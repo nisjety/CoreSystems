@@ -129,3 +129,33 @@
   padding-left: 14px;
   list-style: disc;
 }
+
+/* WS09-S8: manager Stop on the run card. */
+.verevon-run-card__stop {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--verevon-text-muted);
+}
+
+.verevon-run-card__stop-button {
+  border: 1px solid var(--verevon-border, currentColor);
+  background: transparent;
+  border-radius: 6px;
+  padding: 2px 10px;
+  font-size: 12px;
+  color: inherit;
+  cursor: pointer;
+}
+
+.verevon-run-card__stop-button:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.verevon-run-card__stop-button:focus-visible {
+  outline: 2px solid var(--verevon-accent, currentColor);
+  outline-offset: 1px;
+}

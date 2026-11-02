@@ -80,6 +80,7 @@ use super::dispatchers_spaces::ws04::{
     dispatch_spaces_update_room_details,
 };
 use super::dispatchers_spaces::ws08::dispatch_spaces_set_agent_wake_policy;
+use super::dispatchers_spaces::ws09::dispatch_spaces_stop_run;
 use super::dispatchers_spaces::ws10::{
     dispatch_spaces_decide_approval, dispatch_spaces_revoke_approval_grant,
 };
@@ -600,6 +601,9 @@ pub(super) async fn execute_action(
         }
         "spaces.set_attention_item_state" => {
             dispatch_spaces_set_attention_item_state(&state, &user, &body.input).await
+        }
+        "spaces.stop_run" => {
+            dispatch_spaces_stop_run(&state, &user, &headers, &body.input).await
         }
         "spaces.set_thread_follow" => {
             dispatch_spaces_set_thread_follow(&state, &user, &headers, &body.input).await

@@ -44,7 +44,9 @@ use axum::{
     routing::post,
     Extension, Json, Router,
 };
-use mp_contracts::model_plane::v1::{AuthorizeRoomRunAttachRequest, AuthorizeRoomRunAttachResponse};
+use mp_contracts::model_plane::v1::{
+    AuthorizeRoomRunAttachRequest, AuthorizeRoomRunAttachResponse, CancelRunAsRoomManagerRequest,
+};
 use mp_contracts::zdr_refusal::Refusal;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -52,7 +54,7 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
 use crate::auth::{Claims, VerifiedSessionBearer};
-use crate::http_routes::authenticated_session_request;
+use crate::http_routes::{authenticated_session_request, require_non_zdr_durable_mutation};
 use crate::room_run::{RoomFrame, RoomProjector, SnapshotHead};
 use crate::state::AppState;
 use crate::stream_buffer::RunPointer;
@@ -77,7 +79,9 @@ const MAX_ATTACHES_PER_RUN: usize = 100;
 
 /// The room run live routes.
 pub fn router() -> Router<AppState> {
-    Router::new().route("/v1/spaces/:space_id/runs/:run_id/live", post(run_live))
+    Router::new()
+        .route("/v1/spaces/:space_id/runs/:run_id/live", post(run_live))
+        .route("/v1/spaces/:space_id/runs/:run_id/stop", post(room_run_stop))
 }
 
 #[derive(Debug, Deserialize)]
@@ -350,6 +354,192 @@ async fn run_live(
     Sse::new(ReceiverStream::new(rx))
         .keep_alive(KeepAlive::new().interval(KEEP_ALIVE).text("keepalive"))
         .into_response()
+}
+
+// ---------------------------------------------------------------------------
+// Manager Stop (WS09-S8)
+// ---------------------------------------------------------------------------
+
+/// `POST /v1/spaces/:space_id/runs/:run_id/stop` body. The Control `model.run.control` decision rides
+/// in the BODY (never a URL); the idempotency key is the one the decision was issued for.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StopBody {
+    #[serde(default)]
+    space_control_decision_ref: String,
+    #[serde(default)]
+    space_control_decision_token: String,
+    #[serde(default)]
+    idempotency_key: String,
+}
+
+fn count_stop(outcome: &'static str) {
+    metrics::counter!("mp_room_run_stop_total", "outcome" => outcome).increment(1);
+}
+
+/// The HTTP form of a Session Core refusal of a stop, with the metric outcome. Fixed words only.
+fn stop_status_response(status: &tonic::Status) -> (Response, &'static str) {
+    if let Some(refusal) = Refusal::from_status(status) {
+        return (
+            (StatusCode::FORBIDDEN, Json(refusal.json_body())).into_response(),
+            "zdr",
+        );
+    }
+    match status.code() {
+        tonic::Code::Unauthenticated => (
+            plain(StatusCode::UNAUTHORIZED, "unauthorized", "authentication required"),
+            "unauthenticated",
+        ),
+        tonic::Code::PermissionDenied => (
+            plain(
+                StatusCode::FORBIDDEN,
+                "space_run_control_not_authorized",
+                "stopping this run is not permitted",
+            ),
+            "forbidden",
+        ),
+        tonic::Code::NotFound => (
+            plain(StatusCode::NOT_FOUND, "run_not_found", "the run is not available"),
+            "not_found",
+        ),
+        tonic::Code::InvalidArgument => (
+            plain(StatusCode::BAD_REQUEST, "invalid_request", "the stop request is invalid"),
+            "invalid",
+        ),
+        _ => (
+            plain(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "run_control_unavailable",
+                "run control is unavailable",
+            ),
+            "unavailable",
+        ),
+    }
+}
+
+/// The one seam that stops the live producer of a run after its durable cancel. Today it asks the
+/// process-local cancel registry and, when the run-control bus is on, the replica that produces it
+/// (`RunControl::cancel_run`, keyed by the run OWNER's identity, which Session Core reported). A
+/// run with no live producer anywhere is the normal answer. F-t3-016 swaps this one call.
+async fn stop_live_producer(
+    state: &AppState,
+    run_id: &str,
+    owner_org_id: &str,
+    owner_user_id: &str,
+) -> &'static str {
+    match state
+        .run_control
+        .cancel_run(&state.cancels, run_id, owner_org_id, owner_user_id)
+        .await
+    {
+        crate::run_control::CancelRoute::Local => "local",
+        crate::run_control::CancelRoute::Peer => "peer",
+        crate::run_control::CancelRoute::Unavailable => "unavailable",
+        crate::run_control::CancelRoute::NoOwner => "none",
+    }
+}
+
+/// A room manager or owner stops another member's live run. Authority is Session Core's
+/// `RunService.CancelRunAsRoomManager` (Control `model.run.control` decision, membership, audience
+/// ceiling, run-in-this-Space, zero-retention); this handler gates the posture, the rollout flag and
+/// the request shape, forwards the decision in the call and then stops the producer. A durable
+/// mutation: a zero-retention or waived caller is refused first, typed.
+async fn room_run_stop(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    bearer: VerifiedSessionBearer,
+    Path((space_id, run_id)): Path<(String, String)>,
+    Json(body): Json<StopBody>,
+) -> Response {
+    // 1. A durable mutation refuses a zero-retention or waived caller before anything else.
+    if let Err(refusal) = require_non_zdr_durable_mutation(&claims) {
+        count_stop("zdr");
+        return refusal.into_response();
+    }
+    // 2. Rollout flag. A rollout control only.
+    if !state.space_run_policy.manager_stop {
+        count_stop("feature_off");
+        return plain(StatusCode::NOT_FOUND, "feature_unavailable", "stopping runs is not enabled");
+    }
+    // 3. Shape and a user principal.
+    let space_id = space_id.trim().to_owned();
+    let run_id = run_id.trim().to_owned();
+    let decision_ref = body.space_control_decision_ref.trim().to_owned();
+    let decision_token = body.space_control_decision_token.trim().to_owned();
+    let idempotency_key = body.idempotency_key.trim().to_owned();
+    if !id_ok(&space_id) || !id_ok(&run_id) || !id_ok(&idempotency_key) {
+        count_stop("invalid");
+        return plain(StatusCode::BAD_REQUEST, "invalid_request", "the stop request is invalid");
+    }
+    if claims.user_id.trim().is_empty()
+        || decision_ref.is_empty()
+        || decision_ref.len() > MAX_DECISION_REF_BYTES
+        || decision_token.is_empty()
+        || decision_token.len() > MAX_DECISION_TOKEN_BYTES
+    {
+        count_stop("forbidden");
+        return plain(
+            StatusCode::FORBIDDEN,
+            "space_run_control_not_authorized",
+            "stopping this run is not permitted",
+        );
+    }
+
+    // 4. Session Core decides and, if it says yes, cancels in one transaction.
+    let request = match authenticated_session_request(
+        CancelRunAsRoomManagerRequest {
+            run_id: run_id.clone(),
+            space_id,
+            space_control_decision_ref: decision_ref,
+            space_control_decision_token: decision_token,
+            idempotency_key,
+            reason: "room_manager_stop".to_owned(),
+        },
+        &bearer,
+    ) {
+        Ok(request) => request,
+        Err(_) => {
+            count_stop("unavailable");
+            return plain(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "run_control_unavailable",
+                "run control is unavailable",
+            );
+        }
+    };
+    let cancellation = match state.run_client.clone().cancel_run_as_room_manager(request).await {
+        Ok(response) => response.into_inner(),
+        Err(status) => {
+            let (response, outcome) = stop_status_response(&status);
+            count_stop(outcome);
+            return response;
+        }
+    };
+
+    // 5. The producer must stop as well; the durable cancel alone would let it save an answer onto a
+    // cancelled run. The run is cancelled whatever the bus says, so an unreachable producer is
+    // counted and never an error here (its liveness check before the save is the backstop).
+    let via = if cancellation.cancelled {
+        stop_live_producer(
+            &state,
+            &run_id,
+            &cancellation.owner_org_id,
+            &cancellation.owner_user_id,
+        )
+        .await
+    } else {
+        "none"
+    };
+    let status = if cancellation.cancelled { "cancelled" } else { "already_terminal" };
+    count_stop(status);
+    tracing::info!(run_id = %run_id, receipt_id = %cancellation.receipt_id, outcome = status, via, "room run stop");
+    Json(json!({
+        "run_id": run_id,
+        "status": status,
+        "cancelled": cancellation.cancelled,
+        "receipt_id": cancellation.receipt_id,
+    }))
+    .into_response()
 }
 
 /// The invoke request id inside a pointer's scoped key, when the key belongs to `(org, owner)`.

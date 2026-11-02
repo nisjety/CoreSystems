@@ -15,6 +15,7 @@ services:
       SPACE_RUN_WORK_SUMMARY: "true"
       SPACE_RUN_LIVE_VIEW: "true"
       SPACE_RUN_LIVE_TEXT: "true"
+      SPACE_RUN_MANAGER_STOP: "true"
       SPACE_ATTENTION_SUMMARY: "1"
       SPACE_TIMELINE_API: "1"
       SPACE_MESSAGE_SEARCH_API: "1"

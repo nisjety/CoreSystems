@@ -848,6 +848,8 @@ mod tests {
             // Human posts in a Space room (WS01-S4) store free text under a member's name.
             ("space_routes/posts.rs", "create_space_post"),
             ("space_routes/posts.rs", "append_space_post"),
+            // A manager's Stop writes a RUN_CANCELLED receipt on someone else's run (WS09-S8).
+            ("space_routes/runs.rs", "room_run_stop"),
         ];
         let mut missing = Vec::new();
         for (file, function) in DURABLE_MUTATIONS {

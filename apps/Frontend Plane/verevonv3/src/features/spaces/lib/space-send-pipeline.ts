@@ -149,6 +149,12 @@ export type SpaceExchange = {
   /** Whether the stop was recorded server-side, or only cut the local read. */
   stopRecorded?: boolean
   /**
+   * Who stopped it: `self` for a stop this browser initiated, `other` for a `stopped` frame the server
+   * sent that this browser did not ask for (a room manager's Stop, WS09-S8). Copy attributes a stop to
+   * "you" only for `self`.
+   */
+  stoppedBy?: 'self' | 'other'
+  /**
    * The send can be repeated under its own key (`pipeline.retry`): set only when the
    * transport failed and the outcome is unknown, never for an answer the server gave.
    */
@@ -418,7 +424,12 @@ export function createSpaceSendPipeline(options: SpaceSendPipelineOptions): Spac
       onStopped: () => {
         terminal = true
         setExchange((current) =>
-          current && { ...current, status: 'stopped', stopRecorded: true },
+          current && {
+            ...current,
+            status: 'stopped',
+            stopRecorded: true,
+            stoppedBy: current.stoppedBy === 'self' ? 'self' : 'other',
+          },
         )
       },
       onError: (event) => {
@@ -522,7 +533,7 @@ export function createSpaceSendPipeline(options: SpaceSendPipelineOptions): Spac
     controller.abort()
     setExchange((current) =>
       current && current.status === 'streaming'
-        ? { ...current, status: 'stopped', stopRecorded: false }
+        ? { ...current, status: 'stopped', stopRecorded: false, stoppedBy: 'self' }
         : current,
     )
     if (!requestId) return

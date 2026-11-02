@@ -602,6 +602,9 @@ services:
       # production first). Both off in production-style profiles; never an authorization input.
       SPACE_RUN_LIVE_VIEW: ${SPACE_RUN_LIVE_VIEW:-false}
       SPACE_RUN_LIVE_TEXT: ${SPACE_RUN_LIVE_TEXT:-false}
+      # WS09-S8: the room manager's Stop route. Off in production-style profiles; the dev override
+      # turns it on. Never an authorization input (Session Core verifies the Control decision).
+      SPACE_RUN_MANAGER_STOP: ${SPACE_RUN_MANAGER_STOP:-false}
       # WS11-S2: POST /v1/spaces/attention, the cross-room attention aggregate. Off unless set; dev
       # override turns it on. A rollout control, never an authorization input.
       SPACE_ATTENTION_SUMMARY: ${SPACE_ATTENTION_SUMMARY:-0}
@@ -1365,6 +1368,9 @@ services:
       # approval-grants/use and approval-continuation-check; blank means the gate runs
       # without Control (the once-token still works, per-tool levels and standing rules do not).
       EXECUTION_CORE_SPACE_APPROVAL_GATE: ${EXECUTION_CORE_SPACE_APPROVAL_GATE:-enforce}
+      # Quarantine-and-release of flagged tool output (WS10-S8): dev counts and logs only; a Space
+      # must also set its own quarantine_mode in Control before anything is held.
+      EXECUTION_CORE_QUARANTINE_MODE: ${EXECUTION_CORE_QUARANTINE_MODE:-shadow}
       EXECUTION_CORE_CONTROL_APPROVAL_GATE_TOKEN: ${EXECUTION_CORE_CONTROL_APPROVAL_GATE_TOKEN:-}
       EXECUTION_CORE_ALLOW_INSECURE_APPROVAL_GATE_LOOPBACK: ${EXECUTION_CORE_ALLOW_INSECURE_APPROVAL_GATE_LOOPBACK:-false}
       # Build plan WS03 S2: raise Do-loop approvals as loop-owned (consumed once by

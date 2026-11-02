@@ -394,6 +394,10 @@ fn orchestration_routes() -> Router<AppState> {
             get(get_approval),
         )
         .route(
+            "/v1/orchestration/approvals/:approval_id/quarantine-preview",
+            get(get_quarantine_preview),
+        )
+        .route(
             "/v1/orchestration/threads/:thread_id/lineage",
             get(get_subagent_lineage),
         )
@@ -1413,6 +1417,40 @@ async fn get_approval(
         .approval
         .ok_or_else(|| not_found("approval not found"))?;
     Ok(Json(json!({ "approval": approval_value(&approval) })))
+}
+
+/// `GET /v1/orchestration/approvals/{id}/quarantine-preview` — the inert preview (plain text, at
+/// most 1 KiB) of output held for review (build plan WS10 S8). Session Core answers only the run's
+/// owner while the approval is pending or granted-and-unspent; every other case is the same 404.
+/// The org is the verified JWT org, never a caller value. The text is never markup: show it as text.
+async fn get_quarantine_preview(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    bearer: VerifiedModelBearer,
+    Path(approval_id): Path<String>,
+) -> Result<Json<Value>, HttpJsonError> {
+    let response = state
+        .orchestration_client
+        .clone()
+        .get_quarantine_preview(authenticated_session_request(
+            mp_contracts::model_plane::v1::GetQuarantinePreviewRequest {
+                org_id: claims.org_id.clone(),
+                approval_id,
+            },
+            &bearer,
+        )?)
+        .await
+        .map_err(|e| grpc_status_to_http(&e))?
+        .into_inner();
+    Ok(Json(json!({
+        "preview": {
+            "text": response.preview,
+            "truncated": response.truncated,
+            "tool_key": response.tool_key,
+            "trust_class": response.trust_class,
+            "format": "plain_text",
+        }
+    })))
 }
 
 async fn get_subagent_lineage(
@@ -13308,6 +13346,13 @@ mod run_owner_publish_tests {
             _: TonicRequest<mp_contracts::model_plane::v1::AuthorizeRoomRunAttachRequest>,
         ) -> Result<TonicResponse<mp_contracts::model_plane::v1::AuthorizeRoomRunAttachResponse>, Status> {
             Err(Status::unimplemented("room run attach not needed in this test"))
+        }
+
+        async fn cancel_run_as_room_manager(
+            &self,
+            _: TonicRequest<mp_contracts::model_plane::v1::CancelRunAsRoomManagerRequest>,
+        ) -> Result<Response<mp_contracts::model_plane::v1::CancelRunAsRoomManagerResponse>, Status> {
+            Err(Status::unimplemented("room run stop not needed in this test"))
         }
     }
 

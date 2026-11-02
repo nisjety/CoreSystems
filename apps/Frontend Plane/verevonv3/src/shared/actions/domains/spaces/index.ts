@@ -11,6 +11,7 @@ import { ws01SpaceActions } from './ws01'
 import { ws03SpaceActions } from './ws03'
 import { ws04SpaceActions } from './ws04'
 import { ws08SpaceActions } from './ws08'
+import { ws09SpaceActions } from './ws09'
 import { ws10SpaceActions } from './ws10'
 import { ws10bSpaceActions } from './ws10b'
 import { ws11SpaceActions } from './ws11'
@@ -24,6 +25,7 @@ export const spaceActions = [
   ...ws03SpaceActions,
   ...ws04SpaceActions,
   ...ws08SpaceActions,
+  ...ws09SpaceActions,
   ...ws10SpaceActions,
   ...ws10bSpaceActions,
   ...ws11SpaceActions,

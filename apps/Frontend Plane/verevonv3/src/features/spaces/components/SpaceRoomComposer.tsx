@@ -1040,7 +1040,12 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
                 everyone else, and the room must not be told otherwise. */}
             <Show when={current().status === 'stopped'}>
               <p class="verevon-space-room-exchange__stopped" role="status">
-                {current().stopRecorded
+                {current().stopRecorded && current().stoppedBy === 'other'
+                  ? i18n.tr(
+                      'Kjøringen ble stoppet av en rombehandler. Rommet ser dette som stoppet.',
+                      'This run was stopped by a room manager. The room records it as stopped.',
+                    )
+                  : current().stopRecorded
                   ? i18n.tr('Stoppet av deg. Rommet ser dette som stoppet.', 'Stopped by you. The room records it as stopped.')
                   : pipeline.liveRequestId()
                     ? i18n.tr('Stoppet her. Registrerer stoppet …', 'Stopped here. Recording the stop…')

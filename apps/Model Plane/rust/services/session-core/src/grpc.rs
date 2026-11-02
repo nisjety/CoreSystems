@@ -3165,7 +3165,11 @@ fn verify_thread_read_claims_with_key(
     if claims
         .permissions
         .iter()
-        .any(|permission| permission == "thread:append" || permission == "thread:create")
+        .any(|permission| {
+            permission == "thread:append"
+                || permission == "thread:create"
+                || permission == RUN_CONTROL_PERMISSION
+        })
     {
         return Err(Status::permission_denied(
             "a Space read decision must not carry write permissions",
@@ -3333,6 +3337,222 @@ pub(crate) fn verify_space_read_claims(
         user_id,
         space_id,
         CONTROL_SPACE_DECISION_AUDIENCE,
+        &key_id,
+        key,
+        now,
+    )
+}
+
+/// The Control action, schema and sole permission of a room run-control decision (WS09-S7 issues
+/// it, WS09-S8 verifies it). Disjoint from every thread, run-wake and approval decision.
+pub(crate) const CONTROL_RUN_CONTROL_ACTION: &str = "model.run.control";
+pub(crate) const CONTROL_RUN_CONTROL_SCHEMA: &str = "sha256:run-control-v1";
+pub(crate) const RUN_CONTROL_PERMISSION: &str = "run:cancel";
+/// The one operation a run-control decision binds today.
+pub(crate) const RUN_CONTROL_OPERATION_CANCEL: &str = "cancel";
+
+/// Recompute Control's `model.run.control` payload digest from the claims plus the request's own
+/// `run_id` and operation (the thread-read digest fields, then `run_id` and `operation`). The
+/// signature already covers the payload; this pins the digest CONTRACT and, because `run_id` is
+/// the request's, binds the token to the one run it was issued for.
+fn run_control_payload_digest(
+    claims: &ControlSpaceDecisionClaims,
+    run_id: &str,
+    operation: &str,
+) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"model.run.control\0v1\0");
+    for (name, value) in [
+        ("org_id", claims.org_id.as_str()),
+        ("user_id", claims.subject_id.as_str()),
+        ("space_id", claims.space_ref.as_str()),
+        ("space_decision_ref", claims.decision_ref.as_str()),
+        (
+            "recipient_audience_ref",
+            claims.recipient_audience_ref.as_str(),
+        ),
+        (
+            "recipient_audience_hash",
+            claims.recipient_audience_hash.as_str(),
+        ),
+        ("privacy_policy_ref", claims.privacy_policy_ref.as_str()),
+        (
+            "resource_authorization_ref",
+            claims.resource_authorization_ref.as_str(),
+        ),
+        ("run_id", run_id),
+        ("operation", operation),
+        ("action_schema_hash", CONTROL_RUN_CONTROL_SCHEMA),
+        ("idempotency_key", claims.idempotency_key.as_str()),
+    ] {
+        digest.update(name.as_bytes());
+        digest.update([0]);
+        digest.update((value.len() as u64).to_be_bytes());
+        digest.update(value.as_bytes());
+    }
+    digest.update(b"authority_revision\0");
+    digest.update(claims.authority_revision.to_be_bytes());
+    digest.update(b"recipient_audience_revision\0");
+    digest.update(claims.recipient_audience_revision.to_be_bytes());
+    format!("sha256:{:x}", digest.finalize())
+}
+
+#[allow(clippy::result_large_err)]
+#[allow(clippy::too_many_arguments)]
+fn verify_run_control_space_decision_with_key(
+    token: &str,
+    decision_ref: &str,
+    org_id: &str,
+    user_id: &str,
+    space_id: &str,
+    run_id: &str,
+    idempotency_key: &str,
+    expected_key_id: &str,
+    key: &VerifyingKey,
+    now: DateTime<Utc>,
+) -> Result<VerifiedReadClaims, Status> {
+    if token.len() > MAX_CONTROL_SPACE_DECISION_TOKEN_BYTES {
+        return Err(Status::invalid_argument(
+            "Control Space run-control decision is too large",
+        ));
+    }
+    let parts: Vec<&str> = token.split('.').collect();
+    if parts.len() != 4 || parts[0] != CONTROL_SPACE_DECISION_VERSION {
+        return Err(Status::permission_denied(
+            "invalid Control Space run-control decision envelope",
+        ));
+    }
+    let token_key_id = URL_SAFE_NO_PAD
+        .decode(parts[1])
+        .ok()
+        .and_then(|raw| String::from_utf8(raw).ok())
+        .filter(|id| id == expected_key_id)
+        .ok_or_else(|| Status::permission_denied("untrusted Control Space decision key"))?;
+    if token_key_id.trim().is_empty() {
+        return Err(Status::permission_denied(
+            "untrusted Control Space decision key",
+        ));
+    }
+    let payload = URL_SAFE_NO_PAD.decode(parts[2]).map_err(|_| {
+        Status::permission_denied("invalid Control Space run-control decision payload")
+    })?;
+    let signature = URL_SAFE_NO_PAD.decode(parts[3]).map_err(|_| {
+        Status::permission_denied("invalid Control Space run-control decision signature")
+    })?;
+    let signature = Signature::from_slice(&signature).map_err(|_| {
+        Status::permission_denied("invalid Control Space run-control decision signature")
+    })?;
+    key.verify(
+        format!("{}.{}.{}", parts[0], parts[1], parts[2]).as_bytes(),
+        &signature,
+    )
+    .map_err(|_| {
+        Status::permission_denied("invalid Control Space run-control decision signature")
+    })?;
+    let claims: ControlSpaceDecisionClaims = serde_json::from_slice(&payload).map_err(|_| {
+        Status::permission_denied("invalid Control Space run-control decision claims")
+    })?;
+
+    // Exactly the one permission: a thread-read, append, create, wake or approval token carries
+    // another permission and fails here, and this token carries no thread permission, so the two
+    // families stay disjoint in both directions.
+    let matches_request = claims.decision_ref == decision_ref
+        && claims.org_id == org_id
+        && claims.subject_id == user_id
+        && claims.space_ref == space_id
+        && claims.service_audience == CONTROL_SPACE_DECISION_AUDIENCE
+        && claims.action_id == CONTROL_RUN_CONTROL_ACTION
+        && claims.action_schema_hash == CONTROL_RUN_CONTROL_SCHEMA
+        && claims.idempotency_key == idempotency_key
+        && claims.payload_digest
+            == run_control_payload_digest(&claims, run_id, RUN_CONTROL_OPERATION_CANCEL)
+        && claims.permissions.len() == 1
+        && claims.permissions[0] == RUN_CONTROL_PERMISSION;
+    if !matches_request {
+        return Err(Status::permission_denied(
+            "Control Space decision does not authorize this run control",
+        ));
+    }
+    let privacy_complete = [
+        claims.purpose.as_str(),
+        claims.lawful_basis.as_str(),
+        claims.privacy_class.as_str(),
+        claims.retention_class.as_str(),
+        claims.residency.as_str(),
+        claims.deletion_scope.as_str(),
+    ]
+    .iter()
+    .all(|value| !value.trim().is_empty());
+    if !privacy_complete
+        || claims.nonce.trim().is_empty()
+        || claims.recipient_audience_ref.trim().is_empty()
+        || claims.recipient_audience_revision == 0
+        || claims.issued_at > now + chrono::Duration::minutes(1)
+        || claims.expires_at <= now
+    {
+        return Err(Status::permission_denied(
+            "Control Space run-control decision is expired or incomplete",
+        ));
+    }
+    let recipient_audience_revision =
+        i64::try_from(claims.recipient_audience_revision).map_err(|_| {
+            Status::permission_denied("Control Space run-control decision revision is invalid")
+        })?;
+    Ok(VerifiedReadClaims {
+        recipient_audience_revision,
+        issued_at: claims.issued_at,
+        expires_at: claims.expires_at,
+        zero_data_retention: claims.zero_data_retention,
+    })
+}
+
+/// Key lookup and verification of the Control `model.run.control` decision that authorizes a room
+/// manager's Stop of one run (WS09-S8). The decision is bound to the caller (subject), org, Space,
+/// `run_id`, the operation `cancel` and the request's idempotency key. Returns the audience
+/// ceiling, expiry and the zero-retention claim; the caller refuses a zero-retention decision.
+#[allow(clippy::result_large_err)]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn verify_run_control_space_decision(
+    token: &str,
+    decision_ref: &str,
+    org_id: &str,
+    user_id: &str,
+    space_id: &str,
+    run_id: &str,
+    idempotency_key: &str,
+    now: DateTime<Utc>,
+) -> Result<VerifiedReadClaims, Status> {
+    if token.trim().is_empty()
+        || decision_ref.trim().is_empty()
+        || space_id.trim().is_empty()
+        || run_id.trim().is_empty()
+    {
+        return Err(Status::invalid_argument(
+            "a run-control decision requires space_id, run_id, decision ref, and token together",
+        ));
+    }
+    if user_id.trim().is_empty() {
+        return Err(Status::permission_denied(
+            "a run-control decision requires an authenticated user subject",
+        ));
+    }
+    let keys = configured_control_space_decision_keys()?;
+    let key_id = token
+        .split('.')
+        .nth(1)
+        .and_then(|part| URL_SAFE_NO_PAD.decode(part).ok())
+        .and_then(|raw| String::from_utf8(raw).ok())
+        .filter(|id| !id.trim().is_empty())
+        .ok_or_else(|| Status::permission_denied("untrusted Control Space decision key"))?;
+    let key = crate::decision_keys::lookup_key(&keys, &key_id)?;
+    verify_run_control_space_decision_with_key(
+        token,
+        decision_ref,
+        org_id,
+        user_id,
+        space_id,
+        run_id,
+        idempotency_key,
         &key_id,
         key,
         now,

@@ -49,6 +49,11 @@ pub const LIVE_VIEW_ENV: &str = "SPACE_RUN_LIVE_VIEW";
 /// means step classes and `text_progress` only.
 pub const LIVE_TEXT_ENV: &str = "SPACE_RUN_LIVE_TEXT";
 
+/// Environment variable of the room manager's Stop route (`space_run_manager_stop`). Off unless an
+/// explicit on word; a rollout control, never an authorization input (Session Core verifies the
+/// Control `model.run.control` decision on every stop).
+pub const MANAGER_STOP_ENV: &str = "SPACE_RUN_MANAGER_STOP";
+
 /// Most steps the summary and a snapshot carry.
 pub const MAX_STEPS: usize = 64;
 
@@ -100,6 +105,8 @@ pub struct SpaceRunPolicy {
     pub live_view: bool,
     /// `space_run_live_text`: the live view carries answer text (requires `live_view`).
     pub live_text: bool,
+    /// `space_run_manager_stop`: serve the room manager's Stop route.
+    pub manager_stop: bool,
     pub limits: RoomLimits,
 }
 
@@ -109,6 +116,7 @@ impl SpaceRunPolicy {
         work_summary: false,
         live_view: false,
         live_text: false,
+        manager_stop: false,
         limits: RoomLimits::DEFAULT,
     };
 
@@ -118,12 +126,14 @@ impl SpaceRunPolicy {
         work_summary: Option<&str>,
         live_view: Option<&str>,
         live_text: Option<&str>,
+        manager_stop: Option<&str>,
     ) -> Self {
         let on = mp_contracts::agentic_subscription::switch_value_is_on;
         Self {
             work_summary: on(work_summary),
             live_view: on(live_view),
             live_text: on(live_view) && on(live_text),
+            manager_stop: on(manager_stop),
             limits: RoomLimits::DEFAULT,
         }
     }
@@ -135,6 +145,7 @@ impl SpaceRunPolicy {
             std::env::var(WORK_SUMMARY_ENV).ok().as_deref(),
             std::env::var(LIVE_VIEW_ENV).ok().as_deref(),
             std::env::var(LIVE_TEXT_ENV).ok().as_deref(),
+            std::env::var(MANAGER_STOP_ENV).ok().as_deref(),
         )
     }
 }

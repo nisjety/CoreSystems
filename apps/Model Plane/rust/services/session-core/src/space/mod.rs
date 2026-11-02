@@ -46,5 +46,6 @@ pub(crate) mod read_service;
 pub(crate) mod revisions;
 pub(crate) mod thread_activity;
 pub(crate) mod timeline;
+pub(crate) mod run_control;
 #[cfg(test)]
 pub(crate) mod test_support;

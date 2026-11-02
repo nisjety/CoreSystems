@@ -42,7 +42,7 @@ mod message_search;
 mod timeline;
 mod pins;
 mod room_artifacts;
-mod run_live;
+pub(crate) mod run_live;
 pub(crate) mod sidebar;
 mod schedule_template;
 mod stream;

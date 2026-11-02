@@ -107,6 +107,41 @@ service RunService {
   // ids, the honest run phase and a validity window; never run content. Called at subscribe and
   // again every 15 seconds for as long as the stream lives.
   rpc AuthorizeRoomRunAttach(AuthorizeRoomRunAttachRequest) returns (AuthorizeRoomRunAttachResponse);
+
+  // CancelRunAsRoomManager cancels one live room run on behalf of a room manager or owner who is
+  // NOT the run's owner (build plan WS09-S8). The caller presents the Control `model.run.control`
+  // decision (action model.run.control, permissions exactly [run:cancel], audience model-plane,
+  // payload digest bound to run_id and operation "cancel"). Session Core verifies it, the
+  // caller's membership, that the run is a root run of a thread of the decision's Space inside
+  // its audience ceiling, and that nothing about the run or the decision is zero-retention, then
+  // cancels through the same transaction as CancelRun and records `acting_as` and the decision
+  // reference on the RUN_CANCELLED receipt. NotFound for a run outside the audience (no oracle).
+  // Returns the run owner's identity so the caller can stop that owner's live producer.
+  rpc CancelRunAsRoomManager(CancelRunAsRoomManagerRequest) returns (CancelRunAsRoomManagerResponse);
+}
+
+message CancelRunAsRoomManagerRequest {
+  // The run to stop.
+  string run_id = 1;
+  // The Space the run's thread belongs to.
+  string space_id = 2;
+  // Control `model.run.control` decision reference and token (audience model-plane).
+  string space_control_decision_ref = 3;
+  string space_control_decision_token = 4;
+  // Must equal the idempotency key the decision was issued for.
+  string idempotency_key = 5;
+  // Closed words only; recorded on the receipt. Empty means `room_manager_stop`.
+  string reason = 6;
+}
+
+message CancelRunAsRoomManagerResponse {
+  // True if this call cancelled the run; false if it was already terminal (idempotent).
+  bool cancelled = 1;
+  // The durable RUN_CANCELLED event id (the existing one when already terminal).
+  string receipt_id = 2;
+  // The run owner's org and user, for stopping that owner's live producer. Never shown to members.
+  string owner_org_id = 3;
+  string owner_user_id = 4;
 }
 
 message AuthorizeRoomRunAttachRequest {

@@ -758,6 +758,15 @@ function SpaceRoomPost(props: {
     const id = liveRunId()
     return id ? spaceRunStore.view(id) : undefined
   }
+  // Stop is offered to a room manager or owner when the listing says manager Stop is on (WS09-S8).
+  // Presentation only: Control decides and Session Core verifies on every call.
+  const stopTarget = () => {
+    const role = props.viewerRole?.()
+    const runId = liveRunId()
+    if (!runId || props.agentWork?.()?.stop_manager !== true) return undefined
+    if (role !== 'manager' && role !== 'owner') return undefined
+    return { spaceRef: props.spaceRef, runId }
+  }
   const runCardView = () => {
     const view = runView()
     if (!view || view.status !== 'live' || view.finished) return undefined
@@ -1045,6 +1054,7 @@ function SpaceRoomPost(props: {
                     ? resolveAuthorName(view().startedBy, props.roster(), props.viewerSubjectId?.(), i18n.tr)
                     : ''
                 }
+                stop={stopTarget()}
               />
             </div>
           </div>
