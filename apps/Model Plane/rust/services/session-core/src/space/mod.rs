@@ -9,6 +9,8 @@
 //! - [`authz`]: who a message is appended as ([`authz::AppendAs`]) and the member-append gate
 //!   (WS01-S3).
 //! - [`append`]: the member rules inside the append transaction (WS01-S3).
+//! - [`attention_outbox`]: the boot-time flag of the attention outbox (WS11-S5; the rows are written by the
+//!   trigger in migration 0080).
 //! - [`approvals`]: the approval card context and the derived continuation state (WS10-S1).
 //! - [`read_service`]: `SpaceRoomReadService`, the room read aggregates (D3; `ListSpaceArtifacts` WS07-S9).
 //! - [`events`]: the Space event log's flag sync, listener, sweeper, gate and erasure hooks
@@ -23,6 +25,7 @@
 
 pub(crate) mod append;
 pub(crate) mod approvals;
+pub(crate) mod attention_outbox;
 pub(crate) mod authz;
 pub(crate) mod events;
 pub(crate) mod history;

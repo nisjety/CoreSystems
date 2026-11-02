@@ -736,6 +736,7 @@ async fn delete_thread_rows(
             OR payload ->> 'thread_id' = $1",
         "DELETE FROM session_audit_outbox
          WHERE payload ->> 'thread_id' = $1
+            OR payload -> 'payload' ->> 'thread_id' = $1
             OR payload ->> 'run_id' IN (SELECT id FROM runs WHERE thread_id = $1)
             OR payload ->> 'subject' IN (SELECT id FROM runs WHERE thread_id = $1)",
         "DELETE FROM dream_runs WHERE thread_id = $1

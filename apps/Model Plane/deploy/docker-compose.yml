@@ -926,6 +926,11 @@ services:
       # docker-compose.release.yml pin it to "false". Off to on bumps every Space's generation
       # (clients resnapshot). Never an authorization input. Zero-retention runs never write rows.
       SPACE_REALTIME_EMIT: ${SPACE_REALTIME_EMIT:-true}
+      # Space attention outbox (WS11-S5): one content-free event per persistent log row on
+      # mp.v1.space.<ref>.event. Stays off while SPACE_REALTIME_EMIT is off. On here for dev;
+      # docker-compose.production.yml and docker-compose.release.yml pin it to "false".
+      # Never an authorization input and never a ZDR control.
+      SPACE_ATTENTION_EMIT: ${SPACE_ATTENTION_EMIT:-true}
       SPACE_EVENT_LOG_RETENTION_DAYS: ${SPACE_EVENT_LOG_RETENTION_DAYS:-14}
       # Read by the SpaceEvents stream (WS02-S3), inert until then.
       SPACE_STREAM_DB_POOL: ${SPACE_STREAM_DB_POOL:-8}

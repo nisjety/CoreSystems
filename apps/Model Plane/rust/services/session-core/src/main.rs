@@ -97,6 +97,13 @@ async fn main() -> Result<()> {
         warn!(%error, "space event log flag could not be synced");
     }
     info!(space_event_emit, "space event log configured");
+    // Space attention outbox (WS11-S5): the trigger from migration 0080 enqueues one content-free
+    // event per persistent log row while this flag is on. Refused (stays off) while the log is off.
+    // Off by default; a failure here never stops startup.
+    let space_attention_emit = space::attention_outbox::emit_enabled_from_env();
+    if let Err(error) = space::attention_outbox::sync_flag(&pool, space_attention_emit).await {
+        warn!(%error, "space attention outbox flag could not be synced");
+    }
     let space_wakes = space::events::SpaceWakes::new();
     // The adapter is optional only when no Letta endpoint is configured. Once
     // enabled, its dedicated Auth Core service-principal configuration is

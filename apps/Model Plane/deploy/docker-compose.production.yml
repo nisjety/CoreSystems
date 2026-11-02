@@ -70,6 +70,8 @@ services:
       SESSION_CORE_CONTINUATION_DESCRIPTOR_KEY: ${SESSION_CORE_CONTINUATION_DESCRIPTOR_KEY:?SESSION_CORE_CONTINUATION_DESCRIPTOR_KEY is required}
       # Space event log (WS02-S1): off in production until the rollout order turns it on.
       SPACE_REALTIME_EMIT: "false"
+      # Space attention outbox (WS11-S5): off in production until the rollout order turns it on.
+      SPACE_ATTENTION_EMIT: "false"
   inference-core:
     <<: *hardened-service
     ports: !reset []

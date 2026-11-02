@@ -50,6 +50,19 @@ func streamConfigs() []nats.StreamConfig {
 			Replicas:  1,
 			Discard:   nats.DiscardOld,
 		},
+		// Space attention events (build plan WS11-S5): session-core's outbox publishes one
+		// content-free event per persistent Space event log row (ids and closed words only)
+		// on mp.v1.space.<space_ref>.event; the Application Plane's attention projection
+		// consumes it through the convex-space-attention durable below.
+		{
+			Name:      "MODEL_PLANE_SPACE_EVENTS",
+			Subjects:  []string{"mp.v1.space.*.event"},
+			Retention: nats.LimitsPolicy,
+			Storage:   nats.FileStorage,
+			MaxAge:    48 * time.Hour,
+			Replicas:  1,
+			Discard:   nats.DiscardOld,
+		},
 		// Carries session-core's audit events ("Used by AI?") to audit-core. See
 		// audit_observability.go for why this stream is provisioned here.
 		auditObservabilityStream(),
@@ -199,6 +212,26 @@ func consumerBindings() []consumerBinding {
 				FilterSubject:  "mp.v1.run.*.event",
 				ReplayPolicy:   nats.ReplayInstantPolicy,
 				DeliverPolicy:  nats.DeliverAllPolicy,
+			},
+		},
+		{
+			// Space attention projection (WS11-S5): convex-core binds this durable with
+			// explicit ack and acks only after its mutation succeeded; its dedupe makes a
+			// redelivery safe. A push consumer needs DeliverSubject and a matching
+			// DeliverGroup (see the 2026-09-17 note on the run-watch durable above).
+			// DeliverNewPolicy: events that predate the projection cannot have been
+			// projected, and the stream only ever holds ids.
+			stream: "MODEL_PLANE_SPACE_EVENTS",
+			config: nats.ConsumerConfig{
+				Durable:        "convex-space-attention",
+				DeliverSubject: "_VEREVON.MODEL.DELIVER.application.convex.space_attention",
+				DeliverGroup:   "convex-space-attention",
+				AckPolicy:      nats.AckExplicitPolicy,
+				AckWait:        30 * time.Second,
+				MaxDeliver:     8,
+				FilterSubject:  "mp.v1.space.*.event",
+				ReplayPolicy:   nats.ReplayInstantPolicy,
+				DeliverPolicy:  nats.DeliverNewPolicy,
 			},
 		},
 		{

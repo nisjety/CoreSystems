@@ -37,6 +37,8 @@ services:
     environment:
       # Space event log (WS02-S1): release artifacts ship with emit off.
       SPACE_REALTIME_EMIT: "false"
+      # Space attention outbox (WS11-S5): release artifacts ship with emit off.
+      SPACE_ATTENTION_EMIT: "false"
   inference-core:
     build: !reset null
     image: ${INFERENCE_CORE_RELEASE_IMAGE:?INFERENCE_CORE_RELEASE_IMAGE digest is required}
