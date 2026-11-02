@@ -15,7 +15,8 @@
 //! `scripts/verify-sandbox-isolation.sh`).
 //!
 //! Wiring (DONE): `runtime_loop::execute_step` routes the `shell` tool to this
-//! primitive (`execute_shell` → `execute_sandboxed`) under a `ReadOnly` +
+//! primitive (`execute_shell` → `execute_sandboxed_in_dir_with_ro_binds`, cwd `/`,
+//! cleared environment, a [`SpawnAdmission`]) under a `ReadOnly` +
 //! no-network default policy, behind the same permission/hook gates as every
 //! other tool; non-shell tools keep the deterministic `tool_bridge` path by
 //! design. A broader per-call policy (a `policy` field on the shell input) is
@@ -202,6 +203,15 @@ static LIMIT_HITS: [std::sync::atomic::AtomicU64; 5] = [
 ];
 const LIMIT_KINDS: [&str; 5] = ["cpu", "file_size", "output", "killed", "busy"];
 
+/// Space-scoped `shell` calls that ran without a sandbox lease while
+/// `EXECUTION_CORE_SPACE_SHELL_LEASE=observe` (`space_shell_unleased_total`).
+static SHELL_UNLEASED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Count one unleased Space `shell` call. No labels: nothing here can carry an id.
+pub(crate) fn record_shell_unleased() {
+    SHELL_UNLEASED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// Count one limit hit (`execution_core_sandbox_limit_hits_total{kind}`).
 /// An unknown kind is ignored rather than invented as a new label.
 pub(crate) fn record_limit_hit(kind: &str) {
@@ -223,6 +233,14 @@ pub fn limit_hit_metrics() -> String {
             hits.load(std::sync::atomic::Ordering::Relaxed)
         ));
     }
+    out.push_str(
+        "# HELP space_shell_unleased_total Space-scoped shell calls run without a sandbox lease (observe mode).\n\
+         # TYPE space_shell_unleased_total counter\n",
+    );
+    out.push_str(&format!(
+        "space_shell_unleased_total {}\n",
+        SHELL_UNLEASED.load(std::sync::atomic::Ordering::Relaxed)
+    ));
     out
 }
 
@@ -329,7 +347,7 @@ fn timeout_from_env(var: &str, default_secs: u64) -> Duration {
     parse_timeout_secs(std::env::var(var).ok().as_deref(), default_secs)
 }
 
-fn exec_timeout() -> Duration {
+pub(crate) fn exec_timeout() -> Duration {
     timeout_from_env("EXECUTION_SHELL_TIMEOUT_SECS", DEFAULT_EXEC_TIMEOUT_SECS)
 }
 
@@ -399,11 +417,73 @@ fn egress_proxy_configured() -> bool {
 /// # Errors
 /// `Unsupported` when the policy demands local isolation this host cannot
 /// provide, or when `AllowDomains` has no egress proxy behind it.
-pub(crate) fn require_requested_isolation_for(
+///
+/// WS06-S9: this is the one admission gate every spawn path calls, and it takes
+/// a [`SpawnAdmission`] with no default, so a new spawn path that omits the
+/// Space facts does not compile.
+pub(crate) fn require_spawn_admission(
     policy: &MpSandboxPolicy,
     sandboxed: bool,
+    admission: &SpawnAdmission<'_>,
 ) -> std::io::Result<()> {
-    require_requested_isolation(policy, sandboxed, egress_proxy_configured())
+    require_spawn_admission_with(policy, sandboxed, egress_proxy_configured(), admission)
+}
+
+/// What a spawn site knows about the Space it runs for (WS06-S9). Built by the
+/// caller from facts it holds, never defaulted.
+#[derive(Debug, Clone, Copy)]
+pub struct SpawnAdmission<'a> {
+    /// The spawn serves a Space-scoped run.
+    pub space_scoped: bool,
+    /// The sandbox lease the caller holds for that run; required when
+    /// `space_scoped`.
+    pub lease_id: Option<&'a str>,
+}
+
+impl SpawnAdmission<'_> {
+    /// A spawn that serves no Space (an ordinary run, or a service-internal
+    /// helper). Named so the choice is visible at the call site.
+    pub const NOT_SPACE: SpawnAdmission<'static> = SpawnAdmission {
+        space_scoped: false,
+        lease_id: None,
+    };
+}
+
+/// Pure half of [`require_spawn_admission`]. Rules, in order: the isolation
+/// check; no network other than `Disabled` (sandbox egress does not exist, and
+/// the proxy environment variable is no longer trusted to stand in for it);
+/// no `DangerFullAccess`/`External` for a Space; a Space spawn needs a lease.
+fn require_spawn_admission_with(
+    policy: &MpSandboxPolicy,
+    sandboxed: bool,
+    egress_proxy_configured: bool,
+    admission: &SpawnAdmission<'_>,
+) -> std::io::Result<()> {
+    require_requested_isolation(policy, sandboxed, egress_proxy_configured)?;
+    if policy.network().allows_any_network() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "sandbox egress is not available; refusing a spawn with network access",
+        ));
+    }
+    if admission.space_scoped {
+        if matches!(
+            policy,
+            MpSandboxPolicy::DangerFullAccess | MpSandboxPolicy::External { .. }
+        ) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "this sandbox policy is not permitted for a Space-scoped spawn",
+            ));
+        }
+        if !admission.lease_id.is_some_and(|lease| !lease.trim().is_empty()) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "a Space-scoped sandbox spawn requires a sandbox lease",
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn require_requested_isolation(
@@ -487,7 +567,7 @@ async fn execute_sandboxed_with_timeout(
         ..sandbox::LaunchOptions::default()
     };
     let cmd = sandbox::wrap_command_with(policy, program, args, options);
-    require_requested_isolation(policy, cmd.sandboxed, egress_proxy_configured())?;
+    require_spawn_admission(policy, cmd.sandboxed, &SpawnAdmission::NOT_SPACE)?;
     require_limits_applied_for(limits.as_ref(), &cmd)?;
     spawn_capture(&cmd, None, None, timeout, limits.as_ref()).await
 }
@@ -520,7 +600,17 @@ pub async fn execute_sandboxed_in_dir(
     env: &[(String, String)],
     timeout: Duration,
 ) -> std::io::Result<ExecOutcome> {
-    execute_sandboxed_in_dir_with_ro_binds(policy, program, args, cwd, env, &[], timeout).await
+    execute_sandboxed_in_dir_with_ro_binds(
+        policy,
+        program,
+        args,
+        cwd,
+        env,
+        &[],
+        timeout,
+        &SpawnAdmission::NOT_SPACE,
+    )
+    .await
 }
 
 /// [`execute_sandboxed_in_dir`] with read-only layers: each `(host, mount)` pair
@@ -535,6 +625,7 @@ pub async fn execute_sandboxed_in_dir(
 /// # Errors
 /// As [`execute_sandboxed_in_dir`], plus `Unsupported` when `ro_binds` is
 /// non-empty and the command would not be wrapped.
+#[allow(clippy::too_many_arguments)]
 pub async fn execute_sandboxed_in_dir_with_ro_binds(
     policy: &MpSandboxPolicy,
     program: &str,
@@ -543,6 +634,7 @@ pub async fn execute_sandboxed_in_dir_with_ro_binds(
     env: &[(String, String)],
     ro_binds: &[(PathBuf, PathBuf)],
     timeout: Duration,
+    admission: &SpawnAdmission<'_>,
 ) -> std::io::Result<ExecOutcome> {
     // WS06-S8: per-spawn ceilings sized from this call's wall-clock budget.
     let limits = crate::policy::limits_for(timeout);
@@ -553,7 +645,7 @@ pub async fn execute_sandboxed_in_dir_with_ro_binds(
         limits: limits.as_ref(),
     };
     let cmd = sandbox::wrap_command_with(policy, program, args, options);
-    require_requested_isolation(policy, cmd.sandboxed, egress_proxy_configured())?;
+    require_spawn_admission(policy, cmd.sandboxed, admission)?;
     require_ro_binds_enforced(!ro_binds.is_empty(), cmd.sandboxed)?;
     require_limits_applied_for(limits.as_ref(), &cmd)?;
     spawn_capture(&cmd, Some(cwd), Some(env), timeout, limits.as_ref()).await

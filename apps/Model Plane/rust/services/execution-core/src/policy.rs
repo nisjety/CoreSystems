@@ -281,6 +281,46 @@ pub fn limits_for(wall: std::time::Duration) -> Option<ResourceLimits> {
     LimitsConfig::current().limits_for(wall)
 }
 
+// ---------------------------------------------------------------------------
+// Space shell lease rule (WS06-S9)
+// ---------------------------------------------------------------------------
+
+/// How a Space-scoped `shell` call is admitted (`EXECUTION_CORE_SPACE_SHELL_LEASE`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShellLeaseMode {
+    /// Take a lease when one can be had; a call that cannot get one still runs
+    /// (as before this rule existed) and is counted in `space_shell_unleased_total`.
+    /// The default for one release.
+    Observe,
+    /// A Space-scoped `shell` call without a sandbox lease is refused.
+    Enforce,
+}
+
+impl ShellLeaseMode {
+    /// `enforce` (case-insensitive, exact) is the only way to turn the rule on;
+    /// a missing or unrecognised value is `observe`, never a truthiness guess.
+    #[must_use]
+    pub fn from_raw(raw: Option<&str>) -> Self {
+        match raw.map(str::trim) {
+            Some(value) if value.eq_ignore_ascii_case("enforce") => Self::Enforce,
+            _ => Self::Observe,
+        }
+    }
+
+    /// The process-wide mode, decided once.
+    #[must_use]
+    pub fn current() -> Self {
+        static MODE: std::sync::OnceLock<ShellLeaseMode> = std::sync::OnceLock::new();
+        *MODE.get_or_init(|| {
+            Self::from_raw(
+                std::env::var("EXECUTION_CORE_SPACE_SHELL_LEASE")
+                    .ok()
+                    .as_deref(),
+            )
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

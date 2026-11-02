@@ -49,7 +49,7 @@
 //!    execution therefore launches with [`SandboxEnv::Only`] — `--clearenv` plus
 //!    an explicit `--setenv` allowlist — and the spawn site clears the
 //!    passthrough environment too, so a host without bubblewrap is not a hole.
-//!    Only `shell`, which runs operator-authored commands, still inherits.
+//!    `shell` is cleared too (WS06-S9): it launches with `PATH` alone.
 
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;

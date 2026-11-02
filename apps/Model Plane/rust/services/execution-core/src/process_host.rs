@@ -435,7 +435,14 @@ impl ProcessHost {
         let wrapped = crate::sandbox::wrap_command_with(&policy, program, args, options);
         // Identical fail-closed gate to every other sandboxed spawn: a host
         // that cannot isolate does not run model-authored code at all.
-        crate::executor::require_requested_isolation_for(&policy, wrapped.sandboxed)?;
+        crate::executor::require_spawn_admission(
+            &policy,
+            wrapped.sandboxed,
+            &crate::executor::SpawnAdmission {
+                space_scoped: true,
+                lease_id: Some(request.lease_id),
+            },
+        )?;
         crate::executor::require_limits_applied_for(limits.as_ref(), &wrapped)?;
 
         let mut command = tokio::process::Command::new(&wrapped.program);

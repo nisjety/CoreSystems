@@ -1029,7 +1029,7 @@ async fn execute_step_inner(
         tool_bridge::execute_quarry_browser_mcp(tool_name, tool_input, org_id, zdr, browser_grant)
             .await
     } else if tool_name == SHELL_TOOL {
-        execute_shell(tool_input).await
+        execute_shell(tool_input, org_id, user_id, run_id, state, sandbox).await
     } else if tool_name == CODE_INTERPRETER_TOOL {
         let workspace_root = if let Some(sandbox) = sandbox {
             let Some(state) = state else {
@@ -1044,6 +1044,11 @@ async fn execute_step_inner(
         } else {
             None
         };
+        // The lease `ensure_space_workspace` just cached: the spawn is admitted on it (WS06-S9).
+        let lease_id: Option<String> = sandbox
+            .and(state)
+            .and_then(|state| state.sandbox_lease(run_id))
+            .map(|lease| lease.lease_id);
         // The files the request carrying this step attached, registered under the
         // run for the length of the call (`ExecuteStep`). Read here, not passed
         // down, so the model's own tool input cannot name or replace them. A
@@ -1077,6 +1082,7 @@ async fn execute_step_inner(
             skill_tree
                 .as_deref()
                 .map(crate::skill_mounts::SkillTree::path),
+            lease_id.as_deref(),
         )
         .await
     } else if crate::process_tools::is_process_tool(tool_name) {
@@ -1358,7 +1364,20 @@ async fn execute_subagent(
 /// privileges; a broader per-call policy is a future extension (the input
 /// contract can grow a `policy` field). Output is already secret-scrubbed by
 /// the executor before it returns here.
-async fn execute_shell(tool_input: &str) -> tool_bridge::ToolExecution {
+///
+/// WS06-S9: a Space-scoped call (`sandbox` is `Some`) takes the run's sandbox
+/// lease first and is admitted on it. `EXECUTION_CORE_SPACE_SHELL_LEASE=enforce`
+/// refuses a call that cannot get one; `observe` (the default) runs it as before
+/// and counts it. The command starts from `/` with `PATH` as its whole
+/// environment, so no service credential reaches it.
+async fn execute_shell(
+    tool_input: &str,
+    org_id: &str,
+    user_id: &str,
+    run_id: &str,
+    state: Option<&crate::state::StateStore>,
+    sandbox: Option<&crate::sandbox_lease::SandboxLeaseContext<'_>>,
+) -> tool_bridge::ToolExecution {
     #[derive(serde::Deserialize)]
     struct ShellInput {
         program: String,
@@ -1377,7 +1396,48 @@ async fn execute_shell(tool_input: &str) -> tool_bridge::ToolExecution {
     let policy = MpSandboxPolicy::ReadOnly {
         network: MpNetworkPolicy::Disabled,
     };
-    match crate::executor::execute_sandboxed(&policy, &input.program, &input.args).await {
+    let enforce = crate::policy::ShellLeaseMode::current() == crate::policy::ShellLeaseMode::Enforce;
+    let mut lease_id: Option<String> = None;
+    if let Some(sandbox) = sandbox {
+        let leased = match state {
+            Some(state) => {
+                crate::sandbox_lease::ensure_sandbox_lease(sandbox, state, run_id, org_id, user_id)
+                    .await
+                    .map(|lease| lease.lease_id)
+                    .map_err(|status| status.message().to_owned())
+            }
+            None => Err("a Space-scoped shell call requires a sandbox lease, and run state \
+                         tracking is unavailable"
+                .to_owned()),
+        };
+        match leased {
+            Ok(id) => lease_id = Some(id),
+            Err(message) if enforce => {
+                return tool_bridge::ToolExecution {
+                    output: String::new(),
+                    error: Some(message),
+                };
+            }
+            Err(_) => crate::executor::record_shell_unleased(),
+        }
+    }
+    // Observe mode runs a call that could not get a lease as the unscoped spawn it was before.
+    let admission = crate::executor::SpawnAdmission {
+        space_scoped: lease_id.is_some(),
+        lease_id: lease_id.as_deref(),
+    };
+    match crate::executor::execute_sandboxed_in_dir_with_ro_binds(
+        &policy,
+        &input.program,
+        &input.args,
+        Path::new("/"),
+        &crate::code_interpreter::shell_env(),
+        &[],
+        crate::executor::exec_timeout(),
+        &admission,
+    )
+    .await
+    {
         Ok(o) => tool_bridge::ToolExecution {
             output: o.stdout,
             error: if let Some(hit) = o.limit_hit {
@@ -1414,6 +1474,7 @@ async fn execute_code_interpreter(
     workspace_root: Option<&Path>,
     ro_inputs: Option<std::sync::Arc<crate::run_inputs::InputSet>>,
     skills: Option<&Path>,
+    lease_id: Option<&str>,
 ) -> tool_bridge::ToolExecution {
     match crate::code_interpreter::run_with_skills(
         tool_input,
@@ -1422,6 +1483,7 @@ async fn execute_code_interpreter(
         workspace_root,
         ro_inputs,
         skills,
+        lease_id,
     )
     .await
     {

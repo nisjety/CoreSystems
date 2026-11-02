@@ -3923,6 +3923,7 @@ async fn run_rounds(
                     // only where it is used keeps the "absent unless relevant"
                     // invariant visible at the call sites that care.
                     let reads_sandbox = call.name == "code_interpreter"
+                        || call.name == "shell"
                         || crate::process_tools::is_process_tool(&call.name)
                         || crate::workspace_tools::is_workspace_tool(&call.name);
                     let sandbox = if reads_sandbox && !ctx.req.space_id.is_empty() {
