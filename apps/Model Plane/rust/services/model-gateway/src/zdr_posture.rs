@@ -969,10 +969,13 @@ pub(crate) mod tests {
             // The gRPC surface, each decided by zdr_for before its call.
             ("grpc.rs", "invoke", "the request's route (zdr_for)"),
             ("grpc.rs", "invoke_stream", "the request's route (zdr_for)"),
+            // The extraction's one inference call (WS16.S8). Its callers decide the posture first:
+            // the gRPC method through `zdr_for` on the request's route, the chat tool with the
+            // turn's own `zdr`; the call carries it on the request and on the page scrape.
             (
-                "grpc.rs",
-                "extract_structured",
-                "the request's route (zdr_for)",
+                "web_extraction.rs",
+                "infer_once",
+                "the caller's route (zdr_for in the gRPC method, the turn's zdr in the tool)",
             ),
             (
                 "grpc.rs",
