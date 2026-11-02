@@ -6,6 +6,7 @@ import {
 } from '@/features/spaces/lib/space-retrieval-decline'
 import { ApiError, requestJson } from '../http'
 import { setDmListingEnabled, type SpaceDmParticipant } from './dm'
+import { setRoomDirectoryListed } from './directory'
 import { spacePinsFrom, type SpaceRoomPin } from './pins'
 import { spaceReactionsFrom, type SpaceReactionChip } from './reactions'
 import { spaceRunWorkFrom, type SpaceRunWork } from './run-work'
@@ -17,6 +18,12 @@ export type SpaceMembership = {
   subject_id: string
   kind: 'personal' | 'shared' | string
   role: string
+  /** WS04-S8: `private` or `org_public`. Absent on an older Control: unknown, not private. */
+  visibility?: string
+  /** WS04-S8: the role a self-join receives (`viewer` or `editor`). Absent on an older Control. */
+  join_role?: string
+  /** WS04-S4: false while the room's recipient audience does not include the caller yet. Absent: unknown. */
+  recipient_ready?: boolean
   revisions: {
     authority: number
     membership: number
@@ -76,6 +83,8 @@ export type SpaceContext = {
     room_details?: boolean
     /** WS04-S3: the member picker searches the people directory instead of listing the org. */
     people_search?: boolean
+    /** WS04-S8: the room directory, self-join and the visibility setting are offered. */
+    room_directory?: boolean
     /** WS12-S3: direct messages are offered. */
     dm?: boolean
     /** WS12-S7: editing and deleting messages is offered (rollout only; Control decides each change). */
@@ -246,8 +255,12 @@ export function getSpaceMembership(spaceRef: string): Promise<SpaceMembership> {
 }
 
 export async function listSpaces(): Promise<readonly SpaceSummary[]> {
-  const response = await requestJson<{ spaces: readonly SpaceSummary[]; features?: { dm?: boolean } }>('/api/v1/spaces')
+  const response = await requestJson<{
+    spaces: readonly SpaceSummary[]
+    features?: { dm?: boolean; room_directory?: boolean }
+  }>('/api/v1/spaces')
   setDmListingEnabled(response.features?.dm === true)
+  setRoomDirectoryListed(response.features?.room_directory === true)
   return response.spaces
 }
 

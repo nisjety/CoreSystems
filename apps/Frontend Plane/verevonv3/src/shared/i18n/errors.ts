@@ -1060,7 +1060,9 @@ export const ERROR_COPY: Record<string, ErrorCopy> = {
   upload_not_found: { no: 'Fant ikke opplastingen.', en: 'The upload was not found.' },
 
   // WS04 membership and room administration
-  directory_unavailable: { no: 'Personsøket er utilgjengelig akkurat nå. Prøv igjen om litt.', en: 'People search is unavailable right now. Try again shortly.' },
+  directory_unavailable: { no: 'Katalogen er utilgjengelig akkurat nå. Prøv igjen om litt.', en: 'The directory is unavailable right now. Try again shortly.' },
+  // WS04-S8 room directory, visibility and self-join
+  directory_disabled: { no: 'Organisasjonen din har ikke slått på romkatalogen, så rom kan ikke åpnes for alle ennå. Spør en administrator.', en: 'Your organization has not turned on the room directory, so rooms cannot be opened to everyone yet. Ask an administrator.' },
   idempotency_key_reused: { no: 'Denne forespørselen er allerede brukt til noe annet. Last inn på nytt og prøv igjen.', en: 'This request was already used for something else. Reload and try again.' },
   member_not_in_organization: { no: 'Personen er ikke med i organisasjonen, så de kan ikke legges til i rommet.', en: 'That person is not in the organization, so they cannot be added to the room.' },
   room_archived: { no: 'Rommet er arkivert. Medlemmer kan ikke endres.', en: 'The room is archived. Members cannot be changed.' },

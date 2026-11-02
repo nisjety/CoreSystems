@@ -41,6 +41,11 @@ export interface SpaceRoomHeaderProps {
   /** `features.room_details` and `features.room_archive`. */
   readonly roomDetailsEnabled: boolean
   readonly roomArchiveEnabled: boolean
+  /** WS04-S8: `features.room_directory`, and Control's current visibility and self-join role. */
+  readonly roomDirectoryEnabled?: boolean
+  readonly visibility?: string | null
+  readonly joinRole?: string | null
+  readonly onSettingsSaved?: () => void
   /** The roster, or `undefined` while it loads or when it could not be read (nothing is drawn then). */
   readonly roster: readonly SpaceRosterMember[] | undefined
   /** Label and value pairs for the details panel (type, status, your role). */
@@ -207,6 +212,11 @@ export function SpaceRoomHeader(props: SpaceRoomHeaderProps) {
                 archived={props.archived}
                 enabled={props.roomDetailsEnabled}
                 onSaved={props.onSaved}
+                directoryEnabled={props.roomDirectoryEnabled === true}
+                isOrganizationRoom={props.isOrganizationRoom}
+                visibility={props.visibility}
+                joinRole={props.joinRole}
+                onSettingsSaved={props.onSettingsSaved}
               />
 
               <Show when={canArchive()}>

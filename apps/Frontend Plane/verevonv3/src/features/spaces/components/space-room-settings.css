@@ -47,3 +47,49 @@
   display: flex;
   gap: 8px;
 }
+
+/* WS04-S8: who can find the room (visibility and the self-join role). */
+.verevon-space-room-visibility {
+  margin-top: 10px;
+}
+
+.verevon-space-room-visibility fieldset {
+  margin: 0;
+  min-width: 0;
+}
+
+.verevon-space-room-visibility legend {
+  padding: 0 4px;
+  color: var(--verevon-text);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.verevon-space-room-visibility__choice {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  color: var(--verevon-text);
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.verevon-space-room-visibility__choice input {
+  margin-top: 3px;
+}
+
+.verevon-space-room-visibility select {
+  border: 1px solid var(--verevon-border);
+  border-radius: 8px;
+  background: var(--verevon-surface);
+  padding: 7px 10px;
+  color: var(--verevon-text);
+  font: inherit;
+  font-size: 13px;
+}
+
+.verevon-space-room-visibility__saved {
+  margin: 0;
+  color: var(--verevon-text-muted);
+  font-size: 12px;
+}

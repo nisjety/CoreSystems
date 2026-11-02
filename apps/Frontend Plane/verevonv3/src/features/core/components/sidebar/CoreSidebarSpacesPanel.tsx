@@ -1,5 +1,5 @@
 import { useLocation, useNavigate } from '@solidjs/router'
-import { EyeOff, FolderPlus, Hash, MessageCircle, Pin, Plus, SlidersHorizontal, Users } from '@/shared/icons'
+import { EyeOff, FolderPlus, Hash, MessageCircle, Pin, Plus, Search, SlidersHorizontal, Users } from '@/shared/icons'
 import { createEffect, createMemo, createSignal, For, onCleanup, Show, untrack } from 'solid-js'
 import type { JSX } from '@solidjs/web'
 
@@ -8,6 +8,7 @@ import {
   getSpaceThreads,
   listSpaces,
   spaceDmEnabled,
+  spaceRoomDirectoryListed,
   type SpaceSummary,
   type SpaceThread,
 } from '@/shared/api/spaces-client'
@@ -793,6 +794,21 @@ export function SpacesExpandedSidebarPanel(props: { onCollapse: () => void }) {
           </button>
         </Show>
 
+        <Show when={spaceRoomDirectoryListed() && !spaces.loading && !spacesLoadFailed()}>
+          <a
+            href="/spaces/directory"
+            class={cn(
+              'core-sidebar-panel-link core-sidebar-new-room',
+              location.pathname === '/spaces/directory' && 'verevon-sidebar-panel-active core-sidebar-panel-link--active',
+            )}
+          >
+            <Search class="core-sidebar-panel-link__icon" strokeWidth={1.7} />
+            <span class="core-sidebar-panel-link__label verevon-sidebar-row-normal">
+              {i18n.tr('Finn rom', 'Browse rooms')}
+            </span>
+          </a>
+        </Show>
+
         <Show when={!spaces.loading && !spacesLoadFailed()}>
           <Show
             when={roomFormOpen()}
@@ -1075,6 +1091,8 @@ function spaceRefFromPath(pathname: string): string | undefined {
   if (!pathname.startsWith('/spaces/')) return undefined
   const encodedRef = pathname.slice('/spaces/'.length)
   if (!encodedRef) return undefined
+  // WS04-S8: the room directory is a page, not a Space.
+  if (encodedRef === 'directory') return undefined
   try {
     return decodeURIComponent(encodedRef)
   } catch {

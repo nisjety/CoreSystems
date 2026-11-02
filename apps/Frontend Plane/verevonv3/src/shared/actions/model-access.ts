@@ -203,6 +203,8 @@ export const MODEL_ACCESS: Readonly<Record<ActionId, ModelAccessEntry>> = {
   'space.files.read_text': exempt('no_owner_executor', 'read'),
   'space.files.delete': exempt('irreversible_destructive', 'destructive'),
   'spaces.update_room_details': exempt('human_identity_or_security', 'external_write'),
+  'spaces.join_room': exempt('human_identity_or_security', 'external_write'),
+  'spaces.update_room_settings': exempt('human_identity_or_security', 'external_write'),
   'social.create_draft': exempt('no_owner_executor', 'external_write'),
   'social.schedule_post': exempt('no_owner_executor', 'external_write'),
   'social.publish_post': exempt('irreversible_destructive', 'destructive'),

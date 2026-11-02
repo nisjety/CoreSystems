@@ -707,6 +707,12 @@ export default function SpacePage() {
                   archived={roomIsArchived(current())}
                   roomDetailsEnabled={current().features?.room_details === true}
                   roomArchiveEnabled={contextFeatureOn(current(), 'room_archive')}
+                  roomDirectoryEnabled={contextFeatureOn(current(), 'room_directory')}
+                  visibility={current().membership.visibility}
+                  joinRole={current().membership.join_role}
+                  onSettingsSaved={() => {
+                    void refetchContext()
+                  }}
                   roster={roster.error ? undefined : roster()}
                   facts={[
                     { label: i18n.tr('Type', 'Type'), value: spaceKindLabel(current().space.kind, i18n.tr) },
