@@ -2556,6 +2556,30 @@ Built so far: WS13-S0, WS13-S1, WS13-S2; WS14-S1, WS14-S2 (partial), WS14-S3; WS
 | D2-1165 | WS14-S5 | live-proof | P1 | Add AGENT_ASK_USER_RESUME_ENABLED (default false) to the execution-core block of deploy/docker-compose.yml. | closed: 9c7e74e1f (compose passes AGENT_ASK_USER_RESUME_ENABLED, default false) |
 | D2-1166 | WS14-S5 | follow-up | P3 | 16 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W2-46.json | open |
 
+
+### Wave-mode batch W2-47 (2026-11-02)
+
+| ID | Slice | Kind | P | Finding | Status |
+|---|---|---|---|---|---|
+| D2-1169 | WS14-S2 | test-gap | P1 | No test drives an execute turn carrying approved_plan_id through the invoke stream. Not covered: the pre-run refusal (wrong plan id, no or lapsed durable grant, typed plan_grant_unavailable before any run is dispatched); two concurrent executes where exactly one wins the APPROVED to EXECUTING compare-and-swap; and the bind-then-dispatch path that must run the rung and plan block once. The execute-turn harness lives in tests/e2e_invoke_chain_test.rs, which this slice does not own. Add these before MODEL_GATEWAY_PLAN_EXECUTE_ON_APPROVE is switched on. | open |
+| D2-1170 | WS14-S2 | test-gap | P1 | The e2e spec apps/Frontend Plane/verevonv3/tests/e2e/plan-approve-execute.spec.ts named by the row was not written. It needs the live dev stack, so it belongs with the live proof. | open |
+| D2-1171 | WS14-S2 | test-gap | P1 | The two ZDR posture-matrix goldens (e_zdr_token_execute_approved_plan_refused, e_zdr_token_bind_grant_refused) are absent. The matrix evaluator in model-gateway tests/zdr_posture_matrix.rs computes only route and bearer decisions, so a feature refusal cannot be expressed without changing that evaluator, its vendored fixture copy and its ENFORCEMENT_ROWS count. Refusal coverage today: zdr_feature_table.rs (approved_plan_id refused under agentic, 12 passed) and the session-core zero-retention refusal in the DB test (not run here). | open |
+| D2-1172 | WS14-S2 | live-proof | P1 | No live proof was run; docker and live proofs are lead-only. The proof needs the approve switch, the execute switch and the approval-resume switch on in the proof stack only. The durable-grant switch already defaults on in compose (WS04 S4). | open |
+| D2-1173 | WS14-S2 | test-gap | P1 | No test drives an execute turn carrying approved_plan_id through the invoke stream. Not covered: the pre-run plan_grant_unavailable refusal, two concurrent executes where exactly one wins the APPROVED to EXECUTING CAS, and claim, then bind, then dispatch run once. approve_then_execute_tests pins only the pure helpers. These tests are needed before MODEL_GATEWAY_PLAN_EXECUTE_ON_APPROVE is turned on. | open |
+| D2-1174 | WS14-S2 | test-gap | P1 | The row's ZDR posture-matrix goldens (e_zdr_token_execute_approved_plan_refused, e_zdr_token_bind_grant_refused) are absent. Refusal coverage today: zdr_feature_table.rs, plus the zero-retention case in the ignored session-core DB test. | open |
+| D2-1175 | WS14-S2 | test-gap | P1 | The row's new file apps/Frontend Plane/verevonv3/tests/e2e/plan-approve-execute.spec.ts does not exist. | open |
+| D2-1176 | WS14-S2 | live-proof | P1 | Run the DB harness for bind_grant_to_run_takes_only_the_plan_the_thread_names_against_real_pg (needs DATABASE_URL). It is #[ignore] and was not run. It now also covers a non-owner, a zero-retention caller and a lapsed grant. | open |
+| D2-1177 | WS14-S2 | follow-up | P3 | 20 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W2-47.json | open |
+| D2-1178 | WS14-S7 | risk | P0 | As recorded in the W2-45 ledger entry (not re-verified in this slice), session-core keys the approval cause and decision writes on caller.zdr(), which is false for a waiver credential, and the approval_decided outbox row has no retention check; it is unreachable while waiver minting is off, but must be fixed before ZDR_WAIVER_ENABLED or APPROVAL_AUDIT_EVENTS_ENABLED goes on. | open |
+| D2-1179 | WS14-S7 | risk | P1 | A durable plan grant still covers every later run on its thread for its 24 h TTL, so the rung outlives the approved run; the owner must decide the scope before MODEL_GATEWAY_PLAN_EXECUTE_ON_APPROVE goes on (W2-36 ledger). | open |
+| D2-1180 | WS14-S7 | test-gap | P1 | The S2 behaviour tests (bound rung once, second execute refused, wrong plan refused), the ZDR posture goldens for approved_plan_id and BindGrantToRun, chat.reject_plan and the e2e spec are not written (W2-36 ledger), so the plan's named S2 tests do not exist yet. | open |
+| D2-1181 | WS14-S7 | risk | P1 | The S4 answer is recorded before the turn that carries it is sent, so a failed send leaves an answered question with no turn, and answered_message_id is never linked (W2-42 ledger). | open |
+| D2-1182 | WS14-S7 | risk | P1 | The S4 answer and skip handlers write after their await without checking the thread (W2-42 ledger; not re-verified in this slice). | open |
+| D2-1183 | WS14-S7 | test-gap | P1 | The S4 transcript question node, the reload restore, the e2e ask-user spec and the ZDR golden ask_user_zdr_not_offered are not built (W2-42 ledger), so the S4 definition of done is open on those items. | open |
+| D2-1184 | WS14-S7 | risk | P1 | Under TOOL_CLASS_GATE=enforce, ask_user is unclassified until capability-core migration 0029 is applied, and a read_only Do run cannot ask under the enforced gate (W2-42 lead decision); the proof stack must apply 0029 before enforce. | open |
+| D2-1185 | WS14-S7 | risk | P1 | The S5 gateway continue branch, the awaiting_input frame, RunPausedForInput and the SPA answer path are not built, so resume delivery stays refused and AGENT_ASK_USER_RESUME_ENABLED must stay off (W2-45 and W2-46 ledgers). | open |
+| D2-1186 | WS14-S7 | follow-up | P3 | 29 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W2-47.json | open |
+
 ## Cross-wave
 
 | ID | Kind | P | Finding | Status |
@@ -2776,3 +2800,4 @@ Slices that touch authority, audit, ZDR, money or data-loss and were built in wa
 | WS14-S5 | authority, audit | W2-45 | no |
 | WS13-S8 | zdr | W2-45 | no |
 | WS14-S5 | authority, audit | W2-46 | no |
+| WS14-S2 | authority, zdr, audit | W2-47 | no |
