@@ -334,3 +334,45 @@ func TestProcessRegistryPermissionIsWithheldUnderZDR(t *testing.T) {
 		}
 	}
 }
+
+// WS12-S5: editing or deleting a Space message is gated by two independent,
+// deny-by-default bits, and Control refuses the revise decision under ZDR
+// (it rewrites stored content), so both are ZDR-inert.
+func TestCatalogueIncludesTheMessageLifecycleBitsAsZDRInert(t *testing.T) {
+	byKey := map[string]EntitlementSpec{}
+	for _, spec := range EntitlementCatalog() {
+		byKey[spec.Key] = spec
+	}
+	for key, column := range map[string]string{"message_revise": "message_revise_entitled", "message_moderate": "message_moderate_entitled"} {
+		spec, ok := byKey[key]
+		if !ok {
+			t.Fatalf("catalogue lacks %s", key)
+		}
+		if spec.Column != column {
+			t.Errorf("%s column = %q, want %q", key, spec.Column, column)
+		}
+		if spec.ZDR != ZDRInert {
+			t.Errorf("%s ZDR class = %q, want %q", key, spec.ZDR, ZDRInert)
+		}
+		var policy EffectPolicy
+		if spec.Get(policy) {
+			t.Errorf("%s must default off", key)
+		}
+		spec.Set(&policy, true)
+		if !spec.Get(policy) {
+			t.Errorf("%s Set/Get do not round-trip", key)
+		}
+	}
+	if got := byKey["message_revise"].Decisions; len(got) != 1 || got[0] != "model.thread.revise" {
+		t.Errorf("message_revise decisions = %v", got)
+	}
+	if got := byKey["message_moderate"].Decisions; len(got) != 1 || got[0] != "model.thread.revise#thread:moderate" {
+		t.Errorf("message_moderate decisions = %v", got)
+	}
+	// The two bits are independent fields.
+	var policy EffectPolicy
+	byKey["message_moderate"].Set(&policy, true)
+	if policy.MessageReviseEntitled || !policy.MessageModerateEntitled {
+		t.Errorf("moderate must not imply revise: %+v", policy)
+	}
+}
