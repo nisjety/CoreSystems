@@ -32,6 +32,7 @@ type joinSpaceRoomBody struct {
 type updateSpaceRoomSettingsBody struct {
 	Visibility     *string `json:"visibility"`
 	JoinRole       *string `json:"join_role"`
+	HistoryMode    *string `json:"history_mode"`
 	IdempotencyKey string  `json:"idempotency_key"`
 }
 
@@ -92,6 +93,7 @@ func (s *Server) updateSpaceRoomSettings(c *gin.Context) {
 		ActorID:        c.GetString("user_id"),
 		Visibility:     body.Visibility,
 		JoinRole:       body.JoinRole,
+		HistoryMode:    body.HistoryMode,
 		IdempotencyKey: body.IdempotencyKey,
 	})
 	if err != nil {
@@ -103,6 +105,7 @@ func (s *Server) updateSpaceRoomSettings(c *gin.Context) {
 		"space_ref":          result.SpaceRef,
 		"visibility":         result.Visibility,
 		"join_role":          result.JoinRole,
+		"history_mode":       result.HistoryMode,
 		"changed":            result.Changed,
 		"replayed":           result.Replayed,
 		"authority_revision": result.AuthorityRevision,

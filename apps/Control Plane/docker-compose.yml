@@ -447,6 +447,9 @@ services:
             # WS04-S10: durable Space membership events (ledger outbox + re-announce).
             # Strict literal true; off by default and in production until enabled.
             SPACE_MEMBERSHIP_EVENTS_SWEEPER: ${SPACE_MEMBERSHIP_EVENTS_SWEEPER:-false}
+            # WS04-S11: sign a history floor on shared thread-read decisions for since_join
+            # rooms. Strict literal true; off by default and in production. 0 + restart: full history.
+            SPACE_HISTORY_WINDOW_CLAIM: ${SPACE_HISTORY_WINDOW_CLAIM:-false}
             # WS12-S1: Control accepts the dm/group_dm kinds and serves
             # POST /api/v1/internal/spaces/dm-eligibility. Strict literal true; off by
             # default and in production. 0 + restart: no new DMs, existing DMs keep resolving.

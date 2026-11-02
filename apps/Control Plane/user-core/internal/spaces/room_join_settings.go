@@ -178,6 +178,7 @@ type SettingsRequest struct {
 	ActorID        string
 	Visibility     *string
 	JoinRole       *string
+	HistoryMode    *string
 	IdempotencyKey string
 }
 
@@ -186,6 +187,7 @@ type SettingsResult struct {
 	SpaceRef          string
 	Visibility        string
 	JoinRole          string
+	HistoryMode       string
 	Changed           bool
 	Replayed          bool
 	AuthorityRevision int64
@@ -209,8 +211,12 @@ func (r *Repository) UpdateRoomSettings(ctx context.Context, req SettingsRequest
 	if req.OrgID == "" || req.ActorID == "" {
 		return nil, roomNotFound()
 	}
-	if req.Visibility == nil && req.JoinRole == nil {
-		return nil, invalidRequest("settings", "at least one of visibility or join_role is required")
+	req.HistoryMode = normalizeHistoryMode(req.HistoryMode)
+	if req.Visibility == nil && req.JoinRole == nil && req.HistoryMode == nil {
+		return nil, invalidRequest("settings", "at least one of visibility, join_role or history_mode is required")
+	}
+	if req.HistoryMode != nil && !ValidHistoryMode(*req.HistoryMode) {
+		return nil, invalidRequest("history_mode", "history_mode must be full or since_join")
 	}
 	if req.Visibility != nil && !ValidVisibility(strings.TrimSpace(*req.Visibility)) {
 		return nil, invalidRequest("visibility", "visibility must be private or org_public")
@@ -230,22 +236,31 @@ func (r *Repository) UpdateRoomSettings(ctx context.Context, req SettingsRequest
 	if denial := CanManageRoom(op.actorRole); denial != nil {
 		return nil, denialError(denial)
 	}
+	// The history window changes what every later joiner can read, so it is an
+	// owner decision (WS04-S11), not a manager one.
+	if req.HistoryMode != nil && RoleRank(op.actorRole) < RoleRank(RoleOwner) {
+		return nil, denialError(roleForbidden())
+	}
 	if err := op.refuseDerivedOrArchived(); err != nil {
 		return nil, err
 	}
-	var curVisibility, curJoinRole string
+	var curVisibility, curJoinRole, curHistoryMode string
 	if err := op.tx.QueryRow(ctx, `
-		SELECT visibility, join_role FROM registered_spaces WHERE space_ref=$1`,
-		op.space.SpaceRef).Scan(&curVisibility, &curJoinRole); err != nil {
+		SELECT visibility, join_role, history_mode FROM registered_spaces WHERE space_ref=$1`,
+		op.space.SpaceRef).Scan(&curVisibility, &curJoinRole, &curHistoryMode); err != nil {
 		return nil, fmt.Errorf("read Space settings: %w", err)
 	}
-	newVisibility, newJoinRole := curVisibility, curJoinRole
+	newVisibility, newJoinRole, newHistoryMode := curVisibility, curJoinRole, curHistoryMode
 	if req.Visibility != nil {
 		newVisibility = strings.TrimSpace(*req.Visibility)
 	}
 	if req.JoinRole != nil {
 		newJoinRole = *req.JoinRole
 	}
+	if req.HistoryMode != nil {
+		newHistoryMode = *req.HistoryMode
+	}
+	historyModeChanged := newHistoryMode != curHistoryMode
 	visibilityChanged := newVisibility != curVisibility
 	joinRoleChanged := newJoinRole != curJoinRole
 	action := ActionSettingsChanged
@@ -263,14 +278,15 @@ func (r *Repository) UpdateRoomSettings(ctx context.Context, req SettingsRequest
 				return nil, roomError(409, CodeIdempotencyKeyReused, "idempotency_key was used for a different request", nil)
 			}
 			return &SettingsResult{
-				SpaceRef: op.space.SpaceRef, Visibility: curVisibility, JoinRole: curJoinRole, Replayed: true,
+				SpaceRef: op.space.SpaceRef, Visibility: curVisibility, JoinRole: curJoinRole,
+				HistoryMode: curHistoryMode, Replayed: true,
 				AuthorityRevision: op.revisions.Authority, PrivacyRevision: op.revisions.Privacy,
 			}, nil
 		}
 	}
-	if !visibilityChanged && !joinRoleChanged {
+	if !visibilityChanged && !joinRoleChanged && !historyModeChanged {
 		return &SettingsResult{
-			SpaceRef: op.space.SpaceRef, Visibility: curVisibility, JoinRole: curJoinRole,
+			SpaceRef: op.space.SpaceRef, Visibility: curVisibility, JoinRole: curJoinRole, HistoryMode: curHistoryMode,
 			AuthorityRevision: op.revisions.Authority, PrivacyRevision: op.revisions.Privacy,
 		}, nil
 	}
@@ -284,8 +300,8 @@ func (r *Repository) UpdateRoomSettings(ctx context.Context, req SettingsRequest
 		}
 	}
 	if _, err := op.tx.Exec(ctx, `
-		UPDATE registered_spaces SET visibility=$2, join_role=$3, updated_at=NOW() WHERE space_ref=$1`,
-		op.space.SpaceRef, newVisibility, newJoinRole); err != nil {
+		UPDATE registered_spaces SET visibility=$2, join_role=$3, history_mode=$4, updated_at=NOW() WHERE space_ref=$1`,
+		op.space.SpaceRef, newVisibility, newJoinRole, newHistoryMode); err != nil {
 		return nil, fmt.Errorf("update Space settings: %w", err)
 	}
 	var next AuthorityRevision
@@ -312,7 +328,8 @@ func (r *Repository) UpdateRoomSettings(ctx context.Context, req SettingsRequest
 		return nil, fmt.Errorf("commit Space settings: %w", err)
 	}
 	return &SettingsResult{
-		SpaceRef: op.space.SpaceRef, Visibility: newVisibility, JoinRole: newJoinRole, Changed: true,
+		SpaceRef: op.space.SpaceRef, Visibility: newVisibility, JoinRole: newJoinRole,
+		HistoryMode: newHistoryMode, Changed: true,
 		AuthorityRevision: next.Authority, PrivacyRevision: next.Privacy,
 	}, nil
 }

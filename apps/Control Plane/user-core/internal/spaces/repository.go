@@ -42,6 +42,9 @@ type Repository struct {
 	policyAudit PolicyAuditOutbox
 	// dmRegistration is the SPACE_DM_REGISTRATION rollout switch (WS12-S1).
 	dmRegistration bool
+	// historyWindowClaim is the SPACE_HISTORY_WINDOW_CLAIM rollout switch
+	// (WS04-S11). Off: no read decision carries a history floor.
+	historyWindowClaim bool
 }
 
 // SetPolicyAuditOutbox wires the in-transaction audit outbox for Space
@@ -1019,7 +1022,7 @@ func (r *Repository) resolveUserMembership(ctx context.Context, spaceRef, orgID,
 		SELECT s.space_ref, s.org_id, m.subject_id, s.space_kind, m.role,
 		       r.authority_revision, r.membership_revision, r.privacy_revision,
 		       r.recipient_audience_revision, r.entitlement_revision,
-		       s.roster_mode, s.registration_state, s.archived_at, s.visibility, s.join_role,
+		       s.roster_mode, s.registration_state, s.archived_at, s.visibility, s.join_role, s.history_mode,
 		       (s.space_kind='personal' OR EXISTS (
 			SELECT 1 FROM space_recipient_audience_members a
 			WHERE a.space_ref=s.space_ref
@@ -1047,7 +1050,7 @@ func (r *Repository) resolveUserMembership(ctx context.Context, spaceRef, orgID,
 		&membership.Revisions.Authority, &membership.Revisions.Membership, &membership.Revisions.Privacy,
 		&membership.Revisions.RecipientAudience, &membership.Revisions.Entitlement,
 		&membership.RosterMode, &membership.State, &membership.ArchivedAt,
-		&membership.Visibility, &membership.JoinRole, &membership.RecipientReady,
+		&membership.Visibility, &membership.JoinRole, &membership.HistoryMode, &membership.RecipientReady,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNoCurrentMembership
@@ -1231,6 +1234,9 @@ func (r *Repository) ResolveSharedThreadReadDecisionEvidence(ctx context.Context
 	}
 	if err != nil {
 		return PersonalThreadDecisionEvidence{}, fmt.Errorf("resolve shared Space thread read authority: %w", err)
+	}
+	if err := r.applyHistoryFloor(ctx, &evidence); err != nil {
+		return PersonalThreadDecisionEvidence{}, err
 	}
 	evidence.ResourceAuthorizationRef = fmt.Sprintf("control:%s:thread-read:%d", evidence.Membership.SpaceRef, evidence.Membership.Revisions.Authority)
 	if err := evidence.ValidateForSharedThreadRead(); err != nil {

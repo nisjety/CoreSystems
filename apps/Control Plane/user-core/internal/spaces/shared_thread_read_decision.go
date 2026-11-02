@@ -174,11 +174,15 @@ func IssueSharedThreadReadDecision(
 	if now.IsZero() {
 		return Decision{}, fmt.Errorf("shared thread read decision issuance time is required")
 	}
-	return newEvidenceDecision(
+	decision := newEvidenceDecision(
 		evidence, request.DecisionRef, request.Audience(), threadReadAction, threadReadSchema,
 		sharedThreadReadPayloadDigest(evidence, request), request.IdempotencyKey, request.Nonce,
 		[]string{"thread:read"}, evidence.Privacy.ZeroDataRetention, now,
-	), nil
+	)
+	if evidence.HistoryFloorRevision > 0 {
+		decision.HistoryFloorRevision = evidence.HistoryFloorRevision
+	}
+	return decision, nil
 }
 
 // IssueOwnScheduledThreadReadDecision authorizes one short-lived read of a

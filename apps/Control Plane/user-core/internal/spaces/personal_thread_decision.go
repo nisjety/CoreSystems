@@ -120,6 +120,11 @@ type PersonalThreadDecisionEvidence struct {
 	RunControlEntitled        bool
 	ApprovalGrantEntitled     bool
 	ResourceAuthorizationRef  string
+	// HistoryFloorRevision (WS04-S11) is the first recipient-audience revision
+	// the subject may read from in a since_join room; 0 means no floor. Filled
+	// only by ResolveSharedThreadReadDecisionEvidence, only while
+	// SPACE_HISTORY_WINDOW_CLAIM is on. A presentation rule, never authority.
+	HistoryFloorRevision int64
 	// WS12-S5: the message-lifecycle bits and the org's original-text rule,
 	// filled only by the thread-revise resolvers.
 	MessageReviseEntitled   bool

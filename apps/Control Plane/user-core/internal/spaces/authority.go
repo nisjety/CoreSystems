@@ -484,6 +484,10 @@ type CurrentMembership struct {
 	// grants access by itself.
 	Visibility string `json:"visibility,omitempty"`
 	JoinRole   string `json:"join_role,omitempty"`
+	// HistoryMode is "full" or "since_join" (WS04-S11): a stored room fact for
+	// the settings UI. Whether a floor is actually signed also depends on the
+	// SPACE_HISTORY_WINDOW_CLAIM rollout switch.
+	HistoryMode string `json:"history_mode,omitempty"`
 }
 
 func (m CurrentMembership) Validate() error {

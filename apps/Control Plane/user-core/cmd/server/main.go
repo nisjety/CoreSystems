@@ -389,6 +389,10 @@ func main() {
 	// literal true; off by default; a rollout control, never an authorization
 	// input (the dm_create_entitled bit and membership checks still decide).
 	spaceRepo.SetDMRegistrationEnabled(os.Getenv("SPACE_DM_REGISTRATION") == "true")
+	// WS04-S11: sign a history floor on shared thread-read decisions for
+	// since_join rooms. Strict literal true; off by default; a presentation
+	// rollout control, never an authorization input.
+	spaceRepo.SetHistoryWindowClaim(os.Getenv("SPACE_HISTORY_WINDOW_CLAIM") == "true")
 	httpServer.SetSpaceRepository(spaceRepo)
 	// WS05-S5: Space decision denied/issued audit events. Strict literal true;
 	// off by default; a rollout control, never an authorization input.
