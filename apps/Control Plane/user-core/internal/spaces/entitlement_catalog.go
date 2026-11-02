@@ -114,6 +114,22 @@ var entitlementCatalog = []EntitlementSpec{
 		Get: func(p EffectPolicy) bool { return p.DMCreateEntitled },
 		Set: func(p *EffectPolicy, v bool) { p.DMCreateEntitled = v },
 	},
+	{
+		// WS12-S5: editing or deleting a Space message. Revising rewrites or
+		// retires stored content, so it is inert under Space ZDR.
+		Key: "message_revise", Column: "message_revise_entitled",
+		Decisions: []string{"model.thread.revise"}, ZDR: ZDRInert,
+		Get: func(p EffectPolicy) bool { return p.MessageReviseEntitled },
+		Set: func(p *EffectPolicy, v bool) { p.MessageReviseEntitled = v },
+	},
+	{
+		// WS12-S5: a room manager or owner deleting another member's message
+		// (adds thread:moderate to a revise decision; never in a DM).
+		Key: "message_moderate", Column: "message_moderate_entitled",
+		Decisions: []string{"model.thread.revise#thread:moderate"}, ZDR: ZDRInert,
+		Get: func(p EffectPolicy) bool { return p.MessageModerateEntitled },
+		Set: func(p *EffectPolicy, v bool) { p.MessageModerateEntitled = v },
+	},
 }
 
 // effectPolicyPrivacyColumns are the nine privacy/attestation columns, in the

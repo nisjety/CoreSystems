@@ -84,6 +84,8 @@ process_registry_entitled=""
 run_control_entitled=""
 approval_grant_entitled=""
 dm_create_entitled=""
+message_revise_entitled=""
+message_moderate_entitled=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -108,6 +110,8 @@ while [[ $# -gt 0 ]]; do
     --run-control-entitled) run_control_entitled=true; shift ;;
     --approval-grant-entitled) approval_grant_entitled=true; shift ;;
     --dm-create-entitled) dm_create_entitled=true; shift ;;
+    --message-revise-entitled) message_revise_entitled=true; shift ;;
+    --message-moderate-entitled) message_moderate_entitled=true; shift ;;
     *) echo "unknown argument: $1" >&2; exit 1 ;;
   esac
 done
@@ -121,7 +125,7 @@ done
 
 # Send an entitlement key only when its flag was passed.
 entitlement_json=""
-for key in thread_create retrieval_read import_write agent_action schedule_fire thread_read sandbox_capability process_registry run_control approval_grant dm_create; do
+for key in thread_create retrieval_read import_write agent_action schedule_fire thread_read sandbox_capability process_registry run_control approval_grant dm_create message_revise message_moderate; do
   var="${key}_entitled"
   if [[ -n "${!var}" ]]; then
     entitlement_json+=$',\n  "'"${key}"'_entitled": '"${!var}"

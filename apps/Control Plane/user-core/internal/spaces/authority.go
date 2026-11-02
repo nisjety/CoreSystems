@@ -277,6 +277,13 @@ type EffectPolicy struct {
 	// needs ThreadCreateEntitled and ThreadReadEntitled; this bit is its own
 	// deny-by-default floor and is never inherited from either.
 	DMCreateEntitled bool `json:"dm_create_entitled"`
+	// MessageReviseEntitled (WS12-S5) lets a member edit or delete their own
+	// message and retract an agent reply they started. MessageModerateEntitled
+	// additionally lets a room manager or owner delete another member's
+	// message. Both are their own deny-by-default floors, never inherited from
+	// ThreadCreateEntitled, and both are inert under Zero Data Retention.
+	MessageReviseEntitled   bool `json:"message_revise_entitled"`
+	MessageModerateEntitled bool `json:"message_moderate_entitled"`
 }
 
 func (p EffectPolicy) Validate() error {

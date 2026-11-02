@@ -120,6 +120,11 @@ type PersonalThreadDecisionEvidence struct {
 	RunControlEntitled        bool
 	ApprovalGrantEntitled     bool
 	ResourceAuthorizationRef  string
+	// WS12-S5: the message-lifecycle bits and the org's original-text rule,
+	// filled only by the thread-revise resolvers.
+	MessageReviseEntitled   bool
+	MessageModerateEntitled bool
+	OriginalRetention       string
 }
 
 func (e PersonalThreadDecisionEvidence) validatePersonalAuthority() error {
