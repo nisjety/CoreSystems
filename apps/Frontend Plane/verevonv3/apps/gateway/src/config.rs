@@ -363,6 +363,12 @@ pub(crate) struct SpaceFeatureFlags {
     /// list. Off answers 404 `space_status_disabled` on the status routes and leaves the roster and
     /// agent responses unannotated. A rollout control, never an authorization input.
     pub(crate) status_api: bool,
+    /// `SPACE_REMINDERS_API` (WS11-S11, `space_reminders_api`): the reminder routes (`POST
+    /// /api/v1/spaces/{space_ref}/reminders`, `GET /api/v1/spaces/reminders`, `DELETE
+    /// /api/v1/spaces/reminders/{id}`) and the `spaces.create_reminder` / `spaces.cancel_reminder`
+    /// actions. Off answers 404 `space_reminders_disabled`. A rollout control, never an
+    /// authorization input: membership, the Zero Data Retention posture and the caller's own rows decide.
+    pub(crate) reminders_api: bool,
     /// `ORG_IDENTITY_ADMIN_API` (WS05-S6): the owner/admin domain verification routes
     /// (`/api/v1/orgs/{id}/domains`), proxied to org-core. Off answers 404 `feature_disabled`.
     /// A rollout control, never an authorization input: the live owner/admin membership decides.
@@ -498,6 +504,7 @@ impl SpaceFeatureFlags {
             attention_api: space_flag("SPACE_ATTENTION_API"),
             attention_ui: space_flag("SPACE_ATTENTION_UI"),
             status_api: space_flag("SPACE_STATUS_API"),
+            reminders_api: space_flag("SPACE_REMINDERS_API"),
             org_identity_admin_api: space_flag("ORG_IDENTITY_ADMIN_API"),
             run_live_text: space_flag("SPACE_RUN_LIVE_TEXT"),
             run_live_view: space_flag("SPACE_RUN_LIVE_VIEW"),

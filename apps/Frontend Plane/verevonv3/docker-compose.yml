@@ -289,6 +289,9 @@ services:
       # WS11-S10: the org-scoped status (GET|PUT /api/v1/spaces/status) and the status / activity chips on the
       # roster and agent list. Rollout control only; the caller's own Application row is all it reads or writes.
       SPACE_STATUS_API: ${SPACE_STATUS_API:-true}
+      # WS11-S11: reminders (POST /api/v1/spaces/{ref}/reminders, GET /api/v1/spaces/reminders, DELETE
+      # .../reminders/{id}). Rollout control only; membership and the caller's own rows decide.
+      SPACE_REMINDERS_API: ${SPACE_REMINDERS_API:-true}
       # WS08-S4: identity-bound mentions on posts and the addressed-wake mode of the chat stream. Rollout
       # controls only; Control's signed run-wake decision and Session Core's verifier decide. Pair with
       # model-gateway SPACE_WAKE_API and session-core SPACE_MENTION_RECORDS_CORE / SPACE_WAKE_CORE.

@@ -180,6 +180,8 @@ export const MODEL_ACCESS: Readonly<Record<ActionId, ModelAccessEntry>> = {
   'spaces.mark_unread': exempt('ui_state_only', 'external_write'),
   'spaces.set_notify_level': exempt('ui_state_only', 'external_write'),
   'spaces.set_status': exempt('ui_state_only', 'external_write'),
+  'spaces.create_reminder': exempt('ui_state_only', 'external_write'),
+  'spaces.cancel_reminder': exempt('ui_state_only', 'external_write'),
   'spaces.stop_run': exempt('approval_authority', 'destructive'),
   'spaces.create_room': exempt('no_owner_executor', 'external_write'),
   'spaces.add_member': exempt('no_owner_executor', 'external_write'),

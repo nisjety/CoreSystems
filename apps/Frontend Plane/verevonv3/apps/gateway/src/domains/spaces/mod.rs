@@ -33,6 +33,7 @@ use denial::{typed_response, with_gap_details, Decision, SpaceDenial};
 pub(crate) mod agent_policy;
 pub(crate) mod attention;
 pub(crate) mod status;
+pub(crate) mod reminders;
 pub(crate) mod tool_policy;
 pub(crate) mod directory;
 pub(crate) mod dm;
@@ -1049,6 +1050,7 @@ fn module_routes() -> Router<AppState> {
         .merge(approvals::routes())
         .merge(attention::routes())
         .merge(status::routes())
+        .merge(reminders::routes())
         .merge(tool_policy::routes())
         .merge(dm::routes())
         .merge(files::routes())
@@ -5567,6 +5569,7 @@ async fn space_context(
                     "attention": state.space_features.attention_api
                         && state.space_features.attention_ui,
                     "status": state.space_features.status_api,
+                    "reminders": state.space_features.reminders_api,
                     // WS08-S4: mentions and addressed wake. The picker follows the record flag;
                     // a wake needs the records it answers, so both flags must be on.
                     "mention_records": state.space_features.mention_records_api,

@@ -83,6 +83,29 @@ const spaceSetStatusOutput = z.object({
   expires_at: z.number().nullable(),
 })
 
+const spaceCreateReminderInput = z.object({
+  spaceRef: z.string().trim().min(1).max(200),
+  threadId: z.string().trim().min(1).max(200),
+  messageId: z.string().trim().min(1).max(200).optional(),
+  // Epoch milliseconds, at least five seconds and at most 366 days ahead.
+  remindAt: z.number().int().positive(),
+})
+
+const spaceCreateReminderOutput = z.object({
+  reminder_id: z.string(),
+  remind_at: z.number(),
+  deduplicated: z.boolean(),
+})
+
+const spaceCancelReminderInput = z.object({
+  reminderId: z.string().trim().min(1).max(200),
+})
+
+const spaceCancelReminderOutput = z.object({
+  reminder_id: z.string(),
+  cancelled: z.boolean(),
+})
+
 export const ws11SpaceActions = [
   {
     id: 'spaces.mark_all_read',
@@ -155,5 +178,28 @@ export const ws11SpaceActions = [
     reversible: true,
     inputSchema: spaceSetStatusInput,
     outputSchema: spaceSetStatusOutput,
+  },
+  {
+    id: 'spaces.create_reminder',
+    label: 'Remind me about a post',
+    description:
+      'Set a reminder for yourself on one post (or one message) of a room you belong to. At the time you choose it appears in your attention inbox as an id-only item; there is no note. Refused for a Zero Data Retention organization. At most 50 pending reminders.',
+    ownerPlane: 'application',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: spaceCreateReminderInput,
+    outputSchema: spaceCreateReminderOutput,
+  },
+  {
+    id: 'spaces.cancel_reminder',
+    label: 'Cancel a reminder',
+    description: 'Cancel one of your own pending reminders. Nobody else is affected.',
+    ownerPlane: 'application',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: false,
+    inputSchema: spaceCancelReminderInput,
+    outputSchema: spaceCancelReminderOutput,
   },
 ] as const satisfies readonly ActionDescriptor[]

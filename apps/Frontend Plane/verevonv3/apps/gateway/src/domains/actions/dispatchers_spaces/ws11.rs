@@ -8,6 +8,11 @@
 //! flag, the Zero Data Retention refusal and the typed errors exist once. Neither id is
 //! model-executable: an inbox and a follow are a person's own attention.
 //!
+//! WS11-S11 adds `spaces.create_reminder` and `spaces.cancel_reminder` (`POST
+//! /api/v1/spaces/{space_ref}/reminders`, `DELETE /api/v1/spaces/reminders/{id}`) through
+//! `create_reminder_core` / `cancel_reminder_core` in `domains/spaces/reminders.rs`: creating one is
+//! the typed 412 under Zero Data Retention, cancelling is always allowed.
+//!
 //! WS11-S10 adds `spaces.set_status` (the org-scoped status, `PUT /api/v1/spaces/status`) through
 //! `put_status_core` in `domains/spaces/status.rs`: a text under Zero Data Retention is the typed 412.
 
@@ -18,6 +23,7 @@ use crate::config::AppState;
 use crate::domains::spaces::attention::{
     mark_unread_core, put_follow_core, put_notify_core, read_all_core, set_item_state_core,
 };
+use crate::domains::spaces::reminders::{cancel_reminder_core, create_reminder_core};
 use crate::domains::spaces::status::put_status_core;
 use crate::middleware::AuthenticatedUser;
 
@@ -149,4 +155,49 @@ pub(in crate::domains::actions) async fn dispatch_spaces_set_status(
     let (status, axum::Json(resp)) =
         put_status_core(state, user, Some(headers), &Value::Object(body)).await;
     owner_json_response_to_envelope("spaces.set_status", user, status, resp)
+}
+
+pub(in crate::domains::actions) async fn dispatch_spaces_create_reminder(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    input: &Value,
+) -> Response {
+    let space_ref = ticket_string(input, "spaceRef");
+    let thread_id = ticket_string(input, "threadId");
+    if space_ref.is_empty() || thread_id.is_empty() {
+        return ticket_bad_request(
+            "spaces.create_reminder requires a non-empty 'spaceRef' and 'threadId'",
+        );
+    }
+    let mut body = Map::new();
+    body.insert("thread_id".to_owned(), Value::String(thread_id.to_owned()));
+    if let Some(value) = input.get("messageId") {
+        body.insert("message_id".to_owned(), value.clone());
+    }
+    if let Some(value) = input.get("remindAt") {
+        body.insert("remind_at".to_owned(), value.clone());
+    }
+    let (status, axum::Json(resp)) = create_reminder_core(
+        state,
+        user,
+        Some(headers),
+        space_ref,
+        &Value::Object(body),
+    )
+    .await;
+    owner_json_response_to_envelope("spaces.create_reminder", user, status, resp)
+}
+
+pub(in crate::domains::actions) async fn dispatch_spaces_cancel_reminder(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    input: &Value,
+) -> Response {
+    let reminder_id = ticket_string(input, "reminderId");
+    if reminder_id.is_empty() {
+        return ticket_bad_request("spaces.cancel_reminder requires a non-empty 'reminderId'");
+    }
+    let (status, axum::Json(resp)) = cancel_reminder_core(state, user, reminder_id).await;
+    owner_json_response_to_envelope("spaces.cancel_reminder", user, status, resp)
 }
