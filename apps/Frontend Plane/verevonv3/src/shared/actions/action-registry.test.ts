@@ -589,6 +589,56 @@ describe('action registry', () => {
     expect(getActionDescriptor('spaces.hide_space')?.reversible).toBe(true)
   })
 
+  it('registers the WS10-S4 approval actions, in fragment order, and neither is model-executable', () => {
+    const ids = actionRegistry.map((action) => action.id)
+    const decide = ids.indexOf('spaces.decide_approval')
+    expect(decide).toBeGreaterThan(-1)
+    // Contiguous and in the order ws10.ts declares them.
+    expect(ids.slice(decide, decide + 2)).toEqual(['spaces.decide_approval', 'spaces.revoke_approval_grant'])
+    expect(decide).toBeGreaterThan(ids.indexOf('spaces.leave_room'))
+
+    const decideAction = getActionDescriptor('spaces.decide_approval')
+    expect(decideAction?.ownerPlane).toBe('model')
+    expect(decideAction?.risk).toBe('high')
+    const revokeAction = getActionDescriptor('spaces.revoke_approval_grant')
+    expect(revokeAction?.ownerPlane).toBe('control')
+    expect(revokeAction?.risk).toBe('medium')
+
+    // An agent must never decide its own approval nor revoke the rule that limits it.
+    expect(isModelExecutableAction('spaces.decide_approval')).toBe(false)
+    expect(isModelExecutableAction('spaces.revoke_approval_grant')).toBe(false)
+
+    const input = decideAction?.inputSchema
+    const valid = { spaceRef: 'space-1', approvalId: 'apr-1', decision: 'approve' }
+    expect(input?.safeParse(valid).success).toBe(true)
+    expect(input?.safeParse({ ...valid, scope: 'always', idempotencyKey: 'key-aaaaaaaa' }).success).toBe(true)
+    expect(input?.safeParse({ ...valid, scope: 'forever' }).success).toBe(false)
+    expect(input?.safeParse({ ...valid, decision: 'maybe' }).success).toBe(false)
+    expect(input?.safeParse({ ...valid, idempotencyKey: 'short' }).success).toBe(false)
+    expect(input?.safeParse({ ...valid, reason: 'r'.repeat(501) }).success).toBe(false)
+    expect(input?.safeParse({ approvalId: 'apr-1', decision: 'approve' }).success).toBe(false)
+    expect(revokeAction?.inputSchema.safeParse({ spaceRef: 'space-1', grantId: 'grant-1' }).success).toBe(true)
+    expect(revokeAction?.inputSchema.safeParse({ spaceRef: 'space-1' }).success).toBe(false)
+    expect(revokeAction?.inputSchema.safeParse({ spaceRef: 'space-1', grantId: 'g'.repeat(129) }).success).toBe(false)
+  })
+
+  it('registers the WS14-S7 room file actions and none of them is model-executable', () => {
+    const roomFileIds = ['space.files.attach', 'space.files.list', 'space.files.read_text', 'space.files.delete']
+    const ids = actionRegistry.map((action) => action.id)
+    const first = ids.indexOf(roomFileIds[0] as string)
+    expect(first).toBeGreaterThan(-1)
+    expect(ids.slice(first, first + roomFileIds.length)).toEqual(roomFileIds)
+    for (const id of roomFileIds) {
+      expect(isModelExecutableAction(id), id).toBe(false)
+    }
+    expect(getActionDescriptor('space.files.attach')?.ownerPlane).toBe('ingestion')
+    expect(getActionDescriptor('space.files.list')?.ownerPlane).toBe('data')
+    expect(getActionDescriptor('space.files.delete')?.risk).toBe('medium')
+    expect(
+      getActionDescriptor('space.files.list')?.inputSchema.safeParse({ spaceRef: 'space-1' }).success,
+    ).toBe(true)
+  })
+
   // P-SPA1 moved the spaces.* entries into per-workstream fragments under
   // domains/spaces/*.ts and spread them once. The move must not add, drop, rename
   // or reorder an id: the order is what the contract probes and the context pack read.
