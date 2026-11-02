@@ -140,3 +140,20 @@ Flags: none. Not verified: everything the soak measures.
 
 `cargo test -p session-core --bin session-core` (full, no DATABASE_URL): **698 passed, 0 failed, 275 ignored** (baseline 673 / 256: +25 passed, +19 ignored = the new pure tests and the 19 new Postgres tests: 11 trace + 8 external_content). With the scratch database all 19 new ignored tests pass; the neighbouring suites (dreaming 18, loop_checkpoint 32, zdr_receipt 17, grpc::tests 80) still pass `--ignored`.
 Commits: WS10.S6 `d37161870`; WS10.S5 registry row `278ecc850`; WS11.S7 session-core half `2d0c61d47`; S9 soak script + asks/depth `1f5ddd4bd`.
+
+## Batch 4
+
+## Slice WS11.S6: connector-first routing guidance (batch 4)
+
+Built (under `apps/Model Plane/rust/services/execution-core`):
+- `src/runtime_loop/agent.rs`: `routing_snippet(offered)` builds the guidance from the offered set (never names a tool that is not offered; names `browser_agent` only when offered); appended LAST to the prompt by `compose_system_prompt_with(offered, routing_guidance)`, which `compose_system_prompt` calls with `routing_guidance_enabled()`. Emitted only when the offered set holds `list_provider_actions` or `execute_provider_action` AND one of `web_search`, `web_fetch`, `web.search`, `web.read`, `browser.observe`, `browser.act`, `browser_agent`. `RoutingFirstTool` counts `execution_routing_first_tool_total{class}` (`connector`, `web`, `browser`, `other`) once per loop, for the first tool after discovery (`list_provider_actions` does not count), recorded in the pre-pass after the purpose-lock; it is emitted whether or not the guidance is on (when the offered set poses the question), so the flag-off baseline is measurable. `routing_probe_inputs` (`#[doc(hidden)] pub`) hands the probe the prompt and tool defs with the guidance forced on/off.
+- `tests/routing_probe.rs` NEW: a live `#[ignore]` A/B probe against inference-core (six prompts, N samples, off vs on, prints a table; the 90 percent gate is the plan's placeholder and is enforced only if `ROUTING_PROBE_MIN_PCT` is set) plus one always-on test that pins the probe table. `browser_agent` is not a chat-offered tool today, so the probe's browser route is `browser.observe`.
+
+Flag: `EXECUTION_CORE_ROUTING_GUIDANCE`, default **OFF** (only `1`/`true`/`on`). ASSUMED DECISION: the spec proposed default 1; the owner rule (new behaviour default off) wins, so the default is 0. Pinned by `routing_guidance_is_off_by_default_and_for_any_other_value` and `with_the_switch_off_the_prompt_is_unchanged` (byte-identical prompt).
+Flipping the switch while a run is parked changes `compose_system_prompt` for the resume, and the park resume compares a prompt digest (`prompt_digest_of`): see DEPTH.md.
+
+Tests (`CARGO_TARGET_DIR=C:/dev/mp-w2w3-target-D`, `CARGO_BUILD_JOBS=2`, from `apps/Model Plane/rust`):
+- `cargo test -p execution-core --lib routing_`: 6 passed (`routing_snippet_present_only_when_connector_and_web_tools_are_offered`, `routing_snippet_names_browser_agent_only_when_offered`, `prompt_stays_a_pure_function_of_the_offered_set`, `routing_counter_records_first_non_discovery_tool_class`, the two default-off pins). `prompt_stays_a_pure_function_of_the_offered_set` is a new test: the existing `composition_is_deterministic` is untouched.
+- `cargo test -p execution-core --lib system_prompt_composition`: 12 passed (the neighbouring prompt tests, switch off).
+- `cargo test -p execution-core --test routing_probe`: 1 passed, 1 ignored (the live probe).
+Not verified: the live probe (not run); the real compliance numbers; the counter against a Prometheus scrape.
