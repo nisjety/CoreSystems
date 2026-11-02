@@ -2,6 +2,25 @@ import { v } from "convex/values";
 import { action, internalMutation, internalQuery, mutation, query } from "./_generated/server";
 import { internal } from "./_generated/api";
 import { assertServiceKey, requireGatewayMember } from "./authz";
+import { isDmKind } from "./spaceParticipants";
+
+/**
+ * WS12-S2 legacy-path guard: agents are not bound inside a direct message. A DM
+ * is humans only with a roster fixed at registration (`agent_scope: none` in
+ * Control), and an agent subject is a membership Control would refuse anyway;
+ * refusing here keeps a binding row from existing at all. An unknown Space is
+ * left to the callers' existing behavior (this guard only refuses a DM).
+ * Throws `dm_agent_bind_refused`, which the gateway maps to 409.
+ */
+async function refuseDirectMessageSpace(ctx: any, spaceRef: string, externalOrgId: string) {
+  const space = await ctx.db
+    .query("spaces")
+    .withIndex("by_space_ref", (q: any) => q.eq("spaceRef", spaceRef))
+    .first();
+  if (space && space.externalOrgId === externalOrgId && isDmKind(space.kind)) {
+    throw new Error("dm_agent_bind_refused");
+  }
+}
 
 /**
  * Space agent bindings — the Application half of
@@ -345,6 +364,7 @@ export const upsertSpaceAgentBinding = internalMutation({
   handler: async (ctx, args) => {
     const subjectId = args.subjectId.trim();
     if (!subjectId) throw new Error("A Control subject id is required");
+    await refuseDirectMessageSpace(ctx, args.spaceRef, args.externalOrgId);
     // WS08-S5: the `group` trigger is retired. Rows that already carry it stay readable,
     // but no writer accepts it any more and nothing acts on it.
     if (args.triggerModes?.includes("group")) {
@@ -437,6 +457,7 @@ export const createSpaceAgentForGateway = mutation({
     const name = args.name.trim();
     const spaceRef = args.spaceRef.trim();
     if (!spaceRef) throw new Error("A Space reference is required");
+    await refuseDirectMessageSpace(ctx, spaceRef, args.externalOrgId);
     if (name.length < 2 || name.length > MAX_AGENT_NAME_LENGTH) {
       throw new Error("Agent name must be between 2 and 60 characters");
     }
@@ -554,6 +575,7 @@ export const bindExistingSpaceAgentForGateway = mutation({
 
     const spaceRef = args.spaceRef.trim();
     if (!spaceRef) throw new Error("A Space reference is required");
+    await refuseDirectMessageSpace(ctx, spaceRef, args.externalOrgId);
     const definition = await ctx.db.get(args.agentId);
     if (!definition || (definition as any).orgId !== organization._id) {
       throw new Error("Agent definition not found");

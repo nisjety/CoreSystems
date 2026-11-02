@@ -162,6 +162,10 @@ services:
             CONTROL_SPACE_AUDIENCE_URL: ${CONTROL_SPACE_AUDIENCE_URL:-http://user-core:3012/api/v1/internal/spaces/recipient-audiences}
             APPLICATION_SPACE_AUDIENCE_TOKEN: ${APPLICATION_SPACE_AUDIENCE_TOKEN:-${APPLICATION_SPACE_LIFECYCLE_TOKEN:-}}
             SPACE_AUDIENCE_RECONCILE: ${SPACE_AUDIENCE_RECONCILE:-1}
+            # WS12-S2 flag SPACE_DM_OPEN: open-or-return a direct message. Off
+            # by default everywhere; needs SPACE_AUDIENCE_RECONCILE on and
+            # Control's SPACE_DM_REGISTRATION + dm_create_entitled first.
+            SPACE_DM_OPEN: ${SPACE_DM_OPEN:-0}
         volumes:
             # `npx convex dev` (startup.sh) only pushes what it can see. Without this
             # mount /app/convex is the snapshot baked at image-build time, so every

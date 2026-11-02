@@ -67,6 +67,11 @@ export const deliverOne = internalAction({
 	          lifecycle: claimed.event.lifecycle,
           lifecycle_revision: claimed.event.revision,
           owner_principal_id: claimed.space.ownerPrincipalId,
+          // WS12-S2: present for direct-message kinds only. Control recomputes the
+          // hash and refuses a mismatch; JSON.stringify omits the undefined pair
+          // for every other kind.
+          participants: claimed.space.participantExternalAuthIds,
+          participant_hash: claimed.space.participantHash,
         }),
       });
     } catch {

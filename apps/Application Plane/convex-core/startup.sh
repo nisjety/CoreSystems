@@ -124,6 +124,12 @@ set_convex_env "SPACE_ORG_ROOM_RECONCILE" "${SPACE_ORG_ROOM_RECONCILE:-0}"
 set_convex_env "CONTROL_SPACE_AUDIENCE_URL" "${CONTROL_SPACE_AUDIENCE_URL:-http://user-core:3012/api/v1/internal/spaces/recipient-audiences}"
 set_convex_env "APPLICATION_SPACE_AUDIENCE_TOKEN" "${APPLICATION_SPACE_AUDIENCE_TOKEN:-${APPLICATION_SPACE_LIFECYCLE_TOKEN:-}}"
 set_convex_env "SPACE_AUDIENCE_RECONCILE" "${SPACE_AUDIENCE_RECONCILE:-0}"
+# WS12-S2 flag SPACE_DM_OPEN: spaces:openDmForGateway (open-or-return a direct
+# message). Off unless a compose file turns it on; read by the function at call
+# time, so set 0 and `docker restart convex-gateway` to stop new DMs (existing
+# DMs and hides are unaffected). A rollout control only, never an authorization
+# input. DMs also need WS04-S5's audience registration on (SPACE_AUDIENCE_RECONCILE).
+set_convex_env "SPACE_DM_OPEN" "${SPACE_DM_OPEN:-0}"
 
 # ─────────────────────────────────────────────────────────────────────────
 # Force-deploy functions before starting dev mode.

@@ -54,8 +54,19 @@ export const spaceTables = {
       v.literal("room"),
       v.literal("project"),
       v.literal("case"),
+      // WS12-S2: a direct message (2 people) or group DM (3 to 9). The roster is
+      // fixed at registration and identified by `participantHash`.
+      v.literal("dm"),
+      v.literal("group_dm"),
     ),
     name: v.string(),
+    // WS12-S2: DM kinds only. Sorted (byte order) Better Auth ids of the fixed
+    // roster, creator included, and the "sha256:" hash of that set
+    // (`convex/spaceParticipants.ts`, equal to Control's ParticipantSetHash).
+    // Identity facts for open-or-return and the registration payload, never an
+    // authorization input: Control's membership ledger decides access.
+    participantHash: v.optional(v.string()),
+    participantExternalAuthIds: v.optional(v.array(v.string())),
     // WS04-S2: a short label shown under the room name. Never composed into a
     // prompt, event or notification (D-WS04-6); optional so existing rooms
     // need no backfill.
@@ -93,7 +104,8 @@ export const spaceTables = {
   })
     .index("by_space_ref", ["spaceRef"])
     .index("by_external_org", ["externalOrgId"])
-    .index("by_personal_owner", ["externalOrgId", "kind", "ownerExternalAuthId"]),
+    .index("by_personal_owner", ["externalOrgId", "kind", "ownerExternalAuthId"])
+    .index("by_org_participant_hash", ["externalOrgId", "participantHash"]),
 
   // An agent definition bound to ONE Space, per
   // `docs/SPACE_AGENT_SCOPE_PLAN_2026-08-14.md` §3.2. The plan's central rule is
@@ -301,6 +313,20 @@ export const spaceTables = {
   })
     .index("by_space", ["spaceRef"])
     .index("by_space_and_subject", ["spaceRef", "externalAuthId"]),
+
+  // WS12-S2: a person's per-viewer hide of a direct message (see
+  // `convex/spaceDmHides.ts`). Ids and a timestamp only. Presentation state like
+  // a read marker: it never touches Control membership, and any accepted post in
+  // the DM clears every viewer's row so the DM resurfaces.
+  spaceDmHides: defineTable({
+    externalOrgId: v.string(),
+    spaceRef: v.string(),
+    externalAuthId: v.string(),
+    hiddenAt: v.number(),
+  })
+    .index("by_viewer", ["externalOrgId", "externalAuthId"])
+    .index("by_space", ["spaceRef"])
+    .index("by_space_and_viewer", ["spaceRef", "externalAuthId"]),
 
   // WS04-S1: one row per organization with a debounced room-roster sync queued
   // or running (see `convex/spaceMembershipSync.ts`). Holds an org id and a
