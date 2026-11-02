@@ -1070,6 +1070,7 @@ export const ERROR_COPY: Record<string, ErrorCopy> = {
   // WS05 org security
 
   // WS13 message search
+  entry_not_found: { no: 'Denne meldingen er ikke tilgjengelig for deg.', en: 'This message is not available to you.' },
   invalid_cursor: { no: 'Søkesiden er ikke gyldig lenger. Søk på nytt.', en: 'That page of results is no longer valid. Search again.' },
   invalid_filter: { no: 'Søkeavgrensningen er ikke gyldig. Velg omfanget på nytt og prøv igjen.', en: 'The search filter is not valid. Choose the scope again and try again.' },
   search_busy: { no: 'Søket er opptatt akkurat nå. Prøv igjen om litt.', en: 'Search is busy right now. Try again shortly.', retryable: true },

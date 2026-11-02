@@ -35,6 +35,7 @@ const KnowledgePage = lazy(() => import('@/features/knowledge/components/Knowled
 const SharedWithMePage = lazy(() => import('@/features/knowledge/components/SharedWithMePage'))
 const SpacePage = lazy(() => import('@/features/spaces/components/SpacePage'))
 const SpacesIndexPage = lazy(() => import('@/features/spaces/components/SpacesIndexPage'))
+const SpaceEntryRedirect = lazy(() => import('@/features/spaces/components/SpaceEntryRedirect'))
 const AttentionPage = lazy(() => import('@/features/attention/components/AttentionPage'))
 const LeadsPage = lazy(() => import('@/features/leads/components/LeadsPage'))
 const AnbudPage = lazy(() => import('@/features/anbud/components/AnbudPage'))
@@ -198,6 +199,7 @@ export const Router = createRouter({
         { path: '/attention', component: AttentionPage },
         { path: '/spaces', component: SpacesIndexPage },
         { path: '/spaces/:spaceId', component: SpacePage },
+        { path: '/spaces/:spaceId/m/:messageId', component: SpaceEntryRedirect },
         { path: '/studio', component: () => <StudioPage section="canvas" /> },
         { path: '/studio/canvas', component: () => <StudioPage section="canvas" /> },
         { path: '/studio/campaigns', component: () => <StudioPage section="campaigns" /> },
