@@ -8,6 +8,7 @@ import {
   cancelInvocation,
   resumeStream,
   streamChat,
+  type ChatAttachment,
   type ChatErrorEvent,
   type ChatStreamHandlers,
 } from '@/shared/api/chat-client'
@@ -175,6 +176,12 @@ export interface SpaceSendInput {
   /** The viewer's interface language, sent as a request-scoped hint (WS16-S6). */
   readonly locale?: 'no' | 'en'
   readonly skills: readonly Skill[]
+  /**
+   * Images (and staged sandbox files) for this one turn, already read by the composer (WS14-S8).
+   * Document text is not here: it rides inside `content` under the labelled fence. The room stores
+   * none of it; a zero-retention turn is refused by the gateway with the typed refusal.
+   */
+  readonly attachments?: readonly ChatAttachment[]
   /** Set when the message continues an existing room thread. */
   readonly replyThreadId?: string
   /**
@@ -217,6 +224,7 @@ const askStrategy: SpaceSendStrategy = async (run) => {
   await streamChat(
     {
       content: input.content,
+      attachments: input.attachments && input.attachments.length > 0 ? [...input.attachments] : undefined,
       model: modelSelection.model,
       provider: modelSelection.provider === OPENAI_CODEX_SUBSCRIPTION_PROVIDER
         ? modelSelection.provider

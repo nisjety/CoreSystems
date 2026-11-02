@@ -9,6 +9,7 @@ import { useI18n } from '@/shared/i18n'
 import { AgentAvatar } from '../AgentAvatar'
 import { SpaceIdentityHoverCard } from '../SpaceIdentityHoverCard'
 import { agentAvatarColor, agentForName, memberTint } from '../../lib/agent-avatar'
+import { splitRoomMessage } from '../../lib/room-attachments'
 import { agentCardModel, memberCardModel } from '../../lib/agent-activity'
 import type { IdentityCardModel } from '../../lib/agent-activity'
 import { continuesTurnGroup, formatTurnTime } from '../../lib/space-thread-presentation'
@@ -257,7 +258,20 @@ export function SpaceTurnList(props: SpaceTurnListProps) {
               </Show>
               <Show
                 when={turn.role === 'assistant'}
-                fallback={<p class="verevon-room-turn__plain">{turn.content}</p>}
+                fallback={
+                  <>
+                    <p class="verevon-room-turn__plain">{splitRoomMessage(turn.content).text}</p>
+                    {/* A turn that carried per-turn files (WS14-S8): the words, then one chip per file
+                        by name. The fenced text stays in the stored message and is not shown here. */}
+                    <Show when={splitRoomMessage(turn.content).files.length > 0}>
+                      <ul class="verevon-space-attachment-chips" aria-label={i18n.tr('Vedlegg', 'Attachments')}>
+                        <For each={splitRoomMessage(turn.content).files}>
+                          {(file) => <li class="verevon-space-attachment-chip" title={`${file.content.length} ${i18n.tr('tegn', 'characters')}`}>{file.name}</li>}
+                        </For>
+                      </ul>
+                    </Show>
+                  </>
+                }
               >
                 <Show when={turn.content}>
                   <div class="verevon-room-turn__markdown">

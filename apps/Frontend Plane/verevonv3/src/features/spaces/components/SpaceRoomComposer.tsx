@@ -3,7 +3,22 @@ import { createMemo, createSignal, For, onCleanup, Show } from 'solid-js'
 import { ChatMarkdown } from '@/features/chat/components/ChatMessages'
 import type { ChatArtifact } from '@/features/chat/components/chat-types'
 import { listAvailableSkills, MAX_PICKED_SKILLS, type Skill } from '@/shared/api/skills-client'
-import { WandSparkles } from '@/shared/icons'
+import { Paperclip, WandSparkles } from '@/shared/icons'
+import { ATTACHMENT_ACCEPT, ATTACHMENT_MAX_IMAGES, isImageAttachment, type AttachmentPolicyContext, visionAsPartsEnabled } from '@/features/chat/lib/attachment-policy'
+import { isLocalRetentionAllowed } from '@/features/chat/lib/chat-retention'
+import { getAttachmentPolicy, modelSupportsVision, type ModelInfo } from '@/shared/api/chat-client'
+import {
+  formatChipSize,
+  pastedImageFiles,
+  pastedTextFile,
+  pasteBecomesAttachment,
+  prepareRoomTurn,
+  revokeRoomAttachment,
+  splitRoomMessage,
+  toRoomAttachment,
+  vetRoomAttachments,
+  type RoomAttachment,
+} from '../lib/room-attachments'
 import {
   SPACE_POST_MAX_CHARS_DEFAULT,
   type SpaceAgent,
@@ -198,6 +213,17 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
   // The member's own pick between Send and Ask; `effectiveMode` below is what the box does.
   const [pickedMode, setPickedMode] = createSignal<SpaceComposerModeId | undefined>(undefined)
   const [zdrRefused, setZdrRefused] = createSignal(false)
+  // Per-turn attachments (WS14-S8). In memory only: chips hold object URLs that are revoked on
+  // removal, on a clean send and on unmount; nothing is written to browser storage or to the room.
+  // `features.turn_attachments` (gateway `space_turn_attachments_ui`) switches the whole surface;
+  // off, the box has no attach button and ignores paste and drop exactly as before.
+  const [files, setFiles] = createSignal<readonly RoomAttachment[]>([])
+  const [attachNotice, setAttachNotice] = createSignal<string | undefined>(undefined)
+  const [dragActive, setDragActive] = createSignal(false)
+  const [preparing, setPreparing] = createSignal(false)
+  const attachFlagOn = () =>
+    spaceRoomFeatureWithDevOverride('turn_attachments', import.meta.env.VITE_SPACE_TURN_ATTACHMENTS)
+  let fileInputRef: HTMLInputElement | undefined
   let textareaRef: HTMLTextAreaElement | undefined
   // What to clear once the in-flight turn is accepted; set only while drafts keep the words in the box.
   let acceptSend: (() => void) | undefined
@@ -299,6 +325,73 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
     return entry?.stage === 'failed' ? entry : undefined
   }
   const overLimit = () => effectiveMode() === 'post' && postLength(text().trim()) > postMax()
+
+  // Per-turn attachments ride a turn for the agent only. A human post is a durable message of the
+  // member's own words, so files never go with one; durable room files are the Files tab (WS14-S9).
+  const attachAvailable = () => attachFlagOn() && effectiveMode() === 'ask' && !roleBlocked()
+  // The model catalogue, for the vision check only. It is the same request the picker and a send
+  // already share; read at mount and only when images ride as parts of the turn.
+  const [catalogueModels, setCatalogueModels] = createSignal<readonly ModelInfo[] | undefined>(undefined)
+  if (visionAsPartsEnabled()) {
+    void privacyTiers.catalogue().then(setCatalogueModels, () => undefined)
+  }
+  const selectedCatalogModel = () => {
+    const picked = selectedModel()
+    return catalogueModels()?.find((model) => model.id === picked.model && model.provider === picked.provider)
+  }
+  // What this turn can carry as configured right now; read at pick time and again at send, because
+  // the model, the route and the retention verdict can change after a chip is added.
+  const attachmentPolicyContext = (): AttachmentPolicyContext => ({
+    subscriptionBacked: selectedModel().provider === OPENAI_CODEX_SUBSCRIPTION_PROVIDER,
+    planMode: false,
+    // A room has no Temporary chat; a zero-retention workspace or a refused post closes images.
+    zdr: zdrRefused() || !isLocalRetentionAllowed(),
+    currentImageCount: files().filter(isImageAttachment).length,
+    currentTotalBytes: files().reduce((total, file) => total + file.size, 0),
+    imageParts: visionAsPartsEnabled()
+      ? {
+          modelReadsImages: modelSupportsVision(selectedCatalogModel(), getAttachmentPolicy(), {
+            verevonMode: !selectedCatalogModel(),
+          }),
+          visionModelName: catalogueModels()?.find((model) => modelSupportsVision(model, undefined))?.name,
+          maxImages: getAttachmentPolicy()?.maxImages ?? ATTACHMENT_MAX_IMAGES,
+        }
+      : undefined,
+  })
+  function addFiles(incoming: readonly File[]): void {
+    if (!attachAvailable() || incoming.length === 0) return
+    const verdict = vetRoomAttachments(incoming, attachmentPolicyContext(), files().length, i18n.tr)
+    setAttachNotice(verdict.messages.length > 0 ? verdict.messages.join(' ') : undefined)
+    if (verdict.accepted.length === 0) return
+    setFiles((current) => [...current, ...verdict.accepted.map((file, index) => toRoomAttachment(file, index))])
+  }
+  function removeFile(id: string): void {
+    setFiles((current) => {
+      const gone = current.find((file) => file.id === id)
+      if (gone) revokeRoomAttachment(gone)
+      return current.filter((file) => file.id !== id)
+    })
+    setAttachNotice(undefined)
+  }
+  function clearFiles(): void {
+    for (const file of files()) revokeRoomAttachment(file)
+    setFiles([])
+  }
+  onCleanup(clearFiles)
+  function handlePaste(event: ClipboardEvent): void {
+    if (!attachAvailable()) return
+    const images = pastedImageFiles(event.clipboardData)
+    if (images.length > 0) {
+      event.preventDefault()
+      addFiles(images)
+      return
+    }
+    const pasted = event.clipboardData?.getData('text/plain') ?? ''
+    if (pasteBecomesAttachment(pasted)) {
+      event.preventDefault()
+      addFiles([pastedTextFile(pasted, i18n.tr('Limt inn tekst', 'Pasted text'))])
+    }
+  }
 
   // Threads the server currently reports as working in this room, minus the
   // one this browser is streaming itself (that one has its own indicator in
@@ -510,17 +603,50 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
     if (!content || nothingOffered()) return
     if (effectiveMode() === 'post') {
       if (submitting() || postBusy() || overLimit()) return
+      if (files().length > 0) {
+        setAttachNotice(i18n.tr(
+          'Vedlegg følger bare med når du spør Verevon. Fjern dem eller bytt til Spør Verevon.',
+          'Attachments only go with Ask Verevon. Remove them or switch to Ask Verevon.',
+        ))
+        return
+      }
       closePicker()
       await postSender.send({ content, replyThreadId: props.replyTarget?.()?.threadId })
       return
     }
-    if (submitting() || postBusy() || blockedByApproval() || subscriptionIncompatible()) return
+    if (submitting() || preparing() || postBusy() || blockedByApproval() || subscriptionIncompatible()) return
+
+    // Read every chip before anything is cleared or sent. A file the turn can no longer carry
+    // (the route, the model or the retention verdict changed since it was added) or one that cannot
+    // be read whole stops the send with its reason; the words and the chips stay.
+    let sendContent = content
+    let sendAttachments: Awaited<ReturnType<typeof prepareRoomTurn>>['attachments'] = []
+    if (files().length > 0) {
+      const verdict = vetRoomAttachments(files(), { ...attachmentPolicyContext(), currentImageCount: 0, currentTotalBytes: 0 }, 0, i18n.tr)
+      if (verdict.messages.length > 0) {
+        setAttachNotice(`${verdict.messages.join(' ')} ${i18n.tr('Fjern filen og send på nytt. Utkastet er beholdt.', 'Remove the file and send again. Your draft has been kept.')}`)
+        return
+      }
+      setPreparing(true)
+      try {
+        const prepared = await prepareRoomTurn(content, files())
+        sendContent = prepared.content
+        sendAttachments = prepared.attachments
+        setAttachNotice(undefined)
+      } catch (error) {
+        setAttachNotice(error instanceof Error ? error.message : i18n.tr('Kunne ikke lese vedleggene.', 'Could not read the attachments.'))
+        return
+      } finally {
+        setPreparing(false)
+      }
+    }
 
     closePicker()
     // A post that failed earlier and is now being asked instead is not retried behind the new send.
     postSender.discard()
     const input = {
-      content,
+      content: sendContent,
+      attachments: sendAttachments,
       mode: 'ask' as const,
       model: selectedModel(),
       mentionedAgentRef: mentionedAgentRef(),
@@ -537,6 +663,7 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
         discardDraft()
         setMentionedAgentRef(undefined)
         setPickedSkills([])
+        clearFiles()
       }
     }
     const sent = pipeline.send(input)
@@ -544,6 +671,7 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
       setText('')
       setMentionedAgentRef(undefined)
       setPickedSkills([])
+      clearFiles()
     }
     await sent
   }
@@ -559,7 +687,7 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
     setMode: setPickedMode,
     modes: offeredModes,
     inThread,
-    disabled: () => submitting() || blockedByApproval() || postBusy(),
+    disabled: () => submitting() || preparing() || blockedByApproval() || postBusy(),
     text,
     setText,
     focus: () => textareaRef?.focus(),
@@ -574,8 +702,15 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
           <div class="verevon-space-room-exchange" role="log" aria-live="polite">
             <p class="verevon-space-room-exchange__user">
               <span class="verevon-space-room-exchange__speaker">{i18n.tr('Du', 'You')}</span>
-              {current().userContent}
+              {splitRoomMessage(current().userContent).text}
             </p>
+            <Show when={splitRoomMessage(current().userContent).files.length > 0}>
+              <ul class="verevon-space-attachment-chips" aria-label={i18n.tr('Vedlegg', 'Attachments')}>
+                <For each={splitRoomMessage(current().userContent).files}>
+                  {(file) => <li class="verevon-space-attachment-chip">{file.name}</li>}
+                </For>
+              </ul>
+            </Show>
             <div
               class={[
                 'verevon-space-room-exchange__assistant',
@@ -706,7 +841,25 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
 
       <SpaceConnectivityBanner />
 
-      <form onSubmit={(event) => { event.preventDefault(); void submitMessage() }}>
+      <form
+        onSubmit={(event) => { event.preventDefault(); void submitMessage() }}
+        onDragOver={(event) => {
+          if (!attachAvailable() || !event.dataTransfer?.types.includes('Files')) return
+          event.preventDefault()
+          setDragActive(true)
+        }}
+        onDragLeave={(event) => {
+          if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDragActive(false)
+        }}
+        onDrop={(event) => {
+          const dropped = Array.from(event.dataTransfer?.files ?? [])
+          setDragActive(false)
+          if (!attachAvailable() || dropped.length === 0) return
+          event.preventDefault()
+          addFiles(dropped)
+        }}
+        data-drop-active={dragActive() ? 'true' : undefined}
+      >
         <Show when={inThread() ? undefined : props.replyTarget?.()}>
           {(target) => (
             <p class="verevon-space-room-composer__reply">
@@ -810,10 +963,62 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
             </Show>
           </ul>
         </Show>
+        <Show when={attachAvailable()}>
+          <div class="verevon-space-attachments">
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept={ATTACHMENT_ACCEPT}
+              multiple
+              class="sr-only"
+              aria-label={i18n.tr('Legg til filer', 'Add files')}
+              onChange={(event) => {
+                if (event.currentTarget.files) addFiles(Array.from(event.currentTarget.files))
+                event.currentTarget.value = ''
+              }}
+            />
+            <button
+              type="button"
+              class="verevon-space-attachments__add"
+              disabled={submitting() || preparing() || postBusy() || blockedByApproval()}
+              aria-label={i18n.tr('Legg ved fil', 'Attach a file')}
+              title={i18n.tr('Legg ved fil', 'Attach a file')}
+              onClick={() => fileInputRef?.click()}
+            >
+              <Paperclip aria-hidden="true" />
+            </button>
+            <Show when={files().length > 0}>
+              <ul class="verevon-space-attachment-chips" aria-label={i18n.tr('Vedlegg', 'Attachments')}>
+                <For each={files()}>
+                  {(file) => (
+                    <li class="verevon-space-attachment-chip" data-kind={isImageAttachment(file) ? 'image' : 'document'}>
+                      <span class="verevon-space-attachment-chip__name">{file.name}</span>
+                      <span class="verevon-space-attachment-chip__size">{formatChipSize(file.size)}</span>
+                      <button
+                        type="button"
+                        disabled={submitting() || preparing()}
+                        aria-label={`${i18n.tr('Fjern', 'Remove')} ${file.name}`}
+                        onClick={() => removeFile(file.id)}
+                      >
+                        ✕
+                      </button>
+                    </li>
+                  )}
+                </For>
+              </ul>
+            </Show>
+          </div>
+        </Show>
+        <Show when={attachNotice()}>
+          {(notice) => (
+            <p class="verevon-space-room-composer__blocked" role="alert">{notice()}</p>
+          )}
+        </Show>
         <textarea
           ref={textareaRef}
           value={text()}
           onInput={handleInput}
+          onPaste={handlePaste}
           onKeyDown={handleKeyDown}
           aria-controls={pickerOpen() ? pickerId : undefined}
           aria-activedescendant={pickerItems().length > 0 ? `${pickerId}-${activeIndex()}` : undefined}
@@ -844,7 +1049,7 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
                     )
           }
           rows={2}
-          disabled={submitting() || blockedByApproval() || postBusy() || roleBlocked()}
+          disabled={submitting() || preparing() || blockedByApproval() || postBusy() || roleBlocked()}
         />
         {/* A human post that did not land (WS01-S6). The text is still in the box; Retry repeats
             the same send under its own key, so a post whose answer was lost lands once. */}
@@ -897,7 +1102,7 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
         <button
           type="submit"
           disabled={
-            submitting() || blockedByApproval() || subscriptionIncompatible() || !text().trim()
+            submitting() || preparing() || blockedByApproval() || subscriptionIncompatible() || !text().trim()
             || postBusy() || roleBlocked() || nothingOffered() || overLimit()
           }
         >

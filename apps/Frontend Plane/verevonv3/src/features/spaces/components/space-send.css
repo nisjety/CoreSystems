@@ -77,3 +77,88 @@
 .dark .verevon-room-pending__state[data-stage="failed"] {
   color: #f0968f;
 }
+
+/* Per-turn attachments (WS14-S8): the attach button, the chips under the box and on a sent turn. */
+.verevon-space-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.verevon-space-attachments__add {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--verevon-border);
+  border-radius: 8px;
+  background: var(--verevon-surface);
+  padding: 4px 6px;
+  color: var(--verevon-text-muted);
+  cursor: pointer;
+}
+
+.verevon-space-attachments__add svg {
+  width: 16px;
+  height: 16px;
+}
+
+.verevon-space-attachments__add:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.verevon-space-attachments__add:focus-visible {
+  outline: 2px solid var(--verevon-accent, currentColor);
+  outline-offset: 1px;
+}
+
+.verevon-space-attachment-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 4px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.verevon-space-attachments .verevon-space-attachment-chips {
+  margin: 0;
+}
+
+.verevon-space-attachment-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  border: 1px solid var(--verevon-border);
+  border-radius: 999px;
+  background: var(--verevon-surface);
+  padding: 2px 10px;
+  color: var(--verevon-text);
+  font-size: 12px;
+}
+
+.verevon-space-attachment-chip__name {
+  overflow: hidden;
+  max-width: 28ch;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.verevon-space-attachment-chip__size {
+  color: var(--verevon-text-muted);
+}
+
+.verevon-space-attachment-chip button {
+  border: 0;
+  background: transparent;
+  padding: 0 2px;
+  color: var(--verevon-text-muted);
+  cursor: pointer;
+}
+
+.verevon-space-room-composer form[data-drop-active="true"] {
+  outline: 2px dashed var(--verevon-accent, currentColor);
+  outline-offset: 2px;
+}
