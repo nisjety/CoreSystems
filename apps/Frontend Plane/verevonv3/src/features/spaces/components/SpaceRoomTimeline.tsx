@@ -32,6 +32,10 @@ import type { SpaceJournalEntry } from '../lib/space-send-journal'
 import { spaceRoomFeatureWithDevOverride } from '../lib/space-room-features'
 import { postPosition } from '../lib/timeline-anchor'
 import { startAnchoring } from '../lib/timeline-anchor-dom'
+import type { SpaceTimelineStore } from '../lib/space-timeline-store'
+import { threadRevision } from '../lib/space-timeline-store'
+import { createVisibilityWatcher } from '../lib/post-visibility'
+import type { PostWatcher } from '../lib/post-visibility'
 import './space-timeline.css'
 import { SpaceArtifactChip } from './SpaceArtifactChip'
 import { SpaceArtifactSheet } from './SpaceArtifactSheet'
@@ -144,6 +148,12 @@ export interface SpaceRoomTimelineProps {
    * exactly as before. A rollout answer, never an authorization.
    */
   readonly agentWork?: () => SpaceAgentWork | undefined
+  /**
+   * The windowed timeline store (WS15-S8, `features.timeline_windows`). With it, posts are the store's
+   * pages ("Load earlier", the pinned shelf), and a post's transcript tail is read lazily when the post
+   * is near the viewport. Absent: the whole listing is drawn and every transcript is read, as before.
+   */
+  readonly timeline?: SpaceTimelineStore
 }
 
 /**
@@ -189,11 +199,15 @@ export function SpaceRoomTimeline(props: SpaceRoomTimelineProps) {
   // reader who cannot see it. A listing for another room, or the first one, is a baseline, not news.
   let narratedRef: string | undefined
   let narratedThreads: readonly SpaceThread[] | undefined
+  let narratedEpoch = 0
   createEffect(
-    () => ({ ref: props.spaceRef, threads: props.threads() }),
-    ({ ref, threads }) => {
-      const prev = narratedRef === ref ? narratedThreads : undefined
+    // The epoch moves when the window grows at the top or is trimmed: posts that appear then are older
+    // posts the reader paged to, not news.
+    () => ({ ref: props.spaceRef, threads: props.threads(), epoch: props.timeline?.windowVersion() ?? 0 }),
+    ({ ref, threads, epoch }) => {
+      const prev = narratedRef === ref && narratedEpoch === epoch ? narratedThreads : undefined
       narratedRef = ref
+      narratedEpoch = epoch
       narratedThreads = threads
       if (!prev) return
       const roster = props.roster()
@@ -244,6 +258,30 @@ export function SpaceRoomTimeline(props: SpaceRoomTimelineProps) {
   let runTick: (() => void) | undefined
   let ownSendPending = false
   let ownSendTimer: ReturnType<typeof setTimeout> | undefined
+
+  // ── Windowed timeline (WS15-S8) ──────────────────────────────────────────────────────────────────
+  // One observer for every post: a post within ~600px of the scroll root asks for its transcript tail,
+  // and the top sentinel pages older posts once the reader has scrolled up on their own.
+  const watcher: PostWatcher = createVisibilityWatcher(() => listEl, '600px 0px')
+  onCleanup(() => watcher.dispose())
+  let readerScrolledUp = false
+  let lastScrollTop = 0
+  function noteScroll(element: HTMLElement): void {
+    const top = element.scrollTop
+    if (top < lastScrollTop - 1) readerScrolledUp = true
+    lastScrollTop = top
+  }
+  let sentinelEl: HTMLLIElement | undefined
+  createEffect(
+    () => ({ el: sentinelEl, store: props.timeline, more: props.timeline?.hasEarlier() === true }),
+    ({ el, store, more }) => {
+      if (!el || !store || !more) return undefined
+      return watcher.observe(el, (near) => {
+        if (near && readerScrolledUp) void store.loadEarlier().catch(() => undefined)
+      })
+    },
+  )
+  const loadingMore = () => props.timeline?.loadingMore() ?? 'idle'
 
   const reduceMotion = () =>
     typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches
@@ -321,7 +359,55 @@ export function SpaceRoomTimeline(props: SpaceRoomTimelineProps) {
         ref={(element) => { listEl = element }}
         data-anchored={anchored() ? '' : undefined}
         aria-label={i18n.tr('Samtaler i rommet', 'Room conversations')}
+        onScroll={(event) => noteScroll(event.currentTarget)}
       >
+        <Show when={(props.timeline?.pinnedShelf().length ?? 0) > 0}>
+          <li class="verevon-room-shelf-item" role="presentation">
+            <section class="verevon-room-shelf" aria-label={i18n.tr('Festede innlegg', 'Pinned posts')}>
+              <h3 class="verevon-room-shelf__title">
+                <Pin size={12} aria-hidden="true" />
+                {i18n.tr('Festede innlegg', 'Pinned posts')}
+              </h3>
+              <ul class="verevon-room-shelf__list">
+                <For each={props.timeline?.pinnedShelf() ?? []}>
+                  {(pinned) => (
+                    <li>
+                      <button
+                        type="button"
+                        class="verevon-room-shelf__row"
+                        disabled={!props.onOpenThread}
+                        onClick={() => props.onOpenThread?.(pinned)}
+                      >
+                        {pinned.title?.trim()
+                          || (pinned.preview ? stripMarkdownPreview(pinned.preview) : '')
+                          || i18n.tr('Festet innlegg', 'Pinned post')}
+                      </button>
+                    </li>
+                  )}
+                </For>
+              </ul>
+            </section>
+          </li>
+        </Show>
+        <Show when={props.timeline?.hasEarlier() === true}>
+          <li class="verevon-room-earlier-item" role="presentation" ref={(element) => { sentinelEl = element }}>
+            <button
+              type="button"
+              class="verevon-room-earlier"
+              disabled={loadingMore() === 'earlier'}
+              onClick={() => { void props.timeline?.loadEarlier().catch(() => undefined) }}
+            >
+              {loadingMore() === 'earlier'
+                ? i18n.tr('Laster tidligere innlegg …', 'Loading earlier posts…')
+                : (props.timeline?.unloadedBefore() ?? 0) > 0
+                  ? i18n.tr(
+                      `Last inn tidligere innlegg (${props.timeline?.unloadedBefore()})`,
+                      `Load earlier posts (${props.timeline?.unloadedBefore()})`,
+                    )
+                  : i18n.tr('Last inn tidligere innlegg', 'Load earlier posts')}
+            </button>
+          </li>
+        </Show>
         <For each={orderedThreads()}>
           {(thread, index) => (
             <>
@@ -339,7 +425,9 @@ export function SpaceRoomTimeline(props: SpaceRoomTimelineProps) {
             <SpaceRoomPost
               spaceRef={props.spaceRef}
               thread={thread}
-              position={anchored() ? postPosition(index(), orderedThreads().length) : undefined}
+              position={anchored() ? postPosition(index(), orderedThreads().length, props.timeline?.unloadedBefore()) : undefined}
+              timeline={props.timeline}
+              watch={watcher.observe}
               threads={props.threads}
               roster={props.roster}
               viewerSubjectId={props.viewerSubjectId}
@@ -363,6 +451,20 @@ export function SpaceRoomTimeline(props: SpaceRoomTimelineProps) {
             </>
           )}
         </For>
+        <Show when={props.timeline?.hasNewer() === true}>
+          <li class="verevon-room-earlier-item" role="presentation">
+            <button
+              type="button"
+              class="verevon-room-earlier"
+              disabled={loadingMore() === 'later'}
+              onClick={() => { void props.timeline?.loadLater().catch(() => undefined) }}
+            >
+              {loadingMore() === 'later'
+                ? i18n.tr('Laster nyere innlegg …', 'Loading newer posts…')
+                : i18n.tr('Last inn nyere innlegg', 'Load newer posts')}
+            </button>
+          </li>
+        </Show>
         <For each={pendingNewPosts()}>{(entry) => <SpacePendingNewPost entry={entry} />}</For>
         {/* The jump pill: sticks to the bottom edge of the list while the reader is scrolled up. */}
         <Show when={anchored() && jumpVisible()}>
@@ -420,15 +522,19 @@ function SpaceRoomPost(props: {
   readonly pendingReplies?: () => readonly SpaceJournalEntry[]
   /** Collapse a long thread to first + last three and show the reply count (needs the pane). */
   readonly collapse?: () => boolean
+  /** The windowed store (WS15-S8): the transcript tail is read lazily through it instead of per post. */
+  readonly timeline?: SpaceTimelineStore
+  /** Watches this post's element against the scroll root; the store hears when it is near. */
+  readonly watch?: PostWatcher['observe']
 }) {
   const i18n = useI18n()
-  const [transcript, { refetch: refetchTranscript }] = createResource(
+  const [legacyTranscript, { refetch: refetchLegacyTranscript }] = createResource(
     // The revision suffix keeps a settled reply visible: refetching the thread
     // list bumps updated_at, which re-keys this source and refetches the
     // transcript for exactly the post that changed. NUL-joined because thread
     // ids may themselves contain any printable character, including spaces.
     // `undefined` (shared read unavailable) makes no request at all.
-    () => props.transcriptEnabled()
+    () => props.transcriptEnabled() && !props.timeline
       ? `${props.spaceRef}\u0000${props.thread.thread_id}\u0000${props.thread.updated_at ?? props.thread.latest_run_updated_at ?? ''}`
       : undefined,
     async (key) => {
@@ -451,6 +557,52 @@ function SpaceRoomPost(props: {
       return { state: load.state, turns: [] as readonly TranscriptTurn[], denial }
     },
   )
+  // Windowed: the store holds the post's first turn plus its newest turns, read when the post is near the
+  // viewport. Otherwise the per-post resource above holds the whole conversation.
+  type TranscriptView = {
+    readonly state: 'ok' | 'restricted' | 'missing' | 'error'
+    readonly turns: readonly TranscriptTurn[]
+    readonly denial?: unknown
+  }
+  const transcript = (): TranscriptView | undefined => {
+    const store = props.timeline
+    if (!store) return legacyTranscript()
+    const entry = store.transcript(props.thread.thread_id)
+    return entry && entry.rev !== '' ? entry : undefined
+  }
+  const transcriptLoading = (): boolean =>
+    props.timeline ? props.timeline.transcript(props.thread.thread_id)?.loading === true : legacyTranscript.loading
+  const refetchTranscript = (): void => {
+    if (props.timeline) props.timeline.retryTranscript(props.thread.thread_id)
+    else void refetchLegacyTranscript()
+  }
+  // Turns the server left out between the first turn and the loaded tail (windowed reads only).
+  const serverOmitted = (): number => props.timeline?.transcript(props.thread.thread_id)?.omittedBefore ?? 0
+  let postEl: HTMLLIElement | undefined
+  const [near, setNear] = createSignal(false)
+  createEffect(
+    () => ({ el: postEl, store: props.timeline, watch: props.watch }),
+    ({ el, store, watch }) => {
+      if (!el || !store || !watch) return undefined
+      const id = props.thread.thread_id
+      return watch(el, (isNear) => {
+        setNear(isNear)
+        store.setVisible(id, isNear)
+      })
+    },
+  )
+  createEffect(
+    () => ({
+      near: near(),
+      enabled: props.transcriptEnabled(),
+      rev: threadRevision(props.thread),
+      store: props.timeline,
+      thread: props.thread,
+    }),
+    ({ near: isNear, enabled, store, thread }) => {
+      if (store && isNear && enabled) store.ensureTranscript(thread)
+    },
+  )
   // With the artifact surfaces off an artifact-only turn has nothing to show,
   // so it is dropped here and the post reads exactly as it did before.
   const allTurns = (): readonly TranscriptTurn[] => {
@@ -461,10 +613,11 @@ function SpaceRoomPost(props: {
   const [turnsExpanded, setTurnsExpanded] = createSignal(false)
   const turnWindow = (): { readonly turns: readonly TranscriptTurn[]; readonly omitted: number } => {
     const all = allTurns()
-    if (turnsExpanded() || all.length <= MAX_TURNS_PER_POST) return { turns: all, omitted: 0 }
+    const left = serverOmitted()
+    if (turnsExpanded() || all.length <= MAX_TURNS_PER_POST) return { turns: all, omitted: left }
     return {
       turns: [all[0] as TranscriptTurn, ...all.slice(all.length - (MAX_TURNS_PER_POST - 1))],
-      omitted: all.length - MAX_TURNS_PER_POST,
+      omitted: all.length - MAX_TURNS_PER_POST + left,
     }
   }
   const turns = (): readonly TranscriptTurn[] => turnWindow().turns
@@ -495,7 +648,7 @@ function SpaceRoomPost(props: {
   // transcript has loaded the projection's `reply_count` stands in.
   const replyCount = () => {
     if (props.collapse?.() !== true) return 0
-    if (allTurns().length > 0) return allTurns().length - 1
+    if (allTurns().length > 0) return allTurns().length - 1 + serverOmitted()
     const count = props.thread.reply_count
     return typeof count === 'number' && count > 0 ? count : 0
   }
@@ -504,7 +657,16 @@ function SpaceRoomPost(props: {
   const replyTurns = (): readonly TranscriptTurn[] => allTurns().slice(1)
   const earlierTurns = () => {
     const omitted = turnWindow().omitted
-    return omitted > 0 && !summarised() ? { count: omitted, onExpand: () => setTurnsExpanded(true) } : undefined
+    return omitted > 0 && !summarised()
+      ? {
+          count: omitted,
+          onExpand: () => {
+            setTurnsExpanded(true)
+            // Windowed: the turns the server left out are read a window at a time.
+            if (serverOmitted() > 0) void props.timeline?.loadEarlierTurns(props.thread.thread_id)
+          },
+        }
+      : undefined
   }
   const replyAuthorName = (turn: TranscriptTurn): string =>
     turn.role === 'assistant'
@@ -688,6 +850,7 @@ function SpaceRoomPost(props: {
       data-run-status={props.thread.latest_run_status ?? undefined}
       aria-posinset={props.position?.posinset}
       aria-setsize={props.position?.setsize}
+      ref={(element) => { postEl = element }}
     >
       {/* Pinned and new are facts about the post, stated before its content so
           a reader scanning the room sees them first. "New" is drawn once for the whole room as the
@@ -734,7 +897,7 @@ function SpaceRoomPost(props: {
               <p class="verevon-room-turn__plain">
                 {(props.thread.preview && stripMarkdownPreview(props.thread.preview))
                   || props.thread.title?.trim()
-                  || (transcript.loading
+                  || (transcriptLoading()
                     ? i18n.tr('Henter samtalen …', 'Loading the conversation…')
                     : i18n.tr('Samtalen har ikke noe lesbart innhold ennå.', 'This conversation has no readable content yet.'))}
               </p>
@@ -755,7 +918,7 @@ function SpaceRoomPost(props: {
               <Show when={readState() === 'error'}>
                 <div class="verevon-space-inline-status" role="alert">
                   <span>{i18n.tr('Kunne ikke hente denne samtalen.', 'Could not load this conversation.')}</span>{' '}
-                  <button type="button" class="verevon-space-secondary-action" onClick={() => { void refetchTranscript() }}>
+                  <button type="button" class="verevon-space-secondary-action" onClick={refetchTranscript}>
                     {i18n.tr('Prøv igjen', 'Retry')}
                   </button>
                 </div>

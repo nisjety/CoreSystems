@@ -91,3 +91,82 @@
   outline: 2px solid var(--verevon-accent, currentColor);
   outline-offset: 2px;
 }
+
+/* WS15-S8: the windowed timeline's "Load earlier / newer" rows and the pinned shelf. */
+.verevon-room-earlier-item {
+  display: flex;
+  justify-content: center;
+  list-style: none;
+  padding: 8px 0;
+}
+
+.verevon-room-earlier {
+  min-height: 32px;
+  padding: 0 14px;
+  border: 1px solid var(--verevon-border);
+  border-radius: 999px;
+  background: var(--verevon-surface);
+  color: var(--verevon-text-muted, inherit);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.verevon-room-earlier:disabled {
+  cursor: progress;
+  opacity: 0.7;
+}
+
+.verevon-room-earlier:focus-visible,
+.verevon-room-shelf__row:focus-visible {
+  outline: 2px solid var(--verevon-accent, currentColor);
+  outline-offset: 2px;
+}
+
+.verevon-room-shelf-item {
+  list-style: none;
+  padding: 4px 0 8px;
+}
+
+.verevon-room-shelf {
+  border: 1px solid var(--verevon-border);
+  border-radius: 10px;
+  padding: 8px 12px;
+  background: color-mix(in srgb, var(--verevon-surface) 92%, transparent);
+}
+
+.verevon-room-shelf__title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 0 4px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--verevon-text-muted, inherit);
+}
+
+.verevon-room-shelf__list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.verevon-room-shelf__row {
+  display: block;
+  width: 100%;
+  padding: 4px 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.verevon-room-shelf__row:disabled {
+  cursor: default;
+}

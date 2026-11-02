@@ -107,6 +107,12 @@ export type SpaceThread = {
   reply_count?: number
   /** Who wrote the latest message (WS01-S1). Absent means unknown, never "you". */
   last_author_subject_id?: string
+  /** Readable turns in the post (WS15-S5 summary, via the timeline window). Absent on the legacy listing. */
+  turn_count?: number
+  /** Session Core's tail sequence of the post, the keyset the timeline pages by (WS15-S5). */
+  last_message_seq?: number
+  /** Up to five newest distinct authors of the post (WS15-S5). Ids only. */
+  recent_author_subject_ids?: readonly string[]
 }
 
 /**
@@ -254,17 +260,25 @@ export function getSpaceContext(spaceRef: string): Promise<SpaceContext> {
   return requestJson(`/api/v1/spaces/${encodeURIComponent(spaceRef)}/context`)
 }
 
+/** The body of the thread listing and of the timeline's first page (`data` of both routes). */
+export type SpaceThreadsBody = {
+  space: SpaceSummary
+  membership: SpaceMembership
+  threads: readonly SpaceThread[]
+  read_marker?: unknown
+  pins?: unknown
+  unavailable?: unknown
+  shared_read?: unknown
+  agent_work?: unknown
+}
+
 export async function getSpaceThreads(spaceRef: string): Promise<SpaceThreads> {
-  const response = await requestJson<{
-    space: SpaceSummary
-    membership: SpaceMembership
-    threads: readonly SpaceThread[]
-    read_marker?: unknown
-    pins?: unknown
-    unavailable?: unknown
-    shared_read?: unknown
-    agent_work?: unknown
-  }>(`/api/v1/spaces/${encodeURIComponent(spaceRef)}/threads`)
+  const response = await requestJson<SpaceThreadsBody>(`/api/v1/spaces/${encodeURIComponent(spaceRef)}/threads`)
+  return spaceThreadsFromBody(response)
+}
+
+/** Reads the closed shape of a listing body; shared by the legacy listing and the timeline's first page. */
+export function spaceThreadsFromBody(response: SpaceThreadsBody): SpaceThreads {
   // Only an explicit `available: false` restricts; absent or malformed keeps
   // today's behaviour (the transcript route still decides per read).
   const sharedRead = response.shared_read
@@ -798,6 +812,23 @@ export type SpaceThreadTurn = {
 export type SpaceThreadTranscript = {
   readonly threadId: string
   readonly turns: readonly SpaceThreadTurn[]
+  /** Present only when a tail window was asked for and the gateway honoured it (WS15-S7 R2). */
+  readonly window?: SpaceTranscriptWindowInfo
+}
+
+/** What a tail read left out: `omittedBefore` turns sit between the first turn and the window. */
+export type SpaceTranscriptWindowInfo = {
+  readonly omittedBefore: number
+  readonly hasMoreBefore: boolean
+}
+
+/** `?tail=&before=&include_first=` of the transcript route (WS15-S7 R2). */
+export type SpaceTranscriptWindowRequest = {
+  readonly tail: number
+  /** A message id: the window is the turns before it. */
+  readonly before?: string
+  /** Put the post's first turn ahead of the tail. Ignored with `before`. */
+  readonly includeFirst?: boolean
 }
 
 /** A server time as a normalized ISO string, or undefined when it is missing or not a time. */
@@ -875,13 +906,29 @@ function normalizeSpaceThreadTurns(value: unknown): readonly SpaceThreadTurn[] {
 export async function getSpaceThreadTranscript(
   spaceRef: string,
   threadId: string,
+  window?: SpaceTranscriptWindowRequest,
 ): Promise<SpaceThreadTranscript> {
-  const response = await requestJson<{ transcript?: { threadId?: string; turns?: unknown } }>(
-    `/api/v1/spaces/${encodeURIComponent(spaceRef)}/threads/${encodeURIComponent(threadId)}/transcript`,
+  const params = new URLSearchParams()
+  if (window) {
+    params.set('tail', String(window.tail))
+    if (window.before) params.set('before', window.before)
+    else if (window.includeFirst) params.set('include_first', '1')
+  }
+  const query = params.toString()
+  const response = await requestJson<{
+    transcript?: { threadId?: string; turns?: unknown; window?: { omitted_before?: unknown; has_more_before?: unknown } }
+  }>(
+    `/api/v1/spaces/${encodeURIComponent(spaceRef)}/threads/${encodeURIComponent(threadId)}/transcript${query ? `?${query}` : ''}`,
   )
+  const raw = response.transcript?.window
+  const omitted = raw && typeof raw.omitted_before === 'number' && Number.isFinite(raw.omitted_before) ? raw.omitted_before : 0
+  const info: SpaceTranscriptWindowInfo | undefined = window && raw
+    ? { omittedBefore: Math.max(0, Math.floor(omitted)), hasMoreBefore: raw.has_more_before === true }
+    : undefined
   return {
     threadId: response.transcript?.threadId ?? threadId,
     turns: normalizeSpaceThreadTurns(response.transcript?.turns),
+    ...(info ? { window: info } : {}),
   }
 }
 
@@ -895,7 +942,12 @@ export async function getSpaceThreadTranscript(
  * - `error`: anything else (network, 5xx); worth a retry, never a silent preview.
  */
 export type SpaceTranscriptLoad =
-  | { readonly state: 'ok'; readonly threadId: string; readonly turns: readonly SpaceThreadTurn[] }
+  | {
+      readonly state: 'ok'
+      readonly threadId: string
+      readonly turns: readonly SpaceThreadTurn[]
+      readonly window?: SpaceTranscriptWindowInfo
+    }
   | { readonly state: 'restricted'; readonly denial?: SpaceTranscriptDenial }
   | { readonly state: 'missing' }
   | { readonly state: 'error' }
@@ -910,10 +962,19 @@ export type SpaceTranscriptDenial = {
   readonly details: Readonly<Record<string, unknown>> | null
 }
 
-export async function loadSpaceTranscript(spaceRef: string, threadId: string): Promise<SpaceTranscriptLoad> {
+export async function loadSpaceTranscript(
+  spaceRef: string,
+  threadId: string,
+  window?: SpaceTranscriptWindowRequest,
+): Promise<SpaceTranscriptLoad> {
   try {
-    const snapshot = await getSpaceThreadTranscript(spaceRef, threadId)
-    return { state: 'ok', threadId: snapshot.threadId, turns: snapshot.turns }
+    const snapshot = await getSpaceThreadTranscript(spaceRef, threadId, window)
+    return {
+      state: 'ok',
+      threadId: snapshot.threadId,
+      turns: snapshot.turns,
+      ...(snapshot.window ? { window: snapshot.window } : {}),
+    }
   } catch (error) {
     if (error instanceof ApiError && error.status === 403) {
       return readSpaceDenial(error)

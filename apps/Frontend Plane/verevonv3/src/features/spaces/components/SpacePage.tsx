@@ -87,6 +87,8 @@ import { publishSpaceThreads, publishSpaceUnread, retractSpaceThreads } from '..
 import { refreshSpaceAttention } from '../lib/space-attention'
 import { unreadThreadIds } from '../lib/space-unread'
 import { createSpaceSendJournal, type SpaceSendJournal } from '../lib/space-send-journal'
+import { createSpaceTimelineStore, type SpaceTimelineStore } from '../lib/space-timeline-store'
+import { ApiError } from '@/shared/api/api-error'
 import { hereSentence, readPresence, typingSentence } from '../lib/space-presence'
 import { createSpaceStreamController, type SpaceStreamController, type SpaceStreamState } from '../lib/space-stream'
 import { SpaceLiveIndicator } from './SpaceLiveIndicator'
@@ -188,18 +190,91 @@ export default function SpacePage() {
   onCleanup(clearSpaceRoomFeatures)
   const [threadsUnavailable, setThreadsUnavailable] = createSignal(false)
   let latestThreadRequest = 0
-  const [threads, { refetch: refetchThreads }] = createResource(spaceRef, async (ref) => {
-    const request = ++latestThreadRequest
-    setThreadsUnavailable(false)
-    try {
-      const projection = await getSpaceThreads(ref)
-      if (request === latestThreadRequest) setThreadsUnavailable(false)
-      return projection
-    } catch {
-      if (request === latestThreadRequest) setThreadsUnavailable(true)
-      return undefined
+  // WS15-S8: with `features.timeline_windows` the listing is the windowed timeline store (pages of posts,
+  // lazy transcripts). The store is plain state beside the resource; the resource value stays the one
+  // projection every other part of the page reads. A gateway that answers `space_timeline_disabled`
+  // sends the room back to the legacy listing for the rest of the visit.
+  const [timelineStore, setTimelineStore] = createSignal<SpaceTimelineStore | undefined>(undefined)
+  let activeStore: SpaceTimelineStore | undefined
+  let activeStoreRef: string | undefined
+  let activeStoreLoaded = false
+  let timelineWindowsOff = false
+  // Set by the callers that change what the first page carries (a pin, a settled exchange, the 30 s
+  // authority recheck); the next read then also re-reads the first page's extras.
+  let headStale = false
+  const timelineWindowsWanted = (): boolean => {
+    if (timelineWindowsOff) return false
+    if (import.meta.env.DEV === true) {
+      if (import.meta.env.VITE_SPACE_TIMELINE_WINDOWS_UI === 'true') return true
+      if (import.meta.env.VITE_SPACE_TIMELINE_WINDOWS_UI === 'false') return false
     }
-  })
+    return contextFeatureOn(context.error ? undefined : context(), 'timeline_windows')
+  }
+  const dropTimelineStore = () => {
+    activeStore?.dispose()
+    activeStore = undefined
+    activeStoreRef = undefined
+    activeStoreLoaded = false
+    setTimelineStore(undefined)
+  }
+  onCleanup(() => activeStore?.dispose())
+  // The listing waits for the context read: the rollout flag that picks the windowed timeline arrives with it.
+  const [threads, { refetch: refetchThreads, mutate: mutateThreads }] = createResource(
+    () => (context.error || context() !== undefined ? spaceRef() : undefined),
+    async (ref) => {
+      const request = ++latestThreadRequest
+      setThreadsUnavailable(false)
+      try {
+        if (timelineWindowsWanted()) {
+          if (!activeStore || activeStoreRef !== ref) {
+            dropTimelineStore()
+            activeStore = createSpaceTimelineStore(ref)
+            activeStoreRef = ref
+            setTimelineStore(activeStore)
+          }
+          const store = activeStore
+          try {
+            if (!activeStoreLoaded) await store.loadFirst()
+            else if (headStale) await store.reloadHead()
+            else await store.refresh()
+            activeStoreLoaded = true
+            headStale = false
+            const projection = store.projection()
+            if (projection) {
+              if (request === latestThreadRequest) setThreadsUnavailable(false)
+              return projection
+            }
+            throw new Error('timeline_without_head')
+          } catch (error) {
+            if (!(error instanceof ApiError && error.status === 404 && error.code === 'space_timeline_disabled')) {
+              throw error
+            }
+            timelineWindowsOff = true
+            dropTimelineStore()
+          }
+        }
+        const projection = await getSpaceThreads(ref)
+        if (request === latestThreadRequest) setThreadsUnavailable(false)
+        return projection
+      } catch {
+        if (request === latestThreadRequest) setThreadsUnavailable(true)
+        return undefined
+      }
+    },
+  )
+  // Paging the window (load earlier or newer, a trim) changes the store without a listing read: carry
+  // it into the projection so the sidebar, the unread set and the timeline all see the same posts.
+  createEffect(
+    () => timelineStore()?.projection(),
+    (projection) => {
+      if (projection) mutateThreads(projection)
+    },
+  )
+  /** Re-reads the listing; `full` also re-reads the first page's extras (pins, agent work) when windowed. */
+  const refetchThreadsFull = () => {
+    headStale = true
+    return refetchThreads()
+  }
   // `undefined`, not '': Solid skips a fetch only for false/null/undefined, and
   // an empty string is none of those — so the receipt resource fired on mount
   // and requested `/spaces/deletion-requests/` with no id, producing a 404 on
@@ -514,7 +589,7 @@ export default function SpacePage() {
             // A failed authority check leaves the page fail-closed. Only refresh
             // the derived thread projection after a new current context resolves.
             if (current) {
-              void refetchThreads()
+              void refetchThreadsFull()
               // One new stream attempt for a stream that ended forbidden or
               // revoked; a failed recheck never gets here and stays closed.
               streamController?.rearm()
@@ -547,7 +622,7 @@ export default function SpacePage() {
   // composer and details follow it) and the listing.
   const refreshAfterArchiveChange = () => {
     void Promise.resolve(refetchContext()).catch(() => undefined)
-    void Promise.resolve(refetchThreads()).catch(() => undefined)
+    void Promise.resolve(refetchThreadsFull()).catch(() => undefined)
   }
 
   return (
@@ -694,6 +769,7 @@ export default function SpacePage() {
                         spaceName={spaceDisplayName(current().space, i18n.tr)}
                         viewerSubjectId={() => current().membership.subject_id}
                         threads={currentThreads}
+                        timeline={timelineStore()}
                         liveArtifacts={liveArtifacts}
                         sharedReadAvailable={sharedReadAvailable}
                         roomPins={() => (threads.error ? [] : threads()?.pins ?? [])}
@@ -713,7 +789,7 @@ export default function SpacePage() {
                         typingSentence={() => typingSentence(presenceReading(), i18n.tr)}
                         onTyping={noteTyping}
                         onExchangeSettled={() => {
-                          void refetchThreads()
+                          void refetchThreadsFull()
                         }}
                         onCreateAgent={
                           canCreateAgent(current().membership.role)
@@ -805,6 +881,7 @@ export default function SpacePage() {
               <SpacePulse
                 activeRun={activeRun}
                 threads={currentThreads}
+                totalPosts={() => timelineStore()?.totalPosts() ?? undefined}
                 agents={() => (agents.error ? [] : agents() ?? [])}
                 onOpenThread={threadPaneEnabled() ? openThread : undefined}
               />
@@ -838,7 +915,7 @@ export default function SpacePage() {
                               agents={() => (agents.error ? [] : agents() ?? [])}
                               threads={currentThreads}
                               onExchangeSettled={() => {
-                                void refetchThreads()
+                                void refetchThreadsFull()
                               }}
                               replyTarget={() => ({
                                 threadId: threadId(),
@@ -875,6 +952,8 @@ function SpaceConversationPanel(props: {
    * marked as theirs. Never used to name an unattributed turn. */
   readonly viewerSubjectId: () => string | undefined
   readonly threads: () => readonly SpaceThread[]
+  /** The windowed timeline store (WS15-S8); absent while `features.timeline_windows` is off. */
+  readonly timeline?: SpaceTimelineStore
   /** The listing's `shared_read.available`; false shows the room's restricted notice. */
   readonly sharedReadAvailable?: () => boolean
   /** The listing's room pins (WS13-S8). */
@@ -972,6 +1051,7 @@ function SpaceConversationPanel(props: {
             viewerSubjectId={props.viewerSubjectId}
             viewerRole={props.viewerRole}
             threads={props.threads}
+            timeline={props.timeline}
             sharedReadAvailable={props.sharedReadAvailable}
             roomPins={props.roomPins}
             agentWork={props.agentWork}
@@ -1830,6 +1910,8 @@ const PULSE_RECENT_LIMIT = 5
 function SpacePulse(props: {
   readonly activeRun: () => SpaceThread | undefined
   readonly threads: () => readonly SpaceThread[]
+  /** The room's post count when the server says it (windowed timeline); else the loaded posts are counted. */
+  readonly totalPosts?: () => number | undefined
   readonly agents: () => readonly SpaceAgent[]
   /** Opens a conversation in the side pane; absent when the room has no thread pane. */
   readonly onOpenThread?: (threadId: string) => void
@@ -1948,7 +2030,7 @@ function SpacePulse(props: {
           <Show when={props.threads().length > 0}>
             <div>
               <dt>{i18n.tr('Samtaler', 'Conversations')}</dt>
-              <dd>{props.threads().length}</dd>
+              <dd>{props.totalPosts?.() ?? props.threads().length}</dd>
             </div>
           </Show>
           <Show when={attention() > 0}>

@@ -1095,6 +1095,12 @@ export const ERROR_COPY: Record<string, ErrorCopy> = {
   attention_unavailable: { no: 'Innboksen er ikke tilgjengelig akkurat nå. Ingenting er endret.', en: 'The inbox is not available right now. Nothing was changed.', retryable: true },
   invalid_follow_state: { no: 'Det valget finnes ikke. Ingenting er endret.', en: 'That choice does not exist. Nothing was changed.' },
   space_kind_unsupported: { no: 'Et personlig rom har ingen delte agenter og dermed ingen verktøyregler.', en: 'A personal Space has no shared agents, so it has no tool rules.' },
+  // WS15 room timeline windows (S7/S8)
+  space_timeline_unavailable: { no: 'Samtalene i rommet kunne ikke leses akkurat nå. Prøv igjen om litt.', en: 'The room conversations could not be read right now. Try again shortly.', retryable: true },
+  space_timeline_disabled: { no: 'Sideinndelte samtaler er ikke slått på for dette rommet.', en: 'Paged conversations are not turned on for this room.' },
+  summary_backfill_pending: { no: 'Rommet gjøres klart for sideinndeling. Prøv igjen om litt.', en: 'The room is being prepared for paging. Try again shortly.', retryable: true },
+  invalid_window: { no: 'Den delen av samtalen kunne ikke hentes. Last siden på nytt.', en: 'That part of the conversation could not be loaded. Reload the page.' },
+  invalid_refresh: { no: 'Oppdateringen kunne ikke gjennomføres. Last siden på nytt.', en: 'The refresh could not be completed. Reload the page.' },
 }
 
 /**
