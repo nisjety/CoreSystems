@@ -1485,6 +1485,20 @@ const auditVerifyChainInput = z.object({
   maxRows: z.number().int().min(1).max(1_000_000).optional(),
 })
 
+// Audit list v2 (WS05-S4): the paged admin view, no export (export is audit.export_log).
+const auditListEventsInput = z.object({
+  event: z.string().trim().max(128).optional(),
+  userId: z.string().trim().max(128).optional(),
+  plane: z.string().trim().max(128).optional(),
+  outcome: z.string().trim().max(128).optional(),
+  subject: z.string().trim().max(256).optional(),
+  resourceId: z.string().trim().max(256).optional(),
+  since: z.string().datetime().optional(),
+  until: z.string().datetime().optional(),
+  limit: z.number().int().min(1).max(200).optional(),
+  cursor: z.string().trim().max(512).optional(),
+})
+
 const auditExportLogInput = z.object({
   event: z.string().trim().max(128).optional(),
   userId: z.string().trim().max(128).optional(),
@@ -3478,6 +3492,17 @@ export const actionRegistry = [
     requiresApproval: false,
     reversible: true,
     inputSchema: auditVerifyChainInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'audit.list_events',
+    label: 'List audit log events',
+    description: 'Page the organization's audit trail newest first with a cursor and filters on event, user, plane, outcome, subject and resource. Read-only metadata, no export. Owner or admin see the organization; other roles only their own rows. Human sessions only.',
+    ownerPlane: 'control',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: auditListEventsInput,
     outputSchema: envelopeStatusOutput,
   },
   {

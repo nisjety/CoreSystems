@@ -6,8 +6,8 @@
 //!
 //! The org is resolved server-side from the validated session — the browser
 //! never gets to pick which org's audit log it reads. Only the `event`,
-//! `user_id`, `since`, `until`, and `limit` filters are forwarded from the
-//! query string; `org_id` is always the caller's authorized org.
+//! `user_id`, `since`, `until`, `limit`, `plane`, `outcome`, `subject`,
+//! `resource_id` and `cursor` filters are forwarded from the query string; `org_id` is always the caller's authorized org.
 //!
 //! Role gate (WS05-S1): org owners and admins read the whole org trail. Any other
 //! member is narrowed to their own events here, before the upstream call, and a
@@ -37,6 +37,8 @@ use crate::{
 /// Largest page a gateway caller may ask for; audit-core's own ceiling is higher.
 const MAX_AUDIT_LIMIT: u32 = 200;
 const TOOL_ACTION_EVENT: &str = "tool_action";
+/// Longest filter or cursor value forwarded upstream.
+const MAX_FILTER_LEN: usize = 512;
 
 pub(crate) fn router(state: AppState) -> Router<AppState> {
     Router::new()
@@ -53,6 +55,11 @@ pub(super) struct AuditQuery {
     since: Option<String>,
     until: Option<String>,
     limit: Option<u32>,
+    plane: Option<String>,
+    outcome: Option<String>,
+    subject: Option<String>,
+    resource_id: Option<String>,
+    cursor: Option<String>,
 }
 
 async fn list_audit(
@@ -116,6 +123,21 @@ async fn list_audit(
     }
     if let Some(limit) = query.limit {
         params.push(("limit", limit.clamp(1, MAX_AUDIT_LIMIT).to_string()));
+    }
+    // WS05-S4 filters and keyset cursor. They only narrow; audit-core applies the
+    // role scope on top, and the cursor is opaque (audit-core rejects a bad one).
+    for (key, value) in [
+        ("plane", query.plane),
+        ("outcome", query.outcome),
+        ("subject", query.subject),
+        ("resource_id", query.resource_id),
+        ("cursor", query.cursor),
+    ] {
+        if let Some(value) = value.filter(|v| !v.trim().is_empty()) {
+            if value.len() <= MAX_FILTER_LEN {
+                params.push((key, value));
+            }
+        }
     }
 
     let query_string = params

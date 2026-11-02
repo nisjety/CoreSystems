@@ -7,6 +7,7 @@ export const workspaceSettingsSectionIds = [
   'org-security',
   'integrations',
   'trust',
+  'audit-log',
   'router-policy',
   'finetune',
   'mcp',
@@ -89,6 +90,13 @@ export const workspaceSettingsSections: SectionDetail[] = [
     description:
       'See exactly what each connected app can access, what data the AI has fetched, and how it is retained.',
     saveLabel: 'Save trust settings',
+  },
+  {
+    id: 'audit-log',
+    label: 'Audit log',
+    title: 'Audit log',
+    description: 'Browse the organization audit trail: who did what, when, and with what outcome. Owners and admins only; content-free by design.',
+    saveLabel: 'Save audit log',
   },
   {
     id: 'router-policy',

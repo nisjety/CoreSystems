@@ -294,6 +294,7 @@ export const MODEL_ACCESS: Readonly<Record<ActionId, ModelAccessEntry>> = {
   'browser.blocked.try_other_source': exempt('no_owner_executor', 'external_write'),
   'router_policy.update': exempt('no_owner_executor', 'external_write'),
   'audit.verify_chain': exempt('no_owner_executor', 'external_write'),
+  'audit.list_events': exempt('no_owner_executor', 'read'),
   'audit.export_log': exempt('no_owner_executor', 'external_write'),
   'audit.create_siem_destination': exempt('no_owner_executor', 'external_write'),
   'audit.update_siem_destination': exempt('no_owner_executor', 'external_write'),

@@ -7,6 +7,7 @@ import {
   CheckCircle2,
   CircleUserRound,
   CreditCard,
+  FileText,
   Fingerprint,
   Globe2,
   KeyRound,
@@ -53,6 +54,7 @@ const settingsSidebarSections: SettingsLinkSection[] = [
   { id: 'sso', label: 'SSO', icon: KeyRound, href: '/settings/sso' },
   { id: 'org-security', label: 'Org security', icon: ShieldCheck, href: '/settings/org-security' },
   { id: 'integrations', label: 'Integrations', icon: Plug, href: '/settings/integrations' },
+  { id: 'audit-log', label: 'Revisjonslogg', icon: FileText, href: '/settings/audit-log' },
   { id: 'router-policy', label: 'Router policy', icon: Route, href: '/settings/router-policy' },
   { id: 'model-access', label: 'Modelltilgang', icon: BrainCircuit, href: '/settings/model-access' },
   { id: 'space-policy', label: 'Rom-policy', icon: Layers, href: '/settings/space-policy' },
@@ -116,6 +118,7 @@ export function SettingsExpandedSidebarPanel(props: { modelAccessEnabled: boolea
         sections={localizedSettingsSections(i18n).filter(
           (section) =>
             (section.id !== 'platform-users' || hasPlatformAdminAccess(getSession())) &&
+            (section.id !== 'audit-log' || hasWorkspaceAdminAccess(getSession())) &&
             (section.id !== 'model-access' || props.modelAccessEnabled) &&
             (section.id !== 'space-policy' || spacePolicyEnabled()),
         )}
@@ -290,6 +293,8 @@ function settingsSectionLabel(id: string, fallback: string, i18n: ReturnType<typ
       return i18n.tr('Organisasjonssikkerhet', 'Org security')
     case 'integrations':
       return i18n.tr('Integrasjoner', 'Integrations')
+    case 'audit-log':
+      return i18n.tr('Revisjonslogg', 'Audit log')
     case 'router-policy':
       return i18n.tr('Router-policy', 'Router policy')
     case 'model-access':

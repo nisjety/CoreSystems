@@ -3,6 +3,7 @@ import RouterPolicyPage from '@/features/router-policy/components/RouterPolicyPa
 import FinetuneJobsPage from '@/features/finetune/components/FinetuneJobsPage'
 import { OrgDeletionDangerZone } from '@/features/settings/components/OrgDeletionDangerZone'
 import { AuditComplianceSection } from '@/features/settings/components/AuditComplianceSection'
+import { AuditLogSection } from '@/features/settings/components/AuditLogSection'
 import { TrustCenterSection } from '@/features/settings/components/TrustCenterSection'
 import { McpServersSection } from '@/features/settings/components/McpServersSection'
 import { SkillsSection } from '@/features/settings/components/SkillsSection'
@@ -223,6 +224,8 @@ const sectionStatusCards: Record<WorkspaceSettingsSectionId, StatusCard[]> = {
   // Trust Center renders its own live transparency cards, and router-policy /
   // fine-tune render dedicated pages — so these carry no shared status grid.
   trust: [],
+  // The audit log renders its own live, filterable list, so no shared status grid.
+  'audit-log': [],
   'router-policy': [],
   finetune: [],
   // MCP servers renders its own live list + form, so it carries no shared status grid.
@@ -484,6 +487,9 @@ function WorkspaceSettingsSection(props: {
       <Match when={props.section === 'trust'}>
         <TrustCenterSection />
         <AuditComplianceSection />
+      </Match>
+      <Match when={props.section === 'audit-log'}>
+        <AuditLogSection />
       </Match>
       <Match when={props.section === 'mcp'}>
         <McpServersSection />
@@ -1657,6 +1663,8 @@ function OrgSecuritySection() {
         title={i18n.tr('Nylige sikkerhetshendelser', 'Recent security events')}
         description={i18n.tr('Nylige organisasjonsendringer som administratorer bør gjennomgå.', 'Recent organization changes that administrators should review.')}
         actionLabel={i18n.tr('Åpne revisjonslogg', 'Open audit log')}
+        // The full log is an owner/admin view; a member's button stays inert.
+        onAction={hasWorkspaceAdminAccess(getSession()) ? () => window.location.assign('/settings/audit-log') : undefined}
         class="verevon-settings-feature-panel--spaced"
       >
         <RecentSecurityEvents />

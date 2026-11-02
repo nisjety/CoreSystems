@@ -126,7 +126,9 @@ func (a *API) resolveAuditScope(w http.ResponseWriter, r *http.Request, filter s
 		return "", filter, false
 	}
 	if filter.UserID == "" && filter.Event == toolActionEvent {
-		// Trust Center: a content-free org-wide tool_action view.
+		// Trust Center: a content-free org-wide tool_action view. Subject and
+		// resource filters would let a reader probe columns the projection hides.
+		filter.Subject, filter.ResourceID = "", ""
 		return scopeOrgRedacted, filter, true
 	}
 	filter.UserID = caller
