@@ -8499,70 +8499,195 @@ mod tests {
         (status, payload, application)
     }
 
-    /// Adding a person is only real once Control has the roster, so the route
-    /// declares it and reports the result rather than trusting the write.
+    /// WS04-S12: Application's own member list is retired, so with the Control writer flag
+    /// (`membership_writer_api`) off, adding or removing a person is a plain 404
+    /// `feature_disabled` for every role, and nothing is sent to Application. The writer path
+    /// itself is covered in `room_admin`'s tests.
     #[tokio::test]
-    async fn an_owner_adds_a_person_and_control_gets_the_roster() {
+    async fn member_routes_with_the_writer_flag_off_answer_404_and_make_zero_convex_calls() {
         let _env = crate::config::TEST_ENV_LOCK.lock().await;
-        let (status, body, application) = room_membership_response(
-            "owner",
-            "POST",
-            Some(json!({"member_id": "user-2"})),
-            json!({"status": "applied"}),
-        )
-        .await;
-
-        assert_eq!(status, 200);
-        assert_eq!(body["data"]["changed"], true);
-        let requests = application.received_requests().await.expect("requests");
-        assert!(
-            requests
-                .iter()
-                .any(|request| request.url.path() == "/api/action"),
-            "a membership change must be declared to Control"
-        );
-    }
-
-    /// Application's list ahead of Control's roster is the safe direction, but
-    /// the caller must be told: the person is not a member yet.
-    #[tokio::test]
-    async fn an_unconfirmed_roster_is_reported_rather_than_claimed_as_success() {
-        let _env = crate::config::TEST_ENV_LOCK.lock().await;
-        let (status, body, _application) = room_membership_response(
-            "owner",
-            "POST",
-            Some(json!({"member_id": "user-2"})),
-            json!({"status": "control_unavailable"}),
-        )
-        .await;
-
-        assert_eq!(status, 502);
-        assert_eq!(body["error"]["code"], "room_membership_unconfirmed");
-    }
-
-    /// Deciding who may read a room's shared record takes the same roles as
-    /// granting an agent access to it.
-    #[tokio::test]
-    async fn a_viewer_cannot_add_or_remove_room_members() {
-        let _env = crate::config::TEST_ENV_LOCK.lock().await;
-        for (method, body) in [
-            ("POST", Some(json!({"member_id": "user-2"}))),
-            ("DELETE", None),
-        ] {
-            let (status, payload, application) =
-                room_membership_response("viewer", method, body, json!({"status": "applied"}))
-                    .await;
-            assert_eq!(status, 403, "{method} must be refused for a viewer");
-            assert_eq!(payload["error"]["code"], "space_role_cannot_create_agent");
-            assert!(
-                application
-                    .received_requests()
-                    .await
-                    .expect("requests")
-                    .is_empty(),
-                "a refused {method} must never reach Application"
-            );
+        for role in ["owner", "manager", "viewer"] {
+            for (method, body) in [
+                ("POST", Some(json!({"member_id": "user-2"}))),
+                ("DELETE", None),
+            ] {
+                let (status, payload, application) = room_membership_response(
+                    role,
+                    method,
+                    body,
+                    json!({"status": "applied"}),
+                )
+                .await;
+                assert_eq!(status, 404, "{role} {method}");
+                assert_eq!(payload["error"]["code"], "feature_disabled", "{role} {method}");
+                assert!(
+                    application
+                        .received_requests()
+                        .await
+                        .expect("requests")
+                        .is_empty(),
+                    "{role} {method}: the retired Application path must make no Convex call"
+                );
+            }
         }
+    }
+
+    /// WS08-S5: who `respond_to` lets wake an agent. Owners and managers always can; `members`
+    /// lets an editor; `managers` nobody else; `allowlist` an editor whose subject is listed; a
+    /// viewer and an unknown role never; an unknown value refuses.
+    #[test]
+    fn respond_to_allows_matrix() {
+        let allows = super::respond_to_allows;
+        let listed: &[&str] = &["user-9"];
+        for respond_to in ["members", "managers", "allowlist", "mystery", ""] {
+            for role in ["owner", "manager"] {
+                assert!(allows(respond_to, listed, role, "user-1"), "{role} always wakes ({respond_to})");
+            }
+            for role in ["viewer", "", "guest"] {
+                assert!(!allows(respond_to, listed, role, "user-9"), "{role:?} never wakes ({respond_to})");
+            }
+        }
+        // an editor
+        assert!(allows("members", &[], "editor", "user-1"));
+        assert!(!allows("managers", listed, "editor", "user-9"));
+        assert!(allows("allowlist", listed, "editor", "user-9"));
+        assert!(!allows("allowlist", listed, "editor", "user-1"));
+        assert!(!allows("allowlist", &[], "editor", "user-1"));
+        assert!(!allows("mystery", listed, "editor", "user-9"), "an unknown value refuses");
+        assert!(!allows("group", listed, "editor", "user-9"), "the retired group value refuses");
+    }
+
+    /// The pure evaluator: an absent `respond_to` changes nothing; a present one binds only when
+    /// the role is known; trigger modes and `blocked` still apply after it.
+    #[test]
+    fn evaluate_agent_wake_policy_orders_respond_to_before_trigger_modes_and_blocking() {
+        use super::{evaluate_agent_wake_policy, WakeRefusal};
+        let agent = json!({"respond_to": "managers", "trigger_modes": ["mention"]});
+        assert_eq!(evaluate_agent_wake_policy(&agent, Some("editor"), "user-1"), Err(WakeRefusal::RespondToDenied));
+        assert_eq!(evaluate_agent_wake_policy(&agent, Some("manager"), "user-1"), Ok(()));
+        // no role supplied: respond_to is not evaluated (the planner path has no role)
+        assert_eq!(evaluate_agent_wake_policy(&agent, None, "user-1"), Ok(()));
+        // absent respond_to: today's behaviour
+        let legacy = json!({"trigger_modes": ["mention"]});
+        assert_eq!(evaluate_agent_wake_policy(&legacy, Some("viewer"), "user-1"), Ok(()));
+        assert_eq!(evaluate_agent_wake_policy(&json!({"respond_to": ""}), Some("viewer"), "user-1"), Ok(()));
+        // respond_to is checked first, then the trigger, then blocked
+        let both = json!({"respond_to": "managers", "trigger_modes": ["group"], "approval_mode": "blocked"});
+        assert_eq!(evaluate_agent_wake_policy(&both, Some("editor"), "u"), Err(WakeRefusal::RespondToDenied));
+        assert_eq!(evaluate_agent_wake_policy(&both, Some("owner"), "u"), Err(WakeRefusal::MentionNotEnabled));
+        let blocked = json!({"respond_to": "members", "trigger_modes": ["mention"], "approval_mode": "blocked"});
+        assert_eq!(evaluate_agent_wake_policy(&blocked, Some("owner"), "u"), Err(WakeRefusal::InvocationBlocked));
+        assert_eq!(WakeRefusal::RespondToDenied.reason(), "respond_to_denied");
+    }
+
+    /// The mention path: a binding that projects `respondTo: managers` refuses an editor with a
+    /// typed 403 `agent_respond_to_denied` and injects nothing; a manager passes.
+    #[tokio::test]
+    async fn a_respond_to_policy_refuses_the_mention_for_an_editor_and_lets_a_manager_through() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        for (role, allowed) in [("editor", false), ("manager", true)] {
+            let (application_state, application, user_core) = mention_test_state(
+                json!([mention_service_member("svc-support")]),
+                json!([{
+                    "bindingRef": "sab_1",
+                    "agentRef": "agent-1",
+                    "subjectId": "svc-support",
+                    "name": "Kundest\u{f8}tte",
+                    "status": "active",
+                    "respondTo": "managers",
+                    "deliveryTargets": []
+                }]),
+            )
+            .await;
+            Mock::given(wm_method("GET"))
+                .and(wm_path("/api/v1/internal/spaces/space-1/membership"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                    "data": {"space_ref": "space-1", "kind": "room", "role": role}
+                })))
+                .mount(&user_core)
+                .await;
+            Mock::given(wm_method("POST"))
+                .and(wm_path("/api/query"))
+                .and(wm_body_partial_json(
+                    json!({"path": "spaceAgents:agentPersonaForGateway"}),
+                ))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                    "value": {"name": "Kundest\u{f8}tte", "systemPrompt": "Answer briefly."}
+                })))
+                .mount(&application)
+                .await;
+            let mut body = json!({
+                "content": "hello",
+                "space_ref": "space-1",
+                "mentioned_agent_ref": "svc-support",
+            });
+            let result = inject_mentioned_space_agent_persona(
+                &application_state,
+                &authenticated_user(),
+                "org-1",
+                &mut body,
+            )
+            .await;
+            if allowed {
+                assert!(result.is_ok(), "{role} must wake the agent");
+                assert_eq!(body["agent_system_prompt"], "Answer briefly.");
+            } else {
+                let (status, payload) = result.expect_err("an editor must be refused");
+                assert_eq!(status, axum::http::StatusCode::FORBIDDEN);
+                assert_eq!(payload.0["error"]["code"], "agent_respond_to_denied");
+                assert!(body.get("agent_name").is_none(), "no persona may be injected");
+            }
+        }
+    }
+
+    /// An absent `respond_to` stays today's behaviour: no Control role read at all.
+    #[tokio::test]
+    async fn an_absent_respond_to_makes_no_membership_read_on_the_mention_path() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (application_state, application, user_core) = mention_test_state(
+            json!([mention_service_member("svc-support")]),
+            json!([{
+                "bindingRef": "sab_1",
+                "agentRef": "agent-1",
+                "subjectId": "svc-support",
+                "name": "Kundest\u{f8}tte",
+                "status": "active",
+                "deliveryTargets": []
+            }]),
+        )
+        .await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/query"))
+            .and(wm_body_partial_json(
+                json!({"path": "spaceAgents:agentPersonaForGateway"}),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "value": {"name": "Kundest\u{f8}tte", "systemPrompt": "Answer briefly."}
+            })))
+            .mount(&application)
+            .await;
+        let mut body = json!({
+            "content": "hello",
+            "space_ref": "space-1",
+            "mentioned_agent_ref": "svc-support",
+        });
+        let result = inject_mentioned_space_agent_persona(
+            &application_state,
+            &authenticated_user(),
+            "org-1",
+            &mut body,
+        )
+        .await;
+        assert!(result.is_ok());
+        assert!(
+            user_core
+                .received_requests()
+                .await
+                .expect("requests")
+                .iter()
+                .all(|request| !request.url.path().ends_with("/membership")),
+            "no respond_to means no extra Control role read"
+        );
     }
 
     /// Drive `POST /api/v1/spaces` with a given body and return what came back

@@ -338,3 +338,388 @@ pub(super) async fn list_pins(
         .collect();
     Some(Value::Array(pins))
 }
+
+#[cfg(test)]
+mod tests {
+    //! WS13-S8: the route's refusal order, idempotency and the listing's `pins` section, driven
+    //! through the real router against mock Auth, Control, Application (Convex) and Model Gateway.
+    use crate::config::AppState;
+    use axum::{body::Body, http::Request};
+    use http_body_util::BodyExt;
+    use serde_json::{json, Value};
+    use tower::ServiceExt;
+    use wiremock::matchers::{body_partial_json, method as wm_method, path as wm_path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    const PIN: &str = "/api/v1/spaces/space-room/pins/thread-1";
+
+    struct Fx {
+        state: AppState,
+        user_core: MockServer,
+        application: MockServer,
+        model_gateway: MockServer,
+        _auth: MockServer,
+    }
+
+    /// The caller holds `role` in `space-room`. Control grants the shared read, the Space is active
+    /// in Application, Model Gateway reads `thread-1` and Convex accepts pin writes, unless a test
+    /// replaces a piece (a later mount does not override an earlier one, so those are built here
+    /// from the options).
+    struct Opts {
+        role: &'static str,
+        read_decision: u16,
+        thread_read: u16,
+        pin_mutation: ResponseTemplate,
+        list_query: ResponseTemplate,
+    }
+
+    impl Opts {
+        fn new(role: &'static str) -> Self {
+            Self {
+                role,
+                read_decision: 200,
+                thread_read: 200,
+                pin_mutation: ResponseTemplate::new(200).set_body_json(json!({
+                    "value": {"threadId": "thread-1", "pinnedAt": 1_760_000_000_000_u64, "changed": true}
+                })),
+                list_query: ResponseTemplate::new(200).set_body_json(json!({"value": {"pins": [
+                    {"threadId": "thread-2", "pinnedByExternalAuthId": "user-9", "pinnedAt": 20},
+                    {"threadId": "thread-1", "pinnedByExternalAuthId": "user-1", "pinnedAt": 10}
+                ]}})),
+            }
+        }
+    }
+
+    async fn fx(opts: Opts, pins_on: bool) -> Fx {
+        let auth = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/auth/get-session"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "user": {"id": "user-1", "email": "user@example.com", "emailVerified": true},
+                "session": {"activeOrganizationId": "org-1"}
+            })))
+            .mount(&auth)
+            .await;
+        for slug in ["session-core", "model-gateway", "capability-core"] {
+            Mock::given(wm_method("GET"))
+                .and(wm_path(format!("/api/{slug}/token")))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({"token": "plane-token"})))
+                .mount(&auth)
+                .await;
+        }
+        let user_core = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/me/session-context"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "userId":"user-1", "orgId":"org-1", "role":"member", "onboardingStatus":"COMPLETED"
+            })))
+            .mount(&user_core)
+            .await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/internal/spaces/space-room/membership"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {"space_ref": "space-room", "kind": "room", "role": opts.role, "subject_id": "user-1"}
+            })))
+            .mount(&user_core)
+            .await;
+        let decision = if opts.read_decision == 200 {
+            ResponseTemplate::new(200).set_body_json(json!({
+                "data": {"decision": {"decision_ref": "decision-1"}, "token": "decision-token"}
+            }))
+        } else {
+            ResponseTemplate::new(opts.read_decision).set_body_json(json!({"error": {"code": "forbidden"}}))
+        };
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/v1/internal/spaces/thread-read-decision"))
+            .respond_with(decision)
+            .mount(&user_core)
+            .await;
+
+        let application = MockServer::start().await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/query"))
+            .and(body_partial_json(json!({"path": "spacePins:listForGateway"})))
+            .respond_with(opts.list_query)
+            .mount(&application)
+            .await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/query"))
+            .and(body_partial_json(json!({"path": "spaceReadMarkers:spaceReadMarkerForGateway"})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"value": {"lastReadAt": 1}})))
+            .mount(&application)
+            .await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/query"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"value": [
+                {"spaceRef":"space-room","name":"AQUATIQ AS","kind":"room","lifecycle":"active"}
+            ]})))
+            .mount(&application)
+            .await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/mutation"))
+            .respond_with(opts.pin_mutation)
+            .mount(&application)
+            .await;
+
+        let model_gateway = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/v1/threads/thread-1/messages"))
+            .respond_with(ResponseTemplate::new(opts.thread_read).set_body_json(json!({"messages": []})))
+            .mount(&model_gateway)
+            .await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/v1/threads"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"threads": [
+                {"thread_id": "thread-1", "space_id": "space-room", "title": "Innkjop",
+                 "updated_at": "2026-09-07T11:00:00Z", "owner_subject_id": "user-1"}
+            ]})))
+            .mount(&model_gateway)
+            .await;
+
+        let mut state = crate::tests::test_state(false);
+        state.application_convex_url = application.uri();
+        state.application_convex_service_key = "application-test-key".into();
+        state.auth_core_url = auth.uri();
+        state.user_core_url = user_core.uri();
+        state.model_gateway_url = model_gateway.uri();
+        state.space_features.room_pins = pins_on;
+        Fx { state, user_core, application, model_gateway, _auth: auth }
+    }
+
+    async fn call(fx: &Fx, method: &str, uri: &str) -> (u16, Value) {
+        let response = crate::build_router(fx.state.clone())
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(uri)
+                    .header("cookie", "better-auth.session_token=session-1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status().as_u16();
+        let body: Value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap_or(Value::Null);
+        (status, body)
+    }
+
+    /// Convex mutations the application mock saw, as `{path, args}`.
+    async fn mutations(fx: &Fx) -> Vec<Value> {
+        fx.application
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .filter(|request| request.url.path() == "/api/mutation")
+            .map(|request| serde_json::from_slice(&request.body).unwrap_or(Value::Null))
+            .collect()
+    }
+
+    async fn control_paths(fx: &Fx) -> Vec<String> {
+        fx.user_core
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .map(|request| request.url.path().to_owned())
+            .collect()
+    }
+
+    async fn model_gateway_reads(fx: &Fx) -> usize {
+        fx.model_gateway.received_requests().await.unwrap().len()
+    }
+
+    #[tokio::test]
+    async fn flag_off_answers_404_feature_disabled_before_any_upstream_call() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = fx(Opts::new("editor"), false).await;
+        for method in ["PUT", "DELETE"] {
+            let (status, body) = call(&fx, method, PIN).await;
+            assert_eq!(status, 404, "{method}");
+            assert_eq!(body["error"]["code"], "feature_disabled");
+        }
+        assert!(mutations(&fx).await.is_empty());
+        assert!(!control_paths(&fx).await.iter().any(|path| path.ends_with("/membership")));
+        assert_eq!(model_gateway_reads(&fx).await, 0);
+    }
+
+    #[tokio::test]
+    async fn a_viewer_gets_403_room_role_forbidden_and_nothing_downstream_runs() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        for method in ["PUT", "DELETE"] {
+            let fx = fx(Opts::new("viewer"), true).await;
+            let (status, body) = call(&fx, method, PIN).await;
+            assert_eq!(status, 403, "{method}");
+            assert_eq!(body["error"]["code"], "room_role_forbidden");
+            assert!(mutations(&fx).await.is_empty(), "{method}: no Convex write");
+            assert!(
+                !control_paths(&fx).await.iter().any(|path| path.ends_with("thread-read-decision")),
+                "{method}: no read decision is requested for a viewer"
+            );
+            assert_eq!(model_gateway_reads(&fx).await, 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_declined_read_decision_is_403_and_nothing_is_written() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let mut opts = Opts::new("editor");
+        opts.read_decision = 403;
+        let fx = fx(opts, true).await;
+        let (status, body) = call(&fx, "PUT", PIN).await;
+        assert_eq!(status, 403);
+        assert!(body["error"]["code"].is_string());
+        assert!(mutations(&fx).await.is_empty());
+        assert_eq!(model_gateway_reads(&fx).await, 0);
+    }
+
+    #[tokio::test]
+    async fn a_thread_that_is_not_in_the_space_is_404_thread_not_found_with_no_write() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        for upstream in [404, 403] {
+            let mut opts = Opts::new("editor");
+            opts.thread_read = upstream;
+            let fx = fx(opts, true).await;
+            let (status, body) = call(&fx, "PUT", PIN).await;
+            assert_eq!(status, 404, "model gateway {upstream}");
+            assert_eq!(body["error"]["code"], "thread_not_found");
+            assert!(mutations(&fx).await.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn a_model_gateway_failure_is_503_room_pins_unavailable_with_no_write() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let mut opts = Opts::new("editor");
+        opts.thread_read = 500;
+        let fx = fx(opts, true).await;
+        let (status, body) = call(&fx, "PUT", PIN).await;
+        assert_eq!(status, 503);
+        assert_eq!(body["error"]["code"], "room_pins_unavailable");
+        assert!(mutations(&fx).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn pinning_is_idempotent_and_writes_with_the_session_identity_only() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let mut opts = Opts::new("editor");
+        // The second call sees an already pinned post: Convex answers changed:false, the route 200.
+        opts.pin_mutation = ResponseTemplate::new(200).set_body_json(json!({
+            "value": {"threadId": "thread-1", "pinnedAt": 1_760_000_000_000_u64, "changed": false}
+        }));
+        let fx = fx(opts, true).await;
+        for _ in 0..2 {
+            let (status, body) = call(&fx, "PUT", PIN).await;
+            assert_eq!(status, 200, "{body}");
+            assert_eq!(body["data"]["pinned"], true);
+            assert_eq!(body["data"]["thread_id"], "thread-1");
+            assert_eq!(body["data"]["pinned_at"], 1_760_000_000_000_u64);
+        }
+        let writes = mutations(&fx).await;
+        assert_eq!(writes.len(), 2);
+        assert_eq!(writes[0]["path"], "spacePins:setForGateway");
+        let args = &writes[0]["args"];
+        assert_eq!(args["externalAuthId"], "user-1");
+        assert_eq!(args["externalOrgId"], "org-1");
+        assert_eq!(args["spaceRef"], "space-room");
+        assert_eq!(args["threadId"], "thread-1");
+    }
+
+    #[tokio::test]
+    async fn the_pin_limit_is_409_room_pins_limit() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let mut opts = Opts::new("manager");
+        opts.pin_mutation = ResponseTemplate::new(200)
+            .set_body_json(json!({"status": "error", "errorMessage": "Uncaught Error: room_pins_limit"}));
+        let fx = fx(opts, true).await;
+        let (status, body) = call(&fx, "PUT", PIN).await;
+        assert_eq!(status, 409);
+        assert_eq!(body["error"]["code"], "room_pins_limit");
+    }
+
+    #[tokio::test]
+    async fn a_convex_failure_hides_the_raw_error_text() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let mut opts = Opts::new("owner");
+        opts.pin_mutation = ResponseTemplate::new(200).set_body_json(
+            json!({"status": "error", "errorMessage": "Server Error at secret-internal-host:3210 stack"}),
+        );
+        let fx = fx(opts, true).await;
+        let (status, body) = call(&fx, "PUT", PIN).await;
+        assert_eq!(status, 503);
+        assert_eq!(body["error"]["code"], "room_pins_unavailable");
+        assert!(!body.to_string().contains("secret-internal-host"));
+    }
+
+    #[tokio::test]
+    async fn unpinning_is_idempotent_and_skips_the_read_proof() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let mut opts = Opts::new("editor");
+        // Even a thread that is gone or unreadable stays removable.
+        opts.thread_read = 404;
+        opts.pin_mutation = ResponseTemplate::new(200)
+            .set_body_json(json!({"value": {"threadId": "thread-1", "changed": false}}));
+        let fx = fx(opts, true).await;
+        for _ in 0..2 {
+            let (status, body) = call(&fx, "DELETE", PIN).await;
+            assert_eq!(status, 200, "{body}");
+            assert_eq!(body["data"]["pinned"], false);
+        }
+        let writes = mutations(&fx).await;
+        assert_eq!(writes.len(), 2);
+        assert_eq!(writes[0]["path"], "spacePins:clearForGateway");
+        assert_eq!(model_gateway_reads(&fx).await, 0, "an unpin proves nothing about the thread");
+        assert!(!control_paths(&fx).await.iter().any(|path| path.ends_with("thread-read-decision")));
+    }
+
+    #[tokio::test]
+    async fn the_thread_listing_carries_pins_when_on_and_an_empty_list_when_off() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let on = fx(Opts::new("editor"), true).await;
+        let (status, body) = call(&on, "GET", "/api/v1/spaces/space-room/threads").await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(
+            body["data"]["pins"],
+            json!([
+                {"thread_id": "thread-2", "pinned_by": "user-9", "pinned_at": 20},
+                {"thread_id": "thread-1", "pinned_by": "user-1", "pinned_at": 10}
+            ])
+        );
+        assert!(!body["data"]["unavailable"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|gap| gap["section"] == "pins"));
+
+        let off = fx(Opts::new("editor"), false).await;
+        let (status, body) = call(&off, "GET", "/api/v1/spaces/space-room/threads").await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(body["data"]["pins"], json!([]));
+        assert!(!body["data"]["unavailable"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|gap| gap["section"] == "pins"));
+    }
+
+    #[tokio::test]
+    async fn the_thread_listing_names_a_pins_gap_when_convex_fails_and_still_lists_threads() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let mut opts = Opts::new("editor");
+        opts.list_query = ResponseTemplate::new(500).set_body_string("boom");
+        let fx = fx(opts, true).await;
+        let (status, body) = call(&fx, "GET", "/api/v1/spaces/space-room/threads").await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(body["data"]["pins"], json!([]));
+        assert_eq!(body["data"]["threads"].as_array().unwrap().len(), 1);
+        let gap = body["data"]["unavailable"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|gap| gap["section"] == "pins")
+            .expect("a named pins gap");
+        assert_eq!(gap["code"], "pins_unavailable");
+    }
+}
