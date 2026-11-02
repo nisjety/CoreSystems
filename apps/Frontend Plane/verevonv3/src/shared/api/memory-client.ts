@@ -21,7 +21,19 @@ export interface MemoryEntry {
   content: string
   updatedAt: string
   provenance: MemoryProvenance
+  /**
+   * Set only for a row learned in a shared room before containment existed:
+   * listed to its owner, never recalled by any conversation. The owner may keep
+   * or delete it. Absent for every ordinary row (including from an older
+   * gateway that never sends the field).
+   */
+  withheldReason?: WithheldReason
+  /** Space the withheld row was learned in (an id, never content). */
+  originSpaceRef?: string
 }
+
+/** Closed vocabulary; an unrecognised value is read as withheld for an unknown reason. */
+export type WithheldReason = 'room_origin_unverified' | 'unknown'
 
 export interface ListMemoriesResult {
   memories: MemoryEntry[]
@@ -44,6 +56,10 @@ interface ListMemoriesResponse {
     updated_at?: string
     updatedAt?: string
     provenance?: string
+    withheld_reason?: string
+    withheldReason?: string
+    origin_space_ref?: string
+    originSpaceRef?: string
   }>
   degraded?: boolean
   degradation_reason?: string
@@ -53,6 +69,8 @@ interface ListMemoriesResponse {
 function normalizeMemory(raw: NonNullable<ListMemoriesResponse['memories']>[number]): MemoryEntry | null {
   const memoryId = raw.memory_id ?? raw.memoryId ?? ''
   if (!memoryId) return null
+  const withheldRaw = raw.withheld_reason ?? raw.withheldReason ?? ''
+  const originSpaceRef = raw.origin_space_ref ?? raw.originSpaceRef ?? ''
   return {
     memoryId,
     topic: raw.topic ?? '',
@@ -62,6 +80,10 @@ function normalizeMemory(raw: NonNullable<ListMemoriesResponse['memories']>[numb
     // at all — is 'unknown'. Never default to a real value.
     provenance:
       raw.provenance === 'stated' || raw.provenance === 'inferred' ? raw.provenance : 'unknown',
+    ...(withheldRaw
+      ? { withheldReason: withheldRaw === 'room_origin_unverified' ? withheldRaw : ('unknown' as const) }
+      : {}),
+    ...(originSpaceRef ? { originSpaceRef } : {}),
   }
 }
 

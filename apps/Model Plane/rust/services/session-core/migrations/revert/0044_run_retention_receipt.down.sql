@@ -7,8 +7,21 @@
 -- waived run is still under review.
 --
 -- Safe to run twice (every statement is IF EXISTS).
+--
+-- Ordering with 0072_space_event_log: once 0072 is installed, its two runs triggers
+-- (space_event_runs_ins / space_event_runs_upd) carry a WHEN clause on
+-- runs.retention_class, so Postgres refuses to drop that column while they exist. This
+-- revert therefore drops those two triggers first. That is the whole of the 0072
+-- dependency: its functions, log tables and the messages/threads triggers do not read
+-- the column and are left alone. After this revert the Space event log no longer records
+-- run lifecycle events; re-apply 0072_space_event_log.sql only together with 0044, since
+-- 0072's runs triggers cannot be created without the column. To remove the whole Space
+-- event log, run revert/0072_space_event_log.down.sql (also safe in either order).
 
 BEGIN;
+
+DROP TRIGGER IF EXISTS space_event_runs_ins ON runs;
+DROP TRIGGER IF EXISTS space_event_runs_upd ON runs;
 
 DROP INDEX IF EXISTS runs_zdr_waived_thread_idx;
 DROP TRIGGER IF EXISTS runs_retention_receipt_immutable_trg ON runs;

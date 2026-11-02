@@ -142,8 +142,15 @@ func IssueOwnerGrantDecision(evidence PersonalThreadDecisionEvidence, request Ow
 	if err := evidence.validatePersonalAuthority(); err != nil {
 		return OwnerGrantDecision{}, err
 	}
-	if !matchesOneOf(evidence.Membership.Role, "manager", "owner") || !evidence.AgentActionEntitled || evidence.Privacy.ZeroDataRetention {
-		return OwnerGrantDecision{}, fmt.Errorf("current personal Space authority cannot manage agent grants")
+	const ownerGrantRefusal = "current personal Space authority cannot manage agent grants"
+	if !matchesOneOf(evidence.Membership.Role, "manager", "owner") {
+		return OwnerGrantDecision{}, roleBelowFloorDenial(ownerGrantRefusal, "manager", "owner")
+	}
+	if !evidence.AgentActionEntitled {
+		return OwnerGrantDecision{}, entitlementOffDenial("agent_action", ownerGrantRefusal)
+	}
+	if evidence.Privacy.ZeroDataRetention {
+		return OwnerGrantDecision{}, zdrForbidsDenial("owner_grant", ownerGrantRefusal)
 	}
 	if err := request.Validate(); err != nil || now.IsZero() {
 		return OwnerGrantDecision{}, fmt.Errorf("owner grant decision request is invalid")

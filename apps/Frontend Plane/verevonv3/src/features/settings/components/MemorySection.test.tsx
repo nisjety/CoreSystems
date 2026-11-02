@@ -182,3 +182,81 @@ describe('MemorySection reset', () => {
     expect(screen.queryByText('Minnet er nullstilt.')).toBeNull()
   })
 })
+
+describe('MemorySection withheld legacy rows (WS17-S2)', () => {
+  const WITHHELD = {
+    memory_id: 'mem_withheld',
+    topic: 'USER',
+    content: 'Likes oat milk',
+    updated_at: '2026-10-01T10:00:00Z',
+    provenance: 'unknown',
+    withheld_reason: 'room_origin_unverified',
+    origin_space_ref: 'space-room-1',
+  }
+  const ORDINARY = {
+    memory_id: 'mem_ordinary',
+    topic: 'USER',
+    content: 'Prefers dark mode',
+    updated_at: '2026-10-02T10:00:00Z',
+    provenance: 'stated',
+  }
+  const BADGE = 'Tilbakeholdt – lært i et delt rom'
+
+  it('badges a withheld row, and only that row', async () => {
+    stubBackend(ON, {
+      'GET /api/v1/memory': () =>
+        jsonResponse({ memories: [WITHHELD, ORDINARY], degraded: false, degradation_reason: '' }),
+    })
+
+    render(() => <MemorySection />)
+
+    expect(await screen.findByText('Likes oat milk')).toBeTruthy()
+    expect(screen.getByText('Prefers dark mode')).toBeTruthy()
+    expect(screen.getAllByText(BADGE)).toHaveLength(1)
+  })
+
+  it('shows no badge when no row is withheld', async () => {
+    stubBackend(ON, {
+      'GET /api/v1/memory': () =>
+        jsonResponse({ memories: [ORDINARY], degraded: false, degradation_reason: '' }),
+    })
+
+    render(() => <MemorySection />)
+
+    expect(await screen.findByText('Prefers dark mode')).toBeTruthy()
+    expect(screen.queryByText(BADGE)).toBeNull()
+  })
+
+  it('still deletes a withheld row after the confirming click', async () => {
+    let listCalls = 0
+    const fetchMock = stubBackend(ON, {
+      'GET /api/v1/memory': () => {
+        listCalls += 1
+        return jsonResponse({
+          memories: listCalls === 1 ? [WITHHELD] : [],
+          degraded: false,
+          degradation_reason: '',
+        })
+      },
+      'DELETE /api/v1/memory/mem_withheld': () =>
+        jsonResponse({ deleted: true, degraded: false, degradation_reason: '' }),
+    })
+
+    render(() => <MemorySection />)
+    expect(await screen.findByText(BADGE)).toBeTruthy()
+
+    fireEvent.click(await screen.findByRole('button', { name: /Slett minne: Likes oat milk/ }))
+    flush()
+    expect(callsTo(fetchMock, 'DELETE', '/api/v1/memory/mem_withheld')).toHaveLength(0)
+
+    fireEvent.click(await screen.findByRole('button', { name: /Bekreft sletting av minne: Likes oat milk/ }))
+    flush()
+
+    await waitFor(() => {
+      expect(callsTo(fetchMock, 'DELETE', '/api/v1/memory/mem_withheld')).toHaveLength(1)
+    })
+    await waitFor(() => {
+      expect(screen.queryByText(BADGE)).toBeNull()
+    })
+  })
+})

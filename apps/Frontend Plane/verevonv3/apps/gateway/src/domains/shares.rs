@@ -1,19 +1,23 @@
-//! ShareDialog backend (PR-6) — proxies the user-core resource_grants facade.
+//! ShareDialog backend (PR-6, re-pointed by WS14-S4) — proxies documents-api.
 //!
 //! Backs the verevonv3 ShareDialog: list who a document is shared with, share it
-//! with a user (view-only for MVP), un-share, and the read-only "shared with me"
-//! list. `resource_grants` (user-core) is the SINGLE authority retrieval +
-//! documents-api enforce against — the UI writes here, never to a display flag.
+//! with a user (view-only), un-share, and the read-only "shared with me" list.
 //!
-//! Identity discipline: `proxy_json` injects the internal key + the validated
-//! session actor's `x-user-id`, so the facade's internal-key-only guard is
-//! satisfied structurally and a Bearer user token can never reach it directly.
-//! `org_id` and `granted_by` are set SERVER-SIDE from the session — the client
-//! supplies ONLY the subject to share with.
+//! Authority discipline: documents-api OWNS the document, so it is the service
+//! that proves the signed-in user owns it before Control writes the grant
+//! (`resource_grants` stays the single grant authority). This gateway holds no
+//! `authz:*` scope and never calls Control's grant surface: it relays the
+//! user's own `aud=data-plane` token (`proxy_data_plane_json`), and the client
+//! supplies ONLY the subject (and an optional role, which documents-api refuses
+//! unless it is `view`). `org_id` and the granter come from the verified
+//! session / token, never from the body.
+//!
+//! The `ownership.share_document` / `ownership.revoke_document_share` actions
+//! call the same two upstream helpers below, so there is exactly one share path.
 
 use axum::{
     extract::{Extension, Path, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::IntoResponse,
     routing::{delete, get},
     Json, Router,
@@ -24,10 +28,10 @@ use serde_json::{json, Value};
 
 use crate::{
     config::AppState,
-    contracts::ActionActor,
+    domains::knowledge::shared::proxy_data_plane_json,
     envelope::error,
     middleware::{require_session, AuthenticatedUser},
-    upstream::{authorized_org_id, proxy_json},
+    upstream::authorized_org_id,
 };
 
 pub(crate) fn router(state: AppState) -> Router<AppState> {
@@ -44,54 +48,170 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
         .route_layer(axum::middleware::from_fn_with_state(state, require_session))
 }
 
-fn actor_for(user: &AuthenticatedUser) -> ActionActor {
-    ActionActor {
-        user_id: user.user_id.clone(),
-        user_email: user.user_email.clone(),
-        user_name: user.user_name.clone(),
-        user_role: user.auth_role.clone().unwrap_or_default(),
-    }
-}
-
 #[derive(Deserialize)]
 struct CreateShareRequest {
     subject_id: String,
+    #[serde(default)]
+    role: Option<String>,
 }
 
-/// GET /api/v1/documents/:id/shares — list the explicit grants on a document
-/// (the ShareDialog "shared with" list).
-async fn list_shares(
-    State(state): State<AppState>,
-    Extension(user): Extension<AuthenticatedUser>,
-    Path(doc_id): Path<String>,
-) -> impl IntoResponse {
-    let org_id = authorized_org_id(&state, &user).await;
-    let actor = actor_for(&user);
+fn default_error_code(status: StatusCode) -> &'static str {
+    match status {
+        StatusCode::BAD_REQUEST => "invalid_request",
+        StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => "forbidden",
+        StatusCode::NOT_FOUND => "not_found",
+        StatusCode::CONFLICT => "conflict",
+        StatusCode::SERVICE_UNAVAILABLE => "sharing_unavailable",
+        _ => "upstream_error",
+    }
+}
+
+fn is_safe_code(code: &str) -> bool {
+    !code.is_empty()
+        && code.len() <= 64
+        && code
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+}
+
+/// documents-api answers `{ "error": "message", "code": "stable_code" }`. The
+/// browser contract is `{ error: { code, message } }`, so rewrite the failure
+/// here. The stable code is relayed only when it is a plain snake_case token;
+/// the message is the service's own short text, never an upstream URL.
+fn normalize_error(status: StatusCode, body: &Value) -> Value {
+    if body.get("error").map(Value::is_object).unwrap_or(false) {
+        return body.clone();
+    }
+    let code = body
+        .get("code")
+        .and_then(Value::as_str)
+        .filter(|c| is_safe_code(c))
+        .unwrap_or_else(|| default_error_code(status));
+    let message = body
+        .get("error")
+        .and_then(Value::as_str)
+        .filter(|m| !m.is_empty() && m.len() <= 300)
+        .unwrap_or("The sharing request could not be completed.");
+    json!({ "error": { "code": code, "message": message } })
+}
+
+async fn org_for(state: &AppState, user: &AuthenticatedUser) -> Option<String> {
+    let org = authorized_org_id(state, user).await;
+    (!org.is_empty()).then_some(org)
+}
+
+/// Share `doc_id` with `subject_id` through documents-api (owner check there).
+/// Shared by the REST route and the `ownership.share_document` action.
+pub(crate) async fn share_document_upstream(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    doc_id: &str,
+    subject_id: &str,
+    role: Option<&str>,
+) -> (StatusCode, Value) {
+    let org_id = org_for(state, user).await;
     let url = format!(
-        "{}/api/v1/internal/authz/grants?org_id={}&resource_type=document&resource_id={}",
-        state.user_core_url,
-        urlencoding::encode(&org_id),
-        urlencoding::encode(&doc_id),
+        "{}/v1/documents/{}/shares",
+        state.documents_api_url,
+        urlencoding::encode(doc_id)
     );
-    let (status, body): (StatusCode, Json<Value>) = proxy_json(
-        &state,
-        Method::GET,
+    let mut payload = json!({ "subject_id": subject_id });
+    if let Some(role) = role.map(str::trim).filter(|r| !r.is_empty()) {
+        payload["role"] = json!(role);
+    }
+    let (status, Json(body)) = proxy_data_plane_json(
+        state,
+        user,
+        headers,
+        Method::POST,
         &url,
-        None,
-        Some(&org_id),
-        Some(&actor),
+        Some(payload),
+        org_id.as_deref(),
         None,
     )
     .await;
-    (status, body).into_response()
+    if status.is_success() {
+        (status, body)
+    } else {
+        (status, normalize_error(status, &body))
+    }
+}
+
+/// Remove the user grant for `subject_id` on `doc_id` through documents-api.
+/// Shared by the REST route and the `ownership.revoke_document_share` action.
+pub(crate) async fn revoke_document_share_upstream(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    doc_id: &str,
+    subject_id: &str,
+) -> (StatusCode, Value) {
+    let org_id = org_for(state, user).await;
+    let url = format!(
+        "{}/v1/documents/{}/shares/{}",
+        state.documents_api_url,
+        urlencoding::encode(doc_id),
+        urlencoding::encode(subject_id)
+    );
+    let (status, Json(body)) = proxy_data_plane_json(
+        state,
+        user,
+        headers,
+        Method::DELETE,
+        &url,
+        None,
+        org_id.as_deref(),
+        None,
+    )
+    .await;
+    if status.is_success() {
+        (status, body)
+    } else {
+        (status, normalize_error(status, &body))
+    }
+}
+
+/// GET /api/v1/documents/:id/shares — the ShareDialog "shared with" list. The
+/// SPA reads `grants`; documents-api names the same rows `shares`. Space rows
+/// carry `subject_type: "space"` and are read-only.
+async fn list_shares(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Path(doc_id): Path<String>,
+) -> impl IntoResponse {
+    let org_id = org_for(&state, &user).await;
+    let url = format!(
+        "{}/v1/documents/{}/shares",
+        state.documents_api_url,
+        urlencoding::encode(&doc_id)
+    );
+    let (status, Json(body)) = proxy_data_plane_json(
+        &state,
+        &user,
+        &headers,
+        Method::GET,
+        &url,
+        None,
+        org_id.as_deref(),
+        None,
+    )
+    .await;
+    if !status.is_success() {
+        return (status, Json(normalize_error(status, &body))).into_response();
+    }
+    let grants = body.get("shares").cloned().unwrap_or_else(|| json!([]));
+    (status, Json(json!({ "grants": grants }))).into_response()
 }
 
 /// POST /api/v1/documents/:id/shares — share the document with a user (view).
-/// Only `subject_id` is client-supplied; `org_id` + `granted_by` are server-set
-/// from the validated session, so a caller can never forge the granter.
+/// Only `subject_id` (and an optional role documents-api validates) is
+/// client-supplied.
 async fn create_share(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
     Path(doc_id): Path<String>,
     Json(req): Json<CreateShareRequest>,
 ) -> impl IntoResponse {
@@ -103,82 +223,53 @@ async fn create_share(
         )
             .into_response();
     }
-    let org_id = authorized_org_id(&state, &user).await;
-    let actor = actor_for(&user);
-    let url = format!("{}/api/v1/internal/authz/grant", state.user_core_url);
-    let payload = json!({
-        "org_id": org_id,
-        "resource_type": "document",
-        "resource_id": doc_id,
-        "subject_id": subject_id,
-        "subject_type": "user",
-        "role": "view",
-        "granted_by": actor.user_id,
-    });
-    let (status, body): (StatusCode, Json<Value>) = proxy_json(
+    let (status, body) = share_document_upstream(
         &state,
-        Method::POST,
-        &url,
-        Some(payload),
-        Some(&org_id),
-        Some(&actor),
-        None,
+        &user,
+        &headers,
+        &doc_id,
+        &subject_id,
+        req.role.as_deref(),
     )
     .await;
-    (status, body).into_response()
+    (status, Json(body)).into_response()
 }
 
-/// DELETE /api/v1/documents/:id/shares/:subject_id — un-share (remove the grant).
+/// DELETE /api/v1/documents/:id/shares/:subject_id — un-share (user grants only).
 async fn revoke_share(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
     Path((doc_id, subject_id)): Path<(String, String)>,
 ) -> impl IntoResponse {
-    let org_id = authorized_org_id(&state, &user).await;
-    let actor = actor_for(&user);
-    let url = format!(
-        "{}/api/v1/internal/authz/grant?org_id={}&resource_type=document&resource_id={}&subject_id={}&subject_type=user",
-        state.user_core_url,
-        urlencoding::encode(&org_id),
-        urlencoding::encode(&doc_id),
-        urlencoding::encode(&subject_id),
-    );
-    let (status, body): (StatusCode, Json<Value>) = proxy_json(
-        &state,
-        Method::DELETE,
-        &url,
-        None,
-        Some(&org_id),
-        Some(&actor),
-        None,
-    )
-    .await;
-    (status, body).into_response()
+    let (status, body) =
+        revoke_document_share_upstream(&state, &user, &headers, &doc_id, &subject_id).await;
+    (status, Json(body)).into_response()
 }
 
-/// GET /api/v1/shares/shared-with-me — document ids explicitly shared with the
-/// viewer (off ListVisible). Subject is the session actor, never client-supplied.
+/// GET /api/v1/shares/shared-with-me — documents explicitly shared with the
+/// viewer. The subject is the verified token's user, never client-supplied.
 async fn shared_with_me(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
 ) -> impl IntoResponse {
-    let org_id = authorized_org_id(&state, &user).await;
-    let actor = actor_for(&user);
-    let url = format!(
-        "{}/api/v1/internal/authz/visible?org_id={}&subject_id={}&resource_type=document",
-        state.user_core_url,
-        urlencoding::encode(&org_id),
-        urlencoding::encode(&actor.user_id),
-    );
-    let (status, body): (StatusCode, Json<Value>) = proxy_json(
+    let org_id = org_for(&state, &user).await;
+    let url = format!("{}/v1/documents/shared-with-me", state.documents_api_url);
+    let (status, Json(body)) = proxy_data_plane_json(
         &state,
+        &user,
+        &headers,
         Method::GET,
         &url,
         None,
-        Some(&org_id),
-        Some(&actor),
+        org_id.as_deref(),
         None,
     )
     .await;
-    (status, body).into_response()
+    if status.is_success() {
+        (status, Json(body)).into_response()
+    } else {
+        (status, Json(normalize_error(status, &body))).into_response()
+    }
 }

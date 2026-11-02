@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -98,5 +99,39 @@ func TestSpaceDecisionHandlersAcceptACompleteBody(t *testing.T) {
 				t.Fatalf("a complete body was refused as incomplete: %s", w.Body.String())
 			}
 		})
+	}
+}
+
+// WS01-S2: post_kind is a closed vocabulary. An unknown kind is a 400 before
+// any authority is resolved; "", "turn" and "post" are accepted (they fail
+// closed later against the empty repository, never as a 400).
+func TestThreadAppendDecisionHandlerRejectsUnknownPostKind(t *testing.T) {
+	run := func(postKind string) (int, string) {
+		s := &Server{spaceRepo: &spaces.Repository{}}
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		body := `{"space_ref":"s","thread_id":"t","content_digest":"sha256:d","idempotency_key":"i","post_kind":"` + postKind + `"}`
+		c.Request = httptest.NewRequest(http.MethodPost, "/decision", bytes.NewBufferString(body))
+		c.Request.Header.Set("Content-Type", "application/json")
+		c.Set("org_id", "o")
+		c.Set("user_id", "u")
+		s.issueThreadAppendDecision(c)
+		return w.Code, w.Body.String()
+	}
+
+	for _, kind := range []string{"x", "Post", "post,turn", "system"} {
+		code, body := run(kind)
+		if code != http.StatusBadRequest {
+			t.Fatalf("post_kind %q: want 400, got %d %s", kind, code, body)
+		}
+		if !strings.Contains(body, "post_kind must be turn or post") {
+			t.Fatalf("post_kind %q: unexpected 400 body %s", kind, body)
+		}
+	}
+	for _, kind := range []string{"", "turn", "post"} {
+		code, body := run(kind)
+		if code == http.StatusBadRequest {
+			t.Fatalf("post_kind %q was refused as invalid: %s", kind, body)
+		}
 	}
 }

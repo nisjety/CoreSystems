@@ -43,6 +43,8 @@ const ALLOWED_FAILURE_CODES: &[&str] = &[
     // Distinct from `invalid_continuation`, which says the attempt could not
     // be judged at all — this one says it was judged and found false.
     "postcondition_refuted",
+    // The requester no longer holds the Space authority the run started with (WS10-S3).
+    "authority_changed",
 ];
 
 /// Verified Outcome Foundation (verevon-roadmap.md §3b) status strings, kept

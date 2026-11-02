@@ -2,7 +2,6 @@ package http
 
 import (
 	"encoding/json"
-	"errors"
 	"io"
 	"net/http"
 	"os"
@@ -55,12 +54,7 @@ func (s *Server) issueOwnerGrantDecision(c *gin.Context) {
 	evidence, err := s.spaceRepo.ResolvePersonalThreadDecisionEvidence(
 		c.Request.Context(), strings.TrimSpace(request.SpaceRef), c.GetString("org_id"), c.GetString("user_id"),
 	)
-	if errors.Is(err, spaces.ErrNoCurrentMembership) {
-		c.JSON(http.StatusForbidden, gin.H{"error": "current personal Space authority required"})
-		return
-	}
-	if err != nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "personal Space authority unavailable"})
+	if s.writeSpaceDenial(c, err, strings.TrimSpace(request.SpaceRef), spaces.ExpectPersonal, "current personal Space authority required", http.StatusServiceUnavailable, "personal Space authority unavailable") {
 		return
 	}
 	key, err := spaces.LoadSigningKeyFromEnv(os.Getenv)
@@ -88,7 +82,7 @@ func (s *Server) issueOwnerGrantDecision(c *gin.Context) {
 		Nonce:          nonce,
 	}, time.Now().UTC())
 	if err != nil {
-		c.JSON(http.StatusForbidden, gin.H{"error": "owner grant management is not authorized"})
+		writeSpaceIssuerDenial(c, err, "owner grant management is not authorized")
 		return
 	}
 	token, err := spaces.SignOwnerGrantDecision(key, decision)

@@ -1,4 +1,5 @@
-import { requestJson } from './http'
+import { apiErrorFromResponse, requestJson } from './http'
+import { gatewayBaseUrl } from './config'
 
 /**
  * Audit read client.
@@ -19,6 +20,10 @@ export interface AuditEvent {
   actorRole?: string
   userId?: string
   resource?: string
+  /** Producing plane (`control`, `model`, ...). Absent on the redacted view's older rows. */
+  plane?: string
+  /** What the event was about, e.g. a member id or setting name. Absent in the redacted view. */
+  subject?: string
   outcome?: string
   occurredAt?: string
   requestId?: string
@@ -35,9 +40,30 @@ export interface AuditQuery {
   since?: string
   until?: string
   limit?: number
+  /** Audit list v2 filters (WS05-S4). They only narrow; the role scope still applies. */
+  plane?: string
+  outcome?: string
+  subject?: string
+  resourceId?: string
+  /** Opaque `meta.next_cursor` from the previous page. */
+  cursor?: string
 }
 
 type AuditListResponse = { data?: unknown[] } | unknown[]
+
+/**
+ * Scope audit-core served the read under (`meta.scope`): `org` for owners and
+ * admins, `self` for everyone else, `org_redacted` for the content-free
+ * org-wide `tool_action` view. Presentation only; audit-core is the authority.
+ */
+export type AuditReadScope = 'org' | 'self' | 'org_redacted'
+
+export interface AuditPage {
+  events: AuditEvent[]
+  scope?: AuditReadScope
+  /** Present while another page exists; pass it back as `cursor`. */
+  nextCursor?: string
+}
 
 function recordFrom(value: unknown): Record<string, unknown> | undefined {
   return value && typeof value === 'object' && !Array.isArray(value)
@@ -66,6 +92,8 @@ function normalizeAuditEvent(value: unknown): AuditEvent | undefined {
     ...(textField(row, 'actor_role', 'actorRole') ? { actorRole: textField(row, 'actor_role', 'actorRole') } : {}),
     ...(textField(row, 'user_id', 'userId') ? { userId: textField(row, 'user_id', 'userId') } : {}),
     ...(textField(row, 'resource', 'resource_id', 'subject') ? { resource: textField(row, 'resource', 'resource_id', 'subject') } : {}),
+    ...(textField(row, 'plane') ? { plane: textField(row, 'plane') } : {}),
+    ...(textField(row, 'subject') ? { subject: textField(row, 'subject') } : {}),
     ...(textField(row, 'outcome', 'status') ? { outcome: textField(row, 'outcome', 'status') } : {}),
     ...(textField(row, 'occurred_at', 'occurredAt', 'created_at', 'createdAt', 'timestamp')
       ? { occurredAt: textField(row, 'occurred_at', 'occurredAt', 'created_at', 'createdAt', 'timestamp') }
@@ -108,8 +136,63 @@ export async function listAuditEvents(query: AuditQuery = {}, signal?: AbortSign
   return rowsFrom(payload)
 }
 
+function auditPath(query: AuditQuery): string {
+  const params = new URLSearchParams()
+  if (query.event) params.set('event', query.event)
+  if (query.userId) params.set('user_id', query.userId)
+  if (query.since) params.set('since', query.since)
+  if (query.until) params.set('until', query.until)
+  if (query.limit != null) params.set('limit', String(query.limit))
+  if (query.plane) params.set('plane', query.plane)
+  if (query.outcome) params.set('outcome', query.outcome)
+  if (query.subject) params.set('subject', query.subject)
+  if (query.resourceId) params.set('resource_id', query.resourceId)
+  if (query.cursor) params.set('cursor', query.cursor)
+  const suffix = params.toString()
+  return `/api/v1/audit${suffix ? `?${suffix}` : ''}`
+}
+
+function scopeFrom(meta: unknown): AuditReadScope | undefined {
+  const scope = recordFrom(meta)?.scope
+  return scope === 'org' || scope === 'self' || scope === 'org_redacted' ? scope : undefined
+}
+
+/**
+ * Like {@link listAuditEvents}, but keeps `meta.scope` (`requestJson` drops
+ * `meta`). Failures are the same typed `ApiError` every other client throws.
+ */
+export async function listAuditPage(query: AuditQuery = {}, signal?: AbortSignal): Promise<AuditPage> {
+  const response = await fetch(`${gatewayBaseUrl()}${auditPath(query)}`, {
+    credentials: 'include',
+    headers: { Accept: 'application/json' },
+    signal,
+  })
+  const body = (await response.json().catch(() => null)) as { data?: unknown[]; meta?: unknown } | null
+  if (!response.ok) {
+    throw apiErrorFromResponse(body, response)
+  }
+  const scope = scopeFrom(body?.meta)
+  const nextCursor = recordFrom(body?.meta)?.next_cursor
+  return {
+    events: rowsFrom(body ?? {}),
+    ...(scope ? { scope } : {}),
+    ...(typeof nextCursor === 'string' && nextCursor ? { nextCursor } : {}),
+  }
+}
+
+/**
+ * The caller's own audit events. Passing the caller's id makes the intent
+ * explicit; audit-core pins every non-admin read to the caller anyway.
+ */
+export function listOwnAuditEvents(userId: string, limit = 25, signal?: AbortSignal): Promise<AuditPage> {
+  return listAuditPage({ userId, limit }, signal)
+}
+
+/** Largest page the gateway serves (it clamps `limit` to this). */
+export const AUDIT_MAX_LIMIT = 200
+
 /** Convenience: the tool-action events the Trust Center aggregates over. */
-export function listToolActionEvents(limit = 500): Promise<AuditEvent[]> {
+export function listToolActionEvents(limit = AUDIT_MAX_LIMIT): Promise<AuditEvent[]> {
   return listAuditEvents({ event: 'tool_action', limit })
 }
 

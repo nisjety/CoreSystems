@@ -18,6 +18,7 @@ use mp_contracts::model_plane::v1::{
     learning_governance_service_server::{LearningGovernanceService, LearningGovernanceServiceServer},
     managed_run_lifecycle_server::{ManagedRunLifecycle, ManagedRunLifecycleServer},
     memory_service_server::MemoryServiceServer,
+    message_revision_service_server::MessageRevisionServiceServer,
     message_search_server::MessageSearchServer,
     message_tree_service_server::MessageTreeServiceServer,
     orchestration_core_service_server::OrchestrationCoreServiceServer,
@@ -25,9 +26,14 @@ use mp_contracts::model_plane::v1::{
     run_service_server::RunServiceServer,
     session_core_server::{SessionCore, SessionCoreServer},
     session_retention_service_server::{SessionRetentionService, SessionRetentionServiceServer},
+    space_attention_server::SpaceAttentionServer,
+    space_events_server::SpaceEventsServer,
+    space_history_service_server::SpaceHistoryServiceServer,
+    space_room_read_service_server::SpaceRoomReadServiceServer,
     thread_autonomy_server::{ThreadAutonomy, ThreadAutonomyServer},
 };
 use mp_contracts::run_origin::{RunOrigin, ORIGIN_METADATA_KEY};
+use mp_contracts::retention::{space_zdr_mode, SpaceZdrMode};
 use mp_contracts::zdr_refusal::Refusal;
 use mp_events::idempotency::derive_idempotency_hash;
 use mp_ids::new_ulid;
@@ -49,11 +55,12 @@ use crate::letta_adapter::{LettaMemoryAdapter, LettaSearchOutcome};
 use crate::loop_checkpoint;
 use crate::orchestration_grpc::{json_to_struct, struct_to_json};
 use crate::retention_receipt::refuse_zdr_continuation;
+use crate::space::audience_window::AudienceWindow;
 use crate::terminalization;
 
 /// Standard gRPC health names registered on the unauthenticated health-only
 /// surface. Business RPCs remain independently intercepted.
-pub const HEALTH_SERVICE_NAMES: [&str; 9] = [
+pub const HEALTH_SERVICE_NAMES: [&str; 13] = [
     "model_plane.v1.SessionCore",
     "model_plane.v1.ManagedRunLifecycle",
     "model_plane.v1.OrchestrationCoreService",
@@ -63,6 +70,10 @@ pub const HEALTH_SERVICE_NAMES: [&str; 9] = [
     "model_plane.v1.RunService",
     "model_plane.v1.SessionRetentionService",
     "model_plane.v1.ThreadAutonomy",
+    "model_plane.v1.SpaceRoomReadService",
+    "model_plane.v1.SpaceEvents",
+    "model_plane.v1.SpaceHistoryService",
+    "model_plane.v1.SpaceAttention",
 ];
 
 const RUN_STARTED_TYPE_URL: &str = "type.googleapis.com/model_plane.v1.RunStarted";
@@ -82,7 +93,7 @@ const MAX_THREAD_LIST_LIMIT: i64 = 200;
 /// caller asks for. The gateway may serve less, never more.
 const MAX_CONVERSATION_PAGE_LIMIT: i64 = 200;
 pub(crate) const THREAD_TITLE_MAX_CHARS: usize = 96;
-const THREAD_PREVIEW_MAX_CHARS: usize = 180;
+pub(crate) const THREAD_PREVIEW_MAX_CHARS: usize = 180;
 
 /// EU data-residency default for Model-Plane processing (P0.4). Sweden Central
 /// is the explicit EU region; runs are stamped with this unless an operator
@@ -95,6 +106,9 @@ const CONTROL_SPACE_DECISION_AUDIENCE: &str = "model-plane";
 const CONTROL_THREAD_CREATE_ACTION: &str = "model.thread.create";
 const CONTROL_THREAD_APPEND_ACTION: &str = "model.thread.append";
 const CONTROL_THREAD_APPEND_SCHEMA: &str = "sha256:thread-append-v1";
+/// v2 binds `post_kind` into the effect digest (Control `threadAppendSchemaV2`). Only a
+/// v2 decision can authorize a `post`; a v1 decision keeps authorizing a `turn` only.
+pub(crate) const CONTROL_THREAD_APPEND_SCHEMA_V2: &str = "sha256:thread-append-v2";
 const CONTROL_THREAD_READ_ACTION: &str = "model.thread.read";
 const CONTROL_THREAD_READ_SCHEMA: &str = "sha256:thread-read-v1";
 const CONTROL_SCHEDULED_RUN_AUDIENCE: &str = "model-plane-capability-core";
@@ -178,7 +192,8 @@ fn clamp_conversation_page_limit(limit: u32) -> i64 {
 }
 
 /// One stored turn as the transcript reads it: id, role, content, persona,
-/// metadata and author, and where it sits in the message tree (WS17 S8).
+/// metadata, author, post kind, when it was stored, and where it sits in the message tree
+/// (WS17 S8).
 #[derive(sqlx::FromRow)]
 struct ConversationRow {
     id: String,
@@ -187,12 +202,21 @@ struct ConversationRow {
     agent_name: Option<String>,
     metadata: Option<serde_json::Value>,
     author_subject_id: Option<String>,
+    post_kind: String,
+    created_at: DateTime<Utc>,
     parent_message_id: Option<String>,
     sibling_ordinal: i32,
     sibling_count: i64,
     on_active_path: bool,
     /// The thread has a message tree, so its turns carry their place in it.
     versioned: bool,
+    /// The latest allowed revision folded in (WS12-S4): "", "edited" or "deleted". `content`
+    /// and `metadata` above are already the effective values.
+    revision_state: String,
+    revised_at: Option<DateTime<Utc>>,
+    revised_by_subject_id: Option<String>,
+    revision_no: i32,
+    agent_followed_up: bool,
 }
 
 /// The sibling count of a turn, read where the tree is read: a thread that has never been
@@ -208,8 +232,24 @@ fn session_message_from_row(row: ConversationRow, include_inactive: bool) -> pb:
     // The tree fields are sent only where they mean something: a versioned thread, or a read that
     // asked for inactive turns. Every other transcript read keeps its exact shape.
     let tree = include_inactive || row.versioned;
+    // WS15-S9: the typed entry of a human post lives under `metadata.entry`. It is surfaced as its
+    // own field only when it passes the write rules again, and the key never travels in the free
+    // metadata map.
+    let mut metadata = row.metadata;
+    let mut entry = None;
+    if row.post_kind == "post" {
+        if let Some(map) = metadata.as_mut().and_then(serde_json::Value::as_object_mut) {
+            if let Some(stored) = map.remove(crate::space::entry::ENTRY_METADATA_KEY) {
+                entry = crate::space::entry::entry_from_stored(&stored);
+            }
+        }
+    }
     pb::SessionMessage {
         message_id: row.id,
+        post_kind: row.post_kind,
+        // `messages.created_at` is NOT NULL, so every stored turn has a time; a
+        // room shows it beside the message.
+        created_at: Some(to_proto_timestamp(row.created_at)),
         role: row.role,
         content: row.content,
         agent_name: row.agent_name.unwrap_or_default(),
@@ -218,8 +258,7 @@ fn session_message_from_row(row: ConversationRow, include_inactive: bool) -> pb:
         // metadata was persisted; send None rather than an empty
         // Struct so the caller can tell "no evidence recorded" from
         // "evidence recorded and empty".
-        metadata: row
-            .metadata
+        metadata: metadata
             .filter(|value| !matches!(value, serde_json::Value::Null))
             .filter(|value| value.as_object().is_none_or(|map| !map.is_empty()))
             .as_ref()
@@ -240,6 +279,14 @@ fn session_message_from_row(row: ConversationRow, include_inactive: bool) -> pb:
             0
         },
         on_active_path: tree && row.on_active_path,
+        revision_state: row.revision_state,
+        revised_at: row.revised_at.map(to_proto_timestamp),
+        revised_by_subject_id: row.revised_by_subject_id.unwrap_or_default(),
+        revision_no: u32::try_from(row.revision_no).unwrap_or(0),
+        agent_followed_up: row.agent_followed_up,
+        // Filled for human posts by `finish_conversation_messages` (WS08-S2).
+        mentions: Vec::new(),
+        entry,
     }
 }
 
@@ -260,7 +307,8 @@ async fn conversation_cursor_sequence(
     pool: &PgPool,
     org_id: &str,
     thread_id: &str,
-    audience_ceiling: Option<i64>,
+    audience: AudienceWindow,
+    include_human_posts: bool,
     message_id: &str,
 ) -> Result<i64, Status> {
     let row: Option<(i64,)> = sqlx::query_as(
@@ -270,12 +318,18 @@ async fn conversation_cursor_sequence(
          WHERE m.id = $1 AND m.thread_id = $2 AND t.org_id = $3
            AND ($4::BIGINT IS NULL
                 OR m.recipient_audience_revision IS NULL
-                OR m.recipient_audience_revision <= $4)",
+                OR m.recipient_audience_revision <= $4)
+           AND ($6::BIGINT IS NULL
+                OR m.recipient_audience_revision IS NULL
+                OR m.recipient_audience_revision >= $6)
+           AND ($5 OR m.post_kind <> 'post')",
     )
     .bind(message_id)
     .bind(thread_id)
     .bind(org_id)
-    .bind(audience_ceiling)
+    .bind(audience.ceiling)
+    .bind(include_human_posts)
+    .bind(audience.floor)
     .fetch_optional(pool)
     .await
     .map_err(|error| Status::internal(error.to_string()))?;
@@ -293,34 +347,82 @@ async fn conversation_page_rows(
     pool: &PgPool,
     org_id: &str,
     thread_id: &str,
-    audience_ceiling: Option<i64>,
+    audience: AudienceWindow,
+    include_human_posts: bool,
     before_sequence: Option<i64>,
     fetch: i64,
     include_inactive: bool,
 ) -> Result<Vec<ConversationRow>, Status> {
+    conversation_rows_ordered(
+        pool,
+        org_id,
+        thread_id,
+        audience,
+        include_human_posts,
+        before_sequence,
+        fetch,
+        include_inactive,
+        false,
+    )
+    .await
+}
+
+/// [`conversation_page_rows`] with the read order chosen: newest first, or (`ascending`) oldest
+/// first, which is how the tail transcript fetches a thread's first readable turn (WS15-S6).
+async fn conversation_rows_ordered(
+    pool: &PgPool,
+    org_id: &str,
+    thread_id: &str,
+    audience: AudienceWindow,
+    include_human_posts: bool,
+    before_sequence: Option<i64>,
+    fetch: i64,
+    include_inactive: bool,
+    ascending: bool,
+) -> Result<Vec<ConversationRow>, Status> {
+    let direction = if ascending { "ASC" } else { "DESC" };
     let sql = format!(
-        "SELECT m.id::text AS id, m.role, m.content, m.agent_name, m.metadata, m.author_subject_id,
-                m.parent_message_id, m.sibling_ordinal, ({}) AS sibling_count,
-                m.on_active_path, (t.active_leaf_message_id IS NOT NULL) AS versioned
+        "SELECT m.id::text AS id, m.role, {fold_content} AS content, m.agent_name,
+                {fold_metadata} AS metadata, m.author_subject_id,
+                m.post_kind, m.created_at,
+                m.parent_message_id, m.sibling_ordinal, ({sibling}) AS sibling_count,
+                m.on_active_path, (t.active_leaf_message_id IS NOT NULL) AS versioned,
+                {fold_state} AS revision_state, rv.created_at AS revised_at,
+                rv.actor_subject_id AS revised_by_subject_id,
+                COALESCE(rv.revision_no, 0) AS revision_no,
+                {fold_followed_up} AS agent_followed_up
          FROM messages m
          JOIN threads t ON t.id = m.thread_id
+         {fold_join}
          WHERE m.thread_id = $1 AND t.org_id = $2
            AND ($3::BIGINT IS NULL
                 OR m.recipient_audience_revision IS NULL
                 OR m.recipient_audience_revision <= $3)
+           AND ($8::BIGINT IS NULL
+                OR m.recipient_audience_revision IS NULL
+                OR m.recipient_audience_revision >= $8)
            AND ($4::BIGINT IS NULL OR m.sequence < $4)
            AND ($6 OR m.on_active_path)
-         ORDER BY m.sequence DESC
+           AND ($7 OR m.post_kind <> 'post')
+         ORDER BY m.sequence {direction}
          LIMIT $5",
-        SIBLING_COUNT_SQL
+        direction = direction,
+        sibling = SIBLING_COUNT_SQL,
+        fold_content = crate::space::revisions::FOLD_CONTENT_SQL,
+        fold_metadata = crate::space::revisions::FOLD_METADATA_SQL,
+        fold_state = crate::space::revisions::FOLD_STATE_SQL,
+        fold_followed_up = crate::space::revisions::FOLD_FOLLOWED_UP_SQL,
+        fold_join = crate::space::revisions::fold_join_sql("$3::BIGINT"),
     );
     sqlx::query_as::<_, ConversationRow>(&sql)
         .bind(thread_id)
         .bind(org_id)
-        .bind(audience_ceiling)
+        .bind(audience.ceiling)
         .bind(before_sequence)
         .bind(fetch)
         .bind(include_inactive)
+        .bind(include_human_posts)
+        .bind(audience.floor)
         .fetch_all(pool)
         .await
         .map_err(|error| {
@@ -329,12 +431,65 @@ async fn conversation_page_rows(
         })
 }
 
+/// Whether `ListConversationRequest.include_first` is honoured: `SPACE_TIMELINE_CORE`, read once.
+fn timeline_include_first_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(mp_contracts::space_timeline::core_enabled)
+}
+
+/// How many readable turns lie strictly before `before_sequence`, under the same org join,
+/// audience ceiling, branch and post filters as the page read.
+async fn conversation_count_before(
+    pool: &PgPool,
+    org_id: &str,
+    thread_id: &str,
+    audience: AudienceWindow,
+    include_human_posts: bool,
+    include_inactive: bool,
+    before_sequence: i64,
+) -> Result<i64, Status> {
+    sqlx::query_scalar(
+        "SELECT count(*)
+         FROM messages m
+         JOIN threads t ON t.id = m.thread_id
+         WHERE m.thread_id = $1 AND t.org_id = $2
+           AND ($3::BIGINT IS NULL
+                OR m.recipient_audience_revision IS NULL
+                OR m.recipient_audience_revision <= $3)
+           AND m.sequence < $4
+           AND ($5 OR m.on_active_path)
+           AND ($6 OR m.post_kind <> 'post')
+           AND ($7::BIGINT IS NULL
+                OR m.recipient_audience_revision IS NULL
+                OR m.recipient_audience_revision >= $7)",
+    )
+    .bind(thread_id)
+    .bind(org_id)
+    .bind(audience.ceiling)
+    .bind(before_sequence)
+    .bind(include_inactive)
+    .bind(include_human_posts)
+    .bind(audience.floor)
+    .fetch_one(pool)
+    .await
+    .map_err(|error| {
+        warn!(error = %error, "list_conversation first-turn count failed");
+        Status::internal(error.to_string())
+    })
+}
+
 /// The paged transcript read (WS09 S8): the newest `limit` turns before the
 /// cursor, in conversation order, and whether older turns exist.
+///
+/// With `include_first` (WS15-S6, `SPACE_TIMELINE_CORE`), no `before_message_id` and older turns
+/// than the page, the thread's first readable turn is put ahead of the page and `omitted_before`
+/// counts the readable turns between the two. When `omitted_before` is positive, `messages[0]` is
+/// that first turn and the rest is the contiguous tail window; paging further back uses the
+/// oldest tail message id (`messages[1]`). When it is 0 the page is contiguous from the first turn.
 async fn conversation_page_response(
     pool: &PgPool,
     req: &pb::ListConversationRequest,
-    audience_ceiling: Option<i64>,
+    audience: AudienceWindow,
 ) -> Result<Response<pb::ListConversationResponse>, Status> {
     let limit = clamp_conversation_page_limit(req.limit);
     let before_sequence = if req.before_message_id.is_empty() {
@@ -345,7 +500,8 @@ async fn conversation_page_response(
                 pool,
                 &req.org_id,
                 &req.thread_id,
-                audience_ceiling,
+                audience,
+                req.include_human_posts,
                 &req.before_message_id,
             )
             .await?,
@@ -355,21 +511,89 @@ async fn conversation_page_response(
         pool,
         &req.org_id,
         &req.thread_id,
-        audience_ceiling,
+        audience,
+        req.include_human_posts,
         before_sequence,
         limit + 1,
         req.include_inactive,
     )
     .await?;
     let page_size = usize::try_from(limit).unwrap_or(usize::MAX);
-    let (page, has_more) = conversation_tail_page(rows, page_size);
-    Ok(Response::new(pb::ListConversationResponse {
-        messages: page
+    let (page, mut has_more) = conversation_tail_page(rows, page_size);
+    let mut omitted_before: u32 = 0;
+    let mut first_row: Option<ConversationRow> = None;
+    if req.include_first
+        && timeline_include_first_enabled()
+        && before_sequence.is_none()
+        && has_more
+    {
+        if let Some(oldest) = page.first() {
+            let oldest_sequence = conversation_cursor_sequence(
+                pool,
+                &req.org_id,
+                &req.thread_id,
+                audience,
+                req.include_human_posts,
+                &oldest.id,
+            )
+            .await?;
+            first_row = conversation_rows_ordered(
+                pool,
+                &req.org_id,
+                &req.thread_id,
+                audience,
+                req.include_human_posts,
+                None,
+                1,
+                req.include_inactive,
+                true,
+            )
+            .await?
             .into_iter()
-            .map(|row| session_message_from_row(row, req.include_inactive))
-            .collect(),
+            .next();
+            if first_row.is_some() {
+                let before = conversation_count_before(
+                    pool,
+                    &req.org_id,
+                    &req.thread_id,
+                    audience,
+                    req.include_human_posts,
+                    req.include_inactive,
+                    oldest_sequence,
+                )
+                .await?;
+                // The count includes the first turn itself.
+                omitted_before = u32::try_from((before - 1).max(0)).unwrap_or(u32::MAX);
+                has_more = omitted_before > 0;
+            }
+        }
+    }
+    let mut messages: Vec<pb::SessionMessage> = first_row
+        .into_iter()
+        .chain(page)
+        .map(|row| session_message_from_row(row, req.include_inactive))
+        .collect();
+    finish_conversation_messages(pool, req, &mut messages).await?;
+    Ok(Response::new(pb::ListConversationResponse {
+        messages,
         has_more,
+        omitted_before,
     }))
+}
+
+/// WS08-S2: what a read that includes human posts adds after the rows are mapped: the optional
+/// cap on how many posts it returns, then the mentions of the posts it kept (with the wake state
+/// derived from each agent's newest run). A read without posts is untouched.
+async fn finish_conversation_messages(
+    pool: &PgPool,
+    req: &pb::ListConversationRequest,
+    messages: &mut Vec<pb::SessionMessage>,
+) -> Result<(), Status> {
+    if req.include_human_posts {
+        crate::space::mentions::apply_post_context_cap(messages, req.post_context_cap);
+        crate::space::mentions::attach_mentions(pool, &req.org_id, &req.thread_id, messages).await?;
+    }
+    Ok(())
 }
 
 /// The sort position a ListThreads page ended on. The list sorts pinned threads
@@ -686,6 +910,7 @@ async fn delete_thread_rows(
             OR payload ->> 'thread_id' = $1",
         "DELETE FROM session_audit_outbox
          WHERE payload ->> 'thread_id' = $1
+            OR payload -> 'payload' ->> 'thread_id' = $1
             OR payload ->> 'run_id' IN (SELECT id FROM runs WHERE thread_id = $1)
             OR payload ->> 'subject' IN (SELECT id FROM runs WHERE thread_id = $1)",
         "DELETE FROM dream_runs WHERE thread_id = $1
@@ -960,11 +1185,21 @@ struct ControlSpaceDecisionClaims {
     permissions: Vec<String>,
     issued_at: DateTime<Utc>,
     expires_at: DateTime<Utc>,
+    // WS04-S11: the first audience revision a `since_join` member may read from. Absent (0) on
+    // every other decision and on decisions issued before the claim existed. Not part of any
+    // payload digest; honoured only behind SESSION_CORE_SPACE_HISTORY_FLOOR.
+    #[serde(default)]
+    history_floor_revision: u64,
     // Absent on every decision issued without a stored-consent contract.
     #[serde(default)]
     contract_digest: Option<String>,
     #[serde(default)]
     contract_expires_at: Option<DateTime<Utc>>,
+    // WS17-S1: the Space kind Control signed (`personal`, `room`, ...). Absent on decisions
+    // issued before the claim existed; the thread then stays kind-less and contained. Not part
+    // of any payload digest.
+    #[serde(default)]
+    space_kind: String,
 }
 
 /// Delegated-identity design, Gap B (03-design-2-token-exchange.md §2.2/§2.5).
@@ -988,6 +1223,9 @@ struct MailTaskThreadDecisionClaims {
     service_audience: String,
     action_id: String,
     nonce: String,
+    /// Required, like the scheduled-run decision's: Control states it on every decision it signs (always
+    /// false, since it refuses a ZDR org), and a decision that omits it or claims true is refused here.
+    zero_data_retention: bool,
     issued_at: DateTime<Utc>,
     expires_at: DateTime<Utc>,
 }
@@ -1097,9 +1335,7 @@ fn verify_scheduled_run_decision_with_keys(
         .and_then(|raw| String::from_utf8(raw).ok())
         .filter(|id| !id.trim().is_empty())
         .ok_or_else(|| Status::permission_denied("untrusted Control Space decision key"))?;
-    let key = keys
-        .get(&key_id)
-        .ok_or_else(|| Status::permission_denied("untrusted Control Space decision key"))?;
+    let key = crate::decision_keys::lookup_key(&keys, &key_id)?;
     let payload = URL_SAFE_NO_PAD
         .decode(parts[2])
         .map_err(|_| Status::permission_denied("invalid Control scheduled-run decision payload"))?;
@@ -1186,9 +1422,7 @@ fn verify_mail_task_thread_decision_with_keys(
         .and_then(|raw| String::from_utf8(raw).ok())
         .filter(|id| !id.trim().is_empty())
         .ok_or_else(|| Status::permission_denied("untrusted Control Space decision key"))?;
-    let key = keys
-        .get(&key_id)
-        .ok_or_else(|| Status::permission_denied("untrusted Control Space decision key"))?;
+    let key = crate::decision_keys::lookup_key(&keys, &key_id)?;
     let payload = URL_SAFE_NO_PAD.decode(parts[2]).map_err(|_| {
         Status::permission_denied("invalid Control mail-task thread decision payload")
     })?;
@@ -1220,7 +1454,8 @@ fn verify_mail_task_thread_decision_with_keys(
         && claims.action_id == MAIL_TASK_THREAD_PREPARE_ACTION
         && !claims.decision_ref.trim().is_empty()
         && !claims.alias_id.trim().is_empty()
-        && !claims.provider_message_id.trim().is_empty();
+        && !claims.provider_message_id.trim().is_empty()
+        && !claims.zero_data_retention;
     if !matches
         || claims.nonce.trim().is_empty()
         || claims.expires_at <= now
@@ -1392,9 +1627,7 @@ fn verify_scheduled_run_execution_decision_with_keys(
         .and_then(|raw| String::from_utf8(raw).ok())
         .filter(|id| !id.trim().is_empty())
         .ok_or_else(|| Status::permission_denied("untrusted Control Space decision key"))?;
-    let key = keys
-        .get(&key_id)
-        .ok_or_else(|| Status::permission_denied("untrusted Control Space decision key"))?;
+    let key = crate::decision_keys::lookup_key(&keys, &key_id)?;
     let payload = URL_SAFE_NO_PAD.decode(parts[2]).map_err(|_| {
         Status::permission_denied("invalid Control scheduled-run execution decision payload")
     })?;
@@ -1891,9 +2124,8 @@ async fn record_scheduled_run_result_inner(
         crate::retention_receipt::RetentionClass::from_storage(&retention_class),
         Some(crate::retention_receipt::RetentionClass::Persistent)
     ) {
-        return Err(Status::failed_precondition(
-            "a zero-retention or waived run has no durable scheduled result",
-        ));
+        return Err(mp_contracts::zdr_refusal::Refusal::feature_not_supported("scheduled_step")
+            .grpc_status(tonic::Code::FailedPrecondition));
     }
 
     let receipt: Option<(String, String, String, String, String, String)> = sqlx::query_as(
@@ -2446,6 +2678,11 @@ fn validate_thread_space_context_shape(req: &pb::CreateThreadRequest) -> Result<
 /// is only permitted for an unscoped thread (or the bootstrap first message
 /// atomically following its already-verified create); it must never silently
 /// downgrade a later scoped append.
+/// Whether the request carries the complete signed-decision envelope (WS01-S3's member gate).
+pub(crate) fn append_space_context_is_complete(req: &pb::AppendMessageRequest) -> bool {
+    matches!(validate_append_space_context_shape(req), Ok(true))
+}
+
 fn validate_append_space_context_shape(req: &pb::AppendMessageRequest) -> Result<bool, Status> {
     let values = [
         req.space_id.trim(),
@@ -2476,12 +2713,27 @@ fn validate_append_space_context_shape(req: &pb::AppendMessageRequest) -> Result
 
 /// Loads the current Control verification key set. During rotation the
 /// deployment supplies `CONTROL_SPACE_DECISION_PUBLIC_KEYS_JSON` as a JSON map
-/// of `{ key_id: url_safe_base64_ed25519_public_key }`; any token bearing an
+/// of `{ key_id: base64_ed25519_public_key }` (unpadded base64url preferred; padded
+/// base64url and standard base64 are accepted, see `decision_keys::parse_public_key`); any token bearing an
 /// unlisted key id fails closed. The singular variables remain a deliberately
 /// compatible bootstrap form for deployments that have not started rotation.
-fn configured_control_space_decision_keys() -> Result<BTreeMap<String, VerifyingKey>, Status> {
-    if let Ok(raw) = env::var("CONTROL_SPACE_DECISION_PUBLIC_KEYS_JSON") {
-        let encoded_keys: BTreeMap<String, String> = serde_json::from_str(&raw).map_err(|_| {
+pub(crate) fn configured_control_space_decision_keys() -> Result<BTreeMap<String, VerifyingKey>, Status> {
+    control_space_decision_keys_from(
+        env::var("CONTROL_SPACE_DECISION_PUBLIC_KEYS_JSON").ok().as_deref(),
+        env::var("CONTROL_SPACE_DECISION_KEY_ID").ok().as_deref(),
+        env::var("CONTROL_SPACE_DECISION_PUBLIC_KEY_BASE64").ok().as_deref(),
+    )
+}
+
+/// The env-free half of [`configured_control_space_decision_keys`]: the three values are the
+/// raw `CONTROL_SPACE_DECISION_PUBLIC_KEYS_JSON`, `..._KEY_ID` and `..._PUBLIC_KEY_BASE64`.
+pub(crate) fn control_space_decision_keys_from(
+    keys_json: Option<&str>,
+    key_id: Option<&str>,
+    encoded_key: Option<&str>,
+) -> Result<BTreeMap<String, VerifyingKey>, Status> {
+    if let Some(raw) = keys_json {
+        let encoded_keys: BTreeMap<String, String> = serde_json::from_str(raw).map_err(|_| {
             Status::failed_precondition("Control Space decision public key set is invalid")
         })?;
         if encoded_keys.is_empty() {
@@ -2498,15 +2750,7 @@ fn configured_control_space_decision_keys() -> Result<BTreeMap<String, Verifying
                     "Control Space decision key configuration is invalid",
                 ));
             }
-            let bytes = URL_SAFE_NO_PAD.decode(encoded).map_err(|_| {
-                Status::failed_precondition("Control Space decision public key is invalid")
-            })?;
-            let bytes: [u8; 32] = bytes.try_into().map_err(|_| {
-                Status::failed_precondition("Control Space decision public key length is invalid")
-            })?;
-            let key = VerifyingKey::from_bytes(&bytes).map_err(|_| {
-                Status::failed_precondition("Control Space decision public key is invalid")
-            })?;
+            let key = crate::decision_keys::parse_public_key(encoded)?;
             if keys.insert(key_id.to_owned(), key).is_some() {
                 return Err(Status::failed_precondition(
                     "Control Space decision public key IDs are not unique",
@@ -2516,10 +2760,10 @@ fn configured_control_space_decision_keys() -> Result<BTreeMap<String, Verifying
         return Ok(keys);
     }
 
-    let key_id = env::var("CONTROL_SPACE_DECISION_KEY_ID").map_err(|_| {
+    let key_id = key_id.ok_or_else(|| {
         Status::failed_precondition("Control Space decision key ID is not configured")
     })?;
-    let encoded = env::var("CONTROL_SPACE_DECISION_PUBLIC_KEY_BASE64").map_err(|_| {
+    let encoded = encoded_key.ok_or_else(|| {
         Status::failed_precondition("Control Space decision public key is not configured")
     })?;
     let key_id = key_id.trim();
@@ -2529,14 +2773,7 @@ fn configured_control_space_decision_keys() -> Result<BTreeMap<String, Verifying
             "Control Space decision key configuration is invalid",
         ));
     }
-    let bytes = URL_SAFE_NO_PAD
-        .decode(encoded)
-        .map_err(|_| Status::failed_precondition("Control Space decision public key is invalid"))?;
-    let bytes: [u8; 32] = bytes.try_into().map_err(|_| {
-        Status::failed_precondition("Control Space decision public key length is invalid")
-    })?;
-    let key = VerifyingKey::from_bytes(&bytes)
-        .map_err(|_| Status::failed_precondition("Control Space decision public key is invalid"))?;
+    let key = crate::decision_keys::parse_public_key(encoded)?;
     Ok(BTreeMap::from([(key_id.to_owned(), key)]))
 }
 
@@ -2594,9 +2831,47 @@ fn thread_append_payload_digest(
     org_id: &str,
     user_id: &str,
 ) -> String {
+    thread_append_payload_digest_for(req, org_id, user_id, None)
+}
+
+/// The request's post kind as the digest binds it: `""` is the historical turn.
+fn append_post_kind(req: &pb::AppendMessageRequest) -> &str {
+    match req.post_kind.trim() {
+        "" => "turn",
+        other => other,
+    }
+}
+
+/// v2 of the canonical digest shared with Control's `threadAppendPayloadDigest`: the v1
+/// encoding under header `model.thread.append\0v2\0` plus one `post_kind` field after
+/// `idempotency_key` and before the revisions.
+fn thread_append_payload_digest_v2(
+    req: &pb::AppendMessageRequest,
+    org_id: &str,
+    user_id: &str,
+) -> String {
+    thread_append_payload_digest_for(req, org_id, user_id, Some(append_post_kind(req)))
+}
+
+fn thread_append_payload_digest_for(
+    req: &pb::AppendMessageRequest,
+    org_id: &str,
+    user_id: &str,
+    post_kind: Option<&str>,
+) -> String {
     let mut digest = Sha256::new();
-    digest.update(b"model.thread.append\0v1\0");
+    digest.update(if post_kind.is_some() {
+        b"model.thread.append\0v2\0".as_slice()
+    } else {
+        b"model.thread.append\0v1\0".as_slice()
+    });
     let content_digest = thread_append_content_digest(&req.content);
+    let mut write_field = |name: &str, value: &str| {
+        digest.update(name.as_bytes());
+        digest.update([0]);
+        digest.update((value.len() as u64).to_be_bytes());
+        digest.update(value.as_bytes());
+    };
     for (name, value) in [
         ("org_id", org_id),
         ("user_id", user_id),
@@ -2620,10 +2895,10 @@ fn thread_append_payload_digest(
         ("action_schema_hash", req.action_schema_hash.as_str()),
         ("idempotency_key", req.idempotency_key.as_str()),
     ] {
-        digest.update(name.as_bytes());
-        digest.update([0]);
-        digest.update((value.len() as u64).to_be_bytes());
-        digest.update(value.as_bytes());
+        write_field(name, value);
+    }
+    if let Some(kind) = post_kind {
+        write_field("post_kind", kind);
     }
     digest.update(b"authority_revision\0");
     digest.update(req.authority_revision.to_be_bytes());
@@ -2637,7 +2912,7 @@ fn verify_thread_space_decision_with_key(
     expected_key_id: &str,
     key: &VerifyingKey,
     now: DateTime<Utc>,
-) -> Result<(), Status> {
+) -> Result<String, Status> {
     if req.space_decision_token.len() > MAX_CONTROL_SPACE_DECISION_TOKEN_BYTES {
         return Err(Status::invalid_argument(
             "Control Space decision is too large",
@@ -2708,12 +2983,10 @@ fn verify_thread_space_decision_with_key(
     .iter()
     .all(|value| !value.trim().is_empty());
     // Boolean policy flags are required serde fields, so merely decoding the
-    // claims establishes their presence; retain them for the later provider/
-    // retention propagation slices without inventing a Model-local default.
-    let _privacy_processing_flags = (
-        claims.third_party_processing_allowed,
-        claims.zero_data_retention,
-    );
+    // claims establishes their presence. `zero_data_retention` is gated below
+    // (WS06-S2); the third-party flag is retained for the later provider
+    // propagation slices without inventing a Model-local default.
+    let _third_party_processing_allowed = claims.third_party_processing_allowed;
     if !privacy_complete || claims.nonce.trim().is_empty() {
         return Err(Status::permission_denied(
             "Control Space decision has incomplete privacy policy or nonce",
@@ -2724,14 +2997,51 @@ fn verify_thread_space_decision_with_key(
             "Control Space decision is expired or not yet valid",
         ));
     }
-    Ok(())
+    space_decision_retention_gate(
+        claims.zero_data_retention,
+        "thread_create",
+        configured_space_zdr_mode(),
+    )?;
+    Ok(claims.space_kind)
+}
+
+/// WS06-S2: the Space decision's `zero_data_retention` flag on the legacy owner
+/// `create_thread` and `append_message` paths. Called after the signature, key and binding
+/// checks, so only a decision Control really issued reaches it. A flag of `false` is a no-op.
+/// With the flag set the call is counted (`mp_session_space_zdr_flag_total{action,enforced}`,
+/// closed labels, no ids); under `SESSION_CORE_SPACE_ZDR=enforce` it also refuses with the typed
+/// `zdr_durable_mutation_forbidden` refusal, under `observe` (the default) it proceeds.
+fn space_decision_retention_gate(
+    zero_data_retention: bool,
+    action: &'static str,
+    mode: SpaceZdrMode,
+) -> Result<(), Status> {
+    if !zero_data_retention {
+        return Ok(());
+    }
+    metrics::counter!(
+        "mp_session_space_zdr_flag_total",
+        "action" => action,
+        "enforced" => mode.enforced_label()
+    )
+    .increment(1);
+    match mode {
+        SpaceZdrMode::Observe => Ok(()),
+        SpaceZdrMode::Enforce => {
+            Err(Refusal::DURABLE_MUTATION_FORBIDDEN.grpc_status(tonic::Code::FailedPrecondition))
+        }
+    }
+}
+
+fn configured_space_zdr_mode() -> SpaceZdrMode {
+    space_zdr_mode(env::var("SESSION_CORE_SPACE_ZDR").ok().as_deref())
 }
 
 fn verify_thread_space_decision_with_keys(
     req: &pb::CreateThreadRequest,
     keys: &BTreeMap<String, VerifyingKey>,
     now: DateTime<Utc>,
-) -> Result<(), Status> {
+) -> Result<String, Status> {
     let key_id = req
         .space_decision_token
         .split('.')
@@ -2740,15 +3050,13 @@ fn verify_thread_space_decision_with_keys(
         .and_then(|raw| String::from_utf8(raw).ok())
         .filter(|id| !id.trim().is_empty())
         .ok_or_else(|| Status::permission_denied("untrusted Control Space decision key"))?;
-    let key = keys
-        .get(&key_id)
-        .ok_or_else(|| Status::permission_denied("untrusted Control Space decision key"))?;
+    let key = crate::decision_keys::lookup_key(&keys, &key_id)?;
     verify_thread_space_decision_with_key(req, &key_id, key, now)
 }
 
-fn verify_thread_space_decision(req: &pb::CreateThreadRequest) -> Result<(), Status> {
+fn verify_thread_space_decision(req: &pb::CreateThreadRequest) -> Result<String, Status> {
     if !validate_thread_space_context_shape(req)? {
-        return Ok(());
+        return Ok(String::new());
     }
     let keys = configured_control_space_decision_keys()?;
     verify_thread_space_decision_with_keys(req, &keys, Utc::now())
@@ -2766,6 +3074,9 @@ pub(crate) struct VerifiedSpaceRead {
     /// stamped with a NEWER revision are refused: they belong to an audience
     /// this reader was not part of when the decision was minted.
     pub(crate) recipient_audience_revision: i64,
+    /// WS04-S11: rows stamped with an OLDER revision are hidden from a `since_join` reader.
+    /// `None` when the claim is absent or SESSION_CORE_SPACE_HISTORY_FLOOR is off (full history).
+    pub(crate) history_floor: Option<i64>,
 }
 
 /// Recompute Control's `model.thread.read` payload digest from the claims.
@@ -2813,16 +3124,17 @@ fn thread_read_payload_digest(claims: &ControlSpaceDecisionClaims) -> String {
 
 #[allow(clippy::result_large_err)]
 #[allow(clippy::too_many_arguments)]
-fn verify_thread_read_space_decision_with_key(
+fn verify_thread_read_claims_with_key(
     token: &str,
     decision_ref: &str,
     org_id: &str,
     user_id: &str,
     space_id: &str,
+    expected_audience: &str,
     expected_key_id: &str,
     key: &VerifyingKey,
     now: DateTime<Utc>,
-) -> Result<VerifiedSpaceRead, Status> {
+) -> Result<VerifiedReadClaims, Status> {
     if token.len() > MAX_CONTROL_SPACE_DECISION_TOKEN_BYTES {
         return Err(Status::invalid_argument(
             "Control Space read decision is too large",
@@ -2865,7 +3177,7 @@ fn verify_thread_read_space_decision_with_key(
         && claims.org_id == org_id
         && claims.subject_id == user_id
         && claims.space_ref == space_id
-        && claims.service_audience == CONTROL_SPACE_DECISION_AUDIENCE
+        && claims.service_audience == expected_audience
         && claims.action_id == CONTROL_THREAD_READ_ACTION
         && claims.action_schema_hash == CONTROL_THREAD_READ_SCHEMA
         && claims.payload_digest == thread_read_payload_digest(&claims)
@@ -2884,7 +3196,11 @@ fn verify_thread_read_space_decision_with_key(
     if claims
         .permissions
         .iter()
-        .any(|permission| permission == "thread:append" || permission == "thread:create")
+        .any(|permission| {
+            permission == "thread:append"
+                || permission == "thread:create"
+                || permission == RUN_CONTROL_PERMISSION
+        })
     {
         return Err(Status::permission_denied(
             "a Space read decision must not carry write permissions",
@@ -2915,9 +3231,371 @@ fn verify_thread_read_space_decision_with_key(
         i64::try_from(claims.recipient_audience_revision).map_err(|_| {
             Status::permission_denied("Control Space read decision revision is invalid")
         })?;
-    Ok(VerifiedSpaceRead {
+    Ok(VerifiedReadClaims {
         recipient_audience_revision,
+        issued_at: claims.issued_at,
+        expires_at: claims.expires_at,
+        zero_data_retention: claims.zero_data_retention,
+        history_floor: crate::space::audience_window::history_floor_from_claim(
+            claims.history_floor_revision,
+            crate::space::audience_window::history_floor_enabled(),
+        ),
     })
+}
+
+/// What the claims-returning read-decision verifier keeps of a verified decision. The
+/// Space event stream (WS02-S3) needs the expiry, issue time and `zero_data_retention`
+/// that [`VerifiedSpaceRead`] deliberately discards.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct VerifiedReadClaims {
+    pub(crate) recipient_audience_revision: i64,
+    pub(crate) issued_at: DateTime<Utc>,
+    pub(crate) expires_at: DateTime<Utc>,
+    pub(crate) zero_data_retention: bool,
+    /// WS04-S11: see [`VerifiedSpaceRead::history_floor`]; always `None` on non-read decisions.
+    pub(crate) history_floor: Option<i64>,
+}
+
+/// The existing `model.thread.read` verifier: audience `model-plane`, answering only the
+/// revision ceiling. A thin caller of [`verify_thread_read_claims_with_key`].
+#[allow(clippy::result_large_err)]
+#[allow(clippy::too_many_arguments)]
+fn verify_thread_read_space_decision_with_key(
+    token: &str,
+    decision_ref: &str,
+    org_id: &str,
+    user_id: &str,
+    space_id: &str,
+    expected_key_id: &str,
+    key: &VerifyingKey,
+    now: DateTime<Utc>,
+) -> Result<VerifiedSpaceRead, Status> {
+    let verified = verify_thread_read_claims_with_key(
+        token,
+        decision_ref,
+        org_id,
+        user_id,
+        space_id,
+        CONTROL_SPACE_DECISION_AUDIENCE,
+        expected_key_id,
+        key,
+        now,
+    )?;
+    Ok(VerifiedSpaceRead {
+        recipient_audience_revision: verified.recipient_audience_revision,
+        history_floor: verified.history_floor,
+    })
+}
+
+/// The Control audience that authorizes the Space event stream (WS02-S2 issues it). A read
+/// decision (`model-plane`) is refused by the stream and a stream decision by `ListThreads`,
+/// because each verifier compares the signed `service_audience` exactly.
+pub(crate) const CONTROL_SPACE_STREAM_AUDIENCE: &str = "model-plane-space-stream";
+
+/// Verifies the Control decision that opens a Space event stream: signature and key id,
+/// audience `model-plane-space-stream`, action, schema, payload digest, subject, org, Space,
+/// `thread:read` without any write permission, privacy completeness and the time window.
+#[allow(clippy::result_large_err)]
+pub(crate) fn verify_space_stream_decision(
+    token: &str,
+    decision_ref: &str,
+    org_id: &str,
+    user_id: &str,
+    space_id: &str,
+    now: DateTime<Utc>,
+) -> Result<VerifiedReadClaims, Status> {
+    if token.trim().is_empty() || decision_ref.trim().is_empty() || space_id.trim().is_empty() {
+        return Err(Status::invalid_argument(
+            "a Space event stream requires space_id, decision ref, and token together",
+        ));
+    }
+    if user_id.trim().is_empty() {
+        return Err(Status::permission_denied(
+            "a Space event stream requires an authenticated user subject",
+        ));
+    }
+    let keys = configured_control_space_decision_keys()?;
+    let key_id = token
+        .split('.')
+        .nth(1)
+        .and_then(|part| URL_SAFE_NO_PAD.decode(part).ok())
+        .and_then(|raw| String::from_utf8(raw).ok())
+        .filter(|id| !id.trim().is_empty())
+        .ok_or_else(|| Status::permission_denied("untrusted Control Space decision key"))?;
+    let key = crate::decision_keys::lookup_key(&keys, &key_id)?;
+    verify_thread_read_claims_with_key(
+        token,
+        decision_ref,
+        org_id,
+        user_id,
+        space_id,
+        CONTROL_SPACE_STREAM_AUDIENCE,
+        &key_id,
+        key,
+        now,
+    )
+}
+
+/// Verifies the Control `model.thread.read` decision (audience `model-plane`) and keeps its
+/// claims: the audience ceiling, the expiry and the zero-retention claim. Unlike
+/// [`verify_thread_read_space_decision`] a missing decision is an error, not "no decision":
+/// the room run live view (WS09-S4) has no owner-bound fallback.
+#[allow(clippy::result_large_err)]
+pub(crate) fn verify_space_read_claims(
+    token: &str,
+    decision_ref: &str,
+    org_id: &str,
+    user_id: &str,
+    space_id: &str,
+    now: DateTime<Utc>,
+) -> Result<VerifiedReadClaims, Status> {
+    if token.trim().is_empty() || decision_ref.trim().is_empty() || space_id.trim().is_empty() {
+        return Err(Status::invalid_argument(
+            "a Space read decision requires space_id, decision ref, and token together",
+        ));
+    }
+    if user_id.trim().is_empty() {
+        return Err(Status::permission_denied(
+            "a Space read decision requires an authenticated user subject",
+        ));
+    }
+    let keys = configured_control_space_decision_keys()?;
+    let key_id = token
+        .split('.')
+        .nth(1)
+        .and_then(|part| URL_SAFE_NO_PAD.decode(part).ok())
+        .and_then(|raw| String::from_utf8(raw).ok())
+        .filter(|id| !id.trim().is_empty())
+        .ok_or_else(|| Status::permission_denied("untrusted Control Space decision key"))?;
+    let key = crate::decision_keys::lookup_key(&keys, &key_id)?;
+    verify_thread_read_claims_with_key(
+        token,
+        decision_ref,
+        org_id,
+        user_id,
+        space_id,
+        CONTROL_SPACE_DECISION_AUDIENCE,
+        &key_id,
+        key,
+        now,
+    )
+}
+
+/// The Control action, schema and sole permission of a room run-control decision (WS09-S7 issues
+/// it, WS09-S8 verifies it). Disjoint from every thread, run-wake and approval decision.
+pub(crate) const CONTROL_RUN_CONTROL_ACTION: &str = "model.run.control";
+pub(crate) const CONTROL_RUN_CONTROL_SCHEMA: &str = "sha256:run-control-v1";
+pub(crate) const RUN_CONTROL_PERMISSION: &str = "run:cancel";
+/// The one operation a run-control decision binds today.
+pub(crate) const RUN_CONTROL_OPERATION_CANCEL: &str = "cancel";
+
+/// Recompute Control's `model.run.control` payload digest from the claims plus the request's own
+/// `run_id` and operation (the thread-read digest fields, then `run_id` and `operation`). The
+/// signature already covers the payload; this pins the digest CONTRACT and, because `run_id` is
+/// the request's, binds the token to the one run it was issued for.
+fn run_control_payload_digest(
+    claims: &ControlSpaceDecisionClaims,
+    run_id: &str,
+    operation: &str,
+) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"model.run.control\0v1\0");
+    for (name, value) in [
+        ("org_id", claims.org_id.as_str()),
+        ("user_id", claims.subject_id.as_str()),
+        ("space_id", claims.space_ref.as_str()),
+        ("space_decision_ref", claims.decision_ref.as_str()),
+        (
+            "recipient_audience_ref",
+            claims.recipient_audience_ref.as_str(),
+        ),
+        (
+            "recipient_audience_hash",
+            claims.recipient_audience_hash.as_str(),
+        ),
+        ("privacy_policy_ref", claims.privacy_policy_ref.as_str()),
+        (
+            "resource_authorization_ref",
+            claims.resource_authorization_ref.as_str(),
+        ),
+        ("run_id", run_id),
+        ("operation", operation),
+        ("action_schema_hash", CONTROL_RUN_CONTROL_SCHEMA),
+        ("idempotency_key", claims.idempotency_key.as_str()),
+    ] {
+        digest.update(name.as_bytes());
+        digest.update([0]);
+        digest.update((value.len() as u64).to_be_bytes());
+        digest.update(value.as_bytes());
+    }
+    digest.update(b"authority_revision\0");
+    digest.update(claims.authority_revision.to_be_bytes());
+    digest.update(b"recipient_audience_revision\0");
+    digest.update(claims.recipient_audience_revision.to_be_bytes());
+    format!("sha256:{:x}", digest.finalize())
+}
+
+#[allow(clippy::result_large_err)]
+#[allow(clippy::too_many_arguments)]
+fn verify_run_control_space_decision_with_key(
+    token: &str,
+    decision_ref: &str,
+    org_id: &str,
+    user_id: &str,
+    space_id: &str,
+    run_id: &str,
+    idempotency_key: &str,
+    expected_key_id: &str,
+    key: &VerifyingKey,
+    now: DateTime<Utc>,
+) -> Result<VerifiedReadClaims, Status> {
+    if token.len() > MAX_CONTROL_SPACE_DECISION_TOKEN_BYTES {
+        return Err(Status::invalid_argument(
+            "Control Space run-control decision is too large",
+        ));
+    }
+    let parts: Vec<&str> = token.split('.').collect();
+    if parts.len() != 4 || parts[0] != CONTROL_SPACE_DECISION_VERSION {
+        return Err(Status::permission_denied(
+            "invalid Control Space run-control decision envelope",
+        ));
+    }
+    let token_key_id = URL_SAFE_NO_PAD
+        .decode(parts[1])
+        .ok()
+        .and_then(|raw| String::from_utf8(raw).ok())
+        .filter(|id| id == expected_key_id)
+        .ok_or_else(|| Status::permission_denied("untrusted Control Space decision key"))?;
+    if token_key_id.trim().is_empty() {
+        return Err(Status::permission_denied(
+            "untrusted Control Space decision key",
+        ));
+    }
+    let payload = URL_SAFE_NO_PAD.decode(parts[2]).map_err(|_| {
+        Status::permission_denied("invalid Control Space run-control decision payload")
+    })?;
+    let signature = URL_SAFE_NO_PAD.decode(parts[3]).map_err(|_| {
+        Status::permission_denied("invalid Control Space run-control decision signature")
+    })?;
+    let signature = Signature::from_slice(&signature).map_err(|_| {
+        Status::permission_denied("invalid Control Space run-control decision signature")
+    })?;
+    key.verify(
+        format!("{}.{}.{}", parts[0], parts[1], parts[2]).as_bytes(),
+        &signature,
+    )
+    .map_err(|_| {
+        Status::permission_denied("invalid Control Space run-control decision signature")
+    })?;
+    let claims: ControlSpaceDecisionClaims = serde_json::from_slice(&payload).map_err(|_| {
+        Status::permission_denied("invalid Control Space run-control decision claims")
+    })?;
+
+    // Exactly the one permission: a thread-read, append, create, wake or approval token carries
+    // another permission and fails here, and this token carries no thread permission, so the two
+    // families stay disjoint in both directions.
+    let matches_request = claims.decision_ref == decision_ref
+        && claims.org_id == org_id
+        && claims.subject_id == user_id
+        && claims.space_ref == space_id
+        && claims.service_audience == CONTROL_SPACE_DECISION_AUDIENCE
+        && claims.action_id == CONTROL_RUN_CONTROL_ACTION
+        && claims.action_schema_hash == CONTROL_RUN_CONTROL_SCHEMA
+        && claims.idempotency_key == idempotency_key
+        && claims.payload_digest
+            == run_control_payload_digest(&claims, run_id, RUN_CONTROL_OPERATION_CANCEL)
+        && claims.permissions.len() == 1
+        && claims.permissions[0] == RUN_CONTROL_PERMISSION;
+    if !matches_request {
+        return Err(Status::permission_denied(
+            "Control Space decision does not authorize this run control",
+        ));
+    }
+    let privacy_complete = [
+        claims.purpose.as_str(),
+        claims.lawful_basis.as_str(),
+        claims.privacy_class.as_str(),
+        claims.retention_class.as_str(),
+        claims.residency.as_str(),
+        claims.deletion_scope.as_str(),
+    ]
+    .iter()
+    .all(|value| !value.trim().is_empty());
+    if !privacy_complete
+        || claims.nonce.trim().is_empty()
+        || claims.recipient_audience_ref.trim().is_empty()
+        || claims.recipient_audience_revision == 0
+        || claims.issued_at > now + chrono::Duration::minutes(1)
+        || claims.expires_at <= now
+    {
+        return Err(Status::permission_denied(
+            "Control Space run-control decision is expired or incomplete",
+        ));
+    }
+    let recipient_audience_revision =
+        i64::try_from(claims.recipient_audience_revision).map_err(|_| {
+            Status::permission_denied("Control Space run-control decision revision is invalid")
+        })?;
+    Ok(VerifiedReadClaims {
+        recipient_audience_revision,
+        issued_at: claims.issued_at,
+        expires_at: claims.expires_at,
+        zero_data_retention: claims.zero_data_retention,
+        history_floor: None,
+    })
+}
+
+/// Key lookup and verification of the Control `model.run.control` decision that authorizes a room
+/// manager's Stop of one run (WS09-S8). The decision is bound to the caller (subject), org, Space,
+/// `run_id`, the operation `cancel` and the request's idempotency key. Returns the audience
+/// ceiling, expiry and the zero-retention claim; the caller refuses a zero-retention decision.
+#[allow(clippy::result_large_err)]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn verify_run_control_space_decision(
+    token: &str,
+    decision_ref: &str,
+    org_id: &str,
+    user_id: &str,
+    space_id: &str,
+    run_id: &str,
+    idempotency_key: &str,
+    now: DateTime<Utc>,
+) -> Result<VerifiedReadClaims, Status> {
+    if token.trim().is_empty()
+        || decision_ref.trim().is_empty()
+        || space_id.trim().is_empty()
+        || run_id.trim().is_empty()
+    {
+        return Err(Status::invalid_argument(
+            "a run-control decision requires space_id, run_id, decision ref, and token together",
+        ));
+    }
+    if user_id.trim().is_empty() {
+        return Err(Status::permission_denied(
+            "a run-control decision requires an authenticated user subject",
+        ));
+    }
+    let keys = configured_control_space_decision_keys()?;
+    let key_id = token
+        .split('.')
+        .nth(1)
+        .and_then(|part| URL_SAFE_NO_PAD.decode(part).ok())
+        .and_then(|raw| String::from_utf8(raw).ok())
+        .filter(|id| !id.trim().is_empty())
+        .ok_or_else(|| Status::permission_denied("untrusted Control Space decision key"))?;
+    let key = crate::decision_keys::lookup_key(&keys, &key_id)?;
+    verify_run_control_space_decision_with_key(
+        token,
+        decision_ref,
+        org_id,
+        user_id,
+        space_id,
+        run_id,
+        idempotency_key,
+        &key_id,
+        key,
+        now,
+    )
 }
 
 /// Resolve an optional shared-Space read authority for one request.
@@ -2956,9 +3634,7 @@ pub(crate) fn verify_thread_read_space_decision(
         .and_then(|raw| String::from_utf8(raw).ok())
         .filter(|id| !id.trim().is_empty())
         .ok_or_else(|| Status::permission_denied("untrusted Control Space decision key"))?;
-    let key = keys
-        .get(&key_id)
-        .ok_or_else(|| Status::permission_denied("untrusted Control Space decision key"))?;
+    let key = crate::decision_keys::lookup_key(&keys, &key_id)?;
     verify_thread_read_space_decision_with_key(
         token,
         decision_ref,
@@ -2979,7 +3655,7 @@ fn verify_append_space_decision_with_key(
     expected_key_id: &str,
     key: &VerifyingKey,
     now: DateTime<Utc>,
-) -> Result<(), Status> {
+) -> Result<String, Status> {
     if req.space_decision_token.len() > MAX_CONTROL_SPACE_DECISION_TOKEN_BYTES {
         return Err(Status::invalid_argument(
             "Control Space decision is too large",
@@ -3012,16 +3688,35 @@ fn verify_append_space_decision_with_key(
     .map_err(|_| Status::permission_denied("invalid Control Space decision signature"))?;
     let claims: ControlSpaceDecisionClaims = serde_json::from_slice(&payload)
         .map_err(|_| Status::permission_denied("invalid Control Space decision claims"))?;
+    // v1 decisions authorize a turn only (the post kind is forced `turn`); a post needs a v2
+    // decision whose digest commits to `post_kind`.
+    let schema_v2 = req.action_schema_hash == CONTROL_THREAD_APPEND_SCHEMA_V2;
+    if !schema_v2 && append_post_kind(req) != "turn" {
+        return Err(Status::permission_denied(
+            "a v1 Control Space decision cannot authorize a post",
+        ));
+    }
+    let (expected_schema, expected_digest) = if schema_v2 {
+        (
+            CONTROL_THREAD_APPEND_SCHEMA_V2,
+            thread_append_payload_digest_v2(req, org_id, user_id),
+        )
+    } else {
+        (
+            CONTROL_THREAD_APPEND_SCHEMA,
+            thread_append_payload_digest(req, org_id, user_id),
+        )
+    };
     let matches_request = claims.decision_ref == req.space_decision_ref
         && claims.org_id == org_id
         && claims.subject_id == user_id
         && claims.space_ref == req.space_id
         && claims.service_audience == CONTROL_SPACE_DECISION_AUDIENCE
         && claims.action_id == CONTROL_THREAD_APPEND_ACTION
-        && claims.action_schema_hash == CONTROL_THREAD_APPEND_SCHEMA
+        && claims.action_schema_hash == expected_schema
         && claims.action_schema_hash == req.action_schema_hash
         && claims.payload_digest == req.payload_digest
-        && claims.payload_digest == thread_append_payload_digest(req, org_id, user_id)
+        && claims.payload_digest == expected_digest
         && claims.idempotency_key == req.idempotency_key
         && claims.recipient_audience_ref == req.recipient_audience_ref
         && claims.recipient_audience_revision == req.recipient_audience_revision
@@ -3057,16 +3752,21 @@ fn verify_append_space_decision_with_key(
             "Control Space append decision is expired or incomplete",
         ));
     }
-    Ok(())
+    space_decision_retention_gate(
+        claims.zero_data_retention,
+        "message_append",
+        configured_space_zdr_mode(),
+    )?;
+    Ok(claims.space_kind)
 }
 
-fn verify_append_space_decision(
+pub(crate) fn verify_append_space_decision(
     req: &pb::AppendMessageRequest,
     org_id: &str,
     user_id: &str,
-) -> Result<(), Status> {
+) -> Result<String, Status> {
     if !validate_append_space_context_shape(req)? {
-        return Ok(());
+        return Ok(String::new());
     }
     let keys = configured_control_space_decision_keys()?;
     let key_id = req
@@ -3077,13 +3777,455 @@ fn verify_append_space_decision(
         .and_then(|raw| String::from_utf8(raw).ok())
         .filter(|id| !id.trim().is_empty())
         .ok_or_else(|| Status::permission_denied("untrusted Control Space decision key"))?;
-    let key = keys
-        .get(&key_id)
-        .ok_or_else(|| Status::permission_denied("untrusted Control Space decision key"))?;
+    let key = crate::decision_keys::lookup_key(&keys, &key_id)?;
     verify_append_space_decision_with_key(req, org_id, user_id, &key_id, key, Utc::now())
 }
 
-/// Whether a decision-less assistant append may land in a Space thread. The
+//// What a verified Control `model.thread.revise` decision admits (WS12-S4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct VerifiedRevise {
+    /// `thread:moderate` is present: the caller may delete another member's message.
+    pub(crate) moderate: bool,
+    /// The org's retention rule for the original text: `true` purges it, `false` retains it.
+    pub(crate) purge_original: bool,
+}
+
+/// The `sha256:` digest of a revise request's new text; of the empty string for a delete.
+pub(crate) fn thread_revise_content_digest(req: &pb::ReviseMessageRequest) -> String {
+    if req.action == mp_contracts::message_revision::ACTION_DELETE {
+        thread_append_content_digest("")
+    } else {
+        thread_append_content_digest(&req.content)
+    }
+}
+
+/// Canonical digest shared with Control's `model.thread.revise` decision: the thread-append v1
+/// encoding with `message_id` and `revise_action` added after `idempotency_key`. The exact byte
+/// layout is documented in `mp_contracts::message_revision`. Recomputed from the request fields
+/// and the verified CALLER, never taken from the BFF.
+pub(crate) fn thread_revise_payload_digest(
+    req: &pb::ReviseMessageRequest,
+    org_id: &str,
+    user_id: &str,
+) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"model.thread.revise\0v1\0");
+    let content_digest = thread_revise_content_digest(req);
+    let mut write_field = |name: &str, value: &str| {
+        digest.update(name.as_bytes());
+        digest.update([0]);
+        digest.update((value.len() as u64).to_be_bytes());
+        digest.update(value.as_bytes());
+    };
+    for (name, value) in [
+        ("org_id", org_id),
+        ("user_id", user_id),
+        ("thread_id", req.thread_id.as_str()),
+        ("space_id", req.space_id.as_str()),
+        ("space_decision_ref", req.space_decision_ref.as_str()),
+        ("recipient_audience_ref", req.recipient_audience_ref.as_str()),
+        ("recipient_audience_hash", req.recipient_audience_hash.as_str()),
+        ("privacy_policy_ref", req.privacy_policy_ref.as_str()),
+        ("resource_authorization_ref", req.resource_authorization_ref.as_str()),
+        ("content_digest", content_digest.as_str()),
+        ("action_schema_hash", req.action_schema_hash.as_str()),
+        ("idempotency_key", req.idempotency_key.as_str()),
+        ("message_id", req.message_id.as_str()),
+        ("revise_action", req.action.as_str()),
+    ] {
+        write_field(name, value);
+    }
+    digest.update(b"authority_revision\0");
+    digest.update(req.authority_revision.to_be_bytes());
+    digest.update(b"recipient_audience_revision\0");
+    digest.update(req.recipient_audience_revision.to_be_bytes());
+    format!("sha256:{:x}", digest.finalize())
+}
+
+/// Whether the revise request carries the complete decision envelope (all or nothing: a revise
+/// has no decision-less form).
+pub(crate) fn revise_space_context_is_complete(req: &pb::ReviseMessageRequest) -> bool {
+    [
+        req.space_id.trim(),
+        req.space_decision_ref.trim(),
+        req.recipient_audience_ref.trim(),
+        req.recipient_audience_hash.trim(),
+        req.privacy_policy_ref.trim(),
+        req.resource_authorization_ref.trim(),
+        req.space_decision_token.trim(),
+        req.action_schema_hash.trim(),
+        req.payload_digest.trim(),
+        req.idempotency_key.trim(),
+    ]
+    .iter()
+    .all(|value| !value.is_empty())
+        && req.authority_revision != 0
+        && req.recipient_audience_revision != 0
+}
+
+#[allow(clippy::result_large_err)]
+fn verify_revise_space_decision_with_key(
+    req: &pb::ReviseMessageRequest,
+    org_id: &str,
+    user_id: &str,
+    expected_key_id: &str,
+    key: &VerifyingKey,
+    now: DateTime<Utc>,
+) -> Result<VerifiedRevise, Status> {
+    use mp_contracts::message_revision as rev;
+    if req.space_decision_token.len() > MAX_CONTROL_SPACE_DECISION_TOKEN_BYTES {
+        return Err(Status::invalid_argument("Control Space decision is too large"));
+    }
+    let parts: Vec<&str> = req.space_decision_token.split('.').collect();
+    if parts.len() != 4 || parts[0] != CONTROL_SPACE_DECISION_VERSION {
+        return Err(Status::permission_denied("invalid Control Space decision envelope"));
+    }
+    let token_key_id = URL_SAFE_NO_PAD
+        .decode(parts[1])
+        .ok()
+        .and_then(|raw| String::from_utf8(raw).ok())
+        .filter(|id| id == expected_key_id)
+        .ok_or_else(|| Status::permission_denied("untrusted Control Space decision key"))?;
+    let payload = URL_SAFE_NO_PAD
+        .decode(parts[2])
+        .map_err(|_| Status::permission_denied("invalid Control Space decision payload"))?;
+    let signature = URL_SAFE_NO_PAD
+        .decode(parts[3])
+        .map_err(|_| Status::permission_denied("invalid Control Space decision signature"))?;
+    let signature = Signature::from_slice(&signature)
+        .map_err(|_| Status::permission_denied("invalid Control Space decision signature"))?;
+    key.verify(
+        format!("{}.{}.{}", parts[0], parts[1], parts[2]).as_bytes(),
+        &signature,
+    )
+    .map_err(|_| Status::permission_denied("invalid Control Space decision signature"))?;
+    let claims: ControlSpaceDecisionClaims = serde_json::from_slice(&payload)
+        .map_err(|_| Status::permission_denied("invalid Control Space decision claims"))?;
+    let has = |permission: &str| claims.permissions.iter().any(|p| p == permission);
+    // Exactly one retention permission: neither or both is a malformed decision, and it fails
+    // closed rather than guessing which rule the org set.
+    let purge = has(rev::PERMISSION_PURGE_ORIGINAL);
+    let retain = has(rev::PERMISSION_RETAIN_ORIGINAL);
+    let expected_digest = thread_revise_payload_digest(req, org_id, user_id);
+    let matches_request = claims.decision_ref == req.space_decision_ref
+        && claims.org_id == org_id
+        && claims.subject_id == user_id
+        && claims.space_ref == req.space_id
+        && claims.service_audience == CONTROL_SPACE_DECISION_AUDIENCE
+        && claims.action_id == rev::DECISION_ACTION_ID
+        && claims.action_schema_hash == rev::DECISION_SCHEMA
+        && claims.action_schema_hash == req.action_schema_hash
+        && claims.payload_digest == req.payload_digest
+        && claims.payload_digest == expected_digest
+        && claims.idempotency_key == req.idempotency_key
+        && claims.recipient_audience_ref == req.recipient_audience_ref
+        && claims.recipient_audience_revision == req.recipient_audience_revision
+        && claims.recipient_audience_hash == req.recipient_audience_hash
+        && claims.privacy_policy_ref == req.privacy_policy_ref
+        && claims.resource_authorization_ref == req.resource_authorization_ref
+        && claims.authority_revision == req.authority_revision
+        && has(rev::PERMISSION_REVISE)
+        && (purge != retain);
+    if !matches_request || token_key_id.trim().is_empty() {
+        return Err(Status::permission_denied(
+            "Control Space decision does not authorize this message revision",
+        ));
+    }
+    let privacy_complete = [
+        claims.purpose.as_str(),
+        claims.lawful_basis.as_str(),
+        claims.privacy_class.as_str(),
+        claims.retention_class.as_str(),
+        claims.residency.as_str(),
+        claims.deletion_scope.as_str(),
+    ]
+    .iter()
+    .all(|value| !value.trim().is_empty());
+    if !privacy_complete
+        || claims.nonce.trim().is_empty()
+        || claims.issued_at > now + chrono::Duration::minutes(1)
+        || claims.expires_at <= now
+    {
+        return Err(Status::permission_denied(
+            "Control Space revise decision is expired or incomplete",
+        ));
+    }
+    space_decision_retention_gate(
+        claims.zero_data_retention,
+        "message_revise",
+        configured_space_zdr_mode(),
+    )?;
+    Ok(VerifiedRevise {
+        moderate: has(rev::PERMISSION_MODERATE),
+        purge_original: purge,
+    })
+}
+
+/// Verifies the Control `model.thread.revise` decision for exactly this org, this CALLER (not the
+/// thread owner), this Space, this message and this action and text. A v1/v2 append decision
+/// differs in action id and schema and is refused.
+#[allow(clippy::result_large_err)]
+pub(crate) fn verify_revise_space_decision(
+    req: &pb::ReviseMessageRequest,
+    org_id: &str,
+    user_id: &str,
+) -> Result<VerifiedRevise, Status> {
+    if !revise_space_context_is_complete(req) {
+        return Err(Status::invalid_argument(
+            "a message revision requires a complete signed decision and operation bindings",
+        ));
+    }
+    let keys = configured_control_space_decision_keys()?;
+    let key_id = req
+        .space_decision_token
+        .split('.')
+        .nth(1)
+        .and_then(|part| URL_SAFE_NO_PAD.decode(part).ok())
+        .and_then(|raw| String::from_utf8(raw).ok())
+        .filter(|id| !id.trim().is_empty())
+        .ok_or_else(|| Status::permission_denied("untrusted Control Space decision key"))?;
+    let key = crate::decision_keys::lookup_key(&keys, &key_id)?;
+    verify_revise_space_decision_with_key(req, org_id, user_id, &key_id, key, Utc::now())
+}
+
+/// WS08-S2: verifies the Control `model.run.wake` decision of a wake for exactly this org, this
+/// CALLER, this Space, this thread, this trigger post (by id and content digest), this agent and
+/// this turn origin. The permission set must be exactly `["run:wake"]`, which keeps it disjoint
+/// from every thread token in both directions. A thread append/read/revise decision differs in
+/// action id and schema and is refused.
+#[allow(clippy::result_large_err)]
+fn verify_run_wake_space_decision_with_key(
+    wake: &pb::RunWakeContext,
+    org_id: &str,
+    user_id: &str,
+    thread_id: &str,
+    expected_key_id: &str,
+    key: &VerifyingKey,
+    now: DateTime<Utc>,
+) -> Result<crate::space::mentions::VerifiedWake, Status> {
+    use mp_contracts::space_mentions as sm;
+    if wake.space_decision_token.len() > MAX_CONTROL_SPACE_DECISION_TOKEN_BYTES {
+        return Err(Status::invalid_argument("Control Space decision is too large"));
+    }
+    let parts: Vec<&str> = wake.space_decision_token.split('.').collect();
+    if parts.len() != 4 || parts[0] != CONTROL_SPACE_DECISION_VERSION {
+        return Err(Status::permission_denied("invalid Control Space decision envelope"));
+    }
+    let token_key_id = URL_SAFE_NO_PAD
+        .decode(parts[1])
+        .ok()
+        .and_then(|raw| String::from_utf8(raw).ok())
+        .filter(|id| id == expected_key_id)
+        .ok_or_else(|| Status::permission_denied("untrusted Control Space decision key"))?;
+    let payload = URL_SAFE_NO_PAD
+        .decode(parts[2])
+        .map_err(|_| Status::permission_denied("invalid Control Space decision payload"))?;
+    let signature = URL_SAFE_NO_PAD
+        .decode(parts[3])
+        .map_err(|_| Status::permission_denied("invalid Control Space decision signature"))?;
+    let signature = Signature::from_slice(&signature)
+        .map_err(|_| Status::permission_denied("invalid Control Space decision signature"))?;
+    key.verify(
+        format!("{}.{}.{}", parts[0], parts[1], parts[2]).as_bytes(),
+        &signature,
+    )
+    .map_err(|_| Status::permission_denied("invalid Control Space decision signature"))?;
+    let claims: ControlSpaceDecisionClaims = serde_json::from_slice(&payload)
+        .map_err(|_| Status::permission_denied("invalid Control Space decision claims"))?;
+    let expected_digest =
+        crate::space::mentions::run_wake_payload_digest(wake, org_id, user_id, thread_id);
+    let matches_request = claims.decision_ref == wake.space_decision_ref
+        && claims.org_id == org_id
+        && claims.subject_id == user_id
+        && claims.space_ref == wake.space_id
+        && claims.service_audience == CONTROL_SPACE_DECISION_AUDIENCE
+        && claims.action_id == sm::DECISION_ACTION_ID
+        && claims.action_schema_hash == sm::DECISION_SCHEMA
+        && claims.action_schema_hash == wake.action_schema_hash
+        && claims.payload_digest == wake.payload_digest
+        && claims.payload_digest == expected_digest
+        && claims.idempotency_key == wake.idempotency_key
+        && claims.recipient_audience_ref == wake.recipient_audience_ref
+        && claims.recipient_audience_revision == wake.recipient_audience_revision
+        && claims.recipient_audience_hash == wake.recipient_audience_hash
+        && claims.privacy_policy_ref == wake.privacy_policy_ref
+        && claims.resource_authorization_ref == wake.resource_authorization_ref
+        && claims.authority_revision == wake.authority_revision
+        && claims.permissions.len() == 1
+        && claims.permissions[0] == sm::PERMISSION_WAKE;
+    if !matches_request || token_key_id.trim().is_empty() {
+        return Err(Status::permission_denied(
+            "Control Space decision does not authorize this wake",
+        ));
+    }
+    let privacy_complete = [
+        claims.purpose.as_str(),
+        claims.lawful_basis.as_str(),
+        claims.privacy_class.as_str(),
+        claims.retention_class.as_str(),
+        claims.residency.as_str(),
+        claims.deletion_scope.as_str(),
+    ]
+    .iter()
+    .all(|value| !value.trim().is_empty());
+    if !privacy_complete
+        || claims.nonce.trim().is_empty()
+        || claims.issued_at > now + chrono::Duration::minutes(1)
+        || claims.expires_at <= now
+    {
+        return Err(Status::permission_denied(
+            "Control Space wake decision is expired or incomplete",
+        ));
+    }
+    space_decision_retention_gate(
+        claims.zero_data_retention,
+        "run_wake",
+        configured_space_zdr_mode(),
+    )?;
+    Ok(crate::space::mentions::VerifiedWake {
+        space_id: wake.space_id.clone(),
+        trigger_message_id: wake.trigger_message_id.clone(),
+        trigger_content_digest: wake.trigger_content_digest.clone(),
+        agent_subject_id: wake.agent_subject_id.clone(),
+        turn_origin: wake.turn_origin.clone(),
+    })
+}
+
+/// Key lookup and verification of a wake decision (see
+/// [`verify_run_wake_space_decision_with_key`]). `thread_id` is the start request's own.
+#[allow(clippy::result_large_err)]
+pub(crate) fn verify_run_wake_space_decision(
+    wake: &pb::RunWakeContext,
+    org_id: &str,
+    user_id: &str,
+    thread_id: &str,
+) -> Result<crate::space::mentions::VerifiedWake, Status> {
+    let keys = configured_control_space_decision_keys()?;
+    let key_id = wake
+        .space_decision_token
+        .split('.')
+        .nth(1)
+        .and_then(|part| URL_SAFE_NO_PAD.decode(part).ok())
+        .and_then(|raw| String::from_utf8(raw).ok())
+        .filter(|id| !id.trim().is_empty())
+        .ok_or_else(|| Status::permission_denied("untrusted Control Space decision key"))?;
+    let key = crate::decision_keys::lookup_key(&keys, &key_id)?;
+    verify_run_wake_space_decision_with_key(wake, org_id, user_id, thread_id, &key_id, key, Utc::now())
+}
+
+/// What a Control approval decision must commit to (WS10-S6): `model.approval.decide` for a
+/// member decide, `model.approval.reroute` for a reroute. The permission set must be exactly the
+/// one named permission, which keeps both disjoint from every thread, run and wake token.
+pub(crate) struct ApprovalDecisionExpect<'a> {
+    pub(crate) action_id: &'static str,
+    pub(crate) schema: &'static str,
+    pub(crate) permission: &'static str,
+    pub(crate) payload_digest: String,
+    pub(crate) space_id: &'a str,
+    pub(crate) decision_ref: &'a str,
+    pub(crate) token: &'a str,
+    pub(crate) org_id: &'a str,
+    /// The CALLER: the decision's subject must be this user.
+    pub(crate) user_id: &'a str,
+    pub(crate) metric_action: &'static str,
+}
+
+#[allow(clippy::result_large_err)]
+fn verify_approval_space_decision_with_key(
+    expect: &ApprovalDecisionExpect<'_>,
+    expected_key_id: &str,
+    key: &VerifyingKey,
+    now: DateTime<Utc>,
+) -> Result<(), Status> {
+    if expect.token.len() > MAX_CONTROL_SPACE_DECISION_TOKEN_BYTES {
+        return Err(Status::invalid_argument("Control Space decision is too large"));
+    }
+    let parts: Vec<&str> = expect.token.split('.').collect();
+    if parts.len() != 4 || parts[0] != CONTROL_SPACE_DECISION_VERSION {
+        return Err(Status::permission_denied("invalid Control Space decision envelope"));
+    }
+    let token_key_id = URL_SAFE_NO_PAD
+        .decode(parts[1])
+        .ok()
+        .and_then(|raw| String::from_utf8(raw).ok())
+        .filter(|id| id == expected_key_id)
+        .ok_or_else(|| Status::permission_denied("untrusted Control Space decision key"))?;
+    let payload = URL_SAFE_NO_PAD
+        .decode(parts[2])
+        .map_err(|_| Status::permission_denied("invalid Control Space decision payload"))?;
+    let signature = URL_SAFE_NO_PAD
+        .decode(parts[3])
+        .map_err(|_| Status::permission_denied("invalid Control Space decision signature"))?;
+    let signature = Signature::from_slice(&signature)
+        .map_err(|_| Status::permission_denied("invalid Control Space decision signature"))?;
+    key.verify(
+        format!("{}.{}.{}", parts[0], parts[1], parts[2]).as_bytes(),
+        &signature,
+    )
+    .map_err(|_| Status::permission_denied("invalid Control Space decision signature"))?;
+    let claims: ControlSpaceDecisionClaims = serde_json::from_slice(&payload)
+        .map_err(|_| Status::permission_denied("invalid Control Space decision claims"))?;
+    let matches_request = claims.decision_ref == expect.decision_ref
+        && claims.org_id == expect.org_id
+        && claims.subject_id == expect.user_id
+        && claims.space_ref == expect.space_id
+        && claims.service_audience == CONTROL_SPACE_DECISION_AUDIENCE
+        && claims.action_id == expect.action_id
+        && claims.action_schema_hash == expect.schema
+        && claims.payload_digest == expect.payload_digest
+        && claims.permissions.len() == 1
+        && claims.permissions[0] == expect.permission;
+    if !matches_request || token_key_id.trim().is_empty() {
+        return Err(Status::permission_denied(
+            "Control Space decision does not authorize this approval action",
+        ));
+    }
+    let privacy_complete = [
+        claims.purpose.as_str(),
+        claims.lawful_basis.as_str(),
+        claims.privacy_class.as_str(),
+        claims.retention_class.as_str(),
+        claims.residency.as_str(),
+        claims.deletion_scope.as_str(),
+    ]
+    .iter()
+    .all(|value| !value.trim().is_empty());
+    if !privacy_complete
+        || claims.nonce.trim().is_empty()
+        || claims.issued_at > now + chrono::Duration::minutes(1)
+        || claims.expires_at <= now
+    {
+        return Err(Status::permission_denied(
+            "Control Space approval decision is expired or incomplete",
+        ));
+    }
+    space_decision_retention_gate(
+        claims.zero_data_retention,
+        expect.metric_action,
+        configured_space_zdr_mode(),
+    )
+}
+
+/// Key lookup and verification of a member-decide or reroute decision (see
+/// [`verify_approval_space_decision_with_key`]).
+#[allow(clippy::result_large_err)]
+pub(crate) fn verify_approval_space_decision(
+    expect: &ApprovalDecisionExpect<'_>,
+) -> Result<(), Status> {
+    let keys = configured_control_space_decision_keys()?;
+    let key_id = expect
+        .token
+        .split('.')
+        .nth(1)
+        .and_then(|part| URL_SAFE_NO_PAD.decode(part).ok())
+        .and_then(|raw| String::from_utf8(raw).ok())
+        .filter(|id| !id.trim().is_empty())
+        .ok_or_else(|| Status::permission_denied("untrusted Control Space decision key"))?;
+    let key = crate::decision_keys::lookup_key(&keys, &key_id)?;
+    verify_approval_space_decision_with_key(expect, &key_id, key, Utc::now())
+}
+
+// Whether a decision-less assistant append may land in a Space thread. The
 /// reply slot is open only directly after a user message: that user turn was
 /// itself admitted by a verified create or append decision, and the assistant
 /// reply is the second half of that same authorized exchange. An empty thread
@@ -3099,13 +4241,25 @@ async fn create_thread_inner(
     pool: &PgPool,
     req: pb::CreateThreadRequest,
 ) -> Result<Response<pb::CreateThreadResponse>, Status> {
-    verify_thread_space_decision(&req)?;
-    create_thread_inner_preverified(pool, req).await
+    let signed_kind = verify_thread_space_decision(&req)?;
+    let space_kind = crate::space::memory_scope::normalize_claim_space_kind(&signed_kind);
+    create_thread_inner_preverified_kind(pool, req, space_kind).await
 }
 
 async fn create_thread_inner_preverified(
     pool: &PgPool,
     req: pb::CreateThreadRequest,
+) -> Result<Response<pb::CreateThreadResponse>, Status> {
+    create_thread_inner_preverified_kind(pool, req, None).await
+}
+
+/// WS17-S1: `space_kind` is the Space kind from the verified Control decision, already
+/// normalised; `None` leaves the column NULL (contained). Only the verified create path
+/// passes one.
+async fn create_thread_inner_preverified_kind(
+    pool: &PgPool,
+    req: pb::CreateThreadRequest,
+    space_kind: Option<String>,
 ) -> Result<Response<pb::CreateThreadResponse>, Status> {
     let mut tx = pool
         .begin()
@@ -3138,15 +4292,31 @@ async fn create_thread_inner_preverified(
             .map_err(|e| Status::internal(e.to_string()))?;
         let existing: Option<(String,)> = sqlx::query_as(
             "SELECT id FROM threads WHERE org_id = $1 AND user_id = $2 AND session_key = $3 \
+             AND space_id IS NOT DISTINCT FROM NULLIF($4, '') \
              ORDER BY id LIMIT 1",
         )
         .bind(&req.org_id)
         .bind(&req.user_id)
         .bind(&req.session_key)
+        .bind(&req.space_id)
         .fetch_optional(&mut *tx)
         .await
         .map_err(|e| Status::internal(e.to_string()))?;
         if let Some((thread_id,)) = existing {
+            if let Some(kind) = space_kind.as_deref() {
+                // A retried create of a legacy thread learns its kind from this verified decision.
+                sqlx::query(
+                    "UPDATE threads SET space_kind = $2 WHERE id = $1 AND space_kind IS NULL AND space_id IS NOT NULL",
+                )
+                .bind(&thread_id)
+                .bind(kind)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| Status::internal(e.to_string()))?;
+                tx.commit()
+                    .await
+                    .map_err(|e| Status::internal(e.to_string()))?;
+            }
             return Ok(Response::new(pb::CreateThreadResponse {
                 thread_id,
                 created_at: None,
@@ -3165,8 +4335,8 @@ async fn create_thread_inner_preverified(
     let origin = resolve_thread_origin(&req)?;
 
     sqlx::query(
-        "INSERT INTO threads (id, session_key, org_id, user_id, created_at, space_id, space_decision_ref, recipient_audience_ref, recipient_audience_revision, recipient_audience_hash, privacy_policy_ref, resource_authorization_ref, authority_revision, origin)
-         VALUES ($1, $2, $3, $4, $5, NULLIF($6, ''), NULLIF($7, ''), NULLIF($8, ''), NULLIF($9, 0), NULLIF($10, ''), NULLIF($11, ''), NULLIF($12, ''), NULLIF($13, 0), $14)",
+        "INSERT INTO threads (id, session_key, org_id, user_id, created_at, space_id, space_decision_ref, recipient_audience_ref, recipient_audience_revision, recipient_audience_hash, privacy_policy_ref, resource_authorization_ref, authority_revision, origin, space_kind)
+         VALUES ($1, $2, $3, $4, $5, NULLIF($6, ''), NULLIF($7, ''), NULLIF($8, ''), NULLIF($9, 0), NULLIF($10, ''), NULLIF($11, ''), NULLIF($12, ''), NULLIF($13, 0), $14, $15)",
     )
     .bind(&thread_id)
     .bind(&req.session_key)
@@ -3186,6 +4356,7 @@ async fn create_thread_inner_preverified(
         Status::invalid_argument("authority_revision exceeds PostgreSQL BIGINT range")
     })?)
     .bind(origin)
+    .bind(space_kind.as_deref())
     .execute(&mut *tx)
     .await
     .map_err(|e| Status::internal(e.to_string()))?;
@@ -3344,6 +4515,7 @@ fn support_thread_id(session_key: &str) -> Option<&str> {
 /// (`agent_name`), and a system/tool turn has no human author to name. Passing
 /// it in rather than reading it off the request is the point -- a client that
 /// could name the author of a message could put words in someone's mouth.
+#[cfg_attr(not(test), allow(dead_code))] // the owner-path wrapper the tests (and older callers) use
 async fn append_message_inner(
     pool: &PgPool,
     letta: Option<&LettaMemoryAdapter>,
@@ -3351,11 +4523,31 @@ async fn append_message_inner(
     req: pb::AppendMessageRequest,
     author_subject_id: &str,
 ) -> Result<Response<pb::AppendMessageResponse>, Status> {
+    append_message_inner_as(
+        pool,
+        letta,
+        retention,
+        req,
+        author_subject_id,
+        crate::space::authz::AppendAs::Owner,
+    )
+    .await
+}
+
+/// [`append_message_inner`] under an explicit authority (`Member` only from `authorize_append`).
+async fn append_message_inner_as(
+    pool: &PgPool,
+    letta: Option<&LettaMemoryAdapter>,
+    retention: MemoryRetention,
+    req: pb::AppendMessageRequest,
+    author_subject_id: &str,
+    append_as: crate::space::authz::AppendAs,
+) -> Result<Response<pb::AppendMessageResponse>, Status> {
     let mut tx = pool
         .begin()
         .await
         .map_err(|e| Status::internal(e.to_string()))?;
-    let appended = append_message_in_tx(&mut tx, &req, author_subject_id).await?;
+    let appended = append_message_in_tx_as(&mut tx, &req, author_subject_id, append_as).await?;
     tx.commit()
         .await
         .map_err(|e| Status::internal(e.to_string()))?;
@@ -3365,6 +4557,7 @@ async fn append_message_inner(
         sequence: appended.sequence,
         message_id: appended.message_id,
         deduplicated: appended.deduplicated,
+        mentions: appended.mentions,
     }))
 }
 
@@ -3395,6 +4588,19 @@ pub(crate) struct AppendedMessage {
     /// memory extraction).
     pub(crate) deduplicated: bool,
     pub(crate) memory: Option<AppendedMemory>,
+    /// The mentions stored on the post (WS08-S2); empty for a turn and for a post without any.
+    pub(crate) mentions: Vec<pb::MentionRef>,
+}
+
+/// An append made under the thread owner's authority: the call every existing
+/// caller makes. A thin wrapper over [`append_message_in_tx_as`] with
+/// `AppendAs::Owner`, so the member seam (P-SC1) changes no owner behaviour.
+pub(crate) async fn append_message_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    req: &pb::AppendMessageRequest,
+    author_subject_id: &str,
+) -> Result<AppendedMessage, Status> {
+    append_message_in_tx_as(tx, req, author_subject_id, crate::space::authz::AppendAs::Owner).await
 }
 
 /// The whole durable half of an append -- thread lock, Space authority,
@@ -3403,14 +4609,20 @@ pub(crate) struct AppendedMessage {
 /// and `CompleteDirectRunWithMessage`, so an answer saved together with its
 /// run's terminal receipt is stored exactly as an ordinary append stores it.
 /// The caller commits, then passes `memory` to [`sync_appended_memory`].
+/// `append_as` names the authority: `Owner` is the former behaviour; `Member`
+/// (WS01-S3) appends only a human `post`, re-checked under the thread lock by
+/// `space::append::enforce_member_append`, stamped from the verified request and
+/// writing no thread column.
 // The body is the former `append_message_inner`, moved unchanged; splitting it
 // would scatter checks that must all run under the one thread lock.
 #[allow(clippy::too_many_lines)]
-pub(crate) async fn append_message_in_tx(
+pub(crate) async fn append_message_in_tx_as(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     req: &pb::AppendMessageRequest,
     author_subject_id: &str,
+    append_as: crate::space::authz::AppendAs,
 ) -> Result<AppendedMessage, Status> {
+    let member = append_as == crate::space::authz::AppendAs::Member;
     let author_subject_id = if req.role.trim() == "user" {
         author_subject_id.trim()
     } else {
@@ -3422,20 +4634,54 @@ pub(crate) async fn append_message_in_tx(
             "client_message_id must match [A-Za-z0-9][A-Za-z0-9_-]{0,127}",
         ));
     }
+    // "" and "turn" are the conversation turn every caller has always written; "post" is a
+    // human message to the room, which only a user row can be. Anything else is refused
+    // here so it never reaches the CHECK as a database error.
+    let post_kind = match req.post_kind.trim() {
+        "" | "turn" => "turn",
+        "post" if req.role.trim() == "user" => "post",
+        "post" => {
+            return Err(Status::invalid_argument("post_kind post needs role user"));
+        }
+        _ => {
+            return Err(Status::invalid_argument("post_kind must be turn or post"));
+        }
+    };
     let msg_id = new_ulid();
     let now = Utc::now();
     let mut letta_sync: Option<AppendedMemory> = None;
 
     let has_append_context = validate_append_space_context_shape(req)?;
-    let thread: (String, String, Option<String>, String) =
-        sqlx::query_as("SELECT org_id, user_id, space_id, source_scope FROM threads WHERE id = $1 FOR UPDATE")
+    let thread: (String, String, Option<String>, String, Option<String>, Option<i64>) =
+        sqlx::query_as("SELECT org_id, user_id, space_id, source_scope, space_kind, recipient_audience_revision FROM threads WHERE id = $1 FOR UPDATE")
             .bind(&req.thread_id)
             .fetch_optional(&mut **tx)
             .await
             .map_err(|e| Status::internal(e.to_string()))?
             .ok_or_else(|| Status::not_found("thread not found"))?;
+    // WS17-S1: the thread's Space kind. A verified decision below stamps a kind-less thread.
+    let mut space_kind: Option<String> = thread.4.clone();
+
+    if member {
+        // WS01-S3: every member condition, the decision (subject = the caller) and the stale
+        // audience check run here under the thread lock. A member append never rewrites the
+        // thread's authority columns and never self-heals its kind.
+        crate::space::append::enforce_member_append(
+            tx,
+            req,
+            author_subject_id,
+            &crate::space::append::LockedThread {
+                org_id: &thread.0,
+                owner_id: &thread.1,
+                space_id: thread.2.as_deref(),
+                audience_revision: thread.5,
+            },
+        )
+        .await?;
+    }
 
     match thread.2.as_deref() {
+        Some(_) if member => {}
         Some(stored_space_id) => {
             if !has_append_context && req.role.trim() == "user" {
                 // A scoped create is verified before the thread exists, so its
@@ -3448,7 +4694,23 @@ pub(crate) async fn append_message_in_tx(
                 .fetch_one(&mut **tx)
                 .await
                 .map_err(|e| Status::internal(e.to_string()))?;
-                if message_count != 0 {
+                // A replay of the bootstrap send (same client_message_id, lost reply) is answered
+                // with the original row by the dedupe lookup below, which writes nothing, so it
+                // is not a decision-less append.
+                let is_replay = if message_count != 0 && !req.client_message_id.trim().is_empty() {
+                    let (found,): (bool,) = sqlx::query_as(
+                        "SELECT EXISTS(SELECT 1 FROM messages WHERE thread_id = $1 AND client_message_id = $2)",
+                    )
+                    .bind(&req.thread_id)
+                    .bind(req.client_message_id.trim())
+                    .fetch_one(&mut **tx)
+                    .await
+                    .map_err(|e| Status::internal(e.to_string()))?;
+                    found
+                } else {
+                    false
+                };
+                if message_count != 0 && !is_replay {
                     return Err(Status::permission_denied(
                         "a fresh Control Space append decision is required",
                     ));
@@ -3468,7 +4730,17 @@ pub(crate) async fn append_message_in_tx(
                 .fetch_optional(&mut **tx)
                 .await
                 .map_err(|e| Status::internal(e.to_string()))?;
-                if !assistant_reply_slot_is_open(last_role.as_ref().map(|(role,)| role.as_str())) {
+                let last_role_str = last_role.as_ref().map(|(role,)| role.as_str());
+                // WS08-S2: after one addressed agent answered, the next expected agent of the same
+                // human post may answer too (off with SPACE_WAKE_CORE).
+                if !assistant_reply_slot_is_open(last_role_str)
+                    && !crate::space::mentions::extended_reply_slot_is_open(
+                        tx,
+                        &req.thread_id,
+                        last_role_str,
+                    )
+                    .await?
+                {
                     return Err(Status::permission_denied(
                         "a Space assistant reply must directly follow a verified user turn",
                     ));
@@ -3479,7 +4751,23 @@ pub(crate) async fn append_message_in_tx(
                         "Control Space append decision targets another Space",
                     ));
                 }
-                verify_append_space_decision(req, &thread.0, &thread.1)?;
+                let signed_kind = verify_append_space_decision(req, &thread.0, &thread.1)?;
+                if space_kind.is_none() {
+                    if let Some(kind) =
+                        crate::space::memory_scope::normalize_claim_space_kind(&signed_kind)
+                    {
+                        // Self-heal (K4-12): a legacy thread learns its kind from its next verified decision.
+                        sqlx::query(
+                            "UPDATE threads SET space_kind = $2 WHERE id = $1 AND space_kind IS NULL",
+                        )
+                        .bind(&req.thread_id)
+                        .bind(&kind)
+                        .execute(&mut **tx)
+                        .await
+                        .map_err(|e| Status::internal(e.to_string()))?;
+                        space_kind = Some(kind);
+                    }
+                }
                 sqlx::query(
                     "UPDATE threads SET space_decision_ref = $2, recipient_audience_ref = $3, \
                      recipient_audience_revision = $4, recipient_audience_hash = $5, privacy_policy_ref = $6, \
@@ -3506,6 +4794,10 @@ pub(crate) async fn append_message_in_tx(
         None => {}
     }
 
+    // A member's `metadata` is never stored: it could carry a source scope or retrieval hint
+    // that is not theirs to set.
+    let member_metadata_ignored = member;
+
     // `messages.metadata` has existed in the schema since 0001_init but was
     // never written, so a turn's evidence (grounding/citations/artifacts) died
     // with the stream that produced it. Persist it here and `list_conversation`
@@ -3514,14 +4806,34 @@ pub(crate) async fn append_message_in_tx(
     let mut metadata_json = req
         .metadata
         .as_ref()
+        .filter(|_| !member_metadata_ignored)
         .map_or_else(|| serde_json::json!({}), struct_to_json);
+    // WS08-S2: keys that name a post's mentions, a wake or a turn origin are Session Core's to
+    // write and never a client's: strip them on every path (the owner path stores metadata).
+    // WS15-S9: `entry` is the typed entry's key; only the validated `req.entry` may set it.
+    if let Some(map) = metadata_json.as_object_mut() {
+        for reserved in ["mentions", "wake", "turn_origin", "post_kind", crate::space::entry::ENTRY_METADATA_KEY] {
+            map.remove(reserved);
+        }
+    }
+    // WS15-S9: the typed entry of a human post. Any other append that carries one is refused, and
+    // an invalid entry refuses the whole append (nothing is stored without its entry).
+    if let Some(entry) = req.entry.as_ref() {
+        if post_kind != "post" {
+            return Err(Status::invalid_argument("entry needs post_kind post"));
+        }
+        let stored = crate::space::entry::validate_entry(entry, now).map_err(Status::invalid_argument)?;
+        metadata_json[crate::space::entry::ENTRY_METADATA_KEY] = stored;
+    }
 
     // This scope is immutable after the first user message. Enforce it here,
     // under the thread lock, so alternate ingress paths cannot silently widen
     // a restricted task or relabel history that already used other sources.
     let requested_isolation = metadata_json["source_scope"] == "conversation";
     let stored_isolation = thread.3 == "conversation";
-    if req.role == "user" {
+    // The owner's source-scope lock is the owner's to set; a member post is a room message, not
+    // a retrieval turn, so it neither widens nor narrows it.
+    if req.role == "user" && !member {
         if stored_isolation && !requested_isolation {
             return Err(Status::failed_precondition("This conversation requires conversation-only source scope."));
         }
@@ -3536,7 +4848,7 @@ pub(crate) async fn append_message_in_tx(
         }
     }
     let conversation_only = stored_isolation || (req.role == "user" && requested_isolation);
-    if conversation_only {
+    if conversation_only && !member {
         metadata_json["source_scope"] = serde_json::json!("conversation");
         // Per-turn retrieval-source filter (chat-wave2 scope spec §2.4):
         // deliberately NOT part of the immutability check above — this axis
@@ -3559,8 +4871,8 @@ pub(crate) async fn append_message_in_tx(
     // Compared trimmed: the queue path stores the trimmed text and the resend carries the
     // composer's own.
     if !client_message_id.is_empty() {
-        let existing: Option<(String, i64, String, String)> = sqlx::query_as(
-            "SELECT id, sequence, role, content FROM messages
+        let existing: Option<(String, i64, String, String, String, Option<String>)> = sqlx::query_as(
+            "SELECT id, sequence, role, content, post_kind, author_subject_id FROM messages
              WHERE thread_id = $1 AND client_message_id = $2",
         )
         .bind(&req.thread_id)
@@ -3568,8 +4880,16 @@ pub(crate) async fn append_message_in_tx(
         .fetch_optional(&mut **tx)
         .await
         .map_err(|e| Status::internal(e.to_string()))?;
-        if let Some((existing_id, existing_sequence, existing_role, existing_content)) = existing {
-            if existing_role != req.role || existing_content.trim() != req.content.trim() {
+        if let Some((existing_id, existing_sequence, existing_role, existing_content, existing_kind, existing_author)) = existing {
+            // A post's key belongs to its author: another member repeating the same id and text
+            // must not be handed someone else's row.
+            let author_differs = post_kind == "post"
+                && existing_author.as_deref().unwrap_or_default() != author_subject_id;
+            if existing_role != req.role
+                || existing_kind != post_kind
+                || author_differs
+                || existing_content.trim() != req.content.trim()
+            {
                 return Err(Status::already_exists(
                     "client_message_id already names a different message in this thread",
                 ));
@@ -3577,6 +4897,8 @@ pub(crate) async fn append_message_in_tx(
             return Ok(AppendedMessage {
                 sequence: u64::try_from(existing_sequence)
                     .map_err(|_| Status::internal("message sequence out of range"))?,
+                mentions: crate::space::mentions::load_recorded_mentions(&mut **tx, &existing_id)
+                    .await?,
                 message_id: existing_id,
                 deduplicated: true,
                 memory: None,
@@ -3598,10 +4920,14 @@ pub(crate) async fn append_message_in_tx(
         "INSERT INTO messages
          (id, thread_id, role, content, created_at, agent_name, metadata, space_id, recipient_audience_ref,
           recipient_audience_revision, recipient_audience_hash, authority_revision, resource_authorization_ref,
-          author_subject_id)
-         SELECT $1, t.id, $3, $4, $5, NULLIF($6, ''), $7, t.space_id, t.recipient_audience_ref,
-                t.recipient_audience_revision, t.recipient_audience_hash, t.authority_revision, t.resource_authorization_ref,
-                NULLIF($8, '')
+          author_subject_id, post_kind)
+         SELECT $1, t.id, $3, $4, $5, NULLIF($6, ''), $7, t.space_id,
+                COALESCE($10::text, t.recipient_audience_ref),
+                COALESCE($11::bigint, t.recipient_audience_revision),
+                COALESCE($12::text, t.recipient_audience_hash),
+                COALESCE($13::bigint, t.authority_revision),
+                COALESCE($14::text, t.resource_authorization_ref),
+                NULLIF($8, ''), $9
          FROM threads t WHERE t.id=$2
          RETURNING sequence, space_id, recipient_audience_ref, recipient_audience_revision,
                    recipient_audience_hash, authority_revision, resource_authorization_ref",
@@ -3611,9 +4937,17 @@ pub(crate) async fn append_message_in_tx(
     .bind(&req.role)
     .bind(&req.content)
     .bind(now)
-    .bind(req.agent_name.trim())
+    .bind(if member { "" } else { req.agent_name.trim() })
     .bind(&metadata_json)
     .bind(author_subject_id)
+    .bind(post_kind)
+    // A member's row carries the audience and authority its own verified decision named (the
+    // thread's columns are the owner's and stay untouched); the owner path copies the thread's.
+    .bind(member.then(|| req.recipient_audience_ref.clone()))
+    .bind(if member { Some(i64::try_from(req.recipient_audience_revision).map_err(|_| Status::invalid_argument("recipient audience revision out of range"))?) } else { None })
+    .bind(member.then(|| req.recipient_audience_hash.clone()))
+    .bind(if member { Some(i64::try_from(req.authority_revision).map_err(|_| Status::invalid_argument("authority revision out of range"))?) } else { None })
+    .bind(member.then(|| req.resource_authorization_ref.clone()))
     .fetch_one(&mut **tx)
     .await
     .map_err(|e| Status::internal(e.to_string()))?;
@@ -3631,6 +4965,32 @@ pub(crate) async fn append_message_in_tx(
 
     if let Some(leaf) = tree_leaf {
         crate::message_tree::record_append(tx, &req.thread_id, &msg_id, leaf.as_deref()).await?;
+    }
+
+    // WS08-S2: the mentions of a human post, in the same transaction as the post. Only a human
+    // post in a Space thread records them, and only with the records switch on; anything else
+    // ignores the field. The caller is the thread owner on the owner path, or a member whose id
+    // equals the owner's (an agent mention by a non-owner is stored as refused/owner_only_thread).
+    let mut recorded_mentions: Vec<pb::MentionRef> = Vec::new();
+    if post_kind == "post"
+        && !req.mentions.is_empty()
+        && !author_subject_id.is_empty()
+        && mp_contracts::space_mentions::records_core_enabled()
+    {
+        if let Some(mention_space_id) = row.1.as_deref() {
+            let caller_is_owner = !member || thread.1 == author_subject_id;
+            let valid = crate::space::mentions::validate_mentions(&req.mentions, caller_is_owner)?;
+            crate::space::mentions::insert_mentions(
+                tx,
+                &thread.0,
+                &req.thread_id,
+                mention_space_id,
+                &msg_id,
+                &valid,
+            )
+            .await?;
+            recorded_mentions = valid.iter().map(crate::space::mentions::ValidMention::to_ref).collect();
+        }
     }
 
     // The list's paging key, written in the same transaction as the message so
@@ -3668,18 +5028,20 @@ pub(crate) async fn append_message_in_tx(
     )
     .bind(new_ulid())
     .bind(&req.thread_id)
-    .bind(serde_json::json!({
+    .bind(crate::space::mentions::with_mention_counts(serde_json::json!({
         "thread_id": &req.thread_id,
         "message_id": &msg_id,
         "sequence": sequence,
         "role": &req.role,
+        "post_kind": post_kind,
+        "author_subject_id": author_subject_id,
         "space_id": row.1,
         "recipient_audience_ref": row.2,
         "recipient_audience_revision": row.3,
         "recipient_audience_hash": row.4,
         "authority_revision": row.5,
         "resource_authorization_ref": row.6,
-    }))
+    }), &recorded_mentions))
     .bind(now)
     .bind(&req.thread_id)
     .bind(&msg_idem)
@@ -3689,7 +5051,16 @@ pub(crate) async fn append_message_in_tx(
     .await
     .map_err(|e| Status::internal(e.to_string()))?;
 
-    let candidates = if conversation_only { Vec::new() } else {
+    // A human post is the author's words to the room, not the thread owner's: it never becomes
+    // the owner's memory, so no candidate is extracted and nothing reaches the Letta mirror.
+    // WS17-S1 C1: nothing said in a shared room is learned into the owner's memory, so a contained
+    // thread extracts nothing and records no dream run.
+    let contained =
+        crate::space::memory_scope::thread_is_contained(thread.2.as_deref(), space_kind.as_deref());
+    let candidates = if conversation_only || post_kind == "post" { Vec::new() } else if contained {
+        crate::space::memory_scope::record_contained("append_extract");
+        Vec::new()
+    } else {
         crate::dreaming::extract_memory_candidates(&req.role, &req.content, &req.thread_id)
     };
     // A paused or off user, or a thread set off, learns nothing from this turn:
@@ -3760,6 +5131,7 @@ pub(crate) async fn append_message_in_tx(
         message_id: msg_id,
         deduplicated: false,
         memory: letta_sync,
+        mentions: recorded_mentions,
     })
 }
 
@@ -6037,24 +7409,36 @@ async fn load_thread_messages(
     pool: &PgPool,
     thread_id: &str,
 ) -> Result<Vec<(String, String)>, Status> {
-    let mut msgs = sqlx::query_as::<_, (String, String)>(
-        "SELECT role, content
+    // WS12-S4: the revision fold is always on. A deleted turn reaches the model as one static
+    // system line and an edited one as its effective text plus a marker; the stored thread is
+    // never appended to. No audience ceiling here (the owner's own context read).
+    let sql = format!(
+        "SELECT role, content, revision_state
          FROM (
-             SELECT role, content, sequence
-             FROM messages
-             WHERE thread_id = $1 AND on_active_path
-             ORDER BY sequence DESC
+             SELECT m.role, {fold_content} AS content, {fold_state} AS revision_state, m.sequence
+             FROM messages m
+             {fold_join}
+             WHERE m.thread_id = $1 AND m.on_active_path AND m.post_kind <> 'post'
+             ORDER BY m.sequence DESC
              LIMIT $2
          ) recent
          ORDER BY sequence ASC",
-    )
-    .bind(thread_id)
-    .bind(CONTEXT_MESSAGE_LIMIT)
-    .fetch_all(pool)
-    .await
-    .map_err(|e| Status::internal(e.to_string()))?;
-    msgs.retain(|(_, content)| !content.is_empty());
-    Ok(msgs)
+        fold_content = crate::space::revisions::FOLD_CONTENT_SQL,
+        fold_state = crate::space::revisions::FOLD_STATE_SQL,
+        fold_join = crate::space::revisions::fold_join_sql("NULL::BIGINT"),
+    );
+    let rows = sqlx::query_as::<_, (String, String, String)>(&sql)
+        .bind(thread_id)
+        .bind(CONTEXT_MESSAGE_LIMIT)
+        .fetch_all(pool)
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|(role, content, state)| {
+            mp_contracts::message_revision::render_for_model(&role, &content, &state)
+        })
+        .collect())
 }
 
 fn semantic_memory_query(thread_messages: &[(String, String)]) -> String {
@@ -6354,6 +7738,12 @@ async fn load_context_memory_rows(
     if access != crate::memory_control::MemoryAccess::Full {
         return Ok(rows);
     }
+    // WS17-S1 C5: the semantic mirror holds the owner's rows, so a contained thread never reads it.
+    if crate::space::memory_scope::thread_is_contained_by_id(&svc.pool, thread_id).await {
+        crate::space::memory_scope::record_contained("read_letta");
+        record_semantic_memory_degraded(crate::space::memory_scope::DEGRADED_LETTA_SPACE_SUPPRESSED);
+        return Ok(rows);
+    }
     append_letta_memory_rows(
         &svc.pool,
         svc.letta_memory.as_ref(),
@@ -6521,15 +7911,17 @@ impl SessionCore for SessionService {
             let caller = identity(&request)?;
             authorize_operation(&caller, "session:write")?;
             let req = request.into_inner();
-            authorize_thread_owner(&self.pool, &caller, &req.thread_id, OwnerIntent::Mutate)
-                .await?;
+            // The thread's owner keeps the owner path unchanged; another Space member may append
+            // a human `post` only through the member gate (WS01-S3, flag `SPACE_HUMAN_POSTS_CORE`).
+            let append_as = crate::space::authz::authorize_append(&self.pool, &caller, &req).await?;
             let author_subject_id = caller.user_id().unwrap_or_default().to_owned();
-            append_message_inner(
+            append_message_inner_as(
                 &self.pool,
                 self.letta_memory.as_ref(),
                 MemoryRetention::of(&caller),
                 req,
                 &author_subject_id,
+                append_as,
             )
             .await
         }
@@ -7854,9 +9246,10 @@ impl SessionCore for SessionService {
             // written for a recipient set this decision was not issued against.
             // A NULL revision predates audience snapshots entirely and is
             // covered by the thread-level Space check above.
-            let audience_ceiling = space_read.map(|read| read.recipient_audience_revision);
+            // WS04-S11: a `since_join` room also carries a history floor on the same decision.
+            let audience = crate::space::audience_window::audience_window(space_read);
             if req.limit > 0 {
-                return conversation_page_response(&self.pool, &req, audience_ceiling).await;
+                return conversation_page_response(&self.pool, &req, audience).await;
             }
             // The unpaged read is the newest page with no bound, put back in conversation order.
             // One query serves both reads, so the active-path filter and the tree columns cannot
@@ -7865,20 +9258,23 @@ impl SessionCore for SessionService {
                 &self.pool,
                 &req.org_id,
                 &req.thread_id,
-                audience_ceiling,
+                audience,
+                req.include_human_posts,
                 None,
                 i64::MAX,
                 req.include_inactive,
             )
             .await?;
             rows.reverse();
-            let messages = rows
+            let mut messages: Vec<pb::SessionMessage> = rows
                 .into_iter()
                 .map(|row| session_message_from_row(row, req.include_inactive))
                 .collect();
+            finish_conversation_messages(&self.pool, &req, &mut messages).await?;
             Ok(Response::new(pb::ListConversationResponse {
                 messages,
                 has_more: false,
+                omitted_before: 0,
             }))
         }
         .await;
@@ -7911,7 +9307,9 @@ impl SessionCore for SessionService {
                 &req.user_id,
                 &req.space_id,
             )?;
-            let audience_ceiling = space_read.map(|read| read.recipient_audience_revision);
+            let audience = crate::space::audience_window::audience_window(space_read);
+            let audience_ceiling = audience.ceiling;
+            let history_floor = audience.floor;
             let limit = clamp_thread_limit(req.limit);
             let page_size = usize::try_from(limit).unwrap_or(usize::MAX);
             let archive_state = match pb::ArchiveFilter::try_from(req.archived) {
@@ -7958,9 +9356,11 @@ impl SessionCore for SessionService {
                 starred: bool,
                 unread: bool,
                 last_read_at: DateTime<Utc>,
+                // {reply_count, last_author}: one JSON column so the row stays a flat struct.
+                reply_stats: Option<serde_json::Value>,
             }
             let mut rows: Vec<ThreadListRow> = sqlx::query_as(
-                "WITH page AS (
+                concat!("WITH page AS (
                     SELECT t.id, t.session_key, t.created_at, t.presentation_title,
                            t.presentation_preview, t.pinned_at, t.last_activity_at, t.space_id,
                            t.origin, t.user_id, t.persona_enabled, t.archived_at,
@@ -7973,6 +9373,12 @@ impl SessionCore for SessionService {
                            OR (t.recipient_audience_revision IS NULL
                                OR t.recipient_audience_revision <= $6))
                       AND ($6::BIGINT IS NOT NULL OR t.user_id = $2)
+                      AND ($6::BIGINT IS NULL
+                           OR EXISTS (SELECT 1 FROM messages em
+                                      WHERE em.thread_id = t.id
+                                        AND ($13::BIGINT IS NULL
+                                             OR em.recipient_audience_revision IS NULL
+                                             OR em.recipient_audience_revision >= $13)))
                       AND (NULLIF($4, '') IS NULL OR t.space_id = $4)
                       AND (NULLIF($5, '') IS NULL OR t.origin = $5)
                       AND (NULLIF($7, '') IS NULL OR t.id = $7)
@@ -8002,12 +9408,17 @@ impl SessionCore for SessionService {
                     page.archived_at,
                     page.starred,
                     page.unread,
-                    page.last_read_at
+                    page.last_read_at,
+                    jsonb_build_object('reply_count', reply_stats.reply_count,
+                                       'last_author', reply_stats.last_author) AS reply_stats
                  FROM page
                  LEFT JOIN LATERAL (
                     SELECT content
                     FROM messages
                     WHERE thread_id = page.id AND role = 'user' AND on_active_path
+                      AND ($13::BIGINT IS NULL
+                           OR recipient_audience_revision IS NULL
+                           OR recipient_audience_revision >= $13)
                     ORDER BY sequence ASC
                     LIMIT 1
                  ) first_user ON TRUE
@@ -8015,17 +9426,45 @@ impl SessionCore for SessionService {
                     SELECT content
                     FROM messages
                     WHERE thread_id = page.id AND on_active_path
+                      AND ($13::BIGINT IS NULL
+                           OR recipient_audience_revision IS NULL
+                           OR recipient_audience_revision >= $13)
                     ORDER BY sequence DESC
                     LIMIT 1
                  ) last_message ON TRUE
                  LEFT JOIN LATERAL (
-                    SELECT id, status, updated_at
-                    FROM runs
-                    WHERE thread_id = page.id
-                    ORDER BY updated_at DESC, created_at DESC, id DESC
+                    SELECT r.id, ", crate::run_phase::run_phase_sql!("r"), " AS status, r.updated_at
+                    FROM runs r
+                    WHERE r.thread_id = page.id
+                    ORDER BY r.updated_at DESC, r.created_at DESC, r.id DESC
                     LIMIT 1
                  ) latest_run ON TRUE
-                 ORDER BY (page.pinned_at IS NOT NULL) DESC, page.last_activity_at DESC, page.id DESC",
+                 LEFT JOIN LATERAL (
+                    SELECT GREATEST(COUNT(*) FILTER (WHERE m.role = 'user') - 1, 0) AS reply_count,
+                           (SELECT lm.author_subject_id
+                            FROM messages lm
+                            WHERE lm.thread_id = page.id AND lm.role = 'user'
+                              AND lm.author_subject_id IS NOT NULL
+                              AND lm.on_active_path
+                              AND ($6::BIGINT IS NULL
+                                   OR lm.recipient_audience_revision IS NULL
+                                   OR lm.recipient_audience_revision <= $6)
+                              AND ($13::BIGINT IS NULL
+                                   OR lm.recipient_audience_revision IS NULL
+                                   OR lm.recipient_audience_revision >= $13)
+                            ORDER BY lm.sequence DESC
+                            LIMIT 1) AS last_author
+                    FROM messages m
+                    WHERE m.thread_id = page.id
+                      AND m.on_active_path
+                      AND ($6::BIGINT IS NULL
+                           OR m.recipient_audience_revision IS NULL
+                           OR m.recipient_audience_revision <= $6)
+                      AND ($13::BIGINT IS NULL
+                           OR m.recipient_audience_revision IS NULL
+                           OR m.recipient_audience_revision >= $13)
+                 ) reply_stats ON TRUE
+                 ORDER BY (page.pinned_at IS NOT NULL) DESC, page.last_activity_at DESC, page.id DESC"),
             )
             .bind(&req.org_id)
             .bind(&req.user_id)
@@ -8039,6 +9478,7 @@ impl SessionCore for SessionService {
             .bind(cursor_thread_id)
             .bind(archive_state)
             .bind(req.starred_only)
+            .bind(history_floor)
             .fetch_all(&self.pool)
             .await
             .map_err(|e| {
@@ -8080,6 +9520,7 @@ impl SessionCore for SessionService {
                             starred,
                             unread,
                             last_read_at,
+                            reply_stats,
                         } = row;
                         let fallback_title = if session_key.trim().is_empty() {
                             "Verevon Chat"
@@ -8109,6 +9550,18 @@ impl SessionCore for SessionService {
                             starred,
                             unread,
                             last_read_at: Some(to_proto_timestamp(last_read_at)),
+                            reply_count: reply_stats
+                                .as_ref()
+                                .and_then(|stats| stats["reply_count"].as_u64())
+                                .and_then(|count| u32::try_from(count).ok())
+                                .unwrap_or_default(),
+                            last_author_subject_id: reply_stats
+                                .as_ref()
+                                .and_then(|stats| stats["last_author"].as_str())
+                                .unwrap_or_default()
+                                .to_owned(),
+                            // The activity summary is read by ListSpaceTimeline (WS15-S6).
+                            ..Default::default()
                         }
                     },
                 )
@@ -8624,6 +10077,13 @@ impl SessionCore for SessionService {
                 .begin()
                 .await
                 .map_err(|error| Status::internal(error.to_string()))?;
+            // Space event log: the deferred thread-delete triggers fire at commit and
+            // would write fresh `thread.deleted` rows for a Space being erased. Suppress
+            // them for this transaction and drop the Space's log and head with it.
+            crate::space::events::purge_space(&mut tx, &req.org_id, &req.space_id)
+                .await
+                .map_err(|error| Status::internal(error.to_string()))?;
+
             // Lock exactly the scoped owner rows before deleting their
             // descendants. This is idempotent: a retry after a committed
             // deletion observes an empty set and cannot touch an unscoped
@@ -8842,6 +10302,13 @@ impl ManagedRunLifecycle for ManagedRunLifecycleService {
                 Status::permission_denied("user-bound managed-run credential required")
             })?;
             req.user_id = user_id.to_owned();
+            // WS08-S2: a wake writes durable rows (the run's trigger pair), so a zero-retention
+            // caller is refused with the typed catalogue refusal before anything else.
+            let wake_ctx = req.wake.take();
+            if wake_ctx.is_some() && caller.zdr() {
+                return Err(mp_contracts::zdr_refusal::Refusal::DURABLE_MUTATION_FORBIDDEN
+                    .grpc_status(tonic::Code::PermissionDenied));
+            }
 
             // ZDR users use the intentionally narrow metadata-only start
             // branch. It does not append a message or durable prompt; their
@@ -8855,9 +10322,43 @@ impl ManagedRunLifecycle for ManagedRunLifecycleService {
             // verified claims give: zero retention, a waived persistent run on
             // its one connection, or an ordinary persistent run.
             let retention = crate::retention_receipt::RunRetention::from_caller(&caller);
-            terminalization::start_managed_run_with_retention_inner(&self.pool, req, retention)
-                .await
-                .map(|started| Response::new(started.into_proto()))
+            // WS08-S2: wake mode. The owner gate above has passed; now the switch, the signed
+            // decision (subject = the caller) and the stored facts. Origin and the (post, agent)
+            // pair come from the verified decision, never from a caller field.
+            let verified_wake = if let Some(wake) = wake_ctx.as_ref() {
+                if !mp_contracts::space_mentions::wake_core_enabled() {
+                    return Err(Status::permission_denied("addressed wake is not enabled"));
+                }
+                if req.thread_id.trim().is_empty()
+                    || !crate::space::mentions::wake_context_is_complete(wake)
+                    || !crate::space::mentions::known_turn_origin(&wake.turn_origin)
+                {
+                    return Err(Status::invalid_argument(
+                        "a wake needs a thread and a complete signed decision",
+                    ));
+                }
+                let verified =
+                    verify_run_wake_space_decision(wake, &req.org_id, user_id, &req.thread_id)?;
+                crate::space::mentions::check_wake_facts(
+                    &self.pool,
+                    &req.org_id,
+                    &req.thread_id,
+                    user_id,
+                    &verified,
+                )
+                .await?;
+                Some(verified)
+            } else {
+                None
+            };
+            terminalization::start_managed_run_with_wake_inner(
+                &self.pool,
+                req,
+                retention,
+                verified_wake.as_ref(),
+            )
+            .await
+            .map(|started| Response::new(started.into_proto()))
         }
         .await;
         record_metrics("start_managed_run", started, result.is_ok());
@@ -8927,9 +10428,8 @@ impl ManagedRunLifecycle for ManagedRunLifecycleService {
             let caller = identity(&request)?;
             let req = request.into_inner();
             if caller.zdr() {
-                return Err(Status::permission_denied(
-                    "a zero-retention run has no durable output",
-                ));
+                return Err(mp_contracts::zdr_refusal::Refusal::DURABLE_MUTATION_FORBIDDEN
+                    .grpc_status(tonic::Code::PermissionDenied));
             }
             authorize_operation(&caller, "session:write")?;
             authorize_run_owner(&self.pool, &caller, &req.run_id, OwnerIntent::Mutate).await?;
@@ -9207,6 +10707,13 @@ impl SessionService {
             None => return local(),
         };
 
+        // WS17-S1 C6: no org-wide Data Plane call for a contained thread; Space-scoped
+        // retrieval stays on the model-gateway path.
+        if crate::space::memory_scope::thread_is_contained_by_id(&self.pool, thread_id).await {
+            crate::space::memory_scope::record_contained("retrieval_org_wide");
+            return local();
+        }
+
         // Data Plane requires the caller's own `aud=data-plane` bearer and there
         // is no honest substitute, so an undelegated call answers from durable
         // local memory instead of attempting a call that can only 401.
@@ -9391,6 +10898,11 @@ impl SessionService {
     /// Failures are logged and ignored — persistence is best-effort.
     async fn persist_retrieval_evidence(&self, thread_id: &str, segments: &[String]) {
         if segments.is_empty() {
+            return;
+        }
+        // WS17-S1 C6: a contained thread persists no retrieval evidence into `memory_index`.
+        if crate::space::memory_scope::thread_is_contained_by_id(&self.pool, thread_id).await {
+            crate::space::memory_scope::record_contained("retrieval_persist");
             return;
         }
         let org_id: Option<String> =
@@ -9789,6 +11301,7 @@ pub async fn serve(
     events_tx: tokio::sync::broadcast::Sender<mp_contracts::model_plane::v1::OrchestrationEvent>,
     letta_memory: Option<LettaMemoryAdapter>,
     auth: JwtVerifier,
+    space_wakes: crate::space::events::SpaceWakes,
 ) -> anyhow::Result<()> {
     let addr = "0.0.0.0:9091".parse()?;
     info!("gRPC listening on :9091");
@@ -9883,6 +11396,17 @@ pub async fn serve(
     };
     let message_tree = crate::message_tree::MessageTreeGrpc { pool: pool.clone() };
 
+    // Space event stream (WS02-S3): its own small read pool, built before `pool` moves.
+    let space_events = crate::space_stream_grpc::SpaceEventsGrpc::new(pool.clone(), space_wakes);
+
+    // Space room read service (WS07-S9): its own handle on the pool, taken before `pool` moves.
+    let session_read_pool = pool.clone();
+    // Space message search (WS13-S1): own handle on the pool; the switch is read once, at boot.
+    let space_history_pool = pool.clone();
+    let space_attention_pool = pool.clone();
+    // Message revisions (WS12-S4): its own handle on the pool and the Letta mirror, taken before they move.
+    let message_revision_pool = pool.clone();
+    let letta_for_revisions = letta_memory.clone();
     let session = SessionService {
         pool,
         retrieval_client,
@@ -9933,6 +11457,32 @@ pub async fn serve(
         ))
         .add_service(LearningGovernanceServiceServer::with_interceptor(
             learning_governance,
+            auth.clone(),
+        ))
+        .add_service(SpaceRoomReadServiceServer::with_interceptor(
+            crate::space::read_service::SpaceRoomReadGrpc::new(session_read_pool),
+            auth.clone(),
+        ))
+        .add_service(SpaceHistoryServiceServer::with_interceptor(
+            crate::space::history::SpaceHistoryGrpc::new(
+                space_history_pool,
+                mp_contracts::space_history::core_enabled(),
+            ),
+            auth.clone(),
+        ))
+        .add_service(SpaceAttentionServer::with_interceptor(
+            crate::space::attention::SpaceAttentionGrpc::new(
+                space_attention_pool,
+                mp_contracts::space_attention::summary_enabled(),
+            ),
+            auth.clone(),
+        ))
+        .add_service(SpaceEventsServer::with_interceptor(
+            space_events,
+            auth.clone(),
+        ))
+        .add_service(MessageRevisionServiceServer::with_interceptor(
+            crate::space::revisions::MessageRevisionGrpc::new(message_revision_pool, letta_for_revisions),
             auth.clone(),
         ))
         .add_service(RunServiceServer::with_interceptor(runs, auth))
@@ -10836,7 +12386,8 @@ mod tests {
         valid_scheduled_step_digest, validate_append_space_context_shape,
         validate_scheduled_run_result_request, validate_scheduled_step_request,
         thread_read_payload_digest, validate_thread_space_context_shape, validate_user_checkpoint,
-        CONTROL_THREAD_READ_ACTION, CONTROL_THREAD_READ_SCHEMA,
+        thread_append_payload_digest_v2, CONTROL_THREAD_APPEND_SCHEMA,
+        CONTROL_THREAD_APPEND_SCHEMA_V2, CONTROL_THREAD_READ_ACTION, CONTROL_THREAD_READ_SCHEMA,
         verify_thread_read_space_decision, verify_thread_read_space_decision_with_key,
         ControlSpaceDecisionClaims,
         verify_append_space_decision_with_key, verify_scheduled_run_decision_with_keys,
@@ -12772,7 +14323,7 @@ mod tests {
     #[test]
     #[allow(clippy::result_large_err)] // the closure returns the verifier's `Status` error
     fn own_scheduled_thread_read_decision_issued_by_control_verifies() {
-        const TOKEN: &str = "v2.Y29udHJvbC13aXJlLXZlY3Rvci1rZXk.eyJkZWNpc2lvbl9yZWYiOiJvd24tcmVhZC13aXJlLTEiLCJvcmdfaWQiOiJvcmctMSIsInNwYWNlX3JlZiI6InNwYWNlLXBlcnNvbmFsIiwic3ViamVjdF9pZCI6InVzZXItMSIsInNlcnZpY2VfYXVkaWVuY2UiOiJtb2RlbC1wbGFuZSIsImFjdGlvbl9pZCI6Im1vZGVsLnRocmVhZC5yZWFkIiwiYWN0aW9uX3NjaGVtYV9oYXNoIjoic2hhMjU2OnRocmVhZC1yZWFkLXYxIiwicGF5bG9hZF9kaWdlc3QiOiJzaGEyNTY6Y2E5YmM3ZjJiMDI5YzQzNWY1MGRiYjY1NWNmZDFmZGU3YTU4NjNhOTUwNDAzNjNlOGFlN2NmMzBkY2M5NjRiOCIsImlkZW1wb3RlbmN5X2tleSI6InNwYWNlLXJlYWQtd2lyZS0xIiwicmVjaXBpZW50X2F1ZGllbmNlX3JlZiI6ImF1ZGllbmNlOnNwYWNlLXBlcnNvbmFsOjIiLCJyZWNpcGllbnRfYXVkaWVuY2VfaGFzaCI6InNoYTI1Njp0ZXN0LWF1ZGllbmNlIiwicHJpdmFjeV9wb2xpY3lfcmVmIjoicHJpdmFjeTpvcmctMTo1IiwicmVzb3VyY2VfYXV0aG9yaXphdGlvbl9yZWYiOiJjb250cm9sOnNwYWNlLXBlcnNvbmFsOnRocmVhZC1yZWFkOjciLCJhdXRob3JpdHlfcmV2aXNpb24iOjcsIm1lbWJlcnNoaXBfcmV2aXNpb24iOjQsInByaXZhY3lfcmV2aXNpb24iOjUsInJlY2lwaWVudF9hdWRpZW5jZV9yZXZpc2lvbiI6MiwiZW50aXRsZW1lbnRfcmV2aXNpb24iOjMsInBlcm1pc3Npb25zIjpbInRocmVhZDpyZWFkIl0sInB1cnBvc2UiOiJhc3Npc3RhbnRfY29sbGFib3JhdGlvbiIsImxhd2Z1bF9iYXNpcyI6ImNvbnRyYWN0IiwicHJpdmFjeV9jbGFzcyI6ImludGVybmFsIiwidGhpcmRfcGFydHlfcHJvY2Vzc2luZ19hbGxvd2VkIjpmYWxzZSwicmV0ZW50aW9uX2NsYXNzIjoic3RhbmRhcmQiLCJyZXNpZGVuY3kiOiJzd2VkZW5jZW50cmFsIiwiZGVsZXRpb25fc2NvcGUiOiJzcGFjZSIsInplcm9fZGF0YV9yZXRlbnRpb24iOmZhbHNlLCJpc3N1ZWRfYXQiOiIyMDI2LTEwLTAxVDEyOjAwOjAwWiIsImV4cGlyZXNfYXQiOiIyMDI2LTEwLTAxVDEyOjAyOjAwWiIsIm5vbmNlIjoibm9uY2Utd2lyZS0xIn0.ChmOC42y-MpKrWV9T-CdsX8rjVeqepJ213aODu261XDk-AkAh13OxJXnhJ7lVYUXpdUxQjRIGC6qrxkp5ZVfCQ";
+        const TOKEN: &str = "v2.Y29udHJvbC13aXJlLXZlY3Rvci1rZXk.eyJkZWNpc2lvbl9yZWYiOiJvd24tcmVhZC13aXJlLTEiLCJvcmdfaWQiOiJvcmctMSIsInNwYWNlX3JlZiI6InNwYWNlLXBlcnNvbmFsIiwic3ViamVjdF9pZCI6InVzZXItMSIsInNlcnZpY2VfYXVkaWVuY2UiOiJtb2RlbC1wbGFuZSIsImFjdGlvbl9pZCI6Im1vZGVsLnRocmVhZC5yZWFkIiwiYWN0aW9uX3NjaGVtYV9oYXNoIjoic2hhMjU2OnRocmVhZC1yZWFkLXYxIiwicGF5bG9hZF9kaWdlc3QiOiJzaGEyNTY6Y2E5YmM3ZjJiMDI5YzQzNWY1MGRiYjY1NWNmZDFmZGU3YTU4NjNhOTUwNDAzNjNlOGFlN2NmMzBkY2M5NjRiOCIsImlkZW1wb3RlbmN5X2tleSI6InNwYWNlLXJlYWQtd2lyZS0xIiwicmVjaXBpZW50X2F1ZGllbmNlX3JlZiI6ImF1ZGllbmNlOnNwYWNlLXBlcnNvbmFsOjIiLCJyZWNpcGllbnRfYXVkaWVuY2VfaGFzaCI6InNoYTI1Njp0ZXN0LWF1ZGllbmNlIiwicHJpdmFjeV9wb2xpY3lfcmVmIjoicHJpdmFjeTpvcmctMTo1IiwicmVzb3VyY2VfYXV0aG9yaXphdGlvbl9yZWYiOiJjb250cm9sOnNwYWNlLXBlcnNvbmFsOnRocmVhZC1yZWFkOjciLCJhdXRob3JpdHlfcmV2aXNpb24iOjcsIm1lbWJlcnNoaXBfcmV2aXNpb24iOjQsInByaXZhY3lfcmV2aXNpb24iOjUsInJlY2lwaWVudF9hdWRpZW5jZV9yZXZpc2lvbiI6MiwiZW50aXRsZW1lbnRfcmV2aXNpb24iOjMsInBlcm1pc3Npb25zIjpbInRocmVhZDpyZWFkIl0sInB1cnBvc2UiOiJhc3Npc3RhbnRfY29sbGFib3JhdGlvbiIsImxhd2Z1bF9iYXNpcyI6ImNvbnRyYWN0IiwicHJpdmFjeV9jbGFzcyI6ImludGVybmFsIiwidGhpcmRfcGFydHlfcHJvY2Vzc2luZ19hbGxvd2VkIjpmYWxzZSwicmV0ZW50aW9uX2NsYXNzIjoic3RhbmRhcmQiLCJyZXNpZGVuY3kiOiJzd2VkZW5jZW50cmFsIiwiZGVsZXRpb25fc2NvcGUiOiJzcGFjZSIsInplcm9fZGF0YV9yZXRlbnRpb24iOmZhbHNlLCJpc3N1ZWRfYXQiOiIyMDI2LTEwLTAxVDEyOjAwOjAwWiIsImV4cGlyZXNfYXQiOiIyMDI2LTEwLTAxVDEyOjAyOjAwWiIsIm5vbmNlIjoibm9uY2Utd2lyZS0xIiwic3BhY2Vfa2luZCI6InBlcnNvbmFsIn0.cXwllRNltAcl6e8fcfs4DDaURmgvbvivksjj6f4uyshZDo2gld2xIVt3pehPgS-cUpxAj55PbJ0TLWSLq35ADw";
         const PUBLIC_KEY: &str = "lHXGzw7aNAV1KNhpR4HsySrWOdfivSd2HtPvdJJL6wc";
         const KEY_ID: &str = "control-wire-vector-key";
 
@@ -12978,6 +14529,241 @@ mod tests {
         (request, key_id)
     }
 
+    // WS01-S2: thread-append schema v2 binds `post_kind`. The golden is shared with
+    // Control (`thread-append-v2.golden.json`, same bytes on both sides).
+    const THREAD_APPEND_V2_GOLDEN: &str =
+        include_str!("../tests/fixtures/thread-append-v2.golden.json");
+    // sha256 of the golden with CRLF folded to LF (autocrlf rewrites Windows checkouts).
+    const THREAD_APPEND_V2_GOLDEN_SHA256: &str =
+        "7c5d8215e76b22f63406477e36c61457abb37babc532b1b93989aee35a51407e";
+
+    fn thread_append_golden_request(
+        golden: &serde_json::Value,
+        action_schema_hash: &str,
+        post_kind: &str,
+    ) -> pb::AppendMessageRequest {
+        let input = &golden["input"];
+        let text = |key: &str| input[key].as_str().expect("golden text field").to_owned();
+        pb::AppendMessageRequest {
+            thread_id: text("thread_id"),
+            role: "user".to_owned(),
+            content: text("content"),
+            space_id: text("space_id"),
+            space_decision_ref: text("space_decision_ref"),
+            recipient_audience_ref: text("recipient_audience_ref"),
+            recipient_audience_hash: text("recipient_audience_hash"),
+            recipient_audience_revision: input["recipient_audience_revision"]
+                .as_u64()
+                .expect("audience revision"),
+            privacy_policy_ref: text("privacy_policy_ref"),
+            resource_authorization_ref: text("resource_authorization_ref"),
+            authority_revision: input["authority_revision"]
+                .as_u64()
+                .expect("authority revision"),
+            action_schema_hash: action_schema_hash.to_owned(),
+            idempotency_key: text("idempotency_key"),
+            post_kind: post_kind.to_owned(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn thread_append_v2_digest_matches_control_golden() {
+        use sha2::{Digest, Sha256};
+        let normalized = THREAD_APPEND_V2_GOLDEN.replace("\r\n", "\n");
+        assert_eq!(
+            format!("{:x}", Sha256::digest(normalized.as_bytes())),
+            THREAD_APPEND_V2_GOLDEN_SHA256,
+            "the Rust copy of thread-append-v2.golden.json drifted from Control's; update both together"
+        );
+        let golden: serde_json::Value = serde_json::from_str(&normalized).expect("golden parses");
+        let input = &golden["input"];
+        let org_id = input["org_id"].as_str().expect("org");
+        let user_id = input["user_id"].as_str().expect("user");
+        let expected = &golden["expected"];
+        assert_eq!(expected["v1_schema"], CONTROL_THREAD_APPEND_SCHEMA);
+        assert_eq!(expected["v2_schema"], CONTROL_THREAD_APPEND_SCHEMA_V2);
+
+        let v1 = thread_append_golden_request(&golden, CONTROL_THREAD_APPEND_SCHEMA, "");
+        assert_eq!(
+            thread_append_payload_digest(&v1, org_id, user_id),
+            expected["v1_digest"].as_str().expect("v1 digest"),
+            "v1 encoding changed"
+        );
+        let v2 = thread_append_golden_request(&golden, CONTROL_THREAD_APPEND_SCHEMA_V2, "post");
+        assert_eq!(
+            thread_append_payload_digest_v2(&v2, org_id, user_id),
+            expected["v2_post_digest"].as_str().expect("v2 digest"),
+            "v2 encoding drifted from Control"
+        );
+        // The digest commits to the kind.
+        let v2_turn =
+            thread_append_golden_request(&golden, CONTROL_THREAD_APPEND_SCHEMA_V2, "turn");
+        assert_ne!(
+            thread_append_payload_digest_v2(&v2_turn, org_id, user_id),
+            thread_append_payload_digest_v2(&v2, org_id, user_id)
+        );
+    }
+
+    /// Signs a decision whose claimed schema and digest follow `schema_v2`, for a request
+    /// carrying `post_kind`, issued to `user-2` in a room.
+    fn signed_thread_append_request_for_kind(
+        signing_key: &SigningKey,
+        now: DateTime<Utc>,
+        schema_v2: bool,
+        post_kind: &str,
+    ) -> (pb::AppendMessageRequest, String) {
+        let key_id = "control-test-key".to_owned();
+        let key_part = URL_SAFE_NO_PAD.encode(key_id.as_bytes());
+        let mut request = pb::AppendMessageRequest {
+            thread_id: "thread-1".to_owned(),
+            role: "user".to_owned(),
+            content: "hello room".to_owned(),
+            space_id: "space-room-1".to_owned(),
+            space_decision_ref: "append-decision-2".to_owned(),
+            recipient_audience_ref: "audience:space-room-1:4".to_owned(),
+            recipient_audience_revision: 4,
+            recipient_audience_hash: "sha256:audience-hash".to_owned(),
+            privacy_policy_ref: "privacy:org-1:5".to_owned(),
+            authority_revision: 7,
+            resource_authorization_ref: "control:space-room-1:thread-append:7".to_owned(),
+            action_schema_hash: if schema_v2 {
+                CONTROL_THREAD_APPEND_SCHEMA_V2.to_owned()
+            } else {
+                CONTROL_THREAD_APPEND_SCHEMA.to_owned()
+            },
+            idempotency_key: "thread-append:2".to_owned(),
+            post_kind: post_kind.to_owned(),
+            ..Default::default()
+        };
+        request.payload_digest = if schema_v2 {
+            thread_append_payload_digest_v2(&request, "org-1", "user-2")
+        } else {
+            thread_append_payload_digest(&request, "org-1", "user-2")
+        };
+        let payload = serde_json::json!({
+            "decision_ref": request.space_decision_ref, "org_id": "org-1", "space_ref": request.space_id,
+            "subject_id": "user-2", "service_audience": CONTROL_SPACE_DECISION_AUDIENCE,
+            "action_id": CONTROL_THREAD_APPEND_ACTION, "action_schema_hash": request.action_schema_hash,
+            "payload_digest": request.payload_digest, "idempotency_key": request.idempotency_key,
+            "recipient_audience_ref": request.recipient_audience_ref, "recipient_audience_hash": request.recipient_audience_hash,
+            "privacy_policy_ref": request.privacy_policy_ref, "resource_authorization_ref": request.resource_authorization_ref,
+            "purpose": "assistant_collaboration", "lawful_basis": "contract", "privacy_class": "internal",
+            "third_party_processing_allowed": false, "retention_class": "standard", "residency": "swedencentral",
+            "deletion_scope": "space", "zero_data_retention": false, "nonce": "nonce-2",
+            "authority_revision": request.authority_revision, "membership_revision": 4, "privacy_revision": 5,
+            "recipient_audience_revision": request.recipient_audience_revision, "entitlement_revision": 3,
+            "permissions": ["thread:append"], "issued_at": now.to_rfc3339(),
+            "expires_at": (now + chrono::Duration::minutes(1)).to_rfc3339(),
+            "space_kind": "room",
+        });
+        let payload_part =
+            URL_SAFE_NO_PAD.encode(serde_json::to_vec(&payload).expect("test claims"));
+        let signing_input = format!("{CONTROL_SPACE_DECISION_VERSION}.{key_part}.{payload_part}");
+        request.space_decision_token = format!(
+            "{signing_input}.{}",
+            URL_SAFE_NO_PAD.encode(signing_key.sign(signing_input.as_bytes()).to_bytes())
+        );
+        (request, key_id)
+    }
+
+    fn verify_append_for_user_2(
+        request: &pb::AppendMessageRequest,
+        key_id: &str,
+        signing_key: &SigningKey,
+        now: DateTime<Utc>,
+    ) -> Result<String, tonic::Status> {
+        verify_append_space_decision_with_key(
+            request,
+            "org-1",
+            "user-2",
+            key_id,
+            &signing_key.verifying_key(),
+            now,
+        )
+    }
+
+    #[test]
+    fn v1_decision_cannot_authorize_a_post() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-10-27T12:00:00Z")
+            .expect("test time")
+            .with_timezone(&Utc);
+        let signing_key = SigningKey::from_bytes(&[21_u8; 32]);
+        // A fully consistent v1 decision (schema, digest and claims all v1) for a request that
+        // claims post_kind post must still be refused: only v2 binds the kind.
+        let (request, key_id) =
+            signed_thread_append_request_for_kind(&signing_key, now, false, "post");
+        let err = verify_append_for_user_2(&request, &key_id, &signing_key, now)
+            .expect_err("a v1 decision may not authorize a post");
+        assert_eq!(err.code(), tonic::Code::PermissionDenied);
+        assert!(err.message().contains("v1"), "{}", err.message());
+
+        // The same v1 decision still authorizes a turn (existing behaviour unchanged).
+        for kind in ["", "turn"] {
+            let (turn, key_id) =
+                signed_thread_append_request_for_kind(&signing_key, now, false, kind);
+            verify_append_for_user_2(&turn, &key_id, &signing_key, now)
+                .expect("a v1 decision must keep authorizing a turn");
+        }
+    }
+
+    #[test]
+    fn v2_decision_for_post_verifies_and_is_bound_to_the_kind() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-10-27T12:00:00Z")
+            .expect("test time")
+            .with_timezone(&Utc);
+        let signing_key = SigningKey::from_bytes(&[22_u8; 32]);
+        let (request, key_id) =
+            signed_thread_append_request_for_kind(&signing_key, now, true, "post");
+        let space_kind = verify_append_for_user_2(&request, &key_id, &signing_key, now)
+            .expect("a v2 decision must verify for a post");
+        assert_eq!(space_kind, "room");
+
+        // The same decision does not verify a request with a different post_kind: the digest
+        // binds the kind, so a post token cannot be replayed as a turn (or the reverse).
+        let as_turn = pb::AppendMessageRequest {
+            post_kind: "turn".to_owned(),
+            ..request.clone()
+        };
+        assert_eq!(
+            verify_append_for_user_2(&as_turn, &key_id, &signing_key, now)
+                .expect_err("a post decision must not authorize a turn")
+                .code(),
+            tonic::Code::PermissionDenied
+        );
+        // Another user cannot use it.
+        assert_eq!(
+            verify_append_space_decision_with_key(
+                &request,
+                "org-1",
+                "user-3",
+                &key_id,
+                &signing_key.verifying_key(),
+                now,
+            )
+            .expect_err("a post decision is bound to its subject")
+            .code(),
+            tonic::Code::PermissionDenied
+        );
+    }
+
+    #[test]
+    fn v2_decision_for_a_turn_does_not_verify_as_a_post() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-10-27T12:00:00Z")
+            .expect("test time")
+            .with_timezone(&Utc);
+        let signing_key = SigningKey::from_bytes(&[23_u8; 32]);
+        let (request, key_id) =
+            signed_thread_append_request_for_kind(&signing_key, now, true, "turn");
+        verify_append_for_user_2(&request, &key_id, &signing_key, now)
+            .expect("a v2 decision over post_kind turn verifies");
+        let as_post = pb::AppendMessageRequest {
+            post_kind: "post".to_owned(),
+            ..request
+        };
+        assert!(verify_append_for_user_2(&as_post, &key_id, &signing_key, now).is_err());
+    }
+
     #[test]
     fn standard_health_registers_every_business_service_name() {
         assert_eq!(
@@ -12992,6 +14778,10 @@ mod tests {
                 "model_plane.v1.RunService",
                 "model_plane.v1.SessionRetentionService",
                 "model_plane.v1.ThreadAutonomy",
+                "model_plane.v1.SpaceRoomReadService",
+                "model_plane.v1.SpaceEvents",
+                "model_plane.v1.SpaceHistoryService",
+                "model_plane.v1.SpaceAttention",
             ]
         );
     }
@@ -15381,6 +17171,8 @@ mod tests {
         service_audience: String,
         action_id: String,
         nonce: String,
+        /// `None` leaves the claim out of the signed payload altogether.
+        zero_data_retention: Option<bool>,
         issued_at: DateTime<Utc>,
         expires_at: DateTime<Utc>,
     }
@@ -15402,6 +17194,7 @@ mod tests {
                 service_audience: super::MAIL_TASK_THREAD_PREPARE_AUDIENCE.to_owned(),
                 action_id: super::MAIL_TASK_THREAD_PREPARE_ACTION.to_owned(),
                 nonce: "nonce-1".to_owned(),
+                zero_data_retention: Some(false),
                 issued_at: now - chrono::Duration::seconds(1),
                 expires_at: now + chrono::Duration::minutes(5),
             }
@@ -15425,7 +17218,7 @@ mod tests {
         }
 
         fn sign(&self) -> String {
-            let claims = serde_json::json!({
+            let mut claims = serde_json::json!({
                 "decision_ref": self.decision_ref,
                 "org_id": self.org_id,
                 "user_id": self.user_id,
@@ -15439,6 +17232,9 @@ mod tests {
                 "issued_at": self.issued_at.to_rfc3339(),
                 "expires_at": self.expires_at.to_rfc3339(),
             });
+            if let Some(zero_data_retention) = self.zero_data_retention {
+                claims["zero_data_retention"] = serde_json::json!(zero_data_retention);
+            }
             let payload = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims).expect("claims encode"));
             let encoded_key = URL_SAFE_NO_PAD.encode(self.key_id.as_bytes());
             let signing_input = format!("{}.{encoded_key}.{payload}", super::MAIL_TASK_DECISION_VERSION);
@@ -15457,6 +17253,30 @@ mod tests {
         let decision = MailTaskDecisionBuilder::new(now);
         super::verify_mail_task_thread_decision_with_keys(&decision.request(), &decision.keys(), now)
             .expect("a fully matching mail-task-v1 decision must authorize the request");
+    }
+
+    /// A mail-task decision claiming zero data retention is refused, and so is one that does not state
+    /// the claim at all: Control always states it (false), so a silent decision is not one it signed.
+    #[test]
+    fn mail_task_thread_decision_is_refused_for_a_zero_data_retention_claim_or_a_missing_one() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-09-28T12:00:00Z")
+            .expect("test time")
+            .with_timezone(&Utc);
+        for (label, claim) in [("claims true", Some(true)), ("states nothing", None)] {
+            let mut decision = MailTaskDecisionBuilder::new(now);
+            decision.zero_data_retention = claim;
+            let error = super::verify_mail_task_thread_decision_with_keys(
+                &decision.request(),
+                &decision.keys(),
+                now,
+            )
+            .expect_err("a zero-retention or silent mail-task decision must not authorize a thread");
+            assert_eq!(error.code(), tonic::Code::PermissionDenied, "{label}");
+        }
+        // Control's own shape (the claim stated, false) still passes.
+        let decision = MailTaskDecisionBuilder::new(now);
+        super::verify_mail_task_thread_decision_with_keys(&decision.request(), &decision.keys(), now)
+            .expect("an explicit false claim authorizes");
     }
 
     /// prepare_user_owned_thread_rejects_a_decision_minted_for_user_A_when_the_request_names_user_B
@@ -16000,6 +17820,8 @@ mod tests {
                 "service_audience": super::MAIL_TASK_THREAD_PREPARE_AUDIENCE,
                 "action_id": super::MAIL_TASK_THREAD_PREPARE_ACTION,
                 "nonce": nonce,
+                // Required since the mail-task decision began stating ZDR; Control always sends false.
+                "zero_data_retention": false,
                 "issued_at": Utc::now().to_rfc3339(),
                 "expires_at": (Utc::now() + chrono::Duration::minutes(5)).to_rfc3339(),
             });
@@ -18160,6 +19982,801 @@ mod tests {
             .collect();
         assert_eq!(dups, vec!["user", "org"]);
     }
+
+    // ---- WS01-S1 / WS01-S3 / P-SC1: human posts and the member append path ----
+
+    #[test]
+    fn member_decision_subject_must_be_the_caller_not_the_owner() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-10-27T12:00:00Z")
+            .expect("test time")
+            .with_timezone(&Utc);
+        let signing_key = SigningKey::from_bytes(&[24_u8; 32]);
+        // Control signs a member's post decision for the member (user-2); the thread's owner
+        // is someone else (user-1).
+        let (request, key_id) =
+            signed_thread_append_request_for_kind(&signing_key, now, true, "post");
+        let verifying = signing_key.verifying_key();
+        verify_append_space_decision_with_key(&request, "org-1", "user-2", &key_id, &verifying, now)
+            .expect("the decision verifies for the caller it names");
+        // The owner path verifies against the OWNER subject: a member's decision must not pass
+        // there, and the member path must verify against the caller, never the owner.
+        let as_owner =
+            verify_append_space_decision_with_key(&request, "org-1", "user-1", &key_id, &verifying, now)
+                .expect_err("a decision made for the member does not verify for the owner subject");
+        assert_eq!(as_owner.code(), tonic::Code::PermissionDenied);
+        // The same decision does not verify in another org either.
+        assert_eq!(
+            verify_append_space_decision_with_key(&request, "org-2", "user-2", &key_id, &verifying, now)
+                .expect_err("another org")
+                .code(),
+            tonic::Code::PermissionDenied
+        );
+    }
+
+    /// Process-env guard for the ignored DB tests below (they run one at a time).
+    struct SpEnv(Vec<(&'static str, Option<String>)>);
+
+    impl SpEnv {
+        fn set(pairs: &[(&'static str, Option<&str>)]) -> Self {
+            let mut saved = Vec::new();
+            for (name, value) in pairs {
+                saved.push((*name, std::env::var(name).ok()));
+                match value {
+                    Some(value) => std::env::set_var(name, value),
+                    None => std::env::remove_var(name),
+                }
+            }
+            Self(saved)
+        }
+    }
+
+    impl Drop for SpEnv {
+        fn drop(&mut self) {
+            for (name, value) in self.0.drain(..) {
+                match value {
+                    Some(value) => std::env::set_var(name, value),
+                    None => std::env::remove_var(name),
+                }
+            }
+        }
+    }
+
+    fn sp_service(pool: sqlx::PgPool) -> super::SessionService {
+        super::SessionService {
+            pool,
+            retrieval_client: None,
+            graph_client: None,
+            knowledge_client: None,
+            letta_memory: None,
+            audit_publisher: None,
+            auth: None,
+            grant_columns: crate::grpc::ThreadGrantColumns::present(),
+        }
+    }
+
+    /// The env a verified Control decision needs: the test public key, with the flag switches
+    /// for the member path.
+    fn sp_member_env(signing_key: &SigningKey, flag_on: bool) -> SpEnv {
+        SpEnv::set(&[
+            ("CONTROL_SPACE_DECISION_PUBLIC_KEYS_JSON", None),
+            ("CONTROL_SPACE_DECISION_KEY_ID", Some("control-test-key")),
+            (
+                "CONTROL_SPACE_DECISION_PUBLIC_KEY_BASE64",
+                Some(URL_SAFE_NO_PAD.encode(signing_key.verifying_key().to_bytes()).as_str()),
+            ),
+            ("SPACE_HUMAN_POSTS_CORE", flag_on.then_some("1")),
+        ])
+    }
+
+    /// A v2-signed member post for `subject` against `thread` in `space`.
+    #[allow(clippy::too_many_arguments)]
+    fn sp_signed_post(
+        signing_key: &SigningKey,
+        org: &str,
+        subject: &str,
+        thread: &str,
+        space: &str,
+        content: &str,
+        client_message_id: &str,
+        audience_revision: u64,
+        nonce: &str,
+    ) -> pb::AppendMessageRequest {
+        sp_signed_append(
+            signing_key, org, subject, thread, space, content, client_message_id, audience_revision, nonce, "post",
+        )
+    }
+
+    /// A v2-signed append of `post_kind` (the v2 digest binds the kind).
+    #[allow(clippy::too_many_arguments)]
+    fn sp_signed_append(
+        signing_key: &SigningKey,
+        org: &str,
+        subject: &str,
+        thread: &str,
+        space: &str,
+        content: &str,
+        client_message_id: &str,
+        audience_revision: u64,
+        nonce: &str,
+        post_kind: &str,
+    ) -> pb::AppendMessageRequest {
+        let now = Utc::now();
+        let key_part = URL_SAFE_NO_PAD.encode(b"control-test-key");
+        let mut request = pb::AppendMessageRequest {
+            thread_id: thread.to_owned(),
+            role: "user".to_owned(),
+            content: content.to_owned(),
+            space_id: space.to_owned(),
+            space_decision_ref: format!("append-decision-{nonce}"),
+            recipient_audience_ref: format!("audience:{space}:{audience_revision}"),
+            recipient_audience_revision: audience_revision,
+            recipient_audience_hash: "sha256:audience-hash".to_owned(),
+            privacy_policy_ref: "privacy:org:5".to_owned(),
+            authority_revision: 7,
+            resource_authorization_ref: format!("control:{space}:thread-append:7"),
+            action_schema_hash: CONTROL_THREAD_APPEND_SCHEMA_V2.to_owned(),
+            idempotency_key: format!("thread-append:{nonce}"),
+            post_kind: post_kind.to_owned(),
+            client_message_id: client_message_id.to_owned(),
+            ..Default::default()
+        };
+        request.payload_digest = thread_append_payload_digest_v2(&request, org, subject);
+        let payload = serde_json::json!({
+            "decision_ref": request.space_decision_ref, "org_id": org, "space_ref": request.space_id,
+            "subject_id": subject, "service_audience": CONTROL_SPACE_DECISION_AUDIENCE,
+            "action_id": CONTROL_THREAD_APPEND_ACTION, "action_schema_hash": request.action_schema_hash,
+            "payload_digest": request.payload_digest, "idempotency_key": request.idempotency_key,
+            "recipient_audience_ref": request.recipient_audience_ref, "recipient_audience_hash": request.recipient_audience_hash,
+            "privacy_policy_ref": request.privacy_policy_ref, "resource_authorization_ref": request.resource_authorization_ref,
+            "purpose": "assistant_collaboration", "lawful_basis": "contract", "privacy_class": "internal",
+            "third_party_processing_allowed": false, "retention_class": "standard", "residency": "swedencentral",
+            "deletion_scope": "space", "zero_data_retention": false, "nonce": format!("nonce-{nonce}"),
+            "authority_revision": request.authority_revision, "membership_revision": 4, "privacy_revision": 5,
+            "recipient_audience_revision": request.recipient_audience_revision, "entitlement_revision": 3,
+            "permissions": ["thread:append"], "issued_at": now.to_rfc3339(),
+            "expires_at": (now + chrono::Duration::minutes(1)).to_rfc3339(),
+            "space_kind": "room",
+        });
+        let payload_part =
+            URL_SAFE_NO_PAD.encode(serde_json::to_vec(&payload).expect("test claims"));
+        let signing_input = format!("{CONTROL_SPACE_DECISION_VERSION}.{key_part}.{payload_part}");
+        request.space_decision_token = format!(
+            "{signing_input}.{}",
+            URL_SAFE_NO_PAD.encode(signing_key.sign(signing_input.as_bytes()).to_bytes())
+        );
+        request
+    }
+
+    /// A room thread owned by `owner` with the owner's first turn already stored.
+    async fn sp_room(pool: &sqlx::PgPool, prefix: &str) -> (String, String, String, String) {
+        let suffix = super::new_ulid();
+        let (org, space, thread) = (
+            format!("org-{prefix}-{suffix}"),
+            format!("space-{prefix}-{suffix}"),
+            format!("thread-{prefix}-{suffix}"),
+        );
+        crate::space::test_support::seed_space_thread(pool, &org, &space, &thread, "owner-1").await;
+        (org, space, thread, "owner-1".to_owned())
+    }
+
+    async fn sp_message_columns(pool: &sqlx::PgPool, id: &str) -> (String, i64, i64, String, Option<String>, serde_json::Value) {
+        sqlx::query_as(
+            "SELECT recipient_audience_ref, recipient_audience_revision, authority_revision, post_kind, \
+             agent_name, metadata FROM messages WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_one(pool)
+        .await
+        .expect("message row")
+    }
+
+    #[tokio::test]
+    #[ignore = "needs DB harness (DATABASE_URL to a disposable *test* Postgres)"]
+    async fn posts_are_excluded_from_context_assembly_and_default_list_conversation() {
+        let Some(pool) = crate::space::test_support::connect().await else { return };
+        let (org, space, thread, owner) = sp_room(&pool, "excl").await;
+        for (n, (role, kind, author)) in [
+            ("user", "turn", Some("owner-1")),
+            ("user", "post", Some("member-2")),
+            ("assistant", "turn", None),
+            ("user", "post", Some("member-3")),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let id = format!("{thread}-m{n}");
+            crate::space::test_support::seed_space_message(&pool, &space, &thread, &id, role, author).await;
+            sqlx::query("UPDATE messages SET post_kind = $2 WHERE id = $1")
+                .bind(&id)
+                .bind(kind)
+                .execute(&pool)
+                .await
+                .expect("set kind");
+        }
+        let svc = sp_service(pool.clone());
+        let read = |limit: u32, before: &str, include: bool| {
+            let mut request = Request::new(pb::ListConversationRequest {
+                org_id: org.clone(),
+                thread_id: thread.clone(),
+                limit,
+                before_message_id: before.to_owned(),
+                include_human_posts: include,
+                ..Default::default()
+            });
+            request.extensions_mut().insert(VerifiedIdentity::user_for_test(&org, &owner));
+            let svc = &svc;
+            async move { svc.list_conversation(request).await.map(tonic::Response::into_inner) }
+        };
+        // Default (what every model history read uses): no post rows, paged or not.
+        for limit in [0_u32, 10] {
+            let page = read(limit, "", false).await.expect("default read");
+            let kinds: Vec<&str> = page.messages.iter().map(|m| m.role.as_str()).collect();
+            assert_eq!(kinds, ["user", "assistant"], "limit {limit}");
+            assert!(page.messages.iter().all(|m| m.post_kind != "post"));
+        }
+        // The thread-view read asks for them explicitly.
+        for limit in [0_u32, 10] {
+            let page = read(limit, "", true).await.expect("with posts");
+            assert_eq!(page.messages.len(), 4, "limit {limit}");
+            assert_eq!(page.messages.iter().filter(|m| m.post_kind == "post").count(), 2);
+        }
+        // A cursor cannot name a post when posts are excluded, but can when they are included.
+        let post_id = format!("{thread}-m1");
+        let refused = read(10, &post_id, false).await.expect_err("a hidden row is not a cursor");
+        assert_eq!(refused.code(), tonic::Code::InvalidArgument);
+        let page = read(10, &post_id, true).await.expect("an included post is a cursor");
+        assert_eq!(page.messages.len(), 1, "only the turn before it");
+        crate::space::test_support::clean_space(&pool, &org, &space).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "needs DB harness (DATABASE_URL to a disposable *test* Postgres)"]
+    async fn member_and_owner_post_never_create_owner_memory() {
+        let Some(pool) = crate::space::test_support::connect().await else { return };
+        let signing_key = SigningKey::from_bytes(&[51_u8; 32]);
+        let _env = sp_member_env(&signing_key, true);
+        let (org, space, thread, owner) = sp_room(&pool, "mem").await;
+        let text = "Husk at jeg heter Kari.";
+        // The owner's own first post (bootstrap, no decision): no owner memory.
+        let first = pb::AppendMessageRequest {
+            thread_id: thread.clone(),
+            role: "user".to_owned(),
+            content: text.to_owned(),
+            post_kind: "post".to_owned(),
+            client_message_id: "owner-post-1".to_owned(),
+            ..Default::default()
+        };
+        super::append_message_inner(&pool, None, MemoryRetention::Durable, first, &owner)
+            .await
+            .expect("owner post");
+        // A member's post, under their own verified decision.
+        let member = sp_signed_post(&signing_key, &org, "member-2", &thread, &space, text, "member-post-1", 1, "m1");
+        super::append_message_inner_as(
+            &pool,
+            None,
+            MemoryRetention::Durable,
+            member,
+            "member-2",
+            crate::space::authz::AppendAs::Member,
+        )
+        .await
+        .expect("member post");
+        let (memories,): (i64,) = sqlx::query_as("SELECT count(*) FROM agent_memory WHERE org_id = $1")
+            .bind(&org)
+            .fetch_one(&pool)
+            .await
+            .expect("count memory");
+        assert_eq!(memories, 0, "a human post is never the owner's memory");
+        // The MESSAGE_APPENDED payload names ids and kinds, never the text.
+        let payloads: Vec<serde_json::Value> = sqlx::query_scalar(
+            "SELECT payload FROM events WHERE run_id = $1 AND event_type = 'MESSAGE_APPENDED' ORDER BY ts",
+        )
+        .bind(&thread)
+        .fetch_all(&pool)
+        .await
+        .expect("payloads");
+        assert_eq!(payloads.len(), 2);
+        for payload in &payloads {
+            assert_eq!(payload["post_kind"], "post");
+            let object = payload.as_object().expect("object");
+            assert!(!object.contains_key("content") && !object.contains_key("text"));
+            assert!(!payload.to_string().contains("Kari"));
+        }
+        let authors: Vec<&str> = payloads.iter().map(|p| p["author_subject_id"].as_str().unwrap_or_default()).collect();
+        assert_eq!(authors, ["owner-1", "member-2"]);
+        crate::space::test_support::clean_space(&pool, &org, &space).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "needs DB harness (DATABASE_URL to a disposable *test* Postgres)"]
+    async fn dedupe_returns_original_and_conflicts_on_changed_content() {
+        let Some(pool) = crate::space::test_support::connect().await else { return };
+        let (org, space, thread, owner) = sp_room(&pool, "dedupe").await;
+        let post = |content: &str, kind: &str, role: &str| pb::AppendMessageRequest {
+            thread_id: thread.clone(),
+            role: role.to_owned(),
+            content: content.to_owned(),
+            post_kind: kind.to_owned(),
+            client_message_id: "send-1".to_owned(),
+            ..Default::default()
+        };
+        let append = |req: pb::AppendMessageRequest| {
+            let (pool, owner) = (pool.clone(), owner.clone());
+            async move {
+                super::append_message_inner(&pool, None, MemoryRetention::Durable, req, &owner)
+                    .await
+                    .map(tonic::Response::into_inner)
+            }
+        };
+        let first = append(post("hello room", "post", "user")).await.expect("first");
+        assert!(!first.deduplicated);
+        let again = append(post("hello room", "post", "user")).await.expect("repeat");
+        assert!(again.deduplicated);
+        assert_eq!((again.message_id.as_str(), again.sequence), (first.message_id.as_str(), first.sequence));
+        // Changed content, or the same id as another kind: a conflict, never a second row.
+        for conflicting in [post("changed text", "post", "user"), post("hello room", "turn", "user")] {
+            assert_eq!(append(conflicting).await.expect_err("conflict").code(), tonic::Code::AlreadyExists);
+        }
+        // Closed vocabulary: anything but turn/post, and a post by a non-user role.
+        for (kind, role) in [("other", "user"), ("post", "assistant"), ("POST", "user")] {
+            let mut bad = post("x", kind, role);
+            bad.client_message_id = "send-2".to_owned();
+            assert_eq!(append(bad).await.expect_err("invalid").code(), tonic::Code::InvalidArgument, "{kind}/{role}");
+        }
+        let (rows,): (i64,) = sqlx::query_as("SELECT count(*) FROM messages WHERE thread_id = $1")
+            .bind(&thread)
+            .fetch_one(&pool)
+            .await
+            .expect("count");
+        assert_eq!(rows, 1);
+        crate::space::test_support::clean_space(&pool, &org, &space).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "needs DB harness (DATABASE_URL to a disposable *test* Postgres)"]
+    async fn bootstrap_replay_returns_original_not_decision_required() {
+        let Some(pool) = crate::space::test_support::connect().await else { return };
+        let (org, space, thread, owner) = sp_room(&pool, "boot").await;
+        let send = || pb::AppendMessageRequest {
+            thread_id: thread.clone(),
+            role: "user".to_owned(),
+            content: "first words".to_owned(),
+            client_message_id: "boot-1".to_owned(),
+            ..Default::default()
+        };
+        let first = super::append_message_inner(&pool, None, MemoryRetention::Durable, send(), &owner)
+            .await
+            .expect("bootstrap send")
+            .into_inner();
+        // A lost reply is retried without a decision: answered with the original row.
+        let replay = super::append_message_inner(&pool, None, MemoryRetention::Durable, send(), &owner)
+            .await
+            .expect("replay is not a decision-less append")
+            .into_inner();
+        assert!(replay.deduplicated);
+        assert_eq!(replay.message_id, first.message_id);
+        // A new decision-less send with another id is still refused.
+        let mut other = send();
+        other.client_message_id = "boot-2".to_owned();
+        assert_eq!(
+            super::append_message_inner(&pool, None, MemoryRetention::Durable, other, &owner)
+                .await
+                .expect_err("needs a fresh decision")
+                .code(),
+            tonic::Code::PermissionDenied
+        );
+        crate::space::test_support::clean_space(&pool, &org, &space).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "needs DB harness (DATABASE_URL to a disposable *test* Postgres)"]
+    async fn member_post_is_stamped_with_its_own_audience_and_leaves_thread_columns() {
+        let Some(pool) = crate::space::test_support::connect().await else { return };
+        let signing_key = SigningKey::from_bytes(&[52_u8; 32]);
+        let _env = sp_member_env(&signing_key, true);
+        let (org, space, thread, _owner) = sp_room(&pool, "stamp").await;
+        let before: (String, i64, i64, Option<String>) = sqlx::query_as(
+            "SELECT recipient_audience_ref, recipient_audience_revision, authority_revision, space_decision_ref \
+             FROM threads WHERE id = $1",
+        )
+        .bind(&thread)
+        .fetch_one(&pool)
+        .await
+        .expect("thread before");
+        let mut req = sp_signed_post(&signing_key, &org, "member-2", &thread, &space, "hi all", "m-stamp-1", 3, "s1");
+        // A member's metadata and agent_name are never stored.
+        req.agent_name = "forged-agent".to_owned();
+        req.metadata = super::json_to_struct(&serde_json::json!({"source_scope": "conversation"}));
+        let appended = super::append_message_inner_as(
+            &pool,
+            None,
+            MemoryRetention::Durable,
+            req.clone(),
+            "member-2",
+            crate::space::authz::AppendAs::Member,
+        )
+        .await
+        .expect("member post")
+        .into_inner();
+        let (audience_ref, revision, authority, kind, agent_name, metadata) =
+            sp_message_columns(&pool, &appended.message_id).await;
+        assert_eq!(audience_ref, req.recipient_audience_ref);
+        assert_eq!((revision, authority), (3, 7));
+        assert_eq!(kind, "post");
+        assert_eq!(agent_name, None);
+        assert_eq!(metadata, serde_json::json!({}));
+        let author: Option<String> = sqlx::query_scalar("SELECT author_subject_id FROM messages WHERE id = $1")
+            .bind(&appended.message_id)
+            .fetch_one(&pool)
+            .await
+            .expect("author");
+        assert_eq!(author.as_deref(), Some("member-2"));
+        // The thread's own authority columns are the owner's and did not move.
+        let after: (String, i64, i64, Option<String>) = sqlx::query_as(
+            "SELECT recipient_audience_ref, recipient_audience_revision, authority_revision, space_decision_ref \
+             FROM threads WHERE id = $1",
+        )
+        .bind(&thread)
+        .fetch_one(&pool)
+        .await
+        .expect("thread after");
+        assert_eq!(before, after);
+        let payload: serde_json::Value = sqlx::query_scalar(
+            "SELECT payload FROM events WHERE run_id = $1 AND event_type = 'MESSAGE_APPENDED'",
+        )
+        .bind(&thread)
+        .fetch_one(&pool)
+        .await
+        .expect("event");
+        assert_eq!(payload["post_kind"], "post");
+        assert_eq!(payload["author_subject_id"], "member-2");
+        assert!(!payload.to_string().contains("hi all"));
+        crate::space::test_support::clean_space(&pool, &org, &space).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "needs DB harness (DATABASE_URL to a disposable *test* Postgres)"]
+    async fn revoked_member_cannot_post() {
+        let Some(pool) = crate::space::test_support::connect().await else { return };
+        let signing_key = SigningKey::from_bytes(&[53_u8; 32]);
+        let _env = sp_member_env(&signing_key, true);
+        let (org, space, thread, _owner) = sp_room(&pool, "revoked").await;
+        sqlx::query("INSERT INTO space_membership_revocations (space_ref, org_id, subject_id) VALUES ($1, $2, 'member-2')")
+            .bind(&space)
+            .bind(&org)
+            .execute(&pool)
+            .await
+            .expect("revoke");
+        let req = sp_signed_post(&signing_key, &org, "member-2", &thread, &space, "still here?", "m-rev-1", 1, "r1");
+        let refused = super::append_message_inner_as(
+            &pool,
+            None,
+            MemoryRetention::Durable,
+            req,
+            "member-2",
+            crate::space::authz::AppendAs::Member,
+        )
+        .await
+        .expect_err("a revoked member cannot post");
+        assert_eq!(refused.code(), tonic::Code::PermissionDenied);
+        let (rows,): (i64,) = sqlx::query_as("SELECT count(*) FROM messages WHERE thread_id = $1")
+            .bind(&thread)
+            .fetch_one(&pool)
+            .await
+            .expect("count");
+        assert_eq!(rows, 0);
+        sqlx::query("DELETE FROM space_membership_revocations WHERE space_ref = $1").bind(&space).execute(&pool).await.ok();
+        crate::space::test_support::clean_space(&pool, &org, &space).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "needs DB harness (DATABASE_URL to a disposable *test* Postgres)"]
+    async fn stale_decision_is_rejected_on_member_path_only() {
+        let Some(pool) = crate::space::test_support::connect().await else { return };
+        let signing_key = SigningKey::from_bytes(&[54_u8; 32]);
+        let _env = sp_member_env(&signing_key, true);
+        let (org, space, thread, owner) = sp_room(&pool, "stale").await;
+        // The thread has already seen audience revision 5.
+        sqlx::query("UPDATE threads SET recipient_audience_revision = 5 WHERE id = $1")
+            .bind(&thread)
+            .execute(&pool)
+            .await
+            .expect("raise revision");
+        let stale = sp_signed_post(&signing_key, &org, "member-2", &thread, &space, "late", "m-stale-1", 4, "st1");
+        let refused = super::append_message_inner_as(
+            &pool,
+            None,
+            MemoryRetention::Durable,
+            stale,
+            "member-2",
+            crate::space::authz::AppendAs::Member,
+        )
+        .await
+        .expect_err("older audience than the thread has seen");
+        assert_eq!(refused.code(), tonic::Code::Aborted);
+        assert!(refused.message().contains("space_authority_stale"));
+        // The owner path with an older revision still succeeds (unchanged behaviour): the
+        // staleness rule is the member path's alone.
+        let turn = sp_signed_append(&signing_key, &org, &owner, &thread, &space, "owner turn", "m-owner-1", 4, "st2", "turn");
+        let stored = super::append_message_inner(&pool, None, MemoryRetention::Durable, turn, &owner)
+            .await
+            .expect("the owner path does not apply the member staleness rule")
+            .into_inner();
+        assert!(!stored.deduplicated);
+        crate::space::test_support::clean_space(&pool, &org, &space).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "needs DB harness (DATABASE_URL to a disposable *test* Postgres)"]
+    async fn member_dedupe_is_per_author() {
+        let Some(pool) = crate::space::test_support::connect().await else { return };
+        let signing_key = SigningKey::from_bytes(&[55_u8; 32]);
+        let _env = sp_member_env(&signing_key, true);
+        let (org, space, thread, _owner) = sp_room(&pool, "authors").await;
+        let append = |req: pb::AppendMessageRequest, author: &'static str| {
+            let pool = pool.clone();
+            async move {
+                super::append_message_inner_as(
+                    &pool,
+                    None,
+                    MemoryRetention::Durable,
+                    req,
+                    author,
+                    crate::space::authz::AppendAs::Member,
+                )
+                .await
+                .map(tonic::Response::into_inner)
+            }
+        };
+        let first = append(sp_signed_post(&signing_key, &org, "member-2", &thread, &space, "same words", "shared-id", 1, "a1"), "member-2")
+            .await
+            .expect("first author");
+        let again = append(sp_signed_post(&signing_key, &org, "member-2", &thread, &space, "same words", "shared-id", 1, "a2"), "member-2")
+            .await
+            .expect("same author repeats");
+        assert!(again.deduplicated);
+        assert_eq!(again.message_id, first.message_id);
+        // Another member repeating the same id and the same text is not handed that row.
+        let other = append(sp_signed_post(&signing_key, &org, "member-3", &thread, &space, "same words", "shared-id", 1, "a3"), "member-3")
+            .await
+            .expect_err("another author's send id");
+        assert_eq!(other.code(), tonic::Code::AlreadyExists);
+        crate::space::test_support::clean_space(&pool, &org, &space).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "needs DB harness (DATABASE_URL to a disposable *test* Postgres)"]
+    async fn flag_off_member_post_is_permission_denied_as_today() {
+        let Some(pool) = crate::space::test_support::connect().await else { return };
+        let signing_key = SigningKey::from_bytes(&[56_u8; 32]);
+        let _env = sp_member_env(&signing_key, false);
+        let (org, space, thread, _owner) = sp_room(&pool, "off").await;
+        let req = sp_signed_post(&signing_key, &org, "member-2", &thread, &space, "knock knock", "m-off-1", 1, "o1");
+        // Through the RPC: the non-owner gets the owner refusal.
+        let svc = sp_service(pool.clone());
+        let mut request = Request::new(req.clone());
+        request.extensions_mut().insert(VerifiedIdentity::user_for_test(&org, "member-2"));
+        let refused = svc.append_message(request).await.expect_err("flag off");
+        assert_eq!(refused.code(), tonic::Code::PermissionDenied);
+        // At the append core: AppendAs::Member is refused outright while the flag is off.
+        let core = super::append_message_inner_as(
+            &pool,
+            None,
+            MemoryRetention::Durable,
+            req,
+            "member-2",
+            crate::space::authz::AppendAs::Member,
+        )
+        .await
+        .expect_err("member authority needs the flag");
+        assert_eq!(core.code(), tonic::Code::PermissionDenied);
+        let (rows,): (i64,) = sqlx::query_as("SELECT count(*) FROM messages WHERE thread_id = $1")
+            .bind(&thread)
+            .fetch_one(&pool)
+            .await
+            .expect("count");
+        assert_eq!(rows, 0);
+        crate::space::test_support::clean_space(&pool, &org, &space).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "needs DB harness (DATABASE_URL to a disposable *test* Postgres)"]
+    async fn zdr_credential_cannot_post() {
+        let Some(pool) = crate::space::test_support::connect().await else { return };
+        let signing_key = SigningKey::from_bytes(&[57_u8; 32]);
+        let _env = sp_member_env(&signing_key, true);
+        let (org, space, thread, _owner) = sp_room(&pool, "zdrpost").await;
+        let req = sp_signed_post(&signing_key, &org, "member-2", &thread, &space, "private", "m-zdr-1", 1, "z1");
+        let svc = sp_service(pool.clone());
+        let mut request = Request::new(req);
+        request
+            .extensions_mut()
+            .insert(VerifiedIdentity::user_for_test_with_zdr(&org, "member-2", true));
+        let refused = svc.append_message(request).await.expect_err("a zero-retention credential cannot write");
+        assert!(
+            matches!(refused.code(), tonic::Code::PermissionDenied | tonic::Code::FailedPrecondition),
+            "{refused:?}"
+        );
+        let (rows,): (i64,) = sqlx::query_as("SELECT count(*) FROM messages WHERE thread_id = $1")
+            .bind(&thread)
+            .fetch_one(&pool)
+            .await
+            .expect("count");
+        assert_eq!(rows, 0);
+        crate::space::test_support::clean_space(&pool, &org, &space).await;
+    }
+
+    /// Thread summaries read through a Space decision (ceiling) or as the owner.
+    async fn sp_list_one(
+        svc: &super::SessionService,
+        org: &str,
+        user: &str,
+        thread: &str,
+        decision: Option<(String, String)>,
+        space: &str,
+    ) -> Vec<pb::ThreadSummary> {
+        let (token, decision_ref) = decision.unwrap_or_default();
+        let mut request = Request::new(pb::ListThreadsRequest {
+            org_id: org.to_owned(),
+            user_id: user.to_owned(),
+            thread_id: thread.to_owned(),
+            space_id: space.to_owned(),
+            space_read_decision_token: token,
+            space_read_decision_ref: decision_ref,
+            limit: 10,
+            ..Default::default()
+        });
+        request.extensions_mut().insert(VerifiedIdentity::user_for_test(org, user));
+        svc.list_threads(request).await.expect("list_threads").into_inner().threads
+    }
+
+    async fn sp_summary_fixture(pool: &sqlx::PgPool, thread: &str) {
+        // org-1 / space-room / user-1 is the subject of `signed_thread_read_decision`.
+        sqlx::query(
+            "INSERT INTO threads (id, session_key, org_id, user_id, origin, space_id, space_decision_ref, \
+             recipient_audience_ref, recipient_audience_revision, recipient_audience_hash, \
+             privacy_policy_ref, resource_authorization_ref, authority_revision) \
+             VALUES ($1, $1, 'org-1', 'user-1', 'space', 'space-room', 'decision-1', 'audience-1', 1, \
+             'sha256:audience-1', 'privacy-1', 'resource-1', 1)",
+        )
+        .bind(thread)
+        .execute(pool)
+        .await
+        .expect("seed thread");
+    }
+
+    async fn sp_summary_message(pool: &sqlx::PgPool, thread: &str, id: &str, author: &str, revision: i64) {
+        sqlx::query(
+            "INSERT INTO messages (id, thread_id, role, content, space_id, recipient_audience_ref, \
+             recipient_audience_revision, recipient_audience_hash, authority_revision, \
+             resource_authorization_ref, author_subject_id, post_kind) \
+             VALUES ($1, $2, 'user', 'body', 'space-room', 'audience-1', $3, 'sha256:audience-1', 1, \
+             'resource-1', $4, 'post')",
+        )
+        .bind(id)
+        .bind(thread)
+        .bind(revision)
+        .bind(author)
+        .execute(pool)
+        .await
+        .expect("seed message");
+    }
+
+    async fn sp_summary_cleanup(pool: &sqlx::PgPool, thread: &str) {
+        sqlx::query("DELETE FROM messages WHERE thread_id = $1").bind(thread).execute(pool).await.ok();
+        sqlx::query("DELETE FROM threads WHERE id = $1").bind(thread).execute(pool).await.ok();
+    }
+
+    #[tokio::test]
+    #[ignore = "needs DB harness (DATABASE_URL to a disposable *test* Postgres)"]
+    async fn reply_count_respects_audience_ceiling_and_last_author() {
+        let Some(pool) = crate::space::test_support::connect().await else { return };
+        let signing_key = SigningKey::from_bytes(&[58_u8; 32]);
+        let thread = format!("thread-reply-{}", super::new_ulid());
+        sp_summary_fixture(&pool, &thread).await;
+        sp_summary_message(&pool, &thread, &format!("{thread}-1"), "user-1", 1).await;
+        sp_summary_message(&pool, &thread, &format!("{thread}-2"), "user-2", 3).await;
+        sp_summary_message(&pool, &thread, &format!("{thread}-3"), "user-3", 5).await;
+        let svc = sp_service(pool.clone());
+        // The owner's own listing has no ceiling: two replies, last author user-3.
+        let owner_view = sp_list_one(&svc, "org-1", "user-1", &thread, None, "").await;
+        assert_eq!(owner_view.len(), 1);
+        assert_eq!((owner_view[0].reply_count, owner_view[0].last_author_subject_id.as_str()), (2, "user-3"));
+        // A member listing under a decision for audience revision 4 counts only rows at or
+        // below it: one reply, last author user-2.
+        let (token, decision_ref, key_id) =
+            signed_thread_read_decision(&signing_key, Utc::now(), &["thread:read"], 4);
+        let _env = SpEnv::set(&[
+            ("CONTROL_SPACE_DECISION_PUBLIC_KEYS_JSON", None),
+            ("CONTROL_SPACE_DECISION_KEY_ID", Some(key_id.as_str())),
+            (
+                "CONTROL_SPACE_DECISION_PUBLIC_KEY_BASE64",
+                Some(URL_SAFE_NO_PAD.encode(signing_key.verifying_key().to_bytes()).as_str()),
+            ),
+        ]);
+        let member_view =
+            sp_list_one(&svc, "org-1", "user-1", &thread, Some((token, decision_ref)), "space-room").await;
+        assert_eq!(member_view.len(), 1);
+        assert_eq!(
+            (member_view[0].reply_count, member_view[0].last_author_subject_id.as_str()),
+            (1, "user-2"),
+            "rows above the decision's audience ceiling are not counted"
+        );
+        sp_summary_cleanup(&pool, &thread).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "needs DB harness (DATABASE_URL to a disposable *test* Postgres)"]
+    async fn empty_space_thread_is_hidden_from_shared_listing() {
+        let Some(pool) = crate::space::test_support::connect().await else { return };
+        let signing_key = SigningKey::from_bytes(&[59_u8; 32]);
+        let thread = format!("thread-empty-{}", super::new_ulid());
+        sp_summary_fixture(&pool, &thread).await;
+        let svc = sp_service(pool.clone());
+        let (token, decision_ref, key_id) =
+            signed_thread_read_decision(&signing_key, Utc::now(), &["thread:read"], 4);
+        let _env = SpEnv::set(&[
+            ("CONTROL_SPACE_DECISION_PUBLIC_KEYS_JSON", None),
+            ("CONTROL_SPACE_DECISION_KEY_ID", Some(key_id.as_str())),
+            (
+                "CONTROL_SPACE_DECISION_PUBLIC_KEY_BASE64",
+                Some(URL_SAFE_NO_PAD.encode(signing_key.verifying_key().to_bytes()).as_str()),
+            ),
+        ]);
+        let shared = |t: String, r: String| {
+            let svc = &svc;
+            let thread = thread.clone();
+            async move { sp_list_one(svc, "org-1", "user-1", &thread, Some((t, r)), "space-room").await }
+        };
+        // A thread with no messages is not shown in the shared listing, but the owner sees it.
+        assert!(shared(token.clone(), decision_ref.clone()).await.is_empty());
+        assert_eq!(sp_list_one(&svc, "org-1", "user-1", &thread, None, "").await.len(), 1);
+        // Once it holds a message it is listed.
+        sp_summary_message(&pool, &thread, &format!("{thread}-1"), "user-1", 1).await;
+        assert_eq!(shared(token, decision_ref).await.len(), 1);
+        sp_summary_cleanup(&pool, &thread).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "needs DB harness (DATABASE_URL to a disposable *test* Postgres)"]
+    async fn create_thread_session_key_reuse_does_not_cross_spaces() {
+        let Some(pool) = crate::space::test_support::connect().await else { return };
+        let suffix = super::new_ulid();
+        let org = format!("org-cross-{suffix}");
+        let session_key = format!("shared-key-{suffix}");
+        let create = |space: &str| {
+            let pool = pool.clone();
+            let req = pb::CreateThreadRequest {
+                session_key: session_key.clone(),
+                org_id: org.clone(),
+                user_id: "owner-1".to_owned(),
+                space_id: space.to_owned(),
+                space_decision_ref: "decision-1".to_owned(),
+                recipient_audience_ref: "audience-1".to_owned(),
+                recipient_audience_revision: 1,
+                recipient_audience_hash: "sha256:audience-1".to_owned(),
+                privacy_policy_ref: "privacy-1".to_owned(),
+                resource_authorization_ref: "resource-1".to_owned(),
+                authority_revision: 1,
+                ..Default::default()
+            };
+            async move {
+                super::create_thread_inner_preverified(&pool, req)
+                    .await
+                    .expect("create")
+                    .into_inner()
+                    .thread_id
+            }
+        };
+        let a1 = create("space-a").await;
+        let a2 = create("space-a").await;
+        let b1 = create("space-b").await;
+        assert_eq!(a1, a2, "a retry in the same Space reuses its thread");
+        assert_ne!(a1, b1, "the same session key in another Space is another thread");
+        for space in ["space-a", "space-b"] {
+            crate::space::test_support::clean_space(&pool, &org, space).await;
+        }
+    }
 }
 
 /// `CompleteDirectRunWithMessage` behind the production wiring
@@ -19422,7 +22039,7 @@ mod direct_completion_db_tests {
         assert_eq!(refused.code(), tonic::Code::FailedPrecondition);
         assert_eq!(
             refused.message(),
-            "a zero-retention run has no durable assistant message",
+            mp_contracts::zdr_refusal::Refusal::DURABLE_MUTATION_FORBIDDEN.message(),
             "the run's own retention refuses it, not the credential's"
         );
         let zdr_messages: i64 =
@@ -20118,7 +22735,45 @@ mod thread_list_db_tests {
 
 #[cfg(test)]
 mod conversation_page_tests {
-    use super::{clamp_conversation_page_limit, conversation_tail_page};
+    use super::{
+        clamp_conversation_page_limit, conversation_tail_page, session_message_from_row,
+        ConversationRow,
+    };
+    use chrono::{TimeZone, Utc};
+
+    #[test]
+    fn a_stored_turn_carries_the_time_it_was_stored() {
+        let stored = Utc.with_ymd_and_hms(2026, 10, 31, 9, 30, 15).unwrap()
+            + chrono::Duration::milliseconds(250);
+        let row = ConversationRow {
+            id: "m-1".to_owned(),
+            role: "user".to_owned(),
+            content: "hello".to_owned(),
+            agent_name: None,
+            metadata: None,
+            author_subject_id: Some("sub-1".to_owned()),
+            post_kind: "post".to_owned(),
+            created_at: stored,
+            parent_message_id: None,
+            sibling_ordinal: 0,
+            sibling_count: 0,
+            on_active_path: true,
+            versioned: false,
+            revision_state: String::new(),
+            revised_at: None,
+            revised_by_subject_id: None,
+            revision_no: 0,
+            agent_followed_up: false,
+        };
+        let message = session_message_from_row(row, false);
+        let created_at = message.created_at.expect("created_at is set on every row");
+        assert_eq!(created_at.seconds, stored.timestamp());
+        assert_eq!(created_at.nanos, 250_000_000);
+        // The other columns are unaffected by the new one.
+        assert_eq!(message.message_id, "m-1");
+        assert_eq!(message.post_kind, "post");
+        assert_eq!(message.author_subject_id, "sub-1");
+    }
 
     #[test]
     fn a_positive_page_limit_is_clamped_to_the_page_bounds() {
@@ -20453,27 +23108,68 @@ mod conversation_page_db_tests {
 
         // A reader whose decision was issued at revision 2 never sees revision 3,
         // and a turn with no snapshot is visible as it always was.
-        let page = conversation_page_rows(&pool, &org, &thread, Some(2), None, 10, false)
+        let page = conversation_page_rows(&pool, &org, &thread, AudienceWindow::ceiling_only(Some(2)), true, None, 10, false)
             .await
             .expect("ceiling page");
         let seen: Vec<&str> = page.iter().map(|row| row.id.as_str()).collect();
         assert_eq!(seen, [legacy.as_str(), mid.as_str(), early.as_str()]);
 
         // A hidden turn is no cursor for that reader, exactly as an unknown id is not.
-        let hidden = conversation_cursor_sequence(&pool, &org, &thread, Some(2), &late)
+        let hidden = conversation_cursor_sequence(&pool, &org, &thread, AudienceWindow::ceiling_only(Some(2)), true, &late)
             .await
             .expect_err("a hidden turn is refused as a cursor");
         assert_eq!(hidden.code(), tonic::Code::InvalidArgument);
-        conversation_cursor_sequence(&pool, &org, &thread, Some(2), &mid)
+        conversation_cursor_sequence(&pool, &org, &thread, AudienceWindow::ceiling_only(Some(2)), true, &mid)
             .await
             .expect("a visible turn is a cursor");
 
         // The owner's unfiltered read sees all four turns.
-        let owner = conversation_page_rows(&pool, &org, &thread, None, None, 10, false)
+        let owner = conversation_page_rows(&pool, &org, &thread, AudienceWindow::default(), true, None, 10, false)
             .await
             .expect("owner page");
         assert_eq!(owner.len(), 4);
 
         cleanup(&pool, &[thread.as_str()]).await;
     }
+
+    /// The transcript reads carry the stored time of every turn, paged or not.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres"]
+    async fn list_conversation_carries_created_at_against_real_pg() {
+        let pool = connect().await;
+        let suffix = new_ulid();
+        let org = format!("conv-time-{suffix}");
+        let thread = format!("conv-time-thread-{suffix}");
+        let ids = seed_turns(&pool, &org, "reader", &thread, 3).await;
+        // Pin the middle turn to a known instant so the value is checked, not just its presence.
+        sqlx::query("UPDATE messages SET created_at = '2026-10-31T09:30:15.250Z' WHERE id = $1")
+            .bind(&ids[1])
+            .execute(&pool)
+            .await
+            .unwrap();
+        let svc = service(pool.clone());
+
+        for limit in [0_u32, 10] {
+            let page = read(&svc, &org, "reader", &thread, limit, "")
+                .await
+                .expect("transcript read");
+            assert_eq!(page.messages.len(), 3);
+            for message in &page.messages {
+                assert!(message.created_at.is_some(), "limit {limit}: {message:?}");
+            }
+            let pinned = page.messages[1].created_at.as_ref().unwrap();
+            assert_eq!(pinned.seconds, 1_793_439_015, "limit {limit}");
+            assert_eq!(pinned.nanos, 250_000_000, "limit {limit}");
+        }
+
+        cleanup(&pool, &[thread.as_str()]).await;
+    }
 }
+
+#[cfg(test)]
+#[path = "grpc_space_w1_tests.rs"]
+pub(crate) mod space_w1_tests;
+
+#[cfg(test)]
+#[path = "grpc_space_memory_tests.rs"]
+mod space_memory_tests;

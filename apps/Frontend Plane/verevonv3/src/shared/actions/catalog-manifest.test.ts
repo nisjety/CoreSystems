@@ -90,4 +90,20 @@ describe('provisional Action Catalog manifest', () => {
     await expect(actionCatalogSha256()).resolves.toMatch(/^[a-f0-9]{64}$/)
     await expect(actionCatalogSha256()).resolves.toBe(await actionCatalogSha256())
   })
+
+  it('lists the Space post and entitlement actions as human-only, closed to the model (WS01-S5, WS03-S4)', async () => {
+    const manifest = await buildActionCatalogManifest()
+    for (const id of [
+      'spaces.create_post',
+      'spaces.reply_in_thread',
+      'spaces.set_effect_entitlements',
+      'spaces.apply_effect_preset',
+    ]) {
+      const entry = manifest.actions.find((action) => action.id === id)
+      expect(entry, id).toBeDefined()
+      expect(entry?.allowedActorTypes).toEqual(['human'])
+      expect(entry?.modelAccess).toBe('none')
+      expect(entry?.exemptReason).toBe('human_identity_or_security')
+    }
+  })
 })

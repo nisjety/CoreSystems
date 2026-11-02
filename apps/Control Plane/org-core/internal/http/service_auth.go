@@ -25,6 +25,8 @@ const (
 	siemExporterPrincipal     = "audit-core"
 	browserBrokerPrincipal    = "browser-broker"
 	authCorePrincipal         = "auth-core"
+	domainReaderPrincipal     = "auth-core"
+	scimEdgePrincipal         = "verevon-scim-edge"
 	serviceDelegationMaxAge   = 30 * time.Second
 	serviceDelegationSkew     = 5 * time.Second
 	serviceDelegationMaxBody  = 1 << 20
@@ -67,6 +69,14 @@ var orgServiceScopeAllowlist = map[string]struct{}{
 	// alone (validateServiceCredential); neither is org:read:any.
 	"org:siem:manage:self": {},
 	"org:siem:read:any":    {},
+	// Identity administration (WS05-S6): owner/admin domain verification through the
+	// gateway on behalf of a signed user, and the by-domain read of which organisation
+	// holds a verified domain, held by auth-core alone (validateServiceCredential).
+	"org:identity:admin:self": {},
+	// The SCIM surface (WS05-S8), held by the gateway's stateless SCIM edge alone
+	// (validateServiceCredential); the IdP's own bearer token still names the org.
+	"org:scim:any":        {},
+	"org:domain:read:any": {},
 	// Read-only access to one org's agent-browser site decision, through
 	// GET /internal/orgs/:orgId/browser-sites/resolve and nothing else (WS21-S3).
 	// Held by the browser broker alone (validateServiceCredential); the decision
@@ -184,6 +194,12 @@ func validateServiceCredential(credential serviceCredential, principals map[stri
 		// The exporter read returns plaintext destination secrets, so unlike the
 		// other :any scopes it is pinned to one principal.
 		if scope == "org:siem:read:any" && credential.Principal != siemExporterPrincipal {
+			return fmt.Errorf("scope %s is not valid for principal %s", scope, credential.Principal)
+		}
+		if scope == "org:scim:any" && credential.Principal != scimEdgePrincipal {
+			return fmt.Errorf("scope %s is not valid for principal %s", scope, credential.Principal)
+		}
+		if scope == "org:domain:read:any" && credential.Principal != domainReaderPrincipal {
 			return fmt.Errorf("scope %s is not valid for principal %s", scope, credential.Principal)
 		}
 		if scope == "org:browser-site:read:any" && credential.Principal != browserBrokerPrincipal {
@@ -316,6 +332,8 @@ func serviceScopesForRequest(request *http.Request) []string {
 		}
 	case len(segments) >= 1 && segments[0] == "orgs":
 		return organizationProxyScopes(method, segments[1:])
+	case len(segments) >= 3 && segments[0] == "internal" && segments[1] == "scim" && segments[2] == "v2":
+		return []string{"org:scim:any"}
 	case len(segments) >= 2 && segments[0] == "internal" && segments[1] == "orgs":
 		return internalOrganizationScopes(method, segments[2:])
 	}
@@ -421,6 +439,27 @@ func organizationProxyScopes(method string, rest []string) []string {
 		return []string{"org:siem:manage:self"}
 	case len(rest) == 3 && rest[1] == "siem-destinations" && (method == http.MethodPatch || method == http.MethodDelete):
 		return []string{"org:siem:manage:self"}
+	// Domain verification (WS05-S6) is administered on behalf of a signed owner or
+	// admin only (:self); the handlers re-check the role from the membership table.
+	case len(rest) == 2 && rest[1] == "domains" && (method == http.MethodGet || method == http.MethodPost):
+		return []string{"org:identity:admin:self"}
+	case len(rest) == 3 && rest[1] == "domains" && method == http.MethodDelete:
+		return []string{"org:identity:admin:self"}
+	case len(rest) == 4 && rest[1] == "domains" && rest[3] == "verify" && method == http.MethodPost:
+		return []string{"org:identity:admin:self"}
+	// SSO policy and providers (WS05-S7): the same signed owner/admin authority.
+	case len(rest) == 3 && rest[1] == "scim" && rest[2] == "tokens" && (method == http.MethodGet || method == http.MethodPost):
+		return []string{"org:identity:admin:self"}
+	case len(rest) == 4 && rest[1] == "scim" && rest[2] == "tokens" && method == http.MethodDelete:
+		return []string{"org:identity:admin:self"}
+	case len(rest) == 3 && rest[1] == "scim" && rest[2] == "status" && method == http.MethodGet:
+		return []string{"org:identity:admin:self"}
+	case len(rest) == 3 && rest[1] == "sso" && rest[2] == "policy" && (method == http.MethodGet || method == http.MethodPut):
+		return []string{"org:identity:admin:self"}
+	case len(rest) == 3 && rest[1] == "sso" && rest[2] == "providers" && method == http.MethodPost:
+		return []string{"org:identity:admin:self"}
+	case len(rest) == 4 && rest[1] == "sso" && rest[2] == "providers" && method == http.MethodDelete:
+		return []string{"org:identity:admin:self"}
 	case len(rest) == 2 && method == http.MethodPost && rest[1] == "plan":
 		return []string{"org:settings:write:self"}
 	case len(rest) == 2 && method == http.MethodPatch && (rest[1] == "capabilities" || rest[1] == "settings"):
@@ -454,6 +493,12 @@ func internalOrganizationScopes(method string, rest []string) []string {
 	// route that returns destination secrets.
 	case len(rest) == 1 && rest[0] == "siem-destinations" && method == http.MethodGet:
 		return []string{"org:siem:read:any"}
+	// Which organisation holds a verified domain (WS05-S6); before the generic reads.
+	case len(rest) == 2 && rest[0] == "by-domain" && method == http.MethodGet:
+		return []string{"org:domain:read:any"}
+	// The SSO policy covering a domain (WS05-S7), read by the same principal.
+	case len(rest) == 3 && rest[0] == "by-domain" && rest[2] == "sso-policy" && method == http.MethodGet:
+		return []string{"org:domain:read:any"}
 	case len(rest) == 1 && method == http.MethodGet:
 		return []string{"org:read:any"}
 	case len(rest) == 1 && rest[0] == "ensure-from-tenant" && method == http.MethodPost:

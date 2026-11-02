@@ -99,6 +99,13 @@ func publisherRegistry() []publisherRow {
 			source: "rust/services/session-core/src/audit_publisher.rs",
 			needle: `RUN_EVENT_SUBJECT_PREFIX: &str = "mp.v1.run."`,
 		},
+		{
+			service: "session-core", natsUser: sessionCoreUser, inbox: sessionCoreBox,
+			subject: "mp.v1.space.x.event", transport: jetStreamAck,
+			stream: "MODEL_PLANE_SPACE_EVENTS",
+			source: "rust/services/session-core/src/audit_publisher.rs",
+			needle: `SPACE_EVENT_SUBJECT_PREFIX: &str = "mp.v1.space."`,
+		},
 
 		// ---- model-gateway: core NATS through mp-events' EventPublisher. ----
 		{

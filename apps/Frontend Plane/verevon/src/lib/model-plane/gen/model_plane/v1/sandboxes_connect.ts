@@ -3,7 +3,7 @@
 /* eslint-disable */
 // @ts-nocheck
 
-import { AcquireLeaseRequest, AcquireLeaseResponse, ActivateLeaseRequest, ActivateLeaseResponse, GetWorkspaceManifestRequest, GetWorkspaceManifestResponse, PromoteWorkspaceRequest, PromoteWorkspaceResponse, ReleaseLeaseRequest, ReleaseLeaseResponse, SandboxHealthRequest, SandboxHealthResponse, SnapshotRequest, SnapshotResponse } from "./sandboxes_pbjs";
+import { AcquireLeaseRequest, AcquireLeaseResponse, ActivateLeaseRequest, ActivateLeaseResponse, AppendProcessOutputRequest, AppendProcessOutputResponse, ApplyThreadWorkspaceChangesRequest, ApplyThreadWorkspaceChangesResponse, DeleteThreadWorkspaceRequest, DeleteThreadWorkspaceResponse, GetProcessRequest, GetProcessResponse, GetThreadWorkspaceRequest, GetThreadWorkspaceResponse, GetWorkspaceManifestRequest, GetWorkspaceManifestResponse, ListProcessesRequest, ListProcessesResponse, PromoteWorkspaceRequest, PromoteWorkspaceResponse, ReadProcessOutputRequest, ReadProcessOutputResponse, ReconcileProcessesRequest, ReconcileProcessesResponse, RegisterProcessRequest, RegisterProcessResponse, ReleaseLeaseRequest, ReleaseLeaseResponse, SandboxHealthRequest, SandboxHealthResponse, SnapshotRequest, SnapshotResponse, UpdateProcessStateRequest, UpdateProcessStateResponse } from "./sandboxes_pbjs";
 import { MethodKind } from "@bufbuild/protobuf";
 
 /**
@@ -97,6 +97,92 @@ export const SandboxManager = {
       kind: MethodKind.Unary,
     },
     /**
+     * Reserve a process row before the host spawns, so lease eligibility, the
+     * TTL clamp and the live-count limits are all decided before anything runs.
+     *
+     * @generated from rpc model_plane.v1.SandboxManager.RegisterProcess
+     */
+    registerProcess: {
+      name: "RegisterProcess",
+      I: RegisterProcessRequest,
+      O: RegisterProcessResponse,
+      kind: MethodKind.Unary,
+    },
+    /**
+     * Report a host-driven lifecycle transition: spawned, signal requested, or
+     * a terminal outcome.
+     *
+     * @generated from rpc model_plane.v1.SandboxManager.UpdateProcessState
+     */
+    updateProcessState: {
+      name: "UpdateProcessState",
+      I: UpdateProcessStateRequest,
+      O: UpdateProcessStateResponse,
+      kind: MethodKind.Unary,
+    },
+    /**
+     * Append output chunks and refresh the heartbeat. A batch with no chunks is
+     * a pure heartbeat, which is what keeps silence distinguishable from a dead
+     * host.
+     *
+     * @generated from rpc model_plane.v1.SandboxManager.AppendProcessOutput
+     */
+    appendProcessOutput: {
+      name: "AppendProcessOutput",
+      I: AppendProcessOutputRequest,
+      O: AppendProcessOutputResponse,
+      kind: MethodKind.Unary,
+    },
+    /**
+     * Mark every live process this backend owns under a DIFFERENT host epoch as
+     * LOST. A restarted host calls it once before serving: its predecessor's
+     * children died with it (bwrap --die-with-parent), so the registry must say
+     * so rather than leave rows claiming to be RUNNING.
+     *
+     * @generated from rpc model_plane.v1.SandboxManager.ReconcileProcesses
+     */
+    reconcileProcesses: {
+      name: "ReconcileProcesses",
+      I: ReconcileProcessesRequest,
+      O: ReconcileProcessesResponse,
+      kind: MethodKind.Unary,
+    },
+    /**
+     * Read one process's metadata. Descriptive, not an operational grant: a
+     * terminal process's record stays readable.
+     *
+     * @generated from rpc model_plane.v1.SandboxManager.GetProcess
+     */
+    getProcess: {
+      name: "GetProcess",
+      I: GetProcessRequest,
+      O: GetProcessResponse,
+      kind: MethodKind.Unary,
+    },
+    /**
+     * Page a Space's processes, newest first.
+     *
+     * @generated from rpc model_plane.v1.SandboxManager.ListProcesses
+     */
+    listProcesses: {
+      name: "ListProcesses",
+      I: ListProcessesRequest,
+      O: ListProcessesResponse,
+      kind: MethodKind.Unary,
+    },
+    /**
+     * Read output after a cursor. A terminal process with nothing left after the
+     * cursor returns an empty page carrying its outcome — never a not-found.
+     *
+     * @generated from rpc model_plane.v1.SandboxManager.ReadProcessOutput
+     */
+    readProcessOutput: {
+      name: "ReadProcessOutput",
+      I: ReadProcessOutputRequest,
+      O: ReadProcessOutputResponse,
+      kind: MethodKind.Unary,
+    },
+    /**
      * Health check.
      *
      * @generated from rpc model_plane.v1.SandboxManager.Health
@@ -105,6 +191,41 @@ export const SandboxManager = {
       name: "Health",
       I: SandboxHealthRequest,
       O: SandboxHealthResponse,
+      kind: MethodKind.Unary,
+    },
+    /**
+     * Read every file a thread's lease can see, with the current revision.
+     *
+     * @generated from rpc model_plane.v1.SandboxManager.GetThreadWorkspace
+     */
+    getThreadWorkspace: {
+      name: "GetThreadWorkspace",
+      I: GetThreadWorkspaceRequest,
+      O: GetThreadWorkspaceResponse,
+      kind: MethodKind.Unary,
+    },
+    /**
+     * Apply per-path changes and deletes, each compare-and-swapped on its
+     * base_hash. A conflicting path is reported and never overwritten.
+     *
+     * @generated from rpc model_plane.v1.SandboxManager.ApplyThreadWorkspaceChanges
+     */
+    applyThreadWorkspaceChanges: {
+      name: "ApplyThreadWorkspaceChanges",
+      I: ApplyThreadWorkspaceChangesRequest,
+      O: ApplyThreadWorkspaceChangesResponse,
+      kind: MethodKind.Unary,
+    },
+    /**
+     * Erase a thread's rows and its object-store prefix. Declared here, implemented
+     * with the retention sweeper (WS22-S5); until then it refuses every caller.
+     *
+     * @generated from rpc model_plane.v1.SandboxManager.DeleteThreadWorkspace
+     */
+    deleteThreadWorkspace: {
+      name: "DeleteThreadWorkspace",
+      I: DeleteThreadWorkspaceRequest,
+      O: DeleteThreadWorkspaceResponse,
       kind: MethodKind.Unary,
     },
   }

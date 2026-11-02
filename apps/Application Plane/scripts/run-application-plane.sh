@@ -111,7 +111,7 @@ required_generated=(
   JWT_SECRET CONVEX_INSTANCE_SECRET CONVEX_INTERNAL_SERVICE_KEY CONVEX_RECONCILIATION_KEY
   CONVERSATION_CORE_INGEST_SERVICE_TOKEN CONVERSATION_EMAIL_INGEST_SERVICE_TOKEN
   CONVERSATION_GATEWAY_SERVICE_TOKEN CONVERSATION_INTEGRATION_SERVICE_API_KEY
-  NOTIFICATION_GATEWAY_SERVICE_TOKEN
+  NOTIFICATION_GATEWAY_SERVICE_TOKEN NOTIFICATION_SPACE_ATTENTION_SERVICE_TOKEN
   # Ingestion's integration-corev2 publishes to this plane's NATS account with a
   # password Application owns. Ingestion's own run-ingestion-plane.sh reads it
   # back from this plane's .env.generated-secrets rather than keeping its own
@@ -132,6 +132,18 @@ case " ${*:-} " in
         --label com.docker.compose.project=triodelab \
         inter-plane-bus >/dev/null
     fi
+    ;;
+esac
+
+# F10: warn (never fail) when the convex-gateway / convex-subscriber image is older
+# than the files baked into it. Skipped when this invocation builds, since the
+# image is then fresh by construction.
+case " ${*:-} " in
+  *" build "*|*" --build "*) ;;
+  *" up "*|*" start "*|*" restart "*)
+    # shellcheck source=convex-image-staleness.sh
+    source "$root/scripts/convex-image-staleness.sh"
+    warn_if_convex_image_stale "$root" || true
     ;;
 esac
 

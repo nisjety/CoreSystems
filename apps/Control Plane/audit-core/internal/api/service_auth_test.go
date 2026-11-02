@@ -242,3 +242,55 @@ func TestComplianceRoutesRequireTheComplianceScopeNotJustAuditRead(t *testing.T)
 		}
 	}
 }
+
+// WS05-S1: the org role the read scope depends on comes only from the signed
+// delegation. A forged role header without a valid signature never gets that far.
+func TestForgedRoleHeaderWithUnsignedDelegationIsRefused(t *testing.T) {
+	credentials, err := parseServiceCredentialRegistry(testCredentialRegistry())
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 7, 14, 12, 0, 0, 0, time.UTC)
+
+	// No delegation headers at all, only a forged admin role.
+	forged := httptest.NewRequest(http.MethodGet, "/v1/audit?org_id=org-a", nil)
+	forged.Header.Set("X-Service-Id", "verevon-gateway")
+	forged.Header.Set("X-Service-Token", testGatewayToken)
+	forged.Header.Set("X-User-Id", "user-a")
+	forged.Header.Set("X-Org-Id", "org-a")
+	forged.Header.Set("X-User-Role", "admin")
+	_, failure := authorizeServiceRequest(forged, credentials, newDelegationNonceCache(100), now)
+	if failure == nil || failure.Status != http.StatusForbidden || failure.Message != "signed service delegation required" {
+		t.Fatalf("forged role without a delegation: %+v", failure)
+	}
+
+	// A member's signed delegation whose role header is swapped to admin after
+	// signing no longer verifies, so the role cannot be escalated in transit.
+	swapped := httptest.NewRequest(http.MethodGet, "/v1/audit?org_id=org-a", nil)
+	signAuditReadRequest(swapped, now, "nonce-role-swap-0123456", "org-a")
+	swapped.Header.Set("X-User-Role", "admin")
+	_, failure = authorizeServiceRequest(swapped, credentials, newDelegationNonceCache(100), now)
+	if failure == nil || failure.Status != http.StatusForbidden || failure.Message != "signed service delegation required" {
+		t.Fatalf("role swapped after signing: %+v", failure)
+	}
+
+	// The honestly signed member delegation reaches the handler as a non-admin.
+	honest := httptest.NewRequest(http.MethodGet, "/v1/audit?org_id=org-a", nil)
+	signAuditReadRequest(honest, now, "nonce-role-honest-01234", "org-a")
+	authorization, failure := authorizeServiceRequest(honest, credentials, newDelegationNonceCache(100), now)
+	if failure != nil || authorization.UserRole != "member" || authorization.IsOrgAdmin() {
+		t.Fatalf("signed member delegation: %+v %+v", authorization, failure)
+	}
+}
+
+func TestIsOrgAdminMatrix(t *testing.T) {
+	for role, want := range map[string]bool{
+		"owner": true, "admin": true, "Owner": true, "ADMIN": true, " admin ": true,
+		"member": false, "viewer": false, "": false, "   ": false, "guest": false,
+		"superadmin": false, "administrator": false, "owner,member": false, "admin;member": false,
+	} {
+		if got := (serviceAuthorization{UserRole: role}).IsOrgAdmin(); got != want {
+			t.Fatalf("IsOrgAdmin(%q) = %t, want %t", role, got, want)
+		}
+	}
+}

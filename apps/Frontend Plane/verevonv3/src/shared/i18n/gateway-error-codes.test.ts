@@ -63,7 +63,14 @@ const NOT_A_CODE_TABLE: Record<string, string> = {
   SHAPE_DENY_KEYS: 'cache_admission.rs: JSON keys that keep a response out of the cache',
   READ_ONLY_BROWSE_OPS: 'domains/integrations/browse.rs: operation names the read-only browse proxy allows',
   READ_ONLY_CONTENT_OPS: 'domains/integrations/browse.rs: operation names the read-only content proxy allows',
-  FORGED_SPACE_AUTHORITY_FIELDS: 'domains/spaces.rs: request body fields a client may not set',
+  FORGED_SPACE_AUTHORITY_FIELDS: 'domains/spaces/mod.rs: request body fields a client may not set',
+  DETAIL_ALLOWLIST: 'domains/spaces/denial.rs: key names of the typed refusal details a Space denial may carry to the browser',
+  RESOLVABLE_BY: 'domains/spaces/denial.rs: values of the resolvable_by hint of a typed Space denial (who can fix it), not error codes',
+  STRING_FIELDS: 'domains/spaces/room_artifacts.rs: JSON field names of an artifact row the room artifacts route keeps',
+  NUMBER_FIELDS: 'domains/spaces/room_artifacts.rs: JSON field names of an artifact row the room artifacts route keeps',
+  RUN_STATES: 'domains/spaces/stream.rs: run state names of a Space stream frame, not error codes',
+  UPDATED_FIELDS: 'domains/spaces/stream.rs: thread field names a thread-updated frame may name, not error codes',
+  CLOSING_CODES: 'domains/spaces/stream.rs: reasons of a stream close frame; the stream client handles them itself and they never come back as an API error response',
   STRIPPED_HEADERS: 'middleware.rs: header names removed from a proxied request',
   RENDERABLE_ARTIFACT_TYPES: 'upstream.rs: media types an artifact may be rendered as',
   SENSITIVE_FIELDS: 'zdr_log.rs: field names the log redaction recognises',
@@ -131,6 +138,10 @@ const HELPER_WITHOUT_COPY: Record<string, string> = {
 // operation, and a code-level sentence would override that (and be wrong for another operation).
 const CALLER_WORDS_IT: Record<string, string> = {
   persona_unavailable: 'PersonaSection answers it with "could not save / could not load your persona instructions", which names the operation',
+  audit_scope_denied: 'a 403 for a member who may read only their own audit events; the audit client keeps the typed error and the Trust Center draws its own self-scope notice (the 403 status class answers anywhere else)',
+  room_admin_unavailable: 'SpaceRoomArchive words it for the archive and restore it belongs to ("Nothing was changed"); a code-level sentence would override that',
+  space_policy_admin_disabled: 'a 404 that hides the org Space policy console; OrgSpacePolicySection draws its own "not switched on for this installation" notice',
+  space_room_artifacts_disabled: 'a 404 that turns the room Artifacts tab into its disabled state; SpaceArtifactsTab draws its own notice',
 }
 
 // Strings the scan meets that are not error codes at all.
@@ -139,6 +150,11 @@ const NOT_AN_ERROR_CODE: Record<string, string> = {
   minio: 'name of a dependency in the knowledge diagnostics readiness list, not an error',
   qdrant: 'name of a dependency in the knowledge diagnostics readiness list, not an error',
   quickwit: 'name of a dependency in the knowledge diagnostics readiness list, not an error',
+  body: 'the field name of a validation refusal built as a (field, message) pair by the Space policy and room admin helpers; the code sent is the one the helper names',
+  expected_revision: 'the field name of a validation refusal built as a (field, message) pair by the room admin helpers',
+  idempotency_key: 'the field name of a validation refusal built as a (field, message) pair by the room admin helpers',
+  preset_id: 'the field name of a validation refusal built as a (field, message) pair by the Space policy helpers',
+  role: 'the field name of a validation refusal built as a (field, message) pair by the room admin helpers',
 }
 
 // Codes that sit inside a 200 payload as `unavailable` sections of a Space. The
@@ -188,6 +204,11 @@ const INTERNAL_ONLY: Record<string, string> = {
   operation_required: 'the integration browse operation is always sent by the SPA',
   speech_provider_not_allowed: 'the SPA does not offer another text-to-speech provider',
   unsupported_space_kind: 'the SPA only creates a personal Space or a room',
+  invalid_cursor: 'the Space stream drops a stale cursor and refetches, and the artifacts list restarts from the first page; a person never sees it',
+  invalid_diagnostic: 'the diagnostics beacon is fire-and-forget; no screen shows its refusal',
+  invalid_report: 'the Content-Security-Policy report endpoint is called by the browser, not by a screen',
+  report_too_large: 'the Content-Security-Policy report endpoint is called by the browser, not by a screen',
+  space_role_insufficient: 'Control Plane names it as the reason of a Space denial; the gateway sends it inside details.reason of a typed refusal and the denial presenter words it',
   mail_task_pipeline_failed: 'the mail-task ingest endpoint is called service to service; no SPA code calls it',
   mail_task_pipeline_not_configured: 'the mail-task ingest endpoint is called service to service; no SPA code calls it',
 }
@@ -206,7 +227,7 @@ describe('every code the gateway emits', () => {
       ['session_verification_unavailable', 'middleware.rs'],
       ['upstream_error', 'upstream.rs'],
       ['invalid_name', 'onboarding/actions/organization.rs'],
-      ['space_not_found', 'domains/spaces.rs'],
+      ['space_not_found', 'domains/spaces/mod.rs'],
       ['invalid_url', 'domains/browser.rs'],
       ['scrape_failed', 'domains/knowledge/quarry.rs'],
       ['model_error', 'upstream.rs'],
@@ -228,10 +249,10 @@ describe('every code the gateway emits', () => {
         if (!(table.name in NOT_A_CODE_TABLE)) read.push(table.name)
       }
     }
-    // The two tables of upstream.rs are read, so their entries reach the scan; a new
+    // The two tables of upstream.rs and the Space stream's ERROR_CODES are read, so their entries reach the scan; a new
     // table lands here and has to be added to this list (it holds codes) or to
     // NOT_A_CODE_TABLE (it does not).
-    expect(read.sort()).toEqual(['INTEGRATION_ERROR_CODE_ALLOWLIST', 'NEVER_PLAN_GATED_INTEGRATION_ERROR_CODES'])
+    expect(read.sort()).toEqual(['ERROR_CODES', 'INTEGRATION_ERROR_CODE_ALLOWLIST', 'NEVER_PLAN_GATED_INTEGRATION_ERROR_CODES'])
     for (const name of Object.keys(NOT_A_CODE_TABLE)) {
       expect(seen.has(name), `${name} is no longer a table in the gateway, remove it from NOT_A_CODE_TABLE`).toBe(true)
     }

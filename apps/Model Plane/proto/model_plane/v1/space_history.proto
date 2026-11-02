@@ -1,0 +1,96 @@
+syntax = "proto3";
+
+package model_plane.v1;
+
+import "google/protobuf/timestamp.proto";
+
+option go_package = "github.com/triodelab/model-plane/gen/go/model_plane/v1;mpv1";
+
+// SpaceHistoryService: permission-checked message search and message address resolution for a
+// Space room (build plan WS13-S1). Separate file and service so that SessionCore and every mock
+// of it stay source-compatible.
+//
+// Authority: the caller is a user principal whose id equals `user_id`. `space_read_decision_*`
+// is a Control `model.thread.read` decision for exactly this org, user and Space (audience
+// `model-plane`). With a decision the search covers the room up to the decision's audience
+// ceiling (`coverage = "shared"`); without one it covers only the caller's own threads in the
+// Space (`coverage = "own_threads_only"`). Both RPCs are reads: a ZDR caller may call them, and
+// nothing is persisted, cached or logged (query text and hit ids never reach a log).
+service SpaceHistoryService {
+  // Keyword search over the user and assistant messages of one Space.
+  rpc SearchMessages(SearchSpaceMessagesRequest) returns (SearchSpaceMessagesResponse);
+  // Maps a message id to its thread, under the same authority. Not found, hidden by audience,
+  // another Space and another org all answer NotFound("entry not found").
+  rpc ResolveMessage(ResolveSpaceMessageRequest) returns (ResolveSpaceMessageResponse);
+}
+
+message SearchSpaceMessagesRequest {
+  string org_id = 1;
+  string user_id = 2;
+  string space_id = 3;
+  string space_read_decision_ref = 4;
+  string space_read_decision_token = 5;
+  // 2 to 200 characters after trim, no control characters.
+  string query = 6;
+  // True while the user is still typing: the trailing word also matches as a prefix.
+  bool prefix = 7;
+  // Scope thread: only this thread.
+  string thread_id = 8;
+  // Scope person: only messages this subject authored.
+  string author_subject_id = 9;
+  // "", "user" or "assistant".
+  string role = 10;
+  google.protobuf.Timestamp since = 11;
+  google.protobuf.Timestamp until = 12;
+  // "recent" (default) or "relevance".
+  string sort = 13;
+  // 0 means 20; clamped to 1..50.
+  uint32 limit = 14;
+  // Opaque cursor from the previous response; empty for the first page.
+  string cursor = 15;
+}
+
+// One slice of a snippet. The client renders `text` as a text node, never as markup.
+message SnippetSegment {
+  string text = 1;
+  bool matched = 2;
+}
+
+message SpaceMessageHit {
+  string message_id = 1;
+  string thread_id = 2;
+  string space_id = 3;
+  string role = 4;
+  string author_subject_id = 5;
+  string agent_name = 6;
+  google.protobuf.Timestamp created_at = 7;
+  repeated SnippetSegment snippet = 8;
+  string thread_title = 9;
+}
+
+message SearchSpaceMessagesResponse {
+  repeated SpaceMessageHit hits = 1;
+  // Empty when there is no further page.
+  string next_cursor = 2;
+  // True when the relevance horizon (100 hits) cut the result.
+  bool truncated = 3;
+  // "shared" or "own_threads_only".
+  string coverage = 4;
+  // Closed words naming why content was withheld: "zdr_waived_threads", "no_searchable_terms".
+  repeated string excluded = 5;
+}
+
+message ResolveSpaceMessageRequest {
+  string org_id = 1;
+  string user_id = 2;
+  string space_id = 3;
+  string space_read_decision_ref = 4;
+  string space_read_decision_token = 5;
+  string message_id = 6;
+}
+
+message ResolveSpaceMessageResponse {
+  string message_id = 1;
+  string thread_id = 2;
+  string space_id = 3;
+}

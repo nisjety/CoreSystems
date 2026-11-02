@@ -524,6 +524,7 @@ async fn load_history(
             // Unpaged (WS09-S8): the whole conversation in sequence order.
             limit: 0,
             before_message_id: String::new(),
+            ..Default::default()
         },
         bearer,
     ) else {

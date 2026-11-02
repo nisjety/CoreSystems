@@ -1,4 +1,5 @@
 import { expect, test } from '@playwright/test'
+import { skipUnlessSpace } from './space-fixtures'
 
 // A release fixture must point at an already active, Control-registered Space
 // owned by the authenticated E2E principal. We deliberately do not create one
@@ -7,7 +8,7 @@ import { expect, test } from '@playwright/test'
 const spaceRef = process.env.E2E_SPACE_REF?.trim()
 
 test('Space shell uses server-composed context and never exposes an authority bearer', async ({ page }) => {
-  test.skip(!spaceRef, 'E2E_SPACE_REF must name an active fixture Space')
+  skipUnlessSpace(test, !spaceRef, 'E2E_SPACE_REF must name an active fixture Space')
 
   const canonical = await page.request.get(`/api/v1/spaces/${encodeURIComponent(spaceRef!)}/context`)
   expect(canonical.status()).toBe(200)

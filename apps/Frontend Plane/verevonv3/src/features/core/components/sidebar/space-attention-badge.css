@@ -1,0 +1,95 @@
+/* WS11-S4: attention badges in the sidebar. A count means something needs the reader (strong) or a
+   quiet unread number (muted); a dot is "new activity" at the mentions level. Tokens only, so dark
+   mode, forced-colors and density rules apply unchanged. */
+
+.space-attention-badge {
+  flex: none;
+  margin-left: auto;
+  display: inline-grid;
+  place-items: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 9px;
+  background: var(--verevon-surface-soft);
+  color: var(--verevon-text-muted);
+  font-size: 11px;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+}
+
+.space-attention-badge[data-strong='true'] {
+  background: var(--verevon-accent-ink);
+  color: var(--verevon-surface, #fff);
+}
+
+.space-attention-badge[data-kind='dot'] {
+  min-width: 7px;
+  width: 7px;
+  height: 7px;
+  padding: 0;
+  border-radius: 50%;
+  background: var(--verevon-text);
+  opacity: 0.7;
+}
+
+/* An old answer is shown, but visibly less sure. */
+.space-attention-badge[data-stale='true'] {
+  opacity: 0.55;
+}
+
+.core-sidebar-panel-link[data-attention] .core-sidebar-panel-link__label {
+  font-weight: 650;
+}
+
+@media (forced-colors: active) {
+  .space-attention-badge {
+    border: 1px solid CanvasText;
+    background: Canvas;
+    color: CanvasText;
+  }
+  .space-attention-badge[data-kind='dot'] {
+    background: CanvasText;
+  }
+}
+
+/* "Mark all read" under the Spaces search field. */
+.space-attention-readall {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 2px 8px 6px;
+  color: var(--verevon-text-muted);
+  font-size: 12px;
+}
+
+.space-attention-readall button {
+  min-height: 28px;
+  padding: 2px 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--verevon-accent-ink);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.space-attention-readall button:hover:not(:disabled) {
+  background: var(--verevon-surface-soft);
+}
+
+.space-attention-readall button:focus-visible {
+  outline: 2px solid var(--verevon-accent-ink);
+  outline-offset: 2px;
+}
+
+.space-attention-readall button:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.space-attention-readall__stale {
+  margin-left: auto;
+}

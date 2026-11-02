@@ -340,6 +340,14 @@ func (r *DocumentRepo) CreateWithOutbox(
 					}
 				}
 
+				// WS14-S3: a NEW room file is admitted under a per-Space lock so
+				// the quota count and the hash lookup cannot race another upload.
+				if input.SpaceFile != nil {
+					if err := checkSpaceFileAdmissionTx(ctx, tx, input); err != nil {
+						return nil, err
+					}
+				}
+
 				// space_ref is written on create only. A re-POST under Space
 				// authority refreshes content (the UPDATE branch above) but
 				// never re-homes an existing document into another room: that
@@ -355,6 +363,9 @@ func (r *DocumentRepo) CreateWithOutbox(
 					nilIfEmpty(strings.TrimSpace(input.SpaceRef)))
 				doc, insertErr := scanDocument(row)
 				if insertErr != nil {
+					if input.SpaceFile != nil && isUniqueViolation(insertErr) && containsAny(insertErr.Error(), spaceFileSHAIndex) {
+						return nil, &SpaceFileDuplicateError{}
+					}
 					if input.IdempotencyKey != "" && isUniqueViolation(insertErr) && attempt == 0 {
 						return nil, errIdempotencyRaceRetry
 					}

@@ -1,0 +1,334 @@
+/* Space human posts: the Send/Ask switch and the optimistic row (WS01-S6). Lives beside the
+   components rather than in global.css so it does not touch that file's uncommitted lines. */
+
+.verevon-space-room-composer__modes {
+  display: inline-flex;
+  gap: 2px;
+  align-self: flex-start;
+  border: 1px solid var(--verevon-border);
+  border-radius: 10px;
+  background: var(--verevon-surface);
+  padding: 2px;
+}
+
+.verevon-space-room-composer__modes button {
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  padding: 4px 10px;
+  color: var(--verevon-text-muted);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.verevon-space-room-composer__modes button[aria-checked="true"] {
+  background: color-mix(in srgb, var(--verevon-text) 9%, var(--verevon-surface));
+  color: var(--verevon-text);
+  font-weight: 600;
+}
+
+.verevon-space-room-composer__modes button:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.verevon-space-room-composer__modes button:focus-visible {
+  outline: 2px solid var(--verevon-accent, currentColor);
+  outline-offset: 1px;
+}
+
+/* A post that has not landed yet. Present, but visibly not part of the record: the sender sees
+   their own words at once, and the row settles into the real one when the room shows it. */
+.verevon-room-post--pending,
+.verevon-room-turn--pending {
+  opacity: 0.78;
+}
+
+.verevon-room-post--pending[data-stage="failed"],
+.verevon-room-turn--pending[data-stage="failed"] {
+  opacity: 1;
+}
+
+.verevon-room-pending__state {
+  margin: 4px 0 0;
+  color: var(--verevon-text-muted);
+  font-size: 12px;
+}
+
+.verevon-room-pending__state[data-stage="failed"] {
+  color: var(--danger, #b42318);
+}
+
+.verevon-room-pending__actions {
+  display: inline-flex;
+  gap: 8px;
+  margin-left: 8px;
+}
+
+.verevon-space-projection-error.verevon-space-room-composer__post-failure {
+  margin: 0;
+  font-size: 12px;
+}
+
+.verevon-space-room-composer__post-failure button {
+  margin-left: 6px;
+}
+
+.dark .verevon-room-pending__state[data-stage="failed"] {
+  color: #f0968f;
+}
+
+/* Per-turn attachments (WS14-S8): the attach button, the chips under the box and on a sent turn. */
+.verevon-space-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.verevon-space-attachments__add {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--verevon-border);
+  border-radius: 8px;
+  background: var(--verevon-surface);
+  padding: 4px 6px;
+  color: var(--verevon-text-muted);
+  cursor: pointer;
+}
+
+.verevon-space-attachments__add svg {
+  width: 16px;
+  height: 16px;
+}
+
+.verevon-space-attachments__add:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.verevon-space-attachments__add:focus-visible {
+  outline: 2px solid var(--verevon-accent, currentColor);
+  outline-offset: 1px;
+}
+
+.verevon-space-attachment-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 4px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.verevon-space-attachments .verevon-space-attachment-chips {
+  margin: 0;
+}
+
+.verevon-space-attachment-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  border: 1px solid var(--verevon-border);
+  border-radius: 999px;
+  background: var(--verevon-surface);
+  padding: 2px 10px;
+  color: var(--verevon-text);
+  font-size: 12px;
+}
+
+.verevon-space-attachment-chip__name {
+  overflow: hidden;
+  max-width: 28ch;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.verevon-space-attachment-chip__size {
+  color: var(--verevon-text-muted);
+}
+
+.verevon-space-attachment-chip button {
+  border: 0;
+  background: transparent;
+  padding: 0 2px;
+  color: var(--verevon-text-muted);
+  cursor: pointer;
+}
+
+.verevon-space-room-composer form[data-drop-active="true"] {
+  outline: 2px dashed var(--verevon-accent, currentColor);
+  outline-offset: 2px;
+}
+
+/* Markdown authoring (WS15-S3): format bar, preview pane. Only rendered while features.composer_markdown is on. */
+.verevon-space-room-composer__format {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex-wrap: wrap;
+}
+
+.verevon-space-room-composer__format-spacer {
+  flex: 1 1 auto;
+}
+
+.verevon-space-room-composer__format-button,
+.verevon-space-room-composer__format-toggle {
+  border: 0;
+  background: transparent;
+  color: var(--verevon-text-muted);
+  font: inherit;
+  font-size: 0.8125rem;
+  min-width: 28px;
+  min-height: 28px;
+  padding: 0 6px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.verevon-space-room-composer__format-button:hover:not(:disabled),
+.verevon-space-room-composer__format-toggle:hover:not(:disabled) {
+  background: var(--verevon-surface-hover, rgba(127, 127, 127, 0.12));
+  color: inherit;
+}
+
+.verevon-space-room-composer__format-button:disabled,
+.verevon-space-room-composer__format-toggle:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.verevon-space-room-composer__format-button:focus-visible,
+.verevon-space-room-composer__format-toggle:focus-visible {
+  outline: 2px solid var(--verevon-accent, currentColor);
+  outline-offset: 1px;
+}
+
+.verevon-space-room-composer__format-toggle[aria-pressed="true"] {
+  color: inherit;
+  background: var(--verevon-surface-hover, rgba(127, 127, 127, 0.12));
+}
+
+.verevon-space-room-composer__preview {
+  min-height: 3.5rem;
+  max-height: 16rem;
+  overflow: auto;
+  padding: 8px 10px;
+  border: 1px dashed var(--verevon-border, rgba(127, 127, 127, 0.4));
+  border-radius: 8px;
+}
+
+.verevon-space-room-composer textarea[hidden] {
+  display: none;
+}
+
+/* WS14-S9: the per-message choice to also keep text files in the room's Files tab. */
+.verevon-space-attachments__keep {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.8125rem;
+  color: var(--verevon-text-muted);
+}
+
+/* WS08-S6: structured mentions, the address bar, wake status and mention highlight. */
+.verevon-space-mention-picker {
+  max-height: 260px;
+  overflow-y: auto;
+}
+
+.verevon-space-mention-picker__section {
+  padding: 6px 10px 2px;
+  color: var(--verevon-text-muted);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.verevon-space-addressed {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0 0 6px;
+  padding: 0;
+  list-style: none;
+}
+
+.verevon-space-addressed__chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--verevon-border);
+  border-radius: 999px;
+  background: var(--verevon-surface);
+  padding: 2px 4px 2px 8px;
+  font-size: 12px;
+}
+
+.verevon-space-addressed__chip[data-locked="true"] {
+  border-color: var(--verevon-accent, currentColor);
+}
+
+.verevon-space-addressed__order {
+  color: var(--verevon-text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.verevon-space-addressed__lock,
+.verevon-space-addressed__remove {
+  border: 0;
+  background: transparent;
+  padding: 2px 4px;
+  color: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.verevon-space-addressed__lock:focus-visible,
+.verevon-space-addressed__remove:focus-visible {
+  outline: 2px solid var(--verevon-accent, currentColor);
+  outline-offset: 1px;
+}
+
+.verevon-space-wake {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 4px 0 0;
+  padding: 0;
+  list-style: none;
+  color: var(--verevon-text-muted);
+  font-size: 12px;
+}
+
+.verevon-space-wake__item[data-state="failed"],
+.verevon-space-wake__item[data-state="refused"] {
+  color: var(--danger, #b42318);
+}
+
+.verevon-space-wake__action {
+  margin-left: 8px;
+  border: 0;
+  background: transparent;
+  padding: 0;
+  color: var(--verevon-accent, currentColor);
+  font-size: 12px;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.verevon-space-mention {
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--verevon-accent, currentColor) 14%, transparent);
+  padding: 0 2px;
+  color: inherit;
+}
+
+.verevon-space-mention[data-self="true"] {
+  background: color-mix(in srgb, var(--verevon-accent, currentColor) 32%, transparent);
+  font-weight: 600;
+}

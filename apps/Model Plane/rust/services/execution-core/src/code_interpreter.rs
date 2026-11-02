@@ -198,6 +198,20 @@ struct CodeResult {
     /// Office files the verifier did not check, so the model can say so.
     #[serde(skip_serializing_if = "is_zero")]
     verification_unchecked: usize,
+    /// How the program was confined and whether it was stopped for a limit
+    /// (WS06-S8). Additive: callers that do not know it ignore it.
+    execution: ExecutionInfo,
+}
+
+/// The `execution` object of a code result: `{sandboxed, limits, limit_hit}`.
+#[derive(Debug, serde::Serialize)]
+struct ExecutionInfo {
+    sandboxed: bool,
+    /// `enforced` | `unlimited`.
+    limits: &'static str,
+    /// Present only when the program was stopped for a resource limit.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    limit_hit: Option<executor::LimitHit>,
 }
 
 fn is_zero(count: &usize) -> bool {
@@ -493,6 +507,12 @@ fn child_env(workspace: &Path) -> Vec<(String, String)> {
     env
 }
 
+/// The ENTIRE environment of a `shell` call (WS06-S9): `PATH` and nothing else, so
+/// no service credential execution-core holds reaches a model-authored command.
+pub(crate) fn shell_env() -> Vec<(String, String)> {
+    vec![("PATH".to_owned(), inherited_or("PATH", FALLBACK_PATH))]
+}
+
 fn path_value(path: &Path) -> String {
     path.to_string_lossy().into_owned()
 }
@@ -543,6 +563,10 @@ pub async fn run(
 /// [`run`] with the turn's skill bundles: `skills`, when present, is the host directory a
 /// `crate::skill_mounts` tree was written to, bound read-only at [`SKILLS_MOUNT`] for the
 /// call. `None` is exactly [`run`].
+///
+/// `lease_id` is the sandbox lease the caller holds for a Space-scoped run
+/// (`workspace_root` is `Some` exactly then); the spawn is refused without it
+/// (WS06-S9 `SpawnAdmission`).
 pub async fn run_with_skills(
     tool_input: &str,
     run_id: &str,
@@ -550,8 +574,13 @@ pub async fn run_with_skills(
     workspace_root: Option<&Path>,
     ro_inputs: Option<Arc<InputSet>>,
     skills: Option<&Path>,
+    lease_id: Option<&str>,
 ) -> Result<String, String> {
-    run_staged_with_skills(
+    let admission = executor::SpawnAdmission {
+        space_scoped: workspace_root.is_some(),
+        lease_id,
+    };
+    run_admitted(
         tool_input,
         run_id,
         step_id,
@@ -559,6 +588,7 @@ pub async fn run_with_skills(
         ro_inputs,
         skills,
         executor::code_exec_timeout(),
+        &admission,
     )
     .await
 }
@@ -607,16 +637,41 @@ async fn run_staged_with_skills(
     skills: Option<&Path>,
     timeout: Duration,
 ) -> Result<String, String> {
+    run_admitted(
+        tool_input,
+        run_id,
+        step_id,
+        workspace_root,
+        ro_inputs,
+        skills,
+        timeout,
+        &executor::SpawnAdmission::NOT_SPACE,
+    )
+    .await
+}
+
+/// [`run_staged_with_skills`] with the Space facts the spawn is admitted on (WS06-S9).
+#[allow(clippy::too_many_arguments)]
+async fn run_admitted(
+    tool_input: &str,
+    run_id: &str,
+    step_id: &str,
+    workspace_root: Option<&Path>,
+    ro_inputs: Option<Arc<InputSet>>,
+    skills: Option<&Path>,
+    timeout: Duration,
+    admission: &executor::SpawnAdmission<'_>,
+) -> Result<String, String> {
     let mut request = parse_request(tool_input)?;
     request.ro_inputs = ro_inputs;
 
     if let Some(root) = workspace_root {
-        return run_in_root(&request, root, timeout, true, skills).await;
+        return run_in_root(&request, root, timeout, true, skills, admission).await;
     }
 
     let workspace = Workspace::create(run_id, step_id)
         .map_err(|error| format!("code_interpreter could not create its workspace: {error}"))?;
-    run_in_root(&request, workspace.path(), timeout, false, skills).await
+    run_in_root(&request, workspace.path(), timeout, false, skills, admission).await
     // `workspace` drops here — and on every `?` above — removing the directory.
 }
 
@@ -636,6 +691,7 @@ async fn run_in_root(
     timeout: Duration,
     persistent: bool,
     skills: Option<&Path>,
+    admission: &executor::SpawnAdmission<'_>,
 ) -> Result<String, String> {
     let pre_call_baseline = if persistent {
         snapshot_file_hashes(root)
@@ -711,6 +767,7 @@ async fn run_in_root(
         &child_env(root),
         &ro_binds,
         timeout,
+        admission,
     )
     .await
     .map_err(|error| format!("code_interpreter execution failed: {error}"))?;
@@ -728,6 +785,11 @@ async fn run_in_root(
         files,
         verification: office.reports,
         verification_unchecked: office.unchecked,
+        execution: ExecutionInfo {
+            sandboxed: outcome.sandboxed,
+            limits: outcome.limits,
+            limit_hit: outcome.limit_hit,
+        },
     })
     .map_err(|error| format!("code_interpreter could not encode its result: {error}"))
 }
@@ -1017,6 +1079,11 @@ mod tests {
             ],
             verification: Vec::new(),
             verification_unchecked: 0,
+            execution: ExecutionInfo {
+                sandboxed: true,
+                limits: "enforced",
+                limit_hit: None,
+            },
         };
         assert_eq!(
             serde_json::to_string(&result).expect("serializes"),

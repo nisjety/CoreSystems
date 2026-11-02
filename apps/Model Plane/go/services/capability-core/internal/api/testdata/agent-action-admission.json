@@ -2081,7 +2081,20 @@
       "eligible": false,
       "executor": {},
       "hashBasis": "catalog_entry",
-      "schemaHash": "sha256:6ab144c4b0b5948b9200b57168eded8ceec8f3c157139c8fe91f3bf7c1ed5de4",
+      "schemaHash": "sha256:2d8a0e4a9c834097bfe9abf47571a7ed12e42026eb8cc392dc17b0d573dfb50b",
+      "zdr_allowed": false
+    },
+    {
+      "actionId": "spaces.apply_effect_preset",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "external_write",
+      "exemptReason": "human_identity_or_security",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:f24ce168a5f442e88fbaf9601491bc38002c6e6c818c79ab0a3e252388103fca",
       "zdr_allowed": false
     },
     {
@@ -2098,6 +2111,19 @@
       "zdr_allowed": false
     },
     {
+      "actionId": "spaces.change_member_role",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "external_write",
+      "exemptReason": "human_identity_or_security",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:ad3a691af32a368a01bf7bb07545e72a93a626b2a76a2f29767727697f3ccb36",
+      "zdr_allowed": false
+    },
+    {
       "actionId": "spaces.create_personal_space",
       "registry": true,
       "access": "none",
@@ -2108,6 +2134,19 @@
       "executor": {},
       "hashBasis": "catalog_entry",
       "schemaHash": "sha256:c9b4983d649b5d5028c9f7c5db04dfe95973729f4a7c53f5220542abf482b343",
+      "zdr_allowed": false
+    },
+    {
+      "actionId": "spaces.create_post",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "external_write",
+      "exemptReason": "human_identity_or_security",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:4070c2c97e11d31e83fe220ef1c0e4f6824637a8564cbd5a6e38ce2e47fbce6d",
       "zdr_allowed": false
     },
     {
@@ -2150,6 +2189,19 @@
       "zdr_allowed": false
     },
     {
+      "actionId": "spaces.leave_room",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "external_write",
+      "exemptReason": "human_identity_or_security",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:d4835f7fd8075780d3476295315b6313a1c47b10be0118b0ff08a3964948ce74",
+      "zdr_allowed": false
+    },
+    {
       "actionId": "spaces.mark_read",
       "registry": true,
       "access": "none",
@@ -2189,6 +2241,19 @@
       "zdr_allowed": false
     },
     {
+      "actionId": "spaces.reply_in_thread",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "external_write",
+      "exemptReason": "human_identity_or_security",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:fcce555c4ef3be648698014f3d8051ebb30d9809975fcd746807f8e9ee3ba7f9",
+      "zdr_allowed": false
+    },
+    {
       "actionId": "spaces.request_personal_space_deletion",
       "registry": true,
       "access": "none",
@@ -2225,6 +2290,32 @@
       "executor": {},
       "hashBasis": "catalog_entry",
       "schemaHash": "sha256:5b34ad65096af0fbbbc967486ffc9328579e79ff4ff6fbfb06cfd1a272bbbedc",
+      "zdr_allowed": false
+    },
+    {
+      "actionId": "spaces.set_effect_entitlements",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "external_write",
+      "exemptReason": "human_identity_or_security",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:04909c96a7c1eeca070a07c6c760a21de47d7c1d9f51575dcfb91e72550221a2",
+      "zdr_allowed": false
+    },
+    {
+      "actionId": "spaces.update_room_details",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "external_write",
+      "exemptReason": "human_identity_or_security",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:696800fbbc6fa124c123dcbed5f34479b12029fab4588f8000013bc2dfe5f389",
       "zdr_allowed": false
     },
     {

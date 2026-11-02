@@ -27,6 +27,19 @@ const (
 
 var grpcPolicyIdentifier = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{1,127}$`)
 
+// WS14-S2 grant-writer audit. resource_grants has one reviewed write surface
+// (the HTTP authz facade, owner-asserted mode). The dormant DocumentAccessService
+// gRPC grant/revoke methods are a second writer that skips the owner check, so
+// a credential may hold them only if its principal is NAMED here. The set is
+// empty on purpose: no principal needs them today, and adding one is a reviewed
+// code change, not a registry edit.
+var grpcGrantWriterMethods = map[string]struct{}{
+	"/user.v1.DocumentAccessService/GrantDocumentAccess":  {},
+	"/user.v1.DocumentAccessService/RevokeDocumentAccess": {},
+}
+
+var grpcGrantWriterPrincipals = map[string]struct{}{}
+
 type grpcServiceCredential struct {
 	CredentialID string   `json:"credentialId"`
 	Principal    string   `json:"principal"`
@@ -133,6 +146,11 @@ func parseGRPCServiceCredentials(raw string) ([]grpcServiceCredential, error) {
 			}
 			if _, ok := allowedMethods[method]; !ok {
 				return nil, fmt.Errorf("USER_CORE_GRPC_SERVICE_CREDENTIALS contains an unknown method")
+			}
+			if _, writer := grpcGrantWriterMethods[method]; writer {
+				if _, named := grpcGrantWriterPrincipals[credential.Principal]; !named {
+					return nil, fmt.Errorf("USER_CORE_GRPC_SERVICE_CREDENTIALS grants a resource-grant writer method to an unnamed principal")
+				}
 			}
 			if _, duplicate := methodSet[method]; duplicate {
 				return nil, fmt.Errorf("USER_CORE_GRPC_SERVICE_CREDENTIALS contains a duplicate method")

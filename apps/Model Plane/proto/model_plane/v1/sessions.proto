@@ -304,6 +304,22 @@ service LearningGovernanceService {
   rpc ListLearningLedger(ListLearningLedgerRequest) returns (ListLearningLedgerResponse);
 }
 
+// MessageRevisionService: edit or delete ONE message of a Space thread (build plan WS12-S4).
+// A separate service, as MessageSearch and LearningGovernanceService are, so that SessionCore
+// and every mock of it stay source-compatible. Both RPCs are the caller's own: a service
+// credential is refused, and the caller carries a Control decision for the Space.
+service MessageRevisionService {
+  // The caller carries a Control `model.thread.revise` decision; Session Core verifies it,
+  // records an append-only revision and folds it into every read. Refused for a
+  // zero-retention credential and when SPACE_MESSAGE_REVISE_CORE is off.
+  rpc ReviseMessage(ReviseMessageRequest) returns (ReviseMessageResponse);
+
+  // Resolve what a caller may need to know about a message before asking Control
+  // to authorize a revision: its role and revision state, never its content or
+  // author. Read class: authorized like ListConversation (a Space read decision).
+  rpc ResolveMessageTarget(ResolveMessageTargetRequest) returns (ResolveMessageTargetResponse);
+}
+
 // --- CreateThread ---
 
 message CreateThreadRequest {
@@ -384,6 +400,65 @@ message CreateThreadResponse {
 
 // --- AppendMessage ---
 
+// One mentioned subject of a human post (WS08-S2). Ids only, never text. Session Core
+// accepts mentions only on a role "user" row with post_kind "post" from a human caller.
+message MentionInput {
+  // The mentioned person's or agent's subject id (^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$).
+  string subject_id = 1;
+  // "user" or "agent".
+  string kind = 2;
+  // "typed" (the author wrote @name) or "locked" (the composer's address lock). Empty = typed.
+  string source = 3;
+  // Agents only: "expected" (a wake may start one run) or "refused". Empty for a person.
+  string wake_expectation = 4;
+  // Set only with wake_expectation "refused": respond_to_denied, mention_not_enabled,
+  // invocation_blocked or owner_only_thread.
+  string refusal_code = 5;
+  // Wake order among the agents of this post (0-based). Persons carry 0.
+  uint32 ordinal = 6;
+}
+
+// One recorded mention as a read or an append reports it. `wake_state` is derived at read:
+// refused, expected, running, awaiting_approval, completed, failed or cancelled; empty for a
+// person.
+message MentionRef {
+  string subject_id = 1;
+  string kind = 2;
+  string wake_state = 3;
+  // The refusal code when wake_state is refused.
+  string reason = 4;
+  string source = 5;
+  uint32 ordinal = 6;
+}
+
+// The Control-signed authority and the stored post a wake starts a run from (WS08-S2). The
+// decision fields are the twelve of AppendMessageRequest 5 to 16, in that order, for the
+// action "model.run.wake" (schema sha256:run-wake-v1, permission run:wake); the four wake
+// fields follow. Session Core recomputes the payload digest from these fields and the verified
+// caller, and never takes turn_origin from anywhere but the verified decision.
+message RunWakeContext {
+  string space_id = 1;
+  string space_decision_ref = 2;
+  string recipient_audience_ref = 3;
+  uint64 recipient_audience_revision = 4;
+  string recipient_audience_hash = 5;
+  string privacy_policy_ref = 6;
+  uint64 authority_revision = 7;
+  string resource_authorization_ref = 8;
+  string space_decision_token = 9;
+  string action_schema_hash = 10;
+  string payload_digest = 11;
+  string idempotency_key = 12;
+  // The caller's own stored post this run answers.
+  string trigger_message_id = 13;
+  // sha256:<hex> of that post's stored text; must equal the digest the decision bound.
+  string trigger_content_digest = 14;
+  // The bound agent to run (must be an `expected` mention on the trigger post).
+  string agent_subject_id = 15;
+  // "direct" today; Control refuses the others until their slices exist.
+  string turn_origin = 16;
+}
+
 message AppendMessageRequest {
   // Thread to append to.
   string thread_id = 1;
@@ -430,6 +505,25 @@ message AppendMessageRequest {
   // derived from content, and never sent for a zero-retention turn (such a
   // credential cannot append at all). Empty = no receipt, today's behaviour.
   string client_message_id = 18;
+
+  // What kind of row this is in the room: "" and "turn" are today's
+  // conversation turn (the owner's prompt, the agent's answer); "post" is a
+  // human message written to the room and never sent to the agent. Posts are
+  // kept out of model context, agent memory and Dreaming (see
+  // ListConversationRequest.include_human_posts). Any other value is refused.
+  string post_kind = 19;
+
+  // Mentions of a human post (WS08-S2): at most 20 people and 3 agents, no duplicates. Honoured
+  // only for role "user", post_kind "post", a human caller and SPACE_MENTION_RECORDS_CORE on;
+  // otherwise ignored. Never written for a zero-retention caller. An agent mention on a
+  // thread the caller does not own is recorded as refused/owner_only_thread.
+  repeated MentionInput mentions = 20;
+
+  // Typed room entry of a human post (WS15-S9): kind "link_previews", version 1, one to three
+  // text-only previews. Honoured only with post_kind "post"; on any other append it is refused
+  // (invalid_argument), and a failed validation refuses the append. Stored under
+  // messages.metadata.entry; never part of model context. Unset = no entry.
+  MessageEntry entry = 21;
 }
 
 message AppendMessageResponse {
@@ -443,6 +537,9 @@ message AppendMessageResponse {
   // True when the append found the caller's `client_message_id` already stored
   // and wrote nothing.
   bool deduplicated = 3;
+
+  // The mentions as stored (effective wake states after Session Core's own downgrade).
+  repeated MentionRef mentions = 4;
 }
 
 // --- StartRun ---
@@ -632,6 +729,9 @@ message StartManagedRunRequest {
   string start_key = 8;
   // The server validates this source and stores the matching canonical step.
   ManagedRunSource terminal_source = 9;
+  // Wake mode (WS08-S2): start this run from a stored human post for one addressed agent.
+  // Absent keeps every existing start unchanged. Refused for a zero-retention caller.
+  RunWakeContext wake = 10;
 }
 
 message StartManagedRunResponse {
@@ -1105,6 +1205,23 @@ message ListConversationRequest {
   // `on_active_path = false` (WS17 S8). Off, the read is the active path only, and
   // every prompt, learning and Dreaming reader leaves it off.
   bool include_inactive = 8;
+
+  // Human posts (post_kind "post") are filtered out of every read unless the
+  // caller sets this. False is the default so every caller, the model-callable
+  // reattach_context included, is contained without doing anything; only the
+  // UI transcript route opts in.
+  bool include_human_posts = 9;
+
+  // With include_human_posts, keep only the newest N human posts in the returned page (0 = no
+  // cap). Used by a wake that opts in to fenced room-post context (WS08-S3).
+  uint32 post_context_cap = 10;
+
+  // Space timeline tail transcript (WS15-S6). With a positive `limit` and no
+  // `before_message_id`, also return the thread's first readable turn ahead of
+  // the newest page (unless the page already holds it) and report in
+  // `omitted_before` how many readable turns lie between the two. Only read
+  // while SPACE_TIMELINE_CORE is on; otherwise the read is the plain page.
+  bool include_first = 11;
 }
 
 // One conversation turn. Named SessionMessage (not ThreadMessage, which the
@@ -1150,6 +1267,34 @@ message SessionMessage {
   // True when the turn is on the active path: the chain from the first turn to the
   // thread's active leaf. Only inactive turns are read with `include_inactive`.
   bool on_active_path = 10;
+  // "turn" or "post" (see AppendMessageRequest.post_kind). Rows written before
+  // the column existed read as "turn".
+  string post_kind = 11;
+  // When this turn was stored (messages.created_at). A room shows a time beside
+  // each message and this is the only source for it; absent only when a caller
+  // built the message without reading it from the store.
+  google.protobuf.Timestamp created_at = 12;
+  // The mentions recorded on this post (WS08-S2), with the wake state derived from the newest
+  // run per (post, agent). Empty on turns and on posts without mentions.
+  repeated MentionRef mentions = 13;
+  // Typed room entry of a human post (WS15-S6 declares it, WS15-S9 validates and fills it). Unset
+  // on every turn and on a post without one; a reader renders an unset or unknown kind neutrally.
+  MessageEntry entry = 14;
+
+  // The latest revision applied to this message (WS12-S4): "" (never revised),
+  // "edited" or "deleted". A deleted message arrives with empty `content` and no
+  // `metadata`; an edited one arrives with its effective (edited) content.
+  string revision_state = 15;
+  // When the latest applied revision was made; absent when never revised.
+  google.protobuf.Timestamp revised_at = 16;
+  // Who made the latest applied revision (the author, the thread owner for an
+  // agent answer, or a moderator).
+  string revised_by_subject_id = 17;
+  // 1-based number of the latest applied revision; 0 when never revised.
+  uint32 revision_no = 18;
+  // Set only on a deleted user message: an agent answer to it already exists, and
+  // that answer is not retracted by the deletion.
+  bool agent_followed_up = 19;
 }
 
 message ListConversationResponse {
@@ -1158,6 +1303,100 @@ message ListConversationResponse {
   // True when messages older than this page exist. Always false for an
   // unpaged read.
   bool has_more = 2;
+  // Readable turns between the first turn (ListConversationRequest.include_first) and the
+  // returned page; 0 when the request did not ask for the first turn or nothing is omitted
+  // (WS15-S6).
+  uint32 omitted_before = 3;
+}
+
+// A typed room entry carried by a human post (WS15). `kind` is a closed word; a reader that
+// does not know a kind shows `{kind, version}` neutrally. Today's only kind is "link_previews".
+message MessageEntry {
+  string kind = 1;
+  uint32 version = 2;
+  repeated LinkPreview link_previews = 3;
+}
+
+// One captured link preview, text only (no image), snapshotted when the post was sent.
+message LinkPreview {
+  string url = 1;
+  string final_url = 2;
+  string host = 3;
+  string title = 4;
+  string description = 5;
+  string site_name = 6;
+  google.protobuf.Timestamp fetched_at = 7;
+}
+
+// --- ReviseMessage / ResolveMessageTarget (WS12-S4) ---
+
+message ReviseMessageRequest {
+  // Required. The owning org; must equal the caller's org and the thread's org.
+  string org_id = 1;
+  // Required. The thread holding the message; it must belong to `space_id`.
+  string thread_id = 2;
+  // Required. The message to revise.
+  string message_id = 3;
+  // Required. "edit" or "delete".
+  string action = 4;
+  // The new text of an edit (1 to 32768 bytes). Must be empty for a delete.
+  string content = 5;
+  // Optional closed set, honoured only for a moderator delete: policy_violation,
+  // spam, harassment, privacy or other. Ignored (stored empty) for any other class.
+  string moderation_reason = 6;
+
+  // The complete Control `model.thread.revise` decision envelope, the same fields
+  // as AppendMessageRequest 5 to 16. `action_schema_hash` is
+  // "sha256:thread-revise-v1" and `payload_digest` binds the org, caller, thread,
+  // message, action, new-content digest and idempotency key. A v1/v2 append
+  // decision is refused. The token is verified and never persisted.
+  string space_id = 7;
+  string space_decision_ref = 8;
+  string recipient_audience_ref = 9;
+  uint64 recipient_audience_revision = 10;
+  string recipient_audience_hash = 11;
+  string privacy_policy_ref = 12;
+  uint64 authority_revision = 13;
+  string resource_authorization_ref = 14;
+  string space_decision_token = 15;
+  string action_schema_hash = 16;
+  string payload_digest = 17;
+  string idempotency_key = 18;
+}
+
+message ReviseMessageResponse {
+  // The message that was revised.
+  string message_id = 1;
+  // 1-based number of the revision that was recorded (or replayed).
+  uint32 revision_no = 2;
+  // "edited" or "deleted".
+  string revision_state = 3;
+  google.protobuf.Timestamp revised_at = 4;
+  // True when the idempotency key had already recorded this exact revision.
+  bool deduplicated = 5;
+  // "author", "agent_owner" or "moderator": the class the caller was revised under.
+  string actor_class = 6;
+}
+
+message ResolveMessageTargetRequest {
+  // Required. The owning org.
+  string org_id = 1;
+  // Required. The thread holding the message.
+  string thread_id = 2;
+  // Required. The message to resolve.
+  string message_id = 3;
+  // Required Space read decision (same envelope as ListConversationRequest 3 to 5):
+  // an absent decision is refused, there is no owner-bound fallback.
+  string space_id = 4;
+  string space_read_decision_ref = 5;
+  string space_read_decision_token = 6;
+}
+
+message ResolveMessageTargetResponse {
+  // "user" | "assistant" | "system" | "tool".
+  string role = 1;
+  // "" (never revised), "edited" or "deleted".
+  string revision_state = 2;
 }
 
 // --- ListThreads (durable cross-device chat history) ---
@@ -1273,6 +1512,24 @@ message ThreadSummary {
   // The owner's last read of the thread. Mark-read sets it to now; mark-unread
   // moves it to one microsecond before the newest assistant message.
   google.protobuf.Timestamp last_read_at = 22;
+  // Human replies in the thread: user rows after the first, counted under the
+  // same audience ceiling as the rest of the read so a count never reveals a
+  // row the reader could not open. Presentation only.
+  uint32 reply_count = 23;
+  // Author subject of the latest human row the reader may see; empty when
+  // there is none. Presentation only, never a grant.
+  string last_author_subject_id = 24;
+
+  // Thread activity summary (WS15-S5 columns, read by ListSpaceTimeline, WS15-S6). Ids, counts and
+  // a role word only; set by ListSpaceTimeline and left at the defaults by ListThreads.
+  // Sequence of the thread's newest message: the timeline's keyset position.
+  uint64 last_message_seq = 25;
+  // Up to five most recent human authors, newest first. Presentation only, never a grant.
+  repeated string recent_author_subject_ids = 26;
+  // Role of the newest message ("user", "assistant", ...).
+  string last_role = 27;
+  // Messages with role user or assistant in the thread.
+  uint32 turn_count = 28;
 }
 
 message ListThreadsResponse {

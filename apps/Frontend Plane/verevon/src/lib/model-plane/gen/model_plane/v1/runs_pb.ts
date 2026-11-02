@@ -12,7 +12,7 @@ import type { JsonObject, Message } from "@bufbuild/protobuf";
  * Describes the file model_plane/v1/runs.proto.
  */
 export const file_model_plane_v1_runs: GenFile = /*@__PURE__*/
-  fileDesc("Chltb2RlbF9wbGFuZS92MS9ydW5zLnByb3RvEg5tb2RlbF9wbGFuZS52MSIfCg1HZXRSdW5SZXF1ZXN0Eg4KBnJ1bl9pZBgBIAEoCSJTCh5HZXRTY2hlZHVsZWRTdGVwQ29udGV4dFJlcXVlc3QSDgoGcnVuX2lkGAEgASgJEhEKCXRocmVhZF9pZBgCIAEoCRIOCgZvcmdfaWQYAyABKAkiZwoUU2NoZWR1bGVkU3RlcENvbnRleHQSDgoGcnVuX2lkGAEgASgJEhEKCXRocmVhZF9pZBgCIAEoCRIOCgZvcmdfaWQYAyABKAkSDAoEZ29hbBgEIAEoCRIOCgZzdGF0dXMYBSABKAkiYAoPTGlzdFJ1bnNSZXF1ZXN0EhEKCXRocmVhZF9pZBgBIAEoCRIVCg1zdGF0dXNfZmlsdGVyGAIgASgJEhQKDGFmdGVyX3J1bl9pZBgDIAEoCRINCgVsaW1pdBgEIAEoDSJNChBMaXN0UnVuc1Jlc3BvbnNlEicKBHJ1bnMYASADKAsyGS5tb2RlbF9wbGFuZS52MS5SdW5EZXRhaWwSEAoIaGFzX21vcmUYAiABKAgiYwoVTGlzdFN5c3RlbVJ1bnNSZXF1ZXN0Eg4KBm9yZ19pZBgBIAEoCRIVCg1zdGF0dXNfZmlsdGVyGAIgASgJEhQKDGFmdGVyX3J1bl9pZBgDIAEoCRINCgVsaW1pdBgEIAEoDSIyChBDYW5jZWxSdW5SZXF1ZXN0Eg4KBnJ1bl9pZBgBIAEoCRIOCgZyZWFzb24YAiABKAkiJgoRQ2FuY2VsUnVuUmVzcG9uc2USEQoJY2FuY2VsbGVkGAEgASgIIkkKFlJlc29sdmVSdW5Pd25lclJlcXVlc3QSDgoGcnVuX2lkGAEgASgJEg4KBm9yZ19pZBgCIAEoCRIPCgd1c2VyX2lkGAMgASgJIi0KF1Jlc29sdmVSdW5Pd25lclJlc3BvbnNlEhIKCmF1dGhvcml6ZWQYASABKAgiTwoZUmVzb2x2ZVRocmVhZE93bmVyUmVxdWVzdBIRCgl0aHJlYWRfaWQYASABKAkSDgoGb3JnX2lkGAIgASgJEg8KB3VzZXJfaWQYAyABKAkiMAoaUmVzb2x2ZVRocmVhZE93bmVyUmVzcG9uc2USEgoKYXV0aG9yaXplZBgBIAEoCCJCCiBSZXNvbHZlUnVuQWN0aW9uQXV0aG9yaXR5UmVxdWVzdBIOCgZydW5faWQYASABKAkSDgoGb3JnX2lkGAIgASgJIusCCiFSZXNvbHZlUnVuQWN0aW9uQXV0aG9yaXR5UmVzcG9uc2USEAoIcmVzb2x2ZWQYASABKAgSDgoGcnVuX2lkGAIgASgJEg4KBm9yZ19pZBgDIAEoCRISCgpzdWJqZWN0X2lkGAQgASgJEhEKCXRocmVhZF9pZBgFIAEoCRIQCghzcGFjZV9pZBgGIAEoCRIeChZyZWNpcGllbnRfYXVkaWVuY2VfcmVmGAcgASgJEiMKG3JlY2lwaWVudF9hdWRpZW5jZV9yZXZpc2lvbhgIIAEoBBIfChdyZWNpcGllbnRfYXVkaWVuY2VfaGFzaBgJIAEoCRIaChJwcml2YWN5X3BvbGljeV9yZWYYCiABKAkSKQohdGhyZWFkX3Jlc291cmNlX2F1dGhvcml6YXRpb25fcmVmGAsgASgJEhoKEmF1dGhvcml0eV9yZXZpc2lvbhgMIAEoBBISCgpydW5fc3RhdHVzGA0gASgJIu4BCiRSZXNvbHZlU2NoZWR1bGVkU3RlcEF1dGhvcml0eVJlcXVlc3QSDgoGcnVuX2lkGAEgASgJEhEKCXRocmVhZF9pZBgCIAEoCRIOCgZvcmdfaWQYAyABKAkSEwoLc2NoZWR1bGVfaWQYBCABKAkSEAoIZmlyZV9rZXkYBSABKAkSFwoPdGVtcGxhdGVfZGlnZXN0GAYgASgJEhUKDXBvbGljeV9kaWdlc3QYByABKAkSDwoHc3RlcF9pZBgIIAEoCRISCgpzdGVwX2luZGV4GAkgASgNEhcKD2lkZW1wb3RlbmN5X2tleRgKIAEoCSK7AgolUmVzb2x2ZVNjaGVkdWxlZFN0ZXBBdXRob3JpdHlSZXNwb25zZRIQCghyZXNvbHZlZBgBIAEoCBIOCgZydW5faWQYAiABKAkSEQoJdGhyZWFkX2lkGAMgASgJEg4KBm9yZ19pZBgEIAEoCRISCgpzdWJqZWN0X2lkGAUgASgJEhAKCHNwYWNlX2lkGAYgASgJEhMKC3NjaGVkdWxlX2lkGAcgASgJEhAKCGZpcmVfa2V5GAggASgJEhcKD3RlbXBsYXRlX2RpZ2VzdBgJIAEoCRIVCg1wb2xpY3lfZGlnZXN0GAogASgJEg8KB3N0ZXBfaWQYCyABKAkSEgoKc3RlcF9pbmRleBgMIAEoDRIXCg9pZGVtcG90ZW5jeV9rZXkYDSABKAkSEgoKcnVuX3N0YXR1cxgOIAEoCSKTAwoJUnVuRGV0YWlsEg4KBnJ1bl9pZBgBIAEoCRIRCgl0aHJlYWRfaWQYAiABKAkSFQoNcGFyZW50X3J1bl9pZBgDIAEoCRIQCghhZ2VudF9pZBgEIAEoCRIOCgZzdGF0dXMYBSABKAkSDAoEbW9kZRgGIAEoCRIMCgRnb2FsGAcgASgJEhQKDGZpbmFsX291dHB1dBgIIAEoCRINCgVlcnJvchgJIAEoCRIYChBjaGVja3BvaW50X2luZGV4GAogASgNEhcKD3N0ZXBzX2NvbXBsZXRlZBgLIAEoDRIUCgxpbnB1dF90b2tlbnMYDCABKA0SFQoNb3V0cHV0X3Rva2VucxgNIAEoDRIuCgpjcmVhdGVkX2F0GA4gASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcBIuCgp1cGRhdGVkX2F0GA8gASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcBIpCghtZXRhZGF0YRgQIAEoCzIXLmdvb2dsZS5wcm90b2J1Zi5TdHJ1Y3QqkwEKDEF1dG9ub215UnVuZxIdChlBVVRPTk9NWV9SVU5HX1VOU1BFQ0lGSUVEEAASGwoXQVVUT05PTVlfUlVOR19SRUFEX09OTFkQARIhCh1BVVRPTk9NWV9SVU5HX1dPUktTUEFDRV9XUklURRACEiQKIEFVVE9OT01ZX1JVTkdfREFOR0VSX0ZVTExfQUNDRVNTEAMyoAcKClJ1blNlcnZpY2USQgoGR2V0UnVuEh0ubW9kZWxfcGxhbmUudjEuR2V0UnVuUmVxdWVzdBoZLm1vZGVsX3BsYW5lLnYxLlJ1bkRldGFpbBJvChdHZXRTY2hlZHVsZWRTdGVwQ29udGV4dBIuLm1vZGVsX3BsYW5lLnYxLkdldFNjaGVkdWxlZFN0ZXBDb250ZXh0UmVxdWVzdBokLm1vZGVsX3BsYW5lLnYxLlNjaGVkdWxlZFN0ZXBDb250ZXh0Ek0KCExpc3RSdW5zEh8ubW9kZWxfcGxhbmUudjEuTGlzdFJ1bnNSZXF1ZXN0GiAubW9kZWxfcGxhbmUudjEuTGlzdFJ1bnNSZXNwb25zZRJQCglDYW5jZWxSdW4SIC5tb2RlbF9wbGFuZS52MS5DYW5jZWxSdW5SZXF1ZXN0GiEubW9kZWxfcGxhbmUudjEuQ2FuY2VsUnVuUmVzcG9uc2USWQoOTGlzdFN5c3RlbVJ1bnMSJS5tb2RlbF9wbGFuZS52MS5MaXN0U3lzdGVtUnVuc1JlcXVlc3QaIC5tb2RlbF9wbGFuZS52MS5MaXN0UnVuc1Jlc3BvbnNlEmIKD1Jlc29sdmVSdW5Pd25lchImLm1vZGVsX3BsYW5lLnYxLlJlc29sdmVSdW5Pd25lclJlcXVlc3QaJy5tb2RlbF9wbGFuZS52MS5SZXNvbHZlUnVuT3duZXJSZXNwb25zZRJrChJSZXNvbHZlVGhyZWFkT3duZXISKS5tb2RlbF9wbGFuZS52MS5SZXNvbHZlVGhyZWFkT3duZXJSZXF1ZXN0GioubW9kZWxfcGxhbmUudjEuUmVzb2x2ZVRocmVhZE93bmVyUmVzcG9uc2USgAEKGVJlc29sdmVSdW5BY3Rpb25BdXRob3JpdHkSMC5tb2RlbF9wbGFuZS52MS5SZXNvbHZlUnVuQWN0aW9uQXV0aG9yaXR5UmVxdWVzdBoxLm1vZGVsX3BsYW5lLnYxLlJlc29sdmVSdW5BY3Rpb25BdXRob3JpdHlSZXNwb25zZRKMAQodUmVzb2x2ZVNjaGVkdWxlZFN0ZXBBdXRob3JpdHkSNC5tb2RlbF9wbGFuZS52MS5SZXNvbHZlU2NoZWR1bGVkU3RlcEF1dGhvcml0eVJlcXVlc3QaNS5tb2RlbF9wbGFuZS52MS5SZXNvbHZlU2NoZWR1bGVkU3RlcEF1dGhvcml0eVJlc3BvbnNlQrEBChJjb20ubW9kZWxfcGxhbmUudjFCCVJ1bnNQcm90b1ABWjtnaXRodWIuY29tL3RyaW9kZWxhYi9tb2RlbC1wbGFuZS9nZW4vZ28vbW9kZWxfcGxhbmUvdjE7bXB2MaICA01YWKoCDU1vZGVsUGxhbmUuVjHKAg1Nb2RlbFBsYW5lXFYx4gIZTW9kZWxQbGFuZVxWMVxHUEJNZXRhZGF0YeoCDk1vZGVsUGxhbmU6OlYxYgZwcm90bzM", [file_google_protobuf_timestamp, file_google_protobuf_struct]);
+  fileDesc("Chltb2RlbF9wbGFuZS92MS9ydW5zLnByb3RvEg5tb2RlbF9wbGFuZS52MSIfCg1HZXRSdW5SZXF1ZXN0Eg4KBnJ1bl9pZBgBIAEoCSJTCh5HZXRTY2hlZHVsZWRTdGVwQ29udGV4dFJlcXVlc3QSDgoGcnVuX2lkGAEgASgJEhEKCXRocmVhZF9pZBgCIAEoCRIOCgZvcmdfaWQYAyABKAkitAEKFFNjaGVkdWxlZFN0ZXBDb250ZXh0Eg4KBnJ1bl9pZBgBIAEoCRIRCgl0aHJlYWRfaWQYAiABKAkSDgoGb3JnX2lkGAMgASgJEgwKBGdvYWwYBCABKAkSDgoGc3RhdHVzGAUgASgJEhUKDWNvbnRyYWN0X2pzb24YBiABKAkSFwoPY29udHJhY3RfZGlnZXN0GAcgASgJEhsKE2NvbnRyYWN0X2V4cGlyZXNfYXQYCCABKAkitgEKD0xpc3RSdW5zUmVxdWVzdBIRCgl0aHJlYWRfaWQYASABKAkSFQoNc3RhdHVzX2ZpbHRlchgCIAEoCRIUCgxhZnRlcl9ydW5faWQYAyABKAkSDQoFbGltaXQYBCABKA0SEAoIc3BhY2VfaWQYBSABKAkSHwoXc3BhY2VfcmVhZF9kZWNpc2lvbl9yZWYYBiABKAkSIQoZc3BhY2VfcmVhZF9kZWNpc2lvbl90b2tlbhgHIAEoCSJNChBMaXN0UnVuc1Jlc3BvbnNlEicKBHJ1bnMYASADKAsyGS5tb2RlbF9wbGFuZS52MS5SdW5EZXRhaWwSEAoIaGFzX21vcmUYAiABKAgiYwoVTGlzdFN5c3RlbVJ1bnNSZXF1ZXN0Eg4KBm9yZ19pZBgBIAEoCRIVCg1zdGF0dXNfZmlsdGVyGAIgASgJEhQKDGFmdGVyX3J1bl9pZBgDIAEoCRINCgVsaW1pdBgEIAEoDSIyChBDYW5jZWxSdW5SZXF1ZXN0Eg4KBnJ1bl9pZBgBIAEoCRIOCgZyZWFzb24YAiABKAkiOgoRQ2FuY2VsUnVuUmVzcG9uc2USEQoJY2FuY2VsbGVkGAEgASgIEhIKCnJlY2VpcHRfaWQYAiABKAkiSQoWUmVzb2x2ZVJ1bk93bmVyUmVxdWVzdBIOCgZydW5faWQYASABKAkSDgoGb3JnX2lkGAIgASgJEg8KB3VzZXJfaWQYAyABKAkiLQoXUmVzb2x2ZVJ1bk93bmVyUmVzcG9uc2USEgoKYXV0aG9yaXplZBgBIAEoCCJPChlSZXNvbHZlVGhyZWFkT3duZXJSZXF1ZXN0EhEKCXRocmVhZF9pZBgBIAEoCRIOCgZvcmdfaWQYAiABKAkSDwoHdXNlcl9pZBgDIAEoCSIwChpSZXNvbHZlVGhyZWFkT3duZXJSZXNwb25zZRISCgphdXRob3JpemVkGAEgASgIIkIKIFJlc29sdmVSdW5BY3Rpb25BdXRob3JpdHlSZXF1ZXN0Eg4KBnJ1bl9pZBgBIAEoCRIOCgZvcmdfaWQYAiABKAki6wIKIVJlc29sdmVSdW5BY3Rpb25BdXRob3JpdHlSZXNwb25zZRIQCghyZXNvbHZlZBgBIAEoCBIOCgZydW5faWQYAiABKAkSDgoGb3JnX2lkGAMgASgJEhIKCnN1YmplY3RfaWQYBCABKAkSEQoJdGhyZWFkX2lkGAUgASgJEhAKCHNwYWNlX2lkGAYgASgJEh4KFnJlY2lwaWVudF9hdWRpZW5jZV9yZWYYByABKAkSIwobcmVjaXBpZW50X2F1ZGllbmNlX3JldmlzaW9uGAggASgEEh8KF3JlY2lwaWVudF9hdWRpZW5jZV9oYXNoGAkgASgJEhoKEnByaXZhY3lfcG9saWN5X3JlZhgKIAEoCRIpCiF0aHJlYWRfcmVzb3VyY2VfYXV0aG9yaXphdGlvbl9yZWYYCyABKAkSGgoSYXV0aG9yaXR5X3JldmlzaW9uGAwgASgEEhIKCnJ1bl9zdGF0dXMYDSABKAki7gEKJFJlc29sdmVTY2hlZHVsZWRTdGVwQXV0aG9yaXR5UmVxdWVzdBIOCgZydW5faWQYASABKAkSEQoJdGhyZWFkX2lkGAIgASgJEg4KBm9yZ19pZBgDIAEoCRITCgtzY2hlZHVsZV9pZBgEIAEoCRIQCghmaXJlX2tleRgFIAEoCRIXCg90ZW1wbGF0ZV9kaWdlc3QYBiABKAkSFQoNcG9saWN5X2RpZ2VzdBgHIAEoCRIPCgdzdGVwX2lkGAggASgJEhIKCnN0ZXBfaW5kZXgYCSABKA0SFwoPaWRlbXBvdGVuY3lfa2V5GAogASgJIvECCiVSZXNvbHZlU2NoZWR1bGVkU3RlcEF1dGhvcml0eVJlc3BvbnNlEhAKCHJlc29sdmVkGAEgASgIEg4KBnJ1bl9pZBgCIAEoCRIRCgl0aHJlYWRfaWQYAyABKAkSDgoGb3JnX2lkGAQgASgJEhIKCnN1YmplY3RfaWQYBSABKAkSEAoIc3BhY2VfaWQYBiABKAkSEwoLc2NoZWR1bGVfaWQYByABKAkSEAoIZmlyZV9rZXkYCCABKAkSFwoPdGVtcGxhdGVfZGlnZXN0GAkgASgJEhUKDXBvbGljeV9kaWdlc3QYCiABKAkSDwoHc3RlcF9pZBgLIAEoCRISCgpzdGVwX2luZGV4GAwgASgNEhcKD2lkZW1wb3RlbmN5X2tleRgNIAEoCRISCgpydW5fc3RhdHVzGA4gASgJEhcKD2NvbnRyYWN0X2RpZ2VzdBgPIAEoCRIbChNjb250cmFjdF9leHBpcmVzX2F0GBAgASgJIrsDCglSdW5EZXRhaWwSDgoGcnVuX2lkGAEgASgJEhEKCXRocmVhZF9pZBgCIAEoCRIVCg1wYXJlbnRfcnVuX2lkGAMgASgJEhAKCGFnZW50X2lkGAQgASgJEg4KBnN0YXR1cxgFIAEoCRIMCgRtb2RlGAYgASgJEgwKBGdvYWwYByABKAkSFAoMZmluYWxfb3V0cHV0GAggASgJEg0KBWVycm9yGAkgASgJEhgKEGNoZWNrcG9pbnRfaW5kZXgYCiABKA0SFwoPc3RlcHNfY29tcGxldGVkGAsgASgNEhQKDGlucHV0X3Rva2VucxgMIAEoDRIVCg1vdXRwdXRfdG9rZW5zGA0gASgNEi4KCmNyZWF0ZWRfYXQYDiABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wEi4KCnVwZGF0ZWRfYXQYDyABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wEikKCG1ldGFkYXRhGBAgASgLMhcuZ29vZ2xlLnByb3RvYnVmLlN0cnVjdBIRCglyZXN1bWFibGUYESABKAgSEwoLcGFya19yZWFzb24YEiABKAkicwoOUnVuQ29udGV4dFBhcnQSLgoFc3RhdGUYASABKA4yHy5tb2RlbF9wbGFuZS52MS5SdW5Db250ZXh0U3RhdGUSEAoIaW5jbHVkZWQYAiABKA0SDwoHb21pdHRlZBgDIAEoDRIOCgZyZWFzb24YBCABKAkiqQEKEFJ1bkNvbnRleHRTdGF0dXMSNAoMaW5zdHJ1Y3Rpb25zGAEgASgLMh4ubW9kZWxfcGxhbmUudjEuUnVuQ29udGV4dFBhcnQSLwoHaGlzdG9yeRgCIAEoCzIeLm1vZGVsX3BsYW5lLnYxLlJ1bkNvbnRleHRQYXJ0Ei4KBm1lbW9yeRgDIAEoCzIeLm1vZGVsX3BsYW5lLnYxLlJ1bkNvbnRleHRQYXJ0KpMBCgxBdXRvbm9teVJ1bmcSHQoZQVVUT05PTVlfUlVOR19VTlNQRUNJRklFRBAAEhsKF0FVVE9OT01ZX1JVTkdfUkVBRF9PTkxZEAESIQodQVVUT05PTVlfUlVOR19XT1JLU1BBQ0VfV1JJVEUQAhIkCiBBVVRPTk9NWV9SVU5HX0RBTkdFUl9GVUxMX0FDQ0VTUxADKt4BCg9SdW5Db250ZXh0U3RhdGUSIQodUlVOX0NPTlRFWFRfU1RBVEVfVU5TUEVDSUZJRUQQABIeChpSVU5fQ09OVEVYVF9TVEFURV9JTkNMVURFRBABEh8KG1JVTl9DT05URVhUX1NUQVRFX1RSVU5DQVRFRBACEhsKF1JVTl9DT05URVhUX1NUQVRFX0VNUFRZEAMSJwojUlVOX0NPTlRFWFRfU1RBVEVfU0tJUFBFRF9CWV9QT0xJQ1kQBBIhCh1SVU5fQ09OVEVYVF9TVEFURV9VTkFWQUlMQUJMRRAFMqAHCgpSdW5TZXJ2aWNlEkIKBkdldFJ1bhIdLm1vZGVsX3BsYW5lLnYxLkdldFJ1blJlcXVlc3QaGS5tb2RlbF9wbGFuZS52MS5SdW5EZXRhaWwSbwoXR2V0U2NoZWR1bGVkU3RlcENvbnRleHQSLi5tb2RlbF9wbGFuZS52MS5HZXRTY2hlZHVsZWRTdGVwQ29udGV4dFJlcXVlc3QaJC5tb2RlbF9wbGFuZS52MS5TY2hlZHVsZWRTdGVwQ29udGV4dBJNCghMaXN0UnVucxIfLm1vZGVsX3BsYW5lLnYxLkxpc3RSdW5zUmVxdWVzdBogLm1vZGVsX3BsYW5lLnYxLkxpc3RSdW5zUmVzcG9uc2USUAoJQ2FuY2VsUnVuEiAubW9kZWxfcGxhbmUudjEuQ2FuY2VsUnVuUmVxdWVzdBohLm1vZGVsX3BsYW5lLnYxLkNhbmNlbFJ1blJlc3BvbnNlElkKDkxpc3RTeXN0ZW1SdW5zEiUubW9kZWxfcGxhbmUudjEuTGlzdFN5c3RlbVJ1bnNSZXF1ZXN0GiAubW9kZWxfcGxhbmUudjEuTGlzdFJ1bnNSZXNwb25zZRJiCg9SZXNvbHZlUnVuT3duZXISJi5tb2RlbF9wbGFuZS52MS5SZXNvbHZlUnVuT3duZXJSZXF1ZXN0GicubW9kZWxfcGxhbmUudjEuUmVzb2x2ZVJ1bk93bmVyUmVzcG9uc2USawoSUmVzb2x2ZVRocmVhZE93bmVyEikubW9kZWxfcGxhbmUudjEuUmVzb2x2ZVRocmVhZE93bmVyUmVxdWVzdBoqLm1vZGVsX3BsYW5lLnYxLlJlc29sdmVUaHJlYWRPd25lclJlc3BvbnNlEoABChlSZXNvbHZlUnVuQWN0aW9uQXV0aG9yaXR5EjAubW9kZWxfcGxhbmUudjEuUmVzb2x2ZVJ1bkFjdGlvbkF1dGhvcml0eVJlcXVlc3QaMS5tb2RlbF9wbGFuZS52MS5SZXNvbHZlUnVuQWN0aW9uQXV0aG9yaXR5UmVzcG9uc2USjAEKHVJlc29sdmVTY2hlZHVsZWRTdGVwQXV0aG9yaXR5EjQubW9kZWxfcGxhbmUudjEuUmVzb2x2ZVNjaGVkdWxlZFN0ZXBBdXRob3JpdHlSZXF1ZXN0GjUubW9kZWxfcGxhbmUudjEuUmVzb2x2ZVNjaGVkdWxlZFN0ZXBBdXRob3JpdHlSZXNwb25zZUKxAQoSY29tLm1vZGVsX3BsYW5lLnYxQglSdW5zUHJvdG9QAVo7Z2l0aHViLmNvbS90cmlvZGVsYWIvbW9kZWwtcGxhbmUvZ2VuL2dvL21vZGVsX3BsYW5lL3YxO21wdjGiAgNNWFiqAg1Nb2RlbFBsYW5lLlYxygINTW9kZWxQbGFuZVxWMeICGU1vZGVsUGxhbmVcVjFcR1BCTWV0YWRhdGHqAg5Nb2RlbFBsYW5lOjpWMWIGcHJvdG8z", [file_google_protobuf_timestamp, file_google_protobuf_struct]);
 
 /**
  * @generated from message model_plane.v1.GetRunRequest
@@ -88,6 +88,24 @@ export type ScheduledStepContext = Message<"model_plane.v1.ScheduledStepContext"
    * @generated from field: string status = 5;
    */
   status: string;
+
+  /**
+   * Stored-consent contract for this scheduled step (WS20 S5). Empty when the
+   * schedule has no contract; the digest and expiry are re-verified per step.
+   *
+   * @generated from field: string contract_json = 6;
+   */
+  contractJson: string;
+
+  /**
+   * @generated from field: string contract_digest = 7;
+   */
+  contractDigest: string;
+
+  /**
+   * @generated from field: string contract_expires_at = 8;
+   */
+  contractExpiresAt: string;
 };
 
 /**
@@ -102,7 +120,8 @@ export const ScheduledStepContextSchema: GenMessage<ScheduledStepContext> = /*@_
  */
 export type ListRunsRequest = Message<"model_plane.v1.ListRunsRequest"> & {
   /**
-   * Thread to list runs for.
+   * Thread to list runs for. Required UNLESS a Space read decision is supplied
+   * below, in which case it is an optional extra narrowing within that Space.
    *
    * @generated from field: string thread_id = 1;
    */
@@ -128,6 +147,33 @@ export type ListRunsRequest = Message<"model_plane.v1.ListRunsRequest"> & {
    * @generated from field: uint32 limit = 4;
    */
   limit: number;
+
+  /**
+   * Optional Control-issued authority to read a SHARED Space's record, the
+   * same `model.thread.read` decision the conversation read takes.
+   *
+   * Reused rather than given its own permission on purpose: the runs this
+   * returns are exactly the runs of the threads that decision already admits,
+   * so it grants no reach the caller did not already have on the conversation.
+   * Session Core enforces that by listing runs THROUGH those threads rather
+   * than by trusting `space_id` as a filter.
+   *
+   * Without it this listing is unchanged: `thread_id` is required and the
+   * caller must own the thread.
+   *
+   * @generated from field: string space_id = 5;
+   */
+  spaceId: string;
+
+  /**
+   * @generated from field: string space_read_decision_ref = 6;
+   */
+  spaceReadDecisionRef: string;
+
+  /**
+   * @generated from field: string space_read_decision_token = 7;
+   */
+  spaceReadDecisionToken: string;
 };
 
 /**
@@ -240,6 +286,15 @@ export type CancelRunResponse = Message<"model_plane.v1.CancelRunResponse"> & {
    * @generated from field: bool cancelled = 1;
    */
   cancelled: boolean;
+
+  /**
+   * Identifier of the durable RUN_CANCELLED event when the cancellation was
+   * recorded. Empty is allowed for an idempotent request against a legacy
+   * already-terminal run that predates cancellation receipts.
+   *
+   * @generated from field: string receipt_id = 2;
+   */
+  receiptId: string;
 };
 
 /**
@@ -585,6 +640,19 @@ export type ResolveScheduledStepAuthorityResponse = Message<"model_plane.v1.Reso
    * @generated from field: string run_status = 14;
    */
   runStatus: string;
+
+  /**
+   * Control-signed contract digest and expiry for this scheduled step (WS20 S5).
+   * Empty for a schedule without a contract.
+   *
+   * @generated from field: string contract_digest = 15;
+   */
+  contractDigest: string;
+
+  /**
+   * @generated from field: string contract_expires_at = 16;
+   */
+  contractExpiresAt: string;
 };
 
 /**
@@ -707,6 +775,26 @@ export type RunDetail = Message<"model_plane.v1.RunDetail"> & {
    * @generated from field: google.protobuf.Struct metadata = 16;
    */
   metadata?: JsonObject | undefined;
+
+  /**
+   * True when a continuation can claim this run's durable loop fold now: the
+   * loop is paused for an approval or parked, the fold store is on, and the run
+   * is persistent and not ended. A flag only; the fold never appears on this
+   * message. Owner: WS03 durable loop.
+   *
+   * @generated from field: bool resumable = 17;
+   */
+  resumable: boolean;
+
+  /**
+   * Why the run is parked. Set only while resumable and parked; one closed
+   * token: credential_window, provider_exhausted, upstream_unavailable,
+   * crash_interrupted or reauth_required (mp_contracts::loop_fold::ParkReason).
+   * Owner: WS03 durable loop.
+   *
+   * @generated from field: string park_reason = 18;
+   */
+  parkReason: string;
 };
 
 /**
@@ -715,6 +803,83 @@ export type RunDetail = Message<"model_plane.v1.RunDetail"> & {
  */
 export const RunDetailSchema: GenMessage<RunDetail> = /*@__PURE__*/
   messageDesc(file_model_plane_v1_runs, 16);
+
+/**
+ * The assembly outcome of one part of the run context.
+ *
+ * @generated from message model_plane.v1.RunContextPart
+ */
+export type RunContextPart = Message<"model_plane.v1.RunContextPart"> & {
+  /**
+   * How the part was assembled.
+   *
+   * @generated from field: model_plane.v1.RunContextState state = 1;
+   */
+  state: RunContextState;
+
+  /**
+   * Items included (the unit is part specific: messages for history).
+   *
+   * @generated from field: uint32 included = 2;
+   */
+  included: number;
+
+  /**
+   * Items left out by a cap.
+   *
+   * @generated from field: uint32 omitted = 3;
+   */
+  omitted: number;
+
+  /**
+   * A closed token (for example "zdr", "memory_off", "cap"); never content.
+   *
+   * @generated from field: string reason = 4;
+   */
+  reason: string;
+};
+
+/**
+ * Describes the message model_plane.v1.RunContextPart.
+ * Use `create(RunContextPartSchema)` to create a new message.
+ */
+export const RunContextPartSchema: GenMessage<RunContextPart> = /*@__PURE__*/
+  messageDesc(file_model_plane_v1_runs, 17);
+
+/**
+ * How a run's context was assembled, per part. Counts and closed tokens only.
+ *
+ * @generated from message model_plane.v1.RunContextStatus
+ */
+export type RunContextStatus = Message<"model_plane.v1.RunContextStatus"> & {
+  /**
+   * The composed authored instructions (platform, org, Space, persona).
+   *
+   * @generated from field: model_plane.v1.RunContextPart instructions = 1;
+   */
+  instructions?: RunContextPart | undefined;
+
+  /**
+   * The bounded prior turns of the thread.
+   *
+   * @generated from field: model_plane.v1.RunContextPart history = 2;
+   */
+  history?: RunContextPart | undefined;
+
+  /**
+   * The prefetched memory block.
+   *
+   * @generated from field: model_plane.v1.RunContextPart memory = 3;
+   */
+  memory?: RunContextPart | undefined;
+};
+
+/**
+ * Describes the message model_plane.v1.RunContextStatus.
+ * Use `create(RunContextStatusSchema)` to create a new message.
+ */
+export const RunContextStatusSchema: GenMessage<RunContextStatus> = /*@__PURE__*/
+  messageDesc(file_model_plane_v1_runs, 18);
 
 /**
  * AutonomyRung — how much a run is permitted to do, as a strictly ordered
@@ -770,6 +935,61 @@ export enum AutonomyRung {
  */
 export const AutonomyRungSchema: GenEnum<AutonomyRung> = /*@__PURE__*/
   enumDesc(file_model_plane_v1_runs, 0);
+
+/**
+ * How one part of a run's context was assembled.
+ *
+ * @generated from enum model_plane.v1.RunContextState
+ */
+export enum RunContextState {
+  /**
+   * Not stated (an older gateway).
+   *
+   * @generated from enum value: RUN_CONTEXT_STATE_UNSPECIFIED = 0;
+   */
+  UNSPECIFIED = 0,
+
+  /**
+   * Included in full.
+   *
+   * @generated from enum value: RUN_CONTEXT_STATE_INCLUDED = 1;
+   */
+  INCLUDED = 1,
+
+  /**
+   * Included, but cut to a cap; see `omitted`.
+   *
+   * @generated from enum value: RUN_CONTEXT_STATE_TRUNCATED = 2;
+   */
+  TRUNCATED = 2,
+
+  /**
+   * Nothing to include (no instructions authored, no prior turns, no memory).
+   *
+   * @generated from enum value: RUN_CONTEXT_STATE_EMPTY = 3;
+   */
+  EMPTY = 3,
+
+  /**
+   * Withheld by policy (zero data retention, memory paused or off, Space scope).
+   *
+   * @generated from enum value: RUN_CONTEXT_STATE_SKIPPED_BY_POLICY = 4;
+   */
+  SKIPPED_BY_POLICY = 4,
+
+  /**
+   * Could not be assembled (the loader failed or timed out); the run proceeds without it.
+   *
+   * @generated from enum value: RUN_CONTEXT_STATE_UNAVAILABLE = 5;
+   */
+  UNAVAILABLE = 5,
+}
+
+/**
+ * Describes the enum model_plane.v1.RunContextState.
+ */
+export const RunContextStateSchema: GenEnum<RunContextState> = /*@__PURE__*/
+  enumDesc(file_model_plane_v1_runs, 1);
 
 /**
  * RunService — query and manage run lifecycle.

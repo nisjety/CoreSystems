@@ -254,3 +254,76 @@ describe('org ZDR switch on the security page is gated on an attested provider',
     await waitFor(() => expect(isDisabled(zdrSwitch())).toBe(true))
   })
 })
+
+// WS05-S1: the Recent security events panel follows the audit read split. audit-core and the
+// gateway enforce it from the signed org role; the page only chooses which request to make
+// and says which view it is showing.
+describe('recent security events follow the role-gated audit read', () => {
+  afterEach(() => {
+    cleanup()
+    clearSession()
+    vi.unstubAllGlobals()
+  })
+
+  const ORG_ROWS = [
+    { id: 1, event: 'member.removed', outcome: 'ok', user_id: 'someone_else', occurred_at: '2026-10-01T10:00:00Z' },
+    { id: 2, event: 'sso.updated', outcome: 'ok', user_id: 'owner_1', occurred_at: '2026-10-01T11:00:00Z' },
+  ]
+  const OWN_ROWS = [
+    { id: 3, event: 'login.success', outcome: 'ok', user_id: 'member_1', occurred_at: '2026-10-01T12:00:00Z' },
+  ]
+  const OWN_EVENTS_NOTE = /Viser bare dine egne hendelser\./
+
+  function stubAuditGateway(): string[] {
+    const auditRequests: string[] = []
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const path = String(input)
+      if (path.startsWith('/api/v1/audit')) {
+        auditRequests.push(path)
+        const own = new URL(path, 'http://localhost').searchParams.get('user_id') === 'member_1'
+        return json({ data: own ? OWN_ROWS : ORG_ROWS, meta: { count: 1, scope: own ? 'self' : 'org' }, error: null })
+      }
+      if (path === '/api/v1/orgs/org_1') {
+        return json({ id: 'org_1', name: 'Acme', metadata: { interactiveRetention: { zdr: false }, supportAi: { mode: 'review' } } })
+      }
+      if (path === '/api/v1/orgs/org_1/entitlements') return json({ organization_id: 'org_1', entitlements: [] })
+      if (path === '/api/v1/models') return json(catalogue(NOTHING_ATTESTED))
+      return json({})
+    }))
+    return auditRequests
+  }
+
+  it('a member sees only their own events, with the note, and asks for their own user_id', async () => {
+    setSessionUser({ id: 'member_1', email: 'member@example.com', name: 'Member', emailVerified: true })
+    flush()
+    markSessionOnboardingComplete({ id: 'org_1', name: 'Acme', role: 'member' })
+    flush()
+    const auditRequests = stubAuditGateway()
+
+    render(() => <VerevonWorkspaceSettingsPage section="org-security" />)
+
+    expect(await screen.findByText(/login\.success/)).toBeTruthy()
+    expect(screen.getByText(OWN_EVENTS_NOTE)).toBeTruthy()
+    expect(screen.queryByText(/member\.removed/)).toBeNull()
+    expect(screen.queryByText(/sso\.updated/)).toBeNull()
+    expect(auditRequests.length).toBeGreaterThan(0)
+    for (const request of auditRequests) {
+      expect(new URL(request, 'http://localhost').searchParams.get('user_id')).toBe('member_1')
+    }
+  })
+
+  it('an admin sees the org events, without the own-events note and without a user_id filter', async () => {
+    signInAsOrgOwner()
+    const auditRequests = stubAuditGateway()
+
+    render(() => <VerevonWorkspaceSettingsPage section="org-security" />)
+
+    expect(await screen.findByText(/member\.removed/)).toBeTruthy()
+    expect(screen.getByText(/sso\.updated/)).toBeTruthy()
+    expect(screen.queryByText(OWN_EVENTS_NOTE)).toBeNull()
+    expect(auditRequests.length).toBeGreaterThan(0)
+    for (const request of auditRequests) {
+      expect(new URL(request, 'http://localhost').searchParams.has('user_id')).toBe(false)
+    }
+  })
+})

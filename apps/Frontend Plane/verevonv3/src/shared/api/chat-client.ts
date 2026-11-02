@@ -9,6 +9,7 @@ import {
 import { readSseStream, type SseEvent } from './sse'
 import { createDeltaCoalescer, type DeltaCoalescer } from './delta-coalescer'
 import type { ChatEventPayloads } from './chat-event-payloads.generated'
+import { isSpaceDenial } from './space-denials'
 import { isZdrCode } from './zdr-refusals'
 import { normalizeConnectorScope } from '@/shared/actions/chat-connector-scope'
 import {
@@ -90,6 +91,13 @@ export type ChatInvokeRequest = {
    * exchanges this selection for a Control-signed, effect-bound decision. */
   spaceRef?: string
   /**
+   * The viewer's interface language (WS16-S6), a plain framing hint for the model on a Space turn.
+   * Request-scoped: the gateway maps `no` to `nb-NO` and `en` to `en-US` (anything else is dropped,
+   * and the field is removed while its flag is off) and model-gateway never stores it. It decides
+   * nothing about access.
+   */
+  locale?: 'no' | 'en'
+  /**
    * The Control `subject_id` of a Space agent addressed by `@` mention this
    * turn (`docs/space-defenition.md`, "Invocation rule"). The gateway is the
    * one that decides whether this agent may actually answer — it re-resolves
@@ -98,6 +106,13 @@ export type ChatInvokeRequest = {
    * silently ignored or silently granted. Meaningless without `spaceRef`.
    */
   mentionedAgentRef?: string
+  /**
+   * WS08: wake the one agent in `mentionedAgentRef` from a stored human post. `messageId` names the
+   * post (the trigger; its text must be this request's `content`) and `clientWakeId` is this wake's
+   * own retry identity. Needs `threadId`. The gateway signs and Session Core verifies the wake; the
+   * browser only names the post.
+   */
+  wake?: { messageId: string; clientWakeId: string }
   sessionKey?: string
   features?: string[]
   generateImage?: boolean
@@ -361,6 +376,12 @@ export type ChatErrorEvent = {
    * reader's language (`zdr-refusals.ts`). Absent for every other error.
    */
   feature?: string
+  /**
+   * For a typed Space denial (`space-denials.ts`): the refusal's `details`
+   * (`reason`, `resolvable_by` and the allowlisted keys), as a refused request
+   * carried them. Absent for every other error.
+   */
+  details?: Readonly<Record<string, unknown>>
 }
 export type ChatArtifactEvent = {
   id?: string
@@ -1390,7 +1411,11 @@ export function buildChatWireBody(request: ChatInvokeRequest): Record<string, un
     thread_id: threadId,
     session_key: request.sessionKey?.trim() || threadId,
     space_ref: request.spaceRef?.trim() || undefined,
+    // Narrowed inline like `retrievalScope` above: only the two known codes ever reach the wire.
+    locale: request.locale === 'no' || request.locale === 'en' ? request.locale : undefined,
     mentioned_agent_ref: request.mentionedAgentRef?.trim() || undefined,
+    // Present only on a wake, so every other body is byte-identical to what it was.
+    ...(request.wake ? { wake: { message_id: request.wake.messageId, client_wake_id: request.wake.clientWakeId } } : {}),
     // Explicit skill picks. The KEY is absent when none — not `undefined`, not
     // `[]` — so a turn that names no skill is byte-for-byte what it was before
     // this field existed.
@@ -2177,6 +2202,16 @@ function streamConnectionFailure(err: unknown, fallback: string): ChatErrorEvent
       code: err.code,
       message: err.message,
       ...(err.feature ? { feature: err.feature } : {}),
+    }
+  }
+  // A typed Space denial (a policy, entitlement, role or ZDR refusal) is the
+  // server's answer about the room, not a sign-in problem: keep its code and
+  // details so the room can say why. An untyped 403 still reads as lost access.
+  if (err instanceof ApiError && (err.status === 403 || err.status === 503) && isSpaceDenial(err)) {
+    return {
+      code: err.code ?? 'forbidden',
+      message: err.message,
+      ...(err.details ? { details: err.details } : {}),
     }
   }
   if (err instanceof ApiError && err.status === 401) {

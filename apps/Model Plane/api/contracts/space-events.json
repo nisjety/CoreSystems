@@ -1,0 +1,81 @@
+{
+  "schema": "space-events.v1",
+  "version": 1,
+  "owner": "WS02-S3",
+  "description": "The Space event stream: the SSE vocabulary served by model-gateway at GET /v1/spaces/:space_id/events (relayed by the gateway BFF at GET /api/v1/spaces/{space_ref}/events). Frames carry ids and closed words only, never message text, titles, previews or outputs. Authored by hand with the slice that serves it; pinned by space-events.json.sha256 and scripts/tests/zdr-contract-sync.test.sh. Session Core's gRPC SpaceEvents service (proto/model_plane/v1/space_events.proto) is the source of every frame.",
+  "cursor": {
+    "grammar": "<generation>.<seq>",
+    "sse_id": "Every frame that moves the position carries the cursor in the SSE id line (connected when mode is live, space_event, heartbeat, closing). cursor_too_old and error carry none.",
+    "contiguity": "seq is strictly contiguous per generation. A row the subscriber may not see is sent as a hidden stub and an erased row as redacted, so the client enforces seq == last + 1 and treats any hole as a resnapshot trigger."
+  },
+  "events": {
+    "connected": {
+      "data": ["v", "space_id", "generation", "head", "resumed", "lease_seconds", "heartbeat_seconds", "mode"],
+      "mode": ["live", "poll_only"]
+    },
+    "space_event": {
+      "data": ["v", "source", "space_id", "generation", "seq", "kind", "at", "actor", "refs"],
+      "source": ["session"],
+      "actor": {"type": ["user", "agent", "system"], "optional": ["id"]}
+    },
+    "heartbeat": {
+      "data": ["head", "generation"],
+      "every_seconds": 10
+    },
+    "cursor_too_old": {
+      "data": ["reason", "head", "generation"],
+      "reason": ["retention", "generation_changed", "ahead_of_head"]
+    },
+    "closing": {
+      "data": ["code", "reconnect", "retry_after_ms"],
+      "codes": {
+        "lease_expired": {"reconnect": true, "emitted_by": "session-core"},
+        "reauthorize": {"reconnect": true, "emitted_by": "session-core"},
+        "slow_consumer": {"reconnect": true, "emitted_by": "session-core"},
+        "membership_revoked": {"reconnect": false, "emitted_by": "session-core"},
+        "zdr_poll_only": {"reconnect": false, "emitted_by": "session-core"},
+        "server_draining": {"reconnect": true, "emitted_by": "reserved (WS02-S6)"},
+        "upstream_unavailable": {"reconnect": true, "emitted_by": "gateway BFF"},
+        "invalid_frame": {"reconnect": true, "emitted_by": "gateway BFF"}
+      }
+    },
+    "error": {
+      "data": ["error"],
+      "error": ["code", "message", "details"],
+      "codes": ["unauthorized", "space_stream_forbidden", "space_stream_unavailable"]
+    }
+  },
+  "kinds": {
+    "thread.created": {"refs": ["thread_id", "origin"]},
+    "message.appended": {"refs": ["thread_id", "message_id", "message_sequence", "role"]},
+    "thread.updated": {"refs": ["thread_id", "fields"]},
+    "thread.archived": {"refs": ["thread_id"]},
+    "thread.deleted": {"refs": ["thread_id"]},
+    "run.state_changed": {"refs": ["run_id", "thread_id", "agent_id", "parent_run_id", "state", "prev"]},
+    "hidden": {"refs": []},
+    "redacted": {"refs": []}
+  },
+  "closed_words": {
+    "run_state": ["queued", "running", "awaiting_approval", "completed", "failed", "cancelled", "other"],
+    "thread_updated_fields": ["title", "preview", "pinned", "persona"]
+  },
+  "unknown_kind": "A kind outside this registry is forwarded only as a hidden stub.",
+  "ref_keys": ["thread_id", "run_id", "message_id", "message_sequence", "role", "agent_id", "state", "prev", "origin", "fields", "parent_run_id"],
+  "http": {
+    "request_headers": ["x-space-decision-ref", "x-space-decision-token", "Last-Event-ID"],
+    "errors": {
+      "unauthorized": 401,
+      "space_stream_forbidden": 403,
+      "invalid_request": 400,
+      "space_stream_capacity": 503,
+      "space_stream_unavailable": 503
+    },
+    "note": "Not ZDR refusals: no entry in zdr-refusals.json. A ZDR caller or decision gets 200 connected{mode: poll_only} then closing{zdr_poll_only, reconnect: false} and no rows."
+  },
+  "timing": {
+    "lease_seconds": "min(decision expiry minus 10 s, 85 to 100 s jittered)",
+    "heartbeat_seconds": 10,
+    "send_timeout_seconds": 15,
+    "revocation_cache_seconds": 2
+  }
+}

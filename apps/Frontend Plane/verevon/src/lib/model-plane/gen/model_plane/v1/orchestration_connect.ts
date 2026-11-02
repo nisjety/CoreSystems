@@ -3,7 +3,7 @@
 /* eslint-disable */
 // @ts-nocheck
 
-import { AcknowledgeApprovalDeliveryRequest, AcknowledgeApprovalDeliveryResponse, AttachSubagentRequest, AttachSubagentResponse, ClaimApprovalDeliveriesRequest, ClaimApprovalDeliveriesResponse, CreateApprovalRequest, CreateApprovalResponse, DecideApprovalRequest, DecideApprovalResponse, GetApprovalContinuationRequest, GetApprovalContinuationResponse, GetApprovalRequest, GetApprovalResponse, GetPlanRequest, GetPlanResponse, GetSubagentLineageRequest, GetSubagentLineageResponse, GetTodoRequest, GetTodoResponse, ListApprovalsRequest, ListApprovalsResponse, ListPlansRequest, ListPlansResponse, ListTodosRequest, ListTodosResponse, OrchestrationEvent, OrgPendingApprovalsRequest, OrgPendingApprovalsResponse, RecordApprovalContinuationOutcomeRequest, RecordApprovalContinuationOutcomeResponse, RecordApprovalContinuationStartedRequest, RecordApprovalContinuationStartedResponse, RecordOrchestrationEventRequest, RecordOrchestrationEventResponse, StartWorkflowRequest, StartWorkflowResponse, StreamRunEventsRequest, TransitionPlanRequest, TransitionPlanResponse, TransitionTodoRequest, TransitionTodoResponse } from "./orchestration_pbjs";
+import { AcknowledgeApprovalDeliveryRequest, AcknowledgeApprovalDeliveryResponse, AnswerRunQuestionRequest, AnswerRunQuestionResponse, AttachSubagentRequest, AttachSubagentResponse, ClaimApprovalDeliveriesRequest, ClaimApprovalDeliveriesResponse, ConsumeApprovalRequest, ConsumeApprovalResponse, CreateApprovalRequest, CreateApprovalResponse, CreateRunQuestionRequest, CreateRunQuestionResponse, DecideApprovalRequest, DecideApprovalResponse, GetApprovalContinuationRequest, GetApprovalContinuationResponse, GetApprovalRequest, GetApprovalResponse, GetPlanRequest, GetPlanResponse, GetSubagentLineageRequest, GetSubagentLineageResponse, GetTodoRequest, GetTodoResponse, ListApprovalsRequest, ListApprovalsResponse, ListPlansRequest, ListPlansResponse, ListRunQuestionsRequest, ListRunQuestionsResponse, ListTodosRequest, ListTodosResponse, OrchestrationEvent, OrgPendingApprovalsRequest, OrgPendingApprovalsResponse, ProposePlanRequest, ProposePlanResponse, RecordApprovalContinuationOutcomeRequest, RecordApprovalContinuationOutcomeResponse, RecordApprovalContinuationStartedRequest, RecordApprovalContinuationStartedResponse, RecordOrchestrationEventRequest, RecordOrchestrationEventResponse, StartWorkflowRequest, StartWorkflowResponse, StreamRunEventsRequest, TransitionPlanRequest, TransitionPlanResponse, TransitionTodoRequest, TransitionTodoResponse } from "./orchestration_pbjs";
 import { MethodKind } from "@bufbuild/protobuf";
 import { GetRunProofBundleRequest, GetRunProofBundleResponse, GetVerificationMetricsRequest, GetVerificationMetricsResponse } from "./proof_bundle_pbjs";
 
@@ -49,6 +49,22 @@ export const OrchestrationCoreService = {
       name: "TransitionPlan",
       I: TransitionPlanRequest,
       O: TransitionPlanResponse,
+      kind: MethodKind.Unary,
+    },
+    /**
+     * Create a plan directly in PROPOSED state with real steps, supplied by the
+     * model via the `plan.propose` control tool during a plan-mode run
+     * (chat-wave2-specs plan-gate §2.1-2.2). Unlike the zero-step `draft` plan
+     * session-core auto-creates at run start for the retrospective execution
+     * log (`create_plan`), this is the plan a user actually reviews and edits
+     * before granting an autonomy rung.
+     *
+     * @generated from rpc model_plane.v1.OrchestrationCoreService.ProposePlan
+     */
+    proposePlan: {
+      name: "ProposePlan",
+      I: ProposePlanRequest,
+      O: ProposePlanResponse,
       kind: MethodKind.Unary,
     },
     /**
@@ -149,6 +165,20 @@ export const OrchestrationCoreService = {
       kind: MethodKind.Unary,
     },
     /**
+     * Consume a granted loop-mode approval exactly once (build plan WS03 S2). The
+     * durable Do loop that paused for the approval calls this when it re-enters, so
+     * a granted approval is executed by the loop once and never also by the cold
+     * delivery worker. Caller-scoped (user bearer), not service-only.
+     *
+     * @generated from rpc model_plane.v1.OrchestrationCoreService.ConsumeApproval
+     */
+    consumeApproval: {
+      name: "ConsumeApproval",
+      I: ConsumeApprovalRequest,
+      O: ConsumeApprovalResponse,
+      kind: MethodKind.Unary,
+    },
+    /**
      * Claim due durable approval deliveries for an authenticated internal
      * worker. Claims are tenant-scoped, leased, and opaque; the caller identity
      * is derived from its verified service credential, never from this request.
@@ -210,6 +240,44 @@ export const OrchestrationCoreService = {
       name: "AcknowledgeApprovalDelivery",
       I: AcknowledgeApprovalDeliveryRequest,
       O: AcknowledgeApprovalDeliveryResponse,
+      kind: MethodKind.Unary,
+    },
+    /**
+     * Ask the run's owner a question (build plan WS14 S3). A question is a pause
+     * kind with its own store, never an approval: an answer is information, not an
+     * authority grant, so it lives in `run_questions` and never reads as a grant.
+     * Refused for a zero-retention or waived run, and for a ZDR or waived caller.
+     *
+     * @generated from rpc model_plane.v1.OrchestrationCoreService.CreateRunQuestion
+     */
+    createRunQuestion: {
+      name: "CreateRunQuestion",
+      I: CreateRunQuestionRequest,
+      O: CreateRunQuestionResponse,
+      kind: MethodKind.Unary,
+    },
+    /**
+     * List the caller's own questions for a run. Owner-only; an overdue
+     * question is reported EXPIRED.
+     *
+     * @generated from rpc model_plane.v1.OrchestrationCoreService.ListRunQuestions
+     */
+    listRunQuestions: {
+      name: "ListRunQuestions",
+      I: ListRunQuestionsRequest,
+      O: ListRunQuestionsResponse,
+      kind: MethodKind.Unary,
+    },
+    /**
+     * Answer (or skip) a requested question once. An identical retry is an
+     * idempotent replay; a different second answer is refused.
+     *
+     * @generated from rpc model_plane.v1.OrchestrationCoreService.AnswerRunQuestion
+     */
+    answerRunQuestion: {
+      name: "AnswerRunQuestion",
+      I: AnswerRunQuestionRequest,
+      O: AnswerRunQuestionResponse,
       kind: MethodKind.Unary,
     },
     /**

@@ -39,6 +39,21 @@ const (
 	// the recipient it means, and a token leaked from one path cannot be
 	// replayed against the other.
 	ThreadReadAudienceSandboxManager = "model-plane-sandbox-manager"
+
+	// ThreadReadAudienceSpaceStream names Session Core's SpaceEvents stream
+	// (WS02) as the recipient, so the per-Space realtime tail verifies a
+	// decision that no other Model Plane read path will accept.
+	//
+	// AGAIN A THIRD AUDIENCE, NOT A THIRD ACTION: the question is still "may
+	// this member see what this Space did?", so the route, action
+	// `model.thread.read`, schema, permission and payload digest are exactly
+	// the thread-read ones and only the signed `service_audience` differs.
+	// What that buys is isolation in both directions: a stream token is refused
+	// by ListThreads and the other read paths, and a plain read token is
+	// refused by the stream, because each verifier pins its own audience.
+	// Issuance is unchanged and still gated by `thread_read_entitled` and the
+	// current recipient audience, so this widens no one's access.
+	ThreadReadAudienceSpaceStream = "model-plane-space-stream"
 )
 
 // threadReadAudiences is the closed set a caller may request. Closed rather
@@ -49,6 +64,7 @@ const (
 var threadReadAudiences = map[string]struct{}{
 	ThreadReadAudienceSessionCore:    {},
 	ThreadReadAudienceSandboxManager: {},
+	ThreadReadAudienceSpaceStream:    {},
 }
 
 // SharedThreadReadDecisionRequest carries only the operation-bound fields the
@@ -158,11 +174,15 @@ func IssueSharedThreadReadDecision(
 	if now.IsZero() {
 		return Decision{}, fmt.Errorf("shared thread read decision issuance time is required")
 	}
-	return newEvidenceDecision(
+	decision := newEvidenceDecision(
 		evidence, request.DecisionRef, request.Audience(), threadReadAction, threadReadSchema,
 		sharedThreadReadPayloadDigest(evidence, request), request.IdempotencyKey, request.Nonce,
 		[]string{"thread:read"}, evidence.Privacy.ZeroDataRetention, now,
-	), nil
+	)
+	if evidence.HistoryFloorRevision > 0 {
+		decision.HistoryFloorRevision = evidence.HistoryFloorRevision
+	}
+	return decision, nil
 }
 
 // IssueOwnScheduledThreadReadDecision authorizes one short-lived read of a

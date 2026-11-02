@@ -109,6 +109,47 @@ set_convex_env "APPLICATION_SPACE_LIFECYCLE_TOKEN" "${APPLICATION_SPACE_LIFECYCL
 # Control. Both must reach the deployment, not just this container.
 set_convex_env "APPLICATION_ORG_CORE_SERVICE_TOKEN" "${APPLICATION_ORG_CORE_SERVICE_TOKEN:-}"
 set_convex_env "CONTROL_SPACE_MEMBERSHIP_BASE_URL" "${CONTROL_SPACE_MEMBERSHIP_BASE_URL:-http://user-core:3012/api/v1/internal/spaces}"
+# WS04-S1 flag space_org_room_reconcile_sync: the 10-minute org-room roster cron
+# and the debounced org-core event hook. Off unless a compose file turns it on
+# (dev compose does; production stays off until enabled). Read by the functions
+# at handler time, so set 0 and `docker restart convex-gateway` to stop it.
+set_convex_env "SPACE_ORG_ROOM_RECONCILE" "${SPACE_ORG_ROOM_RECONCILE:-0}"
+# WS04-S5: the registration worker (spaceAudienceRegistration.ts) delivers each
+# recipient-audience snapshot to Control. Both values were previously set in no
+# compose file or here, so no shared room ever registered an audience. Control's
+# principal entry has one token, so the audience token defaults to the
+# lifecycle token. SPACE_AUDIENCE_RECONCILE is flag space_audience_reconcile_sync
+# (the reconcile action and its 10-minute cron); 0 stops it, and the last
+# registered audience stays in force.
+set_convex_env "CONTROL_SPACE_AUDIENCE_URL" "${CONTROL_SPACE_AUDIENCE_URL:-http://user-core:3012/api/v1/internal/spaces/recipient-audiences}"
+set_convex_env "APPLICATION_SPACE_AUDIENCE_TOKEN" "${APPLICATION_SPACE_AUDIENCE_TOKEN:-${APPLICATION_SPACE_LIFECYCLE_TOKEN:-}}"
+set_convex_env "SPACE_AUDIENCE_RECONCILE" "${SPACE_AUDIENCE_RECONCILE:-0}"
+# WS12-S2 flag SPACE_DM_OPEN: spaces:openDmForGateway (open-or-return a direct
+# message). Off unless a compose file turns it on; read by the function at call
+# time, so set 0 and `docker restart convex-gateway` to stop new DMs (existing
+# DMs and hides are unaffected). A rollout control only, never an authorization
+# input. DMs also need WS04-S5's audience registration on (SPACE_AUDIENCE_RECONCILE).
+set_convex_env "SPACE_DM_OPEN" "${SPACE_DM_OPEN:-0}"
+# WS12-S8 flag SPACE_REACTIONS: spaceReactions:setForGateway (message reactions: ids,
+# one emoji and a time). Off unless a compose file turns it on; read by the function at
+# call time, so set 0 and `docker restart convex-gateway` to stop new reactions (existing
+# rows stay and reads return nothing). A rollout control only, never an authorization input.
+set_convex_env "SPACE_REACTIONS" "${SPACE_REACTIONS:-0}"
+# WS11-S6 flag SPACE_ATTENTION_INGEST: spaceAttentionIngest:ingestSpaceEvent (Space
+# attention items, follows and agent activity from the MODEL_PLANE_SPACE_EVENTS
+# durable). Off unless a compose file turns it on; read by the function at call
+# time, so set it empty and `docker restart convex-gateway` to stop (events are
+# then acknowledged and dropped). A rollout control only, never an authorization
+# input. Needs Model Plane SPACE_ATTENTION_EMIT on to receive anything.
+set_convex_env "SPACE_ATTENTION_INGEST" "${SPACE_ATTENTION_INGEST:-0}"
+# WS11-S9 flag SPACE_ATTENTION_OUT_OF_APP: spaceAttentionIngest:deliverOutOfApp posts
+# a refs-only request to notification-core, signed as service id space-attention.
+# Off unless a compose file turns it on; set it empty and `docker restart
+# convex-gateway` to stop. A rollout control only, never an authorization input.
+# Needs the delegation token below and notification-core's own delivery mode.
+set_convex_env "SPACE_ATTENTION_OUT_OF_APP" "${SPACE_ATTENTION_OUT_OF_APP:-0}"
+set_convex_env "NOTIFICATION_CORE_URL" "${NOTIFICATION_CORE_URL:-}"
+set_convex_env "NOTIFICATION_SPACE_ATTENTION_SERVICE_TOKEN" "${NOTIFICATION_SPACE_ATTENTION_SERVICE_TOKEN:-}"
 
 # ─────────────────────────────────────────────────────────────────────────
 # Force-deploy functions before starting dev mode.

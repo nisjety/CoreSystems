@@ -3923,6 +3923,7 @@ async fn run_rounds(
                     // only where it is used keeps the "absent unless relevant"
                     // invariant visible at the call sites that care.
                     let reads_sandbox = call.name == "code_interpreter"
+                        || call.name == "shell"
                         || crate::process_tools::is_process_tool(&call.name)
                         || crate::workspace_tools::is_workspace_tool(&call.name);
                     let sandbox = if reads_sandbox && !ctx.req.space_id.is_empty() {
@@ -5029,6 +5030,7 @@ async fn register_delegated_child_run(
             user_id: parent.req.user_id.clone(),
             start_key: start_key.clone(),
             terminal_source: pb::ManagedRunSource::ExecutionAgent as i32,
+            wake: None,
         },
         parent.session_bearer,
     ) {
@@ -7191,6 +7193,7 @@ async fn declined_earlier_in_run(
             run_id: ctx.req.run_id.clone(),
             step_id: String::new(),
             org_id: ctx.req.org_id.clone(),
+            ..Default::default()
         },
         ctx.session_bearer,
     ) else {
@@ -7284,6 +7287,20 @@ async fn pause_for_approval(
     } else {
         String::new()
     };
+    // Build plan WS10 S3: a Space run's pause states the tool key and the digest of the call, so
+    // the agent's retry of this exact action can spend the once-approval a person grants. The
+    // digest is all that is kept of the call; a zero-retention run states neither.
+    let (gate_tool_key, gate_action_digest) = if !req.space_id.trim().is_empty()
+        && !req.zdr
+        && crate::space_gate::GateMode::from_env() != crate::space_gate::GateMode::Off
+    {
+        (
+            crate::space_gate::tool_key(tool_name).to_owned(),
+            crate::space_gate::action_digest(tool_name, tool_input),
+        )
+    } else {
+        (String::new(), String::new())
+    };
     let request = authenticated_session_request(
         pb::CreateApprovalRequest {
             // Cold (the delivery worker) unless the durable-loop switch is on, the
@@ -7310,6 +7327,21 @@ async fn pause_for_approval(
             // collapses onto the existing durable approval instead of creating
             // a duplicate via the (org_id, idempotency_key) ON CONFLICT guard.
             idempotency_key: format!("{}:{step_id}", req.run_id),
+            // The honest card (build plan WS10 S1): an allowlisted tool key and label, and
+            // what this pause expects. Only a call with a descriptor can be run by the
+            // delivery worker; everything else is a retry of the exact action.
+            tool_key: gate_tool_key,
+            action_digest: gate_action_digest,
+            turn_origin: String::new(),
+            grant_use_token: String::new(),
+            context_json: crate::space_gate::card_context_json(
+                tool_name,
+                tool_input,
+                crate::space_gate::resume_class_for(
+                    tool_name,
+                    !continuation_descriptor_json.is_empty(),
+                ),
+            ),
             continuation_descriptor_json,
             cause: Some(approval_cause::for_call(
                 cause,
@@ -7317,6 +7349,7 @@ async fn pause_for_approval(
                 tool_name,
                 tool_input,
             )),
+            ..Default::default()
         },
         bearer,
     );
@@ -7475,6 +7508,11 @@ async fn continuation_descriptor(
         "permission_mode": permission_mode,
         "action_fingerprint": action_fingerprint,
     });
+    // The Space the run belongs to, so the delivery worker knows to re-check the requester's
+    // authority with Control before it runs the action (WS10 S3). Outside the fingerprint.
+    if !req.space_id.trim().is_empty() {
+        descriptor["space_id"] = json!(req.space_id);
+    }
     if let Some((schema_sha256, payload_sha256, ticket_idempotency_key)) = ticket_binding {
         let object = descriptor
             .as_object_mut()

@@ -4590,6 +4590,20 @@ mod tests {
                 "scheduled step authority not needed in gateway test",
             ))
         }
+
+        async fn authorize_room_run_attach(
+            &self,
+            _: Request<mp_contracts::model_plane::v1::AuthorizeRoomRunAttachRequest>,
+        ) -> Result<Response<mp_contracts::model_plane::v1::AuthorizeRoomRunAttachResponse>, Status> {
+            Err(Status::unimplemented("room run attach not needed in this test"))
+        }
+
+        async fn cancel_run_as_room_manager(
+            &self,
+            _: Request<mp_contracts::model_plane::v1::CancelRunAsRoomManagerRequest>,
+        ) -> Result<Response<mp_contracts::model_plane::v1::CancelRunAsRoomManagerResponse>, Status> {
+            Err(Status::unimplemented("room run stop not needed in this test"))
+        }
     }
 
     async fn spawn_inference_client<S: InferenceCore>(

@@ -13,6 +13,18 @@ struct ApiError {
 }
 
 #[derive(Debug, Serialize)]
+struct ApiErrorWithDetailsEnvelope {
+    error: ApiErrorWithDetails,
+}
+
+#[derive(Debug, Serialize)]
+struct ApiErrorWithDetails {
+    code: &'static str,
+    message: String,
+    details: Value,
+}
+
+#[derive(Debug, Serialize)]
 struct ApiSuccessEnvelope<T> {
     data: T,
 }
@@ -59,6 +71,24 @@ pub(crate) fn error(code: &'static str, message: impl Into<String>) -> Value {
     .unwrap_or_else(|_| json!({ "error": { "code": code, "message": "Unknown error." } }))
 }
 
+/// Typed error envelope with a `details` object: `{ error: { code, message, details } }`.
+/// `details` must already be safe for the browser (no upstream URLs, tokens or internal ids).
+#[allow(dead_code, reason = "first consumer is the next Space slice (WS01-S5, WS03-S4)")]
+pub(crate) fn error_with_details(
+    code: &'static str,
+    message: impl Into<String>,
+    details: Value,
+) -> Value {
+    serde_json::to_value(ApiErrorWithDetailsEnvelope {
+        error: ApiErrorWithDetails {
+            code,
+            message: message.into(),
+            details,
+        },
+    })
+    .unwrap_or_else(|_| json!({ "error": { "code": code, "message": "Unknown error.", "details": {} } }))
+}
+
 /// Public response for transport failures. `reqwest::Error` display strings can
 /// contain configured upstream URLs, query identifiers, and internal topology;
 /// callers receive only this bounded category.
@@ -93,5 +123,22 @@ mod tests {
         );
         assert!(!body.to_string().contains("http://"));
         assert!(!body.to_string().contains("https://"));
+    }
+
+    #[test]
+    fn error_with_details_carries_the_given_details_object() {
+        let body = super::error_with_details(
+            "invalid_post",
+            "The post is not valid.",
+            json!({ "field": "content", "max_chars": 8000 }),
+        );
+        assert_eq!(body["error"]["code"], "invalid_post");
+        assert_eq!(body["error"]["message"], "The post is not valid.");
+        assert_eq!(
+            body["error"]["details"],
+            json!({ "field": "content", "max_chars": 8000 })
+        );
+        assert_eq!(body.as_object().map(|o| o.len()), Some(1));
+        assert_eq!(body["error"].as_object().map(|o| o.len()), Some(3));
     }
 }

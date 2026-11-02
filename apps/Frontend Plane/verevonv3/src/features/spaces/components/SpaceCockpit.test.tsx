@@ -1,11 +1,12 @@
 import { fireEvent, render, screen, within } from '@solidjs/testing-library'
 import { flush } from 'solid-js'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { I18nProvider, localeStorageKey } from '@/shared/i18n'
-import { SpaceCockpit } from './SpaceCockpit'
+import { SpaceCockpit, useActiveSpaceTab } from './SpaceCockpit'
 
 afterEach(() => {
+  vi.unstubAllEnvs()
   if (typeof window !== 'undefined') {
     window.location.hash = ''
     window.localStorage.removeItem(localeStorageKey)
@@ -170,5 +171,75 @@ describe('SpaceCockpit', () => {
       expect(panelId).toBeTruthy()
       expect(document.getElementById(panelId!)).toBeTruthy()
     }
+  })
+})
+
+describe('SpaceCockpit artifacts tab (WS07-S12)', () => {
+  it('shows seven tabs with the flag on, artefakter after kunnskap', () => {
+    vi.stubEnv('VITE_SPACE_ROOM_ARTIFACTS_UI', 'true')
+    render(() => <SpaceCockpit />)
+    const labels = screen.getAllByRole('tab').map((tab) => tab.textContent)
+    expect(labels).toEqual(['Samtaler', 'Arbeid', 'Kunnskap', 'Artefakter', 'Aktivitet', 'Agent', 'Medlemmer'])
+  })
+
+  it('shows six tabs and no artifacts panel when VITE_SPACE_ROOM_ARTIFACTS_UI=false', () => {
+    vi.stubEnv('VITE_SPACE_ROOM_ARTIFACTS_UI', 'false')
+    render(() => <SpaceCockpit />)
+    const labels = screen.getAllByRole('tab').map((tab) => tab.textContent)
+    expect(labels).toEqual(['Samtaler', 'Arbeid', 'Kunnskap', 'Aktivitet', 'Agent', 'Medlemmer'])
+    expect(screen.queryByRole('tab', { name: 'Artefakter' })).toBeNull()
+    expect(document.getElementById('space-panel-artefakter')).toBeNull()
+  })
+
+  it('lets a panel built from the tabs prop see useActiveSpaceTab() change on tab select', () => {
+    vi.stubEnv('VITE_SPACE_ROOM_ARTIFACTS_UI', 'true')
+    const Probe = () => {
+      const active = useActiveSpaceTab()
+      return <p data-testid="active-tab">{active()}</p>
+    }
+    render(() => <SpaceCockpit initialTab="chat" tabs={{ artefakter: <Probe /> }} />)
+    expect(screen.getByTestId('active-tab').textContent).toBe('chat')
+    fireEvent.click(screen.getByRole('tab', { name: 'Artefakter' }))
+    flush()
+    expect(screen.getByTestId('active-tab').textContent).toBe('artefakter')
+    fireEvent.click(screen.getByRole('tab', { name: 'Kunnskap' }))
+    flush()
+    expect(screen.getByTestId('active-tab').textContent).toBe('kunnskap')
+  })
+
+  it('reports the default tab to a panel rendered outside a cockpit', () => {
+    const Probe = () => <p data-testid="outside">{useActiveSpaceTab()()}</p>
+    render(() => <Probe />)
+    expect(screen.getByTestId('outside').textContent).toBe('chat')
+  })
+
+  it('covers the new tab in roving focus, both directions', () => {
+    vi.stubEnv('VITE_SPACE_ROOM_ARTIFACTS_UI', 'true')
+    render(() => <SpaceCockpit initialTab="kunnskap" />)
+    const list = screen.getByRole('tablist')
+    screen.getByRole('tab', { name: 'Kunnskap' }).focus()
+    fireEvent.keyDown(list, { key: 'ArrowRight' })
+    flush()
+    expect(screen.getByRole('tab', { name: 'Artefakter' }).getAttribute('aria-selected')).toBe('true')
+    expect(document.activeElement).toBe(screen.getByRole('tab', { name: 'Artefakter' }))
+    fireEvent.keyDown(list, { key: 'ArrowRight' })
+    flush()
+    expect(screen.getByRole('tab', { name: 'Aktivitet' }).getAttribute('aria-selected')).toBe('true')
+    fireEvent.keyDown(list, { key: 'ArrowLeft' })
+    flush()
+    fireEvent.keyDown(list, { key: 'ArrowLeft' })
+    flush()
+    expect(screen.getByRole('tab', { name: 'Kunnskap' }).getAttribute('aria-selected')).toBe('true')
+  })
+
+  it('opens #artefakter from a deep link when the flag is on, and falls back to chat when off', () => {
+    vi.stubEnv('VITE_SPACE_ROOM_ARTIFACTS_UI', 'true')
+    window.location.hash = '#artefakter'
+    const first = render(() => <SpaceCockpit />)
+    expect(screen.getByRole('tab', { name: 'Artefakter' }).getAttribute('aria-selected')).toBe('true')
+    first.unmount()
+    vi.stubEnv('VITE_SPACE_ROOM_ARTIFACTS_UI', 'false')
+    render(() => <SpaceCockpit />)
+    expect(screen.getByRole('tab', { name: 'Samtaler' }).getAttribute('aria-selected')).toBe('true')
   })
 })

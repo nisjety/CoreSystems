@@ -3,6 +3,7 @@ import RouterPolicyPage from '@/features/router-policy/components/RouterPolicyPa
 import FinetuneJobsPage from '@/features/finetune/components/FinetuneJobsPage'
 import { OrgDeletionDangerZone } from '@/features/settings/components/OrgDeletionDangerZone'
 import { AuditComplianceSection } from '@/features/settings/components/AuditComplianceSection'
+import { AuditLogSection } from '@/features/settings/components/AuditLogSection'
 import { TrustCenterSection } from '@/features/settings/components/TrustCenterSection'
 import { McpServersSection } from '@/features/settings/components/McpServersSection'
 import { SkillsSection } from '@/features/settings/components/SkillsSection'
@@ -11,7 +12,11 @@ import { PersonaSection } from '@/features/settings/components/PersonaSection'
 import { PluginsSection } from '@/features/settings/components/PluginsSection'
 import { CronSchedulesSection } from '@/features/settings/components/CronSchedulesSection'
 import { OrgModelAccessSection } from '@/features/settings/components/OrgModelAccessSection'
+import { DomainsPanel } from '@/features/settings/components/DomainsPanel'
+import { SsoPolicyPanel } from '@/features/settings/components/SsoPolicyPanel'
+import { ScimPanel } from '@/features/settings/components/ScimPanel'
 import { OrgQuotasSection } from '@/features/settings/components/OrgQuotasSection'
+import { OrgSpacePolicySection } from '@/features/settings/components/OrgSpacePolicySection'
 import { MemorySection } from '@/features/settings/components/MemorySection'
 import { LearningSection } from '@/features/settings/components/LearningSection'
 import { ChatGptSubscriptionPanel } from '@/features/integrations/components/ChatGptSubscriptionPanel'
@@ -35,7 +40,7 @@ import {
   type BillingPlanId,
 } from '@/features/billing/lib/plans'
 import { requestJson } from '@/shared/api/http'
-import { listAuditEvents, type AuditEvent } from '@/shared/api/audit-client'
+import { listAuditEvents, listOwnAuditEvents, type AuditEvent } from '@/shared/api/audit-client'
 import {
   inviteMember,
   removeMember,
@@ -222,6 +227,8 @@ const sectionStatusCards: Record<WorkspaceSettingsSectionId, StatusCard[]> = {
   // Trust Center renders its own live transparency cards, and router-policy /
   // fine-tune render dedicated pages — so these carry no shared status grid.
   trust: [],
+  // The audit log renders its own live, filterable list, so no shared status grid.
+  'audit-log': [],
   'router-policy': [],
   finetune: [],
   // MCP servers renders its own live list + form, so it carries no shared status grid.
@@ -241,6 +248,8 @@ const sectionStatusCards: Record<WorkspaceSettingsSectionId, StatusCard[]> = {
   quotas: [],
   // Model access renders its own live policy editor, so no shared status grid.
   'model-access': [],
+  // Space policy renders its own live console (hidden when the gateway flag is off), so no shared status grid.
+  'space-policy': [],
   // Memory renders its own live list, so it carries no shared status grid.
   memory: [],
   // Learning renders its own proposals and ledger, so it carries no shared status grid.
@@ -482,6 +491,9 @@ function WorkspaceSettingsSection(props: {
         <TrustCenterSection />
         <AuditComplianceSection />
       </Match>
+      <Match when={props.section === 'audit-log'}>
+        <AuditLogSection />
+      </Match>
       <Match when={props.section === 'mcp'}>
         <McpServersSection />
       </Match>
@@ -505,6 +517,9 @@ function WorkspaceSettingsSection(props: {
       </Match>
       <Match when={props.section === 'model-access'}>
         <OrgModelAccessSection />
+      </Match>
+      <Match when={props.section === 'space-policy'}>
+        <OrgSpacePolicySection />
       </Match>
       <Match when={props.section === 'memory'}>
         <MemorySection />
@@ -553,16 +568,7 @@ function WorkspaceSection() {
         <SettingsField id="admin-owner" label={i18n.tr('Administratoreier', 'Admin owner')} value="Author Name" />
       </div>
       <div class="verevon-settings-feature-grid">
-        <FeaturePanel
-          title={i18n.tr('Verifiserte domener', 'Verified domains')}
-          description={i18n.tr(
-            'Domeneoppføringer klare for DNS-verifisering og kundevendte lenker.',
-            'Domain records ready for DNS verification and customer-facing links.',
-          )}
-          actionLabel={i18n.tr('Legg til domene', 'Add domain')}
-        >
-          <p class="verevon-settings-panel-note">{i18n.tr('Ingen domener er verifisert for denne organisasjonen.', 'No domains have been verified for this organization.')}</p>
-        </FeaturePanel>
+        <DomainsPanel />
         <FeaturePanel
           title={i18n.tr('Åpningstider', 'Business hours')}
           description={i18n.tr(
@@ -1260,18 +1266,18 @@ function SsoSection() {
         title={i18n.tr('SSO-konfigurasjon', 'SSO configuration')}
         description={i18n.tr('Konfigurer organisasjonens innlogging, domener og provisjonering.', 'Configure organization sign-in, domains, and provisioning.')}
       />
-      <p class="verevon-settings-panel-note">
-        {i18n.tr(
-          'Enkel pålogging (SSO) er ikke konfigurert for denne organisasjonen. Ingen identitetsleverandør, godkjent domene, SCIM-token eller attributt-mapping er satt opp, og SSO/SCIM-konfigurasjon er ikke tilgjengelig i denne versjonen.',
-          'Single sign-on is not configured for this organization. No identity provider, allowed domain, SCIM token, or attribute mapping is set up, and SSO/SCIM configuration is not available in this build.',
-        )}
-      </p>
+      <SsoPolicyPanel />
+      <ScimPanel />
     </>
   )
 }
 
 function RecentSecurityEvents() {
   const i18n = useI18n()
+  const session = getSession()
+  // Presentation only: audit-core and the gateway enforce the same split from
+  // the signed org role. A member never receives org-wide rows to hide.
+  const orgWide = () => hasWorkspaceAdminAccess(session)
   const [events, setEvents] = createSignal<AuditEvent[]>([])
   const [loading, setLoading] = createSignal(true)
   const [loadFailed, setLoadFailed] = createSignal(false)
@@ -1281,7 +1287,10 @@ function RecentSecurityEvents() {
     () => {
       const controller = new AbortController()
 
-      listAuditEvents({ limit: 25 }, controller.signal)
+      const request = orgWide()
+        ? listAuditEvents({ limit: 25 }, controller.signal)
+        : listOwnAuditEvents(session.user?.id ?? '', 25, controller.signal).then((page) => page.events)
+      request
         .then((rows) => {
           setEvents(rows)
           setLoading(false)
@@ -1299,6 +1308,9 @@ function RecentSecurityEvents() {
 
   return (
     <Show when={!loading()} fallback={<p class="verevon-settings-panel-note">{i18n.tr('Laster sikkerhetshendelser …', 'Loading security events...')}</p>}>
+      <Show when={!orgWide()}>
+        <p class="verevon-settings-panel-note">{i18n.tr('Viser bare dine egne hendelser.', 'Showing your own events')}</p>
+      </Show>
       <Show when={!loadFailed()} fallback={<p class="verevon-settings-panel-note" role="alert">{i18n.tr('Kunne ikke laste sikkerhetshendelser.', 'Could not load security events.')}</p>}>
       <Show when={events().length > 0} fallback={<p class="verevon-settings-panel-note">{i18n.tr('Ingen sikkerhetshendelser ennå', 'No security events yet')}</p>}>
         <div class="verevon-settings-row-divider">
@@ -1641,6 +1653,8 @@ function OrgSecuritySection() {
         title={i18n.tr('Nylige sikkerhetshendelser', 'Recent security events')}
         description={i18n.tr('Nylige organisasjonsendringer som administratorer bør gjennomgå.', 'Recent organization changes that administrators should review.')}
         actionLabel={i18n.tr('Åpne revisjonslogg', 'Open audit log')}
+        // The full log is an owner/admin view; a member's button stays inert.
+        onAction={hasWorkspaceAdminAccess(getSession()) ? () => window.location.assign('/settings/audit-log') : undefined}
         class="verevon-settings-feature-panel--spaced"
       >
         <RecentSecurityEvents />

@@ -380,12 +380,12 @@ fn unresolved_run_action_authority() -> pb::ResolveRunActionAuthorityResponse {
 /// highest `step_ordinal` recorded for the run (0 when none) and
 /// `checkpoint_index` is the run's checkpoint count, both via correlated
 /// sub-selects so a single round trip hydrates the whole `RunDetail`.
-const RUN_SELECT: &str = "SELECT
+const RUN_SELECT: &str = concat!("SELECT
         r.id,
         r.thread_id,
         r.parent_run_id,
         r.agent_id,
-        r.status,
+        ", crate::run_phase::run_phase_sql!("r"), " AS status,
         r.mode,
         r.goal,
         r.final_output,
@@ -418,7 +418,7 @@ const RUN_SELECT: &str = "SELECT
               AND ap.consumed_at IS NOT NULL
         ) END AS fold_pause_consumed
      FROM runs r
-     LEFT JOIN run_loop_checkpoints lc ON lc.run_id = r.id";
+     LEFT JOIN run_loop_checkpoints lc ON lc.run_id = r.id");
 
 /// Whether a durable loop fold is in a state a continuation can claim: paused for
 /// an approval, parked, or `resuming` under a lease that has lapsed. It mirrors
@@ -510,6 +510,7 @@ fn row_to_detail(row: RunRow, store_enabled: bool, viewer: &VerifiedIdentity) ->
         metadata: json_to_struct(&row.metadata),
         resumable,
         park_reason,
+        owner_subject_id: String::new(),
     }
 }
 
@@ -517,6 +518,158 @@ fn row_to_detail(row: RunRow, store_enabled: bool, viewer: &VerifiedIdentity) ->
 /// or already-cancelled run is never silently "re-cancelled".
 fn is_terminal(status: &str) -> bool {
     matches!(status, "completed" | "failed" | "cancelled")
+}
+
+/// How a cancel was authorized when it was not the run owner's own: a room manager acting under a
+/// Control `model.run.control` decision (WS09-S8). Recorded on the `RUN_CANCELLED` payload.
+pub(crate) struct ActingAs<'a> {
+    pub(crate) acting_as: &'static str,
+    pub(crate) decision_ref: &'a str,
+}
+
+/// The `RUN_CANCELLED` payload. The owner's own cancel carries `run_id`, `reason`, `cancelled_by`;
+/// a manager's cancel also carries `acting_as` and the decision reference, so the receipt names
+/// who stopped the run and on whose authority.
+fn cancelled_payload(
+    run_id: &str,
+    reason: &str,
+    cancelled_by: &str,
+    acting: Option<&ActingAs<'_>>,
+) -> serde_json::Value {
+    let mut payload = serde_json::json!({
+        "run_id": run_id,
+        "reason": reason,
+        "cancelled_by": cancelled_by,
+    });
+    if let (Some(acting), Some(object)) = (acting, payload.as_object_mut()) {
+        object.insert("acting_as".to_owned(), serde_json::json!(acting.acting_as));
+        object.insert("decision_ref".to_owned(), serde_json::json!(acting.decision_ref));
+    }
+    payload
+}
+
+/// The terminalization both cancel paths share (the run owner's `CancelRun` and the room manager's
+/// `CancelRunAsRoomManager`): flip a non-terminal run to `cancelled`, drop its loop fold and write
+/// the `RUN_CANCELLED` receipt in one transaction. The caller has already authorized the cancel.
+/// An already-terminal run answers `cancelled: false` with the existing receipt.
+pub(crate) async fn cancel_run_terminalize(
+    pool: &PgPool,
+    run_id: &str,
+    reason: &str,
+    cancelled_by: &str,
+    acting: Option<&ActingAs<'_>>,
+) -> Result<pb::CancelRunResponse, Status> {
+    // Read the current status to reject a re-cancel of a terminal run
+    // before flipping it. A missing run is a 404.
+    let current: Option<(String,)> = sqlx::query_as("SELECT status FROM runs WHERE id = $1")
+        .bind(run_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?;
+
+    let (status,) =
+        current.ok_or_else(|| Status::not_found(format!("run not found: {run_id}")))?;
+
+    if is_terminal(&status) {
+        // Already terminal - not cancellable. Report not-cancelled rather
+        // than erroring so a double-cancel is idempotent at the UI. If a
+        // cancellation receipt already exists, return it so a retry can
+        // still render the same durable proof instead of losing it.
+        let receipt: Option<(String,)> = sqlx::query_as(
+            "SELECT id FROM events
+             WHERE run_id = $1 AND event_type = 'RUN_CANCELLED'
+             ORDER BY ts DESC, id DESC LIMIT 1",
+        )
+        .bind(run_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?;
+        return Ok(pb::CancelRunResponse {
+            cancelled: false,
+            receipt_id: receipt.map_or_else(String::new, |(id,)| id),
+        });
+    }
+
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?;
+
+    // The status transition and receipt are one transaction. A caller
+    // can never observe a cancelled run without the event that proves
+    // who cancelled it and why.
+    let updated: Option<(String,)> = sqlx::query_as(
+        "UPDATE runs
+         SET status = 'cancelled', ended_at = now(), updated_at = now()
+         WHERE id = $1 AND status NOT IN ('completed', 'failed', 'cancelled')
+         RETURNING id",
+    )
+    .bind(run_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|e| Status::internal(e.to_string()))?;
+
+    let Some((run_id,)) = updated else {
+        // A concurrent terminalization won the race. Re-read the
+        // receipt through the same service contract rather than
+        // claiming that this request performed the cancellation.
+        tx.rollback()
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+        let receipt: Option<(String,)> = sqlx::query_as(
+            "SELECT id FROM events
+             WHERE run_id = $1 AND event_type = 'RUN_CANCELLED'
+             ORDER BY ts DESC, id DESC LIMIT 1",
+        )
+        .bind(run_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?;
+        return Ok(pb::CancelRunResponse {
+            cancelled: false,
+            receipt_id: receipt.map_or_else(String::new, |(id,)| id),
+        });
+    };
+
+    // A cancelled run never resumes, so its loop fold is dropped in this
+    // transaction (build plan WS03 S4).
+    crate::loop_checkpoint::purge_run(&mut tx, &run_id)
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?;
+
+    let receipt_id = new_ulid();
+    let now = Utc::now();
+    let idempotency_key = format!("run_cancelled:{run_id}");
+    sqlx::query(
+        "INSERT INTO events
+            (id, event_type, run_id, payload, ts, org_id, user_id,
+             correlation_id, causation_id, idempotency_key, resource_ref,
+             type_url, producer, schema_version)
+         SELECT $1, 'RUN_CANCELLED', r.id, $2, $3, r.org_id, r.user_id,
+                r.id, '', $4, $5, $6, 'session-core', 1
+         FROM runs AS r WHERE r.id = $7
+         ON CONFLICT (org_id, idempotency_key)
+         WHERE idempotency_key <> '' DO NOTHING",
+    )
+    .bind(&receipt_id)
+    .bind(cancelled_payload(&run_id, reason, cancelled_by, acting))
+    .bind(now)
+    .bind(&idempotency_key)
+    .bind(format!("run:{run_id}"))
+    .bind(RUN_CANCELLED_TYPE_URL)
+    .bind(&run_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| Status::internal(e.to_string()))?;
+
+    tx.commit()
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?;
+
+    Ok(pb::CancelRunResponse {
+        cancelled: true,
+        receipt_id,
+    })
 }
 
 pub struct RunServiceImpl {
@@ -746,7 +899,7 @@ impl RunService for RunServiceImpl {
                 " AND NOT EXISTS (SELECT 1 FROM threads st \
                   WHERE st.id = r.thread_id AND COALESCE(st.space_id, '') <> '')",
             );
-            query.push_str(" AND ($3 = '' OR r.status = $3)");
+            query.push_str(concat!(" AND ($3 = '' OR ", crate::run_phase::run_phase_sql!("r"), " = $3)"));
             query.push_str(" AND ($4 = '' OR r.id < $4)");
             query.push_str(" ORDER BY r.id DESC LIMIT $5");
 
@@ -815,7 +968,8 @@ impl RunService for RunServiceImpl {
             // column of their own: a run has no audience snapshot, so the only
             // honest way to decide whether this reader may see it is to ask
             // whether they may see the thread it belongs to.
-            let audience_ceiling = space_read.map(|read| read.recipient_audience_revision);
+            let audience = crate::space::audience_window::audience_window(space_read);
+            let audience_ceiling = audience.ceiling;
             let mut query = String::from(RUN_SELECT);
             if audience_ceiling.is_some() {
                 query.push_str(
@@ -823,12 +977,15 @@ impl RunService for RunServiceImpl {
                      WHERE t.org_id = $5 AND t.space_id = $6
                        AND (t.recipient_audience_revision IS NULL
                             OR t.recipient_audience_revision <= $7)
+                       AND ($8::BIGINT IS NULL
+                            OR r.recipient_audience_revision IS NULL
+                            OR r.recipient_audience_revision >= $8)
                        AND ($1 = '' OR r.thread_id = $1)",
                 );
             } else {
                 query.push_str(" WHERE r.thread_id = $1");
             }
-            query.push_str(" AND ($2 = '' OR r.status = $2)");
+            query.push_str(concat!(" AND ($2 = '' OR ", crate::run_phase::run_phase_sql!("r"), " = $2)"));
             query.push_str(" AND ($3 = '' OR r.id < $3)");
             query.push_str(" ORDER BY r.id DESC LIMIT $4");
 
@@ -841,7 +998,8 @@ impl RunService for RunServiceImpl {
                 sql = sql
                     .bind(caller.org_id())
                     .bind(&req.space_id)
-                    .bind(ceiling);
+                    .bind(ceiling)
+                    .bind(audience.floor);
             }
             let rows: Vec<RunRow> = sql
                 .fetch_all(&self.pool)
@@ -850,16 +1008,59 @@ impl RunService for RunServiceImpl {
 
             let has_more = i64::try_from(rows.len()).unwrap_or(i64::MAX) > limit;
             let store_enabled = crate::loop_checkpoint::enabled();
+            let via_space = audience_ceiling.is_some();
             let runs: Vec<pb::RunDetail> = rows
                 .into_iter()
                 .take(usize::try_from(limit).unwrap_or(usize::MAX))
-                .map(|row| row_to_detail(row, store_enabled, &caller))
+                .map(|row| {
+                    let owner = row.owner_user_id.clone();
+                    let mut detail = row_to_detail(row, store_enabled, &caller);
+                    // The owner id rides only on the Space branch (WS09-S4).
+                    if via_space {
+                        detail.owner_subject_id = owner;
+                    }
+                    detail
+                })
                 .collect();
 
             Ok(Response::new(pb::ListRunsResponse { runs, has_more }))
         }
         .await;
         record_metrics("list_runs", started, result.is_ok());
+        result
+    }
+
+    async fn authorize_room_run_attach(
+        &self,
+        request: Request<pb::AuthorizeRoomRunAttachRequest>,
+    ) -> Result<Response<pb::AuthorizeRoomRunAttachResponse>, Status> {
+        let started = Instant::now();
+        let result: Result<Response<pb::AuthorizeRoomRunAttachResponse>, Status> = async {
+            let caller = identity(&request)?;
+            let req = request.into_inner();
+            crate::room_run_attach::authorize_room_run_attach(&self.pool, &caller, &req)
+                .await
+                .map(Response::new)
+        }
+        .await;
+        record_metrics("authorize_room_run_attach", started, result.is_ok());
+        result
+    }
+
+    async fn cancel_run_as_room_manager(
+        &self,
+        request: Request<pb::CancelRunAsRoomManagerRequest>,
+    ) -> Result<Response<pb::CancelRunAsRoomManagerResponse>, Status> {
+        let started = Instant::now();
+        let result: Result<Response<pb::CancelRunAsRoomManagerResponse>, Status> = async {
+            let caller = identity(&request)?;
+            let req = request.into_inner();
+            crate::space::run_control::cancel_run_as_room_manager(&self.pool, &caller, &req)
+                .await
+                .map(Response::new)
+        }
+        .await;
+        record_metrics("cancel_run_as_room_manager", started, result.is_ok());
         result
     }
 
@@ -877,123 +1078,10 @@ impl RunService for RunServiceImpl {
             }
             authorize_run_owner(&self.pool, &caller, &req.run_id, OwnerIntent::Mutate).await?;
 
-            // Read the current status to reject a re-cancel of a terminal run
-            // before flipping it. A missing run is a 404.
-            let current: Option<(String,)> =
-                sqlx::query_as("SELECT status FROM runs WHERE id = $1")
-                    .bind(&req.run_id)
-                    .fetch_optional(&self.pool)
-                    .await
-                    .map_err(|e| Status::internal(e.to_string()))?;
-
-            let (status,) = current
-                .ok_or_else(|| Status::not_found(format!("run not found: {}", req.run_id)))?;
-
-            if is_terminal(&status) {
-                // Already terminal — not cancellable. Report not-cancelled rather
-                // than erroring so a double-cancel is idempotent at the UI. If a
-                // cancellation receipt already exists, return it so a retry can
-                // still render the same durable proof instead of losing it.
-                let receipt: Option<(String,)> = sqlx::query_as(
-                    "SELECT id FROM events
-                     WHERE run_id = $1 AND event_type = 'RUN_CANCELLED'
-                     ORDER BY ts DESC, id DESC LIMIT 1",
-                )
-                .bind(&req.run_id)
-                .fetch_optional(&self.pool)
+            let cancelled_by = caller.user_id().unwrap_or_else(|| caller.principal_id());
+            cancel_run_terminalize(&self.pool, &req.run_id, req.reason.trim(), cancelled_by, None)
                 .await
-                .map_err(|e| Status::internal(e.to_string()))?;
-                return Ok(Response::new(pb::CancelRunResponse {
-                    cancelled: false,
-                    receipt_id: receipt.map_or_else(String::new, |(id,)| id),
-                }));
-            }
-
-            let mut tx = self
-                .pool
-                .begin()
-                .await
-                .map_err(|e| Status::internal(e.to_string()))?;
-
-            // The status transition and receipt are one transaction. A caller
-            // can never observe a cancelled run without the event that proves
-            // who cancelled it and why.
-            let updated: Option<(String,)> = sqlx::query_as(
-                "UPDATE runs
-                 SET status = 'cancelled', ended_at = now(), updated_at = now()
-                 WHERE id = $1 AND status NOT IN ('completed', 'failed', 'cancelled')
-                 RETURNING id",
-            )
-            .bind(&req.run_id)
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(|e| Status::internal(e.to_string()))?;
-
-            let Some((run_id,)) = updated else {
-                // A concurrent terminalization won the race. Re-read the
-                // receipt through the same service contract rather than
-                // claiming that this request performed the cancellation.
-                tx.rollback()
-                    .await
-                    .map_err(|e| Status::internal(e.to_string()))?;
-                let receipt: Option<(String,)> = sqlx::query_as(
-                    "SELECT id FROM events
-                     WHERE run_id = $1 AND event_type = 'RUN_CANCELLED'
-                     ORDER BY ts DESC, id DESC LIMIT 1",
-                )
-                .bind(&req.run_id)
-                .fetch_optional(&self.pool)
-                .await
-                .map_err(|e| Status::internal(e.to_string()))?;
-                return Ok(Response::new(pb::CancelRunResponse {
-                    cancelled: false,
-                    receipt_id: receipt.map_or_else(String::new, |(id,)| id),
-                }));
-            };
-
-            // A cancelled run never resumes, so its loop fold is dropped in this
-            // transaction (build plan WS03 S4).
-            crate::loop_checkpoint::purge_run(&mut tx, &run_id)
-                .await
-                .map_err(|e| Status::internal(e.to_string()))?;
-
-            let receipt_id = new_ulid();
-            let now = Utc::now();
-            let idempotency_key = format!("run_cancelled:{run_id}");
-            sqlx::query(
-                "INSERT INTO events
-                    (id, event_type, run_id, payload, ts, org_id, user_id,
-                     correlation_id, causation_id, idempotency_key, resource_ref,
-                     type_url, producer, schema_version)
-                 SELECT $1, 'RUN_CANCELLED', r.id, $2, $3, r.org_id, r.user_id,
-                        r.id, '', $4, $5, $6, 'session-core', 1
-                 FROM runs AS r WHERE r.id = $7
-                 ON CONFLICT (org_id, idempotency_key)
-                 WHERE idempotency_key <> '' DO NOTHING",
-            )
-            .bind(&receipt_id)
-            .bind(serde_json::json!({
-                "run_id": &run_id,
-                "reason": req.reason.trim(),
-                "cancelled_by": caller.user_id().unwrap_or_else(|| caller.principal_id()),
-            }))
-            .bind(now)
-            .bind(&idempotency_key)
-            .bind(format!("run:{run_id}"))
-            .bind(RUN_CANCELLED_TYPE_URL)
-            .bind(&run_id)
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| Status::internal(e.to_string()))?;
-
-            tx.commit()
-                .await
-                .map_err(|e| Status::internal(e.to_string()))?;
-
-            Ok(Response::new(pb::CancelRunResponse {
-                cancelled: true,
-                receipt_id,
-            }))
+                .map(Response::new)
         }
         .await;
         record_metrics("cancel_run", started, result.is_ok());
@@ -1124,6 +1212,32 @@ impl RunService for RunServiceImpl {
         }
         .await;
         record_metrics("resolve_run_action_authority", started, result.is_ok());
+        result
+    }
+
+    async fn resolve_approval_authority(
+        &self,
+        request: Request<pb::ResolveApprovalAuthorityRequest>,
+    ) -> Result<Response<pb::ResolveApprovalAuthorityResponse>, Status> {
+        let started = Instant::now();
+        let result: Result<Response<pb::ResolveApprovalAuthorityResponse>, Status> = async {
+            let caller = identity(&request)?;
+            authorize_run_action_authority_service(&caller)?;
+            let req = request.into_inner();
+            if req.approval_id.trim().is_empty() || req.org_id.trim().is_empty() {
+                return Err(Status::invalid_argument("approval_id and org_id are required"));
+            }
+            caller.authorize_org(&req.org_id)?;
+            let response = crate::space::approval_member::resolve_authority(
+                &self.pool,
+                &req.approval_id,
+                &req.org_id,
+            )
+            .await?;
+            Ok(Response::new(response))
+        }
+        .await;
+        record_metrics("resolve_approval_authority", started, result.is_ok());
         result
     }
 }

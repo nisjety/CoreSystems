@@ -500,4 +500,99 @@ describe('action registry', () => {
     // The user, the org and the turn are the server's, never a client input.
     expect(schema?.safeParse({ connectionIds: [], userId: 'user_x' }).success).toBe(false)
   })
+
+  it('registers the human post actions as low-risk, ungated, model-plane actions the model cannot execute (WS01-S5)', () => {
+    for (const id of ['spaces.create_post', 'spaces.reply_in_thread'] as const) {
+      const action = getActionDescriptor(id)
+      expect(action, id).toBeDefined()
+      expect(action?.ownerPlane).toBe('model')
+      expect(action?.risk).toBe('low')
+      expect(action?.requiresApproval).toBe(false)
+      expect(action?.reversible).toBe(false)
+      // A post is a person speaking in a room, never an agent proposal.
+      expect(isModelExecutableAction(id)).toBe(false)
+    }
+    const send = 'send_id_0123456789ab'
+    const create = getActionDescriptor('spaces.create_post')
+    expect(create?.inputSchema.safeParse({ spaceRef: 'space-room', content: 'hello', clientSendId: send }).success).toBe(true)
+    // The send id is required and shaped like the gateway's ^[A-Za-z0-9_-]{16,64}$.
+    expect(create?.inputSchema.safeParse({ spaceRef: 'space-room', content: 'hello' }).success).toBe(false)
+    expect(create?.inputSchema.safeParse({ spaceRef: 'space-room', content: 'hello', clientSendId: 'short' }).success).toBe(false)
+    expect(create?.inputSchema.safeParse({ spaceRef: 'space-room', content: 'hello', clientSendId: 'has space 0123456789' }).success).toBe(false)
+    expect(create?.inputSchema.safeParse({ spaceRef: 'space-room', content: '   ', clientSendId: send }).success).toBe(false)
+    expect(create?.inputSchema.safeParse({ spaceRef: 'space-room', content: 'x'.repeat(8001), clientSendId: send }).success).toBe(false)
+    expect(create?.inputSchema.safeParse({ spaceRef: 'space-room', content: 'x'.repeat(8000), clientSendId: send }).success).toBe(true)
+    const reply = getActionDescriptor('spaces.reply_in_thread')
+    expect(reply?.inputSchema.safeParse({ spaceRef: 'space-room', threadId: 'thread-1', content: 'hi', clientSendId: send }).success).toBe(true)
+    expect(reply?.inputSchema.safeParse({ spaceRef: 'space-room', content: 'hi', clientSendId: send }).success).toBe(false)
+  })
+
+  it('registers the Space effect-policy actions as high-risk, approval-gated, control-plane actions the model cannot execute (WS03-S4)', () => {
+    for (const id of ['spaces.set_effect_entitlements', 'spaces.apply_effect_preset'] as const) {
+      const action = getActionDescriptor(id)
+      expect(action, id).toBeDefined()
+      expect(action?.ownerPlane).toBe('control')
+      expect(action?.risk).toBe('high')
+      expect(action?.requiresApproval).toBe(true)
+      expect(action?.reversible).toBe(true)
+      // An agent must never widen the entitlement floor.
+      expect(isModelExecutableAction(id)).toBe(false)
+    }
+    const set = getActionDescriptor('spaces.set_effect_entitlements')
+    const base = { orgId: 'org_1', expectedEntitlementRevision: 2, entitlements: { effects_enabled: true } }
+    expect(set?.inputSchema.safeParse(base).success).toBe(true)
+    // The revision the edit started from is required: never a blind overwrite.
+    expect(set?.inputSchema.safeParse({ orgId: 'org_1', entitlements: {} }).success).toBe(false)
+    expect(set?.inputSchema.safeParse({ ...base, expectedEntitlementRevision: -1 }).success).toBe(false)
+    expect(set?.inputSchema.safeParse({ ...base, entitlements: { 'Bad-Key': true } }).success).toBe(false)
+    expect(set?.inputSchema.safeParse({ ...base, entitlements: { effects_enabled: 'yes' } }).success).toBe(false)
+    const preset = getActionDescriptor('spaces.apply_effect_preset')
+    expect(preset?.inputSchema.safeParse({ orgId: 'org_1', expectedEntitlementRevision: 0, presetId: 'balanced' }).success).toBe(true)
+    expect(preset?.inputSchema.safeParse({ orgId: 'org_1', expectedEntitlementRevision: 0 }).success).toBe(false)
+    expect(preset?.inputSchema.safeParse({ orgId: 'org_1', expectedEntitlementRevision: 0, presetId: 'p'.repeat(49) }).success).toBe(false)
+  })
+
+  // P-SPA1 moved the spaces.* entries into per-workstream fragments under
+  // domains/spaces/*.ts and spread them once. The move must not add, drop, rename
+  // or reorder an id: the order is what the contract probes and the context pack read.
+  it('keeps every action id unique and the spaces.* entries contiguous and in their pre-fragment order (P-SPA1)', () => {
+    const ids: string[] = actionRegistry.map((action) => action.id)
+    expect(new Set(ids).size).toBe(ids.length)
+    // 187 before the move, plus the seven W1 additions (create_post, reply_in_thread, the two
+    // effect-policy actions, update_room_details, change_member_role, leave_room), plus the
+    // eight actions main added on its own side (195 before the Space merge).
+    expect(ids).toHaveLength(202)
+
+    const spaceIds = ids.filter((id) => id.startsWith('spaces.'))
+    const first = ids.indexOf(spaceIds[0] as string)
+    expect(ids.slice(first, first + spaceIds.length)).toEqual(spaceIds)
+
+    // The fourteen entries the fragment move carried, exactly as they stood in action-registry.ts.
+    expect(spaceIds.slice(0, 14)).toEqual([
+      'spaces.create_personal_space',
+      'spaces.ensure_organization_room',
+      'spaces.update_space_instructions',
+      'spaces.create_space_agent',
+      'spaces.bind_space_agent',
+      'spaces.request_personal_space_deletion',
+      'spaces.update_thread_presentation',
+      'spaces.mark_read',
+      'spaces.record_presence',
+      'spaces.set_agent_state',
+      'spaces.revoke_agent',
+      'spaces.create_room',
+      'spaces.add_member',
+      'spaces.remove_member',
+    ])
+    // The later workstream fragments follow them in fragment order (ws01, ws03, ws04).
+    expect(spaceIds.slice(14)).toEqual([
+      'spaces.create_post',
+      'spaces.reply_in_thread',
+      'spaces.set_effect_entitlements',
+      'spaces.apply_effect_preset',
+      'spaces.update_room_details',
+      'spaces.change_member_role',
+      'spaces.leave_room',
+    ])
+  })
 })

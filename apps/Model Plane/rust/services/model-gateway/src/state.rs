@@ -14,12 +14,16 @@ use mp_contracts::model_plane::v1::{
     inference_core_client::InferenceCoreClient,
     learning_governance_service_client::LearningGovernanceServiceClient,
     managed_run_lifecycle_client::ManagedRunLifecycleClient,
+    message_revision_service_client::MessageRevisionServiceClient,
     message_search_client::MessageSearchClient,
     memory_service_client::MemoryServiceClient,
     message_tree_service_client::MessageTreeServiceClient,
     orchestration_core_service_client::OrchestrationCoreServiceClient,
     run_service_client::RunServiceClient, sandbox_manager_client::SandboxManagerClient,
-    session_core_client::SessionCoreClient,
+    session_core_client::SessionCoreClient, space_attention_client::SpaceAttentionClient,
+    space_events_client::SpaceEventsClient,
+    space_history_service_client::SpaceHistoryServiceClient,
+    space_room_read_service_client::SpaceRoomReadServiceClient,
 };
 use mp_events::envelope::Envelope;
 use mp_events::publisher::{EventPublisher, InMemoryPublisher, PublishError};
@@ -104,10 +108,33 @@ pub struct AppState {
     pub session_client: SessionCoreClient<Channel>,
     /// Session Core's MessageSearch service, on the same endpoint as `session_client` (WS17-S3).
     pub message_search_client: MessageSearchClient<Channel>,
+    /// Session Core's MessageRevisionService (edit and delete one message), on the same endpoint as
+    /// `session_client` (WS12-S6).
+    pub message_revision_client: MessageRevisionServiceClient<Channel>,
     /// Session Core's MessageTree service on the session_client endpoint (WS17-S8).
     pub message_tree_client: MessageTreeServiceClient<Channel>,
     /// Session Core's LearningGovernance service on the same endpoint as `session_client` (WS07-S9).
     pub learning_client: LearningGovernanceServiceClient<Channel>,
+    /// Session Core's SpaceEvents service (the Space event tail), on the same endpoint as
+    /// `session_client` (WS02-S3).
+    pub space_events_client: SpaceEventsClient<Channel>,
+    /// Session Core's SpaceRoomReadService (the room's read aggregates), on the same endpoint as
+    /// `session_client` (WS07-S9).
+    pub space_room_read_client: SpaceRoomReadServiceClient<Channel>,
+    /// Session Core's SpaceHistoryService (message search and resolve), on the same endpoint as
+    /// `session_client` (WS13-S2).
+    pub space_history_client: SpaceHistoryServiceClient<Channel>,
+    /// `SPACE_MESSAGE_SEARCH_API`, read once at startup (WS13-S2). A rollout control, never an
+    /// authorization input.
+    pub space_message_search_api_enabled: bool,
+    /// Session Core's SpaceAttention service (the cross-room attention aggregate), on the same
+    /// endpoint as `session_client` (WS11-S2).
+    pub space_attention_client: SpaceAttentionClient<Channel>,
+    /// `SPACE_ATTENTION_SUMMARY`, read once at startup. A rollout control, never an authorization input.
+    pub space_attention_enabled: bool,
+    /// `SPACE_TIMELINE_API`, read once at startup (WS15-S6). A rollout control, never an
+    /// authorization input.
+    pub space_timeline_enabled: bool,
     /// Additive managed-run terminalization service hosted by Session Core on
     /// the same gRPC endpoint. It deliberately remains separate from the
     /// legacy `SessionCore` client so existing callers retain their contracts.
@@ -329,6 +356,8 @@ pub struct AppState {
     /// Resumable chat-stream delta buffer (`HARNESS_PHASE1` §3b). Process-local;
     /// powers `/v1/invoke/{request_id}/resume`. Swap for Redis in multi-replica.
     pub stream_buffers: crate::stream_buffer::StreamBufferStore,
+    /// Room run policy (WS09-S3), read from the environment once at startup.
+    pub space_run_policy: crate::room_run::SpaceRunPolicy,
     /// Wave 10d — skill catalogue (per-org markdown skills).
     pub skills: crate::skills::SkillStore,
     /// Wave 10g — MCP server registry + tool proxy client.
@@ -423,8 +452,16 @@ impl AppState {
             rate_limiter: RateLimiter::from_env(),
             inference_client: InferenceCoreClient::new(inference_channel),
             message_search_client: MessageSearchClient::new(session_channel.clone()),
+            message_revision_client: MessageRevisionServiceClient::new(session_channel.clone()),
             message_tree_client: MessageTreeServiceClient::new(session_channel.clone()),
             learning_client: LearningGovernanceServiceClient::new(session_channel.clone()),
+            space_events_client: SpaceEventsClient::new(session_channel.clone()),
+            space_room_read_client: SpaceRoomReadServiceClient::new(session_channel.clone()),
+            space_history_client: SpaceHistoryServiceClient::new(session_channel.clone()),
+            space_message_search_api_enabled: false,
+            space_attention_client: SpaceAttentionClient::new(session_channel.clone()),
+            space_attention_enabled: false,
+            space_timeline_enabled: false,
             session_client: SessionCoreClient::new(session_channel),
             managed_run_client: ManagedRunLifecycleClient::new(managed_run_channel),
             session_terminal_tokens: None,
@@ -487,6 +524,7 @@ impl AppState {
             tool_results: crate::tool_result_handles::ToolResultStore::new(),
             trajectories: crate::trajectory::TrajectoryStore::new(),
             stream_buffers: crate::stream_buffer::StreamBufferStore::new(),
+            space_run_policy: crate::room_run::SpaceRunPolicy::OFF,
             skills: crate::skills::SkillStore::new(),
             mcp: crate::runtime_registries::McpRegistry::new(),
             ownership: crate::ownership::OwnershipStore::new(),
@@ -587,12 +625,37 @@ impl AppState {
             "SESSION_CORE_ADDR",
             "http://localhost:9091",
         )?);
+        let message_revision_client = MessageRevisionServiceClient::new(Self::lazy_channel(
+            "SESSION_CORE_URL",
+            "SESSION_CORE_ADDR",
+            "http://localhost:9091",
+        )?);
         let message_tree_client = MessageTreeServiceClient::new(Self::lazy_channel(
             "SESSION_CORE_URL",
             "SESSION_CORE_ADDR",
             "http://localhost:9091",
         )?);
         let learning_client = LearningGovernanceServiceClient::new(Self::lazy_channel(
+            "SESSION_CORE_URL",
+            "SESSION_CORE_ADDR",
+            "http://localhost:9091",
+        )?);
+        let space_events_client = SpaceEventsClient::new(Self::lazy_channel(
+            "SESSION_CORE_URL",
+            "SESSION_CORE_ADDR",
+            "http://localhost:9091",
+        )?);
+        let space_room_read_client = SpaceRoomReadServiceClient::new(Self::lazy_channel(
+            "SESSION_CORE_URL",
+            "SESSION_CORE_ADDR",
+            "http://localhost:9091",
+        )?);
+        let space_history_client = SpaceHistoryServiceClient::new(Self::lazy_channel(
+            "SESSION_CORE_URL",
+            "SESSION_CORE_ADDR",
+            "http://localhost:9091",
+        )?);
+        let space_attention_client = SpaceAttentionClient::new(Self::lazy_channel(
             "SESSION_CORE_URL",
             "SESSION_CORE_ADDR",
             "http://localhost:9091",
@@ -797,8 +860,17 @@ impl AppState {
             state.inference_client = inference_client;
             state.session_client = session_client;
             state.message_search_client = message_search_client;
+            state.message_revision_client = message_revision_client;
             state.message_tree_client = message_tree_client;
             state.learning_client = learning_client;
+            state.space_events_client = space_events_client;
+            state.space_room_read_client = space_room_read_client;
+            state.space_history_client = space_history_client;
+            state.space_message_search_api_enabled =
+                mp_contracts::space_history::api_enabled();
+            state.space_attention_client = space_attention_client;
+            state.space_attention_enabled = mp_contracts::space_attention::summary_enabled();
+            state.space_timeline_enabled = mp_contracts::space_timeline::api_enabled();
             state.managed_run_client = managed_run_client;
             state.session_terminal_tokens = Some(session_terminal_tokens);
             state.mail_task_bridge_tokens = mail_task_bridge_tokens.clone();
@@ -839,6 +911,7 @@ impl AppState {
             state.lsp = lsp_client.clone();
             // Redis-backed resume buffer when REDIS_URL is set (multi-replica).
             state.stream_buffers = crate::stream_buffer::StreamBufferStore::from_env().await;
+            state.space_run_policy = crate::room_run::SpaceRunPolicy::from_env();
             // Off unless the switch is `true`; a failed boot check degrades it, never the boot.
             state.run_control = crate::run_control::RunControl::from_env(Some(url.as_str())).await;
             // plan_mode + team_workers default to empty stores —
@@ -851,8 +924,17 @@ impl AppState {
             state.inference_client = inference_client;
             state.session_client = session_client;
             state.message_search_client = message_search_client;
+            state.message_revision_client = message_revision_client;
             state.message_tree_client = message_tree_client;
             state.learning_client = learning_client;
+            state.space_events_client = space_events_client;
+            state.space_room_read_client = space_room_read_client;
+            state.space_history_client = space_history_client;
+            state.space_message_search_api_enabled =
+                mp_contracts::space_history::api_enabled();
+            state.space_attention_client = space_attention_client;
+            state.space_attention_enabled = mp_contracts::space_attention::summary_enabled();
+            state.space_timeline_enabled = mp_contracts::space_timeline::api_enabled();
             state.managed_run_client = managed_run_client;
             state.session_terminal_tokens = Some(session_terminal_tokens);
             state.mail_task_bridge_tokens = mail_task_bridge_tokens;
@@ -894,6 +976,7 @@ impl AppState {
             // disabled in dev mode even when LSP_BRIDGE_URL is configured.
             state.lsp = lsp_client;
             state.stream_buffers = crate::stream_buffer::StreamBufferStore::from_env().await;
+            state.space_run_policy = crate::room_run::SpaceRunPolicy::from_env();
             state.run_control = crate::run_control::RunControl::from_env(None).await;
             Ok(state)
         }

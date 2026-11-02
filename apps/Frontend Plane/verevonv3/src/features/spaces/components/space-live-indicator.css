@@ -1,0 +1,33 @@
+/* Space live indicator (WS02-S5). Lives beside the component rather than in
+   global.css so it does not touch that file's uncommitted lines. It inherits
+   the meta row's ink; only the dot carries a colour. */
+
+.verevon-space-live {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.verevon-space-live__dot {
+  width: 6px;
+  height: 6px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--verevon-success, #2f7d4f);
+}
+
+.verevon-space-live[data-state='degraded'] .verevon-space-live__dot {
+  background: var(--verevon-warning, #b7791f);
+}
+
+.verevon-space-live__announce {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}

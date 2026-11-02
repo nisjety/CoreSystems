@@ -1,0 +1,116 @@
+syntax = "proto3";
+
+package model_plane.v1;
+
+option go_package = "github.com/triodelab/model-plane/gen/go/model_plane/v1;mpv1";
+
+// SpaceEvents: Session Core's per-Space event tail (build plan WS02-S3).
+//
+// A shared room learns THAT something changed (a thread appeared, a post landed, a run
+// changed state) through this stream and then refetches through the authorized read path.
+// Frames carry ids and closed words only, never message text, titles, previews, goals or
+// outputs (ADR 2 option B). Rows come from the Space event log (migration 0072); the
+// service reads them by cursor, so a lost wake costs latency and never correctness.
+//
+// Authority: the caller is a user principal whose id equals `user_id`, and `decision_*` is a
+// Control `model.thread.read` decision issued for the audience `model-plane-space-stream`.
+// A read decision (audience `model-plane`) is refused here and a stream decision is refused
+// by ListThreads. The decision is re-checked on every delivery (see the lease and revocation
+// rules in apps/Model Plane/docs/space-event-stream.md), and a Zero Data Retention caller or
+// decision gets `poll_only` and no rows.
+//
+// Separate file and service so that SessionCore and every mock of it stay
+// source-compatible. The SSE form of these frames is pinned by the golden
+// apps/Model Plane/api/contracts/space-events.json.
+service SpaceEvents {
+  // Opens the tail. The first frame is `connected` (or `cursor_too_old`); the stream ends
+  // after a `closing` frame, after `cursor_too_old`, or when the caller goes away.
+  rpc StreamSpaceEvents(StreamSpaceEventsRequest) returns (stream SpaceEventFrame);
+}
+
+message StreamSpaceEventsRequest {
+  string org_id = 1;
+  string user_id = 2;
+  string space_id = 3;
+  // Control decision, minted for service_audience "model-plane-space-stream".
+  string decision_ref = 4;
+  string decision_token = 5;
+  // false: live tail from the current head. true: continue after `after_seq` of
+  // `generation`; a cursor that cannot be honoured answers `cursor_too_old`.
+  bool resume = 6;
+  int64 generation = 7;
+  int64 after_seq = 8;
+}
+
+message SpaceEventFrame {
+  oneof frame {
+    SpaceStreamConnected connected = 1;
+    SpaceEventRecord event = 2;
+    SpaceStreamHeartbeat heartbeat = 3;
+    SpaceStreamCursorTooOld cursor_too_old = 4;
+    SpaceStreamClosing closing = 5;
+  }
+}
+
+message SpaceStreamConnected {
+  int64 generation = 1;
+  int64 head = 2;
+  bool resumed = 3;
+  int32 lease_seconds = 4;
+  int32 heartbeat_seconds = 5;
+  // "live" or "poll_only" (a ZDR caller or decision: no rows follow).
+  string mode = 6;
+  // Highest seq the stream has fully processed; the stream starts after it.
+  int64 cursor = 7;
+}
+
+message SpaceStreamHeartbeat {
+  int64 head = 1;
+  int64 generation = 2;
+  // Highest seq fully processed. Not `head` while rows are still queued.
+  int64 cursor = 3;
+}
+
+message SpaceStreamCursorTooOld {
+  // "retention", "generation_changed" or "ahead_of_head".
+  string reason = 1;
+  int64 head = 2;
+  int64 generation = 3;
+}
+
+message SpaceStreamClosing {
+  // lease_expired, reauthorize, slow_consumer, membership_revoked, zdr_poll_only.
+  string code = 1;
+  bool reconnect = 2;
+  int64 retry_after_ms = 3;
+  int64 generation = 4;
+  int64 cursor = 5;
+}
+
+// One log row, as ids and closed words. `kind` is thread.created, message.appended,
+// thread.updated, thread.archived, thread.deleted, run.state_changed, or one of the two
+// stubs `hidden` (a row this subscriber may not see) and `redacted` (an erased row). A stub
+// carries only seq, generation, kind and at, so the client's seq stays contiguous.
+message SpaceEventRecord {
+  int64 seq = 1;
+  int64 generation = 2;
+  string kind = 3;
+  // RFC 3339.
+  string at = 4;
+  // user, agent or system.
+  string actor_type = 5;
+  string actor_id = 6;
+  string thread_id = 7;
+  string run_id = 8;
+  string message_id = 9;
+  int64 message_sequence = 10;
+  string role = 11;
+  string agent_id = 12;
+  // Closed run-state word (space::events::run_state).
+  string state = 13;
+  string prev_state = 14;
+  string origin = 15;
+  // Closed words: title, preview, pinned, persona.
+  repeated string fields = 16;
+  string parent_run_id = 17;
+}

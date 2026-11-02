@@ -151,6 +151,35 @@ services:
             # the credential that registers Spaces.
             APPLICATION_ORG_CORE_SERVICE_TOKEN: ${APPLICATION_ORG_CORE_SERVICE_TOKEN:-}
             CONTROL_SPACE_MEMBERSHIP_BASE_URL: ${CONTROL_SPACE_MEMBERSHIP_BASE_URL:-http://user-core:3012/api/v1/internal/spaces}
+            # WS04-S1 flag space_org_room_reconcile_sync: 10-minute org-room
+            # roster cron plus debounced org-core event hook. On in this dev
+            # compose; a production deployment sets it to 0 until enabled.
+            SPACE_ORG_ROOM_RECONCILE: ${SPACE_ORG_ROOM_RECONCILE:-1}
+            # WS04-S5 flag space_audience_reconcile_sync: recipient audience
+            # follows the roster. The audience token defaults to the lifecycle
+            # token (Control's principal entry has one token). On in this dev
+            # compose; a production deployment sets it to 0 until enabled.
+            CONTROL_SPACE_AUDIENCE_URL: ${CONTROL_SPACE_AUDIENCE_URL:-http://user-core:3012/api/v1/internal/spaces/recipient-audiences}
+            APPLICATION_SPACE_AUDIENCE_TOKEN: ${APPLICATION_SPACE_AUDIENCE_TOKEN:-${APPLICATION_SPACE_LIFECYCLE_TOKEN:-}}
+            SPACE_AUDIENCE_RECONCILE: ${SPACE_AUDIENCE_RECONCILE:-1}
+            # WS12-S2 flag SPACE_DM_OPEN: open-or-return a direct message. Off
+            # by default everywhere; needs SPACE_AUDIENCE_RECONCILE on and
+            # Control's SPACE_DM_REGISTRATION + dm_create_entitled first.
+            SPACE_DM_OPEN: ${SPACE_DM_OPEN:-0}
+            # WS12-S8 flag SPACE_REACTIONS: message reactions (ids, one emoji, a time).
+            # Off by default everywhere; never an authorization input.
+            SPACE_REACTIONS: ${SPACE_REACTIONS:-0}
+            # WS11-S6 flag SPACE_ATTENTION_INGEST: apply Space attention events from the
+            # MODEL_PLANE_SPACE_EVENTS durable. Off by default everywhere (never an
+            # authorization input); set empty to acknowledge and drop events.
+            SPACE_ATTENTION_INGEST: ${SPACE_ATTENTION_INGEST:-0}
+            # WS11-S9 flag SPACE_ATTENTION_OUT_OF_APP: refs-only email through
+            # notification-core as service id space-attention. Off by default
+            # (never an authorization input); also needs the delegation token and
+            # NOTIFICATION_DELIVERY_MODE=novu with the space.* workflows.
+            SPACE_ATTENTION_OUT_OF_APP: ${SPACE_ATTENTION_OUT_OF_APP:-0}
+            NOTIFICATION_CORE_URL: ${NOTIFICATION_CORE_URL:-http://notification-core:3140}
+            NOTIFICATION_SPACE_ATTENTION_SERVICE_TOKEN: ${NOTIFICATION_SPACE_ATTENTION_SERVICE_TOKEN:-}
         volumes:
             # `npx convex dev` (startup.sh) only pushes what it can see. Without this
             # mount /app/convex is the snapshot baked at image-build time, so every
@@ -795,6 +824,9 @@ services:
             # for run-watch notifications (AUTO-2). Empty disables this
             # principal entirely, matching support-worker's optional pattern.
             NOTIFICATION_CAPABILITY_CORE_SERVICE_TOKEN: ${NOTIFICATION_CAPABILITY_CORE_SERVICE_TOKEN:-}
+            # Optional fourth caller: Convex's Space attention courier (WS11-S9),
+            # service id space-attention. Empty disables the principal.
+            NOTIFICATION_SPACE_ATTENTION_SERVICE_TOKEN: ${NOTIFICATION_SPACE_ATTENTION_SERVICE_TOKEN:-}
             # Cross-plane org-deletion subscriber: a SECOND, narrowly-scoped NATS
             # identity (notification-core-gdpr) on the shared Control-Plane broker,
             # kept distinct from NATS_URL/NATS_SHARED_URL/VEREVON_NATS_URL above,

@@ -1,0 +1,172 @@
+/*
+ * Room timeline scroll behaviour (WS15-S1). Everything here applies only when the timeline carries
+ * `data-anchored`, which the component sets under `features.timeline_anchor`; flag off, none of it
+ * matches and the room renders as before. Its own sheet on purpose: global.css is a shared monolith.
+ *
+ * The timeline list is already the room's single scroll root (space-room-layout.css docks the composer
+ * under it); this sheet adds the parts that make a long room cheap and stable.
+ */
+
+/* The component does the anchoring arithmetic itself, so Safari (no native scroll anchoring) behaves
+   like Chromium and Firefox, and the browser's own adjustment never doubles ours. */
+.verevon-room-timeline[data-anchored] {
+  overflow-anchor: none;
+  overscroll-behavior: contain;
+  position: relative;
+}
+
+/* A post outside the viewport skips layout and paint. The intrinsic size is remembered per post once it
+   has been seen (`auto`), so the scrollbar settles instead of jumping. */
+.verevon-room-timeline[data-anchored] > .verevon-room-post {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 220px;
+}
+
+/* The jump pill sticks to the bottom edge of the scroll root while the reader is scrolled up. */
+.verevon-room-timeline[data-anchored] > .verevon-room-jump-item {
+  position: sticky;
+  bottom: 8px;
+  z-index: 2;
+  display: flex;
+  justify-content: center;
+  height: 0;
+  overflow: visible;
+  pointer-events: none;
+  list-style: none;
+}
+
+.verevon-room-jump {
+  pointer-events: auto;
+  align-self: flex-end;
+  transform: translateY(-100%);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 32px;
+  padding: 0 14px;
+  border: 1px solid var(--verevon-border);
+  border-radius: 999px;
+  background: var(--verevon-surface);
+  color: var(--verevon-text, inherit);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.18);
+  cursor: pointer;
+}
+
+.verevon-room-jump[data-new='true'] {
+  border-color: color-mix(in srgb, var(--verevon-accent, currentColor) 60%, var(--verevon-border));
+}
+
+.verevon-room-jump:focus-visible {
+  outline: 2px solid var(--verevon-accent, currentColor);
+  outline-offset: 2px;
+}
+
+/* The "N earlier turns" row inside a post whose transcript is longer than the window. */
+.verevon-room-turns-gap {
+  display: flex;
+  margin: 2px 0 2px 42px;
+}
+
+.verevon-room-turns-gap__button {
+  border: 0;
+  background: transparent;
+  padding: 2px 6px;
+  border-radius: 6px;
+  color: var(--verevon-text-muted, inherit);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.verevon-room-turns-gap__button:hover {
+  background: color-mix(in srgb, var(--verevon-border) 40%, transparent);
+}
+
+.verevon-room-turns-gap__button:focus-visible {
+  outline: 2px solid var(--verevon-accent, currentColor);
+  outline-offset: 2px;
+}
+
+/* WS15-S8: the windowed timeline's "Load earlier / newer" rows and the pinned shelf. */
+.verevon-room-earlier-item {
+  display: flex;
+  justify-content: center;
+  list-style: none;
+  padding: 8px 0;
+}
+
+.verevon-room-earlier {
+  min-height: 32px;
+  padding: 0 14px;
+  border: 1px solid var(--verevon-border);
+  border-radius: 999px;
+  background: var(--verevon-surface);
+  color: var(--verevon-text-muted, inherit);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.verevon-room-earlier:disabled {
+  cursor: progress;
+  opacity: 0.7;
+}
+
+.verevon-room-earlier:focus-visible,
+.verevon-room-shelf__row:focus-visible {
+  outline: 2px solid var(--verevon-accent, currentColor);
+  outline-offset: 2px;
+}
+
+.verevon-room-shelf-item {
+  list-style: none;
+  padding: 4px 0 8px;
+}
+
+.verevon-room-shelf {
+  border: 1px solid var(--verevon-border);
+  border-radius: 10px;
+  padding: 8px 12px;
+  background: color-mix(in srgb, var(--verevon-surface) 92%, transparent);
+}
+
+.verevon-room-shelf__title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 0 4px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--verevon-text-muted, inherit);
+}
+
+.verevon-room-shelf__list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.verevon-room-shelf__row {
+  display: block;
+  width: 100%;
+  padding: 4px 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.verevon-room-shelf__row:disabled {
+  cursor: default;
+}

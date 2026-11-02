@@ -108,6 +108,11 @@ func RenderTranscript(msgs []*mpv1.SessionMessage) string {
 	}
 	var b strings.Builder
 	for _, m := range msgs {
+		// A deleted message (WS12-S4) has no content left and must not teach the reviewer
+		// anything; its tombstone is not part of the conversation either.
+		if m.GetRevisionState() == "deleted" {
+			continue
+		}
 		b.WriteString(strings.ToUpper(m.GetRole()))
 		b.WriteString(": ")
 		b.WriteString(m.GetContent())

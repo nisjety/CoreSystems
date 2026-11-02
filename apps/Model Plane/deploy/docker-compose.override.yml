@@ -12,13 +12,33 @@ services:
       ALLOWED_MODELS: ""
       # Wave 7 — dev profile enables fine-tuning routes; production keeps off.
       FINETUNE_ENABLED: "1"
+      SPACE_RUN_WORK_SUMMARY: "true"
+      SPACE_RUN_LIVE_VIEW: "true"
+      SPACE_RUN_LIVE_TEXT: "true"
+      SPACE_RUN_MANAGER_STOP: "true"
+      SPACE_ATTENTION_SUMMARY: "1"
+      SPACE_TIMELINE_API: "1"
+      SPACE_MESSAGE_SEARCH_API: "1"
       FINETUNE_ORG_BUDGET_USD: "50"
       FINETUNE_PER_JOB_BUDGET_USD: "20"
+      SPACE_HUMAN_POSTS_API: "1"
+      SPACE_MESSAGE_REVISE_API: "1"
+      SPACE_WAKE_API: "1"
 
   session-core:
     environment:
       RUST_LOG: debug
       COMPACTION_THRESHOLD: "200000"
+      SPACE_RUN_THREAD_GUARD: "true"
+      SPACE_HUMAN_POSTS_CORE: "1"
+      SPACE_MESSAGE_REVISE_CORE: "1"
+      SPACE_MENTION_RECORDS_CORE: "1"
+      SPACE_WAKE_CORE: "1"
+      SPACE_MESSAGE_SEARCH_CORE: "1"
+      SPACE_ATTENTION_SUMMARY: "1"
+      SPACE_TIMELINE_CORE: "1"
+      SESSION_CORE_APPROVAL_MEMBER_DECIDE: "1"
+      SESSION_CORE_SPACE_HISTORY_FLOOR: "1"
 
   inference-core:
     environment:

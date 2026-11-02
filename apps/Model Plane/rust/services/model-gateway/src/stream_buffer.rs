@@ -60,6 +60,31 @@ pub fn scoped_stream_key(org_id: &str, user_id: &str, request_id: &str) -> Strin
     format!("{org_id}{KEY_SEPARATOR}{user_id}{KEY_SEPARATOR}{request_id}")
 }
 
+/// Redis key prefix of the run pointer index (WS09-S3).
+const RUN_POINTER_PREFIX: &str = "mp:gw:streamrun:";
+
+/// Where the buffer of a run's turn lives, found by the run id alone (WS09-S3).
+///
+/// The buffer is keyed by the OWNER's identity (see [`scoped_stream_key`]); a room member holds only
+/// a run id. This pointer is the one bridge: it names the scoped key and the persona the turn
+/// answered as, and nothing else. It is content-free and carries no authority: a reader must be
+/// authorized by Session Core BEFORE it resolves one, and the pointer itself is org-scoped, so a
+/// run id from another org misses.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunPointer {
+    /// The key the run's frames are buffered under.
+    pub key: String,
+    /// The persona (agent name) the turn answered as; empty when it was the default.
+    #[serde(default)]
+    pub persona: String,
+}
+
+/// `{org}\x1f{run_id}`: the org comes from the verified identity, so no run id can reach into
+/// another tenant's pointer.
+fn run_pointer_key(org_id: &str, run_id: &str) -> String {
+    format!("{org_id}{KEY_SEPARATOR}{run_id}")
+}
+
 /// A single buffered SSE frame plus its sequence id.
 ///
 /// # Rich events, and reading records written before them
@@ -163,6 +188,8 @@ impl BufferedStream {
 #[derive(Clone, Default)]
 pub struct InMemoryStreamBuffer {
     inner: Arc<Mutex<HashMap<String, BufferedStream>>>,
+    /// Run pointers (WS09-S3), keyed by [`run_pointer_key`], each with its write time.
+    runs: Arc<Mutex<HashMap<String, (RunPointer, Instant)>>>,
 }
 
 impl InMemoryStreamBuffer {
@@ -255,6 +282,22 @@ impl InMemoryStreamBuffer {
     fn sweep(map: &mut HashMap<String, BufferedStream>) {
         let now = Instant::now();
         map.retain(|_, s| now.duration_since(s.updated) < STREAM_TTL);
+    }
+
+    fn index_run(&self, key: String, pointer: RunPointer) {
+        let Ok(mut map) = self.runs.lock() else {
+            return;
+        };
+        let now = Instant::now();
+        map.retain(|_, (_, written)| now.duration_since(*written) < STREAM_TTL);
+        map.insert(key, (pointer, now));
+    }
+
+    fn resolve_run(&self, key: &str) -> Option<RunPointer> {
+        let map = self.runs.lock().ok()?;
+        map.get(key)
+            .filter(|(_, written)| written.elapsed() < STREAM_TTL)
+            .map(|(pointer, _)| pointer.clone())
     }
 }
 
@@ -645,6 +688,41 @@ impl StreamBufferStore {
         match self {
             Self::Memory(m) => m.replay_after(request_id, after_seq),
             Self::Redis(r) => r.replay_after(request_id, after_seq).await,
+        }
+    }
+
+    /// Record, for a run, where its buffer lives (WS09-S3). Written by the owner's producer after it
+    /// registers the run, never for a zero-retention turn (that path has no buffer). Best effort,
+    /// same TTL as the frames: when it lapses the buffer is gone too. Overwrites a pointer for the
+    /// same org and run.
+    pub async fn index_run(&self, org_id: &str, run_id: &str, scoped_key: &str, persona: &str) {
+        let key = run_pointer_key(org_id, run_id);
+        let pointer = RunPointer {
+            key: scoped_key.to_owned(),
+            persona: persona.to_owned(),
+        };
+        match self {
+            Self::Memory(m) => m.index_run(key, pointer),
+            Self::Redis(r) => {
+                if let Ok(value) = serde_json::to_string(&pointer) {
+                    r.kv_set(&format!("{RUN_POINTER_PREFIX}{key}"), &value, STREAM_TTL_SECS as u64)
+                        .await;
+                }
+            }
+        }
+    }
+
+    /// The pointer for `(org_id, run_id)`, or `None` when there is none, it expired, the store is
+    /// unreachable, or the run belongs to another org. Does not authorize anything.
+    #[must_use]
+    pub async fn resolve_run(&self, org_id: &str, run_id: &str) -> Option<RunPointer> {
+        let key = run_pointer_key(org_id, run_id);
+        match self {
+            Self::Memory(m) => m.resolve_run(&key),
+            Self::Redis(r) => {
+                let raw = r.kv_get(&format!("{RUN_POINTER_PREFIX}{key}")).await?;
+                serde_json::from_str(&raw).ok()
+            }
         }
     }
 }

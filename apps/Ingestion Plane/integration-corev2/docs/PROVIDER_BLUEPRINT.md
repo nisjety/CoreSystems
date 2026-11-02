@@ -74,7 +74,7 @@ Each provider should add these pieces in order:
 | Shopify | yes | yes | Requires `providerContext.shop` or `shop` in connect-session requests. |
 | Stripe | yes | yes | Stripe Connect OAuth plus signed webhook intake and billing support actions. |
 | Okta | yes | no | Admin/API-token adapter. User/group discovery and lifecycle actions require explicit admin consent. |
-| SCIM | yes | no | Inbound provisioning endpoint model with per-org bearer token; no OAuth flow. |
+| SCIM | yes | no | Not implemented here: routes answer 501 and the provider reports `unavailable`; no OAuth flow. |
 
 ## Capability Rules
 

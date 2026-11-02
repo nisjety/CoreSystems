@@ -177,25 +177,19 @@ Exit gates:
 
 ## Phase 8: Enterprise Identity And Provisioning
 
-Status: mostly complete; Okta admin read/lifecycle actions, durable hashed
-per-org SCIM token CRUD, SCIM token last-used tracking, org-scoped SCIM bearer
-auth, safe provisioning-event storage, and NATS forwarding are implemented.
-Remaining work is downstream lifecycle orchestration into Control
-Plane/Application Plane.
+Status: Okta admin read/lifecycle actions are implemented. SCIM inbound
+provisioning is NOT implemented in this service: the SCIM routes answer an
+honest 501 and persist nothing (WS05-S2). Real SCIM is planned in Control Plane
+org-core behind a gateway edge, not here.
 
 Scope:
 
 - Complete Okta admin/API-token adapter.
-- Complete SCIM inbound provisioning endpoints.
-- Add org-scoped SCIM bearer token model instead of one global token.
-- Store provisioning events as safe integration events.
-- Forward identity lifecycle events to Control Plane/Application Plane where needed.
+- SCIM inbound provisioning moved out of this service (Control Plane org-core, WS05-S8).
 
 Exit gates:
 
-- SCIM bearer auth is org-scoped.
-- SCIM tokens are stored hashed and can be revoked.
-- Replay and duplicate SCIM calls are safe.
+- SCIM routes answer 501 and store nothing; legacy stub payloads are redacted.
 - Okta lifecycle actions are admin-consent gated and audited.
 
 ## Phase 9: Verevon V2 Integration

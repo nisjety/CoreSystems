@@ -126,6 +126,7 @@ fn approval_kind_to_proto(k: ApprovalKind) -> i32 {
         ApprovalKind::Permission => ProtoApprovalKind::Permission as i32,
         ApprovalKind::Destructive => ProtoApprovalKind::Destructive as i32,
         ApprovalKind::Cost => ProtoApprovalKind::Cost as i32,
+        ApprovalKind::UntrustedContent => ProtoApprovalKind::UntrustedContent as i32,
     }
 }
 
@@ -196,6 +197,7 @@ fn approval_kind_from_proto(code: i32) -> Result<ApprovalKind, ShimError> {
         ProtoApprovalKind::Permission => Ok(ApprovalKind::Permission),
         ProtoApprovalKind::Destructive => Ok(ApprovalKind::Destructive),
         ProtoApprovalKind::Cost => Ok(ApprovalKind::Cost),
+        ProtoApprovalKind::UntrustedContent => Ok(ApprovalKind::UntrustedContent),
     }
 }
 

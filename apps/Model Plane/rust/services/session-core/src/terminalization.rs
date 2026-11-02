@@ -7,6 +7,7 @@
 
 use crate::continuation_crypto::DescriptorCipher;
 use crate::retention_receipt::{self, RetentionClass, RunRetention};
+use crate::space::mentions::VerifiedWake;
 use chrono::{DateTime, Utc};
 use mp_contracts::model_plane::v1 as pb;
 use mp_events::idempotency::derive_idempotency_hash;
@@ -394,9 +395,8 @@ fn validate_managed_start_request(
     }
     if zdr {
         if !request.thread_id.is_empty() {
-            return Err(Status::failed_precondition(
-                "ZDR managed runs require a fresh metadata-only thread",
-            ));
+            return Err(mp_contracts::zdr_refusal::Refusal::feature_not_supported("agent_run")
+                .grpc_status(tonic::Code::FailedPrecondition));
         }
         return Ok(source);
     }
@@ -462,6 +462,9 @@ struct ExistingManagedStart {
     retention_class: String,
     waiver_ack_id: Option<String>,
     waiver_connection_id: Option<String>,
+    /// WS08-S2: the wake pair the run was started with (both NULL for every other run).
+    trigger_message_id: Option<String>,
+    agent_subject_id: Option<String>,
 }
 
 /// A retry is the same start only if it carries the same receipt. A waiver
@@ -481,7 +484,16 @@ fn existing_start_matches(
     request: &pb::StartManagedRunRequest,
     zdr: bool,
     source: pb::ManagedRunSource,
+    wake: Option<&VerifiedWake>,
 ) -> bool {
+    // A reused start key must name the same wake pair (or none): another post or another agent
+    // under the same key is a different start. ZDR never reaches here with a wake (typed
+    // refusal first), so the pair of a ZDR run is always NULL.
+    if existing.trigger_message_id.as_deref() != wake.map(|w| w.trigger_message_id.as_str())
+        || existing.agent_subject_id.as_deref() != wake.map(|w| w.agent_subject_id.as_str())
+    {
+        return false;
+    }
     if existing.zdr != zdr
         || source_storage_name(source) != Some(existing.configured_source.as_str())
         || canonical_terminal_step(source) != Some(existing.configured_terminal_step_id.as_str())
@@ -557,6 +569,7 @@ async fn insert_managed_run_started(
     persisted: &ManagedStartPersistence,
     source: pb::ManagedRunSource,
     retention: &RunRetention,
+    wake: Option<&VerifiedWake>,
     now: DateTime<Utc>,
 ) -> Result<(), Status> {
     let zdr = retention.class == RetentionClass::Zdr;
@@ -577,10 +590,11 @@ async fn insert_managed_run_started(
     ) = sqlx::query_as(
         "INSERT INTO runs (id, thread_id, parent_run_id, agent_id, goal, mode, org_id, user_id, status, residency, created_at, updated_at,
                           space_id, space_decision_ref, recipient_audience_ref, recipient_audience_revision, recipient_audience_hash, privacy_policy_ref, resource_authorization_ref, authority_revision,
-                          retention_class, waiver_ack_id, waiver_connection_id)
+                          retention_class, waiver_ack_id, waiver_connection_id,
+                          turn_origin, trigger_message_id, agent_subject_id)
          SELECT $1, t.id, NULLIF($3, ''), $4, $5, $6, $7, $8, 'queued', $9, $10, $10,
                 t.space_id, t.space_decision_ref, t.recipient_audience_ref, t.recipient_audience_revision, t.recipient_audience_hash, t.privacy_policy_ref, t.resource_authorization_ref, t.authority_revision,
-                $11, $12, $13
+                $11, $12, $13, $14, $15, $16
          FROM threads AS t
          WHERE t.id = $2 AND t.org_id = $7 AND t.user_id = $8
          RETURNING space_id, space_decision_ref, recipient_audience_ref, recipient_audience_revision, recipient_audience_hash, privacy_policy_ref, resource_authorization_ref, authority_revision",
@@ -598,6 +612,10 @@ async fn insert_managed_run_started(
     .bind(retention.class.as_str())
     .bind(retention.ack_id())
     .bind(retention.connection_id())
+    // WS08-S2: from the verified decision, never from a caller field.
+    .bind(wake.map(|w| w.turn_origin.as_str()))
+    .bind(wake.map(|w| w.trigger_message_id.as_str()))
+    .bind(wake.map(|w| w.agent_subject_id.as_str()))
     .fetch_optional(&mut **transaction)
     .await
     .map_err(database_error)?
@@ -726,12 +744,32 @@ pub(crate) async fn start_managed_run_inner(
 /// [`RunRetention::from_caller`]). It is recorded immutably on the run, and a
 /// child run must match its parent's receipt ([`RunRetention::inherit_from`]).
 #[allow(clippy::result_large_err)]
+#[cfg_attr(not(test), allow(dead_code))] // the wake-less entry the tests and older callers use
 pub(crate) async fn start_managed_run_with_retention_inner(
     pool: &PgPool,
     request: pb::StartManagedRunRequest,
     retention: RunRetention,
 ) -> Result<ManagedRunStart, Status> {
+    start_managed_run_with_wake_inner(pool, request, retention, None).await
+}
+
+/// [`start_managed_run_with_retention_inner`] for a wake (WS08-S2): `wake` is the already
+/// verified decision and stored-fact check of `StartManagedRun.wake`. The run row carries its
+/// `turn_origin`, `trigger_message_id` and `agent_subject_id`, and a reused start key must name
+/// the same pair. `None` is every other start, unchanged.
+#[allow(clippy::result_large_err)]
+pub(crate) async fn start_managed_run_with_wake_inner(
+    pool: &PgPool,
+    request: pb::StartManagedRunRequest,
+    retention: RunRetention,
+    wake: Option<&VerifiedWake>,
+) -> Result<ManagedRunStart, Status> {
     let zdr = retention.class == RetentionClass::Zdr;
+    if zdr && wake.is_some() {
+        // Backstop: the gRPC handler refuses first.
+        return Err(mp_contracts::zdr_refusal::Refusal::DURABLE_MUTATION_FORBIDDEN
+            .grpc_status(tonic::Code::PermissionDenied));
+    }
     let source = validate_managed_start_request(&request, zdr)?;
     let persisted = managed_start_persistence(&request, zdr);
     let mut transaction = pool.begin().await.map_err(database_error)?;
@@ -754,7 +792,8 @@ pub(crate) async fn start_managed_run_with_retention_inner(
         "SELECT o.run_id, r.thread_id, r.created_at, o.configured_source,
                 o.configured_terminal_step_id, o.zdr, r.parent_run_id,
                 r.agent_id, r.goal, r.mode,
-                r.retention_class, r.waiver_ack_id, r.waiver_connection_id
+                r.retention_class, r.waiver_ack_id, r.waiver_connection_id,
+                r.trigger_message_id, r.agent_subject_id
          FROM managed_run_terminalization_outbox AS o
          JOIN runs AS r ON r.id = o.run_id
          WHERE o.org_id = $1 AND o.user_id = $2 AND o.start_key = $3
@@ -767,7 +806,7 @@ pub(crate) async fn start_managed_run_with_retention_inner(
     .await
     .map_err(database_error)?;
     if let Some(existing) = existing {
-        if !existing_start_matches(&existing, &request, zdr, source)
+        if !existing_start_matches(&existing, &request, zdr, source, wake)
             || !existing_retention_matches(&existing, &retention)
         {
             return Err(Status::already_exists(
@@ -804,6 +843,12 @@ pub(crate) async fn start_managed_run_with_retention_inner(
     } else {
         persisted.thread_id.clone()
     };
+    // One live root run per Space thread (WS09-S1). After the idempotent branch
+    // above, so a replay of the same start key is never refused; skipped for a
+    // child run and for the metadata thread a ZDR start creates.
+    if persisted.parent_run_id.is_empty() && !persisted.create_metadata_thread {
+        crate::run_phase::ensure_thread_idle(&mut transaction, &request.org_id, &thread_id).await?;
+    }
     let run_id = new_ulid();
     insert_managed_run_started(
         &mut transaction,
@@ -813,6 +858,7 @@ pub(crate) async fn start_managed_run_with_retention_inner(
         &persisted,
         source,
         &retention,
+        wake,
         now,
     )
     .await?;
@@ -1658,9 +1704,8 @@ pub(crate) async fn complete_direct_run_with_message_inner(
     // from the user's verified credential, not the service credential's (see
     // `authorize_direct_completion`).
     if completion.zdr {
-        return Err(Status::failed_precondition(
-            "a zero-retention run has no durable assistant message",
-        ));
+        return Err(mp_contracts::zdr_refusal::Refusal::DURABLE_MUTATION_FORBIDDEN
+            .grpc_status(tonic::Code::FailedPrecondition));
     }
     // The answer's memories are mirrored under the run's receipt. A waived run's
     // memories stay local: they never reach the external memory service (Z-17).
@@ -4432,5 +4477,39 @@ mod park_recovery_db_tests {
             .await
             .expect("claimed once the thread is free");
         assert_eq!(won.kind, "park");
+    }
+}
+
+/// WS06-S1: a ZDR managed start that names an existing thread is the typed
+/// `zdr_feature_not_supported` refusal for the `agent_run` feature.
+#[cfg(test)]
+mod zdr_refusal_tests {
+    use super::*;
+    use mp_contracts::zdr_refusal::Refusal;
+
+    fn start(thread_id: &str) -> pb::StartManagedRunRequest {
+        pb::StartManagedRunRequest {
+            thread_id: thread_id.to_owned(),
+            org_id: "org-1".to_owned(),
+            user_id: "user-1".to_owned(),
+            start_key: "opaque-start-1".to_owned(),
+            terminal_source: pb::ManagedRunSource::GatewayDirect as i32,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn zdr_refusal_managed_start_with_a_thread_names_the_agent_run_feature() {
+        let status = validate_managed_start_request(&start("thread-1"), true)
+            .expect_err("a ZDR run needs a fresh metadata-only thread");
+        assert_eq!(status.code(), tonic::Code::FailedPrecondition);
+        let refusal = Refusal::from_status(&status).expect("typed refusal");
+        assert_eq!(refusal.code(), mp_contracts::zdr_refusal::code::FEATURE_NOT_SUPPORTED);
+        assert_eq!(refusal.feature(), Some("agent_run"));
+    }
+
+    #[test]
+    fn zdr_refusal_managed_start_without_a_thread_is_accepted() {
+        assert!(validate_managed_start_request(&start(""), true).is_ok());
     }
 }

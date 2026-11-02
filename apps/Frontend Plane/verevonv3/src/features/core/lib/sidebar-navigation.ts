@@ -71,6 +71,8 @@ export type SidebarPanelItem = {
   aliases?: string[]
   /** Do not mark this base route active when another Support view is selected. */
   exactPathMatch?: boolean
+  /** WS11-S4: draw the server's cross-room attention total beside the label. Display only; unknown draws nothing. */
+  badge?: 'attention'
   tabId?: string
   subItems?: Array<{
     id: string
@@ -124,7 +126,8 @@ export const sidebarSections: SidebarSection[] = [
           // Points at the /spaces resolver, not /spaces/:spaceId — the sidebar
           // has no Space ref to build a direct link from. `aliases` keeps the
           // item highlighted once the resolver has forwarded to a real room.
-          { id: 'overview-spaces', label: 'Rom', href: '/spaces', icon: Users, description: 'Delt rom for samtaler, arbeid, kunnskap og medlemmer.', tabId: 'my-account', aliases: ['/spaces'] },
+          { id: 'overview-spaces', label: 'Rom', href: '/spaces', icon: Users, description: 'Delt rom for samtaler, arbeid, kunnskap og medlemmer.', tabId: 'my-account', aliases: ['/spaces'], badge: 'attention' },
+          { id: 'overview-attention', label: 'Trenger deg', href: '/attention', icon: Inbox, description: 'Omtaler, svar, agenter og godkjenninger som venter på deg, på tvers av rom.', tabId: 'my-account' },
           { id: 'overview-studio', label: 'Studio', href: '/studio/canvas', icon: PanelsTopLeft, description: 'Bygg kampanjer, pakker og visuelle planer på canvas.', tabId: 'my-account' },
           { id: 'overview-inbox', label: 'Support', href: '/support', icon: Inbox, description: 'Samtaler, saker, AI-gjennomgang og SLA i én arbeidsflyt.', tabId: 'my-account' },
           { id: 'overview-social', label: 'Social', href: '/social/calendar', icon: CalendarDays, description: 'Planlegg postkalender, godkjenninger og kanaler.', tabId: 'shared' },

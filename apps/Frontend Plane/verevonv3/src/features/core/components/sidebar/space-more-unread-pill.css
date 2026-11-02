@@ -1,0 +1,67 @@
+/* WS16-S10: the "more unread" pill. It sticks to the bottom (or the top when every hidden badge is
+   above) of the scrolling Spaces list. Tokens only, so dark mode, forced-colors and density apply. */
+
+.space-more-unread {
+  position: sticky;
+  bottom: 8px;
+  z-index: 20;
+  display: flex;
+  justify-content: center;
+  height: 0;
+  overflow: visible;
+  pointer-events: none;
+}
+
+.space-more-unread[data-side='above'] {
+  top: 8px;
+  bottom: auto;
+  order: -1;
+}
+
+.space-more-unread__button {
+  pointer-events: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 28px;
+  padding: 4px 12px;
+  border: 1px solid var(--verevon-border);
+  border-radius: 14px;
+  background: var(--verevon-accent-ink);
+  color: var(--verevon-surface, #fff);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transform: translateY(-100%);
+  box-shadow: var(--shadow-md);
+}
+
+.space-more-unread[data-side='above'] .space-more-unread__button {
+  transform: none;
+}
+
+.space-more-unread__button:focus-visible {
+  outline: 2px solid var(--verevon-accent-ink);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .space-more-unread__button { transition: opacity 0.12s ease; }
+}
+
+@media (forced-colors: active) {
+  .space-more-unread__button {
+    border: 1px solid CanvasText;
+    background: Canvas;
+    color: CanvasText;
+  }
+}
+
+/* Computed sections: a muted room's row, and the Smart sections menu above the list. */
+.space-sidebar-row[data-muted='true'] .core-sidebar-panel-link__label { opacity: 0.65; }
+.space-sidebar-muted-icon { flex: none; margin-left: 4px; color: var(--verevon-text-muted); }
+.space-sidebar-computed-bar { display: flex; justify-content: flex-end; margin: 0 4px 4px; }
+.space-sidebar-computed-bar .space-sidebar-menu > summary {
+  display: inline-flex; width: auto; padding: 0 8px; gap: 6px; font-size: 12px;
+}

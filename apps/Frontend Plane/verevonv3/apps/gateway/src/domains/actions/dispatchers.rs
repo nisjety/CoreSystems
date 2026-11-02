@@ -931,7 +931,7 @@ fn ticket_remap(input: &Value, pairs: &[(&str, &str)]) -> serde_json::Map<String
     out
 }
 
-fn ticket_string<'a>(input: &'a Value, key: &str) -> &'a str {
+pub(super) fn ticket_string<'a>(input: &'a Value, key: &str) -> &'a str {
     input
         .get(key)
         .and_then(Value::as_str)
@@ -961,7 +961,7 @@ fn ticket_classification_body(input: &Value) -> serde_json::Map<String, Value> {
     body
 }
 
-fn ticket_bad_request(message: &str) -> Response {
+pub(super) fn ticket_bad_request(message: &str) -> Response {
     (
         StatusCode::BAD_REQUEST,
         Json(error("invalid_input", message)),
@@ -3372,9 +3372,15 @@ pub(super) async fn dispatch_inbox_workspace_set_read(
     owner_json_response_to_envelope("inbox.set_conversation_read", user, status, resp)
 }
 
+// WS14-S4: both actions go to documents-api (the owning service), which proves
+// the signed-in user owns the document before Control writes the grant. The
+// gateway no longer calls Control's grant surface. The actions stay out of
+// MODEL_EXECUTABLE_ACTION_IDS (model-access.ts exempts them as no_owner_executor),
+// so only the signed-in user reaches these dispatchers.
 pub(super) async fn dispatch_ownership_share_document(
     state: &AppState,
     user: &AuthenticatedUser,
+    headers: &HeaderMap,
     input: &Value,
 ) -> Response {
     let doc_id = ticket_string(input, "docId");
@@ -3384,24 +3390,9 @@ pub(super) async fn dispatch_ownership_share_document(
             "ownership.share_document requires non-empty 'docId' and 'subjectId'",
         );
     }
-    let org_id = crate::upstream::authorized_org_id(state, user).await;
-    let actor = actor_for_user(user);
-    let url = format!("{}/api/v1/internal/authz/grant", state.user_core_url);
-    let payload = json!({
-        "org_id": org_id,
-        "resource_type": "document",
-        "resource_id": doc_id,
-        "subject_id": subject_id,
-        "subject_type": "user",
-    });
-    let (status, Json(resp)) = proxy_json(
-        state,
-        Method::POST,
-        &url,
-        Some(payload),
-        Some(&org_id),
-        Some(&actor),
-        None,
+    let role = input.get("role").and_then(Value::as_str);
+    let (status, resp) = crate::domains::shares::share_document_upstream(
+        state, user, headers, doc_id, subject_id, role,
     )
     .await;
     owner_json_response_to_envelope("ownership.share_document", user, status, resp)
@@ -3410,6 +3401,7 @@ pub(super) async fn dispatch_ownership_share_document(
 pub(super) async fn dispatch_ownership_revoke_document_share(
     state: &AppState,
     user: &AuthenticatedUser,
+    headers: &HeaderMap,
     input: &Value,
 ) -> Response {
     let doc_id = ticket_string(input, "docId");
@@ -3419,23 +3411,8 @@ pub(super) async fn dispatch_ownership_revoke_document_share(
             "ownership.revoke_document_share requires non-empty 'docId' and 'subjectId'",
         );
     }
-    let org_id = crate::upstream::authorized_org_id(state, user).await;
-    let actor = actor_for_user(user);
-    let url = format!(
-        "{}/api/v1/internal/authz/grant?org_id={}&resource_type=document&resource_id={}&subject_id={}&subject_type=user",
-        state.user_core_url,
-        urlencoding::encode(&org_id),
-        urlencoding::encode(doc_id),
-        urlencoding::encode(subject_id),
-    );
-    let (status, Json(resp)) = proxy_json(
-        state,
-        Method::DELETE,
-        &url,
-        None,
-        Some(&org_id),
-        Some(&actor),
-        None,
+    let (status, resp) = crate::domains::shares::revoke_document_share_upstream(
+        state, user, headers, doc_id, subject_id,
     )
     .await;
     owner_json_response_to_envelope("ownership.revoke_document_share", user, status, resp)
@@ -6355,7 +6332,10 @@ pub(super) async fn dispatch_space_add_member(
         StateExtractor(state.clone()),
         ExtensionExtractor(user.clone()),
         PathExtractor(space_ref.to_owned()),
-        Json(json!({ "member_id": member_id })),
+        Json(match ticket_string(input, "role") {
+            "" => json!({ "member_id": member_id }),
+            role => json!({ "member_id": member_id, "role": role }),
+        }),
     )
     .await;
     owner_json_response_to_envelope("spaces.add_member", user, status, payload)

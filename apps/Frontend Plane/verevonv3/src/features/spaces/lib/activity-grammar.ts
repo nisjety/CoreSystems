@@ -34,6 +34,23 @@
  *   generic row rather than inventing a richer reading of it.
  */
 
+import { spaceThreadHref } from './space-thread-deep-link'
+import {
+  COPY,
+  exitedWithCode,
+  grantedAtDetail,
+  grantedByDetail,
+  noTr,
+  requestedByDetail,
+  revokedByDetail,
+  runsScheduleOutcome,
+  say,
+  stepsDetail,
+  ticketDetail,
+  type CopyPair,
+  type Tr,
+} from './space-copy'
+
 /**
  * The render classes implemented today.
  *
@@ -116,25 +133,25 @@ export interface SpaceActivityItem {
  * grammar yet" and correctly falls through to the honest generic row.
  */
 const RUN_STATUS: Readonly<
-  Record<string, { label: string; tone: ActivityTone; salience: ActivitySalience; live: boolean }>
+  Record<string, { label: CopyPair; tone: ActivityTone; salience: ActivitySalience; live: boolean }>
 > = {
   // Needs a human. The whole point of "failures rise".
-  awaiting_approval: { label: 'venter på godkjenning', tone: 'pending', salience: 'critical', live: true },
-  failed: { label: 'feilet', tone: 'failure', salience: 'critical', live: false },
-  timed_out: { label: 'tidsavbrutt', tone: 'failure', salience: 'critical', live: false },
-  denied: { label: 'avslått', tone: 'failure', salience: 'attention', live: false },
-  rejected: { label: 'avvist', tone: 'failure', salience: 'attention', live: false },
+  awaiting_approval: { label: COPY.run.awaitingApproval, tone: 'pending', salience: 'critical', live: true },
+  failed: { label: COPY.run.failed, tone: 'failure', salience: 'critical', live: false },
+  timed_out: { label: COPY.run.timedOut, tone: 'failure', salience: 'critical', live: false },
+  denied: { label: COPY.run.denied, tone: 'failure', salience: 'attention', live: false },
+  rejected: { label: COPY.run.rejected, tone: 'failure', salience: 'attention', live: false },
 
   // In flight.
-  running: { label: 'kjører', tone: 'pending', salience: 'attention', live: true },
-  queued: { label: 'i kø', tone: 'pending', salience: 'normal', live: true },
-  pending: { label: 'venter', tone: 'pending', salience: 'normal', live: true },
+  running: { label: COPY.run.running, tone: 'pending', salience: 'attention', live: true },
+  queued: { label: COPY.run.queued, tone: 'pending', salience: 'normal', live: true },
+  pending: { label: COPY.run.pending, tone: 'pending', salience: 'normal', live: true },
 
   // Done and unremarkable — these recede.
-  completed: { label: 'fullført', tone: 'success', salience: 'muted', live: false },
-  succeeded: { label: 'fullført', tone: 'success', salience: 'muted', live: false },
-  approved: { label: 'godkjent', tone: 'success', salience: 'muted', live: false },
-  cancelled: { label: 'avbrutt', tone: 'neutral', salience: 'muted', live: false },
+  completed: { label: COPY.run.completed, tone: 'success', salience: 'muted', live: false },
+  succeeded: { label: COPY.run.completed, tone: 'success', salience: 'muted', live: false },
+  approved: { label: COPY.run.approved, tone: 'success', salience: 'muted', live: false },
+  cancelled: { label: COPY.run.cancelled, tone: 'neutral', salience: 'muted', live: false },
 }
 
 const SALIENCE_ORDER: Readonly<Record<ActivitySalience, number>> = {
@@ -164,12 +181,12 @@ export interface ThreadLikeActivitySource {
 }
 
 /** "Resolve references": a readable object, never a raw id. */
-function resolveObject(source: ThreadLikeActivitySource): string {
+function resolveObject(source: ThreadLikeActivitySource, tr: Tr): string {
   const title = source.title?.trim()
   if (title) return title
   const preview = source.preview?.trim()
   if (preview) return preview.length > 80 ? `${preview.slice(0, 80)}…` : preview
-  return 'Uten tittel'
+  return say(tr, COPY.fallback.untitled)
 }
 
 /**
@@ -179,8 +196,8 @@ function resolveObject(source: ThreadLikeActivitySource): string {
  * because they answer different questions: "what is being discussed" and "what
  * does it need from me". Collapsing them would bury the second.
  */
-export function activityFromThread(source: ThreadLikeActivitySource): SpaceActivityItem[] {
-  const object = resolveObject(source)
+export function activityFromThread(source: ThreadLikeActivitySource, tr: Tr = noTr): SpaceActivityItem[] {
+  const object = resolveObject(source, tr)
   // Space activity is owned by the Space surface. Keep the legacy Chat
   // fallback only for older projections that predate `space_id`; current
   // SpaceThread responses always include it, so a foreign Space thread cannot
@@ -196,16 +213,14 @@ export function activityFromThread(source: ThreadLikeActivitySource): SpaceActiv
   // the decision that unblocks it — actually lives. Landing the reader on
   // whichever tab the hash happened to hold would show them a count of work
   // needing them and no way to do it.
-  const href = owner
-    ? `/spaces/${encodeURIComponent(owner)}?thread_id=${encodeURIComponent(source.thread_id)}#chat`
-    : undefined
+  const href = owner ? spaceThreadHref(owner, source.thread_id) : undefined
 
   const conversation: SpaceActivityItem = {
     id: `thread:${source.thread_id}`,
     renderClass: 'conversation',
-    verb: 'Samtale',
+    verb: say(tr, COPY.verb.conversation),
     object,
-    outcome: { label: 'åpen', tone: 'neutral', live: false },
+    outcome: { label: say(tr, COPY.conversationOpen), tone: 'neutral', live: false },
     salience: 'normal',
     ...(source.updated_at ? { at: source.updated_at } : {}),
     href,
@@ -219,9 +234,9 @@ export function activityFromThread(source: ThreadLikeActivitySource): SpaceActiv
     ? {
         id: `run:${source.latest_run_id ?? source.thread_id}`,
         renderClass: 'run',
-        verb: 'Kjøring',
+        verb: say(tr, COPY.verb.run),
         object,
-        outcome: { label: known.label, tone: known.tone, live: known.live },
+        outcome: { label: say(tr, known.label), tone: known.tone, live: known.live },
         salience: known.salience,
         ...(source.latest_run_updated_at ? { at: source.latest_run_updated_at } : {}),
         href,
@@ -231,7 +246,7 @@ export function activityFromThread(source: ThreadLikeActivitySource): SpaceActiv
         // pretending to understand it. "Never go dark": still rendered.
         id: `run:${source.latest_run_id ?? source.thread_id}`,
         renderClass: 'unknown',
-        verb: 'Kjøring',
+        verb: say(tr, COPY.verb.run),
         object,
         outcome: { label: status, tone: 'neutral', live: false },
         salience: 'normal',
@@ -266,8 +281,9 @@ export function orderActivity(items: readonly SpaceActivityItem[]): SpaceActivit
 /** Build an ordered feed from Space threads. */
 export function buildSpaceActivity(
   threads: readonly ThreadLikeActivitySource[],
+  tr: Tr = noTr,
 ): SpaceActivityItem[] {
-  return orderActivity(threads.flatMap(activityFromThread))
+  return orderActivity(threads.flatMap((thread) => activityFromThread(thread, tr)))
 }
 
 /**
@@ -316,27 +332,25 @@ function asIsoTime(value: string | number | undefined): string | undefined {
   return trimmed ? trimmed : undefined
 }
 
-export function activityFromRun(source: RunLikeActivitySource): SpaceActivityItem | null {
+export function activityFromRun(source: RunLikeActivitySource, tr: Tr = noTr): SpaceActivityItem | null {
   const runId = (source.id ?? source.run_id ?? '').trim()
   if (!runId) return null
-  const object = source.goal?.trim() || 'Uten beskrevet mål'
+  const object = source.goal?.trim() || say(tr, COPY.fallback.noGoal)
   const owner = source.space_id?.trim()
   const threadId = source.thread_id?.trim()
-  const href = owner && threadId
-    ? `/spaces/${encodeURIComponent(owner)}?thread_id=${encodeURIComponent(threadId)}#chat`
-    : undefined
+  const href = owner && threadId ? spaceThreadHref(owner, threadId) : undefined
   const status = source.status?.trim()
   const known = status ? RUN_STATUS[status] : undefined
   const at = asIsoTime(source.updated_at) ?? asIsoTime(source.created_at)
   return {
     id: `work-run:${runId}`,
     renderClass: known ? 'run' : 'unknown',
-    verb: 'Kjøring',
+    verb: say(tr, COPY.verb.run),
     object,
     outcome: known
-      ? { label: known.label, tone: known.tone, live: known.live }
+      ? { label: say(tr, known.label), tone: known.tone, live: known.live }
       : // "Honesty over guessing": an unrecognized status is named as it came.
-        { label: status || 'ukjent tilstand', tone: 'neutral', live: false },
+        { label: status || say(tr, COPY.fallback.unknownState), tone: 'neutral', live: false },
     salience: known ? known.salience : 'normal',
     ...(at ? { at } : {}),
     ...(href ? { href } : {}),
@@ -364,26 +378,27 @@ export interface ScheduleLikeActivitySource {
 
 export function activityFromSchedule(
   source: ScheduleLikeActivitySource,
+  tr: Tr = noTr,
 ): SpaceActivityItem | null {
   const id = (source.id ?? '').trim()
   if (!id) return null
-  const object = source.name?.trim() || source.description?.trim() || 'Uten navn'
+  const object = source.name?.trim() || source.description?.trim() || say(tr, COPY.fallback.unnamed)
   const expression = source.schedule_expr?.trim()
   const enabled = source.enabled !== false
   return {
     id: `work-schedule:${id}`,
     renderClass: 'schedule',
-    verb: 'Planlagt',
+    verb: say(tr, COPY.verb.scheduled),
     object,
     outcome: enabled
       ? {
-          label: expression ? `kjører ${expression}` : 'aktiv',
+          label: expression ? runsScheduleOutcome(tr, expression) : say(tr, COPY.scheduleActive),
           tone: 'pending',
           // Not "live": nothing is moving right now, and a pulsing row would
           // claim otherwise.
           live: false,
         }
-      : { label: 'slått av', tone: 'neutral', live: false },
+      : { label: say(tr, COPY.scheduleOff), tone: 'neutral', live: false },
     // A schedule needs attention only when it is off; an active one is
     // background furniture and recedes, per "reads recede".
     salience: enabled ? 'muted' : 'normal',
@@ -422,46 +437,48 @@ export interface ProcessLikeActivitySource {
 }
 
 const PROCESS_STATE: Readonly<
-  Record<string, { label: string; tone: ActivityTone; salience: ActivitySalience; live: boolean }>
+  Record<string, { label: CopyPair; tone: ActivityTone; salience: ActivitySalience; live: boolean }>
 > = {
-  STARTING: { label: 'starter', tone: 'pending', salience: 'normal', live: true },
-  RUNNING: { label: 'kjører', tone: 'pending', salience: 'normal', live: true },
-  KILLED: { label: 'stoppet', tone: 'failure', salience: 'attention', live: false },
-  EXPIRED: { label: 'tidsavbrutt', tone: 'failure', salience: 'attention', live: false },
-  LOST: { label: 'verten forsvant — utfall ukjent', tone: 'failure', salience: 'critical', live: false },
+  STARTING: { label: COPY.process.starting, tone: 'pending', salience: 'normal', live: true },
+  RUNNING: { label: COPY.process.running, tone: 'pending', salience: 'normal', live: true },
+  KILLED: { label: COPY.process.killed, tone: 'failure', salience: 'attention', live: false },
+  EXPIRED: { label: COPY.process.expired, tone: 'failure', salience: 'attention', live: false },
+  LOST: { label: COPY.process.lost, tone: 'failure', salience: 'critical', live: false },
 }
 
 export function activityFromProcess(
   source: ProcessLikeActivitySource,
+  tr: Tr = noTr,
 ): SpaceActivityItem | null {
   const id = (source.process_id ?? '').trim()
   if (!id) return null
   const state = (source.state ?? '').trim().toUpperCase()
-  const object = source.command?.trim() || 'Bakgrunnsprosess'
+  const object = source.command?.trim() || say(tr, COPY.verb.process)
 
   // EXITED is the only state whose meaning depends on a second field, so it is
   // resolved here rather than in the table: exit 0 is a success and anything
   // else is a failure the reader should see, not a neutral "finished".
-  let outcome = PROCESS_STATE[state]
+  let outcome: { label: CopyPair | string; tone: ActivityTone; salience: ActivitySalience; live: boolean } | undefined =
+    PROCESS_STATE[state]
   if (state === 'EXITED') {
     const code = source.exit_code ?? 0
     outcome =
       code === 0
-        ? { label: 'ferdig', tone: 'success', salience: 'muted', live: false }
-        : { label: `avsluttet med kode ${code}`, tone: 'failure', salience: 'attention', live: false }
+        ? { label: say(tr, COPY.process.done), tone: 'success', salience: 'muted', live: false }
+        : { label: exitedWithCode(tr, code), tone: 'failure', salience: 'attention', live: false }
   }
 
   return {
     id: `work-process:${id}`,
     renderClass: 'process',
-    verb: 'Bakgrunnsprosess',
+    verb: say(tr, COPY.verb.process),
     object,
     outcome: outcome
-      ? { label: outcome.label, tone: outcome.tone, live: outcome.live }
+      ? { label: typeof outcome.label === 'string' ? outcome.label : say(tr, outcome.label), tone: outcome.tone, live: outcome.live }
       : // Honesty over guessing, as everywhere else in this grammar: a state
         // this build has not been taught is named as it came rather than
         // flattened into "finished".
-        { label: state.toLowerCase() || 'ukjent tilstand', tone: 'neutral', live: false },
+        { label: state.toLowerCase() || say(tr, COPY.fallback.unknownState), tone: 'neutral', live: false },
     salience: outcome ? outcome.salience : 'normal',
     // A live process is shown by when it will STOP, not when it started: "what
     // needs me" is answered by the deadline, and a start time three hours ago
@@ -484,11 +501,12 @@ export function buildSpaceWork(
   runs: readonly RunLikeActivitySource[],
   schedules: readonly ScheduleLikeActivitySource[],
   processes: readonly ProcessLikeActivitySource[] = [],
+  tr: Tr = noTr,
 ): SpaceActivityItem[] {
   const items = [
-    ...runs.map(activityFromRun),
-    ...schedules.map(activityFromSchedule),
-    ...processes.map(activityFromProcess),
+    ...runs.map((run) => activityFromRun(run, tr)),
+    ...schedules.map((schedule) => activityFromSchedule(schedule, tr)),
+    ...processes.map((process) => activityFromProcess(process, tr)),
   ].filter((item): item is SpaceActivityItem => item !== null)
   return orderActivity(items)
 }
@@ -506,13 +524,13 @@ export function buildSpaceWork(
  * resolved.
  */
 const OPERATION_STATUS: Readonly<
-  Record<string, { label: string; tone: ActivityTone; salience: ActivitySalience; live: boolean }>
+  Record<string, { label: CopyPair; tone: ActivityTone; salience: ActivitySalience; live: boolean }>
 > = {
-  unknown: { label: 'utfall er ukjent', tone: 'failure', salience: 'critical', live: false },
-  pending_control_commit: { label: 'venter på godkjent reservasjon', tone: 'pending', salience: 'attention', live: true },
-  reserved: { label: 'reservert, ikke utført', tone: 'pending', salience: 'attention', live: true },
-  cancelled: { label: 'avbrutt før effekt', tone: 'neutral', salience: 'normal', live: false },
-  completed: { label: 'utført', tone: 'success', salience: 'muted', live: false },
+  unknown: { label: COPY.operation.unknown, tone: 'failure', salience: 'critical', live: false },
+  pending_control_commit: { label: COPY.operation.pendingControlCommit, tone: 'pending', salience: 'attention', live: true },
+  reserved: { label: COPY.operation.reserved, tone: 'pending', salience: 'attention', live: true },
+  cancelled: { label: COPY.operation.cancelled, tone: 'neutral', salience: 'normal', live: false },
+  completed: { label: COPY.operation.completed, tone: 'success', salience: 'muted', live: false },
 }
 
 /**
@@ -522,9 +540,9 @@ const OPERATION_STATUS: Readonly<
  * `tickets.create` read verbatim is worse than a translation but far better
  * than a dropped row.
  */
-function operationVerb(actionId: string): string {
-  if (actionId === 'tickets.create') return 'Opprettet sak'
-  return actionId.trim() || 'Effekt'
+function operationVerb(actionId: string, tr: Tr): string {
+  if (actionId === 'tickets.create') return say(tr, COPY.verb.ticketCreated)
+  return actionId.trim() || say(tr, COPY.verb.effect)
 }
 
 export interface OperationLikeActivitySource {
@@ -541,6 +559,7 @@ export interface OperationLikeActivitySource {
 
 export function activityFromOperation(
   source: OperationLikeActivitySource,
+  tr: Tr = noTr,
 ): SpaceActivityItem | null {
   const operationId = source.operation_id?.trim()
   if (!operationId) return null
@@ -551,16 +570,16 @@ export function activityFromOperation(
   // Only on `completed` does the ledger name what the effect produced, and its
   // own constraint guarantees that. An absent id here means the effect is not
   // claimed to have landed — never render it as one that did.
-  if (source.ticket_id?.trim()) detail.push(`Sak ${source.ticket_id.trim()}`)
+  if (source.ticket_id?.trim()) detail.push(ticketDetail(tr, source.ticket_id.trim()))
   if (source.terminal_reason?.trim()) detail.push(source.terminal_reason.trim())
   return {
     id: `operation:${operationId}`,
     renderClass: known ? 'operation' : 'unknown',
-    verb: operationVerb(source.action_id?.trim() ?? ''),
-    object: source.subject_id?.trim() || 'Ukjent utfører',
+    verb: operationVerb(source.action_id?.trim() ?? '', tr),
+    object: source.subject_id?.trim() || say(tr, COPY.fallback.unknownActor),
     outcome: known
-      ? { label: known.label, tone: known.tone, live: known.live }
-      : { label: status || 'ukjent tilstand', tone: 'neutral', live: false },
+      ? { label: say(tr, known.label), tone: known.tone, live: known.live }
+      : { label: status || say(tr, COPY.fallback.unknownState), tone: 'neutral', live: false },
     salience: known ? known.salience : 'normal',
     ...(at ? { at } : {}),
     ...(detail.length ? { detail } : {}),
@@ -591,27 +610,28 @@ export interface AuthorityLikeActivitySource {
  */
 export function activityFromAuthority(
   source: AuthorityLikeActivitySource,
+  tr: Tr = noTr,
 ): SpaceActivityItem | null {
   const grantId = source.grant_id?.trim()
   if (!grantId) return null
   const revokedAt = asIsoTime(source.revoked_at)
   const grantedAt = asIsoTime(source.created_at)
-  const subject = source.subject_id?.trim() || 'Ukjent subjekt'
+  const subject = source.subject_id?.trim() || say(tr, COPY.fallback.unknownSubject)
   const detail: string[] = []
   const actor = revokedAt
     ? source.revoked_by_user_id?.trim()
     : source.created_by_user_id?.trim()
-  if (actor) detail.push(revokedAt ? `Trukket av ${actor}` : `Gitt av ${actor}`)
-  if (revokedAt && grantedAt) detail.push(`Gitt ${grantedAt}`)
+  if (actor) detail.push(revokedAt ? revokedByDetail(tr, actor) : grantedByDetail(tr, actor))
+  if (revokedAt && grantedAt) detail.push(grantedAtDetail(tr, grantedAt))
   if (source.action_id?.trim()) detail.push(source.action_id.trim())
   return {
     id: `authority:${grantId}`,
     renderClass: 'authority',
-    verb: revokedAt ? 'Fjernet fullmakt' : 'Ga fullmakt',
+    verb: say(tr, revokedAt ? COPY.verb.authorityRevoked : COPY.verb.authorityGranted),
     object: subject,
     outcome: revokedAt
-      ? { label: 'ikke lenger tillatt', tone: 'neutral', live: false }
-      : { label: 'tillatt her', tone: 'success', live: false },
+      ? { label: say(tr, COPY.authority.noLongerAllowed), tone: 'neutral', live: false }
+      : { label: say(tr, COPY.authority.allowedHere), tone: 'success', live: false },
     // A withdrawn authority is the row that explains a later refusal, so it
     // does not recede the way a completed effect does.
     salience: revokedAt ? 'normal' : 'muted',
@@ -631,21 +651,22 @@ export function activityFromAuthority(
  */
 function approvalOutcome(
   raw: string | undefined,
+  tr: Tr,
 ): { label: string; tone: ActivityTone; salience: ActivitySalience; live: boolean } {
   const value = (raw ?? '').toUpperCase()
   if (value.includes('REQUESTED') || value.includes('PENDING')) {
-    return { label: 'venter på en avgjørelse', tone: 'pending', salience: 'critical', live: true }
+    return { label: say(tr, COPY.approval.waiting), tone: 'pending', salience: 'critical', live: true }
   }
   if (value.includes('GRANTED')) {
-    return { label: 'godkjent', tone: 'success', salience: 'muted', live: false }
+    return { label: say(tr, COPY.approval.granted), tone: 'success', salience: 'muted', live: false }
   }
   if (value.includes('DENIED')) {
-    return { label: 'avslått', tone: 'failure', salience: 'attention', live: false }
+    return { label: say(tr, COPY.approval.denied), tone: 'failure', salience: 'attention', live: false }
   }
   if (value.includes('TIMED_OUT') || value.includes('EXPIRED')) {
-    return { label: 'utløpt uten avgjørelse', tone: 'failure', salience: 'attention', live: false }
+    return { label: say(tr, COPY.approval.expired), tone: 'failure', salience: 'attention', live: false }
   }
-  return { label: value.toLowerCase() || 'ukjent tilstand', tone: 'neutral', salience: 'normal', live: false }
+  return { label: value.toLowerCase() || say(tr, COPY.fallback.unknownState), tone: 'neutral', salience: 'normal', live: false }
 }
 
 export interface ApprovalLikeActivitySource {
@@ -664,21 +685,22 @@ export interface ApprovalLikeActivitySource {
 
 export function activityFromApproval(
   source: ApprovalLikeActivitySource,
+  tr: Tr = noTr,
 ): SpaceActivityItem | null {
   const approvalId = (source.id ?? source.approval_id ?? '').trim()
   if (!approvalId) return null
-  const outcome = approvalOutcome(source.status ?? source.state)
+  const outcome = approvalOutcome(source.status ?? source.state, tr)
   const runId = source.run_id?.trim()
   const owner = source.space_id?.trim()
   const detail: string[] = []
   if (source.detail?.trim()) detail.push(source.detail.trim())
   else if (source.summary?.trim()) detail.push(source.summary.trim())
-  if (source.requested_by?.trim()) detail.push(`Bedt om av ${source.requested_by.trim()}`)
+  if (source.requested_by?.trim()) detail.push(requestedByDetail(tr, source.requested_by.trim()))
   return {
     id: `approval:${approvalId}`,
     renderClass: 'approval',
-    verb: 'Godkjenning',
-    object: source.kind?.trim() || 'Handling uten navngitt type',
+    verb: say(tr, COPY.verb.approval),
+    object: source.kind?.trim() || say(tr, COPY.fallback.unnamedAction),
     outcome: { label: outcome.label, tone: outcome.tone, live: outcome.live },
     salience: outcome.salience,
     ...(asIsoTime(source.created_at) ? { at: asIsoTime(source.created_at) } : {}),
@@ -704,7 +726,7 @@ export function activityFromApproval(
  * Control-owned concern and a browser-side multiplication would be an invented
  * number.
  */
-function runCostDetail(source: RunLikeActivitySource): string[] {
+function runCostDetail(source: RunLikeActivitySource, tr: Tr): string[] {
   const detail: string[] = []
   const input = typeof source.input_tokens === 'number' ? source.input_tokens : 0
   const output = typeof source.output_tokens === 'number' ? source.output_tokens : 0
@@ -712,7 +734,7 @@ function runCostDetail(source: RunLikeActivitySource): string[] {
     detail.push(`${input + output} tokens`)
   }
   if (typeof source.steps_completed === 'number' && source.steps_completed > 0) {
-    detail.push(`${source.steps_completed} steg`)
+    detail.push(stepsDetail(tr, source.steps_completed))
   }
   if (source.agent_id?.trim()) detail.push(source.agent_id.trim())
   // An error message is the single most useful thing on a failed row, so it
@@ -736,18 +758,18 @@ export function buildSpaceRecord(input: {
   readonly approvals?: readonly ApprovalLikeActivitySource[]
   readonly operations?: readonly OperationLikeActivitySource[]
   readonly authority?: readonly AuthorityLikeActivitySource[]
-}): SpaceActivityItem[] {
+}, tr: Tr = noTr): SpaceActivityItem[] {
   const items = [
-    ...(input.threads ?? []).flatMap(activityFromThread),
+    ...(input.threads ?? []).flatMap((thread) => activityFromThread(thread, tr)),
     ...(input.runs ?? []).map((run) => {
-      const item = activityFromRun(run)
+      const item = activityFromRun(run, tr)
       if (!item) return null
-      const detail = runCostDetail(run)
+      const detail = runCostDetail(run, tr)
       return detail.length ? { ...item, detail } : item
     }),
-    ...(input.approvals ?? []).map(activityFromApproval),
-    ...(input.operations ?? []).map(activityFromOperation),
-    ...(input.authority ?? []).map(activityFromAuthority),
+    ...(input.approvals ?? []).map((approval) => activityFromApproval(approval, tr)),
+    ...(input.operations ?? []).map((operation) => activityFromOperation(operation, tr)),
+    ...(input.authority ?? []).map((grant) => activityFromAuthority(grant, tr)),
   ].filter((item): item is SpaceActivityItem => item !== null)
   return orderActivity(items)
 }

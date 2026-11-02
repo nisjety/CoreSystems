@@ -214,7 +214,8 @@ func TestZDRMigrationIsTheLatestAndNumberedAfter0012(t *testing.T) {
 	if !seen012 || !seen013 {
 		t.Fatalf("migration set = %v, want 0012 and 0013 present", versions)
 	}
-	if latestMigration != zdrMigration {
-		t.Fatalf("latestMigration = %q, want %q", latestMigration, zdrMigration)
+	// 0013 is no longer the latest (WS05-S2 added 0014): it only has to stay applied before it.
+	if latestMigration < zdrMigration {
+		t.Fatalf("latestMigration = %q sorts before %q", latestMigration, zdrMigration)
 	}
 }

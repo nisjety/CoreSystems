@@ -111,6 +111,18 @@ export const natsWebhook = httpAction(async (ctx, request) => {
       case "onAgentRunEvent":
         await ctx.runAction(internal.nats.onAgentRunEvent, body as any);
         break;
+      // WS11-S6: Space attention events (`mp.v1.space.<ref>.event` from the
+      // MODEL_PLANE_SPACE_EVENTS durable). A rejected or dropped event answers
+      // 200 so the subscriber acks it; only a thrown error is redelivered.
+      case "onSpaceEvent": {
+        const result = await ctx.runMutation(internal.spaceAttentionIngest.ingestSpaceEvent, {
+          event: body,
+        });
+        return new Response(JSON.stringify({ ok: true, handler, status: result.status }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
       case "onConversationEvent":
         await ctx.runMutation(internal.conversationProjection.applyEvent, { event: body as any });
         break;

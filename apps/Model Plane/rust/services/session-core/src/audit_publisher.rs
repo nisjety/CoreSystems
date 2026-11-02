@@ -50,11 +50,16 @@ const AUDIT_SUBJECT_PREFIX: &str = "verevon.audit.v2.model.session-core.";
 const RUN_EVENT_SUBJECT_PREFIX: &str = "mp.v1.run.";
 const RUN_EVENT_SUBJECT_SUFFIX: &str = ".event";
 
+/// Subject family carrying Space attention `Envelope`s (build plan WS11-S5):
+/// `mp.v1.space.<space_ref>.event`, captured by the `MODEL_PLANE_SPACE_EVENTS` stream.
+const SPACE_EVENT_SUBJECT_PREFIX: &str = "mp.v1.space.";
+const SPACE_EVENT_SUBJECT_SUFFIX: &str = ".event";
+
 /// Delivery route for one outbox row, derived from the row's own `subject`.
 ///
-/// Session Core may publish inside exactly these two subject families; a row
-/// naming anything else is refused before it reaches NATS. The two families
-/// carry DIFFERENT wire shapes (a flat audit body vs. a canonical `Envelope`),
+/// Session Core may publish inside exactly these three subject families; a row
+/// naming anything else is refused before it reaches NATS. The audit family
+/// carries a DIFFERENT wire shape from the two envelope families (a flat audit body vs. a canonical `Envelope`),
 /// so the authority check is per-route.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OutboxRoute<'a> {
@@ -64,6 +69,11 @@ pub enum OutboxRoute<'a> {
     /// capability-core's session review (the skill-learning trigger) over core
     /// NATS, and captured by the `MODEL_PLANE_RUN_EVENTS` stream for insight-core.
     RunEvent { run_id: &'a str },
+    /// `mp.v1.space.<space_ref>.event` — content-free Space attention `Envelope`
+    /// (ids and closed words only), written by migration 0080's trigger in the same
+    /// transaction as the Space event log row. Consumed by the Application Plane's
+    /// attention projection through the `convex-space-attention` durable.
+    SpaceEvent { space_ref: &'a str },
 }
 
 /// Classify an outbox subject, or `None` when it is outside Session Core's
@@ -72,6 +82,9 @@ pub enum OutboxRoute<'a> {
 pub fn classify_outbox_subject(subject: &str) -> Option<OutboxRoute<'_>> {
     if subject.starts_with(AUDIT_SUBJECT_PREFIX) {
         return Some(OutboxRoute::Audit);
+    }
+    if subject.starts_with(SPACE_EVENT_SUBJECT_PREFIX) {
+        return classify_space_event_subject(subject);
     }
     let run_id = subject
         .strip_prefix(RUN_EVENT_SUBJECT_PREFIX)?
@@ -83,6 +96,23 @@ pub fn classify_outbox_subject(subject: &str) -> Option<OutboxRoute<'_>> {
         return None;
     }
     Some(OutboxRoute::RunEvent { run_id })
+}
+
+/// Classify a `mp.v1.space.<space_ref>.event` subject. The ref must stay ONE subject
+/// token under the single-token grant `mp.v1.space.*.event`, so a ref holding a dot,
+/// a wildcard or whitespace is refused rather than allowed to widen its own authority.
+fn classify_space_event_subject(subject: &str) -> Option<OutboxRoute<'_>> {
+    let space_ref = subject
+        .strip_prefix(SPACE_EVENT_SUBJECT_PREFIX)?
+        .strip_suffix(SPACE_EVENT_SUBJECT_SUFFIX)?;
+    if space_ref.is_empty()
+        || space_ref
+            .chars()
+            .any(|c| c == '.' || c == '*' || c == '>' || c.is_whitespace())
+    {
+        return None;
+    }
+    Some(OutboxRoute::SpaceEvent { space_ref })
 }
 
 /// Verify a claimed row's payload really belongs to that row and to Session Core
@@ -119,6 +149,28 @@ fn check_outbox_authority(
                 || payload["org_id"].as_str().unwrap_or_default().is_empty()
             {
                 return Err("run event envelope is missing event_type or org_id".to_owned());
+            }
+        }
+        OutboxRoute::SpaceEvent { space_ref } => {
+            // The subject names the room, so the envelope and its payload must name the
+            // same room: one room's row cannot be published under another room's subject.
+            if payload["resource_ref"].as_str() != Some(format!("space:{space_ref}").as_str())
+                || payload["payload"]["space_ref"].as_str() != Some(space_ref)
+            {
+                return Err("space event payload does not match its subject room".to_owned());
+            }
+            if !payload["event_type"]
+                .as_str()
+                .unwrap_or_default()
+                .starts_with("SPACE_")
+                || payload["org_id"].as_str().unwrap_or_default().is_empty()
+            {
+                return Err("space event envelope is missing event_type or org_id".to_owned());
+            }
+            // The projection admits persistent events only; a zero-retention envelope
+            // must never leave through this route.
+            if payload["zdr"].as_bool() != Some(false) {
+                return Err("space event envelope is not marked persistent".to_owned());
             }
         }
     }
@@ -177,7 +229,7 @@ fn resolve_wire_subject(
             .ok_or_else(|| {
                 "audit payload event is not a single lowercase subject token".to_owned()
             }),
-        OutboxRoute::RunEvent { .. } => Ok(row_subject.to_owned()),
+        OutboxRoute::RunEvent { .. } | OutboxRoute::SpaceEvent { .. } => Ok(row_subject.to_owned()),
     }
 }
 
@@ -522,7 +574,10 @@ impl AuditOutbox {
         if terminal > 0 {
             let by_subject = sqlx::query_as::<_, (String, i64)>(
                 "SELECT CASE WHEN subject LIKE 'mp.v1.run.%.event'
-                             THEN 'mp.v1.run.<run>.event' ELSE subject END,
+                             THEN 'mp.v1.run.<run>.event'
+                             WHEN subject LIKE 'mp.v1.space.%.event'
+                             THEN 'mp.v1.space.<space>.event'
+                             ELSE subject END,
                         count(*)
                  FROM session_audit_outbox
                  WHERE terminal_at IS NOT NULL AND published_at IS NULL
@@ -656,7 +711,9 @@ impl AuditOutbox {
         let publisher = publisher.as_ref().expect("publisher initialized");
         match route {
             OutboxRoute::Audit => publish_tool_action(publisher, payload).await,
-            OutboxRoute::RunEvent { .. } => publisher.publish_audit(subject, payload).await,
+            OutboxRoute::RunEvent { .. } | OutboxRoute::SpaceEvent { .. } => {
+                publisher.publish_audit(subject, payload).await
+            }
         }
     }
 }
@@ -672,11 +729,12 @@ fn audit_retry_delay(attempt: i32) -> Duration {
 /// Every value [`outbox_subject_class`] can return. The per-class gauge is set
 /// for all of them on every tick, so a class with nothing stuck reads 0 instead
 /// of being absent (an absent series cannot be told from a stopped reporter).
-const SUBJECT_CLASSES: [&str; 5] = [
+const SUBJECT_CLASSES: [&str; 6] = [
     "audit_tool_action",
     "audit_tool_action_reserved",
     "audit_other",
     "run_event",
+    "space_event",
     "unclassified",
 ];
 
@@ -691,6 +749,7 @@ const TOPOLOGY_REASONS: [&str; 2] = ["stream_not_found", "permission_denied"];
 pub fn outbox_subject_class(subject: &str) -> &'static str {
     match classify_outbox_subject(subject) {
         Some(OutboxRoute::RunEvent { .. }) => "run_event",
+        Some(OutboxRoute::SpaceEvent { .. }) => "space_event",
         Some(OutboxRoute::Audit) => match subject.strip_prefix(AUDIT_SUBJECT_PREFIX) {
             Some(EVENT_TOOL_ACTION) => "audit_tool_action",
             Some(EVENT_TOOL_ACTION_RESERVED) => "audit_tool_action_reserved",

@@ -237,6 +237,11 @@ pub async fn purge_organization_data(
     let mut tx: Transaction<'_, Postgres> = pool.begin().await?;
     let mut summary = PurgeSummary::default();
 
+    // Space event log: switch the deferred event triggers off for this transaction FIRST.
+    // They fire at commit, and without this the thread/run deletes below would write new
+    // `thread.deleted` rows for an org that was just erased.
+    crate::space::events::suppress(&mut tx).await?;
+
     // The loop's sealed folds are erased with the org's runs, before them.
     sqlx::query(
         "DELETE FROM run_loop_checkpoints WHERE run_id IN (SELECT id FROM runs WHERE org_id = $1)",
@@ -370,6 +375,17 @@ pub async fn purge_organization_data(
     .execute(&mut *tx)
     .await?
     .rows_affected();
+
+    // Space event log (ids and kinds only): the org's rows and per-Space heads go with its
+    // events. Not counted in the summary (the erasure proof counts content tables).
+    sqlx::query("DELETE FROM space_event_log WHERE org_id = $1")
+        .bind(org_id)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("DELETE FROM space_event_heads WHERE org_id = $1")
+        .bind(org_id)
+        .execute(&mut *tx)
+        .await?;
 
     // `runs` — cascades `session_tool_audit_intents` and
     // `managed_run_terminalization_outbox` (ON DELETE CASCADE).
@@ -774,5 +790,37 @@ mod tests {
                 < pos("DELETE FROM skill_revisions WHERE org_id = $1"),
             "deleting a skill writes a revision holding its text, so the revisions are purged after the skills"
         );
+    }
+
+    /// WS02-S1: the org erasure switches the Space event triggers off before any delete that
+    /// could fire them, and purges the Space log beside the org's events, before runs and
+    /// threads. Without the suppression the deferred delete triggers would write fresh
+    /// tombstones for an org that was just erased.
+    #[test]
+    fn purge_suppresses_space_events_before_deletes_and_purges_the_log() {
+        let source = include_str!("gdpr.rs");
+        let pos = |needle: &str| {
+            source
+                .find(needle)
+                .unwrap_or_else(|| panic!("expected to find {needle:?} in gdpr.rs"))
+        };
+        let suppress = pos("space::events::suppress(");
+        let first_delete = pos("DELETE FROM run_loop_checkpoints");
+        let events = pos("DELETE FROM events");
+        let log = pos("DELETE FROM space_event_log WHERE org_id = $1");
+        let heads = pos("DELETE FROM space_event_heads WHERE org_id = $1");
+        let runs = pos("DELETE FROM runs WHERE org_id = $1");
+        let messages = pos("DELETE FROM messages");
+        let threads = pos("DELETE FROM threads WHERE org_id = $1");
+        assert!(
+            suppress < first_delete,
+            "suppress must precede the first DELETE of the transaction"
+        );
+        assert!(suppress < messages && suppress < runs && suppress < threads);
+        assert!(
+            events < log && log < heads && heads < runs,
+            "the Space log is purged beside the org's events, and its heads after it"
+        );
+        assert!(log < threads, "the log is purged before the threads whose delete triggers fire");
     }
 }

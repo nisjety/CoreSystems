@@ -1,0 +1,126 @@
+/* Member status and agent availability chips, and the status menu (WS11-S10). Lives beside the
+   components rather than in global.css. Colour is never the only signal: every chip carries a word. */
+
+.verevon-space-status-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 100%;
+  color: var(--verevon-text-muted);
+  font-size: 12px;
+}
+
+.verevon-space-status-chip__dot {
+  width: 7px;
+  height: 7px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--verevon-text-muted);
+}
+
+.verevon-space-status-chip[data-state='available'] .verevon-space-status-chip__dot,
+.verevon-space-status-chip[data-state='working'] .verevon-space-status-chip__dot {
+  background: var(--verevon-success, #2f7d4f);
+}
+
+.verevon-space-status-chip[data-state='away'] .verevon-space-status-chip__dot,
+.verevon-space-status-chip[data-state='waiting'] .verevon-space-status-chip__dot {
+  background: var(--verevon-warning, #b7791f);
+}
+
+.verevon-space-status-chip[data-state='dnd'] .verevon-space-status-chip__dot {
+  background: var(--verevon-danger, #b3372f);
+}
+
+.verevon-space-status-chip[data-state='offline'] .verevon-space-status-chip__dot,
+.verevon-space-status-chip[data-state='idle'] .verevon-space-status-chip__dot {
+  background: transparent;
+  box-shadow: inset 0 0 0 1.5px var(--verevon-text-muted);
+}
+
+.verevon-space-status-chip__text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.verevon-space-status-menu {
+  display: grid;
+  gap: 10px;
+  max-width: 460px;
+}
+
+.verevon-space-status-menu__states {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.verevon-space-status-menu__states legend {
+  margin-bottom: 6px;
+  padding: 0;
+  color: var(--verevon-text);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.verevon-space-status-menu__state {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  border: 1px solid var(--verevon-border, rgba(127, 127, 127, 0.35));
+  border-radius: 999px;
+  color: var(--verevon-text);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.verevon-space-status-menu__state:has(input:checked) {
+  border-color: var(--verevon-accent, currentColor);
+  font-weight: 600;
+}
+
+.verevon-space-status-menu__state input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.verevon-space-status-menu__state:has(input:focus-visible) {
+  outline: 2px solid var(--verevon-accent, currentColor);
+  outline-offset: 2px;
+}
+
+.verevon-space-status-menu__row {
+  display: grid;
+  gap: 4px;
+}
+
+.verevon-space-status-menu__row label {
+  color: var(--verevon-text);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.verevon-space-status-menu__hint {
+  margin: 0;
+  color: var(--verevon-text-muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.verevon-space-status-menu__error {
+  margin: 0;
+  color: var(--verevon-danger, #b3372f);
+  font-size: 13px;
+}
+
+.verevon-space-status-menu__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}

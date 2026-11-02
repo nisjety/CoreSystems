@@ -471,6 +471,9 @@ impl OrchestrationCoreService for MockOrchestration {
         Ok(Response::new(ListApprovalsResponse {
             approvals: vec![Approval {
                 consumed_at: None,
+                tool_key: String::new(),
+                action_label: String::new(),
+                continuation: None,
                 continuation_mode: String::new(),
                 cause: None,
                 id: "appr-1".into(),
@@ -498,6 +501,9 @@ impl OrchestrationCoreService for MockOrchestration {
         Ok(Response::new(OrgPendingApprovalsResponse {
             approvals: vec![Approval {
                 consumed_at: None,
+                tool_key: String::new(),
+                action_label: String::new(),
+                continuation: None,
                 continuation_mode: String::new(),
                 cause: None,
                 id: "appr-pending-1".into(),
@@ -530,6 +536,9 @@ impl OrchestrationCoreService for MockOrchestration {
         Ok(Response::new(GetApprovalResponse {
             approval: Some(Approval {
                 consumed_at: None,
+                tool_key: String::new(),
+                action_label: String::new(),
+                continuation: None,
                 continuation_mode: String::new(),
                 cause: None,
                 id: request.approval_id,
@@ -557,6 +566,9 @@ impl OrchestrationCoreService for MockOrchestration {
         Ok(Response::new(CreateApprovalResponse {
             approval: Some(Approval {
                 consumed_at: None,
+                tool_key: String::new(),
+                action_label: String::new(),
+                continuation: None,
                 continuation_mode: String::new(),
                 cause: None,
                 id: "appr-mock".into(),
@@ -603,6 +615,9 @@ impl OrchestrationCoreService for MockOrchestration {
         Ok(Response::new(DecideApprovalResponse {
             approval: Some(Approval {
                 consumed_at: None,
+                tool_key: String::new(),
+                action_label: String::new(),
+                continuation: None,
                 continuation_mode,
                 cause: None,
                 id: request.approval_id,
@@ -989,6 +1004,20 @@ impl RunService for MockRunOwner {
         Err(Status::unimplemented(
             "scheduled step authority not needed in orchestration route test",
         ))
+    }
+
+    async fn authorize_room_run_attach(
+        &self,
+        _: TonicRequest<mp_contracts::model_plane::v1::AuthorizeRoomRunAttachRequest>,
+    ) -> Result<Response<mp_contracts::model_plane::v1::AuthorizeRoomRunAttachResponse>, Status> {
+        Err(Status::unimplemented("room run attach not needed in this test"))
+    }
+
+    async fn cancel_run_as_room_manager(
+        &self,
+        _: TonicRequest<mp_contracts::model_plane::v1::CancelRunAsRoomManagerRequest>,
+    ) -> Result<Response<mp_contracts::model_plane::v1::CancelRunAsRoomManagerResponse>, Status> {
+        Err(Status::unimplemented("room run stop not needed in this test"))
     }
 
     async fn get_scheduled_step_context(
@@ -1507,6 +1536,9 @@ impl OrchestrationCoreService for OrgScopedMock {
 fn owned_approval(state: ApprovalState) -> Approval {
     Approval {
         consumed_at: None,
+        tool_key: String::new(),
+        action_label: String::new(),
+        continuation: None,
         continuation_mode: String::new(),
         cause: None,
         id: "appr-owned".into(),

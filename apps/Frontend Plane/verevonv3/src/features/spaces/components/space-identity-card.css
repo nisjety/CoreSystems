@@ -1,0 +1,85 @@
+/*
+ * Identity hover card (WS07-S8). Its own sheet on purpose: global.css carries
+ * uncommitted lines.
+ */
+
+.verevon-identity-trigger {
+  border-radius: 4px;
+  cursor: default;
+}
+
+.verevon-identity-trigger:focus-visible {
+  outline: 2px solid var(--verevon-accent);
+  outline-offset: 2px;
+}
+
+.verevon-identity-card {
+  position: fixed;
+  z-index: 1000;
+  box-sizing: border-box;
+  padding: 12px;
+  border: 1px solid var(--verevon-border-strong);
+  border-radius: 12px;
+  background: var(--verevon-surface);
+  color: var(--verevon-text);
+  box-shadow: 0 10px 30px rgb(0 0 0 / 14%);
+  font-size: 0.8125rem;
+  line-height: 1.4;
+}
+
+.verevon-identity-card__head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.verevon-identity-card__who {
+  min-width: 0;
+}
+
+.verevon-identity-card__name {
+  margin: 0;
+  font-size: 0.875rem;
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
+.verevon-identity-card__sub {
+  margin: 2px 0 0;
+  color: var(--verevon-text-muted);
+  font-size: 0.75rem;
+}
+
+.verevon-identity-card__chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: var(--verevon-surface-muted);
+  font-weight: 650;
+}
+
+.verevon-identity-card__lead {
+  margin: 10px 0 0;
+  color: var(--verevon-text-soft);
+  overflow-wrap: anywhere;
+}
+
+.verevon-identity-card__lead--blocking {
+  color: var(--verevon-accent-ink);
+  font-weight: 650;
+}
+
+.verevon-identity-card__label {
+  display: block;
+  color: var(--verevon-text-muted);
+  font-size: 0.6875rem;
+  font-weight: 650;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.verevon-identity-card__when {
+  color: var(--verevon-text-muted);
+}

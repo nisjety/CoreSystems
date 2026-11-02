@@ -180,3 +180,92 @@ test('a binding for a Space that could not be resolved still projects, with Spac
   assert.equal(rows[0].spaceKind, undefined);
   assert.equal(rows[0].spaceLifecycle, undefined);
 });
+
+// ---------------------------------------------------------------------------
+// WS07-S7: createSpaceAgentForGateway stores the avatar colour only as #rrggbb.
+// Driven through a mocked Convex ctx (the handler is a thin shell, see above).
+// ---------------------------------------------------------------------------
+
+const { createSpaceAgentForGateway } = require('../convex/spaceAgents.ts');
+
+const CREATE_SERVICE_KEY = 'service-key-aaaa';
+const CREATE_AUTH = 'auth_user_1';
+
+function makeCreateCtx() {
+  const inserts = [];
+  const tables = {
+    organizations: [{ _id: 'org_row', externalOrgId: ORG, syncStatus: 'active' }],
+    users: [{ _id: 'user_row', externalAuthId: CREATE_AUTH, orgId: 'org_row', syncStatus: 'active' }],
+  };
+  const ctx = {
+    db: {
+      query(table) {
+        const rows = tables[table] ?? [];
+        return {
+          withIndex(_name, build) {
+            build({ eq() { return this; } });
+            return { collect: async () => rows };
+          },
+        };
+      },
+      async insert(table, value) {
+        inserts.push({ table, value });
+        return table === 'agents' ? 'agent123' : `${table}_row`;
+      },
+    },
+  };
+  return { ctx, inserts };
+}
+
+async function createWithColour(avatarColor) {
+  const { ctx, inserts } = makeCreateCtx();
+  const result = await createSpaceAgentForGateway._handler(ctx, {
+    serviceKey: CREATE_SERVICE_KEY,
+    externalAuthId: CREATE_AUTH,
+    externalOrgId: ORG,
+    spaceRef: 'space-a',
+    name: 'Meeting scribe',
+    ...(avatarColor === undefined ? {} : { avatarColor }),
+  });
+  const definition = inserts.find((row) => row.table === 'agents');
+  assert.ok(definition, 'the agent definition must be inserted');
+  return { result, definition: definition.value };
+}
+
+test('createSpaceAgentForGateway avatar colour (WS07-S7)', async (t) => {
+  const prior = process.env.CONVEX_INTERNAL_SERVICE_KEY;
+  process.env.CONVEX_INTERNAL_SERVICE_KEY = CREATE_SERVICE_KEY;
+  t.after(() => {
+    if (prior === undefined) delete process.env.CONVEX_INTERNAL_SERVICE_KEY;
+    else process.env.CONVEX_INTERNAL_SERVICE_KEY = prior;
+  });
+
+  await t.test('stores a #rrggbb colour as given', async () => {
+    const { result, definition } = await createWithColour('#2563eb');
+    assert.equal(definition.avatarColor, '#2563eb');
+    assert.equal(result.subjectId, 'agent-agent123');
+  });
+
+  await t.test('trims whitespace around a valid colour', async () => {
+    const { definition } = await createWithColour('  #2563EB ');
+    assert.equal(definition.avatarColor, '#2563EB');
+  });
+
+  await t.test('stores nothing for a named colour', async () => {
+    const { definition } = await createWithColour('red');
+    assert.equal(definition.avatarColor, undefined);
+  });
+
+  await t.test('stores nothing for a short, long, url or css-injection value', async () => {
+    for (const bad of ['#12345', '#1234567', 'url(x)', '#12345g', '#2563eb; color: red', '2563eb', '']) {
+      const { definition } = await createWithColour(bad);
+      assert.equal(definition.avatarColor, undefined, `rejected: ${JSON.stringify(bad)}`);
+    }
+  });
+
+  await t.test('an omitted colour stores nothing and the agent is still created', async () => {
+    const { result, definition } = await createWithColour(undefined);
+    assert.equal(definition.avatarColor, undefined);
+    assert.equal(result.agentRef, 'agent123');
+  });
+});

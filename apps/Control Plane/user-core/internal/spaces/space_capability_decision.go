@@ -25,6 +25,14 @@ const (
 	// execution-core's sandbox.rs; all three must agree on the spelling,
 	// because the value is bound into this decision's payload digest.
 	ProcessesBackgroundRegistry = "background_registry"
+
+	// EgressDisabledByDefault is the only egress claim Control signs today.
+	// It is the bottom tier of the closed egress vocabulary: the sandbox has
+	// no network reach unless a later, separately designed egress track adds
+	// a tier here (WS06-D3; the tunnel tier is parked behind SD-06). Mirrored
+	// by execution-core's sandbox.rs and capability_client.rs, and bound into
+	// this decision's payload digest, so the spelling must agree everywhere.
+	EgressDisabledByDefault = "disabled_by_default"
 )
 
 // allowedProcessesClaims is the closed vocabulary Control will sign.
@@ -39,6 +47,18 @@ const (
 var allowedProcessesClaims = map[string]struct{}{
 	ProcessesBoundedOneshot:     {},
 	ProcessesBackgroundRegistry: {},
+}
+
+// allowedEgressClaims is the closed egress vocabulary Control will sign.
+// Before this, any value other than "disabled_by_default" was accepted and
+// earned the space:egress permission with no entitlement check. A value that
+// is not listed here is refused before signing, which is the same
+// unknown-means-disabled rule the other claim dimensions follow: Control never
+// widens network reach from a string it does not recognize. Adding a tier is
+// a Control decision and a lockstep change with the capability verifier, not
+// a backend's to claim.
+var allowedEgressClaims = map[string]struct{}{
+	EgressDisabledByDefault: {},
 }
 
 // SpaceCapabilityIntent is the non-secret, measured sandbox substrate claim a
@@ -77,6 +97,9 @@ func (i SpaceCapabilityIntent) Validate() error {
 	}
 	if _, ok := allowedProcessesClaims[i.Processes]; !ok {
 		return fmt.Errorf("space capability intent processes claim %q is not a recognized substrate profile", i.Processes)
+	}
+	if _, ok := allowedEgressClaims[i.Egress]; !ok {
+		return fmt.Errorf("space capability intent egress claim %q is not a recognized egress tier", i.Egress)
 	}
 	return nil
 }
@@ -127,7 +150,9 @@ func spaceCapabilityPayloadDigest(evidence PersonalThreadDecisionEvidence, inten
 //
 // Unlike schedule fire, zero data retention does not disqualify this
 // decision: ephemeral, credential-free scratch execution is compatible
-// with — arguably the most privacy-preserving option under — ZDR.
+// with — arguably the most privacy-preserving option under — ZDR. It does
+// withhold space:processes, because a background process registry persists
+// output and state past the call that started it.
 func IssueSpaceCapabilityDecision(
 	evidence PersonalThreadDecisionEvidence,
 	intent SpaceCapabilityIntent,
@@ -154,7 +179,11 @@ func IssueSpaceCapabilityDecision(
 		return Decision{}, fmt.Errorf("space capability decision fields are required")
 	}
 	permissions := []string{"space:sandbox:use"}
-	if intent.Egress != "disabled_by_default" {
+	// Intent.Validate has already refused every egress claim outside
+	// allowedEgressClaims, so this branch is unreachable today. It stays so
+	// that a future tier added to the vocabulary cannot be signed without
+	// the permission that the verifier checks for.
+	if intent.Egress != EgressDisabledByDefault {
 		permissions = append(permissions, "space:egress")
 	}
 	// Deliberately NOT symmetric with egress above. An egress-capable claim
@@ -164,8 +193,11 @@ func IssueSpaceCapabilityDecision(
 	// it is still a perfectly good bounded one-shot substrate for a Space
 	// that is not entitled to background work, so the lease is granted and
 	// only the permission is withheld. sandbox-manager then records the
-	// absence on the lease row and refuses the process RPCs alone.
-	if intent.Processes == ProcessesBackgroundRegistry && evidence.ProcessRegistryEntitled {
+	// absence on the lease row and refuses the process RPCs alone. A Space
+	// under zero data retention is treated like an unentitled one: the
+	// process registry persists output beyond the call, so the permission is
+	// withheld there as well, and the lease itself is still granted.
+	if intent.Processes == ProcessesBackgroundRegistry && evidence.ProcessRegistryEntitled && !evidence.Privacy.ZeroDataRetention {
 		permissions = append(permissions, "space:processes")
 	}
 	return newEvidenceDecision(
