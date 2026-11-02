@@ -176,7 +176,13 @@ func TestOrgKeysAndWebPolicyScopesAreMachineOnly(t *testing.T) {
 		if _, err := parseServiceCredentials(orgServiceTestRegistry(scope)); err == nil {
 			t.Fatalf("expected %s to be refused for the gateway principal", scope)
 		}
-		credentials, err := parseServiceCredentials(`[{"principal":"quarry-edge","audience":"org-core","token":"fedcba9876543210fedcba9876543210","scopes":["` + scope + `"]}]`)
+		// The web-policy read is pinned to auth-core (WS7.H); the key scopes are
+		// quarry-edge's and are pinned by WS17.E2a.
+		holder := "quarry-edge"
+		if scope == "org:web-policy:read:any" {
+			holder = "auth-core"
+		}
+		credentials, err := parseServiceCredentials(`[{"principal":"` + holder + `","audience":"org-core","token":"fedcba9876543210fedcba9876543210","scopes":["` + scope + `"]}]`)
 		if err != nil || len(credentials) != 1 {
 			t.Fatalf("machine principal with %s rejected: credentials=%d err=%v", scope, len(credentials), err)
 		}

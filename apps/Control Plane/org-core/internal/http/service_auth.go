@@ -24,6 +24,7 @@ const (
 	gatewayServicePrincipal   = "verevon-gateway"
 	siemExporterPrincipal     = "audit-core"
 	browserBrokerPrincipal    = "browser-broker"
+	authCorePrincipal         = "auth-core"
 	serviceDelegationMaxAge   = 30 * time.Second
 	serviceDelegationSkew     = 5 * time.Second
 	serviceDelegationMaxBody  = 1 << 20
@@ -188,6 +189,11 @@ func validateServiceCredential(credential serviceCredential, principals map[stri
 		if scope == "org:browser-site:read:any" && credential.Principal != browserBrokerPrincipal {
 			return fmt.Errorf("scope %s is not valid for principal %s", scope, credential.Principal)
 		}
+		// The web policy read feeds a token claim that bounds what agents may do, so
+		// it is pinned to the one principal that mints it (WS7.H, WS7.I).
+		if scope == "org:web-policy:read:any" && credential.Principal != authCorePrincipal {
+			return fmt.Errorf("scope %s is not valid for principal %s", scope, credential.Principal)
+		}
 		scopes[scope] = struct{}{}
 	}
 	principals[credential.Principal] = struct{}{}
@@ -255,7 +261,7 @@ func ValidateRequiredServiceCredentialRegistry(raw string) error {
 					required[scope] = true
 				}
 			}
-		case "auth-core":
+		case authCorePrincipal:
 			authCount++
 			for _, scope := range credential.Scopes {
 				if _, exists := authRequired[scope]; exists {
@@ -351,6 +357,14 @@ func organizationAPIScopes(method string, rest []string) []string {
 		return []string{"org:read:self"}
 	case len(rest) == 2 && method == http.MethodPut && rest[1] == "browser-sites":
 		return []string{"org:settings:write:self"}
+	// The org web policy (WS7.H): read and written only on behalf of a signed user
+	// (:self); org:read:any holders never see it. The history is an admin read.
+	case len(rest) == 2 && method == http.MethodGet && rest[1] == "web-policy":
+		return []string{"org:read:self"}
+	case len(rest) == 2 && method == http.MethodPut && rest[1] == "web-policy":
+		return []string{"org:settings:write:self"}
+	case len(rest) == 3 && method == http.MethodGet && rest[1] == "web-policy" && rest[2] == "history":
+		return []string{"org:read:self"}
 	case len(rest) == 3 && method == http.MethodGet && rest[1] == "browser-sites" && (rest[2] == "explain" || rest[2] == "me"):
 		return []string{"org:read:self"}
 	case len(rest) == 4 && rest[1] == "browser-sites" && rest[2] == "me" && (method == http.MethodPut || method == http.MethodDelete):
@@ -393,6 +407,13 @@ func organizationProxyScopes(method string, rest []string) []string {
 	case len(rest) == 2 && method == http.MethodPut && rest[1] == "model-entitlement":
 		return []string{"org:settings:write:self"}
 	case len(rest) == 3 && method == http.MethodGet && rest[1] == "model-entitlement" && rest[2] == "explain":
+		return []string{"org:read:self"}
+	// The org web policy (WS7.H), on behalf of a signed user only (:self).
+	case len(rest) == 2 && method == http.MethodGet && rest[1] == "web-policy":
+		return []string{"org:read:self"}
+	case len(rest) == 2 && method == http.MethodPut && rest[1] == "web-policy":
+		return []string{"org:settings:write:self"}
+	case len(rest) == 3 && method == http.MethodGet && rest[1] == "web-policy" && rest[2] == "history":
 		return []string{"org:read:self"}
 	// SIEM destinations are administered on behalf of a signed owner or admin
 	// only (:self); no :any holder reaches them through this path.
@@ -447,6 +468,8 @@ func internalOrganizationScopes(method string, rest []string) []string {
 		return []string{"org:model-entitlement:read:any"}
 	case len(rest) == 3 && rest[1] == "browser-sites" && rest[2] == "resolve" && method == http.MethodGet:
 		return []string{"org:browser-site:read:any"}
+	case len(rest) == 2 && rest[1] == "web-policy" && method == http.MethodGet:
+		return []string{"org:web-policy:read:any"}
 	case len(rest) == 2 && rest[1] == "reconcile" && method == http.MethodPost:
 		return []string{"org:projection:write:any"}
 	case len(rest) == 3 && rest[1] == "members" && rest[2] == "reconcile" && method == http.MethodPost:
