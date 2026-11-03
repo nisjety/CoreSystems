@@ -39,6 +39,25 @@ message AcquireGrantResponse {
   repeated string allowed_dialog_ids = 7;
   repeated string allowed_artifact_ids = 8;
   string parent_grant_id = 9;
+
+  // WS7.K (R-6: field 20 is the web-policy snapshot). See WebPolicy below.
+  WebPolicy web_policy = 20;
+}
+
+// The org web-policy snapshot the broker stored on a grant (WS7.K). The broker
+// derives it from the verified principal's `web_policy` claim, never from a
+// request field, and a derived run grant may only tighten its parent's. It has
+// the claim's content: the version, the issuer's revision, the capability
+// modes, the robots and proxy ceilings and the domain rules. Unset means the
+// grant carries no snapshot, which is no grant layer.
+message WebPolicy {
+  uint32 v = 1;
+  string rev = 2;
+  map<string, string> caps = 3;
+  string robots_max = 4;
+  string proxy_max = 5;
+  repeated string domains_allow = 6;
+  repeated string domains_deny = 7;
 }
 
 message RevokeGrantRequest {
@@ -72,6 +91,10 @@ message ValidateGrantResponse {
   repeated string allowed_dialog_ids = 7;
   repeated string allowed_artifact_ids = 8;
   string parent_grant_id = 9;
+
+  // WS7.K (R-6: field 20): the grant's web-policy snapshot. Unset from a broker
+  // that predates it, which Quarry reads as no grant layer.
+  WebPolicy web_policy = 20;
 
   // Same values as the upstream contract: "session" / "run" / "sensitive_approval", the
   // user the grant was issued to, and whether it is a Zero Data Retention grant.
