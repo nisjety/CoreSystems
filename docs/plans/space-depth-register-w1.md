@@ -1145,4 +1145,4 @@ wrong, and the classification's own value is restored.
 - Merge note: Model Plane is also editing `session-core` on `model-plane` (the `ApprovalCause` field moves to 10 and 11).
   Those numbers are on a different message, so they do not collide with fields 8 and 9 here, but check them at the merge.
 - Still open: the frontend `run_live` (`domains/spaces/run_live.rs`) refuses every zero-retention org member by org
-  posture, not per token. It was left as it is pending the owner's answer.
+  posture, not per token. Owner decision (2026-11-03): keep org posture.
