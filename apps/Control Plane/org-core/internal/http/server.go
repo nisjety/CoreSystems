@@ -11,6 +11,7 @@ import (
 
 	"github.com/I-Dacosta/AquatiqCMS/apps/org-core/internal/brreg"
 	orgcore "github.com/I-Dacosta/AquatiqCMS/apps/org-core/internal/org"
+	"github.com/I-Dacosta/AquatiqCMS/apps/org-core/internal/orgkeys"
 	"github.com/I-Dacosta/AquatiqCMS/apps/org-core/internal/rbac"
 	"github.com/gin-gonic/gin"
 )
@@ -58,6 +59,12 @@ type Server struct {
 	scimOn      bool
 	scim        scimService
 	scimLimiter *scimRateLimiter
+
+	// keysOn mounts the key custody routes (WS17.E2, ORG_CORE_KEYS_ENABLED,
+	// default off); orgKeys is set by SetOrgKeys. With the routes on and no
+	// service they answer 503 keys_unavailable.
+	keysOn  bool
+	orgKeys orgKeyService
 }
 
 func NewServer(port int, orgService *orgcore.Service, rbacRepo *rbac.Repository, authServiceURL, userServiceURL string) *Server {
@@ -136,6 +143,10 @@ func NewServer(port int, orgService *orgcore.Service, rbacRepo *rbac.Repository,
 			}
 		}
 	}
+	// The key routes exist only when ORG_CORE_KEYS_ENABLED=1; cmd/server wires
+	// the service (SetOrgKeys) and refuses to boot without usable master keys
+	// (ValidateOrgKeysConfig).
+	s.keysOn = orgkeys.Enabled(os.Getenv)
 	s.setupRoutes()
 	s.httpServer = &http.Server{
 		Addr:              ":" + strconv.Itoa(port),
@@ -365,4 +376,8 @@ func (s *Server) setupRoutes() {
 	// (EnsureSuccession) before a sole owner/admin's erasure saga starts. See
 	// succession_handlers.go.
 	internal.POST("/orgs/:orgId/members/:userId/succession", s.promoteMemberSuccession)
+	// Key custody (WS17.E2): DEK wrap, unwrap, rewrap, KEK rotation, metadata and
+	// crypto-shred. Registered only when ORG_CORE_KEYS_ENABLED=1; see
+	// keys_handlers.go for the scope of each route.
+	s.registerOrgKeyRoutes(internal)
 }

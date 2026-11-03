@@ -27,6 +27,7 @@ const (
 	authCorePrincipal         = "auth-core"
 	domainReaderPrincipal     = "auth-core"
 	scimEdgePrincipal         = "verevon-scim-edge"
+	quarryEdgePrincipal       = "quarry-edge"
 	serviceDelegationMaxAge   = 30 * time.Second
 	serviceDelegationSkew     = 5 * time.Second
 	serviceDelegationMaxBody  = 1 << 20
@@ -208,6 +209,11 @@ func validateServiceCredential(credential serviceCredential, principals map[stri
 		// The web policy read feeds a token claim that bounds what agents may do, so
 		// it is pinned to the one principal that mints it (WS7.H, WS7.I).
 		if scope == "org:web-policy:read:any" && credential.Principal != authCorePrincipal {
+			return fmt.Errorf("scope %s is not valid for principal %s", scope, credential.Principal)
+		}
+		// The key scopes hand out plaintext data keys of ANY org, so they are
+		// pinned to the one principal that seals Quarry profiles (WS17.E2).
+		if (scope == "org:keys:wrap:any" || scope == "org:keys:unwrap:any") && credential.Principal != quarryEdgePrincipal {
 			return fmt.Errorf("scope %s is not valid for principal %s", scope, credential.Principal)
 		}
 		scopes[scope] = struct{}{}
@@ -515,6 +521,21 @@ func internalOrganizationScopes(method string, rest []string) []string {
 		return []string{"org:browser-site:read:any"}
 	case len(rest) == 2 && rest[1] == "web-policy" && method == http.MethodGet:
 		return []string{"org:web-policy:read:any"}
+	// Key custody (WS17.E2). The admin and destroy scopes are deliberately not in
+	// orgServiceScopeAllowlist yet, so no credential holds them and rotate,
+	// metadata and crypto-shred answer 403 until a reviewed registry change.
+	case len(rest) == 3 && rest[1] == "keys" && rest[2] == "data-keys" && method == http.MethodPost:
+		return []string{"org:keys:wrap:any"}
+	case len(rest) == 4 && rest[1] == "keys" && rest[2] == "data-keys" && rest[3] == "unwrap" && method == http.MethodPost:
+		return []string{"org:keys:unwrap:any"}
+	case len(rest) == 4 && rest[1] == "keys" && rest[2] == "data-keys" && rest[3] == "rewrap" && method == http.MethodPost:
+		return []string{"org:keys:wrap:any"}
+	case len(rest) == 3 && rest[1] == "keys" && rest[2] == "rotate" && method == http.MethodPost:
+		return []string{"org:keys:admin:any"}
+	case len(rest) == 2 && rest[1] == "keys" && method == http.MethodGet:
+		return []string{"org:keys:admin:any"}
+	case len(rest) == 2 && rest[1] == "keys" && method == http.MethodDelete:
+		return []string{"org:keys:destroy:any"}
 	case len(rest) == 2 && rest[1] == "reconcile" && method == http.MethodPost:
 		return []string{"org:projection:write:any"}
 	case len(rest) == 3 && rest[1] == "members" && rest[2] == "reconcile" && method == http.MethodPost:
