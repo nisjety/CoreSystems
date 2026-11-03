@@ -433,3 +433,32 @@ Open items:
 - W3-E3.2-f: MP asks appended (re-vendor model-gateway golden copy + pin; accept unknown web_policy.caps keys; broker origin-extension grants honour both keys); the model-gateway rows of zdr-contract-sync fail until that lands; nothing enforces the keys yet.
 - 50 depth rows appended to W23-depth.md (lanes a 13, b 22, c 4, d 11).
 - Four tracked .sha256 files are clean after the index refresh; none committed.
+
+## Step S9 (W3), integrated 2026-11-03
+
+Units: W3-E3.3-h, W3-E3.7.1 (lane a); W3-E3.1-e, W3-E3.4-2-3 (lane b); W3-E3.6-4b (lane c; W3-E3.2-b-swap NOT LANDED, see open items); W3-E3.2-e1, W3-E3.5-3 (lane d). All code only, flags default off (QUARRY_EDGE__HIT_TEST, QUARRY_EDGE__BATCH_IDEMPOTENCY, QUARRY_EDGE__RUN_TTL, QUARRY_EDGE__PII_REDACTION reused, QUARRY_EDGE__ORIGIN_CONSENT, QUARRY_EDGE__JOB_WEBHOOK, QUARRY_CONTROL__JOB_WEBHOOK). Not flagged: migration 028 (org-scoped job Idempotency-Key, a cross-org bug fix) and the E3.1-e read denial (only withholds more; its trigger fill_otp_ref stays behind QUARRY_EDGE__FILL_OTP).
+
+Merge commits on w23/integ (base 2c3ce34a4):
+- 2cd162156 merge: w23/lane-a (S9: W3-E3.3-h, W3-E3.7.1)
+- d9b3f458c merge: w23/lane-b (S9: W3-E3.1-e, W3-E3.4-2-3)
+- 93632ea98 merge: w23/lane-c (S9: W3-E3.6-4b)
+- 94515ab58 merge: w23/lane-d (S9: W3-E3.2-e1, W3-E3.5-3)
+- One conflict: .plan-work/quarry-w1w2/MP-ASKS.md (lane b E3.4-2-3 and lane d E3.2-e1 both appended a section at the end); kept both, lane b first, CRLF kept.
+
+Compile guard (no test runs):
+- Rust (qtest-lane integ): `cargo check --workspace --tests` exit 0; 33 warnings, all pre-existing (the agent_policy_gate.rs dead-code ones come from W2-Q-WS7K c3f894d41, run_live.rs:519 fetch_update deprecation from 6efc33cc9); no warning from S9 code. Extra: `cargo check -p quarry-browser -p quarry-runtime --features quarry-browser/chromiumoxide,quarry-runtime/chromiumoxide --tests` exit 0, no warnings (covers the E3.3-h hit_test_point code).
+- Go, GOWORK=off, build + vet: apps/Ingestion Plane/Quarry-v2/services/quarry-control clean (exit 0 both).
+- No TS, verevonv3 gateway or action-registry.ts change: no tsc/gateway check, no admission golden regeneration, no new action ids. No ZDR/schema/route-count regeneration needed (the guard compiled; the new hit-test route is not in the ZDR matrix yet, D-E33h-9).
+- No follow-up fix commits were needed.
+
+Open items:
+- W3-E3.2-b-swap (lane c): NOT BUILT. The unit agent refused to write into innh-lane-c (different-worktree guard) and did not use the python fallback; nothing written. Rerun from a session that can write lane c (planned change in its report: flag VITE_BROWSER_APPROVAL_CARD, ChatMessages.tsx + BrowserChrome.tsx; MP ask for execution-core gate_risky_action redirect text + 1000-char cap not yet appended).
+- W3-E3.3-h: route dark even with the flag on (501) until a BrowserDriver trait method + BrowserPointHit land in quarry-browser lib.rs (ask 1); backend node id is exposed in the public fingerprint_id (D-E33h-1, ask 2 accessor in observation.rs); ZDR matrix/OpenAPI/SDK rows missing (ask 3).
+- W3-E3.7.1: migration 028 not applied anywhere; Idempotency-Key not covered by the internal HMAC (D-E371-1); crawl replay with a different URL re-attaches silently (D-E371-2); createJob and memory store untouched (D-E371-3).
+- W3-E3.1-e: runtime stores screenshot/visual artifacts and emits ObservationReady before the edge strips (high, observation.rs); attach.rs delegate_step skips the check (high); marks not released on close/sweep; SPA route change counts as a new page.
+- W3-E3.4-2-3: types.rs run_is_resumable still treats only active as resumable (blocks QUARRY_EDGE__RUN_TTL); close.rs drain does not mark suspended; checkpoint has no timestamps; wire/OpenAPI/SDK lack suspended/expired; MP ask (execution-core resume_run_id) appended.
+- W3-E3.6-4b: per-request redacting runs still render a page PNG into the CAS (D-E364b-1 high; pipeline.rs must skip and wrap in PiiEnforcingStore); ingest_client.rs no sink check; JSON number-run false positives unmeasured.
+- W3-E3.2-e1: no route calls admit_origin_extension; extension checked once, not per step (RunEntry in types.rs) - condition for flag on; other lanes/tabs do not get the widening; MP ask (origin_extension grant kind) appended; OD13 counsel review still gates the flag.
+- W3-E3.5-3: crawl handoff (routes.rs) does not save req.webhook, so the edge flag must stay off; batch not wired; control create does not call NormalizeJobWebhook; no delivery path; docs/compose/SDK not updated.
+- 38 depth rows appended to W23-depth.md (lanes a 14, b 9, c 4, d 11).
+- The four line-ending-only .sha256 artifacts were not staged.
