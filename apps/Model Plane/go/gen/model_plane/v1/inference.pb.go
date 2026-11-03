@@ -381,9 +381,14 @@ type InferRequest struct {
 	// purpose and routes nothing. UNSPECIFIED, and any value this build does not
 	// know, count as `unspecified`, so an older caller and a newer one both work.
 	// It carries no content, so Zero Data Retention does not change it.
-	Purpose       InferPurpose `protobuf:"varint,21,opt,name=purpose,proto3,enum=model_plane.v1.InferPurpose" json:"purpose,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	Purpose InferPurpose `protobuf:"varint,21,opt,name=purpose,proto3,enum=model_plane.v1.InferPurpose" json:"purpose,omitempty"`
+	// The model the turn itself was served by (EP-13 S4). Read only when `model`
+	// is `verevon-role`: the role table tries its own candidates first, then this
+	// model, then the cheap fallback. Empty names none. It carries no content, so
+	// Zero Data Retention does not change it.
+	RoleFallbackModel string `protobuf:"bytes,23,opt,name=role_fallback_model,json=roleFallbackModel,proto3" json:"role_fallback_model,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
 }
 
 func (x *InferRequest) Reset() {
@@ -561,6 +566,13 @@ func (x *InferRequest) GetPurpose() InferPurpose {
 		return x.Purpose
 	}
 	return InferPurpose_INFER_PURPOSE_UNSPECIFIED
+}
+
+func (x *InferRequest) GetRoleFallbackModel() string {
+	if x != nil {
+		return x.RoleFallbackModel
+	}
+	return ""
 }
 
 // InferImagePart — one image attached to a message of an InferRequest. Bytes
@@ -1559,6 +1571,15 @@ type RouteNote struct {
 	// The effort level the budget clamped the call to, when it did. Empty when
 	// the budget left the requested effort alone.
 	AppliedEffort string `protobuf:"bytes,4,opt,name=applied_effort,json=appliedEffort,proto3" json:"applied_effort,omitempty"`
+	// The role-table purpose whose entry chose the model, for a `verevon-role`
+	// call (EP-13 S4): "title", "follow_ups", "verification_judge" or
+	// "research_plan". Empty when no table entry chose the model, that is when the
+	// turn's own model or the cheap fallback did, and for every other call.
+	Role string `protobuf:"bytes,5,opt,name=role,proto3" json:"role,omitempty"`
+	// Which step of the `verevon-role` resolution chose the model (EP-13 S4):
+	// "table", "turn_model" or "cheap_fallback". Empty for every call that named
+	// no role.
+	RoleSource    string `protobuf:"bytes,6,opt,name=role_source,json=roleSource,proto3" json:"role_source,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1617,6 +1638,20 @@ func (x *RouteNote) GetCheapFallbackForced() bool {
 func (x *RouteNote) GetAppliedEffort() string {
 	if x != nil {
 		return x.AppliedEffort
+	}
+	return ""
+}
+
+func (x *RouteNote) GetRole() string {
+	if x != nil {
+		return x.Role
+	}
+	return ""
+}
+
+func (x *RouteNote) GetRoleSource() string {
+	if x != nil {
+		return x.RoleSource
 	}
 	return ""
 }
@@ -6256,7 +6291,7 @@ var File_model_plane_v1_inference_proto protoreflect.FileDescriptor
 
 const file_model_plane_v1_inference_proto_rawDesc = "" +
 	"\n" +
-	"\x1emodel_plane/v1/inference.proto\x12\x0emodel_plane.v1\"\xed\a\n" +
+	"\x1emodel_plane/v1/inference.proto\x12\x0emodel_plane.v1\"\x9d\b\n" +
 	"\fInferRequest\x12\x1d\n" +
 	"\n" +
 	"request_id\x18\x01 \x01(\tR\trequestId\x12\x15\n" +
@@ -6283,7 +6318,8 @@ const file_model_plane_v1_inference_proto_rawDesc = "" +
 	"\x0fcache_scope_key\x18\x13 \x01(\tR\rcacheScopeKey\x12?\n" +
 	"\vimage_parts\x18\x14 \x03(\v2\x1e.model_plane.v1.InferImagePartR\n" +
 	"imageParts\x126\n" +
-	"\apurpose\x18\x15 \x01(\x0e2\x1c.model_plane.v1.InferPurposeR\apurpose\"f\n" +
+	"\apurpose\x18\x15 \x01(\x0e2\x1c.model_plane.v1.InferPurposeR\apurpose\x12.\n" +
+	"\x13role_fallback_model\x18\x17 \x01(\tR\x11roleFallbackModel\"f\n" +
 	"\x0eInferImagePart\x12#\n" +
 	"\rmessage_index\x18\x01 \x01(\rR\fmessageIndex\x12\x12\n" +
 	"\x04data\x18\x02 \x01(\fR\x04data\x12\x1b\n" +
@@ -6374,12 +6410,15 @@ const file_model_plane_v1_inference_proto_rawDesc = "" +
 	"upstreamMs\x1a=\n" +
 	"\x0fUpstreamMsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\x04R\x05value:\x028\x01\"\xb0\x01\n" +
+	"\x05value\x18\x02 \x01(\x04R\x05value:\x028\x01\"\xe5\x01\n" +
 	"\tRouteNote\x12%\n" +
 	"\x0ebudget_posture\x18\x01 \x01(\tR\rbudgetPosture\x12!\n" +
 	"\ftier_shifted\x18\x02 \x01(\bR\vtierShifted\x122\n" +
 	"\x15cheap_fallback_forced\x18\x03 \x01(\bR\x13cheapFallbackForced\x12%\n" +
-	"\x0eapplied_effort\x18\x04 \x01(\tR\rappliedEffort\"\xc7\x01\n" +
+	"\x0eapplied_effort\x18\x04 \x01(\tR\rappliedEffort\x12\x12\n" +
+	"\x04role\x18\x05 \x01(\tR\x04role\x12\x1f\n" +
+	"\vrole_source\x18\x06 \x01(\tR\n" +
+	"roleSource\"\xc7\x01\n" +
 	"\x16CreateEmbeddingRequest\x12\x1d\n" +
 	"\n" +
 	"request_id\x18\x01 \x01(\tR\trequestId\x12\x15\n" +

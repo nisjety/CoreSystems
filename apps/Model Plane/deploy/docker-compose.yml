@@ -239,6 +239,9 @@ services:
       MODEL_GATEWAY_AUX_MODEL: ${MODEL_GATEWAY_AUX_MODEL:-}
       MODEL_GATEWAY_CATALOGUE_PRICES: ${MODEL_GATEWAY_CATALOGUE_PRICES:-false}
       MODEL_GATEWAY_WEB_READER: ${MODEL_GATEWAY_WEB_READER:-false}
+      # Side-task models from the platform role table (EP-13 S4). Roll out inference-core first:
+      # an older inference-core refuses the verevon-role model id.
+      MODEL_GATEWAY_ROLE_ROUTING: ${MODEL_GATEWAY_ROLE_ROUTING:-false}
       RATE_LIMIT_RPM: "100"
       # Resume buffer for chat streams (chat gap closure I3). With it the frames
       # a turn has already sent are kept in the model plane's Dragonfly, so a

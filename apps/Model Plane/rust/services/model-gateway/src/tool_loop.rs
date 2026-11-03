@@ -8456,6 +8456,7 @@ pub async fn run_tool_rounds_for_model_with_attachments(
                     prompt_tiers: decision_tiers,
                     cache_scope_key,
                     image_parts: Vec::new(),
+                    role_fallback_model: String::new(),
                 },
                 inference_bearer,
             );
@@ -9369,6 +9370,8 @@ mod tests {
             tier_shifted,
             cheap_fallback_forced,
             applied_effort: String::new(),
+            role: String::new(),
+            role_source: String::new(),
         };
         assert_eq!(route_shift(None), None);
         assert_eq!(route_shift(Some(&note(false, false))), None);

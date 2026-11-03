@@ -141,6 +141,7 @@ mod tests {
             tier_shifted: true,
             cheap_fallback_forced: false,
             applied_effort: None,
+            role: None,
         };
         let mut wire = bridge_to_grpc(rx, HandlerClock::start(), Some(note));
 

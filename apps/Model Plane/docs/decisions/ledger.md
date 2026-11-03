@@ -22,6 +22,38 @@ with a pointer forward. Newest first.
 
 ---
 
+## 2026-11-03 - Side-task models come from a platform role table; a role never fails a turn (EP-13 S4, D6, D7)
+
+**Status: built in wave mode behind `MODEL_GATEWAY_ROLE_ROUTING` (default off); not deployed, no live proof yet.**
+
+Decided: D6, the role table lives inside the platform `RoutingPolicy` singleton (scope `inference:policy:admin`), with one entry each for `title`, `follow_ups`, `verification_judge` and `research_plan`, and one to four ordered candidates per entry. Per-org tables stay in Wave 4 (F-t3-065). D7, a side task names the model `verevon-role` with its `purpose` and the turn's own model in `role_fallback_model`; inference-core takes the first candidate that passes the catalogue, the entitlement, the ZDR, privacy-tier and residency floors and, for the small-budget purposes, the no-reasoning filter; else the turn's own model; else the cheap fallback. A side task never fails a turn. The route note records `role` and `role_source`. A PUT with a malformed table is refused with 400 `invalid_role_table`. With the switch off the gateway sends exactly what it sent before. Roll out inference-core before turning the gateway switch on. Supersedes nothing.
+
+---
+
+## 2026-11-03 - Run now is a manual schedule fire through the same Control fire authorisation; creator only (EP-6 S2)
+
+**Status: decided at the default; not built yet (EP-6 S2 builds it, dark).**
+
+Decided: OD-1 (creator only), OD-8 (manual fires count toward the three-failure auto-pause) and OD-9 (limits). A creator presses Run now on one of their own schedules. The fire takes the same Control decisions as a cron fire: `AuthorizeFire` on the route, as the sweeper makes it for a cron slot, and then the task dispatcher's checks (`AuthorizeFire`, then `AuthorizeScheduledRun`) before `StartWorkflow`. Run now never calls `StartWorkflow` directly, and it writes the same `tasks` and `cron_fires` rows as a cron fire, with fire key `manual:<uuid>`. Creator only is enforced in capability-core and in the BFF. Org admins and owners keep pause and delete but cannot press Run now, because a press spends the creator's stored authority at a moment the creator did not choose. One manual fire may be in flight per schedule, and at most six manual fires per schedule per rolling hour; the refusals are typed 409 and 429. ZDR refuses the route at the capability-core router, as it refuses every non-read request from a ZDR principal. Supersedes nothing.
+
+---
+
+## 2026-11-03 - The Automations hub shows Active, Paused and Expired; the Fleet console stays hidden until Quarry has a fleet model (EP-6 S0, OD-2, OD-3)
+
+**Status: decided at the defaults. The Fleet route is already hidden: it mounts only when `VITE_FLEET_CONSOLE` is `'1'`, and no tracked config sets it.**
+
+Decided: OD-3, the hub states are Active, Paused and Expired. Expired means the approval lapsed. Paused shows its reason (set by the owner, or after failures). There is no Completed state until one-shot schedules exist, and those are out of scope. OD-2: no producer starts a fleet, and proxying `/v1/fleets/:id` through a Quarry-audience BFF would add a cross-plane route with nothing behind it, so the console stays hidden. When Quarry rules that it has no fleet model, the code is removed rather than proxied, and EP-6 S5 removes any link to it. Supersedes nothing.
+
+---
+
+## 2026-11-03 - Agent definitions stay in Convex and are versioned there; capability-core keeps policy only (EP-6, OD-4, OD-5, DEC-14)
+
+**Status: proposed until the owner rules on OD-4 and OD-5.**
+
+It blocks EP-6 S7 to S11; S0 to S6 do not depend on it. OD-4 (recommended: immutable published versions): each definition has numbered, immutable versions in Convex with a canonical digest, one editable draft, and a `publishedVersion` pointer on the agent. A binding or a run pins a version, and publishing never changes a running turn. Rollback publishes an old version again as a new number. OD-5 (recommended: the Convex definition holds the join): the tool allowlist and the autonomy cap live on the definition and apply tighten-only at invoke. They narrow what the WS05 bindings and the org policy already allow and never grant. capability-core stays the policy of record under DEC-14 and gains no agent table; the agent cap is one more input to the WS25-S6 strictest-wins resolve. OD-6 (named-agent authority, phase 3) is open in the depth register. Supersedes nothing.
+
+---
+
 ## 2026-11-02 - Main merged into model-plane: Space threads follow main's memory containment; two numbers moved
 
 **Status: implemented on model-plane (merge commit), not deployed.** Main (259 commits: the Space waves, the remote merge, the NATS cutover to `controlplane.*` and `CONTROLPLANE`, the ZDR resolver) was merged into model-plane. Decisions taken in the merge:

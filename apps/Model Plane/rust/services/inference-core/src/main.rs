@@ -68,6 +68,7 @@ async fn main() -> Result<()> {
         auth: auth.clone(),
         policy: chain.policy_handle(),
         client: chain.policy_client(),
+        chain: chain.clone(),
     };
     let grpc_readiness = GrpcReadiness::new();
     let grpc_handle = tokio::spawn(grpc::serve_with_providers_and_readiness(

@@ -18,6 +18,7 @@ use crate::provider::language::{
     LanguageAnalyticsChain, LanguageAnalyticsRequest, LanguageOperation,
 };
 use crate::provider::realtime::{RealtimeChain, RealtimeSessionRequest};
+use crate::provider::role::RoleCall;
 use crate::provider::speech::{
     AudioFormat, SpeechChain, SpeechSynthesisRequest, SpeechTranscriptionRequest,
 };
@@ -342,7 +343,7 @@ impl InferenceCore for InferenceService {
         clock.enter_chain();
         let (result, route_note) = self
             .chain
-            .infer_noted(&internal_req, !no_store)
+            .infer_role_noted(&internal_req, &RoleCall::from_wire(req.purpose, &req.role_fallback_model), !no_store)
             .await
             .map_err(provider_error_to_status)?;
 
@@ -376,7 +377,7 @@ impl InferenceCore for InferenceService {
         clock.enter_chain();
         let (rx, route_note) = self
             .chain
-            .infer_stream_noted(&internal_req)
+            .infer_stream_role_noted(&internal_req, &RoleCall::from_wire(req.purpose, &req.role_fallback_model))
             .await
             .map_err(provider_error_to_status)?;
 

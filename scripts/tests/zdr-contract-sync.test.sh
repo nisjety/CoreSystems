@@ -206,7 +206,7 @@ GOLDENS=(
   # (VEREVON_UPDATE_GOLDEN=1 pnpm vitest run src/shared/actions/admission-contract.test.ts) from the typed
   # side map (model-access.ts) and the registry, never written by hand. Each plane that admits an agent
   # action vendors it, with the pin beside it, in the VENDORED rows below.
-  "apps/Model Plane/api/contracts/agent-action-admission.json|d06d608ffa8ad8fc2e62a87a758461bb947286e34adab745e736f6cd4c751f70"
+  "apps/Model Plane/api/contracts/agent-action-admission.json|41d17b3b7813f90329485c6e0599c9691694df8b60b102ab2edaaefb97a3c12b"
   # WS21-S0 and WS21-S3: the browser policy goldens, authored (not generated). org-core's validate and resolve tests
   # and execution-core's canonicaliser test read vendored copies (VENDORED); the other consumers are pending (CONSUMERS).
   "apps/Model Plane/api/contracts/browser-domain-canonical.json|ef6bfb8e63f3a1c34b90a0d26d0f27fb5ef224f138a652bf851dc179573ac45d"

@@ -49831,3 +49831,122 @@ so it
 /* EP-14-S3: the docked step strip. Never display:none: the live region stays in the accessibility tree. */
 .verevon-chat-step-strip { min-width: 0; overflow: hidden; color: var(--verevon-e-subtle, var(--subtle)); font-size: 12px; line-height: 1.4; white-space: nowrap; text-overflow: ellipsis; }
 .verevon-chat-step-strip:not(:empty) { margin-top: 8px; }
+
+/* Automations hub (/agents/automations, EP-6 S1). */
+.verevon-automations-page {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  max-width: 960px;
+  margin: 0 auto;
+  padding: 24px 16px;
+}
+
+.verevon-automations-page__topbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.verevon-automations-page__topbar h1 {
+  margin: 0;
+  font-size: 22px;
+}
+
+.verevon-automations-page__back {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 999px;
+  color: var(--verevon-text);
+}
+
+.verevon-automations-page__intro {
+  margin: 0;
+  color: var(--verevon-text-muted);
+  font-size: 14px;
+}
+
+.verevon-automations-hub {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
+
+.verevon-automations-hub__filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.verevon-automations-hub__list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.verevon-automations-hub__row {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+  border: 1px solid var(--verevon-border);
+  border-radius: 12px;
+  background: var(--verevon-surface);
+  padding: 12px 14px;
+}
+
+.verevon-automations-hub__name {
+  margin: 0;
+  font-weight: 650;
+  overflow-wrap: anywhere;
+}
+
+.verevon-automations-hub__meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+  margin-top: 4px;
+  color: var(--verevon-text-muted);
+  font-size: 12px;
+}
+
+.verevon-automations-hub__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.verevon-automations-hub__retime {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 8px;
+}
+
+.verevon-automations-hub__retime label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  color: var(--verevon-text-muted);
+  font-size: 12px;
+}
+
+.verevon-automations-hub__retime select,
+.verevon-automations-hub__retime input {
+  max-width: 100%;
+  min-width: 0;
+}
+
+.verevon-automations-hub__empty {
+  margin: 0;
+  color: var(--verevon-text-muted);
+  font-size: 14px;
+}

@@ -3132,6 +3132,7 @@ async fn run_rounds(
             cache_scope_key: round_cache_scope_key(req, ctx.depth),
             // The run's images, on every round beside the goal they were attached to.
             image_parts: image_parts.clone(),
+            role_fallback_model: String::new(),
         });
         infer_request.metadata_mut().insert(
             "authorization",
