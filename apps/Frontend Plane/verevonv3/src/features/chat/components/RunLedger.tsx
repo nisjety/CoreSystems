@@ -5,7 +5,8 @@
  *
  * Nothing here takes focus. The arrow keys move focus between rows the reader is already on, and an
  * Inspect action from a tool card selects its call without moving focus. The page mounts this only
- * behind `VITE_CHAT_RUN_LEDGER` (see `run-ledger.ts`).
+ * behind `VITE_CHAT_RUN_LEDGER` (see `run-ledger.ts`). With `VITE_CHAT_RUN_WATERFALL` on, a turn of a
+ * known run also offers its durable timing (`RunWaterfall.tsx`).
  */
 
 import { createEffect, createMemo, createSignal, For, Show, untrack } from 'solid-js'
@@ -13,6 +14,7 @@ import { uiEventLabel, type VerevonUiEvent } from '@/shared/chat/verevon-ui-even
 import { useI18n } from '@/shared/i18n'
 import { formatLatency } from './chat-media-markdown'
 import { LedgerInspector } from './LedgerInspector'
+import { RunTimingPanel, runWaterfallEnabled } from './RunWaterfall'
 import {
   buildLedger,
   formatClock,
@@ -196,6 +198,10 @@ export function RunLedger(props: {
                   </button>
                   <Show when={!collapsed().has(entry.key)}>
                     <div class="verevon-chat-ledger__records">
+                      {/* EP-14 S5: the run's durable timing, which survives a reload; fetched only on request. */}
+                      <Show when={runWaterfallEnabled ? entry.turn.runId : undefined}>
+                        {(runId) => <RunTimingPanel runId={runId()} />}
+                      </Show>
                       <For each={entry.turn.records}>
                         {(record) => (
                           <button

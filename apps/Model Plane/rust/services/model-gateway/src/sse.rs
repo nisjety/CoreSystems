@@ -877,6 +877,8 @@ async fn emit_turn_timing(
     resume: (&crate::stream_buffer::StreamBufferStore, &str, &mut u64, &[String]),
 ) {
     if let Some(report) = timing.report(outcome) {
+        // EP-14 S5: an armed turn keeps this same report, written on its own task.
+        crate::run_timing_persist::persist_turn(&report);
         let (buffers, buffer_key, seq, features) = resume;
         let event = crate::sse_events::ChatEvent::TurnTiming { report };
         emit_and_buffer(tx, buffers, buffer_key, seq, features, req_id, event).await;
@@ -2675,6 +2677,17 @@ pub async fn invoke_stream_sse(
     let thread_scope = session_run.thread_id.clone();
     let prepared_ms = timing.close(crate::turn_timing::Phase::SessionPrepare, admitted_ms);
     timing.set_run(&session_run.run_id);
+    // EP-14 S5: an Ask turn of a persistent run keeps its timing report (no-op with the switch off).
+    if !agentic_requested {
+        crate::run_timing_persist::arm_turn(
+            &state,
+            &request_id,
+            &session_run.run_id,
+            &model_bearer,
+            turn_posture.zdr(),
+            turn_posture.is_waived(),
+        );
+    }
 
     // Planmodus: record plan mode against THIS run, in both the authoritative
     // in-memory store the tool-dispatch middleware consults (`is_plan_mode`) and
@@ -13492,6 +13505,16 @@ fn agentic_run_stream(
             }
             Ok(Ok(Ok(response))) => response,
         };
+        // EP-14 S5: the run's round timing, kept for a persistent run (no-op with either switch off).
+        crate::run_timing_persist::persist_rounds(
+            &state,
+            &run.run_id,
+            &request_id,
+            &model_bearer,
+            zdr,
+            retention_class.is_some(),
+            &response.round_timing,
+        );
 
         // Compaction is LOSSY and otherwise invisible: an answer built on a
         // prompt whose earlier tool results were cleared can be worse for a

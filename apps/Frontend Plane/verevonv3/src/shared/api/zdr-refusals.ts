@@ -65,6 +65,7 @@ export type ZdrFeatureKey =
   | 'conversation_export'
   | 'conversation_share'
   | 'conversation_import'
+  | 'run_inspection'
 
 /** The reader's-language chooser, the same shape the rest of the SPA passes around. */
 export type Translate = (noText: string, enText: string) => string
@@ -198,6 +199,7 @@ export const FEATURE_LABELS: Record<ZdrFeatureKey, Copy> = {
   conversation_export: { no: 'eksport av samtaler', en: 'conversation export and replay' },
   conversation_share: { no: 'deling av samtaler', en: 'conversation sharing' },
   conversation_import: { no: 'import av samtaler', en: 'conversation import' },
+  run_inspection: { no: 'tidslinje og innsyn i kjøringer', en: 'run timing and request inspection' },
 }
 
 /** A refusal whose feature the SPA does not know names it this way. */

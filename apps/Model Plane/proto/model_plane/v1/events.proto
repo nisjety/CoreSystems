@@ -253,6 +253,12 @@ enum EventType {
   // Allocated here so the enum is touched once.
   EVENT_TYPE_BROWSER_ATTACH_SHARED_JAR = 160;
 
+  // Run-ledger events (EP-14 S5). 150, proposed by the design, is the trace's.
+  // A run's content-free timing record (`RunTimingRecorded`, run_ledger.proto):
+  // ids, milliseconds, counts and tool names. Written by session-core for a
+  // persistent run only; a ZDR or waived run records none.
+  EVENT_TYPE_RUN_TIMING_RECORDED = 161;
+
   // Reserved for future event types.
   reserved 200 to 255;
 }

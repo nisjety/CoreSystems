@@ -456,6 +456,31 @@ message RunAgentResponse {
   // parked run reports the usage of the invocation that paused or parked; the
   // continuation that follows is a new invocation with its own tally.
   RunUsage usage = 9;
+
+  // When each inference round of this invocation's own loop ran (EP-14 S5), in
+  // round order. Milliseconds and counts only, never content. Empty unless
+  // EXECUTION_ROUND_TIMING is on; delegated loops are not listed (their time
+  // falls inside the parent round's dispatch). The gateway stores it as the
+  // run's `round-timing-v1` record when the run is persistent.
+  repeated RoundTiming round_timing = 12;
+}
+
+// RoundTiming - one inference round of a Do run's loop (EP-14 S5). Offsets are
+// milliseconds from the start of the invocation's loop, read from one monotonic
+// clock, so they never go backwards.
+message RoundTiming {
+  // The round's number within the invocation, from 1.
+  uint32 round = 1;
+  // When the round's inference call was sent.
+  uint64 inference_start_ms = 2;
+  // When its response (or its failure) came back.
+  uint64 inference_end_ms = 3;
+  // When the loop moved on from the round: its tool calls were dispatched, or
+  // the loop ended. Equal to `inference_end_ms` for a round with no tool calls.
+  uint64 dispatch_end_ms = 4;
+  // The tool calls the round's response asked for. 0 for an answering round
+  // and for a round whose inference failed.
+  uint32 tool_count = 5;
 }
 
 // RunUsage - the inference a run's loop spent in one invocation.

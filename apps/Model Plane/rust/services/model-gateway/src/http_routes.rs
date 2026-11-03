@@ -391,6 +391,8 @@ fn authed_routes() -> Router<AppState> {
         .route("/v1/runs/:run_id/events/replay", get(replay_run_events))
         // WS10.S6: the run's durable trace (Session Core EventLog), owner only, paged by cursor.
         .route("/v1/runs/:run_id/trace", get(get_run_trace))
+        // EP-14 S5: the run's durable, content-free timing and tool-call times, owner only.
+        .route("/v1/runs/:run_id/timing", get(get_run_timing))
         // Run event SSE
         .route("/v1/runs/:run_id/events", get(sse::run_events_sse))
         // Browser reasoning: Model Plane proposes one safe browser action from
@@ -2001,6 +2003,109 @@ async fn get_run_trace(
     Ok(Json(json!({
         "data": { "events": events },
         "meta": { "next_cursor": next_cursor, "has_more": page.has_more },
+    })))
+}
+
+// ---------------------------------------------------------------------------
+// EP-14 S5: `GET /v1/runs/:run_id/timing` - a run's durable, content-free timing.
+// ---------------------------------------------------------------------------
+
+/// A stored timestamp as RFC 3339 UTC to the millisecond, the shape the trace route uses.
+fn timing_rfc3339(ts: Option<&prost_types::Timestamp>) -> Option<String> {
+    let ts = ts?;
+    let nanos = u32::try_from(ts.nanos).ok()?;
+    chrono::DateTime::from_timestamp(ts.seconds, nanos)
+        .map(|at| at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
+}
+
+/// One timing record as the SPA reads it: the report as the JSON object it was stored as. A report
+/// that does not parse is reported as absent, never as its raw text.
+fn run_timing_json(timing: &mp_contracts::model_plane::v1::RunTimingRecorded) -> Value {
+    let report = serde_json::from_str::<Value>(&timing.report_json)
+        .ok()
+        .filter(Value::is_object);
+    json!({
+        "run_id": timing.run_id,
+        "request_id": timing.request_id,
+        "schema": timing.schema,
+        "report": report,
+        "phases_dropped": timing.phases_dropped,
+        "recorded_at": timing_rfc3339(timing.recorded_at.as_ref()),
+    })
+}
+
+fn run_action_timing_json(action: &mp_contracts::model_plane::v1::RunActionTiming) -> Value {
+    json!({
+        "action_id": action.action_id,
+        "tool": action.tool,
+        "status": action.status,
+        "reserved_at": timing_rfc3339(action.reserved_at.as_ref()),
+        "finalized_at": timing_rfc3339(action.finalized_at.as_ref()),
+        "effect_class": (!action.effect_class.is_empty()).then_some(action.effect_class.as_str()),
+    })
+}
+
+/// Session Core's answer to a timing read. A non-owner, an unknown run and a Session Core with the read
+/// switched off all read as 404, so the route says nothing about a run the caller cannot see.
+fn run_timing_status_to_http(status: &tonic::Status) -> HttpJsonError {
+    match status.code() {
+        tonic::Code::NotFound | tonic::Code::PermissionDenied => {
+            run_trace_error(StatusCode::NOT_FOUND, "run_not_found", "no such run")
+        }
+        tonic::Code::Unimplemented => run_trace_error(
+            StatusCode::NOT_FOUND,
+            "run_timing_unavailable",
+            "run timing is not available",
+        ),
+        tonic::Code::InvalidArgument => run_trace_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_run_id",
+            "the run id was refused",
+        ),
+        _ => grpc_status_to_http(status),
+    }
+}
+
+/// `GET /v1/runs/:run_id/timing` - the run's timing records and its tool calls' reserve and finalize
+/// times, `{data: {timings, actions, truncated}}`. Session Core checks that the caller owns the run (the
+/// user behind the session bearer). A zero-retention bearer is refused before anything is read, with
+/// feature `run_inspection`: there is nothing of a ZDR run to inspect, and the refusal says so.
+async fn get_run_timing(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    bearer: VerifiedModelBearer,
+    Path(run_id): Path<String>,
+) -> Result<Json<Value>, HttpJsonError> {
+    if claims.zdr {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(mp_contracts::zdr_refusal::Refusal::feature_not_supported("run_inspection").json_body()),
+        ));
+    }
+    let run_id = run_id.trim();
+    if !valid_trace_run_id(run_id) {
+        return Err(run_trace_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_run_id",
+            "run_id must be 1 to 64 characters of [A-Za-z0-9_-]",
+        ));
+    }
+    let response = state
+        .run_ledger_client
+        .clone()
+        .get_run_timing(authenticated_session_request(
+            mp_contracts::model_plane::v1::GetRunTimingRequest {
+                run_id: run_id.to_owned(),
+            },
+            &bearer,
+        )?)
+        .await
+        .map_err(|status| run_timing_status_to_http(&status))?
+        .into_inner();
+    let timings: Vec<Value> = response.timings.iter().map(run_timing_json).collect();
+    let actions: Vec<Value> = response.actions.iter().map(run_action_timing_json).collect();
+    Ok(Json(json!({
+        "data": { "timings": timings, "actions": actions, "truncated": response.truncated },
     })))
 }
 
@@ -20357,5 +20462,188 @@ mod run_trace_route_tests {
         let json = trace_event_json(&opaque);
         assert_eq!(json["payload"], json!({ "type_url": "type.googleapis.com/other" }));
         assert_eq!(json["origin"], Value::Null);
+    }
+}
+
+/// EP-14 S5: the run timing route against a stand-in Session Core RunLedgerService.
+#[cfg(test)]
+mod run_timing_route_tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    use axum::{body::Body, http::Request as HttpRequest};
+    use mp_contracts::model_plane::v1::{
+        run_ledger_service_client::RunLedgerServiceClient,
+        run_ledger_service_server::{RunLedgerService, RunLedgerServiceServer},
+        GetRunTimingRequest, GetRunTimingResponse, RecordRequestSnapshotRequest,
+        RecordRequestSnapshotResponse, RecordRunTimingRequest, RecordRunTimingResponse,
+        RunActionTiming, RunTimingRecorded,
+    };
+    use tower::ServiceExt;
+
+    /// Session Core as the owner check sees it: `run_1` is user-a's, every other run is absent.
+    #[derive(Clone, Default)]
+    struct FakeRunLedger {
+        seen: Arc<Mutex<Vec<(GetRunTimingRequest, Option<String>)>>>,
+        failure: Option<tonic::Code>,
+    }
+
+    #[tonic::async_trait]
+    impl RunLedgerService for FakeRunLedger {
+        async fn record_request_snapshot(
+            &self,
+            _: tonic::Request<RecordRequestSnapshotRequest>,
+        ) -> Result<tonic::Response<RecordRequestSnapshotResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("not used"))
+        }
+
+        async fn record_run_timing(
+            &self,
+            _: tonic::Request<RecordRunTimingRequest>,
+        ) -> Result<tonic::Response<RecordRunTimingResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("not used"))
+        }
+
+        async fn get_run_timing(
+            &self,
+            request: tonic::Request<GetRunTimingRequest>,
+        ) -> Result<tonic::Response<GetRunTimingResponse>, tonic::Status> {
+            let authorization = request
+                .metadata()
+                .get("authorization")
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_owned);
+            let request = request.into_inner();
+            self.seen
+                .lock()
+                .unwrap()
+                .push((request.clone(), authorization));
+            if let Some(code) = self.failure {
+                return Err(tonic::Status::new(code, "session-core says no"));
+            }
+            if request.run_id != "run_1" {
+                return Err(tonic::Status::not_found("run not found"));
+            }
+            Ok(tonic::Response::new(GetRunTimingResponse {
+                timings: vec![RunTimingRecorded {
+                    run_id: "run_1".to_owned(),
+                    request_id: "req_1".to_owned(),
+                    schema: "turn-timing-v1".to_owned(),
+                    report_json: r#"{"server_ms":1200,"phases":[]}"#.to_owned(),
+                    phases_dropped: 0,
+                    recorded_at: Some(prost_types::Timestamp {
+                        seconds: 1_793_525_415,
+                        nanos: 250_000_000,
+                    }),
+                }],
+                actions: vec![RunActionTiming {
+                    action_id: "act_1".to_owned(),
+                    tool: "web_search".to_owned(),
+                    status: "completed".to_owned(),
+                    reserved_at: Some(prost_types::Timestamp {
+                        seconds: 1_793_525_415,
+                        nanos: 0,
+                    }),
+                    finalized_at: None,
+                    effect_class: String::new(),
+                }],
+                truncated: false,
+            }))
+        }
+    }
+
+    fn claims(zdr: bool) -> Claims {
+        serde_json::from_value(json!({
+            "sub": "user-a", "iss": "auth-core", "exp": 4_102_444_800_i64, "org_id": "org-a",
+            "user_id": "user-a", "principal_type": "user", "zdr": zdr
+        }))
+        .expect("claims")
+    }
+
+    async fn app(fake: FakeRunLedger, zdr: bool) -> Router {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = tonic::transport::Server::builder()
+                .add_service(RunLedgerServiceServer::new(fake))
+                .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
+                .await;
+        });
+        let mut state = AppState::new();
+        state.run_ledger_client = RunLedgerServiceClient::connect(format!("http://{address}"))
+            .await
+            .unwrap();
+        Router::new()
+            .route("/v1/runs/:run_id/timing", get(get_run_timing))
+            .with_state(state)
+            .layer(Extension(claims(zdr)))
+            .layer(Extension(crate::auth::VerifiedSessionBearer::for_test(
+                "session-core-bearer",
+            )))
+    }
+
+    async fn get_json(router: Router, uri: &str) -> (StatusCode, Value) {
+        let response = router
+            .oneshot(HttpRequest::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+    }
+
+    #[tokio::test]
+    async fn get_run_timing_owner_only() {
+        let fake = FakeRunLedger::default();
+        let (status, body) = get_json(app(fake.clone(), false).await, "/v1/runs/run_1/timing").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let data = &body["data"];
+        assert_eq!(data["timings"][0]["schema"], "turn-timing-v1");
+        assert_eq!(data["timings"][0]["report"]["server_ms"], 1200);
+        assert!(data["timings"][0]["recorded_at"].as_str().is_some_and(|at| at.ends_with(".250Z")));
+        assert_eq!(data["actions"][0]["tool"], "web_search");
+        assert_eq!(data["actions"][0]["finalized_at"], Value::Null);
+        assert_eq!(data["actions"][0]["effect_class"], Value::Null);
+        assert_eq!(data["truncated"], false);
+        {
+            let seen = fake.seen.lock().unwrap();
+            assert_eq!(seen[0].1.as_deref(), Some("Bearer session-core-bearer"), "the owner's bearer");
+        }
+
+        // Another user's run reads exactly like a run that does not exist.
+        let (status, body) = get_json(app(fake.clone(), false).await, "/v1/runs/run_2/timing").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["error"]["code"], "run_not_found");
+        let denied = FakeRunLedger {
+            failure: Some(tonic::Code::PermissionDenied),
+            ..FakeRunLedger::default()
+        };
+        let (status, body) = get_json(app(denied, false).await, "/v1/runs/run_1/timing").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["error"]["code"], "run_not_found");
+
+        // Session Core with the read switched off.
+        let off = FakeRunLedger {
+            failure: Some(tonic::Code::Unimplemented),
+            ..FakeRunLedger::default()
+        };
+        let (status, body) = get_json(app(off, false).await, "/v1/runs/run_1/timing").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["error"]["code"], "run_timing_unavailable");
+
+        let (status, _) = get_json(app(fake.clone(), false).await, "/v1/runs/run.1/timing").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn get_run_timing_refuses_zdr_bearer() {
+        let fake = FakeRunLedger::default();
+        let (status, body) = get_json(app(fake.clone(), true).await, "/v1/runs/run_1/timing").await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["error"]["code"], "zdr_feature_not_supported");
+        assert_eq!(body["error"]["feature"], "run_inspection");
+        assert!(fake.seen.lock().unwrap().is_empty(), "nothing reaches Session Core");
     }
 }

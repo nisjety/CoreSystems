@@ -89,6 +89,7 @@ pub mod retrieval_tools;
 pub mod room_metadata;
 pub mod run_budget;
 pub mod run_context;
+pub mod run_timing_persist;
 pub mod run_control;
 pub mod runtime_registries;
 pub mod schema_check;

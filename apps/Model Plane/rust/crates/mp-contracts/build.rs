@@ -103,7 +103,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Hit again 2026-09-07 adding ListRunsRequest.space_id + the Space read
     // decision fields: model-gateway rebuilt and session-core did not, so the
     // room Work listing would have compiled against a contract without the
-    // fields. Touching this comment is the fingerprint bust.
+    // fields. Touching this comment is the fingerprint bust (last: EP-14 S5,
+    // run_ledger.proto's timing RPCs and RunAgentResponse.round_timing).
     for p in &proto_paths {
         println!("cargo:rerun-if-changed={}", p.display());
     }

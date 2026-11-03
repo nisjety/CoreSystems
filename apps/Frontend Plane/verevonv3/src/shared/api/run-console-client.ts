@@ -536,6 +536,87 @@ export async function listRunEventReplay(
   }
 }
 
+// ── Durable run timing (EP-14 S5) ───────────────────────────────────────────
+// `GET /api/v1/agents/runs/:run_id/timing` reads what the run kept of its timing: an Ask turn's
+// `turn_timing` report (`turn-timing-v1`), a Do run's per-round inference intervals
+// (`round-timing-v1`) and every tool call's reserve and finalize times. Content-free by
+// construction: ids, milliseconds, counts and tool names. A zero-retention run keeps none, and a
+// zero-retention caller is refused with the `run_inspection` feature.
+
+export type RunTimingRecord = {
+  schema: string
+  requestId: string
+  recordedAt?: string
+  phasesDropped: number
+  /** The stored report, as the JSON object of its schema. */
+  report: Record<string, unknown>
+}
+
+export type RunActionTiming = {
+  actionId: string
+  tool: string
+  status: string
+  reservedAt?: string
+  finalizedAt?: string
+  effectClass?: string
+}
+
+export type RunTiming = {
+  timings: RunTimingRecord[]
+  actions: RunActionTiming[]
+  /** More tool calls were recorded than the read returns. */
+  truncated: boolean
+}
+
+function normalizeRunTimingRecord(raw: unknown): RunTimingRecord | null {
+  const item = objectRecord(raw)
+  const report = objectRecord(item?.report)
+  const schema = str(item?.schema)
+  if (!item || !report || !schema) return null
+  return {
+    schema,
+    requestId: str(item.request_id) ?? str(item.requestId) ?? '',
+    recordedAt: normalizeOptionalIsoTimestamp(str(item.recorded_at) ?? str(item.recordedAt)),
+    phasesDropped: nonNegativeInt(item.phases_dropped) ?? nonNegativeInt(item.phasesDropped) ?? 0,
+    report,
+  }
+}
+
+function normalizeRunActionTiming(raw: unknown): RunActionTiming | null {
+  const item = objectRecord(raw)
+  const actionId = str(item?.action_id) ?? str(item?.actionId)
+  const tool = str(item?.tool)
+  if (!item || !actionId || !tool) return null
+  return {
+    actionId,
+    tool,
+    status: str(item.status) ?? '',
+    reservedAt: normalizeOptionalIsoTimestamp(str(item.reserved_at) ?? str(item.reservedAt)),
+    finalizedAt: normalizeOptionalIsoTimestamp(str(item.finalized_at) ?? str(item.finalizedAt)),
+    effectClass: str(item.effect_class) ?? str(item.effectClass),
+  }
+}
+
+/** Fetch a run's durable timing. Records the client cannot read are dropped, never guessed. */
+export async function getRunTiming(runId: string, signal?: AbortSignal): Promise<RunTiming> {
+  const raw = await requestJson<unknown>(
+    `/api/v1/agents/runs/${encodeURIComponent(runId)}/timing`,
+    { signal },
+  )
+  const data = objectRecord(objectRecord(raw)?.data)
+  const timings = Array.isArray(data?.timings) ? data.timings : []
+  const actions = Array.isArray(data?.actions) ? data.actions : []
+  return {
+    timings: timings
+      .map(normalizeRunTimingRecord)
+      .filter((record): record is RunTimingRecord => record !== null),
+    actions: actions
+      .map(normalizeRunActionTiming)
+      .filter((action): action is RunActionTiming => action !== null),
+    truncated: data?.truncated === true,
+  }
+}
+
 // ── Verevon Proof Bundle ────────────────────────────────────────────────────
 // `GET /api/v1/orchestration/runs/:run_id/proof-bundle` is the run's portable
 // evidence record: what a human authorized, what execution-core actually

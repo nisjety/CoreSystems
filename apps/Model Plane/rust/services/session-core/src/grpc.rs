@@ -891,7 +891,7 @@ async fn authorize_thread_deletion_owner(
 /// is gone there is nothing left in Postgres to find that twin by. The caller
 /// propagates after commit — see [`crate::memory_erasure`] for why this is not
 /// done inside the transaction.
-async fn delete_thread_rows(
+pub(crate) async fn delete_thread_rows(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     thread_id: &str,
 ) -> Result<Vec<crate::memory_erasure::ErasedMemory>, Status> {
@@ -11558,6 +11558,8 @@ pub(crate) fn event_type_to_i32(s: &str) -> i32 {
         "BROWSER_EGRESS_DECIDED" => 155,
         "BROWSER_ARTIFACT_RECORDED" => 156,
         "BROWSER_ATTACH_SHARED_JAR" => 160,
+        // EP-14 S5: a run's content-free timing record (run_ledger_grpc.rs).
+        "RUN_TIMING_RECORDED" => 161,
         _ => 0,
     }
 }

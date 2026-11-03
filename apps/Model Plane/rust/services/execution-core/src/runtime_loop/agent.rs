@@ -712,6 +712,9 @@ struct LoopContext<'a> {
     /// context and cloned into every delegated child's, so the clones share one
     /// tally and the response reports the run's rounds and its delegates' together.
     usage: UsageTally,
+    /// When each round of the root loop ran (EP-14 S5). `None` with `EXECUTION_ROUND_TIMING`
+    /// off and for every delegated child, whose rounds fall inside the parent round's dispatch.
+    round_timing: Option<RoundTimingLog>,
     /// The run's held results (WS25-S5), shared with every delegated child. `None` unless
     /// the switch is on for this run, and never set for a zero-retention or waived run.
     result_store: Option<std::sync::Arc<super::result_handles::ResultHandles>>,
@@ -2065,6 +2068,7 @@ async fn run_agent_with_route_parkable(
         subagent_roles,
         deadline,
         usage: UsageTally::default(),
+        round_timing: round_timing_for_run(round_timing_enabled()),
         result_store: result_store.clone(),
         max_tokens: scheduled.map_or(MAX_TOKENS, |scope| scope.max_tokens_per_round),
         purpose: if scheduled.is_some() {
@@ -2088,6 +2092,8 @@ async fn run_agent_with_route_parkable(
         None => (req.goal.clone(), None),
     };
     let rounds = run_rounds(&context, &loop_goal, max_rounds, seeded_round).await?;
+    // Closed here, at the loop's end, so finalizing is not counted as the last round's dispatch.
+    let round_timing = finished_round_timing(context.round_timing.as_ref());
     let total_rounds = rounds.total_rounds();
     // Captured before `rounds.outcome` is moved out below.
     let compaction_triggered = rounds.compaction_triggered;
@@ -2098,7 +2104,12 @@ async fn run_agent_with_route_parkable(
     let (final_answer, success, refusal) = match rounds.outcome {
         // Paused, not finished: the approval is already durable and the run
         // stays non-terminal. Resume re-invokes `run_agent`.
-        RoundsOutcome::Paused(response) => return Ok(response),
+        RoundsOutcome::Paused(response) => {
+            return Ok(pb::RunAgentResponse {
+                round_timing,
+                ..response
+            })
+        }
         // Parked, not finished and not failed: the park fold is durable and the run stays
         // open. It returns BEFORE `finalize`, so nothing of a terminal outcome is written (no
         // assistant message, no receipt, no plan transition) and the sandbox lease below is
@@ -2106,6 +2117,7 @@ async fn run_agent_with_route_parkable(
         RoundsOutcome::Parked(parked) => {
             return Ok(pb::RunAgentResponse {
                 usage: Some(context.usage.snapshot()),
+                round_timing,
                 ..super::park::parked_response(
                     &parked,
                     total_rounds,
@@ -2169,6 +2181,7 @@ async fn run_agent_with_route_parkable(
         store.release_run(&req.org_id, &req.run_id);
     }
     let mut response = finalized?;
+    response.round_timing = round_timing;
 
     // Only reached once `finalize` actually made the run terminal (it
     // returns `Err` — never mutating `StateStore` — when the durable receipt
@@ -3376,6 +3389,9 @@ async fn run_rounds(
         } else {
             None
         };
+        if let Some(log) = &ctx.round_timing {
+            log.begin(rounds_executed);
+        }
         let infer_result = match seeded_round.take() {
             Some(round) => Ok(tonic::Response::new(round)),
             None => inference.infer(infer_request).await,
@@ -3540,6 +3556,9 @@ async fn run_rounds(
             if ctx.run_usage_progress {
                 publish_run_usage_progress(ctx, &response).await;
             }
+        }
+        if let Some(log) = &ctx.round_timing {
+            log.end_inference(response.tool_calls.len());
         }
 
         // No tool calls → the model is ready to answer.
@@ -6354,6 +6373,8 @@ async fn run_delegated_child(
         deadline: parent.deadline,
         // The parent's tally, shared: the delegate's rounds are the run's.
         usage: parent.usage.clone(),
+        // A delegated loop's rounds are not listed: they fall inside the parent round's dispatch.
+        round_timing: None,
         result_store: parent.result_store.clone(),
         max_tokens: parent.max_tokens,
         purpose: parent.purpose,
@@ -8532,6 +8553,8 @@ async fn pause_for_approval(
         loop_stop_code: String::new(),
         // The caller that holds the loop's tally sets it.
         usage: None,
+        // The caller that holds the loop's round log sets it.
+        round_timing: Vec::new(),
     })
 }
 
@@ -8911,6 +8934,8 @@ async fn finalize(
         park_reason: String::new(),
         loop_stop_code: loop_stop_code.unwrap_or_default().to_owned(),
         usage: Some(usage),
+        // The caller that holds the loop's round log sets it.
+        round_timing: Vec::new(),
     })
 }
 
@@ -9380,6 +9405,121 @@ fn run_usage_progress_enabled() -> bool {
     mp_contracts::loop_fold::switch_from(std::env::var(RUN_USAGE_PROGRESS_ENV).ok().as_deref())
 }
 
+/// The round-timing switch (EP-14 S5). Off: `RunAgentResponse.round_timing` stays empty, so the
+/// response is byte-identical to one without the field. Only the literal `true` enables it.
+const ROUND_TIMING_ENV: &str = "EXECUTION_ROUND_TIMING";
+
+fn round_timing_enabled() -> bool {
+    mp_contracts::loop_fold::switch_from(std::env::var(ROUND_TIMING_ENV).ok().as_deref())
+}
+
+/// The root loop's round log, or none with the switch off.
+fn round_timing_for_run(enabled: bool) -> Option<RoundTimingLog> {
+    enabled.then(RoundTimingLog::start)
+}
+
+/// What the response carries: the closed log, or nothing.
+fn finished_round_timing(log: Option<&RoundTimingLog>) -> Vec<pb::RoundTiming> {
+    log.map_or_else(Vec::new, RoundTimingLog::finish)
+}
+
+/// When each inference round of the root loop ran (EP-14 S5): milliseconds from the loop's start on
+/// one monotonic clock, and the round's tool-call count. Never content. The gateway stores it as the
+/// run's `round-timing-v1` record when the run is persistent.
+#[derive(Clone)]
+struct RoundTimingLog {
+    origin: std::time::Instant,
+    inner: std::sync::Arc<std::sync::Mutex<RoundTimingInner>>,
+}
+
+#[derive(Default)]
+struct RoundTimingInner {
+    rounds: Vec<pb::RoundTiming>,
+    /// The last round's inference has not come back yet.
+    inference_open: bool,
+    /// The last round has not been left yet.
+    dispatch_open: bool,
+}
+
+impl RoundTimingInner {
+    /// The last round ended at `now`: whatever of it is still open closes there.
+    fn close(&mut self, now: u64) {
+        let Some(last) = self.rounds.last_mut() else {
+            return;
+        };
+        if self.inference_open {
+            last.inference_end_ms = now;
+            self.inference_open = false;
+        }
+        if self.dispatch_open {
+            last.dispatch_end_ms = now;
+            self.dispatch_open = false;
+        }
+    }
+}
+
+impl RoundTimingLog {
+    fn start() -> Self {
+        Self {
+            origin: std::time::Instant::now(),
+            inner: std::sync::Arc::default(),
+        }
+    }
+
+    fn now_ms(&self) -> u64 {
+        u64::try_from(self.origin.elapsed().as_millis()).unwrap_or(u64::MAX)
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, RoundTimingInner> {
+        self.inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Round `round`'s inference call is about to be sent. The round before it ended now.
+    fn begin(&self, round: u32) {
+        let now = self.now_ms();
+        let mut inner = self.lock();
+        inner.close(now);
+        inner.rounds.push(pb::RoundTiming {
+            round,
+            inference_start_ms: now,
+            ..pb::RoundTiming::default()
+        });
+        inner.inference_open = true;
+        inner.dispatch_open = true;
+    }
+
+    /// The round's response came back asking for `tool_calls` calls. A round with none is over.
+    fn end_inference(&self, tool_calls: usize) {
+        let now = self.now_ms();
+        let mut inner = self.lock();
+        if !inner.inference_open {
+            return;
+        }
+        inner.inference_open = false;
+        let answered = tool_calls == 0;
+        if answered {
+            inner.dispatch_open = false;
+        }
+        if let Some(last) = inner.rounds.last_mut() {
+            last.inference_end_ms = now;
+            last.tool_count = u32::try_from(tool_calls).unwrap_or(u32::MAX);
+            if answered {
+                last.dispatch_end_ms = now;
+            }
+        }
+    }
+
+    /// The loop ended: the last round closes now, and the log is what the response carries.
+    fn finish(&self) -> Vec<pb::RoundTiming> {
+        let now = self.now_ms();
+        let mut inner = self.lock();
+        inner.close(now);
+        inner.rounds.clone()
+    }
+}
+
 #[cfg(test)]
 thread_local! {
     /// A test's override of the lifecycle switch for tool retries (see `RUN_USAGE_PROGRESS_OVERRIDE`).
@@ -9510,6 +9650,52 @@ fn bounded_tool_context(output: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn round_timing_offsets_monotonic() {
+        let log = RoundTimingLog::start();
+        log.begin(1);
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        log.end_inference(2);
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        log.begin(2);
+        log.end_inference(0);
+        log.begin(3);
+        // The third round's inference failed: it never came back, and the loop ended.
+        let rounds = log.finish();
+        assert_eq!(rounds.iter().map(|round| round.round).collect::<Vec<_>>(), [1, 2, 3]);
+        assert_eq!(rounds.iter().map(|round| round.tool_count).collect::<Vec<_>>(), [2, 0, 0]);
+        let mut previous_end = 0;
+        for round in &rounds {
+            assert!(previous_end <= round.inference_start_ms, "{round:?}");
+            assert!(round.inference_start_ms <= round.inference_end_ms, "{round:?}");
+            assert!(round.inference_end_ms <= round.dispatch_end_ms, "{round:?}");
+            previous_end = round.dispatch_end_ms;
+        }
+        assert!(rounds[0].dispatch_end_ms > rounds[0].inference_end_ms, "the tools ran after it");
+        assert_eq!(rounds[1].dispatch_end_ms, rounds[1].inference_end_ms, "an answer has no dispatch");
+        assert_eq!(log.finish(), rounds, "finishing twice changes nothing");
+    }
+
+    #[test]
+    fn round_timing_off_leaves_response_unchanged() {
+        assert!(round_timing_for_run(false).is_none());
+        assert!(finished_round_timing(None).is_empty());
+        let before = pb::RunAgentResponse {
+            status: "completed".to_owned(),
+            rounds_executed: 2,
+            ..pb::RunAgentResponse::default()
+        };
+        let after = pb::RunAgentResponse {
+            round_timing: finished_round_timing(round_timing_for_run(false).as_ref()),
+            ..before.clone()
+        };
+        assert_eq!(
+            prost::Message::encode_to_vec(&after),
+            prost::Message::encode_to_vec(&before),
+            "the switch off adds no byte"
+        );
+    }
     use crate::session_terminal_auth::SessionTerminalTokenError;
     use mp_contracts::agentic_subscription::Switches;
     use mp_contracts::model_plane::v1::{
@@ -28435,6 +28621,7 @@ mod tests {
                 park_reason: "provider_exhausted".to_owned(),
                 loop_stop_code: String::new(),
                 usage: Some(usage),
+                round_timing: Vec::new(),
             },
             "the failed round stays charged, and a park carries no answer and no failure code"
         );
