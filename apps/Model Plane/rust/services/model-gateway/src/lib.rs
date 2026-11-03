@@ -41,6 +41,7 @@ pub mod implicit_feedback;
 pub mod knowledge_receipt;
 pub mod langcache;
 pub mod latency_levers;
+pub mod locale_context;
 pub mod locale_hint;
 pub mod lsp;
 mod mail_task_bridge_auth;

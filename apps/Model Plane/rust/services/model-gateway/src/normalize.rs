@@ -610,6 +610,9 @@ mod tests {
             space_instructions: None,
             persona_instructions: None,
             locale: None,
+            client_timezone: None,
+            client_utc_offset_minutes: None,
+            ui_locale: None,
         }
     }
 

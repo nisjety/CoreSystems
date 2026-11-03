@@ -4,6 +4,19 @@
   "catalogSchemaVersion": 3,
   "rows": [
     {
+      "actionId": "agents.installations.list",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "read",
+      "exemptReason": "no_owner_executor",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:3145895d015b65aa3646491a939371f2edb92181ee177fc588355bb81de5e9da",
+      "zdr_allowed": false
+    },
+    {
       "actionId": "approvals.decide",
       "registry": true,
       "access": "none",

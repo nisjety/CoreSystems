@@ -412,6 +412,9 @@ services:
       # WS27-S5: a ZDR answer's usage frame states its cost in-stream, numbers only, nothing stored (no ledger row, no usage
       # envelope). Off by default; only the literal `true` turns it on. Turning it on is an owner call (DEC-18(d)).
       MODEL_GATEWAY_ZDR_STREAM_COST: ${MODEL_GATEWAY_ZDR_STREAM_COST:-false}
+      # EP-8 S1: the person's local date, time and app language in the prompt. Only the literal
+      # true turns it on; nothing is stored. Keep it off until the time precision is decided.
+      MODEL_GATEWAY_USER_LOCALE_CONTEXT: ${MODEL_GATEWAY_USER_LOCALE_CONTEXT:-false}
       # WS27-S2: a turn's usage frame and ledger rows count every tool round and the overhead calls, with run_id. Off by
       # default; only the literal `true`. Billing attribution (DEC-18, WS27-D5) must be confirmed before it is turned on.
       MODEL_GATEWAY_TURN_USAGE_COMPLETE: ${MODEL_GATEWAY_TURN_USAGE_COMPLETE:-false}

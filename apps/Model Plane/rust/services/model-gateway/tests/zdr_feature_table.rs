@@ -310,6 +310,17 @@ fn cases() -> Vec<(&'static str, Value, Expect)> {
             with("persona_instructions", json!("Friendly.")),
             None,
         ),
+        (
+            "client_timezone",
+            with("client_timezone", json!("Europe/Oslo")),
+            None,
+        ),
+        (
+            "client_utc_offset_minutes",
+            with("client_utc_offset_minutes", json!(60)),
+            None,
+        ),
+        ("ui_locale", with("ui_locale", json!("no")), None),
     ]
 }
 
