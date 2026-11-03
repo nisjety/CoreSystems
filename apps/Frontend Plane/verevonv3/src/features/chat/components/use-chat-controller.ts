@@ -327,6 +327,9 @@ export function useChatController() {
   })
 
   const [activeTab, setActiveTabSignal] = createSignal<ChatTab>('chat')
+  // The tool call the Trace should select, from a tool card's Inspect action (EP-14 S4). It lasts
+  // while the Trace is the open surface, so a later visit does not select that call again.
+  const [ledgerInspect, setLedgerInspect] = createSignal<{ callId: string } | null>(null)
   const [copiedTurnId, setCopiedTurnId] = createSignal<string | null>(null)
   const [launchMotion, setLaunchMotion] = createSignal(false)
   const [showScrollDown, setShowScrollDown] = createSignal(false)
@@ -366,7 +369,8 @@ export function useChatController() {
       deltaRecordedTurns.add(turnId)
     }
     if (untrack(() => uiEvents().length) >= MAX_TRACE_EVENTS) setTraceReplayTruncated(true)
-    setUiEvents((current) => [...current, event].slice(-MAX_TRACE_EVENTS))
+    // The turn rides on the record so the run ledger can group it (EP-14 S4).
+    setUiEvents((current) => [...current, turnId ? { ...event, turnId } : event].slice(-MAX_TRACE_EVENTS))
   }
   const [imageMode, setImageMode] = createSignal(false)
   const [planMode, setPlanModeRaw] = createSignal(false)
@@ -743,6 +747,7 @@ export function useChatController() {
   const setActiveTab = (tab: ChatTab) => {
     autoSummonedTab = null
     setActiveTabSignal(tab)
+    if (tab !== 'trace') setLedgerInspect(null)
     const threadId = state.threadId
     if (!threadId || isTemporaryThread(threadId) || isForeignOriginThread(threadId)) return
     try {
@@ -750,6 +755,14 @@ export function useChatController() {
     } catch {
       // Local storage can be disabled or full; the in-memory tab remains valid.
     }
+  }
+  /**
+   * The Inspect action on a tool call (EP-14 S4): the user asks for the Trace on that call, so
+   * the surface opens by their own act and the run ledger selects the call.
+   */
+  const inspectLedgerCall = (callId: string) => {
+    setLedgerInspect({ callId })
+    setActiveTab('trace')
   }
   const summonSurface = (tab: Exclude<ChatTab, 'chat'>) => {
     const current = activeTab()
@@ -768,6 +781,7 @@ export function useChatController() {
   }
   const restoreSurfaceTab = (threadId: string) => {
     autoSummonedTab = null
+    setLedgerInspect(null)
     if (isTemporaryThread(threadId) || isForeignOriginThread(threadId)) {
       setActiveTabSignal('chat')
       return
@@ -4773,6 +4787,8 @@ export function useChatController() {
     setActiveTab,
     copiedTurnId,
     uiEvents,
+    ledgerInspect,
+    inspectLedgerCall,
     traceReplayTruncated,
     launchMotion,
     showScrollDown,

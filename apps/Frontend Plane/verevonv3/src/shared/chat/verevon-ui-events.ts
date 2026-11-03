@@ -1,7 +1,7 @@
 /** Stable Verevon-owned UI events projected from the backend SSE stream. */
 export type VerevonPauseKind = 'blocked' | 'approval' | 'ambiguous'
 
-export type VerevonUiEvent =
+type VerevonUiEventBody =
   | { type: 'run.connected'; at: string; requestId?: string; threadId?: string; runId?: string; model?: string }
   | { type: 'run.completed'; at: string; runId?: string; outcome?: string }
   | { type: 'run.paused'; at: string; runId?: string; interrupts?: unknown[]; pauseKind?: VerevonPauseKind; detail?: string }
@@ -41,6 +41,9 @@ export type VerevonUiEvent =
   | { type: 'lifecycle.context'; at: string; change?: string; messagesDropped?: number; skillsTruncated?: number; skillsDropped?: number; layer?: string; state?: string }
   | { type: 'lifecycle.sandbox'; at: string; scope?: string; state?: string; cause?: string }
   | { type: 'unknown'; at: string; name: string; payload: Record<string, unknown> }
+
+/** A Trace record and the turn the controller recorded it under (EP-14 S4). The wire never sets it. */
+export type VerevonUiEvent = VerevonUiEventBody & { turnId?: string }
 
 const stringValue = (value: unknown): string | undefined => typeof value === 'string' ? value : undefined
 const numberValue = (value: unknown): number | undefined => typeof value === 'number' && Number.isFinite(value) ? value : undefined

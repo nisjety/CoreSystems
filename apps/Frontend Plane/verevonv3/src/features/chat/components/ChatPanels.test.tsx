@@ -3,7 +3,8 @@
 import { cleanup, fireEvent, render, waitFor } from '@solidjs/testing-library'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { flush, createSignal } from 'solid-js'
-import { ChatTabs, ContextWindowPanel, RunPlanPanel, SourcesPanel, StepsPanel } from './ChatPanels'
+import { ChatTabs, ContextWindowPanel, RunPlanPanel, SourcesPanel, StepsPanel, TracePanel } from './ChatPanels'
+import type { VerevonUiEvent } from '@/shared/chat/verevon-ui-events'
 import * as orchestration from '@/shared/api/orchestration-client'
 import * as memoryClient from '@/shared/api/memory-client'
 import {
@@ -88,6 +89,42 @@ describe('StepsPanel terminal status', () => {
     ]} onStopTask={() => {}} />)
     expect(container.querySelector('.verevon-chat-steps-header p')?.textContent).toBe('Stoppet')
     expect(container.querySelector<HTMLButtonElement>('.verevon-chat-steps-header button')?.disabled).toBe(true)
+    unmount()
+  })
+})
+
+// VITE_CHAT_RUN_LEDGER is unset here, so these pin what the Trace and the Steps tab
+// show with the run ledger off: the flat list, the cap notice and no Inspect action.
+describe('the Trace and the tool cards with the run ledger off', () => {
+  it('keeps the flat list, one row per event, and no ledger', () => {
+    const events: VerevonUiEvent[] = [
+      { type: 'run.connected', at: '2026-11-03T10:00:00.000Z', runId: 'run-1' },
+      { type: 'tool.call', at: '2026-11-03T10:00:01.000Z', id: 'c1', name: 'web_search' },
+    ]
+    const { container, unmount } = render(() => <TracePanel events={events} runId={null} />)
+    expect(container.querySelectorAll('.verevon-chat-trace-log > ol > li')).toHaveLength(2)
+    expect(container.querySelector('.verevon-chat-ledger')).toBeNull()
+    expect(container.querySelector('.verevon-chat-trace-log > header > span')?.textContent).toBe('2 hendelser')
+    unmount()
+  })
+
+  it('keeps the cap notice on the flat list', () => {
+    const { container, unmount } = render(() => <TracePanel events={[]} replayTruncated runId={null} />)
+    expect(container.querySelector('.verevon-chat-trace-log__notice')).not.toBeNull()
+    unmount()
+  })
+
+  it('offers no Inspect action on a tool card', () => {
+    const { container, unmount } = render(() => (
+      <StepsPanel
+        steps={[{ id: 'search', title: 'Search the web', detail: '', status: 'done', createdAt: '2026-11-03T10:00:00Z' }]}
+        toolCalls={[{ id: 'c1', name: 'web_search', status: 'completed', output: '3 results' }]}
+        onStopTask={() => {}}
+        onInspectCall={() => {}}
+      />
+    ))
+    expect(container.querySelector('.verevon-chat-tool-call')).not.toBeNull()
+    expect(container.querySelector('.verevon-chat-tool-call__inspect')).toBeNull()
     unmount()
   })
 })

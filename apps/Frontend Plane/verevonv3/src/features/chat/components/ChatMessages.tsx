@@ -2500,7 +2500,7 @@ function ToolIntentIcon(props: { intent: ToolIntent }) {
  * informative without expanding it. The body is still the raw payload, because
  * the payload is the evidence and reshaping it would hide what the model saw.
  */
-export function ToolCallCard(props: { call: ChatToolCall }) {
+export function ToolCallCard(props: { call: ChatToolCall; onInspect?: () => void }) {
   const i18n = useI18n()
   const [open, setOpen] = createSignal(false)
   const failed = () =>
@@ -2551,6 +2551,11 @@ export function ToolCallCard(props: { call: ChatToolCall }) {
         </em>
         <ChevronRight size={14} class={{ 'verevon-chat-rotate': open() }} />
       </button>
+      <Show when={props.onInspect}>
+        <button type="button" class="verevon-chat-tool-call__inspect" onClick={() => props.onInspect?.()}>
+          {i18n.tr('Åpne i Trace', 'Open in Trace')}
+        </button>
+      </Show>
       <Show when={open() && (args() || props.call.output || props.call.error)}>
         <div>
           <Show when={args()}>
