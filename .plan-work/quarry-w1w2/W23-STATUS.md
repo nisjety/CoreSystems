@@ -374,3 +374,33 @@ Open items:
 - W3-E3.8.1: no producer names dns/tls/connect yet (all chains report all_drivers_failed); merge lane d before E3.8.2 (lane a also edits fallback_driver.rs); owner decision on Temporal retries for all_drivers_failed and tls; openapi/CONTRACTS/compose/RUNBOOKS entries missing.
 - 58 depth rows appended to W23-depth.md (lanes a 24, b 5, c 5, d 24).
 - Four tracked .sha256 files in the integ worktree still show as modified (CRLF/LF checkout artifacts); none committed.
+
+## Step S7 (W2 + W3), integrated 2026-11-03
+
+Units: W3-E3.8.2 (lane a; W2-FE-WS9H NOT LANDED, drafts only in the vigorous-perlman scratchpad ws9h-drafts/, nothing committed); W3-E3.3-e1, W3-E3.4-4 (lane b); W3-E3.1-d, W3-E3.6-5 (lane c); W3-E3.2-g2, W3-E3.2-e3 (lane d). All code only, flags default off.
+
+Merge commits on w23/integ (base e30b70f82), no conflicts:
+- 83cd6612f merge: w23/lane-a (S7: W3-E3.8.2)
+- 0b640dd46 merge: w23/lane-b (S7: W3-E3.3-e1, W3-E3.4-4)
+- 7b780d6ca merge: w23/lane-c (S7: W3-E3.1-d, W3-E3.6-5)
+- 13379850a merge: w23/lane-d (S7: W3-E3.2-g2, W3-E3.2-e3)
+- 6f18a23cc fix(quarry-edge): drop the unused ArtifactStore import from the download settle path (compile-guard follow-up; it was a new warning, not an error)
+
+Compile guard (no test runs):
+- Rust (qtest-lane integ): `cargo check --workspace --tests` exit 0, warnings only; the one new S7 warning (step.rs unused ArtifactStore import) fixed in 6f18a23cc.
+- Go, GOWORK=off, build + vet: apps/Control Plane/user-core clean.
+- verevonv3 SPA (tsc6 -p tsconfig.app.json): 1 error, the pre-existing src/shared/api/schedule-contract.test.ts TS2352; 0 errors in BrowserPolicySection(.test).tsx. `pnpm typecheck` stops in the @verevon/remote-core build (libsodium-wrappers / fzstd modules not installed in this node_modules), pre-existing environment, not S7.
+- verevonv3 gateway: not changed in S7, no check.
+- action-registry.ts unchanged: no admission golden regeneration, no new action ids. No ZDR/schema/route-count regeneration run (the E3.6-5 schema goldens are known stale, see open items).
+
+Open items:
+- W2-FE-WS9H: NOT LANDED (different-worktree guard). Apply from an innh-lane-a session: copy ws9h-drafts/ new files into src/features/browser/dock/ (CSS to CRLF), git apply ws9h-chatpanels.patch and ws9h-chatpage.patch, commit, typecheck. Flag VITE_CHAT_BROWSER_DOCK default off.
+- W3-E3.8.2: no production caller passes FetchPolicy (budget is always the 30 s default with QUARRY_EDGE__FETCH_DEADLINE on); reasons tier_stalled / fetch_deadline_exceeded not yet in quarry-core error.rs, Go mirror, ERROR_REASONS.md; compose passthrough and RUNBOOKS missing; browser lease release on a stalled tier unverified (D-E382-3).
+- W3-E3.3-e1: rect never produced; needs BrowserDriver::target_box + DOM.getBoxModel in chromiumoxide.rs behind a default-off flag; CONTRACTS/openapi/SDK docs.
+- W3-E3.4-4: refused downloads stay in artifact storage (no delete); ledger not released on run close; delegate step path ungated; driver still quarantines unsolicited downloads until E3.4-6.
+- W3-E3.1-d: observation.rs FillOtpRef arm still Unsupported; E3.1-c adapter onto OtpFillTarget; mail connection id source.
+- W3-E3.6-5: HIGH crawl_scrape.rs UNSUPPORTED_KEYS lacks redact_pii/redactPii (crawl runs unredacted silently in lenient mode); docs/schemas goldens stale (UPDATE_SCHEMAS=1 needed before the jsonschema-feature test); OpenAPI parity script; owner to confirm non-ZDR refusal (requires_zdr).
+- W3-E3.2-g2: hidden until E3.2-g1 registers browser.get_org_policy / browser.set_org_policy (still BLOCKED); not mounted in WorkspaceSettingsPage.tsx; Norwegian copy unreviewed.
+- W3-E3.2-e3: migration 044 never applied to a real DB; RLS inert under a superuser role; no reader of the decisions (broker, Quarry, SPA); no gateway proxy; DSAR export likely misses user_settings.
+- 46 depth rows appended to W23-depth.md (lanes a 5, b 12, c 14, d 15).
+- Four tracked .sha256 files in the integ worktree still show as modified (CRLF/LF checkout artifacts); none committed.
