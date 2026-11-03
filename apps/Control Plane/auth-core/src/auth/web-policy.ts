@@ -11,7 +11,15 @@
  *    "proxy_max":...,"domains":{"allow":[...],"deny":[...]}}
  *
  * Only the entries the document states are carried (org-core omits the
- * baseline ones); `{"v":1,"rev":"0"}` means "no policy". The claim is always
+ * baseline ones); `{"v":1,"rev":"0"}` means "no policy".
+ *
+ * Per-origin consent defaults (W3 E3.2-f) ride in `caps` like every other
+ * mode, so the claim stays version 1: `browser.consent.origin`
+ * (`disabled`|`allowed`) and `browser.consent.max_scope`
+ * (`turn`|`conversation`|`always`). org-core accepts them tighten-only; an edge
+ * that does not know them ignores and counts them. A value outside those sets
+ * is a malformed answer here (no token), never a partial policy. They follow
+ * the same flag as the rest of the claim. The claim is always
  * present on a user token for those audiences, so an ABSENT claim on a user
  * token identifies an old issuer, never "no policy". A service token carries it
  * only when the principal's registry row says
@@ -92,6 +100,20 @@ export type WebPolicyClaim = Readonly<{
   proxy_max?: string;
   domains?: Readonly<WebPolicyDomains>;
 }>;
+
+/** Per-origin consent keys (E3.2-f) and the values each may carry in `caps`. */
+export const WEB_POLICY_ORIGIN_CONSENT_KEY = 'browser.consent.origin';
+export const WEB_POLICY_CONSENT_MAX_SCOPE_KEY = 'browser.consent.max_scope';
+export const WEB_POLICY_ORIGIN_CONSENT_VALUES: Readonly<
+  Record<string, readonly string[]>
+> = Object.freeze({
+  [WEB_POLICY_ORIGIN_CONSENT_KEY]: Object.freeze(['disabled', 'allowed']),
+  [WEB_POLICY_CONSENT_MAX_SCOPE_KEY]: Object.freeze([
+    'turn',
+    'conversation',
+    'always',
+  ]),
+});
 
 /** What a token carries when there is no policy, or the flag is off. */
 export const BASELINE_WEB_POLICY_CLAIM: WebPolicyClaim = Object.freeze({
@@ -269,6 +291,18 @@ export function webPolicyClaimFromOrgCore(body: unknown): WebPolicyClaim {
       const mode = rawCaps[key];
       if (typeof mode !== 'string') {
         throw new WebPolicyLookupFailure('org_core_malformed_response', 'caps');
+      }
+      const consentValues = Object.prototype.hasOwnProperty.call(
+        WEB_POLICY_ORIGIN_CONSENT_VALUES,
+        key,
+      )
+        ? WEB_POLICY_ORIGIN_CONSENT_VALUES[key]
+        : undefined;
+      if (consentValues && !consentValues.includes(mode)) {
+        throw new WebPolicyLookupFailure(
+          'org_core_malformed_response',
+          'origin_consent',
+        );
       }
       caps[key] = mode;
     }
