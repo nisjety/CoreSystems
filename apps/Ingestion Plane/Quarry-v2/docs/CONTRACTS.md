@@ -1328,3 +1328,72 @@ Errors: 501 `UNSUPPORTED` `details.reason = "browser_capability_unavailable"` (a
 - The eight `/v1/internal/*` routes of the Go control service (quarry-control: jobs claim, pending-control, control-ack, running, finalize; schedules desired and runs; zdr-tombstones) are not described yet. They move with the D2-050 internal secret split.
 - Every route the edge registers is in one of the two spec files or on `scripts/openapi-route-allowlist.json` with a reason (`scripts/tests/openapi-route-coverage.test.mjs`).
 - The generator does not delete files it no longer writes. After a spec change, delete the generated files that no longer exist (the gitignored `sdks/python/quarry_client`, `sdks/python/docs`, `sdks/python/test`, `sdks/typescript/src`, and the tracked `sdks/typescript/docs`).
+
+## E3.7 additions: batch idempotency, the 408 envelope, job get and cancel, the search scrape block, sitemap options (W3-E3.7.11, 2026-11-03)
+
+Status: a record of the E3.7 units as the code stands on 2026-11-03. Code only, not compiled, not run. `docs/openapi.yaml` carries the wire shapes: `Idempotency-Key` on `POST /v1/batch` and `POST /v1/crawl`, the batch `409`, the route-deadline `408` on `GET /v1/jobs/{job_id}`, and `SearchRequest.scrape` with `SearchResponse.scrape`. This section says what the edge serves, what it does not, and under which switch. Every switch named here is read by the code and defaults off.
+
+| Item | State | Switch (default) |
+|---|---|---|
+| Batch `Idempotency-Key`, org-scoped (E3.7.1) | built | `QUARRY_EDGE__BATCH_IDEMPOTENCY` (off); migration 028 is not flagged |
+| Job get and cancel (WS15.L1, WS15.L2) | built, documented in openapi | cancel needs `QUARRY_EDGE__JOB_CONTROL` (off) |
+| Wait-or-resume job get with a 408 envelope and a resume token (E3.7.3) | not built | none yet |
+| `scrape` block on `POST /v1/search` (E3.7.7a) | built | `QUARRY_EDGE__SEARCH_SCRAPE` (off) |
+| Answer reuse of the hydrated pages (E3.7.7b) | not wired on the edge | none |
+| Crawl `sitemap` skip, include, only (INNH-6a, which is E3.7.5) | built, documented in the INNH-6 section | `QUARRY_EDGE__CRAWL_SITEMAP` (off) |
+| Gzip sitemaps and the Sitemap-line parse on `/v1/map` (E3.7.4) | not built | none yet |
+
+### Batch `Idempotency-Key` (E3.7.1)
+
+- The header is read on `POST /v1/batch` and on `POST /v1/crawl`. It is trimmed and used when it is 1 to 128 bytes. An empty, longer or not visible ASCII value is ignored, and the request proceeds as if no key were sent.
+- Keys are unique per organization. Control migration 028 replaces the global unique index with one on `(org_id, idempotency_key)`. The migration is not behind a flag: it only stops two organizations colliding on one key.
+- Flag off (the default). A repeated key answers `200` with the job the first request created, the same `job_id`. The repeat is not billed. The body is not compared, so a repeat with a different body re-attaches to the first job.
+- Flag on (`QUARRY_EDGE__BATCH_IDEMPOTENCY`, batch only). The edge stores a SHA-256 of the batch as sent (the URL list in order, and `ingest`) on the job as `idempotency_payload_hash`, inside the signed body. A repeat with the same hash re-attaches exactly as with the flag off. A repeat with a different hash answers `409`: `error.code` is `CONFLICT` and `error.details` is `{"reason": "idempotency_key_reused", "job_id": "<the held job>"}`. Nothing is created and nothing is billed.
+- The hash is taken before the URL check and the allowance clamp, so a retry is not refused because the plan or the policy changed between attempts.
+- A held job with no stored hash (created with the flag off, by the crawl path or by another client) re-attaches as before, because it cannot be compared.
+- Crawls are forwarded with the key but are not hashed. With the flag on, a crawl key reused for a different URL still re-attaches silently.
+- A fresh request is unchanged by the flag: `200` with the `HandoffAck`.
+
+### The 408 envelope (E3.7.3)
+
+- Served today: the route deadline. Each edge route has one: 60 seconds, or 125 seconds for `POST /v1/scrape` while actions or AI formats are on. Past it the edge answers `408` with an empty body and no error envelope, and echoes `x-request-id`. It is the only `408` the edge answers itself. `GET /v1/jobs/{job_id}` documents it in openapi.
+- Not built: the wait-or-resume answer. The E3.7.3 design gives `GET /v1/jobs/{job_id}` a wait: when the wait ends before the job does, the answer is a `408` with a JSON envelope and a resume token, and the caller calls again with the token. Neither the wait parameter, the token nor the envelope exists in the edge or in control today. Do not build a client against it until E3.7.3 lands and this section changes.
+- A route-deadline `408` on `POST /v1/batch` or `POST /v1/crawl` can be retried with the same `Idempotency-Key`. If the first attempt created a job, the retry re-attaches to it. Without a key, a retry can create a second job.
+
+### Job get and cancel (WS15.L1, WS15.L2)
+
+- Read: `GET /v1/jobs/{job_id}` for any kind. `GET /v1/crawl/{job_id}` and `GET /v1/batch/{job_id}` check the kind: a job of the other kind is `404`. Errors are at `/v1/jobs/{job_id}/errors` and at the kind-specific `errors` paths. Reads are org-scoped by the verified token: another organization's job is `404`.
+- Cancel: `DELETE /v1/crawl/{job_id}` and `DELETE /v1/batch/{job_id}`. The replies are `202` when recorded and not yet applied (`control.pending`), `200` when the job already reflects the request, `404`, `409` (`details.reason` is `ended`, `not_running` or `not_controllable`), and `501` when `QUARRY_EDGE__JOB_CONTROL` is off. Pause and resume are `POST` on `/pause` and `/resume` under the same paths.
+- There is no generic `DELETE /v1/jobs/{job_id}`. A caller cancels through the path of the kind it created.
+- Non-ZDR only: crawl and batch are durable jobs. Both handoffs answer `403` under zero data retention (`zdr_refusal`), so no ZDR caller has a job for these routes to read or cancel.
+
+### The search `scrape` block (E3.7.7a)
+
+Request: `SearchRequest.scrape`, optional.
+
+- `limit`: 1 to 10, default 5.
+- `max_chars` (also `maxChars`): 1 to 50 000, default 8 000.
+- `timeout_ms` (also `timeoutMs`): 1 000 to 55 000, default 15 000. One budget for the whole block.
+- `formats`: `markdown` only, which is the default. Any other entry is `400 UNSUPPORTED_OPTION`.
+
+Out-of-range values are `400 BAD_REQUEST`. They are not clamped. Both refusals use the flat search error body (`error`, `code`, optional `hint`), and the message never repeats the caller's input. The checks run only with the flag on.
+
+Response: `SearchResponse.scrape`, present only when the request sent a block.
+
+- Flag `QUARRY_EDGE__SEARCH_SCRAPE` (default off, read per request). Off: the block is not validated, nothing is fetched, and `scrape` is `{"status": "disabled", "requested": 0, "hydrated": 0, "failed": 0}`. Turning the flag off never turns a search into a `400`.
+- On: the first `limit` results, in the order the caller sees (after diversity and rerank), are fetched concurrently under one deadline. Each URL passes the request's web policy, then the security preflight (blocklists, private hosts, host rules), then a static markdown fetch with a 2 MB body cap. The browser is not used: no render and no actions.
+- `scrape` is `{"status": "ok", "requested", "hydrated", "failed", "items": [...]}`, with `items` in result order. An item carries `url`, `position` (1-based in `results`), and either `status: "ok"` with `markdown`, `chars` and `truncated`, or `status: "failed"` with `code` (and `http_status` when the code is `http_status`).
+- Failure codes are closed. `policy_denied`, `blocked` and `invalid_url` are refused before the fetch and are not billed. `deadline_exceeded`, `http_status`, `too_large`, `decode`, `extract`, `timeout`, `transport`, `empty` and `too_short` happen after it. The search never fails because a hydration did.
+- Zero data retention: hydration runs inline only. Nothing is cached (it runs after the cache step, on hits and misses alike), written to an event or logged. The page text is in this response and nowhere else.
+- Metering: one `quarry.scrape.page` event per request, with the quantity of fetch units that left the edge (successes, and failures after the fetch began). The estimate in its metadata uses placeholder rates from the job pricing helper.
+- Not yet: `format=context` and `include_answer` do not use the hydrated text. A request with a scrape block and `include_answer` fetches the answer's sources a second time, and those fetches are not metered as `quarry.scrape.page`, until the edge passes the hydrated pages into the answer path (E3.7.7b).
+
+### Sitemap options (INNH-6a covers E3.7.5; E3.7.6 and E3.7.4 as noted)
+
+- Crawl `sitemap` (built; see the INNH-6 section above): `skip` (absent) follows links only; `include` seeds the crawl from the site's sitemaps and still follows links; `only` crawls the seed and the sitemap's URLs and follows no page link. Gzip sitemaps and sitemap indexes are read within bounds (`quarry_transform::sitemap::parse_body`, 50 MiB decoded cap). With `QUARRY_EDGE__CRAWL_SITEMAP` off, `include` and `only` are `400 unsupported_option`.
+- Canonical URL helper (E3.7.6): `quarry_transform::canonical_url` is used by the crawl sitemap path. Its frontier enqueue and redirect seen-marking are not wired yet.
+- `/v1/map` (E3.7.4, not built): the route still reads its sitemaps as text (`quarry_transform::sitemap::parse`), with no gzip handling and no Sitemap-line parse. No switch is added for it here.
+
+### What the SDKs carry
+
+`sdks/generate.sh` generates the Python and TypeScript clients from `docs/openapi.yaml` in Docker (openapi-generator 7.22.0). This unit did not regenerate them. Until the integration step runs the generator, the in-tree clients may lack the `Idempotency-Key` parameter, the `scrape` fields and the batch `409`.
