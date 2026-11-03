@@ -130,9 +130,12 @@ func (s *jobsStore) Create(j store.Job) error {
 }
 
 // FindByIdempotencyKey returns the existing job for an Idempotency-Key
-// scoped to orgID, if any. Uses the partial unique index for an O(log n)
-// lookup; the org_id predicate means a key collision with another
-// tenant's job is reported as a miss, never returned across tenants.
+// scoped to orgID, if any. Uses the partial unique index on
+// (org_id, idempotency_key) for an O(log n) lookup (migration 028, which
+// replaced 007's global index); the org_id predicate means a key collision
+// with another tenant's job is reported as a miss, never returned across
+// tenants, and since 028 the other tenant's key no longer blocks the insert
+// either: the same key is unique per org, not across orgs.
 func (s *jobsStore) FindByIdempotencyKey(orgID, key string) (store.Job, bool) {
 	if key == "" {
 		return store.Job{}, false
