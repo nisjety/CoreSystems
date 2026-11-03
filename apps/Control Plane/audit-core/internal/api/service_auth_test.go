@@ -294,3 +294,108 @@ func TestIsOrgAdminMatrix(t *testing.T) {
 		}
 	}
 }
+
+// WS14.S7b: quarry-control is a second ingestion writer beside integration-corev2.
+// It writes crawl.robots_ignored before a robots.txt override job is acknowledged.
+const testQuarryControlToken = "fedcba9876543210fedcba9876543210"
+
+func testRegistryWithQuarryControl(quarryPlanes string) string {
+	quarry := `{"principal":"quarry-control","audience":"audit-core","token":"` + testQuarryControlToken + `","scopes":["audit:write"]` + quarryPlanes + `}`
+	return `[{"principal":"verevon-gateway","audience":"audit-core","token":"` + testGatewayToken + `","scopes":["audit:read:self"]},` +
+		`{"principal":"integration-corev2","audience":"audit-core","token":"` + testWriterToken + `","scopes":["audit:write"],"planes":["ingestion"]},` +
+		quarry + `]`
+}
+
+func TestSecondIngestionWriterIsAccepted(t *testing.T) {
+	registry := testRegistryWithQuarryControl(`,"planes":["ingestion"]`)
+	credentials, err := parseServiceCredentialRegistry(registry)
+	if err != nil || len(credentials) != 3 {
+		t.Fatalf("registry with a second ingestion writer: credentials=%d err=%v", len(credentials), err)
+	}
+	if err := ValidateRequiredServiceCredentialRegistry(registry); err != nil {
+		t.Fatalf("startup validation refused a second ingestion writer: %v", err)
+	}
+
+	request := httptest.NewRequest(http.MethodPost, "/v1/audit", strings.NewReader(`{"org_id":"org-a","plane":"ingestion","producer":"quarry-control","event":"crawl.robots_ignored"}`))
+	request.Header.Set("X-Service-Id", "quarry-control")
+	request.Header.Set("X-Service-Token", testQuarryControlToken)
+	authorization, failure := authorizeServiceRequest(request, credentials, newDelegationNonceCache(100), time.Now())
+	if failure != nil {
+		t.Fatalf("quarry-control writer rejected: %v", failure)
+	}
+	// ingestAudit requires event.Producer == authorization.Principal, so the
+	// principal is what pins quarry-control's rows to its own producer name.
+	if authorization.Principal != "quarry-control" || authorization.Scope != "audit:write" {
+		t.Fatalf("quarry-control authorization = %+v", authorization)
+	}
+	if !authorization.AllowsPlane("ingestion") || authorization.AllowsPlane("model") || authorization.AllowsPlane("control") {
+		t.Fatalf("quarry-control plane policy = %+v", authorization)
+	}
+
+	// The existing writer is unaffected by the second one.
+	request = httptest.NewRequest(http.MethodPost, "/v1/audit", strings.NewReader(`{}`))
+	request.Header.Set("X-Service-Id", "integration-corev2")
+	request.Header.Set("X-Service-Token", testWriterToken)
+	authorization, failure = authorizeServiceRequest(request, credentials, newDelegationNonceCache(100), time.Now())
+	if failure != nil || authorization.Principal != "integration-corev2" || !authorization.AllowsPlane("ingestion") {
+		t.Fatalf("integration-corev2 after adding quarry-control: auth=%+v failure=%v", authorization, failure)
+	}
+}
+
+func TestSecondIngestionWriterCannotBorrowTheOtherWritersIdentity(t *testing.T) {
+	credentials, err := parseServiceCredentialRegistry(testRegistryWithQuarryControl(`,"planes":["ingestion"]`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct{ principal, token string }{
+		{"integration-corev2", testQuarryControlToken},
+		{"quarry-control", testWriterToken},
+	} {
+		request := httptest.NewRequest(http.MethodPost, "/v1/audit", strings.NewReader(`{}`))
+		request.Header.Set("X-Service-Id", tc.principal)
+		request.Header.Set("X-Service-Token", tc.token)
+		if _, failure := authorizeServiceRequest(request, credentials, newDelegationNonceCache(100), time.Now()); failure == nil || failure.Status != http.StatusUnauthorized {
+			t.Fatalf("principal %s with the other writer's token: failure=%v, want 401", tc.principal, failure)
+		}
+	}
+}
+
+func TestSecondIngestionWriterCannotReadAudit(t *testing.T) {
+	credentials, err := parseServiceCredentialRegistry(testRegistryWithQuarryControl(`,"planes":["ingestion"]`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodGet, "/v1/audit?org_id=org-a", nil)
+	request.Header.Set("X-Service-Id", "quarry-control")
+	request.Header.Set("X-Service-Token", testQuarryControlToken)
+	if _, failure := authorizeServiceRequest(request, credentials, newDelegationNonceCache(100), time.Now()); failure == nil || failure.Status != http.StatusForbidden {
+		t.Fatalf("quarry-control read: failure=%v, want 403", failure)
+	}
+}
+
+func TestSecondWriterWithoutPlanesIsStillRejected(t *testing.T) {
+	for name, planes := range map[string]string{
+		"no planes key": ``,
+		"empty planes":  `,"planes":[]`,
+		"blank planes":  `,"planes":["  "]`,
+	} {
+		registry := testRegistryWithQuarryControl(planes)
+		if _, err := parseServiceCredentialRegistry(registry); err == nil {
+			t.Fatalf("%s: a second audit:write principal without planes was accepted", name)
+		}
+		if err := ValidateRequiredServiceCredentialRegistry(registry); err == nil {
+			t.Fatalf("%s: startup validation accepted a writer without planes", name)
+		}
+	}
+}
+
+func TestSecondIngestionWriterDoesNotReplaceTheRequiredOne(t *testing.T) {
+	registry := `[{"principal":"verevon-gateway","audience":"audit-core","token":"` + testGatewayToken + `","scopes":["audit:read:self"]},` +
+		`{"principal":"quarry-control","audience":"audit-core","token":"` + testQuarryControlToken + `","scopes":["audit:write"],"planes":["ingestion"]}]`
+	if _, err := parseServiceCredentialRegistry(registry); err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if err := ValidateRequiredServiceCredentialRegistry(registry); err == nil {
+		t.Fatal("quarry-control alone satisfied the integration-corev2 startup requirement")
+	}
+}
