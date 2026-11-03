@@ -927,6 +927,7 @@ mod tests {
             enforcement_mode: "off".to_string(),
             browser_grant_mode: crate::config::BrowserGrantMode::Permissive,
             browser_human_browse: false,
+            browser_live_view_only: false,
             auth_core_url: "http://127.0.0.1:1".into(),
             verevon_public_origin: "http://localhost:5173".into(),
             session_core_url: "http://127.0.0.1:1".into(),
