@@ -26,6 +26,7 @@ use mp_contracts::model_plane::v1::{
     orchestration_core_service_server::OrchestrationCoreServiceServer,
     run_question_consume_service_server::RunQuestionConsumeServiceServer,
     routing_policy_server::RoutingPolicyServer,
+    run_ledger_service_server::RunLedgerServiceServer,
     run_service_server::RunServiceServer,
     session_core_server::{SessionCore, SessionCoreServer},
     session_retention_service_server::{SessionRetentionService, SessionRetentionServiceServer},
@@ -5071,6 +5072,21 @@ pub(crate) async fn append_message_in_tx_as(
         crate::space::memory_scope::thread_is_contained(thread.2.as_deref(), space_kind.as_deref());
     let candidates = if conversation_only || post_kind == "post" { Vec::new() } else if contained {
         crate::space::memory_scope::record_contained("append_extract");
+        // EP-8 S6: with Space memory switched on, what the room states is kept for the room
+        // (`scope = 'space'`, stamped with this message's audience), never for its owner; off, the
+        // writer returns before reading anything. Either way no personal candidate exists here.
+        crate::space_memory::write_inline(
+            crate::space_memory::enabled(),
+            tx,
+            &thread.0,
+            &thread.1,
+            &req.thread_id,
+            &msg_id,
+            &req.role,
+            &req.content,
+        )
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?;
         Vec::new()
     } else {
         crate::dreaming::extract_memory_candidates(&req.role, &req.content, &req.thread_id)
@@ -11423,6 +11439,8 @@ pub async fn serve(
     // `routing_policy` JSONB row in this same Postgres; the BFF writes and
     // inference-core polls it.
     let routing = crate::routing_policy_grpc::RoutingPolicyService::new(pool.clone());
+    // EP-14 S6: the request snapshot writer (refuses unless SESSION_CORE_REQUEST_SNAPSHOTS_ENABLED).
+    let run_ledger = crate::run_ledger_grpc::RunLedgerGrpc::new(pool.clone());
     // Run read model + cancel path for the runs-history UI. Owns the `runs` +
     // `events` tables in this same Postgres (read-only here, plus the cancel
     // status flip).
@@ -11513,6 +11531,7 @@ pub async fn serve(
         .add_service(FinetuneJobsServer::with_interceptor(finetune, auth.clone()))
         .add_service(MemoryServiceServer::with_interceptor(memory, auth.clone()))
         .add_service(RoutingPolicyServer::with_interceptor(routing, auth.clone()))
+        .add_service(RunLedgerServiceServer::with_interceptor(run_ledger, auth.clone()))
         .add_service(SessionRetentionServiceServer::with_interceptor(
             retention,
             auth.clone(),

@@ -139,6 +139,20 @@ message MemoryEntry {
   // in a shared room before containment existed. The owner may keep or delete
   // it; no conversation recalls it. Empty for an ordinary row.
   string withheld_reason = 10;
+
+  // The row's scope kind (agent_memory.scope): "user", "org", "thread", ...,
+  // "space" or "agent" (EP-8 S6). Empty when the reader does not report it;
+  // set by the Space memory readers (EP-8 S7).
+  string scope = 11;
+
+  // The scope instance: the Space id for "space", "<space_id>:<agent_id>" for
+  // "agent". Empty for every other kind. Ids only, never content.
+  string scope_id = 12;
+
+  // How a Space or agent row came to exist: "room_statement" (extracted from a
+  // room turn), "member_save" (an explicit save in a room), "agent_memory".
+  // Closed vocabulary; empty for every other row.
+  string source_label = 13;
 }
 
 // MemoryProvenance — who decided a memory was worth keeping.

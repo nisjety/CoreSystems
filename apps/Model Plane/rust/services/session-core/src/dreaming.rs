@@ -239,6 +239,23 @@ pub(crate) async fn dream_once(
             continue;
         }
 
+        // EP-8 S6: with Space memory switched on, a shared room's messages are mined for the room
+        // instead (deterministic extractor only, `scope = 'space'`), never for its owner. Every
+        // message is still ledgered, so the pending query moves on exactly as with the skip below.
+        if last.contained && crate::space_memory::enabled() {
+            let turns: Vec<crate::space_memory::RoomTurn<'_>> = group
+                .iter()
+                .map(|message| crate::space_memory::RoomTurn {
+                    message_id: &message.message_id,
+                    role: &message.role,
+                    content: &message.content,
+                    external_content: message.external_content,
+                })
+                .collect();
+            processed += crate::space_memory::mine_room_turns(pool, &org_id, &last.user_id, &thread_id, &turns).await?;
+            continue;
+        }
+
         // WS17-S1 C3: a shared room's messages are never read into the owner's memory. The skip is
         // written to the ledger exactly like the conversation-only skip, so the pending query
         // does not select them again.
@@ -2287,7 +2304,7 @@ fn take_value(raw: &str, max_words: usize) -> Option<String> {
     }
 }
 
-fn collapse_whitespace(value: &str) -> String {
+pub(crate) fn collapse_whitespace(value: &str) -> String {
     value.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
@@ -2317,7 +2334,7 @@ fn title_name(value: &str) -> String {
         .join(" ")
 }
 
-fn stable_fragment(value: &str) -> String {
+pub(crate) fn stable_fragment(value: &str) -> String {
     let mut fragment = value
         .chars()
         .filter_map(|c| {

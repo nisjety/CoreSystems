@@ -204,6 +204,10 @@ fn pg_row_to_entry(
         provenance: memory_provenance(row.provenance) as i32,
         origin_space_ref: row.origin_space_ref,
         withheld_reason: row.withheld_reason,
+        // Personal and org recall does not report the scope key; the Space readers do (EP-8 S7).
+        scope: String::new(),
+        scope_id: String::new(),
+        source_label: String::new(),
     }
 }
 
@@ -522,6 +526,42 @@ impl MemoryService for MemoryGrpc {
         if !gate.generation_allowed {
             return Err(Status::failed_precondition(gate.refusal()));
         }
+        // EP-8 S6: with Space memory switched on, a SPACE save in a shared room is kept for the
+        // room (`scope = 'space'`, the thread's audience stamped), never mirrored to Letta. A
+        // waived credential stores nothing new for a room (D11); a ZDR one was refused above.
+        if contained && crate::space_memory::enabled() && crate::space_memory::is_space_topic(&req.topic) {
+            if MemoryRetention::of(&caller) != MemoryRetention::Durable {
+                return Err(Status::failed_precondition(
+                    crate::space_memory::Skip::Waived.refusal(),
+                ));
+            }
+            write_policy::gate(
+                write_policy::Mode::configured(),
+                &req.content,
+                crate::space_memory::SPACE_SCOPE,
+                write_policy::Origin::from_wire(&req.origin),
+            )
+            .map_err(|code| Status::failed_precondition(code.status_message()))?;
+            let written = crate::space_memory::index_space_memory(
+                &self.pool,
+                req.org_id.trim(),
+                &owner_user_id,
+                req.thread_id.trim(),
+                &req.content,
+            )
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+            return match written {
+                Ok(memory_id) if !memory_id.is_empty() => Ok(Response::new(index_response(
+                    memory_id,
+                    Some(crate::space::memory_scope::DEGRADED_LETTA_SPACE_SUPPRESSED),
+                ))),
+                Ok(_) => Err(Status::failed_precondition(
+                    crate::space_memory::Skip::Gate.refusal(),
+                )),
+                Err(skip) => Err(Status::failed_precondition(skip.refusal())),
+            };
+        }
         // The content policy every writer runs (WS26-S4). It follows the memory gate,
         // so a paused person is told about the pause, and it precedes the write, so a
         // refusal leaves neither a row nor a semantic mirror.
@@ -657,6 +697,10 @@ impl MemoryService for MemoryGrpc {
                 provenance: memory_provenance(row.provenance) as i32,
                 origin_space_ref: row.origin_space_ref,
                 withheld_reason: row.withheld_reason,
+                // The personal list holds `user` rows only; it does not report the scope key.
+                scope: String::new(),
+                scope_id: String::new(),
+                source_label: String::new(),
             })
             .collect();
 
@@ -2376,6 +2420,9 @@ mod tests {
                 provenance: 0,
                 origin_space_ref: String::new(),
                 withheld_reason: String::new(),
+                scope: String::new(),
+                scope_id: String::new(),
+                source_label: String::new(),
             }
         }
 
