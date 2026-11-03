@@ -497,4 +497,79 @@ describe('ChatLiveRunPanel', () => {
     flush()
     expect(container.querySelectorAll('.verevon-chat-run-shot')).toHaveLength(0)
   })
+
+  // WS9.G: the browser dock's layout picker is an optional header slot. The panel
+  // only places it; the page decides what it is (see ChatPage's dock wiring).
+  it('hosts the browser dock picker in the header while the panel is open', async () => {
+    const { container } = render(() => (
+      <ChatLiveRunPanel
+        collapsed={false}
+        dockControls={<span data-testid="dock-picker">Dock picker</span>}
+        onToggleCollapsed={() => undefined}
+        runId="run_abc123"
+        zdr={false}
+      />
+    ))
+    await subscribed()
+
+    expect(container.querySelector('.verevon-chat-run-panel__head [data-testid="dock-picker"]')).not.toBeNull()
+  })
+
+  it('leaves the dock picker out of the header while the rail is collapsed', async () => {
+    const { container } = render(() => (
+      <ChatLiveRunPanel
+        collapsed
+        dockControls={<span data-testid="dock-picker">Dock picker</span>}
+        onToggleCollapsed={() => undefined}
+        runId="run_abc123"
+        zdr={false}
+      />
+    ))
+    await subscribed()
+
+    expect(container.querySelector('.verevon-chat-run-panel')).not.toBeNull()
+    expect(container.querySelector('[data-testid="dock-picker"]')).toBeNull()
+  })
+
+  it('does not offer the dock picker while the Work tab owns the rail', async () => {
+    const { container } = render(() => (
+      <ChatLiveRunPanel
+        collapsed={false}
+        dockControls={<span data-testid="dock-picker">Dock picker</span>}
+        onToggleCollapsed={() => undefined}
+        runId="run_abc123"
+        workContent={<p data-testid="work-body">Work</p>}
+        zdr={false}
+      />
+    ))
+    await subscribed()
+
+    expect(container.querySelector('[data-testid="work-body"]')).not.toBeNull()
+    expect(container.querySelector('[data-testid="dock-picker"]')).toBeNull()
+  })
+
+  it('shows the dock picker once, and once again after a collapse and a restore', async () => {
+    // One element handed over once: the panel must place it, never rebuild it.
+    const picker = <span data-testid="dock-picker">Dock picker</span>
+    const [collapsed, setCollapsed] = createSignal(false)
+    const { container } = render(() => (
+      <ChatLiveRunPanel
+        collapsed={collapsed()}
+        dockControls={picker}
+        onToggleCollapsed={() => setCollapsed((current) => !current)}
+        runId="run_abc123"
+        zdr={false}
+      />
+    ))
+    await subscribed()
+    expect(container.querySelectorAll('[data-testid="dock-picker"]')).toHaveLength(1)
+
+    setCollapsed(true)
+    flush()
+    expect(container.querySelectorAll('[data-testid="dock-picker"]')).toHaveLength(0)
+
+    setCollapsed(false)
+    flush()
+    expect(container.querySelectorAll('[data-testid="dock-picker"]')).toHaveLength(1)
+  })
 })
