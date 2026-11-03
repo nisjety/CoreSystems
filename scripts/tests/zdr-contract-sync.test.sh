@@ -79,7 +79,7 @@ GOLDENS=(
   # The claims of aud=quarry tokens as Auth Core really mints them. Written with
   #   UPDATE_GOLDENS=1 npx jest src/auth/quarry-token-zdr-claims.golden.spec.ts
   # in "apps/Control Plane/auth-core", which also vendors it into Quarry.
-  "apps/Control Plane/auth-core/src/auth/fixtures/quarry-token-claims.golden.json|ec0ae10c182493fd61f369b7a63ee6dd3156039e5230918933e5413af8beeffa"
+  "apps/Control Plane/auth-core/src/auth/fixtures/quarry-token-claims.golden.json|76cc4af7f2a2a4f2730265d19f8ec4b26dd181b048e9135b66e8369b3ae8c266"
 
   # What Auth Core emits to the Data Plane for a service caller, and what it
   # answers when the Data Plane asks whether that caller is a member. Written with
@@ -239,6 +239,11 @@ VENDORED=(
   # Quarry's token-claims contract test (crates/quarry-edge/tests/zdr_claim_floor.rs).
   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/tests/fixtures/auth-core/quarry-token-claims.golden.json|apps/Control Plane/auth-core/src/auth/fixtures/quarry-token-claims.golden.json"
   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/tests/fixtures/auth-core/quarry-token-claims.golden.sha256|apps/Control Plane/auth-core/src/auth/fixtures/quarry-token-claims.golden.sha256"
+
+  # WS7.I: Auth Core's copy of the web-policy catalogue and its pin
+  # (src/auth/web-policy.spec.ts checks the copy against the pin and Quarry's source).
+  "apps/Control Plane/auth-core/src/auth/fixtures/web-policy-catalogue.v1.json|apps/Ingestion Plane/Quarry-v2/crates/quarry-core/contracts/web-policy-catalogue.v1.json"
+  "apps/Control Plane/auth-core/src/auth/fixtures/web-policy-catalogue.v1.json.sha256|apps/Ingestion Plane/Quarry-v2/crates/quarry-core/contracts/web-policy-catalogue.v1.json.sha256"
 
   # The retrieval engine's service-principal tests (tests/service_principal_auth.rs).
   "apps/Data Plane v2/services/retrieval-engine-rs/tests/fixtures/auth-core/data-plane-authorization-decision.golden.json|apps/Control Plane/auth-core/src/auth/fixtures/data-plane-authorization-decision.golden.json"
