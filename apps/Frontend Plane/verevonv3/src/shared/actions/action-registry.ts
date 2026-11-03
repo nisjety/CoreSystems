@@ -750,6 +750,19 @@ const settingsSetTonePresetInput = z.object({
   tonePreset: z.enum(['default', 'professional', 'friendly', 'direct', 'warm', 'neutral']),
 })
 
+// The answers a person gives once, on first use (EP-8-S8). Every field is optional and bounded; user-core
+// checks the time zone and the language again before it stores them. Whose settings these are never comes
+// from the input: it is the verified caller.
+const settingsCompletePersonalSetupInput = z.object({
+  displayName: z.string().trim().max(80).optional(),
+  timezone: z.string().trim().max(64).optional(),
+  language: z.enum(['nb-NO', 'en-US']).optional(),
+  tonePreset: z.enum(['default', 'professional', 'friendly', 'direct', 'warm', 'neutral']).optional(),
+})
+
+// Skipping takes no input: it records only that the person chose not to answer now.
+const settingsSkipPersonalSetupInput = z.object({})
+
 // The response carries a raw, one-time API key secret auth-core never
 // returns again — real credential material, not a routine settings change.
 const settingsCreateApiKeyInput = z.object({
@@ -2849,6 +2862,28 @@ export const actionRegistry = [
     requiresApproval: false,
     reversible: true,
     inputSchema: settingsSetTonePresetInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'settings.complete_personal_setup',
+    label: 'Complete personal setup',
+    description: 'Save the caller\'s own display name, time zone, language and reply tone, then mark the first-run personal setup done. Only the fields given are saved, and the setup is marked done last, once they are saved.',
+    ownerPlane: 'control',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: settingsCompletePersonalSetupInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'settings.skip_personal_setup',
+    label: 'Skip personal setup',
+    description: 'Record that the caller skipped the first-run personal setup. The card does not show again.',
+    ownerPlane: 'control',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: settingsSkipPersonalSetupInput,
     outputSchema: envelopeStatusOutput,
   },
   {

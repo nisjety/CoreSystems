@@ -845,7 +845,9 @@ describe('action registry', () => {
     // 249 after EP-6-S1 registered the six schedule contracts the automations hub calls.
     // 250 after EP-6-S5 registered agents.installations.list, the read the agents landing shows.
     // 251 after EP-8-S3 registered settings.set_tone_preset, the caller's own reply tone.
-    expect(ids).toHaveLength(251)
+    // 253 after EP-8-S4 registered memory.profile.save and memory.profile.rebuild; that slice did not move this count.
+    // 255 after EP-8-S8 registered settings.complete_personal_setup and settings.skip_personal_setup, the first-run step.
+    expect(ids).toHaveLength(255)
 
     const spaceIds = ids.filter((id) => id.startsWith('spaces.'))
     const first = ids.indexOf(spaceIds[0] as string)

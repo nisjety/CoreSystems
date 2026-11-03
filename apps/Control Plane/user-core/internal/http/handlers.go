@@ -1449,12 +1449,13 @@ type AISettings struct {
 // except "default", so nothing outside this list may be stored.
 var tonePresets = []string{"default", "professional", "friendly", "direct", "warm", "neutral"}
 
-// aiSettingsResponse is what GET and PUT /api/v1/settings/ai return: the stored settings plus whether
-// this deployment shows the tone selector. The flag is set on every response and never stored, so a
-// save cannot write it.
+// aiSettingsResponse is what GET and PUT /api/v1/settings/ai return: the stored settings plus two flags
+// that say what this deployment shows (the tone selector, EP-8-S3, and the personal first-run card,
+// EP-8-S8). The flags are set on every response and never stored, so a save cannot write them.
 type aiSettingsResponse struct {
 	AISettings
-	TonePresetsAvailable bool `json:"tonePresetsAvailable"`
+	TonePresetsAvailable   bool `json:"tonePresetsAvailable"`
+	PersonalSetupAvailable bool `json:"personalSetupAvailable"`
 }
 
 // aiSettingsDefaults are what a person reads before they save any AI setting.
@@ -1495,6 +1496,7 @@ func writeAISettings(c *gin.Context, settings map[string]any) {
 		result.TonePreset = "default"
 	}
 	result.TonePresetsAvailable = tonePresetsVisible()
+	result.PersonalSetupAvailable = personalSetupVisible()
 	c.JSON(http.StatusOK, result)
 }
 
@@ -1539,6 +1541,124 @@ func (s *Server) updateAISettings(c *gin.Context) {
 		return
 	}
 	writeAISettings(c, updated)
+}
+
+// ============================================
+// PERSONAL FIRST-RUN STEP (EP-8-S8)
+// ============================================
+
+// The closed states of the personal first-run step (EP-8-S8, D10). A person who has not answered is
+// pending, and the card shows only in that state. Nothing outside this list is ever stored.
+const (
+	personalStepPending   = "pending"
+	personalStepCompleted = "completed"
+	personalStepSkipped   = "skipped"
+)
+
+var personalSteps = []string{personalStepPending, personalStepCompleted, personalStepSkipped}
+
+// onboardingVersion is the version of the first-run step. A later step bumps it so a person who answered
+// this one can be asked once more. The server writes it; a client cannot.
+const onboardingVersion = 1
+
+// OnboardingSettings is the stored first-run state, the "onboarding" settings category. updatedAt is set
+// by the server on every write.
+type OnboardingSettings struct {
+	PersonalStep string `json:"personalStep"`
+	Version      int    `json:"version"`
+	UpdatedAt    string `json:"updatedAt"`
+}
+
+// updateOnboardingSettingsRequest is the body of PUT /api/v1/settings/onboarding. The step is the only
+// field a client writes; the version and the time are stamped by the server.
+type updateOnboardingSettingsRequest struct {
+	PersonalStep string `json:"personalStep"`
+}
+
+// onboardingSettingsDefaults are what a person reads before they answer the first-run step.
+func onboardingSettingsDefaults() map[string]any {
+	return map[string]any{"personalStep": personalStepPending, "version": onboardingVersion, "updatedAt": ""}
+}
+
+// personalSetupVisible reads the user-core switch that shows the personal first-run card (EP-8-S8).
+// Opt-in: only the literal true enables it. It hides the card and nothing else: a stored state is still
+// read and written.
+func personalSetupVisible() bool {
+	return os.Getenv("PERSONAL_SETUP_VISIBLE") == "true"
+}
+
+// onboardingStepPatch is the stored patch for a step the person chose. Only the step comes from the
+// request: the version and the time are stamped here, so a save cannot forge either. A step outside the
+// closed set is refused.
+func onboardingStepPatch(step string, now time.Time) (map[string]any, bool) {
+	if !slices.Contains(personalSteps, step) {
+		return nil, false
+	}
+	return map[string]any{
+		"personalStep": step,
+		"version":      onboardingVersion,
+		"updatedAt":    now.UTC().Format(time.RFC3339),
+	}, true
+}
+
+// writeOnboardingSettings writes the stored first-run state. A stored step outside the closed set reads as
+// pending, never as completed: an unknown value must not hide the card for good.
+func writeOnboardingSettings(c *gin.Context, settings map[string]any) {
+	var result OnboardingSettings
+	if err := mapToStruct(settings, &result); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to decode settings"})
+		return
+	}
+	if !slices.Contains(personalSteps, result.PersonalStep) {
+		result.PersonalStep = personalStepPending
+	}
+	if result.Version == 0 {
+		result.Version = onboardingVersion
+	}
+	c.JSON(http.StatusOK, result)
+}
+
+// GET /api/v1/settings/onboarding
+func (s *Server) getOnboardingSettings(c *gin.Context) {
+	userID, ok := requireAuthenticatedUserID(c)
+	if !ok {
+		return
+	}
+	settings, err := s.userService.GetSettings(c.Request.Context(), userID, "onboarding", onboardingSettingsDefaults())
+	if err != nil {
+		log.Error().Err(err).Str("user_id", userID).Msg("failed to get onboarding settings")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to retrieve settings"})
+		return
+	}
+	writeOnboardingSettings(c, settings)
+}
+
+// PUT /api/v1/settings/onboarding
+func (s *Server) updateOnboardingSettings(c *gin.Context) {
+	userID, ok := requireAuthenticatedUserID(c)
+	if !ok {
+		return
+	}
+	var req updateOnboardingSettingsRequest
+	if !bindJSONRequest(c, &req, "Invalid request body") {
+		return
+	}
+	patch, ok := onboardingStepPatch(req.PersonalStep, time.Now())
+	if !ok {
+		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{
+			"code":    "personal_step_invalid",
+			"message": "personalStep must be one of pending, completed or skipped.",
+			"details": gin.H{"allowed": personalSteps},
+		}})
+		return
+	}
+	updated, err := s.userService.UpsertSettings(c.Request.Context(), userID, "onboarding", patch)
+	if err != nil {
+		log.Error().Err(err).Str("user_id", userID).Msg("failed to update onboarding settings")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to save settings"})
+		return
+	}
+	writeOnboardingSettings(c, updated)
 }
 
 // ============================================
