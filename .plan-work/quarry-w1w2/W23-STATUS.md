@@ -486,3 +486,27 @@ Open items:
 - W3-E3.3-g: no gateway arm for browser_run.steer (registry-only); page wiring (controller per run, settle/markDelivered) not built; MP ask (steer inbox route, browser_run.steer_taken event) appended to MP-ASKS.md; Model Plane copies of the admission golden are re-vendored here, the MP owner must accept the row.
 - 8 depth rows appended to W23-depth.md (lane b 8).
 - The four line-ending-only .sha256 artifacts were not staged.
+
+## Step S13 (W3), integrated 2026-11-03
+
+Units: W3-E3.7.3 and W3-E3.6-6b (lane a). Flags: QUARRY_EDGE__JOB_CONTROL (existing, default off; gates the new `wait`/`resume` on GET /v1/jobs|crawl|batch/:id) and QUARRY_EDGE__OFFICE_VIA_IMPORTS (new, default off; only effective with QUARRY_EDGE__DOC_ROUTING=on).
+
+Merge commits on w23/integ (base dc6c316e5):
+- ce2b5f8db merge: w23/lane-a (S13: W3-E3.7.3, W3-E3.6-6b). No conflicts.
+
+Follow-up commits:
+- 240fc644d fix(quarry-runtime): E3.6-6b calls `content_route::extract_office_via_imports`, which E3.6-6a (on no branch) was to add. Added a placeholder with that name and signature in content_route.rs that refuses every body with the typed 415 (UnsupportedMedia, details.reason imports_client_unavailable, route imports). Flag off: unchanged. Flag on before 6a: Office kinds keep a 415, as today. E3.6-6a must replace this body (expect a conflict on that function when 6a merges).
+
+Compile guard (no test runs):
+- Quarry Rust (cargo check --workspace --tests, CARGO_INCREMENTAL=0): first run exit 101, 1 error (E0425 extract_office_via_imports not found in content_route, pipeline.rs:320); after 240fc644d exit 0, no warnings in the touched files.
+- Go: no Go module touched.
+- TS: not changed (action-registry.ts untouched, no admission golden regeneration, no new action ids).
+- verevonv3 gateway: not changed.
+- No ZDR/schema/route-count regeneration needed.
+
+Open items:
+- E3.6-6a still unbuilt: real imports-core client (POST /api/v1/import/extract, verified ingestion token, 400/413/415/422 mapping); ODF/EPUB are 415 in imports-core; PPTX 60k char cap.
+- E3.7.3: no wait test in tests/job_lifecycle.rs; gateway does not forward wait/resume; OpenAPI/CONTRACTS/SDK in E3.7.11; owner to confirm that only the wait (not cancel/pause/resume) is non-ZDR; 408 reuses TIMEOUT.
+- Unit tests of both units compiled but not run.
+- 22 depth rows appended to W23-depth.md (lane a 22: E3.7.3 11, E3.6-6b 11).
+- The four line-ending-only .sha256 artifacts were not staged.
