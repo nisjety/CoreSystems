@@ -246,6 +246,85 @@ func normalizeSubscriptionEvents(in []string) (events []string, reason, msg stri
 	return events, "", ""
 }
 
+// The change types a notifyOnChange filter may name (E3.5-7). "new" is a first capture and
+// "changed" a content change: the two kinds the edge's change webhook classifies today. "removed"
+// names a page that is gone; no producer sends it yet, so a filter that names only "removed"
+// matches nothing until one does.
+const (
+	ChangeTypeNew     = "new"
+	ChangeTypeChanged = "changed"
+	ChangeTypeRemoved = "removed"
+)
+
+// changeTypes is the closed vocabulary of notifyOnChange.types.
+var changeTypes = map[string]bool{ChangeTypeNew: true, ChangeTypeChanged: true, ChangeTypeRemoved: true}
+
+// maxNotifyMinParagraphDelta bounds notifyOnChange.min_paragraph_delta. A threshold above it would
+// silence a monitor on any real page, so it is refused as a typo.
+const maxNotifyMinParagraphDelta = 1000
+
+// ChangeNotifyFilter is a subscription's optional notifyOnChange filter. Types lists the change
+// types the subscriber takes. MinParagraphDelta, above zero, is the fewest paragraphs a changed page
+// must have changed (added plus removed; moves do not count) for the change to be delivered. A
+// subscription without a filter takes every change, as before.
+type ChangeNotifyFilter struct {
+	Types             []string `json:"types"`
+	MinParagraphDelta int      `json:"min_paragraph_delta,omitempty"`
+}
+
+// normalizeChangeNotifyFilter validates and canonicalises a filter: at least one type, every type in
+// changeTypes, duplicates dropped and sorted, and a threshold from 0 to maxNotifyMinParagraphDelta.
+func normalizeChangeNotifyFilter(in ChangeNotifyFilter) (f ChangeNotifyFilter, reason, msg string) {
+	if len(in.Types) == 0 {
+		return ChangeNotifyFilter{}, "notify_types_empty", "notify_on_change.types must name at least one change type"
+	}
+	seen := map[string]bool{}
+	var types []string
+	for _, t := range in.Types {
+		t = strings.TrimSpace(t)
+		if !changeTypes[t] {
+			return ChangeNotifyFilter{}, "notify_type_unsupported", "unsupported change type: " + t
+		}
+		if !seen[t] {
+			seen[t] = true
+			types = append(types, t)
+		}
+	}
+	if in.MinParagraphDelta < 0 || in.MinParagraphDelta > maxNotifyMinParagraphDelta {
+		return ChangeNotifyFilter{}, "notify_min_delta_out_of_range",
+			"notify_on_change.min_paragraph_delta must be between 0 and 1000"
+	}
+	sort.Strings(types)
+	return ChangeNotifyFilter{Types: types, MinParagraphDelta: in.MinParagraphDelta}, "", ""
+}
+
+// changeNotice is one classified change as the fan-out sees it: its type, and the paragraph delta
+// the edge measured, or -1 when it could not measure one.
+type changeNotice struct {
+	Type           string
+	ParagraphDelta int
+}
+
+// matches reports whether the filter takes the change. The threshold applies to changed pages only,
+// and an unknown delta passes: a change is not dropped because its text was not kept.
+func (f ChangeNotifyFilter) matches(c changeNotice) bool {
+	typeOK := false
+	for _, t := range f.Types {
+		if t == c.Type {
+			typeOK = true
+			break
+		}
+	}
+	if !typeOK {
+		return false
+	}
+	if c.Type == ChangeTypeChanged && f.MinParagraphDelta > 0 &&
+		c.ParagraphDelta >= 0 && c.ParagraphDelta < f.MinParagraphDelta {
+		return false
+	}
+	return true
+}
+
 // MountWebhookSubscriptions registers the org-scoped subscription routes.
 func MountWebhookSubscriptions(r chi.Router, db store.DB, opts WebhookSubscriptionOptions) {
 	if opts.MaxPerOrg <= 0 {
