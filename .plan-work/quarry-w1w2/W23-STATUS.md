@@ -510,3 +510,27 @@ Open items:
 - Unit tests of both units compiled but not run.
 - 22 depth rows appended to W23-depth.md (lane a 22: E3.7.3 11, E3.6-6b 11).
 - The four line-ending-only .sha256 artifacts were not staged.
+
+## Step S14 (W3), integrated 2026-11-03
+
+Units: W3-E3.8.8 (lane a) and W3-E3.7.11 (lane c). Flags: QUARRY_EDGE__NO_EGRESS (new, default off; only 1/true/on enable it; nothing builds the driver yet, so no request path changes). E3.7.11 is docs only and adds no flag.
+
+Merge commits on w23/integ (base d3cc76b5a):
+- 6851552a8 merge: w23/lane-a (S14: W3-E3.8.8). No conflicts.
+- 51787421a merge: w23/lane-c (S14: W3-E3.7.11). No conflicts.
+
+Follow-up commits: none (the guard was green on the first run).
+
+Compile guard (no test runs):
+- Quarry Rust (cargo check --workspace --tests, CARGO_INCREMENTAL=0): exit 0 on the first run; no warnings in data_plane_http.rs or fetch.rs (the 33 warnings are pre-existing, in quarry-edge).
+- Go: no Go module touched.
+- TS: not changed (action-registry.ts untouched, no admission golden regeneration, no new action ids).
+- verevonv3 gateway: not changed.
+- No ZDR/schema/route-count regeneration needed.
+- openapi.yaml was not parsed (no YAML parser available locally; node parity tests not run).
+
+Open items:
+- E3.8.8: Data Plane owner must accept or change the proposed POST /v1/artifacts/lookup contract and pick the store for page captures; token-request manifest row + Auth Core registry entry for the artifacts read; edge wiring (NoEgressDriver::from_env, route no_egress scrapes, ADR topic 1 catalogue key); quarry-core driver kind for stored reads; decision on robots/sitemap discovery under no_egress; run no_egress_tests, artifact_reader_tests, log_hygiene and the manifest tests at the test phase.
+- E3.7.11: SDKs not regenerated (needs the openapi-generator 7.22.0 Docker image); openapi parse and node parity tests not run; E3.7.3 408 envelope, E3.7.4 /v1/map gzip and E3.7.7b answer reuse documented as not served.
+- 14 depth rows appended to W23-depth.md (lane a 6, lane c 8).
+- The four line-ending-only .sha256 artifacts were not staged.
