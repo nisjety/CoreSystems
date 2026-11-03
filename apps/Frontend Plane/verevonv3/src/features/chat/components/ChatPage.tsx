@@ -42,6 +42,7 @@ import {
   ArtifactsPanel,
 } from './ChatArtifactPanel'
 import { ThreadWorkspacePanel } from './ThreadWorkspacePanel'
+import { EffectivePolicyPanel } from './EffectivePolicyPanel'
 import {
   ChatHeader,
   ChatTabs,
@@ -1172,6 +1173,7 @@ export default function ChatPage() {
         </Show>
         <Show when={hasMessages() && state.threadId && !isActiveThreadTemporary()}>
           <ThreadWorkspacePanel threadId={state.threadId ?? ''} />
+          <EffectivePolicyPanel scope={{ kind: 'thread', threadId: state.threadId ?? '' }} />
         </Show>
 
         <Switch>

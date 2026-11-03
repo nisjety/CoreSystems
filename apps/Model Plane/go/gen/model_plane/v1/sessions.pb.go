@@ -5614,7 +5614,12 @@ type ThreadSummary struct {
 	// Role of the newest message ("user", "assistant", ...).
 	LastRole string `protobuf:"bytes,27,opt,name=last_role,json=lastRole,proto3" json:"last_role,omitempty"`
 	// Messages with role user or assistant in the thread.
-	TurnCount     uint32 `protobuf:"varint,28,opt,name=turn_count,json=turnCount,proto3" json:"turn_count,omitempty"`
+	TurnCount uint32 `protobuf:"varint,28,opt,name=turn_count,json=turnCount,proto3" json:"turn_count,omitempty"`
+	// The status of the thread's latest goal (EP-7 S5): one closed token ("active", "paused", "met",
+	// "budget_reached", "turns_reached", "blocked"), so the sidebar can show a goal chip without a
+	// second call. Empty when the thread has no goal, its goal was cleared, or the thread goals switch
+	// or the attention switch is off. A status token only, never the objective.
+	GoalStatus    string `protobuf:"bytes,29,opt,name=goal_status,json=goalStatus,proto3" json:"goal_status,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -5843,6 +5848,13 @@ func (x *ThreadSummary) GetTurnCount() uint32 {
 		return x.TurnCount
 	}
 	return 0
+}
+
+func (x *ThreadSummary) GetGoalStatus() string {
+	if x != nil {
+		return x.GoalStatus
+	}
+	return ""
 }
 
 type ListThreadsResponse struct {
@@ -10152,7 +10164,7 @@ const file_model_plane_v1_sessions_proto_rawDesc = "" +
 	"\tthread_id\x18\t \x01(\tR\bthreadId\x129\n" +
 	"\barchived\x18\n" +
 	" \x01(\x0e2\x1d.model_plane.v1.ArchiveFilterR\barchived\x12!\n" +
-	"\fstarred_only\x18\v \x01(\bR\vstarredOnly\"\xc0\t\n" +
+	"\fstarred_only\x18\v \x01(\bR\vstarredOnly\"\xe1\t\n" +
 	"\rThreadSummary\x12\x1b\n" +
 	"\tthread_id\x18\x01 \x01(\tR\bthreadId\x12\x1f\n" +
 	"\vsession_key\x18\x02 \x01(\tR\n" +
@@ -10189,7 +10201,9 @@ const file_model_plane_v1_sessions_proto_rawDesc = "" +
 	"\x19recent_author_subject_ids\x18\x1a \x03(\tR\x16recentAuthorSubjectIds\x12\x1b\n" +
 	"\tlast_role\x18\x1b \x01(\tR\blastRole\x12\x1d\n" +
 	"\n" +
-	"turn_count\x18\x1c \x01(\rR\tturnCount\"o\n" +
+	"turn_count\x18\x1c \x01(\rR\tturnCount\x12\x1f\n" +
+	"\vgoal_status\x18\x1d \x01(\tR\n" +
+	"goalStatus\"o\n" +
 	"\x13ListThreadsResponse\x127\n" +
 	"\athreads\x18\x01 \x03(\v2\x1d.model_plane.v1.ThreadSummaryR\athreads\x12\x1f\n" +
 	"\vnext_cursor\x18\x02 \x01(\tR\n" +

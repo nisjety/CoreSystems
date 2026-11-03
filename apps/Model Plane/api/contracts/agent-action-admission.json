@@ -1465,6 +1465,32 @@
       "zdr_allowed": false
     },
     {
+      "actionId": "memory.profile.rebuild",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "external_write",
+      "exemptReason": "human_identity_or_security",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:a55569ffb85ecef5eda5c2e7c1913368a72433fbbecffaac2018c266d5a4153b",
+      "zdr_allowed": false
+    },
+    {
+      "actionId": "memory.profile.save",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "external_write",
+      "exemptReason": "human_identity_or_security",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:c9f28ca73b98fc156773f449e6ca1654fbf8386cd8c9517e5503340cdb2672c8",
+      "zdr_allowed": false
+    },
+    {
       "actionId": "memory.remember",
       "registry": true,
       "access": "none",

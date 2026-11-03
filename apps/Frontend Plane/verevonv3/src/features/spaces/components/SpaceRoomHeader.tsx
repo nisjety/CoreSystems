@@ -9,6 +9,7 @@ import { initials } from './sidepane/SpaceTurnList'
 import { avatarTextColor, memberTint } from '../lib/agent-avatar'
 import { canArchiveRoom, SpaceRoomArchiveControl } from './SpaceRoomArchive'
 import { SpaceRoomSettings } from './SpaceRoomSettings'
+import { EffectivePolicyPanel } from '@/features/chat/components/EffectivePolicyPanel'
 import './space-room-header.css'
 
 /** How many avatars the stack draws before the count carries the rest. */
@@ -218,6 +219,7 @@ export function SpaceRoomHeader(props: SpaceRoomHeaderProps) {
                 joinRole={props.joinRole}
                 onSettingsSaved={props.onSettingsSaved}
               />
+              <EffectivePolicyPanel scope={{ kind: 'space', spaceId: props.spaceRef }} />
 
               <Show when={canArchive()}>
                 <SpaceRoomArchiveControl

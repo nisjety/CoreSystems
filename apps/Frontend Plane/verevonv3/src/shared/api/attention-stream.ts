@@ -20,7 +20,7 @@ export type AttentionFrame =
   | { kind: 'resync'; epoch: string; seq: number }
   | { kind: 'heartbeat'; epoch: string; seq: number }
 
-const REASONS: readonly AttentionReason[] = ['approval', 'plan', 'input']
+const REASONS: readonly AttentionReason[] = ['approval', 'plan', 'input', 'goal']
 
 /** Reads one server-sent event as a frame. A frame this build cannot read is dropped, never guessed at. */
 export function parseAttentionFrame(event: SseEvent): AttentionFrame | null {

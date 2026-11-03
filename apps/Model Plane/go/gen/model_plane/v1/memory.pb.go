@@ -1494,6 +1494,348 @@ func (x *ResetMemoryResponse) GetDegradationReason() string {
 	return ""
 }
 
+// UserProfile — the person's standing profile (EP-8 S4). Built only from their
+// own accepted, current scope "user" rows in session-core; never from org,
+// thread, Space or agent rows, and never from letta-bridge blocks.
+type UserProfile struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The profile text, one line per remembered fact, at most 1400 characters.
+	Content string `protobuf:"bytes,1,opt,name=content,proto3" json:"content,omitempty"`
+	// The memory ids the built lines came from, in line order. Kept unchanged by
+	// an edit, so the deleted count below can be computed. Ids only.
+	SourceMemoryIds []string `protobuf:"bytes,2,rep,name=source_memory_ids,json=sourceMemoryIds,proto3" json:"source_memory_ids,omitempty"`
+	// "built" (made by the builder) or "edited" (the person's own text, kept
+	// until they ask for a rebuild).
+	Origin string `protobuf:"bytes,3,opt,name=origin,proto3" json:"origin,omitempty"`
+	// Increases on every change; SetUserProfile must name the current one.
+	Revision uint64 `protobuf:"varint,4,opt,name=revision,proto3" json:"revision,omitempty"`
+	// When the profile last changed.
+	UpdatedAt *timestamppb.Timestamp `protobuf:"bytes,5,opt,name=updated_at,json=updatedAt,proto3" json:"updated_at,omitempty"`
+	// For an edited profile: how many of its source memories were deleted since
+	// the edit. Zero for a built profile, whose deleted lines are already gone.
+	SourcesDeletedSinceEdit uint32 `protobuf:"varint,6,opt,name=sources_deleted_since_edit,json=sourcesDeletedSinceEdit,proto3" json:"sources_deleted_since_edit,omitempty"`
+	unknownFields           protoimpl.UnknownFields
+	sizeCache               protoimpl.SizeCache
+}
+
+func (x *UserProfile) Reset() {
+	*x = UserProfile{}
+	mi := &file_model_plane_v1_memory_proto_msgTypes[18]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *UserProfile) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*UserProfile) ProtoMessage() {}
+
+func (x *UserProfile) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_memory_proto_msgTypes[18]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use UserProfile.ProtoReflect.Descriptor instead.
+func (*UserProfile) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_memory_proto_rawDescGZIP(), []int{18}
+}
+
+func (x *UserProfile) GetContent() string {
+	if x != nil {
+		return x.Content
+	}
+	return ""
+}
+
+func (x *UserProfile) GetSourceMemoryIds() []string {
+	if x != nil {
+		return x.SourceMemoryIds
+	}
+	return nil
+}
+
+func (x *UserProfile) GetOrigin() string {
+	if x != nil {
+		return x.Origin
+	}
+	return ""
+}
+
+func (x *UserProfile) GetRevision() uint64 {
+	if x != nil {
+		return x.Revision
+	}
+	return 0
+}
+
+func (x *UserProfile) GetUpdatedAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.UpdatedAt
+	}
+	return nil
+}
+
+func (x *UserProfile) GetSourcesDeletedSinceEdit() uint32 {
+	if x != nil {
+		return x.SourcesDeletedSinceEdit
+	}
+	return 0
+}
+
+type GetUserProfileRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Tenant context.
+	OrgId string `protobuf:"bytes,1,opt,name=org_id,json=orgId,proto3" json:"org_id,omitempty"`
+	// The profile's owner. A user caller may only read their own.
+	UserId        string `protobuf:"bytes,2,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetUserProfileRequest) Reset() {
+	*x = GetUserProfileRequest{}
+	mi := &file_model_plane_v1_memory_proto_msgTypes[19]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetUserProfileRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetUserProfileRequest) ProtoMessage() {}
+
+func (x *GetUserProfileRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_memory_proto_msgTypes[19]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetUserProfileRequest.ProtoReflect.Descriptor instead.
+func (*GetUserProfileRequest) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_memory_proto_rawDescGZIP(), []int{19}
+}
+
+func (x *GetUserProfileRequest) GetOrgId() string {
+	if x != nil {
+		return x.OrgId
+	}
+	return ""
+}
+
+func (x *GetUserProfileRequest) GetUserId() string {
+	if x != nil {
+		return x.UserId
+	}
+	return ""
+}
+
+type SetUserProfileRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Tenant context.
+	OrgId string `protobuf:"bytes,1,opt,name=org_id,json=orgId,proto3" json:"org_id,omitempty"`
+	// The profile's owner. Must be the caller.
+	UserId string `protobuf:"bytes,2,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
+	// The new text, at most 1400 characters. Empty clears it.
+	Content string `protobuf:"bytes,3,opt,name=content,proto3" json:"content,omitempty"`
+	// The revision the edit was made against; 0 when no profile exists yet.
+	ExpectedRevision uint64 `protobuf:"varint,4,opt,name=expected_revision,json=expectedRevision,proto3" json:"expected_revision,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
+}
+
+func (x *SetUserProfileRequest) Reset() {
+	*x = SetUserProfileRequest{}
+	mi := &file_model_plane_v1_memory_proto_msgTypes[20]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SetUserProfileRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SetUserProfileRequest) ProtoMessage() {}
+
+func (x *SetUserProfileRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_memory_proto_msgTypes[20]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SetUserProfileRequest.ProtoReflect.Descriptor instead.
+func (*SetUserProfileRequest) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_memory_proto_rawDescGZIP(), []int{20}
+}
+
+func (x *SetUserProfileRequest) GetOrgId() string {
+	if x != nil {
+		return x.OrgId
+	}
+	return ""
+}
+
+func (x *SetUserProfileRequest) GetUserId() string {
+	if x != nil {
+		return x.UserId
+	}
+	return ""
+}
+
+func (x *SetUserProfileRequest) GetContent() string {
+	if x != nil {
+		return x.Content
+	}
+	return ""
+}
+
+func (x *SetUserProfileRequest) GetExpectedRevision() uint64 {
+	if x != nil {
+		return x.ExpectedRevision
+	}
+	return 0
+}
+
+type RebuildUserProfileRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Tenant context.
+	OrgId string `protobuf:"bytes,1,opt,name=org_id,json=orgId,proto3" json:"org_id,omitempty"`
+	// The profile's owner. Must be the caller.
+	UserId string `protobuf:"bytes,2,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
+	// Replace an edited profile too. Without it an edited profile is kept.
+	Force         bool `protobuf:"varint,3,opt,name=force,proto3" json:"force,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RebuildUserProfileRequest) Reset() {
+	*x = RebuildUserProfileRequest{}
+	mi := &file_model_plane_v1_memory_proto_msgTypes[21]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RebuildUserProfileRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RebuildUserProfileRequest) ProtoMessage() {}
+
+func (x *RebuildUserProfileRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_memory_proto_msgTypes[21]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RebuildUserProfileRequest.ProtoReflect.Descriptor instead.
+func (*RebuildUserProfileRequest) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_memory_proto_rawDescGZIP(), []int{21}
+}
+
+func (x *RebuildUserProfileRequest) GetOrgId() string {
+	if x != nil {
+		return x.OrgId
+	}
+	return ""
+}
+
+func (x *RebuildUserProfileRequest) GetUserId() string {
+	if x != nil {
+		return x.UserId
+	}
+	return ""
+}
+
+func (x *RebuildUserProfileRequest) GetForce() bool {
+	if x != nil {
+		return x.Force
+	}
+	return false
+}
+
+type UserProfileResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The profile, unset when none exists or it is hidden (see skip_reason).
+	Profile *UserProfile `protobuf:"bytes,1,opt,name=profile,proto3" json:"profile,omitempty"`
+	// Why the profile is not used in conversations, one of the closed
+	// MemoryControls.reason tokens ("user_paused", "user_off", "org_disabled",
+	// "zdr", "policy_unavailable"). A paused profile is still returned (listed
+	// and editable); off and org_disabled hide it. Empty when it is used.
+	SkipReason    string `protobuf:"bytes,2,opt,name=skip_reason,json=skipReason,proto3" json:"skip_reason,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *UserProfileResponse) Reset() {
+	*x = UserProfileResponse{}
+	mi := &file_model_plane_v1_memory_proto_msgTypes[22]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *UserProfileResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*UserProfileResponse) ProtoMessage() {}
+
+func (x *UserProfileResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_memory_proto_msgTypes[22]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use UserProfileResponse.ProtoReflect.Descriptor instead.
+func (*UserProfileResponse) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_memory_proto_rawDescGZIP(), []int{22}
+}
+
+func (x *UserProfileResponse) GetProfile() *UserProfile {
+	if x != nil {
+		return x.Profile
+	}
+	return nil
+}
+
+func (x *UserProfileResponse) GetSkipReason() string {
+	if x != nil {
+		return x.SkipReason
+	}
+	return ""
+}
+
 var File_model_plane_v1_memory_proto protoreflect.FileDescriptor
 
 const file_model_plane_v1_memory_proto_rawDesc = "" +
@@ -1597,7 +1939,31 @@ const file_model_plane_v1_memory_proto_rawDesc = "" +
 	"\x0fdurable_deleted\x18\x01 \x01(\rR\x0edurableDeleted\x121\n" +
 	"\x14semantic_unconfirmed\x18\x02 \x01(\rR\x13semanticUnconfirmed\x12\x1a\n" +
 	"\bdegraded\x18\x03 \x01(\bR\bdegraded\x12-\n" +
-	"\x12degradation_reason\x18\x04 \x01(\tR\x11degradationReason*s\n" +
+	"\x12degradation_reason\x18\x04 \x01(\tR\x11degradationReason\"\xff\x01\n" +
+	"\vUserProfile\x12\x18\n" +
+	"\acontent\x18\x01 \x01(\tR\acontent\x12*\n" +
+	"\x11source_memory_ids\x18\x02 \x03(\tR\x0fsourceMemoryIds\x12\x16\n" +
+	"\x06origin\x18\x03 \x01(\tR\x06origin\x12\x1a\n" +
+	"\brevision\x18\x04 \x01(\x04R\brevision\x129\n" +
+	"\n" +
+	"updated_at\x18\x05 \x01(\v2\x1a.google.protobuf.TimestampR\tupdatedAt\x12;\n" +
+	"\x1asources_deleted_since_edit\x18\x06 \x01(\rR\x17sourcesDeletedSinceEdit\"G\n" +
+	"\x15GetUserProfileRequest\x12\x15\n" +
+	"\x06org_id\x18\x01 \x01(\tR\x05orgId\x12\x17\n" +
+	"\auser_id\x18\x02 \x01(\tR\x06userId\"\x8e\x01\n" +
+	"\x15SetUserProfileRequest\x12\x15\n" +
+	"\x06org_id\x18\x01 \x01(\tR\x05orgId\x12\x17\n" +
+	"\auser_id\x18\x02 \x01(\tR\x06userId\x12\x18\n" +
+	"\acontent\x18\x03 \x01(\tR\acontent\x12+\n" +
+	"\x11expected_revision\x18\x04 \x01(\x04R\x10expectedRevision\"a\n" +
+	"\x19RebuildUserProfileRequest\x12\x15\n" +
+	"\x06org_id\x18\x01 \x01(\tR\x05orgId\x12\x17\n" +
+	"\auser_id\x18\x02 \x01(\tR\x06userId\x12\x14\n" +
+	"\x05force\x18\x03 \x01(\bR\x05force\"m\n" +
+	"\x13UserProfileResponse\x125\n" +
+	"\aprofile\x18\x01 \x01(\v2\x1b.model_plane.v1.UserProfileR\aprofile\x12\x1f\n" +
+	"\vskip_reason\x18\x02 \x01(\tR\n" +
+	"skipReason*s\n" +
 	"\x10MemoryProvenance\x12!\n" +
 	"\x1dMEMORY_PROVENANCE_UNSPECIFIED\x10\x00\x12\x1c\n" +
 	"\x18MEMORY_PROVENANCE_STATED\x10\x01\x12\x1e\n" +
@@ -1606,7 +1972,7 @@ const file_model_plane_v1_memory_proto_rawDesc = "" +
 	"\x18MEMORY_STATE_UNSPECIFIED\x10\x00\x12\x13\n" +
 	"\x0fMEMORY_STATE_ON\x10\x01\x12\x17\n" +
 	"\x13MEMORY_STATE_PAUSED\x10\x02\x12\x14\n" +
-	"\x10MEMORY_STATE_OFF\x10\x032\xf3\x05\n" +
+	"\x10MEMORY_STATE_OFF\x10\x032\x95\b\n" +
 	"\rMemoryService\x12Y\n" +
 	"\fSearchMemory\x12#.model_plane.v1.SearchMemoryRequest\x1a$.model_plane.v1.SearchMemoryResponse\x12V\n" +
 	"\vIndexMemory\x12\".model_plane.v1.IndexMemoryRequest\x1a#.model_plane.v1.IndexMemoryResponse\x12S\n" +
@@ -1616,7 +1982,10 @@ const file_model_plane_v1_memory_proto_rawDesc = "" +
 	"\x06Health\x12#.model_plane.v1.MemoryHealthRequest\x1a$.model_plane.v1.MemoryHealthResponse\x12h\n" +
 	"\x11GetMemoryControls\x12(.model_plane.v1.GetMemoryControlsRequest\x1a).model_plane.v1.GetMemoryControlsResponse\x12h\n" +
 	"\x11SetMemoryControls\x12(.model_plane.v1.SetMemoryControlsRequest\x1a).model_plane.v1.SetMemoryControlsResponse\x12V\n" +
-	"\vResetMemory\x12\".model_plane.v1.ResetMemoryRequest\x1a#.model_plane.v1.ResetMemoryResponseB\xb3\x01\n" +
+	"\vResetMemory\x12\".model_plane.v1.ResetMemoryRequest\x1a#.model_plane.v1.ResetMemoryResponse\x12\\\n" +
+	"\x0eGetUserProfile\x12%.model_plane.v1.GetUserProfileRequest\x1a#.model_plane.v1.UserProfileResponse\x12\\\n" +
+	"\x0eSetUserProfile\x12%.model_plane.v1.SetUserProfileRequest\x1a#.model_plane.v1.UserProfileResponse\x12d\n" +
+	"\x12RebuildUserProfile\x12).model_plane.v1.RebuildUserProfileRequest\x1a#.model_plane.v1.UserProfileResponseB\xb3\x01\n" +
 	"\x12com.model_plane.v1B\vMemoryProtoP\x01Z;github.com/triodelab/model-plane/gen/go/model_plane/v1;mpv1\xa2\x02\x03MXX\xaa\x02\rModelPlane.V1\xca\x02\rModelPlane\\V1\xe2\x02\x19ModelPlane\\V1\\GPBMetadata\xea\x02\x0eModelPlane::V1b\x06proto3"
 
 var (
@@ -1632,7 +2001,7 @@ func file_model_plane_v1_memory_proto_rawDescGZIP() []byte {
 }
 
 var file_model_plane_v1_memory_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
-var file_model_plane_v1_memory_proto_msgTypes = make([]protoimpl.MessageInfo, 18)
+var file_model_plane_v1_memory_proto_msgTypes = make([]protoimpl.MessageInfo, 23)
 var file_model_plane_v1_memory_proto_goTypes = []any{
 	(MemoryProvenance)(0),             // 0: model_plane.v1.MemoryProvenance
 	(MemoryState)(0),                  // 1: model_plane.v1.MemoryState
@@ -1654,40 +2023,53 @@ var file_model_plane_v1_memory_proto_goTypes = []any{
 	(*SetMemoryControlsResponse)(nil), // 17: model_plane.v1.SetMemoryControlsResponse
 	(*ResetMemoryRequest)(nil),        // 18: model_plane.v1.ResetMemoryRequest
 	(*ResetMemoryResponse)(nil),       // 19: model_plane.v1.ResetMemoryResponse
-	(*timestamppb.Timestamp)(nil),     // 20: google.protobuf.Timestamp
+	(*UserProfile)(nil),               // 20: model_plane.v1.UserProfile
+	(*GetUserProfileRequest)(nil),     // 21: model_plane.v1.GetUserProfileRequest
+	(*SetUserProfileRequest)(nil),     // 22: model_plane.v1.SetUserProfileRequest
+	(*RebuildUserProfileRequest)(nil), // 23: model_plane.v1.RebuildUserProfileRequest
+	(*UserProfileResponse)(nil),       // 24: model_plane.v1.UserProfileResponse
+	(*timestamppb.Timestamp)(nil),     // 25: google.protobuf.Timestamp
 }
 var file_model_plane_v1_memory_proto_depIdxs = []int32{
-	20, // 0: model_plane.v1.SearchMemoryRequest.updated_after:type_name -> google.protobuf.Timestamp
+	25, // 0: model_plane.v1.SearchMemoryRequest.updated_after:type_name -> google.protobuf.Timestamp
 	4,  // 1: model_plane.v1.SearchMemoryResponse.entries:type_name -> model_plane.v1.MemoryEntry
-	20, // 2: model_plane.v1.MemoryEntry.updated_at:type_name -> google.protobuf.Timestamp
+	25, // 2: model_plane.v1.MemoryEntry.updated_at:type_name -> google.protobuf.Timestamp
 	0,  // 3: model_plane.v1.MemoryEntry.provenance:type_name -> model_plane.v1.MemoryProvenance
 	4,  // 4: model_plane.v1.ListMemoryResponse.entries:type_name -> model_plane.v1.MemoryEntry
 	1,  // 5: model_plane.v1.SetMemoryControlsRequest.state:type_name -> model_plane.v1.MemoryState
 	1,  // 6: model_plane.v1.MemoryControls.state:type_name -> model_plane.v1.MemoryState
-	20, // 7: model_plane.v1.MemoryControls.updated_at:type_name -> google.protobuf.Timestamp
+	25, // 7: model_plane.v1.MemoryControls.updated_at:type_name -> google.protobuf.Timestamp
 	15, // 8: model_plane.v1.GetMemoryControlsResponse.controls:type_name -> model_plane.v1.MemoryControls
 	15, // 9: model_plane.v1.SetMemoryControlsResponse.controls:type_name -> model_plane.v1.MemoryControls
-	2,  // 10: model_plane.v1.MemoryService.SearchMemory:input_type -> model_plane.v1.SearchMemoryRequest
-	5,  // 11: model_plane.v1.MemoryService.IndexMemory:input_type -> model_plane.v1.IndexMemoryRequest
-	9,  // 12: model_plane.v1.MemoryService.ListMemory:input_type -> model_plane.v1.ListMemoryRequest
-	11, // 13: model_plane.v1.MemoryService.DeleteMemory:input_type -> model_plane.v1.DeleteMemoryRequest
-	7,  // 14: model_plane.v1.MemoryService.Health:input_type -> model_plane.v1.MemoryHealthRequest
-	13, // 15: model_plane.v1.MemoryService.GetMemoryControls:input_type -> model_plane.v1.GetMemoryControlsRequest
-	14, // 16: model_plane.v1.MemoryService.SetMemoryControls:input_type -> model_plane.v1.SetMemoryControlsRequest
-	18, // 17: model_plane.v1.MemoryService.ResetMemory:input_type -> model_plane.v1.ResetMemoryRequest
-	3,  // 18: model_plane.v1.MemoryService.SearchMemory:output_type -> model_plane.v1.SearchMemoryResponse
-	6,  // 19: model_plane.v1.MemoryService.IndexMemory:output_type -> model_plane.v1.IndexMemoryResponse
-	10, // 20: model_plane.v1.MemoryService.ListMemory:output_type -> model_plane.v1.ListMemoryResponse
-	12, // 21: model_plane.v1.MemoryService.DeleteMemory:output_type -> model_plane.v1.DeleteMemoryResponse
-	8,  // 22: model_plane.v1.MemoryService.Health:output_type -> model_plane.v1.MemoryHealthResponse
-	16, // 23: model_plane.v1.MemoryService.GetMemoryControls:output_type -> model_plane.v1.GetMemoryControlsResponse
-	17, // 24: model_plane.v1.MemoryService.SetMemoryControls:output_type -> model_plane.v1.SetMemoryControlsResponse
-	19, // 25: model_plane.v1.MemoryService.ResetMemory:output_type -> model_plane.v1.ResetMemoryResponse
-	18, // [18:26] is the sub-list for method output_type
-	10, // [10:18] is the sub-list for method input_type
-	10, // [10:10] is the sub-list for extension type_name
-	10, // [10:10] is the sub-list for extension extendee
-	0,  // [0:10] is the sub-list for field type_name
+	25, // 10: model_plane.v1.UserProfile.updated_at:type_name -> google.protobuf.Timestamp
+	20, // 11: model_plane.v1.UserProfileResponse.profile:type_name -> model_plane.v1.UserProfile
+	2,  // 12: model_plane.v1.MemoryService.SearchMemory:input_type -> model_plane.v1.SearchMemoryRequest
+	5,  // 13: model_plane.v1.MemoryService.IndexMemory:input_type -> model_plane.v1.IndexMemoryRequest
+	9,  // 14: model_plane.v1.MemoryService.ListMemory:input_type -> model_plane.v1.ListMemoryRequest
+	11, // 15: model_plane.v1.MemoryService.DeleteMemory:input_type -> model_plane.v1.DeleteMemoryRequest
+	7,  // 16: model_plane.v1.MemoryService.Health:input_type -> model_plane.v1.MemoryHealthRequest
+	13, // 17: model_plane.v1.MemoryService.GetMemoryControls:input_type -> model_plane.v1.GetMemoryControlsRequest
+	14, // 18: model_plane.v1.MemoryService.SetMemoryControls:input_type -> model_plane.v1.SetMemoryControlsRequest
+	18, // 19: model_plane.v1.MemoryService.ResetMemory:input_type -> model_plane.v1.ResetMemoryRequest
+	21, // 20: model_plane.v1.MemoryService.GetUserProfile:input_type -> model_plane.v1.GetUserProfileRequest
+	22, // 21: model_plane.v1.MemoryService.SetUserProfile:input_type -> model_plane.v1.SetUserProfileRequest
+	23, // 22: model_plane.v1.MemoryService.RebuildUserProfile:input_type -> model_plane.v1.RebuildUserProfileRequest
+	3,  // 23: model_plane.v1.MemoryService.SearchMemory:output_type -> model_plane.v1.SearchMemoryResponse
+	6,  // 24: model_plane.v1.MemoryService.IndexMemory:output_type -> model_plane.v1.IndexMemoryResponse
+	10, // 25: model_plane.v1.MemoryService.ListMemory:output_type -> model_plane.v1.ListMemoryResponse
+	12, // 26: model_plane.v1.MemoryService.DeleteMemory:output_type -> model_plane.v1.DeleteMemoryResponse
+	8,  // 27: model_plane.v1.MemoryService.Health:output_type -> model_plane.v1.MemoryHealthResponse
+	16, // 28: model_plane.v1.MemoryService.GetMemoryControls:output_type -> model_plane.v1.GetMemoryControlsResponse
+	17, // 29: model_plane.v1.MemoryService.SetMemoryControls:output_type -> model_plane.v1.SetMemoryControlsResponse
+	19, // 30: model_plane.v1.MemoryService.ResetMemory:output_type -> model_plane.v1.ResetMemoryResponse
+	24, // 31: model_plane.v1.MemoryService.GetUserProfile:output_type -> model_plane.v1.UserProfileResponse
+	24, // 32: model_plane.v1.MemoryService.SetUserProfile:output_type -> model_plane.v1.UserProfileResponse
+	24, // 33: model_plane.v1.MemoryService.RebuildUserProfile:output_type -> model_plane.v1.UserProfileResponse
+	23, // [23:34] is the sub-list for method output_type
+	12, // [12:23] is the sub-list for method input_type
+	12, // [12:12] is the sub-list for extension type_name
+	12, // [12:12] is the sub-list for extension extendee
+	0,  // [0:12] is the sub-list for field type_name
 }
 
 func init() { file_model_plane_v1_memory_proto_init() }
@@ -1701,7 +2083,7 @@ func file_model_plane_v1_memory_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_model_plane_v1_memory_proto_rawDesc), len(file_model_plane_v1_memory_proto_rawDesc)),
 			NumEnums:      2,
-			NumMessages:   18,
+			NumMessages:   23,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

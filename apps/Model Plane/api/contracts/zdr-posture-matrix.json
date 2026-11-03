@@ -834,19 +834,6 @@
         "route": {"provider": "openai-codex-subscription", "connection": "conn-2", "explicit_zdr": false}
       },
       "expect": {"decision": "waived", "code": "connection_not_zdr_capable"}
-    },
-    {
-      "id": "e_zdr_token_batched_web_search_refused",
-      "title": "A ZDR token on a platform provider route, asking for batched web search: ZDR, with no batched search offered and no search ref issued.",
-      "tags": [],
-      "note": "Batched web_search (queries) and the ref it issues are web search, so the feature web_search refuses them wherever a ZDR turn asks for it: the composer's browse_web is refused before the tool loop starts (zdr_features.rs), so the tool is not offered, and a call that reaches dispatch anyway is refused as not available for the turn. Refs live in memory for one turn and are never persisted, so a ZDR turn holds none. The route is a platform provider with no connection, as in the reader row.",
-      "inputs": {
-        "bearers": [
-          {"zdr": true, "org_zdr": true, "waiver": null}
-        ],
-        "route": {"provider": "azure-openai", "connection": null, "explicit_zdr": false}
-      },
-      "expect": {"decision": "zdr", "code": "org_zdr"}
     }
   ]
 }

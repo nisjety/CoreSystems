@@ -246,6 +246,7 @@ func isNotificationTypeAuthorized(serviceID, notificationType string) bool {
 			"modelplane.needs_input":           {},
 			"modelplane.plan_ready":            {},
 			"modelplane.scheduled_run_outcome": {},
+			"modelplane.goal_stopped":          {},
 		},
 		// WS11-S9: refs-only Space attention, issued by Convex only. The
 		// in-app copy is the Convex inbox, so these types carry no title or text.

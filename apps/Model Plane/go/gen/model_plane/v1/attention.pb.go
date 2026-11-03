@@ -113,6 +113,10 @@ const (
 	AttentionReason_ATTENTION_REASON_PLAN AttentionReason = 2
 	// A run question.
 	AttentionReason_ATTENTION_REASON_INPUT AttentionReason = 3
+	// A thread goal stopped (EP-7 S5): COMPLETED when the goal was met, NEEDS_INPUT when it reached
+	// its token budget or turn cap or was judged blocked. Derived only while the thread has no other
+	// pending row and the thread goals switch is on, so a flag-off response never carries it.
+	AttentionReason_ATTENTION_REASON_GOAL AttentionReason = 5
 )
 
 // Enum value maps for AttentionReason.
@@ -122,12 +126,14 @@ var (
 		1: "ATTENTION_REASON_APPROVAL",
 		2: "ATTENTION_REASON_PLAN",
 		3: "ATTENTION_REASON_INPUT",
+		5: "ATTENTION_REASON_GOAL",
 	}
 	AttentionReason_value = map[string]int32{
 		"ATTENTION_REASON_UNSPECIFIED": 0,
 		"ATTENTION_REASON_APPROVAL":    1,
 		"ATTENTION_REASON_PLAN":        2,
 		"ATTENTION_REASON_INPUT":       3,
+		"ATTENTION_REASON_GOAL":        5,
 	}
 )
 
@@ -1000,12 +1006,13 @@ const file_model_plane_v1_attention_proto_rawDesc = "" +
 	"\x19ATTENTION_STATE_COMPLETED\x10\x05\x12\x1a\n" +
 	"\x16ATTENTION_STATE_FAILED\x10\x06\x12\x1c\n" +
 	"\x18ATTENTION_STATE_ARCHIVED\x10\a\x12\x18\n" +
-	"\x14ATTENTION_STATE_IDLE\x10\b*\x89\x01\n" +
+	"\x14ATTENTION_STATE_IDLE\x10\b*\xa4\x01\n" +
 	"\x0fAttentionReason\x12 \n" +
 	"\x1cATTENTION_REASON_UNSPECIFIED\x10\x00\x12\x1d\n" +
 	"\x19ATTENTION_REASON_APPROVAL\x10\x01\x12\x19\n" +
 	"\x15ATTENTION_REASON_PLAN\x10\x02\x12\x1a\n" +
-	"\x16ATTENTION_REASON_INPUT\x10\x032\xb7\x02\n" +
+	"\x16ATTENTION_REASON_INPUT\x10\x03\x12\x19\n" +
+	"\x15ATTENTION_REASON_GOAL\x10\x052\xb7\x02\n" +
 	"\x10AttentionService\x12\\\n" +
 	"\rListAttention\x12$.model_plane.v1.ListAttentionRequest\x1a%.model_plane.v1.ListAttentionResponse\x12_\n" +
 	"\x0eMarkThreadSeen\x12%.model_plane.v1.MarkThreadSeenRequest\x1a&.model_plane.v1.MarkThreadSeenResponse\x12d\n" +

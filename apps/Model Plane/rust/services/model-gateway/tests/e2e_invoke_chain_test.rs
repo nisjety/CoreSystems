@@ -12460,6 +12460,27 @@ impl mpv1::memory_service_server::MemoryService for MockMemory {
     ) -> Result<Response<mpv1::ResetMemoryResponse>, Status> {
         Err(Status::unimplemented("reset_memory not needed in test"))
     }
+
+    async fn get_user_profile(
+        &self,
+        _: TReq<mpv1::GetUserProfileRequest>,
+    ) -> Result<Response<mpv1::UserProfileResponse>, Status> {
+        Err(Status::unimplemented("get_user_profile not needed in test"))
+    }
+
+    async fn set_user_profile(
+        &self,
+        _: TReq<mpv1::SetUserProfileRequest>,
+    ) -> Result<Response<mpv1::UserProfileResponse>, Status> {
+        Err(Status::unimplemented("set_user_profile not needed in test"))
+    }
+
+    async fn rebuild_user_profile(
+        &self,
+        _: TReq<mpv1::RebuildUserProfileRequest>,
+    ) -> Result<Response<mpv1::UserProfileResponse>, Status> {
+        Err(Status::unimplemented("rebuild_user_profile not needed in test"))
+    }
 }
 
 async fn spawn_memory_mock(

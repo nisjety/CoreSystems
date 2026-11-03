@@ -3907,6 +3907,27 @@ mod tests {
         ) -> Result<Response<mp_contracts::model_plane::v1::ResetMemoryResponse>, Status> {
             Err(Status::unimplemented("reset_memory not needed in test"))
         }
+
+        async fn get_user_profile(
+            &self,
+            _: Request<mp_contracts::model_plane::v1::GetUserProfileRequest>,
+        ) -> Result<Response<mp_contracts::model_plane::v1::UserProfileResponse>, Status> {
+            Err(Status::unimplemented("get_user_profile not needed in test"))
+        }
+
+        async fn set_user_profile(
+            &self,
+            _: Request<mp_contracts::model_plane::v1::SetUserProfileRequest>,
+        ) -> Result<Response<mp_contracts::model_plane::v1::UserProfileResponse>, Status> {
+            Err(Status::unimplemented("set_user_profile not needed in test"))
+        }
+
+        async fn rebuild_user_profile(
+            &self,
+            _: Request<mp_contracts::model_plane::v1::RebuildUserProfileRequest>,
+        ) -> Result<Response<mp_contracts::model_plane::v1::UserProfileResponse>, Status> {
+            Err(Status::unimplemented("rebuild_user_profile not needed in test"))
+        }
     }
 
     async fn spawn_memory_client(

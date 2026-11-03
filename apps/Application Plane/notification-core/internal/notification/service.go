@@ -83,6 +83,7 @@ var nativeTypes = map[string]struct{}{
 	"modelplane.needs_input":           {},
 	"modelplane.plan_ready":            {},
 	"modelplane.scheduled_run_outcome": {},
+	"modelplane.goal_stopped":          {},
 }
 
 // IsNativeType reports whether a notification type is delivered by the native in-app adapter.

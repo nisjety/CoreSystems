@@ -242,6 +242,7 @@ services:
       MODEL_GATEWAY_AUX_MODEL: ${MODEL_GATEWAY_AUX_MODEL:-}
       MODEL_GATEWAY_CATALOGUE_PRICES: ${MODEL_GATEWAY_CATALOGUE_PRICES:-false}
       MODEL_GATEWAY_WEB_READER: ${MODEL_GATEWAY_WEB_READER:-false}
+      MODEL_GATEWAY_WEB_SEARCH_BATCH: ${MODEL_GATEWAY_WEB_SEARCH_BATCH:-false}
       # Side-task models from the platform role table (EP-13 S4). Roll out inference-core first:
       # an older inference-core refuses the verevon-role model id.
       MODEL_GATEWAY_ROLE_ROUTING: ${MODEL_GATEWAY_ROLE_ROUTING:-false}
@@ -1145,6 +1146,7 @@ services:
       # pre-S1 behaviour (every user treated as on) and logs ERROR once per Dreaming cycle; SetMemoryControls is
       # then refused.
       MEMORY_CONTROLS_ENABLED: ${MEMORY_CONTROLS_ENABLED:-true}
+      SESSION_USER_PROFILE_ENABLED: ${SESSION_USER_PROFILE_ENABLED:-false}
       # WS07-S4: the org memory and learning policy mirror. An empty service token keeps the whole mirror
       # dormant; ORG_POLICY_FAIL_CLOSED is the strict literal true; ORG_POLICY_MAX_STALE is in seconds.
       ORG_CORE_URL: ${ORG_CORE_URL:-http://org-core:8080}

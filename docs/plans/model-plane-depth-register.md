@@ -2967,6 +2967,9 @@ Built so far: WS13-S0, WS13-S1, WS13-S2; WS14-S1, WS14-S2 (partial), WS14-S3; WS
 | D3-332 | EP-9-T3 | live-proof | P1 | Both mounts are safe before EP-9-T2 lands: with no BFF route the read returns 404 and the panel renders nothing, and with the build switch off it sends no request. | open |
 | D3-333 | EP-9-T3 | live-proof | P1 | owner-only: add VITE_POLICY_EFFECTIVE_VIEW_ENABLED=false to apps/Frontend Plane/verevonv3/.env.example. This slice does not edit that file. | open |
 | D3-334 | EP-9-T3 | follow-up | P3 | 7 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W3-08.json | open |
+| D3-335 | W3-08 lead | decision | P2 | The zdr-posture-matrix keys rows on resolver inputs only (bearers, route), so a per-feature ZDR row (EP-2-S3's e_zdr_token_batched_web_search_refused) always duplicates an existing row and fails zdr-contract-schema ('rows must differ'). The lead dropped it and restored the matrix, its copies, the counts and the pin; feature refusals belong in zdr_features.rs, the feature table and docs/ZDR.md. Builders keep adding such rows (EP-14-S6 in W3-07, EP-2-S3 here): later batches are told so. | closed |
+| D3-336 | W3-08 lead | follow-up | P2 | EP-8-S4 took session-core 0100_user_profiles under round B's renumber of round A (0072 to 0100); 00-integration-round-b.md does not record it yet. Taken so far: 0100 (EP-8-S4), 0101 (EP-14-S6), 0103 (EP-8-S6), 0104 (EP-14-S10), 0105 (EP-4-S5), 0106 (EP-12-S14); 0102 stays with its round-A owner. | open |
+| D3-337 | W3-08 lead | cleanup | P3 | model-gateway http_routes.rs user_profile_route_tests (about :18256 and :18259) import axum::Json without using it (new warning from EP-8-S4). | open |
 
 ## Cross-wave
 

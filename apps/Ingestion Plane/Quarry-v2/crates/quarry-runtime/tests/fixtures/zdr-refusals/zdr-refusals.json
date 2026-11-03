@@ -208,6 +208,10 @@
     {
       "key": "sandbox_workspace",
       "label_en": "files kept between calls in a thread workspace"
+    },
+    {
+      "key": "user_profile",
+      "label_en": "the standing profile"
     }
   ],
   "generated_by": "mp-contracts zdr_refusal tests (MP_UPDATE_GOLDEN=1)",

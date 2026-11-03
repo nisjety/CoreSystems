@@ -60,6 +60,7 @@ export type ZdrFeatureKey =
   | 'connector_read'
   | 'message_versions'
   | 'sandbox_workspace'
+  | 'user_profile'
 
 /** The reader's-language chooser, the same shape the rest of the SPA passes around. */
 export type Translate = (noText: string, enText: string) => string
@@ -188,6 +189,7 @@ export const FEATURE_LABELS: Record<ZdrFeatureKey, Copy> = {
   connector_read: { no: 'lesing fra tilkoblede apper', en: 'connected-app reads' },
   message_versions: { no: 'meldingsversjoner', en: 'message versions' },
   sandbox_workspace: { no: 'filer som beholdes mellom kall i et trådarbeidsområde', en: 'files kept between calls in a thread workspace' },
+  user_profile: { no: 'den faste profilen', en: 'the standing profile' },
 }
 
 /** A refusal whose feature the SPA does not know names it this way. */
