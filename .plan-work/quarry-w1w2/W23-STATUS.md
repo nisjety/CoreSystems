@@ -404,3 +404,32 @@ Open items:
 - W3-E3.2-e3: migration 044 never applied to a real DB; RLS inert under a superuser role; no reader of the decisions (broker, Quarry, SPA); no gateway proxy; DSAR export likely misses user_settings.
 - 46 depth rows appended to W23-depth.md (lanes a 5, b 12, c 14, d 15).
 - Four tracked .sha256 files in the integ worktree still show as modified (CRLF/LF checkout artifacts); none committed.
+
+## Step S8 (W3), integrated 2026-11-03
+
+Units: W3-E3.1-c, W3-E3.6-4a (lane a); W3-E3.3-j, W3-E3.8.3 (lane b); W3-E3.4-1 (lane c; W3-E3.3-a NOT LANDED, see open items); W3-E3.1-h, W3-E3.2-f (lane d). All code only, flags default off (E3.4-1 has no flag; it adds stored statuses nothing writes yet).
+
+Merge commits on w23/integ (base 1b2bbc9ae), no conflicts:
+- 5d8bc888a merge: w23/lane-a (S8: W3-E3.1-c, W3-E3.6-4a)
+- b0513b184 merge: w23/lane-b (S8: W3-E3.3-j, W3-E3.8.3)
+- 0a9525c76 merge: w23/lane-c (S8: W3-E3.4-1)
+- b32273bb0 merge: w23/lane-d (S8: W3-E3.1-h, W3-E3.2-f)
+- The lane-d merge was first refused by the line-ending-only auth-core cross-plane-token-requests.json.sha256 artifact; its bytes equal HEAD, `git update-index --refresh` cleared it (and the other three artifacts), nothing restored or stashed.
+
+Compile guard (no test runs):
+- Rust (qtest-lane integ): `cargo check --workspace --tests` exit 0, warnings only, all pre-existing quarry-edge ones; no new warning from S8 files. Extra: `cargo check -p quarry-browser -p quarry-runtime --features quarry-browser/chromiumoxide,quarry-runtime/chromiumoxide --tests` exit 0, no warnings (covers the E3.1-c chromiumoxide.rs code).
+- Go, GOWORK=off, build + vet: apps/Control Plane/org-core clean.
+- auth-core TS (web-policy.ts, origin-consent spec, golden spec): not type-checked (not in the guard list); verevonv3 SPA and gateway not changed in S8, no check.
+- action-registry.ts unchanged: no admission golden regeneration, no new action ids. No ZDR/schema/route-count regeneration needed. Manifest digest (cross-plane-token-requests 6e5f14b3...) and quarry token claims golden (6c3044d5...) changed only in lane d, so no cross-lane digest merge was needed.
+
+Open items:
+- W3-E3.3-a: NOT LANDED (different-worktree guard refused lane-c writes). Patches in the vigorous-perlman scratchpad e33a/spa.patch and e33a/gateway.patch; apply from an innh-lane-c session with `patch --binary -p1` (not git apply, CRLF), commit the three commits named in its report, then gateway cargo check + tsc. Its six depth rows are not in W23-depth.md yet.
+- W3-E3.1-c: the OTP methods are inherent ChromiumoxideDriver methods, unreachable through Arc<dyn BrowserDriver> (needs trait methods in lib.rs, D-E31c-1 high); nothing reads the credential-delivered mark (E3.1-e, D-E31c-2 high); no trusted grant origin until the broker carries it (D-E31c-7 high); the http /otp-login fixture fails otp_not_https (D-E31c-3).
+- W3-E3.6-4a: routes.rs still calls run_with_inline_request, so per-request redact_pii does not reach the stage (D-E364a-2); edge caches ignore the org default (D-E364a-3); a caught scanner panic can print page text through the panic hook (D-E364a-1).
+- W3-E3.3-j: the queue row's flag name QUARRY_BROWSER_SETTLE_MS is the live hydration budget; the unit uses QUARRY_BROWSER_ACTION_SETTLE(_MS) instead (queue row to correct); openapi/SDK/SELF_HOST docs for settle_ms missing.
+- W3-E3.8.3: no retry while QUARRY_PROXY_POOL is set; stream and crawl run-page paths not wrapped; flag not in compose/RUNBOOKS/openapi; E3.8.1 sub-codes not produced yet so dns/connect retries are dormant.
+- W3-E3.4-1: migration is 0020 (0019 reserved for W2-U49a, not on this branch, so the sequence has a gap until it lands); edge run_is_resumable still treats only Active as resumable; OpenAPI/SDK/gateway status values not widened; roll every edge before the TTL flag is on.
+- W3-E3.1-h: nothing constructs IntegrationCoreOtpSource (no edge config/wiring); integration-core route does not pass the verified caller; personal-connection owner decision open.
+- W3-E3.2-f: MP asks appended (re-vendor model-gateway golden copy + pin; accept unknown web_policy.caps keys; broker origin-extension grants honour both keys); the model-gateway rows of zdr-contract-sync fail until that lands; nothing enforces the keys yet.
+- 50 depth rows appended to W23-depth.md (lanes a 13, b 22, c 4, d 11).
+- Four tracked .sha256 files are clean after the index refresh; none committed.
