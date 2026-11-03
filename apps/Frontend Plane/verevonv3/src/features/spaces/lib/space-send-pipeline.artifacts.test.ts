@@ -14,7 +14,9 @@ vi.mock('@/shared/api/chat-client', () => ({
   cancelInvocation: vi.fn(),
 }))
 
-vi.mock('@/shared/api/spaces-client', () => ({
+vi.mock('@/shared/api/spaces-client', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/shared/api/spaces-client')>()),
+  searchSpaceMessages: () => new Promise(() => {}),
   updateSpaceThreadPresentation: vi.fn(async () => undefined),
   createSpacePost: vi.fn(),
   replyInSpaceThread: vi.fn(),

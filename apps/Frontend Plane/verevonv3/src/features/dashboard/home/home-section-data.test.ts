@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
-vi.mock('@/shared/api/spaces-client', () => ({ listSpaces: vi.fn() }))
+vi.mock('@/shared/api/spaces-client', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/shared/api/spaces-client')>()),
+  searchSpaceMessages: () => new Promise(() => {}), listSpaces: vi.fn() }))
 vi.mock('@/shared/api/inbox-client', () => ({ listConversations: vi.fn() }))
 import { listSpaces } from '@/shared/api/spaces-client'
 import { listConversations } from '@/shared/api/inbox-client'

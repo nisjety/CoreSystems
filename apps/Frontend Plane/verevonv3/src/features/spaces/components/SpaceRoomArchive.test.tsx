@@ -2,10 +2,14 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@solidjs/testing-li
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const spacesClient = vi.hoisted(() => ({
+  searchSpaceMessages: vi.fn(() => new Promise(() => {})),
   archiveSpaceRoom: vi.fn(),
   unarchiveSpaceRoom: vi.fn(),
 }))
-vi.mock('@/shared/api/spaces-client', () => spacesClient)
+vi.mock('@/shared/api/spaces-client', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/shared/api/spaces-client')>()),
+  ...spacesClient,
+}))
 
 const { SpaceArchivedBanner, SpaceArchivedNotice, archiveErrorCopy, canArchiveRoom } = await import('./SpaceRoomArchive')
 

@@ -5,11 +5,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { SpaceRosterMember } from '@/shared/api/spaces-client'
 
 const spacesClient = vi.hoisted(() => ({
+  searchSpaceMessages: vi.fn(() => new Promise(() => {})),
   updateSpaceRoomDetails: vi.fn(),
   archiveSpaceRoom: vi.fn(),
   unarchiveSpaceRoom: vi.fn(),
 }))
-vi.mock('@/shared/api/spaces-client', () => spacesClient)
+vi.mock('@/shared/api/spaces-client', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/shared/api/spaces-client')>()),
+  ...spacesClient,
+}))
 
 const { SpaceRoomHeader, headerPeople, memberTint, HEADER_AVATAR_LIMIT } = await import('./SpaceRoomHeader')
 

@@ -23,12 +23,16 @@ vi.mock('@/shared/session/session-store', () => ({
   getSession: () => ({ activeOrg: { id: 'org-1', name: 'Test', role: 'admin' } }),
 }))
 const spacesClient = vi.hoisted(() => ({
+  searchSpaceMessages: vi.fn(() => new Promise(() => {})),
   updateSpaceThreadPresentation: vi.fn(),
   createSpacePost: vi.fn(),
   replyInSpaceThread: vi.fn(),
   SPACE_POST_MAX_CHARS_DEFAULT: 8000,
 }))
-vi.mock('@/shared/api/spaces-client', () => spacesClient)
+vi.mock('@/shared/api/spaces-client', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/shared/api/spaces-client')>()),
+  ...spacesClient,
+}))
 const skillsClient = vi.hoisted(() => ({ listAvailableSkills: vi.fn(), MAX_PICKED_SKILLS: 4 }))
 vi.mock('@/shared/api/skills-client', () => skillsClient)
 vi.mock('@/features/chat/components/ChatMessages', () => ({

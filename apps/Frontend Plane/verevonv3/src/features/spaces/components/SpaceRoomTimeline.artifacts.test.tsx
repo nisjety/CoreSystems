@@ -6,11 +6,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 // request leaves the test and no model is involved.
 
 const spacesClient = vi.hoisted(() => ({
+  searchSpaceMessages: vi.fn(() => new Promise(() => {})),
   getSpaceThreadTranscript: vi.fn(),
   loadSpaceTranscript: vi.fn(),
   updateSpaceThreadPresentation: vi.fn(),
 }))
-vi.mock('@/shared/api/spaces-client', () => spacesClient)
+vi.mock('@/shared/api/spaces-client', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/shared/api/spaces-client')>()),
+  ...spacesClient,
+}))
 vi.mock('@/features/chat/components/ChatMessages', async (importOriginal) => ({
   ...(await importOriginal<Record<string, unknown>>()),
   ChatMarkdown: (props: { content: string }) => <p>{props.content}</p>,

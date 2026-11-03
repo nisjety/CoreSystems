@@ -6,7 +6,9 @@ import { ApiError } from '@/shared/api/http'
 const createSpacePost = vi.fn()
 const replyInSpaceThread = vi.fn()
 
-vi.mock('@/shared/api/spaces-client', () => ({
+vi.mock('@/shared/api/spaces-client', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/shared/api/spaces-client')>()),
+  searchSpaceMessages: () => new Promise(() => {}),
   createSpacePost: (...args: unknown[]) => createSpacePost(...args),
   replyInSpaceThread: (...args: unknown[]) => replyInSpaceThread(...args),
   updateSpaceThreadPresentation: vi.fn(),

@@ -14,7 +14,9 @@ const spacesClient = vi.hoisted(() => ({
   listSpaces: vi.fn(),
 }))
 
-vi.mock('@/shared/api/spaces-client', () => ({
+vi.mock('@/shared/api/spaces-client', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/shared/api/spaces-client')>()),
+  searchSpaceMessages: () => new Promise(() => {}),
   getSpaceThreads: spacesClient.getSpaceThreads,
   listSpaces: spacesClient.listSpaces,
 }))
