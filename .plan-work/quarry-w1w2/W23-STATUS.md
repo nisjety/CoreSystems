@@ -243,3 +243,34 @@ Open items:
 - W2-CP-E2a: org-core cmd/server/main.go not wired (ValidateOrgKeysConfig, NewServiceFromEnv, SetAuditPublisher, SetOrgKeys, FlushAudit ticker) so flag-on routes answer 503; org:keys:admin:any and org:keys:destroy:any not allowlisted (403); service_auth.go edited outside the file set; audit-core subject acceptance unchecked.
 - 45 depth rows appended to W23-depth.md (a 5, b 10, c 11, d 12, plus 7 W2-U56 rows from its report).
 - Four tracked .sha256 files in the integ worktree still show as modified (CRLF/LF checkout artifacts); none committed.
+
+## Step S3 (W2), integrated 2026-11-03
+
+Units: W2-CP-L1 + W2-CP-E2b (lane a), W2-CP-INNH10A + W2-Q-S7a (lane b), W2-DOC-A + W2-CP-S7b (lane c), W2-Q-WS7K + W2-Q-S3 (lane d). All code only, flags default off.
+
+Merge commits (w23/integ, git merge --no-ff, base fa99419a8):
+- c76b96097 merge: w23/lane-a (S3: W2-CP-L1, W2-CP-E2b) into w23/integ
+- 1a5f6ee2c merge: w23/lane-b (S3: W2-CP-INNH10A, W2-Q-S7a) into w23/integ
+- 010879302 merge: w23/lane-c (S3: W2-DOC-A, W2-CP-S7b) into w23/integ
+- ec8fc035d merge: w23/lane-d (S3: W2-Q-WS7K, W2-Q-S3) into w23/integ
+
+Conflicts: .plan-work/quarry-w1w2/MP-ASKS.md on the lane-c and lane-d merges (append-only sections); resolved keeping both sides (integ sections first, then the lane's). Lanes a and b merged clean.
+
+Compile guard (no test runs):
+- Quarry Rust (qtest-lane integ): `cargo check --workspace --tests` exit 0, warnings only (pre-existing kinds, e.g. unused imports in tests/browser_grants_prod.rs).
+- Go, GOWORK=off, build + vet: billing-core clean; audit-core clean; quarry-control clean; quarry-orchestrator clean. No fixes needed.
+- verevonv3 SPA and gateway: untouched by S3, not run.
+- action-registry.ts unchanged: no admission golden regeneration, no new action ids. No ZDR/schema/route-count regeneration needed.
+- auth-core TS (W2-CP-INNH10A) is NOT compile-checked: no auth-core node_modules in the integ worktree and the guard list has no auth-core step. Before relying on it: pnpm install, prettier `--end-of-line auto` on the 4 files, `tsc --noEmit -p tsconfig.json`, `npx jest api-key-exchange plane-token convex-token plane-token-exchange quarry-token-zdr-claims` (diff failing sets vs base: 15 pre-existing failures in 3 suites).
+
+Open items:
+- W2-CP-L1: no Postgres test for Service.QuarryLimits; W2-CP-L2 must send X-Quarry-Org-Id and handle 403 organization_inactive; quarry.batch.url has no usage emitter (D-L1-1..7).
+- W2-CP-E2b: BLOCKER for the org_core flip (D-E2b-1): envelope_profile_store.rs (~lines 125, 249) must call is_current_key(org_id, &env.key_id) instead of comparing with current_key_id(); profiles_backfill still env-only; owner must copy QUARRY_ORG_CORE_SERVICE_TOKEN and QUARRY_BILLING_CORE_SERVICE_TOKEN into the Ingestion secrets ledger before any flip.
+- W2-CP-INNH10A: not compiled (above); OD-11 per-key exchange rate not enforced separately; MP-1/MP-3 asks in MP-ASKS.md.
+- W2-Q-S7a: orchestrator workflows/inputs.go (lines 69, 131) still reads params.robots as a string, so override jobs run as respect until it uses activities.RobotsModeFromParam (W23-b-S7a-1); OpenAPI/SELF_HOST/compose lack QUARRY_EDGE__ROBOTS_OVERRIDE_ORGS and effective.robots_override; ship edge before orchestrator.
+- W2-CP-S7b: schedule-fired jobs (schedule_runs.go registerScheduledRun) skip the robots audit; AUDIT_CORE_* env for quarry-control not in Ingestion compose.
+- W2-DOC-A: scripts/tests/ownership-docs-contract.test.mjs reads the missing apps/master-ownership-matrix.md path (pre-existing); four MP asks; model_plane_gate rows() maps every feature to model-invoke; ai_formats.rs calls /v1/invoke which refuses service principals.
+- W2-Q-WS7K: grant-layer gate not wired (admission::validate_run_grant drops the grant; step.rs/tabs.rs/attach.rs do not call the new gate fns); no HTTP tests; browser egress gap for denied sub-resources; Model Plane half in MP-ASKS.md.
+- W2-Q-S3: control flag must stay off until gdpr_purge.go deletes schedule_requests, edge schedule_routes.rs is updated (GET requests/{rid}, ZDR refusal), temporal client cleanup, Backfill overlap policy, controlauth.IsControlInternalPath listing; its orchestrator files landed inside commit b4de27454 (WS7K docs commit).
+- 53 depth lines appended to W23-depth.md (lanes a, b, c, d).
+- Four tracked .sha256 files in the integ worktree still show as modified (CRLF/LF checkout artifacts); none committed.
