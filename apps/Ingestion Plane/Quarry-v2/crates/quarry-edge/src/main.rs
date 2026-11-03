@@ -724,16 +724,44 @@ async fn run() -> anyhow::Result<()> {
     // usage meter. When NATS is up we publish to `usage.>` subjects;
     // otherwise we noop so dev / offline boots silently. Billing-core's
     // HTTP recovery endpoint covers any gap if NATS drops mid-flight.
-    let inner_usage: Arc<dyn quarry_runtime::UsageMeter> = match shared_nats_bus.as_ref() {
-        Some(bus) => {
-            tracing::info!("usage meter: NATS (publishes to usage.>)");
-            Arc::new(quarry_runtime::NatsUsageMeter::from_bus(bus))
-        }
-        None => {
-            tracing::warn!("usage meter: noop (no NATS) — billing-core will see no usage events");
-            Arc::new(quarry_runtime::NoopUsageMeter)
-        }
+    //
+    // U37: with QUARRY_EDGE__USAGE_BUS_URL set, the meter publishes to the Control NATS that
+    // billing-core subscribes and awaits each JetStream ack (at-least-once). Unset (the default)
+    // keeps today's path below. Half-set credentials stop the edge here; a failed connect falls
+    // back to today's path with a warning. The URL is never logged (it may carry userinfo).
+    let usage_bus = quarry_runtime::usage::UsageBusConfig::from_env()
+        .map_err(|e| anyhow::anyhow!("usage bus: {e}"))?;
+    let usage_bus_meter: Option<quarry_runtime::NatsUsageMeter> = match usage_bus.as_ref() {
+        Some(bus_cfg) => match quarry_runtime::NatsUsageMeter::connect_usage_bus(bus_cfg).await {
+            Ok(meter) => Some(meter),
+            Err(e) => {
+                // zdr-log-ok: a NATS connect error; no URL, credential or caller content
+                tracing::warn!(
+                    error = %e,
+                    "usage bus connect failed; usage stays on the Quarry bus"
+                );
+                None
+            }
+        },
+        None => None,
     };
+    let inner_usage: Arc<dyn quarry_runtime::UsageMeter> =
+        match (usage_bus_meter, shared_nats_bus.as_ref()) {
+            (Some(meter), _) => {
+                tracing::info!("usage meter: Control usage bus (usage.>, acked)");
+                Arc::new(meter)
+            }
+            (None, Some(bus)) => {
+                tracing::info!("usage meter: NATS (publishes to usage.>)");
+                Arc::new(quarry_runtime::NatsUsageMeter::from_bus(bus))
+            }
+            (None, None) => {
+                tracing::warn!(
+                    "usage meter: noop (no NATS) — billing-core will see no usage events"
+                );
+                Arc::new(quarry_runtime::NoopUsageMeter)
+            }
+        };
     // WS6.C-e: the gate in front of the meter applies QUARRY_EDGE__USAGE_BROWSER_METRICS to the
     // seven browser metrics (default off); every other event passes through unchanged.
     let browser_metrics = usage_attrs::browser_metrics_mode_from_env();
