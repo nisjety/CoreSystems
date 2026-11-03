@@ -308,5 +308,5 @@ Open items:
 - W2-AP-S7a: MP ask (nats.conf subscribe mp.v1.trace.run.*); listForOrg/rate leak browserActivity to every org member (high, fix before S7b); confirm Convex skips *.test.ts when bundling.
 - W2-CP-X9EVENT: inert until org-core main.go wiring (SetRetentionPostureReader, SetZDRSignal), audit-core provisioner consumer row, control-shared-nats.conf grants, compose flag.
 - W2-FE-GW1: `build_router` in apps/gateway/src/main.rs not yet merging `domains::api_key_agent::router` (left for an explicit wiring step; route-count pin may need ROUTE_BASELINE_UPDATE then); MP-3 key-grant door not built; in-memory run binding breaks with several replicas.
-- 51 depth lines appended to W23-depth.md (lanes a, b, c, d).
+- 45 depth rows appended to W23-depth.md (lanes a 10, b 13, c 12, d 10).
 - Four tracked .sha256 files in the integ worktree still show as modified (CRLF/LF checkout artifacts); none committed.
