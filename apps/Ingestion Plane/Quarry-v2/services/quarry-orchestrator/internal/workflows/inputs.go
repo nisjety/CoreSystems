@@ -115,7 +115,9 @@ func scrapeOptionsFromParams(params map[string]any) json.RawMessage {
 	return encoded
 }
 
-// BatchInputFromParams builds a BatchJobWF input from params.urls.
+// BatchInputFromParams builds a BatchJobWF input from params.urls. params.max_parallel,
+// when the job carries one, is the org's cap on the parallel batch (W3 E3.7.2); absent is
+// zero (no org cap) and leaves the input as it was.
 func BatchInputFromParams(params map[string]any, runID, jobID string) (BatchJobInput, error) {
 	urls := StringsFromParam(params["urls"])
 	if len(urls) == 0 {
@@ -130,6 +132,7 @@ func BatchInputFromParams(params map[string]any, runID, jobID string) (BatchJobI
 		URLs:           urls,
 		Robots:         stringFromParam(params["robots"]),
 		PolicySnapshot: policySnapshotFromParams(params),
+		MaxParallel:    UintFromParam(params["max_parallel"]),
 	}, nil
 }
 

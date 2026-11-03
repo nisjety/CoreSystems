@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -82,6 +83,11 @@ type BatchJobInput struct {
 	// PolicySnapshot is the web policy the edge resolved at the handoff (WS7.G 6b), carried to
 	// every page of the batch. Empty means the job was admitted without one.
 	PolicySnapshot json.RawMessage `json:"policy_snapshot,omitempty"`
+	// MaxParallel is the org's cap on how many pages of this batch run at a time
+	// (W3 E3.7.2). Zero means no org cap: the QUARRY_BATCH_PARALLEL flag and the hard
+	// ceiling still bound it. Omitted when zero, so an input built before it existed is
+	// byte-identical.
+	MaxParallel uint32 `json:"max_parallel,omitempty"`
 }
 
 // CrawlJobInput drives a bounded BFS crawl.
@@ -523,13 +529,21 @@ func ChangeMonitorWF(ctx workflow.Context, in ChangeMonitorInput, a *activities.
 	}, runID, string(quarrycontracts.EvtRunCompleted))
 }
 
-// BatchJobWF fans out page activities for each URL sequentially (bounded
-// concurrency is enforced by the runtime) and aggregates the result.
+// BatchJobWF fans out page activities for each URL and aggregates the result.
+// Without the parallel batch (below) the URLs run one after the other.
 //
 // From batch-control-v1 the batch takes the same control requests as a crawl:
 // pause holds it before the next URL (run_paused, then run_resumed), cancel ends
 // it before the next URL with run_cancelled. Executions recorded before that
 // version run to the end as they did.
+//
+// From batch-parallel-v1 (W3 E3.7.2) the batch reads QUARRY_BATCH_PARALLEL once,
+// through a recorded side effect, and with a value above 1 runs up to that many
+// pages at a time (an activity pool of workflow coroutines), capped by the org's
+// MaxParallel. Pause and cancel gate each new page as before; pages already
+// running finish. Results are aggregated in URL order, so the statistics and the
+// terminal counts do not depend on which page finished first. With the flag off
+// (the default) the batch runs the sequential loop it always ran.
 func BatchJobWF(ctx workflow.Context, in BatchJobInput, a *activities.Activities) error {
 	ctx = workflow.WithActivityOptions(ctx, defaultActivityOpts())
 	ids := runIDs{RunID: in.RunID, JobID: in.JobID}
@@ -549,12 +563,22 @@ func BatchJobWF(ctx workflow.Context, in BatchJobInput, a *activities.Activities
 		return err
 	}
 
-	var visited, failed, blocked, blockedRobots uint32
 	stats := newJobStatistics(workflow.Now(ctx))
-	cancelled := false
 	// WS14.S5: the batch context on each page and the blocked count. A history recorded before
 	// the marker runs as it did (no context, no blocked count).
 	checked := workflow.GetVersion(ctx, batchCheckVersion, workflow.DefaultVersion, 1) >= 1
+
+	// W3 E3.7.2: a history recorded before the marker never reads the flag and runs sequentially.
+	parallel := 0
+	if workflow.GetVersion(ctx, batchParallelVersion, workflow.DefaultVersion, 1) >= 1 {
+		parallel = batchParallelism(ctx, in.MaxParallel, len(in.URLs))
+	}
+	if parallel > 1 {
+		return batchJobParallel(ctx, a, in, ids, ctrl, stats, checked, parallel)
+	}
+
+	var visited, failed, blocked, blockedRobots uint32
+	cancelled := false
 	for i, url := range in.URLs {
 		if ctrl != nil {
 			remaining := uint32(len(in.URLs) - i)
@@ -586,30 +610,205 @@ func BatchJobWF(ctx workflow.Context, in BatchJobInput, a *activities.Activities
 		stats.recordPage(res)
 	}
 
+	return finishBatch(ctx, a, ids, in, stats, checked, cancelled, batchTally{
+		visited: visited, failed: failed, blocked: blocked, blockedRobots: blockedRobots,
+	})
+}
+
+// batchTally is the terminal count of a batch.
+type batchTally struct {
+	visited, failed, blocked, blockedRobots uint32
+}
+
+// finishBatch emits the batch's terminal event: run_cancelled when a cancel ended it
+// before every URL, run_completed otherwise. The sequential and the parallel batch
+// share it, so both end with the same payload shape.
+func finishBatch(
+	ctx workflow.Context,
+	a *activities.Activities,
+	ids runIDs,
+	in BatchJobInput,
+	stats *jobStatistics,
+	checked bool,
+	cancelled bool,
+	t batchTally,
+) error {
 	if cancelled {
 		cancelPayload := map[string]any{
-			"pages_visited": visited,
-			"pages_failed":  failed,
-			"pending":       uint32(len(in.URLs)) - visited - failed,
-			"statistics":    stats.payload(visited, failed, workflow.Now(ctx)),
+			"pages_visited": t.visited,
+			"pages_failed":  t.failed,
+			"pending":       uint32(len(in.URLs)) - t.visited - t.failed,
+			"statistics":    stats.payload(t.visited, t.failed, workflow.Now(ctx)),
 		}
 		if checked {
-			cancelPayload["pages_blocked"] = blocked
-			cancelPayload["pages_blocked_robots"] = blockedRobots
+			cancelPayload["pages_blocked"] = t.blocked
+			cancelPayload["pages_blocked_robots"] = t.blockedRobots
 		}
 		return emitEvent(ctx, a, ids, quarrycontracts.EvtRunCancelled, cancelPayload, in.RunID, string(quarrycontracts.EvtRunCancelled))
 	}
 
 	completed := map[string]any{
-		"pages_visited": visited,
-		"pages_failed":  failed,
-		"statistics":    stats.payload(visited, failed, workflow.Now(ctx)),
+		"pages_visited": t.visited,
+		"pages_failed":  t.failed,
+		"statistics":    stats.payload(t.visited, t.failed, workflow.Now(ctx)),
 	}
 	if checked {
-		completed["pages_blocked"] = blocked
-		completed["pages_blocked_robots"] = blockedRobots
+		completed["pages_blocked"] = t.blocked
+		completed["pages_blocked_robots"] = t.blockedRobots
 	}
 	return emitEvent(ctx, a, ids, quarrycontracts.EvtRunCompleted, completed, in.RunID, string(quarrycontracts.EvtRunCompleted))
+}
+
+// The parallel batch (W3 E3.7.2).
+const (
+	// batchParallelVersion is the GetVersion id of the parallel batch. Its id is kept in
+	// the order the markers were introduced, after batch-check-v1.
+	batchParallelVersion = "batch-parallel-v1"
+	// batchParallelFlag is the operator switch. Unset, 0, false or off is the sequential
+	// batch; true or on is batchParallelDefault pages at a time; a positive integer is that
+	// many, up to batchParallelHardMax.
+	batchParallelFlag = "QUARRY_BATCH_PARALLEL"
+	// batchParallelDefault is the concurrency when the flag is just switched on.
+	batchParallelDefault = 4
+	// batchParallelHardMax is the ceiling whatever the flag or the org says.
+	batchParallelHardMax = 16
+)
+
+// batchParallelEnv reads the flag. It is only called inside workflow.SideEffect, so a
+// replay reads the recorded value and never the worker's environment. A var so a test
+// can set the flag without touching the process environment.
+var batchParallelEnv = func() string { return os.Getenv(batchParallelFlag) }
+
+// parseBatchParallel turns the flag's text into a concurrency: 0 (off), or 1 up to
+// batchParallelHardMax. Anything it does not understand is off.
+func parseBatchParallel(raw string) int {
+	switch v := strings.ToLower(strings.TrimSpace(raw)); v {
+	case "", "0", "false", "off", "no":
+		return 0
+	case "true", "on", "yes":
+		return batchParallelDefault
+	default:
+		n, err := strconv.Atoi(v)
+		if err != nil || n <= 0 {
+			return 0
+		}
+		if n > batchParallelHardMax {
+			return batchParallelHardMax
+		}
+		return n
+	}
+}
+
+// effectiveBatchParallel caps the flag's concurrency by the org's limit (zero means no
+// org limit) and by the number of URLs. A result of 0 or 1 is the sequential batch.
+func effectiveBatchParallel(flag int, orgMax uint32, urls int) int {
+	n := flag
+	if orgMax > 0 && uint64(orgMax) < uint64(n) {
+		n = int(orgMax)
+	}
+	if n > urls {
+		n = urls
+	}
+	if n < 0 {
+		return 0
+	}
+	return n
+}
+
+// batchParallelism reads the flag once per execution as a recorded side effect and
+// returns the concurrency this batch runs with.
+func batchParallelism(ctx workflow.Context, orgMax uint32, urls int) int {
+	var flag int
+	encoded := workflow.SideEffect(ctx, func(workflow.Context) any {
+		return parseBatchParallel(batchParallelEnv())
+	})
+	if err := encoded.Get(&flag); err != nil {
+		return 0
+	}
+	return effectiveBatchParallel(flag, orgMax, urls)
+}
+
+// batchOutcome is the result slot of one URL of a parallel batch.
+type batchOutcome struct {
+	res activities.RunPageResult
+	err error
+}
+
+// batchJobParallel runs the batch's pages up to `limit` at a time. Each page runs in its
+// own workflow coroutine and writes its result into the slot of its URL; the terminal
+// counts and the statistics are then taken in URL order. Before each new page the batch
+// waits for a free slot and passes the control gate: a pause holds new pages (running
+// ones finish), a cancel launches no more and ends with run_cancelled once the running
+// pages are done.
+func batchJobParallel(
+	ctx workflow.Context,
+	a *activities.Activities,
+	in BatchJobInput,
+	ids runIDs,
+	ctrl *crawlControl,
+	stats *jobStatistics,
+	checked bool,
+	limit int,
+) error {
+	outcomes := make([]batchOutcome, len(in.URLs))
+	var visited, failed uint32
+	inFlight, launched := 0, 0
+	cancelled := false
+
+	for i, url := range in.URLs {
+		if err := workflow.Await(ctx, func() bool { return inFlight < limit }); err != nil {
+			return err
+		}
+		if ctrl != nil {
+			counts := map[string]any{
+				"pages_visited": visited,
+				"pages_failed":  failed,
+				"pending":       uint32(len(in.URLs)) - visited - failed,
+			}
+			if !controlGate(ctx, a, ids, ctrl, in.RunID, counts) {
+				cancelled = true
+				break
+			}
+		}
+		var crawl *activities.CrawlContext
+		if checked {
+			crawl = batchCrawlContext(in.Robots)
+		}
+		slot, pageURL := i, url
+		inFlight++
+		launched++
+		workflow.Go(ctx, func(gctx workflow.Context) {
+			res, err := runPageSnapshot(gctx, a, ids, in.OrgID, in.UserID, in.Ingest, "batch", pageURL, crawl, nil, in.PolicySnapshot)
+			outcomes[slot] = batchOutcome{res: res, err: err}
+			if err != nil {
+				failed++
+			} else {
+				visited++
+			}
+			inFlight--
+		})
+	}
+	if err := workflow.Await(ctx, func() bool { return inFlight == 0 }); err != nil {
+		return err
+	}
+
+	var t batchTally
+	for _, o := range outcomes[:launched] {
+		if o.err != nil {
+			if checked && errs.CategoryOf(o.err) == errs.CategoryBlocklist {
+				t.blocked++
+				if robotsRefused(o.err) {
+					t.blockedRobots++
+				}
+			}
+			t.failed++
+			stats.recordFailure(o.err)
+			continue
+		}
+		t.visited++
+		stats.recordPage(o.res)
+	}
+	return finishBatch(ctx, a, ids, in, stats, checked, cancelled, t)
 }
 
 // controlGate holds the workflow at a safe boundary while it is paused. It emits
