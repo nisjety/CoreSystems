@@ -1,0 +1,61 @@
+Live re-proof: Wave 1 zero data retention (ZDR) rows on main, on the developer stack
+Date: 2026-11-03 (UTC, 01:05 to 01:25). Branch `zdr-live-proof-wave1`, fast-forwarded to main 12534c248.
+Verification level: LIVE-VERIFIED on a developer stack. Not production. No secrets, tokens, tenant ids or payload
+content below. First proof: live-proof-wave1-zdr-2026-10-28.txt. Machine output: live-reads-zdr-2026-11-03.txt.
+Why again: model-plane and Space were merged into main, every plane was rebuilt from main on 2026-11-01, and
+model-gateway now decides ZDR through zdr_posture::decide_for (org_zdr and zdr_waiver claims) instead of
+Claims::effective_zdr. Nothing was rebuilt or restarted for this re-proof; every turn named claude-sonnet-5-5 and none
+reached a model.
+
+STACK AS FOUND
+  session-core, execution-core, model-gateway, inference-core: all at 91b9b8ddf ("merge: space into main"), which
+  contains the WS01-S7 code commit ae4f8b936 and the ZDR branch merge c325305bb (with the D1-815 fix 8689b1c43).
+  The live SPA on :5173 (the main checkout) serves the D1-815 fix. The ZDR-TEST account and org from 2026-10-28 are
+  still there (plan pro, ZDR off). Safety net: org_core dumped to C:/dev/backups/zdr-live-proof-2026-11-03 before the
+  seed wrote to it; no migration ran.
+
+VERDICTS
+  D1-220 HOLDS: the spec passes on main against the live SPA; the refusal is the same SSE `event: error` frame.
+  D1-221 HOLDS EXCEPT THE START ORDER: before/turns/after with zero delta on all seven counters; the preflight passes
+    5/6 and fails deploy-order only: the 2026-11-01 redeploy started model-gateway (23:23:46) before execution-core
+    (23:23:52). All four run the same revision, so the order is cosmetic here, but the runbook asks for it. An ordered
+    restart (model-gateway, then inference-core; no rebuild) was asked of the coordinating session and is not done.
+  D1-222 HOLDS: a non-ZDR org and the ZDR-TEST org with ZDR off are refused by the spec before sending; zero delta.
+  D1-223 not re-run (a DB harness test, resolved 2026-10-28).
+  D1-224 HOLDS: zdr-org-switch-gate.spec.ts with ZDR_GATE_LIVE_PATCH=1 3/3 on the live SPA; seed --apply ON and
+    --zdr false --apply OFF with the gateway's org-core credential.
+  D1-225 HOLDS: this file and live-reads-zdr-2026-11-03.txt; nothing in ZDR.md or the ledger needed changing.
+  D1-815 HOLDS on the live SPA: a default turn (no stored web-search preference) goes out with browse_web false.
+  D1-330 STILL BLOCKED: D1-327 is open (no written ZDR contract, no named reviewer) and no chat model in the live
+    catalogue lists `zdr` (both specs assert it); the signed candidate (D1-302, D1-307) does not exist either.
+  D1-813 STILL PRESENT: session_core's migration 1 checksum is still the CRLF rendering (450c6aa7...); the running
+    session-core boots because it was built from a checkout with CRLF working copies.
+
+RUN A: PREFLIGHT (01:09 UTC) -> 5/6, deploy-order FAIL (see D1-221). wave-revision, migrations 0044/0045 with
+  runs.retention_class, waiver minting off on all four, no waived run, no ZDR row in the audit outbox: PASS.
+RUN B: D1-224 GATE, ZDR OFF (live SPA :5173, 01:10-01:16 UTC) -> 3/3 pass on the second attempt.
+  First attempt: tests 1 and 2 failed on the cold :5173 dev server (the settings route had not been compiled since the
+  11-01 redeploy; one "socket hang up" on /api/v1/models through its proxy), test 3 passed. After opening
+  /settings/org-security and /chat once headless (nothing sent), all three passed.
+  Incident in that first attempt: Playwright printed the request headers of the failed request, including the ZDR-TEST
+  test account's session cookie. The session was signed out at once (the cookie now answers 401), the log files were
+  redacted, test-results was deleted, and every later run passes its output through a cookie redaction filter. It was a
+  test account on the local stack; no other credential was involved.
+RUN C: Z-60 PASS 1 (01:17-01:19 UTC). ZDR switched ON at 01:17:21, fresh sign-in after the 45 s posture cache.
+  Spec, ZDR_LIVE_TURN=1 ZDR_LIVE_TURN_MODEL=claude-sonnet-5-5 on :5173: ok, pass 1 refused with a typed code and
+    no streamed content.
+  Default web-search turn on :5173 (D1-815): Søk disabled with "Web search is not available with zero data retention
+    yet"; request browse_web false, tools []; stream HTTP 200 `event: error`, code zdr_unavailable, "... The request
+    was not sent to a model."; the page shows it.
+  inference-core: WARN "provider skipped: ZDR was required but is not verified for this deployment" (anthropic), once
+    per turn. model-gateway turn timing: outcome handed_off, route zdr_direct, provider_ms 0, model_rounds 0, both turns.
+  Counters (threads 1199, messages 3899, runs 2013, feedback_ratings 20, session_audit_outbox 5043, ZDR outbox rows 0,
+    mp:gw:cache:* keys 0): delta 0 on all seven. ZDR switched OFF again after the run.
+RUN D: D1-222 (01:19 UTC): as the e2e fixture account the spec stops at "this spec sends a turn only for a ZDR-TEST org"
+  (received "Verevon E2E Test"); as the ZDR-TEST owner with ZDR off at "the ZDR-TEST org must have ZDR on". Zero delta.
+
+FINAL STATE
+  Nothing rebuilt or restarted. ZDR-TEST org: ZDR off, plan pro. The test sessions opened for the runs are signed out.
+  Not run: the session-core zdr_receipt DB tests (D1-223) and the known main failures named by the coordinator
+  (model-gateway zdr_posture every_non_get_route_is_classified and no_raw_retention_claim_is_read_outside_the_named_
+  inventory); this re-proof does not depend on them and did not touch them.
