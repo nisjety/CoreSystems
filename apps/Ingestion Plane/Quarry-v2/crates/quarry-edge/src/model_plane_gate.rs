@@ -7,11 +7,15 @@
 //! error that names it. Nothing degrades silently: the feature's routes answer their unavailable
 //! response and make no Model Plane call.
 //!
-//! Today the shipped manifest grants quarry-edge no model-gateway request (`model-invoke` and
-//! `model-audio` are `granted: false`), so every feature is refused: Auth Core would answer each
-//! call with 403. Flipping the row's `granted` (with the registry grant) is the one change a feature
-//! needs before its switch can take effect. The org-bound, metered model path is a separate design
-//! (DEF-QB-T17-PART2) and is not in this module.
+//! Today every feature here is refused. `model-invoke` and `model-audio` are `granted: false`, so
+//! the gate keeps each switch off and Auth Core would answer each call with 403. Granting a row
+//! does not by itself open a path: the Model Plane gateway's `authorize_principal_route` closes
+//! `/v1/invoke` and `/v1/invoke/stream` to service principals whatever the registry says. The chat
+//! route a service may use is `POST /v1/ai/chat` with `models:invoke`, and the manifest notes name
+//! `model-extract` and `model-extract-inference` (granted since WS16.S2) as its two tokens. This
+//! gate still checks `model-invoke` for these features (see `ModelPlaneFeature::rows`), so it is
+//! stricter than the route it will use. The org-bound, metered lane is decision DR-15.1 (proposed,
+//! not built) and is not in this module.
 
 use quarry_runtime::service_tokens::token_request_manifest;
 
