@@ -543,6 +543,14 @@ Open and logged in the depth register: with the switch off the gRPC `ExitPlanMod
 
 **EP-14-S10.** '## 2026-11-03 - RoutingPolicy changes go through a candidate with a recorded evaluation (EP-14 S10, D9, D10)'. Status: built in wave mode behind SESSION_CORE_ROUTING_CANDIDATES_ENABLED and ROUTING_POLICY_PROMOTION_REQUIRED (both default off). The direct PUT is unchanged until D9 is decided. The candidate store keeps config as opaque JSON, so EP-13 roles ride unchanged.
 
+## 2026-11-03 - Wave-mode batch W3-07: decisions recorded by its slices
+
+**Status: built in wave mode (unit tests only; depth in the register).**
+
+**EP-8-S6.** "2026-11-03 EP-8 S6 (dark): One scope key: `scope` is the kind (closed CHECK, NOT VALID), `scope_id` the instance; Space memory is isolated, written only for shared-room threads with a Space decision and an audience stamp, deterministic extractor only, never mirrored to Letta; waived and ZDR refuse (D3=b, D4=a, D5=b, D11=refuse taken by default under the code-first order, pending owner ruling)."
+
+**EP-14-S6.** add the newest entry "Request snapshots are captured once, in inference-core, behind the provider call; a dropped write is counted, never silent (EP-14 D1, D2, D4 assumed by default; D13 waived = ZDR)", marked proposed/implemented-dark pending owner acceptance.
+
 ## 2026-10-21 - The reasoning-effort ladder lives in inference-core (WS11-S1)
 
 **Status: implemented (code only, inert).** The canonical ladder (`Level` Minimal..Max, `Wire`, a `support(family, model)` table with a per-row `verified_on`, `resolve` clamping to the nearest weaker supported level, `from_legacy_budget`, `allowance`, deployment aliases from `INFERENCE_CORE_EFFORT_MODEL_ALIASES`) lives in `inference-core/src/provider/effort.rs`; model-gateway derives only the requested level (WS11-S5) and never a per-provider shape. One owner, so the three per-path budget derivations (normal, ZDR, source validation) stop being three decisions. `InferRequest.reasoning_effort` and `ModelInfo.effort_levels` exist but no adapter reads them yet; the response-cache key now hashes the level, so a quick and a deep turn of one prompt cannot share an entry. Default applied (DEC-36, Q3): the provider ceiling rises by the per-level allowance (Low 1024 to Max 16384), total cap 32768, pending per-model measurement. Every support row is `verified_on = None` until the P0 live probe runs; the Anthropic split (budget through 4.6, adaptive from 4.7, unknown claude names adaptive) comes from the plan's cached claude-api reference, not a live check. A model with no declared row is treated as having no effort control, because an unsupported parameter is a 400 and an omitted one is a no-op.
