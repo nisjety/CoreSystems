@@ -48,6 +48,8 @@ on:
       # WS06-S10: the production-profile sandbox verification reads these.
       - "apps/Model Plane/scripts/verify-sandbox-isolation.sh"
       - "apps/Model Plane/scripts/verify-sandbox-production-profile.sh"
+      - "apps/Model Plane/scripts/tests/execution-core-limits-compose-contract-test.sh"
+      - "apps/Model Plane/scripts/tests/sandbox-production-profile-contract-test.sh"
       - "apps/Model Plane/deploy/seccomp-bwrap.json"
       - "apps/Model Plane/deploy/docker-compose.yml"
       - "apps/Model Plane/deploy/docker-compose.production.yml"
@@ -76,6 +78,8 @@ on:
       # WS06-S10: the production-profile sandbox verification reads these.
       - "apps/Model Plane/scripts/verify-sandbox-isolation.sh"
       - "apps/Model Plane/scripts/verify-sandbox-production-profile.sh"
+      - "apps/Model Plane/scripts/tests/execution-core-limits-compose-contract-test.sh"
+      - "apps/Model Plane/scripts/tests/sandbox-production-profile-contract-test.sh"
       - "apps/Model Plane/deploy/seccomp-bwrap.json"
       - "apps/Model Plane/deploy/docker-compose.yml"
       - "apps/Model Plane/deploy/docker-compose.production.yml"
@@ -277,6 +281,13 @@ jobs:
         working-directory: "."
     steps:
       - uses: actions/checkout@v7
+      # Text contracts (no docker): the compose limits the profile is read from (WS06-S7), and the
+      # numbers the script hard-codes against execution-core (WS06-S10). Run first, so a drift fails
+      # the job before an image is built.
+      - name: Sandbox limits contracts
+        run: |
+          bash "apps/Model Plane/scripts/tests/execution-core-limits-compose-contract-test.sh"
+          bash "apps/Model Plane/scripts/tests/sandbox-production-profile-contract-test.sh"
       - uses: docker/setup-buildx-action@v3
       - name: Build the execution-core image
         uses: docker/build-push-action@v6
