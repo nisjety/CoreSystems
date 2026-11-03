@@ -948,6 +948,20 @@ pub enum AgentAction {
         ref_id: String,
         approval_grant_id: String,
     },
+    /// E3.1-a (ADR-2a): fill a one-time code into an exact input from the
+    /// latest snapshot. The code is never on the wire, in either direction:
+    /// the caller names only the target and a fresh BrowserBroker approval for
+    /// the sensitive action `fill_otp`, and Quarry's executor reads the code
+    /// from the approved mail connection and inserts it through trusted input.
+    /// The approval is single use per live run, like [`Self::UploadRef`]. There
+    /// is no frame variant: a child-frame target fails closed. The edge refuses
+    /// this action (403) unless `QUARRY_EDGE__FILL_OTP` is on (default off).
+    FillOtpRef {
+        snapshot_id: String,
+        generation: u32,
+        ref_id: String,
+        approval_grant_id: String,
+    },
     Screenshot {
         full_page: bool,
     },
@@ -1149,6 +1163,61 @@ pub struct ExtractionUsage {
     pub input_tokens: u32,
     pub output_tokens: u32,
     pub cost_usd: f64,
+}
+
+#[cfg(test)]
+mod fill_otp_contract_tests {
+    use super::AgentAction;
+
+    #[test]
+    fn fill_otp_ref_roundtrips_with_the_snake_case_tag() {
+        let wire = r#"{"type":"fill_otp_ref","snapshot_id":"snap","generation":3,"ref_id":"@e4","approval_grant_id":"g1"}"#;
+        let action: AgentAction = serde_json::from_str(wire).unwrap();
+        match &action {
+            AgentAction::FillOtpRef {
+                snapshot_id,
+                generation,
+                ref_id,
+                approval_grant_id,
+            } => {
+                assert_eq!(snapshot_id, "snap");
+                assert_eq!(*generation, 3);
+                assert_eq!(ref_id, "@e4");
+                assert_eq!(approval_grant_id, "g1");
+            }
+            other => panic!("expected FillOtpRef, got {other:?}"),
+        }
+        let back: serde_json::Value = serde_json::to_value(&action).unwrap();
+        assert_eq!(
+            back,
+            serde_json::json!({
+                "type": "fill_otp_ref",
+                "snapshot_id": "snap",
+                "generation": 3,
+                "ref_id": "@e4",
+                "approval_grant_id": "g1",
+            })
+        );
+    }
+
+    #[test]
+    fn fill_otp_ref_carries_no_value_on_the_wire() {
+        // A caller that tries to send the code gets it dropped: the variant has
+        // no field for it, so it is neither kept nor echoed back.
+        let wire = r#"{"type":"fill_otp_ref","snapshot_id":"s","generation":1,"ref_id":"@e1","approval_grant_id":"g","value":"123456","code":"123456","text":"123456"}"#;
+        let action: AgentAction = serde_json::from_str(wire).unwrap();
+        let back = serde_json::to_string(&action).unwrap();
+        assert!(!back.contains("123456"), "{back}");
+        for key in ["\"value\"", "\"code\"", "\"text\""] {
+            assert!(!back.contains(key), "{key} in {back}");
+        }
+    }
+
+    #[test]
+    fn fill_otp_ref_requires_its_approval_grant() {
+        let missing = r#"{"type":"fill_otp_ref","snapshot_id":"s","generation":1,"ref_id":"@e1"}"#;
+        assert!(serde_json::from_str::<AgentAction>(missing).is_err());
+    }
 }
 
 #[cfg(test)]

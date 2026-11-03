@@ -77,6 +77,7 @@ pub(super) fn browser_action_name(action: &AgentAction) -> &'static str {
         AgentAction::FrameUploadRef { .. } => "frame_upload_ref",
         AgentAction::DownloadRef { .. } => "download_ref",
         AgentAction::FrameDownloadRef { .. } => "frame_download_ref",
+        AgentAction::FillOtpRef { .. } => "fill_otp_ref",
         AgentAction::Screenshot { .. } => "screenshot",
         AgentAction::Pdf => "pdf",
         AgentAction::Evaluate { .. } => "evaluate",
@@ -277,6 +278,8 @@ pub(super) fn estimated_action_cost_usd(action: &AgentAction) -> f64 {
         AgentAction::FrameUploadRef { .. } => "type",
         AgentAction::DownloadRef { .. } => "download_ref",
         AgentAction::FrameDownloadRef { .. } => "frame_download_ref",
+        // E3.1-a: one trusted-input fill, priced like the other typed inputs.
+        AgentAction::FillOtpRef { .. } => "type",
         AgentAction::Screenshot { .. } => "screenshot",
         AgentAction::Pdf => "pdf",
         AgentAction::Evaluate { .. } => "evaluate",

@@ -93,6 +93,8 @@ fn classify(action: &AgentAction) -> (ActionClass, &'static str) {
         AgentAction::FrameUploadRef { .. } => (C::Upload, "frame_upload_ref"),
         AgentAction::DownloadRef { .. } => (C::Download, "download_ref"),
         AgentAction::FrameDownloadRef { .. } => (C::Download, "frame_download_ref"),
+        // E3.1-a: typing a one-time code is an input action on the page.
+        AgentAction::FillOtpRef { .. } => (C::Input, "fill_otp_ref"),
         AgentAction::Screenshot { .. } => (C::Observation, "screenshot"),
         AgentAction::Pdf => (C::Observation, "pdf"),
         AgentAction::Evaluate { .. } => (C::Script, "evaluate"),

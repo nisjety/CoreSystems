@@ -229,6 +229,10 @@ impl ObservationRunner {
                 "the file was attached to the exact input, but the page has not confirmed submission",
             ),
             AgentAction::DownloadRef { .. } | AgentAction::FrameDownloadRef { .. } => ActionOutcome::verified("download_captured_as_artifact"),
+            AgentAction::FillOtpRef { .. } => ActionOutcome::unknown(
+                "postcondition_required",
+                "the one-time code was inserted, but the page has not confirmed sign-in",
+            ),
             AgentAction::Click { .. }
             | AgentAction::ClickRef { .. }
             | AgentAction::FrameClickRef { .. }
@@ -276,7 +280,8 @@ impl ObservationRunner {
             | AgentAction::UploadRef { .. }
             | AgentAction::FrameUploadRef { .. }
             | AgentAction::DownloadRef { .. }
-            | AgentAction::FrameDownloadRef { .. } => {
+            | AgentAction::FrameDownloadRef { .. }
+            | AgentAction::FillOtpRef { .. } => {
                 return Err(QuarryError::new(
                     ErrorCode::TargetRepairRequired,
                     "snapshot actions require ObservationContext target resolution",
@@ -588,6 +593,15 @@ impl ObservationRunner {
                             bytes.to_vec(),
                         )
                         .await?;
+                }
+                AgentAction::FillOtpRef { .. } => {
+                    // E3.1-a: the contract exists, the executor does not yet (E3.1-c
+                    // preconditions, E3.1-d OtpSource). Fail closed before any driver
+                    // call; the edge already refuses it while QUARRY_EDGE__FILL_OTP is off.
+                    return Err(QuarryError::new(
+                        ErrorCode::Unsupported,
+                        "fill_otp_ref has no executor on this runtime",
+                    ));
                 }
                 AgentAction::Evaluate { .. } => {
                     // Raw script is refused before any driver call. The edge
