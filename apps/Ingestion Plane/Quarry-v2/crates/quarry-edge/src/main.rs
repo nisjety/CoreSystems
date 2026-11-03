@@ -940,17 +940,101 @@ async fn run() -> anyhow::Result<()> {
 
     // WS17.E3: the erasure families the internal purge route walks. Profiles first;
     // the rows live in the durable table, so this needs the Postgres blob store.
-    let org_erasables: Vec<Arc<dyn quarry_runtime::org_erasure::OrgErasable>> = match erasure_blobs {
-        Some(blobs) => vec![Arc::new(
-            quarry_runtime::org_erasure::ProfileErasure::connect(
-                blobs,
-                profile_plan.keys.clone(),
-                cfg.redis_url.as_deref(),
-            )
-            .await,
-        )],
-        None => Vec::new(),
-    };
+    // W2-U41a: the families beyond profiles (QUARRY_ORG_ERASURE_FAMILIES, none by
+    // default), the profile tombstone guard (D2-077, off by default) and the
+    // backfill release gate for migration 0017 (QUARRY_PROFILE_BACKFILL_GATE, off).
+    let erasure_families = quarry_runtime::org_erasure::FamilySelection::parse(
+        std::env::var(quarry_runtime::org_erasure::FAMILIES_ENV)
+            .ok()
+            .as_deref(),
+    )
+    .map_err(|name| {
+        anyhow::anyhow!(
+            "{}: unknown erasure family {name:?}",
+            quarry_runtime::org_erasure::FAMILIES_ENV
+        )
+    })?;
+    let erasure_tombstone_guard = quarry_runtime::org_erasure::flag_on(
+        std::env::var(quarry_runtime::org_erasure::PROFILE_TOMBSTONE_GUARD_ENV)
+            .ok()
+            .as_deref(),
+    );
+    let backfill_gate = quarry_runtime::profile_backfill::ReleaseGateMode::parse(
+        std::env::var(quarry_runtime::profile_backfill::RELEASE_GATE_ENV)
+            .ok()
+            .as_deref(),
+    )
+    .ok_or_else(|| {
+        anyhow::anyhow!(
+            "{} must be off, observe or enforce",
+            quarry_runtime::profile_backfill::RELEASE_GATE_ENV
+        )
+    })?;
+    if let Some(blobs) = erasure_blobs.as_deref() {
+        quarry_runtime::profile_backfill::check_release_gate(
+            blobs,
+            backfill_gate,
+            profile_plan.mode == quarry_runtime::envelope_profile_store::EncryptionMode::On,
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("{}", e.message))?;
+    }
+    #[allow(unused_mut)]
+    let mut org_erasables: Vec<Arc<dyn quarry_runtime::org_erasure::OrgErasable>> =
+        match erasure_blobs {
+            Some(blobs) => vec![Arc::new(
+                quarry_runtime::org_erasure::ProfileErasure::connect(
+                    blobs,
+                    profile_plan.keys.clone(),
+                    cfg.redis_url.as_deref(),
+                )
+                .await
+                .with_tombstone_guard(erasure_tombstone_guard),
+            )],
+            None => Vec::new(),
+        };
+    #[cfg(feature = "postgres-queue")]
+    {
+        if !erasure_families.is_empty() {
+            match cfg.database_url.as_deref().filter(|s| !s.is_empty()) {
+                Some(dsn) => match sqlx::postgres::PgPool::connect(dsn).await {
+                    Ok(pool) => org_erasables.extend(
+                        quarry_runtime::org_erasure::PgTableErasure::families(
+                            &pool,
+                            &erasure_families,
+                        ),
+                    ),
+                    Err(_) => tracing::warn!(
+                        "org erasure: database connect failed; table families not registered"
+                    ),
+                },
+                None => {
+                    tracing::warn!("org erasure: no database_url; table families not registered")
+                }
+            }
+        }
+    }
+    if erasure_families.includes(quarry_runtime::org_erasure::ARTIFACTS_FAMILY) {
+        match artifact_backend.as_str() {
+            "fs" | "filesystem" => org_erasables.push(Arc::new(
+                quarry_runtime::org_erasure::ArtifactErasure::filesystem(&cfg.artifact_root),
+            )),
+            "s3" => {
+                if let Some(bucket) = cfg.s3_bucket.clone() {
+                    org_erasables.push(Arc::new(
+                        quarry_runtime::org_erasure::ArtifactErasure::s3_from_env(bucket).await,
+                    ));
+                }
+            }
+            _ => tracing::info!("org erasure: in-memory artifacts; artifact family not registered"),
+        }
+    }
+    if !erasure_families.is_empty() {
+        tracing::info!(
+            families = org_erasables.len(),
+            "org erasure: families registered (route scope=org)"
+        );
+    }
     // P0 action proof. A production agent must not report readiness while
     // receipts would disappear with the edge process. The durable store uses
     // the same migration set as the queue/history stores and enforces org_id

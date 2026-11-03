@@ -12,6 +12,9 @@
 //! an error, so no row is left half-done by a silent skip. After the rows, the
 //! legacy plaintext cache keys are unlinked, because they hold the same
 //! snapshots in Redis. The envelope cache keys (`quarry:profile:v2:*`) are kept.
+//!
+//! W2-U41a: `check_release_gate` is the boot-time release gate for migration
+//! 0017 (`RELEASE_GATE_ENV`, off by default).
 
 use std::time::Duration;
 
@@ -172,6 +175,101 @@ pub async fn run_backfill(
     Ok(report)
 }
 
+// ---------------------------------------------------------------------------
+// W2-U41a: the E3 release gate for migration 0017 (D2-077).
+//
+// Migration 0017 clears the legacy column only beside an envelope and adds a
+// NOT VALID check, so it never removes the only copy of a snapshot. What it
+// cannot prove is that the backfill ran: a plaintext row can still be left. The
+// release that turns profile encryption `on` must not ship while one is. This
+// gate asks the store for one plaintext row at boot. `observe` logs the result;
+// `enforce` refuses to boot in `on` mode while a plaintext row is left. Off by
+// default, and in `off` or `compat` mode `enforce` only logs.
+// ---------------------------------------------------------------------------
+
+/// Env flag for the release gate: `off` (default), `observe` or `enforce`.
+pub const RELEASE_GATE_ENV: &str = "QUARRY_PROFILE_BACKFILL_GATE";
+
+/// How the boot treats the release gate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ReleaseGateMode {
+    #[default]
+    Off,
+    Observe,
+    Enforce,
+}
+
+impl ReleaseGateMode {
+    /// Parse [`RELEASE_GATE_ENV`]. Unset or empty is `off`; an unknown value is
+    /// `None`, and boot refuses it rather than guessing.
+    pub fn parse(raw: Option<&str>) -> Option<Self> {
+        match raw.unwrap_or("").trim().to_ascii_lowercase().as_str() {
+            "" | "off" => Some(Self::Off),
+            "observe" => Some(Self::Observe),
+            "enforce" => Some(Self::Enforce),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Observe => "observe",
+            Self::Enforce => "enforce",
+        }
+    }
+}
+
+/// What the gate saw. Counts only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReleaseGateReport {
+    /// Plaintext rows seen by the probe (0 or 1: the probe reads one row).
+    pub plaintext_rows_seen: u64,
+    /// No plaintext row is left: the backfill is complete.
+    pub passed: bool,
+}
+
+/// Probe for one plaintext row. A pass means the backfill left no row.
+pub async fn release_gate(blobs: &dyn ProfileBlobStore) -> QuarryResult<ReleaseGateReport> {
+    let page = blobs.plaintext_page(None, 1).await?;
+    Ok(ReleaseGateReport {
+        plaintext_rows_seen: page.len() as u64,
+        passed: page.is_empty(),
+    })
+}
+
+/// Apply the gate at boot. `encryption_on` is true when the profile encryption
+/// mode is `on` (the mode that 0017's header calls the no-rollback release).
+/// Returns `Ok(None)` when the gate is off, the report otherwise, and an error
+/// only in `enforce` mode with `encryption_on` and a plaintext row left.
+pub async fn check_release_gate(
+    blobs: &dyn ProfileBlobStore,
+    mode: ReleaseGateMode,
+    encryption_on: bool,
+) -> QuarryResult<Option<ReleaseGateReport>> {
+    if mode == ReleaseGateMode::Off {
+        return Ok(None);
+    }
+    let report = release_gate(blobs).await?;
+    if report.passed {
+        tracing::info!(gate = mode.as_str(), "profile backfill gate: no plaintext row left");
+        return Ok(Some(report));
+    }
+    if mode == ReleaseGateMode::Enforce && encryption_on {
+        return Err(QuarryError::new(
+            ErrorCode::RuntimeNotReady,
+            "profile backfill gate: plaintext profile rows are left; run profiles_backfill \
+             before profile encryption `on` (docs/RUNBOOKS.md, WS17.E3)",
+        ));
+    }
+    tracing::warn!(
+        gate = mode.as_str(),
+        encryption_on,
+        "profile backfill gate: plaintext profile rows are left; run profiles_backfill"
+    );
+    Ok(Some(report))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -311,5 +409,54 @@ mod tests {
         assert_eq!(exists(legacy.clone()).await, 0, "legacy plaintext key unlinked");
         assert_eq!(exists(v2.clone()).await, 1, "envelope cache key is kept");
         let _: u64 = redis::cmd("UNLINK").arg(&v2).query_async(&mut conn).await.unwrap();
+    }
+
+    #[test]
+    fn release_gate_mode_parses() {
+        assert_eq!(ReleaseGateMode::parse(None), Some(ReleaseGateMode::Off));
+        assert_eq!(ReleaseGateMode::parse(Some(" ")), Some(ReleaseGateMode::Off));
+        assert_eq!(ReleaseGateMode::parse(Some("Observe")), Some(ReleaseGateMode::Observe));
+        assert_eq!(ReleaseGateMode::parse(Some("enforce")), Some(ReleaseGateMode::Enforce));
+        assert_eq!(ReleaseGateMode::parse(Some("required")), None);
+    }
+
+    /// The gate fails while a plaintext row is left, refuses boot only in
+    /// `enforce` with encryption `on`, and passes once the backfill ran.
+    #[tokio::test]
+    async fn release_gate_blocks_on_until_the_backfill_ran() {
+        let store = InMemoryBlobStore::new();
+        let keys = keys();
+        store
+            .put("org_gate", &ProfileKind::new(), legacy_payload(), &meta_now())
+            .await
+            .unwrap();
+
+        assert_eq!(
+            check_release_gate(&store, ReleaseGateMode::Off, true).await.unwrap(),
+            None
+        );
+        let seen = release_gate(&store).await.unwrap();
+        assert_eq!(seen.plaintext_rows_seen, 1);
+        assert!(!seen.passed);
+        let observe = check_release_gate(&store, ReleaseGateMode::Observe, true)
+            .await
+            .unwrap()
+            .expect("report");
+        assert!(!observe.passed, "observe reports and never refuses");
+        assert!(check_release_gate(&store, ReleaseGateMode::Enforce, false)
+            .await
+            .is_ok(), "enforce in compat or off mode only logs");
+        let err = check_release_gate(&store, ReleaseGateMode::Enforce, true)
+            .await
+            .expect_err("enforce with encryption on refuses");
+        assert_eq!(err.code, ErrorCode::RuntimeNotReady);
+
+        run_backfill(&store, &keys, None, no_pause(10)).await.expect("backfill");
+        let after = check_release_gate(&store, ReleaseGateMode::Enforce, true)
+            .await
+            .unwrap()
+            .expect("report");
+        assert!(after.passed);
+        assert_eq!(after.plaintext_rows_seen, 0);
     }
 }

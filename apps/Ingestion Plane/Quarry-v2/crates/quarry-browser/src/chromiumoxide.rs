@@ -92,8 +92,8 @@ use crate::slots::{
     SlotStatus,
 };
 use crate::tab_control::{
-    addressed_tab_id, resolve_tab_egress_policy, visible_through_pin, OpenTabOptions,
-    PINNED_TAB_CLOSED_REASON,
+    addressed_tab_id, keeps_tab_on_navigation_failure, resolve_tab_egress_policy,
+    timed_out_open_error, visible_through_pin, OpenTabOptions, PINNED_TAB_CLOSED_REASON,
 };
 use crate::{
     BrowserDevtoolsEvent, BrowserDownloadedFile, BrowserDriver, BrowserDriverCapabilities,
@@ -1527,20 +1527,37 @@ impl ChromiumoxideDriver {
             FirstNavigation::InAttach => initial_url,
             FirstNavigation::ByCaller | FirstNavigation::Placeholder => "about:blank",
         };
+        // W2-U07: an `open_tab` whose navigation times out keeps its tab. The navigation is
+        // abandoned, not the tab: it is stopped here, so the tab is readable; it is marked
+        // when the tab is registered below, so the tab's next `goto` drains it (SC4 T3); and
+        // the caller gets the tab's id with the typed timeout. Any other failure closes the
+        // tab, as before.
+        let mut timed_out: Option<QuarryError> = None;
+        let mut stopped = false;
         if committed_url != "about:blank" {
             // No recovery here: a tab whose first navigation fails is closed by the
             // attach guard, abandoned navigation and all. A refused one fails at once
             // (SC4 D3), not at the navigate deadline.
-            goto_watched(
+            if let Err(error) = goto_watched(
                 &self.navigation_watches,
                 &page,
                 committed_url,
                 deadline(Op::Navigate),
             )
-            .await?;
+            .await
+            {
+                if first_navigation != FirstNavigation::InAttach
+                    || !keeps_tab_on_navigation_failure(error.code)
+                {
+                    return Err(error);
+                }
+                stopped = stop_abandoned_navigation(&page, deadline(Op::NavigateRecovery)).await;
+                timed_out = Some(error);
+            }
         }
-        // The bridge is per document: the caller's navigation installs it on its own.
-        if committed_url == initial_url {
+        // The bridge is per document: the caller's navigation installs it on its own. A
+        // timed-out navigation has no committed document to install it on, as in `goto`.
+        if committed_url == initial_url && timed_out.is_none() {
             install_popup_bridge(&page).await?;
         }
 
@@ -1549,7 +1566,7 @@ impl ChromiumoxideDriver {
         if let Some(error) = self.not_admitted_error(&session_key) {
             return Err(error);
         }
-        let session_pages = pages.entry(session_key).or_default();
+        let session_pages = pages.entry(session_key.clone()).or_default();
         if let Some(context_id) = attach.context.take() {
             session_pages.browser_context_id = Some(context_id);
             session_pages.download_dir = attach.download_dir.take();
@@ -1573,8 +1590,27 @@ impl ChromiumoxideDriver {
         if activate || session_pages.active_tab_id.is_none() {
             session_pages.active_tab_id = Some(tab_id.clone());
         }
+        if timed_out.is_some() {
+            // Marked in the same step as the tab, so no `goto` finds the tab unmarked. The
+            // mark goes with the tab (`forget_abandoned_navigations`, when it closes).
+            self.abandoned_navigations
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .insert(page.target_id().clone());
+        }
         attach.disarm();
-        Ok((tab_id, page))
+        drop(pages);
+        let Some(error) = timed_out else {
+            return Ok((tab_id, page));
+        };
+        // The kept tab's metadata and the cached frame follow it, as a `goto` that stopped
+        // its navigation does.
+        if stopped {
+            self.update_tab_metadata(&session_key, &tab_id, &page).await;
+        }
+        let owner = self.admission(session);
+        self.invalidate_live_frame_cache(session, owner).await;
+        Err(timed_out_open_error(&tab_id, error))
     }
 
     /// Count a page against the session's slot, or say why it cannot open:
@@ -2497,7 +2533,8 @@ fn chromium_launch_dirs_in(root: &Path) -> std::io::Result<ChromiumLaunchDirs> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum FirstNavigation {
     /// The attach, before the tab is committed: a tab whose navigation fails is closed
-    /// and the caller gets no tab (`open_tab`, which answers with the tab it made).
+    /// and the caller gets no tab (`open_tab`). A TIMEOUT keeps the tab instead, and the
+    /// caller gets the typed timeout with its id (W2-U07).
     InAttach,
     /// The caller, once the tab is committed on `about:blank`: a navigation that times
     /// out leaves the tab as any later one does, readable and drained at the next `goto`
@@ -5248,6 +5285,8 @@ impl BrowserDriver for ChromiumoxideDriver {
         .await
     }
 
+    /// A navigation that times out keeps the tab it opened (W2-U07): the error is the typed
+    /// navigate TIMEOUT with `details.tab_id`, and the tab is listed and readable.
     async fn open_tab(
         &self,
         session: &BrowserSession,
@@ -9556,6 +9595,81 @@ mod tests {
         let _ = best_effort(Op::PageClose, page.close()).await;
         driver.shutdown().await;
         silent_task.abort();
+    }
+
+    /// W2-U07 against a real Chromium: an `open_tab` whose navigation hangs ends in the typed
+    /// navigate TIMEOUT and keeps its tab. The error names the tab (`details.tab_id`, never
+    /// the URL), the tab is listed and active, its abandoned navigation is marked, and the
+    /// tab's next `goto` drains it and navigates. Slow: the navigate deadline is 25 s, and the
+    /// URL guard looks the host up, so `example.com` must resolve to a public address.
+    #[tokio::test]
+    #[ignore = "W2-U07 live lane, slow (25 s): needs Chromium (CHROMIUMOXIDE_TEST=1) and a public DNS answer for example.com"]
+    async fn a_timed_out_open_tab_keeps_its_tab_and_names_it() {
+        if !live_enabled() {
+            return;
+        }
+        let (endpoint, proxy_task) = fixture_proxy().await;
+        let driver = ChromiumoxideDriver::new()
+            .with_pinned_egress_proxy(Arc::new(FixtureProxyProvider(endpoint)))
+            .with_pool_config(quiet_pool());
+        let session = driver
+            .acquire(&make_lease_with_key("w2-u07-open"))
+            .await
+            .expect("acquire");
+        driver
+            .configure_egress_policy(
+                &session,
+                BrowserEgressPolicy::from_allowed_domains(&["example.com".to_owned()]),
+            )
+            .await
+            .expect("allow example.com");
+
+        let started = Instant::now();
+        let error = driver
+            .open_tab(
+                &session,
+                OpenTabOptions {
+                    url: Some("http://example.com/slow.html".to_owned()),
+                    activate: true,
+                    egress_policy: None,
+                },
+            )
+            .await
+            .expect_err("the held navigation times out");
+        let waited = started.elapsed();
+        assert_eq!(error.code, ErrorCode::Timeout, "{error:?}");
+        assert!(!error.retryable, "{error:?}");
+        assert!(waited < Duration::from_secs(40), "{waited:?}");
+        let details = error.details.clone().expect("details");
+        assert_eq!(details["op"], "navigate");
+        assert_eq!(details["effect"], "unknown");
+        assert!(!details.to_string().contains("example.com"), "{details}");
+        let tab_id = details["tab_id"].as_str().expect("the tab id").to_owned();
+
+        let tabs = driver.list_tabs(&session).await.expect("tabs");
+        assert!(
+            tabs.iter().any(|tab| tab.tab_id == tab_id && tab.active),
+            "the timed-out tab is kept and active: {tabs:?}"
+        );
+        assert_eq!(
+            abandoned_count(&driver),
+            1,
+            "the abandoned navigation is marked"
+        );
+
+        let started = Instant::now();
+        driver
+            .goto(&session, "http://example.com/next.html")
+            .await
+            .expect("the next navigation drains the abandoned one");
+        let next_step = started.elapsed();
+        eprintln!("next step took {next_step:?} after a timed-out open_tab");
+        assert!(next_step < Duration::from_secs(8), "{next_step:?}");
+        assert!(page_html(&driver, &session).await.contains("sc4-next-page"));
+        assert_eq!(abandoned_count(&driver), 0, "the drain takes the mark");
+        driver.release(session).await.expect("release");
+        driver.shutdown().await;
+        proxy_task.abort();
     }
 
     /// The end-to-end loopback-egress proof lives in
