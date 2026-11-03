@@ -126,6 +126,11 @@ const NOT_CONVERTED: Record<string, { sites: number; reason: string }> = {
     reason:
       "shows the integration's own sentence for an integration_error on purpose (the library-picker test pins it); translateApiError has no copy for that code by design, so a conversion would hide it",
   },
+  'features/spaces/components/SpaceFilesPanel.tsx': {
+    sites: 1,
+    reason:
+      'a listed upload failure: `failure.message` is already translateApiError output (per item, from the failed item code), not a raw error; the name `failure` is the heuristic reading it as one',
+  },
   'features/spaces/components/SpaceRoomComposer.tsx': {
     sites: 1,
     reason: `${UNREVIEWED} (the abort or failure of a send; the streamed send moved to the send pipeline)`,

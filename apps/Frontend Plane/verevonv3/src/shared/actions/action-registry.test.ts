@@ -566,7 +566,9 @@ describe('action registry', () => {
     // domains (job_control, start_agent_run, create_monitor, delete_monitor).
     expect(ids).toHaveLength(240)
 
-    const spaceIds = ids.filter((id) => id.startsWith('spaces.'))
+    // The Space block is every `spaces.*` and `space.*` id: the Space files actions use the singular prefix,
+    // and they sit inside the block in fragment order.
+    const spaceIds = ids.filter((id) => /^spaces?\./.test(id))
     const first = ids.indexOf(spaceIds[0] as string)
     expect(ids.slice(first, first + spaceIds.length)).toEqual(spaceIds)
 
@@ -587,8 +589,9 @@ describe('action registry', () => {
       'spaces.add_member',
       'spaces.remove_member',
     ])
-    // The later workstream fragments follow them in fragment order (ws01, ws03, ws04).
-    expect(spaceIds.slice(14)).toEqual([
+    // The later workstream fragments follow them in fragment order (ws01, ws03, ws04). Later fragments keep
+    // adding entries after these (main did), so the order is checked on these seven, not on the whole tail.
+    const laterFragments = [
       'spaces.create_post',
       'spaces.reply_in_thread',
       'spaces.set_effect_entitlements',
@@ -596,6 +599,7 @@ describe('action registry', () => {
       'spaces.update_room_details',
       'spaces.change_member_role',
       'spaces.leave_room',
-    ])
+    ]
+    expect(spaceIds.slice(14).filter((id) => laterFragments.includes(id))).toEqual(laterFragments)
   })
 })

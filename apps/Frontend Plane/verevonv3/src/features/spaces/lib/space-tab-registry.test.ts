@@ -9,7 +9,8 @@ afterEach(() => {
 describe('space tab registry (P-SPA1)', () => {
   it('lists the room tabs in their fixed order with unique ids', () => {
     const ids = SPACE_TABS.map((tab) => tab.id)
-    expect(ids).toEqual(['chat', 'arbeid', 'kunnskap', 'artefakter', 'aktivitet', 'agent', 'medlemmer'])
+    // Filer (the Space files tab) sits after the artefakter tab, as main added it.
+    expect(ids).toEqual(['chat', 'arbeid', 'kunnskap', 'artefakter', 'filer', 'aktivitet', 'agent', 'medlemmer'])
     expect(new Set(ids).size).toBe(ids.length)
     expect(DEFAULT_SPACE_TAB).toBe('chat')
   })
