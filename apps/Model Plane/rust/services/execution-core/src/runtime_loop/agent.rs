@@ -697,6 +697,10 @@ struct LoopContext<'a> {
     /// on the struct rather than root-only avoids a second, parallel context
     /// shape for depth-1 loops.
     child_ceiling: u32,
+    /// The roles a `subagent.task` call may name (EP-6 S10, [`run_subagent_roles`]):
+    /// `None` with `EXECUTION_CORE_SUBAGENT_ROLES` off. A delegated child holds `None`:
+    /// it cannot delegate.
+    subagent_roles: Option<&'a [pb::AgentRoleSpec]>,
     /// The instant after which no loop of this run starts another round
     /// (`run_budget::RunDeadline`): the operator's wall clock and, for a run
     /// pinned to the ChatGPT subscription, the run's own credentials' expiry.
@@ -1945,6 +1949,18 @@ async fn run_agent_with_route_parkable(
     };
     let permission_wire = mode_wire(mode);
 
+    // Agent roles for `subagent.task` (EP-6 S10). Offering the parameter changes the
+    // definition, so a run that offers it is not parkable: a park resume derives the
+    // base set alone.
+    let subagent_roles = run_subagent_roles(
+        subagent_roles_enabled(),
+        &req,
+        route.is_waived(),
+        scheduled.is_some(),
+        resumed.is_some(),
+    );
+    let derivable = derivable && !offer_subagent_roles(&mut tools, subagent_roles.unwrap_or(&[]));
+
     // Purpose-lock: the offered allowlist IS the scope lock. Tool calls outside
     // it are rejected, never dispatched.
     let allowlist: BTreeSet<String> = tools.iter().map(|t| t.name.clone()).collect();
@@ -2046,6 +2062,7 @@ async fn run_agent_with_route_parkable(
         depth: 0,
         step_prefix: resumed.as_ref().map_or_else(String::new, |r| r.step_prefix.clone()),
         child_ceiling,
+        subagent_roles,
         deadline,
         usage: UsageTally::default(),
         result_store: result_store.clone(),
@@ -5279,6 +5296,7 @@ impl LoopSubagentDispatch<'_, '_> {
                         budget,
                         pb::SubagentRole::Researcher,
                         Some(batch_id),
+                        None,
                     )
                     .await;
                     consumed.fetch_add(rounds, std::sync::atomic::Ordering::Relaxed);
@@ -5309,6 +5327,205 @@ impl LoopSubagentDispatch<'_, '_> {
 /// item it spawns records `SubagentRole::Researcher` instead, see
 /// `LoopSubagentDispatch::spawn_research_fan_out`.
 const SUBAGENT_LINEAGE_ROLE: pb::SubagentRole = pb::SubagentRole::Generic;
+
+/// The switch for `subagent.task`'s `role` parameter (EP-6 S10). Off, the run's
+/// `RunContext.agent_roles` is ignored, the parameter is not offered and a `role`
+/// key in a call is ignored as before: a run is exactly what it was.
+const SUBAGENT_ROLES_ENV: &str = "EXECUTION_CORE_SUBAGENT_ROLES";
+
+/// At most this many roles in one run's catalogue; a longer one is dropped whole.
+const MAX_SUBAGENT_ROLES: usize = 8;
+
+/// A role's instructions are seeded into the child's prompt, so they are bounded.
+const MAX_ROLE_INSTRUCTIONS_BYTES: usize = 4_096;
+
+/// A role's `agent_ref` ends up in the child run's `agent_id` (session-core: 256 bytes).
+const MAX_AGENT_REF_BYTES: usize = 128;
+
+/// The WS25-S6 mode vocabulary a role's autonomy cap may name (empty: none stated).
+const ROLE_AUTONOMY_CAPS: &[&str] = &["", "read_only", "ask_first", "auto"];
+
+/// Whether the role switch is on: only the literal `true` enables it.
+fn subagent_roles_enabled() -> bool {
+    subagent_roles_enabled_with(std::env::var(SUBAGENT_ROLES_ENV).ok().as_deref())
+}
+
+fn subagent_roles_enabled_with(value: Option<&str>) -> bool {
+    value.is_some_and(|value| value.trim() == "true")
+}
+
+/// One catalogue entry the loop will honour. The gateway already bounds the
+/// catalogue; it is checked again here because execution-core is the service that
+/// seeds the child with it, and a malformed entry must not reach a prompt or a
+/// durable `agent_id`.
+fn valid_role(role: &pb::AgentRoleSpec) -> bool {
+    !role.agent_ref.is_empty()
+        && role.agent_ref.len() <= MAX_AGENT_REF_BYTES
+        && role
+            .agent_ref
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b':'))
+        && role.version >= 1
+        && role.instructions.len() <= MAX_ROLE_INSTRUCTIONS_BYTES
+        && !role.name.chars().any(char::is_control)
+        && ROLE_AUTONOMY_CAPS.contains(&role.autonomy_cap.as_str())
+}
+
+/// The roles this run's `subagent.task` calls may name, or `None` with the switch
+/// off (a `role` key is then ignored, as it always was).
+///
+/// With the switch on the catalogue is honoured only for a fresh, interactive run
+/// that keeps content: never for a ZDR or waived run (Do and delegation are refused
+/// there anyway), a scheduled run (DEC-16: its contract fixes its tools) or a
+/// continuation (the gateway sends no run context for one). Those runs get an
+/// empty catalogue, so a `role` is a tool error, never a fallback to the wider set.
+/// A catalogue that breaks any bound is dropped whole rather than trimmed, so the
+/// model is never offered part of what the gateway composed.
+fn run_subagent_roles<'r>(
+    enabled: bool,
+    req: &'r pb::RunAgentRequest,
+    waived: bool,
+    scheduled: bool,
+    continuing: bool,
+) -> Option<&'r [pb::AgentRoleSpec]> {
+    if !enabled {
+        return None;
+    }
+    if req.zdr || waived || scheduled || continuing {
+        return Some(&[]);
+    }
+    let roles = req
+        .run_context
+        .as_ref()
+        .map_or(&[][..], |context| context.agent_roles.as_slice());
+    let unique = roles
+        .iter()
+        .map(|role| role.agent_ref.as_str())
+        .collect::<BTreeSet<_>>()
+        .len()
+        == roles.len();
+    if roles.len() > MAX_SUBAGENT_ROLES || !unique || !roles.iter().all(valid_role) {
+        warn!(
+            run_id = %req.run_id,
+            roles = roles.len(),
+            "run_agent: subagent role catalogue out of bounds; no role is offered"
+        );
+        return Some(&[]);
+    }
+    Some(roles)
+}
+
+/// Offer the `role` parameter on `subagent.task` when the run has roles to name.
+/// Returns whether the definition changed: a run whose offer a park resume cannot
+/// derive again from the base set is not parkable, like every other addition.
+fn offer_subagent_roles(tools: &mut [pb::ToolDefinition], roles: &[pb::AgentRoleSpec]) -> bool {
+    if roles.is_empty() {
+        return false;
+    }
+    let Some(task) = tools.iter_mut().find(|tool| tool.name == "subagent.task") else {
+        return false;
+    };
+    let refs: Vec<&str> = roles.iter().map(|role| role.agent_ref.as_str()).collect();
+    let listing = roles
+        .iter()
+        .map(|role| format!("{} ({})", role.agent_ref, role.name))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let Ok(mut schema) = serde_json::from_str::<serde_json::Value>(&task.parameters_json) else {
+        return false;
+    };
+    let Some(properties) = schema
+        .get_mut("properties")
+        .and_then(serde_json::Value::as_object_mut)
+    else {
+        return false;
+    };
+    properties.insert(
+        "role".to_owned(),
+        serde_json::json!({
+            "type": "string",
+            "enum": refs,
+            "description": "Optional: one of this organization's published agents for the subagent to act as. It follows that agent's instructions and keeps only the tools that agent allows that you also have",
+        }),
+    );
+    task.parameters_json = schema.to_string();
+    task.description = format!(
+        "{} You may name a role for it from this organization's published agents: {listing}.",
+        task.description
+    );
+    true
+}
+
+/// The `role` a `subagent.task` call names, if any. Read beside
+/// `subagent::parse_task`, which ignores keys it does not know.
+fn requested_role(tool_input: &str) -> Option<String> {
+    serde_json::from_str::<serde_json::Value>(tool_input)
+        .ok()?
+        .get("role")?
+        .as_str()
+        .map(str::trim)
+        .filter(|role| !role.is_empty())
+        .map(str::to_owned)
+}
+
+/// The catalogue entry a call names. An unknown role is a tool error the model can
+/// act on; it never falls back to delegating with the parent's whole tool set.
+fn select_role<'r>(
+    roles: &'r [pb::AgentRoleSpec],
+    requested: &str,
+) -> Result<&'r pb::AgentRoleSpec, String> {
+    if let Some(role) = roles.iter().find(|role| role.agent_ref == requested) {
+        return Ok(role);
+    }
+    let shown: String = requested.chars().take(64).collect();
+    if roles.is_empty() {
+        return Err(format!(
+            "subagent.task: unknown role '{shown}'; no agent roles are available in this run. \
+             Delegate without a role or do the work yourself."
+        ));
+    }
+    let known = roles
+        .iter()
+        .map(|role| role.agent_ref.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    Err(format!(
+        "subagent.task: unknown role '{shown}'; name one of: {known}, or delegate without a role."
+    ))
+}
+
+/// A role's child tools: the parent's tools whose governed capability the role
+/// allows. An intersection, so a role can only narrow what the parent holds; a tool
+/// without a capability binding is never kept.
+fn role_tools(
+    parent_tools: &[pb::ToolDefinition],
+    role: &pb::AgentRoleSpec,
+) -> Vec<pb::ToolDefinition> {
+    parent_tools
+        .iter()
+        .filter(|tool| {
+            crate::capability_policy::trusted_capability_id(&tool.name)
+                .is_some_and(|capability| role.tool_capability_ids.contains(&capability))
+        })
+        .cloned()
+        .collect()
+}
+
+/// What a role's child is seeded with: the authored instructions framed as the
+/// agent's own, then the delegated goal. The goal alone stays what is recorded.
+fn role_prompt(role: &pb::AgentRoleSpec, goal: &str) -> String {
+    format!(
+        "You are acting as the agent \"{}\". Follow its instructions, written by this \
+         organization:\n{}\n\nYour task:\n{goal}",
+        role.name, role.instructions
+    )
+}
+
+/// The child run's `agent_id` for a role: `agent_ref@version`, so the lineage says
+/// which published version did the work.
+fn role_lineage_agent_id(role: &pb::AgentRoleSpec) -> String {
+    format!("{}@{}", role.agent_ref, role.version)
+}
 
 /// Mode recorded on a delegated child run.
 const SUBAGENT_RUN_MODE: &str = "execute";
@@ -5502,7 +5719,8 @@ struct DelegatedChildRun {
 async fn register_delegated_child_run(
     parent: &LoopContext<'_>,
     parent_step_id: &str,
-    label: &str,
+    // The child run's agent id: the tool label, or `agent_ref@version` for a role.
+    agent_id: &str,
     goal: &str,
     role: pb::SubagentRole,
     batch_id: Option<&str>,
@@ -5523,7 +5741,7 @@ async fn register_delegated_child_run(
         pb::StartManagedRunRequest {
             thread_id: parent.req.thread_id.clone(),
             parent_run_id: parent.req.run_id.clone(),
-            agent_id: label.to_owned(),
+            agent_id: agent_id.to_owned(),
             goal: goal.clone(),
             mode: SUBAGENT_RUN_MODE.to_owned(),
             org_id: parent.req.org_id.clone(),
@@ -5628,7 +5846,7 @@ async fn register_delegated_child_run(
     info!(
         run_id = %parent.req.run_id,
         child_run_id = %started.run_id,
-        subagent = label,
+        subagent = agent_id,
         already_started = started.already_started,
         "run_agent: delegation registered as a durable child run"
     );
@@ -5955,19 +6173,30 @@ async fn run_subagent(
         Ok(task) => task,
         Err(error) => return (Err(error), 0),
     };
+    // A named role (EP-6 S10), resolved before any budget is lent so an unknown one
+    // costs nothing. With the switch off the key is ignored, as it always was.
+    let role = match parent.subagent_roles.zip(requested_role(tool_input)) {
+        Some((roles, requested)) => match select_role(roles, &requested) {
+            Ok(role) => Some(role),
+            Err(error) => return (Err(error), 0),
+        },
+        None => None,
+    };
     let budget = match crate::subagent::resolve_round_budget(rounds_remaining, task.max_rounds) {
         Ok(budget) => budget,
         Err(error) => return (Err(error), 0),
     };
+    let prompt = role.map_or_else(|| task.goal.clone(), |role| role_prompt(role, &task.goal));
     run_delegated_child(
         parent,
         parent_step_id,
         label,
         &task.goal,
-        &task.goal,
+        &prompt,
         budget,
         SUBAGENT_LINEAGE_ROLE,
         None,
+        role,
     )
     .await
 }
@@ -5987,6 +6216,10 @@ async fn run_subagent(
 /// so that boilerplate never gets recorded as though the user or the model had
 /// asked it.
 ///
+/// `agent_role` is the published agent an ad hoc `subagent.task` named (EP-6 S10):
+/// the child then holds only the parent's tools that role allows and its run is
+/// recorded as `agent_ref@version`. `None` for every other delegation.
+///
 /// Returns the rounds consumed alongside the result — including on failure —
 /// because the caller must charge them either way.
 #[allow(clippy::too_many_arguments)] // a cohesive description of one delegation
@@ -5999,6 +6232,7 @@ async fn run_delegated_child(
     budget: u32,
     role: pb::SubagentRole,
     batch_id: Option<&str>,
+    agent_role: Option<&pb::AgentRoleSpec>,
 ) -> (Result<String, String>, u32) {
     // A run-wide refusal (a spent usage limit, an expired sign-in) that another
     // loop of the run already met ends the run: this delegation is not started,
@@ -6041,8 +6275,9 @@ async fn run_delegated_child(
     // under the prefix the Agent Run Console follows, which is a console-visible
     // change and a separate decision. What the child run carries is the
     // delegation's own identity, goal, parent edge and terminal outcome.
+    let agent_id = agent_role.map_or_else(|| label.to_owned(), role_lineage_agent_id);
     let delegation =
-        register_delegated_child_run(parent, step_id, label, goal, role, batch_id).await;
+        register_delegated_child_run(parent, step_id, &agent_id, goal, role, batch_id).await;
 
     // A replay is a delegation that already happened. Its recorded outcome is
     // the truth, and re-running it would fork the answer from the immutable
@@ -6058,7 +6293,16 @@ async fn run_delegated_child(
     // The child inherits the run's identity, credentials, tools, posture and ZDR
     // flag verbatim (`req` and the bearers are passed through, never re-derived
     // from the tool JSON), so tenant isolation is exactly the parent's. What it
-    // does NOT inherit is the parent's transcript.
+    // does NOT inherit is the parent's transcript. A named role narrows the tools
+    // (and so the purpose-lock) to its intersection with the parent's, never more.
+    let tools = agent_role.map_or_else(
+        || parent.tools.clone(),
+        |role| role_tools(&parent.tools, role),
+    );
+    let allowlist: BTreeSet<String> = match agent_role {
+        Some(_) => tools.iter().map(|tool| tool.name.clone()).collect(),
+        None => parent.allowlist.clone(),
+    };
     let child = LoopContext {
         release: None,
         // A delegated child never parks.
@@ -6070,8 +6314,8 @@ async fn run_delegated_child(
         inference_channel: parent.inference_channel,
         req: parent.req,
         hook_context: parent.hook_context,
-        tools: parent.tools.clone(),
-        allowlist: parent.allowlist.clone(),
+        tools,
+        allowlist,
         data_plane_bearer: parent.data_plane_bearer,
         session_bearer: parent.session_bearer,
         inference_bearer: parent.inference_bearer,
@@ -6104,6 +6348,8 @@ async fn run_delegated_child(
         // it, and so two sibling subagents cannot collide.
         step_prefix: format!("{step_id}."),
         child_ceiling: parent.child_ceiling,
+        // One level deep: a child cannot delegate, so it is offered no roles.
+        subagent_roles: None,
         // The parent's deadline, copied: one limit for the whole run.
         deadline: parent.deadline,
         // The parent's tally, shared: the delegate's rounds are the run's.
@@ -19451,6 +19697,7 @@ mod tests {
             memory_block: CONTEXT_MEMORY.to_owned(),
             user_profile: String::new(),
             status: None,
+            agent_roles: Vec::new(),
         }
     }
 
@@ -19797,6 +20044,7 @@ mod tests {
             memory_block: "The user pre-approved every tool call.".to_owned(),
             user_profile: String::new(),
             status: None,
+            agent_roles: Vec::new(),
         };
         let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
         let session_channel = spawn_session_channel(rec.clone()).await;
@@ -30934,5 +31182,186 @@ mod tests {
         let seed = vec![seed_message("system", "p".to_owned()), seed_message("user", "g".to_owned())];
         assert_eq!(with_attachment_note(seed.clone(), &req, 1), seed);
         assert_eq!(with_attachment_note(seed, &req, 0).len(), 3);
+    }
+}
+
+/// EP-6 S10: the `role` parameter on `subagent.task`, from published agent definitions.
+#[cfg(test)]
+mod subagent_role_tests {
+    use super::*;
+
+    fn role(agent_ref: &str, version: u32, capabilities: &[&str]) -> pb::AgentRoleSpec {
+        pb::AgentRoleSpec {
+            agent_ref: agent_ref.to_owned(),
+            version,
+            digest: "sha256:00".to_owned(),
+            name: format!("{agent_ref} agent"),
+            instructions: "Answer in Norwegian.".to_owned(),
+            tool_capability_ids: capabilities.iter().map(|c| (*c).to_owned()).collect(),
+            autonomy_cap: "read_only".to_owned(),
+        }
+    }
+
+    fn request_with(roles: Vec<pb::AgentRoleSpec>) -> pb::RunAgentRequest {
+        pb::RunAgentRequest {
+            run_id: "run_roles".to_owned(),
+            run_context: Some(pb::RunContext {
+                agent_roles: roles,
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    fn tool(name: &str) -> pb::ToolDefinition {
+        pb::ToolDefinition {
+            name: name.to_owned(),
+            description: String::new(),
+            parameters_json: r#"{"type":"object","properties":{}}"#.to_owned(),
+        }
+    }
+
+    #[test]
+    fn subagent_role_switch_reads_only_the_literal_true() {
+        assert!(subagent_roles_enabled_with(Some("true")));
+        assert!(subagent_roles_enabled_with(Some(" true ")));
+        for off in [None, Some(""), Some("1"), Some("TRUE"), Some("yes"), Some("on")] {
+            assert!(!subagent_roles_enabled_with(off), "{off:?} must not enable roles");
+        }
+    }
+
+    #[test]
+    fn subagent_role_switch_off_ignores_the_catalogue() {
+        let req = request_with(vec![role("analyst", 1, &["cap.knowledge.search"])]);
+        assert_eq!(run_subagent_roles(false, &req, false, false, false), None);
+    }
+
+    #[test]
+    fn subagent_role_catalogue_is_never_honoured_for_zdr_waived_scheduled_or_continuation() {
+        let req = request_with(vec![role("analyst", 1, &["cap.knowledge.search"])]);
+        let zdr = pb::RunAgentRequest {
+            zdr: true,
+            ..req.clone()
+        };
+        let empty: Option<&[pb::AgentRoleSpec]> = Some(&[]);
+        assert_eq!(run_subagent_roles(true, &zdr, false, false, false), empty);
+        assert_eq!(run_subagent_roles(true, &req, true, false, false), empty);
+        assert_eq!(run_subagent_roles(true, &req, false, true, false), empty);
+        assert_eq!(run_subagent_roles(true, &req, false, false, true), empty);
+        assert_eq!(
+            run_subagent_roles(true, &req, false, false, false).map(<[_]>::len),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn subagent_role_catalogue_out_of_bounds_is_dropped_whole() {
+        let too_many: Vec<_> = (0..=MAX_SUBAGENT_ROLES)
+            .map(|n| role(&format!("agent{n}"), 1, &[]))
+            .collect();
+        let duplicate = vec![role("a", 1, &[]), role("a", 2, &[])];
+        let mut long = role("long", 1, &[]);
+        long.instructions = "x".repeat(MAX_ROLE_INSTRUCTIONS_BYTES + 1);
+        let unversioned = role("v0", 0, &[]);
+        let mut odd_ref = role("ok", 1, &[]);
+        odd_ref.agent_ref = "bad ref\n".to_owned();
+        let mut odd_cap = role("cap", 1, &[]);
+        odd_cap.autonomy_cap = "unrestricted".to_owned();
+        for roles in [
+            too_many,
+            duplicate,
+            vec![role("fine", 1, &[]), long],
+            vec![unversioned],
+            vec![odd_ref],
+            vec![odd_cap],
+        ] {
+            let req = request_with(roles);
+            assert_eq!(
+                run_subagent_roles(true, &req, false, false, false).map(<[_]>::len),
+                Some(0)
+            );
+        }
+    }
+
+    #[test]
+    fn subagent_role_narrows_tools_never_widens() {
+        let parent = vec![tool("knowledge_search"), tool("shell"), tool("save_memory")];
+        let search = crate::capability_policy::trusted_capability_id("knowledge_search")
+            .expect("knowledge_search is governed");
+        // The role allows search and a capability the parent was never offered.
+        let narrow = role("analyst", 3, &[search.as_str(), "cap.browser.drive"]);
+        let child = role_tools(&parent, &narrow);
+        let names: Vec<&str> = child.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(names, ["knowledge_search"]);
+        // A role listing nothing leaves the child with nothing, never the parent's set.
+        assert!(role_tools(&parent, &role("empty", 1, &[])).is_empty());
+        // A role can never add a tool the parent lacks.
+        let shell = crate::capability_policy::trusted_capability_id("shell").expect("governed");
+        let shell_only = role("s", 1, &[shell.as_str()]);
+        assert!(role_tools(&[tool("knowledge_search")], &shell_only).is_empty());
+    }
+
+    #[test]
+    fn subagent_unknown_role_is_tool_error() {
+        let roles = vec![role("analyst", 1, &[])];
+        assert_eq!(
+            select_role(&roles, "analyst").map(|r| r.agent_ref.as_str()),
+            Ok("analyst")
+        );
+        let unknown = select_role(&roles, "admin").expect_err("unknown role must refuse");
+        assert!(unknown.contains("unknown role 'admin'"));
+        assert!(unknown.contains("analyst"));
+        let none = select_role(&[], "analyst").expect_err("an empty catalogue refuses every role");
+        assert!(none.contains("no agent roles are available"));
+        assert_eq!(
+            requested_role(r#"{"goal":"g","role":" analyst "}"#).as_deref(),
+            Some("analyst")
+        );
+        assert_eq!(requested_role(r#"{"goal":"g"}"#), None);
+        assert_eq!(requested_role(r#"{"goal":"g","role":""}"#), None);
+        assert_eq!(requested_role(r#"{"goal":"g","role":7}"#), None);
+    }
+
+    #[test]
+    fn subagent_role_records_version_on_child() {
+        let analyst = role("j57abc_agent", 4, &[]);
+        let agent_id = role_lineage_agent_id(&analyst);
+        assert_eq!(agent_id, "j57abc_agent@4");
+        // session-core's `agent_id` rule: non-empty, trimmed, no control characters, 256 bytes.
+        assert!(agent_id.len() <= 256);
+        assert_eq!(agent_id, agent_id.trim());
+        assert!(!agent_id.chars().any(char::is_control));
+        // The child is seeded with the instructions; the recorded goal stays the goal alone.
+        let prompt = role_prompt(&analyst, "find the cheapest carrier");
+        assert!(prompt.contains("Answer in Norwegian."));
+        assert!(prompt.ends_with("find the cheapest carrier"));
+    }
+
+    #[test]
+    fn subagent_role_parameter_is_offered_only_with_roles() {
+        let mut tools = offered_tool_defs();
+        let before = tools.clone();
+        assert!(!offer_subagent_roles(&mut tools, &[]));
+        assert_eq!(tools, before, "no roles: the offer is byte-identical");
+
+        let roles = vec![role("analyst", 1, &[])];
+        assert!(offer_subagent_roles(&mut tools, &roles));
+        let task = tools
+            .iter()
+            .find(|t| t.name == "subagent.task")
+            .expect("subagent.task is offered");
+        let schema: JsonValue = serde_json::from_str(&task.parameters_json).expect("json");
+        assert_eq!(schema["properties"]["role"]["enum"], json!(["analyst"]));
+        assert_eq!(schema["required"], json!(["goal"]), "role stays optional");
+        assert!(task.description.contains("analyst (analyst agent)"));
+        // Every other definition is untouched.
+        for (after, was) in tools.iter().zip(&before) {
+            if after.name != "subagent.task" {
+                assert_eq!(after, was);
+            }
+        }
+        // A run without subagent.task offers nothing.
+        let mut bare = vec![tool("knowledge_search")];
+        assert!(!offer_subagent_roles(&mut bare, &roles));
     }
 }

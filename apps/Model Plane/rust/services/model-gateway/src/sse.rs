@@ -171,6 +171,106 @@ fn agentic_space_retrieval(space_id: &str, decision: Option<&str>, enabled: bool
     Some(decision.unwrap_or_default().trim().to_owned())
 }
 
+/// The switch that lets a Do run carry its agent role catalogue to execution-core (EP-6 S10). Opt-in:
+/// only the literal `true` enables it. Off, `InvokeRequest.agent_roles` is never read and the run's
+/// `RunContext` carries no roles. execution-core honours the catalogue only under its own switch,
+/// `EXECUTION_CORE_SUBAGENT_ROLES`; this one decides whether the gateway sends it at all.
+const SUBAGENT_ROLE_CATALOGUE_VAR: &str = "MODEL_GATEWAY_SUBAGENT_ROLE_CATALOGUE";
+
+fn subagent_role_catalogue_enabled() -> bool {
+    subagent_role_catalogue_enabled_with(&|key| std::env::var(key).ok())
+}
+
+fn subagent_role_catalogue_enabled_with(get: &dyn Fn(&str) -> Option<String>) -> bool {
+    get(SUBAGENT_ROLE_CATALOGUE_VAR).is_some_and(|value| value.trim() == "true")
+}
+
+/// At most this many roles reach a run; later entries are left out.
+const MAX_AGENT_ROLES: usize = 8;
+
+/// A role's instructions are cut to this many bytes (on a character boundary).
+const MAX_AGENT_ROLE_INSTRUCTIONS_BYTES: usize = 4_096;
+
+/// Longest `agent_ref` sent on: it becomes part of the child run's `agent_id`.
+const MAX_AGENT_REF_BYTES: usize = 128;
+
+/// The WS25-S6 mode vocabulary a role's autonomy cap may name; empty means none stated.
+const AGENT_ROLE_AUTONOMY_CAPS: &[&str] = &["", "read_only", "ask_first", "auto"];
+
+/// One role as the BFF gateway sends it (the fields of `AgentRoleSpec`).
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(default)]
+struct AgentRoleInput {
+    agent_ref: String,
+    version: u32,
+    digest: String,
+    name: String,
+    instructions: String,
+    tool_capability_ids: Vec<String>,
+    autonomy_cap: String,
+}
+
+/// The bounded role catalogue a Do run carries in `RunContext.agent_roles` (EP-6 S10).
+///
+/// Empty with the switch off, for a ZDR or waived turn (Do and delegation are refused there, so the
+/// catalogue is never built), and for a body that is not a list of roles. Each entry must name an
+/// `agent_ref` of `[A-Za-z0-9_.:-]`, a published version (from 1) and an autonomy cap from the closed
+/// vocabulary, or it is left out: an unknown cap could read as a widening. Duplicates keep the first,
+/// instructions are cut to 4 KB and at most 8 roles are kept. Nothing here grants: execution-core
+/// intersects a role's tools with the parent's.
+fn compose_agent_roles(
+    enabled: bool,
+    raw: Option<&Value>,
+    zdr_or_waived: bool,
+) -> Vec<mp_contracts::model_plane::v1::AgentRoleSpec> {
+    if !enabled || zdr_or_waived {
+        return Vec::new();
+    }
+    let Some(inputs) =
+        raw.and_then(|raw| serde_json::from_value::<Vec<AgentRoleInput>>(raw.clone()).ok())
+    else {
+        return Vec::new();
+    };
+    let mut seen = std::collections::BTreeSet::new();
+    inputs
+        .into_iter()
+        .filter(|role| {
+            !role.agent_ref.is_empty()
+                && role.agent_ref.len() <= MAX_AGENT_REF_BYTES
+                && role
+                    .agent_ref
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b':'))
+                && role.version >= 1
+                && AGENT_ROLE_AUTONOMY_CAPS.contains(&role.autonomy_cap.as_str())
+        })
+        .filter(|role| seen.insert(role.agent_ref.clone()))
+        .take(MAX_AGENT_ROLES)
+        .map(|role| mp_contracts::model_plane::v1::AgentRoleSpec {
+            agent_ref: role.agent_ref,
+            version: role.version,
+            digest: role.digest,
+            name: role.name.chars().filter(|c| !c.is_control()).collect(),
+            instructions: within_bytes(&role.instructions, MAX_AGENT_ROLE_INSTRUCTIONS_BYTES)
+                .to_owned(),
+            tool_capability_ids: role.tool_capability_ids,
+            autonomy_cap: role.autonomy_cap,
+        })
+        .collect()
+}
+
+/// The longest prefix of `text` within `max_bytes`, cut on a character boundary.
+fn within_bytes(text: &str, max_bytes: usize) -> &str {
+    if text.len() <= max_bytes {
+        return text;
+    }
+    let mut end = max_bytes;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
+}
+
 /// The Space retrieval decision a turn's grounding is scoped by. A scoped thread's first message
 /// carries `space_context`; a later one carries `space_append_context`, which is read only while the
 /// switch is on. An empty token is the BFF's FORBIDDEN answer, which `retrieval::scoped_retrieval_token`
@@ -2684,6 +2784,17 @@ pub async fn invoke_stream_sse(
         // provider. Every other turn leaves the route empty and the request
         // unchanged.
         let agentic_route = AgentRoute::for_turn(&normalized);
+        // The roles a delegated subagent may take on (EP-6 S10): empty with the switch off and
+        // for a ZDR or waived turn.
+        let agent_roles = compose_agent_roles(
+            subagent_role_catalogue_enabled(),
+            req.agent_roles.as_ref(),
+            effective_zdr
+                || matches!(
+                    retention_class,
+                    Some(crate::sse_events::RetentionClass::ZdrWaived { .. })
+                ),
+        );
         timing.hand_off("agentic");
         return agentic_run_stream(
             state.clone(),
@@ -2758,6 +2869,7 @@ pub async fn invoke_stream_sse(
                 req.effort.as_deref().unwrap_or_default(),
                 crate::thinking::ladder_enabled(),
             ),
+            agent_roles,
         );
     }
 
@@ -12722,6 +12834,9 @@ fn agentic_run_stream(
     // The run's effort level (WS11-S8), from `thinking::run_level` at the launch; 0 for a
     // continuation and with the ladder off.
     run_effort: i32,
+    // The run's agent role catalogue (EP-6 S10, `compose_agent_roles`), carried in the run
+    // context. Empty with `MODEL_GATEWAY_SUBAGENT_ROLE_CATALOGUE` off and for a continuation.
+    agent_roles: Vec<mp_contracts::model_plane::v1::AgentRoleSpec>,
 ) -> Sse<ReceiverStream<Result<Event, Infallible>>> {
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(32);
     tokio::spawn(async move {
@@ -12793,6 +12908,12 @@ fn agentic_run_stream(
             ),
             _ => None,
         };
+        // The role catalogue rides in the composed context only (EP-6 S10): in flight, never part
+        // of the run record. A run whose context is not composed carries none.
+        let run_context = run_context.map(|mut context| {
+            context.agent_roles = agent_roles;
+            context
+        });
 
         // plan-gate §2.4: a run that is itself in plan mode has no authority
         // to consume a plan with yet, and a continuation takes its goal and
@@ -20094,6 +20215,8 @@ pub(crate) async fn continue_run(
             Vec::new(),
             // A continuation carries no effort level (WS11-S8).
             0,
+            // Nor a role catalogue: it carries no run context (EP-6 S10).
+            Vec::new(),
         )
     };
     if !resume_enabled {
@@ -21987,6 +22110,7 @@ mod continue_run_tests {
             Vec::new(),
             Vec::new(),
             0,
+            Vec::new(),
         );
         let frames = frames_of_stream(stream).await;
         let names: Vec<&str> = frames.iter().map(|(name, _)| name.as_str()).collect();
@@ -23474,6 +23598,7 @@ mod continue_run_tests {
             Vec::new(),
             Vec::new(),
             0,
+            Vec::new(),
         );
         let frames = frames_of_stream(stream).await;
         let names: Vec<&str> = frames.iter().map(|(name, _)| name.as_str()).collect();
@@ -24951,5 +25076,79 @@ mod ask_turn_tests {
             + declared.len();
         let end = inference[start..].find('"').expect("a closing quote");
         assert_eq!(&inference[start..start + end], VISION_UNSUPPORTED);
+    }
+}
+
+/// EP-6 S10: the agent role catalogue a Do run carries to execution-core.
+#[cfg(test)]
+mod agent_role_catalogue_tests {
+    use super::*;
+
+    fn role(agent_ref: &str) -> Value {
+        json!({
+            "agent_ref": agent_ref,
+            "version": 2,
+            "digest": "sha256:ab",
+            "name": "Analyst",
+            "instructions": "Answer briefly.",
+            "tool_capability_ids": ["cap.retrieval.query"],
+            "autonomy_cap": "read_only",
+        })
+    }
+
+    #[test]
+    fn the_catalogue_switch_reads_only_the_literal_true() {
+        let with = |value: Option<&str>| {
+            let value = value.map(str::to_owned);
+            subagent_role_catalogue_enabled_with(&move |key: &str| {
+                (key == SUBAGENT_ROLE_CATALOGUE_VAR).then(|| value.clone()).flatten()
+            })
+        };
+        assert!(with(Some("true")));
+        for off in [None, Some(""), Some("1"), Some("TRUE"), Some("yes")] {
+            assert!(!with(off), "{off:?} must not enable the catalogue");
+        }
+    }
+
+    #[test]
+    fn no_catalogue_with_the_switch_off_or_on_a_zdr_or_waived_turn() {
+        let body = json!([role("analyst")]);
+        assert!(compose_agent_roles(false, Some(&body), false).is_empty());
+        assert!(compose_agent_roles(true, Some(&body), true).is_empty());
+        assert!(compose_agent_roles(true, None, false).is_empty());
+        assert!(compose_agent_roles(true, Some(&json!("analyst")), false).is_empty());
+        let roles = compose_agent_roles(true, Some(&body), false);
+        assert_eq!(roles.len(), 1);
+        assert_eq!(roles[0].agent_ref, "analyst");
+        assert_eq!(roles[0].version, 2);
+        assert_eq!(roles[0].tool_capability_ids, ["cap.retrieval.query"]);
+    }
+
+    #[test]
+    fn the_catalogue_is_bounded() {
+        let many: Vec<Value> = (0..12).map(|n| role(&format!("agent{n}"))).collect();
+        assert_eq!(
+            compose_agent_roles(true, Some(&Value::Array(many)), false).len(),
+            MAX_AGENT_ROLES
+        );
+
+        let mut long = role("long");
+        long["instructions"] = json!("æ".repeat(MAX_AGENT_ROLE_INSTRUCTIONS_BYTES));
+        let roles = compose_agent_roles(true, Some(&json!([long])), false);
+        assert!(roles[0].instructions.len() <= MAX_AGENT_ROLE_INSTRUCTIONS_BYTES);
+        assert!(roles[0].instructions.starts_with('æ'));
+
+        let mut unversioned = role("v0");
+        unversioned["version"] = json!(0);
+        let mut widening = role("wide");
+        widening["autonomy_cap"] = json!("unrestricted");
+        let bad_ref = role("bad ref");
+        let roles = compose_agent_roles(
+            true,
+            Some(&json!([unversioned, widening, bad_ref, role("ok"), role("ok")])),
+            false,
+        );
+        let refs: Vec<&str> = roles.iter().map(|r| r.agent_ref.as_str()).collect();
+        assert_eq!(refs, ["ok"], "invalid entries and duplicates are left out");
     }
 }

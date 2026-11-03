@@ -345,6 +345,35 @@ message RunContext {
   // MODEL_GATEWAY_USER_PROFILE_PREFIX is on and the run's memory decision
   // allows it; never set on a ZDR, waived or Space-scoped run.
   string user_profile = 7;
+  // The roles a `subagent.task` call of this run may name (EP-6 S10; owner:
+  // model-gateway composes it, execution-core reads it). Built from published
+  // agent definitions the caller may use, at most 8 entries. In flight only:
+  // never persisted, never built for a ZDR, waived or scheduled run, and
+  // ignored by execution-core with EXECUTION_CORE_SUBAGENT_ROLES off.
+  repeated AgentRoleSpec agent_roles = 8;
+}
+
+// AgentRoleSpec - one published agent definition a delegated subagent may take
+// on as its role (EP-6 S10). It only narrows: the child's tools are the
+// parent's tools intersected with `tool_capability_ids`, never more.
+message AgentRoleSpec {
+  // The agent definition's stable id, the value `subagent.task`'s `role` names.
+  string agent_ref = 1;
+  // The published version this entry was read from (immutable, from 1).
+  uint32 version = 2;
+  // The published version's canonical digest ("sha256:<hex>").
+  string digest = 3;
+  // The agent's display name, shown to the parent model.
+  string name = 4;
+  // The agent's authored instructions, at most 4096 bytes.
+  string instructions = 5;
+  // Capability ids (WS05 registry) the role allows; the child keeps only the
+  // parent's tools whose capability is listed here.
+  repeated string tool_capability_ids = 6;
+  // The role's autonomy cap ("read_only", "ask_first" or "auto"; empty when
+  // the definition states none). A delegated child is read/analysis only
+  // whatever the cap, so the cap can never widen it.
+  string autonomy_cap = 7;
 }
 
 // RunAgentResponse — terminal outcome of a driven agent run.

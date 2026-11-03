@@ -9525,6 +9525,15 @@ pub struct InvokeRequest {
     /// is the WS16-S6 hint with its own switch and vocabulary (`nb-NO` / `en-US`).
     #[serde(default)]
     pub ui_locale: Option<String>,
+    /// EP-6 S10 — the published agent definitions this turn's `subagent.task` may name as a
+    /// role, resolved server-side by the BFF gateway (the Space's bound agents, each at its
+    /// pinned or published version) and never client-suppliable, like `agent_system_prompt`.
+    /// Kept as raw JSON: it is read, bounded and typed only while
+    /// `MODEL_GATEWAY_SUBAGENT_ROLE_CATALOGUE` is on (`sse::compose_agent_roles`), so a body
+    /// carrying it is parsed exactly as before with the switch off. Grants nothing: a role
+    /// only narrows a delegated child's tools.
+    #[serde(default)]
+    pub agent_roles: Option<serde_json::Value>,
 }
 
 /// A tool/function definition supplied by the client (chat-parity §2).
