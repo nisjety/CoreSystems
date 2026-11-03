@@ -1831,6 +1831,11 @@ fn with_crawl(
     let mut outcome = scope.evaluate(&page, &result.links, lookup);
     if let Some(gate) = robots {
         outcome.report.crawl_delay_ms = gate.crawl_delay_ms(&page);
+        // WS14.S4, D2-091: the links the robots decision removed, counted only when the gate
+        // enforces. Observe and off remove no link, so they count none.
+        if gate.mode() == quarry_runtime::RobotsEnforceMode::Enforce {
+            crate::metrics::record_robots_link_refusals(&outcome.report);
+        }
     }
     result.links = outcome.links;
     result.crawl = Some(outcome.report);
@@ -3497,5 +3502,83 @@ mod tests {
         }));
         let result = InternalRunPageResult::from_output("run_1".into(), &out);
         assert_eq!(result.source_artifact_id.as_deref(), Some(raw.as_str()));
+    }
+
+    // ---- WS14.S4, D2-091: a robots link refusal is counted only when the gate enforces ----
+
+    /// Answers every robots.txt with the same body.
+    struct FixedRobots(&'static str);
+
+    #[async_trait]
+    impl quarry_runtime::RobotsFetcher for FixedRobots {
+        async fn fetch(&self, _origin: &str, _org_id: &str) -> quarry_runtime::RobotsFetch {
+            quarry_runtime::RobotsFetch::Found(self.0.to_owned())
+        }
+    }
+
+    /// A gate in `mode` whose cache already holds the page's origin, so the link filter reads
+    /// the rules from the cache as it does on a live crawl.
+    async fn gate_with_cached_rules(
+        mode: quarry_runtime::RobotsEnforceMode,
+        page: &Url,
+    ) -> quarry_runtime::RobotsGate {
+        let gate = quarry_runtime::RobotsGate::with_fetcher(
+            Arc::new(FixedRobots("User-agent: *\nDisallow: /private/\n")),
+            quarry_runtime::RobotsGateConfig {
+                mode,
+                ..quarry_runtime::RobotsGateConfig::default()
+            },
+        );
+        let _ = gate.rules_for_origin(page, "org_test", false).await;
+        gate
+    }
+
+    #[tokio::test]
+    async fn robots_link_refusals_are_counted_only_when_the_gate_enforces() {
+        let page = "https://example.test/docs/landing";
+        let page_url: Url = page.parse().unwrap();
+        let scope = quarry_runtime::crawl_filter::CompiledScope::compile(
+            &quarry_core::crawl_scope::CrawlContext::default(),
+        )
+        .expect("the default scope compiles");
+        let page_links = || {
+            let mut result =
+                InternalRunPageResult::from_output("run_1".into(), &output_with_markdown(None));
+            result.links = vec![
+                "https://example.test/private/x".to_owned(),
+                "https://example.test/docs/a".to_owned(),
+            ];
+            result
+        };
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+
+        let observe =
+            gate_with_cached_rules(quarry_runtime::RobotsEnforceMode::Observe, &page_url).await;
+        let kept = metrics::with_local_recorder(&recorder, || {
+            with_crawl(page_links(), page, Some(&scope), Some(&observe))
+        });
+        assert_eq!(kept.links.len(), 2, "observe removes no link");
+        assert!(
+            !handle
+                .render()
+                .contains("quarry_robots_link_refusals_total"),
+            "observe counts no refusal: {}",
+            handle.render()
+        );
+
+        let enforce =
+            gate_with_cached_rules(quarry_runtime::RobotsEnforceMode::Enforce, &page_url).await;
+        let kept = metrics::with_local_recorder(&recorder, || {
+            with_crawl(page_links(), page, Some(&scope), Some(&enforce))
+        });
+        assert_eq!(kept.links, vec!["https://example.test/docs/a".to_owned()]);
+        assert!(
+            handle
+                .render()
+                .contains(r#"quarry_robots_link_refusals_total{outcome="denied"} 1"#),
+            "{}",
+            handle.render()
+        );
     }
 }
