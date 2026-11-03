@@ -462,3 +462,27 @@ Open items:
 - W3-E3.5-3: crawl handoff (routes.rs) does not save req.webhook, so the edge flag must stay off; batch not wired; control create does not call NormalizeJobWebhook; no delivery path; docs/compose/SDK not updated.
 - 38 depth rows appended to W23-depth.md (lanes a 14, b 9, c 4, d 11).
 - The four line-ending-only .sha256 artifacts were not staged.
+
+## Step S12 (W3), integrated 2026-11-03
+
+Units: W3-E3.3-g (lane b, landed). NOT LANDED (no lane commits, nothing to merge): W3-E3.4-6 and W3-E3.7.4-6w (lane a), W3-E3.7.9b (lane b), W3-E3.9.6-7 and W3-E3.3-c (lane c), W3-E3.7.10-CP (lane d). Lanes a, c and d had no new commits; their units were blocked by the pre-commit gitleaks hook while the Docker engine was down (lane a, c, d) or by the different-worktree write guard (E3.7.9b). Flag of the landed unit: VITE_CHAT_BROWSER_STEER (default off).
+
+Merge commits on w23/integ (base 5d4143522):
+- 6fb6a2902 merge: w23/lane-b (S12: W3-E3.3-g). No conflicts.
+
+Follow-up commits:
+- f58d2ddc3 chore(contracts): regenerated agent-action admission golden (VEREVON_UPDATE_GOLDEN=1 admission-contract.test.ts, 5/5), copied byte-identically to the four Model Plane copies, sha256 pin f0dd9c5731f0f89fd95f16f167d3cbfe3490b544e876bada1dc7b9cf2b33e592 written to agent-action-admission.json.sha256 and scripts/tests/zdr-contract-sync.test.sh. New row: browser_run.steer, access none (exempt no_owner_executor, context_write). Model Plane owner: new action id browser_run.steer.
+- effcd5737 fix(frontend): steer composer typings (add/change setters returned the array where void was declared; onInput arrow returned a string; maxLength -> maxlength for Solid textarea typings).
+
+Compile guard (no test runs):
+- Quarry Rust: not run, the step changed no Quarry Rust (only lane b frontend files merged).
+- Go: no Go module touched.
+- TS: tsc6 -p tsconfig.app.json --noEmit: 3 new errors from E3.3-g (steer-input.ts x2, SteerInput.tsx x1), fixed in effcd5737; after the fix 1 error remains, src/shared/api/schedule-contract.test.ts(28,16) TS2352, pre-existing and not from this step (whole-project count is now 1, below the old 34 baseline). `pnpm typecheck` stops earlier at the @verevon/remote-core build (missing libsodium-wrappers/fzstd in this worktree's node_modules), pre-existing and unrelated.
+- verevonv3 gateway: not changed, no cargo check.
+- No ZDR/schema/route-count regeneration needed.
+
+Open items:
+- Re-run the six not-landed units once Docker is up / from sessions that can write their lanes: lane a has E3.4-6 (patch .plan-work/quarry-w1w2/W23-W3-E3.4-6-chromiumoxide.patch, commit order behind E3.3-k and E3.8.7) and E3.7.4-6w uncommitted in innh-lane-a; lane c has E3.9.6-7 and E3.3-c uncommitted (E3.3-c files staged in the lane index); lane d has E3.7.10-CP uncommitted; E3.7.9b exists only as a scratchpad file (vigorous-perlman scratchpad 4b2ee830.../CrawlApprovalPrompt.tsx).
+- W3-E3.3-g: no gateway arm for browser_run.steer (registry-only); page wiring (controller per run, settle/markDelivered) not built; MP ask (steer inbox route, browser_run.steer_taken event) appended to MP-ASKS.md; Model Plane copies of the admission golden are re-vendored here, the MP owner must accept the row.
+- 8 depth rows appended to W23-depth.md (lane b 8).
+- The four line-ending-only .sha256 artifacts were not staged.
