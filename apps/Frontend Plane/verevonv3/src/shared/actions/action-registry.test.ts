@@ -418,6 +418,62 @@ describe('action registry', () => {
     }).success).toBe(false)
   })
 
+  it('takes the whole router policy, the ladder and the role table included, so a save through the action resets neither', () => {
+    const action = getActionDescriptor('router_policy.update')
+    const row = { simple: 'gpt-4o-mini', moderate: 'gpt-4o-mini', complex: 'claude-sonnet-5-5' }
+    const policy = {
+      enabled: true,
+      budget_cap_usd: 50,
+      constrained_fraction: 0.8,
+      cheap_fallback: 'gpt-4o-mini',
+      complexity: {
+        large_total_chars: 4000,
+        large_total_chars_score: 2,
+        medium_total_chars: 1200,
+        medium_total_chars_score: 1,
+        long_user_turn_chars: 800,
+        long_user_turn_score: 1,
+        code_fence_score: 1,
+        keyword_score: 1,
+        tool_use_score: 2,
+        deep_conversation_turns: 12,
+        deep_conversation_score: 1,
+        moderate_threshold: 1,
+        complex_threshold: 3,
+        keywords: ['analyze'],
+        tool_use_floors_complex: false,
+      },
+      table: { budget: row, balance: row, genius: row },
+      tool_fallback_ladder: ['claude-sonnet-4-6', 'gpt-4o-mini'],
+      roles: {
+        title: { candidates: ['claude-sonnet-5-5'], effort: 'minimal' },
+        research_plan: { candidates: ['claude-opus-4-8'] },
+      },
+    }
+
+    const parsed = action?.inputSchema.safeParse(policy)
+    expect(parsed?.success).toBe(true)
+    expect(parsed?.success && parsed.data).toMatchObject({
+      tool_fallback_ladder: ['claude-sonnet-4-6', 'gpt-4o-mini'],
+      roles: policy.roles,
+      complexity: { tool_use_floors_complex: false },
+    })
+    // A save that leaves the ladder or the complexity flag out would reset it on the server, so it is refused.
+    expect(action?.inputSchema.safeParse({ ...policy, tool_fallback_ladder: undefined }).success).toBe(false)
+    expect(action?.inputSchema.safeParse({
+      ...policy,
+      complexity: { ...policy.complexity, tool_use_floors_complex: undefined },
+    }).success).toBe(false)
+    // The role table is optional, and a role names one to four models and only the four purposes.
+    expect(action?.inputSchema.safeParse({ ...policy, roles: undefined }).success).toBe(true)
+    expect(action?.inputSchema.safeParse({ ...policy, roles: { title: { candidates: [] } } }).success).toBe(false)
+    expect(action?.inputSchema.safeParse({
+      ...policy,
+      roles: { title: { candidates: ['a', 'b', 'c', 'd', 'e'] } },
+    }).success).toBe(false)
+    expect(action?.inputSchema.safeParse({ ...policy, roles: { summarise: { candidates: ['a'] } } }).success).toBe(false)
+  })
+
   it('registers the memory controls with their risk: pausing is light, resetting is gated and final', () => {
     const setState = getActionDescriptor('memory.set_state')
     const reset = getActionDescriptor('memory.reset')

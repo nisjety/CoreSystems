@@ -3835,6 +3835,11 @@ export function getModelEntitlementMeta(): ModelEntitlementMeta | undefined {
 export interface ModelCatalogue {
   readonly models: ModelInfo[]
   readonly entitlement?: ModelEntitlementMeta
+  /**
+   * Whether side tasks ask the platform role table (`role_routing` beside `models`). The gateway leaves it out
+   * while the switch is off, so `undefined` means off.
+   */
+  readonly roleRouting?: boolean
 }
 
 /**
@@ -3919,7 +3924,11 @@ export async function listModelCatalogue(): Promise<ModelCatalogue> {
       }
     })
     .filter((model) => model.id.length > 0)
-  return { models, ...(entitlement ? { entitlement } : {}) }
+  return {
+    models,
+    ...(entitlement ? { entitlement } : {}),
+    ...(envelope?.role_routing === true ? { roleRouting: true } : {}),
+  }
 }
 
 export async function listModels(): Promise<ModelInfo[]> {

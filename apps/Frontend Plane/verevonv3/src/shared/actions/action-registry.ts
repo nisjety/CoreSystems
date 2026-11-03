@@ -1548,10 +1548,20 @@ const routerPolicyModeTableInput = z.object({
   complex: z.string().min(1),
 })
 
+// The side-task purposes the role table names (EP-13 S4); inference-core refuses any other key.
+const routerPolicyRolePurposes = ['title', 'follow_ups', 'verification_judge', 'research_plan'] as const
+
+const routerPolicyRoleInput = z.object({
+  candidates: z.array(z.string().min(1)).min(1).max(4),
+  effort: z.string().optional(),
+})
+
 // The owner enforces no admin gate on this write today — only org-scoping.
 // See dispatch_router_policy_update's own comment: the high risk/
 // requires-approval posture here compensates for that at the registry level,
 // since this is a full-document PUT of the org's entire model-routing table.
+// Every field of the document is listed, the ones the page does not show included:
+// the owner defaults a field it does not receive, so an unlisted field is reset by a save.
 const routerPolicyUpdateInput = z.object({
   enabled: z.boolean(),
   budget_cap_usd: z.number().nonnegative(),
@@ -1572,12 +1582,15 @@ const routerPolicyUpdateInput = z.object({
     moderate_threshold: z.number(),
     complex_threshold: z.number(),
     keywords: z.array(z.string()),
+    tool_use_floors_complex: z.boolean(),
   }),
   table: z.object({
     budget: routerPolicyModeTableInput,
     balance: routerPolicyModeTableInput,
     genius: routerPolicyModeTableInput,
   }),
+  tool_fallback_ladder: z.array(z.string().min(1)).max(8),
+  roles: z.partialRecord(z.enum(routerPolicyRolePurposes), routerPolicyRoleInput).optional(),
 })
 
 const chatSubmitFeedbackInput = z.object({
