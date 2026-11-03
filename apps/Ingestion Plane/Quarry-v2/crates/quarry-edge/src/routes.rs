@@ -134,6 +134,11 @@ pub fn router(state: AppState) -> Router {
             "/v1/internal/orgs/:org/profiles",
             delete(crate::internal_routes::purge_org_profiles),
         )
+        // W2-U49: user-level erasure of step receipts. Same token, counts only.
+        .route(
+            "/v1/internal/orgs/:org/users/:user/receipts",
+            delete(crate::internal_routes::purge_user_receipts),
+        )
         .merge(crate::queue_routes::internal_router());
 
     // WS17.P0 — the profile list and import. Their own router: the import body is a whole

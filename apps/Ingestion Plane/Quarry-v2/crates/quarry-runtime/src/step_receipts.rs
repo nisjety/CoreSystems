@@ -16,6 +16,11 @@
 //! organization-scoped storage. All stores are append-only; never mutate or
 //! delete a receipt. To override a step, append a corrective receipt with
 //! `correction_of: <prior_id>`.
+//!
+//! The one exception is erasure: an org erasure (`org_erasure::PgTableErasure`,
+//! family `step_receipts`) and a user-level erasure
+//! ([`StepReceiptStore::purge_for_actor`], W2-U49, X-19 condition c) delete
+//! rows. Both report counts only.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -527,6 +532,83 @@ pub enum StepOutcome {
     Skipped { reason: String },
 }
 
+/// What one user-level receipt erasure removed (W2-U49). Counts only: no id,
+/// run or payload leaves the store.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct ActorReceiptPurge {
+    /// Step receipts whose `org_id` and `actor_id` matched.
+    pub receipts: u64,
+    /// Browser timeline events whose `org_id` and `actor_id` matched.
+    pub timeline_events: u64,
+}
+
+impl ActorReceiptPurge {
+    /// Rows removed across both tables.
+    pub fn total(&self) -> u64 {
+        self.receipts + self.timeline_events
+    }
+}
+
+/// Both ids are required: an empty actor would otherwise read as "every row of
+/// the org" in a store that matched loosely.
+fn validate_actor_purge(org_id: &str, actor_id: &str) -> QuarryResult<()> {
+    if org_id.trim().is_empty() || actor_id.trim().is_empty() {
+        return Err(QuarryError::new(
+            ErrorCode::BadRequest,
+            "org_id and actor_id are required",
+        ));
+    }
+    Ok(())
+}
+
+/// W2-U49: delete one user's step receipts and browser timeline events in one
+/// org, in one transaction (`DELETE ... WHERE org_id = $1 AND actor_id = $2`).
+/// Idempotent: a second call removes nothing and reports zeros. Rows written
+/// before migration 0008 have a NULL `actor_id`; they cannot be attributed to a
+/// user and are reached only by the org erasure family.
+///
+/// A free function over the pool rather than a `PostgresStepReceiptStore`
+/// override, so the edge can call it with the pool it already holds; the store
+/// override is a one-line delegation to this (depth row).
+#[cfg(feature = "postgres-queue")]
+pub async fn purge_actor_receipts_pg(
+    pool: &sqlx::postgres::PgPool,
+    org_id: &str,
+    actor_id: &str,
+) -> QuarryResult<ActorReceiptPurge> {
+    validate_actor_purge(org_id, actor_id)?;
+    // The class only: a sqlx error can echo bound values.
+    fn fail(step: &'static str) -> QuarryError {
+        QuarryError::new(
+            ErrorCode::Internal,
+            format!("user receipt erasure: database {step} failed"),
+        )
+    }
+    let mut tx = pool.begin().await.map_err(|_| fail("begin"))?;
+    let timeline_events = sqlx::query(
+        "DELETE FROM quarry_browser_timeline_events WHERE org_id = $1 AND actor_id = $2",
+    )
+    .bind(org_id)
+    .bind(actor_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(|_| fail("delete"))?
+    .rows_affected();
+    let receipts =
+        sqlx::query("DELETE FROM quarry_step_receipts WHERE org_id = $1 AND actor_id = $2")
+            .bind(org_id)
+            .bind(actor_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|_| fail("delete"))?
+            .rows_affected();
+    tx.commit().await.map_err(|_| fail("commit"))?;
+    Ok(ActorReceiptPurge {
+        receipts,
+        timeline_events,
+    })
+}
+
 #[async_trait]
 pub trait StepReceiptStore: Send + Sync {
     /// Append a receipt. MUST be idempotent on `receipt_id`.
@@ -640,6 +722,20 @@ pub trait StepReceiptStore: Send + Sync {
 
     async fn close_run_checkpoint(&self, _org_id: &str, _run_id: &RunKind) -> QuarryResult<()> {
         Ok(())
+    }
+
+    /// W2-U49 (X-19 condition c): delete every receipt and browser timeline
+    /// event one user initiated in one org. Idempotent, counts only. The default
+    /// refuses, so a store that cannot erase says so instead of reporting zeros.
+    async fn purge_for_actor(
+        &self,
+        _org_id: &str,
+        _actor_id: &str,
+    ) -> QuarryResult<ActorReceiptPurge> {
+        Err(QuarryError::new(
+            ErrorCode::Unsupported,
+            "user receipt erasure is not configured for this store",
+        ))
     }
 }
 
@@ -772,6 +868,44 @@ impl StepReceiptStore for InMemoryStepReceiptStore {
             checkpoint.status = AgentRunStatus::Closed;
         }
         Ok(())
+    }
+
+    async fn purge_for_actor(
+        &self,
+        org_id: &str,
+        actor_id: &str,
+    ) -> QuarryResult<ActorReceiptPurge> {
+        validate_actor_purge(org_id, actor_id)?;
+        let owned = |receipt: &StepReceipt| {
+            receipt.org_id.as_deref() == Some(org_id) && receipt.actor_id.as_deref() == Some(actor_id)
+        };
+        let mut by_id = self.by_id.write().await;
+        let before = by_id.len();
+        by_id.retain(|_, receipt| !owned(&*receipt));
+        let receipts = (before - by_id.len()) as u64;
+        drop(by_id);
+        let mut by_run = self.by_run.write().await;
+        for stream in by_run.values_mut() {
+            stream.retain(|receipt| !owned(receipt));
+        }
+        by_run.retain(|_, stream| !stream.is_empty());
+        drop(by_run);
+        let mut timeline_events: u64 = 0;
+        self.timeline_events
+            .write()
+            .await
+            .retain(|(event_org, event_actor, _), stream| {
+                if event_org.as_str() == org_id && event_actor.as_str() == actor_id {
+                    timeline_events += stream.len() as u64;
+                    false
+                } else {
+                    true
+                }
+            });
+        Ok(ActorReceiptPurge {
+            receipts,
+            timeline_events,
+        })
     }
 }
 
@@ -1971,5 +2105,215 @@ mod redaction_tests {
         let json = serde_json::to_string(&masked).unwrap();
         assert!(!json.contains("eyJ"));
         assert!(!tally.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod user_erasure_tests {
+    use super::*;
+    use quarry_core::ids::Id;
+
+    fn action() -> AgentAction {
+        AgentAction::Navigate {
+            url: "https://example.com".into(),
+        }
+    }
+
+    fn receipt(run_id: &RunKind, step: u32, org: &str, actor: &str) -> StepReceipt {
+        ReceiptBuilder::start(run_id.to_string(), step)
+            .org_id(org)
+            .actor_id(actor)
+            .complete(action(), None, 0.001)
+    }
+
+    fn control_event(org: &str, actor: &str, run_id: &RunKind) -> BrowserTimelineEvent {
+        BrowserTimelineEvent::new(
+            org,
+            actor,
+            run_id.to_string(),
+            BrowserTimelineEventKind::Control {
+                mode: BrowserControlMode::HumanTakeover,
+                initiated_by: BrowserTimelineInitiator::Human,
+                control_epoch: 1,
+            },
+        )
+    }
+
+    #[tokio::test]
+    async fn purge_for_actor_removes_only_that_user_in_that_org_and_is_idempotent() {
+        let store = InMemoryStepReceiptStore::new();
+        let run_id: RunKind = Id::new();
+        for r in [
+            receipt(&run_id, 1, "org_a", "user_a"),
+            receipt(&run_id, 2, "org_a", "user_a"),
+            receipt(&run_id, 3, "org_a", "user_b"),
+            receipt(&run_id, 4, "org_b", "user_a"),
+        ] {
+            store.append(r).await.unwrap();
+        }
+        // A legacy receipt with no actor binding is never attributed to a user.
+        let mut legacy = receipt(&run_id, 5, "org_a", "user_a");
+        legacy.actor_id = None;
+        store.append(legacy).await.unwrap();
+        for event in [
+            control_event("org_a", "user_a", &run_id),
+            control_event("org_a", "user_b", &run_id),
+        ] {
+            store.append_browser_timeline_event(event).await.unwrap();
+        }
+
+        let first = store.purge_for_actor("org_a", "user_a").await.unwrap();
+        assert_eq!(
+            first,
+            ActorReceiptPurge {
+                receipts: 2,
+                timeline_events: 1
+            }
+        );
+        assert_eq!(first.total(), 3);
+        assert_eq!(store.count().await, 3, "other user, other org and legacy rows stay");
+        let left = store.list(&run_id).await.unwrap();
+        assert!(left.iter().all(|r| !(r.org_id.as_deref() == Some("org_a")
+            && r.actor_id.as_deref() == Some("user_a"))));
+        assert!(store
+            .list_browser_timeline_events("org_a", "user_a", &run_id)
+            .await
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            store
+                .list_browser_timeline_events("org_a", "user_b", &run_id)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+
+        let second = store.purge_for_actor("org_a", "user_a").await.unwrap();
+        assert_eq!(second, ActorReceiptPurge::default(), "a redelivery reports zeros");
+    }
+
+    #[tokio::test]
+    async fn purge_for_actor_refuses_empty_ids() {
+        let store = InMemoryStepReceiptStore::new();
+        for (org, actor) in [("", "user_a"), ("org_a", ""), ("org_a", "  ")] {
+            let err = store.purge_for_actor(org, actor).await.unwrap_err();
+            assert_eq!(err.code, ErrorCode::BadRequest);
+        }
+    }
+
+    struct NoErasureStore;
+
+    #[async_trait]
+    impl StepReceiptStore for NoErasureStore {
+        async fn append(&self, _receipt: StepReceipt) -> QuarryResult<()> {
+            Ok(())
+        }
+        async fn list(&self, _run_id: &RunKind) -> QuarryResult<Vec<StepReceipt>> {
+            Ok(Vec::new())
+        }
+        async fn get(&self, _receipt_id: &str) -> QuarryResult<Option<StepReceipt>> {
+            Ok(None)
+        }
+    }
+
+    #[tokio::test]
+    async fn a_store_without_erasure_refuses_rather_than_reporting_zeros() {
+        let err = NoErasureStore
+            .purge_for_actor("org_a", "user_a")
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, ErrorCode::Unsupported);
+    }
+}
+
+// Needs DATABASE_URL (self-skips without it; REQUIRE_CONTRACT=1 makes that a
+// failure), like the other postgres_* store tests.
+#[cfg(all(test, feature = "postgres-queue"))]
+mod user_erasure_pg_tests {
+    use super::*;
+    use crate::postgres_step_receipts::PostgresStepReceiptStore;
+    use quarry_core::ids::Id;
+
+    #[tokio::test]
+    async fn pg_purge_actor_receipts_deletes_one_user_in_one_org_and_is_idempotent() {
+        let Some(pool) =
+            crate::postgres_test_support::isolated_pool("user receipt erasure (W2-U49)").await
+        else {
+            eprintln!("skipping: DATABASE_URL not set");
+            return;
+        };
+        let store = PostgresStepReceiptStore::new(pool.clone());
+        let run_id: RunKind = Id::new();
+        let make = |step: u32, org: &str, actor: &str| {
+            ReceiptBuilder::start(run_id.to_string(), step)
+                .org_id(org)
+                .actor_id(actor)
+                .complete(
+                    AgentAction::Navigate {
+                        url: "https://example.com".into(),
+                    },
+                    None,
+                    0.001,
+                )
+        };
+        for r in [
+            make(1, "org_a", "user_a"),
+            make(2, "org_a", "user_a"),
+            make(3, "org_a", "user_b"),
+            make(4, "org_b", "user_a"),
+        ] {
+            store.append(r).await.unwrap();
+        }
+        store
+            .append_browser_timeline_event(BrowserTimelineEvent::new(
+                "org_a",
+                "user_a",
+                run_id.to_string(),
+                BrowserTimelineEventKind::Control {
+                    mode: BrowserControlMode::HumanTakeover,
+                    initiated_by: BrowserTimelineInitiator::Human,
+                    control_epoch: 1,
+                },
+            ))
+            .await
+            .unwrap();
+
+        let first = purge_actor_receipts_pg(&pool, "org_a", "user_a")
+            .await
+            .unwrap();
+        assert_eq!(
+            first,
+            ActorReceiptPurge {
+                receipts: 2,
+                timeline_events: 1
+            }
+        );
+        assert!(store
+            .list_for_actor("org_a", "user_a", &run_id)
+            .await
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            store
+                .list_for_actor("org_a", "user_b", &run_id)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            store
+                .list_for_actor("org_b", "user_a", &run_id)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        let second = purge_actor_receipts_pg(&pool, "org_a", "user_a")
+            .await
+            .unwrap();
+        assert_eq!(second, ActorReceiptPurge::default());
+        assert!(purge_actor_receipts_pg(&pool, "org_a", "").await.is_err());
     }
 }

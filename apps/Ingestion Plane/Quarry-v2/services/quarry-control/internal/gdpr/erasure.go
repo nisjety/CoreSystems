@@ -12,15 +12,41 @@
 // subject for "user"/"user_anonymize" erasure with a different, richer
 // payload shape; this package ignores those (see decodeErasureEvent) since
 // a per-user erasure is not this service's org-scoped purge's concern.
+//
+// W2-U49 (X-19 condition c): with QUARRY_CONTROL_GDPR_USER_RECEIPTS on, a
+// "user" or "user_anonymize" event is no longer a no-op: quarry-control calls
+// quarry-edge DELETE /v1/internal/orgs/{org}/users/{user}/receipts, which
+// deletes the step receipts and browser timeline events that user initiated in
+// that org. user-core's saga publishes one such event per org the user
+// belonged to (user_erasure_fanout snapshots the memberships), so no
+// registration on the Control Plane side is needed. Off by default.
 package gdpr
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"net/http"
+	"net/url"
 	"strings"
+
+	"github.com/rs/zerolog"
 
 	"github.com/triodelab/quarry-v2/services/quarry-control/internal/store"
 )
+
+// UserReceiptsFlagEnv switches on the user-level receipt erasure hop (W2-U49).
+// Unset or anything but 1/true/on/yes leaves user events the no-op they were.
+const UserReceiptsFlagEnv = "QUARRY_CONTROL_GDPR_USER_RECEIPTS"
+
+// UserReceiptPurger deletes one user's step receipts in one org, held by
+// quarry-edge. HTTPEdgePurger implements it. A nil UserReceiptPurger means the
+// hop is off.
+type UserReceiptPurger interface {
+	PurgeEdgeUserReceipts(orgID, userID string) (EdgePurgeResult, error)
+}
 
 // ErasureRequestedSubject mirrors org-core's GDPRErasureFanoutSubject.
 const ErasureRequestedSubject = "verevon.gdpr.erasure.requested"
@@ -94,9 +120,36 @@ func HandleErasure(purger OrgPurger, payload []byte) (store.PurgeResult, error) 
 // a redelivery repeats them safely. Other events are the same deliberate no-ops
 // as HandleErasure.
 func HandleErasureWithEdge(purger OrgPurger, edge EdgePurger, payload []byte) (store.PurgeResult, EdgePurgeResult, error) {
+	return HandleErasureWithUsers(purger, edge, nil, payload)
+}
+
+// isUserSubject is true for the two subject types user-core's saga publishes.
+func isUserSubject(subjectType string) bool {
+	return subjectType == "user" || subjectType == "user_anonymize"
+}
+
+// HandleErasureWithUsers is HandleErasureWithEdge plus the user-level receipt
+// hop (W2-U49). A "user" or "user_anonymize" event with users not nil deletes
+// that user's step receipts in the event's org through quarry-edge; both ids
+// are required, and an event missing either is a deliberate no-op (acked), like
+// an org event missing its org. An anonymize erasure deletes the receipts too:
+// a receipt holds what the user typed, which cannot be anonymised in place. A
+// hop failure is a plain error (NAK and redelivery); the delete is idempotent.
+// With users nil, user events stay the no-op they were.
+func HandleErasureWithUsers(purger OrgPurger, edge EdgePurger, users UserReceiptPurger, payload []byte) (store.PurgeResult, EdgePurgeResult, error) {
 	evt, err := decodeErasureEvent(payload)
 	if err != nil {
 		return store.PurgeResult{}, EdgePurgeResult{}, err
+	}
+	if isUserSubject(evt.SubjectType) {
+		if users == nil || evt.OrgID == "" || evt.SubjectID == "" {
+			return store.PurgeResult{}, EdgePurgeResult{}, nil
+		}
+		edgeResult, err := users.PurgeEdgeUserReceipts(evt.OrgID, evt.SubjectID)
+		if err != nil {
+			return store.PurgeResult{}, EdgePurgeResult{}, err
+		}
+		return store.PurgeResult{}, edgeResult, nil
 	}
 	if evt.SubjectType != "organization" {
 		return store.PurgeResult{}, EdgePurgeResult{}, nil
@@ -124,4 +177,83 @@ func HandleErasureWithEdge(purger OrgPurger, edge EdgePurger, payload []byte) (s
 		return result, EdgePurgeResult{}, err
 	}
 	return result, edgeResult, nil
+}
+
+// PurgeEdgeUserReceipts deletes one user's step receipts in one org in
+// quarry-edge (W2-U49). Idempotent. Both ids are escaped as single path
+// segments.
+func (p *HTTPEdgePurger) PurgeEdgeUserReceipts(orgID, userID string) (EdgePurgeResult, error) {
+	endpoint := p.baseURL + "/v1/internal/orgs/" + url.PathEscape(orgID) +
+		"/users/" + url.PathEscape(userID) + "/receipts"
+	return p.deleteForCounts(endpoint)
+}
+
+// deleteForCounts sends one DELETE with the internal token and reads the
+// counts-only envelope. Errors carry fixed messages only: the endpoint holds
+// the org and user ids.
+func (p *HTTPEdgePurger) deleteForCounts(endpoint string) (EdgePurgeResult, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), EdgePurgeTimeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, endpoint, nil)
+	if err != nil {
+		return EdgePurgeResult{}, errEdgeRequest
+	}
+	req.Header.Set("Authorization", "Bearer "+p.token)
+	req.Header.Set("Accept", "application/json")
+	resp, err := p.client.Do(req)
+	if err != nil {
+		return EdgePurgeResult{}, errEdgeUnreachable
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxEdgeResponseBytes))
+	if err != nil {
+		return EdgePurgeResult{}, errEdgeResponse
+	}
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		return EdgePurgeResult{}, fmt.Errorf("gdpr: edge purge refused with status %d", resp.StatusCode)
+	}
+	var envelope struct {
+		Data struct {
+			Families []EdgePurgeFamily `json:"families"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		return EdgePurgeResult{}, errEdgeResponse
+	}
+	return EdgePurgeResult{Families: envelope.Data.Families}, nil
+}
+
+// PurgeEdgeUserReceipts makes a misconfigured hop refuse user erasures too.
+func (f failingEdgePurger) PurgeEdgeUserReceipts(string, string) (EdgePurgeResult, error) {
+	return EdgePurgeResult{}, f.err
+}
+
+// flagOn is true for the usual spellings of an enabled boolean flag.
+func flagOn(raw string) bool {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "1", "true", "on", "yes":
+		return true
+	}
+	return false
+}
+
+// UserReceiptPurgerFromEnv builds the user-level hop (W2-U49). The flag off
+// returns nil (user events stay no-ops). The flag on with the edge hop off or
+// unable to erase users returns a purger that fails every call, so user
+// erasures are retried and the gap stays visible until the config is fixed.
+func UserReceiptPurgerFromEnv(getenv func(string) string, edge EdgePurger, logger zerolog.Logger) UserReceiptPurger {
+	if !flagOn(getenv(UserReceiptsFlagEnv)) {
+		return nil
+	}
+	if edge == nil {
+		logger.Error().Msg("gdpr: " + UserReceiptsFlagEnv + " is on but QUARRY_EDGE_URL is unset; user erasures will be retried until fixed")
+		return failingEdgePurger{err: errors.New("gdpr: user receipt erasure is not configured (edge)")}
+	}
+	users, ok := edge.(UserReceiptPurger)
+	if !ok {
+		logger.Error().Msg("gdpr: the edge hop cannot erase user receipts; user erasures will be retried until fixed")
+		return failingEdgePurger{err: errors.New("gdpr: user receipt erasure is not configured (hop)")}
+	}
+	logger.Info().Msg("gdpr: user-level receipt erasure hop enabled")
+	return users
 }
