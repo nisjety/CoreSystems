@@ -8,6 +8,7 @@ use mp_contracts::model_entitlement::Reason;
 use tokio::sync::mpsc;
 use tracing::{info, warn, Instrument};
 
+use super::gemini::GeminiProvider;
 use super::policy_client::PolicyClient;
 use super::routing_policy::RoutingPolicy;
 use super::timing::{CallClock, StreamClock};
@@ -19,7 +20,7 @@ use super::{
     Residency,
 };
 use crate::cache::PromptCache;
-use crate::config::{EntitlementConfig, InferenceConfig};
+use crate::config::{EntitlementConfig, InferenceConfig, VertexGeminiConfig};
 use crate::entitlement::{EntitlementGate, RequestAccess};
 
 /// A boxed, type-erased provider.
@@ -327,6 +328,12 @@ fn is_anthropic_model(model: &str) -> bool {
     model.trim().to_ascii_lowercase().starts_with("claude")
 }
 
+/// True for a Gemini model id. Gemini ids are served only by the Vertex provider, so they
+/// never reach an OpenAI-shaped surface, which would answer them with a 404.
+fn is_gemini_model(model: &str) -> bool {
+    model.trim().to_ascii_lowercase().starts_with("gemini")
+}
+
 /// The Azure `model-router` deployment — Azure auto-routes it to the cheapest
 /// capable model. Used as the smart default for unspecified requests when the
 /// Azure `OpenAI` provider is serving them.
@@ -554,11 +561,15 @@ fn provider_serves_model(
     model: &str,
 ) -> bool {
     if is_unspecified_model(model) {
-        return true;
+        // "Auto" resolves to a platform default that every provider may take, except
+        // Gemini: its catalogue is opt-in by model id, and an Auto prompt must not leave
+        // for Vertex just because the chain tried it first.
+        return caps.model_family != ModelFamily::Gemini;
     }
     let family_matches = match caps.model_family {
         ModelFamily::Anthropic => is_anthropic_model(model),
-        ModelFamily::OpenAiCompatible => !is_anthropic_model(model),
+        ModelFamily::OpenAiCompatible => !is_anthropic_model(model) && !is_gemini_model(model),
+        ModelFamily::Gemini => is_gemini_model(model),
     };
     if !family_matches {
         return false;
@@ -602,7 +613,14 @@ fn residency_gate_blocks(req: &InferRequest, caps_residency: Residency) -> bool 
 }
 
 impl FallbackChain {
-    /// Build a fallback chain from configuration.
+    /// Build a fallback chain from configuration. The Vertex Gemini settings are read from
+    /// the environment, so boot code calls this. Tests call
+    /// [`Self::from_config_with_gemini`] and choose those settings themselves.
+    pub fn from_config(cfg: &InferenceConfig) -> Self {
+        Self::from_config_with_gemini(cfg, &VertexGeminiConfig::from_env())
+    }
+
+    /// Build a fallback chain from configuration with the Vertex Gemini settings given.
     ///
     /// # Panics
     ///
@@ -613,7 +631,7 @@ impl FallbackChain {
     // Linear provider-registration table plus the intent/budget wiring; reads
     // top-to-bottom and isn't worth fragmenting across helpers.
     #[allow(clippy::too_many_lines)]
-    pub fn from_config(cfg: &InferenceConfig) -> Self {
+    pub fn from_config_with_gemini(cfg: &InferenceConfig, gemini: &VertexGeminiConfig) -> Self {
         let mut providers: Vec<(String, BoxedProvider)> = Vec::new();
 
         // Validated at config load; Arc'd once so each registration site shares
@@ -735,6 +753,18 @@ impl FallbackChain {
                                 providers.push(("anthropic".to_owned(), Arc::new(p)));
                                 info!(provider = "anthropic", "provider registered");
                             }
+                        }
+                    }
+                }
+                "vertex-gemini" | "gemini" => {
+                    // Refusals are logged inside `from_config`; the chain just goes without.
+                    if !providers
+                        .iter()
+                        .any(|(registered, _)| registered == "vertex-gemini")
+                    {
+                        if let Some(p) = GeminiProvider::from_config(gemini) {
+                            providers.push(("vertex-gemini".to_owned(), Arc::new(p)));
+                            info!(provider = "vertex-gemini", "provider registered");
                         }
                     }
                 }

@@ -107,6 +107,7 @@ pub enum Family {
     OpenAi,
     Anthropic,
     Codex,
+    Gemini,
 }
 
 /// What one model can express.
@@ -269,6 +270,12 @@ const ROWS: &[Row] = &[
             levels: CODEX_LEVELS,
             verified_on: None,
         },
+    },
+    // Gemini on Vertex: no effort control until the thinking-level wire lands (EP-13-S7).
+    Row {
+        family: Family::Gemini,
+        matches: |_| true,
+        support: Support::NONE,
     },
 ];
 

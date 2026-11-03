@@ -117,6 +117,26 @@ const ROWS: &[Row] = &[
         64_000,
         Lifecycle::Deprecated,
     ),
+    // Gemini 2.5 Pro on Vertex: 1,048,576 input and 65,536 output tokens. The page
+    // announces its retirement on 2026-10-20 and says the model may still answer on the
+    // Gemini API afterwards.
+    // https://docs.cloud.google.com/vertex-ai/generative-ai/docs/models/gemini/2-5-pro
+    row(
+        Family::Gemini,
+        "gemini-2.5-pro",
+        1_048_576,
+        65_536,
+        Lifecycle::Deprecated,
+    ),
+    // Gemini 2.5 Flash: the same numbers and the same announced retirement.
+    // https://docs.cloud.google.com/vertex-ai/generative-ai/docs/models/gemini/2-5-flash
+    row(
+        Family::Gemini,
+        "gemini-2.5-flash",
+        1_048_576,
+        65_536,
+        Lifecycle::Deprecated,
+    ),
 ];
 
 /// The record the table declares for `model` under `family`, read the way

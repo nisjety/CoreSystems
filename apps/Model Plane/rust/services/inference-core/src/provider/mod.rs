@@ -9,6 +9,7 @@ mod codex_subscription_tools;
 pub mod doc_intel;
 pub mod effort;
 pub mod fallback;
+pub mod gemini;
 pub mod intent;
 pub mod language;
 pub mod logprobs;
@@ -21,6 +22,7 @@ pub mod routing_policy;
 pub mod speech;
 pub mod timing;
 pub mod translation;
+pub mod vertex_auth;
 pub mod video;
 pub mod vision;
 pub mod zdr;
@@ -624,6 +626,8 @@ pub enum ModelFamily {
     OpenAiCompatible,
     /// Anthropic Messages shape, direct or via Azure AI Foundry.
     Anthropic,
+    /// Gemini on Vertex AI, served over the native `generateContent` surface.
+    Gemini,
 }
 
 /// The strongest residency guarantee a provider's traffic honors.
