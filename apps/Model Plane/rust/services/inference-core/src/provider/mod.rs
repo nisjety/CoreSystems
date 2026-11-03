@@ -18,6 +18,7 @@ pub mod openai;
 pub mod overflow;
 pub mod policy_client;
 pub mod realtime;
+pub mod role;
 pub mod routing_policy;
 pub mod speech;
 pub mod timing;

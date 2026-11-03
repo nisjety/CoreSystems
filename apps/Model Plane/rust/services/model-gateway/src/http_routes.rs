@@ -10283,10 +10283,19 @@ struct ListModelsHttpResponse {
     /// same JSON as before.
     #[serde(skip_serializing_if = "Option::is_none")]
     entitlement: Option<ModelEntitlementMeta>,
+    /// Whether side tasks ask the platform role table (`MODEL_GATEWAY_ROLE_ROUTING`, EP-13 S4).
+    /// Left out while off, so a deploy with the switch off serves the same JSON as before.
+    #[serde(skip_serializing_if = "is_false")]
+    role_routing: bool,
     /// What a chat turn may attach, enforced by the stream route. Left out when
     /// the attachment contract is off, so the client keeps its own constants.
     #[serde(skip_serializing_if = "Option::is_none")]
     attachment_policy: Option<crate::attachment_policy::DeclaredAttachmentPolicy>,
+}
+
+/// The serde skip predicate for a flag that is left out while it is off.
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 /// `ModelAccessMeta` as the catalogue's sibling field: counts, a revision and
@@ -10383,6 +10392,7 @@ async fn list_models(
         models,
         entitlement,
         attachment_policy,
+        role_routing: crate::role_routing::role_routing_enabled(),
     }))
 }
 

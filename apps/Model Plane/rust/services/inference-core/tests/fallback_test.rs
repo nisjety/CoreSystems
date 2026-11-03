@@ -6,6 +6,9 @@ use std::time::Duration;
 
 use inference_core::config::{InferenceConfig, VertexGeminiConfig};
 use inference_core::provider::fallback::{FallbackChain, ProviderRouterDyn};
+use inference_core::provider::role::{RoleCall, RoleDecision, RoleSource, ROLE_MODEL_ID};
+use inference_core::provider::routing_policy::{RoleEntry, RolePurpose, RoutingPolicy};
+use inference_core::provider::{ModelFamily, ProviderCapabilities, Residency};
 use inference_core::provider::{
     ChatMessage, EmbedRequest, EmbedResponse, InferChunk, InferRequest, InferResponse, ModelInfo,
     PrivacyTier, ProviderError,
@@ -1017,6 +1020,285 @@ async fn vertex_gemini_registers_dark_in_an_eu_location_when_enabled() {
     assert_eq!(listed[0].residency_label, "eu");
     assert_eq!(listed[0].privacy_tier, PrivacyTier::EuResident);
     assert_eq!(hits(&token).await, 0, "registration makes no network call");
+}
+
+/// A provider that declares `caps`, serves `models`, and records each model it is asked for, so a test
+/// can see the candidate the chain actually sent.
+struct RoleRecorder {
+    caps: ProviderCapabilities,
+    models: Vec<&'static str>,
+    seen: Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+impl RoleRecorder {
+    /// An OpenAI-family provider that serves only `models`.
+    fn exclusive(
+        models: &[&'static str],
+        supports_zdr: bool,
+        residency: Residency,
+        seen: &Arc<std::sync::Mutex<Vec<String>>>,
+    ) -> Self {
+        Self {
+            caps: ProviderCapabilities {
+                model_family: ModelFamily::OpenAiCompatible,
+                exclusive_catalog: true,
+                supports_zdr,
+                residency,
+                ..ProviderCapabilities::default()
+            },
+            models: models.to_vec(),
+            seen: Arc::clone(seen),
+        }
+    }
+
+    /// An OpenAI-family provider with an open catalogue: it may be asked for any model id.
+    fn open(models: &[&'static str], seen: &Arc<std::sync::Mutex<Vec<String>>>) -> Self {
+        Self {
+            caps: ProviderCapabilities {
+                model_family: ModelFamily::OpenAiCompatible,
+                ..ProviderCapabilities::default()
+            },
+            models: models.to_vec(),
+            seen: Arc::clone(seen),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl ProviderRouterDyn for RoleRecorder {
+    async fn infer_dyn(&self, req: &InferRequest) -> Result<InferResponse, ProviderError> {
+        self.seen
+            .lock()
+            .expect("the recorder lock")
+            .push(req.model.clone());
+        Ok(InferResponse {
+            request_id: req.request_id.clone(),
+            content: "answer".to_owned(),
+            model_used: req.model.clone(),
+            stop_reason: "end_turn".to_owned(),
+            ..Default::default()
+        })
+    }
+
+    async fn infer_stream_dyn(
+        &self,
+        _req: &InferRequest,
+    ) -> Result<mpsc::Receiver<InferChunk>, ProviderError> {
+        Err(ProviderError::UnsupportedModel(
+            "streaming is not under test".to_owned(),
+        ))
+    }
+
+    async fn create_embedding_dyn(
+        &self,
+        _req: &EmbedRequest,
+    ) -> Result<EmbedResponse, ProviderError> {
+        Err(ProviderError::UnsupportedModel(
+            "embeddings are not under test".to_owned(),
+        ))
+    }
+
+    fn list_models_dyn(&self) -> Vec<ModelInfo> {
+        self.models
+            .iter()
+            .map(|id| ModelInfo {
+                id: (*id).to_owned(),
+                modality: "chat".to_owned(),
+                ..Default::default()
+            })
+            .collect()
+    }
+
+    fn capabilities_dyn(&self) -> ProviderCapabilities {
+        self.caps.clone()
+    }
+}
+
+fn role_chain(providers: Vec<(&str, RoleRecorder)>) -> FallbackChain {
+    let providers: Vec<(String, Arc<dyn ProviderRouterDyn>)> = providers
+        .into_iter()
+        .map(|(name, provider)| {
+            (
+                name.to_owned(),
+                Arc::new(provider) as Arc<dyn ProviderRouterDyn>,
+            )
+        })
+        .collect();
+    FallbackChain::new_with_providers(providers, 1)
+}
+
+fn role_policy(purpose: RolePurpose, candidates: &[&str]) -> RoutingPolicy {
+    let mut policy = RoutingPolicy::default();
+    policy.roles.insert(
+        purpose,
+        RoleEntry {
+            candidates: candidates.iter().map(|id| (*id).to_owned()).collect(),
+            effort: None,
+        },
+    );
+    policy
+}
+
+fn role_call(purpose: RolePurpose, fallback_model: &str) -> RoleCall {
+    RoleCall {
+        purpose: Some(purpose),
+        fallback_model: fallback_model.to_owned(),
+    }
+}
+
+fn role_request() -> InferRequest {
+    InferRequest {
+        model: ROLE_MODEL_ID.to_owned(),
+        ..sample_request()
+    }
+}
+
+fn recorded(seen: &Arc<std::sync::Mutex<Vec<String>>>) -> Vec<String> {
+    seen.lock().expect("the recorder lock").clone()
+}
+
+#[tokio::test]
+async fn verevon_role_never_reaches_a_provider_verbatim() {
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let chain = role_chain(vec![(
+        "openai",
+        RoleRecorder::exclusive(&["gpt-5-nano"], false, Residency::Global, &seen),
+    )]);
+    chain
+        .policy_handle()
+        .store(Arc::new(role_policy(RolePurpose::Title, &["gpt-5-nano"])));
+
+    let (response, note) = chain
+        .infer_role_noted(&role_request(), &role_call(RolePurpose::Title, ""), false)
+        .await
+        .expect("the role table serves the title");
+    assert_eq!(response.model_used, "gpt-5-nano");
+    assert_eq!(recorded(&seen), vec!["gpt-5-nano".to_owned()]);
+    assert_eq!(
+        note.and_then(|note| note.role),
+        Some(RoleDecision {
+            table_entry: Some(RolePurpose::Title),
+            source: RoleSource::Table,
+        })
+    );
+
+    // A role call that names no purpose is refused before any provider is asked.
+    let error = chain
+        .infer_noted(&role_request(), false)
+        .await
+        .expect_err("a role call without a role is refused");
+    assert!(
+        matches!(error, ProviderError::RequestRejected { .. }),
+        "{error:?}"
+    );
+    assert_eq!(
+        recorded(&seen),
+        vec!["gpt-5-nano".to_owned()],
+        "the refused call reached no provider"
+    );
+}
+
+#[tokio::test]
+async fn zdr_request_skips_unattested_candidates() {
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let chain = role_chain(vec![
+        (
+            "plain",
+            RoleRecorder::exclusive(&["gpt-5-nano"], false, Residency::Global, &seen),
+        ),
+        (
+            "attested",
+            RoleRecorder::exclusive(&["gpt-5-mini"], true, Residency::Global, &seen),
+        ),
+    ]);
+    chain.policy_handle().store(Arc::new(role_policy(
+        RolePurpose::Title,
+        &["gpt-5-nano", "gpt-5-mini"],
+    )));
+    let mut request = role_request();
+    request.zdr = true;
+
+    let (response, _) = chain
+        .infer_role_noted(&request, &role_call(RolePurpose::Title, ""), false)
+        .await
+        .expect("the attested candidate serves the title");
+    assert_eq!(response.model_used, "gpt-5-mini");
+    assert_eq!(recorded(&seen), vec!["gpt-5-mini".to_owned()]);
+}
+
+#[tokio::test]
+async fn eu_floor_skips_global_candidate() {
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let chain = role_chain(vec![
+        (
+            "global",
+            RoleRecorder::exclusive(&["gpt-5-nano"], false, Residency::Global, &seen),
+        ),
+        (
+            "eu",
+            RoleRecorder::exclusive(&["gpt-5-mini"], false, Residency::Eu, &seen),
+        ),
+    ]);
+    chain.policy_handle().store(Arc::new(role_policy(
+        RolePurpose::Title,
+        &["gpt-5-nano", "gpt-5-mini"],
+    )));
+    let mut request = role_request();
+    request.min_residency = "eu".to_owned();
+
+    let (response, _) = chain
+        .infer_role_noted(&request, &role_call(RolePurpose::Title, ""), false)
+        .await
+        .expect("the EU candidate serves the title");
+    assert_eq!(response.model_used, "gpt-5-mini");
+    assert_eq!(recorded(&seen), vec!["gpt-5-mini".to_owned()]);
+}
+
+#[tokio::test]
+async fn candidate_absent_from_catalogue_is_skipped() {
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    // An open catalogue would serve any id, so only the chain's own listing refuses the first candidate.
+    let chain = role_chain(vec![(
+        "openai",
+        RoleRecorder::open(&["gpt-5-mini"], &seen),
+    )]);
+    chain.policy_handle().store(Arc::new(role_policy(
+        RolePurpose::Title,
+        &["gpt-9-imaginary", "gpt-5-mini"],
+    )));
+
+    let (response, _) = chain
+        .infer_role_noted(&role_request(), &role_call(RolePurpose::Title, ""), false)
+        .await
+        .expect("the listed candidate serves the title");
+    assert_eq!(response.model_used, "gpt-5-mini");
+    assert_eq!(recorded(&seen), vec!["gpt-5-mini".to_owned()]);
+}
+
+#[tokio::test]
+async fn a_role_with_no_table_entry_runs_on_the_turn_model() {
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let chain = role_chain(vec![(
+        "openai",
+        RoleRecorder::open(&["gpt-5-mini"], &seen),
+    )]);
+
+    let (response, note) = chain
+        .infer_role_noted(
+            &role_request(),
+            &role_call(RolePurpose::Title, "gpt-5-mini"),
+            false,
+        )
+        .await
+        .expect("the turn's own model serves the title");
+    assert_eq!(response.model_used, "gpt-5-mini");
+    assert_eq!(
+        note.and_then(|note| note.role),
+        Some(RoleDecision {
+            table_entry: None,
+            source: RoleSource::TurnModel,
+        })
+    );
 }
 
 #[tokio::test]

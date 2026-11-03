@@ -11,6 +11,8 @@ use std::time::{Duration, Instant};
 use inference_core::config::EntitlementConfig;
 use inference_core::entitlement::{EntitlementGate, RequestAccess, Resolved};
 use inference_core::provider::fallback::{FallbackChain, ProviderRouterDyn};
+use inference_core::provider::role::{RoleCall, ROLE_MODEL_ID};
+use inference_core::provider::routing_policy::{RoleEntry, RolePurpose, RoutingPolicy};
 use inference_core::provider::{
     Bearer, ChatMessage, EmbedRequest, EmbedResponse, InferChunk, InferRequest, InferResponse,
     ModelFamily, ModelInfo, ProviderCapabilities, ProviderError,
@@ -326,6 +328,36 @@ async fn a_deny_wins_over_an_allow_and_a_provider_selector_admits_its_models() {
         .expect_err("and none of another provider's");
     assert_eq!(not_entitled(error), ("claude-sonnet-4-5".to_owned(), Reason::NotInAllowList));
     assert_eq!(seen(&calls), ["gpt-5-mini"]);
+}
+
+#[tokio::test]
+async fn role_candidate_not_entitled_is_skipped() {
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let chain = chain(&calls);
+    let mut policy = RoutingPolicy::default();
+    policy.roles.insert(
+        RolePurpose::Title,
+        RoleEntry {
+            candidates: vec!["gpt-5".to_owned(), "claude-sonnet-4-5".to_owned()],
+            effort: None,
+        },
+    );
+    chain.policy_handle().store(Arc::new(policy));
+    let access = access_of(Mode::Enforce, &open(&["gpt-5"]));
+
+    let (response, _) = chain
+        .infer_role_noted(
+            &with_access(request(ROLE_MODEL_ID), &access),
+            &RoleCall {
+                purpose: Some(RolePurpose::Title),
+                fallback_model: String::new(),
+            },
+            false,
+        )
+        .await
+        .expect("the entitled candidate serves the title");
+    assert_eq!(response.model_used, "claude-sonnet-4-5");
+    assert_eq!(seen(&calls), vec!["claude-sonnet-4-5".to_owned()]);
 }
 
 #[tokio::test]

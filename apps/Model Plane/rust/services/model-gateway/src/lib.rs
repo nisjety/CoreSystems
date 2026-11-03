@@ -66,6 +66,7 @@ pub mod quarry;
 mod quarry_auth;
 pub mod queued_input;
 pub mod rate_limit;
+pub mod role_routing;
 pub mod room_run;
 pub mod readiness;
 pub mod recall_conversations;

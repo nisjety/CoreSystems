@@ -43,6 +43,7 @@ use crate::{
     },
     gateway_metrics,
     http_routes::InvokeRequest,
+    role_routing,
     state::AppState,
 };
 
@@ -1106,7 +1107,7 @@ mod subscription_route_tests {
             min_residency: "eu".into(),
             ..Default::default()
         };
-        let title = title_request(&route, "req-1", "org-1", "question", "answer");
+        let title = title_request(&route, "gpt-5-mini", "req-1", "org-1", "question", "answer");
         assert_eq!(title.min_privacy_tier, 2);
         assert_eq!(title.min_residency, "eu");
         assert_eq!(title.purpose, InferPurpose::Title as i32);
@@ -1123,7 +1124,7 @@ mod subscription_route_tests {
         };
         let snippets = vec!["a retrieved source".to_owned()];
         let judge = verification_judge_request(
-            &route, "req-1", "org-1", "question", "answer", &snippets, false,
+            &route, "gpt-5-mini", "req-1", "org-1", "question", "answer", &snippets, false,
         );
         assert_eq!(judge.min_residency, "norway");
         assert_eq!(judge.min_privacy_tier, 4);
@@ -1204,9 +1205,9 @@ mod aux_model_tests {
         };
         let snippets = vec!["A retrieved passage.".to_owned()];
         let requests = [
-            title_request(&metered, "req-1", "org-1", "question", "answer"),
-            follow_ups_request(&metered, "req-1", "org-1", "question", "answer"),
-            verification_judge_request(&metered, "req-1", "org-1", "question", "answer", &snippets, false),
+            title_request(&metered, "claude-sonnet-5-5", "req-1", "org-1", "question", "answer"),
+            follow_ups_request(&metered, "claude-sonnet-5-5", "req-1", "org-1", "question", "answer"),
+            verification_judge_request(&metered, "claude-sonnet-5-5", "req-1", "org-1", "question", "answer", &snippets, false),
         ];
         let ids: Vec<&str> = requests.iter().map(|request| request.request_id.as_str()).collect();
         assert_eq!(ids, ["req-1-title", "req-1-follow-ups", "req-1-verify"]);
@@ -1215,7 +1216,7 @@ mod aux_model_tests {
         }
         // The judge inherits the turn's retention posture; the title and the
         // follow-ups only ever carry non-ZDR exchange content.
-        assert!(verification_judge_request(&metered, "req-1", "org-1", "question", "answer", &snippets, true).zdr);
+        assert!(verification_judge_request(&metered, "claude-sonnet-5-5", "req-1", "org-1", "question", "answer", &snippets, true).zdr);
         assert!(!requests[0].zdr && !requests[1].zdr && !requests[2].zdr);
 
         // On a subscription turn the auxiliary calls keep the turn's own model whatever
@@ -1226,12 +1227,28 @@ mod aux_model_tests {
             subscription_connection_id: "connection".into(),
             ..Default::default()
         };
-        assert_eq!(title_request(&subscription, "req-2", "org-1", "question", "answer").model, "gpt-5.6-terra");
-        assert_eq!(follow_ups_request(&subscription, "req-2", "org-1", "question", "answer").model, "gpt-5.6-terra");
+        assert_eq!(title_request(&subscription, "gpt-5.6-terra", "req-2", "org-1", "question", "answer").model, "gpt-5.6-terra");
+        assert_eq!(follow_ups_request(&subscription, "gpt-5.6-terra", "req-2", "org-1", "question", "answer").model, "gpt-5.6-terra");
         assert_eq!(
-            verification_judge_request(&subscription, "req-2", "org-1", "question", "answer", &snippets, false).model,
+            verification_judge_request(&subscription, "gpt-5.6-terra", "req-2", "org-1", "question", "answer", &snippets, false).model,
             "gpt-5.6-terra"
         );
+    }
+
+    #[test]
+    fn aux_requests_keep_the_aux_model_while_the_switch_is_off() {
+        // The switch is read once from the environment, which a test does not set. With it off a side
+        // task names the aux model and carries no role fallback, exactly the request it sent before.
+        let route = InferRequest {
+            model: "claude-sonnet-5-5".into(),
+            ..Default::default()
+        };
+        let title = title_request(&route, "claude-sonnet-5-5", "req-3", "org-1", "question", "answer");
+        assert_eq!(title.model, aux_model());
+        assert!(title.role_fallback_model.is_empty());
+        let follow_ups = follow_ups_request(&route, "claude-sonnet-5-5", "req-3", "org-1", "question", "answer");
+        assert_eq!(follow_ups.model, aux_model());
+        assert!(follow_ups.role_fallback_model.is_empty());
     }
 }
 
@@ -4922,6 +4939,7 @@ pub async fn invoke_stream_sse(
                                     let judge_started = timing.now_ms();
                                     verdict = judge_sources(
                                         &grpc_req,
+                                        &model_used,
                                         &session_state,
                                         &req_id,
                                         &org_clone,
@@ -5037,6 +5055,7 @@ pub async fn invoke_stream_sse(
                                 let judge_started = timing.now_ms();
                                 verdict = judge_sources(
                                     &grpc_req,
+                                    &model_used,
                                     &session_state,
                                     &req_id,
                                     &org_clone,
@@ -5784,6 +5803,7 @@ pub async fn invoke_stream_sse(
                             let title_call = timing.call(crate::turn_timing::Phase::Title);
                             let title = generate_thread_title(
                                 &grpc_req,
+                                &model_used,
                                 &session_state,
                                 &req_id,
                                 &org_clone,
@@ -5833,6 +5853,7 @@ pub async fn invoke_stream_sse(
                         let follow_ups_call = timing.call(crate::turn_timing::Phase::FollowUps);
                         let suggestions = generate_follow_ups(
                             &grpc_req,
+                            &model_used,
                             &session_state,
                             &req_id,
                             &org_clone,
@@ -9780,9 +9801,11 @@ fn aux_model_from(value: Option<&str>) -> String {
 }
 
 /// The source judge's request: one classification over the snippets, carried on
-/// the turn's subscription when it has one, as every auxiliary call is.
+/// the turn's subscription when it has one, as every auxiliary call is. With role
+/// routing on it names the role table and carries the turn's served model instead.
 fn verification_judge_request(
     route: &InferRequest,
+    served_model: &str,
     request_id: &str,
     org_id: &str,
     question: &str,
@@ -9790,12 +9813,15 @@ fn verification_judge_request(
     snippets: &[String],
     zdr: bool,
 ) -> InferRequest {
+    let (model, role_fallback_model) =
+        role_routing::side_task_model(role_routing::role_routing_enabled(), aux_model(), served_model);
     subscription_scoped_request(
         InferRequest {
             request_id: format!("{request_id}-verify"),
             purpose: InferPurpose::VerificationJudge as i32,
             org_id: org_id.to_owned(),
-            model: aux_model().to_owned(),
+            model,
+            role_fallback_model,
             provider_hint: String::new(),
             messages: vec![ChatMessage {
                 compaction_summary: String::new(),
@@ -9827,6 +9853,7 @@ fn verification_judge_request(
 /// judge that times out or errors can never raise a score.
 async fn judge_sources(
     route: &InferRequest,
+    served_model: &str,
     state: &AppState,
     request_id: &str,
     org_id: &str,
@@ -9845,7 +9872,7 @@ async fn judge_sources(
     let response = tokio::time::timeout(
         VERIFICATION_JUDGE_TIMEOUT,
         client.infer(authenticated_inference_request(
-            verification_judge_request(route, request_id, org_id, question, answer, snippets, zdr),
+            verification_judge_request(route, served_model, request_id, org_id, question, answer, snippets, zdr),
             inference_bearer,
         )),
     )
@@ -9952,20 +9979,25 @@ async fn resample_answer(
 }
 
 /// The thread-title request: one bounded, non-streaming user turn on the
-/// auxiliary model, carried on the turn's subscription when it has one.
+/// auxiliary model, carried on the turn's subscription when it has one. With role
+/// routing on it names the role table and carries the turn's served model instead.
 fn title_request(
     route: &InferRequest,
+    served_model: &str,
     request_id: &str,
     org_id: &str,
     user_content: &str,
     assistant_answer: &str,
 ) -> InferRequest {
+    let (model, role_fallback_model) =
+        role_routing::side_task_model(role_routing::role_routing_enabled(), aux_model(), served_model);
     subscription_scoped_request(
         InferRequest {
             request_id: format!("{request_id}-title"),
             purpose: InferPurpose::Title as i32,
             org_id: org_id.to_owned(),
-            model: aux_model().to_owned(),
+            model,
+            role_fallback_model,
             provider_hint: String::new(),
             messages: vec![ChatMessage {
                 compaction_summary: String::new(),
@@ -9994,6 +10026,7 @@ fn title_request(
 /// ledger. Best-effort: every failure path returns `None` after a debug log.
 async fn generate_thread_title(
     route: &InferRequest,
+    served_model: &str,
     state: &AppState,
     request_id: &str,
     org_id: &str,
@@ -10005,7 +10038,7 @@ async fn generate_thread_title(
     let response = tokio::time::timeout(
         TITLE_GENERATION_TIMEOUT,
         client.infer(authenticated_inference_request(
-            title_request(route, request_id, org_id, user_content, assistant_answer),
+            title_request(route, served_model, request_id, org_id, user_content, assistant_answer),
             inference_bearer,
         )),
     )
@@ -10054,20 +10087,25 @@ fn thread_title_prompt(user_content: &str, assistant_answer: &str) -> String {
 }
 
 /// The follow-up suggestion request: one bounded, non-streaming user turn on the
-/// auxiliary model, carried on the turn's subscription when it has one.
+/// auxiliary model, carried on the turn's subscription when it has one. With role
+/// routing on it names the role table and carries the turn's served model instead.
 fn follow_ups_request(
     route: &InferRequest,
+    served_model: &str,
     request_id: &str,
     org_id: &str,
     user_content: &str,
     assistant_answer: &str,
 ) -> InferRequest {
+    let (model, role_fallback_model) =
+        role_routing::side_task_model(role_routing::role_routing_enabled(), aux_model(), served_model);
     subscription_scoped_request(
         InferRequest {
             request_id: format!("{request_id}-follow-ups"),
             purpose: InferPurpose::FollowUps as i32,
             org_id: org_id.to_owned(),
-            model: aux_model().to_owned(),
+            model,
+            role_fallback_model,
             provider_hint: String::new(),
             messages: vec![ChatMessage {
                 compaction_summary: String::new(),
@@ -10096,6 +10134,7 @@ fn follow_ups_request(
 /// like a call that produced no usable title).
 async fn generate_follow_ups(
     route: &InferRequest,
+    served_model: &str,
     state: &AppState,
     request_id: &str,
     org_id: &str,
@@ -10107,7 +10146,7 @@ async fn generate_follow_ups(
     let response = tokio::time::timeout(
         FOLLOW_UPS_GENERATION_TIMEOUT,
         client.infer(authenticated_inference_request(
-            follow_ups_request(route, request_id, org_id, user_content, assistant_answer),
+            follow_ups_request(route, served_model, request_id, org_id, user_content, assistant_answer),
             inference_bearer,
         )),
     )

@@ -293,6 +293,12 @@ message InferRequest {
   // know, count as `unspecified`, so an older caller and a newer one both work.
   // It carries no content, so Zero Data Retention does not change it.
   InferPurpose purpose = 21;
+
+  // The model the turn itself was served by (EP-13 S4). Read only when `model`
+  // is `verevon-role`: the role table tries its own candidates first, then this
+  // model, then the cheap fallback. Empty names none. It carries no content, so
+  // Zero Data Retention does not change it.
+  string role_fallback_model = 23;
 }
 
 // InferImagePart — one image attached to a message of an InferRequest. Bytes
@@ -604,6 +610,17 @@ message RouteNote {
   // The effort level the budget clamped the call to, when it did. Empty when
   // the budget left the requested effort alone.
   string applied_effort = 4;
+
+  // The role-table purpose whose entry chose the model, for a `verevon-role`
+  // call (EP-13 S4): "title", "follow_ups", "verification_judge" or
+  // "research_plan". Empty when no table entry chose the model, that is when the
+  // turn's own model or the cheap fallback did, and for every other call.
+  string role = 5;
+
+  // Which step of the `verevon-role` resolution chose the model (EP-13 S4):
+  // "table", "turn_model" or "cheap_fallback". Empty for every call that named
+  // no role.
+  string role_source = 6;
 }
 
 // CreateEmbeddingRequest — text to embed via a provider-owned model/deployment.
