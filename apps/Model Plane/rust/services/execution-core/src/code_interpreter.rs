@@ -51,6 +51,7 @@ use base64::engine::general_purpose::{GeneralPurpose, GeneralPurposeConfig, STAN
 use base64::engine::DecodePaddingMode;
 use base64::Engine;
 use mp_contracts::attachments::{validate_name, ATTACHMENTS_DIR};
+use mp_contracts::sandbox_report::{Enforcement, NetworkTier, SandboxReport};
 use sha2::{Digest, Sha256};
 
 use crate::executor;
@@ -70,6 +71,10 @@ const WORKSPACE_PREFIX: &str = "verevon-code";
 /// collision needs a *fresh* name (see [`Workspace::create`]), and the
 /// counter+clock name is unique in practice, so a handful of tries is plenty.
 const WORKSPACE_CREATE_ATTEMPTS: u32 = 8;
+
+/// Switch for the per-call enforcement report (EP-9 E1). Only the exact value
+/// `true` turns it on, so a typo leaves every result unchanged.
+const ENFORCEMENT_REPORT_ENV: &str = "CODE_INTERPRETER_ENFORCEMENT_REPORT";
 
 /// The interpreter this tool invokes. Public so the health probe
 /// ([`crate::health_attest`]) measures the SAME binary the tool runs — a probe
@@ -205,6 +210,11 @@ struct CodeResult {
     /// How the program was confined and whether it was stopped for a limit
     /// (WS06-S8). Additive: callers that do not know it ignore it.
     execution: ExecutionInfo,
+    /// The per-call enforcement report (EP-9 E1). Absent unless
+    /// `CODE_INTERPRETER_ENFORCEMENT_REPORT` is `true`, so a result is unchanged
+    /// while the switch is off.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sandbox: Option<SandboxReport>,
 }
 
 /// The `execution` object of a code result: `{sandboxed, limits, limit_hit}`.
@@ -220,6 +230,39 @@ struct ExecutionInfo {
 
 fn is_zero(count: &usize) -> bool {
     *count == 0
+}
+
+/// Whether this call's result carries the enforcement report. Read per call, as
+/// the Office verifier's switch is.
+fn enforcement_report_requested() -> bool {
+    enforcement_report_requested_in(std::env::var(ENFORCEMENT_REPORT_ENV).ok().as_deref())
+}
+
+/// The strict parse: only the exact value `true` enables the report.
+fn enforcement_report_requested_in(raw: Option<&str>) -> bool {
+    raw == Some("true")
+}
+
+/// The enforcement report for one run (EP-9 E1). The network tier is the one the
+/// policy the run was launched with allows, never one a request asked for. Only a
+/// wrapped process with no network counts as fully enforced: `--unshare-net` is
+/// the boundary bwrap applies itself, and it is the only one this tool runs with.
+fn enforcement_report(sandboxed: bool, network: &MpNetworkPolicy) -> SandboxReport {
+    let network = match network {
+        MpNetworkPolicy::Disabled => NetworkTier::Off,
+        MpNetworkPolicy::AllowDomains(_) => NetworkTier::Allowlist,
+        MpNetworkPolicy::AllowAll => NetworkTier::All,
+    };
+    let enforcement = match (sandboxed, network) {
+        (false, _) => Enforcement::Unenforced,
+        (true, NetworkTier::Off) => Enforcement::Full,
+        (true, _) => Enforcement::Partial,
+    };
+    SandboxReport {
+        sandboxed,
+        network,
+        enforcement,
+    }
 }
 
 /// Parse and validate a `code_interpreter` tool input.
@@ -782,6 +825,10 @@ async fn run_in_root(
     let files = collect_output_files(root, &staged, &pre_call_baseline);
     let office = office_verify::verify_outputs(&files).await;
 
+    // Attached only while the switch is on, so the result is byte-identical without it.
+    let sandbox = enforcement_report_requested()
+        .then(|| enforcement_report(outcome.sandboxed, &policy.network()));
+
     serde_json::to_string(&CodeResult {
         stdout: outcome.stdout,
         stderr: outcome.stderr,
@@ -795,6 +842,7 @@ async fn run_in_root(
             limits: outcome.limits,
             limit_hit: outcome.limit_hit,
         },
+        sandbox,
     })
     .map_err(|error| format!("code_interpreter could not encode its result: {error}"))
 }
@@ -1090,10 +1138,114 @@ mod tests {
                 limits: "enforced",
                 limit_hit: None,
             },
+            sandbox: None,
         };
         assert_eq!(
             serde_json::to_string(&result).expect("serializes"),
             r#"{"stdout":"done\n","stderr":"","exit_code":0,"files":[{"name":"out.csv","mime":"text/csv","bytes":2,"content_b64":"b2s="},{"name":"big.xlsx","mime":"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet","bytes":9000000,"content_b64":"","truncated":true}],"execution":{"sandboxed":true,"limits":"enforced"}}"#
+        );
+    }
+
+    /// The report is the last key and only present when attached, so a result
+    /// without it keeps the exact bytes the shape test above pins.
+    #[test]
+    fn the_enforcement_report_is_the_last_key_when_attached() {
+        let result = CodeResult {
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: 0,
+            files: Vec::new(),
+            verification: Vec::new(),
+            verification_unchecked: 0,
+            previews: Vec::new(),
+            execution: ExecutionInfo {
+                sandboxed: true,
+                limits: "enforced",
+                limit_hit: None,
+            },
+            sandbox: Some(enforcement_report(true, &MpNetworkPolicy::Disabled)),
+        };
+        let json = serde_json::to_string(&result).expect("serializes");
+        assert!(
+            json.ends_with(
+                r#""execution":{"sandboxed":true,"limits":"enforced"},"sandbox":{"sandboxed":true,"network":"off","enforcement":"full"}}"#
+            ),
+            "json: {json}"
+        );
+    }
+
+    /// Only the exact value `true` enables the report, so a typo or another
+    /// spelling leaves every result as it was.
+    #[test]
+    fn the_enforcement_switch_accepts_only_the_literal_true() {
+        assert!(enforcement_report_requested_in(Some("true")));
+        for raw in [
+            None,
+            Some(""),
+            Some("TRUE"),
+            Some(" true"),
+            Some("1"),
+            Some("yes"),
+            Some("false"),
+        ] {
+            assert!(
+                !enforcement_report_requested_in(raw),
+                "{raw:?} must not enable the report"
+            );
+        }
+    }
+
+    #[test]
+    fn a_wrapped_run_with_no_network_is_fully_enforced() {
+        assert_eq!(
+            enforcement_report(true, &MpNetworkPolicy::Disabled),
+            SandboxReport {
+                sandboxed: true,
+                network: NetworkTier::Off,
+                enforcement: Enforcement::Full,
+            }
+        );
+    }
+
+    /// A run that bwrap did not wrap must never read as enforced, whatever its
+    /// policy says.
+    #[test]
+    fn an_unwrapped_run_is_never_reported_as_enforced() {
+        for network in [
+            MpNetworkPolicy::Disabled,
+            MpNetworkPolicy::AllowAll,
+            MpNetworkPolicy::AllowDomains(vec!["pypi.org".to_owned()]),
+        ] {
+            assert_eq!(
+                enforcement_report(false, &network).enforcement,
+                Enforcement::Unenforced
+            );
+        }
+    }
+
+    /// A network other than none is named by its tier and is only partly enforced
+    /// today: the allow-list is advisory, and unrestricted egress has no boundary
+    /// for the sandbox to confirm.
+    #[test]
+    fn a_network_other_than_none_is_partial_and_names_its_tier() {
+        assert_eq!(
+            enforcement_report(
+                true,
+                &MpNetworkPolicy::AllowDomains(vec!["pypi.org".to_owned()])
+            ),
+            SandboxReport {
+                sandboxed: true,
+                network: NetworkTier::Allowlist,
+                enforcement: Enforcement::Partial,
+            }
+        );
+        assert_eq!(
+            enforcement_report(true, &MpNetworkPolicy::AllowAll),
+            SandboxReport {
+                sandboxed: true,
+                network: NetworkTier::All,
+                enforcement: Enforcement::Partial,
+            }
         );
     }
 

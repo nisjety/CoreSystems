@@ -25,6 +25,7 @@ pub mod result_query;
 pub mod retention;
 pub mod run_context;
 pub mod run_origin;
+pub mod sandbox_report;
 pub mod scheduled_contract;
 pub mod skill_bundle;
 pub mod skill_recovery;

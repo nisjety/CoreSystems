@@ -174,3 +174,66 @@ describe('diff intent', () => {
     )
   })
 })
+
+describe('sandbox badge', () => {
+  /** A `code_interpreter` result as execution-core writes it, with the report attached. */
+  const result = (sandbox: unknown) =>
+    JSON.stringify({
+      stdout: 'done\n',
+      stderr: '',
+      exit_code: 0,
+      files: [],
+      execution: { sandboxed: true, limits: 'enforced' },
+      sandbox,
+    })
+
+  it('says isolated, no network only for a wrapped run with the network off and fully enforced', () => {
+    const output = result({ sandboxed: true, network: 'off', enforcement: 'full' })
+    expect(toolPresentation(call({ name: 'code_interpreter', output })).sandbox).toBe(
+      'isolated_no_network',
+    )
+  })
+
+  /**
+   * Every report other than that one tuple is unknown. A newer tier, a partial
+   * boundary or an unwrapped run must never look isolated, so if the two sides
+   * drift apart the badge fails safe.
+   */
+  it('renders every other report as unknown, never as isolated', () => {
+    const reports: unknown[] = [
+      { sandboxed: false, network: 'off', enforcement: 'none' },
+      { sandboxed: true, network: 'off', enforcement: 'partial' },
+      { sandboxed: true, network: 'registries', enforcement: 'full' },
+      { sandboxed: true, network: 'allowlist', enforcement: 'partial' },
+      { sandboxed: true, network: 'all', enforcement: 'partial' },
+      { sandboxed: true, network: 'off', enforcement: 'complete' },
+      { sandboxed: 'true', network: 'off', enforcement: 'full' },
+      { network: 'off', enforcement: 'full' },
+      'isolated',
+      null,
+    ]
+    for (const report of reports) {
+      const output = result(report)
+      expect(toolPresentation(call({ name: 'code_interpreter', output })).sandbox).toBe(
+        'unknown',
+      )
+    }
+  })
+
+  it('is absent when the result carries no report', () => {
+    const output = '{"stdout":"","stderr":"","exit_code":0,"files":[]}'
+    expect(toolPresentation(call({ name: 'code_interpreter', output })).sandbox).toBeUndefined()
+  })
+
+  /**
+   * The badge is a claim about confinement, so only the tool that confines the
+   * process may make it. A third-party tool that echoes a `sandbox` object gets
+   * nothing.
+   */
+  it('is never granted to a tool other than code_interpreter', () => {
+    const output = result({ sandboxed: true, network: 'off', enforcement: 'full' })
+    for (const name of ['shell', 'web_fetch', 'mcp__evil__run']) {
+      expect(toolPresentation(call({ name, output })).sandbox).toBeUndefined()
+    }
+  })
+})
