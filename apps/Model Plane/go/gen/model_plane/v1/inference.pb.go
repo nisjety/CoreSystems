@@ -1761,7 +1761,16 @@ type ModelInfo struct {
 	// lowercase canonical names ("minimal", "low", "medium", "high", "xhigh",
 	// "max"). Empty means the model has no effort control or the provider does
 	// not advertise one yet; a client must offer no effort choice in that case.
-	EffortLevels  []string `protobuf:"bytes,8,rep,name=effort_levels,json=effortLevels,proto3" json:"effort_levels,omitempty"`
+	EffortLevels []string `protobuf:"bytes,8,rep,name=effort_levels,json=effortLevels,proto3" json:"effort_levels,omitempty"`
+	// Context window of the model in tokens, lowered to the serving surface's own
+	// ceiling. 0 means no sourced record names the model (EP-13 S2).
+	ContextWindowTokens uint32 `protobuf:"varint,9,opt,name=context_window_tokens,json=contextWindowTokens,proto3" json:"context_window_tokens,omitempty"`
+	// Largest synchronous output in tokens this model is served at on this surface.
+	// 0 means no sourced record names the model (EP-13 S2).
+	MaxOutputTokens uint32 `protobuf:"varint,10,opt,name=max_output_tokens,json=maxOutputTokens,proto3" json:"max_output_tokens,omitempty"`
+	// Vendor lifecycle stage: "ga", "preview" or "deprecated". Empty means no sourced
+	// record names the model (EP-13 S2).
+	Lifecycle     string `protobuf:"bytes,11,opt,name=lifecycle,proto3" json:"lifecycle,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1850,6 +1859,27 @@ func (x *ModelInfo) GetEffortLevels() []string {
 		return x.EffortLevels
 	}
 	return nil
+}
+
+func (x *ModelInfo) GetContextWindowTokens() uint32 {
+	if x != nil {
+		return x.ContextWindowTokens
+	}
+	return 0
+}
+
+func (x *ModelInfo) GetMaxOutputTokens() uint32 {
+	if x != nil {
+		return x.MaxOutputTokens
+	}
+	return 0
+}
+
+func (x *ModelInfo) GetLifecycle() string {
+	if x != nil {
+		return x.Lifecycle
+	}
+	return ""
 }
 
 // ListModelsResponse — available models in the active provider chain.
@@ -6244,7 +6274,7 @@ const file_model_plane_v1_inference_proto_rawDesc = "" +
 	"\rprovider_used\x18\x04 \x01(\tR\fproviderUsed\"K\n" +
 	"\x11ListModelsRequest\x12\x1a\n" +
 	"\bmodality\x18\x01 \x01(\tR\bmodality\x12\x1a\n" +
-	"\bprovider\x18\x02 \x01(\tR\bprovider\"\x90\x02\n" +
+	"\bprovider\x18\x02 \x01(\tR\bprovider\"\x8e\x03\n" +
 	"\tModelInfo\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1a\n" +
 	"\bprovider\x18\x02 \x01(\tR\bprovider\x12\x1a\n" +
@@ -6253,7 +6283,11 @@ const file_model_plane_v1_inference_proto_rawDesc = "" +
 	"\bfeatures\x18\x05 \x03(\tR\bfeatures\x12>\n" +
 	"\fprivacy_tier\x18\x06 \x01(\x0e2\x1b.model_plane.v1.PrivacyTierR\vprivacyTier\x12\x1c\n" +
 	"\tresidency\x18\a \x01(\tR\tresidency\x12#\n" +
-	"\reffort_levels\x18\b \x03(\tR\feffortLevels\"\x80\x01\n" +
+	"\reffort_levels\x18\b \x03(\tR\feffortLevels\x122\n" +
+	"\x15context_window_tokens\x18\t \x01(\rR\x13contextWindowTokens\x12*\n" +
+	"\x11max_output_tokens\x18\n" +
+	" \x01(\rR\x0fmaxOutputTokens\x12\x1c\n" +
+	"\tlifecycle\x18\v \x01(\tR\tlifecycle\"\x80\x01\n" +
 	"\x12ListModelsResponse\x121\n" +
 	"\x06models\x18\x01 \x03(\v2\x19.model_plane.v1.ModelInfoR\x06models\x127\n" +
 	"\x06access\x18\x02 \x01(\v2\x1f.model_plane.v1.ModelAccessMetaR\x06access\"\x8d\x02\n" +

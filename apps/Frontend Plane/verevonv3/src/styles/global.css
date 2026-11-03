@@ -49808,3 +49808,7 @@ so it
 .dashboard-composer-model-search { display: block; box-sizing: border-box; width: calc(100% - 20px); margin: 6px 10px 4px; padding: 6px 10px; border: 1px solid var(--verevon-border-warm); border-radius: 8px; background: transparent; color: inherit; font: inherit; font-size: 13px; }
 .dashboard-composer-model-price { display: block; margin-top: 1px; font-size: 11px; font-weight: 400; color: var(--verevon-text-muted); }
 .dashboard-composer-model-empty { margin: 6px 12px; font-size: 13px; color: var(--verevon-text-muted); }
+
+/* EP-14-S3: the docked step strip. Never display:none: the live region stays in the accessibility tree. */
+.verevon-chat-step-strip { min-width: 0; overflow: hidden; color: var(--verevon-e-subtle, var(--subtle)); font-size: 12px; line-height: 1.4; white-space: nowrap; text-overflow: ellipsis; }
+.verevon-chat-step-strip:not(:empty) { margin-top: 8px; }

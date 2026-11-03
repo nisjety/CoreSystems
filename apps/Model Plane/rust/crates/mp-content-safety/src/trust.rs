@@ -32,6 +32,9 @@ const TOOL_TRUST: &[(&str, TrustClass)] = &[
     ("web_search", TrustClass::ExternalWeb),
     ("web_fetch", TrustClass::ExternalWeb),
     ("fetch_url", TrustClass::ExternalWeb),
+    // The long-page reader (EP-2 S2) reads parked fetch_url pages.
+    ("read_page", TrustClass::ExternalWeb),
+    ("find_in_page", TrustClass::ExternalWeb),
     ("web.search", TrustClass::ExternalWeb),
     ("web.read", TrustClass::ExternalWeb),
     ("browser_agent", TrustClass::BrowserScraped),

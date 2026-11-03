@@ -8,7 +8,8 @@
 #[must_use]
 pub fn tool_data_category(tool: &str) -> &'static str {
     match tool {
-        "web_search" | "fetch_url" | "web_fetch" | "news" | "traffic" | "yr_weather"
+        "web_search" | "fetch_url" | "web_fetch" | "read_page" | "find_in_page" | "news" | "traffic"
+        | "yr_weather"
         | "company_lookup" | "track_shipment" => "public_non_personal",
         // The org's own ingested documents, the user's own durable memory, and
         // the user's own conversation. All three are customer content, and a
