@@ -179,12 +179,14 @@ pub fn crawl_limits() -> &'static CrawlLimits {
 // capacity does its plan allow? The answer is a [`LimitsResolver`] held on
 // `AppState` and read by the crawl and batch handoffs and by `start_run`.
 //
-// Only the `static` source is built. It knows nothing about an organization, so
+// The `static` source (the default) knows nothing about an organization, so
 // every allowance is "unconfigured" and every capacity cap is "use the floor":
 // the edge behaves exactly as it did before this module existed. The
-// `billing_core` source (a per-org read of the quota status with a cache and a
-// stale window) is a second [`LimitsBackend`] behind the same [`FailMode`]
-// wrapper; it waits on the billing-core credential and is not built here.
+// `billing_core` source (W2-CP-L2: a per-org read of billing-core's Quarry
+// limits snapshot with a cache and a stale window, [`BillingCoreBackend`]) is a
+// [`LimitsBackend`] behind the same [`FailMode`] wrapper. It is chosen only by
+// `QUARRY_EDGE__LIMITS_SOURCE=billing_core` and then needs
+// `QUARRY_EDGE__BILLING_CORE_URL` and `QUARRY_EDGE__BILLING_CORE_TOKEN`.
 //
 // Three rules hold for every source:
 //
@@ -217,8 +219,8 @@ pub const DIMENSION_ORG_ALLOWANCE: &str = "org_allowance";
 pub enum LimitsSource {
     /// The floor only. The default; nothing is read from another plane.
     Static,
-    /// The billing-core quota status. Not built in this edge (it waits on the
-    /// billing-core credential): naming it stops boot.
+    /// billing-core's Quarry limits snapshot (W2-CP-L2), cached, behind the
+    /// fail mode. Naming it without its URL and token stops boot.
     BillingCore,
 }
 
@@ -306,16 +308,26 @@ impl LimitsConfig {
         Ok(Self { source, fail_mode })
     }
 
-    /// The resolver this configuration names. `billing_core` is refused here, at
-    /// boot, rather than silently serving the floor under a name that promises
-    /// entitlements.
+    /// The resolver this configuration names, reading the billing-core settings
+    /// from the environment when the source is `billing_core`.
     pub fn build(&self) -> Result<Arc<dyn LimitsResolver>, String> {
+        self.build_with(|name| std::env::var(name).ok())
+    }
+
+    /// [`Self::build`] with the settings read through `lookup`. `billing_core`
+    /// without a URL or a token is an error at boot, rather than the floor served
+    /// under a name that promises entitlements. The static source reads nothing.
+    pub fn build_with(
+        &self,
+        lookup: impl Fn(&str) -> Option<String>,
+    ) -> Result<Arc<dyn LimitsResolver>, String> {
         match self.source {
             LimitsSource::Static => Ok(Arc::new(StaticFloor)),
-            LimitsSource::BillingCore => Err(format!(
-                "{ENV_LIMITS_SOURCE}=billing_core is not built in this edge (the billing-core \
-                 credential is not provisioned); unset it or use static"
-            )),
+            LimitsSource::BillingCore => {
+                let settings = BillingCoreSettings::from_lookup(lookup)?;
+                let backend = BillingCoreBackend::from_settings(&settings)?;
+                Ok(Arc::new(WithFailMode::new(backend, self.fail_mode)))
+            }
         }
     }
 }
@@ -567,6 +579,446 @@ impl<B: LimitsBackend> LimitsResolver for WithFailMode<B> {
             },
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// W2-CP-L2: the billing_core source (U43, Rust half)
+// ---------------------------------------------------------------------------
+//
+// One read per organization of billing-core's Quarry limits snapshot
+// (`GET {QUARRY_EDGE__BILLING_CORE_URL}/api/v1/billing/orgs/{org}/quarry/limits`,
+// the W2-CP-L1 contract), held in an in-process cache:
+//
+// - **Fresh** (younger than `QUARRY_EDGE__LIMITS_CACHE_TTL_S`, 30 s): served
+//   without a read.
+// - **Stale window** (`QUARRY_EDGE__LIMITS_STALE_WINDOW_S`, 300 s past the TTL):
+//   a read is tried; when billing-core cannot answer, the cached answer is
+//   served and the clamps it carries still apply.
+// - **Past the window, or never read**: the read error goes to the
+//   [`FailMode`] wrapper ([`WithFailMode`]), `floor` by default.
+//
+// The edge states the tenant twice (`X-Quarry-Org-Id` and the path) and refuses
+// an answer whose `org_id` is not the one it asked for. Response bodies, URLs
+// and the token are never logged; an error is a closed class
+// ([`BackendError`]).
+
+use std::collections::HashMap;
+use std::fmt;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
+
+pub const ENV_BILLING_CORE_URL: &str = "QUARRY_EDGE__BILLING_CORE_URL";
+pub const ENV_BILLING_CORE_TOKEN: &str = "QUARRY_EDGE__BILLING_CORE_TOKEN";
+pub const ENV_LIMITS_CACHE_TTL_S: &str = "QUARRY_EDGE__LIMITS_CACHE_TTL_S";
+pub const ENV_LIMITS_STALE_WINDOW_S: &str = "QUARRY_EDGE__LIMITS_STALE_WINDOW_S";
+pub const ENV_LIMITS_TIMEOUT_MS: &str = "QUARRY_EDGE__LIMITS_TIMEOUT_MS";
+
+/// The principal billing-core pins its Quarry limits route to.
+pub const BILLING_CORE_SERVICE_ID: &str = "quarry-edge";
+/// The org-binding header billing-core checks against the path (W2-CP-L1).
+pub const HEADER_QUARRY_ORG_ID: &str = "x-quarry-org-id";
+
+pub const DEFAULT_LIMITS_CACHE_TTL_S: u64 = 30;
+pub const DEFAULT_LIMITS_STALE_WINDOW_S: u64 = 300;
+pub const DEFAULT_LIMITS_TIMEOUT_MS: u64 = 2000;
+
+/// The largest limits answer read; anything larger is refused unread.
+const MAX_LIMITS_BODY_BYTES: usize = 64 * 1024;
+/// Past this many cached organizations, entries older than the stale window
+/// are dropped on the next write.
+const LIMITS_CACHE_SOFT_LIMIT: usize = 4096;
+
+/// How the billing_core source reaches billing-core. Read only when
+/// `QUARRY_EDGE__LIMITS_SOURCE=billing_core`.
+#[derive(Clone, PartialEq, Eq)]
+pub struct BillingCoreSettings {
+    pub base_url: String,
+    pub token: String,
+    pub cache_ttl: Duration,
+    pub stale_window: Duration,
+    pub timeout: Duration,
+}
+
+impl fmt::Debug for BillingCoreSettings {
+    /// The token is never printed.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("BillingCoreSettings")
+            .field("base_url", &self.base_url)
+            .field("token", &"<redacted>")
+            .field("cache_ttl", &self.cache_ttl)
+            .field("stale_window", &self.stale_window)
+            .field("timeout", &self.timeout)
+            .finish()
+    }
+}
+
+impl BillingCoreSettings {
+    /// Read the settings through `lookup`. The URL and the token are required;
+    /// an error names the variable, never its value.
+    pub fn from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Result<Self, String> {
+        let required = |name: &str| -> Result<String, String> {
+            match lookup(name).map(|value| value.trim().to_owned()) {
+                Some(value) if !value.is_empty() => Ok(value),
+                _ => Err(format!("{ENV_LIMITS_SOURCE}=billing_core needs {name}")),
+            }
+        };
+        let number = |name: &str, default: u64, min: u64| -> Result<u64, String> {
+            match lookup(name).map(|value| value.trim().to_owned()).as_deref() {
+                None | Some("") => Ok(default),
+                Some(raw) => {
+                    let value: u64 = raw
+                        .parse()
+                        .map_err(|_| format!("{name} must be a whole number, got {raw:?}"))?;
+                    if value < min {
+                        return Err(format!("{name} must be at least {min}, got {value}"));
+                    }
+                    Ok(value)
+                }
+            }
+        };
+        let base_url = required(ENV_BILLING_CORE_URL)?;
+        match reqwest::Url::parse(&base_url) {
+            Ok(url) if matches!(url.scheme(), "http" | "https") && !url.cannot_be_a_base() => {}
+            _ => return Err(format!("{ENV_BILLING_CORE_URL} must be an http or https base URL")),
+        }
+        let token = required(ENV_BILLING_CORE_TOKEN)?;
+        Ok(Self {
+            base_url,
+            token,
+            cache_ttl: Duration::from_secs(number(
+                ENV_LIMITS_CACHE_TTL_S,
+                DEFAULT_LIMITS_CACHE_TTL_S,
+                1,
+            )?),
+            stale_window: Duration::from_secs(number(
+                ENV_LIMITS_STALE_WINDOW_S,
+                DEFAULT_LIMITS_STALE_WINDOW_S,
+                0,
+            )?),
+            timeout: Duration::from_millis(number(
+                ENV_LIMITS_TIMEOUT_MS,
+                DEFAULT_LIMITS_TIMEOUT_MS,
+                100,
+            )?),
+        })
+    }
+}
+
+/// One metric of billing-core's answer.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct AllowanceDoc {
+    #[serde(default)]
+    pub configured: bool,
+    #[serde(default)]
+    pub unlimited: bool,
+    #[serde(default)]
+    pub remaining: Option<i64>,
+}
+
+/// The plan capacity values of billing-core's answer; `null` is "the plan says
+/// nothing". Read as signed so a negative value is `None`, not an error.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct CapsDoc {
+    #[serde(default)]
+    pub agent_runs: Option<i64>,
+    #[serde(default)]
+    pub interactive_runs: Option<i64>,
+    #[serde(default)]
+    pub render_permits: Option<i64>,
+    #[serde(default)]
+    pub crawl_jobs: Option<i64>,
+    #[serde(default)]
+    pub job_backlog: Option<i64>,
+    #[serde(default)]
+    pub rate_multiplier: Option<i64>,
+}
+
+/// billing-core's Quarry limits snapshot (the `data` of the W2-CP-L1 answer).
+/// Fields the edge does not use (`plan`, `account`, `as_of`, ...) are ignored.
+#[derive(Debug, Clone, Deserialize)]
+pub struct LimitsDoc {
+    pub org_id: String,
+    #[serde(default)]
+    pub allowances: HashMap<String, AllowanceDoc>,
+    #[serde(default)]
+    pub caps: CapsDoc,
+}
+
+#[derive(Deserialize)]
+struct LimitsEnvelope {
+    data: LimitsDoc,
+}
+
+fn cap_value(value: Option<i64>) -> Option<u32> {
+    value
+        .filter(|v| *v >= 0)
+        .map(|v| u32::try_from(v).unwrap_or(u32::MAX))
+}
+
+impl LimitsDoc {
+    fn allowance(&self, metric: &str) -> Result<Allowance, BackendError> {
+        let Some(doc) = self.allowances.get(metric) else {
+            return Ok(Allowance::Unconfigured);
+        };
+        if !doc.configured || doc.unlimited {
+            return Ok(Allowance::Unconfigured);
+        }
+        match doc.remaining {
+            Some(left) => Ok(Allowance::Remaining(u64::try_from(left).unwrap_or(0))),
+            // Configured and limited but no remainder: malformed, not zero.
+            None => Err(BackendError("malformed")),
+        }
+    }
+
+    /// The edge's view of the answer for `expected_org`. An answer about any
+    /// other organization is never served.
+    pub fn into_org_limits(self, expected_org: &str) -> Result<OrgLimits, BackendError> {
+        if self.org_id != expected_org {
+            return Err(BackendError("org_mismatch"));
+        }
+        Ok(OrgLimits {
+            origin: LimitsOrigin::Entitlement,
+            crawl_pages: self.allowance(usage_metrics::CRAWL_PAGE)?,
+            batch_urls: self.allowance(usage_metrics::BATCH_URL)?,
+            browser_seconds_agent: self.allowance(usage_metrics::BROWSER_SECOND_AGENT)?,
+            caps: PlanCaps {
+                agent_runs: cap_value(self.caps.agent_runs),
+                interactive_runs: cap_value(self.caps.interactive_runs),
+                render_permits: cap_value(self.caps.render_permits),
+                crawl_jobs: cap_value(self.caps.crawl_jobs),
+                job_backlog: cap_value(self.caps.job_backlog),
+                rate_multiplier: cap_value(self.caps.rate_multiplier),
+            },
+        })
+    }
+}
+
+/// An organization id the edge will put in a billing-core path: 1 to 128
+/// characters of `[A-Za-z0-9_-]`. Anything else is refused before any request.
+fn valid_org_id(org_id: &str) -> bool {
+    !org_id.is_empty()
+        && org_id.len() <= 128
+        && org_id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
+
+/// One read of one organization's limits snapshot.
+#[async_trait]
+pub trait LimitsFetch: Send + Sync {
+    async fn fetch(&self, org_id: &str) -> Result<LimitsDoc, BackendError>;
+}
+
+/// The HTTP read of billing-core's Quarry limits route.
+pub struct HttpLimitsFetch {
+    client: reqwest::Client,
+    base_url: String,
+    token: String,
+}
+
+impl HttpLimitsFetch {
+    pub fn new(settings: &BillingCoreSettings) -> Result<Self, String> {
+        let client = reqwest::Client::builder()
+            .timeout(settings.timeout)
+            .connect_timeout(settings.timeout)
+            .build()
+            .map_err(|e| format!("limits: http client: {}", e.without_url()))?;
+        Ok(Self {
+            client,
+            base_url: settings.base_url.clone(),
+            token: settings.token.clone(),
+        })
+    }
+
+    fn url_for(&self, org_id: &str) -> Result<reqwest::Url, BackendError> {
+        let mut url = reqwest::Url::parse(&self.base_url).map_err(|_| BackendError("config"))?;
+        url.path_segments_mut()
+            .map_err(|_| BackendError("config"))?
+            .pop_if_empty()
+            .extend(["api", "v1", "billing", "orgs", org_id, "quarry", "limits"]);
+        Ok(url)
+    }
+}
+
+#[async_trait]
+impl LimitsFetch for HttpLimitsFetch {
+    async fn fetch(&self, org_id: &str) -> Result<LimitsDoc, BackendError> {
+        if !valid_org_id(org_id) {
+            return Err(BackendError("invalid_org"));
+        }
+        let url = self.url_for(org_id)?;
+        let mut response = self
+            .client
+            .get(url)
+            .header("x-service-id", BILLING_CORE_SERVICE_ID)
+            .header("x-service-token", &self.token)
+            .header(HEADER_QUARRY_ORG_ID, org_id)
+            .header("accept", "application/json")
+            .send()
+            .await
+            .map_err(|_| BackendError("unreachable"))?;
+        let status = response.status().as_u16();
+        if !(200..300).contains(&status) {
+            return Err(BackendError(match status {
+                401 => "unauthorized",
+                // Includes 403 organization_inactive: the fail mode decides
+                // (the floor by default), the body is not read.
+                403 => "forbidden",
+                404 => "not_found",
+                500..=599 => "unavailable",
+                _ => "rejected",
+            }));
+        }
+        if response
+            .content_length()
+            .is_some_and(|len| len > MAX_LIMITS_BODY_BYTES as u64)
+        {
+            return Err(BackendError("oversize"));
+        }
+        let mut body = Vec::new();
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .map_err(|_| BackendError("unreachable"))?
+        {
+            if body.len() + chunk.len() > MAX_LIMITS_BODY_BYTES {
+                return Err(BackendError("oversize"));
+            }
+            body.extend_from_slice(&chunk);
+        }
+        serde_json::from_slice::<LimitsEnvelope>(&body)
+            .map(|envelope| envelope.data)
+            .map_err(|_| BackendError("malformed"))
+    }
+}
+
+/// The time source of the cache (a manual clock in tests).
+pub type LimitsClock = Arc<dyn Fn() -> Instant + Send + Sync>;
+
+#[derive(Clone)]
+struct CachedLimits {
+    limits: OrgLimits,
+    fetched_at: Instant,
+}
+
+/// The billing_core [`LimitsBackend`]: a [`LimitsFetch`] behind the fresh
+/// cache and the stale window. Wrap it in [`WithFailMode`].
+pub struct BillingCoreBackend<F = HttpLimitsFetch> {
+    fetch: F,
+    cache_ttl: Duration,
+    stale_window: Duration,
+    cache: Mutex<HashMap<String, CachedLimits>>,
+    clock: LimitsClock,
+}
+
+impl BillingCoreBackend<HttpLimitsFetch> {
+    /// The HTTP backend the settings name.
+    pub fn from_settings(settings: &BillingCoreSettings) -> Result<Self, String> {
+        Ok(Self::with_fetch(
+            HttpLimitsFetch::new(settings)?,
+            settings.cache_ttl,
+            settings.stale_window,
+        ))
+    }
+}
+
+impl<F: LimitsFetch> BillingCoreBackend<F> {
+    pub fn with_fetch(fetch: F, cache_ttl: Duration, stale_window: Duration) -> Self {
+        Self {
+            fetch,
+            cache_ttl,
+            stale_window,
+            cache: Mutex::new(HashMap::new()),
+            clock: Arc::new(Instant::now),
+        }
+    }
+
+    pub fn with_clock(mut self, clock: LimitsClock) -> Self {
+        self.clock = clock;
+        self
+    }
+
+    fn cached(&self, org_id: &str) -> Option<CachedLimits> {
+        self.cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(org_id)
+            .cloned()
+    }
+
+    fn remember(&self, org_id: &str, limits: OrgLimits, now: Instant) {
+        let keep = self.cache_ttl + self.stale_window;
+        let mut cache = self
+            .cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if cache.len() >= LIMITS_CACHE_SOFT_LIMIT {
+            cache.retain(|_, entry| now.saturating_duration_since(entry.fetched_at) < keep);
+        }
+        cache.insert(
+            org_id.to_owned(),
+            CachedLimits {
+                limits,
+                fetched_at: now,
+            },
+        );
+    }
+}
+
+#[async_trait]
+impl<F: LimitsFetch> LimitsBackend for BillingCoreBackend<F> {
+    async fn read(&self, org_id: &str) -> Result<OrgLimits, BackendError> {
+        let now = (self.clock)();
+        let cached = self.cached(org_id);
+        if let Some(entry) = &cached {
+            if now.saturating_duration_since(entry.fetched_at) < self.cache_ttl {
+                return Ok(entry.limits.clone());
+            }
+        }
+        let answer = match self.fetch.fetch(org_id).await {
+            Ok(doc) => doc.into_org_limits(org_id),
+            Err(error) => Err(error),
+        };
+        match answer {
+            Ok(limits) => {
+                self.remember(org_id, limits.clone(), now);
+                Ok(limits)
+            }
+            Err(BackendError(class)) => {
+                if let Some(entry) = cached {
+                    let age = now.saturating_duration_since(entry.fetched_at);
+                    if age < self.cache_ttl + self.stale_window {
+                        tracing::warn!(
+                            class,
+                            age_s = age.as_secs(),
+                            "limits: billing-core unreadable; serving the cached answer inside the stale window"
+                        );
+                        return Ok(entry.limits);
+                    }
+                }
+                Err(BackendError(class))
+            }
+        }
+    }
+}
+
+/// W2-CP-L2 (U59): one organization's share of a browser pool.
+///
+/// `pool_org_max` is `QUARRY_EDGE__POOL_ORG_MAX_PERMITS` and stays the switch:
+/// `0` (the default) is "no per-organization cap" and the plan is not read, so
+/// nothing changes. With a cap set, it is the floor; the plan's
+/// `render_permits` replaces it (raising it up to the pool size, never past),
+/// fail-open uses the pool size. A plan value of `0` is read as `1`: the pool
+/// reads `0` as "no cap", so a stamped zero would mean the opposite of what it
+/// says. The result is at least 1.
+pub fn org_render_permits(pool_org_max: usize, pool_size: usize, limits: &OrgLimits) -> usize {
+    if pool_org_max == 0 {
+        return 0;
+    }
+    let floor = u32::try_from(pool_org_max).unwrap_or(u32::MAX);
+    let global = u32::try_from(pool_size).unwrap_or(u32::MAX);
+    let plan = limits.caps.render_permits.map(|value| value.max(1));
+    effective_capacity(floor, plan, global, limits.origin).max(1) as usize
 }
 
 /// The organization's allowance for one metric is spent. Becomes a 402
@@ -910,11 +1362,11 @@ mod resolver_tests {
     }
 
     #[test]
-    fn billing_core_source_is_refused_at_build_not_served_as_the_floor() {
+    fn billing_core_source_without_settings_is_refused_at_build_not_served_as_the_floor() {
         let config =
             LimitsConfig::from_lookup(lookup(&[(ENV_LIMITS_SOURCE, "billing_core")])).unwrap();
         assert_eq!(config.source, LimitsSource::BillingCore);
-        let error = config.build().err().expect("billing_core is not built");
+        let error = config.build_with(lookup(&[])).err().expect("billing_core needs its settings");
         assert!(error.contains("billing_core"), "{error}");
         assert!(LimitsConfig::default().build().is_ok());
     }
@@ -1098,5 +1550,420 @@ mod resolver_tests {
             assert_eq!(limits.crawl_pages, Allowance::Remaining(25));
             assert_eq!(resolver.backend.calls.load(Ordering::SeqCst), 1);
         }
+    }
+}
+
+#[cfg(test)]
+mod billing_core_tests {
+    //! W2-CP-L2: the billing_core source. A stub fetch and a manual clock drive
+    //! the cache, the stale window and the fail mode; one wiremock test covers
+    //! the HTTP read (headers, path, status classes).
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// A billing-core stand-in whose answer the test can switch, counting reads.
+    struct StubBilling {
+        answer: Mutex<Result<serde_json::Value, BackendError>>,
+        calls: AtomicUsize,
+    }
+
+    impl StubBilling {
+        fn answering(doc: serde_json::Value) -> Self {
+            Self {
+                answer: Mutex::new(Ok(doc)),
+                calls: AtomicUsize::new(0),
+            }
+        }
+
+        fn down() -> Self {
+            Self {
+                answer: Mutex::new(Err(BackendError("unavailable"))),
+                calls: AtomicUsize::new(0),
+            }
+        }
+
+        fn go_down(&self) {
+            *self.answer.lock().unwrap() = Err(BackendError("unavailable"));
+        }
+
+        fn answer(&self, doc: serde_json::Value) {
+            *self.answer.lock().unwrap() = Ok(doc);
+        }
+
+        fn calls(&self) -> usize {
+            self.calls.load(Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait]
+    impl LimitsFetch for StubBilling {
+        async fn fetch(&self, _org_id: &str) -> Result<LimitsDoc, BackendError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let answer = self.answer.lock().unwrap().clone();
+            answer.and_then(|doc| {
+                serde_json::from_value::<LimitsDoc>(doc).map_err(|_| BackendError("malformed"))
+            })
+        }
+    }
+
+    /// A clock the test moves by hand.
+    fn manual_clock() -> (Arc<Mutex<Instant>>, LimitsClock) {
+        let now = Arc::new(Mutex::new(Instant::now()));
+        let read = now.clone();
+        (now, Arc::new(move || *read.lock().unwrap()))
+    }
+
+    fn advance(clock: &Mutex<Instant>, secs: u64) {
+        *clock.lock().unwrap() += Duration::from_secs(secs);
+    }
+
+    const TTL: Duration = Duration::from_secs(30);
+    const STALE: Duration = Duration::from_secs(300);
+
+    /// A W2-CP-L1 `data` object with a configured page allowance.
+    fn snapshot(org: &str, pages_left: i64, caps: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({
+            "org_id": org,
+            "account": "present",
+            "plan": "standard",
+            "allowances": {
+                "quarry.crawl.page": {
+                    "metric": "quarry.crawl.page", "configured": true, "source": "policy",
+                    "active": true, "unlimited": false, "limit": 1000, "used": 1000 - pages_left,
+                    "remaining": pages_left, "exhausted": pages_left == 0
+                },
+                "quarry.batch.url": {
+                    "metric": "quarry.batch.url", "configured": false, "source": "none",
+                    "active": false, "unlimited": false, "limit": null, "used": 0,
+                    "remaining": null, "exhausted": false
+                },
+                "quarry.browser.second.agent": {
+                    "metric": "quarry.browser.second.agent", "configured": true, "source": "plan",
+                    "active": true, "unlimited": true, "limit": null, "used": 5,
+                    "remaining": null, "exhausted": false
+                }
+            },
+            "caps": caps,
+            "plan_cap_defaults": true,
+            "as_of": "2026-11-03T00:00:00Z"
+        })
+    }
+
+    fn no_caps() -> serde_json::Value {
+        serde_json::json!({
+            "agent_runs": null, "interactive_runs": null, "render_permits": null,
+            "crawl_jobs": null, "job_backlog": null, "rate_multiplier": null
+        })
+    }
+
+    fn backend(stub: StubBilling, clock: LimitsClock) -> BillingCoreBackend<StubBilling> {
+        BillingCoreBackend::with_fetch(stub, TTL, STALE).with_clock(clock)
+    }
+
+    #[test]
+    fn the_snapshot_maps_configured_unconfigured_and_unlimited() {
+        let doc: LimitsDoc = serde_json::from_value(snapshot("org_a", 25, no_caps())).unwrap();
+        let limits = doc.into_org_limits("org_a").unwrap();
+        assert_eq!(limits.origin, LimitsOrigin::Entitlement);
+        assert_eq!(limits.crawl_pages, Allowance::Remaining(25));
+        // Unconfigured is not zero, and unlimited is unconfigured for the edge.
+        assert_eq!(limits.batch_urls, Allowance::Unconfigured);
+        assert_eq!(limits.browser_seconds_agent, Allowance::Unconfigured);
+        assert_eq!(limits.caps, PlanCaps::default());
+        // A metric billing-core does not name is unconfigured too.
+        let doc: LimitsDoc =
+            serde_json::from_value(serde_json::json!({ "org_id": "org_a" })).unwrap();
+        assert_eq!(doc.into_org_limits("org_a").unwrap().crawl_pages, Allowance::Unconfigured);
+    }
+
+    #[test]
+    fn caps_map_null_to_none_keep_zero_and_drop_negatives() {
+        let caps = serde_json::json!({
+            "agent_runs": 4, "interactive_runs": 0, "render_permits": -1,
+            "crawl_jobs": 3, "job_backlog": null, "rate_multiplier": 99_999_999_999i64
+        });
+        let doc: LimitsDoc = serde_json::from_value(snapshot("org_a", 1, caps)).unwrap();
+        let caps = doc.into_org_limits("org_a").unwrap().caps;
+        assert_eq!(caps.agent_runs, Some(4));
+        assert_eq!(caps.interactive_runs, Some(0), "an explicit zero is a real cap");
+        assert_eq!(caps.render_permits, None, "a negative value is no plan value");
+        assert_eq!(caps.crawl_jobs, Some(3));
+        assert_eq!(caps.job_backlog, None);
+        assert_eq!(caps.rate_multiplier, Some(u32::MAX));
+    }
+
+    #[test]
+    fn an_answer_about_another_org_or_a_malformed_allowance_is_never_served() {
+        let doc: LimitsDoc = serde_json::from_value(snapshot("org_b", 25, no_caps())).unwrap();
+        assert_eq!(doc.into_org_limits("org_a").unwrap_err(), BackendError("org_mismatch"));
+        let doc: LimitsDoc = serde_json::from_value(serde_json::json!({
+            "org_id": "org_a",
+            "allowances": { "quarry.crawl.page": { "configured": true, "unlimited": false, "remaining": null } }
+        }))
+        .unwrap();
+        assert_eq!(doc.into_org_limits("org_a").unwrap_err(), BackendError("malformed"));
+    }
+
+    #[tokio::test]
+    async fn a_fresh_answer_is_cached_and_read_again_after_the_ttl() {
+        let (now, clock) = manual_clock();
+        let backend = backend(StubBilling::answering(snapshot("org_a", 25, no_caps())), clock);
+        assert_eq!(backend.read("org_a").await.unwrap().crawl_pages, Allowance::Remaining(25));
+        advance(&now, 29);
+        assert_eq!(backend.read("org_a").await.unwrap().crawl_pages, Allowance::Remaining(25));
+        assert_eq!(backend.fetch.calls(), 1, "a fresh entry is served without a read");
+        backend.fetch.answer(snapshot("org_a", 7, no_caps()));
+        advance(&now, 2);
+        assert_eq!(backend.read("org_a").await.unwrap().crawl_pages, Allowance::Remaining(7));
+        assert_eq!(backend.fetch.calls(), 2);
+    }
+
+    #[tokio::test]
+    async fn the_cache_is_per_organization() {
+        let (_now, clock) = manual_clock();
+        let backend = backend(StubBilling::answering(snapshot("org_a", 25, no_caps())), clock);
+        backend.read("org_a").await.unwrap();
+        // The stub answers about org_a whoever asks: org_b's read is refused, not
+        // served from org_a's entry.
+        assert_eq!(backend.read("org_b").await.unwrap_err(), BackendError("org_mismatch"));
+        assert_eq!(backend.fetch.calls(), 2);
+    }
+
+    #[tokio::test]
+    async fn inside_the_stale_window_a_down_billing_core_still_clamps() {
+        let (now, clock) = manual_clock();
+        let backend = backend(StubBilling::answering(snapshot("org_a", 25, no_caps())), clock);
+        let resolver = WithFailMode::new(backend, FailMode::Floor);
+        resolver.org_limits("org_a").await.unwrap();
+        resolver.backend.fetch.go_down();
+        advance(&now, 30 + 299);
+        let limits = resolver.org_limits("org_a").await.unwrap();
+        assert_eq!(limits.origin, LimitsOrigin::Entitlement, "the cached answer, not the floor");
+        assert_eq!(resolver.backend.fetch.calls(), 2, "a stale entry still tries a read");
+        // The cached allowance still clamps the crawl.
+        let ack = CrawlLimits::default()
+            .resolve(Some(100), None)
+            .clamp_pages_to(limits.crawl_pages)
+            .unwrap();
+        assert_eq!(ack.max_pages.effective, 25);
+        assert_eq!(ack.max_pages.clamped_by, vec![ClampedBy::Entitlement]);
+    }
+
+    #[tokio::test]
+    async fn past_the_stale_window_a_down_billing_core_falls_to_the_fail_mode() {
+        for (mode, expected) in [
+            (FailMode::Floor, Some(LimitsOrigin::Floor)),
+            (FailMode::Open, Some(LimitsOrigin::Open)),
+            (FailMode::Closed, None),
+        ] {
+            let (now, clock) = manual_clock();
+            let backend = backend(StubBilling::answering(snapshot("org_a", 25, no_caps())), clock);
+            let resolver = WithFailMode::new(backend, mode);
+            resolver.org_limits("org_a").await.unwrap();
+            resolver.backend.fetch.go_down();
+            advance(&now, 30 + 300);
+            match (resolver.org_limits("org_a").await, expected) {
+                (Ok(limits), Some(origin)) => {
+                    assert_eq!(limits.origin, origin, "{mode:?}");
+                    // The floor never clamps: the stub-down edge does not refuse.
+                    assert_eq!(limits.crawl_pages, Allowance::Unconfigured, "{mode:?}");
+                }
+                (Err(error), None) => {
+                    assert_eq!(error.code, ErrorCode::RuntimeNotReady);
+                    assert_eq!(error.details.unwrap()["reason"], "limits_unreadable");
+                }
+                (other, _) => panic!("{mode:?}: unexpected {other:?}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn down_with_nothing_cached_is_the_fail_mode_at_once() {
+        let (_now, clock) = manual_clock();
+        let resolver = WithFailMode::new(backend(StubBilling::down(), clock), FailMode::Floor);
+        assert_eq!(resolver.org_limits("org_a").await.unwrap(), OrgLimits::floor());
+    }
+
+    #[tokio::test]
+    async fn billing_core_recovering_replaces_the_stale_answer() {
+        let (now, clock) = manual_clock();
+        let backend = backend(StubBilling::answering(snapshot("org_a", 25, no_caps())), clock);
+        backend.read("org_a").await.unwrap();
+        backend.fetch.go_down();
+        advance(&now, 40);
+        assert_eq!(backend.read("org_a").await.unwrap().crawl_pages, Allowance::Remaining(25));
+        backend.fetch.answer(snapshot("org_a", 0, no_caps()));
+        advance(&now, 1);
+        let limits = backend.read("org_a").await.unwrap();
+        assert!(limits.crawl_pages.is_exhausted(), "the new answer is served and cached");
+        assert_eq!(backend.read("org_a").await.unwrap().crawl_pages, Allowance::Remaining(0));
+    }
+
+    fn plan(agent: u32, interactive: u32, render: u32, jobs: u32) -> OrgLimits {
+        let caps = serde_json::json!({
+            "agent_runs": agent, "interactive_runs": interactive, "render_permits": render,
+            "crawl_jobs": jobs, "job_backlog": 10 * jobs, "rate_multiplier": 1
+        });
+        let doc: LimitsDoc = serde_json::from_value(snapshot("org_a", 1000, caps)).unwrap();
+        doc.into_org_limits("org_a").unwrap()
+    }
+
+    #[test]
+    fn two_plans_give_two_capacities_never_past_the_global_caps() {
+        use crate::budget::RunClass::{Agent, Interactive};
+        let free = plan(1, 2, 1, 1);
+        let pro = plan(8, 8, 5, 5);
+        // Run caps (U59): the plan value, capped by MAX_CONCURRENT_RUNS.
+        assert_eq!(free.run_override().bound_for(Agent, 32), Some(1));
+        assert_eq!(pro.run_override().bound_for(Agent, 32), Some(8));
+        assert_eq!(pro.run_override().bound_for(Interactive, 4), Some(4));
+        // Job slots: the plan value, capped by the process-wide value.
+        assert_eq!(effective_capacity(3, free.caps.crawl_jobs, 16, free.origin), 1);
+        assert_eq!(effective_capacity(3, pro.caps.crawl_jobs, 16, pro.origin), 5);
+        // Render permits only once the pool cap is on (U59).
+        assert_eq!(org_render_permits(2, 4, &free), 1);
+        assert_eq!(org_render_permits(2, 4, &pro), 4, "never past the pool size");
+    }
+
+    #[test]
+    fn render_permits_stay_off_while_the_pool_cap_is_zero() {
+        assert_eq!(org_render_permits(0, 4, &plan(8, 8, 3, 5)), 0);
+        assert_eq!(org_render_permits(0, 4, &OrgLimits::open()), 0);
+        // The floor and a plan that says nothing keep the operator's cap.
+        assert_eq!(org_render_permits(2, 4, &OrgLimits::floor()), 2);
+        // Fail-open uses the whole pool.
+        assert_eq!(org_render_permits(2, 4, &OrgLimits::open()), 4);
+        // A plan zero is one permit, never "no cap".
+        assert_eq!(org_render_permits(2, 4, &plan(1, 1, 0, 1)), 1);
+    }
+
+    fn settings_env(
+        pairs: &'static [(&'static str, &'static str)],
+    ) -> impl Fn(&str) -> Option<String> {
+        move |name| {
+            pairs
+                .iter()
+                .find(|(key, _)| *key == name)
+                .map(|(_, value)| (*value).to_owned())
+        }
+    }
+
+    #[test]
+    fn settings_need_a_url_and_a_token_and_name_what_is_missing() {
+        let error = BillingCoreSettings::from_lookup(settings_env(&[(ENV_BILLING_CORE_TOKEN, "t")]))
+            .unwrap_err();
+        assert!(error.contains(ENV_BILLING_CORE_URL), "{error}");
+        let error = BillingCoreSettings::from_lookup(settings_env(&[(
+            ENV_BILLING_CORE_URL,
+            "http://billing-core:8080",
+        )]))
+        .unwrap_err();
+        assert!(error.contains(ENV_BILLING_CORE_TOKEN), "{error}");
+        let error = BillingCoreSettings::from_lookup(settings_env(&[
+            (ENV_BILLING_CORE_URL, "billing-core"),
+            (ENV_BILLING_CORE_TOKEN, "t"),
+        ]))
+        .unwrap_err();
+        assert!(error.contains(ENV_BILLING_CORE_URL), "{error}");
+        let error = BillingCoreSettings::from_lookup(settings_env(&[
+            (ENV_BILLING_CORE_URL, "http://billing-core:8080"),
+            (ENV_BILLING_CORE_TOKEN, "t"),
+            (ENV_LIMITS_CACHE_TTL_S, "0"),
+        ]))
+        .unwrap_err();
+        assert!(error.contains(ENV_LIMITS_CACHE_TTL_S), "{error}");
+    }
+
+    #[test]
+    fn settings_defaults_and_the_token_is_never_printed() {
+        let settings = BillingCoreSettings::from_lookup(settings_env(&[
+            (ENV_BILLING_CORE_URL, " http://billing-core:8080 "),
+            (ENV_BILLING_CORE_TOKEN, "not-a-real-token"),
+        ]))
+        .unwrap();
+        assert_eq!(settings.base_url, "http://billing-core:8080");
+        assert_eq!(settings.cache_ttl, Duration::from_secs(DEFAULT_LIMITS_CACHE_TTL_S));
+        assert_eq!(settings.stale_window, Duration::from_secs(DEFAULT_LIMITS_STALE_WINDOW_S));
+        assert_eq!(settings.timeout, Duration::from_millis(DEFAULT_LIMITS_TIMEOUT_MS));
+        let printed = format!("{settings:?}");
+        assert!(!printed.contains("not-a-real-token"), "{printed}");
+    }
+
+    #[test]
+    fn billing_core_source_builds_once_configured() {
+        let config = LimitsConfig::from_lookup(settings_env(&[(ENV_LIMITS_SOURCE, "billing_core")]))
+            .unwrap();
+        assert_eq!(config.source, LimitsSource::BillingCore);
+        // Without a URL and a token the edge does not boot under a name that
+        // promises entitlements.
+        let error = config.build_with(settings_env(&[])).err().expect("needs settings");
+        assert!(error.contains(ENV_BILLING_CORE_URL), "{error}");
+        assert!(config
+            .build_with(settings_env(&[
+                (ENV_BILLING_CORE_URL, "http://billing-core:8080"),
+                (ENV_BILLING_CORE_TOKEN, "t"),
+            ]))
+            .is_ok());
+        // The static default never reads the billing settings.
+        assert!(LimitsConfig::default().build_with(settings_env(&[])).is_ok());
+    }
+
+    #[tokio::test]
+    async fn the_http_read_binds_the_org_and_maps_status_classes() {
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/billing/orgs/org_a/quarry/limits"))
+            .and(header("x-service-id", "quarry-edge"))
+            .and(header("x-service-token", "stub-token"))
+            .and(header("x-quarry-org-id", "org_a"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({ "data": snapshot("org_a", 12, no_caps()) })),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/billing/orgs/org_down/quarry/limits"))
+            .respond_with(ResponseTemplate::new(503))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/billing/orgs/org_gone/quarry/limits"))
+            .respond_with(ResponseTemplate::new(403).set_body_json(serde_json::json!({
+                "error": { "code": "organization_inactive", "message": "inactive" }
+            })))
+            .mount(&server)
+            .await;
+
+        let settings = BillingCoreSettings {
+            base_url: format!("{}/", server.uri()),
+            token: "stub-token".to_owned(),
+            cache_ttl: TTL,
+            stale_window: STALE,
+            timeout: Duration::from_secs(2),
+        };
+        let fetch = HttpLimitsFetch::new(&settings).unwrap();
+        let doc = fetch.fetch("org_a").await.unwrap();
+        assert_eq!(doc.into_org_limits("org_a").unwrap().crawl_pages, Allowance::Remaining(12));
+        assert_eq!(fetch.fetch("org_down").await.unwrap_err(), BackendError("unavailable"));
+        assert_eq!(fetch.fetch("org_gone").await.unwrap_err(), BackendError("forbidden"));
+        // An org id that is not a plain path segment is refused before any request.
+        let before = server.received_requests().await.unwrap_or_default().len();
+        for bad in ["", "../org_a", "org a", "org/a", "org%2Fa"] {
+            assert_eq!(fetch.fetch(bad).await.unwrap_err(), BackendError("invalid_org"), "{bad:?}");
+        }
+        let after = server.received_requests().await.unwrap_or_default().len();
+        assert_eq!(before, after);
+
+        // Through the whole resolver: a 503 with nothing cached is the floor.
+        let resolver = WithFailMode::new(BillingCoreBackend::from_settings(&settings).unwrap(), FailMode::Floor);
+        assert_eq!(resolver.org_limits("org_down").await.unwrap(), OrgLimits::floor());
+        assert_eq!(
+            resolver.org_limits("org_a").await.unwrap().crawl_pages,
+            Allowance::Remaining(12)
+        );
     }
 }

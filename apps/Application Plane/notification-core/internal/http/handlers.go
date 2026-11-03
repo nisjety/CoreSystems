@@ -179,6 +179,14 @@ func (h *Handler) CreateNotificationRequest(c *gin.Context) {
 			c.JSON(http.StatusForbidden, gin.H{"error": "space attention notifications require standard retention mode"})
 			return
 		}
+	case "quarry-control":
+		// Quarry tells the user it acts for: the change monitor's or the schedule's
+		// creator is the notice principal. quarryNoticeRefusal holds the rules for the
+		// recipient, the idempotency key, retention and payload shape.
+		if status, message := quarryNoticeRefusal(request, principal.UserID); status != 0 {
+			c.JSON(status, gin.H{"error": message})
+			return
+		}
 	default:
 		c.JSON(http.StatusForbidden, gin.H{"error": "caller is not authorized to create notifications"})
 		return
@@ -224,11 +232,16 @@ func isNotificationTypeAuthorized(serviceID, notificationType string) bool {
 			"modelplane.run_completed": {},
 			"modelplane.run_failed":    {},
 		},
-		// Quarry's change monitor tells a user that a page they watch has changed.
-			"quarry-control": {
-				"change_detected": {},
-			},
-			// WS11-S9: refs-only Space attention, issued by Convex only. The
+		// Quarry's change monitor tells a user that a page they watch has changed, and
+		// its schedule runner tells the schedule's creator that a run failed or was
+		// skipped. Each notice goes to the delegated user only; quarryNoticeRefusal
+		// holds the rules.
+		"quarry-control": {
+			"change_detected":             {},
+			"quarry.schedule_run_failed":  {},
+			"quarry.schedule_run_skipped": {},
+		},
+		// WS11-S9: refs-only Space attention, issued by Convex only. The
 		// in-app copy is the Convex inbox, so these types carry no title or text.
 		"space-attention": {
 			"space.mention":         {},
@@ -243,6 +256,68 @@ func isNotificationTypeAuthorized(serviceID, notificationType string) bool {
 	}
 	_, ok := allowed[serviceID][notificationType]
 	return ok
+}
+
+// quarryScheduleNoticeKeys is the closed payload of a standard-retention schedule
+// notice: display text, ids and a closed reason. It holds no URL and no schedule
+// target, so a notice cannot point at page content.
+var quarryScheduleNoticeKeys = map[string]struct{}{"title": {}, "body": {}, "schedule_id": {}, "schedule_kind": {}, "reason": {}, "run_id": {}}
+
+// quarryScheduleNoticeTitleOnly is the payload a ZDR schedule notice may carry.
+var quarryScheduleNoticeTitleOnly = map[string]struct{}{"title": {}}
+
+// quarryNoticeRefusal decides whether a notice from the quarry-control principal may
+// go on. It returns the status and message to refuse with, or (0, "") to accept.
+// The delegated user is the notice principal: a notice reaches the creator of the
+// change monitor or schedule that raised it and no other member. Every notice needs
+// an idempotency key, so a replayed event batch adds nothing.
+func quarryNoticeRefusal(request notification.Request, delegatedUserID string) (int, string) {
+	if strings.TrimSpace(delegatedUserID) == "" || request.Recipient.Kind != notification.RecipientKindUser || request.Recipient.ID != delegatedUserID {
+		return http.StatusForbidden, "quarry may notify only the delegated user"
+	}
+	if strings.TrimSpace(request.IdempotencyKey) == "" {
+		return http.StatusBadRequest, "quarry notices require an idempotency key"
+	}
+	retentionMode := strings.ToLower(strings.TrimSpace(request.RetentionMode))
+	if retentionMode != notification.RetentionModeStandard && retentionMode != notification.RetentionModeZDR {
+		return http.StatusBadRequest, "quarry notices require retention_mode standard or zdr"
+	}
+	switch strings.TrimSpace(request.Type) {
+	case "change_detected":
+		if retentionMode != notification.RetentionModeStandard {
+			return http.StatusForbidden, "change notices require standard retention mode"
+		}
+		return 0, ""
+	case "quarry.schedule_run_failed", "quarry.schedule_run_skipped":
+		allowed := quarryScheduleNoticeKeys
+		if retentionMode == notification.RetentionModeZDR {
+			allowed = quarryScheduleNoticeTitleOnly
+		}
+		if !quarryNoticePayloadWithin(request.Payload, allowed) {
+			return http.StatusBadRequest, "quarry schedule notice payload is not allowed for this retention mode"
+		}
+		return 0, ""
+	default:
+		return http.StatusForbidden, "quarry may not send this notification type"
+	}
+}
+
+// quarryNoticePayloadWithin reports whether payload has a non-blank title, no key
+// outside allowed, and string values only.
+func quarryNoticePayloadWithin(payload map[string]any, allowed map[string]struct{}) bool {
+	title, ok := payload["title"].(string)
+	if !ok || strings.TrimSpace(title) == "" {
+		return false
+	}
+	for key, value := range payload {
+		if _, ok := allowed[key]; !ok {
+			return false
+		}
+		if _, ok := value.(string); !ok {
+			return false
+		}
+	}
+	return true
 }
 
 // ── Feed ──────────────────────────────────────────────────────────────────
