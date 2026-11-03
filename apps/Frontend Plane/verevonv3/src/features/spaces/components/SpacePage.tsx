@@ -412,7 +412,11 @@ export default function SpacePage() {
       const reason = enteredRef === ref ? 'while_open' : 'enter'
       enteredRef = ref
       void markSpaceRead(ref, reason)
-        .then(() => refreshSpaceAttention())
+        // Only the visit's first mark asks the cross-room aggregate again. The routine poll runs every few
+        // seconds, the open room draws no sidebar count of its own, and each aggregate costs Control decisions.
+        .then(() => {
+          if (reason === 'enter') refreshSpaceAttention()
+        })
         .catch(() => undefined)
     },
   )

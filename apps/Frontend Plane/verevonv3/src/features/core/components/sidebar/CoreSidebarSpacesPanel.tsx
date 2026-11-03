@@ -487,7 +487,9 @@ export function SpacesExpandedSidebarPanel(props: { onCollapse: () => void }) {
     ]
     return options.map((option) => ({
       id: `notify-${option.level}`,
-      label: `${option.level === current ? '✓ ' : ''}${i18n.tr(option.no, option.en)}`,
+      // A checkbox item: the menu draws the check and announces its state, the label stays plain text.
+      checked: option.level === current,
+      label: i18n.tr(option.no, option.en),
       onSelect: () => {
         if (option.level === current) return
         void setSpaceNotifyLevel(space.space_ref, option.level)
@@ -989,6 +991,10 @@ function SpaceLink(props: { space: SpaceSummary; active: boolean; muted?: boolea
   // never shows a second, polled number. Absent store data draws nothing: unknown is not zero.
   const showAttention = () => !isSpaceObserved(props.space.space_ref)
   const attention = () => (showAttention() ? spaceAttentionRoom(props.space.space_ref) : undefined)
+  const drawsAttention = () => {
+    const kind = attention()?.badge.kind
+    return kind === 'count' || kind === 'dot'
+  }
   return (
     <a
       href={spaceHref(props.space.space_ref)}
@@ -996,7 +1002,7 @@ function SpaceLink(props: { space: SpaceSummary; active: boolean; muted?: boolea
       aria-current={props.active ? 'page' : undefined}
       class={cn('core-sidebar-panel-link', props.active && 'verevon-sidebar-panel-active core-sidebar-panel-link--active')}
       data-working={working() ? 'true' : undefined}
-      data-attention={attention() && attention()!.badge.kind !== 'none' ? 'true' : undefined}
+      data-attention={drawsAttention() ? 'true' : undefined}
       data-archived={props.space.archived === true ? 'true' : undefined}
     >
       <Show

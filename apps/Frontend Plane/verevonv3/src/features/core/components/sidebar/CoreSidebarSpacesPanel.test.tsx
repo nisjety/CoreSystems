@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
 import { createRouter, memoryHistory } from '@solidjs/router'
-import { cleanup, fireEvent, render, screen, waitFor } from '@solidjs/testing-library'
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@solidjs/testing-library'
 import { flush } from 'solid-js'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -28,10 +28,13 @@ vi.mock('@/shared/api/spaces-client', async (importOriginal) => ({
 // writes a signal inside the component, which Solid 2 refuses (REACTIVE_WRITE_IN_OWNED_SCOPE) and
 // then halts the reactive system for the rest of the file. These tests are about the room list, so
 // the attention store is replaced by one that never answers (the sections that need it stay off).
+// WS11-S4: the one exception is `attention.rooms`, which a test fills to say what the server counted
+// for a room; it is empty in every other test, so those rows draw no badge.
+const attention = vi.hoisted(() => ({ rooms: {} as Record<string, unknown> }))
 vi.mock('@/features/spaces/lib/space-attention', () => ({
   retainSpaceAttention: () => () => undefined,
   refreshSpaceAttention: () => undefined,
-  spaceAttentionRoom: () => undefined,
+  spaceAttentionRoom: (spaceRef: string) => attention.rooms[spaceRef],
   spaceAttentionTotals: () => undefined,
   spaceAttentionStale: () => false,
   spaceAttentionAvailable: () => false,
@@ -59,6 +62,7 @@ function renderSpacesSidebar() {
 
 describe('SpacesExpandedSidebarPanel', () => {
   beforeEach(() => {
+    attention.rooms = {}
     resetLiveWorkForTests()
     flush()
     spacesClient.spaceDmEnabled.mockReset().mockReturnValue(false)
@@ -104,6 +108,31 @@ describe('SpacesExpandedSidebarPanel', () => {
       '/spaces/space%20personal?thread_id=thread-retro#chat',
     )
     expect(screen.queryByRole('link', { name: /Åpne rommet|open room/i })).toBeNull()
+  })
+
+  it('draws the server count on a room with a count, and no badge on a room the answer does not name', async () => {
+    attention.rooms = {
+      space_shared: {
+        spaceRef: 'space_shared',
+        unreadThreads: 1,
+        unreadCapped: false,
+        mentions: 0,
+        needsYou: 1,
+        working: 0,
+        lastActivityAt: null,
+        lastReadAt: null,
+        manualUnread: false,
+        level: 'mentions',
+        badge: { kind: 'count', n: 1 },
+        gaps: [],
+      },
+    }
+    renderSpacesSidebar()
+
+    const shared = await screen.findByRole('link', { name: /Launch room/ })
+    expect(shared.getAttribute('data-attention')).toBe('true')
+    expect(within(shared).getByRole('img', { name: /1 (trenger deg|need you)/ }).textContent).toBe('1')
+    expect(screen.getByRole('link', { name: 'Personlig rom' }).getAttribute('data-attention')).toBeNull()
   })
 
   it('filters the personal room and conversation projection with the core sidebar search', async () => {

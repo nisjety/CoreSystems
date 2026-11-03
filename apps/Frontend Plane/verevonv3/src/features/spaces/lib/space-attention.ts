@@ -12,13 +12,20 @@ import {
 /**
  * Cross-room attention, shared by every consumer in the shell (WS11-S4).
  *
- * # One poller per browser
+ * # One poller per browser, and only while it is seen
  *
  * The aggregate is one request that covers every room, so it is fetched ONCE per browser, not once
- * per tab or per component. A tab that holds the Web Lock `verevon.space-attention.leader` polls and
- * broadcasts each answer on a `BroadcastChannel`; every other tab only listens. When the leader tab
- * closes the browser hands the lock to the next waiting tab, which then starts polling. Without
- * `navigator.locks` (old browsers, tests) every tab polls for itself, which is correct, just wasteful.
+ * per tab or per component. A VISIBLE tab that holds the Web Lock `verevon.space-attention.leader`
+ * polls every 30 seconds and broadcasts each answer on a `BroadcastChannel`; every other tab only
+ * listens. A hidden tab never asks for the lock and gives it back when it is hidden, so a background
+ * tab costs the server nothing and the next visible tab takes over at once. Without `navigator.locks`
+ * (old browsers, tests) every visible tab polls for itself: correct, just wasteful.
+ *
+ * # Requests are spaced
+ *
+ * A reader who marks something read asks for a fresh answer, but two aggregate requests from one
+ * browser are never closer than {@link ATTENTION_REFRESH_GAP_MS}. A request asked for during a poll
+ * waits for that poll and then goes once.
  *
  * # The badge is the server's
  *
@@ -29,13 +36,18 @@ import {
  * # Absence is not zero
  *
  * No snapshot yet, a failed poll or a feature-off gateway all read as "unknown": the sidebar shows
- * no badge rather than a calm one. After {@link ATTENTION_STALE_AFTER_MS} without a fresh answer the
- * store reports `stale`, and the UI says so instead of presenting old numbers as current.
+ * no badge rather than a calm one. The age of an answer is the time this browser (or the leader tab
+ * it heard from) GOT it, so a follower tab never calls an old answer fresh. After
+ * {@link ATTENTION_STALE_AFTER_MS} without a fresh answer the store reports `stale`, and the UI says
+ * so instead of presenting old numbers as current.
  */
 
 export const ATTENTION_POLL_MS = 30_000
 export const ATTENTION_MAX_BACKOFF_MS = 300_000
 export const ATTENTION_STALE_AFTER_MS = 90_000
+/** Two aggregate requests from one browser are at least this far apart, however often a reader asks. */
+export const ATTENTION_REFRESH_GAP_MS = 10_000
+const CLOCK_TICK_MS = 15_000
 const LEADER_LOCK = 'verevon.space-attention.leader'
 const CHANNEL = 'verevon.space-attention'
 
@@ -49,10 +61,16 @@ type ChannelMessage =
 
 interface State {
   readonly snapshot: SpacesAttention | undefined
-  /** When this browser last received an answer (local clock), or null. */
+  /** When this browser last received an answer (its clock, or the leader's), or null. */
   readonly receivedAt: number | null
   /** The gateway said the surface is off (404 `space_attention_disabled`); polling stopped. */
   readonly disabled: boolean
+}
+
+/** The last good answer and when it was received. Kept outside the signal, so a read is never behind a write. */
+interface Answer {
+  readonly snapshot: SpacesAttention
+  readonly at: number
 }
 
 const store = createRoot(() => {
@@ -93,14 +111,20 @@ export function spaceAttentionAvailable(): boolean {
 let retainers = 0
 let translate: Translate = (_no, en) => en
 let channel: BroadcastChannel | undefined
+/** This tab polls: it is visible and holds the lock (or there is no lock to hold). */
 let leader = false
 let leaderAbort: AbortController | undefined
 let releaseLeader: (() => void) | undefined
 let pollTimer: ReturnType<typeof setTimeout> | undefined
+let refreshTimer: ReturnType<typeof setTimeout> | undefined
 let tickTimer: ReturnType<typeof setInterval> | undefined
 let failures = 0
 let inflight = false
-let lastRefreshAt = 0
+let queued = false
+let lastPollAt = 0
+let lastAnswer: Answer | undefined
+/** Bumped on every stop, so a request that was on its way then cannot touch the next session's state. */
+let generation = 0
 
 /**
  * Start (or join) the shared poller. Returns the release function; the poller stops when the last
@@ -122,18 +146,19 @@ export function retainSpaceAttention(tr: Translate): () => void {
 /** Ask for a fresh answer soon (after the reader marks something read). Safe to call from anywhere. */
 export function refreshSpaceAttention(): void {
   if (retainers === 0 || store.state().disabled) return
-  const at = Date.now()
-  if (at - lastRefreshAt < 1000) return
-  lastRefreshAt = at
-  if (leader) void pollNow()
+  if (leader) scheduleRefresh()
   else post({ type: 'refresh' })
+}
+
+function documentVisible(): boolean {
+  return typeof document === 'undefined' || document.visibilityState === 'visible'
 }
 
 function start(): void {
   if (typeof window === 'undefined') return
   failures = 0
   store.setNow(Date.now())
-  tickTimer = setInterval(() => store.setNow(Date.now()), 15_000)
+  tickTimer = setInterval(() => store.setNow(Date.now()), CLOCK_TICK_MS)
   try {
     if (typeof BroadcastChannel === 'function') {
       channel = new BroadcastChannel(CHANNEL)
@@ -142,34 +167,19 @@ function start(): void {
   } catch {
     channel = undefined
   }
-  const locks = typeof navigator !== 'undefined' ? navigator.locks : undefined
-  if (!locks || !channel) {
-    // No way to elect (or no way to hear the leader): poll for ourselves.
-    becomeLeader()
-    return
-  }
+  if (typeof document !== 'undefined') document.addEventListener('visibilitychange', onVisibilityChange)
   post({ type: 'hello' })
-  leaderAbort = new AbortController()
-  locks
-    .request(LEADER_LOCK, { mode: 'exclusive', signal: leaderAbort.signal }, () =>
-      new Promise<void>((resolve) => {
-        releaseLeader = resolve
-        becomeLeader()
-      }),
-    )
-    .catch(() => undefined) // an aborted request is the normal way out
+  requestLeadership()
 }
 
 function stop(): void {
-  clearTimeout(pollTimer)
-  pollTimer = undefined
   if (tickTimer) clearInterval(tickTimer)
   tickTimer = undefined
-  leader = false
-  leaderAbort?.abort()
-  leaderAbort = undefined
-  releaseLeader?.()
-  releaseLeader = undefined
+  if (typeof document !== 'undefined') document.removeEventListener('visibilitychange', onVisibilityChange)
+  generation += 1
+  inflight = false
+  queued = false
+  yieldLeadership()
   try {
     channel?.close()
   } catch {
@@ -178,10 +188,66 @@ function stop(): void {
   channel = undefined
 }
 
+/**
+ * Take the lead while this tab is visible. A visible tab queues for the lock; a hidden one never
+ * does, so no background tab asks the server anything. With no lock, or no channel to hear the
+ * leader on, the visible tab polls for itself.
+ */
+function requestLeadership(): void {
+  if (retainers === 0 || leader || leaderAbort || !documentVisible()) return
+  const locks = typeof navigator !== 'undefined' ? navigator.locks : undefined
+  if (!locks || !channel) {
+    becomeLeader()
+    return
+  }
+  const abort = new AbortController()
+  leaderAbort = abort
+  void locks
+    .request(LEADER_LOCK, { mode: 'exclusive', signal: abort.signal }, () =>
+      new Promise<void>((resolve) => {
+        // Superseded, stopped, or hidden while it waited: pass the lock straight on.
+        if (abort.signal.aborted || retainers === 0 || !documentVisible()) {
+          resolve()
+          return
+        }
+        releaseLeader = resolve
+        becomeLeader()
+      }),
+    )
+    .catch(() => undefined) // an aborted request is the normal way out
+    .finally(() => {
+      if (leaderAbort === abort) leaderAbort = undefined
+    })
+}
+
+/** Give up polling: cancel a pending lock request and release a held one. Safe to call when not leader. */
+function yieldLeadership(): void {
+  leader = false
+  queued = false
+  clearTimeout(pollTimer)
+  pollTimer = undefined
+  clearTimeout(refreshTimer)
+  refreshTimer = undefined
+  leaderAbort?.abort()
+  leaderAbort = undefined
+  releaseLeader?.()
+  releaseLeader = undefined
+}
+
+function onVisibilityChange(): void {
+  if (retainers === 0) return
+  if (!documentVisible()) {
+    yieldLeadership()
+  } else if (leader) {
+    scheduleRefresh()
+  } else {
+    requestLeadership()
+  }
+}
+
 function becomeLeader(): void {
   leader = true
-  if (store.state().disabled) return
-  void pollNow()
+  scheduleRefresh()
 }
 
 function post(message: ChannelMessage): void {
@@ -197,56 +263,91 @@ function onMessage(message: ChannelMessage | undefined): void {
   switch (message.type) {
     case 'snapshot':
       // Only a follower takes another tab's answer; the leader has its own.
-      if (!leader && message.snapshot && typeof message.snapshot === 'object') apply(message.snapshot)
+      if (!leader && message.snapshot && typeof message.snapshot === 'object') {
+        const at = typeof message.at === 'number' && Number.isFinite(message.at) ? message.at : Date.now()
+        apply(message.snapshot, at)
+      }
       return
     case 'disabled':
       store.setState((current) => ({ ...current, disabled: true }))
       return
     case 'refresh':
-      if (leader) void pollNow()
+      if (leader) scheduleRefresh()
       return
-    case 'hello': {
-      const { snapshot } = store.state()
-      if (leader && snapshot) post({ type: 'snapshot', at: Date.now(), snapshot })
+    case 'hello':
+      // A new tab asks for the answer it missed. Replies carry when WE got it, never "now".
+      if (leader && lastAnswer) post({ type: 'snapshot', at: lastAnswer.at, snapshot: lastAnswer.snapshot })
       return
-    }
   }
 }
 
 // ── polling (leader only) ────────────────────────────────────────────────────────────────────────
 
+/** Poll now, or at the end of the spacing gap when the last request was too recent. */
+function scheduleRefresh(): void {
+  if (!leader || retainers === 0 || refreshTimer !== undefined) return
+  const wait = Math.max(0, lastPollAt + ATTENTION_REFRESH_GAP_MS - Date.now())
+  if (wait === 0) {
+    void pollNow()
+    return
+  }
+  refreshTimer = setTimeout(() => {
+    refreshTimer = undefined
+    void pollNow()
+  }, wait)
+}
+
 async function pollNow(): Promise<void> {
-  if (!leader || inflight || store.state().disabled) return
+  if (!leader || store.state().disabled || !documentVisible()) return
+  if (inflight) {
+    queued = true
+    return
+  }
   inflight = true
+  queued = false
+  const session = generation
   clearTimeout(pollTimer)
+  pollTimer = undefined
+  lastPollAt = Date.now()
   let nextMs = ATTENTION_POLL_MS
+  let off = false
   try {
     const snapshot = await getSpacesAttention()
+    if (session !== generation) return // stopped while on its way: the answer belongs to a session that ended
     failures = 0
-    apply(snapshot)
-    post({ type: 'snapshot', at: Date.now(), snapshot })
+    const at = Date.now()
+    apply(snapshot, at)
+    post({ type: 'snapshot', at, snapshot })
   } catch (error) {
+    if (session !== generation) return
     if (error instanceof ApiError && error.status === 404 && error.code === 'space_attention_disabled') {
       // Off in this deployment: stop for the session instead of asking every 30 seconds.
       store.setState((current) => ({ ...current, disabled: true }))
       post({ type: 'disabled' })
-      inflight = false
-      return
-    }
-    failures += 1
-    nextMs = Math.min(ATTENTION_POLL_MS * 2 ** failures, ATTENTION_MAX_BACKOFF_MS)
-    if (error instanceof ApiError && error.retryAfterSeconds) {
-      nextMs = Math.max(nextMs, error.retryAfterSeconds * 1000)
+      off = true
+    } else {
+      failures += 1
+      nextMs = Math.min(ATTENTION_POLL_MS * 2 ** failures, ATTENTION_MAX_BACKOFF_MS)
+      if (error instanceof ApiError && error.retryAfterSeconds) {
+        nextMs = Math.max(nextMs, error.retryAfterSeconds * 1000)
+      }
     }
   } finally {
-    inflight = false
+    if (session === generation) inflight = false
   }
-  if (leader && retainers > 0) pollTimer = setTimeout(() => void pollNow(), nextMs)
+  if (off || !leader || retainers === 0) return
+  if (queued) {
+    // Someone asked for a fresh answer while this one was on its way: that answer may predate the change.
+    scheduleRefresh()
+    return
+  }
+  pollTimer = setTimeout(() => void pollNow(), nextMs)
 }
 
-function apply(snapshot: SpacesAttention): void {
-  const previous = store.state().snapshot
-  store.setState({ snapshot, receivedAt: Date.now(), disabled: false })
+function apply(snapshot: SpacesAttention, at: number): void {
+  const previous = lastAnswer?.snapshot
+  lastAnswer = { snapshot, at }
+  store.setState({ snapshot, receivedAt: at, disabled: false })
   store.setNow(Date.now())
   announceIncrease(previous, snapshot)
 }
@@ -275,6 +376,8 @@ export function resetSpaceAttentionForTests(): void {
   stop()
   failures = 0
   inflight = false
-  lastRefreshAt = 0
+  queued = false
+  lastPollAt = 0
+  lastAnswer = undefined
   store.setState({ snapshot: undefined, receivedAt: null, disabled: false })
 }
