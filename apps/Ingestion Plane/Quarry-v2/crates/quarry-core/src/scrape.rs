@@ -2116,6 +2116,7 @@ mod tests {
             etag: None,
             last_modified: None,
             extraction: None,
+            text_fp: None,
         }
     }
 
