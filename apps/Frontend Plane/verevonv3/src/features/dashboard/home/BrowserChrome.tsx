@@ -2055,20 +2055,6 @@ export function BrowserChrome(props: {
                 </div>
               )}
             </Show>
-            <For each={session().commentAnchors}>
-              {(anchor) => (
-                <span
-                  class="knowledge-browser-comment-anchor"
-                  style={{
-                    left: `${anchor.x * 100}%`,
-                    top: `${anchor.y * 100}%`,
-                  }}
-                  aria-label={`Kommentar ${anchor.label}`}
-                >
-                  {anchor.label}
-                </span>
-              )}
-            </For>
             <Show
               when={searchQuery() ? null : frameUrl()}
               keyed

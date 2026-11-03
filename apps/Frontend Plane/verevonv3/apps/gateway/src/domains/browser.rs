@@ -3298,7 +3298,7 @@ fn browser_response(
                 "eventCount": metadata.replay_events.len()
             },
             "zdr": metadata.zdr,
-            "capabilities": ["navigate", "back", "forward", "reload", "hard_reload", "click", "click_point", "type", "press", "scroll", "mouse_wheel", "wait_for", "select", "inspect_dom", "control_state", "human_takeover", "agent_control", "tabs", "live_frame", "live_frame_stream", "live_frame_ws", "devtools_events", "devtools_stream", "replay_timeline", "screenshot_artifact", "visual_observation", "visual_change", "annotate", "persistent_profile", "evidence"]
+            "capabilities": ["navigate", "back", "forward", "reload", "hard_reload", "click", "click_point", "type", "press", "scroll", "mouse_wheel", "wait_for", "select", "control_state", "human_takeover", "agent_control", "tabs", "live_frame", "live_frame_stream", "live_frame_ws", "devtools_events", "devtools_stream", "replay_timeline", "screenshot_artifact", "visual_observation", "visual_change", "persistent_profile", "evidence"]
         },
         "observation": observation
     })
@@ -3434,12 +3434,16 @@ fn browser_response_from_owner_projection(projection: &Value, observation: Optio
     })
 }
 
-/// The capabilities the SPA may act on for a session. The three WS8.D additions are read
-/// from Quarry's projection, so none is advertised until Quarry reports it: `human_browsing`
-/// needs `grantKind == "human_browse"`, `tab_control` the boolean `tabControl`, and `attach`
-/// the boolean `attachAvailable` (false until WS8.F).
+/// The capabilities the SPA may act on for a session. Each names an action or surface that Quarry
+/// honours for it. The three WS8.D additions are read from Quarry's projection, so none is
+/// advertised until Quarry reports it: `human_browsing` needs `grantKind == "human_browse"`,
+/// `tab_control` the boolean `tabControl`, and `attach` the boolean `attachAvailable` (false until
+/// WS8.F). A ZDR run cannot take a persistent profile or an attach (`reject_zdr_persistent_profile`
+/// here, and the `agent_persistent_profile` and `agent_attach` rows of Quarry's `zdr_matrix`), so
+/// `persistent_profile` and `attach` are offered only when the projection says `zdr: false`.
 fn browser_session_capabilities(projection: &Value) -> Vec<&'static str> {
     let flag = |key: &str| projection.get(key).and_then(Value::as_bool).unwrap_or(false);
+    let zdr_off = projection.get("zdr").and_then(Value::as_bool) == Some(false);
     let mut capabilities = vec![
         "navigate",
         "back",
@@ -3454,7 +3458,6 @@ fn browser_session_capabilities(projection: &Value) -> Vec<&'static str> {
         "mouse_wheel",
         "wait_for",
         "select",
-        "inspect_dom",
         "control_state",
         "human_takeover",
         "agent_control",
@@ -3465,17 +3468,18 @@ fn browser_session_capabilities(projection: &Value) -> Vec<&'static str> {
         "screenshot_artifact",
         "visual_observation",
         "visual_change",
-        "annotate",
-        "persistent_profile",
         "evidence",
     ];
+    if zdr_off {
+        capabilities.push("persistent_profile");
+    }
     if projection.get("grantKind").and_then(Value::as_str) == Some("human_browse") {
         capabilities.push("human_browsing");
     }
     if flag("tabControl") {
         capabilities.push("tab_control");
     }
-    if flag("attachAvailable") {
+    if zdr_off && flag("attachAvailable") {
         capabilities.push("attach");
     }
     capabilities
@@ -10410,6 +10414,35 @@ mod human_browse_session_tests {
         assert!(!caps.contains(&"human_browsing"));
         assert!(!caps.contains(&"tab_control"));
         assert!(!caps.contains(&"attach"));
+    }
+
+    #[test]
+    fn advertised_capabilities_name_only_what_quarry_honours() {
+        let open = browser_session_capabilities(&json!({
+            "runId": "run-1",
+            "zdr": false,
+            "grantKind": "human_browse",
+            "tabControl": true,
+            "attachAvailable": true
+        }));
+        assert!(!open.contains(&"annotate"), "{open:?}");
+        assert!(!open.contains(&"inspect_dom"), "{open:?}");
+        assert!(open.contains(&"persistent_profile"), "{open:?}");
+        assert!(open.contains(&"human_browsing"), "{open:?}");
+        assert!(open.contains(&"tab_control"), "{open:?}");
+        assert!(open.contains(&"attach"), "{open:?}");
+
+        let zdr = browser_session_capabilities(&json!({
+            "runId": "run-1",
+            "zdr": true,
+            "attachAvailable": true
+        }));
+        assert!(!zdr.contains(&"persistent_profile"), "{zdr:?}");
+        assert!(!zdr.contains(&"attach"), "{zdr:?}");
+        assert!(zdr.contains(&"navigate"), "{zdr:?}");
+
+        let unstated = browser_session_capabilities(&json!({ "runId": "run-1" }));
+        assert!(!unstated.contains(&"persistent_profile"), "{unstated:?}");
     }
 }
 
