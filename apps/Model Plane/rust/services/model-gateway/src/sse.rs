@@ -807,7 +807,7 @@ fn stream_ended_with_no_content(prompt: &str, stop_reason: &str, assistant_outpu
 
 /// Auxiliary calls inherit the subscription selected for the turn. They must
 /// never spend another provider's quota just because their default is cheaper.
-fn subscription_scoped_request(request: InferRequest, route: &InferRequest) -> InferRequest {
+pub(crate) fn subscription_scoped_request(request: InferRequest, route: &InferRequest) -> InferRequest {
     let mut request = inherit_turn_floors(request, route);
     if !route.subscription_connection_id.is_empty() {
         request.model.clone_from(&route.model);
@@ -9846,7 +9846,7 @@ const VERIFICATION_JUDGE_MAX_TOKENS: i32 = 8;
 /// The model the auxiliary calls use. It is read from the environment once per
 /// process, so every auxiliary call in the process agrees on it and the
 /// environment is not consulted on each request.
-fn aux_model() -> &'static str {
+pub(crate) fn aux_model() -> &'static str {
     static MODEL: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     MODEL
         .get_or_init(|| aux_model_from(std::env::var(AUX_MODEL_VAR).ok().as_deref()))

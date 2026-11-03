@@ -32,6 +32,7 @@ mod finetune_poller_auth;
 pub mod finetune_routes;
 pub mod format_guidance;
 pub mod gateway_metrics;
+pub mod goal_judge;
 pub mod grounding;
 pub mod grpc;
 pub mod grpc_auth;
