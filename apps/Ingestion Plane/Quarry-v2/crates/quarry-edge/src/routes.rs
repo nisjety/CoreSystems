@@ -1002,11 +1002,16 @@ async fn scrape_with(
     }
 
     let driver = pick_driver(&state, &plan, req.prefer_http3);
-    // E3.8.3: the fetch retries under the scrape config. A browser render is not
-    // retried: each runs for seconds, and a repeat is not a transport retry. The
-    // retries share the run's own deadline, so none waits past `timeout_ms`.
+    // E3.8.3: the fetch retries under the scrape config, except in two cases. A browser
+    // render runs for seconds, and a repeat is not a transport retry. A configured proxy
+    // pool (`QUARRY_PROXY_POOL`) rotates identities inside the driver chain, and a chain
+    // error keeps only each tier's message, so a retry could reach proxies beyond the
+    // first attempt's plan (ADR-5). The retries share the run's own deadline.
     let driver = match scrape_retry_config() {
-        Some(config) if plan.driver != quarry_core::output::DriverKind::Browser => {
+        Some(config)
+            if plan.driver != quarry_core::output::DriverKind::Browser
+                && state.proxy_pool_name.is_empty() =>
+        {
             let until = tokio::time::Instant::now()
                 + Duration::from_millis(crate::scrape_actions::run_deadline_ms(
                     resolved.actions.is_some(),
