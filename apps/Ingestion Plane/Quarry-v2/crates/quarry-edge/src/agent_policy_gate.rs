@@ -1158,3 +1158,668 @@ mod tests {
         assert!(gate_step_layers(&baseline, Principal::Autonomous, false, &layers, check).is_err());
     }
 }
+
+// ---- E3.2-e1: per-origin consent, the Quarry half (origin-extension grants) ----------------
+//
+// A person can let a running run reach origins outside its own allow list (an SSO host, a CDN,
+// a partner site) by approving an origin extension. The broker (Model Plane) records the
+// decision as a child grant of the run grant, kind `origin_extension`; Quarry validates that
+// grant and only then widens the run's browser egress (`configure_egress_policy`). Quarry never
+// widens from anything the caller says, and it never widens past the web policy: any deny (the
+// run's decision, the run grant's snapshot, the open-web denied list, the org's consent caps)
+// beats the approval, and the whole extension is refused rather than applied in part.
+//
+// The grant contract (MP-ASKS.md, "W3-E3.2-e1"): `kind = "origin_extension"`, `parent_grant_id`
+// = the live run grant, `owner_id` = the run's actor, `resource_id` = the start host (the origin
+// the person was on), `allowed_domains` = the start host plus at most eight hosts the person
+// listed, all canonical, `allowed_actions` = exactly one entry `extend_origin:<scope>` with scope
+// `turn` | `conversation` | `always`, no frame/dialog/artifact scope, allow-list mode with no
+// denied list, `zdr` equal to the run's. A ZDR run takes a turn-scoped extension only.
+//
+// Flag: `QUARRY_EDGE__ORIGIN_CONSENT`, default off (OD13: the consent wording ships off until
+// counsel has reviewed it). Off, every extension is refused before any broker call.
+
+/// The flag that admits origin extensions. Default off.
+pub const ORIGIN_CONSENT_FLAG: &str = "QUARRY_EDGE__ORIGIN_CONSENT";
+
+/// The grant kind the broker issues for a person's per-origin consent decision.
+pub const ORIGIN_EXTENSION_KIND: &str = "origin_extension";
+
+/// The one `allowed_actions` entry an origin-extension grant carries, before its scope.
+pub const ORIGIN_EXTENSION_ACTION_PREFIX: &str = "extend_origin:";
+
+/// At most this many hosts a person lists, beside the start host (OD13 / DEC-19).
+pub const MAX_ORIGIN_EXTENSION_HOSTS: usize = 8;
+
+/// Org default (E3.2-f, claim caps): `disabled` refuses every extension, `allowed` states nothing.
+pub const ORIGIN_CONSENT_CAP_KEY: &str = "browser.consent.origin";
+
+/// Org default (E3.2-f, claim caps): the widest scope an extension may have.
+pub const ORIGIN_CONSENT_MAX_SCOPE_CAP_KEY: &str = "browser.consent.max_scope";
+
+/// Whether `QUARRY_EDGE__ORIGIN_CONSENT` is on in this process. Read per call so the flag needs no
+/// AppState plumbing; tests pass the value explicitly instead.
+pub fn origin_consent_enabled() -> bool {
+    std::env::var(ORIGIN_CONSENT_FLAG)
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
+}
+
+/// How long a person's consent decision lasts. Ordered narrowest first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ConsentScope {
+    Turn,
+    Conversation,
+    Always,
+}
+
+impl ConsentScope {
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw {
+            "turn" => Some(Self::Turn),
+            "conversation" => Some(Self::Conversation),
+            "always" => Some(Self::Always),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Turn => "turn",
+            Self::Conversation => "conversation",
+            Self::Always => "always",
+        }
+    }
+}
+
+/// A validated origin extension: what the run may now also reach.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OriginExtension {
+    pub grant_id: String,
+    /// The origin the person was on when they approved.
+    pub start_host: String,
+    /// The hosts the person listed, without the start host. At most
+    /// [`MAX_ORIGIN_EXTENSION_HOSTS`].
+    pub hosts: Vec<String>,
+    pub scope: ConsentScope,
+}
+
+impl OriginExtension {
+    /// The start host and the listed hosts, the set the egress boundary gains.
+    pub fn all_hosts(&self) -> Vec<String> {
+        let mut all = Vec::with_capacity(self.hosts.len() + 1);
+        all.push(self.start_host.clone());
+        all.extend(self.hosts.iter().cloned());
+        all
+    }
+}
+
+/// Why an origin extension is refused, as a closed label (logs, counters, error details). It
+/// never carries a host.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OriginExtensionRefusal {
+    /// `QUARRY_EDGE__ORIGIN_CONSENT` is off.
+    FlagOff,
+    /// Not a live origin-extension grant of this run, its owner and its ZDR posture.
+    GrantInvalid,
+    /// A host that is not canonical, or the start host missing from the list.
+    HostInvalid,
+    /// More than [`MAX_ORIGIN_EXTENSION_HOSTS`] listed hosts.
+    TooManyHosts,
+    /// A ZDR run takes a turn-scoped extension only.
+    ZdrScope,
+    /// The org's `browser.consent.origin` is `disabled`.
+    OrgDisabled,
+    /// The extension's scope is wider than the org's `browser.consent.max_scope`.
+    OrgScope,
+    /// The org's consent caps carry a value this build does not know (fail closed).
+    OrgUnreadable,
+    /// A host the web policy, the grant snapshot or the run's denied list refuses.
+    Denied,
+    /// A key run, which has no person to consent.
+    ApiKeyRun,
+}
+
+impl OriginExtensionRefusal {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::FlagOff => "origin_consent_disabled",
+            Self::GrantInvalid => "origin_extension_grant_invalid",
+            Self::HostInvalid => "origin_extension_host_invalid",
+            Self::TooManyHosts => "origin_extension_too_many_hosts",
+            Self::ZdrScope => "origin_extension_zdr_scope",
+            Self::OrgDisabled => "org_origin_consent_disabled",
+            Self::OrgScope => "org_origin_consent_scope",
+            Self::OrgUnreadable => "org_origin_consent_unreadable",
+            Self::Denied => "origin_extension_denied",
+            Self::ApiKeyRun => "origin_extension_api_key_run",
+        }
+    }
+
+    /// The typed error: 403 when the deployment has the feature off, `SecurityBlocked`
+    /// otherwise. The details carry the closed label only.
+    pub fn to_error(self) -> quarry_core::error::QuarryError {
+        use quarry_core::error::{ErrorCode, QuarryError};
+        let (code, message) = match self {
+            Self::FlagOff => (
+                ErrorCode::Forbidden,
+                "origin consent is not enabled on this deployment (QUARRY_EDGE__ORIGIN_CONSENT is off)",
+            ),
+            Self::ApiKeyRun => (
+                ErrorCode::Forbidden,
+                "an API-key run cannot be extended to other origins",
+            ),
+            Self::Denied => (
+                ErrorCode::SecurityBlocked,
+                "the web policy denies an origin in this extension; a deny beats the approval",
+            ),
+            _ => (
+                ErrorCode::SecurityBlocked,
+                "origin extension grant does not authorize this run",
+            ),
+        };
+        QuarryError::new(code, message)
+            .with_details(serde_json::json!({ "reason": self.as_str() }))
+    }
+}
+
+/// Host suffixes no consent can reach: loopback and private-use names (same list as user-core's
+/// browser_consent validation).
+const NON_GRANTABLE_SUFFIXES: [&str; 4] = ["localhost", "local", "internal", "home.arpa"];
+
+/// A host is canonical when it is already in the form the policy matches on: lower case ASCII
+/// (punycode for an internationalised name), at least two labels, no trailing dot, no scheme,
+/// port, path, userinfo or wildcard, not an IP literal (a numeric last label refuses dotted
+/// IPv4), and not a loopback or private-use name. A non-canonical host is refused, never
+/// rewritten.
+pub fn is_canonical_host(host: &str) -> bool {
+    if host.is_empty() || host.len() > 253 || !host.contains('.') {
+        return false;
+    }
+    let labels_ok = host.split('.').all(|label| {
+        !label.is_empty()
+            && label.len() <= 63
+            && !label.starts_with('-')
+            && !label.ends_with('-')
+            && label
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+    });
+    if !labels_ok {
+        return false;
+    }
+    let last = host.rsplit('.').next().unwrap_or_default();
+    if last.bytes().all(|byte| byte.is_ascii_digit()) {
+        return false;
+    }
+    !NON_GRANTABLE_SUFFIXES
+        .iter()
+        .any(|suffix| host_under(host, suffix))
+}
+
+/// The run an extension must belong to.
+#[derive(Debug, Clone, Copy)]
+pub struct ExtensionRun<'a> {
+    /// The run's live grant: the extension's parent.
+    pub parent_grant_id: &'a str,
+    /// The run's actor: the extension's owner.
+    pub owner_id: &'a str,
+    pub zdr: bool,
+}
+
+/// Read an origin-extension grant against the run it claims to extend. Fails closed: any field
+/// that does not match the contract refuses the whole grant.
+pub fn origin_extension_from_grant(
+    grant: &GrantValidation,
+    run: &ExtensionRun<'_>,
+) -> Result<OriginExtension, OriginExtensionRefusal> {
+    if !grant.is_usable()
+        || grant.kind != ORIGIN_EXTENSION_KIND
+        || grant.parent_grant_id.as_deref() != Some(run.parent_grant_id)
+        || run.parent_grant_id.is_empty()
+        || run.owner_id.is_empty()
+        || grant.owner_id != run.owner_id
+        || grant.zdr != run.zdr
+        || !grant.key_id.is_empty()
+        || !grant.allowed_frame_ids.is_empty()
+        || !grant.allowed_dialog_ids.is_empty()
+        || !grant.allowed_artifact_ids.is_empty()
+        || !matches!(grant.policy_mode.as_str(), "" | "allowlist")
+        || !grant.denied_domains.is_empty()
+    {
+        return Err(OriginExtensionRefusal::GrantInvalid);
+    }
+    let scope = match grant.allowed_actions.as_slice() {
+        [only] => only
+            .strip_prefix(ORIGIN_EXTENSION_ACTION_PREFIX)
+            .and_then(ConsentScope::parse)
+            .ok_or(OriginExtensionRefusal::GrantInvalid)?,
+        _ => return Err(OriginExtensionRefusal::GrantInvalid),
+    };
+    if run.zdr && scope != ConsentScope::Turn {
+        return Err(OriginExtensionRefusal::ZdrScope);
+    }
+
+    let start_host = grant.resource_id.as_str();
+    if !is_canonical_host(start_host) {
+        return Err(OriginExtensionRefusal::HostInvalid);
+    }
+    let mut hosts: Vec<String> = Vec::new();
+    let mut saw_start = false;
+    for host in &grant.allowed_domains {
+        if !is_canonical_host(host) {
+            return Err(OriginExtensionRefusal::HostInvalid);
+        }
+        if host == start_host {
+            if saw_start {
+                return Err(OriginExtensionRefusal::HostInvalid);
+            }
+            saw_start = true;
+        } else if hosts.contains(host) {
+            return Err(OriginExtensionRefusal::HostInvalid);
+        } else {
+            hosts.push(host.clone());
+        }
+    }
+    if !saw_start {
+        return Err(OriginExtensionRefusal::HostInvalid);
+    }
+    if hosts.len() > MAX_ORIGIN_EXTENSION_HOSTS {
+        return Err(OriginExtensionRefusal::TooManyHosts);
+    }
+    Ok(OriginExtension {
+        grant_id: grant.grant_id.clone(),
+        start_host: start_host.to_owned(),
+        hosts,
+        scope,
+    })
+}
+
+/// The org's consent defaults (E3.2-f), read from the run grant's web-policy snapshot (the claim
+/// the broker verified). Absent keys state nothing. A value this build does not know fails closed.
+pub fn org_consent_refusal(
+    snapshot: Option<&serde_json::Value>,
+    scope: ConsentScope,
+) -> Option<OriginExtensionRefusal> {
+    let caps = snapshot
+        .filter(|raw| !raw.is_null())
+        .and_then(|raw| raw.get("caps"))
+        .filter(|caps| !caps.is_null())?;
+    let Some(caps) = caps.as_object() else {
+        return Some(OriginExtensionRefusal::OrgUnreadable);
+    };
+    match caps.get(ORIGIN_CONSENT_CAP_KEY) {
+        None | Some(serde_json::Value::Null) => {}
+        Some(value) => match value.as_str() {
+            Some("allowed") => {}
+            Some("disabled") => return Some(OriginExtensionRefusal::OrgDisabled),
+            _ => return Some(OriginExtensionRefusal::OrgUnreadable),
+        },
+    }
+    match caps.get(ORIGIN_CONSENT_MAX_SCOPE_CAP_KEY) {
+        None | Some(serde_json::Value::Null) => None,
+        Some(value) => match value.as_str().and_then(ConsentScope::parse) {
+            Some(max) if scope > max => Some(OriginExtensionRefusal::OrgScope),
+            Some(_) => None,
+            None => Some(OriginExtensionRefusal::OrgUnreadable),
+        },
+    }
+}
+
+/// Deny beats approval: every host of the extension must pass the run's resolved policy, the
+/// step layer (the run grant's snapshot) when there is one, and the run's own denied list (an
+/// open-web grant's). One refused host refuses the extension.
+pub fn origin_extension_denied(
+    run_policy: &ResolvedPolicy,
+    step_layer: Option<&ResolvedPolicy>,
+    run_denied: &[String],
+    extension: &OriginExtension,
+) -> bool {
+    extension.all_hosts().iter().any(|host| {
+        run_policy.check_host(host).is_err()
+            || step_layer.is_some_and(|layer| layer.check_host(host).is_err())
+            || run_denied.iter().any(|entry| host_under(host, entry))
+    })
+}
+
+/// The run's allow list with the extension's hosts added, or `None` when the run's list is
+/// empty (an unconstrained boundary needs no widening, and adding hosts to it would narrow it).
+pub fn extended_allowed_domains(
+    allowed_domains: &[String],
+    extension: &OriginExtension,
+) -> Option<Vec<String>> {
+    if allowed_domains.is_empty() {
+        return None;
+    }
+    let mut out = allowed_domains.to_vec();
+    for host in extension.all_hosts() {
+        if !out.contains(&host) {
+            out.push(host);
+        }
+    }
+    Some(out)
+}
+
+/// The full Quarry-side check of an extension against a live run: the org's consent caps from
+/// the run grant's snapshot, then deny-beats-approval against the run's decision (or the
+/// autonomous fallback a run without one is held to), the snapshot as a layer, and the run's
+/// denied list. Nothing is consumed or installed here.
+pub fn check_origin_extension(
+    state: &AppState,
+    live: &RunLive,
+    zdr: bool,
+    run_denied: &[String],
+    run_grant: &GrantValidation,
+    extension: &OriginExtension,
+) -> Result<(), OriginExtensionRefusal> {
+    if let Some(refusal) = org_consent_refusal(run_grant.web_policy.as_ref(), extension.scope) {
+        return Err(refusal);
+    }
+    let fallback;
+    let run_policy = match live.policy() {
+        Some(decision) => decision.policy(),
+        None => {
+            fallback = state
+                .policy
+                .decide(Principal::Autonomous, zdr, None)
+                .map_err(|_| OriginExtensionRefusal::Denied)?;
+            fallback.policy()
+        }
+    };
+    let snapshot = GrantSnapshot::from_grant(run_grant);
+    let step_layer = step_policy(
+        run_principal(live),
+        zdr,
+        &StepLayers {
+            grant: &snapshot,
+            claim: &OrgInput::Absent,
+        },
+    )
+    .map_err(|_| OriginExtensionRefusal::Denied)?;
+    if origin_extension_denied(run_policy, step_layer.as_ref(), run_denied, extension) {
+        return Err(OriginExtensionRefusal::Denied);
+    }
+    Ok(())
+}
+
+/// The egress boundary of a run once the extension applies: the run's allow list plus the
+/// extension's hosts, narrowed and deny-listed by the run's decision exactly as at start
+/// ([`live_egress_policy`]). An unconstrained run keeps its boundary.
+pub fn extended_egress_policy(
+    state: &AppState,
+    live: &RunLive,
+    zdr: bool,
+    allowed_domains: &[String],
+    extension: &OriginExtension,
+) -> BrowserEgressPolicy {
+    match extended_allowed_domains(allowed_domains, extension) {
+        Some(extended) => live_egress_policy(state, live, zdr, &extended),
+        None => live_egress_policy(state, live, zdr, allowed_domains),
+    }
+}
+
+#[cfg(test)]
+mod origin_consent_tests {
+    use super::*;
+    use serde_json::json;
+
+    const RUN_GRANT: &str = "grant_run_1";
+    const OWNER: &str = "user_1";
+
+    fn run(zdr: bool) -> ExtensionRun<'static> {
+        ExtensionRun {
+            parent_grant_id: RUN_GRANT,
+            owner_id: OWNER,
+            zdr,
+        }
+    }
+
+    fn grant(scope: &str, start: &str, hosts: &[&str]) -> GrantValidation {
+        let mut domains = vec![start.to_owned()];
+        domains.extend(hosts.iter().map(|host| (*host).to_owned()));
+        serde_json::from_value(json!({
+            "grant_id": "grant_ext_1",
+            "active": true,
+            "kind": ORIGIN_EXTENSION_KIND,
+            "parent_grant_id": RUN_GRANT,
+            "owner_id": OWNER,
+            "resource_id": start,
+            "allowed_domains": domains,
+            "allowed_actions": [format!("{ORIGIN_EXTENSION_ACTION_PREFIX}{scope}")],
+        }))
+        .expect("grant json")
+    }
+
+    #[test]
+    fn the_flag_defaults_off() {
+        if std::env::var(ORIGIN_CONSENT_FLAG).is_err() {
+            assert!(!origin_consent_enabled());
+        }
+        assert_eq!(OriginExtensionRefusal::FlagOff.to_error().code.http_status(), 403);
+    }
+
+    #[test]
+    fn a_well_formed_extension_is_read() {
+        let extension = origin_extension_from_grant(
+            &grant("conversation", "shop.example.com", &["login.example.net", "cdn.example.org"]),
+            &run(false),
+        )
+        .expect("valid");
+        assert_eq!(extension.start_host, "shop.example.com");
+        assert_eq!(extension.hosts, vec!["login.example.net", "cdn.example.org"]);
+        assert_eq!(extension.scope, ConsentScope::Conversation);
+        assert_eq!(extension.all_hosts().len(), 3);
+    }
+
+    #[test]
+    fn eight_listed_hosts_pass_and_nine_do_not() {
+        let eight: Vec<String> = (0..8).map(|i| format!("h{i}.example.com")).collect();
+        let eight: Vec<&str> = eight.iter().map(String::as_str).collect();
+        assert!(origin_extension_from_grant(&grant("turn", "start.example.com", &eight), &run(false)).is_ok());
+
+        let nine: Vec<String> = (0..9).map(|i| format!("h{i}.example.com")).collect();
+        let nine: Vec<&str> = nine.iter().map(String::as_str).collect();
+        assert_eq!(
+            origin_extension_from_grant(&grant("turn", "start.example.com", &nine), &run(false)),
+            Err(OriginExtensionRefusal::TooManyHosts)
+        );
+    }
+
+    #[test]
+    fn the_grant_must_be_a_child_of_this_run_for_this_owner() {
+        let mut other_parent = grant("turn", "a.example.com", &[]);
+        other_parent.parent_grant_id = Some("grant_run_2".into());
+        let mut other_owner = grant("turn", "a.example.com", &[]);
+        other_owner.owner_id = "user_2".into();
+        let mut wrong_kind = grant("turn", "a.example.com", &[]);
+        wrong_kind.kind = "sensitive_approval".into();
+        let mut inactive = grant("turn", "a.example.com", &[]);
+        inactive.active = false;
+        let mut key = grant("turn", "a.example.com", &[]);
+        key.key_id = "key_1".into();
+        let mut open_web = grant("turn", "a.example.com", &[]);
+        open_web.policy_mode = "open_web".into();
+        let mut two_actions = grant("turn", "a.example.com", &[]);
+        two_actions.allowed_actions.push("upload".into());
+        let mut bad_scope = grant("turn", "a.example.com", &[]);
+        bad_scope.allowed_actions = vec!["extend_origin:once".into()];
+        let mut framed = grant("turn", "a.example.com", &[]);
+        framed.allowed_frame_ids = vec!["main".into()];
+        for bad in [
+            other_parent,
+            other_owner,
+            wrong_kind,
+            inactive,
+            key,
+            open_web,
+            two_actions,
+            bad_scope,
+            framed,
+        ] {
+            assert_eq!(
+                origin_extension_from_grant(&bad, &run(false)),
+                Err(OriginExtensionRefusal::GrantInvalid)
+            );
+        }
+    }
+
+    #[test]
+    fn zdr_takes_turn_scope_only_and_the_postures_must_match() {
+        let mut zdr_turn = grant("turn", "a.example.com", &[]);
+        zdr_turn.zdr = true;
+        assert!(origin_extension_from_grant(&zdr_turn, &run(true)).is_ok());
+
+        for scope in ["conversation", "always"] {
+            let mut zdr_wide = grant(scope, "a.example.com", &[]);
+            zdr_wide.zdr = true;
+            assert_eq!(
+                origin_extension_from_grant(&zdr_wide, &run(true)),
+                Err(OriginExtensionRefusal::ZdrScope)
+            );
+        }
+        // A non-ZDR grant never backs a ZDR run, nor the reverse.
+        assert_eq!(
+            origin_extension_from_grant(&grant("turn", "a.example.com", &[]), &run(true)),
+            Err(OriginExtensionRefusal::GrantInvalid)
+        );
+        assert_eq!(
+            origin_extension_from_grant(&zdr_turn, &run(false)),
+            Err(OriginExtensionRefusal::GrantInvalid)
+        );
+    }
+
+    #[test]
+    fn hosts_must_be_canonical() {
+        for host in [
+            "Example.com",
+            "example.com.",
+            "https://example.com",
+            "example.com:443",
+            "*.example.com",
+            "10.0.0.1",
+            "localhost",
+            "printer.local",
+            "svc.internal",
+            "router.home.arpa",
+            "-bad.example.com",
+            "example",
+            "",
+        ] {
+            assert!(!is_canonical_host(host), "{host:?} is not canonical");
+        }
+        for host in ["example.com", "xn--bcher-kva.example", "a-b.c1.example.org"] {
+            assert!(is_canonical_host(host), "{host:?} is canonical");
+        }
+        assert_eq!(
+            origin_extension_from_grant(&grant("turn", "a.example.com", &["B.example.com"]), &run(false)),
+            Err(OriginExtensionRefusal::HostInvalid)
+        );
+        // The start host must be in the list, once; a listed host appears once.
+        let mut no_start = grant("turn", "a.example.com", &["b.example.com"]);
+        no_start.allowed_domains.remove(0);
+        assert_eq!(
+            origin_extension_from_grant(&no_start, &run(false)),
+            Err(OriginExtensionRefusal::HostInvalid)
+        );
+        assert_eq!(
+            origin_extension_from_grant(
+                &grant("turn", "a.example.com", &["b.example.com", "b.example.com"]),
+                &run(false)
+            ),
+            Err(OriginExtensionRefusal::HostInvalid)
+        );
+    }
+
+    #[test]
+    fn org_consent_caps_tighten_only() {
+        let snap = |caps: serde_json::Value| json!({ "v": 1, "rev": "1", "caps": caps });
+        assert_eq!(org_consent_refusal(None, ConsentScope::Always), None);
+        assert_eq!(org_consent_refusal(Some(&snap(json!({}))), ConsentScope::Always), None);
+        assert_eq!(
+            org_consent_refusal(
+                Some(&snap(json!({ "browser.consent.origin": "disabled" }))),
+                ConsentScope::Turn
+            ),
+            Some(OriginExtensionRefusal::OrgDisabled)
+        );
+        let max_conversation = snap(json!({ "browser.consent.max_scope": "conversation" }));
+        assert_eq!(org_consent_refusal(Some(&max_conversation), ConsentScope::Conversation), None);
+        assert_eq!(
+            org_consent_refusal(Some(&max_conversation), ConsentScope::Always),
+            Some(OriginExtensionRefusal::OrgScope)
+        );
+        for unknown in [
+            json!({ "browser.consent.origin": "forced" }),
+            json!({ "browser.consent.max_scope": "once" }),
+            json!({ "browser.consent.max_scope": 3 }),
+        ] {
+            assert_eq!(
+                org_consent_refusal(Some(&snap(unknown)), ConsentScope::Turn),
+                Some(OriginExtensionRefusal::OrgUnreadable)
+            );
+        }
+    }
+
+    fn policy_denying(deny: &[&str]) -> ResolvedPolicy {
+        PolicyBaseline::default()
+            .decide(
+                Principal::Human,
+                false,
+                Some(
+                    RequestAsk {
+                        deny_domains: deny.iter().map(|host| (*host).to_owned()).collect(),
+                        ..Default::default()
+                    }
+                    .into_layer()
+                    .expect("a valid ask"),
+                ),
+            )
+            .expect("a decision")
+            .policy()
+            .clone()
+    }
+
+    #[test]
+    fn any_deny_beats_the_approval() {
+        let extension = origin_extension_from_grant(
+            &grant("turn", "shop.example.com", &["login.example.net", "ads.tracker.com"]),
+            &run(false),
+        )
+        .expect("valid");
+
+        let allows = policy_denying(&["other.example"]);
+        assert!(!origin_extension_denied(&allows, None, &[], &extension));
+        // The run's decision denies a parent of one host.
+        assert!(origin_extension_denied(&policy_denying(&["tracker.com"]), None, &[], &extension));
+        // The step layer (the grant snapshot) denies one.
+        assert!(origin_extension_denied(
+            &allows,
+            Some(&policy_denying(&["login.example.net"])),
+            &[],
+            &extension
+        ));
+        // The run's own denied list (an open-web grant's) denies the start host.
+        assert!(origin_extension_denied(&allows, None, &["example.com".into()], &extension));
+    }
+
+    #[test]
+    fn the_allow_list_gains_the_extension_and_an_unconstrained_one_stays_so() {
+        let extension = origin_extension_from_grant(
+            &grant("turn", "shop.example.com", &["login.example.net"]),
+            &run(false),
+        )
+        .expect("valid");
+        let extended = extended_allowed_domains(&["shop.example.com".into()], &extension)
+            .expect("a constrained run is widened");
+        assert_eq!(extended, vec!["shop.example.com", "login.example.net"]);
+        let egress = BrowserEgressPolicy::from_allowed_domains(&extended);
+        assert!(egress.allows_url("https://login.example.net/sso"));
+        assert!(!egress.allows_url("https://elsewhere.example/"));
+        assert_eq!(extended_allowed_domains(&[], &extension), None);
+    }
+}

@@ -27,6 +27,13 @@
 //! - Patterns obey the D3 caps (100 patterns, 512 characters each, 8192 in total)
 //!   and must compile (`re:` prefixes are regular expressions).
 //!
+//! - W3-E3.5-3: `webhook` is reserved (a 400) unless `QUARRY_EDGE__JOB_WEBHOOK` is on
+//!   (default off). With it on, `webhook` is a per-job target `{url, events}` (or a bare URL
+//!   string) checked by [`check_job_webhook`]: https only, no credentials or fragment, no
+//!   literal private, loopback or link-local address and no `localhost`, `events` from the
+//!   closed [`JOB_WEBHOOK_EVENTS`] set. Control vets the resolved host again (the SSRF
+//!   guard) and signs every delivery. A ZDR request may not carry one.
+//!
 //! `max_pages: 0` is the default in `lenient` and a 400 `invalid_option` in
 //! `strict` (the W1 WS6.A semantics until strict is set). `max_depth: 0` takes
 //! the default in both modes, as the existing contract documents.
@@ -51,6 +58,31 @@ use crate::policy_baseline::{Enforcement, PolicyBaseline};
 
 /// The environment name. Read once through [`CrawlRequestSettings::current`].
 pub const ENV_REQUEST_VALIDATION: &str = "QUARRY_EDGE__CRAWL_REQUEST_VALIDATION";
+
+/// W3-E3.5-3: the per-job webhook switch. Off (the default): `webhook` stays a reserved key.
+pub const ENV_JOB_WEBHOOK: &str = "QUARRY_EDGE__JOB_WEBHOOK";
+
+/// The request key a per-job webhook travels under (crawl and batch alike).
+pub const JOB_WEBHOOK_KEY: &str = "webhook";
+
+/// The closed vocabulary a per-job webhook may name in `events`: the stored event types of
+/// the job's run. Control holds the same set (`JobWebhookEvents` in `webhooks.go`).
+pub const JOB_WEBHOOK_EVENTS: &[&str] = &[
+    "page_failed",
+    "page_fetched",
+    "run_cancelled",
+    "run_completed",
+    "run_failed",
+    "run_started",
+    "run_timed_out",
+];
+
+/// What a per-job webhook gets when `events` is absent: the run's terminal events.
+pub const DEFAULT_JOB_WEBHOOK_EVENTS: &[&str] =
+    &["run_cancelled", "run_completed", "run_failed", "run_timed_out"];
+
+/// The longest webhook URL accepted, as for a webhook subscription.
+pub const MAX_JOB_WEBHOOK_URL_CHARS: usize = 2048;
 
 /// Each option, its canonical name first, then every spelling it takes.
 pub const FIELDS: &[(&str, &[&str])] = &[
@@ -78,6 +110,8 @@ pub const FIELDS: &[(&str, &[&str])] = &[
         "ignore_robots_txt",
         &["ignore_robots_txt", "ignoreRobotsTxt", "ignoreRobots"],
     ),
+    // W3-E3.5-3: also in RESERVED_KEYS, which refuses it while the flag is off.
+    ("webhook", &["webhook"]),
 ];
 
 /// Keys that would change what a request may do. Refused in both modes.
@@ -103,6 +137,16 @@ pub struct CrawlRequestSettings {
     pub strict: bool,
     /// INNH-6: which of the two default-off options the handoff accepts.
     pub features: CrawlFeatures,
+    /// W3-E3.5-3: `QUARRY_EDGE__JOB_WEBHOOK`. Off: `webhook` is a reserved key.
+    pub job_webhook: bool,
+}
+
+/// `on`, `1` or `true` (any case) turn the flag on. Anything else, including a typo, is off.
+fn job_webhook_flag(value: Option<String>) -> bool {
+    matches!(
+        value.as_deref().map(|v| v.trim().to_ascii_lowercase()).as_deref(),
+        Some("on" | "1" | "true")
+    )
 }
 
 impl CrawlRequestSettings {
@@ -110,24 +154,22 @@ impl CrawlRequestSettings {
     /// An unknown value is logged (the value is not) and treated as `lenient`.
     pub fn from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Self {
         let value = lookup(ENV_REQUEST_VALIDATION).map(|value| value.trim().to_ascii_lowercase());
-        match value.as_deref() {
-            None | Some("") | Some("lenient") => Self {
-                strict: false,
-                features: CrawlFeatures::from_lookup(&lookup),
-            },
-            Some("strict") => Self {
-                strict: true,
-                features: CrawlFeatures::from_lookup(&lookup),
-            },
+        let features = CrawlFeatures::from_lookup(&lookup);
+        let job_webhook = job_webhook_flag(lookup(ENV_JOB_WEBHOOK));
+        let strict = match value.as_deref() {
+            None | Some("") | Some("lenient") => false,
+            Some("strict") => true,
             Some(_) => {
                 tracing::warn!(
                     "QUARRY_EDGE__CRAWL_REQUEST_VALIDATION is not lenient or strict; using lenient"
                 );
-                Self {
-                    strict: false,
-                    features: CrawlFeatures::from_lookup(&lookup),
-                }
+                false
             }
+        };
+        Self {
+            strict,
+            features,
+            job_webhook,
         }
     }
 
@@ -262,7 +304,245 @@ pub struct ParsedCrawl {
     /// key is absent or false. A body that asks for it is only accepted by the handoff after
     /// [`robots_override`] allows it; otherwise it is the 403 it always was.
     pub ignore_robots_txt: Option<String>,
+    /// W3-E3.5-3: the checked per-job webhook. `None` when absent (or the flag is off, which
+    /// refuses the key instead).
+    pub webhook: Option<JobWebhook>,
     pub warnings: Vec<RequestWarning>,
+}
+
+/// W3-E3.5-3: a per-job webhook target as the edge accepted it. The URL passed the syntax
+/// and literal-address checks here; control resolves the host through its egress guard before
+/// it stores the hook on the job, and the dispatcher's pinned dial checks it again per delivery.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JobWebhook {
+    pub url: String,
+    /// Sorted and without duplicates, so equal sets compare equal.
+    pub events: Vec<String>,
+}
+
+impl JobWebhook {
+    /// The value the handoff stamps into the job params under [`JOB_WEBHOOK_KEY`].
+    pub fn params_value(&self) -> Value {
+        serde_json::json!({ "url": self.url, "events": self.events })
+    }
+}
+
+/// An address a webhook may never target: private, loopback, link-local, unspecified,
+/// broadcast, documentation, multicast, carrier-grade NAT, "this network", unique-local, and an
+/// IPv4-mapped IPv6 form of any of them.
+fn is_blocked_webhook_ip(ip: std::net::IpAddr) -> bool {
+    use std::net::IpAddr;
+    match ip {
+        IpAddr::V4(v4) => {
+            let octets = v4.octets();
+            v4.is_private()
+                || v4.is_loopback()
+                || v4.is_link_local()
+                || v4.is_unspecified()
+                || v4.is_broadcast()
+                || v4.is_documentation()
+                || v4.is_multicast()
+                || octets[0] == 0
+                || (octets[0] == 100 && (octets[1] & 0xc0) == 64)
+        }
+        IpAddr::V6(v6) => {
+            let first = v6.segments()[0];
+            v6.is_loopback()
+                || v6.is_unspecified()
+                || v6.is_multicast()
+                || (first & 0xfe00) == 0xfc00
+                || (first & 0xffc0) == 0xfe80
+                || v6
+                    .to_ipv4_mapped()
+                    .is_some_and(|v4| is_blocked_webhook_ip(IpAddr::V4(v4)))
+        }
+    }
+}
+
+/// Check a per-job webhook URL. The reason codes are the ones control answers for a webhook
+/// subscription (`validateWebhookURL`), so a caller sees one vocabulary.
+fn check_job_webhook_url(path: &str, raw: &str) -> Result<String, RequestField> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Err(RequestField::new(path, "url_invalid", "a webhook URL is required"));
+    }
+    if raw.chars().count() > MAX_JOB_WEBHOOK_URL_CHARS {
+        return Err(RequestField::new(
+            path,
+            "url_too_long",
+            format!("at most {MAX_JOB_WEBHOOK_URL_CHARS} characters"),
+        ));
+    }
+    let Ok(parsed) = url::Url::parse(raw) else {
+        return Err(RequestField::new(path, "url_invalid", "is not a valid absolute URL"));
+    };
+    if parsed.scheme() != "https" {
+        return Err(RequestField::new(path, "url_not_https", "must use https"));
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(RequestField::new(path, "url_userinfo", "must not carry credentials"));
+    }
+    if parsed.fragment().is_some() || raw.contains('#') {
+        return Err(RequestField::new(path, "url_fragment", "must not carry a fragment"));
+    }
+    let blocked = match parsed.host() {
+        None => {
+            return Err(RequestField::new(path, "url_invalid", "has no host"));
+        }
+        Some(url::Host::Ipv4(ip)) => is_blocked_webhook_ip(std::net::IpAddr::V4(ip)),
+        Some(url::Host::Ipv6(ip)) => is_blocked_webhook_ip(std::net::IpAddr::V6(ip)),
+        Some(url::Host::Domain(domain)) => {
+            let domain = domain.trim_end_matches('.').to_ascii_lowercase();
+            domain == "localhost" || domain.ends_with(".localhost")
+        }
+    };
+    if blocked {
+        return Err(RequestField::new(
+            path,
+            "url_private_address",
+            "must not target a private, loopback or link-local address",
+        ));
+    }
+    Ok(parsed.to_string())
+}
+
+/// Check a per-job `events` list: non-empty, every entry in [`JOB_WEBHOOK_EVENTS`], duplicates
+/// dropped, sorted. Absent is [`DEFAULT_JOB_WEBHOOK_EVENTS`].
+fn check_job_webhook_events(
+    path: &str,
+    value: Option<&Value>,
+    invalid: &mut Vec<RequestField>,
+) -> Vec<String> {
+    let Some(value) = value.filter(|value| !value.is_null()) else {
+        return DEFAULT_JOB_WEBHOOK_EVENTS.iter().map(|e| (*e).to_owned()).collect();
+    };
+    let Value::Array(items) = value else {
+        invalid.push(RequestField::new(path, "invalid_type", "must be an array of event names"));
+        return Vec::new();
+    };
+    if items.is_empty() {
+        invalid.push(RequestField::new(path, "events_empty", "must name at least one event"));
+        return Vec::new();
+    }
+    let mut events = BTreeSet::new();
+    for (index, item) in items.iter().enumerate() {
+        match item.as_str().map(str::trim) {
+            Some(name) if JOB_WEBHOOK_EVENTS.contains(&name) => {
+                events.insert(name.to_owned());
+            }
+            Some(_) => invalid.push(RequestField::new(
+                format!("{path}[{index}]"),
+                "events_unsupported",
+                format!("must be one of {}", JOB_WEBHOOK_EVENTS.join(", ")),
+            )),
+            None => invalid.push(RequestField::new(
+                format!("{path}[{index}]"),
+                "invalid_type",
+                "must be a string",
+            )),
+        }
+    }
+    events.into_iter().collect()
+}
+
+/// W3-E3.5-3: check a per-job webhook value sent under `path`. A bare string is the URL with
+/// the default events; an object takes `url` and `events`. `headers` is refused (a caller does
+/// not choose what control sends), `metadata` is not built, and any other key is unknown in
+/// both modes. Every problem is reported together.
+pub fn check_job_webhook(path: &str, value: &Value) -> Result<JobWebhook, Vec<RequestField>> {
+    let mut invalid = Vec::new();
+    let (url_value, events_value) = match value {
+        Value::String(_) => (Some(value), None),
+        Value::Object(object) => {
+            let mut keys: Vec<&String> = object.keys().collect();
+            keys.sort();
+            for key in keys {
+                match key.as_str() {
+                    "url" | "events" => {}
+                    "headers" => invalid.push(RequestField::new(
+                        format!("{path}.{key}"),
+                        "reserved_field",
+                        "a per-job webhook does not take headers",
+                    )),
+                    "metadata" => invalid.push(RequestField::new(
+                        format!("{path}.{key}"),
+                        "unsupported_option",
+                        "is not supported yet",
+                    )),
+                    _ => invalid.push(RequestField::new(
+                        format!("{path}.{key}"),
+                        "unknown_field",
+                        format!("`{key}` is not a webhook field"),
+                    )),
+                }
+            }
+            (object.get("url"), object.get("events"))
+        }
+        _ => {
+            return Err(vec![RequestField::new(
+                path,
+                "invalid_type",
+                "must be a URL string or an object with url and events",
+            )]);
+        }
+    };
+    let url_path = match value {
+        Value::String(_) => path.to_owned(),
+        _ => format!("{path}.url"),
+    };
+    let url = match url_value.filter(|value| !value.is_null()) {
+        None => {
+            invalid.push(RequestField::new(url_path.as_str(), "required", "a webhook URL is required"));
+            String::new()
+        }
+        Some(Value::String(raw)) => match check_job_webhook_url(&url_path, raw) {
+            Ok(url) => url,
+            Err(field) => {
+                invalid.push(field);
+                String::new()
+            }
+        },
+        Some(_) => {
+            invalid.push(RequestField::new(url_path.as_str(), "invalid_type", "must be a string"));
+            String::new()
+        }
+    };
+    let events = check_job_webhook_events(&format!("{path}.events"), events_value, &mut invalid);
+    if invalid.is_empty() {
+        Ok(JobWebhook { url, events })
+    } else {
+        Err(invalid)
+    }
+}
+
+/// W3-E3.5-3: the per-job webhook of a request body, for any job route (crawl here, batch in
+/// its own handler). `Ok(None)` when the key is absent. With the flag off a present key is the
+/// `reserved_field` 400 it has always been. A ZDR request (`zdr: true` in the body or on the
+/// caller's claims, which the caller passes as `zdr`) may not carry one: control would keep
+/// the delivery payloads.
+pub fn job_webhook_field(
+    object: &Map<String, Value>,
+    enabled: bool,
+    zdr: bool,
+) -> Result<Option<JobWebhook>, Vec<RequestField>> {
+    let Some(value) = object.get(JOB_WEBHOOK_KEY).filter(|value| !value.is_null()) else {
+        return Ok(None);
+    };
+    if !enabled {
+        return Err(vec![RequestField::new(
+            JOB_WEBHOOK_KEY,
+            "reserved_field",
+            format!("`{JOB_WEBHOOK_KEY}` is not accepted"),
+        )]);
+    }
+    if zdr {
+        return Err(vec![RequestField::new(
+            JOB_WEBHOOK_KEY,
+            "zdr_refused",
+            "a zero-data-retention job cannot carry a webhook",
+        )]);
+    }
+    check_job_webhook(JOB_WEBHOOK_KEY, value).map(Some)
 }
 
 /// WS14.S7a (OQ-11): the operator grant list for the robots.txt override, a comma-separated
@@ -646,6 +926,8 @@ pub fn parse_body(body: &[u8], settings: CrawlRequestSettings) -> Result<ParsedC
     let reserved: Vec<RequestField> = keys
         .iter()
         .filter(|key| RESERVED_KEYS.contains(&key.as_str()))
+        // W3-E3.5-3: with the flag on, `webhook` is an option and is checked below.
+        .filter(|key| !(settings.job_webhook && key.as_str() == JOB_WEBHOOK_KEY))
         .map(|key| {
             RequestField::new(
                 key.as_str(),
@@ -795,6 +1077,20 @@ pub fn parse_body(body: &[u8], settings: CrawlRequestSettings) -> Result<ParsedC
         }
     }
 
+    // W3-E3.5-3: the per-job webhook. Only reached with the flag on (off, the key is reserved
+    // above). A body that also asks for ZDR is refused; the handoff checks the claims' ZDR.
+    let webhook = if settings.job_webhook {
+        match job_webhook_field(object, true, zdr == Some(true)) {
+            Ok(found) => found,
+            Err(found) => {
+                invalid.extend(found);
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     // Errors from here on are pattern errors; the regex step runs only when there are none.
     let pattern_errors = invalid.len();
     let include = string_list(lookup(object, "include_paths"), &mut invalid);
@@ -901,6 +1197,7 @@ pub fn parse_body(body: &[u8], settings: CrawlRequestSettings) -> Result<ParsedC
         sitemap,
         scrape_options,
         ignore_robots_txt,
+        webhook,
         warnings,
     })
 }
@@ -911,15 +1208,23 @@ mod tests {
     use serde_json::json;
 
     fn lenient() -> CrawlRequestSettings {
-        CrawlRequestSettings { strict: false, features: CrawlFeatures::default() }
+        CrawlRequestSettings { strict: false, features: CrawlFeatures::default(), job_webhook: false }
     }
 
     fn strict() -> CrawlRequestSettings {
-        CrawlRequestSettings { strict: true, features: CrawlFeatures::default() }
+        CrawlRequestSettings { strict: true, features: CrawlFeatures::default(), job_webhook: false }
     }
 
     fn with_features(strict: bool, sitemap: bool, scrape_options: bool) -> CrawlRequestSettings {
-        CrawlRequestSettings { strict, features: CrawlFeatures { sitemap, scrape_options } }
+        CrawlRequestSettings {
+            strict,
+            features: CrawlFeatures { sitemap, scrape_options },
+            job_webhook: false,
+        }
+    }
+
+    fn with_job_webhook(strict: bool) -> CrawlRequestSettings {
+        CrawlRequestSettings { strict, features: CrawlFeatures::default(), job_webhook: true }
     }
 
     fn parse(body: Value, settings: CrawlRequestSettings) -> Result<ParsedCrawl, Refusal> {
@@ -1616,5 +1921,181 @@ mod tests {
         assert_eq!(scope_skew("observe", false, Some(true)), ScopeSkew::LegacyUnscoped);
         assert_eq!(scope_skew("enforce", false, None), ScopeSkew::Refused);
         assert_eq!(scope_skew("enforce", false, Some(true)), ScopeSkew::Refused);
+    }
+
+    // W3-E3.5-3: the per-job webhook.
+
+    #[test]
+    fn job_webhook_flag_grammar_defaults_off() {
+        let read = |value: Option<&str>| {
+            CrawlRequestSettings::from_lookup(|name| {
+                (name == ENV_JOB_WEBHOOK).then(|| value.map(str::to_owned)).flatten()
+            })
+            .job_webhook
+        };
+        assert!(!read(None));
+        assert!(!read(Some("")));
+        assert!(!read(Some("yes please")));
+        assert!(read(Some("on")));
+        assert!(read(Some(" TRUE ")));
+        assert!(read(Some("1")));
+    }
+
+    #[test]
+    fn job_webhook_is_reserved_while_the_flag_is_off() {
+        let body = json!({ "url": "https://e.test/", "webhook": { "url": "https://hooks.example.com/q" } });
+        for settings in [lenient(), strict()] {
+            assert_eq!(
+                codes(&parse(body.clone(), settings)),
+                vec![("webhook".to_owned(), "reserved_field")]
+            );
+        }
+    }
+
+    #[test]
+    fn job_webhook_is_accepted_with_the_flag_on() {
+        for strict_mode in [false, true] {
+            let parsed = parse(
+                json!({
+                    "url": "https://e.test/",
+                    "webhook": {
+                        "url": "https://hooks.example.com/q?x=1",
+                        "events": ["run_completed", "page_fetched", "run_completed"]
+                    }
+                }),
+                with_job_webhook(strict_mode),
+            )
+            .expect("accepted");
+            let hook = parsed.webhook.expect("a webhook");
+            assert_eq!(hook.url, "https://hooks.example.com/q?x=1");
+            assert_eq!(hook.events, vec!["page_fetched".to_owned(), "run_completed".to_owned()]);
+            assert_eq!(
+                hook.params_value(),
+                json!({ "url": "https://hooks.example.com/q?x=1", "events": ["page_fetched", "run_completed"] })
+            );
+            assert!(parsed.warnings.is_empty(), "webhook is a known field");
+        }
+    }
+
+    #[test]
+    fn a_bare_job_webhook_url_takes_the_terminal_events() {
+        let parsed = parse(
+            json!({ "url": "https://e.test/", "webhook": "https://hooks.example.com/q" }),
+            with_job_webhook(false),
+        )
+        .expect("accepted");
+        let hook = parsed.webhook.expect("a webhook");
+        let expected: Vec<String> =
+            DEFAULT_JOB_WEBHOOK_EVENTS.iter().map(|e| (*e).to_owned()).collect();
+        assert_eq!(hook.events, expected);
+    }
+
+    #[test]
+    fn job_webhook_without_the_key_is_none() {
+        let parsed = parse(json!({ "url": "https://e.test/" }), with_job_webhook(false)).unwrap();
+        assert_eq!(parsed.webhook, None);
+    }
+
+    #[test]
+    fn job_webhook_urls_are_checked_like_subscriptions() {
+        let cases = [
+            ("http://hooks.example.com/q", "url_not_https"),
+            ("https://user:pw@hooks.example.com/q", "url_userinfo"),
+            ("https://hooks.example.com/q#frag", "url_fragment"),
+            ("not a url", "url_invalid"),
+            ("", "url_invalid"),
+            ("https://127.0.0.1/q", "url_private_address"),
+            ("https://10.1.2.3/q", "url_private_address"),
+            ("https://192.168.0.10/q", "url_private_address"),
+            ("https://169.254.169.254/latest", "url_private_address"),
+            ("https://100.64.0.1/q", "url_private_address"),
+            ("https://2130706433/q", "url_private_address"),
+            ("https://[::1]/q", "url_private_address"),
+            ("https://[fd00::1]/q", "url_private_address"),
+            ("https://[fe80::1]/q", "url_private_address"),
+            ("https://[::ffff:127.0.0.1]/q", "url_private_address"),
+            ("https://localhost/q", "url_private_address"),
+            ("https://api.localhost./q", "url_private_address"),
+        ];
+        for (url, code) in cases {
+            let result = parse(
+                json!({ "url": "https://e.test/", "webhook": { "url": url } }),
+                with_job_webhook(false),
+            );
+            assert_eq!(codes(&result), vec![("webhook.url".to_owned(), code)], "{url}");
+        }
+        let long = format!("https://hooks.example.com/{}", "a".repeat(MAX_JOB_WEBHOOK_URL_CHARS));
+        assert_eq!(
+            codes(&parse(json!({ "url": "https://e.test/", "webhook": long }), with_job_webhook(false))),
+            vec![("webhook".to_owned(), "url_too_long")]
+        );
+    }
+
+    #[test]
+    fn job_webhook_events_are_a_closed_set() {
+        let empty = parse(
+            json!({ "url": "https://e.test/", "webhook": { "url": "https://h.example.com/", "events": [] } }),
+            with_job_webhook(false),
+        );
+        assert_eq!(codes(&empty), vec![("webhook.events".to_owned(), "events_empty")]);
+        let unknown = parse(
+            json!({ "url": "https://e.test/", "webhook": { "url": "https://h.example.com/", "events": ["run_completed", "change_detected", 3] } }),
+            with_job_webhook(false),
+        );
+        assert_eq!(
+            codes(&unknown),
+            vec![
+                ("webhook.events[1]".to_owned(), "events_unsupported"),
+                ("webhook.events[2]".to_owned(), "invalid_type"),
+            ]
+        );
+        let not_a_list = parse(
+            json!({ "url": "https://e.test/", "webhook": { "url": "https://h.example.com/", "events": "run_completed" } }),
+            with_job_webhook(false),
+        );
+        assert_eq!(codes(&not_a_list), vec![("webhook.events".to_owned(), "invalid_type")]);
+    }
+
+    #[test]
+    fn job_webhook_refuses_headers_metadata_and_unknown_keys() {
+        let result = parse(
+            json!({ "url": "https://e.test/", "webhook": {
+                "url": "https://h.example.com/", "headers": { "x": "y" }, "metadata": {}, "secret": "s"
+            } }),
+            with_job_webhook(false),
+        );
+        assert_eq!(
+            codes(&result),
+            vec![
+                ("webhook.headers".to_owned(), "reserved_field"),
+                ("webhook.metadata".to_owned(), "unsupported_option"),
+                ("webhook.secret".to_owned(), "unknown_field"),
+            ]
+        );
+        let wrong_type = parse(json!({ "url": "https://e.test/", "webhook": 7 }), with_job_webhook(false));
+        assert_eq!(codes(&wrong_type), vec![("webhook".to_owned(), "invalid_type")]);
+        let no_url = parse(
+            json!({ "url": "https://e.test/", "webhook": { "events": ["run_completed"] } }),
+            with_job_webhook(false),
+        );
+        assert_eq!(codes(&no_url), vec![("webhook.url".to_owned(), "required")]);
+    }
+
+    #[test]
+    fn a_zdr_request_cannot_carry_a_job_webhook() {
+        let result = parse(
+            json!({ "url": "https://e.test/", "zdr": true, "webhook": "https://h.example.com/" }),
+            with_job_webhook(false),
+        );
+        assert_eq!(codes(&result), vec![("webhook".to_owned(), "zdr_refused")]);
+        let object = json!({ "webhook": "https://h.example.com/" });
+        let object = object.as_object().unwrap();
+        assert!(job_webhook_field(object, true, true).is_err(), "claims ZDR refuses too");
+        assert!(job_webhook_field(object, true, false).unwrap().is_some());
+        assert_eq!(
+            job_webhook_field(object, false, false).unwrap_err()[0].code,
+            "reserved_field"
+        );
+        assert_eq!(job_webhook_field(&Map::new(), false, true), Ok(None));
     }
 }
