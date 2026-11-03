@@ -24,6 +24,7 @@ const FleetRunConsole = FLEET_CONSOLE_ENABLED
   ? lazy(() => import('@/features/agents/components/FleetRunConsole'))
   : undefined
 const AgentInstallationsPage = lazy(() => import('@/features/agents/components/AgentInstallationsPage'))
+const AutomationsHubPage = lazy(() => import('@/features/automations/components/AutomationsHubPage'))
 const ChiefCoreRoutingPage = lazy(() => import('@/features/agents/components/ChiefCoreRoutingPage'))
 const CustomizeHubPage = lazy(() => import('@/features/customize/CustomizeHub'))
 const CostDashboardPage = lazy(() => import('@/features/cost/components/CostDashboardPage'))
@@ -243,6 +244,7 @@ export const Router = createRouter({
         { path: '/insights/experiments', component: () => <InsightsPage section="experiments" /> },
         { path: '/agents', component: AgentsPage },
         { path: '/agents/installations', component: AgentInstallationsPage },
+        { path: '/agents/automations', component: AutomationsHubPage },
         { path: '/agents/chief-core', component: ChiefCoreRoutingPage },
         { path: '/agents/runs', component: AgentRunConsole },
         ...(FleetRunConsole

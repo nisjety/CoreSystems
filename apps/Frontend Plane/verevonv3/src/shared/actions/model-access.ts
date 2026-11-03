@@ -339,6 +339,12 @@ export const MODEL_ACCESS: Readonly<Record<ActionId, ModelAccessEntry>> = {
   'audit.create_siem_destination': exempt('no_owner_executor', 'external_write'),
   'audit.update_siem_destination': exempt('no_owner_executor', 'external_write'),
   'audit.delete_siem_destination': exempt('no_owner_executor', 'external_write'),
+  'schedule.list': exempt('no_owner_executor', 'read'),
+  'schedule.pause': exempt('agent_cannot_self_govern', 'external_write'),
+  'schedule.resume': exempt('agent_cannot_self_govern', 'external_write'),
+  'schedule.update_time': exempt('agent_cannot_self_govern', 'external_write'),
+  'schedule.delete': exempt('irreversible_destructive', 'destructive'),
+  'schedule.fires.list': exempt('no_owner_executor', 'read'),
 }
 
 /**

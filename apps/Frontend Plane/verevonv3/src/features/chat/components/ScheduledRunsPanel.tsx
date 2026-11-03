@@ -9,6 +9,7 @@ import {
   type CronSchedule,
 } from '@/shared/api/cron-client'
 import { cronExprToLabel, listMySchedules } from '@/shared/api/schedule-from-chat'
+import { approvalLapsed, approvalOf, goalOf } from '@/features/automations/lib/automation-state'
 import { translateApiError, useI18n } from '@/shared/i18n'
 import { getSession } from '@/shared/session/session-store'
 import { chatThreadHref } from '../lib/chat-thread-deep-link'
@@ -32,7 +33,7 @@ import { ScheduleDialog } from './ScheduleDialog'
  * toggle. The panel offers "Forny godkjenning" instead, which opens the
  * consent card again with the schedule's goal; the renewal is a new schedule.
  */
-function formatWhen(value?: string | null, locale?: string): string {
+export function formatWhen(value?: string | null, locale?: string): string {
   if (!value) return '—'
   try {
     return new Date(value).toLocaleString(locale ?? 'nb-NO', { dateStyle: 'short', timeStyle: 'short' })
@@ -41,44 +42,7 @@ function formatWhen(value?: string | null, locale?: string): string {
   }
 }
 
-const scheduleResultsEnabled = () => import.meta.env.VITE_SCHEDULE_RESULTS === 'true'
-
-/** The expiry of a stored approval's `expires_at`, or null when it cannot be read. */
-function approvalExpiry(text: unknown): Date | null {
-  if (typeof text !== 'string') return null
-  try {
-    const parsed: unknown = JSON.parse(text)
-    const raw = parsed && typeof parsed === 'object' ? (parsed as { expires_at?: unknown }).expires_at : undefined
-    if (typeof raw !== 'string') return null
-    const expires = new Date(raw)
-    return Number.isNaN(expires.getTime()) ? null : expires
-  } catch {
-    return null
-  }
-}
-
-/**
- * The consent contract a schedule carries (WS20-S4), read from its stored template.
- * An approval that cannot be read or has passed its expiry cannot fire, which is
- * the same rule capability-core applies (WS20-S8).
- */
-function approvalOf(schedule: CronSchedule, now: number): { expiresAt: Date | null; lapsed: boolean } | null {
-  const template = schedule.task_template
-  if (!template || typeof template !== 'object' || !('approval_contract' in template)) return null
-  const expiresAt = approvalExpiry(template.approval_contract)
-  return { expiresAt, lapsed: !expiresAt || expiresAt.getTime() <= now }
-}
-
-function approvalLapsed(schedule: CronSchedule): boolean {
-  return approvalOf(schedule, Date.now())?.lapsed ?? false
-}
-
-/** The goal a schedule was created with, which the renewal's consent card starts from. */
-function goalOf(schedule: CronSchedule): string {
-  const template = schedule.task_template
-  if (!template || typeof template !== 'object' || !('description' in template)) return ''
-  return typeof template.description === 'string' ? template.description : ''
-}
+export const scheduleResultsEnabled = () => import.meta.env.VITE_SCHEDULE_RESULTS === 'true'
 
 // Closed tokens from cron_fires and the run's outcome. A token outside this
 // list is shown as-is rather than guessed at.
@@ -109,7 +73,7 @@ function fireTokenLabel(token: string, i18n: ReturnType<typeof useI18n>): string
   }
 }
 
-function ScheduleFires(props: { orgId: string; cronId: string }) {
+export function ScheduleFires(props: { orgId: string; cronId: string }) {
   const i18n = useI18n()
   const [fires] = createResource(
     () => [props.orgId, props.cronId] as const,

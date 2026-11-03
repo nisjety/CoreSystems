@@ -6,6 +6,7 @@ import {
   integrationsFetchConnectionContentInput,
 } from '@/shared/actions/action-registry'
 import { chatProjectSchema } from '@/shared/actions/chat-project'
+import { MODEL_ACCESS } from '@/shared/actions/model-access'
 import { isModelExecutableAction } from '@/shared/actions/model-eligibility'
 import { buildModelContextPack } from '@/shared/context-packs/context-pack'
 
@@ -676,6 +677,74 @@ describe('action registry', () => {
   // P-SPA1 moved the spaces.* entries into per-workstream fragments under
   // domains/spaces/*.ts and spread them once. The move must not add, drop, rename
   // or reorder an id: the order is what the contract probes and the context pack read.
+  it('registers the six schedule contracts the automations hub calls, as model-plane actions the model cannot execute', () => {
+    const scheduleIds = [
+      'schedule.list',
+      'schedule.pause',
+      'schedule.resume',
+      'schedule.update_time',
+      'schedule.delete',
+      'schedule.fires.list',
+    ] as const
+
+    for (const id of scheduleIds) {
+      const action = getActionDescriptor(id)
+      expect(action?.ownerPlane, id).toBe('model')
+      expect(action?.requiresApproval, id).toBe(false)
+      expect(isModelExecutableAction(id), id).toBe(false)
+    }
+    expect(getActionDescriptor('schedule.delete')).toMatchObject({ risk: 'high', reversible: false })
+  })
+
+  it('takes the schedule id, the cron expression and the fires limit, and nothing else the hub never sends', () => {
+    const pause = getActionDescriptor('schedule.pause')
+    expect(pause?.inputSchema.safeParse({ scheduleId: 'cron_1' }).success).toBe(true)
+    expect(pause?.inputSchema.safeParse({ scheduleId: '' }).success).toBe(false)
+    expect(pause?.inputSchema.safeParse({ scheduleId: 'cron_1', enabled: false }).success).toBe(false)
+
+    // The time change is a PATCH of the cadence alone: a goal, an approval or a creator is refused.
+    const updateTime = getActionDescriptor('schedule.update_time')
+    expect(updateTime?.inputSchema.safeParse({ scheduleId: 'cron_1', scheduleExpr: '0 8 * * 1-5' }).success).toBe(true)
+    for (const extra of ['description', 'enabled', 'task_template', 'creator_subject_id']) {
+      expect(
+        updateTime?.inputSchema.safeParse({ scheduleId: 'cron_1', scheduleExpr: '0 8 * * 1-5', [extra]: 'x' }).success,
+        extra,
+      ).toBe(false)
+    }
+
+    const firesList = getActionDescriptor('schedule.fires.list')
+    expect(firesList?.inputSchema.safeParse({ scheduleId: 'cron_1', limit: 5 }).success).toBe(true)
+    expect(firesList?.inputSchema.safeParse({ scheduleId: 'cron_1', limit: 0 }).success).toBe(false)
+    expect(firesList?.inputSchema.safeParse({ scheduleId: 'cron_1', limit: 101 }).success).toBe(false)
+
+    // The list takes no filter from the caller: the creator scope is applied by the hub, not by a parameter.
+    const list = getActionDescriptor('schedule.list')
+    expect(list?.inputSchema.safeParse({}).success).toBe(true)
+    expect(list?.inputSchema.safeParse({ creator: 'someone-else' }).success).toBe(false)
+  })
+
+  it('closes each schedule contract in the side map with the reason that matches what it does', () => {
+    expect(MODEL_ACCESS['schedule.list']).toMatchObject({
+      access: 'none',
+      exemptReason: 'no_owner_executor',
+      sideEffectClass: 'read',
+    })
+    expect(MODEL_ACCESS['schedule.fires.list']).toMatchObject({
+      access: 'none',
+      exemptReason: 'no_owner_executor',
+      sideEffectClass: 'read',
+    })
+    // A model that could pause, resume or retime its own schedule would govern its own autonomy.
+    for (const id of ['schedule.pause', 'schedule.resume', 'schedule.update_time'] as const) {
+      expect(MODEL_ACCESS[id], id).toMatchObject({ access: 'none', exemptReason: 'agent_cannot_self_govern' })
+    }
+    expect(MODEL_ACCESS['schedule.delete']).toMatchObject({
+      access: 'none',
+      exemptReason: 'irreversible_destructive',
+      sideEffectClass: 'destructive',
+    })
+  })
+
   it('keeps every action id unique and the spaces.* entries contiguous and in their pre-fragment order (P-SPA1)', () => {
     const ids: string[] = actionRegistry.map((action) => action.id)
     expect(new Set(ids).size).toBe(ids.length)
@@ -683,7 +752,8 @@ describe('action registry', () => {
     // effect-policy actions, update_room_details, change_member_role, leave_room), plus the
     // eight actions main added on its own side (195 before the Space merge).
     // 243 after main was merged into model-plane (2026-11-02): main's 202 plus model-plane's own actions.
-    expect(ids).toHaveLength(243)
+    // 249 after EP-6-S1 registered the six schedule contracts the automations hub calls.
+    expect(ids).toHaveLength(249)
 
     const spaceIds = ids.filter((id) => id.startsWith('spaces.'))
     const first = ids.indexOf(spaceIds[0] as string)

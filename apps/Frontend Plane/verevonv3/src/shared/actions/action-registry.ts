@@ -1714,6 +1714,31 @@ const envelopeStatusOutput = z.object({
   status: z.string(),
 })
 
+// The automations hub's schedule calls (EP-6-S1). Strict, so a field the hub never sends (a goal,
+// an approval, a creator) is refused here rather than dropped. Creator-or-admin is enforced by the
+// BFF (authorize_own_schedule), not by these shapes.
+const scheduleListInput = z.object({}).strict()
+
+const scheduleIdInput = z
+  .object({
+    scheduleId: z.string().trim().min(1).max(200),
+  })
+  .strict()
+
+const scheduleUpdateTimeInput = z
+  .object({
+    scheduleId: z.string().trim().min(1).max(200),
+    scheduleExpr: z.string().trim().min(1).max(120),
+  })
+  .strict()
+
+const scheduleFiresListInput = z
+  .object({
+    scheduleId: z.string().trim().min(1).max(200),
+    limit: z.number().int().min(1).max(100).optional(),
+  })
+  .strict()
+
 // Registry entries are the product contract shared by humans and the Model Plane.
 export const actionRegistry = [
   {
@@ -3883,6 +3908,72 @@ export const actionRegistry = [
     requiresApproval: false,
     reversible: false,
     inputSchema: auditDeleteSiemDestinationInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'schedule.list',
+    label: 'List schedules',
+    description: 'List the schedules the signed-in person created in this organization, with cadence, enabled state and next run. Read only.',
+    ownerPlane: 'model',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: scheduleListInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'schedule.pause',
+    label: 'Pause schedule',
+    description: 'Stop the future fires of one schedule. A run already in progress finishes. The creator or an organization admin may pause it.',
+    ownerPlane: 'model',
+    risk: 'medium',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: scheduleIdInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'schedule.resume',
+    label: 'Resume schedule',
+    description: 'Start the fires of a paused schedule again. A schedule whose approval has expired cannot be resumed; renewing the approval creates a new schedule.',
+    ownerPlane: 'model',
+    risk: 'medium',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: scheduleIdInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'schedule.update_time',
+    label: 'Change schedule time',
+    description: 'Change the cron expression of one schedule. Only the time changes: the goal, the approval and the creator stay as they are.',
+    ownerPlane: 'model',
+    risk: 'medium',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: scheduleUpdateTimeInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'schedule.delete',
+    label: 'Delete schedule',
+    description: 'Delete one schedule. It stops firing at once and cannot be restored from the product. The creator or an organization admin may delete it.',
+    ownerPlane: 'model',
+    risk: 'high',
+    requiresApproval: false,
+    reversible: false,
+    inputSchema: scheduleIdInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'schedule.fires.list',
+    label: 'List schedule fires',
+    description: 'List the most recent fires of one of your schedules, with their status, outcome and the thread that holds the answer. Schedule creator or org admin only.',
+    ownerPlane: 'model',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: scheduleFiresListInput,
     outputSchema: envelopeStatusOutput,
   },
 ] as const satisfies readonly ActionDescriptor[]
