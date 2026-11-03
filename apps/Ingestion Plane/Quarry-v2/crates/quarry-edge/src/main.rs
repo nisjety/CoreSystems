@@ -880,14 +880,9 @@ async fn run() -> anyhow::Result<()> {
     // Otherwise the dev-default `InMemoryProfileStore` runs. Either
     // backend can be wrapped with Redis hot-cache via
     // `cached_profile_store::maybe_cache`.
-    // WS17.E1: profile envelope encryption. Validated before any profile store is built.
-    let profile_plan = profile_encryption::plan_from_settings(
-        &cfg.profile_encryption,
-        cfg.profile_encryption_required,
-        &cfg.profile_key_provider,
-        std::env::var(profile_encryption::MASTER_KEYS_ENV).ok().as_deref(),
-        std::env::var(profile_encryption::MASTER_KEY_ACTIVE_ENV).ok().as_deref(),
-    )?;
+    // WS17.E1/E2b: profile envelope encryption and its key provider. Validated before any
+    // profile store is built.
+    let profile_plan = profile_encryption_plan(&cfg)?;
     #[allow(unused_mut)]
     let mut profile_blobs: Option<Arc<dyn quarry_runtime::profile_blob_store::ProfileBlobStore>> =
         None;
@@ -2141,6 +2136,76 @@ async fn run() -> anyhow::Result<()> {
     Ok(())
 }
 // zdr-log-ok-end
+
+/// WS17.E1/E2b: validate the profile encryption settings and build the key provider.
+///
+/// `env` (the default, and anything but `org_core`) is `profile_encryption::plan_from_settings`
+/// unchanged. `org_core` is the boot check of WS17.E2b: the org-core URL and token must be
+/// set (whatever the mode, so a misconfigured flip stops the edge instead of failing on the
+/// first restore). New wraps then go to org-core through a `KeyRouter`; the env master, when
+/// still configured, is kept only to read `env:`-sealed rows until they reseal lazily.
+fn profile_encryption_plan(
+    cfg: &config::EdgeConfig,
+) -> anyhow::Result<profile_encryption::EncryptionPlan> {
+    use quarry_runtime::envelope_profile_store::EncryptionMode;
+    use quarry_runtime::profile_keys::{
+        KeyRouter, OrgCoreKeyProvider, ProfileKeyProvider, ORG_CORE_KEYS_TOKEN_ENV,
+        ORG_CORE_KEYS_URL_ENV,
+    };
+
+    let master_keys = std::env::var(profile_encryption::MASTER_KEYS_ENV).ok();
+    let master_active = std::env::var(profile_encryption::MASTER_KEY_ACTIVE_ENV).ok();
+    if !cfg.profile_key_provider.trim().eq_ignore_ascii_case("org_core") {
+        return profile_encryption::plan_from_settings(
+            &cfg.profile_encryption,
+            cfg.profile_encryption_required,
+            &cfg.profile_key_provider,
+            master_keys.as_deref(),
+            master_active.as_deref(),
+        );
+    }
+    let Some(mode) = EncryptionMode::parse(&cfg.profile_encryption) else {
+        anyhow::bail!("QUARRY_EDGE__PROFILE_ENCRYPTION must be off, compat or on");
+    };
+    if cfg.profile_encryption_required && mode != EncryptionMode::On {
+        anyhow::bail!(
+            "QUARRY_EDGE__PROFILE_ENCRYPTION_REQUIRED=1 refuses profile_encryption={}; set on first",
+            mode.as_str()
+        );
+    }
+    let org_core = OrgCoreKeyProvider::from_env(cfg.org_core_keys_url.as_deref()).map_err(|e| {
+        anyhow::anyhow!(
+            "QUARRY_EDGE__PROFILE_KEY_PROVIDER=org_core refused at boot ({}); set {ORG_CORE_KEYS_URL_ENV} and {ORG_CORE_KEYS_TOKEN_ENV}",
+            e.class()
+        )
+    })?;
+    if mode == EncryptionMode::Off {
+        return Ok(profile_encryption::EncryptionPlan { mode, keys: None });
+    }
+    // The env master reads `env:` rows only. Validated by the env rules; `compat` here only
+    // selects the validation (the real mode is `mode`) and skips the env-only warning.
+    let env_keys: Option<Arc<dyn ProfileKeyProvider>> =
+        if master_keys.as_deref().is_some_and(|s| !s.trim().is_empty()) {
+            profile_encryption::plan_from_settings(
+                "compat",
+                false,
+                "env",
+                master_keys.as_deref(),
+                master_active.as_deref(),
+            )?
+            .keys
+        } else {
+            tracing::warn!(
+                "profile key provider org_core without env master keys: env-sealed profile rows cannot be read"
+            );
+            None
+        };
+    tracing::info!("profile key provider: org_core (env master kept for env-sealed rows only)");
+    Ok(profile_encryption::EncryptionPlan {
+        mode,
+        keys: Some(Arc::new(KeyRouter::new(env_keys, Arc::new(org_core)))),
+    })
+}
 
 fn env_flag(name: &str) -> bool {
     std::env::var(name)

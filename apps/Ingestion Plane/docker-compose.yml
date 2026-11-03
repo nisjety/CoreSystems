@@ -111,6 +111,17 @@ services:
       QUARRY_EDGE__PROFILE_KEY_PROVIDER: ${QUARRY_EDGE__PROFILE_KEY_PROVIDER:-env}
       QUARRY_PROFILE_MASTER_KEYS: ${QUARRY_PROFILE_MASTER_KEYS:-}
       QUARRY_PROFILE_MASTER_KEY_ACTIVE: ${QUARRY_PROFILE_MASTER_KEY_ACTIVE:-}
+      # WS17.E2b: org-core key provider, used only with QUARRY_EDGE__PROFILE_KEY_PROVIDER=org_core
+      # (which also needs ORG_CORE_KEYS_ENABLED=1 on org-core). The token is the quarry-edge
+      # org-core credential minted in Control's secrets ledger as QUARRY_ORG_CORE_SERVICE_TOKEN
+      # and MIRRORED into this stack's ledger; empty keeps the edge on the env provider, and
+      # the boot check refuses org_core without it.
+      QUARRY_EDGE__ORG_CORE_KEYS_URL: ${QUARRY_EDGE__ORG_CORE_KEYS_URL:-http://org-core:8080}
+      QUARRY_EDGE__ORG_CORE_KEYS_TOKEN: ${QUARRY_ORG_CORE_SERVICE_TOKEN:-}
+      # W2-CP-L2: billing-core quota/entitlement reads (empty = not wired). The token is the
+      # quarry-edge billing-core credential (QUARRY_BILLING_CORE_SERVICE_TOKEN, mirrored).
+      QUARRY_EDGE__BILLING_CORE_URL: ${QUARRY_EDGE__BILLING_CORE_URL:-}
+      QUARRY_EDGE__BILLING_CORE_TOKEN: ${QUARRY_BILLING_CORE_SERVICE_TOKEN:-}
       QUARRY_EDGE__RUNTIME_AUTH_TOKEN: ${QUARRY_RUNTIME_AUTH_TOKEN:?QUARRY_RUNTIME_AUTH_TOKEN is required}
       QUARRY_EDGE__INTERNAL_SECRET: ${QUARRY_INTERNAL_SECRET:?QUARRY_INTERNAL_SECRET must be set (no insecure default)}
       QUARRY_EDGE__NATS_URL: nats://nats:4222
