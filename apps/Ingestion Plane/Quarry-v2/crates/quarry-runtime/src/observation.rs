@@ -23,7 +23,7 @@ use quarry_core::contracts::{
     SnapshotTarget,
 };
 use quarry_core::error::{ErrorCode, QuarryError, QuarryResult};
-use quarry_core::event::EventType;
+use quarry_core::event::{ActionStartedPayload, EventType};
 use quarry_core::ids::kinds::ArtifactKind;
 use quarry_core::redaction::{self, FieldKind, Tally, RULE_VERSION};
 use quarry_core::zdr::{self, WriteKind, ZdrMode};
@@ -410,22 +410,27 @@ impl ObservationRunner {
             .await?;
 
         if let Some(events) = &self.events {
+            // E3.3-e1: `rect` is the target's box, for presentation only. No driver method
+            // reads a box yet (the CDP box-model call is not on BrowserDriver), so it stays
+            // None and the event keeps its shape.
+            let started = ActionStartedPayload {
+                step: ctx.step,
+                action: observation_redaction::action_for_event(
+                    &request.action,
+                    typed_kind,
+                    // X-19: the event keeps what the stored receipt keeps.
+                    quarry_core::redaction::action::record_policy(),
+                    redaction::mode(),
+                    &mut Tally::new(),
+                ),
+                rect: None,
+            };
             events
                 .emit_for_zdr(
                     request.zdr,
                     run_id.clone(),
                     EventType::ActionStarted,
-                    json!({
-                        "step": ctx.step,
-                        "action": observation_redaction::action_for_event(
-                            &request.action,
-                            typed_kind,
-                            // X-19: the event keeps what the stored receipt keeps.
-                            quarry_core::redaction::action::record_policy(),
-                            redaction::mode(),
-                            &mut Tally::new(),
-                        ),
-                    }),
+                    started.to_value(),
                     format!("{}:action:{}:started", run_id, ctx.step),
                 )
                 .await;
