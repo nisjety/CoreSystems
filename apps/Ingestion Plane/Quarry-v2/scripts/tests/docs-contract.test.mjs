@@ -291,11 +291,17 @@ test("every granted manifest row is allowed by the committed registry for quarry
   }
 });
 
-test("the ingestion lane of quarry-edge is the one-time-code read alone, ZDR, and no manifest row requests it yet", () => {
+test("the ingestion lane of quarry-edge is the one-time-code read alone, ZDR, requested by the mail-otp-read row only", () => {
   const quarry = registry["quarry-edge"];
   assert.deepEqual(quarry.scopesByAudience.ingestion, ["integration:otp:read"], "ingestion carries the code-read scope alone");
   assert.equal(quarry.retentionByAudience.ingestion, "zdr", "the ingestion lane is ZDR");
-  assert.ok(!tokenRows.some((r) => r.audience === "ingestion"), "no row requests the ingestion lane until E3.1-h adds the call site");
+  const ingestionRows = tokenRows.filter((r) => r.audience === "ingestion");
+  assert.deepEqual(ingestionRows.map((r) => r.name), ["mail-otp-read"], "E3.1-h is the one row on the ingestion lane");
+  const [otp] = ingestionRows;
+  assert.deepEqual(otp.scopes, ["integration:otp:read"], "the row asks for the code-read scope alone");
+  assert.equal(otp.granted, true, "R-13 PR 1 granted the row");
+  assert.deepEqual(otp.used_by, ["crates/quarry-runtime/src/otp_ic_client.rs"], "the integration-core OTP client is the call site");
+  assert.ok(!tokenRows.some((r) => r.audience !== "ingestion" && r.scopes.includes("integration:otp:read")), "no other row carries the code-read scope");
 });
 
 test("every granted data-plane scope is in the committed registry for quarry-edge", () => {

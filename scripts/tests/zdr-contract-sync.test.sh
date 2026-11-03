@@ -79,7 +79,7 @@ GOLDENS=(
   # The claims of aud=quarry tokens as Auth Core really mints them. Written with
   #   UPDATE_GOLDENS=1 npx jest src/auth/quarry-token-zdr-claims.golden.spec.ts
   # in "apps/Control Plane/auth-core", which also vendors it into Quarry.
-  "apps/Control Plane/auth-core/src/auth/fixtures/quarry-token-claims.golden.json|76cc4af7f2a2a4f2730265d19f8ec4b26dd181b048e9135b66e8369b3ae8c266"
+  "apps/Control Plane/auth-core/src/auth/fixtures/quarry-token-claims.golden.json|6c3044d5004a36f2cab3187a31847d23a6d471e1902337e0c71c9e5f34770682"
 
   # What Auth Core emits to the Data Plane for a service caller, and what it
   # answers when the Data Plane asks whether that caller is a member. Written with
@@ -123,7 +123,7 @@ GOLDENS=(
   # row: edit it, refresh the .sha256 pin beside it (the Rust tests in
   # src/token_request_contract.rs compare it), update the digest here, then re-vendor
   # every copy listed in VENDORED (Auth Core's, CR-T17) and refresh its pin.
-  "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/contracts/cross-plane-token-requests.json|2d139b8fd464d8a32af658b87902beca62730a0e20828475ef35c048974e0fd5"
+  "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/contracts/cross-plane-token-requests.json|6e5f14b36cff96b33991f20b49d7eff87151f1d91dac92fe6afa50c8400e7f04"
 
   # WS4.G: the ZDR feature matrix, what Zero Data Retention does to each route. Generated
   # from quarry_core::zdr_matrix::ROWS by the owner's test, never written by hand:

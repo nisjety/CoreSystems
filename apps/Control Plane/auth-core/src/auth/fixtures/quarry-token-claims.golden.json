@@ -196,6 +196,33 @@
           "robots_max": "respect"
         }
       }
+    },
+    "user_in_org_with_origin_consent_defaults": {
+      "ttl_seconds": 300,
+      "claims": {
+        "iss": "http://localhost:3011/api/convex-auth",
+        "aud": "quarry",
+        "sub": "user-golden",
+        "org_id": "org-origin-consent-golden",
+        "user_id": "user-golden",
+        "principal_type": "user",
+        "email": "member@example.test",
+        "scopes": [
+          "data:read",
+          "documents:read",
+          "documents:write",
+          "wiki.read",
+          "wiki.write"
+        ],
+        "zdr": false,
+        "web_policy": {
+          "v": 1,
+          "rev": "abcdef012345",
+          "caps": {
+            "browser.consent.max_scope": "conversation"
+          }
+        }
+      }
     }
   }
 }
