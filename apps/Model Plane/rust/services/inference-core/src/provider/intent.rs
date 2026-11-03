@@ -25,12 +25,6 @@ use super::effort::Level;
 use super::routing_policy::RoutingPolicy;
 use super::{ChatMessage, ToolDefinition};
 
-// The offline routing diff (EP-14 S10) replays this module's classifier and table chooser. It is mounted here,
-// not in provider/mod.rs, because EP-13 S7 edits that file in the same batch. Move the declaration to
-// provider/mod.rs when the batch lands, and delete this one.
-#[path = "routing_diff.rs"]
-pub mod routing_diff;
-
 /// The three Verevon auto modes the model picker exposes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VerevonMode {

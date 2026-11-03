@@ -30,7 +30,10 @@ type RoutingPolicyMessage struct {
 	// Identity (user/system id) that last wrote the policy.
 	UpdatedBy string `protobuf:"bytes,3,opt,name=updated_by,json=updatedBy,proto3" json:"updated_by,omitempty"`
 	// Unix seconds of the last write.
-	UpdatedAt     int64 `protobuf:"varint,4,opt,name=updated_at,json=updatedAt,proto3" json:"updated_at,omitempty"`
+	UpdatedAt int64 `protobuf:"varint,4,opt,name=updated_at,json=updatedAt,proto3" json:"updated_at,omitempty"`
+	// The candidate this live version was promoted from. Empty when the version
+	// was written directly by SetPolicy.
+	CandidateId   string `protobuf:"bytes,5,opt,name=candidate_id,json=candidateId,proto3" json:"candidate_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -93,6 +96,13 @@ func (x *RoutingPolicyMessage) GetUpdatedAt() int64 {
 	return 0
 }
 
+func (x *RoutingPolicyMessage) GetCandidateId() string {
+	if x != nil {
+		return x.CandidateId
+	}
+	return ""
+}
+
 type GetRoutingPolicyRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	unknownFields protoimpl.UnknownFields
@@ -130,11 +140,15 @@ func (*GetRoutingPolicyRequest) Descriptor() ([]byte, []int) {
 }
 
 type SetRoutingPolicyRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	ConfigJson    string                 `protobuf:"bytes,1,opt,name=config_json,json=configJson,proto3" json:"config_json,omitempty"`
-	UpdatedBy     string                 `protobuf:"bytes,2,opt,name=updated_by,json=updatedBy,proto3" json:"updated_by,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state      protoimpl.MessageState `protogen:"open.v1"`
+	ConfigJson string                 `protobuf:"bytes,1,opt,name=config_json,json=configJson,proto3" json:"config_json,omitempty"`
+	UpdatedBy  string                 `protobuf:"bytes,2,opt,name=updated_by,json=updatedBy,proto3" json:"updated_by,omitempty"`
+	// The live version the caller read. 0 skips the check, which is the behaviour
+	// before this field existed. Any other value must equal the live version, or
+	// the write is ABORTED.
+	ExpectedVersion int64 `protobuf:"varint,3,opt,name=expected_version,json=expectedVersion,proto3" json:"expected_version,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *SetRoutingPolicyRequest) Reset() {
@@ -181,11 +195,580 @@ func (x *SetRoutingPolicyRequest) GetUpdatedBy() string {
 	return ""
 }
 
+func (x *SetRoutingPolicyRequest) GetExpectedVersion() int64 {
+	if x != nil {
+		return x.ExpectedVersion
+	}
+	return 0
+}
+
+// A proposed RoutingPolicy change and the trail of its review. Platform-global:
+// it holds configuration and identities, and no org or user content.
+type PolicyCandidate struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Server-issued identifier.
+	Id string `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	// The proposed RoutingPolicy as a JSON string (schema owned by inference-core).
+	ConfigJson string `protobuf:"bytes,2,opt,name=config_json,json=configJson,proto3" json:"config_json,omitempty"`
+	// The live version the candidate was proposed against.
+	BaseVersion int64 `protobuf:"varint,3,opt,name=base_version,json=baseVersion,proto3" json:"base_version,omitempty"`
+	// Identity that proposed the candidate.
+	ProposedBy string `protobuf:"bytes,4,opt,name=proposed_by,json=proposedBy,proto3" json:"proposed_by,omitempty"`
+	// Unix seconds of the proposal.
+	ProposedAt int64 `protobuf:"varint,5,opt,name=proposed_at,json=proposedAt,proto3" json:"proposed_at,omitempty"`
+	// One of `proposed`, `evaluated`, `rejected`, `promoted`, `superseded`.
+	State string `protobuf:"bytes,6,opt,name=state,proto3" json:"state,omitempty"`
+	// The offline routing diff, as a JSON document computed by inference-core.
+	DiffJson string `protobuf:"bytes,7,opt,name=diff_json,json=diffJson,proto3" json:"diff_json,omitempty"`
+	// The live evaluation as a JSON document. `{}` until one is recorded.
+	LiveEvalJson string `protobuf:"bytes,8,opt,name=live_eval_json,json=liveEvalJson,proto3" json:"live_eval_json,omitempty"`
+	// The written reason for promoting without a passing live evaluation.
+	WaiverReason string `protobuf:"bytes,9,opt,name=waiver_reason,json=waiverReason,proto3" json:"waiver_reason,omitempty"`
+	// Identity that decided the candidate: the reviewer, or the promoter.
+	DecidedBy     string `protobuf:"bytes,10,opt,name=decided_by,json=decidedBy,proto3" json:"decided_by,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PolicyCandidate) Reset() {
+	*x = PolicyCandidate{}
+	mi := &file_model_plane_v1_routing_policy_proto_msgTypes[3]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PolicyCandidate) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PolicyCandidate) ProtoMessage() {}
+
+func (x *PolicyCandidate) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_routing_policy_proto_msgTypes[3]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PolicyCandidate.ProtoReflect.Descriptor instead.
+func (*PolicyCandidate) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_routing_policy_proto_rawDescGZIP(), []int{3}
+}
+
+func (x *PolicyCandidate) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *PolicyCandidate) GetConfigJson() string {
+	if x != nil {
+		return x.ConfigJson
+	}
+	return ""
+}
+
+func (x *PolicyCandidate) GetBaseVersion() int64 {
+	if x != nil {
+		return x.BaseVersion
+	}
+	return 0
+}
+
+func (x *PolicyCandidate) GetProposedBy() string {
+	if x != nil {
+		return x.ProposedBy
+	}
+	return ""
+}
+
+func (x *PolicyCandidate) GetProposedAt() int64 {
+	if x != nil {
+		return x.ProposedAt
+	}
+	return 0
+}
+
+func (x *PolicyCandidate) GetState() string {
+	if x != nil {
+		return x.State
+	}
+	return ""
+}
+
+func (x *PolicyCandidate) GetDiffJson() string {
+	if x != nil {
+		return x.DiffJson
+	}
+	return ""
+}
+
+func (x *PolicyCandidate) GetLiveEvalJson() string {
+	if x != nil {
+		return x.LiveEvalJson
+	}
+	return ""
+}
+
+func (x *PolicyCandidate) GetWaiverReason() string {
+	if x != nil {
+		return x.WaiverReason
+	}
+	return ""
+}
+
+func (x *PolicyCandidate) GetDecidedBy() string {
+	if x != nil {
+		return x.DecidedBy
+	}
+	return ""
+}
+
+// Propose a candidate. The server stamps the base version from the live row.
+type ProposeCandidateRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The proposed RoutingPolicy as a JSON string.
+	ConfigJson string `protobuf:"bytes,1,opt,name=config_json,json=configJson,proto3" json:"config_json,omitempty"`
+	// Identity that proposes the candidate.
+	ProposedBy string `protobuf:"bytes,2,opt,name=proposed_by,json=proposedBy,proto3" json:"proposed_by,omitempty"`
+	// The offline routing diff, as a JSON document. `{}` when none was computed.
+	DiffJson      string `protobuf:"bytes,3,opt,name=diff_json,json=diffJson,proto3" json:"diff_json,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ProposeCandidateRequest) Reset() {
+	*x = ProposeCandidateRequest{}
+	mi := &file_model_plane_v1_routing_policy_proto_msgTypes[4]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ProposeCandidateRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ProposeCandidateRequest) ProtoMessage() {}
+
+func (x *ProposeCandidateRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_routing_policy_proto_msgTypes[4]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ProposeCandidateRequest.ProtoReflect.Descriptor instead.
+func (*ProposeCandidateRequest) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_routing_policy_proto_rawDescGZIP(), []int{4}
+}
+
+func (x *ProposeCandidateRequest) GetConfigJson() string {
+	if x != nil {
+		return x.ConfigJson
+	}
+	return ""
+}
+
+func (x *ProposeCandidateRequest) GetProposedBy() string {
+	if x != nil {
+		return x.ProposedBy
+	}
+	return ""
+}
+
+func (x *ProposeCandidateRequest) GetDiffJson() string {
+	if x != nil {
+		return x.DiffJson
+	}
+	return ""
+}
+
+// Record the review of a proposed candidate.
+type RecordCandidateEvaluationRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The candidate under review.
+	CandidateId string `protobuf:"bytes,1,opt,name=candidate_id,json=candidateId,proto3" json:"candidate_id,omitempty"`
+	// Whether the reviewer accepts the offline diff. False rejects the candidate.
+	DiffAccepted bool `protobuf:"varint,2,opt,name=diff_accepted,json=diffAccepted,proto3" json:"diff_accepted,omitempty"`
+	// The live evaluation as a JSON document. Its `passed` flag gates promotion.
+	// Empty means none was recorded.
+	LiveEvalJson string `protobuf:"bytes,3,opt,name=live_eval_json,json=liveEvalJson,proto3" json:"live_eval_json,omitempty"`
+	// The written reason for promoting without a passing live evaluation. Empty
+	// when the evaluation passed.
+	WaiverReason string `protobuf:"bytes,4,opt,name=waiver_reason,json=waiverReason,proto3" json:"waiver_reason,omitempty"`
+	// Identity that recorded the review.
+	DecidedBy     string `protobuf:"bytes,5,opt,name=decided_by,json=decidedBy,proto3" json:"decided_by,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RecordCandidateEvaluationRequest) Reset() {
+	*x = RecordCandidateEvaluationRequest{}
+	mi := &file_model_plane_v1_routing_policy_proto_msgTypes[5]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RecordCandidateEvaluationRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RecordCandidateEvaluationRequest) ProtoMessage() {}
+
+func (x *RecordCandidateEvaluationRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_routing_policy_proto_msgTypes[5]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RecordCandidateEvaluationRequest.ProtoReflect.Descriptor instead.
+func (*RecordCandidateEvaluationRequest) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_routing_policy_proto_rawDescGZIP(), []int{5}
+}
+
+func (x *RecordCandidateEvaluationRequest) GetCandidateId() string {
+	if x != nil {
+		return x.CandidateId
+	}
+	return ""
+}
+
+func (x *RecordCandidateEvaluationRequest) GetDiffAccepted() bool {
+	if x != nil {
+		return x.DiffAccepted
+	}
+	return false
+}
+
+func (x *RecordCandidateEvaluationRequest) GetLiveEvalJson() string {
+	if x != nil {
+		return x.LiveEvalJson
+	}
+	return ""
+}
+
+func (x *RecordCandidateEvaluationRequest) GetWaiverReason() string {
+	if x != nil {
+		return x.WaiverReason
+	}
+	return ""
+}
+
+func (x *RecordCandidateEvaluationRequest) GetDecidedBy() string {
+	if x != nil {
+		return x.DecidedBy
+	}
+	return ""
+}
+
+// Make an evaluated candidate the live policy.
+type PromoteCandidateRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The candidate to promote.
+	CandidateId string `protobuf:"bytes,1,opt,name=candidate_id,json=candidateId,proto3" json:"candidate_id,omitempty"`
+	// Identity that promotes the candidate.
+	DecidedBy     string `protobuf:"bytes,2,opt,name=decided_by,json=decidedBy,proto3" json:"decided_by,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PromoteCandidateRequest) Reset() {
+	*x = PromoteCandidateRequest{}
+	mi := &file_model_plane_v1_routing_policy_proto_msgTypes[6]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PromoteCandidateRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PromoteCandidateRequest) ProtoMessage() {}
+
+func (x *PromoteCandidateRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_routing_policy_proto_msgTypes[6]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PromoteCandidateRequest.ProtoReflect.Descriptor instead.
+func (*PromoteCandidateRequest) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_routing_policy_proto_rawDescGZIP(), []int{6}
+}
+
+func (x *PromoteCandidateRequest) GetCandidateId() string {
+	if x != nil {
+		return x.CandidateId
+	}
+	return ""
+}
+
+func (x *PromoteCandidateRequest) GetDecidedBy() string {
+	if x != nil {
+		return x.DecidedBy
+	}
+	return ""
+}
+
+// List candidates, filtered by nothing and paged by `limit` only.
+type ListCandidatesRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The most candidates to return. 0 means 50, and the server caps the value at
+	// 200.
+	Limit         int32 `protobuf:"varint,1,opt,name=limit,proto3" json:"limit,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListCandidatesRequest) Reset() {
+	*x = ListCandidatesRequest{}
+	mi := &file_model_plane_v1_routing_policy_proto_msgTypes[7]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListCandidatesRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListCandidatesRequest) ProtoMessage() {}
+
+func (x *ListCandidatesRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_routing_policy_proto_msgTypes[7]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListCandidatesRequest.ProtoReflect.Descriptor instead.
+func (*ListCandidatesRequest) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_routing_policy_proto_rawDescGZIP(), []int{7}
+}
+
+func (x *ListCandidatesRequest) GetLimit() int32 {
+	if x != nil {
+		return x.Limit
+	}
+	return 0
+}
+
+// The candidates, newest first.
+type ListCandidatesResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Newest first.
+	Candidates    []*PolicyCandidate `protobuf:"bytes,1,rep,name=candidates,proto3" json:"candidates,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListCandidatesResponse) Reset() {
+	*x = ListCandidatesResponse{}
+	mi := &file_model_plane_v1_routing_policy_proto_msgTypes[8]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListCandidatesResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListCandidatesResponse) ProtoMessage() {}
+
+func (x *ListCandidatesResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_routing_policy_proto_msgTypes[8]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListCandidatesResponse.ProtoReflect.Descriptor instead.
+func (*ListCandidatesResponse) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_routing_policy_proto_rawDescGZIP(), []int{8}
+}
+
+func (x *ListCandidatesResponse) GetCandidates() []*PolicyCandidate {
+	if x != nil {
+		return x.Candidates
+	}
+	return nil
+}
+
+// The candidate that the proposal created, in state `proposed`.
+type ProposeCandidateResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The new candidate.
+	Candidate     *PolicyCandidate `protobuf:"bytes,1,opt,name=candidate,proto3" json:"candidate,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ProposeCandidateResponse) Reset() {
+	*x = ProposeCandidateResponse{}
+	mi := &file_model_plane_v1_routing_policy_proto_msgTypes[9]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ProposeCandidateResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ProposeCandidateResponse) ProtoMessage() {}
+
+func (x *ProposeCandidateResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_routing_policy_proto_msgTypes[9]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ProposeCandidateResponse.ProtoReflect.Descriptor instead.
+func (*ProposeCandidateResponse) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_routing_policy_proto_rawDescGZIP(), []int{9}
+}
+
+func (x *ProposeCandidateResponse) GetCandidate() *PolicyCandidate {
+	if x != nil {
+		return x.Candidate
+	}
+	return nil
+}
+
+// The candidate after the review, in state `evaluated` or `rejected`.
+type RecordCandidateEvaluationResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The reviewed candidate.
+	Candidate     *PolicyCandidate `protobuf:"bytes,1,opt,name=candidate,proto3" json:"candidate,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RecordCandidateEvaluationResponse) Reset() {
+	*x = RecordCandidateEvaluationResponse{}
+	mi := &file_model_plane_v1_routing_policy_proto_msgTypes[10]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RecordCandidateEvaluationResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RecordCandidateEvaluationResponse) ProtoMessage() {}
+
+func (x *RecordCandidateEvaluationResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_routing_policy_proto_msgTypes[10]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RecordCandidateEvaluationResponse.ProtoReflect.Descriptor instead.
+func (*RecordCandidateEvaluationResponse) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_routing_policy_proto_rawDescGZIP(), []int{10}
+}
+
+func (x *RecordCandidateEvaluationResponse) GetCandidate() *PolicyCandidate {
+	if x != nil {
+		return x.Candidate
+	}
+	return nil
+}
+
+// The live policy the promotion wrote.
+type PromoteCandidateResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The live version the candidate became.
+	Policy        *RoutingPolicyMessage `protobuf:"bytes,1,opt,name=policy,proto3" json:"policy,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PromoteCandidateResponse) Reset() {
+	*x = PromoteCandidateResponse{}
+	mi := &file_model_plane_v1_routing_policy_proto_msgTypes[11]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PromoteCandidateResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PromoteCandidateResponse) ProtoMessage() {}
+
+func (x *PromoteCandidateResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_routing_policy_proto_msgTypes[11]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PromoteCandidateResponse.ProtoReflect.Descriptor instead.
+func (*PromoteCandidateResponse) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_routing_policy_proto_rawDescGZIP(), []int{11}
+}
+
+func (x *PromoteCandidateResponse) GetPolicy() *RoutingPolicyMessage {
+	if x != nil {
+		return x.Policy
+	}
+	return nil
+}
+
 var File_model_plane_v1_routing_policy_proto protoreflect.FileDescriptor
 
 const file_model_plane_v1_routing_policy_proto_rawDesc = "" +
 	"\n" +
-	"#model_plane/v1/routing_policy.proto\x12\x0emodel_plane.v1\"\x8f\x01\n" +
+	"#model_plane/v1/routing_policy.proto\x12\x0emodel_plane.v1\"\xb2\x01\n" +
 	"\x14RoutingPolicyMessage\x12\x1f\n" +
 	"\vconfig_json\x18\x01 \x01(\tR\n" +
 	"configJson\x12\x18\n" +
@@ -193,16 +776,67 @@ const file_model_plane_v1_routing_policy_proto_rawDesc = "" +
 	"\n" +
 	"updated_by\x18\x03 \x01(\tR\tupdatedBy\x12\x1d\n" +
 	"\n" +
-	"updated_at\x18\x04 \x01(\x03R\tupdatedAt\"\x19\n" +
-	"\x17GetRoutingPolicyRequest\"Y\n" +
+	"updated_at\x18\x04 \x01(\x03R\tupdatedAt\x12!\n" +
+	"\fcandidate_id\x18\x05 \x01(\tR\vcandidateId\"\x19\n" +
+	"\x17GetRoutingPolicyRequest\"\x84\x01\n" +
 	"\x17SetRoutingPolicyRequest\x12\x1f\n" +
 	"\vconfig_json\x18\x01 \x01(\tR\n" +
 	"configJson\x12\x1d\n" +
 	"\n" +
-	"updated_by\x18\x02 \x01(\tR\tupdatedBy2\xc7\x01\n" +
+	"updated_by\x18\x02 \x01(\tR\tupdatedBy\x12)\n" +
+	"\x10expected_version\x18\x03 \x01(\x03R\x0fexpectedVersion\"\xc4\x02\n" +
+	"\x0fPolicyCandidate\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1f\n" +
+	"\vconfig_json\x18\x02 \x01(\tR\n" +
+	"configJson\x12!\n" +
+	"\fbase_version\x18\x03 \x01(\x03R\vbaseVersion\x12\x1f\n" +
+	"\vproposed_by\x18\x04 \x01(\tR\n" +
+	"proposedBy\x12\x1f\n" +
+	"\vproposed_at\x18\x05 \x01(\x03R\n" +
+	"proposedAt\x12\x14\n" +
+	"\x05state\x18\x06 \x01(\tR\x05state\x12\x1b\n" +
+	"\tdiff_json\x18\a \x01(\tR\bdiffJson\x12$\n" +
+	"\x0elive_eval_json\x18\b \x01(\tR\fliveEvalJson\x12#\n" +
+	"\rwaiver_reason\x18\t \x01(\tR\fwaiverReason\x12\x1d\n" +
+	"\n" +
+	"decided_by\x18\n" +
+	" \x01(\tR\tdecidedBy\"x\n" +
+	"\x17ProposeCandidateRequest\x12\x1f\n" +
+	"\vconfig_json\x18\x01 \x01(\tR\n" +
+	"configJson\x12\x1f\n" +
+	"\vproposed_by\x18\x02 \x01(\tR\n" +
+	"proposedBy\x12\x1b\n" +
+	"\tdiff_json\x18\x03 \x01(\tR\bdiffJson\"\xd4\x01\n" +
+	" RecordCandidateEvaluationRequest\x12!\n" +
+	"\fcandidate_id\x18\x01 \x01(\tR\vcandidateId\x12#\n" +
+	"\rdiff_accepted\x18\x02 \x01(\bR\fdiffAccepted\x12$\n" +
+	"\x0elive_eval_json\x18\x03 \x01(\tR\fliveEvalJson\x12#\n" +
+	"\rwaiver_reason\x18\x04 \x01(\tR\fwaiverReason\x12\x1d\n" +
+	"\n" +
+	"decided_by\x18\x05 \x01(\tR\tdecidedBy\"[\n" +
+	"\x17PromoteCandidateRequest\x12!\n" +
+	"\fcandidate_id\x18\x01 \x01(\tR\vcandidateId\x12\x1d\n" +
+	"\n" +
+	"decided_by\x18\x02 \x01(\tR\tdecidedBy\"-\n" +
+	"\x15ListCandidatesRequest\x12\x14\n" +
+	"\x05limit\x18\x01 \x01(\x05R\x05limit\"Y\n" +
+	"\x16ListCandidatesResponse\x12?\n" +
+	"\n" +
+	"candidates\x18\x01 \x03(\v2\x1f.model_plane.v1.PolicyCandidateR\n" +
+	"candidates\"Y\n" +
+	"\x18ProposeCandidateResponse\x12=\n" +
+	"\tcandidate\x18\x01 \x01(\v2\x1f.model_plane.v1.PolicyCandidateR\tcandidate\"b\n" +
+	"!RecordCandidateEvaluationResponse\x12=\n" +
+	"\tcandidate\x18\x01 \x01(\v2\x1f.model_plane.v1.PolicyCandidateR\tcandidate\"X\n" +
+	"\x18PromoteCandidateResponse\x12<\n" +
+	"\x06policy\x18\x01 \x01(\v2$.model_plane.v1.RoutingPolicyMessageR\x06policy2\xf9\x04\n" +
 	"\rRoutingPolicy\x12Z\n" +
 	"\tGetPolicy\x12'.model_plane.v1.GetRoutingPolicyRequest\x1a$.model_plane.v1.RoutingPolicyMessage\x12Z\n" +
-	"\tSetPolicy\x12'.model_plane.v1.SetRoutingPolicyRequest\x1a$.model_plane.v1.RoutingPolicyMessageB\xba\x01\n" +
+	"\tSetPolicy\x12'.model_plane.v1.SetRoutingPolicyRequest\x1a$.model_plane.v1.RoutingPolicyMessage\x12e\n" +
+	"\x10ProposeCandidate\x12'.model_plane.v1.ProposeCandidateRequest\x1a(.model_plane.v1.ProposeCandidateResponse\x12\x80\x01\n" +
+	"\x19RecordCandidateEvaluation\x120.model_plane.v1.RecordCandidateEvaluationRequest\x1a1.model_plane.v1.RecordCandidateEvaluationResponse\x12e\n" +
+	"\x10PromoteCandidate\x12'.model_plane.v1.PromoteCandidateRequest\x1a(.model_plane.v1.PromoteCandidateResponse\x12_\n" +
+	"\x0eListCandidates\x12%.model_plane.v1.ListCandidatesRequest\x1a&.model_plane.v1.ListCandidatesResponseB\xba\x01\n" +
 	"\x12com.model_plane.v1B\x12RoutingPolicyProtoP\x01Z;github.com/triodelab/model-plane/gen/go/model_plane/v1;mpv1\xa2\x02\x03MXX\xaa\x02\rModelPlane.V1\xca\x02\rModelPlane\\V1\xe2\x02\x19ModelPlane\\V1\\GPBMetadata\xea\x02\x0eModelPlane::V1b\x06proto3"
 
 var (
@@ -217,22 +851,43 @@ func file_model_plane_v1_routing_policy_proto_rawDescGZIP() []byte {
 	return file_model_plane_v1_routing_policy_proto_rawDescData
 }
 
-var file_model_plane_v1_routing_policy_proto_msgTypes = make([]protoimpl.MessageInfo, 3)
+var file_model_plane_v1_routing_policy_proto_msgTypes = make([]protoimpl.MessageInfo, 12)
 var file_model_plane_v1_routing_policy_proto_goTypes = []any{
-	(*RoutingPolicyMessage)(nil),    // 0: model_plane.v1.RoutingPolicyMessage
-	(*GetRoutingPolicyRequest)(nil), // 1: model_plane.v1.GetRoutingPolicyRequest
-	(*SetRoutingPolicyRequest)(nil), // 2: model_plane.v1.SetRoutingPolicyRequest
+	(*RoutingPolicyMessage)(nil),              // 0: model_plane.v1.RoutingPolicyMessage
+	(*GetRoutingPolicyRequest)(nil),           // 1: model_plane.v1.GetRoutingPolicyRequest
+	(*SetRoutingPolicyRequest)(nil),           // 2: model_plane.v1.SetRoutingPolicyRequest
+	(*PolicyCandidate)(nil),                   // 3: model_plane.v1.PolicyCandidate
+	(*ProposeCandidateRequest)(nil),           // 4: model_plane.v1.ProposeCandidateRequest
+	(*RecordCandidateEvaluationRequest)(nil),  // 5: model_plane.v1.RecordCandidateEvaluationRequest
+	(*PromoteCandidateRequest)(nil),           // 6: model_plane.v1.PromoteCandidateRequest
+	(*ListCandidatesRequest)(nil),             // 7: model_plane.v1.ListCandidatesRequest
+	(*ListCandidatesResponse)(nil),            // 8: model_plane.v1.ListCandidatesResponse
+	(*ProposeCandidateResponse)(nil),          // 9: model_plane.v1.ProposeCandidateResponse
+	(*RecordCandidateEvaluationResponse)(nil), // 10: model_plane.v1.RecordCandidateEvaluationResponse
+	(*PromoteCandidateResponse)(nil),          // 11: model_plane.v1.PromoteCandidateResponse
 }
 var file_model_plane_v1_routing_policy_proto_depIdxs = []int32{
-	1, // 0: model_plane.v1.RoutingPolicy.GetPolicy:input_type -> model_plane.v1.GetRoutingPolicyRequest
-	2, // 1: model_plane.v1.RoutingPolicy.SetPolicy:input_type -> model_plane.v1.SetRoutingPolicyRequest
-	0, // 2: model_plane.v1.RoutingPolicy.GetPolicy:output_type -> model_plane.v1.RoutingPolicyMessage
-	0, // 3: model_plane.v1.RoutingPolicy.SetPolicy:output_type -> model_plane.v1.RoutingPolicyMessage
-	2, // [2:4] is the sub-list for method output_type
-	0, // [0:2] is the sub-list for method input_type
-	0, // [0:0] is the sub-list for extension type_name
-	0, // [0:0] is the sub-list for extension extendee
-	0, // [0:0] is the sub-list for field type_name
+	3,  // 0: model_plane.v1.ListCandidatesResponse.candidates:type_name -> model_plane.v1.PolicyCandidate
+	3,  // 1: model_plane.v1.ProposeCandidateResponse.candidate:type_name -> model_plane.v1.PolicyCandidate
+	3,  // 2: model_plane.v1.RecordCandidateEvaluationResponse.candidate:type_name -> model_plane.v1.PolicyCandidate
+	0,  // 3: model_plane.v1.PromoteCandidateResponse.policy:type_name -> model_plane.v1.RoutingPolicyMessage
+	1,  // 4: model_plane.v1.RoutingPolicy.GetPolicy:input_type -> model_plane.v1.GetRoutingPolicyRequest
+	2,  // 5: model_plane.v1.RoutingPolicy.SetPolicy:input_type -> model_plane.v1.SetRoutingPolicyRequest
+	4,  // 6: model_plane.v1.RoutingPolicy.ProposeCandidate:input_type -> model_plane.v1.ProposeCandidateRequest
+	5,  // 7: model_plane.v1.RoutingPolicy.RecordCandidateEvaluation:input_type -> model_plane.v1.RecordCandidateEvaluationRequest
+	6,  // 8: model_plane.v1.RoutingPolicy.PromoteCandidate:input_type -> model_plane.v1.PromoteCandidateRequest
+	7,  // 9: model_plane.v1.RoutingPolicy.ListCandidates:input_type -> model_plane.v1.ListCandidatesRequest
+	0,  // 10: model_plane.v1.RoutingPolicy.GetPolicy:output_type -> model_plane.v1.RoutingPolicyMessage
+	0,  // 11: model_plane.v1.RoutingPolicy.SetPolicy:output_type -> model_plane.v1.RoutingPolicyMessage
+	9,  // 12: model_plane.v1.RoutingPolicy.ProposeCandidate:output_type -> model_plane.v1.ProposeCandidateResponse
+	10, // 13: model_plane.v1.RoutingPolicy.RecordCandidateEvaluation:output_type -> model_plane.v1.RecordCandidateEvaluationResponse
+	11, // 14: model_plane.v1.RoutingPolicy.PromoteCandidate:output_type -> model_plane.v1.PromoteCandidateResponse
+	8,  // 15: model_plane.v1.RoutingPolicy.ListCandidates:output_type -> model_plane.v1.ListCandidatesResponse
+	10, // [10:16] is the sub-list for method output_type
+	4,  // [4:10] is the sub-list for method input_type
+	4,  // [4:4] is the sub-list for extension type_name
+	4,  // [4:4] is the sub-list for extension extendee
+	0,  // [0:4] is the sub-list for field type_name
 }
 
 func init() { file_model_plane_v1_routing_policy_proto_init() }
@@ -246,7 +901,7 @@ func file_model_plane_v1_routing_policy_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_model_plane_v1_routing_policy_proto_rawDesc), len(file_model_plane_v1_routing_policy_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   3,
+			NumMessages:   12,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

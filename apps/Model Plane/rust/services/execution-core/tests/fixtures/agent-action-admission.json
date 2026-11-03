@@ -2072,7 +2072,7 @@
       "eligible": false,
       "executor": {},
       "hashBasis": "catalog_entry",
-      "schemaHash": "sha256:508d301a4a2e8c137e76c8ff093cb9b313b9b4ea2028e05ea08cbecea6d9ae74",
+      "schemaHash": "sha256:ba1aa503fd2b11f865a96bd9b9c54e244bad822cb4b01cabb167d5ff8f474af9",
       "zdr_allowed": false
     },
     {

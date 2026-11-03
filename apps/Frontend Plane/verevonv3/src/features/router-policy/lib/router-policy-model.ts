@@ -220,7 +220,7 @@ export function moveCandidate(candidates: readonly string[], index: number, step
   return next
 }
 
-/** One refusal of a role table, as inference-core names it under `details` of an `invalid_role_table` error. */
+/** One refusal of a role table, as inference-core names it under `details.issues` of an `invalid_role_table` error. */
 export interface RouterPolicyRoleIssue {
   purpose: RouterPolicyRolePurpose
   reason: string
@@ -230,9 +230,10 @@ export interface RouterPolicyRoleIssue {
 
 /** The refusals in an `invalid_role_table` body that name a purpose the page shows. Anything else is dropped. */
 export function roleIssuesFrom(details: unknown): RouterPolicyRoleIssue[] {
-  if (!Array.isArray(details)) return []
+  const listed = details && typeof details === 'object' ? (details as Record<string, unknown>).issues : undefined
+  if (!Array.isArray(listed)) return []
   const issues: RouterPolicyRoleIssue[] = []
-  for (const item of details as unknown[]) {
+  for (const item of listed as unknown[]) {
     if (!item || typeof item !== 'object') continue
     const record = item as Record<string, unknown>
     const purpose = ROUTER_POLICY_ROLE_PURPOSES.find((known) => known === record.purpose)

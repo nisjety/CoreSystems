@@ -122,6 +122,10 @@ pub fn describe() {
         TOKENS_TOTAL,
         "Tokens reported by the serving provider, by purpose, calling service, model, provider and direction (input already includes prompt-cache tokens)."
     );
+    describe_counter!(
+        "inference_gemini_tool_dropped_total",
+        "Gemini tool declarations left out of a request because their schema cannot be expressed for Vertex, by refusal reason."
+    );
     describe_gauge!(BUILD_INFO, "Version of the running inference-core binary.");
     describe_gauge!(
         ZDR_ATTESTATION_REVIEW_BY,

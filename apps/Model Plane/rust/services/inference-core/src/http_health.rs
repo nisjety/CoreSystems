@@ -191,7 +191,7 @@ fn role_table_refusal(policy: &RoutingPolicy, catalogue: &[ModelInfo]) -> Option
                 "error": {
                     "code": "invalid_role_table",
                     "message": "the role table does not fit the chat catalogue",
-                    "details": errors,
+                    "details": { "issues": errors },
                 }
             })),
         )
@@ -300,7 +300,7 @@ mod tests {
             .expect("the refusal body");
         let value: serde_json::Value = serde_json::from_slice(&body).expect("json");
         assert_eq!(value["error"]["code"], "invalid_role_table");
-        assert_eq!(value["error"]["details"][0]["reason"], "unknown_model");
+        assert_eq!(value["error"]["details"]["issues"][0]["reason"], "unknown_model");
 
         assert!(role_table_refusal(&RoutingPolicy::default(), &catalogue).is_none());
     }

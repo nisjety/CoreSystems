@@ -10,8 +10,8 @@ import { getRouterPolicy, updateRouterPolicy } from '@/shared/api/router-policy-
 import { clearSession, markSessionOnboardingComplete, setSessionUser } from '@/shared/session/session-store'
 
 // The client is replaced at its boundary. The page's contract is what it loads, what it sends back, and what
-// it does with a refusal. The client keeps only object `details` from an error, so a role table refusal is
-// built here the way the gateway sends it: its issues as an array under `details`.
+// it does with a refusal. A role table refusal is built here the way inference-core sends it: its issues
+// under `details.issues`.
 vi.mock('@/shared/api/router-policy-client', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/shared/api/router-policy-client')>()),
   getRouterPolicy: vi.fn(),
@@ -69,7 +69,7 @@ function policy(overrides: Partial<RouterPolicyDocument> = {}): RouterPolicyDocu
 
 function roleTableRefusal(issues: readonly Record<string, unknown>[]): ApiError {
   return new ApiError('the role table does not fit the chat catalogue', 400, 'invalid_role_table', {
-    details: issues as unknown as Record<string, unknown>,
+    details: { issues },
   })
 }
 

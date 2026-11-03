@@ -974,6 +974,9 @@ services:
       # extraction loop presents; Auth Core scopes the two audiences separately.
       SESSION_CORE_SERVICE_ID: ${SESSION_CORE_SERVICE_ID:-session-core}
       SESSION_CORE_SERVICE_API_KEY: ${SESSION_CORE_SERVICE_API_KEY:-}
+      # RoutingPolicy candidates (EP-14 S10): propose, evaluate and promote RPCs. Off answers
+      # FAILED_PRECONDITION on every candidate RPC; set_policy's expected_version check is always on.
+      SESSION_CORE_ROUTING_CANDIDATES_ENABLED: ${SESSION_CORE_ROUTING_CANDIDATES_ENABLED:-false}
       # AES-256-GCM key for encrypted approval continuation descriptors. The
       # service fails closed when a descriptor is requested without this key.
       SESSION_CORE_CONTINUATION_DESCRIPTOR_KEY: ${SESSION_CORE_CONTINUATION_DESCRIPTOR_KEY:-}
@@ -1198,6 +1201,9 @@ services:
       INFERENCE_ANTHROPIC_TIERED_SYSTEM: ${INFERENCE_ANTHROPIC_TIERED_SYSTEM:-false}
       INFERENCE_CORE_EFFORT_MODEL_ALIASES: ${INFERENCE_CORE_EFFORT_MODEL_ALIASES:-}
       INFERENCE_ROUTE_NOTE: ${INFERENCE_ROUTE_NOTE:-false}
+      # EP-14 S10: a policy PUT must go through a candidate. Keep it off: this build answers
+      # 503 candidate_store_unwired with it on (owner decision D9 and the candidate client are open).
+      ROUTING_POLICY_PROMOTION_REQUIRED: ${ROUTING_POLICY_PROMOTION_REQUIRED:-false}
       # Optional ChatGPT subscription route. Add openai-codex-subscription to
       # INFERENCE_PROVIDER_ORDER only after setting all three variables. This
       # service gets an opaque connection id plus this dedicated service key;
