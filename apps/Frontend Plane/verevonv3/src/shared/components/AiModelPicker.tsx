@@ -10,6 +10,7 @@ import {
   selectionIsStale,
   verevonModeById,
   VEREVON_MODES,
+  type ModelDataUse,
   type ModelInfo,
 } from '@/shared/api/chat-client'
 import {
@@ -29,6 +30,29 @@ import {
 import { rememberedPrivacyTier } from '@/features/dashboard/home/submit-privacy-tier'
 import { cn } from '@/shared/lib/cn'
 import { ModelSearchField } from './ModelSearchField'
+
+/**
+ * The data-use statements a catalogue record makes about a model, joined as one short line. A
+ * statement the record does not make is left out, so a model with none shows no line.
+ */
+function modelDataUseLine(
+  dataUse: ModelDataUse | undefined,
+  tr: (noText: string, enText: string) => string,
+): string | undefined {
+  if (!dataUse) return undefined
+  const statements: string[] = []
+  if (dataUse.zdrAttested === true) statements.push(tr('Null datalagring, bekreftet', 'Zero data retention, attested'))
+  if (dataUse.trainsOnInputs === true) statements.push(tr('Brukes til trening', 'Used for training'))
+  if (dataUse.trainsOnInputs === false) statements.push(tr('Brukes ikke til trening', 'Not used for training'))
+  const days = dataUse.retentionDays
+  if (days === 0) statements.push(tr('Ingen lagring', 'No retention'))
+  if (days !== undefined && days > 0) {
+    statements.push(days === 1
+      ? tr('Lagres i 1 dag', 'Kept for 1 day')
+      : tr(`Lagres i ${days} dager`, `Kept for ${days} days`))
+  }
+  return statements.length > 0 ? statements.join(' · ') : undefined
+}
 
 export function AiModelPicker(props: {
   orgId: string
@@ -230,7 +254,7 @@ export function AiModelPicker(props: {
                       onClick={() => chooseCatalogModel(model)}
                       class={{ 'dashboard-composer-model-menu__item--active': selected().model === model.id && selected().provider === model.provider }}
                     >
-                      <span><span><Zap class="size-3" /></span><span>{model.name}<Show when={model.price}>{(price) => <span class="dashboard-composer-model-price">{formatModelListPrice(price(), i18n.locale())}</span>}</Show></span></span>
+                      <span><span><Zap class="size-3" /></span><span>{model.name}<Show when={model.price}>{(price) => <span class="dashboard-composer-model-price">{formatModelListPrice(price(), i18n.locale())}</span>}</Show><Show when={modelDataUseLine(model.dataUse, i18n.tr)}>{(line) => <span class="dashboard-composer-model-data-use">{line()}</span>}</Show></span></span>
                       <span class="dashboard-composer-model-menu__right">
                         <Show when={model.provider === OPENAI_CODEX_SUBSCRIPTION_PROVIDER}>
                           <span class="dashboard-composer-model-badge dashboard-composer-model-badge--cheap">{i18n.tr('Tilkoblet', 'Connected')}</span>

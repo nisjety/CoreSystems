@@ -56,6 +56,16 @@ const MAX_VIDEO_PROMPT_LEN: usize = 4_000;
 const MAX_VIDEO_DURATION_SECONDS: u32 = 20;
 const MAX_VIDEO_VARIANTS: u32 = 4;
 
+/// The data-use statement of a deployment whose zero-retention attestation is in force (see
+/// [`attests_zdr`]). Only `zdr_attested` is set: no cited source yet states training or retention
+/// for any provider, and the attestation cites no public text for `statement_ref`.
+fn attested_data_use() -> pb::ProviderDataUse {
+    pb::ProviderDataUse {
+        zdr_attested: Some(true),
+        ..Default::default()
+    }
+}
+
 /// Convert an internal [`provider::ModelInfo`] into the wire [`pb::ModelInfo`].
 ///
 /// The proto `ModelInfo` has no dedicated cost field, so the internal `cheap`
@@ -65,6 +75,8 @@ const MAX_VIDEO_VARIANTS: u32 = 4;
 /// any proto change.
 impl From<provider::ModelInfo> for pb::ModelInfo {
     fn from(model: provider::ModelInfo) -> Self {
+        // Read before the fields below move out of the model.
+        let data_use = attests_zdr(&model).then(attested_data_use);
         let mut features = model.features;
         if model.cheap {
             features.push("cheap".to_owned());
@@ -92,6 +104,9 @@ impl From<provider::ModelInfo> for pb::ModelInfo {
                 .lifecycle
                 .map(|lifecycle| lifecycle.as_str().to_owned())
                 .unwrap_or_default(),
+            // Set only for a deployment whose zero-retention attestation is in force, the one
+            // data-use statement a verified source makes today. Unset is "not stated", never "no".
+            data_use,
         }
     }
 }
@@ -2655,6 +2670,39 @@ mod tests {
         assert_eq!(unknown.context_window_tokens, 0);
         assert_eq!(unknown.max_output_tokens, 0);
         assert_eq!(unknown.lifecycle, "");
+    }
+
+    #[test]
+    fn data_use_is_stated_only_by_an_attested_deployment() {
+        use provider::PrivacyTier;
+        // An attested deployment states its zero-retention attestation and nothing it has no
+        // source for.
+        for privacy_tier in [PrivacyTier::ZdrContractual, PrivacyTier::Sovereign] {
+            let attested = pb::ModelInfo::from(provider::ModelInfo {
+                id: "claude-sonnet-5-5".to_owned(),
+                provider: "azure-anthropic".to_owned(),
+                modality: "chat".to_owned(),
+                privacy_tier,
+                ..Default::default()
+            });
+            let data_use = attested
+                .data_use
+                .expect("an attested deployment states its data use");
+            assert_eq!(data_use.zdr_attested, Some(true), "{privacy_tier:?}");
+            assert_eq!(data_use.trains_on_inputs, None);
+            assert_eq!(data_use.retention_days, None);
+            assert!(data_use.statement_ref.is_empty());
+        }
+
+        // A deployment without an attestation states nothing, so the field stays unset: "not
+        // stated", never "no".
+        for privacy_tier in [PrivacyTier::Global, PrivacyTier::EuResident] {
+            let unattested = pb::ModelInfo::from(provider::ModelInfo {
+                privacy_tier,
+                ..Default::default()
+            });
+            assert_eq!(unattested.data_use, None, "{privacy_tier:?}");
+        }
     }
 
     fn chat_models() -> Vec<provider::ModelInfo> {

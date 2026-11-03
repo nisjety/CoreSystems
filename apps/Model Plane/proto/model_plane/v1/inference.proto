@@ -732,6 +732,33 @@ message ModelInfo {
   // Vendor lifecycle stage: "ga", "preview" or "deprecated". Empty means no sourced
   // record names the model (EP-13 S2).
   string lifecycle = 11;
+
+  // What the provider states about how it handles the request data sent to this model
+  // (EP-9 C5). Unset when neither an attested deployment nor a cited source states
+  // anything, which is "not stated", never "no".
+  ProviderDataUse data_use = 12;
+}
+
+// ProviderDataUse — the data-handling statements a provider makes for one model (EP-9 C5).
+// A field is set only when its source states it. The scalars are `optional` for that reason:
+// an absent value is "not stated", while a `false` or `0` is a statement the source made.
+message ProviderDataUse {
+  // True when the provider states it trains on the inputs it receives, false when it
+  // states it does not. Unset when no source says either.
+  optional bool trains_on_inputs = 1;
+
+  // Days the provider states it keeps the inputs, zero when it states none are kept.
+  // Unset when no source states a period.
+  optional int32 retention_days = 2;
+
+  // True only when this deployment carries a zero-data-retention attestation that is in
+  // force now (the operator's evidence-bound retention approval). Unset otherwise: an
+  // unattested deployment is not stated to retain data.
+  optional bool zdr_attested = 3;
+
+  // Reference to the public statement the fields above cite, such as a vendor policy URL.
+  // Empty when none is cited, including when the fields come from an attestation.
+  string statement_ref = 4;
 }
 
 // ListModelsResponse — available models in the active provider chain.
