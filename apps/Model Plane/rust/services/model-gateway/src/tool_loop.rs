@@ -16,7 +16,7 @@ use chrono::{Datelike, Utc};
 use mp_contracts::dataplane::retrieval_v2::RetrieveRequest;
 use mp_contracts::loop_guard::{self, CallOutcome, CallRecord, LoopGuard, LoopGuardMode, LoopStop, Verdict};
 use mp_contracts::model_plane::v1::{
-    ChatMessage, FinalizeToolActionRequest, InferRequest, PromptTierPlan,
+    ChatMessage, FinalizeToolActionRequest, InferPurpose, InferRequest, PromptTierPlan,
     ReserveToolActionRequest, SearchMemoryRequest, SkillBundleSummary, SkillMount, ToolCall,
     ToolDefinition,
 };
@@ -8425,6 +8425,7 @@ pub async fn run_tool_rounds_for_model_with_attachments(
                 mp_contracts::prompt_tier::cache_scope_key(org_id, thread_id).unwrap_or_default();
             let mut decision = with_authorization(
                 InferRequest {
+                    purpose: InferPurpose::ToolRound as i32,
                     // A source-bound plan has many authority/dependency distinctions.
                     // Spend reasoning before drafting to avoid slower private repair
                     // rounds and keep the existing high-effort review independent.
@@ -8741,6 +8742,7 @@ pub async fn run_tool_rounds_for_model_with_attachments(
             events.push(ChatEvent::StepUpdate { id: format!("{}:source-check", call.id), title: if source_context.is_some() { "Kontrollerer utkastet mot kildene" } else { "Bevarer valgte avsnitt" }.to_owned(),
                 detail: if source_context.is_some() { "Kontrollerer påstander og bevarer avsnitt som skal stå uendret" } else { "Bevarer innholdet fra forrige versjon" }.to_owned(), status: "running".to_owned() }).await;
             let request = InferRequest { request_id: format!("{request_id}-{}", call.id), org_id: org_id.to_owned(),
+                purpose: InferPurpose::Validation as i32,
                 model: resolved_model.clone().unwrap_or_else(|| model.to_owned()),
                 provider_hint: provider_hint.to_owned(), subscription_connection_id: subscription_connection_id.to_owned(),
                 messages: review_messages.clone(),

@@ -25,7 +25,7 @@
 #![allow(clippy::missing_errors_doc, clippy::doc_markdown)]
 
 use mp_contracts::model_plane::v1::inference_core_client::InferenceCoreClient;
-use mp_contracts::model_plane::v1::{ChatMessage, InferRequest};
+use mp_contracts::model_plane::v1::{ChatMessage, InferPurpose, InferRequest};
 use std::sync::Arc;
 use tonic::transport::Channel;
 
@@ -251,6 +251,7 @@ pub fn planner_infer_request(
     );
 
     InferRequest {
+        purpose: InferPurpose::BrowserPlanner as i32,
         request_id: mp_ids::new_ulid(),
         org_id: config.org_id.clone(),
         model: model.to_owned(),

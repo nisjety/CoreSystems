@@ -534,6 +534,9 @@ struct LoopContext<'a> {
     result_store: Option<std::sync::Arc<super::result_handles::ResultHandles>>,
     /// The per-round output cap: the fixed cap, or the scheduled contract's own (WS20 S6).
     max_tokens: i32,
+    /// What every round of this loop is counted under: a scheduled run's rounds are
+    /// `scheduled_round`, an interactive run's are `agent_round`.
+    purpose: i32,
 }
 
 /// The inference this invocation of a run has spent, summed across the root loop
@@ -1862,6 +1865,11 @@ async fn run_agent_with_route_parkable(
         usage: UsageTally::default(),
         result_store: result_store.clone(),
         max_tokens: scheduled.map_or(MAX_TOKENS, |scope| scope.max_tokens_per_round),
+        purpose: if scheduled.is_some() {
+            pb::InferPurpose::ScheduledRound as i32
+        } else {
+            pb::InferPurpose::AgentRound as i32
+        },
     };
     if context.browser_bearer.is_some() {
         debug!(run_id = %req.run_id, "browser bearer present");
@@ -3065,6 +3073,7 @@ async fn run_rounds(
         let reasoning_effort =
             super::run_effort::round_level(super::run_effort::enabled(), req.reasoning_effort);
         let mut infer_request = tonic::Request::new(pb::InferRequest {
+            purpose: ctx.purpose,
             // No extended thinking on the governed agent loop: the effort
             // dial is a chat-surface control, and a deployed agent's budget
             // is its round budget.
@@ -5857,6 +5866,7 @@ async fn run_delegated_child(
         usage: parent.usage.clone(),
         result_store: parent.result_store.clone(),
         max_tokens: parent.max_tokens,
+        purpose: parent.purpose,
     };
 
     info!(

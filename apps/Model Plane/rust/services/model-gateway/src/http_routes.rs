@@ -20,6 +20,7 @@ use axum::{
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use chrono::Utc;
 use metrics_exporter_prometheus::PrometheusHandle;
+use mp_contracts::model_plane::v1::InferPurpose;
 use mp_contracts::model_plane::v1::{
     AcquireLeaseRequest, DeleteThreadWorkspaceRequest, GetThreadWorkspaceRequest,
     AnalyzeDocumentRequest, AnalyzeImageRequest, AnalyzeLanguageRequest, AnswerRunQuestionRequest,
@@ -2913,6 +2914,7 @@ async fn browser_suggest_action(
         .clone()
         .infer(authenticated_inference_request(
             InferRequest {
+                purpose: InferPurpose::BrowserPlanner as i32,
                 request_id: request_id.clone(),
                 org_id: claims.org_id.clone(),
                 model: req.model.clone().unwrap_or_default(),
@@ -3229,6 +3231,7 @@ async fn ai_chat(
         .clone()
         .infer(authenticated_inference_request(
             InferRequest {
+                purpose: InferPurpose::Answer as i32,
                 request_id: request_id.clone(),
                 org_id: claims.org_id.clone(),
                 model: req.model,
@@ -3413,6 +3416,7 @@ async fn recommend_plan(
         .clone()
         .infer(authenticated_inference_request(
             InferRequest {
+                purpose: InferPurpose::Answer as i32,
                 request_id: request_id.clone(),
                 org_id: claims.org_id.clone(),
                 model: String::new(),
@@ -4949,6 +4953,7 @@ async fn ai_dictate(
         .clone()
         .infer(authenticated_inference_request(
             InferRequest {
+                purpose: InferPurpose::DictationCleanup as i32,
                 request_id: request_id.clone(),
                 org_id: claims.org_id.clone(),
                 model: cleanup_model,
@@ -12990,6 +12995,7 @@ async fn invoke(
             .clone()
             .infer(authenticated_inference_request(
                 mp_contracts::model_plane::v1::InferRequest {
+                    purpose: InferPurpose::Answer as i32,
                     request_id: request_id.clone(),
                     org_id: claims.org_id.clone(),
                     model: normalized.model.clone(),
@@ -13292,6 +13298,7 @@ async fn invoke(
             .clone()
             .infer(authenticated_inference_request(
                 InferRequest {
+                    purpose: InferPurpose::Answer as i32,
                     request_id: request_id.clone(),
                     org_id: claims.org_id.clone(),
                     model: normalized.model.clone(),

@@ -829,6 +829,7 @@ fn scheduled_inference_request(
     goal: &str,
 ) -> pb::InferRequest {
     pb::InferRequest {
+        purpose: pb::InferPurpose::ScheduledRound as i32,
         // Keep provider correlation in the same tenant/run/step namespace as
         // the Session receipt. A bare step id can collide across runs or
         // tenants, which makes an ambiguous provider response impossible to

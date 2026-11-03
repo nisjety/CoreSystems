@@ -49,7 +49,7 @@ use std::fmt::Write as _;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use mp_contracts::model_plane::v1::{ChatMessage, InferRequest, ToolCall};
+use mp_contracts::model_plane::v1::{ChatMessage, InferPurpose, InferRequest, ToolCall};
 use serde_json::Value;
 
 use crate::{artifacts::ArtifactKind, relevance, sse_events::ChatEvent, state::AppState};
@@ -3169,6 +3169,7 @@ async fn plan_once(
         client.infer(authorized(
             InferRequest {
                 request_id: format!("{request_id}-research-plan"),
+                purpose: InferPurpose::ResearchPlan as i32,
                 org_id: org_id.to_owned(),
                 model: model.to_owned(),
                 messages: vec![ChatMessage {
@@ -3391,6 +3392,7 @@ async fn synthesize_report(
         client.infer(authorized(
             InferRequest {
                 request_id: format!("{request_id}-research-report"),
+                purpose: InferPurpose::ResearchSynthesis as i32,
                 org_id: org_id.to_owned(),
                 model: model.to_owned(),
                 messages: vec![ChatMessage {

@@ -7,6 +7,7 @@
 //!     final LLM call, with memory results injected as system context.
 
 use chrono::Utc;
+use mp_contracts::model_plane::v1::InferPurpose;
 use mp_contracts::model_plane::v1::{
     model_gateway_server::{ModelGateway, ModelGatewayServer},
     AppendThreadMessageRequest, AppendThreadMessageResponse, ApproveApprovalRequest,
@@ -618,6 +619,7 @@ fn build_infer_request(
         ))
     })?;
     Ok(InferRequest {
+        purpose: InferPurpose::Answer as i32,
         // Extended thinking is not exposed on the legacy gRPC `InvokeRequest`
         // surface, so this path never asks for a reasoning budget. Pinned
         // explicitly rather than left to `Default` so the zero reads as a
@@ -2940,6 +2942,7 @@ impl ModelGateway for GatewayService {
         );
 
         let infer_req = InferRequest {
+            purpose: InferPurpose::ToolRound as i32,
             thinking_budget_tokens: 0,
             request_id: req.request_id.clone(),
             org_id: req.org_id.clone(),

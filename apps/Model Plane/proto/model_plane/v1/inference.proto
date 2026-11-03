@@ -127,6 +127,46 @@ enum ReasoningEffort {
   REASONING_EFFORT_MAX = 6;
 }
 
+// InferPurpose — what a call is for. The closed vocabulary behind the `purpose`
+// metrics label; a call names exactly one. A side task names its own purpose
+// (title, follow-ups, judge) rather than the answer it accompanies. Owner: EP-13 S3.
+enum InferPurpose {
+  // No purpose named. Counted as `unspecified`.
+  INFER_PURPOSE_UNSPECIFIED = 0;
+  // The user-visible answer to a chat turn.
+  INFER_PURPOSE_ANSWER = 1;
+  // A model round that decides or runs a tool inside a chat turn.
+  INFER_PURPOSE_TOOL_ROUND = 2;
+  // A round of a governed Do run.
+  INFER_PURPOSE_AGENT_ROUND = 3;
+  // The sidebar title of a thread.
+  INFER_PURPOSE_TITLE = 4;
+  // The follow-up questions offered after an answer.
+  INFER_PURPOSE_FOLLOW_UPS = 5;
+  // Whether retrieved sources back an answer.
+  INFER_PURPOSE_VERIFICATION_JUDGE = 6;
+  // The plan of a deep research run.
+  INFER_PURPOSE_RESEARCH_PLAN = 7;
+  // The report of a deep research run.
+  INFER_PURPOSE_RESEARCH_SYNTHESIS = 8;
+  // The summary that replaces compacted thread history.
+  INFER_PURPOSE_COMPACTION_SUMMARY = 9;
+  // Facts extracted from a conversation for the memory store.
+  INFER_PURPOSE_MEMORY_EXTRACTION = 10;
+  // Whether a candidate memory duplicates or updates an existing one.
+  INFER_PURPOSE_MEMORY_GROUNDING = 11;
+  // The browser planner choosing the next action.
+  INFER_PURPOSE_BROWSER_PLANNER = 12;
+  // Screening of content for injected instructions.
+  INFER_PURPOSE_SAFETY_SCREEN = 13;
+  // Checking an answer or artifact against its sources or its length.
+  INFER_PURPOSE_VALIDATION = 14;
+  // Cleaning up a dictated transcript.
+  INFER_PURPOSE_DICTATION_CLEANUP = 15;
+  // One round of a scheduled run.
+  INFER_PURPOSE_SCHEDULED_ROUND = 16;
+}
+
 // InferRequest — a single inference request to be routed to a provider.
 message InferRequest {
   // Client-supplied request identifier for tracing.
@@ -247,6 +287,12 @@ message InferRequest {
   // the images. The bytes are request-scope memory only: never cached, never
   // logged, and a field of the internal request that the Debug output redacts.
   repeated InferImagePart image_parts = 20;
+
+  // What this call is for (owner: EP-13 S3). Labels the inference metrics by
+  // purpose and routes nothing. UNSPECIFIED, and any value this build does not
+  // know, count as `unspecified`, so an older caller and a newer one both work.
+  // It carries no content, so Zero Data Retention does not change it.
+  InferPurpose purpose = 21;
 }
 
 // InferImagePart — one image attached to a message of an InferRequest. Bytes

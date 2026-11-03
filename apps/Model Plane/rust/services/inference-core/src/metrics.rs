@@ -29,12 +29,17 @@
 //! derived from data a caller can influence goes through a [`LabelSet`]: a value
 //! that is not a plain identifier becomes `invalid` and a value past the label's
 //! cap becomes `other`, so a hostile or buggy caller cannot grow the series set.
+//!
+//! `purpose` is the closed name of an `InferPurpose`. A call that names none, and
+//! a value this build does not know, is `unspecified`, so the set never grows past
+//! the enum.
 
 use std::collections::HashSet;
 use std::sync::{Mutex, OnceLock, PoisonError};
 
 use metrics::{counter, describe_counter, describe_gauge, gauge};
 use metrics_exporter_prometheus::{BuildError, PrometheusBuilder, PrometheusHandle};
+use mp_contracts::model_plane::v1::InferPurpose;
 use tonic::{Code, Status};
 
 use crate::auth::AuthenticatedPrincipal;
@@ -63,6 +68,10 @@ pub const UNKNOWN: &str = "unknown";
 
 /// Label value for "this call serves no model" (a catalogue read).
 pub const NONE: &str = "none";
+
+/// Label value for a call that names no purpose, or names one this build does not
+/// know.
+pub const UNSPECIFIED: &str = "unspecified";
 
 /// `service` label value for a call that carried no verified credential.
 pub const UNAUTHENTICATED: &str = "unauthenticated";
@@ -107,11 +116,11 @@ pub fn install_recorder() -> Result<PrometheusHandle, BuildError> {
 pub fn describe() {
     describe_counter!(
         REQUESTS_TOTAL,
-        "Finished inference-core calls by rpc, calling service, serving model and provider, and outcome (ok, a typed refusal kind such as zdr_unavailable, or the gRPC code)."
+        "Finished inference-core calls by rpc, purpose, calling service, serving model and provider, and outcome (ok, a typed refusal kind such as zdr_unavailable, or the gRPC code)."
     );
     describe_counter!(
         TOKENS_TOTAL,
-        "Tokens reported by the serving provider, by calling service, model, provider and direction (input already includes prompt-cache tokens)."
+        "Tokens reported by the serving provider, by purpose, calling service, model, provider and direction (input already includes prompt-cache tokens)."
     );
     describe_gauge!(BUILD_INFO, "Version of the running inference-core binary.");
     describe_gauge!(
@@ -171,6 +180,32 @@ impl LabelSet {
 
 fn is_label_char(ch: char) -> bool {
     ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | ':' | '/' | '@' | '+')
+}
+
+/// The `purpose` label of a wire `InferPurpose` value. The label set is the closed
+/// list the enum defines: a value this build does not know counts as
+/// `unspecified`, so a newer caller can add a purpose without growing the series.
+#[must_use]
+pub fn purpose_label(purpose: i32) -> &'static str {
+    match InferPurpose::try_from(purpose) {
+        Ok(InferPurpose::Unspecified) | Err(_) => UNSPECIFIED,
+        Ok(InferPurpose::Answer) => "answer",
+        Ok(InferPurpose::ToolRound) => "tool_round",
+        Ok(InferPurpose::AgentRound) => "agent_round",
+        Ok(InferPurpose::Title) => "title",
+        Ok(InferPurpose::FollowUps) => "follow_ups",
+        Ok(InferPurpose::VerificationJudge) => "verification_judge",
+        Ok(InferPurpose::ResearchPlan) => "research_plan",
+        Ok(InferPurpose::ResearchSynthesis) => "research_synthesis",
+        Ok(InferPurpose::CompactionSummary) => "compaction_summary",
+        Ok(InferPurpose::MemoryExtraction) => "memory_extraction",
+        Ok(InferPurpose::MemoryGrounding) => "memory_grounding",
+        Ok(InferPurpose::BrowserPlanner) => "browser_planner",
+        Ok(InferPurpose::SafetyScreen) => "safety_screen",
+        Ok(InferPurpose::Validation) => "validation",
+        Ok(InferPurpose::DictationCleanup) => "dictation_cleanup",
+        Ok(InferPurpose::ScheduledRound) => "scheduled_round",
+    }
 }
 
 struct Labels {
@@ -254,14 +289,36 @@ pub fn record_zdr_attestation_review_by(surface: &'static str, review_by: chrono
     gauge!(ZDR_ATTESTATION_REVIEW_BY, "surface" => surface).set(seconds as f64);
 }
 
-/// Count one finished call.
+/// Count one finished call under no purpose, the `unspecified` series.
+///
+/// See [`record_request_with_purpose`] for what the other arguments are.
+pub fn record_request(
+    rpc: &'static str,
+    service: &str,
+    model: &str,
+    provider: &str,
+    outcome: &str,
+) {
+    record_request_with_purpose(
+        rpc,
+        InferPurpose::Unspecified as i32,
+        service,
+        model,
+        provider,
+        outcome,
+    );
+}
+
+/// Count one finished call under the purpose it was made for, a wire `InferPurpose`
+/// value.
 ///
 /// `service` is [`caller_label`]'s value (or [`UNAUTHENTICATED`]); `model` and
 /// `provider` are what the response named, or [`UNKNOWN`] / [`NONE`]; `outcome`
 /// is `ok` or [`outcome_of`]'s value. Every one is bounded here, so a caller
 /// cannot pass a raw value around the cap.
-pub fn record_request(
+pub fn record_request_with_purpose(
     rpc: &'static str,
+    purpose: i32,
     service: &str,
     model: &str,
     provider: &str,
@@ -271,6 +328,7 @@ pub fn record_request(
     counter!(
         REQUESTS_TOTAL,
         "rpc" => rpc,
+        "purpose" => purpose_label(purpose),
         "service" => labels.services.admit(service),
         "model" => labels.models.admit(model),
         "provider" => labels.providers.admit(provider),
@@ -279,19 +337,43 @@ pub fn record_request(
     .increment(1);
 }
 
-/// Count the tokens a provider reported for one call.
+/// Count the tokens a provider reported for one call, under no purpose.
+///
+/// See [`record_tokens_with_purpose`].
+pub fn record_tokens(service: &str, model: &str, provider: &str, input: u64, output: u64) {
+    record_tokens_with_purpose(
+        service,
+        InferPurpose::Unspecified as i32,
+        model,
+        provider,
+        input,
+        output,
+    );
+}
+
+/// Count the tokens a provider reported for one call, under the purpose it was made
+/// for.
 ///
 /// `input` already includes the prompt-cache read and write legs (the provider
 /// adapters fold them in), so they are not added again. A leg of zero is not
 /// recorded: a route that reports no usage creates no series.
-pub fn record_tokens(service: &str, model: &str, provider: &str, input: u64, output: u64) {
+pub fn record_tokens_with_purpose(
+    service: &str,
+    purpose: i32,
+    model: &str,
+    provider: &str,
+    input: u64,
+    output: u64,
+) {
     let labels = labels();
+    let purpose = purpose_label(purpose);
     for (direction, tokens) in [("input", input), ("output", output)] {
         if tokens == 0 {
             continue;
         }
         counter!(
             TOKENS_TOTAL,
+            "purpose" => purpose,
             "service" => labels.services.admit(service),
             "model" => labels.models.admit(model),
             "provider" => labels.providers.admit(provider),
@@ -492,5 +574,39 @@ mod tests {
         });
         assert!(text.contains(REQUESTS_TOTAL), "{text}");
         assert!(!text.contains(TOKENS_TOTAL), "{text}");
+    }
+
+    #[test]
+    fn purpose_label_is_bounded() {
+        let closed = [
+            "unspecified",
+            "answer",
+            "tool_round",
+            "agent_round",
+            "title",
+            "follow_ups",
+            "verification_judge",
+            "research_plan",
+            "research_synthesis",
+            "compaction_summary",
+            "memory_extraction",
+            "memory_grounding",
+            "browser_planner",
+            "safety_screen",
+            "validation",
+            "dictation_cleanup",
+            "scheduled_round",
+        ];
+        let labels: std::collections::BTreeSet<&str> = (-8..=40).map(purpose_label).collect();
+        assert_eq!(labels.len(), closed.len(), "one label per purpose: {labels:?}");
+        assert!(labels.iter().all(|label| closed.contains(label)), "{labels:?}");
+    }
+
+    #[test]
+    fn unknown_purpose_counts_as_unspecified() {
+        assert_eq!(purpose_label(InferPurpose::Unspecified as i32), UNSPECIFIED);
+        assert_eq!(purpose_label(InferPurpose::Title as i32), "title");
+        assert_eq!(purpose_label(99), UNSPECIFIED, "a value past the enum");
+        assert_eq!(purpose_label(-1), UNSPECIFIED, "a negative value");
     }
 }

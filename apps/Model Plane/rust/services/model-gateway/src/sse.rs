@@ -14,7 +14,8 @@ use chrono::Utc;
 use futures::Stream;
 use mp_contracts::model_plane::v1::{
     orchestration_event, ApprovalKind, ApprovalState, CancelRunRequest, ChatMessage,
-    ContextSegment, GetContextAssemblyRequest, InferRequest, OrchestrationEvent, PlanState,
+    ContextSegment, GetContextAssemblyRequest, InferPurpose, InferRequest, OrchestrationEvent,
+    PlanState,
     RunAgentRequest, RunAgentResponse, StreamRunEventsRequest, SubagentRole, TodoState,
     ToolDefinition, VerificationStatus,
 };
@@ -805,15 +806,23 @@ fn stream_ended_with_no_content(prompt: &str, stop_reason: &str, assistant_outpu
 
 /// Auxiliary calls inherit the subscription selected for the turn. They must
 /// never spend another provider's quota just because their default is cheaper.
-fn subscription_scoped_request(mut request: InferRequest, route: &InferRequest) -> InferRequest {
+fn subscription_scoped_request(request: InferRequest, route: &InferRequest) -> InferRequest {
+    let mut request = inherit_turn_floors(request, route);
     if !route.subscription_connection_id.is_empty() {
         request.model.clone_from(&route.model);
         request.provider_hint.clone_from(&route.provider_hint);
         request.subscription_connection_id.clone_from(&route.subscription_connection_id);
         request.zdr = route.zdr;
-        request.min_privacy_tier = route.min_privacy_tier;
-        request.min_residency.clone_from(&route.min_residency);
     }
+    request
+}
+
+/// Auxiliary calls take the turn's privacy-tier and residency floors on every
+/// route. Only a subscription route carried them before, so a title or a source
+/// judge of a floored turn could reach a provider the turn itself would refuse.
+fn inherit_turn_floors(mut request: InferRequest, route: &InferRequest) -> InferRequest {
+    request.min_privacy_tier = route.min_privacy_tier;
+    request.min_residency.clone_from(&route.min_residency);
     request
 }
 
@@ -1063,6 +1072,62 @@ mod subscription_route_tests {
         assert!(!scoped.zdr, "the auxiliary call takes the connection turn's posture, never ZDR");
         let ordinary=subscription_scoped_request(InferRequest {model:"gpt-4o-mini".into(),..Default::default()}, &InferRequest::default());
         assert_eq!(ordinary.model,"gpt-4o-mini");
+    }
+
+    #[test]
+    fn subscription_route_still_overrides_model_and_hint() {
+        let route = InferRequest {
+            model: "gpt-5.6-terra".into(),
+            provider_hint: "openai-codex-subscription".into(),
+            subscription_connection_id: "connection".into(),
+            ..Default::default()
+        };
+        let scoped = subscription_scoped_request(
+            InferRequest {
+                model: "gpt-4o-mini".into(),
+                provider_hint: "azure-openai".into(),
+                ..Default::default()
+            },
+            &route,
+        );
+        assert_eq!(scoped.model, "gpt-5.6-terra");
+        assert_eq!(scoped.provider_hint, "openai-codex-subscription");
+        assert_eq!(scoped.subscription_connection_id, "connection");
+    }
+
+    #[test]
+    fn title_request_inherits_the_turn_privacy_floor() {
+        // A floored turn on an ordinary route: its title must not reach a provider
+        // the turn itself would refuse.
+        let route = InferRequest {
+            model: "gpt-5-mini".into(),
+            provider_hint: "azure-openai".into(),
+            min_privacy_tier: 2,
+            min_residency: "eu".into(),
+            ..Default::default()
+        };
+        let title = title_request(&route, "req-1", "org-1", "question", "answer");
+        assert_eq!(title.min_privacy_tier, 2);
+        assert_eq!(title.min_residency, "eu");
+        assert_eq!(title.purpose, InferPurpose::Title as i32);
+        assert!(!title.zdr);
+    }
+
+    #[test]
+    fn judge_request_inherits_residency_floor() {
+        let route = InferRequest {
+            model: "gpt-5-mini".into(),
+            min_privacy_tier: 4,
+            min_residency: "norway".into(),
+            ..Default::default()
+        };
+        let snippets = vec!["a retrieved source".to_owned()];
+        let judge = verification_judge_request(
+            &route, "req-1", "org-1", "question", "answer", &snippets, false,
+        );
+        assert_eq!(judge.min_residency, "norway");
+        assert_eq!(judge.min_privacy_tier, 4);
+        assert_eq!(judge.purpose, InferPurpose::VerificationJudge as i32);
     }
 
     #[test]
@@ -3975,10 +4040,11 @@ pub async fn invoke_stream_sse(
             structured_output_schema,
             zdr: effective_zdr,
             // The caller's privacy floor rides on the ANSWER call and every
-            // retry/fallback derived from `grpc_req` below; auxiliary
-            // micro-calls (title, follow-ups, compaction summary) keep their
-            // own posture because they carry only already-persisted text.
+            // retry/fallback derived from `grpc_req` below. The auxiliary calls
+            // take it too, through `inherit_turn_floors`; the compaction summary
+            // takes its own through `direct_infer`.
             min_privacy_tier: min_privacy_tier_wire,
+            purpose: InferPurpose::Answer as i32,
             thinking_budget_tokens: thinking_plan.budget_tokens,
             reasoning_effort: thinking_plan.effort_wire(),
             prompt_tiers: answer_tiers,
@@ -9539,6 +9605,7 @@ async fn direct_infer(
         temperature,
         zdr,
         min_privacy_tier,
+        InferPurpose::CompactionSummary as i32,
         inference_bearer,
     )
     .await
@@ -9563,6 +9630,7 @@ async fn direct_infer_turn(
     temperature: f32,
     zdr: bool,
     min_privacy_tier: i32,
+    purpose: i32,
     inference_bearer: &VerifiedInferenceBearer,
 ) -> Result<DirectAnswer, tonic::Status> {
     let mut client = state.inference_client.clone();
@@ -9590,6 +9658,8 @@ async fn direct_infer_turn(
                 // Same caller privacy floor as the primary paths — a fallback
                 // must never reach a provider the main chain would refuse.
                 min_privacy_tier,
+                // What the call is for: the compaction summary, or the ZDR answer.
+                purpose,
                 ..Default::default()
             },
             inference_bearer,
@@ -9723,6 +9793,7 @@ fn verification_judge_request(
     subscription_scoped_request(
         InferRequest {
             request_id: format!("{request_id}-verify"),
+            purpose: InferPurpose::VerificationJudge as i32,
             org_id: org_id.to_owned(),
             model: aux_model().to_owned(),
             provider_hint: String::new(),
@@ -9832,6 +9903,7 @@ async fn resample_answer(
         let mut request = authenticated_inference_request(
             subscription_scoped_request(InferRequest {
                 request_id: format!("{request_id}-resample-{index}"),
+                purpose: InferPurpose::Validation as i32,
                 org_id: org_id.to_owned(),
                 model: model.to_owned(),
                 provider_hint: String::new(),
@@ -9891,6 +9963,7 @@ fn title_request(
     subscription_scoped_request(
         InferRequest {
             request_id: format!("{request_id}-title"),
+            purpose: InferPurpose::Title as i32,
             org_id: org_id.to_owned(),
             model: aux_model().to_owned(),
             provider_hint: String::new(),
@@ -9992,6 +10065,7 @@ fn follow_ups_request(
     subscription_scoped_request(
         InferRequest {
             request_id: format!("{request_id}-follow-ups"),
+            purpose: InferPurpose::FollowUps as i32,
             org_id: org_id.to_owned(),
             model: aux_model().to_owned(),
             provider_hint: String::new(),
@@ -10394,6 +10468,7 @@ async fn zdr_direct_stream(
         0.7,
         true,
         min_privacy_tier,
+        InferPurpose::Answer as i32,
         &inference_bearer,
     )
     .await
