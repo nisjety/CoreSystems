@@ -180,6 +180,17 @@ pub(super) fn validation(message: &str) -> Response {
         .into_response()
 }
 
+/// 400 with the standard `{error:{code,message}}` envelope, for a value that is present
+/// but malformed, such as a schema that is not a JSON object (WS16.S7). A missing field
+/// keeps [`validation`]'s 422.
+pub(super) fn bad_request(code: &'static str, message: &str) -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(error(code, message.to_owned())),
+    )
+        .into_response()
+}
+
 /// Forward an upstream `(status, body)` failure verbatim.
 pub(super) fn forward(status: StatusCode, body: Value) -> Response {
     (status, Json(body)).into_response()

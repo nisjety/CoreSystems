@@ -19,7 +19,7 @@ use std::collections::HashMap;
 use crate::{config::AppState, envelope::unwrap_data, middleware::AuthenticatedUser};
 
 use super::shared::{
-    array_at, cookie_header, created, date_millis, first_num, first_str, forward,
+    array_at, bad_request, cookie_header, created, date_millis, first_num, first_str, forward,
     normalize_batch_urls, normalize_target, obj_or_empty, okay, quarry_call, quarry_token, str_at,
     str_or_null, validation,
 };
@@ -395,7 +395,8 @@ async fn create_extract(
     match extract_schema(body) {
         Ok(Some(schema)) => request["schema"] = schema,
         Ok(None) => {}
-        Err(message) => return validation(&message),
+        // Present but not a JSON object: malformed, so a 400, and nothing reaches quarry-edge.
+        Err(message) => return bad_request("invalid_schema", &message),
     }
     match extract_prompt(body) {
         Ok(Some(prompt)) => request["prompt"] = Value::String(prompt),
@@ -525,7 +526,8 @@ async fn create_scrape(
 // ── Small helpers ───────────────────────────────────────────────────────────
 
 /// The extraction schema of a run body: a JSON object, or the same document sent
-/// as text. `Ok(None)` when none was sent; an unreadable schema is a validation error.
+/// as text. `Ok(None)` when none was sent or the text is blank. A schema that is not a
+/// JSON object is an `Err`, which `create_extract` answers with a 400.
 fn extract_schema(body: &Value) -> Result<Option<Value>, String> {
     match body.get("schema") {
         None | Some(Value::Null) => Ok(None),
@@ -582,6 +584,35 @@ mod tests {
         let long = "x".repeat(10_001);
         assert!(extract_prompt(&json!({ "prompt": long })).is_err());
         assert!(extract_prompt(&json!({ "prompt": "y".repeat(10_000) })).is_ok());
+    }
+
+    /// WS16.S7: a schema is a JSON object, or the same object as text. Blank text means none;
+    /// anything else is refused before it can reach quarry-edge.
+    #[test]
+    fn extract_schema_accepts_an_object_or_its_text_and_refuses_the_rest() {
+        let object = json!({ "type": "object" });
+        assert_eq!(extract_schema(&json!({})).unwrap(), None);
+        assert_eq!(extract_schema(&json!({ "schema": null })).unwrap(), None);
+        assert_eq!(extract_schema(&json!({ "schema": "  " })).unwrap(), None);
+        assert_eq!(
+            extract_schema(&json!({ "schema": object.clone() })).unwrap(),
+            Some(object.clone())
+        );
+        assert_eq!(
+            extract_schema(&json!({ "schema": "{\"type\":\"object\"}" })).unwrap(),
+            Some(object)
+        );
+        for malformed in [
+            json!("not json"),
+            json!("[1, 2]"),
+            json!("\"text\""),
+            json!(["type"]),
+            json!(42),
+            json!(true),
+        ] {
+            let refused = extract_schema(&json!({ "schema": malformed.clone() }));
+            assert!(refused.is_err(), "{malformed}");
+        }
     }
 
     #[test]
@@ -799,5 +830,207 @@ mod job_control_field_tests {
         let response = list_runs(State(state), Extension(user), HeaderMap::new(), Query(params)).await;
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(quarry.received_requests().await.unwrap().len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod extract_forward_tests {
+    use super::*;
+    use wiremock::matchers::{method as wm_method, path as wm_path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    /// A quarry-edge double for `POST /v1/extract`: it answers `status` with `body`, and
+    /// expects `calls` requests.
+    async fn quarry_answering(status: u16, body: Value, calls: u64) -> MockServer {
+        let quarry = MockServer::start().await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/v1/extract"))
+            .respond_with(ResponseTemplate::new(status).set_body_json(body))
+            .expect(calls)
+            .mount(&quarry)
+            .await;
+        quarry
+    }
+
+    fn state_for(quarry: &MockServer) -> AppState {
+        let mut state = crate::tests::test_state(false);
+        state.quarry_edge_url = quarry.uri();
+        state
+    }
+
+    /// The JSON bodies the double received, in arrival order.
+    async fn sent_bodies(quarry: &MockServer) -> Vec<Value> {
+        quarry
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .iter()
+            .map(|request| serde_json::from_slice::<Value>(&request.body).expect("a JSON body"))
+            .collect()
+    }
+
+    async fn json_of(response: Response) -> Value {
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    fn structured_answer() -> Value {
+        json!({ "data": { "results": [{
+            "url": "https://vg.no/a",
+            "status": "ok",
+            "data": { "price": 10 },
+            "schema_valid": true
+        }], "count": 1, "requested": 1 } })
+    }
+
+    fn markdown_answer() -> Value {
+        json!({ "data": { "results": [{
+            "url": "https://vg.no/a",
+            "status": "fetched",
+            "markdown": "# Price"
+        }], "count": 1, "requested": 1 } })
+    }
+
+    /// WS16.S7: a schema and a prompt reach `POST /v1/extract` beside the URL, and the
+    /// prompt arrives trimmed. The gateway adds nothing else to the request.
+    #[tokio::test]
+    async fn extract_forwards_the_schema_and_the_trimmed_prompt() {
+        let quarry = quarry_answering(200, structured_answer(), 1).await;
+        let schema = json!({
+            "type": "object",
+            "properties": { "price": { "type": "number" } }
+        });
+        let body = json!({
+            "kind": "extract",
+            "url": "https://vg.no/a",
+            "schema": schema.clone(),
+            "prompt": "  Find the price in NOK  ",
+        });
+
+        let response = create_extract(&state_for(&quarry), &body, None, "user-1").await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            sent_bodies(&quarry).await,
+            vec![json!({
+                "urls": ["https://vg.no/a"],
+                "schema": schema,
+                "prompt": "Find the price in NOK",
+            })]
+        );
+    }
+
+    /// A schema sent as text is read as the object it spells, and forwarded as one.
+    #[tokio::test]
+    async fn a_schema_sent_as_text_is_forwarded_as_an_object() {
+        let quarry = quarry_answering(200, structured_answer(), 1).await;
+        let body = json!({
+            "kind": "extract",
+            "url": "https://vg.no/a",
+            "schema": "{\"type\":\"object\"}",
+        });
+
+        let response = create_extract(&state_for(&quarry), &body, None, "user-1").await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            sent_bodies(&quarry).await,
+            vec![json!({ "urls": ["https://vg.no/a"], "schema": { "type": "object" } })]
+        );
+    }
+
+    /// A null schema and a blank prompt are not forwarded: the markdown route is unchanged.
+    #[tokio::test]
+    async fn extract_sends_only_the_urls_when_no_schema_or_prompt_is_given() {
+        let quarry = quarry_answering(200, markdown_answer(), 1).await;
+        let body = json!({
+            "kind": "extract",
+            "url": "https://vg.no/a",
+            "schema": null,
+            "prompt": "   ",
+        });
+
+        let response = create_extract(&state_for(&quarry), &body, None, "user-1").await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            sent_bodies(&quarry).await,
+            vec![json!({ "urls": ["https://vg.no/a"] })]
+        );
+    }
+
+    /// WS16.S7: a schema that is not a JSON object is a 400 with the `invalid_schema` code,
+    /// and nothing reaches quarry-edge.
+    #[tokio::test]
+    async fn a_malformed_schema_is_a_400_and_nothing_reaches_quarry() {
+        let quarry = quarry_answering(200, structured_answer(), 0).await;
+        let state = state_for(&quarry);
+        for schema in [
+            json!("not json"),
+            json!("[1, 2]"),
+            json!(["type", "object"]),
+            json!(42),
+            json!(true),
+        ] {
+            let body = json!({
+                "kind": "extract",
+                "url": "https://vg.no/a",
+                "schema": schema.clone(),
+            });
+
+            let response = create_extract(&state, &body, None, "user-1").await;
+
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{schema}");
+            let refusal = json_of(response).await;
+            assert_eq!(refusal["error"]["code"], "invalid_schema", "{schema}");
+        }
+        assert!(sent_bodies(&quarry).await.is_empty());
+    }
+
+    /// The prompt limit is refused here, as a 422 validation error, before any upstream call.
+    #[tokio::test]
+    async fn an_over_long_prompt_is_refused_before_quarry() {
+        let quarry = quarry_answering(200, structured_answer(), 0).await;
+        let body = json!({
+            "kind": "extract",
+            "url": "https://vg.no/a",
+            "prompt": "x".repeat(10_001),
+        });
+
+        let response = create_extract(&state_for(&quarry), &body, None, "user-1").await;
+
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let refusal = json_of(response).await;
+        assert_eq!(refusal["error"]["code"], "validation_error");
+        assert!(sent_bodies(&quarry).await.is_empty());
+    }
+
+    /// INNH-2: quarry-edge's AI-formats refusal keeps its 501, and the gateway sets the typed
+    /// code it reads from that refusal's text at the top level.
+    #[tokio::test]
+    async fn an_ai_formats_refusal_keeps_its_typed_code_through_the_forward() {
+        let refused = json!({
+            "error": concat!(
+                "structured extraction is not available on this edge: ",
+                "QUARRY_EDGE__AI_FORMATS is off"
+            ),
+            "code": "UNSUPPORTED",
+        });
+        let quarry = quarry_answering(501, refused, 1).await;
+        let body = json!({
+            "kind": "extract",
+            "url": "https://vg.no/a",
+            "schema": { "type": "object" },
+        });
+
+        let response = create_extract(&state_for(&quarry), &body, None, "user-1").await;
+
+        assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
+        let refusal = json_of(response).await;
+        assert_eq!(refusal["code"], "extract_ai_formats_off");
+        let sent = sent_bodies(&quarry).await;
+        assert_eq!(sent[0]["schema"], json!({ "type": "object" }));
     }
 }
