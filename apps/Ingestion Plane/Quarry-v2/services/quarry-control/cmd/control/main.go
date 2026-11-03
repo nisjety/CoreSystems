@@ -26,6 +26,7 @@ import (
 	"github.com/triodelab/quarry-v2/services/quarry-control/internal/httpx"
 	"github.com/triodelab/quarry-v2/services/quarry-control/internal/janitor"
 	"github.com/triodelab/quarry-v2/services/quarry-control/internal/notify"
+	"github.com/triodelab/quarry-v2/services/quarry-control/internal/posture"
 	"github.com/triodelab/quarry-v2/services/quarry-control/internal/resources"
 	"github.com/triodelab/quarry-v2/services/quarry-control/internal/store"
 	"github.com/triodelab/quarry-v2/services/quarry-control/internal/store/pg"
@@ -333,6 +334,30 @@ func main() {
 		}
 	} else {
 		log.Warn().Msg("NATS_SHARED_URL unset — GDPR org-erasure purge consumer disabled (org deletions will not auto-purge this service's crawl data for that org)")
+	}
+
+	// X-9: the ZDR-enabled consumer on controlplane.org.interactive_retention.enabled
+	// (org-core, CONTROLPLANE stream). OFF BY DEFAULT: with
+	// QUARRY_CONTROL__ZDR_EVENT_CONSUMER unset or off it is not started. observe
+	// logs would_pause per schedule; enforce pauses the org's schedules and
+	// change monitors and writes a skipped_zdr reason event. It shares the
+	// control-shared connection above and binds a consumer audit-core must have
+	// provisioned (quarry-control-interactive-retention).
+	zdrMode, zdrModeInvalid := posture.ModeFromEnv(os.Getenv)
+	if zdrModeInvalid {
+		log.Warn().Str("flag", posture.FlagEnv).Msg("ZDR-enabled consumer flag is not off, observe or enforce - consumer stays off")
+	}
+	switch {
+	case zdrMode == posture.ModeOff:
+		log.Info().Msg("ZDR-enabled consumer is off (default): schedules keep their create-time ZDR stamp (X-9)")
+	case gdprNC == nil:
+		log.Warn().Str("mode", string(zdrMode)).Msg("ZDR-enabled consumer requested but the control-shared NATS connection is not up - consumer disabled")
+	default:
+		if _, err := posture.StartSubscriber(gdprNC, posture.NewConsumer(db, zdrMode, log.Logger), log.Logger); err != nil {
+			log.Warn().Err(err).Str("mode", string(zdrMode)).Msg("ZDR-enabled consumer failed to start")
+		} else {
+			log.Warn().Str("mode", string(zdrMode)).Msg("ZDR-enabled consumer is ON (QUARRY_CONTROL__ZDR_EVENT_CONSUMER)")
+		}
 	}
 
 	srv := &http.Server{
