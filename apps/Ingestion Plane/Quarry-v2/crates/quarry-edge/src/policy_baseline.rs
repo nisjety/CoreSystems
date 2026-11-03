@@ -15,6 +15,32 @@
 //! resolution is the catalogue default and its digest leaves the run fingerprint
 //! unchanged (see `RunPolicy::from(&ResolvedPolicy)` in quarry-runtime).
 //!
+//! WS7.J: the org layer is the token's `web_policy` claim. `QUARRY_EDGE__WEB_POLICY_CLAIM_ENFORCEMENT`
+//! picks what the claim does on its own, beside the mode above (W2-CP-U35):
+//!
+//! * `observe` (the default): the run never runs under the claim. The policy the run would
+//!   take with the claim is the shadow, checked and counted (`web_policy_would_deny_total`
+//!   with `decision_source = org_policy`); an unreadable or (when required) missing claim is
+//!   counted, never refused.
+//! * `enforce`: the claim is the org layer of the run, as the mode above applies it. Turning
+//!   it on after WS7.H and WS7.I are deployed is one environment flip.
+//! * `off`: the claim is ignored entirely, `REQUIRE_CLAIM` included.
+//!
+//! The mode above still bounds the claim: under `off` nothing but the invariants and the ZDR
+//! floor applies, and under `observe` everything (the claim included) is shadow only.
+//!
+//! What the claim means (decisions D2-053 and D2-054):
+//!
+//! * An absent claim is no org layer (the baseline alone), unless `REQUIRE_CLAIM` is on.
+//! * An empty `domains.allow` list is no allow-list restriction: the issuer lists only
+//!   entries beyond the baseline, so `[]` means "allow anything the other layers allow",
+//!   never "allow nothing". An issuer that means "allow nothing" must deny instead.
+//! * `rev` is the issuer's 12 lowercase hex digest (or `"0"` for no policy), and the
+//!   denial envelope carries it back in the same form (`web_policy_edge::policy_rev_hex`),
+//!   so "the denial's `policy_rev` equals the stored rev" is a string comparison.
+//! * Unknown capability keys and top-level fields are ignored, never applied, and counted
+//!   (`web_policy_claim_unknown_key_total`).
+//!
 //! Errors name the environment variable, never its value.
 
 use quarry_core::web_policy::{
@@ -30,6 +56,9 @@ pub const ENFORCEMENT_ENV: &str = "QUARRY_EDGE__WEB_POLICY_ENFORCEMENT";
 /// `1`/`true` or `0`/`false`. On: a request whose token has no `web_policy` claim is refused
 /// (403 `policy_unreadable`) under `enforce`; under `observe` the refusal is only counted.
 pub const REQUIRE_CLAIM_ENV: &str = "QUARRY_EDGE__WEB_POLICY_REQUIRE_CLAIM";
+/// `off`, `observe` or `enforce` (WS7.J, W2-CP-U35), default `observe`: what the token's
+/// `web_policy` claim does. See the module documentation.
+pub const CLAIM_ENFORCEMENT_ENV: &str = "QUARRY_EDGE__WEB_POLICY_CLAIM_ENFORCEMENT";
 
 /// `1`/`true` or `0`/`false` (WS7.G). On: a page run preflights the final URL of a fetch
 /// again when a redirect moved it off the requested URL, so a redirect to a host the policy
@@ -83,6 +112,7 @@ pub struct PolicyBaseline {
     layer: PolicyLayer,
     enforcement: Enforcement,
     require_claim: bool,
+    claim: Enforcement,
     final_url_check: bool,
     snapshot: Enforcement,
 }
@@ -94,6 +124,7 @@ impl Default for PolicyBaseline {
             layer: PolicyLayer::default(),
             enforcement: Enforcement::Enforce,
             require_claim: false,
+            claim: Enforcement::Observe,
             final_url_check: false,
             snapshot: Enforcement::Off,
         }
@@ -117,6 +148,11 @@ impl PolicyBaseline {
             Some(raw) => parse_flag(&raw)?,
             None => false,
         };
+        let claim = match lookup(CLAIM_ENFORCEMENT_ENV) {
+            Some(raw) => Enforcement::parse(&raw)
+                .map_err(|_| format!("{CLAIM_ENFORCEMENT_ENV} must be off, observe or enforce"))?,
+            None => Enforcement::Observe,
+        };
         let final_url_check = match lookup(FINAL_URL_CHECK_ENV) {
             Some(raw) => {
                 parse_flag(&raw).map_err(|_| format!("{FINAL_URL_CHECK_ENV} must be 1 or 0"))?
@@ -132,6 +168,7 @@ impl PolicyBaseline {
             layer,
             enforcement,
             require_claim,
+            claim,
             final_url_check,
             snapshot,
         })
@@ -165,12 +202,21 @@ impl PolicyBaseline {
         self.require_claim
     }
 
+    /// What the token's `web_policy` claim does (WS7.J). `Observe` by default.
+    pub fn claim_mode(&self) -> Enforcement {
+        self.claim
+    }
+
     /// WS7.J: the org layer for one request, read from the token's `web_policy` claim.
     ///
     /// A readable claim is the org layer. An absent claim is no org layer, unless the baseline
     /// requires the claim, which refuses the request. An unreadable claim is `Unreadable`: it
-    /// refuses under `enforce` and is only counted under `observe`.
+    /// refuses under `enforce` and is only counted under `observe`. With the claim mode `off`
+    /// the claim is not read at all: no org layer, whatever the token carries.
     pub fn org_input(&self, claim: Result<Option<WebPolicyClaim>, PolicyDenial>) -> OrgInput {
+        if self.claim == Enforcement::Off {
+            return OrgInput::Absent;
+        }
         match claim {
             Ok(Some(claim)) => OrgInput::Present {
                 layer: claim.layer,
@@ -201,6 +247,10 @@ impl PolicyBaseline {
     }
 
     /// [`PolicyBaseline::decide`] with the org layer given (WS7.J: from the token's claim).
+    ///
+    /// The claim mode bounds the org layer: `off` drops it; `observe` keeps it out of the run
+    /// and puts it in the shadow only (under `enforce`, the run is the baseline and the ask, and
+    /// the shadow is that plus the org layer); `enforce` applies it as the mode above says.
     pub fn decide_with_org(
         &self,
         principal: Principal,
@@ -208,6 +258,12 @@ impl PolicyBaseline {
         org: OrgInput,
         request: Option<PolicyLayer>,
     ) -> Result<Decision, PolicyDenial> {
+        let org = if self.claim == Enforcement::Off {
+            OrgInput::Absent
+        } else {
+            org
+        };
+        let claim_shadow_only = self.claim == Enforcement::Observe && org_has_effect(&org);
         let full = PolicyInputs {
             principal,
             zdr,
@@ -225,6 +281,25 @@ impl PolicyBaseline {
             request: None,
         };
         match self.enforcement {
+            Enforcement::Enforce if claim_shadow_only => {
+                // The claim is observed: the run is everything but the org layer, and the
+                // shadow (the full resolution) is checked and counted. A shadow that cannot
+                // be resolved (an unreadable or missing required claim) is the would-be denial.
+                let applied = PolicyInputs {
+                    org: OrgInput::Absent,
+                    ..full.clone()
+                };
+                let policy = resolve(&applied)?;
+                let (shadow, shadow_denial) = match resolve(&full) {
+                    Ok(shadow) => (Some(shadow), None),
+                    Err(denial) => (None, Some(denial)),
+                };
+                Ok(Decision {
+                    policy,
+                    shadow,
+                    shadow_denial,
+                })
+            }
             Enforcement::Enforce => Ok(Decision {
                 policy: resolve(&full)?,
                 shadow: None,
@@ -249,6 +324,17 @@ impl PolicyBaseline {
                 shadow_denial: None,
             }),
         }
+    }
+}
+
+/// Whether an org input can change a resolution. An absent claim and a claim with an empty
+/// layer (the `{"v":1,"rev":"0"}` baseline every token carries before WS7.I is switched on)
+/// cannot, so they need no shadow.
+fn org_has_effect(org: &OrgInput) -> bool {
+    match org {
+        OrgInput::Absent => false,
+        OrgInput::Present { layer, .. } => *layer != PolicyLayer::default(),
+        OrgInput::Unreadable => true,
     }
 }
 
@@ -354,6 +440,31 @@ mod tests {
         assert_eq!(env("observe").unwrap().snapshot_mode(), Enforcement::Observe);
         assert_eq!(env("enforce").unwrap().snapshot_mode(), Enforcement::Enforce);
         assert!(env("on").is_err(), "an unknown value fails the boot, it does not fall back");
+    }
+
+    #[test]
+    fn claim_mode_defaults_to_observe_and_parses_the_three_names() {
+        let env = |value: &'static str| {
+            PolicyBaseline::from_lookup(move |name| {
+                (name == CLAIM_ENFORCEMENT_ENV).then(|| value.to_owned())
+            })
+        };
+        assert_eq!(PolicyBaseline::from_lookup(|_| None).unwrap().claim_mode(), Enforcement::Observe);
+        assert_eq!(PolicyBaseline::default().claim_mode(), Enforcement::Observe);
+        assert_eq!(env("off").unwrap().claim_mode(), Enforcement::Off);
+        assert_eq!(env("observe").unwrap().claim_mode(), Enforcement::Observe);
+        assert_eq!(env("enforce").unwrap().claim_mode(), Enforcement::Enforce);
+        assert!(env("ENFORCE").is_err(), "an unknown value fails the boot, it does not fall back");
+    }
+
+    #[test]
+    fn an_empty_org_layer_has_no_effect() {
+        assert!(!org_has_effect(&OrgInput::Absent));
+        assert!(!org_has_effect(&OrgInput::Present {
+            layer: PolicyLayer::default(),
+            rev: 0,
+        }));
+        assert!(org_has_effect(&OrgInput::Unreadable));
     }
 
     #[test]
