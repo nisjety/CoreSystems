@@ -1,6 +1,8 @@
 pub mod agent_mode;
 pub mod agentic_subscription;
 pub mod approval_cause;
+pub mod approval_descriptor;
+pub mod approval_edit;
 pub mod attachments;
 pub mod autonomy;
 pub mod dataplane_posture;

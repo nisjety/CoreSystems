@@ -8337,20 +8337,19 @@ async fn continuation_descriptor(
         }
         enrich_shipment_recipient_contact(&mut input, &req.user_id).await;
     }
-    let scope = json!({
-        "version": 1,
-        "run_id": req.run_id,
-        "org_id": req.org_id,
-        "user_id": req.user_id,
-        "step_id": step_id,
-        "action_kind": "tool_call",
-        "tool_name": tool_name,
-        "input": input.clone(),
-        "permission_mode": permission_mode,
-    });
-    let canonical = serde_json::to_string(&scope)
+    // The fingerprinted scope is shared with session-core, which rebuilds it for an edited
+    // approval (EP-10), so both build the same bytes from mp-contracts.
+    let scope = mp_contracts::approval_descriptor::descriptor_scope(
+        &req.run_id,
+        &req.org_id,
+        &req.user_id,
+        step_id,
+        tool_name,
+        &input,
+        permission_mode,
+    );
+    let action_fingerprint = mp_contracts::approval_descriptor::action_fingerprint(&scope)
         .map_err(|_| tonic::Status::internal("could not encode continuation descriptor"))?;
-    let action_fingerprint = blake3::hash(canonical.as_bytes()).to_hex().to_string();
     let ticket_binding = if tool_name == crate::ticket_tools::TOOL_NAME {
         Some(
             crate::ticket_tools::continuation_binding(
@@ -9336,6 +9335,55 @@ mod tests {
             .code(),
             tonic::Code::FailedPrecondition
         );
+    }
+
+    /// The scope and its fingerprint moved to mp-contracts (EP-10-S3). The hash below is the one
+    /// this function produced before the move for the same call; a drift would orphan every
+    /// approval still pending.
+    #[tokio::test]
+    async fn fingerprint_is_byte_identical_after_the_move() {
+        let request = pb::RunAgentRequest {
+            run_id: "run-1".to_owned(),
+            org_id: "org-1".to_owned(),
+            user_id: "user-1".to_owned(),
+            ..Default::default()
+        };
+        let raw = continuation_descriptor(
+            crate::permission::RunGate::for_run(&request.org_id, &request.run_id),
+            &request,
+            "step-1",
+            "execute_provider_action",
+            r#"{"connection_id":"conn-1","operation":"gmail.send","body":{"to":["alice@example.com"],"subject":"Status","bodyText":"Hei"}}"#,
+            "ask",
+        )
+        .await
+        .expect("retained run descriptor");
+        let descriptor: serde_json::Value = serde_json::from_str(&raw).expect("descriptor json");
+        assert_eq!(
+            descriptor["action_fingerprint"],
+            "fb6e264cffc1d147d1c1307b38b33f873bffa1854049bfe6c204fcf6a41887f1"
+        );
+
+        // The construction used inline before the move, as a second reference.
+        let legacy = serde_json::json!({
+            "version": 1,
+            "run_id": "run-1",
+            "org_id": "org-1",
+            "user_id": "user-1",
+            "step_id": "step-1",
+            "action_kind": "tool_call",
+            "tool_name": "execute_provider_action",
+            "input": descriptor["input"].clone(),
+            "permission_mode": "ask",
+        });
+        let legacy_fingerprint = blake3::hash(
+            serde_json::to_string(&legacy)
+                .expect("legacy scope encodes")
+                .as_bytes(),
+        )
+        .to_hex()
+        .to_string();
+        assert_eq!(descriptor["action_fingerprint"], legacy_fingerprint);
     }
 
     /// `tickets.create` is the one tool `permission::requires_durable_owner_approval`
