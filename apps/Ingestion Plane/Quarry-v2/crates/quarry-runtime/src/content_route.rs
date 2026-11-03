@@ -14,6 +14,11 @@
 //! - **Output.** Extracted text is cut at [`MAX_DOC_TEXT_BYTES`].
 //!
 //! Input size caps (25 MiB) and the DOCX zip bounds live in the parsers.
+//!
+//! XLSX, PPTX, OpenDocument and EPUB are not parsed here. With
+//! `QUARRY_EDGE__OFFICE_VIA_IMPORTS` on, [`ImportsExtractClient`] sends them to
+//! imports-core's ephemeral extract endpoint (the approved Office hybrid, E3.6-6);
+//! with it off (the default) they stay a typed 415.
 
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
@@ -21,6 +26,8 @@ use std::time::Duration;
 use quarry_core::error::{ErrorCode, QuarryError, QuarryResult};
 use quarry_transform::sniff::ContentKind;
 use tokio::sync::Semaphore;
+
+use crate::service_tokens::{ServiceBearer, ServiceTokenRequest, SharedServiceTokenProvider};
 
 pub const DOC_PARSE_TIMEOUT: Duration = Duration::from_secs(15);
 pub const DOC_PARSE_CONCURRENCY: usize = 2;
@@ -80,27 +87,56 @@ pub async fn parse_document(kind: ContentKind, body: Vec<u8>) -> QuarryResult<Pa
     }
 }
 
-/// E3.6-6b integration placeholder for the E3.6-6a imports-core extract client
-/// (`POST /api/v1/import/extract`), which is not on any branch yet. Until 6a
-/// lands it refuses every body with the typed 415 the Office kinds already get,
-/// so `QUARRY_EDGE__OFFICE_VIA_IMPORTS=on` changes nothing visible. E3.6-6a
-/// replaces this body (same name and signature).
+/// The process-wide imports-core extract client (E3.6-6a) the pipeline's Office
+/// route calls. Installed once by the edge wiring, built from
+/// [`IMPORTS_CORE_URL_ENV`] with a [`ManifestImportsBearer`] and
+/// `.with_enabled(office_via_imports_enabled())`.
+static OFFICE_EXTRACT_CLIENT: OnceLock<Arc<ImportsExtractClient>> = OnceLock::new();
+
+/// Install the client [`extract_office_via_imports`] uses. The first install
+/// wins; a second answers `false` and changes nothing.
+pub fn install_office_extract_client(client: ImportsExtractClient) -> bool {
+    OFFICE_EXTRACT_CLIENT.set(Arc::new(client)).is_ok()
+}
+
+/// The installed client, if any.
+pub fn office_extract_client() -> Option<Arc<ImportsExtractClient>> {
+    OFFICE_EXTRACT_CLIENT.get().cloned()
+}
+
+/// Extract an XLSX, PPTX, OpenDocument or EPUB body through imports-core's
+/// ephemeral `POST /api/v1/import/extract` (E3.6-6a), for the pipeline's Office
+/// route (E3.6-6b). The bearer is minted for `org_id`; `filename_hint` (the URL
+/// path) only picks the ODF subtype and is never sent.
+///
+/// With no client installed every body is the typed 415
+/// `imports_client_unavailable` and nothing is sent; with the client disabled
+/// (the flag off) it is the 415 `office_via_imports_off`.
 pub async fn extract_office_via_imports(
+    org_id: &str,
     kind: ContentKind,
     body: Vec<u8>,
+    filename_hint: Option<&str>,
 ) -> QuarryResult<ParsedDocument> {
-    let _ = body;
-    Err(QuarryError::new(
-        ErrorCode::UnsupportedMedia,
-        format!(
-            "the {} could not be read: the imports extract client is not available",
-            kind.label()
-        ),
-    )
-    .with_details(serde_json::json!({
-        "reason": "imports_client_unavailable",
-        "route": "imports",
-    })))
+    let Some(client) = OFFICE_EXTRACT_CLIENT.get() else {
+        drop(body);
+        return Err(office_refusal(
+            kind,
+            "imports_client_unavailable",
+            format!(
+                "the {} could not be read: the imports extract client is not available",
+                kind.label()
+            ),
+        ));
+    };
+    client
+        .extract(OfficeExtractRequest {
+            org_id: org_id.to_owned(),
+            kind,
+            body,
+            filename_hint: filename_hint.map(str::to_owned),
+        })
+        .await
 }
 
 /// Parse with an explicit backend and deadline: what [`parse_document`] does,
@@ -668,6 +704,568 @@ fn apply_limits(limits: ChildLimits) -> std::io::Result<()> {
     Ok(())
 }
 
+// ---- Office hybrid: imports-core extract client (E3.6-6a) -------------------
+
+/// The flag that sends XLSX, PPTX, OpenDocument and EPUB bodies to imports-core's
+/// ephemeral extract endpoint. Default off: those kinds stay a typed 415.
+pub const OFFICE_VIA_IMPORTS_FLAG: &str = "QUARRY_EDGE__OFFICE_VIA_IMPORTS";
+
+/// The imports-core origin (for example `http://imports-core:8000`) the wiring
+/// reads to build an [`ImportsExtractClient`].
+pub const IMPORTS_CORE_URL_ENV: &str = "QUARRY_EDGE__IMPORTS_CORE_URL";
+
+/// imports-core's ephemeral extract route: no job, no storage, no model call, no
+/// third-party egress, `Cache-Control: no-store` (`imports-core/app/main.py`).
+pub const OFFICE_EXTRACT_PATH: &str = "/api/v1/import/extract";
+
+/// The budget of one extraction: the slot wait, the token and the call (and the
+/// one retry after a refused bearer).
+pub const OFFICE_EXTRACT_TIMEOUT: Duration = Duration::from_secs(15);
+const OFFICE_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// At most this many extractions are in flight to imports-core from this process.
+pub const OFFICE_EXTRACT_CONCURRENCY: usize = 4;
+
+/// The default input cap: imports-core's own default (`CHAT_EXTRACT_MAX_BYTES`,
+/// 1 MB). A larger body is refused here, before any call.
+pub const DEFAULT_OFFICE_MAX_INPUT_BYTES: usize = 1_000_000;
+
+/// The ceiling for [`ImportsExtractClient::with_max_input_bytes`]: the same 25 MiB
+/// the in-process parsers refuse above.
+pub const MAX_OFFICE_INPUT_BYTES: usize = 25 * 1024 * 1024;
+
+/// imports-core answers at most 60 000 characters of text in a small envelope; an
+/// answer larger than this is not an extract answer.
+const MAX_OFFICE_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
+
+/// Whether [`OFFICE_VIA_IMPORTS_FLAG`] is on in this process.
+pub fn office_via_imports_enabled() -> bool {
+    flag_on(std::env::var(OFFICE_VIA_IMPORTS_FLAG).ok().as_deref())
+}
+
+/// `1`, `true`, `yes` or `on` (any case); anything else, or unset, is off.
+fn flag_on(value: Option<&str>) -> bool {
+    value.is_some_and(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        )
+    })
+}
+
+/// The kinds that go to imports-core when the flag is on. PDF and DOCX stay in
+/// Rust (the parsers above); the legacy OLE2 formats are not sent anywhere.
+pub fn is_office_via_imports_kind(kind: ContentKind) -> bool {
+    matches!(
+        kind,
+        ContentKind::Xlsx | ContentKind::Pptx | ContentKind::Odf | ContentKind::Epub
+    )
+}
+
+/// The file extension imports-core chooses its parser by. Only the extension of
+/// the hint is used; the name sent is always `document.<ext>`, never the real
+/// file name or anything from the URL.
+fn office_extension(kind: ContentKind, filename_hint: Option<&str>) -> Option<&'static str> {
+    match kind {
+        ContentKind::Xlsx => Some("xlsx"),
+        ContentKind::Pptx => Some("pptx"),
+        ContentKind::Epub => Some("epub"),
+        ContentKind::Odf => {
+            let hinted = filename_hint
+                .and_then(|name| name.rsplit_once('.'))
+                .map(|(_, ext)| ext.trim().to_ascii_lowercase());
+            Some(match hinted.as_deref() {
+                Some("ods") => "ods",
+                Some("odp") => "odp",
+                _ => "odt",
+            })
+        }
+        _ => None,
+    }
+}
+
+/// The bearer for imports-core (`aud=ingestion`, scope `imports:read`), minted for
+/// the run's organization. A trait so the client never builds a token request by
+/// hand: production passes [`ManifestImportsBearer`].
+#[async_trait::async_trait]
+pub trait ImportsBearer: Send + Sync {
+    async fn bearer(&self, org_id: &str, force_refresh: bool) -> QuarryResult<ServiceBearer>;
+    async fn invalidate(&self, org_id: &str);
+}
+
+/// [`ImportsBearer`] over the service-token provider and one manifest row. The
+/// wiring builds the request with `ServiceTokenRequest::from_manifest` and the
+/// row's literal name once that row exists (see this unit's status file).
+pub struct ManifestImportsBearer {
+    tokens: SharedServiceTokenProvider,
+    request: ServiceTokenRequest,
+}
+
+impl ManifestImportsBearer {
+    pub fn new(tokens: SharedServiceTokenProvider, request: ServiceTokenRequest) -> Self {
+        Self { tokens, request }
+    }
+}
+
+#[async_trait::async_trait]
+impl ImportsBearer for ManifestImportsBearer {
+    async fn bearer(&self, org_id: &str, force_refresh: bool) -> QuarryResult<ServiceBearer> {
+        self.tokens
+            .token_for_org(org_id, &self.request, force_refresh)
+            .await
+    }
+
+    async fn invalidate(&self, org_id: &str) {
+        self.tokens.invalidate(org_id, &self.request).await;
+    }
+}
+
+/// One body to extract.
+#[derive(Debug, Clone)]
+pub struct OfficeExtractRequest {
+    /// The organization the run belongs to; the bearer is minted for it.
+    pub org_id: String,
+    pub kind: ContentKind,
+    pub body: Vec<u8>,
+    /// The fetched file name or URL path, used only for the ODF subtype.
+    pub filename_hint: Option<String>,
+}
+
+#[derive(serde::Serialize)]
+struct ImportsExtractBody<'a> {
+    filename: &'a str,
+    content_base64: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    content_type: Option<&'static str>,
+}
+
+#[derive(serde::Deserialize)]
+struct ImportsExtractEnvelope {
+    data: ImportsExtractData,
+}
+
+#[derive(serde::Deserialize)]
+struct ImportsExtractData {
+    content: String,
+    /// imports-core always answers `false`; anything else is refused.
+    #[serde(default)]
+    persisted: Option<bool>,
+    #[serde(default)]
+    truncated: bool,
+}
+
+fn office_content_type(extension: &str) -> Option<&'static str> {
+    Some(match extension {
+        "xlsx" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "pptx" => "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        "odt" => "application/vnd.oasis.opendocument.text",
+        "ods" => "application/vnd.oasis.opendocument.spreadsheet",
+        "odp" => "application/vnd.oasis.opendocument.presentation",
+        "epub" => "application/epub+zip",
+        _ => return None,
+    })
+}
+
+fn office_permits() -> &'static Arc<Semaphore> {
+    static PERMITS: OnceLock<Arc<Semaphore>> = OnceLock::new();
+    PERMITS.get_or_init(|| Arc::new(Semaphore::new(OFFICE_EXTRACT_CONCURRENCY)))
+}
+
+/// The client of imports-core's ephemeral `POST /api/v1/import/extract` for the
+/// Office kinds the Rust parsers do not read (approved hybrid, E3.6-6).
+///
+/// - **Flag.** Built disabled; [`Self::with_enabled`] takes
+///   [`office_via_imports_enabled`]. Disabled, every call is the typed 415 the
+///   pipeline answers today, and nothing is sent.
+/// - **Bounds.** The input is capped before the call, the answer is read to a
+///   cap, a process-wide slot count limits calls in flight, and one deadline
+///   covers the slot wait, the bearer and the call. Redirects are never followed
+///   (a redirect could move the bearer).
+/// - **No storage.** The endpoint persists nothing; an answer that says it did
+///   (`persisted` not `false`) is refused and its text dropped. That is why ZDR
+///   runs may use it.
+/// - **Privacy.** The name sent is `document.<ext>`. No log line or error carries
+///   the body, the text, the URL or imports-core's message.
+/// - **Refusals.** Unsupported type, too large, or unreadable are a typed 415
+///   with a reason; busy is a 429 with `retry_after_seconds`; a slow answer is a
+///   `TIMEOUT`; an unreachable or broken service is `DRIVER_FAILED`.
+pub struct ImportsExtractClient {
+    http: reqwest::Client,
+    base_url: String,
+    bearer: Arc<dyn ImportsBearer>,
+    enabled: bool,
+    deadline: Duration,
+    max_input_bytes: usize,
+    permits: Arc<Semaphore>,
+}
+
+impl ImportsExtractClient {
+    /// A disabled client for the imports-core origin `base_url`.
+    pub fn new(base_url: impl Into<String>, bearer: Arc<dyn ImportsBearer>) -> QuarryResult<Self> {
+        let base_url = base_url.into().trim().trim_end_matches('/').to_owned();
+        let parsed = reqwest::Url::parse(&base_url).map_err(|_| {
+            QuarryError::new(
+                ErrorCode::Internal,
+                "the imports-core URL for Office extraction must be an absolute URL",
+            )
+        })?;
+        if !matches!(parsed.scheme(), "http" | "https")
+            || parsed.query().is_some()
+            || parsed.fragment().is_some()
+            || !parsed.username().is_empty()
+            || parsed.password().is_some()
+        {
+            return Err(QuarryError::new(
+                ErrorCode::Internal,
+                "the imports-core URL for Office extraction must be a plain http(s) origin",
+            ));
+        }
+        let http = reqwest::Client::builder()
+            .connect_timeout(OFFICE_CONNECT_TIMEOUT)
+            .timeout(OFFICE_EXTRACT_TIMEOUT)
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map_err(|error| {
+                QuarryError::new(
+                    ErrorCode::Internal,
+                    format!("office extract client: {}", error.without_url()),
+                )
+            })?;
+        Ok(Self {
+            http,
+            base_url,
+            bearer,
+            enabled: false,
+            deadline: OFFICE_EXTRACT_TIMEOUT,
+            max_input_bytes: DEFAULT_OFFICE_MAX_INPUT_BYTES,
+            permits: office_permits().clone(),
+        })
+    }
+
+    /// Turn the client on or off: pass [`office_via_imports_enabled`].
+    pub fn with_enabled(mut self, enabled: bool) -> Self {
+        self.enabled = enabled;
+        self
+    }
+
+    /// The input cap; set it to imports-core's `CHAT_EXTRACT_MAX_BYTES` when the
+    /// operator raises that. Never above [`MAX_OFFICE_INPUT_BYTES`], never zero.
+    pub fn with_max_input_bytes(mut self, max: usize) -> Self {
+        self.max_input_bytes = max.clamp(1, MAX_OFFICE_INPUT_BYTES);
+        self
+    }
+
+    /// The deadline of one extraction; it never exceeds [`OFFICE_EXTRACT_TIMEOUT`].
+    pub fn with_deadline(mut self, deadline: Duration) -> Self {
+        self.deadline = deadline.min(OFFICE_EXTRACT_TIMEOUT);
+        self
+    }
+
+    #[cfg(test)]
+    fn with_permits(mut self, permits: Arc<Semaphore>) -> Self {
+        self.permits = permits;
+        self
+    }
+
+    pub fn enabled(&self) -> bool {
+        self.enabled
+    }
+
+    /// Extract the text of an XLSX, PPTX, OpenDocument or EPUB body. The text is
+    /// cut at [`MAX_DOC_TEXT_BYTES`] like every other document.
+    pub async fn extract(&self, request: OfficeExtractRequest) -> QuarryResult<ParsedDocument> {
+        let kind = request.kind;
+        if !self.enabled {
+            return Err(office_refusal(
+                kind,
+                "office_via_imports_off",
+                format!(
+                    "no text extractor for {} ({OFFICE_VIA_IMPORTS_FLAG} is off)",
+                    kind.label()
+                ),
+            ));
+        }
+        let Some(extension) = office_extension(kind, request.filename_hint.as_deref()) else {
+            return Err(office_refusal(
+                kind,
+                "no_extractor",
+                format!("no text extractor for {}", kind.label()),
+            ));
+        };
+        if request.body.is_empty() {
+            return Err(office_refusal(
+                kind,
+                "office_parse_failed",
+                format!("the {} is empty", kind.label()),
+            ));
+        }
+        if request.body.len() > self.max_input_bytes {
+            return Err(office_refusal(
+                kind,
+                "too_large",
+                format!(
+                    "the {} is larger than the {} bytes Office extraction accepts",
+                    kind.label(),
+                    self.max_input_bytes
+                ),
+            )
+            .with_details(serde_json::json!({
+                "reason": "too_large",
+                "kind": kind.label(),
+                "limit_bytes": self.max_input_bytes,
+            })));
+        }
+        if request.org_id.trim().is_empty() {
+            return Err(QuarryError::new(
+                ErrorCode::BadRequest,
+                "Office extraction needs the run's organization",
+            ));
+        }
+
+        let started = tokio::time::Instant::now();
+        let deadline = self.deadline;
+        let _permit = acquire_slot(self.permits.clone(), kind, deadline, Some(deadline / 3)).await?;
+        let remaining = deadline.saturating_sub(started.elapsed());
+        let filename = format!("document.{extension}");
+        let body = ImportsExtractBody {
+            filename: &filename,
+            content_base64: {
+                use base64::Engine as _;
+                base64::engine::general_purpose::STANDARD.encode(&request.body)
+            },
+            content_type: office_content_type(extension),
+        };
+        let payload = serde_json::to_vec(&body).map_err(|_| {
+            QuarryError::new(ErrorCode::Internal, "the Office extract request could not be encoded")
+        })?;
+        drop(body);
+
+        let outcome = tokio::time::timeout(remaining, self.call(&request.org_id, kind, payload)).await;
+        let result = match outcome {
+            Ok(result) => result,
+            Err(_) => Err(timeout_error(kind)),
+        };
+        match &result {
+            Ok(parsed) => tracing::debug!(
+                kind = kind.label(),
+                truncated = parsed.truncated,
+                "office document extracted by imports-core"
+            ),
+            Err(error) => tracing::warn!(
+                kind = kind.label(),
+                error_code = ?error.code,
+                "office extraction by imports-core failed"
+            ),
+        }
+        result
+    }
+
+    async fn call(
+        &self,
+        org_id: &str,
+        kind: ContentKind,
+        payload: Vec<u8>,
+    ) -> QuarryResult<ParsedDocument> {
+        let url = format!("{}{}", self.base_url, OFFICE_EXTRACT_PATH);
+        let bearer = self.bearer.bearer(org_id, false).await?;
+        let mut response = self.send(&url, kind, payload.clone(), bearer.expose()).await?;
+        if response.status() == reqwest::StatusCode::UNAUTHORIZED {
+            // Refused before any parse: one retry with a fresh bearer.
+            drain_quietly(response).await;
+            self.bearer.invalidate(org_id).await;
+            let refreshed = self.bearer.bearer(org_id, true).await?;
+            response = self.send(&url, kind, payload, refreshed.expose()).await?;
+        }
+        decode_office_response(kind, response).await
+    }
+
+    async fn send(
+        &self,
+        url: &str,
+        kind: ContentKind,
+        payload: Vec<u8>,
+        bearer: &str,
+    ) -> QuarryResult<reqwest::Response> {
+        self.http
+            .post(url)
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .header(reqwest::header::AUTHORIZATION, format!("Bearer {bearer}"))
+            .body(payload)
+            .send()
+            .await
+            .map_err(|error| office_transport_error(kind, error))
+    }
+}
+
+/// A 415 with a reason, the shape [`as_unsupported`] gives the Rust parsers.
+fn office_refusal(kind: ContentKind, reason: &str, message: String) -> QuarryError {
+    QuarryError::new(ErrorCode::UnsupportedMedia, message).with_details(serde_json::json!({
+        "reason": reason,
+        "kind": kind.label(),
+        "extractor": "imports-core",
+    }))
+}
+
+fn office_transport_error(kind: ContentKind, error: reqwest::Error) -> QuarryError {
+    if error.is_timeout() {
+        return timeout_error(kind);
+    }
+    QuarryError::new(
+        ErrorCode::DriverFailed,
+        format!("imports-core could not be reached: {}", error.without_url()),
+    )
+    .with_details(serde_json::json!({
+        "reason": "imports_unavailable",
+        "kind": kind.label(),
+    }))
+}
+
+async fn drain_quietly(response: reqwest::Response) {
+    let _ = read_bounded(response, MAX_OFFICE_RESPONSE_BYTES).await;
+}
+
+fn refused_reason(status: u16) -> &'static str {
+    if matches!(status, 401 | 403) {
+        "imports_refused_credentials"
+    } else {
+        "imports_failed"
+    }
+}
+
+/// The body, read to `max` bytes; more is an error, never a partial answer.
+async fn read_bounded(mut response: reqwest::Response, max: usize) -> Result<Vec<u8>, ReadFailure> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > max as u64)
+    {
+        return Err(ReadFailure::TooLarge);
+    }
+    let mut out = Vec::new();
+    loop {
+        match response.chunk().await {
+            Ok(Some(chunk)) => {
+                if out.len() + chunk.len() > max {
+                    return Err(ReadFailure::TooLarge);
+                }
+                out.extend_from_slice(&chunk);
+            }
+            Ok(None) => return Ok(out),
+            Err(error) => return Err(ReadFailure::Transport(error)),
+        }
+    }
+}
+
+enum ReadFailure {
+    TooLarge,
+    Transport(reqwest::Error),
+}
+
+/// Map imports-core's answer. Its error messages are never copied: a parser
+/// message can carry document text.
+async fn decode_office_response(
+    kind: ContentKind,
+    response: reqwest::Response,
+) -> QuarryResult<ParsedDocument> {
+    let status = response.status();
+    if !status.is_success() {
+        let retry_after = response
+            .headers()
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.trim().parse::<u64>().ok())
+            .filter(|seconds| (1..=300).contains(seconds))
+            .unwrap_or(PARSER_BUSY_RETRY_AFTER_S);
+        drain_quietly(response).await;
+        let upstream = status.as_u16();
+        return Err(match upstream {
+            415 => office_refusal(
+                kind,
+                "imports_unsupported_type",
+                format!("imports-core does not read {} documents", kind.label()),
+            ),
+            413 => office_refusal(
+                kind,
+                "too_large",
+                format!("the {} is too large to extract", kind.label()),
+            ),
+            422 => office_refusal(
+                kind,
+                "office_parse_failed",
+                format!("the {} could not be read", kind.label()),
+            ),
+            429 | 503 => QuarryError::new(
+                ErrorCode::RateLimited,
+                "the Office extractor is busy, try again shortly",
+            )
+            .with_details(serde_json::json!({
+                "reason": "office_extractor_busy",
+                "kind": kind.label(),
+                "retry_after_seconds": retry_after,
+            })),
+            408 | 504 => timeout_error(kind),
+            _ => QuarryError::new(
+                ErrorCode::DriverFailed,
+                format!("imports-core refused the Office extraction (status {upstream})"),
+            )
+            .with_details(serde_json::json!({
+                "reason": refused_reason(upstream),
+                "kind": kind.label(),
+                "upstream_status": upstream,
+            })),
+        });
+    }
+    let bytes = match read_bounded(response, MAX_OFFICE_RESPONSE_BYTES).await {
+        Ok(bytes) => bytes,
+        Err(ReadFailure::TooLarge) => {
+            return Err(QuarryError::new(
+                ErrorCode::DriverFailed,
+                "imports-core's Office extract answer is larger than allowed",
+            )
+            .with_details(serde_json::json!({
+                "reason": "imports_answer_too_large",
+                "kind": kind.label(),
+            })))
+        }
+        Err(ReadFailure::Transport(error)) => return Err(office_transport_error(kind, error)),
+    };
+    let envelope: ImportsExtractEnvelope = serde_json::from_slice(&bytes).map_err(|_| {
+        QuarryError::new(
+            ErrorCode::DriverFailed,
+            "imports-core answered the Office extraction with an unreadable body",
+        )
+        .with_details(serde_json::json!({
+            "reason": "imports_failed",
+            "kind": kind.label(),
+        }))
+    })?;
+    drop(bytes);
+    let data = envelope.data;
+    if data.persisted != Some(false) {
+        // The route is ephemeral by contract; an answer that says otherwise is
+        // not used, so a ZDR run never depends on a stored copy.
+        return Err(QuarryError::new(
+            ErrorCode::DriverFailed,
+            "imports-core did not confirm the Office extraction was ephemeral",
+        )
+        .with_details(serde_json::json!({
+            "reason": "imports_not_ephemeral",
+            "kind": kind.label(),
+        })));
+    }
+    if data.content.trim().is_empty() {
+        return Err(office_refusal(
+            kind,
+            "office_parse_failed",
+            format!("no readable text found in the {}", kind.label()),
+        ));
+    }
+    let (text, cut) = quarry_core::scrape::truncate_on_char_boundary(&data.content, MAX_DOC_TEXT_BYTES);
+    Ok(ParsedDocument {
+        text,
+        truncated: cut || data.truncated,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -910,5 +1508,393 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(error.code, ErrorCode::UnsupportedMedia);
+    }
+}
+
+#[cfg(test)]
+mod office_tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    use serde_json::json;
+    use wiremock::matchers::{body_partial_json, header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    /// Mints `first.imports.token`, or `refreshed.imports.token` on a forced refresh.
+    #[derive(Default)]
+    struct FakeBearer {
+        calls: Mutex<Vec<(String, bool)>>,
+        invalidated: Mutex<usize>,
+    }
+
+    #[async_trait::async_trait]
+    impl ImportsBearer for FakeBearer {
+        async fn bearer(&self, org_id: &str, force_refresh: bool) -> QuarryResult<ServiceBearer> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push((org_id.to_owned(), force_refresh));
+            Ok(ServiceBearer::from_test_token(if force_refresh {
+                "refreshed.imports.token"
+            } else {
+                "first.imports.token"
+            }))
+        }
+
+        async fn invalidate(&self, _org_id: &str) {
+            *self.invalidated.lock().unwrap() += 1;
+        }
+    }
+
+    fn client(server: &MockServer, bearer: Arc<FakeBearer>) -> ImportsExtractClient {
+        ImportsExtractClient::new(server.uri(), bearer)
+            .expect("client")
+            .with_enabled(true)
+            .with_permits(Arc::new(Semaphore::new(2)))
+    }
+
+    fn request(kind: ContentKind, body: &[u8]) -> OfficeExtractRequest {
+        OfficeExtractRequest {
+            org_id: "org-1".into(),
+            kind,
+            body: body.to_vec(),
+            filename_hint: None,
+        }
+    }
+
+    fn answer(content: &str) -> serde_json::Value {
+        json!({ "data": { "name": "document.xlsx", "content": content, "persisted": false } })
+    }
+
+    fn reason(error: &QuarryError) -> String {
+        error.details.as_ref().expect("details")["reason"]
+            .as_str()
+            .expect("a reason")
+            .to_owned()
+    }
+
+    #[test]
+    fn the_flag_is_off_unless_it_says_on() {
+        assert!(!flag_on(None));
+        for off in ["", "0", "false", "off", "no", "maybe"] {
+            assert!(!flag_on(Some(off)), "{off}");
+        }
+        for on in ["1", "true", "TRUE", " yes ", "on"] {
+            assert!(flag_on(Some(on)), "{on}");
+        }
+    }
+
+    #[test]
+    fn only_the_office_kinds_go_to_imports_core() {
+        for kind in [
+            ContentKind::Xlsx,
+            ContentKind::Pptx,
+            ContentKind::Odf,
+            ContentKind::Epub,
+        ] {
+            assert!(is_office_via_imports_kind(kind), "{}", kind.label());
+        }
+        for kind in [
+            ContentKind::Pdf,
+            ContentKind::Docx,
+            ContentKind::OleCompound,
+            ContentKind::Html,
+            ContentKind::Archive,
+        ] {
+            assert!(!is_office_via_imports_kind(kind), "{}", kind.label());
+        }
+    }
+
+    #[test]
+    fn the_name_sent_is_generic_and_odf_takes_its_subtype_from_the_hint() {
+        assert_eq!(office_extension(ContentKind::Xlsx, Some("salary.ods")), Some("xlsx"));
+        assert_eq!(office_extension(ContentKind::Odf, Some("/files/q3.ODS")), Some("ods"));
+        assert_eq!(office_extension(ContentKind::Odf, Some("deck.odp")), Some("odp"));
+        assert_eq!(office_extension(ContentKind::Odf, Some("noext")), Some("odt"));
+        assert_eq!(office_extension(ContentKind::Odf, None), Some("odt"));
+        assert_eq!(office_extension(ContentKind::Pdf, None), None);
+    }
+
+    #[test]
+    fn the_url_must_be_a_plain_origin() {
+        let bearer: Arc<dyn ImportsBearer> = Arc::new(FakeBearer::default());
+        for bad in [
+            "imports-core:8000",
+            "ftp://imports-core",
+            "http://imports-core:8000/?q=1",
+            "http://user:pw@imports-core:8000",
+        ] {
+            assert!(ImportsExtractClient::new(bad, bearer.clone()).is_err(), "{bad}");
+        }
+        let client = ImportsExtractClient::new("http://imports-core:8000/", bearer).unwrap();
+        assert!(!client.enabled(), "built disabled");
+    }
+
+    #[tokio::test]
+    async fn a_disabled_client_is_the_415_of_today_and_sends_nothing() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(answer("x")))
+            .expect(0)
+            .mount(&server)
+            .await;
+        let bearer = Arc::new(FakeBearer::default());
+        let client = ImportsExtractClient::new(server.uri(), bearer.clone()).unwrap();
+        let error = client
+            .extract(request(ContentKind::Xlsx, b"PK"))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::UnsupportedMedia);
+        assert_eq!(reason(&error), "office_via_imports_off");
+        assert!(bearer.calls.lock().unwrap().is_empty(), "no mint");
+    }
+
+    #[tokio::test]
+    async fn extracts_with_the_bearer_and_a_generic_name() {
+        use base64::Engine as _;
+        let server = MockServer::start().await;
+        let body = b"PK\x03\x04 a workbook";
+        Mock::given(method("POST"))
+            .and(path(OFFICE_EXTRACT_PATH))
+            .and(header("authorization", "Bearer first.imports.token"))
+            .and(body_partial_json(json!({
+                "filename": "document.xlsx",
+                "content_base64": base64::engine::general_purpose::STANDARD.encode(body),
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(answer("Sheet1\nA1\t42")))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let bearer = Arc::new(FakeBearer::default());
+        let mut req = request(ContentKind::Xlsx, body);
+        req.filename_hint = Some("secret-payroll.xlsx".into());
+        let parsed = client(&server, bearer.clone()).extract(req).await.unwrap();
+        assert_eq!(
+            parsed,
+            ParsedDocument {
+                text: "Sheet1\nA1\t42".into(),
+                truncated: false
+            }
+        );
+        assert_eq!(*bearer.calls.lock().unwrap(), vec![("org-1".to_owned(), false)]);
+    }
+
+    #[tokio::test]
+    async fn a_cut_reported_by_imports_core_is_kept() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(OFFICE_EXTRACT_PATH))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": { "name": "document.xlsx", "content": "rows", "persisted": false, "truncated": true }
+            })))
+            .mount(&server)
+            .await;
+        let parsed = client(&server, Arc::new(FakeBearer::default()))
+            .extract(request(ContentKind::Xlsx, b"PK"))
+            .await
+            .unwrap();
+        assert!(parsed.truncated);
+    }
+
+    #[tokio::test]
+    async fn an_answer_that_is_not_ephemeral_is_refused() {
+        for data in [
+            json!({ "name": "d", "content": "text", "persisted": true }),
+            json!({ "name": "d", "content": "text" }),
+        ] {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "data": data })))
+                .mount(&server)
+                .await;
+            let error = client(&server, Arc::new(FakeBearer::default()))
+                .extract(request(ContentKind::Pptx, b"PK"))
+                .await
+                .unwrap_err();
+            assert_eq!(error.code, ErrorCode::DriverFailed);
+            assert_eq!(reason(&error), "imports_not_ephemeral");
+            assert!(!error.message.contains("text"));
+        }
+    }
+
+    #[tokio::test]
+    async fn refusals_are_typed_and_never_copy_the_upstream_message() {
+        for (status, code, why) in [
+            (415, ErrorCode::UnsupportedMedia, "imports_unsupported_type"),
+            (413, ErrorCode::UnsupportedMedia, "too_large"),
+            (422, ErrorCode::UnsupportedMedia, "office_parse_failed"),
+            (429, ErrorCode::RateLimited, "office_extractor_busy"),
+            (403, ErrorCode::DriverFailed, "imports_refused_credentials"),
+            (500, ErrorCode::DriverFailed, "imports_failed"),
+        ] {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .respond_with(
+                    ResponseTemplate::new(status)
+                        .set_body_json(json!({ "detail": "SECRET CELL VALUE" })),
+                )
+                .mount(&server)
+                .await;
+            let error = client(&server, Arc::new(FakeBearer::default()))
+                .extract(request(ContentKind::Epub, b"PK"))
+                .await
+                .unwrap_err();
+            assert_eq!(error.code, code, "{status}");
+            assert_eq!(reason(&error), why, "{status}");
+            assert!(!error.message.contains("SECRET"), "{status}");
+            assert!(
+                !error.details.as_ref().unwrap().to_string().contains("SECRET"),
+                "{status}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn busy_carries_retry_after() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(429).insert_header("retry-after", "12"))
+            .mount(&server)
+            .await;
+        let error = client(&server, Arc::new(FakeBearer::default()))
+            .extract(request(ContentKind::Xlsx, b"PK"))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::RateLimited);
+        assert_eq!(error.details.unwrap()["retry_after_seconds"], 12);
+    }
+
+    #[tokio::test]
+    async fn an_oversize_or_empty_body_is_refused_before_any_call() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(answer("x")))
+            .expect(0)
+            .mount(&server)
+            .await;
+        let bearer = Arc::new(FakeBearer::default());
+        let client = client(&server, bearer.clone()).with_max_input_bytes(8);
+        let error = client
+            .extract(request(ContentKind::Xlsx, &[0u8; 9]))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::UnsupportedMedia);
+        assert_eq!(reason(&error), "too_large");
+        assert_eq!(error.details.unwrap()["limit_bytes"], 8);
+        let error = client
+            .extract(request(ContentKind::Xlsx, b""))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::UnsupportedMedia);
+        assert!(bearer.calls.lock().unwrap().is_empty(), "no mint");
+    }
+
+    #[tokio::test]
+    async fn pdf_and_docx_are_not_sent() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(answer("x")))
+            .expect(0)
+            .mount(&server)
+            .await;
+        for kind in [ContentKind::Pdf, ContentKind::Docx, ContentKind::OleCompound] {
+            let error = client(&server, Arc::new(FakeBearer::default()))
+                .extract(request(kind, b"%PDF"))
+                .await
+                .unwrap_err();
+            assert_eq!(error.code, ErrorCode::UnsupportedMedia);
+            assert_eq!(reason(&error), "no_extractor");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_refused_bearer_is_refreshed_once() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(header("authorization", "Bearer first.imports.token"))
+            .respond_with(ResponseTemplate::new(401))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(header("authorization", "Bearer refreshed.imports.token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(answer("slide one")))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let bearer = Arc::new(FakeBearer::default());
+        let parsed = client(&server, bearer.clone())
+            .extract(request(ContentKind::Pptx, b"PK"))
+            .await
+            .unwrap();
+        assert_eq!(parsed.text, "slide one");
+        assert_eq!(*bearer.invalidated.lock().unwrap(), 1);
+        assert_eq!(
+            *bearer.calls.lock().unwrap(),
+            vec![("org-1".to_owned(), false), ("org-1".to_owned(), true)]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_slow_answer_is_a_timeout() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(answer("late"))
+                    .set_delay(Duration::from_secs(5)),
+            )
+            .mount(&server)
+            .await;
+        let error = client(&server, Arc::new(FakeBearer::default()))
+            .with_deadline(Duration::from_millis(200))
+            .extract(request(ContentKind::Odf, b"PK"))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::Timeout);
+    }
+
+    #[tokio::test]
+    async fn no_free_slot_is_a_retryable_429() {
+        let server = MockServer::start().await;
+        let error = ImportsExtractClient::new(server.uri(), Arc::new(FakeBearer::default()))
+            .unwrap()
+            .with_enabled(true)
+            .with_permits(Arc::new(Semaphore::new(0)))
+            .with_deadline(Duration::from_millis(300))
+            .extract(request(ContentKind::Xlsx, b"PK"))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::RateLimited);
+        assert_eq!(reason(&error), "parser_busy");
+    }
+
+    #[tokio::test]
+    async fn an_oversize_answer_is_refused() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_string("x".repeat(MAX_OFFICE_RESPONSE_BYTES + 1)),
+            )
+            .mount(&server)
+            .await;
+        let error = client(&server, Arc::new(FakeBearer::default()))
+            .extract(request(ContentKind::Xlsx, b"PK"))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::DriverFailed);
+        assert_eq!(reason(&error), "imports_answer_too_large");
+    }
+
+    /// No test in this crate installs the process-wide client, so the pipeline
+    /// entry answers the typed 415 and sends nothing.
+    #[tokio::test]
+    async fn the_pipeline_entry_without_an_installed_client_is_a_typed_415() {
+        assert!(office_extract_client().is_none());
+        let error = extract_office_via_imports("org_a", ContentKind::Xlsx, b"PK".to_vec(), Some("/a/b.xlsx"))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::UnsupportedMedia);
+        assert_eq!(reason(&error), "imports_client_unavailable");
     }
 }
