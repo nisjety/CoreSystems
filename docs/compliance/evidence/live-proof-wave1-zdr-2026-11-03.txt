@@ -28,8 +28,12 @@ VERDICTS
   D1-815 HOLDS on the live SPA: a default turn (no stored web-search preference) goes out with browse_web false.
   D1-330 STILL BLOCKED: D1-327 is open (no written ZDR contract, no named reviewer) and no chat model in the live
     catalogue lists `zdr` (both specs assert it); the signed candidate (D1-302, D1-307) does not exist either.
-  D1-813 STILL PRESENT: session_core's migration 1 checksum is still the CRLF rendering (450c6aa7...); the running
-    session-core boots because it was built from a checkout with CRLF working copies.
+  D1-813 NARROWED, STILL OPEN: all 67 applied checksums were compared with a fresh checkout of main. 34 match: 0032,
+    which main pins byte-identical on purpose (`-text`, fd499ce49; accepted as by design), and 0035 onward. 33 do not:
+    0001-0031, 0033 and 0034, whose stored checksum is the CRLF rendering while the checked-out files are LF. sqlx
+    checks in version order, so a session-core built from a clean checkout of main (CI, a new worktree, the signed
+    candidate) refuses at migration 1. The running session-core boots because it was built from the live tree, whose
+    working copies of 0001-0034 are still CRLF (git ls-files --eol: i/lf w/crlf).
 
 RUN A: PREFLIGHT (01:09 UTC) -> 5/6, deploy-order FAIL (see D1-221). wave-revision, migrations 0044/0045 with
   runs.retention_class, waiver minting off on all four, no waived run, no ZDR row in the audit outbox: PASS.
@@ -40,7 +44,11 @@ RUN B: D1-224 GATE, ZDR OFF (live SPA :5173, 01:10-01:16 UTC) -> 3/3 pass on the
   Incident in that first attempt: Playwright printed the request headers of the failed request, including the ZDR-TEST
   test account's session cookie. The session was signed out at once (the cookie now answers 401), the log files were
   redacted, test-results was deleted, and every later run passes its output through a cookie redaction filter. It was a
-  test account on the local stack; no other credential was involved.
+  test account on the local stack; no other credential was involved. Afterwards every session cookie still stored in
+  the proof's backup folders (the 2026-10-28 Playwright traces and the curl cookie jars, four distinct sessions) was
+  checked against the BFF without printing it: two were already invalid, the two still valid were signed out (401
+  afterwards). The traces and jars were then deleted; a scan of both backup folders and these evidence files finds no
+  session value.
 RUN C: Z-60 PASS 1 (01:17-01:19 UTC). ZDR switched ON at 01:17:21, fresh sign-in after the 45 s posture cache.
   Spec, ZDR_LIVE_TURN=1 ZDR_LIVE_TURN_MODEL=claude-sonnet-5-5 on :5173: ok, pass 1 refused with a typed code and
     no streamed content.
