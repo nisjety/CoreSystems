@@ -184,7 +184,7 @@ fn token_budget(value: Option<&str>) -> Option<usize> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PromptOrder {
     /// The order the chat path has always sent: conversation scope, artifact
-    /// inventory, authored instructions, identity, calendar, date notice,
+    /// inventory, authored instructions, identity, the profile, calendar, date notice,
     /// grounding, the context block, then pins and summary, memory, skills,
     /// verbosity, response discipline, generated-image state, the
     /// supplied-arguments notice and any formatting guidance, and last the
@@ -234,6 +234,10 @@ pub struct PromptContext {
     pub authored_instructions: Option<ChatMessage>,
     /// Who the model is talking to.
     pub identity: Option<ChatMessage>,
+    /// The person's standing profile, as they wrote or accepted it (EP-8-S5).
+    /// Context about them, never instructions; empty unless the profile switch
+    /// is on and the turn's memory decision allows it.
+    pub profile: Option<ChatMessage>,
     /// Weekdays for the dates the user's messages name.
     pub calendar: Option<ChatMessage>,
     /// Today's date and how to treat time-sensitive facts.
@@ -310,6 +314,7 @@ impl PromptContext {
             artifact_inventory,
             authored_instructions,
             identity,
+            profile,
             calendar,
             date_notice,
             grounding,
@@ -333,6 +338,7 @@ impl PromptContext {
         out.extend(artifact_inventory);
         out.extend(authored_instructions);
         out.extend(identity);
+        out.extend(profile);
         out.extend(calendar);
         out.extend(date_notice);
         out.extend(grounding);
@@ -369,6 +375,7 @@ impl PromptContext {
             artifact_inventory,
             authored_instructions,
             identity,
+            profile,
             calendar,
             date_notice,
             grounding,
@@ -392,6 +399,7 @@ impl PromptContext {
         out.add(PromptTier::Stable, response_discipline);
         out.add(PromptTier::Context, authored_instructions);
         out.add(PromptTier::Context, identity);
+        out.add(PromptTier::Context, profile);
         out.add(PromptTier::Context, user_supplied_args);
         out.add(PromptTier::Context, verbosity);
         out.add(PromptTier::Conversation, history);
@@ -558,6 +566,9 @@ mod tests {
             artifact_inventory: Some(system("inventory v3")),
             authored_instructions: Some(system("instructions")),
             identity: Some(system("identity")),
+            // Empty here, so every table below is the prompt before the slot
+            // existed; the profile's own tests fill it.
+            profile: None,
             calendar: Some(system("calendar 24. september")),
             date_notice: Some(system("date notice")),
             grounding: Some(system("grounding for query A")),
@@ -815,6 +826,74 @@ mod tests {
             .position(|m| m.content.contains(line))
             .expect("the language line is sent");
         assert_eq!(tiered.tiers[at], PromptTier::Context);
+    }
+
+    /// The profile is a standing block (EP-8-S5): Context tier, right after
+    /// who the model is talking to, while the memory recall stays Volatile.
+    #[test]
+    fn profile_slot_is_context_tier_after_identity() {
+        let tiered = PromptContext {
+            profile: Some(system("profile")),
+            ..full_context(history_with_pins_and_summary())
+        }
+        .render_tiered(PromptOrder::StablePrefix)
+        .expect("the stable-prefix order is tiered");
+        let at = |content: &str| {
+            tiered
+                .messages
+                .iter()
+                .position(|m| m.content == content)
+                .unwrap_or_else(|| panic!("{content:?} is sent"))
+        };
+        assert_eq!(at("profile"), at("identity") + 1);
+        assert_eq!(tiered.tiers[at("profile")], PromptTier::Context);
+        assert_eq!(tiered.tiers[at("memory recall A")], PromptTier::Volatile);
+        assert_eq!(
+            tiered.plan(),
+            PromptTierPlan {
+                stable: 2,
+                context: 5
+            }
+        );
+
+        let legacy = PromptContext {
+            profile: Some(system("profile")),
+            ..full_context(history_with_pins_and_summary())
+        }
+        .render(PromptOrder::Legacy);
+        let position = |content: &str| {
+            legacy
+                .iter()
+                .position(|m| m.content == content)
+                .unwrap_or_else(|| panic!("{content:?} is sent"))
+        };
+        assert_eq!(position("profile"), position("identity") + 1);
+    }
+
+    /// An empty profile slot sends nothing: with the switch off both orders
+    /// are byte-identical to the prompt before the slot existed.
+    #[test]
+    fn no_profile_prompt_is_byte_identical() {
+        let histories = [
+            Vec::new(),
+            vec![turn("user", "only turn")],
+            history_with_pins_and_summary(),
+        ];
+        for history in histories {
+            let context = full_context(history);
+            assert_eq!(context.profile, None);
+            assert_eq!(
+                context.clone().render(PromptOrder::Legacy),
+                legacy_insertions(&context)
+            );
+            let with = PromptContext {
+                profile: Some(system("profile")),
+                ..context.clone()
+            };
+            let mut stable_with = with.render(PromptOrder::StablePrefix);
+            stable_with.retain(|m| m.content != "profile");
+            assert_eq!(stable_with, context.render(PromptOrder::StablePrefix));
+        }
     }
 
     #[test]

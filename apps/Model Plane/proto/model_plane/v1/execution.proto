@@ -339,6 +339,12 @@ message RunContext {
   string memory_block = 3;
   // How each part was assembled, for the run record.
   RunContextStatus status = 4;
+  // Fields 5 and 6 stay reserved for WS08 and WS20 (see the comment above).
+  // The person's standing profile as a finished, bounded block (EP-8 S5),
+  // placed by the loop in the Context tier of the root loop only. Empty unless
+  // MODEL_GATEWAY_USER_PROFILE_PREFIX is on and the run's memory decision
+  // allows it; never set on a ZDR, waived or Space-scoped run.
+  string user_profile = 7;
 }
 
 // RunAgentResponse — terminal outcome of a driven agent run.

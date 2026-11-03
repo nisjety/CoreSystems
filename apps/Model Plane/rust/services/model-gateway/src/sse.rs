@@ -2911,17 +2911,57 @@ pub async fn invoke_stream_sse(
     // now; only the gRPC Invoke path had it. Skipped for trivial prompts
     // ("ja", "thanks!") where recalled context can only derail the reply, and
     // timeout-bounded so a slow backend costs the recall, never the turn.
+    //
+    // The standing profile (EP-8-S5) is read beside it under the same skip
+    // conditions and used only when this thread's memory decision says the
+    // memory is used (D8): `decide_profile` is the one rule for both paths.
+    // Switch off, nothing is read or counted and the prompt is unchanged.
+    let user_profile_prefix = crate::run_context::user_profile_prefix_enabled();
     let memory_recall_status = if conversation_only || retrieval_scope == crate::normalize::RetrievalScope::WebOnly || crate::memory_prefetch::is_trivial_prompt(&req.content) {
+        if user_profile_prefix {
+            crate::run_context::record_user_profile_outcome("skipped_turn");
+        }
         None
     } else {
-        let (memory_entries, recall_status) = fetch_chat_memory_context(
-            &state,
-            &org_id,
-            &session_run.thread_id,
-            &user_content,
-            &model_bearer,
-        )
-        .await;
+        let mut memory_skip_reason = None;
+        let profile_read = async {
+            // A ZDR or waived turn never reads it: the decision below refuses it anyway.
+            if user_profile_prefix && !turn_posture.zdr() && !turn_posture.is_waived() {
+                crate::run_context::load_user_profile(&state, &org_id, &user_id, &model_bearer)
+                    .await
+            } else {
+                None
+            }
+        };
+        let ((memory_entries, recall_status), profile_read) = tokio::join!(
+            fetch_chat_memory_context(
+                &state,
+                &org_id,
+                &session_run.thread_id,
+                &user_content,
+                &model_bearer,
+                &mut memory_skip_reason,
+            ),
+            profile_read
+        );
+        if user_profile_prefix {
+            let injection =
+                crate::run_context::decide_profile(&crate::run_context::ProfileReads {
+                    zdr: turn_posture.zdr(),
+                    waived: turn_posture.is_waived(),
+                    memory_skip_reason: memory_skip_reason.as_deref(),
+                    profile: profile_read
+                        .as_ref()
+                        .map(|(skip_reason, content)| (skip_reason.as_str(), content.as_str())),
+                });
+            crate::run_context::record_user_profile_outcome(injection.outcome());
+            prompt.profile = injection.into_block().map(|block| ChatMessage {
+                compaction_summary: String::new(),
+                role: "system".to_owned(),
+                content: block,
+                name: String::new(),
+            });
+        }
         if let Some(memory_block) = crate::memory_provenance::memory_context_block(&memory_entries)
         {
             // Same block format as grpc.rs's `build_messages`, so both paths
@@ -6785,12 +6825,18 @@ struct MemoryRecallStatus {
 /// Returns the recalled entries plus a recall status for the indicator
 /// event. Every failure mode — missing credential, timeout, backend error —
 /// degrades to "no memory this turn", exactly like the gRPC twin.
+///
+/// `memory_skip_reason` receives the search's `skip_reason` when session-core
+/// answered (empty when the thread's memory is used) and stays `None` when it
+/// did not: the standing profile follows that decision (EP-8-S5, D8), so a
+/// failed read leaves the profile out too.
 async fn fetch_chat_memory_context(
     state: &AppState,
     org_id: &str,
     thread_id: &str,
     query: &str,
     bearer: &VerifiedModelBearer,
+    memory_skip_reason: &mut Option<String>,
 ) -> (Vec<String>, Option<MemoryRecallStatus>) {
     use mp_contracts::model_plane::v1::SearchMemoryRequest;
 
@@ -6828,6 +6874,7 @@ async fn fetch_chat_memory_context(
     let (recalled, skip_reason) = match response {
         Ok(Ok(resp)) => {
             let resp = resp.into_inner();
+            *memory_skip_reason = Some(resp.skip_reason.clone());
             (resp.entries, resp.skip_reason)
         }
         Ok(Err(error)) => {
@@ -12738,6 +12785,8 @@ fn agentic_run_stream(
                     },
                     &run,
                     &org_id,
+                    // The caller's own id, from the claims: whose profile the run may read.
+                    &user_id,
                     &model_bearer,
                 )
                 .await,
