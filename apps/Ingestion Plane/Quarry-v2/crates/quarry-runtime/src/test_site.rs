@@ -8,6 +8,9 @@
 //! - `POST /login` — accepts `username=alice&password=secret`, sets `auth=alice`
 //! - `GET /dashboard` — gated; requires `auth` cookie, otherwise redirects to /login
 //! - `GET /search?q=...` — returns structured results echoing the query
+//! - `GET /otp-login` — E3.1-d one-time-code step: exactly one visible required
+//!   non-password input; `POST /otp-login` accepts [`FIXTURE_OTP_CODE`]
+//! - `GET /otp-login/ambiguous` — two code inputs, so the E3.1-c preconditions refuse it
 //!
 //! Used by integration tests to drive an `AgentLoop` against a deterministic
 //! local site (avoiding the live-network flakiness of using example.com).
@@ -49,6 +52,15 @@ struct LoginForm {
     username: String,
     password: String,
 }
+
+#[derive(Debug, Deserialize)]
+struct OtpForm {
+    code: String,
+}
+
+/// E3.1-d: the one-time code the `/otp-login` fixture accepts. Pair it with
+/// `otp_source::StubOtpSource` in tests; it is a fixture value, not a secret.
+pub const FIXTURE_OTP_CODE: &str = "482915";
 
 #[derive(Debug, Deserialize)]
 struct SearchQuery {
@@ -104,6 +116,11 @@ impl TestSite {
         format!("http://{}/dashboard", self.addr)
     }
 
+    /// E3.1-d one-time-code step of the login fixture.
+    pub fn otp_login_url(&self) -> String {
+        format!("http://{}/otp-login", self.addr)
+    }
+
     pub fn search_url(&self, q: &str) -> String {
         format!("http://{}/search?q={}", self.addr, urlencoding_simple(q))
     }
@@ -130,6 +147,8 @@ impl TestSite {
             .route("/secrets-lab", get(secrets_lab))
             .route("/secrets-lab/frame", get(secrets_lab_frame))
             .route("/secrets-lab/scrolled", get(secrets_lab_scrolled))
+            .route("/otp-login", get(otp_login_page).post(otp_login_submit))
+            .route("/otp-login/ambiguous", get(otp_login_ambiguous))
             .with_state(state)
     }
 }
@@ -274,6 +293,64 @@ async fn secrets_lab_scrolled(State(state): State<SiteState>) -> Html<String> {
 <div style="height:600px"></div>
 </body></html>"#
     ))
+}
+
+/// E3.1-d login fixture, one-time-code step: exactly one visible, required,
+/// non-password input (`autocomplete="one-time-code"`), no options and no QR, so
+/// the E3.1-c preconditions accept it as a fill target.
+async fn otp_login_page(State(state): State<SiteState>) -> Html<String> {
+    record(&state, "GET /otp-login").await;
+    Html(
+        r#"<!doctype html><html lang="en"><head><title>Verify sign-in</title></head>
+<body><h1>Enter the code we emailed you</h1>
+<form method="post" action="/otp-login">
+  <label for="code">Verification code</label>
+  <input name="code" id="code" required inputmode="numeric" autocomplete="one-time-code">
+  <button type="submit" id="verify">Verify</button>
+</form>
+</body></html>"#
+            .to_string(),
+    )
+}
+
+/// E3.1-d: the same step with two code inputs; the preconditions must refuse it.
+async fn otp_login_ambiguous(State(state): State<SiteState>) -> Html<String> {
+    record(&state, "GET /otp-login/ambiguous").await;
+    Html(
+        r#"<!doctype html><html lang="en"><head><title>Verify sign-in</title></head>
+<body><h1>Enter the code</h1>
+<form method="post" action="/otp-login">
+  <input name="code" id="code-a" required autocomplete="one-time-code">
+  <input name="code" id="code-b" required autocomplete="one-time-code">
+  <button type="submit" id="verify">Verify</button>
+</form>
+</body></html>"#
+            .to_string(),
+    )
+}
+
+/// The submitted code is compared and never echoed or logged.
+async fn otp_login_submit(
+    State(state): State<SiteState>,
+    Form(form): Form<OtpForm>,
+) -> impl IntoResponse {
+    record(&state, "POST /otp-login").await;
+    if form.code == FIXTURE_OTP_CODE {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::SET_COOKIE,
+            "auth=alice; Path=/; HttpOnly".parse().unwrap(),
+        );
+        (
+            StatusCode::SEE_OTHER,
+            headers,
+            [(header::LOCATION, "/dashboard")],
+            "",
+        )
+            .into_response()
+    } else {
+        (StatusCode::UNAUTHORIZED, Html("<h1>Invalid code</h1>")).into_response()
+    }
 }
 
 fn html_escape(s: &str) -> String {
@@ -421,6 +498,61 @@ mod tests {
         assert_ne!(s1.addr, s2.addr);
         s1.shutdown().await;
         s2.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn otp_login_page_has_exactly_one_code_input() {
+        let site = TestSite::start().await;
+        let body = reqwest::get(site.otp_login_url())
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        assert_eq!(body.matches("autocomplete=\"one-time-code\"").count(), 1);
+        assert!(!body.contains("type=\"password\""));
+        assert!(body.contains("required"));
+        site.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn otp_login_accepts_the_fixture_code_and_refuses_others() {
+        let site = TestSite::start().await;
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap();
+        let ok = client
+            .post(site.otp_login_url())
+            .form(&[("code", FIXTURE_OTP_CODE)])
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(ok.status(), 303);
+        let bad = client
+            .post(site.otp_login_url())
+            .form(&[("code", "000000")])
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(bad.status(), 401);
+        assert!(!bad.text().await.unwrap().contains("000000"));
+        let log = site.request_log().await;
+        assert!(log.iter().all(|l| !l.contains(FIXTURE_OTP_CODE)));
+        site.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn the_ambiguous_otp_page_has_two_code_inputs() {
+        let site = TestSite::start().await;
+        let body = reqwest::get(format!("{}/ambiguous", site.otp_login_url()))
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        assert_eq!(body.matches("autocomplete=\"one-time-code\"").count(), 2);
+        site.shutdown().await;
     }
 
     #[test]

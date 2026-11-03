@@ -560,6 +560,13 @@ pub struct ScrapeRequest {
     /// values are ignored.
     #[serde(default)]
     pub initiated_by: Option<String>,
+    /// E3.6-5: the raw `redact_pii`. The stream route refuses anything but `off`; on
+    /// `/v1/scrape` the contract parse checks the value.
+    #[serde(default)]
+    pub redact_pii: Option<serde_json::Value>,
+    /// E3.6-5: the camelCase spelling of `redact_pii`, read the same way.
+    #[serde(default, rename = "redactPii")]
+    pub redact_pii_camel: Option<serde_json::Value>,
 }
 
 /// Wire-level shape for [`RenderHints`]. Kept separate from the runtime
@@ -613,6 +620,70 @@ fn contract_error(
     )
 }
 
+/// E3.6-5: pass the text a `redact_pii: on` scrape returns through the PII scanner
+/// (`quarry_transform::pii`). Redacted: the inline markdown, html, raw_html and AI
+/// source; the page title, description, author and keywords; the extraction's title,
+/// excerpt and summary. A field the markers grow past `max_inline_bytes` is cut again
+/// on a character boundary and named in `truncated`. The text fingerprint is cleared,
+/// since it hashes the text as the page had it. URLs, the branding block and the
+/// raw-byte fingerprint are not text the scanner reads.
+fn redact_pii_text(
+    output: &mut quarry_core::output::NormalizedOutput,
+    inline: &mut quarry_runtime::InlineParts,
+    max_inline_bytes: usize,
+) {
+    fn redact_slot(slot: &mut Option<String>) {
+        if let Some(text) = slot.as_mut() {
+            *text = quarry_transform::pii::redact(text.as_str());
+        }
+    }
+    // True when the redacted field had to be cut again to fit the cap.
+    fn redact_inline(slot: &mut Option<String>, max_bytes: usize) -> bool {
+        let Some(text) = slot.as_mut() else {
+            return false;
+        };
+        let redacted = quarry_transform::pii::redact(text.as_str());
+        let (cut, was_cut) = quarry_core::scrape::truncate_on_char_boundary(&redacted, max_bytes);
+        *text = cut;
+        was_cut
+    }
+
+    for (name, slot) in [
+        ("markdown", &mut inline.markdown),
+        ("html", &mut inline.html),
+        ("raw_html", &mut inline.raw_html),
+    ] {
+        if redact_inline(slot, max_inline_bytes)
+            && !inline.truncated.iter().any(|field| field.as_str() == name)
+        {
+            inline.truncated.push(name.to_owned());
+        }
+    }
+    if let Some(source) = inline.ai_source.as_mut() {
+        *source = quarry_transform::pii::redact(source.as_str());
+    }
+
+    redact_slot(&mut output.metadata.title);
+    redact_slot(&mut output.metadata.description);
+    redact_slot(&mut output.metadata.author);
+    redact_slot(&mut output.metadata.keywords);
+    if let Some(extraction) = output.extraction.as_mut() {
+        extraction.title = quarry_transform::pii::redact(extraction.title.as_str());
+        extraction.excerpt = quarry_transform::pii::redact(extraction.excerpt.as_str());
+        redact_slot(&mut extraction.summary);
+    }
+    output.text_fp = None;
+}
+
+/// E3.6-5: whether a stream request asks for a `redact_pii` other than `off`. The
+/// stream serves no redaction: its events carry the page text as the run emits it.
+fn stream_requests_redaction(req: &ScrapeRequest) -> bool {
+    [req.redact_pii.as_ref(), req.redact_pii_camel.as_ref()]
+        .into_iter()
+        .flatten()
+        .any(|value| !value.is_null() && value.as_str() != Some("off"))
+}
+
 /// `/v1/scrape` with its settings passed in, so tests can pick strictness.
 async fn scrape_with(
     state: AppState,
@@ -620,7 +691,7 @@ async fn scrape_with(
     body: &[u8],
     settings: &crate::scrape_contract::ScrapeSettings,
 ) -> Result<axum::response::Response, (StatusCode, axum::response::Response)> {
-    use quarry_core::scrape::{CacheState, EffectiveScrapeOptions, ScrapeFormat};
+    use quarry_core::scrape::{CacheState, EffectiveScrapeOptions, PiiRedaction, ScrapeFormat};
 
     let request_id = crate::request_id::current();
     let parsed = crate::scrape_contract::parse_body(body, settings, chrono::Utc::now())
@@ -922,6 +993,7 @@ async fn scrape_with(
         None
     };
 
+    let redact_pii = resolved.redact_pii == PiiRedaction::On;
     // WS13.5: a page an action changed is not evidence of its URL, so nothing that
     // indexes, titles, re-renders or ingests it runs for an actions request
     // (`scrape_actions::safe_mode_runner`, applied right after the runner is built).
@@ -936,7 +1008,7 @@ async fn scrape_with(
         user_id: Some(claims.actor_id().to_owned()),
         privacy: privacy.clone(),
         cancel_token: None,
-        local_index: state.local_index.clone(),
+        local_index: if redact_pii { None } else { state.local_index.clone() },
         policy: quarry_runtime::RunPolicy::from(decision.policy()),
         scheduler: state.scheduler.clone(),
         autoscale: Some(quarry_runtime::global_autoscale()),
@@ -960,7 +1032,7 @@ async fn scrape_with(
         // Ad-hoc single-page scrape, not a crawl target — don't materialize
         // a "tracked website" row for it.
         source_registrar: None,
-        title_enricher: state.page_title_enricher.clone(),
+        title_enricher: if redact_pii { None } else { state.page_title_enricher.clone() },
         doc_routing,
         robots: None,
     };
@@ -1010,7 +1082,10 @@ async fn scrape_with(
         },
     );
     match run {
-        Ok((out, inline)) => {
+        Ok((mut out, mut inline)) => {
+            if redact_pii {
+                redact_pii_text(&mut out, &mut inline, resolved.max_inline_bytes);
+            }
             if cache_allowed && should_write(&req.cache) {
                 if let Some(cache) = state.cache.as_ref() {
                     let ttl = effective_ttl(&req.cache, DEFAULT_TTL_SECS);
@@ -2412,6 +2487,17 @@ async fn scrape_stream(
             yield Ok(Event::default().event("error").data(serde_json::to_string(&error).unwrap_or_default()));
             return;
         }
+        // E3.6-5: the stream serves no PII redaction (its events carry the page text as the
+        // run emits it). Refused, not dropped; `off` is the default and passes.
+        if stream_requests_redaction(&req) {
+            let error = QuarryError::new(
+                ErrorCode::BadRequest,
+                "redact_pii is not served on the stream route",
+            )
+            .with_details(serde_json::json!({ "reason": "unsupported_in_stream" }));
+            yield Ok(Event::default().event("error").data(serde_json::to_string(&error).unwrap_or_default()));
+            return;
+        }
         // INNH-1: the stream serves no AI formats. Refused whatever the switch says,
         // before any fetch, so a caller learns it is the route and not the flag.
         if crate::scrape_contract::ai_formats::requests_ai_format(req.formats.as_ref()) {
@@ -3172,6 +3258,61 @@ mod tests {
         let body = crate::test_support::response_json(response).await;
         assert!(body["data"]["markdown"].as_str().unwrap().contains("Hello options world"));
         assert_eq!(body["data"]["effective_options"]["formats"], serde_json::json!(["markdown"]));
+    }
+
+    const PII_PAGE: &[u8] = b"<html><head><title>Contact page</title></head><body><main><p>Write to ola.nordmann@example.no or call +47 22 33 44 55 about the order, long enough to read as content for the extractor.</p></main></body></html>";
+
+    fn pii_page_state() -> AppState {
+        let calls = Arc::new(AtomicU32::new(0));
+        let driver = Arc::new(TestDriver::ok(DriverKind::Static, calls, PII_PAGE));
+        let mut drivers = DriverRegistry::new(DriverKind::Static);
+        drivers.register(driver.clone());
+        test_state(driver, drivers, None)
+    }
+
+    #[tokio::test]
+    async fn redact_pii_under_zdr_redacts_the_inline_text_and_says_so() {
+        let response = call_scrape_with(
+            pii_page_state(),
+            serde_json::json!({ "url": "https://example.com/contact", "zdr": true, "redact_pii": "on" }),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = crate::test_support::response_json(response).await;
+        let data = &body["data"];
+        let markdown = data["markdown"].as_str().expect("ZDR returns the markdown inline");
+        assert!(!markdown.contains("ola.nordmann@example.no"), "{markdown}");
+        assert!(!markdown.contains("22 33 44 55"), "{markdown}");
+        assert!(markdown.contains("[redacted:pii.email]"), "{markdown}");
+        assert!(markdown.contains("[redacted:pii.phone]"), "{markdown}");
+        assert_eq!(data["effective_options"]["redact_pii"], "on");
+        assert!(data.get("scrape_id").is_none(), "ZDR stores no record");
+    }
+
+    #[tokio::test]
+    async fn redact_pii_outside_zdr_is_refused_with_the_field_named() {
+        let response = call_scrape_with(
+            pii_page_state(),
+            serde_json::json!({ "url": "https://example.com/contact", "redact_pii": "on" }),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = crate::test_support::response_json(response).await;
+        assert_eq!(body["error"]["details"]["fields"][0]["path"], "redact_pii");
+        assert_eq!(body["error"]["details"]["fields"][0]["code"], "requires_zdr");
+    }
+
+    #[tokio::test]
+    async fn redact_pii_is_off_by_default_and_the_text_is_the_pages() {
+        let response = call_scrape_with(
+            pii_page_state(),
+            serde_json::json!({ "url": "https://example.com/contact", "zdr": true }),
+        )
+        .await;
+        let body = crate::test_support::response_json(response).await;
+        let data = &body["data"];
+        assert!(data["markdown"].as_str().unwrap().contains("ola.nordmann@example.no"));
+        assert_eq!(data["effective_options"]["redact_pii"], "off");
     }
 
     #[tokio::test]
