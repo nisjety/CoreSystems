@@ -216,23 +216,28 @@ pub struct RunContextRequest {
     /// PII-redacted when the org's policy requires redaction. The raw goal never
     /// leaves the gateway through this read.
     memory_query: String,
+    /// The turn's local date and app language (EP-8-S1), which trail the composed instructions. `None`
+    /// unless the local context switch is on and the request carried something valid.
+    local_notice: Option<String>,
 }
 
 impl RunContextRequest {
     /// `None` when the switch is off, which is what keeps off byte-identical: the
-    /// layers and the memory query are not even built.
+    /// layers, the memory query and the local notice are not even built.
     #[must_use]
     pub fn for_turn(
         mode: RunContextMode,
         layers: impl FnOnce() -> AuthoredLayers,
         sovereign_required: bool,
         memory_query: impl FnOnce() -> String,
+        local_notice: impl FnOnce() -> Option<String>,
     ) -> Option<Self> {
         (mode != RunContextMode::Off).then(|| Self {
             mode,
             layers: layers(),
             sovereign_required,
             memory_query: memory_query(),
+            local_notice: local_notice(),
         })
     }
 }
@@ -422,6 +427,18 @@ pub struct Composition<'a> {
     /// The thread as persisted, current turn last.
     pub history: Part<Vec<ChatMessage>>,
     pub memory: Part<Vec<String>>,
+    /// The turn's local date and app language, placed after the instructions (EP-8-S1).
+    pub local_notice: Option<String>,
+}
+
+/// The Do preamble: the composed instructions with the turn's local notice after them. The notice moves
+/// with the clock, so it trails the text that stays the same for the person.
+fn with_local_notice(text: Option<String>, notice: Option<String>) -> Option<String> {
+    match (text, notice) {
+        (text, None) => text,
+        (Some(text), Some(notice)) => Some(format!("{text}\n\n{notice}")),
+        (None, Some(notice)) => Some(notice),
+    }
 }
 
 /// Build the run context and its status. Pure: every read has happened.
@@ -431,7 +448,10 @@ pub fn compose(input: Composition<'_>) -> RunContext {
 
     let mut authored_instructions = String::new();
     status.instructions = Some(
-        match compose_authored_instructions(input.layers, input.persona_enabled) {
+        match with_local_notice(
+            compose_authored_instructions(input.layers, input.persona_enabled),
+            input.local_notice,
+        ) {
             None => part(RunContextState::Empty, 0, 0, ""),
             Some(text) if text.len() <= MAX_AUTHORED_INSTRUCTION_BYTES => {
                 authored_instructions = text;
@@ -731,6 +751,7 @@ pub async fn prepare(
         history_budget_tokens: history_token_budget_from(&|key| std::env::var(key).ok()),
         history: Part::from_plan(history_plan, history),
         memory: Part::from_plan(memory_plan, memory),
+        local_notice: request.local_notice.clone(),
     });
 
     let status = composed.status.clone().unwrap_or_default();
@@ -790,6 +811,7 @@ mod tests {
             history_budget_tokens: DEFAULT_HISTORY_TOKENS,
             history,
             memory,
+            local_notice: None,
         }
     }
 
@@ -817,6 +839,34 @@ mod tests {
 
     fn instructions_of(status: &RunContextStatus) -> &Option<RunContextPart> {
         &status.instructions
+    }
+
+    /// The Do preamble carries the turn's local notice after the instructions, and alone when the turn has
+    /// none. With no notice the text is exactly what it was (EP-8-S1).
+    #[test]
+    fn the_local_notice_trails_the_instructions() {
+        let layers = layers();
+        let bare = AuthoredLayers::default();
+        let text = |layers: &AuthoredLayers, notice: Option<&str>| {
+            let mut input = composition(
+                layers,
+                Part::from_plan(Plan::NotRequested, None),
+                Part::from_plan(Plan::NotRequested, None),
+            );
+            input.local_notice = notice.map(str::to_owned);
+            compose(input).authored_instructions
+        };
+        let base = text(&layers, None);
+        assert_eq!(
+            base,
+            compose_authored_instructions(&layers, true).expect("the layers compose"),
+        );
+        assert_eq!(
+            text(&layers, Some("Local notice.")),
+            format!("{base}\n\nLocal notice."),
+        );
+        assert_eq!(text(&bare, None), "");
+        assert_eq!(text(&bare, Some("Local notice.")), "Local notice.");
     }
 
     #[tokio::test]
@@ -1317,13 +1367,13 @@ mod tests {
         assert!(
             RunContextRequest::for_turn(RunContextMode::Off, layers, false, || {
                 panic!("off must not even build the memory query")
-            })
+            }, || panic!("off must not even build the local notice"))
             .is_none(),
             "off builds no request, so no read is made and no field is sent"
         );
         let on = RunContextRequest::for_turn(RunContextMode::Full, layers, false, || {
             "the query".to_owned()
-        })
+        }, || None)
         .expect("on builds a request");
         assert_eq!(on.memory_query, "the query");
     }

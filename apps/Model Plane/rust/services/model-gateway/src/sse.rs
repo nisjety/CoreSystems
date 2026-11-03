@@ -2716,6 +2716,18 @@ pub async fn invoke_stream_sse(
                         req.content.clone()
                     }
                 },
+                // The turn's local date and app language for the Do preamble (EP-8-S1).
+                || {
+                    crate::locale_context::turn_notice(
+                        Utc::now(),
+                        crate::locale_context::clock_for_turn(
+                            req.client_timezone.as_deref(),
+                            req.client_utc_offset_minutes,
+                        )
+                        .as_ref(),
+                        crate::locale_context::language_for_turn(req.ui_locale.as_deref()),
+                    )
+                },
             ),
             do_attachments,
             connector_ids,
@@ -3066,7 +3078,14 @@ pub async fn invoke_stream_sse(
     // Whether the model knows what day it is must never depend on an
     // unrelated lookup succeeding. See temporal_awareness_message's doc
     // comment for the failure this closes.
-    prompt.date_notice = Some(temporal_awareness_message());
+    prompt.date_notice = Some(temporal_awareness_message(
+        Utc::now(),
+        crate::locale_context::clock_for_turn(
+            req.client_timezone.as_deref(),
+            req.client_utc_offset_minutes,
+        )
+        .as_ref(),
+    ));
     // Reads the user turns only, which all live in the history.
     prompt.calendar =
         crate::calendar_context::reference_calendar(&prompt.history).map(|calendar| ChatMessage {
@@ -8060,13 +8079,20 @@ async fn mark_run_plan_mode(state: &AppState, org_id: &str, run_id: &str, sessio
     }
 }
 
-fn temporal_awareness_message() -> ChatMessage {
-    let today = Utc::now().format("%Y-%m-%d");
+/// `local` is the turn's clock when the local context switch is on and the request carried a valid one
+/// (EP-8-S1), and the date then reads in that zone. Without one the date is the UTC date, as it always was.
+fn temporal_awareness_message(
+    now: chrono::DateTime<Utc>,
+    local: Option<&crate::locale_context::LocalClock>,
+) -> ChatMessage {
+    let date = local
+        .and_then(|clock| crate::locale_context::date_clause(now, clock))
+        .unwrap_or_else(|| format!("Today's real date is {}.", now.format("%Y-%m-%d")));
     ChatMessage {
         compaction_summary: String::new(),
         role: "system".to_owned(),
         content: format!(
-            "Today's real date is {today}. Your training data has a cutoff before this date, so anything that changes over time — population counts, prices, exchange rates, software versions, current office-holders, schedules, sports results, or any other figure that could be stale — may no longer match what you remember. When the web_search tool is available this turn, use it before stating such a fact so your answer reflects the present, not your training snapshot. When it is not available, do not state a time-sensitive fact as current, unqualified truth: say what you know from training and clearly note it may be outdated (for example, \"as of my training data, roughly X — this may have changed\") rather than presenting a remembered figure as if it were verified today."
+            "{date} Your training data has a cutoff before this date, so anything that changes over time — population counts, prices, exchange rates, software versions, current office-holders, schedules, sports results, or any other figure that could be stale — may no longer match what you remember. When the web_search tool is available this turn, use it before stating such a fact so your answer reflects the present, not your training snapshot. When it is not available, do not state a time-sensitive fact as current, unqualified truth: say what you know from training and clearly note it may be outdated (for example, \"as of my training data, roughly X — this may have changed\") rather than presenting a remembered figure as if it were verified today."
         ),
         name: String::new(),
     }
@@ -8172,7 +8198,25 @@ fn agent_persona_message(req: &InvokeRequest) -> Option<ChatMessage> {
     })
 }
 
+/// Who the model is talking to, and, while the local context switch is on, the line that names the app
+/// language (EP-8-S1). The language is stable per person, so it stays in the Context tier with this slot.
 fn identity_context_message(req: &InvokeRequest) -> Option<ChatMessage> {
+    let language = crate::locale_context::language_for_turn(req.ui_locale.as_deref());
+    let content = match (org_identity_text(req), language) {
+        (identity, None) => identity?,
+        (Some(identity), Some(line)) => format!("{identity} {line}"),
+        (None, Some(line)) => line.to_owned(),
+    };
+    Some(ChatMessage {
+        compaction_summary: String::new(),
+        role: "system".to_owned(),
+        content,
+        name: String::new(),
+    })
+}
+
+/// The org and user sentence of the identity slot, or `None` when the org name is not resolved.
+fn org_identity_text(req: &InvokeRequest) -> Option<String> {
     let org_name = req
         .org_name
         .as_deref()
@@ -8191,12 +8235,7 @@ fn identity_context_message(req: &InvokeRequest) -> Option<ChatMessage> {
             "You are Verevon, the AI assistant currently helping {org_name}. When the user says \"we\", \"us\", \"our\", or \"the company\", they mean {org_name} — not Verevon itself. For broad questions like \"who are we\" or \"what do we offer\", treat it as a question about {org_name} and use the knowledge_search tool to ground your answer in {org_name}'s own information rather than answering from general knowledge."
         ),
     };
-    Some(ChatMessage {
-        compaction_summary: String::new(),
-        role: "system".to_owned(),
-        content,
-        name: String::new(),
-    })
+    Some(content)
 }
 
 /// Fallback used when `InferStream` is unavailable: call the (working)
@@ -10377,20 +10416,33 @@ impl ZdrTurnSettings {
 /// instructions. Persona is on for the turn: a ZDR turn has no thread, so the
 /// per-thread override is unknown, and the global switch was applied upstream.
 pub(crate) fn zdr_turn_settings(state: &AppState, req: &InvokeRequest) -> ZdrTurnSettings {
-    zdr_turn_settings_with(state, req, crate::thinking::ladder_enabled())
+    let local_notice = crate::locale_context::turn_notice(
+        Utc::now(),
+        crate::locale_context::clock_for_turn(
+            req.client_timezone.as_deref(),
+            req.client_utc_offset_minutes,
+        )
+        .as_ref(),
+        crate::locale_context::language_for_turn(req.ui_locale.as_deref()),
+    );
+    zdr_turn_settings_with(state, req, crate::thinking::ladder_enabled(), local_notice)
 }
 
-/// [`zdr_turn_settings`] with the effort-ladder switch passed in, so the ZDR
-/// derivation can be compared with the streamed path's without the process
-/// environment.
+/// [`zdr_turn_settings`] with the effort-ladder switch and the turn's local notice passed in, so the ZDR
+/// derivation can be compared with the streamed path's without the process environment.
 fn zdr_turn_settings_with(
     state: &AppState,
     req: &InvokeRequest,
     ladder_on: bool,
+    local_notice: Option<String>,
 ) -> ZdrTurnSettings {
     let mut sections: Vec<String> = Vec::new();
     if let Some(identity) = crate::zdr_features::identity_framing(req) {
         sections.push(identity);
+    }
+    // The local date and the app language (EP-8-S1), with nothing stored: they are sent for this turn only.
+    if let Some(notice) = local_notice {
+        sections.push(notice);
     }
     if let Some(authored) = authored_instructions_message(state, req, true) {
         sections.push(authored.content);
@@ -15241,7 +15293,7 @@ mod tests {
         for profile in ["quick", "deep", "standard", "xhigh", "wat"] {
             let req = invoke_request(serde_json::json!({ "effort": profile }));
             for ladder_on in [false, true] {
-                let settings = super::zdr_turn_settings_with(&state, &req, ladder_on);
+                let settings = super::zdr_turn_settings_with(&state, &req, ladder_on, None);
                 assert_eq!(
                     settings.thinking,
                     crate::thinking::plan(profile, settings.max_tokens, ladder_on),
@@ -15250,15 +15302,15 @@ mod tests {
             }
         }
         let deep = invoke_request(serde_json::json!({ "effort": "deep" }));
-        let on = super::zdr_turn_settings_with(&state, &deep, true).thinking;
+        let on = super::zdr_turn_settings_with(&state, &deep, true, None).thinking;
         assert_eq!(on.effort, mp_contracts::model_plane::v1::ReasoningEffort::High);
         assert_eq!(on.budget_tokens, 0);
-        let off = super::zdr_turn_settings_with(&state, &deep, false).thinking;
+        let off = super::zdr_turn_settings_with(&state, &deep, false, None).thinking;
         assert_eq!(off.effort, mp_contracts::model_plane::v1::ReasoningEffort::Unspecified);
         // A caller cap below the ceiling is what the legacy budget is sized
         // against: `deep` does not fit 2048 with headroom and steps down.
         let capped = invoke_request(serde_json::json!({ "effort": "deep", "max_tokens": 2048 }));
-        let stepped = super::zdr_turn_settings_with(&state, &capped, false).thinking;
+        let stepped = super::zdr_turn_settings_with(&state, &capped, false, None).thinking;
         assert_eq!(stepped.budget_tokens, 1_024);
     }
 
@@ -16682,6 +16734,19 @@ mod tests {
         assert_eq!(opened.correlation_id, request_id);
     }
 
+    /// With the local context switch off the date notice is the UTC sentence it has always been, byte for
+    /// byte, so no prompt changes until the switch is turned on (EP-8-S1).
+    #[test]
+    fn locale_context_switch_off_notice_is_byte_identical() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-11-02T09:14:00Z")
+            .expect("a valid instant")
+            .with_timezone(&chrono::Utc);
+        assert_eq!(
+            super::temporal_awareness_message(now, None).content,
+            "Today's real date is 2026-11-02. Your training data has a cutoff before this date, so anything that changes over time — population counts, prices, exchange rates, software versions, current office-holders, schedules, sports results, or any other figure that could be stale — may no longer match what you remember. When the web_search tool is available this turn, use it before stating such a fact so your answer reflects the present, not your training snapshot. When it is not available, do not state a time-sensitive fact as current, unqualified truth: say what you know from training and clearly note it may be outdated (for example, \"as of my training data, roughly X — this may have changed\") rather than presenting a remembered figure as if it were verified today.",
+        );
+    }
+
     /// The regression this pins: nothing ever told the model today's real date,
     /// so it had no basis to suspect a remembered fact (a city's population, a
     /// software version) might be stale — a real turn stated a 2024 figure as
@@ -16693,7 +16758,7 @@ mod tests {
     /// unavailable-search turn like the Oslo one.
     #[test]
     fn temporal_awareness_message_always_carries_the_real_date() {
-        let message = super::temporal_awareness_message();
+        let message = super::temporal_awareness_message(chrono::Utc::now(), None);
         assert_eq!(message.role, "system");
         let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
         assert!(

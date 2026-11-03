@@ -9028,6 +9028,19 @@ pub struct InvokeRequest {
     /// [`crate::locale_hint`]. Absent on agent wake-ups.
     #[serde(default)]
     pub locale: Option<String>,
+    /// The browser's IANA zone name (`Europe/Oslo`), sent on every turn (EP-8-S1). The BFF gateway
+    /// keeps it only in that closed form; it is checked again here, because it is printed into the
+    /// prompt. Read only while `MODEL_GATEWAY_USER_LOCALE_CONTEXT` is on; never stored.
+    #[serde(default)]
+    pub client_timezone: Option<String>,
+    /// The browser's UTC offset in minutes, east positive (EP-8-S1). Dates and times are computed from
+    /// it, so a value outside the range a browser can report gives no local clock at all.
+    #[serde(default)]
+    pub client_utc_offset_minutes: Option<i32>,
+    /// The app language the browser shows, `no` or `en` (EP-8-S1). Distinct from `locale` above, which
+    /// is the WS16-S6 hint with its own switch and vocabulary (`nb-NO` / `en-US`).
+    #[serde(default)]
+    pub ui_locale: Option<String>,
 }
 
 /// A tool/function definition supplied by the client (chat-parity §2).

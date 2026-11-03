@@ -798,6 +798,25 @@ mod tests {
         }
     }
 
+    /// The language line rides in the identity slot, so it stays in the Context tier: it changes only when the
+    /// person switches language, and the stable prefix relies on that (EP-8-S1).
+    #[test]
+    fn identity_slot_stays_context_tier() {
+        let line = "The person's app language is English; answer in the language they write in.";
+        let tiered = PromptContext {
+            identity: Some(system(&format!("identity. {line}"))),
+            ..full_context(history_with_pins_and_summary())
+        }
+        .render_tiered(PromptOrder::StablePrefix)
+        .expect("the stable-prefix order is tiered");
+        let at = tiered
+            .messages
+            .iter()
+            .position(|m| m.content.contains(line))
+            .expect("the language line is sent");
+        assert_eq!(tiered.tiers[at], PromptTier::Context);
+    }
+
     #[test]
     fn each_slot_lands_in_its_tier() {
         let tiered = PromptContext {

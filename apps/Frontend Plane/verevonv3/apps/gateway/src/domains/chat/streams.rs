@@ -144,6 +144,8 @@ async fn stream_chat(
     }
     let outbound_body =
         shared::with_identity_context(outbound_body, &user.user_name, &org_name);
+    // The viewer's clock and app language for this turn (EP-8-S1); a value outside its closed form is dropped.
+    let outbound_body = shared::with_locale_context(outbound_body);
     let mut outbound_body =
         shared::with_viewer_locale(outbound_body, state.space_features.chat_locale_hint);
     // Before the turn goes out, not after: a ZDR turn that fails midway is still

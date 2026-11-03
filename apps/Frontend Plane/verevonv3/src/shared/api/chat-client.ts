@@ -23,7 +23,7 @@ import {
 import { createSelectedAgentToolSpecs } from '@/shared/actions/agent-tools'
 import { parseChatHistoryAction } from '@/shared/actions/chat-history'
 import { isSupportChatThread } from '@/shared/chat/support-chat-thread'
-import { localeIntl, type Locale } from '@/shared/i18n/locales'
+import { isLocale, localeIntl, localeStorageKey, type Locale } from '@/shared/i18n/locales'
 import { isAgUiEventName, toVerevonUiEvent, type VerevonUiEvent } from '@/shared/chat/verevon-ui-events'
 import {
   applyServerRetention,
@@ -1518,6 +1518,32 @@ export class AttachmentsNotSentError extends Error {
   }
 }
 
+/** The browser's IANA zone name, when the runtime reports one (EP-8-S1). */
+export function clientTimeZone(): string | undefined {
+  return Intl.DateTimeFormat().resolvedOptions().timeZone || undefined
+}
+
+/**
+ * The UTC offset in minutes, east positive (EP-8-S1). `getTimezoneOffset` reports minutes behind UTC, so
+ * it is negated; `|| 0` folds negative zero, which UTC produces, into zero.
+ */
+export function clientUtcOffsetMinutes(now: Pick<Date, 'getTimezoneOffset'>): number {
+  return -now.getTimezoneOffset() || 0
+}
+
+/**
+ * The app language the person chose, for a turn that names none (EP-8-S1): the stored setting the app shows.
+ * An unreadable store, or a value outside the app's two languages, gives none rather than a guess.
+ */
+function storedUiLocale(): Locale | undefined {
+  try {
+    const stored = window.localStorage.getItem(localeStorageKey)
+    return isLocale(stored) ? stored : undefined
+  } catch {
+    return undefined
+  }
+}
+
 export function buildChatWireBody(request: ChatInvokeRequest): Record<string, unknown> {
   const conversationOnly = request.sourceScope === 'conversation'
   // Per-turn retrieval-source filter (chat-wave2 scope spec): conversation
@@ -1603,6 +1629,7 @@ export function buildChatWireBody(request: ChatInvokeRequest): Record<string, un
     ? []
     : normalizeConnectorScope(request.connectorScope)
 
+  const uiLocale = request.locale ?? storedUiLocale()
   return {
     content: request.content,
     model: request.model,
@@ -1614,6 +1641,12 @@ export function buildChatWireBody(request: ChatInvokeRequest): Record<string, un
     space_ref: request.spaceRef?.trim() || undefined,
     // Narrowed inline like `retrievalScope` above: only the two known codes ever reach the wire.
     locale: request.locale === 'no' || request.locale === 'en' ? request.locale : undefined,
+    // The browser's own clock and app language, on every turn (EP-8-S1). The gateway keeps each one only in its
+    // closed form and reads it for the prompt alone; nothing stores it. `ui_locale` is the turn's language, else
+    // the stored app setting, and absent when neither is set.
+    client_timezone: clientTimeZone(),
+    client_utc_offset_minutes: clientUtcOffsetMinutes(new Date()),
+    ...(uiLocale ? { ui_locale: uiLocale } : {}),
     mentioned_agent_ref: request.mentionedAgentRef?.trim() || undefined,
     // Present only on a wake, so every other body is byte-identical to what it was.
     ...(request.wake ? { wake: { message_id: request.wake.messageId, client_wake_id: request.wake.clientWakeId } } : {}),
