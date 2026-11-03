@@ -50,9 +50,11 @@ import {
 } from '@/shared/chat/support-chat-thread'
 import { readThreadDeepLink } from '@/features/chat/lib/chat-thread-deep-link'
 import {
-  readChatRunPanelCollapsed,
-  writeChatRunPanelCollapsed,
-} from '@/features/chat/lib/chat-run-watch'
+  toggleBrowserDockPosition,
+  useBrowserDock,
+  type BrowserDockPosition,
+  type BrowserDockVisiblePosition,
+} from '@/features/browser/dock/browser-dock-state'
 import {
   type DashboardComposerSubmitPayload,
 } from '@/features/dashboard/home/DashboardComposer'
@@ -441,12 +443,23 @@ export function useChatController() {
     togglePinnedMessage(threadId, messageId)
     setPinRevision((revision) => revision + 1)
   }
-  /** Chat split view: whether the live agent panel is folded to its rail. */
-  const [runPanelCollapsed, setRunPanelCollapsed] = createSignal(readChatRunPanelCollapsed())
+  /**
+   * Chat split view: the live agent panel's layout (WS9.G browser dock). One record holds it, and
+   * `hidden` is the folded rail, so the collapse state and the layout cannot disagree. Restoring from
+   * the rail returns to the last visible layout this visit, or to the right when none is known.
+   */
+  const [browserDock, updateBrowserDock] = useBrowserDock()
+  const initialDockPosition = browserDock().position
+  const [restoreDockPosition, setRestoreDockPosition] = createSignal<BrowserDockVisiblePosition>(
+    initialDockPosition === 'hidden' ? 'right' : initialDockPosition,
+  )
+  const runPanelCollapsed = () => browserDock().position === 'hidden'
+  const setBrowserDockPosition = (position: BrowserDockPosition) => {
+    if (position !== 'hidden') setRestoreDockPosition(position)
+    updateBrowserDock({ position })
+  }
   const toggleRunPanel = () => {
-    const next = !runPanelCollapsed()
-    setRunPanelCollapsed(next)
-    writeChatRunPanelCollapsed(next)
+    setBrowserDockPosition(toggleBrowserDockPosition(browserDock().position, restoreDockPosition()))
   }
   let feedbackNoticeTimer: number | undefined
   let abortController: AbortController | undefined
@@ -4415,6 +4428,8 @@ export function useChatController() {
     liveRunId,
     runPanelCollapsed,
     toggleRunPanel,
+    browserDock,
+    setBrowserDockPosition,
     pinnedMessages,
     togglePin,
     title,
