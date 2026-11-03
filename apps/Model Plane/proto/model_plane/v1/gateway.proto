@@ -10,6 +10,8 @@ import "google/protobuf/struct.proto";
 import "model_plane/v1/inference.proto";
 // AutonomyRung — the shared autonomy ladder a plan approval grants.
 import "model_plane/v1/runs.proto";
+// McpElicitationPending (EP-4 S4) — the form a held MCP call waits on.
+import "model_plane/v1/mcp_elicitation.proto";
 
 // ModelGateway — public boundary for HTTP/gRPC/SSE/WebSocket.
 // Owns: auth verification, request normalization, rate limiting, usage envelopes.
@@ -1254,6 +1256,10 @@ message ProxyMcpToolRequest {
   // gateway refuses the call with `tool_definition_changed` unless the server's
   // current definition still hashes to it. Empty keeps today's behaviour.
   string expected_digest = 7;
+  // EP-4 S4: the caller allows the server to ask the run's owner a question
+  // during this call. False keeps today's protocol revision and empty
+  // capabilities. Ignored while the gateway's MCP_ELICITATION_ENABLED is off.
+  bool allow_elicitation = 8;
 }
 
 message ProxyMcpToolResponse {
@@ -1262,6 +1268,10 @@ message ProxyMcpToolResponse {
   string output_json = 2;
   // Non-empty when the proxy or remote server returned an error.
   string error_message = 3;
+  // EP-4 S4: set when the server asked a question and the call is held;
+  // output_json and error_message are then empty. Answer it with
+  // McpElicitationService.AnswerMcpElicitation.
+  McpElicitationPending elicitation = 4;
 }
 
 // =============================================================

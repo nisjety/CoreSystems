@@ -11,6 +11,7 @@ pub mod effect_ledger;
 pub mod lifecycle_notice;
 pub mod loop_fold;
 pub mod loop_guard;
+pub mod mcp_elicitation;
 pub mod message_revision;
 pub mod model_entitlement;
 pub mod office_verification;

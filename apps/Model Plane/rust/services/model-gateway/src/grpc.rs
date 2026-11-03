@@ -42,6 +42,10 @@ use mp_contracts::model_plane::v1::{
 use mp_contracts::model_plane::v1::{
     Command, EvaluatePolicyRequest, OrgPolicy, Plugin, TaskRecord,
 };
+use mp_contracts::model_plane::v1::{
+    mcp_elicitation_service_server::{McpElicitationService, McpElicitationServiceServer},
+    AnswerMcpElicitationRequest, AnswerMcpElicitationResponse,
+};
 use mp_events::{envelope::Envelope, publisher::EventPublisher, subjects};
 use mp_ids::new_ulid;
 use tokio_stream::StreamExt;
@@ -121,6 +125,7 @@ direct_tenant_requests!(
     FetchRequest,
     ExtractStructuredRequest,
     ScreenContentRequest,
+    AnswerMcpElicitationRequest,
 );
 
 impl TenantScopedRequest for RecordTrajectoryRequest {
@@ -3004,6 +3009,83 @@ fn quarry_err_to_status(err: QuarryError) -> Status {
     }
 }
 
+fn elicitation_error(error_message: String) -> AnswerMcpElicitationResponse {
+    AnswerMcpElicitationResponse {
+        output_json: String::new(),
+        error_message,
+        elicitation: None,
+    }
+}
+
+/// EP-4 S4: answers to the forms of MCP calls this replica holds. Its own
+/// service so ModelGateway and its doubles stay unchanged; the same verifier
+/// guards it.
+#[tonic::async_trait]
+impl McpElicitationService for GatewayService {
+    async fn answer_mcp_elicitation(
+        &self,
+        request: Request<AnswerMcpElicitationRequest>,
+    ) -> Result<Response<AnswerMcpElicitationResponse>, Status> {
+        // The same gate as ProxyMcpTool, which created the held call: the
+        // governed execution service only, never under ZDR.
+        let identity = authorize_rpc(&request, RpcAccess::Tool)?;
+        require_explicit_zdr_contract(&identity, "mcp_execution")?;
+        if !identity.is_service() {
+            return Err(Status::permission_denied(
+                "MCP elicitation answers are restricted to the governed execution service",
+            ));
+        }
+        let req = request.into_inner();
+        if req.elicitation_id.trim().is_empty() {
+            return Err(Status::invalid_argument("elicitation_id is required"));
+        }
+        if req.user_id.trim().is_empty() {
+            return Err(Status::invalid_argument("user_id is required"));
+        }
+        let expired = || {
+            elicitation_error(format!(
+                "{}: the form is no longer waiting for an answer",
+                crate::mcp_elicitation::MCP_ELICITATION_EXPIRED
+            ))
+        };
+        // With the switch off no call is ever held, so nothing can be answered.
+        if !crate::mcp_elicitation::enabled() {
+            return Ok(Response::new(expired()));
+        }
+        let answers = crate::mcp_elicitation::answers_from_proto(&req.answers);
+        match crate::mcp_elicitation::ElicitationRegistry::global()
+            .answer(
+                &req.elicitation_id,
+                identity.org_id(),
+                &req.user_id,
+                &req.action,
+                &answers,
+            )
+            .await
+        {
+            Ok(settled) => {
+                let (output_json, error_message, elicitation) =
+                    runtime_registries::settled_parts(settled);
+                Ok(Response::new(AnswerMcpElicitationResponse {
+                    output_json,
+                    error_message,
+                    elicitation,
+                }))
+            }
+            Err(crate::mcp_elicitation::AnswerError::Expired) => Ok(Response::new(expired())),
+            Err(crate::mcp_elicitation::AnswerError::InvalidAction) => Err(
+                Status::invalid_argument("action must be accept, decline or cancel"),
+            ),
+            Err(crate::mcp_elicitation::AnswerError::InvalidAnswer(problem)) => {
+                Ok(Response::new(elicitation_error(format!(
+                    "{}: {problem}",
+                    crate::mcp_elicitation::MCP_ELICITATION_INVALID_ANSWER
+                ))))
+            }
+        }
+    }
+}
+
 /// Start the additive, authenticated gRPC compatibility listener on `:9090`.
 /// Auth Core verification material is fetched before bind, so a missing or
 /// malformed JWKS cannot leave a partially exposed listener.
@@ -3037,6 +3119,12 @@ pub async fn serve_with_readiness(
     let result = tonic::transport::Server::builder()
         .add_service(health_service)
         .add_service(ModelGatewayServer::with_interceptor(
+            GatewayService {
+                state: state.clone(),
+            },
+            verifier.clone(),
+        ))
+        .add_service(McpElicitationServiceServer::with_interceptor(
             GatewayService { state },
             verifier,
         ))

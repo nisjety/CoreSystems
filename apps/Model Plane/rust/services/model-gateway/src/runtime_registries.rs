@@ -67,7 +67,7 @@ const MCP_CATALOG_TTL: Duration = Duration::from_secs(60);
 /// constrains discovered tools but never fabricates callable schemas.
 const MCP_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(6);
 const MCP_HTTP_TIMEOUT: Duration = Duration::from_secs(10);
-const MCP_MAX_RESPONSE_BYTES: usize = 1_048_576;
+pub(crate) const MCP_MAX_RESPONSE_BYTES: usize = 1_048_576;
 
 fn now_unix() -> i64 {
     SystemTime::now()
@@ -2675,6 +2675,7 @@ mod mcp_exposure_tests {
             input_json: "{}".into(),
             user_id: "u1".into(),
             expected_digest: expected_digest.into(),
+            allow_elicitation: false,
         }
     }
 
@@ -2756,6 +2757,46 @@ mod mcp_exposure_tests {
                 .starts_with(TOOL_DEFINITION_UNVERIFIED),
             "{}",
             response.error_message
+        );
+    }
+
+    #[tokio::test]
+    async fn switch_off_ignores_allow_elicitation() {
+        // MCP_ELICITATION_ENABLED is unset under test: a caller's allow_elicitation
+        // must not change the call in any way.
+        assert!(!crate::mcp_elicitation::enabled());
+        let reg = McpRegistry::new();
+        let ownership = annotated_server(&reg, fixture_tools());
+        let mut allowing = proxy_request("echo_read", "");
+        allowing.allow_elicitation = true;
+        let with = handle_proxy_mcp_tool(&reg, &ownership, allowing, None)
+            .await
+            .expect("an outcome");
+        let without = handle_proxy_mcp_tool(&reg, &ownership, proxy_request("echo_read", ""), None)
+            .await
+            .expect("an outcome");
+        assert_eq!(with, without);
+        assert!(with.elicitation.is_none());
+        assert_eq!(
+            crate::mcp_elicitation::ElicitationRegistry::global().held_count(),
+            0
+        );
+    }
+
+    #[test]
+    fn the_held_form_names_the_server_within_the_label_bound() {
+        let mut server = McpServer {
+            server_id: "srv_01".into(),
+            name: "  Fixture  ".into(),
+            ..McpServer::default()
+        };
+        assert_eq!(elicitation_server_label(&server), "Fixture");
+        server.name = String::new();
+        assert_eq!(elicitation_server_label(&server), "srv_01");
+        server.name = "x".repeat(200);
+        assert_eq!(
+            elicitation_server_label(&server).chars().count(),
+            mp_contracts::user_question::MAX_ORIGIN_LABEL
         );
     }
 }
@@ -2855,6 +2896,7 @@ pub async fn handle_proxy_mcp_tool(
             request_id: req.request_id,
             output_json: String::new(),
             error_message: "server disabled".into(),
+            elicitation: None,
         });
     }
     if !server.tool_allowlist.contains(&req.tool_name) {
@@ -2862,6 +2904,7 @@ pub async fn handle_proxy_mcp_tool(
             request_id: req.request_id,
             output_json: String::new(),
             error_message: format!("tool not in allowlist: {}", req.tool_name),
+            elicitation: None,
         });
     }
 
@@ -2901,6 +2944,7 @@ pub async fn handle_proxy_mcp_tool(
                 request_id: req.request_id,
                 output_json: String::new(),
                 error_message,
+                elicitation: None,
             });
         }
     }
@@ -2913,6 +2957,25 @@ pub async fn handle_proxy_mcp_tool(
         .filter(|token| !token.is_empty())
         .unwrap_or(&server.token);
 
+    // EP-4 S4: a caller that allows elicitation, on a gateway whose switch is
+    // on, gets the interactive path. Everything else below is today's path.
+    // A call without an acting user has no one who may answer, so it never
+    // advertises elicitation.
+    if crate::mcp_elicitation::interactive(
+        crate::mcp_elicitation::enabled(),
+        req.allow_elicitation,
+    ) && !req.user_id.trim().is_empty()
+    {
+        return Ok(proxy_mcp_tool_interactive(
+            crate::mcp_elicitation::ElicitationRegistry::global(),
+            &server,
+            req,
+            token,
+            &arguments,
+        )
+        .await);
+    }
+
     // Real MCP Streamable HTTP: one JSON-RPC session against the server URL
     // itself (see crate::mcp_http). A failed session is an outcome, not an
     // RPC-level error, so the caller sees it as a tool result like any other
@@ -2924,6 +2987,7 @@ pub async fn handle_proxy_mcp_tool(
                 request_id: req.request_id,
                 output_json: String::new(),
                 error_message: error,
+                elicitation: None,
             });
         }
     };
@@ -2932,12 +2996,116 @@ pub async fn handle_proxy_mcp_tool(
             request_id: req.request_id,
             output_json,
             error_message: String::new(),
+            elicitation: None,
         }),
         crate::mcp_jsonrpc::McpCallOutcome::Err(error_message) => Ok(ProxyMcpToolResponse {
             request_id: req.request_id,
             output_json: String::new(),
             error_message,
+            elicitation: None,
         }),
+    }
+}
+
+/// The `ProxyMcpToolResponse` (or `AnswerMcpElicitationResponse` fields) a
+/// settled elicitation step amounts to: the tool result, or the held form.
+#[must_use]
+pub fn settled_parts(
+    settled: crate::mcp_elicitation::Settled,
+) -> (
+    String,
+    String,
+    Option<mp_contracts::model_plane::v1::McpElicitationPending>,
+) {
+    match settled {
+        crate::mcp_elicitation::Settled::Done(crate::mcp_jsonrpc::McpCallOutcome::Ok(output)) => {
+            (output, String::new(), None)
+        }
+        crate::mcp_elicitation::Settled::Done(crate::mcp_jsonrpc::McpCallOutcome::Err(error)) => {
+            (String::new(), error, None)
+        }
+        crate::mcp_elicitation::Settled::Pending(pending) => {
+            (String::new(), String::new(), Some(pending))
+        }
+    }
+}
+
+/// The name a held form shows as its origin: the server's display name, or its
+/// id when it has none, cut to the question store's origin-label bound.
+fn elicitation_server_label(server: &McpServer) -> String {
+    let name = server.name.trim();
+    let label = if name.is_empty() {
+        server.server_id.as_str()
+    } else {
+        name
+    };
+    label
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(mp_contracts::user_question::MAX_ORIGIN_LABEL)
+        .collect::<String>()
+        .trim()
+        .to_owned()
+}
+
+/// EP-4 S4: one call that advertises elicitation and reads the response
+/// stream frame by frame. A form the server asks is held in `registry` and
+/// returned as `elicitation`; a call that never asks ends exactly like
+/// [`handle_proxy_mcp_tool`]'s plain path.
+async fn proxy_mcp_tool_interactive(
+    registry: &crate::mcp_elicitation::ElicitationRegistry,
+    server: &McpServer,
+    req: ProxyMcpToolRequest,
+    token: &str,
+    arguments: &Value,
+) -> ProxyMcpToolResponse {
+    let session = match crate::mcp_http::McpHttpSession::connect_with(&server.url, token, true).await
+    {
+        Ok(session) => session,
+        Err(error) => {
+            return ProxyMcpToolResponse {
+                request_id: req.request_id,
+                output_json: String::new(),
+                error_message: error,
+                elicitation: None,
+            };
+        }
+    };
+    let interactive = session
+        .call_tool_interactive(
+            &req.tool_name,
+            arguments,
+            crate::mcp_elicitation::stream_timeout(registry.hold()),
+        )
+        .await;
+    let settled = match interactive {
+        crate::mcp_http::Interactive::Done(outcome) => crate::mcp_elicitation::Settled::Done(outcome),
+        crate::mcp_http::Interactive::Elicit {
+            request_id,
+            params,
+            stream,
+        } => {
+            registry
+                .begin(
+                    crate::mcp_elicitation::http_held(session, stream),
+                    request_id,
+                    params,
+                    crate::mcp_elicitation::HeldContext {
+                        org_id: req.org_id.clone(),
+                        user_id: req.user_id.clone(),
+                        server_id: server.server_id.clone(),
+                        server_label: elicitation_server_label(server),
+                    },
+                )
+                .await
+        }
+    };
+    let (output_json, error_message, elicitation) = settled_parts(settled);
+    ProxyMcpToolResponse {
+        request_id: req.request_id,
+        output_json,
+        error_message,
+        elicitation,
     }
 }
 

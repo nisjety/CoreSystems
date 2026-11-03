@@ -47,6 +47,7 @@ pub mod locale_hint;
 pub mod lsp;
 mod mail_task_bridge_auth;
 mod managed_start_key;
+pub mod mcp_elicitation;
 pub mod mcp_http;
 pub mod mcp_jsonrpc;
 pub mod mcp_oauth;
