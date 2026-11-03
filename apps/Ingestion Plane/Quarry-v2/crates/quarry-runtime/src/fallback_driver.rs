@@ -1,11 +1,11 @@
 //! Fallback driver — tries drivers in order until one succeeds.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use async_trait::async_trait;
 use quarry_core::contracts::ChallengeStrength;
-use quarry_core::error::ErrorCode;
+use quarry_core::error::{driver_failed_reason, ErrorCode};
 use quarry_core::output::DriverKind;
 use quarry_core::QuarryResult;
 use quarry_tls::TlsProfile;
@@ -25,6 +25,9 @@ pub struct FallbackDriver {
     /// the next driver (WS3.I). Non-block reasons (a JS shell, an unfollowed
     /// redirect, a transport failure) move it in both modes.
     mode: EscalationMode,
+    /// Whether a waterfall that ends in DRIVER_FAILED names its reason (E3.8.1,
+    /// `QUARRY_EDGE__FETCH_SUB_CODES`, default off). Off: the error is as the tiers left it.
+    fetch_sub_codes: bool,
 }
 
 impl FallbackDriver {
@@ -38,6 +41,7 @@ impl FallbackDriver {
             chain,
             drivers,
             mode: EscalationMode::current(),
+            fetch_sub_codes: fetch_sub_codes_enabled(),
         }
     }
 
@@ -45,6 +49,28 @@ impl FallbackDriver {
     pub fn with_escalation_mode(mut self, mode: EscalationMode) -> Self {
         self.mode = mode;
         self
+    }
+
+    /// Pins whether a waterfall that ends in DRIVER_FAILED names its reason (E3.8.1),
+    /// instead of reading `QUARRY_EDGE__FETCH_SUB_CODES`.
+    pub fn with_fetch_sub_codes(mut self, enabled: bool) -> Self {
+        self.fetch_sub_codes = enabled;
+        self
+    }
+
+    /// Settles the reason of a DRIVER_FAILED that leaves this chain (E3.8.1). It is
+    /// a no-op unless the flag is on.
+    fn settle_chain_error(
+        &self,
+        error: quarry_core::QuarryError,
+        tier_classes: &[Option<&'static str>],
+        attempts: usize,
+    ) -> quarry_core::QuarryError {
+        if self.fetch_sub_codes {
+            settle_driver_failed(error, tier_classes, attempts)
+        } else {
+            error
+        }
     }
 
     pub fn from_plan(
@@ -56,6 +82,7 @@ impl FallbackDriver {
             chain: plan.fallback_chain.clone(),
             drivers,
             mode: EscalationMode::current(),
+            fetch_sub_codes: fetch_sub_codes_enabled(),
         }
     }
 
@@ -114,6 +141,8 @@ impl FallbackDriver {
         // operator sees `[static: timeout (5s), tls: ja3-mismatch, browser:
         // 502]` instead of a single mystery error from the last attempt.
         let mut attempts: Vec<(DriverKind, String)> = Vec::with_capacity(order.len());
+        // One entry per tier that failed with an error: the sub-code it named, if any.
+        let mut tier_classes: Vec<Option<&'static str>> = Vec::with_capacity(order.len());
         let mut last_err: Option<quarry_core::QuarryError> = None;
         // 2D — on a block STATUS (403/429/503/…), fall through to the next
         // driver (a different TLS fingerprint / transport) instead of
@@ -322,6 +351,7 @@ impl FallbackDriver {
                         *kind,
                         format!("{}: {}", error_code_short(e.code), e.message),
                     ));
+                    tier_classes.push(tier_failure_class(&e));
                     if is_retryable && idx < order.len() - 1 {
                         warn!(
                             driver = ?kind,
@@ -341,7 +371,8 @@ impl FallbackDriver {
                         );
                         return Ok(shell);
                     }
-                    return Err(with_fallback_attempts(e, &attempts));
+                    let error = with_fallback_attempts(e, &attempts);
+                    return Err(self.settle_chain_error(error, &tier_classes, attempts.len()));
                 }
             }
         }
@@ -368,14 +399,15 @@ impl FallbackDriver {
             .collect::<Vec<_>>()
             .join("; ");
 
-        Err(last_err
+        let error = last_err
             .map(|e| with_fallback_attempts(e, &attempts))
             .unwrap_or_else(|| {
                 quarry_core::QuarryError::new(
                     ErrorCode::DriverFailed,
                     format!("no drivers succeeded in fallback chain: {aggregate_msg}"),
                 )
-            }))
+            });
+        Err(self.settle_chain_error(error, &tier_classes, attempts.len()))
     }
 }
 
@@ -648,6 +680,93 @@ fn find_ci(hay: &[u8], from: usize, needle_lower: &[u8]) -> Option<usize> {
                 .all(|(a, b)| a.to_ascii_lowercase() == *b)
         })
         .map(|p| p + from)
+}
+
+/// The environment variable that turns the fetch sub-codes on (E3.8.1).
+pub const FETCH_SUB_CODES_ENV: &str = "QUARRY_EDGE__FETCH_SUB_CODES";
+
+/// The pure half of [`fetch_sub_codes_enabled`]. `1`, `true` and `on` (any case,
+/// surrounding blanks ignored) turn it on. Unset, blank or any other value is
+/// off, so a typo leaves every envelope as it was.
+pub fn fetch_sub_codes_from_value(value: Option<&str>) -> bool {
+    matches!(
+        value.map(|raw| raw.trim().to_ascii_lowercase()).as_deref(),
+        Some("1" | "true" | "on")
+    )
+}
+
+/// The process-wide default, read from the environment once.
+pub fn fetch_sub_codes_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        let raw = std::env::var(FETCH_SUB_CODES_ENV).ok();
+        let enabled = fetch_sub_codes_from_value(raw.as_deref());
+        info!(enabled = enabled, "quarry.fetch_sub_codes");
+        enabled
+    })
+}
+
+/// The fetch sub-code a tier's own error named (E3.8.1), if it named one.
+/// `all_drivers_failed` is the verdict on a whole chain, so it is never a tier's reason.
+fn tier_failure_class(error: &quarry_core::QuarryError) -> Option<&'static str> {
+    match error.driver_failed_reason()? {
+        driver_failed_reason::ALL_DRIVERS_FAILED => None,
+        class => Some(class),
+    }
+}
+
+/// What a waterfall that ended in DRIVER_FAILED reports (E3.8.1): the sub-code
+/// every tried tier failed with, when they all agree on one. A tier that answered
+/// with a status or a body the chain moved on from, a tier that named no sub-code,
+/// or two tiers that disagree, make it `all_drivers_failed`. `attempts` counts every
+/// tier that was tried; `tier_classes` has one entry per tier that failed with an
+/// error, so the two lengths match only when every attempt failed that way.
+fn chain_reason(tier_classes: &[Option<&'static str>], attempts: usize) -> &'static str {
+    if tier_classes.len() != attempts {
+        return driver_failed_reason::ALL_DRIVERS_FAILED;
+    }
+    match tier_classes.split_first() {
+        Some((Some(first), rest)) if rest.iter().all(|class| class == &Some(*first)) => *first,
+        _ => driver_failed_reason::ALL_DRIVERS_FAILED,
+    }
+}
+
+/// Stamps the reason and the retryable flag on a DRIVER_FAILED that leaves the
+/// waterfall (E3.8.1). A typed reason a tier already gave (`action_failed`,
+/// `session_reaped`, ...) is kept with its own flag: only an absent reason or a
+/// fetch sub-code is replaced. Any other code is returned as it is.
+fn settle_driver_failed(
+    mut error: quarry_core::QuarryError,
+    tier_classes: &[Option<&'static str>],
+    attempts: usize,
+) -> quarry_core::QuarryError {
+    if error.code != ErrorCode::DriverFailed {
+        return error;
+    }
+    let keeps_its_reason = error
+        .details
+        .as_ref()
+        .is_some_and(|details| details.get("reason").is_some())
+        && error.driver_failed_reason().is_none();
+    if keeps_its_reason {
+        return error;
+    }
+    if error
+        .details
+        .as_ref()
+        .is_some_and(|details| !details.is_object())
+    {
+        return error;
+    }
+    let reason = chain_reason(tier_classes, attempts);
+    let mut details = error
+        .details
+        .take()
+        .unwrap_or_else(|| serde_json::json!({}));
+    details["reason"] = serde_json::Value::String(reason.to_owned());
+    error.details = Some(details);
+    error.retryable = driver_failed_reason::retryable(reason);
+    error
 }
 
 pub(crate) fn is_retryable_driver_error(code: ErrorCode) -> bool {
@@ -1933,5 +2052,296 @@ mod tests {
         let url: Url = "https://example.com".parse().unwrap();
         let resp = fb.fetch(&url).await.unwrap();
         assert_eq!(resp.status, 200);
+    }
+}
+
+#[cfg(test)]
+mod fetch_sub_code_tests {
+    use super::*;
+    use quarry_core::QuarryError;
+    use serde_json::json;
+
+    /// Fails every call with one error, as a tier that names its own failure does.
+    struct ErrorDriver {
+        kind: DriverKind,
+        error: QuarryError,
+    }
+
+    #[async_trait]
+    impl Driver for ErrorDriver {
+        fn kind(&self) -> DriverKind {
+            self.kind
+        }
+
+        async fn fetch(&self, _url: &Url) -> QuarryResult<FetchResponse> {
+            Err(self.error.clone())
+        }
+    }
+
+    /// Serves the page on every call.
+    struct ServesDriver {
+        kind: DriverKind,
+    }
+
+    #[async_trait]
+    impl Driver for ServesDriver {
+        fn kind(&self) -> DriverKind {
+            self.kind
+        }
+
+        async fn fetch(&self, url: &Url) -> QuarryResult<FetchResponse> {
+            Ok(FetchResponse {
+                status: 200,
+                final_url: url.clone(),
+                headers: vec![],
+                body: b"ok".to_vec(),
+                duration_ms: 1,
+                served_by: self.kind,
+                captures: None,
+            })
+        }
+    }
+
+    /// Answers 403 on every call. Under `legacy` the chain rotates on the status.
+    struct BlockedDriver {
+        kind: DriverKind,
+    }
+
+    #[async_trait]
+    impl Driver for BlockedDriver {
+        fn kind(&self) -> DriverKind {
+            self.kind
+        }
+
+        async fn fetch(&self, url: &Url) -> QuarryResult<FetchResponse> {
+            Ok(FetchResponse {
+                status: 403,
+                final_url: url.clone(),
+                headers: vec![],
+                body: b"blocked".to_vec(),
+                duration_ms: 1,
+                served_by: self.kind,
+                captures: None,
+            })
+        }
+    }
+
+    fn tier(kind: DriverKind, driver: impl Driver + 'static) -> (DriverKind, Arc<dyn Driver>) {
+        let driver: Arc<dyn Driver> = Arc::new(driver);
+        (kind, driver)
+    }
+
+    fn failing(kind: DriverKind, error: QuarryError) -> (DriverKind, Arc<dyn Driver>) {
+        tier(kind, ErrorDriver { kind, error })
+    }
+
+    fn chain(
+        mode: EscalationMode,
+        sub_codes: bool,
+        order: Vec<(DriverKind, Arc<dyn Driver>)>,
+    ) -> FallbackDriver {
+        let primary = order[0].0;
+        let rest = order[1..].iter().map(|(kind, _)| *kind).collect();
+        let drivers: HashMap<DriverKind, Arc<dyn Driver>> = order.into_iter().collect();
+        FallbackDriver::new(primary, rest, drivers)
+            .with_escalation_mode(mode)
+            .with_fetch_sub_codes(sub_codes)
+    }
+
+    fn target_url() -> Url {
+        "https://example.com/".parse().expect("a valid URL")
+    }
+
+    fn dns() -> QuarryError {
+        QuarryError::driver_failed(driver_failed_reason::DNS, "lookup failed")
+    }
+
+    fn connect() -> QuarryError {
+        QuarryError::driver_failed(driver_failed_reason::CONNECT, "connection refused")
+    }
+
+    fn tls() -> QuarryError {
+        QuarryError::driver_failed(driver_failed_reason::TLS, "handshake failed")
+    }
+
+    fn plain() -> QuarryError {
+        QuarryError::new(ErrorCode::DriverFailed, "simulated failure")
+    }
+
+    fn reason_of(error: &QuarryError) -> Option<&str> {
+        error.details.as_ref()?.get("reason")?.as_str()
+    }
+
+    fn attempts_of(error: &QuarryError) -> usize {
+        error
+            .details
+            .as_ref()
+            .and_then(|details| details.get("fallback_attempts"))
+            .and_then(serde_json::Value::as_array)
+            .map_or(0, Vec::len)
+    }
+
+    #[tokio::test]
+    async fn with_the_flag_off_the_error_is_left_as_the_tiers_made_it() {
+        let fb = chain(
+            EscalationMode::Honest,
+            false,
+            vec![
+                failing(DriverKind::Static, plain()),
+                failing(DriverKind::Tls, plain()),
+            ],
+        );
+        let err = fb.fetch(&target_url()).await.unwrap_err();
+        assert_eq!(err.code, ErrorCode::DriverFailed);
+        assert!(!err.retryable);
+        assert_eq!(
+            reason_of(&err),
+            None,
+            "no reason is stamped with the flag off"
+        );
+        assert_eq!(attempts_of(&err), 2);
+    }
+
+    #[tokio::test]
+    async fn tiers_that_fail_without_a_sub_code_report_all_drivers_failed() {
+        let fb = chain(
+            EscalationMode::Honest,
+            true,
+            vec![
+                failing(DriverKind::Static, plain()),
+                failing(DriverKind::Tls, plain()),
+            ],
+        );
+        let err = fb.fetch(&target_url()).await.unwrap_err();
+        assert_eq!(err.code, ErrorCode::DriverFailed);
+        assert_eq!(reason_of(&err), Some("all_drivers_failed"));
+        assert!(!err.retryable);
+        assert_eq!(attempts_of(&err), 2);
+    }
+
+    #[tokio::test]
+    async fn tiers_that_all_fail_the_same_way_report_that_sub_code_and_its_flag() {
+        let fb = chain(
+            EscalationMode::Honest,
+            true,
+            vec![
+                failing(DriverKind::Static, dns()),
+                failing(DriverKind::Tls, dns()),
+            ],
+        );
+        let err = fb.fetch(&target_url()).await.unwrap_err();
+        assert_eq!(reason_of(&err), Some("dns"));
+        assert!(err.retryable, "dns carries its own retryable flag");
+        assert_eq!(err.driver_failed_reason(), Some("dns"));
+    }
+
+    #[tokio::test]
+    async fn tiers_that_disagree_report_all_drivers_failed() {
+        let fb = chain(
+            EscalationMode::Honest,
+            true,
+            vec![
+                failing(DriverKind::Static, dns()),
+                failing(DriverKind::Tls, connect()),
+            ],
+        );
+        let err = fb.fetch(&target_url()).await.unwrap_err();
+        assert_eq!(reason_of(&err), Some("all_drivers_failed"));
+        assert!(!err.retryable);
+    }
+
+    #[tokio::test]
+    async fn a_single_tier_sub_code_is_kept_with_its_own_flag() {
+        let fb = chain(
+            EscalationMode::Honest,
+            true,
+            vec![failing(DriverKind::Static, tls())],
+        );
+        let err = fb.fetch(&target_url()).await.unwrap_err();
+        assert_eq!(reason_of(&err), Some("tls"));
+        assert!(!err.retryable, "tls is not retryable");
+    }
+
+    #[tokio::test]
+    async fn a_sub_code_still_falls_through_to_a_tier_that_serves() {
+        // The waterfall is unchanged: dns is a transport failure and moves on.
+        let fb = chain(
+            EscalationMode::Honest,
+            true,
+            vec![
+                failing(DriverKind::Static, dns()),
+                tier(
+                    DriverKind::Tls,
+                    ServesDriver {
+                        kind: DriverKind::Tls,
+                    },
+                ),
+            ],
+        );
+        let resp = fb.fetch(&target_url()).await.unwrap();
+        assert_eq!(resp.served_by, DriverKind::Tls);
+    }
+
+    #[tokio::test]
+    async fn a_typed_reason_a_tier_gave_is_kept_with_its_own_flag() {
+        let typed = QuarryError::new(ErrorCode::DriverFailed, "a scrape action failed")
+            .with_details(json!({ "reason": "action_failed" }));
+        let fb = chain(
+            EscalationMode::Honest,
+            true,
+            vec![failing(DriverKind::Browser, typed)],
+        );
+        let err = fb.fetch(&target_url()).await.unwrap_err();
+        assert_eq!(reason_of(&err), Some("action_failed"));
+        assert!(!err.retryable);
+    }
+
+    #[tokio::test]
+    async fn only_a_driver_failed_is_settled() {
+        let timeout = QuarryError::new(ErrorCode::Timeout, "too slow");
+        let fb = chain(
+            EscalationMode::Honest,
+            true,
+            vec![
+                failing(DriverKind::Static, timeout.clone()),
+                failing(DriverKind::Tls, timeout),
+            ],
+        );
+        let err = fb.fetch(&target_url()).await.unwrap_err();
+        assert_eq!(err.code, ErrorCode::Timeout);
+        assert_eq!(reason_of(&err), None);
+    }
+
+    #[tokio::test]
+    async fn a_status_the_chain_moved_on_from_breaks_the_agreement() {
+        // Under legacy the static tier answers 403 and the chain rotates on it. The
+        // static tier answered, so the dns of the next tier is not the chain's cause.
+        let fb = chain(
+            EscalationMode::Legacy,
+            true,
+            vec![
+                tier(
+                    DriverKind::Static,
+                    BlockedDriver {
+                        kind: DriverKind::Static,
+                    },
+                ),
+                failing(DriverKind::Tls, dns()),
+            ],
+        );
+        let err = fb.fetch(&target_url()).await.unwrap_err();
+        assert_eq!(reason_of(&err), Some("all_drivers_failed"));
+        assert!(!err.retryable);
+    }
+
+    #[test]
+    fn the_flag_is_on_only_for_a_true_value() {
+        assert!(!fetch_sub_codes_from_value(None));
+        assert!(!fetch_sub_codes_from_value(Some("")));
+        assert!(!fetch_sub_codes_from_value(Some("0")));
+        assert!(!fetch_sub_codes_from_value(Some("yes")));
+        assert!(fetch_sub_codes_from_value(Some("1")));
+        assert!(fetch_sub_codes_from_value(Some("TRUE")));
+        assert!(fetch_sub_codes_from_value(Some(" on ")));
     }
 }
