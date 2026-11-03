@@ -239,10 +239,14 @@ describeIfPolicy('principal policy Quarry web-tool grant', () => {
   it('grants search:read and extract:read to execution-core on the quarry audience, beside its existing scopes', () => {
     const principal = policy?.['execution-core'];
     // parse:write (INNH-11, POST /v1/parse) joined the list with R-13 PR 1; the
-    // block "principal bundle R-13 PR 1" below pins who holds it.
+    // block "principal bundle R-13 PR 1" below pins who holds it. jobs:control
+    // and jobs:read (E3.7.10) joined with the Model-facing job tools; the block
+    // "principal bundle E3.7.10" below pins them.
     expect(principal?.scopesByAudience?.quarry).toEqual([
       'browser:execute',
       'extract:read',
+      'jobs:control',
+      'jobs:read',
       'parse:write',
       'scrape:write',
       'search:read',
@@ -2432,6 +2436,134 @@ describeIfPolicy('principal bundle R-13 PR 1: parse:write (INNH-11)', () => {
     ).toThrow(/not authorized/i);
   });
 });
+
+// The Control Plane rows of E3.7.10 (plan section 3.3, E3.7 R2): the agent
+// runtime's job tools (execution-core, Model Plane) read the status of a crawl
+// or batch job of the run's organization and pause or cancel it, on quarry-edge's
+// org-scoped job routes. Two named scopes, one principal, one audience:
+//
+//   jobs:read      GET /v1/jobs/:id (and the crawl and batch status views)
+//   jobs:control   pause and cancel (the toolset names no resume)
+//
+// Tenant-bound: a run mints with its own organization, which the directory
+// vouches for at every mint (orgBinding `directory`), and quarry-edge answers a
+// job id of another organization with 404. The rows are inert until both callers
+// exist: quarry-edge refuses every service principal on the job routes today
+// (`require_service_route_scope`, `authorize_control`), and the execution-core
+// tools are a Model Plane ask. The token stays zero-retention for Quarry, so the
+// grant adds no persistence authority.
+const jobReadScope = 'jobs:read';
+const jobControlScope = 'jobs:control';
+const jobScopes = [jobControlScope, jobReadScope];
+
+describeIfPolicy(
+  'principal bundle E3.7.10: Quarry job scopes for execution-core',
+  () => {
+    it('is held by execution-core on the quarry audience alone, for both scopes', () => {
+      for (const scope of jobScopes) {
+        expect({ scope, holders: holdersOfScope(scope) }).toEqual({
+          scope,
+          holders: ['execution-core'],
+        });
+        expect({ scope, lanes: lanesHoldingScope(scope) }).toEqual({
+          scope,
+          lanes: ['execution-core|quarry'],
+        });
+        expect(policy?.['execution-core']?.scopes).toContain(scope);
+        expectScopeConfinedTo(scope, ['execution-core|quarry']);
+      }
+    });
+
+    it('spells both as single named scopes, and keeps the quarry lane zero-retention with the tenant web policy', () => {
+      for (const scope of jobScopes) {
+        expect({
+          scope,
+          shape: /^[a-z][a-z-]*:[a-z][a-z-]*$/.test(scope),
+        }).toEqual({ scope, shape: true });
+      }
+      expect(policy?.['execution-core']?.retentionByAudience?.quarry).toBe(
+        'zdr',
+      );
+      expect(policy?.['execution-core']?.webPolicyByAudience?.quarry).toBe(
+        'tenant',
+      );
+    });
+
+    it('mints each job scope for a run organization through the directory, as a ZDR token', () => {
+      const registry = registryWithTestCredentials();
+      for (const scope of jobScopes) {
+        expect(
+          authorizePlaneServicePrincipal(
+            registry,
+            mintRequest('execution-core', 'quarry', scope, 'org-run-1234'),
+          ),
+        ).toMatchObject({
+          serviceId: 'execution-core',
+          orgId: 'org-run-1234',
+          orgBinding: 'directory',
+          scopes: [scope],
+          retention: 'zdr',
+          zdr: true,
+        });
+      }
+      // Status and control together is one tool call's need (read, then pause).
+      expect(
+        authorizePlaneServicePrincipal(registry, {
+          ...mintRequest(
+            'execution-core',
+            'quarry',
+            jobReadScope,
+            'org-run-1234',
+          ),
+          requestedScopes: [jobReadScope, jobControlScope],
+        }),
+      ).toMatchObject({
+        orgBinding: 'directory',
+        // The authorizer keeps the requested order.
+        scopes: [jobReadScope, jobControlScope],
+      });
+    });
+
+    it('refuses a job scope mixed with an authority of another audience, and on any other audience', () => {
+      const registry = registryWithTestCredentials();
+      expect(() =>
+        authorizePlaneServicePrincipal(registry, {
+          ...mintRequest('execution-core', 'quarry', jobControlScope),
+          requestedScopes: [jobControlScope, 'sandbox:write'],
+        }),
+      ).toThrow(/not authorized/i);
+      for (const audience of [
+        'session-core',
+        'capability-core',
+        'sandbox-manager',
+      ]) {
+        for (const scope of jobScopes) {
+          expect(() =>
+            authorizePlaneServicePrincipal(
+              registry,
+              mintRequest('execution-core', audience, scope),
+            ),
+          ).toThrow(/not authorized/i);
+        }
+      }
+    });
+
+    it('gives model-gateway, the chat web-search principal on quarry, no job scope', () => {
+      const registry = registryWithTestCredentials();
+      for (const scope of jobScopes) {
+        expect(
+          policy?.['model-gateway']?.scopesByAudience?.quarry ?? [],
+        ).not.toContain(scope);
+        expect(() =>
+          authorizePlaneServicePrincipal(
+            registry,
+            mintRequest('model-gateway', 'quarry', scope),
+          ),
+        ).toThrow(/not authorized/i);
+      }
+    });
+  },
+);
 
 describe('registry schema fields of R-13 PR 1: webPolicyByAudience and apiKeyExchange', () => {
   const base = {

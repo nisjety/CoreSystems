@@ -140,13 +140,56 @@ pub(super) struct ExecuteActionRequest {
     input: Value,
 }
 
+/// `VEREVON_GATEWAY_AGENT_WEB_TOOLSET` (E3.7.10, R1 user-session path): turns on the
+/// gateway arms of the Model-facing agent web toolset. Off unless it is exactly `true`.
+/// Read per request, and only when the action id is one of the four `web.*` ids.
+pub(super) const AGENT_WEB_TOOLSET_FLAG: &str = "VEREVON_GATEWAY_AGENT_WEB_TOOLSET";
+
+fn agent_web_toolset_enabled() -> bool {
+    agent_web_toolset_from(std::env::var(AGENT_WEB_TOOLSET_FLAG).ok().as_deref())
+}
+
+/// Exactly the word `true`, like the other gateway feature switches; anything else,
+/// including an unset variable, is off.
+fn agent_web_toolset_from(value: Option<&str>) -> bool {
+    value == Some("true")
+}
+
+/// The agent web toolset (E3.7.10): each Model-facing id runs the existing user-session
+/// dispatcher of the action it names, so it carries exactly that action's authority and
+/// checks and nothing more. `web.crawl_site` is `knowledge.crawl_site`, so the E3.7.9
+/// approval above the page threshold (enforced on the crawl dispatch path) applies to it
+/// unchanged; the job verbs are the WS15.L5 run-control dispatchers (the caller's own org,
+/// crawl jobs only). There is deliberately no resume arm: the toolset names status, pause
+/// and cancel.
+fn agent_web_tool_target(action_id: &str) -> Option<&'static str> {
+    match action_id {
+        "web.crawl_site" => Some("knowledge.crawl_site"),
+        "web.job_status" => Some("ingestions.get_run_status"),
+        "web.pause_job" => Some("ingestions.pause_run"),
+        "web.cancel_job" => Some("ingestions.cancel_run"),
+        _ => None,
+    }
+}
+
+/// The id `execute_action` dispatches on. With the toolset off a `web.*` id stays as it is
+/// and falls through to the 501 of an unknown action, exactly as before the switch existed.
+fn resolve_action_id(action_id: &str, toolset_enabled: bool) -> &str {
+    match agent_web_tool_target(action_id) {
+        Some(target) if toolset_enabled => target,
+        _ => action_id,
+    }
+}
+
 pub(super) async fn execute_action(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     headers: HeaderMap,
     Json(body): Json<ExecuteActionRequest>,
 ) -> Response {
-    match body.action_id.as_str() {
+    let toolset_enabled =
+        agent_web_tool_target(&body.action_id).is_some() && agent_web_toolset_enabled();
+    match resolve_action_id(&body.action_id, toolset_enabled) {
         "knowledge.recrawl_source" => dispatch_recrawl(&state, &user, &headers, &body.input).await,
         "knowledge.scrape_url" => dispatch_scrape_url(&state, &user, &headers, &body.input).await,
         "knowledge.crawl_site" => dispatch_crawl_site(&state, &user, &headers, &body.input).await,
@@ -799,5 +842,46 @@ mod ingestions_dispatch_tests {
             run("ingestions.run_schedule_action", json!({ "action": "delete_schedule", "scheduleId": "sch_1" })).await,
             StatusCode::NOT_IMPLEMENTED
         );
+    }
+
+    const AGENT_WEB_TOOL_IDS: [&str; 4] =
+        ["web.crawl_site", "web.job_status", "web.pause_job", "web.cancel_job"];
+
+    /// E3.7.10: the switch is the exact word `true`; every other spelling is off.
+    #[test]
+    fn the_agent_web_toolset_switch_is_off_unless_exactly_true() {
+        assert!(agent_web_toolset_from(Some("true")));
+        for value in [None, Some(""), Some("1"), Some("TRUE"), Some("yes"), Some(" true")] {
+            assert!(!agent_web_toolset_from(value), "{value:?}");
+        }
+    }
+
+    /// Each toolset id names one existing action, and crawl_site is the crawl action
+    /// itself, so the E3.7.9 page-threshold approval cannot be bypassed through it.
+    #[test]
+    fn each_agent_web_tool_runs_an_existing_action_and_crawl_site_keeps_its_approval_path() {
+        assert_eq!(resolve_action_id("web.crawl_site", true), "knowledge.crawl_site");
+        assert_eq!(resolve_action_id("web.job_status", true), "ingestions.get_run_status");
+        assert_eq!(resolve_action_id("web.pause_job", true), "ingestions.pause_run");
+        assert_eq!(resolve_action_id("web.cancel_job", true), "ingestions.cancel_run");
+        // No resume, no map or batch, and no other prefix is aliased.
+        for id in ["web.resume_job", "web.map_site", "web.batch_scrape", "knowledge.crawl_site"] {
+            assert_eq!(agent_web_tool_target(id), None, "{id}");
+            assert_eq!(resolve_action_id(id, true), id, "{id}");
+        }
+    }
+
+    /// Off (the default), a toolset id is not resolved and the request gets the 501 of an
+    /// unknown action, before any input is read.
+    #[tokio::test]
+    async fn the_agent_web_tool_ids_are_unknown_actions_while_the_switch_is_off() {
+        if agent_web_toolset_enabled() {
+            // The surrounding environment switched it on; the off path is not observable here.
+            return;
+        }
+        for id in AGENT_WEB_TOOL_IDS {
+            assert_eq!(resolve_action_id(id, false), id, "{id}");
+            assert_eq!(run(id, json!({})).await, StatusCode::NOT_IMPLEMENTED, "{id}");
+        }
     }
 }

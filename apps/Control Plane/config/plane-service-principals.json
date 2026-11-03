@@ -179,6 +179,8 @@
       "capability:health:global:write",
       "capability:read",
       "extract:read",
+      "jobs:control",
+      "jobs:read",
       "parse:write",
       "sandbox:read",
       "sandbox:write",
@@ -195,6 +197,8 @@
       "quarry": [
         "browser:execute",
         "extract:read",
+        "jobs:control",
+        "jobs:read",
         "parse:write",
         "scrape:write",
         "search:read"
