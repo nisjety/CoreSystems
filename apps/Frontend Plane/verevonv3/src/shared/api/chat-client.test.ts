@@ -1058,6 +1058,64 @@ describe('chat-client tool wiring', () => {
     })
   })
 
+  it('carries the server citation number through a single citation event', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      sseResponse([
+        `event: citation\ndata: ${JSON.stringify({
+          id: 'c3',
+          title: 'Third',
+          url: 'https://example.com/3',
+          snippet: 'Snippet',
+          number: 3,
+        })}\n\n`,
+      ]),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const onCitation = vi.fn()
+    await streamChat({ content: 'hi' }, { onCitation })
+
+    expect(onCitation).toHaveBeenCalledWith(expect.objectContaining({ id: 'c3', number: 3 }))
+  })
+
+  it('carries each server citation number through a batched citations event', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      sseResponse([
+        `event: citations\ndata: ${JSON.stringify({
+          citations: [
+            { id: 'c1', title: 'First', url: 'https://example.com/1', snippet: '', number: 1 },
+            { id: 'c3', title: 'Third', url: 'https://example.com/3', snippet: '', number: 3 },
+          ],
+        })}\n\n`,
+      ]),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const onCitation = vi.fn()
+    await streamChat({ content: 'hi' }, { onCitation })
+
+    expect(onCitation.mock.calls.map(([event]) => event.number)).toEqual([1, 3])
+  })
+
+  it('reads the server citation number on the AG-UI custom form of a citation too', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        sseResponse([
+          `event: CUSTOM\ndata: ${JSON.stringify({
+            type: 'CUSTOM',
+            name: 'citation',
+            value: { id: 'c3', title: 'Third', url: 'https://example.com/3', snippet: '', number: 3 },
+          })}\n\n`,
+        ]),
+      ),
+    )
+    const onCitation = vi.fn()
+    await streamChat({ content: 'hi' }, { onCitation })
+
+    expect(onCitation).toHaveBeenCalledWith(expect.objectContaining({ id: 'c3', number: 3 }))
+  })
+
   it('maps a follow_ups event into onFollowUps, dropping non-string/empty entries', async () => {
     const fetchMock = vi.fn().mockResolvedValue(
       sseResponse([

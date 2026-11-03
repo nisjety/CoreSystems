@@ -436,6 +436,8 @@ export type ChatCitationEvent = {
   sourceGroupLabel?: string
   start?: number
   end?: number
+  /** The server's `[n]` for this source (see `Citation.number`); a chip binds by it, not by position. */
+  number?: number
   /** See `Citation.origin` (chat-wave2 scope spec §2.2). */
   origin?: string
 }
@@ -1431,6 +1433,7 @@ function emitCitation(value: unknown, handlers: ChatStreamHandlers): void {
     sourceGroupLabel: str(payload.source_group_label) ?? str(payload.sourceGroupLabel),
     start: num(payload.start) ?? num(payload.start_offset) ?? num(payload.startOffset),
     end: num(payload.end) ?? num(payload.end_offset) ?? num(payload.endOffset),
+    number: num(payload.number),
     origin: str(payload.origin),
   })
 }
@@ -1893,6 +1896,7 @@ function dispatchAgUiEvent(
             sourceGroupLabel: str(value.source_group_label) ?? str(value.sourceGroupLabel),
             start: num(value.start) ?? num(value.start_offset) ?? num(value.startOffset),
             end: num(value.end) ?? num(value.end_offset) ?? num(value.endOffset),
+            number: num(value.number),
             origin: str(value.origin),
           })
           break

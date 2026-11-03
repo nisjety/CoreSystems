@@ -307,6 +307,14 @@ describe('the SPA reads of the chat event payloads', () => {
     )
   })
 
+  it('reports a citation number read under a key the golden does not list', () => {
+    const renamed = source.replace('num(payload.number)', 'num(payload.citation_number)')
+    expect(renamed).not.toBe(source)
+    expect(violationsOf(renamed, golden)).toEqual([
+      "citation reads 'citation_number', which the golden does not list",
+    ])
+  })
+
   it('reports a golden key renamed while the SPA still reads the old name', () => {
     const renamed = JSON.parse(JSON.stringify(golden)) as Golden
     const reasoning = goldenEvent(renamed, 'reasoning_delta')

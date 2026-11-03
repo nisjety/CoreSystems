@@ -1704,7 +1704,7 @@ function citationOrigin(value: unknown): Citation['origin'] {
   return CITATION_ORIGINS.find((origin) => origin === value)
 }
 
-export function normalizeCitation(event: { id?: string; title?: string; url?: string; snippet?: string; claimId?: string; sourceGroupId?: string; sourceGroupLabel?: string; start?: number; end?: number; origin?: string }): Citation | null {
+export function normalizeCitation(event: { id?: string; title?: string; url?: string; snippet?: string; number?: number; claimId?: string; sourceGroupId?: string; sourceGroupLabel?: string; start?: number; end?: number; origin?: string }): Citation | null {
   if (!event.url) return null
   const origin = citationOrigin(event.origin)
   return {
@@ -1712,6 +1712,7 @@ export function normalizeCitation(event: { id?: string; title?: string; url?: st
     title: event.title ?? hostname(event.url),
     url: event.url,
     snippet: event.snippet ?? '',
+    ...(event.number !== undefined ? { number: event.number } : {}),
     ...(event.claimId ? { claimId: event.claimId } : {}),
     ...(event.sourceGroupId ? { sourceGroupId: event.sourceGroupId } : {}),
     ...(event.sourceGroupLabel ? { sourceGroupLabel: event.sourceGroupLabel } : {}),

@@ -98,6 +98,12 @@ export type Citation = {
   title: string
   url: string
   snippet: string
+  /**
+   * The `[n]` the server numbered this source with. A marker binds by this, never by array position: the
+   * numbering has gaps, because a source that was not read takes no number. Absent from an older gateway and
+   * from a stored turn written before numbers were kept.
+   */
+  number?: number
   /** Optional server-issued claim binding. The current gateway may omit it;
    * the UI must never infer these values from prose. */
   claimId?: string
