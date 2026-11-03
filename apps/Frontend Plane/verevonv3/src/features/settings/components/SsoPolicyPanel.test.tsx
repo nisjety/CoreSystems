@@ -52,10 +52,13 @@ const MEMBERS = {
   ],
 }
 
-type Handler = (url: string, init: RequestInit | undefined) => Response | Promise<Response>
+type Handler = (url: string, init: RequestInit | undefined) => Response | Promise<Response> | undefined
 
 function stubFetch(handler: Handler) {
-  const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => handler(String(input), init))
+  const fetchMock = vi.fn(
+    async (input: RequestInfo | URL, init?: RequestInit) =>
+      (await handler(String(input), init)) ?? new Response(null, { status: 404 }),
+  )
   vi.stubGlobal('fetch', fetchMock)
   return fetchMock
 }
@@ -315,7 +318,7 @@ describe('SsoPolicyPanel', () => {
 
   it('removes a provider and explains a refusal for the last one under enforce', async () => {
     signIn('owner')
-    const fetchMock = stubFetch(server((url, init) =>
+    const fetchMock = stubFetch(server((_url, init) =>
       init?.method === 'DELETE'
         ? json({ error: { code: 'last_provider_enforced', message: 'last', details: {} } }, 409)
         : undefined,

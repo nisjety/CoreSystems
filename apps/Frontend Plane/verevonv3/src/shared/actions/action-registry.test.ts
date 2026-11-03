@@ -624,12 +624,12 @@ describe('action registry', () => {
 
   it('registers the WS14-S7 room file actions and none of them is model-executable', () => {
     const roomFileIds = ['space.files.attach', 'space.files.list', 'space.files.read_text', 'space.files.delete']
-    const ids = actionRegistry.map((action) => action.id)
+    const ids: string[] = actionRegistry.map((action) => action.id)
     const first = ids.indexOf(roomFileIds[0] as string)
     expect(first).toBeGreaterThan(-1)
     expect(ids.slice(first, first + roomFileIds.length)).toEqual(roomFileIds)
     for (const id of roomFileIds) {
-      expect(isModelExecutableAction(id), id).toBe(false)
+      expect(isModelExecutableAction(id as Parameters<typeof isModelExecutableAction>[0]), id).toBe(false)
     }
     expect(getActionDescriptor('space.files.attach')?.ownerPlane).toBe('ingestion')
     expect(getActionDescriptor('space.files.list')?.ownerPlane).toBe('data')
