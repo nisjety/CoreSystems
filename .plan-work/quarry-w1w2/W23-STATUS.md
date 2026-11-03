@@ -211,3 +211,35 @@ Open items:
 - MP asks added to MP-ASKS.md by W2-U39b and W2-CP-WS7I.
 - 42 depth rows appended to W23-depth.md (a 13, b 8 plus the table header, c 7, d 14).
 - Four tracked .sha256 files in the integ worktree still show as modified (CRLF/LF checkout artifacts); none committed.
+
+## Step S2 (W2), integrated 2026-11-03
+
+Units: W2-CP-U37 (lane a), W2-U49 and W2-U45 (lane b), W2-U62-66 and W2-CP-INNH10B (lane c), W2-CP-U35 and W2-CP-E2a (lane d). W2-U56 (lane a) is NOT merged: it is BLOCKED with nothing committed. Its openapi.yaml edit sits uncommitted in the innh-lane-a working tree (equal to scratchpad U56/openapi-envelopes.patch), and the two test patches are in the scratchpad only.
+
+Merge commits (git merge --no-ff, base bb5fb9473):
+- b33f01689 merge: w23/lane-a (S2: W2-CP-U37; W2-U56 blocked, not committed)
+- 3fd805f9b merge: w23/lane-b (S2: W2-U49, W2-U45)
+- c17898bf6 merge: w23/lane-c (S2: W2-U62-66, W2-CP-INNH10B)
+- ac2756d25 merge: w23/lane-d (S2: W2-CP-U35, W2-CP-E2a)
+
+Conflicts: none (all four merges were clean).
+
+Compile guard (no test runs):
+- Quarry Rust (qtest-lane integ, quarry-target-integ): `cargo check --workspace --tests` exit 0, warnings only (pre-existing kinds, none in the new files).
+- Go, GOWORK=off: billing-core build + vet clean; quarry-control build + vet clean; org-core build FAILED (W2-CP-E2a: `EnvMasterKeys` declared both as the env-name constant and as the provider type). Fixed in b50ff11d8 (type renamed `EnvMasterKeyProvider`, constant kept); org-core build + vet then clean.
+- verevonv3 gateway: `cargo check --tests` (CARGO_TARGET_DIR=%TEMP%/w23cg-gw) exit 0.
+- verevonv3 SPA: no src TS changed (only tests/e2e/browser-workspace-live-takeover.spec.ts, which no tsconfig includes); `tsc6 -p tsconfig.app.json` 34 errors = baseline, no new.
+- action-registry.ts unchanged: no admission golden regeneration, no new action ids. No golden, schema or route-count regeneration needed.
+- auth-core TS (W2-CP-INNH10B) is NOT compile-checked: the integ worktree has no auth-core node_modules and the guard list has no auth-core step. Before relying on it: pnpm install, `prettier --write --end-of-line auto` on the 6 files, `tsc --noEmit -p tsconfig.json`, `npx jest api-key-metadata` (diff failing sets vs base: 15 pre-existing failures in 3 suites).
+
+Open items:
+- W2-U56: finish from a session that may write innh-lane-a (commit openapi.yaml + the two test patches, status file, depth rows), then run sdks/generate.sh and commit sdks/typescript/docs + sdks/python or CI spa-verify fails on drift.
+- W2-CP-U37: Control nats.conf needs a quarry-edge-control user + ledger password before QUARRY_EDGE__USAGE_BUS_URL is set (D-U37-1); Lago must register the seven metric codes before USAGE_BROWSER_METRICS (D-U37-3).
+- W2-U49: PostgresStepReceiptStore has no purge_for_actor override (501 through the store; edge route uses the pool directly); flag QUARRY_CONTROL_GDPR_USER_RECEIPTS not in compose; route not in RUNBOOKS/OpenAPI.
+- W2-U45: edge half of D2-134 (claim org vs body org in scrape_capture.rs) still open.
+- W2-U62-66: edge tabs.rs responses still lack openedBy (Quarry ask); keepalive not gated by BROWSER_HUMAN_BROWSE; gateway HTTP tests for human grant create/keepalive missing; Playwright spec unrun (stack session).
+- W2-CP-INNH10B: no HTTP route for apiKeys.updateAgent (add POST api-keys/update-agent in src/orpc/auth.controller.ts, W2-FE-GW2); MP ask for the broker to consume api_key_revoked (MP-ASKS.md); INNH10A exchange not on this base.
+- W2-CP-U35: snapshot=enforce would bind the observed claim (stamp_policy_snapshot); env var not in SELF_HOST/RUNBOOKS/compose.
+- W2-CP-E2a: org-core cmd/server/main.go not wired (ValidateOrgKeysConfig, NewServiceFromEnv, SetAuditPublisher, SetOrgKeys, FlushAudit ticker) so flag-on routes answer 503; org:keys:admin:any and org:keys:destroy:any not allowlisted (403); service_auth.go edited outside the file set; audit-core subject acceptance unchecked.
+- 45 depth rows appended to W23-depth.md (a 5, b 10, c 11, d 12, plus 7 W2-U56 rows from its report).
+- Four tracked .sha256 files in the integ worktree still show as modified (CRLF/LF checkout artifacts); none committed.
