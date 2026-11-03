@@ -95,6 +95,8 @@ fn build_router(state: config::AppState) -> Router {
         .route("/version", get(version))
         .merge(domains::actions::router(state.clone()))
         .merge(domains::agent_actions::router(state.clone()))
+        // EP-12 S8: empty unless GATEWAY_AGENT_API_ENABLED is exactly `true`.
+        .merge(domains::agent_api::router(state.clone()))
         .merge(domains::agents::router(state.clone()))
         .merge(domains::agents_runs::router(state.clone()))
         .merge(domains::ag_ui::router(state.clone()))
