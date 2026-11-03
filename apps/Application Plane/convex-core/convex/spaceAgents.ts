@@ -2,6 +2,7 @@ import { v } from "convex/values";
 import { action, internalMutation, internalQuery, mutation, query } from "./_generated/server";
 import { internal } from "./_generated/api";
 import { assertServiceKey, requireGatewayMember } from "./authz";
+import { definitionPersona } from "./agents";
 import { isDmKind } from "./spaceParticipants";
 import { noticeKindForBindingStatus, recordRoomNotice } from "./spaceRoomNotices";
 
@@ -331,7 +332,19 @@ export const agentPersonaForGateway = query({
     const agent = await ctx.db.get(args.agentId);
     if (!agent || agent.orgId !== organization._id) return null;
 
-    return { name: agent.name, systemPrompt: agent.systemPrompt ?? null };
+    // EP-6 S7: a versioned agent answers with its published version. Only a pointer
+    // adds a read, so a legacy row takes the path it always took.
+    const pointer = agent.publishedVersion;
+    const published =
+      pointer === undefined
+        ? null
+        : await ctx.db
+            .query("agentDefinitionVersions")
+            .withIndex("by_agent_version", (q: any) =>
+              q.eq("agentId", args.agentId).eq("version", pointer),
+            )
+            .unique();
+    return definitionPersona(agent, published);
   },
 });
 
