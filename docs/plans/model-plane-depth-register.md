@@ -3187,6 +3187,10 @@ Built so far: WS13-S0, WS13-S1, WS13-S2; WS14-S1, WS14-S2 (partial), WS14-S3; WS
 | D3-534 | EP-12-S13 | live-proof | P1 | guard: run bash scripts/lint-resource-taxonomy.sh; cd "apps/Control Plane/user-core" && go test ./internal/authztaxonomy/...; cd "apps/Data Plane v2/services/retrieval-engine-rs" && cargo test -q --lib authz::taxonomy | open |
 | D3-535 | EP-12-S13 | risk | P2 | Once conversation_snapshot is ownable, the legacy internal facade POST /api/v1/internal/authz/grant (non-owner-asserted path, AclRepository.Grant) accepts grant rows for it from any caller holding the authz write scope, though nothing reads them until S14. | open |
 | D3-536 | EP-12-S13 | decision | P2 | The ADR adds that revoking a snapshot also removes its Control grants and that membership is re-checked at read, beyond the design's 'revoked_at + delete body'; S14 should implement or the owner should strike it at OD-5. | open |
+| D3-537 | W3-11 guard | follow-up | P2 | guard skipped: apps/Model Plane/ZDR.md / docs/ZDR.md RUN_TIMING_RECORDED row and run_inspection refusal (EP-14-S5 'Lead docs'): lead | open |
+| D3-538 | W3-11 guard | follow-up | P2 | guard skipped: Optional waterfall CSS in the ledger stylesheet (EP-14-S5): not a shared-edit item and has no exact lines; left to the lead | open |
+| D3-539 | W3-11 guard | follow-up | P2 | guard skipped: verevonv3 src/shared/api/chat-client.ts agentPreview field (EP-6-S8 needs_other_files, 'not built'): design work, not a mechanical edit | open |
+| D3-540 | W3-11 guard | follow-up | P2 | guard skipped: Agent API spec x-agent-org-id header in agent-api.v1.yaml / agent-api-v1.json (EP-12-S8 needs_other_files): S3 owner decision | open |
 
 ## Cross-wave
 

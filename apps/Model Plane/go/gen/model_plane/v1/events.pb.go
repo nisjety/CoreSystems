@@ -217,6 +217,11 @@ const (
 	// A delegate attached with the owner's shared cookie jar (WS8.G).
 	// Allocated here so the enum is touched once.
 	EventType_EVENT_TYPE_BROWSER_ATTACH_SHARED_JAR EventType = 160
+	// Run-ledger events (EP-14 S5). 150, proposed by the design, is the trace's.
+	// A run's content-free timing record (`RunTimingRecorded`, run_ledger.proto):
+	// ids, milliseconds, counts and tool names. Written by session-core for a
+	// persistent run only; a ZDR or waived run records none.
+	EventType_EVENT_TYPE_RUN_TIMING_RECORDED EventType = 161
 )
 
 // Enum value maps for EventType.
@@ -275,6 +280,7 @@ var (
 		155: "EVENT_TYPE_BROWSER_EGRESS_DECIDED",
 		156: "EVENT_TYPE_BROWSER_ARTIFACT_RECORDED",
 		160: "EVENT_TYPE_BROWSER_ATTACH_SHARED_JAR",
+		161: "EVENT_TYPE_RUN_TIMING_RECORDED",
 	}
 	EventType_value = map[string]int32{
 		"EVENT_TYPE_UNSPECIFIED":                      0,
@@ -330,6 +336,7 @@ var (
 		"EVENT_TYPE_BROWSER_EGRESS_DECIDED":           155,
 		"EVENT_TYPE_BROWSER_ARTIFACT_RECORDED":        156,
 		"EVENT_TYPE_BROWSER_ATTACH_SHARED_JAR":        160,
+		"EVENT_TYPE_RUN_TIMING_RECORDED":              161,
 	}
 )
 
@@ -664,7 +671,7 @@ const file_model_plane_v1_events_proto_rawDesc = "" +
 	"\x10RUN_ORIGIN_AGENT\x10\x02\x12\x17\n" +
 	"\x13RUN_ORIGIN_SCHEDULE\x10\x03\x12\x16\n" +
 	"\x12RUN_ORIGIN_WEBHOOK\x10\x04\x12\x12\n" +
-	"\x0eRUN_ORIGIN_API\x10\x05*\xc7\x0e\n" +
+	"\x0eRUN_ORIGIN_API\x10\x05*\xec\x0e\n" +
 	"\tEventType\x12\x1a\n" +
 	"\x16EVENT_TYPE_UNSPECIFIED\x10\x00\x12\x1c\n" +
 	"\x18EVENT_TYPE_SESSION_START\x10\x01\x12\x1a\n" +
@@ -719,7 +726,8 @@ const file_model_plane_v1_events_proto_rawDesc = "" +
 	"(EVENT_TYPE_BROWSER_STEP_RECEIPT_RECORDED\x10\x9a\x01\x12&\n" +
 	"!EVENT_TYPE_BROWSER_EGRESS_DECIDED\x10\x9b\x01\x12)\n" +
 	"$EVENT_TYPE_BROWSER_ARTIFACT_RECORDED\x10\x9c\x01\x12)\n" +
-	"$EVENT_TYPE_BROWSER_ATTACH_SHARED_JAR\x10\xa0\x01\"\x06\b\xc8\x01\x10\xff\x01B\xb3\x01\n" +
+	"$EVENT_TYPE_BROWSER_ATTACH_SHARED_JAR\x10\xa0\x01\x12#\n" +
+	"\x1eEVENT_TYPE_RUN_TIMING_RECORDED\x10\xa1\x01\"\x06\b\xc8\x01\x10\xff\x01B\xb3\x01\n" +
 	"\x12com.model_plane.v1B\vEventsProtoP\x01Z;github.com/triodelab/model-plane/gen/go/model_plane/v1;mpv1\xa2\x02\x03MXX\xaa\x02\rModelPlane.V1\xca\x02\rModelPlane\\V1\xe2\x02\x19ModelPlane\\V1\\GPBMetadata\xea\x02\x0eModelPlane::V1b\x06proto3"
 
 var (

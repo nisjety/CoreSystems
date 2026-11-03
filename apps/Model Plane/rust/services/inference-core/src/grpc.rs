@@ -214,7 +214,7 @@ catalog_requests!(
 );
 
 impl InferenceService {
-    async fn authorize<T: TenantRequest>(
+    async fn authorize<T: TenantRequest + 'static>(
         &self,
         request: &Request<T>,
     ) -> Result<AuthenticatedPrincipal, Status> {
@@ -222,6 +222,11 @@ impl InferenceService {
         // From here the call has a verified caller, whatever the checks below
         // decide: the metering decorator counts it under that service.
         crate::metered::note_caller(request.extensions(), &principal);
+        // EP-12 S6: an API-key principal reaches only the chat turn (Infer, InferStream, both
+        // `pb::InferRequest`); every other RPC, including request types added later, is refused.
+        principal.authorize_api_key_rpc(
+            std::any::TypeId::of::<T>() == std::any::TypeId::of::<pb::InferRequest>(),
+        )?;
         if request.get_ref().is_catalog() {
             principal.authorize_catalog()?;
         } else {

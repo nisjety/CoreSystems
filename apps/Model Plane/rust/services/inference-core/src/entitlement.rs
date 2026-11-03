@@ -361,7 +361,7 @@ impl EntitlementGate {
     /// [`ProviderError::EntitlementUnavailable`], under `enforce` only, when no
     /// answer can be read or held within its bound.
     pub async fn resolve(&self, principal: &AuthenticatedPrincipal) -> Result<Resolved, ProviderError> {
-        self.resolve_for(&principal.org_id, principal.user_id.as_deref())
+        self.resolve_for(&principal.org_id, principal.entitlement_user_id())
             .await
     }
 

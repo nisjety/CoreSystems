@@ -96,6 +96,18 @@ async fn stream_chat(
     if let Err(message) = super::history::enforce_support_thread_policy(&mut outbound_body) {
         return shared::invalid_chat_request(message).into_response();
     }
+    // EP-6 S8: a builder preview becomes a temporary read-only turn with the draft persona. Must run
+    // before the mention and thread injectors; a no-op unless AGENT_DEFINITION_VERSIONS is `true`.
+    if let Err((status, body)) = crate::domains::agent_actions::inject_agent_draft_preview(
+        &state,
+        &user,
+        &org_id,
+        &mut outbound_body,
+    )
+    .await
+    {
+        return (status, body).into_response();
+    }
     // Must run before `inject_personal_thread_context`, which is the call
     // that removes the Space reference fields this one still needs to read.
     // WS08-S4: also yields the wake the body asked for (`wake`), verified against the binding

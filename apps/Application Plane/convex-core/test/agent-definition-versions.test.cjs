@@ -180,7 +180,13 @@ test('version numbers run from 1 and are never reused', () => {
 
 test('every new gateway function checks the service key and gateway membership', () => {
   const source = fs.readFileSync(path.join(convexDirectory, 'agents.ts'), 'utf8');
-  for (const name of ['saveDraftForGateway', 'publishForGateway', 'listVersionsForGateway', 'getVersionForGateway']) {
+  for (const name of [
+    'saveDraftForGateway',
+    'publishForGateway',
+    'listVersionsForGateway',
+    'getVersionForGateway',
+    'builderDefinitionForGateway',
+  ]) {
     const start = source.indexOf(`export const ${name} = `);
     assert.notEqual(start, -1, `${name} is not exported`);
     const next = source.indexOf('\nexport const ', start + 1);
@@ -221,4 +227,19 @@ test('agents carry the pointer and the draft, bindings carry the pinned version,
   assert.ok(agentFields.includes('draft'));
   assert.ok(Object.keys(spaceTables.spaceAgentBindings.validator.fields).includes('pinnedVersion'));
   assert.ok(schema.tables.agentDefinitionVersions, 'schema.ts composes agentDefinitionVersions');
+});
+
+test('the builder read answers null for another organisation and derives the origin Space of a room-born agent', () => {
+  const source = fs.readFileSync(path.join(convexDirectory, 'agents.ts'), 'utf8');
+  const start = source.indexOf('export const builderDefinitionForGateway = ');
+  assert.notEqual(start, -1, 'builderDefinitionForGateway is not exported');
+  const block = source.slice(start);
+  // Another organisation's agent reads exactly like an unknown id.
+  assert.match(block, /if \(!agent \|\| agent\.orgId !== organization\._id\) return null;/);
+  // A created agent has a creator and no origin; a room-born one (no createdBy) has its first
+  // binding's Space, matched on the shared creation timestamp, and no creator.
+  assert.match(block, /const origin = agent\.createdBy\s*\?\s*null/);
+  assert.match(block, /binding\.agentId === args\.agentId && binding\.createdAt === agent\.createdAt/);
+  assert.match(block, /creatorExternalAuthId: creator\?\.externalAuthId \?\? null/);
+  assert.match(block, /originSpaceRef: origin\?\.spaceRef \?\? null/);
 });

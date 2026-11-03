@@ -20,6 +20,8 @@ const _ = grpc.SupportPackageIsVersion9
 
 const (
 	RunLedgerService_RecordRequestSnapshot_FullMethodName = "/model_plane.v1.RunLedgerService/RecordRequestSnapshot"
+	RunLedgerService_RecordRunTiming_FullMethodName       = "/model_plane.v1.RunLedgerService/RecordRunTiming"
+	RunLedgerService_GetRunTiming_FullMethodName          = "/model_plane.v1.RunLedgerService/GetRunTiming"
 )
 
 // RunLedgerServiceClient is the client API for RunLedgerService service.
@@ -44,6 +46,16 @@ type RunLedgerServiceClient interface {
 	// tool catalogue are stored once per run by digest; a call that repeats one
 	// only references it.
 	RecordRequestSnapshot(ctx context.Context, in *RecordRequestSnapshotRequest, opts ...grpc.CallOption) (*RecordRequestSnapshotResponse, error)
+	// Store one content-free timing record of a run (EP-14 S5) as a
+	// RUN_TIMING_RECORDED event. The caller is the run's owner (model-gateway
+	// forwards the user's session bearer). A ZDR or waived run is refused with
+	// `zdr_durable_mutation_forbidden`; a repeat of the same (run, request,
+	// schema) is stored once.
+	RecordRunTiming(ctx context.Context, in *RecordRunTimingRequest, opts ...grpc.CallOption) (*RecordRunTimingResponse, error)
+	// Read a run's timing records and its tool calls' reserve and finalize
+	// times (EP-14 S5). Owner only: a run of another user or org reads as not
+	// found. Answers UNIMPLEMENTED unless SESSION_CORE_RUN_LEDGER_READ is on.
+	GetRunTiming(ctx context.Context, in *GetRunTimingRequest, opts ...grpc.CallOption) (*GetRunTimingResponse, error)
 }
 
 type runLedgerServiceClient struct {
@@ -58,6 +70,26 @@ func (c *runLedgerServiceClient) RecordRequestSnapshot(ctx context.Context, in *
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(RecordRequestSnapshotResponse)
 	err := c.cc.Invoke(ctx, RunLedgerService_RecordRequestSnapshot_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *runLedgerServiceClient) RecordRunTiming(ctx context.Context, in *RecordRunTimingRequest, opts ...grpc.CallOption) (*RecordRunTimingResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RecordRunTimingResponse)
+	err := c.cc.Invoke(ctx, RunLedgerService_RecordRunTiming_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *runLedgerServiceClient) GetRunTiming(ctx context.Context, in *GetRunTimingRequest, opts ...grpc.CallOption) (*GetRunTimingResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetRunTimingResponse)
+	err := c.cc.Invoke(ctx, RunLedgerService_GetRunTiming_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -86,6 +118,16 @@ type RunLedgerServiceServer interface {
 	// tool catalogue are stored once per run by digest; a call that repeats one
 	// only references it.
 	RecordRequestSnapshot(context.Context, *RecordRequestSnapshotRequest) (*RecordRequestSnapshotResponse, error)
+	// Store one content-free timing record of a run (EP-14 S5) as a
+	// RUN_TIMING_RECORDED event. The caller is the run's owner (model-gateway
+	// forwards the user's session bearer). A ZDR or waived run is refused with
+	// `zdr_durable_mutation_forbidden`; a repeat of the same (run, request,
+	// schema) is stored once.
+	RecordRunTiming(context.Context, *RecordRunTimingRequest) (*RecordRunTimingResponse, error)
+	// Read a run's timing records and its tool calls' reserve and finalize
+	// times (EP-14 S5). Owner only: a run of another user or org reads as not
+	// found. Answers UNIMPLEMENTED unless SESSION_CORE_RUN_LEDGER_READ is on.
+	GetRunTiming(context.Context, *GetRunTimingRequest) (*GetRunTimingResponse, error)
 	mustEmbedUnimplementedRunLedgerServiceServer()
 }
 
@@ -98,6 +140,12 @@ type UnimplementedRunLedgerServiceServer struct{}
 
 func (UnimplementedRunLedgerServiceServer) RecordRequestSnapshot(context.Context, *RecordRequestSnapshotRequest) (*RecordRequestSnapshotResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method RecordRequestSnapshot not implemented")
+}
+func (UnimplementedRunLedgerServiceServer) RecordRunTiming(context.Context, *RecordRunTimingRequest) (*RecordRunTimingResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method RecordRunTiming not implemented")
+}
+func (UnimplementedRunLedgerServiceServer) GetRunTiming(context.Context, *GetRunTimingRequest) (*GetRunTimingResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetRunTiming not implemented")
 }
 func (UnimplementedRunLedgerServiceServer) mustEmbedUnimplementedRunLedgerServiceServer() {}
 func (UnimplementedRunLedgerServiceServer) testEmbeddedByValue()                          {}
@@ -138,6 +186,42 @@ func _RunLedgerService_RecordRequestSnapshot_Handler(srv interface{}, ctx contex
 	return interceptor(ctx, in, info, handler)
 }
 
+func _RunLedgerService_RecordRunTiming_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RecordRunTimingRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RunLedgerServiceServer).RecordRunTiming(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RunLedgerService_RecordRunTiming_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RunLedgerServiceServer).RecordRunTiming(ctx, req.(*RecordRunTimingRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _RunLedgerService_GetRunTiming_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetRunTimingRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RunLedgerServiceServer).GetRunTiming(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RunLedgerService_GetRunTiming_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RunLedgerServiceServer).GetRunTiming(ctx, req.(*GetRunTimingRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // RunLedgerService_ServiceDesc is the grpc.ServiceDesc for RunLedgerService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -148,6 +232,14 @@ var RunLedgerService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "RecordRequestSnapshot",
 			Handler:    _RunLedgerService_RecordRequestSnapshot_Handler,
+		},
+		{
+			MethodName: "RecordRunTiming",
+			Handler:    _RunLedgerService_RecordRunTiming_Handler,
+		},
+		{
+			MethodName: "GetRunTiming",
+			Handler:    _RunLedgerService_GetRunTiming_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

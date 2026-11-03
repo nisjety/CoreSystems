@@ -228,6 +228,10 @@
     {
       "key": "conversation_import",
       "label_en": "conversation import"
+    },
+    {
+      "key": "run_inspection",
+      "label_en": "run timing and request inspection"
     }
   ],
   "generated_by": "mp-contracts zdr_refusal tests (MP_UPDATE_GOLDEN=1)",

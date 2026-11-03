@@ -202,6 +202,9 @@ services:
       # user-core registry entry of the same name (that one is audience user-core).
       MAIL_TASK_GATEWAY_BRIDGE_SERVICE_API_KEY: ${MAIL_TASK_GATEWAY_BRIDGE_SERVICE_API_KEY:-}
       MAIL_TASK_GATEWAY_BRIDGE_SERVICE_ID: ${MAIL_TASK_GATEWAY_BRIDGE_SERVICE_ID:-verevon-gateway}
+      # EP-12 S8: public Agent API ingress (/api/agent/v1/*); exchanges x-api-key at auth-core with the verevon-gateway principal above.
+      GATEWAY_AGENT_API_ENABLED: ${GATEWAY_AGENT_API_ENABLED:-false}
+      GATEWAY_AGENT_API_RPM_PER_KEY: ${GATEWAY_AGENT_API_RPM_PER_KEY:-60}
       # NOTE: there is deliberately no SCRAPE_ENHANCED_* stealth-proxy tier here.
       # The BFF used to fetch bot-walled sites itself through Scrapfly / Bright
       # Data, which sent the org's target URL and the page's full content to a

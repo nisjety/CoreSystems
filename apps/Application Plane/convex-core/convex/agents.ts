@@ -702,3 +702,45 @@ export const getVersionForGateway = query({
     return row ? projectAgentVersion(row, organization._id) : null;
   },
 });
+
+/**
+ * What the agent builder (EP-6 S8) reads before the gateway authorises an edit: the draft, the
+ * pointer, the legacy fields a first draft is seeded from, and the two facts its gate needs (the
+ * creator's Control subject, and the Space a room-born agent was created in). An agent of another
+ * organisation reads as null, the same answer as an unknown id.
+ */
+export const builderDefinitionForGateway = query({
+  args: {
+    serviceKey: v.string(),
+    externalAuthId: v.string(),
+    externalOrgId: v.string(),
+    agentId: v.id("agents"),
+  },
+  handler: async (ctx, args) => {
+    assertServiceKey(args.serviceKey);
+    const organization = await requireGatewayMember(ctx, args.externalAuthId, args.externalOrgId);
+    const agent = await ctx.db.get(args.agentId);
+    if (!agent || agent.orgId !== organization._id) return null;
+    const creator = agent.createdBy ? await ctx.db.get(agent.createdBy) : null;
+    // createSpaceAgentForGateway writes the agent and its first binding in one transaction with
+    // the same timestamp and no createdBy; that binding's Space is where the agent was born.
+    const origin = agent.createdBy
+      ? null
+      : (
+          await ctx.db
+            .query("spaceAgentBindings")
+            .withIndex("by_external_org", (q: any) => q.eq("externalOrgId", args.externalOrgId))
+            .collect()
+        ).find((binding: any) => binding.agentId === args.agentId && binding.createdAt === agent.createdAt);
+    return {
+      agentRef: agent._id,
+      name: agent.name,
+      systemPrompt: agent.systemPrompt ?? null,
+      model: agent.model ?? null,
+      publishedVersion: agent.publishedVersion ?? null,
+      draft: agent.draft ?? null,
+      creatorExternalAuthId: creator?.externalAuthId ?? null,
+      originSpaceRef: origin?.spaceRef ?? null,
+    };
+  },
+});

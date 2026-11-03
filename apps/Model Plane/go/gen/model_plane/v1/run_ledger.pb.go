@@ -9,6 +9,7 @@ package mpv1
 import (
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
+	timestamppb "google.golang.org/protobuf/types/known/timestamppb"
 	reflect "reflect"
 	sync "sync"
 	unsafe "unsafe"
@@ -237,11 +238,401 @@ func (x *RecordRequestSnapshotResponse) GetDeduplicatedTools() bool {
 	return false
 }
 
+// RunTimingRecorded: one content-free timing record of a run (EP-14 S5).
+// Holds ids, milliseconds, counts and offered tool names, never prompt text,
+// message content, tool arguments or tool results.
+type RunTimingRecorded struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The run the record belongs to.
+	RunId string `protobuf:"bytes,1,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
+	// The request id of the turn (Ask) or of the stream that drove the run (Do).
+	RequestId string `protobuf:"bytes,2,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
+	// The record's shape: "turn-timing-v1" (an Ask turn's `turn_timing` report,
+	// as the SSE frame carries it) or "round-timing-v1" (a Do run's
+	// `RunAgentResponse.round_timing` as `{"rounds":[...]}`). A later additive
+	// field is a new minor schema, never a change of these.
+	Schema string `protobuf:"bytes,3,opt,name=schema,proto3" json:"schema,omitempty"`
+	// The record as a JSON object of that schema.
+	ReportJson string `protobuf:"bytes,4,opt,name=report_json,json=reportJson,proto3" json:"report_json,omitempty"`
+	// Phase spans the turn clock counted but did not keep (MAX_PHASES).
+	PhasesDropped uint32 `protobuf:"varint,5,opt,name=phases_dropped,json=phasesDropped,proto3" json:"phases_dropped,omitempty"`
+	// When session-core stored the record. Set on read; ignored on write.
+	RecordedAt    *timestamppb.Timestamp `protobuf:"bytes,6,opt,name=recorded_at,json=recordedAt,proto3" json:"recorded_at,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RunTimingRecorded) Reset() {
+	*x = RunTimingRecorded{}
+	mi := &file_model_plane_v1_run_ledger_proto_msgTypes[2]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RunTimingRecorded) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RunTimingRecorded) ProtoMessage() {}
+
+func (x *RunTimingRecorded) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_run_ledger_proto_msgTypes[2]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RunTimingRecorded.ProtoReflect.Descriptor instead.
+func (*RunTimingRecorded) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_run_ledger_proto_rawDescGZIP(), []int{2}
+}
+
+func (x *RunTimingRecorded) GetRunId() string {
+	if x != nil {
+		return x.RunId
+	}
+	return ""
+}
+
+func (x *RunTimingRecorded) GetRequestId() string {
+	if x != nil {
+		return x.RequestId
+	}
+	return ""
+}
+
+func (x *RunTimingRecorded) GetSchema() string {
+	if x != nil {
+		return x.Schema
+	}
+	return ""
+}
+
+func (x *RunTimingRecorded) GetReportJson() string {
+	if x != nil {
+		return x.ReportJson
+	}
+	return ""
+}
+
+func (x *RunTimingRecorded) GetPhasesDropped() uint32 {
+	if x != nil {
+		return x.PhasesDropped
+	}
+	return 0
+}
+
+func (x *RunTimingRecorded) GetRecordedAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.RecordedAt
+	}
+	return nil
+}
+
+// RunActionTiming: one tool call of a run, from its durable tool-intent row
+// (EP-14 S5). Content-free: no arguments, no result, no argument digest.
+type RunActionTiming struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The tool call's action id.
+	ActionId string `protobuf:"bytes,1,opt,name=action_id,json=actionId,proto3" json:"action_id,omitempty"`
+	// The tool's name.
+	Tool string `protobuf:"bytes,2,opt,name=tool,proto3" json:"tool,omitempty"`
+	// The intent's status ("reserved", "completed", "failed", ...).
+	Status string `protobuf:"bytes,3,opt,name=status,proto3" json:"status,omitempty"`
+	// When the call was reserved, before dispatch.
+	ReservedAt *timestamppb.Timestamp `protobuf:"bytes,4,opt,name=reserved_at,json=reservedAt,proto3" json:"reserved_at,omitempty"`
+	// When the call was finalized. Unset while it is still open.
+	FinalizedAt *timestamppb.Timestamp `protobuf:"bytes,5,opt,name=finalized_at,json=finalizedAt,proto3" json:"finalized_at,omitempty"`
+	// The call's effect class, empty when the writer recorded none.
+	EffectClass   string `protobuf:"bytes,6,opt,name=effect_class,json=effectClass,proto3" json:"effect_class,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RunActionTiming) Reset() {
+	*x = RunActionTiming{}
+	mi := &file_model_plane_v1_run_ledger_proto_msgTypes[3]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RunActionTiming) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RunActionTiming) ProtoMessage() {}
+
+func (x *RunActionTiming) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_run_ledger_proto_msgTypes[3]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RunActionTiming.ProtoReflect.Descriptor instead.
+func (*RunActionTiming) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_run_ledger_proto_rawDescGZIP(), []int{3}
+}
+
+func (x *RunActionTiming) GetActionId() string {
+	if x != nil {
+		return x.ActionId
+	}
+	return ""
+}
+
+func (x *RunActionTiming) GetTool() string {
+	if x != nil {
+		return x.Tool
+	}
+	return ""
+}
+
+func (x *RunActionTiming) GetStatus() string {
+	if x != nil {
+		return x.Status
+	}
+	return ""
+}
+
+func (x *RunActionTiming) GetReservedAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.ReservedAt
+	}
+	return nil
+}
+
+func (x *RunActionTiming) GetFinalizedAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.FinalizedAt
+	}
+	return nil
+}
+
+func (x *RunActionTiming) GetEffectClass() string {
+	if x != nil {
+		return x.EffectClass
+	}
+	return ""
+}
+
+// RecordRunTimingRequest: store one timing record (EP-14 S5).
+type RecordRunTimingRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The record. `recorded_at` is ignored.
+	Timing        *RunTimingRecorded `protobuf:"bytes,1,opt,name=timing,proto3" json:"timing,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RecordRunTimingRequest) Reset() {
+	*x = RecordRunTimingRequest{}
+	mi := &file_model_plane_v1_run_ledger_proto_msgTypes[4]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RecordRunTimingRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RecordRunTimingRequest) ProtoMessage() {}
+
+func (x *RecordRunTimingRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_run_ledger_proto_msgTypes[4]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RecordRunTimingRequest.ProtoReflect.Descriptor instead.
+func (*RecordRunTimingRequest) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_run_ledger_proto_rawDescGZIP(), []int{4}
+}
+
+func (x *RecordRunTimingRequest) GetTiming() *RunTimingRecorded {
+	if x != nil {
+		return x.Timing
+	}
+	return nil
+}
+
+// RecordRunTimingResponse: what the write stored (EP-14 S5).
+type RecordRunTimingResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// A new event was written (false for a repeat of the same record).
+	Stored        bool `protobuf:"varint,1,opt,name=stored,proto3" json:"stored,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RecordRunTimingResponse) Reset() {
+	*x = RecordRunTimingResponse{}
+	mi := &file_model_plane_v1_run_ledger_proto_msgTypes[5]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RecordRunTimingResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RecordRunTimingResponse) ProtoMessage() {}
+
+func (x *RecordRunTimingResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_run_ledger_proto_msgTypes[5]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RecordRunTimingResponse.ProtoReflect.Descriptor instead.
+func (*RecordRunTimingResponse) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_run_ledger_proto_rawDescGZIP(), []int{5}
+}
+
+func (x *RecordRunTimingResponse) GetStored() bool {
+	if x != nil {
+		return x.Stored
+	}
+	return false
+}
+
+// GetRunTimingRequest: read one run's timing (EP-14 S5).
+type GetRunTimingRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The run to read. Must be the caller's.
+	RunId         string `protobuf:"bytes,1,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetRunTimingRequest) Reset() {
+	*x = GetRunTimingRequest{}
+	mi := &file_model_plane_v1_run_ledger_proto_msgTypes[6]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetRunTimingRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetRunTimingRequest) ProtoMessage() {}
+
+func (x *GetRunTimingRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_run_ledger_proto_msgTypes[6]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetRunTimingRequest.ProtoReflect.Descriptor instead.
+func (*GetRunTimingRequest) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_run_ledger_proto_rawDescGZIP(), []int{6}
+}
+
+func (x *GetRunTimingRequest) GetRunId() string {
+	if x != nil {
+		return x.RunId
+	}
+	return ""
+}
+
+// GetRunTimingResponse: a run's timing records and tool-call times (EP-14 S5).
+type GetRunTimingResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The run's timing records, oldest first.
+	Timings []*RunTimingRecorded `protobuf:"bytes,1,rep,name=timings,proto3" json:"timings,omitempty"`
+	// The run's tool calls, by reserve time, at most 500.
+	Actions []*RunActionTiming `protobuf:"bytes,2,rep,name=actions,proto3" json:"actions,omitempty"`
+	// More tool calls exist than `actions` holds.
+	Truncated     bool `protobuf:"varint,3,opt,name=truncated,proto3" json:"truncated,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetRunTimingResponse) Reset() {
+	*x = GetRunTimingResponse{}
+	mi := &file_model_plane_v1_run_ledger_proto_msgTypes[7]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetRunTimingResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetRunTimingResponse) ProtoMessage() {}
+
+func (x *GetRunTimingResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_run_ledger_proto_msgTypes[7]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetRunTimingResponse.ProtoReflect.Descriptor instead.
+func (*GetRunTimingResponse) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_run_ledger_proto_rawDescGZIP(), []int{7}
+}
+
+func (x *GetRunTimingResponse) GetTimings() []*RunTimingRecorded {
+	if x != nil {
+		return x.Timings
+	}
+	return nil
+}
+
+func (x *GetRunTimingResponse) GetActions() []*RunActionTiming {
+	if x != nil {
+		return x.Actions
+	}
+	return nil
+}
+
+func (x *GetRunTimingResponse) GetTruncated() bool {
+	if x != nil {
+		return x.Truncated
+	}
+	return false
+}
+
 var File_model_plane_v1_run_ledger_proto protoreflect.FileDescriptor
 
 const file_model_plane_v1_run_ledger_proto_rawDesc = "" +
 	"\n" +
-	"\x1fmodel_plane/v1/run_ledger.proto\x12\x0emodel_plane.v1\x1a\x1emodel_plane/v1/inference.proto\"\xb7\x03\n" +
+	"\x1fmodel_plane/v1/run_ledger.proto\x12\x0emodel_plane.v1\x1a\x1fgoogle/protobuf/timestamp.proto\x1a\x1emodel_plane/v1/inference.proto\"\xb7\x03\n" +
 	"\x1cRecordRequestSnapshotRequest\x12\x15\n" +
 	"\x06run_id\x18\x01 \x01(\tR\x05runId\x12\x19\n" +
 	"\bcall_seq\x18\x02 \x01(\rR\acallSeq\x126\n" +
@@ -262,9 +653,39 @@ const file_model_plane_v1_run_ledger_proto_rawDesc = "" +
 	"\x1dRecordRequestSnapshotResponse\x12\x16\n" +
 	"\x06stored\x18\x01 \x01(\bR\x06stored\x12/\n" +
 	"\x13deduplicated_system\x18\x02 \x01(\bR\x12deduplicatedSystem\x12-\n" +
-	"\x12deduplicated_tools\x18\x03 \x01(\bR\x11deduplicatedTools2\x88\x01\n" +
+	"\x12deduplicated_tools\x18\x03 \x01(\bR\x11deduplicatedTools\"\xe6\x01\n" +
+	"\x11RunTimingRecorded\x12\x15\n" +
+	"\x06run_id\x18\x01 \x01(\tR\x05runId\x12\x1d\n" +
+	"\n" +
+	"request_id\x18\x02 \x01(\tR\trequestId\x12\x16\n" +
+	"\x06schema\x18\x03 \x01(\tR\x06schema\x12\x1f\n" +
+	"\vreport_json\x18\x04 \x01(\tR\n" +
+	"reportJson\x12%\n" +
+	"\x0ephases_dropped\x18\x05 \x01(\rR\rphasesDropped\x12;\n" +
+	"\vrecorded_at\x18\x06 \x01(\v2\x1a.google.protobuf.TimestampR\n" +
+	"recordedAt\"\xf9\x01\n" +
+	"\x0fRunActionTiming\x12\x1b\n" +
+	"\taction_id\x18\x01 \x01(\tR\bactionId\x12\x12\n" +
+	"\x04tool\x18\x02 \x01(\tR\x04tool\x12\x16\n" +
+	"\x06status\x18\x03 \x01(\tR\x06status\x12;\n" +
+	"\vreserved_at\x18\x04 \x01(\v2\x1a.google.protobuf.TimestampR\n" +
+	"reservedAt\x12=\n" +
+	"\ffinalized_at\x18\x05 \x01(\v2\x1a.google.protobuf.TimestampR\vfinalizedAt\x12!\n" +
+	"\feffect_class\x18\x06 \x01(\tR\veffectClass\"S\n" +
+	"\x16RecordRunTimingRequest\x129\n" +
+	"\x06timing\x18\x01 \x01(\v2!.model_plane.v1.RunTimingRecordedR\x06timing\"1\n" +
+	"\x17RecordRunTimingResponse\x12\x16\n" +
+	"\x06stored\x18\x01 \x01(\bR\x06stored\",\n" +
+	"\x13GetRunTimingRequest\x12\x15\n" +
+	"\x06run_id\x18\x01 \x01(\tR\x05runId\"\xac\x01\n" +
+	"\x14GetRunTimingResponse\x12;\n" +
+	"\atimings\x18\x01 \x03(\v2!.model_plane.v1.RunTimingRecordedR\atimings\x129\n" +
+	"\aactions\x18\x02 \x03(\v2\x1f.model_plane.v1.RunActionTimingR\aactions\x12\x1c\n" +
+	"\ttruncated\x18\x03 \x01(\bR\ttruncated2\xc7\x02\n" +
 	"\x10RunLedgerService\x12t\n" +
-	"\x15RecordRequestSnapshot\x12,.model_plane.v1.RecordRequestSnapshotRequest\x1a-.model_plane.v1.RecordRequestSnapshotResponseB\xb6\x01\n" +
+	"\x15RecordRequestSnapshot\x12,.model_plane.v1.RecordRequestSnapshotRequest\x1a-.model_plane.v1.RecordRequestSnapshotResponse\x12b\n" +
+	"\x0fRecordRunTiming\x12&.model_plane.v1.RecordRunTimingRequest\x1a'.model_plane.v1.RecordRunTimingResponse\x12Y\n" +
+	"\fGetRunTiming\x12#.model_plane.v1.GetRunTimingRequest\x1a$.model_plane.v1.GetRunTimingResponseB\xb6\x01\n" +
 	"\x12com.model_plane.v1B\x0eRunLedgerProtoP\x01Z;github.com/triodelab/model-plane/gen/go/model_plane/v1;mpv1\xa2\x02\x03MXX\xaa\x02\rModelPlane.V1\xca\x02\rModelPlane\\V1\xe2\x02\x19ModelPlane\\V1\\GPBMetadata\xea\x02\x0eModelPlane::V1b\x06proto3"
 
 var (
@@ -279,21 +700,38 @@ func file_model_plane_v1_run_ledger_proto_rawDescGZIP() []byte {
 	return file_model_plane_v1_run_ledger_proto_rawDescData
 }
 
-var file_model_plane_v1_run_ledger_proto_msgTypes = make([]protoimpl.MessageInfo, 2)
+var file_model_plane_v1_run_ledger_proto_msgTypes = make([]protoimpl.MessageInfo, 8)
 var file_model_plane_v1_run_ledger_proto_goTypes = []any{
 	(*RecordRequestSnapshotRequest)(nil),  // 0: model_plane.v1.RecordRequestSnapshotRequest
 	(*RecordRequestSnapshotResponse)(nil), // 1: model_plane.v1.RecordRequestSnapshotResponse
-	(InferPurpose)(0),                     // 2: model_plane.v1.InferPurpose
+	(*RunTimingRecorded)(nil),             // 2: model_plane.v1.RunTimingRecorded
+	(*RunActionTiming)(nil),               // 3: model_plane.v1.RunActionTiming
+	(*RecordRunTimingRequest)(nil),        // 4: model_plane.v1.RecordRunTimingRequest
+	(*RecordRunTimingResponse)(nil),       // 5: model_plane.v1.RecordRunTimingResponse
+	(*GetRunTimingRequest)(nil),           // 6: model_plane.v1.GetRunTimingRequest
+	(*GetRunTimingResponse)(nil),          // 7: model_plane.v1.GetRunTimingResponse
+	(InferPurpose)(0),                     // 8: model_plane.v1.InferPurpose
+	(*timestamppb.Timestamp)(nil),         // 9: google.protobuf.Timestamp
 }
 var file_model_plane_v1_run_ledger_proto_depIdxs = []int32{
-	2, // 0: model_plane.v1.RecordRequestSnapshotRequest.purpose:type_name -> model_plane.v1.InferPurpose
-	0, // 1: model_plane.v1.RunLedgerService.RecordRequestSnapshot:input_type -> model_plane.v1.RecordRequestSnapshotRequest
-	1, // 2: model_plane.v1.RunLedgerService.RecordRequestSnapshot:output_type -> model_plane.v1.RecordRequestSnapshotResponse
-	2, // [2:3] is the sub-list for method output_type
-	1, // [1:2] is the sub-list for method input_type
-	1, // [1:1] is the sub-list for extension type_name
-	1, // [1:1] is the sub-list for extension extendee
-	0, // [0:1] is the sub-list for field type_name
+	8,  // 0: model_plane.v1.RecordRequestSnapshotRequest.purpose:type_name -> model_plane.v1.InferPurpose
+	9,  // 1: model_plane.v1.RunTimingRecorded.recorded_at:type_name -> google.protobuf.Timestamp
+	9,  // 2: model_plane.v1.RunActionTiming.reserved_at:type_name -> google.protobuf.Timestamp
+	9,  // 3: model_plane.v1.RunActionTiming.finalized_at:type_name -> google.protobuf.Timestamp
+	2,  // 4: model_plane.v1.RecordRunTimingRequest.timing:type_name -> model_plane.v1.RunTimingRecorded
+	2,  // 5: model_plane.v1.GetRunTimingResponse.timings:type_name -> model_plane.v1.RunTimingRecorded
+	3,  // 6: model_plane.v1.GetRunTimingResponse.actions:type_name -> model_plane.v1.RunActionTiming
+	0,  // 7: model_plane.v1.RunLedgerService.RecordRequestSnapshot:input_type -> model_plane.v1.RecordRequestSnapshotRequest
+	4,  // 8: model_plane.v1.RunLedgerService.RecordRunTiming:input_type -> model_plane.v1.RecordRunTimingRequest
+	6,  // 9: model_plane.v1.RunLedgerService.GetRunTiming:input_type -> model_plane.v1.GetRunTimingRequest
+	1,  // 10: model_plane.v1.RunLedgerService.RecordRequestSnapshot:output_type -> model_plane.v1.RecordRequestSnapshotResponse
+	5,  // 11: model_plane.v1.RunLedgerService.RecordRunTiming:output_type -> model_plane.v1.RecordRunTimingResponse
+	7,  // 12: model_plane.v1.RunLedgerService.GetRunTiming:output_type -> model_plane.v1.GetRunTimingResponse
+	10, // [10:13] is the sub-list for method output_type
+	7,  // [7:10] is the sub-list for method input_type
+	7,  // [7:7] is the sub-list for extension type_name
+	7,  // [7:7] is the sub-list for extension extendee
+	0,  // [0:7] is the sub-list for field type_name
 }
 
 func init() { file_model_plane_v1_run_ledger_proto_init() }
@@ -308,7 +746,7 @@ func file_model_plane_v1_run_ledger_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_model_plane_v1_run_ledger_proto_rawDesc), len(file_model_plane_v1_run_ledger_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   2,
+			NumMessages:   8,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

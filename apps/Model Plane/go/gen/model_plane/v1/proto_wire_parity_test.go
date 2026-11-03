@@ -128,6 +128,7 @@ func TestTraceEventTypesAreAllocated(t *testing.T) {
 		EventType_EVENT_TYPE_BROWSER_EGRESS_DECIDED:        155,
 		EventType_EVENT_TYPE_BROWSER_ARTIFACT_RECORDED:     156,
 		EventType_EVENT_TYPE_BROWSER_ATTACH_SHARED_JAR:     160,
+		EventType_EVENT_TYPE_RUN_TIMING_RECORDED:          161,
 	}
 	for et, n := range want {
 		if int32(et) != n {

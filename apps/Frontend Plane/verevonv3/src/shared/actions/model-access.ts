@@ -352,6 +352,9 @@ export const MODEL_ACCESS: Readonly<Record<ActionId, ModelAccessEntry>> = {
   'schedule.delete': exempt('irreversible_destructive', 'destructive'),
   'schedule.fires.list': exempt('no_owner_executor', 'read'),
   'agents.installations.list': exempt('no_owner_executor', 'read'),
+  'agents.draft.save': exempt('agent_cannot_self_govern', 'external_write'),
+  'agents.publish': exempt('agent_cannot_self_govern', 'external_write'),
+  'agents.versions.list': exempt('no_owner_executor', 'read'),
 }
 
 /**

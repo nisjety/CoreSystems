@@ -371,6 +371,11 @@ pub const FEATURES: &[Feature] = &[
         key: "conversation_import",
         label: "conversation import",
     },
+    // EP-14 S5/S7: the run timing and request-inspection reads refuse a ZDR caller.
+    Feature {
+        key: "run_inspection",
+        label: "run timing and request inspection",
+    },
 ];
 
 /// The catalogue entry for `code`, if it is a catalogue code.

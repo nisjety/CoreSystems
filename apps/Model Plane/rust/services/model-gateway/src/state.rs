@@ -22,6 +22,7 @@ use mp_contracts::model_plane::v1::{
     thread_fork_service_client::ThreadForkServiceClient,
     attention_service_client::AttentionServiceClient,
     orchestration_core_service_client::OrchestrationCoreServiceClient,
+    run_ledger_service_client::RunLedgerServiceClient,
     run_service_client::RunServiceClient, sandbox_manager_client::SandboxManagerClient,
     session_core_client::SessionCoreClient, space_attention_client::SpaceAttentionClient,
     space_events_client::SpaceEventsClient,
@@ -117,6 +118,8 @@ pub struct AppState {
     pub message_revision_client: MessageRevisionServiceClient<Channel>,
     /// Session Core's EventLog (the run trace read path, WS10.S6) on the `session_client` endpoint.
     pub event_log_client: EventLogClient<Channel>,
+    /// Session Core's RunLedgerService (EP-14 S5 run timing write and read) on the session_client endpoint.
+    pub run_ledger_client: RunLedgerServiceClient<Channel>,
     /// Session Core's MessageTree service on the session_client endpoint (WS17-S8).
     pub message_tree_client: MessageTreeServiceClient<Channel>,
     /// Session Core's ThreadFork service on the session_client endpoint (WS17-S6).
@@ -468,6 +471,7 @@ impl AppState {
             message_search_client: MessageSearchClient::new(session_channel.clone()),
             message_revision_client: MessageRevisionServiceClient::new(session_channel.clone()),
             event_log_client: EventLogClient::new(session_channel.clone()),
+            run_ledger_client: RunLedgerServiceClient::new(session_channel.clone()),
             message_tree_client: MessageTreeServiceClient::new(session_channel.clone()),
             thread_fork_client: ThreadForkServiceClient::new(session_channel.clone()),
             attention_client: AttentionServiceClient::new(session_channel.clone()),
@@ -649,6 +653,11 @@ impl AppState {
             "http://localhost:9091",
         )?);
         let event_log_client = EventLogClient::new(Self::lazy_channel(
+            "SESSION_CORE_URL",
+            "SESSION_CORE_ADDR",
+            "http://localhost:9091",
+        )?);
+        let run_ledger_client = RunLedgerServiceClient::new(Self::lazy_channel(
             "SESSION_CORE_URL",
             "SESSION_CORE_ADDR",
             "http://localhost:9091",
@@ -895,6 +904,7 @@ impl AppState {
             state.message_search_client = message_search_client;
             state.message_revision_client = message_revision_client;
             state.event_log_client = event_log_client;
+            state.run_ledger_client = run_ledger_client;
             state.message_tree_client = message_tree_client;
             state.thread_fork_client = thread_fork_client;
             state.attention_client = attention_client;
@@ -962,6 +972,7 @@ impl AppState {
             state.message_search_client = message_search_client;
             state.message_revision_client = message_revision_client;
             state.event_log_client = event_log_client;
+            state.run_ledger_client = run_ledger_client;
             state.message_tree_client = message_tree_client;
             state.thread_fork_client = thread_fork_client;
             state.attention_client = attention_client;

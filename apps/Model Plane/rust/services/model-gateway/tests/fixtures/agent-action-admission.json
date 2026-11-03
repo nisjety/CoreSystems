@@ -4,6 +4,19 @@
   "catalogSchemaVersion": 3,
   "rows": [
     {
+      "actionId": "agents.draft.save",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "external_write",
+      "exemptReason": "agent_cannot_self_govern",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:444183e61bfb126b0d783f1df8e5546a2622ecba0c34df9e4ba8989625b436b8",
+      "zdr_allowed": false
+    },
+    {
       "actionId": "agents.installations.list",
       "registry": true,
       "access": "none",
@@ -14,6 +27,32 @@
       "executor": {},
       "hashBasis": "catalog_entry",
       "schemaHash": "sha256:3145895d015b65aa3646491a939371f2edb92181ee177fc588355bb81de5e9da",
+      "zdr_allowed": false
+    },
+    {
+      "actionId": "agents.publish",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "external_write",
+      "exemptReason": "agent_cannot_self_govern",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:ab68817a9885cdedd52202fa03cc701f94ba82bfcf03d60a4840d37446016d78",
+      "zdr_allowed": false
+    },
+    {
+      "actionId": "agents.versions.list",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "read",
+      "exemptReason": "no_owner_executor",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:d593cdd2255311fc867161d5b33745c3cc6626c71864829078786a0bf4ede9f7",
       "zdr_allowed": false
     },
     {
