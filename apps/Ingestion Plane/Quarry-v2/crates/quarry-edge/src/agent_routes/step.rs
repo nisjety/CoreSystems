@@ -38,6 +38,93 @@ pub(super) fn check_landed_page(
     crate::agent_policy_gate::gate_visit(state, live, zdr, url)
 }
 
+/// W3-E3.4-4: the flag that turns on the download admission policy. Default off: while it
+/// is off the edge runs none of the policy below and `download_ref` keeps its earlier path
+/// (the capability gate, the single-use sensitive approval, the runner's own checks).
+const DOWNLOADS_FLAG: &str = "QUARRY_EDGE__DOWNLOADS";
+
+/// Whether `QUARRY_EDGE__DOWNLOADS` is on in this process. Read per call, like
+/// `QUARRY_EDGE__FILL_OTP`, so the flag needs no AppState plumbing.
+fn downloads_enabled() -> bool {
+    std::env::var(DOWNLOADS_FLAG)
+        .map(|v| {
+            matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn is_download_action(action: &AgentAction) -> bool {
+    matches!(
+        action,
+        AgentAction::DownloadRef { .. } | AgentAction::FrameDownloadRef { .. }
+    )
+}
+
+/// W3-E3.4-4, before the browser runs: a `download_ref` step (the only solicited
+/// download; admission has already spent its single-use approval) is refused under ZDR
+/// and when its session has spent its download byte cap. `Ok(true)` means the step is a
+/// download the policy must settle after it ran ([`settle_download`]).
+fn download_gate_before(
+    enabled: bool,
+    action: &AgentAction,
+    zdr_active: bool,
+    ledger: &quarry_runtime::action_runtime::downloads::SessionDownloadLedger,
+    session: &str,
+) -> QuarryResult<bool> {
+    use quarry_runtime::action_runtime::downloads;
+    if !enabled || !is_download_action(action) {
+        return Ok(false);
+    }
+    downloads::admit_origin(downloads::DownloadOrigin::DownloadRef)?;
+    downloads::admit_zdr(zdr_active)?;
+    ledger.check_open(session)?;
+    Ok(true)
+}
+
+/// W3-E3.4-4, after the browser ran: the type allow-list (PDF, text, Markdown, CSV; Office
+/// refused) on the stored download's bytes, and the charge to the session's byte cap. A
+/// refusal fails the step. The runner pushes the download's artifact id last in the proof
+/// bundle; a backend that reports object keys must also name it a browser download.
+async fn settle_download(
+    state: &AppState,
+    org_id: &str,
+    session: &str,
+    zdr_active: bool,
+    obs: BrowserObservation,
+) -> QuarryResult<BrowserObservation> {
+    use quarry_runtime::action_runtime::downloads;
+    use quarry_runtime::artifact_store::ArtifactStore as _;
+    let id = obs
+        .proof_bundle
+        .as_ref()
+        .and_then(|proof| proof.artifact_ids.last().cloned())
+        .ok_or_else(|| {
+            QuarryError::new(
+                ErrorCode::RuntimeNotReady,
+                "download step produced no stored artifact to admit",
+            )
+        })?;
+    let (bytes, key) = state.artifacts.get_with_key(org_id, &id).await?;
+    if !downloads::is_download_artifact_key(&key) {
+        return Err(QuarryError::new(
+            ErrorCode::RuntimeNotReady,
+            "download step's last artifact is not a browser download",
+        ));
+    }
+    downloads::admit_download(
+        downloads::session_ledger(),
+        session,
+        downloads::DownloadOrigin::DownloadRef,
+        zdr_active,
+        None,
+        &bytes,
+    )?;
+    Ok(obs)
+}
+
 /// [`check_landed_page`] against the run's own navigation policy.
 fn check_landed_on_run(
     state: &AppState,
@@ -122,6 +209,16 @@ pub async fn step(
     super::attach::person_tab_gate(&state, &handle, &entry, admitted.initiator, &body.action)
         .await
         .map_err(|error| driver_err(&request_id, error))?;
+    // W3-E3.4-4: the download admission policy, while QUARRY_EDGE__DOWNLOADS is on.
+    let download_gated = download_gate_before(
+        downloads_enabled(),
+        &body.action,
+        entry.zdr.is_active(),
+        quarry_runtime::action_runtime::downloads::session_ledger(),
+        &entry.run_id.to_string(),
+    )
+    .map_err(|error| driver_err(&request_id, error))?;
+    let download_zdr = entry.zdr.is_active();
     // WS8.B: the receipt plan and the budget exemption of this step.
     let receipt_plan = super::human_browse::receipt_plan(
         admitted.initiator,
@@ -182,6 +279,14 @@ pub async fn step(
     let step_started = std::time::Instant::now();
     let egress_cursor = lane.ctx.last_egress_sequence;
     let step_result = runner.execute(&req, &session, &mut lane.ctx).await;
+    // W3-E3.4-4: the stored download passes the type allow-list and the session cap, or
+    // the step fails. Read without the run entry held.
+    let step_result = match step_result {
+        Ok(obs) if download_gated => {
+            settle_download(&state, &org_id, &receipt_run_id, download_zdr, obs).await
+        }
+        other => other,
+    };
     let step_elapsed = step_started.elapsed();
     if takeover_exempt {
         crate::metrics::record_takeover_exempt_step(step_elapsed);
@@ -307,6 +412,15 @@ pub(super) async fn execute_ws_action(
     )
     .await?;
     super::attach::person_tab_gate(state, handle, &entry, admitted.initiator, &action).await?;
+    // W3-E3.4-4: the download admission policy, while QUARRY_EDGE__DOWNLOADS is on.
+    let download_gated = download_gate_before(
+        downloads_enabled(),
+        &action,
+        entry.zdr.is_active(),
+        quarry_runtime::action_runtime::downloads::session_ledger(),
+        &entry.run_id.to_string(),
+    )?;
+    let download_zdr = entry.zdr.is_active();
     // WS8.B: the receipt plan and the budget exemption of this step.
     let receipt_plan = super::human_browse::receipt_plan(
         admitted.initiator,
@@ -359,6 +473,13 @@ pub(super) async fn execute_ws_action(
     let step_started = std::time::Instant::now();
     let egress_cursor = lane.ctx.last_egress_sequence;
     let step_result = runner.execute(&req, &session, &mut lane.ctx).await;
+    // W3-E3.4-4: as in `step`.
+    let step_result = match step_result {
+        Ok(obs) if download_gated => {
+            settle_download(state, &org_id, &receipt_run_id, download_zdr, obs).await
+        }
+        other => other,
+    };
     let step_elapsed = step_started.elapsed();
     if takeover_exempt {
         crate::metrics::record_takeover_exempt_step(step_elapsed);
@@ -430,4 +551,70 @@ pub(super) async fn execute_ws_action(
             .await?;
     }
     Ok(observation)
+}
+
+#[cfg(test)]
+mod download_gate_tests {
+    use super::*;
+    use quarry_runtime::action_runtime::downloads::SessionDownloadLedger;
+
+    fn download() -> AgentAction {
+        AgentAction::DownloadRef {
+            snapshot_id: "s1".into(),
+            generation: 1,
+            ref_id: "r1".into(),
+            approval_grant_id: "g1".into(),
+        }
+    }
+
+    fn ledger(max: u64) -> SessionDownloadLedger {
+        SessionDownloadLedger::new(max, std::time::Duration::from_secs(60))
+    }
+
+    #[test]
+    fn flag_off_runs_no_download_policy() {
+        let l = ledger(0);
+        // Even a ZDR run with a spent cap passes: the policy is off.
+        assert!(!download_gate_before(false, &download(), true, &l, "run").unwrap());
+    }
+
+    #[test]
+    fn other_actions_are_not_gated() {
+        let l = ledger(0);
+        let nav = AgentAction::Navigate { url: "https://example.com".into() };
+        assert!(!download_gate_before(true, &nav, true, &l, "run").unwrap());
+    }
+
+    #[test]
+    fn flag_on_gates_download_ref() {
+        let l = ledger(10);
+        assert!(download_gate_before(true, &download(), false, &l, "run").unwrap());
+        let frame = AgentAction::FrameDownloadRef {
+            snapshot_id: "s1".into(),
+            generation: 1,
+            frame_id: "f1".into(),
+            ref_id: "r1".into(),
+            approval_grant_id: "g1".into(),
+        };
+        assert!(download_gate_before(true, &frame, false, &l, "run").unwrap());
+    }
+
+    #[test]
+    fn flag_on_refuses_zdr() {
+        let l = ledger(10);
+        let err = download_gate_before(true, &download(), true, &l, "run").unwrap_err();
+        assert_eq!(err.code, ErrorCode::SecurityBlocked);
+    }
+
+    #[test]
+    fn flag_on_refuses_a_session_past_its_cap() {
+        let l = ledger(10);
+        l.charge("run", 10).unwrap();
+        let err = download_gate_before(true, &download(), false, &l, "run").unwrap_err();
+        assert_eq!(err.code, ErrorCode::BudgetExhausted);
+        // Another run is unaffected; a released run starts again.
+        assert!(download_gate_before(true, &download(), false, &l, "other").unwrap());
+        l.release("run");
+        assert!(download_gate_before(true, &download(), false, &l, "run").unwrap());
+    }
 }
