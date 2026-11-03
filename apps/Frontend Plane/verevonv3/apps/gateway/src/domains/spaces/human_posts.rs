@@ -877,7 +877,7 @@ pub(crate) async fn space_scope_for_thread(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     //! WS01-S5 tests: the real router with wiremock for auth-core, user-core (Control), org-core,
     //! Application (Convex) and model-gateway. No model is called: model-gateway is a mock.
     use super::*;
@@ -890,22 +890,22 @@ mod tests {
     const SEND_ID: &str = "send_id_0123456789ab";
     const TOKEN_SECRET: &str = "decision-token-secret-xyzxyz";
 
-    struct Fx {
-        state: AppState,
+    pub(crate) struct Fx {
+        pub(crate) state: AppState,
         _auth: MockServer,
-        user_core: MockServer,
+        pub(crate) user_core: MockServer,
         _org_core: MockServer,
         _application: MockServer,
-        model_gateway: MockServer,
+        pub(crate) model_gateway: MockServer,
     }
 
-    fn active_space() -> ResponseTemplate {
+    pub(crate) fn active_space() -> ResponseTemplate {
         ResponseTemplate::new(200).set_body_json(json!({"value": [
             {"spaceRef": "space-room", "name": "Room", "kind": "room", "lifecycle": "active"}
         ]}))
     }
 
-    fn org_posture(zdr: bool) -> ResponseTemplate {
+    pub(crate) fn org_posture(zdr: bool) -> ResponseTemplate {
         ResponseTemplate::new(200).set_body_json(
             json!({"data": {"metadata": {"interactiveRetention": {"zdr": zdr}}}}),
         )
@@ -913,7 +913,7 @@ mod tests {
 
     /// `org_core`: org-core's answer to the ZDR posture read; `application`: the Convex answer to
     /// the Space lifecycle lookup. Flags: human posts on, everything else off.
-    async fn fixture(org_core: ResponseTemplate, application: ResponseTemplate) -> Fx {
+    pub(crate) async fn fixture(org_core: ResponseTemplate, application: ResponseTemplate) -> Fx {
         let auth = MockServer::start().await;
         Mock::given(wm_method("GET"))
             .and(wm_path("/api/auth/get-session"))
@@ -1028,7 +1028,7 @@ mod tests {
             .await;
     }
 
-    async fn send(
+    pub(crate) async fn send(
         state: &AppState,
         uri: &str,
         extra_header: Option<(&str, &str)>,
@@ -1067,7 +1067,7 @@ mod tests {
     }
 
     /// Control (user-core) requests to the Space decision namespace: (path, JSON body).
-    async fn control_calls(fx: &Fx) -> Vec<(String, Value)> {
+    pub(crate) async fn control_calls(fx: &Fx) -> Vec<(String, Value)> {
         fx.user_core
             .received_requests()
             .await
@@ -1083,7 +1083,7 @@ mod tests {
             .collect()
     }
 
-    async fn model_calls(fx: &Fx) -> Vec<(String, Value)> {
+    pub(crate) async fn model_calls(fx: &Fx) -> Vec<(String, Value)> {
         fx.model_gateway
             .received_requests()
             .await

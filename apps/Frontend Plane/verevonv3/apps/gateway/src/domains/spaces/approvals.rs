@@ -424,6 +424,11 @@ pub(crate) async fn decide_space_approval(
     approval_id: &str,
     body: Value,
 ) -> Reply {
+    // The decision's reason is free text that the approval keeps: a zero-retention caller is refused
+    // first, before any Session Core call. The route and the action share this body, so both are covered.
+    if let Some(refusal) = crate::zdr::durable_write_refusal(state, user, Some(headers), Some(&body)).await {
+        return refusal;
+    }
     let decision = match parse_decision(body) {
         Ok(decision) => decision,
         Err(reply) => return reply,
@@ -615,4 +620,32 @@ async fn get_approval_policy_route(
     let data = unwrap_data(&control);
     let policy = data.get("policy").cloned().unwrap_or(Value::Null);
     (StatusCode::OK, Json(json!({ "data": { "policy": policy } })))
+}
+
+#[cfg(test)]
+mod tests {
+    //! The approval decide body refuses a zero-retention org before any Control or model call. The
+    //! fixture is the human-posts router with wiremock for auth-core, Control, org-core, Application
+    //! and model-gateway.
+    use serde_json::json;
+
+    use super::super::human_posts::tests::{active_space, control_calls, fixture, model_calls, org_posture, send};
+
+    #[tokio::test]
+    async fn a_zdr_org_cannot_decide_an_approval_and_nothing_upstream_is_asked() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = fixture(org_posture(true), active_space()).await;
+        let body = json!({"decision": "approve", "reason": "looks fine", "idempotency_key": "approve-1"});
+        let (status, payload, _) = send(
+            &fx.state,
+            "/api/v1/spaces/space-room/approvals/approval-1/decide",
+            None,
+            body,
+        )
+        .await;
+        assert_eq!(status, 412);
+        assert_eq!(payload["error"]["code"], "zdr_durable_mutation_forbidden");
+        assert!(control_calls(&fx).await.is_empty());
+        assert!(model_calls(&fx).await.is_empty());
+    }
 }
