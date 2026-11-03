@@ -19,7 +19,7 @@ use std::collections::HashMap;
 use crate::{config::AppState, envelope::unwrap_data, middleware::AuthenticatedUser};
 
 use super::shared::{
-    array_at, cookie_header, created, date_millis, first_num, first_str, forward,
+    array_at, bad_request, cookie_header, created, date_millis, first_num, first_str, forward,
     normalize_batch_urls, normalize_target, obj_or_empty, okay, quarry_call, quarry_token, str_at,
     str_or_null, validation,
 };
@@ -395,7 +395,8 @@ async fn create_extract(
     match extract_schema(body) {
         Ok(Some(schema)) => request["schema"] = schema,
         Ok(None) => {}
-        Err(message) => return validation(&message),
+        // Present but not a JSON object: malformed, so a 400, and nothing reaches quarry-edge.
+        Err(message) => return bad_request("invalid_schema", &message),
     }
     match extract_prompt(body) {
         Ok(Some(prompt)) => request["prompt"] = Value::String(prompt),
@@ -525,7 +526,8 @@ async fn create_scrape(
 // ── Small helpers ───────────────────────────────────────────────────────────
 
 /// The extraction schema of a run body: a JSON object, or the same document sent
-/// as text. `Ok(None)` when none was sent; an unreadable schema is a validation error.
+/// as text. `Ok(None)` when none was sent or the text is blank. A schema that is not a
+/// JSON object is an `Err`, which `create_extract` answers with a 400.
 fn extract_schema(body: &Value) -> Result<Option<Value>, String> {
     match body.get("schema") {
         None | Some(Value::Null) => Ok(None),
@@ -582,6 +584,35 @@ mod tests {
         let long = "x".repeat(10_001);
         assert!(extract_prompt(&json!({ "prompt": long })).is_err());
         assert!(extract_prompt(&json!({ "prompt": "y".repeat(10_000) })).is_ok());
+    }
+
+    /// WS16.S7: a schema is a JSON object, or the same object as text. Blank text means none;
+    /// anything else is refused before it can reach quarry-edge.
+    #[test]
+    fn extract_schema_accepts_an_object_or_its_text_and_refuses_the_rest() {
+        let object = json!({ "type": "object" });
+        assert_eq!(extract_schema(&json!({})).unwrap(), None);
+        assert_eq!(extract_schema(&json!({ "schema": null })).unwrap(), None);
+        assert_eq!(extract_schema(&json!({ "schema": "  " })).unwrap(), None);
+        assert_eq!(
+            extract_schema(&json!({ "schema": object.clone() })).unwrap(),
+            Some(object.clone())
+        );
+        assert_eq!(
+            extract_schema(&json!({ "schema": "{\"type\":\"object\"}" })).unwrap(),
+            Some(object)
+        );
+        for malformed in [
+            json!("not json"),
+            json!("[1, 2]"),
+            json!("\"text\""),
+            json!(["type"]),
+            json!(42),
+            json!(true),
+        ] {
+            let refused = extract_schema(&json!({ "schema": malformed.clone() }));
+            assert!(refused.is_err(), "{malformed}");
+        }
     }
 
     #[test]
