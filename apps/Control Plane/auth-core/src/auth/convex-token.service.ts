@@ -9,6 +9,12 @@ import {
 } from 'crypto';
 import { readFileSync } from 'fs';
 import type { InteractiveRetentionPosture } from './interactive-retention-policy';
+import {
+  assertWebPolicyClaimSize,
+  BASELINE_WEB_POLICY_CLAIM,
+  isWebPolicyAudience,
+  type WebPolicyClaim,
+} from './web-policy';
 
 type ConvexJwtClaims = {
   externalAuthId: string;
@@ -260,7 +266,54 @@ type PlaneJwtClaims = {
    * none, so nothing that verifies them changes.
    */
   tokenId?: string;
+  /**
+   * The org web policy (WS7.I), resolved by the caller through
+   * `webPolicyClaimFor` and signed as the `web_policy` claim beside `zdr`.
+   * Accepted only for `quarry` and `browser-broker`. A USER token for those
+   * audiences always carries the claim (`{"v":1,"rev":"0"}` when none is
+   * given), so an absent claim identifies an old issuer; a SERVICE token
+   * carries it only when the caller passes one (a `tenant` registry row).
+   * Never touches `zdr`.
+   */
+  webPolicy?: WebPolicyClaim;
 };
+
+/**
+ * The `web_policy` claim a token carries, or `undefined`. See
+ * `PlaneJwtClaims.webPolicy`; the 2 KiB cap fails closed here too, so no path
+ * can sign an oversized claim.
+ */
+function issuedWebPolicy(
+  audience: PlaneAudience,
+  principalType: 'user' | 'service',
+  webPolicy: WebPolicyClaim | undefined,
+): WebPolicyClaim | undefined {
+  if (!isWebPolicyAudience(audience)) {
+    if (webPolicy !== undefined) {
+      throw new Error(
+        `A web_policy claim cannot be carried on a ${audience} token`,
+      );
+    }
+    return undefined;
+  }
+  const claim =
+    principalType === 'user'
+      ? (webPolicy ?? BASELINE_WEB_POLICY_CLAIM)
+      : webPolicy;
+  if (claim !== undefined) assertWebPolicyClaimSize(claim);
+  return claim;
+}
+
+/**
+ * Optional lifetime cap for a token that carries a `web_policy` claim
+ * (`WEB_POLICY_TOKEN_TTL_CAP_SECONDS`). Unset by default, so the audience TTL
+ * stands; a value below the 60 s floor every audience has is raised to it.
+ */
+function webPolicyTtlCapSeconds(): number | undefined {
+  const raw = parseInt(process.env.WEB_POLICY_TOKEN_TTL_CAP_SECONDS ?? '', 10);
+  if (!Number.isFinite(raw) || raw <= 0) return undefined;
+  return Math.max(60, raw);
+}
 
 type PlaneTokenBundle = {
   token: string;
@@ -672,6 +725,11 @@ export class ConvexTokenService {
       );
     }
     const zdr = issuedTokenZdr(principalType, claims);
+    const webPolicy = issuedWebPolicy(
+      audience,
+      principalType,
+      claims.webPolicy,
+    );
     // Never lengthens a token beyond the audience's configured default —
     // only a strictly shorter override is honored, so a caller-supplied
     // value can only narrow the exposure window, never widen it.
@@ -685,10 +743,16 @@ export class ConvexTokenService {
     // A token whose posture is a snapshot of the org's setting (a tenant
     // principal) also never outlives the snapshot's bound.
     const tenantTtlCap = tenantTtlCapSeconds(principalType, claims);
-    const ttlSeconds =
+    const tenantCappedTtlSeconds =
       tenantTtlCap === undefined
         ? requestedTtlSeconds
         : Math.min(requestedTtlSeconds, tenantTtlCap);
+    const webPolicyTtlCap =
+      webPolicy === undefined ? undefined : webPolicyTtlCapSeconds();
+    const ttlSeconds =
+      webPolicyTtlCap === undefined
+        ? tenantCappedTtlSeconds
+        : Math.min(tenantCappedTtlSeconds, webPolicyTtlCap);
     const now = Math.floor(Date.now() / 1000);
     const payload = {
       iss: this.planeIssuer,
@@ -715,6 +779,8 @@ export class ConvexTokenService {
       // for a `tenant` principal, from the same organization policy resolved at
       // mint time (the caller stamps it; see `tenantTtlCapSeconds`).
       zdr,
+      // WS7.I: the org web policy, beside and independent of `zdr`.
+      ...(webPolicy !== undefined ? { web_policy: webPolicy } : {}),
     };
 
     const encodedHeader = this.encodeSegment({
