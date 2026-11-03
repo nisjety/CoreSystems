@@ -141,7 +141,9 @@ pub fn scrape_retryable(err: &QuarryError) -> bool {
 /// Whether a failure went through a proxy identity: any `"egress": "proxy"`
 /// record in its details, `egress_attempts` or nested. The egress broker already
 /// rotates within its bounded plan, so a retry would reach proxies beyond that
-/// plan. Such a failure is final on the scrape path (ADR-5).
+/// plan. Such a failure is final on the scrape path (ADR-5). This sees only the
+/// records a driver chain keeps: a fallback chain drops a tier's records, so the
+/// edge runs no retry at all while a proxy pool is configured (routes.rs).
 pub fn routed_through_proxy(err: &QuarryError) -> bool {
     err.details.as_ref().is_some_and(mentions_proxy_egress)
 }
