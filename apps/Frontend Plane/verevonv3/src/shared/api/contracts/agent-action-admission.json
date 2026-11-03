@@ -290,6 +290,19 @@
       "zdr_allowed": false
     },
     {
+      "actionId": "browser_run.steer",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "context_write",
+      "exemptReason": "no_owner_executor",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:7cc77d024abbb0bc3287a3bb783f7e861d1c7325a3b802151356a99b7cddaed0",
+      "zdr_allowed": false
+    },
+    {
       "actionId": "browser_session.close",
       "registry": true,
       "access": "none",
