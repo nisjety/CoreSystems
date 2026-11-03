@@ -1,0 +1,24 @@
+id: "18-do-run-follows-a-tone-preset"
+name: "A Do run must write in the reply tone the person picked"
+# EP-8-S3. A reply tone is a closed setting the BFF stamps onto a turn as `persona_tone`. With
+# MODEL_GATEWAY_TONE_PRESETS=true, model-gateway renders one fixed sentence for the tone inside the
+# personal layer of the authored instructions, from the same composer an Ask turn uses, so a Do run
+# answers in the chosen tone.
+#
+# This harness talks to model-gateway directly, not through the BFF, and its request builder has no
+# passthrough for `persona_tone`, so the tone is never on its requests. The case skips (does not fail)
+# until that passthrough and a fixture that sets a tone exist: set
+# EVAL_CAPABILITIES=run-context-instructions,tone-preset-fixture once they do. The composition itself
+# is covered by the model-gateway unit tests in run_context.rs (`tone_renders_inside_personal_layer`,
+# `switch_off_composition_byte_identical`).
+profile: deployed_agent
+features: [usage, tools, citations, agentic]
+prompt: "In one sentence: what is HACCP?"
+checks:
+  judge_rubric: "The answer is direct: it gives the definition first, with no greeting, no preamble and no hedging."
+loop:
+  max_tool_calls: 4
+  max_errors: 1
+requires: [run-context-instructions, tone-preset-fixture]
+tags: [run-context, instructions, tone, agentic]
+timeout_s: 180.0

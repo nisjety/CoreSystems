@@ -235,6 +235,7 @@ export const MODEL_ACCESS: Readonly<Record<ActionId, ModelAccessEntry>> = {
   'settings.update_me': exempt('human_identity_or_security', 'external_write'),
   'settings.update_preferences': exempt('human_identity_or_security', 'external_write'),
   'settings.update_setting': exempt('human_identity_or_security', 'external_write'),
+  'settings.set_tone_preset': exempt('human_identity_or_security', 'external_write'),
   'settings.create_api_key': exempt('human_identity_or_security', 'external_write'),
   'settings.delete_api_key': exempt('human_identity_or_security', 'external_write'),
   'mcp.delete_server': exempt('no_owner_executor', 'external_write'),

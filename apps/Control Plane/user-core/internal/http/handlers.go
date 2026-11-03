@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
@@ -1439,6 +1440,62 @@ type AISettings struct {
 	ModelPreference        string `json:"modelPreference"` // "auto"|"gpt-4"|"gpt-4o"|"claude"
 	DataCollectionEnabled  bool   `json:"dataCollectionEnabled"`
 	PersonalizationEnabled bool   `json:"personalizationEnabled"`
+	// TonePreset is the reply tone the person picked (EP-8-S3): one of tonePresets. "default" asks for
+	// nothing extra. It is a setting, not content, so it is stored with the rest of the ai category.
+	TonePreset string `json:"tonePreset"`
+}
+
+// tonePresets is the closed set of reply tones. model-gateway renders one fixed sentence for each name
+// except "default", so nothing outside this list may be stored.
+var tonePresets = []string{"default", "professional", "friendly", "direct", "warm", "neutral"}
+
+// aiSettingsResponse is what GET and PUT /api/v1/settings/ai return: the stored settings plus whether
+// this deployment shows the tone selector. The flag is set on every response and never stored, so a
+// save cannot write it.
+type aiSettingsResponse struct {
+	AISettings
+	TonePresetsAvailable bool `json:"tonePresetsAvailable"`
+}
+
+// aiSettingsDefaults are what a person reads before they save any AI setting.
+func aiSettingsDefaults() map[string]any {
+	return map[string]any{
+		"aiEnabled": true, "modelPreference": "auto",
+		"dataCollectionEnabled": true, "personalizationEnabled": true,
+		"tonePreset": "default",
+	}
+}
+
+// tonePresetsVisible reads the user-core switch that shows the tone selector (EP-8-S3). Opt-in: only
+// the literal true enables it. It hides the selector and nothing else: a stored tone is still read and
+// written.
+func tonePresetsVisible() bool {
+	return os.Getenv("TONE_PRESETS_VISIBLE") == "true"
+}
+
+// applyTonePresetPatch settles the tone in a bound AI settings save. A save that names no tone keeps
+// the stored one: the key leaves the patch, so a client written before tones existed cannot reset it.
+// A named tone must be in the closed set.
+func applyTonePresetPatch(req AISettings, patch map[string]any) bool {
+	if req.TonePreset == "" {
+		delete(patch, "tonePreset")
+		return true
+	}
+	return slices.Contains(tonePresets, req.TonePreset)
+}
+
+// writeAISettings writes stored AI settings in the response shape.
+func writeAISettings(c *gin.Context, settings map[string]any) {
+	var result aiSettingsResponse
+	if err := mapToStruct(settings, &result); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to decode settings"})
+		return
+	}
+	if result.TonePreset == "" {
+		result.TonePreset = "default"
+	}
+	result.TonePresetsAvailable = tonePresetsVisible()
+	c.JSON(http.StatusOK, result)
 }
 
 // GET /api/v1/settings/ai
@@ -1447,17 +1504,13 @@ func (s *Server) getAISettings(c *gin.Context) {
 	if !ok {
 		return
 	}
-	defaults := map[string]any{
-		"aiEnabled": true, "modelPreference": "auto",
-		"dataCollectionEnabled": true, "personalizationEnabled": true,
-	}
-	settings, err := s.userService.GetSettings(c.Request.Context(), userID, "ai", defaults)
+	settings, err := s.userService.GetSettings(c.Request.Context(), userID, "ai", aiSettingsDefaults())
 	if err != nil {
 		log.Error().Err(err).Str("user_id", userID).Msg("failed to get AI settings")
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to retrieve settings"})
 		return
 	}
-	writeSettingsResponse[AISettings](c, settings)
+	writeAISettings(c, settings)
 }
 
 // PUT /api/v1/settings/ai
@@ -1471,15 +1524,21 @@ func (s *Server) updateAISettings(c *gin.Context) {
 	if !ok {
 		return
 	}
+	if !applyTonePresetPatch(req, patch) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{
+			"code":    "tone_preset_invalid",
+			"message": "tonePreset must be one of default, professional, friendly, direct, warm or neutral.",
+			"details": gin.H{"allowed": tonePresets},
+		}})
+		return
+	}
 	updated, err := s.userService.UpsertSettings(c.Request.Context(), userID, "ai", patch)
 	if err != nil {
 		log.Error().Err(err).Str("user_id", userID).Msg("failed to update AI settings")
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to save settings"})
 		return
 	}
-	var result AISettings
-	_ = mapToStruct(updated, &result)
-	c.JSON(http.StatusOK, result)
+	writeAISettings(c, updated)
 }
 
 // ============================================

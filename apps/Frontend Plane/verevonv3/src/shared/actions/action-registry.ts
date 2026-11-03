@@ -733,6 +733,11 @@ const settingsUpdateSettingInput = z.object({
   value: z.unknown(),
 })
 
+// The caller's own reply tone (EP-8-S3), the closed set user-core stores. `default` asks for nothing extra.
+const settingsSetTonePresetInput = z.object({
+  tonePreset: z.enum(['default', 'professional', 'friendly', 'direct', 'warm', 'neutral']),
+})
+
 // The response carries a raw, one-time API key secret auth-core never
 // returns again — real credential material, not a routine settings change.
 const settingsCreateApiKeyInput = z.object({
@@ -2799,6 +2804,17 @@ export const actionRegistry = [
     requiresApproval: false,
     reversible: true,
     inputSchema: settingsUpdateSettingInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'settings.set_tone_preset',
+    label: 'Set reply tone',
+    description: 'Set the caller\'s own reply tone (default, professional, friendly, direct, warm or neutral). It applies to the caller\'s new chats and runs, beneath the organization\'s and Space\'s instructions.',
+    ownerPlane: 'control',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: settingsSetTonePresetInput,
     outputSchema: envelopeStatusOutput,
   },
   {

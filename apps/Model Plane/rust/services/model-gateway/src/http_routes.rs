@@ -9488,6 +9488,12 @@ pub struct InvokeRequest {
     /// not carried here — this field is the text alone.
     #[serde(default)]
     pub persona_instructions: Option<String>,
+    /// The reply tone the person picked (EP-8-S3), resolved server-side from user-core's AI settings
+    /// by the BFF gateway and never client-suppliable, like `persona_instructions`. Only the closed
+    /// names `professional`, `friendly`, `direct`, `warm` and `neutral` mean anything: `default` and any
+    /// other value add nothing. Read only while `MODEL_GATEWAY_TONE_PRESETS` is on.
+    #[serde(default)]
+    pub persona_tone: Option<String>,
     /// WS16-S6 — the viewer's interface language, stamped by the BFF gateway from a closed set
     /// (`nb-NO` or `en-US`; flag `CHAT_LOCALE_HINT`). A framing hint for the reply language,
     /// request-scoped: never stored, grants nothing, and `Honored` under ZDR. See

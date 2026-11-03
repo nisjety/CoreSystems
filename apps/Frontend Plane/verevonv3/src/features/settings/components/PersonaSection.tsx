@@ -1,7 +1,8 @@
 import { Loader2, Sparkles } from '@/shared/icons'
-import { createMemo, createSignal, Show } from 'solid-js'
+import { createMemo, createSignal, For, Show } from 'solid-js'
 import { createResource } from '@/shared/lib/create-resource-compat'
 import { getPersonaInstructions, updatePersonaInstructions } from '@/shared/api/persona-client'
+import { getAISettings, TONE_PRESETS, updateTonePreset, type TonePreset } from '@/shared/api/ai-settings-client'
 import { translateApiError, useI18n } from '@/shared/i18n'
 import { SectionHeader, SettingsButton, ToggleRow } from '@/features/settings/components/settings-ui'
 
@@ -23,6 +24,15 @@ export function PersonaSection() {
   const i18n = useI18n()
 
   const [saved, { refetch }] = createResource(() => getPersonaInstructions())
+
+  // The tone selector shows only when user-core says this deployment offers it (EP-8-S3). A failed
+  // read hides the selector and never blocks the persona form above it.
+  const [aiSettings, { refetch: refetchAiSettings }] = createResource(() => getAISettings())
+  const toneAvailable = createMemo(() => !aiSettings.error && aiSettings()?.tonePresetsAvailable === true)
+  const [toneDraft, setToneDraft] = createSignal<TonePreset | null>(null)
+  const [toneSubmitting, setToneSubmitting] = createSignal(false)
+  const [toneError, setToneError] = createSignal<string | null>(null)
+  const selectedTone = createMemo<TonePreset>(() => toneDraft() ?? aiSettings()?.tonePreset ?? 'default')
 
   const [draft, setDraft] = createSignal('')
   const [draftEnabled, setDraftEnabled] = createSignal(true)
@@ -68,6 +78,37 @@ export function PersonaSection() {
       )
     } finally {
       setSubmitting(false)
+    }
+  }
+
+  const toneLabels = (): Record<TonePreset, string> => ({
+    default: i18n.tr('Standard', 'Default'),
+    professional: i18n.tr('Profesjonell', 'Professional'),
+    friendly: i18n.tr('Vennlig', 'Friendly'),
+    direct: i18n.tr('Direkte', 'Direct'),
+    warm: i18n.tr('Varm', 'Warm'),
+    neutral: i18n.tr('Nøytral', 'Neutral'),
+  })
+
+  const handleToneSubmit = async (event: Event) => {
+    event.preventDefault()
+    const choice = toneDraft()
+    if (toneSubmitting() || choice === null) return
+    setToneSubmitting(true)
+    setToneError(null)
+    try {
+      await updateTonePreset(choice)
+      setToneDraft(null)
+      await refetchAiSettings()
+    } catch (err) {
+      setToneError(
+        translateApiError(err, i18n.tr, {
+          no: 'Kunne ikke lagre tonen.',
+          en: 'Could not save the tone.',
+        }),
+      )
+    } finally {
+      setToneSubmitting(false)
     }
   }
 
@@ -154,6 +195,58 @@ export function PersonaSection() {
           </SettingsButton>
         </div>
       </form>
+
+      <Show when={toneAvailable()}>
+        <form class="verevon-settings-field-grid verevon-settings-field-grid--spaced" onSubmit={handleToneSubmit}>
+          <Show when={toneError()}>
+            {(message) => (
+              <p class="verevon-settings-status-message verevon-settings-status-message--error" role="alert">
+                {message()}
+              </p>
+            )}
+          </Show>
+
+          <fieldset class="verevon-settings-field" disabled={toneSubmitting()}>
+            <legend class="verevon-settings-label">{i18n.tr('Tone', 'Tone')}</legend>
+            <span class="verevon-settings-help">
+              {i18n.tr(
+                'Hvordan Verevon skriver. Gjelder i nye samtaler og kjøringer, under organisasjonens og rommets instrukser, og uavhengig av persona-teksten over.',
+                'How Verevon writes. It applies to new chats and runs, beneath the organization\'s and Space\'s instructions, and independently of the persona text above.',
+              )}
+            </span>
+            <For each={TONE_PRESETS}>
+              {(preset) => (
+                <label class="verevon-settings-option">
+                  <input
+                    type="radio"
+                    name="persona-tone"
+                    value={preset}
+                    checked={selectedTone() === preset}
+                    onChange={() => setToneDraft(preset)}
+                  />
+                  <span>{toneLabels()[preset]}</span>
+                </label>
+              )}
+            </For>
+          </fieldset>
+
+          <div>
+            <SettingsButton
+              type="submit"
+              variant="primary"
+              settingsSize="sm"
+              disabled={toneSubmitting() || toneDraft() === null}
+            >
+              <Show
+                when={toneSubmitting()}
+                fallback={<><Sparkles size={14} aria-hidden="true" /> {i18n.tr('Lagre tone', 'Save tone')}</>}
+              >
+                <Loader2 size={14} aria-hidden="true" /> {i18n.tr('Lagrer…', 'Saving…')}
+              </Show>
+            </SettingsButton>
+          </div>
+        </form>
+      </Show>
     </>
   )
 }

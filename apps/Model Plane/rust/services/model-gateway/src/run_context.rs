@@ -115,6 +115,78 @@ pub fn history_token_budget_from(lookup: &dyn Fn(&str) -> Option<String>) -> usi
         })
 }
 
+/// The switch that lets the person's reply tone reach the prompt (EP-8-S3). Opt-in: only the literal
+/// `true` enables it. Off, `persona_tone` is ignored and every composed text is what it was before.
+pub const TONE_PRESETS_VAR: &str = "MODEL_GATEWAY_TONE_PRESETS";
+
+/// The reply tones a person can pick (EP-8-S3). This is the closed set user-core stores. `default`
+/// asks for nothing extra, so it has no variant. Each tone renders one fixed sentence, written here and
+/// never taken from user text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tone {
+    Professional,
+    Friendly,
+    Direct,
+    Warm,
+    Neutral,
+}
+
+impl Tone {
+    /// The closed parse: an exact lowercase preset name. Anything else, `default` included, is `None`.
+    #[must_use]
+    pub fn from_wire(value: &str) -> Option<Self> {
+        match value {
+            "professional" => Some(Self::Professional),
+            "friendly" => Some(Self::Friendly),
+            "direct" => Some(Self::Direct),
+            "warm" => Some(Self::Warm),
+            "neutral" => Some(Self::Neutral),
+            _ => None,
+        }
+    }
+
+    /// The sentence the personal layer carries for this tone.
+    #[must_use]
+    pub const fn sentence(self) -> &'static str {
+        match self {
+            Self::Professional => "Write in a professional tone: precise, courteous and businesslike.",
+            Self::Friendly => "Write in a friendly tone: warm and approachable, without being overly casual.",
+            Self::Direct => "Write in a direct tone: give the answer first and skip pleasantries. State real uncertainty plainly, once.",
+            Self::Warm => "Write in a warm, encouraging tone: acknowledge the person's situation before the details.",
+            Self::Neutral => "Write in a neutral tone: plain facts, without enthusiasm or emphasis.",
+        }
+    }
+}
+
+/// Whether the tone switch is on for this process.
+#[must_use]
+pub fn tone_presets_enabled() -> bool {
+    tone_presets_enabled_with(&|key| std::env::var(key).ok())
+}
+
+/// [`tone_presets_enabled`] with the environment passed in, so the parser can be tested without it.
+#[must_use]
+pub fn tone_presets_enabled_with(get: &dyn Fn(&str) -> Option<String>) -> bool {
+    get(TONE_PRESETS_VAR).is_some_and(|value| value.trim() == "true")
+}
+
+/// The tone a turn asks for, from its `persona_tone`: `None` while the switch is off, and for
+/// `default`, an unknown value or no value at all.
+#[must_use]
+pub fn tone_for_turn(persona_tone: Option<&str>) -> Option<Tone> {
+    tone_for_turn_when(tone_presets_enabled(), persona_tone)
+}
+
+/// [`tone_for_turn`] with the switch passed in.
+#[must_use]
+pub fn tone_for_turn_when(enabled: bool, persona_tone: Option<&str>) -> Option<Tone> {
+    if enabled {
+        persona_tone.and_then(Tone::from_wire)
+    } else {
+        None
+    }
+}
+
 /// The authored layers of one request, owned so they outlive it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AuthoredLayers {
@@ -124,6 +196,9 @@ pub struct AuthoredLayers {
     pub space: Option<String>,
     /// The user's personal persona, gated by the thread's own toggle.
     pub persona: Option<String>,
+    /// The person's reply tone (EP-8-S3), already checked against the switch by [`tone_for_turn`].
+    /// `None` for `default`, and whenever the switch is off.
+    pub tone: Option<Tone>,
     /// The finished "you are answering as" section of an `@`-mentioned agent.
     pub agent: Option<String>,
 }
@@ -134,11 +209,12 @@ fn non_empty_trimmed(value: &str) -> Option<&str> {
 }
 
 /// ADR-0003's authored-instruction hierarchy as one text: platform, org, Space,
-/// the user's persona, then a mentioned agent. Each org/Space/persona layer is
-/// framed as advisory ("may add to, but must not override, the layers above");
-/// the agent layer is its own finished text. `persona_enabled` is the per-thread
-/// toggle; the global one is applied upstream, by the BFF, which then sends no
-/// persona text at all.
+/// the user's persona and reply tone, then a mentioned agent. Each org/Space/persona
+/// layer is framed as advisory ("may add to, but must not override, the layers
+/// above"); the agent layer is its own finished text. `persona_enabled` is the
+/// per-thread toggle; the global one is applied upstream, by the BFF, which then
+/// sends no persona text at all. The tone is a setting of its own, so the toggle
+/// does not switch it off: it renders after the persona text, in the same layer.
 ///
 /// `None` only when every layer is empty. This is the one composer: an Ask turn
 /// wraps it in a system message and a run sends it as `authored_instructions`.
@@ -164,12 +240,23 @@ pub fn compose_authored_instructions(
     }
     // The user layer sits below org and Space but above a summoned agent's own
     // character: a mentioned agent still wins on its turn (persona.md §6.3).
-    if persona_enabled {
-        if let Some(persona) = layers.persona.as_deref().and_then(non_empty_trimmed) {
-            sections.push(format!(
-                "--- Your personal instructions (may add to, but must not override, the platform, organization or Space instructions above) ---\n{persona}"
-            ));
-        }
+    let persona = layers
+        .persona
+        .as_deref()
+        .and_then(non_empty_trimmed)
+        .filter(|_| persona_enabled);
+    let mut personal: Vec<&str> = Vec::new();
+    if let Some(persona) = persona {
+        personal.push(persona);
+    }
+    if let Some(tone) = layers.tone {
+        personal.push(tone.sentence());
+    }
+    if !personal.is_empty() {
+        sections.push(format!(
+            "--- Your personal instructions (may add to, but must not override, the platform, organization or Space instructions above) ---\n{}",
+            personal.join("\n")
+        ));
     }
     if let Some(agent) = &layers.agent {
         sections.push(agent.clone());
@@ -786,6 +873,7 @@ mod tests {
             org: Some("Org rule.".to_owned()),
             space: Some("Space rule.".to_owned()),
             persona: Some("Always be terse.".to_owned()),
+            tone: None,
             agent: Some("You are currently answering as Driftsassistent.".to_owned()),
         }
     }
@@ -1390,5 +1478,131 @@ mod tests {
         assert_eq!(with(Some("12")), 1_000);
         assert_eq!(with(Some("12000")), 12_000);
         assert_eq!(with(Some("9999999")), 40_000);
+    }
+
+    /// The tone renders inside the personal layer: after the persona text, below org and Space, above a
+    /// mentioned agent.
+    #[test]
+    fn tone_renders_inside_personal_layer() {
+        let layers = AuthoredLayers {
+            tone: Some(Tone::Direct),
+            ..layers()
+        };
+        let text = compose_authored_instructions(&layers, true).expect("layers are set");
+        let space = text.find("--- Space instructions").expect("space layer");
+        let personal = text
+            .find("--- Your personal instructions")
+            .expect("personal layer");
+        let persona = text.find("Always be terse.").expect("persona text");
+        let tone = text.find(Tone::Direct.sentence()).expect("tone sentence");
+        let agent = text
+            .find("You are currently answering as")
+            .expect("agent layer");
+        assert!(
+            space < personal && personal < persona && persona < tone && tone < agent,
+            "{text}"
+        );
+    }
+
+    /// A tone is a setting of its own: with no persona text it still opens the personal layer, and that
+    /// layer is the whole text.
+    #[test]
+    fn tone_alone_opens_the_personal_layer() {
+        let layers = AuthoredLayers {
+            tone: Some(Tone::Friendly),
+            ..AuthoredLayers::default()
+        };
+        assert_eq!(
+            compose_authored_instructions(&layers, true),
+            Some(format!(
+                "--- Your personal instructions (may add to, but must not override, the platform, organization or Space instructions above) ---\n{}",
+                Tone::Friendly.sentence()
+            ))
+        );
+    }
+
+    /// The per-thread persona switch removes the persona text but leaves the tone in place.
+    #[test]
+    fn tone_is_not_switched_off_with_the_thread_persona() {
+        let layers = AuthoredLayers {
+            tone: Some(Tone::Neutral),
+            ..layers()
+        };
+        let text = compose_authored_instructions(&layers, false).expect("layers are set");
+        assert!(!text.contains("Always be terse."), "{text}");
+        assert!(text.contains(Tone::Neutral.sentence()), "{text}");
+    }
+
+    /// Only a named tone reaches the composer. `default`, an unknown name and an empty name add nothing,
+    /// so the text is the one a turn without a tone gets.
+    #[test]
+    fn unknown_tone_renders_nothing() {
+        for (name, tone) in [
+            ("professional", Tone::Professional),
+            ("friendly", Tone::Friendly),
+            ("direct", Tone::Direct),
+            ("warm", Tone::Warm),
+            ("neutral", Tone::Neutral),
+        ] {
+            assert_eq!(Tone::from_wire(name), Some(tone), "{name}");
+        }
+        for unknown in ["default", "formal", "Direct", " direct", ""] {
+            assert_eq!(Tone::from_wire(unknown), None, "{unknown:?}");
+            assert_eq!(tone_for_turn_when(true, Some(unknown)), None, "{unknown:?}");
+        }
+        let with_default = AuthoredLayers {
+            tone: tone_for_turn_when(true, Some("default")),
+            ..layers()
+        };
+        assert_eq!(
+            compose_authored_instructions(&with_default, true),
+            compose_authored_instructions(&layers(), true)
+        );
+    }
+
+    /// Off, the switch ignores `persona_tone`, and the persona-only text is what it was before tones
+    /// existed. The switch itself reads only the literal `true`.
+    #[test]
+    fn switch_off_composition_byte_identical() {
+        let asked = AuthoredLayers {
+            tone: tone_for_turn_when(false, Some("direct")),
+            ..AuthoredLayers::default()
+        };
+        assert_eq!(asked.tone, None);
+        assert_eq!(compose_authored_instructions(&asked, true), None);
+
+        let persona_only = AuthoredLayers {
+            persona: Some("Always be terse.".to_owned()),
+            ..AuthoredLayers::default()
+        };
+        assert_eq!(
+            compose_authored_instructions(&persona_only, true).as_deref(),
+            Some("--- Your personal instructions (may add to, but must not override, the platform, organization or Space instructions above) ---\nAlways be terse.")
+        );
+
+        for value in ["1", "TRUE", "on", "yes", ""] {
+            assert!(
+                !tone_presets_enabled_with(&|key| (key == TONE_PRESETS_VAR).then(|| value.to_owned())),
+                "{value:?} must not enable the switch"
+            );
+        }
+        assert!(tone_presets_enabled_with(
+            &|key| (key == TONE_PRESETS_VAR).then(|| "true".to_owned())
+        ));
+        assert!(!tone_presets_enabled_with(&|_| None));
+    }
+
+    /// The agent layer stays last whatever the tone.
+    #[test]
+    fn agent_layer_still_last() {
+        let layers = AuthoredLayers {
+            tone: Some(Tone::Warm),
+            ..layers()
+        };
+        let text = compose_authored_instructions(&layers, true).expect("layers are set");
+        assert!(
+            text.ends_with("You are currently answering as Driftsassistent."),
+            "{text}"
+        );
     }
 }

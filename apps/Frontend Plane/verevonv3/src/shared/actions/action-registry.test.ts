@@ -825,7 +825,8 @@ describe('action registry', () => {
     // 243 after main was merged into model-plane (2026-11-02): main's 202 plus model-plane's own actions.
     // 249 after EP-6-S1 registered the six schedule contracts the automations hub calls.
     // 250 after EP-6-S5 registered agents.installations.list, the read the agents landing shows.
-    expect(ids).toHaveLength(250)
+    // 251 after EP-8-S3 registered settings.set_tone_preset, the caller's own reply tone.
+    expect(ids).toHaveLength(251)
 
     const spaceIds = ids.filter((id) => id.startsWith('spaces.'))
     const first = ids.indexOf(spaceIds[0] as string)
