@@ -100,6 +100,7 @@ import {
 import { ChartFenceBlock } from './ChatChart'
 import { ChatTableTools, TableChart, createTableChartState } from './ChatTableTools'
 import { SettledTurnContent } from './SettledTurnFold'
+import { StepStrip, stepStripEnabled } from './StepStrip'
 import {
   domId,
   formatBytes,
@@ -143,6 +144,7 @@ import {
 import type { VersionBadge } from '@/features/chat/lib/chat-versions'
 import type { ServerVersionBadge } from '@/features/chat/lib/chat-versions-server'
 import { streamActivityLabel, type StreamActivity, type Translator } from '@/features/chat/lib/stream-activity'
+import { narrate } from '@/shared/activity/narration'
 import { isEffectfulChatTurn } from '@/shared/chat/effect-class'
 import { translateApiError, useI18n } from '@/shared/i18n'
 import { approvalHeadline, approvalReason } from '@/shared/approvals/approval-copy'
@@ -795,6 +797,13 @@ export function AssistantMessage(props: {
         */}
         <div class="verevon-chat-message__content" ref={(el) => { contentRef = el }}>
           <SettledTurnContent fold={props.settledFold} entries={nodeEntries()} renderEntries={renderNodeEntries} />
+          <Show when={stepStripEnabled && props.message.streaming}>
+            <StepStrip
+              calls={props.message.toolCalls ?? []}
+              planSteps={props.message.proposedPlan?.steps.length}
+              notices={props.message.lifecycle}
+            />
+          </Show>
         </div>
         <Show when={!waiting() && !errored()}>
           <div class="verevon-chat-message-actions">
@@ -2501,6 +2510,9 @@ export function ToolCallCard(props: { call: ChatToolCall }) {
     failed() ? i18n.tr('feilet', 'failed') : running() ? i18n.tr('kjører ...', 'running ...') : i18n.tr('fullført', 'completed')
   const args = () => formatToolArgs(props.call.args)
   const presentation = createMemo(() => toolPresentation(props.call))
+  // With the step strip on, the row reads as a sentence that already carries the count and any truncation,
+  // so those marks are dropped below. Off, the raw name and both marks stay as they were.
+  const label = () => (stepStripEnabled ? narrate(props.call, i18n) : props.call.name)
 
   return (
     <div class="verevon-chat-tool-call" data-intent={presentation().intent}>
@@ -2510,10 +2522,10 @@ export function ToolCallCard(props: { call: ChatToolCall }) {
         onClick={() => setOpen((value) => !value)}
       >
         <ToolIntentIcon intent={presentation().intent} />
-        <span>{props.call.name}</span>
+        <span>{label()}</span>
         {/* A search that returned nothing is a real outcome, so 0 must render —
             hence an explicit null check rather than a truthiness test. */}
-        <Show when={presentation().count != null && !running()}>
+        <Show when={presentation().count != null && !running() && !stepStripEnabled}>
           <em class="verevon-chat-tool-call__count">
             {presentation().count}{' '}
             {presentation().count === 1 ? 'treff' : 'treff'}
@@ -2524,7 +2536,7 @@ export function ToolCallCard(props: { call: ChatToolCall }) {
             +{presentation().added ?? 0} −{presentation().removed ?? 0}
           </em>
         </Show>
-        <Show when={presentation().truncated}>
+        <Show when={presentation().truncated && !stepStripEnabled}>
           {/* Not the same as "no results": there IS more and the model did not
               see it, which matters for any answer built on this. */}
           <em
