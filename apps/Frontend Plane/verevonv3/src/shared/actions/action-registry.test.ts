@@ -801,6 +801,21 @@ describe('action registry', () => {
     })
   })
 
+  it('registers the agent installations read as a low-risk, ungated application contract the model cannot execute', () => {
+    const action = getActionDescriptor('agents.installations.list')
+    expect(action).toMatchObject({ ownerPlane: 'application', risk: 'low', requiresApproval: false, reversible: true })
+    expect(isModelExecutableAction('agents.installations.list')).toBe(false)
+    expect(MODEL_ACCESS['agents.installations.list']).toMatchObject({
+      access: 'none',
+      exemptReason: 'no_owner_executor',
+      sideEffectClass: 'read',
+    })
+
+    // The organisation comes from the session, so the read takes no parameter a caller could widen.
+    expect(action?.inputSchema.safeParse({}).success).toBe(true)
+    expect(action?.inputSchema.safeParse({ orgId: 'org_other' }).success).toBe(false)
+  })
+
   it('keeps every action id unique and the spaces.* entries contiguous and in their pre-fragment order (P-SPA1)', () => {
     const ids: string[] = actionRegistry.map((action) => action.id)
     expect(new Set(ids).size).toBe(ids.length)
@@ -809,7 +824,8 @@ describe('action registry', () => {
     // eight actions main added on its own side (195 before the Space merge).
     // 243 after main was merged into model-plane (2026-11-02): main's 202 plus model-plane's own actions.
     // 249 after EP-6-S1 registered the six schedule contracts the automations hub calls.
-    expect(ids).toHaveLength(249)
+    // 250 after EP-6-S5 registered agents.installations.list, the read the agents landing shows.
+    expect(ids).toHaveLength(250)
 
     const spaceIds = ids.filter((id) => id.startsWith('spaces.'))
     const first = ids.indexOf(spaceIds[0] as string)

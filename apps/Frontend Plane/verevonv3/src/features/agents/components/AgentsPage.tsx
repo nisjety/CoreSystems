@@ -13,6 +13,7 @@ import { Button } from '@/shared/ui/Button'
 import { VerevonIconButton } from '@/shared/ui/verevon/VerevonIconButton'
 import { cn } from '@/shared/lib/cn'
 import { RoleCounterpartSurface } from '@/features/agents/components/AgentRoleSurfaces'
+import { AgentsHubSummary } from '@/features/agents/components/AgentsHubSummary'
 import { ChatbotStudio } from '@/features/agents/components/ChatbotStudio'
 import {
   AgentMetricStrip,
@@ -107,21 +108,37 @@ function AllRolesOverview(props: { onRoleSelect: (role: AgentRoleId) => void }) 
         </p>
       </header>
 
+      <AgentsHubSummary />
+
       <section aria-labelledby="agent-role-heading" class="agents-overview-section">
         <TaskConsoleEntry />
         <InstallationsEntry />
         <ChiefCoreEntry />
-        <div class="agents-role-grid">
-          <For each={agentBlueprints}>
-            {(role) => (
-              <RoleCard
-                active={false}
-                role={role}
-                onSelect={() => props.onRoleSelect(role.id)}
-              />
+        <section aria-labelledby="agent-templates-heading" class="mt-8">
+          <div class="flex flex-wrap items-center gap-3">
+            <h2 id="agent-templates-heading" class="text-[16px] font-semibold text-[var(--verevon-dark-surface)] dark:text-[var(--panel)]">
+              {i18n.tr('Maler (forhåndsvisning)', 'Templates (preview)')}
+            </h2>
+            <DesignPreviewBadge label={i18n.tr('Blueprint', 'Blueprint')} title={blueprintBadgeTitle(i18n.tr)} />
+          </div>
+          <p class="mt-2 max-w-[760px] text-[13px] leading-5 text-[var(--verevon-text-muted)] dark:text-[var(--verevon-text-subtle)]">
+            {i18n.tr(
+              'Referansemodeller for hver rolle. De er ikke konfigurert for denne organisasjonen ennå, så du kan gjennomgå dem her, men ikke aktivere dem.',
+              'Reference models for each role. They are not configured for this org yet, so you can review them here, but not activate them.',
             )}
-          </For>
-        </div>
+          </p>
+          <div class="agents-role-grid mt-4">
+            <For each={agentBlueprints}>
+              {(role) => (
+                <RoleCard
+                  active={false}
+                  role={role}
+                  onSelect={() => props.onRoleSelect(role.id)}
+                />
+              )}
+            </For>
+          </div>
+        </section>
       </section>
     </>
   )

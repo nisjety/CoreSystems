@@ -1752,6 +1752,29 @@ const scheduleFiresListInput = z
   })
   .strict()
 
+// The agents landing's read of the org's definitions and the rooms each is installed in (EP-6-S5).
+// Strict and empty: the organisation comes from the session, never from the caller.
+const agentInstallationsListInput = z.object({}).strict()
+
+const agentInstallationsListOutput = z.object({
+  definitions: z.array(
+    z.object({
+      agent_ref: z.string(),
+      name: z.string().optional(),
+      description: z.string().optional(),
+      definition_status: z.enum(['active', 'inactive', 'draft']).optional(),
+      installations: z.array(
+        z.object({
+          space_ref: z.string(),
+          space_name: z.string(),
+          space_kind: z.enum(['personal', 'room', 'project', 'case']),
+          status: z.enum(['pending', 'active', 'paused', 'revoked', 'failed']).optional(),
+        }),
+      ),
+    }),
+  ),
+})
+
 // Registry entries are the product contract shared by humans and the Model Plane.
 export const actionRegistry = [
   {
@@ -3988,6 +4011,17 @@ export const actionRegistry = [
     reversible: true,
     inputSchema: scheduleFiresListInput,
     outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'agents.installations.list',
+    label: 'List agent installations',
+    description: 'List the agent definitions in this organization, with the rooms each one is added to and each installation\'s status. Read only: it shows where an agent is installed, not whether the caller may act in that room.',
+    ownerPlane: 'application',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: agentInstallationsListInput,
+    outputSchema: agentInstallationsListOutput,
   },
 ] as const satisfies readonly ActionDescriptor[]
 
