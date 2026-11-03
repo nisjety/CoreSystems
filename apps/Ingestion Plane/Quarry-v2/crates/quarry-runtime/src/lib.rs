@@ -73,6 +73,7 @@ pub mod migrations;
 pub mod mp_client;
 pub mod observation;
 pub mod observation_redaction;
+pub mod otp_source;
 pub mod pipeline;
 pub mod policy_gate;
 pub mod planner;
