@@ -10,6 +10,8 @@ import {
 } from 'node:fs';
 import { isAbsolute, normalize } from 'node:path';
 
+import { isApiKeyExchangeAudience } from './api-key-exchange';
+
 /**
  * A principal's retention posture for one audience, as the deployment-owned
  * registry states it. Exactly one of:
@@ -81,6 +83,16 @@ type ServicePrincipalConfig = {
    * that further per-principal, never widen it.
    */
   tokenExchange?: Readonly<Record<string, readonly string[]>>;
+  /**
+   * API-key exchange (EP-12 S2, INNH-10 CP-1): the audiences this principal
+   * may turn a user's API key into an `api_key` token for, through
+   * `POST /api/:audience/api-key-exchange`. Each must be one of the closed
+   * `API_KEY_EXCHANGE_AUDIENCE_SCOPES` audiences. Independent of `audiences`:
+   * opting in here gives the caller no `/internal-token` for that audience.
+   * Absent by default, so no principal gains the capability until a
+   * deployment names it (only the Verevon gateway is meant to).
+   */
+  apiKeyExchange?: readonly string[];
 };
 
 type ServicePrincipalRegistry = Record<string, ServicePrincipalConfig>;
@@ -389,6 +401,20 @@ function validTokenExchangeMap(config: Partial<ServicePrincipalConfig>): boolean
   );
 }
 
+function validApiKeyExchangeList(
+  config: Partial<ServicePrincipalConfig>,
+): boolean {
+  if (config.apiKeyExchange === undefined) {
+    return true;
+  }
+  return (
+    nonEmptyStrings(config.apiKeyExchange) &&
+    config.apiKeyExchange.every((audience) =>
+      isApiKeyExchangeAudience(audience),
+    )
+  );
+}
+
 function parseRegistry(raw: string): ServicePrincipalRegistry {
   if (!raw.trim()) {
     throw new ServicePrincipalConfigurationError(
@@ -435,7 +461,8 @@ function parseRegistry(raw: string): ServicePrincipalRegistry {
       !nonEmptyStrings(config.scopes) ||
       !validAudienceScopeMap(config) ||
       !validAudienceRetentionMap(config) ||
-      !validTokenExchangeMap(config)
+      !validTokenExchangeMap(config) ||
+      !validApiKeyExchangeList(config)
     ) {
       throw new ServicePrincipalConfigurationError(
         'PLANE_SERVICE_PRINCIPALS_JSON contains an invalid principal policy',
@@ -599,5 +626,68 @@ export function authorizePlaneServiceTokenExchange(
     orgId,
     scopes: requestedScopes,
     reason,
+  };
+}
+
+export type PlaneServiceApiKeyExchangeRequest = {
+  serviceId: string;
+  credential: string;
+  /** The audience the key is exchanged into (one per call). */
+  audience: string;
+  /** The organization the key must be bound to; the key policy checks that. */
+  orgId: string;
+};
+
+/**
+ * Result of authorizing the CALLER of an API-key exchange. Like the token
+ * exchange it carries no scopes and no retention: the minted token's scopes
+ * come from the key's own permissions and its `zdr` from the org posture
+ * raised by the key flag, never from this principal's registry row.
+ */
+export type AuthorizedPlaneServiceApiKeyExchange = {
+  serviceId: string;
+  subject: string;
+  orgId: string;
+  orgBinding: PrincipalOrgBinding;
+};
+
+/**
+ * Authorizes the registered service that presents a user's API key to
+ * `POST /api/:audience/api-key-exchange` (EP-12 S2). The one place
+ * `apiKeyExchange` is read. A directory-bound row needs no lookup: the key's
+ * org binding plus the owner's canonical membership in that org prove the
+ * organization more strongly. A fixed-list row still may not exchange outside
+ * its list.
+ */
+export function authorizePlaneServiceApiKeyExchange(
+  rawRegistry: string,
+  request: PlaneServiceApiKeyExchangeRequest,
+): AuthorizedPlaneServiceApiKeyExchange {
+  const registry = parseRegistry(rawRegistry);
+  const serviceId = request.serviceId.trim();
+  const orgId = request.orgId.trim();
+  const principal = registry[serviceId];
+  const orgBinding =
+    principal && orgId ? orgBindingFor(principal, orgId) : undefined;
+
+  if (
+    !principal ||
+    !request.credential ||
+    !secureEqual(principal.credential, request.credential) ||
+    !principal.apiKeyExchange ||
+    !principal.apiKeyExchange.includes(request.audience) ||
+    !orgId ||
+    !orgBinding
+  ) {
+    throw new ServicePrincipalAuthorizationError(
+      'Service principal API-key exchange is not authorized',
+    );
+  }
+
+  return {
+    serviceId,
+    subject: `service:${serviceId}`,
+    orgId,
+    orgBinding,
   };
 }

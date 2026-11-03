@@ -9,6 +9,7 @@ import { ConvexAuthController } from './auth/convex-auth.controller';
 import { ModelPlaneTokenController } from './auth/model-plane-token.controller';
 import { StepUpController } from './auth/step-up.controller';
 import { PlaneTokenController } from './auth/plane-token.controller';
+import { ApiKeyExchangeController } from './auth/api-key-exchange.controller';
 import { DataPlaneAuthorizationController } from './auth/data-plane-authorization.controller';
 import { MembershipAuthorityController } from './auth/membership-authority.controller';
 import { OrgGroupGrantController } from './auth/org-group-grant.controller';
@@ -48,6 +49,7 @@ import { InvitationAcceptanceRepairService } from './services/invitation-accepta
     ModelPlaneTokenController,
     StepUpController,
     PlaneTokenController,
+    ApiKeyExchangeController,
     DataPlaneAuthorizationController,
     MembershipAuthorityController,
     OrgGroupGrantController,

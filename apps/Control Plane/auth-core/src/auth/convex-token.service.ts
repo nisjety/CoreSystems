@@ -45,13 +45,94 @@ type ModelPlaneJwtClaims = {
   orgId: string;
   email?: string;
   scopes?: readonly string[];
-  principalType?: 'user' | 'service';
+  principalType?: TokenPrincipalType;
   serviceId?: string;
   reason?: string;
   retentionPosture?: ServiceRetentionPosture | InteractiveRetentionPosture;
   // A fresh password re-check from POST /api/v2/auth/step-up (WS13-S5).
   stepUp?: { at: number; method: 'password' };
+  /**
+   * The four fields below are read only for an `api_key` principal (EP-12 S2,
+   * minted solely by `POST /api/:audience/api-key-exchange`): any other
+   * principal that carries `keyId` or `actingUserId` is refused, and
+   * `ttlSecondsOverride` and `tokenId` are ignored on it.
+   */
+  keyId?: string;
+  actingUserId?: string;
+  ttlSecondsOverride?: number;
+  tokenId?: string;
 };
+
+/**
+ * `api_key` (EP-12 S2, INNH-10 CP-4): the principal is an API key, `sub` is
+ * `apikey:<key_id>`, and the key's owner rides along as `acting_user_id` for
+ * attribution only. Only the API-key exchange controller passes it.
+ */
+type TokenPrincipalType = 'user' | 'service' | 'api_key';
+
+/**
+ * Hard ceiling on an `api_key` token's lifetime, whatever the audience's
+ * configured default (INNH-10 OD-9). The exchange route mints one per call, so
+ * a revoked key stops authenticating within this bound.
+ */
+export const API_KEY_TOKEN_MAX_TTL_SECONDS = 120;
+
+type ApiKeyIdentityInput = {
+  userId: string;
+  email?: string;
+  serviceId?: string;
+  keyId?: string;
+  actingUserId?: string;
+  tokenId?: string;
+};
+
+/**
+ * The identity claims of an `api_key` token, or a throw when the shape is not
+ * exactly the one model-gateway's `is_well_formed_api_key` and Quarry's
+ * normalizer accept: a bounded printable key id, `sub == "apikey:" + key_id`,
+ * an unpadded owner that is not itself a key, a fresh `jti`, and no service or
+ * person attribute (`service_id`, `email`) beside them.
+ */
+function apiKeyIdentityClaims(claims: ApiKeyIdentityInput): {
+  key_id: string;
+  acting_user_id: string;
+  jti: string;
+} {
+  const keyId = claims.keyId ?? '';
+  const owner = claims.actingUserId ?? '';
+  if (
+    !/^[\x21-\x7e]{1,128}$/.test(keyId) ||
+    claims.userId !== `apikey:${keyId}` ||
+    claims.serviceId !== undefined ||
+    claims.email !== undefined ||
+    !owner ||
+    owner.length > 256 ||
+    owner !== owner.trim() ||
+    owner.startsWith('apikey:') ||
+    !claims.tokenId
+  ) {
+    throw new Error('API-key token identity is ambiguous');
+  }
+  return { key_id: keyId, acting_user_id: owner, jti: claims.tokenId };
+}
+
+/**
+ * An `api_key` token's lifetime: the audience default, a strictly shorter
+ * override, and never more than `API_KEY_TOKEN_MAX_TTL_SECONDS`.
+ */
+function apiKeyTtlSeconds(
+  audienceTtlSeconds: number,
+  override: number | undefined,
+): number {
+  const requested =
+    override !== undefined &&
+    Number.isFinite(override) &&
+    override > 0 &&
+    override < audienceTtlSeconds
+      ? override
+      : audienceTtlSeconds;
+  return Math.min(requested, API_KEY_TOKEN_MAX_TTL_SECONDS);
+}
 
 type ModelPlaneTokenBundle = {
   token: string;
@@ -195,9 +276,13 @@ type RetentionAwareClaims = {
  * they trust only a claim stamped `service-principal-policy`, defaulting to
  * `zdr: true` otherwise. No caller-selected field (request body, header) can
  * ever downgrade either posture.
+ *
+ * `api_key` tokens carry the org's posture (already raised by the key's own
+ * flag in the exchange controller) under the organization-policy authority;
+ * without it they fail closed to `zdr: true`, never to a persistent token.
  */
 function issuedTokenZdr(
-  principalType: 'user' | 'service',
+  principalType: TokenPrincipalType,
   claims: RetentionAwareClaims,
 ): boolean {
   if (principalType === 'user') {
@@ -205,6 +290,12 @@ function issuedTokenZdr(
       'interactive-org-retention-policy'
       ? claims.retentionPosture.zdr
       : false;
+  }
+  if (principalType === 'api_key') {
+    return claims.retentionPosture?.authority ===
+      'interactive-org-retention-policy'
+      ? claims.retentionPosture.zdr
+      : true;
   }
   return claims.retentionPosture?.authority === 'service-principal-policy'
     ? claims.retentionPosture.zdr
@@ -217,7 +308,7 @@ function issuedTokenZdr(
  * token's posture has its own authority and never takes this path.
  */
 function tenantTtlCapSeconds(
-  principalType: 'user' | 'service',
+  principalType: TokenPrincipalType,
   claims: RetentionAwareClaims,
 ): number | undefined {
   return principalType === 'service' &&
@@ -232,7 +323,7 @@ type PlaneJwtClaims = {
   orgId: string;
   email?: string;
   scopes?: readonly string[];
-  principalType?: 'user' | 'service';
+  principalType?: TokenPrincipalType;
   serviceId?: string;
   reason?: string;
   retentionPosture?: ServiceRetentionPosture | InteractiveRetentionPosture;
@@ -243,8 +334,16 @@ type PlaneJwtClaims = {
    * `VerifyToken`) can read a real, cryptographically-bound acting user
    * alongside the service identity. `principal_type` stays `"service"` —
    * this is an additive claim, not a different token shape.
+   *
+   * Also required on an `api_key` token, where it names the key's owner
+   * (attribution only; the principal is the key).
    */
   actingUserId?: string;
+  /**
+   * The Better Auth key id of an `api_key` principal (EP-12 S2), emitted as
+   * `key_id`. Refused on every other principal type.
+   */
+  keyId?: string;
   /**
    * Lets one call site mint a token shorter-lived than the audience's
    * configured default (never longer — any value `>=` the audience default
@@ -577,12 +676,28 @@ export class ConvexTokenService {
     if (principalType === 'user' && claims.serviceId) {
       throw new Error('User token cannot carry a service identity');
     }
+    if (
+      principalType !== 'api_key' &&
+      (claims.keyId !== undefined || claims.actingUserId !== undefined)
+    ) {
+      throw new Error('Only an API-key token can carry a key identity');
+    }
+    if (principalType === 'api_key' && claims.stepUp) {
+      throw new Error('API-key token cannot carry a step-up');
+    }
+    const apiKeyIdentity =
+      principalType === 'api_key' ? apiKeyIdentityClaims(claims) : undefined;
     const zdr = issuedTokenZdr(principalType, claims);
     const tenantTtlCap = tenantTtlCapSeconds(principalType, claims);
     const ttlSeconds =
-      tenantTtlCap === undefined
-        ? this.modelPlaneTtlSeconds
-        : Math.min(this.modelPlaneTtlSeconds, tenantTtlCap);
+      apiKeyIdentity !== undefined
+        ? apiKeyTtlSeconds(
+            this.modelPlaneTtlSeconds,
+            claims.ttlSecondsOverride,
+          )
+        : tenantTtlCap === undefined
+          ? this.modelPlaneTtlSeconds
+          : Math.min(this.modelPlaneTtlSeconds, tenantTtlCap);
     const now = Math.floor(Date.now() / 1000);
     const payload = {
       iss: this.modelPlaneIssuer,
@@ -597,6 +712,7 @@ export class ConvexTokenService {
       ...(principalType === 'user' ? { user_id: claims.userId } : {}),
       principal_type: principalType,
       ...(principalType === 'service' ? { service_id: claims.userId } : {}),
+      ...(apiKeyIdentity ?? {}),
       ...(claims.reason ? { reason: claims.reason } : {}),
       // Optional extras — accepted by the gateway but not required.
       ...(claims.email ? { email: claims.email } : {}),
@@ -666,11 +782,20 @@ export class ConvexTokenService {
     if (principalType === 'user' && claims.serviceId) {
       throw new Error('User token cannot carry a service identity');
     }
-    if (claims.actingUserId !== undefined && principalType !== 'service') {
+    if (
+      claims.actingUserId !== undefined &&
+      principalType !== 'service' &&
+      principalType !== 'api_key'
+    ) {
       throw new Error(
         'Acting-user identity can only be carried on a service token',
       );
     }
+    if (claims.keyId !== undefined && principalType !== 'api_key') {
+      throw new Error('Only an API-key token can carry a key identity');
+    }
+    const apiKeyIdentity =
+      principalType === 'api_key' ? apiKeyIdentityClaims(claims) : undefined;
     const zdr = issuedTokenZdr(principalType, claims);
     // Never lengthens a token beyond the audience's configured default —
     // only a strictly shorter override is honored, so a caller-supplied
@@ -686,9 +811,11 @@ export class ConvexTokenService {
     // principal) also never outlives the snapshot's bound.
     const tenantTtlCap = tenantTtlCapSeconds(principalType, claims);
     const ttlSeconds =
-      tenantTtlCap === undefined
-        ? requestedTtlSeconds
-        : Math.min(requestedTtlSeconds, tenantTtlCap);
+      apiKeyIdentity !== undefined
+        ? apiKeyTtlSeconds(config.ttlSeconds, claims.ttlSecondsOverride)
+        : tenantTtlCap === undefined
+          ? requestedTtlSeconds
+          : Math.min(requestedTtlSeconds, tenantTtlCap);
     const now = Math.floor(Date.now() / 1000);
     const payload = {
       iss: this.planeIssuer,
@@ -705,6 +832,8 @@ export class ConvexTokenService {
         ? { acting_user_id: claims.actingUserId }
         : {}),
       ...(claims.tokenId ? { jti: claims.tokenId } : {}),
+      // `key_id`, `acting_user_id` and the same `jti`, validated above.
+      ...(apiKeyIdentity ?? {}),
       ...(claims.reason ? { reason: claims.reason } : {}),
       ...(claims.email ? { email: claims.email } : {}),
       ...(claims.scopes && claims.scopes.length > 0
