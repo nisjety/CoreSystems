@@ -560,8 +560,11 @@ describe('action registry', () => {
     expect(new Set(ids).size).toBe(ids.length)
     // 187 before the move, plus the seven W1 additions (create_post, reply_in_thread, the two
     // effect-policy actions, update_room_details, change_member_role, leave_room), plus the
-    // eight actions main added on its own side (195 before the Space merge).
-    expect(ids).toHaveLength(202)
+    // eight actions main added on its own side (195 before the Space merge), then 34 more that
+    // main added after this pin (space files and reminders, spaces.* controls, org domains and
+    // SSO, audit.list_events), then the four Innhenting actions of the ingestions and monitoring
+    // domains (job_control, start_agent_run, create_monitor, delete_monitor).
+    expect(ids).toHaveLength(240)
 
     const spaceIds = ids.filter((id) => id.startsWith('spaces.'))
     const first = ids.indexOf(spaceIds[0] as string)

@@ -128,6 +128,30 @@ export const ERROR_COPY: Record<string, ErrorCopy> = {
   scrape_artifact_unsupported: { no: 'Denne filtypen kan ikke vises eller lastes ned her.', en: 'This file type cannot be shown or downloaded here.' },
   scrape_artifact_failed: { no: 'Kunne ikke hente bildet eller PDF-filen. Prøv igjen.', en: 'Could not fetch the image or PDF. Try again.' },
   scrape_artifact_too_large: { no: 'Filen er for stor til å vises.', en: 'The file is too large to show.' },
+  invalid_artifact: { no: 'Fil-referansen er ugyldig.', en: 'The file reference is not valid.' },
+  artifact_not_found: { no: 'Filen er ikke lenger tilgjengelig.', en: 'The file is no longer available.' },
+  artifact_unsupported: { no: 'Denne filtypen kan ikke vises her. Bare tekst kan åpnes.', en: 'This file type cannot be shown here. Only text can be opened.' },
+  not_controllable: {
+    no: 'Denne kjøringen går til den er ferdig, og kan ikke settes på pause, gjenopptas eller avbrytes.',
+    en: 'This run goes to completion and cannot be paused, resumed or cancelled.',
+  },
+  upstream_invalid: { no: 'Nettleserøkten mangler id. Start den på nytt.', en: 'The browser session has no id. Start it again.' },
+  extract_ai_formats_off: {
+    no: 'Strukturert uttrekk er slått av på Quarry-edge (QUARRY_EDGE__AI_FORMATS).',
+    en: 'Structured extraction is switched off in Quarry-edge (QUARRY_EDGE__AI_FORMATS).',
+  },
+  extract_model_plane_not_configured: {
+    no: 'Modellplanen er ikke koblet til Quarry-edge (QUARRY_EDGE__MODEL_PLANE_URL mangler).',
+    en: 'The model plane is not connected to Quarry-edge (QUARRY_EDGE__MODEL_PLANE_URL is not set).',
+  },
+  extract_model_lane_not_granted: {
+    no: 'Denne installasjonen har ingen modellnøkkel for strukturert uttrekk.',
+    en: 'This installation has no model credential for structured extraction.',
+  },
+  extract_model_plane_refused: {
+    no: 'Modellplanen avviste Quarry-edge ved første modellkall. Det ble ikke belastet noe.',
+    en: 'The model plane refused Quarry-edge on the first model call. Nothing was metered.',
+  },
   feature_disabled: {
     no: 'Denne funksjonen er ikke slått på for deg ennå.',
     en: 'This feature is not turned on for you yet.',
@@ -135,6 +159,8 @@ export const ERROR_COPY: Record<string, ErrorCopy> = {
   browser_capability_unavailable: { no: 'Denne nettleserfunksjonen er ikke tilgjengelig akkurat nå.', en: 'This browser capability is not available right now.' },
   heavy_browser_busy: { no: 'Nettleseren er opptatt med en tung oppgave. Prøv igjen om litt.', en: 'The browser is busy with a heavy task. Try again shortly.' },
   action_failed: { no: 'Handlingen kunne ikke utføres.', en: 'The action could not be completed.' },
+  too_large: { no: 'Dokumentet er større enn 25 MiB. Velg en mindre fil.', en: 'The document is larger than 25 MiB. Choose a smaller file.' },
+  upstream_timeout: { no: 'Lesingen tok for lang tid. Prøv med et kortere dokument.', en: 'Reading took too long. Try a shorter document.' },
   capture_exceeds_inline_cap: { no: 'Opptaket er for stort til å sendes direkte. Prøv en mindre del av siden.', en: 'The capture is too large to send inline. Try a smaller part of the page.' },
   unsupported_media: { no: 'Dette innholdet kan ikke vises som forhåndsvisning. Prøv en lenke til en nettside eller et dokument.', en: 'This content cannot be previewed. Try a link to a web page or a document.' },
   extraction_failed: { no: 'Kunne ikke hente ut innhold fra dette dokumentet.', en: 'Could not extract content from this document.' },

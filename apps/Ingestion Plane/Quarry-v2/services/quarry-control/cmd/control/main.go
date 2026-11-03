@@ -51,15 +51,22 @@ func main() {
 	apiKey := os.Getenv("QUARRY_CONTROL_API_KEY")
 
 	// W2: the one in-product notification on a detected change is delivered
-	// to notification-core (Application Plane) over HTTP. Unset URL → the
-	// notify leg is inert (nil sink); change tracking + webhooks still work.
+	// to notification-core (Application Plane) over HTTP, signed as the
+	// quarry-control principal. Unset URL or secret → the notify leg is inert
+	// (nil sink); change tracking + webhooks still work.
 	var notifySink notify.Sink
-	if u := strings.TrimSpace(os.Getenv("NOTIFICATION_CORE_URL")); u != "" {
-		notifySink = notify.NewHTTPSink(u, os.Getenv("NOTIFICATION_CORE_INTERNAL_KEY"))
-		log.Info().Str("url", u).Msg("notification-core sink wired for change notifications")
-	} else {
+	notifyURL := strings.TrimSpace(os.Getenv("NOTIFICATION_CORE_URL"))
+	notifySecret := strings.TrimSpace(os.Getenv("NOTIFICATION_QUARRY_CONTROL_SERVICE_TOKEN"))
+	switch {
+	case notifyURL == "":
 		log.Warn().Msg("NOTIFICATION_CORE_URL unset — change notifications disabled (change tracking + webhooks unaffected)")
+	case notifySecret == "":
+		log.Warn().Msg("NOTIFICATION_QUARRY_CONTROL_SERVICE_TOKEN unset — change notifications disabled (change tracking + webhooks unaffected)")
+	default:
+		notifySink = notify.NewHTTPSink(notifyURL, notifySecret)
+		log.Info().Str("url", notifyURL).Msg("notification-core sink wired for change notifications")
 	}
+
 	envName := strings.ToLower(strings.TrimSpace(os.Getenv("ENVIRONMENT")))
 	isProd := envName == "prod" || envName == "production"
 

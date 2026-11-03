@@ -182,3 +182,38 @@ export async function requestForm<T>(
 
   return unwrap(body as Envelope<T>)
 }
+
+/**
+ * Raw-body variant of {@link requestJson}: the file's bytes go up as they are, under the
+ * `Content-Type` the caller names. Used for a document read, which is neither JSON nor
+ * multipart. The browser does not add a type of its own, so the one given is the one sent.
+ */
+export async function requestBytes<T>(
+  path: string,
+  body: Blob,
+  contentType: string,
+  init?: Omit<RequestInit, 'body'>,
+): Promise<T> {
+  const headers = new Headers(init?.headers)
+  headers.set('Accept', 'application/json')
+  headers.set('Content-Type', contentType)
+  applyDevAuth(headers)
+
+  const response = await fetch(`${gatewayBaseUrl()}${path}`, {
+    ...init,
+    method: init?.method ?? 'POST',
+    credentials: 'include',
+    headers,
+    body,
+  })
+
+  const reply = (await response.json().catch(() => null)) as Envelope<T> | Record<string, unknown> | null
+
+  if (!response.ok) {
+    const failure = apiErrorFromResponse(reply, response)
+    signalSessionExpiry(failure, path)
+    throw failure
+  }
+
+  return unwrap(reply as Envelope<T>)
+}

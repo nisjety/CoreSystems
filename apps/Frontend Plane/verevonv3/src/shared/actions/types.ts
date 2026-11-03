@@ -45,6 +45,8 @@ export type ActionExecution = {
   auditEventId?: string
   /** True only when the owner returned the receipt for an exact idempotent replay. */
   replayed?: boolean
+  /** What the owner dispatcher returned for the action (its `data`), when the action has one. */
+  result?: unknown
   /** Present when a ticket action durably creates or mutates a ticket. */
   ticketId?: string
 }

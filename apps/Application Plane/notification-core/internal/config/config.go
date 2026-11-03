@@ -72,6 +72,7 @@ func Load() (*Config, error) {
 			"support-worker":  strings.TrimSpace(getEnv("NOTIFICATION_SUPPORT_WORKER_SERVICE_TOKEN", "")),
 			"capability-core": strings.TrimSpace(getEnv("NOTIFICATION_CAPABILITY_CORE_SERVICE_TOKEN", "")),
 			"space-attention": strings.TrimSpace(getEnv("NOTIFICATION_SPACE_ATTENTION_SERVICE_TOKEN", "")),
+			"quarry-control":  strings.TrimSpace(getEnv("NOTIFICATION_QUARRY_CONTROL_SERVICE_TOKEN", "")),
 		},
 	}
 

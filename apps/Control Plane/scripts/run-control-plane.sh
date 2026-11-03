@@ -440,7 +440,10 @@ set_if_missing VEREVON_PUBLIC_ORIGIN http://localhost:5173
 # name in docker-compose.yml, so an ephemeral-only default is invisible to
 # build-verevon-services.sh's direct `docker compose config` interpolation.
 persist_if_missing AUTH_CORE_ISSUER http://localhost:3011/api/convex-auth
-set_if_missing BETTER_AUTH_TRUSTED_ORIGINS 'http://localhost:3185,http://127.0.0.1:3185,http://localhost:5173,http://127.0.0.1:5173'
+# The same list as auth-core's default in docker-compose.yml. This value wins over
+# that default, so a shorter list here silently untrusts the e2e SPA on :5199
+# (Playwright setup then fails 403 INVALID_ORIGIN, register D1-814).
+set_if_missing BETTER_AUTH_TRUSTED_ORIGINS 'http://localhost:3185,http://127.0.0.1:3185,http://localhost:3186,http://127.0.0.1:3186,http://localhost:5173,http://127.0.0.1:5173,http://localhost:5199,http://127.0.0.1:5199,http://localhost:5201,http://127.0.0.1:5201'
 
 # Compose's development overlay requires pairwise-distinct values for these
 # scoped NATS and HTTP/gRPC principals. They are generated once into the 0600

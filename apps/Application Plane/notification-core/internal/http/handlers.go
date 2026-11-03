@@ -224,7 +224,11 @@ func isNotificationTypeAuthorized(serviceID, notificationType string) bool {
 			"modelplane.run_completed": {},
 			"modelplane.run_failed":    {},
 		},
-		// WS11-S9: refs-only Space attention, issued by Convex only. The
+		// Quarry's change monitor tells a user that a page they watch has changed.
+			"quarry-control": {
+				"change_detected": {},
+			},
+			// WS11-S9: refs-only Space attention, issued by Convex only. The
 		// in-app copy is the Convex inbox, so these types carry no title or text.
 		"space-attention": {
 			"space.mention":         {},

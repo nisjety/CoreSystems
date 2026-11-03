@@ -188,9 +188,14 @@ func notifyOnChange(sink notify.Sink, ev quarrycontracts.Event) {
 		// No creator recorded (legacy schedule / non-user path) — honest skip.
 		return
 	}
+	orgID, _ := ev.Payload["org_id"].(string)
+	if strings.TrimSpace(orgID) == "" {
+		// The organization scopes the notification; without it there is nothing to scope to.
+		return
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if err := sink.NotifyChange(ctx, recipient, string(ev.EventID), ev.Payload); err != nil {
+	if err := sink.NotifyChange(ctx, orgID, recipient, string(ev.EventID), ev.Payload); err != nil {
 		log.Warn().Err(err).Str("event_id", string(ev.EventID)).Msg("change notification delivery failed")
 	}
 }

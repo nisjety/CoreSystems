@@ -20,8 +20,12 @@ export type RunItem = {
     query?: string | null
   }
   stats: Record<string, unknown>
-  /** WS15.L5: where the job came from (`knowledge`, `schedule`, `api`, ...). Absent on older gateways. */
-  origin?: string | null
+  /** Credits the job has used (INNH-9). Absent while Quarry's job-credits flag is off. */
+  credits?: JobCredits
+  /** Who started the job: `{ type, actor?, ref? }` as Quarry records it (`manual`, `schedule`, `api`, …). */
+  origin?: { type: string; actor?: string | null; ref?: string | null } | null
+  /** The schedule that fired this job, when it was not started by hand. */
+  scheduleId?: string | null
   /** WS15.L5: the job's current phase (`discover`, `fetch`, `ingest`, ...). Absent on older gateways. */
   phase?: string | null
   /** WS15.L5: what the user asked for (`run`, `paused`, `cancelled`). Differs from `status` while a request is in flight. */
@@ -144,18 +148,99 @@ export type RunCreateResult = {
   evidence?: ManualEvidence
 }
 
+/** Quarry's per-job credit figure (INNH-9): pages fetched times the page price. A Quarry estimate, not an invoice. */
+export type JobCredits = {
+  used: number
+  unit: string
+  basis: string
+  pricePerPage: number
+  estimated: boolean
+  /** False while the job can still fetch pages; a late page event can still raise `used`. */
+  final: boolean
+}
+
 export type RunCreateRequest =
   | {
        kind: 'batch'
        urls: string[]
      }
   | {
+       kind: 'extract'
+       url: string
+       /** JSON Schema for structured extraction. */
+       schema?: Record<string, unknown> | string
+       /** Instructions for the model (1 to 10,000 characters). Alone, one free-form JSON object; with a schema, it steers the extraction within it. */
+       prompt?: string
+     }
+  | {
        kind: string
        url: string
-       prompt?: string
-       schema?: Record<string, unknown> | string
-       extractMode?: 'product' | 'article' | 'general'
      }
+
+/** One job's status as Quarry reports it (`GET /api/ingestions/jobs/{id}`). */
+export type JobDetail = {
+  id: string
+  kind: string
+  status: string
+  phase: string
+  terminal: boolean
+  /** Present only while Quarry's job-credits flag is on. */
+  credits?: JobCredits
+  origin: RunItem['origin']
+  createdAt: string
+  finishedAt: string | null
+  deadlineAt: string | null
+  counts: { completed: number; failed: number; blocked: number; retried: number }
+  total: number | null
+  /** `exact` for a batch, `budget` for a crawl whose total is a page ceiling. */
+  totalKind: string | null
+  warnings: Array<{ code: string; message: string }>
+  control: { desired: string | null; pending: boolean }
+  scheduleId: string | null
+  runId: string | null
+  /** Crawl and batch jobs can be paused, resumed and cancelled. */
+  controllable: boolean
+}
+
+/** Failed and blocked pages of a job (`GET /api/ingestions/jobs/{id}/errors`). */
+export type JobErrors = {
+  errors: Array<{
+    id: string
+    ts: string
+    url: string | null
+    code: string | null
+    category: string | null
+    retryable: boolean
+    status: number | null
+  }>
+  blocked: Array<{ url: string | null; ts: string; reason: string | null }>
+  robotsBlocked: Array<{ url: string | null; ts: string; reason: string | null }>
+  nextSeq: number | null
+}
+
+/** Team credit use for a period (`GET /api/ingestions/usage`). */
+export type CreditUsage = {
+  period: string | null
+  creditsUsed: number
+  creditsLimit: number | null
+  utilizationPercent: number
+}
+
+/** One structured or markdown result of `/v1/extract`, as the gateway hands it over. */
+export type ExtractItem = {
+  url: string
+  status: 'ok' | 'fetched' | 'error' | string
+  data?: unknown
+  markdown?: string | null
+  structured?: unknown
+  error?: string | null
+  /** Present when a schema was sent and the model answered. `status` stays `ok` either way. */
+  schema_valid?: boolean
+  /** Why `data` does not conform to the schema, one line per issue. */
+  schema_issues?: string[]
+  /** True when the page was longer than the input cap and only its start was read. */
+  truncated_input?: boolean
+}
 
 /**
  * `activate` is deliberately not a member: a schedule is created inactive and
@@ -327,4 +412,74 @@ export function deleteIngestionSource(id: string, signal?: AbortSignal) {
     `/api/ingestions/sources/${encodeURIComponent(id)}`,
     { method: 'DELETE', signal },
   )
+}
+
+export function getIngestionJob(id: string, signal?: AbortSignal) {
+  return requestJson<JobDetail>(`/api/ingestions/jobs/${encodeURIComponent(id)}`, { signal })
+}
+
+export function getIngestionJobErrors(
+  id: string,
+  options: { afterSeq?: number; limit?: number } = {},
+  signal?: AbortSignal,
+) {
+  const query = new URLSearchParams()
+  if (options.afterSeq !== undefined) query.set('afterSeq', String(options.afterSeq))
+  if (options.limit !== undefined) query.set('limit', String(options.limit))
+  const suffix = query.size > 0 ? `?${query.toString()}` : ''
+  return requestJson<JobErrors>(`/api/ingestions/jobs/${encodeURIComponent(id)}/errors${suffix}`, { signal })
+}
+
+export function getIngestionUsage(period: string, signal?: AbortSignal) {
+  return requestJson<CreditUsage>(`/api/ingestions/usage?period=${encodeURIComponent(period)}`, { signal })
+}
+
+/** One page a run fetched (the Apify dataset row). Optional fields are null when Quarry did not record them. */
+export interface JobResultItem {
+  seq: number
+  url: string
+  status: number | null
+  contentType: string | null
+  title: string | null
+  fetchedAt: string | null
+  wordCount: number | null
+  driver: string | null
+  markdownArtifactId: string | null
+  sourceArtifactId: string | null
+  bytes: number | null
+}
+
+export interface JobResultsPage {
+  items: JobResultItem[]
+  /** The cursor for the next page; null on the last page. */
+  nextSeq: number | null
+  /** True when `latest` stopped scanning early on a very large run. */
+  scanCapped: boolean
+}
+
+/** The pages a crawl, batch or other job fetched. Quarry answers 501 while `QUARRY_EDGE__JOB_RESULTS` is off and 403 under ZDR. */
+export function getIngestionJobResults(
+  id: string,
+  options: { afterSeq?: number; limit?: number; latest?: boolean } = {},
+  signal?: AbortSignal,
+) {
+  const query = new URLSearchParams()
+  if (options.afterSeq !== undefined) query.set('afterSeq', String(options.afterSeq))
+  if (options.limit !== undefined) query.set('limit', String(options.limit))
+  if (options.latest) query.set('latest', 'true')
+  const suffix = query.size > 0 ? `?${query.toString()}` : ''
+  return requestJson<JobResultsPage>(`/api/ingestions/jobs/${encodeURIComponent(id)}/results${suffix}`, { signal })
+}
+
+/** A text artifact, such as a fetched page's markdown, capped at 1 MiB by the gateway. */
+export interface ArtifactText {
+  id: string
+  contentType: string
+  content: string
+  bytes: number
+  truncated: boolean
+}
+
+export function getIngestionArtifactText(artifactId: string, signal?: AbortSignal) {
+  return requestJson<ArtifactText>(`/api/ingestions/artifacts/${encodeURIComponent(artifactId)}`, { signal })
 }

@@ -111,7 +111,6 @@ const NOT_CONVERTED: Record<string, { sites: number; reason: string }> = {
     reason:
       'reviewed: safeConnectionStatusMessage shows the message only for three listed codes, under 180 characters and without a URL',
   },
-  'features/ingestions/components/VerevonIngestionsPage.tsx': { sites: 7, reason: UNREVIEWED },
   'features/settings/components/OrgDeletionDangerZone.tsx': {
     sites: 1,
     reason:
