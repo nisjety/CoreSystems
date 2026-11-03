@@ -502,6 +502,7 @@ fn normalize_run_agent_input(body: Value) -> Result<Value, String> {
             out.insert(output_key.to_owned(), Value::Bool(value));
         }
     }
+    crate::domains::spaces::mentions::carry_ag_ui_wake(&body, &mut out); // WS08-S4 AG-UI wake parity
 
     Ok(Value::Object(out))
 }

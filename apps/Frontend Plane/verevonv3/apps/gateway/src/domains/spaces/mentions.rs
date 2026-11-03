@@ -211,6 +211,24 @@ pub(crate) fn parse_wake_fields(raw: &Value) -> Option<(String, String)> {
         .then(|| (message_id.to_owned(), client_wake_id.to_owned()))
 }
 
+/// AG-UI parity: an AG-UI `RunAgentInput` is rebuilt field by field into the native invoke body,
+/// so without this its `wake` never reached the injector chain and an AG-UI wake silently became
+/// the legacy ephemeral mention turn. Carries the browser's `wake` VALUE unchanged (the injector
+/// parses and refuses it, exactly as on `/api/v1/chat/stream`), read with the adapter's own
+/// precedence: `forwardedProps`, then `data`, then the top level. A null or absent `wake` carries
+/// nothing.
+pub(crate) fn carry_ag_ui_wake(input: &Value, out: &mut Map<String, Value>) {
+    let wake = ["forwardedProps", "data"]
+        .iter()
+        .filter_map(|holder| input.get(*holder).and_then(Value::as_object))
+        .find_map(|holder| holder.get("wake"))
+        .or_else(|| input.get("wake"))
+        .filter(|value| !value.is_null());
+    if let Some(wake) = wake {
+        out.insert("wake".to_owned(), wake.clone());
+    }
+}
+
 /// Who owns the thread the post lands in. Only the owner's runs can be started in a thread, so an
 /// agent mention by anyone else is recorded as refused `owner_only_thread`. `Unknown` (a new
 /// thread, or a route that has not read it) plans no downgrade: Session Core decides.
@@ -500,9 +518,24 @@ pub(crate) async fn check_wake_ceiling(
     let limiter = WAKE_LIMITER.get_or_init(|| {
         crate::rate_limit::RateLimiter::from_cache_with_rpm(&state.cache, WAKES_PER_MINUTE)
     });
-    limiter
-        .try_acquire(&format!("space-wake:{}:{user_id}:{}", org_id.trim(), space_ref.trim()))
-        .await
+    acquire_wake_token(limiter, org_id, user_id, space_ref).await
+}
+
+/// One token from `limiter`'s bucket for (org, user, Space). Split from [`check_wake_ceiling`] so
+/// the per-(user, Space) keying is testable with a low rate (the process-wide limiter is lifted in
+/// tests).
+async fn acquire_wake_token(
+    limiter: &crate::rate_limit::RateLimiter,
+    org_id: &str,
+    user_id: &str,
+    space_ref: &str,
+) -> Result<(), u64> {
+    limiter.try_acquire(&wake_bucket_key(org_id, user_id, space_ref)).await
+}
+
+/// The bucket key: one bucket per user per Space, inside the organization.
+fn wake_bucket_key(org_id: &str, user_id: &str, space_ref: &str) -> String {
+    format!("space-wake:{}:{}:{}", org_id.trim(), user_id.trim(), space_ref.trim())
 }
 
 #[cfg(test)]
@@ -905,5 +938,111 @@ mod tests {
         // with the kill switches off the receipt carries none: nothing is reported as recorded
         assert!(recorded_from_receipt(&json!({"thread_id": "t"})).is_empty());
         assert!(recorded_from_receipt(&json!({"mentions": "x"})).is_empty());
+    }
+
+    /// AG-UI parity: the `RunAgentInput` rebuild carries `wake` like every other Space field,
+    /// with the adapter's precedence, and carries the value as sent (the injector refuses a bad
+    /// one with the same 400 as native chat).
+    #[test]
+    fn an_ag_ui_run_input_carries_its_wake_to_the_injector() {
+        let wake = json!({"message_id": "msg-1", "client_wake_id": "wake_id_0123456789"});
+        let carried = |input: Value| {
+            let mut out = Map::new();
+            carry_ag_ui_wake(&input, &mut out);
+            out.get("wake").cloned()
+        };
+        assert_eq!(carried(json!({"forwardedProps": {"wake": wake}})), Some(wake.clone()));
+        assert_eq!(carried(json!({"data": {"wake": wake}})), Some(wake.clone()));
+        assert_eq!(carried(json!({"wake": wake})), Some(wake.clone()));
+        // forwardedProps wins over data, data over the top level
+        let other = json!({"message_id": "msg-2", "client_wake_id": "wake_id_9876543210"});
+        assert_eq!(
+            carried(json!({"forwardedProps": {"wake": wake}, "data": {"wake": other}, "wake": other})),
+            Some(wake.clone())
+        );
+        assert_eq!(carried(json!({"data": {"wake": other}, "wake": wake})), Some(other.clone()));
+        // a malformed value is carried as sent, so the injector answers `invalid_wake`
+        assert_eq!(carried(json!({"forwardedProps": {"wake": "msg-1"}})), Some(json!("msg-1")));
+        // no wake: nothing is added, the turn stays the legacy mention turn
+        assert_eq!(carried(json!({"forwardedProps": {"spaceRef": "room-1"}})), None);
+        assert_eq!(carried(json!({"forwardedProps": {"wake": null}})), None);
+        assert_eq!(carried(json!({"forwardedProps": "x", "data": 3})), None);
+    }
+
+    /// The wake bucket is per (user, Space) inside the organization: one user exhausting one
+    /// Space's bucket leaves another Space, another user and another organization untouched, and
+    /// the refusal carries a Retry-After of at least one second.
+    #[tokio::test]
+    async fn the_wake_bucket_is_per_user_and_per_space() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let state = crate::config::AppState::for_tests();
+        let limiter = crate::rate_limit::RateLimiter::from_cache_with_rpm(&state.cache, 2.0);
+        assert!(acquire_wake_token(&limiter, "org-1", "user-1", "room-1").await.is_ok());
+        assert!(acquire_wake_token(&limiter, "org-1", "user-1", "room-1").await.is_ok());
+        let retry_after = acquire_wake_token(&limiter, "org-1", "user-1", "room-1")
+            .await
+            .expect_err("the third wake in the minute is refused");
+        assert!(retry_after >= 1);
+        assert!(acquire_wake_token(&limiter, "org-1", "user-1", "room-2").await.is_ok());
+        assert!(acquire_wake_token(&limiter, "org-1", "user-2", "room-1").await.is_ok());
+        assert!(acquire_wake_token(&limiter, "org-2", "user-1", "room-1").await.is_ok());
+        assert_eq!(wake_bucket_key(" org-1 ", "user-1", " room-1"), "space-wake:org-1:user-1:room-1");
+        assert_ne!(wake_bucket_key("org-1", "user-1", "room-1"), wake_bucket_key("org-1", "room-1", "user-1"));
+    }
+
+    /// `thread_run_active` passthrough: model-gateway refuses a wake into a busy thread (and a
+    /// replayed start) as an SSE `error` frame inside a 200 stream. The BFF stream relay forwards
+    /// those frames byte for byte, so the SPA's wake sequencer sees the typed code and retries;
+    /// `managed_run_already_started` (a replayed `client_wake_id`) reaches it the same way and is
+    /// treated as accepted there.
+    #[tokio::test]
+    async fn thread_run_active_and_already_started_frames_pass_through_the_stream_relay() {
+        use http_body_util::BodyExt;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        for (code, message) in [
+            ("thread_run_active", "This thread already has an agent run in progress. Try again when it finishes."),
+            ("managed_run_already_started", "This request already has a durable run."),
+        ] {
+            let frame = format!(
+                "event: error\ndata: {}\n\n",
+                json!({"code": code, "message": message, "retryable": true, "request_id": "req-1"})
+            );
+            let upstream = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/v1/invoke/stream"))
+                .respond_with(ResponseTemplate::new(200).set_body_raw(frame.clone(), "text/event-stream"))
+                .expect(1)
+                .mount(&upstream)
+                .await;
+            let state = crate::config::AppState::for_tests();
+            let response = crate::upstream::proxy_sse_stream_with_browser(
+                &state,
+                reqwest::Method::POST,
+                &format!("{}/v1/invoke/stream", upstream.uri()),
+                Some(json!({"content": "hello", "thread_id": "thread-1"})),
+                Some("model-token"),
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some("session-token"),
+                None,
+                None,
+                None,
+                None,
+                Some(("user-1", "org-1")),
+                false,
+                &[],
+            )
+            .await;
+            assert_eq!(response.status().as_u16(), 200, "{code}");
+            let bytes = response.into_body().collect().await.expect("relayed stream").to_bytes();
+            let text = String::from_utf8_lossy(&bytes);
+            assert!(text.contains(&frame), "{code} frame relayed unchanged: {text}");
+        }
     }
 }
