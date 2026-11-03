@@ -344,6 +344,11 @@ fn authed_routes() -> Router<AppState> {
         )
         .route("/v1/memories/profile/rebuild", post(rebuild_user_profile))
         .route("/v1/memories/:memory_id", delete(delete_memory_entry))
+        // Space memory for the Space's owner or admin (EP-8 S7). POST so the Control
+        // `model.space.memory.manage` decision rides in the body, never a URL; Session Core
+        // verifies it and is the authority.
+        .route("/v1/spaces/:space_id/memory/list", post(list_space_memories))
+        .route("/v1/spaces/:space_id/memory/delete", post(delete_space_memory_entry))
         // Learning governance (WS07-S9): the owner's decisions on learned skills and
         // the ledger of what was learned. The user bearer only; the owner is the
         // verified caller on every hop, and session-core re-checks ownership.
@@ -10745,6 +10750,25 @@ struct ModelDescriptor {
     /// with the switch off serves the same JSON as before.
     #[serde(skip_serializing_if = "Option::is_none")]
     price: Option<crate::catalogue_prices::ModelPrice>,
+    /// What the provider states about this model's request data (`data_use` on inference-core's
+    /// `ModelInfo`). Left out when nothing is stated, so a deploy without an attested deployment
+    /// serves the JSON it served before (EP-9 C5).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    data_use: Option<DataUseDescriptor>,
+}
+
+/// The data-use statements one model's provider makes (`data_use` on `/v1/models`). A field is
+/// left out unless a source states it: an absent field is "not stated", never "no".
+#[derive(Debug, Serialize)]
+struct DataUseDescriptor {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    trains_on_inputs: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    retention_days: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    zdr_attested: Option<bool>,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    statement_ref: String,
 }
 
 /// Wire-numeric → tier label. Mirrors inference-core's `PrivacyTier::label`;
@@ -10860,6 +10884,12 @@ async fn list_models(
                 max_output_tokens: known_tokens(m.max_output_tokens),
                 lifecycle: m.lifecycle,
                 price,
+                data_use: m.data_use.map(|data_use| DataUseDescriptor {
+                    trains_on_inputs: data_use.trains_on_inputs,
+                    retention_days: data_use.retention_days,
+                    zdr_attested: data_use.zdr_attested,
+                    statement_ref: data_use.statement_ref,
+                }),
             }
         })
         .collect();
@@ -12912,6 +12942,7 @@ async fn list_memories(
                 org_id: claims.org_id.clone(),
                 user_id: claims.user_id.clone(),
                 limit: query.limit.unwrap_or(100),
+                ..Default::default()
             },
             &bearer,
         )?)
@@ -13062,6 +13093,7 @@ async fn delete_memory_entry(
                 org_id: claims.org_id.clone(),
                 user_id: claims.user_id.clone(),
                 memory_id: trimmed.to_owned(),
+                ..Default::default()
             },
             &bearer,
         )?)
@@ -13074,6 +13106,219 @@ async fn delete_memory_entry(
         degraded: response.degraded,
         degradation_reason: response.degradation_reason,
     }))
+}
+
+/// Upper bounds of the Space memory routes' body fields (EP-8 S7), the run-control route's own.
+const SPACE_MEMORY_MAX_ID_BYTES: usize = 200;
+const SPACE_MEMORY_MAX_DECISION_REF_BYTES: usize = 512;
+const SPACE_MEMORY_MAX_DECISION_TOKEN_BYTES: usize = 8 * 1024;
+
+/// `POST /v1/spaces/:space_id/memory/{list,delete}` body. The Control `model.space.memory.manage`
+/// decision rides in the body; `memory_id` only on a delete.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SpaceMemoryBody {
+    #[serde(default)]
+    space_control_decision_ref: String,
+    #[serde(default)]
+    space_control_decision_token: String,
+    #[serde(default)]
+    memory_id: String,
+    #[serde(default)]
+    limit: Option<u32>,
+}
+
+/// The decision and ids of a Space memory call, bounded; `None` is a malformed request.
+fn space_memory_fields(space_id: &str, body: &SpaceMemoryBody) -> Option<(String, String, String)> {
+    let space_id = space_id.trim();
+    let decision_ref = body.space_control_decision_ref.trim();
+    let token = body.space_control_decision_token.trim();
+    let bounded = !space_id.is_empty()
+        && space_id.len() <= SPACE_MEMORY_MAX_ID_BYTES
+        && decision_ref.len() <= SPACE_MEMORY_MAX_DECISION_REF_BYTES
+        && token.len() <= SPACE_MEMORY_MAX_DECISION_TOKEN_BYTES
+        && body.memory_id.trim().len() <= SPACE_MEMORY_MAX_ID_BYTES;
+    bounded.then(|| (space_id.to_owned(), decision_ref.to_owned(), token.to_owned()))
+}
+
+/// Session Core's refusal of a Space memory call in fixed words. A permission refusal is one code
+/// whatever its cause (no decision, another role, a revoked member), so nothing about the Space leaks.
+fn space_memory_error(status: &tonic::Status) -> HttpJsonError {
+    let (code, http, message) = match status.code() {
+        tonic::Code::PermissionDenied | tonic::Code::Unauthenticated => (
+            "space_memory_not_authorized",
+            StatusCode::FORBIDDEN,
+            "managing this Space's memory is not permitted",
+        ),
+        tonic::Code::NotFound => (
+            "memory_not_found",
+            StatusCode::NOT_FOUND,
+            "the memory is not available",
+        ),
+        tonic::Code::InvalidArgument => (
+            "invalid_request",
+            StatusCode::BAD_REQUEST,
+            "the Space memory request is invalid",
+        ),
+        _ => (
+            "space_memory_unavailable",
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Space memory is unavailable",
+        ),
+    };
+    (
+        http,
+        Json(json!({"error": {"code": code, "message": message, "details": {}}})),
+    )
+}
+
+#[derive(Debug, Serialize)]
+struct SpaceMemorySummaryResponse {
+    memory_id: String,
+    content: String,
+    updated_at: String,
+    provenance: &'static str,
+    /// `room_statement` or `member_save`.
+    source_label: String,
+    /// The thread the row was learned in, for the source link.
+    thread_id: String,
+    /// `audience_changed` when the room's current audience does not recall the row; omitted otherwise.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    withheld_reason: String,
+}
+
+/// The memory of one Space, for its owner or admin (EP-8 S7). Session Core verifies the Control
+/// Space memory decision; this hop checks the shape only. A read: a zero-retention caller is
+/// answered empty by Session Core, as the personal list is.
+async fn list_space_memories(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    bearer: VerifiedModelBearer,
+    Path(space_id): Path<String>,
+    Json(body): Json<SpaceMemoryBody>,
+) -> Result<Json<Value>, HttpJsonError> {
+    use mp_contracts::model_plane::v1::ListMemoryRequest;
+    let (space_id, decision_ref, token) = space_memory_fields(&space_id, &body).ok_or_else(|| {
+        space_memory_error(&tonic::Status::invalid_argument("invalid Space memory request"))
+    })?;
+    let response = state
+        .memory_client
+        .clone()
+        .list_memory(authenticated_session_request(
+            ListMemoryRequest {
+                org_id: claims.org_id.clone(),
+                user_id: claims.user_id.clone(),
+                limit: body.limit.unwrap_or(100).clamp(1, 200),
+                space_id,
+                space_control_decision_ref: decision_ref,
+                space_control_decision_token: token,
+            },
+            &bearer,
+        )?)
+        .await
+        .map_err(|status| space_memory_error(&status))?
+        .into_inner();
+    let withheld = response
+        .entries
+        .iter()
+        .filter(|entry| !entry.withheld_reason.is_empty())
+        .count();
+    let memories: Vec<SpaceMemorySummaryResponse> = response
+        .entries
+        .into_iter()
+        .map(|entry| SpaceMemorySummaryResponse {
+            memory_id: entry.memory_id,
+            content: entry.content,
+            updated_at: timestamp_to_rfc3339(entry.updated_at),
+            provenance: memory_provenance_label(entry.provenance),
+            source_label: entry.source_label,
+            thread_id: entry.thread_id,
+            withheld_reason: entry.withheld_reason,
+        })
+        .collect();
+    Ok(Json(json!({
+        "memories": memories,
+        "withheld": withheld,
+        "degraded": response.degraded,
+        "degradation_reason": response.degradation_reason,
+    })))
+}
+
+/// Deletes one row of a Space's memory under a decision issued for that row (EP-8 S7). Allowed
+/// under every posture, as every delete is.
+async fn delete_space_memory_entry(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    bearer: VerifiedModelBearer,
+    Path(space_id): Path<String>,
+    Json(body): Json<SpaceMemoryBody>,
+) -> Result<Json<DeleteMemoryHttpResponse>, HttpJsonError> {
+    use mp_contracts::model_plane::v1::DeleteMemoryRequest;
+    let memory_id = body.memory_id.trim().to_owned();
+    let fields = space_memory_fields(&space_id, &body).filter(|_| !memory_id.is_empty());
+    let (space_id, decision_ref, token) = fields.ok_or_else(|| {
+        space_memory_error(&tonic::Status::invalid_argument("invalid Space memory request"))
+    })?;
+    let response = state
+        .memory_client
+        .clone()
+        .delete_memory(authenticated_session_request(
+            DeleteMemoryRequest {
+                org_id: claims.org_id.clone(),
+                user_id: claims.user_id.clone(),
+                memory_id,
+                space_id,
+                space_control_decision_ref: decision_ref,
+                space_control_decision_token: token,
+            },
+            &bearer,
+        )?)
+        .await
+        .map_err(|status| space_memory_error(&status))?
+        .into_inner();
+    Ok(Json(DeleteMemoryHttpResponse {
+        deleted: response.deleted,
+        degraded: response.degraded,
+        degradation_reason: response.degradation_reason,
+    }))
+}
+
+#[cfg(test)]
+mod space_memory_route_tests {
+    use super::*;
+
+    fn body(decision_ref: &str, token: &str, memory_id: &str) -> SpaceMemoryBody {
+        SpaceMemoryBody {
+            space_control_decision_ref: decision_ref.to_owned(),
+            space_control_decision_token: token.to_owned(),
+            memory_id: memory_id.to_owned(),
+            limit: None,
+        }
+    }
+
+    #[test]
+    fn space_memory_fields_are_bounded_and_trimmed() {
+        assert_eq!(
+            space_memory_fields(" space-1 ", &body(" ref ", " tok ", "")),
+            Some(("space-1".to_owned(), "ref".to_owned(), "tok".to_owned()))
+        );
+        assert_eq!(space_memory_fields("  ", &body("ref", "tok", "")), None);
+        assert_eq!(space_memory_fields(&"s".repeat(201), &body("ref", "tok", "")), None);
+        assert_eq!(space_memory_fields("space-1", &body("ref", &"t".repeat(8 * 1024 + 1), "")), None);
+        assert_eq!(space_memory_fields("space-1", &body("ref", "tok", &"m".repeat(201))), None);
+    }
+
+    #[test]
+    fn space_memory_refusals_use_fixed_words_and_object_details() {
+        let (status, Json(body)) =
+            space_memory_error(&tonic::Status::permission_denied("Space membership required for space-1"));
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["error"]["code"], "space_memory_not_authorized");
+        assert!(body["error"]["details"].is_object());
+        assert!(!body.to_string().contains("space-1"), "upstream text never crosses");
+        let (status, _) = space_memory_error(&tonic::Status::internal("db down"));
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    }
 }
 
 fn memory_state_label(tag: i32) -> &'static str {
@@ -15315,6 +15560,7 @@ mod run_owner_publish_tests {
             max_output_tokens: None,
             lifecycle: String::new(),
             price: None,
+            data_use: None,
         }
     }
 

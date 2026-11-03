@@ -550,6 +550,175 @@ pub async fn purge_organization_data(
     Ok(summary)
 }
 
+/// A validated per-user erasure (`user-core`'s saga, `subject_type == "user"`), read only for the
+/// one thing session-core erases per user today: that person's part of Space memory (EP-8 S7).
+/// Everything else the module note says about per-user events still holds: the org is not purged.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UserErasure {
+    pub org_id: String,
+    pub user_id: String,
+}
+
+/// Decode the fan-out payload as a per-user erasure. `Ok(None)` for every other subject type
+/// (`user_anonymize` included: it keeps the records and removes the identity, which a Space row
+/// does not carry).
+///
+/// # Errors
+///
+/// Returns [`ErasureEventError`] for a payload that is not JSON, or a `user` event without a
+/// bounded org or subject.
+pub fn parse_user_erasure_event(payload: &[u8]) -> Result<Option<UserErasure>, ErasureEventError> {
+    let wire: ErasureEventWire =
+        serde_json::from_slice(payload).map_err(|e| ErasureEventError::Decode(e.to_string()))?;
+    if wire.subject_type.as_deref().unwrap_or_default() != "user" {
+        return Ok(None);
+    }
+    let org_id = wire.org_id.unwrap_or_default().trim().to_owned();
+    if org_id.is_empty() {
+        return Err(ErasureEventError::MissingOrgId);
+    }
+    if org_id.len() > MAX_ID_LEN {
+        return Err(ErasureEventError::OrgIdTooLong);
+    }
+    let user_id = wire.subject_id.unwrap_or_default().trim().to_owned();
+    if user_id.is_empty() || user_id.len() > MAX_ID_LEN {
+        return Err(ErasureEventError::MissingSubjectId);
+    }
+    Ok(Some(UserErasure { org_id, user_id }))
+}
+
+/// What erasing one person does to one Space row, pure. `links` are the row's `source_links`;
+/// `attributed` names the person each attributable link came from: a `message:<id>` link its
+/// author, the `tool:save_memory` link of an explicit save the owner of the thread it was saved in.
+/// A link nobody is attributed to (a `thread:` link, a message already gone) supports nobody.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SpaceSourceErasure {
+    /// The person is not a source of this row.
+    Untouched,
+    /// The person was the row's only source: the row goes (EP-8 S7, DPO rule assumed).
+    Delete,
+    /// Others are sources too: the row stays, without the person's links.
+    Keep(Vec<String>),
+}
+
+pub fn space_source_erasure(
+    links: &[String],
+    attributed: &std::collections::HashMap<String, String>,
+    user_id: &str,
+) -> SpaceSourceErasure {
+    let is_users = |link: &String| attributed.get(link).is_some_and(|subject| subject == user_id);
+    if !links.iter().any(is_users) {
+        return SpaceSourceErasure::Untouched;
+    }
+    let others = links
+        .iter()
+        .any(|link| attributed.get(link).is_some_and(|subject| subject != user_id));
+    if !others {
+        return SpaceSourceErasure::Delete;
+    }
+    SpaceSourceErasure::Keep(links.iter().filter(|link| !is_users(link)).cloned().collect())
+}
+
+/// Counts of one person's Space-memory erasure.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct SpaceSourceSummary {
+    pub deleted: u64,
+    pub narrowed: u64,
+}
+
+/// Drops one person's part of every Space memory row of their org, in one transaction (EP-8 S7):
+/// a row only they were the source of is deleted, a row with other members' sources keeps those
+/// and loses theirs. Space rows have no Letta copy (EP-8 S6), so this is the whole erasure.
+/// Idempotent: a redelivered event finds nothing of the person left.
+///
+/// # Errors
+///
+/// Returns an error if any statement or the commit fails; nothing is changed then.
+pub async fn erase_user_space_memory_sources(
+    pool: &Pool,
+    org_id: &str,
+    user_id: &str,
+) -> anyhow::Result<SpaceSourceSummary> {
+    let mut tx: Transaction<'_, Postgres> = pool.begin().await?;
+    // The rows the person may be a source of, locked: a message they wrote, or an explicit save in
+    // a thread they own.
+    let rows: Vec<(String, Vec<String>, Option<String>)> = sqlx::query_as(
+        "SELECT am.id, am.source_links, am.source_label FROM agent_memory am \
+         WHERE am.org_id = $1 AND am.scope = 'space' AND ( \
+           EXISTS (SELECT 1 FROM unnest(am.source_links) AS sl(link) \
+                   JOIN messages m ON m.id = substr(sl.link, 9) \
+                   JOIN threads t ON t.id = m.thread_id \
+                   WHERE sl.link LIKE 'message:%' AND t.org_id = $1 \
+                     AND COALESCE(m.author_subject_id, t.user_id) = $2) \
+           OR (am.source_label = 'member_save' AND EXISTS ( \
+                   SELECT 1 FROM unnest(am.source_links) AS sl(link) \
+                   JOIN threads t ON t.id = substr(sl.link, 8) \
+                   WHERE sl.link LIKE 'thread:%' AND t.org_id = $1 AND t.user_id = $2))) \
+         ORDER BY am.id FOR UPDATE OF am",
+    )
+    .bind(org_id)
+    .bind(user_id)
+    .fetch_all(&mut *tx)
+    .await?;
+
+    let mut summary = SpaceSourceSummary::default();
+    for (memory_id, links, source_label) in rows {
+        let mut attributed: std::collections::HashMap<String, String> = sqlx::query_as::<_, (String, String)>(
+            "SELECT 'message:' || m.id, COALESCE(m.author_subject_id, t.user_id) \
+             FROM messages m JOIN threads t ON t.id = m.thread_id \
+             WHERE t.org_id = $1 AND ('message:' || m.id) = ANY($2)",
+        )
+        .bind(org_id)
+        .bind(&links)
+        .fetch_all(&mut *tx)
+        .await?
+        .into_iter()
+        .collect();
+        // An explicit save is the saving thread owner's statement.
+        if source_label.as_deref() == Some("member_save") {
+            let saver: Option<String> = sqlx::query_scalar(
+                "SELECT t.user_id FROM threads t \
+                 WHERE t.org_id = $1 AND ('thread:' || t.id) = ANY($2) ORDER BY t.id LIMIT 1",
+            )
+            .bind(org_id)
+            .bind(&links)
+            .fetch_optional(&mut *tx)
+            .await?;
+            if let Some(saver) = saver {
+                attributed.insert("tool:save_memory".to_owned(), saver);
+            }
+        }
+        match space_source_erasure(&links, &attributed, user_id) {
+            SpaceSourceErasure::Untouched => {}
+            SpaceSourceErasure::Delete => {
+                summary.deleted += sqlx::query("DELETE FROM agent_memory WHERE id = $1 AND org_id = $2")
+                    .bind(&memory_id)
+                    .bind(org_id)
+                    .execute(&mut *tx)
+                    .await?
+                    .rows_affected();
+            }
+            SpaceSourceErasure::Keep(remaining) => {
+                summary.narrowed += sqlx::query(
+                    "UPDATE agent_memory SET source_links = $3, updated_at = now() WHERE id = $1 AND org_id = $2",
+                )
+                .bind(&memory_id)
+                .bind(org_id)
+                .bind(&remaining)
+                .execute(&mut *tx)
+                .await?
+                .rows_affected();
+            }
+        }
+    }
+    tx.commit().await?;
+    if summary.deleted > 0 {
+        metrics::counter!("mp_session_space_memory_erased_total", "op" => "gdpr_user")
+            .increment(summary.deleted);
+    }
+    Ok(summary)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -928,5 +1097,127 @@ mod tests {
             "the Space log is purged beside the org's events, and its heads after it"
         );
         assert!(log < threads, "the log is purged before the threads whose delete triggers fire");
+    }
+
+    #[test]
+    fn user_erasure_is_parsed_and_every_other_subject_is_not() {
+        let user = serde_json::to_vec(&serde_json::json!({
+            "subject_type": "user", "subject_id": "user_1", "org_id": "org_1",
+        }))
+        .unwrap();
+        assert_eq!(
+            parse_user_erasure_event(&user).unwrap(),
+            Some(UserErasure { org_id: "org_1".to_owned(), user_id: "user_1".to_owned() })
+        );
+        for subject_type in ["organization", "user_anonymize", "other"] {
+            let payload = serde_json::to_vec(&serde_json::json!({
+                "subject_type": subject_type, "subject_id": "org_1", "org_id": "org_1",
+            }))
+            .unwrap();
+            assert_eq!(parse_user_erasure_event(&payload).unwrap(), None, "{subject_type}");
+        }
+        let no_user = serde_json::to_vec(&serde_json::json!({"subject_type": "user", "org_id": "org_1"})).unwrap();
+        assert_eq!(parse_user_erasure_event(&no_user), Err(ErasureEventError::MissingSubjectId));
+        assert!(parse_erasure_event(&user).unwrap().is_none(), "a user erasure never purges the org");
+    }
+
+    #[test]
+    fn space_source_erasure_deletes_sole_rows_and_narrows_shared_ones() {
+        let attributed: std::collections::HashMap<String, String> = [
+            ("message:m1", "user_1"),
+            ("message:m2", "user_2"),
+            ("tool:save_memory", "user_1"),
+        ]
+        .into_iter()
+        .map(|(link, subject)| (link.to_owned(), subject.to_owned()))
+        .collect();
+        let links = |items: &[&str]| items.iter().map(|item| (*item).to_owned()).collect::<Vec<_>>();
+        assert_eq!(
+            space_source_erasure(&links(&["thread:t1", "message:m1"]), &attributed, "user_1"),
+            SpaceSourceErasure::Delete
+        );
+        assert_eq!(
+            space_source_erasure(&links(&["thread:t1", "tool:save_memory"]), &attributed, "user_1"),
+            SpaceSourceErasure::Delete,
+            "an explicit save of theirs alone"
+        );
+        assert_eq!(
+            space_source_erasure(&links(&["thread:t1", "message:m1", "message:m2"]), &attributed, "user_1"),
+            SpaceSourceErasure::Keep(links(&["thread:t1", "message:m2"]))
+        );
+        assert_eq!(
+            space_source_erasure(&links(&["thread:t1", "message:m2"]), &attributed, "user_1"),
+            SpaceSourceErasure::Untouched
+        );
+        assert_eq!(
+            space_source_erasure(&links(&["thread:t1", "message:gone", "message:m1"]), &attributed, "user_1"),
+            SpaceSourceErasure::Delete,
+            "a link nobody is attributed to supports nobody"
+        );
+    }
+
+    /// EP-8 S7: erasing a person deletes the Space rows only they were the source of and drops
+    /// their message from rows other members also stated; other rows are untouched.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres whose name contains \"test\""]
+    async fn gdpr_erasure_drops_user_sources() {
+        use crate::space::test_support;
+        let Some(pool) = test_support::connect().await else { return };
+        let nonce = mp_ids::new_ulid();
+        let org = format!("gdpr-space-org-{nonce}");
+        let space = format!("gdpr-space-{nonce}");
+        let thread = format!("gdpr-space-thread-{nonce}");
+        let (mine, theirs) = (format!("gdpr-msg-a-{nonce}"), format!("gdpr-msg-b-{nonce}"));
+        test_support::seed_space_thread(&pool, &org, &space, &thread, "owner-1").await;
+        test_support::seed_space_message(&pool, &space, &thread, &mine, "user", Some("erased-user")).await;
+        test_support::seed_space_message(&pool, &space, &thread, &theirs, "user", Some("other-user")).await;
+        let insert = |key: &'static str, links: Vec<String>| {
+            let (pool, org, space) = (pool.clone(), org.clone(), space.clone());
+            async move {
+                let id = mp_ids::new_ulid();
+                sqlx::query(
+                    "INSERT INTO agent_memory (id, org_id, scope, scope_id, key, content, kind, confidence, owner, \
+                     source_links, review_state, audience_hash, audience_revision, source_label) \
+                     VALUES ($1, $2, 'space', $3, $4, 'c', 'fact', 0.9, '', $5, 'accepted', 'sha256:audience-1', 1, \
+                     'room_statement')",
+                )
+                .bind(&id)
+                .bind(&org)
+                .bind(&space)
+                .bind(format!("{space}/{key}"))
+                .bind(links)
+                .execute(&pool)
+                .await
+                .expect("seed space row");
+                id
+            }
+        };
+        let thread_link = format!("thread:{thread}");
+        let sole = insert("sole", vec![thread_link.clone(), format!("message:{mine}")]).await;
+        let shared = insert("shared", vec![thread_link.clone(), format!("message:{mine}"), format!("message:{theirs}")]).await;
+        let other = insert("other", vec![thread_link.clone(), format!("message:{theirs}")]).await;
+
+        let summary = erase_user_space_memory_sources(&pool, &org, "erased-user").await.expect("erasure");
+        assert_eq!(summary, SpaceSourceSummary { deleted: 1, narrowed: 1 });
+        let links_of = |id: String| {
+            let pool = pool.clone();
+            async move {
+                sqlx::query_scalar::<_, Vec<String>>("SELECT source_links FROM agent_memory WHERE id = $1")
+                    .bind(id)
+                    .fetch_optional(&pool)
+                    .await
+                    .expect("read row")
+            }
+        };
+        assert_eq!(links_of(sole).await, None, "a row only the person stated is gone");
+        assert_eq!(links_of(shared).await, Some(vec![thread_link.clone(), format!("message:{theirs}")]));
+        assert_eq!(links_of(other).await, Some(vec![thread_link, format!("message:{theirs}")]));
+        assert_eq!(
+            erase_user_space_memory_sources(&pool, &org, "erased-user").await.expect("redelivery"),
+            SpaceSourceSummary::default(),
+            "a redelivered event finds nothing left"
+        );
+        sqlx::query("DELETE FROM agent_memory WHERE org_id = $1").bind(&org).execute(&pool).await.ok();
+        test_support::clean_space(&pool, &org, &space).await;
     }
 }

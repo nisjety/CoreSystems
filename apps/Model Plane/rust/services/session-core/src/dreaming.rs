@@ -1527,9 +1527,9 @@ pub(crate) async fn load_agent_memory_context_rows(
     if access == MemoryAccess::None {
         return Ok(Vec::new());
     }
-    let Some((org_id, thread_user_id, space_id, space_kind)) =
-        sqlx::query_as::<_, (String, String, Option<String>, Option<String>)>(
-            "SELECT org_id, user_id, space_id, space_kind FROM threads WHERE id = $1",
+    let Some((org_id, thread_user_id, space_id, space_kind, audience_hash)) =
+        sqlx::query_as::<_, (String, String, Option<String>, Option<String>, Option<String>)>(
+            "SELECT org_id, user_id, space_id, space_kind, recipient_audience_hash FROM threads WHERE id = $1",
         )
         .bind(thread_id)
         .fetch_optional(pool)
@@ -1543,6 +1543,21 @@ pub(crate) async fn load_agent_memory_context_rows(
         crate::space::memory_scope::thread_is_contained(space_id.as_deref(), space_kind.as_deref());
     if contained {
         crate::space::memory_scope::record_contained("read_context");
+    }
+    // EP-8 S7: with Space memory on, a shared room recalls the room's memory and nothing else
+    // (D4), and only what was said in front of the room as it is now (D5).
+    if let Some(target) = space_recall_target(
+        crate::space_memory::enabled(),
+        contained,
+        space_id.as_deref(),
+        audience_hash.as_deref(),
+    ) {
+        let recall = recall_space_memory(pool, &org_id, thread_id, &target, "", limit).await?;
+        return Ok(recall
+            .rows
+            .into_iter()
+            .map(|row| (row.topic, format!("{SPACE_RECALL_SOURCE}: {}", row.content)))
+            .collect());
     }
     let legacy_exclusion = crate::space::memory_scope::legacy_room_origin_exclusion("$7", "$2");
 
@@ -2425,6 +2440,238 @@ pub(crate) fn scope_for_topic(topic: &str) -> &'static str {
         "POLICY" | "AGENT" | "WORKSPACE" => "org",
         _ => "thread",
     }
+}
+
+/// How a recalled Space row is introduced in a room turn's context: the room's memory, never the
+/// person's (EP-8 S7).
+const SPACE_RECALL_SOURCE: &str = "from this Space";
+
+/// The Space and audience a shared-room reader recalls under (EP-8 S7).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SpaceRecallTarget {
+    pub(crate) space_id: String,
+    /// The thread's current `recipient_audience_hash`. Empty matches no row: everything is withheld.
+    pub(crate) audience_hash: String,
+}
+
+/// Which reader a thread gets, pure. `None` keeps every reader as it was: the switch is off, or the
+/// thread is not a shared room (a personal Space keeps the owner's memory, WS17-S1).
+pub(crate) fn space_recall_target(
+    enabled: bool,
+    contained: bool,
+    space_id: Option<&str>,
+    audience_hash: Option<&str>,
+) -> Option<SpaceRecallTarget> {
+    if !enabled || !contained {
+        return None;
+    }
+    let space_id = space_id.map(str::trim).filter(|id| !id.is_empty())?;
+    Some(SpaceRecallTarget {
+        space_id: space_id.to_owned(),
+        audience_hash: audience_hash.map(str::trim).unwrap_or_default().to_owned(),
+    })
+}
+
+/// What a shared room recalled: the rows said in front of its current audience, how many of the
+/// Space's rows were left out for audience (D5), and whether the thread is waived (D11: nothing).
+#[derive(Debug, Default)]
+pub(crate) struct SpaceRecall {
+    pub(crate) rows: Vec<MemorySearchRow>,
+    pub(crate) withheld: u32,
+    pub(crate) waived: bool,
+}
+
+/// The rows a shared room may recall: its own Space, current, accepted, and learned in front of the
+/// audience the thread has now. No user, org, thread or other Space row can match (D4).
+const SPACE_RECALL_SQL: &str = "SELECT id, kind, key, content, confidence, updated_at, source_links \
+     FROM agent_memory \
+     WHERE org_id = $1 \
+       AND scope = 'space' \
+       AND scope_id = $2 \
+       AND review_state = 'accepted' \
+       AND is_latest = true \
+       AND (expires_at IS NULL OR expires_at > now()) \
+       AND $3 <> '' \
+       AND audience_hash = $3 \
+     ORDER BY confidence DESC, updated_at DESC \
+     LIMIT $4";
+
+/// The Space's rows the same reader may not see because the room's audience changed since.
+const SPACE_WITHHELD_SQL: &str = "SELECT COUNT(*) \
+     FROM agent_memory \
+     WHERE org_id = $1 \
+       AND scope = 'space' \
+       AND scope_id = $2 \
+       AND review_state = 'accepted' \
+       AND is_latest = true \
+       AND (expires_at IS NULL OR expires_at > now()) \
+       AND audience_hash IS DISTINCT FROM $3";
+
+/// Recall for a shared-room thread with Space memory on (EP-8 S7). A thread with a waived run
+/// recalls nothing (D11), the same test the Space writers apply. `query` only ranks; an empty one
+/// keeps the stored order.
+pub(crate) async fn recall_space_memory(
+    pool: &PgPool,
+    org_id: &str,
+    thread_id: &str,
+    target: &SpaceRecallTarget,
+    query: &str,
+    limit: i64,
+) -> Result<SpaceRecall, sqlx::Error> {
+    let waived: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM runs WHERE thread_id = $1 AND retention_class = 'zdr_waived')",
+    )
+    .bind(thread_id)
+    .fetch_one(pool)
+    .await?;
+    if waived {
+        metrics::counter!("mp_session_space_memory_recall_total", "outcome" => "waived").increment(1);
+        return Ok(SpaceRecall { waived: true, ..SpaceRecall::default() });
+    }
+    let limit = limit.clamp(1, 50);
+    let rows = sqlx::query_as::<_, (String, String, String, String, f64, DateTime<Utc>, Vec<String>)>(
+        SPACE_RECALL_SQL,
+    )
+    .bind(org_id)
+    .bind(&target.space_id)
+    .bind(&target.audience_hash)
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+    let withheld: i64 = sqlx::query_scalar(SPACE_WITHHELD_SQL)
+        .bind(org_id)
+        .bind(&target.space_id)
+        .bind(&target.audience_hash)
+        .fetch_one(pool)
+        .await?;
+    let query = query.trim().to_ascii_lowercase();
+    let mut scored: Vec<MemorySearchRow> = rows
+        .into_iter()
+        .map(|(id, kind, key, content, confidence, updated_at, source_links)| {
+            let exact_match = !query.is_empty()
+                && (content.to_ascii_lowercase().contains(&query)
+                    || key.to_ascii_lowercase().contains(&query));
+            let exact_bonus = if query.is_empty() || exact_match { 0.15 } else { 0.0 };
+            MemorySearchRow {
+                id,
+                thread_id: space_row_thread(&source_links).unwrap_or_else(|| thread_id.to_owned()),
+                topic: memory_topic("space", &kind).to_owned(),
+                provenance: MemoryProvenance::classify(&source_links),
+                origin_space_ref: String::new(),
+                withheld_reason: String::new(),
+                content,
+                score: memory_score(confidence, exact_bonus),
+                updated_at,
+                exact_match,
+            }
+        })
+        .collect();
+    scored.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| b.updated_at.cmp(&a.updated_at))
+    });
+    metrics::counter!("mp_session_space_memory_recall_total", "outcome" => "read").increment(1);
+    Ok(SpaceRecall {
+        rows: scored,
+        withheld: u32::try_from(withheld).unwrap_or(u32::MAX),
+        waived: false,
+    })
+}
+
+/// The thread a Space row was learned in, from its `thread:<id>` link.
+fn space_row_thread(source_links: &[String]) -> Option<String> {
+    source_links
+        .iter()
+        .find_map(|link| link.strip_prefix("thread:"))
+        .filter(|id| !id.is_empty())
+        .map(str::to_owned)
+}
+
+/// `MemoryEntry.withheld_reason` of a Space row its owner sees listed but the room's current
+/// audience does not recall (EP-8 S7, D5). Closed vocabulary, next to `room_origin_unverified`.
+pub(crate) const WITHHELD_AUDIENCE_CHANGED: &str = "audience_changed";
+
+/// One row of a Space's memory as its owner or admin lists it.
+#[derive(Debug)]
+pub(crate) struct SpaceMemoryRow {
+    pub(crate) id: String,
+    pub(crate) thread_id: String,
+    pub(crate) topic: String,
+    pub(crate) content: String,
+    pub(crate) source_label: String,
+    pub(crate) provenance: MemoryProvenance,
+    pub(crate) updated_at: DateTime<Utc>,
+    /// Learned in front of another audience than the Space's current one: not recalled.
+    pub(crate) withheld: bool,
+}
+
+/// Lists one Space's memory for its owner or admin (EP-8 S7). The caller has verified the Control
+/// Space memory decision; `current_audience_hash` is the audience that decision signed.
+pub(crate) async fn list_space_memory(
+    pool: &PgPool,
+    org_id: &str,
+    space_id: &str,
+    current_audience_hash: &str,
+    limit: i64,
+) -> Result<Vec<SpaceMemoryRow>, sqlx::Error> {
+    let rows = sqlx::query_as::<
+        _,
+        (String, String, String, Option<String>, DateTime<Utc>, Vec<String>, Option<String>),
+    >(
+        "SELECT id, kind, content, source_label, updated_at, source_links, audience_hash \
+         FROM agent_memory \
+         WHERE org_id = $1 \
+           AND scope = 'space' \
+           AND scope_id = $2 \
+           AND review_state = 'accepted' \
+           AND is_latest = true \
+           AND (expires_at IS NULL OR expires_at > now()) \
+         ORDER BY updated_at DESC \
+         LIMIT $3",
+    )
+    .bind(org_id)
+    .bind(space_id)
+    .bind(limit.clamp(1, 200))
+    .fetch_all(pool)
+    .await?;
+    let current = current_audience_hash.trim();
+    Ok(rows
+        .into_iter()
+        .map(|(id, kind, content, source_label, updated_at, source_links, audience_hash)| SpaceMemoryRow {
+            id,
+            thread_id: space_row_thread(&source_links).unwrap_or_default(),
+            topic: memory_topic("space", &kind).to_owned(),
+            content,
+            source_label: source_label.unwrap_or_default(),
+            provenance: MemoryProvenance::classify(&source_links),
+            updated_at,
+            withheld: current.is_empty() || audience_hash.as_deref() != Some(current),
+        })
+        .collect())
+}
+
+/// Deletes one row of one Space's memory (EP-8 S7). The Space and org are in the `WHERE` clause,
+/// so a guessed id of another Space, of a person's memory or of another org deletes nothing.
+/// Space rows have no Letta copy (EP-8 S6), so the durable delete is the whole erasure.
+pub(crate) async fn delete_space_memory(
+    pool: &PgPool,
+    org_id: &str,
+    space_id: &str,
+    memory_id: &str,
+) -> Result<bool, sqlx::Error> {
+    let deleted: Option<String> = sqlx::query_scalar(
+        "DELETE FROM agent_memory \
+         WHERE org_id = $1 AND scope = 'space' AND scope_id = $2 AND id = $3 \
+         RETURNING id",
+    )
+    .bind(org_id)
+    .bind(space_id)
+    .bind(memory_id)
+    .fetch_optional(pool)
+    .await?;
+    Ok(deleted.is_some())
 }
 
 fn memory_topic(scope: &str, kind: &str) -> &'static str {
@@ -3750,5 +3997,197 @@ mod tests {
             thread_memories(&pool, &org, &thread).await,
             vec!["Assistant generated image artifact plain-png."]
         );
+    }
+}
+
+/// Space memory recall (EP-8 S7). The DB tier is `#[ignore]`d and needs `DATABASE_URL` to a
+/// disposable `*test*` Postgres (the Space test helpers refuse any other database).
+#[cfg(test)]
+mod space_recall_tests {
+    use super::*;
+    use crate::space::test_support;
+
+    const OWNER: &str = "owner-1";
+    const AUDIENCE: &str = "sha256:audience-1";
+
+    #[test]
+    fn space_recall_target_only_for_a_contained_thread_with_the_switch_on() {
+        let target = space_recall_target(true, true, Some("space-1"), Some(AUDIENCE));
+        assert_eq!(
+            target,
+            Some(SpaceRecallTarget { space_id: "space-1".to_owned(), audience_hash: AUDIENCE.to_owned() })
+        );
+        assert_eq!(space_recall_target(false, true, Some("space-1"), Some(AUDIENCE)), None, "switch off: readers unchanged");
+        assert_eq!(space_recall_target(true, false, Some("space-1"), Some(AUDIENCE)), None, "a personal Space keeps today's reader");
+        assert_eq!(space_recall_target(true, true, Some("  "), Some(AUDIENCE)), None);
+        assert_eq!(
+            space_recall_target(true, true, Some("space-1"), None).map(|t| t.audience_hash),
+            Some(String::new()),
+            "no audience matches no row: everything is withheld"
+        );
+    }
+
+    #[test]
+    fn space_recall_sql_reads_only_the_space_scope_of_one_space() {
+        for sql in [SPACE_RECALL_SQL, SPACE_WITHHELD_SQL] {
+            assert!(sql.contains("AND scope = 'space'"));
+            assert!(sql.contains("AND scope_id = $2"));
+            assert!(sql.contains("AND is_latest = true"));
+            for other in ["'user'", "'org'", "'thread'", "'global'", "session_id", "owner"] {
+                assert!(!sql.contains(other), "{other} must not reach a Space reader");
+            }
+        }
+        assert!(SPACE_RECALL_SQL.contains("AND audience_hash = $3"));
+        assert!(SPACE_WITHHELD_SQL.contains("audience_hash IS DISTINCT FROM $3"));
+    }
+
+    struct Seeded {
+        pool: PgPool,
+        org: String,
+        space: String,
+        thread: String,
+    }
+
+    async fn seed() -> Option<Seeded> {
+        let pool = test_support::connect().await?;
+        let nonce = new_ulid();
+        let org = format!("space-recall-org-{nonce}");
+        let space = format!("space-recall-{nonce}");
+        let thread = format!("space-recall-thread-{nonce}");
+        test_support::seed_space_thread(&pool, &org, &space, &thread, OWNER).await;
+        Some(Seeded { pool, org, space, thread })
+    }
+
+    async fn insert(seeded: &Seeded, scope: &str, scope_id: Option<&str>, owner: &str, hash: Option<&str>, content: &str) {
+        let label = (scope == "space").then_some("room_statement");
+        sqlx::query(
+            "INSERT INTO agent_memory (id, org_id, scope, scope_id, key, content, kind, confidence, owner, \
+             source_links, review_state, audience_hash, audience_revision, source_label) \
+             VALUES ($1, $2, $3, $4, $5, $6, 'fact', 0.9, $7, $8, 'accepted', $9, \
+             CASE WHEN $9::text IS NULL THEN NULL ELSE 1 END, $10)",
+        )
+        .bind(new_ulid())
+        .bind(&seeded.org)
+        .bind(scope)
+        .bind(scope_id)
+        .bind(format!("k-{}", new_ulid()))
+        .bind(content)
+        .bind(owner)
+        .bind(vec![format!("thread:{}", seeded.thread)])
+        .bind(hash)
+        .bind(label)
+        .execute(&seeded.pool)
+        .await
+        .expect("seed memory row");
+    }
+
+    fn target(seeded: &Seeded, hash: &str) -> SpaceRecallTarget {
+        SpaceRecallTarget { space_id: seeded.space.clone(), audience_hash: hash.to_owned() }
+    }
+
+    async fn recall(seeded: &Seeded, hash: &str) -> SpaceRecall {
+        recall_space_memory(&seeded.pool, &seeded.org, &seeded.thread, &target(seeded, hash), "", 20)
+            .await
+            .expect("recall")
+    }
+
+    fn contents(recall: &SpaceRecall) -> Vec<&str> {
+        recall.rows.iter().map(|row| row.content.as_str()).collect()
+    }
+
+    async fn cleanup(seeded: &Seeded) {
+        sqlx::query("DELETE FROM agent_memory WHERE org_id = $1")
+            .bind(&seeded.org)
+            .execute(&seeded.pool)
+            .await
+            .ok();
+        test_support::clean_space(&seeded.pool, &seeded.org, &seeded.space).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres whose name contains \"test\""]
+    async fn space_recall_returns_only_this_space() {
+        let Some(seeded) = seed().await else { return };
+        let space = seeded.space.clone();
+        insert(&seeded, "space", Some(&space), "", Some(AUDIENCE), "Vi leverer til Bergen på fredager.").await;
+        let recalled = recall(&seeded, AUDIENCE).await;
+        assert_eq!(contents(&recalled), vec!["Vi leverer til Bergen på fredager."]);
+        assert_eq!(recalled.withheld, 0);
+        assert!(!recalled.waived);
+        assert_eq!(recalled.rows[0].thread_id, seeded.thread, "the row links back to the thread it was said in");
+        cleanup(&seeded).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres whose name contains \"test\""]
+    async fn space_recall_never_returns_user_or_org_rows() {
+        let Some(seeded) = seed().await else { return };
+        let space = seeded.space.clone();
+        insert(&seeded, "user", None, OWNER, None, "PERSONAL canary").await;
+        insert(&seeded, "org", None, "", None, "ORG canary").await;
+        insert(&seeded, "global", None, "", None, "GLOBAL canary").await;
+        insert(&seeded, "space", Some(&space), "", Some(AUDIENCE), "room fact").await;
+        let recalled = recall(&seeded, AUDIENCE).await;
+        assert_eq!(contents(&recalled), vec!["room fact"], "isolation: the room reads its own memory only (D4)");
+        assert_eq!(recalled.withheld, 0, "personal and org rows are not counted as withheld either");
+        cleanup(&seeded).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres whose name contains \"test\""]
+    async fn audience_change_withholds_old_rows() {
+        let Some(seeded) = seed().await else { return };
+        let space = seeded.space.clone();
+        insert(&seeded, "space", Some(&space), "", Some(AUDIENCE), "said before the new member").await;
+        insert(&seeded, "space", Some(&space), "", Some("sha256:audience-2"), "said in front of everyone").await;
+        let after_join = recall(&seeded, "sha256:audience-2").await;
+        assert_eq!(contents(&after_join), vec!["said in front of everyone"]);
+        assert_eq!(after_join.withheld, 1, "the older row is counted, never shown (D5)");
+        let no_audience = recall(&seeded, "").await;
+        assert!(no_audience.rows.is_empty(), "a thread without an audience recalls nothing");
+        assert_eq!(no_audience.withheld, 2);
+
+        let listed = list_space_memory(&seeded.pool, &seeded.org, &space, "sha256:audience-2", 50)
+            .await
+            .expect("list");
+        assert_eq!(listed.len(), 2, "the owner sees every row of the Space");
+        assert_eq!(listed.iter().filter(|row| row.withheld).count(), 1, "and which one the room does not recall");
+        cleanup(&seeded).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres whose name contains \"test\""]
+    async fn other_space_rows_never_returned() {
+        let Some(seeded) = seed().await else { return };
+        let other = format!("{}-other", seeded.space);
+        insert(&seeded, "space", Some(&other), "", Some(AUDIENCE), "Room B fact").await;
+        let recalled = recall(&seeded, AUDIENCE).await;
+        assert!(recalled.rows.is_empty(), "Room A never recalls Room B");
+        assert_eq!(recalled.withheld, 0, "nor counts it");
+        let other_id: String = sqlx::query_scalar("SELECT id FROM agent_memory WHERE org_id = $1 AND scope_id = $2")
+            .bind(&seeded.org)
+            .bind(&other)
+            .fetch_one(&seeded.pool)
+            .await
+            .unwrap();
+        assert!(
+            !delete_space_memory(&seeded.pool, &seeded.org, &seeded.space, &other_id).await.unwrap(),
+            "a delete under Room A's decision cannot reach Room B's row"
+        );
+        cleanup(&seeded).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres whose name contains \"test\""]
+    async fn waived_space_thread_recalls_nothing() {
+        let Some(seeded) = seed().await else { return };
+        let space = seeded.space.clone();
+        insert(&seeded, "space", Some(&space), "", Some(AUDIENCE), "room fact").await;
+        let run = format!("space-recall-run-{}", new_ulid());
+        test_support::seed_space_run(&seeded.pool, &seeded.org, &space, &seeded.thread, &run, "completed", "zdr_waived").await;
+        let recalled = recall(&seeded, AUDIENCE).await;
+        assert!(recalled.waived);
+        assert!(recalled.rows.is_empty(), "D11: a waived thread recalls no Space memory");
+        cleanup(&seeded).await;
     }
 }

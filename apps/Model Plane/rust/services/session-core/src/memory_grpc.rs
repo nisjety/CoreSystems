@@ -119,6 +119,212 @@ impl MemoryGrpc {
         }
         Ok(owner_user_id)
     }
+
+    /// Recall for a shared-room thread with Space memory on (EP-8 S7): the room's rows said in front
+    /// of its current audience, the count withheld for audience, and nothing on a waived thread.
+    async fn search_space_memory(
+        &self,
+        org_id: &str,
+        thread_id: &str,
+        target: &crate::dreaming::SpaceRecallTarget,
+        query: &str,
+        limit: u32,
+    ) -> Result<Response<SearchMemoryResponse>, Status> {
+        let recall = crate::dreaming::recall_space_memory(
+            &self.pool,
+            org_id,
+            thread_id,
+            target,
+            query,
+            i64::from(limit),
+        )
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?;
+        let mut response = search_response(Vec::new(), None);
+        if recall.waived {
+            response.skip_reason = crate::memory_control::MemoryReason::Zdr.as_str().to_owned();
+            return Ok(Response::new(response));
+        }
+        response.withheld = recall.withheld;
+        response.entries = recall
+            .rows
+            .into_iter()
+            .take(usize::try_from(limit).unwrap_or(usize::MAX))
+            .map(|row| MemoryEntry {
+                memory_id: row.id,
+                thread_id: row.thread_id,
+                topic: row.topic,
+                content: row.content,
+                score: row.score,
+                updated_at: Some(timestamp(row.updated_at)),
+                // The room's row, no person's.
+                user_id: String::new(),
+                provenance: memory_provenance(row.provenance) as i32,
+                origin_space_ref: String::new(),
+                withheld_reason: String::new(),
+                scope: crate::space_memory::SPACE_SCOPE.to_owned(),
+                scope_id: target.space_id.clone(),
+                source_label: String::new(),
+            })
+            .collect();
+        Ok(Response::new(response))
+    }
+
+    /// The authority to list or delete a Space's memory (EP-8 S7): a person, the caller's own org and
+    /// user, a verified Control `model.space.memory.manage` decision for this Space, operation and
+    /// row (Control issues it to the Space's owner or admin only), and no membership revocation.
+    #[allow(clippy::too_many_arguments)]
+    async fn authorize_space_memory(
+        &self,
+        caller: &VerifiedIdentity,
+        org_id: &str,
+        user_id: &str,
+        space_id: &str,
+        decision_ref: &str,
+        decision_token: &str,
+        operation: &str,
+        memory_id: &str,
+    ) -> Result<crate::grpc::VerifiedSpaceMemoryManage, Status> {
+        caller.authorize_org(org_id)?;
+        if caller.is_service() {
+            return Err(Status::permission_denied(
+                "Space memory is listed and deleted by a person",
+            ));
+        }
+        caller.authorize_user(user_id)?;
+        let verified = crate::grpc::verify_space_memory_decision(
+            decision_token,
+            decision_ref,
+            org_id,
+            user_id,
+            space_id,
+            operation,
+            memory_id,
+            Utc::now(),
+        )?;
+        // A removed member is refused even while the decision they hold has not expired.
+        let revoked: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM space_membership_revocations \
+             WHERE space_ref = $1 AND subject_id = $2)",
+        )
+        .bind(space_id)
+        .bind(user_id)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?;
+        if revoked {
+            return Err(Status::permission_denied(
+                "Space membership required for this Space's memory",
+            ));
+        }
+        Ok(verified)
+    }
+
+    /// `ListMemory` with `space_id`: the Space's memory for its owner or admin, each row marked when
+    /// the Space's current audience does not recall it. A zero-retention caller is answered empty, as
+    /// the personal list is.
+    async fn list_space_memory(
+        &self,
+        caller: &VerifiedIdentity,
+        req: &ListMemoryRequest,
+    ) -> Result<Response<ListMemoryResponse>, Status> {
+        let (org_id, user_id, space_id) = (req.org_id.trim(), req.user_id.trim(), req.space_id.trim());
+        let verified = self
+            .authorize_space_memory(
+                caller,
+                org_id,
+                user_id,
+                space_id,
+                req.space_control_decision_ref.trim(),
+                req.space_control_decision_token.trim(),
+                crate::grpc::SPACE_MEMORY_OPERATION_LIST,
+                "",
+            )
+            .await?;
+        if !MemoryRetention::of(caller).permits_durable_memory() || verified.zero_data_retention {
+            return Ok(Response::new(list_response(
+                Vec::new(),
+                Some(ZDR_MEMORY_READ_SUPPRESSED),
+            )));
+        }
+        let limit = if req.limit == 0 { 100 } else { req.limit };
+        let rows = crate::dreaming::list_space_memory(
+            &self.pool,
+            org_id,
+            space_id,
+            &verified.recipient_audience_hash,
+            i64::from(limit),
+        )
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?;
+        let entries = rows
+            .into_iter()
+            .map(|row| MemoryEntry {
+                memory_id: row.id,
+                thread_id: row.thread_id,
+                topic: row.topic,
+                content: row.content,
+                score: 0.0,
+                updated_at: Some(timestamp(row.updated_at)),
+                user_id: String::new(),
+                provenance: memory_provenance(row.provenance) as i32,
+                origin_space_ref: String::new(),
+                withheld_reason: if row.withheld {
+                    crate::dreaming::WITHHELD_AUDIENCE_CHANGED.to_owned()
+                } else {
+                    String::new()
+                },
+                scope: crate::space_memory::SPACE_SCOPE.to_owned(),
+                scope_id: space_id.to_owned(),
+                source_label: row.source_label,
+            })
+            .collect();
+        // No semantic tier: Space rows are never mirrored (EP-8 S6).
+        Ok(Response::new(list_response(entries, None)))
+    }
+
+    /// `DeleteMemory` with `space_id`: one row of the Space's memory, under a decision issued for that
+    /// row. Allowed under every retention posture, as a personal delete is: removing is never storing.
+    async fn delete_space_memory(
+        &self,
+        caller: &VerifiedIdentity,
+        req: &DeleteMemoryRequest,
+    ) -> Result<Response<DeleteMemoryResponse>, Status> {
+        let (org_id, user_id, space_id, memory_id) = (
+            req.org_id.trim(),
+            req.user_id.trim(),
+            req.space_id.trim(),
+            req.memory_id.trim(),
+        );
+        self.authorize_space_memory(
+            caller,
+            org_id,
+            user_id,
+            space_id,
+            req.space_control_decision_ref.trim(),
+            req.space_control_decision_token.trim(),
+            crate::grpc::SPACE_MEMORY_OPERATION_DELETE,
+            memory_id,
+        )
+        .await?;
+        let deleted = crate::dreaming::delete_space_memory(&self.pool, org_id, space_id, memory_id)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+        if !deleted {
+            return Err(Status::not_found("memory not found"));
+        }
+        // Ids only, never content: who removed which row of which Space.
+        tracing::info!(org_id, space_id, memory_id, actor = user_id, "space memory row deleted by its manager");
+        metrics::counter!("mp_session_space_memory_erased_total", "op" => "manager_delete").increment(1);
+        Ok(Response::new(delete_response(true, None)))
+    }
+}
+
+fn timestamp(at: DateTime<Utc>) -> prost_types::Timestamp {
+    prost_types::Timestamp {
+        seconds: at.timestamp(),
+        nanos: i32::try_from(at.timestamp_subsec_nanos()).unwrap_or(i32::MAX),
+    }
 }
 
 #[allow(clippy::result_large_err)]
@@ -195,6 +401,7 @@ fn search_response(
         degraded: degradation_reason.is_some(),
         degradation_reason: degradation_reason.unwrap_or_default().to_owned(),
         skip_reason: String::new(),
+        withheld: 0,
     }
 }
 
@@ -415,6 +622,22 @@ impl MemoryService for MemoryGrpc {
         }
 
         let limit = if req.limit == 0 { 10 } else { req.limit };
+        // EP-8 S7: with Space memory on, a shared room reads the room's memory and nothing else,
+        // neither the durable personal rows nor the semantic mirror. A lookup failure is an error,
+        // never a fall-back to the wider reader.
+        if crate::space_memory::enabled() {
+            let scope = crate::space::memory_scope::reader_scope_for_thread(&self.pool, req.thread_id.trim())
+                .await
+                .map_err(|e| Status::internal(e.to_string()))?;
+            if let crate::space::memory_scope::ReaderScope::Contained { space_ref, audience_hash, .. } = scope {
+                let target = crate::dreaming::space_recall_target(true, true, Some(&space_ref), Some(&audience_hash));
+                if let Some(target) = target {
+                    return self
+                        .search_space_memory(req.org_id.trim(), req.thread_id.trim(), &target, &req.query, limit)
+                        .await;
+                }
+            }
+        }
         let topic_filter = req.topic_filter.clone();
         let query_trimmed = req.query.trim();
         // WS17-S1 C5: the semantic mirror holds the owner's rows, so a shared-room thread never
@@ -663,6 +886,9 @@ impl MemoryService for MemoryGrpc {
         if req.user_id.trim().is_empty() {
             return Err(Status::invalid_argument("user_id is required"));
         }
+        if !req.space_id.trim().is_empty() {
+            return self.list_space_memory(&caller, &req).await;
+        }
         let org_id = req.org_id.trim();
         let user_id = req.user_id.trim();
         let permits_durable_memory =
@@ -765,6 +991,9 @@ impl MemoryService for MemoryGrpc {
         }
         if req.memory_id.trim().is_empty() {
             return Err(Status::invalid_argument("memory_id is required"));
+        }
+        if !req.space_id.trim().is_empty() {
+            return self.delete_space_memory(&caller, &req).await;
         }
         let org_id = req.org_id.trim();
         let user_id = req.user_id.trim();
@@ -1413,6 +1642,7 @@ mod tests {
             org_id: org_id.to_owned(),
             user_id: user_id.to_owned(),
             limit: 10,
+            ..Default::default()
         }
     }
 
@@ -1421,7 +1651,54 @@ mod tests {
             org_id: org_id.to_owned(),
             user_id: user_id.to_owned(),
             memory_id: memory_id.to_owned(),
+            ..Default::default()
         }
+    }
+
+    /// EP-8 S7: a Space's memory is listed and deleted only under a Control Space memory decision,
+    /// which Control issues to the Space's owner or admin. A member without one, a service, another
+    /// user or another org is refused before any database or Letta call.
+    #[tokio::test]
+    async fn non_owner_cannot_list_space_memory() {
+        let auth = MockServer::start().await;
+        Mock::given(wiremock::matchers::method("POST"))
+            .respond_with(ResponseTemplate::new(500))
+            .expect(0)
+            .mount(&auth)
+            .await;
+        let (service, ownership) = guarded_service(&auth.uri(), "user-a");
+        let space_list = |org: &str, user: &str, token: &str| ListMemoryRequest {
+            space_id: "space-room".to_owned(),
+            space_control_decision_ref: if token.is_empty() { String::new() } else { "memory-decision-1".to_owned() },
+            space_control_decision_token: token.to_owned(),
+            ..list_request(org, user)
+        };
+        let space_delete = |token: &str| DeleteMemoryRequest {
+            space_id: "space-room".to_owned(),
+            space_control_decision_ref: "memory-decision-1".to_owned(),
+            space_control_decision_token: token.to_owned(),
+            ..delete_request("org-a", "user-a", "mem-1")
+        };
+        for (req, caller, why) in [
+            (space_list("org-a", "user-a", ""), VerifiedIdentity::user_for_test("org-a", "user-a"), "a member without a decision"),
+            (space_list("org-a", "user-b", "x.y.z.w"), VerifiedIdentity::user_for_test("org-a", "user-a"), "another user"),
+            (space_list("org-b", "user-a", "x.y.z.w"), VerifiedIdentity::user_for_test("org-a", "user-a"), "another org"),
+            (
+                space_list("org-a", "user-a", "x.y.z.w"),
+                VerifiedIdentity::service_for_test("org-a", &["memory:read"], false),
+                "a service",
+            ),
+        ] {
+            let error = service.list_memory(request(req, caller)).await.expect_err(why);
+            assert_eq!(error.code(), tonic::Code::PermissionDenied, "{why}");
+        }
+        let error = service
+            .delete_memory(request(space_delete(""), VerifiedIdentity::user_for_test("org-a", "user-a")))
+            .await
+            .expect_err("a delete without a decision");
+        assert_eq!(error.code(), tonic::Code::PermissionDenied);
+        assert_eq!(ownership.calls.load(Ordering::SeqCst), 0);
+        assert!(auth.received_requests().await.unwrap().is_empty());
     }
 
     fn guarded_service(

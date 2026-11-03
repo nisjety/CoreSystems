@@ -112,6 +112,13 @@ message SearchMemoryResponse {
   // off user still receives org-owned entries, so an empty `entries` with this
   // set means "memory is switched off", never "nothing to recall".
   string skip_reason = 4;
+
+  // Space memory rows of this thread's Space that were left out because they
+  // were learned in front of a different audience than the thread's current
+  // one (EP-8 S7, decision D5): a member added later does not see what the
+  // room said before they joined. A count only, never ids or content. Zero for
+  // every thread that is not a shared-room thread with Space memory on.
+  uint32 withheld = 5;
 }
 
 message MemoryEntry {
@@ -251,6 +258,20 @@ message ListMemoryRequest {
 
   // Maximum results. Server clamps to a sane upper bound.
   uint32 limit = 3;
+
+  // Lists the memory of this Space instead of the user's own (EP-8 S7). Set,
+  // the call is answered only for a person who presents the Control Space
+  // memory decision below, which Control issues to the Space's owner or admin;
+  // `user_id` must still be the caller. Empty keeps the personal list.
+  string space_id = 4;
+
+  // The Control `model.space.memory.manage` decision reference, with
+  // `space_id`. Never logged.
+  string space_control_decision_ref = 5;
+
+  // The signed Control `model.space.memory.manage` decision token, with
+  // `space_id`. Never logged.
+  string space_control_decision_token = 6;
 }
 
 message ListMemoryResponse {
@@ -279,6 +300,19 @@ message DeleteMemoryRequest {
 
   // Identifier of the memory entry to delete.
   string memory_id = 3;
+
+  // Deletes a row of this Space's memory instead of the user's own (EP-8 S7),
+  // under the Control Space memory decision below, issued for this
+  // `memory_id`. Empty keeps the personal delete.
+  string space_id = 4;
+
+  // The Control `model.space.memory.manage` decision reference, with
+  // `space_id`. Never logged.
+  string space_control_decision_ref = 5;
+
+  // The signed Control `model.space.memory.manage` decision token, with
+  // `space_id`. Never logged.
+  string space_control_decision_token = 6;
 }
 
 message DeleteMemoryResponse {

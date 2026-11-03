@@ -3611,6 +3611,208 @@ pub(crate) fn verify_run_control_space_decision(
     )
 }
 
+/// The Control action, schema and sole permission of a Space memory decision (EP-8 S7). Control
+/// issues it only to the Space's owner or admin; it is disjoint from every thread, run-control,
+/// wake and approval decision in both directions, so no other token lists or deletes room memory.
+pub(crate) const CONTROL_SPACE_MEMORY_ACTION: &str = "model.space.memory.manage";
+pub(crate) const CONTROL_SPACE_MEMORY_SCHEMA: &str = "sha256:space-memory-manage-v1";
+pub(crate) const SPACE_MEMORY_PERMISSION: &str = "memory:manage";
+/// The two operations a Space memory decision binds.
+pub(crate) const SPACE_MEMORY_OPERATION_LIST: &str = "list";
+pub(crate) const SPACE_MEMORY_OPERATION_DELETE: &str = "delete";
+
+/// What a verified Space memory decision tells the reader: the Space's audience as Control signed
+/// it now, so the owner's list can mark the rows a current member is not shown, and the
+/// zero-retention claim.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct VerifiedSpaceMemoryManage {
+    pub(crate) recipient_audience_hash: String,
+    pub(crate) zero_data_retention: bool,
+}
+
+/// Recompute Control's `model.space.memory.manage` payload digest from the claims plus the request's
+/// own operation and memory id (empty for a list). Binds a delete token to the one row it was issued
+/// for, so a list token never deletes and one delete token never deletes another row.
+fn space_memory_payload_digest(
+    claims: &ControlSpaceDecisionClaims,
+    operation: &str,
+    memory_id: &str,
+) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"model.space.memory.manage\0v1\0");
+    for (name, value) in [
+        ("org_id", claims.org_id.as_str()),
+        ("user_id", claims.subject_id.as_str()),
+        ("space_id", claims.space_ref.as_str()),
+        ("space_decision_ref", claims.decision_ref.as_str()),
+        (
+            "recipient_audience_ref",
+            claims.recipient_audience_ref.as_str(),
+        ),
+        (
+            "recipient_audience_hash",
+            claims.recipient_audience_hash.as_str(),
+        ),
+        ("privacy_policy_ref", claims.privacy_policy_ref.as_str()),
+        (
+            "resource_authorization_ref",
+            claims.resource_authorization_ref.as_str(),
+        ),
+        ("operation", operation),
+        ("memory_id", memory_id),
+        ("action_schema_hash", CONTROL_SPACE_MEMORY_SCHEMA),
+        ("idempotency_key", claims.idempotency_key.as_str()),
+    ] {
+        digest.update(name.as_bytes());
+        digest.update([0]);
+        digest.update((value.len() as u64).to_be_bytes());
+        digest.update(value.as_bytes());
+    }
+    digest.update(b"authority_revision\0");
+    digest.update(claims.authority_revision.to_be_bytes());
+    digest.update(b"recipient_audience_revision\0");
+    digest.update(claims.recipient_audience_revision.to_be_bytes());
+    format!("sha256:{:x}", digest.finalize())
+}
+
+#[allow(clippy::result_large_err)]
+#[allow(clippy::too_many_arguments)]
+fn verify_space_memory_decision_with_key(
+    token: &str,
+    decision_ref: &str,
+    org_id: &str,
+    user_id: &str,
+    space_id: &str,
+    operation: &str,
+    memory_id: &str,
+    expected_key_id: &str,
+    key: &VerifyingKey,
+    now: DateTime<Utc>,
+) -> Result<VerifiedSpaceMemoryManage, Status> {
+    const DENIED: &str = "Control Space decision does not authorize this Space memory request";
+    if token.len() > MAX_CONTROL_SPACE_DECISION_TOKEN_BYTES {
+        return Err(Status::invalid_argument(
+            "Control Space memory decision is too large",
+        ));
+    }
+    let parts: Vec<&str> = token.split('.').collect();
+    if parts.len() != 4 || parts[0] != CONTROL_SPACE_DECISION_VERSION {
+        return Err(Status::permission_denied(DENIED));
+    }
+    URL_SAFE_NO_PAD
+        .decode(parts[1])
+        .ok()
+        .and_then(|raw| String::from_utf8(raw).ok())
+        .filter(|id| !id.trim().is_empty() && id == expected_key_id)
+        .ok_or_else(|| Status::permission_denied("untrusted Control Space decision key"))?;
+    let payload = URL_SAFE_NO_PAD
+        .decode(parts[2])
+        .map_err(|_| Status::permission_denied(DENIED))?;
+    let signature = URL_SAFE_NO_PAD
+        .decode(parts[3])
+        .ok()
+        .and_then(|raw| Signature::from_slice(&raw).ok())
+        .ok_or_else(|| Status::permission_denied(DENIED))?;
+    key.verify(
+        format!("{}.{}.{}", parts[0], parts[1], parts[2]).as_bytes(),
+        &signature,
+    )
+    .map_err(|_| Status::permission_denied(DENIED))?;
+    let claims: ControlSpaceDecisionClaims =
+        serde_json::from_slice(&payload).map_err(|_| Status::permission_denied(DENIED))?;
+
+    // Exactly the one permission: a read, append, run-control, wake or approval token carries another
+    // and fails here, and this token carries no thread permission.
+    let matches_request = claims.decision_ref == decision_ref
+        && claims.org_id == org_id
+        && claims.subject_id == user_id
+        && claims.space_ref == space_id
+        && claims.service_audience == CONTROL_SPACE_DECISION_AUDIENCE
+        && claims.action_id == CONTROL_SPACE_MEMORY_ACTION
+        && claims.action_schema_hash == CONTROL_SPACE_MEMORY_SCHEMA
+        && claims.payload_digest == space_memory_payload_digest(&claims, operation, memory_id)
+        && claims.permissions.len() == 1
+        && claims.permissions[0] == SPACE_MEMORY_PERMISSION;
+    if !matches_request {
+        return Err(Status::permission_denied(DENIED));
+    }
+    let privacy_complete = [
+        claims.purpose.as_str(),
+        claims.lawful_basis.as_str(),
+        claims.privacy_class.as_str(),
+        claims.retention_class.as_str(),
+        claims.residency.as_str(),
+        claims.deletion_scope.as_str(),
+    ]
+    .iter()
+    .all(|value| !value.trim().is_empty());
+    if !privacy_complete
+        || claims.nonce.trim().is_empty()
+        || claims.recipient_audience_ref.trim().is_empty()
+        || claims.recipient_audience_hash.trim().is_empty()
+        || claims.recipient_audience_revision == 0
+        || claims.issued_at > now + chrono::Duration::minutes(1)
+        || claims.expires_at <= now
+    {
+        return Err(Status::permission_denied(
+            "Control Space memory decision is expired or incomplete",
+        ));
+    }
+    Ok(VerifiedSpaceMemoryManage {
+        recipient_audience_hash: claims.recipient_audience_hash,
+        zero_data_retention: claims.zero_data_retention,
+    })
+}
+
+/// Key lookup and verification of the Control `model.space.memory.manage` decision that lets a
+/// Space's owner or admin list (`operation = list`, empty `memory_id`) or delete one row of the
+/// Space's memory (EP-8 S7). Bound to the caller, org, Space, operation and row; Session Core is the
+/// authority, the gateway and the BFF only carry it.
+#[allow(clippy::result_large_err)]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn verify_space_memory_decision(
+    token: &str,
+    decision_ref: &str,
+    org_id: &str,
+    user_id: &str,
+    space_id: &str,
+    operation: &str,
+    memory_id: &str,
+    now: DateTime<Utc>,
+) -> Result<VerifiedSpaceMemoryManage, Status> {
+    if token.trim().is_empty() || decision_ref.trim().is_empty() || space_id.trim().is_empty() {
+        return Err(Status::permission_denied(
+            "Space memory requires a Control Space memory decision",
+        ));
+    }
+    if user_id.trim().is_empty() {
+        return Err(Status::permission_denied(
+            "Space memory requires an authenticated user subject",
+        ));
+    }
+    let keys = configured_control_space_decision_keys()?;
+    let key_id = token
+        .split('.')
+        .nth(1)
+        .and_then(|part| URL_SAFE_NO_PAD.decode(part).ok())
+        .and_then(|raw| String::from_utf8(raw).ok())
+        .filter(|id| !id.trim().is_empty())
+        .ok_or_else(|| Status::permission_denied("untrusted Control Space decision key"))?;
+    let key = crate::decision_keys::lookup_key(&keys, &key_id)?;
+    verify_space_memory_decision_with_key(
+        token,
+        decision_ref,
+        org_id,
+        user_id,
+        space_id,
+        operation,
+        memory_id,
+        &key_id,
+        key,
+        now,
+    )
+}
+
 /// Resolve an optional shared-Space read authority for one request.
 ///
 /// `Ok(None)` means no decision was offered and the caller stays on the
@@ -10207,6 +10409,26 @@ impl SessionCore for SessionService {
                 .await
                 .map_err(|error| Status::internal(error.to_string()))?;
             }
+            // EP-8 S7: the room's own memory and its agents' memory go with the Space, in the same
+            // transaction. These rows are the Space's, not any thread's (owner ''), so the thread
+            // loop above never reaches them; they have no Letta copy (EP-8 S6), so no receipt.
+            // Compared by prefix, not LIKE, so a Space id holding '%' or '_' matches only itself.
+            let erased_space_memory = sqlx::query(
+                "DELETE FROM agent_memory
+                 WHERE org_id = $1
+                   AND ((scope = 'space' AND scope_id = $2)
+                     OR (scope = 'agent' AND left(scope_id, length($2) + 1) = $2 || ':'))",
+            )
+            .bind(&req.org_id)
+            .bind(&req.space_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| Status::internal(error.to_string()))?
+            .rows_affected();
+            if erased_space_memory > 0 {
+                metrics::counter!("mp_session_space_memory_erased_total", "op" => "space_deletion")
+                    .increment(erased_space_memory);
+            }
             tx.commit()
                 .await
                 .map_err(|error| Status::internal(error.to_string()))?;
@@ -12586,6 +12808,9 @@ mod tests {
         DEFAULT_RESIDENCY, HEALTH_SERVICE_NAMES, MAX_USER_CHECKPOINT_ID_BYTES,
         MAX_USER_CHECKPOINT_STATE_BYTES, MESSAGE_APPENDED_TYPE_URL, STEP_COMPLETED_TYPE_URL,
         THREAD_ORIGINS, THREAD_TITLE_MAX_CHARS, ZDR_MEMORY_READ_SUPPRESSED,
+        space_memory_payload_digest, verify_space_memory_decision_with_key,
+        CONTROL_SPACE_MEMORY_ACTION, CONTROL_SPACE_MEMORY_SCHEMA, SPACE_MEMORY_OPERATION_DELETE,
+        SPACE_MEMORY_OPERATION_LIST, SPACE_MEMORY_PERMISSION,
     };
     use crate::auth::{SPACE_DELETION_SCOPE, SPACE_DELETION_SERVICE};
     use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
@@ -14413,6 +14638,179 @@ mod tests {
             URL_SAFE_NO_PAD.encode(signature.to_bytes())
         );
         (token, decision_ref, key_id)
+    }
+
+    /// Mint a signed `model.space.memory.manage` decision (EP-8 S7) the way Control would, bound
+    /// to `operation` and `memory_id`.
+    fn signed_space_memory_decision(
+        signing_key: &SigningKey,
+        now: DateTime<Utc>,
+        permissions: &[&str],
+        operation: &str,
+        memory_id: &str,
+    ) -> (String, String, String) {
+        let key_id = "control-test-key".to_owned();
+        let key_part = URL_SAFE_NO_PAD.encode(key_id.as_bytes());
+        let decision_ref = "memory-decision-1".to_owned();
+        let mut claims = serde_json::json!({
+            "decision_ref": decision_ref,
+            "org_id": "org-1",
+            "space_ref": "space-room",
+            "subject_id": "user-1",
+            "service_audience": CONTROL_SPACE_DECISION_AUDIENCE,
+            "action_id": CONTROL_SPACE_MEMORY_ACTION,
+            "action_schema_hash": CONTROL_SPACE_MEMORY_SCHEMA,
+            "payload_digest": "",
+            "idempotency_key": "space-memory-1",
+            "recipient_audience_ref": "audience:space-room:4",
+            "recipient_audience_hash": "sha256:test-audience",
+            "privacy_policy_ref": "privacy:org-1:5",
+            "resource_authorization_ref": "control:space-room:memory:7",
+            "purpose": "assistant_collaboration",
+            "lawful_basis": "contract",
+            "privacy_class": "internal",
+            "third_party_processing_allowed": false,
+            "retention_class": "standard",
+            "residency": "swedencentral",
+            "deletion_scope": "space",
+            "zero_data_retention": false,
+            "nonce": "nonce-1",
+            "authority_revision": 7,
+            "membership_revision": 4,
+            "privacy_revision": 5,
+            "recipient_audience_revision": 4,
+            "entitlement_revision": 3,
+            "permissions": permissions,
+            "issued_at": now.to_rfc3339(),
+            "expires_at": (now + chrono::Duration::minutes(1)).to_rfc3339(),
+        });
+        let parsed: ControlSpaceDecisionClaims =
+            serde_json::from_value(claims.clone()).expect("claims fixture");
+        claims["payload_digest"] =
+            serde_json::json!(space_memory_payload_digest(&parsed, operation, memory_id));
+        let encoded = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims).expect("claims"));
+        let signed = format!("{CONTROL_SPACE_DECISION_VERSION}.{key_part}.{encoded}");
+        let signature = signing_key.sign(signed.as_bytes());
+        let token = format!("{signed}.{}", URL_SAFE_NO_PAD.encode(signature.to_bytes()));
+        (token, decision_ref, key_id)
+    }
+
+    /// The Space owner's list token admits exactly its caller, Space and operation, and carries the
+    /// Space's current audience for the withheld marks.
+    #[test]
+    fn space_memory_decision_binds_subject_space_operation_and_row() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-11-03T12:00:00Z")
+            .expect("test time")
+            .with_timezone(&Utc);
+        let signing_key = SigningKey::from_bytes(&[41_u8; 32]);
+        let verify = |token: &str, decision_ref: &str, key_id: &str, user: &str, space: &str, op: &str, id: &str, at| {
+            verify_space_memory_decision_with_key(
+                token,
+                decision_ref,
+                "org-1",
+                user,
+                space,
+                op,
+                id,
+                key_id,
+                &signing_key.verifying_key(),
+                at,
+            )
+        };
+        let (list, list_ref, key_id) = signed_space_memory_decision(
+            &signing_key,
+            now,
+            &[SPACE_MEMORY_PERMISSION],
+            SPACE_MEMORY_OPERATION_LIST,
+            "",
+        );
+        let verified = verify(&list, &list_ref, &key_id, "user-1", "space-room", SPACE_MEMORY_OPERATION_LIST, "", now)
+            .expect("the owner's list decision verifies");
+        assert_eq!(verified.recipient_audience_hash, "sha256:test-audience");
+        assert!(!verified.zero_data_retention);
+        for (user, space, op, id, why) in [
+            ("user-2", "space-room", SPACE_MEMORY_OPERATION_LIST, "", "another subject"),
+            ("user-1", "space-other", SPACE_MEMORY_OPERATION_LIST, "", "another Space"),
+            ("user-1", "space-room", SPACE_MEMORY_OPERATION_DELETE, "mem-1", "a delete with a list token"),
+        ] {
+            assert_eq!(
+                verify(&list, &list_ref, &key_id, user, space, op, id, now).expect_err(why).code(),
+                tonic::Code::PermissionDenied,
+                "{why}"
+            );
+        }
+        let (delete, delete_ref, _) = signed_space_memory_decision(
+            &signing_key,
+            now,
+            &[SPACE_MEMORY_PERMISSION],
+            SPACE_MEMORY_OPERATION_DELETE,
+            "mem-1",
+        );
+        assert!(verify(&delete, &delete_ref, &key_id, "user-1", "space-room", SPACE_MEMORY_OPERATION_DELETE, "mem-1", now).is_ok());
+        assert!(
+            verify(&delete, &delete_ref, &key_id, "user-1", "space-room", SPACE_MEMORY_OPERATION_DELETE, "mem-2", now).is_err(),
+            "a delete token deletes only the row it was issued for"
+        );
+        assert!(
+            verify(&list, &list_ref, &key_id, "user-1", "space-room", SPACE_MEMORY_OPERATION_LIST, "", now + chrono::Duration::minutes(5)).is_err(),
+            "an expired decision is refused"
+        );
+    }
+
+    /// Only the one permission: a member's read token (or one that also carries `thread:read`)
+    /// never lists or deletes room memory.
+    #[test]
+    fn space_memory_decision_refuses_any_other_permission_set() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-11-03T12:00:00Z")
+            .expect("test time")
+            .with_timezone(&Utc);
+        let signing_key = SigningKey::from_bytes(&[42_u8; 32]);
+        for permissions in [
+            &["thread:read"][..],
+            &[SPACE_MEMORY_PERMISSION, "thread:read"][..],
+            &[][..],
+        ] {
+            let (token, decision_ref, key_id) = signed_space_memory_decision(
+                &signing_key,
+                now,
+                permissions,
+                SPACE_MEMORY_OPERATION_LIST,
+                "",
+            );
+            assert_eq!(
+                verify_space_memory_decision_with_key(
+                    &token,
+                    &decision_ref,
+                    "org-1",
+                    "user-1",
+                    "space-room",
+                    SPACE_MEMORY_OPERATION_LIST,
+                    "",
+                    &key_id,
+                    &signing_key.verifying_key(),
+                    now,
+                )
+                .expect_err("only memory:manage alone is accepted")
+                .code(),
+                tonic::Code::PermissionDenied,
+                "{permissions:?}"
+            );
+        }
+        let (read_token, read_ref, key_id) =
+            signed_thread_read_decision(&signing_key, now, &["thread:read"], 4);
+        assert!(verify_space_memory_decision_with_key(
+            &read_token,
+            &read_ref,
+            "org-1",
+            "user-1",
+            "space-room",
+            SPACE_MEMORY_OPERATION_LIST,
+            "",
+            &key_id,
+            &signing_key.verifying_key(),
+            now,
+        )
+        .is_err());
     }
 
     /// The read path's whole purpose: admit a member who does NOT own the
@@ -17278,6 +17676,93 @@ mod tests {
                 .await
                 .expect("cleanup preserved thread");
         }
+    }
+
+    /// EP-8 S7: deleting a Space erases its room memory and its agents' memory in the same
+    /// transaction, and nothing of another Space, even one whose id extends this one's.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres whose name contains \"test\""]
+    async fn space_deletion_erases_space_rows() {
+        let Some(pool) = crate::space::test_support::connect().await else { return };
+        let suffix = mp_ids::new_ulid();
+        let org_id = format!("org-space-memory-erase-{suffix}");
+        let owner = "owner-1";
+        let space = format!("space-erase-{suffix}");
+        let longer_space = format!("{space}x");
+        let thread = format!("thread-space-erase-{suffix}");
+        crate::space::test_support::seed_space_thread(&pool, &org_id, &space, &thread, owner).await;
+        let insert = |scope: &'static str, scope_id: String| {
+            let pool = pool.clone();
+            let org_id = org_id.clone();
+            async move {
+                let id = mp_ids::new_ulid();
+                sqlx::query(
+                    "INSERT INTO agent_memory (id, org_id, scope, scope_id, key, content, kind, confidence, \
+                     owner, source_links, review_state, audience_hash, audience_revision, source_label) \
+                     VALUES ($1, $2, $3, $4, $5, 'c', 'fact', 0.9, '', '{}', 'accepted', 'sha256:audience-1', 1, \
+                     CASE WHEN $3 = 'agent' THEN 'agent_memory' ELSE 'room_statement' END)",
+                )
+                .bind(&id)
+                .bind(&org_id)
+                .bind(scope)
+                .bind(&scope_id)
+                .bind(format!("{scope_id}/k-{id}"))
+                .execute(&pool)
+                .await
+                .expect("seed memory row");
+                id
+            }
+        };
+        let room = insert("space", space.clone()).await;
+        let agent = insert("agent", format!("{space}:agent-1")).await;
+        let other_room = insert("space", longer_space.clone()).await;
+        let other_agent = insert("agent", format!("{longer_space}:agent-1")).await;
+
+        let svc = super::SessionService {
+            pool: pool.clone(),
+            retrieval_client: None,
+            graph_client: None,
+            knowledge_client: None,
+            letta_memory: None,
+            audit_publisher: None,
+            auth: None,
+            grant_columns: crate::grpc::ThreadGrantColumns::present(),
+        };
+        let mut request = Request::new(pb::DeleteSpaceThreadsRequest {
+            org_id: org_id.clone(),
+            space_id: space.clone(),
+            owner_principal_id: owner.to_owned(),
+            deletion_request_id: format!("deletion-request-{suffix}"),
+        });
+        request
+            .extensions_mut()
+            .insert(VerifiedIdentity::service_for_test_as(
+                &org_id,
+                SPACE_DELETION_SERVICE,
+                &[SPACE_DELETION_SCOPE],
+                false,
+            ));
+        svc.delete_space_threads(request).await.expect("space deletion");
+
+        for (id, expected, why) in [
+            (&room, 0_i64, "the room's memory goes with the Space"),
+            (&agent, 0_i64, "the room's agent memory goes with the Space"),
+            (&other_room, 1_i64, "another Space's memory stays"),
+            (&other_agent, 1_i64, "an agent memory of another Space stays"),
+        ] {
+            let (count,): (i64,) = sqlx::query_as("SELECT count(*) FROM agent_memory WHERE id = $1")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .expect("count");
+            assert_eq!(count, expected, "{why}");
+        }
+        sqlx::query("DELETE FROM agent_memory WHERE org_id = $1")
+            .bind(&org_id)
+            .execute(&pool)
+            .await
+            .ok();
+        crate::space::test_support::clean_space(&pool, &org_id, &space).await;
     }
 
     #[tokio::test]
