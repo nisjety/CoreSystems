@@ -779,6 +779,7 @@ type memDB struct {
 	snapshotsV2  *memSnapshotsV2
 	jobClaims    *jobClaimTable
 	zdrTombs     *memZdrTombstones
+	schedReqs    *memScheduleRequests
 }
 
 func NewMemory() DB {
@@ -797,6 +798,7 @@ func NewMemory() DB {
 		snapshotsV2:  &memSnapshotsV2{},
 		jobClaims:    &jobClaimTable{until: map[quarrycontracts.ID]time.Time{}},
 		zdrTombs:     newMemZdrTombstones(),
+		schedReqs:    newMemScheduleRequests(),
 	}
 }
 
@@ -1904,4 +1906,267 @@ func (l *memEventLog) FindByIdempotencyKey(key string) (quarrycontracts.Event, b
 		}
 	}
 	return quarrycontracts.Event{}, false
+}
+
+// ---- schedule requests (WS15.S3, migration 026) ----------------------------
+
+// Schedule request actions and states. A trigger or backfill is recorded as a
+// row that the orchestrator claims (pull model, X-9 / D14 option 2): control
+// holds no Temporal client, so a request is durable before anything runs and an
+// orchestrator restart between request and claim loses nothing.
+const (
+	ScheduleRequestTrigger  = "trigger"
+	ScheduleRequestBackfill = "backfill"
+
+	ScheduleRequestPending  = "pending"
+	ScheduleRequestClaimed  = "claimed"
+	ScheduleRequestDone     = "done"
+	ScheduleRequestFailed   = "failed"
+	ScheduleRequestRejected = "rejected"
+)
+
+// ScheduleRequest is one trigger or backfill of a schedule. Times are unix
+// milliseconds. Params is {start_at, end_at, overlap_policy} for a backfill and
+// empty for a trigger; Result is what the orchestrator reported (the workflow
+// or schedule id). The row holds no page content.
+type ScheduleRequest struct {
+	ID             quarrycontracts.ID `json:"id"`
+	ScheduleID     quarrycontracts.ID `json:"schedule_id"`
+	OrgID          string             `json:"org_id"`
+	Action         string             `json:"action"`
+	Params         map[string]any     `json:"params,omitempty"`
+	Status         string             `json:"status"`
+	ClaimedBy      string             `json:"claimed_by,omitempty"`
+	LeaseUntil     int64              `json:"lease_until,omitempty"`
+	Attempts       int                `json:"attempts"`
+	Result         map[string]any     `json:"result,omitempty"`
+	Error          string             `json:"error,omitempty"`
+	RequestedBy    string             `json:"requested_by,omitempty"`
+	IdempotencyKey string             `json:"-"`
+	CreatedAt      int64              `json:"created_at"`
+	FinishedAt     *int64             `json:"finished_at,omitempty"`
+}
+
+// ScheduleRequestTerminal reports whether status ends a request.
+func ScheduleRequestTerminal(status string) bool {
+	switch status {
+	case ScheduleRequestDone, ScheduleRequestFailed, ScheduleRequestRejected:
+		return true
+	}
+	return false
+}
+
+// ScheduleRequestsStore is the request table. Create refuses a second open
+// (pending or claimed) request of the same schedule and a repeated
+// (org, idempotency key) with ErrConflict. Claim hands each claimable row to one
+// worker: a pending row, or a claimed row whose lease ran out (the worker died).
+// Complete, Fail and Release act only on a row the named worker still holds;
+// anything else is ErrConflict, an unknown id ErrNotFound.
+type ScheduleRequestsStore interface {
+	Create(req ScheduleRequest) error
+	// GetByOrg is the tenant read: a request of another org is not found.
+	GetByOrg(id quarrycontracts.ID, orgID string) (ScheduleRequest, bool)
+	// HasPending reports an open request of the schedule. action "" matches any.
+	HasPending(scheduleID quarrycontracts.ID, action string) bool
+	Claim(worker string, limit int, lease time.Duration, now time.Time) ([]ScheduleRequest, error)
+	Complete(id quarrycontracts.ID, worker string, result map[string]any, now time.Time) error
+	// Fail ends a held request as failed or rejected with a short reason.
+	Fail(id quarrycontracts.ID, worker, status, reason string, now time.Time) error
+	// Release gives a held request back to the queue (a transient error); the
+	// attempt stays counted and the reason is kept as the last error.
+	Release(id quarrycontracts.ID, worker, reason string) error
+}
+
+// ScheduleRequestsProvider is implemented by a DB that has the request table.
+// It is optional, like RequestQueueReader, so a DB without it answers 501
+// instead of failing to compile; both backends here implement it.
+type ScheduleRequestsProvider interface {
+	ScheduleRequests() ScheduleRequestsStore
+}
+
+// ScheduleRequestReasonMax bounds the stored error text.
+const ScheduleRequestReasonMax = 256
+
+// ClipScheduleRequestReason trims a reason to ScheduleRequestReasonMax bytes.
+func ClipScheduleRequestReason(s string) string {
+	if len(s) > ScheduleRequestReasonMax {
+		return s[:ScheduleRequestReasonMax]
+	}
+	return s
+}
+
+type memScheduleRequests struct {
+	mu    sync.Mutex
+	items map[quarrycontracts.ID]ScheduleRequest
+	order []quarrycontracts.ID
+}
+
+func newMemScheduleRequests() *memScheduleRequests {
+	return &memScheduleRequests{items: map[quarrycontracts.ID]ScheduleRequest{}}
+}
+
+func (d *memDB) ScheduleRequests() ScheduleRequestsStore { return d.schedReqs }
+
+func copyAnyMap(in map[string]any) map[string]any {
+	if in == nil {
+		return nil
+	}
+	out := make(map[string]any, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
+}
+
+func cloneScheduleRequest(r ScheduleRequest) ScheduleRequest {
+	r.Params = copyAnyMap(r.Params)
+	r.Result = copyAnyMap(r.Result)
+	if r.FinishedAt != nil {
+		v := *r.FinishedAt
+		r.FinishedAt = &v
+	}
+	return r
+}
+
+func (m *memScheduleRequests) Create(req ScheduleRequest) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, dup := m.items[req.ID]; dup {
+		return ErrConflict
+	}
+	for _, id := range m.order {
+		it := m.items[id]
+		if it.ScheduleID == req.ScheduleID && !ScheduleRequestTerminal(it.Status) {
+			return ErrConflict
+		}
+		if req.IdempotencyKey != "" && it.OrgID == req.OrgID && it.IdempotencyKey == req.IdempotencyKey {
+			return ErrConflict
+		}
+	}
+	if req.Status == "" {
+		req.Status = ScheduleRequestPending
+	}
+	m.items[req.ID] = cloneScheduleRequest(req)
+	m.order = append(m.order, req.ID)
+	return nil
+}
+
+func (m *memScheduleRequests) GetByOrg(id quarrycontracts.ID, orgID string) (ScheduleRequest, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	it, ok := m.items[id]
+	if !ok || orgID == "" || it.OrgID != orgID {
+		return ScheduleRequest{}, false
+	}
+	return cloneScheduleRequest(it), true
+}
+
+func (m *memScheduleRequests) HasPending(scheduleID quarrycontracts.ID, action string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, id := range m.order {
+		it := m.items[id]
+		if it.ScheduleID != scheduleID || ScheduleRequestTerminal(it.Status) {
+			continue
+		}
+		if action == "" || it.Action == action {
+			return true
+		}
+	}
+	return false
+}
+
+func (m *memScheduleRequests) Claim(worker string, limit int, lease time.Duration, now time.Time) ([]ScheduleRequest, error) {
+	if worker == "" {
+		return nil, fmt.Errorf("claim: worker required")
+	}
+	if limit <= 0 {
+		limit = 1
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	nowMs := now.UnixMilli()
+	var out []ScheduleRequest
+	// Oldest first: order is insertion order, which is created_at order.
+	for _, id := range m.order {
+		if len(out) >= limit {
+			break
+		}
+		it := m.items[id]
+		claimable := it.Status == ScheduleRequestPending ||
+			(it.Status == ScheduleRequestClaimed && it.LeaseUntil < nowMs)
+		if !claimable {
+			continue
+		}
+		it.Status = ScheduleRequestClaimed
+		it.ClaimedBy = worker
+		it.LeaseUntil = now.Add(lease).UnixMilli()
+		it.Attempts++
+		m.items[id] = it
+		out = append(out, cloneScheduleRequest(it))
+	}
+	return out, nil
+}
+
+// held returns the row when worker still holds it.
+func (m *memScheduleRequests) held(id quarrycontracts.ID, worker string) (ScheduleRequest, error) {
+	it, ok := m.items[id]
+	if !ok {
+		return ScheduleRequest{}, ErrNotFound
+	}
+	if it.Status != ScheduleRequestClaimed || it.ClaimedBy != worker {
+		return ScheduleRequest{}, ErrConflict
+	}
+	return it, nil
+}
+
+func (m *memScheduleRequests) Complete(id quarrycontracts.ID, worker string, result map[string]any, now time.Time) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	it, err := m.held(id, worker)
+	if err != nil {
+		return err
+	}
+	fin := now.UnixMilli()
+	it.Status = ScheduleRequestDone
+	it.Result = copyAnyMap(result)
+	it.Error = ""
+	it.LeaseUntil = 0
+	it.FinishedAt = &fin
+	m.items[id] = it
+	return nil
+}
+
+func (m *memScheduleRequests) Fail(id quarrycontracts.ID, worker, status, reason string, now time.Time) error {
+	if status != ScheduleRequestFailed && status != ScheduleRequestRejected {
+		return fmt.Errorf("fail: status must be failed or rejected")
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	it, err := m.held(id, worker)
+	if err != nil {
+		return err
+	}
+	fin := now.UnixMilli()
+	it.Status = status
+	it.Error = ClipScheduleRequestReason(reason)
+	it.LeaseUntil = 0
+	it.FinishedAt = &fin
+	m.items[id] = it
+	return nil
+}
+
+func (m *memScheduleRequests) Release(id quarrycontracts.ID, worker, reason string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	it, err := m.held(id, worker)
+	if err != nil {
+		return err
+	}
+	it.Status = ScheduleRequestPending
+	it.ClaimedBy = ""
+	it.LeaseUntil = 0
+	it.Error = ClipScheduleRequestReason(reason)
+	m.items[id] = it
+	return nil
 }

@@ -2330,6 +2330,7 @@ fn broker_grant(owner: &str, domains: &[&str], zdr: bool) -> quarry_runtime::Gra
         absolute_expires_at: None,
         resource_id: String::new(),
         key_id: String::new(),
+        web_policy: None,
     }
 }
 
