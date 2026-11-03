@@ -274,3 +274,39 @@ Open items:
 - W2-Q-S3: control flag must stay off until gdpr_purge.go deletes schedule_requests, edge schedule_routes.rs is updated (GET requests/{rid}, ZDR refusal), temporal client cleanup, Backfill overlap policy, controlauth.IsControlInternalPath listing; its orchestrator files landed inside commit b4de27454 (WS7K docs commit).
 - 53 depth lines appended to W23-depth.md (lanes a, b, c, d).
 - Four tracked .sha256 files in the integ worktree still show as modified (CRLF/LF checkout artifacts); none committed.
+
+## Step S4 (W2 + W3), integrated 2026-11-03
+
+Units: W2-Q-U41b, W3-E3.5-4 (lane a); W2-CP-L2, W2-AP-S4c (lane b); W2-U47-69a, W2-AP-S7a (lane c); W2-CP-X9EVENT, W2-FE-GW1 (lane d).
+
+Merge commits on w23/integ:
+- 676171253 merge: w23/lane-a (S4: W2-Q-U41b, W3-E3.5-4) into w23/integ
+- baa47066b merge: w23/lane-b (S4: W2-CP-L2, W2-AP-S4c) into w23/integ
+- 0b74c0754 merge: w23/lane-c (S4: W2-U47-69a, W2-AP-S7a) into w23/integ
+- 5eabb6904 merge: w23/lane-d (S4: W2-CP-X9EVENT, W2-FE-GW1) into w23/integ
+
+Conflicts:
+- quarry-edge src/internal_routes.rs (lane a vs W2-U49 on integ): module docs and the helper block; kept both (U49 user-receipts docs, path_id_ok and USER_RECEIPTS_FAMILY, then U41b's run_families). Added `key_shred: None` to user_purge_report's FamilyReport (new field from U41b), inside the merge commit.
+- .plan-work/quarry-w1w2/MP-ASKS.md on the lane-d merge (append-only sections); kept both, integ first.
+- Lanes b and c merged clean.
+
+Compile guard (no test runs):
+- Quarry Rust (qtest-lane integ): `cargo check --workspace --tests` exit 0, warnings only. New one in S4 code: `change_text_fp_enabled` reported never used in the bin test target only (the lib uses it; same dual-module pattern as other edge modules).
+- Go, GOWORK=off, build + vet: notification-core clean; org-core clean; quarry-control clean; quarry-orchestrator clean.
+- verevonv3 SPA: `pnpm typecheck` stops early in packages/remote-core (no node_modules there: libsodium-wrappers, fzstd; environment, not S4). `tsc6 -p tsconfig.app.json --noEmit`: 34 errors, equal to the baseline, none in src/features/browser/session.
+- verevonv3 gateway: `cargo check --tests` (CARGO_TARGET_DIR=%TEMP%/w23cg-gw) exit 0.
+- action-registry.ts unchanged: no admission golden regeneration, no new action ids. No ZDR/schema/route-count regeneration needed.
+- No follow-up fix commits needed.
+- Not compile-checked (no guard step): convex-core TS (W2-AP-S7a; run `npx tsx --test convex/agentRuns.browserActivity.test.ts` and a convex typecheck before relying on it).
+
+Open items:
+- W2-Q-U41b: BLOCKER for the flag (D-U41b-1): org-core must allow and grant `org:keys:destroy:any` to quarry-edge, or every shredding erasure retries forever; pending set is in-process (D-U41b-2); main.rs/config, compose, openapi-internal, RUNBOOKS not done.
+- W3-E3.5-4: docs (openapi.yaml, CHANGE_TRACKING.md, RUNBOOKS.md) not updated; roll orchestrator before the flag (D-E354-1); workflow replay with change-text-fp-v1 not tested; Postgres column accepting `text:` values unchecked.
+- W2-CP-L2: lease pool does not use plan render permits (W23-b-L2-1); main.rs comment stale; QUARRY_JOB_CAP_MAX / QUARRY_JOB_BACKLOG_MAX not in compose.
+- W2-AP-S4c: migration number 016 clashes with R-32/E3.2 and the Space plan, settle before main; ZDR notices 500 under NOTIFICATION_DELIVERY_WORKER_ENABLED=1; quarry-control emitter must sign x-user-id = schedule created_by; no PG round-trip test.
+- W2-U47-69a: same-tick tests rely on Solid 2 rc latest() semantics, run the controller vitest; scheduled crawls skip the enforce-without-scope refusal (lane b inputs.go/scheduled.go).
+- W2-AP-S7a: MP ask (nats.conf subscribe mp.v1.trace.run.*); listForOrg/rate leak browserActivity to every org member (high, fix before S7b); confirm Convex skips *.test.ts when bundling.
+- W2-CP-X9EVENT: inert until org-core main.go wiring (SetRetentionPostureReader, SetZDRSignal), audit-core provisioner consumer row, control-shared-nats.conf grants, compose flag.
+- W2-FE-GW1: `build_router` in apps/gateway/src/main.rs not yet merging `domains::api_key_agent::router` (left for an explicit wiring step; route-count pin may need ROUTE_BASELINE_UPDATE then); MP-3 key-grant door not built; in-memory run binding breaks with several replicas.
+- 51 depth lines appended to W23-depth.md (lanes a, b, c, d).
+- Four tracked .sha256 files in the integ worktree still show as modified (CRLF/LF checkout artifacts); none committed.
