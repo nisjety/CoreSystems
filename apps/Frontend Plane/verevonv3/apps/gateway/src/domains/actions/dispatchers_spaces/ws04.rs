@@ -289,4 +289,102 @@ mod tests {
         assert!(control.received_requests().await.unwrap().is_empty());
         assert!(application.received_requests().await.unwrap().is_empty());
     }
+
+    // ---- WS04-S8.gw: spaces.join_room and spaces.update_room_settings -----------------------------
+
+    async fn directory_stack(role: &str) -> (AppState, MockServer, MockServer) {
+        let (mut state, control, application) = stack(role).await;
+        state.space_features.room_directory_api = true;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/v1/internal/spaces/space-room/join"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {"space_ref": "space-room", "role": "editor", "changed": true, "already_member": false}
+            })))
+            .mount(&control)
+            .await;
+        Mock::given(wm_method("PATCH"))
+            .and(wm_path("/api/v1/internal/spaces/space-room/settings"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {"space_ref": "space-room", "visibility": "org_public", "join_role": "viewer", "history_mode": "full", "changed": true}
+            })))
+            .mount(&control)
+            .await;
+        (state, control, application)
+    }
+
+    async fn control_bodies(control: &MockServer, method: &str, path: &str) -> Vec<Value> {
+        control
+            .received_requests()
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|request| request.method.to_string() == method && request.url.path() == path)
+            .map(|request| serde_json::from_slice(&request.body).unwrap_or(Value::Null))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn join_room_and_update_room_settings_require_a_space_ref_and_call_nothing() {
+        let (state, control, application) = directory_stack("owner").await;
+        for input in [json!({}), json!({"spaceRef": "  "}), json!({"spaceRef": 5, "visibility": "private"})] {
+            let (status, body) = read(dispatch_spaces_join_room(&state, &user(), &input, "idem-key-1").await).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{input}");
+            assert_eq!(body["error"]["code"], "invalid_input");
+            let (status, body) = read(dispatch_spaces_update_room_settings(&state, &user(), &input, "idem-key-1").await).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{input}");
+            assert_eq!(body["error"]["code"], "invalid_input");
+        }
+        assert!(control.received_requests().await.unwrap().is_empty());
+        assert!(application.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn join_room_forwards_the_idempotency_key_and_wraps_the_owner_envelope() {
+        let (state, control, _application) = directory_stack("viewer").await;
+        let input = json!({"spaceRef": "space-room", "role": "owner", "orgId": "forged"});
+        let (status, body) = read(dispatch_spaces_join_room(&state, &user(), &input, "  idem-join-1  ").await).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["data"]["actionId"], "spaces.join_room");
+        assert_eq!(body["data"]["status"], "completed");
+        assert_eq!(body["data"]["result"]["recipient_ready"], false);
+        assert_eq!(body["data"]["result"]["role"], "editor");
+        let sent = control_bodies(&control, "POST", "/api/v1/internal/spaces/space-room/join").await;
+        assert_eq!(sent, vec![json!({"idempotency_key": "idem-join-1"})], "only the trimmed key travels");
+
+        let (status, _) = read(dispatch_spaces_join_room(&state, &user(), &input, "   ").await).await;
+        assert_eq!(status, StatusCode::OK);
+        let sent = control_bodies(&control, "POST", "/api/v1/internal/spaces/space-room/join").await;
+        assert_eq!(sent[1], json!({}), "a blank key is not sent");
+    }
+
+    #[tokio::test]
+    async fn update_room_settings_maps_join_role_and_history_mode_and_forwards_the_key() {
+        let (state, control, _application) = directory_stack("manager").await;
+        let input = json!({
+            "spaceRef": "space-room", "visibility": "org_public", "joinRole": "viewer",
+            "historyMode": "since_join", "orgId": "forged", "role": "owner"
+        });
+        let (status, body) = read(dispatch_spaces_update_room_settings(&state, &user(), &input, "idem-set-1").await).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["data"]["actionId"], "spaces.update_room_settings");
+        assert_eq!(body["data"]["result"]["visibility"], "org_public");
+        let sent = control_bodies(&control, "PATCH", "/api/v1/internal/spaces/space-room/settings").await;
+        assert_eq!(
+            sent,
+            vec![json!({"visibility": "org_public", "join_role": "viewer", "history_mode": "since_join", "idempotency_key": "idem-set-1"})]
+        );
+    }
+
+    #[tokio::test]
+    async fn the_directory_actions_answer_404_feature_disabled_with_the_flag_off() {
+        let (mut state, control, _application) = directory_stack("owner").await;
+        state.space_features.room_directory_api = false;
+        let input = json!({"spaceRef": "space-room", "visibility": "private"});
+        let (status, body) = read(dispatch_spaces_join_room(&state, &user(), &input, "idem-1").await).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["error"]["code"], "feature_disabled");
+        let (status, _) = read(dispatch_spaces_update_room_settings(&state, &user(), &input, "idem-1").await).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert!(control_bodies(&control, "POST", "/api/v1/internal/spaces/space-room/join").await.is_empty());
+    }
 }

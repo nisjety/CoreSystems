@@ -504,3 +504,406 @@ pub(crate) async fn check_wake_ceiling(
         .try_acquire(&format!("space-wake:{}:{user_id}:{}", org_id.trim(), space_ref.trim()))
         .await
 }
+
+#[cfg(test)]
+mod tests {
+    //! WS08-S4 tests: the pure planner, the shape parser, the wake-field parser and the receipt
+    //! reader. No network and no state.
+    use super::*;
+
+    fn member(subject_id: &str) -> Value {
+        json!({"subject_type": "user", "subject_id": subject_id, "role": "editor", "status": "active"})
+    }
+
+    fn agent(subject_id: &str, name: &str) -> Value {
+        json!({"subject_id": subject_id, "name": name, "status": "active"})
+    }
+
+    fn people(items: &[(&str, &str)]) -> MentionsInput {
+        MentionsInput {
+            people: items
+                .iter()
+                .map(|(id, label)| PersonInput {
+                    subject_id: (*id).to_owned(),
+                    label: (*label).to_owned(),
+                    source: Source::Typed,
+                })
+                .collect(),
+            agents: Vec::new(),
+        }
+    }
+
+    fn agents(items: &[&str], source: Source) -> MentionsInput {
+        MentionsInput {
+            people: Vec::new(),
+            agents: items
+                .iter()
+                .map(|id| AgentInput {
+                    subject_id: (*id).to_owned(),
+                    source,
+                })
+                .collect(),
+        }
+    }
+
+    fn invoker(role: &str) -> Invoker<'_> {
+        Invoker {
+            subject_id: "user-1",
+            role,
+        }
+    }
+
+    fn plan_people(content: &str, input: &MentionsInput, roster: &[Value]) -> MentionPlan {
+        plan_mentions(content, input, roster, &[], &invoker("editor"), ThreadOwner::Invoker)
+            .expect("a valid set plans")
+    }
+
+    #[test]
+    fn a_person_who_is_not_in_the_room_is_rejected_softly() {
+        let plan = plan_people("hi @Ada", &people(&[("u-ada", "Ada")]), &[member("u-bob")]);
+        assert!(plan.recorded.is_empty());
+        assert_eq!(
+            plan.rejected,
+            vec![Rejected {
+                subject_id: "u-ada".to_owned(),
+                code: "person_not_in_room"
+            }]
+        );
+        // a removed member and a service with the same id are not people of the room either
+        let removed = json!({"subject_type": "user", "subject_id": "u-ada", "status": "removed"});
+        let service = json!({"subject_type": "service", "subject_id": "u-ada", "status": "active"});
+        for roster in [vec![removed], vec![service]] {
+            let plan = plan_people("hi @Ada", &people(&[("u-ada", "Ada")]), &roster);
+            assert_eq!(plan.rejected[0].code, "person_not_in_room");
+        }
+    }
+
+    #[test]
+    fn a_typed_mention_needs_its_label_visible_in_the_text() {
+        let roster = [member("u-ada")];
+        let input = people(&[("u-ada", "Ada")]);
+        let plan = plan_people("hello there", &input, &roster);
+        assert!(plan.recorded.is_empty());
+        assert_eq!(plan.rejected[0].code, "mention_text_missing");
+        // case is folded and a leading @ on the label is tolerated
+        let plan = plan_people("ping @ADA please", &people(&[("u-ada", "@Ada")]), &roster);
+        assert_eq!(plan.recorded.len(), 1);
+        assert_eq!(plan.recorded[0].kind, MentionKind::User);
+        assert_eq!(plan.recorded[0].wake, None);
+        // an empty label can never match
+        let plan = plan_people("hi @", &people(&[("u-ada", "  ")]), &roster);
+        assert_eq!(plan.rejected[0].code, "mention_text_missing");
+    }
+
+    #[test]
+    fn two_members_with_the_same_display_name_stay_distinct_subjects() {
+        let roster = [member("u-ada-1"), member("u-ada-2")];
+        let input = people(&[("u-ada-1", "Ada"), ("u-ada-2", "Ada")]);
+        let plan = plan_people("@Ada and @Ada", &input, &roster);
+        let ids: Vec<&str> = plan.recorded.iter().map(|m| m.subject_id.as_str()).collect();
+        assert_eq!(ids, ["u-ada-1", "u-ada-2"]);
+        assert_eq!(plan.recorded[0].ordinal, 0);
+        assert_eq!(plan.recorded[1].ordinal, 1);
+    }
+
+    #[test]
+    fn the_caps_are_twenty_people_and_three_agents() {
+        let twenty: Vec<(String, String)> = (0..20).map(|i| (format!("u-{i}"), format!("n{i}"))).collect();
+        let roster: Vec<Value> = twenty.iter().map(|(id, _)| member(id)).collect();
+        let text: String = twenty.iter().map(|(_, l)| format!("@{l} ")).collect();
+        let refs: Vec<(&str, &str)> = twenty.iter().map(|(i, l)| (i.as_str(), l.as_str())).collect();
+        let plan = plan_people(&text, &people(&refs), &roster);
+        assert_eq!(plan.recorded.len(), 20, "20 people are allowed");
+
+        let mut over = refs.clone();
+        over.push(("u-21", "n21"));
+        let result = plan_mentions("x", &people(&over), &roster, &[], &invoker("owner"), ThreadOwner::Invoker);
+        assert_eq!(result, Err(InvalidMentions::TooManyPeople));
+
+        let result = plan_mentions(
+            "x",
+            &agents(&["a1", "a2", "a3", "a4"], Source::Locked),
+            &[],
+            &[],
+            &invoker("owner"),
+            ThreadOwner::Invoker,
+        );
+        assert_eq!(result, Err(InvalidMentions::TooManyAgents));
+        let three = [agent("a1", "A1"), agent("a2", "A2"), agent("a3", "A3")];
+        let plan = plan_mentions(
+            "x",
+            &agents(&["a1", "a2", "a3"], Source::Locked),
+            &[],
+            &three,
+            &invoker("owner"),
+            ThreadOwner::Invoker,
+        )
+        .unwrap();
+        assert_eq!(plan.recorded.len(), 3, "3 agents are allowed");
+    }
+
+    #[test]
+    fn a_duplicate_or_malformed_subject_id_refuses_the_whole_set() {
+        let roster = [member("u-ada")];
+        let duplicate = people(&[("u-ada", "Ada"), ("u-ada", "Ada")]);
+        assert_eq!(
+            plan_mentions("@Ada", &duplicate, &roster, &[], &invoker("owner"), ThreadOwner::Invoker),
+            Err(InvalidMentions::Duplicate)
+        );
+        // a person and an agent sharing one id is a duplicate too
+        let mixed = MentionsInput {
+            people: people(&[("same", "Ada")]).people,
+            agents: agents(&["same"], Source::Locked).agents,
+        };
+        assert_eq!(
+            plan_mentions("@Ada", &mixed, &roster, &[], &invoker("owner"), ThreadOwner::Invoker),
+            Err(InvalidMentions::Duplicate)
+        );
+        for bad in ["", "-leading", "has space", "slash/id", "a".repeat(129).as_str()] {
+            let result = plan_mentions(
+                "@Ada",
+                &people(&[(bad, "Ada")]),
+                &roster,
+                &[],
+                &invoker("owner"),
+                ThreadOwner::Invoker,
+            );
+            assert_eq!(result, Err(InvalidMentions::BadSubjectId), "{bad:?}");
+        }
+        assert!(valid_subject_id("a"));
+        assert!(valid_subject_id("User_1.x:y-z"));
+        assert!(valid_subject_id(&"a".repeat(128)));
+    }
+
+    #[test]
+    fn a_locked_source_skips_the_text_check() {
+        let roster = [member("u-ada")];
+        let input = MentionsInput {
+            people: vec![PersonInput {
+                subject_id: "u-ada".to_owned(),
+                label: "Ada".to_owned(),
+                source: Source::Locked,
+            }],
+            agents: Vec::new(),
+        };
+        let plan = plan_people("no mention typed at all", &input, &roster);
+        assert_eq!(plan.recorded.len(), 1);
+        assert_eq!(plan.recorded[0].source, Source::Locked);
+
+        // an address-locked agent is recorded without being typed; a typed one is not
+        let helper = [agent("svc-1", "Helper")];
+        let locked = plan_mentions("hello", &agents(&["svc-1"], Source::Locked), &[], &helper, &invoker("owner"), ThreadOwner::Invoker).unwrap();
+        assert_eq!(locked.recorded[0].wake, Some(Wake::Expected));
+        let typed = plan_mentions("hello", &agents(&["svc-1"], Source::Typed), &[], &helper, &invoker("owner"), ThreadOwner::Invoker).unwrap();
+        assert_eq!(typed.rejected[0].code, "mention_text_missing");
+        let typed = plan_mentions("hi @helper", &agents(&["svc-1"], Source::Typed), &[], &helper, &invoker("owner"), ThreadOwner::Invoker).unwrap();
+        assert_eq!(typed.recorded.len(), 1);
+    }
+
+    #[test]
+    fn an_agent_that_is_not_bound_or_not_active_is_rejected() {
+        let inactive = json!({"subject_id": "svc-1", "name": "Helper", "status": "disabled"});
+        for list in [vec![], vec![inactive]] {
+            let plan = plan_mentions("@Helper", &agents(&["svc-1"], Source::Typed), &[], &list, &invoker("owner"), ThreadOwner::Invoker).unwrap();
+            assert!(plan.recorded.is_empty());
+            assert_eq!(plan.rejected[0].code, "agent_not_bound");
+        }
+    }
+
+    #[test]
+    fn respond_to_decides_the_wake_expectation_per_role() {
+        let helper = |respond_to: &str, subjects: Value| {
+            json!({"subject_id": "svc-1", "name": "Helper", "status": "active",
+                   "respond_to": respond_to, "respond_to_subjects": subjects})
+        };
+        let wake_for = |agent: &Value, role: &str, caller: &str| {
+            let invoker = Invoker { subject_id: caller, role };
+            let plan = plan_mentions(
+                "@Helper",
+                &agents(&["svc-1"], Source::Typed),
+                &[],
+                std::slice::from_ref(agent),
+                &invoker,
+                ThreadOwner::Invoker,
+            )
+            .unwrap();
+            plan.recorded[0].wake
+        };
+        let denied = Some(Wake::Refused("respond_to_denied"));
+        // managers: only owner and manager
+        let managers = helper("managers", json!([]));
+        assert_eq!(wake_for(&managers, "owner", "u"), Some(Wake::Expected));
+        assert_eq!(wake_for(&managers, "manager", "u"), Some(Wake::Expected));
+        assert_eq!(wake_for(&managers, "editor", "u"), denied);
+        assert_eq!(wake_for(&managers, "viewer", "u"), denied);
+        // members: editors too, viewers never
+        let members = helper("members", json!([]));
+        assert_eq!(wake_for(&members, "editor", "u"), Some(Wake::Expected));
+        assert_eq!(wake_for(&members, "viewer", "u"), denied);
+        // allowlist: an editor only when listed
+        let listed = helper("allowlist", json!(["u-listed"]));
+        assert_eq!(wake_for(&listed, "editor", "u-listed"), Some(Wake::Expected));
+        assert_eq!(wake_for(&listed, "editor", "u-other"), denied);
+        assert_eq!(wake_for(&listed, "viewer", "u-listed"), denied);
+        assert_eq!(wake_for(&listed, "manager", "u-other"), Some(Wake::Expected));
+    }
+
+    #[test]
+    fn binding_policy_refusals_carry_their_closed_words() {
+        let wake_for = |agent: Value| {
+            plan_mentions(
+                "@Helper",
+                &agents(&["svc-1"], Source::Typed),
+                &[],
+                &[agent],
+                &invoker("owner"),
+                ThreadOwner::Invoker,
+            )
+            .unwrap()
+            .recorded[0]
+                .wake
+        };
+        assert_eq!(
+            wake_for(json!({"subject_id": "svc-1", "name": "Helper", "status": "active", "trigger_modes": ["group"]})),
+            Some(Wake::Refused("mention_not_enabled"))
+        );
+        assert_eq!(
+            wake_for(json!({"subject_id": "svc-1", "name": "Helper", "status": "active", "approval_mode": "blocked"})),
+            Some(Wake::Refused("invocation_blocked"))
+        );
+    }
+
+    #[test]
+    fn a_thread_owned_by_someone_else_refuses_the_wake_as_owner_only_thread() {
+        let helper = [agent("svc-1", "Helper")];
+        let plan_for = |owner: ThreadOwner| {
+            plan_mentions("@Helper", &agents(&["svc-1"], Source::Typed), &[], &helper, &invoker("owner"), owner)
+                .unwrap()
+                .recorded[0]
+                .wake
+        };
+        assert_eq!(plan_for(ThreadOwner::Other), Some(Wake::Refused(REFUSAL_OWNER_ONLY_THREAD)));
+        assert_eq!(REFUSAL_OWNER_ONLY_THREAD, "owner_only_thread");
+        assert_eq!(plan_for(ThreadOwner::Invoker), Some(Wake::Expected));
+        // unknown plans no downgrade: Session Core decides
+        assert_eq!(plan_for(ThreadOwner::Unknown), Some(Wake::Expected));
+        // a binding refusal outranks the thread fact
+        let blocked = [json!({"subject_id": "svc-1", "name": "Helper", "status": "active", "approval_mode": "blocked"})];
+        let plan = plan_mentions("@Helper", &agents(&["svc-1"], Source::Typed), &[], &blocked, &invoker("owner"), ThreadOwner::Other).unwrap();
+        assert_eq!(plan.recorded[0].wake, Some(Wake::Refused("invocation_blocked")));
+    }
+
+    #[test]
+    fn session_entries_carry_ids_and_closed_words_only() {
+        let roster = [member("u-ada")];
+        let helper = [agent("svc-1", "Helper")];
+        let input = MentionsInput {
+            people: people(&[("u-ada", "Ada")]).people,
+            agents: agents(&["svc-1"], Source::Typed).agents,
+        };
+        let plan = plan_mentions("@Ada @Helper", &input, &roster, &helper, &invoker("owner"), ThreadOwner::Other).unwrap();
+        assert_eq!(
+            plan.session_entries(),
+            vec![
+                json!({"subject_id": "u-ada", "kind": "user", "source": "typed", "ordinal": 0}),
+                json!({"subject_id": "svc-1", "kind": "agent", "source": "typed", "ordinal": 0,
+                       "wake_expectation": "refused", "refusal_code": "owner_only_thread"}),
+            ]
+        );
+        let plan = plan_mentions("@Helper", &agents(&["svc-1"], Source::Typed), &[], &helper, &invoker("owner"), ThreadOwner::Invoker).unwrap();
+        assert_eq!(plan.session_entries()[0]["wake_expectation"], "expected");
+        assert!(plan.session_entries()[0].get("refusal_code").is_none());
+        let plan = plan_people("hi", &people(&[("u-gone", "Gone")]), &[]);
+        assert_eq!(plan.rejected_json(), vec![json!({"subject_id": "u-gone", "code": "person_not_in_room"})]);
+    }
+
+    #[test]
+    fn mentions_input_parse_accepts_the_documented_shapes() {
+        let parsed = MentionsInput::parse(&json!({
+            "people": [{"subject_id": "u-1", "label": "  Ada  "}, {"subject_id": "u-2", "label": "Bob", "source": "locked"}],
+            "agents": [{"subject_id": "svc-1", "source": null}]
+        }))
+        .unwrap();
+        assert_eq!(parsed.people[0].label, "Ada", "labels are trimmed");
+        assert_eq!(parsed.people[0].source, Source::Typed, "source defaults to typed");
+        assert_eq!(parsed.people[1].source, Source::Locked);
+        assert_eq!(parsed.agents[0].source, Source::Typed);
+        assert!(!parsed.is_empty());
+        assert!(MentionsInput::parse(&json!({})).unwrap().is_empty());
+        assert!(MentionsInput::parse(&json!({"people": null, "agents": null})).unwrap().is_empty());
+        // a person without a label parses (a locked one needs none)
+        assert_eq!(MentionsInput::parse(&json!({"people": [{"subject_id": "u-1"}]})).unwrap().people[0].label, "");
+    }
+
+    #[test]
+    fn mentions_input_parse_refuses_wrong_shapes() {
+        let reason = |value: Value| MentionsInput::parse(&value).unwrap_err().reason();
+        assert_eq!(reason(json!("text")), "malformed");
+        assert_eq!(reason(json!([])), "malformed");
+        assert_eq!(reason(json!({"people": [], "extra": 1})), "malformed");
+        assert_eq!(reason(json!({"people": {}})), "malformed");
+        assert_eq!(reason(json!({"people": ["u-1"]})), "malformed");
+        assert_eq!(reason(json!({"people": [{"subject_id": "u-1", "email": "a@b.c"}]})), "malformed");
+        assert_eq!(reason(json!({"people": [{"subject_id": 7}]})), "malformed");
+        assert_eq!(reason(json!({"people": [{"subject_id": "u-1", "label": 7}]})), "malformed");
+        assert_eq!(reason(json!({"people": [{"subject_id": "u-1", "label": "x".repeat(121)}]})), "malformed");
+        assert_eq!(reason(json!({"agents": [{"subject_id": "s", "label": "Ada"}]})), "malformed");
+        assert_eq!(reason(json!({"agents": [{"subject_id": "s", "source": "other"}]})), "bad_source");
+        assert_eq!(reason(json!({"agents": [{"subject_id": "s", "source": 3}]})), "bad_source");
+        let many_people: Vec<Value> = (0..21).map(|i| json!({"subject_id": format!("u-{i}")})).collect();
+        assert_eq!(reason(json!({"people": many_people})), "too_many_people");
+        let many_agents: Vec<Value> = (0..4).map(|i| json!({"subject_id": format!("s-{i}")})).collect();
+        assert_eq!(reason(json!({"agents": many_agents})), "too_many_agents");
+        assert_eq!(InvalidMentions::Duplicate.reason(), "duplicate");
+        assert_eq!(InvalidMentions::BadSubjectId.reason(), "bad_subject_id");
+    }
+
+    #[test]
+    fn parse_wake_fields_accepts_exactly_message_id_and_client_wake_id() {
+        let wake_id = "wake_id_0123456789";
+        assert_eq!(
+            parse_wake_fields(&json!({"message_id": "msg-1", "client_wake_id": wake_id})),
+            Some(("msg-1".to_owned(), wake_id.to_owned()))
+        );
+        // an extra key is a forged field, not ignorable
+        assert_eq!(
+            parse_wake_fields(&json!({"message_id": "msg-1", "client_wake_id": wake_id, "agent": "x"})),
+            None
+        );
+        assert_eq!(parse_wake_fields(&json!({"message_id": "msg-1"})), None);
+        assert_eq!(parse_wake_fields(&json!("msg-1")), None);
+        assert_eq!(parse_wake_fields(&json!({"message_id": 1, "client_wake_id": wake_id})), None);
+        assert_eq!(parse_wake_fields(&json!({"message_id": "bad id", "client_wake_id": wake_id})), None);
+        assert_eq!(parse_wake_fields(&json!({"message_id": "msg-1", "client_wake_id": "short"})), None);
+        assert_eq!(
+            parse_wake_fields(&json!({"message_id": "msg-1", "client_wake_id": "has.dot_0123456789"})),
+            None
+        );
+        assert!(valid_client_wake_id(&"a".repeat(16)));
+        assert!(valid_client_wake_id(&"a".repeat(64)));
+        assert!(!valid_client_wake_id(&"a".repeat(65)));
+        assert!(!valid_client_wake_id(&"a".repeat(15)));
+    }
+
+    #[test]
+    fn recorded_from_receipt_reports_what_session_core_recorded() {
+        let receipt = json!({"thread_id": "t", "mentions": [
+            {"subject_id": "u-1", "kind": "user", "ordinal": 0},
+            {"subject_id": "svc-1", "kind": "agent", "wake_state": "refused", "reason": "respond_to_denied", "ordinal": 0},
+            {"subject_id": "svc-2", "kind": "agent", "wake_state": "pending", "reason": "", "ordinal": 1},
+            {"kind": "user"},
+            {"subject_id": "u-9"}
+        ]});
+        assert_eq!(
+            recorded_from_receipt(&receipt),
+            vec![
+                json!({"subject_id": "u-1", "kind": "user", "ordinal": 0}),
+                json!({"subject_id": "svc-1", "kind": "agent", "wake": "refused", "reason": "respond_to_denied", "ordinal": 0}),
+                json!({"subject_id": "svc-2", "kind": "agent", "wake": "expected", "ordinal": 1}),
+            ]
+        );
+        // with the kill switches off the receipt carries none: nothing is reported as recorded
+        assert!(recorded_from_receipt(&json!({"thread_id": "t"})).is_empty());
+        assert!(recorded_from_receipt(&json!({"mentions": "x"})).is_empty());
+    }
+}

@@ -429,6 +429,11 @@ impl ControlGateClient {
     /// The process-wide client. `None` when unconfigured (the gate then behaves as `off` for the
     /// Control inputs) or when the configuration is malformed (logged once, never panics).
     pub(crate) fn shared() -> Option<&'static Self> {
+        // Test-only: a test installs a client for its own thread (env mutation is forbidden).
+        #[cfg(test)]
+        if let Some(client) = tests_support::installed_client() {
+            return Some(client);
+        }
         static CLIENT: OnceLock<Option<ControlGateClient>> = OnceLock::new();
         CLIENT
             .get_or_init(|| match Self::from_env() {
@@ -796,6 +801,35 @@ pub(crate) async fn observe_shadow(call: &GateCall<'_>) {
     }
 }
 
+/// Test seam for [`ControlGateClient::shared`]: a per-thread client, so a test can point the gate
+/// at a mock Control without touching the process environment.
+#[cfg(test)]
+pub(crate) mod tests_support {
+    use super::ControlGateClient;
+    use std::cell::Cell;
+
+    thread_local! {
+        static CLIENT: Cell<Option<&'static ControlGateClient>> = const { Cell::new(None) };
+    }
+
+    pub(crate) fn installed_client() -> Option<&'static ControlGateClient> {
+        CLIENT.with(Cell::get)
+    }
+
+    pub(crate) fn install(client: ControlGateClient) {
+        CLIENT.with(|slot| slot.set(Some(Box::leak(Box::new(client)))));
+    }
+
+    pub(crate) fn uninstall() {
+        CLIENT.with(|slot| slot.set(None));
+    }
+
+    /// A client for a mock Control at `base_url` (loopback allowed, a throwaway token).
+    pub(crate) fn client_for(base_url: &str) -> ControlGateClient {
+        ControlGateClient::new(base_url, &"c".repeat(36), true).expect("loopback client")
+    }
+}
+
 #[cfg(test)]
 mod gate_tests {
     use super::*;
@@ -831,5 +865,462 @@ mod gate_tests {
             "execute_provider_action:mail.send"
         );
         assert_eq!(action_key("shell", "{}"), "shell");
+    }
+
+    // -- WS10-S3 postponed tests -------------------------------------------
+
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use tonic::codegen::{http, BoxFuture, Service};
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[test]
+    fn the_digest_matches_a_golden_vector() {
+        // sha256 of the canonical `{"input":{"command":"ls"},"tool":"shell"}`; Session Core
+        // and Control hold the same vector, so a change here is a contract change.
+        assert_eq!(
+            action_digest("shell", r#"{"command":"ls"}"#),
+            "8bd087dd9ade255c1c46c5bb3525ad0ebe9d36ea95db30c67c27d593925906b7"
+        );
+        // Input that is not JSON is digested as the string it is.
+        assert_eq!(
+            action_digest("shell", "not json"),
+            "167aee8ca898d6b2749bf5c0b778b80ab2abe767335b651939d365d3a80966ca"
+        );
+    }
+
+    #[test]
+    fn the_action_key_never_carries_arguments_and_rejects_unsafe_operations() {
+        // The key is the operation only, whatever else the input holds.
+        let key = action_key(
+            PROVIDER_ACTION_TOOL,
+            r#"{"operation":"mail.send","args":{"to":"a@example.com"}}"#,
+        );
+        assert_eq!(key, "execute_provider_action:mail.send");
+        assert!(!key.contains("example.com"));
+        // An operation that is not a safe identifier, or missing, degrades to the tool name.
+        for input in [
+            r#"{"operation":"mail send; drop"}"#,
+            r#"{"operation":""}"#,
+            r#"{"op":"mail.send"}"#,
+            "not json",
+        ] {
+            assert_eq!(action_key(PROVIDER_ACTION_TOOL, input), PROVIDER_ACTION_TOOL, "{input}");
+        }
+    }
+
+    #[test]
+    fn the_lattice_is_allow_below_ask_below_block() {
+        assert!(GateLevel::Allow < GateLevel::Ask && GateLevel::Ask < GateLevel::Block);
+        assert_eq!(fold(&[GateLevel::Block, GateLevel::Allow]), GateLevel::Block);
+        assert_eq!(fold(&[GateLevel::Allow, GateLevel::Allow]), GateLevel::Allow);
+        assert_eq!(GateLevel::from_wire("ask"), Some(GateLevel::Ask));
+        assert_eq!(GateLevel::from_wire("ALLOW"), None);
+        assert_eq!(GateLevel::from_wire(""), None);
+    }
+
+    #[test]
+    fn a_view_answers_specific_key_then_tool_then_star_and_defaults_to_allow() {
+        let view: GateView = serde_json::from_value(serde_json::json!({
+            "tools": {
+                "execute_provider_action:mail.send": {"level": "block", "source": "org_policy"},
+                "execute_provider_action": {"level": "ask", "source": "space_policy"},
+                "*": {"level": "ask", "source": "default"},
+                "bogus": {"level": "maybe", "source": "x"}
+            }
+        }))
+        .expect("view parses");
+        assert_eq!(
+            view.level_for("execute_provider_action:mail.send", "execute_provider_action"),
+            (GateLevel::Block, "org_policy".to_owned())
+        );
+        assert_eq!(
+            view.level_for("execute_provider_action:cal.read", "execute_provider_action"),
+            (GateLevel::Ask, "space_policy".to_owned())
+        );
+        assert_eq!(view.level_for("shell", "shell"), (GateLevel::Ask, "default".to_owned()));
+        // An unrecognised level is skipped, not read as allow-by-policy for that row only.
+        assert_eq!(view.level_for("bogus", "bogus").0, GateLevel::Ask);
+        let empty: GateView = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert_eq!(empty.level_for("shell", "shell"), (GateLevel::Allow, String::new()));
+        assert!(!empty.standing_rules_enabled);
+        assert!(empty.agent_subject_id.is_none() && empty.quarantine_mode.is_none());
+    }
+
+    #[test]
+    fn the_source_slug_shows_plain_slugs_only() {
+        assert_eq!(source_slug("org_policy"), "org_policy");
+        for hidden in ["", "Org Policy", "has-dash", &"a".repeat(65), "x\ny"] {
+            assert_eq!(source_slug(hidden), "policy", "{hidden:?}");
+        }
+    }
+
+    #[test]
+    fn a_schema_commitment_needs_a_full_lowercase_sha256() {
+        let hex = "a".repeat(64);
+        assert_eq!(schema_commitment(&hex), Some(format!("sha256:{hex}")));
+        assert_eq!(schema_commitment(&format!(" sha256:{hex} ")), Some(format!("sha256:{hex}")));
+        assert_eq!(schema_commitment(&"A".repeat(64)), None);
+        assert_eq!(schema_commitment(&"a".repeat(63)), None);
+        assert_eq!(schema_commitment(""), None);
+    }
+
+    // ---- A mock Control and a mock Session Core -------------------------------------------
+
+    const TEST_TOKEN: &str = "cccccccccccccccccccccccccccccccccccc";
+
+    fn control_for(server: &MockServer) -> ControlGateClient {
+        ControlGateClient::new(&server.uri(), TEST_TOKEN, true).expect("loopback client")
+    }
+
+    async fn serve_view(server: &MockServer, view: serde_json::Value) {
+        Mock::given(method("POST"))
+            .and(path(GATE_VIEW_PATH))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "data": view })))
+            .mount(server)
+            .await;
+    }
+
+    async fn requests_to(server: &MockServer, request_path: &str) -> usize {
+        server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .iter()
+            .filter(|request| request.url.path() == request_path)
+            .count()
+    }
+
+    /// Answers `ClaimOnceApproval` (counting calls) and refuses every other method.
+    #[derive(Clone)]
+    struct MockSessionCore {
+        claims: Arc<AtomicUsize>,
+        claimed: bool,
+    }
+
+    impl tonic::server::NamedService for MockSessionCore {
+        const NAME: &'static str = "model_plane.v1.OrchestrationCoreService";
+    }
+
+    impl Service<http::Request<tonic::body::BoxBody>> for MockSessionCore {
+        type Response = http::Response<tonic::body::BoxBody>;
+        type Error = std::convert::Infallible;
+        type Future = BoxFuture<Self::Response, Self::Error>;
+
+        fn poll_ready(
+            &mut self,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Result<(), Self::Error>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+
+        fn call(&mut self, request: http::Request<tonic::body::BoxBody>) -> Self::Future {
+            let this = self.clone();
+            if request.uri().path() != "/model_plane.v1.OrchestrationCoreService/ClaimOnceApproval" {
+                return Box::pin(async move {
+                    let mut response = http::Response::new(tonic::body::empty_body());
+                    let headers = response.headers_mut();
+                    headers.insert("grpc-status", (tonic::Code::Unimplemented as i32).to_string().parse().unwrap());
+                    headers.insert("content-type", "application/grpc".parse().unwrap());
+                    Ok(response)
+                });
+            }
+            struct ClaimSvc(MockSessionCore);
+            impl tonic::server::UnaryService<pb::ClaimOnceApprovalRequest> for ClaimSvc {
+                type Response = pb::ClaimOnceApprovalResponse;
+                type Future = BoxFuture<tonic::Response<Self::Response>, tonic::Status>;
+                fn call(
+                    &mut self,
+                    request: tonic::Request<pb::ClaimOnceApprovalRequest>,
+                ) -> Self::Future {
+                    let this = self.0.clone();
+                    Box::pin(async move {
+                        let body = request.into_inner();
+                        // The claim binds the run, the tool and the exact action digest.
+                        assert!(!body.run_id.is_empty() && !body.tool_key.is_empty());
+                        assert_eq!(body.action_digest.len(), 64);
+                        this.claims.fetch_add(1, Ordering::SeqCst);
+                        Ok(tonic::Response::new(pb::ClaimOnceApprovalResponse {
+                            claimed: this.claimed,
+                            ..Default::default()
+                        }))
+                    })
+                }
+            }
+            Box::pin(async move {
+                let mut grpc = tonic::server::Grpc::new(tonic::codec::ProstCodec::default());
+                Ok(grpc.unary(ClaimSvc(this), request).await)
+            })
+        }
+    }
+
+    async fn session_core(claimed: bool) -> (Channel, Arc<AtomicUsize>) {
+        let claims = Arc::new(AtomicUsize::new(0));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let service = MockSessionCore {
+            claims: Arc::clone(&claims),
+            claimed,
+        };
+        tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .add_service(service)
+                .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
+                .await
+                .ok();
+        });
+        let channel = tonic::transport::Endpoint::from_shared(format!("http://{addr}"))
+            .unwrap()
+            .connect()
+            .await
+            .expect("connect to the mock Session Core");
+        (channel, claims)
+    }
+
+    fn call<'a>(tool: &'a str, input: &'a str, channel: Option<&'a Channel>) -> GateCall<'a> {
+        GateCall {
+            tool_name: tool,
+            tool_input: input,
+            org_id: "org-1",
+            user_id: "user-1",
+            run_id: "run-1",
+            step_id: "step-1",
+            zdr: false,
+            waived: false,
+            session_channel: channel,
+            session_bearer: channel.map(|_| "bearer-bbbbbbbb"),
+            fallback_cause: CauseCode::RiskyEffectUnderAsk,
+        }
+    }
+
+    // ---- Control client over HTTP ----------------------------------------------------------
+
+    #[tokio::test]
+    async fn the_client_reads_a_view_once_and_serves_the_second_read_from_cache() {
+        let server = MockServer::start().await;
+        serve_view(&server, serde_json::json!({"tools": {"shell": {"level": "ask", "source": "org_policy"}}})).await;
+        let client = control_for(&server);
+        let first = client.gate_view("org-1", "run-1").await.expect("view");
+        assert_eq!(first.level_for("shell", "shell").0, GateLevel::Ask);
+        client.gate_view("org-1", "run-1").await.expect("cached view");
+        assert_eq!(requests_to(&server, GATE_VIEW_PATH).await, 1, "second read must hit the cache");
+        client.gate_view("org-1", "run-2").await.expect("another run");
+        assert_eq!(requests_to(&server, GATE_VIEW_PATH).await, 2);
+    }
+
+    #[tokio::test]
+    async fn the_client_sends_the_service_headers_and_no_arguments() {
+        let server = MockServer::start().await;
+        serve_view(&server, serde_json::json!({})).await;
+        control_for(&server).gate_view("org-1", "run-1").await.expect("view");
+        let requests = server.received_requests().await.unwrap();
+        let request = &requests[0];
+        assert_eq!(request.headers.get("x-service-id").unwrap(), "execution-core");
+        assert_eq!(request.headers.get("x-service-token").unwrap(), TEST_TOKEN);
+        let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+        assert_eq!(body["run_id"], "run-1");
+        assert_eq!(body["org_id"], "org-1");
+    }
+
+    #[tokio::test]
+    async fn a_5xx_or_malformed_view_is_unavailable_and_a_4xx_is_a_typed_refusal() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST")).and(path(GATE_VIEW_PATH))
+            .respond_with(ResponseTemplate::new(503)).mount(&server).await;
+        assert!(matches!(
+            control_for(&server).gate_view("o", "r").await,
+            Err(ControlGateError::Unavailable(_))
+        ));
+
+        let refused = MockServer::start().await;
+        Mock::given(method("POST")).and(path(GATE_VIEW_PATH))
+            .respond_with(ResponseTemplate::new(403).set_body_json(serde_json::json!({"error": {"code": "forbidden", "message": "x"}})))
+            .mount(&refused).await;
+        assert!(matches!(
+            control_for(&refused).gate_view("o", "r").await,
+            Err(ControlGateError::Refused { status: 403, code: Some(ref code) }) if code == "forbidden"
+        ));
+
+        let malformed = MockServer::start().await;
+        Mock::given(method("POST")).and(path(GATE_VIEW_PATH))
+            .respond_with(ResponseTemplate::new(200).set_body_string("not json")).mount(&malformed).await;
+        assert!(matches!(
+            control_for(&malformed).gate_view("o", "r").await,
+            Err(ControlGateError::Unavailable(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_grant_use_is_none_on_404_and_the_token_on_200() {
+        let none = MockServer::start().await;
+        Mock::given(method("POST")).and(path(GRANT_USE_PATH))
+            .respond_with(ResponseTemplate::new(404)).mount(&none).await;
+        assert!(matches!(
+            control_for(&none).use_grant("o", "r", "agent-1", "mcp__s__t", "mcp__s__t", "sha256:x").await,
+            Ok(None)
+        ));
+        let some = MockServer::start().await;
+        Mock::given(method("POST")).and(path(GRANT_USE_PATH))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"data": {"token": "proof-token"}})))
+            .mount(&some).await;
+        assert!(matches!(
+            control_for(&some).use_grant("o", "r", "agent-1", "mcp__s__t", "mcp__s__t", "sha256:x").await,
+            Ok(Some(ref token)) if token == "proof-token"
+        ));
+    }
+
+    #[tokio::test]
+    async fn the_continuation_check_reads_authority_changed_as_false() {
+        let changed = MockServer::start().await;
+        Mock::given(method("POST")).and(path(CONTINUATION_CHECK_PATH))
+            .respond_with(ResponseTemplate::new(403).set_body_json(serde_json::json!({"error": {"code": "authority_changed"}})))
+            .mount(&changed).await;
+        assert!(matches!(control_for(&changed).continuation_authorized("o", "r", "a").await, Ok(false)));
+
+        let other = MockServer::start().await;
+        Mock::given(method("POST")).and(path(CONTINUATION_CHECK_PATH))
+            .respond_with(ResponseTemplate::new(403).set_body_json(serde_json::json!({"error": {"code": "forbidden"}})))
+            .mount(&other).await;
+        assert!(matches!(
+            control_for(&other).continuation_authorized("o", "r", "a").await,
+            Err(ControlGateError::Refused { status: 403, .. })
+        ));
+
+        let ok = MockServer::start().await;
+        Mock::given(method("POST")).and(path(CONTINUATION_CHECK_PATH))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"data": {"authorized": true}})))
+            .mount(&ok).await;
+        assert!(matches!(control_for(&ok).continuation_authorized("o", "r", "a").await, Ok(true)));
+    }
+
+    // ---- resolve ---------------------------------------------------------------------------
+
+    const MCP_TOOL: &str = "mcp__srv__do_thing";
+
+    #[tokio::test]
+    async fn a_never_auto_tool_pauses_even_with_a_once_approval_and_a_rule_present() {
+        let server = MockServer::start().await;
+        serve_view(&server, serde_json::json!({
+            "tools": {}, "standing_rules_enabled": true, "agent_subject_id": "agent-1"
+        })).await;
+        let (channel, claims) = session_core(true).await;
+        tests_support::install(control_for(&server));
+        let disclose = crate::runtime_loop::subagent_results::READ_TOOL;
+        assert!(is_never_auto(disclose));
+        let outcome = resolve(&call(disclose, "{}", Some(&channel)), Some(CauseCode::ConsentToDisclose)).await;
+        tests_support::uninstall();
+        assert_eq!(outcome, GateOutcome::Pause(CauseCode::ConsentToDisclose));
+        assert_eq!(claims.load(Ordering::SeqCst), 0, "a never-auto call must not claim the once-token");
+        assert_eq!(requests_to(&server, GRANT_USE_PATH).await, 0, "nor ask for a rule");
+    }
+
+    #[tokio::test]
+    async fn block_beats_a_once_token_and_a_rule() {
+        let server = MockServer::start().await;
+        serve_view(&server, serde_json::json!({
+            "tools": {MCP_TOOL: {"level": "block", "source": "org_policy"}},
+            "standing_rules_enabled": true, "agent_subject_id": "agent-1"
+        })).await;
+        let (channel, claims) = session_core(true).await;
+        tests_support::install(control_for(&server));
+        let outcome = resolve(&call(MCP_TOOL, "{}", Some(&channel)), Some(CauseCode::RiskyEffectUnderAsk)).await;
+        tests_support::uninstall();
+        assert_eq!(outcome, GateOutcome::Block("org_policy".to_owned()));
+        assert_eq!(claims.load(Ordering::SeqCst), 0);
+        assert_eq!(requests_to(&server, GRANT_USE_PATH).await, 0);
+    }
+
+    #[tokio::test]
+    async fn an_unavailable_view_makes_a_risky_call_ask_with_grants_disabled() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST")).and(path(GATE_VIEW_PATH))
+            .respond_with(ResponseTemplate::new(500)).mount(&server).await;
+        tests_support::install(control_for(&server));
+        // `mcp__` tools are risky by name; no prior ask from the existing gates.
+        assert!(crate::permission::is_risky_call(MCP_TOOL, "{}"));
+        // Never-auto forced off for the grant half: no channel either, so only the pause is left.
+        let outcome = resolve(&call(MCP_TOOL, "{}", None), None).await;
+        tests_support::uninstall();
+        assert_eq!(outcome, GateOutcome::Pause(CauseCode::RiskyEffectUnderAsk));
+        assert_eq!(requests_to(&server, GRANT_USE_PATH).await, 0, "grants are disabled while the view is down");
+    }
+
+    #[tokio::test]
+    async fn an_unavailable_view_leaves_a_non_risky_call_as_the_existing_gates_decided() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST")).and(path(GATE_VIEW_PATH))
+            .respond_with(ResponseTemplate::new(500)).mount(&server).await;
+        tests_support::install(control_for(&server));
+        assert!(!crate::permission::is_risky_call("web_search", "{}"));
+        let outcome = resolve(&call("web_search", "{}", None), None).await;
+        tests_support::uninstall();
+        assert_eq!(outcome, GateOutcome::Pass);
+    }
+
+    #[tokio::test]
+    async fn zdr_and_waived_calls_never_claim_or_use_a_grant() {
+        for (zdr, waived) in [(true, false), (false, true), (true, true)] {
+            let server = MockServer::start().await;
+            serve_view(&server, serde_json::json!({
+                "tools": {MCP_TOOL: {"level": "ask", "source": "space_policy"}},
+                "standing_rules_enabled": true, "agent_subject_id": "agent-1"
+            })).await;
+            let (channel, claims) = session_core(true).await;
+            tests_support::install(control_for(&server));
+            let mut gated = call(MCP_TOOL, "{}", Some(&channel));
+            gated.zdr = zdr;
+            gated.waived = waived;
+            let outcome = resolve(&gated, None).await;
+            tests_support::uninstall();
+            assert_eq!(outcome, GateOutcome::Pause(CauseCode::CapabilityPolicyAsk), "zdr={zdr} waived={waived}");
+            assert_eq!(claims.load(Ordering::SeqCst), 0, "zdr={zdr} waived={waived}");
+            assert_eq!(requests_to(&server, GRANT_USE_PATH).await, 0, "zdr={zdr} waived={waived}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_non_mcp_tool_never_reaches_the_standing_rule_use() {
+        let server = MockServer::start().await;
+        serve_view(&server, serde_json::json!({
+            "tools": {"shell": {"level": "ask", "source": "space_policy"}},
+            "standing_rules_enabled": true, "agent_subject_id": "agent-1"
+        })).await;
+        // The once-approval is not there to claim, so the call falls through to the rule step.
+        let (channel, claims) = session_core(false).await;
+        tests_support::install(control_for(&server));
+        let outcome = resolve(&call("shell", "{}", Some(&channel)), None).await;
+        tests_support::uninstall();
+        assert_eq!(outcome, GateOutcome::Pause(CauseCode::CapabilityPolicyAsk));
+        assert_eq!(claims.load(Ordering::SeqCst), 1, "the once-token is tried");
+        assert_eq!(requests_to(&server, GRANT_USE_PATH).await, 0, "a non-mcp tool never asks Control for a rule");
+    }
+
+    #[tokio::test]
+    async fn a_claimed_once_approval_passes_a_non_resumable_ask() {
+        let server = MockServer::start().await;
+        serve_view(&server, serde_json::json!({
+            "tools": {"shell": {"level": "ask", "source": "space_policy"}}
+        })).await;
+        let (channel, claims) = session_core(true).await;
+        tests_support::install(control_for(&server));
+        let outcome = resolve(&call("shell", r#"{"program":"ls"}"#, Some(&channel)), None).await;
+        tests_support::uninstall();
+        assert_eq!(outcome, GateOutcome::Pass);
+        assert_eq!(claims.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn without_a_control_client_only_the_existing_gates_ask() {
+        // No client installed and no environment: the gate behaves as the existing gates decided.
+        assert!(tests_support::installed_client().is_none());
+        if ControlGateClient::shared().is_some() {
+            return;
+        }
+        assert_eq!(resolve(&call("shell", "{}", None), None).await, GateOutcome::Pass);
+        assert_eq!(
+            resolve(&call("shell", "{}", None), Some(CauseCode::ProviderWrite)).await,
+            GateOutcome::Pause(CauseCode::ProviderWrite)
+        );
     }
 }

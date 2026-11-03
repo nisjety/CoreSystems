@@ -1537,6 +1537,33 @@ mod tests {
             assert!(!flags.room_archive_api);
         });
     }
+
+    /// WS04-S8.gw / WS08-S4: the room-directory, mention-record and addressed-wake flags default
+    /// OFF, are OFF under `APP_ENV=production` when unset, ON in dev, and an explicit value wins.
+    #[test]
+    fn ws04_ws08_room_directory_and_mention_flags_default_off_in_production_and_on_in_dev() {
+        let default = super::SpaceFeatureFlags::default();
+        assert!(!default.room_directory_api);
+        assert!(!default.mention_records_api);
+        assert!(!default.addressed_wake_api);
+        let cases: [(&str, fn(&super::SpaceFeatureFlags) -> bool); 3] = [
+            ("SPACE_ROOM_DIRECTORY_API", |flags| flags.room_directory_api),
+            ("SPACE_MENTION_RECORDS_API", |flags| flags.mention_records_api),
+            ("SPACE_ADDRESSED_WAKE_API", |flags| flags.addressed_wake_api),
+        ];
+        for (key, read) in cases {
+            let vars = |env: &'static str, value: Option<&'static str>| {
+                vec![("APP_ENV", Some(env)), (key, value)]
+            };
+            let flag = || read(&super::SpaceFeatureFlags::from_env());
+            with_env(&vars("production", None), || assert!(!flag(), "{key} production default"));
+            with_env(&vars("prod", None), || assert!(!flag(), "{key} prod default"));
+            with_env(&vars("development", None), || assert!(flag(), "{key} dev default"));
+            with_env(&vars("production", Some("true")), || assert!(flag(), "{key} explicit on"));
+            with_env(&vars("development", Some("false")), || assert!(!flag(), "{key} explicit off wins in dev"));
+            with_env(&vars("development", Some("0")), || assert!(!flag(), "{key} 0 is off"));
+        }
+    }
 }
 
 #[cfg(test)]

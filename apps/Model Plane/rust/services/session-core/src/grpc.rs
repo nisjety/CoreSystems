@@ -14529,6 +14529,42 @@ mod tests {
         (request, key_id)
     }
 
+    // WS12-S5: the `model.thread.revise` payload digest. The same hex is asserted by Control's
+    // `TestThreadReviseDigestGolden` for the same inputs (produced by an independent
+    // implementation of the byte layout in `mp_contracts::message_revision`).
+    #[test]
+    fn thread_revise_digest_matches_control_golden() {
+        let req = pb::ReviseMessageRequest {
+            thread_id: "thread-1".to_owned(),
+            message_id: "msg-1".to_owned(),
+            action: "edit".to_owned(),
+            content: "edited text".to_owned(),
+            space_id: "space-personal".to_owned(),
+            space_decision_ref: "decision-1".to_owned(),
+            recipient_audience_ref: "space:room-1:recipient-audience:4".to_owned(),
+            recipient_audience_hash: "sha256:shared-audience".to_owned(),
+            privacy_policy_ref: "privacy:org-1:5".to_owned(),
+            resource_authorization_ref: "control:room-1:thread-revise:7".to_owned(),
+            action_schema_hash: "sha256:thread-revise-v1".to_owned(),
+            idempotency_key: "revise-1".to_owned(),
+            authority_revision: 7,
+            recipient_audience_revision: 4,
+            ..Default::default()
+        };
+        assert_eq!(
+            thread_revise_payload_digest(&req, "org-1", "user-1"),
+            "sha256:450775ecf96b23929bd99d5cbaa3ef4c7047b247d6c3351c1d69ed5cfab3ccee"
+        );
+        // A delete commits to the empty string whatever content rides along.
+        let mut delete = req.clone();
+        delete.action = "delete".to_owned();
+        delete.content = String::new();
+        assert_ne!(
+            thread_revise_payload_digest(&delete, "org-1", "user-1"),
+            thread_revise_payload_digest(&req, "org-1", "user-1")
+        );
+    }
+
     // WS01-S2: thread-append schema v2 binds `post_kind`. The golden is shared with
     // Control (`thread-append-v2.golden.json`, same bytes on both sides).
     const THREAD_APPEND_V2_GOLDEN: &str =

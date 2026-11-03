@@ -1915,4 +1915,132 @@ mod tests {
             .count();
         assert_eq!(notice_calls, 0);
     }
+
+    // ----- WS15-S11: the system rows are cut to the page interval ------------------------------
+
+    fn window(before: (u64, Option<i64>), after: (u64, Option<i64>)) -> super::TimelineWindow {
+        super::TimelineWindow {
+            limit: 20,
+            before_seq: before.0,
+            after_seq: after.0,
+            before_ms: before.1,
+            after_ms: after.1,
+            refresh: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn system_entries_are_cut_to_the_page_interval() {
+        // first page: open at the top, rows newer than the newest post still show
+        let first = window((0, None), (0, None));
+        assert_eq!(super::system_interval(&first, true, Some(100), Some(900)), (Some(100), None));
+        assert_eq!(super::system_interval(&first, false, Some(100), Some(900)), (None, None), "reached the start of the room");
+        // older page: from its own oldest post up to the time the before-cursor carries
+        let older = window((5, Some(500)), (0, None));
+        assert_eq!(super::system_interval(&older, true, Some(300), Some(480)), (Some(300), Some(500)));
+        assert_eq!(super::system_interval(&older, false, Some(300), Some(480)), (None, Some(500)), "has_more=false leaves lo open");
+        // an old cursor without a time leaves the upper bound open
+        let legacy = window((5, None), (0, None));
+        assert_eq!(super::system_interval(&legacy, true, Some(300), None), (Some(300), None));
+        // refresh page: from the cursor's time upward; a cut window stops at its newest post
+        let after = window((0, None), (9, Some(900)));
+        assert_eq!(super::system_interval(&after, false, Some(910), Some(990)), (Some(900), None));
+        assert_eq!(super::system_interval(&after, true, Some(910), Some(990)), (Some(900), Some(991)));
+    }
+
+    #[test]
+    fn a_legacy_cursor_without_a_time_still_decodes_and_a_bad_time_does_not() {
+        assert_eq!(decode_cursor(&cursor("v1|7")), Some((7, None)));
+        assert_eq!(decode_cursor(&cursor("v1|7|1793527200000")), Some((7, Some(1_793_527_200_000))));
+        assert_eq!(decode_cursor(&cursor("v1|7|soon")), None);
+        assert_eq!(decode_cursor(&cursor("v1|0|5")), None);
+    }
+
+    async fn membership_event_queries(fx: &Fx) -> Vec<Vec<(String, String)>> {
+        fx.server
+            .received_requests()
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|request| request.url.path().ends_with("/membership-events"))
+            .map(|request| {
+                request
+                    .url
+                    .query_pairs()
+                    .map(|(key, value)| (key.into_owned(), value.into_owned()))
+                    .collect()
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn the_control_read_carries_the_interval_of_an_older_page() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let mut fx = notices_fixture(ResponseTemplate::new(503)).await;
+        fx.state.space_features.system_entries_api = true;
+        mount_control_events(&fx, ResponseTemplate::new(200).set_body_json(control_events())).await;
+        let before_ms = 1_793_530_800_000_i64; // 2026-11-01T11:00:00Z, after both posts
+        let query = TimelineQuery {
+            before: Some(super::encode_cursor(5, Some(before_ms)).as_str().unwrap().to_owned()),
+            ..TimelineQuery::default()
+        };
+        let (status, _) = timeline(&fx, query).await;
+        assert_eq!(status, 200);
+        let queries = membership_event_queries(&fx).await;
+        assert_eq!(queries.len(), 1);
+        let get = |name: &str| queries[0].iter().find(|(key, _)| key == name).map(|(_, value)| value.clone());
+        assert_eq!(get("limit").as_deref(), Some("100"));
+        // hi is the time the before-cursor carries; lo is this page's own oldest post (has_more)
+        assert_eq!(get("before"), super::rfc3339_from_ms(before_ms));
+        assert_eq!(get("after").as_deref(), Some("2026-11-01T10:00:00.000Z"));
+    }
+
+    #[tokio::test]
+    async fn the_first_page_is_open_at_the_top_and_a_refresh_starts_at_the_cursor_time() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let mut fx = notices_fixture(ResponseTemplate::new(503)).await;
+        fx.state.space_features.system_entries_api = true;
+        mount_control_events(&fx, ResponseTemplate::new(200).set_body_json(control_events())).await;
+        let (status, _) = timeline(&fx, TimelineQuery::default()).await;
+        assert_eq!(status, 200);
+        let first = membership_event_queries(&fx).await;
+        assert!(first[0].iter().all(|(key, _)| key != "before"), "no upper bound on the first page: {first:?}");
+        assert!(first[0].iter().any(|(key, _)| key == "after"), "has_more=true bounds it by the page's oldest post");
+
+        let after_ms = 1_793_527_800_000_i64;
+        let query = TimelineQuery {
+            after: Some(super::encode_cursor(9, Some(after_ms)).as_str().unwrap().to_owned()),
+            ..TimelineQuery::default()
+        };
+        let (status, _) = timeline(&fx, query).await;
+        assert_eq!(status, 200);
+        let all = membership_event_queries(&fx).await;
+        let refresh = all.last().unwrap();
+        let after = refresh.iter().find(|(key, _)| key == "after").map(|(_, value)| value.clone());
+        assert_eq!(after, super::rfc3339_from_ms(after_ms), "a refresh covers from the cursor's post time upward");
+    }
+
+    #[tokio::test]
+    async fn an_unknown_action_and_a_row_without_an_event_id_are_dropped() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let mut fx = notices_fixture(ResponseTemplate::new(503)).await;
+        fx.state.space_features.system_entries_api = true;
+        mount_control_events(
+            &fx,
+            ResponseTemplate::new(200).set_body_json(json!({ "data": { "events": [
+                { "event_id": "ev-1", "action": "member_added", "space_seq": 1, "created_at": "2026-11-01T10:01:00.000Z" },
+                { "event_id": "ev-2", "action": "ownership_transferred", "created_at": "2026-11-01T10:02:00.000Z" },
+                { "event_id": "", "action": "member_added", "created_at": "2026-11-01T10:03:00.000Z" },
+                { "action": "member_removed", "created_at": "2026-11-01T10:04:00.000Z" },
+                { "event_id": "ev-5", "action": "settings_changed", "created_at": "2026-11-01T10:05:00.000Z" }
+            ], "truncated": true }})),
+        )
+        .await;
+        let (status, body) = timeline(&fx, TimelineQuery::default()).await;
+        assert_eq!(status, 200);
+        let rows = body["data"]["system_entries"].as_array().unwrap();
+        assert_eq!(ids(rows), ["ev-5", "ev-1"], "newest first, only the closed action set");
+        assert_eq!(body["data"]["system_truncated"], true, "Control's cut is relayed");
+        assert_eq!(rows[1]["kind"], "membership");
+    }
 }

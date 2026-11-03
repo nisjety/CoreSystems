@@ -11557,6 +11557,414 @@ mod tests {
         let parsed: UpdateSpaceInstructionsRequest = serde_json::from_value(json!({})).unwrap();
         assert!(parsed.instructions.is_none());
     }
+
+    // ---- WS08-S4: the addressed wake in the injector chain -------------------------------------
+
+    fn wake_user() -> AuthenticatedUser {
+        let mut user = authenticated_user();
+        user.authorized_membership = Some(crate::middleware::AuthorizedMembership {
+            organization_id: "org-1".to_owned(),
+            role: "member".to_owned(),
+        });
+        user
+    }
+
+    fn wake_intent() -> super::mentions::WakeIntent {
+        super::mentions::WakeIntent {
+            trigger_message_id: "msg-1".to_owned(),
+            client_wake_id: "wake_id_0123456789".to_owned(),
+            agent_subject_id: "svc-support".to_owned(),
+        }
+    }
+
+    fn wake_decision_ok() -> ResponseTemplate {
+        ResponseTemplate::new(200).set_body_json(json!({"data": {
+            "token": "wake-signed-token",
+            "decision": {
+                "space_ref": "room-1", "decision_ref": "decision-wake-1",
+                "recipient_audience_ref": "audience-1", "privacy_policy_ref": "privacy-1",
+                "recipient_audience_revision": 3, "recipient_audience_hash": "sha256:audience-1",
+                "authority_revision": 7, "resource_authorization_ref": "resource-1",
+                "action_schema_hash": "sha256:schema-wake", "payload_digest": "sha256:payload",
+                "idempotency_key": "space-wake-wake_id_0123456789"
+            }
+        }}))
+    }
+
+    async fn org_core_posture(zdr: bool) -> MockServer {
+        let org = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/organizations/org-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                json!({"data": {"metadata": {"interactiveRetention": {"zdr": zdr}}}}),
+            ))
+            .mount(&org)
+            .await;
+        org
+    }
+
+    async fn control_paths(server: &MockServer) -> Vec<String> {
+        server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .iter()
+            .map(|request| request.url.path().to_owned())
+            .collect()
+    }
+
+    fn forged_chat_body() -> Value {
+        json!({
+            "content": "hello agent",
+            "space_ref": "room-1",
+            "thread_id": "thread-1",
+            "wake": {"message_id": "forged"},
+            "wake_context": {"space_decision_token": "forged"},
+            "turn_origin": "forged",
+            "participants": ["intruder"],
+            "space_append_context": {"space_decision_token": "forged"},
+        })
+    }
+
+    #[tokio::test]
+    async fn a_wake_mints_the_run_wake_decision_and_sets_wake_context_and_space_append_context() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let user_core = MockServer::start().await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/v1/internal/spaces/run-wake-decision"))
+            .respond_with(wake_decision_ok())
+            .mount(&user_core)
+            .await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/v1/internal/spaces/retrieval-decision"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": {"token": "retrieval-token"}})))
+            .mount(&user_core)
+            .await;
+        let mut state = crate::tests::test_state(false);
+        state.user_core_url = user_core.uri();
+        let mut body = forged_chat_body();
+
+        super::inject_personal_thread_context_for_wake(&state, &authenticated_user(), "org-1", &mut body, Some(&wake_intent()))
+            .await
+            .expect("the wake decision is injected");
+
+        let paths = control_paths(&user_core).await;
+        assert!(paths.contains(&"/api/v1/internal/spaces/run-wake-decision".to_owned()), "{paths:?}");
+        assert!(!paths.iter().any(|path| path.ends_with("thread-append-decision")), "a wake asks for no append decision: {paths:?}");
+        let sent = user_core
+            .received_requests()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|request| request.url.path().ends_with("run-wake-decision"))
+            .unwrap();
+        let sent_body: Value = serde_json::from_slice(&sent.body).unwrap();
+        let digest = format!("sha256:{}", hex::encode(<sha2::Sha256 as sha2::Digest>::digest(b"hello agent")));
+        assert_eq!(sent_body["space_ref"], "room-1");
+        assert_eq!(sent_body["thread_id"], "thread-1");
+        assert_eq!(sent_body["trigger_message_id"], "msg-1");
+        assert_eq!(sent_body["content_digest"], digest);
+        assert_eq!(sent_body["agent_subject_id"], "svc-support");
+        assert_eq!(sent_body["turn_origin"], "direct");
+        assert_eq!(sent_body["idempotency_key"], "space-wake-wake_id_0123456789");
+        assert!(sent.headers.get("x-delegation-signature").is_some());
+
+        let wake_context = &body["wake_context"];
+        assert_eq!(wake_context["space_decision_token"], "wake-signed-token");
+        assert_eq!(wake_context["trigger_message_id"], "msg-1");
+        assert_eq!(wake_context["trigger_content_digest"], digest);
+        assert_eq!(wake_context["agent_subject_id"], "svc-support");
+        assert_eq!(wake_context["turn_origin"], "direct");
+        assert_eq!(wake_context["client_wake_id"], "wake_id_0123456789");
+        assert_eq!(body["space_append_context"]["space_decision_token"], "wake-signed-token");
+        assert_eq!(body["space_append_context"]["space_decision_ref"], "decision-wake-1");
+        // the forged fields are gone: only the signed values travel
+        assert!(body.get("wake").is_none());
+        assert!(body.get("turn_origin").is_none());
+        assert!(body.get("participants").is_none());
+        assert!(body.get("space_ref").is_none());
+    }
+
+    #[tokio::test]
+    async fn forged_wake_fields_are_stripped_and_no_wake_context_exists_without_a_wake() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let user_core = MockServer::start().await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/v1/internal/spaces/thread-append-decision"))
+            .respond_with(wake_decision_ok())
+            .mount(&user_core)
+            .await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/v1/internal/spaces/retrieval-decision"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": {"token": "retrieval-token"}})))
+            .mount(&user_core)
+            .await;
+        let mut state = crate::tests::test_state(false);
+        state.user_core_url = user_core.uri();
+        let mut body = forged_chat_body();
+        inject_personal_thread_context(&state, &authenticated_user(), "org-1", &mut body)
+            .await
+            .expect("an ordinary follow-up");
+        for field in ["wake", "wake_context", "turn_origin", "participants"] {
+            assert!(body.get(field).is_none(), "{field} survived");
+        }
+        assert_eq!(body["space_append_context"]["space_decision_token"], "wake-signed-token");
+        let paths = control_paths(&user_core).await;
+        assert!(paths.iter().any(|path| path.ends_with("thread-append-decision")));
+        assert!(!paths.iter().any(|path| path.ends_with("run-wake-decision")), "{paths:?}");
+
+        // with no Space at all the fields are still stripped and Control is not asked
+        let quiet = MockServer::start().await;
+        state.user_core_url = quiet.uri();
+        let mut plain = json!({"content": "hi", "wake": {"message_id": "x"}, "wake_context": {}, "turn_origin": "x", "participants": []});
+        inject_personal_thread_context(&state, &authenticated_user(), "org-1", &mut plain).await.unwrap();
+        assert_eq!(plain, json!({"content": "hi"}));
+        assert!(quiet.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn wake_denial_is_typed_at_the_bff() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let control_string = "Space run wake is not authorized";
+        for (control_status, control_body, want_status, want_code) in [
+            (403u16, json!({"error": control_string}), 403u16, "wake_not_authorized"),
+            (400, json!({"error": "bad"}), 400, "invalid_wake"),
+            (500, json!({"error": "boom"}), 503, "space_decision_unavailable"),
+            (409, json!({"error": "conflict"}), 503, "space_decision_unavailable"),
+        ] {
+            let user_core = MockServer::start().await;
+            Mock::given(wm_method("POST"))
+                .and(wm_path("/api/v1/internal/spaces/run-wake-decision"))
+                .respond_with(ResponseTemplate::new(control_status).set_body_json(control_body))
+                .mount(&user_core)
+                .await;
+            let mut state = crate::tests::test_state(false);
+            state.user_core_url = user_core.uri();
+            let mut body = forged_chat_body();
+            let (status, axum::Json(reply)) =
+                super::inject_personal_thread_context_for_wake(&state, &authenticated_user(), "org-1", &mut body, Some(&wake_intent()))
+                    .await
+                    .expect_err("the wake is refused");
+            assert_eq!(status.as_u16(), want_status, "control {control_status}");
+            assert_eq!(reply["error"]["code"], want_code);
+            assert!(!reply.to_string().contains(control_string), "Control's internal string never reaches the browser");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_wake_without_content_or_thread_context_fails_before_control() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let user_core = MockServer::start().await;
+        let mut state = crate::tests::test_state(false);
+        state.user_core_url = user_core.uri();
+        let mut body = json!({"space_ref": "room-1", "thread_id": "thread-1"});
+        let (status, axum::Json(reply)) =
+            super::inject_personal_thread_context_for_wake(&state, &authenticated_user(), "org-1", &mut body, Some(&wake_intent()))
+                .await
+                .expect_err("a wake answers a post, so it carries content");
+        assert_eq!(status.as_u16(), 400);
+        assert_eq!(reply["error"]["code"], "scoped_append_content_required");
+        assert!(user_core.received_requests().await.unwrap().is_empty());
+    }
+
+    /// State for `inject_mentioned_space_agent`: wake flag on, org-core answering `zdr`.
+    async fn wake_injector_state(zdr: bool, bindings: Value) -> (AppState, Vec<MockServer>) {
+        let (mut state, application, user_core) =
+            mention_test_state(json!([mention_service_member("svc-support")]), bindings).await;
+        let org = org_core_posture(zdr).await;
+        state.org_core_url = org.uri();
+        state.space_features.addressed_wake_api = true;
+        (state, vec![application, user_core, org])
+    }
+
+    fn active_binding() -> Value {
+        json!([{
+            "bindingRef": "sab_1", "agentRef": "agent-1", "subjectId": "svc-support",
+            "name": "Kundest\u{f8}tte", "status": "active", "deliveryTargets": []
+        }])
+    }
+
+    fn wake_chat_body() -> Value {
+        json!({
+            "content": "hello",
+            "space_ref": "space-1",
+            "thread_id": "thread-1",
+            "mentioned_agent_ref": "svc-support",
+            "wake": {"message_id": "msg-1", "client_wake_id": "wake_id_0123456789"},
+        })
+    }
+
+    #[tokio::test]
+    async fn the_injector_returns_the_wake_intent_from_the_verified_mention_not_from_wake() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (state, _servers) = wake_injector_state(false, active_binding()).await;
+        let mut body = wake_chat_body();
+        let intent = super::inject_mentioned_space_agent(&state, &wake_user(), "org-1", &mut body)
+            .await
+            .expect("a bound agent may be woken")
+            .expect("a wake intent");
+        assert_eq!(intent.agent_subject_id, "svc-support");
+        assert_eq!(intent.trigger_message_id, "msg-1");
+        assert_eq!(intent.client_wake_id, "wake_id_0123456789");
+        assert!(body.get("wake").is_none(), "the browser's wake is consumed");
+        assert!(body.get("mentioned_agent_ref").is_none());
+        // a mention without `wake` is the legacy turn: no intent
+        let mut legacy = wake_chat_body();
+        legacy.as_object_mut().unwrap().remove("wake");
+        let intent = super::inject_mentioned_space_agent(&state, &wake_user(), "org-1", &mut legacy).await.unwrap();
+        assert!(intent.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_wake_without_a_single_agent_or_a_thread_gets_its_own_400_code() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (state, _servers) = wake_injector_state(false, active_binding()).await;
+        let cases = [
+            ("no agent", json!({"content": "x", "space_ref": "space-1", "thread_id": "t", "wake": {"message_id": "msg-1", "client_wake_id": "wake_id_0123456789"}}), "wake_requires_single_agent"),
+            ("two different spellings", {
+                let mut body = wake_chat_body();
+                body["mentionedAgentRef"] = json!("svc-other");
+                body
+            }, "wake_requires_single_agent"),
+            ("no thread", {
+                let mut body = wake_chat_body();
+                body.as_object_mut().unwrap().remove("thread_id");
+                body
+            }, "wake_requires_thread"),
+            ("blank thread", {
+                let mut body = wake_chat_body();
+                body["thread_id"] = json!("  ");
+                body
+            }, "wake_requires_thread"),
+            ("extra wake key", {
+                let mut body = wake_chat_body();
+                body["wake"]["agent"] = json!("svc-other");
+                body
+            }, "invalid_wake"),
+            ("short wake id", {
+                let mut body = wake_chat_body();
+                body["wake"]["client_wake_id"] = json!("short");
+                body
+            }, "invalid_wake"),
+        ];
+        for (name, mut body, code) in cases {
+            let (status, axum::Json(reply)) = super::inject_mentioned_space_agent(&state, &wake_user(), "org-1", &mut body)
+                .await
+                .expect_err(name);
+            assert_eq!(status.as_u16(), 400, "{name}");
+            assert_eq!(reply["error"]["code"], code, "{name}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_wake_with_the_flag_off_is_404_and_a_zdr_wake_is_412_before_any_upstream_call() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        // flag off
+        let (mut state, servers) = wake_injector_state(false, active_binding()).await;
+        state.space_features.addressed_wake_api = false;
+        let mut body = wake_chat_body();
+        let (status, axum::Json(reply)) = super::inject_mentioned_space_agent(&state, &wake_user(), "org-1", &mut body)
+            .await
+            .expect_err("disabled");
+        assert_eq!(status.as_u16(), 404);
+        assert_eq!(reply["error"]["code"], "space_addressed_wake_disabled");
+
+        // the request says ZDR (normalized_model_body folds the header into `zdr`)
+        let (state, servers_zdr) = wake_injector_state(false, active_binding()).await;
+        let mut body = wake_chat_body();
+        body["zdr"] = json!(true);
+        let (status, axum::Json(reply)) = super::inject_mentioned_space_agent(&state, &wake_user(), "org-1", &mut body)
+            .await
+            .expect_err("zdr");
+        assert_eq!(status.as_u16(), 412);
+        assert_eq!(reply["error"]["code"], "zdr_durable_mutation_forbidden");
+        // the organization says ZDR
+        let (state, servers_org) = wake_injector_state(true, active_binding()).await;
+        let mut body = wake_chat_body();
+        let (status, _) = super::inject_mentioned_space_agent(&state, &wake_user(), "org-1", &mut body)
+            .await
+            .expect_err("org zdr");
+        assert_eq!(status.as_u16(), 412);
+        // Control (user_core, index 1) and Application (index 0) were never asked in any of the three
+        for group in [&servers, &servers_zdr, &servers_org] {
+            assert!(group[0].received_requests().await.unwrap().is_empty(), "Application untouched");
+            assert!(group[1].received_requests().await.unwrap().is_empty(), "Control untouched");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_wake_for_a_blocked_or_unbound_agent_is_refused_with_the_mention_codes() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let blocked = json!([{
+            "bindingRef": "sab_1", "agentRef": "agent-1", "subjectId": "svc-support",
+            "name": "Helper", "status": "active", "approvalMode": "blocked", "deliveryTargets": []
+        }]);
+        let (state, _servers) = wake_injector_state(false, blocked).await;
+        let mut body = wake_chat_body();
+        let (status, axum::Json(reply)) = super::inject_mentioned_space_agent(&state, &wake_user(), "org-1", &mut body)
+            .await
+            .expect_err("blocked");
+        assert_eq!(status.as_u16(), 403);
+        assert_eq!(reply["error"]["code"], "agent_invocation_blocked");
+
+        let (state, _servers) = wake_injector_state(false, json!([])).await;
+        let mut body = wake_chat_body();
+        let (status, axum::Json(reply)) = super::inject_mentioned_space_agent(&state, &wake_user(), "org-1", &mut body)
+            .await
+            .expect_err("unbound");
+        assert_eq!(status.as_u16(), 404);
+        assert_eq!(reply["error"]["code"], "mentioned_agent_not_bound");
+    }
+
+    // ---- WS11-S3.gw: the read marker's reason ----------------------------------------------------
+
+    async fn marker_mutation_args(reason_body: Option<Value>) -> (u16, Value, Option<Value>) {
+        let (state, application, _mg, _auth, _user_core) = room_4b_fixture(
+            ResponseTemplate::new(200).set_body_json(json!({"value": {"lastReadAt": null}})),
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"value": {"lastReadAt": 1_757_240_100_000_i64, "manualUnread": true}})),
+            ResponseTemplate::new(200).set_body_json(json!({})),
+        )
+        .await;
+        let (status, body) = room_4b_request(state, "POST", "/api/v1/spaces/space-room/read", reason_body).await;
+        let sent = application
+            .received_requests()
+            .await
+            .expect("requests")
+            .into_iter()
+            .find(|request| request.url.path() == "/api/mutation")
+            .map(|request| serde_json::from_slice::<Value>(&request.body).unwrap());
+        (status, body, sent)
+    }
+
+    #[tokio::test]
+    async fn mark_read_enter_clears_floor() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        for word in ["enter", "while_open"] {
+            let (status, body, sent) = marker_mutation_args(Some(json!({"reason": word}))).await;
+            assert_eq!(status, 200, "{word}: {body}");
+            assert_eq!(sent.expect("mutation")["args"]["reason"], word);
+            assert_eq!(body["data"]["manual_unread"], true, "the answer carries the manual floor flag");
+            assert_eq!(body["data"]["last_read_at"], 1_757_240_100_000_i64);
+        }
+        // absent body, empty object and a null reason are all today's behaviour: no reason sent
+        for request in [None, Some(json!({})), Some(json!({"reason": null}))] {
+            let (status, _, sent) = marker_mutation_args(request.clone()).await;
+            assert_eq!(status, 200, "{request:?}");
+            assert!(sent.expect("mutation")["args"].get("reason").is_none(), "{request:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn mark_read_with_any_other_reason_is_a_400_and_writes_nothing() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        for request in [json!({"reason": "leave"}), json!({"reason": ""}), json!({"reason": 1}), json!({"reason": "ENTER"})] {
+            let (status, body, sent) = marker_mutation_args(Some(request.clone())).await;
+            assert_eq!(status, 400, "{request}");
+            assert_eq!(body["error"]["code"], "invalid_reason");
+            assert!(sent.is_none(), "{request}: no marker write");
+        }
+    }
 }
 
 /// WS03-S5 (typed denial mapping at the real issuers and read routes) and the WS04-S2 / WS04-S3
@@ -12366,5 +12774,44 @@ mod ws03_s5_ws04_gateway_tests {
         }
         assert_ne!(seen[0], seen[1]);
         assert_ne!(seen[0], seen[2]);
+    }
+
+    #[tokio::test]
+    async fn space_context_reports_the_mention_wake_and_system_entries_features_and_limits() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let room = json!([{"spaceRef": "space-room", "name": "Leveranse", "kind": "room", "lifecycle": "active"}]);
+        // (mention_records, addressed_wake, timeline, system_entries) -> (addressed_wake, system_entries)
+        for (records, wake, timeline, system, want_wake, want_system) in [
+            (false, false, false, false, false, false),
+            (true, false, false, false, false, false),
+            (false, true, false, false, false, false),
+            (true, true, false, false, true, false),
+            (false, false, true, false, false, false),
+            (false, false, false, true, false, false),
+            (false, false, true, true, false, true),
+            (true, true, true, true, true, true),
+        ] {
+            let (status, body) = json_route(
+                "/api/v1/spaces/space-room/context",
+                |state| {
+                    state.space_features.mention_records_api = records;
+                    state.space_features.addressed_wake_api = wake;
+                    state.space_features.timeline_api = timeline;
+                    state.space_features.system_entries_api = system;
+                },
+                json!([]),
+                room.clone(),
+            )
+            .await;
+            assert_eq!(status, 200);
+            let features = &body["data"]["features"];
+            assert_eq!(features["mention_records"], records);
+            assert_eq!(features["mention_picker"], records);
+            assert_eq!(features["addressed_wake"], want_wake, "records={records} wake={wake}");
+            assert_eq!(features["timeline_windows"], timeline);
+            assert_eq!(features["system_entries"], want_system, "timeline={timeline} system={system}");
+            assert_eq!(body["data"]["limits"]["max_people_mentions"], 20);
+            assert_eq!(body["data"]["limits"]["max_agent_mentions"], 3);
+        }
     }
 }

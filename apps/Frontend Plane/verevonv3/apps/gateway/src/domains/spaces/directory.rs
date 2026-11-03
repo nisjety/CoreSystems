@@ -1649,3 +1649,268 @@ mod tests {
         assert!(!crate::config::SpaceFeatureFlags::default().directory_resolver_api);
     }
 }
+
+#[cfg(test)]
+mod rooms_tests {
+    //! WS04-S8.gw: the room directory route. Control lists the browsable rooms, Application only
+    //! supplies labels; both are mocks.
+    use super::{decode_rooms_cursor, encode_rooms_cursor, rooms_route, RoomsParams};
+    use crate::config::AppState;
+    use crate::middleware::{AuthenticatedUser, AuthorizedMembership};
+    use axum::extract::{Extension, Query, State};
+    use http_body_util::BodyExt;
+    use serde_json::{json, Value};
+    use wiremock::matchers::{method as wm_method, path as wm_path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    const ROOMS_PATH: &str = "/api/v1/internal/directory/rooms";
+
+    /// Each test uses its own user id: the limiter is process-wide and keyed by org and user.
+    fn member(user_id: &str) -> AuthenticatedUser {
+        AuthenticatedUser {
+            user_id: user_id.to_owned(),
+            user_email: format!("{user_id}@example.com"),
+            user_name: "Caller".to_owned(),
+            user_image: None,
+            email_verified: true,
+            auth_role: Some("member".to_owned()),
+            active_org_id: Some("org-1".to_owned()),
+            authorized_membership: Some(AuthorizedMembership {
+                organization_id: "org-1".to_owned(),
+                role: "member".to_owned(),
+            }),
+        }
+    }
+
+    struct Fx {
+        state: AppState,
+        control: MockServer,
+        application: MockServer,
+    }
+
+    async fn fixture(control: ResponseTemplate, labels: ResponseTemplate, flag: bool) -> Fx {
+        let control_server = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path(ROOMS_PATH))
+            .respond_with(control)
+            .mount(&control_server)
+            .await;
+        let application = MockServer::start().await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/query"))
+            .respond_with(labels)
+            .mount(&application)
+            .await;
+        let mut state = crate::tests::test_state(false);
+        state.user_core_url = control_server.uri();
+        state.application_convex_url = application.uri();
+        state.application_convex_service_key = "application-test-key".into();
+        state.space_features.room_directory_api = flag;
+        Fx { state, control: control_server, application }
+    }
+
+    fn rooms_ok(rooms: Value) -> ResponseTemplate {
+        ResponseTemplate::new(200).set_body_json(json!({"data": {"enabled": true, "rooms": rooms, "truncated": false}}))
+    }
+
+    fn labels(rows: Value) -> ResponseTemplate {
+        ResponseTemplate::new(200).set_body_json(json!({"value": rows}))
+    }
+
+    fn listed(space_ref: &str) -> Value {
+        json!({"space_ref": space_ref, "member_count": 3, "join_role": "editor"})
+    }
+
+    fn label(space_ref: &str, name: &str, topic: Option<&str>) -> Value {
+        json!({"spaceRef": space_ref, "name": name, "topic": topic, "kind": "room", "lifecycle": "active"})
+    }
+
+    async fn run(fx: &Fx, user_id: &str, q: Option<&str>, cursor: Option<&str>) -> (u16, Value) {
+        let params = RoomsParams { q: q.map(str::to_owned), cursor: cursor.map(str::to_owned) };
+        let response = rooms_route(State(fx.state.clone()), Extension(member(user_id)), Query(params)).await;
+        let status = response.status().as_u16();
+        let body: Value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap_or(Value::Null);
+        (status, body)
+    }
+
+    fn names(body: &Value) -> Vec<String> {
+        body["data"]["rooms"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|room| room["name"].as_str().unwrap().to_owned())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn flag_off_is_404_feature_disabled_with_zero_control_requests() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = fixture(rooms_ok(json!([listed("r1")])), labels(json!([])), false).await;
+        let (status, body) = run(&fx, "rooms-flag-off", None, None).await;
+        assert_eq!(status, 404);
+        assert_eq!(body["error"]["code"], "feature_disabled");
+        assert!(fx.control.received_requests().await.unwrap().is_empty());
+        assert!(fx.application.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn policy_off_answers_enabled_false_and_no_rooms_without_a_convex_call() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = fixture(
+            ResponseTemplate::new(200).set_body_json(json!({"data": {"enabled": false, "rooms": [listed("r1")]}})),
+            labels(json!([label("r1", "Alpha", None)])),
+            true,
+        )
+        .await;
+        let (status, body) = run(&fx, "rooms-policy-off", None, None).await;
+        assert_eq!(status, 200);
+        assert_eq!(body["data"]["enabled"], false);
+        assert_eq!(body["data"]["rooms"], json!([]));
+        assert!(body["data"]["next_cursor"].is_null());
+        assert!(fx.application.received_requests().await.unwrap().is_empty(), "no label read when the policy is off");
+    }
+
+    #[tokio::test]
+    async fn rooms_without_an_active_label_are_dropped_and_the_rest_sorted_by_name() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = fixture(
+            rooms_ok(json!([listed("r-zulu"), listed("r-alpha"), listed("r-archived"), listed("r-nolabel"), listed("r-blank"), listed("")])),
+            labels(json!([
+                label("r-zulu", "Zulu", Some("last")),
+                label("r-alpha", "alpha", None),
+                {"spaceRef": "r-archived", "name": "Gone", "lifecycle": "archived"},
+                {"spaceRef": "r-blank", "name": "   ", "lifecycle": "active"},
+                label("r-unlisted", "Secret", None),
+            ])),
+            true,
+        )
+        .await;
+        let (status, body) = run(&fx, "rooms-labels", None, None).await;
+        assert_eq!(status, 200);
+        assert_eq!(names(&body), ["alpha", "Zulu"], "case-insensitive sort; unlabelled, archived, blank and unlisted rooms never appear");
+        let first = &body["data"]["rooms"][0];
+        assert_eq!(first["space_ref"], "r-alpha");
+        assert_eq!(first["member_count"], 3);
+        assert_eq!(first["join_role"], "editor");
+        assert!(first["topic"].is_null());
+        assert_eq!(body["meta"]["truncated"], false);
+        // the label read is scoped to the caller and the organization
+        let query = &fx.application.received_requests().await.unwrap()[0];
+        let sent: Value = serde_json::from_slice(&query.body).unwrap();
+        assert_eq!(sent["path"], "spaces:spacesForOrgForGateway");
+        assert_eq!(sent["args"]["externalOrgId"], "org-1");
+    }
+
+    #[tokio::test]
+    async fn q_filters_on_name_and_topic_case_insensitively() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = fixture(
+            rooms_ok(json!([listed("r1"), listed("r2"), listed("r3")])),
+            labels(json!([
+                label("r1", "Leveranse", None),
+                label("r2", "Salg", Some("Ukens LEVERING")),
+                label("r3", "Okonomi", Some("budsjett")),
+            ])),
+            true,
+        )
+        .await;
+        let (_, body) = run(&fx, "rooms-q-1", Some("  lever "), None).await;
+        assert_eq!(names(&body), ["Leveranse", "Salg"]);
+        let (_, body) = run(&fx, "rooms-q-2", Some("BUDSJ"), None).await;
+        assert_eq!(names(&body), ["Okonomi"]);
+        let (_, body) = run(&fx, "rooms-q-3", Some("nothing"), None).await;
+        assert_eq!(names(&body), Vec::<String>::new());
+        let (status, body) = run(&fx, "rooms-q-4", Some(&"a".repeat(101)), None).await;
+        assert_eq!(status, 400);
+        assert_eq!(body["error"]["details"], json!({"field": "q", "reason": "too_long"}));
+    }
+
+    #[tokio::test]
+    async fn pages_hold_25_rooms_with_an_opaque_cursor_that_resumes_after_the_last_room() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let refs: Vec<String> = (0..30).map(|i| format!("r{i:02}")).collect();
+        let fx = fixture(
+            rooms_ok(Value::Array(refs.iter().map(|r| listed(r)).collect())),
+            labels(Value::Array(refs.iter().map(|r| label(r, &format!("Room {r}"), None)).collect())),
+            true,
+        )
+        .await;
+        let (status, first) = run(&fx, "rooms-page", None, None).await;
+        assert_eq!(status, 200);
+        assert_eq!(names(&first).len(), 25);
+        assert_eq!(names(&first)[0], "Room r00");
+        let cursor = first["data"]["next_cursor"].as_str().expect("a next cursor").to_owned();
+        assert_eq!(decode_rooms_cursor(&cursor), Some(("room r24".to_owned(), "r24".to_owned())));
+        let (_, second) = run(&fx, "rooms-page", None, Some(&cursor)).await;
+        assert_eq!(names(&second), ["Room r25", "Room r26", "Room r27", "Room r28", "Room r29"]);
+        assert!(second["data"]["next_cursor"].is_null(), "the last page has no cursor");
+    }
+
+    #[tokio::test]
+    async fn a_malformed_or_oversized_cursor_is_a_400_before_control() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = fixture(rooms_ok(json!([listed("r1")])), labels(json!([label("r1", "A", None)])), true).await;
+        for (index, cursor) in ["***not-base64***", "bm90LWpzb24", &encode_rooms_cursor("a", "b").replace('=', "")[..3]]
+            .into_iter()
+            .enumerate()
+        {
+            let (status, body) = run(&fx, &format!("rooms-cursor-{index}"), None, Some(cursor)).await;
+            assert_eq!(status, 400, "{cursor}");
+            assert_eq!(body["error"]["details"], json!({"field": "cursor", "reason": "malformed"}));
+        }
+        let (status, body) = run(&fx, "rooms-cursor-long", None, Some(&"c".repeat(513))).await;
+        assert_eq!(status, 400);
+        assert_eq!(body["error"]["details"], json!({"field": "cursor", "reason": "too_long"}));
+        assert!(fx.control.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_control_5xx_or_a_failed_label_read_is_a_503_never_an_empty_directory() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let down = fixture(ResponseTemplate::new(503), labels(json!([])), true).await;
+        let (status, body) = run(&down, "rooms-503-control", None, None).await;
+        assert_eq!(status, 503);
+        assert_eq!(body["error"]["code"], "directory_unavailable");
+
+        let no_labels = fixture(rooms_ok(json!([listed("r1")])), ResponseTemplate::new(500), true).await;
+        let (status, body) = run(&no_labels, "rooms-503-labels", None, None).await;
+        assert_eq!(status, 503);
+        assert_eq!(body["error"]["code"], "directory_unavailable");
+    }
+
+    #[tokio::test]
+    async fn a_control_4xx_passes_through_with_its_status_and_body() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = fixture(
+            ResponseTemplate::new(403).set_body_json(json!({"error": {"code": "member_not_in_organization", "message": "no"}})),
+            labels(json!([])),
+            true,
+        )
+        .await;
+        let (status, body) = run(&fx, "rooms-403", None, None).await;
+        assert_eq!(status, 403);
+        assert_eq!(body["error"]["code"], "member_not_in_organization");
+        assert!(fx.application.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn truncated_is_relayed_in_meta() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = fixture(
+            ResponseTemplate::new(200).set_body_json(json!({"data": {"enabled": true, "rooms": [listed("r1")], "truncated": true}})),
+            labels(json!([label("r1", "A", None)])),
+            true,
+        )
+        .await;
+        let (_, body) = run(&fx, "rooms-truncated", None, None).await;
+        assert_eq!(body["meta"]["truncated"], true);
+    }
+
+    #[test]
+    fn the_cursor_round_trips_name_and_ref() {
+        let cursor = encode_rooms_cursor("room a", "ref-1");
+        assert_eq!(decode_rooms_cursor(&cursor), Some(("room a".to_owned(), "ref-1".to_owned())));
+        assert_eq!(decode_rooms_cursor(""), None);
+    }
+}

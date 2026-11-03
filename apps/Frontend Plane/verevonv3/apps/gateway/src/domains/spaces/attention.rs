@@ -1654,3 +1654,637 @@ pub(crate) async fn mark_unread_core(
         Err(_) => unavailable(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    //! WS11-S3.gw tests: the aggregate, read-all, notify level and mark-unread routes through the
+    //! real router, with wiremock for auth-core, Control (user-core), org-core, Application
+    //! (Convex) and model-gateway. No model is called.
+    use super::*;
+    use axum::{body::Body, http::Request};
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
+    use wiremock::matchers::{body_partial_json, method as wm_method, path as wm_path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    struct Fx {
+        state: AppState,
+        _auth: MockServer,
+        user_core: MockServer,
+        _org: MockServer,
+        application: MockServer,
+        model_gateway: MockServer,
+    }
+
+    /// `zdr`: org-core's answer (`None` is an outage, so an unknown posture). `role`: what Control
+    /// says the caller holds in `room-a` (empty is "not a member"). The attention flag is on.
+    async fn fx(zdr: Option<bool>, role: &str) -> Fx {
+        let auth = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/auth/get-session"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "user": {"id": "user-1", "email": "user@example.com", "emailVerified": true},
+                "session": {"activeOrganizationId": "org-1"}
+            })))
+            .mount(&auth)
+            .await;
+        for slug in ["session-core", "model-plane"] {
+            Mock::given(wm_method("GET"))
+                .and(wm_path(format!("/api/{slug}/token")))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({"token": "plane-token"})))
+                .mount(&auth)
+                .await;
+        }
+        let user_core = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/me/session-context"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "userId": "user-1", "orgId": "org-1", "role": "member", "onboardingStatus": "COMPLETED"
+            })))
+            .mount(&user_core)
+            .await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/internal/spaces/room-a/membership"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {"space_ref": "room-a", "kind": "room", "role": role}
+            })))
+            .mount(&user_core)
+            .await;
+        let org = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/organizations/org-1"))
+            .respond_with(match zdr {
+                Some(zdr) => ResponseTemplate::new(200).set_body_json(
+                    json!({"data": {"metadata": {"interactiveRetention": {"zdr": zdr}}}}),
+                ),
+                None => ResponseTemplate::new(500),
+            })
+            .mount(&org)
+            .await;
+        let application = MockServer::start().await;
+        let model_gateway = MockServer::start().await;
+        let mut state = crate::tests::test_state(false);
+        state.auth_core_url = auth.uri();
+        state.user_core_url = user_core.uri();
+        state.org_core_url = org.uri();
+        state.application_convex_url = application.uri();
+        state.application_convex_service_key = "application-test-key".into();
+        state.model_gateway_url = model_gateway.uri();
+        state.space_features.attention_api = true;
+        Fx {
+            state,
+            _auth: auth,
+            user_core,
+            _org: org,
+            application,
+            model_gateway,
+        }
+    }
+
+    async fn mount_index(fx: &Fx, rooms: &[&str]) {
+        let mut spaces: Vec<Value> = rooms
+            .iter()
+            .map(|space_ref| json!({"space_ref": space_ref, "kind": "room"}))
+            .collect();
+        spaces.push(json!({"space_ref": "personal-1", "kind": "personal"}));
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/internal/spaces"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": {"spaces": spaces}})))
+            .mount(&fx.user_core)
+            .await;
+    }
+
+    async fn mount_decisions(fx: &Fx, issued: &[&str]) {
+        let results: Vec<Value> = issued
+            .iter()
+            .map(|space_ref| {
+                json!({"space_ref": space_ref, "status": "issued",
+                       "decision": {"decision_ref": format!("d-{space_ref}")}, "token": format!("t-{space_ref}")})
+            })
+            .collect();
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/v1/internal/spaces/thread-read-decisions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": {"results": results}})))
+            .mount(&fx.user_core)
+            .await;
+    }
+
+    async fn mount_convex(fx: &Fx, route: &str, function: &str, template: ResponseTemplate) {
+        Mock::given(wm_method("POST"))
+            .and(wm_path(route))
+            .and(body_partial_json(json!({"path": function})))
+            .respond_with(template)
+            .mount(&fx.application)
+            .await;
+    }
+
+    fn value(value: Value) -> ResponseTemplate {
+        ResponseTemplate::new(200).set_body_json(json!({"value": value}))
+    }
+
+    async fn call(fx: &Fx, method: &str, uri: &str, body: Option<Value>) -> (u16, Value) {
+        let mut request = Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("cookie", "better-auth.session_token=session-1");
+        if body.is_some() {
+            request = request.header("content-type", "application/json");
+        }
+        let response = crate::build_router(fx.state.clone())
+            .oneshot(
+                request
+                    .body(match &body {
+                        Some(value) => Body::from(value.to_string()),
+                        None => Body::empty(),
+                    })
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status().as_u16();
+        let payload: Value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap_or(Value::Null);
+        (status, payload)
+    }
+
+    /// Bodies of the Convex calls to one function.
+    async fn convex_calls(fx: &Fx, function: &str) -> Vec<Value> {
+        fx.application
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .filter_map(|request| serde_json::from_slice::<Value>(&request.body).ok())
+            .filter(|body| body["path"] == function)
+            .collect()
+    }
+
+    async fn paths_seen(server: &MockServer) -> Vec<String> {
+        server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .map(|request| request.url.path().to_owned())
+            .collect()
+    }
+
+    fn room<'a>(body: &'a Value, space_ref: &str) -> &'a Value {
+        body["data"]["rooms"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|room| room["space_ref"] == space_ref)
+            .unwrap_or_else(|| panic!("room {space_ref} in {body}"))
+    }
+
+    // ---- the badge rule --------------------------------------------------------------------------
+
+    #[test]
+    fn attention_badge_rule_table() {
+        // n = needs_you + mentions is a count at EVERY level; unread never joins it
+        for level in ["all", "mentions", "off", "unheard-of"] {
+            assert_eq!(room_badge(level, 1, 2, 9), Badge::Count(3), "{level}");
+            assert_eq!(room_badge(level, 0, 4, 0), Badge::Count(4), "{level}");
+            assert_eq!(room_badge(level, 2, 0, 5), Badge::Count(2), "{level}");
+            assert_eq!(room_badge(level, 0, 0, 0), Badge::Nothing, "{level}");
+        }
+        // otherwise unread decides by level
+        assert_eq!(room_badge("all", 0, 0, 3), Badge::MutedCount(3));
+        assert_eq!(room_badge("mentions", 0, 0, 3), Badge::Dot);
+        assert_eq!(room_badge("off", 0, 0, 3), Badge::Nothing);
+        assert_eq!(room_badge("unheard-of", 0, 0, 3), Badge::Nothing);
+        assert_eq!(room_badge("all", u32::MAX, 5, 0), Badge::Count(u32::MAX), "saturates");
+        assert_eq!(badge_json(Badge::Count(3)), json!({"kind": "count", "n": 3}));
+        assert_eq!(badge_json(Badge::MutedCount(3)), json!({"kind": "count", "n": 3, "muted": true}));
+        assert_eq!(badge_json(Badge::Dot), json!({"kind": "dot", "n": 0}));
+        assert_eq!(badge_json(Badge::Nothing), json!({"kind": "none", "n": 0}));
+    }
+
+    #[tokio::test]
+    async fn the_aggregate_applies_the_badge_rule_and_never_adds_unread_to_the_total() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = fx(Some(false), "editor").await;
+        mount_index(&fx, &["room-a", "room-b"]).await;
+        mount_decisions(&fx, &["room-a", "room-b"]).await;
+        mount_convex(
+            &fx,
+            "/api/query",
+            "spaceAttention:attentionForGateway",
+            value(json!({"rooms": [
+                {"spaceRef": "room-a", "level": "mentions", "mentions": 1, "lastReadAt": 100, "replies": 4},
+                {"spaceRef": "room-b", "level": "all"}
+            ], "otherOpen": 2})),
+        )
+        .await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/v1/spaces/attention"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"results": [
+                {"space_id": "room-a", "status": "ok", "unread_threads": 2, "pending": [{"approval_id": "ap-1"}],
+                 "latest_activity_ms": 5, "working_runs": 1},
+                {"space_id": "room-b", "status": "ok", "unread_threads": 3, "pending": []},
+                {"space_id": "room-not-asked", "status": "ok", "unread_threads": 99, "pending": [{"approval_id": "x"}]}
+            ]})))
+            .mount(&fx.model_gateway)
+            .await;
+        let (status, body) = call(&fx, "GET", "/api/v1/spaces/attention", None).await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(body["data"]["mode"], "live");
+        assert_eq!(room(&body, "room-a")["badge"], json!({"kind": "count", "n": 2}), "needs_you 1 + mentions 1");
+        assert_eq!(room(&body, "room-b")["badge"], json!({"kind": "count", "n": 3, "muted": true}));
+        assert_eq!(room(&body, "room-a")["working"], 1);
+        assert_eq!(room(&body, "room-a")["last_read_at"], 100);
+        assert_eq!(body["data"]["totals"]["badge"], 2, "unread (2 + 3) is never in the badge total");
+        assert_eq!(body["data"]["totals"]["unread_rooms"], 2);
+        assert_eq!(body["data"]["totals"]["other_open"], 6, "otherOpen 2 + room-a replies 4");
+        assert!(body["data"]["rooms"].as_array().unwrap().iter().all(|r| r["space_ref"] != "room-not-asked"));
+        assert_eq!(body["meta"]["stale_sources"], json!([]));
+    }
+
+    // ---- rooms: the Control index, the refs and the cap -------------------------------------------
+
+    #[tokio::test]
+    async fn attention_rooms_intersect_control_index_and_cap_60() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = fx(Some(false), "editor").await;
+        mount_index(&fx, &["room-a", "room-b"]).await;
+        mount_decisions(&fx, &[]).await;
+        mount_convex(&fx, "/api/query", "spaceAttention:attentionForGateway", value(json!({"rooms": [], "otherOpen": 0}))).await;
+        // refs can only narrow: an unknown ref and a personal Space are dropped
+        let (status, body) = call(&fx, "GET", "/api/v1/spaces/attention?refs=room-a,personal-1,zz,room-a", None).await;
+        assert_eq!(status, 200, "{body}");
+        let asked = convex_calls(&fx, "spaceAttention:attentionForGateway").await;
+        assert_eq!(asked[0]["args"]["spaceRefs"], json!(["room-a"]));
+        assert_eq!(body["data"]["rooms"].as_array().unwrap().len(), 1);
+        // no refs: the whole index minus personal Spaces, in Control's order
+        let (_, body) = call(&fx, "GET", "/api/v1/spaces/attention", None).await;
+        let asked = convex_calls(&fx, "spaceAttention:attentionForGateway").await;
+        assert_eq!(asked[1]["args"]["spaceRefs"], json!(["room-a", "room-b"]));
+        assert_eq!(body["data"]["truncated"], false);
+        // more than 60 refs is a 400 before any upstream read of the rooms
+        let many: Vec<String> = (0..61).map(|i| format!("r{i}")).collect();
+        let (status, body) = call(&fx, "GET", &format!("/api/v1/spaces/attention?refs={}", many.join(",")), None).await;
+        assert_eq!(status, 400);
+        assert_eq!(body["error"]["code"], "invalid_refs");
+        let (status, body) = call(&fx, "GET", &format!("/api/v1/spaces/attention?refs={}", "x".repeat(201)), None).await;
+        assert_eq!(status, 400);
+        assert_eq!(body["error"]["code"], "invalid_refs");
+    }
+
+    #[tokio::test]
+    async fn an_index_of_more_than_60_rooms_is_cut_to_60_and_says_truncated() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = fx(Some(false), "editor").await;
+        let names: Vec<String> = (0..61).map(|i| format!("room-{i:02}")).collect();
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        mount_index(&fx, &refs).await;
+        mount_decisions(&fx, &[]).await;
+        mount_convex(&fx, "/api/query", "spaceAttention:attentionForGateway", value(json!({"rooms": [], "otherOpen": 0}))).await;
+        let (status, body) = call(&fx, "GET", "/api/v1/spaces/attention", None).await;
+        assert_eq!(status, 200);
+        assert_eq!(body["data"]["truncated"], true);
+        assert_eq!(body["data"]["rooms"].as_array().unwrap().len(), 60);
+        let asked = convex_calls(&fx, "spaceAttention:attentionForGateway").await;
+        assert_eq!(asked[0]["args"]["spaceRefs"].as_array().unwrap().len(), 60);
+        let decisions = fx
+            .user_core
+            .received_requests()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|request| request.url.path().ends_with("thread-read-decisions"))
+            .expect("a bulk decision request");
+        let sent: Value = serde_json::from_slice(&decisions.body).unwrap();
+        assert_eq!(sent["items"].as_array().unwrap().len(), 60);
+    }
+
+    // ---- degraded sources ---------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn attention_degrades_to_gaps_when_session_core_down() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = fx(Some(false), "editor").await;
+        mount_index(&fx, &["room-a", "room-b"]).await;
+        mount_decisions(&fx, &["room-a"]).await;
+        mount_convex(&fx, "/api/query", "spaceAttention:attentionForGateway", value(json!({"rooms": [{"spaceRef": "room-a", "mentions": 2}], "otherOpen": 0}))).await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/v1/spaces/attention"))
+            .respond_with(ResponseTemplate::new(503))
+            .mount(&fx.model_gateway)
+            .await;
+        let (status, body) = call(&fx, "GET", "/api/v1/spaces/attention", None).await;
+        assert_eq!(status, 200, "a failed source is a named gap, never a 5xx: {body}");
+        assert_eq!(room(&body, "room-a")["gaps"], json!(["session_core"]));
+        assert_eq!(room(&body, "room-b")["gaps"], json!(["read_decision"]), "no decision, no counts");
+        assert_eq!(room(&body, "room-a")["mentions"], 2, "Application's own counts still show");
+        assert_eq!(body["data"]["stale_sources"], json!(["session_core"]));
+        assert_eq!(body["meta"]["stale_sources"], json!(["session_core"]));
+    }
+
+    #[tokio::test]
+    async fn application_and_control_decision_failures_are_named_gaps_and_the_index_failure_is_a_503() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx_gaps = fx(Some(false), "editor").await;
+        mount_index(&fx_gaps, &["room-a"]).await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/v1/internal/spaces/thread-read-decisions"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&fx_gaps.user_core)
+            .await;
+        mount_convex(&fx_gaps, "/api/query", "spaceAttention:attentionForGateway", ResponseTemplate::new(500)).await;
+        let (status, body) = call(&fx_gaps, "GET", "/api/v1/spaces/attention", None).await;
+        assert_eq!(status, 200);
+        let gaps = room(&body, "room-a")["gaps"].clone();
+        assert_eq!(gaps, json!(["application", "space_decisions"]));
+        assert_eq!(body["meta"]["stale_sources"], json!(["application", "space_decisions"]));
+
+        let down = fx(Some(false), "editor").await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/internal/spaces"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&down.user_core)
+            .await;
+        let (status, body) = call(&down, "GET", "/api/v1/spaces/attention", None).await;
+        assert_eq!(status, 503);
+        assert_eq!(body["error"]["code"], "space_index_unavailable");
+        assert!(paths_seen(&down.model_gateway).await.is_empty());
+    }
+
+    // ---- Zero Data Retention -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn attention_zdr_org_makes_no_upstream_call() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        // org-core says ZDR; org-core unreachable is an unknown posture, which counts as ZDR
+        for zdr in [Some(true), None] {
+            let fx = fx(zdr, "editor").await;
+            mount_index(&fx, &["room-a"]).await;
+            mount_decisions(&fx, &["room-a"]).await;
+            let (status, body) = call(&fx, "GET", "/api/v1/spaces/attention?refs=room-a", None).await;
+            assert_eq!(status, 200, "{zdr:?}: {body}");
+            assert_eq!(body["data"]["mode"], "zdr_empty");
+            assert_eq!(body["data"]["rooms"], json!([]));
+            assert_eq!(body["data"]["totals"], json!({"badge": 0, "unread_rooms": 0, "other_open": 0}));
+            let control = paths_seen(&fx.user_core).await;
+            assert!(!control.iter().any(|path| path.starts_with("/api/v1/internal/spaces")), "{zdr:?}: Control untouched: {control:?}");
+            assert!(paths_seen(&fx.application).await.is_empty(), "{zdr:?}: no Convex request");
+            assert!(paths_seen(&fx.model_gateway).await.is_empty(), "{zdr:?}: no model-gateway request");
+        }
+    }
+
+    // ---- no titles without a decision --------------------------------------------------------------
+
+    #[tokio::test]
+    async fn attention_never_returns_titles_without_decision() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = fx(Some(false), "editor").await;
+        mount_index(&fx, &["room-a", "room-b"]).await;
+        mount_decisions(&fx, &["room-a"]).await;
+        mount_convex(&fx, "/api/query", "spaceAttention:attentionForGateway", value(json!({"rooms": [], "otherOpen": 0}))).await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/v1/spaces/attention"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"results": [
+                {"space_id": "room-a", "status": "ok", "unread_threads": 1, "pending": [],
+                 "headlines": [{"thread_id": "t-1", "title": "A secret plan"}]}
+            ]})))
+            .mount(&fx.model_gateway)
+            .await;
+        let (status, body) = call(&fx, "GET", "/api/v1/spaces/attention", None).await;
+        assert_eq!(status, 200);
+        let sent = fx.model_gateway.received_requests().await.unwrap();
+        assert_eq!(sent.len(), 1);
+        let sent: Value = serde_json::from_slice(&sent[0].body).unwrap();
+        let spaces = sent["spaces"].as_array().unwrap();
+        assert_eq!(spaces.len(), 1, "only the room with a decision is asked about");
+        assert_eq!(spaces[0]["space_id"], "room-a");
+        assert_eq!(spaces[0]["headline_thread_ids"], json!([]), "the aggregate asks for no titles");
+        assert_eq!(spaces[0]["decision_ref"], "d-room-a");
+        assert!(!body.to_string().contains("A secret plan"), "no title in the aggregate answer");
+        assert!(!body.to_string().contains("title"));
+        assert_eq!(room(&body, "room-b")["gaps"], json!(["read_decision"]));
+    }
+
+    // ---- the rate limit ----------------------------------------------------------------------------
+
+    /// The aggregate ceiling is lifted under `cfg!(test)` (one process-wide bucket and one test
+    /// user), so the 429 envelope itself cannot be driven here without changing production code.
+    /// This pins the limiter the route uses at the plan's six polls a minute and its Retry-After.
+    #[tokio::test]
+    async fn attention_rate_limits_six_per_minute_with_retry_after() {
+        let state = crate::tests::test_state(false);
+        let limiter = RateLimiter::from_cache_with_rpm(&state.cache, 6.0);
+        for poll in 0..6 {
+            assert!(limiter.try_acquire("space-attention:org-1:user-1").await.is_ok(), "poll {poll}");
+        }
+        let retry_after = limiter.try_acquire("space-attention:org-1:user-1").await.expect_err("the seventh poll");
+        assert!(retry_after >= 1);
+        assert!(limiter.try_acquire("space-attention:org-1:user-2").await.is_ok(), "own bucket per user");
+        assert_eq!(MAX_SPACES, 60);
+    }
+
+    // ---- read-all ----------------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn read_all_never_creates_markers_or_touches_needs_you() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = fx(Some(false), "editor").await;
+        mount_index(&fx, &["room-a", "room-b"]).await;
+        mount_convex(&fx, "/api/mutation", "spaceAttention:markAllReadForGateway", value(json!({"roomsMarked": 1, "itemsResolved": 3, "markedAt": 777}))).await;
+        // only the index-intersected refs reach the mutation (an unknown ref is dropped, a duplicate collapses)
+        let (status, body) = call(
+            &fx,
+            "POST",
+            "/api/v1/spaces/attention/read-all",
+            Some(json!({"space_refs": ["room-a", "personal-1", "zz", "room-a"], "kinds": ["mention"]})),
+        )
+        .await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(body["data"], json!({"rooms_marked": 1, "items_resolved": 3, "marked_at": 777}));
+        let calls = convex_calls(&fx, "spaceAttention:markAllReadForGateway").await;
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0]["args"]["spaceRefs"], json!(["room-a", "personal-1"]));
+        assert_eq!(calls[0]["args"]["kinds"], json!(["mention"]));
+        assert_eq!(calls[0]["args"]["externalAuthId"], "user-1");
+        assert_eq!(calls[0]["args"]["externalOrgId"], "org-1");
+        // an empty body means every room of the index (membership of the caller), default kinds
+        let (status, _) = call(&fx, "POST", "/api/v1/spaces/attention/read-all", None).await;
+        assert_eq!(status, 200);
+        let calls = convex_calls(&fx, "spaceAttention:markAllReadForGateway").await;
+        assert_eq!(calls[1]["args"]["spaceRefs"], json!(["room-a", "room-b", "personal-1"]));
+        assert!(calls[1]["args"].get("kinds").is_none());
+        // nothing else was read: no decision, no model-gateway request, no aggregate query
+        assert!(paths_seen(&fx.model_gateway).await.is_empty());
+        assert!(!paths_seen(&fx.user_core).await.iter().any(|path| path.ends_with("thread-read-decisions")));
+        assert!(paths_seen(&fx.application).await.iter().all(|path| path == "/api/mutation"));
+    }
+
+    #[tokio::test]
+    async fn read_all_sends_chunks_of_60_and_sums_the_answers() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = fx(Some(false), "editor").await;
+        let names: Vec<String> = (0..130).map(|i| format!("room-{i:03}")).collect();
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        mount_index(&fx, &refs).await;
+        mount_convex(&fx, "/api/mutation", "spaceAttention:markAllReadForGateway", value(json!({"roomsMarked": 2, "itemsResolved": 1, "markedAt": 50}))).await;
+        let (status, body) = call(&fx, "POST", "/api/v1/spaces/attention/read-all", Some(json!({}))).await;
+        assert_eq!(status, 200, "{body}");
+        let lens: Vec<usize> = convex_calls(&fx, "spaceAttention:markAllReadForGateway")
+            .await
+            .iter()
+            .map(|call| call["args"]["spaceRefs"].as_array().unwrap().len())
+            .collect();
+        assert_eq!(lens, [60, 60, 11], "130 rooms and the personal Space");
+        assert_eq!(body["data"]["rooms_marked"], 6);
+        assert_eq!(body["data"]["items_resolved"], 3);
+        assert_eq!(body["data"]["marked_at"], 50);
+    }
+
+    #[tokio::test]
+    async fn read_all_refuses_other_kinds_bad_bodies_and_the_flag_off() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = fx(Some(false), "editor").await;
+        mount_index(&fx, &["room-a"]).await;
+        mount_convex(&fx, "/api/mutation", "spaceAttention:markAllReadForGateway", value(json!({"roomsMarked": 0, "itemsResolved": 0}))).await;
+        for kinds in [json!(["invite"]), json!(["mention", "reminder"]), json!(["needs_you"])] {
+            let (status, body) = call(&fx, "POST", "/api/v1/spaces/attention/read-all", Some(json!({"kinds": kinds}))).await;
+            assert_eq!(status, 400, "{kinds}");
+            assert_eq!(body["error"]["code"], "invalid_kind");
+        }
+        let (status, body) = call(&fx, "POST", "/api/v1/spaces/attention/read-all", Some(json!({"org_id": "forged"}))).await;
+        assert_eq!(status, 400);
+        assert_eq!(body["error"]["code"], "invalid_request");
+        let (status, body) = call(&fx, "POST", "/api/v1/spaces/attention/read-all", Some(json!({"space_refs": ["x".repeat(201)]}))).await;
+        assert_eq!(status, 400);
+        assert_eq!(body["error"]["code"], "invalid_refs");
+        let too_many: Vec<String> = (0..61).map(|i| format!("r{i}")).collect();
+        let (status, _) = call(&fx, "POST", "/api/v1/spaces/attention/read-all", Some(json!({"space_refs": too_many}))).await;
+        assert_eq!(status, 400);
+        assert!(convex_calls(&fx, "spaceAttention:markAllReadForGateway").await.is_empty());
+
+        let mut off = fx;
+        off.state.space_features.attention_api = false;
+        let (status, body) = call(&off, "POST", "/api/v1/spaces/attention/read-all", Some(json!({}))).await;
+        assert_eq!(status, 404);
+        assert_eq!(body["error"]["code"], "space_attention_disabled");
+        for (method, uri) in [("GET", "/api/v1/spaces/attention"), ("GET", "/api/v1/spaces/room-a/notify"), ("POST", "/api/v1/spaces/room-a/unread")] {
+            let (status, body) = call(&off, method, uri, if method == "POST" { Some(json!({"before_ms": 5})) } else { None }).await;
+            assert_eq!(status, 404, "{uri}");
+            assert_eq!(body["error"]["code"], "space_attention_disabled");
+        }
+    }
+
+    // ---- notify level ------------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn notify_get_put_and_invalid_level() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = fx(Some(false), "viewer").await;
+        mount_convex(&fx, "/api/query", "spaceAttention:getRoomLevelForGateway", value(json!({"level": "all", "hidePreview": true}))).await;
+        mount_convex(&fx, "/api/mutation", "spaceAttention:setRoomLevelForGateway", value(json!({"level": "off", "hidePreview": false}))).await;
+        let (status, body) = call(&fx, "GET", "/api/v1/spaces/room-a/notify", None).await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(body["data"], json!({"level": "all", "hide_preview": true}));
+        let (status, body) = call(&fx, "PUT", "/api/v1/spaces/room-a/notify", Some(json!({"level": "off"}))).await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(body["data"], json!({"level": "off", "hide_preview": false}));
+        let writes = convex_calls(&fx, "spaceAttention:setRoomLevelForGateway").await;
+        assert_eq!(writes[0]["args"]["level"], "off");
+        assert_eq!(writes[0]["args"]["spaceRef"], "room-a");
+        assert_eq!(writes[0]["args"]["externalAuthId"], "user-1");
+        assert!(writes[0]["args"].get("hidePreview").is_none());
+        let (_, _) = call(&fx, "PUT", "/api/v1/spaces/room-a/notify", Some(json!({"hide_preview": true}))).await;
+        let writes = convex_calls(&fx, "spaceAttention:setRoomLevelForGateway").await;
+        assert_eq!(writes[1]["args"]["hidePreview"], true);
+        assert!(writes[1]["args"].get("level").is_none());
+
+        for (body, code) in [
+            (json!({"level": "loud"}), "invalid_level"),
+            (json!({"level": ""}), "invalid_level"),
+            (json!({}), "invalid_request"),
+            (json!({"level": "all", "org_id": "forged"}), "invalid_request"),
+            (json!({"level": 3}), "invalid_request"),
+        ] {
+            let (status, got) = call(&fx, "PUT", "/api/v1/spaces/room-a/notify", Some(body.clone())).await;
+            assert_eq!(status, 400, "{body}");
+            assert_eq!(got["error"]["code"], code, "{body}");
+        }
+        assert_eq!(convex_calls(&fx, "spaceAttention:setRoomLevelForGateway").await.len(), 2, "no refused write reached Convex");
+    }
+
+    #[tokio::test]
+    async fn notify_needs_a_live_membership_and_is_allowed_under_zdr() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let stranger = fx(Some(false), "").await;
+        mount_convex(&stranger, "/api/query", "spaceAttention:getRoomLevelForGateway", value(json!({"level": "all"}))).await;
+        mount_convex(&stranger, "/api/mutation", "spaceAttention:setRoomLevelForGateway", value(json!({"level": "all"}))).await;
+        let (status, body) = call(&stranger, "GET", "/api/v1/spaces/room-a/notify", None).await;
+        assert_eq!(status, 403);
+        assert_eq!(body["error"]["code"], "active_membership_required");
+        let (status, _) = call(&stranger, "PUT", "/api/v1/spaces/room-a/notify", Some(json!({"level": "all"}))).await;
+        assert_eq!(status, 403);
+        let (status, _) = call(&stranger, "POST", "/api/v1/spaces/room-a/unread", Some(json!({"before_ms": 5}))).await;
+        assert_eq!(status, 403);
+        assert!(paths_seen(&stranger.application).await.is_empty(), "a non-member reaches no Convex function");
+
+        // a level is a closed word and a boolean: no content, so a ZDR organization may write it
+        let zdr = fx(Some(true), "viewer").await;
+        mount_convex(&zdr, "/api/mutation", "spaceAttention:setRoomLevelForGateway", value(json!({"level": "mentions", "hidePreview": false}))).await;
+        mount_convex(&zdr, "/api/mutation", "spaceReadMarkers:markUnreadForGateway", value(json!({"lastReadAt": 1, "manualUnread": true}))).await;
+        let (status, body) = call(&zdr, "PUT", "/api/v1/spaces/room-a/notify", Some(json!({"level": "mentions"}))).await;
+        assert_eq!(status, 200, "{body}");
+        let (status, _) = call(&zdr, "POST", "/api/v1/spaces/room-a/unread", Some(json!({"before_ms": 5}))).await;
+        assert_eq!(status, 200);
+    }
+
+    // ---- mark unread -------------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn unread_posts_floor_and_rejects_bad_before_ms() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = fx(Some(false), "viewer").await;
+        mount_convex(&fx, "/api/mutation", "spaceReadMarkers:markUnreadForGateway", value(json!({"lastReadAt": 1_699_999_999_000_i64, "manualUnread": true}))).await;
+        let (status, body) = call(
+            &fx,
+            "POST",
+            "/api/v1/spaces/room-a/unread",
+            Some(json!({"before_ms": 1_700_000_000_000_i64, "idempotency_key": "k-1"})),
+        )
+        .await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(body["data"], json!({"last_read_at": 1_699_999_999_000_i64, "manual_unread": true}));
+        let writes = convex_calls(&fx, "spaceReadMarkers:markUnreadForGateway").await;
+        assert_eq!(writes.len(), 1);
+        assert_eq!(writes[0]["args"]["beforeMs"], 1_700_000_000_000_i64);
+        assert_eq!(writes[0]["args"]["spaceRef"], "room-a");
+        assert_eq!(writes[0]["args"]["externalOrgId"], "org-1");
+        assert!(writes[0]["args"].get("idempotencyKey").is_none(), "the key is accepted and ignored");
+
+        for before_ms in [json!(0), json!(-5)] {
+            let (status, got) = call(&fx, "POST", "/api/v1/spaces/room-a/unread", Some(json!({"before_ms": before_ms}))).await;
+            assert_eq!(status, 400, "{before_ms}");
+            assert_eq!(got["error"]["code"], "invalid_before_ms");
+        }
+        for body in [json!({}), json!({"before_ms": "soon"}), json!({"before_ms": 5, "org_id": "forged"}), json!({"before_ms": 5, "last_read_at": 1})] {
+            let (status, got) = call(&fx, "POST", "/api/v1/spaces/room-a/unread", Some(body.clone())).await;
+            assert_eq!(status, 400, "{body}");
+            assert_eq!(got["error"]["code"], "invalid_request", "forged fields are rejected by deny_unknown_fields: {body}");
+        }
+        assert_eq!(convex_calls(&fx, "spaceReadMarkers:markUnreadForGateway").await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_convex_invalid_level_message_is_a_400_and_any_other_failure_a_503() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let bad = fx(Some(false), "viewer").await;
+        mount_convex(&bad, "/api/mutation", "spaceAttention:setRoomLevelForGateway", ResponseTemplate::new(200).set_body_json(json!({"status": "error", "errorMessage": "Uncaught Error: invalid_level"}))).await;
+        let (status, body) = call(&bad, "PUT", "/api/v1/spaces/room-a/notify", Some(json!({"level": "all"}))).await;
+        assert_eq!(status, 400);
+        assert_eq!(body["error"]["code"], "invalid_level");
+        let down = fx(Some(false), "viewer").await;
+        mount_convex(&down, "/api/mutation", "spaceAttention:setRoomLevelForGateway", ResponseTemplate::new(500)).await;
+        let (status, body) = call(&down, "PUT", "/api/v1/spaces/room-a/notify", Some(json!({"level": "all"}))).await;
+        assert_eq!(status, 503);
+        assert_eq!(body["error"]["code"], "attention_unavailable");
+    }
+}

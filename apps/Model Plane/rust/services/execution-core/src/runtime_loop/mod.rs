@@ -5165,4 +5165,148 @@ mod tests {
         assert!(unexpected.is_empty(), "leaked environment: {unexpected:?}");
         assert!(lines.iter().any(|l| l.starts_with("PATH=")), "{lines:?}");
     }
+
+    // -- WS10-S3 postponed tests: the three early awaiting_approval returns --------------
+
+    struct AllowAllPolicy;
+
+    #[tonic::async_trait]
+    impl crate::capability_policy::CapabilityPolicy for AllowAllPolicy {
+        async fn evaluate(
+            &self,
+            _tool_name: &str,
+            _run_id: &str,
+            _org_id: &str,
+        ) -> Result<crate::capability_policy::CapabilityDecision, tonic::Status> {
+            Ok(crate::capability_policy::CapabilityDecision::Allow)
+        }
+    }
+
+    /// A risky tool under the `ask` posture, optionally as a Space step (a sandbox context).
+    async fn ask_posture_step(
+        tool: &str,
+        sandbox: Option<&crate::sandbox_lease::SandboxLeaseContext<'_>>,
+    ) -> StepOutcome {
+        execute_step(
+            tool,
+            "{}",
+            "ask",
+            "",
+            "org-1",
+            "user-1",
+            "run-gate-fold",
+            "step-gate-fold",
+            "",
+            None,
+            None,
+            None,
+            false,
+            0,
+            None,
+            None,
+            None,
+            &AllowAllPolicy,
+            sandbox,
+        )
+        .await
+    }
+
+    fn space_step_context<'a>(
+        client: &'a crate::sandbox_manager_client::SandboxManagerClient,
+        tokens: &'a crate::sandbox_lease::SandboxManagerTokenProvider,
+    ) -> crate::sandbox_lease::SandboxLeaseContext<'a> {
+        crate::sandbox_lease::SandboxLeaseContext {
+            space_id: "space-1",
+            sandbox_bearer: "bearer",
+            capability_client: None,
+            sandbox_manager_client: client,
+            backend_id: "backend-1",
+            cas_client: None,
+            sandbox_tokens: tokens,
+            process_host: None,
+        }
+    }
+
+    /// Gate off (the default) and every non-Space step keep today's early return: the ask pauses
+    /// the step at once, with no fold and no Control read.
+    #[tokio::test]
+    async fn gate_off_and_non_space_steps_keep_the_early_awaiting_approval_return() {
+        let non_space = ask_posture_step("delete_account", None).await;
+        assert_eq!(non_space.status, "awaiting_approval");
+        assert_eq!(non_space.cause, Some(CauseCode::RiskyEffectUnderAsk));
+
+        if crate::space_gate::GateMode::from_env() == crate::space_gate::GateMode::Enforce {
+            eprintln!("skipping the Space half: the gate is enforcing in this process");
+            return;
+        }
+        let (client, tokens) = unroutable_lease_context_parts();
+        let ctx = space_step_context(&client, &tokens);
+        let space = ask_posture_step("delete_account", Some(&ctx)).await;
+        assert_eq!(space.status, "awaiting_approval");
+        assert_eq!(space.cause, Some(CauseCode::RiskyEffectUnderAsk));
+    }
+
+    async fn block_row_control() -> wiremock::MockServer {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/internal/spaces/tool-gate-view"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {"tools": {"delete_account": {"level": "block", "source": "org_policy"}}}
+            })))
+            .mount(&server)
+            .await;
+        server
+    }
+
+    /// Enforce folds the ask with Control's level, so a `block` row refuses the call that the
+    /// early return would have paused. Needs `EXECUTION_CORE_SPACE_APPROVAL_GATE=enforce` in the
+    /// process environment (the mode is read from it per call and the crate forbids env mutation).
+    #[tokio::test]
+    #[ignore = "needs EXECUTION_CORE_SPACE_APPROVAL_GATE=enforce in the process environment"]
+    async fn enforce_defers_the_ask_into_one_fold_with_control() {
+        assert_eq!(
+            crate::space_gate::GateMode::from_env(),
+            crate::space_gate::GateMode::Enforce,
+            "run with EXECUTION_CORE_SPACE_APPROVAL_GATE=enforce"
+        );
+        let server = block_row_control().await;
+        crate::space_gate::tests_support::install(
+            crate::space_gate::tests_support::client_for(&server.uri()),
+        );
+        let (client, tokens) = unroutable_lease_context_parts();
+        let ctx = space_step_context(&client, &tokens);
+        let outcome = ask_posture_step("delete_account", Some(&ctx)).await;
+        crate::space_gate::tests_support::uninstall();
+        assert_ne!(outcome.status, "awaiting_approval", "the block row must win over the ask");
+        assert!(
+            outcome.error.contains("space_tool_policy: org_policy"),
+            "error: {}",
+            outcome.error
+        );
+        // A non-Space step is never folded: it still pauses.
+        assert_eq!(ask_posture_step("delete_account", None).await.status, "awaiting_approval");
+    }
+
+    /// Shadow reads the view and counts; it changes nothing, so the early return stands.
+    #[tokio::test]
+    #[ignore = "needs EXECUTION_CORE_SPACE_APPROVAL_GATE=shadow in the process environment"]
+    async fn shadow_changes_nothing() {
+        assert_eq!(
+            crate::space_gate::GateMode::from_env(),
+            crate::space_gate::GateMode::Shadow,
+            "run with EXECUTION_CORE_SPACE_APPROVAL_GATE=shadow"
+        );
+        let server = block_row_control().await;
+        crate::space_gate::tests_support::install(
+            crate::space_gate::tests_support::client_for(&server.uri()),
+        );
+        let (client, tokens) = unroutable_lease_context_parts();
+        let ctx = space_step_context(&client, &tokens);
+        let outcome = ask_posture_step("delete_account", Some(&ctx)).await;
+        crate::space_gate::tests_support::uninstall();
+        assert_eq!(outcome.status, "awaiting_approval");
+        assert_eq!(outcome.cause, Some(CauseCode::RiskyEffectUnderAsk));
+    }
 }
