@@ -8464,11 +8464,39 @@ mod tests {
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({"value": sync})))
             .mount(&application)
             .await;
+        // Control's member writer decides who may add or remove people: a viewer is refused there
+        // (`CanAdd`, room_role_forbidden), and the gateway relays that refusal unchanged.
+        let writer = || {
+            if role == "viewer" {
+                ResponseTemplate::new(403).set_body_json(json!({
+                    "error": {
+                        "code": "room_role_forbidden",
+                        "message": "your role in this room does not allow that",
+                    }
+                }))
+            } else {
+                ResponseTemplate::new(200).set_body_json(json!({
+                    "data": {"changed": true, "left": true, "role": "editor", "member_count": 2}
+                }))
+            }
+        };
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/v1/internal/spaces/space-room/members"))
+            .respond_with(writer())
+            .mount(&user_core)
+            .await;
+        Mock::given(wm_method("DELETE"))
+            .and(wm_path("/api/v1/internal/spaces/space-room/members/user-2"))
+            .respond_with(writer())
+            .mount(&user_core)
+            .await;
         let mut state = crate::tests::test_state(false);
         state.application_convex_url = application.uri();
         state.application_convex_service_key = "application-test-key".into();
         state.auth_core_url = auth.uri();
         state.user_core_url = user_core.uri();
+        // The Control member writer is the path under test; off, every call is a 404 feature_disabled.
+        state.space_features.membership_writer_api = true;
         let uri = if method == "DELETE" {
             "/api/v1/spaces/space-room/members/user-2"
         } else {
@@ -8523,8 +8551,8 @@ mod tests {
         );
     }
 
-    /// Application's list ahead of Control's roster is the safe direction, but
-    /// the caller must be told: the person is not a member yet.
+    /// Control has the roster, but Application could not reconcile the room's audience: the
+    /// add is reported with an unconfirmed audience and a warning, never as a settled success.
     #[tokio::test]
     async fn an_unconfirmed_roster_is_reported_rather_than_claimed_as_success() {
         let _env = crate::config::TEST_ENV_LOCK.lock().await;
@@ -8536,12 +8564,14 @@ mod tests {
         )
         .await;
 
-        assert_eq!(status, 502);
-        assert_eq!(body["error"]["code"], "room_membership_unconfirmed");
+        assert_eq!(status, 200);
+        assert_eq!(body["data"]["changed"], true);
+        assert_eq!(body["data"]["audience"]["state"], "unconfirmed");
+        assert_eq!(body["meta"]["warnings"][0], "room_audience_unconfirmed");
     }
 
-    /// Deciding who may read a room's shared record takes the same roles as
-    /// granting an agent access to it.
+    /// Control's member writer decides who may add or remove people. A viewer is refused there,
+    /// and the gateway relays that refusal without reaching Application.
     #[tokio::test]
     async fn a_viewer_cannot_add_or_remove_room_members() {
         let _env = crate::config::TEST_ENV_LOCK.lock().await;
@@ -8553,7 +8583,7 @@ mod tests {
                 room_membership_response("viewer", method, body, json!({"status": "applied"}))
                     .await;
             assert_eq!(status, 403, "{method} must be refused for a viewer");
-            assert_eq!(payload["error"]["code"], "space_role_cannot_create_agent");
+            assert_eq!(payload["error"]["code"], "room_role_forbidden");
             assert!(
                 application
                     .received_requests()
