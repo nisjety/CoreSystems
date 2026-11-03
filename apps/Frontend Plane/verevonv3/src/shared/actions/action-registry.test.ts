@@ -915,7 +915,8 @@ describe('action registry', () => {
     // ingestions and monitoring domains (job_control, start_agent_run, create_monitor, delete_monitor),
     // the six ingestions run and schedule controls (get_run_status, pause_run, resume_run, cancel_run,
     // pause_schedule, change_schedule_state) that replace run_schedule_action, and browser_run.steer.
-    expect(ids).toHaveLength(269)
+    // 270 after W3-E3.4-7 registered browser_download.send_to_knowledge (downloads drawer).
+    expect(ids).toHaveLength(270)
 
     const spaceIds = ids.filter((id) => id.startsWith('spaces.'))
     const first = ids.indexOf(spaceIds[0] as string)

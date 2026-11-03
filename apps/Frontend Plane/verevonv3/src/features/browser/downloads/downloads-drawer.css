@@ -1,0 +1,79 @@
+/* Downloads drawer of a browser session (E3.4-7). Colours come from the theme tokens, with fallbacks,
+   as in steer-input.css. Nothing here shows until the session reports a download. */
+
+.browser-downloads {
+  display: grid;
+  gap: 0.5rem;
+  padding: 0.5rem 0.75rem;
+  border-top: 1px solid var(--border, rgba(0, 0, 0, 0.12));
+  font-size: 0.8125rem;
+  color: var(--foreground, inherit);
+}
+
+.browser-downloads__header {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-weight: 600;
+}
+
+.browser-downloads__count {
+  color: var(--muted-foreground, #5f5f5f);
+  font-weight: 400;
+}
+
+.browser-downloads__zdr {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  margin: 0;
+  color: var(--muted-foreground, #5f5f5f);
+  font-size: 0.75rem;
+}
+
+.browser-downloads__list {
+  display: grid;
+  gap: 0.35rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.browser-downloads__item {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.25rem 0.5rem;
+  min-width: 0;
+}
+
+.browser-downloads__name {
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.browser-downloads__meta,
+.browser-downloads__status {
+  color: var(--muted-foreground, #5f5f5f);
+  font-size: 0.75rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.browser-downloads__button {
+  margin-left: auto;
+  padding: 0.2rem 0.5rem;
+  border: 1px solid var(--border, rgba(0, 0, 0, 0.2));
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.browser-downloads__button:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
