@@ -256,9 +256,12 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
   // legacy `mentionedAgentRef` above stays the path for Ask Verevon, skills and a room with the
   // flags off.
   const mention = createMentionState(() => props.spaceRef, () => props.replyTarget?.()?.threadId)
-  createEffect(() => {
-    mention.rebind(props.replyTarget?.()?.threadId)
-  })
+  createEffect(
+    () => props.replyTarget?.()?.threadId,
+    (threadId) => {
+      mention.rebind(threadId)
+    },
+  )
   const [mentionNotice, setMentionNotice] = createSignal<string | undefined>(undefined)
   const [addTarget, setAddTarget] = createSignal<AgentAddTarget | undefined>(undefined)
   const [installable, setInstallable] = createSignal<readonly InstallableSpaceAgent[] | undefined>(undefined)
@@ -301,27 +304,31 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
   const MARKDOWN_ROWS_MAX = 10
   // Grow with the text, two rows up to ten, then scroll. Measured from scrollHeight so wrapped lines
   // count; a layout-less environment measures zero and stays at two.
-  createEffect(() => {
-    text()
-    previewing()
-    const element = textareaRef
-    if (!element) return
-    if (!markdownOn()) {
+  createEffect(
+    () => ({ text: text(), previewing: previewing(), markdown: markdownOn() }),
+    () => {
+      const element = textareaRef
+      if (!element) return
+      if (!markdownOn()) {
+        element.rows = MARKDOWN_ROWS_MIN
+        return
+      }
       element.rows = MARKDOWN_ROWS_MIN
-      return
-    }
-    element.rows = MARKDOWN_ROWS_MIN
-    const lineHeight = Number.parseFloat(getComputedStyle(element).lineHeight)
-    if (!Number.isFinite(lineHeight) || lineHeight <= 0 || element.scrollHeight <= 0) return
-    const style = getComputedStyle(element)
-    const padding = (Number.parseFloat(style.paddingTop) || 0) + (Number.parseFloat(style.paddingBottom) || 0)
-    const needed = Math.ceil((element.scrollHeight - padding) / lineHeight)
-    element.rows = Math.max(MARKDOWN_ROWS_MIN, Math.min(MARKDOWN_ROWS_MAX, needed))
-  })
+      const lineHeight = Number.parseFloat(getComputedStyle(element).lineHeight)
+      if (!Number.isFinite(lineHeight) || lineHeight <= 0 || element.scrollHeight <= 0) return
+      const style = getComputedStyle(element)
+      const padding = (Number.parseFloat(style.paddingTop) || 0) + (Number.parseFloat(style.paddingBottom) || 0)
+      const needed = Math.ceil((element.scrollHeight - padding) / lineHeight)
+      element.rows = Math.max(MARKDOWN_ROWS_MIN, Math.min(MARKDOWN_ROWS_MAX, needed))
+    },
+  )
   // An emptied box (a sent message) leaves Preview.
-  createEffect(() => {
-    if (previewing() && (!markdownOn() || text().trim() === '')) setPreviewing(false)
-  })
+  createEffect(
+    () => previewing() && (!markdownOn() || text().trim() === ''),
+    (leavePreview) => {
+      if (leavePreview) setPreviewing(false)
+    },
+  )
   // What to clear once the in-flight turn is accepted; set only while drafts keep the words in the box.
   let acceptSend: (() => void) | undefined
   // The send path (in-flight handles, exchange state, Stop) lives in the send
@@ -610,23 +617,30 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
   props.registerFocusHandle?.(() => textareaRef?.focus())
   // A message waiting for the agent to be free goes out once the room's projection no longer shows
   // its thread working. Only on an observed room: absence of data is not idleness.
-  createEffect(() => {
-    const waiting = midRun.deferred()
-    if (!waiting || submitting() || !isSpaceObserved(props.spaceRef)) return
-    if (liveThreadsIn(props.spaceRef).some((thread) => thread.thread_id === waiting.threadId)) return
-    const ready = midRun.takeDeferred()
-    if (!ready) return
-    midRun.startTurn(false)
-    void pipeline.send({
-      content: ready.content,
-      mode: 'ask',
-      model: selectedModel(),
-      mentionedAgentRef: ready.mentionedAgentRef,
-      locale: i18n.locale(),
-      skills: ready.skills ?? [],
-      replyThreadId: ready.threadId,
-    })
-  })
+  createEffect(
+    () => ({
+      waiting: midRun.deferred(),
+      busy: submitting(),
+      observed: isSpaceObserved(props.spaceRef),
+      threads: liveThreadsIn(props.spaceRef),
+    }),
+    ({ waiting, busy, observed, threads }) => {
+      if (!waiting || busy || !observed) return
+      if (threads.some((thread) => thread.thread_id === waiting.threadId)) return
+      const ready = midRun.takeDeferred()
+      if (!ready) return
+      midRun.startTurn(false)
+      void pipeline.send({
+        content: ready.content,
+        mode: 'ask',
+        model: selectedModel(),
+        mentionedAgentRef: ready.mentionedAgentRef,
+        locale: i18n.locale(),
+        skills: ready.skills ?? [],
+        replyThreadId: ready.threadId,
+      })
+    },
+  )
 
   const candidates = createMemo<readonly MentionCandidate[]>(() => {
     const people: MentionCandidate[] = props.roster()
@@ -1069,7 +1083,10 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
           }
         }
       } catch (error) {
-        setAttachNotice(error instanceof Error ? error.message : i18n.tr('Kunne ikke lese vedleggene.', 'Could not read the attachments.'))
+        setAttachNotice(translateApiError(error, i18n.tr, {
+          no: 'Kunne ikke lese vedleggene.',
+          en: 'Could not read the attachments.',
+        }))
         return
       } finally {
         setPreparing(false)
@@ -1514,7 +1531,7 @@ ${managers.map((m) => `@${m.label}`).join(' ')} ${request}`
                 </li>
               )}
             </For>
-            <Show when={skillQuery() !== undefined && pickerItems().length === 0}>
+            <Show when={skillQuery() !== undefined && visibleSkills().length === 0}>
               <li class="verevon-space-room-mentions__empty" role="presentation">
                 {skillEmptyText()}
               </li>

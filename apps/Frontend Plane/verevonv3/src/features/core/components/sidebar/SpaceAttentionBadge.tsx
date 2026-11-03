@@ -1,4 +1,4 @@
-import { Show, createSignal, onCleanup } from 'solid-js'
+import { Show, createSignal, onSettled } from 'solid-js'
 
 import { announce } from '@/shared/a11y/announcer'
 import { markAllSpacesRead } from '@/shared/api/spaces-attention-client'
@@ -19,7 +19,10 @@ import './space-attention-badge.css'
  */
 export function useSpaceAttentionPoller(): void {
   const i18n = useI18n()
-  onCleanup(retainSpaceAttention(i18n.tr))
+  // Joined once settled, not in the component body: starting the poller writes signals (its clock and
+  // its first state), and Solid 2 refuses a write inside a component body (REACTIVE_WRITE_IN_OWNED_SCOPE).
+  // The returned release is the cleanup.
+  onSettled(() => retainSpaceAttention(i18n.tr))
 }
 
 function Mark(props: { badge: AttentionBadge; strong: boolean; stale: boolean; label: string }) {

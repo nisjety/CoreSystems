@@ -26,13 +26,17 @@ vi.mock('@/shared/session/session-store', () => ({
   getSession: () => ({ activeOrg: { id: 'org-1', name: 'Test', role: 'admin' } }),
 }))
 const spacesClient = vi.hoisted(() => ({
+  searchSpaceMessages: vi.fn(() => new Promise(() => {})),
   updateSpaceThreadPresentation: vi.fn(),
   // WS01-S6 human posts.
   createSpacePost: vi.fn(),
   replyInSpaceThread: vi.fn(),
   SPACE_POST_MAX_CHARS_DEFAULT: 8000,
 }))
-vi.mock('@/shared/api/spaces-client', () => spacesClient)
+vi.mock('@/shared/api/spaces-client', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/shared/api/spaces-client')>()),
+  ...spacesClient,
+}))
 const skillsClient = vi.hoisted(() => ({ listAvailableSkills: vi.fn(), MAX_PICKED_SKILLS: 4 }))
 vi.mock('@/shared/api/skills-client', () => skillsClient)
 vi.mock('@/features/chat/components/ChatMessages', () => ({
@@ -615,14 +619,19 @@ describe('SpaceRoomComposer — `/` picks a skill (later tier)', () => {
     flush()
     expect(skillsClient.listAvailableSkills).toHaveBeenCalledTimes(1)
 
-    const options = await screen.findAllByRole('option')
-    expect(options.map((option) => option.textContent)).toEqual([
-      'HMS-rundeOrganisasjon',
-      'InnkjøpsrutineOrganisasjon',
-      'Min sjekklistePersonlig',
-    ])
-    // No "this room" badge exists to give: the registry has no Space scope.
-    expect(screen.queryByText(/rommet/i)).toBeNull()
+    // The platform commands list first (WS13-S7); the skills follow once their catalogue has loaded.
+    await screen.findByRole('option', { name: /HMS-runde/ })
+    const labels = screen.getAllByRole('option').map((option) => option.textContent ?? '')
+    expect(labels).toEqual(
+      expect.arrayContaining(['HMS-rundeOrganisasjon', 'InnkjøpsrutineOrganisasjon', 'Min sjekklistePersonlig']),
+    )
+    // No "this room" badge exists to give: the registry has no Space scope. The platform command hints
+    // legitimately say "rommet", so only the skill rows are checked.
+    const skillRows = screen
+      .getAllByRole('option')
+      .filter((option) => /HMS-runde|Innkjøpsrutine|sjekkliste/.test(option.textContent ?? ''))
+    expect(skillRows).toHaveLength(3)
+    for (const row of skillRows) expect(row.textContent).not.toMatch(/rommet/i)
   })
 
   it('filters by name, picks with the keyboard, and turns the pick into a chip instead of text', async () => {
@@ -651,7 +660,7 @@ describe('SpaceRoomComposer — `/` picks a skill (later tier)', () => {
 
     fireEvent.keyDown(textarea(), { key: 'ArrowDown' })
     flush()
-    expect(screen.getByRole('option', { name: /Innkjøpsrutine/ }).getAttribute('aria-selected')).toBe('true')
+    expect(screen.getAllByRole('option')[1]?.getAttribute('aria-selected')).toBe('true')
     expect(textarea().getAttribute('aria-activedescendant')).toMatch(/-1$/)
 
     fireEvent.keyDown(textarea(), { key: 'Escape' })
@@ -706,7 +715,7 @@ describe('SpaceRoomComposer — `/` picks a skill (later tier)', () => {
     fireEvent.input(textarea(), { target: { value: '/' } })
     flush()
     expect(await screen.findByText(/kunne ikke hentes/)).toBeTruthy()
-    expect(screen.queryByRole('option')).toBeNull()
+    expect(screen.queryByRole('option', { name: /Innkjøpsrutine|HMS-runde|sjekkliste/ })).toBeNull()
   })
 
   it('does not list a skill twice once it is picked', async () => {

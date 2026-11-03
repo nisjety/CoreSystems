@@ -6,11 +6,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 // denial presenter's words. The client is mocked: no request is made.
 
 const spacesClient = vi.hoisted(() => ({
+  searchSpaceMessages: vi.fn(() => new Promise(() => {})),
   getSpaceThreadTranscript: vi.fn(),
   loadSpaceTranscript: vi.fn(),
   updateSpaceThreadPresentation: vi.fn(),
 }))
-vi.mock('@/shared/api/spaces-client', () => spacesClient)
+vi.mock('@/shared/api/spaces-client', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/shared/api/spaces-client')>()),
+  ...spacesClient,
+}))
 vi.mock('@/features/chat/components/ChatMessages', () => ({
   ChatMarkdown: (props: { content: string }) => <p>{props.content}</p>,
 }))
@@ -169,7 +173,8 @@ describe('SpaceRoomTimeline reading: the new messages divider', () => {
     await screen.findByText('Ny to')
     const dividers = document.querySelectorAll('[role="separator"]')
     expect(dividers.length).toBe(1)
-    expect(dividers[0]?.getAttribute('aria-label')).toBe('Nye meldinger')
+    // The divider states how many are new ("2 nye"), so the count is in its label too.
+    expect(dividers[0]?.getAttribute('aria-label')).toBe('2 nye')
     // Order in the list: old post, divider, first new post, second new post.
     const items = [...document.querySelectorAll('.verevon-room-timeline > li')]
     const kinds = items.map((item) =>

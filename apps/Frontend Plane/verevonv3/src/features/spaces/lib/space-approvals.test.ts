@@ -9,7 +9,10 @@ const orchestration = vi.hoisted(() => ({
   cancelRun: vi.fn(),
 }))
 
-vi.mock('@/shared/api/orchestration-client', () => orchestration)
+vi.mock('@/shared/api/orchestration-client', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/shared/api/orchestration-client')>()),
+  ...orchestration,
+}))
 
 const { describeApproval, pendingApprovals, readPendingApprovals, settleApproval } = await import(
   './space-approvals'
@@ -69,11 +72,11 @@ describe('describeApproval', () => {
 })
 
 describe('settleApproval', () => {
-  it('approving records the decision and resumes the run', async () => {
+  it('approving records the decision and never resumes the run from the client (WS10 S1)', async () => {
     orchestration.decideApproval.mockResolvedValue({ id: 'ap-1', status: 'GRANTED' })
     const outcome = await settleApproval({ approvalId: 'ap-1', runId: 'run-1', decision: 'approve' })
     expect(outcome).toBe('granted')
-    expect(orchestration.resumeRun).toHaveBeenCalledWith('run-1', undefined)
+    expect(orchestration.resumeRun).not.toHaveBeenCalled()
     expect(orchestration.cancelRun).not.toHaveBeenCalled()
   })
 
@@ -97,12 +100,12 @@ describe('settleApproval', () => {
 
   // The expensive mistake at a gate is telling someone their approval failed
   // when it actually landed.
-  it('re-reads after an error and follows through when the decision did land', async () => {
+  it('re-reads after an error and reports the grant when the decision did land', async () => {
     orchestration.decideApproval.mockRejectedValue(new ApiError('gateway', 502, null))
     orchestration.listApprovals.mockResolvedValue([{ id: 'ap-1', status: 'GRANTED' }])
     const outcome = await settleApproval({ approvalId: 'ap-1', runId: 'run-1', decision: 'approve' })
     expect(outcome).toBe('granted')
-    expect(orchestration.resumeRun).toHaveBeenCalledWith('run-1', undefined)
+    expect(orchestration.resumeRun).not.toHaveBeenCalled()
   })
 
   it('reports someone else deciding it first, and does not touch the run', async () => {

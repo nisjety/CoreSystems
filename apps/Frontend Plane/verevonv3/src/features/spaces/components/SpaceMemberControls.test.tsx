@@ -5,6 +5,7 @@ import { ApiError } from '@/shared/api/http'
 
 const orgClient = vi.hoisted(() => ({ listOrganizationMembers: vi.fn() }))
 const spacesClient = vi.hoisted(() => ({
+  searchSpaceMessages: vi.fn(() => new Promise(() => {})),
   addSpaceMember: vi.fn(),
   removeSpaceMember: vi.fn(),
   changeSpaceMemberRole: vi.fn(),
@@ -13,7 +14,10 @@ const spacesClient = vi.hoisted(() => ({
 }))
 
 vi.mock('@/shared/api/organization-client', () => orgClient)
-vi.mock('@/shared/api/spaces-client', () => spacesClient)
+vi.mock('@/shared/api/spaces-client', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/shared/api/spaces-client')>()),
+  ...spacesClient,
+}))
 
 const { SpaceLeaveRoomButton, SpaceMemberControls, SpaceMemberRemoveButton, SpaceMemberRoleSelect } = await import(
   './SpaceMemberControls'
@@ -491,7 +495,8 @@ describe('SpaceMemberControls people search (WS04-S3)', () => {
   it('shows a typed error, not an empty list, for a disabled, unavailable or rate-limited search', async () => {
     const cases: Array<[number, string, string]> = [
       [404, 'feature_disabled', 'Denne funksjonen er ikke slått på for deg ennå.'],
-      [503, 'directory_unavailable', 'Personsøket er utilgjengelig akkurat nå. Prøv igjen om litt.'],
+      // A typed code reads the shared catalogue (errors.ts), the same sentence the directory says everywhere.
+      [503, 'directory_unavailable', 'Katalogen er utilgjengelig akkurat nå. Prøv igjen om litt.'],
       // `rate_limited` is one app-wide sentence (retryable); a 429 with no retry hint ends with "Prøv igjen om litt."
       [429, 'rate_limited', 'Det kommer for mange forespørsler akkurat nå. Prøv igjen om litt.'],
     ]
@@ -524,7 +529,7 @@ describe('SpaceMemberControls people search (WS04-S3)', () => {
     openPicker()
     await screen.findByText('Nina Berg')
     screen.getByRole('button', { name: 'Vis flere' }).click()
-    expect((await screen.findByRole('alert')).textContent).toContain('Personsøket er utilgjengelig')
+    expect((await screen.findByRole('alert')).textContent).toContain('Katalogen er utilgjengelig')
     expect(screen.getByText('Nina Berg')).toBeTruthy()
   })
 

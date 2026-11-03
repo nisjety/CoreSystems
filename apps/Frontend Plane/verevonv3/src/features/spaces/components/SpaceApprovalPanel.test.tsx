@@ -58,13 +58,12 @@ describe('SpaceApprovalPanel', () => {
     approve.click()
 
     await waitFor(() => expect(approvals.settleApproval).toHaveBeenCalled())
-    expect(approvals.settleApproval).toHaveBeenCalledWith({
-      approvalId: 'ap-1',
-      runId: 'run-1',
-      decision: 'approve',
-    })
+    expect(approvals.settleApproval).toHaveBeenCalledWith(
+      expect.objectContaining({ approvalId: 'ap-1', runId: 'run-1', decision: 'approve' }),
+    )
     await waitFor(() => expect(onSettled).toHaveBeenCalled())
-    expect(await screen.findByText(/Kjøringen fortsetter/)).toBeTruthy()
+    // The copy never promises the run continues (WS10 S1): a plain grant says the decision is recorded.
+    expect(await screen.findByText(/Godkjent\. Avgjørelsen er registrert/)).toBeTruthy()
   })
 
   // The room shows other members' work. Seeing that something waits without
@@ -73,7 +72,7 @@ describe('SpaceApprovalPanel', () => {
     approvals.readPendingApprovals.mockResolvedValue({ approvals: [], refused: true })
     render(() => <SpaceApprovalPanel runId="run-1" />)
 
-    expect(await screen.findByText(/tilhører et annet medlem/)).toBeTruthy()
+    expect(await screen.findByText(/Venter på medlemmet som startet kjøringen/)).toBeTruthy()
     expect(screen.queryByRole('button', { name: 'Godkjenn' })).toBeNull()
   })
 
