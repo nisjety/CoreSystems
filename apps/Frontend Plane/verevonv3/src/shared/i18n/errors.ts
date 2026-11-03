@@ -360,6 +360,22 @@ export const ERROR_COPY: Record<string, ErrorCopy> = {
     en: 'The page took too long to respond. Try a more specific sub-page, or another source.',
   },
 
+  // Fetch failures Quarry names on a failed scrape (gateway `knowledge/shared.rs`, `fetch_sub_code_refusal`).
+  // They arrive only with the fetch sub-codes switched on in quarry-edge. Other failures keep scrape_failed and scrape_timeout.
+  scrape_host_not_found: {
+    no: 'Vi fant ikke adressen til nettstedet. Sjekk lenken og prøv igjen.',
+    en: 'We could not find the address of the site. Check the link and try again.',
+  },
+  scrape_unreachable: {
+    no: 'Nettstedet svarer ikke akkurat nå.',
+    en: 'The site is not responding right now.',
+    retryable: true,
+  },
+  scrape_tls_failed: {
+    no: 'Det var ikke mulig å opprette en sikker forbindelse til nettstedet. Prøv en annen kilde.',
+    en: 'A secure connection to the site could not be made. Try another source.',
+  },
+
   // Refusals the gateway answers before any upstream call: the address or the
   // request itself is wrong, so the person fixes it rather than retries.
   invalid_url: {

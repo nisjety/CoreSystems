@@ -197,6 +197,19 @@ Quarry consumer: `apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_po
 - **Tests on your side:** derive refuses a parent that is not a live run grant, an owner mismatch, nine listed hosts, a non-canonical host, `conversation`/`always` under ZDR, and any issuance when the claim says `browser.consent.origin: disabled`.
 - **When:** before `QUARRY_EDGE__ORIGIN_CONSENT` is switched on anywhere (OD13: also not before counsel signs off the consent wording). Until then Quarry refuses every extension with 403 before any broker call, so nothing breaks without it.
 
+## W3-E3.6-7 (lane b, w23): OCR route and PII model tier on the WS16 service lane
+
+Quarry consumer: `apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/mp_client.rs` (`ocr_pages_for_org`, `pii_model_for_org`), lane b, code only, dark behind `QUARRY_EDGE__OCR` and `QUARRY_EDGE__PII_MODEL` (both default off), refused locally under ZDR. Built against the contract below; please confirm or say what differs.
+
+- **Service-route rows (model-gateway `auth.rs` / WS16.S1 `SERVICE_ROUTE_GRANTS` and its golden):** allow the Quarry service principal on `POST /v1/ai/documents/layout` and `POST /v1/ai/language/pii` (today services are allowed only on `/v1/ai/chat` and `/v1/ai/embeddings`). One reviewed row per route (plan E3.6 / WS16 "one reviewed PR per route"). Both need the `x-inference-authorization` bearer (`aud=inference-core`) as today.
+- **OCR request Quarry sends:** `{ content_base64, content_type: "application/pdf", pages: "2,5,7" (1-based, ascending), locale? }`, at most 20 pages and 16 MiB of PDF per call. Confirm `pages` is honoured by prebuilt-layout so only those pages are processed and billed.
+- **OCR answer Quarry reads:** `status` (`succeeded`), `content`, `pages_processed`, `model_used`, `provider_used`. Quarry fails closed when `pages_processed` is below the pages asked. Confirm `pages_processed` counts the pages processed in this call (not the document's page total), and that a provider partial failure is not reported as `succeeded`.
+- **PII request Quarry sends:** `{ texts: [..] (1..=25, each 1..=5120 chars), language? }`; no `operation` (the route fixes `pii`).
+- **PII answer Quarry reads:** `results[].id` and `results[].redacted_text` only (never entity offsets). Quarry expects exactly one result per text with ids `"1".."n"` (inference-core `provider/language.rs` numbers them so); a provider per-document error must surface as a non-2xx or a missing item, never as an item with `redacted_text: ""` that looks like a redaction of an empty text (Quarry treats an empty `redacted_text` as a failure either way).
+- **ZDR:** Quarry never calls either route under ZDR. Please keep both routes refusing a ZDR principal with 412 (`zdr_posture::decide_content_route`), which Quarry maps to `ZdrRefused`.
+- **Grant (Control Plane, DR-15.1 / OD-1):** Auth Core manifest rows for the two lanes (audiences model-gateway and inference-core, retention `tenant`), so the Dynamic token path can replace `LaneNotGranted`. Quarry adds its `ServiceTokenRequest` rows when the grant lands; none are added now.
+- **When:** before `QUARRY_EDGE__OCR` or `QUARRY_EDGE__PII_MODEL` is switched on anywhere. Until then both lanes refuse before any send, so nothing breaks without it.
+
 ## W3-E3.3-g (lane b, w23): steer inbox on the browser-agent run (Model Plane)
 
 Frontend consumer: `apps/Frontend Plane/verevonv3/src/features/browser/dock/steer-input.ts` and `SteerInput.tsx` (lane b, code only, dark behind `VITE_CHAT_BROWSER_STEER`, default off). The action contract is `browser_run.steer` in `apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts`. Built against the contract below; please confirm or say what differs.

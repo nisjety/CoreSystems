@@ -335,6 +335,7 @@ export const MODEL_ACCESS: Readonly<Record<ActionId, ModelAccessEntry>> = {
   'browser_evidence.compile_procedure': exempt('no_owner_executor', 'external_write'),
   'browser_session.keepalive': exempt('no_owner_executor', 'external_write'),
   'browser.blocked.try_other_source': exempt('no_owner_executor', 'external_write'),
+  'browser_download.send_to_knowledge': exempt('no_owner_executor', 'external_write'),
   'router_policy.update': exempt('no_owner_executor', 'external_write'),
   'audit.verify_chain': exempt('no_owner_executor', 'external_write'),
   'audit.list_events': exempt('no_owner_executor', 'read'),
