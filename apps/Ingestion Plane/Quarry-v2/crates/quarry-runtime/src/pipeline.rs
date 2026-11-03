@@ -1456,6 +1456,8 @@ impl PageRunner {
             status: resp.status,
             fetched_at,
             fingerprint: fp.0.clone(),
+            // E3.5-4: the normalised text fingerprint rides next to the raw one.
+            text_fp: Some(text_fp.0.clone()),
             formats: OutputFormats {
                 html: if is_doc { None } else { html_fmt.clone() },
                 markdown: md_fmt.clone(),

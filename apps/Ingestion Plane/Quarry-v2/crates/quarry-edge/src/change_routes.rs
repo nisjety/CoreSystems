@@ -43,6 +43,12 @@ pub struct CheckRequest {
     #[serde(default)]
     #[allow(dead_code)] // read only under `postgres-queue`; wired in follow-up
     pub fresh_fingerprint: Option<String>,
+    /// E3.5-4: optional normalised text fingerprint of the same fetch (`text_fp` of the
+    /// output). With `QUARRY_EDGE__CHANGE_TEXT_FP` on it is compared first; a baseline written
+    /// under the other scheme is compared with the other fingerprint.
+    #[serde(default)]
+    #[allow(dead_code)] // read only under `postgres-queue`
+    pub fresh_text_fingerprint: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -73,6 +79,81 @@ fn validate_url(s: &str) -> Result<(), QuarryError> {
         .map_err(|e| QuarryError::new(ErrorCode::BadRequest, format!("invalid url: {e}")))
 }
 
+// ============================================================================
+// E3.5-4: the text-fingerprint switch.
+//
+// A monitor compared the raw-byte hash of the body, so a rotating nonce, a CSRF token or a
+// reflowed attribute read as a change. With `QUARRY_EDGE__CHANGE_TEXT_FP` on (default off) the
+// recorder compares the normalised text fingerprint instead and keeps it on the baseline with
+// a `text:` mark, so the scheme of every stored baseline is known. The raw-byte fingerprint is
+// kept as the secondary (`raw_fingerprint` on the response, and the fallback when the caller
+// sent no text fingerprint). The first check after the scheme flips, in either direction,
+// re-baselines silently: the new baseline is saved, nothing is diffed, the record reaches the
+// event log and the webhook as unchanged, so a deploy (or a rollback) is not a flood of
+// change events.
+// ============================================================================
+
+/// Env flag of the text-fingerprint switch. Default off: the raw-byte fingerprint is compared.
+pub const ENV_CHANGE_TEXT_FP: &str = "QUARRY_EDGE__CHANGE_TEXT_FP";
+
+/// Mark on a baseline fingerprint that holds a text fingerprint.
+pub const TEXT_FP_PREFIX: &str = "text:";
+
+/// Whether the text-fingerprint switch is on. Read per request, like the text-diff flag.
+pub fn change_text_fp_enabled() -> bool {
+    text_fp_flag_is_on(std::env::var(ENV_CHANGE_TEXT_FP).ok().as_deref())
+}
+
+/// The flag grammar of `change_diff::flag_is_on` (that module is `postgres-queue` only).
+pub fn text_fp_flag_is_on(value: Option<&str>) -> bool {
+    matches!(
+        value.map(str::trim),
+        Some("1" | "true" | "TRUE" | "yes" | "YES" | "on" | "ON")
+    )
+}
+
+/// Whether a baseline fingerprint was written under the text scheme.
+pub fn is_text_fingerprint(fp: &str) -> bool {
+    fp.starts_with(TEXT_FP_PREFIX)
+}
+
+/// The baseline form of a text fingerprint (`text:blake3:...`). Idempotent.
+pub fn text_baseline_fingerprint(text_fp: &str) -> String {
+    let fp = text_fp.trim();
+    if is_text_fingerprint(fp) {
+        fp.to_string()
+    } else {
+        format!("{TEXT_FP_PREFIX}{fp}")
+    }
+}
+
+/// True when the stored baseline and the fresh fingerprint use different schemes: comparing
+/// them says nothing about the page, so the check re-baselines instead of reporting a change.
+pub fn is_scheme_switch(prev: &str, fresh: &str) -> bool {
+    is_text_fingerprint(prev) != is_text_fingerprint(fresh)
+}
+
+/// The fingerprint the recorder compares and saves: the marked text fingerprint when the flag
+/// is on and one was sent, else the raw-byte one (an older orchestrator, or the flag off).
+pub fn record_fingerprint(raw: &str, text: Option<&str>, text_fp_on: bool) -> String {
+    match text.map(str::trim).filter(|t| !t.is_empty()) {
+        Some(t) if text_fp_on => text_baseline_fingerprint(t),
+        _ => raw.to_string(),
+    }
+}
+
+/// The fingerprints `POST /v1/change/check` may compare, preferred first. The second is used
+/// only when the latest baseline was written under the other scheme.
+pub fn check_candidates(raw: Option<&str>, text: Option<&str>, text_fp_on: bool) -> Vec<String> {
+    let raw = raw.map(str::trim).filter(|r| !r.is_empty()).map(str::to_string);
+    let text = text
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .map(text_baseline_fingerprint);
+    let ordered = if text_fp_on { [text, raw] } else { [raw, text] };
+    ordered.into_iter().flatten().collect()
+}
+
 pub async fn check(
     State(state): State<AppState>,
     Extension(claims): Extension<crate::auth::Claims>,
@@ -91,7 +172,14 @@ pub async fn check(
 
     #[cfg(feature = "postgres-queue")]
     if let Some(store) = state.baseline_store.as_ref() {
-        let fresh = req.fresh_fingerprint.as_deref().ok_or_else(|| {
+        // E3.5-4: the text fingerprint first when the switch is on; the raw-byte one stays
+        // the secondary for a baseline written before the switch.
+        let candidates = check_candidates(
+            req.fresh_fingerprint.as_deref(),
+            req.fresh_text_fingerprint.as_deref(),
+            change_text_fp_enabled(),
+        );
+        let fresh = candidates.first().ok_or_else(|| {
             err_response(
                 &request_id,
                 QuarryError::new(
@@ -100,10 +188,23 @@ pub async fn check(
                 ),
             )
         })?;
-        let record = store
+        let mut record = store
             .compare_snapshot(&claims.org_id, &req.url, fresh)
             .await
             .map_err(|e| err_response(&request_id, e))?;
+        if let Some(other) = candidates.get(1) {
+            let switched = record.status == quarry_core::change_history::ChangeStatus::Changed
+                && record
+                    .prev_baseline
+                    .as_ref()
+                    .map_or(false, |b| is_scheme_switch(&b.fingerprint, fresh));
+            if switched {
+                record = store
+                    .compare_snapshot(&claims.org_id, &req.url, other)
+                    .await
+                    .map_err(|e| err_response(&request_id, e))?;
+            }
+        }
         return Ok(Json(Envelope::ok(request_id, record)));
     }
 
@@ -518,6 +619,12 @@ pub struct RecordRequest {
     #[serde(default)]
     #[allow(dead_code)] // read only under `postgres-queue` in record_core
     pub markdown_artifact_id: Option<String>,
+    /// E3.5-4: the normalised text fingerprint of the fresh fetch (`text_fp` of `run_page`).
+    /// Compared and saved instead of `fresh_fingerprint` with `QUARRY_EDGE__CHANGE_TEXT_FP`
+    /// on; ignored with it off. Absent from an older orchestrator: the raw one is compared.
+    #[serde(default)]
+    #[allow(dead_code)] // read only under `postgres-queue` in record_core_fp
+    pub fresh_text_fingerprint: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -532,6 +639,14 @@ pub struct RecordResponse {
     pub baseline_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub diff_id: Option<String>,
+    /// E3.5-4: the raw-byte fingerprint of the fetch when `fingerprint` is the text one (the
+    /// secondary). Empty, and omitted, when the raw one was compared.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub raw_fingerprint: String,
+    /// E3.5-4: true on the first check after the fingerprint scheme flipped: a new baseline
+    /// was saved silently, `status` is `unchanged` and no change event or webhook followed.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub rebaselined: bool,
 }
 
 /// Returns true when the edge is running with auth dev-bypass — used to let
@@ -627,12 +742,14 @@ pub async fn record_internal(
     #[cfg(feature = "postgres-queue")]
     if let Some(store) = state.baseline_store.as_ref() {
         let text_diff = crate::change_diff::change_text_diff_enabled();
+        let text_fp = change_text_fp_enabled();
         let resp = record_check(
             &state,
             store.as_ref(),
             state.artifacts.as_ref(),
             &req,
             text_diff,
+            text_fp,
         )
         .await
         .map_err(|e| err_response(&request_id, e))?;
@@ -657,8 +774,9 @@ async fn record_check(
     artifacts: &dyn quarry_runtime::artifact_store::ArtifactStore,
     req: &RecordRequest,
     text_diff: bool,
+    text_fp: bool,
 ) -> Result<RecordResponse, QuarryError> {
-    let (resp, record, run_kind) = record_core(store, artifacts, req, text_diff).await?;
+    let (resp, record, run_kind) = record_core_fp(store, artifacts, req, text_diff, text_fp).await?;
     let zdr = quarry_core::zdr::ZdrMode::from(req.zdr.unwrap_or(false));
     crate::change_webhook::emit_change_side_effects(state, &record, run_kind, zdr).await;
     Ok(resp)
@@ -673,12 +791,18 @@ async fn record_check(
 /// INNH-4 applies: the baseline keeps the fetch's markdown artifact, a change stores the JSON
 /// paragraph diff (format `json`), and the record that goes to the event log and the webhook
 /// carries `new_baseline` and `diff_id`.
+///
+/// `text_fp` is `QUARRY_EDGE__CHANGE_TEXT_FP` (E3.5-4). Off, or with no text fingerprint in the
+/// request, the raw-byte fingerprint is compared as before. On, the marked text fingerprint is
+/// compared and saved; the first check against a baseline of the other scheme re-baselines
+/// silently (see the E3.5-4 section above).
 #[cfg(feature = "postgres-queue")]
-async fn record_core(
+async fn record_core_fp(
     store: &dyn crate::change_diff::ChangeStore,
     artifacts: &dyn quarry_runtime::artifact_store::ArtifactStore,
     req: &RecordRequest,
     text_diff: bool,
+    text_fp: bool,
 ) -> Result<
     (
         RecordResponse,
@@ -693,10 +817,22 @@ async fn record_core(
     // `Id<X marker>`); `X::new()` mints one and `.ulid()` is the raw ULID.
     use quarry_core::ids::kinds::{ArtifactKind, RunKind};
 
+    let fresh_fp = record_fingerprint(
+        &req.fresh_fingerprint,
+        req.fresh_text_fingerprint.as_deref(),
+        text_fp,
+    );
     let mut record = store
-        .compare_snapshot(&req.org_id, &req.url, &req.fresh_fingerprint)
+        .compare_snapshot(&req.org_id, &req.url, &fresh_fp)
         .await?;
     let now = Utc::now();
+    // E3.5-4: a baseline of the other scheme cannot be compared with this fingerprint. The check
+    // saves the new baseline and reports unchanged, with no diff and no change event.
+    let rebaselined = record.status == ChangeStatus::Changed
+        && record
+            .prev_baseline
+            .as_ref()
+            .map_or(false, |b| is_scheme_switch(&b.fingerprint, &fresh_fp));
 
     let prev_fingerprint = record
         .prev_baseline
@@ -710,6 +846,7 @@ async fn record_core(
     let run_kind: Option<RunKind> = req.run_id.parse().ok();
 
     let status_str = match record.status {
+        _ if rebaselined => "unchanged",
         ChangeStatus::New => "new",
         ChangeStatus::Unchanged => "unchanged",
         ChangeStatus::Changed => "changed",
@@ -718,11 +855,17 @@ async fn record_core(
 
     let mut resp = RecordResponse {
         status: status_str.to_string(),
-        changed: record.status == ChangeStatus::Changed,
-        fingerprint: req.fresh_fingerprint.clone(),
+        changed: record.status == ChangeStatus::Changed && !rebaselined,
+        fingerprint: fresh_fp.clone(),
         prev_fingerprint,
         baseline_id: String::new(),
         diff_id: None,
+        raw_fingerprint: if fresh_fp == req.fresh_fingerprint {
+            String::new()
+        } else {
+            req.fresh_fingerprint.clone()
+        },
+        rebaselined,
     };
 
     // Persist a new baseline for New or Changed; Unchanged/Unreachable persist
@@ -754,7 +897,7 @@ async fn record_core(
             baseline_id: baseline_id.clone(),
             org_id: req.org_id.clone(),
             source_url: req.url.clone(),
-            fingerprint: req.fresh_fingerprint.clone(),
+            fingerprint: fresh_fp.clone(),
             artifact_id: markdown_id,
             // Chain from the already-loaded prev — no second load_latest.
             prev_baseline_id: record.prev_baseline.as_ref().map(|b| b.baseline_id.clone()),
@@ -767,8 +910,8 @@ async fn record_core(
     }
 
     // On Changed, persist a diff record. DiffRecord.artifact_id is required, so
-    // store the diff body first.
-    if record.status == ChangeStatus::Changed {
+    // store the diff body first. A silent re-baseline (E3.5-4) stores none.
+    if record.status == ChangeStatus::Changed && !rebaselined {
         let prev = record.prev_baseline.as_ref().ok_or_else(|| {
             QuarryError::new(ErrorCode::Internal, "changed status without prev baseline")
         })?;
@@ -802,13 +945,13 @@ async fn record_core(
             // records the fingerprint transition.
             let summary = format!(
                 "content fingerprint changed: {} → {}",
-                prev.fingerprint, req.fresh_fingerprint
+                prev.fingerprint, fresh_fp
             );
             let handle = artifacts
                 .put(
                     &req.org_id,
                     &artifact_run,
-                    &req.fresh_fingerprint,
+                    &fresh_fp,
                     "raw",
                     summary.clone().into_bytes(),
                 )
@@ -837,7 +980,31 @@ async fn record_core(
         record.diff_id = resp.diff_id.clone();
     }
 
+    // E3.5-4: a silent re-baseline reaches the event log and the webhook as unchanged, so
+    // `emit_change_side_effects` emits nothing for it.
+    if rebaselined {
+        record.status = ChangeStatus::Unchanged;
+    }
+
     Ok((resp, record, run_kind))
+}
+
+/// The recorder as it is with `QUARRY_EDGE__CHANGE_TEXT_FP` off (the existing tests' entry).
+#[cfg(all(test, feature = "postgres-queue"))]
+async fn record_core(
+    store: &dyn crate::change_diff::ChangeStore,
+    artifacts: &dyn quarry_runtime::artifact_store::ArtifactStore,
+    req: &RecordRequest,
+    text_diff: bool,
+) -> Result<
+    (
+        RecordResponse,
+        ChangeRecord,
+        Option<quarry_core::ids::kinds::RunKind>,
+    ),
+    QuarryError,
+> {
+    record_core_fp(store, artifacts, req, text_diff, false).await
 }
 
 #[cfg(test)]
@@ -933,6 +1100,100 @@ mod tests {
         let s = serde_json::to_string(&r).unwrap();
         assert!(s.contains("\"request_id\":\"chg_"));
         assert!(s.contains("\"accepted\":true"));
+    }
+
+    // ---- W3-E3.5-4: text-fingerprint switch ----
+
+    #[test]
+    fn the_text_fp_flag_reads_the_usual_grammar_and_defaults_off() {
+        assert!(!text_fp_flag_is_on(None));
+        assert!(!text_fp_flag_is_on(Some("")));
+        assert!(!text_fp_flag_is_on(Some("0")));
+        assert!(!text_fp_flag_is_on(Some("off")));
+        assert!(text_fp_flag_is_on(Some("1")));
+        assert!(text_fp_flag_is_on(Some(" true ")));
+        assert!(text_fp_flag_is_on(Some("on")));
+        assert_eq!(ENV_CHANGE_TEXT_FP, "QUARRY_EDGE__CHANGE_TEXT_FP");
+    }
+
+    #[test]
+    fn a_text_fingerprint_is_marked_once_and_recognised() {
+        let marked = text_baseline_fingerprint("blake3:t");
+        assert_eq!(marked, "text:blake3:t");
+        assert_eq!(text_baseline_fingerprint(&marked), marked);
+        assert!(is_text_fingerprint(&marked));
+        assert!(!is_text_fingerprint("blake3:t"));
+    }
+
+    #[test]
+    fn the_recorder_compares_the_text_fingerprint_only_with_the_flag_and_a_value() {
+        assert_eq!(record_fingerprint("blake3:r", Some("blake3:t"), true), "text:blake3:t");
+        assert_eq!(record_fingerprint("blake3:r", Some("blake3:t"), false), "blake3:r");
+        assert_eq!(record_fingerprint("blake3:r", None, true), "blake3:r");
+        assert_eq!(record_fingerprint("blake3:r", Some("  "), true), "blake3:r");
+    }
+
+    #[test]
+    fn a_scheme_switch_is_either_direction_and_never_within_one_scheme() {
+        assert!(is_scheme_switch("blake3:r", "text:blake3:t"));
+        assert!(is_scheme_switch("text:blake3:t", "blake3:r"));
+        assert!(!is_scheme_switch("blake3:a", "blake3:b"));
+        assert!(!is_scheme_switch("text:blake3:a", "text:blake3:b"));
+    }
+
+    #[test]
+    fn check_candidates_put_the_flagged_scheme_first_and_keep_the_other() {
+        assert_eq!(
+            check_candidates(Some("blake3:r"), Some("blake3:t"), true),
+            vec!["text:blake3:t".to_string(), "blake3:r".to_string()]
+        );
+        assert_eq!(
+            check_candidates(Some("blake3:r"), Some("blake3:t"), false),
+            vec!["blake3:r".to_string(), "text:blake3:t".to_string()]
+        );
+        assert_eq!(check_candidates(Some("blake3:r"), None, true), vec!["blake3:r".to_string()]);
+        assert!(check_candidates(None, None, true).is_empty());
+        assert!(check_candidates(Some(" "), Some(""), true).is_empty());
+    }
+
+    #[test]
+    fn the_requests_decode_the_optional_text_fingerprint() {
+        let check: CheckRequest = serde_json::from_value(serde_json::json!({
+            "url": "https://example.com", "fresh_text_fingerprint": "blake3:t"
+        }))
+        .unwrap();
+        assert_eq!(check.fresh_text_fingerprint.as_deref(), Some("blake3:t"));
+        let record: RecordRequest = serde_json::from_value(serde_json::json!({
+            "org_id": "org_a", "url": "https://example.com", "fresh_fingerprint": "blake3:r"
+        }))
+        .unwrap();
+        assert!(record.fresh_text_fingerprint.is_none());
+    }
+
+    #[test]
+    fn the_record_response_omits_the_new_fields_when_unused() {
+        let resp = RecordResponse {
+            status: "unchanged".into(),
+            changed: false,
+            fingerprint: "blake3:r".into(),
+            prev_fingerprint: String::new(),
+            baseline_id: String::new(),
+            diff_id: None,
+            raw_fingerprint: String::new(),
+            rebaselined: false,
+        };
+        let wire = serde_json::to_value(&resp).unwrap();
+        assert!(wire.get("raw_fingerprint").is_none(), "{wire}");
+        assert!(wire.get("rebaselined").is_none(), "{wire}");
+        let resp = RecordResponse {
+            raw_fingerprint: "blake3:r".into(),
+            rebaselined: true,
+            fingerprint: "text:blake3:t".into(),
+            ..resp
+        };
+        let wire = serde_json::to_value(&resp).unwrap();
+        assert_eq!(wire["raw_fingerprint"], "blake3:r");
+        assert_eq!(wire["rebaselined"], true);
     }
 
     #[test]
@@ -1253,6 +1514,131 @@ mod record_tests {
             .all(|b| b.artifact_id.is_none()));
         assert_eq!(store.diffs.lock().unwrap()[0].format, "text");
         assert!(resp.changed && record.new_baseline.is_none() && record.diff_id.is_none());
+    }
+
+    // ---- W3-E3.5-4: the text-fingerprint switch with silent re-baseline ----
+
+    fn request_fp(raw: &str, text: Option<&str>) -> RecordRequest {
+        serde_json::from_value(serde_json::json!({
+            "org_id": ORG,
+            "url": URL,
+            "fresh_fingerprint": raw,
+            "fresh_text_fingerprint": text,
+            "run_id": "temporal-run-1",
+        }))
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn the_first_text_check_after_deploy_rebaselines_silently() {
+        use quarry_core::change_history::ChangeStatus;
+        let (store, artifacts) = (MemStore::default(), InMemoryStore::new());
+        // A baseline written before the switch: the raw-byte fingerprint.
+        record_core_fp(&store, &artifacts, &request_fp("blake3:r1", Some("blake3:t1")), false, false)
+            .await
+            .unwrap();
+        assert_eq!(store.baselines.lock().unwrap()[0].fingerprint, "blake3:r1");
+
+        // The switch on: the raw bytes moved too, and still no change is reported.
+        let (resp, record, _) = record_core_fp(
+            &store,
+            &artifacts,
+            &request_fp("blake3:r2", Some("blake3:t1")),
+            false,
+            true,
+        )
+        .await
+        .unwrap();
+        assert_eq!(resp.status, "unchanged");
+        assert!(!resp.changed && resp.rebaselined);
+        assert!(resp.diff_id.is_none());
+        assert_eq!(resp.fingerprint, "text:blake3:t1");
+        assert_eq!(resp.raw_fingerprint, "blake3:r2");
+        assert_eq!(resp.prev_fingerprint, "blake3:r1");
+        assert_eq!(record.status, ChangeStatus::Unchanged, "no change event follows");
+        assert!(store.diffs.lock().unwrap().is_empty());
+        let saved = store.baselines.lock().unwrap().clone();
+        assert_eq!(saved.len(), 2);
+        assert_eq!(saved[1].fingerprint, "text:blake3:t1");
+        assert_eq!(saved[1].baseline_id, resp.baseline_id);
+        assert_eq!(saved[1].prev_baseline_id.as_deref(), Some(saved[0].baseline_id.as_str()));
+    }
+
+    #[tokio::test]
+    async fn after_the_rebaseline_only_a_text_change_is_a_change() {
+        let (store, artifacts) = (MemStore::default(), InMemoryStore::new());
+        let run = |raw: &'static str, text: &'static str| request_fp(raw, Some(text));
+        record_core_fp(&store, &artifacts, &run("blake3:r1", "blake3:t1"), false, false)
+            .await
+            .unwrap();
+        record_core_fp(&store, &artifacts, &run("blake3:r2", "blake3:t1"), false, true)
+            .await
+            .unwrap();
+
+        // A nonce rotated the bytes, the text is the same: unchanged, nothing saved.
+        let (same, _, _) =
+            record_core_fp(&store, &artifacts, &run("blake3:r3", "blake3:t1"), false, true)
+                .await
+                .unwrap();
+        assert_eq!(same.status, "unchanged");
+        assert!(!same.rebaselined && !same.changed);
+        assert_eq!(store.baselines.lock().unwrap().len(), 2);
+
+        // The text moved: a real change, with its diff note naming the text fingerprints.
+        let (changed, record, _) =
+            record_core_fp(&store, &artifacts, &run("blake3:r4", "blake3:t2"), false, true)
+                .await
+                .unwrap();
+        assert!(changed.changed && !changed.rebaselined);
+        assert_eq!(record.status, quarry_core::change_history::ChangeStatus::Changed);
+        let diffs = store.diffs.lock().unwrap().clone();
+        assert_eq!(diffs.len(), 1);
+        assert_eq!(
+            diffs[0].summary.as_deref(),
+            Some("content fingerprint changed: text:blake3:t1 → text:blake3:t2")
+        );
+    }
+
+    #[tokio::test]
+    async fn turning_the_switch_off_again_rebaselines_silently_too() {
+        let (store, artifacts) = (MemStore::default(), InMemoryStore::new());
+        record_core_fp(&store, &artifacts, &request_fp("blake3:r1", Some("blake3:t1")), false, true)
+            .await
+            .unwrap();
+        let (resp, record, _) = record_core_fp(
+            &store,
+            &artifacts,
+            &request_fp("blake3:r2", Some("blake3:t1")),
+            false,
+            false,
+        )
+        .await
+        .unwrap();
+        assert!(resp.rebaselined && !resp.changed);
+        assert_eq!(resp.fingerprint, "blake3:r2");
+        assert!(resp.raw_fingerprint.is_empty());
+        assert_eq!(record.status, quarry_core::change_history::ChangeStatus::Unchanged);
+        assert!(store.diffs.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_older_orchestrator_without_a_text_fingerprint_compares_raw_bytes() {
+        let (store, artifacts) = (MemStore::default(), InMemoryStore::new());
+        record_core_fp(&store, &artifacts, &request_fp("blake3:a", None), false, true)
+            .await
+            .unwrap();
+        let (resp, _, _) =
+            record_core_fp(&store, &artifacts, &request_fp("blake3:b", None), false, true)
+                .await
+                .unwrap();
+        assert!(resp.changed && !resp.rebaselined);
+        assert_eq!(resp.fingerprint, "blake3:b");
+        assert!(store
+            .baselines
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|b| !is_text_fingerprint(&b.fingerprint)));
     }
 
     #[tokio::test]

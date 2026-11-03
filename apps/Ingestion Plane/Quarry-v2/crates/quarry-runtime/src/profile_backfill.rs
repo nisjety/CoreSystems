@@ -15,6 +15,9 @@
 //!
 //! W2-U41a: `check_release_gate` is the boot-time release gate for migration
 //! 0017 (`RELEASE_GATE_ENV`, off by default).
+//!
+//! W2-Q-U41b: `org_has_oc_rows` is the probe the erasure's crypto-shred hop
+//! runs before the profile rows are deleted.
 
 use std::time::Duration;
 
@@ -26,7 +29,7 @@ use quarry_core::error::{ErrorCode, QuarryError, QuarryResult};
 use crate::org_erasure::{scan_unlink, V2_CACHE_PREFIX};
 use crate::profile_blob_store::{PlaintextRow, ProfileBlobStore};
 use crate::profile_crypto::{self, CryptoError, ENC_V};
-use crate::profile_keys::{KeyError, ProfileKeyProvider};
+use crate::profile_keys::{KeyError, ProfileKeyProvider, OC_KEY_ID_PREFIX};
 
 /// Default rows per batch.
 pub const DEFAULT_BATCH: usize = 200;
@@ -270,6 +273,28 @@ pub async fn check_release_gate(
     Ok(Some(report))
 }
 
+/// W2-Q-U41b: whether any of the org's profile rows is sealed under an org-core
+/// KEK (a `key_id` that starts with `oc:`). Reads the org's list, then each row
+/// until one matches, so an org without an `oc:` row costs one list and one get
+/// per row. The erasure's crypto-shred hop runs it before the rows are deleted,
+/// when the edge's own key provider is not `org_core`. Ids, key ids and payloads
+/// never leave this function.
+pub async fn org_has_oc_rows(blobs: &dyn ProfileBlobStore, org_id: &str) -> QuarryResult<bool> {
+    for summary in blobs.list(org_id).await? {
+        let Some(row) = blobs.get(org_id, &summary.profile_id).await? else {
+            continue;
+        };
+        if row
+            .key_id
+            .as_deref()
+            .is_some_and(|k| k.starts_with(OC_KEY_ID_PREFIX))
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -458,5 +483,37 @@ mod tests {
             .expect("report");
         assert!(after.passed);
         assert_eq!(after.plaintext_rows_seen, 0);
+    }
+
+    /// W2-Q-U41b: the probe sees `oc:` rows only, never `env:` or plaintext rows,
+    /// and never another org's rows.
+    #[tokio::test]
+    async fn org_has_oc_rows_sees_only_org_core_sealed_rows() {
+        let store = InMemoryBlobStore::new();
+        let envelope = |key_id: &str| BlobPayload::Envelope {
+            envelope: b"{}".to_vec(),
+            enc_v: 1,
+            key_id: key_id.to_string(),
+        };
+        store
+            .put("org_probe_env", &ProfileKind::new(), legacy_payload(), &meta_now())
+            .await
+            .unwrap();
+        store
+            .put("org_probe_env", &ProfileKind::new(), envelope("env:k1"), &meta_now())
+            .await
+            .unwrap();
+        store
+            .put("org_probe_oc", &ProfileKind::new(), legacy_payload(), &meta_now())
+            .await
+            .unwrap();
+        store
+            .put("org_probe_oc", &ProfileKind::new(), envelope("oc:2"), &meta_now())
+            .await
+            .unwrap();
+
+        assert!(!org_has_oc_rows(&store, "org_probe_env").await.unwrap());
+        assert!(org_has_oc_rows(&store, "org_probe_oc").await.unwrap());
+        assert!(!org_has_oc_rows(&store, "org_probe_none").await.unwrap());
     }
 }

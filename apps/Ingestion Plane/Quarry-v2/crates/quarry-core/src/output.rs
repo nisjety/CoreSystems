@@ -53,6 +53,14 @@ pub struct NormalizedOutput {
     /// responses and for outputs produced before this field existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extraction: Option<PageExtraction>,
+    /// E3.5-4: whitespace- and case-normalised fingerprint of the page's readable text
+    /// (`quarry_transform::fingerprint::text_fingerprint` over the transformed markdown),
+    /// e.g. `"blake3:..."`. `fingerprint` above stays the raw-byte hash (artifact addressing,
+    /// cache keys); this one is what a change monitor compares with
+    /// `QUARRY_EDGE__CHANGE_TEXT_FP` on, so a rotating nonce or a reflowed attribute no longer
+    /// reads as a change. `None` for outputs produced before this field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text_fp: Option<String>,
 }
 
 /// Where a page's display title came from.
@@ -107,6 +115,46 @@ pub struct PageExtraction {
 /// fields mirror [`crate::contracts`] / quarry-runtime's `policy.rs`
 /// types but live in `quarry-core` so consumers don't need to depend
 /// on the runtime crate to interpret the stamp.
+#[cfg(test)]
+mod text_fp_tests {
+    use super::NormalizedOutput;
+
+    fn minimal(extra: Option<&str>) -> serde_json::Value {
+        let mut v = serde_json::json!({
+            "run_id": crate::ids::kinds::RunKind::new(),
+            "url": { "requested": "https://example.com/", "final_url": "https://example.com/" },
+            "status": 200,
+            "fetched_at": "2026-01-01T00:00:00Z",
+            "fingerprint": "blake3:raw",
+            "formats": {},
+            "change": { "status": "new" },
+            "metadata": {},
+            "driver": { "kind": "static", "duration_ms": 1 }
+        });
+        if let Some(fp) = extra {
+            v["text_fp"] = serde_json::json!(fp);
+        }
+        v
+    }
+
+    #[test]
+    fn an_output_from_before_the_text_fingerprint_decodes_without_it() {
+        let out: NormalizedOutput = serde_json::from_value(minimal(None)).unwrap();
+        assert!(out.text_fp.is_none());
+        let wire = serde_json::to_value(&out).unwrap();
+        assert!(wire.get("text_fp").is_none(), "{wire}");
+    }
+
+    #[test]
+    fn the_text_fingerprint_round_trips_next_to_the_raw_one() {
+        let out: NormalizedOutput = serde_json::from_value(minimal(Some("blake3:text"))).unwrap();
+        assert_eq!(out.text_fp.as_deref(), Some("blake3:text"));
+        assert_eq!(out.fingerprint, "blake3:raw");
+        let wire = serde_json::to_value(&out).unwrap();
+        assert_eq!(wire["text_fp"], "blake3:text");
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeterminismStamp {
     /// `"strict" | "best_effort" | "off"`.

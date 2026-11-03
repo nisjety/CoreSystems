@@ -243,6 +243,9 @@ type RunPageResult struct {
 	// ScrapeApplied is the edge's proof that it applied the request's scrape options
 	// (INNH-6b). Nil when the request carried none, or the edge predates the option.
 	ScrapeApplied *bool `json:"scrape_applied,omitempty"`
+	// TextFP is the page's normalised text fingerprint (W3-E3.5-4). Fingerprint stays the
+	// raw-byte hash. Empty from an edge that predates the field.
+	TextFP string `json:"text_fp,omitempty"`
 }
 
 // RunPage executes a single page via Quarry Runtime.
@@ -421,6 +424,10 @@ type CheckChangeInput struct {
 	// on /v1/internal/change/record, where the edge refuses (flag on) or logs
 	// would-refuse (flag off) for a true value.
 	Zdr *bool `json:"zdr,omitempty"`
+	// TextFingerprint asks the activity to forward run_page's text fingerprint to the edge
+	// (W3-E3.5-4). Set by ChangeMonitorWF from change-text-fp-v1; false for a history that
+	// predates it, so its activity input and edge request are what they were.
+	TextFingerprint bool `json:"text_fingerprint,omitempty"`
 }
 
 // CheckChangeResult is the outcome of comparing a fresh fetch against the
@@ -438,6 +445,12 @@ type CheckChangeResult struct {
 	// non-retryable outcome of the job, not an error: Status is "zdr_refused"
 	// and no other field is set.
 	ZDRRefused bool `json:"zdr_refused,omitempty"`
+	// RawFingerprint is the raw-byte fingerprint when Fingerprint is the text one
+	// (W3-E3.5-4, the edge's text:blake3:... form). Empty when the raw one was compared.
+	RawFingerprint string `json:"raw_fingerprint,omitempty"`
+	// Rebaselined is true on the first probe after the fingerprint scheme flipped: the edge
+	// saved a new baseline silently, Status is unchanged and Changed is false.
+	Rebaselined bool `json:"rebaselined,omitempty"`
 }
 
 // ZDRRefusalCode is the catalogue code the edge puts in
@@ -488,6 +501,10 @@ type changeRecordRequest struct {
 	// (INNH-4). Omitted when run_page returned none (ZDR, an older runtime), so the body is
 	// byte-identical to before. The edge verifies it belongs to OrgID before it keeps it.
 	MarkdownArtifactID string `json:"markdown_artifact_id,omitempty"`
+	// FreshTextFingerprint is run_page's text_fp (W3-E3.5-4), sent only when the workflow
+	// asked for it (CheckChangeInput.TextFingerprint). The edge compares it instead of the raw
+	// bytes with QUARRY_EDGE__CHANGE_TEXT_FP on, and ignores it with the flag off.
+	FreshTextFingerprint string `json:"fresh_text_fingerprint,omitempty"`
 }
 
 // CheckChange fetches the URL fresh (via the runtime), then asks the edge to
@@ -516,7 +533,7 @@ func (a *Activities) CheckChange(ctx context.Context, in CheckChangeInput) (Chec
 	}
 
 	// 2) Compare + persist via the edge's Rust-owned baseline store.
-	body, err := json.Marshal(changeRecordRequest{
+	rec := changeRecordRequest{
 		OrgID:            in.OrgID,
 		URL:              in.URL,
 		FreshFingerprint: page.Fingerprint,
@@ -524,7 +541,12 @@ func (a *Activities) CheckChange(ctx context.Context, in CheckChangeInput) (Chec
 		Zdr:              in.Zdr,
 
 		MarkdownArtifactID: page.MarkdownArtifactID,
-	})
+	}
+	// W3-E3.5-4: the text fingerprint rides along only when the workflow asked for it.
+	if in.TextFingerprint {
+		rec.FreshTextFingerprint = page.TextFP
+	}
+	body, err := json.Marshal(rec)
 	if err != nil {
 		return CheckChangeResult{}, errs.New(errs.CategoryValidation, op, err).Temporal()
 	}
