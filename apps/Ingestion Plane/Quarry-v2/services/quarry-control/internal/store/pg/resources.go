@@ -1442,3 +1442,217 @@ func (l *eventLog) forField(col, val string, afterSeq uint64, limit int) []quarr
 	}
 	return out
 }
+
+// ---- schedule requests (WS15.S3, migration 026) ----------------------------
+
+// scheduleRequestsStore is the pull-model request table. It needs no state of
+// its own beyond the pool, so the DB hands out a fresh value per call and the
+// postgresDB struct does not change.
+type scheduleRequestsStore struct{ pool *pgxpool.Pool }
+
+// ScheduleRequests implements store.ScheduleRequestsProvider.
+func (d *postgresDB) ScheduleRequests() store.ScheduleRequestsStore {
+	return &scheduleRequestsStore{pool: d.pool}
+}
+
+const scheduleRequestCols = `id, schedule_id, org_id, action, params, status, claimed_by, lease_until,
+	attempts, result, error, requested_by, COALESCE(idempotency_key, ''), created_at, finished_at`
+
+func scanScheduleRequest(row interface{ Scan(dest ...any) error }) (store.ScheduleRequest, error) {
+	var v store.ScheduleRequest
+	var id, scheduleID string
+	var params, result []byte
+	if err := row.Scan(&id, &scheduleID, &v.OrgID, &v.Action, &params, &v.Status, &v.ClaimedBy,
+		&v.LeaseUntil, &v.Attempts, &result, &v.Error, &v.RequestedBy, &v.IdempotencyKey,
+		&v.CreatedAt, &v.FinishedAt); err != nil {
+		return store.ScheduleRequest{}, mapPgErr(err)
+	}
+	v.ID = quarrycontracts.ID(id)
+	v.ScheduleID = quarrycontracts.ID(scheduleID)
+	if len(params) > 0 {
+		if err := json.Unmarshal(params, &v.Params); err != nil {
+			return store.ScheduleRequest{}, err
+		}
+		if len(v.Params) == 0 {
+			v.Params = nil
+		}
+	}
+	if len(result) > 0 {
+		if err := json.Unmarshal(result, &v.Result); err != nil {
+			return store.ScheduleRequest{}, err
+		}
+	}
+	return v, nil
+}
+
+// Create inserts a pending row. The partial unique index on open rows of one
+// schedule and the (org, idempotency key) index both surface as ErrConflict.
+func (s *scheduleRequestsStore) Create(v store.ScheduleRequest) error {
+	params := v.Params
+	if params == nil {
+		params = map[string]any{}
+	}
+	paramsJSON, err := json.Marshal(params)
+	if err != nil {
+		return err
+	}
+	status := v.Status
+	if status == "" {
+		status = store.ScheduleRequestPending
+	}
+	var idem any
+	if v.IdempotencyKey != "" {
+		idem = v.IdempotencyKey
+	}
+	_, err = s.pool.Exec(context.Background(),
+		`INSERT INTO schedule_requests(id, schedule_id, org_id, action, params, status, requested_by,
+		   idempotency_key, created_at)
+		 VALUES ($1,$2,$3,$4,$5::jsonb,$6,$7,$8,$9)`,
+		string(v.ID), string(v.ScheduleID), v.OrgID, v.Action, string(paramsJSON), status,
+		v.RequestedBy, idem, v.CreatedAt)
+	return mapPgErr(err)
+}
+
+func (s *scheduleRequestsStore) GetByOrg(id quarrycontracts.ID, orgID string) (store.ScheduleRequest, bool) {
+	if orgID == "" {
+		return store.ScheduleRequest{}, false
+	}
+	v, err := scanScheduleRequest(s.pool.QueryRow(context.Background(),
+		`SELECT `+scheduleRequestCols+` FROM schedule_requests WHERE id=$1 AND org_id=$2`,
+		string(id), orgID))
+	if err != nil {
+		return store.ScheduleRequest{}, false
+	}
+	return v, true
+}
+
+func (s *scheduleRequestsStore) HasPending(scheduleID quarrycontracts.ID, action string) bool {
+	var exists bool
+	err := s.pool.QueryRow(context.Background(),
+		`SELECT EXISTS(SELECT 1 FROM schedule_requests
+		   WHERE schedule_id=$1 AND status IN ('pending','claimed') AND ($2 = '' OR action = $2))`,
+		string(scheduleID), action).Scan(&exists)
+	if err != nil {
+		// Fail closed: an unreadable table must not let a second request in. The
+		// unique index refuses it anyway; this keeps the friendly 409.
+		return true
+	}
+	return exists
+}
+
+// Claim hands each claimable row to exactly one worker: SKIP LOCKED makes two
+// concurrent claims take disjoint rows, and a claimed row whose lease ran out
+// (its worker died) is claimable again.
+func (s *scheduleRequestsStore) Claim(worker string, limit int, lease time.Duration, now time.Time) ([]store.ScheduleRequest, error) {
+	if worker == "" {
+		return nil, errors.New("claim: worker required")
+	}
+	if limit <= 0 {
+		limit = 1
+	}
+	nowMs := now.UnixMilli()
+	rows, err := s.pool.Query(context.Background(),
+		`UPDATE schedule_requests
+		    SET status='claimed', claimed_by=$1, lease_until=$2, attempts=attempts+1
+		  WHERE id IN (
+		    SELECT id FROM schedule_requests
+		     WHERE status='pending' OR (status='claimed' AND lease_until < $3)
+		     ORDER BY created_at ASC, id ASC
+		     LIMIT $4
+		     FOR UPDATE SKIP LOCKED)
+		 RETURNING `+scheduleRequestCols,
+		worker, now.Add(lease).UnixMilli(), nowMs, limit)
+	if err != nil {
+		return nil, mapPgErr(err)
+	}
+	defer rows.Close()
+	var out []store.ScheduleRequest
+	for rows.Next() {
+		v, err := scanScheduleRequest(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, v)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	// RETURNING order is not the subquery order.
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].CreatedAt != out[j].CreatedAt {
+			return out[i].CreatedAt < out[j].CreatedAt
+		}
+		return out[i].ID < out[j].ID
+	})
+	return out, nil
+}
+
+// heldErr tells a missing row (ErrNotFound) from one the worker no longer holds
+// (ErrConflict) after an update matched nothing.
+func (s *scheduleRequestsStore) heldErr(id quarrycontracts.ID) error {
+	var exists bool
+	if err := s.pool.QueryRow(context.Background(),
+		`SELECT EXISTS(SELECT 1 FROM schedule_requests WHERE id=$1)`, string(id)).Scan(&exists); err != nil {
+		return mapPgErr(err)
+	}
+	if !exists {
+		return store.ErrNotFound
+	}
+	return store.ErrConflict
+}
+
+func (s *scheduleRequestsStore) Complete(id quarrycontracts.ID, worker string, result map[string]any, now time.Time) error {
+	var resultJSON any
+	if result != nil {
+		b, err := json.Marshal(result)
+		if err != nil {
+			return err
+		}
+		resultJSON = string(b)
+	}
+	ct, err := s.pool.Exec(context.Background(),
+		`UPDATE schedule_requests
+		    SET status='done', result=$3::jsonb, error='', lease_until=0, finished_at=$4
+		  WHERE id=$1 AND status='claimed' AND claimed_by=$2`,
+		string(id), worker, resultJSON, now.UnixMilli())
+	if err != nil {
+		return mapPgErr(err)
+	}
+	if ct.RowsAffected() == 0 {
+		return s.heldErr(id)
+	}
+	return nil
+}
+
+func (s *scheduleRequestsStore) Fail(id quarrycontracts.ID, worker, status, reason string, now time.Time) error {
+	if status != store.ScheduleRequestFailed && status != store.ScheduleRequestRejected {
+		return errors.New("fail: status must be failed or rejected")
+	}
+	ct, err := s.pool.Exec(context.Background(),
+		`UPDATE schedule_requests
+		    SET status=$3, error=$4, lease_until=0, finished_at=$5
+		  WHERE id=$1 AND status='claimed' AND claimed_by=$2`,
+		string(id), worker, status, store.ClipScheduleRequestReason(reason), now.UnixMilli())
+	if err != nil {
+		return mapPgErr(err)
+	}
+	if ct.RowsAffected() == 0 {
+		return s.heldErr(id)
+	}
+	return nil
+}
+
+func (s *scheduleRequestsStore) Release(id quarrycontracts.ID, worker, reason string) error {
+	ct, err := s.pool.Exec(context.Background(),
+		`UPDATE schedule_requests
+		    SET status='pending', claimed_by='', lease_until=0, error=$3
+		  WHERE id=$1 AND status='claimed' AND claimed_by=$2`,
+		string(id), worker, store.ClipScheduleRequestReason(reason))
+	if err != nil {
+		return mapPgErr(err)
+	}
+	if ct.RowsAffected() == 0 {
+		return s.heldErr(id)
+	}
+	return nil
+}
