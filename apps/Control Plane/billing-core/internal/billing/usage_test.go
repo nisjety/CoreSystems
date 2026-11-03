@@ -213,3 +213,77 @@ func TestSaveAccountStateCASRejectsInvalidJSONBeforeStorage(t *testing.T) {
 		t.Fatalf("invalid metadata JSON error=%v", err)
 	}
 }
+
+// W2-CP-U37: pins the usage transport contract shared with quarry-edge
+// (quarry-runtime usage.rs every_quarry_metric_lands_under_billing_core_subscription).
+func TestUsageSubjectAndQuarryMetricsArePinned(t *testing.T) {
+	if UsageSubjectFilter != "usage.>" {
+		t.Fatalf("usage subject filter=%q; quarry-edge publishes under usage.>", UsageSubjectFilter)
+	}
+	want := []string{
+		"quarry.browser.second.agent",
+		"quarry.browser.second.interactive",
+		"quarry.agent.run",
+		"quarry.agent.step",
+		"quarry.crawl.page",
+		"quarry.extract.url",
+		"quarry.map.call",
+	}
+	if len(QuarryBrowserMetrics) != len(want) {
+		t.Fatalf("quarry browser metrics=%v; want %v", QuarryBrowserMetrics, want)
+	}
+	for index, metric := range want {
+		if QuarryBrowserMetrics[index] != metric {
+			t.Fatalf("quarry browser metric %d=%q; want %q", index, QuarryBrowserMetrics[index], metric)
+		}
+		if subject := UsageSubjectForMetric(metric); subject != "usage."+metric || !strings.HasPrefix(subject, UsageSubjectPrefix) {
+			t.Fatalf("subject for %s=%q", metric, subject)
+		}
+		code, ok := LagoBillableMetricCode(metric)
+		if !ok || code != metric {
+			t.Fatalf("lago code for %s=%q ok=%t; the Lago adapter sends the metric as the code", metric, code, ok)
+		}
+		event := UsageEvent{
+			EventID:    "quarry:run_abc:s0:" + metric,
+			OrgID:      "org-usage",
+			Metric:     metric,
+			Quantity:   1,
+			Source:     QuarryUsageSource,
+			OccurredAt: time.Date(2026, 11, 3, 10, 0, 0, 0, time.UTC),
+			Metadata:   map[string]interface{}{},
+		}
+		if err := ValidateUsageEvent(event); err != nil {
+			t.Fatalf("quarry metric %s rejected: %v", metric, err)
+		}
+	}
+	if _, ok := LagoBillableMetricCode("api_calls"); ok {
+		t.Fatal("a non-Quarry metric has a Quarry Lago mapping")
+	}
+}
+
+// W2-CP-U37: the quarry-edge id shapes (quarry:<request>:<metric>,
+// quarry:<run>:<segment>:<metric>, quarry:<run>:<url hash>:<metric>) fit the id rule,
+// and the rule the edge mirrors (validate_event_id) refuses the same bad ids.
+func TestUsageEventIDPatternAcceptsQuarryRunEvents(t *testing.T) {
+	for _, eventID := range []string{
+		"quarry:req_abc:quarry.scrape.page",
+		"quarry:run_abc:s0:quarry.agent.run",
+		"quarry:run_abc:s12:quarry.browser.second.interactive",
+		"quarry:job_7f3a:3f9a0c1d2e4b5a6c:quarry.crawl.page",
+		strings.Repeat("a", MaxUsageEventIDLength),
+	} {
+		if err := ValidateUsageEventID(eventID); err != nil {
+			t.Fatalf("quarry event id %q rejected: %v", eventID, err)
+		}
+	}
+	for _, eventID := range []string{
+		"quarry:a b:quarry.agent.run",
+		":leading",
+		"quarry:run/abc:quarry.agent.run",
+		strings.Repeat("a", MaxUsageEventIDLength+1),
+	} {
+		if err := ValidateUsageEventID(eventID); err == nil {
+			t.Fatalf("invalid quarry event id %q accepted", eventID)
+		}
+	}
+}

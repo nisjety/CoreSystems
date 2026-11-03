@@ -116,6 +116,12 @@ services:
       QUARRY_EDGE__NATS_URL: nats://nats:4222
       QUARRY_EDGE__NATS_TOKEN: ${INGESTION_NATS_TOKEN:?INGESTION_NATS_TOKEN is required}
       QUARRY_EDGE__NATS_SUBJECT_PREFIX: ${QUARRY_EDGE_NATS_SUBJECT_PREFIX:-quarry}
+      # U37: the Control NATS billing-core subscribes (usage.>). Unset = usage stays on the
+      # Quarry bus (today). The user and password come from the secrets ledger, never this file.
+      # QUARRY_EDGE__USAGE_BROWSER_METRICS stays unset here (off) until Lago has the codes.
+      QUARRY_EDGE__USAGE_BUS_URL: ${QUARRY_EDGE__USAGE_BUS_URL:-}
+      QUARRY_EDGE__USAGE_BUS_USER: ${QUARRY_EDGE__USAGE_BUS_USER:-}
+      QUARRY_EDGE__USAGE_BUS_PASSWORD: ${QUARRY_EDGE__USAGE_BUS_PASSWORD:-}
       # Web search providers (SmartRouter): SearXNG free primary + Brave paid fallback.
       # SearXNG is owned by this Ingestion Plane stack so Quarry-v2 is
       # self-contained and does not depend on a root mega-stack service.

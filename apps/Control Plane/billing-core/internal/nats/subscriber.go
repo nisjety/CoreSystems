@@ -38,7 +38,10 @@ func NewSubscriber(client *Client, service *billing.Service) *Subscriber {
 }
 
 func (s *Subscriber) Start(ctx context.Context) error {
-	_, err := s.client.Subscribe("usage.>", func(msg *nats.Msg) {
+	// W2-CP-U37: plain subscription over the whole usage tree (quarry-edge publishes
+	// usage.quarry.<metric> here when QUARRY_EDGE__USAGE_BUS_URL is set). Redelivered or
+	// retried events carry the producer's event_id, which RecordUsage dedupes on.
+	_, err := s.client.Subscribe(billing.UsageSubjectFilter, func(msg *nats.Msg) {
 		usage, err := decodeUsageMessage(msg)
 		if err != nil {
 			log.Printf("billing-core invalid usage event payload: %v", err)
