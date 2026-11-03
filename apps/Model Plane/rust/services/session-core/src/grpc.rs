@@ -8054,7 +8054,7 @@ async fn get_context_assembly_inner(
             .map_err(|e| Status::internal(e.to_string()))?;
 
     let thread_messages = load_thread_messages(&svc.pool, &thread_id).await?;
-    let memory_rows = load_context_memory_rows(
+    let mut memory_rows = load_context_memory_rows(
         svc,
         retention,
         &thread_id,
@@ -8062,6 +8062,20 @@ async fn get_context_assembly_inner(
         &thread_messages,
     )
     .await?;
+    // EP-8 S10: on a run a verified wake addressed to a bound agent, that agent's own notes for
+    // this Space, quoted, in the episodic bucket below every instruction layer. A ZDR or waived
+    // credential reads none; off, nothing is queried.
+    if crate::space_memory::agent_enabled() && retention == MemoryRetention::Durable && !run_id.is_empty() {
+        let mut agent_notes = crate::space_memory::recall_agent_memory(
+            &svc.pool,
+            &thread_id,
+            &run_id,
+            crate::dreaming::AGENT_MEMORY_CONTEXT_LIMIT,
+        )
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?;
+        memory_rows.append(&mut agent_notes);
+    }
     let memory = bucket_memory_segments(memory_rows);
 
     let evidence = svc

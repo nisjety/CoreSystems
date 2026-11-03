@@ -797,6 +797,50 @@ impl MemoryService for MemoryGrpc {
                 Err(skip) => Err(Status::failed_precondition(skip.refusal())),
             };
         }
+        // EP-8 S10: with agent memory switched on, an AGENT_SELF save in a Space is the woken
+        // agent's own note for this Space (`scope = 'agent'`), never mirrored to Letta. Only the
+        // agent's tool writes it: a person's save under this topic is refused, not re-scoped.
+        if space_id.is_some()
+            && crate::space_memory::agent_enabled() && crate::space_memory::is_agent_self_topic(&req.topic)
+        {
+            if MemoryRetention::of(&caller) != MemoryRetention::Durable {
+                return Err(Status::failed_precondition(
+                    crate::space_memory::Skip::Waived.agent_refusal(),
+                ));
+            }
+            let origin = write_policy::Origin::from_wire(&req.origin);
+            if origin != write_policy::Origin::ModelTool {
+                return Err(Status::failed_precondition(
+                    crate::space_memory::Skip::NotAgentTurn.agent_refusal(),
+                ));
+            }
+            write_policy::gate(
+                write_policy::Mode::configured(),
+                &req.content,
+                crate::space_memory::AGENT_SCOPE,
+                origin,
+            )
+            .map_err(|code| Status::failed_precondition(code.status_message()))?;
+            let written = crate::space_memory::index_agent_memory(
+                &self.pool,
+                req.org_id.trim(),
+                &owner_user_id,
+                req.thread_id.trim(),
+                &req.content,
+            )
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+            return match written {
+                Ok(memory_id) if !memory_id.is_empty() => Ok(Response::new(index_response(
+                    memory_id,
+                    Some(crate::space::memory_scope::DEGRADED_LETTA_SPACE_SUPPRESSED),
+                ))),
+                Ok(_) => Err(Status::failed_precondition(
+                    crate::space_memory::Skip::Gate.agent_refusal(),
+                )),
+                Err(skip) => Err(Status::failed_precondition(skip.agent_refusal())),
+            };
+        }
         // The content policy every writer runs (WS26-S4). It follows the memory gate,
         // so a paused person is told about the pause, and it precedes the write, so a
         // refusal leaves neither a row nor a semantic mirror.

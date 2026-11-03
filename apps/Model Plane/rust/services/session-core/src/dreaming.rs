@@ -1670,6 +1670,9 @@ pub(crate) async fn search_agent_memory(
         crate::space::memory_scope::record_contained("read_search");
     }
     let legacy_exclusion = crate::space::memory_scope::legacy_room_origin_exclusion("$9", "$2");
+    // Space and agent rows have owner '' and no session, so the unowned branch below would hand
+    // every room's memory to every thread of the org; only their own readers return them
+    // (`recall_space_memory`, `space_memory::recall_agent_memory`, EP-8 S7/S10).
 
     let rows = sqlx::query_as::<
         _,
@@ -1693,7 +1696,7 @@ pub(crate) async fn search_agent_memory(
            AND is_latest = true \
            AND (expires_at IS NULL OR expires_at > now()) \
            AND (($7 AND session_id = $2) \
-                OR (session_id IS NULL AND scope <> 'user' AND NOT $8) \
+                OR (session_id IS NULL AND scope NOT IN ('user', 'space', 'agent') AND NOT $8) \
                 OR ($7 AND session_id IS NULL AND scope = 'user' AND owner = $3 AND NOT $8)) \
            AND {legacy_exclusion} \
            AND ($4::timestamptz IS NULL OR updated_at > $4) \
