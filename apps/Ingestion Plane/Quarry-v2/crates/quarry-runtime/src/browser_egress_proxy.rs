@@ -23,7 +23,7 @@ use quarry_browser::{BrowserEgressPolicy, BrowserEgressProxyProvider, PinnedEgre
 use quarry_core::contracts::{BrowserEgressDecision, BrowserEgressReceipt};
 use quarry_core::error::{ErrorCode, QuarryError, QuarryResult};
 
-use crate::dns_guard::{resolve_public_url, ResolvedTarget};
+use crate::dns_guard::{resolve_public_url_via, HostLookup, ResolvedTarget, SystemHostLookup};
 
 const MAX_PROXY_HEADER_BYTES: usize = 32 * 1024;
 const RECEIPT_LIMIT: usize = 2_048;
@@ -41,6 +41,9 @@ pub struct PinnedBrowserEgressProxy {
 struct PinnedBrowserEgressProxyInner {
     sessions: Mutex<HashMap<String, PinnedBrowserEgressSession>>,
     shutdown: CancellationToken,
+    /// The DNS lookup every proxied request is vetted through (D2-059). The
+    /// system resolver in production; a scripted one in tests.
+    lookup: Arc<dyn HostLookup>,
 }
 
 struct PinnedBrowserEgressSession {
@@ -68,10 +71,18 @@ impl PinnedBrowserEgressProxy {
     /// browser lease, giving every session a separate local port and receipt
     /// stream without exposing a run identifier to any destination server.
     pub fn new() -> Self {
+        Self::with_host_lookup(Arc::new(SystemHostLookup))
+    }
+
+    /// The same authority over an explicit DNS lookup. Production uses `new`;
+    /// this exists so a test can prove a name that resolves to a private address
+    /// is refused under every policy mode without real DNS.
+    pub fn with_host_lookup(lookup: Arc<dyn HostLookup>) -> Self {
         Self {
             inner: Arc::new(PinnedBrowserEgressProxyInner {
                 sessions: Mutex::new(HashMap::new()),
                 shutdown: CancellationToken::new(),
+                lookup,
             }),
         }
     }
@@ -106,6 +117,7 @@ impl PinnedBrowserEgressProxy {
         let accept_receipts = receipts.clone();
         let accept_sequence = sequence.clone();
         let accept_policy = policy.clone();
+        let accept_lookup = self.inner.lookup.clone();
         let accept_task = tokio::spawn(async move {
             loop {
                 let accepted = tokio::select! {
@@ -123,11 +135,18 @@ impl PinnedBrowserEgressProxy {
                 let receipts = accept_receipts.clone();
                 let sequence = accept_sequence.clone();
                 let policy = accept_policy.clone();
+                let lookup = accept_lookup.clone();
                 let connection_shutdown = accept_shutdown.clone();
                 tokio::spawn(async move {
-                    if let Err(error) =
-                        serve_connection(stream, receipts, sequence, policy, connection_shutdown)
-                            .await
+                    if let Err(error) = serve_connection(
+                        stream,
+                        receipts,
+                        sequence,
+                        policy,
+                        lookup,
+                        connection_shutdown,
+                    )
+                    .await
                     {
                         tracing::debug!(error_class = error.code.wire_name(), "browser egress proxy request refused");
                     }
@@ -236,10 +255,11 @@ async fn serve_connection(
     receipts: Arc<Mutex<Vec<BrowserEgressReceipt>>>,
     sequence: Arc<Mutex<u64>>,
     policy: Arc<Mutex<BrowserEgressPolicy>>,
+    lookup: Arc<dyn HostLookup>,
     shutdown: CancellationToken,
 ) -> QuarryResult<()> {
     tokio::select! {
-        result = serve_connection_until_cancelled(client, receipts, sequence, policy) => result,
+        result = serve_connection_until_cancelled(client, receipts, sequence, policy, lookup) => result,
         _ = shutdown.cancelled() => Ok(()),
     }
 }
@@ -249,6 +269,7 @@ async fn serve_connection_until_cancelled(
     receipts: Arc<Mutex<Vec<BrowserEgressReceipt>>>,
     sequence: Arc<Mutex<u64>>,
     policy: Arc<Mutex<BrowserEgressPolicy>>,
+    lookup: Arc<dyn HostLookup>,
 ) -> QuarryResult<()> {
     // Chromium is the only intended peer, but this listener is still a
     // process-local network service. A partial request line must not retain a
@@ -279,7 +300,13 @@ async fn serve_connection_until_cancelled(
             "browser proxy request is outside the run domain policy",
         ));
     }
-    let target = match resolve_public_url(&request.url).await {
+    // D2-059: the policy above decides by name only. An open-web policy admits
+    // any public-looking name, so the resolved addresses are vetted here for
+    // every mode, with no allow_private_hosts bypass: a public name that
+    // resolves (or rebinds) to a private, loopback or metadata address is
+    // refused before any socket is opened, and the connect below dials only the
+    // addresses this resolution vetted.
+    let target = match resolve_public_url_via(&request.url, lookup.as_ref()).await {
         Ok(target) => target,
         Err(error) => {
             record_receipt(
@@ -654,6 +681,93 @@ mod tests {
         assert!(receipts
             .iter()
             .all(|receipt| receipt.decision == BrowserEgressDecision::Block));
+    }
+
+    /// Answers every name with the same fixed addresses (a name rebound to a
+    /// private target, as a rebinding DNS server serves it).
+    struct FixedLookup(Vec<IpAddr>);
+
+    #[async_trait]
+    impl HostLookup for FixedLookup {
+        async fn lookup(&self, _host: &str, port: u16) -> std::io::Result<Vec<SocketAddr>> {
+            Ok(self.0.iter().map(|ip| SocketAddr::new(*ip, port)).collect())
+        }
+    }
+
+    #[tokio::test]
+    async fn open_web_egress_refuses_a_public_name_that_resolves_private() {
+        // D2-059: the open-web policy admits the name (it is not local by name),
+        // so only the resolution can refuse it. It must, for HTTP and CONNECT.
+        let proxy = PinnedBrowserEgressProxy::with_host_lookup(Arc::new(FixedLookup(vec![
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5)),
+        ])));
+        let session = "open-web-private";
+        let policy = BrowserEgressPolicy::open_web(&[]);
+        assert!(policy.allows_url("https://rebind.example/"), "name check passes");
+        proxy
+            .configure_policy(session, policy)
+            .await
+            .expect("configure open-web policy");
+        let endpoint = proxy
+            .endpoint_for_session(session)
+            .await
+            .expect("session endpoint");
+
+        let http = send_proxy_request(
+            &endpoint,
+            "GET http://rebind.example/a HTTP/1.1\r\nHost: rebind.example\r\n\r\n",
+        )
+        .await;
+        let connect = send_proxy_request(
+            &endpoint,
+            "CONNECT rebind.example:443 HTTP/1.1\r\nHost: rebind.example:443\r\n\r\n",
+        )
+        .await;
+
+        assert!(http.starts_with("HTTP/1.1 403"));
+        assert!(connect.starts_with("HTTP/1.1 403"));
+        let receipts = proxy
+            .receipts_after(session, 0, 10)
+            .await
+            .expect("ordered receipts");
+        assert_eq!(receipts.len(), 2);
+        assert!(receipts
+            .iter()
+            .all(|receipt| receipt.policy == "dns_or_ssrf_blocked"
+                && receipt.decision == BrowserEgressDecision::Block));
+    }
+
+    #[tokio::test]
+    async fn open_web_egress_refuses_a_mixed_or_metadata_answer() {
+        // One public address beside a metadata one must not pass: the whole
+        // answer is refused, never filtered down to the public half.
+        let proxy = PinnedBrowserEgressProxy::with_host_lookup(Arc::new(FixedLookup(vec![
+            IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34)),
+            IpAddr::V4(Ipv4Addr::new(169, 254, 169, 254)),
+        ])));
+        let session = "open-web-mixed";
+        proxy
+            .configure_policy(session, BrowserEgressPolicy::open_web(&[]))
+            .await
+            .expect("configure open-web policy");
+        let endpoint = proxy
+            .endpoint_for_session(session)
+            .await
+            .expect("session endpoint");
+
+        let response = send_proxy_request(
+            &endpoint,
+            "CONNECT mixed.example:443 HTTP/1.1\r\nHost: mixed.example:443\r\n\r\n",
+        )
+        .await;
+
+        assert!(response.starts_with("HTTP/1.1 403"));
+        let receipts = proxy
+            .receipts_after(session, 0, 10)
+            .await
+            .expect("receipts");
+        assert_eq!(receipts.len(), 1);
+        assert_eq!(receipts[0].policy, "dns_or_ssrf_blocked");
     }
 
     #[tokio::test]

@@ -882,16 +882,27 @@ impl PageRunner {
         // and drops eagerly (`drop(_slot)` before any other work) so
         // we don't hold scarce per-host concurrency during DOM cleanup
         // / markdown conversion / artifact storage.
+        let host_for_scheduler = requested_url.host_str().unwrap_or("unknown").to_string();
+        // WS14.S4, D2-161: a Crawl-delay wait is spent before the process-wide permit is taken,
+        // so a request that waits for its start time holds no global permit and other hosts keep
+        // theirs. The per-host slot is still taken after the global permit.
+        let start_ticket = match self.scheduler.as_ref() {
+            Some(s) => {
+                let ticket = s.reserve_start(&host_for_scheduler).await;
+                ticket.wait().await;
+                Some(ticket)
+            }
+            None => None,
+        };
         // 2C — global concurrency permit, acquired before the per-host slot
         // and held for the fetch duration (drops with `_slot`).
         let _global_slot = match self.autoscale.as_ref() {
             Some(p) => Some(p.acquire().await),
             None => None,
         };
-        let host_for_scheduler = requested_url.host_str().unwrap_or("unknown").to_string();
-        let _slot = match self.scheduler.as_ref() {
-            Some(s) => Some(s.acquire(&host_for_scheduler).await),
-            None => None,
+        let _slot = match (self.scheduler.as_ref(), start_ticket) {
+            (Some(s), Some(ticket)) => Some(s.acquire_reserved(ticket).await),
+            _ => None,
         };
         // Use `fetch_conditional` so render-hint plumbing (waitFor) and
         // future ETag/IMS validators flow through a single path. The
@@ -4458,5 +4469,111 @@ mod robots_gate_tests {
         assert_eq!(denial["host"], "example.test");
         assert_eq!(h.gate.stats().denied_unreachable, 1);
         assert_eq!(h.calls.load(Ordering::SeqCst), 0);
+    }
+
+    /// Records each fetch: the host, the time since the test began and the global permits still
+    /// free. A request holds its global permit from its fetch onwards.
+    struct ProbeDriver {
+        pool: Arc<AutoscaledPool>,
+        started: tokio::time::Instant,
+        fetches: Arc<std::sync::Mutex<Vec<(String, std::time::Duration, usize)>>>,
+    }
+
+    #[async_trait]
+    impl Driver for ProbeDriver {
+        fn kind(&self) -> DriverKind {
+            DriverKind::Static
+        }
+
+        async fn fetch(&self, url: &Url) -> QuarryResult<FetchResponse> {
+            self.fetches.lock().unwrap().push((
+                url.host_str().unwrap_or_default().to_owned(),
+                self.started.elapsed(),
+                self.pool.available(),
+            ));
+            Ok(FetchResponse::new(
+                200,
+                url.clone(),
+                vec![("content-type".into(), "text/html; charset=utf-8".into())],
+                PAGE.as_bytes().to_vec(),
+                2,
+                DriverKind::Static,
+            ))
+        }
+    }
+
+    /// D2-161: a request waiting out its host's Crawl-delay holds no global autoscale permit, so
+    /// another host is fetched meanwhile, and the delayed request is fetched at its start time.
+    #[tokio::test(start_paused = true)]
+    async fn a_crawl_delay_wait_holds_no_global_permit() {
+        let pool = Arc::new(AutoscaledPool::new(1, 1, 1));
+        let scheduler = Arc::new(HostScheduler::with_defaults());
+        scheduler
+            .set_min_interval("example.test", std::time::Duration::from_secs(30))
+            .await;
+        // The host's first start is reserved now, so its next request may start 30 s from now.
+        let _first_start = scheduler.reserve_start("example.test").await;
+        let fetches = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut h = harness(
+            gate(&[(ORIGIN, PRIVATE)]),
+            None,
+            Some(scheduler.clone()),
+            None,
+        );
+        let probe: Arc<dyn Driver> = Arc::new(ProbeDriver {
+            pool: pool.clone(),
+            started: tokio::time::Instant::now(),
+            fetches: fetches.clone(),
+        });
+        h.runner.driver = probe;
+        h.runner.autoscale = Some(pool.clone());
+        let runner = h.runner;
+        let run_id: RunKind = quarry_core::ids::Id::new();
+        let delayed_url: Url = "https://example.test/docs/a".parse().unwrap();
+        let other_url: Url = "https://other.test/docs/a".parse().unwrap();
+        let delayed = runner.run(&run_id, &delayed_url, None);
+        let other = runner.run(&run_id, &other_url, None);
+        let check = async {
+            // Ten seconds in, the delayed request is still waiting and holds no global permit.
+            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+            assert_eq!(
+                pool.available(),
+                1,
+                "the waiting request holds no global permit"
+            );
+            assert!(
+                fetches
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .all(|(host, _, _)| host != "example.test"),
+                "the delayed request is not fetched before its start time"
+            );
+        };
+        let (delayed, other, ()) = tokio::join!(delayed, other, check);
+        other.expect("the other host is fetched while the delayed request waits");
+        delayed.expect("the delayed host is fetched at its start time");
+
+        let fetches = fetches.lock().unwrap().clone();
+        let fetch_of = |host: &str| {
+            fetches
+                .iter()
+                .find(|(seen, _, _)| seen == host)
+                .cloned()
+                .unwrap_or_else(|| panic!("no fetch of {host}"))
+        };
+        let (_, other_at, other_free) = fetch_of("other.test");
+        assert!(
+            other_at < std::time::Duration::from_secs(30),
+            "the other host is not held up"
+        );
+        assert_eq!(other_free, 0, "the fetch holds the one global permit");
+        let (_, delayed_at, delayed_free) = fetch_of("example.test");
+        assert!(
+            delayed_at >= std::time::Duration::from_secs(30),
+            "the delay is honoured"
+        );
+        assert_eq!(delayed_free, 0, "the fetch holds the one global permit");
+        assert_eq!(pool.available(), 1, "every global permit is back");
     }
 }

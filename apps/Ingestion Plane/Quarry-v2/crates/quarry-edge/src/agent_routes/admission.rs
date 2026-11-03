@@ -4,6 +4,26 @@ pub(super) async fn validate_navigation(
     action: &AgentAction,
     security: &dyn SecurityEngine,
 ) -> QuarryResult<()> {
+    validate_navigation_with(action, security, false).await
+}
+
+/// `validate_navigation` for a live run whose navigation authority is known
+/// (D2-059). An open-web run keeps the DNS guard on even when the engine allows
+/// private hosts: its grant is "any public host", decided by name in gate 11, so
+/// only the resolution can refuse a public name that points at a private address.
+pub(super) async fn validate_navigation_for_run(
+    action: &AgentAction,
+    security: &dyn SecurityEngine,
+    run_nav: &super::human_browse::RunNavPolicy,
+) -> QuarryResult<()> {
+    validate_navigation_with(action, security, run_nav.is_open_web()).await
+}
+
+async fn validate_navigation_with(
+    action: &AgentAction,
+    security: &dyn SecurityEngine,
+    open_web: bool,
+) -> QuarryResult<()> {
     let AgentAction::Navigate { url } = action else {
         return Ok(());
     };
@@ -20,7 +40,7 @@ pub(super) async fn validate_navigation(
             verdict.reasons.join("; "),
         ));
     }
-    if !security.allow_private_hosts() {
+    if quarry_runtime::dns_guard::dns_guard_required(security.allow_private_hosts(), open_web) {
         quarry_runtime::dns_guard::guard_url(&parsed).await?;
     }
     Ok(())
@@ -516,8 +536,8 @@ pub(super) async fn admit_action(
         }
     }
 
-    // 12. navigation security
-    validate_navigation(action, state.security.as_ref()).await?;
+    // 12. navigation security (an open-web run is DNS-guarded whatever allow_private_hosts says)
+    validate_navigation_for_run(action, state.security.as_ref(), &entry.nav_policy).await?;
 
     Ok(Admitted {
         initiator: input.initiator.class,
@@ -547,4 +567,52 @@ pub(super) fn admit_tab_operation(
         control_epoch: snapshot.epoch,
         takeover: snapshot.mode == BrowserControlMode::HumanTakeover,
     })
+}
+
+#[cfg(test)]
+mod dns_guard_tests {
+    use super::super::human_browse::RunNavPolicy;
+    use super::*;
+
+    fn private_navigation() -> AgentAction {
+        AgentAction::Navigate {
+            url: "http://127.0.0.1/admin".to_owned(),
+        }
+    }
+
+    #[tokio::test]
+    async fn open_web_navigation_is_dns_guarded_under_allow_private_hosts() {
+        // D2-059: allow_private_hosts relaxes the allow-list path (local
+        // fixtures) but never an open-web grant. A literal keeps this DNS-free.
+        let security = quarry_security::preflight::DefaultEngine::new().with_allow_private_hosts(true);
+        let open_web = RunNavPolicy::OpenWeb { denied: Vec::new() };
+
+        let error = validate_navigation_for_run(&private_navigation(), &security, &open_web)
+            .await
+            .expect_err("an open-web run never reaches a private address");
+        assert_eq!(error.code, ErrorCode::SecurityBlocked);
+    }
+
+    #[tokio::test]
+    async fn allowlist_navigation_keeps_the_allow_private_hosts_relaxation() {
+        let security = quarry_security::preflight::DefaultEngine::new().with_allow_private_hosts(true);
+
+        validate_navigation_for_run(&private_navigation(), &security, &RunNavPolicy::Allowlist)
+            .await
+            .expect("allow-list runs keep the dev/test relaxation unchanged");
+        validate_navigation(&private_navigation(), &security)
+            .await
+            .expect("the run-less entry point is unchanged");
+    }
+
+    #[tokio::test]
+    async fn strict_engine_guards_both_modes() {
+        let security = quarry_security::preflight::DefaultEngine::new();
+        for nav in [RunNavPolicy::Allowlist, RunNavPolicy::OpenWeb { denied: Vec::new() }] {
+            let error = validate_navigation_for_run(&private_navigation(), &security, &nav)
+                .await
+                .expect_err("a strict engine refuses a private target in every mode");
+            assert_eq!(error.code, ErrorCode::SecurityBlocked);
+        }
+    }
 }

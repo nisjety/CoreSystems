@@ -390,6 +390,11 @@ pub fn select(
     let mut urls: Vec<String> = Vec::new();
     for chunk in hrefs.chunks(MAX_LINKS_EVALUATED) {
         let outcome = scope.evaluate(seed, chunk, lookup);
+        // WS14.S4, D2-091: the robots refusals of this chunk are counted only when a lookup is
+        // given, and the handler gives one only when the gate enforces (`robots_enforced`).
+        if lookup.is_some() {
+            crate::metrics::record_robots_link_refusals(&outcome.report);
+        }
         for (code, count) in &outcome.report.denials.counts {
             match code.as_str() {
                 "robots_disallowed" | "robots_unreachable" => skipped.robots_disallowed += count,
@@ -1009,6 +1014,51 @@ mod tests {
         ];
         let out = select(&scope, &url("https://e.test/docs/"), &locs, None, 10);
         assert_eq!(out.urls, vec!["https://e.test/docs/a"]);
+    }
+
+    #[test]
+    fn robots_refusals_are_counted_only_when_a_lookup_is_given() {
+        let scope = scope_for(CrawlContext::default());
+        let seed = url("https://e.test/");
+        let locs = vec![
+            "https://e.test/ok".to_owned(),
+            "https://e.test/private/x".to_owned(),
+        ];
+        let deny_private = |link: &Url| {
+            if link.path().starts_with("/private/") {
+                RobotsPeek::Disallowed {
+                    user_agent: "quarrybot".into(),
+                    path: link.path().into(),
+                }
+            } else {
+                RobotsPeek::Allowed
+            }
+        };
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        // No lookup: the crawl does not consult robots, so nothing is refused or counted.
+        let unchecked =
+            metrics::with_local_recorder(&recorder, || select(&scope, &seed, &locs, None, 10));
+        assert_eq!(unchecked.urls.len(), 2);
+        assert!(
+            !handle
+                .render()
+                .contains("quarry_robots_link_refusals_total"),
+            "{}",
+            handle.render()
+        );
+        // A lookup means the gate enforces: the refused link is counted once.
+        let enforced = metrics::with_local_recorder(&recorder, || {
+            select(&scope, &seed, &locs, Some(&deny_private), 10)
+        });
+        assert_eq!(enforced.urls, vec!["https://e.test/ok"]);
+        assert!(
+            handle
+                .render()
+                .contains(r#"quarry_robots_link_refusals_total{outcome="denied"} 1"#),
+            "{}",
+            handle.render()
+        );
     }
 
     #[test]
