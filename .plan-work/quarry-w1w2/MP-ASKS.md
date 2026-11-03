@@ -36,3 +36,72 @@ Auth Core now publishes `verevon.audit.v2.control.auth-core.api_key_revoked` on 
 - **Latency:** delete/disable/browser:agent removal are immediate. Expiry and owner removal come from a sweep (default every 60 s, `API_KEY_REVOCATION_SWEEP_MS`). The 120 s token bound (CP-1) still applies.
 - **Transport question:** the broker lives on the Model Plane bus; this event is on the control-plane audit stream. Say whether the broker subscribes there (needs a NATS user/permission row for that subject) or whether auth-core must also forward it to the shared bus (a separate Control Plane change, not built).
 - **Key ceiling for MP-2:** the key's host ceiling and budget ceiling are in the key metadata (`key_hosts`, `budget_ceiling{micro_usd,max_steps,max_runtime_s}`); CP-1 is to put `key_hosts` into the broker-audience token. The broker never reads auth-core storage.
+
+## W2-DOC-A (lane c, w23): ledger entries and one gateway.proto comment (2026-11-03)
+
+Each block is the exact text for a Model Plane file. The Quarry lane did not edit `apps/Model Plane`. Nothing below is built or deployed. The unit's status is in `.plan-work/quarry-w1w2/W23-W2-DOC-A-status.md`.
+
+### 1. `apps/Model Plane/docs/decisions/ledger.md`: WS7.A policy owner (new entry, above `## 2026-10-27 - WS04-S9`)
+
+```markdown
+## 2026-11-03 — Org web policy has one issuer: Auth Core signs the claim, org-core stores the policy, consumers only enforce (ADR-1 outcome C)
+
+**State:** `proposed`. This is the recommended default that the W2 units build on. The owner ruling and the Control and Model Plane sign-offs are not recorded yet.
+
+**The decision.** The policy of record for web and browser capability is org-core. An organisation's web policy (capability switches, robots and proxy ceilings, domain allow and deny lists) is stored and versioned by org-core and read by Auth Core alone, through `GET /internal/orgs/:orgId/web-policy` (scope `org:web-policy:read:any`). Auth Core is the only issuer: it signs `web_policy` beside `zdr` on user tokens and on tenant-row service tokens for the `quarry` and `browser-broker` audiences. Quarry, the browser broker and the gateway only enforce the claim. None of them mints, re-signs or widens it, and a grant's snapshot never overrides a tighter claim.
+
+**Options (D7).** A: claims on user tokens only, plus grant fields for Model-driven runs (two resolution paths). B: capability-core owns the policy, grant fields only; it cannot reach `/v1/scrape`, `/v1/search` or `/v1/crawl`, and cannot store a proxy ceiling or robots mode. C: org-core owns the policy; the claim rides on user tokens and org-resolved service tokens; the grant carries a snapshot.
+
+**Recommendation and limits.** C. Claim staleness is about 345 s by default (300 s audience TTL plus 45 s resolver cache), or 105 s with `WEB_POLICY_TOKEN_TTL_CAP_SECONDS=60`, which is not applied by default. Fail mode: the last good answer for 15 minutes, then refusal (`web_policy_unavailable`, no token). Fall back to A if Control declines the registry field `webPolicyByAudience`.
+
+**Open point.** The design text says "fail-to-floor (last good for 15 min, then the static floor)". The built behaviour in auth-core (WS7.I) is a 503 with no token once the 15 minutes end. The owner must say which one stands before `WEB_POLICY_CLAIM_ENABLED` is turned on.
+
+**Built state.** Code only, in the W2 wave: org-core storage, admin API and internal read (WS7.H); auth-core minting (WS7.I), flag off. No deployment claim.
+
+**Decider.** The user, with Control Plane (registry field, token lifetime) and Model Plane (grant fields) sign-off. Not yet recorded.
+```
+
+### 2. `apps/Model Plane/docs/decisions/ledger.md`: WS16 DR-15.1 (new entry, above `## 2026-10-27 - WS04-S9`)
+
+```markdown
+## 2026-11-03 — Quarry reaches the Model Plane through one allowlisted, org-bound, metered machine lane (DR-15.1)
+
+**State:** `proposed`. Only the registry rows are built. Trigger to flip to `implemented`: slice WS16.S6 tier E2 passes on the stack, and the owner has named the owner of the lane under X-7.
+
+**The decision.** `service:quarry-edge` may call `POST /v1/ai/chat` on the Model Plane gateway, and no other model route. Its registry principal holds two audiences: `model-gateway` (`models:invoke`) and `inference-core` (`inference:invoke`, `models:invoke`), both at `tenant` retention, so the token's `zdr` is the organisation's own posture as Auth Core resolves it at each mint. The two manifest rows are `model-extract` (the user-ingress bearer of `POST /v1/ai/chat`) and `model-extract-inference` (the `inference-core` bearer, sent as `x-inference-authorization`). Quarry sends the run's ZDR flag explicitly on each request. The gateway must meter each non-ZDR call to cost-core under the organisation, and rate-limit services in their own bucket.
+
+**Not chosen.** `/v1/invoke` or `/v1/invoke/stream` for services (the gateway refuses service principals there, and a grant alone does not change that). A gateway-held inference principal (ambient authority). Flipping `model-invoke`, `model-stream` or `model-audio` to open a path.
+
+**Deliberately not decided.** AI-format pricing; whether ZDR extraction is ledgered; org `injection_defense` and PII on this lane.
+
+**Evidence owed.** The `/v1/ai/chat` service route, its golden route table and the metering envelope (WS16.S1), and the live assertion in tier E2 (WS16.S6). Until then the registry rows are the only built part.
+```
+
+### 3. `apps/Model Plane/docs/decisions/ledger.md`: WS8.A row for U03 (new entry, above `## 2026-10-27 - WS04-S9`)
+
+```markdown
+## 2026-11-03 — Shared browser sessions: human_browse and attach grants, renewal by presence, per-tab control
+
+**State:** `proposed`. Spike facts come from code reads; the live measurements are still owed.
+
+- Records D8-1 to D8-3, D8-5 and D8-7 of `docs/plans/quarry-browser-build-plan-2026-10-14.md`.
+- Proto allocation: browser.proto numbers 50-59 belong to WS8 (`policy_mode`, `denied_domains`, `absolute_expires_at`, `resource_id`, `RenewGrant`). Confirmed unused in the Model Plane proto on 2026-10-23.
+- Attach uses a service principal. The OD13 delegated bearer (`aud=quarry`) is rejected for attach. The option-2 delegation claim (RFC 8693 `acting_user_id`) is deferred.
+- Spike facts (code read at HEAD 2ac764f1; live measurements pending): new tabs activate on creation; actions reach only the active tab; egress policy is per session; page hygiene applies focus emulation to every page at attach.
+- Open item recorded for WS8: the SPA sends `actor:'agent'` under the user's session (`KnowledgeComposer.tsx:1050`), and the gateway does not check the caller class for agent calls. This is not allowed as a pattern for attach.
+- Measurements still owed: background throttle, two-tab Chromium RSS, the F3 domain-blocked count, broker validation latency at 20 actions/s, and the three pin tests as current behaviour (the U03 hand-over lists them).
+```
+
+### 4. `apps/Model Plane/proto/model_plane/v1/gateway.proto`: comment on `ExtractStructuredResponse.extracted_json` (comment only)
+
+The three comment lines above `string extracted_json = 6;` (lines 493 to 495) say "Always a JSON object matching `schema_json`." That is not true of `ExtractStructured` today: the handler returns the model's content unchanged (`extract_structured` in `apps/Model Plane/rust/services/model-gateway/src/grpc.rs` sets `extracted_json: infer.content` with no check). Replace those three lines with:
+
+```proto
+  // The model's output as a JSON string, as the model returned it. The gateway
+  // does NOT check it against `schema_json` on this path: no validator runs
+  // before the reply, and the validating lane (the web_extraction work in the
+  // build plan, WS16) is not built. Callers must validate it. Empty when the
+  // model failed to produce output: see `error_message`.
+```
+
+Comment only. No field, type, name or number changes.
