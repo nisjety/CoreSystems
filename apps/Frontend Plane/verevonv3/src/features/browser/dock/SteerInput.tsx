@@ -142,11 +142,13 @@ export function SteerInput(props: SteerInputProps): JSX.Element {
             <textarea
               class="browser-steer__input"
               rows={2}
-              maxLength={STEER_MAX_CHARS}
+              maxlength={STEER_MAX_CHARS}
               value={draft()}
               placeholder={tr('Skriv til agenten …', 'Write to the agent …')}
               aria-label={tr('Melding til agenten', 'Message to the agent')}
-              onInput={(event) => setDraft(event.currentTarget.value)}
+              onInput={(event) => {
+                setDraft(event.currentTarget.value)
+              }}
               onKeyDown={(event) => {
                 if (event.key !== 'Enter' || event.shiftKey || event.isComposing) return
                 event.preventDefault()

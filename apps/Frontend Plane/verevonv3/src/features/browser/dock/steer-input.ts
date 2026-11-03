@@ -140,9 +140,12 @@ export function createBrowserSteer(options: BrowserSteerOptions): BrowserSteer {
     counter += 1
     return `steer-${counter}`
   }
-  const add = (entry: SteerEntry): void => setEntries((current) => [...current, entry])
-  const change = (id: string, patch: Partial<SteerEntry>): void =>
+  const add = (entry: SteerEntry): void => {
+    setEntries((current) => [...current, entry])
+  }
+  const change = (id: string, patch: Partial<SteerEntry>): void => {
     setEntries((current) => current.map((entry) => (entry.id === id ? { ...entry, ...patch } : entry)))
+  }
   const refuseNow = (content: string, refusal: SteerRefusal): SteerOutcome => {
     add({ id: nextId(), content, clientMessageId: mint(), state: 'refused', refusal })
     return { outcome: 'refused', refusal }
