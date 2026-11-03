@@ -2536,6 +2536,15 @@ export function ToolCallCard(props: { call: ChatToolCall; onInspect?: () => void
             +{presentation().added ?? 0} −{presentation().removed ?? 0}
           </em>
         </Show>
+        <Show when={presentation().sandbox}>
+          {(sandbox) => (
+            <em class="verevon-chat-tool-call__sandbox" data-sandbox={sandbox()}>
+              {sandbox() === 'isolated_no_network'
+                ? i18n.tr('Isolert, uten nett', 'Isolated, no network')
+                : i18n.tr('ukjent', 'unknown')}
+            </em>
+          )}
+        </Show>
         <Show when={presentation().truncated && !stepStripEnabled}>
           {/* Not the same as "no results": there IS more and the model did not
               see it, which matters for any answer built on this. */}

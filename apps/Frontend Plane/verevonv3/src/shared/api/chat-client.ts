@@ -1257,6 +1257,19 @@ export type ModelPrice = {
 /** The vendor lifecycle stage a catalogue record names (`lifecycle` on `/v1/models`). */
 export type ModelLifecycle = 'ga' | 'preview' | 'deprecated'
 
+/**
+ * The data-use statements a catalogue record makes for a model (`data_use` on `/v1/models`). A field is
+ * set only when a source states it: `undefined` is "not stated", never "no".
+ */
+export type ModelDataUse = {
+  /** Whether the provider states it trains on the inputs it receives. */
+  trainsOnInputs?: boolean
+  /** Days the provider states it keeps the inputs; `0` when it states none are kept. */
+  retentionDays?: number
+  /** `true` only when the deployment carries a verified zero-retention attestation in force. */
+  zdrAttested?: boolean
+}
+
 export type ModelInfo = {
   id: string
   name: string
@@ -1297,6 +1310,8 @@ export type ModelInfo = {
    * the gateway's list-price switch is on and the catalogue names a price.
    */
   price?: ModelPrice
+  /** What the provider states about the request data sent to this model (`data_use`). Absent when none is stated. */
+  dataUse?: ModelDataUse
 }
 
 // Opt-in rich SSE families the model-gateway understands (chat-parity §2).
@@ -3691,6 +3706,23 @@ function normalizeModelPrice(value: unknown): ModelPrice | undefined {
   return { inputPerMillion: input, outputPerMillion: output, currency }
 }
 
+/** The data-use record a catalogue entry carries. A statement the record does not make stays unset. */
+function normalizeModelDataUse(value: unknown): ModelDataUse | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined
+  const record = value as Record<string, unknown>
+  const trainsOnInputs = readBool(record.trains_on_inputs)
+  const days = record.retention_days
+  const retentionDays =
+    typeof days === 'number' && Number.isSafeInteger(days) && days >= 0 ? days : undefined
+  const zdrAttested = readBool(record.zdr_attested)
+  const dataUse: ModelDataUse = {
+    ...(trainsOnInputs === undefined ? {} : { trainsOnInputs }),
+    ...(retentionDays === undefined ? {} : { retentionDays }),
+    ...(zdrAttested === undefined ? {} : { zdrAttested }),
+  }
+  return Object.keys(dataUse).length > 0 ? dataUse : undefined
+}
+
 /** A token count the record names as a positive whole number; anything else is unknown. */
 function normalizeTokenCount(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isSafeInteger(value) && value > 0 ? value : undefined
@@ -3954,6 +3986,7 @@ export async function listModelCatalogue(): Promise<ModelCatalogue> {
         maxOutputTokens: normalizeTokenCount(item.max_output_tokens),
         lifecycle: normalizeLifecycle(item.lifecycle),
         price: normalizeModelPrice(item.price),
+        dataUse: normalizeModelDataUse(item.data_use),
       }
     })
     .filter((model) => model.id.length > 0)

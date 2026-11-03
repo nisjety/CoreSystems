@@ -50,6 +50,7 @@ pub(crate) mod run_live;
 pub(crate) mod sidebar;
 mod schedule_template;
 mod stream;
+mod memory;
 
 static THREAD_SCOPE_COUNTER: AtomicU64 = AtomicU64::new(1);
 
@@ -1063,6 +1064,7 @@ fn module_routes() -> Router<AppState> {
         .merge(run_live::routes())
         .merge(sidebar::routes())
         .merge(stream::routes())
+        .merge(memory::routes())
 }
 
 #[derive(Debug, Deserialize)]

@@ -257,7 +257,13 @@ type SearchMemoryResponse struct {
 	// which reads no personal or org rows. Empty when it was used. A paused or
 	// off user still receives org-owned entries, so an empty `entries` with this
 	// set means "memory is switched off", never "nothing to recall".
-	SkipReason    string `protobuf:"bytes,4,opt,name=skip_reason,json=skipReason,proto3" json:"skip_reason,omitempty"`
+	SkipReason string `protobuf:"bytes,4,opt,name=skip_reason,json=skipReason,proto3" json:"skip_reason,omitempty"`
+	// Space memory rows of this thread's Space that were left out because they
+	// were learned in front of a different audience than the thread's current
+	// one (EP-8 S7, decision D5): a member added later does not see what the
+	// room said before they joined. A count only, never ids or content. Zero for
+	// every thread that is not a shared-room thread with Space memory on.
+	Withheld      uint32 `protobuf:"varint,5,opt,name=withheld,proto3" json:"withheld,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -318,6 +324,13 @@ func (x *SearchMemoryResponse) GetSkipReason() string {
 		return x.SkipReason
 	}
 	return ""
+}
+
+func (x *SearchMemoryResponse) GetWithheld() uint32 {
+	if x != nil {
+		return x.Withheld
+	}
+	return 0
 }
 
 type MemoryEntry struct {
@@ -768,9 +781,20 @@ type ListMemoryRequest struct {
 	// user, so a caller can never enumerate an entire org's memories.
 	UserId string `protobuf:"bytes,2,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
 	// Maximum results. Server clamps to a sane upper bound.
-	Limit         uint32 `protobuf:"varint,3,opt,name=limit,proto3" json:"limit,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	Limit uint32 `protobuf:"varint,3,opt,name=limit,proto3" json:"limit,omitempty"`
+	// Lists the memory of this Space instead of the user's own (EP-8 S7). Set,
+	// the call is answered only for a person who presents the Control Space
+	// memory decision below, which Control issues to the Space's owner or admin;
+	// `user_id` must still be the caller. Empty keeps the personal list.
+	SpaceId string `protobuf:"bytes,4,opt,name=space_id,json=spaceId,proto3" json:"space_id,omitempty"`
+	// The Control `model.space.memory.manage` decision reference, with
+	// `space_id`. Never logged.
+	SpaceControlDecisionRef string `protobuf:"bytes,5,opt,name=space_control_decision_ref,json=spaceControlDecisionRef,proto3" json:"space_control_decision_ref,omitempty"`
+	// The signed Control `model.space.memory.manage` decision token, with
+	// `space_id`. Never logged.
+	SpaceControlDecisionToken string `protobuf:"bytes,6,opt,name=space_control_decision_token,json=spaceControlDecisionToken,proto3" json:"space_control_decision_token,omitempty"`
+	unknownFields             protoimpl.UnknownFields
+	sizeCache                 protoimpl.SizeCache
 }
 
 func (x *ListMemoryRequest) Reset() {
@@ -822,6 +846,27 @@ func (x *ListMemoryRequest) GetLimit() uint32 {
 		return x.Limit
 	}
 	return 0
+}
+
+func (x *ListMemoryRequest) GetSpaceId() string {
+	if x != nil {
+		return x.SpaceId
+	}
+	return ""
+}
+
+func (x *ListMemoryRequest) GetSpaceControlDecisionRef() string {
+	if x != nil {
+		return x.SpaceControlDecisionRef
+	}
+	return ""
+}
+
+func (x *ListMemoryRequest) GetSpaceControlDecisionToken() string {
+	if x != nil {
+		return x.SpaceControlDecisionToken
+	}
+	return ""
 }
 
 type ListMemoryResponse struct {
@@ -906,9 +951,19 @@ type DeleteMemoryRequest struct {
 	// Owning user. A caller may only delete their own memories.
 	UserId string `protobuf:"bytes,2,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
 	// Identifier of the memory entry to delete.
-	MemoryId      string `protobuf:"bytes,3,opt,name=memory_id,json=memoryId,proto3" json:"memory_id,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	MemoryId string `protobuf:"bytes,3,opt,name=memory_id,json=memoryId,proto3" json:"memory_id,omitempty"`
+	// Deletes a row of this Space's memory instead of the user's own (EP-8 S7),
+	// under the Control Space memory decision below, issued for this
+	// `memory_id`. Empty keeps the personal delete.
+	SpaceId string `protobuf:"bytes,4,opt,name=space_id,json=spaceId,proto3" json:"space_id,omitempty"`
+	// The Control `model.space.memory.manage` decision reference, with
+	// `space_id`. Never logged.
+	SpaceControlDecisionRef string `protobuf:"bytes,5,opt,name=space_control_decision_ref,json=spaceControlDecisionRef,proto3" json:"space_control_decision_ref,omitempty"`
+	// The signed Control `model.space.memory.manage` decision token, with
+	// `space_id`. Never logged.
+	SpaceControlDecisionToken string `protobuf:"bytes,6,opt,name=space_control_decision_token,json=spaceControlDecisionToken,proto3" json:"space_control_decision_token,omitempty"`
+	unknownFields             protoimpl.UnknownFields
+	sizeCache                 protoimpl.SizeCache
 }
 
 func (x *DeleteMemoryRequest) Reset() {
@@ -958,6 +1013,27 @@ func (x *DeleteMemoryRequest) GetUserId() string {
 func (x *DeleteMemoryRequest) GetMemoryId() string {
 	if x != nil {
 		return x.MemoryId
+	}
+	return ""
+}
+
+func (x *DeleteMemoryRequest) GetSpaceId() string {
+	if x != nil {
+		return x.SpaceId
+	}
+	return ""
+}
+
+func (x *DeleteMemoryRequest) GetSpaceControlDecisionRef() string {
+	if x != nil {
+		return x.SpaceControlDecisionRef
+	}
+	return ""
+}
+
+func (x *DeleteMemoryRequest) GetSpaceControlDecisionToken() string {
+	if x != nil {
+		return x.SpaceControlDecisionToken
 	}
 	return ""
 }
@@ -1848,13 +1924,14 @@ const file_model_plane_v1_memory_proto_rawDesc = "" +
 	"\x05limit\x18\x04 \x01(\rR\x05limit\x12\x15\n" +
 	"\x06org_id\x18\x05 \x01(\tR\x05orgId\x12?\n" +
 	"\rupdated_after\x18\x06 \x01(\v2\x1a.google.protobuf.TimestampR\fupdatedAfter\x12\x17\n" +
-	"\auser_id\x18\a \x01(\tR\x06userId\"\xb9\x01\n" +
+	"\auser_id\x18\a \x01(\tR\x06userId\"\xd5\x01\n" +
 	"\x14SearchMemoryResponse\x125\n" +
 	"\aentries\x18\x01 \x03(\v2\x1b.model_plane.v1.MemoryEntryR\aentries\x12\x1a\n" +
 	"\bdegraded\x18\x02 \x01(\bR\bdegraded\x12-\n" +
 	"\x12degradation_reason\x18\x03 \x01(\tR\x11degradationReason\x12\x1f\n" +
 	"\vskip_reason\x18\x04 \x01(\tR\n" +
-	"skipReason\"\xca\x03\n" +
+	"skipReason\x12\x1a\n" +
+	"\bwithheld\x18\x05 \x01(\rR\bwithheld\"\xca\x03\n" +
 	"\vMemoryEntry\x12\x1b\n" +
 	"\tmemory_id\x18\x01 \x01(\tR\bmemoryId\x12\x1b\n" +
 	"\tthread_id\x18\x02 \x01(\tR\bthreadId\x12\x14\n" +
@@ -1889,20 +1966,26 @@ const file_model_plane_v1_memory_proto_rawDesc = "" +
 	"\x14MemoryHealthResponse\x12\x16\n" +
 	"\x06status\x18\x01 \x01(\tR\x06status\x12\x14\n" +
 	"\x05ready\x18\x02 \x01(\bR\x05ready\x12#\n" +
-	"\rmemory_status\x18\x03 \x01(\tR\fmemoryStatus\"Y\n" +
+	"\rmemory_status\x18\x03 \x01(\tR\fmemoryStatus\"\xf2\x01\n" +
 	"\x11ListMemoryRequest\x12\x15\n" +
 	"\x06org_id\x18\x01 \x01(\tR\x05orgId\x12\x17\n" +
 	"\auser_id\x18\x02 \x01(\tR\x06userId\x12\x14\n" +
-	"\x05limit\x18\x03 \x01(\rR\x05limit\"\xbb\x01\n" +
+	"\x05limit\x18\x03 \x01(\rR\x05limit\x12\x19\n" +
+	"\bspace_id\x18\x04 \x01(\tR\aspaceId\x12;\n" +
+	"\x1aspace_control_decision_ref\x18\x05 \x01(\tR\x17spaceControlDecisionRef\x12?\n" +
+	"\x1cspace_control_decision_token\x18\x06 \x01(\tR\x19spaceControlDecisionToken\"\xbb\x01\n" +
 	"\x12ListMemoryResponse\x125\n" +
 	"\aentries\x18\x01 \x03(\v2\x1b.model_plane.v1.MemoryEntryR\aentries\x12\x1a\n" +
 	"\bdegraded\x18\x02 \x01(\bR\bdegraded\x12-\n" +
 	"\x12degradation_reason\x18\x03 \x01(\tR\x11degradationReason\x12#\n" +
-	"\rhidden_reason\x18\x04 \x01(\tR\fhiddenReason\"b\n" +
+	"\rhidden_reason\x18\x04 \x01(\tR\fhiddenReason\"\xfb\x01\n" +
 	"\x13DeleteMemoryRequest\x12\x15\n" +
 	"\x06org_id\x18\x01 \x01(\tR\x05orgId\x12\x17\n" +
 	"\auser_id\x18\x02 \x01(\tR\x06userId\x12\x1b\n" +
-	"\tmemory_id\x18\x03 \x01(\tR\bmemoryId\"{\n" +
+	"\tmemory_id\x18\x03 \x01(\tR\bmemoryId\x12\x19\n" +
+	"\bspace_id\x18\x04 \x01(\tR\aspaceId\x12;\n" +
+	"\x1aspace_control_decision_ref\x18\x05 \x01(\tR\x17spaceControlDecisionRef\x12?\n" +
+	"\x1cspace_control_decision_token\x18\x06 \x01(\tR\x19spaceControlDecisionToken\"{\n" +
 	"\x14DeleteMemoryResponse\x12\x18\n" +
 	"\adeleted\x18\x01 \x01(\bR\adeleted\x12\x1a\n" +
 	"\bdegraded\x18\x02 \x01(\bR\bdegraded\x12-\n" +

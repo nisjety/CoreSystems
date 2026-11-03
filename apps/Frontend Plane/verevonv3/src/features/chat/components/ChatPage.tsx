@@ -60,6 +60,7 @@ import { ChatWorkspaceCanvas } from './ChatWorkspaceCanvas'
 import { ChatAttachmentCanvas } from './ChatAttachmentCanvas'
 import { ScheduleDialog } from './ScheduleDialog'
 import { ScheduledRunsPanel } from './ScheduledRunsPanel'
+import { PersonalSetupCard } from './PersonalSetupCard'
 import {
   partitionEvidenceSources,
   spokenSourceTally,
@@ -1178,6 +1179,7 @@ export default function ChatPage() {
 
         <Switch>
           <Match when={!hasMessages()}>
+            <PersonalSetupCard threadId={state.threadId} />
             <EmptyChatState
               onSelectPrompt={setInput}
               onResumeThread={(threadId) => selectChatThread(threadId)}

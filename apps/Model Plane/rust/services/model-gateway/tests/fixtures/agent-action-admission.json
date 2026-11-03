@@ -2193,6 +2193,19 @@
       "zdr_allowed": false
     },
     {
+      "actionId": "settings.complete_personal_setup",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "external_write",
+      "exemptReason": "human_identity_or_security",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:fa3eda20fe20089465e4c5eadebdd3b3424573f744856cd693dd486ead7b4154",
+      "zdr_allowed": false
+    },
+    {
       "actionId": "settings.create_api_key",
       "registry": true,
       "access": "none",
@@ -2229,6 +2242,19 @@
       "executor": {},
       "hashBasis": "catalog_entry",
       "schemaHash": "sha256:9b309b7c7585c5e5ffdf77a21aead48ec1b8beacb36404a87a3790f2cd9d72bc",
+      "zdr_allowed": false
+    },
+    {
+      "actionId": "settings.skip_personal_setup",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "external_write",
+      "exemptReason": "human_identity_or_security",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:e0484b2c49b722d4ee87a187684b5ca3c961459fe11f1c8a4f78cf88f11c2db0",
       "zdr_allowed": false
     },
     {

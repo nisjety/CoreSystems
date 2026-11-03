@@ -62,6 +62,7 @@ use super::dispatchers::{
     dispatch_ownership_share_document, dispatch_privacy_erase_my_account,
     dispatch_router_policy_update, dispatch_settings_create_api_key,
     dispatch_settings_delete_api_key, dispatch_settings_set_tone_preset,
+    dispatch_settings_complete_personal_setup, dispatch_settings_skip_personal_setup,
     dispatch_settings_update_me,
     dispatch_settings_update_preferences, dispatch_settings_update_setting,
     dispatch_social_create_campaign, dispatch_social_create_draft_from_inbox,
@@ -278,6 +279,10 @@ pub(super) async fn execute_action(
         "settings.set_tone_preset" => {
             dispatch_settings_set_tone_preset(&state, &user, &body.input).await
         }
+        "settings.complete_personal_setup" => {
+            dispatch_settings_complete_personal_setup(&state, &user, &body.input).await
+        }
+        "settings.skip_personal_setup" => dispatch_settings_skip_personal_setup(&state, &user).await,
         "settings.create_api_key" => {
             dispatch_settings_create_api_key(&state, &user, &headers, &body.input).await
         }

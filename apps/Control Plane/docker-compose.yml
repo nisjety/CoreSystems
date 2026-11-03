@@ -445,6 +445,7 @@ services:
             # Off in production until the privacy-attestation question (SD-18) is answered.
             SPACE_POLICY_ADMIN_WRITES: ${SPACE_POLICY_ADMIN_WRITES:-false}
             TONE_PRESETS_VISIBLE: ${TONE_PRESETS_VISIBLE:-false}
+            PERSONAL_SETUP_VISIBLE: ${PERSONAL_SETUP_VISIBLE:-false}
             # WS04-S10: durable Space membership events (ledger outbox + re-announce).
             # Strict literal true; off by default and in production until enabled.
             SPACE_MEMBERSHIP_EVENTS_SWEEPER: ${SPACE_MEMBERSHIP_EVENTS_SWEEPER:-false}

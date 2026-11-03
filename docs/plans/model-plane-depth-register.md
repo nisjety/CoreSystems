@@ -3048,6 +3048,9 @@ Built so far: WS13-S0, WS13-S1, WS13-S2; WS14-S1, WS14-S2 (partial), WS14-S3; WS
 | D3-407 | EP-9-C6 | risk | P2 | The gate checks that a trailing comment exists, not that it names the tag the SHA resolves to, so a wrong comment such as # v7 on another SHA passes; only review or a periodic ls-remote comparison catches it. | open |
 | D3-408 | EP-9-C6 | risk | P2 | Three pins are branch heads, not tags (dtolnay/rust-toolchain stable, arduino/setup-protoc v3, bufbuild/buf-setup-action v1), so a tag-based update never moves them; arduino v3.0.0 is the same commit as its v3 head, so its comment could name the release. | open |
 | D3-409 | EP-9-C6 | follow-up | P3 | 4 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W3-09.json | open |
+| D3-410 | W3-09 guard | follow-up | P2 | guard skipped: git update-index --chmod=+x apps/Model Plane/scripts/verify-personalisation.sh (lead, at commit) | open |
+| D3-411 | W3-09 guard | follow-up | P2 | guard skipped: ADR-NEXT rename and number (lead, at filing) | open |
+| D3-412 | W3-09 guard | test-gap | P1 | still broken after the guard: scripts/tests/zdr-contract-sync.test.sh: 11 failures in vendored pins this batch did not touch (zdr-posture-matrix copies, run-trace-envelope copies, space-denial-codes, quarry-token-claims, cross-plane-token-requests, usage-envelopes, Quarry zdr-feature-matrix). The space-surface and agent-action-admission pins pass. | open |
 
 ## Cross-wave
 

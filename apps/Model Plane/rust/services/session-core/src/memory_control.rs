@@ -1703,6 +1703,7 @@ mod tests {
                     org_id: org.clone(),
                     user_id: "user-a".into(),
                     limit: 10,
+                    ..Default::default()
                 },
                 identity(),
             )
@@ -1759,6 +1760,7 @@ mod tests {
                     org_id: org.clone(),
                     user_id: "user-a".into(),
                     memory_id: id,
+                    ..Default::default()
                 },
                 identity(),
             ))

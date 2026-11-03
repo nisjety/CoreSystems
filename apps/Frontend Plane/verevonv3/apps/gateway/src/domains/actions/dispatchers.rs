@@ -3706,6 +3706,7 @@ pub(super) async fn dispatch_settings_set_tone_preset(
     }
     if let Some(object) = settings.as_object_mut() {
         object.remove("tonePresetsAvailable");
+        object.remove("personalSetupAvailable");
         object.insert("tonePreset".to_owned(), json!(tone));
     }
     let (status, Json(resp)) = proxy_json(
@@ -3719,6 +3720,143 @@ pub(super) async fn dispatch_settings_set_tone_preset(
     )
     .await;
     owner_json_response_to_envelope("settings.set_tone_preset", user, status, resp)
+}
+
+// Saves the personal first-run step (EP-8-S8). Every value is checked before the first write. The
+// writes overwrite, and the first-run state is written last: if an earlier write fails the step stays
+// pending, so a retry never leaves a half-saved step marked done.
+pub(super) async fn dispatch_settings_complete_personal_setup(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    input: &Value,
+) -> Response {
+    let display_name = ticket_string(input, "displayName").trim();
+    let timezone = ticket_string(input, "timezone").trim();
+    let language = ticket_string(input, "language").trim();
+    let tone = ticket_string(input, "tonePreset").trim();
+    if display_name.chars().count() > 80 {
+        return ticket_bad_request(
+            "settings.complete_personal_setup takes a displayName of at most 80 characters",
+        );
+    }
+    if !language.is_empty() && !matches!(language, "nb-NO" | "en-US") {
+        return ticket_bad_request(
+            "settings.complete_personal_setup takes a language of nb-NO or en-US",
+        );
+    }
+    if !tone.is_empty() && !crate::domains::persona::is_tone_preset(tone) {
+        return ticket_bad_request(
+            "settings.complete_personal_setup takes a tonePreset of default, professional, friendly, direct, warm or neutral",
+        );
+    }
+    let actor = actor_for_user(user);
+    // user-core checks the time zone itself. It is the first write, so a bad zone stops the step
+    // before anything is saved.
+    if !timezone.is_empty() || !language.is_empty() {
+        let mut preferences = serde_json::Map::new();
+        if !timezone.is_empty() {
+            preferences.insert("timezone".to_owned(), json!(timezone));
+        }
+        if !language.is_empty() {
+            preferences.insert("language".to_owned(), json!(language));
+        }
+        let (status, Json(resp)) = proxy_json(
+            state,
+            Method::PATCH,
+            &format!("{}/api/v1/preferences", state.user_core_url),
+            Some(Value::Object(preferences)),
+            None,
+            Some(&actor),
+            None,
+        )
+        .await;
+        if !status.is_success() {
+            return owner_json_response_to_envelope(
+                "settings.complete_personal_setup",
+                user,
+                status,
+                resp,
+            );
+        }
+    }
+    if !display_name.is_empty() {
+        let (status, Json(resp)) = proxy_json(
+            state,
+            Method::PATCH,
+            &format!("{}/api/v1/users/me", state.user_core_url),
+            Some(json!({ "name": display_name })),
+            None,
+            Some(&actor),
+            None,
+        )
+        .await;
+        if !status.is_success() {
+            return owner_json_response_to_envelope(
+                "settings.complete_personal_setup",
+                user,
+                status,
+                resp,
+            );
+        }
+    }
+    if !tone.is_empty() {
+        let url = format!("{}/api/v1/settings/ai", state.user_core_url);
+        let (status, Json(mut settings)) =
+            proxy_json(state, Method::GET, &url, None, None, Some(&actor), None).await;
+        if !status.is_success() {
+            return owner_json_response_to_envelope(
+                "settings.complete_personal_setup",
+                user,
+                status,
+                settings,
+            );
+        }
+        if let Some(object) = settings.as_object_mut() {
+            object.remove("tonePresetsAvailable");
+            object.remove("personalSetupAvailable");
+            object.insert("tonePreset".to_owned(), json!(tone));
+        }
+        let (status, Json(resp)) =
+            proxy_json(state, Method::PUT, &url, Some(settings), None, Some(&actor), None).await;
+        if !status.is_success() {
+            return owner_json_response_to_envelope(
+                "settings.complete_personal_setup",
+                user,
+                status,
+                resp,
+            );
+        }
+    }
+    let (status, Json(resp)) = proxy_json(
+        state,
+        Method::PUT,
+        &format!("{}/api/v1/settings/onboarding", state.user_core_url),
+        Some(json!({ "personalStep": "completed" })),
+        None,
+        Some(&actor),
+        None,
+    )
+    .await;
+    owner_json_response_to_envelope("settings.complete_personal_setup", user, status, resp)
+}
+
+// Records that the person skipped the personal first-run step (EP-8-S8). The card does not show again.
+pub(super) async fn dispatch_settings_skip_personal_setup(
+    state: &AppState,
+    user: &AuthenticatedUser,
+) -> Response {
+    let actor = actor_for_user(user);
+    let (status, Json(resp)) = proxy_json(
+        state,
+        Method::PUT,
+        &format!("{}/api/v1/settings/onboarding", state.user_core_url),
+        Some(json!({ "personalStep": "skipped" })),
+        None,
+        Some(&actor),
+        None,
+    )
+    .await;
+    owner_json_response_to_envelope("settings.skip_personal_setup", user, status, resp)
 }
 
 // Reuses the real create_api_key/delete_api_key rather than re-deriving them:

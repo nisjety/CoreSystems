@@ -979,7 +979,13 @@ type RunContext struct {
 	// A prefetched memory block, already bounded.
 	MemoryBlock string `protobuf:"bytes,3,opt,name=memory_block,json=memoryBlock,proto3" json:"memory_block,omitempty"`
 	// How each part was assembled, for the run record.
-	Status        *RunContextStatus `protobuf:"bytes,4,opt,name=status,proto3" json:"status,omitempty"`
+	Status *RunContextStatus `protobuf:"bytes,4,opt,name=status,proto3" json:"status,omitempty"`
+	// Fields 5 and 6 stay reserved for WS08 and WS20 (see the comment above).
+	// The person's standing profile as a finished, bounded block (EP-8 S5),
+	// placed by the loop in the Context tier of the root loop only. Empty unless
+	// MODEL_GATEWAY_USER_PROFILE_PREFIX is on and the run's memory decision
+	// allows it; never set on a ZDR, waived or Space-scoped run.
+	UserProfile   string `protobuf:"bytes,7,opt,name=user_profile,json=userProfile,proto3" json:"user_profile,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1040,6 +1046,13 @@ func (x *RunContext) GetStatus() *RunContextStatus {
 		return x.Status
 	}
 	return nil
+}
+
+func (x *RunContext) GetUserProfile() string {
+	if x != nil {
+		return x.UserProfile
+	}
+	return ""
 }
 
 // RunAgentResponse — terminal outcome of a driven agent run.
@@ -2232,13 +2245,14 @@ const file_model_plane_v1_execution_proto_rawDesc = "" +
 	"questionId\x12\x1f\n" +
 	"\vanswer_json\x18\v \x01(\tR\n" +
 	"answerJsonJ\x04\b\t\x10\n" +
-	"\"\xd5\x01\n" +
+	"\"\xf8\x01\n" +
 	"\n" +
 	"RunContext\x123\n" +
 	"\x15authored_instructions\x18\x01 \x01(\tR\x14authoredInstructions\x125\n" +
 	"\ahistory\x18\x02 \x03(\v2\x1b.model_plane.v1.ChatMessageR\ahistory\x12!\n" +
 	"\fmemory_block\x18\x03 \x01(\tR\vmemoryBlock\x128\n" +
-	"\x06status\x18\x04 \x01(\v2 .model_plane.v1.RunContextStatusR\x06status\"\xba\x03\n" +
+	"\x06status\x18\x04 \x01(\v2 .model_plane.v1.RunContextStatusR\x06status\x12!\n" +
+	"\fuser_profile\x18\a \x01(\tR\vuserProfile\"\xba\x03\n" +
 	"\x10RunAgentResponse\x12\x16\n" +
 	"\x06status\x18\x01 \x01(\tR\x06status\x12!\n" +
 	"\ffinal_output\x18\x02 \x01(\tR\vfinalOutput\x12'\n" +

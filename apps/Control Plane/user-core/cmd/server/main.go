@@ -393,6 +393,7 @@ func main() {
 	// since_join rooms. Strict literal true; off by default; a presentation
 	// rollout control, never an authorization input.
 	spaceRepo.SetHistoryWindowClaim(os.Getenv("SPACE_HISTORY_WINDOW_CLAIM") == "true")
+	spaceRepo.SetSandboxEgressTiers(os.Getenv("SPACE_SANDBOX_EGRESS_TIERS") == "true")
 	httpServer.SetSpaceRepository(spaceRepo)
 	// WS05-S5: Space decision denied/issued audit events. Strict literal true;
 	// off by default; a rollout control, never an authorization input.

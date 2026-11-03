@@ -752,6 +752,7 @@ impl LettaMemoryAdapter {
                 org_id: org_id.to_owned(),
                 user_id: user_id.to_owned(),
                 limit,
+                ..Default::default()
             },
             &token,
         ) {
@@ -814,6 +815,7 @@ impl LettaMemoryAdapter {
                 org_id: org_id.to_owned(),
                 user_id: user_id.to_owned(),
                 memory_id: memory_id.to_owned(),
+                ..Default::default()
             },
             &token,
         ) {
