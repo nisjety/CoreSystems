@@ -122,6 +122,14 @@ services:
       # quarry-edge billing-core credential (QUARRY_BILLING_CORE_SERVICE_TOKEN, mirrored).
       QUARRY_EDGE__BILLING_CORE_URL: ${QUARRY_EDGE__BILLING_CORE_URL:-}
       QUARRY_EDGE__BILLING_CORE_TOKEN: ${QUARRY_BILLING_CORE_SERVICE_TOKEN:-}
+      # WS15.S4a: fire-time schedule preflight (ZDR posture + entitlement). off | observe | enforce;
+      # observe (default) runs every check and logs it, allows the fire and pauses nothing. The
+      # posture read is org-core GET /internal/orgs/:org/retention-posture with the quarry-edge
+      # credential QUARRY_ORG_CORE_SERVICE_TOKEN (minted in Control's ledger, MIRRORED here).
+      # Empty token = posture unknown (enforce then skips every fire as skipped_posture_unknown).
+      QUARRY_EDGE__SCHEDULE_POSTURE: ${QUARRY_EDGE__SCHEDULE_POSTURE:-observe}
+      QUARRY_EDGE__ORG_CORE_URL: ${QUARRY_EDGE__ORG_CORE_URL:-http://org-core:8080}
+      QUARRY_EDGE__ORG_CORE_SERVICE_TOKEN: ${QUARRY_ORG_CORE_SERVICE_TOKEN:-}
       QUARRY_EDGE__RUNTIME_AUTH_TOKEN: ${QUARRY_RUNTIME_AUTH_TOKEN:?QUARRY_RUNTIME_AUTH_TOKEN is required}
       QUARRY_EDGE__INTERNAL_SECRET: ${QUARRY_INTERNAL_SECRET:?QUARRY_INTERNAL_SECRET must be set (no insecure default)}
       QUARRY_EDGE__NATS_URL: nats://nats:4222

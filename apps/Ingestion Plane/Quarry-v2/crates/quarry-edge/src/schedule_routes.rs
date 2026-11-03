@@ -526,6 +526,22 @@ pub async fn pause_schedule(
     Ok(Json(Envelope::ok(request_id, summary)))
 }
 
+/// WS15.S4a: pause a schedule because its organization's fire-time posture is
+/// Zero Data Retention (`skipped_zdr`). Called by the schedule preflight under
+/// `QUARRY_EDGE__SCHEDULE_POSTURE=enforce`, with no user token: the org comes
+/// from the preflight's run-bound body, and the call is the same signed control
+/// forward `pause_schedule` makes. Unpause stays refused for a ZDR caller.
+pub(crate) async fn pause_for_posture(
+    state: &AppState,
+    schedule_id: &str,
+    org_id: &str,
+) -> Result<(), QuarryError> {
+    let path = format!("/v1/schedules/{schedule_id}/pause");
+    forward_json::<(), serde_json::Value>(state, reqwest::Method::POST, &path, org_id, None)
+        .await
+        .map(|_| ())
+}
+
 pub async fn unpause_schedule(
     State(state): State<AppState>,
     Extension(claims): Extension<crate::auth::Claims>,
