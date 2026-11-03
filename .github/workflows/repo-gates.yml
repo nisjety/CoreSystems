@@ -8,6 +8,7 @@ on:
       - 'scripts/gates/**'
       - 'scripts/tests/**'
       - 'apps/**'
+      - 'docs/compliance/**'
       - '.github/workflows/repo-gates.yml'
   push:
     branches: [main, fix/ui-premium-restore]
@@ -15,6 +16,7 @@ on:
       - 'scripts/gates/**'
       - 'scripts/tests/**'
       - 'apps/**'
+      - 'docs/compliance/**'
       - '.github/workflows/repo-gates.yml'
 jobs:
   buf-lint-ratchet-selftest:
@@ -106,3 +108,19 @@ jobs:
             echo "::notice::no previous commit to compare with (new branch); checking the boundary only"
             python3 scripts/gates/plane-boundary.py --check
           fi
+  egress-catalogue:
+    # EP-9 T1: the declared egress catalogue must name every vendor the scan finds, and the
+    # disclosure must be the one the catalogue generates. Non-required for its first week:
+    # the owner adds this job to the branch rule once it has been green on main.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+      - name: egress catalogue and scanner unit tests
+        run: node --test docs/compliance/evidence/tools/scan-egress.test.mjs scripts/gates/gen-egress-disclosure.test.mjs
+      - name: declared egress catalogue matches the scan
+        run: node docs/compliance/evidence/tools/scan-egress.mjs --strict --declared docs/compliance/egress-catalogue.json
+      - name: egress disclosure is generated from the catalogue
+        run: node scripts/gates/gen-egress-disclosure.mjs --check
