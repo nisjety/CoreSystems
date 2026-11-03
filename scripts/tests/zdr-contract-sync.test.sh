@@ -79,7 +79,7 @@ GOLDENS=(
   # The claims of aud=quarry tokens as Auth Core really mints them. Written with
   #   UPDATE_GOLDENS=1 npx jest src/auth/quarry-token-zdr-claims.golden.spec.ts
   # in "apps/Control Plane/auth-core", which also vendors it into Quarry.
-  "apps/Control Plane/auth-core/src/auth/fixtures/quarry-token-claims.golden.json|76cc4af7f2a2a4f2730265d19f8ec4b26dd181b048e9135b66e8369b3ae8c266"
+  "apps/Control Plane/auth-core/src/auth/fixtures/quarry-token-claims.golden.json|6c3044d5004a36f2cab3187a31847d23a6d471e1902337e0c71c9e5f34770682"
 
   # What Auth Core emits to the Data Plane for a service caller, and what it
   # answers when the Data Plane asks whether that caller is a member. Written with

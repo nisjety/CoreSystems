@@ -28,8 +28,11 @@ import { join } from 'node:path';
 // on and an org-core double that answers the web-policy route: one org holds a
 // policy (the answer of org-core's own contract golden,
 // org-core/internal/http/testdata/auth-core-org-core-web-policy.contract.json),
-// every other org has none (`{"v":1,"rev":"0"}`). The `zdr` values of the four
-// original cases are unchanged by the claim; the spec says so explicitly.
+// every other org has none (`{"v":1,"rev":"0"}`). W3 E3.2-f adds one org whose
+// policy states only per-origin consent defaults (`browser.consent.max_scope`
+// in caps), so the edge sees the version 1 claim carry them. The `zdr` values
+// of the four original cases are unchanged by the claim; the spec says so
+// explicitly.
 // A third copy lives in the Model Plane tree (model-gateway's tests); it is
 // re-vendored by that plane's owner from the bytes this spec writes.
 //
@@ -98,6 +101,18 @@ const WEB_POLICY_ANSWER = {
     policy: {
       caps: { 'browser.act.upload': 'disabled' },
       robots_max: 'respect',
+    },
+    entitlements: WEB_ENTITLEMENTS,
+  },
+};
+// W3 E3.2-f: an org whose policy states per-origin consent defaults only.
+const ORIGIN_CONSENT_ORG = 'org-origin-consent-golden';
+const ORIGIN_CONSENT_ANSWER = {
+  data: {
+    revision: 1,
+    rev: 'abcdef012345',
+    policy: {
+      caps: { 'browser.consent.max_scope': 'conversation' },
     },
     entitlements: WEB_ENTITLEMENTS,
   },
@@ -218,10 +233,13 @@ describeIfAvailable('Quarry-audience token claims, real mint', () => {
         if (authenticated && retention) {
           body = { zdrIntent: false, entitled: true };
         } else if (authenticated && webPolicy) {
+          const orgId = decodeURIComponent(webPolicy[1]);
           body =
-            decodeURIComponent(webPolicy[1]) === WEB_POLICY_ORG
+            orgId === WEB_POLICY_ORG
               ? WEB_POLICY_ANSWER
-              : NO_WEB_POLICY_ANSWER;
+              : orgId === ORIGIN_CONSENT_ORG
+                ? ORIGIN_CONSENT_ANSWER
+                : NO_WEB_POLICY_ANSWER;
         }
         return Promise.resolve({
           ok: authenticated,
@@ -323,6 +341,9 @@ describeIfAvailable('Quarry-audience token claims, real mint', () => {
             WEB_POLICY_ORG,
           ),
         ),
+      ),
+      user_in_org_with_origin_consent_defaults: withoutTimes(
+        payloadOf(await userToken(ORIGIN_CONSENT_ORG, false)),
       ),
     };
     const document = {
@@ -444,6 +465,16 @@ describeIfAvailable('Quarry-audience token claims, real mint', () => {
       // web policy says.
       expect(claims.zdr).toBe(true);
     }
+  });
+
+  it('carries per-origin consent defaults in the version 1 claim caps (E3.2-f)', async () => {
+    const claims = payloadOf(await userToken(ORIGIN_CONSENT_ORG, false));
+    expect(claims.web_policy).toEqual({
+      v: 1,
+      rev: 'abcdef012345',
+      caps: { 'browser.consent.max_scope': 'conversation' },
+    });
+    expect(claims.zdr).toBe(false);
   });
 
   it('every case of the committed golden carries a version 1 web_policy claim', () => {
