@@ -10,6 +10,7 @@ pub mod doc_intel;
 pub mod effort;
 pub mod fallback;
 pub mod gemini;
+pub mod gemini_schema;
 pub mod intent;
 pub mod language;
 pub mod logprobs;

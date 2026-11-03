@@ -4,9 +4,10 @@
 //! The provider is dark: [`crate::provider::fallback`] registers it only when
 //! `VERTEX_GEMINI_ENABLED` is `true` and the project, an EU location, a credentials
 //! file and a model list are all present. It declares itself EU-resident and never
-//! ZDR. Tools, images and structured output are refused with a typed error before
-//! any call, so a request that needs them moves on to a provider that can serve
-//! it, instead of losing them on the way.
+//! ZDR. Images are refused with a typed error before any call, and so is a streamed
+//! request that offers tools, since a stream cannot carry a function call. A request
+//! that needs a refused feature moves on to a provider that can serve it, instead of
+//! losing the feature on the way.
 
 use std::sync::Arc;
 
@@ -14,13 +15,15 @@ use futures_util::StreamExt;
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
-use super::effort::{Family, ModelAliases};
+use super::effort::{self, Family, Level, ModelAliases, Resolved, Wire};
+use super::gemini_schema;
 use super::model_record;
 use super::overflow;
 use super::vertex_auth::VertexTokenProvider;
 use super::{
     features_for_model, provider_http_client, InferChunk, InferRequest, InferResponse, ModelFamily,
     ModelInfo, PrivacyTier, ProviderCapabilities, ProviderError, ProviderRouter, Residency,
+    ToolCall, ToolDefinition,
 };
 use crate::config::{is_vertex_eu_location, vertex_residency, VertexGeminiConfig};
 
@@ -167,7 +170,7 @@ impl GeminiProvider {
 impl ProviderRouter for GeminiProvider {
     async fn infer(&self, req: &InferRequest) -> Result<InferResponse, ProviderError> {
         refuse_unsupported(req)?;
-        let body = build_request_body(req);
+        let body = build_request_body(req)?;
         let json: serde_json::Value = self
             .post(&self.method_url(&req.model, "generateContent"), &body)
             .await?
@@ -182,7 +185,14 @@ impl ProviderRouter for GeminiProvider {
         req: &InferRequest,
     ) -> Result<mpsc::Receiver<InferChunk>, ProviderError> {
         refuse_unsupported(req)?;
-        let body = build_request_body(req);
+        // A stream carries text deltas only, so a function call the model made would be
+        // lost. Refused before any call, so the chain walks on.
+        if !req.tools.is_empty() {
+            return Err(ProviderError::RequestRejected {
+                detail: "feature_unsupported: streamed_tools".to_owned(),
+            });
+        }
+        let body = build_request_body(req)?;
         let url = format!(
             "{}?alt=sse",
             self.method_url(&req.model, "streamGenerateContent")
@@ -227,7 +237,7 @@ impl ProviderRouter for GeminiProvider {
                     cheap: false,
                     privacy_tier,
                     residency_label: residency_label.clone(),
-                    effort_levels: Vec::new(),
+                    effort_levels: aliases.support(Family::Gemini, id).levels.to_vec(),
                     context_window_tokens: record.context_window_tokens,
                     max_output_tokens: record.max_output_tokens,
                     lifecycle: record.lifecycle,
@@ -243,9 +253,11 @@ impl ProviderRouter for GeminiProvider {
             model_family: ModelFamily::Gemini,
             residency: vertex_residency(&self.location),
             exclusive_catalog: true,
-            supports_tools: false,
+            supports_tools: true,
             supports_vision: false,
-            supports_thinking: false,
+            // Thinking reaches the wire only through the effort switch, so it is advertised
+            // only while that switch is on.
+            supports_thinking: effort::gemini_effort_enabled(),
             supports_streaming: true,
             supports_embeddings: false,
             // Never ZDR. No Vertex retention attestation is read, and implicit caching
@@ -270,27 +282,13 @@ fn endpoint_base(location: &str) -> String {
     }
 }
 
-/// Refuse what this adapter does not send yet, before any network call. Each refusal
-/// is typed so the chain moves on to a provider that can serve the request.
+/// Refuse what this adapter does not send, before any network call. Each refusal is
+/// typed so the chain moves on to a provider that can serve the request.
 fn refuse_unsupported(req: &InferRequest) -> Result<(), ProviderError> {
     if !req.image_parts.is_empty() {
         return Err(ProviderError::VisionUnsupported(
             "vertex-gemini does not send images yet".to_owned(),
         ));
-    }
-    if req
-        .structured_output_schema
-        .as_deref()
-        .is_some_and(|schema| !schema.is_empty())
-    {
-        return Err(ProviderError::RequestRejected {
-            detail: "feature_unsupported: structured_output".to_owned(),
-        });
-    }
-    if !req.tools.is_empty() {
-        return Err(ProviderError::RequestRejected {
-            detail: "feature_unsupported: tools".to_owned(),
-        });
     }
     Ok(())
 }
@@ -298,7 +296,7 @@ fn refuse_unsupported(req: &InferRequest) -> Result<(), ProviderError> {
 /// The `generateContent` body for `req`. System messages move to
 /// `systemInstruction`, assistant turns become `model` turns, and every other role
 /// is sent as `user`, the way the tool loops frame tool results.
-fn build_request_body(req: &InferRequest) -> serde_json::Value {
+fn build_request_body(req: &InferRequest) -> Result<serde_json::Value, ProviderError> {
     let mut system: Vec<&str> = Vec::new();
     let mut contents = Vec::new();
     for message in &req.messages {
@@ -324,15 +322,164 @@ fn build_request_body(req: &InferRequest) -> serde_json::Value {
         "contents": contents,
         "generationConfig": { "temperature": req.temperature },
     });
+    let thinking = resolve_effort(req)
+        .and_then(|resolved| thinking_config(&resolved).map(|config| (resolved.applied, config)));
     if req.max_tokens > 0 {
-        body["generationConfig"]["maxOutputTokens"] = serde_json::json!(req.max_tokens);
+        // Thinking spends the same output ceiling as the answer, so the ceiling rises by the
+        // level's allowance, as the other adapters raise theirs.
+        let ceiling = thinking.as_ref().map_or(req.max_tokens, |(applied, _)| {
+            effort::raised_ceiling(req.max_tokens, *applied)
+        });
+        body["generationConfig"]["maxOutputTokens"] = serde_json::json!(ceiling);
+    }
+    if let Some((_, config)) = thinking {
+        body["generationConfig"]["thinkingConfig"] = config;
+    }
+    if let Some(text) = req
+        .structured_output_schema
+        .as_deref()
+        .filter(|text| !text.trim().is_empty())
+    {
+        // A function call and a JSON answer are not sent together, so a request that offers
+        // tools is refused rather than sent in a shape Vertex would reject.
+        if !req.tools.is_empty() {
+            return Err(ProviderError::RequestRejected {
+                detail: "feature_unsupported: structured_output_with_tools".to_owned(),
+            });
+        }
+        let schema = gemini_schema::response_schema(text).map_err(|reason| {
+            ProviderError::RequestRejected {
+                detail: format!("feature_unsupported: structured_output ({})", reason.as_str()),
+            }
+        })?;
+        body["generationConfig"]["responseMimeType"] = serde_json::json!("application/json");
+        body["generationConfig"]["responseSchema"] = schema;
+    }
+    if let Some((tools, tool_config)) = tool_members(req)? {
+        body["tools"] = tools;
+        body["toolConfig"] = tool_config;
     }
     if !system.is_empty() {
         body["systemInstruction"] = serde_json::json!({
             "parts": [{ "text": system.join("\n\n") }],
         });
     }
-    body
+    Ok(body)
+}
+
+/// The effort the request asks for, resolved against this model's Gemini support. `None`
+/// when no effort is asked for, or the model has no effort wire (the switch is off).
+fn resolve_effort(req: &InferRequest) -> Option<Resolved> {
+    let requested = req
+        .reasoning_effort
+        .or_else(|| effort::from_legacy_budget(req.thinking_budget_tokens));
+    effort::resolve(
+        requested,
+        ModelAliases::default().support(Family::Gemini, &req.model),
+    )
+}
+
+/// The `thinkingConfig` a resolved level renders to: a budget for the 2.5 generation, a
+/// level name for the 3 generation. The declared rows never carry another level, so the
+/// `None` arm only guards a row added without its wire.
+fn thinking_config(resolved: &Resolved) -> Option<serde_json::Value> {
+    match resolved.wire {
+        Wire::GeminiThinkingBudget => Some(serde_json::json!({
+            "thinkingBudget": effort::allowance(resolved.applied),
+        })),
+        Wire::GeminiThinkingLevel => match resolved.applied {
+            Level::Low => Some(serde_json::json!({ "thinkingLevel": "LOW" })),
+            Level::High => Some(serde_json::json!({ "thinkingLevel": "HIGH" })),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// The `tools` and `toolConfig` members for the tools `req` offers, or `None` when it offers
+/// none. A tool whose schema cannot be expressed is left out and counted. A forced choice
+/// that then names no offered tool is refused, rather than answered with another choice.
+fn tool_members(
+    req: &InferRequest,
+) -> Result<Option<(serde_json::Value, serde_json::Value)>, ProviderError> {
+    if req.tools.is_empty() {
+        return Ok(None);
+    }
+    let declarations = tool_declarations(&req.tools);
+    if declarations.is_empty() {
+        return if forced_choice(&req.tool_choice) {
+            Err(refused_choice())
+        } else {
+            Ok(None)
+        };
+    }
+    let offered: Vec<&str> = declarations
+        .iter()
+        .filter_map(|declaration| declaration["name"].as_str())
+        .collect();
+    let config = function_calling_config(&req.tool_choice, &offered)?;
+    Ok(Some((
+        serde_json::json!([{ "functionDeclarations": declarations }]),
+        serde_json::json!({ "functionCallingConfig": config }),
+    )))
+}
+
+/// The function declarations for `tools`. A tool whose schema cannot be expressed is left out
+/// and counted under its reason. Its schema is never logged.
+fn tool_declarations(tools: &[ToolDefinition]) -> Vec<serde_json::Value> {
+    tools
+        .iter()
+        .filter_map(|tool| match gemini_schema::parameters(&tool.parameters_json) {
+            Ok(parameters) => {
+                let mut declaration = serde_json::json!({ "name": tool.name });
+                if !tool.description.is_empty() {
+                    declaration["description"] = serde_json::json!(tool.description);
+                }
+                if let Some(parameters) = parameters {
+                    declaration["parameters"] = parameters;
+                }
+                Some(declaration)
+            }
+            Err(reason) => {
+                gemini_schema::count_dropped_tool(reason);
+                warn!(
+                    tool = %tool.name,
+                    reason = reason.as_str(),
+                    "tool left out: its schema cannot be expressed for vertex-gemini"
+                );
+                None
+            }
+        })
+        .collect()
+}
+
+/// The `functionCallingConfig` for a `tool_choice`. The keywords map to a mode, and a named
+/// tool is forced through an allowlist holding only that tool.
+fn function_calling_config(
+    choice: &str,
+    offered: &[&str],
+) -> Result<serde_json::Value, ProviderError> {
+    Ok(match choice {
+        "" | "auto" => serde_json::json!({ "mode": "AUTO" }),
+        "none" => serde_json::json!({ "mode": "NONE" }),
+        "required" => serde_json::json!({ "mode": "ANY" }),
+        name if offered.contains(&name) => serde_json::json!({
+            "mode": "ANY",
+            "allowedFunctionNames": [name],
+        }),
+        _ => return Err(refused_choice()),
+    })
+}
+
+/// True when `choice` forces a call: any choice other than auto or none.
+fn forced_choice(choice: &str) -> bool {
+    !matches!(choice, "" | "auto" | "none")
+}
+
+fn refused_choice() -> ProviderError {
+    ProviderError::RequestRejected {
+        detail: "feature_unsupported: tool_choice".to_owned(),
+    }
 }
 
 /// The answer to a unary call. A blocked prompt or a safety finish is a typed
@@ -362,6 +509,7 @@ fn parse_response(
         input_tokens: counts.input,
         output_tokens: counts.output,
         cache_read_input_tokens: counts.cache_read,
+        tool_calls: function_calls(candidate),
         ..InferResponse::default()
     })
 }
@@ -387,6 +535,28 @@ fn answer_text(candidate: &serde_json::Value) -> String {
         .flatten()
         .filter(|part| !part["thought"].as_bool().unwrap_or(false))
         .filter_map(|part| part["text"].as_str())
+        .collect()
+}
+
+/// The function calls of a candidate, in the order the model made them. Vertex returns no
+/// call id, so one is synthesised from the position, which keeps it stable for the same
+/// answer. A thought signature on the part is not carried: no loop replays native
+/// function-call parts.
+fn function_calls(candidate: &serde_json::Value) -> Vec<ToolCall> {
+    candidate["content"]["parts"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|part| part.get("functionCall"))
+        .enumerate()
+        .map(|(index, call)| ToolCall {
+            id: format!("gemini-call-{index}"),
+            name: call["name"].as_str().unwrap_or_default().to_owned(),
+            arguments_json: match call.get("args") {
+                Some(args) if !args.is_null() => args.to_string(),
+                _ => "{}".to_owned(),
+            },
+        })
         .collect()
 }
 
@@ -603,7 +773,8 @@ mod tests {
             ("user", "Hi"),
             ("assistant", "Hei"),
             ("user", "Thanks"),
-        ]));
+        ]))
+        .expect("a plain body");
 
         assert_eq!(
             body["systemInstruction"]["parts"][0]["text"],
@@ -701,31 +872,221 @@ mod tests {
     }
 
     #[test]
-    fn structured_output_refused_until_sanitiser() {
+    fn structured_output_goes_through_the_sanitiser() {
         let mut req = request(vec![("user", "Give JSON")]);
+        req.structured_output_schema = Some(
+            r#"{"type":"object","properties":{"city":{"type":"string"}},"required":["city"],"additionalProperties":false}"#
+                .to_owned(),
+        );
+        let body = build_request_body(&req).expect("a schema the sanitiser expresses");
+        assert_eq!(
+            body["generationConfig"]["responseMimeType"],
+            "application/json"
+        );
+        assert_eq!(
+            body["generationConfig"]["responseSchema"],
+            serde_json::json!({
+                "type": "OBJECT",
+                "properties": {"city": {"type": "STRING"}},
+                "required": ["city"],
+            })
+        );
+        // A schema with no fields cannot be expressed, so the call is refused before the network.
         req.structured_output_schema = Some(r#"{"type":"object"}"#.to_owned());
-        let error = refuse_unsupported(&req).expect_err("refused");
+        let error = build_request_body(&req).expect_err("refused");
         assert!(
             matches!(&error, ProviderError::RequestRejected { detail }
-                if detail == "feature_unsupported: structured_output"),
+                if detail == "feature_unsupported: structured_output (open_object)"),
+            "{error:?}"
+        );
+    }
+
+    fn search_tool() -> ToolDefinition {
+        ToolDefinition {
+            name: "search".to_owned(),
+            description: "Search the index".to_owned(),
+            parameters_json: r#"{"type":"object","properties":{"q":{"type":"string"}},"required":["q"]}"#
+                .to_owned(),
+        }
+    }
+
+    #[test]
+    fn declared_tools_ride_in_the_body_with_their_choice() {
+        let mut req = request(vec![("user", "Find oslo")]);
+        req.tools = vec![search_tool()];
+        req.tool_choice = "search".to_owned();
+        let body = build_request_body(&req).expect("body");
+        assert_eq!(
+            body["tools"],
+            serde_json::json!([{ "functionDeclarations": [{
+                "name": "search",
+                "description": "Search the index",
+                "parameters": {
+                    "type": "OBJECT",
+                    "properties": {"q": {"type": "STRING"}},
+                    "required": ["q"],
+                },
+            }]}])
+        );
+        assert_eq!(
+            body["toolConfig"],
+            serde_json::json!({
+                "functionCallingConfig": {"mode": "ANY", "allowedFunctionNames": ["search"]},
+            })
+        );
+    }
+
+    #[test]
+    fn unexpressible_schema_drops_only_that_tool() {
+        let tool = |name: &str, schema: &str| ToolDefinition {
+            name: name.to_owned(),
+            description: String::new(),
+            parameters_json: schema.to_owned(),
+        };
+        let declarations = tool_declarations(&[
+            tool("search", r#"{"type":"object","properties":{"q":{"type":"string"}}}"#),
+            tool(
+                "choose",
+                r#"{"type":"object","properties":{"v":{"oneOf":[{"type":"string"}]}}}"#,
+            ),
+            tool("open", ""),
+        ]);
+        let names: Vec<&str> = declarations
+            .iter()
+            .filter_map(|declaration| declaration["name"].as_str())
+            .collect();
+        assert_eq!(names, ["search", "open"]);
+        assert!(
+            declarations[1].get("parameters").is_none(),
+            "a tool with no arguments declares none"
+        );
+    }
+
+    #[test]
+    fn named_tool_choice_maps_to_any_with_allowlist() {
+        let offered = ["search", "open"];
+        assert_eq!(
+            function_calling_config("auto", &offered).expect("auto"),
+            serde_json::json!({ "mode": "AUTO" })
+        );
+        assert_eq!(
+            function_calling_config("none", &offered).expect("none"),
+            serde_json::json!({ "mode": "NONE" })
+        );
+        assert_eq!(
+            function_calling_config("required", &offered).expect("required"),
+            serde_json::json!({ "mode": "ANY" })
+        );
+        assert_eq!(
+            function_calling_config("open", &offered).expect("a named tool"),
+            serde_json::json!({ "mode": "ANY", "allowedFunctionNames": ["open"] })
+        );
+        // A forced choice naming no offered tool is refused: a call forced to a tool that
+        // was never declared would fail at Vertex.
+        let error = function_calling_config("missing", &offered).expect_err("refused");
+        assert!(
+            matches!(&error, ProviderError::RequestRejected { detail }
+                if detail == "feature_unsupported: tool_choice"),
             "{error:?}"
         );
     }
 
     #[test]
-    fn tools_are_refused_until_the_tool_wire_lands() {
-        let mut req = request(vec![("user", "Search")]);
-        req.tools = vec![ToolDefinition {
-            name: "search".to_owned(),
-            description: String::new(),
-            parameters_json: "{}".to_owned(),
-        }];
-        let error = refuse_unsupported(&req).expect_err("refused");
+    fn function_call_maps_to_tool_calls_with_stable_ids() {
+        let json = serde_json::json!({
+            "candidates": [{
+                "content": { "role": "model", "parts": [
+                    { "functionCall": { "name": "search", "args": { "q": "oslo" } } },
+                    { "text": "" },
+                    { "functionCall": { "name": "open", "args": { "id": 7 } } },
+                ]},
+                "finishReason": "STOP",
+            }],
+        });
+        let first = parse_response("req-1", MODEL, &json).expect("tool round");
+        let again = parse_response("req-1", MODEL, &json).expect("tool round");
+        let ids: Vec<&str> = first.tool_calls.iter().map(|call| call.id.as_str()).collect();
+        assert_eq!(ids, ["gemini-call-0", "gemini-call-1"]);
+        assert_eq!(first.tool_calls, again.tool_calls, "the ids are stable for one answer");
+        assert_eq!(first.tool_calls[0].name, "search");
+        assert_eq!(first.tool_calls[0].arguments_json, r#"{"q":"oslo"}"#);
+        assert_eq!(first.tool_calls[1].arguments_json, r#"{"id":7}"#);
+        assert!(first.content.is_empty());
+    }
+
+    #[test]
+    fn thought_signature_is_ignored() {
+        let json = serde_json::json!({
+            "candidates": [{
+                "content": { "role": "model", "parts": [
+                    {
+                        "functionCall": { "name": "search", "args": { "q": "oslo" } },
+                        "thoughtSignature": "c2lnbmF0dXJl",
+                    },
+                ]},
+                "finishReason": "STOP",
+            }],
+        });
+        let response = parse_response("req-1", MODEL, &json).expect("tool round");
+        assert_eq!(response.tool_calls.len(), 1);
+        assert_eq!(response.tool_calls[0].name, "search");
+        assert_eq!(response.tool_calls[0].arguments_json, r#"{"q":"oslo"}"#);
+        // No loop replays a native function-call part, so the request never carries one.
+        let mut req = request(vec![("user", "Find oslo")]);
+        req.tools = vec![search_tool()];
+        let body = build_request_body(&req).expect("body");
+        assert!(!body.to_string().contains("thoughtSignature"));
+    }
+
+    #[tokio::test]
+    async fn a_streamed_request_with_tools_is_refused_before_the_call() {
+        let mut req = request(vec![("user", "Find oslo")]);
+        req.tools = vec![search_tool()];
+        // Nothing listens on port 1: a refusal that reached the network would fail differently.
+        let provider = GeminiProvider::for_test(
+            "http://127.0.0.1:1",
+            VertexTokenProvider::from_json(&key_json("http://127.0.0.1:1/token")).expect("key"),
+            &[MODEL],
+        );
+        let Err(error) = provider.infer_stream(&req).await else {
+            panic!("a streamed request with tools is refused");
+        };
         assert!(
             matches!(&error, ProviderError::RequestRejected { detail }
-                if detail == "feature_unsupported: tools"),
+                if detail == "feature_unsupported: streamed_tools"),
             "{error:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn a_tool_round_sends_declarations_and_reads_the_call() {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        Mock::given(method("POST"))
+            .and(path(generate_path("generateContent")))
+            .and(wiremock::matchers::body_partial_json(serde_json::json!({
+                "tools": [{ "functionDeclarations": [{ "name": "search" }] }],
+                "toolConfig": { "functionCallingConfig": { "mode": "AUTO" } },
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "candidates": [{
+                    "content": { "role": "model", "parts": [
+                        { "functionCall": { "name": "search", "args": { "q": "oslo" } } },
+                    ]},
+                    "finishReason": "STOP",
+                }],
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let provider = provider_at(&server).await;
+        let mut req = request(vec![("user", "Find oslo")]);
+        req.tools = vec![search_tool()];
+        let response = provider.infer(&req).await.expect("tool round");
+        assert_eq!(response.tool_calls.len(), 1);
+        assert_eq!(response.tool_calls[0].name, "search");
+        server.verify().await;
     }
 
     #[test]
