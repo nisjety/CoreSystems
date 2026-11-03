@@ -226,12 +226,14 @@ paths:
                 $ref: '#/components/schemas/Envelope_Error'
         '429':
           description: >-
-            Rate limited. With actions, details.reason heavy_browser_busy means the
-            browser's heavy lane is held by another action run; retry shortly.
+            Rate limited, answered with the structured retry body (RateLimitError: code RATE_LIMITED,
+            window, retry_after_seconds and next_actions) and a Retry-After header, not with the envelope.
+            With actions, a busy browser heavy lane (another action run) gets the same 429 today: the
+            details.reason heavy_browser_busy named in docs/ERROR_REASONS.md is not carried on this route.
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/Envelope_Error'
+                $ref: '#/components/schemas/RateLimitError'
         '501':
           description: >-
             The browser cannot do what was asked: a capture or actions on a browser that
@@ -1619,7 +1621,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ErrorBody'
+                $ref: '#/components/schemas/Envelope_Error'
   /v1/sources:
     get:
       operationId: list_sources
@@ -1701,7 +1703,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ErrorBody'
+                $ref: '#/components/schemas/Envelope_Error'
   /v1/sources/{source_id}:
     delete:
       operationId: delete_source
@@ -1739,7 +1741,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ErrorBody'
+                $ref: '#/components/schemas/Envelope_Error'
   /v1/snapshots:
     get:
       operationId: list_snapshots
@@ -2496,7 +2498,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ErrorBody'
+                $ref: '#/components/schemas/Envelope_Error'
   /v1/request-queues:
     get:
       operationId: list_request_queues
@@ -2785,7 +2787,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ErrorBody'
+                $ref: '#/components/schemas/Envelope_Error'
   /v1/jobs/{job_id}/events:
     get:
       operationId: list_job_events
@@ -2999,7 +3001,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ErrorBody'
+                $ref: '#/components/schemas/Envelope_Error'
   /v1/change/history:
     get:
       operationId: change_history
@@ -3127,25 +3129,25 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ErrorBody'
+                $ref: '#/components/schemas/Envelope_Error'
         '403':
           description: The caller is under Zero Data Retention. Stored page text is not readable.
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ErrorBody'
+                $ref: '#/components/schemas/Envelope_Error'
         '404':
           description: No baseline for this org and url, or an unknown baseline or diff id, or one that belongs to another organization
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ErrorBody'
+                $ref: '#/components/schemas/Envelope_Error'
         '501':
           description: Change text diffs are not enabled on this edge (QUARRY_EDGE__CHANGE_TEXT_DIFF), or the edge has no baseline store
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ErrorBody'
+                $ref: '#/components/schemas/Envelope_Error'
   /v1/change/snapshot:
     post:
       operationId: promote_tracked_result_to_snapshot
@@ -3183,13 +3185,13 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ErrorBody'
+                $ref: '#/components/schemas/Envelope_Error'
         '501':
           description: postgres-queue feature disabled
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ErrorBody'
+                $ref: '#/components/schemas/Envelope_Error'
   /v1/change/refresh:
     post:
       operationId: schedule_refresh_run
@@ -3249,7 +3251,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ErrorBody'
+                $ref: '#/components/schemas/Envelope_Error'
   /v1/schedules:
     get:
       operationId: list_schedules
@@ -3330,7 +3332,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ErrorBody'
+                $ref: '#/components/schemas/Envelope_Error'
   /v1/schedules/{schedule_id}:
     delete:
       operationId: delete_schedule
@@ -3366,7 +3368,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ErrorBody'
+                $ref: '#/components/schemas/Envelope_Error'
   /v1/schedules/{schedule_id}/pause:
     post:
       operationId: pause_schedule
@@ -3439,7 +3441,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ErrorBody'
+                $ref: '#/components/schemas/Envelope_Error'
   /v1/schedules/{schedule_id}/backfill:
     post:
       operationId: backfill_schedule
@@ -3463,7 +3465,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ErrorBody'
+                $ref: '#/components/schemas/Envelope_Error'
   /v1/profiles:
     get:
       operationId: list_profiles
@@ -3693,31 +3695,31 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ErrorBody'
+                $ref: '#/components/schemas/Envelope_Error'
         '403':
           description: The token's ZDR floor is set (`error.details.reason` is `webhook_off_process`), or the caller is a service principal.
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ErrorBody'
+                $ref: '#/components/schemas/Envelope_Error'
         '409':
           description: The organization already has a subscription with this URL and these events (`error.details.reason` is `subscription_exists`).
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ErrorBody'
+                $ref: '#/components/schemas/Envelope_Error'
         '429':
           description: The organization holds the maximum of 10 subscriptions (`error.details.reason` is `subscription_limit`, `error.details.limit` is 10).
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ErrorBody'
+                $ref: '#/components/schemas/Envelope_Error'
         '501':
           description: Not enabled (QUARRY_EDGE__WEBHOOK_SUBSCRIPTIONS on the edge, QUARRY_CONTROL__WEBHOOK_SUBSCRIPTIONS on control; the message names the one that is off).
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ErrorBody'
+                $ref: '#/components/schemas/Envelope_Error'
     get:
       operationId: list_webhook_subscriptions
       summary: List the organization's webhook subscriptions (INNH-5)
@@ -3762,13 +3764,13 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ErrorBody'
+                $ref: '#/components/schemas/Envelope_Error'
         '501':
           description: Not enabled.
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ErrorBody'
+                $ref: '#/components/schemas/Envelope_Error'
   /v1/webhook-subscriptions/{subscription_id}:
     get:
       operationId: get_webhook_subscription
@@ -3799,13 +3801,13 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ErrorBody'
+                $ref: '#/components/schemas/Envelope_Error'
         '501':
           description: Not enabled.
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ErrorBody'
+                $ref: '#/components/schemas/Envelope_Error'
     patch:
       operationId: update_webhook_subscription
       summary: Pause, resume or change the events of a subscription (INNH-5)
@@ -3846,25 +3848,25 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ErrorBody'
+                $ref: '#/components/schemas/Envelope_Error'
         '403':
           description: Zero Data Retention (`error.details.reason` is `webhook_off_process`), or a service principal.
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ErrorBody'
+                $ref: '#/components/schemas/Envelope_Error'
         '404':
           description: Unknown or foreign id.
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ErrorBody'
+                $ref: '#/components/schemas/Envelope_Error'
         '501':
           description: Not enabled.
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ErrorBody'
+                $ref: '#/components/schemas/Envelope_Error'
     delete:
       operationId: delete_webhook_subscription
       summary: Delete a subscription and its delivery log (INNH-5)
@@ -3883,13 +3885,13 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ErrorBody'
+                $ref: '#/components/schemas/Envelope_Error'
         '501':
           description: Not enabled.
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ErrorBody'
+                $ref: '#/components/schemas/Envelope_Error'
   /v1/webhook-subscriptions/{subscription_id}/rotate-secret:
     post:
       operationId: rotate_webhook_subscription_secret
@@ -3921,13 +3923,13 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ErrorBody'
+                $ref: '#/components/schemas/Envelope_Error'
         '501':
           description: Not enabled.
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ErrorBody'
+                $ref: '#/components/schemas/Envelope_Error'
   /v1/webhook-subscriptions/{subscription_id}/deliveries:
     get:
       operationId: list_webhook_deliveries
@@ -3988,19 +3990,19 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ErrorBody'
+                $ref: '#/components/schemas/Envelope_Error'
         '404':
           description: Unknown or foreign subscription id.
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ErrorBody'
+                $ref: '#/components/schemas/Envelope_Error'
         '501':
           description: Not enabled.
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ErrorBody'
+                $ref: '#/components/schemas/Envelope_Error'
   /v1/webhook-subscriptions/{subscription_id}/deliveries/{delivery_id}/retry:
     post:
       operationId: retry_webhook_delivery
@@ -4038,25 +4040,25 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ErrorBody'
+                $ref: '#/components/schemas/Envelope_Error'
         '404':
           description: Unknown or foreign subscription or delivery id.
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ErrorBody'
+                $ref: '#/components/schemas/Envelope_Error'
         '409':
           description: The delivery is pending, in flight or delivered (`error.details.reason` is `delivery_not_retryable`).
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ErrorBody'
+                $ref: '#/components/schemas/Envelope_Error'
         '501':
           description: Not enabled.
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ErrorBody'
+                $ref: '#/components/schemas/Envelope_Error'
   /v1/parse:
     post:
       operationId: parse_document
@@ -4277,11 +4279,13 @@ components:
               type: string
     ParseError:
       type: object
-      required: [error, meta]
+      required: [data, error, meta]
       properties:
+        data:
+          description: Always null on an error.
         error:
           type: object
-          required: [code, message]
+          required: [code, message, retryable]
           properties:
             code:
               type: string
@@ -4315,6 +4319,8 @@ components:
                   type: integer
                 env:
                   type: string
+            retryable:
+              type: boolean
         meta:
           type: object
           properties:
@@ -4511,16 +4517,25 @@ components:
             limit:
               type: integer
     ErrorDetail:
+      description: 'The wire error object (QuarryError) of the typed envelope. Null on a success.'
       type: object
       nullable: true
+      required:
+      - code
+      - message
+      - retryable
       properties:
         code:
           type: string
+          description: The wire code, SCREAMING_SNAKE_CASE (BAD_REQUEST, FORBIDDEN, RATE_LIMITED, UNSUPPORTED, TIMEOUT, INTERNAL and the rest of the ErrorCode set).
         message:
           type: string
-        hint:
-          type: string
-          nullable: true
+        details:
+          type: object
+          additionalProperties: true
+          description: Present only when the route adds detail, such as details.reason.
+        retryable:
+          type: boolean
     Source:
       type: object
       required:
@@ -5657,16 +5672,13 @@ components:
           type: number
           nullable: true
     Envelope_StartAgentRun:
+      description: 'Success envelope. data is the payload, meta carries request_id, error is null.'
       type: object
       required:
-      - request_id
-      - success
       - data
+      - meta
+      - error
       properties:
-        request_id:
-          type: string
-        success:
-          type: boolean
         data:
           type: object
           required:
@@ -5749,6 +5761,10 @@ components:
                     - default
                     - ceiling
                     - grant
+        meta:
+          $ref: '#/components/schemas/ResponseMeta'
+        error:
+          description: Always null on a success.
     AdvisoryIdentifier:
       type: string
       minLength: 1
@@ -5840,16 +5856,13 @@ components:
         agentLabel:
           $ref: '#/components/schemas/AdvisoryIdentifier'
     Envelope_AgentTabs:
+      description: 'Success envelope. data is the payload, meta carries request_id, error is null.'
       type: object
       required:
-      - request_id
-      - success
       - data
+      - meta
+      - error
       properties:
-        request_id:
-          type: string
-        success:
-          type: boolean
         data:
           type: object
           required:
@@ -5859,17 +5872,18 @@ components:
               type: array
               items:
                 $ref: '#/components/schemas/AgentTab'
+        meta:
+          $ref: '#/components/schemas/ResponseMeta'
+        error:
+          description: Always null on a success.
     Envelope_AgentTab:
+      description: 'Success envelope. data is the payload, meta carries request_id, error is null.'
       type: object
       required:
-      - request_id
-      - success
       - data
+      - meta
+      - error
       properties:
-        request_id:
-          type: string
-        success:
-          type: boolean
         data:
           type: object
           required:
@@ -5882,6 +5896,10 @@ components:
               type: array
               items:
                 $ref: '#/components/schemas/AgentTab'
+        meta:
+          $ref: '#/components/schemas/ResponseMeta'
+        error:
+          description: Always null on a success.
     AgentStepRequest:
       type: object
       required:
@@ -5913,24 +5931,25 @@ components:
           nullable: true
           additionalProperties: true
     Envelope_BrowserObservation:
+      description: 'Success envelope. data is the payload, meta carries request_id, error is null.'
       type: object
       required:
-      - request_id
-      - success
       - data
+      - meta
+      - error
       properties:
-        request_id:
-          type: string
-        success:
-          type: boolean
         data:
           $ref: '#/components/schemas/BrowserObservation'
         meta:
-          type: object
           description: Present on a step response of an agent-class run (WS6.B); absent for a person's session and when budgets are off.
-          properties:
-            budget:
-              $ref: '#/components/schemas/BudgetMeta'
+          allOf:
+          - $ref: '#/components/schemas/ResponseMeta'
+          - type: object
+            properties:
+              budget:
+                $ref: '#/components/schemas/BudgetMeta'
+        error:
+          description: Always null on a success.
     BudgetMeta:
       type: object
       description: >-
@@ -6273,16 +6292,13 @@ components:
           type: integer
           minimum: 0
     Envelope_EgressReceipts:
+      description: 'Success envelope. data is the payload, meta carries request_id, error is null.'
       type: object
       required:
-      - request_id
-      - success
       - data
+      - meta
+      - error
       properties:
-        request_id:
-          type: string
-        success:
-          type: boolean
         data:
           type: object
           required:
@@ -6295,6 +6311,10 @@ components:
                 $ref: '#/components/schemas/BrowserEgressReceipt'
             zdr:
               type: boolean
+        meta:
+          $ref: '#/components/schemas/ResponseMeta'
+        error:
+          description: Always null on a success.
     BrowserDialog:
       type: object
       required:
@@ -7389,20 +7409,21 @@ components:
           type: string
           nullable: true
     Envelope_StepReceipts:
+      description: 'Success envelope. data is the payload, meta carries request_id, error is null.'
       type: object
       required:
-      - request_id
-      - success
       - data
+      - meta
+      - error
       properties:
-        request_id:
-          type: string
-        success:
-          type: boolean
         data:
           type: array
           items:
             $ref: '#/components/schemas/StepReceipt'
+        meta:
+          $ref: '#/components/schemas/ResponseMeta'
+        error:
+          description: Always null on a success.
     StepReceipt:
       type: object
       required:
@@ -7516,18 +7537,19 @@ components:
                   was masked when the receipt was written, so a replay must supply it. The
                   replay check answers repair_required for such a step, never exact.
     Envelope_BrowserProcedure:
+      description: 'Success envelope. data is the payload, meta carries request_id, error is null.'
       type: object
       required:
-      - request_id
-      - success
       - data
+      - meta
+      - error
       properties:
-        request_id:
-          type: string
-        success:
-          type: boolean
         data:
           $ref: '#/components/schemas/BrowserProcedure'
+        meta:
+          $ref: '#/components/schemas/ResponseMeta'
+        error:
+          description: Always null on a success.
     ReplayCheckRequest:
       type: object
       required:
@@ -7541,19 +7563,20 @@ components:
             type: object
             additionalProperties: true
     Envelope_ReplayDecision:
+      description: 'Success envelope. data is the payload, meta carries request_id, error is null.'
       type: object
       required:
-      - request_id
-      - success
       - data
+      - meta
+      - error
       properties:
-        request_id:
-          type: string
-        success:
-          type: boolean
         data:
           type: object
           additionalProperties: true
+        meta:
+          $ref: '#/components/schemas/ResponseMeta'
+        error:
+          description: Always null on a success.
     ProcedureImpactRequest:
       type: object
       required:
@@ -7567,44 +7590,43 @@ components:
             type: string
             format: uri
     Envelope_ProcedureQuality:
+      description: 'Success envelope. data is the payload, meta carries request_id, error is null.'
       type: object
       required:
-      - request_id
-      - success
       - data
+      - meta
+      - error
       properties:
-        request_id:
-          type: string
-        success:
-          type: boolean
         data:
           type: object
           additionalProperties: true
+        meta:
+          $ref: '#/components/schemas/ResponseMeta'
+        error:
+          description: Always null on a success.
     Envelope_ProcedureImpact:
+      description: 'Success envelope. data is the payload, meta carries request_id, error is null.'
       type: object
       required:
-      - request_id
-      - success
       - data
+      - meta
+      - error
       properties:
-        request_id:
-          type: string
-        success:
-          type: boolean
         data:
           type: object
           additionalProperties: true
+        meta:
+          $ref: '#/components/schemas/ResponseMeta'
+        error:
+          description: Always null on a success.
     Envelope_ClosedRun:
+      description: 'Success envelope. data is the payload, meta carries request_id, error is null.'
       type: object
       required:
-      - request_id
-      - success
       - data
+      - meta
+      - error
       properties:
-        request_id:
-          type: string
-        success:
-          type: boolean
         data:
           type: object
           required:
@@ -7634,6 +7656,10 @@ components:
                   type: string
                   nullable: true
                   enum: [steps, attempts, runtime, cost, null]
+        meta:
+          $ref: '#/components/schemas/ResponseMeta'
+        error:
+          description: Always null on a success.
     SearchRequest:
       type: object
       required:
@@ -8992,19 +9018,19 @@ components:
             enum:
             - entitlement
     Envelope_NormalizedOutput:
+      description: 'Success envelope. data is the payload, meta carries request_id, error is null.'
       type: object
       required:
-      - request_id
-      - success
       - data
+      - meta
+      - error
       properties:
-        request_id:
-          type: string
-        success:
-          type: boolean
-          description: Always true for success envelopes
         data:
           $ref: '#/components/schemas/NormalizedOutput'
+        meta:
+          $ref: '#/components/schemas/ResponseMeta'
+        error:
+          description: Always null on a success.
     ScrapeResponse:
       description: >-
         A NormalizedOutput plus what cannot be a stored artifact. Under Zero Data
@@ -9367,51 +9393,47 @@ components:
               type: string
               description: The inline bytes under ZDR, within the shared inline cap.
     Envelope_ScrapeResponse:
+      description: 'Success envelope. data is the payload, meta carries request_id, error is null.'
       type: object
       required:
-      - request_id
-      - success
       - data
-      properties:
-        request_id:
-          type: string
-        success:
-          type: boolean
-        data:
-          $ref: '#/components/schemas/ScrapeResponse'
-    Envelope_HandoffAck:
-      type: object
-      required:
-      - request_id
-      - success
-      - data
-      properties:
-        request_id:
-          type: string
-        success:
-          type: boolean
-          description: Always true for success envelopes
-        data:
-          $ref: '#/components/schemas/HandoffAck'
-    Envelope_Error:
-      type: object
-      required:
-      - request_id
-      - success
+      - meta
       - error
       properties:
-        request_id:
-          type: string
-        success:
-          type: boolean
-          description: Always false for error envelopes
+        data:
+          $ref: '#/components/schemas/ScrapeResponse'
+        meta:
+          $ref: '#/components/schemas/ResponseMeta'
         error:
-          type: object
-          properties:
-            code:
-              type: string
-            message:
-              type: string
+          description: Always null on a success.
+    Envelope_HandoffAck:
+      description: 'Success envelope. data is the payload, meta carries request_id, error is null.'
+      type: object
+      required:
+      - data
+      - meta
+      - error
+      properties:
+        data:
+          $ref: '#/components/schemas/HandoffAck'
+        meta:
+          $ref: '#/components/schemas/ResponseMeta'
+        error:
+          description: Always null on a success.
+    Envelope_Error:
+      description: 'The error envelope of the typed routes. data is null, meta carries request_id, error is the wire error object (ErrorDetail).'
+      type: object
+      required:
+      - data
+      - meta
+      - error
+      properties:
+        data:
+          description: Always null on an error.
+        meta:
+          $ref: '#/components/schemas/ResponseMeta'
+        error:
+          $ref: '#/components/schemas/ErrorDetail'
     CreateWebhookSubscription:
       type: object
       additionalProperties: false
