@@ -268,10 +268,9 @@ async fn run_live(
             "a user principal is required",
         );
     }
-    // A posture that cannot be decided is refused like a ZDR one (fail closed).
-    let zero_retention = crate::zdr_posture::zdr_or_refuse(&claims, &crate::zdr_posture::Route::plain(false))
-        .unwrap_or(true);
-    if zero_retention {
+    // A ZDR credential, or a posture that cannot be decided (fail closed), is refused here. A waiver
+    // waits for the run's route, which Session Core verdicts in step 4.
+    if crate::zdr_posture::live_view_refused_before_verdict(&claims) {
         count_attach("zdr");
         return (
             StatusCode::FORBIDDEN,
@@ -295,6 +294,25 @@ async fn run_live(
             return response;
         }
     };
+
+    // 4b. The run's posture on the route it names. Session Core's verdict does not name the run's
+    // provider or connection yet, so the run is decided on the default route, where a waiver is a route
+    // mismatch and is refused (fail closed). Once the verdict carries the route, decide on it here.
+    match crate::zdr_posture::decide_for(&claims, &crate::zdr_posture::Route::plain(false)) {
+        Ok(crate::zdr_posture::TurnPosture::Persistent) => {}
+        Ok(_) => {
+            count_attach("zdr");
+            return (
+                StatusCode::FORBIDDEN,
+                Json(Refusal::feature_not_supported("agent_run").json_body()),
+            )
+                .into_response();
+        }
+        Err(refusal) => {
+            count_attach("zdr");
+            return crate::zdr_posture::http(&refusal).into_response();
+        }
+    }
 
     // 5. Where the producer's buffer lives. Org-scoped; the owner segment must be the owner
     // Session Core named, so a pointer never crosses users.
