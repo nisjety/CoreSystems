@@ -283,7 +283,7 @@ func (a *Activities) RunPage(ctx context.Context, in RunPageInput) (RunPageResul
 	// verify_run_binding byte-for-byte). Skipped when no shared secret is
 	// configured — the edge then falls back to runtime-token-only.
 	if a.cfg.EdgeRunSecret != "" {
-		sig, sigErr := runBindingSigExtras(a.cfg.EdgeRunSecret, in.OrgID, in.URL, snapshot)
+		sig, sigErr := runBindingSigPage(a.cfg.EdgeRunSecret, in.OrgID, in.URL, snapshot, in.Crawl)
 		if sigErr != nil {
 			return RunPageResult{}, errs.New(errs.CategoryValidation, op, sigErr).Temporal()
 		}
@@ -601,8 +601,19 @@ func runBindingSig(secret, orgID, url string) string {
 // snapshot's canonical JSON>" after the url. With no snapshot the string is exactly the
 // two-field one, so an edge that predates the extras still verifies. The Rust side is
 // InternalSigner::run_binding_sig / RunBindingExtras; the golden constants in both test
-// suites pin the two together. WS14.S7a adds "\nrobots=<sha256 hex>" after the policy line.
+// suites pin the two together. WS14.S7a adds "\nrobots=<sha256 hex>" after the policy line
+// (runBindingSigPage); this form signs a page without a crawl context.
 func runBindingSigExtras(secret, orgID, url string, policySnapshot json.RawMessage) (string, error) {
+	return runBindingSigPage(secret, orgID, url, policySnapshot, nil)
+}
+
+// runBindingSigPage is the run-binding signature of one page body (WS14.S7a): the policy
+// snapshot line, then "\nrobots=<sha256 hex of the canonical JSON of crawl.robots>" when the
+// page has a crawl context whose robots mode is not respect. A page that respects robots.txt
+// (every page before the override) signs exactly what it signed before, so a captured
+// respecting signature cannot be replayed with robots "ignore". The rule and the bytes match
+// the edge's RunBindingExtras::for_page; TestCrawlRobotsBindingGolden pins them.
+func runBindingSigPage(secret, orgID, url string, policySnapshot json.RawMessage, crawl *CrawlContext) (string, error) {
 	canonical := orgID + "\n" + url
 	if policySnapshot = policySnapshotOrNil(policySnapshot); policySnapshot != nil {
 		sum, err := policySnapshotSHA256(policySnapshot)
@@ -611,9 +622,41 @@ func runBindingSigExtras(secret, orgID, url string, policySnapshot json.RawMessa
 		}
 		canonical += "\npolicy=" + sum
 	}
+	if crawl != nil && crawl.Robots != RobotsRespect {
+		sum, err := crawlRobotsSHA256(crawl.Robots)
+		if err != nil {
+			return "", err
+		}
+		canonical += "\nrobots=" + sum
+	}
 	mac := hmac.New(sha256.New, []byte(secret))
 	mac.Write([]byte(canonical))
 	return hex.EncodeToString(mac.Sum(nil)), nil
+}
+
+// crawlRobotsSHA256 is the lowercase-hex sha256 of the canonical JSON of a crawl.robots value
+// (a JSON string, HTML characters not escaped, as the edge's canonical_json writes it).
+func crawlRobotsSHA256(robots string) (string, error) {
+	raw, err := json.Marshal(robots)
+	if err != nil {
+		return "", fmt.Errorf("crawl robots cannot be encoded: %w", err)
+	}
+	return policySnapshotSHA256(raw)
+}
+
+// RobotsModeFromParam reads a job's params.robots (WS14.S7a). Most jobs carry the mode string
+// ("respect"); an ignore-robots override job carries the object {mode, authority, rev} the edge
+// stamps and quarry-control audits. Anything else is "", which the crawl reads as respect.
+func RobotsModeFromParam(v any) string {
+	switch value := v.(type) {
+	case string:
+		return value
+	case map[string]any:
+		mode, _ := value["mode"].(string)
+		return mode
+	default:
+		return ""
+	}
 }
 
 // policySnapshotOrNil is the snapshot when there is one: nil for an absent, empty or JSON null

@@ -17,8 +17,13 @@
 //!   `sitemap` (`include`, `only`) and `scrape_options` behind the default-off
 //!   flags `QUARRY_EDGE__CRAWL_SITEMAP` and `QUARRY_EDGE__CRAWL_SCRAPE_OPTIONS`;
 //!   with a flag off the 400 stays exactly as it was.
-//! - `ignore_robots_txt: true` is a 403 `policy_denied` (WS14.S7 owns the
-//!   entitlement that would allow it; until then it is never allowed).
+//! - `ignore_robots_txt: true` is a 403 `policy_denied` unless the WS14.S7a override
+//!   allows it ([`robots_override`]): a person (never a service, an API key or the
+//!   Model), web policy and the org claim both enforced, the org's signed claim raising
+//!   the robots ceiling to `ignore` (`web.robots_override`, WS7.H/WS7.I), no operator
+//!   ceiling below it, and the org on the operator grant list
+//!   (`QUARRY_EDGE__ROBOTS_OVERRIDE_ORGS`, OQ-11: platform operators grant). Any miss
+//!   is the same 403 as before, with the same field.
 //! - Patterns obey the D3 caps (100 patterns, 512 characters each, 8192 in total)
 //!   and must compile (`re:` prefixes are regular expressions).
 //!
@@ -29,16 +34,20 @@
 //! Field errors are `{path, code, message}`: the path is the spelling the caller
 //! sent, so a caller can correct itself. Messages never echo a caller's value.
 
+use std::collections::BTreeSet;
 use std::sync::OnceLock;
 
 use quarry_core::crawl_scope::{
     CrawlContext, CrawlScope, MAX_EXTENSIONS, MAX_PATTERNS, MAX_PATTERN_CHARS,
     MAX_PATTERN_TOTAL_CHARS,
 };
+use quarry_core::web_policy::{OrgInput, RobotsMax};
 use serde_json::{Map, Value};
 
+use crate::auth::Claims;
 use crate::crawl_policy::CrawlFeatures;
 use crate::crawl_scrape::CrawlScrapeOptions;
+use crate::policy_baseline::{Enforcement, PolicyBaseline};
 
 /// The environment name. Read once through [`CrawlRequestSettings::current`].
 pub const ENV_REQUEST_VALIDATION: &str = "QUARRY_EDGE__CRAWL_REQUEST_VALIDATION";
@@ -249,7 +258,202 @@ pub struct ParsedCrawl {
     /// INNH-6b: the checked per-page options. `None` when absent (or the flag is off, which
     /// refuses the key instead).
     pub scrape_options: Option<CrawlScrapeOptions>,
+    /// WS14.S7a: the spelling the caller sent `ignore_robots_txt: true` under, `None` when the
+    /// key is absent or false. A body that asks for it is only accepted by the handoff after
+    /// [`robots_override`] allows it; otherwise it is the 403 it always was.
+    pub ignore_robots_txt: Option<String>,
     pub warnings: Vec<RequestWarning>,
+}
+
+/// WS14.S7a (OQ-11): the operator grant list for the robots.txt override, a comma-separated
+/// list of org ids. Unset or empty (the default): no org is granted, so the override is
+/// refused for everyone whatever the org's claim says. Only platform operators, who set the
+/// edge environment, can grant it; an org admin can only raise the org's own ceiling (WS7.H).
+pub const ENV_ROBOTS_OVERRIDE_ORGS: &str = "QUARRY_EDGE__ROBOTS_OVERRIDE_ORGS";
+
+/// WS14.S7a: the entitlement an override job names as its authority (`params.robots.authority`).
+pub const ROBOTS_OVERRIDE_AUTHORITY: &str = "web.robots_override";
+
+/// WS14.S7a: the org ids the operators granted the robots.txt override, read once.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RobotsOverrideGrants {
+    orgs: BTreeSet<String>,
+}
+
+impl RobotsOverrideGrants {
+    /// Read the list through a lookup, so tests need no process environment. Entries are
+    /// trimmed; empty entries are dropped. The value is never logged.
+    pub fn from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Self {
+        let orgs = lookup(ENV_ROBOTS_OVERRIDE_ORGS)
+            .map(|raw| {
+                raw.split(',')
+                    .map(str::trim)
+                    .filter(|org| !org.is_empty())
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default();
+        Self { orgs }
+    }
+
+    /// The process list, read once from the environment.
+    pub fn current() -> &'static Self {
+        static GRANTS: OnceLock<RobotsOverrideGrants> = OnceLock::new();
+        GRANTS.get_or_init(|| Self::from_lookup(|name| std::env::var(name).ok()))
+    }
+
+    /// Whether the operators granted `org_id` the override.
+    pub fn grants(&self, org_id: &str) -> bool {
+        !org_id.trim().is_empty() && self.orgs.contains(org_id)
+    }
+}
+
+/// WS14.S7a: why the override was refused. Closed labels, for the counter and the log only:
+/// the caller always gets the same 403 field, whichever check refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OverrideRefusal {
+    /// A service principal, an API key (the Model reaches Quarry only as a service), or a token
+    /// without a user to attribute the audit event to.
+    NotAPerson,
+    /// `QUARRY_EDGE__WEB_POLICY_ENFORCEMENT` or `QUARRY_EDGE__WEB_POLICY_CLAIM_ENFORCEMENT` is not
+    /// `enforce`: the org's claim does not bind the run, so it cannot unlock anything either.
+    NotEnforced,
+    /// No readable org policy: the claim is absent, unreadable, or the baseline `rev` `"0"`.
+    NoOrgPolicy,
+    /// The org's claim does not raise the robots ceiling to `ignore`.
+    NotEntitled,
+    /// The operator baseline caps robots below `ignore`.
+    OperatorCeiling,
+    /// The org is not on the operator grant list (OQ-11).
+    NotGranted,
+}
+
+impl OverrideRefusal {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::NotAPerson => "not_a_person",
+            Self::NotEnforced => "not_enforced",
+            Self::NoOrgPolicy => "no_org_policy",
+            Self::NotEntitled => "not_entitled",
+            Self::OperatorCeiling => "operator_ceiling",
+            Self::NotGranted => "not_granted",
+        }
+    }
+}
+
+/// WS14.S7a: an allowed override. `rev` is the org policy revision that allowed it, in the
+/// issuer's 12-hex form (`web_policy_edge::policy_rev_hex`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RobotsOverride {
+    pub rev: String,
+}
+
+impl RobotsOverride {
+    /// `params.robots` of the job: what quarry-control audits before it acknowledges the job
+    /// (WS14.S7b) and what the orchestrator runs the crawl with.
+    pub fn params_value(&self) -> Value {
+        serde_json::json!({
+            "mode": "ignore",
+            "authority": ROBOTS_OVERRIDE_AUTHORITY,
+            "rev": self.rev,
+        })
+    }
+
+    /// `effective.robots_override` of the handoff acknowledgement (`effective.robots` stays the
+    /// mode string, `"ignore"`).
+    pub fn effective_value(&self) -> Value {
+        serde_json::json!({
+            "authority": ROBOTS_OVERRIDE_AUTHORITY,
+            "rev": self.rev,
+        })
+    }
+}
+
+/// WS14.S7a: may this caller ignore robots.txt on a crawl?
+///
+/// The web-policy lattice is tighten-only and the catalogue baseline for `robots.max_mode` is
+/// `respect`, so a resolved policy never reaches `ignore` (v1 builds no unlock path). The
+/// override is therefore this explicit unlock, the `require(RobotsIgnore, Human)` of the plan:
+/// every check below must pass, in this order.
+pub fn decide_robots_override(
+    claims: &Claims,
+    baseline: &PolicyBaseline,
+    grants: &RobotsOverrideGrants,
+) -> Result<RobotsOverride, OverrideRefusal> {
+    // ADR-1: never a service (the Model and every plane service) and never an API key.
+    if !claims.is_person() || claims.user_id.trim().is_empty() {
+        return Err(OverrideRefusal::NotAPerson);
+    }
+    if baseline.enforcement() != Enforcement::Enforce || baseline.claim_mode() != Enforcement::Enforce {
+        return Err(OverrideRefusal::NotEnforced);
+    }
+    let (layer, rev) = match baseline.org_input(claims.web_policy_claim()) {
+        OrgInput::Present { layer, rev } if rev != 0 => (layer, rev),
+        OrgInput::Present { .. } | OrgInput::Absent | OrgInput::Unreadable => {
+            return Err(OverrideRefusal::NoOrgPolicy)
+        }
+    };
+    if layer.robots_max() != Some(RobotsMax::Ignore) {
+        return Err(OverrideRefusal::NotEntitled);
+    }
+    if baseline
+        .baseline()
+        .robots_max()
+        .is_some_and(|max| max < RobotsMax::Ignore)
+    {
+        return Err(OverrideRefusal::OperatorCeiling);
+    }
+    if !grants.grants(&claims.org_id) {
+        return Err(OverrideRefusal::NotGranted);
+    }
+    Ok(RobotsOverride {
+        rev: crate::web_policy_edge::policy_rev_hex(rev),
+    })
+}
+
+/// WS14.S7a: the override for a parsed request. `Ok(None)` when the request does not ask to
+/// ignore robots.txt. A refused ask is the same 403 `policy_denied` field the request got before
+/// the override existed; the reason is counted and logged as a closed label only.
+pub fn robots_override(
+    parsed: &ParsedCrawl,
+    claims: &Claims,
+    baseline: &PolicyBaseline,
+    grants: &RobotsOverrideGrants,
+) -> Result<Option<RobotsOverride>, Refusal> {
+    let Some(path) = parsed.ignore_robots_txt.as_deref() else {
+        return Ok(None);
+    };
+    match decide_robots_override(claims, baseline, grants) {
+        Ok(allowed) => {
+            metrics::counter!("crawl_robots_override_total", "outcome" => "allowed", "reason" => "granted")
+                .increment(1);
+            tracing::info!(target: "quarry.web_policy", "crawl.robots_override_allowed");
+            Ok(Some(allowed))
+        }
+        Err(reason) => {
+            metrics::counter!(
+                "crawl_robots_override_total",
+                "outcome" => "refused",
+                "reason" => reason.as_str()
+            )
+            .increment(1);
+            tracing::info!(
+                target: "quarry.web_policy",
+                reason = reason.as_str(),
+                "crawl.robots_override_refused"
+            );
+            Err(Refusal::PolicyDenied(vec![robots_denied_field(path)]))
+        }
+    }
+}
+
+/// The 403 field of a refused `ignore_robots_txt: true`. Unchanged since WS14.S6.
+fn robots_denied_field(path: &str) -> RequestField {
+    RequestField::new(
+        path,
+        "policy_denied",
+        "ignoring robots.txt is not available to this request",
+    )
 }
 
 /// W2-U64 (D2-029, D2-073): what a crawl does when the edge's answer does not prove the scope
@@ -455,7 +659,6 @@ pub fn parse_body(body: &[u8], settings: CrawlRequestSettings) -> Result<ParsedC
     }
 
     let mut invalid: Vec<RequestField> = Vec::new();
-    let mut policy: Vec<RequestField> = Vec::new();
     let mut warnings: Vec<RequestWarning> = Vec::new();
 
     for (canonical, spellings) in FIELDS {
@@ -518,13 +721,12 @@ pub fn parse_body(body: &[u8], settings: CrawlRequestSettings) -> Result<ParsedC
     let crawl_entire_domain =
         take_flag(lookup(object, "crawl_entire_domain"), &mut invalid).unwrap_or(true);
 
+    // WS14.S7a: `true` is recorded here and decided by [`robots_override`] in the handoff, which
+    // has the caller's claims. The 400s of the body still come first.
+    let mut ignore_robots_txt = None;
     if let Some((path, value)) = lookup(object, "ignore_robots_txt") {
         match value {
-            Value::Bool(true) => policy.push(RequestField::new(
-                path,
-                "policy_denied",
-                "ignoring robots.txt is not available to this request",
-            )),
+            Value::Bool(true) => ignore_robots_txt = Some(path.to_owned()),
             Value::Bool(false) => {}
             _ => invalid.push(RequestField::new(path, "invalid_type", "must be true or false")),
         }
@@ -680,9 +882,6 @@ pub fn parse_body(body: &[u8], settings: CrawlRequestSettings) -> Result<ParsedC
     if !invalid.is_empty() {
         return Err(Refusal::Invalid(invalid));
     }
-    if !policy.is_empty() {
-        return Err(Refusal::PolicyDenied(policy));
-    }
 
     Ok(ParsedCrawl {
         url,
@@ -701,6 +900,7 @@ pub fn parse_body(body: &[u8], settings: CrawlRequestSettings) -> Result<ParsedC
         },
         sitemap,
         scrape_options,
+        ignore_robots_txt,
         warnings,
     })
 }
@@ -985,19 +1185,235 @@ mod tests {
 
     #[test]
     fn ignore_robots_txt_true_is_policy_denied_and_false_is_accepted() {
+        // Without the override (the default edge, a person's token, no claim) the handoff's
+        // answer is the 403 it always was: same code, the caller's spelling as the path.
+        let claims = crate::test_support::claims_for_org("org_a");
+        let baseline = PolicyBaseline::default();
+        let grants = RobotsOverrideGrants::default();
         for key in ["ignore_robots_txt", "ignoreRobotsTxt", "ignoreRobots"] {
             let mut body = json!({ "url": "https://e.test/" });
             body[key] = json!(true);
-            match parse(body.clone(), lenient()) {
+            let parsed = parse(body.clone(), lenient()).expect("the body itself is valid");
+            assert_eq!(parsed.ignore_robots_txt.as_deref(), Some(key));
+            match robots_override(&parsed, &claims, &baseline, &grants) {
                 Err(Refusal::PolicyDenied(fields)) => {
+                    assert_eq!(fields.len(), 1);
                     assert_eq!(fields[0].code, "policy_denied");
                     assert_eq!(fields[0].path, key);
+                    assert_eq!(
+                        fields[0].message,
+                        "ignoring robots.txt is not available to this request"
+                    );
                 }
                 other => panic!("expected policy_denied for {key}, got {other:?}"),
             }
             body[key] = json!(false);
-            assert!(parse(body, lenient()).is_ok(), "{key}: false is accepted");
+            let parsed = parse(body, lenient()).expect("false is accepted");
+            assert_eq!(parsed.ignore_robots_txt, None, "{key}: false asks for nothing");
+            assert_eq!(robots_override(&parsed, &claims, &baseline, &grants), Ok(None));
         }
+        // A wrong type is still a 400, before any policy decision.
+        assert_eq!(
+            codes(&parse(json!({ "url": "https://e.test/", "ignore_robots_txt": "yes" }), lenient())),
+            vec![("ignore_robots_txt".to_owned(), "invalid_type")]
+        );
+    }
+
+    // WS14.S7a: the override branch.
+
+    const ORG_REV: &str = "0123456789ab";
+
+    fn enforcing() -> PolicyBaseline {
+        PolicyBaseline::from_lookup(|name| match name {
+            crate::policy_baseline::ENFORCEMENT_ENV => Some("enforce".to_owned()),
+            crate::policy_baseline::CLAIM_ENFORCEMENT_ENV => Some("enforce".to_owned()),
+            _ => None,
+        })
+        .expect("valid baseline")
+    }
+
+    fn granted() -> RobotsOverrideGrants {
+        RobotsOverrideGrants::from_lookup(|name| {
+            assert_eq!(name, ENV_ROBOTS_OVERRIDE_ORGS);
+            Some(" org_b , org_a ,".to_owned())
+        })
+    }
+
+    fn person_with_claim(robots_max: Option<&str>) -> Claims {
+        let mut claims = crate::test_support::claims_for_org("org_a");
+        let mut claim = json!({ "v": 1, "rev": ORG_REV });
+        if let Some(max) = robots_max {
+            claim["robots_max"] = json!(max);
+        }
+        claims.web_policy = Some(claim);
+        claims
+    }
+
+    fn ignore_request() -> ParsedCrawl {
+        parse(json!({ "url": "https://e.test/", "ignore_robots_txt": true }), lenient()).unwrap()
+    }
+
+    #[test]
+    fn override_is_allowed_with_the_policy_and_stamps_params() {
+        let allowed = robots_override(
+            &ignore_request(),
+            &person_with_claim(Some("ignore")),
+            &enforcing(),
+            &granted(),
+        )
+        .expect("allowed")
+        .expect("an override");
+        assert_eq!(allowed.rev, ORG_REV);
+        assert_eq!(
+            allowed.params_value(),
+            json!({ "mode": "ignore", "authority": "web.robots_override", "rev": ORG_REV })
+        );
+        assert_eq!(
+            allowed.effective_value(),
+            json!({ "authority": "web.robots_override", "rev": ORG_REV })
+        );
+    }
+
+    #[test]
+    fn override_is_refused_without_the_entitlement() {
+        let baseline = enforcing();
+        let grants = granted();
+        for (robots_max, reason) in [
+            (Some("respect"), OverrideRefusal::NotEntitled),
+            (Some("strict"), OverrideRefusal::NotEntitled),
+            (None, OverrideRefusal::NotEntitled),
+        ] {
+            assert_eq!(
+                decide_robots_override(&person_with_claim(robots_max), &baseline, &grants),
+                Err(reason),
+                "{robots_max:?}"
+            );
+        }
+        // No claim, an unreadable claim, and the baseline rev "0" are no org policy.
+        let mut none = person_with_claim(None);
+        none.web_policy = None;
+        assert_eq!(
+            decide_robots_override(&none, &baseline, &grants),
+            Err(OverrideRefusal::NoOrgPolicy)
+        );
+        let mut unreadable = person_with_claim(None);
+        unreadable.web_policy = Some(json!({ "v": 2, "rev": ORG_REV, "robots_max": "ignore" }));
+        assert_eq!(
+            decide_robots_override(&unreadable, &baseline, &grants),
+            Err(OverrideRefusal::NoOrgPolicy)
+        );
+        let mut baseline_rev = person_with_claim(None);
+        baseline_rev.web_policy = Some(json!({ "v": 1, "rev": "0", "robots_max": "ignore" }));
+        assert_eq!(
+            decide_robots_override(&baseline_rev, &baseline, &grants),
+            Err(OverrideRefusal::NoOrgPolicy)
+        );
+        // And the answer to the caller is the unchanged 403.
+        assert!(matches!(
+            robots_override(&ignore_request(), &person_with_claim(Some("respect")), &baseline, &grants),
+            Err(Refusal::PolicyDenied(_))
+        ));
+    }
+
+    #[test]
+    fn override_is_refused_for_a_service_principal_and_an_api_key() {
+        let baseline = enforcing();
+        let grants = granted();
+        let mut service = person_with_claim(Some("ignore"));
+        service.principal_type = Some("service".into());
+        service.service_id = Some("model-gateway".into());
+        service.sub = "model-gateway".into();
+        assert_eq!(
+            decide_robots_override(&service, &baseline, &grants),
+            Err(OverrideRefusal::NotAPerson)
+        );
+        let mut key = person_with_claim(Some("ignore"));
+        key.principal_type = Some("api_key".into());
+        key.key_id = Some("key_1".into());
+        key.acting_user_id = Some("u1".into());
+        assert_eq!(
+            decide_robots_override(&key, &baseline, &grants),
+            Err(OverrideRefusal::NotAPerson)
+        );
+        let mut anonymous = person_with_claim(Some("ignore"));
+        anonymous.user_id = String::new();
+        assert_eq!(
+            decide_robots_override(&anonymous, &baseline, &grants),
+            Err(OverrideRefusal::NotAPerson)
+        );
+        assert!(matches!(
+            robots_override(&ignore_request(), &service, &baseline, &grants),
+            Err(Refusal::PolicyDenied(_))
+        ));
+    }
+
+    #[test]
+    fn override_is_refused_unless_policy_and_claim_are_both_enforced() {
+        let claims = person_with_claim(Some("ignore"));
+        let grants = granted();
+        // The defaults: enforcement enforce, the claim observed.
+        assert_eq!(
+            decide_robots_override(&claims, &PolicyBaseline::default(), &grants),
+            Err(OverrideRefusal::NotEnforced)
+        );
+        for (enforcement, claim) in [
+            ("observe", "enforce"),
+            ("off", "enforce"),
+            ("enforce", "observe"),
+            ("enforce", "off"),
+        ] {
+            let baseline = PolicyBaseline::from_lookup(|name| match name {
+                crate::policy_baseline::ENFORCEMENT_ENV => Some(enforcement.to_owned()),
+                crate::policy_baseline::CLAIM_ENFORCEMENT_ENV => Some(claim.to_owned()),
+                _ => None,
+            })
+            .unwrap();
+            assert_eq!(
+                decide_robots_override(&claims, &baseline, &grants),
+                Err(OverrideRefusal::NotEnforced),
+                "{enforcement}/{claim}"
+            );
+        }
+    }
+
+    #[test]
+    fn override_is_refused_below_an_operator_ceiling_and_off_the_grant_list() {
+        let claims = person_with_claim(Some("ignore"));
+        let capped = PolicyBaseline::from_lookup(|name| match name {
+            crate::policy_baseline::ENFORCEMENT_ENV => Some("enforce".to_owned()),
+            crate::policy_baseline::CLAIM_ENFORCEMENT_ENV => Some("enforce".to_owned()),
+            crate::policy_baseline::BASELINE_ENV => Some(r#"{"robots_max":"respect"}"#.to_owned()),
+            _ => None,
+        })
+        .unwrap();
+        assert_eq!(
+            decide_robots_override(&claims, &capped, &granted()),
+            Err(OverrideRefusal::OperatorCeiling)
+        );
+        // OQ-11: the default grant list is empty, so nobody is granted.
+        assert_eq!(
+            decide_robots_override(&claims, &enforcing(), &RobotsOverrideGrants::default()),
+            Err(OverrideRefusal::NotGranted)
+        );
+        let other_org = RobotsOverrideGrants::from_lookup(|_| Some("org_b".to_owned()));
+        assert_eq!(
+            decide_robots_override(&claims, &enforcing(), &other_org),
+            Err(OverrideRefusal::NotGranted)
+        );
+    }
+
+    #[test]
+    fn grant_list_is_trimmed_and_ignores_empty_entries() {
+        let grants = granted();
+        assert!(grants.grants("org_a"));
+        assert!(grants.grants("org_b"));
+        assert!(!grants.grants(""));
+        assert!(!grants.grants(" org_a "));
+        assert_eq!(RobotsOverrideGrants::from_lookup(|_| None), RobotsOverrideGrants::default());
+        assert_eq!(
+            RobotsOverrideGrants::from_lookup(|_| Some(" , ".to_owned())),
+            RobotsOverrideGrants::default()
+        );
     }
 
     #[test]

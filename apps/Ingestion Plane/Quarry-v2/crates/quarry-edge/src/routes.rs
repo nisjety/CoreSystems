@@ -1241,6 +1241,18 @@ async fn crawl_handoff(
         crate::crawl_request::CrawlRequestSettings::current(),
     )
     .map_err(|refusal| crawl_request_refusal(&request_id, refusal))?;
+    // WS14.S7a: `ignore_robots_txt: true` is decided here, where the caller's claims are, and
+    // before anything else, so a refused ask is the same 403 `policy_denied` it was when the
+    // body check refused it. Only a person whose org's signed policy raises the robots ceiling
+    // to `ignore`, with web policy and the claim both enforced, on an org the operators
+    // granted, gets it. Never a service principal (the Model) or an API key.
+    let robots_override = crate::crawl_request::robots_override(
+        &req,
+        &claims,
+        &state.policy,
+        crate::crawl_request::RobotsOverrideGrants::current(),
+    )
+    .map_err(|refusal| crawl_request_refusal(&request_id, refusal))?;
     refuse_durable_job_under_zdr(&claims, req.zdr, &request_id, "crawl")?;
     refuse_while_draining(&request_id)?;
     // INNH-6a: a sitemap is seeded through the crawl scope. A crawl that runs with the scope
@@ -1322,12 +1334,16 @@ async fn crawl_handoff(
     // carries its origin (WS15.L1) and the caller's Idempotency-Key, if sent.
     // WS14.S3: the scope this crawl runs with, stamped into the job and echoed in the ack.
     // The switch is read once at boot; `off` stamps `legacy` so the orchestrator runs it as before.
-    let scope = crate::crawl_policy::handoff_scope(
+    let mut scope = crate::crawl_policy::handoff_scope(
         crate::crawl_policy::CrawlScopeSwitch::current(),
         req.scope.allow_subdomains,
         req.scope.allow_external_links,
     )
     .with_request_scope(&req.scope);
+    // WS14.S7a: an allowed override runs the crawl with robots ignored (`effective.robots`).
+    if robots_override.is_some() {
+        scope.robots = quarry_core::crawl_scope::RobotsMode::Ignore;
+    }
     let origin = crate::handoff::run_origin_from_request(&claims, &headers);
     let idempotency_key = crate::handoff::idempotency_key_from_request(&headers);
     let mut job_params = serde_json::json!({
@@ -1351,6 +1367,13 @@ async fn crawl_handoff(
         }
         if let Some(options) = req.scrape_options.as_ref() {
             params.insert("scrape_options".to_owned(), options.to_value());
+        }
+        // WS14.S7a: an override job's `robots` is the object quarry-control audits before it
+        // acknowledges the job (`crawl.robots_ignored`, WS14.S7b): mode, the authority and the
+        // org policy rev that allowed it. `user_id` (stamped above) is the person it is
+        // attributed to. Every other job keeps the `"respect"` string, byte-identical.
+        if let Some(allowed) = robots_override.as_ref() {
+            params.insert("robots".to_owned(), allowed.params_value());
         }
     }
     // WS7.G 6b: the policy this crawl was admitted under rides with the job to every page.
@@ -1419,6 +1442,11 @@ async fn crawl_handoff(
                 }
                 if let Some(options) = req.scrape_options.as_ref() {
                     object.insert("scrape_options".to_owned(), options.to_value());
+                }
+                // WS14.S7a: `robots` is `"ignore"` (from the scope); the authority and rev
+                // that allowed it ride beside it.
+                if let Some(allowed) = robots_override.as_ref() {
+                    object.insert("robots_override".to_owned(), allowed.effective_value());
                 }
                 object.insert(
                     "request_warnings".to_owned(),
@@ -2034,7 +2062,12 @@ async fn internal_run_page(
             .unwrap_or("");
         // WS7.G 6b: a page that carries a policy snapshot signs its hash too, whatever the
         // snapshot flag says, so the binding holds before anything decides to use it.
-        let extras = crate::internal_auth::RunBindingExtras::for_snapshot(req.policy_snapshot.as_ref());
+        // WS14.S7a: and a page whose crawl context does not respect robots.txt signs the hash of
+        // its `crawl.robots`, so a captured respecting page cannot be replayed as ignoring.
+        let extras = crate::internal_auth::RunBindingExtras::for_page(
+            req.policy_snapshot.as_ref(),
+            req.crawl.as_ref(),
+        );
         if !signer.verify_run_binding_with(&org_id, &req.url, &extras, sig) {
             tracing::warn!(
                 had_sig = !sig.is_empty(),
