@@ -168,3 +168,15 @@ No blocker. The read-back calls `Storage.getCookies` with the session's own `bro
 | W23-b-E344-3 | step.rs `settle_download` | The download artifact is found as the last id in `proof_bundle.artifact_ids` (runner ordering); a backend that returns an empty object key cannot confirm it is a `browser_download`. | low | Return the download artifact id on the observation explicitly. |
 | W23-b-E344-4 | chromiumoxide.rs (E3.4-6) | `downloads::admit_origin(Unsolicited)` is the policy; the driver quarantine still accepts every download to disk until E3.4-6 makes unsolicited ones deny/cancel and calls it. | note | E3.4-6. |
 | W23-b-E344-5 | agent_routes/attach.rs delegate step | The delegate (attached) step path does not run the download gate; only `step` and `execute_ws_action` do. | low | Wire `download_gate_before` / `settle_download` into `delegate_step` if delegates may download. |
+
+## W3-E3.3-e1 (lane b)
+
+| id | where | finding | severity | suggested fix |
+|---|---|---|---|---|
+| W23-b-E3e1-1 | observation.rs emit, before the driver probe | `action.started` is emitted before `act_on_verified_target`, so no box exists at the emit. `rect` is None in every event until a driver method reads one (status ask 1). | medium | Add `BrowserDriver::target_box` (default None) and the chromiumoxide `DOM.getBoxModel` impl, behind a flag default off. |
+| W23-b-E3e1-2 | chromiumoxide.rs (not this unit) | A box read adds one browser round trip before each snapshot-backed action. It is latency on the action path, not only presentation. | medium | Flag off by default; measure the added p95 latency on the stack before any default-on. |
+| W23-b-E3e1-3 | DOM.getBoxModel for frame-owned targets | Quads for a target in a child frame may be relative to the frame, not the main viewport. Not verified here; a wrong rect highlights the wrong place. | medium | Verify live; return None for targets with `frame_id` until verified. |
+| W23-b-E3e1-4 | ElementRect::from_content_quad | A rotated box gives its axis-aligned bounds, a larger highlight than the element. | low | Accept for now; a later producer can send the four corners if the highlight needs the true shape. |
+| W23-b-E3e1-5 | docs/CONTRACTS.md, docs/openapi.yaml, sdks/typescript docs/AgentApi.md | The optional `rect` on `action.started` is not documented. | low | Docs unit when the producer lands. |
+| W23-b-E3e1-6 | apps/Frontend Plane/verevonv3 src/shared/api/browser-client.ts | `BrowserTraceEvent.payload` is `Record<string, unknown>`, so the rect reaches the page untyped. | low | The presentation unit types it, clamps it to the viewport and draws a highlight only. |
+| W23-b-E3e1-7 | .plan-work/quarry-w1w2/W23-FINISH-QUEUE.md, E3.3-e1 row | The row lists three files, but the producer also needs quarry-browser/src/lib.rs and chromiumoxide.rs (lane a). The row cannot deliver a rect as written. | medium | Split a producer unit in lane a, or widen this row. |
