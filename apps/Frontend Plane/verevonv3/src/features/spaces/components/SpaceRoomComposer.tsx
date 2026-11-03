@@ -33,7 +33,7 @@ import {
 import { useI18n } from '@/shared/i18n'
 import { translateApiError } from '@/shared/i18n/errors'
 import { isSpaceObserved, liveThreadsIn, ownStream } from '../lib/space-live-work'
-import { createSpaceMidRun, type SpaceMidRunResend } from '../lib/space-mid-run'
+import { createSpaceMidRun, type SpaceDeferredSend, type SpaceMidRunResend } from '../lib/space-mid-run'
 import { agentAvatarColor } from '../lib/agent-avatar'
 import { AgentAvatar } from './AgentAvatar'
 import { threadTitle } from '../lib/space-thread-presentation'
@@ -335,15 +335,30 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
   // pipeline; the composer keeps the box, the pickers and the chosen chips.
   // Owner mid-run steer (WS09-S2): the strip, the messages the run never took and the one waiting
   // for the agent to be free. In memory only.
+  // Whether this composer's send is in flight. A plain flag, set in the same tick as the transition: the
+  // `submitting` signal is not read here, because a read outside a reactive scope answers with the last
+  // committed value, which in the tick of its own write is still the old one.
+  let turnInFlight = false
   const midRun = createSpaceMidRun({
     tr: i18n.tr,
-    settled: () => !pipeline.submitting(),
+    settled: () => !turnInFlight,
   })
   // Messages the run never took, to go out as ordinary turns one at a time.
   let resendQueue: SpaceMidRunResend[] = []
-  function flushResends(found: readonly SpaceMidRunResend[]): void {
-    resendQueue = [...resendQueue, ...found]
-    if (pipeline.submitting()) return
+  // The deferred message being sent now: a refusal that says another run had the thread gives its words back.
+  let flushingDeferred: SpaceDeferredSend | undefined
+  // The turn has ended, or a late steer answer found that it had. A clean finish sends what the run never
+  // took, one message per turn; any other ending sends nothing again, and the strip says so.
+  function endOfTurn(): void {
+    if (pipeline.exchange()?.status === 'done') {
+      resendQueue = [...resendQueue, ...midRun.settle()]
+      sendNextResend()
+      return
+    }
+    midRun.abandon(resendQueue)
+    resendQueue = []
+  }
+  function sendNextResend(): void {
     const next = resendQueue.shift()
     if (!next) return
     midRun.startTurn(true)
@@ -365,17 +380,24 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
     // (WS15-S2): a send that fails or is stopped before `connected` keeps its words.
     onStage: (stage) => {
       const accept = acceptSend
-      if (stage === 'accepted') {
+      if (stage === 'started') {
+        turnInFlight = true
+      } else if (stage === 'accepted') {
         acceptSend = undefined
         accept?.()
       } else if (stage === 'settled') {
+        turnInFlight = false
         acceptSend = undefined
         // The server said it already had this send: accepted, though no `connected` came.
         if (pipeline.exchange()?.status === 'done') accept?.()
-        // The run ended on its own: a steer it never took goes out again as an ordinary turn. A
-        // stop or a failure sends nothing the member did not ask for.
-        if (pipeline.exchange()?.status === 'done') flushResends(midRun.settle())
-        else resendQueue = []
+        // A send-when-ready the room refused because another run already had the thread: the run never
+        // started, so nothing was sent, and the member gets the words back.
+        const waiting = flushingDeferred
+        flushingDeferred = undefined
+        if (waiting && pipeline.exchange()?.errorCode === 'thread_run_active') giveBack(waiting.content)
+        // A steer the run never took goes out again only after a clean finish; a stop or a failure sends
+        // nothing the member did not ask for. See endOfTurn.
+        endOfTurn()
       }
     },
     // Known codes get the room's own words, and a typed Space denial (its
@@ -630,6 +652,7 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
       const ready = midRun.takeDeferred()
       if (!ready) return
       midRun.startTurn(false)
+      flushingDeferred = ready
       void pipeline.send({
         content: ready.content,
         mode: 'ask',
@@ -1033,6 +1056,8 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
       await steerMessage(content)
       return
     }
+    // One message waits for the agent at a time: while it does, a further send keeps its words in the box.
+    if (midRun.deferred()) return
     if (submitting() || preparing() || postBusy() || blockedByApproval() || subscriptionIncompatible()) return
     // Another run is live in the thread being replied to: keep the message here until it is free.
     const busyThread = busyReplyThread()
@@ -1152,8 +1177,19 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
       setText('')
       discardDraft()
     }
-    // The answer came after the run had already ended: nobody is left to flush it at settle time.
-    if (outcome === 'resend' && !pipeline.submitting()) flushResends(midRun.takeLateResends())
+    // The answer came after the run had already ended: nobody is left to settle it, so the turn's end is
+    // applied here.
+    if (outcome === 'resend' && !turnInFlight) endOfTurn()
+  }
+
+  // Cancelling a send-when-ready stops the send, not the message: the words go back into the box.
+  function cancelWaiting(): void {
+    const waiting = midRun.takeDeferred()
+    if (waiting) giveBack(waiting.content)
+  }
+  // Words that were waiting for the agent go back into the box, above anything typed since.
+  function giveBack(content: string): void {
+    setText((current) => (current.trim() === '' ? content : `${content}\n\n${current}`))
   }
 
   // The thread pane's composer is aimed at one thread for as long as the pane is open; the pane title
@@ -1330,7 +1366,7 @@ ${managers.map((m) => `@${m.label}`).join(' ')} ${request}`
               '». Meldingen holdes her i nettleseren din, ikke på serveren, og går tapt hvis du lukker fanen. ',
               '». The message is kept in this browser, not on the server, and is lost if you close the tab. ',
             )}
-            <button type="button" onClick={() => midRun.cancelDeferred()}>
+            <button type="button" onClick={() => cancelWaiting()}>
               {i18n.tr('Avbryt', 'Cancel')}
             </button>
           </p>

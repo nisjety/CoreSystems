@@ -1,5 +1,5 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@solidjs/testing-library'
-import { flush } from 'solid-js'
+import { For, flush } from 'solid-js'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { ApiError } from '@/shared/api/http'
@@ -12,6 +12,8 @@ const chatClient = vi.hoisted(() => ({
   streamChat: vi.fn(),
   cancelInvocation: vi.fn(),
   listModels: vi.fn(),
+  // WS09-S2: a steer into the running turn.
+  queueInvocationInput: vi.fn(),
 }))
 vi.mock('@/shared/api/chat-client', async (importOriginal) => ({
   ...await importOriginal<typeof import('@/shared/api/chat-client')>(),
@@ -41,6 +43,20 @@ const skillsClient = vi.hoisted(() => ({ listAvailableSkills: vi.fn(), MAX_PICKE
 vi.mock('@/shared/api/skills-client', () => skillsClient)
 vi.mock('@/features/chat/components/ChatMessages', () => ({
   ChatMarkdown: (props: { content: string }) => <p>{props.content}</p>,
+  // The mid-run strip (WS09-S2). A stand-in that shows each entry's words, state and note: the chat's
+  // own strip is tested in its own file, and these tests check what the composer hands it.
+  QueuedInputStrip: (props: { entries: readonly { id: string; content: string; state: string; note?: string }[] }) => (
+    <ul aria-label="Meldinger sendt underveis">
+      <For each={props.entries}>
+        {(entry) => (
+          <li data-state={entry.state}>
+            <span>{entry.content}</span>
+            {entry.note ? <span>{entry.note}</span> : null}
+          </li>
+        )}
+      </For>
+    </ul>
+  ),
 }))
 
 const { SpaceRoomComposer } = await import('./SpaceRoomComposer')
@@ -53,6 +69,7 @@ type Handlers = {
   onDone?: (event: Record<string, never>) => void
   onStopped?: (event: Record<string, never>) => void
   onError?: (event: { code: string; message: string; feature?: string }) => void
+  onQueuedInput?: (event: { messages: string[]; ids?: string[] }) => void
 }
 
 /**
@@ -104,6 +121,7 @@ beforeEach(() => {
   // rest of the file. The banner has its own switch; these tests are about the send path, so keep it off.
   vi.stubEnv('VITE_SPACE_CONNECTIVITY_BANNER_UI', 'false')
   chatClient.streamChat.mockReset()
+  chatClient.queueInvocationInput.mockReset()
   chatClient.cancelInvocation.mockReset()
   chatClient.cancelInvocation.mockResolvedValue(undefined)
   chatClient.listModels.mockReset()
@@ -1341,5 +1359,240 @@ describe('SpaceRoomComposer — a fixed reply target (WS01-S7b)', () => {
     cleanup()
     renderWithTarget(false)
     expect(screen.getByRole('button', { name: 'Avbryt svar' })).toBeTruthy()
+  })
+})
+
+describe('SpaceRoomComposer — owner mid-run steer (WS09-S2)', () => {
+  const STEER_ON = { live: false, text: false, steer_owner: true, stop_manager: false }
+
+  // A reply into thread t1, the room's own composer: where a member steers into a turn or waits for one.
+  const renderInThread = (agentWork?: unknown) =>
+    render(() => (
+      <SpaceRoomComposer
+        spaceRef="room-1"
+        roster={() => []}
+        agents={() => []}
+        threads={() => []}
+        replyTarget={() => ({ threadId: 't1', title: 'Innkjøp' })}
+        agentWork={() => agentWork as never}
+      />
+    ))
+
+  // Types and submits. Synchronous on purpose: the caller waits for whatever the send does next.
+  function typeAndSubmit(value: string): void {
+    const box = screen.getByRole('textbox')
+    fireEvent.input(box, { target: { value } })
+    flush()
+    fireEvent.submit(box.closest('form') as HTMLFormElement)
+  }
+
+  // The state of the strip entry that shows these words.
+  const stripState = (words: string) => screen.getByText(words).closest('[data-state]')?.getAttribute('data-state')
+
+  // The member's own turn has started and its stream has announced the run and the thread.
+  async function ownTurnStreaming(stream: ReturnType<typeof scriptedStream>): Promise<void> {
+    await send('Rydd lageret')
+    stream.handlers().onConnected?.({ requestId: 'req-1', threadId: 't1' })
+    flush()
+  }
+
+  // Steer (WS09-S2): the member's own turn stays open to a message, and the gateway takes it.
+  it('keeps the box open during the member\'s own turn when the room allows steering', async () => {
+    const stream = scriptedStream()
+    renderInThread(STEER_ON)
+    await ownTurnStreaming(stream)
+
+    expect((screen.getByRole('textbox') as HTMLTextAreaElement).disabled).toBe(false)
+    expect(screen.getByText(/Agenten jobber\. Det du skriver nå leveres/)).toBeTruthy()
+  })
+
+  it('disables the box during the own turn when the room does not allow steering, as before', async () => {
+    const stream = scriptedStream()
+    renderInThread()
+    await ownTurnStreaming(stream)
+
+    expect((screen.getByRole('textbox') as HTMLTextAreaElement).disabled).toBe(true)
+    expect(screen.queryByText(/Agenten jobber\. Det du skriver/)).toBeNull()
+  })
+
+  it('hands a message written mid-run to the running turn, aimed at its thread and room, and clears the box once accepted', async () => {
+    const stream = scriptedStream()
+    chatClient.queueInvocationInput.mockResolvedValue({ outcome: 'queued', pending: 1, persisted: true })
+    renderInThread(STEER_ON)
+    await ownTurnStreaming(stream)
+
+    typeAndSubmit('Bruk gul ledning')
+
+    await waitFor(() => expect(chatClient.queueInvocationInput).toHaveBeenCalledWith(
+      'req-1',
+      'Bruk gul ledning',
+      expect.objectContaining({ threadId: 't1', spaceRef: 'room-1', clientMessageId: expect.any(String) }),
+    ))
+    await waitFor(() => expect(stripState('Bruk gul ledning')).toBe('pending'))
+    await waitFor(() => expect((screen.getByRole('textbox') as HTMLTextAreaElement).value).toBe(''))
+    expect(chatClient.streamChat).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps the words in the box and says why when the gateway refuses the steer', async () => {
+    const stream = scriptedStream()
+    chatClient.queueInvocationInput.mockResolvedValue({
+      outcome: 'refused',
+      reason: 'too_many',
+      message: 'Tre meldinger venter allerede.',
+    })
+    renderInThread(STEER_ON)
+    await ownTurnStreaming(stream)
+
+    typeAndSubmit('Ny instruks')
+
+    await waitFor(() => expect(stripState('Ny instruks')).toBe('refused'))
+    expect(screen.getByText('Tre meldinger venter allerede.')).toBeTruthy()
+    expect((screen.getByRole('textbox') as HTMLTextAreaElement).value).toBe('Ny instruks')
+  })
+
+  it('refuses a steer typed before the stream announced its run, with no gateway call', async () => {
+    scriptedStream()
+    renderInThread(STEER_ON)
+    await send('Rydd lageret')
+
+    typeAndSubmit('For tidlig')
+
+    await waitFor(() => expect(stripState('For tidlig')).toBe('refused'))
+    expect(screen.getByText(/har ikke startet ennå/)).toBeTruthy()
+    expect(chatClient.queueInvocationInput).not.toHaveBeenCalled()
+    expect((screen.getByRole('textbox') as HTMLTextAreaElement).value).toBe('For tidlig')
+  })
+
+  it('shows a steered message as delivered once the agent takes it, and sends nothing again when the run finishes', async () => {
+    const stream = scriptedStream()
+    chatClient.queueInvocationInput.mockResolvedValue({ outcome: 'queued', pending: 1, persisted: true })
+    renderInThread(STEER_ON)
+    await ownTurnStreaming(stream)
+
+    typeAndSubmit('Bruk gul ledning')
+    await waitFor(() => expect(chatClient.queueInvocationInput).toHaveBeenCalled())
+    const clientMessageId = chatClient.queueInvocationInput.mock.calls[0]?.[2]?.clientMessageId as string
+
+    stream.handlers().onQueuedInput?.({ messages: ['Bruk gul ledning'], ids: [clientMessageId] })
+    flush()
+    stream.handlers().onDone?.({})
+    flush()
+    stream.finish()
+
+    await waitFor(() => expect(stripState('Bruk gul ledning')).toBe('delivered'))
+    expect(chatClient.streamChat).toHaveBeenCalledTimes(1)
+  })
+
+  it('sends a steered message the run never read as an ordinary turn once the run finishes cleanly', async () => {
+    const stream = scriptedStream()
+    chatClient.queueInvocationInput.mockResolvedValue({ outcome: 'run_ended' })
+    renderInThread(STEER_ON)
+    await ownTurnStreaming(stream)
+
+    typeAndSubmit('Legg til kolonne')
+    await waitFor(() => expect(stripState('Legg til kolonne')).toBe('resent'))
+
+    stream.handlers().onDone?.({})
+    flush()
+    stream.finish()
+
+    await waitFor(() => expect(chatClient.streamChat).toHaveBeenCalledTimes(2))
+    expect(chatClient.streamChat.mock.calls[1]?.[0]).toMatchObject({ content: 'Legg til kolonne', threadId: 't1' })
+  })
+
+  it('says a steered message the run never read was not sent again when the run stops', async () => {
+    const stream = scriptedStream()
+    chatClient.queueInvocationInput.mockResolvedValue({ outcome: 'run_ended' })
+    renderInThread(STEER_ON)
+    await ownTurnStreaming(stream)
+
+    typeAndSubmit('Legg til kolonne')
+    await waitFor(() => expect(stripState('Legg til kolonne')).toBe('resent'))
+
+    stream.handlers().onStopped?.({})
+    flush()
+    stream.finish()
+
+    await waitFor(() => expect(stripState('Legg til kolonne')).toBe('refused'))
+    expect(screen.getByText(/ble ikke sendt på nytt/)).toBeTruthy()
+    expect(chatClient.streamChat).toHaveBeenCalledTimes(1)
+  })
+
+  // Send when ready (WS09-S2): a busy thread holds the message here instead of refusing it.
+  it('keeps a message for a thread another member\'s agent is working in, and sends it once that work is done', async () => {
+    publishSpaceThreads('room-1', [{ thread_id: 't1', space_id: 'room-1', title: 'Innkjøp', latest_run_status: 'running' }])
+    flush()
+    renderInThread(STEER_ON)
+
+    typeAndSubmit('Oppdater lista')
+
+    expect(await screen.findByText(/Agenten jobber allerede i denne samtalen/)).toBeTruthy()
+    expect(screen.getByText(/Venter på at agenten blir ferdig/)).toBeTruthy()
+    expect(chatClient.streamChat).not.toHaveBeenCalled()
+
+    publishSpaceThreads('room-1', [{ thread_id: 't1', space_id: 'room-1', title: 'Innkjøp', latest_run_status: 'completed' }])
+    flush()
+
+    await waitFor(() => expect(chatClient.streamChat).toHaveBeenCalledTimes(1))
+    expect(chatClient.streamChat.mock.calls[0]?.[0]).toMatchObject({ content: 'Oppdater lista', threadId: 't1' })
+  })
+
+  it('holds one message while another waits: a further send keeps its words in the box', async () => {
+    publishSpaceThreads('room-1', [{ thread_id: 't1', space_id: 'room-1', latest_run_status: 'running' }])
+    flush()
+    renderInThread(STEER_ON)
+    typeAndSubmit('Første')
+    expect(await screen.findByText(/Venter på at agenten blir ferdig: «Første»/)).toBeTruthy()
+
+    const box = screen.getByRole('textbox') as HTMLTextAreaElement
+    fireEvent.input(box, { target: { value: 'Andre' } })
+    flush()
+    fireEvent.keyDown(box, { key: 'Enter' })
+    flush()
+    expect(box.value).toBe('Andre')
+    expect(screen.getByText(/Venter på at agenten blir ferdig: «Første»/)).toBeTruthy()
+
+    publishSpaceThreads('room-1', [{ thread_id: 't1', space_id: 'room-1', latest_run_status: 'completed' }])
+    flush()
+
+    await waitFor(() => expect(chatClient.streamChat).toHaveBeenCalledTimes(1))
+    expect(chatClient.streamChat.mock.calls[0]?.[0]).toMatchObject({ content: 'Første' })
+    expect(box.value).toBe('Andre')
+  })
+
+  it('cancelling a waiting message gives its words back to the box and sends nothing', async () => {
+    publishSpaceThreads('room-1', [{ thread_id: 't1', space_id: 'room-1', latest_run_status: 'running' }])
+    flush()
+    renderInThread(STEER_ON)
+    typeAndSubmit('Oppdater lista')
+    await screen.findByText(/Venter på at agenten blir ferdig/)
+
+    screen.getByRole('button', { name: 'Avbryt' }).click()
+    flush()
+    await waitFor(() => expect((screen.getByRole('textbox') as HTMLTextAreaElement).value).toBe('Oppdater lista'))
+
+    publishSpaceThreads('room-1', [{ thread_id: 't1', space_id: 'room-1', latest_run_status: 'completed' }])
+    flush()
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(chatClient.streamChat).not.toHaveBeenCalled()
+  })
+
+  it('gives a send-when-ready its words back when the room refuses it because another run had the thread', async () => {
+    const stream = scriptedStream()
+    publishSpaceThreads('room-1', [{ thread_id: 't1', space_id: 'room-1', latest_run_status: 'running' }])
+    flush()
+    renderInThread(STEER_ON)
+    typeAndSubmit('Oppdater lista')
+    await screen.findByText(/Venter på at agenten blir ferdig/)
+
+    publishSpaceThreads('room-1', [{ thread_id: 't1', space_id: 'room-1', latest_run_status: 'completed' }])
+    flush()
+    await waitFor(() => expect(chatClient.streamChat).toHaveBeenCalledTimes(1))
+    stream.handlers().onError?.({ code: 'thread_run_active', message: 'Another reply is running.' })
+    flush()
+    stream.finish()
+
+    await waitFor(() => expect((screen.getByRole('textbox') as HTMLTextAreaElement).value).toBe('Oppdater lista'))
+    expect(chatClient.streamChat).toHaveBeenCalledTimes(1)
   })
 })
