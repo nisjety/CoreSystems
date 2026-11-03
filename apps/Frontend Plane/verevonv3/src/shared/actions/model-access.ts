@@ -317,6 +317,7 @@ export const MODEL_ACCESS: Readonly<Record<ActionId, ModelAccessEntry>> = {
   'orchestration.cancel_run': exempt('no_owner_executor', 'external_write'),
   'browser_run.start': exempt('irreversible_destructive', 'destructive'),
   'browser_run.control': exempt('no_owner_executor', 'external_write'),
+  'browser_run.steer': exempt('no_owner_executor', 'context_write'),
   'browser_session.create': exempt('no_owner_executor', 'external_write'),
   'browser_session.close': exempt('no_owner_executor', 'external_write'),
   'browser_tab.create': exempt('no_owner_executor', 'external_write'),
