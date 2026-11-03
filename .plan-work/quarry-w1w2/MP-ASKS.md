@@ -197,6 +197,20 @@ Quarry consumer: `apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_po
 - **Tests on your side:** derive refuses a parent that is not a live run grant, an owner mismatch, nine listed hosts, a non-canonical host, `conversation`/`always` under ZDR, and any issuance when the claim says `browser.consent.origin: disabled`.
 - **When:** before `QUARRY_EDGE__ORIGIN_CONSENT` is switched on anywhere (OD13: also not before counsel signs off the consent wording). Until then Quarry refuses every extension with 403 before any broker call, so nothing breaks without it.
 
+## W3-E3.3-d (lane c, w23): user-attached browser region is BrowserScraped server-side
+
+The verevonv3 gateway half is built on `w23/lane-c` (code only, not compiled), dark behind `BROWSER_REGION_ATTACH` (default off): `POST /api/v1/browser/sessions/{id}/attachments/region` returns an ephemeral `{ attachment: { kind: "browser-region", trustClass: "browser-scraped", grant: "none", retention: "ephemeral", tabId, target, region, image { mimeType, dataBase64, width, height }, selection { text, length } | null } }`. Nothing is persisted by the gateway.
+
+- **Classification:** when a chat turn carries an attachment of kind `browser-region`, model-gateway (and execution-core provenance) must classify its image and selection text as `TrustClass::BrowserScraped` server-side, from the kind, never from the client-sent `trustClass` field. The owner of the classify arms is WS11.S0 (`provenance.rs` and `moderation.rs`); add a case such as `("browser_region_attachment", TrustClass::BrowserScraped)` with a test beside `trust_class_browser_mcp_tools_are_browser_scraped`.
+- **ZDR:** refuse a `browser-region` attachment on a ZDR turn (the gateway already refuses ZDR sessions; this is the second floor), and never persist its image or selection beyond the turn under the ordinary retention rules.
+- **Grant:** the attachment grants nothing; it must not be read as consent for any browser action.
+- **When:** before `BROWSER_REGION_ATTACH` is switched on anywhere and before the composer carries the attachment into a turn.
+
+## W3-E3.3-c (lane c, w23): @tab browser-tab refs are gateway-resolved, browser-scraped context only
+
+- The verevonv3 gateway re-resolves composer `@tab` mentions against Quarry's live tabs (`browser_context::resolve_turn_tab_mentions`) and yields refs `{ kind: "browser-tab", sessionId, tabId, label, labelSource, title, target, trustClass: "browser-scraped", grant: "none" }`.
+- Ask (model-gateway / execution-core): accept only these gateway-resolved refs, never a client-sent `browserContext`; classify any page content read for a ref as `TrustClass::BrowserScraped`; refuse refs on a ZDR turn; treat a ref as context only (no browser grant, no action authority); treat `label`/`title` as untrusted page text in prompts.
+
 ## W3-E3.3-g (lane b, w23): steer inbox on the browser-agent run (Model Plane)
 
 Frontend consumer: `apps/Frontend Plane/verevonv3/src/features/browser/dock/steer-input.ts` and `SteerInput.tsx` (lane b, code only, dark behind `VITE_CHAT_BROWSER_STEER`, default off). The action contract is `browser_run.steer` in `apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts`. Built against the contract below; please confirm or say what differs.
