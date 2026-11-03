@@ -22,6 +22,10 @@ use crate::retention_receipt::RetentionClass;
 /// whitespace allowed) turns it on, through the same parser as the other durable-store switches.
 pub(crate) const ENABLED_ENV: &str = "SESSION_CORE_ATTENTION_ENABLED";
 
+/// The thread goals switch of EP-7 S1. While it is off no goal is read here, so the derivation and
+/// the listing are what they were before goals existed. Same literal-`true` parser.
+pub(crate) const GOALS_ENABLED_ENV: &str = "SESSION_CORE_THREAD_GOALS_ENABLED";
+
 /// The most threads one `ListAttention` page considers. Also the page a zero or oversized request
 /// asks for.
 pub(crate) const MAX_PAGE: i64 = 200;
@@ -44,6 +48,35 @@ const IDLE: Derived = Derived {
 /// process runs, so the answer is the same as reading it once at boot.
 pub(crate) fn enabled() -> bool {
     mp_contracts::loop_fold::switch_from(std::env::var(ENABLED_ENV).ok().as_deref())
+}
+
+/// Whether thread goals take part in attention (EP-7 S5). Read at each call, like [`enabled`].
+pub(crate) fn goals_enabled() -> bool {
+    mp_contracts::loop_fold::switch_from(std::env::var(GOALS_ENABLED_ENV).ok().as_deref())
+}
+
+/// The goal statuses the listing reports. `cleared` is a goal the owner removed, so it reads as no
+/// goal; a status this build does not know reads as no goal too.
+const REPORTED_GOAL_STATUSES: [&str; 6] = [
+    "active",
+    "paused",
+    "met",
+    "budget_reached",
+    "turns_reached",
+    "blocked",
+];
+
+/// The state and reason a goal in this status raises, or `None` for a goal that does not wait on
+/// anyone (EP-7 S5). A met goal reads as COMPLETED; a goal stopped by its budget, its turn cap or a
+/// blocked verdict reads as NEEDS_INPUT, so no new state is needed.
+pub(crate) fn goal_attention(status: &str) -> Option<(AttentionState, AttentionReason)> {
+    match status {
+        "met" => Some((AttentionState::Completed, AttentionReason::Goal)),
+        "budget_reached" | "turns_reached" | "blocked" => {
+            Some((AttentionState::NeedsInput, AttentionReason::Goal))
+        }
+        _ => None,
+    }
 }
 
 /// How urgent a state is; a higher number wins. What waits for the owner outranks what runs, and
@@ -133,6 +166,15 @@ pub(crate) struct Pending {
     pub(crate) proposed_plans: Vec<DateTime<Utc>>,
     /// When each pending question was asked.
     pub(crate) questions: Vec<DateTime<Utc>>,
+    /// The thread's latest goal (EP-7 S5). `None` while the goals switch is off.
+    pub(crate) goal: Option<GoalFact>,
+}
+
+/// The thread's latest goal: its closed status and when that status was last written.
+#[derive(Debug, Clone)]
+pub(crate) struct GoalFact {
+    pub(crate) status: String,
+    pub(crate) since: DateTime<Utc>,
 }
 
 /// The attention of one thread.
@@ -191,6 +233,31 @@ pub(crate) fn derive(facts: &ThreadFacts<'_>, pending: &Pending) -> Derived {
         reason: AttentionReason::Unspecified,
         since: facts.latest_run_at,
     });
+    // A stopped goal speaks for the thread only while no other row waits on the owner (EP-7 S5) and
+    // no run is working, since a working run means someone already acted. It then stands in for the
+    // latest run: a met goal only over a completed run (a later failed run stays FAILED), a goal
+    // stopped by a cap or a blocked verdict over any finished run.
+    let has_live_pending = approvals.clone().next().is_some()
+        || !pending.proposed_plans.is_empty()
+        || !pending.questions.is_empty();
+    let goal = pending
+        .goal
+        .as_ref()
+        .filter(|_| !has_live_pending)
+        .and_then(|goal| {
+            let (state, reason) = goal_attention(&goal.status)?;
+            let replaces_run = match (state, run.map(|run| run.state)) {
+                (_, Some(AttentionState::Working)) => false,
+                (AttentionState::Completed, Some(AttentionState::Failed)) => false,
+                _ => true,
+            };
+            replaces_run.then_some(Derived {
+                state,
+                reason,
+                since: Some(goal.since),
+            })
+        });
+    let run = if goal.is_some() { None } else { run };
     let archived = facts.archived_at.map(|at| Derived {
         state: AttentionState::Archived,
         reason: AttentionReason::Unspecified,
@@ -200,6 +267,7 @@ pub(crate) fn derive(facts: &ThreadFacts<'_>, pending: &Pending) -> Derived {
         approvals
             .chain(plans)
             .chain(questions)
+            .chain(goal)
             .chain(run)
             .chain(archived)
             .chain(std::iter::once(IDLE)),
@@ -274,7 +342,38 @@ async fn fetch_pending(
     for (thread_id, at) in questions {
         pending.entry(thread_id).or_default().questions.push(at);
     }
+    if goals_enabled() {
+        for (thread_id, goal) in fetch_goals(pool, org_id, thread_ids).await? {
+            pending.entry(thread_id).or_default().goal = Some(goal);
+        }
+    }
     Ok(pending)
+}
+
+/// Reads the latest goal of each thread in one query (EP-7 S5): its status and when that status was
+/// last written. A cleared goal or an unknown status reads as no goal. Status tokens and times only;
+/// the objective is never read here.
+async fn fetch_goals(
+    pool: &PgPool,
+    org_id: &str,
+    thread_ids: &[String],
+) -> Result<Vec<(String, GoalFact)>, Status> {
+    let rows: Vec<(String, String, DateTime<Utc>)> = sqlx::query_as(
+        "SELECT DISTINCT ON (thread_id) thread_id, status, COALESCE(closed_at, updated_at)
+         FROM thread_goals
+         WHERE org_id = $1 AND thread_id = ANY($2)
+         ORDER BY thread_id, updated_at DESC, created_at DESC, id DESC",
+    )
+    .bind(org_id)
+    .bind(thread_ids.to_vec())
+    .fetch_all(pool)
+    .await
+    .map_err(read_error)?;
+    Ok(rows
+        .into_iter()
+        .filter(|(_, status, _)| REPORTED_GOAL_STATUSES.contains(&status.as_str()))
+        .map(|(thread_id, status, since)| (thread_id, GoalFact { status, since }))
+        .collect())
 }
 
 fn read_error(error: sqlx::Error) -> Status {
@@ -306,6 +405,11 @@ pub(crate) async fn enrich(
     let mut pending = fetch_pending(pool, org_id, &thread_ids).await?;
     for thread in threads.iter_mut() {
         let rows = pending.remove(&thread.thread_id).unwrap_or_default();
+        thread.goal_status = rows
+            .goal
+            .as_ref()
+            .map(|goal| goal.status.clone())
+            .unwrap_or_default();
         let facts = ThreadFacts {
             archived_at: thread.archived_at.as_ref().and_then(datetime_of),
             latest_run_status: &thread.latest_run_status,
@@ -707,6 +811,142 @@ mod tests {
     #[test]
     fn the_switch_is_named_for_this_slice() {
         assert_eq!(ENABLED_ENV, "SESSION_CORE_ATTENTION_ENABLED");
+    }
+
+    fn goal(status: &str, seconds: i64) -> Pending {
+        Pending {
+            goal: Some(GoalFact {
+                status: status.to_owned(),
+                since: at(seconds),
+            }),
+            ..Pending::default()
+        }
+    }
+
+    #[test]
+    fn attention_goal_reason_takes_the_number_the_contract_names() {
+        assert_eq!(AttentionReason::Goal as i32, 5);
+        assert_eq!(
+            AttentionReason::try_from(5),
+            Ok(AttentionReason::Goal),
+            "4 stays reserved for the WS03 parked loop"
+        );
+        assert!(AttentionReason::try_from(4).is_err());
+    }
+
+    #[test]
+    fn attention_goal_met_is_completed_goal() {
+        let derived = derive(&running_facts("completed"), &goal("met", 110));
+        assert_eq!(derived.state, AttentionState::Completed);
+        assert_eq!(derived.reason, AttentionReason::Goal);
+        assert_eq!(derived.since, Some(at(110)));
+    }
+
+    #[test]
+    fn attention_goal_budget_reached_needs_input() {
+        for status in ["budget_reached", "turns_reached", "blocked"] {
+            let derived = derive(&running_facts("completed"), &goal(status, 110));
+            assert_eq!(derived.state, AttentionState::NeedsInput, "{status}");
+            assert_eq!(derived.reason, AttentionReason::Goal, "{status}");
+            assert_eq!(derived.since, Some(at(110)), "{status}");
+        }
+    }
+
+    #[test]
+    fn attention_goal_stopped_outranks_a_failed_run_and_needs_no_run() {
+        let derived = derive(&running_facts("failed"), &goal("turns_reached", 110));
+        assert_eq!(derived.state, AttentionState::NeedsInput);
+        let no_run = ThreadFacts {
+            archived_at: None,
+            latest_run_status: "",
+            latest_run_at: None,
+        };
+        let derived = derive(&no_run, &goal("blocked", 110));
+        assert_eq!(derived.reason, AttentionReason::Goal);
+    }
+
+    #[test]
+    fn attention_goal_met_does_not_hide_a_later_failed_run() {
+        let derived = derive(&running_facts("failed"), &goal("met", 90));
+        assert_eq!(derived.state, AttentionState::Failed);
+        assert_eq!(derived.reason, AttentionReason::Unspecified);
+    }
+
+    #[test]
+    fn attention_goal_yields_to_a_working_run() {
+        for status in ["met", "budget_reached", "blocked"] {
+            let derived = derive(&running_facts("running"), &goal(status, 110));
+            assert_eq!(derived.state, AttentionState::Working, "{status}");
+            assert_eq!(derived.reason, AttentionReason::Unspecified, "{status}");
+        }
+    }
+
+    #[test]
+    fn attention_goal_yields_to_any_other_pending_row() {
+        let mut pending = goal("budget_reached", 50);
+        pending.questions = vec![at(130)];
+        let derived = derive(&running_facts("completed"), &pending);
+        assert_eq!(derived.state, AttentionState::NeedsInput);
+        assert_eq!(derived.reason, AttentionReason::Input);
+
+        let mut pending = goal("met", 50);
+        pending.proposed_plans = vec![at(130)];
+        assert_eq!(
+            derive(&running_facts("completed"), &pending).reason,
+            AttentionReason::Plan
+        );
+
+        let mut pending = goal("blocked", 50);
+        pending.approvals = vec![approval("tool_call", "awaiting_approval", None, 130)];
+        assert_eq!(
+            derive(&running_facts("awaiting_approval"), &pending).reason,
+            AttentionReason::Approval
+        );
+    }
+
+    #[test]
+    fn attention_goal_open_or_unknown_status_raises_nothing() {
+        for status in ["active", "paused", "cleared", "judged", ""] {
+            assert_eq!(goal_attention(status), None, "{status}");
+            let derived = derive(&running_facts("completed"), &goal(status, 110));
+            assert_eq!(derived.state, AttentionState::Completed, "{status}");
+            assert_eq!(derived.reason, AttentionReason::Unspecified, "{status}");
+        }
+    }
+
+    #[test]
+    fn attention_goal_absent_derives_exactly_as_before() {
+        for status in ["queued", "running", "completed", "failed", "cancelled", ""] {
+            let facts = running_facts(status);
+            let derived = derive(&facts, &Pending::default());
+            let expected = match run_state(status) {
+                Some(state) => Derived {
+                    state,
+                    reason: AttentionReason::Unspecified,
+                    since: Some(at(100)),
+                },
+                None => IDLE,
+            };
+            assert_eq!(derived, expected, "{status}");
+        }
+    }
+
+    #[test]
+    fn attention_goal_reported_statuses_exclude_cleared() {
+        assert!(!REPORTED_GOAL_STATUSES.contains(&"cleared"));
+        for status in ["met", "budget_reached", "turns_reached", "blocked"] {
+            assert!(REPORTED_GOAL_STATUSES.contains(&status), "{status}");
+        }
+    }
+
+    #[test]
+    fn attention_goal_switch_is_the_thread_goals_switch_and_reads_literal_true_only() {
+        assert_eq!(GOALS_ENABLED_ENV, "SESSION_CORE_THREAD_GOALS_ENABLED");
+        let parse = |value: Option<&str>| mp_contracts::loop_fold::switch_from(value);
+        assert!(parse(Some("true")));
+        for value in [None, Some(""), Some("1"), Some("yes"), Some("on"), Some("false")] {
+            assert!(!parse(value), "{value:?}");
+        }
     }
 }
 

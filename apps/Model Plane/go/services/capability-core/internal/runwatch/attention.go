@@ -63,12 +63,56 @@ var attentionKinds = map[string]attentionKind{
 	},
 }
 
-// attentionPayload is the RUN_ATTENTION payload session-core writes.
+// goalAttentionReason is the reason session-core names on a RUN_ATTENTION for a
+// thread goal that stopped (EP-7 S5). An item without it is a pending row.
+const goalAttentionReason = "ATTENTION_REASON_GOAL"
+
+// goalStoppedKind is the one notification a stopped goal sends, whatever stopped
+// it: fixed copy, no objective and no status text (EP-7 S5).
+var goalStoppedKind = attentionKind{
+	notifyType: "modelplane.goal_stopped",
+	kind:       "goal_stopped",
+	title:      "Goal stopped",
+	body:       "A goal in one of your chats stopped and may need you.",
+}
+
+// goalStopStates maps each goal status that stops a goal to the attention state
+// session-core derives for it. A met goal is COMPLETED; a goal stopped by its
+// budget, its turn cap or a blocked verdict waits on its owner as NEEDS_INPUT. An
+// open goal (active, paused) or a cleared one is not here, so it notifies nothing.
+var goalStopStates = map[string]string{
+	"met":            "ATTENTION_STATE_COMPLETED",
+	"budget_reached": "ATTENTION_STATE_NEEDS_INPUT",
+	"turns_reached":  "ATTENTION_STATE_NEEDS_INPUT",
+	"blocked":        "ATTENTION_STATE_NEEDS_INPUT",
+}
+
+// attentionPayload is the RUN_ATTENTION payload session-core writes. Reason and
+// GoalStatus are set only on a goal item (EP-7 S5); a pending-row item omits both.
 type attentionPayload struct {
-	RunID    string `json:"run_id"`
-	SourceID string `json:"source_id"`
-	State    string `json:"state"`
-	ThreadID string `json:"thread_id"`
+	RunID      string `json:"run_id"`
+	SourceID   string `json:"source_id"`
+	State      string `json:"state"`
+	ThreadID   string `json:"thread_id"`
+	Reason     string `json:"reason,omitempty"`
+	GoalStatus string `json:"goal_status,omitempty"`
+}
+
+// attentionKindOf resolves the notification an attention item sends and the
+// state word its coalescing and idempotency keys use. A goal item resolves only
+// when its status stops the goal and agrees with the state session-core derived
+// for it; its key word is the goal reason, so a goal stop never folds into a
+// question on the same thread.
+func attentionKindOf(payload attentionPayload) (attentionKind, string, bool) {
+	if strings.TrimSpace(payload.Reason) != goalAttentionReason {
+		kind, ok := attentionKinds[payload.State]
+		return kind, payload.State, ok
+	}
+	state, ok := goalStopStates[strings.TrimSpace(payload.GoalStatus)]
+	if !ok || state != payload.State {
+		return attentionKind{}, "", false
+	}
+	return goalStoppedKind, goalAttentionReason, true
 }
 
 // NotifierOption configures a Notifier.
@@ -156,7 +200,7 @@ func (n *Notifier) processAttention(ctx context.Context, env *envelope.Envelope)
 		slog.Warn("runwatch: decode attention payload failed", "error", err)
 		return outcomeAck
 	}
-	kind, ok := attentionKinds[payload.State]
+	kind, stateKey, ok := attentionKindOf(payload)
 	if !ok {
 		return outcomeAck
 	}
@@ -166,18 +210,18 @@ func (n *Notifier) processAttention(ctx context.Context, env *envelope.Envelope)
 	threadID := strings.TrimSpace(payload.ThreadID)
 	sourceID := strings.TrimSpace(payload.SourceID)
 	if orgID == "" || userID == "" || runID == "" || threadID == "" || sourceID == "" {
-		slog.Warn("runwatch: attention event missing org, user, run, thread or source id", "state", payload.State)
+		slog.Warn("runwatch: attention event missing org, user, run, thread or source id", "state", stateKey)
 		return outcomeAck
 	}
 
 	now := n.now().UTC()
-	key := coalesceKey{orgID: orgID, userID: userID, threadID: threadID, state: payload.State}
+	key := coalesceKey{orgID: orgID, userID: userID, threadID: threadID, state: stateKey}
 	if n.attention.coalesced(key, now) {
 		return outcomeAck
 	}
 	req := notifyclient.Request{
 		OrganizationID: orgID,
-		IdempotencyKey: attentionIdempotencyKey(orgID, runID, userID, payload.State, sourceID),
+		IdempotencyKey: attentionIdempotencyKey(orgID, runID, userID, stateKey, sourceID),
 		Recipient:      notifyclient.Recipient{Kind: notifyclient.RecipientKindUser, ID: userID},
 		Type:           kind.notifyType,
 		Payload:        attentionNotificationPayload(kind, threadID, runID),

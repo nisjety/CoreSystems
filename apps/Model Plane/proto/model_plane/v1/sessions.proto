@@ -1556,6 +1556,12 @@ message ThreadSummary {
   string last_role = 27;
   // Messages with role user or assistant in the thread.
   uint32 turn_count = 28;
+
+  // The status of the thread's latest goal (EP-7 S5): one closed token ("active", "paused", "met",
+  // "budget_reached", "turns_reached", "blocked"), so the sidebar can show a goal chip without a
+  // second call. Empty when the thread has no goal, its goal was cleared, or the thread goals switch
+  // or the attention switch is off. A status token only, never the objective.
+  string goal_status = 29;
 }
 
 message ListThreadsResponse {

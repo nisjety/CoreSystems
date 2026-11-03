@@ -58,6 +58,10 @@ enum AttentionReason {
   ATTENTION_REASON_PLAN = 2;
   // A run question.
   ATTENTION_REASON_INPUT = 3;
+  // A thread goal stopped (EP-7 S5): COMPLETED when the goal was met, NEEDS_INPUT when it reached
+  // its token budget or turn cap or was judged blocked. Derived only while the thread has no other
+  // pending row and the thread goals switch is on, so a flag-off response never carries it.
+  ATTENTION_REASON_GOAL = 5;
 }
 
 // One thread that needs attention or is working. Identifiers and the closed state only: no title,

@@ -333,3 +333,119 @@ func TestParseAttentionCoalesce(t *testing.T) {
 		}
 	}
 }
+
+// goalAttentionEnvelope encodes a RUN_ATTENTION for a stopped thread goal (EP-7
+// S5): the pending-row shape plus the goal reason and one closed status token.
+func goalAttentionEnvelope(t *testing.T, state, goalStatus, goalID string) []byte {
+	t.Helper()
+	env := envelope.Envelope{
+		EventID:       "run_attention:session-core:test-" + goalID,
+		EventType:     runAttentionEventType,
+		SchemaVersion: 1,
+		Ts:            attentionFixedTime,
+		Producer:      "session-core",
+		CorrelationID: "run-abc",
+		CausationID:   goalID,
+		OrgID:         "org-1",
+		UserID:        "user-1",
+		ResourceRef:   "run:run-abc",
+		Payload: json.RawMessage(`{"goal_status":"` + goalStatus + `","reason":"ATTENTION_REASON_GOAL","run_id":"run-abc","source_id":"` +
+			goalID + `","state":"` + state + `","thread_id":"thread-9"}`),
+		Zdr: envelope.ZDRFlag(false),
+	}
+	data, err := env.Encode()
+	if err != nil {
+		t.Fatalf("encode envelope: %v", err)
+	}
+	return data
+}
+
+func TestAttentionNotifierGoalStoppedIsContentFree(t *testing.T) {
+	for goalStatus, state := range map[string]string{
+		"met":            "ATTENTION_STATE_COMPLETED",
+		"budget_reached": "ATTENTION_STATE_NEEDS_INPUT",
+		"turns_reached":  "ATTENTION_STATE_NEEDS_INPUT",
+		"blocked":        "ATTENTION_STATE_NEEDS_INPUT",
+	} {
+		notify := &fakeNotifyClient{}
+		n := newAttentionNotifier(&fakeStore{}, notify, 0, fixedNow)
+
+		if got := n.process(context.Background(), goalAttentionEnvelope(t, state, goalStatus, "goal_1")); got != outcomeAck {
+			t.Fatalf("%s outcome = %v, want outcomeAck", goalStatus, got)
+		}
+		if len(notify.accepted) != 1 {
+			t.Fatalf("%s notify calls = %d, want 1", goalStatus, len(notify.accepted))
+		}
+		req := notify.accepted[0]
+		if req.Type != "modelplane.goal_stopped" || req.RetentionMode != "standard" {
+			t.Fatalf("%s request = %+v, want modelplane.goal_stopped with standard retention", goalStatus, req)
+		}
+		const wantKey = "attention:org-1:run-abc:user-1:ATTENTION_REASON_GOAL:goal_1"
+		if req.IdempotencyKey != wantKey {
+			t.Fatalf("%s idempotency key = %q, want %q", goalStatus, req.IdempotencyKey, wantKey)
+		}
+		if req.Payload["kind"] != "goal_stopped" || req.Payload["message_key"] != "modelplane.goal_stopped" ||
+			req.Payload["cta_href"] != "/chat?thread=thread-9" {
+			t.Fatalf("%s payload = %+v, want the goal_stopped kind and the thread deep link", goalStatus, req.Payload)
+		}
+		assertContentFree(t, req.Payload)
+		for _, value := range req.Payload {
+			if value == goalStatus {
+				t.Fatalf("%s payload carries the goal status, which the closed field set has no place for", goalStatus)
+			}
+		}
+	}
+}
+
+func TestAttentionNotifierGoalWithAnOpenOrMismatchedStatusNotifiesNothing(t *testing.T) {
+	for name, tc := range map[string]struct{ state, goalStatus string }{
+		"active goal":           {"ATTENTION_STATE_NEEDS_INPUT", "active"},
+		"paused goal":           {"ATTENTION_STATE_NEEDS_INPUT", "paused"},
+		"cleared goal":          {"ATTENTION_STATE_NEEDS_INPUT", "cleared"},
+		"unknown status":        {"ATTENTION_STATE_NEEDS_INPUT", "judged"},
+		"met named as waiting":  {"ATTENTION_STATE_NEEDS_INPUT", "met"},
+		"blocked named as done": {"ATTENTION_STATE_COMPLETED", "blocked"},
+		"status missing":        {"ATTENTION_STATE_NEEDS_INPUT", ""},
+	} {
+		notify := &fakeNotifyClient{}
+		n := newAttentionNotifier(&fakeStore{}, notify, 0, fixedNow)
+		if got := n.process(context.Background(), goalAttentionEnvelope(t, tc.state, tc.goalStatus, "goal_1")); got != outcomeAck {
+			t.Fatalf("%s outcome = %v, want outcomeAck", name, got)
+		}
+		if len(notify.accepted) != 0 {
+			t.Fatalf("%s notify calls = %d, want 0", name, len(notify.accepted))
+		}
+	}
+}
+
+func TestAttentionNotifierGoalStopDoesNotFoldIntoAQuestionOnTheSameThread(t *testing.T) {
+	notify := &fakeNotifyClient{}
+	n := newAttentionNotifier(&fakeStore{}, notify, time.Minute, fixedNow)
+
+	question := attentionEnvelope(t, "ATTENTION_STATE_NEEDS_INPUT", "q-1", "thread-9", envelope.ZDRFlag(false))
+	if got := n.process(context.Background(), question); got != outcomeAck {
+		t.Fatalf("question outcome = %v, want outcomeAck", got)
+	}
+	goal := goalAttentionEnvelope(t, "ATTENTION_STATE_NEEDS_INPUT", "turns_reached", "goal_1")
+	if got := n.process(context.Background(), goal); got != outcomeAck {
+		t.Fatalf("goal outcome = %v, want outcomeAck", got)
+	}
+	if len(notify.accepted) != 2 {
+		t.Fatalf("notify calls = %d, want one for the question and one for the goal", len(notify.accepted))
+	}
+	if notify.accepted[0].Type != "modelplane.needs_input" || notify.accepted[1].Type != "modelplane.goal_stopped" {
+		t.Fatalf("types = %q, %q, want needs_input then goal_stopped", notify.accepted[0].Type, notify.accepted[1].Type)
+	}
+}
+
+func TestAttentionNotifierGoalStoppedIsAckedWhileTheSwitchIsOff(t *testing.T) {
+	notify := &fakeNotifyClient{}
+	n := &Notifier{store: &fakeStore{}, notify: notify, now: fixedNow}
+	data := goalAttentionEnvelope(t, "ATTENTION_STATE_NEEDS_INPUT", "budget_reached", "goal_1")
+	if got := n.process(context.Background(), data); got != outcomeAck {
+		t.Fatalf("outcome = %v, want outcomeAck", got)
+	}
+	if len(notify.accepted) != 0 {
+		t.Fatalf("notify calls = %d, want 0 while the attention switch is off", len(notify.accepted))
+	}
+}

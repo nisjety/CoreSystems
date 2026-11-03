@@ -25,6 +25,7 @@ import {
   ShieldCheck,
   Sparkles,
   Square,
+  Target,
   Timer,
   Users,
   Wrench,
@@ -97,6 +98,7 @@ import {
   approvalReason,
 } from '@/shared/approvals/approval-copy'
 import { isStoppedRunStatus, legacyStateFromRunStatus } from '@/shared/chat/thread-status'
+import { getThreadGoal, type ThreadGoal } from '@/shared/api/thread-goal-client'
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -263,6 +265,20 @@ export default function AgentRunConsole() {
       return page.runs
     },
   )
+
+  // The goal of the run's thread, read-only (EP-7 S5, decision D1): the goal is set and edited in the
+  // chat thread, so the console only shows it and links there. Re-read when a run settles, since a
+  // goal turn moves its counters and status. A failed read hides the panel: the goal is context here,
+  // not the run's result.
+  const [threadGoal] = createResource(
+    () => {
+      const threadId = state.threadId
+      if (!threadId) return null
+      return { threadId, tick: historyTick() }
+    },
+    (key) => getThreadGoal(key.threadId).catch(() => null),
+  )
+  const goalView = createMemo<ThreadGoal | null>(() => (threadGoal.error != null ? null : threadGoal() ?? null))
 
   // The run whose telemetry the side panel shows. Defaults to the live run; a
   // history-rail click overrides it until the user starts a new run.
@@ -973,6 +989,10 @@ export default function AgentRunConsole() {
                 failed={proofView().failed}
                 loading={proofView().loading}
               />
+            </Show>
+
+            <Show when={goalView()}>
+              {(current) => <GoalPanel goal={current()} threadId={state.threadId ?? current().threadId} />}
             </Show>
 
             <PlanPanel
@@ -1985,6 +2005,56 @@ export function PlanPanel(props: { plans: Plan[]; todos: Todo[]; loading: boolea
           </For>
         </ul>
       </Show>
+    </div>
+  )
+}
+
+/**
+ * The thread goal the run works toward, read-only (EP-7 S5). The console starts a new plan-mode
+ * thread for every launch, so a goal that spans turns lives in the chat thread (decision D1): this
+ * panel shows the objective, the usage line and the last verdict, and links to the chat for edits.
+ * There is no goal creation or editing here. Status and verdict tokens are shown as the server named
+ * them, like the plan states beside it.
+ */
+export function GoalPanel(props: { goal: ThreadGoal; threadId: string }) {
+  const i18n = useI18n()
+  const chatHref = () => `/chat?thread=${encodeURIComponent(props.threadId)}`
+  const usage = () => {
+    const parts: string[] = []
+    const goal = props.goal
+    if (goal.tokenBudget) {
+      parts.push(i18n.tr(`${goal.tokensUsed} av ${goal.tokenBudget} tokens`, `${goal.tokensUsed} of ${goal.tokenBudget} tokens`))
+    }
+    if (goal.maxTurns) {
+      parts.push(i18n.tr(`tur ${goal.turnsUsed} av ${goal.maxTurns}`, `turn ${goal.turnsUsed} of ${goal.maxTurns}`))
+    }
+    return parts.join(' - ')
+  }
+  return (
+    <div class="verevon-run-panel verevon-run-goal" aria-label={i18n.tr('Mål for tråden', 'Thread goal')}>
+      <div class="verevon-run-panel__head">
+        <span class="verevon-run-panel__eyebrow"><Target size={14} strokeWidth={2.1} /> {i18n.tr('Mål', 'Goal')}</span>
+        <span class="verevon-run-plan__state" data-goal-status={props.goal.status}>{props.goal.status}</span>
+      </div>
+      <p class="verevon-run-goal__objective">{props.goal.objective}</p>
+      <Show when={props.goal.successCriteria.length > 0}>
+        <ul class="verevon-run-plan__list">
+          <For each={props.goal.successCriteria}>
+            {(line) => <li class="verevon-run-plan__item"><span class="verevon-run-plan__summary">{line}</span></li>}
+          </For>
+        </ul>
+      </Show>
+      <Show when={usage()}>
+        <p class="verevon-run-goal__usage">{usage()}</p>
+      </Show>
+      <Show when={props.goal.lastVerdict}>
+        <p class="verevon-run-goal__verdict">
+          {i18n.tr('Siste vurdering', 'Last verdict')}: {props.goal.lastVerdict}
+        </p>
+      </Show>
+      <a href={chatHref()} link class={cn('verevon-run-goal__open', controlFocusClass)}>
+        {i18n.tr('Åpne i chat', 'Open in chat')}
+      </a>
     </div>
   )
 }
