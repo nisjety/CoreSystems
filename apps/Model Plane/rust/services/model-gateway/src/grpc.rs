@@ -3477,6 +3477,8 @@ mod tests {
                     privacy_tier: 0,
                     residency: String::new(),
                     effort_levels: Vec::new(),
+                    // EP-13 S2's record fields (ModelInfo 9-11); unknown for the mock.
+                    ..Default::default()
                 }],
                 access: None,
             }))

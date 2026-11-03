@@ -1252,6 +1252,9 @@ export type ModelPrice = {
   currency: string
 }
 
+/** The vendor lifecycle stage a catalogue record names (`lifecycle` on `/v1/models`). */
+export type ModelLifecycle = 'ga' | 'preview' | 'deprecated'
+
 export type ModelInfo = {
   id: string
   name: string
@@ -1278,6 +1281,15 @@ export type ModelInfo = {
    * or the gateway's ladder is off.
    */
   effortLevels?: EffortLevel[]
+  /**
+   * Context window in tokens (`context_window_tokens` on `/v1/models`). `undefined` when the
+   * catalogue has no sourced record for the model, so no window is claimed.
+   */
+  contextWindowTokens?: number
+  /** Largest synchronous output in tokens this model is served at (`max_output_tokens`). */
+  maxOutputTokens?: number
+  /** Vendor lifecycle stage (`lifecycle`). `undefined` when the catalogue names none. */
+  lifecycle?: ModelLifecycle
   /**
    * The catalogue's list price for a chat model (`price` on `/v1/models`). Present only when
    * the gateway's list-price switch is on and the catalogue names a price.
@@ -3642,6 +3654,17 @@ function normalizeModelPrice(value: unknown): ModelPrice | undefined {
   return { inputPerMillion: input, outputPerMillion: output, currency }
 }
 
+/** A token count the record names as a positive whole number; anything else is unknown. */
+function normalizeTokenCount(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value > 0 ? value : undefined
+}
+
+const MODEL_LIFECYCLES: readonly ModelLifecycle[] = ['ga', 'preview', 'deprecated']
+
+function normalizeLifecycle(value: unknown): ModelLifecycle | undefined {
+  return MODEL_LIFECYCLES.find((stage) => stage === value)
+}
+
 function readBool(value: unknown): boolean | undefined {
   if (typeof value === 'boolean') return value
   if (typeof value === 'string') {
@@ -3885,6 +3908,9 @@ export async function listModelCatalogue(): Promise<ModelCatalogue> {
         residency: str(item.residency),
         cheap: readBool(item.cheap) ?? readBool(item.is_cheap),
         effortLevels: normalizeEffortLevels(item.effort_levels ?? item.effortLevels),
+        contextWindowTokens: normalizeTokenCount(item.context_window_tokens),
+        maxOutputTokens: normalizeTokenCount(item.max_output_tokens),
+        lifecycle: normalizeLifecycle(item.lifecycle),
         price: normalizeModelPrice(item.price),
       }
     })
@@ -4035,6 +4061,16 @@ export function modelEffortLevels(model: Pick<ModelInfo, 'effortLevels'> | undef
   return model?.effortLevels ?? []
 }
 
+/**
+ * The context window as a picker row states it, such as "200k kontekst" or "1M kontekst".
+ * `undefined` when no window is known, so a row never claims one it has not been given.
+ */
+export function formatContextWindow(tokens: number | undefined): string | undefined {
+  if (tokens === undefined) return undefined
+  if (tokens >= 1_000_000 && tokens % 1_000_000 === 0) return `${tokens / 1_000_000}M kontekst`
+  return `${Math.round(tokens / 1_000)}k kontekst`
+}
+
 /** Patterns that mark a model as expensive enough to warrant a deliberate pick. */
 const EXPENSIVE_ID_PATTERNS: readonly RegExp[] = [/opus/i, /sonnet/i, /gpt-5/i, /\bo[13]\b/i, /\bo3\b/i]
 
@@ -4079,11 +4115,15 @@ const PROVIDER_GROUP_ORDER: readonly { label: string; test: (m: ModelInfo) => bo
   { label: 'DeepSeek', test: (m) => m.provider === 'deepseek' || /deepseek/i.test(`${m.id} ${m.name}`) },
 ]
 
-export type ModelGroup = { label: string; models: ModelInfo[] }
+export type ModelGroup = { label: string; models: ModelInfo[]; folded?: boolean }
+
+/** The fold that holds models the vendor has deprecated: listed last and collapsed. */
+const DEPRECATED_GROUP_LABEL = 'Eldre modeller'
 
 /**
  * Group chat models by family/provider for the picker. Unmatched providers fall
  * into an "Other models" bucket. Empty groups are dropped. Group order is stable.
+ * A deprecated model leaves its provider group and sits in a folded last group.
  *
  * Verevon intent modes are filtered out here: the backend may advertise them
  * synthetically (`provider === 'verevon'` or a `verevon-*` mode id), but the pinned
@@ -4096,8 +4136,13 @@ export function groupChatModels(models: readonly ModelInfo[]): ModelGroup[] {
     .filter((model) => model.provider !== 'verevon' && !isVerevonModeId(model.id))
   const buckets = new Map<string, ModelInfo[]>()
   const otherLabel = 'Other models'
+  const deprecated: ModelInfo[] = []
 
   for (const model of chat) {
+    if (model.lifecycle === 'deprecated') {
+      deprecated.push(model)
+      continue
+    }
     const group = PROVIDER_GROUP_ORDER.find((g) => g.test(model))
     const label = group?.label ?? otherLabel
     const existing = buckets.get(label)
@@ -4112,6 +4157,9 @@ export function groupChatModels(models: readonly ModelInfo[]): ModelGroup[] {
   }
   const other = buckets.get(otherLabel)
   if (other && other.length > 0) ordered.push({ label: otherLabel, models: other })
+  if (deprecated.length > 0) {
+    ordered.push({ label: DEPRECATED_GROUP_LABEL, models: deprecated, folded: true })
+  }
   return ordered
 }
 

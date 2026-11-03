@@ -650,6 +650,18 @@ message ModelInfo {
   // "max"). Empty means the model has no effort control or the provider does
   // not advertise one yet; a client must offer no effort choice in that case.
   repeated string effort_levels = 8;
+
+  // Context window of the model in tokens, lowered to the serving surface's own
+  // ceiling. 0 means no sourced record names the model (EP-13 S2).
+  uint32 context_window_tokens = 9;
+
+  // Largest synchronous output in tokens this model is served at on this surface.
+  // 0 means no sourced record names the model (EP-13 S2).
+  uint32 max_output_tokens = 10;
+
+  // Vendor lifecycle stage: "ga", "preview" or "deprecated". Empty means no sourced
+  // record names the model (EP-13 S2).
+  string lifecycle = 11;
 }
 
 // ListModelsResponse — available models in the active provider chain.

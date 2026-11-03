@@ -10232,6 +10232,17 @@ struct ModelDescriptor {
     /// ladder off serves the same JSON as before.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     effort_levels: Vec<String>,
+    /// The context window in tokens from the declared record. Left out when no sourced
+    /// row names the model, so an unknown model serves the JSON it served before.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    context_window_tokens: Option<u32>,
+    /// The synchronous output ceiling in tokens this model is served at. Left out when
+    /// unknown.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_output_tokens: Option<u32>,
+    /// `ga`, `preview` or `deprecated`. Left out when no sourced row names the model.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    lifecycle: String,
     /// The catalogue's list price for a chat model, behind
     /// `MODEL_GATEWAY_CATALOGUE_PRICES`. Left out when there is none, so a deploy
     /// with the switch off serves the same JSON as before.
@@ -10251,6 +10262,12 @@ pub(crate) fn privacy_tier_label(value: i32) -> &'static str {
         Ok(mp_contracts::model_plane::v1::PrivacyTier::Sovereign) => "sovereign",
         Err(_) => "unspecified",
     }
+}
+
+/// A token count the record declares, or `None` when it declares none, so the descriptor
+/// leaves the field out rather than stating zero tokens.
+fn known_tokens(value: u32) -> Option<u32> {
+    (value > 0).then_some(value)
 }
 
 #[derive(Debug, Serialize)]
@@ -10333,6 +10350,9 @@ async fn list_models(
                 privacy_tier: privacy_tier_label(m.privacy_tier),
                 residency: m.residency,
                 effort_levels: m.effort_levels,
+                context_window_tokens: known_tokens(m.context_window_tokens),
+                max_output_tokens: known_tokens(m.max_output_tokens),
+                lifecycle: m.lifecycle,
                 price,
             }
         })
@@ -14586,6 +14606,9 @@ mod run_owner_publish_tests {
             privacy_tier: "unspecified",
             residency: String::new(),
             effort_levels: effort_levels.iter().map(|level| (*level).to_owned()).collect(),
+            context_window_tokens: None,
+            max_output_tokens: None,
+            lifecycle: String::new(),
             price: None,
         }
     }

@@ -7,6 +7,7 @@ use tokio::sync::mpsc;
 use tracing::{info, warn};
 
 use super::effort::{self, Family, ModelAliases, Resolved, Wire};
+use super::model_record;
 use super::zdr::ZdrAttestation;
 use super::{
     narrow_f64, EmbedRequest, EmbedResponse, InferChunk, InferRequest, InferResponse, ModelInfo,
@@ -1239,27 +1240,40 @@ impl ProviderRouter for OpenAiProvider {
         } else {
             caps.residency.as_str().to_owned()
         };
+        let aliases = &self.effort.aliases;
         self.chat_models
             .iter()
-            .map(|id| ModelInfo {
-                id: id.clone(),
-                provider: provider.clone(),
-                modality: model_modality(id),
-                streaming: true,
-                features: super::features_for_model(&caps, &provider_features, id),
-                cheap: is_cheap_model(id),
-                privacy_tier,
-                residency_label: residency_label.clone(),
-                // Advertised only while the adapter actually sends the level.
-                effort_levels: if self.effort.enabled {
-                    self.effort
-                        .aliases
-                        .support(Family::OpenAi, id)
-                        .levels
-                        .to_vec()
-                } else {
-                    Vec::new()
-                },
+            .map(|id| {
+                let record = model_record::advertised(
+                    Family::OpenAi,
+                    aliases,
+                    id,
+                    caps.max_context_tokens,
+                    caps.max_output_tokens,
+                );
+                ModelInfo {
+                    id: id.clone(),
+                    provider: provider.clone(),
+                    modality: model_modality(id),
+                    streaming: true,
+                    features: super::features_for_model(&caps, &provider_features, id),
+                    cheap: is_cheap_model(id),
+                    privacy_tier,
+                    residency_label: residency_label.clone(),
+                    // Advertised only while the adapter actually sends the level.
+                    effort_levels: if self.effort.enabled {
+                        self.effort
+                            .aliases
+                            .support(Family::OpenAi, id)
+                            .levels
+                            .to_vec()
+                    } else {
+                        Vec::new()
+                    },
+                    context_window_tokens: record.context_window_tokens,
+                    max_output_tokens: record.max_output_tokens,
+                    lifecycle: record.lifecycle,
+                }
             })
             .chain(self.embedding_models.iter().map(|id| ModelInfo {
                 id: id.clone(),

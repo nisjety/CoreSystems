@@ -84,6 +84,13 @@ impl From<provider::ModelInfo> for pb::ModelInfo {
                 .into_iter()
                 .map(|level| level.as_str().to_owned())
                 .collect(),
+            // Zero and empty mean no sourced row names the model, never a guess.
+            context_window_tokens: model.context_window_tokens,
+            max_output_tokens: model.max_output_tokens,
+            lifecycle: model
+                .lifecycle
+                .map(|lifecycle| lifecycle.as_str().to_owned())
+                .unwrap_or_default(),
         }
     }
 }
@@ -2586,6 +2593,33 @@ mod tests {
         let mut models = catalogue();
         catalogue_access(&applied(Mode::Enforce, policy), &mut models);
         assert_eq!(ids(&models), ["gpt-5", "gpt-5-mini", "text-embedding-3"]);
+    }
+
+    #[test]
+    fn list_models_carries_record_v2_fields() {
+        use provider::model_record::Lifecycle;
+        let declared = provider::ModelInfo {
+            id: "claude-sonnet-5-5".to_owned(),
+            provider: "anthropic".to_owned(),
+            modality: "chat".to_owned(),
+            context_window_tokens: 1_000_000,
+            max_output_tokens: 128_000,
+            lifecycle: Some(Lifecycle::Ga),
+            ..Default::default()
+        };
+        let wire = pb::ModelInfo::from(declared);
+        assert_eq!(wire.context_window_tokens, 1_000_000);
+        assert_eq!(wire.max_output_tokens, 128_000);
+        assert_eq!(wire.lifecycle, "ga");
+
+        // A model with no sourced row carries zero and empty, which the gateway leaves out.
+        let unknown = pb::ModelInfo::from(provider::ModelInfo {
+            id: "gpt-5-mini".to_owned(),
+            ..Default::default()
+        });
+        assert_eq!(unknown.context_window_tokens, 0);
+        assert_eq!(unknown.max_output_tokens, 0);
+        assert_eq!(unknown.lifecycle, "");
     }
 
     fn chat_models() -> Vec<provider::ModelInfo> {

@@ -529,6 +529,7 @@ impl InferenceCore for MockOk {
                 privacy_tier: 0,
                 residency: String::new(),
                 effort_levels: Vec::new(),
+                ..Default::default()
             }],
             access: self.catalogue_access.clone(),
         }))
