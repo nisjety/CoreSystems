@@ -90,6 +90,25 @@ fn cases() -> Vec<(&'static str, Value, Expect)> {
             None,
         ),
         ("space_context", with("space_context", Value::Null), None),
+        // WS08-S3: a wake starts a durable run from a stored post, so a ZDR turn is refused with
+        // the durable-mutation code and no feature.
+        (
+            "wake_context",
+            with(
+                "wake_context",
+                json!({
+                    "space_id": "space-room", "space_decision_ref": "d-1",
+                    "recipient_audience_ref": "a-1", "recipient_audience_revision": 1,
+                    "recipient_audience_hash": "h-1", "privacy_policy_ref": "p-1",
+                    "authority_revision": 1, "resource_authorization_ref": "r-1",
+                    "space_decision_token": "tokentokentoken", "action_schema_hash": "s-1",
+                    "payload_digest": "sha256:x", "idempotency_key": "k-1",
+                    "trigger_message_id": "m-1", "trigger_content_digest": "sha256:y",
+                    "agent_subject_id": "agent-1", "turn_origin": "direct", "client_wake_id": "w-1"
+                }),
+            ),
+            Some((code::DURABLE_MUTATION_FORBIDDEN, None)),
+        ),
         (
             "structured_output_schema",
             with("structured_output_schema", json!("{\"type\":\"object\"}")),
@@ -296,6 +315,8 @@ fn cases() -> Vec<(&'static str, Value, Expect)> {
             with("persona_instructions", json!("Friendly.")),
             None,
         ),
+        // WS16-S6: the viewer's interface language is a request-scoped hint that persists nothing.
+        ("locale", with("locale", json!("nb-NO")), None),
     ]
 }
 
@@ -303,6 +324,24 @@ fn cases() -> Vec<(&'static str, Value, Expect)> {
 fn every_field_row_decides_what_its_treatment_says() {
     for (field, body, expect) in cases() {
         assert_eq!(decided(&body), expect, "{field}: {body}");
+    }
+}
+
+/// WS16-S6: the viewer locale is listed in the field table as honored (it persists nothing), is a
+/// field the classifier names, and a ZDR turn that carries it is not refused.
+#[test]
+fn locale_is_listed_as_honored_and_never_refused_under_zdr() {
+    let treatment = FIELD_TREATMENTS
+        .iter()
+        .find(|(name, _)| *name == "locale")
+        .map(|(_, treatment)| treatment)
+        .expect("locale has a field row");
+    assert!(matches!(treatment, Treatment::Honored), "locale must be honored");
+    let named = zdr_features::invoke_field_names(&request(&json!({"content": "hi", "model": "m"})));
+    assert!(named.contains(&"locale"));
+    for locale in ["nb-NO", "en-US", "fr-FR"] {
+        let body = json!({"content": "hi", "model": "m", "locale": locale});
+        assert_eq!(decided(&body), None, "{locale}");
     }
 }
 

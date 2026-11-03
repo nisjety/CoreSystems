@@ -927,13 +927,20 @@ mod tests {
         ]));
     }
 
-    // DangerFullAccess => wrap_command returns a transparent passthrough, so
-    // these run the real binary directly and work cross-platform (no bwrap).
+    // External => wrap_command returns a transparent passthrough, so these run
+    // the real binary directly and work cross-platform (no bwrap). They used
+    // DangerFullAccess until WS06-S9, which refuses its AllowAll network before
+    // any spawn ("sandbox egress is not available").
+    fn passthrough_policy() -> MpSandboxPolicy {
+        MpSandboxPolicy::External {
+            network: crate::policy::MpNetworkPolicy::Disabled,
+        }
+    }
 
     #[tokio::test]
     async fn captures_stdout_and_zero_exit() {
         let out = execute_sandboxed(
-            &MpSandboxPolicy::DangerFullAccess,
+            &passthrough_policy(),
             "echo",
             &args(&["hello"]),
         )
@@ -951,7 +958,7 @@ mod tests {
         // sits in source (scanner-safe).
         let secret = format!("sk-{}", "leakme1234567890abcdefghij");
         let out = execute_sandboxed(
-            &MpSandboxPolicy::DangerFullAccess,
+            &passthrough_policy(),
             "echo",
             &args(&[secret.as_str()]),
         )
@@ -967,7 +974,7 @@ mod tests {
     #[tokio::test]
     async fn captures_nonzero_exit_code() {
         let out = execute_sandboxed(
-            &MpSandboxPolicy::DangerFullAccess,
+            &passthrough_policy(),
             "sh",
             &args(&["-c", "exit 3"]),
         )
@@ -983,7 +990,7 @@ mod tests {
     async fn a_hung_child_is_killed_at_the_timeout() {
         let started = std::time::Instant::now();
         let result = execute_sandboxed_with_timeout(
-            &MpSandboxPolicy::DangerFullAccess,
+            &passthrough_policy(),
             "sh",
             &args(&["-c", "sleep 300"]),
             Duration::from_secs(1),
@@ -1024,7 +1031,7 @@ mod tests {
         std::fs::create_dir_all(&dir).expect("create test dir");
         let canonical = std::fs::canonicalize(&dir).expect("canonicalize test dir");
         let out = execute_sandboxed_in_dir(
-            &MpSandboxPolicy::DangerFullAccess,
+            &passthrough_policy(),
             "sh",
             &args(&[
                 "-c",
@@ -1102,7 +1109,7 @@ mod tests {
     #[tokio::test]
     async fn oversized_output_is_capped_with_a_marker() {
         let out = execute_sandboxed(
-            &MpSandboxPolicy::DangerFullAccess,
+            &passthrough_policy(),
             "sh",
             // ~200 KiB of 'y' lines, well past the 64 KiB cap.
             &args(&["-c", "yes | head -c 200000"]),
@@ -1173,7 +1180,7 @@ mod tests {
     async fn a_child_printing_100_mb_is_killed_at_the_output_cap() {
         let started = std::time::Instant::now();
         let out = execute_sandboxed_with_timeout(
-            &MpSandboxPolicy::DangerFullAccess,
+            &passthrough_policy(),
             "sh",
             &args(&["-c", "yes | head -c 104857600"]),
             Duration::from_secs(120),
@@ -1201,7 +1208,7 @@ mod tests {
     #[tokio::test]
     async fn stderr_past_the_cap_is_killed_and_attributed_to_stderr() {
         let out = execute_sandboxed_with_timeout(
-            &MpSandboxPolicy::DangerFullAccess,
+            &passthrough_policy(),
             "sh",
             &args(&["-c", "yes | head -c 104857600 >&2"]),
             Duration::from_secs(120),
@@ -1220,7 +1227,7 @@ mod tests {
     #[tokio::test]
     async fn a_normal_exit_reports_no_limit_hit() {
         let out = execute_sandboxed(
-            &MpSandboxPolicy::DangerFullAccess,
+            &passthrough_policy(),
             "echo",
             &args(&["hello"]),
         )
@@ -1246,7 +1253,7 @@ mod tests {
     async fn a_sandboxed_spawn_is_refused_with_would_block_when_the_gate_is_full() {
         let _held = hold_every_spawn_permit_for_test().await;
         let err = execute_sandboxed(
-            &MpSandboxPolicy::DangerFullAccess,
+            &passthrough_policy(),
             "echo",
             &args(&["never runs"]),
         )
@@ -1254,5 +1261,279 @@ mod tests {
         .expect_err("admission must refuse before any spawn");
         assert_eq!(err.kind(), std::io::ErrorKind::WouldBlock);
         assert_eq!(err.to_string(), "sandbox is busy, retry later");
+    }
+
+    // -- WS06-S8 / WS06-S9 postponed tests ---------------------------------
+
+    fn test_limits() -> ResourceLimits {
+        ResourceLimits {
+            cpu_secs: 12,
+            address_space_bytes: 1 << 30,
+            file_size_bytes: 1 << 20,
+            open_files: 64,
+        }
+    }
+
+    #[test]
+    fn classify_exit_reads_signals_and_bwrap_codes_only_when_limits_apply() {
+        let l = test_limits();
+        // Direct signals with limits applied.
+        assert_eq!(
+            classify_exit(Some(24), None, true, Some(&l)),
+            Some(LimitHit::Cpu { limit_secs: 12 })
+        );
+        assert_eq!(
+            classify_exit(Some(25), None, true, Some(&l)),
+            Some(LimitHit::FileSize {
+                limit_bytes: 1 << 20
+            })
+        );
+        // bwrap reports an inner signal as 128 + signal.
+        assert_eq!(
+            classify_exit(None, Some(152), true, Some(&l)),
+            Some(LimitHit::Cpu { limit_secs: 12 })
+        );
+        assert_eq!(
+            classify_exit(None, Some(153), true, Some(&l)),
+            Some(LimitHit::FileSize {
+                limit_bytes: 1 << 20
+            })
+        );
+        // SIGKILL (9 or 137) counts for a sandboxed child, with or without limits.
+        assert_eq!(
+            classify_exit(Some(9), None, true, Some(&l)),
+            Some(LimitHit::Killed)
+        );
+        assert_eq!(
+            classify_exit(None, Some(137), true, None),
+            Some(LimitHit::Killed)
+        );
+        // ... but not for an unsandboxed one.
+        assert_eq!(classify_exit(Some(9), None, false, Some(&l)), None);
+        assert_eq!(classify_exit(None, Some(137), false, None), None);
+        // No limits => the program's own SIGXCPU/SIGXFSZ are its business.
+        assert_eq!(classify_exit(Some(24), None, true, None), None);
+        assert_eq!(classify_exit(Some(25), None, true, None), None);
+        assert_eq!(classify_exit(None, Some(152), true, None), None);
+        // Ordinary exits and non-limit signals classify as nothing.
+        assert_eq!(classify_exit(None, Some(0), true, Some(&l)), None);
+        assert_eq!(classify_exit(None, Some(1), true, Some(&l)), None);
+        assert_eq!(classify_exit(None, Some(128), true, Some(&l)), None);
+        assert_eq!(classify_exit(None, Some(160), true, Some(&l)), None);
+        assert_eq!(classify_exit(Some(15), None, true, Some(&l)), None);
+        assert_eq!(classify_exit(None, None, true, Some(&l)), None);
+    }
+
+    #[test]
+    fn require_limits_applied_refuses_only_requested_sandboxed_and_not_applied() {
+        let refused = require_limits_applied(true, true, false).expect_err("must refuse");
+        assert_eq!(refused.kind(), std::io::ErrorKind::Unsupported);
+        assert!(refused.to_string().contains("prlimit"));
+        assert!(require_limits_applied(true, true, true).is_ok());
+        assert!(require_limits_applied(false, true, false).is_ok());
+        assert!(require_limits_applied(true, false, false).is_ok());
+        assert!(require_limits_applied(false, false, false).is_ok());
+    }
+
+    #[test]
+    fn require_limits_applied_for_reads_the_wrapped_command() {
+        let l = test_limits();
+        let cmd = |sandboxed, limits_applied| sandbox::SandboxedCommand {
+            program: "x".into(),
+            args: vec![],
+            sandboxed,
+            limits_applied,
+        };
+        assert!(require_limits_applied_for(Some(&l), &cmd(true, false)).is_err());
+        assert!(require_limits_applied_for(Some(&l), &cmd(true, true)).is_ok());
+        assert!(require_limits_applied_for(None, &cmd(true, false)).is_ok());
+    }
+
+    #[test]
+    fn limit_hit_metrics_renders_all_five_kinds_and_the_unleased_counter() {
+        record_limit_hit("cpu");
+        record_shell_unleased();
+        record_limit_hit("not-a-kind"); // ignored, never invents a label
+        let text = limit_hit_metrics();
+        for kind in ["cpu", "file_size", "output", "killed", "busy"] {
+            assert!(
+                text.contains(&format!(
+                    "execution_core_sandbox_limit_hits_total{{kind=\"{kind}\"}} "
+                )),
+                "{kind} missing from:\n{text}"
+            );
+        }
+        assert!(!text.contains("not-a-kind"));
+        assert!(text.contains("# TYPE execution_core_sandbox_limit_hits_total counter"));
+        assert!(text.contains("# TYPE space_shell_unleased_total counter"));
+        let unleased: u64 = text
+            .lines()
+            .find_map(|l| l.strip_prefix("space_shell_unleased_total "))
+            .expect("unleased line")
+            .parse()
+            .expect("a number");
+        assert!(unleased >= 1);
+    }
+
+    #[test]
+    fn limit_hit_serialises_as_a_tagged_object_and_describes_with_the_retry_marker() {
+        assert_eq!(
+            serde_json::to_value(LimitHit::Cpu { limit_secs: 7 }).unwrap(),
+            serde_json::json!({"kind": "cpu", "limit_secs": 7})
+        );
+        assert_eq!(
+            serde_json::to_value(LimitHit::FileSize { limit_bytes: 9 }).unwrap(),
+            serde_json::json!({"kind": "file_size", "limit_bytes": 9})
+        );
+        assert_eq!(
+            serde_json::to_value(LimitHit::Killed).unwrap(),
+            serde_json::json!({"kind": "killed"})
+        );
+        assert_eq!(
+            serde_json::to_value(LimitHit::Output {
+                stream: OutputStream::Stderr,
+                limit_bytes: 5
+            })
+            .unwrap(),
+            serde_json::json!({"kind": "output", "stream": "stderr", "limit_bytes": 5})
+        );
+        for hit in [
+            LimitHit::Cpu { limit_secs: 1 },
+            LimitHit::FileSize { limit_bytes: 1 },
+            LimitHit::Killed,
+            LimitHit::Output {
+                stream: OutputStream::Stdout,
+                limit_bytes: 1,
+            },
+        ] {
+            assert!(
+                hit.describe().starts_with("resource limit exceeded"),
+                "{}",
+                hit.kind()
+            );
+        }
+    }
+
+    fn ro(network: crate::policy::MpNetworkPolicy) -> MpSandboxPolicy {
+        MpSandboxPolicy::ReadOnly { network }
+    }
+
+    const SPACE_WITH_LEASE: SpawnAdmission<'static> = SpawnAdmission {
+        space_scoped: true,
+        lease_id: Some("lease-1"),
+    };
+    const SPACE_NO_LEASE: SpawnAdmission<'static> = SpawnAdmission {
+        space_scoped: true,
+        lease_id: None,
+    };
+
+    #[test]
+    fn a_space_spawn_without_a_lease_is_refused() {
+        let err = require_spawn_admission_with(
+            &ro(crate::policy::MpNetworkPolicy::Disabled),
+            true,
+            false,
+            &SPACE_NO_LEASE,
+        )
+        .expect_err("no lease");
+        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+        assert!(err.to_string().contains("requires a sandbox lease"));
+    }
+
+    #[test]
+    fn a_blank_lease_id_is_no_lease() {
+        for blank in ["", "   ", "\t"] {
+            let admission = SpawnAdmission {
+                space_scoped: true,
+                lease_id: Some(blank),
+            };
+            assert!(require_spawn_admission_with(
+                &ro(crate::policy::MpNetworkPolicy::Disabled),
+                true,
+                false,
+                &admission
+            )
+            .is_err());
+        }
+    }
+
+    #[test]
+    fn egress_policies_are_refused_for_every_spawn_with_the_egress_message() {
+        for network in [
+            crate::policy::MpNetworkPolicy::AllowAll,
+            crate::policy::MpNetworkPolicy::AllowDomains(vec!["api.example.com".into()]),
+        ] {
+            // Even with an egress proxy configured and a lease in hand.
+            let err = require_spawn_admission_with(&ro(network), true, true, &SPACE_WITH_LEASE)
+                .expect_err("egress");
+            assert!(
+                err.to_string().contains("sandbox egress is not available"),
+                "{err}"
+            );
+        }
+        let err = require_spawn_admission_with(
+            &MpSandboxPolicy::DangerFullAccess,
+            true,
+            false,
+            &SPACE_WITH_LEASE,
+        )
+        .expect_err("danger-full-access carries AllowAll");
+        assert!(
+            err.to_string().contains("sandbox egress is not available"),
+            "{err}"
+        );
+        // And for a non-Space spawn too: the proxy variable no longer stands in for egress.
+        let err = require_spawn_admission_with(
+            &ro(crate::policy::MpNetworkPolicy::AllowAll),
+            true,
+            false,
+            &SpawnAdmission::NOT_SPACE,
+        )
+        .expect_err("egress");
+        assert!(err.to_string().contains("sandbox egress is not available"));
+    }
+
+    #[test]
+    fn external_policy_is_refused_for_a_space_but_not_for_other_spawns() {
+        let external = MpSandboxPolicy::External {
+            network: crate::policy::MpNetworkPolicy::Disabled,
+        };
+        let err = require_spawn_admission_with(&external, false, false, &SPACE_WITH_LEASE)
+            .expect_err("external for a Space");
+        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+        assert!(
+            require_spawn_admission_with(&external, false, false, &SpawnAdmission::NOT_SPACE)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn disabled_network_with_a_lease_is_accepted_for_a_space() {
+        assert!(require_spawn_admission_with(
+            &ro(crate::policy::MpNetworkPolicy::Disabled),
+            true,
+            false,
+            &SPACE_WITH_LEASE
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn a_non_space_disabled_spawn_needs_no_lease() {
+        assert!(require_spawn_admission_with(
+            &ro(crate::policy::MpNetworkPolicy::Disabled),
+            true,
+            false,
+            &SpawnAdmission::NOT_SPACE
+        )
+        .is_ok());
+        // The isolation check still runs first.
+        assert!(require_spawn_admission_with(
+            &ro(crate::policy::MpNetworkPolicy::Disabled),
+            false,
+            false,
+            &SpawnAdmission::NOT_SPACE
+        )
+        .is_err());
     }
 }

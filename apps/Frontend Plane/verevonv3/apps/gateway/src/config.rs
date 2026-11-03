@@ -1330,6 +1330,92 @@ mod tests {
         });
     }
 
+    /// WS04-S9 / WS16-S6 / WS16-S8 / WS12-S3: the resolver, the locale hint, the sidebar and the DM
+    /// flags default OFF, are OFF under `APP_ENV=production` when unset, ON in dev, and an
+    /// explicit value wins.
+    #[test]
+    fn w2_gateway_flags_default_off_and_follow_their_variables() {
+        let default = super::SpaceFeatureFlags::default();
+        assert!(!default.directory_resolver_api);
+        assert!(!default.sidebar);
+        assert!(!default.chat_locale_hint);
+        assert!(!default.dm_api);
+        let vars = |env: &'static str, value: Option<&'static str>| {
+            vec![
+                ("APP_ENV", Some(env)),
+                ("SPACE_DIRECTORY_RESOLVER_API", value),
+                ("SPACE_SIDEBAR_API", value),
+                ("CHAT_LOCALE_HINT", value),
+                ("SPACE_DM_API", value),
+            ]
+        };
+        let read = || {
+            let flags = super::SpaceFeatureFlags::from_env();
+            [flags.directory_resolver_api, flags.sidebar, flags.chat_locale_hint, flags.dm_api]
+        };
+        with_env(&vars("production", None), || assert_eq!(read(), [false; 4]));
+        with_env(&vars("development", None), || assert_eq!(read(), [true; 4]));
+        with_env(&vars("production", Some("true")), || assert_eq!(read(), [true; 4]));
+        with_env(&vars("development", Some("false")), || assert_eq!(read(), [false; 4]));
+    }
+
+    /// WS10-S4 / WS13-S3 / WS14-S7 / WS15-S7: the approval-scope, message-search, entry-link,
+    /// command-palette, thread-fork, room-file and timeline flags default OFF, are OFF under
+    /// `APP_ENV=production` when unset, ON in dev, and an explicit value wins.
+    #[test]
+    fn ws10_ws13_ws14_ws15_gateway_flags_default_off_and_follow_their_variables() {
+        let default = super::SpaceFeatureFlags::default();
+        assert!(!default.approval_scopes);
+        assert!(!default.message_search_api);
+        assert!(!default.message_search_ui);
+        assert!(!default.entry_links_ui);
+        assert!(!default.command_palette_ui);
+        assert!(!default.thread_fork_api);
+        assert!(!default.room_files_api);
+        assert!(!default.room_files_ui);
+        assert!(!default.turn_attachments_ui);
+        assert!(!default.timeline_api);
+        assert!(!default.system_entries_api);
+        let keys = [
+            "SPACE_APPROVAL_SCOPES_ENABLED",
+            "SPACE_MESSAGE_SEARCH_API",
+            "SPACE_MESSAGE_SEARCH_UI",
+            "SPACE_ENTRY_LINKS_UI",
+            "SPACE_COMMAND_PALETTE_UI",
+            "SPACE_THREAD_FORK_API",
+            "SPACE_ROOM_FILES_API",
+            "SPACE_ROOM_FILES_UI",
+            "SPACE_TURN_ATTACHMENTS_UI",
+            "SPACE_TIMELINE_API",
+            "SPACE_SYSTEM_ENTRIES_API",
+        ];
+        let vars = |env: &'static str, value: Option<&'static str>| {
+            let mut vars = vec![("APP_ENV", Some(env))];
+            vars.extend(keys.iter().map(|key| (*key, value)));
+            vars
+        };
+        let read = || {
+            let flags = super::SpaceFeatureFlags::from_env();
+            [
+                flags.approval_scopes,
+                flags.message_search_api,
+                flags.message_search_ui,
+                flags.entry_links_ui,
+                flags.command_palette_ui,
+                flags.thread_fork_api,
+                flags.room_files_api,
+                flags.room_files_ui,
+                flags.turn_attachments_ui,
+                flags.timeline_api,
+                flags.system_entries_api,
+            ]
+        };
+        with_env(&vars("production", None), || assert_eq!(read(), [false; 11]));
+        with_env(&vars("development", None), || assert_eq!(read(), [true; 11]));
+        with_env(&vars("production", Some("true")), || assert_eq!(read(), [true; 11]));
+        with_env(&vars("development", Some("false")), || assert_eq!(read(), [false; 11]));
+    }
+
     /// WS07-S6: `CSP_REPORT_LOG_HOSTS` is a dev-only flag: it follows its variable outside
     /// production and stays off under `APP_ENV=production` or `prod` even when set to true.
     #[test]
@@ -1450,6 +1536,33 @@ mod tests {
             assert!(!flags.membership_writer_api);
             assert!(!flags.room_archive_api);
         });
+    }
+
+    /// WS04-S8.gw / WS08-S4: the room-directory, mention-record and addressed-wake flags default
+    /// OFF, are OFF under `APP_ENV=production` when unset, ON in dev, and an explicit value wins.
+    #[test]
+    fn ws04_ws08_room_directory_and_mention_flags_default_off_in_production_and_on_in_dev() {
+        let default = super::SpaceFeatureFlags::default();
+        assert!(!default.room_directory_api);
+        assert!(!default.mention_records_api);
+        assert!(!default.addressed_wake_api);
+        let cases: [(&str, fn(&super::SpaceFeatureFlags) -> bool); 3] = [
+            ("SPACE_ROOM_DIRECTORY_API", |flags| flags.room_directory_api),
+            ("SPACE_MENTION_RECORDS_API", |flags| flags.mention_records_api),
+            ("SPACE_ADDRESSED_WAKE_API", |flags| flags.addressed_wake_api),
+        ];
+        for (key, read) in cases {
+            let vars = |env: &'static str, value: Option<&'static str>| {
+                vec![("APP_ENV", Some(env)), (key, value)]
+            };
+            let flag = || read(&super::SpaceFeatureFlags::from_env());
+            with_env(&vars("production", None), || assert!(!flag(), "{key} production default"));
+            with_env(&vars("prod", None), || assert!(!flag(), "{key} prod default"));
+            with_env(&vars("development", None), || assert!(flag(), "{key} dev default"));
+            with_env(&vars("production", Some("true")), || assert!(flag(), "{key} explicit on"));
+            with_env(&vars("development", Some("false")), || assert!(!flag(), "{key} explicit off wins in dev"));
+            with_env(&vars("development", Some("0")), || assert!(!flag(), "{key} 0 is off"));
+        }
     }
 }
 

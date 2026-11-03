@@ -94,3 +94,52 @@ func TestCreateDocumentInputTakesTheSpaceFromClaimsAndNeverFromTheBody(t *testin
 		t.Fatalf("verified space_ref = %q", input.SpaceRef)
 	}
 }
+
+// WS14-S3: the two helpers that route a verified decision into the room-file
+// rules and the signed-subject owner.
+func TestSpaceImportDecisionIsSpaceUploadAndSignedSubject(t *testing.T) {
+	for source, want := range map[string]bool{"space_upload": true, " space_upload ": true, "notion": false, "": false, "Space_Upload": false} {
+		if got := (spaceImportDecisionClaims{ImportSourceType: source}).isSpaceUpload(); got != want {
+			t.Errorf("isSpaceUpload(%q) = %v, want %v", source, got, want)
+		}
+	}
+	if got := (spaceImportDecisionClaims{SubjectID: "  user-1 "}).signedSubject(); got != "user-1" {
+		t.Errorf("signedSubject = %q", got)
+	}
+	if got := (spaceImportDecisionClaims{}).signedSubject(); got != "" {
+		t.Errorf("signedSubject of an empty decision = %q", got)
+	}
+}
+
+// With DOCUMENTS_SPACE_FILES on, a personal-Space connector import is owned by
+// the decision's signed subject; with it off the previous rule (owner must be
+// the verified imports-core principal) is unchanged. The stop point is the
+// validator, which runs after the owner gate and before the repository.
+func TestPersonalSpaceConnectorImportOwnerFollowsTheFlag(t *testing.T) {
+	post := func(f *uploadFixture, owner string) *httptest.ResponseRecorder {
+		notion := baseDecision(testOrg, "space:org-1:user-1", "user-1", "notion")
+		return f.post(uploadRequest{
+			decision: &notion,
+			body:     map[string]any{"type": "notion", "title": "", "owner_id": owner, "metadata": map[string]any{}},
+		})
+	}
+
+	on := newUploadFixture(t, SpaceFilesConfig{Enabled: true})
+	if rec := post(on, "user-1"); rec.Code != 400 || !strings.Contains(rec.Body.String(), "title is required") {
+		t.Fatalf("flag on, owner = subject: %d %s (want the owner gate passed, stopped at validation)", rec.Code, rec.Body.String())
+	}
+	if rec := post(on, ""); rec.Code != 400 || !strings.Contains(rec.Body.String(), "title is required") {
+		t.Fatalf("flag on, no owner_id: %d %s", rec.Code, rec.Body.String())
+	}
+	if rec := post(on, "user-2"); rec.Code != 403 || !strings.Contains(rec.Body.String(), "decision subject") {
+		t.Fatalf("flag on, owner != subject: %d %s", rec.Code, rec.Body.String())
+	}
+
+	off := newUploadFixture(t, SpaceFilesConfig{})
+	if rec := post(off, "user-1"); rec.Code != 403 || !strings.Contains(rec.Body.String(), "verified principal") {
+		t.Fatalf("flag off, owner = subject: %d %s (the subject rule must not apply)", rec.Code, rec.Body.String())
+	}
+	if rec := post(off, "imports-core"); rec.Code != 400 || !strings.Contains(rec.Body.String(), "title is required") {
+		t.Fatalf("flag off, owner = principal: %d %s", rec.Code, rec.Body.String())
+	}
+}

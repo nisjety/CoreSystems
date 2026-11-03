@@ -59,10 +59,9 @@ describe('SpaceApprovalPanel', () => {
 
     await waitFor(() => expect(approvals.settleApproval).toHaveBeenCalled())
     expect(approvals.settleApproval).toHaveBeenCalledWith(
-      expect.objectContaining({ approvalId: 'ap-1', runId: 'run-1', decision: 'approve' }),
+      expect.objectContaining({ approvalId: 'ap-1', runId: 'run-1', decision: 'approve', scope: 'once' }),
     )
     await waitFor(() => expect(onSettled).toHaveBeenCalled())
-    // The copy never promises the run continues (WS10 S1): a plain grant says the decision is recorded.
     expect(await screen.findByText(/Godkjent\. Avgjørelsen er registrert/)).toBeTruthy()
   })
 

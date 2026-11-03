@@ -255,6 +255,17 @@ describe('space send pipeline (P-SPA2)', () => {
       expect(request.sessionKey).toBeUndefined()
     })
 
+    it('passes the viewer locale of an ask turn to streamChat, and nothing when there is none (WS16-S6)', async () => {
+      const { pipeline } = pipelineWith()
+      streamChat.mockResolvedValue(undefined)
+      await pipeline.send(input({ locale: 'no' }))
+      expect((streamChat.mock.calls[0]?.[0] as Record<string, unknown>).locale).toBe('no')
+      await pipeline.send(input({ locale: 'en' }))
+      expect((streamChat.mock.calls[1]?.[0] as Record<string, unknown>).locale).toBe('en')
+      await pipeline.send(input())
+      expect((streamChat.mock.calls[2]?.[0] as Record<string, unknown>).locale).toBeUndefined()
+    })
+
     it('with the send key on, a new thread carries the send id and a session key', async () => {
       const { pipeline } = pipelineWith({ sendIdempotency: true })
       streamChat.mockResolvedValueOnce(undefined)

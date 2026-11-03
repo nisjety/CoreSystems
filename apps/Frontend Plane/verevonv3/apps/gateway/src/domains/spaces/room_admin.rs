@@ -2112,4 +2112,276 @@ mod tests {
         super::annotate_roster(&state, axum::http::StatusCode::OK, &mut body);
         assert_eq!(body["data"]["writer_api"], true);
     }
+
+    // ---- WS11-S8: the invite attention signal from add-member -----------------------------------
+
+    async fn invite_calls(fx: &Fx) -> Vec<Value> {
+        convex_requests(fx)
+            .await
+            .into_iter()
+            .filter(|request| request["path"] == "spaceAttention:recordInviteForGateway")
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn add_member_records_the_invite_only_when_control_says_changed_true() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        for (changed, want_calls) in [(true, 1usize), (false, 0usize)] {
+            let fx = fx_writer("owner").await;
+            mount_control(
+                &fx,
+                "POST",
+                CONTROL_MEMBERS,
+                control_ok(json!({"member_count": 2, "changed": changed, "role": "editor"})),
+            )
+            .await;
+            mount_convex(&fx, "/api/action", reconcile("noop")).await;
+            mount_convex(&fx, "/api/mutation", ResponseTemplate::new(200).set_body_json(json!({"value": {"recorded": true}}))).await;
+            let (status, body) = call(
+                &fx,
+                "POST",
+                &format!("{ROOM}/members"),
+                Some(json!({"member_id": "user-2", "idempotency_key": "invite-key-1"})),
+                &[],
+            )
+            .await;
+            assert_eq!(status, 200, "{body}");
+            assert_eq!(body["data"]["changed"], changed);
+            let invites = invite_calls(&fx).await;
+            assert_eq!(invites.len(), want_calls, "changed={changed}");
+            if let Some(invite) = invites.first() {
+                let args = &invite["args"];
+                assert_eq!(args["inviteeAuthId"], "user-2", "the invitee is the member id");
+                assert_eq!(args["externalAuthId"], "user-1", "the inviter is the session user");
+                assert_eq!(args["externalOrgId"], "org-1");
+                assert_eq!(args["spaceRef"], "space-room");
+                assert_eq!(args["idempotencyKey"], "invite-key-1");
+                assert_eq!(invite["_route"], "/api/mutation");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn add_member_without_an_idempotency_key_sends_none_to_the_invite_mutation() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = fx_writer("owner").await;
+        mount_control(&fx, "POST", CONTROL_MEMBERS, control_ok(json!({"member_count": 2, "changed": true, "role": "editor"}))).await;
+        mount_convex(&fx, "/api/action", reconcile("noop")).await;
+        mount_convex(&fx, "/api/mutation", ResponseTemplate::new(200).set_body_json(json!({"value": {"recorded": true}}))).await;
+        let (status, _) = call(&fx, "POST", &format!("{ROOM}/members"), Some(json!({"member_id": "user-3"})), &[]).await;
+        assert_eq!(status, 200);
+        let invites = invite_calls(&fx).await;
+        assert_eq!(invites.len(), 1);
+        assert!(invites[0]["args"].get("idempotencyKey").is_none());
+        assert_eq!(invites[0]["args"]["inviteeAuthId"], "user-3");
+    }
+
+    #[tokio::test]
+    async fn a_convex_failure_leaves_the_add_member_response_unchanged() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let ok = fx_writer("owner").await;
+        mount_control(&ok, "POST", CONTROL_MEMBERS, control_ok(json!({"member_count": 4, "changed": true, "role": "editor"}))).await;
+        mount_convex(&ok, "/api/action", reconcile("noop")).await;
+        mount_convex(&ok, "/api/mutation", ResponseTemplate::new(200).set_body_json(json!({"value": {"recorded": true}}))).await;
+        let (ok_status, ok_body) = call(&ok, "POST", &format!("{ROOM}/members"), Some(json!({"member_id": "user-2"})), &[]).await;
+
+        for failing in [
+            ResponseTemplate::new(500),
+            ResponseTemplate::new(200).set_body_json(json!({"status": "error", "errorMessage": "boom"})),
+        ] {
+            let fx = fx_writer("owner").await;
+            mount_control(&fx, "POST", CONTROL_MEMBERS, control_ok(json!({"member_count": 4, "changed": true, "role": "editor"}))).await;
+            mount_convex(&fx, "/api/action", reconcile("noop")).await;
+            mount_convex(&fx, "/api/mutation", failing).await;
+            let (status, body) = call(&fx, "POST", &format!("{ROOM}/members"), Some(json!({"member_id": "user-2"})), &[]).await;
+            assert_eq!(status, ok_status);
+            assert_eq!(body, ok_body, "the attention outcome never shows in the response");
+            assert_eq!(invite_calls(&fx).await.len(), 1, "it was attempted");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_failed_control_add_makes_no_invite_call() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        for control_status in [403u16, 404, 409, 500] {
+            let fx = fx_writer("owner").await;
+            mount_control(
+                &fx,
+                "POST",
+                CONTROL_MEMBERS,
+                ResponseTemplate::new(control_status).set_body_json(json!({"error": {"code": "room_archived", "message": "no"}})),
+            )
+            .await;
+            mount_convex(&fx, "/api/action", reconcile("noop")).await;
+            mount_convex(&fx, "/api/mutation", ResponseTemplate::new(200).set_body_json(json!({"value": {"recorded": true}}))).await;
+            let (status, _) = call(&fx, "POST", &format!("{ROOM}/members"), Some(json!({"member_id": "user-2"})), &[]).await;
+            assert_ne!(status, 200, "control {control_status}");
+            assert!(convex_requests(&fx).await.is_empty(), "control {control_status}: no reconcile and no invite");
+        }
+    }
+
+    // ---- WS04-S8.gw: self-join and room settings -------------------------------------------------
+
+    const CONTROL_JOIN: &str = "/api/v1/internal/spaces/space-room/join";
+    const CONTROL_SETTINGS: &str = "/api/v1/internal/spaces/space-room/settings";
+
+    async fn fx_directory(role: &str) -> Fx {
+        let mut fx = fx(role).await;
+        fx.state.space_features.room_directory_api = true;
+        fx
+    }
+
+    async fn control_received(fx: &Fx, method: &str, path: &str) -> Vec<Value> {
+        fx.user_core
+            .received_requests()
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|request| request.method.to_string() == method && request.url.path() == path)
+            .map(|request| serde_json::from_slice(&request.body).unwrap_or(Value::Null))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn join_and_settings_answer_404_feature_disabled_when_the_directory_flag_is_off() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = fx("owner").await;
+        for (method, uri, body) in [
+            ("POST", format!("{ROOM}/join"), json!({})),
+            ("PATCH", format!("{ROOM}/settings"), json!({"visibility": "private"})),
+        ] {
+            let (status, got) = call(&fx, method, &uri, Some(body), &[]).await;
+            assert_eq!(status, 404, "{method}");
+            assert_eq!(got["error"]["code"], "feature_disabled");
+        }
+        assert!(control_calls(&fx).await.is_empty());
+        assert!(convex_requests(&fx).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn join_and_settings_refuse_bad_bodies_before_control_is_called() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = fx_directory("owner").await;
+        let join = format!("{ROOM}/join");
+        let settings = format!("{ROOM}/settings");
+        for (method, uri, body) in [
+            ("POST", join.clone(), json!({"role": "owner"})),
+            ("POST", join.clone(), json!({"idempotency_key": " "})),
+            ("POST", join.clone(), json!([])),
+            ("PATCH", settings.clone(), json!({})),
+            ("PATCH", settings.clone(), json!({"visibility": null, "join_role": null})),
+            ("PATCH", settings.clone(), json!({"visibility": "public"})),
+            ("PATCH", settings.clone(), json!({"visibility": 7})),
+            ("PATCH", settings.clone(), json!({"join_role": "owner"})),
+            ("PATCH", settings.clone(), json!({"join_role": "manager"})),
+            ("PATCH", settings.clone(), json!({"history_mode": "forever"})),
+            ("PATCH", settings.clone(), json!({"visibility": "private", "org_id": "forged"})),
+            ("PATCH", settings, json!({"visibility": "private", "idempotency_key": ""})),
+        ] {
+            let (status, got) = call(&fx, method, &uri, Some(body.clone()), &[]).await;
+            assert_eq!(status, 400, "{method} {body}");
+            assert_eq!(got["error"]["code"], "invalid_request", "{method} {body}");
+        }
+        assert!(control_calls(&fx).await.is_empty());
+        assert!(convex_requests(&fx).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn join_and_settings_pass_control_refusals_through_by_code() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        for (control_status, code) in [(404u16, "room_not_found"), (409, "room_archived")] {
+            let fx = fx_directory("viewer").await;
+            let refusal = ResponseTemplate::new(control_status)
+                .set_body_json(json!({"error": {"code": code, "message": "Refused.", "details": {"nested": {"x": 1}, "kind": "room"}}}));
+            mount_control(&fx, "POST", CONTROL_JOIN, refusal.clone()).await;
+            mount_control(&fx, "PATCH", CONTROL_SETTINGS, refusal).await;
+            mount_convex(&fx, "/api/action", reconcile("noop")).await;
+            let (status, got) = call(&fx, "POST", &format!("{ROOM}/join"), Some(json!({})), &[]).await;
+            assert_eq!(status, control_status, "join");
+            assert_eq!(got["error"]["code"], code);
+            assert_eq!(got["error"]["details"], json!({"kind": "room"}), "only scalar details survive");
+            let (status, got) = call(&fx, "PATCH", &format!("{ROOM}/settings"), Some(json!({"join_role": "viewer"})), &[]).await;
+            assert_eq!(status, control_status, "settings");
+            assert_eq!(got["error"]["code"], code);
+            assert!(convex_requests(&fx).await.is_empty(), "a refused write reconciles nothing");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_join_success_reconciles_the_audience_and_is_not_recipient_ready() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = fx_directory("viewer").await;
+        mount_control(
+            &fx,
+            "POST",
+            CONTROL_JOIN,
+            control_ok(json!({"space_ref": "space-room", "role": "editor", "changed": true, "already_member": false})),
+        )
+        .await;
+        mount_convex(&fx, "/api/action", reconcile("replaced")).await;
+        let (status, body) = call(&fx, "POST", &format!("{ROOM}/join"), Some(json!({"idempotency_key": "join-key-1"})), &[]).await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(
+            body["data"],
+            json!({
+                "space_ref": "space-room", "role": "editor", "changed": true, "already_member": false,
+                "recipient_ready": false, "audience": {"state": "pending"}
+            })
+        );
+        let sent = control_received(&fx, "POST", CONTROL_JOIN).await;
+        assert_eq!(sent, vec![json!({"idempotency_key": "join-key-1"})]);
+        let convex = convex_requests(&fx).await;
+        assert_eq!(convex.len(), 1);
+        assert_eq!(convex[0]["path"], "spaceMembers:reconcileRoomAudienceForGateway");
+        assert_eq!(convex[0]["args"]["externalOrgId"], "org-1");
+        assert_eq!(convex[0]["args"]["spaceRef"], "space-room");
+        let _ = &fx.model_gateway;
+    }
+
+    #[tokio::test]
+    async fn a_join_with_an_unconfirmed_audience_warns_and_never_rolls_back() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = fx_directory("viewer").await;
+        mount_control(&fx, "POST", CONTROL_JOIN, control_ok(json!({"changed": false, "already_member": true, "role": "viewer"}))).await;
+        mount_convex(&fx, "/api/action", ResponseTemplate::new(500)).await;
+        let (status, body) = call(&fx, "POST", &format!("{ROOM}/join"), None, &[]).await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(body["data"]["audience"]["state"], "unconfirmed");
+        assert_eq!(body["data"]["recipient_ready"], false);
+        assert_eq!(body["data"]["already_member"], true);
+        assert_eq!(body["meta"]["warnings"], json!(["room_audience_unconfirmed"]));
+    }
+
+    #[tokio::test]
+    async fn settings_forward_only_the_whitelisted_fields_and_do_not_reconcile() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = fx_directory("manager").await;
+        mount_control(
+            &fx,
+            "PATCH",
+            CONTROL_SETTINGS,
+            control_ok(json!({"space_ref": "space-room", "visibility": "org_public", "join_role": "viewer", "history_mode": "since_join", "changed": true})),
+        )
+        .await;
+        mount_convex(&fx, "/api/action", reconcile("replaced")).await;
+        let (status, body) = call(
+            &fx,
+            "PATCH",
+            &format!("{ROOM}/settings"),
+            Some(json!({"visibility": " org_public ", "join_role": "viewer", "history_mode": "since_join", "idempotency_key": "set-key-1"})),
+            &[],
+        )
+        .await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(
+            body["data"],
+            json!({"space_ref": "space-room", "visibility": "org_public", "join_role": "viewer", "history_mode": "since_join", "changed": true})
+        );
+        let sent = control_received(&fx, "PATCH", CONTROL_SETTINGS).await;
+        assert_eq!(
+            sent,
+            vec![json!({"visibility": "org_public", "join_role": "viewer", "history_mode": "since_join", "idempotency_key": "set-key-1"})]
+        );
+        assert!(convex_requests(&fx).await.is_empty(), "a settings change does not alter the recipient set");
+    }
 }

@@ -1,9 +1,12 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
+import { DM_SPACE_FEATURE } from './space-kind'
+import { primeSpaceRoomFeatures } from './space-room-features'
 import { DEFAULT_SPACE_TAB, SPACE_TABS, spaceTabFromHash, visibleSpaceTabs } from './space-tab-registry'
 
 afterEach(() => {
   vi.unstubAllEnvs()
+  primeSpaceRoomFeatures(undefined)
 })
 
 describe('space tab registry (P-SPA1)', () => {
@@ -49,6 +52,34 @@ describe('space tab registry (P-SPA1)', () => {
       vi.stubEnv('VITE_SPACE_ROOM_ARTIFACTS_UI', 'true')
       expect(visibleSpaceTabs().map((tab) => tab.id)).toContain('artefakter')
       expect(spaceTabFromHash('#artefakter')).toBe('artefakter')
+    })
+  })
+
+  describe('a direct message (WS12-S3)', () => {
+    it('hides the agent and members tabs and keeps the rest', () => {
+      primeSpaceRoomFeatures({ [DM_SPACE_FEATURE]: true })
+      const ids = visibleSpaceTabs().map((tab) => tab.id)
+      expect(ids).not.toContain('agent')
+      expect(ids).not.toContain('medlemmer')
+      expect(ids).toContain('chat')
+      expect(ids).toContain('aktivitet')
+      expect(ids).toContain('arbeid')
+    })
+
+    it('sends a hash for a hidden tab, and its legacy alias, to chat', () => {
+      primeSpaceRoomFeatures({ [DM_SPACE_FEATURE]: true })
+      expect(spaceTabFromHash('#agent')).toBe('chat')
+      expect(spaceTabFromHash('#medlemmer')).toBe('chat')
+      expect(spaceTabFromHash('#members')).toBe('chat')
+      expect(spaceTabFromHash('#aktivitet')).toBe('aktivitet')
+    })
+
+    it('a room (the flag false or absent) keeps both tabs', () => {
+      primeSpaceRoomFeatures({ [DM_SPACE_FEATURE]: false })
+      expect(visibleSpaceTabs().map((tab) => tab.id)).toEqual(expect.arrayContaining(['agent', 'medlemmer']))
+      primeSpaceRoomFeatures(undefined)
+      expect(spaceTabFromHash('#agent')).toBe('agent')
+      expect(spaceTabFromHash('#members')).toBe('medlemmer')
     })
   })
 })

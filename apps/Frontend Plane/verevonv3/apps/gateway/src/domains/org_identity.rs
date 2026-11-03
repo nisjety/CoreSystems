@@ -594,3 +594,515 @@ async fn get_scim_status(
     let url = scim_url(&state, &caller.org_id, "status");
     forward(&state, &caller, Method::GET, url, None).await
 }
+
+#[cfg(test)]
+mod tests {
+    //! WS05-S6 / WS05-S7. The handlers are driven through the REAL router with the real
+    //! session middleware; auth-core, user-core and org-core are wiremock doubles that
+    //! record what the gateway sent.
+    use axum::{body::Body, http::Request};
+    use http_body_util::BodyExt;
+    use serde_json::{json, Value};
+    use tower::ServiceExt;
+    use wiremock::matchers::{method as wm_method, path as wm_path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    use super::*;
+
+    const COOKIE: &str = "better-auth.session_token=session-1";
+
+    struct Harness {
+        auth: MockServer,
+        user_core: MockServer,
+        org_core: MockServer,
+        enabled: bool,
+    }
+
+    impl Harness {
+        async fn start(org_role: &str, enabled: bool) -> Self {
+            let auth = MockServer::start().await;
+            Mock::given(wm_method("GET"))
+                .and(wm_path("/api/auth/get-session"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                    "user": {"id": "user-1", "email": "user@example.com", "emailVerified": true},
+                    "session": {"activeOrganizationId": "org-1"}
+                })))
+                .mount(&auth)
+                .await;
+            let user_core = MockServer::start().await;
+            Mock::given(wm_method("GET"))
+                .and(wm_path("/api/v1/me/session-context"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                    "userId": "user-1", "orgId": "org-1", "role": org_role,
+                    "onboardingStatus": "COMPLETED"
+                })))
+                .mount(&user_core)
+                .await;
+            let org_core = MockServer::start().await;
+            Mock::given(wiremock::matchers::any())
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": {"ok": true}})))
+                .mount(&org_core)
+                .await;
+            Self { auth, user_core, org_core, enabled }
+        }
+
+        fn state(&self) -> AppState {
+            let mut state = crate::tests::test_state(false);
+            state.auth_core_url = self.auth.uri();
+            state.user_core_url = self.user_core.uri();
+            state.org_core_url = self.org_core.uri();
+            state.space_features.org_identity_admin_api = self.enabled;
+            state
+        }
+
+        async fn send(&self, method: &str, uri: &str, body: Option<&str>) -> (u16, axum::http::HeaderMap, Value) {
+            let mut builder = Request::builder().method(method).uri(uri).header("cookie", COOKIE);
+            if body.is_some() {
+                builder = builder.header("content-type", "application/json");
+            }
+            let response = crate::build_router(self.state())
+                .oneshot(builder.body(Body::from(body.unwrap_or("").to_owned())).unwrap())
+                .await
+                .unwrap();
+            let status = response.status().as_u16();
+            let headers = response.headers().clone();
+            let parsed: Value =
+                serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                    .unwrap_or(Value::Null);
+            (status, headers, parsed)
+        }
+
+        async fn upstream(&self) -> Vec<wiremock::Request> {
+            self.org_core.received_requests().await.expect("recording")
+        }
+
+        async fn upstream_count(&self) -> usize {
+            self.upstream().await.len()
+        }
+    }
+
+    fn upstream_body(request: &wiremock::Request) -> Value {
+        serde_json::from_slice(&request.body).unwrap_or(Value::Null)
+    }
+
+    fn code(body: &Value) -> &str {
+        body["error"]["code"].as_str().unwrap_or_default()
+    }
+
+    /// Every identity route the module mounts for org `org-1`, with a valid body where needed.
+    fn all_routes() -> Vec<(&'static str, String, Option<String>)> {
+        let policy = r#"{"mode":"report","expected_revision":1}"#.to_owned();
+        let provider = json!({
+            "provider_id": "acme-oidc", "domain": "example.com", "type": "oidc",
+            "issuer": "https://idp.example.com", "client_id": "client-1", "client_secret": "secret-1"
+        })
+        .to_string();
+        vec![
+            ("GET", "/api/v1/orgs/org-1/domains".into(), None),
+            ("POST", "/api/v1/orgs/org-1/domains".into(), Some(r#"{"domain":"example.com"}"#.into())),
+            ("POST", "/api/v1/orgs/org-1/domains/example.com/verify".into(), None),
+            ("DELETE", "/api/v1/orgs/org-1/domains/example.com".into(), None),
+            ("GET", "/api/v1/orgs/org-1/sso/policy".into(), None),
+            ("PUT", "/api/v1/orgs/org-1/sso/policy".into(), Some(policy)),
+            ("POST", "/api/v1/orgs/org-1/sso/providers".into(), Some(provider)),
+            ("DELETE", "/api/v1/orgs/org-1/sso/providers/acme-oidc".into(), None),
+        ]
+    }
+
+    // --- pure helpers ---
+
+    #[test]
+    fn domain_segments_are_hostname_shaped_only() {
+        for ok in ["example.com", "sub-domain.example.co.uk", "xn--bcher-kva.example", "A1.b-2.org"] {
+            assert!(valid_domain_segment(ok), "{ok}");
+        }
+        for bad in ["", "exa mple.com", "a/b.com", "a_b.com", "a:443", "a@b.com", "a?x=1", "a#b", "ex%20ample", "bücher.example"] {
+            assert!(!valid_domain_segment(bad), "{bad}");
+        }
+        assert!(valid_domain_segment(&"a".repeat(MAX_DOMAIN_LEN)));
+        assert!(!valid_domain_segment(&"a".repeat(MAX_DOMAIN_LEN + 1)));
+    }
+
+    #[test]
+    fn provider_segments_are_lowercase_ids_only() {
+        for ok in ["acme-oidc", "abc", "a1-b2", "0abc"] {
+            assert!(valid_provider_segment(ok), "{ok}");
+        }
+        for bad in ["", "Acme", "acme_oidc", "acme oidc", "a/b", "../x", "acme.oidc"] {
+            assert!(!valid_provider_segment(bad), "{bad}");
+        }
+        assert!(valid_provider_segment(&"a".repeat(MAX_PROVIDER_ID_LEN)));
+        assert!(!valid_provider_segment(&"a".repeat(MAX_PROVIDER_ID_LEN + 1)));
+    }
+
+    #[test]
+    fn verification_attempts_are_limited_per_org_and_domain_per_window() {
+        let now = Instant::now();
+        let org = "org-rate-unit";
+        let domain = "Rate-Unit.Example.com";
+        for attempt in 0..VERIFY_ATTEMPTS {
+            assert!(verify_attempt_allowed(org, domain, now).is_ok(), "attempt {attempt}");
+        }
+        let wait = verify_attempt_allowed(org, "rate-unit.example.com", now)
+            .expect_err("the seventh attempt in the window is refused, and the domain is case-insensitive");
+        assert!((1..=VERIFY_WINDOW.as_secs()).contains(&wait), "retry after {wait}s");
+        // Another domain or another org has its own allowance.
+        assert!(verify_attempt_allowed(org, "other-rate-unit.example.com", now).is_ok());
+        assert!(verify_attempt_allowed("org-rate-unit-2", domain, now).is_ok());
+        // Once the window has passed the allowance returns.
+        let later = now + VERIFY_WINDOW + Duration::from_secs(1);
+        assert!(verify_attempt_allowed(org, domain, later).is_ok());
+    }
+
+    // --- flag, role and organization gates ---
+
+    #[tokio::test]
+    async fn flag_off_is_404_feature_disabled_on_every_route_with_no_upstream_call() {
+        let harness = Harness::start("owner", false).await;
+        for (method, uri, body) in all_routes() {
+            let (status, _, parsed) = harness.send(method, &uri, body.as_deref()).await;
+            assert_eq!(status, 404, "{method} {uri}: {parsed}");
+            assert_eq!(code(&parsed), "feature_disabled", "{method} {uri}");
+        }
+        assert_eq!(harness.upstream_count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn a_member_gets_403_identity_admin_required_and_no_upstream_call() {
+        for role in ["member", "viewer"] {
+            let harness = Harness::start(role, true).await;
+            for (method, uri, body) in all_routes() {
+                let (status, _, parsed) = harness.send(method, &uri, body.as_deref()).await;
+                assert_eq!(status, 403, "{role} {method} {uri}: {parsed}");
+                assert_eq!(code(&parsed), "identity_admin_required", "{role} {method} {uri}");
+            }
+            assert_eq!(harness.upstream_count().await, 0, "{role}");
+        }
+    }
+
+    #[tokio::test]
+    async fn the_path_organization_must_be_the_authorized_one() {
+        let harness = Harness::start("owner", true).await;
+        for (method, uri, body) in all_routes() {
+            let foreign = uri.replace("/orgs/org-1/", "/orgs/org-2/");
+            let (status, _, parsed) = harness.send(method, &foreign, body.as_deref()).await;
+            assert_eq!(status, 403, "{method} {foreign}: {parsed}");
+            assert_eq!(code(&parsed), "forbidden", "{method} {foreign}");
+        }
+        assert_eq!(harness.upstream_count().await, 0);
+    }
+
+    // --- domains (WS05-S6) ---
+
+    #[tokio::test]
+    async fn an_admin_reaches_org_core_with_the_session_org_and_role() {
+        let harness = Harness::start("admin", true).await;
+        let (status, _, parsed) = harness.send("GET", "/api/v1/orgs/org-1/domains", None).await;
+        assert_eq!(status, 200, "{parsed}");
+        let (status, _, _) = harness.send("DELETE", "/api/v1/orgs/org-1/domains/example.com", None).await;
+        assert_eq!(status, 200);
+        let requests = harness.upstream().await;
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].method.as_str(), "GET");
+        assert_eq!(requests[0].url.path(), "/orgs/org-1/domains");
+        assert_eq!(requests[1].method.as_str(), "DELETE");
+        assert_eq!(requests[1].url.path(), "/orgs/org-1/domains/example.com");
+        for request in &requests {
+            let header = |name: &str| request.headers.get(name).map(|v| v.to_str().unwrap_or_default().to_owned());
+            assert_eq!(header("x-service-id").as_deref(), Some("verevon-gateway"));
+            assert_eq!(header("x-org-id").as_deref(), Some("org-1"));
+            assert_eq!(header("x-user-id").as_deref(), Some("user-1"));
+            assert_eq!(header("x-user-role").as_deref(), Some("admin"));
+            assert_eq!(header("x-delegation-version").as_deref(), Some("v3"));
+        }
+    }
+
+    #[tokio::test]
+    async fn only_the_domain_is_forwarded_on_add() {
+        let harness = Harness::start("owner", true).await;
+        let (status, _, parsed) = harness
+            .send(
+                "POST",
+                "/api/v1/orgs/org-1/domains",
+                Some(r#"{"domain":"  Example.COM  ","org_id":"org-2","role":"owner","status":"verified"}"#),
+            )
+            .await;
+        assert_eq!(status, 200, "{parsed}");
+        let requests = harness.upstream().await;
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].url.path(), "/orgs/org-1/domains");
+        assert_eq!(upstream_body(&requests[0]), json!({"domain": "Example.COM"}));
+    }
+
+    #[tokio::test]
+    async fn a_bad_add_body_is_400_invalid_domain_before_org_core() {
+        let harness = Harness::start("owner", true).await;
+        let too_long = format!(r#"{{"domain":"{}.com"}}"#, "a".repeat(600));
+        let huge = format!(r#"{{"domain":"a.com","pad":"{}"}}"#, "x".repeat(5000));
+        for (name, body) in [
+            ("not json", "domain=example.com".to_owned()),
+            ("array", r#"["example.com"]"#.to_owned()),
+            ("no domain", r#"{}"#.to_owned()),
+            ("blank", r#"{"domain":"   "}"#.to_owned()),
+            ("not a string", r#"{"domain":42}"#.to_owned()),
+            ("too long", too_long),
+            ("oversized body", huge),
+        ] {
+            let (status, _, parsed) = harness.send("POST", "/api/v1/orgs/org-1/domains", Some(&body)).await;
+            assert_eq!(status, 400, "{name}: {parsed}");
+            assert_eq!(code(&parsed), "invalid_domain", "{name}");
+        }
+        assert_eq!(harness.upstream_count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn an_invalid_domain_segment_is_400_before_org_core() {
+        let harness = Harness::start("owner", true).await;
+        for segment in ["under_score.com", "has%20space.com", "a%2Fb.com", "a%3Ab.com"] {
+            for (method, suffix) in [("POST", "/verify"), ("DELETE", "")] {
+                let uri = format!("/api/v1/orgs/org-1/domains/{segment}{suffix}");
+                let (status, _, parsed) = harness.send(method, &uri, None).await;
+                assert_eq!(status, 400, "{method} {uri}: {parsed}");
+                assert_eq!(code(&parsed), "invalid_domain", "{method} {uri}");
+            }
+        }
+        assert_eq!(harness.upstream_count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn the_seventh_verify_in_an_hour_is_429_with_retry_after() {
+        let harness = Harness::start("owner", true).await;
+        // A name no other test uses: the attempt log is process-wide.
+        let uri = "/api/v1/orgs/org-1/domains/seventh-verify-ws05s6.example.com/verify";
+        for attempt in 1..=VERIFY_ATTEMPTS {
+            let (status, _, parsed) = harness.send("POST", uri, None).await;
+            assert_eq!(status, 200, "attempt {attempt}: {parsed}");
+        }
+        let (status, headers, parsed) = harness.send("POST", uri, None).await;
+        assert_eq!(status, 429, "{parsed}");
+        assert_eq!(code(&parsed), "rate_limited");
+        let retry_after: u64 = headers
+            .get("retry-after")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse().ok())
+            .expect("a numeric Retry-After header");
+        assert!((1..=3600).contains(&retry_after), "retry-after {retry_after}");
+        assert_eq!(harness.upstream_count().await, VERIFY_ATTEMPTS, "the refused attempt must not reach org-core");
+
+        // The allowance is per domain: another one still goes through.
+        let (status, _, _) = harness
+            .send("POST", "/api/v1/orgs/org-1/domains/other-verify-ws05s6.example.com/verify", None)
+            .await;
+        assert_eq!(status, 200);
+    }
+
+    #[tokio::test]
+    async fn an_org_core_refusal_passes_through_with_its_status_and_body() {
+        let harness = Harness::start("owner", true).await;
+        harness.org_core.reset().await;
+        Mock::given(wm_method("DELETE"))
+            .respond_with(ResponseTemplate::new(409).set_body_json(json!({
+                "error": {"code": "domain_in_use", "message": "in use", "details": {}}
+            })))
+            .mount(&harness.org_core)
+            .await;
+        let (status, _, parsed) = harness.send("DELETE", "/api/v1/orgs/org-1/domains/example.com", None).await;
+        assert_eq!(status, 409, "{parsed}");
+        assert_eq!(code(&parsed), "domain_in_use");
+    }
+
+    // --- SSO policy and providers (WS05-S7) ---
+
+    #[tokio::test]
+    async fn the_policy_body_is_rebuilt_from_an_allow_list() {
+        let harness = Harness::start("owner", true).await;
+        let (status, _, parsed) = harness
+            .send(
+                "PUT",
+                "/api/v1/orgs/org-1/sso/policy",
+                Some(r#"{"mode":" enforce ","expected_revision":3,"break_glass_user_ids":["u1"," u2 "],"org_id":"org-2","updated_by":"x"}"#),
+            )
+            .await;
+        assert_eq!(status, 200, "{parsed}");
+        let requests = harness.upstream().await;
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].method.as_str(), "PUT");
+        assert_eq!(requests[0].url.path(), "/orgs/org-1/sso/policy");
+        assert_eq!(
+            upstream_body(&requests[0]),
+            json!({"mode": "enforce", "break_glass_user_ids": ["u1", "u2"], "expected_revision": 3})
+        );
+
+        // Break-glass users are optional.
+        let (status, _, _) = harness
+            .send("PUT", "/api/v1/orgs/org-1/sso/policy", Some(r#"{"mode":"off","expected_revision":0}"#))
+            .await;
+        assert_eq!(status, 200);
+        assert_eq!(
+            upstream_body(&harness.upstream().await[1]),
+            json!({"mode": "off", "break_glass_user_ids": [], "expected_revision": 0})
+        );
+    }
+
+    #[tokio::test]
+    async fn a_bad_policy_body_is_400_invalid_request_before_org_core() {
+        let harness = Harness::start("owner", true).await;
+        let huge = format!(r#"{{"mode":"off","expected_revision":1,"pad":"{}"}}"#, "x".repeat(5000));
+        for (name, body) in [
+            ("not json", "mode=off".to_owned()),
+            ("array", "[]".to_owned()),
+            ("unknown mode", r#"{"mode":"block","expected_revision":1}"#.to_owned()),
+            ("upper mode", r#"{"mode":"ENFORCE","expected_revision":1}"#.to_owned()),
+            ("no mode", r#"{"expected_revision":1}"#.to_owned()),
+            ("no revision", r#"{"mode":"off"}"#.to_owned()),
+            ("string revision", r#"{"mode":"off","expected_revision":"1"}"#.to_owned()),
+            ("negative revision", r#"{"mode":"off","expected_revision":-1}"#.to_owned()),
+            ("three break glass", r#"{"mode":"off","expected_revision":1,"break_glass_user_ids":["a","b","c"]}"#.to_owned()),
+            ("non-string break glass", r#"{"mode":"off","expected_revision":1,"break_glass_user_ids":[1]}"#.to_owned()),
+            ("blank break glass", r#"{"mode":"off","expected_revision":1,"break_glass_user_ids":[" "]}"#.to_owned()),
+            ("break glass not a list", r#"{"mode":"off","expected_revision":1,"break_glass_user_ids":"a"}"#.to_owned()),
+            ("oversized", huge),
+        ] {
+            let (status, _, parsed) = harness.send("PUT", "/api/v1/orgs/org-1/sso/policy", Some(&body)).await;
+            assert_eq!(status, 400, "{name}: {parsed}");
+            assert_eq!(code(&parsed), "invalid_request", "{name}");
+        }
+        assert_eq!(harness.upstream_count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn the_provider_body_is_rebuilt_from_an_allow_list() {
+        let harness = Harness::start("admin", true).await;
+        let (status, _, parsed) = harness
+            .send(
+                "POST",
+                "/api/v1/orgs/org-1/sso/providers",
+                Some(
+                    &json!({
+                        "provider_id": "acme-oidc", "domain": "example.com", "type": "oidc",
+                        "issuer": "https://idp.example.com", "client_id": " client-1 ",
+                        "client_secret": "secret-1", "org_id": "org-2", "enabled": true
+                    })
+                    .to_string(),
+                ),
+            )
+            .await;
+        assert_eq!(status, 200, "{parsed}");
+        let requests = harness.upstream().await;
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].url.path(), "/orgs/org-1/sso/providers");
+        assert_eq!(
+            upstream_body(&requests[0]),
+            json!({
+                "provider_id": "acme-oidc", "domain": "example.com", "type": "oidc",
+                "issuer": "https://idp.example.com", "client_id": "client-1", "client_secret": "secret-1"
+            })
+        );
+        // The client secret is write-only: nothing in the gateway answer repeats it.
+        assert!(!parsed.to_string().contains("secret-1"));
+    }
+
+    #[tokio::test]
+    async fn a_provider_body_missing_a_field_or_over_a_bound_is_400() {
+        let harness = Harness::start("owner", true).await;
+        let full = json!({
+            "provider_id": "acme-oidc", "domain": "example.com", "type": "oidc",
+            "issuer": "https://idp.example.com", "client_id": "client-1", "client_secret": "secret-1"
+        });
+        for field in ["provider_id", "domain", "type", "issuer", "client_id", "client_secret"] {
+            let mut body = full.clone();
+            body.as_object_mut().unwrap().remove(field);
+            let (status, _, parsed) = harness
+                .send("POST", "/api/v1/orgs/org-1/sso/providers", Some(&body.to_string()))
+                .await;
+            assert_eq!(status, 400, "missing {field}: {parsed}");
+            assert_eq!(code(&parsed), "invalid_request", "missing {field}");
+            let mut blank = full.clone();
+            blank[field] = json!("  ");
+            let (status, _, _) = harness
+                .send("POST", "/api/v1/orgs/org-1/sso/providers", Some(&blank.to_string()))
+                .await;
+            assert_eq!(status, 400, "blank {field}");
+        }
+        for (field, len) in [("client_secret", MAX_FIELD_LEN + 1), ("issuer", MAX_ISSUER_LEN + 1), ("provider_id", MAX_PROVIDER_ID_LEN + 1)] {
+            let mut body = full.clone();
+            body[field] = json!("a".repeat(len));
+            let (status, _, _) = harness
+                .send("POST", "/api/v1/orgs/org-1/sso/providers", Some(&body.to_string()))
+                .await;
+            assert_eq!(status, 400, "over-long {field}");
+        }
+        let (status, _, _) = harness.send("POST", "/api/v1/orgs/org-1/sso/providers", Some("not json")).await;
+        assert_eq!(status, 400);
+        assert_eq!(harness.upstream_count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn the_provider_segment_is_validated_and_encoded() {
+        let harness = Harness::start("owner", true).await;
+        for segment in ["Acme", "acme_oidc", "acme.oidc", "a%2Fb", "a%20b"] {
+            let uri = format!("/api/v1/orgs/org-1/sso/providers/{segment}");
+            let (status, _, parsed) = harness.send("DELETE", &uri, None).await;
+            assert_eq!(status, 400, "{uri}: {parsed}");
+            assert_eq!(code(&parsed), "invalid_request", "{uri}");
+        }
+        assert_eq!(harness.upstream_count().await, 0);
+
+        let (status, _, parsed) = harness.send("DELETE", "/api/v1/orgs/org-1/sso/providers/acme-oidc", None).await;
+        assert_eq!(status, 200, "{parsed}");
+        let requests = harness.upstream().await;
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].method.as_str(), "DELETE");
+        assert_eq!(requests[0].url.path(), "/orgs/org-1/sso/providers/acme-oidc");
+    }
+
+    #[tokio::test]
+    async fn get_policy_is_forwarded_for_an_admin() {
+        let harness = Harness::start("owner", true).await;
+        let (status, _, _) = harness.send("GET", "/api/v1/orgs/org-1/sso/policy", None).await;
+        assert_eq!(status, 200);
+        let requests = harness.upstream().await;
+        assert_eq!(requests[0].method.as_str(), "GET");
+        assert_eq!(requests[0].url.path(), "/orgs/org-1/sso/policy");
+    }
+
+    /// `ORG_IDENTITY_ADMIN_API` (config.rs) defaults OFF, is OFF under `APP_ENV=production` when
+    /// unset, ON in development, and an explicit value wins in both. The compose files set it the
+    /// same way (dev on, production false), so a production build never exposes the routes by
+    /// accident. Lives here, not in config.rs, so it stays beside the routes it gates.
+    #[test]
+    fn org_identity_admin_api_is_dev_on_and_production_off() {
+        use crate::config::{SpaceFeatureFlags, TEST_ENV_LOCK};
+
+        assert!(!SpaceFeatureFlags::default().org_identity_admin_api);
+        let _guard = TEST_ENV_LOCK.blocking_lock();
+        let saved: Vec<(&str, Option<String>)> = ["APP_ENV", "ORG_IDENTITY_ADMIN_API"]
+            .into_iter()
+            .map(|key| (key, std::env::var(key).ok()))
+            .collect();
+        let read = |app_env: &str, value: Option<&str>| {
+            std::env::set_var("APP_ENV", app_env);
+            match value {
+                Some(value) => std::env::set_var("ORG_IDENTITY_ADMIN_API", value),
+                None => std::env::remove_var("ORG_IDENTITY_ADMIN_API"),
+            }
+            SpaceFeatureFlags::from_env().org_identity_admin_api
+        };
+        let observed = [
+            read("production", None),
+            read("prod", None),
+            read("development", None),
+            read("production", Some("true")),
+            read("production", Some("false")),
+            read("development", Some("false")),
+            read("development", Some("0")),
+        ];
+        for (key, value) in saved {
+            match value {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
+        }
+        assert_eq!(observed, [false, false, true, true, false, false, false]);
+    }
+}

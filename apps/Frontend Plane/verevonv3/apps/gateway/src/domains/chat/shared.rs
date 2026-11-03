@@ -1833,4 +1833,26 @@ mod tests {
         );
         assert!(data_plane_authorization_value("").is_none());
     }
+
+    /// WS16-S6: the viewer locale hint maps `no`/`en` only, drops every other value or type, and
+    /// is removed when the flag is off, so a browser-typed value never reaches the model body.
+    #[test]
+    fn with_viewer_locale_maps_no_and_en_and_drops_everything_else() {
+        use super::with_viewer_locale;
+        let with = |locale: serde_json::Value, enabled: bool| {
+            with_viewer_locale(json!({"message": "hei", "locale": locale}), enabled)
+        };
+        assert_eq!(with(json!("no"), true)["locale"], "nb-NO");
+        assert_eq!(with(json!("en"), true)["locale"], "en-US");
+        for other in [json!("nb-NO"), json!("fr"), json!("NO"), json!(""), json!(5), json!(true), json!(null), json!(["no"]), json!({"a": 1})] {
+            assert!(with(other.clone(), true).get("locale").is_none(), "{other}");
+        }
+        // Disabled: the field is removed even for a valid value.
+        assert!(with(json!("no"), false).get("locale").is_none());
+        // The rest of the body is untouched and an absent field stays absent.
+        let out = with_viewer_locale(json!({"message": "hei"}), true);
+        assert_eq!(out, json!({"message": "hei"}));
+        // A non-object body passes through.
+        assert_eq!(with_viewer_locale(json!("x"), true), json!("x"));
+    }
 }

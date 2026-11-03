@@ -57,6 +57,9 @@ func TestOnlyTheReadSurfacesResolveAnArchivedRoom(t *testing.T) {
 		"ResolveReadableUserMembership",
 		"resolveUserMembership",
 		"ResolveSharedRetrievalDecisionEvidence",
+		// WS09-S7: stopping a live run is allowed in an archived room (a run
+		// started before the archive must still be stoppable).
+		"ResolveSharedRunControlDecisionEvidence",
 		"ResolveSharedThreadReadDecisionEvidence",
 		"fenceActiveSpaces",
 	}
@@ -79,7 +82,7 @@ func TestArchivedStateSetsInTheReadSurfacesAreExact(t *testing.T) {
 	for _, name := range []string{
 		"RosterForSpace", "SpacesForSubject",
 		"ResolveSharedRetrievalDecisionEvidence", "ResolveSharedThreadReadDecisionEvidence",
-		"fenceActiveSpaces",
+		"ResolveSharedRunControlDecisionEvidence", "fenceActiveSpaces",
 	} {
 		body := funcs[name]
 		if !regexp.MustCompile(`registration_state IN \('active',\s*'archived'\)`).MatchString(body) {
@@ -173,7 +176,9 @@ func TestReadableResolverIsOnlyUsedByTheReadRoutes(t *testing.T) {
 		}
 	}
 	sort.Strings(users)
-	if strings.Join(users, ",") != "space_room_state.go,spaces.go" {
+	// WS10 read routes (approval grants list/decide, tool policy) also read an
+	// archived room by design.
+	if strings.Join(users, ",") != "approval_grants.go,space_room_state.go,spaces.go,tool_policy.go" {
 		t.Fatalf("ResolveReadableUserMembership is used by %v", users)
 	}
 }

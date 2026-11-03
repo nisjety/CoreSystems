@@ -110,6 +110,7 @@ const AUTH = 'auth_user_1';
 
 function makeCtx({ spaces, members = true, organizations = true }) {
   const patches = [];
+  const inserts = [];
   const tables = {
     organizations: organizations ? [{ _id: 'org_row', externalOrgId: ORG, syncStatus: 'active' }] : [],
     users: members ? [{ _id: 'user_row', externalAuthId: AUTH, orgId: 'org_row', syncStatus: 'active' }] : [],
@@ -129,9 +130,14 @@ function makeCtx({ spaces, members = true, organizations = true }) {
       async patch(id, value) {
         patches.push({ id, value });
       },
+      // WS15-S12: a changed name or topic records one room notice in the same pass.
+      async insert(table, value) {
+        inserts.push({ table, value });
+        return `${table}_new`;
+      },
     },
   };
-  return { ctx, patches };
+  return { ctx, patches, inserts };
 }
 
 function room(overrides = {}) {
@@ -225,7 +231,7 @@ test('updateRoomDetailsForGateway error codes and patch', async (t) => {
   });
 
   await t.test('a name-only update patches the name and returns the existing topic', async () => {
-    const { ctx, patches } = makeCtx({ spaces: [room()] });
+    const { ctx, patches, inserts } = makeCtx({ spaces: [room()] });
     const result = await callUpdate(ctx, { name: '  New   name ' });
     assert.deepEqual(result, { spaceRef: 'space_1', name: 'New name', topic: 'Old topic' });
     assert.equal(patches.length, 1);
@@ -233,14 +239,16 @@ test('updateRoomDetailsForGateway error codes and patch', async (t) => {
     assert.equal(patches[0].value.name, 'New name');
     assert.equal('topic' in patches[0].value, false);
     assert.equal(patches[0].value.updatedByExternalAuthId, AUTH);
+    assert.deepEqual(inserts.map((row) => [row.table, row.value.kind]), [['spaceRoomNotices', 'room_renamed']]);
   });
 
   await t.test('an empty topic clears it and keeps the name', async () => {
-    const { ctx, patches } = makeCtx({ spaces: [room()] });
+    const { ctx, patches, inserts } = makeCtx({ spaces: [room()] });
     const result = await callUpdate(ctx, { topic: '' });
     assert.deepEqual(result, { spaceRef: 'space_1', name: 'Old name', topic: null });
     assert.equal('topic' in patches[0].value, true);
     assert.equal(patches[0].value.topic, undefined);
     assert.equal('name' in patches[0].value, false);
+    assert.deepEqual(inserts.map((row) => [row.table, row.value.kind]), [['spaceRoomNotices', 'topic_changed']]);
   });
 });

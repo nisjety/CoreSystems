@@ -48,6 +48,13 @@ describe('model eligibility characterisation', () => {
     expect(isModelExecutableAction('shipping.get_quotes')).toBe(false)
   })
 
+  it('never admits the sidebar layout or the direct message actions to the model (WS16-S8, WS12-S3)', () => {
+    for (const id of ['spaces.update_sidebar', 'spaces.open_dm', 'spaces.hide_space']) {
+      expect(actionRegistry.map((action) => action.id), id).toContain(id)
+      expect(isModelExecutableAction(id), id).toBe(false)
+    }
+  })
+
   it('never admits the Space post or entitlement actions to the model (WS01-S5, WS03-S4)', () => {
     for (const id of [
       'spaces.create_post',

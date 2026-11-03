@@ -217,3 +217,62 @@ describe('role-gated audit reads (WS05-S1)', () => {
     expect(aggregateToolActions(page.events).size).toBe(0)
   })
 })
+
+describe('audit list v2 (WS05-S4)', () => {
+  it('listAuditPage sends plane, outcome, subject, resource_id and cursor', async () => {
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => jsonResponse({ data: [] }))
+    vi.stubGlobal('fetch', fetchMock)
+    await listAuditPage({
+      plane: 'model',
+      outcome: 'denied',
+      subject: 'agent:alpha',
+      resourceId: 'res-1',
+      cursor: 'abc-_DEF',
+      limit: 50,
+    })
+    const parsed = new URL(String(fetchMock.mock.calls[0]![0]), 'http://localhost')
+    expect(parsed.pathname).toBe('/api/v1/audit')
+    expect(parsed.searchParams.get('plane')).toBe('model')
+    expect(parsed.searchParams.get('outcome')).toBe('denied')
+    expect(parsed.searchParams.get('subject')).toBe('agent:alpha')
+    expect(parsed.searchParams.get('resource_id')).toBe('res-1')
+    expect(parsed.searchParams.get('cursor')).toBe('abc-_DEF')
+    expect(parsed.searchParams.get('limit')).toBe('50')
+    expect(parsed.searchParams.has('org_id')).toBe(false)
+  })
+
+  it('omits unset and empty v2 filters from the query string', async () => {
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => jsonResponse({ data: [] }))
+    vi.stubGlobal('fetch', fetchMock)
+    await listAuditPage({ plane: '', outcome: undefined, cursor: '' })
+    expect(String(fetchMock.mock.calls[0]![0])).toBe('/api/v1/audit')
+  })
+
+  it('returns nextCursor from meta.next_cursor and leaves it off when absent or blank', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => jsonResponse({
+      data: [{ id: 2, event: 'login' }],
+      meta: { count: 1, scope: 'org', next_cursor: 'cursor-2' },
+      error: null,
+    })))
+    const withCursor = await listAuditPage({ limit: 1 })
+    expect(withCursor.nextCursor).toBe('cursor-2')
+    expect(withCursor.scope).toBe('org')
+
+    for (const meta of [{ count: 1 }, { next_cursor: '' }, { next_cursor: 7 }]) {
+      vi.stubGlobal('fetch', vi.fn(async () => jsonResponse({ data: [], meta })))
+      const page = await listAuditPage()
+      expect(page.nextCursor).toBeUndefined()
+      expect('nextCursor' in page).toBe(false)
+    }
+  })
+
+  it('throws the typed ApiError on a 400 invalid_cursor', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => jsonResponse({
+      error: { code: 'invalid_cursor', message: 'cursor is not a cursor this API issued', details: {} },
+    }, 400)))
+    const failure = await listAuditPage({ cursor: 'forged' }).catch((error: unknown) => error)
+    expect(failure).toBeInstanceOf(ApiError)
+    expect((failure as ApiError).status).toBe(400)
+    expect((failure as ApiError).code).toBe('invalid_cursor')
+  })
+})

@@ -931,4 +931,75 @@ mod tests {
             .windows(needle.len())
             .any(|w| w.iter().zip(needle).all(|(a, b)| a == b))
     }
+
+    // -- WS06-S8 postponed tests -------------------------------------------
+
+    #[test]
+    fn prlimit_wrap_puts_the_limits_in_front_of_the_inner_command() {
+        let limits = ResourceLimits {
+            cpu_secs: 5,
+            address_space_bytes: 1 << 30,
+            file_size_bytes: 1 << 20,
+            open_files: 256,
+        };
+        let inner = args(&["--ro-bind", "/", "/", "--", "ls"]);
+        let (program, argv) = prlimit_wrap(&limits, "bwrap", &inner);
+        assert_eq!(program, PRLIMIT_BIN);
+        let flags = limits.prlimit_args();
+        assert_eq!(&argv[..flags.len()], flags.as_slice());
+        assert_eq!(argv[flags.len()], "--");
+        assert_eq!(argv[flags.len() + 1], "bwrap");
+        assert_eq!(&argv[flags.len() + 2..], inner.as_slice());
+    }
+
+    #[test]
+    fn a_passthrough_command_never_claims_limits_were_applied() {
+        let command = wrap_command_with(
+            &MpSandboxPolicy::DangerFullAccess,
+            "echo",
+            &args(&["hi"]),
+            LaunchOptions::default(),
+        );
+        assert!(!command.sandboxed);
+        assert!(!command.limits_applied);
+        assert_eq!(command.program, "echo");
+    }
+
+    #[test]
+    fn the_capability_profile_carries_limits_and_its_digest_differs_from_the_old_shape() {
+        let profile = capability_profile();
+        assert!(matches!(profile.limits, LIMITS_ENFORCED | LIMITS_UNLIMITED));
+        if !profile.local_isolation_available {
+            assert_eq!(profile.limits, LIMITS_UNLIMITED);
+        }
+        let new_digest = capability_profile_digest(&profile);
+        let mut old_shape = serde_json::to_value(&profile).unwrap();
+        assert!(old_shape
+            .as_object_mut()
+            .unwrap()
+            .remove("limits")
+            .is_some());
+        let old_digest = {
+            use sha2::{Digest, Sha256};
+            format!(
+                "sha256:{:x}",
+                Sha256::digest(serde_json::to_vec(&old_shape).unwrap())
+            )
+        };
+        assert_ne!(
+            new_digest, old_digest,
+            "the limits field must change the digest by design"
+        );
+
+        // And the two states differ from each other.
+        let flipped = SandboxCapabilityProfile {
+            limits: if profile.limits == LIMITS_ENFORCED {
+                LIMITS_UNLIMITED
+            } else {
+                LIMITS_ENFORCED
+            },
+            ..profile
+        };
+        assert_ne!(capability_profile_digest(&flipped), new_digest);
+    }
 }

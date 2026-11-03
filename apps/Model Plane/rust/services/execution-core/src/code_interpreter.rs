@@ -1087,7 +1087,7 @@ mod tests {
         };
         assert_eq!(
             serde_json::to_string(&result).expect("serializes"),
-            r#"{"stdout":"done\n","stderr":"","exit_code":0,"files":[{"name":"out.csv","mime":"text/csv","bytes":2,"content_b64":"b2s="},{"name":"big.xlsx","mime":"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet","bytes":9000000,"content_b64":"","truncated":true}]}"#
+            r#"{"stdout":"done\n","stderr":"","exit_code":0,"files":[{"name":"out.csv","mime":"text/csv","bytes":2,"content_b64":"b2s="},{"name":"big.xlsx","mime":"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet","bytes":9000000,"content_b64":"","truncated":true}],"execution":{"sandboxed":true,"limits":"enforced"}}"#
         );
     }
 
@@ -2025,5 +2025,59 @@ mod tests {
             entry.is_dir() && !entry.file_type().is_symlink(),
             "staging must leave a real directory in the root"
         );
+    }
+
+    // -- WS06-S8 / WS06-S9 postponed tests ---------------------------------
+
+    #[test]
+    fn the_execution_object_carries_limit_hit_only_when_a_limit_was_hit() {
+        let hit = ExecutionInfo {
+            sandboxed: true,
+            limits: "enforced",
+            limit_hit: Some(executor::LimitHit::Cpu { limit_secs: 4 }),
+        };
+        assert_eq!(
+            serde_json::to_string(&hit).unwrap(),
+            r#"{"sandboxed":true,"limits":"enforced","limit_hit":{"kind":"cpu","limit_secs":4}}"#
+        );
+        let none = ExecutionInfo {
+            sandboxed: false,
+            limits: "unlimited",
+            limit_hit: None,
+        };
+        assert_eq!(
+            serde_json::to_string(&none).unwrap(),
+            r#"{"sandboxed":false,"limits":"unlimited"}"#
+        );
+    }
+
+    /// A Space-scoped call (`workspace_root` is `Some`) with no lease never
+    /// spawns. Where bwrap is available the refusal is the lease rule; on a host
+    /// without it the isolation check refuses first, which is also a refusal
+    /// before any spawn.
+    #[tokio::test]
+    async fn a_space_scoped_call_without_a_lease_is_refused() {
+        let root = std::env::temp_dir().join(format!("ci-lease-test-{}", std::process::id()));
+        std::fs::create_dir_all(&root).expect("workspace root");
+        let result = run_with_skills(
+            r#"{"language":"python","code":"print(1)"}"#,
+            "leaserun",
+            "leasestep",
+            Some(&root),
+            None,
+            None,
+            None,
+        )
+        .await;
+        let _ = std::fs::remove_dir_all(&root);
+        let error = result.expect_err("no lease, no spawn");
+        if crate::sandbox::is_supported() {
+            assert!(error.contains("requires a sandbox lease"), "error: {error}");
+        } else {
+            assert!(
+                error.contains("isolation is unavailable") || error.contains("sandbox"),
+                "error: {error}"
+            );
+        }
     }
 }

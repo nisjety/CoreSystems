@@ -646,3 +646,468 @@ pub(super) async fn agent_attach_refusal(
         "A direct message cannot have agents.",
     ))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{decorate_index_row, hidden_set, open_dm_core, parse_request, resurface, set_hidden};
+    use crate::config::AppState;
+    use crate::middleware::{AuthenticatedUser, AuthorizedMembership};
+    use axum::{
+        extract::{Extension, State},
+        http::HeaderMap,
+    };
+    use serde_json::{json, Value};
+    use std::collections::HashSet;
+    use wiremock::matchers::{body_partial_json, method as wm_method, path as wm_path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    const ELIGIBILITY: &str = "/api/v1/internal/spaces/dm-eligibility";
+    const INDEX: &str = "/api/v1/internal/spaces";
+
+    fn member() -> AuthenticatedUser {
+        AuthenticatedUser {
+            user_id: "user-1".to_owned(),
+            user_email: "user@example.com".to_owned(),
+            user_name: "Caller".to_owned(),
+            user_image: None,
+            email_verified: true,
+            auth_role: Some("member".to_owned()),
+            active_org_id: Some("org-1".to_owned()),
+            authorized_membership: Some(AuthorizedMembership {
+                organization_id: "org-1".to_owned(),
+                role: "member".to_owned(),
+            }),
+        }
+    }
+
+    struct Fx {
+        state: AppState,
+        control: MockServer,
+        app: MockServer,
+        _org: MockServer,
+    }
+
+    fn eligible() -> ResponseTemplate {
+        ResponseTemplate::new(200).set_body_json(json!({"data": {
+            "eligible": true,
+            "participant_hash": "hash-1",
+            "participant_ids": ["user-1", "user-2"],
+        }}))
+    }
+
+    fn opened(created: bool) -> ResponseTemplate {
+        ResponseTemplate::new(200).set_body_json(json!({"status": "success", "value": {
+            "created": created,
+            "space": {
+                "spaceRef": "space-dm-1", "name": "Ann", "kind": "dm",
+                "lifecycle": "pending_registration",
+                "participantExternalAuthIds": ["user-1", "user-2"],
+            }
+        }}))
+    }
+
+    /// DM flag on. Control answers the pre-check as given and the caller's Space index with a
+    /// room and a DM; Application answers `open` for `spaces:openDmForGateway` and the hide
+    /// functions and lists generically; the org is not ZDR unless `zdr` says so (`None` = down).
+    async fn fixture(eligibility: ResponseTemplate, open: ResponseTemplate, zdr: Option<bool>) -> Fx {
+        let control = MockServer::start().await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path(ELIGIBILITY))
+            .respond_with(eligibility)
+            .mount(&control)
+            .await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path(INDEX))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": {"spaces": [
+                {"space_ref": "space-room", "kind": "room", "role": "editor", "agent_scope": "room"},
+                {"space_ref": "space-dm-1", "kind": "dm", "role": "member", "agent_scope": "none",
+                 "participants": [
+                    {"subject_id": "user-1", "display_name": "Caller", "email": "leak@example.com"},
+                    {"subject_id": "user-2", "display_name": "Ann"}
+                 ]},
+                {"space_ref": "space-gdm-1", "kind": "group_dm", "role": "member", "participants": []},
+            ]}})))
+            .mount(&control)
+            .await;
+        let org = MockServer::start().await;
+        let org_reply = match zdr {
+            Some(flag) => ResponseTemplate::new(200).set_body_json(
+                json!({"data": {"metadata": {"interactiveRetention": {"zdr": flag}}}}),
+            ),
+            None => ResponseTemplate::new(500).set_body_json(json!({"error": "down"})),
+        };
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/organizations/org-1"))
+            .respond_with(org_reply)
+            .mount(&org)
+            .await;
+        let app = MockServer::start().await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/mutation"))
+            .and(body_partial_json(json!({"path": "spaces:openDmForGateway"})))
+            .respond_with(open)
+            .mount(&app)
+            .await;
+        for path in ["spaceDmHides:hideForGateway", "spaceDmHides:unhideForGateway"] {
+            Mock::given(wm_method("POST"))
+                .and(wm_path("/api/mutation"))
+                .and(body_partial_json(json!({"path": path})))
+                .respond_with(ResponseTemplate::new(200).set_body_json(
+                    json!({"status": "success", "value": {"hiddenAt": 1_700_000_000_000_u64}}),
+                ))
+                .mount(&app)
+                .await;
+        }
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/mutation"))
+            .and(body_partial_json(json!({"path": "spaceDmHides:clearForSpaceForGateway"})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"status": "success", "value": null})))
+            .mount(&app)
+            .await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/query"))
+            .and(body_partial_json(json!({"path": "spaceDmHides:hiddenForViewerForGateway"})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                json!({"status": "success", "value": [{"spaceRef": "space-dm-1"}]}),
+            ))
+            .mount(&app)
+            .await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/query"))
+            .and(body_partial_json(json!({"path": "spaces:spacesForOrgForGateway"})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"value": [
+                {"spaceRef": "space-room", "name": "Room", "kind": "room", "lifecycle": "active"},
+                {"spaceRef": "space-dm-1", "name": "Ann", "kind": "dm", "lifecycle": "active"},
+            ]})))
+            .mount(&app)
+            .await;
+        let mut state = crate::tests::test_state(false);
+        state.space_features.dm_api = true;
+        state.user_core_url = control.uri();
+        state.org_core_url = org.uri();
+        state.application_convex_url = app.uri();
+        state.application_convex_service_key = "application-test-key".into();
+        Fx { state, control, app, _org: org }
+    }
+
+    async fn reply_of(reply: (axum::http::StatusCode, axum::Json<Value>)) -> (u16, Value) {
+        (reply.0.as_u16(), reply.1 .0)
+    }
+
+    async fn open(fx: &Fx, body: Value) -> (u16, Value) {
+        reply_of(open_dm_core(&fx.state, &member(), &HeaderMap::new(), &serde_json::to_vec(&body).unwrap()).await).await
+    }
+
+    fn open_body() -> Value {
+        json!({"participants": ["user-2"], "client_request_id": "req-1"})
+    }
+
+    async fn n_requests(server: &MockServer) -> usize {
+        server.received_requests().await.unwrap().len()
+    }
+
+    async fn bodies(server: &MockServer) -> Vec<Value> {
+        server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .map(|request| serde_json::from_slice(&request.body).unwrap_or(Value::Null))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn open_dm_checks_eligibility_before_convex() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let refused = [
+            (
+                ResponseTemplate::new(403).set_body_json(json!({"error": {"code": "dm_not_entitled",
+                    "details": {"missing": ["dm_enabled", "Bad Token!"]}, "message": "internal text"}})),
+                403,
+                "dm_not_entitled",
+            ),
+            (
+                ResponseTemplate::new(422).set_body_json(json!({"error": {"code": "dm_participants_invalid",
+                    "details": {"reason": "not_in_org: secret"}}})),
+                400,
+                "dm_participants_invalid",
+            ),
+            (ResponseTemplate::new(404).set_body_json(json!({"error": {"code": "dm_disabled"}})), 404, "dm_disabled"),
+            (ResponseTemplate::new(500).set_body_json(json!({"error": "boom"})), 503, "space_provisioning_unavailable"),
+            (ResponseTemplate::new(200).set_body_json(json!({"data": {"eligible": false}})), 503, "space_provisioning_unavailable"),
+        ];
+        for (template, status, code) in refused {
+            let fx = fixture(template, opened(true), Some(false)).await;
+            let (got, body) = open(&fx, open_body()).await;
+            assert_eq!((got, body["error"]["code"].as_str().unwrap()), (status, code));
+            assert_eq!(n_requests(&fx.app).await, 0, "Application is not asked after a Control refusal");
+            assert!(!body.to_string().contains("internal text") && !body.to_string().contains("secret"));
+        }
+        let fx = fixture(
+            ResponseTemplate::new(403).set_body_json(json!({"error": {"code": "dm_not_entitled",
+                "details": {"missing": ["dm_enabled", "Bad Token!"]}}})),
+            opened(true),
+            Some(false),
+        )
+        .await;
+        let (_, body) = open(&fx, open_body()).await;
+        assert_eq!(body["error"]["details"]["missing"], json!(["dm_enabled", "shape"]));
+    }
+
+    #[tokio::test]
+    async fn open_dm_new_is_202_and_sends_the_other_people_and_the_hash_only() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = fixture(eligible(), opened(true), Some(false)).await;
+        let (status, body) = open(&fx, open_body()).await;
+        assert_eq!(status, 202);
+        assert_eq!(body["data"]["created"], true);
+        assert_eq!(body["data"]["space"]["space_ref"], "space-dm-1");
+        assert_eq!(body["data"]["space"]["lifecycle"], "pending_registration");
+        assert_eq!(
+            body["data"]["space"]["participants"],
+            json!([{"subject_id": "user-1"}, {"subject_id": "user-2"}])
+        );
+        let sent = bodies(&fx.app).await;
+        let args = &sent[0]["args"];
+        assert_eq!(args["externalAuthId"], "user-1");
+        assert_eq!(args["externalOrgId"], "org-1");
+        assert_eq!(args["participantExternalAuthIds"], json!(["user-2"]), "the caller is not in the others");
+        assert_eq!(args["expectedHash"], "hash-1");
+        let control_sent = bodies(&fx.control).await;
+        assert_eq!(control_sent[0]["participant_ids"], json!(["user-2"]));
+    }
+
+    #[tokio::test]
+    async fn open_dm_existing_returns_200_not_created() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = fixture(eligible(), opened(false), Some(false)).await;
+        let (status, body) = open(&fx, open_body()).await;
+        assert_eq!(status, 200);
+        assert_eq!(body["data"]["created"], false);
+        assert_eq!(body["data"]["space"]["space_ref"], "space-dm-1");
+    }
+
+    #[tokio::test]
+    async fn open_dm_application_errors_map_to_typed_envelopes() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        for (message, status, code) in [
+            ("Uncaught Error: dm_registration_failed ...", 409, "dm_registration_failed"),
+            ("dm_participant_not_member", 400, "dm_participants_invalid"),
+            ("dm_participants_invalid:count and more", 400, "dm_participants_invalid"),
+            ("dm_disabled", 404, "dm_disabled"),
+            ("anything else", 503, "space_provisioning_unavailable"),
+        ] {
+            let fx = fixture(
+                eligible(),
+                ResponseTemplate::new(200).set_body_json(json!({"status": "error", "errorMessage": message})),
+                Some(false),
+            )
+            .await;
+            let (got, body) = open(&fx, open_body()).await;
+            assert_eq!((got, body["error"]["code"].as_str().unwrap()), (status, code), "{message}");
+        }
+    }
+
+    #[tokio::test]
+    async fn zdr_org_dm_is_a_typed_412_with_no_upstream_call() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = fixture(eligible(), opened(true), Some(true)).await;
+        let (status, body) = open(&fx, open_body()).await;
+        assert_eq!(status, 412);
+        assert_eq!(body["error"]["code"], "zdr_durable_mutation_forbidden");
+        assert_eq!(n_requests(&fx.control).await, 0);
+        assert_eq!(n_requests(&fx.app).await, 0);
+        // A request-level ZDR header is the same refusal, and an org-core outage is the retryable 503.
+        let mut headers = HeaderMap::new();
+        headers.insert("x-zdr", "true".parse().unwrap());
+        let fx = fixture(eligible(), opened(true), Some(false)).await;
+        let (status, _) = reply_of(open_dm_core(&fx.state, &member(), &headers, &serde_json::to_vec(&open_body()).unwrap()).await).await;
+        assert_eq!(status, 412);
+        let fx = fixture(eligible(), opened(true), None).await;
+        let (status, body) = open(&fx, open_body()).await;
+        assert_eq!(status, 503);
+        assert_eq!(body["error"]["code"], "zdr_decision_unavailable");
+        assert_eq!(n_requests(&fx.control).await, 0);
+    }
+
+    #[tokio::test]
+    async fn flags_off_are_404_dm_disabled_with_zero_upstream_requests() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let mut fx = fixture(eligible(), opened(true), Some(false)).await;
+        fx.state.space_features.dm_api = false;
+        let (status, body) = open(&fx, open_body()).await;
+        assert_eq!((status, body["error"]["code"].as_str().unwrap()), (404, "dm_disabled"));
+        for hidden in [true, false] {
+            let (status, body) = reply_of(set_hidden(&fx.state, &member(), "space-dm-1", hidden).await).await;
+            assert_eq!((status, body["error"]["code"].as_str().unwrap()), (404, "dm_disabled"));
+        }
+        assert_eq!(n_requests(&fx.control).await + n_requests(&fx.app).await, 0);
+        // The hidden set is empty without a read, and the resurface never reaches Convex... the
+        // flag only gates the read; the clear is best effort and covered below.
+        assert!(hidden_set(&fx.state, &member(), "org-1").await.is_empty());
+        assert_eq!(n_requests(&fx.app).await, 0);
+    }
+
+    #[tokio::test]
+    async fn open_dm_without_an_authorized_org_is_403_and_a_bad_body_is_400_before_control() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = fixture(eligible(), opened(true), Some(false)).await;
+        let mut user = member();
+        user.authorized_membership = None;
+        let (status, body) = reply_of(open_dm_core(&fx.state, &user, &HeaderMap::new(), b"{}").await).await;
+        assert_eq!((status, body["error"]["code"].as_str().unwrap()), (403, "active_membership_required"));
+        for (body, reason) in [
+            (json!({"participants": [], "client_request_id": "r"}), "count"),
+            (json!({"participants": (0..9).map(|i| format!("u-{i}")).collect::<Vec<_>>(), "client_request_id": "r"}), "count"),
+            (json!({"participants": ["user-1"], "client_request_id": "r"}), "self"),
+            (json!({"participants": ["a", "a"], "client_request_id": "r"}), "duplicate"),
+            (json!({"participants": [" "], "client_request_id": "r"}), "shape"),
+            (json!({"participants": ["a"], "client_request_id": " "}), "shape"),
+            (json!({"participants": ["a"], "client_request_id": "r", "org_id": "org-2"}), "shape"),
+        ] {
+            let (status, got) = open(&fx, body.clone()).await;
+            assert_eq!(status, 400, "{body}");
+            assert_eq!(got["error"]["code"], "dm_participants_invalid");
+            assert_eq!(got["error"]["details"]["reason"], reason, "{body}");
+        }
+        assert_eq!(n_requests(&fx.control).await, 0);
+        assert_eq!(n_requests(&fx.app).await, 0);
+    }
+
+    #[test]
+    fn parse_request_trims_and_keeps_order() {
+        let body = serde_json::to_vec(&json!({"participants": [" b ", "a"], "client_request_id": "r"})).unwrap();
+        assert_eq!(parse_request(&body, "me").unwrap(), ["b", "a"]);
+    }
+
+    #[tokio::test]
+    async fn hide_on_a_non_dm_is_409_space_not_hideable_and_needs_control_index_membership() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = fixture(eligible(), opened(true), Some(false)).await;
+        let (status, body) = reply_of(set_hidden(&fx.state, &member(), "space-room", true).await).await;
+        assert_eq!((status, body["error"]["code"].as_str().unwrap()), (409, "space_not_hideable"));
+        // Not in Control's index for this caller: the same 404 as a Space that does not exist.
+        let (status, body) = reply_of(set_hidden(&fx.state, &member(), "space-elsewhere", true).await).await;
+        assert_eq!((status, body["error"]["code"].as_str().unwrap()), (404, "space_not_found"));
+        assert_eq!(n_requests(&fx.app).await, 0, "no Application call for either refusal");
+        // Control's index unavailable is a typed 503, not a guess.
+        let mut down = fx.state.clone();
+        down.user_core_url = "http://127.0.0.1:1".into();
+        let (status, body) = reply_of(set_hidden(&down, &member(), "space-dm-1", true).await).await;
+        assert_eq!((status, body["error"]["code"].as_str().unwrap()), (503, "dm_hide_unavailable"));
+    }
+
+    #[tokio::test]
+    async fn hide_and_unhide_a_dm_call_the_matching_mutation() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = fixture(eligible(), opened(true), Some(false)).await;
+        let (status, body) = reply_of(set_hidden(&fx.state, &member(), "space-dm-1", true).await).await;
+        assert_eq!(status, 200);
+        assert_eq!(body["data"]["hidden"], true);
+        assert_eq!(body["data"]["space_ref"], "space-dm-1");
+        assert_eq!(body["data"]["hidden_at"], 1_700_000_000_000_u64);
+        let (status, body) = reply_of(set_hidden(&fx.state, &member(), "space-gdm-1", false).await).await;
+        assert_eq!(status, 200);
+        assert_eq!(body["data"]["hidden"], false);
+        assert!(body["data"]["hidden_at"].is_null());
+        let sent = bodies(&fx.app).await;
+        assert_eq!(sent[0]["path"], "spaceDmHides:hideForGateway");
+        assert_eq!(sent[0]["args"]["externalAuthId"], "user-1");
+        assert_eq!(sent[0]["args"]["externalOrgId"], "org-1");
+        assert_eq!(sent[1]["path"], "spaceDmHides:unhideForGateway");
+        assert_eq!(sent[1]["args"]["spaceRef"], "space-gdm-1");
+    }
+
+    #[test]
+    fn decorate_index_row_adds_participants_agent_scope_and_hidden_for_dms_only() {
+        let hidden: HashSet<String> = ["space-dm-1".to_owned(), "space-room".to_owned()].into();
+        let dm = json!({"space_ref": "space-dm-1", "kind": "dm", "agent_scope": "none", "participants": [
+            {"subject_id": "user-1", "display_name": "Caller", "email": "leak@example.com"},
+            {"subject_id": "user-2"},
+            {"display_name": "No id"},
+        ]});
+        let mut row = json!({"space_ref": "space-dm-1"});
+        decorate_index_row(&mut row, &dm, &hidden);
+        assert_eq!(row["agent_scope"], "none");
+        assert_eq!(row["hidden"], true);
+        assert_eq!(
+            row["participants"],
+            json!([{"subject_id": "user-1", "display_name": "Caller"}, {"subject_id": "user-2", "display_name": ""}])
+        );
+        assert!(!row.to_string().contains("leak@example.com"));
+        // A room is never hidden or given participants, even when its ref is in the set.
+        let room = json!({"space_ref": "space-room", "kind": "room", "agent_scope": "room"});
+        let mut row = json!({"space_ref": "space-room"});
+        decorate_index_row(&mut row, &room, &hidden);
+        assert_eq!(row["hidden"], false);
+        assert_eq!(row["agent_scope"], "room");
+        assert!(row.get("participants").is_none());
+    }
+
+    #[tokio::test]
+    async fn the_listing_adds_dm_facts_and_drops_dm_kinds_with_the_flag_off() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = fixture(eligible(), opened(true), Some(false)).await;
+        let list = |state: AppState| async move {
+            let (status, axum::Json(body)) =
+                super::super::list_personal_spaces(State(state), Extension(member())).await;
+            (status.as_u16(), body)
+        };
+        let (status, body) = list(fx.state.clone()).await;
+        assert_eq!(status, 200);
+        assert_eq!(body["data"]["features"]["dm"], true);
+        let spaces = body["data"]["spaces"].as_array().unwrap();
+        let by_ref = |r: &str| spaces.iter().find(|s| s["space_ref"] == r).unwrap().clone();
+        assert_eq!(by_ref("space-dm-1")["hidden"], true);
+        assert_eq!(by_ref("space-dm-1")["kind"], "dm");
+        assert_eq!(by_ref("space-dm-1")["participants"][1]["subject_id"], "user-2");
+        assert_eq!(by_ref("space-dm-1")["agent_scope"], "none");
+        assert_eq!(by_ref("space-gdm-1")["hidden"], false);
+        assert_eq!(by_ref("space-room")["hidden"], false);
+        assert_eq!(by_ref("space-room")["agent_scope"], "room");
+
+        let mut off = fx.state.clone();
+        off.space_features.dm_api = false;
+        let (status, body) = list(off).await;
+        assert_eq!(status, 200);
+        assert_eq!(body["data"]["features"]["dm"], false);
+        let refs: Vec<&str> = body["data"]["spaces"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|s| s["space_ref"].as_str())
+            .collect();
+        assert_eq!(refs, ["space-room"], "no DM kind is listed with the flag off");
+    }
+
+    #[tokio::test]
+    async fn a_post_in_a_dm_clears_the_hides_through_resurface() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = fixture(eligible(), opened(true), Some(false)).await;
+        resurface(&fx.state, &member(), "org-1", "space-dm-1").await;
+        let sent = bodies(&fx.app).await;
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0]["path"], "spaceDmHides:clearForSpaceForGateway");
+        assert_eq!(sent[0]["args"]["spaceRef"], "space-dm-1");
+        assert_eq!(sent[0]["args"]["externalOrgId"], "org-1");
+        // Best effort: an unreachable Application never panics or surfaces.
+        let mut down = fx.state.clone();
+        down.application_convex_url = "http://127.0.0.1:1".into();
+        resurface(&down, &member(), "org-1", "space-dm-1").await;
+    }
+
+    #[tokio::test]
+    async fn the_agent_attach_routes_refuse_a_dm_with_409_dm_agent_bind_refused() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = fixture(eligible(), opened(true), Some(false)).await;
+        let refusal = super::agent_attach_refusal(&fx.state, &member(), "org-1", "space-dm-1").await;
+        let (status, body) = reply_of(refusal.expect("a DM refuses agents")).await;
+        assert_eq!((status, body["error"]["code"].as_str().unwrap()), (409, "dm_agent_bind_refused"));
+        // A room, an unknown Space and the flag off keep their own paths.
+        assert!(super::agent_attach_refusal(&fx.state, &member(), "org-1", "space-room").await.is_none());
+        assert!(super::agent_attach_refusal(&fx.state, &member(), "org-1", "space-missing").await.is_none());
+        let mut off = fx.state.clone();
+        off.space_features.dm_api = false;
+        assert!(super::agent_attach_refusal(&off, &member(), "org-1", "space-dm-1").await.is_none());
+    }
+}

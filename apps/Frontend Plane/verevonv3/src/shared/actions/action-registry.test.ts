@@ -5,6 +5,7 @@ import {
   integrationsBrowseConnectionInput,
   integrationsFetchConnectionContentInput,
 } from '@/shared/actions/action-registry'
+import { spaceActions } from '@/shared/actions/domains/spaces'
 import { isModelExecutableAction } from '@/shared/actions/model-eligibility'
 import { buildModelContextPack } from '@/shared/context-packs/context-pack'
 
@@ -552,6 +553,92 @@ describe('action registry', () => {
     expect(preset?.inputSchema.safeParse({ orgId: 'org_1', expectedEntitlementRevision: 0, presetId: 'p'.repeat(49) }).success).toBe(false)
   })
 
+  it('registers spaces.update_sidebar as a low-risk, ungated, reversible application action the model cannot execute (WS16-S8)', () => {
+    const action = getActionDescriptor('spaces.update_sidebar')
+    expect(action).toBeDefined()
+    expect(action?.ownerPlane).toBe('application')
+    expect(action?.risk).toBe('low')
+    expect(action?.requiresApproval).toBe(false)
+    expect(action?.reversible).toBe(true)
+    expect(isModelExecutableAction('spaces.update_sidebar')).toBe(false)
+    expect(action?.inputSchema.safeParse({ baseRevision: 0, doc: { starred: [] } }).success).toBe(true)
+    expect(action?.inputSchema.safeParse({ baseRevision: -1, doc: {} }).success).toBe(false)
+    expect(action?.inputSchema.safeParse({ baseRevision: 1.5, doc: {} }).success).toBe(false)
+    expect(action?.inputSchema.safeParse({ baseRevision: 0 }).success).toBe(false)
+    expect(action?.inputSchema.safeParse({ baseRevision: 0, doc: [] }).success).toBe(false)
+  })
+
+  it('registers the direct message actions as low-risk application actions the model cannot execute (WS12-S3)', () => {
+    for (const id of ['spaces.open_dm', 'spaces.hide_space'] as const) {
+      const action = getActionDescriptor(id)
+      expect(action, id).toBeDefined()
+      expect(action?.ownerPlane).toBe('application')
+      expect(action?.risk).toBe('low')
+      expect(action?.requiresApproval).toBe(false)
+      expect(isModelExecutableAction(id)).toBe(false)
+    }
+    const open = getActionDescriptor('spaces.open_dm')
+    const ids = (n: number) => Array.from({ length: n }, (_, i) => `u-${i}`)
+    expect(open?.reversible).toBe(false)
+    expect(open?.inputSchema.safeParse({ participants: ids(1), clientRequestId: 'r' }).success).toBe(true)
+    expect(open?.inputSchema.safeParse({ participants: ids(8), clientRequestId: 'r' }).success).toBe(true)
+    expect(open?.inputSchema.safeParse({ participants: ids(9), clientRequestId: 'r' }).success).toBe(false)
+    expect(open?.inputSchema.safeParse({ participants: [], clientRequestId: 'r' }).success).toBe(false)
+    expect(open?.inputSchema.safeParse({ participants: ids(1) }).success).toBe(false)
+    expect(open?.inputSchema.safeParse({ participants: [' '], clientRequestId: 'r' }).success).toBe(false)
+    expect(getActionDescriptor('spaces.hide_space')?.reversible).toBe(true)
+  })
+
+  it('registers the WS10-S4 approval actions, in fragment order, and neither is model-executable', () => {
+    const ids = actionRegistry.map((action) => action.id)
+    const decide = ids.indexOf('spaces.decide_approval')
+    expect(decide).toBeGreaterThan(-1)
+    // Contiguous and in the order ws10.ts declares them.
+    expect(ids.slice(decide, decide + 2)).toEqual(['spaces.decide_approval', 'spaces.revoke_approval_grant'])
+    expect(decide).toBeGreaterThan(ids.indexOf('spaces.leave_room'))
+
+    const decideAction = getActionDescriptor('spaces.decide_approval')
+    expect(decideAction?.ownerPlane).toBe('model')
+    expect(decideAction?.risk).toBe('high')
+    const revokeAction = getActionDescriptor('spaces.revoke_approval_grant')
+    expect(revokeAction?.ownerPlane).toBe('control')
+    expect(revokeAction?.risk).toBe('medium')
+
+    // An agent must never decide its own approval nor revoke the rule that limits it.
+    expect(isModelExecutableAction('spaces.decide_approval')).toBe(false)
+    expect(isModelExecutableAction('spaces.revoke_approval_grant')).toBe(false)
+
+    const input = decideAction?.inputSchema
+    const valid = { spaceRef: 'space-1', approvalId: 'apr-1', decision: 'approve' }
+    expect(input?.safeParse(valid).success).toBe(true)
+    expect(input?.safeParse({ ...valid, scope: 'always', idempotencyKey: 'key-aaaaaaaa' }).success).toBe(true)
+    expect(input?.safeParse({ ...valid, scope: 'forever' }).success).toBe(false)
+    expect(input?.safeParse({ ...valid, decision: 'maybe' }).success).toBe(false)
+    expect(input?.safeParse({ ...valid, idempotencyKey: 'short' }).success).toBe(false)
+    expect(input?.safeParse({ ...valid, reason: 'r'.repeat(501) }).success).toBe(false)
+    expect(input?.safeParse({ approvalId: 'apr-1', decision: 'approve' }).success).toBe(false)
+    expect(revokeAction?.inputSchema.safeParse({ spaceRef: 'space-1', grantId: 'grant-1' }).success).toBe(true)
+    expect(revokeAction?.inputSchema.safeParse({ spaceRef: 'space-1' }).success).toBe(false)
+    expect(revokeAction?.inputSchema.safeParse({ spaceRef: 'space-1', grantId: 'g'.repeat(129) }).success).toBe(false)
+  })
+
+  it('registers the WS14-S7 room file actions and none of them is model-executable', () => {
+    const roomFileIds = ['space.files.attach', 'space.files.list', 'space.files.read_text', 'space.files.delete']
+    const ids = actionRegistry.map((action) => action.id)
+    const first = ids.indexOf(roomFileIds[0] as string)
+    expect(first).toBeGreaterThan(-1)
+    expect(ids.slice(first, first + roomFileIds.length)).toEqual(roomFileIds)
+    for (const id of roomFileIds) {
+      expect(isModelExecutableAction(id), id).toBe(false)
+    }
+    expect(getActionDescriptor('space.files.attach')?.ownerPlane).toBe('ingestion')
+    expect(getActionDescriptor('space.files.list')?.ownerPlane).toBe('data')
+    expect(getActionDescriptor('space.files.delete')?.risk).toBe('medium')
+    expect(
+      getActionDescriptor('space.files.list')?.inputSchema.safeParse({ spaceRef: 'space-1' }).success,
+    ).toBe(true)
+  })
+
   // P-SPA1 moved the spaces.* entries into per-workstream fragments under
   // domains/spaces/*.ts and spread them once. The move must not add, drop, rename
   // or reorder an id: the order is what the contract probes and the context pack read.
@@ -560,15 +647,14 @@ describe('action registry', () => {
     expect(new Set(ids).size).toBe(ids.length)
     // 187 before the move, plus the seven W1 additions (create_post, reply_in_thread, the two
     // effect-policy actions, update_room_details, change_member_role, leave_room), plus the
-    // eight actions main added on its own side (195 before the Space merge), then 34 more that
-    // main added after this pin (space files and reminders, spaces.* controls, org domains and
-    // SSO, audit.list_events), then the four Innhenting actions of the ingestions and monitoring
-    // domains (job_control, start_agent_run, create_monitor, delete_monitor).
-    expect(ids).toHaveLength(240)
+    // eight actions main added on its own side (195 before the Space merge), plus the Wave 2
+    // Space fragments and the Model Plane additions that landed with them (236 at W2 test time).
+    expect(ids).toHaveLength(236)
 
-    // The Space block is every `spaces.*` and `space.*` id: the Space files actions use the singular prefix,
-    // and they sit inside the block in fragment order.
-    const spaceIds = ids.filter((id) => /^spaces?\./.test(id))
+    // The fragments also carry ids outside the `spaces.` prefix (`space.files.*`), so the Space
+    // entries are the ones the fragments declare.
+    const fragmentIds = new Set<string>(spaceActions.map((action) => action.id))
+    const spaceIds = ids.filter((id) => fragmentIds.has(id))
     const first = ids.indexOf(spaceIds[0] as string)
     expect(ids.slice(first, first + spaceIds.length)).toEqual(spaceIds)
 
@@ -589,9 +675,8 @@ describe('action registry', () => {
       'spaces.add_member',
       'spaces.remove_member',
     ])
-    // The later workstream fragments follow them in fragment order (ws01, ws03, ws04). Later fragments keep
-    // adding entries after these (main did), so the order is checked on these seven, not on the whole tail.
-    const laterFragments = [
+    // The later workstream fragments follow them in fragment order (ws01, ws03, ws04, ...).
+    expect(spaceIds.slice(14, 21)).toEqual([
       'spaces.create_post',
       'spaces.reply_in_thread',
       'spaces.set_effect_entitlements',
@@ -599,7 +684,36 @@ describe('action registry', () => {
       'spaces.update_room_details',
       'spaces.change_member_role',
       'spaces.leave_room',
-    ]
-    expect(spaceIds.slice(14).filter((id) => laterFragments.includes(id))).toEqual(laterFragments)
+    ])
+    expect(spaceIds.indexOf('spaces.set_agent_wake_policy')).toBeGreaterThan(spaceIds.indexOf('spaces.leave_room'))
+    // Every fragment entry is spread once, in the order domains/spaces/index.ts lists them.
+    expect(spaceIds).toEqual(spaceActions.map((action) => action.id))
+  })
+})
+
+describe('settings.update_preferences contract v2 (WS16-S2)', () => {
+  const schema = () => {
+    const action = getActionDescriptor('settings.update_preferences')
+    if (!action) throw new Error('settings.update_preferences is not registered')
+    return action.inputSchema
+  }
+
+  it('accepts dateFormat, timeFormat (including auto) and compactMode', () => {
+    for (const dateFormat of ['MM/DD/YYYY', 'DD/MM/YYYY', 'YYYY-MM-DD', 'auto']) {
+      expect(schema().safeParse({ dateFormat }).success).toBe(true)
+    }
+    for (const timeFormat of ['12h', '24h', 'auto']) {
+      expect(schema().safeParse({ timeFormat }).success).toBe(true)
+    }
+    expect(schema().safeParse({ compactMode: true }).success).toBe(true)
+    expect(schema().safeParse({ compactMode: false, dateFormat: 'auto', timeFormat: '24h', timezone: 'Europe/Oslo' }).success).toBe(true)
+  })
+
+  it('rejects unknown enum values and a non-boolean compactMode', () => {
+    expect(schema().safeParse({ dateFormat: 'YYYY/MM/DD' }).success).toBe(false)
+    expect(schema().safeParse({ dateFormat: '' }).success).toBe(false)
+    expect(schema().safeParse({ timeFormat: '13h' }).success).toBe(false)
+    expect(schema().safeParse({ timeFormat: '24H' }).success).toBe(false)
+    expect(schema().safeParse({ compactMode: 'yes' }).success).toBe(false)
   })
 })

@@ -142,6 +142,50 @@ mod tests {
         assert!(parse_event(br#"{"space_ref":"room-1","org_id":"org-1","active":false}"#).is_err());
     }
 
+    // WS04-S10: the outbox and the re-announce sweep publish the same subject
+    // with additive ledger fields. The consumer still decodes the current fact
+    // and ignores every field it does not read, so an older consumer and a newer
+    // producer keep working together.
+    #[test]
+    fn decodes_the_extended_ledger_payload_and_ignores_unknown_fields() {
+        let event = parse_event(
+            br#"{"space_ref":"room-1","org_id":"org-1","subject_id":"user-1","active":true,
+                 "event_id":"sme_0b1c","space_seq":42,"action":"member_added","role":"editor",
+                 "actor_kind":"user","reannounce":false,"a_future_field":{"nested":[1,2]},
+                 "_source":"user-core","_published_at":"2026-11-02T00:00:00Z"}"#,
+        )
+        .expect("the extended payload decodes");
+        assert_eq!(event.space_ref, "room-1");
+        assert_eq!(event.org_id, "org-1");
+        assert_eq!(event.subject_id, "user-1");
+        assert!(event.active);
+    }
+
+    #[test]
+    fn decodes_a_reannounce_of_an_inactive_member() {
+        // The sweep states the current fact with no role for an inactive member.
+        let event = parse_event(
+            br#"{"space_ref":"room-2","org_id":"org-1","subject_id":"user-9","active":false,
+                 "event_id":"sma_9f","space_seq":0,"action":"reannounce","role":"","actor_kind":"service"}"#,
+        )
+        .expect("a re-announcement decodes");
+        assert_eq!(event.space_ref, "room-2");
+        assert!(!event.active);
+    }
+
+    #[test]
+    fn the_subject_is_the_one_user_core_publishes_on() {
+        assert_eq!(SUBJECT, "controlplane.space.membership_changed");
+    }
+
+    #[test]
+    fn rejects_a_non_boolean_active_even_with_the_extended_fields() {
+        assert!(parse_event(
+            br#"{"space_ref":"room-1","org_id":"org-1","subject_id":"user-1","active":"yes","event_id":"sme_1"}"#
+        )
+        .is_err());
+    }
+
     // -- apply_membership_change (real Postgres) ------------------------------
     //
     // #[ignore]d so plain `cargo test` (no DB) skips this; run with a DB:

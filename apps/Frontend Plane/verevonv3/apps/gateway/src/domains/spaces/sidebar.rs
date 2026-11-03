@@ -358,3 +358,411 @@ pub(crate) async fn save_sidebar(
         Err(None) => unavailable(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{get_sidebar, invalid_reason};
+    use crate::config::AppState;
+    use crate::middleware::AuthenticatedUser;
+    use axum::{
+        body::Body,
+        extract::{Extension, State},
+        http::{HeaderMap, Request},
+    };
+    use http_body_util::BodyExt;
+    use serde_json::{json, Value};
+    use tower::ServiceExt;
+    use wiremock::matchers::{body_partial_json, method as wm_method, path as wm_path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[derive(Clone, Copy, PartialEq)]
+    enum Zdr {
+        Off,
+        On,
+        OrgCoreDown,
+    }
+
+    struct Fx {
+        state: AppState,
+        app: MockServer,
+        _servers: Vec<MockServer>,
+    }
+
+    /// A signed-in member of `org-1` through the real router. Application answers `get_reply` to
+    /// `spaceSidebar:getForGateway` and `put_reply` to `spaceSidebar:putForGateway` (an
+    /// unanswered function is a 404 from the mock, which the gateway treats as unavailable).
+    /// The flag is on.
+    async fn fixture(
+        zdr: Zdr,
+        get_reply: Option<ResponseTemplate>,
+        put_reply: Option<ResponseTemplate>,
+    ) -> Fx {
+        let auth = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/auth/get-session"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "user": {"id": "user-1", "email": "user@example.com", "emailVerified": true},
+                "session": {"activeOrganizationId": "org-1"}
+            })))
+            .mount(&auth)
+            .await;
+        let user_core = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/me/session-context"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "userId":"user-1", "orgId":"org-1", "role":"member", "onboardingStatus":"COMPLETED"
+            })))
+            .mount(&user_core)
+            .await;
+        let org = MockServer::start().await;
+        let org_reply = match zdr {
+            Zdr::Off => ResponseTemplate::new(200).set_body_json(
+                json!({"data": {"metadata": {"interactiveRetention": {"zdr": false}}}}),
+            ),
+            Zdr::On => ResponseTemplate::new(200).set_body_json(
+                json!({"data": {"metadata": {"interactiveRetention": {"zdr": true}}}}),
+            ),
+            Zdr::OrgCoreDown => ResponseTemplate::new(500).set_body_json(json!({"error": "down"})),
+        };
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/organizations/org-1"))
+            .respond_with(org_reply)
+            .mount(&org)
+            .await;
+        let app = MockServer::start().await;
+        if let Some(reply) = get_reply {
+            Mock::given(wm_method("POST"))
+                .and(wm_path("/api/query"))
+                .and(body_partial_json(json!({"path": "spaceSidebar:getForGateway"})))
+                .respond_with(reply)
+                .mount(&app)
+                .await;
+        }
+        if let Some(reply) = put_reply {
+            Mock::given(wm_method("POST"))
+                .and(wm_path("/api/mutation"))
+                .and(body_partial_json(json!({"path": "spaceSidebar:putForGateway"})))
+                .respond_with(reply)
+                .mount(&app)
+                .await;
+        }
+        let mut state = crate::tests::test_state(false);
+        state.space_features.sidebar = true;
+        state.auth_core_url = auth.uri();
+        state.user_core_url = user_core.uri();
+        state.org_core_url = org.uri();
+        state.application_convex_url = app.uri();
+        state.application_convex_service_key = "application-test-key".into();
+        Fx { state, app, _servers: vec![auth, user_core, org] }
+    }
+
+    async fn call(
+        state: &AppState,
+        verb: &str,
+        body: Option<Vec<u8>>,
+        extra: Option<(&str, &str)>,
+    ) -> (u16, Value) {
+        let mut request = Request::builder()
+            .method(verb)
+            .uri("/api/v1/spaces/sidebar")
+            .header("cookie", "better-auth.session_token=session-1")
+            .header("content-type", "application/json");
+        if let Some((name, value)) = extra {
+            request = request.header(name, value);
+        }
+        let response = crate::build_router(state.clone())
+            .oneshot(request.body(Body::from(body.unwrap_or_default())).unwrap())
+            .await
+            .unwrap();
+        let status = response.status().as_u16();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+    }
+
+    fn put_body(base_revision: Value, doc: Value) -> Option<Vec<u8>> {
+        Some(serde_json::to_vec(&json!({"base_revision": base_revision, "doc": doc})).unwrap())
+    }
+
+    async fn convex_requests(fx: &Fx) -> Vec<Value> {
+        fx.app
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .map(|request| serde_json::from_slice(&request.body).unwrap_or(Value::Null))
+            .collect()
+    }
+
+    fn ok_put(revision: u64) -> ResponseTemplate {
+        ResponseTemplate::new(200)
+            .set_body_json(json!({"status": "success", "value": {"status": "ok", "revision": revision}}))
+    }
+
+    fn convex_error(message: &str) -> ResponseTemplate {
+        ResponseTemplate::new(200).set_body_json(json!({"status": "error", "errorMessage": message}))
+    }
+
+    fn doc() -> Value {
+        json!({"starred": ["space-a"], "hidden": [], "sections": [], "closed_groups": []})
+    }
+
+    #[tokio::test]
+    async fn flag_off_is_404_space_sidebar_disabled_on_get_and_put_before_org_zdr_and_body() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let mut fx = fixture(Zdr::On, None, None).await;
+        fx.state.space_features.sidebar = false;
+        for (verb, body) in [("GET", None), ("PUT", Some(b"{not json".to_vec()))] {
+            let (status, body) = call(&fx.state, verb, body, None).await;
+            assert_eq!(status, 404, "{verb}");
+            assert_eq!(body["error"]["code"], "space_sidebar_disabled");
+        }
+        assert!(convex_requests(&fx).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn get_returns_server_mode_with_null_doc_revision_0_for_a_new_member() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = fixture(
+            Zdr::Off,
+            Some(ResponseTemplate::new(200).set_body_json(json!({"status": "success", "value": null}))),
+            None,
+        )
+        .await;
+        let (status, body) = call(&fx.state, "GET", None, None).await;
+        assert_eq!(status, 200);
+        assert_eq!(body["data"]["mode"], "server");
+        assert_eq!(body["data"]["revision"], 0);
+        assert!(body["data"]["doc"].is_null());
+        assert_eq!(body["data"]["limits"]["sections"], 30);
+        assert_eq!(body["data"]["limits"]["name"], 40);
+        let sent = convex_requests(&fx).await;
+        assert_eq!(sent[0]["args"]["externalAuthId"], "user-1");
+        assert_eq!(sent[0]["args"]["externalOrgId"], "org-1");
+    }
+
+    #[tokio::test]
+    async fn get_returns_the_stored_row_revision_and_doc() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = fixture(
+            Zdr::Off,
+            Some(ResponseTemplate::new(200).set_body_json(
+                json!({"status": "success", "value": {"revision": 7, "doc": doc(), "userId": "leak"}}),
+            )),
+            None,
+        )
+        .await;
+        let (status, body) = call(&fx.state, "GET", None, None).await;
+        assert_eq!(status, 200);
+        assert_eq!(body["data"]["mode"], "server");
+        assert_eq!(body["data"]["revision"], 7);
+        assert_eq!(body["data"]["doc"], doc());
+        assert!(!body.to_string().contains("leak"));
+        // A row without a usable revision or doc is unavailable, never a made-up document.
+        let fx = fixture(
+            Zdr::Off,
+            Some(ResponseTemplate::new(200).set_body_json(json!({"status": "success", "value": {"revision": 1}}))),
+            None,
+        )
+        .await;
+        let (status, body) = call(&fx.state, "GET", None, None).await;
+        assert_eq!(status, 503);
+        assert_eq!(body["error"]["code"], "space_sidebar_unavailable");
+    }
+
+    #[tokio::test]
+    async fn get_for_a_zdr_org_or_the_x_zdr_header_answers_zdr_local_without_a_convex_call() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = fixture(Zdr::On, None, None).await;
+        let (status, body) = call(&fx.state, "GET", None, None).await;
+        assert_eq!(status, 200);
+        assert_eq!(body["data"]["mode"], "zdr_local");
+        assert_eq!(body["data"]["revision"], 0);
+        assert!(body["data"]["doc"].is_null());
+        assert!(body["data"]["limits"].is_object());
+        let fx2 = fixture(Zdr::Off, None, None).await;
+        let (status, body) = call(&fx2.state, "GET", None, Some(("x-zdr", "true"))).await;
+        assert_eq!(status, 200);
+        assert_eq!(body["data"]["mode"], "zdr_local");
+        assert!(convex_requests(&fx).await.is_empty());
+        assert!(convex_requests(&fx2).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn get_with_org_core_down_is_503_space_sidebar_unavailable_not_zdr_local() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = fixture(Zdr::OrgCoreDown, None, None).await;
+        let (status, body) = call(&fx.state, "GET", None, None).await;
+        assert_eq!(status, 503);
+        assert_eq!(body["error"]["code"], "space_sidebar_unavailable");
+        assert!(body["data"].is_null());
+        assert!(convex_requests(&fx).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn get_with_no_authorized_org_is_403_active_membership_required() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = fixture(Zdr::Off, None, None).await;
+        let user = AuthenticatedUser {
+            user_id: "user-1".into(),
+            user_email: "user@example.com".into(),
+            user_name: "User".into(),
+            user_image: None,
+            email_verified: true,
+            auth_role: Some("member".into()),
+            active_org_id: None,
+            authorized_membership: None,
+        };
+        let response = get_sidebar(State(fx.state.clone()), Extension(user), HeaderMap::new()).await;
+        assert_eq!(response.0.as_u16(), 403);
+        assert_eq!(response.1 .0["error"]["code"], "active_membership_required");
+        assert!(convex_requests(&fx).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn put_for_a_zdr_org_is_412_catalogue_shape_with_zero_convex_calls() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = fixture(Zdr::On, None, Some(ok_put(1))).await;
+        let (status, body) = call(&fx.state, "PUT", put_body(json!(0), doc()), None).await;
+        assert_eq!(status, 412);
+        assert_eq!(body["error"]["code"], "zdr_durable_mutation_forbidden");
+        assert_eq!(body["error"]["retryable"], false);
+        assert_eq!(body["error"]["action"], "none");
+        assert!(body["error"]["message"].is_string());
+        assert!(convex_requests(&fx).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn put_with_org_core_down_is_503_zdr_decision_unavailable() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = fixture(Zdr::OrgCoreDown, None, Some(ok_put(1))).await;
+        let (status, body) = call(&fx.state, "PUT", put_body(json!(0), doc()), None).await;
+        assert_eq!(status, 503);
+        assert_eq!(body["error"]["code"], "zdr_decision_unavailable");
+        assert_eq!(body["error"]["retryable"], true);
+        assert!(convex_requests(&fx).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn put_ok_takes_org_and_user_from_the_session_and_returns_revision_and_doc() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = fixture(Zdr::Off, None, Some(ok_put(4))).await;
+        let (status, body) = call(&fx.state, "PUT", put_body(json!(3), doc()), None).await;
+        assert_eq!(status, 200);
+        assert_eq!(body, json!({"data": {"revision": 4, "doc": doc()}}));
+        let sent = convex_requests(&fx).await;
+        let args = &sent[0]["args"];
+        assert_eq!(args["externalAuthId"], "user-1");
+        assert_eq!(args["externalOrgId"], "org-1");
+        assert_eq!(args["baseRevision"], 3);
+        assert_eq!(args["doc"], doc());
+        // The body cannot name an org or a user: any extra key is refused before Convex.
+        let before = sent.len();
+        let forged = serde_json::to_vec(&json!({
+            "base_revision": 3, "doc": doc(), "org_id": "org-2", "user_id": "user-2"
+        }))
+        .unwrap();
+        let (status, body) = call(&fx.state, "PUT", Some(forged), None).await;
+        assert_eq!(status, 400);
+        assert_eq!(body["error"]["code"], "invalid_sidebar_doc");
+        assert_eq!(body["error"]["details"]["reason"], "unknown_key");
+        assert_eq!(convex_requests(&fx).await.len(), before);
+    }
+
+    #[tokio::test]
+    async fn put_conflict_is_409_with_the_current_revision_and_doc() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let current = json!({"starred": [], "hidden": ["space-z"], "sections": [], "closed_groups": []});
+        let fx = fixture(
+            Zdr::Off,
+            None,
+            Some(ResponseTemplate::new(200).set_body_json(json!({"status": "success", "value": {
+                "status": "conflict", "revision": 9, "doc": current
+            }}))),
+        )
+        .await;
+        let (status, body) = call(&fx.state, "PUT", put_body(json!(2), doc()), None).await;
+        assert_eq!(status, 409);
+        assert_eq!(body["error"]["code"], "space_sidebar_conflict");
+        assert_eq!(body["error"]["details"]["revision"], 9);
+        assert_eq!(body["error"]["details"]["doc"], current);
+    }
+
+    #[tokio::test]
+    async fn put_envelope_errors_are_400_with_details_reason_and_no_convex_call() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = fixture(Zdr::Off, None, Some(ok_put(1))).await;
+        let raw = |value: Value| Some(serde_json::to_vec(&value).unwrap());
+        let cases: Vec<(Option<Vec<u8>>, &str)> = vec![
+            (raw(json!({"base_revision": -1, "doc": doc()})), "bad_base_revision"),
+            (raw(json!({"base_revision": 1.5, "doc": doc()})), "bad_base_revision"),
+            (raw(json!({"base_revision": "1", "doc": doc()})), "bad_base_revision"),
+            (raw(json!({"doc": doc()})), "bad_base_revision"),
+            (raw(json!({"base_revision": 1, "doc": []})), "doc_not_object"),
+            (raw(json!({"base_revision": 1, "doc": "x"})), "doc_not_object"),
+            (raw(json!({"base_revision": 1})), "doc_not_object"),
+            (raw(json!([1, 2])), "body_not_object"),
+            (Some(b"{not json".to_vec()), "body_not_json"),
+        ];
+        for (index, (body, reason)) in cases.into_iter().enumerate() {
+            let (status, body) = call(&fx.state, "PUT", body, None).await;
+            assert_eq!(status, 400, "case {index}");
+            assert_eq!(body["error"]["code"], "invalid_sidebar_doc");
+            assert_eq!(body["error"]["details"]["reason"], reason, "case {index}");
+        }
+        assert!(convex_requests(&fx).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn convex_validation_errors_map_to_400_with_the_reason_and_everything_else_to_503() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        for (message, reason) in [
+            ("Uncaught Error: invalid_sidebar_doc:too_many_sections at handler", "too_many_sections"),
+            ("[Request ID: x] Server Error ArgumentValidationError: Object contains extra field", "doc_shape"),
+            ("invalid_sidebar_doc:", "doc_shape"),
+        ] {
+            let fx = fixture(Zdr::Off, None, Some(convex_error(message))).await;
+            let (status, body) = call(&fx.state, "PUT", put_body(json!(0), doc()), None).await;
+            assert_eq!(status, 400, "{message}");
+            assert_eq!(body["error"]["code"], "invalid_sidebar_doc");
+            assert_eq!(body["error"]["details"]["reason"], reason);
+            assert!(!body.to_string().contains("Uncaught"), "no upstream text leaks");
+        }
+        for reply in [
+            convex_error("something else broke"),
+            ResponseTemplate::new(500).set_body_string("boom"),
+            ResponseTemplate::new(200).set_body_json(json!({"status": "success", "value": {"status": "weird"}})),
+        ] {
+            let fx = fixture(Zdr::Off, None, Some(reply)).await;
+            let (status, body) = call(&fx.state, "PUT", put_body(json!(0), doc()), None).await;
+            assert_eq!(status, 503);
+            assert_eq!(body["error"]["code"], "space_sidebar_unavailable");
+        }
+        // Convex not configured at all.
+        let mut fx = fixture(Zdr::Off, None, Some(ok_put(1))).await;
+        fx.state.application_convex_url = String::new();
+        let (status, body) = call(&fx.state, "PUT", put_body(json!(0), doc()), None).await;
+        assert_eq!(status, 503);
+        assert_eq!(body["error"]["code"], "space_sidebar_unavailable");
+    }
+
+    #[test]
+    fn invalid_reason_returns_a_bounded_lowercase_token_only() {
+        assert_eq!(invalid_reason("x invalid_sidebar_doc:name_too_long, more").as_deref(), Some("name_too_long"));
+        assert_eq!(invalid_reason("invalid_sidebar_doc:UPPER").as_deref(), Some("doc_shape"));
+        assert_eq!(invalid_reason("Validator error: bad").as_deref(), Some("doc_shape"));
+        assert_eq!(invalid_reason("nothing relevant"), None);
+        let long = format!("invalid_sidebar_doc:{}", "a".repeat(200));
+        assert_eq!(invalid_reason(&long).unwrap().len(), 64);
+    }
+
+    #[tokio::test]
+    async fn a_body_over_64_kib_is_413_sidebar_too_large_typed_with_no_convex_call() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = fixture(Zdr::Off, None, Some(ok_put(1))).await;
+        let big = json!({"base_revision": 0, "doc": {"starred": ["x".repeat(70 * 1024)]}});
+        let (status, body) = call(&fx.state, "PUT", Some(serde_json::to_vec(&big).unwrap()), None).await;
+        assert_eq!(status, 413);
+        assert_eq!(body["error"]["code"], "sidebar_too_large");
+        assert!(convex_requests(&fx).await.is_empty());
+    }
+}

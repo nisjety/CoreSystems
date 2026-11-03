@@ -818,3 +818,123 @@ mod canonical_sign_in_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod sso_refusal_tests {
+    //! WS05-S7: auth-core's SSO enforcement refusals become typed gateway envelopes; every other
+    //! response, cookies included, is passed through untouched.
+    use super::map_sso_sign_in_refusal;
+    use axum::{
+        body::{to_bytes, Body},
+        http::{header, StatusCode},
+        response::Response,
+    };
+    use serde_json::{json, Value};
+
+    fn upstream(status: StatusCode, body: &str, cookie: Option<&str>) -> Response {
+        let mut builder = Response::builder()
+            .status(status)
+            .header(header::CONTENT_TYPE, "application/json")
+            .header("x-upstream-marker", "kept");
+        if let Some(cookie) = cookie {
+            builder = builder.header(header::SET_COOKIE, cookie);
+        }
+        builder.body(Body::from(body.to_owned())).unwrap()
+    }
+
+    async fn read(response: Response) -> (StatusCode, axum::http::HeaderMap, Vec<u8>) {
+        let (parts, body) = response.into_parts();
+        let bytes = to_bytes(body, usize::MAX).await.unwrap().to_vec();
+        (parts.status, parts.headers, bytes)
+    }
+
+    fn json_of(bytes: &[u8]) -> Value {
+        serde_json::from_slice(bytes).unwrap_or(Value::Null)
+    }
+
+    #[tokio::test]
+    async fn sso_required_becomes_403_sso_required_with_the_domain_from_auth_core() {
+        let response = upstream(
+            StatusCode::FORBIDDEN,
+            r#"{"code":"SSO_REQUIRED","domain":"acme.example","message":"x"}"#,
+            None,
+        );
+        let (status, headers, bytes) = read(map_sso_sign_in_refusal(response, Some("user@other.example")).await).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        let body = json_of(&bytes);
+        assert_eq!(body["error"]["code"], "sso_required");
+        assert_eq!(body["error"]["details"]["domain"], "acme.example");
+        assert!(body["error"]["message"].as_str().is_some_and(|m| !m.is_empty()));
+        // The upstream refusal is replaced, not forwarded: no upstream header or cookie survives.
+        assert!(headers.get("x-upstream-marker").is_none());
+        assert!(headers.get(header::SET_COOKIE).is_none());
+    }
+
+    #[tokio::test]
+    async fn sso_required_falls_back_to_the_submitted_email_domain_lowercased() {
+        let response = upstream(StatusCode::FORBIDDEN, r#"{"code":"SSO_REQUIRED"}"#, None);
+        let (status, _, bytes) = read(map_sso_sign_in_refusal(response, Some("User@Acme.Example")).await).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(json_of(&bytes)["error"]["details"]["domain"], "acme.example");
+
+        // No usable email: an empty domain, still the typed code.
+        for email in [None, Some("no-at-sign")] {
+            let response = upstream(StatusCode::FORBIDDEN, r#"{"code":"SSO_REQUIRED"}"#, None);
+            let (_, _, bytes) = read(map_sso_sign_in_refusal(response, email).await).await;
+            let body = json_of(&bytes);
+            assert_eq!(body["error"]["code"], "sso_required");
+            assert_eq!(body["error"]["details"]["domain"], "");
+        }
+    }
+
+    #[tokio::test]
+    async fn sso_policy_unavailable_becomes_503_sso_policy_unavailable() {
+        let response = upstream(StatusCode::SERVICE_UNAVAILABLE, r#"{"code":"SSO_POLICY_UNAVAILABLE"}"#, None);
+        let (status, headers, bytes) = read(map_sso_sign_in_refusal(response, Some("a@b.example")).await).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(json_of(&bytes)["error"]["code"], "sso_policy_unavailable");
+        assert!(headers.get(header::SET_COOKIE).is_none());
+    }
+
+    #[tokio::test]
+    async fn every_other_response_passes_through_with_body_headers_and_cookies() {
+        let cookie = "better-auth.session_token=abc; Path=/; HttpOnly";
+        let cases = [
+            (StatusCode::OK, r#"{"user":{"id":"u1"}}"#),
+            (StatusCode::UNAUTHORIZED, r#"{"code":"INVALID_EMAIL_OR_PASSWORD"}"#),
+            (StatusCode::FORBIDDEN, r#"{"code":"EMAIL_NOT_VERIFIED"}"#),
+            (StatusCode::FORBIDDEN, r#"{"message":"no code at all"}"#),
+            (StatusCode::FORBIDDEN, "plain text, not json"),
+            (StatusCode::FORBIDDEN, r#"{"code":"sso_required"}"#), // wrong case: not auth-core's code
+            (StatusCode::SERVICE_UNAVAILABLE, r#"{"code":"SOMETHING_ELSE"}"#),
+            (StatusCode::SERVICE_UNAVAILABLE, "upstream timeout"),
+            (StatusCode::BAD_GATEWAY, r#"{"code":"SSO_REQUIRED"}"#), // right code, wrong status
+        ];
+        for (status, body) in cases {
+            let response = upstream(status, body, Some(cookie));
+            let (got_status, headers, bytes) = read(map_sso_sign_in_refusal(response, Some("a@b.example")).await).await;
+            assert_eq!(got_status, status, "{body}");
+            assert_eq!(bytes, body.as_bytes(), "{body}");
+            assert_eq!(headers.get(header::SET_COOKIE).and_then(|v| v.to_str().ok()), Some(cookie), "{body}");
+            assert_eq!(headers.get("x-upstream-marker").and_then(|v| v.to_str().ok()), Some("kept"), "{body}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_success_with_a_session_cookie_is_returned_without_reading_the_body() {
+        let cookie = "better-auth.session_token=abc; Path=/; HttpOnly";
+        let response = upstream(StatusCode::OK, &json!({"token": "t"}).to_string(), Some(cookie));
+        let (status, headers, _) = read(map_sso_sign_in_refusal(response, None).await).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(headers.get(header::SET_COOKIE).is_some());
+    }
+
+    #[tokio::test]
+    async fn an_oversized_refusal_body_is_a_502_not_a_passthrough() {
+        let huge = format!(r#"{{"code":"SSO_REQUIRED","pad":"{}"}}"#, "x".repeat(70 * 1024));
+        let response = upstream(StatusCode::FORBIDDEN, &huge, None);
+        let (status, _, bytes) = read(map_sso_sign_in_refusal(response, Some("a@b.example")).await).await;
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+        assert_eq!(json_of(&bytes)["error"]["code"], "upstream_unavailable");
+    }
+}

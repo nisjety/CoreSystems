@@ -8,6 +8,7 @@ const spacesClient = vi.hoisted(() => ({
   updateSpaceThreadPresentation: vi.fn(),
 }))
 vi.mock('@/shared/api/spaces-client', async (importOriginal) => ({
+  // The pure normalisers the transcript list calls stay real; only the network functions are mocked.
   ...(await importOriginal<typeof import('@/shared/api/spaces-client')>()),
   ...spacesClient,
 }))
@@ -512,5 +513,63 @@ describe('SpaceRoomTimeline — a thread with replies folds to a summary row (WS
     view.unmount()
     renderRoom([{ ...post, reply_count: 5 }], [agent], { onOpenThread: vi.fn(), collapseLongThreads: () => false })
     expect(await screen.findByRole('button', { name: 'Åpne tråd' })).toBeTruthy()
+  })
+})
+
+describe('SpaceRoomTimeline — room pins (WS13-S8)', () => {
+  const threads = [
+    { thread_id: 'a', space_id: 'room-1', title: 'Alfa', updated_at: '2026-09-07T08:00:00Z', latest_run_status: 'completed' },
+    { thread_id: 'b', space_id: 'room-1', title: 'Beta', updated_at: '2026-09-07T09:00:00Z', latest_run_status: 'completed' },
+    { thread_id: 'c', space_id: 'room-1', title: 'Gamma', updated_at: '2026-09-07T10:00:00Z', latest_run_status: 'completed' },
+    { thread_id: 'd', space_id: 'room-1', title: 'Delta', updated_at: '2026-09-07T11:00:00Z', latest_run_status: 'completed' },
+  ]
+  const postOrder = () =>
+    [...document.querySelectorAll('.verevon-room-post[data-thread-id]')].map((node) => node.getAttribute('data-thread-id'))
+
+  it('lifts pinned posts above the time order, newest pin first', async () => {
+    renderRoom(threads, [agent], {
+      roomPins: () => [
+        { thread_id: 'a', pinned_by: 'user-1', pinned_at: 100 },
+        { thread_id: 'c', pinned_by: 'user-2', pinned_at: 200 },
+      ],
+    })
+    await screen.findByText('Alfa')
+    // c was pinned last so it leads, then a; the unpinned posts keep their time order.
+    expect(postOrder()).toEqual(['c', 'a', 'b', 'd'])
+  })
+
+  it('says who pinned a post, by roster name', async () => {
+    renderRoom(threads, [agent], {
+      roster: () => [{ subject_type: 'user', subject_id: 'user-2', role: 'editor', revision: 1, display_name: 'Kari' }],
+      roomPins: () => [{ thread_id: 'c', pinned_by: 'user-2', pinned_at: 200 }],
+    })
+    expect(await screen.findByText('Festet av Kari')).toBeTruthy()
+    expect(document.querySelector('.verevon-room-post[data-thread-id="c"][data-pinned]')).toBeTruthy()
+    expect(document.querySelector('.verevon-room-post[data-thread-id="a"][data-pinned]')).toBeNull()
+  })
+
+  it('names a pinner who has left the roster without showing the raw id', async () => {
+    renderRoom(threads, [agent], {
+      roomPins: () => [{ thread_id: 'c', pinned_by: 'user-raw-id-77', pinned_at: 200 }],
+    })
+    expect(await screen.findByText('Festet av Tidligere medlem')).toBeTruthy()
+    expect(document.body.textContent).not.toContain('user-raw-id-77')
+  })
+
+  it('leaves the order and flags alone when there are no pins', async () => {
+    renderRoom(threads, [agent], { roomPins: () => [] })
+    await screen.findByText('Alfa')
+    expect(postOrder()).toEqual(['a', 'b', 'c', 'd'])
+    expect(document.querySelector('.verevon-room-post__flag--pinned')).toBeNull()
+    cleanup()
+    renderRoom(threads)
+    await screen.findByText('Alfa')
+    expect(postOrder()).toEqual(['a', 'b', 'c', 'd'])
+  })
+
+  it('ignores a pin whose thread is not in the listing', async () => {
+    renderRoom(threads, [agent], { roomPins: () => [{ thread_id: 'gone', pinned_by: 'user-2', pinned_at: 999 }] })
+    await screen.findByText('Alfa')
+    expect(postOrder()).toEqual(['a', 'b', 'c', 'd'])
   })
 })

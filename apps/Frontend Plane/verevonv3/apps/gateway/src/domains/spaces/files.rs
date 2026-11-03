@@ -1040,3 +1040,1009 @@ pub(crate) fn attach_requires_multipart() -> Reply {
         "Files are uploaded with POST /api/v1/spaces/{space_ref}/files as multipart form data.",
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        delete_core, features_json, get_upload_core, limits_json, list_core, read_text_core,
+        reason_code, relay_import_answer, upload_core, valid_idempotency_key, valid_uuid,
+        zdr_refusal, MAX_REQUEST_BYTES,
+    };
+    use crate::config::AppState;
+    use crate::middleware::{AuthenticatedUser, AuthorizedMembership};
+    use axum::{
+        body::Body,
+        http::{header, HeaderMap, HeaderValue, Request, StatusCode},
+        Json,
+    };
+    use serde_json::{json, Value};
+    use tower::ServiceExt;
+    use wiremock::matchers::{method as wm_method, path as wm_path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    const SPACE: &str = "space-1";
+    const KEY: &str = "idem-key-aaaaa";
+    const UPLOAD_ID: &str = "11111111-2222-3333-4444-555555555555";
+    const BOUNDARY: &str = "multipart/form-data; boundary=xyz";
+
+    fn member(user_id: &str) -> AuthenticatedUser {
+        AuthenticatedUser {
+            user_id: user_id.to_owned(),
+            user_email: format!("{user_id}@example.com"),
+            user_name: "Caller".to_owned(),
+            user_image: None,
+            email_verified: true,
+            auth_role: Some("member".to_owned()),
+            active_org_id: Some("org-1".to_owned()),
+            authorized_membership: Some(AuthorizedMembership {
+                organization_id: "org-1".to_owned(),
+                role: "member".to_owned(),
+            }),
+        }
+    }
+
+    /// One mock server stands in for every upstream: the paths are disjoint.
+    fn state_with(server: &MockServer, room_files: bool) -> AppState {
+        let mut state = crate::tests::test_state(false);
+        let uri = server.uri();
+        state.auth_core_url = uri.clone();
+        state.user_core_url = uri.clone();
+        state.org_core_url = uri.clone();
+        state.imports_api_url = uri.clone();
+        state.retrieval_engine_url = uri.clone();
+        state.documents_api_url = uri.clone();
+        state.application_convex_url = uri;
+        state.application_convex_service_key = "application-test-key".into();
+        state.space_features.room_files_api = room_files;
+        state
+    }
+
+    async fn mount(server: &MockServer, method: &str, route: &str, template: ResponseTemplate) {
+        Mock::given(wm_method(method))
+            .and(wm_path(route))
+            .respond_with(template)
+            .mount(server)
+            .await;
+    }
+
+    fn json_ok(status: u16, body: Value) -> ResponseTemplate {
+        ResponseTemplate::new(status).set_body_json(body)
+    }
+
+    async fn mount_basics(server: &MockServer, zdr: bool) {
+        mount(
+            server,
+            "POST",
+            "/api/query",
+            json_ok(200, json!({ "value": [{ "spaceRef": SPACE, "lifecycle": "active" }] })),
+        )
+        .await;
+        mount(
+            server,
+            "GET",
+            "/api/v1/organizations/org-1",
+            json_ok(
+                200,
+                json!({ "data": { "metadata": { "interactiveRetention": { "zdr": zdr } } } }),
+            ),
+        )
+        .await;
+        for audience in ["ingestion", "data-plane"] {
+            mount(
+                server,
+                "GET",
+                &format!("/api/{audience}/token"),
+                json_ok(200, json!({ "token": format!("{audience}-token") })),
+            )
+            .await;
+        }
+    }
+
+    fn import_decision() -> Value {
+        json!({ "data": {
+            "decision": {
+                "space_ref": SPACE,
+                "service_audience": "ingestion-plane-import",
+                "action_id": "ingestion.import.write",
+                "action_schema_hash": "sha256:ingestion-import-v1",
+                "idempotency_key": KEY,
+                "import_source_type": "space_upload",
+            },
+            "token": "import-decision-token",
+        }})
+    }
+
+    async fn mount_import_decision(server: &MockServer) {
+        mount(
+            server,
+            "POST",
+            "/api/v1/internal/spaces/import-decision",
+            json_ok(200, import_decision()),
+        )
+        .await;
+    }
+
+    async fn mount_read_decision(server: &MockServer) {
+        mount(
+            server,
+            "POST",
+            "/api/v1/internal/spaces/retrieval-decision",
+            json_ok(200, json!({ "data": { "token": "retrieval-decision-token" } })),
+        )
+        .await;
+    }
+
+    async fn requests_to(server: &MockServer, needle: &str) -> usize {
+        server
+            .received_requests()
+            .await
+            .expect("requests")
+            .iter()
+            .filter(|request| request.url.path().contains(needle))
+            .count()
+    }
+
+    fn upload_headers() -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::CONTENT_TYPE, HeaderValue::from_static(BOUNDARY));
+        headers.insert("idempotency-key", HeaderValue::from_static(KEY));
+        headers
+    }
+
+    fn with_length(mut headers: HeaderMap, length: u64) -> HeaderMap {
+        headers.insert(
+            header::CONTENT_LENGTH,
+            HeaderValue::from_str(&length.to_string()).unwrap(),
+        );
+        headers
+    }
+
+    fn flat(result: Result<(StatusCode, Json<Value>), (StatusCode, Json<Value>)>) -> (u16, Value) {
+        match result {
+            Ok((status, Json(body))) | Err((status, Json(body))) => (status.as_u16(), body),
+        }
+    }
+
+    async fn upload(
+        state: &AppState,
+        headers: &HeaderMap,
+        bytes: Vec<u8>,
+    ) -> (u16, Value, Option<String>) {
+        match upload_core(state, &member("files-user"), SPACE, headers, Body::from(bytes)).await {
+            Ok(response) => {
+                let status = response.status().as_u16();
+                let cache = response
+                    .headers()
+                    .get(header::CACHE_CONTROL)
+                    .and_then(|v| v.to_str().ok())
+                    .map(str::to_owned);
+                let body = http_body_util::BodyExt::collect(response.into_body())
+                    .await
+                    .unwrap()
+                    .to_bytes();
+                (status, serde_json::from_slice(&body).unwrap_or(Value::Null), cache)
+            }
+            Err((status, Json(body))) => (status.as_u16(), body, None),
+        }
+    }
+
+    // ----- pure helpers ----------------------------------------------------------------------
+
+    #[test]
+    fn the_new_room_files_flags_default_off_and_the_context_blocks_mirror_them() {
+        let state = crate::tests::test_state(false);
+        let features = features_json(&state);
+        assert_eq!(
+            features,
+            json!({ "turn_attachments": false, "durable": false, "files_tab": false })
+        );
+        let mut on = state.clone();
+        on.space_features.room_files_api = true;
+        assert_eq!(features_json(&on)["durable"], true);
+        // The tab needs both the API and the UI flag.
+        assert_eq!(features_json(&on)["files_tab"], false);
+        on.space_features.room_files_ui = true;
+        assert_eq!(features_json(&on)["files_tab"], true);
+        on.space_features.room_files_api = false;
+        assert_eq!(features_json(&on)["files_tab"], false);
+        on.space_features.turn_attachments_ui = true;
+        assert_eq!(features_json(&on)["turn_attachments"], true);
+
+        let limits = limits_json();
+        assert_eq!(limits["max_files"], 10);
+        assert_eq!(limits["max_file_bytes"], 25 * 1024 * 1024);
+        assert_eq!(limits["max_request_bytes"], 100 * 1024 * 1024);
+        assert_eq!(limits["turn_inline_chars"], 60_000);
+        assert_eq!(limits["turn_total_chars"], 120_000);
+        assert_eq!(limits["allowed_extensions"].as_array().unwrap().len(), 8);
+    }
+
+    #[test]
+    fn idempotency_key_uuid_and_reason_code_validation() {
+        assert!(valid_idempotency_key("abcdefgh"));
+        assert!(valid_idempotency_key(&"a".repeat(128)));
+        assert!(!valid_idempotency_key("abcdefg"));
+        assert!(!valid_idempotency_key(&"a".repeat(129)));
+        assert!(!valid_idempotency_key("has space 123"));
+        assert!(valid_uuid(UPLOAD_ID));
+        assert!(!valid_uuid("not-a-uuid"));
+        assert!(!valid_uuid(&format!("{UPLOAD_ID}x")));
+        assert_eq!(reason_code(&json!({ "code": "space_files_off" })), "space_files_off");
+        assert_eq!(reason_code(&json!({ "error": { "code": "role_forbidden" } })), "role_forbidden");
+        // Anything that is not a lowercase token is the generic word, never Control's text.
+        assert_eq!(reason_code(&json!({ "code": "Has Spaces!" })), "not_authorized");
+        assert_eq!(reason_code(&json!({ "code": "UPPER" })), "not_authorized");
+        assert_eq!(reason_code(&json!({})), "not_authorized");
+    }
+
+    #[test]
+    fn zdr_refusal_adds_the_room_files_surface_only_to_the_412() {
+        let body = json!({ "error": { "code": "zdr_durable_mutation_forbidden", "message": "m" } });
+        let (status, Json(out)) =
+            zdr_refusal((StatusCode::PRECONDITION_FAILED, Json(body.clone())));
+        assert_eq!(status, StatusCode::PRECONDITION_FAILED);
+        assert_eq!(out["error"]["details"]["surface"], "room_files");
+        let (status, Json(out)) = zdr_refusal((StatusCode::SERVICE_UNAVAILABLE, Json(body)));
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert!(out["error"].get("details").is_none());
+    }
+
+    #[test]
+    fn relay_import_answer_passes_data_and_typed_errors_and_hides_everything_else() {
+        let (status, Json(body)) =
+            relay_import_answer(StatusCode::ACCEPTED, json!({ "data": { "upload_id": "u" } }));
+        assert_eq!((status.as_u16(), body["data"]["upload_id"].clone()), (202, json!("u")));
+        let typed = json!({ "error": { "code": "room_file_type_not_allowed", "message": "no" } });
+        let (status, Json(body)) = relay_import_answer(StatusCode::UNSUPPORTED_MEDIA_TYPE, typed.clone());
+        assert_eq!(status.as_u16(), 415);
+        assert_eq!(body, typed);
+        let (status, Json(body)) = relay_import_answer(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            json!({ "detail": [{ "msg": "framework text" }] }),
+        );
+        assert_eq!(status.as_u16(), 400);
+        assert_eq!(body["error"]["code"], "invalid_upload");
+        assert!(!body.to_string().contains("framework text"));
+        let (status, Json(body)) =
+            relay_import_answer(StatusCode::INTERNAL_SERVER_ERROR, json!("<html>proxy</html>"));
+        assert_eq!(status.as_u16(), 503);
+        assert_eq!(body["error"]["code"], "room_files_unavailable");
+    }
+
+    // ----- R1: upload ------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn upload_flag_off_is_404_before_any_upstream_call() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let server = MockServer::start().await;
+        let state = state_with(&server, false);
+        let (status, body, _) =
+            upload(&state, &with_length(upload_headers(), 4), b"data".to_vec()).await;
+        assert_eq!(status, 404);
+        assert_eq!(body["error"]["code"], "room_files_disabled");
+        assert!(server.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn upload_streams_to_imports_core_with_the_relayed_decision_and_answers_202_no_store() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let server = MockServer::start().await;
+        mount_basics(&server, false).await;
+        mount_import_decision(&server).await;
+        mount(
+            &server,
+            "POST",
+            "/api/v1/import/jobs/space-upload",
+            json_ok(202, json!({ "data": { "upload_id": UPLOAD_ID, "status": "queued" } })),
+        )
+        .await;
+        let state = state_with(&server, true);
+        let payload = b"--xyz\r\nfile-bytes\r\n--xyz--\r\n".to_vec();
+        let (status, body, cache) = upload(
+            &state,
+            &with_length(upload_headers(), payload.len() as u64),
+            payload.clone(),
+        )
+        .await;
+        assert_eq!(status, 202);
+        assert_eq!(body["data"]["upload_id"], UPLOAD_ID);
+        assert_eq!(cache.as_deref(), Some("no-store"));
+        let sent = server
+            .received_requests()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|request| request.url.path() == "/api/v1/import/jobs/space-upload")
+            .expect("upload call");
+        assert_eq!(sent.body, payload, "the bytes reach Ingestion unchanged");
+        let header_of = |name: &str| sent.headers.get(name).and_then(|v| v.to_str().ok()).map(str::to_owned);
+        assert_eq!(header_of("x-space-import-ingress-decision").as_deref(), Some("import-decision-token"));
+        assert_eq!(header_of("idempotency-key").as_deref(), Some(KEY));
+        assert_eq!(header_of("x-org-id").as_deref(), Some("org-1"));
+        assert_eq!(header_of("x-user-id").as_deref(), Some("files-user"));
+        assert_eq!(header_of("authorization").as_deref(), Some("Bearer ingestion-token"));
+        // Control was asked for exactly the space_upload decision the caller needs.
+        let decision_call = server
+            .received_requests()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|request| request.url.path().ends_with("/import-decision"))
+            .unwrap();
+        let asked: Value = serde_json::from_slice(&decision_call.body).unwrap();
+        assert_eq!(
+            asked,
+            json!({ "space_ref": SPACE, "source_type": "space_upload", "idempotency_key": KEY })
+        );
+    }
+
+    #[tokio::test]
+    async fn upload_replay_200_is_relayed_as_200() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let server = MockServer::start().await;
+        mount_basics(&server, false).await;
+        mount_import_decision(&server).await;
+        mount(
+            &server,
+            "POST",
+            "/api/v1/import/jobs/space-upload",
+            json_ok(200, json!({ "data": { "upload_id": UPLOAD_ID, "status": "completed" } })),
+        )
+        .await;
+        let state = state_with(&server, true);
+        let (status, body, _) =
+            upload(&state, &with_length(upload_headers(), 4), b"data".to_vec()).await;
+        assert_eq!(status, 200);
+        assert_eq!(body["data"]["status"], "completed");
+    }
+
+    #[tokio::test]
+    async fn a_forged_or_mismatched_control_decision_is_refused_and_nothing_is_uploaded() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        for (field, forged) in [
+            ("space_ref", "space-other"),
+            ("service_audience", "documents-api"),
+            ("action_id", "ingestion.import.read"),
+            ("action_schema_hash", "sha256:other"),
+            ("idempotency_key", "someone-elses-key"),
+            ("import_source_type", "web_page"),
+        ] {
+            let server = MockServer::start().await;
+            mount_basics(&server, false).await;
+            let mut decision = import_decision();
+            decision["data"]["decision"][field] = json!(forged);
+            mount(
+                &server,
+                "POST",
+                "/api/v1/internal/spaces/import-decision",
+                json_ok(200, decision),
+            )
+            .await;
+            let state = state_with(&server, true);
+            let (status, body, _) =
+                upload(&state, &with_length(upload_headers(), 4), b"data".to_vec()).await;
+            assert_eq!(status, 502, "{field}");
+            assert_eq!(body["error"]["code"], "invalid_space_decision", "{field}");
+            assert_eq!(requests_to(&server, "space-upload").await, 0, "{field}");
+        }
+        // A missing token is refused too.
+        let server = MockServer::start().await;
+        mount_basics(&server, false).await;
+        let mut decision = import_decision();
+        decision["data"]["token"] = json!("  ");
+        mount(&server, "POST", "/api/v1/internal/spaces/import-decision", json_ok(200, decision)).await;
+        let state = state_with(&server, true);
+        let (status, _, _) = upload(&state, &with_length(upload_headers(), 4), b"d".to_vec()).await;
+        assert_eq!(status, 502);
+        assert_eq!(requests_to(&server, "space-upload").await, 0);
+    }
+
+    #[tokio::test]
+    async fn control_403_is_space_files_not_authorized_with_a_reason_code() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let server = MockServer::start().await;
+        mount_basics(&server, false).await;
+        mount(
+            &server,
+            "POST",
+            "/api/v1/internal/spaces/import-decision",
+            json_ok(403, json!({ "error": { "code": "space_role_below_floor", "message": "secret" } })),
+        )
+        .await;
+        let state = state_with(&server, true);
+        let (status, body, _) =
+            upload(&state, &with_length(upload_headers(), 4), b"data".to_vec()).await;
+        assert_eq!(status, 403);
+        assert_eq!(body["error"]["code"], "space_files_not_authorized");
+        assert_eq!(body["error"]["details"]["reason_code"], "space_role_below_floor");
+        assert!(!body.to_string().contains("secret"));
+        assert_eq!(requests_to(&server, "space-upload").await, 0);
+    }
+
+    #[tokio::test]
+    async fn control_404_is_room_files_disabled_and_a_control_outage_is_unavailable() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let server = MockServer::start().await;
+        mount_basics(&server, false).await;
+        mount(
+            &server,
+            "POST",
+            "/api/v1/internal/spaces/import-decision",
+            ResponseTemplate::new(404),
+        )
+        .await;
+        let state = state_with(&server, true);
+        let (status, body, _) =
+            upload(&state, &with_length(upload_headers(), 4), b"data".to_vec()).await;
+        assert_eq!(status, 404);
+        assert_eq!(body["error"]["code"], "room_files_disabled");
+
+        let server = MockServer::start().await;
+        mount_basics(&server, false).await;
+        mount(
+            &server,
+            "POST",
+            "/api/v1/internal/spaces/import-decision",
+            ResponseTemplate::new(500).set_body_string("down"),
+        )
+        .await;
+        let state = state_with(&server, true);
+        let (status, body, _) =
+            upload(&state, &with_length(upload_headers(), 4), b"data".to_vec()).await;
+        assert_eq!(status, 503);
+        assert_eq!(body["error"]["code"], "room_files_unavailable");
+    }
+
+    #[tokio::test]
+    async fn zdr_org_gets_412_with_the_surface_and_control_is_never_called() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let server = MockServer::start().await;
+        mount_basics(&server, true).await;
+        mount_import_decision(&server).await;
+        let state = state_with(&server, true);
+        let (status, body, _) =
+            upload(&state, &with_length(upload_headers(), 4), b"data".to_vec()).await;
+        assert_eq!(status, 412);
+        assert_eq!(body["error"]["code"], "zdr_durable_mutation_forbidden");
+        assert_eq!(body["error"]["details"]["surface"], "room_files");
+        assert_eq!(requests_to(&server, "import-decision").await, 0);
+        assert_eq!(requests_to(&server, "space-upload").await, 0);
+        // The request-level flag alone is enough, even for an org that is not ZDR.
+        let server = MockServer::start().await;
+        mount_basics(&server, false).await;
+        mount_import_decision(&server).await;
+        let state = state_with(&server, true);
+        let mut headers = with_length(upload_headers(), 4);
+        headers.insert("x-zdr", HeaderValue::from_static("true"));
+        let (status, _, _) = upload(&state, &headers, b"data".to_vec()).await;
+        assert_eq!(status, 412);
+        assert_eq!(requests_to(&server, "import-decision").await, 0);
+    }
+
+    #[tokio::test]
+    async fn an_org_core_outage_is_503_zdr_decision_unavailable_and_nothing_else_is_called() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let server = MockServer::start().await;
+        mount(&server, "GET", "/api/v1/organizations/org-1", ResponseTemplate::new(500)).await;
+        mount_import_decision(&server).await;
+        let state = state_with(&server, true);
+        let (status, body, _) =
+            upload(&state, &with_length(upload_headers(), 4), b"data".to_vec()).await;
+        assert_eq!(status, 503);
+        assert_eq!(body["error"]["code"], "zdr_decision_unavailable");
+        assert_eq!(requests_to(&server, "import-decision").await, 0);
+    }
+
+    #[tokio::test]
+    async fn upload_request_shape_is_refused_before_control_is_asked() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let server = MockServer::start().await;
+        mount_basics(&server, false).await;
+        mount_import_decision(&server).await;
+        let state = state_with(&server, true);
+
+        // Not multipart.
+        let mut headers = with_length(upload_headers(), 4);
+        headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("application/json"));
+        let (status, body, _) = upload(&state, &headers, b"data".to_vec()).await;
+        assert_eq!((status, body["error"]["code"].clone()), (422, json!("upload_requires_multipart")));
+        headers.remove(header::CONTENT_TYPE);
+        let (status, _, _) = upload(&state, &headers, b"data".to_vec()).await;
+        assert_eq!(status, 422);
+
+        // Bad or missing Idempotency-Key.
+        for bad in [Some("short"), Some("has spaces in it"), None] {
+            let mut headers = with_length(upload_headers(), 4);
+            headers.remove("idempotency-key");
+            if let Some(bad) = bad {
+                headers.insert("idempotency-key", HeaderValue::from_str(bad).unwrap());
+            }
+            let (status, body, _) = upload(&state, &headers, b"data".to_vec()).await;
+            assert_eq!(status, 400, "{bad:?}");
+            assert_eq!(body["error"]["code"], "idempotency_key_invalid");
+        }
+
+        // No declared length is 411; an empty one is 400.
+        let (status, body, _) = upload(&state, &upload_headers(), b"data".to_vec()).await;
+        assert_eq!((status, body["error"]["code"].clone()), (411, json!("upload_length_required")));
+        let (status, body, _) = upload(&state, &with_length(upload_headers(), 0), Vec::new()).await;
+        assert_eq!((status, body["error"]["code"].clone()), (400, json!("invalid_upload")));
+
+        // Over 100 MiB is refused from the header alone.
+        let (status, body, _) = upload(
+            &state,
+            &with_length(upload_headers(), MAX_REQUEST_BYTES + 1),
+            b"data".to_vec(),
+        )
+        .await;
+        assert_eq!(status, 413);
+        assert_eq!(body["error"]["code"], "room_file_too_large");
+        assert_eq!(body["error"]["details"]["max_bytes"], MAX_REQUEST_BYTES);
+
+        assert_eq!(requests_to(&server, "import-decision").await, 0);
+        assert_eq!(requests_to(&server, "space-upload").await, 0);
+    }
+
+    #[tokio::test]
+    async fn upload_for_a_missing_space_is_404_and_a_bad_reference_is_400() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let server = MockServer::start().await;
+        mount(&server, "GET", "/api/v1/organizations/org-1", json_ok(200, json!({ "data": {} }))).await;
+        mount(&server, "POST", "/api/query", json_ok(200, json!({ "value": [] }))).await;
+        mount_import_decision(&server).await;
+        let state = state_with(&server, true);
+        let headers = with_length(upload_headers(), 4);
+        let (status, body, _) = upload(&state, &headers, b"data".to_vec()).await;
+        assert_eq!((status, body["error"]["code"].clone()), (404, json!("space_not_found")));
+        assert_eq!(requests_to(&server, "import-decision").await, 0);
+        let result =
+            upload_core(&state, &member("files-user"), "a/b", &headers, Body::from("data")).await;
+        let (status, body) = flat(result.map(|_| unreachable!()));
+        assert_eq!((status, body["error"]["code"].clone()), (400, json!("invalid_space")));
+        let mut no_org = member("files-user");
+        no_org.authorized_membership = None;
+        let result = upload_core(&state, &no_org, SPACE, &headers, Body::from("data")).await;
+        let (status, body) = flat(result.map(|_| unreachable!()));
+        assert_eq!((status, body["error"]["code"].clone()), (403, json!("active_membership_required")));
+    }
+
+    /// Through the real router: a 10 MiB multipart body streams to Ingestion unchanged. The default
+    /// axum body cap is 2 MiB, so this fails if any layer buffers the upload.
+    #[tokio::test]
+    async fn a_ten_mebibyte_upload_streams_through_the_router() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let server = MockServer::start().await;
+        mount_basics(&server, false).await;
+        mount_import_decision(&server).await;
+        mount(
+            &server,
+            "GET",
+            "/api/auth/get-session",
+            json_ok(
+                200,
+                json!({
+                    "user": { "id": "files-router-user", "email": "u@example.com", "emailVerified": true },
+                    "session": { "activeOrganizationId": "org-1" }
+                }),
+            ),
+        )
+        .await;
+        mount(
+            &server,
+            "GET",
+            "/api/v1/me/session-context",
+            json_ok(
+                200,
+                json!({ "userId": "files-router-user", "orgId": "org-1", "role": "member",
+                        "onboardingStatus": "COMPLETED" }),
+            ),
+        )
+        .await;
+        mount(
+            &server,
+            "POST",
+            "/api/v1/import/jobs/space-upload",
+            json_ok(202, json!({ "data": { "upload_id": UPLOAD_ID, "status": "queued" } })),
+        )
+        .await;
+        let state = state_with(&server, true);
+        let size = 10 * 1024 * 1024usize;
+        let payload = vec![b'a'; size];
+        let response = crate::build_router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/spaces/{SPACE}/files"))
+                    .header("cookie", "better-auth.session_token=session-1")
+                    .header(header::CONTENT_TYPE, BOUNDARY)
+                    .header(header::CONTENT_LENGTH, size.to_string())
+                    .header("idempotency-key", KEY)
+                    .body(Body::from(payload))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status().as_u16(), 202);
+        let sent = server
+            .received_requests()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|request| request.url.path() == "/api/v1/import/jobs/space-upload")
+            .expect("upload reached Ingestion");
+        assert_eq!(sent.body.len(), size);
+    }
+
+    // ----- R2: upload progress ---------------------------------------------------------------
+
+    fn job(source_type: &str, user_id: &str) -> Value {
+        json!({
+            "id": UPLOAD_ID,
+            "source_type": source_type,
+            "user_id": user_id,
+            "status": "completed",
+            "total_items": 2,
+            "processed_items": 1,
+            "failed_items": 1,
+            "items": [
+                { "source_name": "a.pdf", "status": "completed",
+                  "metadata": { "document_id": "doc-1" } },
+                { "source_name": "b.exe", "status": "failed",
+                  "metadata": { "error_code": "room_file_type_not_allowed" } }
+            ]
+        })
+    }
+
+    #[tokio::test]
+    async fn upload_progress_shows_only_the_callers_own_space_upload_job() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let route = format!("/api/v1/import/jobs/{UPLOAD_ID}");
+        let user = member("files-user");
+        let headers = HeaderMap::new();
+
+        let server = MockServer::start().await;
+        mount_basics(&server, false).await;
+        mount(&server, "GET", &route, json_ok(200, job("space_upload", "files-user"))).await;
+        let state = state_with(&server, true);
+        let (status, body) = flat(get_upload_core(&state, &user, &headers, SPACE, UPLOAD_ID).await);
+        assert_eq!(status, 200);
+        assert_eq!(body["data"]["upload_id"], UPLOAD_ID);
+        assert_eq!(body["data"]["total"], 2);
+        assert_eq!(body["data"]["failed"], 1);
+        let items = body["data"]["items"].as_array().unwrap();
+        assert_eq!(items[0]["file_name"], "a.pdf");
+        assert_eq!(items[0]["document_id"], "doc-1");
+        assert_eq!(items[1]["error_code"], "room_file_type_not_allowed");
+        assert!(items[1].get("document_id").is_none());
+
+        for (source, owner) in [("space_upload", "someone-else"), ("web_page", "files-user")] {
+            let server = MockServer::start().await;
+            mount_basics(&server, false).await;
+            mount(&server, "GET", &route, json_ok(200, job(source, owner))).await;
+            let state = state_with(&server, true);
+            let (status, body) =
+                flat(get_upload_core(&state, &user, &headers, SPACE, UPLOAD_ID).await);
+            assert_eq!(status, 404, "{source}/{owner}");
+            assert_eq!(body["error"]["code"], "upload_not_found");
+        }
+
+        // Ingestion 404 and 403 read the same; an id that is not a uuid never reaches Ingestion.
+        for upstream in [404u16, 403] {
+            let server = MockServer::start().await;
+            mount_basics(&server, false).await;
+            mount(&server, "GET", &route, ResponseTemplate::new(upstream)).await;
+            let state = state_with(&server, true);
+            let (status, body) =
+                flat(get_upload_core(&state, &user, &headers, SPACE, UPLOAD_ID).await);
+            assert_eq!((status, body["error"]["code"].clone()), (404, json!("upload_not_found")));
+        }
+        let (status, body) = flat(get_upload_core(&state, &user, &headers, SPACE, "nope").await);
+        assert_eq!((status, body["error"]["code"].clone()), (404, json!("upload_not_found")));
+    }
+
+    // ----- R3: list --------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn list_maps_space_sources_rows_to_files_and_forwards_the_decision() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let server = MockServer::start().await;
+        mount_basics(&server, false).await;
+        mount_read_decision(&server).await;
+        mount(
+            &server,
+            "POST",
+            "/v1/knowledge/space-sources",
+            json_ok(
+                200,
+                json!({
+                    "documents": [{
+                        "document_id": "doc-1", "title": "Fallback title", "status": "ready",
+                        "uploaded_by": "u-1", "created_at": "2026-11-01T10:00:00Z",
+                        "metadata": { "filename": "plan.pdf", "content_type": "application/pdf",
+                                      "size_bytes": 1234, "sha256": "abc", "extension": "pdf",
+                                      "text_chars": 99 }
+                    }, {
+                        "document_id": "doc-2", "title": "Only a title", "status": "ready"
+                    }],
+                    "next_cursor": "next-1"
+                }),
+            ),
+        )
+        .await;
+        let state = state_with(&server, true);
+        let (status, body) = flat(
+            list_core(&state, &member("files-user"), &HeaderMap::new(), SPACE, Some("5"), Some("c1"))
+                .await,
+        );
+        assert_eq!(status, 200);
+        let files = body["data"]["files"].as_array().unwrap();
+        assert_eq!(files.len(), 2);
+        assert_eq!(files[0]["file_name"], "plan.pdf");
+        assert_eq!(files[0]["mime_type"], "application/pdf");
+        assert_eq!(files[0]["size_bytes"], 1234);
+        assert_eq!(files[0]["uploaded_at"], "2026-11-01T10:00:00Z");
+        assert_eq!(files[1]["file_name"], "Only a title");
+        assert_eq!(body["data"]["next_cursor"], "next-1");
+        assert_eq!(body["data"]["unavailable"], json!([]));
+        let sent = server
+            .received_requests()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|request| request.url.path() == "/v1/knowledge/space-sources")
+            .unwrap();
+        let asked: Value = serde_json::from_slice(&sent.body).unwrap();
+        assert_eq!(asked, json!({ "limit": 5, "types": ["space_upload"], "cursor": "c1" }));
+        assert_eq!(
+            sent.headers.get("x-space-decision").and_then(|v| v.to_str().ok()),
+            Some("retrieval-decision-token")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_declined_decision_lists_no_files_and_names_the_gap() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let server = MockServer::start().await;
+        mount_basics(&server, false).await;
+        mount(
+            &server,
+            "POST",
+            "/api/v1/internal/spaces/retrieval-decision",
+            json_ok(403, json!({ "error": { "code": "space_membership_required", "message": "m" } })),
+        )
+        .await;
+        let state = state_with(&server, true);
+        let (status, body) = flat(
+            list_core(&state, &member("files-user"), &HeaderMap::new(), SPACE, None, None).await,
+        );
+        assert_eq!(status, 200);
+        assert_eq!(body["data"]["files"], json!([]));
+        let gaps = body["data"]["unavailable"].as_array().unwrap();
+        assert_eq!(gaps.len(), 1);
+        assert_eq!(gaps[0]["section"], "files");
+        assert_eq!(gaps[0]["code"], "files_read_not_authorized");
+        assert_eq!(requests_to(&server, "space-sources").await, 0);
+    }
+
+    #[tokio::test]
+    async fn list_validates_limit_and_cursor_and_names_a_data_plane_gap() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let server = MockServer::start().await;
+        mount_basics(&server, false).await;
+        mount_read_decision(&server).await;
+        mount(&server, "POST", "/v1/knowledge/space-sources", ResponseTemplate::new(502)).await;
+        let state = state_with(&server, true);
+        let user = member("files-user");
+        let headers = HeaderMap::new();
+        for bad in ["0", "201", "abc", "-1"] {
+            let (status, body) =
+                flat(list_core(&state, &user, &headers, SPACE, Some(bad), None).await);
+            assert_eq!(status, 400, "{bad}");
+            assert_eq!(body["error"]["code"], "invalid_limit");
+        }
+        let long = "c".repeat(257);
+        for bad in [long.as_str(), "bad\ncursor"] {
+            let (status, body) =
+                flat(list_core(&state, &user, &headers, SPACE, None, Some(bad)).await);
+            assert_eq!(status, 400);
+            assert_eq!(body["error"]["code"], "invalid_cursor");
+        }
+        assert_eq!(requests_to(&server, "space-sources").await, 0);
+        let (status, body) = flat(list_core(&state, &user, &headers, SPACE, Some("200"), None).await);
+        assert_eq!(status, 200);
+        assert_eq!(body["data"]["unavailable"][0]["code"], "files_upstream_unavailable");
+
+        // 403 from Data Plane: the room has no knowledge binding. 400 with a cursor: bad cursor.
+        let server = MockServer::start().await;
+        mount_basics(&server, false).await;
+        mount_read_decision(&server).await;
+        mount(&server, "POST", "/v1/knowledge/space-sources", ResponseTemplate::new(403)).await;
+        let state = state_with(&server, true);
+        let (_, body) = flat(list_core(&state, &user, &headers, SPACE, None, None).await);
+        assert_eq!(body["data"]["unavailable"][0]["code"], "files_binding_unavailable");
+        let server = MockServer::start().await;
+        mount_basics(&server, false).await;
+        mount_read_decision(&server).await;
+        mount(&server, "POST", "/v1/knowledge/space-sources", ResponseTemplate::new(400)).await;
+        let state = state_with(&server, true);
+        let (status, body) = flat(list_core(&state, &user, &headers, SPACE, None, Some("c")).await);
+        assert_eq!((status, body["error"]["code"].clone()), (400, json!("invalid_cursor")));
+    }
+
+    #[tokio::test]
+    async fn a_control_outage_on_the_read_decision_is_room_files_unavailable() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let server = MockServer::start().await;
+        mount_basics(&server, false).await;
+        mount(
+            &server,
+            "POST",
+            "/api/v1/internal/spaces/retrieval-decision",
+            ResponseTemplate::new(500).set_body_string("down"),
+        )
+        .await;
+        let state = state_with(&server, true);
+        let (status, body) = flat(
+            list_core(&state, &member("files-user"), &HeaderMap::new(), SPACE, None, None).await,
+        );
+        assert_eq!(status, 503);
+        assert_eq!(body["error"]["code"], "room_files_unavailable");
+    }
+
+    // ----- R4: text, R5: delete --------------------------------------------------------------
+
+    #[tokio::test]
+    async fn read_text_returns_the_text_and_caps_max_chars() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let server = MockServer::start().await;
+        mount_basics(&server, false).await;
+        mount_read_decision(&server).await;
+        mount(
+            &server,
+            "POST",
+            "/v1/knowledge/space-document",
+            json_ok(
+                200,
+                json!({ "document_id": "doc-1", "file_name": "a.txt", "text": "hello",
+                        "text_chars": 5, "truncated": false }),
+            ),
+        )
+        .await;
+        let state = state_with(&server, true);
+        let user = member("files-user");
+        let headers = HeaderMap::new();
+        let (status, body) =
+            flat(read_text_core(&state, &user, &headers, SPACE, "doc-1", Some("99999999")).await);
+        assert_eq!(status, 200);
+        assert_eq!(body["data"]["text"], "hello");
+        assert_eq!(body["data"]["truncated"], false);
+        let sent = server
+            .received_requests()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|request| request.url.path() == "/v1/knowledge/space-document")
+            .unwrap();
+        let asked: Value = serde_json::from_slice(&sent.body).unwrap();
+        assert_eq!(asked, json!({ "document_id": "doc-1", "max_chars": 1_000_000 }));
+        for bad in ["0", "abc", "-5"] {
+            let (status, body) =
+                flat(read_text_core(&state, &user, &headers, SPACE, "doc-1", Some(bad)).await);
+            assert_eq!((status, body["error"]["code"].clone()), (400, json!("invalid_max_chars")));
+        }
+        let (status, body) = flat(read_text_core(&state, &user, &headers, SPACE, "a/b", None).await);
+        assert_eq!((status, body["error"]["code"].clone()), (400, json!("invalid_document")));
+    }
+
+    #[tokio::test]
+    async fn read_text_reads_data_plane_404_403_and_400_as_file_not_found_and_a_decline_as_403() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let user = member("files-user");
+        let headers = HeaderMap::new();
+        for upstream in [404u16, 403, 400] {
+            let server = MockServer::start().await;
+            mount_basics(&server, false).await;
+            mount_read_decision(&server).await;
+            mount(&server, "POST", "/v1/knowledge/space-document", ResponseTemplate::new(upstream)).await;
+            let state = state_with(&server, true);
+            let (status, body) =
+                flat(read_text_core(&state, &user, &headers, SPACE, "doc-1", None).await);
+            assert_eq!(status, 404, "{upstream}");
+            assert_eq!(body["error"]["code"], "file_not_found");
+        }
+        let server = MockServer::start().await;
+        mount_basics(&server, false).await;
+        mount_read_decision(&server).await;
+        mount(&server, "POST", "/v1/knowledge/space-document", ResponseTemplate::new(500)).await;
+        let state = state_with(&server, true);
+        let (status, body) =
+            flat(read_text_core(&state, &user, &headers, SPACE, "doc-1", None).await);
+        assert_eq!((status, body["error"]["code"].clone()), (503, json!("room_files_unavailable")));
+
+        let server = MockServer::start().await;
+        mount_basics(&server, false).await;
+        mount(
+            &server,
+            "POST",
+            "/api/v1/internal/spaces/retrieval-decision",
+            json_ok(403, json!({ "error": { "code": "space_membership_required", "message": "m" } })),
+        )
+        .await;
+        let state = state_with(&server, true);
+        let (status, body) =
+            flat(read_text_core(&state, &user, &headers, SPACE, "doc-1", None).await);
+        assert_eq!(status, 403);
+        assert_eq!(body["error"]["code"], "space_files_not_authorized");
+        assert_eq!(requests_to(&server, "space-document").await, 0);
+    }
+
+    #[tokio::test]
+    async fn delete_preflights_the_room_document_and_answers_204() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let server = MockServer::start().await;
+        mount_basics(&server, false).await;
+        mount_read_decision(&server).await;
+        mount(
+            &server,
+            "POST",
+            "/v1/knowledge/space-document",
+            json_ok(200, json!({ "document_id": "doc-1", "text": "x" })),
+        )
+        .await;
+        mount(&server, "DELETE", "/v1/documents/doc-1", ResponseTemplate::new(200)).await;
+        let state = state_with(&server, true);
+        let (status, body) = flat(
+            delete_core(&state, &member("files-user"), &HeaderMap::new(), SPACE, "doc-1").await,
+        );
+        assert_eq!(status, 204);
+        assert_eq!(body["data"]["deleted"], true);
+        let sent = server
+            .received_requests()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|request| request.url.path() == "/v1/knowledge/space-document")
+            .unwrap();
+        let asked: Value = serde_json::from_slice(&sent.body).unwrap();
+        assert_eq!(asked["max_chars"], 1, "the preflight reads one character");
+        assert_eq!(requests_to(&server, "/v1/documents/doc-1").await, 1);
+    }
+
+    #[tokio::test]
+    async fn delete_reads_a_foreign_hidden_or_not_yours_document_as_404_without_deleting() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let user = member("files-user");
+        let headers = HeaderMap::new();
+        // The preflight cannot see the document in this room.
+        for upstream in [404u16, 403] {
+            let server = MockServer::start().await;
+            mount_basics(&server, false).await;
+            mount_read_decision(&server).await;
+            mount(&server, "POST", "/v1/knowledge/space-document", ResponseTemplate::new(upstream)).await;
+            mount(&server, "DELETE", "/v1/documents/doc-1", ResponseTemplate::new(200)).await;
+            let state = state_with(&server, true);
+            let (status, body) = flat(delete_core(&state, &user, &headers, SPACE, "doc-1").await);
+            assert_eq!(status, 404, "preflight {upstream}");
+            assert_eq!(body["error"]["code"], "file_not_found");
+            assert_eq!(requests_to(&server, "/v1/documents/").await, 0);
+        }
+        // documents-api applies the owner check: 403 and 404 both read as file_not_found.
+        for upstream in [404u16, 403] {
+            let server = MockServer::start().await;
+            mount_basics(&server, false).await;
+            mount_read_decision(&server).await;
+            mount(
+                &server,
+                "POST",
+                "/v1/knowledge/space-document",
+                json_ok(200, json!({ "document_id": "doc-1", "text": "x" })),
+            )
+            .await;
+            mount(&server, "DELETE", "/v1/documents/doc-1", ResponseTemplate::new(upstream)).await;
+            let state = state_with(&server, true);
+            let (status, body) = flat(delete_core(&state, &user, &headers, SPACE, "doc-1").await);
+            assert_eq!(status, 404, "delete {upstream}");
+            assert_eq!(body["error"]["code"], "file_not_found");
+        }
+    }
+}

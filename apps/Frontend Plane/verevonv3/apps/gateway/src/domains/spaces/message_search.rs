@@ -621,3 +621,727 @@ async fn space_features(State(state): State<AppState>) -> Response {
         }}}),
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        clean_id, hits_match_space, map_model_error, upstream_code, valid_message_id,
+        validate_search, SearchBody, QUERY_MAX_CHARS,
+    };
+    use crate::config::AppState;
+    use axum::{
+        body::Body,
+        http::{header, HeaderMap, Request, StatusCode},
+    };
+    use http_body_util::BodyExt;
+    use serde_json::{json, Value};
+    use tower::ServiceExt;
+    use wiremock::matchers::{body_string_contains, method as wm_method, path as wm_path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    const SPACE: &str = "space-1";
+
+    fn search_body(value: Value) -> SearchBody {
+        serde_json::from_value(value).expect("a SearchBody")
+    }
+
+    fn refusal(result: Result<super::ValidSearch, axum::response::Response>) -> (u16, String) {
+        match result {
+            Ok(_) => panic!("expected a refusal"),
+            Err(response) => {
+                let status = response.status().as_u16();
+                let bytes = futures_util::FutureExt::now_or_never(response.into_body().collect())
+                    .expect("a buffered body")
+                    .unwrap()
+                    .to_bytes();
+                let body: Value = serde_json::from_slice(&bytes).unwrap();
+                (status, body["error"]["code"].as_str().unwrap_or_default().to_owned())
+            }
+        }
+    }
+
+    // ----- pure validation -------------------------------------------------------------------
+
+    #[test]
+    fn query_length_is_2_to_200_with_invalid_query_details() {
+        for bad in ["", " ", "a", " a ", &"a".repeat(QUERY_MAX_CHARS + 1), "ab\ncd"] {
+            let (status, code) = refusal(validate_search(search_body(json!({ "query": bad }))));
+            assert_eq!((status, code.as_str()), (400, "invalid_query"), "{bad:?}");
+        }
+        for ok in ["ab", &"a".repeat(QUERY_MAX_CHARS), "  trimmed  ", "\u{00e5}\u{00e5}"] {
+            assert!(validate_search(search_body(json!({ "query": ok }))).is_ok(), "{ok:?}");
+        }
+        // Characters, not bytes.
+        assert!(validate_search(search_body(json!({ "query": "\u{00e5}".repeat(200) }))).is_ok());
+        // The details name the bounds so the SPA can word the hint.
+        let response = match validate_search(search_body(json!({ "query": "a" }))) {
+            Err(response) => response,
+            Ok(_) => panic!("refused"),
+        };
+        let bytes = futures_util::FutureExt::now_or_never(response.into_body().collect())
+            .unwrap()
+            .unwrap()
+            .to_bytes();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["error"]["details"], json!({ "min_chars": 2, "max_chars": 200 }));
+        let forwarded = validate_search(search_body(json!({ "query": "  trimmed  " }))).ok().unwrap();
+        assert_eq!(forwarded.forward["query"], "trimmed");
+    }
+
+    #[test]
+    fn scope_decides_which_filter_is_forwarded() {
+        let forward = |body: Value| validate_search(search_body(body)).ok().unwrap().forward;
+        let room = forward(json!({
+            "query": "plan", "thread_id": "t-1", "author_subject_id": "u-1"
+        }));
+        assert_eq!(room["scope"], "room");
+        assert!(room.get("thread_id").is_none() && room.get("author_subject_id").is_none());
+        let thread = forward(json!({
+            "query": "plan", "scope": "thread", "thread_id": "t-1", "author_subject_id": "u-1"
+        }));
+        assert_eq!(thread["thread_id"], "t-1");
+        assert!(thread.get("author_subject_id").is_none());
+        let person = forward(json!({
+            "query": "plan", "scope": "person", "thread_id": "t-1", "author_subject_id": "u-1"
+        }));
+        assert_eq!(person["author_subject_id"], "u-1");
+        assert!(person.get("thread_id").is_none());
+        // A scope without its id is refused, as is an unknown scope.
+        for body in [
+            json!({ "query": "plan", "scope": "thread" }),
+            json!({ "query": "plan", "scope": "person" }),
+            json!({ "query": "plan", "scope": "everywhere" }),
+            json!({ "query": "plan", "scope": "thread", "thread_id": "a\nb" }),
+            json!({ "query": "plan", "scope": "thread", "thread_id": "x".repeat(201) }),
+        ] {
+            let (status, code) = refusal(validate_search(search_body(body.clone())));
+            assert_eq!((status, code.as_str()), (400, "invalid_filter"), "{body}");
+        }
+    }
+
+    #[test]
+    fn role_sort_time_cursor_and_limit_are_validated_and_forwarded() {
+        let forward = |body: Value| validate_search(search_body(body)).ok().unwrap().forward;
+        let all = forward(json!({
+            "query": "plan", "prefix": true, "role": "assistant", "sort": "relevance",
+            "since": "2026-10-01T00:00:00Z", "until": "2026-11-01T00:00:00Z",
+            "cursor": "abc", "limit": 25
+        }));
+        assert_eq!(all["prefix"], true);
+        assert_eq!(all["role"], "assistant");
+        assert_eq!(all["sort"], "relevance");
+        assert_eq!(all["since"], "2026-10-01T00:00:00Z");
+        assert_eq!(all["cursor"], "abc");
+        assert_eq!(all["limit"], 25);
+        let minimal = forward(json!({ "query": "plan" }));
+        assert_eq!(minimal["prefix"], false);
+        for key in ["role", "sort", "since", "until", "cursor", "limit"] {
+            assert!(minimal.get(key).is_none(), "{key}");
+        }
+        for (body, code) in [
+            (json!({ "query": "plan", "role": "system" }), "invalid_filter"),
+            (json!({ "query": "plan", "sort": "oldest" }), "invalid_filter"),
+            (json!({ "query": "plan", "since": "x".repeat(65) }), "invalid_filter"),
+            (json!({ "query": "plan", "until": "a\nb" }), "invalid_filter"),
+            (json!({ "query": "plan", "cursor": "c".repeat(2049) }), "invalid_cursor"),
+            (json!({ "query": "plan", "cursor": "a\nb" }), "invalid_cursor"),
+        ] {
+            let (status, got) = refusal(validate_search(search_body(body.clone())));
+            assert_eq!((status, got.as_str()), (400, code), "{body}");
+        }
+    }
+
+    #[test]
+    fn id_helpers_and_the_hit_space_assertion() {
+        assert_eq!(clean_id("  a-1 "), Some("a-1".to_owned()));
+        assert_eq!(clean_id(""), None);
+        assert_eq!(clean_id("a\u{0007}b"), None);
+        assert_eq!(clean_id(&"a".repeat(201)), None);
+        assert!(valid_message_id("msg_1-A"));
+        assert!(!valid_message_id(""));
+        assert!(!valid_message_id("a/b"));
+        assert!(!valid_message_id("a b"));
+        assert!(!valid_message_id(&"a".repeat(65)));
+        let hit = |space: &str| json!({ "space_id": space, "message_id": "m", "thread_id": "t" });
+        assert!(hits_match_space(&json!([hit(SPACE), hit(SPACE)]), SPACE));
+        assert!(hits_match_space(&json!([]), SPACE));
+        assert!(!hits_match_space(&json!([hit(SPACE), hit("space-2")]), SPACE));
+        assert!(!hits_match_space(&json!([{ "space_id": SPACE, "thread_id": "t" }]), SPACE));
+        assert!(!hits_match_space(&Value::Null, SPACE));
+    }
+
+    #[test]
+    fn model_gateway_error_map() {
+        let body = |code: &str| json!({ "error": { "code": code, "message": "upstream text" } });
+        let status_and_code = |status: StatusCode, payload: Value, entries: bool| {
+            let response = map_model_error(status, &payload, entries);
+            let bytes = futures_util::FutureExt::now_or_never(response.into_body().collect())
+                .unwrap()
+                .unwrap()
+                .to_bytes();
+            let out: Value = serde_json::from_slice(&bytes).unwrap();
+            assert!(!out.to_string().contains("upstream text"), "no upstream text crosses");
+            (
+                out["error"]["code"].as_str().unwrap().to_owned(),
+            )
+        };
+        let cases: Vec<(StatusCode, Value, bool, &str)> = vec![
+            (StatusCode::NOT_FOUND, body("entry_not_found"), false, "entry_not_found"),
+            (StatusCode::NOT_FOUND, json!({}), false, "space_search_disabled"),
+            (StatusCode::NOT_FOUND, json!({}), true, "entry_not_found"),
+            (StatusCode::NOT_FOUND, body("space_search_disabled"), true, "space_search_disabled"),
+            (StatusCode::BAD_REQUEST, body("invalid_cursor"), false, "invalid_cursor"),
+            (StatusCode::BAD_REQUEST, body("invalid_filter"), false, "invalid_filter"),
+            (StatusCode::BAD_REQUEST, body("invalid_query"), false, "invalid_query"),
+            (StatusCode::BAD_REQUEST, body("something_else"), false, "invalid_model_gateway_response"),
+            (StatusCode::UNAUTHORIZED, json!({}), false, "delegated_auth_unavailable"),
+            (StatusCode::FORBIDDEN, body("space_read_not_authorized"), false, "space_read_not_authorized"),
+            (StatusCode::TOO_MANY_REQUESTS, json!({}), false, "search_busy"),
+            (StatusCode::GATEWAY_TIMEOUT, json!({}), false, "search_timeout"),
+            (StatusCode::SERVICE_UNAVAILABLE, body("search_timeout"), false, "search_timeout"),
+            (StatusCode::SERVICE_UNAVAILABLE, body("search_unavailable"), false, "search_unavailable"),
+            (StatusCode::INTERNAL_SERVER_ERROR, json!("html"), false, "search_unavailable"),
+            (StatusCode::IM_A_TEAPOT, json!({}), false, "invalid_model_gateway_response"),
+        ];
+        for (status, payload, entries, expected) in cases {
+            assert_eq!(status_and_code(status, payload, entries).0, expected, "{status}");
+        }
+        assert_eq!(upstream_code(&body("search_busy")), Some("search_busy"));
+        assert_eq!(upstream_code(&body("unknown_word")), None);
+        let teapot = map_model_error(StatusCode::TOO_MANY_REQUESTS, &json!({}), false);
+        assert_eq!(teapot.status(), StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    // ----- routes, through the real router ---------------------------------------------------
+
+    struct Fx {
+        server: MockServer,
+        state: AppState,
+    }
+
+    async fn mount(server: &MockServer, method: &str, route: &str, template: ResponseTemplate) {
+        Mock::given(wm_method(method))
+            .and(wm_path(route))
+            .respond_with(template)
+            .mount(server)
+            .await;
+    }
+
+    fn hit(space: &str) -> Value {
+        json!({ "space_id": space, "thread_id": "t-1", "message_id": "m-1", "snippet": "plan" })
+    }
+
+    fn search_ok() -> ResponseTemplate {
+        ResponseTemplate::new(200).set_body_json(json!({
+            "hits": [hit(SPACE)], "next_cursor": "n-1", "truncated": false,
+            "coverage": "shared", "excluded": []
+        }))
+    }
+
+    async fn fixture(search: ResponseTemplate, flag: bool) -> Fx {
+        let server = MockServer::start().await;
+        mount(
+            &server,
+            "GET",
+            "/api/auth/get-session",
+            ResponseTemplate::new(200).set_body_json(json!({
+                "user": { "id": "search-user", "email": "s@example.com", "emailVerified": true },
+                "session": { "activeOrganizationId": "org-1" }
+            })),
+        )
+        .await;
+        mount(
+            &server,
+            "GET",
+            "/api/v1/me/session-context",
+            ResponseTemplate::new(200).set_body_json(json!({
+                "userId": "search-user", "orgId": "org-1", "role": "member",
+                "onboardingStatus": "COMPLETED"
+            })),
+        )
+        .await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/query"))
+            .and(body_string_contains("spacesForOrgForGateway"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "value": [{ "spaceRef": SPACE, "lifecycle": "active" }]
+            })))
+            .mount(&server)
+            .await;
+        mount(
+            &server,
+            "GET",
+            "/api/session-core/token",
+            ResponseTemplate::new(200).set_body_json(json!({ "token": "session-test-token" })),
+        )
+        .await;
+        mount(
+            &server,
+            "GET",
+            &format!("/api/v1/internal/spaces/{SPACE}/membership"),
+            ResponseTemplate::new(200).set_body_json(json!({ "data": { "role": "member" } })),
+        )
+        .await;
+        mount(
+            &server,
+            "POST",
+            "/api/v1/internal/spaces/thread-read-decision",
+            ResponseTemplate::new(200).set_body_json(json!({
+                "data": { "decision": { "decision_ref": "dec-1" }, "token": "dec-token" }
+            })),
+        )
+        .await;
+        mount(&server, "POST", &format!("/v1/spaces/{SPACE}/messages/search"), search).await;
+        let mut state = crate::tests::test_state(false);
+        let uri = server.uri();
+        state.auth_core_url = uri.clone();
+        state.user_core_url = uri.clone();
+        state.model_gateway_url = uri.clone();
+        state.application_convex_url = uri;
+        state.application_convex_service_key = "application-test-key".into();
+        state.space_features.message_search_api = flag;
+        Fx { server, state }
+    }
+
+    async fn send(fx: &Fx, method: &str, uri: &str, body: Option<String>) -> (u16, HeaderMap, Value) {
+        let mut request = Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("cookie", "better-auth.session_token=session-1");
+        if body.is_some() {
+            request = request.header(header::CONTENT_TYPE, "application/json");
+        }
+        let response = crate::build_router(fx.state.clone())
+            .oneshot(request.body(Body::from(body.unwrap_or_default())).unwrap())
+            .await
+            .unwrap();
+        let status = response.status().as_u16();
+        let headers = response.headers().clone();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        (status, headers, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+    }
+
+    async fn search(fx: &Fx, body: Value) -> (u16, HeaderMap, Value) {
+        send(fx, "POST", &format!("/api/v1/spaces/{SPACE}/search"), Some(body.to_string())).await
+    }
+
+    async fn requests_to(server: &MockServer, needle: &str) -> Vec<wiremock::Request> {
+        server
+            .received_requests()
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|request| request.url.path().contains(needle))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn search_flag_off_is_404_space_search_disabled_before_any_decision() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = fixture(search_ok(), false).await;
+        let (status, headers, body) = search(&fx, json!({ "query": "plan" })).await;
+        assert_eq!(status, 404);
+        assert_eq!(body["error"]["code"], "space_search_disabled");
+        assert_eq!(headers.get(header::CACHE_CONTROL).unwrap(), "no-store");
+        assert!(requests_to(&fx.server, "thread-read-decision").await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn search_mints_fresh_decision_per_query() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = fixture(search_ok(), true).await;
+        for query in ["plan", "budget"] {
+            let (status, _, body) = search(&fx, json!({ "query": query })).await;
+            assert_eq!(status, 200);
+            assert_eq!(body["data"]["coverage"], "shared");
+        }
+        let decisions = requests_to(&fx.server, "thread-read-decision").await;
+        assert_eq!(decisions.len(), 2, "one decision per query, never reused");
+        let keys: Vec<String> = decisions
+            .iter()
+            .map(|request| {
+                let body: Value = serde_json::from_slice(&request.body).unwrap();
+                body["idempotency_key"].as_str().unwrap().to_owned()
+            })
+            .collect();
+        assert_ne!(keys[0], keys[1]);
+        let searches = requests_to(&fx.server, "messages/search").await;
+        assert_eq!(searches.len(), 2);
+        for sent in &searches {
+            let body: Value = serde_json::from_slice(&sent.body).unwrap();
+            assert_eq!(body["space_read_decision_ref"], "dec-1");
+            assert_eq!(body["space_read_decision_token"], "dec-token");
+            assert_eq!(body["scope"], "room");
+        }
+    }
+
+    #[tokio::test]
+    async fn no_store_header_and_no_cache_use() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = fixture(search_ok(), true).await;
+        let (status, headers, body) = search(&fx, json!({ "query": "secret-query-text" })).await;
+        assert_eq!(status, 200);
+        assert_eq!(headers.get(header::CACHE_CONTROL).unwrap(), "no-store");
+        assert_eq!(body["data"]["hits"].as_array().unwrap().len(), 1);
+        assert_eq!(body["data"]["next_cursor"], "n-1");
+        assert_eq!(body["data"]["truncated"], false);
+        // The query text travels in a POST body only, never in any URL.
+        for request in fx.server.received_requests().await.unwrap() {
+            assert!(
+                !request.url.to_string().contains("secret-query-text"),
+                "query leaked into {}",
+                request.url
+            );
+        }
+        // Errors are no-store too.
+        let (status, headers, _) = search(&fx, json!({ "query": "a" })).await;
+        assert_eq!(status, 400);
+        assert_eq!(headers.get(header::CACHE_CONTROL).unwrap(), "no-store");
+    }
+
+    #[tokio::test]
+    async fn strict_body_rejects_unknown_fields() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = fixture(search_ok(), true).await;
+        for extra in [
+            ("space_read_decision_token", json!("forged")),
+            ("org_id", json!("org-2")),
+            ("user_id", json!("u-2")),
+            ("space_id", json!("space-2")),
+        ] {
+            let mut body = json!({ "query": "plan" });
+            body[extra.0] = extra.1;
+            let (status, _, out) = search(&fx, body).await;
+            assert_eq!(status, 400, "{}", extra.0);
+            assert_eq!(out["error"]["code"], "invalid_request");
+        }
+        let (status, _, out) = send(
+            &fx,
+            "POST",
+            &format!("/api/v1/spaces/{SPACE}/search"),
+            Some("not json".to_owned()),
+        )
+        .await;
+        assert_eq!((status, out["error"]["code"].clone()), (400, json!("invalid_request")));
+        assert!(requests_to(&fx.server, "messages/search").await.is_empty());
+        assert!(requests_to(&fx.server, "thread-read-decision").await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn invalid_query_is_400_before_any_decision_is_minted() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = fixture(search_ok(), true).await;
+        let (status, _, body) = search(&fx, json!({ "query": "x" })).await;
+        assert_eq!(status, 400);
+        assert_eq!(body["error"]["code"], "invalid_query");
+        assert_eq!(body["error"]["details"], json!({ "min_chars": 2, "max_chars": 200 }));
+        assert!(requests_to(&fx.server, "thread-read-decision").await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn control_unreachable_is_503_not_owner_only() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = fixture(search_ok(), true).await;
+        fx.server.reset().await;
+        let fx = rebuild_after_reset(fx, |server| async move {
+            mount(
+                &server,
+                "POST",
+                "/api/v1/internal/spaces/thread-read-decision",
+                ResponseTemplate::new(500).set_body_string("down"),
+            )
+            .await;
+            server
+        })
+        .await;
+        let (status, _, body) = search(&fx, json!({ "query": "plan" })).await;
+        assert_eq!(status, 503);
+        assert_eq!(body["error"]["code"], "space_decision_unavailable");
+        assert!(requests_to(&fx.server, "messages/search").await.is_empty(), "never forwarded owner-only");
+    }
+
+    /// `reset()` drops every mock; put back the ones every search needs, then let the test add its own.
+    async fn rebuild_after_reset<F, Fut>(fx: Fx, extra: F) -> Fx
+    where
+        F: FnOnce(MockServer) -> Fut,
+        Fut: std::future::Future<Output = MockServer>,
+    {
+        let Fx { server, state } = fx;
+        mount(
+            &server,
+            "GET",
+            "/api/auth/get-session",
+            ResponseTemplate::new(200).set_body_json(json!({
+                "user": { "id": "search-user", "email": "s@example.com", "emailVerified": true },
+                "session": { "activeOrganizationId": "org-1" }
+            })),
+        )
+        .await;
+        mount(
+            &server,
+            "GET",
+            "/api/v1/me/session-context",
+            ResponseTemplate::new(200).set_body_json(json!({
+                "userId": "search-user", "orgId": "org-1", "role": "member",
+                "onboardingStatus": "COMPLETED"
+            })),
+        )
+        .await;
+        mount(
+            &server,
+            "POST",
+            "/api/query",
+            ResponseTemplate::new(200).set_body_json(json!({
+                "value": [{ "spaceRef": SPACE, "lifecycle": "active" }]
+            })),
+        )
+        .await;
+        mount(
+            &server,
+            "GET",
+            "/api/session-core/token",
+            ResponseTemplate::new(200).set_body_json(json!({ "token": "session-test-token" })),
+        )
+        .await;
+        let server = extra(server).await;
+        Fx { server, state }
+    }
+
+    #[tokio::test]
+    async fn none_decision_is_forwarded_as_no_decision() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = fixture(search_ok(), true).await;
+        fx.server.reset().await;
+        let fx = rebuild_after_reset(fx, |server| async move {
+            mount(
+                &server,
+                "POST",
+                "/api/v1/internal/spaces/thread-read-decision",
+                ResponseTemplate::new(403).set_body_json(json!({
+                    "error": "No.", "code": "space_entitlement_off", "resolvable_by": "org_admin"
+                })),
+            )
+            .await;
+            mount(
+                &server,
+                "GET",
+                &format!("/api/v1/internal/spaces/{SPACE}/membership"),
+                ResponseTemplate::new(200).set_body_json(json!({ "data": { "role": "member" } })),
+            )
+            .await;
+            mount(
+                &server,
+                "POST",
+                &format!("/v1/spaces/{SPACE}/messages/search"),
+                ResponseTemplate::new(200).set_body_json(json!({
+                    "hits": [hit(SPACE)], "coverage": "own_threads_only"
+                })),
+            )
+            .await;
+            server
+        })
+        .await;
+        let (status, _, body) = search(&fx, json!({ "query": "plan" })).await;
+        assert_eq!(status, 200);
+        assert_eq!(body["data"]["coverage"], "own_threads_only");
+        let sent = requests_to(&fx.server, "messages/search").await;
+        assert_eq!(sent.len(), 1);
+        let forwarded: Value = serde_json::from_slice(&sent[0].body).unwrap();
+        assert!(forwarded.get("space_read_decision_ref").is_none());
+        assert!(forwarded.get("space_read_decision_token").is_none());
+        // The live membership was confirmed first.
+        assert_eq!(requests_to(&fx.server, "space-1/membership").await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_declined_decision_without_live_membership_is_403_and_nothing_is_forwarded() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        for (membership, expected) in [(403u16, 403u16), (404, 403), (500, 503)] {
+            let fx = fixture(search_ok(), true).await;
+            fx.server.reset().await;
+            let fx = rebuild_after_reset(fx, |server| async move {
+                mount(
+                    &server,
+                    "POST",
+                    "/api/v1/internal/spaces/thread-read-decision",
+                    ResponseTemplate::new(403).set_body_json(json!({ "code": "space_entitlement_off" })),
+                )
+                .await;
+                mount(
+                    &server,
+                    "GET",
+                    &format!("/api/v1/internal/spaces/{SPACE}/membership"),
+                    ResponseTemplate::new(membership).set_body_string("no"),
+                )
+                .await;
+                server
+            })
+            .await;
+            let (status, _, body) = search(&fx, json!({ "query": "plan" })).await;
+            assert_eq!(status, expected, "membership {membership}");
+            let code = if expected == 403 { "active_membership_required" } else { "space_decision_unavailable" };
+            assert_eq!(body["error"]["code"], code);
+            assert!(requests_to(&fx.server, "messages/search").await.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn hit_from_other_space_is_502() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        for payload in [
+            json!({ "hits": [hit(SPACE), hit("space-other")], "coverage": "shared" }),
+            json!({ "hits": [hit(SPACE)], "coverage": "everything" }),
+            json!({ "hits": "nope", "coverage": "shared" }),
+            json!({ "coverage": "shared" }),
+        ] {
+            let fx = fixture(ResponseTemplate::new(200).set_body_json(payload.clone()), true).await;
+            let (status, _, body) = search(&fx, json!({ "query": "plan" })).await;
+            assert_eq!(status, 502, "{payload}");
+            assert_eq!(body["error"]["code"], "invalid_model_gateway_response");
+            assert!(body.get("data").is_none(), "no partial hits are returned");
+        }
+    }
+
+    #[tokio::test]
+    async fn model_gateway_refusals_are_mapped_through_the_route() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        for (upstream, status, code) in [
+            (429u16, 429u16, "search_busy"),
+            (504, 503, "search_timeout"),
+            (500, 503, "search_unavailable"),
+            (403, 403, "space_read_not_authorized"),
+            (404, 404, "space_search_disabled"),
+        ] {
+            let fx = fixture(ResponseTemplate::new(upstream).set_body_json(json!({})), true).await;
+            let (got, headers, body) = search(&fx, json!({ "query": "plan" })).await;
+            assert_eq!((got, body["error"]["code"].as_str().unwrap()), (status, code));
+            assert_eq!(headers.get(header::CACHE_CONTROL).unwrap(), "no-store");
+        }
+    }
+
+    // ----- entries and features --------------------------------------------------------------
+
+    fn entry_ok() -> ResponseTemplate {
+        ResponseTemplate::new(200).set_body_json(json!({
+            "space_id": SPACE, "thread_id": "t-1", "message_id": "m-1"
+        }))
+    }
+
+    async fn mount_resolve(fx: &Fx, template: ResponseTemplate) {
+        mount(&fx.server, "POST", &format!("/v1/spaces/{SPACE}/messages/resolve"), template).await;
+    }
+
+    #[tokio::test]
+    async fn entries_route_resolves_a_message_address_under_a_fresh_decision() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = fixture(search_ok(), true).await;
+        mount_resolve(&fx, entry_ok()).await;
+        let (status, headers, body) =
+            send(&fx, "GET", &format!("/api/v1/spaces/{SPACE}/entries/m-1"), None).await;
+        assert_eq!(status, 200);
+        assert_eq!(headers.get(header::CACHE_CONTROL).unwrap(), "no-store");
+        assert_eq!(
+            body["data"],
+            json!({ "kind": "message", "space_ref": SPACE, "thread_id": "t-1", "message_id": "m-1" })
+        );
+        let sent = requests_to(&fx.server, "messages/resolve").await;
+        let forwarded: Value = serde_json::from_slice(&sent[0].body).unwrap();
+        assert_eq!(forwarded["message_id"], "m-1");
+        assert_eq!(forwarded["space_read_decision_ref"], "dec-1");
+        assert_eq!(forwarded["space_read_decision_token"], "dec-token");
+    }
+
+    #[tokio::test]
+    async fn entries_route_returns_403_when_no_decision() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = fixture(search_ok(), true).await;
+        fx.server.reset().await;
+        let mut fx = rebuild_after_reset(fx, |server| async move {
+            mount(
+                &server,
+                "POST",
+                "/api/v1/internal/spaces/thread-read-decision",
+                ResponseTemplate::new(403).set_body_json(json!({
+                    "error": "No.", "code": "space_membership_required", "resolvable_by": "none"
+                })),
+            )
+            .await;
+            server
+        })
+        .await;
+        let uri = format!("/api/v1/spaces/{SPACE}/entries/m-1");
+        let (status, _, body) = send(&fx, "GET", &uri, None).await;
+        assert_eq!(status, 403, "unlike search there is no owner-only fallback");
+        assert_eq!(body["error"]["code"], "space_read_not_authorized");
+        // With typed denials on, the reason is carried.
+        fx.state.space_features.denials_typed = true;
+        let (status, _, body) = send(&fx, "GET", &uri, None).await;
+        assert_eq!(status, 403);
+        assert_eq!(body["error"]["details"]["reason"], "space_membership_required");
+        assert!(requests_to(&fx.server, "messages/resolve").await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn entries_route_hides_malformed_missing_and_foreign_messages_alike() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = fixture(search_ok(), true).await;
+        // A malformed id never reaches a decision.
+        let (status, _, body) =
+            send(&fx, "GET", &format!("/api/v1/spaces/{SPACE}/entries/bad%20id"), None).await;
+        assert_eq!((status, body["error"]["code"].clone()), (404, json!("entry_not_found")));
+        assert!(requests_to(&fx.server, "thread-read-decision").await.is_empty());
+        // A missing message (model-gateway 404 without a code) and an unrecognised answer.
+        mount_resolve(&fx, ResponseTemplate::new(404).set_body_json(json!({}))).await;
+        let (status, _, body) =
+            send(&fx, "GET", &format!("/api/v1/spaces/{SPACE}/entries/m-1"), None).await;
+        assert_eq!((status, body["error"]["code"].clone()), (404, json!("entry_not_found")));
+        // A resolved message that is another Space's, or another id, is a contract failure.
+        for payload in [
+            json!({ "space_id": "space-other", "thread_id": "t-1", "message_id": "m-1" }),
+            json!({ "space_id": SPACE, "thread_id": "t-1", "message_id": "m-2" }),
+            json!({ "space_id": SPACE, "message_id": "m-1" }),
+        ] {
+            let fx = fixture(search_ok(), true).await;
+            mount_resolve(&fx, ResponseTemplate::new(200).set_body_json(payload.clone())).await;
+            let (status, _, body) =
+                send(&fx, "GET", &format!("/api/v1/spaces/{SPACE}/entries/m-1"), None).await;
+            assert_eq!(status, 502, "{payload}");
+            assert_eq!(body["error"]["code"], "invalid_model_gateway_response");
+        }
+        // Flag off.
+        let off = fixture(search_ok(), false).await;
+        let (status, _, body) =
+            send(&off, "GET", &format!("/api/v1/spaces/{SPACE}/entries/m-1"), None).await;
+        assert_eq!((status, body["error"]["code"].clone()), (404, json!("space_search_disabled")));
+    }
+
+    #[tokio::test]
+    async fn features_route_is_registered_before_space_ref() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let mut fx = fixture(search_ok(), false).await;
+        let (status, headers, body) = send(&fx, "GET", "/api/v1/spaces/features", None).await;
+        assert_eq!(status, 200, "a room can never shadow the static segment");
+        assert_eq!(headers.get(header::CACHE_CONTROL).unwrap(), "no-store");
+        assert_eq!(
+            body["data"]["features"],
+            json!({
+                "message_search": false, "entry_links": false, "command_palette": false,
+                "room_pins": false, "thread_fork": false, "attention": false
+            })
+        );
+        fx.state.space_features.message_search_api = true;
+        let (_, _, body) = send(&fx, "GET", "/api/v1/spaces/features", None).await;
+        assert_eq!(body["data"]["features"]["message_search"], false, "needs the UI flag too");
+        fx.state.space_features.message_search_ui = true;
+        fx.state.space_features.entry_links_ui = true;
+        fx.state.space_features.command_palette_ui = true;
+        fx.state.space_features.thread_fork_api = true;
+        fx.state.space_features.room_pins = true;
+        let (_, _, body) = send(&fx, "GET", "/api/v1/spaces/features", None).await;
+        let features = &body["data"]["features"];
+        for key in ["message_search", "entry_links", "command_palette", "thread_fork", "room_pins"] {
+            assert_eq!(features[key], true, "{key}");
+        }
+        assert_eq!(features["attention"], false, "needs both attention flags");
+    }
+}
