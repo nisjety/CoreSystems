@@ -250,6 +250,10 @@ func serviceScopesForRequest(request *http.Request) []string {
 		return []string{"billing:usage:write:any"}
 	case len(rest) == 2 && rest[0] == "entitlements" && request.Method == http.MethodGet:
 		return []string{"billing:entitlement:read:self", "billing:entitlement:read:any"}
+	case len(rest) == 2 && rest[0] == "quarry" && rest[1] == "limits" && request.Method == http.MethodGet:
+		// Machine-only: no delegated :self scope reaches the Quarry limits
+		// snapshot; the handler further pins the principal and the org binding.
+		return []string{"billing:quota:read:any"}
 	case len(rest) == 2 && rest[0] == "quotas" && request.Method == http.MethodGet:
 		return []string{"billing:quota:read:self", "billing:quota:read:any"}
 	case len(rest) == 1 && rest[0] == "invoices" && request.Method == http.MethodPost:

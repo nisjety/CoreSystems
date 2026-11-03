@@ -16,6 +16,8 @@ type Server struct {
 	router      *gin.Engine
 	httpServer  *http.Server
 	billingCore *billing.Service
+	// quarryLimits serves the quarry-edge limits snapshot (quota_handler.go).
+	quarryLimits quarryLimitsReader
 }
 
 func NewServer(port int, billingCore *billing.Service) *Server {
@@ -32,6 +34,9 @@ func NewServer(port int, billingCore *billing.Service) *Server {
 	s := &Server{
 		router:      router,
 		billingCore: billingCore,
+	}
+	if billingCore != nil {
+		s.quarryLimits = billingCore
 	}
 	s.setupRoutes()
 	s.httpServer = &http.Server{
@@ -67,6 +72,8 @@ func (s *Server) setupRoutes() {
 	v1.POST("/orgs/:orgId/usage", s.recordUsage)
 	v1.GET("/orgs/:orgId/entitlements/:feature", s.checkEntitlement)
 	v1.GET("/orgs/:orgId/quotas/:metric", s.getQuotaStatus)
+	// quarry-edge only, org-bound, read-only (W2-CP-L1).
+	s.registerQuarryLimitsRoute(v1)
 	v1.POST("/orgs/:orgId/invoices", s.createInvoice)
 	v1.POST("/orgs/:orgId/checkout-session", s.createCheckoutSession)
 	v1.POST("/orgs/:orgId/checkout-session/confirm", s.confirmCheckoutSession)
