@@ -211,6 +211,88 @@ impl DocRouting {
     }
 }
 
+/// E3.6-6b: the environment variable that sends Office documents (XLSX, PPTX,
+/// OpenDocument and EPUB) to the imports-core extract client (E3.6-6a). Off by
+/// default; it takes effect only under `QUARRY_EDGE__DOC_ROUTING=on`.
+pub const OFFICE_VIA_IMPORTS_ENV: &str = "QUARRY_EDGE__OFFICE_VIA_IMPORTS";
+
+/// E3.6-6b: whether Office documents take the imports-core extract client.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum OfficeViaImports {
+    /// Office documents keep their existing path: a typed 415 where routing
+    /// refuses unsupported bodies, the HTML path otherwise.
+    #[default]
+    Off,
+    /// XLSX, PPTX, OpenDocument and EPUB go to the extract client, in the
+    /// document lane (`DocRouting::On`).
+    On,
+}
+
+impl OfficeViaImports {
+    /// `off` / `false` / `0` / empty, or `on` / `true` / `1`, any case.
+    pub fn parse(raw: &str) -> Result<Self, String> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "" | "off" | "false" | "0" => Ok(Self::Off),
+            "on" | "true" | "1" => Ok(Self::On),
+            other => Err(format!(
+                "{OFFICE_VIA_IMPORTS_ENV}: unknown value {other:?} (expected off or on)"
+            )),
+        }
+    }
+
+    /// Read once per process. Unset is `Off`. An unreadable value is `Off` as
+    /// well (and logged): this route sends document bytes to another service,
+    /// so a bad value must not switch it on.
+    pub fn cached() -> Self {
+        static MODE: std::sync::OnceLock<OfficeViaImports> = std::sync::OnceLock::new();
+        *MODE.get_or_init(|| match std::env::var(OFFICE_VIA_IMPORTS_ENV) {
+            Err(_) => Self::Off,
+            Ok(raw) => Self::parse(&raw).unwrap_or_else(|message| {
+                tracing::warn!(%message, "unreadable Office route flag; the route stays off");
+                Self::Off
+            }),
+        })
+    }
+}
+
+/// E3.6-6b: the Office kinds the imports-core extract client serves. PDF and
+/// DOCX keep their Rust extractors.
+fn is_imports_office_kind(kind: quarry_transform::sniff::ContentKind) -> bool {
+    use quarry_transform::sniff::ContentKind;
+    matches!(
+        kind,
+        ContentKind::Xlsx | ContentKind::Pptx | ContentKind::Odf | ContentKind::Epub
+    )
+}
+
+/// E3.6-6b: whether a body takes the imports-core extract client. It needs the
+/// document lane (`DocRouting::On`, as PDF and DOCX do), the flag on, and an
+/// Office kind. Every other body keeps its existing path.
+fn takes_imports_route(
+    doc_routing: DocRouting,
+    flag: OfficeViaImports,
+    kind: quarry_transform::sniff::ContentKind,
+) -> bool {
+    doc_routing == DocRouting::On && flag == OfficeViaImports::On && is_imports_office_kind(kind)
+}
+
+/// The Office flag a run reads. A test installs its own for the thread it runs
+/// on, as for the PII stage.
+fn office_via_imports_mode() -> OfficeViaImports {
+    #[cfg(test)]
+    if let Some(mode) = TEST_OFFICE_VIA_IMPORTS.with(|slot| *slot.borrow()) {
+        return mode;
+    }
+    OfficeViaImports::cached()
+}
+
+#[cfg(test)]
+thread_local! {
+    // Per-thread test override for the flag.
+    static TEST_OFFICE_VIA_IMPORTS: std::cell::RefCell<Option<OfficeViaImports>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 /// E3.6-4a: the environment variable that turns the fail-closed PII redaction
 /// stage on (`off`, the default, or `on`).
 pub const PII_REDACTION_ENV: &str = "QUARRY_EDGE__PII_REDACTION";
