@@ -7,6 +7,24 @@ import { and, asc, count, desc, eq, ilike, or, type SQL } from 'drizzle-orm';
 import { redisSecondaryStorage } from '../db/redis';
 import { createHash, randomBytes } from 'crypto';
 import {
+  API_KEY_AGENT_MAX_EXPIRY_SECONDS,
+  API_KEY_USER_CONFIG_ID,
+  apiKeyAgentExchangeEnabled,
+  apiKeyAgentExpiresIn,
+  apiKeyPermissionList,
+  browserAgentPermissions,
+  plainScopesRefusal,
+  readApiKeyAgentMetadata,
+  stripAgentMetadata,
+  validateApiKeyAgentRequest,
+  withoutBrowserAgentPermission,
+  type ApiKeyAgentMetadata,
+} from './api-key-metadata';
+import {
+  loadApiKeyRevocationRow,
+  loadOrganizationRole,
+} from '../nats/api-key-revocation.publisher';
+import {
   authorizeAuthInternalServiceToken,
   loadAuthInternalServiceCredentials,
 } from '../internal/internal-service-auth';
@@ -624,6 +642,47 @@ const GenerateClientSecretSchema = z.object({
   clientId: z.string().min(1),
 });
 
+// INNH-10 CP-2: a browser:agent key (user key, org-bound, host ceiling,
+// budget ceiling, zdr flag, expiry at most 90 days).
+const BrowserAgentKeySchema = z.object({
+  hosts: z.array(z.string()).min(1),
+  budget: z
+    .object({
+      microUsd: z.number().int().positive().optional(),
+      maxSteps: z.number().int().positive().optional(),
+      maxRuntimeSeconds: z.number().int().positive().optional(),
+    })
+    .optional(),
+  zdr: z.boolean().default(false),
+});
+
+const BrowserAgentKeyOut = z.object({
+  organizationId: z.string(),
+  hosts: z.array(z.string()),
+  budget: z.object({
+    microUsd: z.number(),
+    maxSteps: z.number(),
+    maxRuntimeSeconds: z.number(),
+  }),
+  zdr: z.boolean(),
+});
+
+function browserAgentOut(
+  metadata: ApiKeyAgentMetadata | null,
+): z.infer<typeof BrowserAgentKeyOut> | undefined {
+  if (!metadata) return undefined;
+  return {
+    organizationId: metadata.org_id,
+    hosts: metadata.key_hosts,
+    budget: {
+      microUsd: metadata.budget_ceiling.micro_usd,
+      maxSteps: metadata.budget_ceiling.max_steps,
+      maxRuntimeSeconds: metadata.budget_ceiling.max_runtime_s,
+    },
+    zdr: metadata.zdr,
+  };
+}
+
 // Sprint 3: API Keys & Bearer Authentication Schemas
 const CreateAPIKeySchema = z.object({
   name: z.string().min(1, 'API key name is required'),
@@ -631,6 +690,7 @@ const CreateAPIKeySchema = z.object({
   organizationId: z.string().min(1, 'Organization ID is required'),
   scopes: z.array(z.string()).default(['read']),
   expiresAt: z.date().optional(),
+  browserAgent: BrowserAgentKeySchema.optional(),
   rateLimit: z
     .object({
       requests: z.number().min(1).default(1000),
@@ -641,6 +701,16 @@ const CreateAPIKeySchema = z.object({
 
 const DeleteAPIKeySchema = z.object({
   keyId: z.string().min(1),
+});
+
+// INNH-10 CP-2: change a user key's browser:agent grant, enabled state or
+// expiry. browserAgent null removes the grant (publishes api_key_revoked).
+const UpdateAPIKeyAgentSchema = z.object({
+  keyId: z.string().min(1),
+  organizationId: z.string().min(1).optional(),
+  enabled: z.boolean().optional(),
+  browserAgent: BrowserAgentKeySchema.nullable().optional(),
+  expiresAt: z.date().optional(),
 });
 
 const ListAPIKeysSchema = z.object({
@@ -2408,9 +2478,11 @@ const createAPIKeyProcedure = os
             .optional(),
           expiresAt: z.string().optional(),
           createdAt: z.string(),
+          browserAgent: BrowserAgentKeyOut.optional(),
         })
         .optional(),
       error: z.string().optional(),
+      reason: z.string().optional(),
     }),
   )
   .handler(async ({ input, context }) => {
@@ -2426,6 +2498,93 @@ const createAPIKeyProcedure = os
       }
 
       const createApiKey = getAuthApiMethod('createApiKey');
+
+      if (input.browserAgent) {
+        const validated = validateApiKeyAgentRequest(
+          {
+            organizationId: input.organizationId,
+            hosts: input.browserAgent.hosts,
+            budget: input.browserAgent.budget,
+            zdr: input.browserAgent.zdr,
+            expiresAt: input.expiresAt,
+          },
+          {
+            userId: session.user.id,
+            orgRole: await loadOrganizationRole(
+              session.user.id,
+              input.organizationId,
+            ),
+          },
+          { exchangeEnabled: apiKeyAgentExchangeEnabled(), now: new Date() },
+        );
+        if (!validated.ok) {
+          return {
+            success: false,
+            error: validated.message,
+            reason: validated.reason,
+          };
+        }
+        // OD-4: a user key owned by the creator. OD-5: it carries exactly
+        // browser:agent. Server-side call (no headers): permissions and the
+        // rate limit are server-only Better Auth properties.
+        const permissions = browserAgentPermissions([]);
+        const agentRateLimit = input.rateLimit
+          ? {
+              rateLimitEnabled: true,
+              rateLimitTimeWindow: rateLimitPeriodToMs(input.rateLimit.period),
+              rateLimitMax: input.rateLimit.requests,
+            }
+          : {};
+        const agentKey = (await createApiKey({
+          body: {
+            configId: API_KEY_USER_CONFIG_ID,
+            userId: session.user.id,
+            name: input.name,
+            expiresIn: validated.value.expiresIn,
+            metadata: {
+              description: input.description,
+              scopes: permissions.api,
+              ...validated.value.metadata,
+            },
+            permissions,
+            ...agentRateLimit,
+          },
+        })) as {
+          id?: string;
+          name?: string | null;
+          key?: string;
+          createdAt?: Date | string;
+          expiresAt?: Date | string | null;
+        };
+        if (!agentKey.key) {
+          throw new Error('API key creation did not return a key');
+        }
+        return {
+          success: true,
+          apiKey: {
+            id: agentKey.id ?? '',
+            name: agentKey.name || input.name,
+            key: agentKey.key,
+            organizationId: input.organizationId,
+            scopes: permissions.api,
+            description: input.description,
+            createdAt:
+              toIsoString(agentKey.createdAt) ?? new Date().toISOString(),
+            expiresAt: toIsoString(agentKey.expiresAt),
+            rateLimit: input.rateLimit,
+            browserAgent: browserAgentOut(validated.value.metadata),
+          },
+        };
+      }
+
+      const scopeRefusal = plainScopesRefusal(input.scopes);
+      if (scopeRefusal && !scopeRefusal.ok) {
+        return {
+          success: false,
+          error: scopeRefusal.message,
+          reason: scopeRefusal.reason,
+        };
+      }
       const expiresIn = input.expiresAt
         ? Math.max(
             60,
@@ -2536,6 +2695,8 @@ const listAPIKeysProcedure = os
             createdAt: z.string(),
             lastUsed: z.string().optional(),
             isExpired: z.boolean(),
+            enabled: z.boolean().optional(),
+            browserAgent: BrowserAgentKeyOut.optional(),
           }),
         )
         .optional(),
@@ -2579,6 +2740,7 @@ const listAPIKeysProcedure = os
           expiresAt?: Date | string | null;
           createdAt?: Date | string;
           lastRequest?: Date | string | null;
+          enabled?: boolean | null;
         }>;
         total?: number;
       };
@@ -2622,6 +2784,10 @@ const listAPIKeysProcedure = os
             lastUsed: toIsoString(key.lastRequest),
             isExpired: Boolean(
               key.expiresAt && new Date(key.expiresAt) <= new Date(),
+            ),
+            enabled: typeof key.enabled === 'boolean' ? key.enabled : undefined,
+            browserAgent: browserAgentOut(
+              readApiKeyAgentMetadata(key.metadata),
             ),
           };
         });
@@ -2686,6 +2852,169 @@ const deleteAPIKeyProcedure = os
         success: false,
         error:
           error instanceof Error ? error.message : 'Failed to delete API key',
+      };
+    }
+  });
+
+const updateAPIKeyAgentProcedure = os
+  .input(UpdateAPIKeyAgentSchema)
+  .output(
+    z.object({
+      success: z.boolean(),
+      apiKey: z
+        .object({
+          id: z.string(),
+          enabled: z.boolean().optional(),
+          scopes: z.array(z.string()),
+          expiresAt: z.string().optional(),
+          browserAgent: BrowserAgentKeyOut.optional(),
+        })
+        .optional(),
+      error: z.string().optional(),
+      reason: z.string().optional(),
+    }),
+  )
+  .handler(async ({ input, context }) => {
+    try {
+      const headers = headersFromCtx(context as RpcContext);
+      const session = await getAuthenticatedSession(headers);
+      if (!session || !session.user) {
+        return {
+          success: false,
+          error: 'Authentication required to update API key',
+        };
+      }
+
+      const row = await loadApiKeyRevocationRow(input.keyId);
+      if (
+        !row ||
+        row.configId !== API_KEY_USER_CONFIG_ID ||
+        row.referenceId !== session.user.id
+      ) {
+        return { success: false, error: 'API key not found' };
+      }
+
+      const now = new Date();
+      const current = readApiKeyAgentMetadata(row.metadata);
+      const body: Record<string, unknown> = {
+        configId: API_KEY_USER_CONFIG_ID,
+        keyId: input.keyId,
+        userId: session.user.id,
+      };
+      if (input.enabled !== undefined) body.enabled = input.enabled;
+
+      if (input.browserAgent === null) {
+        body.permissions = withoutBrowserAgentPermission(row.permissions);
+        body.metadata = stripAgentMetadata(row.metadata);
+      } else if (input.browserAgent) {
+        if (
+          current &&
+          input.organizationId &&
+          input.organizationId !== current.org_id
+        ) {
+          return {
+            success: false,
+            error: 'A browser:agent key stays bound to its organization',
+            reason: 'api_key_org_immutable',
+          };
+        }
+        const organizationId = current?.org_id ?? input.organizationId;
+        const validated = validateApiKeyAgentRequest(
+          {
+            organizationId,
+            hosts: input.browserAgent.hosts,
+            budget: input.browserAgent.budget,
+            zdr: input.browserAgent.zdr,
+            expiresAt: input.expiresAt,
+          },
+          {
+            userId: session.user.id,
+            orgRole: organizationId
+              ? await loadOrganizationRole(session.user.id, organizationId)
+              : null,
+          },
+          { exchangeEnabled: apiKeyAgentExchangeEnabled(), now },
+        );
+        if (!validated.ok) {
+          return {
+            success: false,
+            error: validated.message,
+            reason: validated.reason,
+          };
+        }
+        body.metadata = {
+          ...stripAgentMetadata(row.metadata),
+          ...validated.value.metadata,
+        };
+        body.permissions = browserAgentPermissions(
+          apiKeyPermissionList(row.permissions),
+        );
+      }
+
+      const agentAfterUpdate =
+        input.browserAgent !== null && (input.browserAgent || current);
+      if (input.expiresAt) {
+        const expiresIn = agentAfterUpdate
+          ? apiKeyAgentExpiresIn(input.expiresAt, now)
+          : {
+              ok: true as const,
+              value: Math.max(
+                86_400,
+                Math.floor((input.expiresAt.getTime() - now.getTime()) / 1000),
+              ),
+            };
+        if (!expiresIn.ok) {
+          return {
+            success: false,
+            error: expiresIn.message,
+            reason: expiresIn.reason,
+          };
+        }
+        body.expiresIn = expiresIn.value;
+      } else if (agentAfterUpdate) {
+        // OD-15: an agent key never outlives 90 days from its last grant.
+        const currentExpiry = row.expiresAt
+          ? new Date(row.expiresAt).getTime()
+          : null;
+        if (
+          currentExpiry === null ||
+          currentExpiry - now.getTime() > API_KEY_AGENT_MAX_EXPIRY_SECONDS * 1000
+        ) {
+          body.expiresIn = API_KEY_AGENT_MAX_EXPIRY_SECONDS;
+        }
+      }
+
+      // Server-side call (no headers) so permissions may change; the
+      // Better Auth before-hook in auth.ts re-checks the ceiling and
+      // publishes api_key_revoked (fail-closed) for disable / grant removal.
+      const updateApiKey = getAuthApiMethod('updateApiKey');
+      const updated = (await updateApiKey({ body })) as {
+        id?: string;
+        enabled?: boolean | null;
+        expiresAt?: Date | string | null;
+        permissions?: unknown;
+        metadata?: unknown;
+      };
+
+      return {
+        success: true,
+        apiKey: {
+          id: updated.id ?? input.keyId,
+          enabled:
+            typeof updated.enabled === 'boolean' ? updated.enabled : undefined,
+          scopes: apiKeyScopesFrom(updated.permissions ?? body.permissions),
+          expiresAt: toIsoString(updated.expiresAt),
+          browserAgent: browserAgentOut(
+            readApiKeyAgentMetadata(updated.metadata ?? body.metadata),
+          ),
+        },
+      };
+    } catch (error) {
+      console.error('❌ API Key update failed:', error);
+      return {
+        success: false,
+        error:
+          error instanceof Error ? error.message : 'Failed to update API key',
       };
     }
   });
@@ -4214,6 +4543,7 @@ export const orpcRouter = {
     create: createAPIKeyProcedure,
     list: listAPIKeysProcedure,
     delete: deleteAPIKeyProcedure,
+    updateAgent: updateAPIKeyAgentProcedure,
     rotate: rotateAPIKeyProcedure,
     validate: validateAPIKeyProcedure,
   },
