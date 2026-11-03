@@ -39,6 +39,84 @@ pub fn spawn_run_sweeper(state: AppState) -> tokio::task::JoinHandle<()> {
 }
 
 // ---------------------------------------------------------------------------
+// W3-E3.4-2/3 (F-t2-035): the durable side of a release.
+//
+// The idle and absolute TTLs are WS2.D's (`RunLive::verdict` on the run's two clocks,
+// `RunLimits`) and W2-U39b's (the human-browse lifetimes below). A release always left a
+// non-ZDR checkpoint `active`: a resume worked, but nothing durable said the run had ended.
+// With `QUARRY_EDGE__RUN_TTL` on, a run the sweeper releases moves its checkpoint along the
+// D8-10 arc: `expired` (or `suspended` when its profile was persisted), still resumable with
+// `resume_run_id`, and back to `active` when the resume saves its first checkpoint
+// (`start_run`). A ZDR run keeps no checkpoint, so it has no arc and is never resumable.
+// Default off: the checkpoint stays `active`, as before.
+// ---------------------------------------------------------------------------
+
+/// The switch for the durable release arc. Unset, empty, `0`, `false` or `off` is off;
+/// `1`, `true` or `on` is on; anything else is off (and logged).
+pub const ENV_RUN_TTL: &str = "QUARRY_EDGE__RUN_TTL";
+
+/// Parse [`ENV_RUN_TTL`] with the same words as the other switches.
+pub fn parse_run_ttl(raw: Option<&str>) -> Result<bool, String> {
+    match raw.map(|value| value.trim().to_ascii_lowercase()).as_deref() {
+        None | Some("") | Some("0") | Some("false") | Some("off") => Ok(false),
+        Some("1") | Some("true") | Some("on") => Ok(true),
+        Some(other) => Err(format!(
+            "{ENV_RUN_TTL} must be 0, 1, on, off, true or false, got {other:?}"
+        )),
+    }
+}
+
+/// Whether a release marks the run's checkpoint now. Read at each pass (and by a resume,
+/// for its log line); unreadable is off.
+pub fn run_ttl_enabled() -> bool {
+    match parse_run_ttl(std::env::var(ENV_RUN_TTL).ok().as_deref()) {
+        Ok(on) => on,
+        Err(_) => {
+            // The value is not echoed: an unreadable switch is off, and the boot log says so.
+            tracing::warn!("run TTL switch unreadable; off");
+            false
+        }
+    }
+}
+
+/// Mark the checkpoint of a run the sweeper just released (`finish_run` saved it `active`
+/// with the trace seq spent): `expired`, or `suspended` for a persisted profile. Nothing for
+/// a ZDR run. Skipped when the id is live again or a resume of it is being committed, so a
+/// resume that won the race keeps its `active` checkpoint; a race lost after this check is
+/// healed by the resumed run's next save, which writes `active`. A `closed` checkpoint (a
+/// concurrent `DELETE`) stays closed: the store never moves it. Returns the status written.
+async fn mark_released_checkpoint(
+    state: &AppState,
+    run_id: &str,
+    handle: &RunHandle,
+) -> Option<AgentRunStatus> {
+    let (org_id, rid, status) = {
+        let entry = handle.entry.lock().await;
+        let status = released_checkpoint_status(entry.zdr.is_active(), entry.lease.persist_profile)?;
+        (entry.org_id.clone(), entry.run_id.clone(), status)
+    };
+    let resumed = state
+        .agent_runs
+        .lock()
+        .expect("agent_runs mutex poisoned")
+        .is_live_or_resuming(run_id);
+    if resumed {
+        return None;
+    }
+    match state.receipts.mark_run_checkpoint(&org_id, &rid, status).await {
+        Ok(()) => Some(status),
+        Err(error) => {
+            tracing::warn!(
+                %run_id,
+                error_class = crate::zdr_log::class(&error),
+                "could not mark the checkpoint of a released run"
+            );
+            None
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // D2-060 (WS8.B / WS8.C): a person's human-browse run.
 //
 // Its lifetimes are the plan's (idle 900 s, takeover 1800 s, absolute 4 h; see
@@ -283,6 +361,17 @@ pub async fn sweep_once_with(
     now_ms: u64,
     grants: Option<&HumanGrantSweep<'_>>,
 ) -> SweepReport {
+    sweep_once_ttl(state, now_ms, grants, run_ttl_enabled()).await
+}
+
+/// [`sweep_once_with`] with the W3-E3.4-2/3 switch given explicitly (`run_ttl`: mark each
+/// released run's checkpoint `expired`/`suspended`).
+pub async fn sweep_once_ttl(
+    state: &AppState,
+    now_ms: u64,
+    grants: Option<&HumanGrantSweep<'_>>,
+    run_ttl: bool,
+) -> SweepReport {
     let limits = state.agent_runs.limits().clone();
     let runs = state
         .agent_runs
@@ -350,10 +439,20 @@ pub async fn sweep_once_with(
             age_s = verdict.age_s,
             "run expired"
         );
+        let released = run_ttl.then(|| handle.clone());
         match finish_run(state, &run_id, handle, CloseReason::Expired(verdict)).await {
             Ok(_) => {
                 report.expired += 1;
                 crate::metrics::record_run_expired(reason, 1);
+                if let Some(handle) = released {
+                    if let Some(status) = mark_released_checkpoint(state, &run_id, &handle).await {
+                        tracing::info!(
+                            %run_id,
+                            checkpoint_status = status.as_str(),
+                            "released run is resumable"
+                        );
+                    }
+                }
             }
             Err(error) => tracing::warn!(
                 %run_id,
@@ -555,5 +654,157 @@ mod human_grant_tests {
         assert_eq!(parse_human_grant_renew(Some("")), Ok(false));
         assert_eq!(parse_human_grant_renew(Some("on")), Ok(true));
         assert!(parse_human_grant_renew(Some("yes please")).is_err());
+    }
+}
+
+#[cfg(test)]
+mod run_ttl_tests {
+    use super::*;
+
+    use crate::budget::RunClass;
+    use crate::limits::RunCapOverride;
+    use crate::test_support::{claims_for_org, insert_live_run, test_state, StubDriver};
+
+    /// Far past the default interactive idle limit (900 s) of a run inserted now.
+    fn later() -> u64 {
+        now_ms() + 3_600_000
+    }
+
+    async fn ids(handle: &RunHandle) -> (String, RunKind) {
+        let entry = handle.entry.lock().await;
+        (entry.org_id.clone(), entry.run_id.clone())
+    }
+
+    async fn status_of(state: &AppState, handle: &RunHandle) -> Option<AgentRunStatus> {
+        let (org_id, rid) = ids(handle).await;
+        state
+            .receipts
+            .load_run_checkpoint(&org_id, &rid)
+            .await
+            .expect("the in-memory store reads")
+            .map(|checkpoint| checkpoint.status)
+    }
+
+    #[test]
+    fn the_run_ttl_switch_defaults_off_and_rejects_typos() {
+        assert_eq!(parse_run_ttl(None), Ok(false));
+        assert_eq!(parse_run_ttl(Some("")), Ok(false));
+        assert_eq!(parse_run_ttl(Some(" OFF ")), Ok(false));
+        assert_eq!(parse_run_ttl(Some("on")), Ok(true));
+        assert_eq!(parse_run_ttl(Some("1")), Ok(true));
+        assert!(parse_run_ttl(Some("sometimes")).is_err());
+    }
+
+    #[tokio::test]
+    async fn with_the_switch_off_a_released_run_keeps_an_active_checkpoint() {
+        let state = test_state(StubDriver::ok());
+        let handle = insert_live_run(&state, &claims_for_org("org"));
+        let report = sweep_once_ttl(&state, later(), None, false).await;
+        assert_eq!(report.expired, 1);
+        assert_eq!(status_of(&state, &handle).await, Some(AgentRunStatus::Active));
+    }
+
+    #[tokio::test]
+    async fn with_the_switch_on_a_released_run_is_expired_and_still_resumable() {
+        let state = test_state(StubDriver::ok());
+        let handle = insert_live_run(&state, &claims_for_org("org"));
+        // Not idle long enough: nothing is released and nothing is marked.
+        assert_eq!(sweep_once_ttl(&state, now_ms(), None, true).await.expired, 0);
+        let report = sweep_once_ttl(&state, later(), None, true).await;
+        assert_eq!(report.expired, 1);
+        assert_eq!(state.agent_runs.stats().live, 0);
+        assert_eq!(status_of(&state, &handle).await, Some(AgentRunStatus::Expired));
+        let (org_id, rid) = ids(&handle).await;
+        let checkpoint = state
+            .receipts
+            .load_run_checkpoint(&org_id, &rid)
+            .await
+            .unwrap()
+            .expect("the checkpoint is kept");
+        assert!(checkpoint.check_resumable().is_ok(), "expired is resumable");
+    }
+
+    #[tokio::test]
+    async fn a_dry_run_marks_nothing() {
+        let mut state = test_state(StubDriver::ok());
+        state.agent_runs = new_runs_with(crate::run_limits::RunLimits {
+            sweeper_dry_run: true,
+            ..crate::run_limits::RunLimits::unlimited()
+        });
+        let handle = insert_live_run(&state, &claims_for_org("org"));
+        let report = sweep_once_ttl(&state, later(), None, true).await;
+        assert_eq!((report.expired, report.would_expire), (0, 1));
+        assert_eq!(status_of(&state, &handle).await, None, "a live run saved nothing yet");
+    }
+
+    #[tokio::test]
+    async fn a_run_with_a_persisted_profile_is_suspended() {
+        let state = test_state(StubDriver::ok());
+        let handle = insert_live_run(&state, &claims_for_org("org"));
+        handle.entry.lock().await.lease.persist_profile = true;
+        assert_eq!(sweep_once_ttl(&state, later(), None, true).await.expired, 1);
+        assert_eq!(status_of(&state, &handle).await, Some(AgentRunStatus::Suspended));
+    }
+
+    #[tokio::test]
+    async fn a_zdr_run_keeps_no_checkpoint_and_has_no_arc() {
+        let state = test_state(StubDriver::ok());
+        let handle = insert_live_run(&state, &claims_for_org("org"));
+        handle.entry.lock().await.zdr = ZdrMode::On;
+        assert_eq!(sweep_once_ttl(&state, later(), None, true).await.expired, 1);
+        assert_eq!(status_of(&state, &handle).await, None);
+        let (_, rid) = ids(&handle).await;
+        assert_eq!(mark_released_checkpoint(&state, &rid.to_string(), &handle).await, None);
+    }
+
+    #[tokio::test]
+    async fn a_resume_that_won_the_race_keeps_its_active_checkpoint() {
+        let state = test_state(StubDriver::ok());
+        let handle = insert_live_run(&state, &claims_for_org("org"));
+        let run_id = {
+            let entry = handle.entry.lock().await;
+            state
+                .receipts
+                .save_run_checkpoint(checkpoint_for_entry(&entry, &handle.live))
+                .await
+                .unwrap();
+            entry.run_id.to_string()
+        };
+        // Live: not marked.
+        assert_eq!(mark_released_checkpoint(&state, &run_id, &handle).await, None);
+        // Released, and a resume of the id is being committed: not marked either.
+        state.agent_runs.lock().unwrap().remove(&run_id);
+        let slot = state
+            .agent_runs
+            .try_reserve_for("org", RunClass::Agent, RunCapOverride::NONE, Some(&run_id))
+            .expect("the resume claims the id");
+        assert_eq!(mark_released_checkpoint(&state, &run_id, &handle).await, None);
+        assert_eq!(status_of(&state, &handle).await, Some(AgentRunStatus::Active));
+        // The resume failed and gave the id back: now the release is marked.
+        drop(slot);
+        assert_eq!(
+            mark_released_checkpoint(&state, &run_id, &handle).await,
+            Some(AgentRunStatus::Expired)
+        );
+        assert_eq!(status_of(&state, &handle).await, Some(AgentRunStatus::Expired));
+    }
+
+    #[tokio::test]
+    async fn a_closed_checkpoint_is_never_reopened_by_the_mark() {
+        let state = test_state(StubDriver::ok());
+        let handle = insert_live_run(&state, &claims_for_org("org"));
+        let (org_id, rid) = ids(&handle).await;
+        {
+            let entry = handle.entry.lock().await;
+            state
+                .receipts
+                .save_run_checkpoint(checkpoint_for_entry(&entry, &handle.live))
+                .await
+                .unwrap();
+        }
+        state.receipts.close_run_checkpoint(&org_id, &rid).await.unwrap();
+        state.agent_runs.lock().unwrap().remove(&rid.to_string());
+        mark_released_checkpoint(&state, &rid.to_string(), &handle).await;
+        assert_eq!(status_of(&state, &handle).await, Some(AgentRunStatus::Closed));
     }
 }
