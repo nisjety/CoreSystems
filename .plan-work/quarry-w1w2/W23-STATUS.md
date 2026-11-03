@@ -181,3 +181,33 @@ Checks on the merged tree:
 - verevonv3 gateway (host): the main binary needs `RUST_MIN_STACK=16777216` on Windows (default stack overflows). With it: 1270 passed, 3 failed: `domains::spaces::tests::{a_viewer_cannot_add_or_remove_room_members, an_owner_adds_a_person_and_control_gets_the_roster, an_unconfirmed_roster_is_reported_rather_than_claimed_as_success}` (404 instead of 200/502/403). They fail alone too, and w23/integ changes no Space or router file in the gateway (its gateway diff vs main is 5 files: actions dispatchers/handlers, ingestions runs, knowledge, knowledge/quarry), so these are inherited from main's Space work, not from this merge.
 
 The lanes continue from 6edc55ae7: each lane branch must merge w23/integ (or be reset to it by the program) before W2-B7.
+
+## Step S1 (W2), integrated 2026-11-03
+
+Units: W2-U63-callsites and W2-U39a (lane c), W2-U41a and W2-U07 (lane a), W2-U21a (lane b), W2-U39b and W2-CP-WS7I (lane d). W2-U49a (lane b) is NOT merged: its session could not write into innh-lane-b, so the work sits as a patch outside the repo (scratchpad u49a/W23-W2-U49a.patch) and has no commit on w23/lane-b.
+
+Merge commits (git merge --no-ff, base 4c6b78669):
+- c89b3042c merge: w23/lane-c (S1: W2-U63-callsites, W2-U39a)
+- 998305e0b merge: w23/lane-a (S1: W2-U41a, W2-U07)
+- 5c0204198 merge: w23/lane-b (S1: W2-U21a)
+- 5c38e2b35 merge: w23/lane-d (S1: W2-U39b, W2-CP-WS7I)
+
+Conflicts: none (all four merges were clean).
+
+Compile guard (no test runs):
+- Quarry Rust (qtest-lane integ, quarry-target-integ): `cargo check --workspace --tests` exit 0, warnings only (all pre-existing kinds). Extra check with the production edge features: `cargo check -p quarry-runtime -p quarry-edge --tests --features quarry-edge/postgres-queue,quarry-edge/grpc` exit 0 (covers the postgres-queue-gated W2-U41a families and the main.rs cfg block). No compile fix commits were needed.
+- Go: no Go module touched. verevonv3 (SPA and gateway): not touched. action-registry.ts unchanged, so no admission golden regeneration and no new action ids.
+- auth-core TS (W2-CP-WS7I) is NOT compile-checked: the integ worktree has no auth-core node_modules and the guard list has no auth-core step. Run `pnpm install` + `tsc --noEmit -p tsconfig.json` and the three jest specs (web-policy, quarry-token-zdr-claims.golden with UPDATE_GOLDENS=1 to confirm the Python-made golden, digest 76cc4af7...) before relying on it.
+- Golden, schema and route-count regeneration: not needed by any guard step.
+
+Open items:
+- W2-U49a: apply the staged patch in innh-lane-b from a session that may write there, commit in four commits, then merge in the next step.
+- W2-U21a: the driver-refusal call sites (agent_routes/step.rs REST and WebSocket, attach.rs) still call failed_step_cost; switch them to failed_step_cost_for_error and drop the dead_code allow.
+- W2-U39a: attach.rs, tabs.rs and lifecycle.rs still call the run-less validate_navigation (guard skipped under allow_private_hosts); the egress proxy still refuses those connections.
+- W2-U07: edge callers (agent_routes/tabs.rs new_tab, attach.rs open_tab) neither record nor close a tab kept on TIMEOUT (D-U07-1, SR-U07-1 security medium) - must land before WS8.F ATTACH=1.
+- W2-U41a: quarry-control's edge_purger.go does not send ?scope=org, so the new families never run (D-U41a-1, high); RUNBOOKS/compose/openapi-internal entries for the three new flags are missing.
+- W2-U63: Crawl-delay spacing is enforced on reserved, not actual, fetch starts (owner decision before enforce, X-10). W23-STATUS.md line about wiring the W2-U63 call sites (W2-B batch open items) is now done by this step.
+- W2-U39b: renewer stays unwired pending the MP ask (service RenewGrant); W2-CP-WS7I: MP ask to re-vendor the model-gateway golden copy; zdr-contract-sync.test.sh is expected RED on the two model-gateway rows until it lands (not run).
+- MP asks added to MP-ASKS.md by W2-U39b and W2-CP-WS7I.
+- 48 depth rows appended to W23-depth.md (a 13, b 8 plus table header, c 7, d 14).
+- Four tracked .sha256 files in the integ worktree still show as modified (CRLF/LF checkout artifacts); none committed.
