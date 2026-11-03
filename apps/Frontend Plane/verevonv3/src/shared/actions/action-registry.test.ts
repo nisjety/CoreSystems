@@ -853,6 +853,50 @@ describe('action registry', () => {
     expect(action?.inputSchema.safeParse({ orgId: 'org_other' }).success).toBe(false)
   })
 
+  it('registers the agent builder contracts as application actions the model cannot execute (EP-6-S8)', () => {
+    for (const id of ['agents.draft.save', 'agents.publish', 'agents.versions.list'] as const) {
+      const action = getActionDescriptor(id)
+      expect(action?.ownerPlane, id).toBe('application')
+      expect(action?.requiresApproval, id).toBe(false)
+      expect(isModelExecutableAction(id), id).toBe(false)
+    }
+    expect(getActionDescriptor('agents.versions.list')).toMatchObject({ risk: 'low', reversible: true })
+    // A model that could rewrite or publish an agent's instructions would govern its own behaviour.
+    for (const id of ['agents.draft.save', 'agents.publish'] as const) {
+      expect(MODEL_ACCESS[id], id).toMatchObject({ access: 'none', exemptReason: 'agent_cannot_self_govern' })
+    }
+    expect(MODEL_ACCESS['agents.versions.list']).toMatchObject({
+      access: 'none',
+      exemptReason: 'no_owner_executor',
+      sideEffectClass: 'read',
+    })
+  })
+
+  it('takes a draft of capability ids and a bounded autonomy cap, and nothing the builder never sends', () => {
+    const save = getActionDescriptor('agents.draft.save')
+    const draft = {
+      name: 'Driftsassistent',
+      system_prompt: 'Svar kort.',
+      model: 'Verevon Balance',
+      tool_capability_ids: ['cap.tool.ticket.create'],
+      autonomy_cap: 'ask_first',
+    }
+    expect(save?.inputSchema.safeParse({ agentRef: 'agent_1', draft }).success).toBe(true)
+    // The cap never widens to lockdown, and a free tool name is not a capability id.
+    expect(save?.inputSchema.safeParse({ agentRef: 'agent_1', draft: { ...draft, autonomy_cap: 'lockdown' } }).success).toBe(false)
+    expect(save?.inputSchema.safeParse({ agentRef: 'agent_1', draft: { ...draft, tool_capability_ids: ['Send Email'] } }).success).toBe(false)
+    expect(save?.inputSchema.safeParse({ agentRef: 'agent_1', draft: { ...draft, system_prompt: 'x'.repeat(4001) } }).success).toBe(false)
+    for (const extra of ['version', 'digest', 'published_by']) {
+      expect(save?.inputSchema.safeParse({ agentRef: 'agent_1', draft: { ...draft, [extra]: 'x' } }).success, extra).toBe(false)
+    }
+
+    // Publishing takes the agent alone: the version number and digest are the server's.
+    const publish = getActionDescriptor('agents.publish')
+    expect(publish?.inputSchema.safeParse({ agentRef: 'agent_1' }).success).toBe(true)
+    expect(publish?.inputSchema.safeParse({ agentRef: 'agent_1', version: 3 }).success).toBe(false)
+    expect(publish?.inputSchema.safeParse({ agentRef: '' }).success).toBe(false)
+  })
+
   it('keeps every action id unique and the spaces.* entries contiguous and in their pre-fragment order (P-SPA1)', () => {
     const ids: string[] = actionRegistry.map((action) => action.id)
     expect(new Set(ids).size).toBe(ids.length)
@@ -866,7 +910,8 @@ describe('action registry', () => {
     // 253 after EP-8-S4 registered memory.profile.save and memory.profile.rebuild; that slice did not move this count.
     // 255 after EP-8-S8 registered settings.complete_personal_setup and settings.skip_personal_setup, the first-run step.
     // 256 after EP-14-S2 registered chat.set_transcript_density, the person's transcript level.
-    expect(ids).toHaveLength(256)
+    // 259 after EP-6-S8 registered agents.draft.save, agents.publish and agents.versions.list.
+    expect(ids).toHaveLength(259)
 
     const spaceIds = ids.filter((id) => id.startsWith('spaces.'))
     const first = ids.indexOf(spaceIds[0] as string)

@@ -1813,6 +1813,72 @@ const agentInstallationsListOutput = z.object({
   ),
 })
 
+// The agent builder's calls (EP-6-S8, AGENT_DEFINITION_VERSIONS). Strict, so a field the builder
+// never sends (a version, a digest, a publisher) is refused here rather than dropped. Who may edit
+// (org admin, the creator, or a manager of the room a room-born agent came from) is enforced by the
+// BFF (authorize_agent_builder), not by these shapes.
+const agentRefInput = z
+  .object({
+    agentRef: z.string().trim().min(1).max(128),
+  })
+  .strict()
+
+const agentAutonomyCap = z.enum(['read_only', 'ask_first', 'auto'])
+
+const agentDraftBody = z
+  .object({
+    name: z.string().trim().min(2).max(60),
+    system_prompt: z.string().max(4000),
+    model: z.string().trim().min(1).max(200),
+    // Capability ids from the WS05 registry, never free tool names.
+    tool_capability_ids: z
+      .array(z.string().regex(/^[a-z][a-z0-9_.-]{0,127}$/))
+      .max(64),
+    autonomy_cap: agentAutonomyCap,
+    knowledge_bindings: z
+      .object({
+        scope: z.enum(['all', 'selected']),
+        document_ids: z.array(z.string()).optional(),
+        source_ids: z.array(z.string()).optional(),
+        include_qna: z.boolean().optional(),
+      })
+      .strict()
+      .optional(),
+  })
+  .strict()
+
+const agentDraftSaveInput = z
+  .object({
+    agentRef: z.string().trim().min(1).max(128),
+    draft: agentDraftBody,
+  })
+  .strict()
+
+const agentDraftSaveOutput = z.object({
+  draft: agentDraftBody,
+})
+
+const agentPublishOutput = z.object({
+  version: z.number().int().min(1),
+  digest: z.string().regex(/^sha256:[0-9a-f]{64}$/),
+})
+
+const agentVersionsListOutput = z.object({
+  versions: z.array(
+    z.object({
+      version: z.number().int().min(1),
+      digest: z.string(),
+      name: z.string(),
+      system_prompt: z.string(),
+      model: z.string(),
+      tool_capability_ids: z.array(z.string()),
+      autonomy_cap: agentAutonomyCap,
+      published_by: z.string(),
+      published_at: z.number(),
+    }),
+  ),
+})
+
 // Registry entries are the product contract shared by humans and the Model Plane.
 export const actionRegistry = [
   {
@@ -4126,6 +4192,39 @@ export const actionRegistry = [
     reversible: true,
     inputSchema: agentInstallationsListInput,
     outputSchema: agentInstallationsListOutput,
+  },
+  {
+    id: 'agents.draft.save',
+    label: 'Save agent draft',
+    description: 'Save the editable draft of one agent: name, instructions, model, tools by capability id and autonomy cap. Nothing a running turn reads changes until the draft is published. Org admin, the agent\'s creator, or a manager of the room it was created in.',
+    ownerPlane: 'application',
+    risk: 'medium',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: agentDraftSaveInput,
+    outputSchema: agentDraftSaveOutput,
+  },
+  {
+    id: 'agents.publish',
+    label: 'Publish agent',
+    description: 'Publish the saved draft as the agent\'s next numbered version. Earlier versions are kept unchanged; going back means publishing an older version again as a new number.',
+    ownerPlane: 'application',
+    risk: 'medium',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: agentRefInput,
+    outputSchema: agentPublishOutput,
+  },
+  {
+    id: 'agents.versions.list',
+    label: 'List agent versions',
+    description: 'List the published versions of one agent, newest first, with each version\'s instructions, tools, autonomy cap and who published it. Read only; the same people who may edit the agent may read it.',
+    ownerPlane: 'application',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: agentRefInput,
+    outputSchema: agentVersionsListOutput,
   },
 ] as const satisfies readonly ActionDescriptor[]
 
