@@ -100,7 +100,7 @@ use crate::{
     BrowserDevtoolsEvent, BrowserDownloadedFile, BrowserDriver, BrowserDriverCapabilities,
     BrowserEgressPolicy, BrowserEgressProxyProvider, BrowserHealth, BrowserNativeProjection,
     BrowserNativeTarget, BrowserSession, BrowserTab, LiveFrame, LiveFrameFormat, LiveFrameOptions,
-    SessionInner, SlotHealth, VerifiedTargetAction, VerifiedTargetOperation,
+    ReputationOutcome, SessionInner, SlotHealth, VerifiedTargetAction, VerifiedTargetOperation,
 };
 
 const LIVE_FRAME_CACHE_TTL_MS: u64 = 250;
@@ -2268,6 +2268,28 @@ async fn install_network_guard(
             let policy_allows_url =
                 resolve_tab_egress_policy(tab_policy.as_ref(), session_policy.as_ref())
                     .allows_url(&request_url);
+            // E3.8.7 (D2-100): the URL reputation hook, after the grant and before the DNS
+            // guard. This listener sees every request the tab makes (a navigation, each
+            // redirect hop, a click's navigation, frames and sub-resources), so one check
+            // here covers them all. No hook (the default, and `QUARRY_EDGE__REPUTATION_MODE`
+            // off) gives `None`, and the decisions below are the ones made before the hook.
+            let reputation = if policy_allows_url {
+                egress_reputation_outcome(
+                    tab_policy.as_ref(),
+                    session_policy.as_ref(),
+                    &request_url,
+                )
+            } else {
+                None
+            };
+            if let Some(outcome) = reputation {
+                // The source and the decision only: no host or URL in a log line.
+                tracing::warn!(
+                    source = outcome.source(),
+                    blocked = outcome.is_block(),
+                    "chromiumoxide request host is on a reputation list"
+                );
+            }
             let (decision, policy, command_result) = if !policy_allows_url {
                 (
                     BrowserEgressDecision::Block,
@@ -2279,11 +2301,22 @@ async fn install_network_guard(
                     .await
                     .map(|_| ()),
                 )
+            } else if reputation.is_some_and(|outcome| outcome.is_block()) {
+                (
+                    BrowserEgressDecision::Block,
+                    NAVIGATION_REFUSED_BY_REPUTATION,
+                    best_effort(
+                        Op::GuardResolve,
+                        guarded_page.execute(FailRequestParams::new(request_id, ErrorReason::Aborted)),
+                    )
+                    .await
+                    .map(|_| ()),
+                )
             } else {
                 match navigation_watches.guard_request_target(&request_url).await {
                     Ok(()) => (
                         BrowserEgressDecision::Allow,
-                        "url_dns_public",
+                        allowed_receipt_policy(reputation),
                         best_effort(
                             Op::GuardResolve,
                             guarded_page.execute(ContinueRequestParams::new(request_id)),
@@ -2569,6 +2602,38 @@ const NAVIGATION_REFUSED_BY_GRANT: &str = "domain_grant_blocked";
 /// The tab's Fetch guard refused a request its URL and DNS check blocks (a private or
 /// unresolvable address, a blocked scheme).
 const NAVIGATION_REFUSED_BY_GUARD: &str = "url_or_dns_blocked";
+/// The tab's Fetch guard refused a request whose host is on a reputation list, with the
+/// org in `block` mode (E3.8.7). The receipt's policy names the deciding layer: the grant
+/// (`domain_grant_blocked`), the reputation hook (this and [`REPUTATION_WARNED`]) or the
+/// URL and DNS guard (`url_or_dns_blocked`, `url_dns_public`).
+const NAVIGATION_REFUSED_BY_REPUTATION: &str = "reputation_blocked";
+/// An allowed request whose host is on a reputation list, with the org in `warn` mode.
+const REPUTATION_WARNED: &str = "reputation_warned";
+/// An allowed request no layer had anything to say about.
+const REQUEST_ALLOWED: &str = "url_dns_public";
+
+/// The reputation outcome for a request from one tab (E3.8.7): the stricter of the
+/// session policy's hook and the tab policy's hook. A session with no policy is
+/// deny-all, so the grant refuses before this is asked.
+fn egress_reputation_outcome(
+    tab: Option<&BrowserEgressPolicy>,
+    session: Option<&BrowserEgressPolicy>,
+    raw: &str,
+) -> Option<ReputationOutcome> {
+    ReputationOutcome::strictest(
+        session.and_then(|policy| policy.reputation_outcome(raw)),
+        tab.and_then(|policy| policy.reputation_outcome(raw)),
+    )
+}
+
+/// The receipt policy of a request the guard let through: `reputation_warned` when the
+/// host is listed and the org warns, otherwise the established `url_dns_public`.
+fn allowed_receipt_policy(reputation: Option<ReputationOutcome>) -> &'static str {
+    match reputation {
+        Some(ReputationOutcome::Warn { .. }) => REPUTATION_WARNED,
+        _ => REQUEST_ALLOWED,
+    }
+}
 
 /// SC4 D3: the navigation each tab's `goto` is waiting on, so the tab's Fetch guard can
 /// end it the moment it refuses the navigation's document request.
@@ -11914,5 +11979,71 @@ async fn test_only(page: &Page) {
             expected.sort();
             assert_eq!(entries(root.path(), sub), expected, "{sub}");
         }
+    }
+}
+
+#[cfg(test)]
+mod reputation_guard_tests {
+    use super::*;
+    use crate::{HostReputation, HostStanding, ReputationMode};
+    use std::sync::Arc;
+
+    struct Listed;
+
+    impl HostReputation for Listed {
+        fn standing(&self, host: &str) -> HostStanding {
+            if host == "evil.example" {
+                HostStanding::Listed
+            } else {
+                HostStanding::Unlisted
+            }
+        }
+    }
+
+    fn policy(mode: ReputationMode) -> BrowserEgressPolicy {
+        BrowserEgressPolicy::from_allowed_domains(&[]).with_reputation(Arc::new(Listed), mode)
+    }
+
+    #[test]
+    fn no_hook_keeps_the_established_receipt_policy() {
+        let plain = BrowserEgressPolicy::from_allowed_domains(&[]);
+        let outcome = egress_reputation_outcome(None, Some(&plain), "https://evil.example/");
+        assert_eq!(outcome, None);
+        assert_eq!(allowed_receipt_policy(outcome), "url_dns_public");
+        let off = policy(ReputationMode::Off);
+        assert_eq!(egress_reputation_outcome(Some(&off), Some(&off), "https://evil.example/"), None);
+    }
+
+    #[test]
+    fn a_warning_is_allowed_with_its_own_receipt_policy() {
+        let warn = policy(ReputationMode::Warn);
+        let outcome = egress_reputation_outcome(None, Some(&warn), "https://evil.example/x");
+        assert!(outcome.is_some_and(|outcome| !outcome.is_block()));
+        assert_eq!(allowed_receipt_policy(outcome), "reputation_warned");
+        assert_eq!(
+            allowed_receipt_policy(egress_reputation_outcome(None, Some(&warn), "https://good.example/")),
+            "url_dns_public"
+        );
+    }
+
+    #[test]
+    fn the_stricter_of_session_and_tab_decides() {
+        let warn = policy(ReputationMode::Warn);
+        let block = policy(ReputationMode::Block);
+        let url = "https://evil.example/";
+        assert!(egress_reputation_outcome(Some(&block), Some(&warn), url).is_some_and(|o| o.is_block()));
+        assert!(egress_reputation_outcome(Some(&warn), Some(&block), url).is_some_and(|o| o.is_block()));
+        assert!(egress_reputation_outcome(Some(&warn), None, url).is_some_and(|o| !o.is_block()));
+    }
+
+    #[test]
+    fn a_reputation_refusal_reads_as_a_security_block_with_its_own_reason() {
+        let error = navigation_refused(NAVIGATION_REFUSED_BY_REPUTATION);
+        assert_eq!(error.code, ErrorCode::SecurityBlocked);
+        assert_eq!(
+            error.details.as_ref().and_then(|details| details.get("reason")).and_then(|v| v.as_str()),
+            Some("reputation_blocked")
+        );
+        assert!(!error.message.contains("evil.example"));
     }
 }
