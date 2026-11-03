@@ -8,14 +8,14 @@
 //! each lease owns a small tab set keyed by its session affinity key.
 
 use ::chromiumoxide::cdp::browser_protocol::accessibility::{
-    EnableParams as AccessibilityEnableParams, GetFullAxTreeParams,
+    EnableParams as AccessibilityEnableParams, GetFullAxTreeParams, GetPartialAxTreeParams,
 };
 use ::chromiumoxide::cdp::browser_protocol::browser::{
     BrowserContextId, CancelDownloadParams, DownloadProgressState, EventDownloadProgress,
     EventDownloadWillBegin, SetDownloadBehaviorBehavior, SetDownloadBehaviorParams,
 };
 use ::chromiumoxide::cdp::browser_protocol::dom::{
-    BackendNodeId, ResolveNodeParams, SetFileInputFilesParams,
+    BackendNodeId, GetNodeForLocationParams, ResolveNodeParams, SetFileInputFilesParams,
 };
 use ::chromiumoxide::cdp::browser_protocol::emulation::{
     SetDeviceMetricsOverrideParams, SetFocusEmulationEnabledParams, SetTouchEmulationEnabledParams,
@@ -6348,6 +6348,145 @@ impl ChromiumoxideDriver {
     }
 }
 
+/// The most backend node ids one point hit returns: the node under the point and its
+/// accessibility ancestors, nearest first.
+pub const HIT_TEST_CHAIN_LIMIT: usize = 32;
+
+/// What a point hit test found (E3.3-h). `backend_node_ids[0]` is the DOM node under the point and
+/// the rest are its accessibility ancestors, nearest first; `frame_id` is the frame that owns the
+/// node. These are CDP handles: they stay inside Quarry and never reach a response or an
+/// observation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PointHit {
+    pub backend_node_ids: Vec<i64>,
+    pub frame_id: Option<String>,
+}
+
+/// One accessibility node of a partial tree, reduced to the fields the ancestor walk reads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AxLink {
+    ax_id: String,
+    parent_ax_id: Option<String>,
+    backend_node_id: Option<i64>,
+}
+
+/// The backend node ids from `start` up through the accessibility parents, nearest first, at most
+/// `limit` long. `start` is always first, even when no link carries it. The walk ends at a root,
+/// at a parent the tree does not hold, and at a cycle.
+fn backend_chain(links: &[AxLink], start: i64, limit: usize) -> Vec<i64> {
+    let mut chain = vec![start];
+    let Some(first) = links
+        .iter()
+        .find(|link| link.backend_node_id == Some(start))
+    else {
+        return chain;
+    };
+    let by_ax_id: HashMap<&str, &AxLink> = links
+        .iter()
+        .map(|link| (link.ax_id.as_str(), link))
+        .collect();
+    let mut seen: HashSet<&str> = HashSet::from([first.ax_id.as_str()]);
+    let mut current = first;
+    while chain.len() < limit {
+        let Some(parent) = current
+            .parent_ax_id
+            .as_deref()
+            .and_then(|id| by_ax_id.get(id).copied())
+        else {
+            break;
+        };
+        if !seen.insert(parent.ax_id.as_str()) {
+            break;
+        }
+        if let Some(backend) = parent.backend_node_id {
+            if !chain.contains(&backend) {
+                chain.push(backend);
+            }
+        }
+        current = parent;
+    }
+    chain
+}
+
+/// Whether a CDP error is Chromium's answer that no node lies at the point. That is a miss, not a
+/// failure.
+fn no_node_at_location(message: &str) -> bool {
+    message.to_ascii_lowercase().contains("no node found")
+}
+
+impl ChromiumoxideDriver {
+    /// E3.3-h: the DOM node under a viewport point and its accessibility ancestors. The point is in
+    /// CSS pixels from the top-left of the viewport, the `DOM.getNodeForLocation` coordinates. The
+    /// reads are read-only: no focus, scroll, input, navigation or profile write, and nothing is
+    /// retained. `Ok(None)` when Chromium finds no node at the point. Each read is bounded by
+    /// `Op::AxSnapshot` and retried once when the context went away under it.
+    pub async fn hit_test_point(
+        &self,
+        session: &BrowserSession,
+        x: i64,
+        y: i64,
+    ) -> QuarryResult<Option<PointHit>> {
+        let page = self.current_page(session).await?;
+        let located = read_with_retry(Op::AxSnapshot, || async {
+            match page.execute(GetNodeForLocationParams::new(x, y)).await {
+                Ok(response) => Ok(Some(response.result)),
+                Err(error) if no_node_at_location(&error.to_string()) => Ok(None),
+                Err(error) => Err(QuarryError::new(
+                    ErrorCode::DriverFailed,
+                    "chromiumoxide point hit test failed",
+                )
+                .with_details(json!({ "error": error.to_string() }))),
+            }
+        })
+        .await?;
+        let Some(located) = located else {
+            return Ok(None);
+        };
+        let backend = *located.backend_node_id.inner();
+        let frame_id = Some(located.frame_id.inner().clone()).filter(|id| !id.is_empty());
+        let ax_tree = read_with_retry(Op::AxSnapshot, || async {
+            page.execute(AccessibilityEnableParams::default())
+                .await
+                .map_err(|error| {
+                    QuarryError::new(
+                        ErrorCode::DriverFailed,
+                        "chromiumoxide accessibility domain enable failed",
+                    )
+                    .with_details(json!({ "error": error.to_string() }))
+                })?;
+            page.execute(
+                GetPartialAxTreeParams::builder()
+                    .backend_node_id(BackendNodeId::new(backend))
+                    .fetch_relatives(true)
+                    .build(),
+            )
+            .await
+            .map_err(|error| {
+                QuarryError::new(
+                    ErrorCode::DriverFailed,
+                    "chromiumoxide partial accessibility tree failed",
+                )
+                .with_details(json!({ "error": error.to_string() }))
+            })
+        })
+        .await?;
+        let links: Vec<AxLink> = ax_tree
+            .result
+            .nodes
+            .iter()
+            .map(|node| AxLink {
+                ax_id: node.node_id.inner().clone(),
+                parent_ax_id: node.parent_id.as_ref().map(|id| id.inner().clone()),
+                backend_node_id: node.backend_dom_node_id.as_ref().map(|id| *id.inner()),
+            })
+            .collect();
+        Ok(Some(PointHit {
+            backend_node_ids: backend_chain(&links, backend, HIT_TEST_CHAIN_LIMIT),
+            frame_id,
+        }))
+    }
+}
+
 #[cfg(test)]
 mod otp_fill_driver_tests {
     use super::*;
@@ -10075,6 +10214,40 @@ mod tests {
         driver.release(session).await.expect("release");
     }
 
+    /// E3.3-h: a point over a rendered button gives the node under it, and a point outside the
+    /// viewport gives no node. Integration test that requires a local Chromium/Chrome binary.
+    /// Skipped unless `CHROMIUMOXIDE_TEST=1` is set.
+    #[tokio::test]
+    async fn hit_test_point_finds_the_node_under_a_point() {
+        if !live_enabled() {
+            return;
+        }
+        let driver = live_driver();
+        let session = live_session(&driver, "live-hit-test").await;
+        driver.new_tab(&session, None).await.expect("blank tab");
+        let page = driver.current_page(&session).await.expect("current page");
+        page.set_content(
+            "<html><body style=\"margin:0\"><button style=\"position:absolute;left:100px;top:100px;width:200px;height:50px\"><span>Save</span></button></body></html>",
+        )
+        .await
+        .expect("inject page");
+
+        let hit = driver
+            .hit_test_point(&session, 150, 120)
+            .await
+            .expect("hit test")
+            .expect("a node under the point");
+        assert!(!hit.backend_node_ids.is_empty());
+        assert!(hit.frame_id.is_some());
+        assert!(driver
+            .hit_test_point(&session, 5000, 5000)
+            .await
+            .expect("a point outside the viewport is a miss, not an error")
+            .is_none());
+
+        driver.release(session).await.expect("release");
+    }
+
     /// Integration test that requires a local Chromium/Chrome binary.
     /// Skipped unless `CHROMIUMOXIDE_TEST=1` is set.
     #[tokio::test]
@@ -10535,6 +10708,74 @@ mod tests {
     include!("profile_capture_live.rs");
     // WS17.C2: restore against a real Chromium.
     include!("profile_restore_live.rs");
+}
+
+#[cfg(test)]
+mod hit_test_chain_tests {
+    use super::*;
+
+    fn link(ax_id: &str, parent: Option<&str>, backend: Option<i64>) -> AxLink {
+        AxLink {
+            ax_id: ax_id.to_owned(),
+            parent_ax_id: parent.map(str::to_owned),
+            backend_node_id: backend,
+        }
+    }
+
+    #[test]
+    fn the_chain_starts_at_the_hit_node_and_climbs_its_ancestors() {
+        // A span (backend 30) in a button (backend 20), under a generic node with no DOM node,
+        // under the root (backend 1).
+        let links = vec![
+            link("5", Some("4"), Some(30)),
+            link("4", Some("3"), None),
+            link("3", Some("2"), Some(20)),
+            link("2", None, Some(1)),
+        ];
+        assert_eq!(
+            backend_chain(&links, 30, HIT_TEST_CHAIN_LIMIT),
+            vec![30, 20, 1]
+        );
+    }
+
+    #[test]
+    fn a_hit_node_without_an_accessibility_entry_is_its_own_chain() {
+        let links = vec![link("9", None, Some(7))];
+        assert_eq!(backend_chain(&links, 30, HIT_TEST_CHAIN_LIMIT), vec![30]);
+    }
+
+    #[test]
+    fn the_walk_stops_at_a_cycle_a_dangling_parent_and_the_limit() {
+        let cycle = vec![
+            link("1", Some("2"), Some(10)),
+            link("2", Some("1"), Some(11)),
+        ];
+        assert_eq!(
+            backend_chain(&cycle, 10, HIT_TEST_CHAIN_LIMIT),
+            vec![10, 11]
+        );
+
+        let dangling = vec![link("1", Some("missing"), Some(10))];
+        assert_eq!(backend_chain(&dangling, 10, HIT_TEST_CHAIN_LIMIT), vec![10]);
+
+        let deep: Vec<AxLink> = (1..=40_i64)
+            .map(|n| {
+                let parent = (n + 1).to_string();
+                link(&n.to_string(), Some(parent.as_str()), Some(100 + n))
+            })
+            .collect();
+        assert_eq!(backend_chain(&deep, 101, 5), vec![101, 102, 103, 104, 105]);
+    }
+
+    #[test]
+    fn only_chromiums_no_node_answer_is_a_miss() {
+        assert!(no_node_at_location(
+            "Server error: No node found at given location"
+        ));
+        assert!(no_node_at_location("no node found at given location"));
+        assert!(!no_node_at_location("Request timed out."));
+        assert!(!no_node_at_location("Invalid parameters"));
+    }
 }
 
 /// WS3.D and WS3.F, the parts that need no browser: every CDP call is bounded, the
