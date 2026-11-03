@@ -1604,6 +1604,11 @@ async fn batch_handoff(
     // When none can be crawled the batch is a 400 with `details.rejected`; otherwise the
     // accepted URLs go on and the refused ones come back in `HandoffAck.rejected`. The policy
     // gate below sees only the accepted URLs.
+    // W3-E3.7.1 (`QUARRY_EDGE__BATCH_IDEMPOTENCY`, default off): the hash of the request as
+    // the caller sent it, taken before the URL check and the allowance clamp, so a retry of
+    // the same request hashes the same even when the plan changed in between.
+    let batch_payload_hash = crate::handoff::batch_idempotency_enabled()
+        .then(|| crate::handoff::batch_payload_hash(&req.urls, req.ingest));
     let mut req = req;
     let check = crate::batch_check::validate_batch_urls(
         &req.urls,
@@ -1653,16 +1658,37 @@ async fn batch_handoff(
     });
     // WS7.G 6b: the policy this batch was admitted under rides with the job to every page.
     stamp_policy_snapshot(&mut batch_params, &state, &decision);
-    let ack = crate::handoff::forward_job_signed(
-        &state.control_base_url,
-        &claims.org_id,
-        "batch",
-        crate::handoff::with_admission(batch_params, &org_limits),
-        &origin,
-        idempotency_key.as_deref(),
-        state.internal_signer.as_deref(),
-    )
-    .await;
+    let batch_params = crate::handoff::with_admission(batch_params, &org_limits);
+    // W3-E3.7.1: with the flag on and a key sent, a replay of a different batch under the
+    // same key is a 409 and a retry of the same batch re-attaches to the held job. Off, or
+    // without a key, the handoff is exactly as before.
+    let ack = match (idempotency_key.as_deref(), batch_payload_hash.as_deref()) {
+        (Some(key), Some(payload_hash)) => {
+            crate::handoff::forward_job_idempotent(
+                &state.control_base_url,
+                &claims.org_id,
+                "batch",
+                batch_params,
+                &origin,
+                key,
+                payload_hash,
+                state.internal_signer.as_deref(),
+            )
+            .await
+        }
+        _ => {
+            crate::handoff::forward_job_signed(
+                &state.control_base_url,
+                &claims.org_id,
+                "batch",
+                batch_params,
+                &origin,
+                idempotency_key.as_deref(),
+                state.internal_signer.as_deref(),
+            )
+            .await
+        }
+    };
 
     // P3 / cluster #billing — one batch.url event with quantity = url
     // count. Cheaper than emitting N individual events; billing-core can

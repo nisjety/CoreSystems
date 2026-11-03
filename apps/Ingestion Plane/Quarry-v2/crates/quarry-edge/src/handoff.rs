@@ -191,6 +191,21 @@ pub(crate) async fn post_job(
     idempotency_key: Option<&str>,
     signer: Option<&crate::internal_auth::InternalSigner>,
 ) -> Result<HandoffAck, QuarryError> {
+    post_job_with_params(control_base_url, org_id, body, idempotency_key, signer)
+        .await
+        .map(|(ack, _params)| ack)
+}
+
+/// [`post_job`], also returning the `params` of the job control answered with (W3-E3.7.1):
+/// on a replay that is the job control already held, so its stored payload hash can be
+/// compared with this request's.
+async fn post_job_with_params(
+    control_base_url: &str,
+    org_id: &str,
+    body: serde_json::Value,
+    idempotency_key: Option<&str>,
+    signer: Option<&crate::internal_auth::InternalSigner>,
+) -> Result<(HandoffAck, Option<serde_json::Value>), QuarryError> {
     if control_base_url.is_empty() {
         return Err(QuarryError::new(
             ErrorCode::Internal,
@@ -280,15 +295,18 @@ pub(crate) async fn post_job(
         ));
     };
 
-    Ok(HandoffAck {
-        job_id: job.id,
-        run_id: job.run_id,
-        accepted_at: chrono::Utc::now(),
-        limits: None,
-        effective: None,
-        rejected: Vec::new(),
-        replayed,
-    })
+    Ok((
+        HandoffAck {
+            job_id: job.id,
+            run_id: job.run_id,
+            accepted_at: chrono::Utc::now(),
+            limits: None,
+            effective: None,
+            rejected: Vec::new(),
+            replayed,
+        },
+        job.params,
+    ))
 }
 
 /// The id a crawl or batch usage event is keyed by (decision 3.11): Control's job id, and
@@ -303,7 +321,109 @@ pub(crate) fn billable_job_id(ack: &Result<HandoffAck, QuarryError>) -> Option<&
     }
 }
 
-/// The `org_backlog_full` refusal from control's error envelope
+/// W3-E3.7.1: the batch path's `Idempotency-Key` checks. Off (the default), a batch
+/// forwards the key as before: control answers a repeated key with the job it holds,
+/// whatever the second request asked for. On, the edge also stamps a hash of what the
+/// caller asked for into the job's params, which the HMAC over the body covers, and a
+/// replay whose stored hash differs is a 409 instead of a silent re-attach to the
+/// other request's job.
+pub const BATCH_IDEMPOTENCY_FLAG: &str = "QUARRY_EDGE__BATCH_IDEMPOTENCY";
+
+/// The params key the batch payload hash is stamped under.
+pub const PAYLOAD_HASH_PARAM: &str = "idempotency_payload_hash";
+
+/// Whether `QUARRY_EDGE__BATCH_IDEMPOTENCY` is on in this process (default off). Read per
+/// call, like `QUARRY_EDGE__DOWNLOADS`, so the flag needs no AppState plumbing.
+pub fn batch_idempotency_enabled() -> bool {
+    flag_on(std::env::var(BATCH_IDEMPOTENCY_FLAG).ok().as_deref())
+}
+
+fn flag_on(value: Option<&str>) -> bool {
+    value
+        .map(|v| {
+            matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
+}
+
+/// The hash of a batch request as the caller sent it: its URLs, in order, and `ingest`.
+/// The route takes it before the URL check and the allowance clamp, so a retry of the same
+/// request hashes the same even when the plan or the checks changed in between.
+pub fn batch_payload_hash(urls: &[String], ingest: Option<bool>) -> String {
+    use sha2::{Digest, Sha256};
+    use std::fmt::Write as _;
+    let canonical = serde_json::json!({ "kind": "batch", "urls": urls, "ingest": ingest });
+    let bytes = serde_json::to_vec(&canonical).unwrap_or_default();
+    let digest = Sha256::digest(&bytes);
+    let mut out = String::with_capacity(7 + 64);
+    out.push_str("sha256:");
+    for byte in digest {
+        let _ = write!(out, "{byte:02x}");
+    }
+    out
+}
+
+/// [`forward_job_signed`] for a request that sent an `Idempotency-Key` with the batch flag
+/// on: `payload_hash` is stamped into `params` (so it rides inside the signed body and is
+/// stored with the job), and a replay is checked against the hash the held job carries
+/// (see [`check_replay`]). A retry of the same request re-attaches to the job control
+/// holds: the ack carries that job's id and run id, and it is not billed again.
+#[allow(clippy::too_many_arguments)]
+pub async fn forward_job_idempotent(
+    control_base_url: &str,
+    org_id: &str,
+    kind: &str,
+    params: serde_json::Value,
+    origin: &RunOrigin,
+    idempotency_key: &str,
+    payload_hash: &str,
+    signer: Option<&crate::internal_auth::InternalSigner>,
+) -> Result<HandoffAck, QuarryError> {
+    let mut params = params;
+    if let Some(map) = params.as_object_mut() {
+        map.insert(PAYLOAD_HASH_PARAM.to_string(), serde_json::json!(payload_hash));
+    }
+    let body = serde_json::json!({ "kind": kind, "params": params, "origin": origin });
+    let (ack, stored_params) =
+        post_job_with_params(control_base_url, org_id, body, Some(idempotency_key), signer)
+            .await?;
+    check_replay(&ack, stored_params.as_ref(), payload_hash)?;
+    Ok(ack)
+}
+
+/// A replayed key (control answered 200) is accepted only when the held job was created
+/// by the same request: its stored payload hash equals `payload_hash`. A different hash
+/// is a typed 409 `CONFLICT` (`reason: idempotency_key_reused`). A held job with no hash
+/// (created with the flag off, or by another path) cannot be compared and re-attaches,
+/// as before the flag. A fresh job (201) is never checked. Control's lookup is per org,
+/// so the held job is always the caller's own organization's.
+pub(crate) fn check_replay(
+    ack: &HandoffAck,
+    stored_params: Option<&serde_json::Value>,
+    payload_hash: &str,
+) -> Result<(), QuarryError> {
+    if !ack.replayed {
+        return Ok(());
+    }
+    let stored = stored_params
+        .and_then(|params| params.get(PAYLOAD_HASH_PARAM))
+        .and_then(|value| value.as_str());
+    match stored {
+        Some(stored) if stored != payload_hash => Err(QuarryError::new(
+            ErrorCode::Conflict,
+            "this Idempotency-Key was already used for a different batch request",
+        )
+        .with_details(serde_json::json!({
+            "reason": "idempotency_key_reused",
+            "job_id": ack.job_id,
+        }))),
+        _ => Ok(()),
+    }
+}
+
 /// The `org_backlog_full` refusal from control's error envelope
 /// (`{"error": {"code": "RATE_LIMITED", "details": {"reason": ..}}}`), as a
 /// typed `RATE_LIMITED` carrying `reason`, `limit`, `queued` and
@@ -343,6 +463,9 @@ struct ControlJob {
     /// that prefer the run-keyed event stream.
     #[serde(default)]
     run_id: Option<String>,
+    /// The job's stored params (W3-E3.7.1): read only to compare a replay's payload hash.
+    #[serde(default)]
+    params: Option<serde_json::Value>,
 }
 
 fn truncate(s: &str, max: usize) -> String {
@@ -558,5 +681,170 @@ mod tests {
         let rendered = serde_json::to_string(&backlog_full(&body).unwrap()).unwrap();
         assert!(!rendered.contains("SECRET-INTERNAL-TEXT"));
         assert!(!rendered.contains("postgres://leak"));
+    }
+
+    // ---- W3-E3.7.1: batch Idempotency-Key -------------------------------------------
+
+    fn ack(replayed: bool) -> HandoffAck {
+        HandoffAck {
+            job_id: "job_1".to_string(),
+            run_id: None,
+            accepted_at: chrono::Utc::now(),
+            limits: None,
+            effective: None,
+            rejected: Vec::new(),
+            replayed,
+        }
+    }
+
+    fn api_origin() -> RunOrigin {
+        RunOrigin {
+            origin_type: "api".to_string(),
+            actor: Some("service:test".to_string()),
+            origin_ref: None,
+        }
+    }
+
+    #[test]
+    fn the_batch_flag_is_off_unless_set_on() {
+        assert!(!flag_on(None));
+        assert!(!flag_on(Some("")));
+        assert!(!flag_on(Some("0")));
+        assert!(!flag_on(Some("off")));
+        assert!(flag_on(Some("1")));
+        assert!(flag_on(Some(" TRUE ")));
+        assert!(flag_on(Some("on")));
+    }
+
+    #[test]
+    fn the_payload_hash_is_stable_and_tracks_urls_order_and_ingest() {
+        let urls = vec!["https://a.example/".to_string(), "https://b.example/".to_string()];
+        let first = batch_payload_hash(&urls, Some(true));
+        assert_eq!(first, batch_payload_hash(&urls, Some(true)));
+        assert!(first.starts_with("sha256:") && first.len() == 7 + 64, "{first}");
+        let reversed: Vec<String> = urls.iter().rev().cloned().collect();
+        assert_ne!(first, batch_payload_hash(&reversed, Some(true)));
+        assert_ne!(first, batch_payload_hash(&urls, None));
+        assert_ne!(first, batch_payload_hash(&urls[..1], Some(true)));
+    }
+
+    #[test]
+    fn a_fresh_job_is_never_checked() {
+        let params = serde_json::json!({ "idempotency_payload_hash": "sha256:other" });
+        assert!(check_replay(&ack(false), Some(&params), "sha256:mine").is_ok());
+    }
+
+    #[test]
+    fn a_replay_with_the_same_hash_re_attaches() {
+        let params = serde_json::json!({ "idempotency_payload_hash": "sha256:mine" });
+        assert!(check_replay(&ack(true), Some(&params), "sha256:mine").is_ok());
+    }
+
+    #[test]
+    fn a_replay_with_a_different_hash_is_a_conflict() {
+        let params = serde_json::json!({ "idempotency_payload_hash": "sha256:other" });
+        let err = check_replay(&ack(true), Some(&params), "sha256:mine").unwrap_err();
+        assert_eq!(err.code, ErrorCode::Conflict);
+        assert_eq!(err.code.http_status(), 409);
+    }
+
+    #[test]
+    fn a_replay_of_a_job_without_a_hash_re_attaches() {
+        let params = serde_json::json!({ "kind": "batch" });
+        assert!(check_replay(&ack(true), Some(&params), "sha256:mine").is_ok());
+        assert!(check_replay(&ack(true), None, "sha256:mine").is_ok());
+    }
+
+    #[tokio::test]
+    async fn the_idempotent_batch_forward_stamps_the_hash_and_sends_the_key() {
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/jobs"))
+            .and(header("idempotency-key", "key-1"))
+            .respond_with(
+                ResponseTemplate::new(201).set_body_json(serde_json::json!({ "data": { "id": "job_new" } })),
+            )
+            .mount(&server)
+            .await;
+        let ack = forward_job_idempotent(
+            &server.uri(),
+            "org_1",
+            "batch",
+            serde_json::json!({ "kind": "batch", "urls": ["https://a.example/"] }),
+            &api_origin(),
+            "key-1",
+            "sha256:mine",
+            None,
+        )
+        .await
+        .expect("created");
+        assert_eq!(ack.job_id, "job_new");
+        assert!(!ack.replayed);
+
+        let received = server.received_requests().await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&received[0].body).unwrap();
+        assert_eq!(body["params"][PAYLOAD_HASH_PARAM], "sha256:mine");
+        assert_eq!(body["kind"], "batch");
+    }
+
+    #[tokio::test]
+    async fn a_retry_of_the_same_batch_re_attaches_to_the_held_job() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": { "id": "job_held", "run_id": "run_9", "params": { "idempotency_payload_hash": "sha256:mine" } }
+            })))
+            .mount(&server)
+            .await;
+        let ack = forward_job_idempotent(
+            &server.uri(),
+            "org_1",
+            "batch",
+            serde_json::json!({ "kind": "batch" }),
+            &api_origin(),
+            "key-1",
+            "sha256:mine",
+            None,
+        )
+        .await
+        .expect("re-attached");
+        assert_eq!(ack.job_id, "job_held");
+        assert_eq!(ack.run_id.as_deref(), Some("run_9"));
+        assert!(ack.replayed);
+        let result: Result<HandoffAck, QuarryError> = Ok(ack);
+        assert_eq!(billable_job_id(&result), None, "a re-attach is not billed again");
+    }
+
+    #[tokio::test]
+    async fn a_reused_key_with_a_different_batch_is_a_conflict() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": { "id": "job_held", "params": { "idempotency_payload_hash": "sha256:other" } }
+            })))
+            .mount(&server)
+            .await;
+        let err = forward_job_idempotent(
+            &server.uri(),
+            "org_1",
+            "batch",
+            serde_json::json!({ "kind": "batch" }),
+            &api_origin(),
+            "key-1",
+            "sha256:mine",
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, ErrorCode::Conflict);
     }
 }
