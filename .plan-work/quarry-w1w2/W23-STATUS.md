@@ -343,3 +343,34 @@ Open items:
 - W3-E3.1-g: inert until server.go fills ExecuteInput.Caller, SetOTPAuditPublisher is wired, requiredCapabilityForOperation maps mail.otp.read, auth middleware admits integration:otp:read for that route; owner decision on the personal-connection owner rule; no tests.
 - 39 depth rows appended to W23-depth.md (lanes a 15, b 5, c 6, d 13).
 - Four tracked .sha256 files in the integ worktree still show as modified (CRLF/LF checkout artifacts); none committed.
+
+## Step S6 (W2 + W3), integrated 2026-11-03
+
+Units: W2-FE-WS9Gb, W3-E3.5-6 (lane a); W3-E3.7.7a (lane b; W3-E3.2-g1 BLOCKED, nothing committed); W3-E3.4-8 (lane c; W2-Q-U67a-U03 BLOCKED, nothing committed); W2-Q-S5, W3-E3.8.1 (lane d).
+
+Merge commits on w23/integ:
+- f5e7e0ef9 merge: w23/lane-a (S6: W2-FE-WS9Gb, W3-E3.5-6) into w23/integ
+- c8728f7cc merge: w23/lane-b (S6: W3-E3.7.7a) into w23/integ
+- 5b42e5e83 merge: w23/lane-c (S6: W3-E3.4-8) into w23/integ
+- 82b427926 merge: w23/lane-d (S6: W2-Q-S5, W3-E3.8.1) into w23/integ
+
+Conflicts: none.
+
+Compile guard (no test runs):
+- Quarry Rust (qtest-lane integ): `cargo check --workspace --tests` exit 0, warnings only (none in S6 code: search_routes.rs, ingest_client.rs, error.rs, fallback_driver.rs).
+- Go, GOWORK=off, build + vet: Quarry-v2/services/quarry-control clean; Quarry-v2/services/quarry-orchestrator clean.
+- verevonv3 SPA (tsc6 -p tsconfig.app.json): after the merges 38 errors = 34 baseline + 4 new, all W2-FE-WS9Gb imports of the missing W2-FE-WS9Ga modules (browser-dock-state, BrowserDockControls, toggleBrowserDock option). Fixed by follow-up commit 0f210509a, which lands the W2-FE-WS9Ga drafts (`ws9ga-*` from the vigorous-perlman scratchpad; the use-chat-shortcuts.ts change was additive against HEAD). Re-check: 0 errors in any S6/Ga file. That re-check ran against epic-shaw's node_modules (the vigorous-perlman node_modules the integ junction pointed at had disappeared mid-step; the integ junction now points at epic-shaw-4d613b's node_modules). In that environment the only remaining error is the pre-existing src/shared/api/schedule-contract.test.ts TS2352 (not touched in S6); the quarry-client/remote-core baseline errors do not appear there because those packages are built.
+- verevonv3 gateway: not changed in S6, no check.
+- action-registry.ts unchanged: no admission golden regeneration, no new action ids. No ZDR/schema/route-count regeneration needed.
+
+Open items:
+- W2-FE-WS9Ga: now landed on integ through the compile fix only. It has no status file of its own; its tests (browser-dock-state, BrowserDockControls, use-chat-shortcuts.dock) and Gb's tests and Playwright spec are written, not run. Flag VITE_CHAT_BROWSER_DOCK default off.
+- W3-E3.2-g1: BLOCKED (harness different-worktree guard). Planned change set in the unit report (registry ids browser.get_org_policy / browser.set_org_policy, model-access rows, gateway proxy_json_with_if_match + domains/browser_policy.rs, dispatch arms, admission golden regen). Rerun from a lane-b session.
+- W2-Q-U67a-U03: BLOCKED (same guard). Drafts `draft/attach_enabled.rs` and `draft/spike_ws8a.rs` in the vigorous-perlman scratchpad; copy into quarry-edge/tests and quarry-browser/tests, compile-check, commit. Open decision: POST /v1/agent/runs and /v1/agent/procedures/* not covered by the I5 table.
+- W3-E3.5-6: API routes (create, PATCH, ?tag=) not built; Rust edge drops source tags and ignores ?tag= (D-E356-1/2); owner decision one tag vs a set (D-E356-4); DSN-gated pg tests need QUARRY_TEST_DSN.
+- W3-E3.7.7a: page fetcher follows redirects without re-checking hosts (W23-b-E377a-1, medium, shared with include_answer and /v1/answer); OpenAPI/CONTRACTS left for E3.7.11.
+- W3-E3.4-8: not wired (E3.4-4/-6/-7); gRPC ingest adapter hard-codes type="web"; Data Plane owner to confirm the four download_* document types.
+- W2-Q-S5: blocks the scheduled-jobs flip (last schedule of an org never reaped), the request-path flip (edge maps control 409/501 to 502 DRIVER_FAILED), and enforce with no org-core token denies every fire; docs-contract.test.mjs not run.
+- W3-E3.8.1: no producer names dns/tls/connect yet (all chains report all_drivers_failed); merge lane d before E3.8.2 (lane a also edits fallback_driver.rs); owner decision on Temporal retries for all_drivers_failed and tls; openapi/CONTRACTS/compose/RUNBOOKS entries missing.
+- 58 depth rows appended to W23-depth.md (lanes a 24, b 5, c 5, d 24).
+- Four tracked .sha256 files in the integ worktree still show as modified (CRLF/LF checkout artifacts); none committed.
