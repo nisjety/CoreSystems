@@ -284,6 +284,13 @@ struct SessionPages {
     /// Private download directory configured only for this isolated browser
     /// context. Dropping the session removes it after all tabs are closed.
     download_dir: Option<Arc<tempfile::TempDir>>,
+    /// W3-E3.4-6: this context was created with downloads denied
+    /// (`QUARRY_EDGE__DOWNLOADS` on). Only a governed `download_ref` opens it, for
+    /// one download, and closes it again.
+    downloads_default_deny: bool,
+    /// W3-E3.4-6: a governed download holds the context open right now. A second
+    /// `download_ref` on the same session is refused while it is set.
+    download_armed: bool,
     /// WS17.C1: the origins this session visited and the web storage its pages flushed on
     /// `pagehide`. Records nothing until a profile-enabled tab enables it (capture v2).
     journal: Arc<std::sync::Mutex<OriginJournal>>,
@@ -388,6 +395,11 @@ pub struct ChromiumoxideDriver {
     /// E3.1-c: `QUARRY_EDGE__FILL_OTP` (default off). Off, the one-time-code
     /// precheck and insert are refused `UNSUPPORTED`.
     fill_otp: bool,
+    /// W3-E3.4-6: `QUARRY_EDGE__DOWNLOADS` (default off, the switch the edge's
+    /// download admission policy reads too). On: every session context denies
+    /// downloads, a verified `download_ref` opens it for exactly one download, and
+    /// the driver advertises `downloads_to_artifacts`. Off: the earlier quarantine.
+    governed_downloads: bool,
     /// E3.1-c: loaders (top-frame documents) a one-time code was delivered
     /// into, per session key. A navigation makes a new loader, so the mark is
     /// left behind; the session's release forgets it.
@@ -457,6 +469,9 @@ impl ChromiumoxideDriver {
             fill_otp: actionability::parse_fill_otp(
                 std::env::var(actionability::FILL_OTP_FLAG).ok().as_deref(),
             ),
+            governed_downloads: parse_downloads_flag(
+                std::env::var(DOWNLOADS_FLAG).ok().as_deref(),
+            ),
             credential_delivered: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -465,6 +480,14 @@ impl ChromiumoxideDriver {
     /// `QUARRY_BROWSER_TRUSTED_INPUT`. Call before the first `acquire`.
     pub fn with_trusted_input(mut self, enabled: bool) -> Self {
         self.trusted_input = enabled;
+        self
+    }
+
+    /// W3-E3.4-6: turn governed downloads on or off, overriding
+    /// `QUARRY_EDGE__DOWNLOADS`. Call before the first `acquire`: a context keeps the
+    /// download behaviour it was created with.
+    pub fn with_governed_downloads(mut self, enabled: bool) -> Self {
+        self.governed_downloads = enabled;
         self
     }
 
@@ -564,6 +587,7 @@ impl ChromiumoxideDriver {
             profiles: self.profiles.clone(),
             trusted_input: self.trusted_input,
             fill_otp: self.fill_otp,
+            governed_downloads: self.governed_downloads,
             credential_delivered: self.credential_delivered.clone(),
         }
     }
@@ -1368,19 +1392,15 @@ impl ChromiumoxideDriver {
                         "chromiumoxide download quarantine path is not valid UTF-8",
                     )
                 })?;
-                let download_behavior = SetDownloadBehaviorParams::builder()
-                    .behavior(SetDownloadBehaviorBehavior::AllowAndName)
-                    .browser_context_id(id.clone())
-                    .download_path(download_path)
-                    .events_enabled(true)
-                    .build()
-                    .map_err(|error| {
-                        QuarryError::new(
-                            ErrorCode::Internal,
-                            "build chromiumoxide download quarantine configuration failed",
-                        )
-                        .with_details(json!({ "error": error }))
-                    })?;
+                // W3-E3.4-6: governed, the context starts with downloads denied; only a
+                // verified `download_ref` opens it, for one download. Off, the earlier
+                // quarantine (every download is saved under the private directory).
+                let default_deny = self.governed_downloads;
+                let download_behavior = download_behavior_params(
+                    context_download_behavior(default_deny),
+                    &id,
+                    Some(download_path),
+                )?;
                 {
                     let browser_guard = self.browser.read().await;
                     let browser = browser_guard.as_ref().ok_or_else(browser_missing)?;
@@ -1396,6 +1416,7 @@ impl ChromiumoxideDriver {
                     .await?;
                 }
                 attach.download_dir = Some(download_dir);
+                attach.downloads_default_deny = default_deny;
                 id
             }
         };
@@ -1585,6 +1606,7 @@ impl ChromiumoxideDriver {
         if let Some(context_id) = attach.context.take() {
             session_pages.browser_context_id = Some(context_id);
             session_pages.download_dir = attach.download_dir.take();
+            session_pages.downloads_default_deny = attach.downloads_default_deny;
         }
         // The context's first tab is committed: the profile is restored, once. A
         // placeholder that made the context leaves it to the session's first `goto`.
@@ -4528,7 +4550,10 @@ impl BrowserDriver for ChromiumoxideDriver {
         BrowserDriverCapabilities {
             persistent_profile: true,
             devtools_trace: true,
-            downloads_to_artifacts: false,
+            // W3-E3.4-6: advertised only with governed downloads on (default-deny
+            // contexts, one download per verified `download_ref`). Off, real runs keep
+            // refusing `download_ref` at the capability gate, as before.
+            downloads_to_artifacts: self.governed_downloads,
             // Native upload code exists, but it stays unavailable to agent
             // runs until the artifact quarantine and OOPIF path have runtime
             // proof equal to the download path.
@@ -5107,9 +5132,9 @@ impl BrowserDriver for ChromiumoxideDriver {
             Some(frame_id) => frame_id,
             None => root_frame_id(&page).await?,
         };
-        let (context_id, download_dir) = {
-            let pages = self.pages.lock().await;
-            let session_pages = pages.get(&session_key).ok_or_else(|| {
+        let (context_id, download_dir, governed) = {
+            let mut pages = self.pages.lock().await;
+            let session_pages = pages.get_mut(&session_key).ok_or_else(|| {
                 QuarryError::new(
                     ErrorCode::DriverFailed,
                     "download session context is unavailable",
@@ -5127,159 +5152,250 @@ impl BrowserDriver for ChromiumoxideDriver {
                     "download quarantine directory is unavailable",
                 )
             })?;
-            (context_id, download_dir)
-        };
-        // Subscribe before clicking. Browser.download* events are global to the
-        // Chromium process, so the event is additionally tied to this exact
-        // target's observed frame before its GUID is accepted.
-        let (mut begins, mut progress) = {
-            let browser_guard = self.browser.read().await;
-            let browser = browser_guard.as_ref().ok_or_else(|| {
-                QuarryError::new(
-                    ErrorCode::DriverFailed,
-                    "chromiumoxide browser is unavailable",
-                )
-            })?;
-            let begins = browser
-                .event_listener::<EventDownloadWillBegin>()
-                .await
-                .map_err(|error| {
-                    QuarryError::new(
-                        ErrorCode::DriverFailed,
-                        "chromiumoxide download-begin listener failed",
-                    )
-                    .with_details(json!({ "error": error.to_string() }))
-                })?;
-            let progress = browser
-                .event_listener::<EventDownloadProgress>()
-                .await
-                .map_err(|error| {
-                    QuarryError::new(
-                        ErrorCode::DriverFailed,
-                        "chromiumoxide download-progress listener failed",
-                    )
-                    .with_details(json!({ "error": error.to_string() }))
-                })?;
-            (begins, progress)
-        };
-
-        with_deadline(
-            Op::NativeAction,
-            execute_native_target_action(
-                &page,
-                target,
-                VerifiedTargetOperation::Click,
-                // The download is bound to this click's synthetic activation and
-                // frame; real input is not part of the governed download path.
-                &InputMode::Synthetic,
-            ),
-        )
-        .await?;
-
-        let began = tokio::time::timeout(deadline(Op::DownloadBegin), async {
-            while let Some(event) = begins.next().await {
-                let event_frame_id = event.frame_id.inner();
-                if expected_frame_id == event_frame_id.as_str() {
-                    return Some(event);
-                }
-            }
-            None
-        })
-        .await
-        .map_err(|_| QuarryError::new(ErrorCode::Timeout, "browser download did not begin"))?
-        .ok_or_else(|| {
-            QuarryError::new(ErrorCode::DriverFailed, "browser download listener ended")
-        })?;
-
-        let guid = began.guid.clone();
-        let completed_path = tokio::time::timeout(deadline(Op::DownloadComplete), async {
-            while let Some(event) = progress.next().await {
-                if event.guid != guid {
-                    continue;
-                }
-                if event.received_bytes.is_finite()
-                    && event.received_bytes > MAX_GOVERNED_DOWNLOAD_BYTES as f64
-                {
-                    if let Some(browser) = self.browser.read().await.as_ref() {
-                        if let Ok(cancel) = CancelDownloadParams::builder()
-                            .guid(guid.clone())
-                            .browser_context_id(context_id.clone())
-                            .build()
-                        {
-                            let _ = browser.execute(cancel).await;
-                        }
-                    }
+            // W3-E3.4-6: a default-deny context is opened for one download at a time.
+            let governed = session_pages.downloads_default_deny;
+            if governed {
+                if session_pages.download_armed {
                     return Err(QuarryError::new(
-                        ErrorCode::BadRequest,
-                        "browser download exceeds the governed size limit",
+                        ErrorCode::Conflict,
+                        "a governed download is already in progress in this session",
                     ));
                 }
-                match event.state {
-                    DownloadProgressState::Completed => return Ok(event.file_path.clone()),
-                    DownloadProgressState::Canceled => {
-                        return Err(QuarryError::new(
-                            ErrorCode::DriverFailed,
-                            "browser download was canceled",
-                        ));
-                    }
-                    DownloadProgressState::InProgress => {}
-                }
+                session_pages.download_armed = true;
             }
-            Err(QuarryError::new(
-                ErrorCode::DriverFailed,
-                "browser download progress listener ended",
-            ))
-        })
-        .await
-        .map_err(|_| QuarryError::new(ErrorCode::Timeout, "browser download did not complete"))??;
+            (context_id, download_dir, governed)
+        };
+        // From here a governed session holds the arm. The guard closes the context
+        // again (downloads denied) and gives the arm back on every path: an error, a
+        // timeout and a dropped future included.
+        let arm = DownloadArm::new(self, session_key.clone(), context_id.clone(), governed);
+        let result = async {
+            // Subscribe before clicking. Browser.download* events are global to the
+            // Chromium process, so the event is additionally tied to this exact
+            // target's observed frame before its GUID is accepted.
+            let (mut begins, mut progress) = {
+                let browser_guard = self.browser.read().await;
+                let browser = browser_guard.as_ref().ok_or_else(|| {
+                    QuarryError::new(
+                        ErrorCode::DriverFailed,
+                        "chromiumoxide browser is unavailable",
+                    )
+                })?;
+                let begins = browser
+                    .event_listener::<EventDownloadWillBegin>()
+                    .await
+                    .map_err(|error| {
+                        QuarryError::new(
+                            ErrorCode::DriverFailed,
+                            "chromiumoxide download-begin listener failed",
+                        )
+                        .with_details(json!({ "error": error.to_string() }))
+                    })?;
+                let progress = browser
+                    .event_listener::<EventDownloadProgress>()
+                    .await
+                    .map_err(|error| {
+                        QuarryError::new(
+                            ErrorCode::DriverFailed,
+                            "chromiumoxide download-progress listener failed",
+                        )
+                        .with_details(json!({ "error": error.to_string() }))
+                    })?;
+                (begins, progress)
+            };
 
-        let root = tokio::fs::canonicalize(download_dir.path())
+            // W3-E3.4-6: open the denied context for this one download, after the
+            // listeners exist and right before the click that starts it.
+            if governed {
+                let download_path = download_dir.path().to_str().ok_or_else(|| {
+                    QuarryError::new(
+                        ErrorCode::Internal,
+                        "chromiumoxide download quarantine path is not valid UTF-8",
+                    )
+                })?;
+                let allow = download_behavior_params(
+                    SetDownloadBehaviorBehavior::AllowAndName,
+                    &context_id,
+                    Some(download_path),
+                )?;
+                let browser_guard = self.browser.read().await;
+                let browser = browser_guard.as_ref().ok_or_else(browser_missing)?;
+                with_deadline(Op::DownloadBegin, async {
+                    browser.execute(allow).await.map(|_| ()).map_err(|error| {
+                        QuarryError::new(
+                            ErrorCode::DriverFailed,
+                            "chromiumoxide governed download could not be opened",
+                        )
+                        .with_details(json!({ "error": error.to_string() }))
+                    })
+                })
+                .await?;
+            }
+
+            with_deadline(
+                Op::NativeAction,
+                execute_native_target_action(
+                    &page,
+                    target,
+                    VerifiedTargetOperation::Click,
+                    // The download is bound to this click's synthetic activation and
+                    // frame; real input is not part of the governed download path.
+                    &InputMode::Synthetic,
+                ),
+            )
+            .await?;
+
+            let began = tokio::time::timeout(deadline(Op::DownloadBegin), async {
+                while let Some(event) = begins.next().await {
+                    let event_frame_id = event.frame_id.inner();
+                    match download_begin_decision(
+                        governed,
+                        &expected_frame_id,
+                        event_frame_id.as_str(),
+                        None,
+                        &event.guid,
+                    ) {
+                        DownloadBeginDecision::Accept => return Some(event),
+                        // Governed: anything else that starts while the context is open
+                        // (another frame, another tab of the session) is not this
+                        // action's download and is cancelled.
+                        DownloadBeginDecision::Cancel => {
+                            self.cancel_download_in_context(&event.guid, &context_id)
+                                .await;
+                        }
+                        DownloadBeginDecision::Ignore => {}
+                    }
+                }
+                None
+            })
             .await
-            .map_err(|error| {
+            .map_err(|_| QuarryError::new(ErrorCode::Timeout, "browser download did not begin"))?
+            .ok_or_else(|| {
+                QuarryError::new(ErrorCode::DriverFailed, "browser download listener ended")
+            })?;
+
+            let guid = began.guid.clone();
+            let completed_path = tokio::time::timeout(deadline(Op::DownloadComplete), async {
+                // Governed, later begins are still watched while this download runs, so
+                // nothing else slips into the open context before it is closed again.
+                let mut begins_open = governed;
+                loop {
+                    tokio::select! {
+                        event = progress.next() => {
+                            let Some(event) = event else {
+                                return Err(QuarryError::new(
+                                    ErrorCode::DriverFailed,
+                                    "browser download progress listener ended",
+                                ));
+                            };
+                            if event.guid != guid {
+                                continue;
+                            }
+                            if event.received_bytes.is_finite()
+                                && event.received_bytes > MAX_GOVERNED_DOWNLOAD_BYTES as f64
+                            {
+                                self.cancel_download_in_context(&guid, &context_id).await;
+                                return Err(QuarryError::new(
+                                    ErrorCode::BadRequest,
+                                    "browser download exceeds the governed size limit",
+                                ));
+                            }
+                            match event.state {
+                                DownloadProgressState::Completed => {
+                                    return Ok(event.file_path.clone())
+                                }
+                                DownloadProgressState::Canceled => {
+                                    return Err(QuarryError::new(
+                                        ErrorCode::DriverFailed,
+                                        "browser download was canceled",
+                                    ));
+                                }
+                                DownloadProgressState::InProgress => {}
+                            }
+                        }
+                        other = begins.next(), if begins_open => {
+                            let Some(other) = other else {
+                                begins_open = false;
+                                continue;
+                            };
+                            let other_frame_id = other.frame_id.inner();
+                            if download_begin_decision(
+                                governed,
+                                &expected_frame_id,
+                                other_frame_id.as_str(),
+                                Some(guid.as_str()),
+                                &other.guid,
+                            ) == DownloadBeginDecision::Cancel
+                            {
+                                self.cancel_download_in_context(&other.guid, &context_id)
+                                    .await;
+                            }
+                        }
+                    }
+                }
+            })
+            .await
+            .map_err(|_| {
+                QuarryError::new(ErrorCode::Timeout, "browser download did not complete")
+            })??;
+
+            let root = tokio::fs::canonicalize(download_dir.path())
+                .await
+                .map_err(|error| {
+                    QuarryError::new(
+                        ErrorCode::DriverFailed,
+                        "download quarantine directory disappeared",
+                    )
+                    .with_details(json!({ "error": error.to_string() }))
+                })?;
+            let candidate = completed_path
+                .map(PathBuf::from)
+                .unwrap_or_else(|| root.join(&guid));
+            let file = tokio::fs::canonicalize(&candidate).await.map_err(|error| {
                 QuarryError::new(
                     ErrorCode::DriverFailed,
-                    "download quarantine directory disappeared",
+                    "browser download file is unavailable",
                 )
                 .with_details(json!({ "error": error.to_string() }))
             })?;
-        let candidate = completed_path
-            .map(PathBuf::from)
-            .unwrap_or_else(|| root.join(&guid));
-        let file = tokio::fs::canonicalize(&candidate).await.map_err(|error| {
-            QuarryError::new(
-                ErrorCode::DriverFailed,
-                "browser download file is unavailable",
-            )
-            .with_details(json!({ "error": error.to_string() }))
-        })?;
-        if !file.starts_with(&root) {
-            return Err(QuarryError::new(
-                ErrorCode::SecurityBlocked,
-                "browser download escaped Quarry's private quarantine directory",
-            ));
-        }
-        let metadata = tokio::fs::metadata(&file).await.map_err(|error| {
-            QuarryError::new(ErrorCode::DriverFailed, "inspect browser download failed")
+            if !file.starts_with(&root) {
+                return Err(QuarryError::new(
+                    ErrorCode::SecurityBlocked,
+                    "browser download escaped Quarry's private quarantine directory",
+                ));
+            }
+            let metadata = tokio::fs::metadata(&file).await.map_err(|error| {
+                QuarryError::new(ErrorCode::DriverFailed, "inspect browser download failed")
+                    .with_details(json!({ "error": error.to_string() }))
+            })?;
+            if !metadata.is_file() || metadata.len() > MAX_GOVERNED_DOWNLOAD_BYTES {
+                return Err(QuarryError::new(
+                    ErrorCode::BadRequest,
+                    "browser download failed governed type or size admission",
+                ));
+            }
+            let bytes = tokio::fs::read(&file).await.map_err(|error| {
+                QuarryError::new(
+                    ErrorCode::DriverFailed,
+                    "read quarantined browser download failed",
+                )
                 .with_details(json!({ "error": error.to_string() }))
-        })?;
-        if !metadata.is_file() || metadata.len() > MAX_GOVERNED_DOWNLOAD_BYTES {
-            return Err(QuarryError::new(
-                ErrorCode::BadRequest,
-                "browser download failed governed type or size admission",
-            ));
+            })?;
+            // W3-E3.4-6: single use. The bytes now belong to the caller (the runner
+            // stores them as an artifact); the quarantine copy is removed at once
+            // instead of waiting for the session to end.
+            if governed && tokio::fs::remove_file(&file).await.is_err() {
+                tracing::debug!("governed download: removing the quarantine copy failed");
+            }
+            Ok::<_, QuarryError>(BrowserDownloadedFile {
+                bytes: Bytes::from(bytes),
+                suggested_filename: sanitize_download_filename(&began.suggested_filename),
+                source_url: redact_egress_url(&began.url),
+            })
         }
-        let bytes = tokio::fs::read(file).await.map_err(|error| {
-            QuarryError::new(
-                ErrorCode::DriverFailed,
-                "read quarantined browser download failed",
-            )
-            .with_details(json!({ "error": error.to_string() }))
-        })?;
-        Ok(BrowserDownloadedFile {
-            bytes: Bytes::from(bytes),
-            suggested_filename: sanitize_download_filename(&began.suggested_filename),
-            source_url: redact_egress_url(&began.url),
-        })
+        .await;
+        arm.release().await;
+        result
     }
 
     /// WS12.S5: never the raw image. The masked capture below, or a
@@ -7034,6 +7150,8 @@ struct AttachGuard {
     page: Option<Page>,
     context: Option<BrowserContextId>,
     download_dir: Option<Arc<tempfile::TempDir>>,
+    /// W3-E3.4-6: the download behaviour the new context was created with.
+    downloads_default_deny: bool,
     armed: bool,
 }
 
@@ -7047,6 +7165,7 @@ impl AttachGuard {
             page: None,
             context: None,
             download_dir: None,
+            downloads_default_deny: false,
             armed: true,
         }
     }
@@ -7145,6 +7264,199 @@ fn browser_missing() -> QuarryError {
         ErrorCode::DriverFailed,
         "chromiumoxide: browser not initialized",
     )
+}
+
+/// W3-E3.4-6: the switch for governed downloads, shared with the edge's download
+/// admission policy (W3-E3.4-4), so one setting turns the whole path on or off.
+pub const DOWNLOADS_FLAG: &str = "QUARRY_EDGE__DOWNLOADS";
+
+/// Whether the flag's value turns governed downloads on. Anything but a yes value
+/// leaves them off (the same values the edge accepts).
+fn parse_downloads_flag(raw: Option<&str>) -> bool {
+    matches!(
+        raw.map(|value| value.trim().to_ascii_lowercase()).as_deref(),
+        Some("1" | "true" | "yes" | "on")
+    )
+}
+
+/// The download behaviour a new session context is created with: denied when
+/// governed, the earlier private quarantine when not.
+fn context_download_behavior(default_deny: bool) -> SetDownloadBehaviorBehavior {
+    if default_deny {
+        SetDownloadBehaviorBehavior::Deny
+    } else {
+        SetDownloadBehaviorBehavior::AllowAndName
+    }
+}
+
+/// `Browser.setDownloadBehavior` for one context, with download events on (the
+/// governed path waits on them). `download_path` is required by Chromium for the
+/// allow behaviours and ignored for `Deny`.
+fn download_behavior_params(
+    behavior: SetDownloadBehaviorBehavior,
+    context_id: &BrowserContextId,
+    download_path: Option<&str>,
+) -> QuarryResult<SetDownloadBehaviorParams> {
+    let mut builder = SetDownloadBehaviorParams::builder()
+        .behavior(behavior)
+        .browser_context_id(context_id.clone())
+        .events_enabled(true);
+    if let Some(path) = download_path {
+        builder = builder.download_path(path);
+    }
+    builder.build().map_err(|error| {
+        QuarryError::new(
+            ErrorCode::Internal,
+            "build chromiumoxide download behaviour failed",
+        )
+        .with_details(json!({ "error": error }))
+    })
+}
+
+/// What a `Browser.downloadWillBegin` event means to a `download_ref` waiting on it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DownloadBeginDecision {
+    /// The download this action's click started.
+    Accept,
+    /// Governed: another download started while the context is open. Cancel it.
+    Cancel,
+    /// Not governed (the earlier rule), or this action's own download seen again.
+    Ignore,
+}
+
+/// `accepted_guid` is the download already accepted, if any. Only a download from
+/// the target's own frame is accepted, and only one.
+fn download_begin_decision(
+    governed: bool,
+    expected_frame_id: &str,
+    event_frame_id: &str,
+    accepted_guid: Option<&str>,
+    event_guid: &str,
+) -> DownloadBeginDecision {
+    let foreign = match accepted_guid {
+        Some(accepted) if accepted == event_guid => return DownloadBeginDecision::Ignore,
+        Some(_) => true,
+        None => expected_frame_id != event_frame_id,
+    };
+    match (foreign, governed) {
+        (false, _) => DownloadBeginDecision::Accept,
+        (true, true) => DownloadBeginDecision::Cancel,
+        (true, false) => DownloadBeginDecision::Ignore,
+    }
+}
+
+impl ChromiumoxideDriver {
+    /// Cancel one download of `context_id`. A GUID of another context is not found
+    /// there, so this never cancels another session's download. Best effort: a
+    /// download that already ended has nothing to cancel.
+    async fn cancel_download_in_context(&self, guid: &str, context_id: &BrowserContextId) {
+        let Ok(cancel) = CancelDownloadParams::builder()
+            .guid(guid.to_owned())
+            .browser_context_id(context_id.clone())
+            .build()
+        else {
+            return;
+        };
+        let browser_guard = self.browser.read().await;
+        if let Some(browser) = browser_guard.as_ref() {
+            if best_effort(Op::DownloadBegin, browser.execute(cancel))
+                .await
+                .is_err()
+            {
+                tracing::debug!("governed download: cancel failed");
+            }
+        }
+    }
+}
+
+/// W3-E3.4-6: close a governed context again (downloads denied) and give the
+/// session's arm back.
+async fn restore_download_deny(
+    browser: Arc<RwLock<Option<Browser>>>,
+    pages: Arc<Mutex<HashMap<String, SessionPages>>>,
+    session_key: String,
+    context_id: BrowserContextId,
+) {
+    match download_behavior_params(SetDownloadBehaviorBehavior::Deny, &context_id, None) {
+        Ok(deny) => {
+            let browser_guard = browser.read().await;
+            if let Some(browser) = browser_guard.as_ref() {
+                if best_effort(Op::DownloadBegin, browser.execute(deny))
+                    .await
+                    .is_err()
+                {
+                    // The context stays a private quarantine (the earlier behaviour)
+                    // until the session ends; nothing is admitted without a
+                    // `download_ref`, which re-runs this on its way out.
+                    tracing::warn!("governed download: restoring default-deny failed");
+                }
+            }
+        }
+        Err(_) => tracing::warn!("governed download: default-deny parameters failed"),
+    }
+    if let Some(session_pages) = pages.lock().await.get_mut(&session_key) {
+        session_pages.download_armed = false;
+    }
+}
+
+/// W3-E3.4-6: one governed download's hold on its session. `release` closes the
+/// context and gives the arm back; a guard dropped without it (a cancelled or
+/// timed-out caller) does the same on a spawned task.
+struct DownloadArm {
+    browser: Arc<RwLock<Option<Browser>>>,
+    pages: Arc<Mutex<HashMap<String, SessionPages>>>,
+    session_key: String,
+    context_id: BrowserContextId,
+    held: bool,
+}
+
+impl DownloadArm {
+    fn new(
+        driver: &ChromiumoxideDriver,
+        session_key: String,
+        context_id: BrowserContextId,
+        held: bool,
+    ) -> Self {
+        Self {
+            browser: driver.browser.clone(),
+            pages: driver.pages.clone(),
+            session_key,
+            context_id,
+            held,
+        }
+    }
+
+    async fn release(mut self) {
+        if !self.held {
+            return;
+        }
+        self.held = false;
+        restore_download_deny(
+            self.browser.clone(),
+            self.pages.clone(),
+            self.session_key.clone(),
+            self.context_id.clone(),
+        )
+        .await;
+    }
+}
+
+impl Drop for DownloadArm {
+    fn drop(&mut self) {
+        if !self.held {
+            return;
+        }
+        self.held = false;
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        runtime.spawn(restore_download_deny(
+            self.browser.clone(),
+            self.pages.clone(),
+            self.session_key.clone(),
+            self.context_id.clone(),
+        ));
+    }
 }
 
 /// A session that was reaped or whose browser died. Not retryable: the run has
@@ -11046,6 +11358,165 @@ mod tests {
     include!("profile_capture_live.rs");
     // WS17.C2: restore against a real Chromium.
     include!("profile_restore_live.rs");
+
+    // ---- W3-E3.4-6: governed downloads against a real Chromium (lane C4).
+    //
+    // The pages mirror the `/downloads*` fixtures of quarry-runtime's `test_site.rs`
+    // (same ids, names and bytes). They are injected with `set_content` and use
+    // `data:` links because the egress guard refuses loopback navigation, so the
+    // driver cannot load the test site itself.
+    //
+    // Run: CHROMIUMOXIDE_TEST=1 QUARRY_BROWSER_NO_SANDBOX=1 CHROME=/usr/bin/chromium \
+    //      cargo test -p quarry-browser --features chromiumoxide governed_download -- --test-threads=1
+
+    /// `report.txt` of the test site: "quarry download fixture\n", base64.
+    const GOVERNED_DOWNLOAD_PAGE: &str = "<a id=report download=\"report.txt\" \
+        href=\"data:text/plain;base64,cXVhcnJ5IGRvd25sb2FkIGZpeHR1cmUK\">Get report</a>";
+
+    /// A governed driver with one session whose page is `html`.
+    async fn governed_download_fixture(key: &str, html: &str) -> (ChromiumoxideDriver, BrowserSession) {
+        let driver = live_driver().with_governed_downloads(true);
+        let session = live_session(&driver, key).await;
+        driver.new_tab(&session, None).await.expect("blank tab");
+        let page = driver.current_page(&session).await.expect("current page");
+        page.set_content(html).await.expect("inject page");
+        (driver, session)
+    }
+
+    /// The files in the session's private download directory, and whether a
+    /// governed download holds the session right now.
+    async fn governed_download_state(
+        driver: &ChromiumoxideDriver,
+        session: &BrowserSession,
+    ) -> (usize, bool) {
+        let pages = driver.pages.lock().await;
+        let session_pages = pages
+            .get(&ChromiumoxideDriver::session_key(session))
+            .expect("session pages");
+        assert!(session_pages.downloads_default_deny, "the context was created denied");
+        let dir = session_pages.download_dir.clone().expect("download dir");
+        let files = std::fs::read_dir(dir.path())
+            .map(|entries| entries.filter_map(Result::ok).count())
+            .unwrap_or(0);
+        (files, session_pages.download_armed)
+    }
+
+    /// An unsolicited download (a page script clicks a download link; no
+    /// `download_ref`) is denied by the driver: nothing reaches the disk.
+    #[tokio::test]
+    async fn governed_download_denies_an_unsolicited_download() {
+        if !live_enabled() {
+            return;
+        }
+        let (driver, session) =
+            governed_download_fixture("gd-unsolicited", GOVERNED_DOWNLOAD_PAGE).await;
+        assert!(driver.capabilities().downloads_to_artifacts);
+        let page = driver.current_page(&session).await.expect("current page");
+        page.evaluate("document.getElementById('report').click()")
+            .await
+            .expect("page-initiated download");
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        assert_eq!(
+            governed_download_state(&driver, &session).await,
+            (0, false),
+            "an unsolicited download reached the quarantine directory"
+        );
+        driver.release(session).await.expect("release");
+    }
+
+    /// A verified `download_ref` gets exactly its own file; the quarantine copy is
+    /// gone afterwards, the arm is given back, and the context is denied again, so
+    /// the same link clicked by the page right after is refused.
+    #[tokio::test]
+    async fn governed_download_admits_one_download_ref_and_closes_again() {
+        if !live_enabled() {
+            return;
+        }
+        let (driver, session) =
+            governed_download_fixture("gd-single-use", GOVERNED_DOWNLOAD_PAGE).await;
+        let target = ref_named(&driver, &session, "Get report").await;
+        let file = driver
+            .download_from_verified_target(&session, target)
+            .await
+            .expect("governed download");
+        assert_eq!(&file.bytes[..], b"quarry download fixture\n");
+        assert_eq!(file.suggested_filename, "report.txt");
+        assert_eq!(governed_download_state(&driver, &session).await, (0, false));
+
+        let page = driver.current_page(&session).await.expect("current page");
+        page.evaluate("document.getElementById('report').click()")
+            .await
+            .expect("page-initiated download");
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        assert_eq!(
+            governed_download_state(&driver, &session).await,
+            (0, false),
+            "the context stayed open after the governed download"
+        );
+
+        // And a second `download_ref` is its own single use, not a leftover.
+        let again = ref_named(&driver, &session, "Get report").await;
+        let second = driver
+            .download_from_verified_target(&session, again)
+            .await
+            .expect("second governed download");
+        assert_eq!(&second.bytes[..], b"quarry download fixture\n");
+        driver.release(session).await.expect("release");
+    }
+
+    /// While one governed download holds the session, a second is refused
+    /// `CONFLICT` before anything is clicked.
+    #[tokio::test]
+    async fn governed_download_refuses_a_second_download_while_one_is_open() {
+        if !live_enabled() {
+            return;
+        }
+        let (driver, session) =
+            governed_download_fixture("gd-conflict", GOVERNED_DOWNLOAD_PAGE).await;
+        let target = ref_named(&driver, &session, "Get report").await;
+        driver
+            .pages
+            .lock()
+            .await
+            .get_mut(&ChromiumoxideDriver::session_key(&session))
+            .expect("session pages")
+            .download_armed = true;
+        let error = driver
+            .download_from_verified_target(&session, target)
+            .await
+            .expect_err("a second governed download");
+        assert_eq!(error.code, ErrorCode::Conflict);
+        driver.release(session).await.expect("release");
+    }
+
+    /// Off (the default), the earlier quarantine is unchanged: a `download_ref`
+    /// still works and the capability is not advertised.
+    #[tokio::test]
+    async fn governed_download_off_keeps_the_earlier_quarantine() {
+        if !live_enabled() {
+            return;
+        }
+        let driver = live_driver().with_governed_downloads(false);
+        assert!(!driver.capabilities().downloads_to_artifacts);
+        let session = live_session(&driver, "gd-off").await;
+        driver.new_tab(&session, None).await.expect("blank tab");
+        let page = driver.current_page(&session).await.expect("current page");
+        page.set_content(GOVERNED_DOWNLOAD_PAGE).await.expect("inject page");
+        let target = ref_named(&driver, &session, "Get report").await;
+        let file = driver
+            .download_from_verified_target(&session, target)
+            .await
+            .expect("quarantined download");
+        assert_eq!(&file.bytes[..], b"quarry download fixture\n");
+        let pages = driver.pages.lock().await;
+        let session_pages = pages
+            .get(&ChromiumoxideDriver::session_key(&session))
+            .expect("session pages");
+        assert!(!session_pages.downloads_default_deny);
+        assert!(!session_pages.download_armed);
+        drop(pages);
+        driver.release(session).await.expect("release");
+    }
 }
 
 #[cfg(test)]
@@ -12045,5 +12516,92 @@ mod reputation_guard_tests {
             Some("reputation_blocked")
         );
         assert!(!error.message.contains("evil.example"));
+    }
+}
+
+/// W3-E3.4-6, the parts that need no browser: the flag, the context's starting
+/// behaviour, the CDP parameters and which download events a `download_ref` takes.
+#[cfg(test)]
+mod governed_download_tests {
+    use super::*;
+
+    #[test]
+    fn the_downloads_flag_is_off_unless_it_says_yes() {
+        assert_eq!(DOWNLOADS_FLAG, "QUARRY_EDGE__DOWNLOADS");
+        for on in ["1", "true", "YES", " on "] {
+            assert!(parse_downloads_flag(Some(on)), "{on}");
+        }
+        for off in ["", "0", "false", "off", "deny", "maybe"] {
+            assert!(!parse_downloads_flag(Some(off)), "{off}");
+        }
+        assert!(!parse_downloads_flag(None));
+    }
+
+    #[test]
+    fn a_governed_context_starts_denied_and_an_ungoverned_one_quarantined() {
+        assert_eq!(
+            context_download_behavior(true),
+            SetDownloadBehaviorBehavior::Deny
+        );
+        assert_eq!(
+            context_download_behavior(false),
+            SetDownloadBehaviorBehavior::AllowAndName
+        );
+    }
+
+    #[test]
+    fn the_capability_follows_the_switch() {
+        assert!(
+            ChromiumoxideDriver::new()
+                .with_governed_downloads(true)
+                .capabilities()
+                .downloads_to_artifacts
+        );
+        assert!(
+            !ChromiumoxideDriver::new()
+                .with_governed_downloads(false)
+                .capabilities()
+                .downloads_to_artifacts
+        );
+    }
+
+    #[test]
+    fn download_behaviour_parameters_name_the_context_and_keep_events_on() {
+        let context = BrowserContextId::new("ctx-1".to_owned());
+        let deny = download_behavior_params(SetDownloadBehaviorBehavior::Deny, &context, None)
+            .expect("deny params");
+        assert_eq!(deny.behavior, SetDownloadBehaviorBehavior::Deny);
+        assert_eq!(deny.browser_context_id.as_ref(), Some(&context));
+        assert_eq!(deny.events_enabled, Some(true));
+        assert!(deny.download_path.is_none());
+        let allow = download_behavior_params(
+            SetDownloadBehaviorBehavior::AllowAndName,
+            &context,
+            Some("/tmp/quarry-download-x"),
+        )
+        .expect("allow params");
+        assert_eq!(allow.download_path.as_deref(), Some("/tmp/quarry-download-x"));
+    }
+
+    #[test]
+    fn only_the_targets_frame_starts_the_download_ref() {
+        use DownloadBeginDecision::*;
+        // Waiting for the first event.
+        assert_eq!(download_begin_decision(true, "f1", "f1", None, "g1"), Accept);
+        assert_eq!(download_begin_decision(false, "f1", "f1", None, "g1"), Accept);
+        // Another frame: cancelled when governed, ignored (the earlier rule) when not.
+        assert_eq!(download_begin_decision(true, "f1", "f2", None, "g2"), Cancel);
+        assert_eq!(download_begin_decision(false, "f1", "f2", None, "g2"), Ignore);
+    }
+
+    #[test]
+    fn after_the_accepted_download_anything_else_is_cancelled_when_governed() {
+        use DownloadBeginDecision::*;
+        // The accepted download seen again is not cancelled.
+        assert_eq!(download_begin_decision(true, "f1", "f1", Some("g1"), "g1"), Ignore);
+        // A second download, even from the same frame, is not this action's.
+        assert_eq!(download_begin_decision(true, "f1", "f1", Some("g1"), "g2"), Cancel);
+        assert_eq!(download_begin_decision(true, "f1", "f2", Some("g1"), "g3"), Cancel);
+        assert_eq!(download_begin_decision(false, "f1", "f1", Some("g1"), "g2"), Ignore);
     }
 }
