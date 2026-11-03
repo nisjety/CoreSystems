@@ -18,7 +18,7 @@ func envFrom(values map[string]string) func(string) string {
 	return func(name string) string { return values[name] }
 }
 
-func testMaster(t *testing.T, active string, keys map[string]byte) *EnvMasterKeys {
+func testMaster(t *testing.T, active string, keys map[string]byte) *EnvMasterKeyProvider {
 	t.Helper()
 	parts := make([]string, 0, len(keys))
 	for id, fill := range keys {

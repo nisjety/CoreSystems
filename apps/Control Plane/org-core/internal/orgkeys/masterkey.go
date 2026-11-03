@@ -38,7 +38,7 @@ func Enabled(getenv func(string) string) bool {
 	return value == "1" || strings.EqualFold(value, "true")
 }
 
-// MasterKeyProvider is the root of the hierarchy. EnvMasterKeys is the interim
+// MasterKeyProvider is the root of the hierarchy. EnvMasterKeyProvider is the interim
 // implementation; a KMS-backed provider replaces it without touching the store
 // or the routes.
 type MasterKeyProvider interface {
@@ -51,15 +51,15 @@ type MasterKeyProvider interface {
 	IDs() []string
 }
 
-// EnvMasterKeys reads the master keys from the environment.
-type EnvMasterKeys struct {
+// EnvMasterKeyProvider reads the master keys from the environment.
+type EnvMasterKeyProvider struct {
 	active string
 	keys   map[string][]byte
 }
 
 // LoadEnvMasterKeys parses ORG_CORE_KEY_MASTER_KEYS and ORG_CORE_KEY_MASTER_ACTIVE.
 // No error it returns contains a key value.
-func LoadEnvMasterKeys(getenv func(string) string) (*EnvMasterKeys, error) {
+func LoadEnvMasterKeys(getenv func(string) string) (*EnvMasterKeyProvider, error) {
 	raw := strings.TrimSpace(getenv(EnvMasterKeys))
 	if raw == "" {
 		return nil, fmt.Errorf("%s is not set", EnvMasterKeys)
@@ -96,7 +96,7 @@ func LoadEnvMasterKeys(getenv func(string) string) (*EnvMasterKeys, error) {
 	if _, ok := keys[active]; !ok {
 		return nil, fmt.Errorf("%s names a key that %s does not hold", EnvMasterActive, EnvMasterKeys)
 	}
-	return &EnvMasterKeys{active: active, keys: keys}, nil
+	return &EnvMasterKeyProvider{active: active, keys: keys}, nil
 }
 
 // decodeKey accepts standard or URL-safe base64, padded or not, and requires
@@ -124,9 +124,9 @@ func decodeKey(value string) ([]byte, error) {
 	return key, nil
 }
 
-func (m *EnvMasterKeys) ActiveID() string { return m.active }
+func (m *EnvMasterKeyProvider) ActiveID() string { return m.active }
 
-func (m *EnvMasterKeys) Key(id string) ([]byte, bool) {
+func (m *EnvMasterKeyProvider) Key(id string) ([]byte, bool) {
 	key, ok := m.keys[id]
 	if !ok {
 		return nil, false
@@ -134,7 +134,7 @@ func (m *EnvMasterKeys) Key(id string) ([]byte, bool) {
 	return append([]byte(nil), key...), true
 }
 
-func (m *EnvMasterKeys) IDs() []string {
+func (m *EnvMasterKeyProvider) IDs() []string {
 	ids := make([]string, 0, len(m.keys))
 	for id := range m.keys {
 		ids = append(ids, id)
