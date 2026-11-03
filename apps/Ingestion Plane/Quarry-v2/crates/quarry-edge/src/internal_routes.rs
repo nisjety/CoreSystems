@@ -13,6 +13,14 @@
 //! `QUARRY_ORG_ERASURE_FAMILIES` registers them). Without `scope`, or with
 //! `scope=profiles`, the route walks the profile family only, as before, so a
 //! caller that does not know the new families keeps the old behaviour.
+//!
+//! W2-U49 (X-19 condition c): `DELETE /v1/internal/orgs/:org/users/:user/receipts`
+//! is the user-level hop. quarry-control calls it for a `user` or
+//! `user_anonymize` erasure (one event per org the user belonged to, from the
+//! user-core saga) when `QUARRY_CONTROL_GDPR_USER_RECEIPTS` is on. It deletes
+//! the step receipts and browser timeline events whose `org_id` and `actor_id`
+//! match, answers in the same counts-only shape (one `step_receipts` family) and
+//! is idempotent. Same internal token, outside `require_auth`.
 
 use axum::{
     extract::{Path, Query, State},
@@ -87,6 +95,16 @@ pub struct PurgeOrgReport {
     pub families: Vec<FamilyReport>,
 }
 
+/// Family name the user-level route reports (the org family of the same tables).
+pub const USER_RECEIPTS_FAMILY: &str = "step_receipts";
+
+/// The same bound as an org id, for the user id in the path.
+const MAX_USER_ID_LEN: usize = 256;
+
+fn path_id_ok(id: &str, max: usize) -> bool {
+    !id.trim().is_empty() && id.len() <= max && id.trim() == id
+}
+
 fn err_response(request_id: &str, err: QuarryError) -> (StatusCode, Json<Envelope<()>>) {
     (
         StatusCode::from_u16(err.code.http_status()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
@@ -104,7 +122,7 @@ pub async fn purge_org_profiles(
     let request_id = crate::request_id::current();
     crate::change_routes::verify_internal_token(&headers)
         .map_err(|e| err_response(&request_id, e))?;
-    if org.trim().is_empty() || org.len() > MAX_ORG_ID_LEN || org.trim() != org {
+    if !path_id_ok(&org, MAX_ORG_ID_LEN) {
         return Err(err_response(
             &request_id,
             QuarryError::new(ErrorCode::BadRequest, "org id is missing or malformed"),
@@ -146,9 +164,99 @@ pub async fn purge_org_profiles(
     )))
 }
 
+/// `DELETE /v1/internal/orgs/:org/users/:user/receipts` (W2-U49).
+///
+/// With a durable frontier pool (the same `DATABASE_URL` the durable receipt
+/// store uses) the delete runs in Postgres; otherwise it goes to the receipt
+/// store in `AppState`, which is the in-memory store in development and answers
+/// 501 for a store that cannot erase.
+pub async fn purge_user_receipts(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((org, user)): Path<(String, String)>,
+) -> Result<Json<Envelope<PurgeOrgReport>>, (StatusCode, Json<Envelope<()>>)> {
+    let request_id = crate::request_id::current();
+    crate::change_routes::verify_internal_token(&headers)
+        .map_err(|e| err_response(&request_id, e))?;
+    if !path_id_ok(&org, MAX_ORG_ID_LEN) {
+        return Err(err_response(
+            &request_id,
+            QuarryError::new(ErrorCode::BadRequest, "org id is missing or malformed"),
+        ));
+    }
+    if !path_id_ok(&user, MAX_USER_ID_LEN) {
+        return Err(err_response(
+            &request_id,
+            QuarryError::new(ErrorCode::BadRequest, "user id is missing or malformed"),
+        ));
+    }
+    let counts = purge_user_receipts_in(&state, &org, &user)
+        .await
+        .map_err(|e| err_response(&request_id, e))?;
+    tracing::info!(
+        receipts = counts.receipts,
+        timeline_events = counts.timeline_events,
+        "user erasure: step receipts purged"
+    );
+    Ok(Json(Envelope::ok(
+        request_id,
+        user_purge_report(counts),
+    )))
+}
+
+async fn purge_user_receipts_in(
+    state: &AppState,
+    org: &str,
+    user: &str,
+) -> Result<quarry_runtime::step_receipts::ActorReceiptPurge, QuarryError> {
+    #[cfg(feature = "postgres-queue")]
+    {
+        if let Some(pool) = state.queue_pool.as_ref() {
+            return quarry_runtime::step_receipts::purge_actor_receipts_pg(pool, org, user).await;
+        }
+    }
+    state.receipts.purge_for_actor(org, user).await
+}
+
+/// The counts-only response: one family, the same shape as the org route.
+fn user_purge_report(counts: quarry_runtime::step_receipts::ActorReceiptPurge) -> PurgeOrgReport {
+    PurgeOrgReport {
+        families: vec![FamilyReport {
+            family: USER_RECEIPTS_FAMILY,
+            rows_deleted: counts.total(),
+            tombstones_deleted: 0,
+            cache_keys_deleted: 0,
+            keys_evicted: false,
+            guard_tombstones_written: 0,
+        }],
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn path_ids_refuse_empty_padded_and_overlong_values() {
+        assert!(path_id_ok("org_a", MAX_ORG_ID_LEN));
+        assert!(!path_id_ok("", MAX_ORG_ID_LEN));
+        assert!(!path_id_ok(" org_a", MAX_ORG_ID_LEN));
+        assert!(!path_id_ok("org_a ", MAX_ORG_ID_LEN));
+        assert!(!path_id_ok(&"u".repeat(MAX_USER_ID_LEN + 1), MAX_USER_ID_LEN));
+    }
+
+    #[test]
+    fn the_user_report_is_one_counts_only_family() {
+        let report = user_purge_report(quarry_runtime::step_receipts::ActorReceiptPurge {
+            receipts: 2,
+            timeline_events: 1,
+        });
+        let json = serde_json::to_value(&report).unwrap();
+        assert_eq!(json["families"].as_array().unwrap().len(), 1);
+        assert_eq!(json["families"][0]["family"], "step_receipts");
+        assert_eq!(json["families"][0]["rows_deleted"], 3);
+        assert!(json["families"][0].get("guard_tombstones_written").is_none());
+    }
 
     #[test]
     fn scope_defaults_to_profiles_and_refuses_unknown_values() {
