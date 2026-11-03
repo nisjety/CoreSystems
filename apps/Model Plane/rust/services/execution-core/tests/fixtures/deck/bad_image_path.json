@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "title": "Site photos",
+  "locale": "en-GB",
+  "slides": [
+    {
+      "id": "s1",
+      "layout": "title",
+      "title": "Site photos",
+      "bullets": ["Taken during the spring visit"]
+    },
+    {
+      "id": "s2",
+      "layout": "image",
+      "title": "Outside the plant",
+      "image": "../outside/photo.png"
+    },
+    {
+      "id": "s3",
+      "layout": "image",
+      "title": "Inside the plant",
+      "image": "/absolute/photo.png"
+    }
+  ]
+}

@@ -1,0 +1,28 @@
+{
+  "version": 1,
+  "title": "Overflow",
+  "locale": "en-GB",
+  "slides": [
+    {
+      "id": "s1",
+      "layout": "title",
+      "title": "Quarterly review",
+      "bullets": ["Prepared for the board"]
+    },
+    {
+      "id": "s2",
+      "layout": "title_bullets",
+      "title": "Eight points for discussion",
+      "bullets": [
+        "Hiring plans for the second half of the year remain under review",
+        "Supplier contracts in the chemicals line need renegotiation before March",
+        "The pilot in the northern region has met its first two targets",
+        "Cash flow forecasts assume that receivables stay within thirty days",
+        "Customer complaints fell sharply after the new packaging was introduced",
+        "Board approval is needed for the proposed plant upgrade in the south",
+        "Training for the field teams will start with the regional managers",
+        "Risks are listed in the appendix with an owner and a review date"
+      ]
+    }
+  ]
+}
