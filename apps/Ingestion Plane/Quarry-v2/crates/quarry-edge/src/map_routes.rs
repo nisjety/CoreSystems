@@ -275,6 +275,47 @@ pub(crate) fn check_robots(
     Ok(())
 }
 
+/// `QUARRY_EDGE__MAP_GZIP_SITEMAP` (default off). On: `/v1/map` fetches a sitemap as bytes
+/// within the compressed cap (the INNH-6a cap, 10 MiB), inflates a gzip body (`.xml.gz`, 50 MiB
+/// decoded cap) and reads the robots `Sitemap:` lines through the validated parser. Off: the
+/// 1 MiB text path, exactly as before. Read per call, like the other edge flags, so it needs no
+/// AppState plumbing.
+pub const ENV_MAP_GZIP_SITEMAP: &str = "QUARRY_EDGE__MAP_GZIP_SITEMAP";
+
+/// The largest compressed sitemap body fetched with the flag on.
+const MAP_GZIP_SITEMAP_MAX_BYTES: usize = crate::crawl_sitemap::MAX_COMPRESSED_BYTES;
+
+fn map_gzip_sitemap_on() -> bool {
+    flag_on(std::env::var(ENV_MAP_GZIP_SITEMAP).ok())
+}
+
+/// `on`, `1` or `true` in any case, surrounding space ignored (the edge's flag values).
+fn flag_on(value: Option<String>) -> bool {
+    matches!(
+        value.as_deref().map(|v| v.trim().to_ascii_lowercase()).as_deref(),
+        Some("on" | "1" | "true")
+    )
+}
+
+/// The size a sitemap body may have as sent: the text cap off, the compressed cap on.
+fn sitemap_body_cap(gzip_on: bool) -> usize {
+    if gzip_on {
+        MAP_GZIP_SITEMAP_MAX_BYTES
+    } else {
+        MAX_BODY_BYTES
+    }
+}
+
+/// The parsed sitemap of a fetched body, or `None` when the body cannot be read. Off, the body
+/// is read as lossy UTF-8 as it always was; on, a gzip body is inflated first.
+fn sitemap_from_body(body: &[u8], gzip_on: bool) -> Option<quarry_transform::sitemap::Sitemap> {
+    if gzip_on {
+        quarry_transform::sitemap::parse_body(body).ok()
+    } else {
+        Some(quarry_transform::sitemap::parse(&String::from_utf8_lossy(body)))
+    }
+}
+
 async fn fetch_text(
     state: &AppState,
     url: &Url,
@@ -305,6 +346,17 @@ pub(crate) async fn fetch_document_traced(
     url: &Url,
     redirects: &mut Vec<RedirectHop>,
 ) -> Result<Option<quarry_runtime::fetch::FetchResponse>, quarry_core::error::QuarryError> {
+    fetch_document_capped(state, url, redirects, MAX_BODY_BYTES).await
+}
+
+/// [`fetch_document_traced`] with the body bound given. `max_body` is the size as sent: the
+/// discovery hop enforces it, and the response is checked against it again.
+async fn fetch_document_capped(
+    state: &AppState,
+    url: &Url,
+    redirects: &mut Vec<RedirectHop>,
+    max_body: usize,
+) -> Result<Option<quarry_runtime::fetch::FetchResponse>, quarry_core::error::QuarryError> {
     let mut current = url.clone();
     let mut visited = BTreeSet::new();
     for hop in 0..=MAX_REDIRECTS {
@@ -319,7 +371,7 @@ pub(crate) async fn fetch_document_traced(
         }
         match state
             .driver
-            .fetch_discovery_hop(&current, MAX_BODY_BYTES)
+            .fetch_discovery_hop(&current, max_body)
             .await
         {
             Ok(resp) if matches!(resp.status, 301 | 302 | 303 | 307 | 308) => {
@@ -364,7 +416,7 @@ pub(crate) async fn fetch_document_traced(
                     return Err(redirect_blocked());
                 }
                 // Defence in depth for other bounded driver implementations.
-                if resp.body.len() > MAX_BODY_BYTES {
+                if resp.body.len() > max_body {
                     return Err(quarry_core::error::QuarryError::new(
                         quarry_core::error::ErrorCode::BadRequest,
                         "discovery body limit exceeded",
@@ -397,6 +449,19 @@ pub(crate) async fn fetch_document_traced(
         }
     }
     Err(redirect_blocked())
+}
+
+/// The body of a 2xx sitemap fetch, bounded at `max_body` as sent. A redirect follows the same
+/// rules as every discovery fetch.
+async fn fetch_sitemap_bytes(
+    state: &AppState,
+    url: &Url,
+    max_body: usize,
+) -> Result<Option<Vec<u8>>, quarry_core::error::QuarryError> {
+    Ok(fetch_document_capped(state, url, &mut Vec::new(), max_body)
+        .await?
+        .filter(|response| (200..300).contains(&response.status))
+        .map(|response| response.body))
 }
 
 // ── handler ─────────────────────────────────────────────────────────────────
@@ -433,6 +498,7 @@ async fn map_inner(
     claims: crate::auth::Claims,
     req: MapRequest,
 ) -> axum::response::Response {
+    let gzip_on = map_gzip_sitemap_on();
     if req.url.len() > 4096 || req.search.as_ref().is_some_and(|search| search.len() > 512) {
         return (
             StatusCode::BAD_REQUEST,
@@ -532,6 +598,7 @@ async fn map_inner(
     // failed robots may be ignored, but bounds/security/rate failures are fatal.
     // When the shared gate already decided, its rules filter below and the
     // best-effort fetch is skipped (no second robots.txt request).
+    let mut robots_listed: Option<Vec<String>> = None;
     let mut robots = match Url::parse(&format!("{origin}/robots.txt")).ok().filter(|_| !gate_decided) {
         Some(u) => match fetch_text(&state, &u).await {
             Ok(t) => t.map(|document| {
@@ -541,6 +608,11 @@ async fn map_inner(
                     .expect("validated redirect host");
                 origin = base.origin().ascii_serialization();
                 seed_host = base.host_str().unwrap().to_owned();
+                if gzip_on {
+                    robots_listed = Some(quarry_transform::sitemap::sitemap_urls_from_robots(
+                        &document.body,
+                    ));
+                }
                 quarry_transform::robots::RobotsTxt::parse(&document.body)
             }),
             Err(e) => return map_failure(e),
@@ -556,7 +628,10 @@ async fn map_inner(
     let mut sitemap_seen = BTreeSet::new();
     if let Ok(url) = base.join("/sitemap.xml") { sitemap_queue.push_back((url, 0)); }
     if let Some(rt) = robots.as_ref().or(gate_rules.as_deref()) {
-        for url in rt.sitemaps.iter().filter_map(|v| Url::parse(v).ok()).filter(|u| nested_in_scope(&base, u)).take(MAX_NESTED) { sitemap_queue.push_back((url, 0)); }
+        // With the flag on, the best-effort robots text names the sitemaps through the validated
+        // reader. The gate's parsed rules keep no text, so they keep their own list.
+        let listed = robots_listed.clone().unwrap_or_else(|| rt.sitemaps.clone());
+        for url in listed.iter().filter_map(|v| Url::parse(v).ok()).filter(|u| nested_in_scope(&base, u)).take(MAX_NESTED) { sitemap_queue.push_back((url, 0)); }
     }
     let sitemap_deadline = tokio::time::Instant::now() + Duration::from_secs(18);
     while let Some((url, depth)) = sitemap_queue.pop_front() {
@@ -565,13 +640,13 @@ async fn map_inner(
         if !robots_allow(robots.as_ref(), gate_rules.as_deref(), &url) { coverage.sitemap_partial = true; continue; }
         coverage.sitemap_files += 1;
         let remaining = sitemap_deadline.saturating_duration_since(tokio::time::Instant::now()).min(Duration::from_secs(4));
-        let xml = match tokio::time::timeout(remaining, fetch_text(&state, &url)).await {
-            Ok(Ok(Some(document))) => document,
+        let body = match tokio::time::timeout(remaining, fetch_sitemap_bytes(&state, &url, sitemap_body_cap(gzip_on))).await {
+            Ok(Ok(Some(bytes))) => bytes,
             Ok(Ok(None)) => continue,
             Ok(Err(error)) => return map_failure(error),
             Err(_) => { coverage.sitemap_partial = true; continue; }
         };
-        let sm = quarry_transform::sitemap::parse(&xml.body);
+        let Some(sm) = sitemap_from_body(&body, gzip_on) else { coverage.sitemap_partial = true; continue; };
         if !sm.valid { coverage.sitemap_partial = true; continue; }
         coverage.sitemap_valid += 1;
         coverage.sitemap_partial |= sm.truncated;
@@ -762,3 +837,56 @@ fn to_links(
 #[cfg(test)]
 #[path = "map_routes_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod gzip_sitemap_tests {
+    use super::*;
+    use std::io::Write;
+
+    const URLSET: &str = "<urlset><url><loc>https://example.com/a</loc></url><url><loc>https://example.com/b</loc></url></urlset>";
+
+    fn gzip(bytes: &[u8]) -> Vec<u8> {
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(bytes).expect("gzip write");
+        encoder.finish().expect("gzip finish")
+    }
+
+    #[test]
+    fn the_flag_is_on_for_on_one_and_true_in_any_case() {
+        for value in [Some("on"), Some(" TRUE "), Some("1")] {
+            assert!(flag_on(value.map(str::to_owned)), "{value:?}");
+        }
+        for value in [None, Some(""), Some("off"), Some("0"), Some("yes")] {
+            assert!(!flag_on(value.map(str::to_owned)), "{value:?}");
+        }
+    }
+
+    #[test]
+    fn the_body_cap_is_the_text_cap_off_and_the_compressed_cap_on() {
+        assert_eq!(sitemap_body_cap(false), MAX_BODY_BYTES);
+        assert_eq!(sitemap_body_cap(true), 10 * 1024 * 1024);
+    }
+
+    #[test]
+    fn a_plain_body_parses_the_same_with_the_flag_on_or_off() {
+        let off = sitemap_from_body(URLSET.as_bytes(), false).expect("plain body");
+        let on = sitemap_from_body(URLSET.as_bytes(), true).expect("plain body");
+        assert_eq!(off, on);
+        assert_eq!(off.urls.len(), 2);
+    }
+
+    #[test]
+    fn a_gzip_body_is_read_only_with_the_flag_on() {
+        let body = gzip(URLSET.as_bytes());
+        let on = sitemap_from_body(&body, true).expect("valid gzip");
+        assert!(on.valid);
+        assert_eq!(on.urls.len(), 2);
+        assert!(!sitemap_from_body(&body, false).expect("lossy text").valid);
+    }
+
+    #[test]
+    fn a_truncated_gzip_body_is_unreadable_with_the_flag_on() {
+        let body = gzip(URLSET.as_bytes());
+        assert!(sitemap_from_body(&body[..body.len() / 2], true).is_none());
+    }
+}
