@@ -160,7 +160,8 @@ pub fn offer_inline(
 /// - `Skip`: also refuse bodies Quarry has no extractor for (images, archives,
 ///   spreadsheets, ...) with a typed `UNSUPPORTED_MEDIA` (415) instead of
 ///   running readability over binary data.
-/// - `On`: also route PDF and DOCX to their text extractors.
+/// - `On`: also route PDF and DOCX to their text extractors, and Office files
+///   to imports-core when `QUARRY_EDGE__OFFICE_VIA_IMPORTS` is on (E3.6-6b).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum DocRouting {
     Off,
@@ -291,6 +292,32 @@ thread_local! {
     // Per-thread test override for the flag.
     static TEST_OFFICE_VIA_IMPORTS: std::cell::RefCell<Option<OfficeViaImports>> =
         const { std::cell::RefCell::new(None) };
+}
+
+/// The reply a test gives the extract client on its thread: what the client
+/// would have returned.
+#[cfg(test)]
+type TestOfficeReply = QuarryResult<crate::content_route::ParsedDocument>;
+
+#[cfg(test)]
+thread_local! {
+    // Per-thread test override: a canned reply for the next extract call, which
+    // then does not call the client.
+    static TEST_OFFICE_REPLY: std::cell::RefCell<Option<TestOfficeReply>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// E3.6-6b: the one call into the E3.6-6a client (imports-core, ephemeral). If
+/// the client is named differently there, this is the single line to correct.
+async fn extract_office(
+    kind: quarry_transform::sniff::ContentKind,
+    body: Vec<u8>,
+) -> QuarryResult<crate::content_route::ParsedDocument> {
+    #[cfg(test)]
+    if let Some(reply) = TEST_OFFICE_REPLY.with(|slot| slot.borrow_mut().take()) {
+        return reply;
+    }
+    crate::content_route::extract_office_via_imports(kind, body).await
 }
 
 /// E3.6-4a: the environment variable that turns the fail-closed PII redaction
@@ -1467,7 +1494,10 @@ impl PageRunner {
         // rather than decoded as text: an image or an archive run through
         // readability yields mojibake that then gets ingested.
         if let Some(found) = detected {
-            let supported = found.kind.is_text_pipeline() || found.kind.is_parseable_document();
+            // E3.6-6b: an Office body the flag routes to imports-core is supported.
+            let supported = found.kind.is_text_pipeline()
+                || found.kind.is_parseable_document()
+                || takes_imports_route(self.doc_routing, office_via_imports_mode(), found.kind);
             if self.doc_routing.rejects_unsupported() && !supported {
                 let details = json!({
                     "reason": "unsupported_media",
@@ -1508,7 +1538,8 @@ impl PageRunner {
         // Falls through to UTF-8 lossy when no signal is available
         // (preserves previous behaviour for well-behaved servers).
         // PDF and DOCX go to their text extractors (bounded, off-thread) when
-        // routing is `on`; everything else takes the HTML path below. A file
+        // routing is `on`; Office files go to the imports-core client when the
+        // E3.6-6b flag is on; everything else takes the HTML path below. A file
         // the parser cannot read is a typed 415 with a reason, not mojibake.
         let document = match detected {
             Some(found)
@@ -1528,6 +1559,36 @@ impl PageRunner {
                                 "bytes": resp.body.len(),
                             }),
                             format!("{}:{}:document_parse_failed", run_id, resp.final_url),
+                        )
+                        .await;
+                        return Err(error);
+                    }
+                }
+            }
+            // E3.6-6b: an Office body the flag sends to imports-core. The extract
+            // is ephemeral; its text takes the document path below, as PDF and
+            // DOCX text does.
+            Some(found)
+                if takes_imports_route(self.doc_routing, office_via_imports_mode(), found.kind) =>
+            {
+                match extract_office(found.kind, resp.body.clone()).await {
+                    Ok(parsed) => Some(parsed),
+                    Err(error) => {
+                        self.emit_page_event(
+                            run_id.clone(),
+                            EventType::PageBlocked,
+                            json!({
+                                "url": resp.final_url.to_string(),
+                                "reason": "document_parse_failed",
+                                "route": "imports",
+                                "kind": found.kind.label(),
+                                "code": format!("{:?}", error.code),
+                                "bytes": resp.body.len(),
+                            }),
+                            format!(
+                                "{}:{}:document_parse_failed:imports",
+                                run_id, resp.final_url
+                            ),
                         )
                         .await;
                         return Err(error);
