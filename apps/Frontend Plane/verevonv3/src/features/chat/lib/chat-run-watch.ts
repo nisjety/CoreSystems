@@ -41,7 +41,10 @@ import type {
   BrowserTimelineViewEntry,
 } from '@/features/dashboard/home/browser-session'
 
-/** Persisted collapse state for the chat split view's live panel. */
+/**
+ * The chat split view's collapse flag from before the browser dock (WS9.G). Read only: it is the
+ * migration source for the dock record in `browser-dock-state.ts`, and nothing writes it any more.
+ */
 export const CHAT_RUN_PANEL_COLLAPSED_KEY = 'verevon.chat.runPanel.collapsed.v1'
 
 /**
@@ -464,10 +467,16 @@ export function browserSessionFromChatRun(state: ChatRunWatchState): BrowserSess
   }
 }
 
+/** The pre-dock collapse flag, read once as the migration source for the browser dock record. */
 export function readChatRunPanelCollapsed(): boolean {
   return readClientValue(CHAT_RUN_PANEL_COLLAPSED_KEY) === '1'
 }
 
+/**
+ * Retired with the browser dock (WS9.G): the chat controller no longer calls this, because the dock
+ * record holds the panel's layout. Kept only so the existing round-trip test still holds. Do not add
+ * a production caller.
+ */
 export function writeChatRunPanelCollapsed(collapsed: boolean): void {
   writeClientValue(CHAT_RUN_PANEL_COLLAPSED_KEY, collapsed ? '1' : '0')
 }
