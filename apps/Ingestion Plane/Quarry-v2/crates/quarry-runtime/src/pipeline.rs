@@ -3440,6 +3440,245 @@ mod content_routing_tests {
         assert!(error.contains("QUARRY_EDGE__DOC_ROUTING"), "{error}");
         assert_eq!(DocRouting::default(), DocRouting::Shadow);
     }
+    // ---- E3.6-6b: Office bodies through the imports-core client
+
+    /// Installs the Office flag and, optionally, a canned client reply for this
+    /// thread. Both are removed when the guard is dropped.
+    struct OfficeGuard;
+
+    impl Drop for OfficeGuard {
+        fn drop(&mut self) {
+            TEST_OFFICE_VIA_IMPORTS.with(|slot| *slot.borrow_mut() = None);
+            TEST_OFFICE_REPLY.with(|slot| *slot.borrow_mut() = None);
+        }
+    }
+
+    fn office_flag(mode: OfficeViaImports, reply: Option<TestOfficeReply>) -> OfficeGuard {
+        TEST_OFFICE_VIA_IMPORTS.with(|slot| *slot.borrow_mut() = Some(mode));
+        TEST_OFFICE_REPLY.with(|slot| *slot.borrow_mut() = reply);
+        OfficeGuard
+    }
+
+    /// True while the canned reply is still waiting, that is, the client was not
+    /// called.
+    fn reply_pending() -> bool {
+        TEST_OFFICE_REPLY.with(|slot| slot.borrow().is_some())
+    }
+
+    fn text_reply(text: &str) -> TestOfficeReply {
+        Ok(crate::content_route::ParsedDocument {
+            text: text.to_owned(),
+            truncated: false,
+        })
+    }
+
+    fn xlsx_body() -> Vec<u8> {
+        zip_bytes(&[(
+            "[Content_Types].xml",
+            b"<Types>spreadsheetml.sheet.main</Types>",
+        )])
+    }
+
+    #[test]
+    fn the_office_flag_is_off_unless_it_says_on() {
+        assert_eq!(OfficeViaImports::default(), OfficeViaImports::Off);
+        assert_eq!(OfficeViaImports::parse(""), Ok(OfficeViaImports::Off));
+        assert_eq!(OfficeViaImports::parse(" off "), Ok(OfficeViaImports::Off));
+        assert_eq!(OfficeViaImports::parse("0"), Ok(OfficeViaImports::Off));
+        assert_eq!(OfficeViaImports::parse("On"), Ok(OfficeViaImports::On));
+        assert_eq!(OfficeViaImports::parse(" TRUE "), Ok(OfficeViaImports::On));
+        let error = OfficeViaImports::parse("maybe").unwrap_err();
+        assert!(error.contains("QUARRY_EDGE__OFFICE_VIA_IMPORTS"), "{error}");
+    }
+
+    #[test]
+    fn the_office_route_needs_the_document_lane_the_flag_and_an_office_kind() {
+        use quarry_transform::sniff::ContentKind as Kind;
+        for kind in [Kind::Xlsx, Kind::Pptx, Kind::Odf, Kind::Epub] {
+            assert!(
+                takes_imports_route(DocRouting::On, OfficeViaImports::On, kind),
+                "{kind:?}"
+            );
+            assert!(
+                !takes_imports_route(DocRouting::On, OfficeViaImports::Off, kind),
+                "{kind:?}"
+            );
+            for mode in [DocRouting::Off, DocRouting::Shadow, DocRouting::Skip] {
+                assert!(
+                    !takes_imports_route(mode, OfficeViaImports::On, kind),
+                    "{mode:?} {kind:?}"
+                );
+            }
+        }
+        // PDF and DOCX keep their Rust extractors; nothing else is an Office kind.
+        let others = [
+            Kind::Pdf,
+            Kind::Docx,
+            Kind::Archive,
+            Kind::Image,
+            Kind::Html,
+            Kind::OleCompound,
+        ];
+        for kind in others {
+            assert!(
+                !takes_imports_route(DocRouting::On, OfficeViaImports::On, kind),
+                "{kind:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn an_xlsx_takes_the_imports_client_when_the_flag_is_on() {
+        let _flag = office_flag(
+            OfficeViaImports::On,
+            Some(text_reply("Kostnader per kvartal")),
+        );
+        let (runner, _rx) = runner_for(
+            DocRouting::On,
+            200,
+            Some("application/octet-stream"),
+            &xlsx_body(),
+        );
+        let run_id: RunKind = quarry_core::ids::Id::new();
+        let out = runner
+            .run(&run_id, &url(), None)
+            .await
+            .expect("xlsx extracted by imports");
+        assert_eq!(out.metadata.content_kind.as_deref(), Some("xlsx"));
+        assert!(stored_text(&runner, &out)
+            .await
+            .contains("Kostnader per kvartal"));
+        // The original bytes are the raw format, never html, as for a PDF.
+        assert!(out.formats.html.is_none());
+        assert!(!reply_pending(), "the client must have been called");
+    }
+
+    #[tokio::test]
+    async fn with_the_flag_off_an_xlsx_is_still_a_typed_415() {
+        let _flag = office_flag(OfficeViaImports::Off, Some(text_reply("unused")));
+        let (runner, _rx) = runner_for(
+            DocRouting::On,
+            200,
+            Some("application/octet-stream"),
+            &xlsx_body(),
+        );
+        let run_id: RunKind = quarry_core::ids::Id::new();
+        let error = runner.run(&run_id, &url(), None).await.unwrap_err();
+        assert_eq!(error.code, ErrorCode::UnsupportedMedia);
+        assert_eq!(error.details.unwrap()["kind"], "xlsx");
+        assert!(
+            reply_pending(),
+            "the client must not be called with the flag off"
+        );
+    }
+
+    #[tokio::test]
+    async fn skip_refuses_and_shadow_leaves_an_xlsx_alone_with_the_flag_on() {
+        let _flag = office_flag(OfficeViaImports::On, Some(text_reply("unused")));
+        let run_id: RunKind = quarry_core::ids::Id::new();
+        let (skip, _skip_rx) = runner_for(
+            DocRouting::Skip,
+            200,
+            Some("application/octet-stream"),
+            &xlsx_body(),
+        );
+        let error = skip.run(&run_id, &url(), None).await.unwrap_err();
+        assert_eq!(error.code, ErrorCode::UnsupportedMedia);
+        let (shadow, _shadow_rx) = runner_for(
+            DocRouting::Shadow,
+            200,
+            Some("application/octet-stream"),
+            &xlsx_body(),
+        );
+        let _ = shadow.run(&run_id, &url(), None).await;
+        assert!(reply_pending(), "neither mode routes an Office body");
+    }
+
+    #[tokio::test]
+    async fn an_imports_refusal_is_the_pages_typed_error_on_the_imports_route() {
+        let refusal =
+            QuarryError::new(ErrorCode::UnsupportedMedia, "imports-core refused the file");
+        let _flag = office_flag(OfficeViaImports::On, Some(Err(refusal)));
+        let (runner, mut rx) = runner_for(
+            DocRouting::On,
+            200,
+            Some("application/octet-stream"),
+            &xlsx_body(),
+        );
+        let run_id: RunKind = quarry_core::ids::Id::new();
+        let error = runner.run(&run_id, &url(), None).await.unwrap_err();
+        assert_eq!(error.code, ErrorCode::UnsupportedMedia);
+        let blocked = drain(&mut rx)
+            .into_iter()
+            .find(|e| e.event_type == EventType::PageBlocked)
+            .expect("page_blocked for the refusal");
+        assert_eq!(blocked.payload["reason"], "document_parse_failed");
+        assert_eq!(blocked.payload["route"], "imports");
+        assert_eq!(blocked.payload["kind"], "xlsx");
+    }
+
+    #[tokio::test]
+    async fn a_pdf_keeps_the_rust_extractor_with_the_flag_on() {
+        let _flag = office_flag(OfficeViaImports::On, Some(text_reply("unused")));
+        let pdf = minimal_pdf("Hallo dokument fra Verevon");
+        let (runner, _rx) = runner_for(DocRouting::On, 200, Some("application/pdf"), &pdf);
+        let run_id: RunKind = quarry_core::ids::Id::new();
+        let out = runner.run(&run_id, &url(), None).await.expect("pdf parsed");
+        assert_eq!(out.metadata.content_kind.as_deref(), Some("pdf"));
+        assert!(stored_text(&runner, &out)
+            .await
+            .contains("Hallo dokument fra Verevon"));
+        assert!(reply_pending(), "a PDF never reaches the imports client");
+    }
+
+    #[tokio::test]
+    async fn a_plain_zip_stays_a_typed_415_with_the_flag_on() {
+        let _flag = office_flag(OfficeViaImports::On, Some(text_reply("unused")));
+        let plain = zip_bytes(&[("a.txt", b"hello"), ("b.txt", b"world")]);
+        let (runner, _rx) = runner_for(
+            DocRouting::On,
+            200,
+            Some("application/octet-stream"),
+            &plain,
+        );
+        let run_id: RunKind = quarry_core::ids::Id::new();
+        let error = runner.run(&run_id, &url(), None).await.unwrap_err();
+        assert_eq!(error.code, ErrorCode::UnsupportedMedia);
+        assert_eq!(error.details.unwrap()["kind"], "archive");
+        assert!(reply_pending(), "an archive is not an Office kind");
+    }
+
+    #[tokio::test]
+    async fn zdr_office_text_is_returned_inline_and_nothing_is_stored() {
+        let _flag = office_flag(OfficeViaImports::On, Some(text_reply("Hemmelig ark")));
+        let (mut runner, _rx) = runner_for(
+            DocRouting::On,
+            200,
+            Some("application/octet-stream"),
+            &xlsx_body(),
+        );
+        runner.zdr = ZdrMode::On;
+        let store = Arc::new(InMemoryStore::new());
+        runner.artifacts = store.clone();
+        let run_id: RunKind = quarry_core::ids::Id::new();
+        let (out, inline) = runner
+            .run_with_inline(&run_id, &url(), None)
+            .await
+            .expect("zdr xlsx extracted");
+        assert!(
+            out.formats.markdown.is_none()
+                && out.formats.raw.is_none()
+                && out.formats.html.is_none()
+        );
+        let listed = store
+            .list("org_test", &quarry_core::pagination::ListFilter::default())
+            .await
+            .unwrap();
+        assert!(listed.items.is_empty(), "ZDR must write no artifact");
+        let text = inline.markdown.expect("inline text under ZDR");
+        assert!(text.contains("Hemmelig ark"), "{text}");
+    }
+
     // ---- WS5.D: what a caller can ask to get inline -------------------------
 
     fn want(markdown: bool, html: bool, raw_html: bool, max_bytes: usize) -> InlineRequest {
