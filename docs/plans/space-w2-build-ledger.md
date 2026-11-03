@@ -115,3 +115,58 @@ Totals: 98 rows; the table gives each row its feature commit, or none.
 - Fixed in the commit after batch 1: the SSO settings test handler type and the action registry test id type.
 - `quarry-client.ts`: 21 errors that come from the missing Quarry client package in this worktree. Environmental, unchanged.
 - Tests: not run in this pass, per the owner's instruction. Batch-1 test additions are unverified until the suites run.
+
+
+## Compile status (after the live-view waiver change)
+
+Compile checks that pass on the current content (tests are not run in this pass):
+
+- `cargo check` on the frontend gateway, session-core (library and tests), model-gateway (library and tests),
+  execution-core and retrieval-engine-rs.
+- `go vet` on user-core, audit-core, notification-core, documents-api-go, the regenerated `go/gen`, `go/pkg/zdrrefusal`
+  and sandbox-manager (which needed its `zdrrefusal` require added). `go build` on org-core.
+- `python -m compileall` on imports-core (its code is Python, so `cargo check` does not apply).
+- `tsc --noEmit` on convex-core and `tsc` on auth-core.
+- Frontend `pnpm typecheck`: 0 errors, after the Quarry SDK's built types were restored in this worktree's `node_modules`.
+  The first runs showed 21 errors in `quarry-client.ts`. Those came from a stale pnpm store copy of `@quarry/client`
+  that predated the SDK build. The fix was a clean `pnpm install` of this worktree's frontend project; the lockfile is
+  unchanged.
+
+## Merge fixes: kept and replaced (for the post-merge test round)
+
+This list says where to look when the suites run. Kept means my fix is on the branch; replaced means the space-w2 side
+won the merge and my version is superseded.
+
+Kept:
+- `model-gateway` `run_live` posture on the run's route, the room-run zdr fix, and the room-metadata allowlist test.
+- The approval decide ZDR guard: the frontend gateway's decide body refuses a zero-retention caller first, and the
+  model-gateway decide route calls `require_non_zdr_durable_mutation`, listed in `DURABLE_MUTATIONS`.
+- The approval decide test (`zdr_guard_tests` in the frontend `approvals.rs`), appended to the merged file.
+- `space-tab-registry.test.ts`: my comment is kept.
+- `CoreSidebarSpacesPanel.test.tsx`: my `searchSpaceMessages` stub in the mock is kept.
+- `SpaceApprovalPanel.test.tsx`: the space-w2 `scope` argument with my approval copy (`Godkjent. Avgjørelsen ...`).
+- The gateway-error copy (`errors.ts`) and the gateway-error-codes and error-catch-sites guards.
+- The agent-action-admission pin and the sync script's line, both at the digest of the merged contract (90d33707...).
+- The surface golden (the nine model-gateway rows, the 46 bff rows, the decide guard rows and decision types).
+
+Replaced (the space-w2 side won):
+- `apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces/mod.rs`: the room-member tests. The space-w2 side asserts
+  the member writer is off by default (`feature_disabled`). My WS04-S12 rewrites (viewer refusal relayed from Control,
+  unconfirmed roster as a 200 with a warning, and the owner-adds test on the Control writer) are superseded in this file.
+  Re-check: `domains::spaces::tests::*room*`, `*membership*`, `*roster*`, and the two member-writer tests.
+- `apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces/approvals.rs`: the space-w2 file. My decide guard is
+  re-applied in its decide body; my earlier approval tests are superseded, except the new `zdr_guard_tests` module.
+- `apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts`: the space-w2 counts (236 ids, fragment
+  order). My 240-id expectation and my Space-block assertion are superseded. Re-check the counts against the registry.
+- `apps/Frontend Plane/verevonv3/src/features/spaces/lib/space-approvals.test.ts`: the space-w2 mocks
+  (`orchestration-client` and `space-approvals-client`). My mock arrangement is superseded. Re-check the approval-decide
+  expectations.
+- `apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomTimeline.test.tsx`: the space-w2 comment only.
+
+Compile fixes made in this pass, not test runs:
+- `session-core` `grpc.rs`: the test module imports `thread_revise_payload_digest`.
+- `model-gateway` integration tests (`orchestration_http_test.rs`, `e2e_invoke_chain_test.rs`): the mocks implement the
+  RPCs the proto declares (`reroute_approval`, `claim_once_approval`, `hold_quarantined_output`,
+  `claim_quarantine_release`, `get_quarantine_preview`, `resolve_approval_authority`, `list_space_timeline`), and the
+  literals take `..Default::default()` for the new fields.
+- `SsoPolicyPanel.test.tsx` and `action-registry.test.ts`: typecheck fixes.

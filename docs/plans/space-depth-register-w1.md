@@ -1120,3 +1120,29 @@ wrong, and the classification's own value is restored.
 - RV-04 (accepted by the owner): members. Control's CanAdd is the single authority (room_role_forbidden for a viewer); the gateway applies no owner/manager floor since WS04-S12, and its tests assert the relayed refusal.
 - RV-05 (UNVERIFIED): decision_type of the two approval decide rows. Neither handler names the Control decision it mints, so the values are not confirmed.
 - RV-06: the golden's diff in git shows deletions because the new rows are sorted into the array; every HEAD row is unchanged, in order (checked by comparing the rows by id).
+
+## Live-view waiver through the attach verdict (owner-approved 2026-11-03)
+
+- Proto: `AuthorizeRoomRunAttachResponse` gains `provider` (field 8) and `connection` (field 9). They are set only for a
+  zero-retention-waived run bound to the caller's own waiver (same connection and acknowledgement). A persistent run leaves
+  both empty. Additive, so `buf breaking` against the baseline sees no break.
+- Go bindings regenerated for `runs.proto` with the local `protoc-gen-go` and `protoc-gen-go-grpc`. The checked-in `go/gen`
+  was stale: it lacked `CancelRunAsRoomManager`, which the proto already declared, so the regeneration also brings those
+  messages in. Rust bindings come from `mp-contracts/build.rs` at build time. Python (`mp-events-py/_gen`) and the Verevon TS
+  output were not regenerated; run the full `buf generate` in the test phase.
+- Session Core (`room_run_attach.rs`): the attach query now reads `waiver_connection_id` and `waiver_ack_id`
+  (`fetch_attach_row`). `live_route` admits a `zdr_waived` run only when the caller's waiver names the same connection and
+  acknowledgement the run rests on; the verdict then names that waiver's provider and connection. The run row stores the
+  connection and the ack but not the provider, so the provider is taken from the matching waiver: the matching ack is what
+  makes it the same waiver. A persistent run names no route. A zero-retention run, a waived run with no receipt, and a
+  waived run for another connection or ack are refused.
+- Gateway (`model-gateway` `space_routes/runs.rs`): after the verdict, the posture is decided on `Route::named(provider,
+  connection)` when the verdict names a route, and on the default route otherwise. A bound waiver is persistent for its
+  connection; anything else is refused.
+- Tests: `live_route` unit tests (five cases) are runnable. Two DB tests are `#[ignore]`d and were not run:
+  `a_bound_waived_live_run_reads_its_receipt_and_is_admitted_on_its_connection` and
+  `a_persistent_run_reads_with_no_route`. Both run in the test phase after the merge.
+- Merge note: Model Plane is also editing `session-core` on `model-plane` (the `ApprovalCause` field moves to 10 and 11).
+  Those numbers are on a different message, so they do not collide with fields 8 and 9 here, but check them at the merge.
+- Still open: the frontend `run_live` (`domains/spaces/run_live.rs`) refuses every zero-retention org member by org
+  posture, not per token. It was left as it is pending the owner's answer.
