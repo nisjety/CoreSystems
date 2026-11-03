@@ -1720,6 +1720,11 @@ pub struct InternalRunPageResult {
     /// ends the run (an edge that ignores the field would crawl with the default cleaning).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scrape_applied: Option<bool>,
+    /// E3.5-4: the page's normalised text fingerprint (`NormalizedOutput::text_fp`). The
+    /// change monitor sends it on `/v1/internal/change/record` as `fresh_text_fingerprint`;
+    /// `fingerprint` above stays the raw-byte hash. Absent for an output that predates it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text_fp: Option<String>,
 }
 
 impl InternalRunPageResult {
@@ -1763,6 +1768,7 @@ impl InternalRunPageResult {
                 .map(|format| format.artifact_id.to_string()),
             bytes: out.formats.markdown.as_ref().map(|format| format.bytes),
             scrape_applied: None,
+            text_fp: out.text_fp.clone(),
         }
     }
 }
@@ -3467,6 +3473,27 @@ mod tests {
         assert!(wire.get("markdown_artifact_id").is_none(), "{wire}");
         assert!(wire.get("source_artifact_id").is_none(), "{wire}");
         assert!(wire.get("bytes").is_none(), "{wire}");
+    }
+
+    // ---- W3-E3.5-4: run_page hands back the text fingerprint ----
+
+    #[test]
+    fn run_page_result_carries_the_text_fingerprint_next_to_the_raw_one() {
+        let mut out = output_with_markdown(None);
+        out.text_fp = Some("blake3:text".into());
+        let result = InternalRunPageResult::from_output("run_1".into(), &out);
+        assert_eq!(result.text_fp.as_deref(), Some("blake3:text"));
+        let wire = serde_json::to_value(&result).unwrap();
+        assert_eq!(wire["text_fp"], "blake3:text");
+        assert_eq!(wire["fingerprint"], "blake3:fp");
+    }
+
+    #[test]
+    fn run_page_result_omits_the_text_fingerprint_for_an_older_output() {
+        let out = output_with_markdown(None);
+        let result = InternalRunPageResult::from_output("run_1".into(), &out);
+        let wire = serde_json::to_value(&result).unwrap();
+        assert!(wire.get("text_fp").is_none(), "{wire}");
     }
 
     fn output_with_formats(formats: serde_json::Value) -> NormalizedOutput {
