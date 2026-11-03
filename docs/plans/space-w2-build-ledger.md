@@ -4,7 +4,7 @@ Scope: the 98 rows of `.plan-work/space-build/queue-w2.json` (WS04 to WS16).
 
 Status key:
 - **built**: a `feat(...)` commit on this branch names the slice in its subject (checked over the last 1500 commits).
-- **compile and tests: not yet confirmed.** The batch guards so far: gateway `cargo check` passes on the merged tree; `pnpm typecheck` has 9 errors outside the environmental quarry client, listed under Open items.
+- **compile: confirmed** for every Rust crate and Go module that Wave 2 touched: `cargo check` on frontend gateway, session-core, model-gateway and execution-core, and `go build` on org-core. Frontend `pnpm typecheck` is clean except 21 errors in `quarry-client.ts` from the missing Quarry client in this worktree (environmental).
 - The first check of this ledger listed 52 rows as not built. That came from searching only `space-w2`. The history of this branch names all 98, so those 52 are built here, and the next pass is verification, not new code.
 
 Totals: 98 rows; the table gives each row its feature commit, or none.
@@ -112,6 +112,6 @@ Totals: 98 rows; the table gives each row its feature commit, or none.
 
 ## Open items
 
-- `pnpm typecheck`: 8 errors in `src/features/settings/components/SsoPolicyPanel.test.tsx` (the stub handler type does not admit `undefined`) and 1 in `src/shared/actions/action-registry.test.ts` (a string id where the registry's union is required). Both come from the Wave 2 work and the merge, not the environment.
+- Fixed in the commit after batch 1: the SSO settings test handler type and the action registry test id type.
 - `quarry-client.ts`: 21 errors that come from the missing Quarry client package in this worktree. Environmental, unchanged.
-- Wave 2 builds recorded before this pass were not compiled together; the Model Plane and Control parts (session-core, execution-core, model-gateway, org-core) have not been checked here.
+- Tests: not run in this pass, per the owner's instruction. Batch-1 test additions are unverified until the suites run.
