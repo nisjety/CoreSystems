@@ -23213,3 +23213,7 @@ pub(crate) mod space_w1_tests;
 #[cfg(test)]
 #[path = "grpc_space_memory_tests.rs"]
 mod space_memory_tests;
+
+#[cfg(test)]
+#[path = "grpc_space_mentions_tests.rs"]
+mod space_mentions_tests;
