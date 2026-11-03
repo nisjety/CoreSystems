@@ -66,6 +66,7 @@ import type { DockedNodes } from '@/shared/chat-nodes/types'
 import { nodeKey } from '@/shared/chat-nodes/derive'
 import type { AutonomyRung, ChatKnowledgeReceipt, ChatPlanStep, MemoryOrigin, RecalledMemory } from '@/shared/api/chat-client'
 import { isSafeLinkHref } from '../lib/safe-href'
+import { isWidgetFence } from '../lib/inline-widget'
 import type { SettledFold } from '../lib/settled-fold'
 import { readChatThreadHistory } from '../lib/chat-thread-history'
 import { buildPromptSuggestions, type PromptSuggestion } from '../lib/prompt-suggestions'
@@ -98,6 +99,7 @@ import {
   highlightCode,
 } from './chat-code-highlight'
 import { ChartFenceBlock } from './ChatChart'
+import { InlineWidget, InlineWidgetSurface, inlineWidgetsEnabled, useInlineWidgetsLive } from './InlineWidget'
 import { ChatTableTools, TableChart, createTableChartState } from './ChatTableTools'
 import { SettledTurnContent } from './SettledTurnFold'
 import { StepStrip, stepStripEnabled } from './StepStrip'
@@ -796,7 +798,10 @@ export function AssistantMessage(props: {
           could leak into a "clean" PDF).
         */}
         <div class="verevon-chat-message__content" ref={(el) => { contentRef = el }}>
-          <SettledTurnContent fold={props.settledFold} entries={nodeEntries()} renderEntries={renderNodeEntries} />
+          {/* The one surface where a ```widget fence may run (EP-4 S1): `InlineWidgetSurface`. */}
+          <InlineWidgetSurface value={inlineWidgetsEnabled() ? 'live' : 'inert'}>
+            <SettledTurnContent fold={props.settledFold} entries={nodeEntries()} renderEntries={renderNodeEntries} />
+          </InlineWidgetSurface>
           <Show when={stepStripEnabled && props.message.streaming}>
             <StepStrip
               calls={props.message.toolCalls ?? []}
@@ -1424,15 +1429,27 @@ export function DynamicHeading(props: { block: Extract<MarkdownBlock, { kind: 'h
  * A closed ```chart``` fence is the same story: the native chart when its JSON
  * reads, the plain code block plus a one-line note when it does not (see
  * `ChartFenceBlock`), and a plain code block while it is still streaming.
+ *
+ * A closed ```widget fence is a live sandboxed widget only where the surface
+ * says so (`InlineWidgetSurface`, a chat assistant answer) and the switch is on;
+ * everywhere else, and while streaming, it is a code block like any other.
  */
 export function MarkdownCodeBlock(props: { block: Extract<MarkdownBlock, { kind: 'code' }> }) {
+  const widgetsLive = useInlineWidgetsLive()
   return (
     <Show
       when={props.block.closed && props.block.lang.trim().toLowerCase() === 'chart'}
       fallback={
         <Show
           when={props.block.closed && props.block.lang.trim().toLowerCase() === 'mermaid'}
-          fallback={<TranscriptCodeBlock block={props.block} />}
+          fallback={
+            <Show
+              when={widgetsLive && isWidgetFence(props.block)}
+              fallback={<TranscriptCodeBlock block={props.block} />}
+            >
+              <InlineWidget source={props.block.text} fallback={<TranscriptCodeBlock block={props.block} />} />
+            </Show>
+          }
         >
           <MermaidDiagram code={props.block.text} />
         </Show>
