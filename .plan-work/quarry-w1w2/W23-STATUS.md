@@ -310,3 +310,36 @@ Open items:
 - W2-FE-GW1: `build_router` in apps/gateway/src/main.rs not yet merging `domains::api_key_agent::router` (left for an explicit wiring step; route-count pin may need ROUTE_BASELINE_UPDATE then); MP-3 key-grant door not built; in-memory run binding breaks with several replicas.
 - 45 depth rows appended to W23-depth.md (lanes a 10, b 13, c 12, d 10).
 - Four tracked .sha256 files in the integ worktree still show as modified (CRLF/LF checkout artifacts); none committed.
+
+## Step S5 (W2 + W3), integrated 2026-11-03
+
+Units: W2-Q-S4a, W3-E3.5-7 (lane a); W2-FE-WS16S7 (lane b; W2-FE-GW2 BLOCKED, nothing committed); W2-AP-S7b (lane c; W2-FE-WS9Ga BLOCKED, nothing committed); W3-E3.1-ab, W3-E3.1-g (lane d).
+
+Merge commits on w23/integ:
+- 5511d622c merge: w23/lane-a (S5: W2-Q-S4a, W3-E3.5-7) into w23/integ
+- 86ac0e7c4 merge: w23/lane-b (S5: W2-FE-WS16S7) into w23/integ
+- 5a73044fe merge: w23/lane-c (S5: W2-AP-S7b) into w23/integ
+- cb564c9aa merge: w23/lane-d (S5: W3-E3.1-ab, W3-E3.1-g) into w23/integ
+
+Conflicts: none.
+
+Compile guard (no test runs):
+- Quarry Rust (qtest-lane integ): `cargo check --workspace --tests` exit 0, warnings only (all in files outside S5 or pre-existing). The FillOtpRef arms added in quarry-core/quarry-edge/quarry-runtime compile.
+- Go, GOWORK=off, build + vet: Quarry-v2/pkg/quarrycontracts clean; Quarry-v2/services/quarry-control clean; integration-corev2 clean.
+- verevonv3 SPA: no TS change in S5 (the two FE units that would have changed it are blocked), so no typecheck run.
+- verevonv3 gateway: `cargo check --tests` (CARGO_TARGET_DIR=%TEMP%/w23cg-gw) exit 0; one unused-import warning in domains/browser.rs (not S5).
+- action-registry.ts unchanged: no admission golden regeneration, no new action ids. No ZDR/schema/route-count regeneration needed.
+- No follow-up fix commits needed.
+- Not compile-checked (no guard step, no node_modules in integ): convex-core TS (W2-AP-S7b; run `npx tsx --test convex/nats.browserActivity.test.ts` and a convex typecheck before relying on it).
+
+Open items:
+- W2-FE-GW2: BLOCKED (harness different-worktree guard). Drafts in the vigorous-perlman scratchpad `w2-fe-gw2/` (action-registry insert, settings-client insert, ApiKeyAgentSection.tsx + test). Rerun from a lane-b session or copy in; registering the action as an ActionDescriptor needs an owner decision (MODEL_ACCESS row, 240 count, admission golden). Gateway agent-policy/agent create/patch routes and CP `api-keys/update-agent` REST route still missing.
+- W2-FE-WS9Ga: BLOCKED (same guard). Drafts `ws9ga-*` in the vigorous-perlman scratchpad; re-check use-chat-shortcuts.ts against the lane HEAD before copying; flag VITE_CHAT_BROWSER_DOCK off.
+- W2-Q-S4a: orchestrator does not send target_kind/enabled nor read the new fields; Quarry-v2/deploy/compose/docker-compose.yml not edited; RUNBOOKS/openapi not updated; control pause route accepting the edge's signed forward unchecked live; QUARRY_ORG_CORE_SERVICE_TOKEN must be mirrored by hand from Control's ledger.
+- W3-E3.5-7: persistence (store field, pg column, migration 029) and API fields missing, so no filter applies yet; resources.go change_detected batch path still fans out unfiltered (must fix before any filter is enabled); no producer for `new`/`removed`; docs and compose line for QUARRY_EDGE__CHANGE_WEBHOOK_DELTA.
+- W2-FE-WS16S7: schedules.rs build_schedule_config copies schema unchecked; quarry-core json_schema treats a non-object schema as permissive (depth rows -1, -2).
+- W2-AP-S7b: nats-subscriber.js subscription and convex/http.ts case not wired (inert); listForOrg/rate browserActivity leak (from S7a) must be fixed before the flag; producer run_id assumption unconfirmed.
+- W3-E3.1-ab: MP ask (browser-broker grant.go fill_otp) appended to MP-ASKS.md; admission.rs require_action_capabilities lacks FillOtpRef; origin binding and restart-safe single-use set open; OpenAPI/TS SDK lack fill_otp_ref; runtime refuses the action until E3.1-c/d.
+- W3-E3.1-g: inert until server.go fills ExecuteInput.Caller, SetOTPAuditPublisher is wired, requiredCapabilityForOperation maps mail.otp.read, auth middleware admits integration:otp:read for that route; owner decision on the personal-connection owner rule; no tests.
+- 39 depth rows appended to W23-depth.md (lanes a 15, b 5, c 6, d 13).
+- Four tracked .sha256 files in the integ worktree still show as modified (CRLF/LF checkout artifacts); none committed.
