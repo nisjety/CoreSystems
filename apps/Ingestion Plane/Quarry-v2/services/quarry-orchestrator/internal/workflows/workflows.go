@@ -429,6 +429,10 @@ func ScrapeJobWF(ctx workflow.Context, in ScrapeJobInput, a *activities.Activiti
 	}, in.RunID, string(quarrycontracts.EvtRunCompleted))
 }
 
+// changeTextFPVersion guards the W3-E3.5-4 change to ChangeMonitorWF: the CheckChange input
+// asks for the text fingerprint.
+const changeTextFPVersion = "change-text-fp-v1"
+
 // ChangeMonitorWF fetches a URL, compares it to the org's stored baseline,
 // and emits change_detected / change_unchanged. It is the workflow a
 // change_monitor schedule fires on each cron tick.
@@ -456,12 +460,20 @@ func ChangeMonitorWF(ctx workflow.Context, in ChangeMonitorInput, a *activities.
 		return err
 	}
 
+	// W3-E3.5-4: from change-text-fp-v1 the probe forwards run_page's text fingerprint, which
+	// the edge compares instead of the raw bytes when QUARRY_EDGE__CHANGE_TEXT_FP is on (off by
+	// default, and then the edge ignores it). Histories recorded before the marker replay with
+	// the activity input they recorded.
+	textFP := workflow.GetVersion(ctx, changeTextFPVersion, workflow.DefaultVersion, 1) >= 1
+
 	var res activities.CheckChangeResult
 	err := workflow.ExecuteActivity(ctx, a.CheckChange, activities.CheckChangeInput{
 		RunID: runID,
 		OrgID: in.OrgID,
 		URL:   in.URL,
 		Zdr:   in.Zdr,
+
+		TextFingerprint: textFP,
 	}).Get(ctx, &res)
 	if err != nil {
 		_ = emitEvent(ctx, a, ids, quarrycontracts.EvtRunFailed, map[string]any{
@@ -488,7 +500,7 @@ func ChangeMonitorWF(ctx workflow.Context, in ChangeMonitorInput, a *activities.
 	if res.Changed {
 		evt = quarrycontracts.EvtChangeDetected
 	}
-	_ = emitEvent(ctx, a, ids, evt, map[string]any{
+	payload := map[string]any{
 		"url":         in.URL,
 		"org_id":      in.OrgID,
 		"created_by":  in.CreatedBy,
@@ -496,7 +508,13 @@ func ChangeMonitorWF(ctx workflow.Context, in ChangeMonitorInput, a *activities.
 		"fingerprint": res.Fingerprint,
 		"diff_id":     res.DiffID,
 		"baseline_id": res.BaselineID,
-	}, runID, in.URL, string(evt))
+	}
+	// A silent re-baseline (the first probe after the fingerprint scheme flipped) is an
+	// unchanged event that says so; nothing else about the payload moves.
+	if textFP && res.Rebaselined {
+		payload["rebaselined"] = true
+	}
+	_ = emitEvent(ctx, a, ids, evt, payload, runID, in.URL, string(evt))
 
 	return emitEvent(ctx, a, ids, quarrycontracts.EvtRunCompleted, map[string]any{
 		"pages_visited": 1,
