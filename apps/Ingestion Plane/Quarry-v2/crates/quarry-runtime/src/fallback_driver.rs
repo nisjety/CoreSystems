@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use quarry_core::contracts::ChallengeStrength;
@@ -16,6 +17,7 @@ use crate::challenge::{classify, ChallengeInput, MAX_SCANNED_BYTES};
 use crate::driver::{Driver, FetchHints};
 use crate::escalation::{escalation_allowed, trigger_for_error, EscalationMode, EscalationTrigger};
 use crate::fetch::FetchResponse;
+use crate::policy::FetchPolicy;
 
 pub struct FallbackDriver {
     primary: DriverKind,
@@ -28,6 +30,10 @@ pub struct FallbackDriver {
     /// Whether a waterfall that ends in DRIVER_FAILED names its reason (E3.8.1,
     /// `QUARRY_EDGE__FETCH_SUB_CODES`, default off). Off: the error is as the tiers left it.
     fetch_sub_codes: bool,
+    /// The caller's single fetch deadline, split across the tiers (E3.8.2,
+    /// `QUARRY_EDGE__FETCH_DEADLINE`, default off). `None`: every tier runs on its
+    /// own timeout and the chain has no budget of its own, as before.
+    deadline: Option<Duration>,
 }
 
 impl FallbackDriver {
@@ -42,6 +48,7 @@ impl FallbackDriver {
             drivers,
             mode: EscalationMode::current(),
             fetch_sub_codes: fetch_sub_codes_enabled(),
+            deadline: default_fetch_deadline(),
         }
     }
 
@@ -56,6 +63,35 @@ impl FallbackDriver {
     pub fn with_fetch_sub_codes(mut self, enabled: bool) -> Self {
         self.fetch_sub_codes = enabled;
         self
+    }
+
+    /// Takes the chain's deadline from the caller's fetch policy
+    /// (`FetchPolicy::timeout_s`, E3.8.2). A no-op while `QUARRY_EDGE__FETCH_DEADLINE`
+    /// is off, so a caller can always pass its policy.
+    pub fn with_fetch_policy(mut self, policy: &FetchPolicy) -> Self {
+        if fetch_deadline_enabled() {
+            self.deadline = policy.deadline();
+        }
+        self
+    }
+
+    /// Pins the chain's deadline instead of reading the flag and the default
+    /// policy (E3.8.2). `None` turns the budget off.
+    pub fn with_fetch_deadline(mut self, deadline: Option<Duration>) -> Self {
+        self.deadline = deadline;
+        self
+    }
+
+    /// The share of what is left of the deadline the tier at `idx` may spend
+    /// (E3.8.2). Only registered tiers from `idx` on count: an unregistered one
+    /// is skipped at once and spends nothing.
+    fn slice_for(&self, order: &[DriverKind], idx: usize, remaining: Duration) -> Duration {
+        let weight_left: u32 = order[idx..]
+            .iter()
+            .filter(|kind| self.drivers.contains_key(*kind))
+            .map(|kind| tier_weight(*kind))
+            .sum();
+        tier_slice(remaining, tier_weight(order[idx]), weight_left)
     }
 
     /// Settles the reason of a DRIVER_FAILED that leaves this chain (E3.8.1). It is
@@ -83,6 +119,7 @@ impl FallbackDriver {
             drivers,
             mode: EscalationMode::current(),
             fetch_sub_codes: fetch_sub_codes_enabled(),
+            deadline: default_fetch_deadline(),
         }
     }
 
@@ -159,6 +196,11 @@ impl FallbackDriver {
         // and a silent empty render was returned as-is, which is exactly
         // how aquatiq.com produced snippets with no text.
         let mut best_shell: Option<FetchResponse> = None;
+        // E3.8.2: one deadline for the whole chain. Each tier gets a share of
+        // what is left; a tier that stalls past its share returns TIMEOUT with a
+        // sub-code and the chain moves on with the rest of the budget.
+        let started = tokio::time::Instant::now();
+        let mut deadline_spent = false;
 
         for (idx, kind) in order.iter().enumerate() {
             let driver = match self.drivers.get(kind) {
@@ -168,9 +210,40 @@ impl FallbackDriver {
                     continue;
                 }
             };
-            let result = match hints {
-                Some(hints) => driver.fetch_conditional(url, hints).await,
-                None => driver.fetch(url).await,
+            let budget = match self.deadline {
+                Some(deadline) => {
+                    let remaining = deadline.saturating_sub(started.elapsed());
+                    if remaining.is_zero() {
+                        attempts.push((*kind, "skipped: the fetch deadline is spent".into()));
+                        deadline_spent = true;
+                        break;
+                    }
+                    Some((self.slice_for(&order, idx, remaining), remaining, deadline))
+                }
+                None => None,
+            };
+            let call = async {
+                match hints {
+                    Some(hints) => driver.fetch_conditional(url, hints).await,
+                    None => driver.fetch(url).await,
+                }
+            };
+            let result = match budget {
+                Some((slice, remaining, deadline)) => {
+                    match tokio::time::timeout(slice, call).await {
+                        Ok(result) => result,
+                        Err(_) => {
+                            warn!(
+                                driver = ?kind,
+                                slice_ms = duration_ms(slice),
+                                deadline_ms = duration_ms(deadline),
+                                "driver tier stalled past its share of the fetch deadline"
+                            );
+                            Err(stalled_tier_error(*kind, slice, remaining, deadline))
+                        }
+                    }
+                }
+                None => call.await,
             };
             match result {
                 Ok(resp) => {
@@ -391,6 +464,13 @@ impl FallbackDriver {
                 "no driver improved on the JS shell; returning the static shell response"
             );
             return Ok(shell);
+        }
+        if deadline_spent {
+            let deadline = self.deadline.unwrap_or_default();
+            return Err(with_fallback_attempts(
+                deadline_exceeded_error(deadline),
+                &attempts,
+            ));
         }
 
         let aggregate_msg = attempts
@@ -819,6 +899,131 @@ pub(crate) fn error_code_short(code: ErrorCode) -> &'static str {
         ErrorCode::UserTookOver => "user_took_over",
         ErrorCode::Internal => "internal",
     }
+}
+
+// =============================================================================
+// E3.8.2: one deadline budget across the driver tiers
+// =============================================================================
+
+/// The environment variable that turns the chain deadline on (E3.8.2).
+pub const FETCH_DEADLINE_ENV: &str = "QUARRY_EDGE__FETCH_DEADLINE";
+
+/// The smallest share a tier is handed while budget is left for it. A share of
+/// a few milliseconds would time a tier out before its connect, which tells the
+/// caller nothing; the last tier still gets all that is left.
+pub const MIN_TIER_SLICE: Duration = Duration::from_millis(250);
+
+/// The `details.reason` of a TIMEOUT that the chain deadline produced (E3.8.2).
+/// Both carry TIMEOUT's own retryable flag (true): a later call gets a new budget.
+pub mod fetch_deadline_reason {
+    /// One tier did not answer within its share; the chain went on to the next
+    /// tier with what was left, and this is that tier's error.
+    pub const TIER_STALLED: &str = "tier_stalled";
+    /// The whole deadline is spent: the last tier tried stalled on what was left,
+    /// or no budget was left for the next tier.
+    pub const DEADLINE_EXCEEDED: &str = "fetch_deadline_exceeded";
+
+    /// Every reason, in documentation order.
+    pub const ALL: [&str; 2] = [TIER_STALLED, DEADLINE_EXCEEDED];
+}
+
+/// The pure half of [`fetch_deadline_enabled`]: the same values as the sub-code
+/// flag (`1`, `true`, `on`, any case). Anything else is off.
+pub fn fetch_deadline_from_value(value: Option<&str>) -> bool {
+    fetch_sub_codes_from_value(value)
+}
+
+/// The process-wide default, read from the environment once.
+pub fn fetch_deadline_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        let raw = std::env::var(FETCH_DEADLINE_ENV).ok();
+        let enabled = fetch_deadline_from_value(raw.as_deref());
+        info!(enabled = enabled, "quarry.fetch_deadline");
+        enabled
+    })
+}
+
+/// The deadline a chain built without a caller policy runs on: the default
+/// fetch policy's `timeout_s` while the flag is on, none while it is off.
+pub fn default_fetch_deadline() -> Option<Duration> {
+    if fetch_deadline_enabled() {
+        FetchPolicy::default().deadline()
+    } else {
+        None
+    }
+}
+
+/// How much of the remaining budget a tier is worth. A browser tier launches or
+/// leases a page and waits for it to settle, so it is worth two plain fetches.
+fn tier_weight(kind: DriverKind) -> u32 {
+    if kind == DriverKind::Browser {
+        2
+    } else {
+        1
+    }
+}
+
+/// The share of `remaining` a tier of `weight` gets when `weight_left` is the
+/// weight of every registered tier still to run, this one included. Time a tier
+/// does not use rolls over to the tiers after it. The last tier (or a tier whose
+/// weight is all that is left) gets everything; any other gets at least
+/// [`MIN_TIER_SLICE`], and never more than what is left.
+fn tier_slice(remaining: Duration, weight: u32, weight_left: u32) -> Duration {
+    if weight == 0 || weight_left <= weight {
+        return remaining;
+    }
+    let share = remaining * weight / weight_left;
+    share.max(MIN_TIER_SLICE).min(remaining)
+}
+
+fn duration_ms(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
+
+/// The TIMEOUT a tier gets when it did not answer within `slice` (E3.8.2). The
+/// reason is `fetch_deadline_exceeded` when the slice was all that was left, and
+/// `tier_stalled` otherwise. The message names the tier and the times, never the URL.
+fn stalled_tier_error(
+    kind: DriverKind,
+    slice: Duration,
+    remaining: Duration,
+    deadline: Duration,
+) -> quarry_core::QuarryError {
+    let reason = if slice >= remaining {
+        fetch_deadline_reason::DEADLINE_EXCEEDED
+    } else {
+        fetch_deadline_reason::TIER_STALLED
+    };
+    quarry_core::QuarryError::new(
+        ErrorCode::Timeout,
+        format!(
+            "{kind:?} tier did not answer within its {} ms share of the {} ms fetch deadline",
+            duration_ms(slice),
+            duration_ms(deadline)
+        ),
+    )
+    .with_details(serde_json::json!({
+        "reason": reason,
+        "driver": format!("{kind:?}"),
+        "slice_ms": duration_ms(slice),
+        "deadline_ms": duration_ms(deadline),
+    }))
+}
+
+/// The TIMEOUT a chain returns when no budget was left for its next tier (E3.8.2).
+fn deadline_exceeded_error(deadline: Duration) -> quarry_core::QuarryError {
+    quarry_core::QuarryError::new(
+        ErrorCode::Timeout,
+        format!(
+            "the {} ms fetch deadline was spent before every driver tier was tried",
+            duration_ms(deadline)
+        ),
+    )
+    .with_details(serde_json::json!({
+        "reason": fetch_deadline_reason::DEADLINE_EXCEEDED,
+        "deadline_ms": duration_ms(deadline),
+    }))
 }
 
 #[cfg(test)]
@@ -2343,5 +2548,296 @@ mod fetch_sub_code_tests {
         assert!(fetch_sub_codes_from_value(Some("1")));
         assert!(fetch_sub_codes_from_value(Some("TRUE")));
         assert!(fetch_sub_codes_from_value(Some(" on ")));
+    }
+}
+
+#[cfg(test)]
+mod fetch_deadline_tests {
+    use super::*;
+    use quarry_core::QuarryError;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    /// Never answers within any test deadline: sleeps an hour, then fails.
+    struct StallDriver {
+        kind: DriverKind,
+        calls: AtomicU32,
+    }
+
+    impl StallDriver {
+        fn new(kind: DriverKind) -> Self {
+            Self {
+                kind,
+                calls: AtomicU32::new(0),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Driver for StallDriver {
+        fn kind(&self) -> DriverKind {
+            self.kind
+        }
+
+        async fn fetch(&self, _url: &Url) -> QuarryResult<FetchResponse> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            tokio::time::sleep(Duration::from_secs(3_600)).await;
+            Err(QuarryError::new(ErrorCode::DriverFailed, "never answered"))
+        }
+    }
+
+    /// Answers after `delay` with a small page.
+    struct SlowServesDriver {
+        kind: DriverKind,
+        delay: Duration,
+        calls: AtomicU32,
+    }
+
+    impl SlowServesDriver {
+        fn new(kind: DriverKind, delay: Duration) -> Self {
+            Self {
+                kind,
+                delay,
+                calls: AtomicU32::new(0),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Driver for SlowServesDriver {
+        fn kind(&self) -> DriverKind {
+            self.kind
+        }
+
+        async fn fetch(&self, url: &Url) -> QuarryResult<FetchResponse> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            tokio::time::sleep(self.delay).await;
+            Ok(FetchResponse {
+                status: 200,
+                final_url: url.clone(),
+                headers: vec![],
+                body: b"ok".to_vec(),
+                duration_ms: 1,
+                served_by: self.kind,
+                captures: None,
+            })
+        }
+    }
+
+    fn chain(
+        deadline: Option<Duration>,
+        order: Vec<(DriverKind, Arc<dyn Driver>)>,
+    ) -> FallbackDriver {
+        let primary = order[0].0;
+        let rest = order[1..].iter().map(|(kind, _)| *kind).collect();
+        let drivers: HashMap<DriverKind, Arc<dyn Driver>> = order.into_iter().collect();
+        FallbackDriver::new(primary, rest, drivers)
+            .with_escalation_mode(EscalationMode::Honest)
+            .with_fetch_sub_codes(false)
+            .with_fetch_deadline(deadline)
+    }
+
+    fn target_url() -> Url {
+        "https://example.com/".parse().expect("a valid URL")
+    }
+
+    fn reason_of(error: &QuarryError) -> Option<&str> {
+        error.details.as_ref()?.get("reason")?.as_str()
+    }
+
+    fn attempts_of(error: &QuarryError) -> usize {
+        error
+            .details
+            .as_ref()
+            .and_then(|details| details.get("fallback_attempts"))
+            .and_then(serde_json::Value::as_array)
+            .map_or(0, Vec::len)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn without_a_deadline_a_slow_tier_is_waited_for_as_before() {
+        let slow = Arc::new(SlowServesDriver::new(
+            DriverKind::Static,
+            Duration::from_secs(120),
+        ));
+        let fb = chain(
+            None,
+            vec![
+                (DriverKind::Static, slow.clone() as Arc<dyn Driver>),
+                (
+                    DriverKind::Tls,
+                    Arc::new(StallDriver::new(DriverKind::Tls)) as Arc<dyn Driver>,
+                ),
+            ],
+        );
+        let resp = fb.fetch(&target_url()).await.unwrap();
+        assert_eq!(resp.served_by, DriverKind::Static);
+        assert_eq!(slow.calls.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_stalled_tier_hands_the_rest_of_the_budget_to_the_next_tier() {
+        let tls = Arc::new(SlowServesDriver::new(
+            DriverKind::Tls,
+            Duration::from_secs(1),
+        ));
+        let fb = chain(
+            Some(Duration::from_secs(30)),
+            vec![
+                (
+                    DriverKind::Static,
+                    Arc::new(StallDriver::new(DriverKind::Static)) as Arc<dyn Driver>,
+                ),
+                (DriverKind::Tls, tls.clone() as Arc<dyn Driver>),
+            ],
+        );
+        let started = tokio::time::Instant::now();
+        let resp = fb.fetch(&target_url()).await.unwrap();
+        let elapsed = started.elapsed();
+        assert_eq!(resp.served_by, DriverKind::Tls);
+        assert_eq!(tls.calls.load(Ordering::Relaxed), 1);
+        // The static tier had half of 30 s (two tiers of weight one), then TLS answered.
+        assert!(elapsed >= Duration::from_secs(15), "{elapsed:?}");
+        assert!(elapsed <= Duration::from_secs(17), "{elapsed:?}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_chain_of_stalled_tiers_returns_inside_the_deadline_with_a_sub_code() {
+        let fb = chain(
+            Some(Duration::from_secs(30)),
+            vec![
+                (
+                    DriverKind::Static,
+                    Arc::new(StallDriver::new(DriverKind::Static)) as Arc<dyn Driver>,
+                ),
+                (
+                    DriverKind::Tls,
+                    Arc::new(StallDriver::new(DriverKind::Tls)) as Arc<dyn Driver>,
+                ),
+                (
+                    DriverKind::Browser,
+                    Arc::new(StallDriver::new(DriverKind::Browser)) as Arc<dyn Driver>,
+                ),
+            ],
+        );
+        let started = tokio::time::Instant::now();
+        let err = fb.fetch(&target_url()).await.unwrap_err();
+        let elapsed = started.elapsed();
+        assert_eq!(err.code, ErrorCode::Timeout);
+        assert!(err.retryable, "a later call gets a new budget");
+        assert_eq!(reason_of(&err), Some("fetch_deadline_exceeded"));
+        assert_eq!(attempts_of(&err), 3);
+        assert!(elapsed <= Duration::from_secs(31), "{elapsed:?}");
+        assert!(elapsed >= Duration::from_secs(29), "{elapsed:?}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_spent_budget_skips_the_next_tier() {
+        // 100 ms is below MIN_TIER_SLICE, so the first tier gets all of it and the
+        // second is never called.
+        let tls = Arc::new(SlowServesDriver::new(
+            DriverKind::Tls,
+            Duration::from_millis(1),
+        ));
+        let fb = chain(
+            Some(Duration::from_millis(100)),
+            vec![
+                (
+                    DriverKind::Static,
+                    Arc::new(StallDriver::new(DriverKind::Static)) as Arc<dyn Driver>,
+                ),
+                (DriverKind::Tls, tls.clone() as Arc<dyn Driver>),
+            ],
+        );
+        let err = fb.fetch(&target_url()).await.unwrap_err();
+        assert_eq!(err.code, ErrorCode::Timeout);
+        assert_eq!(reason_of(&err), Some("fetch_deadline_exceeded"));
+        assert_eq!(tls.calls.load(Ordering::Relaxed), 0);
+        assert_eq!(attempts_of(&err), 2, "the stalled tier and the skipped one");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_tier_inside_its_share_is_untouched() {
+        let fb = chain(
+            Some(Duration::from_secs(30)),
+            vec![(
+                DriverKind::Static,
+                Arc::new(SlowServesDriver::new(
+                    DriverKind::Static,
+                    Duration::from_secs(5),
+                )) as Arc<dyn Driver>,
+            )],
+        );
+        let resp = fb.fetch(&target_url()).await.unwrap();
+        assert_eq!(resp.served_by, DriverKind::Static);
+    }
+
+    #[test]
+    fn the_last_tier_gets_all_that_is_left() {
+        let left = Duration::from_secs(12);
+        assert_eq!(tier_slice(left, 1, 1), left);
+        assert_eq!(tier_slice(left, 2, 2), left);
+    }
+
+    #[test]
+    fn earlier_tiers_get_their_weighted_share() {
+        let left = Duration::from_secs(40);
+        // static, tls, browser: weights 1, 1, 2.
+        assert_eq!(tier_slice(left, 1, 4), Duration::from_secs(10));
+        assert_eq!(tier_slice(left, 2, 3), left * 2 / 3);
+    }
+
+    #[test]
+    fn a_share_is_never_below_the_floor_nor_above_what_is_left() {
+        assert_eq!(tier_slice(Duration::from_millis(400), 1, 4), MIN_TIER_SLICE);
+        assert_eq!(
+            tier_slice(Duration::from_millis(100), 1, 4),
+            Duration::from_millis(100)
+        );
+    }
+
+    #[test]
+    fn the_stall_reason_says_whether_budget_was_left() {
+        let deadline = Duration::from_secs(30);
+        let stalled = stalled_tier_error(
+            DriverKind::Static,
+            Duration::from_secs(10),
+            Duration::from_secs(30),
+            deadline,
+        );
+        assert_eq!(stalled.code, ErrorCode::Timeout);
+        assert_eq!(reason_of(&stalled), Some("tier_stalled"));
+        assert!(!stalled.message.contains("example.com"));
+        let spent = stalled_tier_error(
+            DriverKind::Browser,
+            Duration::from_secs(10),
+            Duration::from_secs(10),
+            deadline,
+        );
+        assert_eq!(reason_of(&spent), Some("fetch_deadline_exceeded"));
+    }
+
+    #[test]
+    fn the_reasons_are_closed_and_stable() {
+        assert_eq!(
+            fetch_deadline_reason::ALL,
+            ["tier_stalled", "fetch_deadline_exceeded"]
+        );
+    }
+
+    #[test]
+    fn the_deadline_flag_is_on_only_for_a_true_value() {
+        assert!(!fetch_deadline_from_value(None));
+        assert!(!fetch_deadline_from_value(Some("0")));
+        assert!(!fetch_deadline_from_value(Some("off")));
+        assert!(fetch_deadline_from_value(Some("1")));
+        assert!(fetch_deadline_from_value(Some(" On ")));
+    }
+
+    #[test]
+    fn the_default_policy_deadline_is_thirty_seconds() {
+        assert_eq!(
+            FetchPolicy::default().deadline(),
+            Some(Duration::from_secs(30))
+        );
     }
 }
