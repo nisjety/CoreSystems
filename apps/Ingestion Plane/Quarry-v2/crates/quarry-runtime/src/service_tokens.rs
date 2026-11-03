@@ -49,7 +49,7 @@ pub enum ServiceTokenAudience {
     InferenceCore,
     /// integration-corev2's own verifier audience (`aud=ingestion`), for the
     /// executor-only one-time-code read (ADR-2a, scope `integration:otp:read`).
-    /// No manifest row requests it yet: E3.1-h adds the row and the call site.
+    /// Requested by the `mail-otp-read` row from `otp_ic_client.rs` (E3.1-h).
     Ingestion,
 }
 
@@ -810,9 +810,10 @@ mod manifest_tests {
     /// Every request a row must stand for, typed here and not read from the
     /// manifest: the first five are exactly what the call sites wrote inline
     /// before the manifest existed, so the refactor cannot change a request
-    /// unnoticed, and editing a row means editing this table too. The last two
-    /// are the WS16.S2 grant (the two bearers of an org-bound model call).
-    const EXPECTED_REQUESTS: [(&str, ServiceTokenAudience, &[&str], &str); 9] = [
+    /// unnoticed, and editing a row means editing this table too. The two
+    /// model-extract rows are the WS16.S2 grant (the two bearers of an org-bound
+    /// model call); the last is the E3.1-h one-time-code read (R-13 PR 1).
+    const EXPECTED_REQUESTS: [(&str, ServiceTokenAudience, &[&str], &str); 10] = [
         (
             "vector-retrieve",
             ServiceTokenAudience::DataPlane,
@@ -866,6 +867,12 @@ mod manifest_tests {
             ServiceTokenAudience::InferenceCore,
             &["inference:invoke", "models:invoke"],
             "authorize inference for structured page extraction",
+        ),
+        (
+            "mail-otp-read",
+            ServiceTokenAudience::Ingestion,
+            &["integration:otp:read"],
+            "read one approved one-time code",
         ),
     ];
 
