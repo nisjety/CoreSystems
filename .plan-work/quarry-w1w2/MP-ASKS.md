@@ -131,3 +131,11 @@ Quarry's half is built on `w23/lane-d` (code only, not compiled): the vendored `
 - **Tests (plan names):** `TestSnapshotComesFromVerifiedPrincipalNotRequest`, `TestRunGrantSnapshotOnlyTightens`, `TestDeniedDomainIsNotGrantable`, `TestAllowListIntersectsRequestedDomains`, `TestPolicyAbsentYieldsNoSnapshot`, `TestPostgresRoundTripKeepsSnapshot` (integration tag).
 - **model-gateway `browser_run.rs`:** no logic change; `POST /v1/browser/grants` may add `policy_rev` for the UI.
 - **Deploy order:** broker first; Quarry reads an absent snapshot as no grant layer, so either order is safe.
+
+## W2-AP-S7a, WS10.S7a (Application Plane browserActivity: the nats.conf subscribe grant)
+
+The Application Plane half is built on `w23/lane-c` (code only, not compiled): `agentRuns.browserActivity` in convex-core and the `upsertBrowserActivity` internal mutation; the consumer is W2-AP-S7b. Ask (plan "Slice WS10.S7 detail", ADR-8 part 2):
+
+- **`apps/Model Plane/deploy/nats.conf`, user `application-convex-model`:** add `"mp.v1.trace.run.*"` to `permissions.subscribe` (a plain core-NATS subscription, next to `"mp.v1.run.*.event"`). Nothing else: no publish right, no JetStream API or ACK subject, no durable. The subject's last token is the run id; the publisher is `quarry-trace-producer` (X-4 (a), publish-only on `mp.v1.trace.run.*`).
+- **When:** with or before W2-AP-S7b's consumer is switched on (its subscription is off by default). Until then the grant is unused; without it the consumer gets a permissions violation and the projection stays empty, which is safe.
+- **No other Model Plane change.** The convex side writes nothing for an unknown run, an org mismatch, a stale `producer_seq` or any non-label text, so the grant does not widen what reaches Convex beyond labels and counters.

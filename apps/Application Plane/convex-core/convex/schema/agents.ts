@@ -141,6 +141,28 @@ export const agentTables = {
     ratingNote: v.optional(v.string()),
     /** When the rating was set (separate from row updates so we can audit). */
     ratedAt: v.optional(v.number()),
+    /**
+     * WS10.S7a (ADR-8 part 2): coarse projection of the run's browser trace
+     * (`mp.v1.trace.run.*`), written only by `agentRuns.upsertBrowserActivity`.
+     * Owner-only in v1: `getByRunId` strips it for every viewer who is not
+     * the run's `externalUserId`. Labels and approximate counters only,
+     * never payload text (no URLs, selectors or page content). Inert until a
+     * producer and the consumer (WS10.S7b) exist.
+     */
+    browserActivity: v.optional(
+      v.object({
+        /** Highest producer_seq applied; never moves backwards. */
+        lastProducerSeq: v.number(),
+        lastEventType: v.string(),
+        lastEventAt: v.number(),
+        sessionState: v.optional(v.string()),
+        control: v.optional(v.string()),
+        /** Approximate counters: a lost event leaves them low, the state stays right. */
+        blockedEgress: v.optional(v.number()),
+        steps: v.optional(v.number()),
+        artifacts: v.optional(v.number()),
+      }),
+    ),
     startedAt: v.number(),
     completedAt: v.optional(v.number()),
     updatedAt: v.number(),
