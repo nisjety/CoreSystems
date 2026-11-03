@@ -34,6 +34,10 @@ VERDICTS
     checks in version order, so a session-core built from a clean checkout of main (CI, a new worktree, the signed
     candidate) refuses at migration 1. The running session-core boots because it was built from the live tree, whose
     working copies of 0001-0034 are still CRLF (git ls-files --eol: i/lf w/crlf).
+    RESOLVED later the same night: the owner chose to pin them like 0032. main 0e21f277c marks 0001-0031, 0033 and 0034
+    -text and commits the CRLF bytes the database applied; no database change. After rebasing this branch onto it, the
+    comparison was run again: all 67 applied checksums equal the index blobs (what any clean checkout gets), 67/67, and
+    the files in this worktree, 67/67.
 
 RUN A: PREFLIGHT (01:09 UTC) -> 5/6, deploy-order FAIL (see D1-221). wave-revision, migrations 0044/0045 with
   runs.retention_class, waiver minting off on all four, no waived run, no ZDR row in the audit outbox: PASS.
