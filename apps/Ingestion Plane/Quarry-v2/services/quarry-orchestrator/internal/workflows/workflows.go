@@ -1127,12 +1127,19 @@ func crawlJobDurableFrontier(
 	scope *crawlScopeRun,
 ) error {
 	queueName := durableFrontierQueueName(in.RunID)
+	// W3 E3.7.6: the canonical frontier identity, behind QUARRY_ORCHESTRATOR__CANONICAL_FRONTIER
+	// (default off). A history recorded before the marker keeps the raw ids and URLs.
+	canonical := false
+	if workflow.GetVersion(ctx, canonicalFrontierVersion, workflow.DefaultVersion, 1) >= 1 {
+		canonical = canonicalFrontierEnabled(ctx)
+	}
 	for _, seed := range in.Seeds {
 		if strings.TrimSpace(seed) == "" {
 			continue
 		}
+		seedID, seedURL := frontierTarget(in.RunID, seed, canonical)
 		if err := workflow.ExecuteActivity(ctx, a.FrontierEnqueue, activities.FrontierEnqueueInput{
-			Queue: queueName, OrgID: in.OrgID, RequestID: durableFrontierRequestID(in.RunID, seed), URL: seed,
+			Queue: queueName, OrgID: in.OrgID, RequestID: seedID, URL: seedURL,
 		}).Get(ctx, nil); err != nil {
 			return err
 		}
@@ -1214,7 +1221,7 @@ func crawlJobDurableFrontier(
 			}
 			if scope != nil && (in.MaxDepth == 0 || depth+1 <= in.MaxDepth) {
 				// WS14.S3: the children of a page under scope go in one batch call.
-				if err := enqueueChildrenBatch(ctx, a, queueName, in.OrgID, in.RunID, depth+1, links); err != nil {
+				if err := enqueueChildrenBatch(ctx, a, queueName, in.OrgID, in.RunID, depth+1, links, canonical); err != nil {
 					return err
 				}
 			} else if in.MaxDepth == 0 || depth+1 <= in.MaxDepth {
@@ -1222,8 +1229,9 @@ func crawlJobDurableFrontier(
 					if strings.TrimSpace(link) == "" {
 						continue
 					}
+					linkID, linkURL := frontierTarget(in.RunID, link, canonical)
 					if err := workflow.ExecuteActivity(ctx, a.FrontierEnqueue, activities.FrontierEnqueueInput{
-						Queue: queueName, OrgID: in.OrgID, RequestID: durableFrontierRequestID(in.RunID, link), URL: link, Depth: depth + 1,
+						Queue: queueName, OrgID: in.OrgID, RequestID: linkID, URL: linkURL, Depth: depth + 1,
 					}).Get(ctx, nil); err != nil {
 						return err
 					}
@@ -1294,6 +1302,54 @@ func durableFrontierQueueName(runID string) string {
 
 func durableFrontierRequestID(runID, url string) string {
 	return activities.FrontierRequestID(runID, url)
+}
+
+// The canonical frontier identity (W3 E3.7.6).
+const (
+	// canonicalFrontierVersion is the GetVersion id of the canonical frontier.
+	canonicalFrontierVersion = "crawl-canonical-frontier-v1"
+	// canonicalFrontierFlag is the operator switch, default off. On, a crawl URL the Go
+	// mirror of the canonical helper covers is enqueued in its canonical form under the id
+	// of that form, so the spellings of one page (fragment, host case, default port, dot
+	// segments, escapes) are one queue entry, and a seed matches its sitemap entry.
+	canonicalFrontierFlag = "QUARRY_ORCHESTRATOR__CANONICAL_FRONTIER"
+)
+
+// canonicalFrontierEnv reads the flag. It is only called inside workflow.SideEffect, so a
+// replay reads the recorded value. A var so a test can set the flag.
+var canonicalFrontierEnv = func() string { return os.Getenv(canonicalFrontierFlag) }
+
+// parseCanonicalFrontier is true for 1, true, on or yes (any case); anything else is off.
+func parseCanonicalFrontier(raw string) bool {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "1", "true", "on", "yes":
+		return true
+	}
+	return false
+}
+
+// canonicalFrontierEnabled reads the flag once per execution as a recorded side effect.
+func canonicalFrontierEnabled(ctx workflow.Context) bool {
+	var on bool
+	encoded := workflow.SideEffect(ctx, func(workflow.Context) any {
+		return parseCanonicalFrontier(canonicalFrontierEnv())
+	})
+	if err := encoded.Get(&on); err != nil {
+		return false
+	}
+	return on
+}
+
+// frontierTarget is the request id and the URL a crawl URL is enqueued with. Canonical on
+// and covered by the mirror: the canonical URL and its id. Otherwise the URL as given and
+// its raw id, as before (activities.FrontierCanonicalRequestID agrees on both branches).
+func frontierTarget(runID, raw string, canonical bool) (string, string) {
+	if canonical {
+		if canonicalURL, ok := activities.CanonicalFrontierURL(raw); ok {
+			return activities.FrontierRequestID(runID, canonicalURL), canonicalURL
+		}
+	}
+	return durableFrontierRequestID(runID, raw), raw
 }
 
 func frontierPayloadDepth(payload map[string]any) uint32 {
