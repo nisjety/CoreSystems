@@ -45,6 +45,7 @@ hmac = "0.12"
 rand = "0.8"
 
 [dev-dependencies]
+mp-inference-replay = { path = "../../crates/mp-inference-replay" }
 reqwest = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
 serial_test = "3"

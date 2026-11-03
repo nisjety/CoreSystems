@@ -127,6 +127,13 @@ jobs:
         run: |
           cargo test -q -p mp-contracts --test prompt_tool_manifest
 
+      # The replay fake and its shipped cassettes: each cassette is synthetic and not ZDR, and no
+      # service links the fake at runtime.
+      - name: Replay fake and cassettes (offline)
+        working-directory: 'apps/Model Plane/rust'
+        run: |
+          cargo test -q -p mp-inference-replay
+
       - name: Scenario-touch gate self-test (offline)
         working-directory: '.'
         run: |

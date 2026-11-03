@@ -1183,6 +1183,7 @@ dependencies = [
  "mp-content-safety",
  "mp-contracts",
  "mp-ids",
+ "mp-inference-replay",
  "mp-slo",
  "mp-telemetry",
  "nix",
@@ -2357,6 +2358,7 @@ dependencies = [
  "mp-contracts",
  "mp-events",
  "mp-ids",
+ "mp-inference-replay",
  "mp-telemetry",
  "mp-toon",
  "prost",
@@ -2457,6 +2459,22 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.18",
+ "ulid",
+]
+
+[[package]]
+name = "mp-inference-replay"
+version = "0.1.0"
+dependencies = [
+ "futures",
+ "mp-contracts",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-stream",
+ "tonic",
  "ulid",
 ]
 
