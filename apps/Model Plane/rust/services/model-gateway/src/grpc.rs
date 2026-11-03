@@ -4604,6 +4604,13 @@ mod tests {
         ) -> Result<Response<mp_contracts::model_plane::v1::CancelRunAsRoomManagerResponse>, Status> {
             Err(Status::unimplemented("room run stop not needed in this test"))
         }
+
+        async fn resolve_approval_authority(
+            &self,
+            _: Request<mp_contracts::model_plane::v1::ResolveApprovalAuthorityRequest>,
+        ) -> Result<Response<mp_contracts::model_plane::v1::ResolveApprovalAuthorityResponse>, Status> {
+            Err(Status::unimplemented("approval authority not needed in this test"))
+        }
     }
 
     async fn spawn_inference_client<S: InferenceCore>(

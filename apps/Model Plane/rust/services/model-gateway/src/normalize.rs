@@ -566,6 +566,7 @@ mod tests {
 
     fn make_request(content: &str, model: Option<&str>) -> InvokeRequest {
         InvokeRequest {
+            wake_context: None,
             effort: None,
             pinned_message_ids: Vec::new(),
             regenerated: false,

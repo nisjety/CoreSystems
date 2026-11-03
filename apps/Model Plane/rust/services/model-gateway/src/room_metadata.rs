@@ -266,8 +266,8 @@ mod tests {
     }
 
     #[test]
-    fn the_allowlist_is_artifacts_and_the_retrieval_decline_until_a_later_slice_adds_work() {
-        assert_eq!(ROOM_VISIBLE_METADATA_KEYS, ["artifacts", "retrievalDeclined"]);
+    fn the_allowlist_is_artifacts_the_retrieval_decline_and_the_content_free_work_summary() {
+        assert_eq!(ROOM_VISIBLE_METADATA_KEYS, ["artifacts", "retrievalDeclined", "work"]);
         assert_eq!(ROOM_VISIBLE_ARTIFACT_FIELDS, ["id", "kind", "title", "content", "version"]);
     }
 }

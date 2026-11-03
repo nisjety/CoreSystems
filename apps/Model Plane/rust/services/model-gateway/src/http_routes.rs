@@ -13390,8 +13390,15 @@ mod run_owner_publish_tests {
         async fn cancel_run_as_room_manager(
             &self,
             _: TonicRequest<mp_contracts::model_plane::v1::CancelRunAsRoomManagerRequest>,
-        ) -> Result<Response<mp_contracts::model_plane::v1::CancelRunAsRoomManagerResponse>, Status> {
+        ) -> Result<TonicResponse<mp_contracts::model_plane::v1::CancelRunAsRoomManagerResponse>, Status> {
             Err(Status::unimplemented("room run stop not needed in this test"))
+        }
+
+        async fn resolve_approval_authority(
+            &self,
+            _: TonicRequest<mp_contracts::model_plane::v1::ResolveApprovalAuthorityRequest>,
+        ) -> Result<TonicResponse<mp_contracts::model_plane::v1::ResolveApprovalAuthorityResponse>, Status> {
+            Err(Status::unimplemented("approval authority not needed in this test"))
         }
     }
 
@@ -16319,6 +16326,9 @@ mod thread_messages_page_tests {
             message_id: "m2".to_owned(),
             role: "assistant".to_owned(),
             content: "answer".to_owned(),
+            entry: None,
+            mentions: Vec::new(),
+            revision: None,
             agent_name: String::new(),
             author_subject_id: String::new(),
             post_kind: String::new(),

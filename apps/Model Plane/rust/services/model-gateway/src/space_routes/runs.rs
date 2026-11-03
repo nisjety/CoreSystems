@@ -268,7 +268,10 @@ async fn run_live(
             "a user principal is required",
         );
     }
-    if claims.zdr {
+    // A posture that cannot be decided is refused like a ZDR one (fail closed).
+    let zero_retention = crate::zdr_posture::zdr_or_refuse(&claims, &crate::zdr_posture::Route::plain(false))
+        .unwrap_or(true);
+    if zero_retention {
         count_attach("zdr");
         return (
             StatusCode::FORBIDDEN,

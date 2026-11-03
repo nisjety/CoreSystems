@@ -1550,6 +1550,7 @@ mod tests {
             expires_at: None,
             org_id: org.into(),
             cause: None,
+            ..Default::default()
         }
     }
 
