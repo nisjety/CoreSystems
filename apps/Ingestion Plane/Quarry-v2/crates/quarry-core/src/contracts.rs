@@ -622,6 +622,47 @@ pub struct InteractiveElement {
     pub click_index: Option<u32>,
 }
 
+/// A box in CSS pixels, relative to the viewport as the browser's layout
+/// reports it, so it may lie partly or wholly outside the viewport. Presentation
+/// only: a client may draw a highlight with it. No resolver, action or receipt
+/// reads it, and it carries no page content.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct ElementRect {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
+impl ElementRect {
+    /// The axis-aligned bounds of one CDP quad: eight numbers, the x and y of
+    /// the four corners in order (`DOM.getBoxModel` `content`, or one entry of
+    /// `DOM.getContentQuads`). A rotated box gives the box around its corners.
+    /// `None` unless the quad has exactly eight finite numbers and a positive
+    /// width and height.
+    pub fn from_content_quad(quad: &[f64]) -> Option<Self> {
+        if quad.len() != 8 || quad.iter().any(|value| !value.is_finite()) {
+            return None;
+        }
+        let xs = [quad[0], quad[2], quad[4], quad[6]];
+        let ys = [quad[1], quad[3], quad[5], quad[7]];
+        let x = xs.iter().copied().fold(f64::INFINITY, f64::min);
+        let y = ys.iter().copied().fold(f64::INFINITY, f64::min);
+        let width = xs.iter().copied().fold(f64::NEG_INFINITY, f64::max) - x;
+        let height = ys.iter().copied().fold(f64::NEG_INFINITY, f64::max) - y;
+        if width > 0.0 && height > 0.0 {
+            Some(Self {
+                x,
+                y,
+                width,
+                height,
+            })
+        } else {
+            None
+        }
+    }
+}
+
 /// One compact row of a [`DomSummary`] click map. Deliberately narrower than
 /// [`InteractiveElement`]: a planner scans this list cheaply and only fans
 /// out to the full element (via `index`) when it needs placeholder, test-id,
@@ -1236,5 +1277,88 @@ mod reload_contract_tests {
         assert!(matches!(back, AgentAction::Reload { ignore_cache: true }));
         // Unknown keys stay accepted by default; a URL field is not part of the variant.
         assert!(serde_json::from_str::<AgentAction>(r#"{"type":"reload","url":"x"}"#).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod element_rect_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn a_content_quad_gives_its_bounds() {
+        let quad = [10.0, 20.0, 110.0, 20.0, 110.0, 50.0, 10.0, 50.0];
+        assert_eq!(
+            ElementRect::from_content_quad(&quad),
+            Some(ElementRect {
+                x: 10.0,
+                y: 20.0,
+                width: 100.0,
+                height: 30.0
+            })
+        );
+    }
+
+    #[test]
+    fn a_rotated_box_gives_the_box_around_its_corners() {
+        let diamond = [50.0, 0.0, 100.0, 25.0, 50.0, 50.0, 0.0, 25.0];
+        assert_eq!(
+            ElementRect::from_content_quad(&diamond),
+            Some(ElementRect {
+                x: 0.0,
+                y: 0.0,
+                width: 100.0,
+                height: 50.0
+            })
+        );
+    }
+
+    #[test]
+    fn a_box_scrolled_off_screen_keeps_its_negative_position() {
+        let quad = [-40.0, -10.0, 60.0, -10.0, 60.0, 20.0, -40.0, 20.0];
+        assert_eq!(
+            ElementRect::from_content_quad(&quad),
+            Some(ElementRect {
+                x: -40.0,
+                y: -10.0,
+                width: 100.0,
+                height: 30.0
+            })
+        );
+    }
+
+    #[test]
+    fn a_quad_that_is_not_eight_finite_numbers_gives_none() {
+        let short = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0];
+        let not_a_number = [0.0, 0.0, 10.0, 0.0, 10.0, f64::NAN, 0.0, 10.0];
+        let infinite = [0.0, 0.0, f64::INFINITY, 0.0, 10.0, 10.0, 0.0, 10.0];
+        assert_eq!(ElementRect::from_content_quad(&short), None);
+        assert_eq!(ElementRect::from_content_quad(&not_a_number), None);
+        assert_eq!(ElementRect::from_content_quad(&infinite), None);
+    }
+
+    #[test]
+    fn a_box_with_no_area_gives_none() {
+        let point = [10.0, 20.0, 10.0, 20.0, 10.0, 20.0, 10.0, 20.0];
+        let line = [10.0, 20.0, 50.0, 20.0, 50.0, 20.0, 10.0, 20.0];
+        assert_eq!(ElementRect::from_content_quad(&point), None);
+        assert_eq!(ElementRect::from_content_quad(&line), None);
+    }
+
+    #[test]
+    fn the_wire_form_uses_plain_field_names_and_round_trips() {
+        let rect = ElementRect {
+            x: 1.0,
+            y: 2.0,
+            width: 3.0,
+            height: 4.0,
+        };
+        let value = serde_json::to_value(rect).unwrap();
+        assert_eq!(
+            value,
+            json!({ "x": 1.0, "y": 2.0, "width": 3.0, "height": 4.0 })
+        );
+        let back: ElementRect = serde_json::from_value(value).unwrap();
+        assert_eq!(back, rect);
     }
 }
