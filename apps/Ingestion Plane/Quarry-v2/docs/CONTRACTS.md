@@ -1391,7 +1391,7 @@ Response: `SearchResponse.scrape`, present only when the request sent a block.
 ### Sitemap options (INNH-6a covers E3.7.5; E3.7.6 and E3.7.4 as noted)
 
 - Crawl `sitemap` (built; see the INNH-6 section above): `skip` (absent) follows links only; `include` seeds the crawl from the site's sitemaps and still follows links; `only` crawls the seed and the sitemap's URLs and follows no page link. Gzip sitemaps and sitemap indexes are read within bounds (`quarry_transform::sitemap::parse_body`, 50 MiB decoded cap). With `QUARRY_EDGE__CRAWL_SITEMAP` off, `include` and `only` are `400 unsupported_option`.
-- Canonical URL helper (E3.7.6): `quarry_transform::canonical_url` is used by the crawl sitemap path. Its frontier enqueue and redirect seen-marking are not wired yet.
+- Canonical URL helper (E3.7.6): `quarry_transform::canonical_url` already canonicalises and de-duplicates the `<loc>` values of a crawl sitemap (INNH-6a). Its wiring into the frontier enqueue of page links and into redirect seen-marking is not built.
 - `/v1/map` (E3.7.4, not built): the route still reads its sitemaps as text (`quarry_transform::sitemap::parse`), with no gzip handling and no Sitemap-line parse. No switch is added for it here.
 
 ### What the SDKs carry
