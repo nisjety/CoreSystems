@@ -1,0 +1,125 @@
+/* Steer and queue composer under the browser dock's run (E3.3-g). Colours come from the theme tokens,
+   with fallbacks, as in browser-control-strip.css. Nothing here shows until the composer does. */
+
+.browser-steer {
+  display: grid;
+  gap: 0.5rem;
+  padding: 0.5rem 0.75rem;
+  border-top: 1px solid var(--border, rgba(0, 0, 0, 0.12));
+  font-size: 0.8125rem;
+  color: var(--foreground, inherit);
+}
+
+.browser-steer__strip {
+  display: grid;
+  gap: 0.35rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.browser-steer__item {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.25rem 0.5rem;
+  min-width: 0;
+}
+
+.browser-steer__text {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.browser-steer__state {
+  color: var(--muted-foreground, #5f5f5f);
+  font-size: 0.75rem;
+}
+
+.browser-steer__item[data-state='refused'] .browser-steer__state {
+  color: var(--destructive, #b42318);
+}
+
+.browser-steer__item-actions {
+  display: inline-flex;
+  gap: 0.35rem;
+  margin-left: auto;
+}
+
+.browser-steer__form {
+  display: grid;
+  gap: 0.35rem;
+  margin: 0;
+}
+
+.browser-steer__input {
+  width: 100%;
+  min-height: 2.25rem;
+  padding: 0.4rem 0.5rem;
+  border: 1px solid var(--border, rgba(0, 0, 0, 0.2));
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  resize: vertical;
+}
+
+.browser-steer__actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  justify-content: flex-end;
+}
+
+.browser-steer__count {
+  margin-right: auto;
+  color: var(--muted-foreground, #5f5f5f);
+  font-size: 0.75rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.browser-steer__button {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.25rem 0.6rem;
+  border: 1px solid var(--border, rgba(0, 0, 0, 0.2));
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.browser-steer__button--primary {
+  border-color: var(--primary, #1d6fa5);
+  background: var(--primary, #1d6fa5);
+  color: var(--primary-foreground, #ffffff);
+}
+
+.browser-steer__button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.browser-steer__button:focus-visible,
+.browser-steer__input:focus-visible {
+  outline: 2px solid var(--verevon-chat-fjord, #0071e3);
+  outline-offset: 1px;
+}
+
+.browser-steer__hint,
+.browser-steer__zdr {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  margin: 0;
+  color: var(--muted-foreground, #5f5f5f);
+  font-size: 0.75rem;
+}
+
+@media (max-width: 480px) {
+  .browser-steer__actions {
+    flex-wrap: wrap;
+  }
+}

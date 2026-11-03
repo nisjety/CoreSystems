@@ -1357,6 +1357,26 @@ const browserRunControlInput = z.object({
   action: z.enum(['pause', 'resume', 'stop']),
 })
 
+// A person's steer into a live browser-agent run (E3.3-g): one message typed in the dock while the
+// run works, which the run takes at its next step. `clientMessageId` names the message, so a repeated
+// send of the same id is one message. The owner holds the text in memory until a step takes it, and
+// never writes it to the run's event log or to the transcript.
+const browserRunSteerInput = z.object({
+  runId: z.string().min(1).max(128),
+  content: z.string().trim().min(1).max(2000),
+  clientMessageId: z
+    .string()
+    .regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/)
+    .optional(),
+}).strict()
+
+// `queued`: the run has the message and takes it at its next step. `run_ended`: the run ended first, so
+// nothing was taken and nothing was started, and the person decides what happens to the text.
+export const browserRunSteerOutput = z.object({
+  outcome: z.enum(['queued', 'run_ended']),
+  clientMessageId: z.string().min(1).max(128).optional(),
+})
+
 const browserOmniboxSearchInput = z.object({
   query: z.string().trim().min(1).max(500),
   limit: z.number().int().min(1).max(10).optional(),
@@ -3564,6 +3584,17 @@ export const actionRegistry = [
     reversible: true,
     inputSchema: browserRunControlInput,
     outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'browser_run.steer',
+    label: 'Steer browser agent run',
+    description: 'Send one message from the person into a running browser-agent run. The run takes it at its next step. If the run ends first it answers run_ended and nothing starts. Human-only, from the browser dock: a model cannot send it. Ephemeral: the owner holds the text in memory until a step takes it and never writes it to the run event log or the transcript. Refused under zero data retention. Not reversible once taken.',
+    ownerPlane: 'model',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: false,
+    inputSchema: browserRunSteerInput,
+    outputSchema: browserRunSteerOutput,
   },
   {
     id: 'browser_omnibox.search',
