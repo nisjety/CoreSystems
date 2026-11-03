@@ -1486,7 +1486,7 @@ impl SessionCore for MockSessionCore {
                     ..Default::default()
                 })
                 .collect();
-            return Ok(Response::new(ListConversationResponse { messages, has_more: false }));
+            return Ok(Response::new(ListConversationResponse { messages, has_more: false, ..Default::default() }));
         }
         let messages = self
             .handles
@@ -1503,7 +1503,7 @@ impl SessionCore for MockSessionCore {
                 ..Default::default()
             })
             .collect();
-        Ok(Response::new(ListConversationResponse { messages, has_more: false }))
+        Ok(Response::new(ListConversationResponse { messages, has_more: false, ..Default::default() }))
     }
 
     async fn list_threads(
@@ -2314,6 +2314,36 @@ struct ScriptedRunEvents {
 
 #[tonic::async_trait]
 impl mpv1::orchestration_core_service_server::OrchestrationCoreService for ScriptedRunEvents {
+    async fn reroute_approval(
+        &self,
+        _request: tonic::Request<mp_contracts::model_plane::v1::RerouteApprovalRequest>,
+    ) -> Result<tonic::Response<mp_contracts::model_plane::v1::RerouteApprovalResponse>, tonic::Status> {
+        Err(tonic::Status::unimplemented("not exercised by this test"))
+    }
+    async fn claim_once_approval(
+        &self,
+        _request: tonic::Request<mp_contracts::model_plane::v1::ClaimOnceApprovalRequest>,
+    ) -> Result<tonic::Response<mp_contracts::model_plane::v1::ClaimOnceApprovalResponse>, tonic::Status> {
+        Err(tonic::Status::unimplemented("not exercised by this test"))
+    }
+    async fn hold_quarantined_output(
+        &self,
+        _request: tonic::Request<mp_contracts::model_plane::v1::HoldQuarantinedOutputRequest>,
+    ) -> Result<tonic::Response<mp_contracts::model_plane::v1::HoldQuarantinedOutputResponse>, tonic::Status> {
+        Err(tonic::Status::unimplemented("not exercised by this test"))
+    }
+    async fn claim_quarantine_release(
+        &self,
+        _request: tonic::Request<mp_contracts::model_plane::v1::ClaimQuarantineReleaseRequest>,
+    ) -> Result<tonic::Response<mp_contracts::model_plane::v1::ClaimQuarantineReleaseResponse>, tonic::Status> {
+        Err(tonic::Status::unimplemented("not exercised by this test"))
+    }
+    async fn get_quarantine_preview(
+        &self,
+        _request: tonic::Request<mp_contracts::model_plane::v1::GetQuarantinePreviewRequest>,
+    ) -> Result<tonic::Response<mp_contracts::model_plane::v1::GetQuarantinePreviewResponse>, tonic::Status> {
+        Err(tonic::Status::unimplemented("not exercised by this test"))
+    }
     async fn list_plans(
         &self,
         _: TReq<mpv1::ListPlansRequest>,
@@ -13637,6 +13667,7 @@ fn append_response(sequence: u64, message_id: &str, deduplicated: bool) -> Resul
         sequence,
         message_id: message_id.to_owned(),
         deduplicated,
+        ..Default::default()
     })
 }
 
@@ -13995,6 +14026,12 @@ impl MockSpaceRoomRead {
 
 #[tonic::async_trait]
 impl mpv1::space_room_read_service_server::SpaceRoomReadService for MockSpaceRoomRead {
+    async fn list_space_timeline(
+        &self,
+        _request: tonic::Request<mp_contracts::model_plane::v1::ListSpaceTimelineRequest>,
+    ) -> Result<tonic::Response<mp_contracts::model_plane::v1::ListSpaceTimelineResponse>, tonic::Status> {
+        Err(tonic::Status::unimplemented("not exercised by this test"))
+    }
     async fn list_space_artifacts(
         &self,
         request: TReq<mpv1::ListSpaceArtifactsRequest>,

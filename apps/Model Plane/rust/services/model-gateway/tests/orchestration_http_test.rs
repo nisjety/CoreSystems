@@ -235,6 +235,36 @@ impl MockOrchestration {
 
 #[tonic::async_trait]
 impl OrchestrationCoreService for MockOrchestration {
+    async fn reroute_approval(
+        &self,
+        _request: tonic::Request<mp_contracts::model_plane::v1::RerouteApprovalRequest>,
+    ) -> Result<tonic::Response<mp_contracts::model_plane::v1::RerouteApprovalResponse>, tonic::Status> {
+        Err(tonic::Status::unimplemented("not exercised by this test"))
+    }
+    async fn claim_once_approval(
+        &self,
+        _request: tonic::Request<mp_contracts::model_plane::v1::ClaimOnceApprovalRequest>,
+    ) -> Result<tonic::Response<mp_contracts::model_plane::v1::ClaimOnceApprovalResponse>, tonic::Status> {
+        Err(tonic::Status::unimplemented("not exercised by this test"))
+    }
+    async fn hold_quarantined_output(
+        &self,
+        _request: tonic::Request<mp_contracts::model_plane::v1::HoldQuarantinedOutputRequest>,
+    ) -> Result<tonic::Response<mp_contracts::model_plane::v1::HoldQuarantinedOutputResponse>, tonic::Status> {
+        Err(tonic::Status::unimplemented("not exercised by this test"))
+    }
+    async fn claim_quarantine_release(
+        &self,
+        _request: tonic::Request<mp_contracts::model_plane::v1::ClaimQuarantineReleaseRequest>,
+    ) -> Result<tonic::Response<mp_contracts::model_plane::v1::ClaimQuarantineReleaseResponse>, tonic::Status> {
+        Err(tonic::Status::unimplemented("not exercised by this test"))
+    }
+    async fn get_quarantine_preview(
+        &self,
+        _request: tonic::Request<mp_contracts::model_plane::v1::GetQuarantinePreviewRequest>,
+    ) -> Result<tonic::Response<mp_contracts::model_plane::v1::GetQuarantinePreviewResponse>, tonic::Status> {
+        Err(tonic::Status::unimplemented("not exercised by this test"))
+    }
     type StreamRunEventsStream = MockEventStream;
 
     async fn list_plans(
@@ -489,6 +519,7 @@ impl OrchestrationCoreService for MockOrchestration {
                 decided_at: None,
                 expires_at: None,
                 org_id: "org-1".into(),
+                ..Default::default()
             }],
         }))
     }
@@ -523,6 +554,7 @@ impl OrchestrationCoreService for MockOrchestration {
                 } else {
                     request.org_id
                 },
+                ..Default::default()
             }],
         }))
     }
@@ -554,6 +586,7 @@ impl OrchestrationCoreService for MockOrchestration {
                 decided_at: None,
                 expires_at: None,
                 org_id: "org-1".into(),
+                ..Default::default()
             }),
         }))
     }
@@ -584,6 +617,7 @@ impl OrchestrationCoreService for MockOrchestration {
                 decided_at: None,
                 expires_at: None,
                 org_id: request.org_id,
+                ..Default::default()
             }),
         }))
     }
@@ -633,6 +667,7 @@ impl OrchestrationCoreService for MockOrchestration {
                 decided_at: None,
                 expires_at: None,
                 org_id: "org-1".into(),
+                ..Default::default()
             }),
         }))
     }
@@ -896,6 +931,12 @@ struct MockRunOwner {
 
 #[tonic::async_trait]
 impl RunService for MockRunOwner {
+    async fn resolve_approval_authority(
+        &self,
+        _request: tonic::Request<mp_contracts::model_plane::v1::ResolveApprovalAuthorityRequest>,
+    ) -> Result<tonic::Response<mp_contracts::model_plane::v1::ResolveApprovalAuthorityResponse>, tonic::Status> {
+        Err(tonic::Status::unimplemented("not exercised by this test"))
+    }
     async fn get_run(
         &self,
         request: TonicRequest<GetRunRequest>,
@@ -1331,6 +1372,36 @@ struct OrgScopedMock {
 
 #[tonic::async_trait]
 impl OrchestrationCoreService for OrgScopedMock {
+    async fn reroute_approval(
+        &self,
+        _request: tonic::Request<mp_contracts::model_plane::v1::RerouteApprovalRequest>,
+    ) -> Result<tonic::Response<mp_contracts::model_plane::v1::RerouteApprovalResponse>, tonic::Status> {
+        Err(tonic::Status::unimplemented("not exercised by this test"))
+    }
+    async fn claim_once_approval(
+        &self,
+        _request: tonic::Request<mp_contracts::model_plane::v1::ClaimOnceApprovalRequest>,
+    ) -> Result<tonic::Response<mp_contracts::model_plane::v1::ClaimOnceApprovalResponse>, tonic::Status> {
+        Err(tonic::Status::unimplemented("not exercised by this test"))
+    }
+    async fn hold_quarantined_output(
+        &self,
+        _request: tonic::Request<mp_contracts::model_plane::v1::HoldQuarantinedOutputRequest>,
+    ) -> Result<tonic::Response<mp_contracts::model_plane::v1::HoldQuarantinedOutputResponse>, tonic::Status> {
+        Err(tonic::Status::unimplemented("not exercised by this test"))
+    }
+    async fn claim_quarantine_release(
+        &self,
+        _request: tonic::Request<mp_contracts::model_plane::v1::ClaimQuarantineReleaseRequest>,
+    ) -> Result<tonic::Response<mp_contracts::model_plane::v1::ClaimQuarantineReleaseResponse>, tonic::Status> {
+        Err(tonic::Status::unimplemented("not exercised by this test"))
+    }
+    async fn get_quarantine_preview(
+        &self,
+        _request: tonic::Request<mp_contracts::model_plane::v1::GetQuarantinePreviewRequest>,
+    ) -> Result<tonic::Response<mp_contracts::model_plane::v1::GetQuarantinePreviewResponse>, tonic::Status> {
+        Err(tonic::Status::unimplemented("not exercised by this test"))
+    }
     async fn list_plans(
         &self,
         _: TonicRequest<ListPlansRequest>,
@@ -1554,6 +1625,7 @@ fn owned_approval(state: ApprovalState) -> Approval {
         decided_at: None,
         expires_at: None,
         org_id: OWNER_ORG.into(),
+        ..Default::default()
     }
 }
 
