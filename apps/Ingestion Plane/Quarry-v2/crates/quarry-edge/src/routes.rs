@@ -55,6 +55,22 @@ fn pick_driver(
     planned
 }
 
+/// E3.8.3: the retry config of the synchronous scrape path, read from
+/// `QUARRY_EDGE__SCRAPE_RETRIES` once. `None` (the default) leaves every fetch as it was.
+fn scrape_retry_config() -> Option<&'static quarry_runtime::retry::ScrapeRetry> {
+    static CONFIG: std::sync::OnceLock<Option<quarry_runtime::retry::ScrapeRetry>> =
+        std::sync::OnceLock::new();
+    CONFIG
+        .get_or_init(|| {
+            quarry_runtime::retry::scrape_retry_from_flag(
+                std::env::var(quarry_runtime::retry::SCRAPE_RETRIES_ENV)
+                    .ok()
+                    .as_deref(),
+            )
+        })
+        .as_ref()
+}
+
 fn should_read(p: &Option<CachePolicy>) -> bool {
     match p {
         None => true,
@@ -986,6 +1002,20 @@ async fn scrape_with(
     }
 
     let driver = pick_driver(&state, &plan, req.prefer_http3);
+    // E3.8.3: the fetch retries under the scrape config. A browser render is not
+    // retried: each runs for seconds, and a repeat is not a transport retry. The
+    // retries share the run's own deadline, so none waits past `timeout_ms`.
+    let driver = match scrape_retry_config() {
+        Some(config) if plan.driver != quarry_core::output::DriverKind::Browser => {
+            let until = tokio::time::Instant::now()
+                + Duration::from_millis(crate::scrape_actions::run_deadline_ms(
+                    resolved.actions.is_some(),
+                    resolved.timeout_ms,
+                ));
+            quarry_runtime::retry::RetryingDriver::wrap(driver, config.clone(), Some(until))
+        }
+        _ => driver,
+    };
 
     let ingest_client = if req.ingest.unwrap_or(false) {
         state.ingest.clone()
