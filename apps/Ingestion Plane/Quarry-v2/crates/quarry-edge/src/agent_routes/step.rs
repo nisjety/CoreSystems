@@ -96,7 +96,6 @@ async fn settle_download(
     obs: BrowserObservation,
 ) -> QuarryResult<BrowserObservation> {
     use quarry_runtime::action_runtime::downloads;
-    use quarry_runtime::artifact_store::ArtifactStore as _;
     let id = obs
         .proof_bundle
         .as_ref()
