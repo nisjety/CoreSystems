@@ -12,6 +12,12 @@ name: Eval Lab (Python) CI
 # credential, no compose fleet and no network egress are needed here. Total
 # runtime is well under a second.
 #
+# The prompt and tool-schema stage (EP-14 S8) is credential-free as well: the manifest
+# golden compares the prompt and tool source text of model-gateway and execution-core with a
+# pinned fixture, and the scenario-touch gate requires an eval case or replay cassette in the
+# same pull request when that manifest changes. The gate compares against the base branch,
+# so it runs on pull requests only.
+#
 # Deliberately NOT run in CI: the live eval path (`make eval`). It drives real
 # provider inference through the compose fleet and writes a dated report to
 # docs/eval-reports/. That belongs on a schedule against a deployed
@@ -20,15 +26,41 @@ name: Eval Lab (Python) CI
 
 on:
   push:
-    branches: [main, develop]
+    branches: [main, develop, fix/ui-premium-restore]
     paths:
       - 'apps/Model Plane/python/eval-lab-py/**'
       - '.github/workflows/eval-lab.yml'
+      - 'scripts/gates/scenario-touch.py'
+      - 'scripts/gates/tests/**'
+      - 'scripts/gates/baselines/scenario-touch-exceptions.json'
+      - 'apps/Model Plane/rust/crates/mp-contracts/tests/prompt_tool_manifest.rs'
+      - 'apps/Model Plane/rust/crates/mp-contracts/tests/fixtures/prompt-tool-manifest.json*'
+      - 'apps/Model Plane/rust/services/model-gateway/src/prompt_context.rs'
+      - 'apps/Model Plane/rust/services/model-gateway/src/format_guidance.rs'
+      - 'apps/Model Plane/rust/services/model-gateway/src/author_guidance.rs'
+      - 'apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs'
+      - 'apps/Model Plane/rust/services/model-gateway/src/retrieval_tools.rs'
+      - 'apps/Model Plane/rust/services/model-gateway/src/recall_conversations.rs'
+      - 'apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs'
+      - 'apps/Model Plane/rust/crates/mp-inference-replay/**'
   pull_request:
-    branches: [main, develop]
+    branches: [main, develop, fix/ui-premium-restore]
     paths:
       - 'apps/Model Plane/python/eval-lab-py/**'
       - '.github/workflows/eval-lab.yml'
+      - 'scripts/gates/scenario-touch.py'
+      - 'scripts/gates/tests/**'
+      - 'scripts/gates/baselines/scenario-touch-exceptions.json'
+      - 'apps/Model Plane/rust/crates/mp-contracts/tests/prompt_tool_manifest.rs'
+      - 'apps/Model Plane/rust/crates/mp-contracts/tests/fixtures/prompt-tool-manifest.json*'
+      - 'apps/Model Plane/rust/services/model-gateway/src/prompt_context.rs'
+      - 'apps/Model Plane/rust/services/model-gateway/src/format_guidance.rs'
+      - 'apps/Model Plane/rust/services/model-gateway/src/author_guidance.rs'
+      - 'apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs'
+      - 'apps/Model Plane/rust/services/model-gateway/src/retrieval_tools.rs'
+      - 'apps/Model Plane/rust/services/model-gateway/src/recall_conversations.rs'
+      - 'apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs'
+      - 'apps/Model Plane/rust/crates/mp-inference-replay/**'
 
 permissions:
   contents: read
@@ -40,7 +72,10 @@ jobs:
       run:
         working-directory: 'apps/Model Plane/python/eval-lab-py'
     steps:
+      # Full history: the scenario-touch gate diffs the pull request against its base branch.
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-python@v7
         with:
@@ -72,6 +107,38 @@ jobs:
           print(f'ran {ran} offline case(s) of {total} collected ({skipped} live cases skipped)')
           assert ran >= 10, f'expected the offline suite to actually run; only {ran} case(s) did'
           PY
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "apps/Model Plane/rust -> target"
+
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          version: "27.x"
+
+      # The manifest golden reads the prompt and tool source text of model-gateway and
+      # execution-core and builds only mp-contracts. A stale fixture or pin fails here, and
+      # the failure names each changed item and the regeneration command.
+      - name: Prompt and tool manifest (offline)
+        working-directory: 'apps/Model Plane/rust'
+        run: |
+          cargo test -q -p mp-contracts --test prompt_tool_manifest
+
+      - name: Scenario-touch gate self-test (offline)
+        working-directory: '.'
+        run: |
+          python -m pytest scripts/gates/tests -q
+
+      # A direct push to the integration branch has no base to compare with and is not gated
+      # here; the pull request that carried the change was.
+      - name: Scenario-touch gate (pull requests)
+        if: github.event_name == 'pull_request'
+        working-directory: '.'
+        run: |
+          python scripts/gates/scenario-touch.py --base "origin/${{ github.base_ref }}"
 
       - name: Upload the selftest report
         if: always()
