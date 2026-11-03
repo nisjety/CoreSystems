@@ -506,3 +506,32 @@ fn the_knowledge_receipt_is_built_after_the_zdr_branch_returns() {
         "the knowledge receipt must not be built before the ZDR branch returns"
     );
 }
+
+/// The page reader is offered only in the tool loop, and only where a fetched page can be parked. A ZDR
+/// turn returns before that loop starts, and a waived turn parks nothing. Read from the source, as the
+/// other turn-ordering checks in this file are.
+#[test]
+fn the_web_reader_is_offered_only_where_a_fetched_page_can_be_parked() {
+    let sse = include_str!("../src/sse.rs");
+    let zdr_return = sse
+        .find("return zdr_direct_stream(")
+        .expect("the ZDR branch hands the turn to zdr_direct_stream");
+    let first_rounds = sse
+        .find("run_tool_rounds_for_model_with_attachments(")
+        .expect("the ordinary path runs the tool rounds");
+    assert!(
+        zdr_return < first_rounds,
+        "a ZDR turn returns before the tool loop can offer the reader"
+    );
+    let tool_loop = include_str!("../src/tool_loop.rs");
+    let offer = tool_loop
+        .split("let reader_offered =")
+        .nth(1)
+        .and_then(|rest| rest.split(';').next())
+        .expect("the tool loop decides whether the reader is offered");
+    assert!(offer.contains("page_reader::enabled()"), "{offer}");
+    assert!(
+        offer.contains("external_parking_allowed(zdr || data_plane_mode.is_some())"),
+        "{offer}"
+    );
+}

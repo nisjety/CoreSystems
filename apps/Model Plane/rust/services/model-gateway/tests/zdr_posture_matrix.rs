@@ -27,7 +27,7 @@ const MATRIX: &str = include_str!("fixtures/zdr-posture-matrix.json");
 
 /// The number of enforcement rows the canonical matrix carries when this test was written. A row
 /// added or removed without this test being updated is a change nobody reviewed here.
-const ENFORCEMENT_ROWS: usize = 28;
+const ENFORCEMENT_ROWS: usize = 30;
 
 fn matrix() -> Value {
     serde_json::from_str(MATRIX).expect("the vendored matrix is JSON")
@@ -418,5 +418,26 @@ fn zdr_stream_prices_only_behind_its_switch_and_publishes_nothing() {
                 "{name} must publish nothing, but it mentions `{publishing}`"
             );
         }
+    }
+}
+
+/// EP-2-S2's two goldens are rows of this matrix and are decided as their names say. Where the reader
+/// is offered, and why a ZDR or waived turn holds no page, is checked in `zdr_feature_table`.
+#[test]
+fn the_web_reader_goldens_are_rows_decided_as_named() {
+    let matrix = matrix();
+    let rows = matrix["enforcement_rows"]
+        .as_array()
+        .expect("rows are an array");
+    for (id, decision) in [
+        ("e_zdr_token_web_reader_not_offered", "zdr"),
+        ("e_waived_web_reader_keeps_inline_head", "waived"),
+    ] {
+        let row = rows
+            .iter()
+            .find(|row| row["id"] == id)
+            .unwrap_or_else(|| panic!("the matrix has no row {id}"));
+        assert_eq!(row["expect"]["decision"], decision, "{id}");
+        assert_eq!(decided(row).0, decision, "{id}");
     }
 }

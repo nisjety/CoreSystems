@@ -808,6 +808,32 @@
         "route": {"provider": "", "connection": null, "explicit_zdr": true}
       },
       "expect": {"decision": "zdr", "code": "explicit_zdr"}
+    },
+    {
+      "id": "e_zdr_token_web_reader_not_offered",
+      "title": "A ZDR token on a platform provider route, asking for the long-page reader: ZDR, with no reader tool offered and no page held for reading.",
+      "tags": [],
+      "note": "The reader (read_page and find_in_page beside fetch_url) is offered only in the tool loop, and only where a fetched page can be parked. A ZDR turn returns before that loop starts, and external_parking_allowed refuses a ZDR or waived turn, so no page is held for it. The route is a platform provider with no connection, so the row differs from the default-route ZDR row.",
+      "inputs": {
+        "bearers": [
+          {"zdr": true, "org_zdr": true, "waiver": null}
+        ],
+        "route": {"provider": "azure-openai", "connection": null, "explicit_zdr": false}
+      },
+      "expect": {"decision": "zdr", "code": "org_zdr"}
+    },
+    {
+      "id": "e_waived_web_reader_keeps_inline_head",
+      "title": "A waiver on exactly the connection it names, asking for the long-page reader: waived, with the fetched page's head inline and no ref or reader tool.",
+      "tags": [],
+      "note": "A waived turn parks nothing (external_parking_allowed refuses it), so fetch_url returns its inline head as it did before the reader existed and offers neither read_page nor find_in_page.",
+      "inputs": {
+        "bearers": [
+          {"zdr": false, "org_zdr": true, "waiver": {"version": 1, "provider": "openai-codex-subscription", "connection": "conn-2"}}
+        ],
+        "route": {"provider": "openai-codex-subscription", "connection": "conn-2", "explicit_zdr": false}
+      },
+      "expect": {"decision": "waived", "code": "connection_not_zdr_capable"}
     }
   ]
 }

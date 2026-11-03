@@ -3839,9 +3839,8 @@ async fn dispatch_tool_with_cost(
                         };
                     }
                     // Under `RESULT_HANDLES_EXTENDED` the complete screened page is parked, so
-                    // the part past the cut is reachable by `result_query` range. The first
-                    // 4,000 characters stay inline either way.
-                    let head = truncate_chars(&body, MAX_FETCH_CHARS);
+                    // the part past the cut is reachable by reading it. The first 4,000
+                    // characters stay inline either way.
                     let parked = park_extended_result(
                         state,
                         org_id,
@@ -3853,24 +3852,18 @@ async fn dispatch_tool_with_cost(
                         MAX_FETCH_CHARS,
                         &provenance,
                     );
-                    let out = match parked {
-                        Some(handle) => serde_json::json!({
-                            "final_url": r.final_url,
-                            "title": r.title,
-                            "content": head,
-                            "handle": handle.to_model_value(),
-                        }),
-                        None => serde_json::json!({
-                            "final_url": r.final_url,
-                            "title": r.title,
-                            "content": head,
-                        }),
-                    };
+                    let output = fetched_page_output(
+                        &r.final_url,
+                        &r.title,
+                        &body,
+                        parked.as_ref(),
+                        crate::page_reader::enabled(),
+                    );
                     ToolOutcome {
                         call_id: call.id.clone(),
                         name: call.name.clone(),
                         provenance,
-                        output: out.to_string(),
+                        output,
                         error: None,
                     }
                 }
@@ -4711,6 +4704,20 @@ async fn dispatch_tool_with_cost(
                 error: None,
             }
         }
+        "read_page" if crate::page_reader::enabled() => read_page_outcome(
+            state,
+            org_id,
+            user_id,
+            zdr || data_plane_mode.is_some(),
+            call,
+        ),
+        "find_in_page" if crate::page_reader::enabled() => find_in_page_outcome(
+            state,
+            org_id,
+            user_id,
+            zdr || data_plane_mode.is_some(),
+            call,
+        ),
         other => err_outcome(call, format!("unknown tool '{other}'")),
     }
 }
@@ -4828,6 +4835,280 @@ fn read_back_provenance(
     resolved.provenance.clone().unwrap_or_else(|| {
         crate::moderation::ToolProvenance::unscreened(&resolved.capability_id, output)
     })
+}
+
+/// The output a `fetch_url` call returns for a page. The head stays inline as it always has. When the
+/// page was parked under a handle and the reader is on, the output names the handle as `ref` and gives
+/// the outline to read it by; otherwise it carries the handle as it always has, or nothing when the
+/// page was not parked.
+fn fetched_page_output(
+    final_url: &str,
+    title: &str,
+    body: &str,
+    parked: Option<&crate::tool_result_handles::ToolResultHandle>,
+    reader: bool,
+) -> String {
+    let head = truncate_chars(body, MAX_FETCH_CHARS);
+    match parked {
+        Some(handle) if reader => {
+            let sections = crate::page_reader::outline(body);
+            reader_result_within_budget(&sections, |shown| {
+                serde_json::json!({
+                    "final_url": final_url,
+                    "title": title,
+                    "ref": handle.handle_id,
+                    "outline": outline_rows(&sections[..shown]),
+                    "content": head,
+                    "note": reader_fetch_note(body.chars().count(), shown, sections.len()),
+                })
+            })
+        }
+        Some(handle) => serde_json::json!({
+            "final_url": final_url,
+            "title": title,
+            "content": head,
+            "handle": handle.to_model_value(),
+        })
+        .to_string(),
+        None => serde_json::json!({
+            "final_url": final_url,
+            "title": title,
+            "content": head,
+        })
+        .to_string(),
+    }
+}
+
+/// Renders a reader result with as many outline rows as fit one tool result. A result longer than
+/// `MAX_TOOL_OUTPUT_CHARS` is cut at its end, and the keys serialise alphabetically, so `ref` would be
+/// among the first things lost: the outline gives way instead, one row at a time from its last section.
+fn reader_result_within_budget(
+    sections: &[crate::page_reader::Section],
+    render: impl Fn(usize) -> Value,
+) -> String {
+    let mut shown = sections.len();
+    loop {
+        let text = render(shown).to_string();
+        if text.chars().count() <= MAX_TOOL_OUTPUT_CHARS || shown == 0 {
+            return text;
+        }
+        shown -= 1;
+    }
+}
+
+/// The outline a reader shows: one row per section, with the id that reads it.
+fn outline_rows(sections: &[crate::page_reader::Section]) -> Vec<Value> {
+    sections
+        .iter()
+        .map(|section| {
+            serde_json::json!({
+                "id": section.id,
+                "heading": section.heading,
+                "chars": section.chars,
+            })
+        })
+        .collect()
+}
+
+fn reader_fetch_note(total_chars: usize, shown: usize, sections: usize) -> String {
+    format!(
+        "The COMPLETE page ({total_chars} characters) is held under this ref, and only its start is shown \
+         above. Read a section from the outline with read_page, or search the page with find_in_page.{} \
+         The ref stops resolving after about {} minutes.",
+        truncated_outline_note(shown, sections),
+        crate::tool_result_handles::HANDLE_TTL.as_secs() / 60
+    )
+}
+
+/// What the outline says when it lists fewer sections than the page has. Empty when it lists them all.
+fn truncated_outline_note(shown: usize, sections: usize) -> String {
+    if shown < sections {
+        format!(
+            " The outline lists the first {shown} of {sections} sections; find_in_page searches all of them."
+        )
+    } else {
+        String::new()
+    }
+}
+
+/// The fetched page a reader call names, resolved for this exact `(org, user)` and checked to be a
+/// page `fetch_url` parked as text. An unknown, expired, foreign or other ref fails the same way.
+fn resolve_fetched_page(
+    state: &AppState,
+    org_id: &str,
+    user_id: &str,
+    page_ref: &str,
+) -> Result<crate::tool_result_handles::ResolvedResult, String> {
+    let resolved = state
+        .tool_results
+        .resolve(org_id, user_id, page_ref)
+        .ok_or_else(|| {
+            format!(
+                "no page reference '{page_ref}' — it may have expired, or belong to a different \
+                 conversation. Fetch the page again with fetch_url."
+            )
+        })?;
+    if resolved.kind != crate::tool_result_handles::ResultKind::Text
+        || resolved.capability_id != "fetch_url"
+    {
+        return Err(format!(
+            "'{page_ref}' is not a fetched page. Only a page from fetch_url can be read this way; \
+             use result_query for any other result."
+        ));
+    }
+    Ok(resolved)
+}
+
+/// `read_page`: one section of a parked page from a character offset into it, or the outline and the
+/// start of the page when no section is named. Only a turn that can park a page reads one.
+fn read_page_outcome(
+    state: &AppState,
+    org_id: &str,
+    user_id: &str,
+    zdr_or_waived: bool,
+    call: &ToolCall,
+) -> ToolOutcome {
+    if zdr_or_waived {
+        return err_outcome(
+            call,
+            "read_page is not available on this turn: no page is held for reading on it",
+        );
+    }
+    let page_ref = arg_str(&call.arguments_json, "ref");
+    if page_ref.trim().is_empty() {
+        return err_outcome(call, "read_page requires a 'ref' from a fetch_url result");
+    }
+    let resolved = match resolve_fetched_page(state, org_id, user_id, page_ref.trim()) {
+        Ok(resolved) => resolved,
+        Err(message) => return err_outcome(call, message),
+    };
+    let text = resolved.payload.as_str().unwrap_or_default();
+    let sections = crate::page_reader::outline(text);
+    let section_arg = arg_str(&call.arguments_json, "section");
+    let requested = section_arg.trim();
+    let output = if requested.is_empty() {
+        reader_result_within_budget(&sections, |shown| {
+            serde_json::json!({
+                "ref": page_ref.trim(),
+                "total_chars": text.chars().count(),
+                "outline": outline_rows(&sections[..shown]),
+                "content": truncate_chars(text, MAX_FETCH_CHARS),
+                "note": format!(
+                    "This is the start of the page. Name a section id from the outline to read that section.{}",
+                    truncated_outline_note(shown, sections.len())
+                ),
+            })
+        })
+    } else {
+        let Some(section) = sections.iter().find(|section| section.id == requested) else {
+            return err_outcome(
+                call,
+                format!(
+                    "this page has no section '{requested}'. Use a section id from its outline."
+                ),
+            );
+        };
+        let offset = arg_i64(&call.arguments_json, "offset").unwrap_or(0).max(0);
+        let offset = usize::try_from(offset).unwrap_or(0);
+        let read = crate::page_reader::read_section(text, section, offset);
+        let note = match read.next_offset {
+            Some(next) => format!(
+                "This section continues: read it again with section '{}' and offset {next} for the rest.",
+                section.id
+            ),
+            None => format!("This is the end of section '{}'.", section.id),
+        };
+        serde_json::json!({
+            "ref": page_ref.trim(),
+            "section": {"id": section.id, "heading": section.heading, "chars": section.chars},
+            "offset": read.offset,
+            "text": read.text,
+            "returned_chars": read.returned_chars,
+            "next_offset": read.next_offset,
+            "note": note,
+        })
+        .to_string()
+    };
+    let provenance = read_back_provenance(&resolved, &output);
+    ToolOutcome {
+        call_id: call.id.clone(),
+        name: call.name.clone(),
+        provenance,
+        output,
+        error: None,
+    }
+}
+
+/// `find_in_page`: the passages of a parked page that best match a query, each with its section.
+fn find_in_page_outcome(
+    state: &AppState,
+    org_id: &str,
+    user_id: &str,
+    zdr_or_waived: bool,
+    call: &ToolCall,
+) -> ToolOutcome {
+    if zdr_or_waived {
+        return err_outcome(
+            call,
+            "find_in_page is not available on this turn: no page is held for reading on it",
+        );
+    }
+    let page_ref = arg_str(&call.arguments_json, "ref");
+    if page_ref.trim().is_empty() {
+        return err_outcome(
+            call,
+            "find_in_page requires a 'ref' from a fetch_url result",
+        );
+    }
+    let query = arg_str(&call.arguments_json, "query");
+    if query.trim().is_empty() {
+        return err_outcome(
+            call,
+            "find_in_page requires a 'query' of the words to look for",
+        );
+    }
+    let resolved = match resolve_fetched_page(state, org_id, user_id, page_ref.trim()) {
+        Ok(resolved) => resolved,
+        Err(message) => return err_outcome(call, message),
+    };
+    let text = resolved.payload.as_str().unwrap_or_default();
+    let sections = crate::page_reader::outline(text);
+    let passages: Vec<Value> = crate::page_reader::find(
+        text,
+        &sections,
+        query.trim(),
+        crate::page_reader::FIND_CHARS,
+    )
+    .into_iter()
+    .map(|passage| {
+        serde_json::json!({
+            "section": passage.section_id,
+            "heading": passage.heading,
+            "offset": passage.offset,
+            "text": passage.text,
+        })
+    })
+    .collect();
+    let note = if passages.is_empty() {
+        "No passage of this page shares a word with the query. Read a section from the outline with read_page, or search again with other words."
+    } else {
+        "The passages are the closest matches, most relevant first. Read a passage's section with read_page for the text around it."
+    };
+    let output = serde_json::json!({
+        "ref": page_ref.trim(),
+        "query": query.trim(),
+        "passages": passages,
+        "note": note,
+    })
+    .to_string();
+    let provenance = read_back_provenance(&resolved, &output);
+    ToolOutcome {
+        call_id: call.id.clone(),
+        name: call.name.clone(),
+        provenance,
+        output,
+        error: None,
+    }
 }
 
 /// Parse a `result_query` call's arguments into a validated
@@ -5286,7 +5567,7 @@ pub fn conversation_tool_allowed(name: &str) -> bool {
 
 /// The public-web-search half of the retrieval-scope tool buckets
 /// (chat-wave2 scope spec §2.3): excluded from an org-`knowledge_only` turn.
-const WEB_CLASS_TOOLS: &[&str] = &["web_search", "fetch_url"];
+const WEB_CLASS_TOOLS: &[&str] = &["web_search", "fetch_url", "read_page", "find_in_page"];
 /// The org-knowledge half: excluded from a `web_only` turn.
 ///
 /// `mcp_call`, `action_execute` and `browser_agent` are deliberately in
@@ -5343,6 +5624,33 @@ fn tools_for_connector_scope(mut tools: Vec<ToolDefinition>, offered: bool) -> V
         tools.push(connector_reads::tool_definition());
     }
     tools
+}
+
+/// The page reader's place in a turn's tool set. Offered only beside `fetch_url`, so a turn that was
+/// refused web reads never sees it, and only where a fetched page can be parked. A client's copy of
+/// either name gives way to the server's own definition, which is added last so the cached prefix holds.
+fn tools_for_web_reader(mut tools: Vec<ToolDefinition>, offered: bool) -> Vec<ToolDefinition> {
+    if !offered || !tools.iter().any(|tool| tool.name == "fetch_url") {
+        return tools;
+    }
+    tools.retain(|tool| !matches!(tool.name.as_str(), "read_page" | "find_in_page"));
+    tools.extend(web_reader_tool_definitions());
+    tools
+}
+
+fn web_reader_tool_definitions() -> Vec<ToolDefinition> {
+    vec![
+        ToolDefinition {
+            name: "read_page".to_owned(),
+            description: "Read one section of a long web page that fetch_url held for reading. The section ids come from the page's outline. Each read returns up to 4000 characters, and the result says whether the section continues and the offset to continue from. Read a section you have not read yet rather than fetching the page again. Only pages fetched in this conversation can be read, and only while their ref is live.".to_owned(),
+            parameters_json: r#"{"type":"object","properties":{"ref":{"type":"string","description":"The ref from a fetch_url result"},"section":{"type":"string","description":"A section id from the outline, such as s3. Omit to read the outline and the start of the page."},"offset":{"type":"integer","minimum":0,"description":"Characters into the section to start from: the next_offset of the previous read. Defaults to 0."}},"required":["ref"]}"#.to_owned(),
+        },
+        ToolDefinition {
+            name: "find_in_page".to_owned(),
+            description: "Search a long web page that fetch_url held for reading. Returns the passages that best match the query, each with the section it is in, most relevant first (at most two). Use it when the outline does not show where the answer is, or to check one specific fact on the page. Read the surrounding section with read_page when a passage is not enough.".to_owned(),
+            parameters_json: r#"{"type":"object","properties":{"ref":{"type":"string","description":"The ref from a fetch_url result"},"query":{"type":"string","description":"The words to look for on the page"}},"required":["ref","query"]}"#.to_owned(),
+        },
+    ]
 }
 
 /// Whether a loaded history carries a compaction marker — the gate for
@@ -7769,6 +8077,11 @@ pub async fn run_tool_rounds_for_model_with_attachments(
         connector_turn,
     );
     let tools = tools_for_connector_scope(tools, connector_offered);
+    // The page reader is offered only where a fetched page can be parked, which a ZDR or waived turn never
+    // can (see `external_parking_allowed`). With its switch off the list is left exactly as it was.
+    let reader_offered =
+        crate::page_reader::enabled() && external_parking_allowed(zdr || data_plane_mode.is_some());
+    let tools = tools_for_web_reader(tools, reader_offered);
     let connector_turn = connector_turn.filter(|_| connector_offered);
     // The turn's clock rides on the live sink; a caller without one (tests,
     // other routes) times nothing.
@@ -15932,6 +16245,424 @@ mod tests {
         };
         let request = Box::pin(first_decision_request(head, Some(plan))).await;
         assert_eq!(request.prompt_tiers, None);
+    }
+
+    /// A tool definition with only its name, for the offer tests below.
+    fn offered_def(name: &str) -> ToolDefinition {
+        ToolDefinition {
+            name: name.to_owned(),
+            description: String::new(),
+            parameters_json: String::new(),
+        }
+    }
+
+    fn offered_names(tools: &[ToolDefinition]) -> Vec<&str> {
+        tools.iter().map(|tool| tool.name.as_str()).collect()
+    }
+
+    #[test]
+    fn reader_tools_are_offered_only_beside_a_fetch_url_and_only_when_switched_on() {
+        let web = || vec![offered_def("web_search"), offered_def("fetch_url")];
+        assert_eq!(
+            offered_names(&tools_for_web_reader(web(), false)),
+            ["web_search", "fetch_url"]
+        );
+        assert_eq!(
+            offered_names(&tools_for_web_reader(web(), true)),
+            ["web_search", "fetch_url", "read_page", "find_in_page"]
+        );
+        assert_eq!(
+            offered_names(&tools_for_web_reader(vec![offered_def("web_search")], true)),
+            ["web_search"]
+        );
+        // A client's copy of either name gives way to the server's own definition, added last.
+        let client = vec![offered_def("fetch_url"), offered_def("read_page")];
+        assert_eq!(
+            offered_names(&tools_for_web_reader(client, true)),
+            ["fetch_url", "read_page", "find_in_page"]
+        );
+    }
+
+    #[test]
+    fn reader_tool_definitions_name_the_arguments_they_take() {
+        let defs = web_reader_tool_definitions();
+        let schema = |name: &str| -> Value {
+            let def = defs.iter().find(|def| def.name == name).expect("defined");
+            serde_json::from_str(&def.parameters_json).expect("a JSON schema")
+        };
+        assert_eq!(schema("read_page")["required"], serde_json::json!(["ref"]));
+        assert_eq!(
+            schema("find_in_page")["required"],
+            serde_json::json!(["ref", "query"])
+        );
+        assert!(schema("read_page")["properties"]["section"].is_object());
+    }
+
+    #[test]
+    fn reader_fetch_output_is_the_old_head_when_nothing_was_parked() {
+        let page = "word ".repeat(2_000);
+        let output = fetched_page_output("https://a.test/p", "P", &page, None, true);
+        let expected = serde_json::json!({
+            "final_url": "https://a.test/p",
+            "title": "P",
+            "content": truncate_chars(&page, MAX_FETCH_CHARS),
+        })
+        .to_string();
+        assert_eq!(output, expected);
+    }
+
+    #[tokio::test]
+    async fn reader_switch_off_keeps_the_handle_output_byte_identical() {
+        let state = crate::state::AppState::new();
+        let (page, provenance) = screened_page(crate::moderation::ScreeningPosture::Clean, 10_000);
+        let handle = park_extended_result(
+            &state,
+            "org",
+            "user",
+            true,
+            "fetch_url",
+            crate::tool_result_handles::ResultKind::Text,
+            &page,
+            MAX_FETCH_CHARS,
+            &provenance,
+        )
+        .expect("a page past the cut is parked");
+        let output = fetched_page_output("https://a.test/p", "P", &page, Some(&handle), false);
+        let expected = serde_json::json!({
+            "final_url": "https://a.test/p",
+            "title": "P",
+            "content": truncate_chars(&page, MAX_FETCH_CHARS),
+            "handle": handle.to_model_value(),
+        })
+        .to_string();
+        assert_eq!(output, expected);
+        assert!(!output.contains("\"ref\""));
+    }
+
+    #[tokio::test]
+    async fn reader_on_a_parked_page_names_the_ref_the_outline_and_the_first_chunk() {
+        let state = crate::state::AppState::new();
+        let page = format!(
+            "# Intro\n{}\n# Costs\nThe costs were high.\n",
+            "x".repeat(5_000)
+        );
+        let (_, provenance) = screened_page(crate::moderation::ScreeningPosture::Clean, 1);
+        let handle = park_extended_result(
+            &state,
+            "org",
+            "user",
+            true,
+            "fetch_url",
+            crate::tool_result_handles::ResultKind::Text,
+            &page,
+            MAX_FETCH_CHARS,
+            &provenance,
+        )
+        .expect("a page past the cut is parked");
+        let output: Value = serde_json::from_str(&fetched_page_output(
+            "https://a.test/p",
+            "P",
+            &page,
+            Some(&handle),
+            true,
+        ))
+        .expect("JSON");
+        assert_eq!(output["ref"], serde_json::json!(handle.handle_id));
+        assert_eq!(output["outline"].as_array().map(Vec::len), Some(2));
+        assert_eq!(output["outline"][1]["heading"], "Costs");
+        assert_eq!(
+            output["content"],
+            serde_json::json!(truncate_chars(&page, MAX_FETCH_CHARS))
+        );
+        assert!(output.get("handle").is_none());
+    }
+
+    #[tokio::test]
+    async fn reader_read_page_resolves_only_the_callers_own_ref() {
+        let state = crate::state::AppState::new();
+        let (page, provenance) = screened_page(crate::moderation::ScreeningPosture::Clean, 10_000);
+        let handle = park_extended_result(
+            &state,
+            "org",
+            "alice",
+            true,
+            "fetch_url",
+            crate::tool_result_handles::ResultKind::Text,
+            &page,
+            MAX_FETCH_CHARS,
+            &provenance,
+        )
+        .expect("parked");
+        let call = tool_call(
+            "read_page",
+            &format!(r#"{{"ref":"{}","section":"c2"}}"#, handle.handle_id),
+        );
+        let theirs = read_page_outcome(&state, "org", "bob", false, &call);
+        assert!(
+            theirs.error.is_some(),
+            "another user's ref must not resolve"
+        );
+        let own = read_page_outcome(&state, "org", "alice", false, &call);
+        assert!(own.error.is_none(), "{:?}", own.error);
+        let value: Value = serde_json::from_str(&own.output).expect("JSON");
+        assert_eq!(value["section"]["id"], "c2");
+        assert_eq!(value["returned_chars"], serde_json::json!(4_000));
+    }
+
+    #[tokio::test]
+    async fn reader_read_page_on_an_unknown_ref_fails_and_says_how_to_recover() {
+        let state = crate::state::AppState::new();
+        let call = tool_call("read_page", r#"{"ref":"res_does_not_exist"}"#);
+        let outcome = read_page_outcome(&state, "org", "alice", false, &call);
+        let error = outcome.error.unwrap_or_default();
+        assert!(error.contains("no page reference"), "{error}");
+        assert!(error.contains("fetch_url"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn reader_read_page_is_refused_on_a_zdr_or_waived_turn_even_for_a_held_ref() {
+        let state = crate::state::AppState::new();
+        let (page, provenance) = screened_page(crate::moderation::ScreeningPosture::Clean, 10_000);
+        let handle = park_extended_result(
+            &state,
+            "org",
+            "alice",
+            true,
+            "fetch_url",
+            crate::tool_result_handles::ResultKind::Text,
+            &page,
+            MAX_FETCH_CHARS,
+            &provenance,
+        )
+        .expect("parked");
+        let call = tool_call("read_page", &format!(r#"{{"ref":"{}"}}"#, handle.handle_id));
+        let outcome = read_page_outcome(&state, "org", "alice", true, &call);
+        assert!(outcome
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("not available on this turn")));
+    }
+
+    #[tokio::test]
+    async fn reader_read_page_refuses_a_ref_that_is_not_a_fetched_page() {
+        let state = crate::state::AppState::new();
+        let (page, provenance) = screened_page(crate::moderation::ScreeningPosture::Clean, 10_000);
+        let handle = park_extended_result(
+            &state,
+            "org",
+            "alice",
+            true,
+            "web_search",
+            crate::tool_result_handles::ResultKind::Text,
+            &page,
+            MAX_FETCH_CHARS,
+            &provenance,
+        )
+        .expect("parked");
+        let call = tool_call("read_page", &format!(r#"{{"ref":"{}"}}"#, handle.handle_id));
+        let outcome = read_page_outcome(&state, "org", "alice", false, &call);
+        assert!(outcome
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("is not a fetched page")));
+    }
+
+    #[tokio::test]
+    async fn reader_flagged_page_keeps_its_screening_label_on_every_read() {
+        let state = crate::state::AppState::new();
+        let (page, provenance) =
+            screened_page(crate::moderation::ScreeningPosture::Flagged, 10_000);
+        let handle = park_extended_result(
+            &state,
+            "org",
+            "alice",
+            true,
+            "fetch_url",
+            crate::tool_result_handles::ResultKind::Text,
+            &page,
+            MAX_FETCH_CHARS,
+            &provenance,
+        )
+        .expect("parked");
+        for section in ["c1", "c3"] {
+            let call = tool_call(
+                "read_page",
+                &format!(r#"{{"ref":"{}","section":"{section}"}}"#, handle.handle_id),
+            );
+            let outcome = read_page_outcome(&state, "org", "alice", false, &call);
+            assert!(outcome.error.is_none(), "{:?}", outcome.error);
+            assert!(
+                matches!(
+                    outcome.provenance.screening.posture,
+                    crate::moderation::ScreeningPosture::Flagged
+                ),
+                "{section}"
+            );
+            let context = format_tool_context(std::slice::from_ref(&outcome));
+            assert!(context.contains("SCREENING:"), "{context}");
+        }
+    }
+
+    #[tokio::test]
+    async fn reader_find_in_page_returns_the_passage_and_the_section_it_is_in() {
+        let state = crate::state::AppState::new();
+        let filler = "Plain filler sentence about nothing at all here.\n".repeat(100);
+        let page = format!(
+            "# Intro\n{filler}# Lice\nSea lice treatment cut the lice count in every pen this spring season.\n"
+        );
+        let (_, provenance) = screened_page(crate::moderation::ScreeningPosture::Clean, 1);
+        let handle = park_extended_result(
+            &state,
+            "org",
+            "alice",
+            true,
+            "fetch_url",
+            crate::tool_result_handles::ResultKind::Text,
+            &page,
+            MAX_FETCH_CHARS,
+            &provenance,
+        )
+        .expect("parked");
+        let call = tool_call(
+            "find_in_page",
+            &format!(
+                r#"{{"ref":"{}","query":"lice treatment"}}"#,
+                handle.handle_id
+            ),
+        );
+        let outcome = find_in_page_outcome(&state, "org", "alice", false, &call);
+        assert!(outcome.error.is_none(), "{:?}", outcome.error);
+        let value: Value = serde_json::from_str(&outcome.output).expect("JSON");
+        assert_eq!(value["passages"][0]["section"], "s2");
+        assert_eq!(value["passages"][0]["heading"], "Lice");
+    }
+
+    #[tokio::test]
+    async fn reader_find_in_page_says_so_when_no_passage_matches() {
+        let state = crate::state::AppState::new();
+        let (page, provenance) = screened_page(crate::moderation::ScreeningPosture::Clean, 10_000);
+        let handle = park_extended_result(
+            &state,
+            "org",
+            "alice",
+            true,
+            "fetch_url",
+            crate::tool_result_handles::ResultKind::Text,
+            &page,
+            MAX_FETCH_CHARS,
+            &provenance,
+        )
+        .expect("parked");
+        let call = tool_call(
+            "find_in_page",
+            &format!(
+                r#"{{"ref":"{}","query":"zebra crossing"}}"#,
+                handle.handle_id
+            ),
+        );
+        let outcome = find_in_page_outcome(&state, "org", "alice", false, &call);
+        let value: Value = serde_json::from_str(&outcome.output).expect("JSON");
+        assert_eq!(value["passages"].as_array().map(Vec::len), Some(0));
+        assert!(value["note"]
+            .as_str()
+            .is_some_and(|note| note.starts_with("No passage")));
+    }
+
+    #[tokio::test]
+    async fn reader_waived_turn_keeps_the_inline_head_and_no_reader_surface() {
+        assert!(!external_parking_allowed(true));
+        let state = crate::state::AppState::new();
+        let (page, provenance) = screened_page(crate::moderation::ScreeningPosture::Clean, 10_000);
+        let parked = park_extended_result(
+            &state,
+            "org",
+            "alice",
+            external_parking_allowed(true),
+            "fetch_url",
+            crate::tool_result_handles::ResultKind::Text,
+            &page,
+            MAX_FETCH_CHARS,
+            &provenance,
+        );
+        assert!(parked.is_none());
+        let output: Value = serde_json::from_str(&fetched_page_output(
+            "https://a.test/p",
+            "P",
+            &page,
+            parked.as_ref(),
+            true,
+        ))
+        .expect("JSON");
+        assert!(output.get("ref").is_none());
+        assert!(output.get("outline").is_none());
+        assert!(output.get("handle").is_none());
+        assert_eq!(
+            output["content"],
+            serde_json::json!(truncate_chars(&page, MAX_FETCH_CHARS))
+        );
+    }
+
+    #[tokio::test]
+    async fn reader_outline_gives_way_before_the_ref_is_cut_from_the_result() {
+        let state = crate::state::AppState::new();
+        let mut page = String::new();
+        for part in 0..40 {
+            page.push_str(&format!(
+                "## Part {part:02} of the long report on the subject, continued {}\n{}",
+                "x".repeat(40),
+                "A line of body text about the section.\n".repeat(3)
+            ));
+        }
+        let (_, provenance) = screened_page(crate::moderation::ScreeningPosture::Clean, 1);
+        let handle = park_extended_result(
+            &state,
+            "org",
+            "alice",
+            true,
+            "fetch_url",
+            crate::tool_result_handles::ResultKind::Text,
+            &page,
+            MAX_FETCH_CHARS,
+            &provenance,
+        )
+        .expect("parked");
+        let rows = outline_rows(&crate::page_reader::outline(&page));
+        assert_eq!(rows.len(), 40);
+        let untrimmed = serde_json::json!({
+            "ref": handle.handle_id,
+            "outline": rows,
+            "content": truncate_chars(&page, MAX_FETCH_CHARS),
+            "note": "x",
+        })
+        .to_string();
+        assert!(
+            untrimmed.chars().count() > MAX_TOOL_OUTPUT_CHARS,
+            "the premise: all forty rows would be cut"
+        );
+        let output = fetched_page_output("https://a.test/p", "P", &page, Some(&handle), true);
+        assert!(output.chars().count() <= MAX_TOOL_OUTPUT_CHARS, "{}", output.chars().count());
+        let value: Value = serde_json::from_str(&output).expect("the result stays valid JSON");
+        assert_eq!(value["ref"], serde_json::json!(handle.handle_id));
+        let shown = value["outline"].as_array().map_or(0, Vec::len);
+        assert!(shown > 0 && shown < 40, "{shown}");
+        assert!(value["note"]
+            .as_str()
+            .is_some_and(|note| note.contains(&format!("the first {shown} of 40 sections"))));
+    }
+
+    #[test]
+    fn reader_is_neither_offered_nor_read_on_a_knowledge_only_turn() {
+        use crate::normalize::RetrievalScope;
+        for name in ["read_page", "find_in_page"] {
+            assert!(
+                !tool_allowed_for_retrieval_scope(name, RetrievalScope::KnowledgeOnly),
+                "{name}"
+            );
+            assert!(
+                tool_allowed_for_retrieval_scope(name, RetrievalScope::WebOnly),
+                "{name}"
+            );
+        }
     }
 }
 

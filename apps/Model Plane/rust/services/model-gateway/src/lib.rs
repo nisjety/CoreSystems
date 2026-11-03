@@ -58,6 +58,7 @@ pub mod normalize;
 pub mod org_agent_policy;
 pub mod org_quota;
 pub mod ownership;
+pub mod page_reader;
 pub mod pricing;
 pub mod profile;
 pub mod prompt_context;
