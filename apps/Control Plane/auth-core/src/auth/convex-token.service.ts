@@ -279,6 +279,72 @@ type PlaneJwtClaims = {
 };
 
 /**
+ * Every `principal_type` this authority signs on a plane token (INNH-10 CP-4).
+ * `user` and `service` mint through `issuePlaneToken`; `api_key` mints ONLY
+ * through `issueApiKeyAgentToken`, which only the api-key exchange calls
+ * (`POST /api/:audience/api-key-exchange`). `issuePlaneToken` refuses it, so
+ * no session, internal-token or token-exchange path can produce one.
+ */
+export type PlanePrincipalType = 'user' | 'service' | 'api_key';
+
+/** The only audiences an `api_key` token is ever minted for (INNH-10). */
+export const API_KEY_AGENT_AUDIENCES = [
+  'quarry',
+  'browser-broker',
+] as const satisfies readonly PlaneAudience[];
+
+export type ApiKeyAgentAudience = (typeof API_KEY_AGENT_AUDIENCES)[number];
+
+const apiKeyAgentAudienceSet: ReadonlySet<string> = new Set(
+  API_KEY_AGENT_AUDIENCES,
+);
+
+export function isApiKeyAgentAudience(
+  value: string,
+): value is ApiKeyAgentAudience {
+  return apiKeyAgentAudienceSet.has(value);
+}
+
+/** OD-9: an exchanged api-key token lives at most 120 seconds. */
+export const API_KEY_AGENT_TOKEN_TTL_SECONDS = 120;
+
+/** At most this many hosts in a `key_hosts` claim (the CP-2 ceiling bound). */
+const API_KEY_AGENT_MAX_KEY_HOSTS = 32;
+
+/** Bounded printable key id (the design's `key_id` rule, at most 128 bytes). */
+const API_KEY_ID_PATTERN = /^[\x21-\x7e]{1,128}$/;
+
+/**
+ * Claims of an `api_key` agent token (INNH-10 design section 3). The caller
+ * (the exchange) has already verified the key with Better Auth, its org
+ * binding, its permission and its owner's membership.
+ */
+export type ApiKeyAgentJwtClaims = {
+  /** Better Auth key id; `sub` is `apikey:<keyId>`. */
+  keyId: string;
+  /** The key's owning user, carried as `acting_user_id` (never `user_id`). */
+  actingUserId: string;
+  orgId: string;
+  /** Non-empty; already narrowed to what the key holds. */
+  scopes: readonly string[];
+  /**
+   * The ORG's standing posture, from `resolveInteractiveRetentionPosture`.
+   * Required: an api_key token never signs without the org's own answer.
+   */
+  retentionPosture: InteractiveRetentionPosture;
+  /** The key's own ZDR flag: raises the org posture, never lowers it. */
+  keyZdr: boolean;
+  /** As for a user token: absent means the baseline `{"v":1,"rev":"0"}`. */
+  webPolicy?: WebPolicyClaim;
+  /** The key's host ceiling; required on `browser-broker`, refused on `quarry`. */
+  keyHosts?: readonly string[];
+  /** Fresh `jti`, required on every api_key token. */
+  tokenId: string;
+  /** Only ever shortens the 120 s cap. */
+  ttlSecondsOverride?: number;
+};
+
+/**
  * The `web_policy` claim a token carries, or `undefined`. See
  * `PlaneJwtClaims.webPolicy`; the 2 KiB cap fails closed here too, so no path
  * can sign an oversized claim.
@@ -710,6 +776,14 @@ export class ConvexTokenService {
       throw new Error(`Unknown plane audience: ${audience}`);
     }
     const principalType = claims.principalType ?? 'user';
+    // INNH-10 CP-4: the claim type admits only `user` and `service`, and this
+    // runtime check holds the line against a cast. An `api_key` token is minted
+    // by `issueApiKeyAgentToken` alone.
+    if (principalType !== 'user' && principalType !== 'service') {
+      throw new Error(
+        `Principal type ${String(principalType)} cannot be minted by issuePlaneToken`,
+      );
+    }
     if (
       principalType === 'service' &&
       (!claims.serviceId || claims.userId !== `service:${claims.serviceId}`)
@@ -718,6 +792,9 @@ export class ConvexTokenService {
     }
     if (principalType === 'user' && claims.serviceId) {
       throw new Error('User token cannot carry a service identity');
+    }
+    if (claims.userId.startsWith('apikey:')) {
+      throw new Error('An api_key subject cannot be minted by issuePlaneToken');
     }
     if (claims.actingUserId !== undefined && principalType !== 'service') {
       throw new Error(
@@ -803,6 +880,148 @@ export class ConvexTokenService {
       expiresInSeconds: ttlSeconds,
       issuer: this.planeIssuer,
       audience: config.audience,
+    };
+  }
+
+  /**
+   * INNH-10 CP-1 / CP-4: the ONLY minter of a `principal_type: "api_key"`
+   * token, called only by the api-key exchange
+   * (`POST /api/:audience/api-key-exchange`). The token is the design's
+   * section 3 shape: `sub = apikey:<key_id>`, `key_id`, `acting_user_id` (the
+   * key's owner), no `user_id`, no `service_id`, a fresh `jti`, at most 120 s,
+   * `zdr` = org posture OR the key's flag (raise only), `web_policy` as for a
+   * user token, and `key_hosts` on the `browser-broker` audience only.
+   * Every rule fails closed by throwing: no token.
+   */
+  issueApiKeyAgentToken(
+    audience: ApiKeyAgentAudience,
+    claims: ApiKeyAgentJwtClaims,
+  ): PlaneTokenBundle {
+    if (!isApiKeyAgentAudience(audience)) {
+      throw new Error(
+        `An api_key token cannot be minted for ${String(audience)}`,
+      );
+    }
+    const config = this.planeAudiences[audience];
+    if (!config) {
+      throw new Error(`Unknown plane audience: ${audience}`);
+    }
+    const keyId = typeof claims.keyId === 'string' ? claims.keyId : '';
+    if (!API_KEY_ID_PATTERN.test(keyId)) {
+      throw new Error('An api_key token needs a bounded printable key id');
+    }
+    const actingUserId =
+      typeof claims.actingUserId === 'string' ? claims.actingUserId.trim() : '';
+    if (!actingUserId || actingUserId.startsWith('apikey:')) {
+      throw new Error('An api_key token needs the key owner as acting user');
+    }
+    const orgId = typeof claims.orgId === 'string' ? claims.orgId.trim() : '';
+    if (!orgId) {
+      throw new Error('An api_key token needs an organization');
+    }
+    const tokenId =
+      typeof claims.tokenId === 'string' ? claims.tokenId.trim() : '';
+    if (!tokenId) {
+      throw new Error('An api_key token needs a jti');
+    }
+    if (
+      !Array.isArray(claims.scopes) ||
+      claims.scopes.length === 0 ||
+      claims.scopes.some((scope) => typeof scope !== 'string' || !scope)
+    ) {
+      throw new Error('An api_key token needs at least one scope');
+    }
+    if (
+      claims.retentionPosture?.authority !==
+        'interactive-org-retention-policy' ||
+      typeof claims.retentionPosture.zdr !== 'boolean'
+    ) {
+      throw new Error('An api_key token needs the organization retention posture');
+    }
+    if (audience === 'browser-broker') {
+      if (
+        !Array.isArray(claims.keyHosts) ||
+        claims.keyHosts.length === 0 ||
+        claims.keyHosts.length > API_KEY_AGENT_MAX_KEY_HOSTS ||
+        claims.keyHosts.some((host) => typeof host !== 'string' || !host)
+      ) {
+        throw new Error(
+          'A browser-broker api_key token needs the key host ceiling',
+        );
+      }
+    } else if (claims.keyHosts !== undefined) {
+      throw new Error('key_hosts is carried on browser-broker tokens only');
+    }
+    // Raise only: the key can add ZDR to a non-ZDR org, never take it away.
+    const zdr = claims.retentionPosture.zdr || claims.keyZdr === true;
+    const webPolicy = issuedWebPolicy(audience, 'user', claims.webPolicy);
+    const override = claims.ttlSecondsOverride;
+    const cappedTtlSeconds = Math.min(
+      config.ttlSeconds,
+      API_KEY_AGENT_TOKEN_TTL_SECONDS,
+    );
+    const requestedTtlSeconds =
+      override !== undefined &&
+      Number.isFinite(override) &&
+      override >= 1 &&
+      override < cappedTtlSeconds
+        ? Math.floor(override)
+        : cappedTtlSeconds;
+    const webPolicyTtlCap = webPolicyTtlCapSeconds();
+    const ttlSeconds =
+      webPolicyTtlCap === undefined
+        ? requestedTtlSeconds
+        : Math.min(requestedTtlSeconds, webPolicyTtlCap);
+    const now = Math.floor(Date.now() / 1000);
+    const principalType: PlanePrincipalType = 'api_key';
+    const payload = {
+      iss: this.planeIssuer,
+      aud: config.audience,
+      sub: `apikey:${keyId}`,
+      iat: now,
+      nbf: now - 5,
+      exp: now + ttlSeconds,
+      org_id: orgId,
+      principal_type: principalType,
+      key_id: keyId,
+      acting_user_id: actingUserId,
+      jti: tokenId,
+      scopes: [...claims.scopes],
+      zdr,
+      ...(webPolicy !== undefined ? { web_policy: webPolicy } : {}),
+      ...(audience === 'browser-broker' && claims.keyHosts
+        ? { key_hosts: [...claims.keyHosts] }
+        : {}),
+    };
+    return this.signPlanePayload(payload, now, ttlSeconds, config.audience);
+  }
+
+  private signPlanePayload(
+    payload: Record<string, unknown>,
+    now: number,
+    ttlSeconds: number,
+    audience: string,
+  ): PlaneTokenBundle {
+    const encodedHeader = this.encodeSegment({
+      alg: 'RS256',
+      typ: 'JWT',
+      kid: this.kid,
+    });
+    const encodedPayload = this.encodeSegment(payload);
+    const signingInput = `${encodedHeader}.${encodedPayload}`;
+    const signer = createSign('RSA-SHA256');
+    signer.update(signingInput);
+    signer.end();
+
+    const signature = signer.sign(this.privateKey).toString('base64url');
+    const expiresAt = new Date((now + ttlSeconds) * 1000).toISOString();
+
+    return {
+      token: `${signingInput}.${signature}`,
+      expiresAt,
+      expiresInSeconds: ttlSeconds,
+      issuer: this.planeIssuer,
+      audience,
     };
   }
 
