@@ -149,6 +149,9 @@ async fn put_policy(
     if let Some(response) = role_table_refusal(&policy, &state.chain.list_models("chat", "")) {
         return response;
     }
+    if let Some(response) = promotion_gate(promotion_required()) {
+        return response;
+    }
     let Some(client) = state.client else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -194,6 +197,36 @@ fn role_table_refusal(policy: &RoutingPolicy, catalogue: &[ModelInfo]) -> Option
         )
             .into_response(),
     )
+}
+
+/// The switch that makes a policy change a candidate (EP-14 S10). Read on each write; only the literal `true`
+/// enables it.
+const PROMOTION_REQUIRED_ENV: &str = "ROUTING_POLICY_PROMOTION_REQUIRED";
+
+fn promotion_required_from(raw: Option<&str>) -> bool {
+    raw.is_some_and(|value| value.trim() == "true")
+}
+
+fn promotion_required() -> bool {
+    promotion_required_from(std::env::var(PROMOTION_REQUIRED_ENV).ok().as_deref())
+}
+
+/// The refusal for a direct write while promotion is required (EP-14 S10), or `None` when the write may go straight
+/// to the store. With the switch on, a write has to become a candidate, and this process cannot reach the candidate
+/// store yet. The write is refused rather than applied, so a PUT never takes a policy live.
+fn promotion_gate(required: bool) -> Option<Response> {
+    required.then(|| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({
+                "error": {
+                    "code": "candidate_store_unwired",
+                    "message": "ROUTING_POLICY_PROMOTION_REQUIRED is on, so a policy change must be proposed as a candidate, and this process cannot reach the candidate store yet",
+                }
+            })),
+        )
+            .into_response()
+    })
 }
 
 async fn authorize_policy_admin(
@@ -270,6 +303,32 @@ mod tests {
         assert_eq!(value["error"]["details"][0]["reason"], "unknown_model");
 
         assert!(role_table_refusal(&RoutingPolicy::default(), &catalogue).is_none());
+    }
+
+    #[test]
+    fn promotion_switch_reads_only_the_literal_true() {
+        assert!(promotion_required_from(Some("true")));
+        assert!(promotion_required_from(Some(" true ")));
+        for raw in [None, Some(""), Some("1"), Some("TRUE"), Some("yes"), Some("false")] {
+            assert!(!promotion_required_from(raw), "{raw:?}");
+        }
+    }
+
+    #[test]
+    fn put_with_switch_off_unchanged() {
+        // Off, the gate is silent and the write takes the path it always took.
+        assert!(promotion_gate(false).is_none());
+    }
+
+    #[tokio::test]
+    async fn put_with_switch_on_refuses_a_direct_write() {
+        let refusal = promotion_gate(true).expect("a switched-on write is refused");
+        assert_eq!(refusal.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = axum::body::to_bytes(refusal.into_body(), usize::MAX)
+            .await
+            .expect("the refusal body");
+        let value: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        assert_eq!(value["error"]["code"], "candidate_store_unwired");
     }
 
     #[tokio::test]
