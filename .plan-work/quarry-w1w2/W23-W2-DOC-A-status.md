@@ -52,7 +52,7 @@ None. Docs and comments only; no behaviour change. The flags described in the te
 7. Model Plane ledger text uses the newest-entry heading style (`## YYYY-MM-DD — title`, `**State:**`), dated 2026-11-03, state `proposed`.
 8. The U03 ledger text is kept as drafted in wf-U03.md. The measurement list is reworded without the file path.
 9. The claim-edge rows name `execution-core` and `model-gateway` as the service principals that hold a `quarry` tenant row in `webPolicyByAudience`.
-10. The SELF_HOST QB-T17 text keeps the name `DEF-QB-T17-PART2` (the Model Plane ledger's rerank test asserts it) and points it at DR-15.1.
+10. The SELF_HOST QB-T17 text keeps the name `DEF-QB-T17-PART2` beside its new reference to DR-15.1, so the older name stays searchable.
 
 ## MP asks
 
