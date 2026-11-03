@@ -2688,6 +2688,30 @@ Built so far: WS13-S0, WS13-S1, WS13-S2; WS14-S1, WS14-S2 (partial), WS14-S3; WS
 | D3-089 | EP-14-S4 | live-proof | P1 | .verevon-chat-ledger { display: grid; gap: 10px; min-width: 0; } | open |
 | D3-090 | EP-14-S4 | follow-up | P3 | 38 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W3-03.json | open |
 
+
+### Wave-mode batch W3-03b (2026-11-03)
+
+| ID | Slice | Kind | P | Finding | Status |
+|---|---|---|---|---|---|
+| D3-091 | EP-13-S3 | follow-up | P1 | Until metered.rs passes the request purpose (lead_todo item 1), inference_requests_total and inference_tokens_total carry only purpose=unspecified, so the slice's observable deliverable is not yet delivered. | open |
+| D3-092 | EP-13-S3 | follow-up | P1 | inference-core/src/metered.rs still calls the purpose-less record_request/record_tokens (lines ~293, 301, 310, 322), so the row's observable deliverable, a purpose label that tells an answer from a title, emits only 'unspecified' until the lead applies the handed-back metered.rs lines. | open |
+| D3-093 | EP-13-S3 | live-proof | P1 | Apply the metered.rs wiring (the implementer's lead_todo item 1: Call.purpose, with_purpose, and the record_*_with_purpose calls in answered/ended, plus one metered test that an Answer call counts under 'answer'). Until then every series reads purpose=unspecified. The design wrongly named IC/grpc.rs as the reader; the recorder is inference-core/src/metered.rs, which this slice does not own. | open |
+| D3-094 | EP-13-S3 | live-proof | P1 | Regenerate go/gen/model_plane/v1/inference.pb.go (owned, left as a lead_todo). Decide whether to regenerate the Python (inference_pb2.py) and TS (inference_pb.ts / inference_connect.ts) outputs in the same train. | open |
+| D3-095 | EP-13-S3 | live-proof | P1 | Shared-edit the docs/decisions/ledger.md entry for EP-13 S3 / D8 (ungated floor tightening). | open |
+| D3-096 | EP-13-S3 | live-proof | P1 | Live proof: rebuild inference-core, model-gateway, execution-core and session-core, then run one chat turn on claude-sonnet-5-5. :8082/metrics must show purpose=answer, title and follow_ups series moving. Save the evidence as ep13-s3-purpose-<date>.txt. | open |
+| D3-097 | EP-13-S3 | live-proof | P1 | Confirm the 15 failing lib tests outside this slice's files at a clean HEAD or on Linux CI: model-gateway room_metadata and two zdr_posture tests; execution-core 10 executor and 2 fold posture-matrix tests. | open |
+| D3-098 | EP-13-S3 | live-proof | P1 | Commit train: one commit per crate. Keep out EP-14-S9's Cargo.toml dev-dependency lines, mp-inference-replay/ and tests/replay_sessions.rs. | open |
+| D3-099 | EP-13-S3 | follow-up | P3 | 23 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W3-03b.json | open |
+| D3-100 | EP-14-S9 | test-gap | P1 | The execution-core replay suite is missing (verified this round: the row command exits 101 with 'no test target named replay_sessions'). Cassettes 10, 07, 13 and 15 have no consumer until a public run_agent entry exists. | open |
+| D3-101 | EP-14-S9 | risk | P1 | Seam collision: src/runtime_loop/agent.rs, grpc.rs and llm_planner.rs carry uncommitted edits from EP-13-S3 in this same batch (git status shows M). The seam edit must be sequenced with that slice to avoid a conflicting edit. | open |
+| D3-102 | EP-14-S9 | test-gap | P1 | Cassette 04 (honest refusal) has no gateway consumer: a plain chat turn offers no tools, and the knowledge_search offer condition for chat is untraced. | open |
+| D3-103 | EP-14-S9 | test-gap | P1 | Cassette 04 (honest refusal) has no consumer in either suite, so its shape has never been checked against a real request path. | open |
+| D3-104 | EP-14-S9 | live-proof | P1 | The lead must choose the execution-core seam (option A: a public wrapper over run_agent plus visibility changes in session_terminal_auth.rs, lib.rs and sandbox_lease.rs; option B: an in-crate test module, which needs the plan row's test command amended). The implementer documents both options. | open |
+| D3-105 | EP-14-S9 | live-proof | P1 | DoD proof not produced: a deliberate break (drop one tool from the Do offer list, replay goes red with a readable diff) and two green CI run links on a throwaway branch. | open |
+| D3-106 | EP-14-S9 | live-proof | P1 | The owner must decide whether the replay suites become a required CI check (D8). | open |
+| D3-107 | EP-14-S9 | live-proof | P1 | Decide and grant the execution-core seam, one of: (A) in src/runtime_loop/agent.rs add a #[doc(hidden)] pub wrapper over run_agent that takes only public types and hard-codes SpaceRetrieval::Organisation; make the terminal-token trait reachable (src/session_terminal_auth.rs:93 pub(crate) -> pub, and src/lib.rs:46 'mod session_terminal_auth;' -> 'pub mod') or give the wrapper a concrete token type; add a pub constructor for any sandbox token provider the suite passes (src/sandbox_lease.rs:417 new_for_test is pub(crate)). Or (B) keep the suite in-crate as a #[cfg(test)] module under src/runtime_loop, which reaches pub(crate) items the way agent.rs's own tests do. Option B changes the row's command from --test replay_sessions to --lib, so the plan row must be amended first. Option A must be sequenced with EP-13-S3's uncommitted agent.rs edits. | open |
+| D3-108 | EP-14-S9 | follow-up | P3 | 13 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W3-03b.json | open |
+
 ## Cross-wave
 
 | ID | Kind | P | Finding | Status |
@@ -2924,3 +2948,5 @@ Slices that touch authority, audit, ZDR, money or data-loss and were built in wa
 | EP-8-S2 | zdr, authority, data-loss | W3-01 | no |
 | EP-2-S2 | zdr | W3-02 | no |
 | EP-13-S6 | zdr, authority, auth, policy | W3-03 | no |
+| EP-13-S3 | zdr, policy | W3-03b | no |
+| EP-14-S9 | zdr | W3-03b | no |
