@@ -551,6 +551,14 @@ Open and logged in the depth register: with the switch off the gRPC `ExitPlanMod
 
 **EP-14-S6.** add the newest entry "Request snapshots are captured once, in inference-core, behind the provider call; a dropped write is counted, never silent (EP-14 D1, D2, D4 assumed by default; D13 waived = ZDR)", marked proposed/implemented-dark pending owner acceptance.
 
+## 2026-11-03 - Wave-mode batch W3-08: decisions recorded by its slices
+
+**Status: built in wave mode (unit tests only; depth in the register).**
+
+**EP-8-S4.** shared-edit apps/Model Plane/docs/decisions/ledger.md, newest first: 'EP-8 S4 (2026-11-03): The standing profile is deterministic and follows the memory decision of the turn (D7, D8). Built from session-core accepted scope=user rows with a source link (never Letta blocks, never org/thread/Space/agent rows); paused = listed and editable, not rebuilt; off/org disabled = hidden; reset and org erasure delete it; a memory delete drops its built line in the same transaction; ZDR/waived writes refused zdr_feature_not_supported(user_profile). Store: session-core user_profiles (migration 0100).'
+
+**EP-9-T1.** insert a new newest-first section directly above the first '## 2026-11-03' heading (line 25). Heading: '## 2026-11-03 - Egress is declared once per destination; the disclosure is generated and not published before counsel (EP-9 T1, Q-T1)'. Body: the catalogue path, the --strict --declared check, the four zdr values, and the not_gated open findings.
+
 ## 2026-10-21 - The reasoning-effort ladder lives in inference-core (WS11-S1)
 
 **Status: implemented (code only, inert).** The canonical ladder (`Level` Minimal..Max, `Wire`, a `support(family, model)` table with a per-row `verified_on`, `resolve` clamping to the nearest weaker supported level, `from_legacy_budget`, `allowance`, deployment aliases from `INFERENCE_CORE_EFFORT_MODEL_ALIASES`) lives in `inference-core/src/provider/effort.rs`; model-gateway derives only the requested level (WS11-S5) and never a per-provider shape. One owner, so the three per-path budget derivations (normal, ZDR, source validation) stop being three decisions. `InferRequest.reasoning_effort` and `ModelInfo.effort_levels` exist but no adapter reads them yet; the response-cache key now hashes the level, so a quick and a deep turn of one prompt cannot share an entry. Default applied (DEC-36, Q3): the provider ceiling rises by the per-level allowance (Low 1024 to Max 16384), total cap 32768, pending per-model measurement. Every support row is `verified_on = None` until the P0 live probe runs; the Anthropic split (budget through 4.6, adaptive from 4.7, unknown claude names adaptive) comes from the plan's cached claude-api reference, not a live check. A model with no declared row is treated as having no effort control, because an unsupported parameter is a 400 and an omitted one is a no-op.
