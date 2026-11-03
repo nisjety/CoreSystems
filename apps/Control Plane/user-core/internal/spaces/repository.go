@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -45,7 +46,20 @@ type Repository struct {
 	// historyWindowClaim is the SPACE_HISTORY_WINDOW_CLAIM rollout switch
 	// (WS04-S11). Off: no read decision carries a history floor.
 	historyWindowClaim bool
+	// sandboxEgressTiers is the SPACE_SANDBOX_EGRESS_TIERS rollout switch
+	// (EP-9 E2). Off: the capability decision keeps the v1 form and the
+	// egress ceiling columns are neither read nor written.
+	sandboxEgressTiers bool
 }
+
+// SetSandboxEgressTiers turns the SPACE_SANDBOX_EGRESS_TIERS switch on or off.
+// It is a rollout control only, never an authorization input.
+func (r *Repository) SetSandboxEgressTiers(enabled bool) {
+	r.sandboxEgressTiers = enabled
+}
+
+// SandboxEgressTiersEnabled reports the switch.
+func (r *Repository) SandboxEgressTiersEnabled() bool { return r != nil && r.sandboxEgressTiers }
 
 // SetPolicyAuditOutbox wires the in-transaction audit outbox for Space
 // effect-policy changes.
@@ -1732,6 +1746,129 @@ func (r *Repository) ResolveOrgEffectPolicy(ctx context.Context, orgID string) (
 		return EffectPolicy{}, fmt.Errorf("resolve org effect policy: %w", err)
 	}
 	return policy, nil
+}
+
+// ResolveSandboxEgressCeiling reads the org's sandbox egress ceiling for one
+// active Space together with that Space's current entitlement revision (EP-9
+// E2). The capability decision handler compares the revision with the one its
+// authority evidence was read at: UpsertSandboxEgressPolicy fences the
+// entitlement revision in the same transaction as the ceiling change, so an
+// equal revision proves the ceiling belongs to the same authority snapshot.
+func (r *Repository) ResolveSandboxEgressCeiling(ctx context.Context, spaceRef, orgID string) (SandboxEgressPolicy, int64, error) {
+	if r == nil || r.db == nil {
+		return SandboxEgressPolicy{}, 0, fmt.Errorf("space authority repository unavailable")
+	}
+	var policy SandboxEgressPolicy
+	var rawAllowlist []byte
+	var entitlementRevision int64
+	err := r.db.Pool.QueryRow(ctx, `
+		SELECT p.sandbox_egress_tier, p.sandbox_egress_allowlist, r.entitlement_revision
+		FROM registered_spaces s
+		JOIN space_authority_revisions r ON r.space_ref=s.space_ref
+		JOIN space_effect_policies p ON p.org_id=s.org_id
+		WHERE s.space_ref=$1 AND s.org_id=$2 AND s.registration_state='active'`,
+		strings.TrimSpace(spaceRef), strings.TrimSpace(orgID),
+	).Scan(&policy.Tier, &rawAllowlist, &entitlementRevision)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return SandboxEgressPolicy{}, 0, ErrNoOrgEffectPolicy
+	}
+	if err != nil {
+		return SandboxEgressPolicy{}, 0, fmt.Errorf("resolve Space sandbox egress ceiling: %w", err)
+	}
+	if err := json.Unmarshal(rawAllowlist, &policy.Allowlist); err != nil {
+		return SandboxEgressPolicy{}, 0, fmt.Errorf("decode Space sandbox egress allow-list: %w", err)
+	}
+	return policy, entitlementRevision, nil
+}
+
+// UpsertSandboxEgressPolicy writes an org's sandbox egress ceiling (EP-9 E2).
+// The org must already have an effect policy. A change is an entitlement
+// change: it advances the org's entitlement revision, fences every active
+// Space so decisions signed under the old ceiling stop being current, and
+// records a policy event on the same transaction. A replay of the stored
+// value writes nothing and reports false.
+func (r *Repository) UpsertSandboxEgressPolicy(ctx context.Context, orgID string, policy SandboxEgressPolicy, actor EffectPolicyActor) (bool, error) {
+	if r == nil || r.db == nil {
+		return false, fmt.Errorf("space authority repository unavailable")
+	}
+	orgID = strings.TrimSpace(orgID)
+	if orgID == "" {
+		return false, fmt.Errorf("space effect policy org_id is required")
+	}
+	next, err := policy.Normalize()
+	if err != nil {
+		return false, err
+	}
+	if err := actor.Validate(); err != nil {
+		return false, err
+	}
+	encoded, err := json.Marshal(next.Allowlist)
+	if err != nil {
+		return false, fmt.Errorf("encode Space sandbox egress allow-list: %w", err)
+	}
+	tx, err := r.db.Pool.Begin(ctx)
+	if err != nil {
+		return false, fmt.Errorf("begin Space sandbox egress upsert: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	var current EffectPolicy
+	var currentTier string
+	var currentRaw []byte
+	var currentEntRev int64
+	err = scanEffectPolicy(tx.QueryRow(ctx, `
+		SELECT `+effectPolicyColumnList()+`, sandbox_egress_tier, sandbox_egress_allowlist, entitlement_revision
+		FROM space_effect_policies WHERE org_id=$1 FOR UPDATE`, orgID),
+		&current, &currentTier, &currentRaw, &currentEntRev)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, ErrNoOrgEffectPolicy
+	}
+	if err != nil {
+		return false, fmt.Errorf("read Space sandbox egress policy: %w", err)
+	}
+	var currentAllowlist []string
+	if err := json.Unmarshal(currentRaw, &currentAllowlist); err != nil {
+		return false, fmt.Errorf("decode Space sandbox egress allow-list: %w", err)
+	}
+	if currentTier == next.Tier && slices.Equal(currentAllowlist, next.Allowlist) {
+		if err := tx.Commit(ctx); err != nil {
+			return false, fmt.Errorf("commit Space sandbox egress replay: %w", err)
+		}
+		return false, nil
+	}
+	var policyRev, entRev int64
+	if err := tx.QueryRow(ctx, `
+		UPDATE space_effect_policies
+		SET sandbox_egress_tier=$2, sandbox_egress_allowlist=$3::jsonb,
+		    entitlement_revision=entitlement_revision + 1, updated_at=NOW()
+		WHERE org_id=$1
+		RETURNING policy_revision, entitlement_revision`, orgID, next.Tier, string(encoded),
+	).Scan(&policyRev, &entRev); err != nil {
+		return false, fmt.Errorf("update Space sandbox egress policy: %w", err)
+	}
+	fenced, err := fenceActiveSpaces(ctx, tx, orgID, false, true)
+	if err != nil {
+		return false, err
+	}
+	// The event's entitlement maps are boolean, so the tier itself is not in
+	// them; the row still names the actor and the revision step.
+	if _, err := insertPolicyEventTx(ctx, tx, r.policyAudit, policyEvent{
+		OrgID:          orgID,
+		Source:         PolicyEventSourceOperator,
+		Actor:          actor,
+		ChangeKind:     PolicyChangeOperatorUpdated,
+		Before:         EntitlementValues(current),
+		After:          EntitlementValues(current),
+		PolicyRevAfter: policyRev,
+		EntRevBefore:   currentEntRev,
+		EntRevAfter:    entRev,
+		SpacesFenced:   fenced,
+	}, time.Now().UTC()); err != nil {
+		return false, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return false, fmt.Errorf("commit Space sandbox egress policy: %w", err)
+	}
+	return true, nil
 }
 
 // privacyPolicyChanged reports whether the processing/privacy floor of the

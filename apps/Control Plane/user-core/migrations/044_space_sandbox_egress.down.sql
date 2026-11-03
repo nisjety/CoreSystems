@@ -1,0 +1,4 @@
+ALTER TABLE space_effect_policies DROP CONSTRAINT IF EXISTS space_effect_policies_sandbox_egress_allowlist_chk;
+ALTER TABLE space_effect_policies DROP CONSTRAINT IF EXISTS space_effect_policies_sandbox_egress_tier_chk;
+ALTER TABLE space_effect_policies DROP COLUMN IF EXISTS sandbox_egress_allowlist;
+ALTER TABLE space_effect_policies DROP COLUMN IF EXISTS sandbox_egress_tier;
