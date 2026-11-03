@@ -14,13 +14,13 @@ Operational playbooks for common Quarry v2 incidents and recovery flows.
    - **Static**: target site likely Cloudflare-walled. Check site's HTTP response.
    - **TLS**: BoringSSL handshake failing — usually transient, otherwise check `quarry-tls` logs for `ja3 mismatch`.
    - **Browserless / Browserbase / Kernel**: cloud provider outage. Check provider status page.
-3. **Mitigate**: Pause schedule via Control Plane API, then route via fallback chain:
+3. **Mitigate**: Pause the schedule through the edge (a user token for its org), then route via fallback chain:
    ```bash
-   curl -X POST http://control:8081/v1/schedules/<id>/pause
+   curl -X POST -H "Authorization: Bearer $TOKEN" http://edge:8082/v1/schedules/<id>/pause
    ```
-4. **Recover**: When provider is healthy, resume schedule:
+4. **Recover**: When provider is healthy, unpause the schedule:
    ```bash
-   curl -X POST http://control:8081/v1/schedules/<id>/resume
+   curl -X POST -H "Authorization: Bearer $TOKEN" http://edge:8082/v1/schedules/<id>/unpause
    ```
 
 ## Crawl stuck / no progress
@@ -138,17 +138,17 @@ Expected, not a fault. A USER token whose `zdr` claim is `true` (the org has ZDR
 
 ## Recovery: scrape backlog from a queue freeze
 
-If a queue freeze required pausing all schedules:
+If a queue freeze required pausing schedules:
 
-1. List paused schedules: `curl http://control:8081/v1/schedules?status=paused`
-2. Estimate replay backlog vs SLA. If backlog > 1h, prefer "skip and resume" over full replay:
+1. List the org's schedules through the edge and note each row whose `status` is `paused`. Page through the list with the `cursor` it returns:
    ```bash
-   curl -X POST http://control:8081/v1/schedules/<id>/resume?backfill=skip
+   curl -H "Authorization: Bearer $TOKEN" "http://edge:8082/v1/schedules?limit=100"
    ```
-3. Otherwise, resume with backfill:
+2. Unpause each one. The schedule runs again at its next cron time. Whether Temporal also fires the ticks missed during the pause depends on the schedule's catch-up window, so do not rely on it for a replay:
    ```bash
-   curl -X POST http://control:8081/v1/schedules/<id>/resume?backfill=missed
+   curl -X POST -H "Authorization: Bearer $TOKEN" http://edge:8082/v1/schedules/<id>/unpause
    ```
+3. To replay a past range of one scrape schedule, call `POST /v1/schedules/<id>/backfill` with RFC 3339 `start_at` and `end_at`, at most 24 windows. It is refused until the request path is on (see "Schedules go-live", Gate 4). Crawl and batch schedules cannot be backfilled.
 
 ## Chromium will not start: sandbox, seccomp or scratch directories
 
@@ -1333,6 +1333,109 @@ Test phase checks (not run):
 - `cd services/quarry-orchestrator && go test ./internal/workflows/ ./internal/schedules/ ./internal/jobs/ ./internal/activities/ -count=1`
 - `cd services/quarry-control && go test ./internal/resources/ -run "Schedule|WorkflowFor|RegisterRun" -count=1`
 - `cargo test -p quarry-edge --test schedule_preflight` and `cargo test -p quarry-edge --lib schedule_preflight`
+
+## Schedules go-live: gates, the observe week and the flips (WS15.S5, docs only, 2026-11-03)
+
+Nothing is switched on by this section. Every switch below is at its default in the compose and in the code today. The owner decides when each gate opens, and a later gate does not start until the earlier one is met. What each switch does is in `SCHEDULES.md`. "Known gap" numbers refer to that page's Known gaps list.
+
+### Switches and their defaults
+
+| Switch | Read by | Default | Non-default value | Gate |
+| --- | --- | --- | --- | --- |
+| `QUARRY_SCHEDULED_JOBS_ENABLED` | control (compose sets `0`) | `0` | `1` maps scrape, crawl and batch schedules, so they fire | 1 |
+| `QUARRY_ORG_CORE_SERVICE_TOKEN` (edge: `QUARRY_EDGE__ORG_CORE_SERVICE_TOKEN`) | edge, copied from Control's secret ledger | empty | Enables the posture read. Empty means every read is unknown | 0 |
+| `QUARRY_EDGE__ORG_CORE_URL` | edge | `http://org-core:8080` | Where the posture read goes | 0 |
+| `QUARRY_EDGE__SCHEDULE_POSTURE` | edge | `observe` | `enforce` denies skipped fires and pauses on ZDR. `off` restores the S2 answer | 1 (observe), 2 (enforce) |
+| `QUARRY_CONTROL__ZDR_EVENT_CONSUMER` | control | `off` | `observe` logs would-pause; `enforce` writes events and pauses | 1 (observe), 2 (enforce) |
+| `QUARRY_EDGE__ZDR_REFUSE_DURABLE_RESOURCES` | edge | `false` (observe) | Refuses ZDR create, unpause, trigger and backfill with 403 | Not part of this go-live (ADR-4) |
+| `QUARRY_CONTROL__SCHEDULE_REQUESTS` | control | off | `1` answers trigger and backfill with 202 request rows | 4 |
+| `QUARRY_SCHEDULE_REQUESTS` | orchestrator | off | `1` runs the request loop | 4 |
+| `QUARRY_SCHEDULE_CAPABILITIES` | gateway (Frontend Plane) | every capability off | Lets the SPA offer the kinds, trigger, backfill and overlap | 5 |
+| `QUARRY_SCHEDULE_MIN_INTERVAL_S` | control | unset (5 min for scrape, 15 min for crawl and batch) | Replaces the cadence floor for every kind. Evidence runs only | evidence |
+
+All of these are read at process start. A change means a restart of the process that reads it.
+
+### Gate 0: before any switch
+
+- [ ] The owner has ordered the go-live in writing, after reading the not-done list below. Every item that blocks a gate is closed, or the owner has accepted it in writing.
+- [ ] Counsel has answered prospective or retroactive ZDR (X-9). That answer is needed before any `enforce`.
+- [ ] The org-core token is in Ingestion's environment, copied from Control's ledger. On the stack, a test org's fire writes no `schedule preflight: posture unknown` line.
+- [ ] Control's X-9 wiring is in place: the two org-core lines in `cmd/server/main.go`, the audit-core consumer row for `quarry-control-interactive-retention`, and the `quarry-control-gdpr` grants in `control-shared-nats.conf`. Without them the consumer binds to nothing.
+- [ ] The stack evidence for each built unit is written up: S1 (create, org isolation, unpause), S2 (one fire each for scrape, crawl and batch; overlap skip; cancel; the flag off pauses), and S4a (observe reasons, enforce denies, the token-unset case). Each unit's status file lists its checks.
+
+### Gate 1: the observe week
+
+Run it with `QUARRY_SCHEDULED_JOBS_ENABLED=1`, `QUARRY_EDGE__SCHEDULE_POSTURE=observe` and `QUARRY_CONTROL__ZDR_EVENT_CONSUMER=observe`. Observe needs fires to observe, so the scheduled-jobs switch is on for the week. Nothing is denied during the week. The switch is global and cannot be limited to some orgs. The owner chooses the start day.
+
+- [ ] Fires run. Each enabled executable schedule has one job per cron tick, except ticks that Temporal skipped for overlap, and each job has origin `schedule`.
+- [ ] Each day, count the edge's `schedule preflight: skip reason` lines with `mode=observe`, grouped by `reason` and by org. Count `schedule preflight: posture unknown` lines by `class`.
+- [ ] Each day, no `posture unknown` line for a test org without a known cause. The classes `unauthorized`, `forbidden`, `not_found` and `unavailable` point to configuration or an outage. Explain each one before the week counts.
+- [ ] Count control's `would_pause` lines the same way.
+- [ ] At the end of the week, the owner reads the list of orgs and reasons that `enforce` would have acted on, and decides. Gate 2 opens only on that decision.
+
+### Gate 2: enforce (owner decision, after Gate 1 and counsel)
+
+- [ ] Restart the edge with `QUARRY_EDGE__SCHEDULE_POSTURE=enforce`. A ZDR test org's fire answers `allow: false` with reason `skipped_zdr`, and its job is `skipped` with `terminal_reason: schedule_skipped`.
+- [ ] Restart control with `QUARRY_CONTROL__ZDR_EVENT_CONSUMER=enforce`. The org's enabled schedules and monitors are paused, and each one has a `schedule_skipped` event.
+- [ ] Rollback is a restart with `observe` or `off`. A paused schedule stays paused. Unpause is a user action through the edge, and a ZDR caller is refused while `QUARRY_EDGE__ZDR_REFUSE_DURABLE_RESOURCES` is on.
+
+### Gate 3: the first schedule fire (S5 evidence)
+
+- [ ] With a user token for a test org, create a scrape schedule with `kind: "scrape"`, `cron: "*/5 * * * *"`, `timezone: "Europe/Oslo"`, `overlap_policy: "skip"` and `activate: true`. A one-minute cron is refused with `cadence_too_frequent` unless the evidence stack sets `QUARRY_SCHEDULE_MIN_INTERVAL_S`, and that setting applies to every kind.
+- [ ] The first fire writes one job with origin `schedule` and the schedule id as its actor. The job completes, or fails with a reason.
+- [ ] Pause the schedule through the edge. The Temporal schedule pauses within about 30 seconds. Unpause it. Do not use `last_run_at` as evidence: it is not written yet (Known gap 4).
+- [ ] Delete it through the edge. If it was the org's last schedule, Known gap 10 applies: list the Temporal schedules and delete the orphan by hand, after checking its memo's `org_id`.
+
+### Gate 4: the request path (WS15.S3)
+
+Not ready today. Do not set these switches until the blocking items are closed (not-done items 1, 2 and 13):
+
+- [ ] The edge passes the 202 through, reads the request, and keeps control's 409 and 501 codes.
+- [ ] The deployment-evidence list for the request path is written. The S3 status file says its six steps are not run, and they include an orchestrator stop and start.
+- [ ] The owner accepts the at-least-once duplicate fire in writing, or the Temporal-side marker is built.
+- [ ] Set `QUARRY_CONTROL__SCHEDULE_REQUESTS=1` on control and `QUARRY_SCHEDULE_REQUESTS=1` on the orchestrator in one change. Restart both.
+
+### Gate 5: the gateway capabilities
+
+- [ ] Set `QUARRY_SCHEDULE_CAPABILITIES` on the gateway with `trigger` and `backfill` true, and `kinds` limited to what the owner allows. Restart the gateway, then reload the SPA.
+
+### Rollback, at any gate
+
+- Scheduled jobs: set `QUARRY_SCHEDULED_JOBS_ENABLED=0` on control and restart it. The Temporal schedules of these kinds pause on the next reconcile pass (about 30 s). They are not deleted, and fires already running finish.
+- Posture: restart the edge with `observe` or `off`.
+- Requests: unset `QUARRY_CONTROL__SCHEDULE_REQUESTS` (restart control) and `QUARRY_SCHEDULE_REQUESTS` (restart the orchestrator). Pending rows stay pending and run when the flag comes back. There is no cancel route. To list them:
+  ```sql
+  SELECT id, schedule_id, org_id, action, status, attempts, created_at
+  FROM schedule_requests WHERE status IN ('pending', 'claimed');
+  ```
+
+### Not done (explicit list)
+
+A gate named in the Blocks column stays shut until that item is closed. The other rows are follow-ups.
+
+| # | Not done | Blocks | Where |
+| --- | --- | --- | --- |
+| 1 | Edge half of WS15.S3: pass the 202 through, add `GET /v1/schedules/{id}/requests/{rid}`, and keep control's 409 and 501 codes instead of `502 DRIVER_FAILED` (Known gap 1) | Gate 4 | `crates/quarry-edge/src/schedule_routes.rs` (`forward_json`, trigger, backfill), `routes.rs` |
+| 2 | Backfill applies the requested overlap policy. Today `ALLOW_ALL` is hard-coded (Known gap 2) | Gate 4 | `services/quarry-orchestrator/internal/schedules/schedules.go` (`backfillWith`), `requests.go` |
+| 3 | Exact backfill window count from a next-fire iterator (Known gap 3) | Gate 4 (precision) | `services/quarry-control/internal/cron` |
+| 4 | An org's last schedule is not reaped. The reaper removes a Temporal schedule only while its org still has a row (Known gap 10) | Gates 1 and 3 | `services/quarry-orchestrator/internal/schedules/schedules.go` (`reconcileWith`); `reaper_isolation_test.go` pins the current rule |
+| 5 | Writers for `last_run_at`, `next_run_at` and `skipped_overlap_count` (Known gap 4) | Evidence and the SPA | `services/quarry-control/internal/store/pg/resources.go` (`UpdateRuntime` has no caller) |
+| 6 | A record for a Temporal `SKIP`, or the owner's decision to keep it silent (Known gap 5) | Gate 1 (observability) | Orchestrator; owner decision |
+| 7 | The preflight sends `target_kind` and `enabled`, and reads `zdr`, `clamped_units` and `observed_reason` (depth D-S4A-1; Known gap 7) | Latent reasons | `services/quarry-orchestrator/internal/activities/scheduled.go` |
+| 8 | Refuse `enforce` at boot without the org-core token, or warn loudly (depth D-S4A-2; Known gap 8) | Gate 2 | `crates/quarry-edge/src/schedule_preflight.rs` |
+| 9 | Change-monitor fire-time preflight (`monitor-preflight-v1`, the WS15.S4 monitor half; Known gap 9) | ZDR for monitors beyond the create stamp | Orchestrator, `ChangeMonitorWF` |
+| 10 | X-9 wiring outside Quarry: org-core `cmd/server/main.go` (`SetRetentionPostureReader`, `SetZDRSignal`), the audit-core consumer row, and the `quarry-control-gdpr` NATS grants | Gates 0 and 2 | Control Plane owner |
+| 11 | Enforce restamps `schedules.zdr`, or the owner accepts the old stamp coming back on re-enable (Known gap 11) | Gate 2 | `services/quarry-control/internal/store` |
+| 12 | The quarry-control emitter for the schedule notices (`quarry.schedule_run_failed`, `quarry.schedule_run_skipped`), and notification-core's 500 for ZDR notices when its delivery worker is on | User notices | Ingestion (emitter); Application Plane (the 500) |
+| 13 | Org erasure deletes `schedule_requests` (Known gap 13) | Gate 4 | `services/quarry-control/internal/store/pg/gdpr_purge.go` |
+| 14 | Idempotency: control dedupes creates, and the edge sends a stable key; a repeated trigger key replays its 202 (Known gap 6) | Duplicate rows and fires | Edge and control |
+| 15 | A cancel route for a pending request (Known gap 12) | Recovery | `services/quarry-control/internal/resources/schedule_requests.go` |
+| 16 | `jitter_s` in the edge body and in the edge's forward to control | Jitter | `crates/quarry-edge/src/schedule_routes.rs`; `services/quarry-control/internal/resources/schedules.go` |
+| 17 | Stack evidence for every unit (S1, S2, S3, S4a, X-9, AP-S4c). None has run. The S2 replay fixture is synthetic (`scheduled_job_crawl_history.json`); a capture from Temporal is owed | Gate 0 | Each unit's status file |
+| 18 | Migrations 017 and 026 on a live database (the `QUARRY_TEST_DSN` suites) | Gate 0 | `services/quarry-control/internal/store/pg/` |
+| 19 | `QUARRY_CONTROL_SCHEDULES_REQUIRE_ORG=1` in compose does nothing (Known gap 14) | None | `apps/Ingestion Plane/docker-compose.yml` |
+| 20 | The docs contract does not read SCHEDULES.md or the request flags | None | `scripts/tests/docs-contract.test.mjs` (this unit does not edit it) |
+| 21 | A decision on `QUARRY_EDGE__ZDR_REFUSE_DURABLE_RESOURCES` for schedules (ADR-4 stage B) | Not part of this go-live | Owner, ADR-4 |
 
 ## WS17.E3: profile backfill, erasure hop and plaintext removal (W2-U41, built, NOT run, 2026-10-23)
 
