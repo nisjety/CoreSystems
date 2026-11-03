@@ -205,6 +205,7 @@ import { isEffectfulChatTurn } from '@/shared/chat/effect-class'
 import { planExecuteEnabled } from '@/shared/chat/plan-execute'
 import { readPinnedMessages, togglePinnedMessage } from '../lib/chat-pinned-messages'
 import { CHAT_SURFACE_IDS, chatSurfaceSpec, isChatTab } from '../lib/chat-surfaces'
+import { useChatThreadDraft, type ChatDraftOutcome } from '../lib/chat-thread-draft'
 import { createSnapshotWriter, flushOnPageLifecycle, parseSnapshotThrottleMs } from '../lib/snapshot-throttle'
 import { nextFollowState, virtualizeTranscript } from '../lib/transcript-window'
 import { isToolCallRunning } from '../lib/stream-activity'
@@ -446,7 +447,6 @@ export function useChatController() {
    * (`reconcileSentTurns`). A turn loaded from the server is not in this map: its id already is the server's.
    */
   const serverMessageIds = new Map<string, string | undefined>()
-  const [input, setInput] = createSignal('')
   /**
    * Quiet, non-blocking notice for a rating that did NOT persist.
    *
@@ -647,6 +647,15 @@ export function useChatController() {
       return next
     })
   }
+
+  // The composer's text is the draft of the thread on screen (chat-thread-draft). It is created here, after
+  // `isTemporaryThread`, which its Temporary gate reads.
+  const chatDraft = useChatThreadDraft({
+    threadId: () => state.threadId,
+    zeroRetention: () => temporaryChat() || isTemporaryThread(state.threadId),
+  })
+  const input = chatDraft.message
+  const setInput = chatDraft.setMessage
 
   // Threads opened via a cross-surface deep link (e.g. a Space Activity
   // "open in chat" link) that `listChatThreads()` did NOT return -- i.e. its
@@ -2245,7 +2254,7 @@ export function useChatController() {
       }))
     resetUiEvents()
     setTraceReplayTruncated(false)
-    setInput('')
+    chatDraft.reset()
     setActiveTab('chat')
     setVersionState(null)
     // A fresh chat has no title yet; leaving the previous thread's would show
@@ -3005,6 +3014,7 @@ export function useChatController() {
       // The provisional thread belongs to its project from the first send, so the
       // project stays on screen until the durable id replaces this one.
       if (requestedSpaceRef) scopedThreadRefs.set(activeThreadId, requestedSpaceRef)
+      chatDraft.carry(null, activeThreadId)
       setState((s) => { s.threadId = activeThreadId })
       startingThreadIds.add(activeThreadId)
       if (options.zdr) markThreadTemporary(activeThreadId)
@@ -3102,7 +3112,13 @@ export function useChatController() {
       ]
     })
     // The approve-then-execute turn (WS14 S2) is never typed in the composer, so the person's draft stays.
-    if (!options.approvedPlanId) setInput('')
+    // Any other turn clears the composer, but the text stays stored until the send settles, so a failed send
+    // can give it back (see the draft hook).
+    let settleDraft: ((outcome: ChatDraftOutcome) => void) | undefined
+    if (!options.approvedPlanId) {
+      settleDraft = chatDraft.beginSend()
+      setInput('')
+    }
 
     const controller = new AbortController()
     abortController = controller
@@ -3184,6 +3200,7 @@ export function useChatController() {
         // A project thread reopens from its project after a reload (WS18-S4).
         if (chatProjectsEnabled()) rememberProjectThread(serverThreadId, requestedSpaceRef)
       }
+      chatDraft.carry(priorThreadId, serverThreadId)
       setState((s) => { s.threadId = serverThreadId })
       if (!isTemporaryThread(serverThreadId)) setActiveChatThreadId(serverThreadId)
       writeThreadSnapshot(serverThreadId, state.turns, { preview: content, updatedAt: submittedAt })
@@ -3312,6 +3329,7 @@ export function useChatController() {
             appendUiEvent(event, assistantId)
           },
           onConnected: (connected) => {
+            settleDraft?.('accepted')
             if (stopBeforeConnect) {
               cancelOnceConnected(connected)
               return
@@ -3433,6 +3451,7 @@ export function useChatController() {
             setPendingQuestion(question)
           },
           onDone: ({ requestId, modelUsed, outputTokens, stopReason }) => {
+            settleDraft?.('accepted')
             settled = true
             terminalSeen = true
             captureRequestId(requestId)
@@ -3610,6 +3629,8 @@ export function useChatController() {
       writeThreadSnapshot(state.threadId ?? activeThreadId, state.turns)
     } finally {
       releaseDeferredStop()
+      // A send that was never accepted did not reach the thread: its text goes back. Settled already when accepted.
+      settleDraft?.('failed')
       if (isNewThread) {
         startingThreadIds.delete(provisionalThreadId)
         startingThreadIds.delete(activeThreadId)

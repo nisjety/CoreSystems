@@ -88,3 +88,72 @@ export function clearHomeDrafts(): void {
   clearEpoch += 1
   removeSessionValuesWithPrefix(`${KEY_PREFIX}:`)
 }
+
+// The unsent text of each chat thread, kept for this tab in the same way as the Home draft. A thread's
+// draft lives under a key of its own ('new' stands for a chat with no thread yet). An index keeps the
+// drafts of the most recently written threads, so one long session cannot grow the tab's storage without
+// limit.
+const CHAT_KEY_PREFIX = 'verevon.chat-draft.v1'
+const CHAT_INDEX_KEY = `${CHAT_KEY_PREFIX}:index`
+
+/** How many thread drafts a tab keeps; writing one past this removes the least recently written. */
+export const CHAT_DRAFT_MAX_THREADS = 30
+
+/** Where the draft of one chat thread lives; null until the user, the workspace and the thread are known. */
+export function chatDraftStorageKey(userId: string | undefined, orgId: string | undefined, threadId: string): string | null {
+  const user = userId?.trim()
+  const org = orgId?.trim()
+  const thread = threadId.trim()
+  if (!user || !org || !thread) return null
+  return `${CHAT_KEY_PREFIX}:${encodeURIComponent(org)}:${encodeURIComponent(user)}:${encodeURIComponent(thread)}`
+}
+
+function readChatIndex(): string[] {
+  const raw = readSessionValue(CHAT_INDEX_KEY)
+  if (!raw) return []
+  try {
+    const parsed: unknown = JSON.parse(raw)
+    return Array.isArray(parsed) ? parsed.filter((key): key is string => typeof key === 'string') : []
+  } catch {
+    return []
+  }
+}
+
+/**
+ * Stores a thread's draft and returns the text that is now stored, or null when nothing was stored.
+ * Blank text removes the entry, as for the Home draft. A write makes its draft the most recent one.
+ */
+export function writeChatDraft(key: string | null, text: string): string | null {
+  if (!key) return null
+  if (!text.trim()) {
+    removeChatDraft(key)
+    return ''
+  }
+  const capped = capHomeDraft(text)
+  if (!writeSessionValue(key, JSON.stringify({ text: capped }))) return null
+  const keys = readChatIndex().filter((entry) => entry !== key)
+  keys.push(key)
+  for (const stale of keys.splice(0, Math.max(0, keys.length - CHAT_DRAFT_MAX_THREADS))) removeSessionValue(stale)
+  writeSessionValue(CHAT_INDEX_KEY, JSON.stringify(keys))
+  return capped
+}
+
+export function removeChatDraft(key: string | null): void {
+  if (!key) return
+  removeSessionValue(key)
+  const keys = readChatIndex()
+  if (keys.includes(key)) writeSessionValue(CHAT_INDEX_KEY, JSON.stringify(keys.filter((entry) => entry !== key)))
+}
+
+let chatClearEpoch = 0
+
+/** Bumped by every {@link clearChatDrafts}, so a chat write scheduled before a sign-out can tell it was overtaken. */
+export function chatDraftClearEpoch(): number {
+  return chatClearEpoch
+}
+
+/** Removes every chat thread draft from this tab. The Home draft has its own prefix and is left alone. */
+export function clearChatDrafts(): void {
+  chatClearEpoch += 1
+  removeSessionValuesWithPrefix(`${CHAT_KEY_PREFIX}:`)
+}
