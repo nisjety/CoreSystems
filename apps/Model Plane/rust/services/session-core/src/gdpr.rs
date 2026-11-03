@@ -154,6 +154,9 @@ pub struct PurgeSummary {
     pub cron_schedules: u64,
     pub events: u64,
     pub run_trace_events: u64,
+    /// Request snapshots and their system/tool blobs (EP-14 S6).
+    pub run_request_snapshots: u64,
+    pub run_request_snapshot_blobs: u64,
     pub runs: u64,
     pub threads: u64,
     pub hook_configs: u64,
@@ -200,6 +203,8 @@ impl PurgeSummary {
             + self.cron_schedules
             + self.events
             + self.run_trace_events
+            + self.run_request_snapshots
+            + self.run_request_snapshot_blobs
             + self.runs
             + self.threads
             + self.hook_configs
@@ -403,6 +408,20 @@ pub async fn purge_organization_data(
     // The run trace (WS10.S6): scoped by its own `org_id`, and removed explicitly before `runs`
     // so the count is the purge's own rather than the cascade's.
     summary.run_trace_events = sqlx::query("DELETE FROM run_trace_events WHERE org_id = $1")
+        .bind(org_id)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+
+    // Request snapshots (EP-14 S6): they would cascade from `runs`, but are removed explicitly by their own
+    // `org_id` so the purge counts them, as the run trace is.
+    summary.run_request_snapshot_blobs =
+        sqlx::query("DELETE FROM run_request_snapshot_blobs WHERE org_id = $1")
+            .bind(org_id)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+    summary.run_request_snapshots = sqlx::query("DELETE FROM run_request_snapshots WHERE org_id = $1")
         .bind(org_id)
         .execute(&mut *tx)
         .await?
@@ -726,6 +745,8 @@ mod tests {
             cron_schedules: 1,
             events: 1,
             run_trace_events: 1,
+            run_request_snapshots: 1,
+            run_request_snapshot_blobs: 1,
             runs: 1,
             threads: 1,
             hook_configs: 1,
@@ -751,7 +772,7 @@ mod tests {
         };
         assert_eq!(
             summary.total(),
-            29,
+            32,
             "total() must count only Postgres rows; semantic-tier counts belong \
              to erasure_is_complete(), not to this sum"
         );
@@ -800,6 +821,8 @@ mod tests {
         let cron_schedules = pos("DELETE FROM cron_schedules WHERE org_id = $1");
         let events = pos("DELETE FROM events");
         let trace_events = pos("DELETE FROM run_trace_events WHERE org_id = $1");
+        let snapshot_blobs = pos("DELETE FROM run_request_snapshot_blobs WHERE org_id = $1");
+        let snapshots = pos("DELETE FROM run_request_snapshots WHERE org_id = $1");
         let runs = pos("DELETE FROM runs WHERE org_id = $1");
         let threads = pos("DELETE FROM threads WHERE org_id = $1");
 
@@ -855,6 +878,10 @@ mod tests {
         assert!(
             trace_events < runs,
             "the run trace must be purged before runs (its rows reference them)"
+        );
+        assert!(
+            snapshot_blobs < runs && snapshots < runs,
+            "request snapshots must be purged before runs (their rows reference them)"
         );
         assert!(runs < threads, "runs must be purged before threads");
         assert!(

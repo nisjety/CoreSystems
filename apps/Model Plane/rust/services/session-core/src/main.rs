@@ -44,13 +44,16 @@ mod orchestration_grpc;
 mod orchestration_nats;
 mod orchestration_store;
 mod org_policy;
+mod request_snapshots;
 mod retention_receipt;
 mod routing_policy_grpc;
 mod room_run_attach;
+mod run_ledger_grpc;
 mod run_phase;
 mod run_service_grpc;
 mod service_token;
 mod space;
+mod space_memory;
 mod space_deletion_reconciler;
 mod space_membership_nats;
 mod space_stream_grpc;
@@ -322,6 +325,20 @@ async fn main() -> Result<()> {
         },
     ));
 
+    // EP-14 S6: the request snapshot sweep is off unless SESSION_CORE_REQUEST_SNAPSHOTS_SWEEP_ENABLED is the
+    // literal `true`; off, the task parks and makes no database read.
+    let snapshot_sweep_pool = pool.clone();
+    let snapshot_sweep_handle = tokio::spawn(async move {
+        if !request_snapshots::sweep_enabled() {
+            std::future::pending::<()>().await;
+        }
+        supervise_background("session-core request snapshot sweep", move || {
+            let pool = snapshot_sweep_pool.clone();
+            async move { request_snapshots::run_sweeper(pool).await }
+        })
+        .await
+    });
+
     let shutdown = shutdown_signal();
 
     tokio::select! {
@@ -342,6 +359,7 @@ async fn main() -> Result<()> {
         result = space_sweeper_handle => result??,
         result = trace_handle => result??,
         result = trace_sweeper_handle => result??,
+        result = snapshot_sweep_handle => result??,
         () = shutdown => {},
     }
 

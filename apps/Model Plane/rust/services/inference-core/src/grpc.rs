@@ -134,6 +134,9 @@ pub(crate) struct InferenceService {
     language: LanguageAnalyticsChain,
     realtime: RealtimeChain,
     video: VideoChain,
+    /// Request snapshots (EP-14 S6). `None` unless `INFERENCE_REQUEST_CAPTURE`
+    /// is on, and then the handlers do exactly what they did before capture.
+    capture: Option<crate::request_capture::RequestCapture>,
 }
 
 trait TenantRequest {
@@ -341,11 +344,28 @@ impl InferenceCore for InferenceService {
         let internal_req = with_access(to_internal_request(&req, &principal)?, access);
 
         clock.enter_chain();
-        let (result, route_note) = self
+        let outcome = self
             .chain
             .infer_role_noted(&internal_req, &RoleCall::from_wire(req.purpose, &req.role_fallback_model), !no_store)
-            .await
-            .map_err(provider_error_to_status)?;
+            .await;
+        // Behind the provider call and never awaited: a failed call is captured
+        // too, under the model it asked for, because a failed run is what gets
+        // debugged.
+        if let Some(capture) = &self.capture {
+            let (served_model, served_provider) = outcome
+                .as_ref()
+                .map(|(result, _)| (result.model_used.as_str(), result.provider_used.as_str()))
+                .unwrap_or_default();
+            capture.offer(&crate::request_capture::CapturedCall {
+                run_id: &req.run_id,
+                purpose: req.purpose,
+                request: &internal_req,
+                waived: principal.zdr_waiver().is_some(),
+                served_model,
+                served_provider,
+            });
+        }
+        let (result, route_note) = outcome.map_err(provider_error_to_status)?;
 
         let mut response = Response::new(infer_response_to_wire(result, &clock, route_note));
         if no_store { response.metadata_mut().insert("cache-control", "no-store".parse().expect("static metadata")); }
@@ -375,11 +395,24 @@ impl InferenceCore for InferenceService {
         let internal_req = with_access(to_internal_request(&req, &principal)?, access);
 
         clock.enter_chain();
-        let (rx, route_note) = self
+        let outcome = self
             .chain
             .infer_stream_role_noted(&internal_req, &RoleCall::from_wire(req.purpose, &req.role_fallback_model))
-            .await
-            .map_err(provider_error_to_status)?;
+            .await;
+        // Behind the provider call and never awaited. The serving model is named
+        // only by the stream's chunks, so a streamed call records the model it
+        // asked for.
+        if let Some(capture) = &self.capture {
+            capture.offer(&crate::request_capture::CapturedCall {
+                run_id: &req.run_id,
+                purpose: req.purpose,
+                request: &internal_req,
+                waived: principal.zdr_waiver().is_some(),
+                served_model: "",
+                served_provider: "",
+            });
+        }
+        let (rx, route_note) = outcome.map_err(provider_error_to_status)?;
 
         let grpc_rx = streaming::bridge_to_grpc(rx, clock, route_note);
 
@@ -1525,6 +1558,7 @@ pub async fn serve_with_providers_and_readiness(
         language,
         realtime,
         video,
+        capture: crate::request_capture::RequestCapture::from_env(),
     };
     // Every RPC is counted by the decorator, so none can ship unmetered.
     let grpc_service = InferenceCoreServer::new(crate::metered::MeteredCore::new(service))

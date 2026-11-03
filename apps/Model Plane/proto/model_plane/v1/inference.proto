@@ -294,6 +294,13 @@ message InferRequest {
   // It carries no content, so Zero Data Retention does not change it.
   InferPurpose purpose = 21;
 
+  // The run this call belongs to (EP-14 S6). It only attributes a request
+  // snapshot to its run: when INFERENCE_REQUEST_CAPTURE is on, inference-core
+  // records what was sent for a call that names a run and is neither ZDR nor
+  // waived. Empty means no run and no snapshot. It routes nothing and is never
+  // sent to a provider.
+  string run_id = 22;
+
   // The model the turn itself was served by (EP-13 S4). Read only when `model`
   // is `verevon-role`: the role table tries its own candidates first, then this
   // model, then the cheap fallback. Empty names none. It carries no content, so

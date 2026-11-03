@@ -3274,6 +3274,10 @@ async fn run_rounds(
             super::run_effort::round_level(super::run_effort::enabled(), req.reasoning_effort);
         let mut infer_request = tonic::Request::new(pb::InferRequest {
             purpose: ctx.purpose,
+            // The run the round belongs to, so inference-core can attribute a request
+            // snapshot to it (EP-14 S6). It routes nothing; inference-core records
+            // nothing unless INFERENCE_REQUEST_CAPTURE is on and the run is not ZDR.
+            run_id: req.run_id.clone(),
             // No extended thinking on the governed agent loop: the effort
             // dial is a chat-surface control, and a deployed agent's budget
             // is its round budget.
@@ -10684,6 +10688,9 @@ mod tests {
     /// `(reasoning_effort, thinking_budget_tokens)` of each `InferRequest`, in call order.
     type ObservedEffort = Arc<Mutex<Vec<(i32, i32)>>>;
 
+    /// `(run_id, purpose)` of each `InferRequest`, in call order.
+    type ObservedAttribution = Arc<Mutex<Vec<(String, i32)>>>;
+
     /// The route fields one `InferRequest` carried, in call order.
     #[derive(Clone, Debug, PartialEq, Eq)]
     struct ObservedRoute {
@@ -10745,6 +10752,9 @@ mod tests {
         /// `(reasoning_effort, thinking_budget_tokens)` of each `InferRequest`, in call order:
         /// the evidence of which level a run's rounds were sent.
         observed_effort: ObservedEffort,
+        /// `(run_id, purpose)` of each `InferRequest`, in call order: the evidence of which
+        /// run each round names for its request snapshot (EP-14 S6).
+        observed_attribution: ObservedAttribution,
         /// When set, every `infer` call holds for `delay` while counting itself
         /// in-flight, so a test can read back how many ran AT ONCE. Absent for
         /// every ordinary test: no sleep, no counting.
@@ -10783,6 +10793,7 @@ mod tests {
                 observed_tooling: Arc::default(),
                 observed_images: Arc::default(),
                 observed_effort: Arc::default(),
+                observed_attribution: Arc::default(),
                 probe: None,
             }
         }
@@ -10797,6 +10808,7 @@ mod tests {
                 observed_tooling: Arc::default(),
                 observed_images: Arc::default(),
                 observed_effort: Arc::default(),
+                observed_attribution: Arc::default(),
                 probe: None,
             }
         }
@@ -10814,6 +10826,7 @@ mod tests {
                 observed_tooling: Arc::default(),
                 observed_images: Arc::default(),
                 observed_effort: Arc::default(),
+                observed_attribution: Arc::default(),
                 probe: None,
             }
         }
@@ -10828,6 +10841,7 @@ mod tests {
                 observed_tooling: Arc::default(),
                 observed_images: Arc::default(),
                 observed_effort: Arc::default(),
+                observed_attribution: Arc::default(),
                 probe: None,
             }
         }
@@ -10842,6 +10856,7 @@ mod tests {
                 observed_tooling: Arc::default(),
                 observed_images: Arc::default(),
                 observed_effort: Arc::default(),
+                observed_attribution: Arc::default(),
                 probe: Some(probe),
             }
         }
@@ -10865,6 +10880,7 @@ mod tests {
                 observed_tooling: Arc::default(),
                 observed_images: Arc::default(),
                 observed_effort: Arc::default(),
+                observed_attribution: Arc::default(),
                 probe: None,
             }
         }
@@ -10910,6 +10926,10 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push((observed.reasoning_effort, observed.thinking_budget_tokens));
+            self.observed_attribution
+                .lock()
+                .unwrap()
+                .push((observed.run_id.clone(), observed.purpose));
             self.observed_images
                 .lock()
                 .unwrap()
@@ -13510,6 +13530,31 @@ mod tests {
             },
             Scripted::Answer("Done.".to_owned()),
         ]
+    }
+
+    /// Every round of a Do run names its run and the agent-round purpose, so inference-core can attribute
+    /// a request snapshot to the run (EP-14 S6). With capture off in inference-core the fields route nothing.
+    #[tokio::test]
+    async fn do_round_sets_run_id_and_purpose() {
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        real_rules_for(&rec);
+        let session_channel = spawn_session_channel(rec.clone()).await;
+        let observed_attribution: ObservedAttribution = Arc::default();
+        let inference_channel = spawn_inference_channel_inner(MockInference {
+            observed_attribution: observed_attribution.clone(),
+            ..MockInference::new(two_plain_rounds())
+        })
+        .await;
+        let req = sample_request();
+        let run_id = req.run_id.clone();
+        let resp = run_with_real_credentials(session_channel, inference_channel, req).await;
+        assert_eq!(resp.status, "completed", "{}", resp.final_output);
+        let agent_round = pb::InferPurpose::AgentRound as i32;
+        assert_eq!(
+            observed_attribution.lock().unwrap().clone(),
+            vec![(run_id.clone(), agent_round), (run_id, agent_round)],
+            "both rounds name the run and the agent-round purpose"
+        );
     }
 
     #[tokio::test]

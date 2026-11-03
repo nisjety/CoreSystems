@@ -821,9 +821,13 @@ fn subscription_scoped_request(request: InferRequest, route: &InferRequest) -> I
 /// Auxiliary calls take the turn's privacy-tier and residency floors on every
 /// route. Only a subscription route carried them before, so a title or a source
 /// judge of a floored turn could reach a provider the turn itself would refuse.
+///
+/// They also name the turn's run, so a request snapshot of a side call is filed
+/// under the run it served (EP-14 S6). The run id routes nothing.
 fn inherit_turn_floors(mut request: InferRequest, route: &InferRequest) -> InferRequest {
     request.min_privacy_tier = route.min_privacy_tier;
     request.min_residency.clone_from(&route.min_residency);
+    request.run_id.clone_from(&route.run_id);
     request
 }
 
@@ -1249,6 +1253,23 @@ mod aux_model_tests {
         let follow_ups = follow_ups_request(&route, "claude-sonnet-5-5", "req-3", "org-1", "question", "answer");
         assert_eq!(follow_ups.model, aux_model());
         assert!(follow_ups.role_fallback_model.is_empty());
+    }
+
+    #[test]
+    fn aux_requests_name_the_turns_run() {
+        // A side call's request snapshot is filed under the run it served (EP-14 S6); a turn with no
+        // run gives its side calls none.
+        let route = InferRequest {
+            model: "claude-sonnet-5-5".into(),
+            run_id: "run-1".into(),
+            ..Default::default()
+        };
+        let title = title_request(&route, "claude-sonnet-5-5", "req-3", "org-1", "question", "answer");
+        assert_eq!(title.run_id, "run-1");
+        let follow_ups = follow_ups_request(&route, "claude-sonnet-5-5", "req-3", "org-1", "question", "answer");
+        assert_eq!(follow_ups.run_id, "run-1");
+        let no_run = title_request(&InferRequest::default(), "claude-sonnet-5-5", "req-3", "org-1", "question", "answer");
+        assert!(no_run.run_id.is_empty());
     }
 }
 
@@ -4081,6 +4102,9 @@ pub async fn invoke_stream_sse(
             // takes its own through `direct_infer`.
             min_privacy_tier: min_privacy_tier_wire,
             purpose: InferPurpose::Answer as i32,
+            // Attributes the answer's request snapshot to the turn's run (EP-14 S6);
+            // the side calls inherit it through `inherit_turn_floors`. It routes nothing.
+            run_id: session_run_for_terminal.run_id.clone(),
             thinking_budget_tokens: thinking_plan.budget_tokens,
             reasoning_effort: thinking_plan.effort_wire(),
             prompt_tiers: answer_tiers,
@@ -8157,6 +8181,7 @@ pub(crate) fn authored_layers(
         org: req.org_instructions.clone(),
         space: req.space_instructions.clone(),
         persona: req.persona_instructions.clone(),
+        tone: crate::run_context::tone_for_turn(req.persona_tone.as_deref()),
         agent: agent_persona_message(req).map(|message| message.content),
     }
 }

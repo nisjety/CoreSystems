@@ -62,6 +62,12 @@ pub const BUILD_INFO: &str = "inference_core_build_info";
 pub const ZDR_ATTESTATION_REVIEW_BY: &str =
     "mp_inference_zdr_attestation_review_by_timestamp_seconds";
 
+/// Counter: request snapshots that were not stored (EP-14 S6), by closed reason:
+/// `queue_full` (the capture queue was full, the provider call went on) or
+/// `write_failed` (session-core refused or could not be reached). No org, user or
+/// run is a label.
+pub const REQUEST_SNAPSHOT_DROPPED_TOTAL: &str = "inference_request_snapshot_dropped_total";
+
 /// Label value for "the call failed before a provider answered, so no model or
 /// provider is known".
 pub const UNKNOWN: &str = "unknown";
@@ -125,6 +131,10 @@ pub fn describe() {
     describe_counter!(
         "inference_gemini_tool_dropped_total",
         "Gemini tool declarations left out of a request because their schema cannot be expressed for Vertex, by refusal reason."
+    );
+    describe_counter!(
+        REQUEST_SNAPSHOT_DROPPED_TOTAL,
+        "Request snapshots that were not stored, by reason (queue_full: the capture queue was full; write_failed: session-core refused or was unreachable). The provider call is never affected."
     );
     describe_gauge!(BUILD_INFO, "Version of the running inference-core binary.");
     describe_gauge!(
@@ -385,6 +395,12 @@ pub fn record_tokens_with_purpose(
         )
         .increment(tokens);
     }
+}
+
+/// Count one request snapshot that was not stored. `reason` is one of the closed
+/// values named on [`REQUEST_SNAPSHOT_DROPPED_TOTAL`].
+pub fn record_request_snapshot_dropped(reason: &'static str) {
+    counter!(REQUEST_SNAPSHOT_DROPPED_TOTAL, "reason" => reason).increment(1);
 }
 
 #[cfg(test)]

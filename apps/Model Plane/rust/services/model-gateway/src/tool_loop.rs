@@ -8516,6 +8516,9 @@ pub async fn run_tool_rounds_for_model_with_attachments(
             let mut decision = with_authorization(
                 InferRequest {
                     purpose: InferPurpose::ToolRound as i32,
+                    // Attributes the round's request snapshot to its run (EP-14 S6); empty for a
+                    // turn without a run. It routes nothing.
+                    run_id: run_id.to_owned(),
                     // A source-bound plan has many authority/dependency distinctions.
                     // Spend reasoning before drafting to avoid slower private repair
                     // rounds and keep the existing high-effort review independent.

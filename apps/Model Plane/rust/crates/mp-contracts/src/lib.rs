@@ -18,6 +18,7 @@ pub mod prompt_tier;
 pub mod provider_reads;
 pub mod provider_writes;
 pub mod queued_limits;
+pub mod request_snapshot;
 pub mod result_query;
 pub mod retention;
 pub mod run_context;
