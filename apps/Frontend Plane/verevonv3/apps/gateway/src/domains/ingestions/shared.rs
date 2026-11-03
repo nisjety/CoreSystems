@@ -24,7 +24,7 @@
 use std::time::Duration;
 
 use axum::{
-    http::{HeaderMap, StatusCode},
+    http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     Json,
 };
@@ -193,6 +193,12 @@ pub(super) fn created(data: Value) -> Response {
 /// 200 OK with `data` wrapped in the `{data}` success envelope.
 pub(super) fn okay(data: Value) -> Response {
     (StatusCode::OK, Json(ok(data))).into_response()
+}
+
+/// Adds `Cache-Control: no-store` to an answer that must not be kept: a signing secret,
+/// or a document read.
+pub(super) fn no_store(response: impl IntoResponse) -> Response {
+    ([(header::CACHE_CONTROL, "no-store")], response).into_response()
 }
 
 // ── URL normalization (SSRF guard for user-supplied targets) ────────────────

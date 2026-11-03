@@ -133,7 +133,7 @@ fn to_run_item(job: &Value) -> Value {
         query.map(Value::String).unwrap_or(Value::Null),
     );
 
-    json!({
+    let mut row = json!({
         "id": str_at(job, "job_id"),
         // The Temporal run id, stamped once the job starts. The evidence
         // endpoint (`/api/ingestions/evidence?runId=…`) proxies quarry-edge's
@@ -148,8 +148,49 @@ fn to_run_item(job: &Value) -> Value {
         "completedAt": str_or_null(job, "completed_at"),
         "target": target,
         "progress": Value::Object(progress),
+        // Who started the job (`{type, actor, ref}`) and which schedule fired it,
+        // so a run can say "manual" or "schedule X" instead of guessing.
+        "origin": job.get("origin").cloned().unwrap_or(Value::Null),
+        "scheduleId": str_or_null(job, "schedule_id"),
+        "phase": str_or_null(job, "phase"),
         "stats": stats,
-    })
+    });
+    if let Some(credits) = job.get("credits").and_then(to_credits) {
+        row["credits"] = credits;
+    }
+    row
+}
+
+/// Reshapes Quarry's `JobCredits` (`used`, `unit`, `basis`, `price_per_page`,
+/// `estimated`, `final`) into the SPA's camelCase. `None` when the edge sent no object.
+/// Quarry sends the field only while QUARRY_CONTROL__JOB_CREDITS is on, so a row
+/// without it stays as it was.
+pub(super) fn to_credits(credits: &Value) -> Option<Value> {
+    let object = credits.as_object()?;
+    Some(json!({
+        "used": object.get("used").cloned().unwrap_or(json!(0)),
+        "unit": object.get("unit").cloned().unwrap_or(json!("credit")),
+        "basis": object.get("basis").cloned().unwrap_or(json!("pages_fetched")),
+        "pricePerPage": object.get("price_per_page").cloned().unwrap_or(json!(0)),
+        "estimated": object.get("estimated").cloned().unwrap_or(json!(true)),
+        "final": object.get("final").cloned().unwrap_or(json!(false)),
+    }))
+}
+
+/// The extraction prompt of a run body, trimmed. Blank means none; a prompt over
+/// 10,000 characters is refused here, the same limit quarry-edge applies.
+fn extract_prompt(body: &Value) -> Result<Option<String>, String> {
+    let Some(raw) = body.get("prompt").and_then(Value::as_str) else {
+        return Ok(None);
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    if trimmed.chars().count() > 10_000 {
+        return Err("The extraction prompt must be at most 10,000 characters.".to_owned());
+    }
+    Ok(Some(trimmed.to_owned()))
 }
 
 // ── Create ────────────────────────────────────────────────────────────────
@@ -265,6 +306,35 @@ async fn create_batch(
     }))
 }
 
+/// The typed code for a structured-extraction refusal, read from the `error` text that
+/// quarry-edge sets. Quarry gives these refusals no `details.reason`, so the text is the only
+/// signal it sends. A text that matches none of the four keeps Quarry's own `UNSUPPORTED`.
+fn extract_refusal_code(text: &str) -> Option<&'static str> {
+    if text.contains("QUARRY_EDGE__AI_FORMATS is off") {
+        Some("extract_ai_formats_off")
+    } else if text.contains("QUARRY_EDGE__MODEL_PLANE_URL is not set") {
+        Some("extract_model_plane_not_configured")
+    } else if text.contains("holds no model credential") {
+        Some("extract_model_lane_not_granted")
+    } else if text.contains("refused this service") {
+        Some("extract_model_plane_refused")
+    } else {
+        None
+    }
+}
+
+/// The 501 body with the typed code at its top level, where the SPA reads it.
+fn with_extract_refusal_code(status: StatusCode, mut body: Value) -> Value {
+    if status != StatusCode::NOT_IMPLEMENTED {
+        return body;
+    }
+    let text = body.get("error").and_then(Value::as_str).unwrap_or_default();
+    if let Some(code) = extract_refusal_code(text) {
+        body["code"] = json!(code);
+    }
+    body
+}
+
 async fn create_extract(
     state: &AppState,
     body: &Value,
@@ -279,9 +349,20 @@ async fn create_extract(
         Err(message) => return validation(&message),
     };
 
+    // quarry-edge's `/v1/extract` reads both: a `schema` makes the extraction
+    // structured, and a `prompt` steers it (inside the schema) or asks for one
+    // free-form JSON object when it stands alone. With neither, the sources come
+    // back as markdown.
     let mut request = json!({ "urls": [url.clone()] });
-    if let Some(prompt) = first_str(body, &["prompt"]) {
-        request["prompt"] = Value::String(prompt);
+    match extract_schema(body) {
+        Ok(Some(schema)) => request["schema"] = schema,
+        Ok(None) => {}
+        Err(message) => return validation(&message),
+    }
+    match extract_prompt(body) {
+        Ok(Some(prompt)) => request["prompt"] = Value::String(prompt),
+        Ok(None) => {}
+        Err(message) => return validation(&message),
     }
     let (status, resp) = quarry_call(
         state,
@@ -293,7 +374,7 @@ async fn create_extract(
     )
     .await;
     if !status.is_success() {
-        return forward(status, resp);
+        return forward(status, with_extract_refusal_code(status, resp));
     }
 
     let data = unwrap_data(&resp);
@@ -307,13 +388,12 @@ async fn create_extract(
         .filter(|s| !s.is_empty())
         .unwrap_or(&url)
         .to_owned();
-    let run_status = first
-        .get("status")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .unwrap_or("completed")
-        .to_owned();
+    // quarry-edge reports per source: "ok" (structured), "fetched" (markdown only)
+    // or "error". A failed source is a failed run; the other two are completed.
+    let run_status = match first.get("status").and_then(Value::as_str).map(str::trim) {
+        Some("error") => "failed",
+        _ => "completed",
+    };
 
     okay(json!({
         "run": {
@@ -406,6 +486,22 @@ async fn create_scrape(
 
 // ── Small helpers ───────────────────────────────────────────────────────────
 
+/// The extraction schema of a run body: a JSON object, or the same document sent
+/// as text. `Ok(None)` when none was sent; an unreadable schema is a validation error.
+fn extract_schema(body: &Value) -> Result<Option<Value>, String> {
+    match body.get("schema") {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(text)) if text.trim().is_empty() => Ok(None),
+        Some(Value::String(text)) => serde_json::from_str::<Value>(text)
+            .ok()
+            .filter(Value::is_object)
+            .map(Some)
+            .ok_or_else(|| "The extraction schema must be a JSON object.".to_owned()),
+        Some(value) if value.is_object() => Ok(Some(value.clone())),
+        Some(_) => Err("The extraction schema must be a JSON object.".to_owned()),
+    }
+}
+
 fn handoff_id(data: &Value) -> String {
     first_str(data, &["job_id", "jobId", "id", "run_id", "runId"]).unwrap_or_default()
 }
@@ -421,6 +517,34 @@ fn handoff_accepted_at(data: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// INNH-1 / INNH-9: the job's credits pass through in camelCase, and a row without
+    /// them (the flag is off) has no `credits` key at all, not a null one.
+    #[test]
+    fn run_rows_carry_credits_only_when_quarry_sends_them() {
+        let with = json!({
+            "job_id": "job-2", "kind": "crawl", "status": "running", "created_at": "t",
+            "credits": { "used": 12.0, "unit": "credit", "basis": "pages_fetched",
+                         "price_per_page": 1.0, "estimated": true, "final": false }
+        });
+        let row = to_run_item(&with);
+        assert_eq!(row["credits"]["used"], 12.0);
+        assert_eq!(row["credits"]["pricePerPage"], 1.0);
+        assert_eq!(row["credits"]["final"], false);
+        let without = json!({ "job_id": "job-3", "kind": "crawl", "status": "running", "created_at": "t" });
+        assert!(to_run_item(&without).get("credits").is_none());
+    }
+
+    /// INNH-2: a prompt is trimmed; blank means none; over 10,000 characters is refused.
+    #[test]
+    fn extract_prompt_is_trimmed_and_bounded() {
+        assert_eq!(extract_prompt(&json!({ "prompt": "  Find the price  " })).unwrap().as_deref(), Some("Find the price"));
+        assert_eq!(extract_prompt(&json!({ "prompt": "   " })).unwrap(), None);
+        assert_eq!(extract_prompt(&json!({})).unwrap(), None);
+        let long = "x".repeat(10_001);
+        assert!(extract_prompt(&json!({ "prompt": long })).is_err());
+        assert!(extract_prompt(&json!({ "prompt": "y".repeat(10_000) })).is_ok());
+    }
 
     #[test]
     fn to_run_item_derives_target_and_progress() {
@@ -459,5 +583,47 @@ mod tests {
         let item = to_run_item(&job);
         assert_eq!(item["target"], "crawl target");
         assert_eq!(item["progress"]["pages"], 5);
+    }
+
+    #[test]
+    fn each_of_the_four_extract_refusals_gets_its_own_code() {
+        let texts = [
+            (
+                "structured extraction needs the Model Plane, and QUARRY_EDGE__MODEL_PLANE_URL is not set on this deployment",
+                "extract_model_plane_not_configured",
+            ),
+            (
+                "structured extraction needs a granted Model Plane lane, and this deployment holds no model credential",
+                "extract_model_lane_not_granted",
+            ),
+            (
+                "structured extraction needs a granted Model Plane lane, and the Model Plane refused this service",
+                "extract_model_plane_refused",
+            ),
+            (
+                "structured extraction is not available on this edge: QUARRY_EDGE__AI_FORMATS is off",
+                "extract_ai_formats_off",
+            ),
+        ];
+        for (text, code) in texts {
+            assert_eq!(extract_refusal_code(text), Some(code), "{text}");
+        }
+    }
+
+    #[test]
+    fn an_unknown_extract_refusal_keeps_quarry_s_own_code() {
+        assert_eq!(extract_refusal_code("a refusal this gateway has not seen"), None);
+        let body = json!({ "error": "a refusal this gateway has not seen", "code": "UNSUPPORTED" });
+        let kept = with_extract_refusal_code(StatusCode::NOT_IMPLEMENTED, body);
+        assert_eq!(kept["code"], "UNSUPPORTED");
+    }
+
+    #[test]
+    fn the_code_is_set_only_on_a_501_refusal() {
+        let body = json!({ "error": "QUARRY_EDGE__AI_FORMATS is off", "code": "UNSUPPORTED" });
+        let other_status = with_extract_refusal_code(StatusCode::BAD_REQUEST, body.clone());
+        assert_eq!(other_status["code"], "UNSUPPORTED");
+        let refused = with_extract_refusal_code(StatusCode::NOT_IMPLEMENTED, body);
+        assert_eq!(refused["code"], "extract_ai_formats_off");
     }
 }

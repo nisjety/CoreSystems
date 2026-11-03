@@ -25,14 +25,16 @@ use crate::{
 
 const PREVIEW_MARKDOWN_CHAR_LIMIT: usize = 80_000;
 
-/// WS13.5: the ceiling for a scrape that drives the browser (actions, a screenshot, a
-/// PDF). The edge bounds an actions run at 115 s and its router at 125 s, so the edge
-/// answers with its typed timeout before this one fires. Every other scrape keeps the
-/// standard client's 25 s.
-const SCRAPE_BROWSER_TIMEOUT: Duration = Duration::from_secs(125);
+/// WS13.5 and INNH-1: the ceiling for a scrape that drives the browser (actions, a
+/// screenshot, a PDF) or asks a model about the page (the AI formats). The edge's
+/// route allows 125 s for both, so this client waits a little longer and the edge
+/// answers with its own typed timeout first. Every other scrape keeps the standard
+/// client's 25 s.
+const SCRAPE_BROWSER_TIMEOUT: Duration = Duration::from_secs(135);
 
 /// Whether a scrape body asks for work that outlasts the standard 25 s: a non-empty
-/// `actions` list, an object-form format, or a `screenshot` or `pdf` format.
+/// `actions` list, an object-form format (a capture or an AI format), or a
+/// `screenshot`, `pdf` or `summary` string format.
 fn scrape_needs_browser_budget(body: &Value) -> bool {
     let has_actions = body
         .get("actions")
@@ -44,7 +46,7 @@ fn scrape_needs_browser_budget(body: &Value) -> bool {
         .is_some_and(|formats| {
             formats.iter().any(|format| match format {
                 Value::Object(_) => true,
-                Value::String(name) => matches!(name.as_str(), "screenshot" | "pdf"),
+                Value::String(name) => matches!(name.as_str(), "screenshot" | "pdf" | "summary"),
                 _ => false,
             })
         });
@@ -839,8 +841,119 @@ pub(crate) fn normalize_crawl_body_for(input: &Value, surface: Surface) -> Resul
     if !exclude.is_empty() {
         body["exclude_paths"] = json!(exclude);
     }
+    // INNH-6: sitemap discovery, and the cleaning options each page is scraped with.
+    // Absent or null means the edge default.
+    if let Some(sitemap) = input.get("sitemap").filter(|value| !value.is_null()) {
+        let mode = sitemap
+            .as_str()
+            .filter(|mode| matches!(*mode, "skip" | "include" | "only"));
+        let Some(mode) = mode else {
+            return Err("sitemap must be skip, include or only.".to_owned());
+        };
+        body["sitemap"] = json!(mode);
+    }
+    if let Some(options) = input
+        .get("scrape_options")
+        .or_else(|| input.get("scrapeOptions"))
+        .filter(|value| !value.is_null())
+    {
+        let options = scrape_options_body(options)?;
+        if !options.is_empty() {
+            body["scrape_options"] = Value::Object(options);
+        }
+    }
 
     Ok(body)
+}
+
+/// The formats a crawl page can return (`scrape_options.formats`).
+const CRAWL_PAGE_FORMATS: [&str; 5] = ["markdown", "html", "rawHtml", "links", "metadata"];
+
+/// The per-page cleaning options of a crawl (INNH-6), in snake case from either spelling.
+/// Only the keys Quarry applies to each page pass. Anything else is refused by name, so a
+/// crawl cannot carry a capture, an action or an AI format through `scrape_options`.
+fn scrape_options_body(input: &Value) -> Result<serde_json::Map<String, Value>, String> {
+    let object = input
+        .as_object()
+        .ok_or_else(|| "scrape_options must be an object.".to_owned())?;
+    let mut out = serde_json::Map::new();
+    for (key, value) in object {
+        let field = match key.as_str() {
+            "formats" => "formats",
+            "extractor" => "extractor",
+            "onlyMainContent" | "only_main_content" => "only_main_content",
+            "includeTags" | "include_tags" => "include_tags",
+            "excludeTags" | "exclude_tags" => "exclude_tags",
+            "removeBase64Images" | "remove_base64_images" => "remove_base64_images",
+            "timeoutMs" | "timeout_ms" => "timeout_ms",
+            other => return Err(format!("scrape_options.{other} is not supported here.")),
+        };
+        let checked = match field {
+            "formats" => {
+                let formats = value
+                    .as_array()
+                    .ok_or_else(|| "scrape_options.formats must be a list.".to_owned())?;
+                let mut kept = Vec::with_capacity(formats.len());
+                for format in formats {
+                    let name = format
+                        .as_str()
+                        .filter(|name| CRAWL_PAGE_FORMATS.contains(name))
+                        .ok_or_else(|| {
+                            format!("scrape_options.formats has an unsupported format: {format}.")
+                        })?;
+                    kept.push(json!(name));
+                }
+                Value::Array(kept)
+            }
+            "extractor" => {
+                let name = value
+                    .as_str()
+                    .filter(|name| matches!(*name, "readability" | "clean_full" | "raw"))
+                    .ok_or_else(|| {
+                        "scrape_options.extractor must be readability, clean_full or raw.".to_owned()
+                    })?;
+                json!(name)
+            }
+            "only_main_content" | "remove_base64_images" => json!(value.as_bool().ok_or_else(|| {
+                format!("scrape_options.{field} must be true or false.")
+            })?),
+            "include_tags" | "exclude_tags" => selector_list(value, field)?,
+            _ => json!(value
+                .as_u64()
+                .filter(|ms| (1_000..=55_000).contains(ms))
+                .ok_or_else(|| {
+                    "scrape_options.timeout_ms must be between 1000 and 55000.".to_owned()
+                })?),
+        };
+        out.insert(field.to_owned(), checked);
+    }
+    Ok(out)
+}
+
+/// A CSS selector list of a crawl page's cleaning options: at most 32 entries, each
+/// non-blank and at most 256 characters.
+fn selector_list(value: &Value, field: &str) -> Result<Value, String> {
+    let items = value
+        .as_array()
+        .ok_or_else(|| format!("scrape_options.{field} must be a list of selectors."))?;
+    if items.len() > 32 {
+        return Err(format!("scrape_options.{field} is limited to 32 selectors."));
+    }
+    let mut out = Vec::with_capacity(items.len());
+    for item in items {
+        let selector = item
+            .as_str()
+            .map(str::trim)
+            .filter(|selector| !selector.is_empty())
+            .ok_or_else(|| format!("scrape_options.{field} entries must be non-blank strings."))?;
+        if selector.chars().count() > 256 {
+            return Err(format!(
+                "scrape_options.{field} entries are limited to 256 characters."
+            ));
+        }
+        out.push(json!(selector));
+    }
+    Ok(Value::Array(out))
 }
 
 /// Validate the curated subset a user picked from `/crawl/discover` into a
@@ -1240,7 +1353,77 @@ mod tests {
         assert!(!long(json!({ "url": "https://e.test/" })));
         assert!(!long(json!({ "url": "https://e.test/", "actions": [] })));
         assert!(!long(json!({ "formats": ["markdown", "html"] })));
-        assert_eq!(SCRAPE_BROWSER_TIMEOUT, Duration::from_secs(125));
+        // INNH-1: the AI formats are model calls, so they share the long ceiling.
+        assert!(long(json!({ "formats": ["markdown", "summary"] })));
+        assert!(long(json!({ "formats": ["markdown", { "type": "json", "schema": { "type": "object" } }] })));
+        assert!(long(json!({ "formats": [{ "type": "highlights", "query": "price" }] })));
+        // The edge's route allows 125 s; this client must wait longer than that.
+        assert!(SCRAPE_BROWSER_TIMEOUT > Duration::from_secs(125));
+    }
+
+    /// INNH-1: the AI format objects reach the edge exactly as the caller sent them,
+    /// and an AI scrape runs under the long ceiling. The edge's answer (the inline
+    /// `json`, `summary` and `ai` report) comes back unchanged too.
+    #[tokio::test]
+    async fn ai_format_objects_pass_through_unchanged_and_get_the_long_ceiling() {
+        use wiremock::matchers::{method as wm_method, path as wm_path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let quarry = MockServer::start().await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/v1/scrape"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_delay(Duration::from_millis(1500))
+                    .set_body_json(json!({
+                        "data": {
+                            "status": 200,
+                            "markdown": "# Price 2 190 NOK",
+                            "json": { "title": "Ridge 40" },
+                            "summary": "A gravel bike.",
+                            "ai": {
+                                "json": { "status": "ok", "untrusted_source": true, "schema_valid": true, "repair": "none" },
+                                "total": { "calls": 1, "input_tokens": 10, "output_tokens": 4 }
+                            }
+                        }
+                    })),
+            )
+            .mount(&quarry)
+            .await;
+        let mut state = crate::tests::test_state(false);
+        state.quarry_edge_url = quarry.uri();
+        state.client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(1))
+            .build()
+            .unwrap();
+        let format_objects = json!([
+            "markdown",
+            { "type": "json", "schema": { "type": "object", "required": ["title"], "properties": { "title": { "type": "string" } } } },
+            { "type": "summary", "max_chars": 300 },
+        ]);
+        let response = scrape(
+            State(state),
+            Extension(preview_user()),
+            None,
+            HeaderMap::new(),
+            Json(json!({ "url": "https://example.com/p", "formats": format_objects.clone() })),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::OK, "an AI scrape outlasts the 1 s client default");
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let answer: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(answer["data"]["json"]["title"], "Ridge 40");
+        assert_eq!(answer["data"]["ai"]["total"]["calls"], 1);
+
+        let received = quarry.received_requests().await.unwrap();
+        let forwarded: Value = received
+            .iter()
+            .find(|request| request.url.path() == "/v1/scrape")
+            .map(|request| serde_json::from_slice(&request.body).unwrap())
+            .expect("the scrape reached the edge");
+        assert_eq!(forwarded["formats"], format_objects, "the AI format objects are forwarded unchanged");
+        assert!(forwarded.get("initiated_by").is_none(), "a person's scrape carries no origin stamp");
     }
 
     /// WS13.5: the origin stamp is tighten-only and comes from the verified caller.
@@ -1404,6 +1587,116 @@ mod tests {
     fn crawl_site_action_goes_through_the_ssrf_normalizer() {
         assert!(normalize_crawl_body_for(&json!({ "url": "http://127.0.0.1/" }), Surface::Model).is_err());
         assert!(normalize_crawl_body_for(&json!({ "url": "http://localhost/" }), Surface::Model).is_err());
+    }
+
+    /// INNH-6: the sitemap mode and the per-page cleaning options reach the edge in snake
+    /// case, from either spelling. An empty options object is left out.
+    #[test]
+    fn crawl_body_forwards_sitemap_and_page_options() {
+        let body = normalize_crawl_body(&json!({
+            "url": "https://example.com/",
+            "sitemap": "include",
+            "scrapeOptions": {
+                "onlyMainContent": false,
+                "includeTags": ["main", " article "],
+                "excludeTags": [".cookie-banner"],
+                "removeBase64Images": true,
+                "timeoutMs": 20000,
+                "extractor": "clean_full",
+                "formats": ["markdown", "links"],
+            },
+        }))
+        .unwrap();
+        assert_eq!(body["sitemap"], json!("include"));
+        assert_eq!(body["scrape_options"]["only_main_content"], json!(false));
+        assert_eq!(body["scrape_options"]["include_tags"], json!(["main", "article"]));
+        assert_eq!(body["scrape_options"]["exclude_tags"], json!([".cookie-banner"]));
+        assert_eq!(body["scrape_options"]["remove_base64_images"], json!(true));
+        assert_eq!(body["scrape_options"]["timeout_ms"], json!(20_000));
+        assert_eq!(body["scrape_options"]["extractor"], json!("clean_full"));
+        assert_eq!(body["scrape_options"]["formats"], json!(["markdown", "links"]));
+
+        let plain = normalize_crawl_body(&json!({
+            "url": "https://example.com/",
+            "sitemap": "skip",
+            "scrape_options": {},
+        }))
+        .unwrap();
+        assert_eq!(plain["sitemap"], json!("skip"));
+        assert!(plain.get("scrape_options").is_none());
+
+        let absent = normalize_crawl_body(&json!({ "url": "https://example.com/", "sitemap": null })).unwrap();
+        assert!(absent.get("sitemap").is_none());
+    }
+
+    /// INNH-6: every sitemap value and page option Quarry cannot apply is refused, by name.
+    #[test]
+    fn crawl_body_refuses_sitemap_and_page_options_it_cannot_apply() {
+        let with = |key: &str, value: Value| {
+            let mut input = json!({ "url": "https://example.com/" });
+            input[key] = value;
+            normalize_crawl_body(&input)
+        };
+        assert_eq!(
+            with("sitemap", json!("all")).unwrap_err(),
+            "sitemap must be skip, include or only."
+        );
+        assert_eq!(
+            with("scrape_options", json!("main")).unwrap_err(),
+            "scrape_options must be an object."
+        );
+        assert_eq!(
+            with("scrape_options", json!({ "actions": [] })).unwrap_err(),
+            "scrape_options.actions is not supported here."
+        );
+        assert!(with("scrape_options", json!({ "formats": ["screenshot"] })).unwrap_err().contains("screenshot"));
+        assert!(with("scrape_options", json!({ "formats": "markdown" })).is_err());
+        assert!(with("scrape_options", json!({ "include_tags": vec!["div"; 33] })).is_err());
+        assert!(with("scrape_options", json!({ "exclude_tags": [" "] })).is_err());
+        assert!(with("scrape_options", json!({ "include_tags": ["x".repeat(257)] })).is_err());
+        assert!(with("scrape_options", json!({ "extractor": "magic" })).is_err());
+        assert!(with("scrape_options", json!({ "timeout_ms": 999 })).is_err());
+        assert!(with("scrape_options", json!({ "timeout_ms": 55_001 })).is_err());
+        assert!(with("scrape_options", json!({ "only_main_content": "yes" })).is_err());
+    }
+
+    /// INNH-7: `max_age` and `cache` are not gateway fields. The scrape body passes through,
+    /// so the edge receives the freshness window and the cache policy as the caller sent them.
+    #[tokio::test]
+    async fn scrape_forwards_max_age_and_cache_unchanged() {
+        use wiremock::matchers::{method as wm_method, path as wm_path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let quarry = MockServer::start().await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/v1/scrape"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": { "status": 200, "markdown": "# A", "effective_options": { "cache_state": "miss" } }
+            })))
+            .mount(&quarry)
+            .await;
+        let mut state = crate::tests::test_state(false);
+        state.quarry_edge_url = quarry.uri();
+        let response = scrape(
+            State(state),
+            Extension(preview_user()),
+            None,
+            HeaderMap::new(),
+            Json(json!({
+                "url": "https://example.com/p",
+                "max_age": 120_000,
+                "cache": { "max_age_s": 60 },
+            })),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let received = quarry.received_requests().await.unwrap();
+        let forwarded: Value = serde_json::from_slice(&received[0].body).unwrap();
+        assert_eq!(forwarded["max_age"], json!(120_000));
+        assert_eq!(forwarded["cache"]["max_age_s"], json!(60));
+        assert!(forwarded["cache"].get("mode").is_none());
     }
 
     #[test]

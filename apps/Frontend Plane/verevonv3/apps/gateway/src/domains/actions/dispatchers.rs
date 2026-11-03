@@ -36,6 +36,7 @@ use crate::domains::chat::json_handlers::{
     queue_invocation_input as queue_chat_invocation_input, submit_feedback as submit_chat_feedback,
 };
 use crate::domains::inbox::{create_ai_text_proposal, require_support_ai_review};
+use crate::domains::ingestions::jobs::control_job as control_ingestion_job;
 use crate::domains::ingestions::runs::create_run as create_ingestion_run;
 use crate::domains::ingestions::schedules::{
     create_schedule as create_ingestion_schedule, schedule_actions as run_ingestion_schedule_action,
@@ -61,7 +62,9 @@ use crate::domains::memory::{
     delete_memory, remember_memory, reset_memory, set_memory_controls, RememberBody, ResetBody,
     SetControlsBody,
 };
-use crate::domains::monitoring::{check_now, CheckRequest};
+use crate::domains::monitoring::{
+    check_now, create_monitor, delete_monitor, CheckRequest, CreateMonitorRequest,
+};
 use crate::domains::orchestration::{
     cancel_run as cancel_orchestration_run, decide_approval as decide_orchestration_approval,
     resume_run as resume_orchestration_run,
@@ -3817,6 +3820,54 @@ pub(super) async fn dispatch_monitoring_check_now(
     owner_json_response_to_envelope("monitoring.check_now", user, status, payload)
 }
 
+// Reuses the real create_monitor so the SSRF guard and the hourly/daily/weekly
+// preset check stay in one place.
+pub(super) async fn dispatch_monitoring_create_monitor(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    input: &Value,
+) -> Response {
+    let url = ticket_string(input, "url");
+    if url.is_empty() {
+        return ticket_bad_request("monitoring.create_monitor requires a non-empty 'url'");
+    }
+    let preset = ticket_string(input, "preset");
+    let response = create_monitor(
+        StateExtractor(state.clone()),
+        ExtensionExtractor(user.clone()),
+        headers.clone(),
+        Json(CreateMonitorRequest {
+            url: Some(url.to_owned()),
+            preset: (!preset.is_empty()).then(|| preset.to_owned()),
+        }),
+    )
+    .await;
+    let (status, payload) = response_to_status_and_json(response).await;
+    owner_json_response_to_envelope("monitoring.create_monitor", user, status, payload)
+}
+
+pub(super) async fn dispatch_monitoring_delete_monitor(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    input: &Value,
+) -> Response {
+    let monitor_id = ticket_string(input, "monitorId");
+    if monitor_id.is_empty() {
+        return ticket_bad_request("monitoring.delete_monitor requires a non-empty 'monitorId'");
+    }
+    let response = delete_monitor(
+        StateExtractor(state.clone()),
+        ExtensionExtractor(user.clone()),
+        headers.clone(),
+        PathExtractor(monitor_id.to_owned()),
+    )
+    .await;
+    let (status, payload) = response_to_status_and_json(response).await;
+    owner_json_response_to_envelope("monitoring.delete_monitor", user, status, payload)
+}
+
 // Reuses the real erase handler rather than reconstructing its URL and
 // confirm-check by hand — this is the highest-stakes action in the registry
 // (irreversible account erasure), and a hand-rolled copy is exactly where a
@@ -4110,6 +4161,88 @@ pub(super) async fn dispatch_ingestions_create_run(
     .await;
     let (status, payload) = response_to_status_and_json(response).await;
     owner_json_response_to_envelope("ingestions.create_run", user, status, payload)
+}
+
+/// `ingestions.job_control` → pause, resume or cancel a crawl or batch job. The
+/// same function the REST route calls, so the action and the page cannot disagree.
+pub(super) async fn dispatch_ingestions_job_control(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    input: &Value,
+) -> Response {
+    let job_id = ticket_string(input, "jobId");
+    if job_id.is_empty() {
+        return ticket_bad_request("ingestions.job_control requires a non-empty 'jobId'");
+    }
+    let action = ticket_string(input, "action");
+    let response = control_ingestion_job(state, user, headers, job_id, action).await;
+    let (status, payload) = response_to_status_and_json(response).await;
+    owner_json_response_to_envelope("ingestions.job_control", user, status, payload)
+}
+
+/// `ingestions.start_agent_run` → open a browser session on `url` and start a
+/// durable browser-agent run with `goal`. Both steps are the handlers the browser
+/// workspace uses, so an agent run started here is the same run the browser shows.
+pub(super) async fn dispatch_ingestions_start_agent_run(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    input: &Value,
+) -> Response {
+    let url = ticket_string(input, "url");
+    let goal = ticket_string(input, "goal");
+    if url.is_empty() || goal.is_empty() {
+        return ticket_bad_request("ingestions.start_agent_run requires a non-empty 'url' and 'goal'");
+    }
+    let Ok(session_body) = serde_json::from_value::<CreateSessionBody>(json!({ "url": url })) else {
+        return ticket_bad_request("ingestions.start_agent_run requires a valid 'url'");
+    };
+    let session = create_browser_session(
+        StateExtractor(state.clone()),
+        ExtensionExtractor(user.clone()),
+        headers.clone(),
+        Json(session_body),
+    )
+    .await;
+    let (status, session_payload) = response_to_status_and_json(session).await;
+    if !status.is_success() {
+        return owner_json_response_to_envelope("ingestions.start_agent_run", user, status, session_payload);
+    }
+    let session_id = session_payload
+        .pointer("/data/session/id")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    if session_id.is_empty() {
+        return (
+            StatusCode::BAD_GATEWAY,
+            Json(error("upstream_invalid", "The browser session had no id.")),
+        )
+            .into_response();
+    }
+    let Ok(run_body) = serde_json::from_value::<StartAiRunBody>(json!({
+        "goal": goal,
+        "maxSteps": input.get("maxSteps").cloned().unwrap_or(Value::Null),
+        "allowedDomains": input.get("allowedDomains").cloned().unwrap_or(Value::Null),
+    })) else {
+        return ticket_bad_request("ingestions.start_agent_run requires a valid 'maxSteps'");
+    };
+    let run = start_browser_ai_run(
+        StateExtractor(state.clone()),
+        ExtensionExtractor(user.clone()),
+        headers.clone(),
+        PathExtractor(session_id.clone()),
+        Json(run_body),
+    )
+    .await;
+    let (status, mut payload) = response_to_status_and_json(run).await;
+    if status.is_success() {
+        if let Some(data) = payload.get_mut("data").and_then(Value::as_object_mut) {
+            data.insert("session_id".into(), json!(session_id));
+        }
+    }
+    owner_json_response_to_envelope("ingestions.start_agent_run", user, status, payload)
 }
 
 pub(super) async fn dispatch_ingestions_create_schedule(

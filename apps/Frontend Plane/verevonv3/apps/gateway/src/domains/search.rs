@@ -102,6 +102,18 @@ pub(crate) async fn search_web(
         .or_else(|| body.get("exact_match"))
         .and_then(Value::as_bool)
         .unwrap_or(false);
+    // Two-letter market (`NO`) and language (`no`) hints; quarry-edge applies them
+    // to the provider query. Blank values are dropped, never forwarded.
+    let country = body
+        .get("country")
+        .and_then(Value::as_str)
+        .map(|s| s.trim().to_ascii_uppercase())
+        .filter(|s| s.len() == 2 && s.chars().all(|c| c.is_ascii_alphabetic()));
+    let language = body
+        .get("language")
+        .and_then(Value::as_str)
+        .map(|s| s.trim().to_ascii_lowercase())
+        .filter(|s| (2..=3).contains(&s.len()) && s.chars().all(|c| c.is_ascii_alphabetic()));
     let include_domains = string_array(
         body.get("includeDomains")
             .or_else(|| body.get("include_domains")),
@@ -230,6 +242,11 @@ pub(crate) async fn search_web(
         include_domains.join(","),
         exclude_domains.join(","),
     );
+    let filters_sig = format!(
+        "{filters_sig}|{}|{}",
+        country.as_deref().unwrap_or(""),
+        language.as_deref().unwrap_or(""),
+    );
     let key = admission.key(
         "search-web",
         &[
@@ -271,6 +288,12 @@ pub(crate) async fn search_web(
     if exact_match {
         payload["exact_match"] = json!(true);
     }
+    if let Some(country) = &country {
+        payload["country"] = json!(country);
+    }
+    if let Some(language) = &language {
+        payload["language"] = json!(language);
+    }
     if !include_domains.is_empty() {
         payload["include_domains"] = json!(include_domains);
     }
@@ -299,11 +322,16 @@ pub(crate) async fn search_web(
                 .map(Value::from)
                 .unwrap_or(Value::Null);
             let citations = data.get("citations").cloned().unwrap_or_else(|| json!([]));
+            // INNH-8: why there is or is not an answer (ok, no_sources, skipped_zdr, unavailable).
+            let answer_status = data.get("answer_status").cloned().unwrap_or(Value::Null);
+            let answer_reason = data.get("answer_reason").cloned().unwrap_or(Value::Null);
             let cached_payload = json!({
                 "mode": "search",
                 "results": results,
                 "answer": answer,
                 "citations": citations,
+                "answerStatus": answer_status,
+                "answerReason": answer_reason,
             });
             if let (Some(key), Some(scope), true) =
                 (key.as_deref(), admission.scope(), admission.may_write)

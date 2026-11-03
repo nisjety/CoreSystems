@@ -792,6 +792,16 @@ const monitoringCheckNowInput = z.object({
   url: z.string().url(),
 })
 
+// The gateway accepts only the fixed cadences; Quarry derives the cron from them.
+const monitoringCreateMonitorInput = z.object({
+  url: z.string().url(),
+  preset: z.enum(['hourly', 'daily', 'weekly']).optional(),
+})
+
+const monitoringDeleteMonitorInput = z.object({
+  monitorId: z.string().min(1),
+})
+
 // The client always sends confirm: true itself and never lets the caller
 // override it (see eraseMyAccount); no input fields are meaningful here.
 const privacyEraseMyAccountInput = z.object({})
@@ -871,11 +881,26 @@ const ingestionsCreateRunInput = z
     kind: z.string().min(1),
     urls: z.array(z.string().url()).optional(),
     url: z.string().url().optional(),
-    prompt: z.string().trim().optional(),
+    // Extract only: a JSON Schema object (or the same document as text).
+    schema: z.union([z.record(z.string(), z.unknown()), z.string()]).optional(),
+    // Extract only: instructions for the model (1 to 10,000 characters after trimming).
+    prompt: z.string().trim().max(10_000).optional(),
   })
   .refine((value) => (value.kind === 'batch' ? (value.urls?.length ?? 0) > 0 : !!value.url), {
     message: "kind 'batch' requires a non-empty 'urls' array; any other kind requires 'url'",
   })
+
+const ingestionsJobControlInput = z.object({
+  jobId: z.string().min(1),
+  action: z.enum(['pause', 'resume', 'cancel']),
+})
+
+const ingestionsStartAgentRunInput = z.object({
+  url: z.string().url(),
+  goal: z.string().trim().min(1).max(2000),
+  maxSteps: z.number().int().min(1).max(100).optional(),
+  allowedDomains: z.array(z.string().min(1)).max(50).optional(),
+})
 
 const ingestionsCreateScheduleInput = z
   .object({
@@ -2694,6 +2719,28 @@ export const actionRegistry = [
     outputSchema: envelopeStatusOutput,
   },
   {
+    id: 'monitoring.create_monitor',
+    label: 'Create change monitor',
+    description: 'Re-check a URL hourly, daily or weekly and record a baseline whenever its content changes.',
+    ownerPlane: 'ingestion',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: monitoringCreateMonitorInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'monitoring.delete_monitor',
+    label: 'Delete change monitor',
+    description: 'Stop and remove a recurring change monitor. Baselines already captured are kept.',
+    ownerPlane: 'ingestion',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: false,
+    inputSchema: monitoringDeleteMonitorInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
     id: 'privacy.erase_my_account',
     label: 'Erase my account',
     description: 'Irreversibly erase the caller\'s own account (GDPR Art. 17). Requires a client-side typed-confirm and step-up re-authentication that this contract cannot itself enforce.',
@@ -2801,6 +2848,28 @@ export const actionRegistry = [
     requiresApproval: false,
     reversible: true,
     inputSchema: ingestionsCreateRunInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'ingestions.job_control',
+    label: 'Pause, resume or cancel job',
+    description: 'Pause, resume or cancel a running crawl or batch job. Scrape, search, extract and agent runs finish in one request and cannot be controlled.',
+    ownerPlane: 'ingestion',
+    risk: 'medium',
+    requiresApproval: false,
+    reversible: false,
+    inputSchema: ingestionsJobControlInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'ingestions.start_agent_run',
+    label: 'Start browser agent run',
+    description: 'Open a browser session on a URL and start a durable browser-agent run that works toward a goal within a step budget.',
+    ownerPlane: 'model',
+    risk: 'medium',
+    requiresApproval: false,
+    reversible: false,
+    inputSchema: ingestionsStartAgentRunInput,
     outputSchema: envelopeStatusOutput,
   },
   {

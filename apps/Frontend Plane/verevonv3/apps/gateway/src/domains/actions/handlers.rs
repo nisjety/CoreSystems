@@ -32,6 +32,7 @@ use super::dispatchers::{
     dispatch_inbox_save_draft, dispatch_inbox_send_reply, dispatch_inbox_set_assignment,
     dispatch_inbox_set_status, dispatch_inbox_submit_feedback, dispatch_inbox_workspace_set_pinned,
     dispatch_inbox_workspace_set_read, dispatch_ingestions_create_run,
+    dispatch_ingestions_job_control, dispatch_ingestions_start_agent_run,
     dispatch_ingestions_create_schedule, dispatch_ingestions_create_source,
     dispatch_ingestions_delete_source, dispatch_ingestions_run_schedule_action,
     dispatch_integrations_disconnect, dispatch_integrations_disconnect_chatgpt_subscription,
@@ -46,7 +47,9 @@ use super::dispatchers::{
     dispatch_mcp_share_server, dispatch_membership_invite_member,
     dispatch_membership_remove_member, dispatch_membership_update_member_role,
     dispatch_memory_delete, dispatch_memory_remember, dispatch_memory_reset,
-    dispatch_memory_set_state, dispatch_monitoring_check_now, dispatch_navbar_create_calendar_event,
+    dispatch_memory_set_state, dispatch_monitoring_check_now,
+    dispatch_monitoring_create_monitor, dispatch_monitoring_delete_monitor,
+    dispatch_navbar_create_calendar_event,
     dispatch_navbar_create_calendar_note, dispatch_navbar_mark_notification_read,
     dispatch_navbar_save_theme, dispatch_navbar_submit_support_request,
     dispatch_notification_delete, dispatch_notification_mark_all_read,
@@ -284,8 +287,20 @@ pub(super) async fn execute_action(
             dispatch_mcp_delete_server(&state, &user, &headers, &body.input).await
         }
         "mcp.share_server" => dispatch_mcp_share_server(&state, &user, &headers, &body.input).await,
+        "ingestions.job_control" => {
+            dispatch_ingestions_job_control(&state, &user, &headers, &body.input).await
+        }
+        "ingestions.start_agent_run" => {
+            dispatch_ingestions_start_agent_run(&state, &user, &headers, &body.input).await
+        }
         "monitoring.check_now" => {
             dispatch_monitoring_check_now(&state, &user, &headers, &body.input).await
+        }
+        "monitoring.create_monitor" => {
+            dispatch_monitoring_create_monitor(&state, &user, &headers, &body.input).await
+        }
+        "monitoring.delete_monitor" => {
+            dispatch_monitoring_delete_monitor(&state, &user, &headers, &body.input).await
         }
         "privacy.erase_my_account" => {
             dispatch_privacy_erase_my_account(&state, &user, &body.input).await

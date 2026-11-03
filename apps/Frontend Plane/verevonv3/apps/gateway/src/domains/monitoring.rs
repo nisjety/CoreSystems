@@ -58,6 +58,7 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
         .route("/api/v1/monitoring/check", post(check_now))
         .route("/api/v1/monitoring/latest", get(latest))
         .route("/api/v1/monitoring/history", get(history))
+        .route("/api/v1/monitoring/diff", get(diff))
         // Phase 2 (C-FULL): recurring, Temporal-driven change monitors.
         .route(
             "/api/v1/monitoring/schedules",
@@ -176,6 +177,70 @@ fn normalize_change_record(value: &Value) -> Value {
     })
 }
 
+/// Reshape quarry's `ChangeDiffView` (snake_case) into the SPA's camelCase. `from`
+/// and `to` are normalized baselines, or null with a single baseline. `diff` is null
+/// when quarry sent none (an unavailable answer carries a `reason` instead), and
+/// `markdown` is null unless the caller asked for it.
+fn normalize_change_diff(value: &Value) -> Value {
+    json!({
+        "sourceUrl": str_field(value, "source_url"),
+        "from": value.get("from").map(normalize_baseline).unwrap_or(Value::Null),
+        "to": value.get("to").map(normalize_baseline).unwrap_or(Value::Null),
+        "diffId": str_field(value, "diff_id"),
+        "available": value.get("available").and_then(Value::as_bool).unwrap_or(false),
+        "reason": str_field(value, "reason"),
+        "diff": value
+            .get("diff")
+            .filter(|diff| diff.is_object())
+            .map(normalize_diff_body)
+            .unwrap_or(Value::Null),
+        "markdown": value
+            .get("markdown")
+            .filter(|markdown| markdown.is_object())
+            .map(normalize_diff_markdown)
+            .unwrap_or(Value::Null),
+    })
+}
+
+fn normalize_diff_body(diff: &Value) -> Value {
+    let count = |key: &str| diff.get(key).and_then(Value::as_u64).unwrap_or(0);
+    let ops: Vec<Value> = diff
+        .get("ops")
+        .and_then(Value::as_array)
+        .map(|ops| ops.iter().map(normalize_diff_op).collect())
+        .unwrap_or_default();
+    json!({
+        "format": str_field(diff, "format"),
+        "realDelta": diff.get("real_delta").and_then(Value::as_bool).unwrap_or(false),
+        "added": count("added"),
+        "removed": count("removed"),
+        "moved": count("moved"),
+        "unchanged": count("unchanged"),
+        "ops": ops,
+        "truncated": diff.get("truncated").and_then(Value::as_bool).unwrap_or(false),
+    })
+}
+
+/// One paragraph operation: `added` and `removed` carry an `index` and `text`,
+/// `moved` carries `from` and `to` indexes. Keys the operation does not carry are null.
+fn normalize_diff_op(op: &Value) -> Value {
+    json!({
+        "op": str_field(op, "op"),
+        "index": op.get("index").cloned().unwrap_or(Value::Null),
+        "from": op.get("from").cloned().unwrap_or(Value::Null),
+        "to": op.get("to").cloned().unwrap_or(Value::Null),
+        "text": str_field(op, "text"),
+    })
+}
+
+fn normalize_diff_markdown(markdown: &Value) -> Value {
+    json!({
+        "from": str_field(markdown, "from"),
+        "to": str_field(markdown, "to"),
+        "truncated": markdown.get("truncated").and_then(Value::as_bool).unwrap_or(false),
+    })
+}
+
 // ── Routes ───────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
@@ -272,19 +337,19 @@ pub(crate) async fn check_now(
 // ── Recurring monitors (Phase 2 / C-FULL) ────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
-struct CreateMonitorRequest {
+pub(crate) struct CreateMonitorRequest {
     #[serde(default)]
-    url: Option<String>,
+    pub(crate) url: Option<String>,
     /// Fixed cadence: "hourly" | "daily" | "weekly". The edge/control derive the
     /// 5-field cron from this — free-form cron is intentionally not accepted.
     #[serde(default)]
-    preset: Option<String>,
+    pub(crate) preset: Option<String>,
 }
 
 /// `POST /api/v1/monitoring/schedules` — create a recurring change monitor. The
 /// edge stamps org_id + the creator's user_id from the validated session token;
 /// we never trust a client-supplied tenant. The URL is SSRF-guarded.
-async fn create_monitor(
+pub(crate) async fn create_monitor(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     headers: HeaderMap,
@@ -359,7 +424,7 @@ async fn list_monitors(
 }
 
 /// `DELETE /api/v1/monitoring/schedules/:id` — stop + remove a recurring monitor.
-async fn delete_monitor(
+pub(crate) async fn delete_monitor(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     headers: HeaderMap,
@@ -389,6 +454,21 @@ struct UrlQuery {
     url: Option<String>,
     #[serde(default)]
     limit: Option<u32>,
+}
+
+/// Query of `GET /api/v1/monitoring/diff`. `diffId` is camelCase, as the SPA sends it.
+#[derive(Debug, Deserialize)]
+struct DiffQuery {
+    #[serde(default)]
+    url: Option<String>,
+    #[serde(default)]
+    from: Option<String>,
+    #[serde(default)]
+    to: Option<String>,
+    #[serde(default, rename = "diffId")]
+    diff_id: Option<String>,
+    #[serde(default)]
+    include: Option<String>,
 }
 
 /// `GET /api/v1/monitoring/latest?url=` — the most recent baseline for `url`,
@@ -479,6 +559,59 @@ async fn history(
         .map(|arr| arr.iter().map(normalize_baseline).collect())
         .unwrap_or_default();
     (StatusCode::OK, Json(ok(normalized))).into_response()
+}
+
+/// `GET /api/v1/monitoring/diff?url=&from=&to=&diffId=&include=markdown` — the text
+/// diff between two baselines of `url`, or a stored diff by id (INNH-4). Quarry answers
+/// 501 while `QUARRY_EDGE__CHANGE_TEXT_DIFF` is off, 403 under ZDR and 404 for an id the
+/// org does not own; those pass through unchanged. Only `include=markdown` is forwarded.
+async fn diff(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Query(q): Query<DiffQuery>,
+) -> Response {
+    let Some(raw_url) = q.url.as_deref().map(str::trim).filter(|v| !v.is_empty()) else {
+        return validation("A URL is required.");
+    };
+    let target = match normalize_public_http_url(raw_url) {
+        Ok(url) => url,
+        Err(message) => return validation(&message),
+    };
+
+    let mut path = format!("/v1/change/diff?url={}", urlencoding(&target));
+    for (key, value) in [
+        ("from", q.from.as_deref()),
+        ("to", q.to.as_deref()),
+        ("diff_id", q.diff_id.as_deref()),
+    ] {
+        if let Some(value) = value.map(str::trim).filter(|v| !v.is_empty()) {
+            path.push_str(&format!("&{key}={}", urlencoding(value)));
+        }
+    }
+    if q.include.as_deref().map(str::trim) == Some("markdown") {
+        path.push_str("&include=markdown");
+    }
+
+    let cookie = cookie_header(&headers);
+    let token = quarry_token(&state, &user, &cookie).await;
+    let (status, body) = quarry_call(
+        &state,
+        Method::GET,
+        &path,
+        None,
+        token.as_deref(),
+        user.user_id.as_str(),
+    )
+    .await;
+    if !status.is_success() {
+        return forward(status, body);
+    }
+    (
+        StatusCode::OK,
+        Json(ok(normalize_change_diff(&unwrap_data(body)))),
+    )
+        .into_response()
 }
 
 /// Unwrap quarry's `{ data: ... }` / `{ request_id, data }` envelope to the
@@ -596,6 +729,75 @@ mod tests {
         assert_eq!(unwrap_data(enveloped), json!({ "status": "changed" }));
         let bare = json!({ "status": "new" });
         assert_eq!(unwrap_data(bare), json!({ "status": "new" }));
+    }
+
+    #[test]
+    fn change_diff_reshapes_a_stored_diff_with_its_ops() {
+        let raw = json!({
+            "source_url": "https://a.no/pris",
+            "from": { "baseline_id": "bln_1", "fingerprint": "blake3:a", "captured_at": "t1", "artifact_id": "art_1" },
+            "to": { "baseline_id": "bln_2", "fingerprint": "blake3:b", "captured_at": "t2", "artifact_id": "art_2" },
+            "diff_id": "diff_9",
+            "available": true,
+            "diff": {
+                "format": "paragraph", "real_delta": true, "added": 1, "removed": 1, "moved": 1, "unchanged": 14,
+                "ops": [
+                    { "op": "added", "index": 6, "text": "Ny pris" },
+                    { "op": "removed", "index": 6, "text": "Gammel pris" },
+                    { "op": "moved", "from": 2, "to": 5 }
+                ],
+                "truncated": false
+            }
+        });
+        let view = normalize_change_diff(&raw);
+        assert_eq!(view["sourceUrl"], "https://a.no/pris");
+        assert_eq!(view["from"]["baselineId"], "bln_1");
+        assert_eq!(view["to"]["artifactId"], "art_2");
+        assert_eq!(view["diffId"], "diff_9");
+        assert_eq!(view["available"], true);
+        assert!(view["reason"].is_null());
+        assert_eq!(view["diff"]["realDelta"], true);
+        assert_eq!(view["diff"]["added"], 1);
+        assert_eq!(view["diff"]["unchanged"], 14);
+        assert_eq!(view["diff"]["ops"][0], json!({ "op": "added", "index": 6, "from": null, "to": null, "text": "Ny pris" }));
+        assert_eq!(view["diff"]["ops"][2], json!({ "op": "moved", "index": null, "from": 2, "to": 5, "text": null }));
+        assert!(view["markdown"].is_null());
+    }
+
+    #[test]
+    fn change_diff_unavailable_carries_a_reason_and_no_diff() {
+        let raw = json!({
+            "source_url": "https://a.no/pris",
+            "from": null,
+            "to": { "baseline_id": "bln_1", "fingerprint": "blake3:a", "captured_at": "t1", "artifact_id": null },
+            "diff_id": null,
+            "available": false,
+            "reason": "no_previous_version"
+        });
+        let view = normalize_change_diff(&raw);
+        assert_eq!(view["available"], false);
+        assert_eq!(view["reason"], "no_previous_version");
+        assert!(view["from"].is_null());
+        assert!(view["diffId"].is_null());
+        assert!(view["diff"].is_null());
+        assert!(view["markdown"].is_null());
+        assert!(view["to"]["artifactId"].is_null());
+    }
+
+    #[test]
+    fn change_diff_carries_markdown_only_when_quarry_sends_it() {
+        let raw = json!({
+            "source_url": "https://a.no/pris",
+            "available": true,
+            "diff": { "format": "paragraph", "real_delta": false, "added": 0, "removed": 0, "moved": 0, "unchanged": 3, "ops": [], "truncated": false },
+            "markdown": { "from": "# Pris\n\n100 kr", "to": "# Pris\n\n120 kr", "truncated": true }
+        });
+        let view = normalize_change_diff(&raw);
+        assert_eq!(view["markdown"]["from"], "# Pris\n\n100 kr");
+        assert_eq!(view["markdown"]["to"], "# Pris\n\n120 kr");
+        assert_eq!(view["markdown"]["truncated"], true);
+        assert_eq!(view["diff"]["realDelta"], false);
+        assert!(view["diff"]["ops"].as_array().unwrap().is_empty());
     }
 
     #[test]
