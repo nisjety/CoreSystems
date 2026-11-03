@@ -55,6 +55,91 @@ const (
 // webCapPaidSearch is the capability key the paid-search entitlement gates.
 const webCapPaidSearch = "search.paid_provider"
 
+// Per-origin consent defaults (W3 E3.2-f, the org row of plan E3.2 part D).
+//
+// A person may let a browser run reach an origin beyond its start host (the
+// browser_consent decisions user-core stores, E3.2-e3, scope turn, conversation
+// or always). The org layer sets the defaults those decisions live under, and like
+// every other entry here it can only tighten:
+//
+//   - browser.consent.origin: an ability. "disabled" means no per-origin consent at
+//     all (a run stays on its start host and the run domains); "allowed" (the
+//     baseline) states nothing.
+//   - browser.consent.max_scope: the widest scope a person's origin decision may
+//     have: "turn", "conversation" or "always" (the baseline). A narrower value is
+//     stricter. It never widens anything: a ZDR org stays turn-only whatever this
+//     says (enforced by Quarry and the broker), and a sensitive action never gets a
+//     scope above "once" (plan override B7).
+//
+// Both travel in caps, so the claim (WS7.I) carries them with no new field; an edge
+// that does not know them ignores and counts them (quarry-edge auth.rs
+// parse_web_policy_claim). They are not yet rows of Quarry's catalogue, so org-core
+// knows them from this table. When the catalogue gains them, the vendored copy is
+// refreshed, TestOriginConsentKeysAreNotInTheCatalogueYet fails, and this table is
+// deleted in favour of the catalogue rows.
+const (
+	WebCapOriginConsent         = "browser.consent.origin"
+	WebCapOriginConsentMaxScope = "browser.consent.max_scope"
+
+	WebConsentScopeTurn         = "turn"
+	WebConsentScopeConversation = "conversation"
+	WebConsentScopeAlways       = "always"
+
+	// webKindConsentScope is the kind of browser.consent.max_scope: a ceiling over
+	// consent scopes, ranked by webConsentScopeRank.
+	webKindConsentScope = "consent_scope"
+)
+
+// webOriginConsentKind returns the kind of a per-origin consent key, and false for
+// any other key.
+func webOriginConsentKind(key string) (string, bool) {
+	switch key {
+	case WebCapOriginConsent:
+		return "ability", true
+	case WebCapOriginConsentMaxScope:
+		return webKindConsentScope, true
+	default:
+		return "", false
+	}
+}
+
+// OriginConsentKeys lists the per-origin consent keys org-core accepts in caps
+// beside the catalogue, sorted.
+func OriginConsentKeys() []string {
+	return []string{WebCapOriginConsentMaxScope, WebCapOriginConsent}
+}
+
+// webConsentScopeRank is the restrictiveness of a consent scope ceiling: turn is
+// the strictest; always, or nothing stated, adds no limit.
+func webConsentScopeRank(value string) int {
+	switch value {
+	case WebConsentScopeTurn:
+		return 2
+	case WebConsentScopeConversation:
+		return 1
+	default:
+		return 0
+	}
+}
+
+// validateOriginConsentMode refuses a value a per-origin consent key cannot hold.
+func validateOriginConsentMode(key, kind, mode string) error {
+	if kind == webKindConsentScope {
+		switch mode {
+		case WebConsentScopeTurn, WebConsentScopeConversation, WebConsentScopeAlways:
+			return nil
+		}
+		return &WebPolicyError{Kind: ErrIllegalMode, Key: key, Message: key + " must be turn, conversation or always"}
+	}
+	if mode == WebModeForced {
+		return &WebPolicyError{Kind: ErrIllegalMode, Key: key, Message: "forced is not expressible on the ability " + key}
+	}
+	if mode != WebModeDisabled && mode != WebModeAllowed {
+		return &WebPolicyError{Kind: ErrIllegalMode, Key: key, Message: key + " must be disabled or allowed"}
+	}
+	return nil
+}
+
 // Modes and ceilings an admin may state.
 const (
 	WebModeDisabled = "disabled"
@@ -309,7 +394,10 @@ func (d WebPolicyDoc) IsEmpty() bool {
 // Validate refuses a document the catalogue does not allow. It validates the
 // document as given (call Normalize first to accept upper-case host names):
 //   - every capability key is in the catalogue, and only ability and protection
-//     keys appear in caps (ceilings and domain rules have their own fields);
+//     keys appear in caps (ceilings and domain rules have their own fields); the
+//     per-origin consent keys (OriginConsentKeys) are accepted beside it:
+//     browser.consent.origin is disabled or allowed, browser.consent.max_scope is
+//     turn, conversation or always;
 //   - an ability is disabled or allowed, never forced; a protection is allowed or
 //     forced, never disabled;
 //   - robots_max is strict, respect or ignore; proxy_max is none or pool;
@@ -327,6 +415,12 @@ func (d WebPolicyDoc) Validate(catalogue *WebPolicyCatalogue) error {
 	}
 	sort.Strings(keys)
 	for _, key := range keys {
+		if kind, consent := webOriginConsentKind(key); consent {
+			if err := validateOriginConsentMode(key, kind, d.Caps[key]); err != nil {
+				return err
+			}
+			continue
+		}
 		spec, known := catalogue.Spec(key)
 		if !known {
 			return &WebPolicyError{Kind: ErrUnknownCapability, Key: key, Message: "capability " + key + " is not in the catalogue"}
@@ -478,6 +572,9 @@ func (d WebPolicyDoc) Effective(ent WebEntitlements) WebPolicyDoc {
 // webPolicyRank is the restrictiveness of a mode for a kind; a larger rank is
 // more restrictive. The same table as quarry-core web_policy::rank.
 func webPolicyRank(kind, mode string) int {
+	if kind == webKindConsentScope {
+		return webConsentScopeRank(mode)
+	}
 	if kind == "protection" {
 		switch mode {
 		case WebModeForced:
@@ -533,7 +630,9 @@ func Tightened(oldDoc, newDoc WebPolicyDoc) bool {
 	}
 	for key := range keys {
 		kind := "ability"
-		if spec, ok := catalogue.Spec(key); ok {
+		if consentKind, ok := webOriginConsentKind(key); ok {
+			kind = consentKind
+		} else if spec, ok := catalogue.Spec(key); ok {
 			kind = spec.Kind
 		}
 		before, after := webPolicyRank(kind, o.Caps[key]), webPolicyRank(kind, n.Caps[key])
