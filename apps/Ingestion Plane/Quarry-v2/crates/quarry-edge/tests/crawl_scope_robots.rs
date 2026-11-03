@@ -55,10 +55,17 @@ async fn run_page(addr: SocketAddr, url: &str, crawl: Option<Value>) -> (u16, Va
     if let Some(crawl) = crawl {
         body["crawl"] = crawl;
     }
+    // WS14.S7a: a crawl context that does not respect robots.txt signs its `crawl.robots` too
+    // (a respecting one, or none, signs exactly `run_sig`).
+    let extras = quarry_edge::internal_auth::RunBindingExtras::for_page(None, body.get("crawl"));
+    let sig = InternalSigner::new(INTERNAL_SECRET)
+        .unwrap()
+        .run_binding_sig(ORG, url, &extras)
+        .unwrap();
     let response = reqwest::Client::new()
         .post(format!("http://{addr}/v1/internal/run_page"))
         .bearer_auth(RUNTIME_TOKEN)
-        .header("x-quarry-run-sig", run_sig(ORG, url))
+        .header("x-quarry-run-sig", sig)
         .json(&body)
         .send()
         .await
@@ -297,6 +304,23 @@ async fn ignore_and_a_request_without_crawl_do_not_touch_robots() {
     assert_eq!(status, 200);
     assert!(site.was_requested(&url));
     assert!(gate.is_empty());
+}
+
+#[tokio::test]
+async fn a_captured_respecting_signature_cannot_be_replayed_with_robots_ignore() {
+    // WS14.S7a: the two-field signature of a page is not enough to switch it to ignore.
+    let addr = spawn_edge().await;
+    let url = format!("{FIXTURE_A}/private/secret");
+    let body = json!({ "url": url, "org_id": ORG, "crawl": { "v": 1, "robots": "ignore" } });
+    let response = reqwest::Client::new()
+        .post(format!("http://{addr}/v1/internal/run_page"))
+        .bearer_auth(RUNTIME_TOKEN)
+        .header("x-quarry-run-sig", run_sig(ORG, &url))
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status().as_u16(), 401);
 }
 
 #[tokio::test]

@@ -243,12 +243,19 @@ impl InternalSigner {
 /// signs exactly the two-field string. The Go signer (`runBindingSigExtras`) mirrors this
 /// byte-for-byte; the two sides are pinned by the golden constants in the tests on both.
 ///
-/// WS14.S7a adds `robots` (the sha256 of the canonical `crawl.robots` object) as the next
-/// field, after `policy`.
+/// WS14.S7a adds `robots` as the next field, after `policy`: the sha256 of the canonical JSON
+/// of the page's `crawl.robots` value (`"ignore"` today), so a captured `(org, url, signature)`
+/// of a page that respects robots.txt cannot be replayed with `robots: "ignore"`. The line is
+/// present only when `crawl.robots` is present, not null and not `"respect"`, so every page
+/// that respects robots.txt (all of them before the override) signs exactly what it signed
+/// before. The Go signer adds it under the same rule (`in.Crawl != nil && Robots != respect`).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RunBindingExtras {
     /// `sha256(canonical_json(policy_snapshot))` in lowercase hex.
     pub policy_snapshot_sha256: Option<String>,
+    /// WS14.S7a: `sha256(canonical_json(crawl.robots))` in lowercase hex, when the page's crawl
+    /// context carries a robots mode other than `respect`.
+    pub crawl_robots_sha256: Option<String>,
 }
 
 impl RunBindingExtras {
@@ -258,6 +265,20 @@ impl RunBindingExtras {
             policy_snapshot_sha256: snapshot
                 .filter(|value| !value.is_null())
                 .map(snapshot_sha256_hex),
+            crawl_robots_sha256: None,
+        }
+    }
+
+    /// WS14.S7a: the extras of a page body: its `policy_snapshot` and the `robots` value of its
+    /// `crawl` context. A crawl that is absent, null or not an object, or whose `robots` is
+    /// absent, null or `"respect"`, adds no robots line.
+    pub fn for_page(
+        snapshot: Option<&serde_json::Value>,
+        crawl: Option<&serde_json::Value>,
+    ) -> Self {
+        Self {
+            crawl_robots_sha256: crawl_robots_sha256(crawl),
+            ..Self::for_snapshot(snapshot)
         }
     }
 
@@ -266,7 +287,21 @@ impl RunBindingExtras {
             canonical.push_str("\npolicy=");
             canonical.push_str(hash);
         }
+        if let Some(hash) = &self.crawl_robots_sha256 {
+            canonical.push_str("\nrobots=");
+            canonical.push_str(hash);
+        }
     }
+}
+
+/// WS14.S7a: the hash the run binding covers for a page's `crawl.robots`, or `None` when the
+/// page respects robots.txt (or carries no crawl context).
+fn crawl_robots_sha256(crawl: Option<&serde_json::Value>) -> Option<String> {
+    let robots = crawl?.as_object()?.get("robots")?;
+    if robots.is_null() || robots.as_str() == Some("respect") {
+        return None;
+    }
+    Some(snapshot_sha256_hex(robots))
 }
 
 /// The canonical JSON the policy snapshot is hashed in: object keys sorted by byte order at
@@ -595,5 +630,84 @@ mod tests {
         assert!(!s.verify_run_binding_with(org, url, &swapped, &signed_with));
         // The plain two-field check does not accept the extended signature either.
         assert!(!s.verify_run_binding(org, url, &signed_with));
+    }
+
+    /// WS14.S7a golden, pinned on both sides (the Go test `TestCrawlRobotsBindingGolden` holds
+    /// the same constants). First computed with an independent Python implementation:
+    /// sha256 of the canonical `"ignore"`, the HMAC of `org_a\n<url>\nrobots=<hash>`, and the HMAC
+    /// with the policy snapshot golden's line in front of it.
+    const GOLDEN_ROBOTS_SHA256: &str =
+        "c571063a8b56f0fcf1cb9d2627406677c4130152ee49752bf5b833c767283751";
+    const GOLDEN_ROBOTS_SIG: &str =
+        "2a239e083a07ed957d8d5621fe30049b567edbdd417baeb5fba1bc8af3927c99";
+    const GOLDEN_POLICY_AND_ROBOTS_SIG: &str =
+        "8ca2074067ac80a7015fa295f2bae3c2557346b6c55fe320e01bda94e65fc166";
+
+    #[test]
+    fn crawl_robots_golden_matches_the_go_signer() {
+        let s = signer();
+        let url = "https://example.com/pricing";
+        let crawl = serde_json::json!({ "v": 1, "kind": "crawl", "robots": "ignore" });
+        let extras = RunBindingExtras::for_page(None, Some(&crawl));
+        assert_eq!(extras.crawl_robots_sha256.as_deref(), Some(GOLDEN_ROBOTS_SHA256));
+        assert_eq!(
+            s.run_binding_sig("org_a", url, &extras).unwrap(),
+            GOLDEN_ROBOTS_SIG
+        );
+        assert!(s.verify_run_binding_with("org_a", url, &extras, GOLDEN_ROBOTS_SIG));
+
+        let snapshot: serde_json::Value = serde_json::from_str(GOLDEN_SNAPSHOT).unwrap();
+        let both = RunBindingExtras::for_page(Some(&snapshot), Some(&crawl));
+        assert_eq!(both.policy_snapshot_sha256.as_deref(), Some(GOLDEN_SHA256));
+        assert_eq!(
+            s.run_binding_sig("org_a", url, &both).unwrap(),
+            GOLDEN_POLICY_AND_ROBOTS_SIG
+        );
+    }
+
+    #[test]
+    fn a_page_that_respects_robots_signs_what_it_signed_before() {
+        let s = signer();
+        let url = "https://example.com/pricing";
+        for crawl in [
+            serde_json::json!({ "v": 1, "robots": "respect" }),
+            serde_json::json!({ "v": 1, "robots": null }),
+            serde_json::json!({ "v": 1 }),
+            serde_json::json!("not an object"),
+            serde_json::Value::Null,
+        ] {
+            assert_eq!(
+                RunBindingExtras::for_page(None, Some(&crawl)),
+                RunBindingExtras::default(),
+                "{crawl} adds no robots line"
+            );
+        }
+        assert_eq!(RunBindingExtras::for_page(None, None), RunBindingExtras::default());
+        // With the snapshot golden and a respecting crawl, the signature is the 6b golden.
+        let snapshot: serde_json::Value = serde_json::from_str(GOLDEN_SNAPSHOT).unwrap();
+        let respect = serde_json::json!({ "robots": "respect" });
+        let extras = RunBindingExtras::for_page(Some(&snapshot), Some(&respect));
+        assert_eq!(s.run_binding_sig("org_a", url, &extras).unwrap(), GOLDEN_SIG);
+    }
+
+    #[test]
+    fn robots_ignore_cannot_be_added_or_stripped_without_the_secret() {
+        let s = signer();
+        let (org, url) = ("org_a", "https://example.com/p");
+        let respect = RunBindingExtras::for_page(None, Some(&serde_json::json!({ "robots": "respect" })));
+        let ignore = RunBindingExtras::for_page(None, Some(&serde_json::json!({ "robots": "ignore" })));
+        let signed_respect = s.run_binding_sig(org, url, &respect).unwrap();
+        let signed_ignore = s.run_binding_sig(org, url, &ignore).unwrap();
+        assert_ne!(signed_respect, signed_ignore);
+        // Replay: a captured respect signature with the body switched to ignore.
+        assert!(!s.verify_run_binding_with(org, url, &ignore, &signed_respect));
+        // Stripped: an ignore signature on a body that no longer says ignore.
+        assert!(!s.verify_run_binding_with(org, url, &respect, &signed_ignore));
+        // The two-field check does not accept the robots signature.
+        assert!(!s.verify_run_binding(org, url, &signed_ignore));
+        // Any other value is hashed too, never treated as respect.
+        let other = RunBindingExtras::for_page(None, Some(&serde_json::json!({ "robots": "IGNORE" })));
+        assert!(other.crawl_robots_sha256.is_some());
+        assert!(!s.verify_run_binding_with(org, url, &other, &signed_ignore));
     }
 }

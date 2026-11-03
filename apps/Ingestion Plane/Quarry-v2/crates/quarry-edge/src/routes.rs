@@ -2034,7 +2034,12 @@ async fn internal_run_page(
             .unwrap_or("");
         // WS7.G 6b: a page that carries a policy snapshot signs its hash too, whatever the
         // snapshot flag says, so the binding holds before anything decides to use it.
-        let extras = crate::internal_auth::RunBindingExtras::for_snapshot(req.policy_snapshot.as_ref());
+        // WS14.S7a: and a page whose crawl context does not respect robots.txt signs the hash of
+        // its `crawl.robots`, so a captured respecting page cannot be replayed as ignoring.
+        let extras = crate::internal_auth::RunBindingExtras::for_page(
+            req.policy_snapshot.as_ref(),
+            req.crawl.as_ref(),
+        );
         if !signer.verify_run_binding_with(&org_id, &req.url, &extras, sig) {
             tracing::warn!(
                 had_sig = !sig.is_empty(),
