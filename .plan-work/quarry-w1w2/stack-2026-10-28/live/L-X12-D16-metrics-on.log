@@ -1,0 +1,4 @@
+quarry_agent_budget_exhausted_total{dimension="cost",class="agent",mode="on"} 6
+quarry_agent_budget_exhausted_total{dimension="steps",class="agent",mode="on"} 7
+quarry_agent_budget_exhausted_total{dimension="runtime",class="agent",mode="on"} 2
+quarry_agent_takeover_exempt_steps_total 10

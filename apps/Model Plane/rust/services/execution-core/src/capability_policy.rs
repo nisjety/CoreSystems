@@ -1562,13 +1562,21 @@ pub fn trusted_capability_id(tool_name: &str) -> Option<String> {
         "process_start" | "process_read" | "process_stdin" | "process_signal"
         | "process_list" => "cap.process.background",
         // The granular MCP facade never creates raw browser authority: BrowserBroker separately binds
-        // its opaque run grant. The legacy autonomous loop keeps cap.browser.open. The read tools of
-        // the Do loop (browser.open, browser.observe; WS21-S5a) and its act name each have their own
-        // capability, so a read-level grant never answers for a write. Migration 0025 seeds them.
-        "browser_agent" => "cap.browser.open",
+        // its opaque run grant. The legacy autonomous loop and the grant-bound console read
+        // (`browser.console`, WS9.E) keep cap.browser.open. The read tools of the Do loop
+        // (browser.open, browser.observe; WS21-S5a) and its act name each have their own capability,
+        // so a read-level grant never answers for a write. Migration 0025 seeds them.
+        "browser_agent" | "browser.console" => "cap.browser.open",
         "browser.open" | "browser.observe" | "browser.close" => "cap.browser.observe",
         "browser.act" => "cap.browser.act",
         "web_search" | "web_fetch" | "web.search" | "web.read" => "cap.tool.http",
+        // E3.7.10: the bulk-acquisition tools. A crawl or a batch multiplies pages, spend and
+        // egress by a count the model picks, so each family has its own capability instead of
+        // widening `cap.tool.http` (capability-core migration 0031 seeds the three ids and the
+        // tool classes; they stay unavailable until execution-core attests them).
+        "knowledge.crawl_site" => "cap.web.crawl",
+        "knowledge.map" => "cap.web.map",
+        "knowledge.batch" => "cap.web.batch",
         "knowledge_search" => "cap.retrieval.query",
         // The owner document inventory (WS24-S8) is a read of the same Data Plane corpus under the
         // run's own bearer, so it is governed by the same retrieval capability.

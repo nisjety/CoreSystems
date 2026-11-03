@@ -1,0 +1,2 @@
+HANDSHAKE HTTP/1.1 101 Switching Protocols
+TEXT {"code":"FORBIDDEN","details":{"denied_action":"evaluate","reason":"raw_script_denied"},"message":"raw page script execution (evaluate) is not permitted; use typed browser actions","retryable":false,"type":"error"}

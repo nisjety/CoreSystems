@@ -624,6 +624,13 @@ message ResumeRunRequest {
   // transition. Empty is valid only for a user-paused run; it can never
   // resume an approval gate.
   string approval_id = 4;
+
+  // Text the person typed for a live browser run (E3.3-f). Queued for the run
+  // and read by the planner at its next step boundary, as the person's
+  // unverified message: it approves nothing and widens no domain. Empty = none.
+  // Refused (FAILED_PRECONDITION) when the steer switch is off; at most 2000
+  // characters, at most 3 waiting per run.
+  string steer_text = 5;
 }
 
 // ResumeRunResponse — acknowledgement that the run has been resumed.
@@ -642,6 +649,10 @@ message PauseRunRequest {
 
   // Tenant identifier.
   string org_id = 2;
+
+  // Same as ResumeRunRequest.steer_text: queued before the run is paused, read
+  // by the planner when the run next passes a step boundary (E3.3-f).
+  string steer_text = 3;
 }
 
 // PauseRunResponse — acknowledgement that the run has been paused.

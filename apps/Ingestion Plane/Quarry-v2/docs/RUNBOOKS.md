@@ -348,7 +348,7 @@ Measured on 2026-10-18 with `cargo test -p quarry-transform --test clean_html_co
 
 ## Page cache bypass and the Redis-gated cache tests (WS5.D)
 
-The page cache (`quarry:page:{org}:{fingerprint}`) holds only the result of a default scrape. A request with options other than the defaults (`formats`, `include_tags`, `exclude_tags`, an `extractor` other than `readability`, `only_main_content` false, `remove_base64_images`), or whose `signals` select the browser driver (any `actions`, `screenshot`, `pdf`, `prior_block_signals` of 2 or more under `QUARRY_BLOCK_ESCALATION=legacy` (ignored under `honest`), or `profile_required`), neither reads nor writes it. ZDR never does. The response's `effective_options.cache_state` says which happened: `hit`, `miss` or `bypass`.
+The page cache (`quarry:page:{org}:{fingerprint}`) holds only the result of a default scrape. (INNH-7 added a second, separate cache for `max_age`: see "Scrape `max_age`" at the end of this file; the rules in this section are about the page cache and are unchanged.) A request with options other than the defaults (`formats`, `include_tags`, `exclude_tags`, an `extractor` other than `readability`, `only_main_content` false, `remove_base64_images`), or whose `signals` select the browser driver (any `actions`, `screenshot`, `pdf`, `prior_block_signals` of 2 or more under `QUARRY_BLOCK_ESCALATION=legacy` (ignored under `honest`), or `profile_required`), neither reads nor writes it. ZDR never does. The response's `effective_options.cache_state` says which happened: `hit`, `miss` or `bypass`.
 
 `crates/quarry-edge/tests/cache_policy.rs` (9 cases) needs a Redis at `REDIS_URL` (default `redis://127.0.0.1:6379`) and skips each case without one. The `cargo-check` job of `quarry-v2-ci.yml` runs it, and the Redis case of `zdr_claim_floor.rs`, in the step "Page-cache and ZDR cache gates (Redis)" against a `redis:7-alpine` service published on host port 6380, with `REQUIRE_CONTRACT=1`, so there an unreachable Redis is a failure instead of a skip. The step "Test workspace" of the same job keeps the default address, where nothing listens, so its cache cases still skip. The workflow has not run on GitHub Actions (nothing was pushed); the gate was checked locally against a Redis service (`7fffb2ac`). Any other job that provides a Redis should set `REQUIRE_CONTRACT=1` for the same reason.
 
@@ -1963,6 +1963,232 @@ This section corrects and extends "Profile owner and ACL check (WS17.P2, unit W2
 - Tests (run in the build, Linux container): `cargo test -p quarry-edge --lib profile_guard` (16), `--test profile_owner` (8), `--test profile_guard` (8), `--test profile_attach` (10, run-path tests: person stamped under observe and enforce, org_shared scope, no persistent profile, service principal not stamped, off, ZDR refused with no row, existing row untouched), `cargo test -p quarry-browser --lib session` (52), `cargo test -p quarry-runtime --lib profile` (48). The Postgres store tests (default scope, stamp insert-only and tombstone) compile under `--features postgres-queue` and skip without `DATABASE_URL`: not run against a database. The Redis-gated `metadata_methods_pass_through_to_inner_uncached` was corrected and did not run (no `REDIS_URL`).
 - Evidence owed (stack session): with two users A and B in one org, A starts a run with `persist_profile: true`; `GET /v1/profiles` as A lists it with `owner_is_caller: true`; as B it does not appear under enforce, and `GET /v1/profiles/<id>` as B is a 404 (served under observe, with a `profile.owner.would_deny` line). The S3 profile backend has no tombstones, so its stamp is not ordered against a delete.
 
+## Scrape AI formats: enable, disable and the 501 reasons (INNH-1 U3, built, NOT run, 2026-10-31)
+
+`json`, `summary`, `question` and `highlights` in `formats` of `POST /v1/scrape` are answered inline by a model from the page text (`data.json`, `data.summary`, `data.answer`, `data.highlights`, and a per-format report in `data.ai`). The contract is `docs/CONTRACTS.md`, "Scrape AI formats". The code is `crates/quarry-edge/src/scrape_contract/ai_formats.rs` (the switch, who may ask, the lane) over the engine in `crates/quarry-runtime/src/ai_scrape.rs`. They are dark: `QUARRY_EDGE__AI_FORMATS` is off by default, the committed composes set it to `0`, and no stack has it on.
+
+**Enable (a development or side-by-side stack only; the owner decides, not the compose file).** The switch is read once, so it takes a restart of the edge.
+1. Set `MODEL_PLANE_URL` (the gateway, for example `http://model-gateway:8080`). Unset: `501 model_plane_unavailable`.
+2. Give the edge the development credential: the stack runs the cross-plane auth dev bypass and `MODEL_PLANE_TOKEN` carries a user ingress token for the gateway; `MODEL_PLANE_INFERENCE_TOKEN` carries a second token with `aud=inference-core` (without it the one token is sent in both headers). The gateway's `/v1/ai/chat` wants both. No credential: `501 model_lane_not_granted`.
+3. Set `QUARRY_EDGE_AI_FORMATS=on` and recreate the edge. A deployed stack has no credential for this lane until the X-7 grant exists (the Auth Core minted path returns `model_lane_not_granted` without minting); do not set it there.
+
+**Disable.** Unset it or set it to anything but `on`, `1` or `true`, and restart. Every AI format is then `400 feature_disabled` at `formats[i]` (never `reserved_format`, which no longer exists). Nothing else changes: a request with no AI format is byte for byte what it was.
+
+**What a caller sees.**
+| Answer | Reason |
+|---|---|
+| 400, `details.fields[]` with a path | a malformed AI format (`missing_field`, `schema_keyword_not_supported`, `feature_disabled`, ...); decided before the fetch |
+| 403 `details.reason: extract_ai_scope_required`, `details.field: formats[i]` | a service principal without `extract:ai`, or `initiated_by: "agent"`; before the fetch |
+| 501 `details.reason: model_plane_unavailable` | the switch is on and `MODEL_PLANE_URL` is unset |
+| 501 `details.reason: model_lane_not_granted` | a URL, but no credential for the chat lane |
+| 400 (SSE `error` event) `unsupported_in_stream` | an AI format on `POST /v1/scrape/stream`, switch on or off |
+| 200 with `data.ai.<kind>.status` `skipped`, `ZDR_UNAVAILABLE` | ZDR (the token floor or the body flag): no model call at all, the page is a normal ZDR scrape; the 501 checks are not made |
+| 200 with `status` `error` and a code | `MODEL_UNAVAILABLE` (with `reason`), `MODEL_RATE_LIMITED` (with `retry_after_s`), `SCHEMA_INVALID`; the page fields are still there |
+
+**Limits and cost.** Per request: at most 8 model calls (repair included), 200,000 reported tokens, 60,000 page characters per call, 4 calls in flight, and 16 in flight in the process; the AI phase is bounded at 45 s, and while the switch is on `POST /v1/scrape` gets the 125 s router deadline (as with scrape actions). Nothing is billed: token usage is reported in `data.ai`, and pricing (owner decision OD-3) is open. Quarry logs the kind, outcome, code, reason and counts of each format, never the page, the schema, a prompt or an output.
+
+**Evidence owed (stack session, not run here).** Everything above is proven by tests against a strict double of the gateway's chat route (`tests/ai_formats.rs`, `tests/ai_formats_off.rs`, `tests/ai_formats_real_token.rs`); no real Model Plane gateway has been called. On a side-by-side stack with the dev bypass and two hand-minted dev tokens: a scrape with `["markdown", {"type":"json","schema":...}, "summary"]` returns the fields and `data.ai.total.calls: 2`; the same with `zdr: true` returns `skipped` / `ZDR_UNAVAILABLE` and the gateway's log shows no call; with the switch off it is `400 feature_disabled`. The page-cache test (`an_ai_request_never_reads_or_writes_the_page_cache`) needs a Redis and skips without one.
+
+## Change text diff: enable, disable, read and retention (INNH-4, built, NOT run, 2026-10-31)
+
+A change monitor can keep the page text of each version and a paragraph diff between them, and `GET /v1/change/diff` returns both. The contract is `docs/CONTRACTS.md`, "Change text diff". It is off: `QUARRY_EDGE__CHANGE_TEXT_DIFF` is unset in the default composes, which is off, and no compose line is needed.
+
+**Enable.** Set `QUARRY_EDGE__CHANGE_TEXT_DIFF=1` (also `true`, `yes`, `on`) on the edge and restart it. The edge must be the `postgres-queue` build with `DATABASE_URL` (the baseline store), as for any change recording. Deploy the edge before the orchestrator: the edge accepts `markdown_artifact_id` on the record call and returns it from `run_page`, the orchestrator only forwards it, and an old orchestrator simply sends none (the baseline then has no text and its first change is an unavailable diff, `no_previous_text`).
+
+**Disable.** Unset the variable or set it to `0` and restart. Recording goes back to the one-line fingerprint note and baselines without text; `GET /v1/change/diff` answers 501. Baselines and diffs already stored stay (they are readable again when the flag returns). Nothing needs a migration either way.
+
+**What a person sees.** A monitored page changes: the `change_detected` event and the `quarry.change.detected` webhook carry `diff_id` and `new_baseline`; `GET /v1/change/diff?diff_id=...` returns the added and removed paragraphs (`real_delta` false means the bytes changed and the text did not: an ad or a timestamp). The first change after enabling, for a page that was already monitored, answers `available: false`, `reason: no_previous_text`; the next one has a diff.
+
+**Answers.**
+| Answer | Reason |
+|---|---|
+| 501 `UNSUPPORTED`, message names `QUARRY_EDGE__CHANGE_TEXT_DIFF` | the flag is off |
+| 403 `FORBIDDEN` | the caller is under Zero Data Retention |
+| 404 `NOT_FOUND` | no baseline for the url, or an unknown id, or an id of another organization (the same message) |
+| 200, `available: false`, `reason` | `no_previous_version` (one baseline), `no_previous_text` (recorded before text was kept), `no_text`, `artifact_gone` (a stored page was evicted) |
+| 400 on `POST /v1/internal/change/record` | `markdown_artifact_id` is not a markdown artifact of that org; nothing was saved, the activity fails and Temporal retries it |
+
+**Retention.** The page text lives in the artifact store like any page artifact. The artifact janitor deletes by age only; it is dry-run by default (`QUARRY_RETENTION_DRY_RUN` is not `false`). Arming it would delete the markdown of old baselines, and `GET /v1/change/diff` then answers `artifact_gone` for a pair whose diff was not stored (a stored diff keeps its own text). Do not arm it for a deployment that uses text diffs until it spares baseline artifacts. Organization erasure (`org_erasure.rs`) has no baseline handling today, so baseline rows are not removed by it: check that before offering text diffs to a customer who can ask for erasure.
+
+**ZDR.** A ZDR run stores no markdown, returns no `markdown_artifact_id`, and a `zdr: true` record body keeps no text or diff even in observe mode (`QUARRY_EDGE__ZDR_REFUSE_DURABLE_RESOURCES` off), where its baseline row is still written. Reads are refused for a ZDR caller. To check by hand on a side-by-side stack: schedule a monitor on a fixture page, edit one paragraph, wait for the change, read `GET /v1/change/diff?diff_id=` with the id from the event, and confirm the edited paragraph is `added` and the old one `removed`; repeat with an ad-rotation fixture and confirm `real_delta: false`. Not done here: only unit tests with an in-memory store, no real Postgres or Temporal.
+
+## `/v1/extract` with a `prompt` (INNH-2, built, NOT run, 2026-10-31)
+
+`POST /v1/extract` now sends `prompt` to the model: with `schema` as extra instructions, alone as a free-form JSON object (`data`, status `ok`). The contract is `docs/CONTRACTS.md`, "`/v1/extract`: the `prompt` takes effect". This arm has no switch of its own: it runs when `MODEL_PLANE_URL` is set and the edge holds a model credential (`MODEL_PLANE_TOKEN`, or the Auth Core minted path). It calls the gateway's `/v1/invoke`, not the `/v1/ai/chat` lane of the scrape AI formats, so `QUARRY_EDGE__AI_FORMATS` does not gate it. On a deployed stack the lane is ungranted until WS16.S1 to S3 and decision X-7, so a call there is answered by the 501 "lane refused" of INNH-3 after one fetch (see "Enable structured extract and AI formats"); do not point a deployed edge at a gateway for this.
+
+What a caller sees:
+| Answer | Reason |
+|---|---|
+| 400 `BAD_REQUEST` with a `hint` | `prompt` empty after trimming, or more than 10000 characters; before any fetch, and the message never repeats the prompt |
+| 501 `UNSUPPORTED` | a `schema` or a `prompt` was sent and the Model Plane is not usable: no URL, no credential, or the gateway refused the first call (three texts, see "Enable structured extract and AI formats"; not for a ZDR request) |
+| 200, item `ok`, `schema_valid: false`, `schema_issues` | the model answered something that does not fit the schema; the data is returned, the caller decides |
+| 200, item `ok`, `truncated_input: true` | the page was cut at 20000 bytes before the model read it |
+| 200, item `error`, `ZDR_UNAVAILABLE: ...` | ZDR (body flag or the token's floor): no page text goes to a model; `structured` still comes back |
+| 200, item `error`, message names the "request time budget" | 50 s passed before the model read this source; send fewer URLs |
+
+Nothing in a log or a response carries the prompt text; log lines carry lengths only. To check by hand on a side-by-side stack: send a page with a schema and a prompt, read the request the gateway receives (the prompt before the `<<<PAGE-` line, the page inside), then repeat with `"zdr": true` and confirm the gateway sees no request. Not done here: no real gateway was called.
+
+## Enable structured extract and AI formats (INNH-3, built, NOT run, 2026-10-31)
+
+Read this before telling anyone to "turn extract on". Two Model Plane features share one URL and have different doors.
+
+| | `POST /v1/extract` with `schema` or `prompt` | `json`, `summary`, `question`, `highlights` in `formats` of `POST /v1/scrape` |
+|---|---|---|
+| Switch | `QUARRY_EDGE__AI_FORMATS` (QB-T17 gates it; off by default); it then runs when the Model Plane URL is set and Quarry holds a model credential | `QUARRY_EDGE__AI_FORMATS` (off by default; see "Scrape AI formats" below) |
+| Gateway route | `/v1/invoke` (token-request row `model-invoke`) | `/v1/ai/chat`, with an `x-inference-authorization` header |
+| Credential | the Auth Core minted token (needs `QUARRY_EDGE__QUARRY_SERVICE_API_KEY`), or in development `QUARRY_EDGE__MODEL_PLANE_TOKEN` | `QUARRY_EDGE__MODEL_PLANE_TOKEN`, and optionally `QUARRY_EDGE__MODEL_PLANE_INFERENCE_TOKEN` (development only) |
+| Not ready | 501 `UNSUPPORTED`, three texts below | 501 `model_plane_unavailable` or `model_lane_not_granted`; 400 `feature_disabled` while the switch is off |
+
+`QUARRY_EDGE__AI_FORMATS` gates `/v1/extract` (QB-T17, merged from main into the integration; before it the switch never gated extract, and INNH-3 documented that interim state). The Innhenting audit (commit `14299e659`) and the 12-item brief said that extract needs `QUARRY_EDGE__AI_FORMATS=1`, and with the gate that is now true: the switch is decided at boot with the other Model Plane switches (see "Answer synthesis" below), and a switch that is on without a model path is refused at boot and stays off. The old 501 hint that said to set `MODEL_PLANE_URL` alone was wrong too.
+
+**There is no production path today.** A deployed stack cannot run structured extract, and it cannot run the AI formats either. Both wait for the same two things: WS16.S1 to S3 (the metered service lane on the Model Plane gateway) and the owner decision X-7 (OD-1: the grant that lets Quarry call the Model Plane: audiences, retention, and the manifest rows set `granted: true`). Until then, in the committed files: the `model-invoke` row of `crates/quarry-runtime/contracts/cross-plane-token-requests.json` is `granted: false`, the Control Plane registry gives `quarry-edge` no `model-gateway` audience, and the gateway refuses a service principal on `/v1/invoke`. Setting `MODEL_PLANE_URL` on a deployed stack therefore enables nothing: it turns the first 501 below into 1b (the AI formats switch is off by default and a switch that is on is refused at boot without a model path), and it makes the edge refuse to boot unless `QUARRY_EDGE__QUARRY_SERVICE_API_KEY` is set. The live stack keeps `MODEL_PLANE_URL` unset. Do not set it.
+
+**The four 501s of `/v1/extract`.** They are decided before any further page is fetched, they share one body, `{"error", "code": "UNSUPPORTED", "hint", "next_actions"}` (no other key; `next_actions` has two entries), and they never name a URL, a host or a token. A request with neither `schema` nor `prompt` (cleaned markdown) and a ZDR request (each source answers `ZDR_UNAVAILABLE`) never get one.
+1. No Model Plane URL (`QUARRY_EDGE__MODEL_PLANE_URL` unset, empty or blank). `error`: `structured extraction needs the Model Plane, and QUARRY_EDGE__MODEL_PLANE_URL is not set on this deployment`. No page is fetched.
+1b. The AI formats switch is off (QB-T17), or was refused at boot, with a URL set. `error`: `structured extraction is not available on this edge: QUARRY_EDGE__AI_FORMATS is off`. No page is fetched.
+2. A URL, but nothing to authenticate with (no service key and no development token). `error`: `structured extraction needs a granted Model Plane lane, and this deployment holds no model credential`. No page is fetched.
+3. A URL and a credential, but the gateway refuses the first model call (401 or 403, or Auth Core refuses to mint the token because the row is not granted). `error`: `structured extraction needs a granted Model Plane lane, and the Model Plane refused this service`. Exactly one page was fetched and one model call made; the other sources are not fetched and nothing is metered. Before INNH-3 this was a 200 in which every source (up to 25, fetched one after another) said `status: error`, and the fetches were paid. The stop applies only while no source has been extracted: a refusal after one source came back `ok` stays per source, and a timeout, a 5xx, a non-JSON answer or a 429 never stops the batch (429 keeps its own envelope).
+
+`hint` always starts with "omit `schema` and `prompt` to receive cleaned markdown" and ends with a pointer to this section; `next_actions[0]` is the same retry. A caller that gets a 501 can repeat the same request without `schema` and `prompt` and receive `status: fetched` markdown.
+
+**What works in development (a side-by-side or dev stack only; the owner decides).** Run the edge with the cross-plane auth dev bypass (`QUARRY_EDGE__CROSS_PLANE_AUTH_DEV_BYPASS=true`, refused in production). Set `QUARRY_EDGE__MODEL_PLANE_URL` to a gateway and `QUARRY_EDGE__MODEL_PLANE_TOKEN` to a token that gateway accepts on `/v1/invoke`. Leave `QUARRY_EDGE__QUARRY_SERVICE_API_KEY` unset: with a service key the minted path is used instead, and it is refused (state 3). Restart the edge; all of these are read at boot. The deploy compose forwards `MODEL_PLANE_URL` and `MODEL_PLANE_TOKEN`; the Ingestion compose forwards only `MODEL_PLANE_URL`, so give the container the token through an override file. Set `QUARRY_EDGE_AI_FORMATS=on` (compose spelling) too: QB-T17 gates the model arm of `/v1/extract` with it, and boot refuses it unless a model path exists (the dev bypass credential is one). Then `POST /v1/extract` with a `schema` returns `status: ok` with `data`. The AI formats of `/v1/scrape` use the same switch and, for the chat route, additionally need the inference token; follow "Scrape AI formats" below.
+
+**For the Innhenting UI.** Show `error` as the reason. Offer the retry in `next_actions[0]`. Do not parse `hint` and do not tell a person to set a flag or a variable: they are for the operator, and no flag unlocks this on the live stack. The three states are told apart by the `error` text only (there is no `details`). The cross-plane asks are WS16.S1 to S3 and decision X-7.
+
+**Checks.** `cargo test -p quarry-edge --lib extract_routes` (unit tests for the three 501 bodies, the key set, zero fetches, the stop after one fetch and one model call, per-source isolation for 5xx, the refusal after an extracted source, ZDR); `node --test scripts/tests/docs-contract.test.mjs` (every `QUARRY_EDGE__` name in these docs, the openapi, the composes and the 501 texts is a setting the code reads, so no phantom variable). Not done: no real Model Plane gateway was called, and the Auth Core refusal of an ungranted row is read from the code, not exercised against Auth Core.
+
+## Scrape `max_age`: enable, disable and what to look at (INNH-7, built, NOT run, 2026-10-31)
+
+`POST /v1/scrape` accepts `max_age` (milliseconds, alias `maxAge`): serve a stored result for the same organization, canonical URL and options if it is at most that old, else fetch. The contract is in CONTRACTS.md 9.1 ("`max_age`") and `docs/openapi.yaml` (`ScrapeRequest.max_age`).
+
+| Variable | Default | Effect |
+|---|---|---|
+| `QUARRY_EDGE__SCRAPE_MAX_AGE` | `off` (compose: `QUARRY_EDGE_SCRAPE_MAX_AGE`, default `off`) | `on`, `1` or `true` accepts `max_age` and writes the URL result cache; any other value is off. Read once at process start. |
+
+Needs Redis (`REDIS_URL`): without it `max_age` is ignored with the warning `cache_unavailable`. No other setting is needed. The Innhenting gateway does not send `max_age` yet; turning the switch on changes nothing for a request that does not carry it, except that every cacheable success is also written to Redis (about the size of a page-cache entry: the output without page text) for `cache.max_age_s`, default 3600 s.
+
+**Turn on.** Set `QUARRY_EDGE_SCRAPE_MAX_AGE=on` for the edge and restart it. Check: scrape a page twice with `{"url": "...", "max_age": 60000}`; the second answer has `data.effective_options.cache_state: "hit"`, `cached_at`, `cache_age_ms`, the original `data.fetched_at` and no `scrape_id`, and the origin saw one request. `redis-cli --scan --pattern 'quarry:scrape:*'` lists the entries (the org id is in the key; the rest is a hash; no URL is stored in a key).
+
+**Turn off.** Unset it or set it to `off` and restart: a request with `max_age` is a 400 `feature_disabled` at `max_age`, nothing new is written, and existing entries expire by their TTL (they are never read while the switch is off). To drop them at once: `redis-cli --scan --pattern 'quarry:scrape:*' | xargs redis-cli del`.
+
+**Metric.** `quarry_cache_requests_total{cache="scrape", outcome="hit|miss|error"}` counts reads of the URL result cache; a request that did not consult it counts nothing.
+
+**What is never cached** (the response says `max_age_ignored`, or `max_age_ignored_zdr` under ZDR): captures, actions, AI formats, the browser driver, a custom web policy, `ingest`, a private privacy class, a non-2xx page, and a 2xx page the run flagged as a bot wall (the challenge classifier, also under the default `QUARRY_CHALLENGE_ENFORCE=log` where the page is returned) or as a soft-404 ("page not found" in a 200). ZDR neither reads nor writes it and computes no key.
+
+**Limits to know.** The TTL caps the effective `max_age`. A stored result whose artifacts expired is a miss (the page is fetched again). A hit is not metered as `scrape.page`; whether it should be is an open product decision. A redirect is keyed by the URL as requested, not the final one. The trailing slash and the query order are part of the URL identity.
+
+**Tests.** `crates/quarry-edge/tests/scrape_max_age.rs` (Redis, `REQUIRE_CONTRACT=1` makes an unreachable Redis a failure), `tests/scrape_max_age_off.rs` (no Redis), unit tests in `cache.rs`, `scrape_cache.rs`, `scrape_contract.rs` and `quarry-core` (`scrape.rs`, `cache.rs`). The `quarry-v2-ci.yml` step "Page-cache and ZDR cache gates (Redis)" runs `cache_policy.rs`; `scrape_max_age.rs` is not in it yet (an owner/CI decision, recorded in INNH-7-status.md).
+
+## Job results: enable, disable, read (INNH-12, built, NOT run, 2026-10-31)
+
+The pages a crawl or batch fetched, with the ids of what was stored for each, come back from `GET /v1/crawl/{id}/results`, `/v1/batch/{id}/results` and `/v1/jobs/{id}/results`. The contract is `docs/CONTRACTS.md`, "Job results". It is off: `QUARRY_EDGE__JOB_RESULTS` is unset in the default composes, which is off, and no compose line is needed.
+
+**Enable.** Set `QUARRY_EDGE__JOB_RESULTS=1` (also `true`, `yes`, `on`) on the edge and restart it. Rebuild both the edge and the orchestrator: the edge returns the artifact ids from `run_page`, the orchestrator copies them onto each `page_fetched` event, and control reads the rows back. Deploy the edge first. Pages fetched before the orchestrator carries the fields have rows without artifact ids (url, status and title only); nothing is lost and nothing needs a migration. Replaying an in-flight workflow is safe: only the payload of an event changes, no workflow command is added.
+
+**Disable.** Unset the variable or set it to `0` and restart. The three routes answer 501; the events keep the extra fields.
+
+**Answers.**
+| Answer | Reason |
+|---|---|
+| 501 `UNSUPPORTED`, message names `QUARRY_EDGE__JOB_RESULTS` | the flag is off |
+| 403 `FORBIDDEN`, `details.reason` is `job_result_urls` | the caller is under Zero Data Retention |
+| 403 | a service principal |
+| 404 `NOT_FOUND` | unknown id, an id of another organization, or a crawl id on the batch path |
+| 400 `BAD_REQUEST`, `details.field` | `limit` outside 1 to 500, `after_seq` not a number, `latest` not true or false |
+
+**Reading a run.** Page with `after_seq=<next_seq>` until `next_seq` is absent. Use `latest=true` for a dataset with one row per URL. Fetch a page with `GET /v1/artifacts/{markdown_artifact_id}`. On the in-memory artifact backend (`ARTIFACT_BACKEND=memory`, the default compose) the ids stop resolving when the edge restarts; use the filesystem backend for results that must outlive it. `GET /v1/artifacts?run_id=<run>&kind=markdown` lists one run's artifacts on the memory and filesystem backends (not on S3, which cannot list).
+
+**Cost and scale.** A read is one indexed page of the job's events (`events_job_id_idx` is on `job_id`; the type and seq filters run over that job's rows). A 5 000-page crawl is 10 pages at the maximum limit. `latest=true` reads the whole job (up to 20 000 fetches) on every call, so page through it with `after_seq` rather than polling it.
+
+**ZDR.** A ZDR run stores no artifact and its `page_fetched` carries none of the ids; the routes are refused for a ZDR caller anyway. The events already hold each page's url and title (existing posture); this makes them easy to read, which is why the routes are dark. To check by hand on a side-by-side stack: crawl five fixture pages, call `GET /v1/crawl/{id}/results` and confirm five rows whose `markdown_artifact_id` each return the page from `GET /v1/artifacts/{id}`; repeat with a ZDR token and confirm 403. Not done here: Go and Rust unit and route tests only, no stack, no Temporal and no Postgres were run.
+
+## Webhook subscriptions: enable, disable, rotate, retry, erase (INNH-5, built, NOT run, 2026-10-31)
+
+Customers can register an HTTPS endpoint that receives their organization's `change_detected` events, signed. The contract is `docs/CONTRACTS.md`, section 4 (what the endpoint receives) and "Webhook subscriptions" (the API). It is off: neither `QUARRY_EDGE__WEBHOOK_SUBSCRIPTIONS` nor `QUARRY_CONTROL__WEBHOOK_SUBSCRIPTIONS` is set in the default composes, and no compose line is needed. Two things are not behind a switch and ship with the control image: the fan-out only delivers to the subscriptions of the event's own organization (an event of unknown owner delivers to nobody), and `/v1/webhooks` and `/v1/webhook-deliveries` on control answer 410.
+
+**Order.** Deploy control first: it applies migration 025 at boot (`webhooks` and `webhook_deliveries` gain `org_id`; nothing is dropped or rewritten, a legacy row keeps `org_id ''` and delivers to nobody). Then the edge. Then switch on: set `QUARRY_CONTROL__WEBHOOK_SUBSCRIPTIONS=1` on control (it mounts the routes and starts the delivery retention sweep), restart it, then `QUARRY_EDGE__WEBHOOK_SUBSCRIPTIONS=1` on the edge (also `true`, `yes`, `on`). With the edge on and control off the routes answer 501 and the message names the control variable. The edge also needs the change webhook to reach control for anything to be delivered: `QUARRY_EDGE__CONTROL_BASE_URL` and `QUARRY_EDGE__INTERNAL_SECRET` are set, which the change monitor already requires.
+
+**Disable.** Unset the variables and restart. Subscriptions and deliveries stay in the database, and the switches do not stop delivery: control's fan-out and dispatcher read no switch, so while a subscription row exists its organization's events are still delivered. To stop one, `PATCH` it with `active: false` (needs the routes on) or delete it. To stop all at once, delete the rows: `DELETE FROM webhooks WHERE org_id <> ''` (deliveries go with them by cascade).
+
+**Day to day.**
+| Task | How |
+|---|---|
+| A customer lost its secret | `POST .../rotate-secret`; the new secret is in that response only, the old one stops at once. There is no way to read the current one |
+| A customer's endpoint was down | `GET .../deliveries?status=dlq`, then `POST .../deliveries/{id}/retry` for each; a retry restarts the attempt count |
+| An endpoint is refused as `blocked_target` | its host resolves to a private or loopback address (or a rebinding mix). The customer must serve it from a public address; nothing on the control side allows it. `EGRESS_ALLOWLIST_HOSTS` and `EGRESS_ALLOWLIST_CIDRS` must stay empty on control in production: they widen the guard for the dispatcher and for every other control egress |
+| Too many finished rows | `QUARRY_CONTROL__WEBHOOK_DELIVERY_RETENTION_DAYS` (default 14, 1 to 3650; an invalid value logs and keeps 14). The sweep runs hourly while the control switch is on and deletes only `success`, `failed` and `dlq` rows |
+| Organization erasure | `PurgeOrg` deletes the organization's `webhook_deliveries` and `webhooks`; `PurgeResult` reports `webhooks_deleted` and `webhook_deliveries_deleted`. Legacy rows with no organization are not matched by it |
+
+**Legacy rows.** A `webhooks` row from before migration 025 (no tenant route could create one, so there should be none on a deployed stack) has `org_id ''`. It receives nothing and is not listed by any tenant route. Delete it by hand if the table has any: `SELECT id, url FROM webhooks WHERE org_id = ''`.
+
+**Owner decision: the secret at rest.** The HMAC needs the raw key, so control stores `webhooks.secret` in plaintext; the API never returns it after create or rotate, and no log line carries it, but a database reader has every organization's keys. The proper fix is envelope encryption with a control key (a KMS-held data key wrapped per row); it is not built. Accept plaintext at rest for the first customers, or require the envelope before switching on? Until decided, keep the switches off outside a side-by-side stack.
+
+**Owner decision: ZDR.** A Zero Data Retention organization cannot create a subscription, patch one or retry a delivery (403, `webhook_off_process`); it can read, delete and rotate. Nothing is emitted for a ZDR check in any case. Control cannot tell an organization's posture; the edge's token floor is the only gate, and an organization that turns ZDR on later keeps the subscriptions it made until it deletes them (they receive nothing from ZDR checks). Say if enabling ZDR should also deactivate them.
+
+**Not done by this build.** Run against a real stack: the control Go tests ran against an in-memory store and, for the Postgres store, against a scratch Postgres 16; the edge tests run against a control double. No end-to-end run with a real receiver. To check by hand on a side-by-side stack: create a subscription through the edge with a public receiver (a tunnel, or a host on the test network the guard allows), run `POST /v1/change/check`-driven or scheduled changes twice with a changed fixture, confirm the receiver gets one POST per change, recompute `v1` from the documented recipe, then stop the receiver and watch the delivery go `pending` (attempt 1, then 2, ...) and `dlq` on the fifth failure; `rotate-secret` and confirm the next delivery verifies only with the new one.
+
+## Crawl `sitemap` and `scrape_options`: enable, disable and read the result (INNH-6, built, NOT run, 2026-10-31)
+
+`POST /v1/crawl` accepts `sitemap: include|only` and `scrape_options` (per-page cleaning). Both are dark. The contract is `docs/CONTRACTS.md`, "Crawl `sitemap` and `scrape_options`". The request errors are in `docs/ERROR_REASONS.md`.
+
+**Enable (a development or side-by-side stack only; the owner decides, not the compose file).** Each flag is read once, so it takes a restart of the edge. The orchestrator needs no flag, only the new build: it acts on the job params.
+1. Sitemap: `QUARRY_EDGE__CRAWL_SITEMAP=on`. The crawl scope must be on (`QUARRY_EDGE__CRAWL_SCOPE_MODE` is `observe`, the default, or `enforce`). The orchestrator reaches the edge's `POST /v1/internal/crawl/sitemap` with the runtime token and the internal secret it already uses for `run_page`.
+2. Scrape options: `QUARRY_EDGE__CRAWL_SCRAPE_OPTIONS=on`.
+3. Orchestrator first, then the edge flag, when both are rolled. The new orchestrator is inert without the params (a job with no `sitemap` or `scrape_options` runs exactly as before), and an old edge still answers 400 `unsupported_option` at the handoff, so no new crawl can start on it. The reverse order is the unsafe one: the edge stamps `sitemap` and `scrape_options` on the job params and echoes them in `data.effective`, an old orchestrator ignores unknown params, so with the edge flag on first it would crawl links-only with the default cleaning while the ack says otherwise. Do not turn an edge flag on until the orchestrator in front of it is the new build. Only a crawl already in flight can see a new orchestrator talk to an old edge (see Disable).
+
+**Disable.** Unset the flag and restart the edge. The handoff answers 400 `unsupported_option` again. A crawl already running keeps its params: with the sitemap flag off the discovery route answers 501 (an `include` crawl goes on with links, an `only` crawl ends with `sitemap_unavailable`); with the scrape flag off `run_page` ignores `scrape` and does not echo it, so the orchestrator ends the crawl with `edge_scrape_options_unsupported`.
+
+**Read the result.** `data.effective.sitemap` and `data.effective.scrape_options` on the ack. The job's `run_completed` event carries `sitemap` (`discovered`, `seeded`, `skipped{out_of_scope, robots_disallowed, duplicate, cap, invalid, sitemaps_refused, sitemaps_unavailable}`, `sitemaps_fetched`, `nested_fetched`, `truncated`). A high `sitemaps_refused` means the robots.txt names a sitemap on another host or an internal address: that is refused on purpose. `truncated: true` means a bound stopped the read (20 files, 100,000 entries or 30 seconds). A stored markdown artifact is the cleaned text: compare one with and without `exclude_tags` to see the difference.
+
+**Limits to know.** Sitemap URLs are queued at depth 1; the in-memory frontier (an orchestrator without the edge queue credentials) takes at most 500 of them. Sitemap files are not metered. A page cleaned with non-default options skips the page cache, so a repeat crawl fetches those pages again.
+
+**Tests (Linux container, `qtest-lane.sh`).** `cargo test -p quarry-edge --lib crawl_` (65 before the integration files), `--test crawl_sitemap`, `--test crawl_options_on`, `--test crawl_options_off`, `--test crawl_sitemap_scope_off`, `--test web_policy_routes`, `--test zdr_feature_matrix`; Go: `GOWORK=off go test ./...` in `services/quarry-orchestrator`; `node --test scripts/tests/*.test.mjs`.
+
+**Evidence owed (stack session).** On a side-by-side stack with the crawl fixture (`deploy/compose/crawl-fixture/`) and a sitemap that lists a page no link reaches: `sitemap: include` finds it and `skip` does not; `scrape_options.exclude_tags: ["nav"]` removes the nav text from a stored markdown artifact. The in-flight replay of a history recorded before the marker is not tested (there is no recorded history to replay).
+
+
+## Answer synthesis: enable, disable and the reasons (INNH-8a, built, NOT run, 2026-10-31)
+
+`POST /v1/answer`, `POST /v1/answer/stream` and `include_answer` on `POST /v1/search` are answered by one pipeline: search, read the top pages, ask the Model Plane. The contract is `docs/CONTRACTS.md`, "Answer synthesis"; the code is `crates/quarry-edge/src/answer_status.rs` (the gates and the reasons), `model_plane_gate.rs` (the one boot gate that owns the switch) and `answer_routes.rs`. It is dark: `QUARRY_EDGE__ANSWER_SYNTHESIS` is off by default, both composes set it to `0`, and no stack has it on. `MODEL_PLANE_URL` alone does not turn it on.
+
+**One switch, one boot gate (QB-T17).** `QUARRY_EDGE__ANSWER_SYNTHESIS` is decided at boot by `model_plane_gate` together with the other Model Plane switches. A switch that is on is REFUSED, and stays off, unless the edge has a model path: `MODEL_PLANE_URL`, and either a service identity whose manifest row `model-invoke` (`crates/quarry-runtime/contracts/cross-plane-token-requests.json`) is `granted`, or the development bypass credential. The shipped manifest grants nothing, so on a deployed stack the boot log shows an `ERROR` that names `QUARRY_EDGE__ANSWER_SYNTHESIS` and the routes answer `501` with `reason: model_path_refused`. The answer status is derived from that decision; the answer code has no switch of its own.
+
+**The gates, in the order the edge checks them.** The edge reports the first closed one (`reason`, and on `/v1/answer` a `hint` that names the setting). The switch is read once, so every change takes a restart of the edge.
+1. `QUARRY_EDGE_ANSWER_SYNTHESIS=1` (compose variable; the edge reads `QUARRY_EDGE__ANSWER_SYNTHESIS`). Closed: `synthesis_disabled`.
+2. A model path, as the boot gate sees it: `MODEL_PLANE_URL` (the gateway, for example `http://model-gateway:8080`) and a granted `model-invoke` row or the dev bypass credential. The switch on without them: `model_path_refused`; without the URL: `no_model_plane_url`.
+3. A search provider: `SEARXNG_URL`, `BRAVE_SEARCH_KEY` or `SERPER_KEY`. Closed: `no_search_provider`. (Live search works, so this is open wherever search works.) A URL the Model Plane client cannot be built from: `model_client_init_failed`, with the cause in the edge boot log.
+4. A Model Plane that accepts the edge. This is the cross-plane part and it is NOT in Quarry's hands. With 1 to 3 open through the dev bypass and no real grant, a call is `model_plane_auth_refused` (503 on `/v1/answer`, `answer_status: unavailable` on search); on a deployed stack the boot gate stops earlier, at step 2 (`model_path_refused`). It needs, all of them (owner decision INNH-8b, not built): the Control Plane registry (`apps/Control Plane/config/plane-service-principals.json`) giving quarry-edge the `model-gateway` audience with scope `models:invoke` and the `zdr` retention lane; the Model Plane gateway letting a service principal reach the route Quarry calls (`authorize_principal_route` in `model-gateway/src/auth.rs` allows only `POST /v1/ai/chat` and `/v1/ai/embeddings`, Quarry calls `POST /v1/invoke`) or Quarry moving to `/v1/ai/chat`; Quarry sending the second `x-inference-authorization` header; and the `model-invoke` row of `crates/quarry-runtime/contracts/cross-plane-token-requests.json` (and Auth Core's copy) flipping to `granted: true` in the same change as the registry grant.
+
+**Enable (a development or side-by-side stack only; the owner decides, not the compose file).** Set 1 to 3 above and recreate the edge. On a side-by-side stack with the cross-plane auth dev bypass, steps 2 and 4 are the development credential: `QUARRY_EDGE__CROSS_PLANE_AUTH_DEV_BYPASS` on and `MODEL_PLANE_TOKEN` carrying a user ingress token the gateway accepts on `/v1/invoke` (the same credential the AI formats use; not verified against a real gateway here). A deployed stack must not set the switch until the grant exists: the boot gate refuses it (`model_path_refused`, an `ERROR` in the boot log) and nothing is served. After the grant, flip the `model-invoke` row and the registry together, then set the switch.
+
+**Check it worked.** `POST /v1/search` with `{"query": "capital of norway", "include_answer": true}` and a user token, read `answer_status`: `ok` (and an `answer`) is working. `unavailable` with `answer_reason` is the gate that is closed. Then `POST /v1/answer` with the same query: 200 with `answer`, `citations` and `model`. Cost: an `include_answer` search runs the search provider twice (once for the results, once inside the pipeline), reads up to 5 pages (about 10k input tokens at most) and calls the model once.
+
+**Disable.** Unset the switch (or set it to anything but `1`, `true`, `on`) and restart. `/v1/answer` is then `501 synthesis_disabled`; `include_answer` says `unavailable` / `synthesis_disabled`; nothing else changes.
+
+**What a caller sees.** The reason table is `docs/ERROR_REASONS.md`, "Answer synthesis". In short: 501 with a `reason` (`synthesis_disabled`, `model_path_refused`, `no_search_provider`, `no_model_plane_url`, `model_client_init_failed`) for a gate that is closed; 403 `zdr_unavailable` for a ZDR request; 503 `model_plane_auth_refused` for the cross-plane grant; 429 `model_plane_rate_limited` and 502 `model_plane_error` for a failing hop; `answer_search_failed` when the search or page fetch failed first. A failed synthesis is not cached: the search cache skips a request that asked for an answer and has none, so the first query after step 4 is true is answered.
+
+**Billing.** One `quarry.answer.synth` per model call, on `/v1/answer`, the stream and an `include_answer` search (metadata `via: "search.include_answer"` on the last); never on a cache hit, a refusal, a failure, `no_sources` or ZDR. `quarry.search.query` is metered for the search as before.
+
+**ZDR.** The model hop carries no ZDR posture (ADR-4), so no ZDR request reaches a model. `include_answer` under ZDR sends nothing to a model (`answer_status: skipped_zdr`, the search runs under ZDR). `/v1/answer` and `/v1/answer/stream` REFUSE a ZDR request (body flag or the token's floor) with `403 FORBIDDEN`, `reason: zdr_unavailable`, before the gate, the cache and the pipeline: no search, no page fetch, no Model Plane call, and the refusal comes before the 501 checks. The `answer` row of `docs/ZDR_MATRIX.md` is `refused`, enforced. This closes the exposure for a ZDR organization even with the switch on. If an operator sees 403 `zdr_unavailable` for an organization they did not expect to be under ZDR, check the token's `zdr` floor and the request's `zdr` field, not the synthesis settings.
+
+**Evidence owed (stack session, not run here).** Everything above is proven by tests against a double of the gateway's `/v1/invoke` (`tests/answer_provider_status.rs`); no real Model Plane gateway was called. On a side-by-side stack with the dev bypass: one `include_answer` search with the switch on and a credential the gateway accepts (expect `answer_status: ok` and one `quarry.answer.synth` event), the same with the credential removed (expect `model_plane_auth_refused` and no event), and the same with `"zdr": true` (expect `skipped_zdr` and no request at the gateway); and `POST /v1/answer` with `"zdr": true` (expect 403 `zdr_unavailable` and no request at the gateway).
+
+## API-key agent runs: enable, disable and the refusals (INNH-10, Quarry side built dark, NOT run, 2026-10-31)
+
+An API key may drive a fenced browser run on `/v1/agent/*` once the whole chain exists. The contract is `docs/CONTRACTS.md`, "API-key agent runs"; the reasons are `docs/ERROR_REASONS.md`, "API-key agent runs"; the design and the asks to the other planes are `.plan-work/quarry-w1w2/INNH-10-design.md`. The code is `crates/quarry-edge/src/api_key.rs` (the route fence), `agent_routes/api_key_runs.rs` (the start rules), `agent_routes/admission.rs` (the per-step rules) and `grant_boot.rs`. **It is dark: `QUARRY_EDGE__API_KEY_AGENT_RUNS` is `0` by default and no compose file sets it.** With it off a key token is refused on every route and every other caller is served as before.
+
+**What must exist first (other owners; none is built).** Auth Core mints the `api_key` token (a gateway-only exchange of the key, ask CP-1 to CP-4); the BrowserBroker issues key grants stamped with the key's id, with hosts inside the key's host ceiling and a mandatory budget, and revokes them when the key is revoked (MP-1, MP-2); the model-gateway has the key-grant door (MP-3); the Verevon gateway composes exchange, grant and run (GW-1). Until the broker's `ValidateGrantResponse` carries `key_id` and Quarry vendors the field into `crates/quarry-runtime/proto/browser.proto`, the gRPC validator always yields an empty `key_id`, so EVERY key run is refused with `api_key_grant_owner_mismatch` on a gRPC-validated edge (fail closed, on purpose). The HTTP shim validator reads `key_id` from its JSON today (development only).
+
+**Enable order (the owner decides each step; do not change a live flag without that).** 1. Auth Core flag for the key exchange (CP-1). 2. BrowserBroker `BROWSER_BROKER_KEY_GRANTS_ENABLED` and the model-gateway door. 3. On the edge: `QUARRY_EDGE__BUDGET_ENFORCEMENT=on` (a key run is refused with `api_key_budget_not_enforced` otherwise: in `shadow` the grant's budget would bound nothing), a real grant validator (`QUARRY_EDGE__BROWSER_GRANT_VALIDATOR_GRPC_URL` and `QUARRY_EDGE__QUARRY_SERVICE_API_KEY`; or the HTTP shim outside production), then `QUARRY_EDGE__API_KEY_AGENT_RUNS=1` and a restart. Optionally `QUARRY_EDGE__MAX_CONCURRENT_RUNS_PER_KEY` (default 2, at least 1).
+
+**Boot refusals.** The edge does not start with the switch on and no validator endpoint (`ApiKeyRunsWithoutValidator`: the no-op validator accepts any grant id, which for a key would be an open door), whatever the environment; it does not start with a value it cannot read (`QUARRY_EDGE__API_KEY_AGENT_RUNS` must be 0, 1, on, off, true or false). With the switch on the boot log carries a warning line.
+
+**Kill switches, fastest first.** Revoke the key in Auth Core: new tokens stop at once and a live run's next call fails within the token's life (at most two minutes); the broker revokes the key's grants on the revocation event and the run's next step fails with `browser grant is inactive or expired`. Or set `QUARRY_EDGE__API_KEY_AGENT_RUNS=0` and restart: every key token is refused on every route again, the live key runs of that edge are released with it. A key run that stops stepping is released by the idle sweeper like any agent run.
+
+**Check it worked (side-by-side stack, owner approval needed).** With a key that holds `browser:agent`: acquire a key grant through the gateway, `POST /v1/agent/runs` with the key's token and the grant id (expect 200 and `constraints.max_steps` no larger than the grant's), one `wait` step (receipt `agent.basis` `api_key`, `principalId` `apikey:<key_id>`), then revoke the key and step again (expect 403). Negative checks: the same start without the grant id (`api_key_grant_required`), with the owner's own session token and the key grant (`api_key_grant_owner_mismatch`), `GET /v1/artifacts` with the key token (`api_key_route_refused`), and a third run of one key (429 `per_key_run_cap`). **Not run here: nothing in this item has been run against a stack.**
+
+**A refusal you did not expect.** `api_key_agent_runs_disabled`: the switch is off on that edge. `api_key_scope_missing`: the key lacks the permission. `api_key_grant_owner_mismatch` on a gRPC edge with a valid grant: the proto carries no `key_id` yet (above). `api_key_budget_not_enforced`: `QUARRY_EDGE__BUDGET_ENFORCEMENT` is not `on`.
+
 ## Semantic rerank (Data Plane `/v1/rerank`)
 
 Quarry reorders the top search results with the Data Plane's rerank (`rerank-v1`, profile
@@ -2052,3 +2278,23 @@ vector leg is on, and with the vector leg on (`QUARRY_EDGE__VECTOR_RETRIEVAL`) i
 their titles and snippets reach the processor. Quarry's per-request `allow_third_party_processing` privacy
 flag is not carried on the search path. The processor gate that applies today is the Data Plane's deployment switch
 `WEB_RERANK_PROCESSOR_APPROVED`, which the owner's legal confirmation (O2) decides before production.
+
+## `POST /v1/parse`: enable, disable and read the result (INNH-11, built, NOT run on a stack, 2026-10-31)
+
+`POST /v1/parse` takes a PDF or DOCX as the request body and answers its text; it stores nothing. It is dark. The contract is `docs/CONTRACTS.md`, "`POST /v1/parse`". The errors are in `docs/ERROR_REASONS.md`.
+
+**Enable (a development or side-by-side stack only; the owner decides, not the compose file).** The variable is read per request, so no restart is needed to turn it on or off, but the parser isolation is chosen at boot.
+1. `QUARRY_EDGE__PARSE_ROUTE=on`.
+2. Leave `QUARRY_EDGE__DOC_PARSE_ISOLATION` unset or `process` (the default for the edge binary on Linux). On any other setup the route answers 501 `isolation_required` and the boot line `document parse route is on` shows `serving=false`. Do not set `QUARRY_EDGE__PARSE_ALLOW_INPROCESS=1` on a multi-tenant deployment: it lets a hostile file run inside the edge.
+3. A service principal that should call it needs the `parse:write` scope on its token. The Control Plane registry (`plane-service-principals.json`) has no such scope yet, so a service cannot call the route until the owner adds it there.
+4. Optional: `QUARRY_EDGE__PARSE_MAX_BYTES` (lowers the 25 MiB limit), `QUARRY_EDGE__PARSE_CONCURRENCY_PER_ORG` (default 1), `QUARRY_EDGE__PARSE_MAX_INFLIGHT` (default 4). The last two are read once, at the first request.
+
+**Disable.** Unset `QUARRY_EDGE__PARSE_ROUTE` (or set it to `off`): the next request is a 501.
+
+**Read the result.** `data.markdown` is plain text; `data.warnings` says what is missing (a scan is `document_has_no_text_layer`). Nothing is recorded: there is no scrape id, no artifact, and `GET /v1/artifacts` shows no new row. A 429 with `Retry-After` is the per-organisation or process limit working; a 415 with `pdf_parse_failed` and `limit: parser_stopped` is a file the parser's memory or CPU limit stopped.
+
+**Limits to know.** No OCR (a scan has no text), no redaction (personal data comes back as it is), no layout (no headings, lists or tables). The two process-wide parse slots are shared with PDF scrapes (`DOC_ROUTING=on`): a busy scrape path makes `parser_busy` more likely. A 25 MiB body is held in memory while it is read: four at once by default.
+
+**Tests (Linux container, `qtest-lane.sh`).** `cargo test -p quarry-runtime --lib content_route`, `--test doc_parse_sandbox`; `cargo test -p quarry-edge --lib parse_routes`, `--test parse_route`, `--test parse_route_off`, `--test parse_route_process` (starts the real edge binary and sends it a decompression bomb), `--test zdr_feature_matrix`, `--test web_policy_routes`, `--test log_field_discipline`; `node --test scripts/tests/*.test.mjs`.
+
+**Evidence owed (stack session).** On a side-by-side stack with the flag on: `curl --data-binary @file.pdf -H 'Content-Type: application/pdf'` with a user token returns the text, and a following `GET /v1/artifacts` shows no new artifact; a scanned PDF returns the warning; a second parse started while the first runs is a 429 with `Retry-After`.

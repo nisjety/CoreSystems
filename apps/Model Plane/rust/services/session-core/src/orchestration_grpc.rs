@@ -1474,6 +1474,18 @@ fn new_approval_metadata(
         }
         stored_code = Some(CauseCode::from_wire(&cause.code).as_str());
         metadata_map.insert("cause".to_owned(), approval_cause::to_metadata(&cause));
+        // E3.2-a: the host class a browser gate states, as a closed word (anything
+        // else reads `unknown`; a host name is never stored). Top level, because
+        // that is where the authz_decision audit reads it. A zero-retention caller
+        // stores none (the `filter` above).
+        if !cause.host_class.trim().is_empty() {
+            metadata_map.insert(
+                "host_class".to_owned(),
+                JsonValue::String(
+                    crate::audit_publisher::host_class_word(&cause.host_class).to_owned(),
+                ),
+            );
+        }
     }
     (JsonValue::Object(metadata_map), stored_code)
 }
@@ -2082,17 +2094,32 @@ async fn persist_browser_event(
             }),
             "type.googleapis.com/model_plane.v1.BrowserObservationReceived",
         ),
+        // `reason` (WS8.G attach mode) is stored only when set, so a user-initiated
+        // pause keeps the payload it always had.
         Some(orchestration_event::Event::BrowserRunPaused(value)) => (
             "BROWSER_RUN_PAUSED",
             value.run_id.as_str(),
-            serde_json::json!({ "run_id": value.run_id, "plan_id": value.plan_id }),
+            pause_resume_payload(&value.run_id, &value.plan_id, &value.reason),
             "type.googleapis.com/model_plane.v1.BrowserRunPaused",
         ),
         Some(orchestration_event::Event::BrowserRunResumed(value)) => (
             "BROWSER_RUN_RESUMED",
             value.run_id.as_str(),
-            serde_json::json!({ "run_id": value.run_id, "plan_id": value.plan_id }),
+            pause_resume_payload(&value.run_id, &value.plan_id, &value.reason),
             "type.googleapis.com/model_plane.v1.BrowserRunResumed",
+        ),
+        // Attach mode audit event (WS8.G): ids only, never a URL or a title.
+        Some(orchestration_event::Event::BrowserAttachSharedJar(value)) => (
+            "BROWSER_ATTACH_SHARED_JAR",
+            value.run_id.as_str(),
+            serde_json::json!({
+                "run_id": value.run_id,
+                "plan_id": value.plan_id,
+                "attach_id": value.attach_id,
+                "session_run_id": value.session_run_id,
+                "tab_id": value.tab_id,
+            }),
+            "type.googleapis.com/model_plane.v1.BrowserAttachSharedJar",
         ),
         Some(orchestration_event::Event::BrowserActionApprovalRequired(value)) => (
             "BROWSER_ACTION_APPROVAL_REQUIRED",
@@ -2270,6 +2297,15 @@ fn broadcast_approval_decision_events(
     );
 }
 
+/// The stored payload of a browser pause or resume. `reason` is present only when set.
+fn pause_resume_payload(run_id: &str, plan_id: &str, reason: &str) -> serde_json::Value {
+    let mut payload = serde_json::json!({ "run_id": run_id, "plan_id": plan_id });
+    if !reason.is_empty() {
+        payload["reason"] = serde_json::Value::String(reason.to_owned());
+    }
+    payload
+}
+
 fn event_run_id(ev: &proto::OrchestrationEvent) -> Option<&str> {
     match ev.event.as_ref()? {
         orchestration_event::Event::PlanTransitioned(p) => Some(&p.run_id),
@@ -2290,6 +2326,7 @@ fn event_run_id(ev: &proto::OrchestrationEvent) -> Option<&str> {
         orchestration_event::Event::BrowserObservationReceived(p) => Some(&p.run_id),
         orchestration_event::Event::BrowserRunPaused(p) => Some(&p.run_id),
         orchestration_event::Event::BrowserRunResumed(p) => Some(&p.run_id),
+        orchestration_event::Event::BrowserAttachSharedJar(p) => Some(&p.run_id),
         // Phase 5 — browser-specific HITL approval-gate detail events. Reuse
         // the same `RecordOrchestrationEvent` best-effort delivery path as
         // `BrowserActionDispatched`/`BrowserObservationReceived` above; the
@@ -3723,6 +3760,7 @@ impl OrchestrationCoreService for OrchestrationGrpc {
                 }
             }
 
+            let created_new = created.is_some();
             // Counted when a row was inserted, so a retried request that collapses onto
             // an existing approval is not counted twice.
             if let (Some(_), Some(code)) = (&created, cause_code) {
@@ -3749,6 +3787,36 @@ impl OrchestrationCoreService for OrchestrationGrpc {
             }
             .ok_or_else(|| Status::internal("approval vanished after insert"))?;
             let approval = approval_from_row(&row);
+
+            // E3.2-d: the approval-requested signal, for a request that inserted a row (a
+            // retried one that collapsed onto an existing approval raises none). Best effort:
+            // a notification that cannot be queued never fails the approval itself.
+            if created_new && crate::audit_publisher::approval_notify_enabled() {
+                if let Err(error) = store::enqueue_approval_requested(
+                    &self.pool,
+                    &crate::audit_publisher::ApprovalRequestedSignal {
+                        org_id: &row.org_id,
+                        user_id: &row.user_id,
+                        run_id: &row.run_id,
+                        approval_id: &row.id,
+                        kind: &row.kind,
+                        tool: &row.metadata["cause"]["tool"]
+                            .as_str()
+                            .unwrap_or_default()
+                            .to_owned(),
+                        cause_code: &row.metadata["cause"]["code"]
+                            .as_str()
+                            .unwrap_or_default()
+                            .to_owned(),
+                        zdr: caller.zdr(),
+                        occurred_at: Utc::now(),
+                    },
+                )
+                .await
+                {
+                    warn!(error = %error, "approval_requested signal not queued");
+                }
+            }
 
             // Operator surfaces (run-event feed, snapshot) consume both: the
             // approval entering REQUESTED and the run pausing for it. A row a standing rule
@@ -4328,6 +4396,7 @@ impl OrchestrationCoreService for OrchestrationGrpc {
                 audit: approval_audit_events_enabled(),
                 grant_ttl_secs: approval_cause::thread_grant_ttl_secs(),
                 rule_proposed: req.rule_proposed,
+                authz_audit: crate::audit_publisher::authz_decision_audit_enabled(),
             };
             let decision_write = match member_space.as_deref() {
                 Some(space_id) => {
@@ -5803,6 +5872,30 @@ mod tests {
     }
 
     #[test]
+    fn a_stated_host_class_is_stored_as_a_closed_word_and_never_for_a_zdr_caller() {
+        let with_class = |class: &str| {
+            let mut req = create_with_cause("browser_action_risk");
+            req.cause.as_mut().unwrap().host_class = class.to_owned();
+            req
+        };
+        for class in ["none", "general", "sensitive", "internal", "unknown"] {
+            let (metadata, _) = new_approval_metadata(&with_class(class), false);
+            assert_eq!(metadata["host_class"], class);
+        }
+        // A host name (or anything off the list) reads `unknown`; it is never stored.
+        let (metadata, _) = new_approval_metadata(&with_class("bank.example.com"), false);
+        assert_eq!(metadata["host_class"], "unknown");
+        // Nothing stated, nothing stored; and the cause itself carries no host class.
+        let (metadata, _) = new_approval_metadata(&with_class("  "), false);
+        assert!(metadata.get("host_class").is_none());
+        let (metadata, _) = new_approval_metadata(&with_class("sensitive"), false);
+        assert!(metadata["cause"].get("host_class").is_none());
+        // Zero retention keeps none of the cause, host class included.
+        let (metadata, _) = new_approval_metadata(&with_class("sensitive"), true);
+        assert!(metadata.get("host_class").is_none());
+    }
+
+    #[test]
     fn a_stated_cause_is_stored_beside_the_reason_and_read_back() {
         let (metadata, code) =
             new_approval_metadata(&create_with_cause("risky_effect_under_ask"), false);
@@ -6350,6 +6443,7 @@ mod tests {
                 orchestration_event::BrowserRunPaused {
                     run_id: "run_p".into(),
                     plan_id: "plan_p".into(),
+                    reason: String::new(),
                 },
             )),
         };
@@ -6362,10 +6456,35 @@ mod tests {
                 orchestration_event::BrowserRunResumed {
                     run_id: "run_p".into(),
                     plan_id: "plan_p".into(),
+                    reason: "control_returned".into(),
                 },
             )),
         };
         assert_eq!(event_run_id(&resumed_run), Some("run_p"));
+
+        let shared_jar = proto::OrchestrationEvent {
+            event_id: String::new(),
+            at: None,
+            event: Some(orchestration_event::Event::BrowserAttachSharedJar(
+                orchestration_event::BrowserAttachSharedJar {
+                    run_id: "run_j".into(),
+                    plan_id: "plan_j".into(),
+                    attach_id: "att_j".into(),
+                    session_run_id: "qrun_j".into(),
+                    tab_id: "tab_j".into(),
+                },
+            )),
+        };
+        assert_eq!(event_run_id(&shared_jar), Some("run_j"));
+
+        assert_eq!(
+            pause_resume_payload("r", "p", ""),
+            serde_json::json!({ "run_id": "r", "plan_id": "p" })
+        );
+        assert_eq!(
+            pause_resume_payload("r", "p", "user_took_over"),
+            serde_json::json!({ "run_id": "r", "plan_id": "p", "reason": "user_took_over" })
+        );
 
         // A durable-loop park and its resume are run-scoped, so both reach the
         // per-run stream and the replay buffer (WS03 S8).
@@ -6452,6 +6571,7 @@ mod tests {
                 orchestration_event::BrowserRunPaused {
                     run_id: "run_x".into(),
                     plan_id: "plan_x".into(),
+                    reason: String::new(),
                 },
             )),
         };

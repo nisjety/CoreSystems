@@ -66,6 +66,9 @@ func streamConfigs() []nats.StreamConfig {
 		// Carries session-core's audit events ("Used by AI?") to audit-core. See
 		// audit_observability.go for why this stream is provisioned here.
 		auditObservabilityStream(),
+		// Run trace events Quarry publishes about a Model Plane run (WS10.S5),
+		// drained by session-core's pull consumer. See run_trace.go.
+		runTraceStream(),
 		{
 			Name: "MODEL_PLANE_USAGE_EVENTS", Subjects: []string{"mp.v1.usage.*"},
 			Retention: nats.LimitsPolicy, Storage: nats.FileStorage,
@@ -253,6 +256,8 @@ func consumerBindings() []consumerBinding {
 	// audit-core's two durables on the audit observability stream. It binds them
 	// and cannot create them (its principal has no JetStream admin grant).
 	bindings = append(bindings, auditObservabilityConsumers()...)
+	// session-core's pull consumer on the run trace stream (WS10.S5/S6).
+	bindings = append(bindings, runTraceConsumers()...)
 	return append(bindings, consumerBinding{stream: "MODEL_PLANE_USAGE_EVENTS", config: nats.ConsumerConfig{
 		Durable: "cost-core-usage", DeliverSubject: "_VEREVON.MODEL.DELIVER.cost.usage",
 		DeliverGroup: "cost-core-usage", FilterSubject: "mp.v1.usage.*",

@@ -134,6 +134,7 @@ pub(crate) fn build_run_attention_envelope(item: &Waiting, ts: DateTime<Utc>) ->
             "thread_id": item.thread_id,
         }),
         zdr: false,
+        ..Default::default()
     }
 }
 

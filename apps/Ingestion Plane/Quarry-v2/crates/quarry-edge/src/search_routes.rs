@@ -32,6 +32,7 @@ use quarry_runtime::serp::{
 use quarry_runtime::smart_router::{classify_intent, QueryIntent};
 use quarry_runtime::vector_index::{VectorHit, VectorOutcome, VectorQuery};
 
+use crate::answer_status::{self, AnswerReason, AnswerStatus};
 use crate::state::AppState;
 
 /// Char budget for `format=context` (~2k tokens at ~4 chars/token).
@@ -165,6 +166,18 @@ pub struct SearchResponse {
     /// Present when `include_answer=true` and synthesis succeeded.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub answer: Option<String>,
+    /// INNH-8a: present only when `include_answer=true`. Says whether `answer` is a real answer
+    /// (`ok`), empty because no source had text (`no_sources`), withheld under zero data
+    /// retention (`skipped_zdr`) or absent (`unavailable`, with `answer_reason`). A request that
+    /// did not ask for an answer carries neither field.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub answer_status: Option<AnswerStatus>,
+    /// INNH-8a: the closed reason of an `unavailable` status (`synthesis_disabled`,
+    /// `no_search_provider`, `no_model_plane_url`, `model_client_init_failed`,
+    /// `model_plane_auth_refused`, `model_plane_rate_limited`, `model_plane_error`,
+    /// `answer_search_failed`). Never provider text.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub answer_reason: Option<AnswerReason>,
     /// Sources behind `answer`. A citation additionally carries that page's
     /// structured harvest when it had one — see the module header.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -837,9 +850,19 @@ async fn search_run(
             None => None,
         }
     };
+    // INNH-8a: an include_answer entry with no answer is a failed synthesis an older build
+    // wrote, so it is a miss: the caller asked for an answer and gets a fresh attempt.
+    let from_cache = from_cache.filter(|c| usable_hit(c, req.include_answer));
 
-    let (results, answer, citations, provider_name, rerank, cache_hit) = match from_cache {
-        Some(c) => (c.results, c.answer, c.citations, c.provider, c.rerank, true),
+    let (results, answer, citations, provider_name, rerank, cache_hit, answer_outcome) = match from_cache {
+        Some(c) => {
+            let outcome = if req.include_answer {
+                AnswerOutcome::from_cached(c.answer.as_deref())
+            } else {
+                AnswerOutcome::not_asked()
+            };
+            (c.results, c.answer, c.citations, c.provider, c.rerank, true, outcome)
+        }
         None => match provider.search_with_report(&effective_query, &opts).await {
             Ok((results, rerank)) => {
                 let provider_name = provider.name().to_string();
@@ -857,10 +880,17 @@ async fn search_run(
                     "search.upstream"
                 );
 
-                // include_answer — best-effort synthesis; never fail search on it.
-                let (answer, citations) = if req.include_answer {
-                    match state.answer_pipeline.as_ref() {
-                        Some(p) => {
+                // include_answer — best-effort synthesis; never fail search on it. INNH-8a: the
+                // outcome is named in the response, and ZDR is checked first: under ZDR no page
+                // text goes to a model (the model hop has no ZDR posture, ADR-4).
+                let (answer, citations, answer_outcome) = if !req.include_answer {
+                    (None, None, AnswerOutcome::not_asked())
+                } else if zdr {
+                    (None, None, AnswerOutcome::skipped_zdr())
+                } else {
+                    match answer_status::gate(&state) {
+                        Err(reason) => (None, None, AnswerOutcome::unavailable(reason)),
+                        Ok(p) => {
                             let areq = AnswerRequest {
                                 query: req.query.clone(),
                                 top_k: Some(ANSWER_TOP_K),
@@ -870,22 +900,31 @@ async fn search_run(
                                 org_id: Some(claims.org_id.clone()),
                             };
                             match p.answer(areq).await {
-                                Ok(ar) => (Some(ar.answer), Some(ar.citations)),
+                                Ok(ar) => {
+                                    let outcome = AnswerOutcome::from_result(&ar);
+                                    (Some(ar.answer), Some(ar.citations), outcome)
+                                }
                                 Err(e) => {
-                                    tracing::warn!(error_class = crate::zdr_log::class(&e), "include_answer synthesis failed");
-                                    (None, None)
+                                    let reason = answer_status::classify_failure(&e);
+                                    tracing::warn!(
+                                        error_class = crate::zdr_log::class(&e),
+                                        reason = reason.as_str(),
+                                        "include_answer synthesis failed"
+                                    );
+                                    (None, None, AnswerOutcome::unavailable(reason))
                                 }
                             }
                         }
-                        None => (None, None),
                     }
-                } else {
-                    (None, None)
                 };
 
-                // Write-back (best-effort). Cache failures never fail the request.
-                // Only final outcomes are stored, see `cacheable_search`.
-                if cacheable_search(zdr, &rerank) {
+                // Write-back (best-effort). Cache failures never fail the request. Only final
+                // outcomes are stored, see `cacheable_search`. INNH-8a: a request that asked for
+                // an answer and has none (synthesis off, refused or failed) writes nothing, so
+                // turning the pipeline on is seen by the very next query and not after the TTL.
+                if cacheable_search(zdr, &rerank)
+                    && cacheable(zdr, req.include_answer, answer.as_deref())
+                {
                     if let Some(c) = &scache {
                         let ttl = crate::cache::search_ttl_secs(
                             req.topic.as_deref(),
@@ -906,7 +945,7 @@ async fn search_run(
                     }
                 }
 
-                (results, answer, citations, provider_name, rerank, false)
+                (results, answer, citations, provider_name, rerank, false, answer_outcome)
             }
             Err(e) => {
                 // Emitted before the early returns below, because a chain that
@@ -1034,6 +1073,7 @@ async fn search_run(
     // Cycle 19 / cluster #19: emit SearchIssued for autocomplete-core.
     let run_id: quarry_core::ids::kinds::RunKind = quarry_core::ids::Id::new();
     let run_id_str = run_id.to_string();
+    let run_id_str_for_answer = run_id_str.clone();
     let idem = format!("search:{}", run_id);
     if !zdr {
         state
@@ -1072,12 +1112,35 @@ async fn search_run(
                 "provider": provider_name,
                 "query_chars": req.query.chars().count(),
                 "include_answer": req.include_answer,
+                "answer_status": answer_outcome.status,
                 "format": req.format,
                 "cache_hit": cache_hit,
                 "zdr": zdr,
             }),
         ))
         .await;
+
+    // INNH-8a: include_answer synthesis is metered like /v1/answer, once per model call. Never on
+    // a cache hit, a refused or failed synthesis, or a ZDR request (none of those called a model).
+    if let Some(synth) = &answer_outcome.metered {
+        state
+            .usage
+            .meter(quarry_runtime::UsageEvent::new(
+                format!("answer-{run_id_str_for_answer}"),
+                claims.org_id.clone(),
+                quarry_runtime::usage_metrics::ANSWER_SYNTH,
+                1.0,
+                serde_json::json!({
+                    "user_id": claims.user_id,
+                    "sources_used": synth.sources_used,
+                    "sources_skipped": synth.sources_skipped,
+                    "model": synth.model,
+                    "latency_ms": synth.latency_ms,
+                    "via": "search.include_answer",
+                }),
+            ))
+            .await;
+    }
 
     // 2E — facets computed from clean results (before highlight markup).
     let facets = if req.facets {
@@ -1111,6 +1174,8 @@ async fn search_run(
             results,
             count,
             answer,
+            answer_status: answer_outcome.status,
+            answer_reason: answer_outcome.reason,
             citations,
             context,
             facets,
@@ -1120,6 +1185,74 @@ async fn search_run(
         }),
     )
         .into_response()
+}
+
+/// INNH-8a: a cache entry is a hit unless the request asked for an answer and the entry has none.
+/// Such an entry is a failed synthesis an older build wrote; the caller gets a fresh attempt.
+fn usable_hit(entry: &CachedSearch, include_answer: bool) -> bool {
+    !include_answer || entry.answer.is_some()
+}
+
+/// INNH-8a: whether a finished search may be written to the cache. Never under ZDR, and never when
+/// the request asked for an answer and has none (synthesis off, refused or failed): turning the
+/// pipeline on must show on the very next query, not after the TTL. An empty answer is a real
+/// outcome (no source had text) and is cached.
+fn cacheable(zdr: bool, include_answer: bool, answer: Option<&str>) -> bool {
+    !zdr && (!include_answer || answer.is_some())
+}
+
+/// What the `include_answer` step of one search came to (INNH-8a). `metered` is set only when a
+/// model was actually called in this request.
+struct AnswerOutcome {
+    status: Option<AnswerStatus>,
+    reason: Option<AnswerReason>,
+    metered: Option<SynthUsage>,
+}
+
+struct SynthUsage {
+    sources_used: usize,
+    sources_skipped: usize,
+    model: String,
+    latency_ms: u64,
+}
+
+impl AnswerOutcome {
+    fn not_asked() -> Self {
+        Self { status: None, reason: None, metered: None }
+    }
+
+    fn skipped_zdr() -> Self {
+        Self { status: Some(AnswerStatus::SkippedZdr), reason: None, metered: None }
+    }
+
+    fn unavailable(reason: AnswerReason) -> Self {
+        Self { status: Some(AnswerStatus::Unavailable), reason: Some(reason), metered: None }
+    }
+
+    /// A pipeline result. No source means no model call was made, so nothing is metered.
+    fn from_result(result: &quarry_runtime::answer::AnswerResult) -> Self {
+        if result.sources_used == 0 || result.answer.is_empty() {
+            return Self { status: Some(AnswerStatus::NoSources), reason: None, metered: None };
+        }
+        Self {
+            status: Some(AnswerStatus::Ok),
+            reason: None,
+            metered: Some(SynthUsage {
+                sources_used: result.sources_used,
+                sources_skipped: result.sources_skipped,
+                model: result.model.clone(),
+                latency_ms: result.latency_ms,
+            }),
+        }
+    }
+
+    /// A cache hit: the answer was synthesized (and metered) by the request that wrote it.
+    fn from_cached(answer: Option<&str>) -> Self {
+        match answer {
+            Some(a) if !a.is_empty() => Self { status: Some(AnswerStatus::Ok), reason: None, metered: None },
+            _ => Self { status: Some(AnswerStatus::NoSources), reason: None, metered: None },
+        }
+    }
 }
 
 // ── /v1/search/images — IMAGES vertical ──────────────────────────────────────
@@ -1572,6 +1705,8 @@ pub async fn similar(
             results,
             count,
             answer: None,
+            answer_status: None,
+            answer_reason: None,
             citations: None,
             context: None,
             facets: None,
@@ -2553,6 +2688,85 @@ mod tests {
         assert_eq!(figure.period.as_deref(), Some("2. kvartal 2026"));
     }
 
+    fn entry(answer: Option<&str>) -> CachedSearch {
+        CachedSearch {
+            provider: "fake".into(),
+            results: Vec::new(),
+            answer: answer.map(str::to_owned),
+            citations: None,
+            rerank: RerankReport::default(),
+        }
+    }
+
+    #[test]
+    fn a_failed_synthesis_is_never_written_to_the_cache() {
+        // asked for an answer, has none: not cacheable
+        assert!(!cacheable(false, true, None));
+        // asked and has one, or has an empty one (no source had text): cacheable
+        assert!(cacheable(false, true, Some("Oslo")));
+        assert!(cacheable(false, true, Some("")));
+        // did not ask: the result set is cacheable with or without an answer
+        assert!(cacheable(false, false, None));
+        // ZDR never writes
+        assert!(!cacheable(true, true, Some("Oslo")));
+        assert!(!cacheable(true, false, None));
+    }
+
+    #[test]
+    fn an_answerless_entry_is_a_miss_only_for_a_request_that_asked_for_an_answer() {
+        assert!(!usable_hit(&entry(None), true), "a failed synthesis from an older build");
+        assert!(usable_hit(&entry(Some("Oslo")), true));
+        assert!(usable_hit(&entry(Some("")), true));
+        assert!(usable_hit(&entry(None), false));
+    }
+
+    #[test]
+    fn the_answer_outcome_names_what_each_path_came_to() {
+        let none = AnswerOutcome::not_asked();
+        assert!(none.status.is_none() && none.reason.is_none() && none.metered.is_none());
+        let zdr = AnswerOutcome::skipped_zdr();
+        assert_eq!(zdr.status, Some(AnswerStatus::SkippedZdr));
+        assert!(zdr.reason.is_none() && zdr.metered.is_none());
+        let off = AnswerOutcome::unavailable(AnswerReason::SynthesisDisabled);
+        assert_eq!(off.status, Some(AnswerStatus::Unavailable));
+        assert_eq!(off.reason, Some(AnswerReason::SynthesisDisabled));
+        assert!(off.metered.is_none());
+        let hit = AnswerOutcome::from_cached(Some("Oslo"));
+        assert_eq!(hit.status, Some(AnswerStatus::Ok));
+        assert!(hit.metered.is_none(), "a cache hit is never metered");
+        assert_eq!(
+            AnswerOutcome::from_cached(Some("")).status,
+            Some(AnswerStatus::NoSources)
+        );
+    }
+
+    #[test]
+    fn the_new_fields_appear_only_when_set() {
+        let mut response = SearchResponse {
+            query: "oslo".into(),
+            provider: "fake".into(),
+            results: vec![],
+            count: 0,
+            answer: None,
+            answer_status: None,
+            answer_reason: None,
+            citations: None,
+            context: None,
+            facets: None,
+            policy_downgrades: Vec::new(),
+            score_kind: None,
+            rerank: RerankReport::default(),
+        };
+        let plain = serde_json::to_string(&response).unwrap();
+        assert!(!plain.contains("answer"), "an unchanged response: {plain}");
+        response.answer_status = Some(AnswerStatus::Unavailable);
+        response.answer_reason = Some(AnswerReason::NoModelPlaneUrl);
+        let wire = serde_json::to_value(&response).unwrap();
+        assert_eq!(wire["answer_status"], "unavailable");
+        assert_eq!(wire["answer_reason"], "no_model_plane_url");
+        assert!(wire.get("answer").is_none());
+    }
+
     #[test]
     fn a_response_without_structured_facts_is_unchanged() {
         let response = SearchResponse {
@@ -2561,6 +2775,8 @@ mod tests {
             results: vec![],
             count: 0,
             answer: Some("…".into()),
+            answer_status: None,
+            answer_reason: None,
             citations: Some(vec![Citation {
                 structured: None,
                 ..citation_with_figure()
@@ -2718,6 +2934,8 @@ mod tests {
             results: vec![],
             count: 0,
             answer: None,
+            answer_status: None,
+            answer_reason: None,
             citations: None,
             context: None,
             facets: None,

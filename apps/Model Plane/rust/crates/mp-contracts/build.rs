@@ -39,6 +39,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mp_protos = &[
         "model_plane/v1/ids.proto",
         "model_plane/v1/events.proto",
+        // EventLog service (WS10.S6: session-core serves QueryEvents from it).
+        "model_plane/v1/eventlog.proto",
         "model_plane/v1/gateway.proto",
         "model_plane/v1/sessions.proto",
         "model_plane/v1/attention.proto",

@@ -9,6 +9,12 @@ pub struct RunEntry {
     /// scopes live-session reads and mutations to this actor as well as
     /// the tenant; an org membership alone is not browser-run authority.
     pub actor_id: String,
+    /// INNH-10: the id of the API key that started this run; `None` for a person's or a
+    /// service's run. The actor of a key run is `apikey:<key_id>`, so the scoping rule is the
+    /// ordinary one; this field makes the per-step rules (the grant still belongs to the key,
+    /// no sensitive action, always-on grant checks) cheap to read. Process-local: a key run is
+    /// never resumed, so it is not written to the durable checkpoint.
+    pub key_id: Option<String>,
     pub session: BrowserSession,
     /// WS8.H: the person's lane (observation context and last observation). A step of the
     /// attached delegate runs on its own lane (`AttachState.lane`). See `LaneState`.

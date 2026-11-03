@@ -1,0 +1,19 @@
+# rs1: SELECT step, action, status, started_at FROM quarry_step_receipts WHERE run_id=<rs1 run> ORDER BY started_at
+  0|navigate|failed|10:07:32.879
+  1|wait|completed|10:07:33.250
+  2|wait|completed|10:08:08.519
+  3|navigate|completed|10:08:09.319
+  4|wait|completed|10:08:09.828
+# rs2: SELECT step, action, status, started_at FROM quarry_step_receipts WHERE run_id=<rs2 run> ORDER BY started_at
+  0|navigate|failed|10:08:38.549
+  1|wait|completed|10:08:39.018
+  2|navigate|failed|10:08:39.386
+  3|wait|completed|10:09:16.218
+  4|navigate|completed|10:09:17.399
+  5|wait|completed|10:09:17.965
+# rs3: SELECT step, action, status, started_at FROM quarry_step_receipts WHERE run_id=<rs3 run> ORDER BY started_at
+  0|navigate|completed|10:09:22.994
+  1|navigate|failed|10:09:23.256
+  2|wait|completed|10:09:59.966
+  3|navigate|completed|10:10:01.169
+  4|wait|completed|10:10:01.888

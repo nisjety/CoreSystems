@@ -103,6 +103,7 @@ pub fn envelopes_for(
                 "note": serde_json::Value::Null,
             }),
             zdr: false,
+            ..Default::default()
         })
         .collect()
 }

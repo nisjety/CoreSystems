@@ -26,7 +26,9 @@ use quarry_tls::TlsProfile;
 mod agent_routes;
 mod fleet_routes;
 mod answer_routes;
+mod answer_status;
 mod api_error;
+mod api_key;
 mod budget;
 mod audio_routes;
 mod audit_page;
@@ -34,6 +36,10 @@ mod audit_seo;
 mod auth;
 mod cache;
 mod canary;
+// INNH-4: the text diff of a monitored URL; it reads and writes the baseline store, so it exists
+// only where that does.
+#[cfg(feature = "postgres-queue")]
+mod change_diff;
 mod change_routes;
 // Only consumed by the postgres-queue-gated fan-out in change_routes; the
 // bin target has no external consumers, so an ungated declaration would be
@@ -51,12 +57,16 @@ mod handoff;
 mod internal_auth;
 mod internal_routes;
 mod job_lifecycle_routes;
+mod job_results_routes;
 mod job_stream;
 mod crawl_policy;
 mod crawl_request;
+mod crawl_scrape;
+mod crawl_sitemap;
 mod batch_check;
 mod limits;
 mod map_routes;
+mod parse_routes;
 mod metrics;
 mod model_plane_gate;
 mod policy_baseline;
@@ -73,6 +83,7 @@ mod run_limits;
 mod schedule_preflight;
 mod schedule_routes;
 mod scrape_actions;
+mod scrape_cache;
 mod scrape_contract;
 mod scrape_routes;
 mod search_routes;
@@ -83,6 +94,7 @@ mod usage_attrs;
 mod zdr_log;
 mod zdr_refusal;
 mod web_policy_edge;
+mod webhook_subscription_routes;
 #[cfg(feature = "browser-agent")]
 mod agent_policy_gate;
 mod zdr_tombstone;
@@ -169,6 +181,14 @@ async fn run() -> anyhow::Result<()> {
     telemetry::init_telemetry();
     // Choose (and log) how documents are parsed before the first one arrives.
     quarry_runtime::content_route::parse_backend();
+    if parse_routes::route_enabled() {
+        // INNH-11: the parse route serves uploads, so it also reports whether it may.
+        tracing::info!(
+            isolation = quarry_runtime::content_route::parse_backend().label(),
+            serving = !parse_routes::blocked_by_isolation(),
+            "document parse route is on"
+        );
+    }
 
     // Production safety net: `QUARRY_EDGE_AUTH_DEV_BYPASS=1` accepts any
     // bearer without verifying it against auth-core's JWKS. That's fine
@@ -362,8 +382,14 @@ async fn run() -> anyhow::Result<()> {
             .as_deref()
             .is_some_and(|credential| !credential.trim().is_empty()),
         dev_bypass: cfg.cross_plane_auth_dev_bypass,
+        api_key_runs: run_limits::api_key_agent_runs_enabled(),
     })
     .map_err(|refusal| anyhow::anyhow!("{refusal}"))?;
+    if run_limits::api_key_agent_runs_enabled() {
+        tracing::warn!(
+            "QUARRY_EDGE__API_KEY_AGENT_RUNS is on: API-key principals may start fenced agent runs under key grants"
+        );
+    }
     match grant_validator_choice {
         grant_boot::ValidatorChoice::Grpc => {}
         grant_boot::ValidatorChoice::Http => tracing::warn!(
@@ -1522,13 +1548,24 @@ async fn run() -> anyhow::Result<()> {
     };
 
     // Cycle 19 / cluster #18: AnswerPipeline (Tavily replacement).
-    // Requires QUARRY_EDGE__ANSWER_SYNTHESIS on (QB-T17), a SearchProvider and a model path.
-    // When any is missing, /v1/answer returns 501 Unsupported with a hint.
-    let answer_pipeline: Option<Arc<quarry_runtime::answer::AnswerPipeline>> = match (
+    // INNH-8a: the switch (QB-T17, `mp.answer_synthesis`) is decided by `model_plane_gate`; the
+    // pipeline also needs a SearchProvider and a Model Plane URL. The first closed gate, including
+    // a switch the gate refused (no granted `model-invoke` row), is kept on the state, so
+    // /v1/answer answers 501 with the exact reason and include_answer says why it has no answer.
+    let answer_gate = answer_status::AnswerPipelineStatus::from_decision(
+        &model_plane_decision,
+        search.is_some(),
+        cfg.model_plane_url.as_deref().is_some_and(|s| !s.trim().is_empty()),
+    );
+    let (answer_pipeline, answer_pipeline_status): (
+        Option<Arc<quarry_runtime::answer::AnswerPipeline>>,
+        answer_status::AnswerPipelineStatus,
+    ) = match (
+        answer_gate,
         &search,
-        cfg.model_plane_url.as_deref().filter(|s| !s.is_empty()),
+        cfg.model_plane_url.as_deref().filter(|s| !s.trim().is_empty()),
     ) {
-        (Some(search_arc), Some(mp_url)) if mp.answer_synthesis => {
+        (answer_status::AnswerPipelineStatus::Ready, Some(search_arc), Some(mp_url)) => {
             match build_model_client(mp_url) {
                 Ok(mp_client) => {
                     let mp_arc = Arc::new(mp_client);
@@ -1550,25 +1587,31 @@ async fn run() -> anyhow::Result<()> {
                         formats,
                     );
                     tracing::info!("answer pipeline: wired (search + model plane)");
-                    Some(Arc::new(pipeline))
+                    (
+                        Some(Arc::new(pipeline)),
+                        answer_status::AnswerPipelineStatus::Ready,
+                    )
                 }
                 Err(e) => {
-                    tracing::warn!(error = %e, "answer pipeline disabled: model plane client init failed");
-                    None
+                    tracing::warn!(error = %e, reason = "model_client_init_failed", "answer pipeline disabled: model plane client init failed");
+                    (
+                        None,
+                        answer_status::AnswerPipelineStatus::ModelClientInitFailed,
+                    )
                 }
             }
         }
-        _ => {
-            if mp.answer_synthesis && search.is_none() {
+        (gate, _, _) => {
+            if gate == answer_status::AnswerPipelineStatus::NoSearchProvider {
                 tracing::error!(
                     "QUARRY_EDGE__ANSWER_SYNTHESIS is on but no SearchProvider is configured: answer synthesis stays OFF"
                 );
-            } else {
-                tracing::info!(
-                    "answer pipeline off (QUARRY_EDGE__ANSWER_SYNTHESIS is not on, or no SearchProvider)"
-                );
             }
-            None
+            tracing::info!(
+                reason = gate.reason().map(|r| r.as_str()).unwrap_or("none"),
+                "answer pipeline off (needs QUARRY_EDGE__ANSWER_SYNTHESIS=1 with a granted model-invoke row, a search provider and QUARRY_EDGE__MODEL_PLANE_URL)"
+            );
+            (None, gate)
         }
     };
 
@@ -1819,6 +1862,7 @@ async fn run() -> anyhow::Result<()> {
         page_title_enricher,
         service_token_provider: cross_plane_tokens.clone(),
         answer_pipeline,
+        answer_status: answer_pipeline_status,
         model_plane: mp,
         local_index,
         usage,

@@ -21,14 +21,17 @@ var seedRowPattern = regexp.MustCompile(`\('global', '([^']+)', '([^']+)', '([a-
 
 func readSeedRows(t *testing.T) []seedRow {
 	t.Helper()
-	// 0016 seeds the classes; 0018, 0019, 0020, 0024, 0025 and 0026 add the rows of the tools registered after it.
+	// 0016 seeds the classes; 0018, 0019, 0020, 0024, 0025, 0026, 0027, 0029, 0031 and 0034 add the rows of the tools registered after it.
 	sql := readMigration(t, "0016_capability_tool_classes.up.sql") +
 		readMigration(t, "0018_workspace_read_capability.up.sql") +
 		readMigration(t, "0019_workspace_write_capability.up.sql") +
 		readMigration(t, "0020_result_query_capability.up.sql") +
 		readMigration(t, "0024_provider_read_tool.up.sql") +
+		readMigration(t, "0026_knowledge_list_documents_tool.up.sql") +
 		readMigration(t, "0027_browser_tool_capabilities.up.sql") +
-		readMigration(t, "0026_knowledge_list_documents_tool.up.sql")
+		readMigration(t, "0029_ask_user_tool_class.up.sql") +
+		readMigration(t, "0031_web_crawl_tool_capabilities.up.sql") +
+		readMigration(t, "0034_browser_console_tool.up.sql")
 	// 0025 moves these two tools off cap.browser.open; its DELETE is the record of the move, so the
 	// effective seed no longer carries them there. The text check keeps the exclusion honest.
 	moved := map[string]bool{"cap.browser.open/browser.observe": true, "cap.browser.open/browser.act": true}
@@ -151,6 +154,9 @@ func TestSeededCeilingsAreTheStrictestOfTheirTools(t *testing.T) {
 		"cap.process.background":    {models.SideEffectSandboxCompute, models.ApprovalFloorNone},
 		"cap.tool.provider.execute": {models.SideEffectExternalWrite, models.ApprovalFloorNone},
 		"cap.tool.ticket.create":    {models.SideEffectOwnerEffect, models.ApprovalFloorDurableOwner},
+		"cap.web.batch":             {models.SideEffectContextWrite, models.ApprovalFloorNone},
+		"cap.web.crawl":             {models.SideEffectContextWrite, models.ApprovalFloorNone},
+		"cap.web.map":               {models.SideEffectRead, models.ApprovalFloorNone},
 		"cap.workspace.write":       {models.SideEffectContextWrite, models.ApprovalFloorNone},
 	} {
 		if class[id] != want[0] || floor[id] != want[1] {

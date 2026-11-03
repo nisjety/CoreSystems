@@ -1,0 +1,22 @@
+ready before (generation, sessions_open): [1,0]
+A=run_01M622N682X924Y266X9JMN6T7 (800x600)  B=run_01M622N6BPYYX14X4RDW62P0G7 (1280x900)
+round 0: A / HTTP=200 title="title":"Fixture A" | B /blog/b.html HTTP=200 title="title":"Blog B"
+round 1: A /docs/a.html HTTP=200 title="title":"Docs A" | B / HTTP=200 title="title":"Fixture A"
+round 2: A /blog/b.html HTTP=200 title="title":"Blog B" | B /docs/a.html HTTP=200 title="title":"Docs A"
+round 3: A /docs/a.html HTTP=200 title="title":"Docs A" | B /blog/b.html HTTP=200 title="title":"Blog B"
+round 4: A / HTTP=200 title="title":"Fixture A" | B /docs/a.html HTTP=200 title="title":"Docs A"
+round 5: A /blog/b.html HTTP=200 title="title":"Blog B" | B / HTTP=200 title="title":"Fixture A"
+round 6: A /docs/a.html HTTP=200 title="title":"Docs A" | B /blog/b.html HTTP=200 title="title":"Blog B"
+round 7: A / HTTP=200 title="title":"Fixture A" | B /docs/a.html HTTP=200 title="title":"Docs A"
+--- final state
+{"runId":"run_01M622N682X924Y266X9JMN6T7","viewport":{"width":800,"height":600,"device_scale_factor":1.0,"is_mobile":false},"currentUrl":"http://fixture-a.crawl.test/","step":8,"status":"active","live":true}
+{"runId":"run_01M622N6BPYYX14X4RDW62P0G7","viewport":{"width":1280,"height":900,"device_scale_factor":1.0,"is_mobile":false},"currentUrl":"http://fixture-a.crawl.test/docs/a.html","step":8,"status":"active","live":true}
+frame A 200
+frame B 200
+png A dims: 1885676090x577334625   png B dims: 1885676090x577334625
+ready after (generation, sessions_open): [1,2]
+--- edge log since 2026-10-28T20:19:06Z: lines mentioning relaunch/crash/lost/disconnected
+0
+l} HTTP=200
+l} HTTP=200
+ready end: [1,0]

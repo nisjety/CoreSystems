@@ -301,7 +301,7 @@ fn is_credential_refusal(refusal: &Refusal) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use mp_contracts::agentic_subscription::PROVIDER_ID;
     use serde_json::json;
@@ -714,6 +714,11 @@ mod tests {
                 "posture equality across the user bearers of one request, not a decision",
             ),
             (
+                "auth.rs",
+                "verify_delegated_api_key_browser_bearer",
+                "posture equality between an api key's ingress and broker bearers, not a decision",
+            ),
+            (
                 "grpc_auth.rs",
                 "verify_delegated_bearer",
                 "posture equality across the user bearers of one gRPC request, not a decision",
@@ -767,7 +772,7 @@ mod tests {
         const ENTRY_POINTS: &[(&str, &str)] = &[
             ("sse.rs", "invoke_stream_sse"),
             ("http_routes.rs", "invoke"),
-            ("http_routes.rs", "ai_chat"),
+            ("http_routes.rs", "ai_chat_with"),
             ("http_routes.rs", "recommend_plan"),
             ("http_routes.rs", "ai_embeddings"),
             ("http_routes.rs", "ai_dictate"),
@@ -791,6 +796,7 @@ mod tests {
             ("finetune_routes.rs", "require_non_zdr_finetune_mutation"),
             ("finetune_routes.rs", "get_job"),
             ("browser_run.rs", "browser_run_zdr_blocked"),
+            ("browser_grants.rs", "issue_key_grant"),
             ("grpc_auth.rs", "posture"),
             ("grpc_auth.rs", "authorize_request"),
             ("grpc.rs", "require_explicit_zdr_contract"),
@@ -972,10 +978,13 @@ mod tests {
             // The gRPC surface, each decided by zdr_for before its call.
             ("grpc.rs", "invoke", "the request's route (zdr_for)"),
             ("grpc.rs", "invoke_stream", "the request's route (zdr_for)"),
+            // The extraction's one inference call (WS16.S8). Its callers decide the posture first:
+            // the gRPC method through `zdr_for` on the request's route, the chat tool with the
+            // turn's own `zdr`; the call carries it on the request and on the page scrape.
             (
-                "grpc.rs",
-                "extract_structured",
-                "the request's route (zdr_for)",
+                "web_extraction.rs",
+                "infer_once",
+                "the caller's route (zdr_for in the gRPC method, the turn's zdr in the tool)",
             ),
             (
                 "grpc.rs",
@@ -995,7 +1004,7 @@ mod tests {
             ),
             (
                 "http_routes.rs",
-                "ai_chat",
+                "ai_chat_with",
                 "the request's route (zdr_or_refuse)",
             ),
             (
@@ -1175,7 +1184,7 @@ mod tests {
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src")
     }
 
-    fn read_sources() -> Vec<(String, String)> {
+    pub(crate) fn read_sources() -> Vec<(String, String)> {
         let mut files = Vec::new();
         for entry in std::fs::read_dir(source_dir()).expect("the source directory is readable") {
             let path = entry.expect("a directory entry").path();
@@ -1269,7 +1278,7 @@ mod tests {
     }
 
     /// The source with every `#[cfg(test)]` item blanked out, newlines kept.
-    fn strip_test_items(source: &str) -> String {
+    pub(crate) fn strip_test_items(source: &str) -> String {
         const MARK: &str = "#[cfg(test)]";
         let mut out = String::with_capacity(source.len());
         let mut rest = source;

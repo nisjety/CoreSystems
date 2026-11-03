@@ -1,0 +1,42 @@
+ step |   type    |     key_or_text     |         sel          |  by   
+------+-----------+---------------------+----------------------+-------
+    0 | navigate  |                     |                      | agent
+    1 | click     |                     | input[type=password] | agent
+    2 | press     | [redacted:password] |                      | agent
+    3 | press     | [redacted:password] |                      | agent
+    4 | press     | [redacted:password] |                      | agent
+    5 | press     | [redacted:password] |                      | agent
+    6 | press     | [redacted:password] |                      | agent
+    7 | press     | [redacted:password] |                      | agent
+    8 | press     | [redacted:password] |                      | agent
+    9 | press     | [redacted:password] |                      | agent
+   10 | press     | [redacted:password] |                      | agent
+   11 | press     | [redacted:password] |                      | agent
+   12 | press     | Enter               |                      | agent
+   13 | click_ref |                     |                      | agent
+   14 | press     | [redacted:password] |                      | agent
+   15 | press     | [redacted:password] |                      | agent
+   16 | press     | [redacted:password] |                      | agent
+   17 | press     | [redacted:password] |                      | agent
+   18 | press     | [redacted:password] |                      | agent
+   19 | press     | [redacted:password] |                      | agent
+   20 | press     | [redacted:password] |                      | agent
+   21 | press     | [redacted:password] |                      | agent
+   22 | press     | [redacted:password] |                      | agent
+   23 | press     | [redacted:password] |                      | agent
+   24 | press     | Enter               |                      | agent
+   25 | click_ref |                     |                      | agent
+   26 | press     | z                   |                      | agent
+   27 | press     | e                   |                      | agent
+   28 | press     | b                   |                      | agent
+   29 | press     | r                   |                      | agent
+   30 | press     | a                   |                      | agent
+   31 | press     | f                   |                      | agent
+   32 | press     | i                   |                      | agent
+   33 | press     | s                   |                      | agent
+   34 | press     | h                   |                      | agent
+   35 | press     | Enter               |                      | agent
+   36 | click_ref |                     |                      | agent
+   37 | type_ref  | pelican             |                      | agent
+(38 rows)
+

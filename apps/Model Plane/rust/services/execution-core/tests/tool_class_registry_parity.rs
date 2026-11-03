@@ -101,6 +101,8 @@ fn seeded_rows() -> Vec<Seeded> {
         "0027_browser_tool_capabilities.up.sql",
         "0026_knowledge_list_documents_tool.up.sql",
         "0029_ask_user_tool_class.up.sql",
+        "0031_web_crawl_tool_capabilities.up.sql",
+        "0034_browser_console_tool.up.sql",
     ] {
         sql.push_str(&read_text(&format!(
             "../../../go/services/capability-core/migrations/{later}"

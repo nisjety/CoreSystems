@@ -570,6 +570,8 @@ mod tests {
             aud: None,
             scopes: scopes.iter().map(|s| (*s).to_owned()).collect(),
             zdr: None,
+            key_id: None,
+            acting_user_id: None,
         }
     }
 

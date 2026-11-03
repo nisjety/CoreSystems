@@ -22,7 +22,8 @@ use quarry_core::error::{ErrorCode, QuarryError};
 use quarry_core::ids::kinds::JobKind;
 use quarry_core::pagination::Page;
 use quarry_core::resources::{
-    JobControlState, JobCounts, JobErrorsView, JobStatusView, JobSummary, JobWarning, RunOrigin,
+    JobControlState, JobCounts, JobCredits, JobErrorsView, JobStatusView, JobSummary, JobWarning,
+    RunOrigin,
 };
 
 use crate::auth::Claims;
@@ -91,6 +92,11 @@ struct ControlSummary {
     total_kind: Option<String>,
     #[serde(default)]
     warnings: Vec<JobWarning>,
+    /// Control's derived credit estimate (INNH-9); present only while control's
+    /// `QUARRY_CONTROL__JOB_CREDITS` flag is on. Forwarded unchanged: the edge
+    /// holds no price and no flag of its own.
+    #[serde(default)]
+    credits: Option<JobCredits>,
 }
 
 fn is_terminal(status: &str) -> bool {
@@ -109,6 +115,7 @@ fn status_view(summary: ControlSummary) -> JobStatusView {
         total,
         total_kind,
         warnings,
+        credits,
     } = summary;
     let terminal = is_terminal(&job.status);
     let control = JobControlState {
@@ -137,10 +144,11 @@ fn status_view(summary: ControlSummary) -> JobStatusView {
         control,
         schedule_id: job.schedule_id,
         run_id: job.run_id,
+        credits,
     }
 }
 
-fn fail(request_id: &str, err: QuarryError) -> (StatusCode, Json<Envelope<()>>) {
+pub(crate) fn fail(request_id: &str, err: QuarryError) -> (StatusCode, Json<Envelope<()>>) {
     (
         StatusCode::from_u16(err.code.http_status()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
         Json(Envelope::<()>::err(request_id, err)),
@@ -170,6 +178,21 @@ async fn load_summary(state: &AppState, claims: &Claims, id: &str) -> Result<Con
     .await?;
     serde_json::from_value(raw)
         .map_err(|_| QuarryError::new(ErrorCode::Internal, "control summary unreadable"))
+}
+
+/// Settles that the job exists for the caller's org and is of the kind the path names
+/// (`None`: any kind). A foreign, unknown or mismatched id is the same 404.
+pub(crate) async fn require_job_of_kind(
+    state: &AppState,
+    claims: &Claims,
+    id: &str,
+    kind: Option<&str>,
+) -> Result<(), QuarryError> {
+    let summary = load_summary(state, claims, id).await?;
+    if kind.is_some_and(|kind| summary.job.kind != kind) {
+        return Err(QuarryError::new(ErrorCode::NotFound, "not found"));
+    }
+    Ok(())
 }
 
 /// The status of a job, checked against the kind the path names.

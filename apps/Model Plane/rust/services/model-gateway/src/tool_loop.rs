@@ -3870,6 +3870,81 @@ async fn dispatch_tool_with_cost(
                 Err(e) => err_outcome(call, format!("fetch_url failed: {e}")),
             }
         }
+        // Model-proposed page extraction (WS16.S8): reads one to five pages and returns data the
+        // model pulled out of them, checked against the schema or found verbatim on the page. The
+        // result is web content derived from a page, so it is screened and labelled exactly like
+        // `fetch_url`'s. Advertised only behind `MODEL_GATEWAY_EXTRACT_TOOL`; refused here too, so a
+        // call to a tool that was never offered cannot reach the scrape.
+        "extract_structured" => {
+            if !crate::web_extraction::extract_tool_enabled() {
+                return err_outcome(call, "extract_structured is not available");
+            }
+            let args = match crate::web_extraction::ToolArgs::parse(&call.arguments_json) {
+                Ok(args) => args,
+                Err(message) => return err_outcome(call, format!("extract_structured: {message}")),
+            };
+            if !state.quarry.available() {
+                return err_outcome(call, "extract_structured: the page reader is not configured");
+            }
+            if inference_bearer.trim().is_empty() {
+                return err_outcome(call, "extract_structured: no inference credential on this turn");
+            }
+            let mode = args.mode.clone();
+            let spec = crate::web_extraction::ExtractSpec {
+                request_id: format!("extract-{}", mp_ids::new_ulid()),
+                org_id: org_id.to_owned(),
+                user_id: user_id.to_owned(),
+                urls: args.urls,
+                mode: args.mode,
+                instructions: args.instructions,
+                render: None,
+                model: String::new(),
+                provider: String::new(),
+                zdr,
+                max_output_tokens: crate::web_extraction::DEFAULT_MAX_OUTPUT_TOKENS,
+                inference_bearer: inference_bearer.to_owned(),
+                transport: "tool_loop",
+            };
+            let outcomes = crate::web_extraction::extract(state, &spec).await;
+            if outcomes.iter().all(|o| !o.result.error_message.is_empty()) {
+                let reasons: Vec<&str> = outcomes
+                    .iter()
+                    .map(|o| o.result.error_message.as_str())
+                    .collect();
+                return err_outcome(call, format!("extract_structured failed: {}", reasons.join("; ")));
+            }
+            let body = crate::web_extraction::tool_output(&outcomes, &mode).to_string();
+            // Screen the complete result BEFORE it reaches the model, as `fetch_url` does.
+            let ExternalScreen { provenance, withheld } = assess_external_payload(
+                state,
+                &call.name,
+                &body,
+                capability_bearer,
+                inference_bearer,
+                org_id,
+                user_id,
+                run_id,
+                zdr || data_plane_mode.is_some(),
+                classifier_budget,
+            )
+            .await;
+            if withheld {
+                return ToolOutcome {
+                    call_id: call.id.clone(),
+                    name: call.name.clone(),
+                    output: crate::semantic_screening::withheld_output(&call.name, &provenance, None),
+                    provenance,
+                    error: None,
+                };
+            }
+            ToolOutcome {
+                call_id: call.id.clone(),
+                name: call.name.clone(),
+                provenance,
+                output: body,
+                error: None,
+            }
+        }
         // Interactive browsing agent (chat-parity Phase 3) — runs a multi-step
         // browse objective via the agent service (known `AgentModeRequest`
         // contract). Operator points BROWSER_AGENT_URL at the service; disabled
@@ -5567,7 +5642,7 @@ pub fn conversation_tool_allowed(name: &str) -> bool {
 
 /// The public-web-search half of the retrieval-scope tool buckets
 /// (chat-wave2 scope spec §2.3): excluded from an org-`knowledge_only` turn.
-const WEB_CLASS_TOOLS: &[&str] = &["web_search", "fetch_url", "read_page", "find_in_page"];
+const WEB_CLASS_TOOLS: &[&str] = &["web_search", "fetch_url", "read_page", "find_in_page", "extract_structured"];
 /// The org-knowledge half: excluded from a `web_only` turn.
 ///
 /// `mcp_call`, `action_execute` and `browser_agent` are deliberately in
@@ -5667,6 +5742,13 @@ pub fn history_was_compacted(messages: &[ChatMessage]) -> bool {
 
 #[must_use]
 pub fn builtin_tool_defs() -> Vec<ToolDefinition> {
+    builtin_tool_defs_with(crate::web_extraction::extract_tool_enabled())
+}
+
+/// [`builtin_tool_defs`] with the Model-proposed extraction tool (WS16.S8) decided by the caller, so a
+/// test can pin both sides without touching the process environment.
+#[must_use]
+pub fn builtin_tool_defs_with(extract_tool: bool) -> Vec<ToolDefinition> {
     let mut defs = vec![
         ToolDefinition {
             name: "count_words".to_owned(),
@@ -5822,6 +5904,14 @@ pub fn builtin_tool_defs() -> Vec<ToolDefinition> {
             parameters_json: r#"{"type":"object","properties":{"status":{"type":"string","enum":["draft","active","completed","archived"],"description":"Optional status filter. Omit for all statuses."},"limit":{"type":"integer","description":"Max campaigns to return, 1-100 (default 25)"}}}"#.to_owned(),
         },
     ];
+    if extract_tool {
+        // Beside `fetch_url`'s neighbours at the end: the list above is the cached prefix.
+        defs.push(ToolDefinition {
+            name: "extract_structured".to_owned(),
+            description: crate::web_extraction::tool_description().to_owned(),
+            parameters_json: crate::web_extraction::tool_parameters().to_owned(),
+        });
+    }
     advertise_text_range(&mut defs, crate::tool_result_handles::extended_enabled());
     defs
 }
@@ -11032,6 +11122,64 @@ mod tests {
                 "{tool} is a Data Plane hint target but is not advertised to the model"
             );
         }
+    }
+
+    /// WS16.S8: the Model-proposed extraction tool is offered only behind `MODEL_GATEWAY_EXTRACT_TOOL`
+    /// (default off). The switch is decided by the caller of `builtin_tool_defs_with`, so both sides are
+    /// pinned without touching the process environment; the default itself is pinned in
+    /// `web_extraction::tests::the_flag_enables_only_on_the_literals`.
+    #[test]
+    fn extract_structured_is_advertised_only_when_the_flag_is_on() {
+        let names = |on: bool| -> Vec<String> {
+            builtin_tool_defs_with(on).into_iter().map(|def| def.name).collect()
+        };
+        let off = names(false);
+        assert!(!off.iter().any(|name| name == "extract_structured"));
+        let on = names(true);
+        assert_eq!(on.iter().filter(|name| *name == "extract_structured").count(), 1);
+        // Nothing else moves, and the existing tools keep their order (the cached prefix).
+        let without: Vec<&String> = on.iter().filter(|name| *name != "extract_structured").collect();
+        assert_eq!(without, off.iter().collect::<Vec<_>>());
+        // The default list is the switch-off list while the variable is unset.
+        if std::env::var("MODEL_GATEWAY_EXTRACT_TOOL").is_err() {
+            assert_eq!(
+                builtin_tool_defs().into_iter().map(|def| def.name).collect::<Vec<_>>(),
+                off
+            );
+        }
+        // The tool is a web-class tool: a knowledge-only turn never sees it.
+        assert!(!tool_allowed_for_retrieval_scope(
+            "extract_structured",
+            crate::normalize::RetrievalScope::KnowledgeOnly
+        ));
+        assert!(tool_allowed_for_retrieval_scope(
+            "extract_structured",
+            crate::normalize::RetrievalScope::WebOnly
+        ));
+    }
+
+    /// An advertised `extract_structured` reaches a dispatch arm that reads its arguments, and a call
+    /// that arrives while the tool is off is refused before anything is fetched.
+    #[tokio::test]
+    async fn extract_structured_has_a_dispatch_arm_and_validates_before_fetching() {
+        let state = crate::state::AppState::new();
+        let off = tool_call("extract_structured", r#"{"url":"https://a.example","question":"q"}"#);
+        let outcome = dispatch_tool(
+            &state, "run_test", "org_test", "user_test", "thread_test", "", &[], "", None, None, "", "",
+            None, true, false, false, &off, None, None,
+            crate::retrieval::data_plane_zdr_mode(true, false),
+        )
+        .await;
+        let error = outcome.error.unwrap_or_default();
+        assert!(!error.contains("unknown tool"), "{error}");
+        assert!(error.contains("extract_structured"), "{error}");
+        // The advertised parameters are valid minimal arguments for the dispatcher's pre-check.
+        let def = builtin_tool_defs_with(true)
+            .into_iter()
+            .find(|def| def.name == "extract_structured")
+            .expect("advertised");
+        let schema: Value = serde_json::from_str(&def.parameters_json).expect("json schema");
+        assert_eq!(schema["type"], "object");
     }
 
     /// The sovereignty axis has to be POPULATED, not merely present: Data Plane

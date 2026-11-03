@@ -13,6 +13,7 @@ members = [
     "crates/mp-authctx",
     "crates/mp-content-safety",
     "crates/mp-inference-replay",
+    "crates/mp-scrub",
     "services/model-gateway",
     "services/session-core",
     "services/inference-core",

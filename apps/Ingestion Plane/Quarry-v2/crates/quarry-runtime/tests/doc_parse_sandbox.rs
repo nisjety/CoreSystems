@@ -11,7 +11,8 @@ use std::time::{Duration, Instant};
 
 use quarry_core::error::ErrorCode;
 use quarry_runtime::content_route::{
-    parse_document_with, ChildLimits, ParseBackend, ProcessBackend,
+    parse_document_info_with, parse_document_with, ChildLimits, ParseBackend, PdfPageSummary,
+    ProcessBackend,
 };
 use quarry_transform::sniff::ContentKind;
 
@@ -401,4 +402,89 @@ async fn a_docx_bomb_is_a_typed_415_and_the_next_document_still_parses() {
     .await
     .expect("a normal document still parses");
     assert_eq!(after.text, "Etter bomben");
+}
+
+// ---- the page-facts path of POST /v1/parse (INNH-11) ----------------------------
+
+#[tokio::test]
+async fn the_page_facts_come_back_from_the_child_the_same_as_in_process() {
+    let pdf = plain_pdf("Hemmelig dokument");
+    let queue = Duration::from_secs(5);
+    let in_process = parse_document_info_with(
+        &ParseBackend::InProcess,
+        ContentKind::Pdf,
+        pdf.clone(),
+        Duration::from_secs(15),
+        queue,
+    )
+    .await
+    .expect("in-process parse");
+    let in_child = parse_document_info_with(
+        &child_backend(ChildLimits::default()),
+        ContentKind::Pdf,
+        pdf,
+        Duration::from_secs(15),
+        queue,
+    )
+    .await
+    .expect("child parse");
+    assert!(in_child.document.text.contains("Hemmelig dokument"));
+    assert_eq!(
+        in_child.pdf,
+        Some(PdfPageSummary {
+            pages: 1,
+            pages_without_text: 0
+        })
+    );
+    assert_eq!(in_child, in_process);
+
+    // A DOCX has no pages to report.
+    let docx = docx_with_document(
+        b"<w:document><w:body><w:p><w:r><w:t>Avtale</w:t></w:r></w:p></w:body></w:document>",
+    );
+    let parsed = parse_document_info_with(
+        &child_backend(ChildLimits::default()),
+        ContentKind::Docx,
+        docx,
+        Duration::from_secs(15),
+        queue,
+    )
+    .await
+    .expect("docx");
+    assert_eq!(parsed.document.text, "Avtale");
+    assert_eq!(parsed.pdf, None);
+}
+
+#[tokio::test]
+async fn a_bomb_on_the_page_facts_path_is_the_same_typed_415_and_the_next_document_parses() {
+    // The page classification parses the PDF a second time; it runs inside the same child,
+    // under the same limits, so a bomb the text read lets through cannot reach it either.
+    let limits = ChildLimits {
+        address_space: 256 * 1024 * 1024,
+        ..ChildLimits::default()
+    };
+    let compressed = deflated_zeros(1024 * 1024 * 1024);
+    let bomb = pdf_with_stream(&ascii85(&compressed), "/Filter [/ASCII85Decode /FlateDecode]");
+    let error = parse_document_info_with(
+        &child_backend(limits),
+        ContentKind::Pdf,
+        bomb,
+        Duration::from_secs(15),
+        Duration::from_secs(5),
+    )
+    .await
+    .expect_err("the bomb must not parse");
+    assert_eq!(error.code, ErrorCode::UnsupportedMedia, "{error:?}");
+    assert_eq!(error.details.as_ref().unwrap()["reason"], "pdf_parse_failed");
+
+    let after = parse_document_info_with(
+        &child_backend(ChildLimits::default()),
+        ContentKind::Pdf,
+        plain_pdf("Etter bomben"),
+        Duration::from_secs(15),
+        Duration::from_secs(5),
+    )
+    .await
+    .expect("a normal document still parses");
+    assert!(after.document.text.contains("Etter bomben"));
 }

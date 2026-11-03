@@ -23,6 +23,72 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
+// What started a run. A label for display and filtering only; admission and
+// budget code must never read it as authority.
+type RunOrigin int32
+
+const (
+	// Origin not recorded.
+	RunOrigin_RUN_ORIGIN_UNSPECIFIED RunOrigin = 0
+	// A human in a UI (chat, space, support, agent-run console).
+	RunOrigin_RUN_ORIGIN_USER RunOrigin = 1
+	// Another agent or background review.
+	RunOrigin_RUN_ORIGIN_AGENT RunOrigin = 2
+	// A schedule, cron or routine.
+	RunOrigin_RUN_ORIGIN_SCHEDULE RunOrigin = 3
+	// An inbound webhook or mail task.
+	RunOrigin_RUN_ORIGIN_WEBHOOK RunOrigin = 4
+	// A direct service caller.
+	RunOrigin_RUN_ORIGIN_API RunOrigin = 5
+)
+
+// Enum value maps for RunOrigin.
+var (
+	RunOrigin_name = map[int32]string{
+		0: "RUN_ORIGIN_UNSPECIFIED",
+		1: "RUN_ORIGIN_USER",
+		2: "RUN_ORIGIN_AGENT",
+		3: "RUN_ORIGIN_SCHEDULE",
+		4: "RUN_ORIGIN_WEBHOOK",
+		5: "RUN_ORIGIN_API",
+	}
+	RunOrigin_value = map[string]int32{
+		"RUN_ORIGIN_UNSPECIFIED": 0,
+		"RUN_ORIGIN_USER":        1,
+		"RUN_ORIGIN_AGENT":       2,
+		"RUN_ORIGIN_SCHEDULE":    3,
+		"RUN_ORIGIN_WEBHOOK":     4,
+		"RUN_ORIGIN_API":         5,
+	}
+)
+
+func (x RunOrigin) Enum() *RunOrigin {
+	p := new(RunOrigin)
+	*p = x
+	return p
+}
+
+func (x RunOrigin) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (RunOrigin) Descriptor() protoreflect.EnumDescriptor {
+	return file_model_plane_v1_events_proto_enumTypes[0].Descriptor()
+}
+
+func (RunOrigin) Type() protoreflect.EnumType {
+	return &file_model_plane_v1_events_proto_enumTypes[0]
+}
+
+func (x RunOrigin) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use RunOrigin.Descriptor instead.
+func (RunOrigin) EnumDescriptor() ([]byte, []int) {
+	return file_model_plane_v1_events_proto_rawDescGZIP(), []int{0}
+}
+
 // Lifecycle event types from the plan Phase A taxonomy.
 type EventType int32
 
@@ -131,6 +197,26 @@ const (
 	EventType_EVENT_TYPE_BROWSER_ACTION_APPROVAL_REQUIRED EventType = 144
 	EventType_EVENT_TYPE_BROWSER_ACTION_DECIDED           EventType = 145
 	EventType_EVENT_TYPE_APPROVAL_CONTINUATION_VERIFIED   EventType = 146
+	// Run-trace events (WS10.S2). Produced by Quarry, carried on
+	// mp.v1.trace.run.<run_id> and persisted by session-core. 150-159 belong
+	// to the trace; 150-156 are used.
+	// A browser session was opened for the run.
+	EventType_EVENT_TYPE_BROWSER_SESSION_OPENED EventType = 150
+	// A browser session closed (reason in the payload).
+	EventType_EVENT_TYPE_BROWSER_SESSION_CLOSED EventType = 151
+	// Control of the session moved between agent, user and delegate.
+	EventType_EVENT_TYPE_BROWSER_CONTROL_CHANGED EventType = 152
+	// A tab was opened, closed or activated.
+	EventType_EVENT_TYPE_BROWSER_TAB_CHANGED EventType = 153
+	// A step receipt was recorded (reference-based, no page content).
+	EventType_EVENT_TYPE_BROWSER_STEP_RECEIPT_RECORDED EventType = 154
+	// An egress decision (block or summary) was recorded.
+	EventType_EVENT_TYPE_BROWSER_EGRESS_DECIDED EventType = 155
+	// An artifact (screenshot, download) was recorded by reference.
+	EventType_EVENT_TYPE_BROWSER_ARTIFACT_RECORDED EventType = 156
+	// A delegate attached with the owner's shared cookie jar (WS8.G).
+	// Allocated here so the enum is touched once.
+	EventType_EVENT_TYPE_BROWSER_ATTACH_SHARED_JAR EventType = 160
 )
 
 // Enum value maps for EventType.
@@ -181,6 +267,14 @@ var (
 		144: "EVENT_TYPE_BROWSER_ACTION_APPROVAL_REQUIRED",
 		145: "EVENT_TYPE_BROWSER_ACTION_DECIDED",
 		146: "EVENT_TYPE_APPROVAL_CONTINUATION_VERIFIED",
+		150: "EVENT_TYPE_BROWSER_SESSION_OPENED",
+		151: "EVENT_TYPE_BROWSER_SESSION_CLOSED",
+		152: "EVENT_TYPE_BROWSER_CONTROL_CHANGED",
+		153: "EVENT_TYPE_BROWSER_TAB_CHANGED",
+		154: "EVENT_TYPE_BROWSER_STEP_RECEIPT_RECORDED",
+		155: "EVENT_TYPE_BROWSER_EGRESS_DECIDED",
+		156: "EVENT_TYPE_BROWSER_ARTIFACT_RECORDED",
+		160: "EVENT_TYPE_BROWSER_ATTACH_SHARED_JAR",
 	}
 	EventType_value = map[string]int32{
 		"EVENT_TYPE_UNSPECIFIED":                      0,
@@ -228,6 +322,14 @@ var (
 		"EVENT_TYPE_BROWSER_ACTION_APPROVAL_REQUIRED": 144,
 		"EVENT_TYPE_BROWSER_ACTION_DECIDED":           145,
 		"EVENT_TYPE_APPROVAL_CONTINUATION_VERIFIED":   146,
+		"EVENT_TYPE_BROWSER_SESSION_OPENED":           150,
+		"EVENT_TYPE_BROWSER_SESSION_CLOSED":           151,
+		"EVENT_TYPE_BROWSER_CONTROL_CHANGED":          152,
+		"EVENT_TYPE_BROWSER_TAB_CHANGED":              153,
+		"EVENT_TYPE_BROWSER_STEP_RECEIPT_RECORDED":    154,
+		"EVENT_TYPE_BROWSER_EGRESS_DECIDED":           155,
+		"EVENT_TYPE_BROWSER_ARTIFACT_RECORDED":        156,
+		"EVENT_TYPE_BROWSER_ATTACH_SHARED_JAR":        160,
 	}
 )
 
@@ -242,11 +344,11 @@ func (x EventType) String() string {
 }
 
 func (EventType) Descriptor() protoreflect.EnumDescriptor {
-	return file_model_plane_v1_events_proto_enumTypes[0].Descriptor()
+	return file_model_plane_v1_events_proto_enumTypes[1].Descriptor()
 }
 
 func (EventType) Type() protoreflect.EnumType {
-	return &file_model_plane_v1_events_proto_enumTypes[0]
+	return &file_model_plane_v1_events_proto_enumTypes[1]
 }
 
 func (x EventType) Number() protoreflect.EnumNumber {
@@ -255,7 +357,7 @@ func (x EventType) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use EventType.Descriptor instead.
 func (EventType) EnumDescriptor() ([]byte, []int) {
-	return file_model_plane_v1_events_proto_rawDescGZIP(), []int{0}
+	return file_model_plane_v1_events_proto_rawDescGZIP(), []int{1}
 }
 
 // Canonical event envelope for all Model Plane events.
@@ -289,7 +391,18 @@ type Event struct {
 	// Type-specific payload. Encoded as google.protobuf.Any so envelope shape is stable.
 	Payload *anypb.Any `protobuf:"bytes,12,opt,name=payload,proto3" json:"payload,omitempty"`
 	// Zero Data Retention mode. When true, this event must not be persisted durably.
-	Zdr           bool `protobuf:"varint,13,opt,name=zdr,proto3" json:"zdr,omitempty"`
+	Zdr bool `protobuf:"varint,13,opt,name=zdr,proto3" json:"zdr,omitempty"`
+	// Per-(run_id, producer) sequence, dense from 1. 0 = not numbered.
+	ProducerSeq uint64 `protobuf:"varint,21,opt,name=producer_seq,json=producerSeq,proto3" json:"producer_seq,omitempty"`
+	// Agent that produced the event (browser agent, subagent, ...).
+	Agent *AgentRef `protobuf:"bytes,22,opt,name=agent,proto3" json:"agent,omitempty"`
+	// What started the run this event belongs to. Never an authorization input.
+	Origin RunOrigin `protobuf:"varint,23,opt,name=origin,proto3,enum=model_plane.v1.RunOrigin" json:"origin,omitempty"`
+	// Model Plane run id this event belongs to (bare ULID, no dots).
+	RunId string `protobuf:"bytes,24,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
+	// Request id of the HTTP call that caused the event, for support lookups.
+	// Not an authorization, tenancy or idempotency key.
+	RequestId     string `protobuf:"bytes,25,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -415,11 +528,110 @@ func (x *Event) GetZdr() bool {
 	return false
 }
 
+func (x *Event) GetProducerSeq() uint64 {
+	if x != nil {
+		return x.ProducerSeq
+	}
+	return 0
+}
+
+func (x *Event) GetAgent() *AgentRef {
+	if x != nil {
+		return x.Agent
+	}
+	return nil
+}
+
+func (x *Event) GetOrigin() RunOrigin {
+	if x != nil {
+		return x.Origin
+	}
+	return RunOrigin_RUN_ORIGIN_UNSPECIFIED
+}
+
+func (x *Event) GetRunId() string {
+	if x != nil {
+		return x.RunId
+	}
+	return ""
+}
+
+func (x *Event) GetRequestId() string {
+	if x != nil {
+		return x.RequestId
+	}
+	return ""
+}
+
+// Identifies the agent that produced a trace event.
+type AgentRef struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Agent identifier (for example "general-v1"). At most 64 chars [A-Za-z0-9_-].
+	Id string `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	// Role of the agent within the run (for example "primary", "subagent").
+	Role string `protobuf:"bytes,2,opt,name=role,proto3" json:"role,omitempty"`
+	// Identifier of the parent agent, empty for the primary agent.
+	ParentId      string `protobuf:"bytes,3,opt,name=parent_id,json=parentId,proto3" json:"parent_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AgentRef) Reset() {
+	*x = AgentRef{}
+	mi := &file_model_plane_v1_events_proto_msgTypes[1]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AgentRef) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AgentRef) ProtoMessage() {}
+
+func (x *AgentRef) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_events_proto_msgTypes[1]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AgentRef.ProtoReflect.Descriptor instead.
+func (*AgentRef) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_events_proto_rawDescGZIP(), []int{1}
+}
+
+func (x *AgentRef) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *AgentRef) GetRole() string {
+	if x != nil {
+		return x.Role
+	}
+	return ""
+}
+
+func (x *AgentRef) GetParentId() string {
+	if x != nil {
+		return x.ParentId
+	}
+	return ""
+}
+
 var File_model_plane_v1_events_proto protoreflect.FileDescriptor
 
 const file_model_plane_v1_events_proto_rawDesc = "" +
 	"\n" +
-	"\x1bmodel_plane/v1/events.proto\x12\x0emodel_plane.v1\x1a\x19google/protobuf/any.proto\x1a\x1fgoogle/protobuf/timestamp.proto\"\xd9\x03\n" +
+	"\x1bmodel_plane/v1/events.proto\x12\x0emodel_plane.v1\x1a\x19google/protobuf/any.proto\x1a\x1fgoogle/protobuf/timestamp.proto\"\x95\x05\n" +
 	"\x05Event\x12\x19\n" +
 	"\bevent_id\x18\x01 \x01(\tR\aeventId\x128\n" +
 	"\n" +
@@ -435,7 +647,24 @@ const file_model_plane_v1_events_proto_rawDesc = "" +
 	" \x01(\tR\x06userId\x12!\n" +
 	"\fresource_ref\x18\v \x01(\tR\vresourceRef\x12.\n" +
 	"\apayload\x18\f \x01(\v2\x14.google.protobuf.AnyR\apayload\x12\x10\n" +
-	"\x03zdr\x18\r \x01(\bR\x03zdrJ\x04\b\x0e\x10\x15*\xfc\v\n" +
+	"\x03zdr\x18\r \x01(\bR\x03zdr\x12!\n" +
+	"\fproducer_seq\x18\x15 \x01(\x04R\vproducerSeq\x12.\n" +
+	"\x05agent\x18\x16 \x01(\v2\x18.model_plane.v1.AgentRefR\x05agent\x121\n" +
+	"\x06origin\x18\x17 \x01(\x0e2\x19.model_plane.v1.RunOriginR\x06origin\x12\x15\n" +
+	"\x06run_id\x18\x18 \x01(\tR\x05runId\x12\x1d\n" +
+	"\n" +
+	"request_id\x18\x19 \x01(\tR\trequestIdJ\x04\b\x0e\x10\x15\"K\n" +
+	"\bAgentRef\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12\x12\n" +
+	"\x04role\x18\x02 \x01(\tR\x04role\x12\x1b\n" +
+	"\tparent_id\x18\x03 \x01(\tR\bparentId*\x97\x01\n" +
+	"\tRunOrigin\x12\x1a\n" +
+	"\x16RUN_ORIGIN_UNSPECIFIED\x10\x00\x12\x13\n" +
+	"\x0fRUN_ORIGIN_USER\x10\x01\x12\x14\n" +
+	"\x10RUN_ORIGIN_AGENT\x10\x02\x12\x17\n" +
+	"\x13RUN_ORIGIN_SCHEDULE\x10\x03\x12\x16\n" +
+	"\x12RUN_ORIGIN_WEBHOOK\x10\x04\x12\x12\n" +
+	"\x0eRUN_ORIGIN_API\x10\x05*\xc7\x0e\n" +
 	"\tEventType\x12\x1a\n" +
 	"\x16EVENT_TYPE_UNSPECIFIED\x10\x00\x12\x1c\n" +
 	"\x18EVENT_TYPE_SESSION_START\x10\x01\x12\x1a\n" +
@@ -482,7 +711,15 @@ const file_model_plane_v1_events_proto_rawDesc = "" +
 	"\x1eEVENT_TYPE_BROWSER_RUN_RESUMED\x10\x8f\x01\x120\n" +
 	"+EVENT_TYPE_BROWSER_ACTION_APPROVAL_REQUIRED\x10\x90\x01\x12&\n" +
 	"!EVENT_TYPE_BROWSER_ACTION_DECIDED\x10\x91\x01\x12.\n" +
-	")EVENT_TYPE_APPROVAL_CONTINUATION_VERIFIED\x10\x92\x01\"\x06\b\xc8\x01\x10\xff\x01B\xb3\x01\n" +
+	")EVENT_TYPE_APPROVAL_CONTINUATION_VERIFIED\x10\x92\x01\x12&\n" +
+	"!EVENT_TYPE_BROWSER_SESSION_OPENED\x10\x96\x01\x12&\n" +
+	"!EVENT_TYPE_BROWSER_SESSION_CLOSED\x10\x97\x01\x12'\n" +
+	"\"EVENT_TYPE_BROWSER_CONTROL_CHANGED\x10\x98\x01\x12#\n" +
+	"\x1eEVENT_TYPE_BROWSER_TAB_CHANGED\x10\x99\x01\x12-\n" +
+	"(EVENT_TYPE_BROWSER_STEP_RECEIPT_RECORDED\x10\x9a\x01\x12&\n" +
+	"!EVENT_TYPE_BROWSER_EGRESS_DECIDED\x10\x9b\x01\x12)\n" +
+	"$EVENT_TYPE_BROWSER_ARTIFACT_RECORDED\x10\x9c\x01\x12)\n" +
+	"$EVENT_TYPE_BROWSER_ATTACH_SHARED_JAR\x10\xa0\x01\"\x06\b\xc8\x01\x10\xff\x01B\xb3\x01\n" +
 	"\x12com.model_plane.v1B\vEventsProtoP\x01Z;github.com/triodelab/model-plane/gen/go/model_plane/v1;mpv1\xa2\x02\x03MXX\xaa\x02\rModelPlane.V1\xca\x02\rModelPlane\\V1\xe2\x02\x19ModelPlane\\V1\\GPBMetadata\xea\x02\x0eModelPlane::V1b\x06proto3"
 
 var (
@@ -497,23 +734,27 @@ func file_model_plane_v1_events_proto_rawDescGZIP() []byte {
 	return file_model_plane_v1_events_proto_rawDescData
 }
 
-var file_model_plane_v1_events_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_model_plane_v1_events_proto_msgTypes = make([]protoimpl.MessageInfo, 1)
+var file_model_plane_v1_events_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
+var file_model_plane_v1_events_proto_msgTypes = make([]protoimpl.MessageInfo, 2)
 var file_model_plane_v1_events_proto_goTypes = []any{
-	(EventType)(0),                // 0: model_plane.v1.EventType
-	(*Event)(nil),                 // 1: model_plane.v1.Event
-	(*timestamppb.Timestamp)(nil), // 2: google.protobuf.Timestamp
-	(*anypb.Any)(nil),             // 3: google.protobuf.Any
+	(RunOrigin)(0),                // 0: model_plane.v1.RunOrigin
+	(EventType)(0),                // 1: model_plane.v1.EventType
+	(*Event)(nil),                 // 2: model_plane.v1.Event
+	(*AgentRef)(nil),              // 3: model_plane.v1.AgentRef
+	(*timestamppb.Timestamp)(nil), // 4: google.protobuf.Timestamp
+	(*anypb.Any)(nil),             // 5: google.protobuf.Any
 }
 var file_model_plane_v1_events_proto_depIdxs = []int32{
-	0, // 0: model_plane.v1.Event.event_type:type_name -> model_plane.v1.EventType
-	2, // 1: model_plane.v1.Event.ts:type_name -> google.protobuf.Timestamp
-	3, // 2: model_plane.v1.Event.payload:type_name -> google.protobuf.Any
-	3, // [3:3] is the sub-list for method output_type
-	3, // [3:3] is the sub-list for method input_type
-	3, // [3:3] is the sub-list for extension type_name
-	3, // [3:3] is the sub-list for extension extendee
-	0, // [0:3] is the sub-list for field type_name
+	1, // 0: model_plane.v1.Event.event_type:type_name -> model_plane.v1.EventType
+	4, // 1: model_plane.v1.Event.ts:type_name -> google.protobuf.Timestamp
+	5, // 2: model_plane.v1.Event.payload:type_name -> google.protobuf.Any
+	3, // 3: model_plane.v1.Event.agent:type_name -> model_plane.v1.AgentRef
+	0, // 4: model_plane.v1.Event.origin:type_name -> model_plane.v1.RunOrigin
+	5, // [5:5] is the sub-list for method output_type
+	5, // [5:5] is the sub-list for method input_type
+	5, // [5:5] is the sub-list for extension type_name
+	5, // [5:5] is the sub-list for extension extendee
+	0, // [0:5] is the sub-list for field type_name
 }
 
 func init() { file_model_plane_v1_events_proto_init() }
@@ -526,8 +767,8 @@ func file_model_plane_v1_events_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_model_plane_v1_events_proto_rawDesc), len(file_model_plane_v1_events_proto_rawDesc)),
-			NumEnums:      1,
-			NumMessages:   1,
+			NumEnums:      2,
+			NumMessages:   2,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

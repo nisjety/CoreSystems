@@ -428,6 +428,8 @@ pub fn from_metadata(metadata: &Value) -> Option<ApprovalCause> {
         action_key: text("action_key"),
         call_digest: text("call_digest"),
         tool_digest: text("tool_digest"),
+        // Write-only (see the proto): a stored cause never carries it.
+        host_class: String::new(),
     };
     Some(normalized(cause).0)
 }

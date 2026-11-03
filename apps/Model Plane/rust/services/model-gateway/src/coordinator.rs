@@ -529,6 +529,7 @@ pub async fn handle_enter_plan_mode<P: EventPublisher>(
             "ttl_seconds": ttl,
         }),
         zdr: false,
+        ..Default::default()
     };
     if let Err(e) = publisher
         .publish(&subjects::run_event_subject(&req.run_id), &envelope)
@@ -679,6 +680,7 @@ async fn exit_plan_mode<P: EventPublisher>(
                 "plan_id": (!plan_id.is_empty()).then(|| plan_id.to_owned()),
             }),
             zdr: false,
+            ..Default::default()
         };
         if let Err(e) = publisher
             .publish(&subjects::run_event_subject(&req.run_id), &envelope)

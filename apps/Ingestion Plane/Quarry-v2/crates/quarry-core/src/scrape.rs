@@ -10,6 +10,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::ai_spec::{bare_name_error, parse_ai_object, AiKind, AiReport, AiSpec, Highlight};
 use crate::capture::{CaptureLimits, CapturePlan, PdfOptions, ScreenshotOptions};
 use crate::output::NormalizedOutput;
 use crate::scrape_actions::{
@@ -101,6 +102,26 @@ pub struct ScrapeResponse {
     /// the entry's `output.data_base64` under the inline cap.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub actions: Vec<ActionOutcomeView>,
+    /// INNH-1: the `json` AI format's result, inline only. Present only when
+    /// `ai.json.status` is `ok`, and then it validates against the caller's
+    /// schema. Never stored, never in the scrape record, never cached.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub json: Option<serde_json::Value>,
+    /// INNH-1: the `summary` AI format's result (at most `max_chars` characters).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+    /// INNH-1: the `question` AI format's answer. Present only when the page
+    /// held one (`ai.question.found`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answer: Option<String>,
+    /// INNH-1: the `highlights` AI format's result: exact spans of the page
+    /// text. May be an empty list, an honest "nothing found".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub highlights: Option<Vec<Highlight>>,
+    /// INNH-1: what each AI format did and cost (status, codes, token usage).
+    /// Present whenever an AI format was asked for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ai: Option<AiReport>,
 }
 
 impl ScrapeResponse {
@@ -120,6 +141,11 @@ impl ScrapeResponse {
             pdf: None,
             captures: None,
             actions: Vec::new(),
+            json: None,
+            summary: None,
+            answer: None,
+            highlights: None,
+            ai: None,
         }
     }
 }
@@ -250,7 +276,7 @@ pub struct FieldError {
     /// JSON path of the field, `formats[1]` or `timeout_ms`.
     pub path: String,
     /// Stable machine-readable code: `invalid_type`, `unsupported_format`,
-    /// `reserved_format`, `out_of_range`, `too_many`, `too_long`, `empty`,
+    /// `missing_field`, `out_of_range`, `too_many`, `too_long`, `empty`,
     /// `conflicting_aliases`, `invalid_json`, `reserved_field`, `unknown_field`.
     /// Capture and action codes (`too_many_captures`, `invalid_clip`,
     /// `unknown_action_type`, ...) are listed in the `capture` and `scrape_actions` modules.
@@ -276,7 +302,10 @@ impl FieldError {
 /// Equality is not total: the capture options hold `f64` values, so
 /// `ScrapeFormat` is `PartialEq` only. The wire form is the name (`"markdown"`);
 /// the object form (`{"type":"screenshot",...}`) is accepted on input only.
-#[derive(Debug, Clone, Copy, PartialEq)]
+///
+/// Not `Copy`: the AI formats carry a schema, a prompt or a question. On the
+/// wire (`effective_options.formats`) a format is its name only.
+#[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub enum ScrapeFormat {
     Markdown,
@@ -288,10 +317,14 @@ pub enum ScrapeFormat {
     Screenshot(ScreenshotOptions),
     /// A PDF of the page. The string `pdf` means the defaults.
     Pdf(PdfOptions),
+    /// INNH-1: a model reads the page (`json`, `summary`, `question`,
+    /// `highlights`). The string `summary` means the defaults; the others need
+    /// their object form. Off unless `ScrapeLimits::ai_formats_enabled`.
+    Ai(AiSpec),
 }
 
 impl ScrapeFormat {
-    pub const SUPPORTED: [&'static str; 7] = [
+    pub const SUPPORTED: [&'static str; 8] = [
         "markdown",
         "html",
         "rawHtml",
@@ -299,11 +332,12 @@ impl ScrapeFormat {
         "metadata",
         "screenshot",
         "pdf",
+        "summary",
     ];
 
-    /// Formats the contract reserves for a later slice (typed objects there).
-    /// Named in the error so a caller knows they are not a typo.
-    const RESERVED: [&'static str; 4] = ["json", "summary", "question", "highlights"];
+    /// The `type` of every object form, for the error text.
+    const OBJECT_TYPES: [&'static str; 6] =
+        ["screenshot", "pdf", "json", "summary", "question", "highlights"];
 
     fn parse(text: &str) -> Option<Self> {
         match text {
@@ -314,6 +348,7 @@ impl ScrapeFormat {
             "metadata" => Some(Self::Metadata),
             "screenshot" => Some(Self::Screenshot(ScreenshotOptions::default())),
             "pdf" => Some(Self::Pdf(PdfOptions::default())),
+            "summary" => Some(Self::Ai(AiSpec::default_summary())),
             _ => None,
         }
     }
@@ -328,6 +363,15 @@ impl ScrapeFormat {
             Self::Metadata => "metadata",
             Self::Screenshot(_) => "screenshot",
             Self::Pdf(_) => "pdf",
+            Self::Ai(spec) => spec.kind().wire_name(),
+        }
+    }
+
+    /// The AI spec, when this is an AI format.
+    pub fn ai_spec(&self) -> Option<&AiSpec> {
+        match self {
+            Self::Ai(spec) => Some(spec),
+            _ => None,
         }
     }
 }
@@ -341,7 +385,12 @@ impl Serialize for ScrapeFormat {
 impl<'de> Deserialize<'de> for ScrapeFormat {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let text = String::deserialize(deserializer)?;
-        Self::parse(&text).ok_or_else(|| serde::de::Error::custom("unknown scrape format"))
+        // The echo of a stored record names an AI format without its spec
+        // (`effective_options.formats` is names only), so a bare `json` reads
+        // back as a spec with nothing in it. Request parsing never goes this way.
+        Self::parse(&text)
+            .or_else(|| AiSpec::from_wire_echo(&text).map(Self::Ai))
+            .ok_or_else(|| serde::de::Error::custom("unknown scrape format"))
     }
 }
 
@@ -356,12 +405,52 @@ impl schemars::JsonSchema for ScrapeFormat {
             "anyOf": [
                 {
                     "type": "string",
-                    "enum": ["markdown", "html", "rawHtml", "links", "metadata", "screenshot", "pdf"]
+                    "enum": ["markdown", "html", "rawHtml", "links", "metadata", "screenshot", "pdf", "summary"]
                 },
                 {
                     "type": "object",
                     "required": ["type"],
                     "properties": { "type": { "enum": ["screenshot", "pdf"] } }
+                },
+                {
+                    "type": "object",
+                    "required": ["type", "schema"],
+                    "properties": {
+                        "type": { "const": "json" },
+                        "schema": { "type": "object", "properties": { "type": { "const": "object" } } },
+                        "prompt": { "type": "string", "minLength": 1, "maxLength": 10000 }
+                    },
+                    "additionalProperties": false
+                },
+                {
+                    "type": "object",
+                    "required": ["type"],
+                    "properties": {
+                        "type": { "const": "summary" },
+                        "max_chars": { "type": "integer", "minimum": 200, "maximum": 10000 },
+                        "language": { "type": "string", "pattern": "^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})?$" }
+                    },
+                    "additionalProperties": false
+                },
+                {
+                    "type": "object",
+                    "required": ["type", "question"],
+                    "properties": {
+                        "type": { "const": "question" },
+                        "question": { "type": "string", "minLength": 1, "maxLength": 10000 }
+                    },
+                    "additionalProperties": false
+                },
+                {
+                    "type": "object",
+                    "required": ["type", "query"],
+                    "properties": {
+                        "type": { "const": "highlights" },
+                        "query": { "type": "string", "minLength": 1, "maxLength": 1000 },
+                        "max_highlights": { "type": "integer", "minimum": 1, "maximum": 10 },
+                        "max_chars_each": { "type": "integer", "minimum": 40, "maximum": 1000 }
+                    },
+                    "additionalProperties": false
                 }
             ]
         })
@@ -410,12 +499,19 @@ pub struct ScrapeOptions {
     /// `abort` (the default) or `continue`. There is no retry: a replayed click
     /// or type can submit twice.
     pub actions_on_error: Option<ActionOnError>,
+    /// INNH-7: serve a stored result no older than this many milliseconds
+    /// instead of fetching. Absent: no read of the URL result cache. `0`: never
+    /// read it (but still write). Accepted only while `ScrapeLimits::max_age_enabled`.
+    pub max_age: Option<u64>,
 }
+
+/// The longest `max_age` a request may ask for: 30 days, in milliseconds.
+pub const MAX_AGE_CEILING_MS: u64 = 2_592_000_000;
 
 /// Request keys the options own: each field in snake_case and its camelCase
 /// alias. A body key that is neither one of these nor a key of the request
 /// itself is unknown. A unit test pins this against a fully populated value.
-const OPTION_KEYS: [(&str, &str); 10] = [
+const OPTION_KEYS: [(&str, &str); 11] = [
     ("formats", "formats"),
     ("only_main_content", "onlyMainContent"),
     ("include_tags", "includeTags"),
@@ -426,6 +522,7 @@ const OPTION_KEYS: [(&str, &str); 10] = [
     ("max_inline_bytes", "maxInlineBytes"),
     ("actions", "actions"),
     ("actions_on_error", "actionsOnError"),
+    ("max_age", "maxAge"),
 ];
 
 /// Keys a body may carry that are never a scrape option and never lenient: they
@@ -515,6 +612,7 @@ impl ScrapeOptions {
                     )),
                 },
                 "timeout_ms" => read_u64(snake, value, &mut options.timeout_ms, &mut errors),
+                "max_age" => read_u64(snake, value, &mut options.max_age, &mut errors),
                 "max_inline_bytes" => {
                     read_u64(snake, value, &mut options.max_inline_bytes, &mut errors)
                 }
@@ -563,6 +661,33 @@ impl ScrapeOptions {
         limits: &ScrapeLimits,
     ) -> Result<ResolvedScrapeOptions, Vec<FieldError>> {
         let mut errors = Vec::new();
+
+        // INNH-1: the AI formats, checked against the request's own indices
+        // (parse_formats pushes one entry per item, so the position is the path).
+        let named = self.formats.as_deref().unwrap_or_default();
+        let mut seen_kinds: Vec<AiKind> = Vec::new();
+        for (index, format) in named.iter().enumerate() {
+            let Some(spec) = format.ai_spec() else { continue };
+            let path = format!("formats[{index}]");
+            if !limits.ai_formats_enabled {
+                errors.push(FieldError::new(
+                    path,
+                    "feature_disabled",
+                    format!(
+                        "the {} format is not enabled on this endpoint",
+                        spec.kind().wire_name()
+                    ),
+                ));
+            } else if seen_kinds.contains(&spec.kind()) {
+                errors.push(FieldError::new(
+                    path,
+                    "too_many",
+                    format!("at most one {} format per request", spec.kind().wire_name()),
+                ));
+            } else {
+                seen_kinds.push(spec.kind());
+            }
+        }
 
         let mut formats = Vec::new();
         for format in self.formats.clone().unwrap_or_default() {
@@ -636,6 +761,28 @@ impl ScrapeOptions {
                     ),
                 ));
                 limits.default_inline_bytes
+            }
+        };
+        // INNH-7: `max_age` is a read-freshness bound in milliseconds. Off by default:
+        // a request for it is `feature_disabled`, never a 200 that silently refetches.
+        let max_age_ms = match self.max_age {
+            None => None,
+            Some(_) if !limits.max_age_enabled => {
+                errors.push(FieldError::new(
+                    "max_age",
+                    "feature_disabled",
+                    "max_age is not enabled on this endpoint",
+                ));
+                None
+            }
+            Some(value) if value <= MAX_AGE_CEILING_MS => Some(value),
+            Some(_) => {
+                errors.push(FieldError::new(
+                    "max_age",
+                    "out_of_range",
+                    format!("max_age must be between 0 and {MAX_AGE_CEILING_MS} milliseconds"),
+                ));
+                None
             }
         };
         let wants_capture = formats
@@ -747,6 +894,7 @@ impl ScrapeOptions {
             ignored_fields: Vec::new(),
             capture,
             actions,
+            max_age_ms,
         })
     }
 }
@@ -775,22 +923,23 @@ fn parse_formats(value: &serde_json::Value) -> Result<Vec<ScrapeFormat>, Vec<Fie
                 path,
                 "unsupported_format",
                 format!(
-                    "a format is a string or an object; supported: {}",
-                    ScrapeFormat::SUPPORTED.join(", ")
+                    "a format is a string or an object; supported strings: {}; object types: {}",
+                    ScrapeFormat::SUPPORTED.join(", "),
+                    ScrapeFormat::OBJECT_TYPES.join(", ")
                 ),
             ));
             continue;
         };
         match ScrapeFormat::parse(text) {
             Some(format) => formats.push(format),
-            None if ScrapeFormat::RESERVED.contains(&text) => errors.push(FieldError::new(
-                path,
-                "reserved_format",
-                format!(
-                    "`{text}` is reserved and not available yet; supported: {}",
-                    ScrapeFormat::SUPPORTED.join(", ")
-                ),
-            )),
+            // INNH-1: json, question and highlights each need an input, so the
+            // bare name cannot be honoured; the error names the field it lacks.
+            None if AiKind::from_wire(text)
+                .and_then(|kind| bare_name_error(kind, &path))
+                .is_some() =>
+            {
+                errors.extend(AiKind::from_wire(text).and_then(|kind| bare_name_error(kind, &path)));
+            }
             None => errors.push(FieldError::new(
                 path,
                 "unsupported_format",
@@ -830,10 +979,20 @@ fn parse_object_format(
             options.validate(path).map_err(|error| vec![error])?;
             Ok(ScrapeFormat::Pdf(options))
         }
+        Some(name) if AiKind::from_wire(name).is_some() => {
+            let kind = AiKind::from_wire(name).expect("checked");
+            let Some(body) = body.as_object() else {
+                unreachable!("the body was built from an object");
+            };
+            parse_ai_object(kind, body, path).map(ScrapeFormat::Ai)
+        }
         _ => Err(vec![FieldError::new(
             path,
             "unsupported_format",
-            "a format object needs type screenshot or pdf",
+            format!(
+                "a format object needs a type: {}",
+                ScrapeFormat::OBJECT_TYPES.join(", ")
+            ),
         )]),
     }
 }
@@ -927,6 +1086,13 @@ pub struct ScrapeLimits {
     pub captures_enabled: bool,
     /// Same for `actions`. Off by default; WS13.5 sets it from the environment.
     pub actions_enabled: bool,
+    /// The AI formats (`json`, `summary`, `question`, `highlights`) are accepted
+    /// only when this is set. Off by default: a request for one is
+    /// `feature_disabled` at `formats[i]`. INNH-1 sets it from `QUARRY_EDGE__AI_FORMATS`.
+    pub ai_formats_enabled: bool,
+    /// `max_age` is accepted only when this is set. Off by default: a request for
+    /// it is `feature_disabled` at `max_age`. INNH-7 sets it from `QUARRY_EDGE__SCRAPE_MAX_AGE`.
+    pub max_age_enabled: bool,
 }
 
 impl Default for ScrapeLimits {
@@ -943,6 +1109,8 @@ impl Default for ScrapeLimits {
             captures: CaptureLimits::default(),
             captures_enabled: false,
             actions_enabled: false,
+            ai_formats_enabled: false,
+            max_age_enabled: false,
         }
     }
 }
@@ -967,11 +1135,25 @@ pub struct ResolvedScrapeOptions {
     pub capture: CapturePlan,
     /// The actions, checked. `None` when the request has none.
     pub actions: Option<ValidatedActions>,
+    /// INNH-7: how old, in milliseconds, a stored result may be and still be served.
+    /// `None`: the request did not ask for the URL result cache. `Some(0)`: it must
+    /// not be read. It is never part of [`Self::canonical_options_key`]: the key names
+    /// what a result IS, `max_age` only says how stale a reader tolerates.
+    pub max_age_ms: Option<u64>,
 }
 
 impl ResolvedScrapeOptions {
     pub fn wants(&self, format: ScrapeFormat) -> bool {
         self.formats.contains(&format)
+    }
+
+    /// INNH-1: the AI formats of the request, at most one per kind, in kind
+    /// order (`json`, `summary`, `question`, `highlights`) whatever order the
+    /// request named them in.
+    pub fn ai_specs(&self) -> Vec<&AiSpec> {
+        let mut specs: Vec<&AiSpec> = self.formats.iter().filter_map(ScrapeFormat::ai_spec).collect();
+        specs.sort_by_key(|spec| spec.kind());
+        specs
     }
 
     /// Nothing that changes what a cached result would hold: a request with
@@ -994,9 +1176,20 @@ impl ResolvedScrapeOptions {
         self.is_default()
     }
 
+    /// INNH-7: whether the URL result cache (`quarry:scrape:{org}:...`, read by `max_age`)
+    /// may serve or store this request. Wider than [`Self::cache_admissible`]: named
+    /// formats, selectors and an extractor are fine, because [`Self::canonical_options_key`]
+    /// is part of the key and each distinct option set is its own entry. A capture or
+    /// an action changes what the page holds (and needs the browser), and an AI format
+    /// answers from a model: none of those is ever cached. The caller adds what the
+    /// options cannot see: ZDR, the driver plan, the web policy and the privacy block.
+    pub fn result_cache_admissible(&self) -> bool {
+        self.capture.is_empty() && self.actions.is_none() && self.ai_specs().is_empty()
+    }
+
     /// A stable key for the options that change the result, independent of the
-    /// key order in the request, of `zdr`, `timeout_ms` and `max_inline_bytes`.
-    /// For a URL-keyed result cache: `quarry:scrape:{org}:{blake3(url, key)}`.
+    /// key order in the request, of `zdr`, `timeout_ms`, `max_inline_bytes` and
+    /// `max_age`. For the URL-keyed result cache: `quarry:scrape:{org}:{blake3(url, key)}`.
     pub fn canonical_options_key(&self) -> String {
         let mut formats: Vec<&str> = self
             .formats
@@ -1027,6 +1220,16 @@ impl ResolvedScrapeOptions {
         if let Some(actions) = &self.actions {
             canonical["actions"] = serde_json::json!(actions.actions);
             canonical["actions_on_error"] = serde_json::json!(actions.on_error);
+        }
+        // INNH-1: one `ai:<kind>:<hash16>` per AI format, in kind order. The
+        // schema, prompt, question and query are in the hash, never in the key.
+        let ai: Vec<String> = self
+            .ai_specs()
+            .into_iter()
+            .map(|spec| format!("ai:{}:{}", spec.kind().wire_name(), spec.canonical_hash16()))
+            .collect();
+        if !ai.is_empty() {
+            canonical["ai"] = serde_json::json!(ai);
         }
         blake3::hash(canonical.to_string().as_bytes())
             .to_hex()
@@ -1069,9 +1272,26 @@ pub struct EffectiveScrapeOptions {
     /// The actions as counts only: never a text or a selector.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub actions: Option<ActionsSummary>,
+    /// INNH-7: the `max_age` the request asked for, in milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_age: Option<u64>,
+    /// INNH-7: on a `max_age` hit, when the served result was fetched (RFC 3339).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cached_at: Option<String>,
+    /// INNH-7: on a `max_age` hit, how old the served result was, in milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_age_ms: Option<u64>,
 }
 
 impl EffectiveScrapeOptions {
+    /// Mark this as the echo of a result served from the URL result cache.
+    pub fn served_from_cache(mut self, cached_at: chrono::DateTime<chrono::Utc>, age_ms: u64) -> Self {
+        self.cache_state = CacheState::Hit;
+        self.cached_at = Some(cached_at.to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true));
+        self.cache_age_ms = Some(age_ms);
+        self
+    }
+
     pub fn new(
         resolved: &ResolvedScrapeOptions,
         zdr: bool,
@@ -1097,6 +1317,9 @@ impl EffectiveScrapeOptions {
             doc_routing: doc_routing.to_owned(),
             strict,
             actions: resolved.actions.as_ref().map(ValidatedActions::summary),
+            max_age: resolved.max_age_ms,
+            cached_at: None,
+            cache_age_ms: None,
         }
     }
 }
@@ -1131,6 +1354,7 @@ mod tests {
         ScrapeLimits {
             captures_enabled: true,
             actions_enabled: true,
+            ai_formats_enabled: true,
             ..ScrapeLimits::default()
         }
     }
@@ -1222,7 +1446,8 @@ mod tests {
                 .map(|error| error.code.as_str())
         };
         assert_eq!(at("formats[1]"), Some("unsupported_format"));
-        assert_eq!(at("formats[2]"), Some("reserved_format"));
+        // json needs its object form: the error names the field it lacks.
+        assert_eq!(at("formats[2].schema"), Some("missing_field"));
         assert_eq!(at("formats[3]"), Some("unsupported_format"));
         assert_eq!(at("only_main_content"), Some("invalid_type"));
         // from_value stopped at the type errors; range errors come from resolve.
@@ -1301,6 +1526,7 @@ mod tests {
             max_inline_bytes: Some(1),
             actions: Some(vec![]),
             actions_on_error: Some(ActionOnError::Continue),
+            max_age: Some(1),
         };
         let value = serde_json::to_value(&full).unwrap();
         let mut keys: Vec<String> = value.as_object().unwrap().keys().cloned().collect();
@@ -1319,6 +1545,118 @@ mod tests {
         );
         assert!(names.contains(&"onlyMainContent") && names.contains(&"maxInlineBytes"));
         assert!(names.contains(&"actionsOnError") && names.contains(&"actions"));
+        assert!(names.contains(&"maxAge") && names.contains(&"max_age"));
+        assert_eq!(OPTION_KEYS.len(), 11);
+    }
+
+    // ---- INNH-7: max_age
+
+    fn max_age_limits() -> ScrapeLimits {
+        ScrapeLimits { max_age_enabled: true, ..enabled_limits() }
+    }
+
+    fn resolve_max_age(body: serde_json::Value) -> Result<ResolvedScrapeOptions, Vec<FieldError>> {
+        ScrapeOptions::from_value(&body)?.resolve(false, &max_age_limits())
+    }
+
+    #[test]
+    fn max_age_parses_from_snake_and_camel_case() {
+        assert_eq!(ScrapeOptions::from_value(&json!({ "max_age": 5000 })).unwrap().max_age, Some(5000));
+        assert_eq!(ScrapeOptions::from_value(&json!({ "maxAge": 5000 })).unwrap().max_age, Some(5000));
+        // The same value under both spellings is fine; different values conflict.
+        assert_eq!(
+            ScrapeOptions::from_value(&json!({ "max_age": 7, "maxAge": 7 })).unwrap().max_age,
+            Some(7)
+        );
+        let errors = ScrapeOptions::from_value(&json!({ "max_age": 1, "maxAge": 2 })).unwrap_err();
+        assert_eq!(errors[0].code, "conflicting_aliases");
+        assert_eq!(errors[0].path, "max_age");
+        // Absent and null are both "not asked".
+        assert_eq!(ScrapeOptions::from_value(&json!({})).unwrap().max_age, None);
+        assert_eq!(ScrapeOptions::from_value(&json!({ "max_age": null })).unwrap().max_age, None);
+    }
+
+    #[test]
+    fn max_age_must_be_a_non_negative_integer() {
+        for bad in [json!("5000"), json!(-1), json!(1.5), json!(true), json!([1])] {
+            let errors = ScrapeOptions::from_value(&json!({ "max_age": bad })).unwrap_err();
+            assert_eq!(errors[0].code, "invalid_type", "{bad}");
+            assert_eq!(errors[0].path, "max_age");
+        }
+    }
+
+    #[test]
+    fn max_age_is_bounded_to_thirty_days() {
+        assert_eq!(MAX_AGE_CEILING_MS, 30 * 24 * 60 * 60 * 1000);
+        assert_eq!(resolve_max_age(json!({ "max_age": 0 })).unwrap().max_age_ms, Some(0));
+        assert_eq!(
+            resolve_max_age(json!({ "max_age": MAX_AGE_CEILING_MS })).unwrap().max_age_ms,
+            Some(MAX_AGE_CEILING_MS)
+        );
+        let errors = resolve_max_age(json!({ "max_age": MAX_AGE_CEILING_MS + 1 })).unwrap_err();
+        assert_eq!(errors[0].code, "out_of_range");
+        assert_eq!(errors[0].path, "max_age");
+    }
+
+    #[test]
+    fn max_age_is_feature_disabled_while_its_flag_is_off() {
+        let errors = ScrapeOptions::from_value(&json!({ "max_age": 1000 }))
+            .unwrap()
+            .resolve(false, &ScrapeLimits::default())
+            .unwrap_err();
+        assert_eq!(errors[0].code, "feature_disabled");
+        assert_eq!(errors[0].path, "max_age");
+        // A request without it is not affected by the flag.
+        let resolved = ScrapeOptions::from_value(&json!({ "formats": ["markdown"] }))
+            .unwrap()
+            .resolve(false, &ScrapeLimits::default())
+            .unwrap();
+        assert_eq!(resolved.max_age_ms, None);
+    }
+
+    #[test]
+    fn max_age_never_rotates_the_options_key() {
+        let without = resolve_max_age(json!({ "formats": ["markdown"], "include_tags": ["main"] })).unwrap();
+        let with = resolve_max_age(json!({ "formats": ["markdown"], "include_tags": ["main"], "max_age": 60000 })).unwrap();
+        let zero = resolve_max_age(json!({ "formats": ["markdown"], "include_tags": ["main"], "max_age": 0 })).unwrap();
+        assert_eq!(without.canonical_options_key(), with.canonical_options_key());
+        assert_eq!(without.canonical_options_key(), zero.canonical_options_key());
+        // ...and it does not make a default request non-default.
+        assert!(resolve_max_age(json!({ "max_age": 1 })).unwrap().is_default());
+    }
+
+    #[test]
+    fn the_result_cache_admits_options_but_not_captures_actions_or_ai() {
+        let admissible = |body: serde_json::Value| resolve_max_age(body).unwrap().result_cache_admissible();
+        assert!(admissible(json!({})));
+        assert!(admissible(json!({ "formats": ["markdown", "html"] })));
+        assert!(admissible(json!({ "include_tags": ["main"], "exclude_tags": [".nav"] })));
+        assert!(admissible(json!({ "extractor": "raw" })));
+        assert!(!admissible(json!({ "formats": ["screenshot"] })));
+        assert!(!admissible(json!({ "formats": [{ "type": "pdf" }] })));
+        assert!(!admissible(json!({ "actions": [{ "type": "press", "key": "Enter" }] })));
+        assert!(!admissible(json!({ "formats": ["markdown", { "type": "summary" }] })));
+        assert!(!admissible(json!({ "formats": [{ "type": "question", "question": "Who?" }] })));
+    }
+
+    #[test]
+    fn effective_options_echo_max_age_and_a_cache_hit() {
+        let resolved = resolve_max_age(json!({ "max_age": 1500 })).unwrap();
+        let miss = EffectiveScrapeOptions::new(&resolved, false, CacheState::Miss, "shadow", false, &[]);
+        let value = serde_json::to_value(&miss).unwrap();
+        assert_eq!(value["max_age"], 1500);
+        assert_eq!(value["cache_state"], "miss");
+        assert!(value.get("cached_at").is_none() && value.get("cache_age_ms").is_none());
+        let when = chrono::DateTime::parse_from_rfc3339("2026-10-01T12:00:00Z").unwrap().with_timezone(&chrono::Utc);
+        let hit = miss.served_from_cache(when, 900);
+        let value = serde_json::to_value(&hit).unwrap();
+        assert_eq!(value["cache_state"], "hit");
+        assert_eq!(value["cached_at"], "2026-10-01T12:00:00Z");
+        assert_eq!(value["cache_age_ms"], 900);
+        // A request without max_age echoes none.
+        let plain = resolve_max_age(json!({})).unwrap();
+        let value = serde_json::to_value(EffectiveScrapeOptions::new(&plain, false, CacheState::Bypass, "shadow", false, &[])).unwrap();
+        assert!(value.get("max_age").is_none());
     }
 
     #[test]
@@ -1536,5 +1874,280 @@ mod tests {
         let shown = serde_json::to_string(&errors).unwrap();
         assert!(!shown.contains(TEXT));
         assert_eq!(errors[0].code, "text_too_long");
+    }
+    // ---- INNH-1: the AI formats -------------------------------------------
+
+    fn schema_body() -> serde_json::Value {
+        json!({ "type": "object", "required": ["title"], "properties": { "title": { "type": "string" } } })
+    }
+
+    #[test]
+    fn each_ai_object_form_parses_and_a_string_summary_means_the_defaults() {
+        let resolved = resolve(
+            json!({ "formats": [
+                "markdown",
+                { "type": "json", "schema": schema_body(), "prompt": "Be exact." },
+                "summary",
+                { "type": "question", "question": "Who owns it?" },
+                { "type": "highlights", "query": "price", "max_highlights": 5, "max_chars_each": 120 },
+            ] }),
+            false,
+        )
+        .unwrap();
+        let specs = resolved.ai_specs();
+        assert_eq!(specs.len(), 4);
+        assert_eq!(
+            specs.iter().map(|spec| spec.kind()).collect::<Vec<_>>(),
+            AiKind::ALL.to_vec()
+        );
+        assert_eq!(specs[1], &AiSpec::default_summary());
+        let AiSpec::Highlights(highlights) = specs[3] else { panic!() };
+        assert_eq!((highlights.max_highlights, highlights.max_chars_each), (5, 120));
+        assert!(resolved.wants(ScrapeFormat::Markdown));
+        // Naming an AI format is a named format: the request is not default.
+        assert!(!resolved.is_default());
+        assert!(!resolved.cache_admissible());
+        // The object summary is the same spec as the string.
+        let object = resolve(json!({ "formats": [{ "type": "summary" }] }), false).unwrap();
+        assert_eq!(object.ai_specs(), vec![&AiSpec::default_summary()]);
+    }
+
+    #[test]
+    fn bare_json_question_and_highlights_are_missing_field_at_the_field_they_lack() {
+        for (name, path) in [
+            ("json", "formats[1].schema"),
+            ("question", "formats[1].question"),
+            ("highlights", "formats[1].query"),
+        ] {
+            let errors = resolve(json!({ "formats": ["markdown", name] }), false).unwrap_err();
+            assert_eq!(errors.len(), 1, "{name}");
+            assert_eq!((errors[0].path.as_str(), errors[0].code.as_str()), (path, "missing_field"));
+        }
+        // reserved_format is gone for good.
+        let errors = resolve(json!({ "formats": ["json", "xml"] }), false).unwrap_err();
+        assert!(errors.iter().all(|error| error.code != "reserved_format"));
+    }
+
+    #[test]
+    fn an_ai_error_inside_an_object_carries_the_request_index() {
+        let errors = resolve(
+            json!({ "formats": [
+                "markdown",
+                "links",
+                { "type": "json", "schema": { "type": "object", "pattern": "x" } },
+            ] }),
+            false,
+        )
+        .unwrap_err();
+        assert_eq!(errors[0].path, "formats[2].schema.pattern");
+        assert_eq!(errors[0].code, "schema_keyword_not_supported");
+        // Several bad formats are all reported.
+        let errors = resolve(
+            json!({ "formats": [
+                { "type": "summary", "max_chars": 5 },
+                { "type": "question" },
+                { "type": "tweet" },
+            ] }),
+            false,
+        )
+        .unwrap_err();
+        let at = |path: &str| errors.iter().find(|e| e.path == path).map(|e| e.code.as_str());
+        assert_eq!(at("formats[0].max_chars"), Some("out_of_range"));
+        assert_eq!(at("formats[1].question"), Some("missing_field"));
+        assert_eq!(at("formats[2]"), Some("unsupported_format"));
+        // The type list is in the message so the caller can correct itself.
+        assert!(errors
+            .iter()
+            .find(|e| e.path == "formats[2]")
+            .unwrap()
+            .message
+            .contains("json, summary, question, highlights"));
+    }
+
+    #[test]
+    fn only_one_ai_format_of_each_kind() {
+        let errors = resolve(
+            json!({ "formats": [
+                { "type": "question", "question": "a" },
+                "markdown",
+                { "type": "question", "question": "b" },
+            ] }),
+            false,
+        )
+        .unwrap_err();
+        assert_eq!(errors.len(), 1);
+        assert_eq!((errors[0].path.as_str(), errors[0].code.as_str()), ("formats[2]", "too_many"));
+        // The same spec twice is just as many.
+        let errors = resolve(json!({ "formats": ["summary", "summary"] }), false).unwrap_err();
+        assert_eq!(errors[0].code, "too_many");
+        assert_eq!(errors[0].path, "formats[1]");
+        // One of each kind is fine.
+        assert!(resolve(
+            json!({ "formats": [
+                { "type": "json", "schema": schema_body() },
+                "summary",
+                { "type": "question", "question": "q" },
+                { "type": "highlights", "query": "h" },
+            ] }),
+            false
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn the_ai_formats_are_feature_disabled_at_their_index_while_the_flag_is_off() {
+        let off = ScrapeLimits::default();
+        assert!(!off.ai_formats_enabled);
+        let body = json!({ "formats": [
+            "markdown",
+            { "type": "json", "schema": schema_body() },
+            "links",
+            "summary",
+        ] });
+        let errors = ScrapeOptions::from_value(&body).unwrap().resolve(false, &off).unwrap_err();
+        assert_eq!(errors.len(), 2);
+        assert_eq!((errors[0].path.as_str(), errors[0].code.as_str()), ("formats[1]", "feature_disabled"));
+        assert_eq!((errors[1].path.as_str(), errors[1].code.as_str()), ("formats[3]", "feature_disabled"));
+        // A plain request is untouched by the flag.
+        assert!(ScrapeOptions::from_value(&json!({ "formats": ["markdown", "links"] }))
+            .unwrap()
+            .resolve(false, &off)
+            .is_ok());
+        // On, the same body is accepted.
+        let on = ScrapeLimits { ai_formats_enabled: true, ..ScrapeLimits::default() };
+        assert!(ScrapeOptions::from_value(&body).unwrap().resolve(false, &on).is_ok());
+        // Under ZDR the formats still resolve: the engine, not the contract, answers ZDR_UNAVAILABLE.
+        assert!(ScrapeOptions::from_value(&body).unwrap().resolve(true, &on).is_ok());
+    }
+
+    #[test]
+    fn an_ai_format_with_unknown_keys_is_unknown_field() {
+        let errors = resolve(json!({ "formats": [{ "type": "summary", "length": 3 }] }), false).unwrap_err();
+        assert_eq!((errors[0].path.as_str(), errors[0].code.as_str()), ("formats[0]", "unknown_field"));
+    }
+
+    #[test]
+    fn effective_options_name_an_ai_format_and_nothing_of_what_it_asked() {
+        const SECRET: &str = "SECRET-AI-INPUT-5530";
+        let resolved = resolve(
+            json!({ "formats": [
+                "markdown",
+                { "type": "json", "schema": { "type": "object", "description": SECRET }, "prompt": SECRET },
+                { "type": "question", "question": SECRET },
+                { "type": "highlights", "query": SECRET },
+                "summary",
+            ] }),
+            false,
+        )
+        .unwrap();
+        let effective = EffectiveScrapeOptions::new(&resolved, false, CacheState::Bypass, "shadow", false, &[]);
+        let value = serde_json::to_value(&effective).unwrap();
+        assert_eq!(
+            value["formats"],
+            json!(["markdown", "json", "question", "highlights", "summary"])
+        );
+        assert!(!value.to_string().contains(SECRET));
+        // The stored echo reads back (GET /v1/scrape/{id} deserializes it).
+        let back: EffectiveScrapeOptions = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&back).unwrap()["formats"], value["formats"]);
+        // A name read back is not a request: it holds none of the input.
+        let AiSpec::Question(question) = back.formats[2].ai_spec().unwrap().clone() else { panic!() };
+        assert!(question.question.is_empty());
+    }
+
+    #[test]
+    fn the_canonical_key_follows_the_ai_specs_and_leaves_other_keys_alone() {
+        let key = |formats: serde_json::Value| {
+            resolve(json!({ "formats": formats }), false).unwrap().canonical_options_key()
+        };
+        let plain = key(json!(["markdown"]));
+        let with_ai = key(json!(["markdown", { "type": "question", "question": "a" }]));
+        assert_ne!(plain, with_ai);
+        assert_ne!(with_ai, key(json!(["markdown", { "type": "question", "question": "b" }])));
+        let schema_a = json!({ "type": "object", "properties": { "a": { "type": "string" } } });
+        let schema_b = json!({ "type": "object", "properties": { "b": { "type": "string" } } });
+        let json_a = key(json!([{ "type": "json", "schema": schema_a }]));
+        assert_ne!(json_a, key(json!([{ "type": "json", "schema": schema_b }])));
+        assert_ne!(json_a, key(json!([{ "type": "json", "schema": schema_a, "prompt": "p" }])));
+        // Order-stable: formats in another order, a schema with keys in another order.
+        let reordered = json!({ "properties": { "a": { "type": "string" } }, "type": "object" });
+        assert_eq!(
+            key(json!([{ "type": "json", "schema": schema_a }, "summary"])),
+            key(json!(["summary", { "type": "json", "schema": reordered }]))
+        );
+        assert_ne!(key(json!(["summary"])), key(json!([{ "type": "summary", "language": "nb" }])));
+        assert_ne!(
+            key(json!([{ "type": "highlights", "query": "q" }])),
+            key(json!([{ "type": "highlights", "query": "q", "max_highlights": 4 }]))
+        );
+        // No content in the key: it is a 64-hex digest.
+        assert_eq!(with_ai.len(), 64);
+    }
+
+    fn sample_output() -> NormalizedOutput {
+        use crate::output::{
+            ChangeInfo, ChangeStatus, DriverInfo, DriverKind, OutputFormats, PageMetadata, UrlTriple,
+        };
+        NormalizedOutput {
+            run_id: crate::ids::Id::new(),
+            url: UrlTriple {
+                requested: "https://example.com/".into(),
+                final_url: "https://example.com/".into(),
+                canonical: None,
+            },
+            status: 200,
+            fetched_at: chrono::Utc::now(),
+            fingerprint: "abc".into(),
+            formats: OutputFormats::default(),
+            change: ChangeInfo { status: ChangeStatus::New, prev_fingerprint: None },
+            metadata: PageMetadata::default(),
+            driver: DriverInfo {
+                kind: DriverKind::Static,
+                duration_ms: 1,
+                profile: None,
+                version: None,
+                session_id: None,
+                live_view_url: None,
+                recording_id: None,
+            },
+            determinism: None,
+            privacy: None,
+            branding: None,
+            etag: None,
+            last_modified: None,
+            extraction: None,
+        }
+    }
+
+    #[test]
+    fn a_response_without_ai_fields_has_none_of_them_on_the_wire() {
+        let response = ScrapeResponse::from_output(sample_output());
+        let value = serde_json::to_value(&response).unwrap();
+        for key in ["json", "summary", "answer", "highlights", "ai"] {
+            assert!(value.get(key).is_none(), "{key} is on the wire without being asked for");
+        }
+        // The default wire shape: the output's own keys and nothing added.
+        let mut keys: Vec<&str> = value.as_object().unwrap().keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            ["change", "driver", "fetched_at", "fingerprint", "formats", "metadata", "run_id", "status", "url"]
+        );
+        // With them set they are there, under the names the contract gives.
+        let mut asked = response.clone();
+        asked.json = Some(json!({ "title": "T" }));
+        asked.summary = Some("S".into());
+        asked.answer = Some("A".into());
+        asked.highlights = Some(vec![Highlight { text: "tilbud".into(), start: 3, end: 9 }]);
+        asked.ai = Some(AiReport::default());
+        let value = serde_json::to_value(&asked).unwrap();
+        assert_eq!(value["json"]["title"], "T");
+        assert_eq!(value["summary"], "S");
+        assert_eq!(value["answer"], "A");
+        assert_eq!(value["highlights"][0]["end"], 9);
+        assert_eq!(value["ai"]["total"]["calls"], 0);
+        let back: ScrapeResponse = serde_json::from_value(value).unwrap();
+        assert_eq!(back.summary.as_deref(), Some("S"));
+        assert!(back.ai.is_some());
     }
 }

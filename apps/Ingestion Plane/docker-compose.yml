@@ -175,8 +175,8 @@ services:
       # *_base_url); the config crate maps QUARRY_EDGE__MODEL_PLANE_URL to it. Empty,
       # the default, means no Model Plane: quarry-edge reads an empty value as unset
       # (config.rs, from_env). Set MODEL_PLANE_URL (for example http://model-gateway:8080)
-      # to opt in. Set, it serves /v1/invoke for answer synthesis; the gateway chooses
-      # the model (no model id needed).
+      # to opt in. Set, the Model Plane features that have a switch may use it (answer
+      # synthesis has one, below); the gateway chooses the model (no model id needed).
       QUARRY_EDGE__MODEL_PLANE_URL: ${MODEL_PLANE_URL:-}
       # Model Plane features (QB-T17, owner default D-C; decision 3.12 of 2026-10-27, accepted
       # 2026-10-28). Every one is OFF by default, and each one also needs MODEL_PLANE_URL above: the
@@ -186,6 +186,15 @@ services:
       # ERROR that names it. Flip a switch only together with the registry grant. The semantic
       # rerank below is not a Model Plane feature: it calls the Data Plane.
       # (The Quarry token-request manifest holds three model-gateway rows, all granted:false.)
+      # Structured extract (a schema or a prompt on /v1/extract; INNH-2, INNH-3) is gated by
+      # QUARRY_EDGE__AI_FORMATS below, like the AI formats of POST /v1/scrape (INNH-1): off by
+      # default, and it also needs a model credential, which no deployed stack can hold yet
+      # (decision X-7, WS16.S1 to S3). See docs/RUNBOOKS.md (Quarry-v2), "Enable structured
+      # extract and AI formats" and "Scrape AI formats". An owner turns it on, not this file.
+      # max_age on POST /v1/scrape (INNH-7): "off" here. "on" accepts it and runs the
+      # org-scoped URL result cache (needs Redis); never read or written under ZDR. An
+      # owner turns it on, not this file. See docs/RUNBOOKS.md (Quarry-v2), "Scrape max_age".
+      QUARRY_EDGE__SCRAPE_MAX_AGE: "${QUARRY_EDGE_SCRAPE_MAX_AGE:-off}"
       # Autoprompt: rewrite verbose Research/Comparative queries before fan-out.
       QUARRY_EDGE__AUTOPROMPT: "${QUARRY_EDGE_AUTOPROMPT:-0}"
       QUARRY_EDGE__AUTOPROMPT_MODEL: ${QUARRY_AUTOPROMPT_MODEL:-}
@@ -195,6 +204,9 @@ services:
       QUARRY_EDGE__PAGE_TITLE_ENRICH: "${QUARRY_EDGE_PAGE_TITLE_ENRICH:-0}"
       QUARRY_EDGE__ANSWER_SYNTHESIS: "${QUARRY_EDGE_ANSWER_SYNTHESIS:-0}"
       QUARRY_EDGE__AI_FORMATS: "${QUARRY_EDGE_AI_FORMATS:-0}"
+      # Under ZDR the AI formats of POST /v1/scrape are refused (ADR-4); "refuse" is the only value
+      # that takes effect in v1 (INNH-1).
+      QUARRY_EDGE__AI_FORMATS_ZDR: ${QUARRY_EDGE_AI_FORMATS_ZDR:-refuse}
       QUARRY_EDGE__SEARCH_SUGGEST: "${QUARRY_EDGE_SEARCH_SUGGEST:-0}"
       QUARRY_EDGE__MODEL_AUDIO: "${QUARRY_EDGE_MODEL_AUDIO:-0}"
       # Semantic rerank (Quarry option B): the Data Plane's POST /v1/rerank (rerank-v1, profile web-v1)

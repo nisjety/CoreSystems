@@ -99,6 +99,9 @@ pub struct AppState {
     /// Wired only when `QUARRY_EDGE__ANSWER_SYNTHESIS` is on (QB-T17), a SearchProvider
     /// is configured and a model path exists. `/v1/answer` returns 501 Unsupported otherwise.
     pub answer_pipeline: Option<Arc<AnswerPipeline>>,
+    /// INNH-8a: why `answer_pipeline` is `None` (the first closed gate), so a 501 on
+    /// `/v1/answer` and `answer_reason` on `/v1/search` name the exact switch.
+    pub answer_status: crate::answer_status::AnswerPipelineStatus,
     /// Which Model Plane features this edge serves (QB-T17, see `model_plane_gate`). All off
     /// unless switched on AND a model path exists. Routes read their own field before they
     /// call the Model Plane.

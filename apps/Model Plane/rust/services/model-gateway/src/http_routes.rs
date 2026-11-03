@@ -230,7 +230,25 @@ pub fn build_router_with_readiness(
     };
 
     // Auth-gated routes with rate limiting
-    let authed = Router::new()
+    let authed = authed_routes()
+        .layer(middleware::from_fn(rate_limit::rate_limit_middleware))
+        .layer(middleware::from_fn(auth::authorize_principal_route))
+        .layer(middleware::from_fn(auth::require_auth))
+        .layer(axum::Extension(rate_limiter));
+
+    Router::new()
+        .merge(public)
+        .merge(authed)
+        .layer(Extension(grpc_readiness))
+        .layer(middleware::from_fn(gateway_metrics::metrics_middleware))
+        .with_state(state)
+}
+
+/// Every auth-gated route, without its layers. `build_router_with_readiness` wraps it in
+/// `require_auth`, `authorize_principal_route` and the rate limiter; a test wraps it in the route
+/// policy alone, to prove every route here answers to it (INNH-10 MP-3).
+fn authed_routes() -> Router<AppState> {
+    Router::new()
         .route("/v1/invoke", post(invoke))
         // Attachments ride the body as base64, so the 2 MiB default would refuse two
         // images the attachment policy admits (a 413 with no typed reason).
@@ -359,6 +377,8 @@ pub fn build_router_with_readiness(
         // returns after reload. The live SSE route remains the sole tail
         // transport; this route only reads Session Core's canonical log.
         .route("/v1/runs/:run_id/events/replay", get(replay_run_events))
+        // WS10.S6: the run's durable trace (Session Core EventLog), owner only, paged by cursor.
+        .route("/v1/runs/:run_id/trace", get(get_run_trace))
         // Run event SSE
         .route("/v1/runs/:run_id/events", get(sse::run_events_sse))
         // Browser reasoning: Model Plane proposes one safe browser action from
@@ -402,17 +422,6 @@ pub fn build_router_with_readiness(
             "/v1/finetune/jobs/:job_id/deploy",
             post(crate::finetune_routes::deploy_job),
         )
-        .layer(middleware::from_fn(rate_limit::rate_limit_middleware))
-        .layer(middleware::from_fn(auth::authorize_principal_route))
-        .layer(middleware::from_fn(auth::require_auth))
-        .layer(axum::Extension(rate_limiter));
-
-    Router::new()
-        .merge(public)
-        .merge(authed)
-        .layer(Extension(grpc_readiness))
-        .layer(middleware::from_fn(gateway_metrics::metrics_middleware))
-        .with_state(state)
 }
 
 /// `/v1/orchestration/*` read + mutation routes. Merged into the auth-gated router.
@@ -1777,6 +1786,212 @@ async fn replay_run_events(
     }))
 }
 
+// ---------------------------------------------------------------------------
+// WS10.S6: `GET /v1/runs/:run_id/trace` â€” a run's durable trace from Session Core's EventLog.
+// ---------------------------------------------------------------------------
+
+/// Default and bounds of one trace page. Session Core clamps the same way (0 reads 100).
+const RUN_TRACE_DEFAULT_LIMIT: u32 = 100;
+const RUN_TRACE_MAX_LIMIT: u32 = 500;
+const RUN_TRACE_MAX_CURSOR_LEN: usize = 512;
+const RUN_TRACE_MAX_RUN_ID_LEN: usize = 64;
+const RUN_TRACE_MAX_TYPES: usize = 32;
+/// The `type_url` Session Core gives a trace row's payload; its `value` is the JSON object Quarry
+/// sent (`eventlog_grpc.rs` `TRACE_PAYLOAD_TYPE_URL`).
+const RUN_TRACE_PAYLOAD_TYPE_URL: &str = "type.googleapis.com/model_plane.v1.BrowserTraceEvent";
+
+#[derive(Debug, Deserialize)]
+struct RunTraceQuery {
+    #[serde(default)]
+    cursor: Option<String>,
+    #[serde(default)]
+    limit: Option<u32>,
+    /// Comma list of `EventType` names without the `EVENT_TYPE_` prefix.
+    #[serde(default)]
+    types: Option<String>,
+}
+
+fn run_trace_error(status: StatusCode, code: &str, message: &str) -> HttpJsonError {
+    (
+        status,
+        Json(json!({ "error": { "code": code, "message": message } })),
+    )
+}
+
+/// A run id as Session Core's trace store keeps it: one `[A-Za-z0-9_-]` token of at most 64.
+fn valid_trace_run_id(run_id: &str) -> bool {
+    (1..=RUN_TRACE_MAX_RUN_ID_LEN).contains(&run_id.len())
+        && run_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+}
+
+/// `types=A,B` to EventType numbers. Blank items are skipped; an unknown name is a 400 (a typo
+/// must not read as "no events"); `UNSPECIFIED` is not a filter.
+fn parse_trace_types(raw: Option<&str>) -> Result<Vec<i32>, HttpJsonError> {
+    let Some(raw) = raw else {
+        return Ok(Vec::new());
+    };
+    let mut types = Vec::new();
+    for name in raw.split(',').map(str::trim).filter(|name| !name.is_empty()) {
+        let kind = EventType::from_str_name(&format!("EVENT_TYPE_{name}"))
+            .filter(|kind| *kind != EventType::Unspecified)
+            .ok_or_else(|| {
+                run_trace_error(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_trace_types",
+                    "types must be EventType names without the EVENT_TYPE_ prefix",
+                )
+            })?;
+        if !types.contains(&(kind as i32)) {
+            types.push(kind as i32);
+        }
+    }
+    if types.len() > RUN_TRACE_MAX_TYPES {
+        return Err(run_trace_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_trace_types",
+            "too many event types",
+        ));
+    }
+    Ok(types)
+}
+
+/// One trace event in the shape of the run-trace envelope golden
+/// (`api/contracts/run-trace-envelope.golden.json`): names without their enum prefixes, the
+/// payload as the JSON object Quarry sent. A payload of any other type, or one that is not a JSON
+/// object, is reported by its type only: raw bytes never leave the gateway.
+fn trace_event_json(event: &Event) -> Value {
+    let event_type = EventType::try_from(event.event_type).map_or("UNSPECIFIED", |kind| {
+        kind.as_str_name().trim_start_matches("EVENT_TYPE_")
+    });
+    let origin = mp_contracts::model_plane::v1::RunOrigin::try_from(event.origin)
+        .ok()
+        .filter(|origin| *origin != mp_contracts::model_plane::v1::RunOrigin::Unspecified)
+        .map(|origin| origin.as_str_name().trim_start_matches("RUN_ORIGIN_").to_owned());
+    let ts = event.ts.as_ref().and_then(|ts| {
+        let nanos = u32::try_from(ts.nanos).ok()?;
+        chrono::DateTime::from_timestamp(ts.seconds, nanos)
+            .map(|at| at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
+    });
+    let payload = event.payload.as_ref().map(|any| {
+        let object = (any.type_url == RUN_TRACE_PAYLOAD_TYPE_URL)
+            .then(|| serde_json::from_slice::<Value>(&any.value).ok())
+            .flatten()
+            .filter(Value::is_object);
+        object.unwrap_or_else(|| json!({ "type_url": any.type_url }))
+    });
+    let agent = event.agent.as_ref().map(|agent| {
+        json!({ "id": agent.id, "role": agent.role, "parent_id": agent.parent_id })
+    });
+    json!({
+        "event_id": event.event_id,
+        "event_type": event_type,
+        "schema_version": event.schema_version,
+        "ts": ts,
+        "producer": event.producer,
+        "correlation_id": event.correlation_id,
+        "causation_id": event.causation_id,
+        "org_id": event.org_id,
+        "user_id": event.user_id,
+        "resource_ref": event.resource_ref,
+        "payload": payload,
+        "zdr": event.zdr,
+        "producer_seq": event.producer_seq,
+        "agent": agent,
+        "origin": origin,
+        "run_id": event.run_id,
+        "request_id": event.request_id,
+    })
+}
+
+/// Session Core's answer to a trace read. A non-owner and an unknown run look the same (404); a
+/// Session Core that does not serve the trace yet is a 501 the caller can tell from an outage.
+fn run_trace_status_to_http(status: &tonic::Status) -> HttpJsonError {
+    match status.code() {
+        tonic::Code::NotFound | tonic::Code::PermissionDenied => {
+            run_trace_error(StatusCode::NOT_FOUND, "run_not_found", "no such run")
+        }
+        tonic::Code::Unimplemented => run_trace_error(
+            StatusCode::NOT_IMPLEMENTED,
+            "trace_unavailable",
+            "the run trace is not available",
+        ),
+        tonic::Code::InvalidArgument => run_trace_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_trace_query",
+            "the trace query was refused",
+        ),
+        _ => grpc_status_to_http(status),
+    }
+}
+
+/// `GET /v1/runs/:run_id/trace?cursor=&limit=&types=` â€” one page of the run's trace, oldest first.
+/// The org is the token's; Session Core checks that the caller owns the run (the user behind the
+/// session bearer), so this route adds no ownership rule of its own.
+async fn get_run_trace(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    bearer: VerifiedModelBearer,
+    Path(run_id): Path<String>,
+    Query(query): Query<RunTraceQuery>,
+) -> Result<Json<Value>, HttpJsonError> {
+    let run_id = run_id.trim();
+    if !valid_trace_run_id(run_id) {
+        return Err(run_trace_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_run_id",
+            "run_id must be 1 to 64 characters of [A-Za-z0-9_-]",
+        ));
+    }
+    let limit = query
+        .limit
+        .unwrap_or(RUN_TRACE_DEFAULT_LIMIT)
+        .clamp(1, RUN_TRACE_MAX_LIMIT);
+    let cursor = query
+        .cursor
+        .as_deref()
+        .map(str::trim)
+        .filter(|cursor| !cursor.is_empty());
+    if cursor.is_some_and(|cursor| cursor.len() > RUN_TRACE_MAX_CURSOR_LEN) {
+        return Err(run_trace_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_cursor",
+            "the cursor is too long",
+        ));
+    }
+    let event_types = parse_trace_types(query.types.as_deref())?;
+    let request = mp_contracts::model_plane::v1::QueryEventsRequest {
+        filter: Some(mp_contracts::model_plane::v1::EventFilter {
+            org_id: claims.org_id.clone(),
+            run_id: run_id.to_owned(),
+            event_types,
+            ..Default::default()
+        }),
+        cursor: cursor.map(|value| mp_contracts::model_plane::v1::Cursor {
+            value: value.to_owned(),
+        }),
+        limit,
+        reverse: false,
+    };
+    let page = state
+        .event_log_client
+        .clone()
+        .query_events(authenticated_session_request(request, &bearer)?)
+        .await
+        .map_err(|status| run_trace_status_to_http(&status))?
+        .into_inner();
+    let events: Vec<Value> = page.events.iter().map(trace_event_json).collect();
+    let next_cursor = page
+        .next_cursor
+        .map(|cursor| cursor.value)
+        .filter(|value| !value.is_empty());
+    Ok(Json(json!({
+        "data": { "events": events },
+        "meta": { "next_cursor": next_cursor, "has_more": page.has_more },
+    })))
+}
+
 /// `type_url` of Session Core's `RUN_CANCELLED` row. Session Core has no enum
 /// value for that row, so it replays as `EVENT_TYPE_UNSPECIFIED` and only the
 /// payload discriminator identifies it (as in `durable_thread_event_type`).
@@ -1864,6 +2079,8 @@ fn project_run_replay_event(run_id: &str, event: Event) -> Option<DurableRunEven
             | "EVENT_TYPE_BROWSER_OBSERVATION_RECEIVED"
             | "EVENT_TYPE_BROWSER_RUN_PAUSED"
             | "EVENT_TYPE_BROWSER_RUN_RESUMED"
+            // WS8.G: ids only (run, plan, attach, session run, tab), never a URL or a title.
+            | "EVENT_TYPE_BROWSER_ATTACH_SHARED_JAR"
             | "EVENT_TYPE_BROWSER_ACTION_APPROVAL_REQUIRED"
             | "EVENT_TYPE_BROWSER_ACTION_DECIDED"
             | "EVENT_TYPE_APPROVAL_CONTINUATION_VERIFIED"
@@ -2540,6 +2757,7 @@ async fn cancel_run(
             // The guard above answered every ZDR posture with a refusal, so a
             // run-control event that reaches this line is persistent.
             zdr: false,
+            ..Default::default()
         };
         if let Err(error) = state
             .publisher
@@ -2589,6 +2807,7 @@ async fn resume_run(
                 checkpoint_id: String::new(),
                 org_id: claims.org_id.clone(),
                 approval_id: String::new(),
+                steer_text: String::new(),
             },
             &execution_bearer,
             &session_bearer,
@@ -2614,6 +2833,7 @@ async fn resume_run(
         // The guard above answered every ZDR posture with a refusal, so a
         // run-control event that reaches this line is persistent.
         zdr: false,
+        ..Default::default()
     };
     state
         .publisher
@@ -2683,6 +2903,19 @@ struct AiChatRequest {
     structured_output_schema: Option<String>,
     #[serde(default)]
     zdr: bool,
+    /// Sampling temperature, 0.0 to 1.0 (WS16.S1). Absent keeps the 0.7 every caller had before
+    /// this field existed. Read as a plain number and range-checked by hand so a value out of
+    /// range answers 400 with a reason, not a deserialiser 422.
+    #[serde(default)]
+    temperature: Option<f64>,
+    /// Output token ceiling, 1 to 8192. Absent keeps the 4096 every caller had before.
+    #[serde(default)]
+    max_tokens: Option<i64>,
+    /// Why a machine caller makes this call. A closed set (`quarry.extract`), and only the
+    /// `service:quarry-edge` principal may name it; it rides on the usage envelope so cost-core
+    /// can attribute the spend.
+    #[serde(default)]
+    purpose: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -3055,12 +3288,23 @@ fn browser_suggestion_prompt(
         },
         1_200,
     );
-    let observation = compact_json_for_prompt(&req.observation, BROWSER_OBSERVATION_PROMPT_CHARS);
-    let visual_observation =
-        compact_json_for_prompt(&req.visual_observation, BROWSER_VISUAL_PROMPT_CHARS);
+    // WS12.S4: the page is untrusted and may hold a credential the user typed or the page
+    // echoed. Credential-shaped strings are masked HERE, on the way into the prompt, before
+    // any cut (`compact_json_for_prompt`, `truncate_for_prompt`) can split one into a
+    // fragment the pattern no longer matches. The request itself is not changed.
+    let observation = compact_json_for_prompt(
+        &scrubbed_live_json(&req.observation),
+        BROWSER_OBSERVATION_PROMPT_CHARS,
+    );
+    let visual_observation = compact_json_for_prompt(
+        &scrubbed_live_json(&req.visual_observation),
+        BROWSER_VISUAL_PROMPT_CHARS,
+    );
     let visual_summary = visual_summary.map_or_else(
         || "not provided".to_owned(),
-        |summary| truncate_for_prompt(summary, BROWSER_VISUAL_PROMPT_CHARS),
+        |summary| {
+            truncate_for_prompt(&mp_scrub::scrub_live(summary), BROWSER_VISUAL_PROMPT_CHARS)
+        },
     );
     let visual_artifact = req
         .visual_observation_artifact_id
@@ -3071,9 +3315,16 @@ fn browser_suggestion_prompt(
 
     format!(
         "Goal:\n{goal}\n\nCurrent URL: {}\nCurrent title: {}\n\nQuarry observation JSON:\n{observation}\n\nOpenCV visual observation artifact id: {visual_artifact}\nOpenCV visual observation JSON:\n{visual_observation}\n\nVLM screenshot summary:\n{visual_summary}\n\nReturn the single next browser action JSON only.",
-        truncate_for_prompt(&req.url, 1_000),
-        truncate_for_prompt(&req.title, 500),
+        truncate_for_prompt(&mp_scrub::scrub_url(&req.url), 1_000),
+        truncate_for_prompt(&mp_scrub::scrub_live(&req.title), 500),
     )
+}
+
+/// A copy of `value` with every credential-shaped string masked (`mp_scrub::scrub_live_json`).
+fn scrubbed_live_json(value: &Value) -> Value {
+    let mut copy = value.clone();
+    mp_scrub::scrub_live_json(&mut copy);
+    copy
 }
 
 fn browser_suggestion_value(parsed: &Value) -> Value {
@@ -3197,13 +3448,181 @@ fn truncate_for_prompt(value: &str, max_chars: usize) -> String {
     out
 }
 
+/// `AiChatRequest::temperature` when the caller sends none.
+const AI_CHAT_DEFAULT_TEMPERATURE: f32 = 0.7;
+/// `AiChatRequest::max_tokens` when the caller sends none.
+const AI_CHAT_DEFAULT_MAX_TOKENS: i32 = 4096;
+/// The ceiling a caller may ask for.
+const AI_CHAT_MAX_TOKENS_CEILING: i64 = 8192;
+/// The one `purpose` value, and the one principal allowed to name it.
+const AI_CHAT_PURPOSE_QUARRY_EXTRACT: &str = "quarry.extract";
+const AI_CHAT_PURPOSE_CALLER: &str = "service:quarry-edge";
+
+/// `MODEL_GATEWAY_AI_CHAT_METERING`: whose `/v1/ai/chat` calls publish a `USAGE_ENVELOPE`.
+///
+/// The build plan's default is `service`; the owner rule is that new behaviour starts off, so the
+/// default here is `off` (assumed decision, recorded in the progress file). Rolling it out is
+/// `MODEL_GATEWAY_AI_CHAT_METERING=service`. `all` also meters user callers, which changes user
+/// accounting and is therefore not a default of anything.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum AiChatMetering {
+    #[default]
+    Off,
+    Service,
+    All,
+}
+
+impl AiChatMetering {
+    /// Anything other than the literal `service` or `all` is `off`.
+    fn parse(raw: Option<&str>) -> Self {
+        match raw.map(|value| value.trim().to_ascii_lowercase()).as_deref() {
+            Some("service") => Self::Service,
+            Some("all") => Self::All,
+            _ => Self::Off,
+        }
+    }
+
+    const fn meters(self, service_caller: bool) -> bool {
+        match self {
+            Self::Off => false,
+            Self::Service => service_caller,
+            Self::All => true,
+        }
+    }
+}
+
+/// The switch, read once per process.
+fn ai_chat_metering() -> AiChatMetering {
+    static MODE: std::sync::OnceLock<AiChatMetering> = std::sync::OnceLock::new();
+    *MODE.get_or_init(|| {
+        AiChatMetering::parse(env::var("MODEL_GATEWAY_AI_CHAT_METERING").ok().as_deref())
+    })
+}
+
+/// The validated sampling parameters of one `/v1/ai/chat` call.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct AiChatParams {
+    temperature: f32,
+    max_tokens: i32,
+    purpose: Option<&'static str>,
+}
+
+fn ai_chat_bad_request(error: &str) -> HttpJsonError {
+    (StatusCode::BAD_REQUEST, Json(json!({ "error": error })))
+}
+
+/// Validate the additive fields. Absent fields keep today's values exactly.
+fn ai_chat_params(req: &AiChatRequest, claims: &Claims) -> Result<AiChatParams, HttpJsonError> {
+    let temperature = match req.temperature {
+        None => AI_CHAT_DEFAULT_TEMPERATURE,
+        Some(value) if value.is_finite() && (0.0..=1.0).contains(&value) => {
+            // The range check above makes the narrowing safe for a sampling knob.
+            #[allow(clippy::cast_possible_truncation)]
+            let narrowed = value as f32;
+            narrowed
+        }
+        Some(_) => return Err(ai_chat_bad_request("temperature must be between 0.0 and 1.0")),
+    };
+    let max_tokens = match req.max_tokens {
+        None => AI_CHAT_DEFAULT_MAX_TOKENS,
+        Some(value) if (1..=AI_CHAT_MAX_TOKENS_CEILING).contains(&value) => {
+            i32::try_from(value).unwrap_or(AI_CHAT_DEFAULT_MAX_TOKENS)
+        }
+        Some(_) => return Err(ai_chat_bad_request("max_tokens must be between 1 and 8192")),
+    };
+    let purpose = match req.purpose.as_deref() {
+        None => None,
+        Some(purpose) => {
+            // Service callers only, and only the one named service. A user token that sends a
+            // purpose is refused rather than ignored, so the field can never read as accepted.
+            if claims.service_principal_id().is_none() || claims.sub != AI_CHAT_PURPOSE_CALLER {
+                return Err((
+                    StatusCode::FORBIDDEN,
+                    Json(json!({ "error": "purpose is not permitted for this caller" })),
+                ));
+            }
+            if purpose != AI_CHAT_PURPOSE_QUARRY_EXTRACT {
+                return Err(ai_chat_bad_request("unknown purpose"));
+            }
+            Some(AI_CHAT_PURPOSE_QUARRY_EXTRACT)
+        }
+    };
+    Ok(AiChatParams {
+        temperature,
+        max_tokens,
+        purpose,
+    })
+}
+
+/// The `USAGE_ENVELOPE` of one metered `/v1/ai/chat` call: the shape `grpc.rs` and `invoke`
+/// publish, plus `route` and `purpose` so cost-core can tell this lane from chat.
+fn ai_chat_usage_envelope(
+    request_id: &str,
+    claims: &Claims,
+    infer: &mp_contracts::model_plane::v1::InferResponse,
+    latency_ms: u64,
+    purpose: Option<&str>,
+    cost_basis: crate::pricing::CostBasis,
+) -> Envelope {
+    // A service is attributed by its subject, a user by their id.
+    let user_id = if claims.service_principal_id().is_some() {
+        claims.sub.clone()
+    } else {
+        claims.user_id.clone()
+    };
+    Envelope {
+        event_id: new_ulid(),
+        event_type: "USAGE_ENVELOPE".to_owned(),
+        schema_version: 1,
+        ts: Utc::now(),
+        producer: "model-gateway".to_owned(),
+        correlation_id: request_id.to_owned(),
+        causation_id: String::new(),
+        idempotency_key: format!("{request_id}-USAGE_ENVELOPE"),
+        org_id: claims.org_id.clone(),
+        user_id: user_id.clone(),
+        resource_ref: format!("request/{request_id}"),
+        payload: json!({
+            "request_id": request_id,
+            "org_id": claims.org_id,
+            "user_id": user_id,
+            "model": infer.model_used,
+            "input_tokens": infer.input_tokens,
+            "output_tokens": infer.output_tokens,
+            "latency_ms": latency_ms,
+            "transport": "http",
+            "route": "ai_chat",
+            "purpose": purpose,
+            "provider_used": infer.provider_used,
+            "residency": infer.residency,
+            "cache_read_input_tokens": infer.cache_read_input_tokens,
+            "cache_creation_input_tokens": infer.cache_creation_input_tokens,
+            "cost_basis": cost_basis.as_str(),
+        }),
+        zdr: false,
+        ..Default::default()
+    }
+}
+
 async fn ai_chat(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
     inference_bearer: VerifiedInferenceBearer,
     Json(req): Json<AiChatRequest>,
 ) -> Result<Json<Value>, HttpJsonError> {
+    ai_chat_with(state, claims, inference_bearer, req, ai_chat_metering()).await
+}
+
+async fn ai_chat_with(
+    state: AppState,
+    claims: Claims,
+    inference_bearer: VerifiedInferenceBearer,
+    req: AiChatRequest,
+    metering: AiChatMetering,
+) -> Result<Json<Value>, HttpJsonError> {
     use mp_contracts::model_plane::v1::{ChatMessage, InferRequest};
+    // Bad sampling fields and a purpose the caller may not name are refused before anything else.
+    let params = ai_chat_params(&req, &claims)?;
     // The posture of this turn, through the resolver: a ZDR turn that names the caller's own
     // connection is refused here, typed, before any model call, and a waiver is honoured only on
     // the connection it names (see `zdr_posture`). Without this, a connection id with no provider
@@ -3226,6 +3645,9 @@ async fn ai_chat(
         })
         .collect();
     let request_id = new_ulid();
+    let (provider_hint, connection_id) =
+        (req.provider.clone(), req.subscription_connection_id.clone());
+    let started = std::time::Instant::now();
     let resp = state
         .inference_client
         .clone()
@@ -3238,8 +3660,8 @@ async fn ai_chat(
                 provider_hint: req.provider,
                 subscription_connection_id: req.subscription_connection_id,
                 messages,
-                temperature: 0.7,
-                max_tokens: 4096,
+                temperature: params.temperature,
+                max_tokens: params.max_tokens,
                 structured_output_schema: req.structured_output_schema.unwrap_or_default(),
                 zdr,
                 ..Default::default()
@@ -3249,11 +3671,54 @@ async fn ai_chat(
         .await
         .map_err(|e| grpc_status_to_http(&e))?
         .into_inner();
+    let latency_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    // A subscription call is never priced from API list prices.
+    let cost_basis = crate::pricing::CostBasis::of_route(&provider_hint, &connection_id)
+        .served_by(&resp.provider_used);
+    // Under ZDR nothing about the call is priced, metered or ledgered: the cost is null.
+    let cost_usd = if zdr {
+        None
+    } else {
+        state
+            .pricing
+            .cost_usd_for(
+                cost_basis,
+                &resp.model_used,
+                i64::from(resp.input_tokens.max(0)),
+                i64::from(resp.output_tokens.max(0)),
+                i64::from(resp.cache_read_input_tokens.max(0)),
+                i64::from(resp.cache_creation_input_tokens.max(0)),
+            )
+            .await
+    };
+    if !zdr && metering.meters(claims.service_principal_id().is_some()) {
+        let envelope = ai_chat_usage_envelope(
+            &request_id,
+            &claims,
+            &resp,
+            latency_ms,
+            params.purpose,
+            cost_basis,
+        );
+        if let Err(error) = state
+            .publisher
+            .publish(&subjects::usage_subject(&claims.org_id), &envelope)
+            .await
+        {
+            warn!(%error, "failed to publish ai_chat USAGE_ENVELOPE");
+        }
+    }
     Ok(Json(json!({
         "id": request_id,
         "content": resp.content,
         "model_used": resp.model_used,
-        "usage": { "input_tokens": resp.input_tokens, "output_tokens": resp.output_tokens },
+        "provider_used": resp.provider_used,
+        "usage": {
+            "input_tokens": resp.input_tokens,
+            "output_tokens": resp.output_tokens,
+            "cost_usd": cost_usd,
+            "latency_ms": latency_ms,
+        },
     })))
 }
 
@@ -8758,6 +9223,7 @@ async fn ingest_feedback(
         // The guard at the top of this handler answered every ZDR posture with a refusal,
         // so the feedback event that reaches this line is persistent.
         zdr: false,
+        ..Default::default()
     };
     state
         .publisher
@@ -13281,6 +13747,7 @@ async fn invoke(
             "model": normalized.model,
         }),
         zdr: effective_zdr,
+        ..Default::default()
     };
 
     if let Err(error) = state
@@ -13490,6 +13957,7 @@ async fn invoke(
             "cost_basis": cost_basis.as_str(),
         }),
         zdr: effective_zdr,
+        ..Default::default()
     };
 
     if let Err(e) = state
@@ -13669,6 +14137,66 @@ mod browser_suggestion_tests {
         assert!(prompt.contains("...[truncated]"));
         assert!(prompt.contains("Inspect page"));
     }
+
+    /// WS12.S4: a credential in the page (an accessibility value the user typed, a title,
+    /// a URL query, the vision model's reading of the screenshot) never reaches the
+    /// planner prompt; ordinary prose and ordinary URLs come through untouched. Secrets
+    /// are built from fragments so no secret-shaped literal sits in the source.
+    #[test]
+    fn browser_suggestion_prompt_masks_ax_value_and_visual_summary() {
+        let jwt = [
+            "eyJhbGciOiJI",
+            "UzI1NiIsInR5cCI6IkpXVCJ9",
+            ".eyJzdWIiOiIxMjM0NTY3ODkw",
+            ".SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c",
+        ]
+        .concat();
+        let key = ["sk-proj-", "Ab12Cd34Ef56", "Gh78Ij90Kl12"].concat();
+        let pat = ["ghp_", "aB3dE6gH9jK2mN5pQ8sT1uV4wX7yZ0"].concat();
+        let req = BrowserSuggestActionRequest {
+            goal: "Log in".to_owned(),
+            url: format!("https://app.example.com/cb?page=2&access_token={pat}&limit=5"),
+            title: format!("Welcome back {key}"),
+            observation: json!({
+                "extracted_text": "the bearer of the message arrived",
+                "page_url": format!("https://svc:hunter2-pw@h.example/p?token={pat}"),
+                "ax": [{ "role": "textbox", "value": jwt, "name": "Token" }],
+            }),
+            visual_observation: json!({ "ocr": [format!("key {key}")] }),
+            ..Default::default()
+        };
+
+        let prompt = browser_suggestion_prompt(
+            &req,
+            Some(&format!("The page shows an API key field containing {key}.")),
+        );
+
+        for secret in [&jwt, &key, &pat, &"hunter2-pw".to_owned()] {
+            assert!(!prompt.contains(secret.as_str()), "secret leaked: {prompt}");
+        }
+        assert!(prompt.contains("access_token=[REDACTED]&limit=5"));
+        assert!(prompt.contains("the bearer of the message arrived"));
+        assert!(prompt.contains("Welcome back [REDACTED]"));
+        assert!(prompt.contains("h.example/p?token=[REDACTED]"));
+        // The request is read, never rewritten.
+        assert!(req.observation.to_string().contains("eyJhbGciOiJI"));
+    }
+
+    #[test]
+    fn browser_suggestion_prompt_leaves_an_ordinary_page_alone() {
+        let req = BrowserSuggestActionRequest {
+            goal: "Inspect page".to_owned(),
+            url: "https://example.com/search?q=rust&page=2#top".to_owned(),
+            title: "Search results".to_owned(),
+            observation: json!({ "extracted_text": "max_tokens=4096 status=completed" }),
+            ..Default::default()
+        };
+        let prompt = browser_suggestion_prompt(&req, Some("a login form"));
+        assert!(prompt.contains("https://example.com/search?q=rust&page=2#top"));
+        assert!(prompt.contains("max_tokens=4096 status=completed"));
+        assert!(prompt.contains("a login form"));
+        assert!(!prompt.contains("[REDACTED]"));
+    }
 }
 
 #[cfg(test)]
@@ -13689,6 +14217,8 @@ mod invoke_zdr_tests {
     #[test]
     fn issuer_enforced_zdr_cannot_be_downgraded_by_the_request_body() {
         let claims = Claims {
+            key_id: None,
+            acting_user_id: None,
             sub: "user-a".to_owned(),
             iss: "issuer".to_owned(),
             exp: i64::MAX,
@@ -13795,6 +14325,8 @@ mod approval_resume_auth_tests {
     #[test]
     fn issuer_zdr_blocks_run_lifecycle_persistence() {
         let claims = Claims {
+            key_id: None,
+            acting_user_id: None,
             sub: "user-a".to_owned(),
             iss: "issuer".to_owned(),
             exp: i64::MAX,
@@ -13830,6 +14362,8 @@ mod capability_contract_tests {
 
     fn proxy_claims(zdr: bool) -> Claims {
         Claims {
+            key_id: None,
+            acting_user_id: None,
             sub: "user-a".to_owned(),
             iss: "test-issuer".to_owned(),
             exp: i64::MAX,
@@ -14250,6 +14784,8 @@ mod capability_contract_tests {
 
     fn mail_task_bridge_claims(org_id: &str) -> Claims {
         Claims {
+            key_id: None,
+            acting_user_id: None,
             sub: "service:verevon-gateway".to_owned(),
             iss: "test-issuer".to_owned(),
             exp: i64::MAX,
@@ -14670,6 +15206,8 @@ mod run_owner_publish_tests {
 
     fn claims(org_id: &str, user_id: &str) -> Claims {
         Claims {
+            key_id: None,
+            acting_user_id: None,
             sub: user_id.to_owned(),
             iss: "test-issuer".to_owned(),
             exp: i64::MAX,
@@ -16056,8 +16594,10 @@ mod speech_route_tests {
     /// refuses speech that asks for zero retention. `attested` stands for a
     /// future attested deployment that serves ZDR speech.
     #[derive(Clone, Default)]
-    struct SpeechInference {
+    pub(super) struct SpeechInference {
         attested: bool,
+        /// When set, `infer` answers with this instead of the clean-up stand-in (the ai_chat tests).
+        reply: Arc<Mutex<Option<pb::InferResponse>>>,
         transcribe: Arc<Mutex<Vec<pb::TranscribeSpeechRequest>>>,
         synthesize: Arc<Mutex<Vec<pb::SynthesizeSpeechRequest>>>,
         infer: Arc<Mutex<Vec<pb::InferRequest>>>,
@@ -16084,7 +16624,11 @@ mod speech_route_tests {
             self.synthesize.lock().expect("synthesis capture").clone()
         }
 
-        fn cleanups(&self) -> Vec<pb::InferRequest> {
+        pub(super) fn answering(&self, reply: pb::InferResponse) {
+            *self.reply.lock().expect("reply setting") = Some(reply);
+        }
+
+        pub(super) fn cleanups(&self) -> Vec<pb::InferRequest> {
             self.infer.lock().expect("clean-up capture").clone()
         }
     }
@@ -16108,6 +16652,9 @@ mod speech_route_tests {
                 .lock()
                 .expect("clean-up capture")
                 .push(request.into_inner());
+            if let Some(reply) = self.reply.lock().expect("reply setting").clone() {
+                return Ok(tonic::Response::new(reply));
+            }
             Ok(tonic::Response::new(pb::InferResponse {
                 content: "Hei der.".to_owned(),
                 model_used: "cleanup-model".to_owned(),
@@ -16282,7 +16829,7 @@ mod speech_route_tests {
     }
 
     /// An `AppState` whose inference client talks to `inference`.
-    async fn state_with(inference: SpeechInference) -> AppState {
+    pub(super) async fn state_with(inference: SpeechInference) -> AppState {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind inference stand-in");
@@ -16308,6 +16855,8 @@ mod speech_route_tests {
 
     fn claims(zdr: bool) -> Claims {
         Claims {
+            key_id: None,
+            acting_user_id: None,
             sub: "user-a".to_owned(),
             iss: "test-issuer".to_owned(),
             exp: i64::MAX,
@@ -16326,7 +16875,7 @@ mod speech_route_tests {
         }
     }
 
-    fn bearer() -> VerifiedInferenceBearer {
+    pub(super) fn bearer() -> VerifiedInferenceBearer {
         VerifiedInferenceBearer::for_test("inference-test-bearer")
     }
 
@@ -16743,6 +17292,8 @@ mod tool_policy_proxy_tests {
 
     fn claims(zdr: bool) -> Claims {
         Claims {
+            key_id: None,
+            acting_user_id: None,
             sub: "user-a".to_owned(),
             iss: "test-issuer".to_owned(),
             exp: i64::MAX,
@@ -17017,6 +17568,8 @@ mod org_agent_policy_proxy_tests {
 
     fn claims(zdr: bool) -> Claims {
         Claims {
+            key_id: None,
+            acting_user_id: None,
             sub: "user-a".to_owned(),
             iss: "test-issuer".to_owned(),
             exp: i64::MAX,
@@ -17608,6 +18161,8 @@ mod model_access_route_tests {
 
     fn claims(org_id: &str) -> Claims {
         Claims {
+            key_id: None,
+            acting_user_id: None,
             sub: "user-a".to_owned(),
             iss: "test-issuer".to_owned(),
             exp: i64::MAX,
@@ -18056,6 +18611,33 @@ mod run_replay_projection_tests {
     }
 
     #[test]
+    fn an_attach_shared_jar_event_is_replayed_for_its_run() {
+        let payload = r#"{"run_id":"run-1","plan_id":"plan-1","attach_id":"att-1","session_run_id":"user-run-9","tab_id":"tab-3"}"#;
+        let projected = project_run_replay_event(
+            "run-1",
+            event(
+                EventType::BrowserAttachSharedJar as i32,
+                "run:run-1",
+                "run-1",
+                "type.googleapis.com/model_plane.v1.BrowserAttachSharedJar",
+                payload,
+            ),
+        )
+        .expect("a reconnecting client replays the attach audit event");
+        assert_eq!(projected.event_type, "EVENT_TYPE_BROWSER_ATTACH_SHARED_JAR");
+        assert_eq!(projected.payload["attach_id"], "att-1");
+        // Another run's attach event is not replayed.
+        let other = event(
+            EventType::BrowserAttachSharedJar as i32,
+            "run:run-2",
+            "run-2",
+            "type.googleapis.com/model_plane.v1.BrowserAttachSharedJar",
+            r#"{"run_id":"run-2"}"#,
+        );
+        assert!(project_run_replay_event("run-1", other).is_none());
+    }
+
+    #[test]
     fn a_non_slug_failure_code_is_dropped() {
         for code in [
             "Browser_failed",
@@ -18316,5 +18898,803 @@ mod memory_withheld_json_tests {
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0]["withheld_reason"], "room_origin_unverified");
         assert!(rows[1].get("withheld_reason").is_none());
+    }
+}
+
+#[cfg(test)]
+mod ai_chat_lane_tests {
+    //! WS16.S1: `POST /v1/ai/chat` as a machine route. The handler runs against a real inference
+    //! stand-in (the speech tests' gRPC server, which records every `InferRequest`), so what these
+    //! tests assert is what inference-core would have received and what the bus would have carried.
+    use super::speech_route_tests::{bearer, state_with, SpeechInference};
+    use super::*;
+    use mp_contracts::model_plane::v1 as pb;
+
+    fn user(zdr: bool) -> Claims {
+        Claims {
+            key_id: None,
+            acting_user_id: None,
+            sub: "user-a".to_owned(),
+            iss: "test-issuer".to_owned(),
+            exp: i64::MAX,
+            org_id: "org-a".to_owned(),
+            user_id: "user-a".to_owned(),
+            nbf: None,
+            aud: Some("model-gateway".to_owned()),
+            scopes: Vec::new(),
+            zdr,
+            sovereign: None,
+            org_zdr: None,
+            zdr_waiver: None,
+            principal_type: Some("user".to_owned()),
+            service_id: None,
+            reason: None,
+        }
+    }
+
+    fn service(sub: &str, zdr: bool) -> Claims {
+        Claims {
+            key_id: None,
+            acting_user_id: None,
+            sub: sub.to_owned(),
+            iss: "test-issuer".to_owned(),
+            exp: i64::MAX,
+            org_id: "org-a".to_owned(),
+            user_id: String::new(),
+            nbf: None,
+            aud: Some("model-gateway".to_owned()),
+            scopes: vec!["models:invoke".to_owned()],
+            zdr,
+            sovereign: None,
+            org_zdr: None,
+            zdr_waiver: None,
+            principal_type: Some("service".to_owned()),
+            service_id: Some(sub.to_owned()),
+            reason: Some("extract structured data from page text".to_owned()),
+        }
+    }
+
+    fn quarry(zdr: bool) -> Claims {
+        service("service:quarry-edge", zdr)
+    }
+
+    fn request(extra: Value) -> AiChatRequest {
+        let mut body = json!({
+            "messages": [{ "role": "user", "content": "extract the title" }],
+            "model": "test-model",
+        });
+        for (key, value) in extra.as_object().expect("extra fields are an object") {
+            body[key] = value.clone();
+        }
+        serde_json::from_value(body).expect("an ai_chat body parses")
+    }
+
+    fn reply() -> pb::InferResponse {
+        pb::InferResponse {
+            content: "{\"title\":\"Hello\"}".to_owned(),
+            model_used: "test-model".to_owned(),
+            provider_used: "azure".to_owned(),
+            input_tokens: 1000,
+            output_tokens: 500,
+            ..Default::default()
+        }
+    }
+
+    async fn call(
+        inference: &SpeechInference,
+        claims: Claims,
+        extra: Value,
+        metering: AiChatMetering,
+    ) -> (AppState, Result<Json<Value>, HttpJsonError>) {
+        let mut state = state_with(inference.clone()).await;
+        state.pricing = crate::pricing::PricingCache::with_rate_for_test("test-model", 1.0, 2.0);
+        let outcome = ai_chat_with(state.clone(), claims, bearer(), request(extra), metering).await;
+        (state, outcome)
+    }
+
+    #[tokio::test]
+    async fn ai_chat_defaults_are_unchanged_without_new_fields() {
+        let inference = SpeechInference::default();
+        inference.answering(reply());
+        let (_, outcome) = call(&inference, user(false), json!({}), AiChatMetering::Off).await;
+        let Json(body) = outcome.expect("a plain chat call succeeds");
+
+        let sent = inference.cleanups();
+        assert_eq!(sent.len(), 1);
+        assert!((sent[0].temperature - 0.7).abs() < f32::EPSILON, "{}", sent[0].temperature);
+        assert_eq!(sent[0].max_tokens, 4096);
+        // The keys every caller already read are all still there.
+        assert_eq!(body["content"], "{\"title\":\"Hello\"}");
+        assert_eq!(body["model_used"], "test-model");
+        assert_eq!(body["usage"]["input_tokens"], 1000);
+        assert_eq!(body["usage"]["output_tokens"], 500);
+        assert!(body["id"].as_str().is_some_and(|id| !id.is_empty()));
+    }
+
+    #[tokio::test]
+    async fn ai_chat_accepts_the_bounds_and_passes_them_through() {
+        let inference = SpeechInference::default();
+        inference.answering(reply());
+        let (_, outcome) = call(
+            &inference,
+            user(false),
+            json!({ "temperature": 0.0, "max_tokens": 8192 }),
+            AiChatMetering::Off,
+        )
+        .await;
+        let _ = outcome.expect("the inclusive bounds are accepted");
+        let sent = inference.cleanups();
+        assert!(sent[0].temperature.abs() < f32::EPSILON);
+        assert_eq!(sent[0].max_tokens, 8192);
+    }
+
+    #[tokio::test]
+    async fn ai_chat_rejects_temperature_above_one_and_max_tokens_above_8192() {
+        for extra in [
+            json!({ "temperature": 1.01 }),
+            json!({ "temperature": -0.1 }),
+            json!({ "max_tokens": 8193 }),
+            json!({ "max_tokens": 0 }),
+            json!({ "max_tokens": -5 }),
+        ] {
+            let inference = SpeechInference::default();
+            let (_, outcome) = call(&inference, user(false), extra.clone(), AiChatMetering::Off).await;
+            let (status, _) = outcome.expect_err("an out-of-range field is refused");
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{extra}");
+            assert!(inference.cleanups().is_empty(), "{extra}: no model call");
+        }
+    }
+
+    #[tokio::test]
+    async fn ai_chat_returns_cost_and_provider() {
+        let inference = SpeechInference::default();
+        inference.answering(reply());
+        let (_, outcome) = call(&inference, quarry(false), json!({}), AiChatMetering::Off).await;
+        let Json(body) = outcome.expect("a service call succeeds");
+        assert_eq!(body["provider_used"], "azure");
+        // 1000 input tokens at 1.0 per million plus 500 output tokens at 2.0 per million.
+        let cost = body["usage"]["cost_usd"].as_f64().expect("a metered call is priced");
+        assert!((cost - 0.002).abs() < 1e-9, "{cost}");
+        assert!(body["usage"]["latency_ms"].is_u64(), "{body}");
+
+        // Under ZDR the cost is null, never a number.
+        let inference = SpeechInference::default();
+        inference.answering(reply());
+        let (_, outcome) = call(&inference, quarry(true), json!({}), AiChatMetering::Service).await;
+        let Json(body) = outcome.expect("a ZDR service call succeeds");
+        assert!(body["usage"]["cost_usd"].is_null(), "{body}");
+        assert_eq!(body["provider_used"], "azure");
+        assert!(inference.cleanups()[0].zdr, "the ZDR flag reaches inference-core");
+    }
+
+    #[tokio::test]
+    async fn a_service_call_publishes_one_usage_envelope_and_a_zdr_call_none() {
+        let inference = SpeechInference::default();
+        inference.answering(reply());
+        let (state, outcome) = call(
+            &inference,
+            quarry(false),
+            json!({ "purpose": "quarry.extract" }),
+            AiChatMetering::Service,
+        )
+        .await;
+        let Json(body) = outcome.expect("the call succeeds");
+        let published = state.publisher.drain();
+        assert_eq!(published.len(), 1, "{published:?}");
+        let (subject, envelope) = &published[0];
+        assert_eq!(subject, &subjects::usage_subject("org-a"));
+        assert_eq!(envelope.event_type, "USAGE_ENVELOPE");
+        assert_eq!(envelope.producer, "model-gateway");
+        assert_eq!(envelope.org_id, "org-a");
+        assert_eq!(envelope.user_id, "service:quarry-edge");
+        let id = body["id"].as_str().expect("the response id");
+        assert_eq!(envelope.idempotency_key, format!("{id}-USAGE_ENVELOPE"));
+        assert!(!envelope.zdr);
+        assert_eq!(envelope.payload["route"], "ai_chat");
+        assert_eq!(envelope.payload["purpose"], "quarry.extract");
+        assert_eq!(envelope.payload["input_tokens"], 1000);
+        assert_eq!(envelope.payload["output_tokens"], 500);
+        assert_eq!(envelope.payload["provider_used"], "azure");
+        assert_eq!(envelope.payload["user_id"], "service:quarry-edge");
+
+        // A ZDR call publishes nothing at all.
+        let inference = SpeechInference::default();
+        inference.answering(reply());
+        let (state, outcome) = call(
+            &inference,
+            quarry(true),
+            json!({ "purpose": "quarry.extract" }),
+            AiChatMetering::Service,
+        )
+        .await;
+        let _ = outcome.expect("the ZDR call succeeds");
+        assert!(state.publisher.drain().is_empty(), "a ZDR call is never ledgered");
+    }
+
+    #[tokio::test]
+    async fn a_user_call_publishes_nothing_in_service_mode() {
+        let inference = SpeechInference::default();
+        inference.answering(reply());
+        let (state, outcome) = call(&inference, user(false), json!({}), AiChatMetering::Service).await;
+        let _ = outcome.expect("the user call succeeds");
+        assert!(state.publisher.drain().is_empty());
+
+        // `all` is the only mode that meters a user, and it attributes the user.
+        let inference = SpeechInference::default();
+        inference.answering(reply());
+        let (state, outcome) = call(&inference, user(false), json!({}), AiChatMetering::All).await;
+        let _ = outcome.expect("the user call succeeds");
+        let published = state.publisher.drain();
+        assert_eq!(published.len(), 1);
+        assert_eq!(published[0].1.user_id, "user-a");
+        assert!(published[0].1.payload["purpose"].is_null());
+    }
+
+    /// New behaviour is off until switched on: no switch, an unknown value and `off` all meter nothing.
+    #[tokio::test]
+    async fn metering_defaults_to_off_and_only_the_literal_modes_enable_it() {
+        assert_eq!(AiChatMetering::parse(None), AiChatMetering::Off);
+        assert_eq!(AiChatMetering::parse(Some("")), AiChatMetering::Off);
+        assert_eq!(AiChatMetering::parse(Some("1")), AiChatMetering::Off);
+        assert_eq!(AiChatMetering::parse(Some("off")), AiChatMetering::Off);
+        assert_eq!(AiChatMetering::parse(Some("service")), AiChatMetering::Service);
+        assert_eq!(AiChatMetering::parse(Some(" ALL ")), AiChatMetering::All);
+
+        let inference = SpeechInference::default();
+        inference.answering(reply());
+        let (state, outcome) = call(&inference, quarry(false), json!({}), AiChatMetering::default()).await;
+        let _ = outcome.expect("the call succeeds");
+        assert!(state.publisher.drain().is_empty(), "a service call is unmetered by default");
+    }
+
+    const CONTRACT_DIR: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../../api/contracts/ai-chat-v1"
+    );
+
+    fn contract(name: &str) -> String {
+        std::fs::read_to_string(format!("{CONTRACT_DIR}/{name}"))
+            .unwrap_or_else(|error| panic!("cannot read ai-chat-v1/{name}: {error}"))
+    }
+
+    /// The `ai-chat-v1` fixtures are what a caller's fake gateway replays (Quarry vendors them), so
+    /// they must be what this handler speaks: the request parses, with its schema as a STRING; the
+    /// ok response has exactly the keys the handler writes; the 412 is the catalogue's own body; and
+    /// the pin file matches the bytes.
+    #[tokio::test]
+    async fn the_ai_chat_v1_fixtures_are_what_the_handler_speaks() {
+        let request_text = contract("request.ok.json");
+        let request: AiChatRequest = serde_json::from_str(&request_text).expect("request.ok.json parses");
+        let schema = request.structured_output_schema.as_deref().expect("the schema is a string");
+        assert!(serde_json::from_str::<Value>(schema).is_ok_and(|v| v.is_object()));
+        assert!(
+            ai_chat_params(&request, &quarry(false)).is_ok(),
+            "the fixture request is admitted for service:quarry-edge"
+        );
+
+        // The ok response and the handler's own body have the same keys.
+        let fixture: Value = serde_json::from_str(&contract("response.ok.json")).expect("response.ok.json");
+        assert_eq!(fixture["status"], 200);
+        let inference = SpeechInference::default();
+        inference.answering(reply());
+        let (_, outcome) = call(&inference, quarry(false), json!({}), AiChatMetering::Off).await;
+        let Json(body) = outcome.expect("the call succeeds");
+        let keys = |value: &Value| -> Vec<String> {
+            let mut keys: Vec<String> = value.as_object().expect("an object").keys().cloned().collect();
+            keys.sort();
+            keys
+        };
+        assert_eq!(keys(&body), keys(&fixture["body"]));
+        assert_eq!(keys(&body["usage"]), keys(&fixture["body"]["usage"]));
+
+        let denied: Value = serde_json::from_str(&contract("response.route-denied.json")).expect("route-denied");
+        assert_eq!(denied["status"], 403);
+        let unavailable: Value =
+            serde_json::from_str(&contract("response.zdr-unavailable.json")).expect("zdr-unavailable");
+        assert_eq!(unavailable["status"], 412);
+        assert_eq!(
+            unavailable["body"],
+            mp_contracts::zdr_refusal::Refusal::UNAVAILABLE.json_body()
+        );
+
+        // SHA256SUMS pins every other file in the directory, byte for byte.
+        use sha2::{Digest, Sha256};
+        let sums = contract("SHA256SUMS");
+        let mut pinned = 0;
+        for line in sums.lines() {
+            let (digest, name) = line.split_once(" *").expect("`<digest> *<file>` lines");
+            let bytes = std::fs::read(format!("{CONTRACT_DIR}/{name}")).expect("a pinned file");
+            assert_eq!(digest, format!("{:x}", Sha256::digest(&bytes)), "{name}");
+            pinned += 1;
+        }
+        assert_eq!(pinned, 4);
+    }
+
+    #[tokio::test]
+    async fn purpose_is_for_service_quarry_edge_only() {
+        for (claims, purpose, expected) in [
+            (user(false), "quarry.extract", StatusCode::FORBIDDEN),
+            (service("service:someone-else", false), "quarry.extract", StatusCode::FORBIDDEN),
+            (quarry(false), "something.else", StatusCode::BAD_REQUEST),
+        ] {
+            let inference = SpeechInference::default();
+            let (_, outcome) = call(
+                &inference,
+                claims.clone(),
+                json!({ "purpose": purpose }),
+                AiChatMetering::Service,
+            )
+            .await;
+            let (status, _) = outcome.expect_err("the purpose is refused");
+            assert_eq!(status, expected, "{} / {purpose}", claims.sub);
+            assert!(inference.cleanups().is_empty(), "no model call for a refused purpose");
+        }
+    }
+}
+
+/// INNH-10 MP-3: an `api_key` principal reaches the two key-grant routes and nothing else. The
+/// route list is read from the source, so a route added anywhere later is covered without a
+/// change here.
+#[cfg(test)]
+mod api_key_route_fence_tests {
+    use super::*;
+    use axum::{body::Body, http::Request as HttpRequest};
+    use tower::ServiceExt;
+
+    /// Routes outside `authed_routes`: the unauthenticated probes of `build_router_with_readiness`.
+    const PUBLIC: &[&str] = &["/healthz", "/readyz", "/version", "/metrics"];
+
+    /// Every production `.route("<path>", ..)` in the crate, as `(file, path)`.
+    fn production_route_paths() -> Vec<(String, String)> {
+        let pattern = regex::Regex::new(r#"\.route\(\s*"([^"]+)""#).expect("a valid pattern");
+        let mut paths = Vec::new();
+        for (file, text) in crate::zdr_posture::tests::read_sources() {
+            let code: String = crate::zdr_posture::tests::strip_test_items(&text)
+                .lines()
+                .filter(|line| !line.trim_start().starts_with("//"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            for capture in pattern.captures_iter(&code) {
+                paths.push((file.clone(), capture[1].to_owned()));
+            }
+        }
+        paths.sort();
+        paths.dedup();
+        paths
+    }
+
+    fn concrete(path: &str) -> String {
+        path.split('/')
+            .map(|segment| {
+                if segment.starts_with(':') || segment.starts_with('*') {
+                    "x1"
+                } else {
+                    segment
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("/")
+    }
+
+    fn key_claims() -> Claims {
+        serde_json::from_value(json!({
+            "sub": "apikey:key-1",
+            "iss": "auth-core",
+            "exp": 4_102_444_800_i64,
+            "org_id": "org-a",
+            "zdr": false,
+            "principal_type": "api_key",
+            "key_id": "key-1",
+            "acting_user_id": "user-a",
+            "scopes": ["browser:agent"],
+        }))
+        .expect("an api key token decodes")
+    }
+
+    #[tokio::test]
+    async fn api_key_is_refused_on_every_other_route() {
+        let paths = production_route_paths();
+        let fenced: Vec<&(String, String)> = paths
+            .iter()
+            .filter(|(_, path)| !PUBLIC.contains(&path.as_str()))
+            .collect();
+        assert!(
+            fenced.len() > 100,
+            "the source scan found only {} routes; it is not reading the route table",
+            fenced.len()
+        );
+        for (_, key_route) in auth::API_KEY_ROUTES {
+            assert!(
+                paths.iter().any(|(_, path)| path == key_route),
+                "{key_route} is not registered"
+            );
+        }
+        let mut state = AppState::new();
+        // On, so the two key routes reach their handler: it answers 401 for the missing key bearer.
+        state.browser_key_grants = Some(true);
+        let router = authed_routes()
+            .layer(middleware::from_fn(auth::authorize_principal_route))
+            .layer(Extension(key_claims()))
+            .with_state(state);
+
+        let mut failures = Vec::new();
+        for (file, path) in fenced {
+            let uri = concrete(path);
+            let is_key_path = auth::API_KEY_ROUTES.iter().any(|(_, key)| key == path);
+            let mut refused = false;
+            for method in ["GET", "POST", "PUT", "PATCH", "DELETE"] {
+                let status = router
+                    .clone()
+                    .oneshot(
+                        HttpRequest::builder()
+                            .method(method)
+                            .uri(&uri)
+                            .header("content-type", "application/json")
+                            .body(Body::from("{}"))
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap()
+                    .status();
+                if auth::API_KEY_ROUTES
+                    .iter()
+                    .any(|(key_method, key_path)| *key_method == method && key_path == path)
+                {
+                    if status != StatusCode::UNAUTHORIZED {
+                        failures.push(format!("{method} {path}: the key route answered {status}"));
+                    }
+                    continue;
+                }
+                match status {
+                    StatusCode::FORBIDDEN => refused = true,
+                    StatusCode::METHOD_NOT_ALLOWED => {}
+                    other => failures.push(format!("{method} {path} ({file}): {other}")),
+                }
+            }
+            if !refused && !is_key_path {
+                failures.push(format!(
+                    "{path} ({file}): no method was refused; is it outside authed_routes?"
+                ));
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "an api key principal reached a route it may not:\n{}",
+            failures.join("\n")
+        );
+    }
+}
+
+/// WS10.S6: the run trace route against a stand-in Session Core EventLog.
+#[cfg(test)]
+mod run_trace_route_tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    use axum::{body::Body, http::Request as HttpRequest};
+    use mp_contracts::model_plane::v1::{
+        event_log_client::EventLogClient,
+        event_log_server::{EventLog, EventLogServer},
+        AgentRef, AppendEventRequest, AppendEventResponse, Cursor, QueryEventsRequest,
+        QueryEventsResponse, RunOrigin, SubscribeEventsRequest,
+    };
+    use tower::ServiceExt;
+
+    #[derive(Clone, Default)]
+    struct FakeEventLog {
+        seen: Arc<Mutex<Vec<(QueryEventsRequest, Option<String>)>>>,
+        failure: Option<tonic::Code>,
+        /// When set, the answer to every query (C6 builds its page here).
+        page: Option<QueryEventsResponse>,
+    }
+
+    #[tonic::async_trait]
+    impl EventLog for FakeEventLog {
+        async fn append_event(
+            &self,
+            _: tonic::Request<AppendEventRequest>,
+        ) -> Result<tonic::Response<AppendEventResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("not used"))
+        }
+
+        async fn query_events(
+            &self,
+            request: tonic::Request<QueryEventsRequest>,
+        ) -> Result<tonic::Response<QueryEventsResponse>, tonic::Status> {
+            let authorization = request
+                .metadata()
+                .get("authorization")
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_owned);
+            self.seen
+                .lock()
+                .unwrap()
+                .push((request.into_inner(), authorization));
+            if let Some(code) = self.failure {
+                return Err(tonic::Status::new(code, "session-core says no"));
+            }
+            if let Some(page) = &self.page {
+                return Ok(tonic::Response::new(page.clone()));
+            }
+            Ok(tonic::Response::new(QueryEventsResponse {
+                events: vec![Event {
+                    event_id: "01JC7K3M9Q4R8T2V5W6X7Y8Z9A".to_owned(),
+                    event_type: EventType::BrowserStepReceiptRecorded as i32,
+                    schema_version: 1,
+                    ts: Some(prost_types::Timestamp {
+                        seconds: 1_793_525_415,
+                        nanos: 250_000_000,
+                    }),
+                    producer: "quarry-edge".to_owned(),
+                    org_id: "org-a".to_owned(),
+                    user_id: "user-a".to_owned(),
+                    payload: Some(prost_types::Any {
+                        type_url: RUN_TRACE_PAYLOAD_TYPE_URL.to_owned(),
+                        value: br#"{"action":"click","step":7}"#.to_vec(),
+                    }),
+                    producer_seq: 7,
+                    agent: Some(AgentRef {
+                        id: "general-v1".to_owned(),
+                        role: "subagent".to_owned(),
+                        parent_id: "primary-v1".to_owned(),
+                    }),
+                    origin: RunOrigin::Agent as i32,
+                    run_id: "run_1".to_owned(),
+                    request_id: "req_1".to_owned(),
+                    ..Default::default()
+                }],
+                next_cursor: Some(Cursor {
+                    value: "42".to_owned(),
+                }),
+                has_more: true,
+            }))
+        }
+
+        type SubscribeEventsStream = futures::stream::Empty<Result<Event, tonic::Status>>;
+
+        async fn subscribe_events(
+            &self,
+            _: tonic::Request<SubscribeEventsRequest>,
+        ) -> Result<tonic::Response<Self::SubscribeEventsStream>, tonic::Status> {
+            Err(tonic::Status::unimplemented("not used"))
+        }
+    }
+
+    fn claims() -> Claims {
+        serde_json::from_value(json!({
+            "sub": "user-a", "iss": "auth-core", "exp": 4_102_444_800_i64, "org_id": "org-a",
+            "user_id": "user-a", "principal_type": "user", "zdr": false
+        }))
+        .expect("claims")
+    }
+
+    async fn app(fake: FakeEventLog, with_session_bearer: bool) -> Router {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = tonic::transport::Server::builder()
+                .add_service(EventLogServer::new(fake))
+                .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
+                .await;
+        });
+        let mut state = AppState::new();
+        state.event_log_client = EventLogClient::connect(format!("http://{address}"))
+            .await
+            .unwrap();
+        let mut router = Router::new()
+            .route("/v1/runs/:run_id/trace", get(get_run_trace))
+            .with_state(state)
+            .layer(Extension(claims()));
+        if with_session_bearer {
+            router = router.layer(Extension(crate::auth::VerifiedSessionBearer::for_test(
+                "session-core-bearer",
+            )));
+        }
+        router
+    }
+
+    async fn get_json(router: Router, uri: &str) -> (StatusCode, Value) {
+        let response = router
+            .oneshot(HttpRequest::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+    }
+
+    #[tokio::test]
+    async fn run_trace_route_requires_the_verified_bearer() {
+        let fake = FakeEventLog::default();
+        let (status, _) = get_json(app(fake.clone(), false).await, "/v1/runs/run_1/trace").await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert!(fake.seen.lock().unwrap().is_empty(), "nothing reaches Session Core");
+
+        let (status, body) = get_json(
+            app(fake.clone(), true).await,
+            "/v1/runs/run_1/trace?cursor=41&limit=9999&types=BROWSER_STEP_RECEIPT_RECORDED,%20RUN_COMPLETED",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let seen = fake.seen.lock().unwrap();
+        let (request, authorization) = &seen[0];
+        assert_eq!(authorization.as_deref(), Some("Bearer session-core-bearer"));
+        let filter = request.filter.as_ref().expect("a filter");
+        assert_eq!(filter.org_id, "org-a", "the org is the token's");
+        assert_eq!(filter.run_id, "run_1");
+        assert_eq!(
+            filter.event_types,
+            [
+                EventType::BrowserStepReceiptRecorded as i32,
+                EventType::RunCompleted as i32
+            ]
+        );
+        assert_eq!(request.cursor.as_ref().map(|c| c.value.as_str()), Some("41"));
+        assert_eq!(request.limit, 500, "the limit is clamped to 1..500");
+        assert!(!request.reverse);
+        assert_eq!(body["meta"], json!({ "next_cursor": "42", "has_more": true }));
+        let event = &body["data"]["events"][0];
+        assert_eq!(event["event_type"], "BROWSER_STEP_RECEIPT_RECORDED");
+        assert_eq!(event["origin"], "AGENT");
+        assert_eq!(event["ts"], "2026-11-01T09:30:15.250Z");
+        assert_eq!(event["payload"], json!({ "action": "click", "step": 7 }));
+        assert_eq!(event["agent"]["parent_id"], "primary-v1");
+        assert_eq!(event["producer_seq"], 7);
+        assert_eq!(event["zdr"], false);
+    }
+
+    /// WS10.S9 C6: the read-API shape of `GET /v1/runs/:run_id/trace`, pinned as an authored
+    /// fixture that the Frontend gateway's type test also reads. The body below is built by the
+    /// real handler from a Session Core page; it must equal the fixture, field for field.
+    #[tokio::test]
+    async fn run_trace_read_response_matches_the_c6_fixture() {
+        use sha2::{Digest, Sha256};
+        const FIXTURE: &str = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../api/contracts/run-trace-read-v1.golden.json"
+        );
+        let text = std::fs::read_to_string(FIXTURE).expect("the C6 fixture");
+        assert!(!text.contains('\r'), "the fixture is hashed byte for byte: LF only");
+        let pin = std::fs::read_to_string(format!("{FIXTURE}.sha256")).expect("the C6 pin");
+        assert_eq!(
+            pin.trim(),
+            format!("{:x} *run-trace-read-v1.golden.json", Sha256::digest(text.as_bytes())),
+            "the fixture changed without its pin (and the sync-script digest)"
+        );
+        let expected: Value = serde_json::from_str(&text).expect("the fixture parses");
+
+        let first = Event {
+            event_id: "01JC7K3M9Q4R8T2V5W6X7Y8Z9A".to_owned(),
+            event_type: EventType::BrowserStepReceiptRecorded as i32,
+            schema_version: 1,
+            ts: Some(prost_types::Timestamp {
+                seconds: 1_793_525_415,
+                nanos: 250_000_000,
+            }),
+            producer: "quarry-edge".to_owned(),
+            org_id: "org-a".to_owned(),
+            user_id: "user-a".to_owned(),
+            payload: Some(prost_types::Any {
+                type_url: RUN_TRACE_PAYLOAD_TYPE_URL.to_owned(),
+                value: br#"{"action":"click","step":7}"#.to_vec(),
+            }),
+            producer_seq: 7,
+            agent: Some(AgentRef {
+                id: "general-v1".to_owned(),
+                role: "subagent".to_owned(),
+                parent_id: "primary-v1".to_owned(),
+            }),
+            origin: RunOrigin::Agent as i32,
+            run_id: "run_1".to_owned(),
+            request_id: "req_1".to_owned(),
+            ..Default::default()
+        };
+        let second = Event {
+            event_id: "01JC7K3M9Q4R8T2V5W6X7Y8Z9B".to_owned(),
+            event_type: EventType::BrowserArtifactRecorded as i32,
+            schema_version: 1,
+            ts: Some(prost_types::Timestamp {
+                seconds: 1_793_525_416,
+                nanos: 0,
+            }),
+            producer: "quarry-edge".to_owned(),
+            correlation_id: "corr_1".to_owned(),
+            causation_id: "01JC7K3M9Q4R8T2V5W6X7Y8Z9A".to_owned(),
+            org_id: "org-a".to_owned(),
+            user_id: "user-a".to_owned(),
+            resource_ref: "artifact_1".to_owned(),
+            // Another payload type is reported by its type_url, never as bytes.
+            payload: Some(prost_types::Any {
+                type_url: "type.googleapis.com/other".to_owned(),
+                value: b"raw bytes".to_vec(),
+            }),
+            zdr: true,
+            producer_seq: 8,
+            run_id: "run_1".to_owned(),
+            request_id: "req_1".to_owned(),
+            ..Default::default()
+        };
+        let fake = FakeEventLog {
+            page: Some(QueryEventsResponse {
+                events: vec![first, second],
+                next_cursor: Some(Cursor {
+                    value: "42".to_owned(),
+                }),
+                has_more: true,
+            }),
+            ..Default::default()
+        };
+        let (status, body) = get_json(app(fake, true).await, "/v1/runs/run_1/trace").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body, expected, "the handler's body drifted from the C6 fixture");
+
+        // The last page: no events, no cursor. The same envelope with the cursor null.
+        let empty = FakeEventLog {
+            page: Some(QueryEventsResponse::default()),
+            ..Default::default()
+        };
+        let (status, body) = get_json(app(empty, true).await, "/v1/runs/run_1/trace").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            body,
+            json!({ "data": { "events": [] }, "meta": { "next_cursor": null, "has_more": false } })
+        );
+    }
+
+    #[tokio::test]
+    async fn run_trace_route_maps_unimplemented_and_not_found() {
+        for (code, want, error_code) in [
+            (tonic::Code::NotFound, StatusCode::NOT_FOUND, "run_not_found"),
+            (tonic::Code::PermissionDenied, StatusCode::NOT_FOUND, "run_not_found"),
+            (tonic::Code::Unimplemented, StatusCode::NOT_IMPLEMENTED, "trace_unavailable"),
+            (tonic::Code::InvalidArgument, StatusCode::BAD_REQUEST, "invalid_trace_query"),
+        ] {
+            let fake = FakeEventLog {
+                failure: Some(code),
+                ..Default::default()
+            };
+            let (status, body) = get_json(app(fake, true).await, "/v1/runs/run_1/trace").await;
+            assert_eq!(status, want, "{code:?}");
+            assert_eq!(body["error"]["code"], error_code, "{code:?}");
+            assert!(
+                !body.to_string().contains("session-core says no"),
+                "the upstream message is not echoed: {body}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn run_trace_route_refuses_bad_input_before_session_core() {
+        for uri in [
+            "/v1/runs/run.1/trace",
+            "/v1/runs/run_1/trace?types=NOT_A_TYPE",
+            "/v1/runs/run_1/trace?types=UNSPECIFIED",
+            "/v1/runs/run_1/trace?types=EVENT_TYPE_RUN_COMPLETED",
+        ] {
+            let fake = FakeEventLog::default();
+            let (status, _) = get_json(app(fake.clone(), true).await, uri).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}");
+            assert!(fake.seen.lock().unwrap().is_empty(), "{uri}");
+        }
+        let long_cursor = format!("/v1/runs/run_1/trace?cursor={}", "1".repeat(513));
+        let fake = FakeEventLog::default();
+        let (status, _) = get_json(app(fake.clone(), true).await, &long_cursor).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        // A missing limit reads the default page, and an unknown payload type is never raw bytes.
+        let (status, _) = get_json(app(fake.clone(), true).await, "/v1/runs/run_1/trace").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(fake.seen.lock().unwrap()[0].0.limit, 100);
+        let opaque = Event {
+            payload: Some(prost_types::Any {
+                type_url: "type.googleapis.com/other".to_owned(),
+                value: b"secret bytes".to_vec(),
+            }),
+            ..Default::default()
+        };
+        let json = trace_event_json(&opaque);
+        assert_eq!(json["payload"], json!({ "type_url": "type.googleapis.com/other" }));
+        assert_eq!(json["origin"], Value::Null);
     }
 }

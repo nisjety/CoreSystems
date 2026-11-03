@@ -61,3 +61,7 @@ Dockerfile text eol=lf
 # the general rule is ever narrowed.
 apps/**/contracts/*.json text eol=lf
 apps/**/contracts/*.sha256 text eol=lf
+
+# WS16.S1: the ai-chat-v1 fixtures are pinned by SHA256SUMS and vendored by Quarry byte for byte.
+apps/**/contracts/ai-chat-v1/SHA256SUMS text eol=lf
+apps/**/model-gateway-contract/**/SHA256SUMS text eol=lf

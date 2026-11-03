@@ -99,6 +99,9 @@ regexes = [
   '''^dev-test-key-12345$''',
   '''^dev-token$''',
   '''^t=r\.latencyMs$''',
+  # The idempotency key of the authored run-trace envelope golden (WS10.S2) and its three vendored copies: a
+  # synthetic ULID under the key name idempotency_key, which generic-api-key reads as a key. Matched exactly.
+  '''^01JC7K3M9Q4R8T2V5W6X7Y8Z9A$''',
   # Synthetic test fixtures (added 2026-10-08). The pre-commit hook scans diff text on stdin, which carries no file path,
   # so the path allowlist above cannot apply to it. Each entry below is therefore a narrow content match that was
   # checked against the exact strings gitleaks extracted from the real fixtures; none can match a working credential.

@@ -1,0 +1,7 @@
+{
+  "raw": "{\"action\": \"click\", \"snapshot_id\": \"snap-3\", \"generation\": 3, \"ref_id\": \"@e1\", \"reason\": \"open contact\"}",
+  "expect": {
+    "kind": "action",
+    "type": "click"
+  }
+}

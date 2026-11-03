@@ -1,0 +1,310 @@
+# HELP quarry_scrape_outcomes_total Single-page scrapes by outcome (ok or an error code).
+# TYPE quarry_scrape_outcomes_total counter
+quarry_scrape_outcomes_total{outcome="ok"} 2
+
+# HELP quarry_lease_pool_refused_total Lease requests refused, by pool and reason (pool_full, org_render_cap, wait_timeout).
+# TYPE quarry_lease_pool_refused_total counter
+quarry_lease_pool_refused_total{pool="chromium",reason="pool_full"} 0
+quarry_lease_pool_refused_total{pool="chromium",reason="wait_timeout"} 0
+quarry_lease_pool_refused_total{pool="chromium",reason="org_render_cap"} 0
+
+# HELP quarry_lease_pool_waits_total Waits for a lease permit that ended, by pool.
+# TYPE quarry_lease_pool_waits_total counter
+quarry_lease_pool_waits_total{pool="chromium"} 0
+
+# HELP quarry_http_requests_total HTTP requests by route class, method and status class.
+# TYPE quarry_http_requests_total counter
+quarry_http_requests_total{route="/health",method="GET",status_class="2xx"} 7
+quarry_http_requests_total{route="/v1/search",method="POST",status_class="2xx"} 5
+quarry_http_requests_total{route="/v1/internal/change/record",method="POST",status_class="4xx"} 1
+quarry_http_requests_total{route="/v1/internal/orgs/:org/profiles",method="DELETE",status_class="2xx"} 1
+quarry_http_requests_total{route="/v1/internal/run_page",method="POST",status_class="4xx"} 3
+quarry_http_requests_total{route="/v1/search",method="POST",status_class="4xx"} 1
+quarry_http_requests_total{route="/v1/answer/stream",method="POST",status_class="5xx"} 1
+quarry_http_requests_total{route="/v1/map",method="POST",status_class="2xx"} 1
+quarry_http_requests_total{route="/v1/artifacts/:id",method="GET",status_class="2xx"} 2
+quarry_http_requests_total{route="/v1/internal/page-images/:org/:doc/:page/:hash",method="GET",status_class="5xx"} 2
+quarry_http_requests_total{route="/v1/answer",method="POST",status_class="5xx"} 1
+quarry_http_requests_total{route="/v1/internal/schedules/preflight",method="POST",status_class="4xx"} 1
+quarry_http_requests_total{route="/ready",method="GET",status_class="2xx"} 4
+quarry_http_requests_total{route="/v1/scrape",method="POST",status_class="2xx"} 2
+
+# TYPE quarry_robots_decisions_total counter
+quarry_robots_decisions_total{mode="observe",outcome="would_deny"} 0
+quarry_robots_decisions_total{mode="enforce",outcome="denied"} 0
+quarry_robots_decisions_total{mode="any",outcome="allowed"} 0
+quarry_robots_decisions_total{mode="observe",outcome="would_unreachable"} 0
+quarry_robots_decisions_total{mode="enforce",outcome="unreachable"} 0
+
+# HELP quarry_lease_pool_acquired_total Leases handed out, by pool.
+# TYPE quarry_lease_pool_acquired_total counter
+quarry_lease_pool_acquired_total{pool="chromium"} 0
+
+# HELP quarry_cache_requests_total Cache lookups by cache (page, search) and outcome (hit, miss, error).
+# TYPE quarry_cache_requests_total counter
+quarry_cache_requests_total{cache="search",outcome="hit"} 2
+quarry_cache_requests_total{cache="search",outcome="miss"} 3
+
+# HELP quarry_lease_pool_wait_seconds_sum Cumulative seconds spent waiting for a lease permit, by pool (divide by the waits counter for the mean).
+# TYPE quarry_lease_pool_wait_seconds_sum gauge
+quarry_lease_pool_wait_seconds_sum{pool="chromium"} 0
+
+# HELP quarry_agent_runs_active Live agent runs now, by class (interactive or agent).
+# TYPE quarry_agent_runs_active gauge
+quarry_agent_runs_active{class="interactive"} 0
+quarry_agent_runs_active{class="agent"} 0
+
+# HELP quarry_lease_pool_capacity Concurrent leases a pool allows.
+# TYPE quarry_lease_pool_capacity gauge
+quarry_lease_pool_capacity{pool="chromium"} 2
+
+# HELP quarry_lease_pool_peak_in_flight Highest in-flight lease count seen, by pool.
+# TYPE quarry_lease_pool_peak_in_flight gauge
+quarry_lease_pool_peak_in_flight{pool="chromium"} 0
+
+# HELP quarry_build_info Always 1; the version is the label.
+# TYPE quarry_build_info gauge
+quarry_build_info{version="0.1.0"} 1
+
+# TYPE quarry_robots_cache_entries gauge
+quarry_robots_cache_entries 0
+
+# HELP quarry_lease_pool_in_flight Leases currently held, by pool.
+# TYPE quarry_lease_pool_in_flight gauge
+quarry_lease_pool_in_flight{pool="chromium"} 0
+
+# HELP quarry_edge_draining 1 once the edge has begun draining for shutdown, otherwise 0.
+# TYPE quarry_edge_draining gauge
+quarry_edge_draining 0
+
+# HELP quarry_agent_runs_pending Agent run starts admitted and not yet registered.
+# TYPE quarry_agent_runs_pending gauge
+quarry_agent_runs_pending 0
+
+# HELP quarry_http_request_duration_seconds HTTP request duration by route class and status class.
+# TYPE quarry_http_request_duration_seconds histogram
+quarry_http_request_duration_seconds_bucket{route="/health",status_class="2xx",le="0.005"} 7
+quarry_http_request_duration_seconds_bucket{route="/health",status_class="2xx",le="0.01"} 7
+quarry_http_request_duration_seconds_bucket{route="/health",status_class="2xx",le="0.025"} 7
+quarry_http_request_duration_seconds_bucket{route="/health",status_class="2xx",le="0.05"} 7
+quarry_http_request_duration_seconds_bucket{route="/health",status_class="2xx",le="0.1"} 7
+quarry_http_request_duration_seconds_bucket{route="/health",status_class="2xx",le="0.25"} 7
+quarry_http_request_duration_seconds_bucket{route="/health",status_class="2xx",le="0.5"} 7
+quarry_http_request_duration_seconds_bucket{route="/health",status_class="2xx",le="1"} 7
+quarry_http_request_duration_seconds_bucket{route="/health",status_class="2xx",le="2.5"} 7
+quarry_http_request_duration_seconds_bucket{route="/health",status_class="2xx",le="5"} 7
+quarry_http_request_duration_seconds_bucket{route="/health",status_class="2xx",le="10"} 7
+quarry_http_request_duration_seconds_bucket{route="/health",status_class="2xx",le="30"} 7
+quarry_http_request_duration_seconds_bucket{route="/health",status_class="2xx",le="60"} 7
+quarry_http_request_duration_seconds_bucket{route="/health",status_class="2xx",le="+Inf"} 7
+quarry_http_request_duration_seconds_sum{route="/health",status_class="2xx"} 0.000730444
+quarry_http_request_duration_seconds_count{route="/health",status_class="2xx"} 7
+quarry_http_request_duration_seconds_bucket{route="/ready",status_class="2xx",le="0.005"} 4
+quarry_http_request_duration_seconds_bucket{route="/ready",status_class="2xx",le="0.01"} 4
+quarry_http_request_duration_seconds_bucket{route="/ready",status_class="2xx",le="0.025"} 4
+quarry_http_request_duration_seconds_bucket{route="/ready",status_class="2xx",le="0.05"} 4
+quarry_http_request_duration_seconds_bucket{route="/ready",status_class="2xx",le="0.1"} 4
+quarry_http_request_duration_seconds_bucket{route="/ready",status_class="2xx",le="0.25"} 4
+quarry_http_request_duration_seconds_bucket{route="/ready",status_class="2xx",le="0.5"} 4
+quarry_http_request_duration_seconds_bucket{route="/ready",status_class="2xx",le="1"} 4
+quarry_http_request_duration_seconds_bucket{route="/ready",status_class="2xx",le="2.5"} 4
+quarry_http_request_duration_seconds_bucket{route="/ready",status_class="2xx",le="5"} 4
+quarry_http_request_duration_seconds_bucket{route="/ready",status_class="2xx",le="10"} 4
+quarry_http_request_duration_seconds_bucket{route="/ready",status_class="2xx",le="30"} 4
+quarry_http_request_duration_seconds_bucket{route="/ready",status_class="2xx",le="60"} 4
+quarry_http_request_duration_seconds_bucket{route="/ready",status_class="2xx",le="+Inf"} 4
+quarry_http_request_duration_seconds_sum{route="/ready",status_class="2xx"} 0.0005746340000000001
+quarry_http_request_duration_seconds_count{route="/ready",status_class="2xx"} 4
+quarry_http_request_duration_seconds_bucket{route="/v1/map",status_class="2xx",le="0.005"} 0
+quarry_http_request_duration_seconds_bucket{route="/v1/map",status_class="2xx",le="0.01"} 0
+quarry_http_request_duration_seconds_bucket{route="/v1/map",status_class="2xx",le="0.025"} 1
+quarry_http_request_duration_seconds_bucket{route="/v1/map",status_class="2xx",le="0.05"} 1
+quarry_http_request_duration_seconds_bucket{route="/v1/map",status_class="2xx",le="0.1"} 1
+quarry_http_request_duration_seconds_bucket{route="/v1/map",status_class="2xx",le="0.25"} 1
+quarry_http_request_duration_seconds_bucket{route="/v1/map",status_class="2xx",le="0.5"} 1
+quarry_http_request_duration_seconds_bucket{route="/v1/map",status_class="2xx",le="1"} 1
+quarry_http_request_duration_seconds_bucket{route="/v1/map",status_class="2xx",le="2.5"} 1
+quarry_http_request_duration_seconds_bucket{route="/v1/map",status_class="2xx",le="5"} 1
+quarry_http_request_duration_seconds_bucket{route="/v1/map",status_class="2xx",le="10"} 1
+quarry_http_request_duration_seconds_bucket{route="/v1/map",status_class="2xx",le="30"} 1
+quarry_http_request_duration_seconds_bucket{route="/v1/map",status_class="2xx",le="60"} 1
+quarry_http_request_duration_seconds_bucket{route="/v1/map",status_class="2xx",le="+Inf"} 1
+quarry_http_request_duration_seconds_sum{route="/v1/map",status_class="2xx"} 0.014429885
+quarry_http_request_duration_seconds_count{route="/v1/map",status_class="2xx"} 1
+quarry_http_request_duration_seconds_bucket{route="/v1/internal/orgs/:org/profiles",status_class="2xx",le="0.005"} 0
+quarry_http_request_duration_seconds_bucket{route="/v1/internal/orgs/:org/profiles",status_class="2xx",le="0.01"} 0
+quarry_http_request_duration_seconds_bucket{route="/v1/internal/orgs/:org/profiles",status_class="2xx",le="0.025"} 1
+quarry_http_request_duration_seconds_bucket{route="/v1/internal/orgs/:org/profiles",status_class="2xx",le="0.05"} 1
+quarry_http_request_duration_seconds_bucket{route="/v1/internal/orgs/:org/profiles",status_class="2xx",le="0.1"} 1
+quarry_http_request_duration_seconds_bucket{route="/v1/internal/orgs/:org/profiles",status_class="2xx",le="0.25"} 1
+quarry_http_request_duration_seconds_bucket{route="/v1/internal/orgs/:org/profiles",status_class="2xx",le="0.5"} 1
+quarry_http_request_duration_seconds_bucket{route="/v1/internal/orgs/:org/profiles",status_class="2xx",le="1"} 1
+quarry_http_request_duration_seconds_bucket{route="/v1/internal/orgs/:org/profiles",status_class="2xx",le="2.5"} 1
+quarry_http_request_duration_seconds_bucket{route="/v1/internal/orgs/:org/profiles",status_class="2xx",le="5"} 1
+quarry_http_request_duration_seconds_bucket{route="/v1/internal/orgs/:org/profiles",status_class="2xx",le="10"} 1
+quarry_http_request_duration_seconds_bucket{route="/v1/internal/orgs/:org/profiles",status_class="2xx",le="30"} 1
+quarry_http_request_duration_seconds_bucket{route="/v1/internal/orgs/:org/profiles",status_class="2xx",le="60"} 1
+quarry_http_request_duration_seconds_bucket{route="/v1/internal/orgs/:org/profiles",status_class="2xx",le="+Inf"} 1
+quarry_http_request_duration_seconds_sum{route="/v1/internal/orgs/:org/profiles",status_class="2xx"} 0.02232722
+quarry_http_request_duration_seconds_count{route="/v1/internal/orgs/:org/profiles",status_class="2xx"} 1
+quarry_http_request_duration_seconds_bucket{route="/v1/scrape",status_class="2xx",le="0.005"} 0
+quarry_http_request_duration_seconds_bucket{route="/v1/scrape",status_class="2xx",le="0.01"} 0
+quarry_http_request_duration_seconds_bucket{route="/v1/scrape",status_class="2xx",le="0.025"} 0
+quarry_http_request_duration_seconds_bucket{route="/v1/scrape",status_class="2xx",le="0.05"} 1
+quarry_http_request_duration_seconds_bucket{route="/v1/scrape",status_class="2xx",le="0.1"} 1
+quarry_http_request_duration_seconds_bucket{route="/v1/scrape",status_class="2xx",le="0.25"} 2
+quarry_http_request_duration_seconds_bucket{route="/v1/scrape",status_class="2xx",le="0.5"} 2
+quarry_http_request_duration_seconds_bucket{route="/v1/scrape",status_class="2xx",le="1"} 2
+quarry_http_request_duration_seconds_bucket{route="/v1/scrape",status_class="2xx",le="2.5"} 2
+quarry_http_request_duration_seconds_bucket{route="/v1/scrape",status_class="2xx",le="5"} 2
+quarry_http_request_duration_seconds_bucket{route="/v1/scrape",status_class="2xx",le="10"} 2
+quarry_http_request_duration_seconds_bucket{route="/v1/scrape",status_class="2xx",le="30"} 2
+quarry_http_request_duration_seconds_bucket{route="/v1/scrape",status_class="2xx",le="60"} 2
+quarry_http_request_duration_seconds_bucket{route="/v1/scrape",status_class="2xx",le="+Inf"} 2
+quarry_http_request_duration_seconds_sum{route="/v1/scrape",status_class="2xx"} 0.19947526699999998
+quarry_http_request_duration_seconds_count{route="/v1/scrape",status_class="2xx"} 2
+quarry_http_request_duration_seconds_bucket{route="/v1/internal/schedules/preflight",status_class="4xx",le="0.005"} 1
+quarry_http_request_duration_seconds_bucket{route="/v1/internal/schedules/preflight",status_class="4xx",le="0.01"} 1
+quarry_http_request_duration_seconds_bucket{route="/v1/internal/schedules/preflight",status_class="4xx",le="0.025"} 1
+quarry_http_request_duration_seconds_bucket{route="/v1/internal/schedules/preflight",status_class="4xx",le="0.05"} 1
+quarry_http_request_duration_seconds_bucket{route="/v1/internal/schedules/preflight",status_class="4xx",le="0.1"} 1
+quarry_http_request_duration_seconds_bucket{route="/v1/internal/schedules/preflight",status_class="4xx",le="0.25"} 1
+quarry_http_request_duration_seconds_bucket{route="/v1/internal/schedules/preflight",status_class="4xx",le="0.5"} 1
+quarry_http_request_duration_seconds_bucket{route="/v1/internal/schedules/preflight",status_class="4xx",le="1"} 1
+quarry_http_request_duration_seconds_bucket{route="/v1/internal/schedules/preflight",status_class="4xx",le="2.5"} 1
+quarry_http_request_duration_seconds_bucket{route="/v1/internal/schedules/preflight",status_class="4xx",le="5"} 1
+quarry_http_request_duration_seconds_bucket{route="/v1/internal/schedules/preflight",status_class="4xx",le="10"} 1
+quarry_http_request_duration_seconds_bucket{route="/v1/internal/schedules/preflight",status_class="4xx",le="30"} 1
+quarry_http_request_duration_seconds_bucket{route="/v1/internal/schedules/preflight",status_class="4xx",le="60"} 1
+quarry_http_request_duration_seconds_bucket{route="/v1/internal/schedules/preflight",status_class="4xx",le="+Inf"} 1
+quarry_http_request_duration_seconds_sum{route="/v1/internal/schedules/preflight",status_class="4xx"} 0.000123247
+quarry_http_request_duration_seconds_count{route="/v1/internal/schedules/preflight",status_class="4xx"} 1
+quarry_http_request_duration_seconds_bucket{route="/v1/internal/change/record",status_class="4xx",le="0.005"} 1
+quarry_http_request_duration_seconds_bucket{route="/v1/internal/change/record",status_class="4xx",le="0.01"} 1
+quarry_http_request_duration_seconds_bucket{route="/v1/internal/change/record",status_class="4xx",le="0.025"} 1
+quarry_http_request_duration_seconds_bucket{route="/v1/internal/change/record",status_class="4xx",le="0.05"} 1
+quarry_http_request_duration_seconds_bucket{route="/v1/internal/change/record",status_class="4xx",le="0.1"} 1
+quarry_http_request_duration_seconds_bucket{route="/v1/internal/change/record",status_class="4xx",le="0.25"} 1
+quarry_http_request_duration_seconds_bucket{route="/v1/internal/change/record",status_class="4xx",le="0.5"} 1
+quarry_http_request_duration_seconds_bucket{route="/v1/internal/change/record",status_class="4xx",le="1"} 1
+quarry_http_request_duration_seconds_bucket{route="/v1/internal/change/record",status_class="4xx",le="2.5"} 1
+quarry_http_request_duration_seconds_bucket{route="/v1/internal/change/record",status_class="4xx",le="5"} 1
+quarry_http_request_duration_seconds_bucket{route="/v1/internal/change/record",status_class="4xx",le="10"} 1
+quarry_http_request_duration_seconds_bucket{route="/v1/internal/change/record",status_class="4xx",le="30"} 1
+quarry_http_request_duration_seconds_bucket{route="/v1/internal/change/record",status_class="4xx",le="60"} 1
+quarry_http_request_duration_seconds_bucket{route="/v1/internal/change/record",status_class="4xx",le="+Inf"} 1
+quarry_http_request_duration_seconds_sum{route="/v1/internal/change/record",status_class="4xx"} 0.000247138
+quarry_http_request_duration_seconds_count{route="/v1/internal/change/record",status_class="4xx"} 1
+quarry_http_request_duration_seconds_bucket{route="/v1/internal/page-images/:org/:doc/:page/:hash",status_class="5xx",le="0.005"} 2
+quarry_http_request_duration_seconds_bucket{route="/v1/internal/page-images/:org/:doc/:page/:hash",status_class="5xx",le="0.01"} 2
+quarry_http_request_duration_seconds_bucket{route="/v1/internal/page-images/:org/:doc/:page/:hash",status_class="5xx",le="0.025"} 2
+quarry_http_request_duration_seconds_bucket{route="/v1/internal/page-images/:org/:doc/:page/:hash",status_class="5xx",le="0.05"} 2
+quarry_http_request_duration_seconds_bucket{route="/v1/internal/page-images/:org/:doc/:page/:hash",status_class="5xx",le="0.1"} 2
+quarry_http_request_duration_seconds_bucket{route="/v1/internal/page-images/:org/:doc/:page/:hash",status_class="5xx",le="0.25"} 2
+quarry_http_request_duration_seconds_bucket{route="/v1/internal/page-images/:org/:doc/:page/:hash",status_class="5xx",le="0.5"} 2
+quarry_http_request_duration_seconds_bucket{route="/v1/internal/page-images/:org/:doc/:page/:hash",status_class="5xx",le="1"} 2
+quarry_http_request_duration_seconds_bucket{route="/v1/internal/page-images/:org/:doc/:page/:hash",status_class="5xx",le="2.5"} 2
+quarry_http_request_duration_seconds_bucket{route="/v1/internal/page-images/:org/:doc/:page/:hash",status_class="5xx",le="5"} 2
+quarry_http_request_duration_seconds_bucket{route="/v1/internal/page-images/:org/:doc/:page/:hash",status_class="5xx",le="10"} 2
+quarry_http_request_duration_seconds_bucket{route="/v1/internal/page-images/:org/:doc/:page/:hash",status_class="5xx",le="30"} 2
+quarry_http_request_duration_seconds_bucket{route="/v1/internal/page-images/:org/:doc/:page/:hash",status_class="5xx",le="60"} 2
+quarry_http_request_duration_seconds_bucket{route="/v1/internal/page-images/:org/:doc/:page/:hash",status_class="5xx",le="+Inf"} 2
+quarry_http_request_duration_seconds_sum{route="/v1/internal/page-images/:org/:doc/:page/:hash",status_class="5xx"} 0.000411863
+quarry_http_request_duration_seconds_count{route="/v1/internal/page-images/:org/:doc/:page/:hash",status_class="5xx"} 2
+quarry_http_request_duration_seconds_bucket{route="/v1/answer/stream",status_class="5xx",le="0.005"} 1
+quarry_http_request_duration_seconds_bucket{route="/v1/answer/stream",status_class="5xx",le="0.01"} 1
+quarry_http_request_duration_seconds_bucket{route="/v1/answer/stream",status_class="5xx",le="0.025"} 1
+quarry_http_request_duration_seconds_bucket{route="/v1/answer/stream",status_class="5xx",le="0.05"} 1
+quarry_http_request_duration_seconds_bucket{route="/v1/answer/stream",status_class="5xx",le="0.1"} 1
+quarry_http_request_duration_seconds_bucket{route="/v1/answer/stream",status_class="5xx",le="0.25"} 1
+quarry_http_request_duration_seconds_bucket{route="/v1/answer/stream",status_class="5xx",le="0.5"} 1
+quarry_http_request_duration_seconds_bucket{route="/v1/answer/stream",status_class="5xx",le="1"} 1
+quarry_http_request_duration_seconds_bucket{route="/v1/answer/stream",status_class="5xx",le="2.5"} 1
+quarry_http_request_duration_seconds_bucket{route="/v1/answer/stream",status_class="5xx",le="5"} 1
+quarry_http_request_duration_seconds_bucket{route="/v1/answer/stream",status_class="5xx",le="10"} 1
+quarry_http_request_duration_seconds_bucket{route="/v1/answer/stream",status_class="5xx",le="30"} 1
+quarry_http_request_duration_seconds_bucket{route="/v1/answer/stream",status_class="5xx",le="60"} 1
+quarry_http_request_duration_seconds_bucket{route="/v1/answer/stream",status_class="5xx",le="+Inf"} 1
+quarry_http_request_duration_seconds_sum{route="/v1/answer/stream",status_class="5xx"} 0.000212706
+quarry_http_request_duration_seconds_count{route="/v1/answer/stream",status_class="5xx"} 1
+quarry_http_request_duration_seconds_bucket{route="/v1/search",status_class="2xx",le="0.005"} 3
+quarry_http_request_duration_seconds_bucket{route="/v1/search",status_class="2xx",le="0.01"} 3
+quarry_http_request_duration_seconds_bucket{route="/v1/search",status_class="2xx",le="0.025"} 3
+quarry_http_request_duration_seconds_bucket{route="/v1/search",status_class="2xx",le="0.05"} 3
+quarry_http_request_duration_seconds_bucket{route="/v1/search",status_class="2xx",le="0.1"} 3
+quarry_http_request_duration_seconds_bucket{route="/v1/search",status_class="2xx",le="0.25"} 3
+quarry_http_request_duration_seconds_bucket{route="/v1/search",status_class="2xx",le="0.5"} 3
+quarry_http_request_duration_seconds_bucket{route="/v1/search",status_class="2xx",le="1"} 3
+quarry_http_request_duration_seconds_bucket{route="/v1/search",status_class="2xx",le="2.5"} 3
+quarry_http_request_duration_seconds_bucket{route="/v1/search",status_class="2xx",le="5"} 4
+quarry_http_request_duration_seconds_bucket{route="/v1/search",status_class="2xx",le="10"} 4
+quarry_http_request_duration_seconds_bucket{route="/v1/search",status_class="2xx",le="30"} 5
+quarry_http_request_duration_seconds_bucket{route="/v1/search",status_class="2xx",le="60"} 5
+quarry_http_request_duration_seconds_bucket{route="/v1/search",status_class="2xx",le="+Inf"} 5
+quarry_http_request_duration_seconds_sum{route="/v1/search",status_class="2xx"} 12.931828105000001
+quarry_http_request_duration_seconds_count{route="/v1/search",status_class="2xx"} 5
+quarry_http_request_duration_seconds_bucket{route="/v1/search",status_class="4xx",le="0.005"} 1
+quarry_http_request_duration_seconds_bucket{route="/v1/search",status_class="4xx",le="0.01"} 1
+quarry_http_request_duration_seconds_bucket{route="/v1/search",status_class="4xx",le="0.025"} 1
+quarry_http_request_duration_seconds_bucket{route="/v1/search",status_class="4xx",le="0.05"} 1
+quarry_http_request_duration_seconds_bucket{route="/v1/search",status_class="4xx",le="0.1"} 1
+quarry_http_request_duration_seconds_bucket{route="/v1/search",status_class="4xx",le="0.25"} 1
+quarry_http_request_duration_seconds_bucket{route="/v1/search",status_class="4xx",le="0.5"} 1
+quarry_http_request_duration_seconds_bucket{route="/v1/search",status_class="4xx",le="1"} 1
+quarry_http_request_duration_seconds_bucket{route="/v1/search",status_class="4xx",le="2.5"} 1
+quarry_http_request_duration_seconds_bucket{route="/v1/search",status_class="4xx",le="5"} 1
+quarry_http_request_duration_seconds_bucket{route="/v1/search",status_class="4xx",le="10"} 1
+quarry_http_request_duration_seconds_bucket{route="/v1/search",status_class="4xx",le="30"} 1
+quarry_http_request_duration_seconds_bucket{route="/v1/search",status_class="4xx",le="60"} 1
+quarry_http_request_duration_seconds_bucket{route="/v1/search",status_class="4xx",le="+Inf"} 1
+quarry_http_request_duration_seconds_sum{route="/v1/search",status_class="4xx"} 0.000250621
+quarry_http_request_duration_seconds_count{route="/v1/search",status_class="4xx"} 1
+quarry_http_request_duration_seconds_bucket{route="/v1/artifacts/:id",status_class="2xx",le="0.005"} 2
+quarry_http_request_duration_seconds_bucket{route="/v1/artifacts/:id",status_class="2xx",le="0.01"} 2
+quarry_http_request_duration_seconds_bucket{route="/v1/artifacts/:id",status_class="2xx",le="0.025"} 2
+quarry_http_request_duration_seconds_bucket{route="/v1/artifacts/:id",status_class="2xx",le="0.05"} 2
+quarry_http_request_duration_seconds_bucket{route="/v1/artifacts/:id",status_class="2xx",le="0.1"} 2
+quarry_http_request_duration_seconds_bucket{route="/v1/artifacts/:id",status_class="2xx",le="0.25"} 2
+quarry_http_request_duration_seconds_bucket{route="/v1/artifacts/:id",status_class="2xx",le="0.5"} 2
+quarry_http_request_duration_seconds_bucket{route="/v1/artifacts/:id",status_class="2xx",le="1"} 2
+quarry_http_request_duration_seconds_bucket{route="/v1/artifacts/:id",status_class="2xx",le="2.5"} 2
+quarry_http_request_duration_seconds_bucket{route="/v1/artifacts/:id",status_class="2xx",le="5"} 2
+quarry_http_request_duration_seconds_bucket{route="/v1/artifacts/:id",status_class="2xx",le="10"} 2
+quarry_http_request_duration_seconds_bucket{route="/v1/artifacts/:id",status_class="2xx",le="30"} 2
+quarry_http_request_duration_seconds_bucket{route="/v1/artifacts/:id",status_class="2xx",le="60"} 2
+quarry_http_request_duration_seconds_bucket{route="/v1/artifacts/:id",status_class="2xx",le="+Inf"} 2
+quarry_http_request_duration_seconds_sum{route="/v1/artifacts/:id",status_class="2xx"} 0.00054787
+quarry_http_request_duration_seconds_count{route="/v1/artifacts/:id",status_class="2xx"} 2
+quarry_http_request_duration_seconds_bucket{route="/v1/internal/run_page",status_class="4xx",le="0.005"} 3
+quarry_http_request_duration_seconds_bucket{route="/v1/internal/run_page",status_class="4xx",le="0.01"} 3
+quarry_http_request_duration_seconds_bucket{route="/v1/internal/run_page",status_class="4xx",le="0.025"} 3
+quarry_http_request_duration_seconds_bucket{route="/v1/internal/run_page",status_class="4xx",le="0.05"} 3
+quarry_http_request_duration_seconds_bucket{route="/v1/internal/run_page",status_class="4xx",le="0.1"} 3
+quarry_http_request_duration_seconds_bucket{route="/v1/internal/run_page",status_class="4xx",le="0.25"} 3
+quarry_http_request_duration_seconds_bucket{route="/v1/internal/run_page",status_class="4xx",le="0.5"} 3
+quarry_http_request_duration_seconds_bucket{route="/v1/internal/run_page",status_class="4xx",le="1"} 3
+quarry_http_request_duration_seconds_bucket{route="/v1/internal/run_page",status_class="4xx",le="2.5"} 3
+quarry_http_request_duration_seconds_bucket{route="/v1/internal/run_page",status_class="4xx",le="5"} 3
+quarry_http_request_duration_seconds_bucket{route="/v1/internal/run_page",status_class="4xx",le="10"} 3
+quarry_http_request_duration_seconds_bucket{route="/v1/internal/run_page",status_class="4xx",le="30"} 3
+quarry_http_request_duration_seconds_bucket{route="/v1/internal/run_page",status_class="4xx",le="60"} 3
+quarry_http_request_duration_seconds_bucket{route="/v1/internal/run_page",status_class="4xx",le="+Inf"} 3
+quarry_http_request_duration_seconds_sum{route="/v1/internal/run_page",status_class="4xx"} 0.000641502
+quarry_http_request_duration_seconds_count{route="/v1/internal/run_page",status_class="4xx"} 3
+quarry_http_request_duration_seconds_bucket{route="/v1/answer",status_class="5xx",le="0.005"} 1
+quarry_http_request_duration_seconds_bucket{route="/v1/answer",status_class="5xx",le="0.01"} 1
+quarry_http_request_duration_seconds_bucket{route="/v1/answer",status_class="5xx",le="0.025"} 1
+quarry_http_request_duration_seconds_bucket{route="/v1/answer",status_class="5xx",le="0.05"} 1
+quarry_http_request_duration_seconds_bucket{route="/v1/answer",status_class="5xx",le="0.1"} 1
+quarry_http_request_duration_seconds_bucket{route="/v1/answer",status_class="5xx",le="0.25"} 1
+quarry_http_request_duration_seconds_bucket{route="/v1/answer",status_class="5xx",le="0.5"} 1
+quarry_http_request_duration_seconds_bucket{route="/v1/answer",status_class="5xx",le="1"} 1
+quarry_http_request_duration_seconds_bucket{route="/v1/answer",status_class="5xx",le="2.5"} 1
+quarry_http_request_duration_seconds_bucket{route="/v1/answer",status_class="5xx",le="5"} 1
+quarry_http_request_duration_seconds_bucket{route="/v1/answer",status_class="5xx",le="10"} 1
+quarry_http_request_duration_seconds_bucket{route="/v1/answer",status_class="5xx",le="30"} 1
+quarry_http_request_duration_seconds_bucket{route="/v1/answer",status_class="5xx",le="60"} 1
+quarry_http_request_duration_seconds_bucket{route="/v1/answer",status_class="5xx",le="+Inf"} 1
+quarry_http_request_duration_seconds_sum{route="/v1/answer",status_class="5xx"} 0.000301612
+quarry_http_request_duration_seconds_count{route="/v1/answer",status_class="5xx"} 1
+

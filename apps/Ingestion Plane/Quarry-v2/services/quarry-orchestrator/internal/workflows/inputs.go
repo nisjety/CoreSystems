@@ -56,18 +56,47 @@ func CrawlInputFromParams(params map[string]any, runID, jobID string, maxDepth, 
 		return CrawlJobInput{}, err
 	}
 	return CrawlJobInput{
-		UserID:    UserFromParams(params),
-		Ingest:    IngestFromParams(params),
-		RunID:     runID,
-		JobID:     jobID,
-		OrgID:     OrgFromParams(params),
-		Seeds:     seeds,
-		MaxDepth:  maxDepth,
-		MaxPages:  maxPages,
-		Scope:     scope,
-		ScopeMode: stringFromParam(params["scope_mode"]),
-		Robots:    stringFromParam(params["robots"]),
+		UserID:        UserFromParams(params),
+		Ingest:        IngestFromParams(params),
+		RunID:         runID,
+		JobID:         jobID,
+		OrgID:         OrgFromParams(params),
+		Seeds:         seeds,
+		MaxDepth:      maxDepth,
+		MaxPages:      maxPages,
+		Scope:         scope,
+		ScopeMode:     stringFromParam(params["scope_mode"]),
+		Robots:        stringFromParam(params["robots"]),
+		Sitemap:       sitemapFromParams(params),
+		ScrapeOptions: scrapeOptionsFromParams(params),
 	}, nil
+}
+
+// sitemapFromParams reads the sitemap mode the edge stamped on a crawl (INNH-6a): "include" or
+// "only". Anything else, including "skip" and an absent key, is "" (links only).
+func sitemapFromParams(params map[string]any) string {
+	switch stringFromParam(params["sitemap"]) {
+	case sitemapInclude:
+		return sitemapInclude
+	case sitemapOnly:
+		return sitemapOnly
+	}
+	return ""
+}
+
+// scrapeOptionsFromParams reads the per-page scrape options the edge stamped on a crawl
+// (INNH-6b) as canonical JSON. Absent, null or empty is nil: the default cleaning, and a
+// workflow input byte-identical to one built before the option existed.
+func scrapeOptionsFromParams(params map[string]any) json.RawMessage {
+	options, ok := params["scrape_options"].(map[string]any)
+	if !ok || len(options) == 0 {
+		return nil
+	}
+	encoded, err := json.Marshal(options)
+	if err != nil {
+		return nil
+	}
+	return encoded
 }
 
 // BatchInputFromParams builds a BatchJobWF input from params.urls.

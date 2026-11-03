@@ -76,6 +76,14 @@ pub struct GrantValidation {
     /// The resource a derived attach grant is bound to (WS8.C/WS8.F). Empty otherwise.
     #[serde(default)]
     pub resource_id: String,
+    /// INNH-10: the id of the API key a key grant was issued for (never the key itself).
+    /// Empty on every grant a person or a service holds, and from a broker that predates it.
+    /// Quarry admits an `api_key` run only under a grant whose `key_id` equals the token's, so
+    /// an empty value refuses every key run (fail closed). The vendored gRPC proto does not
+    /// carry the field yet, so the gRPC validator always yields an empty one (see
+    /// `docs/RUNBOOKS.md`, "API-key agent runs").
+    #[serde(default)]
+    pub key_id: String,
 }
 
 /// A grant's budget claim, as the broker stored it. A bound of 0 means that
@@ -248,6 +256,7 @@ impl GrantValidator for NoopGrantValidator {
             denied_domains: Vec::new(),
             absolute_expires_at: None,
             resource_id: String::new(),
+            key_id: String::new(),
         })
     }
 }
@@ -335,6 +344,7 @@ impl GrantValidator for HttpGrantValidator {
                 denied_domains: Vec::new(),
                 absolute_expires_at: None,
                 resource_id: String::new(),
+                key_id: String::new(),
             });
         }
         if !status.is_success() {
@@ -382,6 +392,7 @@ mod tests {
             denied_domains: Vec::new(),
             absolute_expires_at: None,
             resource_id: String::new(),
+            key_id: String::new(),
         };
         assert!(!g.is_usable());
     }
@@ -406,6 +417,7 @@ mod tests {
             denied_domains: Vec::new(),
             absolute_expires_at: None,
             resource_id: String::new(),
+            key_id: String::new(),
         };
         assert!(!g.is_usable());
     }
@@ -430,6 +442,7 @@ mod tests {
             denied_domains: Vec::new(),
             absolute_expires_at: None,
             resource_id: String::new(),
+            key_id: String::new(),
         };
         assert!(g.is_usable());
     }
@@ -454,6 +467,7 @@ mod tests {
             denied_domains: Vec::new(),
             absolute_expires_at: None,
             resource_id: String::new(),
+            key_id: String::new(),
         };
         assert!(g.is_usable());
     }

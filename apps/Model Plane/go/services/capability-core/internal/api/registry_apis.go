@@ -2149,6 +2149,9 @@ func (h *RoutingHandler) delete(w http.ResponseWriter, r *http.Request, id strin
 type SafetyHandler struct {
 	pool registryDatabase
 	pub  publisher.EventPublisher
+	// documentPII turns on the document_pii catalogue key (E3.6-8): creating a
+	// policy of that kind and reading the effective org default. Off by default.
+	documentPII bool
 }
 
 // NewSafetyHandler constructs the handler.
@@ -2162,11 +2165,27 @@ func (h *SafetyHandler) WithPublisher(pub publisher.EventPublisher) *SafetyHandl
 	return h
 }
 
+// WithDocumentPIIPolicy switches the document_pii catalogue key on (E3.6-8,
+// DOCUMENT_PII_POLICY). While it is off a document_pii policy cannot be created
+// and the effective-default route answers 404.
+func (h *SafetyHandler) WithDocumentPIIPolicy(enabled bool) *SafetyHandler {
+	h.documentPII = enabled
+	return h
+}
+
 // Register mounts routes.
 func (h *SafetyHandler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/safety", h.listOrCreate)
 	mux.HandleFunc("/api/v1/safety/", func(w http.ResponseWriter, r *http.Request) {
 		id := r.URL.Path[len("/api/v1/safety/"):]
+		if id == documentPIIEffectiveSuffix {
+			if r.Method != http.MethodGet {
+				http.NotFound(w, r)
+				return
+			}
+			h.documentPIIEffective(w, r)
+			return
+		}
 		switch r.Method {
 		case http.MethodGet:
 			h.get(w, r, id)
@@ -2245,6 +2264,16 @@ func (h *SafetyHandler) listOrCreate(w http.ResponseWriter, r *http.Request) {
 		}
 		now := time.Now().UTC()
 		cfgJSON, _ := json.Marshal(p.ConfigJSON)
+		isDocumentPII := isDocumentPIIKind(p.Kind)
+		if isDocumentPII {
+			// The E3.6-8 catalogue key has a closed schema and one row per org.
+			normalized, status, message := h.prepareDocumentPII(&p)
+			if status != 0 {
+				jsonErr(w, message, status)
+				return
+			}
+			cfgJSON = normalized
+		}
 		if p.AppliesTo == nil {
 			p.AppliesTo = []string{}
 		}
@@ -2255,6 +2284,10 @@ func (h *SafetyHandler) listOrCreate(w http.ResponseWriter, r *http.Request) {
 		`, p.ID, p.OrgID, p.Name, p.Description, p.Kind, cfgJSON, p.AppliesTo,
 			p.Priority, p.Enabled, now, now)
 		if err != nil {
+			if isDocumentPII && isUniqueViolation(err) {
+				jsonErr(w, "a document_pii policy already exists for this organization", http.StatusConflict)
+				return
+			}
 			jsonErr(w, err.Error(), http.StatusInternalServerError)
 			return
 		}

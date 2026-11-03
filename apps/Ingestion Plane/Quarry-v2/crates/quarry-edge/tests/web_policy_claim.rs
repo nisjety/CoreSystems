@@ -38,6 +38,8 @@ fn token(principal: Option<&str>, web_policy: Option<serde_json::Value>) -> Clai
         scopes: Vec::new(),
         zdr: None,
         web_policy,
+        key_id: None,
+        acting_user_id: None,
     }
 }
 

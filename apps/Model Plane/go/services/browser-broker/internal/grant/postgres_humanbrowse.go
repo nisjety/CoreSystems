@@ -82,7 +82,7 @@ func (s *PgStore) Renew(ctx context.Context, p RenewParams) (*Grant, error) {
 		if err := scoped(g, p.OrgID, p.OwnerID, now); err != nil {
 			return err
 		}
-		if !renewable(g.Kind) {
+		if !renewable(g) {
 			return ErrRenewNotAllowed
 		}
 		next, err := renewedExpiry(g, now, p.TTL)

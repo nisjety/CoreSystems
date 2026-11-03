@@ -55,6 +55,7 @@ func MountJobs(r chi.Router, db store.DB, opts ...JobsOption) {
 		r.Get("/ongoing", jobsOngoing(db))
 		r.Get("/{id}/summary", jobSummary(db))
 		r.Get("/{id}/errors", jobErrors(db))
+		r.Get("/{id}/results", jobResults(db))
 		r.Post("/{id}/control", controlJob(db))
 	})
 }
@@ -130,6 +131,12 @@ func MountEvents(r chi.Router, db store.DB, apiKey string, sink notify.Sink) {
 		// run's next seq in the same transaction as its insert (D2-016), so
 		// two batches of one run in flight at once cannot collide on a seq,
 		// and an event is never dropped as a replay because it lost one.
+		// The org that owns the run decides which subscriptions may see its events
+		// (INNH-5). An unknown run resolves to "", and an empty org fans out to nobody.
+		fanoutOrg := ""
+		if owner, found := db.Jobs().GetByRunID(runID); found {
+			fanoutOrg = owner.OrgID
+		}
 		for i := range batch {
 			if batch[i].Type == "" {
 				httpx.WriteErr(w, r, quarrycontracts.CodeBadRequest, "event.type required", map[string]any{"index": i})
@@ -159,7 +166,7 @@ func MountEvents(r chi.Router, db store.DB, apiKey string, sink notify.Sink) {
 				return
 			}
 			markJobTerminalIfNeeded(db, batch[i])
-			fanoutWebhooks(db, batch[i])
+			fanoutWebhooks(db, batch[i], fanoutOrg)
 			notifyOnChange(sink, batch[i])
 		}
 		httpx.WriteJSON(w, r, http.StatusCreated, map[string]any{"accepted": len(batch)})
@@ -618,37 +625,43 @@ func jobHistory(db store.DB) http.HandlerFunc {
 	}
 }
 
-// fanoutWebhooks creates pending WebhookDelivery rows for every active webhook
-// whose Events filter matches the event. The dispatcher worker pool will claim
-// and POST them with HMAC signing and retry/backoff.
-func fanoutWebhooks(db store.DB, ev quarrycontracts.Event) {
+// fanoutMaxSubscriptions bounds the subscriptions one event is matched against. It is above
+// the per-org subscription cap, so it only bites on rows written around the API.
+const fanoutMaxSubscriptions = 100
+
+// fanoutWebhooks creates pending WebhookDelivery rows for every active subscription OF
+// ORGID whose Events filter matches the event. The dispatcher worker pool will claim and
+// POST them with HMAC signing and retry/backoff.
+//
+// Tenancy (INNH-5): orgID is the org that owns the event, resolved by the caller from
+// something it verified (the change webhook's signed org, or the run's job). An empty orgID
+// delivers to nobody: an event whose owner is unknown must not reach any tenant. A legacy
+// subscription with no org is never listed by ListActiveByOrg, and an empty Events list
+// matches nothing; "*" matches every event type of that org only.
+func fanoutWebhooks(db store.DB, ev quarrycontracts.Event, orgID string) {
+	if orgID == "" {
+		return
+	}
 	payloadBytes, err := json.Marshal(ev)
 	if err != nil {
 		return
 	}
-	whs, _ := db.Webhooks().List(1000, "")
 	now := time.Now().Unix()
 	evType := string(ev.Type)
-	for _, wh := range whs {
-		if !wh.Active {
+	dedupe := changeDedupeKey(ev, orgID)
+	for _, wh := range db.Webhooks().ListActiveByOrg(orgID, fanoutMaxSubscriptions) {
+		if wh.OrgID != orgID || !subscriptionMatches(wh.Events, evType) {
 			continue
 		}
-		matched := len(wh.Events) == 0
-		if !matched {
-			for _, et := range wh.Events {
-				if et == "*" || et == evType {
-					matched = true
-					break
-				}
-			}
-		}
-		if !matched {
-			continue
-		}
+		// A duplicate (ErrConflict) means this subscription already holds a delivery for
+		// the same logical event, reached by another path: drop it silently.
 		_ = db.WebhookDeliveries().Create(store.WebhookDelivery{
 			ID:            quarrycontracts.NewID(quarrycontracts.KindWebhookDelivery),
 			WebhookID:     wh.ID,
+			OrgID:         orgID,
 			EventID:       ev.EventID,
+			EventType:     evType,
+			DedupeKey:     dedupe,
 			Payload:       string(payloadBytes),
 			Status:        "pending",
 			Attempt:       0,
@@ -656,4 +669,40 @@ func fanoutWebhooks(db store.DB, ev quarrycontracts.Event) {
 			CreatedAt:     now,
 		})
 	}
+}
+
+// subscriptionMatches reports whether a subscription's event filter accepts evType.
+func subscriptionMatches(events []string, evType string) bool {
+	for _, et := range events {
+		if et == "*" || et == evType {
+			return true
+		}
+	}
+	return false
+}
+
+// changeDedupeKey names one detected change: org, url and the new baseline. The same change
+// reaches control as the edge's signed webhook and as a run event (and the scheduled-check
+// workflow emits a third), each with its own event id; a subscription must get it once.
+// Empty when the event is not a change or the payload lacks either part, which turns the
+// dedupe off for that event rather than guessing.
+func changeDedupeKey(ev quarrycontracts.Event, orgID string) string {
+	if ev.Type != quarrycontracts.EvtChangeDetected {
+		return ""
+	}
+	url := payloadString(ev.Payload, "source_url")
+	if url == "" {
+		url = payloadString(ev.Payload, "url")
+	}
+	baseline := ""
+	if nb, ok := ev.Payload["new_baseline"].(map[string]any); ok {
+		baseline = payloadString(nb, "baseline_id")
+	}
+	if baseline == "" {
+		baseline = payloadString(ev.Payload, "baseline_id")
+	}
+	if url == "" || baseline == "" {
+		return ""
+	}
+	return "change_detected:" + orgID + ":" + url + ":" + baseline
 }

@@ -27,7 +27,7 @@
 # A third authored golden, the secret-redaction shapes (WS12.S0, secret-shapes.v1.json), is
 # held to its own Rust loader instead (crates/quarry-core/tests/redaction_golden.rs: strict
 # schema, the .sha256 pin, every rule exercised). This script pins its bytes and lists the
-# Model Plane consumer (mp-scrub, WS12.S4) as pending until that crate vendors its copy.
+# Model Plane consumer (mp-scrub, WS12.S4), which vendors its copy (see VENDORED).
 #
 # The approval ZDR golden cases (APPROVAL_ZDR_CASES, build plan WS13 S8) are not golden files:
 # they are guard functions in one Rust file, one per case. This script only proves that each case
@@ -234,6 +234,37 @@ GOLDENS=(
   # MP_UPDATE_GOLDEN=1 is owed to the test phase. The gateway BFF (WS02-S4) and the SPA (WS02-S5) vendor a
   # copy, with the pin, in their own slices (VENDORED and CONSUMERS rows then).
   "apps/Model Plane/api/contracts/space-events.json|452cc619dd5c4f07e3fb67a2c0776b7a7b3a478cb9a5b3a09e686f809603535f"
+
+  # WS10.S2: the run-trace envelope, one BROWSER_STEP_RECEIPT_RECORDED event with all 18 envelope fields
+  # (model_plane.v1.Event 1-13 plus the trace fields producer_seq, agent, origin, run_id, request_id) and
+  # an explicit "zdr": false. AUTHORED data owned by the Model Plane (not generated): the Rust twin
+  # (mp-events), the Go twin (pkg/envelope), session-core's trace validator (WS10.S6) and Quarry's
+  # trace mapper (WS10.S4, crates/quarry-runtime/tests/fixtures/model-trace/) are all tested against
+  # the same bytes. To change it: edit it, refresh the .sha256 pin beside it, update the digest here,
+  # then re-vendor every copy listed in VENDORED and refresh its pin.
+  "apps/Model Plane/api/contracts/run-trace-envelope.golden.json|265861c85ded72622e279385f53addcdeb7be34469f72f30396108fdd7854d46"
+  # WS10.S9 C6: the GET /v1/runs/:run_id/trace response body. AUTHORED by the Model Plane; model-gateway's
+  # run_trace_route_tests drive the real handler and compare its body to it (pin beside it).
+  "apps/Model Plane/api/contracts/run-trace-read-v1.golden.json|c8202393e0bd6022e04d752e586185374f9e158e384fdeb2c8b7265af4815411"
+
+  # WS16.S1: the route table a SERVICE principal may reach on model-gateway (SERVICE_ROUTE_GRANTS) plus the
+  # second-bearer rule for POST /v1/ai/chat. GENERATED from the real table by model-gateway's auth tests,
+  # never written by hand:
+  #   MP_UPDATE_GOLDEN=1 cargo test -p model-gateway --lib service_route_table_matches_the_golden
+  # in "apps/Model Plane/rust" (it also rewrites the .sha256 pin beside it). Then update the digest here and
+  # re-vendor Quarry's copy.
+  "apps/Model Plane/api/contracts/model-gateway-service-routes.json|72302d575946f4183897df8e66098ec45b4c0dd2a3d1e45d3af967bbb29c3cc3"
+  # WS16.S1: the ai-chat-v1 request and response fixtures (the string-typed structured_output_schema request,
+  # the 200 with usage and provider, the ZDR 412 catalogue body, the 403). AUTHORED data owned by the Model
+  # Plane; model-gateway's ai_chat_lane_tests check them against the handler and against SHA256SUMS.
+  "apps/Model Plane/api/contracts/ai-chat-v1/request.ok.json|dd75c67d10c1d4ce6d55213f2219fad961b8eebaa1c548b0195bf27d0ea5cfae"
+  "apps/Model Plane/api/contracts/ai-chat-v1/response.ok.json|d2db611e05833a3671c5663420698e3b32776a2df5a40d4afe2a3a281734163f"
+  "apps/Model Plane/api/contracts/ai-chat-v1/response.zdr-unavailable.json|58e197283b50674f7131ae9159e5a8945a18725d5113f171e401350166dd65d9"
+  "apps/Model Plane/api/contracts/ai-chat-v1/response.route-denied.json|a9df6d6e58274b351ef0c4adcbc44bc0f54615159bc34ce3bcd10c4dc505f44c"
+  # WS16.S8: the extract schema-validation corpus (model-gateway schema_check.rs, CORPUS_SHA256). AUTHORED by the
+  # Model Plane until Quarry publishes its byte-stable schema-corpus.json (ask in MP-ASKS); then byte-copy it
+  # over this file and move this row to VENDORED. Stored LF (.gitattributes), so the digest is of the LF bytes.
+  "apps/Model Plane/rust/services/model-gateway/tests/fixtures/ai-extract/schema-corpus.json|f3ce2e27a78010d28df3e14bc688908e681426db6bfc2b968a59409810a7c6f5"
 )
 
 # "<repo-relative copy>|<repo-relative golden>"
@@ -403,6 +434,22 @@ VENDORED=(
   "apps/Model Plane/rust/services/model-gateway/tests/fixtures/space-surface.v1.json.sha256|apps/Model Plane/api/contracts/space-surface.v1.json.sha256"
   "apps/Frontend Plane/verevonv3/apps/gateway/tests/fixtures/space-surface.v1.json|apps/Model Plane/api/contracts/space-surface.v1.json"
   "apps/Frontend Plane/verevonv3/apps/gateway/tests/fixtures/space-surface.v1.json.sha256|apps/Model Plane/api/contracts/space-surface.v1.json.sha256"
+
+  # WS10.S2: mp-events (tests/run_trace_golden.rs) copy of the run-trace envelope golden and its pin.
+  "apps/Model Plane/rust/crates/mp-events/tests/fixtures/run-trace-envelope.golden.json|apps/Model Plane/api/contracts/run-trace-envelope.golden.json"
+  "apps/Model Plane/rust/crates/mp-events/tests/fixtures/run-trace-envelope.golden.json.sha256|apps/Model Plane/api/contracts/run-trace-envelope.golden.json.sha256"
+
+  # WS10.S2: session-core (the trace validator test, WS10.S6) copy of the run-trace envelope golden and its pin.
+  "apps/Model Plane/rust/services/session-core/tests/fixtures/run-trace-envelope.golden.json|apps/Model Plane/api/contracts/run-trace-envelope.golden.json"
+  "apps/Model Plane/rust/services/session-core/tests/fixtures/run-trace-envelope.golden.json.sha256|apps/Model Plane/api/contracts/run-trace-envelope.golden.json.sha256"
+
+  # WS10.S2: the Go envelope twin (trace_test.go, TestRunTraceGoldenDecodes) copy of the run-trace envelope golden and its pin.
+  "apps/Model Plane/go/pkg/envelope/testdata/run-trace-envelope.golden.json|apps/Model Plane/api/contracts/run-trace-envelope.golden.json"
+  "apps/Model Plane/go/pkg/envelope/testdata/run-trace-envelope.golden.json.sha256|apps/Model Plane/api/contracts/run-trace-envelope.golden.json.sha256"
+
+  # WS12.S4: the Model Plane scrub crate's byte copy of Quarry's secret-shapes golden and its pin.
+  "apps/Model Plane/rust/crates/mp-scrub/tests/fixtures/secret-shapes.v1.json|apps/Ingestion Plane/Quarry-v2/crates/quarry-core/tests/fixtures/redaction/secret-shapes.v1.json"
+  "apps/Model Plane/rust/crates/mp-scrub/tests/fixtures/secret-shapes.v1.json.sha256|apps/Ingestion Plane/Quarry-v2/crates/quarry-core/tests/fixtures/redaction/secret-shapes.v1.json.sha256"
 )
 
 # "<repo-relative golden>|<consumer>|<tree its copy must live in>|<owning task>"
@@ -442,7 +489,7 @@ CONSUMERS=(
   "apps/Model Plane/api/contracts/infer-statuses.json|embedding-engine|apps/Data Plane v2/services/embedding-engine-rs/|CR-T7 (outcome table over every wire status)"
   "apps/Control Plane/auth-core/src/auth/fixtures/inference-service-tokens.golden.json|embedding-engine|apps/Data Plane v2/services/embedding-engine-rs/|CR-T7 (engine tests replay the real mint)"
   # The secret-redaction shapes: the Model Plane scrub crate vendors the golden and runs the
-  # cases that name it (applies_to "mp"). Pending until WS12.S4 creates the crate.
+  # cases that name it (applies_to "mp"). Satisfied by the WS12.S4 VENDORED rows.
   "apps/Ingestion Plane/Quarry-v2/crates/quarry-core/tests/fixtures/redaction/secret-shapes.v1.json|mp-scrub|apps/Model Plane/rust/crates/mp-scrub/|WS12.S4 (Model Plane scrub crate, vendored golden)"
   # WS10.S8: the Go quarryotel package tests its constants against the vendored copy.
   "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/contracts/telemetry-field-contract.json|quarryotel|apps/Ingestion Plane/Quarry-v2/pkg/quarryotel/|WS10.S8 (span field vocabulary, Go constants)"
@@ -475,6 +522,20 @@ CONSUMERS=(
   # WS06-S4: the Space surface registry. Each plane that registers Space routes lints them against it.
   "apps/Model Plane/api/contracts/space-surface.v1.json|model-gateway|apps/Model Plane/rust/services/model-gateway/|WS06-S4 (zdr_posture: every non-GET route has a classified row)"
   "apps/Model Plane/api/contracts/space-surface.v1.json|bff-gateway|apps/Frontend Plane/verevonv3/apps/gateway/|WS06-S4 (space_routes_zdr_classes: every /api/v1/spaces route has a classified row)"
+  # WS10.S2: the run-trace envelope. The three Model Plane twins vendor it now; Quarry's mapper vendors it
+  # at crates/quarry-runtime/tests/fixtures/model-trace/ (WS10.S4, an ask in MP-ASKS.md), pending until then.
+  "apps/Model Plane/api/contracts/run-trace-envelope.golden.json|mp-events|apps/Model Plane/rust/crates/mp-events/|WS10.S2 (Rust envelope twin decodes the golden losslessly)"
+  "apps/Model Plane/api/contracts/run-trace-envelope.golden.json|session-core|apps/Model Plane/rust/services/session-core/|WS10.S6 (trace validator accepts the golden)"
+  "apps/Model Plane/api/contracts/run-trace-envelope.golden.json|envelope-go|apps/Model Plane/go/pkg/envelope/|WS10.S2 (Go envelope twin decodes the golden)"
+  "apps/Model Plane/api/contracts/run-trace-envelope.golden.json|quarry-runtime|apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/|WS10.S4 (the trace mapper output equals the golden)"
+  # WS16.S1: Quarry's model client fake reads the route table and the ai-chat-v1 fixtures at
+  # crates/quarry-runtime/tests/fixtures/model-gateway-contract/ (WS16.S3, an ask in MP-ASKS.md), pending until then.
+  "apps/Model Plane/api/contracts/model-gateway-service-routes.json|quarry-runtime|apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/|WS16.S3 (the fake gateway applies the real service route table)"
+  "apps/Model Plane/api/contracts/ai-chat-v1/request.ok.json|quarry-runtime|apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/|WS16.S3 (the chat client request, string-typed schema)"
+  "apps/Model Plane/api/contracts/ai-chat-v1/response.ok.json|quarry-runtime|apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/|WS16.S3 (the chat client reads usage and provider)"
+  # WS10.S9 C6: the run-trace read body. model-gateway tests against the authored file itself; the
+  # Frontend gateway/SPA type test reads a vendored copy (pending until it vendors one).
+  "apps/Model Plane/api/contracts/run-trace-read-v1.golden.json|verevonv3-gateway|apps/Frontend Plane/verevonv3/apps/gateway/|WS10.S9 C6 (gateway/SPA type test reads the fixture)"
 )
 
 # The approval ZDR golden cases (build plan WS13 S8). Each is a guard function of the Rust file

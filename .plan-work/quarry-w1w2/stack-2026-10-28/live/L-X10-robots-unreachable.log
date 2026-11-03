@@ -1,0 +1,22 @@
+start 2026-10-28T19:59:33Z
+evidence: C:/dev/CoresSystem/.claude/worktrees/vigorous-perlman-e7ae5b/.plan-work/quarry-w1w2/stack-2026-10-28/live/x10/unreachable
+edge health: ok
+PASS crawl_accepted: HTTP 200
+job: job_01M621HDJ8NSP18ZNFQ5CCEQ1P
+PASS crawl_finished: statistics present
+pages fetched per fixture host (robots.txt excluded):
+  crawl-fixture-a: 0
+  crawl-fixture-b: 0
+PASS unreachable_robots_fetched_twice: 2
+PASS unreachable_no_page_fetched: 0
+PASS unreachable_map_refused: 403
+evidence files: C:/dev/CoresSystem/.claude/worktrees/vigorous-perlman-e7ae5b/.plan-work/quarry-w1w2/stack-2026-10-28/live/x10/unreachable (fixture-a.log, fixture-b.log, job.json, crawl-response.json)
+SUMMARY expect=unreachable pass=5 fail=0 not_run=0
+end 2026-10-28T19:59:42Z
+--- robots metrics after unreachable
+quarry_robots_decisions_total{mode="enforce",outcome="unreachable"} 1
+quarry_robots_decisions_total{mode="enforce",outcome="denied"} 0
+quarry_robots_decisions_total{mode="observe",outcome="would_deny"} 0
+quarry_robots_decisions_total{mode="any",outcome="allowed"} 3
+quarry_robots_decisions_total{mode="observe",outcome="would_unreachable"} 0
+quarry_robots_cache_entries 2

@@ -1,0 +1,50 @@
+=== t5 start 2026-10-28T23:21:05Z ready={"generation":0,"sessions_open":0}
+--- nav try 1 run=run_01M62D2E56JBQJJ2392V8GS416
+warm navigate fixture-a: http=200 time=0.405302 {"url":"http://fixture-a.crawl.test/","title":"Fixture A","step":0,"ax_nodes":37}
+hang navigate slow.html: http=504 time=25.050667
+  body: {"code":"TIMEOUT","message":"browser operation navigate timed out","retryable":false,"details":{"deadline_ms":25000,"effect":"unknown","op":"navigate"}}
+  url-in-body: slow.crawl.test=0 any-http-url=0
+next (nav): http=200 time=0.280153
+  ok: {"url":"http://fixture-a.crawl.test/","title":"Fixture A","step":2,"ax_nodes":37}
+  ax_snapshot TIMEOUT in next body: 0
+step after next (wait): http=200 time=0.211386 {"url":"http://fixture-a.crawl.test/","title":"Fixture A","step":3,"ax_nodes":37}
+receipts: [{"step":0,"a":"navigate","s":"completed"},{"step":1,"a":"navigate","s":"failed"},{"step":2,"a":"navigate","s":"completed"},{"step":3,"a":"wait","s":"completed"}]
+close: HTTP=200
+ready: {"generation":1,"sessions_open":0}
+--- wait try 1 run=run_01M62D3AFEXRJXRK5Q14HGH26F
+warm navigate fixture-a: http=200 time=0.338161 {"url":"http://fixture-a.crawl.test/","title":"Fixture A","step":0,"ax_nodes":37}
+hang navigate slow.html: http=504 time=25.062733
+  body: {"code":"TIMEOUT","message":"browser operation navigate timed out","retryable":false,"details":{"deadline_ms":25000,"effect":"unknown","op":"navigate"}}
+  url-in-body: slow.crawl.test=0 any-http-url=0
+next (wait): http=200 time=0.189831
+  ok: {"url":"http://fixture-a.crawl.test/","title":"Fixture A","step":2,"ax_nodes":37}
+  ax_snapshot TIMEOUT in next body: 0
+step after next (wait): http=200 time=0.163066 {"url":"http://fixture-a.crawl.test/","title":"Fixture A","step":3,"ax_nodes":37}
+receipts: [{"step":0,"a":"navigate","s":"completed"},{"step":1,"a":"navigate","s":"failed"},{"step":2,"a":"wait","s":"completed"},{"step":3,"a":"wait","s":"completed"}]
+close: HTTP=200
+ready: {"generation":1,"sessions_open":0}
+=== t5 end 2026-10-28T23:22:04Z ready={"generation":1,"sessions_open":0}
+=== t5h start 2026-10-28T23:22:04Z ready={"generation":1,"sessions_open":0}
+--- held try 1 run=run_01M62D47CS9X6NW2QXZJSNTA0T
+warm navigate fixture-a: http=200 time=0.365617 {"url":"http://fixture-a.crawl.test/","title":"Fixture A","step":0,"ax_nodes":37,"ax_names":["Fixture A","Fixture A","do
+navigate held.html: http=504 time=25.051895
+  body: {"code":"TIMEOUT","message":"browser operation navigate timed out","retryable":false,"details":{"deadline_ms":25000,"effect":"unknown","op":"navigate"}}
+  url-in-body: slow.crawl.test=0 any-http-url=0
+next (wait): http=200 time=0.201607
+  ok: {"url":"http://slow.crawl.test/held.html","title":"R-SC4 held image page","step":2,"ax_nodes":10,"ax_names":["R-SC4 held image page","Held image","Held image","The image below never finishes."]}
+browser-session: {"currentUrl":"http://slow.crawl.test/held.html","title":null,"status":"active","live":true}
+navigate fixture-a after: http=200 time=0.184529 {"url":"http://fixture-a.crawl.test/","title":"Fixture A","step":3,"ax_nodes":37,"ax_names":["Fixture A","Fixture A","do
+close: HTTP=200
+ready: {"generation":1,"sessions_open":0}
+--- held try 2 run=run_01M62D533YT527VRMPVN9A2JEN
+(no warm step: the held page is the first step)
+navigate held.html: http=504 time=25.124679
+  body: {"code":"TIMEOUT","message":"browser operation navigate timed out","retryable":false,"details":{"deadline_ms":25000,"effect":"unknown","op":"navigate"}}
+  url-in-body: slow.crawl.test=0 any-http-url=0
+next (wait): http=502 time=0.118875
+  err: {"code":"DRIVER_FAILED","message":"chromiumoxide: no current page; call goto() first","retryable":false,"details":{"reason":"no_current_page"}}
+browser-session: {"currentUrl":"","title":null,"status":"active","live":true}
+navigate fixture-a after: http=200 time=0.393415 {"url":"http://fixture-a.crawl.test/","title":"Fixture A","step":2,"ax_nodes":37,"ax_names":["Fixture A","Fixture A","do
+close: HTTP=200
+ready: {"generation":1,"sessions_open":0}
+=== t5h end 2026-10-28T23:23:01Z ready={"generation":1,"sessions_open":0}

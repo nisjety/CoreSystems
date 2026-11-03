@@ -361,7 +361,8 @@ pub(crate) fn gate_skill(mode: Mode, origin: Origin, skill: &SkillText<'_>) -> R
 
 /// The credential shapes execution-core's `scrub.rs` redacts. They are copied,
 /// not shared, because session-core does not depend on execution-core. A test
-/// holds every entry to the text in `scrub.rs`, so the two lists cannot drift.
+/// holds every entry to the text in `mp-scrub` (which `scrub.rs` re-exports),
+/// so the two lists cannot drift.
 const SECRET_SHAPES: &[&str] = &[
     r"(?i)bearer\s+[A-Za-z0-9._\-+/=]+",
     r"eyJ[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+",
@@ -574,9 +575,10 @@ mod tests {
 
     #[test]
     fn the_secret_shapes_are_the_ones_scrub_rs_redacts() {
-        let scrub = normalized(include_str!("../../execution-core/src/scrub.rs"));
+        // execution-core's scrub.rs re-exports the shared crate since WS12.S4a.
+        let scrub = normalized(include_str!("../../../crates/mp-scrub/src/lib.rs"));
         for shape in SECRET_SHAPES {
-            assert!(scrub.contains(shape), "{shape} is not in execution-core's scrub.rs");
+            assert!(scrub.contains(shape), "{shape} is not in mp-scrub's lib.rs");
         }
     }
 

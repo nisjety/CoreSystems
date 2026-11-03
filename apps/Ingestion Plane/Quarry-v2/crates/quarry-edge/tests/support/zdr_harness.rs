@@ -265,6 +265,11 @@ impl Harness {
         }
     }
 
+    /// The URL of `route` on this edge, for a test that sends something other than JSON.
+    pub fn url(&self, route: &str) -> String {
+        format!("http://{}{route}", self.addr)
+    }
+
     pub async fn post(&self, bearer: &str, route: &str, body: Value) -> reqwest::Response {
         self.client
             .post(format!("http://{}{route}", self.addr))

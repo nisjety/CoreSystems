@@ -227,6 +227,11 @@ struct BrowserRunStartRequest {
     require_approval: Option<bool>,
     #[serde(default)]
     max_cost_usd: Option<f64>,
+    /// Token budget for the LLM planner of this run (WS11.S1). Tighten-only: the run gets
+    /// `min(this, the org's browser_agent_max_tokens_per_run)`; it can never raise a ceiling.
+    /// Absent or non-positive asks for nothing.
+    #[serde(default)]
+    max_planner_tokens: Option<i64>,
     /// Accepted so a well-formed caller body never 4xxs, but never trusted:
     /// this endpoint is called by the Verevon gateway, which derives `zdr`
     /// server-side from the browser session's own persisted metadata and
@@ -234,6 +239,387 @@ struct BrowserRunStartRequest {
     /// the safe fallback for any other caller.
     #[serde(default)]
     zdr: bool,
+    /// Plan mode (WS7.L): the run may read but not type, interact, upload or
+    /// download. Expanded here into the four `disable` keys of the ask. Needs
+    /// `MODEL_GATEWAY_BROWSER_POLICY_ASK=on`, else the start is refused.
+    #[serde(default)]
+    plan_mode: Option<bool>,
+    /// A tighten-only ask (WS7.L), e.g. a Space restriction the caller
+    /// resolved. Same flag. Unknown keys (`robots_max`, `proxy_max`) refuse the
+    /// whole body.
+    #[serde(default)]
+    policy: Option<RunPolicyAsk>,
+    /// Which product surface started the run (`chat`, `space`, `support`,
+    /// `agent_run_console`, `scheduled_cron`, `routine`, `background_review`,
+    /// `dreaming`, `mail_task`, `direct_service`). Only a label for the run
+    /// trace (WS10.S4), never read for authorization; an unknown value is the
+    /// default.
+    #[serde(default)]
+    run_source: Option<String>,
+    /// Attach mode (WS8.G): the id of the caller's own browser session (the run
+    /// the person is driving). The run does not start a Quarry run of its own; it
+    /// steps on that session's agent tab under an `attach` grant derived here with
+    /// the caller's bearer. Needs `MODEL_GATEWAY_BROWSER_ATTACH` on, else the start
+    /// is refused 400 `browser_attach_unavailable`.
+    #[serde(default)]
+    attach_session_id: Option<String>,
+    /// What the agent leaves on its tab when an attached run completes (WS8.J):
+    /// `none`, `deliverable` (the default) or `handoff`. Only meaningful with
+    /// `attach_session_id`; named without one it is refused 400
+    /// `tab_mark_requires_attach`, outside the set 400 `tab_mark_on_complete_invalid`.
+    #[serde(default)]
+    tab_mark_on_complete: Option<String>,
+}
+
+/// The three keys a model-driven run may ask Quarry to tighten on. Same shape
+/// as execution-core's `WireRequestAsk`; `robots_max` and `proxy_max` are
+/// deliberately absent and, with any other key, fail the parse.
+#[derive(Debug, Deserialize, Clone, Default, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct RunPolicyAsk {
+    #[serde(default)]
+    disable: Vec<String>,
+    #[serde(default)]
+    deny_domains: Vec<String>,
+    #[serde(default)]
+    allow_domains: Option<Vec<String>>,
+}
+
+/// `MODEL_GATEWAY_BROWSER_POLICY_ASK`: only `on` lets a start carry a policy
+/// ask or plan mode. Off (the default) refuses such a start rather than run it
+/// without the restriction, so an older Quarry can never drop it silently.
+fn policy_ask_flag(value: Option<&str>) -> bool {
+    budget_claim_flag(value)
+}
+
+/// `MODEL_GATEWAY_BROWSER_ATTACH` (WS8.G): only `1`, `true` or `on` lets a start
+/// carry `attach_session_id`. Off (the default) refuses such a start 400
+/// `browser_attach_unavailable` before any grant, thread or run write, so a stack
+/// whose broker or Quarry has attach dark never half-runs one.
+fn attach_flag(value: Option<&str>) -> bool {
+    value.is_some_and(|value| {
+        let value = value.trim();
+        value == "1" || value.eq_ignore_ascii_case("true") || value.eq_ignore_ascii_case("on")
+    })
+}
+
+/// Longest attach session id this route forwards (the broker bounds a resource
+/// id at 256 bytes; session ids are far shorter).
+const MAX_ATTACH_SESSION_ID_BYTES: usize = 128;
+
+/// The attach session id of a start, checked. `Ok(None)` when the start does not
+/// attach. With the flag off a start that names one is refused
+/// `browser_attach_unavailable`; a blank, oversized or non-printable id is
+/// refused `attach_session_id_invalid`.
+fn attach_session_for(enabled: bool, req: &BrowserRunStartRequest) -> Result<Option<String>, ApiError> {
+    let Some(raw) = req.attach_session_id.as_deref() else {
+        return Ok(None);
+    };
+    if !enabled {
+        return Err(bad_request("browser_attach_unavailable"));
+    }
+    let id = raw.trim();
+    let printable = id.bytes().all(|b| b.is_ascii_graphic());
+    if id.is_empty() || id.len() > MAX_ATTACH_SESSION_ID_BYTES || !printable {
+        return Err(bad_request("attach_session_id_invalid"));
+    }
+    Ok(Some(id.to_owned()))
+}
+
+/// The tab mark of a start (WS8.J), checked against the closed set. `Ok(None)`
+/// when the start names none (execution-core then takes its default). Named
+/// without an attach session it is refused: a leased run has no person's tab to
+/// hand over, and a mark that silently did nothing would mislead the caller.
+fn tab_mark_for(
+    req: &BrowserRunStartRequest,
+    attach_session: Option<&str>,
+) -> Result<Option<&'static str>, ApiError> {
+    let Some(raw) = req.tab_mark_on_complete.as_deref() else {
+        return Ok(None);
+    };
+    let mark = match raw.trim().to_ascii_lowercase().as_str() {
+        "none" => "none",
+        "deliverable" => "deliverable",
+        "handoff" => "handoff",
+        _ => return Err(bad_request("tab_mark_on_complete_invalid")),
+    };
+    if attach_session.is_none() {
+        return Err(bad_request("tab_mark_requires_attach"));
+    }
+    Ok(Some(mark))
+}
+
+/// Write the tab mark into the browser `tool_input` (WS8.J) when the start named
+/// one; a start that names none carries the `tool_input` it always did.
+fn insert_tab_mark(tool_input: &mut Value, mark: Option<&str>) {
+    let (Some(mark), Some(fields)) = (mark, tool_input.as_object_mut()) else {
+        return;
+    };
+    fields.insert("tab_mark_on_complete".to_owned(), json!(mark));
+}
+
+/// The four capabilities plan mode switches off (Quarry capability names).
+const PLAN_MODE_DISABLED: [&str; 4] = [
+    "browser.act.input",
+    "browser.act.interact",
+    "browser.act.upload",
+    "browser.act.download",
+];
+/// Most entries per list of an ask.
+const MAX_POLICY_ASK_ENTRIES: usize = 64;
+
+fn policy_ask_invalid() -> ApiError {
+    bad_request("browser_policy_ask_invalid")
+}
+
+fn is_ask_capability(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 48
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'.')
+}
+
+fn is_ask_host(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 253
+        && value.split('.').all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+                && label
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        })
+}
+
+/// The ask this start sends to execution-core, as the `tool_input.policy`
+/// object: plan mode's four disables unioned with the caller's ask, denied
+/// hosts unioned, the allow list as given. Sorted and de-duplicated. `None`
+/// when the start asks for nothing (no plan mode, no entries), whatever the
+/// flag. With the flag off, a start that does ask is refused 400
+/// `browser_policy_ask_unavailable` (fail closed); an ask with a bad shape is
+/// refused 400 `browser_policy_ask_invalid`. Tighten-only by construction: the
+/// output can only disable, deny or narrow.
+fn policy_ask_for(enabled: bool, req: &BrowserRunStartRequest) -> Result<Option<Value>, ApiError> {
+    let caller = req.policy.clone().unwrap_or_default();
+    let plan_mode = req.plan_mode == Some(true);
+    let allow = caller
+        .allow_domains
+        .as_ref()
+        .map(|hosts| hosts.iter().map(|h| h.trim().to_ascii_lowercase()).collect::<Vec<_>>());
+    if !plan_mode && caller.disable.is_empty() && caller.deny_domains.is_empty() && allow.is_none() {
+        return Ok(None);
+    }
+    if !enabled {
+        return Err(bad_request("browser_policy_ask_unavailable"));
+    }
+    let lists_fit = caller.disable.len() <= MAX_POLICY_ASK_ENTRIES
+        && caller.deny_domains.len() <= MAX_POLICY_ASK_ENTRIES
+        && allow.as_ref().map_or(true, |hosts| hosts.len() <= MAX_POLICY_ASK_ENTRIES);
+    if !lists_fit {
+        return Err(policy_ask_invalid());
+    }
+    let mut disable: Vec<String> = caller.disable.iter().map(|c| c.trim().to_owned()).collect();
+    if plan_mode {
+        disable.extend(PLAN_MODE_DISABLED.iter().map(|c| (*c).to_owned()));
+    }
+    let mut deny: Vec<String> = caller
+        .deny_domains
+        .iter()
+        .map(|h| h.trim().to_ascii_lowercase())
+        .collect();
+    disable.sort_unstable();
+    disable.dedup();
+    deny.sort_unstable();
+    deny.dedup();
+    let mut allow = allow;
+    if let Some(hosts) = allow.as_mut() {
+        hosts.sort_unstable();
+        hosts.dedup();
+    }
+    let shapes_ok = disable.iter().all(|c| is_ask_capability(c))
+        && deny.iter().all(|h| is_ask_host(h))
+        && allow.as_ref().map_or(true, |hosts| hosts.iter().all(|h| is_ask_host(h)));
+    if !shapes_ok {
+        return Err(policy_ask_invalid());
+    }
+    let mut ask = serde_json::Map::new();
+    if !disable.is_empty() {
+        ask.insert("disable".to_owned(), json!(disable));
+    }
+    if !deny.is_empty() {
+        ask.insert("deny_domains".to_owned(), json!(deny));
+    }
+    if let Some(hosts) = allow {
+        ask.insert("allow_domains".to_owned(), json!(hosts));
+    }
+    Ok(Some(Value::Object(ask)))
+}
+
+/// Where a browser run came from, as a label for the run trace. Never
+/// authority: Quarry's `origin_is_not_authz` gate keeps it out of admission.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RunSource {
+    /// A person typing in chat.
+    Chat,
+    /// A person in a Space.
+    Space,
+    /// A person in a support session.
+    Support,
+    /// A person in the agent-run console.
+    AgentRunConsole,
+    /// capability-core cron (`0028_space_scoped_cron`).
+    ScheduledCron,
+    /// A capability-core routine.
+    Routine,
+    /// Background review.
+    BackgroundReview,
+    /// Dreaming.
+    Dreaming,
+    /// A `mail_task`.
+    MailTask,
+    /// A service calling the route directly.
+    DirectService,
+}
+
+/// The run-origin vocabulary of the run trace envelope.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RunOrigin {
+    User,
+    Schedule,
+    Agent,
+    Webhook,
+    Api,
+}
+
+impl RunOrigin {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::User => "USER",
+            Self::Schedule => "SCHEDULE",
+            Self::Agent => "AGENT",
+            Self::Webhook => "WEBHOOK",
+            Self::Api => "API",
+        }
+    }
+}
+
+impl RunSource {
+    /// Every source; the mapping test walks this list.
+    const ALL: [Self; 10] = [
+        Self::Chat,
+        Self::Space,
+        Self::Support,
+        Self::AgentRunConsole,
+        Self::ScheduledCron,
+        Self::Routine,
+        Self::BackgroundReview,
+        Self::Dreaming,
+        Self::MailTask,
+        Self::DirectService,
+    ];
+
+    const fn wire(self) -> &'static str {
+        match self {
+            Self::Chat => "chat",
+            Self::Space => "space",
+            Self::Support => "support",
+            Self::AgentRunConsole => "agent_run_console",
+            Self::ScheduledCron => "scheduled_cron",
+            Self::Routine => "routine",
+            Self::BackgroundReview => "background_review",
+            Self::Dreaming => "dreaming",
+            Self::MailTask => "mail_task",
+            Self::DirectService => "direct_service",
+        }
+    }
+
+    fn from_wire(value: &str) -> Option<Self> {
+        let value = value.trim().to_ascii_lowercase();
+        Self::ALL.into_iter().find(|source| source.wire() == value)
+    }
+
+    /// People acting on a surface are `USER`; scheduled work is `SCHEDULE`;
+    /// unattended agent work is `AGENT`; mail-triggered work is `WEBHOOK`; a
+    /// service calling directly is `API`.
+    const fn origin(self) -> RunOrigin {
+        match self {
+            Self::Chat | Self::Space | Self::Support | Self::AgentRunConsole => RunOrigin::User,
+            Self::ScheduledCron | Self::Routine => RunOrigin::Schedule,
+            Self::BackgroundReview | Self::Dreaming => RunOrigin::Agent,
+            Self::MailTask => RunOrigin::Webhook,
+            Self::DirectService => RunOrigin::Api,
+        }
+    }
+}
+
+/// The source of a start: the named one when it is known, else `Chat`. The
+/// route requires a verified user credential, so the unlabelled case is a
+/// person; a hostile or unknown label gets no say.
+fn run_source_of(req: &BrowserRunStartRequest) -> RunSource {
+    req.run_source
+        .as_deref()
+        .and_then(RunSource::from_wire)
+        .unwrap_or(RunSource::Chat)
+}
+
+const REQUEST_ID_HEADER: &str = "x-request-id";
+
+/// The request id for every Quarry call of this run: the inbound `x-request-id`
+/// when it is 1 to 64 chars of `[A-Za-z0-9_-]`, else a fresh one. A hostile
+/// value is replaced, never repaired or forwarded.
+fn request_id_for(headers: &HeaderMap) -> String {
+    headers
+        .get(REQUEST_ID_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|id| {
+            !id.is_empty()
+                && id.len() <= 64
+                && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+        })
+        .map_or_else(|| format!("req-{}", new_ulid()), str::to_owned)
+}
+
+/// Write the attach session into the browser `tool_input` (WS8.G): the
+/// `attach_session_id` execution-core attaches to (`grant_id` is already the
+/// derived `attach` grant). A saved browser profile is never loaded into someone
+/// else's session, so `profile_id` is cleared. A start that does not attach
+/// carries the `tool_input` it always did.
+fn insert_attach_fields(tool_input: &mut Value, attach_session_id: Option<&str>) {
+    let (Some(session), Some(fields)) = (attach_session_id, tool_input.as_object_mut()) else {
+        return;
+    };
+    fields.insert("attach_session_id".to_owned(), json!(session));
+    fields.insert("profile_id".to_owned(), Value::Null);
+}
+
+/// Write the policy ask, trace context and request id into the browser
+/// `tool_input`. Keys the run has no value for are not written, so a start with
+/// none of them carries the `tool_input` it always did, except the request id
+/// and trace, which every start has.
+fn insert_policy_and_trace_fields(
+    tool_input: &mut Value,
+    policy: Option<Value>,
+    source: RunSource,
+    request_id: &str,
+) {
+    let Some(fields) = tool_input.as_object_mut() else {
+        return;
+    };
+    if let Some(policy) = policy {
+        fields.insert("policy".to_owned(), policy);
+    }
+    fields.insert("request_id".to_owned(), json!(request_id));
+    fields.insert(
+        "trace".to_owned(),
+        json!({
+            "origin": source.origin().as_str(),
+            "agent": { "id": "browser-agent", "role": "browser" },
+        }),
+    );
 }
 
 /// How long a presented run grant stays claimed by the run it started when the
@@ -387,11 +773,30 @@ fn run_request_fingerprint(req: &BrowserRunStartRequest) -> String {
     part("v", "model-gateway/browser-run-fp/v1");
     part("goal", &req.goal);
     part("max_steps", &format!("{:?}", req.max_steps));
+    if req.max_planner_tokens.is_some() {
+        // Only when named, so a request that never names it keeps the fingerprint it had.
+        part("max_planner_tokens", &format!("{:?}", req.max_planner_tokens));
+    }
     part("stop_criteria", req.stop_criteria.as_deref().unwrap_or(""));
     part("start_url", req.start_url.as_deref().unwrap_or(""));
     part("require_approval", &format!("{:?}", req.require_approval));
     part("profile_id", req.profile_id.as_deref().unwrap_or(""));
     part("allowed_domains", &domains.join(","));
+    if let Some(session) = non_empty(req.attach_session_id.as_deref()) {
+        // Only when attaching: a retry that names another session is another request.
+        part("attach_session_id", session);
+    }
+    if let Some(mark) = non_empty(req.tab_mark_on_complete.as_deref()) {
+        // Only when named: a retry that asks for another mark is another request.
+        part("tab_mark_on_complete", &mark.to_ascii_lowercase());
+    }
+    if req.plan_mode == Some(true) {
+        // Only when asked, so a request that never names it keeps the fingerprint it had.
+        part("plan_mode", "true");
+    }
+    if let Some(policy) = req.policy.as_ref().filter(|policy| **policy != RunPolicyAsk::default()) {
+        part("policy", &format!("{policy:?}"));
+    }
     let digest = hasher.finalize();
     let mut hex = String::with_capacity(32);
     for byte in &digest[..16] {
@@ -596,6 +1001,94 @@ fn bounded_run_params(
     )
 }
 
+/// `bounded_run_params` plus the LLM planner's token budget (WS11.S1): the three values it
+/// returns, unchanged, and `min(request.max_planner_tokens, org ceiling)` as a fourth. The
+/// first three come from `bounded_run_params` itself, so the two never disagree about a bound.
+fn bounded_run_params_with_planner_tokens(
+    req: &BrowserRunStartRequest,
+    claim: Option<&BudgetClaim>,
+    org_planner_token_ceiling: Option<i64>,
+) -> (Option<i32>, Option<i32>, Option<f64>, Option<i64>) {
+    let (max_steps, max_runtime_s, max_cost_usd) = bounded_run_params(req, claim);
+    (
+        max_steps,
+        max_runtime_s,
+        max_cost_usd,
+        crate::org_quota::planner_token_ceiling_for(
+            req.max_planner_tokens,
+            org_planner_token_ceiling,
+        ),
+    )
+}
+
+/// `MODEL_GATEWAY_BROWSER_PLANNER_QUOTAS`: only `on` makes a browser run start read the org's
+/// planner quota keys (the token ceiling and the planner switch). Off: nothing is read, the
+/// ceiling is the request's own and no `planner_flag` is written. Off by default.
+fn planner_quotas_flag(value: Option<&str>) -> bool {
+    budget_claim_flag(value)
+}
+
+/// What the org's quota rows say about the LLM planner, resolved once per run start.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PlannerQuota {
+    /// `browser_agent_max_tokens_per_run`, when set and readable (fail open).
+    token_ceiling: Option<i64>,
+    /// `browser_agent_llm_planner` (fail closed: an unreadable read is `Unavailable`).
+    flag: crate::org_quota::PlannerFlag,
+}
+
+impl PlannerQuota {
+    /// The quota read was not asked for: no ceiling, no flag.
+    const OFF: Self = Self {
+        token_ceiling: None,
+        flag: crate::org_quota::PlannerFlag::Unset,
+    };
+
+    fn from_keys(keys: &crate::org_quota::OrgQuotaKeys) -> Self {
+        Self {
+            token_ceiling: keys.planner_token_ceiling(),
+            flag: keys.planner_flag(),
+        }
+    }
+}
+
+async fn planner_quota(state: &AppState, org_id: &str) -> PlannerQuota {
+    let flag = std::env::var("MODEL_GATEWAY_BROWSER_PLANNER_QUOTAS").ok();
+    if !planner_quotas_flag(flag.as_deref()) {
+        return PlannerQuota::OFF;
+    }
+    PlannerQuota::from_keys(
+        &crate::org_quota::fetch_org_quota_keys(
+            &state.http_client,
+            &state.org_core_base_url,
+            org_id,
+            &state.org_core_service_id,
+            &state.org_core_service_token,
+        )
+        .await,
+    )
+}
+
+/// Write the planner's inputs into the browser `tool_input`. Both keys are written only when
+/// they have a value, so a run with no planner policy carries the `tool_input` it always did.
+/// `planner_flag` comes from the org's quota row ONLY: the request type has no such field, and a
+/// key of that name in a client body is dropped at deserialisation.
+fn insert_planner_fields(
+    tool_input: &mut serde_json::Value,
+    max_planner_tokens: Option<i64>,
+    planner_flag: crate::org_quota::PlannerFlag,
+) {
+    let Some(fields) = tool_input.as_object_mut() else {
+        return;
+    };
+    if let Some(tokens) = max_planner_tokens {
+        fields.insert("max_planner_tokens".to_owned(), json!(tokens));
+    }
+    if let Some(flag) = planner_flag.wire() {
+        fields.insert("planner_flag".to_owned(), json!(flag));
+    }
+}
+
 /// The bound a run executes under when its run grant was issued before this
 /// request (a presented run grant, or the grant a keyed retry looked up): the
 /// tighter of the claim the grant carries and the claim this request mints.
@@ -610,8 +1103,12 @@ fn presented_run_budget(
     }
 }
 
-/// The only `DeriveRunGrant` purpose this route asks for.
+/// The `DeriveRunGrant` purpose of an ordinary run.
 const DERIVE_PURPOSE_AI_RUN: &str = "ai_run";
+/// The `DeriveRunGrant` purpose of an attach start (WS8.G): an `attach` grant
+/// whose `resource_id` is the session id. The broker takes it from a signed-in
+/// user only.
+const DERIVE_PURPOSE_ATTACH: &str = "attach";
 /// Most hosts a run may be derived with from a `human_browse` parent (WS8.C).
 /// The broker applies its own bound (`BROWSER_BROKER_MAX_RUN_DOMAINS`); this
 /// keeps an oversized list from reaching it.
@@ -655,6 +1152,26 @@ async fn resolve_browser_grant(
     if !response.active || response.grant_id.trim() != grant_id {
         // Never distinguish forged, expired, revoked, or cross-tenant grants.
         return Err(browser_grant_forbidden());
+    }
+    // Attach mode (WS8.G): the grant that backs the run is an `attach` grant derived
+    // with the caller's bearer, bound to the named session; never a run grant.
+    if non_empty(request.attach_session_id.as_deref()).is_some() {
+        return resolve_attach_grant(
+            state,
+            request,
+            browser_bearer,
+            org_id,
+            run_key,
+            grant_id,
+            (response.kind.as_str(), response.zdr, &response.allowed_domains),
+            mint,
+            BudgetClaim::from_wire(
+                response.budget_micro_usd,
+                response.budget_max_steps,
+                response.budget_max_runtime_s,
+            ),
+        )
+        .await;
     }
     // A `human_browse` grant (WS8.C) is a person's own open web: it has no host
     // list to canonicalize and is never lent to a run as it is. The run must name
@@ -795,6 +1312,79 @@ async fn resolve_browser_grant(
     })
 }
 
+/// Resolves the grant of an attach start (WS8.G). The parent must be the person's
+/// own `session` or `human_browse` grant, never ZDR (the broker refuses it too),
+/// and the request must name its hosts: an attach never inherits a parent's list,
+/// and a `human_browse` parent has none to inherit. The `attach` grant is derived
+/// with the caller's bearer, bound (`resource_id`) to the named session, before
+/// the caller's thread or run exists.
+///
+/// `parent` is the validated parent's `(kind, zdr, allowed_domains)`.
+// Nine inputs, all distinct facts about one derive; see `derive_run_grant`.
+#[allow(clippy::too_many_arguments)]
+async fn resolve_attach_grant(
+    state: &AppState,
+    request: &BrowserRunStartRequest,
+    browser_bearer: &VerifiedBrowserBearer,
+    org_id: &str,
+    run_key: &str,
+    parent_grant_id: &str,
+    parent: (&str, bool, &[String]),
+    mint: &BudgetMint,
+    parent_budget: Option<BudgetClaim>,
+) -> Result<ResolvedBrowserGrant, ApiError> {
+    let (kind, zdr, parent_domains) = parent;
+    // A ZDR grant must never back a durable run, whatever the request says.
+    if zdr {
+        return Err(browser_run_zdr_refusal());
+    }
+    if !matches!(kind, "session" | "human_browse") {
+        // A run grant, an approval grant or anything else is not the person's own
+        // session: an attach is derived from that and from nothing narrower.
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(json!({ "error": "browser_grant_not_derivable" })),
+        ));
+    }
+    let hosts = match request.allowed_domains.as_deref() {
+        None | Some([]) => {
+            return Err(bad_request(
+                "allowed_domains required: an attach session names its hosts",
+            ))
+        }
+        Some(requested) => canonical_browser_domains(requested)
+            .map_err(|()| bad_request("allowed_domains must be a bounded hostname policy"))?,
+    };
+    if hosts.len() > MAX_HUMAN_BROWSE_RUN_DOMAINS {
+        return Err(bad_request(
+            "allowed_domains names too many hosts for an attach session",
+        ));
+    }
+    let parent_policy = if kind == "human_browse" {
+        // An open-web parent has no host list; the named hosts stand in for it.
+        hosts.clone()
+    } else {
+        let broker_policy =
+            canonical_browser_domains(parent_domains).map_err(|()| browser_grant_forbidden())?;
+        if broker_policy != parent_domains {
+            return Err(browser_grant_forbidden());
+        }
+        broker_policy
+    };
+    derive_run_grant(
+        state,
+        request,
+        browser_bearer,
+        org_id,
+        run_key,
+        parent_grant_id,
+        &parent_policy,
+        mint,
+        parent_budget,
+    )
+    .await
+}
+
 /// True when a presented run grant was derived (by this gateway) for a run other than
 /// the one starting (D1-001). The broker reports the key a grant was issued under
 /// (`ValidateGrantResponse.session_key`); for a run grant this gateway derived it is
@@ -836,7 +1426,13 @@ async fn derive_run_grant(
     // broker refuses a derive that widens its parent, and a run should not fail
     // to start because the organization's ceiling is above a session's bound).
     // None asks for none: a parent's claim is inherited by the broker.
-    let asked = if mint.enabled {
+    //
+    // An attach (WS8.G) sends none: the broker's attach derive does take the claim
+    // fields (the same `tightenBudget` as a run grant), but an attach grant is a
+    // lease on the person's own session, so it carries the parent's claim as the
+    // broker inherits it and this run's numbers are tightened here instead.
+    let attach = non_empty(request.attach_session_id.as_deref());
+    let asked = if mint.enabled && attach.is_none() {
         mint.minted.map(|(claim, source)| {
             (
                 parent_budget.map_or(claim, |parent| claim.tighter(parent)),
@@ -853,14 +1449,20 @@ async fn derive_run_grant(
             session_key: run_key.to_owned(),
             org_id: org_id.to_owned(),
             allowed_domains: requested.clone(),
-            purpose: DERIVE_PURPOSE_AI_RUN.to_owned(),
+            purpose: if attach.is_some() {
+                DERIVE_PURPOSE_ATTACH
+            } else {
+                DERIVE_PURPOSE_AI_RUN
+            }
+            .to_owned(),
             ttl_seconds: 0,
             budget_micro_usd: claim.map_or(0, |claim| claim.micro_usd),
             budget_max_steps: claim.map_or(0, |claim| claim.max_steps),
             budget_max_runtime_s: claim.map_or(0, |claim| claim.max_runtime_s),
             budget_source: source.unwrap_or_default().to_owned(),
             budget_minted_at_unix: 0,
-            resource_id: String::new(),
+            // Only an attach grant takes a resource: the session it is bound to.
+            resource_id: attach.unwrap_or_default().to_owned(),
         }
     };
     let mut broker = state.browser_client.clone();
@@ -901,7 +1503,9 @@ async fn derive_run_grant(
     let grant_id = derived.grant_id.trim();
     if grant_id.is_empty()
         || grant_id == parent_grant_id
-        || derived.kind != "run"
+        || derived.kind != if attach.is_some() { "attach" } else { "run" }
+        // An attach grant is bound to the session it was asked for and no other.
+        || attach.is_some_and(|session| derived.resource_id != session)
         || derived.parent_grant_id != parent_grant_id
         // The parent was validated as non-ZDR above; a ZDR run grant would
         // mean the broker and this route disagree about retention.
@@ -1009,6 +1613,9 @@ async fn revoke_derived_run_grant(
 /// cannot seed a run (kind, lifetime, ZDR posture, a conflicting replay) is
 /// 409 `browser_grant_not_derivable`; anything unexpected fails closed.
 fn browser_derive_status_to_http(status: &tonic::Status) -> ApiError {
+    if let Some(refusal) = attach_derive_refusal(status) {
+        return refusal;
+    }
     match status.code() {
         tonic::Code::FailedPrecondition | tonic::Code::AlreadyExists => (
             StatusCode::CONFLICT,
@@ -1030,6 +1637,37 @@ fn browser_derive_status_to_http(status: &tonic::Status) -> ApiError {
         ),
         _ => browser_grant_status_to_http(status),
     }
+}
+
+// The broker's attach refusals. Its `errors.go` names them `attach_zdr_refused`,
+// `attach_needs_owner` and `attach_resource_invalid` only as metric outcomes; on
+// the wire they are a gRPC code plus the error text (`grant.ErrAttach*` in
+// `humanbrowse.go` and the user-only check in `server.go`), which is what is
+// matched here, code and text together.
+const BROKER_ATTACH_ZDR_REFUSED: &str = "an attach grant cannot derive from a zero data retention grant";
+const BROKER_ATTACH_NEEDS_OWNER: &str = "an attach grant needs a user owner";
+const BROKER_ATTACH_USER_ONLY: &str = "an attach grant is derived by a signed-in user only";
+
+/// The three attach refusals of `DeriveRunGrant`, by the codes `errors.go` gives
+/// them: 412 `attach_zdr_refused` (the parent is ZDR; same status as this
+/// route's own ZDR refusal), 403 `attach_needs_owner` (the caller is not a
+/// signed-in user), 400 `attach_resource_invalid` (the session id was refused).
+/// `None` for every other status.
+fn attach_derive_refusal(status: &tonic::Status) -> Option<ApiError> {
+    let (http, error) = match (status.code(), status.message()) {
+        (tonic::Code::FailedPrecondition, BROKER_ATTACH_ZDR_REFUSED) => {
+            (StatusCode::PRECONDITION_FAILED, "attach_zdr_refused")
+        }
+        (
+            tonic::Code::PermissionDenied,
+            BROKER_ATTACH_NEEDS_OWNER | BROKER_ATTACH_USER_ONLY,
+        ) => (StatusCode::FORBIDDEN, "attach_needs_owner"),
+        (tonic::Code::InvalidArgument, message) if message.contains("resource_id") => {
+            (StatusCode::BAD_REQUEST, "attach_resource_invalid")
+        }
+        _ => return None,
+    };
+    Some((http, Json(json!({ "error": error }))))
 }
 
 fn browser_run_zdr_refusal() -> ApiError {
@@ -1238,6 +1876,22 @@ async fn browser_run_start_inner(
         return Err(bad_request("goal must not be empty"));
     }
     reject_unsupported_browser_approval(&req)?;
+    // A restriction the run cannot honour is refused before any grant, thread
+    // or run write: flag off, or a malformed ask, never "run without it".
+    let policy_ask = policy_ask_for(
+        policy_ask_flag(std::env::var("MODEL_GATEWAY_BROWSER_POLICY_ASK").ok().as_deref()),
+        &req,
+    )?;
+    // Attach mode needs its flag; refused the same way, before any write.
+    let attach_session = attach_session_for(
+        attach_flag(std::env::var("MODEL_GATEWAY_BROWSER_ATTACH").ok().as_deref()),
+        &req,
+    )?;
+    // The mark of a completed attached run: closed set, attach only; refused
+    // the same way, before any write.
+    let tab_mark = tab_mark_for(&req, attach_session.as_deref())?;
+    let run_source = run_source_of(&req);
+    let request_id = request_id_for(&headers);
     let idempotency_key = parse_idempotency_key(&headers)?;
     if idempotency_key.is_some() && non_empty(req.thread_id.as_deref()).is_some() {
         return Err(bad_request("idempotency_key_requires_a_new_thread"));
@@ -1461,9 +2115,14 @@ async fn browser_run_start_inner(
     // it the loop runs "blind": no events, no pause/resume/stop.
     // The grant's budget claim tightens what execution-core is told, so the
     // planner and Quarry bound the run by the same numbers.
-    let (max_steps, max_runtime_s, max_cost_usd) =
-        bounded_run_params(&req, browser_grant.budget.as_ref());
-    let tool_input = json!({
+    let planner = planner_quota(&state, &org_id).await;
+    let (max_steps, max_runtime_s, max_cost_usd, max_planner_tokens) =
+        bounded_run_params_with_planner_tokens(
+            &req,
+            browser_grant.budget.as_ref(),
+            planner.token_ceiling,
+        );
+    let mut tool_input = json!({
         "grant_id": browser_grant.grant_id,
         "plan_id": plan_id,
         "run_id": run_id,
@@ -1478,8 +2137,12 @@ async fn browser_run_start_inner(
         "zdr": req.zdr,
         "profile_id": req.profile_id,
         "start_url": req.start_url,
-    })
-    .to_string();
+    });
+    insert_attach_fields(&mut tool_input, attach_session.as_deref());
+    insert_tab_mark(&mut tool_input, tab_mark);
+    insert_planner_fields(&mut tool_input, max_planner_tokens, planner.flag);
+    insert_policy_and_trace_fields(&mut tool_input, policy_ask, run_source, &request_id);
+    let tool_input = tool_input.to_string();
 
     let mut execution_client = state.execution_client.clone();
     let terminal_state = state.clone();
@@ -1724,6 +2387,11 @@ enum BrowserRunControlAction {
 #[derive(Debug, Deserialize)]
 struct BrowserRunControlRequest {
     action: BrowserRunControlAction,
+    /// E3.3-f: text the person typed for the live run, sent with `pause` or
+    /// `resume`. Held to the queued-input caps here and queued by execution-core
+    /// (which refuses it while its steer switch is off). Never with `stop`.
+    #[serde(default)]
+    text: Option<String>,
 }
 
 /// `POST /v1/browser/runs/:run_id/control` — pause / resume / stop a durable
@@ -1753,6 +2421,25 @@ async fn browser_run_control(
     if run_id.trim().is_empty() {
         return Err(bad_request("run_id must not be empty"));
     }
+    let steer_text = match crate::queued_input::validate_steer_text(req.text.as_deref()) {
+        Ok(text) => text,
+        Err(crate::queued_input::SteerRefusal::Empty) => {
+            return Err(bad_request("steer_text_empty"));
+        }
+        Err(crate::queued_input::SteerRefusal::TooLong { chars }) => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "error": "steer_text_too_long",
+                    "chars": chars,
+                    "max_chars": crate::queued_input::MAX_QUEUED_CHARS,
+                })),
+            ));
+        }
+    };
+    if steer_text.is_some() && req.action == BrowserRunControlAction::Stop {
+        return Err(bad_request("steer_text_not_allowed_with_stop"));
+    }
 
     let mut execution_client = state.execution_client.clone();
     let status = match req.action {
@@ -1761,6 +2448,7 @@ async fn browser_run_control(
                 PauseRunRequest {
                     run_id: run_id.clone(),
                     org_id: claims.org_id.clone(),
+                    steer_text: steer_text.clone().unwrap_or_default(),
                 },
                 &execution_bearer,
                 &session_bearer,
@@ -1783,6 +2471,7 @@ async fn browser_run_control(
                     checkpoint_id: String::new(),
                     org_id: claims.org_id.clone(),
                     approval_id: String::new(),
+                    steer_text: steer_text.clone().unwrap_or_default(),
                 },
                 &execution_bearer,
                 &session_bearer,
@@ -2159,12 +2848,20 @@ mod tests {
             stop_criteria: None,
             require_approval: None,
             max_cost_usd: None,
+            max_planner_tokens: None,
             zdr: false,
+            plan_mode: None,
+            policy: None,
+            run_source: None,
+            attach_session_id: None,
+            tab_mark_on_complete: None,
         }
     }
 
     fn browser_claims(zdr: bool) -> Claims {
         Claims {
+            key_id: None,
+            acting_user_id: None,
             sub: "user-a".to_owned(),
             iss: "auth-core".to_owned(),
             exp: i64::MAX,
@@ -2496,7 +3193,7 @@ mod tests {
                 VerifiedExecutionBearer::for_test("must-not-forward"),
                 VerifiedSessionBearer::for_test("must-not-forward"),
                 Path("run-retained".to_owned()),
-                Json(BrowserRunControlRequest { action }),
+                Json(BrowserRunControlRequest { action, text: None }),
             )
             .await
             .expect_err("issuer-ZDR browser control must fail before execution forwarding");
@@ -2749,6 +3446,377 @@ mod tests {
         }
     }
 
+    // ── WS8.G: attach mode ──────────────────────────────────────────────────
+
+    const ATTACH_SESSION: &str = "sess-run-01J0USER";
+
+    fn attach_request(grant_id: &str, hosts: &[&str]) -> BrowserRunStartRequest {
+        let mut request = browser_request(grant_id);
+        request.attach_session_id = Some(ATTACH_SESSION.to_owned());
+        request.allowed_domains = Some(hosts.iter().map(|h| (*h).to_owned()).collect());
+        request.start_url = None;
+        request
+    }
+
+    fn attach_derived(grant_id: &str, parent: &str, domains: &[&str]) -> DeriveRunGrantResponse {
+        DeriveRunGrantResponse {
+            kind: "attach".to_owned(),
+            resource_id: ATTACH_SESSION.to_owned(),
+            ..derived_run(grant_id, parent, domains)
+        }
+    }
+
+    fn attach_session_broker(derive: Result<DeriveRunGrantResponse, tonic::Code>) -> TestBrowserBroker {
+        session_broker(&["example.com", "example.org"], derive)
+    }
+
+    #[tokio::test]
+    async fn attach_derives_with_user_bearer_before_any_run_write() {
+        // Session parent, then human_browse parent: both derive an attach grant
+        // with the caller's bearer, bound to the session, with no budget claim.
+        let brokers = [
+            ("session-1", attach_session_broker(Ok(attach_derived("att-1", "session-1", &["example.com"])))),
+            (
+                "human-1",
+                human_browse_broker(Ok(attach_derived("att-1", "human-1", &["example.com"]))),
+            ),
+        ];
+        for (parent, broker) in brokers {
+            let request = attach_request(parent, &["Example.com"]);
+            let mint = minted(5_000_000, 10, 60, "request");
+            let (result, broker) = resolve_with_mint(broker, request, mint).await;
+            let grant = result.expect("derived attach grant");
+            assert_eq!(grant.grant_id, "att-1");
+            assert_eq!(grant.parent_grant_id.as_deref(), Some(parent));
+            assert_eq!(grant.allowed_domains, ["example.com"]);
+
+            let derives = broker.derive_requests.lock().expect("derive recorder");
+            assert_eq!(derives.len(), 1, "{parent}");
+            let sent = &derives[0];
+            assert_eq!(sent.purpose, "attach");
+            assert_eq!(sent.resource_id, ATTACH_SESSION);
+            assert_eq!(sent.parent_grant_id, parent);
+            assert_eq!(sent.session_key, "browser-run-key");
+            assert_eq!(sent.allowed_domains, ["example.com"]);
+            assert_eq!(
+                (sent.budget_micro_usd, sent.budget_max_steps, sent.budget_max_runtime_s),
+                (0, 0, 0),
+                "an attach derive sends no claim; the broker inherits the parent's"
+            );
+            assert!(sent.budget_source.is_empty());
+            assert_eq!(
+                broker.authorizations.lock().expect("authorization recorder").as_slice(),
+                ["Bearer browser-user-token", "Bearer browser-user-token"],
+                "validate and derive both use the caller's browser bearer"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn attach_requires_explicit_domains() {
+        for parent in ["session-1", "human-1"] {
+            for allowed in [None, Some(Vec::new())] {
+                let mut request = attach_request(parent, &[]);
+                request.allowed_domains = allowed;
+                let broker = if parent == "session-1" {
+                    attach_session_broker(Ok(attach_derived("att-1", parent, &["example.com"])))
+                } else {
+                    human_browse_broker(Ok(attach_derived("att-1", parent, &["example.com"])))
+                };
+                let (result, broker) = resolve_with(broker, request).await;
+                let error = result.expect_err("an attach never inherits hosts");
+                assert_eq!(error.0, StatusCode::BAD_REQUEST, "{parent}");
+                assert!(
+                    error.1 .0["error"]
+                        .as_str()
+                        .is_some_and(|message| message.contains("names its hosts")),
+                    "{:?}",
+                    error.1 .0
+                );
+                assert!(broker.derive_requests.lock().expect("recorder").is_empty());
+            }
+        }
+        // More than the cap is refused too, before the broker is asked.
+        let hosts: Vec<String> = (0..=MAX_HUMAN_BROWSE_RUN_DOMAINS)
+            .map(|i| format!("h{i}.example.com"))
+            .collect();
+        let refs: Vec<&str> = hosts.iter().map(String::as_str).collect();
+        let (result, broker) = resolve_with(
+            human_browse_broker(Ok(attach_derived("att-1", "human-1", &["h0.example.com"]))),
+            attach_request("human-1", &refs),
+        )
+        .await;
+        assert_eq!(result.expect_err("nine hosts").0, StatusCode::BAD_REQUEST);
+        assert!(broker.derive_requests.lock().expect("recorder").is_empty());
+    }
+
+    #[tokio::test]
+    async fn attach_rejected_for_zdr() {
+        for kind in ["session", "human_browse"] {
+            let validation = ValidateGrantResponse {
+                kind: kind.to_owned(),
+                zdr: true,
+                ..session_validation("grant-z", &["example.com"])
+            };
+            let broker = TestBrowserBroker {
+                derive: Some(Ok(attach_derived("att-1", "grant-z", &["example.com"]))),
+                ..TestBrowserBroker::validating(Ok(validation))
+            };
+            let (result, broker) =
+                resolve_with(broker, attach_request("grant-z", &["example.com"])).await;
+            assert_eq!(
+                result.expect_err(kind).0,
+                StatusCode::PRECONDITION_FAILED,
+                "{kind}"
+            );
+            assert!(broker.derive_requests.lock().expect("recorder").is_empty());
+        }
+        // The broker's own refusal (a ZDR parent it was asked to attach to) keeps
+        // its name: gRPC FailedPrecondition + the error text of `ErrAttachZdrRefused`.
+        let refusal = browser_derive_status_to_http(&tonic::Status::failed_precondition(
+            BROKER_ATTACH_ZDR_REFUSED,
+        ));
+        assert_eq!(refusal.0, StatusCode::PRECONDITION_FAILED);
+        assert_eq!(refusal.1 .0["error"], "attach_zdr_refused");
+    }
+
+    #[tokio::test]
+    async fn attach_rejected_when_parent_is_run_or_approval_kind() {
+        for kind in ["run", "", "sensitive_approval", "attach", "origin_extension"] {
+            let validation = ValidateGrantResponse {
+                kind: kind.to_owned(),
+                ..session_validation("grant-x", &["example.com"])
+            };
+            let broker = TestBrowserBroker {
+                derive: Some(Ok(attach_derived("att-1", "grant-x", &["example.com"]))),
+                ..TestBrowserBroker::validating(Ok(validation))
+            };
+            let (result, broker) =
+                resolve_with(broker, attach_request("grant-x", &["example.com"])).await;
+            let error = result.expect_err(kind);
+            assert_eq!(error.0, StatusCode::FORBIDDEN, "{kind:?}");
+            assert_eq!(error.1 .0["error"], "browser_grant_not_derivable", "{kind:?}");
+            assert!(
+                broker.derive_requests.lock().expect("recorder").is_empty(),
+                "{kind:?} must not derive"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn an_attach_answer_for_another_session_or_kind_is_refused() {
+        let wrong_session = DeriveRunGrantResponse {
+            resource_id: "sess-someone-else".to_owned(),
+            ..attach_derived("att-1", "session-1", &["example.com"])
+        };
+        let no_session = DeriveRunGrantResponse {
+            resource_id: String::new(),
+            ..attach_derived("att-1", "session-1", &["example.com"])
+        };
+        let run_kind = derived_run("att-1", "session-1", &["example.com"]);
+        let wider = attach_derived("att-1", "session-1", &["example.com", "example.net"]);
+        for (name, response) in [
+            ("wrong session", wrong_session),
+            ("no session", no_session),
+            ("run kind", run_kind),
+            ("wider", wider),
+        ] {
+            let (result, _) = resolve_with(
+                attach_session_broker(Ok(response)),
+                attach_request("session-1", &["example.com"]),
+            )
+            .await;
+            assert_eq!(result.expect_err(name).0, StatusCode::FORBIDDEN, "{name}");
+        }
+    }
+
+    #[test]
+    fn the_brokers_attach_refusals_keep_their_names() {
+        let cases = [
+            (
+                tonic::Status::failed_precondition(BROKER_ATTACH_ZDR_REFUSED),
+                StatusCode::PRECONDITION_FAILED,
+                "attach_zdr_refused",
+            ),
+            (
+                tonic::Status::permission_denied(BROKER_ATTACH_NEEDS_OWNER),
+                StatusCode::FORBIDDEN,
+                "attach_needs_owner",
+            ),
+            (
+                tonic::Status::permission_denied(BROKER_ATTACH_USER_ONLY),
+                StatusCode::FORBIDDEN,
+                "attach_needs_owner",
+            ),
+            (
+                tonic::Status::invalid_argument(
+                    "attach grant needs a bounded resource_id, and only an attach grant takes one",
+                ),
+                StatusCode::BAD_REQUEST,
+                "attach_resource_invalid",
+            ),
+            (
+                tonic::Status::invalid_argument("resource_id is required for an attach grant"),
+                StatusCode::BAD_REQUEST,
+                "attach_resource_invalid",
+            ),
+        ];
+        for (status, want_status, want_error) in cases {
+            let mapped = browser_derive_status_to_http(&status);
+            assert_eq!(mapped.0, want_status, "{want_error}");
+            assert_eq!(mapped.1 .0["error"], want_error);
+        }
+        // Other refusals keep the mapping they had.
+        for status in [
+            tonic::Status::failed_precondition("something else"),
+            tonic::Status::permission_denied("derive would widen the parent"),
+            tonic::Status::invalid_argument("hosts are not grantable"),
+        ] {
+            assert!(attach_derive_refusal(&status).is_none(), "{status:?}");
+        }
+    }
+
+    #[test]
+    fn the_attach_flag_is_off_unless_one_true_or_on() {
+        for on in [Some("1"), Some("true"), Some("on"), Some("ON"), Some(" True ")] {
+            assert!(attach_flag(on), "{on:?}");
+        }
+        for off in [None, Some(""), Some("0"), Some("off"), Some("yes"), Some("enabled")] {
+            assert!(!attach_flag(off), "{off:?}");
+        }
+    }
+
+    #[test]
+    fn a_start_with_an_attach_session_is_refused_while_the_flag_is_off() {
+        let mut request = browser_request("session-1");
+        assert_eq!(attach_session_for(false, &request).expect("no attach"), None);
+        assert_eq!(attach_session_for(true, &request).expect("no attach"), None);
+
+        request.attach_session_id = Some(ATTACH_SESSION.to_owned());
+        let refused = attach_session_for(false, &request).expect_err("flag off");
+        assert_eq!(refused.0, StatusCode::BAD_REQUEST);
+        assert_eq!(refused.1 .0["error"], "browser_attach_unavailable");
+        assert_eq!(
+            attach_session_for(true, &request).expect("flag on").as_deref(),
+            Some(ATTACH_SESSION)
+        );
+
+        let oversized = "x".repeat(MAX_ATTACH_SESSION_ID_BYTES + 1);
+        for bad in ["", "   ", "has space", oversized.as_str()] {
+            request.attach_session_id = Some(bad.to_owned());
+            let refused = attach_session_for(true, &request).expect_err(bad);
+            assert_eq!(refused.0, StatusCode::BAD_REQUEST);
+            assert_eq!(refused.1 .0["error"], "attach_session_id_invalid", "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn tab_mark_on_complete_passes_through_for_an_attach_start_only() {
+        // Not named: nothing in the tool input, nothing in the fingerprint.
+        let plain = attach_request("session-1", &["example.com"]);
+        assert_eq!(tab_mark_for(&plain, Some(ATTACH_SESSION)).expect("no mark"), None);
+        let mut untouched = json!({ "grant_id": "att-1" });
+        insert_tab_mark(&mut untouched, None);
+        assert_eq!(untouched, json!({ "grant_id": "att-1" }));
+
+        // Named with an attach session: the closed set, case-insensitive, into the tool input.
+        for (asked, sent) in [("none", "none"), ("Deliverable", "deliverable"), (" HANDOFF ", "handoff")] {
+            let mut request = attach_request("session-1", &["example.com"]);
+            request.tab_mark_on_complete = Some(asked.to_owned());
+            let mark = tab_mark_for(&request, Some(ATTACH_SESSION)).expect(asked);
+            assert_eq!(mark, Some(sent), "{asked}");
+            let mut tool_input = json!({ "grant_id": "att-1", "attach_session_id": ATTACH_SESSION });
+            insert_tab_mark(&mut tool_input, mark);
+            assert_eq!(tool_input["tab_mark_on_complete"], sent);
+            assert_eq!(tool_input["attach_session_id"], ATTACH_SESSION, "the rest is untouched");
+        }
+
+        // Outside the set: refused, whatever else is true.
+        for bad in ["keep", "", "pinned", "deliverable,none"] {
+            let mut request = attach_request("session-1", &["example.com"]);
+            request.tab_mark_on_complete = Some(bad.to_owned());
+            let refused = tab_mark_for(&request, Some(ATTACH_SESSION)).expect_err(bad);
+            assert_eq!(refused.0, StatusCode::BAD_REQUEST);
+            assert_eq!(refused.1 .0["error"], "tab_mark_on_complete_invalid", "{bad:?}");
+        }
+
+        // A mark on a start that does not attach is refused, not silently dropped.
+        let mut leased = browser_request("session-1");
+        leased.tab_mark_on_complete = Some("deliverable".to_owned());
+        let refused = tab_mark_for(&leased, None).expect_err("no attach session");
+        assert_eq!(refused.1 .0["error"], "tab_mark_requires_attach");
+
+        // A retry that asks for another mark is a different request; none named keeps the old fingerprint.
+        let base = attach_request("session-1", &["example.com"]);
+        let mut marked = base.clone();
+        marked.tab_mark_on_complete = Some("handoff".to_owned());
+        let mut other = base.clone();
+        other.tab_mark_on_complete = Some("deliverable".to_owned());
+        assert_ne!(run_request_fingerprint(&base), run_request_fingerprint(&marked));
+        assert_ne!(run_request_fingerprint(&marked), run_request_fingerprint(&other));
+        assert_eq!(run_request_fingerprint(&base), run_request_fingerprint(&base.clone()));
+    }
+
+    #[test]
+    fn attach_fields_ride_the_tool_input_only_when_attaching() {
+        let mut plain = json!({ "grant_id": "g", "profile_id": "prof-1" });
+        insert_attach_fields(&mut plain, None);
+        assert_eq!(plain, json!({ "grant_id": "g", "profile_id": "prof-1" }));
+
+        let mut attached = json!({ "grant_id": "att-1", "profile_id": "prof-1" });
+        insert_attach_fields(&mut attached, Some(ATTACH_SESSION));
+        assert_eq!(attached["grant_id"], "att-1");
+        assert_eq!(attached["attach_session_id"], ATTACH_SESSION);
+        assert_eq!(attached["profile_id"], Value::Null, "no profile in someone's session");
+    }
+
+    #[test]
+    fn a_retry_that_names_another_attach_session_is_a_different_request() {
+        let base = attach_request("session-1", &["example.com"]);
+        assert_eq!(run_request_fingerprint(&base), run_request_fingerprint(&base.clone()));
+        let mut other = base.clone();
+        other.attach_session_id = Some("sess-other".to_owned());
+        assert_ne!(run_request_fingerprint(&base), run_request_fingerprint(&other));
+        let mut plain = base.clone();
+        plain.attach_session_id = None;
+        assert_ne!(run_request_fingerprint(&base), run_request_fingerprint(&plain));
+    }
+
+    /// The handler reads the flag from the process environment; every test that
+    /// needs it on sets the same value, and none sets it off.
+    fn attach_flag_on() {
+        std::env::set_var("MODEL_GATEWAY_BROWSER_ATTACH", "1");
+    }
+
+    // Plan name: derive_failure_creates_no_thread_or_run (attach variant; the
+    // ordinary-run test of the same name is above). A refused attach derive
+    // stops the start before Session Core is contacted at all.
+    #[tokio::test]
+    async fn attach_derive_failure_creates_no_thread_or_run() {
+        attach_flag_on();
+        for code in [
+            tonic::Code::FailedPrecondition,
+            tonic::Code::PermissionDenied,
+            tonic::Code::InvalidArgument,
+            tonic::Code::Unimplemented,
+        ] {
+            let broker = attach_session_broker(Err(code));
+            let (result, session_connections) =
+                start_with(broker.clone(), attach_request("session-1", &["example.com"])).await;
+            assert!(result.is_err(), "{code:?} must refuse the start");
+            assert_eq!(
+                broker.derive_requests.lock().expect("recorder").len(),
+                1,
+                "{code:?}: the derive was attempted"
+            );
+            assert_eq!(
+                session_connections, 0,
+                "{code:?}: no thread or run write may follow a refused attach derive"
+            );
+            assert!(broker.revoke_requests.lock().expect("recorder").is_empty());
+        }
+    }
+
     // ── WS6.E: the budget claim minted onto a derived run grant ────────────
 
     fn minted(micro_usd: i64, max_steps: i32, max_runtime_s: i32, source: &'static str) -> BudgetMint {
@@ -2870,6 +3938,297 @@ mod tests {
         for off in [None, Some(""), Some("off"), Some("true"), Some("1"), Some("onn")] {
             assert!(!budget_claim_flag(off), "{off:?}");
         }
+    }
+
+    #[test]
+    fn the_planner_token_budget_rides_bounded_run_params_and_changes_nothing_else() {
+        let mut request = browser_request("session-1");
+        request.max_steps = Some(40);
+        request.max_cost_usd = Some(3.0);
+        let claim = BudgetClaim {
+            micro_usd: 1_000_000,
+            max_steps: 10,
+            max_runtime_s: 120,
+        };
+        // The first three values are exactly `bounded_run_params`'s, claim or none.
+        for claim in [Some(&claim), None] {
+            let (steps, runtime, cost) = bounded_run_params(&request, claim);
+            assert_eq!(
+                bounded_run_params_with_planner_tokens(&request, claim, None),
+                (steps, runtime, cost, None)
+            );
+        }
+        // The tokens are min(request, org) and the org key alone binds a silent request.
+        request.max_planner_tokens = Some(80_000);
+        assert_eq!(
+            bounded_run_params_with_planner_tokens(&request, None, Some(50_000)).3,
+            Some(50_000)
+        );
+        request.max_planner_tokens = Some(20_000);
+        assert_eq!(
+            bounded_run_params_with_planner_tokens(&request, None, Some(50_000)).3,
+            Some(20_000)
+        );
+        request.max_planner_tokens = None;
+        assert_eq!(
+            bounded_run_params_with_planner_tokens(&request, None, Some(50_000)).3,
+            Some(50_000)
+        );
+        assert_eq!(bounded_run_params_with_planner_tokens(&request, None, None).3, None);
+    }
+
+    #[test]
+    fn only_on_turns_the_planner_quota_read_on() {
+        assert!(planner_quotas_flag(Some("on")));
+        for off in [None, Some(""), Some("off"), Some("1"), Some("true")] {
+            assert!(!planner_quotas_flag(off), "{off:?}");
+        }
+        // Off: no ceiling, no flag, so nothing is written for an org that never opted in.
+        assert_eq!(
+            PlannerQuota::OFF,
+            PlannerQuota {
+                token_ceiling: None,
+                flag: crate::org_quota::PlannerFlag::Unset
+            }
+        );
+    }
+
+    #[test]
+    fn the_planner_keys_are_written_only_when_they_have_a_value() {
+        let base = json!({ "grant_id": "g", "max_steps": 5 });
+        let mut untouched = base.clone();
+        insert_planner_fields(&mut untouched, None, crate::org_quota::PlannerFlag::Unset);
+        assert_eq!(untouched, base, "no planner policy: the tool_input is exactly what it was");
+
+        let mut written = base.clone();
+        insert_planner_fields(&mut written, Some(40_000), crate::org_quota::PlannerFlag::Off);
+        assert_eq!(written["max_planner_tokens"], 40_000);
+        assert_eq!(written["planner_flag"], "off");
+        assert_eq!(written["grant_id"], "g");
+
+        let mut unavailable = base;
+        insert_planner_fields(&mut unavailable, None, crate::org_quota::PlannerFlag::Unavailable);
+        assert_eq!(unavailable["planner_flag"], "unavailable");
+        assert!(unavailable.get("max_planner_tokens").is_none());
+    }
+
+    #[test]
+    fn origin_mapping_covers_every_run_source() {
+        let expected = [
+            (RunSource::Chat, "USER"),
+            (RunSource::Space, "USER"),
+            (RunSource::Support, "USER"),
+            (RunSource::AgentRunConsole, "USER"),
+            (RunSource::ScheduledCron, "SCHEDULE"),
+            (RunSource::Routine, "SCHEDULE"),
+            (RunSource::BackgroundReview, "AGENT"),
+            (RunSource::Dreaming, "AGENT"),
+            (RunSource::MailTask, "WEBHOOK"),
+            (RunSource::DirectService, "API"),
+        ];
+        // Every source in ALL is mapped, and nothing maps that ALL lacks.
+        assert_eq!(expected.len(), RunSource::ALL.len());
+        for source in RunSource::ALL {
+            let (_, origin) = expected
+                .iter()
+                .find(|(s, _)| *s == source)
+                .unwrap_or_else(|| panic!("{source:?} has no expected origin"));
+            assert_eq!(source.origin().as_str(), *origin, "{source:?}");
+            // Wire names round trip, case-insensitively.
+            assert_eq!(RunSource::from_wire(source.wire()), Some(source));
+            assert_eq!(RunSource::from_wire(&source.wire().to_uppercase()), Some(source));
+            // Strings the trace accepts: 1 to 64 chars of [A-Za-z0-9_-].
+            let origin = source.origin().as_str();
+            assert!(origin.len() <= 64 && origin.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-'));
+        }
+        // Unlabelled, unknown or hostile labels are a person at the keyboard.
+        let mut request = browser_request("session-1");
+        assert_eq!(run_source_of(&request), RunSource::Chat);
+        for label in ["", "root", "API", "scheduled cron; drop", "ünï"] {
+            request.run_source = Some(label.to_owned());
+            assert_eq!(run_source_of(&request), RunSource::Chat, "{label:?}");
+        }
+        request.run_source = Some("mail_task".to_owned());
+        assert_eq!(run_source_of(&request).origin().as_str(), "WEBHOOK");
+    }
+
+    #[test]
+    fn request_id_is_the_inbound_one_when_valid_else_fresh() {
+        let mut headers = HeaderMap::new();
+        headers.insert(REQUEST_ID_HEADER, "req_Abc-123".parse().unwrap());
+        assert_eq!(request_id_for(&headers), "req_Abc-123");
+        for bad in ["a b", "a/b", "x".repeat(65).as_str(), ""] {
+            let mut headers = HeaderMap::new();
+            headers.insert(REQUEST_ID_HEADER, bad.parse().unwrap());
+            let id = request_id_for(&headers);
+            assert_ne!(id, bad);
+            assert!(id.starts_with("req-") && id.len() <= 64, "{id}");
+        }
+        let fresh = request_id_for(&HeaderMap::new());
+        assert!(fresh.starts_with("req-"));
+        assert_ne!(fresh, request_id_for(&HeaderMap::new()));
+    }
+
+    #[test]
+    fn trace_and_policy_fields_ride_the_tool_input() {
+        let mut tool_input = json!({ "grant_id": "g" });
+        insert_policy_and_trace_fields(&mut tool_input, None, RunSource::ScheduledCron, "req-1");
+        assert_eq!(tool_input["grant_id"], "g");
+        assert_eq!(tool_input["request_id"], "req-1");
+        assert_eq!(tool_input["trace"]["origin"], "SCHEDULE");
+        assert_eq!(tool_input["trace"]["agent"]["id"], "browser-agent");
+        assert!(tool_input["trace"].get("run_id").is_none(), "execution-core fills the run id");
+        assert!(tool_input.get("policy").is_none(), "no ask, no policy key");
+
+        let mut with_ask = json!({});
+        insert_policy_and_trace_fields(
+            &mut with_ask,
+            Some(json!({ "disable": ["browser.act.upload"] })),
+            RunSource::Chat,
+            "req-2",
+        );
+        assert_eq!(with_ask["policy"]["disable"][0], "browser.act.upload");
+        assert_eq!(with_ask["trace"]["origin"], "USER");
+    }
+
+    #[test]
+    fn policy_ask_flag_is_off_unless_literally_on() {
+        assert!(policy_ask_flag(Some("on")));
+        for off in [None, Some(""), Some("off"), Some("1"), Some("true")] {
+            assert!(!policy_ask_flag(off), "{off:?}");
+        }
+    }
+
+    #[test]
+    fn policy_ask_is_refused_when_the_flag_is_off_and_absent_asks_pass() {
+        let plain = browser_request("session-1");
+        assert_eq!(policy_ask_for(false, &plain).unwrap(), None);
+        assert_eq!(policy_ask_for(true, &plain).unwrap(), None);
+
+        let mut plan = browser_request("session-1");
+        plan.plan_mode = Some(true);
+        let refused = policy_ask_for(false, &plan).expect_err("fail closed");
+        assert_eq!(refused.0, StatusCode::BAD_REQUEST);
+        assert_eq!(refused.1 .0["error"], "browser_policy_ask_unavailable");
+
+        let mut asked = browser_request("session-1");
+        asked.policy = Some(RunPolicyAsk {
+            deny_domains: vec!["ads.example".to_owned()],
+            ..Default::default()
+        });
+        assert!(policy_ask_for(false, &asked).is_err());
+
+        // plan_mode=false and an empty policy ask for nothing, flag or not.
+        let mut nothing = browser_request("session-1");
+        nothing.plan_mode = Some(false);
+        nothing.policy = Some(RunPolicyAsk::default());
+        assert_eq!(policy_ask_for(false, &nothing).unwrap(), None);
+    }
+
+    #[test]
+    fn plan_mode_expands_to_the_four_disables_and_unions_with_the_callers_ask() {
+        let mut request = browser_request("session-1");
+        request.plan_mode = Some(true);
+        assert_eq!(
+            policy_ask_for(true, &request).unwrap(),
+            Some(json!({"disable": [
+                "browser.act.download", "browser.act.input",
+                "browser.act.interact", "browser.act.upload"
+            ]}))
+        );
+        request.policy = Some(RunPolicyAsk {
+            disable: vec!["browser.act.upload".to_owned(), "browser.act.scroll".to_owned()],
+            deny_domains: vec![" B.example ".to_owned(), "a.example".to_owned(), "a.example".to_owned()],
+            allow_domains: Some(vec!["Docs.Example.com".to_owned()]),
+        });
+        let ask = policy_ask_for(true, &request).unwrap().expect("ask");
+        assert_eq!(
+            ask["disable"],
+            json!([
+                "browser.act.download", "browser.act.input", "browser.act.interact",
+                "browser.act.scroll", "browser.act.upload"
+            ])
+        );
+        assert_eq!(ask["deny_domains"], json!(["a.example", "b.example"]));
+        assert_eq!(ask["allow_domains"], json!(["docs.example.com"]));
+        // Only these keys ever exist in the output.
+        let keys: BTreeSet<&str> = ask.as_object().unwrap().keys().map(String::as_str).collect();
+        assert_eq!(keys, BTreeSet::from(["allow_domains", "deny_domains", "disable"]));
+    }
+
+    #[test]
+    fn malformed_asks_are_refused_not_trimmed() {
+        let with = |policy: RunPolicyAsk| {
+            let mut request = browser_request("session-1");
+            request.policy = Some(policy);
+            policy_ask_for(true, &request)
+        };
+        for policy in [
+            RunPolicyAsk { disable: vec!["Browser Act".to_owned()], ..Default::default() },
+            RunPolicyAsk { deny_domains: vec!["https://x.example/".to_owned()], ..Default::default() },
+            RunPolicyAsk { allow_domains: Some(vec!["*.example.com".to_owned()]), ..Default::default() },
+            RunPolicyAsk { disable: (0..65).map(|i| format!("cap.n{i}")).collect(), ..Default::default() },
+        ] {
+            let err = with(policy).expect_err("malformed");
+            assert_eq!(err.1 .0["error"], "browser_policy_ask_invalid");
+        }
+        // An allow list that is present but empty is a real ask (allow nothing).
+        let none_allowed = with(RunPolicyAsk { allow_domains: Some(vec![]), ..Default::default() });
+        assert_eq!(none_allowed.unwrap(), Some(json!({"allow_domains": []})));
+    }
+
+    #[test]
+    fn the_ask_cannot_name_robots_or_proxy_keys() {
+        for key in ["robots_max", "proxy_max", "mode"] {
+            let body = json!({"goal": "g", "grant_id": "grant-1", "policy": { key: "off" }});
+            assert!(serde_json::from_value::<BrowserRunStartRequest>(body).is_err(), "{key}");
+        }
+        let ok: BrowserRunStartRequest = serde_json::from_value(json!({
+            "goal": "g", "grant_id": "grant-1", "plan_mode": true,
+            "policy": {"disable": ["browser.act.upload"]}, "run_source": "space",
+        }))
+        .unwrap();
+        assert_eq!(ok.plan_mode, Some(true));
+        assert_eq!(run_source_of(&ok), RunSource::Space);
+    }
+
+    #[test]
+    fn a_keyed_retry_that_adds_a_restriction_is_a_different_request() {
+        let base = browser_request("session-1");
+        let mut planned = base.clone();
+        planned.plan_mode = Some(true);
+        assert_ne!(run_request_fingerprint(&base), run_request_fingerprint(&planned));
+        // Absent or empty asks keep the fingerprint a request always had.
+        let mut empty = base.clone();
+        empty.plan_mode = Some(false);
+        empty.policy = Some(RunPolicyAsk::default());
+        assert_eq!(run_request_fingerprint(&base), run_request_fingerprint(&empty));
+    }
+
+    #[test]
+    fn client_supplied_planner_flag_is_ignored() {
+        // A caller that names `planner_flag` (or the token key under a different spelling) gets
+        // nothing from it: the request type has no such field, and the only writer of
+        // `tool_input.planner_flag` is the org's quota row.
+        let request: BrowserRunStartRequest = serde_json::from_value(json!({
+            "goal": "g",
+            "grant_id": "grant-1",
+            "planner_flag": "on",
+            "max_planner_tokens": 30_000,
+        }))
+        .expect("a body naming planner_flag still parses");
+        assert_eq!(request.max_planner_tokens, Some(30_000));
+        let planner = PlannerQuota::OFF;
+        let mut tool_input = json!({ "grant_id": "grant-1" });
+        let (.., tokens) = bounded_run_params_with_planner_tokens(&request, None, planner.token_ceiling);
+        insert_planner_fields(&mut tool_input, tokens, planner.flag);
+        assert!(
+            tool_input.get("planner_flag").is_none(),
+            "a client-supplied planner_flag must not reach tool_input: {tool_input}"
+        );
+        // And when the org says off, that is what is written whatever the client sent.
+        insert_planner_fields(&mut tool_input, tokens, crate::org_quota::PlannerFlag::Off);
+        assert_eq!(tool_input["planner_flag"], "off");
     }
 
     #[test]
@@ -4794,6 +6153,42 @@ mod tests {
                 .await
                 .expect("the retry of the holder");
             assert_eq!(replay["idempotent_replay"], true);
+        }
+
+        /// WS8.G: an attach start derives the attach grant, then runs under it; what
+        /// reaches execution-core is that grant and the session id, with no profile.
+        #[tokio::test]
+        async fn attach_tool_input_carries_attach_grant_and_session_id() {
+            std::env::set_var("MODEL_GATEWAY_BROWSER_ATTACH", "1");
+            let broker = session_broker(
+                &["example.com"],
+                Ok(DeriveRunGrantResponse {
+                    kind: "attach".to_owned(),
+                    resource_id: ATTACH_SESSION.to_owned(),
+                    ..derived_run("att-1", "session-1", &["example.com"])
+                }),
+            );
+            let h = Harness::with_broker(true, broker).await;
+            let mut request = attach_request("session-1", &["example.com"]);
+            request.profile_id = Some("profile-1".to_owned());
+            request.start_url = Some("https://example.com/start".to_owned());
+            let Json(body) = h.start(Some("retry-1"), request).await.expect("attach start");
+            assert_eq!(body["run_id"], "managed-run-1");
+
+            let derives = h.broker.derive_requests.lock().expect("derives").clone();
+            assert_eq!(derives.len(), 1);
+            assert_eq!(derives[0].purpose, "attach");
+            assert_eq!(derives[0].resource_id, ATTACH_SESSION);
+
+            assert!(eventually(|| h.dispatches().len() == 1).await, "one dispatch");
+            let dispatched = h.dispatches();
+            let tool_input: Value = serde_json::from_str(&dispatched[0].tool_input).unwrap();
+            assert_eq!(tool_input["grant_id"], "att-1", "the derived attach grant");
+            assert_eq!(tool_input["attach_session_id"], ATTACH_SESSION);
+            assert_eq!(tool_input["profile_id"], Value::Null);
+            assert_eq!(tool_input["allowed_domains"], json!(["example.com"]));
+            assert_eq!(tool_input["run_id"], "managed-run-1");
+            assert_eq!(dispatched[0].tool_name, "browser_agent");
         }
     }
 

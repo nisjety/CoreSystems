@@ -65,7 +65,7 @@ use crate::terminalization;
 
 /// Standard gRPC health names registered on the unauthenticated health-only
 /// surface. Business RPCs remain independently intercepted.
-pub const HEALTH_SERVICE_NAMES: [&str; 13] = [
+pub const HEALTH_SERVICE_NAMES: [&str; 14] = [
     "model_plane.v1.SessionCore",
     "model_plane.v1.ManagedRunLifecycle",
     "model_plane.v1.OrchestrationCoreService",
@@ -79,6 +79,7 @@ pub const HEALTH_SERVICE_NAMES: [&str; 13] = [
     "model_plane.v1.SpaceEvents",
     "model_plane.v1.SpaceHistoryService",
     "model_plane.v1.SpaceAttention",
+    "model_plane.v1.EventLog",
 ];
 
 const RUN_STARTED_TYPE_URL: &str = "type.googleapis.com/model_plane.v1.RunStarted";
@@ -6694,7 +6695,7 @@ async fn record_run_terminal(
 /// Core of `SessionCore::complete_step`, factored out to keep the trait method
 /// small. Appends the `STEP_COMPLETED` event and, on a terminal status, the
 /// run-terminal event + status flip, all in one tx.
-async fn complete_step_inner(
+pub(crate) async fn complete_step_inner(
     pool: &PgPool,
     audit_publisher: Option<&crate::audit_publisher::AuditOutbox>,
     req: pb::CompleteStepRequest,
@@ -6848,6 +6849,13 @@ async fn enqueue_tool_action_audit(
     };
 
     let tool = crate::audit_publisher::resolve_tool_name(&detail, &req.step_id);
+    // WS11.S7: a COMPLETED step of a web, browser or third-party-MCP tool taints the run (and its
+    // ancestors) in the same transaction as the step; a failed one read nothing from outside.
+    if req.status == "completed" && crate::external_content::is_external_content_tool(&tool) {
+        crate::external_content::mark_external_content(tx, &req.run_id)
+            .await
+            .map_err(|error| Status::internal(error.to_string()))?;
+    }
     let body = crate::audit_publisher::build_tool_action_body(
         &org_id,
         &user_id,
@@ -7038,6 +7046,14 @@ pub(crate) async fn reserve_tool_action_inner(
         return Err(Status::already_exists(
             "tool action identity is bound to different immutable input",
         ));
+    }
+
+    // WS11.S7: the inline loop has no CompleteStep, so the reservation (before the tool runs, which
+    // also marks a call that later fails: the conservative side) taints the run and its ancestors.
+    if crate::external_content::is_external_content_tool(&req.tool) {
+        crate::external_content::mark_external_content(&mut tx, &req.run_id)
+            .await
+            .map_err(|error| Status::internal(error.to_string()))?;
     }
 
     let detail = tool_action_detail(&req.tool, &req.data_category, req.zdr);
@@ -7372,6 +7388,7 @@ fn replay_event_row_to_proto(row: ReplayEventRow) -> pb::Event {
             value: serde_json::to_vec(&payload).unwrap_or_default(),
         }),
         zdr: false,
+        ..Default::default()
     }
 }
 
@@ -11262,7 +11279,7 @@ pub(crate) fn assemble_segments(inputs: &AssemblyInputs) -> (Vec<pb::ContextSegm
     (segments, total)
 }
 
-fn event_type_to_i32(s: &str) -> i32 {
+pub(crate) fn event_type_to_i32(s: &str) -> i32 {
     match s {
         "SESSION_START" => 1,
         "SESSION_END" => 2,
@@ -11280,6 +11297,15 @@ fn event_type_to_i32(s: &str) -> i32 {
         "BROWSER_ACTION_APPROVAL_REQUIRED" => 144,
         "BROWSER_ACTION_DECIDED" => 145,
         "APPROVAL_CONTINUATION_VERIFIED" => 146,
+        // Run-trace events (WS10.S2); names are the proto enum without EVENT_TYPE_.
+        "BROWSER_SESSION_OPENED" => 150,
+        "BROWSER_SESSION_CLOSED" => 151,
+        "BROWSER_CONTROL_CHANGED" => 152,
+        "BROWSER_TAB_CHANGED" => 153,
+        "BROWSER_STEP_RECEIPT_RECORDED" => 154,
+        "BROWSER_EGRESS_DECIDED" => 155,
+        "BROWSER_ARTIFACT_RECORDED" => 156,
+        "BROWSER_ATTACH_SHARED_JAR" => 160,
         _ => 0,
     }
 }
@@ -11401,6 +11427,8 @@ pub async fn serve(
     // `events` tables in this same Postgres (read-only here, plus the cancel
     // status flip).
     let runs = crate::run_service_grpc::RunServiceImpl::new(pool.clone());
+    // Run-trace read path (WS10.S6): QueryEvents over `run_trace_events`.
+    let event_log_pool = pool.clone();
 
     // Tool-action intent is committed to Postgres with the step. The outbox
     // reconnects and retries NATS delivery independently.
@@ -11533,6 +11561,10 @@ pub async fn serve(
         ))
         .add_service(MessageRevisionServiceServer::with_interceptor(
             crate::space::revisions::MessageRevisionGrpc::new(message_revision_pool, letta_for_revisions),
+            auth.clone(),
+        ))
+        .add_service(crate::eventlog_grpc::EventLogServer::with_interceptor(
+            crate::eventlog_grpc::EventLogService::new(event_log_pool),
             auth.clone(),
         ))
         .add_service(RunServiceServer::with_interceptor(runs, auth))
@@ -12563,6 +12595,29 @@ mod tests {
             assert_eq!(kind, pb::EventType::Unspecified, "{stored}");
             assert_eq!(kind.as_str_name(), "EVENT_TYPE_UNSPECIFIED", "{stored}");
         }
+    }
+
+    #[test]
+    fn event_type_to_i32_knows_the_trace_types() {
+        let names = [
+            "BROWSER_SESSION_OPENED",
+            "BROWSER_SESSION_CLOSED",
+            "BROWSER_CONTROL_CHANGED",
+            "BROWSER_TAB_CHANGED",
+            "BROWSER_STEP_RECEIPT_RECORDED",
+            "BROWSER_EGRESS_DECIDED",
+            "BROWSER_ARTIFACT_RECORDED",
+            "BROWSER_ATTACH_SHARED_JAR",
+        ];
+        for name in names {
+            let n = super::event_type_to_i32(name);
+            assert_ne!(n, 0, "{name} must map to a real EventType");
+            let kind = pb::EventType::try_from(n).expect("a valid EventType");
+            assert_eq!(kind.as_str_name(), format!("EVENT_TYPE_{name}"));
+        }
+        assert_eq!(super::event_type_to_i32("BROWSER_STEP_RECEIPT_RECORDED"), 154);
+        // A name the Model Plane has not allocated still reads as unspecified.
+        assert_eq!(super::event_type_to_i32("BROWSER_NOT_A_TYPE"), 0);
     }
 
     #[test]
@@ -14918,6 +14973,7 @@ mod tests {
                 "model_plane.v1.SpaceEvents",
                 "model_plane.v1.SpaceHistoryService",
                 "model_plane.v1.SpaceAttention",
+                "model_plane.v1.EventLog",
             ]
         );
     }

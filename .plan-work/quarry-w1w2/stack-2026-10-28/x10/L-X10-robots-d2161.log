@@ -1,0 +1,46 @@
+flag QUARRY_EDGE__CRAWL_ROBOTS: enforce -> observe
+flag QUARRY_EDGE__CRAWL_SCOPE_MODE: enforce -> observe
+ Container qv2e-edge Started 
+ Container qv2e-edge Waiting 
+ Container qv2e-edge Healthy 
+edge ready, flags match: robots=observe scope=observe
+T0=2026-10-28T17:09:05Z (observe, scope observe)
+--- 1. /private/secret under observe, no prev_fingerprint (fetch, fills cache)
+{"http":200,"status":200,"fingerprint":"blake3:9b45557a379e7139f4aea72b8829cf5833d8c8cb05cb0490089f621c19dc68d8","title":"Secret","driver":"static"}
+--- 2. /docs/a under observe, no prev_fingerprint (fetch, fills cache)
+{"http":200,"status":200,"fingerprint":"blake3:4dfdbfb1b29346755b0f92af3598794fbe440f712da33e1044985a2d87022d7f","title":"Docs A","driver":"static"}
+fixture-a fetches since T0: secret=1 docs/a=1 robots=1
+--- 3. /private/secret under observe WITH prev_fingerprint (expect cache hit, no fixture fetch)
+{"http":200,"status":200,"fingerprint":"blake3:9b45557a379e7139f4aea72b8829cf5833d8c8cb05cb0490089f621c19dc68d8","title":"Secret","driver":"static"}
+fixture-a fetches since T0: secret=1 docs/a=1
+--- cache and robots metrics (observe)
+quarry_cache_requests_total{cache="page",outcome="hit"} 1
+quarry_robots_decisions_total{mode="enforce",outcome="denied"} 0
+quarry_robots_decisions_total{mode="enforce",outcome="unreachable"} 0
+quarry_robots_decisions_total{mode="any",outcome="allowed"} 1
+quarry_robots_decisions_total{mode="observe",outcome="would_unreachable"} 0
+quarry_robots_decisions_total{mode="observe",outcome="would_deny"} 2
+elapsed since cache fill, flipping now: 2026-10-28T17:09:10Z
+flag QUARRY_EDGE__CRAWL_ROBOTS: observe -> enforce
+flag QUARRY_EDGE__CRAWL_SCOPE_MODE: observe -> enforce
+ Container qv2e-edge Started 
+ Container qv2e-edge Waiting 
+ Container qv2e-edge Healthy 
+edge ready, flags match: robots=enforce scope=enforce
+flipped at 2026-10-28T17:09:24Z
+--- 4. /private/secret under enforce WITH prev_fingerprint (expect refusal, not a cache serve)
+{"http":403,"error":{"code":"SECURITY_BLOCKED","message":"robots.txt for user-agent 'quarrybot' disallows /private/secret","denial":"robots_disallowed"}}
+--- 5. /docs/a under enforce WITH prev_fingerprint (control: allowed, expect cache serve 200)
+{"http":200,"status":200,"fingerprint":"blake3:4dfdbfb1b29346755b0f92af3598794fbe440f712da33e1044985a2d87022d7f","title":"Docs A","driver":"static"}
+--- 6. /private/secret under enforce, no prev_fingerprint (control: fetch-time refusal)
+{"http":403,"error":{"code":"SECURITY_BLOCKED","message":"robots.txt for user-agent 'quarrybot' disallows /private/secret","denial":"robots_disallowed"}}
+fixture-a fetches since T0: secret=1 docs/a=1 robots=2
+--- cache and robots metrics (enforce)
+quarry_cache_requests_total{cache="page",outcome="hit"} 2
+quarry_robots_decisions_total{mode="enforce",outcome="unreachable"} 0
+quarry_robots_decisions_total{mode="observe",outcome="would_unreachable"} 0
+quarry_robots_decisions_total{mode="any",outcome="allowed"} 1
+quarry_robots_decisions_total{mode="observe",outcome="would_deny"} 0
+quarry_robots_decisions_total{mode="enforce",outcome="denied"} 2
+page_blocked events or robots lines in the edge log since the flip:
+{"timestamp":"2026-10-28T17:09:14.860105Z","level":"INFO","fields":{"message":"robots gate: boot","mode":"enforce","unreachable_disallows":true,"crawl_delay_max_s":10,"cache_max_entries":10000},"target":"quarry_edge_rs"}

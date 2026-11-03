@@ -1,0 +1,22 @@
+# browser-grant-prod-contract.sh --preflight-only (GATEWAY_CONTAINER=verevon-gateway-rs), run 2026-10-29 11:11:28Z by verifier, exit=0
+preflight (read-only)
+  ok   running: quarry-edge
+  ok   running: model-plane-browser-broker-1
+  ok   running: model-plane-model-gateway-1
+  ok   running: model-plane-execution-core-1
+  ok   running: verevon-gateway-rs
+  ok   running: auth-service
+  ok   quarry-edge: ENVIRONMENT=production
+  ok   quarry-edge: QUARRY_EDGE_AUTH_DEV_BYPASS=0
+  ok   quarry-edge: QUARRY_EDGE__CROSS_PLANE_AUTH_DEV_BYPASS=0
+  ok   quarry-edge: QUARRY_BROWSER_NO_SANDBOX=0
+  ok   quarry-edge: QUARRY_EDGE__BROWSER_GRANT_VALIDATOR_GRPC_URL=http://browser-broker:9095
+  ok   quarry-edge: QUARRY_EDGE__DURABLE_EVENT_HISTORY=1
+  ok   broker: BROWSER_BROKER_GRANT_TTL_SECONDS=45
+  ok   gateway: BROWSER_GRANT_ENFORCEMENT=strict
+  ok   quarry-edge root filesystem is read-only
+  ok   quarry-edge drops all capabilities
+  ok   quarry-edge publishes no host port
+  ok   preflight: no process in quarry-edge has --no-sandbox on its command line
+  ok   auth-core registry: quarry-edge holds browser:read on browser-broker, no browser:write anywhere
+preflight passed

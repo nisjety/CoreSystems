@@ -1,0 +1,46 @@
+=== A1 global cap 3 (per-org cap is 8)
+start 1 -> run_01M622ZZXE9PA5BG7JAB3238EC
+start 2 -> run_01M62300C2R90R8BVCK4HQMG7H
+start 3 -> run_01M62300G2NBRV5T0ZNE1P5XYR
+HTTP/1.1 429 Too Many Requests
+retry-after: 10
+{"data":null,"meta":{"request_id":"req_01M62300KH2F5CDVK2Y5HJKHPB"},"error":{"code":"RATE_LIMITED","message":"browser capacity is full; try again shortly","details":{"active":3,"limit":3,"reason":"global_run_cap","retry_after_seconds":10,"scope":"global"},"retryable":true}}
+ready (generation,sessions_open): [1,3]
+--- metrics (run start / denied)
+quarry_agent_run_denied_total{reason="global_run_cap"} 1
+quarry_agent_run_starts_total{class="agent",outcome="started"} 3
+quarry_agent_run_starts_total{class="agent",outcome="denied"} 1
+ull} HTTP=200
+ull} HTTP=200
+ull} HTTP=200
+ready: [1,0]
+=== A2 typed TIMEOUT under scale 0.5 (navigate deadline 15 s)
+R=run_01M62302EBN7PX03A05QKFREVF
+HTTP=200
+hang navigate: http=504 time=15.014008
+{"code":"TIMEOUT","message":"browser operation navigate timed out","retryable":false,"details":{"deadline_ms":15000,"effect":"unknown","op":"navigate"}}
+second hang: http=504 time=15.016068
+{"code":"TIMEOUT","details":{"deadline_ms":15000,"effect":"unknown","op":"navigate"}}
+{"data":null,"meta":{"request_id":"req_01M6231112YS8YQE5ATZZBBQ1B"},"error":{"code":"TIMEOUT","messa ... HTTP=504
+next step took 15258 ms
+jq: parse error: Invalid numeric literal at line 2, column 0
+{"currentUrl":"http://fixture-a.crawl.test/","step":1,"status":"active","live":true}
+[{"step":0,"a":"navigate","s":"completed"},{"step":1,"a":"navigate","s":"failed"},{"step":2,"a":"navigate","s":"failed"},{"step":3,"a":"navigate","s":"failed"}]
+ready: [1,1]
+ull} HTTP=200
+=== A3 dry-run sweeper: agent run idle past 40 s TTL, RUN_SWEEPER_DRY_RUN=1
+R=run_01M6231R0R66N5K76C96V1NH6N at 2026-10-28T20:25:57Z
+HTTP=200
+idle: waiting 75 s
+ready after idle (generation,sessions_open): [1,1]
+--- edge log lines for this run (would_expire / expired)
+{"timestamp":"2026-10-28T20:26:42.059247Z","level":"WARN","fields":{"message":"would_expire: run sweeper is in dry run","run_id":"run_01M6231R0R66N5K76C96V1NH6N","class":"agent","reason":"idle","idle_s":42,"age_s":44},"target":"quarry_edge_rs::agent_routes::run_sweeper"}
+{"timestamp":"2026-10-28T20:26:47.059354Z","level":"WARN","fields":{"message":"would_expire: run sweeper is in dry run","run_id":"run_01M6231R0R66N5K76C96V1NH6N","class":"agent","reason":"idle","idle_s":47,"age_s":49},"target":"quarry_edge_rs::agent_routes::run_sweeper"}
+{"timestamp":"2026-10-28T20:26:52.056881Z","level":"WARN","fields":{"message":"would_expire: run sweeper is in dry run","run_id":"run_01M6231R0R66N5K76C96V1NH6N","class":"agent","reason":"idle","idle_s":52,"age_s":54},"target":"quarry_edge_rs::agent_routes::run_sweeper"}
+count would_expire for this run: 7
+count 'run expired' for this run: 0
+jq: parse error: Invalid numeric literal at line 2, column 0
+{"status":"active","live":true,"currentUrl":"http://fixture-a.crawl.test/"}
+{"data":{"run_id":"run_01M6231R0R66N5K76C96V1NH6N","step":1,"url":"http://fixtur ... HTTP=200
+ull} HTTP=200
+ready end: [1,0]

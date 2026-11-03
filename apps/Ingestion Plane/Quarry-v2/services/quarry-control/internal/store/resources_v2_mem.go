@@ -48,11 +48,6 @@ func decodeListCursor(s string) (createdAt int64, id string, ok bool) {
 	return ts, parts[1], true
 }
 
-// creditsPerPage is the dev-mode credit price of one fetched page,
-// mirroring quarry_core::credits::CREDIT_COST_PER_PAGE (the same constant
-// the Rust side prices /v1/crawl budget checks with).
-const creditsPerPage = 1.0
-
 // periodWindow resolves a free-form period token ("today", "7d", "30d",
 // "YYYY-MM-DD") to an inclusive start bound. Unknown tokens degrade to 7d,
 // mirroring the edge's documented contract ("backends interpret unknown
@@ -116,10 +111,10 @@ func (m *memTeamUsage) CreditUsage(orgID, period string) (TeamCreditUsageRow, er
 		if e.Timestamp.Before(since) {
 			continue
 		}
-		if pages, ok := e.Payload["pages"].(float64); ok {
-			used += pages * creditsPerPage
-		} else if e.Type == quarrycontracts.EvtPageFetched {
-			used += creditsPerPage
+		// Only page_fetched earns credits: the same rule as the Postgres query
+		// and as the per-job credits on the job reads (one price, CreditsPerPage).
+		if e.Type == quarrycontracts.EvtPageFetched {
+			used += CreditsPerPage
 		}
 	}
 	// No ceiling is modeled in-memory (Control Plane owns entitlements),

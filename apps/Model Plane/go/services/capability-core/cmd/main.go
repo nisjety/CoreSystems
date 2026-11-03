@@ -336,7 +336,9 @@ func main() {
 		slog.Info("mcp dns revalidator started", "interval", interval)
 	}
 	api.NewRoutingHandler(pool).WithPublisher(recPub).Register(protectedMux)
-	api.NewSafetyHandler(pool).WithPublisher(recPub).Register(protectedMux)
+	// E3.6-8: the document_pii catalogue key is behind DOCUMENT_PII_POLICY (off by default).
+	api.NewSafetyHandler(pool).WithPublisher(recPub).
+		WithDocumentPIIPolicy(api.DocumentPIIPolicyFromLookup(os.Getenv)).Register(protectedMux)
 	api.NewMemoryHandler(pool, runClient).WithMemoryControls(memoryClient).Register(protectedMux)
 	api.NewTasksHandler(pool).Register(protectedMux)
 	// AUTO-2: lets a user register/inspect/cancel a watch on one run. The

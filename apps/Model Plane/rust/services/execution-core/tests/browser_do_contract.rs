@@ -204,10 +204,13 @@ fn the_offer_lists_the_three_read_tools_and_act_only_on_its_own_switch() {
         .collect();
     offered.sort_unstable();
     let mut expected = OFFERED.to_vec();
+    // `browser.console` (WS9.E, merged from mp-w2w3) rides the same offer; the grant-bound MCP
+    // path serves it, not the Do session, so it stays out of OFFERED.
+    expected.push("browser.console");
     expected.sort_unstable();
     assert_eq!(
         offered, expected,
-        "the default offer must be the three read tools"
+        "the default offer must be the three read tools and the console"
     );
 
     let act = item(&agent, "fn browser_act_tool_def() -> pb::ToolDefinition {");

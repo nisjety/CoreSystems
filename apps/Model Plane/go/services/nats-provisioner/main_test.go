@@ -10,8 +10,8 @@ import (
 
 func TestTopologySpecsCoverRuntimeBindings(t *testing.T) {
 	streams := streamConfigs()
-	if len(streams) != 6 {
-		t.Fatalf("stream count = %d, want 6 (including durable usage and Space events)", len(streams))
+	if len(streams) != 7 {
+		t.Fatalf("stream count = %d, want 7 (including durable usage, Space events and the run trace)", len(streams))
 	}
 	for _, stream := range streams {
 		if stream.Name == "" || len(stream.Subjects) == 0 || stream.MaxAge == 0 {
@@ -22,8 +22,8 @@ func TestTopologySpecsCoverRuntimeBindings(t *testing.T) {
 		}
 	}
 	bindings := consumerBindings()
-	if len(bindings) != 10 {
-		t.Fatalf("consumer count = %d, want 10 (including Cost Core usage and Space attention)", len(bindings))
+	if len(bindings) != 11 {
+		t.Fatalf("consumer count = %d, want 11 (including Cost Core usage, Space attention and session-core-trace)", len(bindings))
 	}
 	if bindings[0].config.AckPolicy != nats.AckExplicitPolicy || bindings[0].config.AckWait != 30*time.Second {
 		t.Fatalf("tool completion consumer must retry explicit work: %+v", bindings[0].config)

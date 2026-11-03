@@ -23,8 +23,10 @@ use crate::policy_baseline::{Decision, PolicyBaseline};
 const ECHO_LIMIT: usize = 64;
 
 /// The principal a verified token is: a service token is autonomous, a user is human.
+/// INNH-10: an API key is autonomous too. There is never a person behind it, so it must not
+/// get the web-policy latitude of a human.
 pub fn principal(claims: &Claims) -> Principal {
-    if claims.is_service() {
+    if claims.is_service() || claims.is_api_key() {
         Principal::Autonomous
     } else {
         Principal::Human

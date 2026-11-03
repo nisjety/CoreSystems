@@ -1,0 +1,9 @@
+# R2-SC4 /ready and container facts (UTC)
+leg start: 2026-10-29T01:02:52Z
+container 1 (shipped scale, built from the T4b fix, image created 2026-10-29T01:00:26Z, started 01:00:34Z): end ready={"status":"ready","generation":1,"sessions_open":0,"slot_status":"ready","probe_failures":0}
+container 2 (QUARRY_BROWSER_DEADLINE_SCALE=0.5, up 2026-10-29T01:10:43Z): end ready={"status":"ready","generation":1,"sessions_open":0,"slot_status":"ready","probe_failures":0}
+container 3 (reverted, up 2026-10-29T01:12:23Z): end ready={"status":"ready","generation":1,"sessions_open":0,"slot_status":"ready","probe_failures":0}
+end check 2026-10-29T01:15:06Z: quarry-edge running healthy, started 01:12:16Z, RestartCount 0; GET /ready HTTP 200 status ready generation 1 sessions_open 0
+end env: QUARRY_BROWSER_DEADLINE_SCALE absent; QUARRY_EDGE__METRICS_ENABLED=0 (default); live-flags.env 0 bytes; live.sh flags | diff - P0-live-flags-end.txt: empty (exit 0)
+runs: 22 started, 22 DELETE 200; SELECT status,count(*) FROM quarry_agent_run_checkpoints WHERE run_id IN (the 22) -> closed|22
+helper: qlive-rerun-slow removed; docker ps -a --filter name=qlive -> 0 rows

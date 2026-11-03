@@ -308,6 +308,14 @@ pub async fn agent_events_stream(
     };
     let max_events = query.max_events.unwrap_or(0);
     let sink = state.event_sink.clone();
+    // INNH-10: a key's token lives at most two minutes, and every call needs a live one, so a
+    // stream a key opened ends when the token that opened it expires (`done: token_expired`).
+    // The verifier's clock leeway does not extend it. The client reconnects with a fresh token.
+    let token_deadline = claims.is_api_key().then(|| {
+        let remaining = u64::try_from(claims.exp.saturating_sub(chrono::Utc::now().timestamp()))
+            .unwrap_or(0);
+        tokio::time::Instant::now() + Duration::from_secs(remaining)
+    });
 
     let stream = async_stream::stream! {
         let _viewer = viewer;
@@ -326,9 +334,26 @@ pub async fn agent_events_stream(
                 yield Ok(Event::default().event("done").data("max_events"));
                 break;
             }
+            if token_deadline.is_some_and(|deadline| tokio::time::Instant::now() >= deadline) {
+                yield Ok(Event::default().event("done").data("token_expired"));
+                break;
+            }
             let evt = match pending.pop_front() {
                 Some(evt) => evt,
-                None => match recv_unless_closing(&mut rx).await {
+                None => match {
+                    match token_deadline {
+                        Some(deadline) => {
+                            match tokio::time::timeout_at(deadline, recv_unless_closing(&mut rx)).await {
+                                Ok(received) => received,
+                                Err(_elapsed) => {
+                                    yield Ok(Event::default().event("done").data("token_expired"));
+                                    break;
+                                }
+                            }
+                        }
+                        None => recv_unless_closing(&mut rx).await,
+                    }
+                } {
                     None => {
                         // WS6.J: the edge is shutting down; the run's own `agent.expired`
                         // (reason `shutdown`) was sent before this.

@@ -53,6 +53,9 @@ services:
       MODEL_CAPABILITY_CORE_NATS_PASSWORD: "\"${MODEL_CAPABILITY_CORE_NATS_PASSWORD:?MODEL_CAPABILITY_CORE_NATS_PASSWORD is required}\""
       MODEL_ORCHESTRATOR_CORE_NATS_PASSWORD: "\"${MODEL_ORCHESTRATOR_CORE_NATS_PASSWORD:?MODEL_ORCHESTRATOR_CORE_NATS_PASSWORD is required}\""
       MODEL_TOOL_COMPLETION_NATS_PASSWORD: "\"${MODEL_TOOL_COMPLETION_NATS_PASSWORD:?MODEL_TOOL_COMPLETION_NATS_PASSWORD is required}\""
+      # WS10.S5: quarry-edge's publish-only trace principal (deploy/nats.conf). Required like the
+      # others: an unset value would give the broker an empty password for that user.
+      MODEL_QUARRY_TRACE_NATS_PASSWORD: "\"${MODEL_QUARRY_TRACE_NATS_PASSWORD:?MODEL_QUARRY_TRACE_NATS_PASSWORD is required}\""
       APPLICATION_CONVEX_MODEL_NATS_PASSWORD: "\"${APPLICATION_CONVEX_MODEL_NATS_PASSWORD:?APPLICATION_CONVEX_MODEL_NATS_PASSWORD is required}\""
       APPLICATION_INSIGHT_MODEL_NATS_PASSWORD: "\"${APPLICATION_INSIGHT_MODEL_NATS_PASSWORD:?APPLICATION_INSIGHT_MODEL_NATS_PASSWORD is required}\""
       AUDIT_MODEL_NATS_PASSWORD: "\"${AUDIT_MODEL_NATS_PASSWORD:?AUDIT_MODEL_NATS_PASSWORD is required}\""
@@ -546,6 +549,39 @@ services:
       # 4,000 to 4,600 reasoning tokens (53 to 61 s) while its neighbours
       # finished in 11 to 13 s. At most four batches still run together.
       MODEL_GATEWAY_FINER_REVIEW_BATCHES: ${MODEL_GATEWAY_FINER_REVIEW_BATCHES:-1}
+      # WS16.S1, OFF by default: whose POST /v1/ai/chat calls publish a USAGE_ENVELOPE to cost-core.
+      # off (nobody), service (a service principal such as service:quarry-edge, outside ZDR), all
+      # (users too, which changes user accounting). Anything else is off. The build plan's default
+      # was `service`; new behaviour starts off, so turning the Quarry lane's metering on is this
+      # variable, then a restart. A ZDR call is never metered in any mode.
+      MODEL_GATEWAY_AI_CHAT_METERING: ${MODEL_GATEWAY_AI_CHAT_METERING:-off}
+      # WS16.S1: requests per minute of ONE service principal inside one org, in its own rate
+      # bucket (`<org>|svc:<service>`) apart from the org's interactive users (RATE_LIMIT_RPM).
+      MODEL_GATEWAY_SERVICE_RPM: ${MODEL_GATEWAY_SERVICE_RPM:-120}
+      # WS11.S1/S2, OFF by default: a browser run start reads the org's browser_agent_* quota rows
+      # (the planner token ceiling and the LLM-planner switch) from org-core. Only `on` enables it.
+      MODEL_GATEWAY_BROWSER_PLANNER_QUOTAS: ${MODEL_GATEWAY_BROWSER_PLANNER_QUOTAS:-off}
+      # INNH-10 MP-3, OFF by default: POST /v1/browser/key-grants and DELETE
+      # /v1/browser/key-grants/:grant_id, the door for an api_key principal (an API key exchanged
+      # by auth-core, CP-1). Off answers 404; only 1/true/on enables it. The broker's own
+      # BROWSER_BROKER_KEY_GRANTS_ENABLED still applies (403 api_key_grants_disabled while off).
+      MODEL_GATEWAY_BROWSER_KEY_GRANTS: ${MODEL_GATEWAY_BROWSER_KEY_GRANTS:-0}
+      # WS7.L, OFF by default: a browser run start may carry a tighten-only policy ask (or plan_mode,
+      # expanded to four disables) to Quarry. Off REFUSES a start that carries one (400
+      # browser_policy_ask_unavailable) so a restriction is never dropped silently. Only `on` enables it.
+      MODEL_GATEWAY_BROWSER_POLICY_ASK: ${MODEL_GATEWAY_BROWSER_POLICY_ASK:-off}
+      # WS8.G, OFF by default: a browser run start with attach_session_id derives an `attach` grant
+      # and steps on the person's own Quarry run (shared browser session). Off answers 400
+      # browser_attach_unavailable. All layers must be on: broker BROWSER_BROKER_HUMAN_BROWSE_ENABLED,
+      # Quarry QUARRY_EDGE__ATTACH and the gateway BROWSER_ATTACH too. Only `on` enables it.
+      MODEL_GATEWAY_BROWSER_ATTACH: ${MODEL_GATEWAY_BROWSER_ATTACH:-off}
+      # WS16.S8, OFF by default: advertise the extract_structured chat tool (schema-validated,
+      # verbatim-grounded extraction over 1-5 pages). The gRPC ExtractStructured fixes are unflagged.
+      MODEL_GATEWAY_EXTRACT_TOOL: ${MODEL_GATEWAY_EXTRACT_TOOL:-0}
+      # E3.6-8, OFF by default: open POST /v1/ai/documents/layout and POST /v1/ai/language/pii to
+      # SERVICE principals holding models:invoke (404 while off). Users are unaffected.
+      MODEL_GATEWAY_AI_LAYOUT_SERVICE: ${MODEL_GATEWAY_AI_LAYOUT_SERVICE:-0}
+      MODEL_GATEWAY_AI_PII_SERVICE: ${MODEL_GATEWAY_AI_PII_SERVICE:-0}
       # Agentic (Do mode) runs on the user's ChatGPT subscription: the
       # kill switch, OFF by default. One variable with three readers, and the
       # same expression in model-gateway, execution-core and inference-core
@@ -1716,6 +1752,31 @@ services:
       # was never actually wired here (Phase 2, found live: run_browser_agent_loop
       # failed fast with "browser agent unavailable" until this was added).
       QUARRY_BROWSER_AGENT_ENABLED: ${QUARRY_BROWSER_AGENT_ENABLED:-1}
+      # WS11.S1: per-run bounds for the browser agent. A run takes the default when the caller names none
+      # and is clamped to the ceiling; the planner token budget binds only when an LLM planner is selected.
+      # The numbers below are the built-in ones, so leaving them alone changes nothing.
+      QUARRY_BROWSER_AGENT_DEFAULT_MAX_STEPS: ${QUARRY_BROWSER_AGENT_DEFAULT_MAX_STEPS:-20}
+      QUARRY_BROWSER_AGENT_CEILING_MAX_STEPS: ${QUARRY_BROWSER_AGENT_CEILING_MAX_STEPS:-100}
+      QUARRY_BROWSER_AGENT_DEFAULT_MAX_RUNTIME_S: ${QUARRY_BROWSER_AGENT_DEFAULT_MAX_RUNTIME_S:-120}
+      QUARRY_BROWSER_AGENT_CEILING_MAX_RUNTIME_S: ${QUARRY_BROWSER_AGENT_CEILING_MAX_RUNTIME_S:-900}
+      QUARRY_BROWSER_AGENT_MAX_PLANNER_TOKENS: ${QUARRY_BROWSER_AGENT_MAX_PLANNER_TOKENS:-200000}
+      QUARRY_BROWSER_AGENT_MAX_PLANNER_TOKENS_CEILING: ${QUARRY_BROWSER_AGENT_MAX_PLANNER_TOKENS_CEILING:-1000000}
+      QUARRY_BROWSER_AGENT_PROCEDURE: ${QUARRY_BROWSER_AGENT_PROCEDURE:-legacy/0}
+      QUARRY_BROWSER_AGENT_MAX_CONSECUTIVE_FAILURES: ${QUARRY_BROWSER_AGENT_MAX_CONSECUTIVE_FAILURES:-3}
+      QUARRY_BROWSER_AGENT_MAX_TOTAL_FAILURES: ${QUARRY_BROWSER_AGENT_MAX_TOTAL_FAILURES:-8}
+      QUARRY_BROWSER_AGENT_PLANNER_MODE: ${QUARRY_BROWSER_AGENT_PLANNER_MODE:-off}
+      QUARRY_BROWSER_AGENT_LLM_ORGS: ${QUARRY_BROWSER_AGENT_LLM_ORGS:-}
+      QUARRY_BROWSER_AGENT_WIDENED_ACTIONS: ${QUARRY_BROWSER_AGENT_WIDENED_ACTIONS:-0}
+      QUARRY_BROWSER_AGENT_DEFAULT_ON_ACK: ${QUARRY_BROWSER_AGENT_DEFAULT_ON_ACK:-}
+      # WS12.S4b, OFF by default: refuse a browser observation that carries no Quarry redaction
+      # stamp. Turn on only once Quarry runs QUARRY_EDGE__REDACTION_MODE=enforce; off logs once per run.
+      EXECUTION_CORE_REQUIRE_QUARRY_REDACTION_STAMP: ${EXECUTION_CORE_REQUIRE_QUARRY_REDACTION_STAMP:-0}
+      # Quarry W3 browser-loop rows, all OFF by default: E3.2-c a rejection with text redirects the
+      # planner (max 5 per run); E3.3-f steer text on the pause/resume control (off refuses the text);
+      # E3.3-l console/network/warnings signals shown to the planner.
+      QUARRY_BROWSER_AGENT_APPROVAL_REDIRECT: ${QUARRY_BROWSER_AGENT_APPROVAL_REDIRECT:-0}
+      QUARRY_BROWSER_AGENT_STEER: ${QUARRY_BROWSER_AGENT_STEER:-0}
+      QUARRY_BROWSER_AGENT_OBSERVATION_QUALITY: ${QUARRY_BROWSER_AGENT_OBSERVATION_QUALITY:-0}
       # Data Plane v2 retrieval — backs the real knowledge_search agentic tool
       # (RAG over the org's ingested docs). DATAPLANE_INTERNAL_KEY is sent as
       # the x-api-key credential.
@@ -2235,6 +2296,26 @@ services:
       AUTH_CORE_URL: ${AUTH_CORE_URL:-http://auth-core:3011}
       BROWSER_BROKER_SERVICE_API_KEY: ${BROWSER_BROKER_SERVICE_API_KEY:-}
       BROWSER_BROKER_QUARRY_READY_URL: ${BROWSER_BROKER_QUARRY_READY_URL:-${QUARRY_EDGE_URL:-http://quarry-edge:8082}/ready}
+      # API-key grants (INNH-10 MP-2, internal/server/key_grants.go). OFF unless
+      # exactly 1, true or on. A key grant lives KEY_GRANT_TTL_SECONDS (clamped
+      # 30-900 s, never renewed); one key holds at most MAX_ACTIVE_GRANTS_PER_KEY
+      # live grants, which also count against the owner's cap. With the switch on
+      # the broker refuses to start without KEY_REVOKE_NATS_URL (the bus carrying
+      # Auth Core's api_key_revoked event, stream KEY_REVOKE_STREAM, durable
+      # browser-broker-api-key-revoked pre-provisioned), and disables key grants
+      # for the process if it cannot bind there.
+      BROWSER_BROKER_KEY_GRANTS_ENABLED: ${BROWSER_BROKER_KEY_GRANTS_ENABLED:-0}
+      BROWSER_BROKER_KEY_GRANT_TTL_SECONDS: ${BROWSER_BROKER_KEY_GRANT_TTL_SECONDS:-600}
+      BROWSER_BROKER_MAX_ACTIVE_GRANTS_PER_KEY: ${BROWSER_BROKER_MAX_ACTIVE_GRANTS_PER_KEY:-2}
+      BROWSER_BROKER_KEY_REVOKE_NATS_URL: ${BROWSER_BROKER_KEY_REVOKE_NATS_URL:-}
+      BROWSER_BROKER_KEY_REVOKE_NATS_USER: ${BROWSER_BROKER_KEY_REVOKE_NATS_USER:-}
+      BROWSER_BROKER_KEY_REVOKE_NATS_PASSWORD: ${BROWSER_BROKER_KEY_REVOKE_NATS_PASSWORD:-}
+      BROWSER_BROKER_KEY_REVOKE_STREAM: ${BROWSER_BROKER_KEY_REVOKE_STREAM:-VEREVON_CONTROL_OBSERVABILITY}
+      # Origin-extension grants (E3.2-e1, OD13, internal/server/origin_extension.go).
+      # OFF unless exactly 1, true or on. A signed-in user may then consent to up to
+      # eight more exact origins for a run; the grant is parent-bound, never
+      # renewed, and validates as revoked again when the switch goes back off.
+      BROWSER_BROKER_ORIGIN_EXTENSION_ENABLED: ${BROWSER_BROKER_ORIGIN_EXTENSION_ENABLED:-0}
     # The entrypoint's migrations need postgres, so wait for it to be healthy;
     # otherwise a first boot before it answers fails and restarts the container.
     depends_on:

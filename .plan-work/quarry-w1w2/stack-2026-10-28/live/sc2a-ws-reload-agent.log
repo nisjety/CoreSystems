@@ -1,0 +1,2 @@
+HANDSHAKE HTTP/1.1 101 Switching Protocols
+TEXT {"code":"FORBIDDEN","details":{"denied_action":"reload","reason":"agent_reload_denied"},"message":"reload is available to people, not to agents; use navigate","retryable":false,"type":"error"}

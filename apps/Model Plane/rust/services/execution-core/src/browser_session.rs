@@ -25,8 +25,8 @@ use tonic::{Code, Request, Status};
 use tracing::warn;
 
 use crate::quarry_agent::{
-    AgentAction, AgentClientError, AgentConstraints, QuarryAgentClient, WireObservation,
-    WireSnapshotTarget,
+    AgentAction, AgentClientError, AgentConstraints, QuarryAgentClient, StartRunParams, StepParams,
+    WireObservation, WireSnapshotTarget,
 };
 use crate::state::StateStore;
 use crate::tool_bridge::ValidatedBrowserGrant;
@@ -433,8 +433,13 @@ fn quarry_refusal(error: &AgentClientError) -> Refusal {
         AgentClientError::Status {
             status: 404 | 410, ..
         } => SESSION_LOST,
+        AgentClientError::Typed(typed) if matches!(typed.status, 404 | 410) => SESSION_LOST,
         AgentClientError::Transport(_) | AgentClientError::Authentication(_) => UNAVAILABLE,
-        AgentClientError::Status { .. } | AgentClientError::Decode(_) => SESSION_FAILED,
+        // Quarry's web policy refused the step: final, and never read as a page.
+        AgentClientError::PolicyDenied(_) => GRANT_REFUSED,
+        AgentClientError::Status { .. }
+        | AgentClientError::Typed(_)
+        | AgentClientError::Decode(_) => SESSION_FAILED,
     }
 }
 
@@ -686,18 +691,17 @@ async fn establish(
     let fence = validated.allowed_domains().to_vec();
     let constraints = session_constraints(&fence);
     let started = quarry
-        .start_run(
+        .start_run(StartRunParams::new(
             dispatch.org_id,
             &constraints,
             false,
-            None,
             &partial.grant_id,
-        )
+        ))
         .await
         .map_err(|error| quarry_refusal(&error))?;
     partial.run = Some((started.run_id.clone(), started.lease_id.clone()));
     let observation = quarry
-        .step(
+        .step(StepParams::new(
             &started.run_id,
             &started.lease_id,
             dispatch.org_id,
@@ -707,7 +711,7 @@ async fn establish(
             &constraints,
             false,
             &partial.grant_id,
-        )
+        ))
         .await
         .map_err(|error| quarry_refusal(&error))?;
     if !within_fence(&observation.url, &fence) {
@@ -738,7 +742,7 @@ pub(crate) async fn observe(
         .ok_or(NOT_OPEN)?;
     let constraints = session_constraints(&session.fence);
     let observation = match quarry
-        .step(
+        .step(StepParams::new(
             &session.quarry_run_id,
             &session.lease_id,
             dispatch.org_id,
@@ -746,7 +750,7 @@ pub(crate) async fn observe(
             &constraints,
             false,
             &session.grant_id,
-        )
+        ))
         .await
     {
         Ok(observation) => observation,

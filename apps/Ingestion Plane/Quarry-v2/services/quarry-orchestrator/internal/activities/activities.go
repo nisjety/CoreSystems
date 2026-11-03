@@ -192,6 +192,9 @@ type RunPageInput struct {
 	// batch pages and for a crawl accepted before scope existed: the body is then
 	// byte-identical to before.
 	Crawl *CrawlContext `json:"crawl,omitempty"`
+	// Scrape is the crawl's per-page scrape options (INNH-6b), the canonical JSON the edge
+	// stamped on the job. Nil for every other page: the body is then byte-identical to before.
+	Scrape json.RawMessage `json:"scrape,omitempty"`
 }
 
 // RunPageResult is returned by the runtime after a successful page execution.
@@ -222,6 +225,18 @@ type RunPageResult struct {
 	// Crawl is the edge's report on the scope, set only when the request carried a
 	// `crawl` context (WS14.S3).
 	Crawl *CrawlReport `json:"crawl,omitempty"`
+	// MarkdownArtifactID is the id of the stored markdown of this page (INNH-4). Empty when
+	// nothing was stored (ZDR, or a runtime that predates the field). General on purpose: the
+	// change monitor keeps it on a baseline and the per-run results of a crawl read it (INNH-12).
+	MarkdownArtifactID string `json:"markdown_artifact_id,omitempty"`
+	// SourceArtifactID is the stored source of this page (html, or the original document), and
+	// Bytes the size of the stored markdown (INNH-12). Both are empty whenever
+	// MarkdownArtifactID is: they ride the page_fetched event so the per-run results can list them.
+	SourceArtifactID string `json:"source_artifact_id,omitempty"`
+	Bytes            uint64 `json:"bytes,omitempty"`
+	// ScrapeApplied is the edge's proof that it applied the request's scrape options
+	// (INNH-6b). Nil when the request carried none, or the edge predates the option.
+	ScrapeApplied *bool `json:"scrape_applied,omitempty"`
 }
 
 // RunPage executes a single page via Quarry Runtime.
@@ -236,6 +251,9 @@ func (a *Activities) RunPage(ctx context.Context, in RunPageInput) (RunPageResul
 	}
 	if in.Crawl != nil {
 		payload["crawl"] = in.Crawl
+	}
+	if len(in.Scrape) > 0 {
+		payload["scrape"] = in.Scrape
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
@@ -453,6 +471,10 @@ type changeRecordRequest struct {
 	// Zdr declares the posture stamped at schedule create. Omitted (nil) for a
 	// legacy schedule, so its request body is byte-identical to before.
 	Zdr *bool `json:"zdr,omitempty"`
+	// MarkdownArtifactID is the stored markdown of the fresh fetch, as run_page returned it
+	// (INNH-4). Omitted when run_page returned none (ZDR, an older runtime), so the body is
+	// byte-identical to before. The edge verifies it belongs to OrgID before it keeps it.
+	MarkdownArtifactID string `json:"markdown_artifact_id,omitempty"`
 }
 
 // CheckChange fetches the URL fresh (via the runtime), then asks the edge to
@@ -487,6 +509,8 @@ func (a *Activities) CheckChange(ctx context.Context, in CheckChangeInput) (Chec
 		FreshFingerprint: page.Fingerprint,
 		RunID:            in.RunID,
 		Zdr:              in.Zdr,
+
+		MarkdownArtifactID: page.MarkdownArtifactID,
 	})
 	if err != nil {
 		return CheckChangeResult{}, errs.New(errs.CategoryValidation, op, err).Temporal()

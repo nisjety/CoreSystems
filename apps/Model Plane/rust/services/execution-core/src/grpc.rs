@@ -1180,6 +1180,30 @@ fn judge_run_attachments(
     Ok(())
 }
 
+/// E3.3-f: queue the steer text a pause or resume carries, before the run's state moves. Empty
+/// text is nothing to do. While `QUARRY_BROWSER_AGENT_STEER` is off the text is refused, not
+/// dropped: the person must not watch their words vanish. The ZDR refusal is the caller's
+/// (`enforce_persistence_free_execution` already ran for every run control).
+#[allow(clippy::result_large_err)]
+fn queue_steer_text(state: &StateStore, run_id: &str, text: &str) -> Result<(), Status> {
+    if text.trim().is_empty() {
+        return Ok(());
+    }
+    if !crate::browser_agent::steer_enabled() {
+        return Err(Status::failed_precondition("browser_steer_disabled"));
+    }
+    match state.enqueue_steer(run_id, text) {
+        crate::state::SteerOutcome::Queued { .. } => Ok(()),
+        crate::state::SteerOutcome::Empty => Ok(()),
+        crate::state::SteerOutcome::TooLong { .. } => {
+            Err(Status::invalid_argument("steer_text_too_long"))
+        }
+        crate::state::SteerOutcome::Full { .. } => {
+            Err(Status::resource_exhausted("steer_queue_full"))
+        }
+    }
+}
+
 fn enforce_persistence_free_execution(
     caller: &AuthenticatedUser,
     request_zdr: bool,
@@ -1412,7 +1436,7 @@ impl ExecutionCore for ExecutionService {
         // live leased context and `browser.act` can cause external effects.
         let browser_bearer = if matches!(
             request.get_ref().tool_name.as_str(),
-            "browser_agent" | "browser.observe" | "browser.act"
+            "browser_agent" | "browser.observe" | "browser.act" | "browser.console"
         ) {
             Some(
                 self.auth
@@ -1723,6 +1747,7 @@ impl ExecutionCore for ExecutionService {
         caller.authorize(&req.org_id, None)?;
         self.authorize_run(&caller, &req.run_id, &session_bearer)
             .await?;
+        queue_steer_text(&self.state, &req.run_id, &req.steer_text)?;
         let resumed_step = if req.approval_id.trim().is_empty() {
             self.state.resume_paused(&req.run_id)
         } else {
@@ -1827,6 +1852,7 @@ impl ExecutionCore for ExecutionService {
         caller.authorize(&req.org_id, None)?;
         self.authorize_run(&caller, &req.run_id, &session_bearer)
             .await?;
+        queue_steer_text(&self.state, &req.run_id, &req.steer_text)?;
         let paused = self.state.pause(&req.run_id);
         info!(run_id = %req.run_id, "pause_run: run state set to Paused");
 

@@ -4,6 +4,7 @@
 //!
 //! No I/O. No runtime. Only types, IDs, envelopes, policy, errors.
 
+pub mod ai_spec;
 pub mod artifact;
 pub mod benchmark;
 pub mod cache;

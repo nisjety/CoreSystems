@@ -1,6 +1,6 @@
 //! In-memory run state store for execution-core.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -101,6 +101,21 @@ pub struct HydratedWorkspace {
     pub baseline: HashMap<String, String>,
 }
 
+/// What happened to a steer text offered to a live browser run (E3.3-f). The same arms as
+/// model-gateway's `EnqueueOutcome` for a queued chat message, held to the same caps
+/// (`mp_contracts::queued_limits`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SteerOutcome {
+    /// Accepted; `pending` counts everything now waiting, this text included.
+    Queued { pending: usize },
+    /// `MAX_QUEUED_MESSAGES` already waiting.
+    Full { pending: usize },
+    /// Longer than `MAX_QUEUED_CHARS` characters.
+    TooLong { chars: usize },
+    /// Nothing but whitespace.
+    Empty,
+}
+
 /// One effect a scheduled Do run withheld instead of performing (WS20 S6). It keeps the
 /// tool name, a closed reason and the digest of the arguments, never the arguments.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -134,6 +149,9 @@ pub struct StateStore {
     /// The browser page a Do run has open, keyed by run (WS21-S5a). It holds ids only and is ended
     /// by the run's end, its cancellation, a close or the next open.
     browser_sessions: Arc<DashMap<String, BrowserSession>>,
+    /// Texts a person sent to a live browser run, oldest first, waiting for the loop's next
+    /// step boundary (E3.3-f). Dropped with the run's cancel.
+    steers: Arc<DashMap<String, VecDeque<String>>>,
 }
 
 impl StateStore {
@@ -289,8 +307,48 @@ impl StateStore {
             .is_some_and(|owner| owner.org_id == org_id && owner.user_id == user_id)
     }
 
+    /// Queue `text` for the run's next step boundary (E3.3-f). Trimmed, at most
+    /// `MAX_QUEUED_CHARS` characters, at most `MAX_QUEUED_MESSAGES` waiting; a refused text is
+    /// not queued, so a message that fails its bound never reaches the planner.
+    pub fn enqueue_steer(&self, run_id: &str, text: &str) -> SteerOutcome {
+        let text = text.trim();
+        if text.is_empty() {
+            return SteerOutcome::Empty;
+        }
+        let chars = text.chars().count();
+        if chars > mp_contracts::queued_limits::MAX_QUEUED_CHARS {
+            return SteerOutcome::TooLong { chars };
+        }
+        let mut queue = self.steers.entry(run_id.to_owned()).or_default();
+        if queue.len() >= mp_contracts::queued_limits::MAX_QUEUED_MESSAGES {
+            return SteerOutcome::Full {
+                pending: queue.len(),
+            };
+        }
+        queue.push_back(text.to_owned());
+        SteerOutcome::Queued {
+            pending: queue.len(),
+        }
+    }
+
+    /// Take everything waiting for the run, oldest first (E3.3-f).
+    #[must_use]
+    pub fn take_steer(&self, run_id: &str) -> Vec<String> {
+        self.steers
+            .remove(run_id)
+            .map(|(_, queue)| queue.into_iter().collect())
+            .unwrap_or_default()
+    }
+
+    /// How many steer texts wait for the run.
+    #[must_use]
+    pub fn pending_steer(&self, run_id: &str) -> usize {
+        self.steers.get(run_id).map_or(0, |queue| queue.len())
+    }
+
     #[must_use]
     pub fn cancel(&self, run_id: &str, reason: Option<String>) -> bool {
+        self.steers.remove(run_id);
         let mut next = self.get_or_create(run_id);
         next.status = RunStatus::Cancelled;
         next.last_error = reason;
@@ -625,5 +683,47 @@ mod tests {
         );
         assert!(store.take_hydrated_workspace("run-1").is_some());
         assert!(!Arc::ptr_eq(&first, &store.workspace_lock("run-1")));
+    }
+
+    #[test]
+    fn steer_is_held_to_the_queued_input_caps_and_taken_oldest_first() {
+        let store = StateStore::new();
+        assert_eq!(store.enqueue_steer("run-1", "  \n "), SteerOutcome::Empty);
+        let long = "x".repeat(mp_contracts::queued_limits::MAX_QUEUED_CHARS + 1);
+        assert_eq!(
+            store.enqueue_steer("run-1", &long),
+            SteerOutcome::TooLong {
+                chars: mp_contracts::queued_limits::MAX_QUEUED_CHARS + 1
+            }
+        );
+        let exact = "y".repeat(mp_contracts::queued_limits::MAX_QUEUED_CHARS);
+        assert_eq!(
+            store.enqueue_steer("run-1", &exact),
+            SteerOutcome::Queued { pending: 1 }
+        );
+        assert_eq!(store.enqueue_steer("run-1", "two"), SteerOutcome::Queued { pending: 2 });
+        assert_eq!(store.enqueue_steer("run-1", " three "), SteerOutcome::Queued { pending: 3 });
+        assert_eq!(store.enqueue_steer("run-1", "four"), SteerOutcome::Full { pending: 3 });
+        // Another run has its own queue.
+        assert_eq!(store.enqueue_steer("run-2", "other"), SteerOutcome::Queued { pending: 1 });
+        assert_eq!(store.pending_steer("run-1"), 3);
+        assert_eq!(store.take_steer("run-1"), vec![exact, "two".to_owned(), "three".to_owned()]);
+        assert!(store.take_steer("run-1").is_empty(), "taken once");
+        assert_eq!(store.pending_steer("run-2"), 1);
+    }
+
+    #[test]
+    fn a_cancel_drops_the_runs_steer_queue() {
+        let store = StateStore::new();
+        let _ = store.enqueue_steer("run-1", "later");
+        let _ = store.cancel("run-1", None);
+        assert!(store.take_steer("run-1").is_empty());
+    }
+
+    #[test]
+    fn steer_limits_are_the_gateways_queued_input_limits() {
+        // One definition: model-gateway's constants re-export these.
+        assert_eq!(mp_contracts::queued_limits::MAX_QUEUED_CHARS, 2_000);
+        assert_eq!(mp_contracts::queued_limits::MAX_QUEUED_MESSAGES, 3);
     }
 }

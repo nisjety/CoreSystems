@@ -247,6 +247,7 @@ pub(crate) async fn publish_finetune_event(
         resource_ref: format!("finetune:{job_id}"),
         payload,
         zdr,
+        ..Default::default()
     };
     if let Err(e) = publisher.publish(&subject, &envelope).await {
         warn!(error = %e, subject = %subject, "finetune event publish failed");
@@ -1372,6 +1373,8 @@ mod tests {
 
     fn claims_with_scopes(scopes: &[&str]) -> Claims {
         Claims {
+            key_id: None,
+            acting_user_id: None,
             sub: "u1".into(),
             iss: "test".into(),
             exp: 0,

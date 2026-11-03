@@ -27,6 +27,8 @@ fn claims(org_id: &str) -> Claims {
         scopes: Vec::new(),
         zdr: None,
         web_policy: None,
+        key_id: None,
+        acting_user_id: None,
     }
 }
 
@@ -251,6 +253,8 @@ async fn spawn_counting_control(reach: Arc<Reach>) -> String {
 async fn spawn_sweep_edge() -> (SocketAddr, Arc<Reach>) {
     std::env::set_var("QUARRY_EDGE_AUTH_DEV_BYPASS", "1");
     std::env::set_var("QUARRY_EDGE__RUNTIME_AUTH_TOKEN", SWEEP_RUNTIME_TOKEN);
+    // INNH-6a: the sitemap discovery route is served only with its flag on.
+    std::env::set_var("QUARRY_EDGE__CRAWL_SITEMAP", "on");
     let reach = Arc::new(Reach::default());
     let control = spawn_counting_control(reach.clone()).await;
     let (tx, mut rx) = mpsc::channel(64);
@@ -277,7 +281,7 @@ async fn sweep_post(addr: SocketAddr, path: &str, body: Value) -> (u16, String) 
         .post(format!("http://{addr}{path}"))
         .timeout(Duration::from_secs(20))
         .json(&body);
-    let request = if path == "/v1/internal/run_page" {
+    let request = if path == "/v1/internal/run_page" || path == "/v1/internal/crawl/sitemap" {
         let url = body["url"].as_str().unwrap_or_default();
         let org = body["org_id"].as_str().unwrap_or_default();
         request
@@ -306,6 +310,10 @@ fn fetching_routes() -> Vec<(&'static str, Value)> {
         (
             "/v1/internal/run_page",
             json!({ "url": url, "org_id": "org_sweep" }),
+        ),
+        (
+            "/v1/internal/crawl/sitemap",
+            json!({ "url": url, "org_id": "org_sweep", "crawl": { "v": 1, "scope_mode": "enforce" } }),
         ),
     ]
 }
@@ -374,6 +382,8 @@ fn route_manifest() -> Vec<(&'static str, Gate)> {
         ("/v1/internal/change/record", NoUrl),
         ("/v1/internal/page-images/:org/:doc/:page/:hash", NoUrl),
         ("/v1/internal/run_page", Gated),
+        // INNH-6a: the seed is gated, and so is every sitemap file the route fetches.
+        ("/v1/internal/crawl/sitemap", Gated),
         ("/v1/internal/schedules/preflight", NoUrl),
         ("/v1/internal/orgs/:org/profiles", NoUrl),
         ("/v1/profiles", NoUrl),
@@ -399,6 +409,17 @@ fn route_manifest() -> Vec<(&'static str, Gate)> {
         ("/v1/batch/:id/resume", NoUrl),
         ("/v1/batch/:id/events", NoUrl),
         ("/v1/jobs/:id", NoUrl),
+        // INNH-12: reads the stored page_fetched rows of a job; nothing is fetched.
+        ("/v1/crawl/:id/results", NoUrl),
+        ("/v1/batch/:id/results", NoUrl),
+        ("/v1/jobs/:id/results", NoUrl),
+        // INNH-5: subscriptions are control records; the URL is a delivery target checked by
+        // control's egress guard, never fetched by the edge.
+        ("/v1/webhook-subscriptions", NoUrl),
+        ("/v1/webhook-subscriptions/:id", NoUrl),
+        ("/v1/webhook-subscriptions/:id/rotate-secret", NoUrl),
+        ("/v1/webhook-subscriptions/:id/deliveries", NoUrl),
+        ("/v1/webhook-subscriptions/:id/deliveries/:did/retry", NoUrl),
         ("/v1/jobs/:id/errors", NoUrl),
         ("/v1/jobs/:id/events", NoUrl),
         ("/v1/runs/:id/events", NoUrl),
@@ -412,6 +433,8 @@ fn route_manifest() -> Vec<(&'static str, Gate)> {
         ("/v1/map", Gated),
         ("/v1/audit/page", Gated),
         ("/v1/extract", Gated),
+        // INNH-11: the caller uploads the bytes; the route fetches nothing.
+        ("/v1/parse", NoUrl),
         // The pipeline fetches the pages its own search returned; no caller URL.
         ("/v1/answer", OtherPlane),
         ("/v1/answer/stream", OtherPlane),
@@ -432,6 +455,8 @@ fn route_manifest() -> Vec<(&'static str, Gate)> {
         ("/v1/change/check", NoUrl),
         ("/v1/change/latest", NoUrl),
         ("/v1/change/history", NoUrl),
+        // INNH-4: reads two stored baselines of a url the caller names; nothing is fetched.
+        ("/v1/change/diff", NoUrl),
         ("/v1/change/snapshot", NoUrl),
         // Queues a URL for a worker; gated before it is queued (the postgres-queue handler).
         ("/v1/change/refresh", Gated),

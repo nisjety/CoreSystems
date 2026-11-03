@@ -1,0 +1,1 @@
+PRECONDITION enforcement is "shadow", not "on". This script sets nothing: the stack session sets QUARRY_EDGE__BUDGET_ENFORCEMENT=on and restarts the edge first. Nothing was proved.

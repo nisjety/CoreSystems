@@ -26,6 +26,7 @@ type Routed struct {
 var (
 	_ Repository = (*Routed)(nil)
 	_ Purger     = (*Routed)(nil)
+	_ KeyRevoker = (*Routed)(nil)
 )
 
 // NewRouted returns a Routed over a durable store and an in-memory store.
@@ -62,6 +63,11 @@ func (r *Routed) CreateScopedSensitiveApproval(ctx context.Context, p ApprovalPa
 	return r.byID(p.ParentGrantID).CreateScopedSensitiveApproval(ctx, p)
 }
 
+// CreateOriginExtension lives in its parent's store.
+func (r *Routed) CreateOriginExtension(ctx context.Context, p ExtensionParams) (*Grant, error) {
+	return r.byID(p.ParentGrantID).CreateOriginExtension(ctx, p)
+}
+
 // Derive lives in its parent's store.
 func (r *Routed) Derive(ctx context.Context, p DeriveParams) (*Grant, error) {
 	return r.byID(p.ParentGrantID).Derive(ctx, p)
@@ -88,6 +94,28 @@ func (r *Routed) GetScoped(ctx context.Context, id, orgID, ownerID string) (*Gra
 // RevokeScoped routes by the id prefix; the subtree is in the same store.
 func (r *Routed) RevokeScoped(ctx context.Context, id, orgID, ownerID, reason string) error {
 	return r.byID(id).RevokeScoped(ctx, id, orgID, ownerID, reason)
+}
+
+// RevokeByKey revokes the key's grants in BOTH stores: a ZDR key grant lives
+// in memory with a "z_" id, an ordinary one in the durable store. Both are
+// always attempted; a failure of either is returned (joined) so the caller
+// retries, and a store that cannot revoke by key is an error, never a skip.
+func (r *Routed) RevokeByKey(ctx context.Context, keyID, reason string) (int64, error) {
+	var total int64
+	var errs []error
+	for _, repo := range []Repository{r.ephemeral, r.persistent} {
+		revoker, ok := repo.(KeyRevoker)
+		if !ok {
+			errs = append(errs, errors.New("grant store cannot revoke by api key"))
+			continue
+		}
+		n, err := revoker.RevokeByKey(ctx, keyID, reason)
+		total += n
+		if err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return total, errors.Join(errs...)
 }
 
 // PurgeExpired purges both stores that support it and returns the total.

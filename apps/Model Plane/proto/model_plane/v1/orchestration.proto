@@ -595,6 +595,14 @@ message ApprovalCause {
   // tool is an MCP tool whose definition is pinned: only a pinned MCP tool may be offered a
   // standing rule or a thread scope.
   string tool_digest = 10;
+
+  // Closed word for the kind of host a browser gate targets: `none`, `general`,
+  // `sensitive`, `internal` or `unknown` (E3.2-a). Never a host name. Write-only: a
+  // creator states it, session-core stores it as the approval's top-level
+  // `metadata.host_class` (where the authz_decision audit reads it, dropped for a
+  // zero-retention caller), and a read-back cause leaves it empty. Field 11: 10 is
+  // WS13 S7's tool_digest on model-plane, merged with mp-w2w3 on 2026-11-03.
+  string host_class = 11;
 }
 
 // A durable todo record.
@@ -1570,6 +1578,11 @@ message OrchestrationEvent {
     // run's executor counted, the run's cumulative usage. Counts and ids only; session-core
     // broadcasts it on the run's stream and never persists it.
     RunUsageProgress run_usage_progress = 29;
+    // Attach mode (build plan WS8.G, tag 30 — additive; 29 is WS27's
+    // RunUsageProgress on branch model-plane). A delegate agent attached to the
+    // user's browser session and reuses the owner's shared cookie jar. Ids only:
+    // no URL, no title.
+    BrowserAttachSharedJar browser_attach_shared_jar = 30;
   }
 
   message PlanTransitioned {
@@ -1691,12 +1704,30 @@ message OrchestrationEvent {
   message BrowserRunPaused {
     string run_id = 1;
     string plan_id = 2;
+    // Why the run paused (WS8.G, additive). Empty for a user-initiated pause;
+    // `user_took_over` when the person took control of an attached tab.
+    string reason = 3;
   }
 
   // User-initiated run resume (Phase 2 B5), mirrors `BrowserRunPaused`.
   message BrowserRunResumed {
     string run_id = 1;
     string plan_id = 2;
+    // Why the run resumed (WS8.G, additive). Empty for a user-initiated resume;
+    // `control_returned` when the person gave control of an attached tab back.
+    string reason = 3;
+  }
+
+  // A delegate agent attached to the owner's browser session with the shared
+  // cookie jar (WS8.G, tag 30). Emitted once per attach as an audit event.
+  // Ids only: no URL and no page title ever ride this event.
+  message BrowserAttachSharedJar {
+    string run_id = 1;
+    string plan_id = 2;
+    string attach_id = 3;
+    // The user's own browser run the delegate attached to.
+    string session_run_id = 4;
+    string tab_id = 5;
   }
 
   // A browser action was classified risky (login, checkout, posting a form,

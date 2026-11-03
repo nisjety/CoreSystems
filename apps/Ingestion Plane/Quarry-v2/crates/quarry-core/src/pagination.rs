@@ -85,6 +85,16 @@ pub struct ListFilter {
 
     #[serde(default)]
     pub sort: SortDirection,
+
+    /// Artifact lists only (INNH-12): keep the artifacts one run wrote (`run_...`). Every
+    /// other list ignores it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+
+    /// Artifact lists only (INNH-12): keep one artifact kind (`markdown`, `html`, ...).
+    /// Every other list ignores it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
 }
 
 impl ListFilter {
@@ -207,6 +217,21 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(f.effective_limit(), MAX_PAGE_LIMIT);
+    }
+
+    #[test]
+    fn a_default_filter_serializes_without_the_artifact_filters() {
+        let wire = serde_json::to_value(ListFilter::default()).unwrap();
+        assert!(wire.get("run_id").is_none(), "{wire}");
+        assert!(wire.get("kind").is_none(), "{wire}");
+        let f = ListFilter {
+            run_id: Some("run_1".into()),
+            kind: Some("markdown".into()),
+            ..Default::default()
+        };
+        let wire = serde_json::to_value(f).unwrap();
+        assert_eq!(wire["run_id"], "run_1");
+        assert_eq!(wire["kind"], "markdown");
     }
 
     #[test]

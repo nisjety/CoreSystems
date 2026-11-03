@@ -27,6 +27,8 @@ use crate::service_tokens::{ServiceTokenRequest, SharedServiceTokenProvider};
 
 const DEFAULT_TIMEOUT_SECS: u64 = 30;
 const DEFAULT_MODEL: &str = "claude-sonnet-4-6";
+const CHAT_TIMEOUT_SECS: u64 = 60;
+const CHAT_RETRY_BACKOFF_MS: u64 = 250;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ModelPlaneInvokeRequest {
@@ -52,6 +54,10 @@ pub struct ModelPlaneClient {
     base_url: String,
     auth: ModelPlaneAuth,
     default_model: String,
+    /// Development bypass: the second token of the chat lane.
+    inference_token: Option<String>,
+    chat_timeout: Duration,
+    retry_backoff: Duration,
 }
 
 #[derive(Clone)]
@@ -78,6 +84,9 @@ impl ModelPlaneClient {
             base_url: base_url.into(),
             auth: ModelPlaneAuth::None,
             default_model: DEFAULT_MODEL.to_string(),
+            inference_token: None,
+            chat_timeout: Duration::from_secs(CHAT_TIMEOUT_SECS),
+            retry_backoff: Duration::from_millis(CHAT_RETRY_BACKOFF_MS),
         })
     }
 
@@ -304,6 +313,265 @@ impl ModelPlaneClient {
                 format!("model-plane invoke/stream transport failure: {}", e.without_url()),
             )
         })
+    }
+}
+
+// ---- POST /v1/ai/chat (INNH-1 U2) ------------------------------------------
+//
+// The lane the AI scrape formats use. It is `/v1/ai/chat`, never `/v1/invoke`:
+// the gateway refuses service principals on `/v1/invoke` and its non-ZDR path
+// writes the prompt into a Session Core thread, while `/v1/ai/chat` persists
+// nothing and takes `structured_output_schema` and `zdr`. The body carries
+// exactly the fields the gateway reads: no `session_key`, no `thread_id`, and
+// no `max_tokens` or `temperature` (the route fixes them and ignores ours, so
+// sending them would suggest a cap that does not exist).
+
+/// One chat message. `role` is `system` or `user`.
+#[derive(Clone, Serialize)]
+pub struct AiChatMessage {
+    pub role: String,
+    pub content: String,
+}
+
+impl AiChatMessage {
+    pub fn system(content: impl Into<String>) -> Self {
+        Self {
+            role: "system".to_owned(),
+            content: content.into(),
+        }
+    }
+
+    pub fn user(content: impl Into<String>) -> Self {
+        Self {
+            role: "user".to_owned(),
+            content: content.into(),
+        }
+    }
+}
+
+// A page rides in `content`, so Debug names the size and never the text.
+impl std::fmt::Debug for AiChatMessage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AiChatMessage")
+            .field("role", &self.role)
+            .field("chars", &self.content.chars().count())
+            .finish()
+    }
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+/// The body of `POST /v1/ai/chat`.
+#[derive(Clone, Serialize)]
+pub struct AiChatRequest {
+    pub messages: Vec<AiChatMessage>,
+    /// A routing alias (`verevon-balance`), never a vendor model id.
+    pub model: String,
+    /// The JSON Schema as a **string**: the gateway reads an `Option<String>`
+    /// and answers 400 to an object.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub structured_output_schema: Option<String>,
+    /// Omitted when false.
+    #[serde(skip_serializing_if = "is_false")]
+    pub zdr: bool,
+}
+
+impl std::fmt::Debug for AiChatRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AiChatRequest")
+            .field("messages", &self.messages)
+            .field("model", &self.model)
+            .field("has_schema", &self.structured_output_schema.is_some())
+            .field("zdr", &self.zdr)
+            .finish()
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+pub struct AiChatUsage {
+    #[serde(default)]
+    pub input_tokens: u64,
+    #[serde(default)]
+    pub output_tokens: u64,
+}
+
+/// The answer of `POST /v1/ai/chat`. `cost_usd` and `provider_used` are absent
+/// until the gateway returns them (WS16.S1).
+#[derive(Clone, Deserialize)]
+pub struct AiChatResponse {
+    #[serde(default)]
+    pub id: String,
+    pub content: String,
+    #[serde(default)]
+    pub model_used: String,
+    #[serde(default)]
+    pub usage: AiChatUsage,
+    #[serde(default)]
+    pub cost_usd: Option<f64>,
+    #[serde(default)]
+    pub provider_used: Option<String>,
+}
+
+impl std::fmt::Debug for AiChatResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AiChatResponse")
+            .field("id", &self.id)
+            .field("chars", &self.content.chars().count())
+            .field("model_used", &self.model_used)
+            .field("usage", &self.usage)
+            .finish()
+    }
+}
+
+/// Why a `/v1/ai/chat` hop failed. One mapping, here: the engine turns these
+/// into report codes and no other layer reads a status.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ModelHopError {
+    /// Quarry holds no credential for this lane (the Dynamic path is not built
+    /// until the grant exists, and an unauthenticated client has none). Nothing
+    /// was sent and nothing was minted.
+    #[error("the Model Plane lane is not granted to Quarry")]
+    LaneNotGranted,
+    /// 401: the gateway did not accept the token.
+    #[error("the Model Plane did not accept the credential")]
+    Unauthorized,
+    /// 403: the token is valid but not allowed on this route.
+    #[error("the Model Plane denied the route")]
+    RouteDenied,
+    /// 400 and any other 4xx: the gateway refused the request itself.
+    #[error("the Model Plane rejected the request")]
+    Rejected,
+    /// 412: the gateway would not run the request under ZDR.
+    #[error("the Model Plane refused the request under zero data retention")]
+    ZdrRefused,
+    /// 429, with the wait when the gateway said one.
+    #[error("the Model Plane rate-limited the request")]
+    RateLimited { retry_after_s: Option<u32> },
+    /// Any other 5xx, after the one retry of 502 and 503.
+    #[error("the Model Plane answered {status}")]
+    Upstream { status: u16 },
+    /// No answer in time. Never retried: the provider may have charged.
+    #[error("the Model Plane did not answer in time")]
+    Timeout,
+    /// The connection failed (after one retry of a connect error).
+    #[error("the Model Plane could not be reached")]
+    Transport,
+    /// A 2xx whose body was not a chat answer.
+    #[error("the Model Plane answer could not be read")]
+    Decode,
+}
+
+/// The longest answer body read.
+const MAX_CHAT_BODY_BYTES: usize = 4 * 1024 * 1024;
+
+impl ModelPlaneClient {
+    /// Development bypass only: the token sent as `x-inference-authorization`.
+    /// Without it the one dev token (`with_bearer_token`) is sent in both
+    /// headers. The gateway wants two tokens: the user ingress token and one
+    /// with `aud=inference-core`.
+    pub fn with_inference_bearer_token(mut self, token: impl Into<String>) -> Self {
+        self.inference_token = Some(token.into());
+        self
+    }
+
+    /// The bound on one chat call (default 60 s). A call that outlives it is
+    /// [`ModelHopError::Timeout`] and is not retried.
+    pub fn with_chat_timeout(mut self, timeout: Duration) -> Self {
+        self.chat_timeout = timeout;
+        self
+    }
+
+    /// The pause before the one retry of a connect error, 502 or 503.
+    pub fn with_retry_backoff(mut self, backoff: Duration) -> Self {
+        self.retry_backoff = backoff;
+        self
+    }
+
+    /// One chat call on behalf of `org_id`.
+    ///
+    /// Only the static development credential works today. The Dynamic path
+    /// (Auth Core minted tokens) needs the grant and the manifest rows that are
+    /// owner decision OD-1, so it returns [`ModelHopError::LaneNotGranted`]
+    /// without minting anything; so does a client with no credential.
+    ///
+    /// A connect error, 502 or 503 is retried once; a read timeout never is.
+    pub async fn chat_for_org(
+        &self,
+        org_id: &str,
+        req: &AiChatRequest,
+    ) -> Result<AiChatResponse, ModelHopError> {
+        // The org will pick the minted token once the Dynamic path exists.
+        let _ = org_id;
+        let (bearer, inference) = match &self.auth {
+            ModelPlaneAuth::StaticDev(token) => (
+                token.clone(),
+                self.inference_token.clone().unwrap_or_else(|| token.clone()),
+            ),
+            ModelPlaneAuth::Dynamic(_) | ModelPlaneAuth::None => {
+                return Err(ModelHopError::LaneNotGranted)
+            }
+        };
+        let url = format!("{}/v1/ai/chat", self.base_url.trim_end_matches('/'));
+        let mut attempt = 0u8;
+        loop {
+            attempt += 1;
+            let sent = self
+                .http
+                .post(&url)
+                .timeout(self.chat_timeout)
+                .bearer_auth(&bearer)
+                .header("x-inference-authorization", format!("Bearer {inference}"))
+                .json(req)
+                .send()
+                .await;
+            let resp = match sent {
+                Ok(resp) => resp,
+                Err(e) if e.is_timeout() => return Err(ModelHopError::Timeout),
+                Err(e) if e.is_connect() && attempt == 1 => {
+                    tokio::time::sleep(self.retry_backoff).await;
+                    continue;
+                }
+                Err(_) => return Err(ModelHopError::Transport),
+            };
+            let status = resp.status().as_u16();
+            if matches!(status, 502 | 503) && attempt == 1 {
+                tokio::time::sleep(self.retry_backoff).await;
+                continue;
+            }
+            return Self::decode_chat(resp).await;
+        }
+    }
+
+    async fn decode_chat(resp: reqwest::Response) -> Result<AiChatResponse, ModelHopError> {
+        let status = resp.status();
+        if !status.is_success() {
+            let code = status.as_u16();
+            return Err(match code {
+                401 => ModelHopError::Unauthorized,
+                403 => ModelHopError::RouteDenied,
+                412 => ModelHopError::ZdrRefused,
+                429 => ModelHopError::RateLimited {
+                    retry_after_s: resp
+                        .headers()
+                        .get(reqwest::header::RETRY_AFTER)
+                        .and_then(|value| value.to_str().ok())
+                        .and_then(|value| value.trim().parse::<u32>().ok()),
+                },
+                400..=499 => ModelHopError::Rejected,
+                _ => ModelHopError::Upstream { status: code },
+            });
+        }
+        let bytes = match resp.bytes().await {
+            Ok(bytes) => bytes,
+            Err(e) if e.is_timeout() => return Err(ModelHopError::Timeout),
+            Err(_) => return Err(ModelHopError::Decode),
+        };
+        if bytes.len() > MAX_CHAT_BODY_BYTES {
+            return Err(ModelHopError::Decode);
+        }
+        serde_json::from_slice::<AiChatResponse>(&bytes).map_err(|_| ModelHopError::Decode)
     }
 }
 

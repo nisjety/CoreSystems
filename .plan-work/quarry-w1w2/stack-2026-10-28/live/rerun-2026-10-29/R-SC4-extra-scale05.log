@@ -1,0 +1,13 @@
+=== extra start 2026-10-28T23:19:42Z ready={"generation":1,"sessions_open":0}
+--- E1 run=run_01M62CZW9RRNN2GXTYDF2YF9TF
+warm: http=200 time=0.343283 {"url":"http://fixture-a.crawl.test/","title":"Fixture A","step":0}
+hang 1: http=504 time=12.542075 {"code":"TIMEOUT","message":"browser operation navigate timed out","retryable":false,"details":{"deadline_ms":12500,"effect":"unknown","op":"navigate"}}
+hang 2: http=504 time=12.601796 {"code":"TIMEOUT","message":"browser operation navigate timed out","retryable":false,"details":{"deadline_ms":12500,"effect":"unknown","op":"navigate"}}
+next navigate: http=200 time=0.251598 {"url":"http://fixture-a.crawl.test/","title":"Fixture A","step":3}
+close: HTTP=200
+--- E2 run=run_01M62D0Q4KFW1WMTZNB0WXM3XD (hang is the first step)
+hang: http=504 time=12.598339 {"code":"TIMEOUT","message":"browser operation navigate timed out","retryable":false,"details":{"deadline_ms":12500,"effect":"unknown","op":"navigate"}}
+next wait: http=502 time=0.113379 {"code":"DRIVER_FAILED","message":"chromiumoxide: no current page; call goto() first","retryable":false,"details":{"reason":"no_current_page"}}
+then navigate: http=200 time=0.304609 {"url":"http://fixture-a.crawl.test/","title":"Fixture A","step":2}
+close: HTTP=200
+=== extra end 2026-10-28T23:20:24Z ready={"generation":1,"sessions_open":0}

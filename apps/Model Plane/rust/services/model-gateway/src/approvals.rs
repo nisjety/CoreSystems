@@ -1133,6 +1133,7 @@ async fn publish_event<P: EventPublisher>(
             "comment": approval.comment,
         }),
         zdr: false,
+        ..Default::default()
     };
     if let Err(e) = publisher.publish(subject, &envelope).await {
         warn!(error = %e, subject = %subject, "failed to publish approval event");

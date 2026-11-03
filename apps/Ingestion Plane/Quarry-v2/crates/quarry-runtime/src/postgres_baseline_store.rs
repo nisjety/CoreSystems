@@ -81,6 +81,68 @@ impl PostgresBaselineStore {
         row.map(row_to_baseline).transpose()
     }
 
+    /// One baseline by id, only when it belongs to `org_id`: another tenant's id reads as
+    /// `None`, the same as an id that does not exist (INNH-4).
+    pub async fn load_baseline(
+        &self,
+        org_id: &str,
+        baseline_id: &str,
+    ) -> QuarryResult<Option<BaselineSnapshot>> {
+        let row = sqlx::query(
+            "SELECT baseline_id, org_id, source_url, fingerprint, artifact_id, \
+                    prev_baseline_id, run_id, captured_at \
+             FROM quarry_baselines \
+             WHERE org_id = $1 AND baseline_id = $2",
+        )
+        .bind(org_id)
+        .bind(baseline_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| db_err("load_baseline", e))?;
+        row.map(row_to_baseline).transpose()
+    }
+
+    /// One stored diff record by id, only when it belongs to `org_id` (INNH-4).
+    pub async fn load_diff(&self, org_id: &str, diff_id: &str) -> QuarryResult<Option<DiffRecord>> {
+        let row = sqlx::query(
+            "SELECT diff_id, org_id, from_baseline_id, to_baseline_id, source_url, \
+                    format, artifact_id, summary, created_at \
+             FROM quarry_change_diffs \
+             WHERE org_id = $1 AND diff_id = $2",
+        )
+        .bind(org_id)
+        .bind(diff_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| db_err("load_diff", e))?;
+        row.map(row_to_diff).transpose()
+    }
+
+    /// The newest diff record stored for the pair `(from, to)` of this org's baselines, if any
+    /// (INNH-4). A retried activity can store the pair twice; the newest wins.
+    pub async fn find_diff(
+        &self,
+        org_id: &str,
+        from_baseline_id: &str,
+        to_baseline_id: &str,
+    ) -> QuarryResult<Option<DiffRecord>> {
+        let row = sqlx::query(
+            "SELECT diff_id, org_id, from_baseline_id, to_baseline_id, source_url, \
+                    format, artifact_id, summary, created_at \
+             FROM quarry_change_diffs \
+             WHERE org_id = $1 AND from_baseline_id = $2 AND to_baseline_id = $3 \
+             ORDER BY created_at DESC \
+             LIMIT 1",
+        )
+        .bind(org_id)
+        .bind(from_baseline_id)
+        .bind(to_baseline_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| db_err("find_diff", e))?;
+        row.map(row_to_diff).transpose()
+    }
+
     /// Walks the chain newest-first up to `limit` entries.
     pub async fn load_history(
         &self,
@@ -157,6 +219,44 @@ impl PostgresBaselineStore {
         .map_err(|e| db_err("create_diff", e))?;
         Ok(())
     }
+}
+
+fn row_to_diff(row: sqlx::postgres::PgRow) -> QuarryResult<DiffRecord> {
+    let artifact_id = row
+        .try_get::<String, _>("artifact_id")
+        .map_err(|e| db_err("row.artifact_id", e))?
+        .parse::<ArtifactKind>()
+        .map_err(|_| {
+            QuarryError::new(
+                ErrorCode::Internal,
+                "stored diff has a malformed artifact id",
+            )
+        })?;
+    Ok(DiffRecord {
+        diff_id: row
+            .try_get::<String, _>("diff_id")
+            .map_err(|e| db_err("row.diff_id", e))?,
+        org_id: row
+            .try_get::<String, _>("org_id")
+            .map_err(|e| db_err("row.org_id", e))?,
+        from_baseline_id: row
+            .try_get::<String, _>("from_baseline_id")
+            .map_err(|e| db_err("row.from_baseline_id", e))?,
+        to_baseline_id: row
+            .try_get::<String, _>("to_baseline_id")
+            .map_err(|e| db_err("row.to_baseline_id", e))?,
+        source_url: row
+            .try_get::<String, _>("source_url")
+            .map_err(|e| db_err("row.source_url", e))?,
+        format: row
+            .try_get::<String, _>("format")
+            .map_err(|e| db_err("row.format", e))?,
+        artifact_id,
+        summary: row.try_get("summary").ok(),
+        created_at: row
+            .try_get::<DateTime<Utc>, _>("created_at")
+            .map_err(|e| db_err("row.created_at", e))?,
+    })
 }
 
 fn row_to_baseline(row: sqlx::postgres::PgRow) -> QuarryResult<BaselineSnapshot> {
@@ -312,5 +412,100 @@ mod tests {
         // Newest-first = fp_2 → fp_1 → fp_0.
         assert_eq!(hist[0].fingerprint, "fp_2");
         assert_eq!(hist[2].fingerprint, "fp_0");
+    }
+
+    fn diff_record(org: &str, from: &str, to: &str, url: &str) -> DiffRecord {
+        DiffRecord {
+            diff_id: format!("diff_{}", quarry_core::ids::kinds::ArtifactKind::new()),
+            org_id: org.into(),
+            from_baseline_id: from.into(),
+            to_baseline_id: to.into(),
+            source_url: url.into(),
+            format: "json".into(),
+            artifact_id: quarry_core::ids::kinds::ArtifactKind::new(),
+            summary: Some("+1 -1 paragraphs".into()),
+            created_at: Utc::now(),
+        }
+    }
+
+    #[tokio::test]
+    async fn load_baseline_is_org_scoped_and_keeps_the_artifact_id() {
+        let Some(pool) = fresh_pool().await else {
+            return;
+        };
+        clean(&pool).await;
+        let store = PostgresBaselineStore::new(pool);
+        let mut b = baseline("org_a", "https://x/", "fp", None);
+        let art = quarry_core::ids::kinds::ArtifactKind::new();
+        b.artifact_id = Some(art.clone());
+        store.save_baseline(&b).await.unwrap();
+
+        let got = store
+            .load_baseline("org_a", &b.baseline_id)
+            .await
+            .unwrap()
+            .expect("own baseline");
+        assert_eq!(got.artifact_id, Some(art));
+        // Another tenant's read of the same id, and an unknown id, are the same None.
+        assert!(store
+            .load_baseline("org_b", &b.baseline_id)
+            .await
+            .unwrap()
+            .is_none());
+        assert!(store
+            .load_baseline("org_a", "bln_missing")
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn load_diff_and_find_diff_are_org_scoped() {
+        let Some(pool) = fresh_pool().await else {
+            return;
+        };
+        clean(&pool).await;
+        let store = PostgresBaselineStore::new(pool);
+        let first = baseline("org_a", "https://x/", "fp1", None);
+        let second = baseline("org_a", "https://x/", "fp2", Some(&first.baseline_id));
+        store.save_baseline(&first).await.unwrap();
+        store.save_baseline(&second).await.unwrap();
+        let d = diff_record(
+            "org_a",
+            &first.baseline_id,
+            &second.baseline_id,
+            "https://x/",
+        );
+        store.create_diff_record(&d).await.unwrap();
+
+        let by_id = store
+            .load_diff("org_a", &d.diff_id)
+            .await
+            .unwrap()
+            .expect("own diff");
+        assert_eq!(by_id.artifact_id, d.artifact_id);
+        assert_eq!(by_id.summary.as_deref(), Some("+1 -1 paragraphs"));
+        let by_pair = store
+            .find_diff("org_a", &first.baseline_id, &second.baseline_id)
+            .await
+            .unwrap()
+            .expect("pair");
+        assert_eq!(by_pair.diff_id, d.diff_id);
+
+        assert!(store
+            .load_diff("org_b", &d.diff_id)
+            .await
+            .unwrap()
+            .is_none());
+        assert!(store
+            .find_diff("org_b", &first.baseline_id, &second.baseline_id)
+            .await
+            .unwrap()
+            .is_none());
+        assert!(store
+            .find_diff("org_a", &second.baseline_id, &first.baseline_id)
+            .await
+            .unwrap()
+            .is_none());
     }
 }

@@ -12,6 +12,8 @@ pub mod fleet;
 pub mod action_runtime;
 pub mod agent_loop;
 pub mod ai_formats;
+pub mod ai_scrape;
+pub mod ai_verify;
 pub mod answer;
 pub mod artifact_store;
 pub mod browser_driver;
@@ -118,7 +120,7 @@ pub mod vision;
 pub use action_runtime::{ActionResult, ActionRuntime};
 pub use agent_loop::{AgentLoop, AgentLoopResult, LoopTermination};
 pub use agent_memory::{redact_sensitive, AgentScratchpad};
-pub use ai_formats::{AiFormatRunner, JsonResult, QueryResult, SummaryResult};
+pub use ai_formats::{AiFormatRunner, JsonRequest, JsonResult, QueryResult, SummaryResult};
 pub use answer::{
     AnswerPipeline, AnswerRequest, AnswerResult, Citation, ClosureFetcher, MarkdownFetcher,
     SimpleHttpMarkdownFetcher,

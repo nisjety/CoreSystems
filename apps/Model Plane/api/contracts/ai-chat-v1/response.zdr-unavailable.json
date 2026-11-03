@@ -1,0 +1,11 @@
+{
+  "status": 412,
+  "body": {
+    "error": {
+      "code": "zdr_unavailable",
+      "message": "Zero data retention applies to this request, but no model deployment is attested to provide it. The request was not sent to a model.",
+      "retryable": false,
+      "action": "choose_another_model"
+    }
+  }
+}

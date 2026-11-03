@@ -1,0 +1,7 @@
+held.html 200 0.001685 
+img.html 200 0.001735 
+redir 302 0.001622 http://fixture-b.crawl.test/ext
+toblank.html 200 0.001824 
+slow.html 000 bytes=0
+fixture-b/ext 200
+fixture-b/pixel.png 404
