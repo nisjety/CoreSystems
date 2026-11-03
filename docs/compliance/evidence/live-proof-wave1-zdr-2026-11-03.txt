@@ -1,11 +1,11 @@
 Live re-proof: Wave 1 zero data retention (ZDR) rows on main, on the developer stack
-Date: 2026-11-03 (UTC, 01:05 to 01:25). Branch `zdr-live-proof-wave1`, fast-forwarded to main 12534c248.
+Date: 2026-11-03 (UTC, 01:05 to 01:26). Branch `zdr-live-proof-wave1`, fast-forwarded to main 12534c248.
 Verification level: LIVE-VERIFIED on a developer stack. Not production. No secrets, tokens, tenant ids or payload
 content below. First proof: live-proof-wave1-zdr-2026-10-28.txt. Machine output: live-reads-zdr-2026-11-03.txt.
 Why again: model-plane and Space were merged into main, every plane was rebuilt from main on 2026-11-01, and
 model-gateway now decides ZDR through zdr_posture::decide_for (org_zdr and zdr_waiver claims) instead of
-Claims::effective_zdr. Nothing was rebuilt or restarted for this re-proof; every turn named claude-sonnet-5-5 and none
-reached a model.
+Claims::effective_zdr. Nothing was rebuilt; the only restarts were the two the coordinating session approved for the
+start order (run E). Every turn named claude-sonnet-5-5 and none reached a model.
 
 STACK AS FOUND
   session-core, execution-core, model-gateway, inference-core: all at 91b9b8ddf ("merge: space into main"), which
@@ -16,10 +16,10 @@ STACK AS FOUND
 
 VERDICTS
   D1-220 HOLDS: the spec passes on main against the live SPA; the refusal is the same SSE `event: error` frame.
-  D1-221 HOLDS EXCEPT THE START ORDER: before/turns/after with zero delta on all seven counters; the preflight passes
-    5/6 and fails deploy-order only: the 2026-11-01 redeploy started model-gateway (23:23:46) before execution-core
-    (23:23:52). All four run the same revision, so the order is cosmetic here, but the runbook asks for it. An ordered
-    restart (model-gateway, then inference-core; no rebuild) was asked of the coordinating session and is not done.
+  D1-221 HOLDS: the preflight first passed 5/6 and failed deploy-order only, because the 2026-11-01 redeploy started
+    model-gateway (23:23:46) before execution-core (23:23:52). With the coordinating session's approval, model-gateway
+    and then inference-core were restarted (docker restart, same images, no rebuild); the preflight then passed 6/6
+    (run E), and the before/turns/after bracket run right after it had zero delta on all seven counters (run F).
   D1-222 HOLDS: a non-ZDR org and the ZDR-TEST org with ZDR off are refused by the spec before sending; zero delta.
   D1-223 not re-run (a DB harness test, resolved 2026-10-28).
   D1-224 HOLDS: zdr-org-switch-gate.spec.ts with ZDR_GATE_LIVE_PATCH=1 3/3 on the live SPA; seed --apply ON and
@@ -53,9 +53,20 @@ RUN C: Z-60 PASS 1 (01:17-01:19 UTC). ZDR switched ON at 01:17:21, fresh sign-in
     mp:gw:cache:* keys 0): delta 0 on all seven. ZDR switched OFF again after the run.
 RUN D: D1-222 (01:19 UTC): as the e2e fixture account the spec stops at "this spec sends a turn only for a ZDR-TEST org"
   (received "Verevon E2E Test"); as the ZDR-TEST owner with ZDR off at "the ZDR-TEST org must have ZDR on". Zero delta.
+RUN E: ORDERED RESTART AND PREFLIGHT (01:22 UTC), approved by the coordinating session (docker restart only, one at a
+  time, each healthy before the next): model-plane-model-gateway-1 restarted 01:22:05, healthy 01:22:14; then
+  model-plane-inference-core-1 restarted 01:22:28, healthy 01:22:37. Same image ids as before, no log line with
+  authorization violation or panic. Preflight: 6/6 PASS (deploy-order now session-core 11-01 23:23:41, execution-core
+  11-01 23:23:52, model-gateway 01:22:05, inference-core 01:22:28; the other five checks unchanged).
+RUN F: Z-60 PASS 1 AFTER THE 6/6 PREFLIGHT (01:23-01:26 UTC). ZDR switched ON at 01:23:24, fresh sign-in after the
+  posture cache. The spec turn: ok. The default web-search turn: Søk disabled with the reason, browse_web false, tools [],
+  `event: error` code zdr_unavailable, "not sent to a model" on the page. Counters unchanged on all seven (threads 1199,
+  messages 3899, runs 2013, feedback_ratings 20, session_audit_outbox 5043, ZDR outbox rows 0, cache keys 0). ZDR
+  switched OFF again; the test session signed out.
 
 FINAL STATE
-  Nothing rebuilt or restarted. ZDR-TEST org: ZDR off, plan pro. The test sessions opened for the runs are signed out.
+  Nothing rebuilt. Restarted: model-gateway and inference-core only, as approved (run E); both healthy. ZDR-TEST org:
+  ZDR off, plan pro. The test sessions opened for the runs are signed out.
   Not run: the session-core zdr_receipt DB tests (D1-223) and the known main failures named by the coordinator
   (model-gateway zdr_posture every_non_get_route_is_classified and no_raw_retention_claim_is_read_outside_the_named_
   inventory); this re-proof does not depend on them and did not touch them.
