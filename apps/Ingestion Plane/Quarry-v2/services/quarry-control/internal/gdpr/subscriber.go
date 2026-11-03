@@ -3,6 +3,7 @@ package gdpr
 import (
 	"errors"
 	"fmt"
+	"os"
 	"time"
 
 	"github.com/nats-io/nats.go"
@@ -56,8 +57,10 @@ func StartSubscriber(nc *nats.Conn, purger OrgPurger, edge EdgePurger, logger ze
 	if err != nil {
 		return nil, fmt.Errorf("gdpr: init JetStream context: %w", err)
 	}
+	// W2-U49: user-level receipt erasure, off unless QUARRY_CONTROL_GDPR_USER_RECEIPTS is on.
+	users := UserReceiptPurgerFromEnv(os.Getenv, edge, logger)
 	sub, err := js.QueueSubscribe(ErasureRequestedSubject, DurableConsumerName,
-		func(msg *nats.Msg) { handleDelivery(msg, purger, edge, logger) },
+		func(msg *nats.Msg) { handleDelivery(msg, purger, edge, users, logger) },
 		nats.Bind(controlSharedStream, DurableConsumerName),
 		nats.ManualAck(),
 	)
@@ -82,8 +85,8 @@ func StartSubscriber(nc *nats.Conn, purger OrgPurger, edge EdgePurger, logger ze
 //
 // This mirrors the ack/nak split the sibling org-purge consumers
 // (documents-api-go, conversation-core-go) use for the same event.
-func handleDelivery(msg *nats.Msg, purger OrgPurger, edge EdgePurger, logger zerolog.Logger) {
-	result, edgeResult, err := HandleErasureWithEdge(purger, edge, msg.Data)
+func handleDelivery(msg *nats.Msg, purger OrgPurger, edge EdgePurger, users UserReceiptPurger, logger zerolog.Logger) {
+	result, edgeResult, err := HandleErasureWithUsers(purger, edge, users, msg.Data)
 	var poison *poisonEventError
 	if err != nil && !errors.As(err, &poison) {
 		logger.Error().Err(err).Str("subject", msg.Subject).Msg("gdpr: erasure purge failed — will retry")
@@ -105,7 +108,7 @@ func handleDelivery(msg *nats.Msg, purger OrgPurger, edge EdgePurger, logger zer
 			Int64("edge_rows_deleted", sumEdgeRows(edgeResult)).
 			Int64("edge_tombstones_deleted", sumEdgeTombstones(edgeResult)).
 			Int64("edge_cache_keys_deleted", sumEdgeCacheKeys(edgeResult)).
-			Msg("gdpr: org-scoped crawl data purged")
+			Msg("gdpr: erasure data purged")
 	}
 	if ackErr := msg.Ack(); ackErr != nil {
 		logger.Error().Err(ackErr).Str("subject", msg.Subject).Msg("gdpr: ack failed")
