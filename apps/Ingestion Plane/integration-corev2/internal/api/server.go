@@ -3570,6 +3570,9 @@ func requiredCapabilityForOperation(providerKey, operation string) (string, bool
 	return "", false
 }
 
+// actionRequiresApproval is the approval allowlist for provider writes. The write-operations
+// golden (EP-10-S2, internal/actions/testdata/provider-write-operations.json) requires every
+// spelling of a write the executor serves to be named here.
 func actionRequiresApproval(providerKey, operation string) bool {
 	normalized := strings.TrimSpace(strings.ToLower(operation))
 	switch providerKey {

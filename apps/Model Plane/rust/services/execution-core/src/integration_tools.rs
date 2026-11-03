@@ -1697,6 +1697,32 @@ mod tests {
         assert_eq!(contract.len(), READ_OPERATIONS.len(), "golden rows are unique");
     }
 
+    /// The write golden (integration-corev2, copied into mp-contracts) lists the writes that
+    /// execution-core must catalogue as writes. A write marked as a read here would skip the
+    /// approval it needs, and a catalogued write the golden does not name would have no
+    /// integration-corev2 check behind it.
+    #[test]
+    fn catalog_writes_match_contract_table() {
+        use mp_contracts::provider_writes::WRITE_OPERATIONS;
+        use std::collections::BTreeSet;
+
+        let contract: BTreeSet<(&str, &str)> = WRITE_OPERATIONS
+            .iter()
+            .map(|write| (write.provider, write.operation))
+            .collect();
+        let catalogued: BTreeSet<(&str, &str)> = CATALOG
+            .iter()
+            .flat_map(|(provider, ops)| {
+                ops.iter()
+                    .filter(|op| op.is_write)
+                    .map(move |op| (*provider, op.operation))
+            })
+            .collect();
+
+        assert_eq!(catalogued, contract);
+        assert_eq!(contract.len(), WRITE_OPERATIONS.len(), "golden rows are unique");
+    }
+
     // -------------------------------------------------------------------
     // Connected-app reads (WS23-S3).
     // -------------------------------------------------------------------

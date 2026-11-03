@@ -1,0 +1,255 @@
+{
+  "version": 1,
+  "operations": [
+    {
+      "provider": "github",
+      "operation": "issues.create",
+      "aliases": [
+        "github.issues.create"
+      ],
+      "approval_required": true,
+      "direction": "write",
+      "editable_kind": "none"
+    },
+    {
+      "provider": "google",
+      "operation": "gmail.send",
+      "aliases": [
+        "google.gmail.send"
+      ],
+      "approval_required": true,
+      "direction": "write",
+      "editable_kind": "mail_send"
+    },
+    {
+      "provider": "linkedin",
+      "operation": "posts.create",
+      "aliases": [
+        "linkedin.posts.create"
+      ],
+      "approval_required": true,
+      "direction": "write",
+      "editable_kind": "none"
+    },
+    {
+      "provider": "meta",
+      "operation": "instagram.media.create",
+      "aliases": [],
+      "approval_required": true,
+      "direction": "write",
+      "editable_kind": "none"
+    },
+    {
+      "provider": "meta",
+      "operation": "instagram.media.publish",
+      "aliases": [],
+      "approval_required": true,
+      "direction": "write",
+      "editable_kind": "none"
+    },
+    {
+      "provider": "meta",
+      "operation": "messenger.messages.send",
+      "aliases": [],
+      "approval_required": true,
+      "direction": "write",
+      "editable_kind": "none"
+    },
+    {
+      "provider": "meta",
+      "operation": "pages.post",
+      "aliases": [
+        "facebook.page.post"
+      ],
+      "approval_required": true,
+      "direction": "write",
+      "editable_kind": "none"
+    },
+    {
+      "provider": "meta",
+      "operation": "whatsapp.messages.send",
+      "aliases": [],
+      "approval_required": true,
+      "direction": "write",
+      "editable_kind": "none"
+    },
+    {
+      "provider": "microsoft",
+      "operation": "mail.send",
+      "aliases": [
+        "microsoft.mail.send"
+      ],
+      "approval_required": true,
+      "direction": "write",
+      "editable_kind": "mail_send"
+    },
+    {
+      "provider": "slack",
+      "operation": "message.send",
+      "aliases": [
+        "slack.message.send"
+      ],
+      "approval_required": true,
+      "direction": "write",
+      "editable_kind": "none"
+    }
+  ],
+  "excludedWrites": [
+    {
+      "provider": "github",
+      "operation": "issues.comment.create",
+      "aliases": [
+        "github.issues.comment.create"
+      ]
+    },
+    {
+      "provider": "github",
+      "operation": "issues.update",
+      "aliases": [
+        "github.issues.update"
+      ]
+    },
+    {
+      "provider": "linkedin",
+      "operation": "ads.campaign.create",
+      "aliases": [
+        "linkedin.ads.campaign.create"
+      ]
+    },
+    {
+      "provider": "linkedin",
+      "operation": "ads.campaign.update",
+      "aliases": [
+        "linkedin.ads.campaign.update"
+      ]
+    },
+    {
+      "provider": "linkedin",
+      "operation": "conversions.create",
+      "aliases": [
+        "linkedin.conversions.create"
+      ]
+    },
+    {
+      "provider": "linkedin",
+      "operation": "events.create",
+      "aliases": [
+        "linkedin.events.create"
+      ]
+    },
+    {
+      "provider": "linkedin",
+      "operation": "events.update",
+      "aliases": [
+        "linkedin.events.update"
+      ]
+    },
+    {
+      "provider": "meta",
+      "operation": "ads.campaign.create",
+      "aliases": [
+        "app_ads.campaign.create"
+      ]
+    },
+    {
+      "provider": "meta",
+      "operation": "catalog.batch",
+      "aliases": []
+    },
+    {
+      "provider": "meta",
+      "operation": "catalog.product.upsert",
+      "aliases": []
+    },
+    {
+      "provider": "meta",
+      "operation": "instagram.messages.send",
+      "aliases": []
+    },
+    {
+      "provider": "meta",
+      "operation": "live.create",
+      "aliases": [
+        "facebook.live.create"
+      ]
+    },
+    {
+      "provider": "meta",
+      "operation": "messenger.subscribed_apps",
+      "aliases": []
+    },
+    {
+      "provider": "meta",
+      "operation": "pages.photo",
+      "aliases": [
+        "facebook.page.photo"
+      ]
+    },
+    {
+      "provider": "meta",
+      "operation": "threads.container.create",
+      "aliases": []
+    },
+    {
+      "provider": "meta",
+      "operation": "threads.publish",
+      "aliases": []
+    },
+    {
+      "provider": "okta",
+      "operation": "user.activate",
+      "aliases": [
+        "okta.user.activate"
+      ]
+    },
+    {
+      "provider": "okta",
+      "operation": "user.suspend",
+      "aliases": [
+        "okta.user.suspend"
+      ]
+    },
+    {
+      "provider": "snapchat",
+      "operation": "ads.creative.create",
+      "aliases": [
+        "snapchat.ads.creative.create"
+      ]
+    },
+    {
+      "provider": "snapchat",
+      "operation": "ads.media.create",
+      "aliases": [
+        "snapchat.ads.media.create"
+      ]
+    },
+    {
+      "provider": "snapchat",
+      "operation": "profile.media.create",
+      "aliases": [
+        "snapchat.profile.media.create"
+      ]
+    },
+    {
+      "provider": "snapchat",
+      "operation": "saved_story.create",
+      "aliases": [
+        "snapchat.saved_story.create"
+      ]
+    },
+    {
+      "provider": "snapchat",
+      "operation": "spotlight.post",
+      "aliases": [
+        "snapchat.spotlight.post"
+      ]
+    },
+    {
+      "provider": "snapchat",
+      "operation": "story.post",
+      "aliases": [
+        "snapchat.story.post"
+      ]
+    }
+  ]
+}
