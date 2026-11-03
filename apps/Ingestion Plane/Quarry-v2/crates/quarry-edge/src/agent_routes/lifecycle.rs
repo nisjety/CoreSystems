@@ -142,6 +142,15 @@ pub(super) fn resume_next_step(
         .max(after_receipts)
 }
 
+/// W3-E3.4-2/3: the step of the D8-10 arc a resume takes, for its log line: `expired` or
+/// `suspended` -> `live`. `None` for a resume of an `active` checkpoint (a crash or a
+/// shutdown drain left it so), and while `QUARRY_EDGE__RUN_TTL` is off (nothing writes the
+/// two statuses then). The checkpoint the resume saves at start is `active` again
+/// (`checkpoint_for_entry`), which is the `resumable` -> `live` step itself.
+pub(super) fn resume_arc(prior: AgentRunStatus, run_ttl: bool) -> Option<&'static str> {
+    (run_ttl && prior.is_resumable()).then(|| prior.as_str())
+}
+
 /// `POST /v1/agent/runs` — acquire a leased browser session for a new run.
 pub async fn start_run(
     State(state): State<AppState>,
@@ -241,7 +250,9 @@ pub async fn start_run(
                 "agent run not found",
             ));
         }
-        if checkpoint.status == AgentRunStatus::Closed {
+        // W3-E3.4-2/3: `closed` is the only terminal status; `active`, `expired` and
+        // `suspended` (a run the sweeper released with QUARRY_EDGE__RUN_TTL on) resume.
+        if checkpoint.status.is_terminal() {
             return Err(status_err(
                 StatusCode::CONFLICT,
                 &request_id,
@@ -861,6 +872,13 @@ pub async fn start_run(
         run_class.label(),
         if resume_checkpoint.is_some() { "resumed" } else { "started" },
     );
+    if let Some(prior_status) = resume_checkpoint
+        .as_ref()
+        .and_then(|checkpoint| resume_arc(checkpoint.status, run_ttl_enabled()))
+    {
+        // Only a non-ZDR run is resumed (refused above); a run id and a closed status label.
+        tracing::info!(run_id = %run_id, prior_status, "run resumed from a released checkpoint");
+    }
 
     // WS10.S3: the run's event trace starts here, so the AgentStarted below is the first
     // event of this segment's replay ring (seq 1 on a start, past the checkpoint on a resume).
@@ -911,5 +929,30 @@ mod human_browse_ttl_tests {
     fn a_sooner_grant_cap_shortens_the_lease_but_never_to_zero() {
         assert_eq!(human_browse_lease_ttl_s(Some(at(1_800_003_600)), at(1_800_000_000)), 3_600);
         assert_eq!(human_browse_lease_ttl_s(Some(at(1_799_999_000)), at(1_800_000_000)), 1);
+    }
+}
+
+#[cfg(test)]
+mod resume_arc_tests {
+    use super::*;
+
+    #[test]
+    fn a_resume_of_a_released_run_names_its_arc_only_with_the_switch_on() {
+        assert_eq!(resume_arc(AgentRunStatus::Expired, true), Some("expired"));
+        assert_eq!(resume_arc(AgentRunStatus::Suspended, true), Some("suspended"));
+        // A crash or a drain leaves `active`: no arc to name.
+        assert_eq!(resume_arc(AgentRunStatus::Active, true), None);
+        // Closed never resumes (refused with 409 before this point).
+        assert_eq!(resume_arc(AgentRunStatus::Closed, true), None);
+        // Switch off: nothing is named.
+        assert_eq!(resume_arc(AgentRunStatus::Expired, false), None);
+    }
+
+    #[test]
+    fn only_closed_is_refused_by_the_resume_gate() {
+        assert!(AgentRunStatus::Closed.is_terminal());
+        for status in [AgentRunStatus::Active, AgentRunStatus::Expired, AgentRunStatus::Suspended] {
+            assert!(!status.is_terminal(), "{} resumes", status.as_str());
+        }
     }
 }

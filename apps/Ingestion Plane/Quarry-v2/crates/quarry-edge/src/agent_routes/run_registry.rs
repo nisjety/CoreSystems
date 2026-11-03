@@ -41,6 +41,13 @@ impl Inner {
         self.runs.len()
     }
 
+    /// W3-E3.4-2/3: whether `run_id` is live in this process, or a resume of it is being
+    /// committed (D1-021's claim). The sweeper asks before it marks a released run's
+    /// checkpoint `expired`/`suspended`, so a resume that won the race keeps its `active` one.
+    pub fn is_live_or_resuming(&self, run_id: &str) -> bool {
+        self.runs.contains_key(run_id) || self.pending_resume_ids.contains(run_id)
+    }
+
     /// Tests only: no API-key start is pending any more (every slot was committed or dropped).
     #[cfg(test)]
     pub fn inner_pending_key_is_empty_for_tests(&self) -> bool {
@@ -538,6 +545,19 @@ mod resume_claim_tests {
         assert!(runs
             .try_reserve_for("org_a", Agent, RunCapOverride::NONE, Some("run_1"))
             .is_ok());
+    }
+
+    #[test]
+    fn a_pending_resume_counts_as_live_for_the_sweeper_until_it_is_dropped() {
+        let runs = registry();
+        assert!(!runs.lock().unwrap().is_live_or_resuming("run_1"));
+        let slot = runs
+            .try_reserve_for("org_a", Agent, RunCapOverride::NONE, Some("run_1"))
+            .expect("the resume claims the id");
+        assert!(runs.lock().unwrap().is_live_or_resuming("run_1"));
+        assert!(!runs.lock().unwrap().is_live_or_resuming("run_2"));
+        drop(slot);
+        assert!(!runs.lock().unwrap().is_live_or_resuming("run_1"));
     }
 
     #[tokio::test]

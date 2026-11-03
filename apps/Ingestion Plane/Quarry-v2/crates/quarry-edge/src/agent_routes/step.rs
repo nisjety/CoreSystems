@@ -146,6 +146,16 @@ fn check_landed_on_run(
     Ok(obs)
 }
 
+/// W3-E3.1-e: the process-wide credential-delivered marks. After a `fill_otp_ref` step
+/// the page it ran on keeps its accessibility tree, DOM summary, screenshot and content
+/// artifacts out of every observation (and so out of the stored receipt, which carries
+/// `[redacted:otp]` in `policy_denials` instead), and a pure read of it is refused, until
+/// a new document is loaded for that page. The only trigger, `fill_otp_ref`, is admitted
+/// only while `QUARRY_EDGE__FILL_OTP` is on (default off); the denial itself is never off.
+fn otp_reads() -> &'static quarry_runtime::observation_redaction::CredentialDeliveredReads {
+    quarry_runtime::observation_redaction::credential_delivered_reads()
+}
+
 /// `POST /v1/agent/runs/{run_id}/step` — execute one action, return the
 /// resulting observation. `ObservationRunner` emits `ActionStarted`/`ObservationReady`
 /// itself, keyed by the step key this lane reserved.
@@ -217,6 +227,12 @@ pub async fn step(
         &entry.run_id.to_string(),
     )
     .map_err(|error| driver_err(&request_id, error))?;
+    // W3-E3.1-e: a pure read of a page a one-time code was delivered into is refused.
+    let otp_run = entry.run_id.to_string();
+    let otp_before_url = lane.last_observation.as_deref().map(|obs| obs.url.clone());
+    otp_reads()
+        .check_before(&otp_run, &body.action, otp_before_url.as_deref())
+        .map_err(|error| driver_err(&request_id, error))?;
     let download_zdr = entry.zdr.is_active();
     // WS8.B: the receipt plan and the budget exemption of this step.
     let receipt_plan = super::human_browse::receipt_plan(
@@ -286,6 +302,15 @@ pub async fn step(
         }
         other => other,
     };
+    // W3-E3.1-e: a delivered code marks its page (even when the fill failed), and the
+    // observation of a marked page has its page reads withheld before the landing check,
+    // the receipt and the checkpoint see it.
+    let step_result = otp_reads().settle(
+        &otp_run,
+        &receipt_action,
+        otp_before_url.as_deref(),
+        step_result,
+    );
     let step_elapsed = step_started.elapsed();
     if takeover_exempt {
         crate::metrics::record_takeover_exempt_step(step_elapsed);
@@ -419,6 +444,10 @@ pub(super) async fn execute_ws_action(
         quarry_runtime::action_runtime::downloads::session_ledger(),
         &entry.run_id.to_string(),
     )?;
+    // W3-E3.1-e: as in `step`.
+    let otp_run = entry.run_id.to_string();
+    let otp_before_url = lane.last_observation.as_deref().map(|obs| obs.url.clone());
+    otp_reads().check_before(&otp_run, &action, otp_before_url.as_deref())?;
     let download_zdr = entry.zdr.is_active();
     // WS8.B: the receipt plan and the budget exemption of this step.
     let receipt_plan = super::human_browse::receipt_plan(
@@ -479,6 +508,13 @@ pub(super) async fn execute_ws_action(
         }
         other => other,
     };
+    // W3-E3.1-e: as in `step`.
+    let step_result = otp_reads().settle(
+        &otp_run,
+        &receipt_action,
+        otp_before_url.as_deref(),
+        step_result,
+    );
     let step_elapsed = step_started.elapsed();
     if takeover_exempt {
         crate::metrics::record_takeover_exempt_step(step_elapsed);
@@ -615,5 +651,44 @@ mod download_gate_tests {
         assert!(download_gate_before(true, &download(), false, &l, "other").unwrap());
         l.release("run");
         assert!(download_gate_before(true, &download(), false, &l, "run").unwrap());
+    }
+}
+
+#[cfg(test)]
+mod otp_read_denial_tests {
+    use super::*;
+
+    const PAGE: &str = "https://login.example.com/verify";
+
+    fn fill() -> AgentAction {
+        AgentAction::FillOtpRef {
+            snapshot_id: "s1".into(),
+            generation: 1,
+            ref_id: "e1".into(),
+            approval_grant_id: "g1".into(),
+        }
+    }
+
+    #[test]
+    fn the_edge_uses_one_process_wide_set_of_marks() {
+        assert!(std::ptr::eq(otp_reads(), otp_reads()));
+    }
+
+    #[test]
+    fn a_failed_fill_marks_the_page_and_a_screenshot_of_it_is_refused() {
+        let run = format!("run_e31e_{}", std::process::id());
+        let failed: QuarryResult<BrowserObservation> =
+            Err(QuarryError::new(ErrorCode::DriverFailed, "insert failed"));
+        assert!(otp_reads().settle(&run, &fill(), Some(PAGE), failed).is_err());
+        let shot = AgentAction::Screenshot { full_page: false };
+        let err = otp_reads()
+            .check_before(&run, &shot, Some(PAGE))
+            .unwrap_err();
+        assert_eq!(err.code, ErrorCode::Forbidden);
+        // An ordinary action on the page still runs; a released run is forgotten.
+        let click = AgentAction::Click { selector: "#next".into() };
+        assert!(otp_reads().check_before(&run, &click, Some(PAGE)).is_ok());
+        otp_reads().release(&run);
+        assert!(otp_reads().check_before(&run, &shot, Some(PAGE)).is_ok());
     }
 }
