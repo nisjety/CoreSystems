@@ -163,6 +163,117 @@ func (ReasoningEffort) EnumDescriptor() ([]byte, []int) {
 	return file_model_plane_v1_inference_proto_rawDescGZIP(), []int{1}
 }
 
+// InferPurpose — what a call is for. The closed vocabulary behind the `purpose`
+// metrics label; a call names exactly one. A side task names its own purpose
+// (title, follow-ups, judge) rather than the answer it accompanies. Owner: EP-13 S3.
+type InferPurpose int32
+
+const (
+	// No purpose named. Counted as `unspecified`.
+	InferPurpose_INFER_PURPOSE_UNSPECIFIED InferPurpose = 0
+	// The user-visible answer to a chat turn.
+	InferPurpose_INFER_PURPOSE_ANSWER InferPurpose = 1
+	// A model round that decides or runs a tool inside a chat turn.
+	InferPurpose_INFER_PURPOSE_TOOL_ROUND InferPurpose = 2
+	// A round of a governed Do run.
+	InferPurpose_INFER_PURPOSE_AGENT_ROUND InferPurpose = 3
+	// The sidebar title of a thread.
+	InferPurpose_INFER_PURPOSE_TITLE InferPurpose = 4
+	// The follow-up questions offered after an answer.
+	InferPurpose_INFER_PURPOSE_FOLLOW_UPS InferPurpose = 5
+	// Whether retrieved sources back an answer.
+	InferPurpose_INFER_PURPOSE_VERIFICATION_JUDGE InferPurpose = 6
+	// The plan of a deep research run.
+	InferPurpose_INFER_PURPOSE_RESEARCH_PLAN InferPurpose = 7
+	// The report of a deep research run.
+	InferPurpose_INFER_PURPOSE_RESEARCH_SYNTHESIS InferPurpose = 8
+	// The summary that replaces compacted thread history.
+	InferPurpose_INFER_PURPOSE_COMPACTION_SUMMARY InferPurpose = 9
+	// Facts extracted from a conversation for the memory store.
+	InferPurpose_INFER_PURPOSE_MEMORY_EXTRACTION InferPurpose = 10
+	// Whether a candidate memory duplicates or updates an existing one.
+	InferPurpose_INFER_PURPOSE_MEMORY_GROUNDING InferPurpose = 11
+	// The browser planner choosing the next action.
+	InferPurpose_INFER_PURPOSE_BROWSER_PLANNER InferPurpose = 12
+	// Screening of content for injected instructions.
+	InferPurpose_INFER_PURPOSE_SAFETY_SCREEN InferPurpose = 13
+	// Checking an answer or artifact against its sources or its length.
+	InferPurpose_INFER_PURPOSE_VALIDATION InferPurpose = 14
+	// Cleaning up a dictated transcript.
+	InferPurpose_INFER_PURPOSE_DICTATION_CLEANUP InferPurpose = 15
+	// One round of a scheduled run.
+	InferPurpose_INFER_PURPOSE_SCHEDULED_ROUND InferPurpose = 16
+)
+
+// Enum value maps for InferPurpose.
+var (
+	InferPurpose_name = map[int32]string{
+		0:  "INFER_PURPOSE_UNSPECIFIED",
+		1:  "INFER_PURPOSE_ANSWER",
+		2:  "INFER_PURPOSE_TOOL_ROUND",
+		3:  "INFER_PURPOSE_AGENT_ROUND",
+		4:  "INFER_PURPOSE_TITLE",
+		5:  "INFER_PURPOSE_FOLLOW_UPS",
+		6:  "INFER_PURPOSE_VERIFICATION_JUDGE",
+		7:  "INFER_PURPOSE_RESEARCH_PLAN",
+		8:  "INFER_PURPOSE_RESEARCH_SYNTHESIS",
+		9:  "INFER_PURPOSE_COMPACTION_SUMMARY",
+		10: "INFER_PURPOSE_MEMORY_EXTRACTION",
+		11: "INFER_PURPOSE_MEMORY_GROUNDING",
+		12: "INFER_PURPOSE_BROWSER_PLANNER",
+		13: "INFER_PURPOSE_SAFETY_SCREEN",
+		14: "INFER_PURPOSE_VALIDATION",
+		15: "INFER_PURPOSE_DICTATION_CLEANUP",
+		16: "INFER_PURPOSE_SCHEDULED_ROUND",
+	}
+	InferPurpose_value = map[string]int32{
+		"INFER_PURPOSE_UNSPECIFIED":        0,
+		"INFER_PURPOSE_ANSWER":             1,
+		"INFER_PURPOSE_TOOL_ROUND":         2,
+		"INFER_PURPOSE_AGENT_ROUND":        3,
+		"INFER_PURPOSE_TITLE":              4,
+		"INFER_PURPOSE_FOLLOW_UPS":         5,
+		"INFER_PURPOSE_VERIFICATION_JUDGE": 6,
+		"INFER_PURPOSE_RESEARCH_PLAN":      7,
+		"INFER_PURPOSE_RESEARCH_SYNTHESIS": 8,
+		"INFER_PURPOSE_COMPACTION_SUMMARY": 9,
+		"INFER_PURPOSE_MEMORY_EXTRACTION":  10,
+		"INFER_PURPOSE_MEMORY_GROUNDING":   11,
+		"INFER_PURPOSE_BROWSER_PLANNER":    12,
+		"INFER_PURPOSE_SAFETY_SCREEN":      13,
+		"INFER_PURPOSE_VALIDATION":         14,
+		"INFER_PURPOSE_DICTATION_CLEANUP":  15,
+		"INFER_PURPOSE_SCHEDULED_ROUND":    16,
+	}
+)
+
+func (x InferPurpose) Enum() *InferPurpose {
+	p := new(InferPurpose)
+	*p = x
+	return p
+}
+
+func (x InferPurpose) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (InferPurpose) Descriptor() protoreflect.EnumDescriptor {
+	return file_model_plane_v1_inference_proto_enumTypes[2].Descriptor()
+}
+
+func (InferPurpose) Type() protoreflect.EnumType {
+	return &file_model_plane_v1_inference_proto_enumTypes[2]
+}
+
+func (x InferPurpose) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use InferPurpose.Descriptor instead.
+func (InferPurpose) EnumDescriptor() ([]byte, []int) {
+	return file_model_plane_v1_inference_proto_rawDescGZIP(), []int{2}
+}
+
 // InferRequest — a single inference request to be routed to a provider.
 type InferRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
@@ -265,7 +376,12 @@ type InferRequest struct {
 	// `FAILED_PRECONDITION` and the kind `vision_unsupported`, never by dropping
 	// the images. The bytes are request-scope memory only: never cached, never
 	// logged, and a field of the internal request that the Debug output redacts.
-	ImageParts    []*InferImagePart `protobuf:"bytes,20,rep,name=image_parts,json=imageParts,proto3" json:"image_parts,omitempty"`
+	ImageParts []*InferImagePart `protobuf:"bytes,20,rep,name=image_parts,json=imageParts,proto3" json:"image_parts,omitempty"`
+	// What this call is for (owner: EP-13 S3). Labels the inference metrics by
+	// purpose and routes nothing. UNSPECIFIED, and any value this build does not
+	// know, count as `unspecified`, so an older caller and a newer one both work.
+	// It carries no content, so Zero Data Retention does not change it.
+	Purpose       InferPurpose `protobuf:"varint,21,opt,name=purpose,proto3,enum=model_plane.v1.InferPurpose" json:"purpose,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -438,6 +554,13 @@ func (x *InferRequest) GetImageParts() []*InferImagePart {
 		return x.ImageParts
 	}
 	return nil
+}
+
+func (x *InferRequest) GetPurpose() InferPurpose {
+	if x != nil {
+		return x.Purpose
+	}
+	return InferPurpose_INFER_PURPOSE_UNSPECIFIED
 }
 
 // InferImagePart — one image attached to a message of an InferRequest. Bytes
@@ -6133,7 +6256,7 @@ var File_model_plane_v1_inference_proto protoreflect.FileDescriptor
 
 const file_model_plane_v1_inference_proto_rawDesc = "" +
 	"\n" +
-	"\x1emodel_plane/v1/inference.proto\x12\x0emodel_plane.v1\"\xb5\a\n" +
+	"\x1emodel_plane/v1/inference.proto\x12\x0emodel_plane.v1\"\xed\a\n" +
 	"\fInferRequest\x12\x1d\n" +
 	"\n" +
 	"request_id\x18\x01 \x01(\tR\trequestId\x12\x15\n" +
@@ -6159,7 +6282,8 @@ const file_model_plane_v1_inference_proto_rawDesc = "" +
 	"\fprompt_tiers\x18\x12 \x01(\v2\x1e.model_plane.v1.PromptTierPlanR\vpromptTiers\x12&\n" +
 	"\x0fcache_scope_key\x18\x13 \x01(\tR\rcacheScopeKey\x12?\n" +
 	"\vimage_parts\x18\x14 \x03(\v2\x1e.model_plane.v1.InferImagePartR\n" +
-	"imageParts\"f\n" +
+	"imageParts\x126\n" +
+	"\apurpose\x18\x15 \x01(\x0e2\x1c.model_plane.v1.InferPurposeR\apurpose\"f\n" +
 	"\x0eInferImagePart\x12#\n" +
 	"\rmessage_index\x18\x01 \x01(\rR\fmessageIndex\x12\x12\n" +
 	"\x04data\x18\x02 \x01(\fR\x04data\x12\x1b\n" +
@@ -6711,7 +6835,26 @@ const file_model_plane_v1_inference_proto_rawDesc = "" +
 	"\x17REASONING_EFFORT_MEDIUM\x10\x03\x12\x19\n" +
 	"\x15REASONING_EFFORT_HIGH\x10\x04\x12\x1a\n" +
 	"\x16REASONING_EFFORT_XHIGH\x10\x05\x12\x18\n" +
-	"\x14REASONING_EFFORT_MAX\x10\x062\x87\x11\n" +
+	"\x14REASONING_EFFORT_MAX\x10\x06*\xc1\x04\n" +
+	"\fInferPurpose\x12\x1d\n" +
+	"\x19INFER_PURPOSE_UNSPECIFIED\x10\x00\x12\x18\n" +
+	"\x14INFER_PURPOSE_ANSWER\x10\x01\x12\x1c\n" +
+	"\x18INFER_PURPOSE_TOOL_ROUND\x10\x02\x12\x1d\n" +
+	"\x19INFER_PURPOSE_AGENT_ROUND\x10\x03\x12\x17\n" +
+	"\x13INFER_PURPOSE_TITLE\x10\x04\x12\x1c\n" +
+	"\x18INFER_PURPOSE_FOLLOW_UPS\x10\x05\x12$\n" +
+	" INFER_PURPOSE_VERIFICATION_JUDGE\x10\x06\x12\x1f\n" +
+	"\x1bINFER_PURPOSE_RESEARCH_PLAN\x10\a\x12$\n" +
+	" INFER_PURPOSE_RESEARCH_SYNTHESIS\x10\b\x12$\n" +
+	" INFER_PURPOSE_COMPACTION_SUMMARY\x10\t\x12#\n" +
+	"\x1fINFER_PURPOSE_MEMORY_EXTRACTION\x10\n" +
+	"\x12\"\n" +
+	"\x1eINFER_PURPOSE_MEMORY_GROUNDING\x10\v\x12!\n" +
+	"\x1dINFER_PURPOSE_BROWSER_PLANNER\x10\f\x12\x1f\n" +
+	"\x1bINFER_PURPOSE_SAFETY_SCREEN\x10\r\x12\x1c\n" +
+	"\x18INFER_PURPOSE_VALIDATION\x10\x0e\x12#\n" +
+	"\x1fINFER_PURPOSE_DICTATION_CLEANUP\x10\x0f\x12!\n" +
+	"\x1dINFER_PURPOSE_SCHEDULED_ROUND\x10\x102\x87\x11\n" +
 	"\rInferenceCore\x12D\n" +
 	"\x05Infer\x12\x1c.model_plane.v1.InferRequest\x1a\x1d.model_plane.v1.InferResponse\x12I\n" +
 	"\vInferStream\x12\x1c.model_plane.v1.InferRequest\x1a\x1a.model_plane.v1.InferChunk0\x01\x12b\n" +
@@ -6749,153 +6892,155 @@ func file_model_plane_v1_inference_proto_rawDescGZIP() []byte {
 	return file_model_plane_v1_inference_proto_rawDescData
 }
 
-var file_model_plane_v1_inference_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
+var file_model_plane_v1_inference_proto_enumTypes = make([]protoimpl.EnumInfo, 3)
 var file_model_plane_v1_inference_proto_msgTypes = make([]protoimpl.MessageInfo, 63)
 var file_model_plane_v1_inference_proto_goTypes = []any{
 	(PrivacyTier)(0),                             // 0: model_plane.v1.PrivacyTier
 	(ReasoningEffort)(0),                         // 1: model_plane.v1.ReasoningEffort
-	(*InferRequest)(nil),                         // 2: model_plane.v1.InferRequest
-	(*InferImagePart)(nil),                       // 3: model_plane.v1.InferImagePart
-	(*PromptTierPlan)(nil),                       // 4: model_plane.v1.PromptTierPlan
-	(*ToolDefinition)(nil),                       // 5: model_plane.v1.ToolDefinition
-	(*ToolCall)(nil),                             // 6: model_plane.v1.ToolCall
-	(*ChatMessage)(nil),                          // 7: model_plane.v1.ChatMessage
-	(*TokenConfidence)(nil),                      // 8: model_plane.v1.TokenConfidence
-	(*InferResponse)(nil),                        // 9: model_plane.v1.InferResponse
-	(*InferChunk)(nil),                           // 10: model_plane.v1.InferChunk
-	(*ProviderTiming)(nil),                       // 11: model_plane.v1.ProviderTiming
-	(*RouteNote)(nil),                            // 12: model_plane.v1.RouteNote
-	(*CreateEmbeddingRequest)(nil),               // 13: model_plane.v1.CreateEmbeddingRequest
-	(*CreateEmbeddingResponse)(nil),              // 14: model_plane.v1.CreateEmbeddingResponse
-	(*ListModelsRequest)(nil),                    // 15: model_plane.v1.ListModelsRequest
-	(*ModelInfo)(nil),                            // 16: model_plane.v1.ModelInfo
-	(*ListModelsResponse)(nil),                   // 17: model_plane.v1.ListModelsResponse
-	(*ModelAccessMeta)(nil),                      // 18: model_plane.v1.ModelAccessMeta
-	(*SurfaceDefault)(nil),                       // 19: model_plane.v1.SurfaceDefault
-	(*ModelPolicyDoc)(nil),                       // 20: model_plane.v1.ModelPolicyDoc
-	(*GetModelAccessRequest)(nil),                // 21: model_plane.v1.GetModelAccessRequest
-	(*GetModelAccessResponse)(nil),               // 22: model_plane.v1.GetModelAccessResponse
-	(*ModelAccessEntry)(nil),                     // 23: model_plane.v1.ModelAccessEntry
-	(*SynthesizeSpeechRequest)(nil),              // 24: model_plane.v1.SynthesizeSpeechRequest
-	(*SynthesizeSpeechResponse)(nil),             // 25: model_plane.v1.SynthesizeSpeechResponse
-	(*TranscribeSpeechRequest)(nil),              // 26: model_plane.v1.TranscribeSpeechRequest
-	(*TranscribeSpeechResponse)(nil),             // 27: model_plane.v1.TranscribeSpeechResponse
-	(*ListSpeechVoicesRequest)(nil),              // 28: model_plane.v1.ListSpeechVoicesRequest
-	(*SpeechVoiceInfo)(nil),                      // 29: model_plane.v1.SpeechVoiceInfo
-	(*ListSpeechVoicesResponse)(nil),             // 30: model_plane.v1.ListSpeechVoicesResponse
-	(*TranslateTextRequest)(nil),                 // 31: model_plane.v1.TranslateTextRequest
-	(*TranslateTextResponse)(nil),                // 32: model_plane.v1.TranslateTextResponse
-	(*TranslationInput)(nil),                     // 33: model_plane.v1.TranslationInput
-	(*BatchTranslateTextRequest)(nil),            // 34: model_plane.v1.BatchTranslateTextRequest
-	(*TranslationResult)(nil),                    // 35: model_plane.v1.TranslationResult
-	(*BatchTranslateTextResponse)(nil),           // 36: model_plane.v1.BatchTranslateTextResponse
-	(*DetectTextLanguageRequest)(nil),            // 37: model_plane.v1.DetectTextLanguageRequest
-	(*TranslationDetection)(nil),                 // 38: model_plane.v1.TranslationDetection
-	(*DetectTextLanguageResponse)(nil),           // 39: model_plane.v1.DetectTextLanguageResponse
-	(*ListTranslationLanguagesRequest)(nil),      // 40: model_plane.v1.ListTranslationLanguagesRequest
-	(*TranslationLanguageInfo)(nil),              // 41: model_plane.v1.TranslationLanguageInfo
-	(*ListTranslationLanguagesResponse)(nil),     // 42: model_plane.v1.ListTranslationLanguagesResponse
-	(*GenerateImageRequest)(nil),                 // 43: model_plane.v1.GenerateImageRequest
-	(*GeneratedImage)(nil),                       // 44: model_plane.v1.GeneratedImage
-	(*GenerateImageResponse)(nil),                // 45: model_plane.v1.GenerateImageResponse
-	(*AnalyzeImageRequest)(nil),                  // 46: model_plane.v1.AnalyzeImageRequest
-	(*AnalyzeImageResponse)(nil),                 // 47: model_plane.v1.AnalyzeImageResponse
-	(*ExtractImageTextRequest)(nil),              // 48: model_plane.v1.ExtractImageTextRequest
-	(*ExtractImageTextResponse)(nil),             // 49: model_plane.v1.ExtractImageTextResponse
-	(*AnalyzeDocumentRequest)(nil),               // 50: model_plane.v1.AnalyzeDocumentRequest
-	(*AnalyzeDocumentResponse)(nil),              // 51: model_plane.v1.AnalyzeDocumentResponse
-	(*AnalyzeLanguageRequest)(nil),               // 52: model_plane.v1.AnalyzeLanguageRequest
-	(*LanguageAnalysisResult)(nil),               // 53: model_plane.v1.LanguageAnalysisResult
-	(*AnalyzeLanguageResponse)(nil),              // 54: model_plane.v1.AnalyzeLanguageResponse
-	(*CreateRealtimeSessionRequest)(nil),         // 55: model_plane.v1.CreateRealtimeSessionRequest
-	(*CreateRealtimeSessionResponse)(nil),        // 56: model_plane.v1.CreateRealtimeSessionResponse
-	(*CreateVideoGenerationJobRequest)(nil),      // 57: model_plane.v1.CreateVideoGenerationJobRequest
-	(*CreateVideoGenerationJobResponse)(nil),     // 58: model_plane.v1.CreateVideoGenerationJobResponse
-	(*GetVideoGenerationJobRequest)(nil),         // 59: model_plane.v1.GetVideoGenerationJobRequest
-	(*GetVideoGenerationJobResponse)(nil),        // 60: model_plane.v1.GetVideoGenerationJobResponse
-	(*StreamVideoGenerationContentRequest)(nil),  // 61: model_plane.v1.StreamVideoGenerationContentRequest
-	(*StreamVideoGenerationContentResponse)(nil), // 62: model_plane.v1.StreamVideoGenerationContentResponse
-	nil, // 63: model_plane.v1.ProviderTiming.UpstreamMsEntry
-	nil, // 64: model_plane.v1.ModelPolicyDoc.DefaultsEntry
+	(InferPurpose)(0),                            // 2: model_plane.v1.InferPurpose
+	(*InferRequest)(nil),                         // 3: model_plane.v1.InferRequest
+	(*InferImagePart)(nil),                       // 4: model_plane.v1.InferImagePart
+	(*PromptTierPlan)(nil),                       // 5: model_plane.v1.PromptTierPlan
+	(*ToolDefinition)(nil),                       // 6: model_plane.v1.ToolDefinition
+	(*ToolCall)(nil),                             // 7: model_plane.v1.ToolCall
+	(*ChatMessage)(nil),                          // 8: model_plane.v1.ChatMessage
+	(*TokenConfidence)(nil),                      // 9: model_plane.v1.TokenConfidence
+	(*InferResponse)(nil),                        // 10: model_plane.v1.InferResponse
+	(*InferChunk)(nil),                           // 11: model_plane.v1.InferChunk
+	(*ProviderTiming)(nil),                       // 12: model_plane.v1.ProviderTiming
+	(*RouteNote)(nil),                            // 13: model_plane.v1.RouteNote
+	(*CreateEmbeddingRequest)(nil),               // 14: model_plane.v1.CreateEmbeddingRequest
+	(*CreateEmbeddingResponse)(nil),              // 15: model_plane.v1.CreateEmbeddingResponse
+	(*ListModelsRequest)(nil),                    // 16: model_plane.v1.ListModelsRequest
+	(*ModelInfo)(nil),                            // 17: model_plane.v1.ModelInfo
+	(*ListModelsResponse)(nil),                   // 18: model_plane.v1.ListModelsResponse
+	(*ModelAccessMeta)(nil),                      // 19: model_plane.v1.ModelAccessMeta
+	(*SurfaceDefault)(nil),                       // 20: model_plane.v1.SurfaceDefault
+	(*ModelPolicyDoc)(nil),                       // 21: model_plane.v1.ModelPolicyDoc
+	(*GetModelAccessRequest)(nil),                // 22: model_plane.v1.GetModelAccessRequest
+	(*GetModelAccessResponse)(nil),               // 23: model_plane.v1.GetModelAccessResponse
+	(*ModelAccessEntry)(nil),                     // 24: model_plane.v1.ModelAccessEntry
+	(*SynthesizeSpeechRequest)(nil),              // 25: model_plane.v1.SynthesizeSpeechRequest
+	(*SynthesizeSpeechResponse)(nil),             // 26: model_plane.v1.SynthesizeSpeechResponse
+	(*TranscribeSpeechRequest)(nil),              // 27: model_plane.v1.TranscribeSpeechRequest
+	(*TranscribeSpeechResponse)(nil),             // 28: model_plane.v1.TranscribeSpeechResponse
+	(*ListSpeechVoicesRequest)(nil),              // 29: model_plane.v1.ListSpeechVoicesRequest
+	(*SpeechVoiceInfo)(nil),                      // 30: model_plane.v1.SpeechVoiceInfo
+	(*ListSpeechVoicesResponse)(nil),             // 31: model_plane.v1.ListSpeechVoicesResponse
+	(*TranslateTextRequest)(nil),                 // 32: model_plane.v1.TranslateTextRequest
+	(*TranslateTextResponse)(nil),                // 33: model_plane.v1.TranslateTextResponse
+	(*TranslationInput)(nil),                     // 34: model_plane.v1.TranslationInput
+	(*BatchTranslateTextRequest)(nil),            // 35: model_plane.v1.BatchTranslateTextRequest
+	(*TranslationResult)(nil),                    // 36: model_plane.v1.TranslationResult
+	(*BatchTranslateTextResponse)(nil),           // 37: model_plane.v1.BatchTranslateTextResponse
+	(*DetectTextLanguageRequest)(nil),            // 38: model_plane.v1.DetectTextLanguageRequest
+	(*TranslationDetection)(nil),                 // 39: model_plane.v1.TranslationDetection
+	(*DetectTextLanguageResponse)(nil),           // 40: model_plane.v1.DetectTextLanguageResponse
+	(*ListTranslationLanguagesRequest)(nil),      // 41: model_plane.v1.ListTranslationLanguagesRequest
+	(*TranslationLanguageInfo)(nil),              // 42: model_plane.v1.TranslationLanguageInfo
+	(*ListTranslationLanguagesResponse)(nil),     // 43: model_plane.v1.ListTranslationLanguagesResponse
+	(*GenerateImageRequest)(nil),                 // 44: model_plane.v1.GenerateImageRequest
+	(*GeneratedImage)(nil),                       // 45: model_plane.v1.GeneratedImage
+	(*GenerateImageResponse)(nil),                // 46: model_plane.v1.GenerateImageResponse
+	(*AnalyzeImageRequest)(nil),                  // 47: model_plane.v1.AnalyzeImageRequest
+	(*AnalyzeImageResponse)(nil),                 // 48: model_plane.v1.AnalyzeImageResponse
+	(*ExtractImageTextRequest)(nil),              // 49: model_plane.v1.ExtractImageTextRequest
+	(*ExtractImageTextResponse)(nil),             // 50: model_plane.v1.ExtractImageTextResponse
+	(*AnalyzeDocumentRequest)(nil),               // 51: model_plane.v1.AnalyzeDocumentRequest
+	(*AnalyzeDocumentResponse)(nil),              // 52: model_plane.v1.AnalyzeDocumentResponse
+	(*AnalyzeLanguageRequest)(nil),               // 53: model_plane.v1.AnalyzeLanguageRequest
+	(*LanguageAnalysisResult)(nil),               // 54: model_plane.v1.LanguageAnalysisResult
+	(*AnalyzeLanguageResponse)(nil),              // 55: model_plane.v1.AnalyzeLanguageResponse
+	(*CreateRealtimeSessionRequest)(nil),         // 56: model_plane.v1.CreateRealtimeSessionRequest
+	(*CreateRealtimeSessionResponse)(nil),        // 57: model_plane.v1.CreateRealtimeSessionResponse
+	(*CreateVideoGenerationJobRequest)(nil),      // 58: model_plane.v1.CreateVideoGenerationJobRequest
+	(*CreateVideoGenerationJobResponse)(nil),     // 59: model_plane.v1.CreateVideoGenerationJobResponse
+	(*GetVideoGenerationJobRequest)(nil),         // 60: model_plane.v1.GetVideoGenerationJobRequest
+	(*GetVideoGenerationJobResponse)(nil),        // 61: model_plane.v1.GetVideoGenerationJobResponse
+	(*StreamVideoGenerationContentRequest)(nil),  // 62: model_plane.v1.StreamVideoGenerationContentRequest
+	(*StreamVideoGenerationContentResponse)(nil), // 63: model_plane.v1.StreamVideoGenerationContentResponse
+	nil, // 64: model_plane.v1.ProviderTiming.UpstreamMsEntry
+	nil, // 65: model_plane.v1.ModelPolicyDoc.DefaultsEntry
 }
 var file_model_plane_v1_inference_proto_depIdxs = []int32{
-	7,  // 0: model_plane.v1.InferRequest.messages:type_name -> model_plane.v1.ChatMessage
-	5,  // 1: model_plane.v1.InferRequest.tools:type_name -> model_plane.v1.ToolDefinition
+	8,  // 0: model_plane.v1.InferRequest.messages:type_name -> model_plane.v1.ChatMessage
+	6,  // 1: model_plane.v1.InferRequest.tools:type_name -> model_plane.v1.ToolDefinition
 	0,  // 2: model_plane.v1.InferRequest.min_privacy_tier:type_name -> model_plane.v1.PrivacyTier
 	1,  // 3: model_plane.v1.InferRequest.reasoning_effort:type_name -> model_plane.v1.ReasoningEffort
-	4,  // 4: model_plane.v1.InferRequest.prompt_tiers:type_name -> model_plane.v1.PromptTierPlan
-	3,  // 5: model_plane.v1.InferRequest.image_parts:type_name -> model_plane.v1.InferImagePart
-	6,  // 6: model_plane.v1.InferResponse.tool_calls:type_name -> model_plane.v1.ToolCall
-	8,  // 7: model_plane.v1.InferResponse.token_confidence:type_name -> model_plane.v1.TokenConfidence
-	11, // 8: model_plane.v1.InferResponse.provider_timing:type_name -> model_plane.v1.ProviderTiming
-	12, // 9: model_plane.v1.InferResponse.route_note:type_name -> model_plane.v1.RouteNote
-	8,  // 10: model_plane.v1.InferChunk.token_confidence:type_name -> model_plane.v1.TokenConfidence
-	11, // 11: model_plane.v1.InferChunk.provider_timing:type_name -> model_plane.v1.ProviderTiming
-	12, // 12: model_plane.v1.InferChunk.route_note:type_name -> model_plane.v1.RouteNote
-	63, // 13: model_plane.v1.ProviderTiming.upstream_ms:type_name -> model_plane.v1.ProviderTiming.UpstreamMsEntry
-	0,  // 14: model_plane.v1.ModelInfo.privacy_tier:type_name -> model_plane.v1.PrivacyTier
-	16, // 15: model_plane.v1.ListModelsResponse.models:type_name -> model_plane.v1.ModelInfo
-	18, // 16: model_plane.v1.ListModelsResponse.access:type_name -> model_plane.v1.ModelAccessMeta
-	0,  // 17: model_plane.v1.ModelPolicyDoc.min_privacy_tier:type_name -> model_plane.v1.PrivacyTier
-	64, // 18: model_plane.v1.ModelPolicyDoc.defaults:type_name -> model_plane.v1.ModelPolicyDoc.DefaultsEntry
-	20, // 19: model_plane.v1.GetModelAccessRequest.draft:type_name -> model_plane.v1.ModelPolicyDoc
-	0,  // 20: model_plane.v1.GetModelAccessResponse.min_privacy_tier:type_name -> model_plane.v1.PrivacyTier
-	23, // 21: model_plane.v1.GetModelAccessResponse.catalogue:type_name -> model_plane.v1.ModelAccessEntry
-	29, // 22: model_plane.v1.ListSpeechVoicesResponse.voices:type_name -> model_plane.v1.SpeechVoiceInfo
-	33, // 23: model_plane.v1.BatchTranslateTextRequest.items:type_name -> model_plane.v1.TranslationInput
-	35, // 24: model_plane.v1.BatchTranslateTextResponse.translations:type_name -> model_plane.v1.TranslationResult
-	38, // 25: model_plane.v1.DetectTextLanguageResponse.detections:type_name -> model_plane.v1.TranslationDetection
-	41, // 26: model_plane.v1.ListTranslationLanguagesResponse.languages:type_name -> model_plane.v1.TranslationLanguageInfo
-	44, // 27: model_plane.v1.GenerateImageResponse.images:type_name -> model_plane.v1.GeneratedImage
-	53, // 28: model_plane.v1.AnalyzeLanguageResponse.results:type_name -> model_plane.v1.LanguageAnalysisResult
-	19, // 29: model_plane.v1.ModelPolicyDoc.DefaultsEntry.value:type_name -> model_plane.v1.SurfaceDefault
-	2,  // 30: model_plane.v1.InferenceCore.Infer:input_type -> model_plane.v1.InferRequest
-	2,  // 31: model_plane.v1.InferenceCore.InferStream:input_type -> model_plane.v1.InferRequest
-	13, // 32: model_plane.v1.InferenceCore.CreateEmbedding:input_type -> model_plane.v1.CreateEmbeddingRequest
-	15, // 33: model_plane.v1.InferenceCore.ListModels:input_type -> model_plane.v1.ListModelsRequest
-	24, // 34: model_plane.v1.InferenceCore.SynthesizeSpeech:input_type -> model_plane.v1.SynthesizeSpeechRequest
-	26, // 35: model_plane.v1.InferenceCore.TranscribeSpeech:input_type -> model_plane.v1.TranscribeSpeechRequest
-	28, // 36: model_plane.v1.InferenceCore.ListSpeechVoices:input_type -> model_plane.v1.ListSpeechVoicesRequest
-	31, // 37: model_plane.v1.InferenceCore.TranslateText:input_type -> model_plane.v1.TranslateTextRequest
-	34, // 38: model_plane.v1.InferenceCore.BatchTranslateText:input_type -> model_plane.v1.BatchTranslateTextRequest
-	37, // 39: model_plane.v1.InferenceCore.DetectTextLanguage:input_type -> model_plane.v1.DetectTextLanguageRequest
-	40, // 40: model_plane.v1.InferenceCore.ListTranslationLanguages:input_type -> model_plane.v1.ListTranslationLanguagesRequest
-	43, // 41: model_plane.v1.InferenceCore.GenerateImage:input_type -> model_plane.v1.GenerateImageRequest
-	46, // 42: model_plane.v1.InferenceCore.AnalyzeImage:input_type -> model_plane.v1.AnalyzeImageRequest
-	48, // 43: model_plane.v1.InferenceCore.ExtractImageText:input_type -> model_plane.v1.ExtractImageTextRequest
-	50, // 44: model_plane.v1.InferenceCore.AnalyzeDocument:input_type -> model_plane.v1.AnalyzeDocumentRequest
-	52, // 45: model_plane.v1.InferenceCore.AnalyzeLanguage:input_type -> model_plane.v1.AnalyzeLanguageRequest
-	55, // 46: model_plane.v1.InferenceCore.CreateRealtimeSession:input_type -> model_plane.v1.CreateRealtimeSessionRequest
-	57, // 47: model_plane.v1.InferenceCore.CreateVideoGenerationJob:input_type -> model_plane.v1.CreateVideoGenerationJobRequest
-	59, // 48: model_plane.v1.InferenceCore.GetVideoGenerationJob:input_type -> model_plane.v1.GetVideoGenerationJobRequest
-	61, // 49: model_plane.v1.InferenceCore.StreamVideoGenerationContent:input_type -> model_plane.v1.StreamVideoGenerationContentRequest
-	21, // 50: model_plane.v1.InferenceCore.GetModelAccess:input_type -> model_plane.v1.GetModelAccessRequest
-	9,  // 51: model_plane.v1.InferenceCore.Infer:output_type -> model_plane.v1.InferResponse
-	10, // 52: model_plane.v1.InferenceCore.InferStream:output_type -> model_plane.v1.InferChunk
-	14, // 53: model_plane.v1.InferenceCore.CreateEmbedding:output_type -> model_plane.v1.CreateEmbeddingResponse
-	17, // 54: model_plane.v1.InferenceCore.ListModels:output_type -> model_plane.v1.ListModelsResponse
-	25, // 55: model_plane.v1.InferenceCore.SynthesizeSpeech:output_type -> model_plane.v1.SynthesizeSpeechResponse
-	27, // 56: model_plane.v1.InferenceCore.TranscribeSpeech:output_type -> model_plane.v1.TranscribeSpeechResponse
-	30, // 57: model_plane.v1.InferenceCore.ListSpeechVoices:output_type -> model_plane.v1.ListSpeechVoicesResponse
-	32, // 58: model_plane.v1.InferenceCore.TranslateText:output_type -> model_plane.v1.TranslateTextResponse
-	36, // 59: model_plane.v1.InferenceCore.BatchTranslateText:output_type -> model_plane.v1.BatchTranslateTextResponse
-	39, // 60: model_plane.v1.InferenceCore.DetectTextLanguage:output_type -> model_plane.v1.DetectTextLanguageResponse
-	42, // 61: model_plane.v1.InferenceCore.ListTranslationLanguages:output_type -> model_plane.v1.ListTranslationLanguagesResponse
-	45, // 62: model_plane.v1.InferenceCore.GenerateImage:output_type -> model_plane.v1.GenerateImageResponse
-	47, // 63: model_plane.v1.InferenceCore.AnalyzeImage:output_type -> model_plane.v1.AnalyzeImageResponse
-	49, // 64: model_plane.v1.InferenceCore.ExtractImageText:output_type -> model_plane.v1.ExtractImageTextResponse
-	51, // 65: model_plane.v1.InferenceCore.AnalyzeDocument:output_type -> model_plane.v1.AnalyzeDocumentResponse
-	54, // 66: model_plane.v1.InferenceCore.AnalyzeLanguage:output_type -> model_plane.v1.AnalyzeLanguageResponse
-	56, // 67: model_plane.v1.InferenceCore.CreateRealtimeSession:output_type -> model_plane.v1.CreateRealtimeSessionResponse
-	58, // 68: model_plane.v1.InferenceCore.CreateVideoGenerationJob:output_type -> model_plane.v1.CreateVideoGenerationJobResponse
-	60, // 69: model_plane.v1.InferenceCore.GetVideoGenerationJob:output_type -> model_plane.v1.GetVideoGenerationJobResponse
-	62, // 70: model_plane.v1.InferenceCore.StreamVideoGenerationContent:output_type -> model_plane.v1.StreamVideoGenerationContentResponse
-	22, // 71: model_plane.v1.InferenceCore.GetModelAccess:output_type -> model_plane.v1.GetModelAccessResponse
-	51, // [51:72] is the sub-list for method output_type
-	30, // [30:51] is the sub-list for method input_type
-	30, // [30:30] is the sub-list for extension type_name
-	30, // [30:30] is the sub-list for extension extendee
-	0,  // [0:30] is the sub-list for field type_name
+	5,  // 4: model_plane.v1.InferRequest.prompt_tiers:type_name -> model_plane.v1.PromptTierPlan
+	4,  // 5: model_plane.v1.InferRequest.image_parts:type_name -> model_plane.v1.InferImagePart
+	2,  // 6: model_plane.v1.InferRequest.purpose:type_name -> model_plane.v1.InferPurpose
+	7,  // 7: model_plane.v1.InferResponse.tool_calls:type_name -> model_plane.v1.ToolCall
+	9,  // 8: model_plane.v1.InferResponse.token_confidence:type_name -> model_plane.v1.TokenConfidence
+	12, // 9: model_plane.v1.InferResponse.provider_timing:type_name -> model_plane.v1.ProviderTiming
+	13, // 10: model_plane.v1.InferResponse.route_note:type_name -> model_plane.v1.RouteNote
+	9,  // 11: model_plane.v1.InferChunk.token_confidence:type_name -> model_plane.v1.TokenConfidence
+	12, // 12: model_plane.v1.InferChunk.provider_timing:type_name -> model_plane.v1.ProviderTiming
+	13, // 13: model_plane.v1.InferChunk.route_note:type_name -> model_plane.v1.RouteNote
+	64, // 14: model_plane.v1.ProviderTiming.upstream_ms:type_name -> model_plane.v1.ProviderTiming.UpstreamMsEntry
+	0,  // 15: model_plane.v1.ModelInfo.privacy_tier:type_name -> model_plane.v1.PrivacyTier
+	17, // 16: model_plane.v1.ListModelsResponse.models:type_name -> model_plane.v1.ModelInfo
+	19, // 17: model_plane.v1.ListModelsResponse.access:type_name -> model_plane.v1.ModelAccessMeta
+	0,  // 18: model_plane.v1.ModelPolicyDoc.min_privacy_tier:type_name -> model_plane.v1.PrivacyTier
+	65, // 19: model_plane.v1.ModelPolicyDoc.defaults:type_name -> model_plane.v1.ModelPolicyDoc.DefaultsEntry
+	21, // 20: model_plane.v1.GetModelAccessRequest.draft:type_name -> model_plane.v1.ModelPolicyDoc
+	0,  // 21: model_plane.v1.GetModelAccessResponse.min_privacy_tier:type_name -> model_plane.v1.PrivacyTier
+	24, // 22: model_plane.v1.GetModelAccessResponse.catalogue:type_name -> model_plane.v1.ModelAccessEntry
+	30, // 23: model_plane.v1.ListSpeechVoicesResponse.voices:type_name -> model_plane.v1.SpeechVoiceInfo
+	34, // 24: model_plane.v1.BatchTranslateTextRequest.items:type_name -> model_plane.v1.TranslationInput
+	36, // 25: model_plane.v1.BatchTranslateTextResponse.translations:type_name -> model_plane.v1.TranslationResult
+	39, // 26: model_plane.v1.DetectTextLanguageResponse.detections:type_name -> model_plane.v1.TranslationDetection
+	42, // 27: model_plane.v1.ListTranslationLanguagesResponse.languages:type_name -> model_plane.v1.TranslationLanguageInfo
+	45, // 28: model_plane.v1.GenerateImageResponse.images:type_name -> model_plane.v1.GeneratedImage
+	54, // 29: model_plane.v1.AnalyzeLanguageResponse.results:type_name -> model_plane.v1.LanguageAnalysisResult
+	20, // 30: model_plane.v1.ModelPolicyDoc.DefaultsEntry.value:type_name -> model_plane.v1.SurfaceDefault
+	3,  // 31: model_plane.v1.InferenceCore.Infer:input_type -> model_plane.v1.InferRequest
+	3,  // 32: model_plane.v1.InferenceCore.InferStream:input_type -> model_plane.v1.InferRequest
+	14, // 33: model_plane.v1.InferenceCore.CreateEmbedding:input_type -> model_plane.v1.CreateEmbeddingRequest
+	16, // 34: model_plane.v1.InferenceCore.ListModels:input_type -> model_plane.v1.ListModelsRequest
+	25, // 35: model_plane.v1.InferenceCore.SynthesizeSpeech:input_type -> model_plane.v1.SynthesizeSpeechRequest
+	27, // 36: model_plane.v1.InferenceCore.TranscribeSpeech:input_type -> model_plane.v1.TranscribeSpeechRequest
+	29, // 37: model_plane.v1.InferenceCore.ListSpeechVoices:input_type -> model_plane.v1.ListSpeechVoicesRequest
+	32, // 38: model_plane.v1.InferenceCore.TranslateText:input_type -> model_plane.v1.TranslateTextRequest
+	35, // 39: model_plane.v1.InferenceCore.BatchTranslateText:input_type -> model_plane.v1.BatchTranslateTextRequest
+	38, // 40: model_plane.v1.InferenceCore.DetectTextLanguage:input_type -> model_plane.v1.DetectTextLanguageRequest
+	41, // 41: model_plane.v1.InferenceCore.ListTranslationLanguages:input_type -> model_plane.v1.ListTranslationLanguagesRequest
+	44, // 42: model_plane.v1.InferenceCore.GenerateImage:input_type -> model_plane.v1.GenerateImageRequest
+	47, // 43: model_plane.v1.InferenceCore.AnalyzeImage:input_type -> model_plane.v1.AnalyzeImageRequest
+	49, // 44: model_plane.v1.InferenceCore.ExtractImageText:input_type -> model_plane.v1.ExtractImageTextRequest
+	51, // 45: model_plane.v1.InferenceCore.AnalyzeDocument:input_type -> model_plane.v1.AnalyzeDocumentRequest
+	53, // 46: model_plane.v1.InferenceCore.AnalyzeLanguage:input_type -> model_plane.v1.AnalyzeLanguageRequest
+	56, // 47: model_plane.v1.InferenceCore.CreateRealtimeSession:input_type -> model_plane.v1.CreateRealtimeSessionRequest
+	58, // 48: model_plane.v1.InferenceCore.CreateVideoGenerationJob:input_type -> model_plane.v1.CreateVideoGenerationJobRequest
+	60, // 49: model_plane.v1.InferenceCore.GetVideoGenerationJob:input_type -> model_plane.v1.GetVideoGenerationJobRequest
+	62, // 50: model_plane.v1.InferenceCore.StreamVideoGenerationContent:input_type -> model_plane.v1.StreamVideoGenerationContentRequest
+	22, // 51: model_plane.v1.InferenceCore.GetModelAccess:input_type -> model_plane.v1.GetModelAccessRequest
+	10, // 52: model_plane.v1.InferenceCore.Infer:output_type -> model_plane.v1.InferResponse
+	11, // 53: model_plane.v1.InferenceCore.InferStream:output_type -> model_plane.v1.InferChunk
+	15, // 54: model_plane.v1.InferenceCore.CreateEmbedding:output_type -> model_plane.v1.CreateEmbeddingResponse
+	18, // 55: model_plane.v1.InferenceCore.ListModels:output_type -> model_plane.v1.ListModelsResponse
+	26, // 56: model_plane.v1.InferenceCore.SynthesizeSpeech:output_type -> model_plane.v1.SynthesizeSpeechResponse
+	28, // 57: model_plane.v1.InferenceCore.TranscribeSpeech:output_type -> model_plane.v1.TranscribeSpeechResponse
+	31, // 58: model_plane.v1.InferenceCore.ListSpeechVoices:output_type -> model_plane.v1.ListSpeechVoicesResponse
+	33, // 59: model_plane.v1.InferenceCore.TranslateText:output_type -> model_plane.v1.TranslateTextResponse
+	37, // 60: model_plane.v1.InferenceCore.BatchTranslateText:output_type -> model_plane.v1.BatchTranslateTextResponse
+	40, // 61: model_plane.v1.InferenceCore.DetectTextLanguage:output_type -> model_plane.v1.DetectTextLanguageResponse
+	43, // 62: model_plane.v1.InferenceCore.ListTranslationLanguages:output_type -> model_plane.v1.ListTranslationLanguagesResponse
+	46, // 63: model_plane.v1.InferenceCore.GenerateImage:output_type -> model_plane.v1.GenerateImageResponse
+	48, // 64: model_plane.v1.InferenceCore.AnalyzeImage:output_type -> model_plane.v1.AnalyzeImageResponse
+	50, // 65: model_plane.v1.InferenceCore.ExtractImageText:output_type -> model_plane.v1.ExtractImageTextResponse
+	52, // 66: model_plane.v1.InferenceCore.AnalyzeDocument:output_type -> model_plane.v1.AnalyzeDocumentResponse
+	55, // 67: model_plane.v1.InferenceCore.AnalyzeLanguage:output_type -> model_plane.v1.AnalyzeLanguageResponse
+	57, // 68: model_plane.v1.InferenceCore.CreateRealtimeSession:output_type -> model_plane.v1.CreateRealtimeSessionResponse
+	59, // 69: model_plane.v1.InferenceCore.CreateVideoGenerationJob:output_type -> model_plane.v1.CreateVideoGenerationJobResponse
+	61, // 70: model_plane.v1.InferenceCore.GetVideoGenerationJob:output_type -> model_plane.v1.GetVideoGenerationJobResponse
+	63, // 71: model_plane.v1.InferenceCore.StreamVideoGenerationContent:output_type -> model_plane.v1.StreamVideoGenerationContentResponse
+	23, // 72: model_plane.v1.InferenceCore.GetModelAccess:output_type -> model_plane.v1.GetModelAccessResponse
+	52, // [52:73] is the sub-list for method output_type
+	31, // [31:52] is the sub-list for method input_type
+	31, // [31:31] is the sub-list for extension type_name
+	31, // [31:31] is the sub-list for extension extendee
+	0,  // [0:31] is the sub-list for field type_name
 }
 
 func init() { file_model_plane_v1_inference_proto_init() }
@@ -6908,7 +7053,7 @@ func file_model_plane_v1_inference_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_model_plane_v1_inference_proto_rawDesc), len(file_model_plane_v1_inference_proto_rawDesc)),
-			NumEnums:      2,
+			NumEnums:      3,
 			NumMessages:   63,
 			NumExtensions: 0,
 			NumServices:   1,
