@@ -376,7 +376,7 @@ services:
       # W2: deliver the one in-product change notification to notification-core
       # (Application Plane) over the shared inter-plane-bus network.
       NOTIFICATION_CORE_URL: ${NOTIFICATION_CORE_URL:-http://notification-core:3140}
-      NOTIFICATION_CORE_INTERNAL_KEY: ${NOTIFICATION_CORE_INTERNAL_KEY:-}
+      NOTIFICATION_QUARRY_CONTROL_SERVICE_TOKEN: ${NOTIFICATION_QUARRY_CONTROL_SERVICE_TOKEN:-}
       # G33: dispatch newly-created jobs onto the orchestrator's task queue.
       TEMPORAL_ADDR: temporal:7233
       TEMPORAL_NAMESPACE: default
