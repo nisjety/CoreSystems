@@ -62,6 +62,7 @@ mod terminalization;
 mod thread_fork;
 mod tool_ledger;
 mod trace_nats;
+mod user_profile;
 
 #[tokio::main]
 async fn main() -> Result<()> {

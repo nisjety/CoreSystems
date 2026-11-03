@@ -500,6 +500,25 @@ describe('action registry', () => {
     expect(remember?.inputSchema.safeParse({ threadId: 't1', content: '   ' }).success).toBe(false)
   })
 
+  it('registers the profile edit and rebuild as human-only and bounded like the server (EP-8 S4)', () => {
+    const save = getActionDescriptor('memory.profile.save')
+    const rebuild = getActionDescriptor('memory.profile.rebuild')
+
+    expect(save).toMatchObject({ ownerPlane: 'model', risk: 'low', requiresApproval: false, reversible: true })
+    expect(rebuild).toMatchObject({ ownerPlane: 'model', risk: 'low', requiresApproval: false, reversible: false })
+    // A model never writes the profile it is later shown.
+    for (const id of ['memory.profile.save', 'memory.profile.rebuild'] as const) {
+      expect(isModelExecutableAction(id)).toBe(false)
+    }
+
+    expect(save?.inputSchema.safeParse({ content: '- Prefers tables', expectedRevision: 2 }).success).toBe(true)
+    expect(save?.inputSchema.safeParse({ content: 'x'.repeat(1401), expectedRevision: 2 }).success).toBe(false)
+    expect(save?.inputSchema.safeParse({ content: '- Prefers tables' }).success).toBe(false)
+    expect(save?.inputSchema.safeParse({ content: '- Prefers tables', expectedRevision: -1 }).success).toBe(false)
+    expect(rebuild?.inputSchema.safeParse({ force: true }).success).toBe(true)
+    expect(rebuild?.inputSchema.safeParse({}).success).toBe(false)
+  })
+
   it('registers the connected-app reads as low-risk, ungated owner contracts the model cannot execute', () => {
     for (const id of ['integrations.browse_connection', 'integrations.fetch_connection_content'] as const) {
       const action = getActionDescriptor(id)

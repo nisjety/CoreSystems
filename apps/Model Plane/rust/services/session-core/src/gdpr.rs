@@ -164,6 +164,8 @@ pub struct PurgeSummary {
     pub skill_revisions: u64,
     pub agent_memory: u64,
     pub user_memory_controls: u64,
+    /// Standing user profiles (EP-8 S4).
+    pub user_profiles: u64,
     pub forgotten_memory_ids: u64,
     pub memory_control_events: u64,
     pub org_learning_policy_mirror: u64,
@@ -212,6 +214,7 @@ impl PurgeSummary {
             + self.skill_revisions
             + self.agent_memory
             + self.user_memory_controls
+            + self.user_profiles
             + self.forgotten_memory_ids
             + self.memory_control_events
             + self.org_learning_policy_mirror
@@ -492,6 +495,9 @@ pub async fn purge_organization_data(
         .bind(org_id).execute(&mut *tx).await?.rows_affected();
     summary.user_memory_controls = sqlx::query("DELETE FROM user_memory_controls WHERE org_id = $1")
         .bind(org_id).execute(&mut *tx).await?.rows_affected();
+    // The profile is derived from the agent_memory rows erased above, or is the person's own text.
+    summary.user_profiles = sqlx::query("DELETE FROM user_profiles WHERE org_id = $1")
+        .bind(org_id).execute(&mut *tx).await?.rows_affected();
     summary.memory_control_events = sqlx::query("DELETE FROM memory_control_events WHERE org_id = $1")
         .bind(org_id).execute(&mut *tx).await?.rows_affected();
     summary.org_learning_policy_mirror = sqlx::query("DELETE FROM org_learning_policy_mirror WHERE org_id = $1")
@@ -754,6 +760,7 @@ mod tests {
             skill_revisions: 1,
             agent_memory: 1,
             user_memory_controls: 1,
+            user_profiles: 1,
             forgotten_memory_ids: 1,
             memory_control_events: 1,
             org_learning_policy_mirror: 1,
@@ -772,7 +779,7 @@ mod tests {
         };
         assert_eq!(
             summary.total(),
-            32,
+            33,
             "total() must count only Postgres rows; semantic-tier counts belong \
              to erasure_is_complete(), not to this sum"
         );

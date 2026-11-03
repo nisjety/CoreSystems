@@ -229,6 +229,8 @@ export const MODEL_ACCESS: Readonly<Record<ActionId, ModelAccessEntry>> = {
   'memory.set_state': exempt('human_identity_or_security', 'external_write'),
   'memory.reset': exempt('irreversible_destructive', 'destructive'),
   'memory.remember': exempt('human_identity_or_security', 'external_write'),
+  'memory.profile.save': exempt('human_identity_or_security', 'external_write'),
+  'memory.profile.rebuild': exempt('human_identity_or_security', 'external_write'),
   'learning.accept_skill': exempt('agent_cannot_self_govern', 'context_write'),
   'learning.reject_skill': exempt('agent_cannot_self_govern', 'context_write'),
   'learning.undo': exempt('agent_cannot_self_govern', 'destructive'),

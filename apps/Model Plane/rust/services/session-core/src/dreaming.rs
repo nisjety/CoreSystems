@@ -222,6 +222,10 @@ pub(crate) async fn dream_once(
     }
     let messages = load_pending_messages(pool, limit).await?;
     let mut processed = 0i64;
+    // EP-8 S4: the people whose personal memory this cycle wrote, for one profile rebuild each at
+    // the end. Empty, and never filled, while the profile is switched off.
+    let profiles_enabled = crate::user_profile::enabled();
+    let mut profile_owners: Vec<(String, String)> = Vec::new();
 
     // Grouped by thread because extraction needs a conversation, not a line.
     // The ledger stays per-message — every message still gets its `dream_runs`
@@ -392,6 +396,16 @@ pub(crate) async fn dream_once(
                 tx.commit().await?;
                 result
             };
+            if profiles_enabled
+                && persisted
+                    .iter()
+                    .any(|row| candidates.get(row.candidate_index).is_some_and(|c| c.scope == "user"))
+            {
+                let owner = (message.org_id.clone(), message.user_id.clone());
+                if !profile_owners.contains(&owner) {
+                    profile_owners.push(owner);
+                }
+            }
             if grounding.is_some() {
                 sync_persisted_candidates_to_letta_for_grounding(
                     pool,
@@ -431,6 +445,7 @@ pub(crate) async fn dream_once(
         }
     }
 
+    crate::user_profile::rebuild_after_cycle(pool, &profile_owners).await;
     Ok(processed)
 }
 
@@ -2095,8 +2110,10 @@ pub(crate) async fn delete_user_memory(
         for ancestor in &ancestors {
             crate::memory_control::record_forgetting(&mut tx, org_id, owner_user_id, ancestor).await?;
         }
-        tx.commit().await?;
         ids.extend(ancestors);
+        // EP-8 S4: a built profile line from a deleted memory goes in the same transaction.
+        crate::user_profile::drop_sources(&mut tx, org_id, owner_user_id, &ids).await?;
+        tx.commit().await?;
         return Ok(MemoryDeletion::Deleted { ids });
     }
 
@@ -2182,6 +2199,8 @@ pub(crate) async fn reset_user_memory(
     .bind(i64::try_from(erased.len()).unwrap_or(i64::MAX))
     .execute(&mut *tx)
     .await?;
+    // EP-8 S4: the standing profile is derived from what was just erased, so it goes too.
+    crate::user_profile::delete_in_tx(&mut tx, org_id, owner_user_id).await?;
     tx.commit().await?;
     Ok(erased)
 }

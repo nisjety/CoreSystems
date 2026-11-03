@@ -41,6 +41,24 @@ service MemoryService {
   // and semantic copies, in one confirmed step. Org-owned memory is left alone.
   // Open to a ZDR caller too: erasure only removes, and pre-ZDR rows may exist.
   rpc ResetMemory(ResetMemoryRequest) returns (ResetMemoryResponse);
+
+  // The caller's standing profile (EP-8 S4): a short text built from their
+  // accepted personal memories, or as they last edited it. A ZDR caller gets
+  // an empty answer with skip_reason "zdr", never an error. Refused with
+  // failed_precondition "profile_not_enabled" while SESSION_USER_PROFILE_ENABLED
+  // is off.
+  rpc GetUserProfile(GetUserProfileRequest) returns (UserProfileResponse);
+
+  // Replace the profile text with the person's own edit. User callers only, for
+  // themselves; a stale expected_revision is refused (failed_precondition
+  // "profile_revision_stale"); a ZDR or waived credential is refused
+  // zdr_feature_not_supported (feature "user_profile").
+  rpc SetUserProfile(SetUserProfileRequest) returns (UserProfileResponse);
+
+  // Rebuild the profile from the person's accepted memories. Refused while
+  // memory is paused, off or disabled; an edited profile is kept unless force
+  // is set. Same caller and ZDR rules as SetUserProfile.
+  rpc RebuildUserProfile(RebuildUserProfileRequest) returns (UserProfileResponse);
 }
 
 message SearchMemoryRequest {
@@ -380,4 +398,74 @@ message ResetMemoryResponse {
 
   // Stable machine-readable reason, empty when nothing is degraded.
   string degradation_reason = 4;
+}
+
+// UserProfile — the person's standing profile (EP-8 S4). Built only from their
+// own accepted, current scope "user" rows in session-core; never from org,
+// thread, Space or agent rows, and never from letta-bridge blocks.
+message UserProfile {
+  // The profile text, one line per remembered fact, at most 1400 characters.
+  string content = 1;
+
+  // The memory ids the built lines came from, in line order. Kept unchanged by
+  // an edit, so the deleted count below can be computed. Ids only.
+  repeated string source_memory_ids = 2;
+
+  // "built" (made by the builder) or "edited" (the person's own text, kept
+  // until they ask for a rebuild).
+  string origin = 3;
+
+  // Increases on every change; SetUserProfile must name the current one.
+  uint64 revision = 4;
+
+  // When the profile last changed.
+  google.protobuf.Timestamp updated_at = 5;
+
+  // For an edited profile: how many of its source memories were deleted since
+  // the edit. Zero for a built profile, whose deleted lines are already gone.
+  uint32 sources_deleted_since_edit = 6;
+}
+
+message GetUserProfileRequest {
+  // Tenant context.
+  string org_id = 1;
+
+  // The profile's owner. A user caller may only read their own.
+  string user_id = 2;
+}
+
+message SetUserProfileRequest {
+  // Tenant context.
+  string org_id = 1;
+
+  // The profile's owner. Must be the caller.
+  string user_id = 2;
+
+  // The new text, at most 1400 characters. Empty clears it.
+  string content = 3;
+
+  // The revision the edit was made against; 0 when no profile exists yet.
+  uint64 expected_revision = 4;
+}
+
+message RebuildUserProfileRequest {
+  // Tenant context.
+  string org_id = 1;
+
+  // The profile's owner. Must be the caller.
+  string user_id = 2;
+
+  // Replace an edited profile too. Without it an edited profile is kept.
+  bool force = 3;
+}
+
+message UserProfileResponse {
+  // The profile, unset when none exists or it is hidden (see skip_reason).
+  UserProfile profile = 1;
+
+  // Why the profile is not used in conversations, one of the closed
+  // MemoryControls.reason tokens ("user_paused", "user_off", "org_disabled",
+  // "zdr", "policy_unavailable"). A paused profile is still returned (listed
+  // and editable); off and org_disabled hide it. Empty when it is used.
+  string skip_reason = 2;
 }

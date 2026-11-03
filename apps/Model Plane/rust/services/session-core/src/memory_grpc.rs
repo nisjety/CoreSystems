@@ -14,10 +14,11 @@ use chrono::{DateTime, Utc};
 use mp_contracts::model_plane::v1::{
     memory_service_server::{MemoryService, MemoryServiceServer},
     DeleteMemoryRequest, DeleteMemoryResponse, GetMemoryControlsRequest,
-    GetMemoryControlsResponse, IndexMemoryRequest, IndexMemoryResponse, ListMemoryRequest,
-    ListMemoryResponse, MemoryControls, MemoryEntry, MemoryHealthRequest, MemoryHealthResponse,
-    MemoryState, ResetMemoryRequest, ResetMemoryResponse, SearchMemoryRequest,
-    SearchMemoryResponse, SetMemoryControlsRequest, SetMemoryControlsResponse,
+    GetMemoryControlsResponse, GetUserProfileRequest, IndexMemoryRequest, IndexMemoryResponse,
+    ListMemoryRequest, ListMemoryResponse, MemoryControls, MemoryEntry, MemoryHealthRequest,
+    MemoryHealthResponse, MemoryState, RebuildUserProfileRequest, ResetMemoryRequest,
+    ResetMemoryResponse, SearchMemoryRequest, SearchMemoryResponse, SetMemoryControlsRequest,
+    SetMemoryControlsResponse, SetUserProfileRequest, UserProfile, UserProfileResponse,
 };
 use sqlx::PgPool;
 use std::sync::Arc;
@@ -62,6 +63,8 @@ pub(crate) struct MemoryGrpc {
     pool: PgPool,
     letta: Option<LettaMemoryAdapter>,
     ownership: Arc<dyn ThreadOwnership>,
+    /// `SESSION_USER_PROFILE_ENABLED`, read once at start (EP-8 S4).
+    profile_enabled: bool,
 }
 
 impl MemoryGrpc {
@@ -70,7 +73,15 @@ impl MemoryGrpc {
             ownership: Arc::new(PgThreadOwnership { pool: pool.clone() }),
             pool,
             letta,
+            profile_enabled: crate::user_profile::enabled(),
         }
+    }
+
+    /// The profile switch set by a test, so no test reads or writes the process environment.
+    #[cfg(test)]
+    pub(crate) fn with_profile_enabled_for_test(mut self, enabled: bool) -> Self {
+        self.profile_enabled = enabled;
+        self
     }
 
     #[cfg(test)]
@@ -83,6 +94,7 @@ impl MemoryGrpc {
             pool,
             letta,
             ownership,
+            profile_enabled: false,
         }
     }
 
@@ -1042,6 +1054,175 @@ impl MemoryService for MemoryGrpc {
             &semantic,
             listing_degradation,
         )))
+    }
+
+    async fn get_user_profile(
+        &self,
+        request: Request<GetUserProfileRequest>,
+    ) -> Result<Response<UserProfileResponse>, Status> {
+        let caller = identity(&request)?;
+        let req = request.into_inner();
+        let (org_id, user_id) = required_owner(&req.org_id, &req.user_id)?;
+        let permits_durable_memory =
+            authorize_user_memory_preflight(&caller, org_id, user_id, MEMORY_READ_SCOPE)?;
+        if !self.profile_enabled {
+            return Err(Status::failed_precondition(crate::user_profile::NOT_ENABLED));
+        }
+        // A zero-retention caller reads nothing, and is answered, not refused (the
+        // ListMemory rule).
+        if !permits_durable_memory {
+            return Ok(Response::new(profile_response(
+                None,
+                crate::memory_control::MemoryReason::Zdr.as_str(),
+            )));
+        }
+        // Paused keeps the profile listed and editable; off, or an org that
+        // disabled memory, hides it and says why (D8).
+        let decision = crate::memory_control::resolve(&self.pool, false, org_id, user_id)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+        if !decision.list_visible() {
+            return Ok(Response::new(profile_response(None, decision.skip_reason())));
+        }
+        let profile = crate::user_profile::load(&self.pool, org_id, user_id)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+        Ok(Response::new(profile_response(profile, decision.skip_reason())))
+    }
+
+    async fn set_user_profile(
+        &self,
+        request: Request<SetUserProfileRequest>,
+    ) -> Result<Response<UserProfileResponse>, Status> {
+        let caller = identity(&request)?;
+        let req = request.into_inner();
+        let (org_id, user_id) = required_owner(&req.org_id, &req.user_id)?;
+        authorize_profile_write(&caller, org_id, user_id)?;
+        if !self.profile_enabled {
+            return Err(Status::failed_precondition(crate::user_profile::NOT_ENABLED));
+        }
+        let content = req.content.trim();
+        if content.chars().count() > crate::user_profile::MAX_CHARS {
+            return Err(Status::invalid_argument(
+                "profile content exceeds 1400 characters",
+            ));
+        }
+        let expected_revision = i64::try_from(req.expected_revision)
+            .map_err(|_| Status::invalid_argument("expected_revision is out of range"))?;
+        let outcome = crate::user_profile::save_edit(
+            &self.pool,
+            org_id,
+            user_id,
+            content,
+            expected_revision,
+            caller.principal_id(),
+        )
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?;
+        let profile = match outcome {
+            crate::user_profile::EditOutcome::Saved(profile) => profile,
+            crate::user_profile::EditOutcome::Stale => {
+                return Err(Status::failed_precondition(crate::user_profile::REVISION_STALE));
+            }
+            crate::user_profile::EditOutcome::Hidden(decision) => {
+                return Err(Status::failed_precondition(decision.refusal()));
+            }
+        };
+        let decision = crate::memory_control::resolve(&self.pool, false, org_id, user_id)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+        Ok(Response::new(profile_response(Some(profile), decision.skip_reason())))
+    }
+
+    async fn rebuild_user_profile(
+        &self,
+        request: Request<RebuildUserProfileRequest>,
+    ) -> Result<Response<UserProfileResponse>, Status> {
+        let caller = identity(&request)?;
+        let req = request.into_inner();
+        let (org_id, user_id) = required_owner(&req.org_id, &req.user_id)?;
+        authorize_profile_write(&caller, org_id, user_id)?;
+        if !self.profile_enabled {
+            return Err(Status::failed_precondition(crate::user_profile::NOT_ENABLED));
+        }
+        let outcome = crate::user_profile::rebuild(
+            &self.pool,
+            org_id,
+            user_id,
+            req.force,
+            caller.principal_id(),
+        )
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?;
+        // A rebuild runs only where memory is used, so nothing is skipped when it does.
+        let profile = match outcome {
+            crate::user_profile::RebuildOutcome::Refused(decision) => {
+                return Err(Status::failed_precondition(decision.refusal()));
+            }
+            crate::user_profile::RebuildOutcome::KeptEdited(profile) => Some(profile),
+            crate::user_profile::RebuildOutcome::Current(profile) => profile,
+        };
+        Ok(Response::new(profile_response(profile, "")))
+    }
+}
+
+/// The trimmed tenant and owner of a profile request, both required.
+#[allow(clippy::result_large_err)]
+fn required_owner<'a>(org_id: &'a str, user_id: &'a str) -> Result<(&'a str, &'a str), Status> {
+    let (org_id, user_id) = (org_id.trim(), user_id.trim());
+    if org_id.is_empty() {
+        return Err(Status::invalid_argument("org_id is required"));
+    }
+    if user_id.is_empty() {
+        return Err(Status::invalid_argument("user_id is required"));
+    }
+    Ok((org_id, user_id))
+}
+
+/// A profile is written by the person themselves: no service writes it for them, and a new durable
+/// store of user-derived content is refused for a ZDR and a waived credential (DEC-32), with the
+/// catalogue refusal naming the feature.
+#[allow(clippy::result_large_err)]
+fn authorize_profile_write(
+    caller: &VerifiedIdentity,
+    org_id: &str,
+    user_id: &str,
+) -> Result<(), Status> {
+    caller.authorize_org(org_id)?;
+    if caller.is_service() {
+        return Err(Status::permission_denied(
+            "the profile is written by the user themselves",
+        ));
+    }
+    caller.authorize_user(user_id)?;
+    if !matches!(MemoryRetention::of(caller), MemoryRetention::Durable) {
+        return Err(mp_contracts::zdr_refusal::Refusal::feature_not_supported(
+            crate::user_profile::ZDR_FEATURE,
+        )
+        .grpc_status(tonic::Code::FailedPrecondition));
+    }
+    Ok(())
+}
+
+fn profile_response(
+    profile: Option<crate::user_profile::Profile>,
+    skip_reason: &str,
+) -> UserProfileResponse {
+    UserProfileResponse {
+        profile: profile.map(|profile| UserProfile {
+            content: profile.content,
+            source_memory_ids: profile.source_memory_ids,
+            origin: profile.origin,
+            revision: u64::try_from(profile.revision).unwrap_or(0),
+            updated_at: Some(prost_types::Timestamp {
+                seconds: profile.updated_at.timestamp(),
+                nanos: i32::try_from(profile.updated_at.timestamp_subsec_nanos())
+                    .unwrap_or(i32::MAX),
+            }),
+            sources_deleted_since_edit: u32::try_from(profile.sources_deleted_since_edit)
+                .unwrap_or(u32::MAX),
+        }),
+        skip_reason: skip_reason.to_owned(),
     }
 }
 

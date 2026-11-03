@@ -691,6 +691,18 @@ const memoryRememberInput = z.object({
   content: z.string().trim().min(1),
 })
 
+// The caller's own profile text (EP-8 S4), bounded as session-core bounds it, and the
+// revision it was edited against; whose profile it is never comes from here.
+const memoryProfileSaveInput = z.object({
+  content: z.string().max(1400),
+  expectedRevision: z.number().int().min(0),
+})
+
+// `force` replaces an edited profile; the person's own button always sends it.
+const memoryProfileRebuildInput = z.object({
+  force: z.boolean(),
+})
+
 // A learned-skill proposal, by the skill's id. Only its owner may decide it, and
 // session-core checks that; the caller's own identity never comes from here.
 const learningSkillDecisionInput = z.object({
@@ -2738,6 +2750,28 @@ export const actionRegistry = [
     requiresApproval: false,
     reversible: true,
     inputSchema: memoryRememberInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'memory.profile.save',
+    label: 'Save profile',
+    description: 'Replace the caller\'s standing profile with their own text. Kept as written until they choose to rebuild it. Refused while memory is off and under Zero Data Retention.',
+    ownerPlane: 'model',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: memoryProfileSaveInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'memory.profile.rebuild',
+    label: 'Rebuild profile',
+    description: 'Rebuild the caller\'s standing profile from the memories they have accepted, replacing their edit. Refused while memory is paused or off and under Zero Data Retention.',
+    ownerPlane: 'model',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: false,
+    inputSchema: memoryProfileRebuildInput,
     outputSchema: envelopeStatusOutput,
   },
   {

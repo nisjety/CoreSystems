@@ -336,6 +336,13 @@ fn authed_routes() -> Router<AppState> {
             get(get_memory_controls).put(set_memory_controls),
         )
         .route("/v1/memories/reset", post(reset_memory))
+        // The standing profile (EP-8 S4): the user bearer only, org and user from
+        // the claims. session-core refuses all three while its switch is off.
+        .route(
+            "/v1/memories/profile",
+            get(get_user_profile).put(set_user_profile),
+        )
+        .route("/v1/memories/profile/rebuild", post(rebuild_user_profile))
         .route("/v1/memories/:memory_id", delete(delete_memory_entry))
         // Learning governance (WS07-S9): the owner's decisions on learned skills and
         // the ledger of what was learned. The user bearer only; the owner is the
@@ -11213,8 +11220,9 @@ fn attention_state_name(state: i32) -> Option<&'static str> {
     }
 }
 
-/// The wire name of an attention reason (WS16 S1): the pending row behind a waiting state. Tag 4 is
-/// reserved for the parked loop of WS03, so this build names nothing for it.
+/// The wire name of an attention reason (WS16 S1): the pending row behind a waiting state, or
+/// `goal` for a thread goal that stopped (EP-7 S5). Tag 4 is reserved for the parked loop of WS03,
+/// so this build names nothing for it.
 fn attention_reason_name(reason: i32) -> Option<&'static str> {
     use mp_contracts::model_plane::v1::AttentionReason;
     match AttentionReason::try_from(reason).ok()? {
@@ -11222,6 +11230,7 @@ fn attention_reason_name(reason: i32) -> Option<&'static str> {
         AttentionReason::Approval => Some("approval"),
         AttentionReason::Plan => Some("plan"),
         AttentionReason::Input => Some("input"),
+        AttentionReason::Goal => Some("goal"),
     }
 }
 
@@ -13241,6 +13250,130 @@ async fn reset_memory(
         "degraded": response.degraded,
         "degradation_reason": response.degradation_reason,
     })))
+}
+
+/// The profile as JSON: its text, the ids of the memories behind it (never their
+/// content), how it was made, and why it is not used when it is not.
+fn user_profile_json(response: &mp_contracts::model_plane::v1::UserProfileResponse) -> Value {
+    json!({
+        "profile": response.profile.as_ref().map_or(Value::Null, |profile| json!({
+            "content": profile.content,
+            "source_memory_ids": profile.source_memory_ids,
+            "origin": profile.origin,
+            "revision": profile.revision,
+            "updated_at": profile
+                .updated_at
+                .as_ref()
+                .map_or(Value::Null, prost_ts_to_rfc3339),
+            "sources_deleted_since_edit": profile.sources_deleted_since_edit,
+        })),
+        "skip_reason": response.skip_reason,
+    })
+}
+
+/// A profile write refused for a ZDR or waived credential keeps its catalogue
+/// code and feature; every other refusal (`profile_not_enabled`,
+/// `profile_revision_stale`, `memory_not_enabled:<reason>`) is mapped as the
+/// other memory routes map theirs.
+fn session_profile_error(context: &str, error: &tonic::Status) -> HttpJsonError {
+    if let Some(refusal) = mp_contracts::zdr_refusal::Refusal::from_status(error) {
+        return (StatusCode::CONFLICT, Json(refusal.json_body()));
+    }
+    session_memory_error(context, error)
+}
+
+/// The signed-in user's standing profile. A ZDR caller is answered with no
+/// profile and `skip_reason=zdr` by session-core, so there is no ZDR branch here.
+async fn get_user_profile(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    bearer: VerifiedModelBearer,
+) -> Result<Json<Value>, HttpJsonError> {
+    use mp_contracts::model_plane::v1::GetUserProfileRequest;
+
+    let response = state
+        .memory_client
+        .clone()
+        .get_user_profile(authenticated_session_request(
+            GetUserProfileRequest {
+                org_id: claims.org_id.clone(),
+                user_id: claims.user_id.clone(),
+            },
+            &bearer,
+        )?)
+        .await
+        .map_err(|e| session_profile_error("session-core get_user_profile failed", &e))?
+        .into_inner();
+    Ok(Json(user_profile_json(&response)))
+}
+
+#[derive(Debug, Deserialize)]
+struct SetUserProfileBody {
+    content: String,
+    /// The revision the edit was made against; 0 (the default) when there was none.
+    #[serde(default)]
+    expected_revision: u64,
+}
+
+/// Stores the signed-in user's own edit of their profile. Org and user come from
+/// the verified claims, never the body.
+async fn set_user_profile(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    bearer: VerifiedModelBearer,
+    Json(body): Json<SetUserProfileBody>,
+) -> Result<Json<Value>, HttpJsonError> {
+    use mp_contracts::model_plane::v1::SetUserProfileRequest;
+
+    let response = state
+        .memory_client
+        .clone()
+        .set_user_profile(authenticated_session_request(
+            SetUserProfileRequest {
+                org_id: claims.org_id.clone(),
+                user_id: claims.user_id.clone(),
+                content: body.content,
+                expected_revision: body.expected_revision,
+            },
+            &bearer,
+        )?)
+        .await
+        .map_err(|e| session_profile_error("session-core set_user_profile failed", &e))?
+        .into_inner();
+    Ok(Json(user_profile_json(&response)))
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct RebuildUserProfileBody {
+    /// Replace an edited profile too; without it the edit is kept.
+    #[serde(default)]
+    force: bool,
+}
+
+/// Rebuilds the signed-in user's profile from their accepted memories.
+async fn rebuild_user_profile(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    bearer: VerifiedModelBearer,
+    Json(body): Json<RebuildUserProfileBody>,
+) -> Result<Json<Value>, HttpJsonError> {
+    use mp_contracts::model_plane::v1::RebuildUserProfileRequest;
+
+    let response = state
+        .memory_client
+        .clone()
+        .rebuild_user_profile(authenticated_session_request(
+            RebuildUserProfileRequest {
+                org_id: claims.org_id.clone(),
+                user_id: claims.user_id.clone(),
+                force: body.force,
+            },
+            &bearer,
+        )?)
+        .await
+        .map_err(|e| session_profile_error("session-core rebuild_user_profile failed", &e))?
+        .into_inner();
+    Ok(Json(user_profile_json(&response)))
 }
 
 #[derive(Debug, Deserialize)]
@@ -17907,6 +18040,273 @@ mod memory_controls_route_tests {
         assert_eq!(refused.0, StatusCode::CONFLICT);
         assert_eq!(refused.1 .0["error"]["code"], "memory_not_enabled");
         assert_eq!(refused.1 .0["error"]["details"]["reason"], "user_paused");
+    }
+}
+
+#[cfg(test)]
+mod user_profile_route_tests {
+    //! EP-8 S4: the three profile routes send session-core the verified claims' org and user and
+    //! the verified session bearer, whatever the body says, and map its refusals to typed bodies.
+    use super::*;
+    use mp_contracts::model_plane::v1 as pb;
+    use std::sync::{Arc, Mutex};
+    use tokio::net::TcpListener;
+    use tokio_stream::wrappers::TcpListenerStream;
+    use tonic::{Request as TonicRequest, Response as TonicResponse, Status};
+
+    /// What session-core received: the RPC, its org and user, and the forwarded authorization.
+    type Seen = Arc<Mutex<Vec<(&'static str, String, String, String)>>>;
+
+    #[derive(Clone, Default)]
+    struct ProfileMemory {
+        seen: Seen,
+    }
+
+    impl ProfileMemory {
+        fn record<T>(&self, rpc: &'static str, request: &TonicRequest<T>, org: &str, user: &str) {
+            let authorization = request
+                .metadata()
+                .get("authorization")
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or_default()
+                .to_owned();
+            self.seen
+                .lock()
+                .expect("capture")
+                .push((rpc, org.to_owned(), user.to_owned(), authorization));
+        }
+    }
+
+    fn unused<T>() -> Result<TonicResponse<T>, Status> {
+        Err(Status::unimplemented("not used by the profile route tests"))
+    }
+
+    fn profile_answer() -> pb::UserProfileResponse {
+        pb::UserProfileResponse {
+            profile: Some(pb::UserProfile {
+                content: "- Prefers tables".to_owned(),
+                source_memory_ids: vec!["m-1".to_owned()],
+                origin: "built".to_owned(),
+                revision: 3,
+                updated_at: None,
+                sources_deleted_since_edit: 0,
+            }),
+            skip_reason: String::new(),
+        }
+    }
+
+    #[tonic::async_trait]
+    impl pb::memory_service_server::MemoryService for ProfileMemory {
+        async fn search_memory(
+            &self,
+            _: TonicRequest<pb::SearchMemoryRequest>,
+        ) -> Result<TonicResponse<pb::SearchMemoryResponse>, Status> {
+            unused()
+        }
+
+        async fn index_memory(
+            &self,
+            _: TonicRequest<pb::IndexMemoryRequest>,
+        ) -> Result<TonicResponse<pb::IndexMemoryResponse>, Status> {
+            unused()
+        }
+
+        async fn list_memory(
+            &self,
+            _: TonicRequest<pb::ListMemoryRequest>,
+        ) -> Result<TonicResponse<pb::ListMemoryResponse>, Status> {
+            unused()
+        }
+
+        async fn delete_memory(
+            &self,
+            _: TonicRequest<pb::DeleteMemoryRequest>,
+        ) -> Result<TonicResponse<pb::DeleteMemoryResponse>, Status> {
+            unused()
+        }
+
+        async fn health(
+            &self,
+            _: TonicRequest<pb::MemoryHealthRequest>,
+        ) -> Result<TonicResponse<pb::MemoryHealthResponse>, Status> {
+            unused()
+        }
+
+        async fn get_memory_controls(
+            &self,
+            _: TonicRequest<pb::GetMemoryControlsRequest>,
+        ) -> Result<TonicResponse<pb::GetMemoryControlsResponse>, Status> {
+            unused()
+        }
+
+        async fn set_memory_controls(
+            &self,
+            _: TonicRequest<pb::SetMemoryControlsRequest>,
+        ) -> Result<TonicResponse<pb::SetMemoryControlsResponse>, Status> {
+            unused()
+        }
+
+        async fn reset_memory(
+            &self,
+            _: TonicRequest<pb::ResetMemoryRequest>,
+        ) -> Result<TonicResponse<pb::ResetMemoryResponse>, Status> {
+            unused()
+        }
+
+        async fn get_user_profile(
+            &self,
+            request: TonicRequest<pb::GetUserProfileRequest>,
+        ) -> Result<TonicResponse<pb::UserProfileResponse>, Status> {
+            let (org, user) = (request.get_ref().org_id.clone(), request.get_ref().user_id.clone());
+            self.record("get", &request, &org, &user);
+            Ok(TonicResponse::new(profile_answer()))
+        }
+
+        async fn set_user_profile(
+            &self,
+            request: TonicRequest<pb::SetUserProfileRequest>,
+        ) -> Result<TonicResponse<pb::UserProfileResponse>, Status> {
+            let (org, user) = (request.get_ref().org_id.clone(), request.get_ref().user_id.clone());
+            self.record("set", &request, &org, &user);
+            // A ZDR refusal arrives as the catalogue status with its trailers.
+            if request.get_ref().content.contains("zdr") {
+                return Err(mp_contracts::zdr_refusal::Refusal::feature_not_supported("user_profile")
+                    .grpc_status(tonic::Code::FailedPrecondition));
+            }
+            if request.get_ref().expected_revision != 3 {
+                return Err(Status::failed_precondition("profile_revision_stale"));
+            }
+            Ok(TonicResponse::new(profile_answer()))
+        }
+
+        async fn rebuild_user_profile(
+            &self,
+            request: TonicRequest<pb::RebuildUserProfileRequest>,
+        ) -> Result<TonicResponse<pb::UserProfileResponse>, Status> {
+            let (org, user) = (request.get_ref().org_id.clone(), request.get_ref().user_id.clone());
+            self.record(if request.get_ref().force { "rebuild_force" } else { "rebuild" }, &request, &org, &user);
+            Ok(TonicResponse::new(profile_answer()))
+        }
+    }
+
+    async fn state_with(memory: ProfileMemory) -> AppState {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind memory stand-in");
+        let address = listener.local_addr().expect("memory stand-in address");
+        tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .add_service(pb::memory_service_server::MemoryServiceServer::new(memory))
+                .serve_with_incoming(TcpListenerStream::new(listener))
+                .await
+                .ok();
+        });
+        let channel = tonic::transport::Endpoint::from_shared(format!("http://{address}"))
+            .expect("memory stand-in endpoint")
+            .connect()
+            .await
+            .expect("connect memory stand-in");
+        let mut state = AppState::new();
+        state.memory_client = pb::memory_service_client::MemoryServiceClient::new(channel);
+        state
+    }
+
+    fn claims(org_id: &str, user_id: &str) -> Claims {
+        Claims {
+            key_id: None,
+            acting_user_id: None,
+            sub: user_id.to_owned(),
+            iss: "test-issuer".to_owned(),
+            exp: i64::MAX,
+            org_id: org_id.to_owned(),
+            user_id: user_id.to_owned(),
+            nbf: None,
+            aud: Some("model-gateway".to_owned()),
+            scopes: Vec::new(),
+            zdr: false,
+            sovereign: None,
+            org_zdr: None,
+            zdr_waiver: None,
+            principal_type: Some("user".to_owned()),
+            service_id: None,
+            reason: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn profile_routes_take_identity_from_claims() {
+        let memory = ProfileMemory::default();
+        let state = state_with(memory.clone()).await;
+        let bearer = || VerifiedModelBearer::for_test("session-core-token");
+
+        let read = get_user_profile(State(state.clone()), Extension(claims("org-a", "user-a")), bearer())
+            .await
+            .expect("read");
+        assert_eq!(read.0["profile"]["content"], "- Prefers tables");
+        assert_eq!(read.0["profile"]["source_memory_ids"], json!(["m-1"]));
+        assert_eq!(read.0["profile"]["revision"], 3);
+        assert_eq!(read.0["skip_reason"], "");
+
+        // A body naming another user or org cannot reach session-core: the body has no such field.
+        let body: SetUserProfileBody = serde_json::from_value(json!({
+            "content": "- Prefers prose",
+            "expected_revision": 3,
+            "user_id": "user-b",
+            "org_id": "org-b",
+        }))
+        .expect("extra fields are ignored");
+        set_user_profile(State(state.clone()), Extension(claims("org-a", "user-a")), bearer(), Json(body))
+            .await
+            .expect("edit");
+        rebuild_user_profile(
+            State(state.clone()),
+            Extension(claims("org-a", "user-a")),
+            bearer(),
+            Json(RebuildUserProfileBody { force: true }),
+        )
+        .await
+        .expect("rebuild");
+
+        let seen = memory.seen.lock().expect("capture").clone();
+        assert_eq!(
+            seen.iter().map(|(rpc, _, _, _)| *rpc).collect::<Vec<_>>(),
+            ["get", "set", "rebuild_force"]
+        );
+        for (rpc, org, user, authorization) in &seen {
+            assert_eq!((org.as_str(), user.as_str()), ("org-a", "user-a"), "{rpc}");
+            assert_eq!(authorization, "Bearer session-core-token", "{rpc}");
+        }
+    }
+
+    #[tokio::test]
+    async fn profile_refusals_keep_their_typed_codes() {
+        let state = state_with(ProfileMemory::default()).await;
+        let bearer = || VerifiedModelBearer::for_test("session-core-token");
+        let edit = |content: &str, expected_revision: u64| SetUserProfileBody {
+            content: content.to_owned(),
+            expected_revision,
+        };
+
+        let stale = set_user_profile(
+            State(state.clone()),
+            Extension(claims("org-a", "user-a")),
+            bearer(),
+            Json(edit("- Late", 1)),
+        )
+        .await
+        .expect_err("a stale edit is refused");
+        assert_eq!(stale.0, StatusCode::CONFLICT);
+        assert_eq!(stale.1 .0["error"]["code"], "profile_revision_stale");
+
+        let zdr = set_user_profile(
+            State(state),
+            Extension(claims("org-a", "user-a")),
+            bearer(),
+            Json(edit("- zdr", 3)),
+        )
+        .await
+        .expect_err("a ZDR write is refused");
+        assert_eq!(zdr.0, StatusCode::CONFLICT);
+        assert_eq!(zdr.1 .0["error"]["code"], "zdr_feature_not_supported");
+        assert_eq!(zdr.1 .0["error"]["feature"], "user_profile");
     }
 }
 

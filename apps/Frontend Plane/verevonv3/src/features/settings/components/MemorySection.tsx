@@ -4,14 +4,21 @@ import { createResource } from '@/shared/lib/create-resource-compat'
 import {
   deleteMemory,
   getMemoryControls,
+  getProfile,
   listMemories,
+  PROFILE_MAX_CHARS,
+  PROFILE_NOT_ENABLED,
+  rebuildProfile,
   resetMemory,
+  saveProfile,
   setMemoryState,
   type MemoryControls,
   type MemoryEntry,
   type MemoryProvenance,
   type MemoryState,
+  type UserProfileResult,
 } from '@/shared/api/memory-client'
+import { ApiError } from '@/shared/api/api-error'
 import { translateApiError, useI18n } from '@/shared/i18n'
 import { SectionHeader, SettingsButton } from '@/features/settings/components/settings-ui'
 
@@ -127,6 +134,52 @@ function overrideNotice(controls: MemoryControls, i18n: ReturnType<typeof useI18
   }
 }
 
+/**
+ * Whether the profile can be read and edited under this result: on, or paused
+ * (D8: a paused profile stays listed and editable). Off, an org that disabled
+ * memory and ZDR hide it.
+ */
+function profileVisible(result: UserProfileResult): boolean {
+  return result.skipReason === '' || result.skipReason === 'user_paused'
+}
+
+/** Why the profile is not used in conversations, or `null` when it is. */
+function profileNotice(result: UserProfileResult, i18n: ReturnType<typeof useI18n>): string | null {
+  switch (result.skipReason) {
+    case '':
+      return null
+    case 'user_paused':
+      return i18n.tr(
+        'Profilen brukes ikke mens minnet står på pause, og den bygges ikke på nytt. Du kan fortsatt redigere den.',
+        'The profile is not used while memory is paused, and it is not rebuilt. You can still edit it.',
+      )
+    case 'zdr':
+      return i18n.tr(
+        'Zero Data Retention er aktiv for denne økten. Profilen vises ikke, brukes ikke og kan ikke endres herfra.',
+        'Zero Data Retention is on for this session. The profile is not shown, not used and cannot be changed from here.',
+      )
+    default:
+      return i18n.tr(
+        'Profilen er skjult og brukes ikke mens minnet er av. Den er ikke slettet.',
+        'The profile is hidden and not used while memory is off. It is not deleted.',
+      )
+  }
+}
+
+/** The built lines, each with the memory it came from. An edited profile has no such pairing. */
+function profileSources(result: UserProfileResult): { line: string; memoryId: string }[] {
+  const profile = result.profile
+  if (!profile || profile.origin !== 'built' || profile.content === '') return []
+  const lines = profile.content.split('\n')
+  if (lines.length !== profile.sourceMemoryIds.length) return []
+  return lines.map((line, index) => ({ line, memoryId: profile.sourceMemoryIds[index] ?? '' }))
+}
+
+/** Characters as the server counts them (code points, not UTF-16 units). */
+function profileLength(text: string): number {
+  return [...text].length
+}
+
 export function MemorySection() {
   const i18n = useI18n()
   const [memories, { refetch }] = createResource(() => listMemories())
@@ -139,9 +192,63 @@ export function MemorySection() {
   const [stateBusy, setStateBusy] = createSignal(false)
   const [resetStep, setResetStep] = createSignal<'idle' | 'confirm' | 'busy'>('idle')
   const [resetNote, setResetNote] = createSignal<string | null>(null)
+  const [profile, { refetch: refetchProfile, mutate: setProfile }] = createResource(() => getProfile())
+  // `null` until the person types: the card shows the stored text until then.
+  const [profileDraft, setProfileDraft] = createSignal<string | null>(null)
+  const [profileBusy, setProfileBusy] = createSignal(false)
 
   const list = createMemo(() => memories()?.memories ?? [])
   const degraded = createMemo(() => memories()?.degraded ?? false)
+  // The card is not shown at all where the deployment has the profile switched
+  // off, or where the gateway predates it.
+  const profileSwitchedOff = createMemo(() => {
+    const error = profile.error
+    return error instanceof ApiError && (error.code === PROFILE_NOT_ENABLED || error.status === 404)
+  })
+  const profileText = createMemo(() => profileDraft() ?? profile()?.profile?.content ?? '')
+
+  // A delete, a reset or a state change alters what the profile shows; a failed
+  // reload is already shown by the card, so it is not raised again here.
+  const reloadProfile = () => void refetchProfile().catch(() => {})
+
+  const handleProfileSave = async () => {
+    const current = profile()
+    if (profileBusy() || !current) return
+    setProfileBusy(true)
+    setActionError(null)
+    try {
+      setProfile(await saveProfile(profileText(), current.profile?.revision ?? 0))
+      setProfileDraft(null)
+    } catch (err) {
+      setActionError(
+        translateApiError(err, i18n.tr, {
+          no: 'Kunne ikke lagre profilen. Last siden på nytt hvis den er endret et annet sted.',
+          en: 'Could not save the profile. Reload the page if it was changed elsewhere.',
+        }),
+      )
+    } finally {
+      setProfileBusy(false)
+    }
+  }
+
+  const handleProfileRebuild = async () => {
+    if (profileBusy()) return
+    setProfileBusy(true)
+    setActionError(null)
+    try {
+      setProfile(await rebuildProfile(true))
+      setProfileDraft(null)
+    } catch (err) {
+      setActionError(
+        translateApiError(err, i18n.tr, {
+          no: 'Kunne ikke bygge profilen på nytt.',
+          en: 'Could not rebuild the profile.',
+        }),
+      )
+    } finally {
+      setProfileBusy(false)
+    }
+  }
 
   const handleState = async (next: MemoryState) => {
     if (stateBusy() || controls()?.state === next) return
@@ -152,6 +259,7 @@ export function MemorySection() {
       setControls(await setMemoryState(next))
       // Off hides the list and the others show it again, so it is read afresh.
       await refetch()
+      reloadProfile()
     } catch (err) {
       setActionError(
         translateApiError(err, i18n.tr, {
@@ -186,6 +294,8 @@ export function MemorySection() {
           : i18n.tr('Minnet er nullstilt.', 'Memory was reset.'),
       )
       await Promise.all([refetch(), refetchControls()])
+      setProfileDraft(null)
+      reloadProfile()
     } catch (err) {
       setActionError(
         translateApiError(err, i18n.tr, {
@@ -210,6 +320,7 @@ export function MemorySection() {
       await deleteMemory(entry.memoryId)
       setConfirmId(null)
       await refetch()
+      reloadProfile()
     } catch (err) {
       setActionError(
         translateApiError(err, i18n.tr, {
@@ -299,6 +410,106 @@ export function MemorySection() {
         )}
       </Show>
 
+      <Show when={profile.error && !profileSwitchedOff()}>
+        <p class="verevon-settings-status-message verevon-settings-status-message--error" role="alert">
+          {i18n.tr('Kunne ikke laste profilen.', 'Could not load the profile.')}
+        </p>
+      </Show>
+
+      <Show when={profile()}>
+        {(result) => (
+          <section class="verevon-settings-list-card" aria-labelledby="memory-profile-title">
+            <div class="verevon-settings-integration-row">
+              <div>
+                <p id="memory-profile-title">{i18n.tr('Profil', 'Profile')}</p>
+                <span>
+                  {i18n.tr(
+                    'En kort tekst om deg, bygd fra minnene du har godtatt. Du kan endre den; endringen beholdes til du ber om å bygge den på nytt.',
+                    'A short text about you, built from the memories you have accepted. You can edit it; your edit is kept until you ask to rebuild it.',
+                  )}
+                </span>
+              </div>
+            </div>
+            <Show when={profileNotice(result(), i18n)}>
+              {(notice) => (
+                <p class="verevon-settings-subnote" role="status">
+                  {notice()}
+                </p>
+              )}
+            </Show>
+            <Show when={profileVisible(result())}>
+              <label for="memory-profile-text" class="verevon-settings-field">
+                <span class="verevon-settings-label">{i18n.tr('Profiltekst', 'Profile text')}</span>
+                <span class="verevon-settings-input-wrap">
+                  <textarea
+                    id="memory-profile-text"
+                    value={profileText()}
+                    rows={6}
+                    maxlength={PROFILE_MAX_CHARS}
+                    disabled={profileBusy()}
+                    placeholder={i18n.tr(
+                      'Ingen profil ennå. Den bygges fra minnene dine, eller du kan skrive den selv.',
+                      'No profile yet. It is built from your memories, or you can write it yourself.',
+                    )}
+                    onInput={(event) => setProfileDraft(event.currentTarget.value)}
+                    class="verevon-settings-input verevon-settings-textarea"
+                  />
+                </span>
+                <span class="verevon-settings-help">
+                  {profileLength(profileText())} / {PROFILE_MAX_CHARS} {i18n.tr('tegn', 'characters')}
+                </span>
+              </label>
+              <Show when={profileSources(result()).length > 0}>
+                <p class="verevon-settings-subnote">
+                  {i18n.tr(
+                    `Bygd fra ${profileSources(result()).length} minner:`,
+                    `Built from ${profileSources(result()).length} memories:`,
+                  )}
+                </p>
+                <ul class="verevon-settings-subnote">
+                  <For each={profileSources(result())}>
+                    {(source) => (
+                      <li>
+                        <a href={`#memory-${source.memoryId}`}>{source.line}</a>
+                      </li>
+                    )}
+                  </For>
+                </ul>
+              </Show>
+              <Show when={(result().profile?.sourcesDeletedSinceEdit ?? 0) > 0}>
+                <p class="verevon-settings-subnote" role="status">
+                  {i18n.tr(
+                    `${result().profile?.sourcesDeletedSinceEdit} kilde(r) er slettet siden du redigerte. Teksten din er beholdt som du skrev den.`,
+                    `${result().profile?.sourcesDeletedSinceEdit} source(s) deleted since you edited. Your text is kept as you wrote it.`,
+                  )}
+                </p>
+              </Show>
+              <div>
+                <SettingsButton
+                  variant="primary"
+                  settingsSize="sm"
+                  disabled={
+                    profileBusy() ||
+                    profileDraft() === null ||
+                    profileLength(profileText()) > PROFILE_MAX_CHARS
+                  }
+                  onClick={() => void handleProfileSave()}
+                >
+                  {i18n.tr('Lagre profil', 'Save profile')}
+                </SettingsButton>{' '}
+                <SettingsButton
+                  settingsSize="sm"
+                  disabled={profileBusy() || result().skipReason === 'user_paused'}
+                  onClick={() => void handleProfileRebuild()}
+                >
+                  {i18n.tr('Bygg på nytt fra minnene mine', 'Rebuild from my memories')}
+                </SettingsButton>
+              </div>
+            </Show>
+          </section>
+        )}
+      </Show>
+
       <Show when={memories.error}>
         <p class="verevon-settings-status-message verevon-settings-status-message--error" role="alert">
           {i18n.tr('Kunne ikke laste minner.', 'Could not load memories.')}
@@ -340,7 +551,7 @@ export function MemorySection() {
           <div class="verevon-settings-list-card">
             <For each={list()}>
               {(entry) => (
-                <div class="verevon-settings-integration-row">
+                <div id={`memory-${entry.memoryId}`} class="verevon-settings-integration-row">
                   <div>
                     <p>
                       {entry.content}{' '}
