@@ -235,6 +235,31 @@ impl QuarryError {
             .filter(|reason| target_repair_reason::is_known(reason))
     }
 
+    /// A `DRIVER_FAILED` that carries one of the fetch sub-codes of
+    /// [`driver_failed_reason`] (E3.8.1). `details.reason` is the sub-code and
+    /// `retryable` is the sub-code's own flag, not the code's (false). A string
+    /// outside the closed list is not a sub-code: the error is a plain
+    /// `DRIVER_FAILED` with no reason, so free text never reaches a caller.
+    pub fn driver_failed(reason: &str, message: impl Into<String>) -> Self {
+        let Some(reason) = driver_failed_reason::canonical(reason) else {
+            return Self::new(ErrorCode::DriverFailed, message);
+        };
+        let mut error = Self::new(ErrorCode::DriverFailed, message)
+            .with_details(serde_json::json!({ "reason": reason }));
+        error.retryable = driver_failed_reason::retryable(reason);
+        error
+    }
+
+    /// The fetch sub-code of a `DRIVER_FAILED`, when `details.reason` is one of
+    /// the closed list. Another code, another reason and free text are `None`.
+    pub fn driver_failed_reason(&self) -> Option<&'static str> {
+        if self.code != ErrorCode::DriverFailed {
+            return None;
+        }
+        let raw = self.details.as_ref()?.get("reason")?.as_str()?;
+        driver_failed_reason::canonical(raw)
+    }
+
     pub fn unsupported_action(action: &str) -> Self {
         Self::new(
             ErrorCode::Unsupported,
@@ -330,6 +355,40 @@ pub mod target_repair_reason {
     /// Whether `raw` is a reason Quarry itself raises (closed list or legacy).
     pub fn is_known(raw: &str) -> bool {
         ALL.contains(&raw) || LEGACY.contains(&raw)
+    }
+}
+
+/// The closed vocabulary of `details.reason` on a `DRIVER_FAILED` that the fetch
+/// waterfall raises (E3.8.1). No new `ErrorCode` (R-10): the code stays
+/// `DRIVER_FAILED` (502) and the reason says why. Each reason carries its own
+/// `retryable` flag. The strings are wire contract: a new one is an additive,
+/// documented change (docs/ERROR_REASONS.md) and mirrors into the Go errs package.
+pub mod driver_failed_reason {
+    /// The host name did not resolve. A resolver fault can clear on a repeat; a
+    /// name that does not exist fails the same way, so one or two retries at most.
+    pub const DNS: &str = "dns";
+    /// The TLS handshake or the certificate check failed. A repeat of the same
+    /// call cannot change that; another TLS profile is a fallback tier's job.
+    pub const TLS: &str = "tls";
+    /// No TCP connection could be made (refused, reset, unreachable).
+    pub const CONNECT: &str = "connect";
+    /// Every tier of the chain was tried and none served the page, and the tiers
+    /// did not agree on one cause. Each tier's error is in `fallback_attempts`.
+    pub const ALL_DRIVERS_FAILED: &str = "all_drivers_failed";
+
+    /// Every sub-code, in documentation order.
+    pub const ALL: [&str; 4] = [DNS, TLS, CONNECT, ALL_DRIVERS_FAILED];
+
+    /// The sub-code a string stands for, when it is one of [`ALL`].
+    pub fn canonical(raw: &str) -> Option<&'static str> {
+        ALL.iter().find(|known| **known == raw).copied()
+    }
+
+    /// Whether a repeat of the same call can succeed. `dns` and `connect` can
+    /// clear on their own; `tls` and `all_drivers_failed` do not clear on a
+    /// straight repeat. A string outside the list is not retryable.
+    pub fn retryable(reason: &str) -> bool {
+        canonical(reason).is_some_and(|known| known == DNS || known == CONNECT)
     }
 }
 
@@ -453,5 +512,71 @@ mod log_message_tests {
             err.log_message_under(Mode::Off),
             "plain text, nothing to mask"
         );
+    }
+}
+
+#[cfg(test)]
+mod driver_failed_reason_tests {
+    use super::*;
+
+    #[test]
+    fn driver_failed_sub_codes_are_closed_and_stable() {
+        // Wire contract: these exact strings, in this order.
+        assert_eq!(
+            driver_failed_reason::ALL,
+            ["dns", "tls", "connect", "all_drivers_failed"]
+        );
+        for reason in driver_failed_reason::ALL {
+            assert_eq!(driver_failed_reason::canonical(reason), Some(reason));
+        }
+        // Closed and case-sensitive: an unknown or upper-case string is not one.
+        assert_eq!(driver_failed_reason::canonical("DNS"), None);
+        assert_eq!(driver_failed_reason::canonical("action_failed"), None);
+        assert_eq!(driver_failed_reason::canonical("anything else"), None);
+    }
+
+    #[test]
+    fn each_sub_code_carries_its_own_retryable_flag() {
+        assert!(driver_failed_reason::retryable("dns"));
+        assert!(driver_failed_reason::retryable("connect"));
+        assert!(!driver_failed_reason::retryable("tls"));
+        assert!(!driver_failed_reason::retryable("all_drivers_failed"));
+        // Not a sub-code, so not retryable either.
+        assert!(!driver_failed_reason::retryable("anything else"));
+        // The code itself does not move: no new code, still 502, not retryable by code.
+        assert!(!ErrorCode::DriverFailed.retryable());
+        assert_eq!(ErrorCode::DriverFailed.http_status(), 502);
+        assert_eq!(ErrorCode::DriverFailed.wire_name(), "DRIVER_FAILED");
+    }
+
+    #[test]
+    fn driver_failed_constructor_sets_the_sub_code_and_its_own_flag() {
+        let dns = QuarryError::driver_failed(driver_failed_reason::DNS, "lookup failed");
+        assert_eq!(dns.code, ErrorCode::DriverFailed);
+        assert!(dns.retryable, "dns carries its own flag, not the code's");
+        assert_eq!(dns.details.as_ref().expect("details")["reason"], "dns");
+        assert_eq!(dns.driver_failed_reason(), Some("dns"));
+
+        let tls = QuarryError::driver_failed(driver_failed_reason::TLS, "handshake failed");
+        assert!(!tls.retryable);
+        assert_eq!(tls.driver_failed_reason(), Some("tls"));
+
+        // Free text is not a sub-code: no details, not retryable, nothing echoed.
+        let free = QuarryError::driver_failed("https://example.test/private", "x");
+        assert!(free.details.is_none());
+        assert!(!free.retryable);
+        assert_eq!(free.driver_failed_reason(), None);
+    }
+
+    #[test]
+    fn driver_failed_reason_reads_only_a_sub_code_of_a_driver_failed() {
+        let other_code = QuarryError::new(ErrorCode::Timeout, "x")
+            .with_details(serde_json::json!({ "reason": "dns" }));
+        assert_eq!(other_code.driver_failed_reason(), None);
+        let typed = QuarryError::new(ErrorCode::DriverFailed, "x")
+            .with_details(serde_json::json!({ "reason": "action_failed" }));
+        assert_eq!(typed.driver_failed_reason(), None);
+        let none = QuarryError::new(ErrorCode::DriverFailed, "x");
+        assert_eq!(none.driver_failed_reason(), None);
     }
 }
