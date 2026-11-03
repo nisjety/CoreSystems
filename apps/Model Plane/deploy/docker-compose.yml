@@ -397,6 +397,10 @@ services:
       # WS25-S8: org hook rules stored in capability-core, the gateway registry a read-through cache.
       # Only the literal `true`; off keeps the in-memory registry. Not before the Do-run refusal is wired.
       HOOKS_DURABLE: ${HOOKS_DURABLE:-false}
+      # EP-4 S4: MCP elicitation (a server's form held in the gateway while the owner answers). Only the literal true.
+      MCP_ELICITATION_ENABLED: ${MCP_ELICITATION_ENABLED:-false}
+      # Hold window of an unanswered form, seconds (default 600, clamped 60-1800).
+      MCP_ELICITATION_HOLD_SECONDS: ${MCP_ELICITATION_HOLD_SECONDS:-600}
       # WS17-S5: the read-only recall_conversations tool. Off by default; needs WS07 memory controls live.
       MODEL_GATEWAY_RECALL_CONVERSATIONS_ENABLED: ${MODEL_GATEWAY_RECALL_CONVERSATIONS_ENABLED:-false}
       # WS25-S6: the optional agent_mode on invoke (lockdown, read_only, ask_first, auto), strictest-wins over the
@@ -421,6 +425,8 @@ services:
       MODEL_GATEWAY_USER_LOCALE_CONTEXT: ${MODEL_GATEWAY_USER_LOCALE_CONTEXT:-false}
       MODEL_GATEWAY_TONE_PRESETS: ${MODEL_GATEWAY_TONE_PRESETS:-false}
       MODEL_GATEWAY_USER_PROFILE_PREFIX: ${MODEL_GATEWAY_USER_PROFILE_PREFIX:-false}
+      # EP-6 S10: the Space's agent role catalogue on a Do launch. Only the literal true.
+      MODEL_GATEWAY_SUBAGENT_ROLE_CATALOGUE: ${MODEL_GATEWAY_SUBAGENT_ROLE_CATALOGUE:-false}
       # WS27-S2: a turn's usage frame and ledger rows count every tool round and the overhead calls, with run_id. Off by
       # default; only the literal `true`. Billing attribution (DEC-18, WS27-D5) must be confirmed before it is turned on.
       MODEL_GATEWAY_TURN_USAGE_COMPLETE: ${MODEL_GATEWAY_TURN_USAGE_COMPLETE:-false}
@@ -1127,6 +1133,8 @@ services:
       SESSION_CORE_PARK_TTL_SECONDS: ${SESSION_CORE_PARK_TTL_SECONDS:-86400}
       # EP-8 S6: Space memory stays off until D2-480, D2-481 and D2-461 are closed.
       SESSION_SPACE_MEMORY_ENABLED: ${SESSION_SPACE_MEMORY_ENABLED:-false}
+      # EP-8 S10: per-agent memory in a Space (also needs SESSION_SPACE_MEMORY_ENABLED). Only the literal true.
+      SESSION_AGENT_MEMORY_ENABLED: ${SESSION_AGENT_MEMORY_ENABLED:-false}
       # EP-14 S6: request snapshot writer and its TTL sweep (off until S7 and D3).
       SESSION_CORE_REQUEST_SNAPSHOTS_ENABLED: ${SESSION_CORE_REQUEST_SNAPSHOTS_ENABLED:-false}
       SESSION_CORE_REQUEST_SNAPSHOTS_SWEEP_ENABLED: ${SESSION_CORE_REQUEST_SNAPSHOTS_SWEEP_ENABLED:-false}
@@ -1666,6 +1674,8 @@ services:
       AUTH_CORE_JWKS_URL: ${AUTH_CORE_JWKS_URL:-http://auth-core:3011/api/convex-auth/jwks}
       AUTH_CORE_ISSUER: ${AUTH_CORE_ISSUER:-http://auth-core:3011/api/convex-auth}
       EXECUTION_CORE_AUTH_AUDIENCE: ${EXECUTION_CORE_AUTH_AUDIENCE:-execution-core}
+      # EP-6 S10: a subagent may take a role from the run's agent catalogue. Only the literal true.
+      EXECUTION_CORE_SUBAGENT_ROLES: ${EXECUTION_CORE_SUBAGENT_ROLES:-false}
       EXECUTION_CORE_SERVICE_ID: ${EXECUTION_CORE_SERVICE_ID:-execution-core}
       EXECUTION_CORE_SERVICE_API_KEY: ${EXECUTION_CORE_SERVICE_API_KEY:?EXECUTION_CORE_SERVICE_API_KEY is required}
       # WS05-S3/S4: how the permission engine reads a tool's declared class. TOOL_CLASS_GATE is off, shadow or enforce (an unknown value is

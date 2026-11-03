@@ -566,6 +566,19 @@
       "zdr_allowed": false
     },
     {
+      "actionId": "chat.set_transcript_density",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "external_write",
+      "exemptReason": "ui_state_only",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:99e70a79698568f447a3b61916fbad61d12e7c8a360cff76befa052c4ce4832d",
+      "zdr_allowed": false
+    },
+    {
       "actionId": "chat.submit_feedback",
       "registry": true,
       "access": "none",

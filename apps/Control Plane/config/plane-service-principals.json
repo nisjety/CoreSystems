@@ -503,7 +503,12 @@
       "model-gateway": [
         "mail-task:prepare-thread"
       ]
-    }
+    },
+    "apiKeyExchange": [
+      "model-gateway",
+      "session-core",
+      "inference-core"
+    ]
   },
   "verevon-gateway-retention-decision": {
     "tenancy": "directory",

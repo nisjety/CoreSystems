@@ -163,6 +163,12 @@ pub const FIELD_TREATMENTS: &[(&str, Treatment)] = &[
     ("client_timezone", Treatment::Honored),
     ("client_utc_offset_minutes", Treatment::Honored),
     ("ui_locale", Treatment::Honored),
+    (
+        "agent_roles",
+        Treatment::Inert(
+            "no tool loop runs on a ZDR turn, so no subagent takes a role; the catalogue is never built",
+        ),
+    ),
 ];
 
 /// The feature strings the gateway reads, each with its treatment. A feature
@@ -276,6 +282,7 @@ pub fn invoke_field_names(request: &InvokeRequest) -> Vec<&'static str> {
         client_timezone: _,
         client_utc_offset_minutes: _,
         ui_locale: _,
+        agent_roles: _,
     } = request;
     vec![
         "content",
@@ -326,6 +333,7 @@ pub fn invoke_field_names(request: &InvokeRequest) -> Vec<&'static str> {
         "client_timezone",
         "client_utc_offset_minutes",
         "ui_locale",
+        "agent_roles",
     ]
 }
 

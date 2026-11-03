@@ -120,6 +120,13 @@ def check_maps($name; $row; $audiences; $scopes):
          elif ([$m | keys[] | IN($audiences[])] | all | not) then fail($name; "every \"tokenExchange\" target must be one of the row's audiences")
          elif ([$m[] | non_empty_strings] | all | not) then fail($name; "every \"tokenExchange\" entry must be a non-empty array of non-empty strings")
          else . end
+     else . end)
+  # EP-12 S2: the audiences this caller may ask auth-core's api-key-exchange to mint for.
+  | (if ($row | has("apiKeyExchange")) then
+       $row.apiKeyExchange as $l
+       | if ($l | non_empty_strings | not) then fail($name; "\"apiKeyExchange\" must be a non-empty array of non-empty strings")
+         elif ([$l[] | IN("model-gateway", "session-core", "inference-core", "quarry", "browser-broker")] | all | not) then fail($name; "\"apiKeyExchange\" audiences must be model-gateway, session-core, inference-core, quarry or browser-broker")
+         else . end
      else . end);
 
 # The only keys a policy row may carry. Anything else is refused rather than dropped: a
@@ -127,7 +134,7 @@ def check_maps($name; $row; $audiences; $scopes):
 # emitted without one, and Auth Core then grants EVERY scope the row lists on EVERY
 # audience it lists, silently widening the principal to the union of its scopes.
 def known_row_keys:
-  ["allowAnyOrg", "audiences", "consumerEnv", "orgIds", "retentionByAudience",
+  ["allowAnyOrg", "apiKeyExchange", "audiences", "consumerEnv", "orgIds", "retentionByAudience",
    "scopes", "scopesByAudience", "tenancy", "tokenExchange"];
 
 def check_keys($name; $row):
@@ -161,5 +168,6 @@ reduce ($pol[0] | keys[]) as $name ({};
       + optional($row; "scopesByAudience")
       + optional($row; "retentionByAudience")
       + optional($row; "tokenExchange")
+      + optional($row; "apiKeyExchange")
     )
 )

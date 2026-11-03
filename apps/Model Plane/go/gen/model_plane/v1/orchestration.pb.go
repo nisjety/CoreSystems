@@ -6921,8 +6921,16 @@ type RunQuestion struct {
 	Answers []*QuestionAnswerItem `protobuf:"bytes,13,rep,name=answers,proto3" json:"answers,omitempty"`
 	// The user message that carried the answer, when one did.
 	AnsweredMessageId string `protobuf:"bytes,14,opt,name=answered_message_id,json=answeredMessageId,proto3" json:"answered_message_id,omitempty"`
-	unknownFields     protoimpl.UnknownFields
-	sizeCache         protoimpl.SizeCache
+	// Who authored the question: `model` (the run's own model) or
+	// `mcp_elicitation` (a form an MCP server sent through the run). A row stored
+	// before the origin existed reads `model`. A card must never present a
+	// server's question as the assistant's (EP-4 S5).
+	Origin string `protobuf:"bytes,15,opt,name=origin,proto3" json:"origin,omitempty"`
+	// The display name of the server that asked, at most 80 characters. Empty
+	// exactly when `origin` is `model`.
+	OriginLabel   string `protobuf:"bytes,16,opt,name=origin_label,json=originLabel,proto3" json:"origin_label,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *RunQuestion) Reset() {
@@ -7053,6 +7061,20 @@ func (x *RunQuestion) GetAnsweredMessageId() string {
 	return ""
 }
 
+func (x *RunQuestion) GetOrigin() string {
+	if x != nil {
+		return x.Origin
+	}
+	return ""
+}
+
+func (x *RunQuestion) GetOriginLabel() string {
+	if x != nil {
+		return x.OriginLabel
+	}
+	return ""
+}
+
 // Put a question to the run's owner. See `CreateRunQuestion`.
 type CreateRunQuestionRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
@@ -7071,8 +7093,16 @@ type CreateRunQuestionRequest struct {
 	// A retry with the same key (per org) returns the stored question. Callers
 	// use `{run_id}:{step_id}`.
 	IdempotencyKey string `protobuf:"bytes,7,opt,name=idempotency_key,json=idempotencyKey,proto3" json:"idempotency_key,omitempty"`
-	unknownFields  protoimpl.UnknownFields
-	sizeCache      protoimpl.SizeCache
+	// Who authored the question: empty or `model` for the run's model,
+	// `mcp_elicitation` for a form an MCP server sent. Only the execution-core
+	// service principal may send `mcp_elicitation`; any other caller is refused
+	// (EP-4 S5).
+	Origin string `protobuf:"bytes,8,opt,name=origin,proto3" json:"origin,omitempty"`
+	// The display name of the asking server, at most 80 characters. Required
+	// with `mcp_elicitation` and refused with `model`.
+	OriginLabel   string `protobuf:"bytes,9,opt,name=origin_label,json=originLabel,proto3" json:"origin_label,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *CreateRunQuestionRequest) Reset() {
@@ -7150,6 +7180,20 @@ func (x *CreateRunQuestionRequest) GetExpiresInSeconds() uint32 {
 func (x *CreateRunQuestionRequest) GetIdempotencyKey() string {
 	if x != nil {
 		return x.IdempotencyKey
+	}
+	return ""
+}
+
+func (x *CreateRunQuestionRequest) GetOrigin() string {
+	if x != nil {
+		return x.Origin
+	}
+	return ""
+}
+
+func (x *CreateRunQuestionRequest) GetOriginLabel() string {
+	if x != nil {
+		return x.OriginLabel
 	}
 	return ""
 }
@@ -10373,7 +10417,7 @@ const file_model_plane_v1_orchestration_proto_rawDesc = "" +
 	"\aitem_id\x18\x01 \x01(\tR\x06itemId\x12\x1d\n" +
 	"\n" +
 	"option_ids\x18\x02 \x03(\tR\toptionIds\x12\x12\n" +
-	"\x04text\x18\x03 \x01(\tR\x04text\"\xc4\x04\n" +
+	"\x04text\x18\x03 \x01(\tR\x04text\"\xff\x04\n" +
 	"\vRunQuestion\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x15\n" +
 	"\x06run_id\x18\x02 \x01(\tR\x05runId\x12\x1b\n" +
@@ -10391,7 +10435,9 @@ const file_model_plane_v1_orchestration_proto_rawDesc = "" +
 	"\vanswered_at\x18\f \x01(\v2\x1a.google.protobuf.TimestampR\n" +
 	"answeredAt\x12<\n" +
 	"\aanswers\x18\r \x03(\v2\".model_plane.v1.QuestionAnswerItemR\aanswers\x12.\n" +
-	"\x13answered_message_id\x18\x0e \x01(\tR\x11answeredMessageId\"\x88\x02\n" +
+	"\x13answered_message_id\x18\x0e \x01(\tR\x11answeredMessageId\x12\x16\n" +
+	"\x06origin\x18\x0f \x01(\tR\x06origin\x12!\n" +
+	"\forigin_label\x18\x10 \x01(\tR\voriginLabel\"\xc3\x02\n" +
 	"\x18CreateRunQuestionRequest\x12\x15\n" +
 	"\x06run_id\x18\x01 \x01(\tR\x05runId\x12\x17\n" +
 	"\astep_id\x18\x02 \x01(\tR\x06stepId\x12\x15\n" +
@@ -10399,7 +10445,9 @@ const file_model_plane_v1_orchestration_proto_rawDesc = "" +
 	"\bdelivery\x18\x04 \x01(\tR\bdelivery\x122\n" +
 	"\x05items\x18\x05 \x03(\v2\x1c.model_plane.v1.QuestionItemR\x05items\x12,\n" +
 	"\x12expires_in_seconds\x18\x06 \x01(\rR\x10expiresInSeconds\x12'\n" +
-	"\x0fidempotency_key\x18\a \x01(\tR\x0eidempotencyKey\"T\n" +
+	"\x0fidempotency_key\x18\a \x01(\tR\x0eidempotencyKey\x12\x16\n" +
+	"\x06origin\x18\b \x01(\tR\x06origin\x12!\n" +
+	"\forigin_label\x18\t \x01(\tR\voriginLabel\"T\n" +
 	"\x19CreateRunQuestionResponse\x127\n" +
 	"\bquestion\x18\x01 \x01(\v2\x1b.model_plane.v1.RunQuestionR\bquestion\"G\n" +
 	"\x17ListRunQuestionsRequest\x12\x15\n" +

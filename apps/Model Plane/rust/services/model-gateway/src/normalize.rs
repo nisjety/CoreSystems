@@ -614,6 +614,7 @@ mod tests {
             client_timezone: None,
             client_utc_offset_minutes: None,
             ui_locale: None,
+            agent_roles: None,
         }
     }
 

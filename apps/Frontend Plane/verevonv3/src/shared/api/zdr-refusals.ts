@@ -61,6 +61,10 @@ export type ZdrFeatureKey =
   | 'message_versions'
   | 'sandbox_workspace'
   | 'user_profile'
+  | 'agent_api'
+  | 'conversation_export'
+  | 'conversation_share'
+  | 'conversation_import'
 
 /** The reader's-language chooser, the same shape the rest of the SPA passes around. */
 export type Translate = (noText: string, enText: string) => string
@@ -190,6 +194,10 @@ export const FEATURE_LABELS: Record<ZdrFeatureKey, Copy> = {
   message_versions: { no: 'meldingsversjoner', en: 'message versions' },
   sandbox_workspace: { no: 'filer som beholdes mellom kall i et trådarbeidsområde', en: 'files kept between calls in a thread workspace' },
   user_profile: { no: 'den faste profilen', en: 'the standing profile' },
+  agent_api: { no: 'agent-API', en: 'the Agent API' },
+  conversation_export: { no: 'eksport av samtaler', en: 'conversation export and replay' },
+  conversation_share: { no: 'deling av samtaler', en: 'conversation sharing' },
+  conversation_import: { no: 'import av samtaler', en: 'conversation import' },
 }
 
 /** A refusal whose feature the SPA does not know names it this way. */

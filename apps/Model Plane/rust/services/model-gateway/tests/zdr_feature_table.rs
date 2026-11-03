@@ -326,6 +326,11 @@ fn cases() -> Vec<(&'static str, Value, Expect)> {
             None,
         ),
         ("ui_locale", with("ui_locale", json!("no")), None),
+        (
+            "agent_roles",
+            with("agent_roles", json!([{"agent_ref": "a", "version": 1}])),
+            None,
+        ),
     ]
 }
 

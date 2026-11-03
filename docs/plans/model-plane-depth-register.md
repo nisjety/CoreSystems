@@ -3125,6 +3125,15 @@ Built so far: WS13-S0, WS13-S1, WS13-S2; WS14-S1, WS14-S2 (partial), WS14-S3; WS
 | D3-478 | EP-12-S3 | live-proof | P1 | lead, optional: add a row for agent-api-v1.json to the table in apps/Model Plane/api/contracts/README.md (authored by EP-12-S3, pinned by its .sha256, read by model-gateway tests/agent_api_contract.rs). | open |
 | D3-479 | EP-12-S3 | live-proof | P1 | lead, optional: apps/Model Plane/api/.gitignore does not cover the new sdk/agent-api output. Add sdk/agent-api/typescript/node_modules/, sdk/agent-api/typescript/dist/, sdk/agent-api/python/__pycache__/, sdk/agent-api/python/*.egg-info/, sdk/agent-api/python/dist/ and sdk/agent-api/python/build/ beside the existing sdk lines. | open |
 | D3-480 | EP-12-S3 | follow-up | P3 | 14 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W3-10.json | open |
+| D3-481 | W3-10 guard | follow-up | P2 | guard skipped: apps/Control Plane/docker-compose.yml API_KEY_AGENT_EXCHANGE_ENABLED for auth-core: the builder marked it owner/conditional; not applied | open |
+| D3-482 | W3-10 guard | follow-up | P2 | guard skipped: EP-8-S10 memory.proto EraseAgentMemory RPC + BFF spaces/mod.rs revocation call: needs a proto number and an authority ruling (design), not a shared edit | open |
+| D3-483 | W3-10 guard | follow-up | P2 | guard skipped: EP-6-S10 needs_other_files: BFF domains/spaces.rs agent_roles strip/compose and the optional ZDR boundary refusal in execution-core: these need design or S7, not shared edits | open |
+| D3-484 | W3-10 guard | follow-up | P2 | guard skipped: EP-12-S3 optional rows: apps/Model Plane/api/contracts/README.md agent-api-v1 row, apps/Model Plane/api/.gitignore sdk/agent-api lines: left for the lead | open |
+| D3-485 | W3-10 guard | follow-up | P2 | guard skipped: EP-14-S2 bookkeeping: chat-density.css in the new_files record; size ratchet (python scripts/gates/size-ratchet.py --check) not run | open |
+| D3-486 | W3-10 guard | follow-up | P2 | guard skipped: EP-14-S2 optional ChatPanels.tsx header slot: not owned, not applied | open |
+| D3-487 | W3-10 guard | follow-up | P2 | guard skipped: EP-4-S5 migration number 0105 record in 00-integration-round-b.md: lead bookkeeping | open |
+| D3-488 | W3-10 guard | follow-up | P2 | guard skipped: Verevon TS proto gen (EP-4-S4 note): verevonv3 has no generated copies of these messages, so there was nothing to regenerate | open |
+| D3-489 | W3-10 guard | test-gap | P1 | still broken after the guard: apps/Control Plane/auth-core: tsc, prettier and jest were not run because the worktree has no auth-core node_modules. EP-12-S2's prettier --write list and its guard jest run are still to do | open |
 
 ## Cross-wave
 

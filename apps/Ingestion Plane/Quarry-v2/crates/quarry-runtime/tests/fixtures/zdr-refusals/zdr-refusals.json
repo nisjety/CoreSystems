@@ -212,6 +212,22 @@
     {
       "key": "user_profile",
       "label_en": "the standing profile"
+    },
+    {
+      "key": "agent_api",
+      "label_en": "the Agent API"
+    },
+    {
+      "key": "conversation_export",
+      "label_en": "conversation export and replay"
+    },
+    {
+      "key": "conversation_share",
+      "label_en": "conversation sharing"
+    },
+    {
+      "key": "conversation_import",
+      "label_en": "conversation import"
     }
   ],
   "generated_by": "mp-contracts zdr_refusal tests (MP_UPDATE_GOLDEN=1)",

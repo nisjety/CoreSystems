@@ -80,6 +80,10 @@ The Control Plane services (auth-core, user-core, org-core) are the **single sou
 - ✅ **Hard Deletes** (GDPR purge)
   - `gdpr_hard_delete_user(user_id)` - Complete data removal
   - `gdpr_anonymize_user(user_id)` - Anonymize instead of delete
+- ✅ **API-key token issuance** (built dark)
+  - `POST /api/:audience/api-key-exchange` (EP-12 S2 / INNH-10 CP-1): the only path that mints an `api_key` principal token (sub `apikey:<key_id>`, `acting_user_id` attribution only, TTL <= 120 s, `jti`)
+  - Callers opted in per audience by the registry row's `apiKeyExchange`; switch `API_KEY_AGENT_EXCHANGE_ENABLED` (on top of `API_KEY_ENABLED`), default off
+  - Durable audit `api_key_token_exchanged` / `api_key_token_denied`, fail-closed
 
 ### 3. Organization Membership
 **Owned by**: `auth-core` service  

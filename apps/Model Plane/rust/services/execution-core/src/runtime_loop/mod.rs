@@ -4097,6 +4097,9 @@ async fn execute_ask_user(
         items: items.iter().map(ask::to_wire_item).collect(),
         expires_in_seconds: 0,
         idempotency_key: format!("{run_id}:{step_id}"),
+        // The run's own model asks here; an MCP elicitation sets these (EP-4 S5).
+        origin: String::new(),
+        origin_label: String::new(),
     };
     let request = match authenticated_session_request(request, &bearer) {
         Ok(request) => request,

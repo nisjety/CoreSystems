@@ -895,6 +895,8 @@ fn scripted_question(id: &str, run_id: &str, state: QuestionState) -> RunQuestio
         answered_at: None,
         answers: Vec::new(),
         answered_message_id: String::new(),
+        origin: String::new(),
+        origin_label: String::new(),
     }
 }
 

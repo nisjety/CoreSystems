@@ -800,6 +800,8 @@ pub fn compose(input: Composition<'_>) -> RunContext {
         status: Some(status),
         // Already framed and bounded by `decide_profile`; empty when it was left out.
         user_profile: input.user_profile.unwrap_or_default(),
+        // Never composed here: the Do launch adds the role catalogue after `prepare` (EP-6 S10).
+        agent_roles: Vec::new(),
     }
 }
 
