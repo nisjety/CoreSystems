@@ -49,7 +49,7 @@ None.
 2. The flush fix is the import change alone. Every signal in the controller gets same-tick reads, and no caller changes.
 3. The stale-reply guard is extended beyond the three cases the scope names to the error, approval and busy paths. The same leak exists there (a reply from a replaced session writing to the new one). Treated as a leak fix, so no flag.
 4. `dispose()` keeps the ZDR-only close. D2-209 is the owner's decision and is not changed here.
-5. GAP rows 177 and 201 keep status Open: sitemap seeding is built behind a flag, off by default, and not enabled on any stack. Rows 292 and 419 repeat the old claim ("CrawlJobWF has no sitemap seeding"); they are outside the named rows and were left for the owner.
+5. GAP rows 177 and 201 keep status Open: sitemap seeding is built behind a flag, off by default, and left off until the owner enables it (INNH-6). Rows 292 and 419 repeat the old claim ("CrawlJobWF has no sitemap seeding"); they are outside the named rows and were left for the owner.
 6. CRAWL_SCOPE_ROBOTS.md section 13 documents the current code, not the plan. The scheduled-crawl gap is recorded as open, not fixed, because the fix belongs in lane b's `inputs.go` and `scheduled.go`.
 7. The new tests use the existing module mocks and `ApiError`. No new mock or helper was added.
 
