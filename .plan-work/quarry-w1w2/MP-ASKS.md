@@ -131,3 +131,12 @@ Quarry's half is built on `w23/lane-d` (code only, not compiled): the vendored `
 - **Tests (plan names):** `TestSnapshotComesFromVerifiedPrincipalNotRequest`, `TestRunGrantSnapshotOnlyTightens`, `TestDeniedDomainIsNotGrantable`, `TestAllowListIntersectsRequestedDomains`, `TestPolicyAbsentYieldsNoSnapshot`, `TestPostgresRoundTripKeepsSnapshot` (integration tag).
 - **model-gateway `browser_run.rs`:** no logic change; `POST /v1/browser/grants` may add `policy_rev` for the UI.
 - **Deploy order:** broker first; Quarry reads an absent snapshot as no grant layer, so either order is safe.
+
+## W2-FE-GW1 (lane d, w23): INNH-10 MP-3, what the Verevon gateway sends to the key-grant door
+
+Producer: `apps/Frontend Plane/verevonv3/apps/gateway/src/domains/api_key_agent.rs` (commit 853ff3403 on `w23/lane-d`), dark behind `API_KEY_AGENT_RUNS`. Built against the design's proposal; please confirm or say what differs.
+
+- **Acquire:** `POST {model-gateway}/v1/browser/key-grants`, header `x-browser-authorization: Bearer <browser-broker-audience api_key token>` (the CP-1 token; NO `Authorization` header, because auth-core mints no model-gateway-audience key token), `content-type: application/json`, body `{ "allowed_domains": [1..32 hosts], "budget": { "micro_usd": u64, "max_steps": u32, "max_runtime_s": u32 }, "zdr": bool }`. No `kind`, no org or user header.
+- **Answer read:** `{ grant_id, expires_at, allowed_domains?, budget?, key_id }`, bare or wrapped in `{ data }`. `grant_id` required (at most 256 bytes). A `z_` grant id or `zdr: true` makes the gateway start a ZDR run. `allowed_domains` absent (ZDR): the requested hosts go to Quarry, which replaces them with the grant's. `budget`, if present, is min-ed field-wise with the request.
+- **Revoke:** `DELETE {model-gateway}/v1/browser/key-grants/{grant_id}` with the same header shape (a fresh or cached broker-audience token of the same key); 2xx or 404 is success. Called on run close, on any start failure after issuance, and when Quarry reports the run gone.
+- **Refusals:** a 4xx keeps its status to the caller with code `api_key_grant_refused` and `details.reason` = the door's reason when it is a snake_case token at `error.details.reason`, `details.reason`, `reason`, `error.code` or `code`. Please return the design's reasons there (for example `api_key_grant_kind_refused`, hosts outside `key_hosts`, budget over ceiling, `MaxActivePerKey`).
