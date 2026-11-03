@@ -217,6 +217,24 @@ pub const ROOM_EVENT_POLICY: &[(&str, Disposition)] = &[
     ("user_question", Disposition::Drop),
     ("connected", Disposition::Drop),
     ("done", Disposition::Drop),
+    // The run-events stream (`/v1/runs/:run_id/events`, owner-bound, reserved for WS10 and WS20).
+    // A room turn's buffer never holds these; named so a future relay of them stays denied.
+    ("plan_transitioned", Disposition::Drop),
+    ("todo_transitioned", Disposition::Drop),
+    ("approval_state_changed", Disposition::Drop),
+    ("subagent_attached", Disposition::Drop),
+    ("subagent_stopped", Disposition::Drop),
+    ("run_paused_for_approval", Disposition::Drop),
+    ("run_resumed_after_approval", Disposition::Drop),
+    ("approval_continuation_verified", Disposition::Drop),
+    ("browser_action_dispatched", Disposition::Drop),
+    ("browser_observation_received", Disposition::Drop),
+    ("browser_run_paused", Disposition::Drop),
+    ("browser_run_resumed", Disposition::Drop),
+    ("browser_action_approval_required", Disposition::Drop),
+    ("browser_action_decided", Disposition::Drop),
+    ("question_asked", Disposition::Drop),
+    ("question_answered", Disposition::Drop),
 ];
 
 /// What the projector does with `name`. Default deny.
@@ -1092,5 +1110,645 @@ mod tests {
             RoomFrame::Text { offset: 0, delta: "Blåbær 😀x".to_owned() }
         );
         assert_eq!(projector.text_total_units, 10);
+    }
+
+    // --- Leak guard tied to the SSE taxonomy --------------------------------------------------
+
+    const TAXONOMY: &str = include_str!("../../../../docs/sse-event-taxonomy.md");
+    const GOLDEN: &str = include_str!("../../../../api/contracts/space-room-run-frames.v1.json");
+    const SENTINEL: &str = "ZZSENTINELZZ";
+
+    /// Every event name the generated taxonomy lists, in any of its tables.
+    fn taxonomy_event_names() -> Vec<String> {
+        let mut names: Vec<String> = TAXONOMY
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix("| `"))
+            .filter_map(|rest| rest.split('`').next())
+            .map(str::to_owned)
+            .collect();
+        names.sort();
+        names.dedup();
+        names
+    }
+
+    /// A payload with the sentinel in every free-text field a producer frame carries, and safe
+    /// tokens where the projector reads an id.
+    fn sentinel_payload() -> Value {
+        json!({
+            "id": "call_1",
+            "plan_id": "plan_1",
+            "name": SENTINEL,
+            "kind": "document",
+            "status": "ok",
+            "code": SENTINEL,
+            "delta": SENTINEL,
+            "text": SENTINEL,
+            "content": SENTINEL,
+            "title": SENTINEL,
+            "detail": SENTINEL,
+            "summary": SENTINEL,
+            "message": SENTINEL,
+            "reason": SENTINEL,
+            "query": SENTINEL,
+            "url": SENTINEL,
+            "args": { "q": SENTINEL },
+            "output": SENTINEL,
+            "error": SENTINEL,
+            "messages": [SENTINEL, SENTINEL],
+            "steps": [{ "title": SENTINEL }, { "title": SENTINEL }],
+            "citations": [{ "title": SENTINEL, "url": SENTINEL }],
+        })
+    }
+
+    fn head() -> SnapshotHead {
+        SnapshotHead {
+            run_id: "run_01".to_owned(),
+            thread_id: "thr_01".to_owned(),
+            started_by: "usr_01".to_owned(),
+            agent_name: "Driftsassistent".to_owned(),
+            phase: "running".to_owned(),
+            started_at: 1_790_000_000,
+            expires_at: 1_790_000_120,
+        }
+    }
+
+    #[test]
+    fn every_taxonomy_event_has_a_policy_row() {
+        let names = taxonomy_event_names();
+        assert!(names.len() > 20, "the taxonomy parsed to too few names: {names:?}");
+        let missing: Vec<&String> = names
+            .iter()
+            .filter(|name| !ROOM_EVENT_POLICY.iter().any(|(known, _)| known == name))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "event names without a ROOM_EVENT_POLICY row (add one on purpose, Drop unless the room \
+             must see it): {missing:?}"
+        );
+        for transport in ["chunk", "connected", "done"] {
+            assert!(ROOM_EVENT_POLICY.iter().any(|(known, _)| *known == transport));
+        }
+    }
+
+    #[test]
+    fn the_policy_names_each_event_once() {
+        let mut seen = HashSet::new();
+        for (name, _) in ROOM_EVENT_POLICY {
+            assert!(seen.insert(*name), "duplicate ROOM_EVENT_POLICY row: {name}");
+        }
+    }
+
+    #[test]
+    fn no_sentinel_reaches_a_member_frame_for_any_event_name() {
+        let mut names: Vec<String> = taxonomy_event_names();
+        names.extend(ROOM_EVENT_POLICY.iter().map(|(name, _)| (*name).to_owned()));
+        names.push("brand_new_event".to_owned());
+        names.sort();
+        names.dedup();
+        let opener = event(0, "tool_call", json!({"id":"call_1","name":"web_search"}));
+        for name in &names {
+            for text_visible in [false, true] {
+                let mut projector = RoomProjector::new(RoomLimits::DEFAULT, text_visible);
+                let probe = event(1, name, sentinel_payload());
+                let frames = projector.apply_batch([&opener, &probe]);
+                for emitted in &frames {
+                    if text_visible && matches!(emitted.frame, RoomFrame::Text { .. }) {
+                        // Visible text is the one field the live text decision lets through.
+                        continue;
+                    }
+                    let rendered = emitted.frame.to_json().to_string();
+                    assert!(
+                        !rendered.contains(SENTINEL),
+                        "`{name}` leaked into a `{}` frame: {rendered}",
+                        emitted.frame.event_name()
+                    );
+                }
+                let mut snapshot = projector.snapshot(&head()).to_json();
+                if text_visible {
+                    snapshot["text"]["value"] = json!("");
+                }
+                assert!(!snapshot.to_string().contains(SENTINEL), "`{name}` leaked into the snapshot");
+                if let Some(work) = projector.work_summary() {
+                    assert!(!work.to_string().contains(SENTINEL), "`{name}` leaked into the summary");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_legacy_text_record_is_text_and_hidden_text_is_a_count() {
+        let legacy = BufferedEvent { seq: 4, event: String::new(), data: String::new(), delta: SENTINEL.to_owned() };
+        let mut hidden = RoomProjector::new(RoomLimits::DEFAULT, false);
+        let frames = hidden.apply_batch([&legacy]);
+        assert_eq!(frames, vec![Emitted { seq: 4, frame: RoomFrame::TextProgress { chars: 12 } }]);
+        let snapshot = hidden.snapshot(&head()).to_json();
+        assert_eq!(snapshot["text"], json!({"offset": 12, "value": "", "truncated": false, "visible": false}));
+    }
+
+    // --- Tool classes -------------------------------------------------------------------------
+
+    #[test]
+    fn every_builtin_tool_has_a_class_row() {
+        let missing: Vec<String> = crate::tool_loop::builtin_tool_defs()
+            .into_iter()
+            .map(|def| def.name)
+            .filter(|name| !BUILTIN_TOOL_CLASSES.iter().any(|(known, _)| known == name))
+            .collect();
+        assert!(missing.is_empty(), "builtin tools without a BUILTIN_TOOL_CLASSES row: {missing:?}");
+    }
+
+    #[test]
+    fn unknown_tools_are_classed_by_prefix_or_as_tool() {
+        assert_eq!(StepClass::for_tool("plan.update"), Some(StepClass::Plan));
+        assert_eq!(StepClass::for_tool("memory_write"), Some(StepClass::Memory));
+        assert_eq!(StepClass::for_tool("subagent_spawn"), Some(StepClass::Delegate));
+        assert_eq!(StepClass::for_tool("effect.mail.send"), Some(StepClass::Effect));
+        assert_eq!(StepClass::for_tool("knowledge_new_thing"), Some(StepClass::SearchKnowledge));
+        assert_eq!(StepClass::for_tool("connector.hubspot.read"), Some(StepClass::Tool));
+        assert_eq!(StepClass::for_tool("reattach_context"), None);
+        for class in StepClass::ALL {
+            assert_eq!(StepClass::parse(class.as_str()), Some(class));
+        }
+        assert_eq!(StepClass::parse("browser"), None, "browser is reserved for WS20");
+    }
+
+    #[test]
+    fn an_internal_tool_and_its_result_emit_nothing() {
+        let mut projector = RoomProjector::new(RoomLimits::DEFAULT, false);
+        let call = event(0, "tool_call", json!({"id":"c9","name":"reattach_context"}));
+        let result = event(1, "tool_result", json!({"id":"c9","status":"ok"}));
+        assert!(projector.apply_batch([&call, &result]).is_empty());
+        assert!(projector.work_summary().is_none());
+    }
+
+    // --- Steps, states, caps -----------------------------------------------------------------
+
+    #[test]
+    fn a_step_moves_from_running_to_its_result_state() {
+        let mut projector = RoomProjector::new(RoomLimits::DEFAULT, false);
+        let events = [
+            event(0, "tool_call", json!({"id":"a","name":"web_search"})),
+            event(1, "tool_result", json!({"id":"a","status":"ok","error":null})),
+            event(2, "tool_call", json!({"id":"b","name":"code_interpreter"})),
+            event(3, "tool_result", json!({"id":"b","status":"ok","error":"boom"})),
+            event(4, "tool_call", json!({"id":"c","name":"fetch_url"})),
+            event(5, "tool_result", json!({"id":"c","status":"blocked"})),
+            event(6, "tool_call", json!({"id":"d","name":"get_weather"})),
+            event(7, "tool_result", json!({"id":"d","status":"something new"})),
+            event(8, "tool_result", json!({"id":"never_called","status":"ok"})),
+        ];
+        let frames = projector.apply_batch(events.iter());
+        let states: Vec<(String, StepState)> = frames
+            .iter()
+            .filter_map(|emitted| match &emitted.frame {
+                RoomFrame::Step(step) => Some((step.id.clone(), step.state)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            states,
+            vec![
+                ("a".to_owned(), StepState::Running),
+                ("a".to_owned(), StepState::Ok),
+                ("b".to_owned(), StepState::Running),
+                ("b".to_owned(), StepState::Error),
+                ("c".to_owned(), StepState::Running),
+                ("c".to_owned(), StepState::Denied),
+                ("d".to_owned(), StepState::Running),
+                ("d".to_owned(), StepState::Error),
+            ],
+            "an unknown status is an error, a result with no call is not guessed at"
+        );
+    }
+
+    #[test]
+    fn an_id_that_is_not_a_token_is_refused() {
+        let mut projector = RoomProjector::new(RoomLimits::DEFAULT, false);
+        let events = [
+            event(0, "tool_call", json!({"id":"has a space","name":"web_search"})),
+            event(1, "tool_call", json!({"id":"x".repeat(129),"name":"web_search"})),
+            event(2, "artifact", json!({"id":"<script>","kind":"document"})),
+            event(3, "plan_proposed", json!({"plan_id":"","steps":[{}]})),
+        ];
+        assert!(projector.apply_batch(events.iter()).is_empty());
+    }
+
+    #[test]
+    fn only_the_source_check_step_update_is_a_step() {
+        let mut projector = RoomProjector::new(RoomLimits::DEFAULT, false);
+        let narration = event(0, "step_update", json!({"id":"step_1","status":"running","title":SENTINEL}));
+        let check = event(1, "step_update", json!({"id":"call_1:source-check","status":"done"}));
+        let frames = projector.apply_batch([&narration, &check]);
+        assert_eq!(
+            frames,
+            vec![Emitted {
+                seq: 1,
+                frame: RoomFrame::Step(RoomStep {
+                    id: "call_1:source-check".to_owned(),
+                    class: StepClass::Check,
+                    state: StepState::Ok,
+                    ms: None,
+                }),
+            }]
+        );
+    }
+
+    #[test]
+    fn steps_and_artifacts_stop_at_their_caps() {
+        let limits = RoomLimits { max_steps: 3, max_text_units: 16, max_artifacts: 2 };
+        let mut projector = RoomProjector::new(limits, false);
+        let mut events = Vec::new();
+        for index in 0..5u64 {
+            events.push(event(index, "tool_call", json!({"id": format!("c{index}"), "name": "web_search"})));
+        }
+        events.push(event(5, "tool_result", json!({"id":"c4","status":"ok"})));
+        for (offset, id) in ["a1", "a1", "a2", "a3"].iter().enumerate() {
+            events.push(event(6 + offset as u64, "artifact", json!({"id": id, "kind": "document"})));
+        }
+        let frames = projector.apply_batch(events.iter());
+        let steps = frames.iter().filter(|e| matches!(e.frame, RoomFrame::Step(_))).count();
+        let artifacts = frames.iter().filter(|e| matches!(e.frame, RoomFrame::Artifact { .. })).count();
+        assert_eq!(steps, 3, "calls past the cap and their results emit nothing");
+        assert_eq!(artifacts, 2, "a new version is not a new artifact, and the list is capped");
+        let snapshot = projector.snapshot(&head()).to_json();
+        assert_eq!(snapshot["steps"].as_array().map(Vec::len), Some(3));
+        assert_eq!(snapshot["artifacts"].as_array().map(Vec::len), Some(2));
+    }
+
+    #[test]
+    fn an_artifact_kind_that_is_not_a_token_reads_unknown() {
+        let mut projector = RoomProjector::new(RoomLimits::DEFAULT, false);
+        let artifact = event(0, "artifact", json!({"id":"art_1","kind":"a sentence about it"}));
+        assert_eq!(
+            projector.apply_batch([&artifact]),
+            vec![Emitted { seq: 0, frame: RoomFrame::Artifact { id: "art_1".to_owned(), kind: "unknown".to_owned() } }]
+        );
+    }
+
+    #[test]
+    fn steer_counts_accumulate_and_empty_deliveries_say_nothing() {
+        let mut projector = RoomProjector::new(RoomLimits::DEFAULT, false);
+        let first = event(0, "queued_input", json!({"messages":["one","two"]}));
+        let empty = event(1, "queued_input", json!({"messages":[]}));
+        let second = event(2, "queued_input", json!({"messages":["three"]}));
+        let frames = projector.apply_batch([&first, &empty, &second]);
+        assert_eq!(
+            frames.iter().map(|e| e.frame.clone()).collect::<Vec<_>>(),
+            vec![RoomFrame::Steer { count: 2 }, RoomFrame::Steer { count: 3 }]
+        );
+    }
+
+    // --- Text -------------------------------------------------------------------------------
+
+    #[test]
+    fn kept_text_is_the_newest_window_cut_on_a_character_boundary() {
+        let limits = RoomLimits { max_steps: 4, max_text_units: 3, max_artifacts: 4 };
+        let mut projector = RoomProjector::new(limits, true);
+        let chunk = event(0, "chunk", json!({"delta":"a😀b"}));
+        let _ = projector.apply_batch([&chunk]);
+        let text = projector.snapshot(&head()).to_json()["text"].clone();
+        assert_eq!(text, json!({"offset": 1, "value": "😀b", "truncated": true, "visible": true}));
+
+        let limits = RoomLimits { max_steps: 4, max_text_units: 2, max_artifacts: 4 };
+        let mut projector = RoomProjector::new(limits, true);
+        let chunk = event(0, "chunk", json!({"delta":"😀ab"}));
+        let _ = projector.apply_batch([&chunk]);
+        let text = projector.snapshot(&head()).to_json()["text"].clone();
+        assert_eq!(text, json!({"offset": 2, "value": "ab", "truncated": true, "visible": true}));
+    }
+
+    #[test]
+    fn a_non_text_frame_splits_coalesced_text_so_order_is_kept() {
+        let mut projector = RoomProjector::new(RoomLimits::DEFAULT, true);
+        let events = [
+            event(0, "chunk", json!({"delta":"ab"})),
+            event(1, "chunk", json!({"delta":"c"})),
+            event(2, "tool_call", json!({"id":"t1","name":"web_search"})),
+            event(3, "chunk", json!({"delta":"d"})),
+        ];
+        let frames = projector.apply_batch(events.iter());
+        assert_eq!(
+            frames,
+            vec![
+                Emitted { seq: 1, frame: RoomFrame::Text { offset: 0, delta: "abc".to_owned() } },
+                Emitted {
+                    seq: 2,
+                    frame: RoomFrame::Step(RoomStep {
+                        id: "t1".to_owned(),
+                        class: StepClass::Web,
+                        state: StepState::Running,
+                        ms: None,
+                    }),
+                },
+                Emitted { seq: 3, frame: RoomFrame::Text { offset: 3, delta: "d".to_owned() } },
+            ]
+        );
+    }
+
+    #[test]
+    fn hidden_text_reports_progress_and_never_a_delta() {
+        let mut projector = RoomProjector::new(RoomLimits::DEFAULT, false);
+        let events = [
+            event(0, "chunk", json!({"delta":"hei "})),
+            event(1, "chunk", json!({"delta":"der"})),
+            event(2, "tool_call", json!({"id":"t1","name":"web_search"})),
+            event(3, "chunk", json!({"delta":"!"})),
+        ];
+        let frames = projector.apply_batch(events.iter());
+        let progress: Vec<(u64, u64)> = frames
+            .iter()
+            .filter_map(|emitted| match emitted.frame {
+                RoomFrame::TextProgress { chars } => Some((emitted.seq, chars)),
+                RoomFrame::Text { .. } => panic!("hidden text produced a text frame"),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(progress, vec![(1, 7), (3, 8)]);
+    }
+
+    // --- Terminal ----------------------------------------------------------------------------
+
+    #[test]
+    fn a_terminal_frame_finishes_the_run_with_a_closed_reason() {
+        let mut projector = RoomProjector::new(RoomLimits::DEFAULT, false);
+        let error = event(0, "error", json!({"code":"run_budget_exceeded","message":SENTINEL}));
+        let after = event(1, "tool_call", json!({"id":"late","name":"web_search"}));
+        let frames = projector.apply_batch([&error, &after]);
+        assert_eq!(
+            frames,
+            vec![Emitted { seq: 0, frame: RoomFrame::Finished { outcome: Outcome::Failed, reason: Some(Reason::Budget) } }]
+        );
+        assert!(projector.is_finished());
+        assert!(!frames[0].frame.to_json().to_string().contains(SENTINEL));
+
+        let mut stopped = RoomProjector::new(RoomLimits::DEFAULT, false);
+        let stop = event(0, "stopped", json!({"reason":SENTINEL}));
+        assert_eq!(
+            stopped.apply_batch([&stop])[0].frame,
+            RoomFrame::Finished { outcome: Outcome::Stopped, reason: None }
+        );
+    }
+
+    #[test]
+    fn error_codes_map_to_the_closed_reasons() {
+        assert_eq!(Reason::from_error_code("org_quota_exhausted"), Reason::Budget);
+        assert_eq!(Reason::from_error_code("zdr_durable_mutation_forbidden"), Reason::Policy);
+        assert_eq!(Reason::from_error_code("provider_unavailable"), Reason::ModelUnavailable);
+        assert_eq!(Reason::from_error_code("session_liveness_failed"), Reason::Internal);
+        assert_eq!(Reason::from_error_code("something_else"), Reason::Unknown);
+        assert_eq!(Reason::from_error_code(""), Reason::Unknown);
+    }
+
+    #[test]
+    fn a_replay_finishes_completed_on_done_and_failed_on_a_bare_end() {
+        let call = event(0, "tool_call", json!({"id":"a","name":"web_search"}));
+        let done = Replay {
+            deltas: vec![call.clone()],
+            done: Some(StreamDone { seq: 1, model_used: "m".to_owned(), input_tokens: 1, output_tokens: 1 }),
+            ended: None,
+            found: true,
+        };
+        let mut projector = RoomProjector::new(RoomLimits::DEFAULT, false);
+        let frames = projector.apply_replay(&done);
+        assert_eq!(
+            frames.last().map(|e| e.frame.clone()),
+            Some(RoomFrame::Finished { outcome: Outcome::Completed, reason: None })
+        );
+
+        let ended = Replay {
+            deltas: vec![call],
+            done: None,
+            ended: Some(crate::stream_buffer::StreamEnd { seq: 1 }),
+            found: true,
+        };
+        let mut projector = RoomProjector::new(RoomLimits::DEFAULT, false);
+        let frames = projector.apply_replay(&ended);
+        assert_eq!(
+            frames.last().map(|e| e.frame.clone()),
+            Some(RoomFrame::Finished { outcome: Outcome::Failed, reason: Some(Reason::Unknown) }),
+            "an end without a terminal frame is never shown as completed"
+        );
+    }
+
+    // --- Durable summary ---------------------------------------------------------------------
+
+    #[test]
+    fn the_summary_holds_no_text_and_never_claims_an_unseen_success() {
+        let replay = Replay {
+            deltas: vec![
+                event(0, "chunk", json!({"delta":SENTINEL})),
+                event(1, "tool_call", json!({"id":"call_1","name":"web_search","args":{"q":SENTINEL}})),
+                event(2, "tool_result", json!({"id":"call_1","status":"ok","output":SENTINEL})),
+                event(3, "tool_call", json!({"id":"call_2","name":"code_interpreter"})),
+                event(4, "queued_input", json!({"messages":[SENTINEL]})),
+            ],
+            done: None,
+            ended: None,
+            found: true,
+        };
+        let work = work_summary_from_buffer(&replay, RoomLimits::DEFAULT).expect("a summary");
+        assert_eq!(
+            work,
+            json!({
+                "v": 1,
+                "steps": [
+                    {"id":"call_1","class":"web","state":"ok"},
+                    {"id":"call_2","class":"code","state":"error"},
+                ],
+                "steer": 1,
+            })
+        );
+        assert!(!work.to_string().contains(SENTINEL));
+        assert_eq!(validate_work_value(&work), Some(work.clone()), "the summary validates to itself");
+    }
+
+    #[test]
+    fn no_summary_for_a_missing_buffer_or_a_turn_with_no_work() {
+        let missing = Replay { deltas: Vec::new(), done: None, ended: None, found: false };
+        assert!(work_summary_from_buffer(&missing, RoomLimits::DEFAULT).is_none());
+        let text_only = Replay {
+            deltas: vec![event(0, "chunk", json!({"delta":"answer"}))],
+            done: None,
+            ended: None,
+            found: true,
+        };
+        assert!(work_summary_from_buffer(&text_only, RoomLimits::DEFAULT).is_none());
+    }
+
+    #[test]
+    fn a_stored_work_value_outside_the_closed_shape_is_dropped() {
+        let good = json!({"v":1,"steps":[{"id":"s1","class":"web","state":"ok","ms":12}],"steer":0});
+        assert_eq!(validate_work_value(&good), Some(good.clone()));
+        let rejects = [
+            json!({"v":2,"steps":[],"steer":0}),
+            json!({"v":1,"steer":0}),
+            json!({"v":1,"steps":[{"id":"s1","class":"browser","state":"ok"}],"steer":0}),
+            json!({"v":1,"steps":[{"id":"s1","class":"web","state":"running"}],"steer":0}),
+            json!({"v":1,"steps":[{"id":"s 1","class":"web","state":"ok"}],"steer":0}),
+            json!({"v":1,"steps":["s1"],"steer":0}),
+            json!("work"),
+        ];
+        for reject in rejects {
+            assert!(validate_work_value(&reject).is_none(), "accepted {reject}");
+        }
+        let extra = json!({"v":1,"steps":[{"id":"s1","class":"web","state":"ok","title":SENTINEL}],"steer":1,"text":SENTINEL});
+        let rebuilt = validate_work_value(&extra).expect("rebuilt");
+        assert!(!rebuilt.to_string().contains(SENTINEL), "unknown fields are not carried");
+
+        let many: Vec<Value> =
+            (0..100).map(|index| json!({"id": format!("s{index}"), "class": "web", "state": "ok"})).collect();
+        let capped = validate_work_value(&json!({"v":1,"steps":many,"steer":0})).expect("capped");
+        assert_eq!(capped["steps"].as_array().map(Vec::len), Some(MAX_STEPS));
+    }
+
+    // --- Policy -----------------------------------------------------------------------------
+
+    #[test]
+    fn the_policy_is_off_unless_switched_on_and_text_needs_the_live_view() {
+        assert_eq!(SpaceRunPolicy::from_values(None, None, None, None), SpaceRunPolicy::OFF);
+        assert_eq!(SpaceRunPolicy::default(), SpaceRunPolicy::OFF);
+        let on = SpaceRunPolicy::from_values(Some("true"), Some("1"), Some("on"), Some("yes"));
+        assert!(on.work_summary && on.live_view && on.live_text && on.manager_stop);
+        let text_alone = SpaceRunPolicy::from_values(None, Some("false"), Some("true"), None);
+        assert!(!text_alone.live_view && !text_alone.live_text, "text never rides without the live view");
+        let garbage = SpaceRunPolicy::from_values(Some("maybe"), Some(""), None, Some("0"));
+        assert_eq!(garbage, SpaceRunPolicy::OFF);
+    }
+
+    // --- Golden -----------------------------------------------------------------------------
+
+    fn golden() -> Value {
+        serde_json::from_str(GOLDEN).expect("the golden is valid JSON")
+    }
+
+    fn words<T>(items: impl IntoIterator<Item = T>, word: impl Fn(T) -> &'static str) -> Value {
+        Value::Array(items.into_iter().map(|item| json!(word(item))).collect())
+    }
+
+    #[test]
+    fn the_golden_vocabulary_matches_the_code() {
+        let golden = golden();
+        assert_eq!(golden["version"], json!(FRAME_VERSION));
+        assert_eq!(golden["classes"], words(StepClass::ALL, StepClass::as_str));
+        assert_eq!(golden["reserved_classes"], json!(["browser"]));
+        assert_eq!(golden["step_states"], words(StepState::ALL, StepState::as_str));
+        assert_eq!(golden["stored_step_states"], json!(["ok", "error", "denied"]));
+        assert_eq!(golden["outcomes"], words(Outcome::ALL, Outcome::as_str));
+        assert_eq!(golden["failure_reasons"], words(Reason::ALL, Reason::as_str));
+        assert_eq!(
+            golden["limits"],
+            json!({"max_steps": MAX_STEPS, "max_text_units": MAX_TEXT_UNITS, "max_artifacts": MAX_ARTIFACTS})
+        );
+        let forwarded: Vec<&str> = ROOM_EVENT_POLICY
+            .iter()
+            .filter(|(_, disposition)| *disposition != Disposition::Drop)
+            .map(|(name, _)| *name)
+            .collect();
+        let dropped: Vec<&str> = ROOM_EVENT_POLICY
+            .iter()
+            .filter(|(_, disposition)| *disposition == Disposition::Drop)
+            .map(|(name, _)| *name)
+            .collect();
+        assert_eq!(golden["source_events_forwarded"], json!(forwarded));
+        assert_eq!(golden["source_events_dropped"], json!(dropped));
+        assert_eq!(golden["default_for_unnamed_source_event"], json!("drop"));
+        assert_eq!(disposition("an_event_nobody_named"), Disposition::Drop);
+
+        let tools: Map<String, Value> = BUILTIN_TOOL_CLASSES
+            .iter()
+            .map(|(name, class)| ((*name).to_owned(), class.map_or(Value::Null, |class| json!(class.as_str()))))
+            .collect();
+        assert_eq!(golden["builtin_tool_classes"], Value::Object(tools));
+
+        let samples = [
+            RoomFrame::Snapshot(json!({})),
+            RoomFrame::Text { offset: 0, delta: String::new() },
+            RoomFrame::TextProgress { chars: 0 },
+            RoomFrame::Step(RoomStep { id: "s".to_owned(), class: StepClass::Tool, state: StepState::Ok, ms: None }),
+            RoomFrame::Steer { count: 1 },
+            RoomFrame::Plan { plan_id: "p".to_owned(), steps: 0 },
+            RoomFrame::Artifact { id: "a".to_owned(), kind: "k".to_owned() },
+            RoomFrame::Finished { outcome: Outcome::Completed, reason: None },
+            RoomFrame::ReauthRequired,
+            RoomFrame::Error { code: String::new(), message: String::new(), retryable: false, feature: None },
+        ];
+        assert_eq!(golden["frame_events"], words(samples.iter(), RoomFrame::event_name));
+    }
+
+    #[test]
+    fn the_golden_frames_are_what_the_projector_builds() {
+        let golden = golden();
+        let frames = &golden["frames"];
+
+        let mut visible = RoomProjector::new(RoomLimits::DEFAULT, true);
+        let events = [
+            event(0, "chunk", json!({"delta":"Blåbær 😀"})),
+            event(1, "tool_call", json!({"id":"call_1","name":"web_search","args":{"q":"x"}})),
+            event(2, "tool_result", json!({"id":"call_1","status":"ok"})),
+            event(3, "queued_input", json!({"messages":["x"]})),
+            event(4, "plan_proposed", json!({"plan_id":"plan_1","steps":[{},{},{}]})),
+            event(5, "artifact", json!({"id":"art_1","kind":"document"})),
+        ];
+        let _ = visible.apply_batch(events.iter());
+        assert_eq!(visible.snapshot(&head()).to_json(), frames["snapshot"]);
+
+        let mut hidden = RoomProjector::new(RoomLimits::DEFAULT, false);
+        let text = event(0, "chunk", json!({"delta": "a".repeat(42)}));
+        let progress = hidden.apply_batch([&text]);
+        assert_eq!(progress[0].frame.to_json(), frames["text_progress"]);
+        let hidden_head = SnapshotHead { agent_name: String::new(), ..head() };
+        assert_eq!(hidden.snapshot(&hidden_head).to_json(), frames["snapshot_text_hidden"]);
+
+        let step = |state, ms| {
+            RoomFrame::Step(RoomStep { id: "call_1".to_owned(), class: StepClass::SearchKnowledge, state, ms })
+        };
+        let checks = [
+            ("text", RoomFrame::Text { offset: 8, delta: " og mer".to_owned() }),
+            ("step", step(StepState::Running, None)),
+            ("step_finished", step(StepState::Ok, Some(840))),
+            ("steer", RoomFrame::Steer { count: 1 }),
+            ("plan", RoomFrame::Plan { plan_id: "plan_1".to_owned(), steps: 3 }),
+            ("artifact", RoomFrame::Artifact { id: "art_1".to_owned(), kind: "document".to_owned() }),
+            ("finished_completed", RoomFrame::Finished { outcome: Outcome::Completed, reason: None }),
+            ("finished_stopped", RoomFrame::Finished { outcome: Outcome::Stopped, reason: None }),
+            (
+                "finished_failed",
+                RoomFrame::Finished { outcome: Outcome::Failed, reason: Some(Reason::ModelUnavailable) },
+            ),
+            ("reauth_required", RoomFrame::ReauthRequired),
+            (
+                "error",
+                RoomFrame::Error {
+                    code: "run_stream_expired".to_owned(),
+                    message: "The live view has ended.".to_owned(),
+                    retryable: false,
+                    feature: None,
+                },
+            ),
+            (
+                "error_zdr",
+                RoomFrame::Error {
+                    code: "zdr_feature_not_supported".to_owned(),
+                    message: "Not available with zero data retention.".to_owned(),
+                    retryable: false,
+                    feature: Some("agent_run".to_owned()),
+                },
+            ),
+        ];
+        for (name, frame) in checks {
+            assert_eq!(frame.to_json(), frames[name], "golden frame `{name}` drifted");
+        }
+
+        let replay = Replay {
+            deltas: vec![
+                event(0, "tool_call", json!({"id":"call_1","name":"web_search"})),
+                event(1, "tool_result", json!({"id":"call_1","status":"ok"})),
+                event(2, "tool_call", json!({"id":"call_2","name":"code_interpreter"})),
+            ],
+            done: None,
+            ended: None,
+            found: true,
+        };
+        assert_eq!(work_summary_from_buffer(&replay, RoomLimits::DEFAULT), Some(golden["metadata_work"].clone()));
     }
 }

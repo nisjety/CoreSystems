@@ -579,6 +579,68 @@ pub(crate) fn place_current_turn(
     }
 }
 
+// ---------------------------------------------------------------------------------------------
+// Room run hooks on the invoke stream (build plan WS09-S3).
+//
+// The bodies live here so `sse.rs` takes call-site lines only (plan 4.4.1 row 16): the run pointer
+// written after the run registers, and the durable work summary built at the finalize site. What
+// may leave a buffer for the room is decided in `room_run.rs`, not here.
+// ---------------------------------------------------------------------------------------------
+
+use crate::http_routes::InvokeRequest;
+use crate::room_run::SpaceRunPolicy;
+use crate::stream_buffer::StreamBufferStore;
+
+/// Whether this invoke is a turn in a Space room: the BFF injected a Space context naming a Space,
+/// on a thread's first message (`space_context`) or a later one (`space_append_context`). It
+/// selects the room hooks only; it is never an authorization input (Session Core verifies the
+/// context itself).
+pub(crate) fn is_room_turn(req: &InvokeRequest) -> bool {
+    req.space_context
+        .as_ref()
+        .or(req.space_append_context.as_ref())
+        .is_some_and(|context| !context.space_id.is_empty())
+}
+
+/// Leave the content-free pointer from a room turn's run id to its buffer, so the room projector can
+/// find the frames without the owner's identity. Nothing for a turn outside a room, a zero-retention
+/// turn (that path keeps nothing worth finding) or a run with no id. Authorizes nothing: a reader is
+/// authorized by Session Core before it resolves a pointer.
+pub(crate) async fn index_room_run(
+    buffers: &StreamBufferStore,
+    room_turn: bool,
+    zdr: bool,
+    org_id: &str,
+    run_id: &str,
+    buffer_key: &str,
+    agent_name: Option<&str>,
+) {
+    if !room_turn || zdr || org_id.is_empty() || run_id.is_empty() {
+        return;
+    }
+    buffers
+        .index_run(org_id, run_id, buffer_key, agent_name.unwrap_or_default())
+        .await;
+}
+
+/// The durable `metadata.work` summary of a room turn (steps and a steer count, never text), rebuilt
+/// from the producer's own buffer at the finalize site. `None` outside a room, under zero retention,
+/// with `space_run_work_summary` off, or when the turn did no room-visible work; the finalize site
+/// then stores the metadata it had (`session_flow::with_work_summary`).
+pub(crate) async fn room_work_summary(
+    buffers: &StreamBufferStore,
+    policy: SpaceRunPolicy,
+    room_turn: bool,
+    zdr: bool,
+    buffer_key: &str,
+) -> Option<Value> {
+    if !room_turn || zdr || !policy.work_summary {
+        return None;
+    }
+    let replay = buffers.replay_after(buffer_key, None).await;
+    crate::room_run::work_summary_from_buffer(&replay, policy.limits)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -779,5 +841,129 @@ mod tests {
             assert!(frame_event(&SpaceEventFrame { frame: Some(frame) }, "space-room").is_some());
         }
         assert!(frame_event(&SpaceEventFrame { frame: None }, "space-room").is_none());
+    }
+
+    // --- WS09-S3 room run hooks -------------------------------------------------------------
+
+    fn space_context(space_id: &str) -> Value {
+        json!({
+            "space_id": space_id,
+            "space_decision_ref": "dec_1",
+            "recipient_audience_ref": "aud_1",
+            "recipient_audience_revision": 1,
+            "recipient_audience_hash": "sha256:aa",
+            "privacy_policy_ref": "pp_1",
+            "authority_revision": 1,
+            "resource_authorization_ref": "ra_1",
+            "space_decision_token": "token-not-read-here",
+            "action_schema_hash": "sha256:bb",
+            "payload_digest": "sha256:cc",
+            "idempotency_key": "idem_1",
+        })
+    }
+
+    fn invoke_request(extra: Value) -> InvokeRequest {
+        let mut body = json!({ "content": "hello room" });
+        if let (Some(body), Some(extra)) = (body.as_object_mut(), extra.as_object()) {
+            for (key, value) in extra {
+                body.insert(key.clone(), value.clone());
+            }
+        }
+        serde_json::from_value(body).expect("a valid invoke request")
+    }
+
+    fn work_policy(on: bool) -> SpaceRunPolicy {
+        SpaceRunPolicy::from_values(Some(if on { "true" } else { "false" }), None, None, None)
+    }
+
+    async fn buffer_a_tool_turn(buffers: &StreamBufferStore, key: &str) {
+        buffers
+            .append(key, 0, "tool_call", r#"{"id":"call_1","name":"web_search","args":{"q":"SECRET"}}"#)
+            .await;
+        buffers
+            .append(key, 1, "tool_result", r#"{"id":"call_1","status":"ok","output":"SECRET","error":null}"#)
+            .await;
+        buffers.append(key, 2, "chunk", r#"{"delta":"SECRET answer"}"#).await;
+    }
+
+    #[test]
+    fn a_room_turn_is_one_with_a_space_context_naming_a_space() {
+        assert!(!is_room_turn(&invoke_request(json!({}))));
+        assert!(is_room_turn(&invoke_request(json!({ "space_context": space_context("spc_1") }))));
+        assert!(is_room_turn(&invoke_request(
+            json!({ "space_append_context": space_context("spc_1") })
+        )));
+        assert!(
+            !is_room_turn(&invoke_request(json!({ "space_context": space_context("") }))),
+            "a context with no Space is not a room turn"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_run_pointer_is_written_only_for_a_retained_room_turn() {
+        let buffers = StreamBufferStore::new();
+        index_room_run(&buffers, true, false, "org_1", "run_1", "org_1\u{1f}usr_1\u{1f}req_1", Some("Agent")).await;
+        let pointer = buffers.resolve_run("org_1", "run_1").await.expect("indexed");
+        assert_eq!(pointer.key, "org_1\u{1f}usr_1\u{1f}req_1");
+        assert_eq!(pointer.persona, "Agent");
+        assert!(
+            buffers.resolve_run("org_2", "run_1").await.is_none(),
+            "a run id from another org misses"
+        );
+
+        index_room_run(&buffers, true, true, "org_1", "run_zdr", "k", None).await;
+        assert!(buffers.resolve_run("org_1", "run_zdr").await.is_none(), "never under ZDR");
+        index_room_run(&buffers, false, false, "org_1", "run_dm", "k", None).await;
+        assert!(buffers.resolve_run("org_1", "run_dm").await.is_none(), "never outside a room");
+        index_room_run(&buffers, true, false, "org_1", "", "k", None).await;
+        assert!(buffers.resolve_run("org_1", "").await.is_none(), "never for a run with no id");
+    }
+
+    #[tokio::test]
+    async fn the_work_summary_is_built_only_for_a_retained_room_turn_with_the_switch_on() {
+        let buffers = StreamBufferStore::new();
+        buffer_a_tool_turn(&buffers, "key_1").await;
+
+        let work = room_work_summary(&buffers, work_policy(true), true, false, "key_1")
+            .await
+            .expect("a summary");
+        assert_eq!(
+            work,
+            json!({ "v": 1, "steps": [{ "id": "call_1", "class": "web", "state": "ok" }], "steer": 0 })
+        );
+        assert!(!work.to_string().contains("SECRET"), "no text, arguments or output");
+
+        assert!(room_work_summary(&buffers, work_policy(false), true, false, "key_1").await.is_none());
+        assert!(room_work_summary(&buffers, work_policy(true), true, true, "key_1").await.is_none());
+        assert!(room_work_summary(&buffers, work_policy(true), false, false, "key_1").await.is_none());
+        assert!(
+            room_work_summary(&buffers, work_policy(true), true, false, "missing").await.is_none(),
+            "an evicted buffer writes nothing"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_turn_with_no_room_visible_work_keeps_its_metadata() {
+        let buffers = StreamBufferStore::new();
+        buffers.append("key_text", 0, "chunk", r#"{"delta":"just an answer"}"#).await;
+        assert!(room_work_summary(&buffers, work_policy(true), true, false, "key_text").await.is_none());
+    }
+
+    #[test]
+    fn the_finalize_wrapper_writes_the_summary_only_when_retained_and_valid() {
+        let work = json!({ "v": 1, "steps": [{ "id": "call_1", "class": "code", "state": "error" }], "steer": 2 });
+        let stored = crate::session_flow::with_work_summary(None, Some(&work), false).expect("metadata");
+        assert!(stored.fields.contains_key(crate::room_run::WORK_KEY));
+
+        assert!(
+            crate::session_flow::with_work_summary(None, Some(&work), true).is_none(),
+            "nothing is written under ZDR"
+        );
+        assert!(crate::session_flow::with_work_summary(None, None, false).is_none());
+        let tampered = json!({ "v": 1, "steps": [{ "id": "call 1", "class": "code", "state": "ok" }], "steer": 0 });
+        assert!(
+            crate::session_flow::with_work_summary(None, Some(&tampered), false).is_none(),
+            "a value outside the closed shape is not stored"
+        );
     }
 }
