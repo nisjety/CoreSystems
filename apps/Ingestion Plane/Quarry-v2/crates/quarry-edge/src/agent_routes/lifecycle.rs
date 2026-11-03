@@ -1,5 +1,31 @@
 use super::*;
 
+/// D2-060 (WS8.B): the lifetimes of a person's human-browse run, the plan's values. The
+/// run sweeper applies them to every open-web run whatever its class (`run_sweeper.rs`),
+/// and the lease asks the driver for the absolute one instead of the 120 s default of a
+/// run that names no runtime, which a human-browse run never does (its bounds are zeroed).
+/// No viewer and no activity for this long ends the run.
+pub(super) const HUMAN_BROWSE_IDLE_TTL_S: u64 = 900;
+/// The idle limit while the person holds the browser (they may be reading).
+pub(super) const HUMAN_BROWSE_TAKEOVER_IDLE_TTL_S: u64 = 1800;
+/// The absolute backstop, viewer or not. The grant's own absolute cap can only shorten it.
+pub(super) const HUMAN_BROWSE_ABSOLUTE_TTL_S: u64 = 14_400;
+
+/// The lease lifetime of a human-browse run started at `now`: the absolute backstop, or
+/// what is left of the grant's absolute cap when that is sooner (at least one second, so a
+/// grant at its cap is still refused by the grant check, never by a zero lease).
+pub(super) fn human_browse_lease_ttl_s(
+    absolute_expires_at: Option<chrono::DateTime<chrono::Utc>>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> u32 {
+    let backstop = HUMAN_BROWSE_ABSOLUTE_TTL_S;
+    let ttl = match absolute_expires_at {
+        Some(cap) => u64::try_from((cap - now).num_seconds()).unwrap_or(0).min(backstop),
+        None => backstop,
+    };
+    u32::try_from(ttl.max(1)).unwrap_or(u32::MAX)
+}
+
 /// Binds a validated broker grant to the run being started (WS1.B).
 ///
 /// A user principal may only start a run under a grant issued to that user
@@ -402,7 +428,12 @@ pub async fn start_run(
             ));
         }
     }
-    let ttl_s = constraints.max_runtime_s.unwrap_or(120);
+    // D2-060: a human-browse run names no runtime (its bounds were zeroed above), so it
+    // would get the 120 s default; its lease lives the human-browse backstop instead.
+    let ttl_s = match human_grant.as_ref() {
+        Some(human) => human_browse_lease_ttl_s(human.absolute_expires_at, chrono::Utc::now()),
+        None => constraints.max_runtime_s.unwrap_or(120),
+    };
     let viewport = normalize_viewport(
         resume_checkpoint
             .as_ref()
@@ -859,4 +890,26 @@ pub async fn start_run(
             clamped: budget_view.map(|(_, clamped)| clamped).unwrap_or_default(),
         },
     )))
+}
+
+#[cfg(test)]
+mod human_browse_ttl_tests {
+    use super::*;
+
+    fn at(secs: i64) -> chrono::DateTime<chrono::Utc> {
+        chrono::DateTime::<chrono::Utc>::from_timestamp(secs, 0).unwrap()
+    }
+
+    #[test]
+    fn a_human_browse_lease_lives_the_four_hour_backstop() {
+        assert_eq!(human_browse_lease_ttl_s(None, at(1_800_000_000)), 14_400);
+        // A cap further away than the backstop does not lengthen it.
+        assert_eq!(human_browse_lease_ttl_s(Some(at(1_800_100_000)), at(1_800_000_000)), 14_400);
+    }
+
+    #[test]
+    fn a_sooner_grant_cap_shortens_the_lease_but_never_to_zero() {
+        assert_eq!(human_browse_lease_ttl_s(Some(at(1_800_003_600)), at(1_800_000_000)), 3_600);
+        assert_eq!(human_browse_lease_ttl_s(Some(at(1_799_999_000)), at(1_800_000_000)), 1);
+    }
 }

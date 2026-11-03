@@ -1,0 +1,148 @@
+{
+  "keys": [
+    {
+      "applies_to": "all",
+      "baseline": "disabled",
+      "key": "browser.act.script",
+      "kind": "ability",
+      "reserved": false,
+      "since": "WS7.B",
+      "site": "quarry-edge agent gate: raw script refusal (WS2.A, WS7.D)",
+      "unlockable": false,
+      "zdr_implies_disabled": false
+    },
+    {
+      "applies_to": "autonomous",
+      "baseline": "allowed",
+      "key": "browser.act.input",
+      "kind": "ability",
+      "reserved": false,
+      "since": "WS7.B",
+      "site": "quarry-edge agent step gate (WS7.D)",
+      "unlockable": true,
+      "zdr_implies_disabled": false
+    },
+    {
+      "applies_to": "autonomous",
+      "baseline": "allowed",
+      "key": "browser.act.interact",
+      "kind": "ability",
+      "reserved": false,
+      "since": "WS7.B",
+      "site": "quarry-edge agent step gate (WS7.D)",
+      "unlockable": true,
+      "zdr_implies_disabled": false
+    },
+    {
+      "applies_to": "all",
+      "baseline": "allowed",
+      "key": "browser.act.upload",
+      "kind": "ability",
+      "reserved": false,
+      "since": "WS7.B",
+      "site": "quarry-edge agent step gate, one-shot approval still applies (WS7.D)",
+      "unlockable": true,
+      "zdr_implies_disabled": false
+    },
+    {
+      "applies_to": "all",
+      "baseline": "allowed",
+      "key": "browser.act.download",
+      "kind": "ability",
+      "reserved": false,
+      "since": "WS7.B",
+      "site": "quarry-edge agent step gate, one-shot approval still applies (WS7.D)",
+      "unlockable": true,
+      "zdr_implies_disabled": false
+    },
+    {
+      "applies_to": "all",
+      "baseline": "allowed",
+      "key": "browser.profile.persistent",
+      "kind": "ability",
+      "reserved": false,
+      "since": "WS7.B",
+      "site": "quarry-edge profile routes (WS7.E)",
+      "unlockable": true,
+      "zdr_implies_disabled": true
+    },
+    {
+      "applies_to": "all",
+      "baseline": "disabled",
+      "key": "browser.recording",
+      "kind": "ability",
+      "reserved": true,
+      "since": "WS7.B",
+      "site": null,
+      "unlockable": true,
+      "zdr_implies_disabled": true
+    },
+    {
+      "applies_to": "all",
+      "baseline": "allowed",
+      "key": "search.paid_provider",
+      "kind": "ability",
+      "reserved": false,
+      "since": "WS7.B",
+      "site": "quarry-edge search routes (WS7.E)",
+      "unlockable": true,
+      "zdr_implies_disabled": true
+    },
+    {
+      "applies_to": "all",
+      "baseline": "disabled",
+      "key": "request.credentials",
+      "kind": "ability",
+      "reserved": true,
+      "since": "WS7.B",
+      "site": null,
+      "unlockable": true,
+      "zdr_implies_disabled": false
+    },
+    {
+      "applies_to": "all",
+      "baseline": "respect",
+      "key": "robots.max_mode",
+      "kind": "ceiling",
+      "reserved": true,
+      "since": "WS7.B",
+      "site": null,
+      "unlockable": true,
+      "zdr_implies_disabled": false
+    },
+    {
+      "applies_to": "all",
+      "baseline": "none",
+      "key": "proxy.max_tier",
+      "kind": "ceiling",
+      "reserved": true,
+      "since": "WS7.B",
+      "site": null,
+      "unlockable": true,
+      "zdr_implies_disabled": false
+    },
+    {
+      "applies_to": "autonomous",
+      "baseline": "rules",
+      "key": "domains.allow",
+      "kind": "rules",
+      "reserved": false,
+      "since": "WS7.B",
+      "site": "quarry-edge navigation gate (WS7.C, WS7.D)",
+      "unlockable": true,
+      "zdr_implies_disabled": false
+    },
+    {
+      "applies_to": "all",
+      "baseline": "rules",
+      "key": "domains.deny",
+      "kind": "rules",
+      "reserved": false,
+      "since": "WS7.B",
+      "site": "quarry-edge scrape and navigation gate (WS7.C, WS7.D)",
+      "unlockable": true,
+      "zdr_implies_disabled": false
+    }
+  ],
+  "version": 1
+}
