@@ -353,6 +353,33 @@ pub(super) async fn dispatch_crawl_site(
         }
     };
 
+    // E3.7.9a: the approval gate on the action path. A whole-site crawl above the threshold
+    // (CRAWL_APPROVAL_PAGES, default 50) is refused with 409 approval_required in enforce mode
+    // and logged in observe mode (the default). The action path is Surface::Model, so it can
+    // never confirm its own page count (D-E379a-2).
+    let approval_policy = crate::domains::knowledge::crawl_approval_policy();
+    match crate::domains::knowledge::decide_crawl_approval(
+        input,
+        approval_policy,
+        crate::domains::knowledge::quarry::Surface::Model,
+    ) {
+        crate::domains::knowledge::CrawlApprovalDecision::Proceed => {}
+        crate::domains::knowledge::CrawlApprovalDecision::Observed { estimated_pages } => {
+            // The page counts only: no URL, organization or user in the log.
+            tracing::info!(
+                estimated_pages,
+                threshold_pages = approval_policy.threshold_pages,
+                "crawl action above the approval threshold (observe mode, not refused)"
+            );
+        }
+        crate::domains::knowledge::CrawlApprovalDecision::Refuse { estimated_pages } => {
+            return crate::domains::knowledge::approval_required_response(
+                estimated_pages,
+                approval_policy.threshold_pages,
+            );
+        }
+    }
+
     let (status, Json(resp)) = proxy_bearer_json(
         state,
         Method::POST,
