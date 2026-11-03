@@ -160,14 +160,26 @@
     },
     {
       "is_risky_tool": false,
-      "name": "browser.observe",
+      "name": "browser.open",
       "rung_required_for": "read_only",
-      "trusted_capability_id": "cap.browser.open"
+      "trusted_capability_id": "cap.browser.observe"
     },
     {
-      "is_risky_tool": true,
-      "name": "browser.act",
-      "rung_required_for": "danger_full_access",
+      "is_risky_tool": false,
+      "name": "browser.observe",
+      "rung_required_for": "read_only",
+      "trusted_capability_id": "cap.browser.observe"
+    },
+    {
+      "is_risky_tool": false,
+      "name": "browser.close",
+      "rung_required_for": "read_only",
+      "trusted_capability_id": "cap.browser.observe"
+    },
+    {
+      "is_risky_tool": false,
+      "name": "browser.console",
+      "rung_required_for": "read_only",
       "trusted_capability_id": "cap.browser.open"
     },
     {

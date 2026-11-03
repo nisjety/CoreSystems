@@ -9,6 +9,7 @@ import "google/protobuf/struct.proto";
 // AutonomyRung — the shared autonomy ladder a plan approval grants.
 import "model_plane/v1/runs.proto";
 import "model_plane/v1/events.proto";
+import "model_plane/v1/attention.proto";
 
 // SessionCore — authoritative state for thread timeline, run metadata,
 // checkpoints, instruction loading, compaction summaries, and auto-memory index.
@@ -257,6 +258,16 @@ service ThreadAutonomy {
   // "no grant" is an answer, not an error. Read-only; it spends nothing. Refused
   // for a caller that does not own the thread, and never answers for another org.
   rpc GetThreadGrant(GetThreadGrantRequest) returns (GetThreadGrantResponse);
+
+  // Bind the thread's live grant to the run that executes the plan it was
+  // approved with (WS14 S2, approve then execute). One statement copies the
+  // rung, the justification and the plan id onto the run's record, and it
+  // matches only while the thread still holds exactly that plan and the grant
+  // has not lapsed, so the rung is never one the caller stated. Refused with
+  // FAILED_PRECONDITION `plan_grant_unavailable` otherwise, and for a
+  // zero-retention or waived credential. Session Core does not spend the plan:
+  // the gateway's APPROVED -> EXECUTING compare-and-swap is the single-use guard.
+  rpc BindGrantToRun(BindGrantToRunRequest) returns (BindGrantToRunResponse);
 }
 
 // MessageSearch: full-text search over the durable conversation record. A
@@ -1512,6 +1523,21 @@ message ThreadSummary {
   // The owner's last read of the thread. Mark-read sets it to now; mark-unread
   // moves it to one microsecond before the newest assistant message.
   google.protobuf.Timestamp last_read_at = 22;
+
+  // The thread this one was forked from (build plan WS17 S6). Empty for a thread that was
+  // not forked, so a flag-off response carries nothing new.
+  string forked_from_thread_id = 19;
+
+  // The derived attention state of the thread (WS16 S1). Unspecified while the attention switch
+  // is off, so a flag-off response carries nothing new.
+  AttentionState attention_state = 16;
+
+  // When the attention state began. Absent when no state was derived.
+  google.protobuf.Timestamp attention_since = 17;
+
+  // Whether the thread has an unread assistant reply. The same definition as `unread` above,
+  // repeated so the attention surfaces read one message (DEC-11).
+  bool attention_unseen = 18;
   // Human replies in the thread: user rows after the first, counted under the
   // same audience ceiling as the rest of the read so a count never reveals a
   // row the reader could not open. Presentation only.
@@ -1530,6 +1556,12 @@ message ThreadSummary {
   string last_role = 27;
   // Messages with role user or assistant in the thread.
   uint32 turn_count = 28;
+
+  // The status of the thread's latest goal (EP-7 S5): one closed token ("active", "paused", "met",
+  // "budget_reached", "turns_reached", "blocked"), so the sidebar can show a goal chip without a
+  // second call. Empty when the thread has no goal, its goal was cleared, or the thread goals switch
+  // or the attention switch is off. A status token only, never the objective.
+  string goal_status = 29;
 }
 
 message ListThreadsResponse {
@@ -1847,6 +1879,27 @@ message GetThreadGrantResponse {
   string approved_plan_id = 3;
   // When the grant lapses; unset when there is no live grant.
   google.protobuf.Timestamp expires_at = 4;
+}
+
+// --- ThreadAutonomy.BindGrantToRun (build plan WS14 S2) ---
+
+message BindGrantToRunRequest {
+  string run_id = 1;
+  string thread_id = 2;
+  // Server-authoritative org scope, as in GetThreadGrantRequest.
+  string org_id = 3;
+  // The plan the run executes. The thread's live grant must name exactly this
+  // plan, or nothing is bound.
+  string approved_plan_id = 4;
+}
+
+message BindGrantToRunResponse {
+  // The rung the run was bound with, copied from the thread's grant.
+  AutonomyRung granted_rung = 1;
+  // The reason the approval stated, as the thread holds it.
+  string justification = 2;
+  // The plan the grant names; equal to the request's `approved_plan_id`.
+  string approved_plan_id = 3;
 }
 
 // --- RecordRunContext (build plan WS02 S4) ---
@@ -2198,4 +2251,41 @@ message SetActiveLeafResponse {
   string active_leaf_message_id = 1;
   // The turns of the active path, oldest first.
   repeated string active_path = 2;
+}
+
+// --- ThreadFork (WS17 S6) ---
+
+// ThreadForkService: copies a conversation's active path into a new thread (build plan WS17 S6).
+// A separate service, as MessageTreeService is, so that SessionCore and every mock of it stay
+// source-compatible.
+service ThreadForkService {
+  // Copy the active path of an owned thread, from its first turn up to and including a chosen
+  // assistant message, into a new thread that names its source. The copy is one transaction and
+  // writes one THREAD_FORKED event. It writes no MESSAGE_APPENDED event and extracts no memory:
+  // Dreaming skips the copied turns. Owner only, with `session:write`; a zero-retention credential
+  // is refused. Refused with unavailable `thread_fork_disabled` while
+  // SESSION_CORE_THREAD_FORK_ENABLED is not `true`, with failed_precondition for a Space thread, a
+  // thread that holds a waived run, a point that is not on the active path and a path longer than
+  // 5,000 turns.
+  rpc ForkThread(ForkThreadRequest) returns (ForkThreadResponse);
+}
+
+// The parameters of one fork.
+message ForkThreadRequest {
+  // Required. The owning org.
+  string org_id = 1;
+  // Required. The thread to copy. The caller must be its owner.
+  string thread_id = 2;
+  // Required. The assistant message the copy ends with. It must lie on the thread's active path.
+  string from_message_id = 3;
+  // Optional. The new thread's title. Empty leaves the title to be derived from the copy.
+  string title = 4;
+}
+
+// The new thread and how much of the path it took.
+message ForkThreadResponse {
+  // The new thread, which carries the lineage of its source.
+  string new_thread_id = 1;
+  // How many turns were copied, the chosen message included.
+  uint32 copied_message_count = 2;
 }

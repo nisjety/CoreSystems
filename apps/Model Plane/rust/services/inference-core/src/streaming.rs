@@ -5,6 +5,7 @@
 use tokio::sync::mpsc;
 use tonic::Status;
 
+use crate::provider::fallback::RouteNote;
 use crate::provider::timing::HandlerClock;
 use crate::provider::InferChunk;
 
@@ -16,8 +17,10 @@ use crate::provider::InferChunk;
 pub fn bridge_to_grpc(
     mut rx: mpsc::Receiver<InferChunk>,
     clock: HandlerClock,
+    route_note: Option<RouteNote>,
 ) -> mpsc::Receiver<Result<mp_contracts::model_plane::v1::InferChunk, Status>> {
     let (tx, grpc_rx) = mpsc::channel(64);
+    let mut route_note = route_note.map(mp_contracts::model_plane::v1::RouteNote::from);
 
     tokio::spawn(async move {
         while let Some(chunk) = rx.recv().await {
@@ -48,6 +51,8 @@ pub fn bridge_to_grpc(
                     clock.stamp(&mut timing);
                     timing.into()
                 }),
+                // The note of the call rides the final chunk too, as its timing does.
+                route_note: if chunk.done { route_note.take() } else { None },
             };
             if tx.send(Ok(proto_chunk)).await.is_err() {
                 break;
@@ -96,7 +101,7 @@ mod tests {
         tokio::time::advance(Duration::from_millis(3)).await;
         clock.enter_chain();
         let (tx, rx) = mpsc::channel(4);
-        let mut wire = bridge_to_grpc(rx, clock);
+        let mut wire = bridge_to_grpc(rx, clock, None);
 
         tx.send(chunk(false, None)).await.expect("bridge is open");
         tokio::time::advance(Duration::from_millis(40)).await;
@@ -126,5 +131,33 @@ mod tests {
         assert_eq!(timing.first_token_ms, 20);
         assert_eq!(timing.attempts, 1);
         assert!(!timing.usage_reported);
+    }
+
+    #[tokio::test]
+    async fn the_route_note_rides_the_final_chunk_only() {
+        let (tx, rx) = mpsc::channel(4);
+        let note = RouteNote {
+            budget_posture: crate::provider::intent::BudgetPosture::Constrained,
+            tier_shifted: true,
+            cheap_fallback_forced: false,
+            applied_effort: None,
+            role: None,
+        };
+        let mut wire = bridge_to_grpc(rx, HandlerClock::start(), Some(note));
+
+        tx.send(chunk(false, None)).await.expect("bridge is open");
+        tx.send(chunk(true, None)).await.expect("bridge is open");
+
+        let delta = wire.recv().await.expect("delta").expect("ok chunk");
+        assert!(
+            delta.route_note.is_none(),
+            "only the final chunk carries the note"
+        );
+        let last = wire.recv().await.expect("final").expect("ok chunk");
+        let route = last.route_note.expect("the final chunk carries the note");
+        assert_eq!(route.budget_posture, "constrained");
+        assert!(route.tier_shifted);
+        assert!(!route.cheap_fallback_forced);
+        assert_eq!(route.applied_effort, "");
     }
 }

@@ -34,6 +34,15 @@ import {
   type ChatThreadTranscriptStep,
   type ChatThreadTranscriptTurn,
 } from '@/features/chat/lib/chat-thread-history'
+import {
+  CHAT_PROJECT_START_EVENT,
+  chatProjectsEnabled,
+  projectThreadRef,
+  rememberProjectThread,
+  takeChatProjectStart,
+} from '@/features/chat/lib/chat-projects'
+import { projectTurnsFromTranscript, requestedProjectRef } from './use-chat-project'
+import { getSpaceThreadTranscript, type SpaceThreadTranscript } from '@/shared/api/spaces-client'
 import { hydratablePlan } from '@/features/chat/lib/chat-plan-hydration'
 import { registerReloadGuard } from '@/app/chunk-recovery'
 import { isLocalRetentionAllowed } from '@/features/chat/lib/chat-retention'
@@ -49,6 +58,7 @@ import {
   isSupportChatThread,
 } from '@/shared/chat/support-chat-thread'
 import { readThreadDeepLink } from '@/features/chat/lib/chat-thread-deep-link'
+import { announceAttentionChanged } from '@/shared/api/attention-client'
 import {
   toggleBrowserDockPosition,
   useBrowserDock,
@@ -61,8 +71,11 @@ import {
 import {
   cancelRun,
   decideApproval,
+  answerQuestion as answerRunQuestion,
   listApprovals,
   listPlans,
+  listRunQuestions,
+  runQuestionErrorCodeOf,
   resumeRun,
   type ApprovalDecision,
   type PlanStepEdit,
@@ -102,6 +115,7 @@ import { OPENAI_CODEX_SUBSCRIPTION_PROVIDER } from '@/shared/api/chatgpt-subscri
 import { resolveReplaySubscriptionConnectionId } from '@/shared/ai/model-selection'
 import { getSession } from '@/shared/session/session-store'
 import { blobToDataUrl } from '@/shared/lib/blob-data'
+import type { ChatQuestionAnswer, ChatUserQuestionEvent } from '@/shared/api/chat-client'
 import { useI18n } from '@/shared/i18n'
 import type { VerevonUiEvent } from '@/shared/chat/verevon-ui-events'
 import {
@@ -186,13 +200,17 @@ import type {
   TaskStepStatus,
   ThreadPlanGrant,
 } from './chat-types'
+import { addLifecycleNotice } from './chat-types'
+import { applyUsageProgress, applyUsageTotal } from './RunCostMeter'
 import type { ChatEffectClass } from '@/shared/chat/effect-class'
 import { isEffectfulChatTurn } from '@/shared/chat/effect-class'
 import { planExecuteEnabled } from '@/shared/chat/plan-execute'
 import { readPinnedMessages, togglePinnedMessage } from '../lib/chat-pinned-messages'
 import { CHAT_SURFACE_IDS, chatSurfaceSpec, isChatTab } from '../lib/chat-surfaces'
+import { useChatThreadDraft, type ChatDraftOutcome } from '../lib/chat-thread-draft'
 import { createSnapshotWriter, flushOnPageLifecycle, parseSnapshotThrottleMs } from '../lib/snapshot-throttle'
 import { nextFollowState, virtualizeTranscript } from '../lib/transcript-window'
+import { isToolCallRunning } from '../lib/stream-activity'
 
 /**
  * WS09 S3. `VITE_CHAT_SNAPSHOT_THROTTLE_MS` is the cadence of the local transcript
@@ -267,6 +285,24 @@ export function frameSequence(id: string | undefined): number | undefined {
 /** The server id of the turn a regenerate or an edit replaces, sent only on a versioned thread (WS17 S9). */
 type ServerVersionTarget = Pick<ChatInvokeRequest, 'regenerateOfMessageId' | 'editOfMessageId'>
 
+/**
+ * What the person's answer reads as in the transcript: the chosen labels and their own words, one line per
+ * item. The gateway receives the structured answer; this is the words the turn is shown under.
+ */
+export function questionAnswerSummary(question: ChatUserQuestionEvent, answer: ChatQuestionAnswer): string {
+  return question.items
+    .map((item) => {
+      const given = answer.answers.find((entry) => entry.itemId === item.id)
+      const labels = (given?.optionIds ?? []).map(
+        (id) => item.options.find((option) => option.id === id)?.label ?? id,
+      )
+      const words = given?.text.trim() ?? ''
+      return [...labels, ...(words ? [words] : [])].join(', ')
+    })
+    .filter((line) => line.length > 0)
+    .join('\n')
+}
+
 export function useChatController() {
   // Resolved once, like any hook: the controller runs inside the chat page,
   // which is inside the app's locale provider.
@@ -294,6 +330,9 @@ export function useChatController() {
   })
 
   const [activeTab, setActiveTabSignal] = createSignal<ChatTab>('chat')
+  // The tool call the Trace should select, from a tool card's Inspect action (EP-14 S4). It lasts
+  // while the Trace is the open surface, so a later visit does not select that call again.
+  const [ledgerInspect, setLedgerInspect] = createSignal<{ callId: string } | null>(null)
   const [copiedTurnId, setCopiedTurnId] = createSignal<string | null>(null)
   const [launchMotion, setLaunchMotion] = createSignal(false)
   const [showScrollDown, setShowScrollDown] = createSignal(false)
@@ -333,7 +372,8 @@ export function useChatController() {
       deltaRecordedTurns.add(turnId)
     }
     if (untrack(() => uiEvents().length) >= MAX_TRACE_EVENTS) setTraceReplayTruncated(true)
-    setUiEvents((current) => [...current, event].slice(-MAX_TRACE_EVENTS))
+    // The turn rides on the record so the run ledger can group it (EP-14 S4).
+    setUiEvents((current) => [...current, turnId ? { ...event, turnId } : event].slice(-MAX_TRACE_EVENTS))
   }
   const [imageMode, setImageMode] = createSignal(false)
   const [planMode, setPlanModeRaw] = createSignal(false)
@@ -389,6 +429,10 @@ export function useChatController() {
   // top of `writeThreadSnapshot`.
   const [temporaryChat, setTemporaryChat] = createSignal(false)
   const [temporaryThreadIds, setTemporaryThreadIds] = createSignal<ReadonlySet<string>>(new Set())
+  // WS18-S4: the project a new chat will be started in, picked from the sidebar. It
+  // applies only while there is no thread yet; an open thread's own project is in
+  // `scopedThreadRefs`.
+  const [projectSpaceRef, setProjectSpaceRef] = createSignal<string | null>(null)
   // This is a non-authoritative UI routing hint only. The BFF strips it and
   // re-resolves current Control evidence on every scoped append; keeping it in
   // memory makes a newly-created scoped thread continue to send the selected
@@ -405,7 +449,6 @@ export function useChatController() {
    * (`reconcileSentTurns`). A turn loaded from the server is not in this map: its id already is the server's.
    */
   const serverMessageIds = new Map<string, string | undefined>()
-  const [input, setInput] = createSignal('')
   /**
    * Quiet, non-blocking notice for a rating that did NOT persist.
    *
@@ -618,6 +661,15 @@ export function useChatController() {
     })
   }
 
+  // The composer's text is the draft of the thread on screen (chat-thread-draft). It is created here, after
+  // `isTemporaryThread`, which its Temporary gate reads.
+  const chatDraft = useChatThreadDraft({
+    threadId: () => state.threadId,
+    zeroRetention: () => temporaryChat() || isTemporaryThread(state.threadId),
+  })
+  const input = chatDraft.message
+  const setInput = chatDraft.setMessage
+
   // Threads opened via a cross-surface deep link (e.g. a Space Activity
   // "open in chat" link) that `listChatThreads()` did NOT return -- i.e. its
   // origin is not "chat" (see chat_history_sessions' origin filter in
@@ -633,8 +685,24 @@ export function useChatController() {
    */
   const markThreadRead = (threadId: string | null | undefined) => {
     if (!threadId || isTemporaryThread(threadId) || isForeignOriginThread(threadId) || isSupportChatThread(threadId)) return
-    void markChatThreadRead(threadId).catch(() => undefined)
+    // The attention rail reads the same unread flag, so it is told when the flag moved.
+    void markChatThreadRead(threadId).then(() => announceAttentionChanged(), () => undefined)
   }
+  // A reply that finished while the page was hidden stays unseen until the person returns to that
+  // thread (WS16 S2). The thread must still be the open one when they do.
+  let seenOnReturnThreadId: string | null = null
+  const markSeenOnReturn = () => {
+    if (document.visibilityState === 'hidden' || !seenOnReturnThreadId) return
+    const threadId = seenOnReturnThreadId
+    seenOnReturnThreadId = null
+    if (threadId === untrack(() => state.threadId)) markThreadRead(threadId)
+  }
+  document.addEventListener('visibilitychange', markSeenOnReturn)
+  window.addEventListener('focus', markSeenOnReturn)
+  onCleanup(() => {
+    document.removeEventListener('visibilitychange', markSeenOnReturn)
+    window.removeEventListener('focus', markSeenOnReturn)
+  })
   const isForeignOriginThread = (threadId: string | null | undefined): boolean =>
     Boolean(threadId) && foreignOriginThreadIds().has(threadId as string)
   const markThreadForeignOrigin = (threadId: string) => {
@@ -701,6 +769,7 @@ export function useChatController() {
   const setActiveTab = (tab: ChatTab) => {
     autoSummonedTab = null
     setActiveTabSignal(tab)
+    if (tab !== 'trace') setLedgerInspect(null)
     const threadId = state.threadId
     if (!threadId || isTemporaryThread(threadId) || isForeignOriginThread(threadId)) return
     try {
@@ -708,6 +777,14 @@ export function useChatController() {
     } catch {
       // Local storage can be disabled or full; the in-memory tab remains valid.
     }
+  }
+  /**
+   * The Inspect action on a tool call (EP-14 S4): the user asks for the Trace on that call, so
+   * the surface opens by their own act and the run ledger selects the call.
+   */
+  const inspectLedgerCall = (callId: string) => {
+    setLedgerInspect({ callId })
+    setActiveTab('trace')
   }
   const summonSurface = (tab: Exclude<ChatTab, 'chat'>) => {
     const current = activeTab()
@@ -726,6 +803,7 @@ export function useChatController() {
   }
   const restoreSurfaceTab = (threadId: string) => {
     autoSummonedTab = null
+    setLedgerInspect(null)
     if (isTemporaryThread(threadId) || isForeignOriginThread(threadId)) {
       setActiveTabSignal('chat')
       return
@@ -746,6 +824,9 @@ export function useChatController() {
     // After unmount, this is a late write from a stream or wait that was
     // still unwinding; see `disposed`.
     if (disposed) return
+    // A project thread is a room's record. Chat's history, its local transcript and the
+    // server snapshot hold none of it: the room is read back on every open (WS18-S4).
+    if (chatProjectsEnabled() && scopedThreadRefs.has(threadId)) return
     const stableTurns = untrack(() => snapshot(turns))
     const stableTaskSteps = untrack(() => snapshot(taskSteps ?? state.taskSteps))
     // Temporary (ZDR) chat: never persisted, full stop. This is the single
@@ -903,6 +984,33 @@ export function useChatController() {
    * cannot pause for a plan approval and should not trigger an unnecessary
    * approval read.
    */
+  /**
+   * A reload restores the question the thread's last run is still waiting on (WS14 S4): the newest `requested`
+   * question not yet past its expiry, read from the run's own list.
+   */
+  const hydrateRunQuestions = (threadId: string, turns: ChatTurn[], sequence: number) => {
+    if (isTemporaryThread(threadId)) return
+    const runId = [...turns].reverse().find((turn) => turn.role === 'assistant' && turn.runId)?.runId
+    if (!runId) return
+    void listRunQuestions(runId)
+      .then((questions) => {
+        if (sequence !== threadLoadSequence || state.threadId !== threadId) return
+        const waiting = [...questions].reverse().find((question) => (
+          question.state === 'requested'
+          && (!question.expiresAt || Date.parse(question.expiresAt) > Date.now())
+        ))
+        if (waiting) {
+          setPendingQuestion({
+            questionId: waiting.id,
+            delivery: waiting.delivery,
+            expiresAt: waiting.expiresAt,
+            items: waiting.items,
+          })
+        }
+      })
+      .catch(() => undefined)
+  }
+
   const hydrateRunApprovals = (threadId: string, turns: ChatTurn[], sequence: number) => {
     if (isTemporaryThread(threadId)) return
     const runTurn = [...turns].reverse().find((turn) => (
@@ -1216,12 +1324,53 @@ export function useChatController() {
       : getThreadMessages(threadId).then((messages) => ({ messages, hasMore: false }))
   )
 
+  /**
+   * WS18-S4. A project thread is a room's record, not one of Chat's own threads: the
+   * chat transcript and message reads only find threads in Chat's own listing. Its
+   * turns come from the room's transcript route, which asks Control whether the caller
+   * may read the room. Live-run following, approvals and plan hydration stay with
+   * Chat's own threads.
+   */
+  const loadProjectThread = async (threadId: string, spaceRef: string, seq: number) => {
+    let transcript: SpaceThreadTranscript | null = null
+    try {
+      transcript = await getSpaceThreadTranscript(spaceRef, threadId)
+    } catch {
+      transcript = null
+    }
+    if (seq !== threadLoadSequence || state.threadId !== threadId) return
+    hydratingThreadId = null
+    const turns = fillMissingTurnTimestamps(projectTurnsFromTranscript(threadId, transcript?.turns ?? []), threadId)
+    setState((s) => {
+      s.turns = turns
+      s.taskSteps = []
+      s.error = transcript ? null : i18n.tr(
+        'Prosjektsamtalen kunne ikke åpnes. Du har kanskje ikke lenger tilgang til rommet.',
+        'The project conversation could not be opened. You may no longer have access to the room.',
+      )
+    })
+    resetUiEvents()
+    setTraceReplayTruncated(false)
+  }
+
   const loadThread = async (threadId: string) => {
     // The active-thread event for a newly-created conversation is a
     // confirmation, not a request to replace the optimistic live transcript.
     // In particular, do this before aborting `abortController`: session-core
     // may still be indexing the new thread's messages for a few milliseconds.
     if (isStartingThread(threadId)) return
+    // A waiting question belongs to the thread whose run asked it, so opening another thread must not carry its
+    // card over. This thread's own question, if it still waits, comes back with its run (`hydrateRunQuestions`).
+    setPendingQuestion(null)
+    setQuestionError(null)
+    // A project thread's scope is recorded before `threadId` moves into state, so the
+    // project chip reads it from the first render of the thread. With the switch off the
+    // branch is never taken: `scopedThreadRefs` can already hold the Space of an origin=space
+    // thread (read from its session below), and that thread must keep Chat's transcript route.
+    const knownProjectRef = chatProjectsEnabled()
+      ? (scopedThreadRefs.get(threadId) ?? projectThreadRef(threadId))
+      : undefined
+    if (knownProjectRef) scopedThreadRefs.set(threadId, knownProjectRef)
     // Switching threads must tear down the previously-selected thread's
     // in-flight stream/resume and reset the shared view machine. Left running,
     // that stream's terminal handlers keep mutating the store after
@@ -1266,6 +1415,10 @@ export function useChatController() {
         ? storedTitle.title.trim()
         : null,
     )
+    if (knownProjectRef) {
+      await loadProjectThread(threadId, knownProjectRef, seq)
+      return
+    }
     // WS09 S6. With VITE_CHAT_PARALLEL_THREAD_LOAD=true the reads go out together.
     // The messages read is awaited further down; `void ...catch` keeps it from
     // rejecting unhandled when a thread switch leaves it unawaited. The transcript
@@ -1385,6 +1538,7 @@ export function useChatController() {
       if (seq !== threadLoadSequence || state.threadId !== threadId) return
       restoreSurfaceTab(threadId)
       hydrateRunApprovals(threadId, turns, seq)
+      hydrateRunQuestions(threadId, turns, seq)
       hydrateProposedPlan(threadId, turns, seq)
       maybeResumeStream(threadId, turns)
       if (activeRunTail) void followUnresumableRun(threadId, activeRunTail.id, activeRunTail.runId)
@@ -1436,6 +1590,7 @@ export function useChatController() {
       if (seq !== threadLoadSequence || state.threadId !== threadId) return
       restoreSurfaceTab(threadId)
       hydrateRunApprovals(threadId, fallbackTurns, seq)
+      hydrateRunQuestions(threadId, fallbackTurns, seq)
       hydrateProposedPlan(threadId, fallbackTurns, seq)
       maybeResumeStream(threadId, fallbackTurns)
     }
@@ -2112,12 +2267,15 @@ export function useChatController() {
       }))
     resetUiEvents()
     setTraceReplayTruncated(false)
-    setInput('')
+    chatDraft.reset()
     setActiveTab('chat')
     setVersionState(null)
     // A fresh chat has no title yet; leaving the previous thread's would show
     // the old conversation's name over the new one until the next title lands.
     setGeneratedTitle(null)
+    // A waiting question, and a refusal left on its card, belong to the thread that asked: a fresh chat has neither.
+    setPendingQuestion(null)
+    setQuestionError(null)
     // Each fresh chat starts with Temporary Chat off — a user re-enables it
     // deliberately per conversation rather than it silently staying on.
     setTemporaryChat(false)
@@ -2132,6 +2290,8 @@ export function useChatController() {
         // invalidates a mount-time restore that captured an older pointer.
         threadSelectionRevision += 1
         if (!threadId) {
+          // A fresh chat forgets the project picked for the previous one.
+          setProjectSpaceRef(null)
           resetChatState()
           return
         }
@@ -2143,6 +2303,17 @@ export function useChatController() {
       }
       window.addEventListener(CHAT_ACTIVE_THREAD_CHANGED_EVENT, handleActiveThreadChange)
 
+      // WS18-S4: the sidebar asks for a new chat in a project. The page may not be
+      // mounted when it asks, so the tab's pending start is taken here as well.
+      const handleProjectStart = (event?: Event) => {
+        const stored = takeChatProjectStart()
+        const requested = event ? (event as CustomEvent<{ spaceRef?: string }>).detail?.spaceRef : undefined
+        const spaceRef = requested || stored
+        if (spaceRef && chatProjectsEnabled()) setProjectSpaceRef(spaceRef)
+      }
+      window.addEventListener(CHAT_PROJECT_START_EVENT, handleProjectStart)
+      handleProjectStart()
+
       const initializeChat = async () => {
         // A Space Activity link is URL-addressable across a browser restart. It
         // may choose the requested view but never grants it: `loadThread` still
@@ -2153,6 +2324,11 @@ export function useChatController() {
         const bootstrapSelectionRevision = threadSelectionRevision
         if (storedThread && bootstrapSelectionRevision === threadSelectionRevision) {
           if (untrack(() => isTemporaryThread(storedThread))) {
+            await loadThread(storedThread)
+          } else if (projectThreadRef(storedThread)) {
+            // A project thread is not in Chat's own listing, so that listing cannot
+            // prove it. Its routing hint lets it resume, and the room's transcript
+            // route decides what the caller may read.
             await loadThread(storedThread)
           } else {
             // A stored or deep-linked pointer is only trusted as far as Chat's
@@ -2254,7 +2430,10 @@ export function useChatController() {
 
       void initializeChat()
 
-      return () => window.removeEventListener(CHAT_ACTIVE_THREAD_CHANGED_EVENT, handleActiveThreadChange)
+      return () => {
+        window.removeEventListener(CHAT_ACTIVE_THREAD_CHANGED_EVENT, handleActiveThreadChange)
+        window.removeEventListener(CHAT_PROJECT_START_EVENT, handleProjectStart)
+      }
     },
   )
 
@@ -2362,6 +2541,56 @@ export function useChatController() {
    * Session-only: the durable record of a grant is on the run itself, and this
    * is only the status of the click.
    */
+  // The question a run put to its owner (WS14 S4), waiting for the person's answer in the composer tray.
+  // Session-only: a reload restores it from the run's questions (`hydrateRunQuestions`).
+  const [pendingQuestion, setPendingQuestion] = createSignal<ChatUserQuestionEvent | null>(null)
+  const [questionPending, setQuestionPending] = createSignal(false)
+  const [questionError, setQuestionError] = createSignal<string | null>(null)
+
+  /**
+   * Answers the waiting question. The answer is recorded first and then sent as the person's next message, so
+   * the run that follows works from an answered question. A refused answer sends nothing: a question that can
+   * no longer be answered leaves the tray with the refusal, and any other refusal keeps the card for another try.
+   */
+  const answerPendingQuestion = async (answer: ChatQuestionAnswer) => {
+    const question = pendingQuestion()
+    if (!question || questionPending()) return
+    setQuestionPending(true)
+    setQuestionError(null)
+    try {
+      await answerRunQuestion(question.questionId, { answers: answer.answers })
+    } catch (error) {
+      const code = runQuestionErrorCodeOf(error)
+      if (code === 'question_expired' || code === 'question_already_answered' || code === 'question_not_found') {
+        setPendingQuestion(null)
+      }
+      setQuestionError(i18n.tr('Svaret ble ikke lagret. Prøv igjen.', 'The answer was not saved. Try again.'))
+      return
+    } finally {
+      setQuestionPending(false)
+    }
+    setPendingQuestion(null)
+    await sendContent(questionAnswerSummary(question, answer))
+  }
+
+  /** Skips the waiting question. Nothing is sent to the run: the skip is recorded and the card goes. */
+  const skipPendingQuestion = async () => {
+    const question = pendingQuestion()
+    if (!question || questionPending()) return
+    setQuestionPending(true)
+    setQuestionError(null)
+    try {
+      await answerRunQuestion(question.questionId, { skip: true })
+      setPendingQuestion(null)
+    } catch {
+      setQuestionError(
+        i18n.tr('Spørsmålet kunne ikke hoppes over. Prøv igjen.', 'The question could not be skipped. Try again.'),
+      )
+    } finally {
+      setQuestionPending(false)
+    }
+  }
+
   const [planApprovalPending, setPlanApprovalPending] = createSignal<string | null>(null)
   const [planApprovalError, setPlanApprovalError] = createSignal<Record<string, string>>({})
 
@@ -2373,6 +2602,30 @@ export function useChatController() {
    * message plan again, so the user would approve a plan and then watch the
    * agent plan a second time — the grant would look like it did nothing.
    */
+  /**
+   * WS14 S2: sends the one execute turn an approval that answered `execute_now` earns, under the
+   * grant it has just pointed at, naming the plan. The pointer is spent when the turn connects
+   * (`spendThreadGrant`). When the turn never connected the pointer is still ours, and the plan
+   * card says so, with the armed pill as the way to try again.
+   */
+  const sendApprovedPlanNow = async (turnId: string, planId: string, grant: ThreadPlanGrant) => {
+    try {
+      await sendContent(i18n.tr('Kjør den godkjente planen', 'Run the approved plan'), undefined, {
+        executeGranted: true,
+        approvedPlanId: planId,
+      })
+    } catch {
+      // A send that throws never reached the gateway, so the grant is still ours to spend below.
+    }
+    if (threadGrant() === grant) {
+      setExecuteArmed(true)
+      setPlanApprovalError((prev) => ({
+        ...prev,
+        [turnId]: i18n.tr('Plan godkjent - Kjør nå', 'Plan approved - run now'),
+      }))
+    }
+  }
+
   const approveTurnPlan = async (
     turnId: string,
     rung: AutonomyRung,
@@ -2429,17 +2682,29 @@ export function useChatController() {
         && !isTemporaryThread(grantThreadId)
         && !isSupportChatThread(grantThreadId)
       ) {
-        setThreadGrant({
+        const planId = turnBefore?.proposedPlan?.planId
+        const grant: ThreadPlanGrant = {
           threadId: grantThreadId,
           rung: result.grantedRung,
-          planId: turnBefore?.proposedPlan?.planId,
+          planId,
           turnId,
           approvedAtMs: Date.now(),
           expiresAtMs: result.grantExpiresAtMs,
-        })
-        setExecuteArmed(true)
-        if (!input().trim()) {
-          setInput(i18n.tr('Kjør den godkjente planen', 'Run the approved plan'))
+        }
+        setThreadGrant(grant)
+        if (result.continuation === 'execute_now' && planId) {
+          // WS14 S2, approve then execute: the gateway recorded the grant for this plan and
+          // will run exactly one execute turn that names it, so that turn is sent now. The
+          // pill is not armed, so the person cannot send a second one from it. The plan-mode
+          // and grant writes above are applied first: the send reads both, and a signal write
+          // is not visible to a read until the reactive graph has flushed.
+          flush()
+          void sendApprovedPlanNow(turnId, planId, grant)
+        } else {
+          setExecuteArmed(true)
+          if (!input().trim()) {
+            setInput(i18n.tr('Kjør den godkjente planen', 'Run the approved plan'))
+          }
         }
       }
       if (!result.persisted) {
@@ -2659,7 +2924,12 @@ export function useChatController() {
     noteQueuedInput(id, 'refused', result.message)
   }
 
-  const sendContent = async (rawContent: string, modelOverride?: string, options: SendOptions & ServerVersionTarget = {}) => {
+  const sendContent = async (
+    rawContent: string,
+    modelOverride?: string,
+    // `approvedPlanId` is the WS14 S2 approve-then-execute plan; only `sendApprovedPlanNow` sets it.
+    options: SendOptions & ServerVersionTarget & { approvedPlanId?: string } = {},
+  ) => {
     const content = rawContent.trim()
     if (!content) return
     // A deep-linked transcript from Spaces, Support, or another agent surface
@@ -2734,23 +3004,30 @@ export function useChatController() {
     // whatever the composer toggle does afterward.
     const isNewThread = !state.threadId
     // `?space_ref=` used to be read from the URL here to scope a NEW chat to a
-    // Space. Removed rather than kept: nothing in the app has ever produced
-    // such a link (every `/chat?` href is `thread_id`), so the only way to
-    // reach it was to hand-craft the URL — and the design explicitly wants
-    // FEWER `/chat` entry points from other surfaces, with Space-scoped
-    // conversations living in the Space's own timeline (which is what the
-    // `origin == "chat"` history filter enforces). The BFF still honours a
-    // `space_ref` in the body and still authorizes it via `resolve_space_role`,
-    // so a future Space-scoped composer has its plumbing intact; what is gone
-    // is the unreachable URL entry point.
+    // Space. It stays removed: nothing in the app produced such a link, and a URL
+    // is not a grant. A project chat (WS18-S4) starts from the Projects section
+    // instead, behind GATEWAY_CHAT_PROJECTS_ENABLED. Chat's own history still lists
+    // only `origin == "chat"` threads, so a project thread is never in it: it is
+    // reached from its project and reopened by its routing hint. The BFF honours a
+    // `space_ref` in the body only through `resolve_space_role`.
     //
     // `scopedThreadRefs` is a different mechanism and stays: it carries the ref
-    // of a thread the server already reports as scoped, recovered in
-    // `loadThread`, so resuming such a thread remains appendable.
-    const requestedSpaceRef = scopedThreadRefs.get(activeThreadId)
+    // of a thread that belongs to a project, recovered in `loadThread` from its
+    // routing hint, so resuming such a thread remains appendable. WS18-S4 adds one
+    // source for a NEW chat's project: the project picked in the sidebar. Never a
+    // link, never the composer. The BFF still authorizes the ref on every turn.
+    const requestedSpaceRef = requestedProjectRef({
+      isNewThread,
+      threadRef: scopedThreadRefs.get(activeThreadId),
+      pickedRef: projectSpaceRef(),
+    })
     if (isNewThread) {
       // A pending snapshot belongs to the thread being left.
       snapshotWriter.flush()
+      // The provisional thread belongs to its project from the first send, so the
+      // project stays on screen until the durable id replaces this one.
+      if (requestedSpaceRef) scopedThreadRefs.set(activeThreadId, requestedSpaceRef)
+      chatDraft.carry(null, activeThreadId)
       setState((s) => { s.threadId = activeThreadId })
       startingThreadIds.add(activeThreadId)
       if (options.zdr) markThreadTemporary(activeThreadId)
@@ -2847,7 +3124,14 @@ export function useChatController() {
         ...buildTaskSteps(content, tools, appendUser ? 'submit' : 'regenerate', assistantId, options.actions ?? []),
       ]
     })
-    setInput('')
+    // The approve-then-execute turn (WS14 S2) is never typed in the composer, so the person's draft stays.
+    // Any other turn clears the composer, but the text stays stored until the send settles, so a failed send
+    // can give it back (see the draft hook).
+    let settleDraft: ((outcome: ChatDraftOutcome) => void) | undefined
+    if (!options.approvedPlanId) {
+      settleDraft = chatDraft.beginSend()
+      setInput('')
+    }
 
     const controller = new AbortController()
     abortController = controller
@@ -2926,7 +3210,10 @@ export function useChatController() {
       if (requestedSpaceRef) {
         scopedThreadRefs.delete(priorThreadId)
         scopedThreadRefs.set(serverThreadId, requestedSpaceRef)
+        // A project thread reopens from its project after a reload (WS18-S4).
+        if (chatProjectsEnabled()) rememberProjectThread(serverThreadId, requestedSpaceRef)
       }
+      chatDraft.carry(priorThreadId, serverThreadId)
       setState((s) => { s.threadId = serverThreadId })
       if (!isTemporaryThread(serverThreadId)) setActiveChatThreadId(serverThreadId)
       writeThreadSnapshot(serverThreadId, state.turns, { preview: content, updatedAt: submittedAt })
@@ -3018,6 +3305,7 @@ export function useChatController() {
           sourceScope: options.sourceScope ?? sourceScope(),
           retrievalScope: options.retrievalScope ?? retrievalScope(),
           connectorScope: options.connectorScope,
+          agentMode: options.agentMode,
           deepResearch: options.deepResearch,
           generateImage: options.generateImage,
           attachments: options.attachments,
@@ -3026,6 +3314,11 @@ export function useChatController() {
           // Only the turn `sendContent` validated above; the wire builder drops it
           // again on any turn that cannot execute. It carries no rung.
           ...(executeGrant ? { executeGranted: true } : {}),
+          // WS14 S2: the approve-then-execute turn names the plan its grant holds, and
+          // only that plan; a pointer to any other plan sends the turn without it.
+          ...(executeGrant && options.approvedPlanId && executeGrant.planId === options.approvedPlanId
+            ? { approvedPlanId: options.approvedPlanId }
+            : {}),
           effort: options.effort,
           verbosity: options.tone,
           zdr: options.zdr,
@@ -3049,6 +3342,7 @@ export function useChatController() {
             appendUiEvent(event, assistantId)
           },
           onConnected: (connected) => {
+            settleDraft?.('accepted')
             if (stopBeforeConnect) {
               cancelOnceConnected(connected)
               return
@@ -3164,7 +3458,13 @@ export function useChatController() {
               if (turn) turn.proposedPlan = { planId, summary, steps }
             })
           },
+          onUserQuestion: (question) => {
+            // WS14 S4. A temporary chat keeps no question, as it keeps no follow-up chips.
+            if (isTemporaryThread(state.threadId ?? activeThreadId)) return
+            setPendingQuestion(question)
+          },
           onDone: ({ requestId, modelUsed, outputTokens, stopReason }) => {
+            settleDraft?.('accepted')
             settled = true
             terminalSeen = true
             captureRequestId(requestId)
@@ -3195,7 +3495,10 @@ export function useChatController() {
             if (projection.accepts()) resendUntakenQueuedInputs()
             updateLocalRunHint(activeThreadId, 'completed', state.turns.find((turn) => turn.id === assistantId)?.runId)
             // Mark read at stream end, not per delta, and only while the owner is still on this thread.
-            if (projection.accepts()) markThreadRead(activeThreadId)
+            if (projection.accepts()) {
+              if (document.visibilityState === 'hidden') seenOnReturnThreadId = activeThreadId
+              else markThreadRead(activeThreadId)
+            }
             addAnswerVerificationStep(assistantId, turnTitle, tools.includes('search') || tools.includes('research'))
             // Proof is committed after the run settles. Read the server-owned
             // bundle once it is available so effectful turns become immutable
@@ -3339,6 +3642,8 @@ export function useChatController() {
       writeThreadSnapshot(state.threadId ?? activeThreadId, state.turns)
     } finally {
       releaseDeferredStop()
+      // A send that was never accepted did not reach the thread: its text goes back. Settled already when accepted.
+      settleDraft?.('failed')
       if (isNewThread) {
         startingThreadIds.delete(provisionalThreadId)
         startingThreadIds.delete(activeThreadId)
@@ -3376,6 +3681,7 @@ export function useChatController() {
       sourceScope: payload.sourceScope,
       retrievalScope: payload.retrievalScope,
       connectorScope: payload.connectorScope,
+      agentMode: payload.agentMode,
       deepResearch: payload.tools.includes('research'),
       displayAttachments,
       generateImage: payload.tools.includes('image'),
@@ -3595,7 +3901,7 @@ export function useChatController() {
       onSourceScopeApplied: (event: Parameters<NonNullable<ChatStreamHandlers['onSourceScopeApplied']>>[0]) => {
         setState((s) => {
           const turn = s.turns.find((t) => t.id === assistantId)
-          if (turn) turn.scopeApplied = { scope: event.scope, excludedTools: event.excludedTools }
+          if (turn) turn.scopeApplied = event
         })
       },
       onGrounding: ({ value }: Parameters<NonNullable<ChatStreamHandlers['onGrounding']>>[0]) => {
@@ -3701,9 +4007,18 @@ export function useChatController() {
             // leaves the turn without a processing line, never a guessed one.
             turn.servedBy = usage.servedBy
             turn.confidence = usage.confidence
+            // The turn's final total: it replaces every running total the progress frames gave.
+            turn.meter = applyUsageTotal(turn.meter, usage)
           }
         })
         upsertTaskStep(createTurnStep(assistantId, turnTitle, 'usage', 'Usage recorded', formatUsageSummary(usage), 'done'))
+      },
+      // The running total after each provider call of the turn (WS27-S4). The usage frame still ends it.
+      onUsageProgress: (progress: Parameters<NonNullable<ChatStreamHandlers['onUsageProgress']>>[0]) => {
+        setState((s) => {
+          const turn = s.turns.find((t) => t.id === assistantId)
+          if (turn) turn.meter = applyUsageProgress(turn.meter, progress)
+        })
       },
       onTurnTiming: (timing: Parameters<NonNullable<ChatStreamHandlers['onTurnTiming']>>[0]) => {
         setState((s) => {
@@ -3757,6 +4072,56 @@ export function useChatController() {
             'done',
           ),
         )
+      },
+      // Run lifecycle notices (WS15). Each frame records something the gateway did, as counts and closed tokens;
+      // `addLifecycleNotice` keeps them in arrival order, drops an exact replay and caps the list.
+      onRetryScheduled: (event: Parameters<NonNullable<ChatStreamHandlers['onRetryScheduled']>>[0]) => {
+        setState((s) => {
+          const turn = s.turns.find((t) => t.id === assistantId)
+          if (!turn) return
+          // The frame names the tool, not the call: the retry belongs to the newest call of that tool still out.
+          const call = [...(turn.toolCalls ?? [])]
+            .reverse()
+            .find((item) => item.name === event.tool && isToolCallRunning(item))
+          turn.lifecycle = addLifecycleNotice(turn.lifecycle, {
+            kind: 'retry',
+            tool: event.tool,
+            attempt: event.attempt,
+            maxAttempts: event.maxAttempts,
+            reason: event.reason,
+            callId: call?.id,
+          })
+        })
+      },
+      onCompaction: (event: Parameters<NonNullable<ChatStreamHandlers['onCompaction']>>[0]) => {
+        setState((s) => {
+          const turn = s.turns.find((t) => t.id === assistantId)
+          if (turn) {
+            turn.lifecycle = addLifecycleNotice(turn.lifecycle, {
+              kind: 'compaction',
+              scope: event.scope,
+              outcome: event.outcome,
+            })
+          }
+        })
+      },
+      onContextChange: (event: Parameters<NonNullable<ChatStreamHandlers['onContextChange']>>[0]) => {
+        setState((s) => {
+          const turn = s.turns.find((t) => t.id === assistantId)
+          if (turn) {
+            turn.lifecycle = addLifecycleNotice(turn.lifecycle, {
+              kind: 'context',
+              change: event.change,
+              messagesDropped: event.messagesDropped,
+            })
+          }
+        })
+      },
+      onRetrievalNotice: (event: Parameters<NonNullable<ChatStreamHandlers['onRetrievalNotice']>>[0]) => {
+        setState((s) => {
+          const turn = s.turns.find((t) => t.id === assistantId)
+          if (turn) turn.lifecycle = addLifecycleNotice(turn.lifecycle, { kind: 'retrieval', wordingKey: event.wordingKey })
+        })
       },
     } satisfies Partial<ChatStreamHandlers>
   }
@@ -4375,6 +4740,7 @@ export function useChatController() {
   }
 
   const startNewChat = () => {
+    setProjectSpaceRef(null)
     clearActiveChatThreadId()
     resetChatState()
   }
@@ -4457,6 +4823,8 @@ export function useChatController() {
     setActiveTab,
     copiedTurnId,
     uiEvents,
+    ledgerInspect,
+    inspectLedgerCall,
     traceReplayTruncated,
     launchMotion,
     showScrollDown,
@@ -4464,6 +4832,11 @@ export function useChatController() {
     setImageMode,
     planMode,
     approveTurnPlan,
+    pendingQuestion,
+    questionPending,
+    questionError,
+    answerPendingQuestion,
+    skipPendingQuestion,
     rejectTurnPlan,
     planApprovalPending,
     planApprovalError,
@@ -4477,6 +4850,11 @@ export function useChatController() {
     setSourceScope,
     retrievalScope,
     spaceScoped: () => Boolean(scopedThreadRefs.get(state.threadId ?? '')),
+    // WS18-S4: the project this page is writing to: the open thread's own project, or the
+    // pick for a chat that has no thread yet. Null for every ordinary chat.
+    activeProjectRef: () => (state.threadId ? scopedThreadRefs.get(state.threadId) ?? null : projectSpaceRef()),
+    projectSpaceRef,
+    setProjectSpaceRef,
     setRetrievalScope,
     setBrowseWeb,
     temporaryChat,

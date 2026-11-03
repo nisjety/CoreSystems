@@ -9,14 +9,17 @@
 //! (the other `process_*` tools reuse an existing lease), and
 //! `release_sandbox_lease_if_any` reaches `diff_and_upload` when the run ends:
 //! from `CancelRun` or the `RunAgent` finalise. A run driven only by
-//! `ExecuteStep` calls has no run-end signal, so its edits are not uploaded
-//! (see the module doc of `sandbox_lease.rs`).
+//! `ExecuteStep` calls has no run-end signal; its edits reach the Space's
+//! overlay after each step only while the Space write-through is on (WS22-S4),
+//! and are not uploaded otherwise (see the module doc of `sandbox_lease.rs`).
 
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
 
+use mp_contracts::attachments::ATTACHMENTS_DIR;
 use sha2::{Digest, Sha256};
 
+use crate::code_interpreter::{Language, MAX_FILE_BYTES, MPL_CONFIG_SUBDIR, TEMP_SUBDIR};
 use crate::scrub;
 use crate::workspace_cas::CasClient;
 
@@ -103,6 +106,31 @@ pub async fn diff_and_upload(
     target_dir: &Path,
     baseline: &HashMap<String, String>,
 ) -> Result<Vec<ChangedFile>, String> {
+    diff_and_upload_where(cas, target_dir, baseline, |_, _| true).await
+}
+
+/// [`diff_and_upload`] with the thread's filter applied to a Space's overlay (WS22-S4): a file
+/// [`is_syncable`] rejects is neither uploaded nor reported, so the staged program, the scratch
+/// directories, the attachments mount and oversized files never reach the Space.
+///
+/// # Errors
+/// As [`diff_and_upload`].
+pub async fn diff_and_upload_syncable(
+    cas: &CasClient,
+    target_dir: &Path,
+    baseline: &HashMap<String, String>,
+) -> Result<Vec<ChangedFile>, String> {
+    diff_and_upload_where(cas, target_dir, baseline, is_syncable).await
+}
+
+/// The walk both diffs share. `keep` sees each file's path and size once it is read, and before
+/// anything is hashed or uploaded.
+async fn diff_and_upload_where(
+    cas: &CasClient,
+    target_dir: &Path,
+    baseline: &HashMap<String, String>,
+    keep: impl Fn(&str, u64) -> bool,
+) -> Result<Vec<ChangedFile>, String> {
     let mut relative_paths = Vec::new();
     collect_relative_paths(target_dir, target_dir, &mut relative_paths)?;
 
@@ -112,6 +140,9 @@ pub async fn diff_and_upload(
         let absolute = target_dir.join(&relative);
         let raw = std::fs::read(&absolute)
             .map_err(|error| format!("diff: could not read '{}': {error}", absolute.display()))?;
+        if !keep(&path_str, raw.len() as u64) {
+            continue;
+        }
         let redacted = redact(&raw);
         let content_hash = sha256_digest(&redacted);
 
@@ -142,7 +173,7 @@ pub async fn diff_and_upload(
 /// stay byte-identical to be useful. Binary content therefore passes
 /// through untouched rather than risk that; it also isn't the kind of
 /// content these patterns are meant to catch.
-fn redact(raw: &[u8]) -> Vec<u8> {
+pub(crate) fn redact(raw: &[u8]) -> Vec<u8> {
     match std::str::from_utf8(raw) {
         Ok(text) => scrub::scrub_string(text).into_bytes(),
         Err(_) => raw.to_vec(),
@@ -171,7 +202,7 @@ pub fn would_redact(raw: &[u8]) -> bool {
 /// Validates `path` is a safe, relative path with no `..`/absolute/prefix
 /// components, returning it as a `PathBuf` a caller can safely `.join()`
 /// onto a target directory.
-fn safe_relative_path(path: &str) -> Result<PathBuf, String> {
+pub(crate) fn safe_relative_path(path: &str) -> Result<PathBuf, String> {
     let candidate = PathBuf::from(path);
     if candidate.as_os_str().is_empty() {
         return Err("workspace path must not be empty".to_owned());
@@ -187,7 +218,7 @@ fn safe_relative_path(path: &str) -> Result<PathBuf, String> {
     Ok(candidate)
 }
 
-fn collect_relative_paths(root: &Path, dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
+pub(crate) fn collect_relative_paths(root: &Path, dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
     let entries = std::fs::read_dir(dir)
         .map_err(|error| format!("diff: could not list '{}': {error}", dir.display()))?;
     for entry in entries {
@@ -209,6 +240,41 @@ fn collect_relative_paths(root: &Path, dir: &Path, out: &mut Vec<PathBuf>) -> Re
         }
     }
     Ok(())
+}
+
+/// Whether the thread workspace keeps the file at `path` (relative, `/`-separated) between calls
+/// (WS22-S2). It keeps neither the program the runtime stages nor the scratch directories it creates
+/// at the top of the tree, nor Python's bytecode cache, nor the read-only attachments mount, nor a
+/// file over the per-file ceiling, which a call's output cannot carry either.
+#[must_use]
+pub fn is_syncable(path: &str, size_bytes: u64) -> bool {
+    if size_bytes > MAX_FILE_BYTES || path.split('/').any(|part| part == "__pycache__") {
+        return false;
+    }
+    let mut parts = path.split('/');
+    let top = parts.next().unwrap_or_default();
+    if parts.next().is_none() {
+        return top != Language::Python.program_file() && top != Language::Sh.program_file();
+    }
+    !(top == TEMP_SUBDIR || top == MPL_CONFIG_SUBDIR || top.eq_ignore_ascii_case(ATTACHMENTS_DIR))
+}
+
+/// The baseline paths that no longer exist under `target_dir`, in path order (WS22-S2). A path whose
+/// state cannot be read is not reported: an unreadable file is not a deleted one.
+#[must_use]
+pub fn diff_deletions(target_dir: &Path, baseline: &HashMap<String, String>) -> Vec<String> {
+    let mut deleted: Vec<String> = baseline
+        .keys()
+        .filter(|path| {
+            matches!(
+                std::fs::symlink_metadata(target_dir.join(path.as_str())),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound
+            )
+        })
+        .cloned()
+        .collect();
+    deleted.sort();
+    deleted
 }
 
 #[cfg(test)]
@@ -446,6 +512,33 @@ mod tests {
         assert!(changed[0].content_hash.starts_with("sha256:"));
 
         std::fs::remove_dir_all(&target_dir).ok();
+    }
+
+    #[test]
+    fn is_syncable_keeps_user_files_and_drops_runtime_scratch() {
+        assert!(is_syncable("notes.txt", 10));
+        assert!(is_syncable("reports/q3.csv", 10));
+        assert!(is_syncable("big.bin", MAX_FILE_BYTES));
+        assert!(!is_syncable("_verevon_main.py", 10));
+        assert!(!is_syncable("_verevon_main.sh", 10));
+        assert!(!is_syncable(".tmp/scratch.txt", 10));
+        assert!(!is_syncable(".mplconfig/fontlist.json", 10));
+        assert!(!is_syncable("attachments/input.csv", 10));
+        assert!(!is_syncable("Attachments/input.csv", 10));
+        assert!(!is_syncable("pkg/__pycache__/m.pyc", 10));
+        assert!(!is_syncable("big.bin", MAX_FILE_BYTES + 1));
+    }
+
+    #[test]
+    fn diff_deletions_names_only_the_baseline_paths_now_gone() {
+        let dir = tempfile_dir("diff-deletions");
+        std::fs::write(dir.join("kept.txt"), b"still here").unwrap();
+        let baseline = HashMap::from([
+            ("kept.txt".to_owned(), sha256_digest(b"still here")),
+            ("gone.txt".to_owned(), sha256_digest(b"removed")),
+        ]);
+        assert_eq!(diff_deletions(&dir, &baseline), vec!["gone.txt".to_owned()]);
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     fn body_string_bytes(expected: Vec<u8>) -> impl wiremock::Match {

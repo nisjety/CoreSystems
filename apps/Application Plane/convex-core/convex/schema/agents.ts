@@ -7,6 +7,7 @@
 
 import { defineTable } from "convex/server";
 import { v } from "convex/values";
+import { agentDefinitionBodyFields } from "./agentDefinitionVersions";
 
 export const agentTables = {
   // Agents - Per-org AI agent configurations
@@ -95,6 +96,11 @@ export const agentTables = {
       v.literal("chat"),
       v.literal("deployed_agent"),
     )),
+    // EP-6 S7 (AGENT_DEFINITION_VERSIONS): the version the gateway serves (absent = legacy row,
+    // served from systemPrompt and tools as before) and the editable draft a publish copies
+    // into an immutable agentDefinitionVersions row. The draft is not the status "draft".
+    publishedVersion: v.optional(v.number()),
+    draft: v.optional(v.object(agentDefinitionBodyFields)),
     createdBy: v.optional(v.id("users")),
     createdAt: v.number(),
     updatedAt: v.number(),

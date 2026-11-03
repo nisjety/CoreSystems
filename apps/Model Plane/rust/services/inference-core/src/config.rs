@@ -6,7 +6,7 @@ use mp_contracts::model_entitlement::Mode;
 
 use crate::metrics;
 use crate::provider::zdr::{ZdrAttestation, ZdrResolution};
-use crate::provider::Bearer;
+use crate::provider::{Bearer, Residency};
 
 /// Top-level configuration for inference-core.
 // The flags are independent deny-by-default residency/retention opt-ins, not a
@@ -496,9 +496,125 @@ fn parse_csv(value: &str) -> Vec<String> {
         .collect()
 }
 
+/// Vertex AI Gemini settings. They sit apart from [`InferenceConfig`] so every existing
+/// configuration keeps building unchanged, and the provider stays off unless
+/// `VERTEX_GEMINI_ENABLED` is the literal `true`.
+#[derive(Debug, Clone, Default)]
+pub struct VertexGeminiConfig {
+    /// `VERTEX_GEMINI_ENABLED`. Only the literal `true` enables the provider.
+    pub enabled: bool,
+    /// `VERTEX_GEMINI_PROJECT`, the Google Cloud project the models are called in.
+    pub project: String,
+    /// `VERTEX_GEMINI_LOCATION`. Registration needs a location on the EU allowlist.
+    pub location: String,
+    /// `VERTEX_GEMINI_MODELS`, comma separated: the only models this endpoint serves.
+    pub models: Vec<String>,
+    /// `VERTEX_GEMINI_CREDENTIALS_FILE`, a mounted service-account key. Only the path is
+    /// held here; the key is read at registration and never printed.
+    pub credentials_file: String,
+}
+
+impl VertexGeminiConfig {
+    /// Read the settings from the environment.
+    #[must_use]
+    pub fn from_env() -> Self {
+        Self {
+            enabled: vertex_switch_on(std::env::var("VERTEX_GEMINI_ENABLED").ok().as_deref()),
+            project: trimmed_env("VERTEX_GEMINI_PROJECT").unwrap_or_default(),
+            location: trimmed_env("VERTEX_GEMINI_LOCATION").unwrap_or_default(),
+            models: trimmed_env("VERTEX_GEMINI_MODELS")
+                .map(|value| parse_csv(&value))
+                .unwrap_or_default(),
+            credentials_file: trimmed_env("VERTEX_GEMINI_CREDENTIALS_FILE").unwrap_or_default(),
+        }
+    }
+}
+
+/// The strict reading of `VERTEX_GEMINI_ENABLED`: only the literal `true` enables it.
+/// Anything else, including `1`, `TRUE` and an empty value, leaves the provider off.
+fn vertex_switch_on(raw: Option<&str>) -> bool {
+    raw.is_some_and(|value| value.trim() == "true")
+}
+
+/// The Vertex locations that keep processing in the EU: the EU multi-region, and the
+/// European regions the Vertex locations page lists. The page does not confirm which of
+/// them serve each model, so the enablement gate checks that per model.
+const VERTEX_EU_LOCATIONS: &[&str] = &[
+    "eu",
+    "europe-central2",
+    "europe-north1",
+    "europe-southwest1",
+    "europe-west1",
+    "europe-west2",
+    "europe-west3",
+    "europe-west4",
+    "europe-west6",
+    "europe-west8",
+    "europe-west9",
+];
+
+/// Whether `location` is one of [`VERTEX_EU_LOCATIONS`].
+#[must_use]
+pub(crate) fn is_vertex_eu_location(location: &str) -> bool {
+    VERTEX_EU_LOCATIONS.contains(&location.trim().to_ascii_lowercase().as_str())
+}
+
+/// The residency a Vertex location declares. Only an allowlisted location is EU; anything
+/// else is `Global`, so the residency floors skip it.
+#[must_use]
+pub(crate) fn vertex_residency(location: &str) -> Residency {
+    if is_vertex_eu_location(location) {
+        Residency::Eu
+    } else {
+        Residency::Global
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::deployment_type_is_global;
+    use super::{
+        deployment_type_is_global, is_vertex_eu_location, vertex_residency, vertex_switch_on,
+    };
+    use crate::provider::Residency;
+
+    #[test]
+    fn vertex_location_allowlist() {
+        for location in ["eu", "europe-west4", "EU", " europe-north1 "] {
+            assert!(is_vertex_eu_location(location), "{location:?} is EU");
+        }
+        for location in [
+            "us-central1",
+            "global",
+            "asia-northeast1",
+            "europe-west10",
+            "",
+        ] {
+            assert!(!is_vertex_eu_location(location), "{location:?} is not EU");
+        }
+    }
+
+    #[test]
+    fn global_location_classifies_global() {
+        assert_eq!(vertex_residency("us-central1"), Residency::Global);
+        assert_eq!(vertex_residency("global"), Residency::Global);
+        assert_eq!(vertex_residency("europe-west4"), Residency::Eu);
+    }
+
+    #[test]
+    fn vertex_switch_is_on_only_for_the_literal_true() {
+        assert!(vertex_switch_on(Some("true")));
+        assert!(vertex_switch_on(Some(" true ")));
+        for raw in [
+            None,
+            Some(""),
+            Some("1"),
+            Some("TRUE"),
+            Some("yes"),
+            Some("on"),
+        ] {
+            assert!(!vertex_switch_on(raw), "{raw:?} must not enable the switch");
+        }
+    }
 
     /// Every spelling Azure uses for a deployment that may process a request in
     /// any region worldwide. Getting this wrong silently voids the EU residency

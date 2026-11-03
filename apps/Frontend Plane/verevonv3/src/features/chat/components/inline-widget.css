@@ -1,0 +1,94 @@
+/*
+ * Inline widgets (EP-4 S1). The frame has a fixed height until the bridge (S3)
+ * lets a widget size itself; the expanded state is the same frame pinned over the
+ * page, so the widget keeps its state (moving an iframe in the DOM reloads it).
+ */
+
+.verevon-inline-widget {
+  margin: 12px 0;
+  border: 1px solid var(--verevon-border);
+  border-radius: var(--radius);
+  background: var(--verevon-surface);
+  overflow: hidden;
+}
+
+.verevon-inline-widget__toolbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px 6px 12px;
+  border-bottom: 1px solid var(--verevon-border-soft);
+  color: var(--verevon-text-muted);
+  font-size: 12px;
+}
+
+.verevon-inline-widget__title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.verevon-inline-widget__action,
+.verevon-inline-widget__activate {
+  min-height: 28px;
+  padding: 4px 10px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--verevon-surface-soft);
+  color: var(--verevon-text-muted);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.verevon-inline-widget__action[aria-pressed='true'] {
+  color: var(--verevon-text);
+}
+
+.verevon-inline-widget__activate {
+  display: block;
+  margin: 24px auto;
+  font-size: 13px;
+}
+
+.verevon-inline-widget__frame {
+  display: block;
+  width: 100%;
+  height: 360px;
+  border: 0;
+  background: transparent;
+}
+
+.verevon-inline-widget__code {
+  border-top: 1px solid var(--verevon-border-soft);
+}
+
+.verevon-inline-widget__note {
+  margin: 4px 0 0;
+  color: var(--verevon-text-muted);
+  font-size: 12px;
+}
+
+.verevon-inline-widget--expanded {
+  position: fixed;
+  inset: 24px;
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+}
+
+.verevon-inline-widget--expanded .verevon-inline-widget__frame {
+  flex: 1;
+  height: auto;
+}
+
+@media (max-width: 640px) {
+  .verevon-inline-widget--expanded {
+    inset: 0;
+    border-radius: 0;
+  }
+}

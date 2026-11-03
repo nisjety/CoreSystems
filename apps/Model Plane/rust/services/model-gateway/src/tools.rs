@@ -15,6 +15,7 @@
 
 use std::fmt::Write as _;
 use std::net::IpAddr;
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use tonic::Status;
@@ -165,9 +166,9 @@ pub async fn handle_code_interpreter(
     state: &AppState,
     execution_bearer: &crate::auth::VerifiedExecutionBearer,
     data_plane_bearer: &crate::auth::VerifiedDataPlaneBearer,
-    // Present only for a Space-scoped turn. Forwarded unchanged for
-    // execution-core to verify and present to sandbox-manager's AcquireLease
-    // (S3_3_DURABLE_WORKSPACE_DESIGN_2026-09-11.md §3.5 phase B.2).
+    // Present for a Space-scoped turn, and for a non-ZDR personal turn while the thread workspace is
+    // switched on (WS22-S3). Forwarded unchanged for execution-core to verify and present to
+    // sandbox-manager's AcquireLease (S3_3_DURABLE_WORKSPACE_DESIGN_2026-09-11.md §3.5 phase B.2).
     sandbox_bearer: Option<&crate::auth::VerifiedSandboxBearer>,
     inference_bearer: &str,
     session_bearer: &str,
@@ -175,6 +176,9 @@ pub async fn handle_code_interpreter(
     org_id: &str,
     user_id: &str,
     space_id: &str,
+    // The chat thread the call runs in. Named to execution-core only when the call takes the thread
+    // workspace path (WS22-S3); see `workspace_thread_for_call`.
+    thread_id: &str,
     zdr: bool,
     language: &str,
     code: &str,
@@ -233,6 +237,10 @@ pub async fn handle_code_interpreter(
         // sovereignty derivation for this field to feed.
         min_privacy_tier: mp_contracts::model_plane::v1::PrivacyTier::Unspecified as i32,
         space_id: space_id.to_owned(),
+        // Only a personal, non-ZDR call that holds the sandbox credential names its thread (WS22-S3).
+        // execution-core uses the id for that thread's workspace and never for memory tools.
+        thread_id: workspace_thread_for_call(sandbox_bearer.is_some(), zdr, space_id, thread_id)
+            .to_owned(),
         attachments: attachments.to_vec(),
         skill_mounts: skill_mounts.to_vec(),
     });
@@ -285,13 +293,99 @@ pub async fn handle_code_interpreter(
         .map_err(|status| format!("code_interpreter failed: {}", status.message()))?
         .into_inner();
     match response.status.as_str() {
-        "completed" => Ok(response.output),
+        "completed" => Ok(report_workspace(
+            thread_workspace_reporting_enabled(),
+            response.output,
+            space_id,
+            zdr,
+            sandbox_bearer.is_some(),
+        )),
         status => Err(if response.error.is_empty() {
             format!("code_interpreter finished with status '{status}'")
         } else {
             response.error
         }),
     }
+}
+
+/// Whether this gateway adds the `workspace` part to a `code_interpreter` result that execution-core did
+/// not attach one to (WS22-S3). Read once per process, and only the literal `true` enables it: with the
+/// switch off a result is returned exactly as execution-core wrote it.
+fn thread_workspace_reporting_enabled() -> bool {
+    static SWITCH: OnceLock<bool> = OnceLock::new();
+    *SWITCH.get_or_init(|| {
+        std::env::var("SANDBOX_THREAD_WORKSPACE_ENABLED").is_ok_and(|value| value == "true")
+    })
+}
+
+/// The thread a `code_interpreter` call keeps its files in, or empty for the per-call path (WS22-S3).
+/// Only a personal, non-ZDR call that holds a sandbox-manager credential names one: execution-core
+/// presents that credential for the thread's lease, and a zero-retention turn keeps nothing.
+fn workspace_thread_for_call<'a>(
+    thread_credential: bool,
+    zdr: bool,
+    space_id: &str,
+    thread_id: &'a str,
+) -> &'a str {
+    if thread_credential && !zdr && space_id.is_empty() && !thread_id.trim().is_empty() {
+        thread_id
+    } else {
+        ""
+    }
+}
+
+/// The `workspace` part of a `code_interpreter` result that execution-core did not attach one to
+/// (WS22-S3): where the call's files went and that they were not saved. `cause` is a typed token.
+fn unattached_workspace(space_id: &str, zdr: bool, thread_credential: bool) -> serde_json::Value {
+    if !space_id.is_empty() {
+        return serde_json::json!({
+            "scope": "space",
+            "state": "refused",
+            "cause": "not_written_through",
+            "note": "this call's files are kept for this run only",
+        });
+    }
+    let cause = if zdr {
+        "zero_retention"
+    } else if thread_credential {
+        "unavailable"
+    } else {
+        "no_thread_credential"
+    };
+    serde_json::json!({
+        "scope": "ephemeral",
+        "state": "refused",
+        "cause": cause,
+        "note": "files are not kept after this call",
+    })
+}
+
+/// Adds [`unattached_workspace`] to a `code_interpreter` result whose output has no `workspace` part
+/// (WS22-S3). With the switch off, and for an output that is not a JSON object, the output is returned
+/// as it was.
+fn report_workspace(
+    reporting: bool,
+    output: String,
+    space_id: &str,
+    zdr: bool,
+    thread_credential: bool,
+) -> String {
+    if !reporting {
+        return output;
+    }
+    let Ok(serde_json::Value::Object(mut result)) =
+        serde_json::from_str::<serde_json::Value>(&output)
+    else {
+        return output;
+    };
+    if result.contains_key("workspace") {
+        return output;
+    }
+    result.insert(
+        "workspace".to_owned(),
+        unattached_workspace(space_id, zdr, thread_credential),
+    );
+    serde_json::Value::Object(result).to_string()
 }
 
 // ---------------- GetWeather ----------------
@@ -2020,6 +2114,7 @@ mod tests {
                 "org-1",
                 "user-1",
                 "",
+                "",
                 zdr,
                 "python",
                 "print(open('attachments/data.csv').read())",
@@ -2087,6 +2182,94 @@ mod tests {
                 .expect_err("ZDR must refuse before the call");
             assert!(error.contains("zero-retention"), "{error}");
             assert!(execution.steps.lock().expect("steps").is_empty());
+        }
+
+        /// One `code_interpreter` call that names a thread, with or without the sandbox credential.
+        async fn thread_call(
+            state: &AppState,
+            sandbox_bearer: Option<&crate::auth::VerifiedSandboxBearer>,
+            space_id: &str,
+            thread_id: &str,
+            zdr: bool,
+        ) -> Result<String, String> {
+            let attachments = ValidatedAttachments::none();
+            handle_code_interpreter(
+                state,
+                &crate::auth::VerifiedExecutionBearer::for_test("execution"),
+                &crate::auth::VerifiedDataPlaneBearer::for_test("data-plane"),
+                sandbox_bearer,
+                "inference",
+                "session",
+                "run-1",
+                "org-1",
+                "user-1",
+                space_id,
+                thread_id,
+                zdr,
+                "python",
+                "print('kept')",
+                None,
+                attachments.run_attachments(),
+                &[],
+            )
+            .await
+        }
+
+        #[tokio::test]
+        async fn code_interpreter_forwards_thread_id_to_execute_step() {
+            let execution = RecordingExecution::default();
+            let (state, _server) = state_with(execution.clone()).await;
+            let credential = crate::auth::VerifiedSandboxBearer::for_test("sandbox-token");
+
+            // Only a personal, non-ZDR call that holds the sandbox credential names its thread.
+            thread_call(&state, Some(&credential), "", "thread-1", false)
+                .await
+                .expect("the step completes");
+            thread_call(&state, None, "", "thread-1", false)
+                .await
+                .expect("the step completes");
+            thread_call(&state, Some(&credential), "", "thread-1", true)
+                .await
+                .expect("the step completes");
+            thread_call(&state, Some(&credential), "space-1", "thread-1", false)
+                .await
+                .expect("the step completes");
+
+            let steps = execution.steps.lock().expect("steps");
+            let thread_ids: Vec<&str> = steps.iter().map(|step| step.thread_id.as_str()).collect();
+            assert_eq!(thread_ids, ["thread-1", "", "", ""]);
+        }
+
+        #[test]
+        fn ephemeral_result_declares_no_persistence() {
+            let output = r#"{"exit_code":0,"stderr":"","stdout":"4\n"}"#;
+            let read = |report: String| -> serde_json::Value {
+                serde_json::from_str(&report).expect("a JSON object")
+            };
+
+            // A personal call with no credential says its files are not kept.
+            let report = read(report_workspace(true, output.to_owned(), "", false, false));
+            assert_eq!(report["workspace"]["scope"], "ephemeral");
+            assert_eq!(report["workspace"]["state"], "refused");
+            assert_eq!(report["workspace"]["cause"], "no_thread_credential");
+            assert_eq!(report["workspace"]["note"], "files are not kept after this call");
+            assert_eq!(report["stdout"], "4\n");
+
+            // A zero-retention turn, and a call that held the credential but was not kept, say why.
+            let zdr = read(report_workspace(true, output.to_owned(), "", true, false));
+            assert_eq!(zdr["workspace"]["cause"], "zero_retention");
+            let unavailable = read(report_workspace(true, output.to_owned(), "", false, true));
+            assert_eq!(unavailable["workspace"]["cause"], "unavailable");
+
+            // A Space call says its files are kept for the run only.
+            let space = read(report_workspace(true, output.to_owned(), "space-1", false, true));
+            assert_eq!(space["workspace"]["scope"], "space");
+            assert_eq!(space["workspace"]["cause"], "not_written_through");
+
+            // execution-core's own workspace part is kept as written, and the switch off changes nothing.
+            let attached = r#"{"stdout":"","workspace":{"scope":"thread","state":"synced"}}"#;
+            assert_eq!(report_workspace(true, attached.to_owned(), "", false, true), attached);
+            assert_eq!(report_workspace(false, output.to_owned(), "", false, false), output);
         }
     }
 }

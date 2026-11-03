@@ -1561,11 +1561,22 @@ pub fn trusted_capability_id(tool_name: &str) -> Option<String> {
         // Space.
         "process_start" | "process_read" | "process_stdin" | "process_signal"
         | "process_list" => "cap.process.background",
-        // The granular MCP facade never creates raw browser authority. It is
-        // governed by the same browser capability as the agent loop, while
-        // BrowserBroker separately binds its opaque run grant.
-        "browser_agent" | "browser.observe" | "browser.act" => "cap.browser.open",
+        // The granular MCP facade never creates raw browser authority: BrowserBroker separately binds
+        // its opaque run grant. The legacy autonomous loop and the grant-bound console read
+        // (`browser.console`, WS9.E) keep cap.browser.open. The read tools of the Do loop
+        // (browser.open, browser.observe; WS21-S5a) and its act name each have their own capability,
+        // so a read-level grant never answers for a write. Migration 0025 seeds them.
+        "browser_agent" | "browser.console" => "cap.browser.open",
+        "browser.open" | "browser.observe" | "browser.close" => "cap.browser.observe",
+        "browser.act" => "cap.browser.act",
         "web_search" | "web_fetch" | "web.search" | "web.read" => "cap.tool.http",
+        // E3.7.10: the bulk-acquisition tools. A crawl or a batch multiplies pages, spend and
+        // egress by a count the model picks, so each family has its own capability instead of
+        // widening `cap.tool.http` (capability-core migration 0031 seeds the three ids and the
+        // tool classes; they stay unavailable until execution-core attests them).
+        "knowledge.crawl_site" => "cap.web.crawl",
+        "knowledge.map" => "cap.web.map",
+        "knowledge.batch" => "cap.web.batch",
         "knowledge_search" => "cap.retrieval.query",
         // The owner document inventory (WS24-S8) is a read of the same Data Plane corpus under the
         // run's own bearer, so it is governed by the same retrieval capability.
@@ -1586,6 +1597,11 @@ pub fn trusted_capability_id(tool_name: &str) -> Option<String> {
         // for delegated subagents — which is orthogonal to capability risk.
         "save_memory" => "cap.memory.index",
         "recall_memory" => "cap.memory.search",
+        // The question tool (WS14 S4) writes one owner-scoped row through session-core, the same
+        // dependency and low-risk shape as `plan.propose`, so it binds to that seeded, attested id.
+        // Its class is seeded beside `plan.propose`'s row in capability-core; the parity test
+        // (tests/tool_class_registry_parity.rs) refuses a bound name that has no seed.
+        "ask_user" => "cap.memory.index",
         // Reading this run's own delegation records. `cap.agent.lineage.read`
         // covers both: the content-free listing and the approval-gated answer
         // read are the same authority over the same records, and the difference
@@ -1901,6 +1917,12 @@ mod tests {
             Some("cap.memory.index")
         );
         assert!(trusted_capability_id("plan.propose").is_some());
+        // The question tool (WS14 S4) is bound, to a seeded id, so the gate evaluates it rather
+        // than refusing it as unbound.
+        assert_eq!(
+            trusted_capability_id("ask_user").as_deref(),
+            Some("cap.memory.index")
+        );
         // The bare prefix is not itself a callable tool (mirrors
         // `is_plan_tool`'s own "prefix alone is not a tool" rule).
         assert!(trusted_capability_id("plan.").is_none());
@@ -2042,15 +2064,19 @@ mod tests {
     fn a_read_decision_replayed_against_another_tool_of_the_same_capability_is_refused() {
         let key = SigningKey::from_bytes(&[12; 32]);
         let verifier = verifier_for(&key);
-        // browser.observe and browser.act share one capability; only the signed
-        // tool name tells a read from a write.
-        let browser = Fixture::builtin("browser.act");
-        assert_eq!(browser.capability_id, "cap.browser.open");
-        let (response, observe_evidence) = v2_pair(
+        // browser.open and browser.observe share one capability (WS21-S5a); only the signed tool
+        // name tells one read from the other. browser.act has its own capability now.
+        let browser = Fixture::builtin("browser.observe");
+        assert_eq!(browser.capability_id, "cap.browser.observe");
+        assert_eq!(
+            Fixture::builtin("browser.act").capability_id,
+            "cap.browser.act"
+        );
+        let (response, open_evidence) = v2_pair(
             &key,
             &V2 {
-                capability_id: "cap.browser.open",
-                tool_name: "browser.observe",
+                capability_id: "cap.browser.observe",
+                tool_name: "browser.open",
                 user_id: "user-a",
             },
             "read",
@@ -2060,23 +2086,23 @@ mod tests {
 
         assert!(
             !verifier.verify(
-                &observe_evidence,
+                &open_evidence,
                 &response,
-                &browser.call("browser.act", ToolClassGate::Enforce)
+                &browser.call("browser.observe", ToolClassGate::Enforce)
             ),
             "enforce must refuse evidence minted for another tool"
         );
         // Shadow lets the legacy tuple decide for a built-in tool, and counts it.
         assert!(verifier.verify(
-            &observe_evidence,
+            &open_evidence,
             &response,
-            &browser.call("browser.act", ToolClassGate::Shadow)
+            &browser.call("browser.observe", ToolClassGate::Shadow)
         ));
         // The same evidence is, of course, good for the tool it names.
         assert!(verifier.verify(
-            &observe_evidence,
+            &open_evidence,
             &response,
-            &browser.call("browser.observe", ToolClassGate::Enforce)
+            &browser.call("browser.open", ToolClassGate::Enforce)
         ));
     }
 

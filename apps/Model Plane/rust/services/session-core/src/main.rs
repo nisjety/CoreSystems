@@ -9,6 +9,10 @@ use std::{future::Future, time::Duration};
 use tracing::{info, warn};
 
 mod approval_delivery;
+mod attention;
+mod attention_events;
+mod attention_grpc;
+mod attention_hub;
 mod audit_publisher;
 mod auth;
 mod compaction;
@@ -16,6 +20,8 @@ mod continuation_crypto;
 mod decision_keys;
 mod dream_extractor;
 mod dreaming;
+mod eventlog_grpc;
+mod external_content;
 mod finetune_grpc;
 mod gdpr;
 mod gdpr_nats;
@@ -38,19 +44,25 @@ mod orchestration_grpc;
 mod orchestration_nats;
 mod orchestration_store;
 mod org_policy;
+mod request_snapshots;
 mod retention_receipt;
 mod routing_policy_grpc;
 mod room_run_attach;
+mod run_ledger_grpc;
 mod run_phase;
 mod run_service_grpc;
 mod service_token;
 mod space;
+mod space_memory;
 mod space_deletion_reconciler;
 mod space_membership_nats;
 mod space_stream_grpc;
 mod store;
 mod terminalization;
+mod thread_fork;
 mod tool_ledger;
+mod trace_nats;
+mod user_profile;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -250,6 +262,19 @@ async fn main() -> Result<()> {
         },
     ));
 
+    let attention_events_pool = pool.clone();
+    let attention_events_handle = tokio::spawn(async move {
+        // Off by default: the task parks and makes no database read. Parking rather than
+        // returning keeps the select below from reading its end as a failure.
+        if !attention_events::enabled() {
+            std::future::pending::<()>().await;
+        }
+        supervise_background("session-core attention event sweep", move || {
+            let pool = attention_events_pool.clone();
+            async move { attention_events::run(pool).await }
+        })
+        .await
+    });
     // Space event log: the NOTIFY listener only runs while emitting is on (it holds one pool
     // connection); the retention sweeper always runs, because retention is owed for rows
     // already written.
@@ -275,6 +300,46 @@ async fn main() -> Result<()> {
         },
     ));
 
+    // WS10.S6: the run-trace consumer (durable `session-core-trace`) is off unless
+    // SESSION_CORE_TRACE_CONSUMER is 1/true/on, so a deployment that has not provisioned the
+    // stream is unaffected. The retention sweeper only deletes rows past their age.
+    let trace_pool = pool.clone();
+    let trace_nats_url = std::env::var("NATS_URL").unwrap_or_else(|_| "nats://localhost:4222".into());
+    let trace_handle = tokio::spawn(async move {
+        if !trace_nats::enabled() {
+            info!("SESSION_CORE_TRACE_CONSUMER is off; session-core trace consumer disabled");
+            std::future::pending::<()>().await;
+        }
+        supervise_background("session-core trace consumer", move || {
+            let pool = trace_pool.clone();
+            let nats_url = trace_nats_url.clone();
+            async move { trace_nats::run(pool, nats_url).await }
+        })
+        .await
+    });
+    let trace_sweeper_pool = pool.clone();
+    let trace_sweeper_handle = tokio::spawn(supervise_background(
+        "session-core trace retention sweeper",
+        move || {
+            let pool = trace_sweeper_pool.clone();
+            async move { trace_nats::run_retention_sweeper(pool).await }
+        },
+    ));
+
+    // EP-14 S6: the request snapshot sweep is off unless SESSION_CORE_REQUEST_SNAPSHOTS_SWEEP_ENABLED is the
+    // literal `true`; off, the task parks and makes no database read.
+    let snapshot_sweep_pool = pool.clone();
+    let snapshot_sweep_handle = tokio::spawn(async move {
+        if !request_snapshots::sweep_enabled() {
+            std::future::pending::<()>().await;
+        }
+        supervise_background("session-core request snapshot sweep", move || {
+            let pool = snapshot_sweep_pool.clone();
+            async move { request_snapshots::run_sweeper(pool).await }
+        })
+        .await
+    });
+
     let shutdown = shutdown_signal();
 
     tokio::select! {
@@ -290,8 +355,12 @@ async fn main() -> Result<()> {
         result = semantic_reconciliation_handle => result??,
         result = terminalization_handle => result??,
         result = tool_ledger_handle => result??,
+        result = attention_events_handle => result??,
         result = space_listener_handle => result??,
         result = space_sweeper_handle => result??,
+        result = trace_handle => result??,
+        result = trace_sweeper_handle => result??,
+        result = snapshot_sweep_handle => result??,
         () = shutdown => {},
     }
 

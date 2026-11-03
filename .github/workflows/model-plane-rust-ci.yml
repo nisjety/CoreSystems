@@ -39,6 +39,9 @@ on:
       # durable_loop_contract reads these across the plane boundary (no attestation field, the
       # continue vocabulary lists), so a change there must run it.
       - "apps/Model Plane/go/gen/**"
+      # WS10.S5: the NATS provisioner contract tests read the broker config and the topology.
+      - "apps/Model Plane/go/services/nats-provisioner/**"
+      - "apps/Model Plane/deploy/nats.conf"
       - "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/orchestration.rs"
       - "apps/Frontend Plane/verevonv3/apps/gateway/src/upstream.rs"
       - "apps/Frontend Plane/verevonv3/apps/gateway/tests/continue_error_vocabulary.rs"
@@ -67,6 +70,9 @@ on:
       # durable_loop_contract reads these across the plane boundary (no attestation field, the
       # continue vocabulary lists), so a change there must run it.
       - "apps/Model Plane/go/gen/**"
+      # WS10.S5: the NATS provisioner contract tests read the broker config and the topology.
+      - "apps/Model Plane/go/services/nats-provisioner/**"
+      - "apps/Model Plane/deploy/nats.conf"
       - "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/orchestration.rs"
       - "apps/Frontend Plane/verevonv3/apps/gateway/src/upstream.rs"
       - "apps/Frontend Plane/verevonv3/apps/gateway/tests/continue_error_vocabulary.rs"
@@ -100,18 +106,18 @@ jobs:
     name: Format + Check + Lib Tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           components: rustfmt
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           workspaces: "apps/Model Plane/rust -> target"
 
       - name: Install protoc
-        uses: arduino/setup-protoc@v3
+        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3
         with:
           version: "27.x"
 
@@ -199,13 +205,13 @@ jobs:
       DATABASE_URL: postgres://session_core:session_core@localhost:5432/session_core_test
       REQUIRE_CONTRACT: "1"
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           workspaces: "apps/Model Plane/rust -> target"
       - name: Install protoc
-        uses: arduino/setup-protoc@v3
+        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3
         with:
           version: "27.x"
       - name: Run the receipt contract tests against a migrated database
@@ -258,6 +264,29 @@ jobs:
             echo "expected at least 8 space event log tests to run, got ${passed:-0}"
             exit 1
           fi
+      # WS10.S6: the run trace's Postgres tests (persist, idempotency, the ZDR and org refusals,
+      # the EventLog read path and its owner check, the GDPR purge and the retention sweeper).
+      # `trace_` selects them by name; the count fails the job if the filter stops matching.
+      - name: Run the run trace tests against a migrated database
+        run: |
+          set -euo pipefail
+          cargo test -p session-core --bin session-core trace_ -- --ignored --test-threads=1 2>&1 | tee run-trace-tests.log
+          passed=$(grep -oE "test result: ok\. [0-9]+ passed" run-trace-tests.log | grep -oE "[0-9]+" | head -1)
+          if [ -z "$passed" ] || [ "$passed" -lt 11 ]; then
+            echo "expected at least 11 run trace tests to run, got ${passed:-0}"
+            exit 1
+          fi
+      # WS11.S7: the web-taint marker (runs.external_content_at) and Dreaming's skip of assistant
+      # text written inside a tainted run. `external_content` selects them by name.
+      - name: Run the external content tests against a migrated database
+        run: |
+          set -euo pipefail
+          cargo test -p session-core --bin session-core external_content -- --ignored --test-threads=1 2>&1 | tee external-content-tests.log
+          passed=$(grep -oE "test result: ok\. [0-9]+ passed" external-content-tests.log | grep -oE "[0-9]+" | head -1)
+          if [ -z "$passed" ] || [ "$passed" -lt 8 ]; then
+            echo "expected at least 8 external content tests to run, got ${passed:-0}"
+            exit 1
+          fi
 
   # WS06 S10 (F-t1-021): the production-profile sandbox verification. Builds the
   # execution-core image, runs it under the production container profile (cap_drop
@@ -276,10 +305,10 @@ jobs:
       run:
         working-directory: "."
     steps:
-      - uses: actions/checkout@v7
-      - uses: docker/setup-buildx-action@v3
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
       - name: Build the execution-core image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: "apps/Model Plane"
           file: "apps/Model Plane/rust/services/execution-core/Dockerfile"
@@ -305,6 +334,27 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
+  # WS10.S5: the NATS provisioner has no other CI. Its contract tests start an
+  # in-process broker from the real deploy/nats.conf, provision the real manifest
+  # and apply every principal's grants, so a stream without a publisher grant (or
+  # the reverse) fails here and not in production.
+  nats-provisioner:
+    name: NATS provisioner contract tests (Go)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: "apps/Model Plane/go/services/nats-provisioner"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: "apps/Model Plane/go/services/nats-provisioner/go.mod"
+          cache-dependency-path: "apps/Model Plane/go/services/nats-provisioner/go.sum"
+      - name: go vet
+        run: GOWORK=off go vet ./...
+      - name: go test
+        run: GOWORK=off go test ./...
+
   # WS12 S11 (D11): an optional clippy warning-count ratchet. It never denies a
   # warning. It is off unless the repo variable MODEL_PLANE_CLIPPY_RATCHET is the
   # literal "true"; then it fails only when the count rises above the repo
@@ -315,18 +365,18 @@ jobs:
     if: vars.MODEL_PLANE_CLIPPY_RATCHET == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           components: clippy
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           workspaces: "apps/Model Plane/rust -> target"
 
       - name: Install protoc
-        uses: arduino/setup-protoc@v3
+        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3
         with:
           version: "27.x"
 

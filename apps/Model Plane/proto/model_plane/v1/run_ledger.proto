@@ -1,0 +1,151 @@
+syntax = "proto3";
+
+package model_plane.v1;
+
+import "google/protobuf/timestamp.proto";
+import "model_plane/v1/inference.proto";
+
+option go_package = "github.com/triodelab/model-plane/gen/go/model_plane/v1;mpv1";
+
+// RunLedgerService: what a run did and what its model calls were sent (EP-14).
+//
+// session-core owns the store. This file starts with the request snapshot
+// write (EP-14 S6); the run timing read (S5) and the request inspector read
+// (S7) join this service as additive RPCs.
+//
+// A request snapshot records, for one model call of a persistent run, the
+// system prompt, the tool catalogue, the parameters, the routed model and a
+// manifest of the messages (role, source tag, length, digest, never the body).
+// Only inference-core writes it, behind the provider call. A ZDR or waived run
+// stores nothing: inference-core never sends one, and session-core refuses one
+// with `zdr_durable_mutation_forbidden`. The writer is refused with
+// FAILED_PRECONDITION unless SESSION_CORE_REQUEST_SNAPSHOTS_ENABLED is on.
+service RunLedgerService {
+  // Store the snapshot of one model call of a run. The system prompt and the
+  // tool catalogue are stored once per run by digest; a call that repeats one
+  // only references it.
+  rpc RecordRequestSnapshot(RecordRequestSnapshotRequest) returns (RecordRequestSnapshotResponse);
+
+  // Store one content-free timing record of a run (EP-14 S5) as a
+  // RUN_TIMING_RECORDED event. The caller is the run's owner (model-gateway
+  // forwards the user's session bearer). A ZDR or waived run is refused with
+  // `zdr_durable_mutation_forbidden`; a repeat of the same (run, request,
+  // schema) is stored once.
+  rpc RecordRunTiming(RecordRunTimingRequest) returns (RecordRunTimingResponse);
+
+  // Read a run's timing records and its tool calls' reserve and finalize
+  // times (EP-14 S5). Owner only: a run of another user or org reads as not
+  // found. Answers UNIMPLEMENTED unless SESSION_CORE_RUN_LEDGER_READ is on.
+  rpc GetRunTiming(GetRunTimingRequest) returns (GetRunTimingResponse);
+}
+
+// RecordRequestSnapshotRequest: one model call's snapshot (EP-14 S6).
+message RecordRequestSnapshotRequest {
+  // The run the call belongs to. Must be a run of `org_id`.
+  string run_id = 1;
+  // The call's order within the run. 0 asks session-core to number the call
+  // next in its run (inference-core runs as several replicas and always sends
+  // 0). A non-zero value names the number; a repeat of the same
+  // (run_id, call_seq) is stored once.
+  uint32 call_seq = 2;
+  // What the call was for (EP-13's closed vocabulary).
+  InferPurpose purpose = 3;
+  // The inference request id, for joining with provider logs and metrics.
+  string request_id = 4;
+  // The `request-snapshot-v1` JSON (mp_contracts::request_snapshot). It holds
+  // digests and the message manifest, never a message body.
+  string snapshot_json = 5;
+  // The system prompt text, capped; stored once per run by its digest.
+  string system_text = 6;
+  // The tool catalogue JSON, capped; stored once per run by its digest.
+  string tools_json = 7;
+  // Snapshots of this run that inference-core dropped since its last write
+  // (a full queue). Added to the run's `snapshots_dropped` counter.
+  uint32 dropped_before = 8;
+  // The org of the verified caller of the model call. Must match the run and
+  // the org of the service token.
+  string org_id = 9;
+  // The user of the verified caller, empty for a service caller. When set it
+  // must match the run's owner.
+  string user_id = 10;
+  // Whether `system_text` was cut at its cap.
+  bool system_truncated = 11;
+  // Whether `tools_json` was cut at its cap.
+  bool tools_truncated = 12;
+}
+
+// RecordRequestSnapshotResponse: what the write stored (EP-14 S6).
+message RecordRequestSnapshotResponse {
+  // A new snapshot row was written (false for a repeated call_seq).
+  bool stored = 1;
+  // The system prompt was already stored for this run.
+  bool deduplicated_system = 2;
+  // The tool catalogue was already stored for this run.
+  bool deduplicated_tools = 3;
+}
+
+// RunTimingRecorded: one content-free timing record of a run (EP-14 S5).
+// Holds ids, milliseconds, counts and offered tool names, never prompt text,
+// message content, tool arguments or tool results.
+message RunTimingRecorded {
+  // The run the record belongs to.
+  string run_id = 1;
+  // The request id of the turn (Ask) or of the stream that drove the run (Do).
+  string request_id = 2;
+  // The record's shape: "turn-timing-v1" (an Ask turn's `turn_timing` report,
+  // as the SSE frame carries it) or "round-timing-v1" (a Do run's
+  // `RunAgentResponse.round_timing` as `{"rounds":[...]}`). A later additive
+  // field is a new minor schema, never a change of these.
+  string schema = 3;
+  // The record as a JSON object of that schema.
+  string report_json = 4;
+  // Phase spans the turn clock counted but did not keep (MAX_PHASES).
+  uint32 phases_dropped = 5;
+  // When session-core stored the record. Set on read; ignored on write.
+  google.protobuf.Timestamp recorded_at = 6;
+}
+
+// RunActionTiming: one tool call of a run, from its durable tool-intent row
+// (EP-14 S5). Content-free: no arguments, no result, no argument digest.
+message RunActionTiming {
+  // The tool call's action id.
+  string action_id = 1;
+  // The tool's name.
+  string tool = 2;
+  // The intent's status ("reserved", "completed", "failed", ...).
+  string status = 3;
+  // When the call was reserved, before dispatch.
+  google.protobuf.Timestamp reserved_at = 4;
+  // When the call was finalized. Unset while it is still open.
+  google.protobuf.Timestamp finalized_at = 5;
+  // The call's effect class, empty when the writer recorded none.
+  string effect_class = 6;
+}
+
+// RecordRunTimingRequest: store one timing record (EP-14 S5).
+message RecordRunTimingRequest {
+  // The record. `recorded_at` is ignored.
+  RunTimingRecorded timing = 1;
+}
+
+// RecordRunTimingResponse: what the write stored (EP-14 S5).
+message RecordRunTimingResponse {
+  // A new event was written (false for a repeat of the same record).
+  bool stored = 1;
+}
+
+// GetRunTimingRequest: read one run's timing (EP-14 S5).
+message GetRunTimingRequest {
+  // The run to read. Must be the caller's.
+  string run_id = 1;
+}
+
+// GetRunTimingResponse: a run's timing records and tool-call times (EP-14 S5).
+message GetRunTimingResponse {
+  // The run's timing records, oldest first.
+  repeated RunTimingRecorded timings = 1;
+  // The run's tool calls, by reserve time, at most 500.
+  repeated RunActionTiming actions = 2;
+  // More tool calls exist than `actions` holds.
+  bool truncated = 3;
+}

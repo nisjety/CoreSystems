@@ -34,15 +34,20 @@
 //
 // Usage
 //   node scan-egress.mjs [--root DIR] [--json | --summary] [--strict] [--verify-doc FILE]
-//                        [--catalogue FILE.json] [--max-evidence N]
+//                        [--declared FILE.json] [--catalogue FILE.json] [--max-evidence N]
 //   --json            machine-readable result (the contract a drift test for the trust page reads)
 //   --summary         the diffable form: one line per vendor, host, variable and dependency, with
 //                     no line numbers and no counts, so unrelated code motion does not show
 //   --strict          exit 1 when a host is UNCLASSIFIED, a catalogue vendor has no evidence at
 //                     all (stale entry), a curated variable is found nowhere, or a credential-
-//                     like variable is claimed by no vendor and reviewed as nothing
+//                     like variable is claimed by no vendor and reviewed as nothing, or a
+//                     --declared problem is found
 //   --verify-doc FILE exit 1 when FILE (a markdown register) does not name every vendor
 //                     the scan found, by id, with a disposition; see verifyDocument()
+//   --declared FILE   check the scan against the declared egress catalogue (docs/compliance/egress-catalogue.json,
+//                     EP-9 T1): every scanned vendor needs an entry, every entry needs evidence in this tree, and
+//                     each entry's hosts and switches must belong to its vendor; see declaredProblems(). Without
+//                     --strict the problems are printed and the exit status stays 0
 //   --catalogue FILE  replace the built-in catalogue with a JSON array (tests use this)
 //   Without --json or --summary the full text report (with file:line evidence) is printed.
 //
@@ -1775,13 +1780,107 @@ export function strictProblems(result) {
 }
 
 // ---------------------------------------------------------------------------
+// The declared egress catalogue (docs/compliance/egress-catalogue.json)
+// ---------------------------------------------------------------------------
+//
+// The scan says what the code can reach. The declared catalogue says what each destination is
+// for: the process that contacts it, the data class that leaves, the switch that turns it off and
+// what ZDR does. Every scanned vendor needs an entry and every entry needs evidence, so a new
+// destination cannot reach the disclosure unnoticed. gen-egress-disclosure.mjs renders the
+// disclosure from the same file.
+
+/**
+ * The `zdr` values. `not_gated` is the one beyond the three the plan names: it says content can
+ * leave on a ZDR run and that no gate or attestation was found, which the other values would
+ * misstate.
+ */
+export const DECLARED_ZDR = ['refused', 'no_retention_attested', 'unchanged_no_content', 'not_gated']
+
+/** Data classes a destination receives. "none" alone means no customer data leaves (a fixed public read). */
+export const DECLARED_DATA_CLASSES = ['prompt', 'query_terms', 'document', 'metadata', 'none']
+
+const DECLARED_ID = /^[a-z0-9][a-z0-9-]*$/
+
+/**
+ * Checks the declared catalogue on its own, so it needs no scan: the shape of every entry, closed
+ * enums, unique ids, and that each entry names a catalogue vendor, lists only hosts that vendor
+ * owns and names only gating variables that vendor has. Returns problems (empty when clean).
+ */
+export function declaredShapeProblems(declared, vendors = VENDORS) {
+  if (!declared || typeof declared !== 'object' || !Array.isArray(declared.entries)) {
+    return ['the declared catalogue must be an object with an "entries" array']
+  }
+  const problems = []
+  const seen = new Set()
+  for (const entry of declared.entries) {
+    if (!entry || typeof entry !== 'object' || typeof entry.id !== 'string' || !DECLARED_ID.test(entry.id)) {
+      problems.push(`an entry has no valid id (lower-case words joined by hyphens): ${JSON.stringify(entry?.id ?? null)}`)
+      continue
+    }
+    const where = `entry "${entry.id}"`
+    if (seen.has(entry.id)) problems.push(`${where} is declared twice`)
+    seen.add(entry.id)
+    for (const field of ['plane', 'contacting_service', 'region', 'notes']) {
+      if (typeof entry[field] !== 'string' || entry[field].trim() === '') problems.push(`${where}: ${field} must be a non-empty string`)
+    }
+    for (const field of ['hosts', 'data_classes', 'toggle_env']) {
+      if (!Array.isArray(entry[field]) || entry[field].some((item) => typeof item !== 'string' || item === '')) {
+        problems.push(`${where}: ${field} must be an array of strings`)
+      }
+    }
+    if (!DECLARED_ZDR.includes(entry.zdr)) problems.push(`${where}: zdr must be one of ${DECLARED_ZDR.join(', ')}`)
+    if (Array.isArray(entry.data_classes)) {
+      for (const item of entry.data_classes) {
+        if (!DECLARED_DATA_CLASSES.includes(item)) problems.push(`${where}: unknown data class "${item}"`)
+      }
+      if (entry.data_classes.length === 0) problems.push(`${where}: data_classes must name a class ("none" when no customer data leaves)`)
+      if (entry.data_classes.includes('none') && entry.data_classes.length > 1) problems.push(`${where}: "none" stands alone in data_classes`)
+    }
+    const vendor = typeof entry.vendor_id === 'string' ? vendors.find((item) => item.id === entry.vendor_id) : undefined
+    if (!vendor) {
+      problems.push(`${where}: vendor_id "${entry.vendor_id}" is not a catalogue vendor`)
+      continue
+    }
+    for (const host of Array.isArray(entry.hosts) ? entry.hosts : []) {
+      if (typeof host === 'string' && vendorForHost(host, [vendor]) !== vendor) {
+        problems.push(`${where}: host "${host}" is not a host of vendor ${vendor.id} in the catalogue`)
+      }
+    }
+    for (const name of Array.isArray(entry.toggle_env) ? entry.toggle_env : []) {
+      if (!(vendor.gateEnv ?? []).includes(name)) problems.push(`${where}: switch ${name} is not a gating variable of vendor ${vendor.id}`)
+    }
+  }
+  return problems
+}
+
+/**
+ * The declared catalogue against one scan. Every scanned vendor needs at least one entry, and an
+ * entry for a catalogue vendor that this tree gives no evidence for is stale. Shape problems come
+ * first. Returns problems (empty when clean).
+ */
+export function declaredProblems(result, declared, vendors = VENDORS) {
+  const problems = declaredShapeProblems(declared, vendors)
+  if (!declared || !Array.isArray(declared.entries)) return problems
+  const declaredVendors = new Set(declared.entries.map((entry) => entry?.vendor_id))
+  for (const vendor of result.vendors) {
+    if (!declaredVendors.has(vendor.id)) problems.push(`scanned vendor "${vendor.id}" (${vendor.name}) has no entry in the declared egress catalogue`)
+  }
+  const found = new Set(result.vendors.map((vendor) => vendor.id))
+  for (const entry of declared.entries) {
+    const known = vendors.some((vendor) => vendor.id === entry?.vendor_id)
+    if (known && !found.has(entry.vendor_id)) problems.push(`declared entry "${entry.id}" names vendor "${entry.vendor_id}", which has no evidence in this tree (stale entry)`)
+  }
+  return problems
+}
+
+// ---------------------------------------------------------------------------
 // Command line
 // ---------------------------------------------------------------------------
 
 function usage(io) {
   io.err(
     [
-      'usage: node scan-egress.mjs [--root DIR] [--json | --summary] [--strict] [--verify-doc FILE] [--catalogue FILE.json] [--max-evidence N]',
+      'usage: node scan-egress.mjs [--root DIR] [--json | --summary] [--strict] [--verify-doc FILE] [--declared FILE.json] [--catalogue FILE.json] [--max-evidence N]',
       '',
     ].join('\n'),
   )
@@ -1804,6 +1903,7 @@ export function main(argv, io = { out: (text) => process.stdout.write(text), err
   let summary = false
   let strict = false
   let verifyFile = null
+  let declaredFile = null
   let catalogueFile = null
   let maxEvidence = 4
   while (args.length > 0) {
@@ -1817,6 +1917,9 @@ export function main(argv, io = { out: (text) => process.stdout.write(text), err
     else if (arg === '--verify-doc') {
       verifyFile = args.shift()
       if (!verifyFile) { usage(io); return 2 }
+    } else if (arg === '--declared') {
+      declaredFile = args.shift()
+      if (!declaredFile) { usage(io); return 2 }
     } else if (arg === '--catalogue') {
       catalogueFile = args.shift()
       if (!catalogueFile) { usage(io); return 2 }
@@ -1836,15 +1939,27 @@ export function main(argv, io = { out: (text) => process.stdout.write(text), err
       return 2
     }
   }
+  let declared
+  if (declaredFile !== null) {
+    try {
+      declared = JSON.parse(fs.readFileSync(declaredFile, 'utf8'))
+    } catch (error) {
+      io.err(`scan-egress: cannot read the declared catalogue ${declaredFile}: ${error.message}\n`)
+      return 2
+    }
+  }
   const result = scan({ root: resolvedRoot, vendors, maxEvidence })
+  const declaredList = declaredFile === null ? [] : declaredProblems(result, declared, vendors)
   if (json && summary) { usage(io); return 2 }
   io.out(json ? renderJson(result) : summary ? renderSummary(result) : renderText(result))
 
   let failed = false
   if (strict) {
-    const problems = strictProblems(result)
+    const problems = [...strictProblems(result), ...declaredList]
     for (const problem of problems) io.err(`scan-egress: strict: ${problem}\n`)
     if (problems.length > 0) failed = true
+  } else {
+    for (const problem of declaredList) io.err(`scan-egress: declared: ${problem}\n`)
   }
   if (verifyFile) {
     let markdown

@@ -9,6 +9,7 @@ import {
   setSessionUser,
 } from './session-store'
 import { bindSupportChatThread, readSupportChatThread } from '../chat/support-chat-thread'
+import { chatDraftStorageKey, writeChatDraft } from './home-draft-storage'
 
 function jsonResponse(data: unknown): Response {
   return new Response(JSON.stringify(data), {
@@ -197,5 +198,32 @@ describe('an established session survives a backend that cannot answer', () => {
     await loadSession()
 
     expect(getSession().status).toBe('unauthenticated')
+  })
+})
+
+/**
+ * A chat thread's unsent text is part of what a person typed, so it leaves the tab with the session the
+ * same way the Home draft does.
+ */
+describe('chat thread drafts on sign-out', () => {
+  afterEach(() => {
+    clearSession()
+  })
+
+  it('are discarded when the session is cleared', () => {
+    const key = chatDraftStorageKey('user_1', 'org_a', 'thread_1')!
+    writeChatDraft(key, 'Ufullført melding')
+    clearSession()
+    expect(sessionStorage.getItem(key)).toBeNull()
+  })
+
+  it('are discarded when another user takes over the tab', () => {
+    const key = chatDraftStorageKey('user_1', 'org_a', 'thread_1')!
+    setSessionUser({ id: 'user_1', email: 'user@example.com', name: 'User', emailVerified: true })
+    flush()
+    writeChatDraft(key, 'Ufullført melding')
+    setSessionUser({ id: 'user_2', email: 'other@example.com', name: 'Other', emailVerified: true })
+    flush()
+    expect(sessionStorage.getItem(key)).toBeNull()
   })
 })

@@ -114,6 +114,15 @@ assert_equal "gateway session credential matches Control" "$(value_of "$control"
 assert_equal "gateway user credential matches Control" "$(value_of "$control" USER_CORE_GATEWAY_TOKEN)" "$(value_of "$frontend" USER_CORE_GATEWAY_TOKEN)"
 assert_equal "Application consumes Model NATS credential" "$(value_of "$model" MODEL_NATS_TOKEN)" "$(value_of "$application" MODEL_PLANE_NATS_TOKEN)"
 
+# WS10.S5: the trace principal's password is generated once in the Model env and
+# the same value reaches the Ingestion env (quarry-edge presents what the broker holds).
+assert_equal "Ingestion receives the Model trace NATS credential" "$(value_of "$model" MODEL_QUARRY_TRACE_NATS_PASSWORD)" "$(value_of "$ingestion" MODEL_QUARRY_TRACE_NATS_PASSWORD)"
+if [[ -n "$(value_of "$model" MODEL_QUARRY_TRACE_NATS_PASSWORD)" ]]; then
+  pass "Model trace NATS credential is generated"
+else
+  fail "Model trace NATS credential is generated"
+fi
+
 if [[ "$(printf '%s' "$(value_of "$ingestion" INTEGRATION_CREDENTIALS_ENCRYPTION_KEY)" | openssl base64 -d -A | wc -c | tr -d ' ')" == "32" ]]; then
   pass "integration credential encryption key decodes to 32 bytes"
 else

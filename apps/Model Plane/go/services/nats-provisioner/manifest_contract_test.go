@@ -418,7 +418,7 @@ var jetStreamPublishCall = regexp.MustCompile(
 func TestEveryJetStreamPublishCallSiteIsRegistered(t *testing.T) {
 	registered := map[string]bool{}
 	for _, row := range publisherRegistry() {
-		if row.transport == jetStreamAck {
+		if row.transport == jetStreamAck && !row.external {
 			registered[row.source] = true
 		}
 	}

@@ -36,6 +36,8 @@ asserted, not just reported.
 | `result_receipt` | `usage` | `ChatEvent::ResultReceipt` | ✅ |
 | `retrieval_notice` | — (control) | `ChatEvent::RetrievalNotice` | ✅ |
 | `retry_scheduled` | `steps` | `ChatEvent::RetryScheduled` | ✅ |
+| `run_parked` | — (control) | `ChatEvent::RunParked` | ✅ |
+| `sandbox_state` | `steps` | `ChatEvent::SandboxState` | ✅ |
 | `source_scope_applied` | `citations` | `ChatEvent::SourceScopeApplied` | ✅ |
 | `step_update` | `steps` | `ChatEvent::StepUpdate` | ✅ |
 | `stopped` | — (control) | `ChatEvent::Stopped` | ✅ |
@@ -45,6 +47,7 @@ asserted, not just reported.
 | `turn_timing` | `usage` | `ChatEvent::TurnTiming` | ✅ |
 | `usage` | `usage` | `ChatEvent::Usage` | ✅ |
 | `usage_progress` | `usage` | `ChatEvent::UsageProgress` | ✅ |
+| `user_question` | — (control) | `ChatEvent::UserQuestion` | ✅ |
 | `verification` | `citations` | `ChatEvent::Verification` | ✅ |
 
 ## Handled by the SPA but not defined by `ChatEvent`
@@ -73,7 +76,6 @@ literal `.event("...")` in production code (test modules are skipped), and the
 | `connected` | transport: stream opened, emitted by the SSE layer |
 | `done` | transport: terminal success frame |
 | `error` | shared with `ChatEvent::Error`; the run-events stream writes it directly when it cannot authorise or open the orchestration stream |
-| `run_parked` | parked agentic run on the owner's turn stream; the orchestration `RunParked` event shares the name |
 
 The run-events stream (`/v1/runs/:run_id/events`) carries the orchestration
 events. Tags are the proto field numbers. `run-console-client.ts` reads them;
@@ -98,5 +100,8 @@ the wire but not written yet.
 | `approval_continuation_verified` | 23 | ✅ |
 | `run_parked` | 24 | ✅ |
 | `run_resumed` | 25 | ✅ |
+| `tool_retry_scheduled` | 26 | ✅ |
 | `question_asked` | 27 | not yet |
 | `question_answered` | 28 | not yet |
+| `run_usage_progress` | 29 | not yet |
+| `browser_attach_shared_jar` | 30 | ✅ |

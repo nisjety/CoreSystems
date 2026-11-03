@@ -286,11 +286,222 @@ func (x *ListSpaceArtifactsResponse) GetNextCursor() string {
 	return ""
 }
 
+type ListSpaceTimelineRequest struct {
+	state                  protoimpl.MessageState `protogen:"open.v1"`
+	OrgId                  string                 `protobuf:"bytes,1,opt,name=org_id,json=orgId,proto3" json:"org_id,omitempty"`
+	SpaceId                string                 `protobuf:"bytes,2,opt,name=space_id,json=spaceId,proto3" json:"space_id,omitempty"`
+	SpaceReadDecisionRef   string                 `protobuf:"bytes,3,opt,name=space_read_decision_ref,json=spaceReadDecisionRef,proto3" json:"space_read_decision_ref,omitempty"`
+	SpaceReadDecisionToken string                 `protobuf:"bytes,4,opt,name=space_read_decision_token,json=spaceReadDecisionToken,proto3" json:"space_read_decision_token,omitempty"`
+	// 0 means the default of 50; clamped to 1..100.
+	Limit uint32 `protobuf:"varint,5,opt,name=limit,proto3" json:"limit,omitempty"`
+	// Page of posts whose newest message sequence is below this (older). 0 = newest page.
+	BeforeSeq uint64 `protobuf:"varint,6,opt,name=before_seq,json=beforeSeq,proto3" json:"before_seq,omitempty"`
+	// Posts whose newest message sequence is above this (newer), returned oldest first
+	// by the keyset and re-sorted newest first. 0 = unset. Not combined with before_seq.
+	AfterSeq uint64 `protobuf:"varint,7,opt,name=after_seq,json=afterSeq,proto3" json:"after_seq,omitempty"`
+	// At most 30 thread ids of this Space to re-read in full summary form (a run changed state
+	// or a thread gained a reply). Ids outside the Space or the ceiling are silently absent.
+	RefreshThreadIds []string `protobuf:"bytes,8,rep,name=refresh_thread_ids,json=refreshThreadIds,proto3" json:"refresh_thread_ids,omitempty"`
+	// First page only: also return up to 10 pinned posts, even older than the window.
+	IncludePinned bool `protobuf:"varint,9,opt,name=include_pinned,json=includePinned,proto3" json:"include_pinned,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListSpaceTimelineRequest) Reset() {
+	*x = ListSpaceTimelineRequest{}
+	mi := &file_model_plane_v1_space_room_proto_msgTypes[3]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListSpaceTimelineRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListSpaceTimelineRequest) ProtoMessage() {}
+
+func (x *ListSpaceTimelineRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_space_room_proto_msgTypes[3]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListSpaceTimelineRequest.ProtoReflect.Descriptor instead.
+func (*ListSpaceTimelineRequest) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_space_room_proto_rawDescGZIP(), []int{3}
+}
+
+func (x *ListSpaceTimelineRequest) GetOrgId() string {
+	if x != nil {
+		return x.OrgId
+	}
+	return ""
+}
+
+func (x *ListSpaceTimelineRequest) GetSpaceId() string {
+	if x != nil {
+		return x.SpaceId
+	}
+	return ""
+}
+
+func (x *ListSpaceTimelineRequest) GetSpaceReadDecisionRef() string {
+	if x != nil {
+		return x.SpaceReadDecisionRef
+	}
+	return ""
+}
+
+func (x *ListSpaceTimelineRequest) GetSpaceReadDecisionToken() string {
+	if x != nil {
+		return x.SpaceReadDecisionToken
+	}
+	return ""
+}
+
+func (x *ListSpaceTimelineRequest) GetLimit() uint32 {
+	if x != nil {
+		return x.Limit
+	}
+	return 0
+}
+
+func (x *ListSpaceTimelineRequest) GetBeforeSeq() uint64 {
+	if x != nil {
+		return x.BeforeSeq
+	}
+	return 0
+}
+
+func (x *ListSpaceTimelineRequest) GetAfterSeq() uint64 {
+	if x != nil {
+		return x.AfterSeq
+	}
+	return 0
+}
+
+func (x *ListSpaceTimelineRequest) GetRefreshThreadIds() []string {
+	if x != nil {
+		return x.RefreshThreadIds
+	}
+	return nil
+}
+
+func (x *ListSpaceTimelineRequest) GetIncludePinned() bool {
+	if x != nil {
+		return x.IncludePinned
+	}
+	return false
+}
+
+type ListSpaceTimelineResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The window, newest activity first.
+	Posts     []*ThreadSummary `protobuf:"bytes,1,rep,name=posts,proto3" json:"posts,omitempty"`
+	Pinned    []*ThreadSummary `protobuf:"bytes,2,rep,name=pinned,proto3" json:"pinned,omitempty"`
+	Refreshed []*ThreadSummary `protobuf:"bytes,3,rep,name=refreshed,proto3" json:"refreshed,omitempty"`
+	// True when more posts exist beyond the window in the direction asked.
+	HasMore bool `protobuf:"varint,4,opt,name=has_more,json=hasMore,proto3" json:"has_more,omitempty"`
+	// Smallest and largest `last_message_seq` in `posts`; 0 when the window is empty.
+	OldestSeq uint64 `protobuf:"varint,5,opt,name=oldest_seq,json=oldestSeq,proto3" json:"oldest_seq,omitempty"`
+	NewestSeq uint64 `protobuf:"varint,6,opt,name=newest_seq,json=newestSeq,proto3" json:"newest_seq,omitempty"`
+	// Posts the reader may see, counted on the first page (no cursor) only; 0 otherwise.
+	TotalPosts    uint32 `protobuf:"varint,7,opt,name=total_posts,json=totalPosts,proto3" json:"total_posts,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListSpaceTimelineResponse) Reset() {
+	*x = ListSpaceTimelineResponse{}
+	mi := &file_model_plane_v1_space_room_proto_msgTypes[4]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListSpaceTimelineResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListSpaceTimelineResponse) ProtoMessage() {}
+
+func (x *ListSpaceTimelineResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_space_room_proto_msgTypes[4]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListSpaceTimelineResponse.ProtoReflect.Descriptor instead.
+func (*ListSpaceTimelineResponse) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_space_room_proto_rawDescGZIP(), []int{4}
+}
+
+func (x *ListSpaceTimelineResponse) GetPosts() []*ThreadSummary {
+	if x != nil {
+		return x.Posts
+	}
+	return nil
+}
+
+func (x *ListSpaceTimelineResponse) GetPinned() []*ThreadSummary {
+	if x != nil {
+		return x.Pinned
+	}
+	return nil
+}
+
+func (x *ListSpaceTimelineResponse) GetRefreshed() []*ThreadSummary {
+	if x != nil {
+		return x.Refreshed
+	}
+	return nil
+}
+
+func (x *ListSpaceTimelineResponse) GetHasMore() bool {
+	if x != nil {
+		return x.HasMore
+	}
+	return false
+}
+
+func (x *ListSpaceTimelineResponse) GetOldestSeq() uint64 {
+	if x != nil {
+		return x.OldestSeq
+	}
+	return 0
+}
+
+func (x *ListSpaceTimelineResponse) GetNewestSeq() uint64 {
+	if x != nil {
+		return x.NewestSeq
+	}
+	return 0
+}
+
+func (x *ListSpaceTimelineResponse) GetTotalPosts() uint32 {
+	if x != nil {
+		return x.TotalPosts
+	}
+	return 0
+}
+
 var File_model_plane_v1_space_room_proto protoreflect.FileDescriptor
 
 const file_model_plane_v1_space_room_proto_rawDesc = "" +
 	"\n" +
-	"\x1fmodel_plane/v1/space_room.proto\x12\x0emodel_plane.v1\"\xed\x01\n" +
+	"\x1fmodel_plane/v1/space_room.proto\x12\x0emodel_plane.v1\x1a\x1dmodel_plane/v1/sessions.proto\"\xed\x01\n" +
 	"\x19ListSpaceArtifactsRequest\x12\x15\n" +
 	"\x06org_id\x18\x01 \x01(\tR\x05orgId\x12\x19\n" +
 	"\bspace_id\x18\x02 \x01(\tR\aspaceId\x12\x14\n" +
@@ -319,9 +530,32 @@ const file_model_plane_v1_space_room_proto_rawDesc = "" +
 	"\x1aListSpaceArtifactsResponse\x12B\n" +
 	"\tartifacts\x18\x01 \x03(\v2$.model_plane.v1.SpaceArtifactSummaryR\tartifacts\x12\x1f\n" +
 	"\vnext_cursor\x18\x02 \x01(\tR\n" +
-	"nextCursor2\x83\x01\n" +
+	"nextCursor\"\xe5\x02\n" +
+	"\x18ListSpaceTimelineRequest\x12\x15\n" +
+	"\x06org_id\x18\x01 \x01(\tR\x05orgId\x12\x19\n" +
+	"\bspace_id\x18\x02 \x01(\tR\aspaceId\x125\n" +
+	"\x17space_read_decision_ref\x18\x03 \x01(\tR\x14spaceReadDecisionRef\x129\n" +
+	"\x19space_read_decision_token\x18\x04 \x01(\tR\x16spaceReadDecisionToken\x12\x14\n" +
+	"\x05limit\x18\x05 \x01(\rR\x05limit\x12\x1d\n" +
+	"\n" +
+	"before_seq\x18\x06 \x01(\x04R\tbeforeSeq\x12\x1b\n" +
+	"\tafter_seq\x18\a \x01(\x04R\bafterSeq\x12,\n" +
+	"\x12refresh_thread_ids\x18\b \x03(\tR\x10refreshThreadIds\x12%\n" +
+	"\x0einclude_pinned\x18\t \x01(\bR\rincludePinned\"\xbe\x02\n" +
+	"\x19ListSpaceTimelineResponse\x123\n" +
+	"\x05posts\x18\x01 \x03(\v2\x1d.model_plane.v1.ThreadSummaryR\x05posts\x125\n" +
+	"\x06pinned\x18\x02 \x03(\v2\x1d.model_plane.v1.ThreadSummaryR\x06pinned\x12;\n" +
+	"\trefreshed\x18\x03 \x03(\v2\x1d.model_plane.v1.ThreadSummaryR\trefreshed\x12\x19\n" +
+	"\bhas_more\x18\x04 \x01(\bR\ahasMore\x12\x1d\n" +
+	"\n" +
+	"oldest_seq\x18\x05 \x01(\x04R\toldestSeq\x12\x1d\n" +
+	"\n" +
+	"newest_seq\x18\x06 \x01(\x04R\tnewestSeq\x12\x1f\n" +
+	"\vtotal_posts\x18\a \x01(\rR\n" +
+	"totalPosts2\xed\x01\n" +
 	"\x14SpaceRoomReadService\x12k\n" +
-	"\x12ListSpaceArtifacts\x12).model_plane.v1.ListSpaceArtifactsRequest\x1a*.model_plane.v1.ListSpaceArtifactsResponseB\xb6\x01\n" +
+	"\x12ListSpaceArtifacts\x12).model_plane.v1.ListSpaceArtifactsRequest\x1a*.model_plane.v1.ListSpaceArtifactsResponse\x12h\n" +
+	"\x11ListSpaceTimeline\x12(.model_plane.v1.ListSpaceTimelineRequest\x1a).model_plane.v1.ListSpaceTimelineResponseB\xb6\x01\n" +
 	"\x12com.model_plane.v1B\x0eSpaceRoomProtoP\x01Z;github.com/triodelab/model-plane/gen/go/model_plane/v1;mpv1\xa2\x02\x03MXX\xaa\x02\rModelPlane.V1\xca\x02\rModelPlane\\V1\xe2\x02\x19ModelPlane\\V1\\GPBMetadata\xea\x02\x0eModelPlane::V1b\x06proto3"
 
 var (
@@ -336,21 +570,29 @@ func file_model_plane_v1_space_room_proto_rawDescGZIP() []byte {
 	return file_model_plane_v1_space_room_proto_rawDescData
 }
 
-var file_model_plane_v1_space_room_proto_msgTypes = make([]protoimpl.MessageInfo, 3)
+var file_model_plane_v1_space_room_proto_msgTypes = make([]protoimpl.MessageInfo, 5)
 var file_model_plane_v1_space_room_proto_goTypes = []any{
 	(*ListSpaceArtifactsRequest)(nil),  // 0: model_plane.v1.ListSpaceArtifactsRequest
 	(*SpaceArtifactSummary)(nil),       // 1: model_plane.v1.SpaceArtifactSummary
 	(*ListSpaceArtifactsResponse)(nil), // 2: model_plane.v1.ListSpaceArtifactsResponse
+	(*ListSpaceTimelineRequest)(nil),   // 3: model_plane.v1.ListSpaceTimelineRequest
+	(*ListSpaceTimelineResponse)(nil),  // 4: model_plane.v1.ListSpaceTimelineResponse
+	(*ThreadSummary)(nil),              // 5: model_plane.v1.ThreadSummary
 }
 var file_model_plane_v1_space_room_proto_depIdxs = []int32{
 	1, // 0: model_plane.v1.ListSpaceArtifactsResponse.artifacts:type_name -> model_plane.v1.SpaceArtifactSummary
-	0, // 1: model_plane.v1.SpaceRoomReadService.ListSpaceArtifacts:input_type -> model_plane.v1.ListSpaceArtifactsRequest
-	2, // 2: model_plane.v1.SpaceRoomReadService.ListSpaceArtifacts:output_type -> model_plane.v1.ListSpaceArtifactsResponse
-	2, // [2:3] is the sub-list for method output_type
-	1, // [1:2] is the sub-list for method input_type
-	1, // [1:1] is the sub-list for extension type_name
-	1, // [1:1] is the sub-list for extension extendee
-	0, // [0:1] is the sub-list for field type_name
+	5, // 1: model_plane.v1.ListSpaceTimelineResponse.posts:type_name -> model_plane.v1.ThreadSummary
+	5, // 2: model_plane.v1.ListSpaceTimelineResponse.pinned:type_name -> model_plane.v1.ThreadSummary
+	5, // 3: model_plane.v1.ListSpaceTimelineResponse.refreshed:type_name -> model_plane.v1.ThreadSummary
+	0, // 4: model_plane.v1.SpaceRoomReadService.ListSpaceArtifacts:input_type -> model_plane.v1.ListSpaceArtifactsRequest
+	3, // 5: model_plane.v1.SpaceRoomReadService.ListSpaceTimeline:input_type -> model_plane.v1.ListSpaceTimelineRequest
+	2, // 6: model_plane.v1.SpaceRoomReadService.ListSpaceArtifacts:output_type -> model_plane.v1.ListSpaceArtifactsResponse
+	4, // 7: model_plane.v1.SpaceRoomReadService.ListSpaceTimeline:output_type -> model_plane.v1.ListSpaceTimelineResponse
+	6, // [6:8] is the sub-list for method output_type
+	4, // [4:6] is the sub-list for method input_type
+	4, // [4:4] is the sub-list for extension type_name
+	4, // [4:4] is the sub-list for extension extendee
+	0, // [0:4] is the sub-list for field type_name
 }
 
 func init() { file_model_plane_v1_space_room_proto_init() }
@@ -358,13 +600,14 @@ func file_model_plane_v1_space_room_proto_init() {
 	if File_model_plane_v1_space_room_proto != nil {
 		return
 	}
+	file_model_plane_v1_sessions_proto_init()
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_model_plane_v1_space_room_proto_rawDesc), len(file_model_plane_v1_space_room_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   3,
+			NumMessages:   5,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

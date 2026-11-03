@@ -90,6 +90,23 @@ message AcquireGrantRequest {
   // allowed_domains, and is refused when the broker's policy has it off.
   string grant_kind = 50;
 
+  // Origin extension (E3.2-e1, OD13; field numbers 21-39 are F-t2-032's band in
+  // the R-6 ledger). With grant_kind "origin_extension" the broker issues a
+  // parent-bound grant that adds the hosts in allowed_domains (at most eight,
+  // exact hosts, no wildcard) to what the run named by parent_grant_id may
+  // reach. The person consented to them; the grant is never wider than that
+  // consent and dies with its parent. Dark behind
+  // BROWSER_BROKER_ORIGIN_EXTENSION_ENABLED.
+  // How long the consent is meant to last: "turn", "conversation" or "always".
+  // Required for an origin extension and refused for any other grant. A Zero
+  // Data Retention grant takes "turn" only (a persisted consent would persist
+  // host names).
+  string consent_scope = 21;
+  // Hosts the person denied in the same decision. Deny beats approval: an
+  // approved host equal to, below or above a denied entry is dropped, and a
+  // request left with no host is refused. Refused for any other grant.
+  repeated string consent_denied_domains = 22;
+
   // The Space the run belongs to (WS21-S8). The site policy reads the Space
   // floor from it; empty outside a Space. Tag 11 (R-6 allocates 10 to zdr).
   string space_id = 11;
@@ -167,6 +184,15 @@ message AcquireGrantResponse {
   // 13 carried the site policy's dropped hosts on the model-plane branch before
   // the merge with WS8.C; they now ride in denied_domains (51).
   reserved 13;
+
+  // E3.2-e1: the consent scope of an origin_extension grant ("turn",
+  // "conversation" or "always"); empty for every other kind.
+  string consent_scope = 21;
+
+  // INNH-10: the API key this grant was issued for (the key id, never the
+  // key). Empty for every grant not acquired by an api_key principal. 60:
+  // 54-59 stay reserved for the WS8.C follow-ons.
+  string key_id = 60;
 }
 
 message RevokeGrantRequest {
@@ -260,6 +286,18 @@ message ValidateGrantResponse {
   // True when the grant is read-only (WS21-S4). Consumers must refuse a
   // mutating action on it. Field 14: 13 is session_key.
   bool read_only = 14;
+
+  // E3.2-e1: the consent scope of an origin_extension grant; empty for every
+  // other kind. A consumer widens a run's egress policy from an
+  // origin_extension grant only while it validates and its parent_grant_id is
+  // the run grant it holds.
+  string consent_scope = 21;
+
+  // INNH-10: the API key the grant was issued for (the key id, never the
+  // key); empty for a grant not acquired by an api_key principal. A consumer
+  // running a key-driven run binds the grant to the key it was started for.
+  // 60: 54-59 stay reserved for the WS8.C follow-ons.
+  string key_id = 60;
 }
 
 message DeriveRunGrantRequest {

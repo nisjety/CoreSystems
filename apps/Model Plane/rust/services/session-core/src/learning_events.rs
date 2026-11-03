@@ -145,6 +145,7 @@ pub(crate) fn build_run_completed_envelope(context: &RunCompletedContext) -> Env
         // fetches the transcript itself over gRPC under its own authority.
         payload: serde_json::json!({ "thread_id": context.thread_id }),
         zdr: false,
+        ..Default::default()
     }
 }
 

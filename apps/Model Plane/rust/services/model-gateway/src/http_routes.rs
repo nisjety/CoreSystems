@@ -3,21 +3,26 @@
 //! Public routes: /healthz, /readyz, /version, /metrics
 //! Auth-gated routes: invoke endpoints, orchestration read endpoints, run-event SSE
 
-use std::{env, fmt::Write as _};
+use std::{convert::Infallible, env, fmt::Write as _};
 
 use axum::{
     body::{Body, Bytes},
     extract::{DefaultBodyLimit, Path, Query, State},
     http::{header::CONTENT_TYPE, HeaderMap, HeaderValue, StatusCode},
     middleware,
-    response::{IntoResponse, Redirect, Response},
+    response::{
+        sse::{Event as SseEvent, Sse},
+        IntoResponse, Redirect, Response,
+    },
     routing::{delete, get, post, put},
     Extension, Json, Router,
 };
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use chrono::Utc;
 use metrics_exporter_prometheus::PrometheusHandle;
+use mp_contracts::model_plane::v1::InferPurpose;
 use mp_contracts::model_plane::v1::{
+    AcquireLeaseRequest, DeleteThreadWorkspaceRequest, GetThreadWorkspaceRequest,
     AnalyzeDocumentRequest, AnalyzeImageRequest, AnalyzeLanguageRequest, AnswerRunQuestionRequest,
     Approval, ApprovalCause, ApprovalDecisionSource, ApprovalKind, ApprovalProof, ApprovalScope,
     ApprovalState, BatchTranslateTextRequest,
@@ -38,11 +43,12 @@ use mp_contracts::model_plane::v1::{
     TransitionPlanRequest, TransitionTodoRequest, TranslateTextRequest, TranslationInput,
     VerificationMetrics, VerificationStatus,
 };
-use mp_contracts::approval_cause::{CauseCode, SCOPE_ONCE};
+use mp_contracts::approval_cause::{self, CauseCode, SCOPE_ONCE, SCOPE_RUN, SCOPE_THREAD};
 use mp_events::{envelope::Envelope, publisher::EventPublisher, subjects};
 use mp_ids::new_ulid;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use tokio_stream::wrappers::ReceiverStream;
 use tracing::{debug, info, warn};
 
 use crate::{
@@ -129,6 +135,39 @@ fn derived_stream_body_limit(explicit: usize, declared_total: Option<usize>) -> 
 }
 
 #[cfg(test)]
+mod attention_state_tests {
+    use super::{attention_reason_name, attention_state_name};
+
+    /// A replica with the attention switch off returns the unspecified state, and the wire omits
+    /// it, so a flag-off thread listing is unchanged. The named states are the closed set.
+    #[test]
+    fn unspecified_is_omitted_and_every_named_state_has_a_wire_name() {
+        assert_eq!(attention_state_name(0), None);
+        assert_eq!(attention_state_name(1), Some("needs_approval"));
+        assert_eq!(attention_state_name(2), Some("needs_input"));
+        assert_eq!(attention_state_name(3), Some("plan_ready"));
+        assert_eq!(attention_state_name(4), Some("working"));
+        assert_eq!(attention_state_name(5), Some("completed"));
+        assert_eq!(attention_state_name(6), Some("failed"));
+        assert_eq!(attention_state_name(7), Some("archived"));
+        assert_eq!(attention_state_name(8), Some("idle"));
+        // A number this build does not name reads as absent, never as a guessed state.
+        assert_eq!(attention_state_name(9), None);
+    }
+
+    /// A reason names the pending row behind a waiting state. Tag 4 belongs to WS03's parked loop
+    /// and reads as absent until that slice names it.
+    #[test]
+    fn reason_names_the_pending_row_and_leaves_the_rest_absent() {
+        assert_eq!(attention_reason_name(0), None);
+        assert_eq!(attention_reason_name(1), Some("approval"));
+        assert_eq!(attention_reason_name(2), Some("plan"));
+        assert_eq!(attention_reason_name(3), Some("input"));
+        assert_eq!(attention_reason_name(4), None);
+    }
+}
+
+#[cfg(test)]
 mod stream_body_limit_tests {
     use super::{derived_stream_body_limit, STREAM_BODY_HEADROOM_BYTES};
     use crate::attachment_policy::DEFAULT_STREAM_BODY_LIMIT_BYTES as DEFAULT;
@@ -191,7 +230,25 @@ pub fn build_router_with_readiness(
     };
 
     // Auth-gated routes with rate limiting
-    let authed = Router::new()
+    let authed = authed_routes()
+        .layer(middleware::from_fn(rate_limit::rate_limit_middleware))
+        .layer(middleware::from_fn(auth::authorize_principal_route))
+        .layer(middleware::from_fn(auth::require_auth))
+        .layer(axum::Extension(rate_limiter));
+
+    Router::new()
+        .merge(public)
+        .merge(authed)
+        .layer(Extension(grpc_readiness))
+        .layer(middleware::from_fn(gateway_metrics::metrics_middleware))
+        .with_state(state)
+}
+
+/// Every auth-gated route, without its layers. `build_router_with_readiness` wraps it in
+/// `require_auth`, `authorize_principal_route` and the rate limiter; a test wraps it in the route
+/// policy alone, to prove every route here answers to it (INNH-10 MP-3).
+fn authed_routes() -> Router<AppState> {
+    Router::new()
         .route("/v1/invoke", post(invoke))
         // Attachments ride the body as base64, so the 2 MiB default would refuse two
         // images the attachment policy admits (a 413 with no typed reason).
@@ -215,6 +272,14 @@ pub fn build_router_with_readiness(
             "/v1/threads/:thread_id/presentation",
             post(update_thread_presentation),
         )
+        // The attention state of the caller's threads (build plan WS16 S1). It is off by
+        // default, and the response says so rather than failing.
+        .route("/v1/attention", get(list_attention))
+        // The per-person live view of the same state (WS16 S5), relayed as server-sent events.
+        .route("/v1/attention/stream", get(stream_attention))
+        // Marks one thread read (WS16 S1). A zero-retention caller's read state stays on the
+        // client, so Session Core refuses that caller here.
+        .route("/v1/threads/:thread_id/seen", post(mark_thread_seen))
         .route("/v1/threads/:thread_id/archive", post(archive_thread))
         // Context inspector (plan item 3.5): what is actually in the model's
         // window for this thread, itemized. session-core has computed this all
@@ -224,6 +289,10 @@ pub fn build_router_with_readiness(
         // that?" was unreachable.
         .route("/v1/threads/:thread_id/context", get(get_thread_context))
         .route("/v1/threads/:thread_id", delete(delete_thread))
+        .route(
+            "/v1/threads/:thread_id/workspace",
+            get(get_thread_workspace).delete(delete_thread_workspace),
+        )
         // Control-authorized internal deletion adapter. This is deliberately
         // outside the browser/BFF API and is allowed only for the exact
         // deletion coordinator service by auth::authorize_principal_route.
@@ -243,6 +312,8 @@ pub fn build_router_with_readiness(
         .route("/v1/threads/:thread_id/messages", get(list_thread_messages))
         // Move a thread's active branch: a version switch or a rewind (build plan WS17 S8).
         .route("/v1/threads/:thread_id/branch", post(branch_thread))
+        // Start a new thread from a copy of this one, up to an assistant turn (build plan WS17 S6).
+        .route("/v1/threads/:thread_id/fork", post(fork_thread))
         // Read-only replay of Session Core's canonical event log. The route
         // exposes envelope metadata only; Any payload bytes remain inside the
         // owning plane and cannot become an accidental browser data channel.
@@ -265,7 +336,19 @@ pub fn build_router_with_readiness(
             get(get_memory_controls).put(set_memory_controls),
         )
         .route("/v1/memories/reset", post(reset_memory))
+        // The standing profile (EP-8 S4): the user bearer only, org and user from
+        // the claims. session-core refuses all three while its switch is off.
+        .route(
+            "/v1/memories/profile",
+            get(get_user_profile).put(set_user_profile),
+        )
+        .route("/v1/memories/profile/rebuild", post(rebuild_user_profile))
         .route("/v1/memories/:memory_id", delete(delete_memory_entry))
+        // Space memory for the Space's owner or admin (EP-8 S7). POST so the Control
+        // `model.space.memory.manage` decision rides in the body, never a URL; Session Core
+        // verifies it and is the authority.
+        .route("/v1/spaces/:space_id/memory/list", post(list_space_memories))
+        .route("/v1/spaces/:space_id/memory/delete", post(delete_space_memory_entry))
         // Learning governance (WS07-S9): the owner's decisions on learned skills and
         // the ledger of what was learned. The user bearer only; the owner is the
         // verified caller on every hop, and session-core re-checks ownership.
@@ -306,6 +389,10 @@ pub fn build_router_with_readiness(
         // returns after reload. The live SSE route remains the sole tail
         // transport; this route only reads Session Core's canonical log.
         .route("/v1/runs/:run_id/events/replay", get(replay_run_events))
+        // WS10.S6: the run's durable trace (Session Core EventLog), owner only, paged by cursor.
+        .route("/v1/runs/:run_id/trace", get(get_run_trace))
+        // EP-14 S5: the run's durable, content-free timing and tool-call times, owner only.
+        .route("/v1/runs/:run_id/timing", get(get_run_timing))
         // Run event SSE
         .route("/v1/runs/:run_id/events", get(sse::run_events_sse))
         // Browser reasoning: Model Plane proposes one safe browser action from
@@ -349,17 +436,6 @@ pub fn build_router_with_readiness(
             "/v1/finetune/jobs/:job_id/deploy",
             post(crate::finetune_routes::deploy_job),
         )
-        .layer(middleware::from_fn(rate_limit::rate_limit_middleware))
-        .layer(middleware::from_fn(auth::authorize_principal_route))
-        .layer(middleware::from_fn(auth::require_auth))
-        .layer(axum::Extension(rate_limiter));
-
-    Router::new()
-        .merge(public)
-        .merge(authed)
-        .layer(Extension(grpc_readiness))
-        .layer(middleware::from_fn(gateway_metrics::metrics_middleware))
-        .with_state(state)
 }
 
 /// `/v1/orchestration/*` read + mutation routes. Merged into the auth-gated router.
@@ -467,6 +543,25 @@ fn proxy_routes() -> Router<AppState> {
         .route(
             "/v1/tool-policies/:capability_id",
             put(set_tool_policy_proxy).delete(revoke_tool_policy_proxy),
+        )
+        // The org agent policy and its durable hook rules (WS25-S10). capability-core owns both and
+        // decides who may write them from the signed principal; the org comes from the verified token,
+        // never from a body.
+        .route(
+            "/v1/org/agent-policy",
+            get(get_org_agent_policy_proxy).put(set_org_agent_policy_proxy),
+        )
+        .route(
+            "/v1/org/agent-policy/effective",
+            get(get_org_agent_policy_effective_proxy),
+        )
+        .route(
+            "/v1/org/hooks",
+            get(list_org_hooks_proxy).post(create_org_hook_proxy),
+        )
+        .route(
+            "/v1/org/hooks/:hook_id",
+            put(update_org_hook_proxy).delete(delete_org_hook_proxy),
         )
         // Tasks
         .route("/v1/tasks", get(list_tasks_proxy).post(create_task_proxy))
@@ -1270,7 +1365,7 @@ fn question_state_token(state: i32) -> &'static str {
 }
 
 /// The question as the browser reads it. The owner's own org and user ids stay off the wire.
-fn run_question_value(question: &RunQuestion) -> Value {
+pub(crate) fn run_question_value(question: &RunQuestion) -> Value {
     json!({
         "id": question.id,
         "run_id": question.run_id,
@@ -1705,6 +1800,315 @@ async fn replay_run_events(
     }))
 }
 
+// ---------------------------------------------------------------------------
+// WS10.S6: `GET /v1/runs/:run_id/trace` â€” a run's durable trace from Session Core's EventLog.
+// ---------------------------------------------------------------------------
+
+/// Default and bounds of one trace page. Session Core clamps the same way (0 reads 100).
+const RUN_TRACE_DEFAULT_LIMIT: u32 = 100;
+const RUN_TRACE_MAX_LIMIT: u32 = 500;
+const RUN_TRACE_MAX_CURSOR_LEN: usize = 512;
+const RUN_TRACE_MAX_RUN_ID_LEN: usize = 64;
+const RUN_TRACE_MAX_TYPES: usize = 32;
+/// The `type_url` Session Core gives a trace row's payload; its `value` is the JSON object Quarry
+/// sent (`eventlog_grpc.rs` `TRACE_PAYLOAD_TYPE_URL`).
+const RUN_TRACE_PAYLOAD_TYPE_URL: &str = "type.googleapis.com/model_plane.v1.BrowserTraceEvent";
+
+#[derive(Debug, Deserialize)]
+struct RunTraceQuery {
+    #[serde(default)]
+    cursor: Option<String>,
+    #[serde(default)]
+    limit: Option<u32>,
+    /// Comma list of `EventType` names without the `EVENT_TYPE_` prefix.
+    #[serde(default)]
+    types: Option<String>,
+}
+
+fn run_trace_error(status: StatusCode, code: &str, message: &str) -> HttpJsonError {
+    (
+        status,
+        Json(json!({ "error": { "code": code, "message": message } })),
+    )
+}
+
+/// A run id as Session Core's trace store keeps it: one `[A-Za-z0-9_-]` token of at most 64.
+fn valid_trace_run_id(run_id: &str) -> bool {
+    (1..=RUN_TRACE_MAX_RUN_ID_LEN).contains(&run_id.len())
+        && run_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+}
+
+/// `types=A,B` to EventType numbers. Blank items are skipped; an unknown name is a 400 (a typo
+/// must not read as "no events"); `UNSPECIFIED` is not a filter.
+fn parse_trace_types(raw: Option<&str>) -> Result<Vec<i32>, HttpJsonError> {
+    let Some(raw) = raw else {
+        return Ok(Vec::new());
+    };
+    let mut types = Vec::new();
+    for name in raw.split(',').map(str::trim).filter(|name| !name.is_empty()) {
+        let kind = EventType::from_str_name(&format!("EVENT_TYPE_{name}"))
+            .filter(|kind| *kind != EventType::Unspecified)
+            .ok_or_else(|| {
+                run_trace_error(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_trace_types",
+                    "types must be EventType names without the EVENT_TYPE_ prefix",
+                )
+            })?;
+        if !types.contains(&(kind as i32)) {
+            types.push(kind as i32);
+        }
+    }
+    if types.len() > RUN_TRACE_MAX_TYPES {
+        return Err(run_trace_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_trace_types",
+            "too many event types",
+        ));
+    }
+    Ok(types)
+}
+
+/// One trace event in the shape of the run-trace envelope golden
+/// (`api/contracts/run-trace-envelope.golden.json`): names without their enum prefixes, the
+/// payload as the JSON object Quarry sent. A payload of any other type, or one that is not a JSON
+/// object, is reported by its type only: raw bytes never leave the gateway.
+fn trace_event_json(event: &Event) -> Value {
+    let event_type = EventType::try_from(event.event_type).map_or("UNSPECIFIED", |kind| {
+        kind.as_str_name().trim_start_matches("EVENT_TYPE_")
+    });
+    let origin = mp_contracts::model_plane::v1::RunOrigin::try_from(event.origin)
+        .ok()
+        .filter(|origin| *origin != mp_contracts::model_plane::v1::RunOrigin::Unspecified)
+        .map(|origin| origin.as_str_name().trim_start_matches("RUN_ORIGIN_").to_owned());
+    let ts = event.ts.as_ref().and_then(|ts| {
+        let nanos = u32::try_from(ts.nanos).ok()?;
+        chrono::DateTime::from_timestamp(ts.seconds, nanos)
+            .map(|at| at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
+    });
+    let payload = event.payload.as_ref().map(|any| {
+        let object = (any.type_url == RUN_TRACE_PAYLOAD_TYPE_URL)
+            .then(|| serde_json::from_slice::<Value>(&any.value).ok())
+            .flatten()
+            .filter(Value::is_object);
+        object.unwrap_or_else(|| json!({ "type_url": any.type_url }))
+    });
+    let agent = event.agent.as_ref().map(|agent| {
+        json!({ "id": agent.id, "role": agent.role, "parent_id": agent.parent_id })
+    });
+    json!({
+        "event_id": event.event_id,
+        "event_type": event_type,
+        "schema_version": event.schema_version,
+        "ts": ts,
+        "producer": event.producer,
+        "correlation_id": event.correlation_id,
+        "causation_id": event.causation_id,
+        "org_id": event.org_id,
+        "user_id": event.user_id,
+        "resource_ref": event.resource_ref,
+        "payload": payload,
+        "zdr": event.zdr,
+        "producer_seq": event.producer_seq,
+        "agent": agent,
+        "origin": origin,
+        "run_id": event.run_id,
+        "request_id": event.request_id,
+    })
+}
+
+/// Session Core's answer to a trace read. A non-owner and an unknown run look the same (404); a
+/// Session Core that does not serve the trace yet is a 501 the caller can tell from an outage.
+fn run_trace_status_to_http(status: &tonic::Status) -> HttpJsonError {
+    match status.code() {
+        tonic::Code::NotFound | tonic::Code::PermissionDenied => {
+            run_trace_error(StatusCode::NOT_FOUND, "run_not_found", "no such run")
+        }
+        tonic::Code::Unimplemented => run_trace_error(
+            StatusCode::NOT_IMPLEMENTED,
+            "trace_unavailable",
+            "the run trace is not available",
+        ),
+        tonic::Code::InvalidArgument => run_trace_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_trace_query",
+            "the trace query was refused",
+        ),
+        _ => grpc_status_to_http(status),
+    }
+}
+
+/// `GET /v1/runs/:run_id/trace?cursor=&limit=&types=` â€” one page of the run's trace, oldest first.
+/// The org is the token's; Session Core checks that the caller owns the run (the user behind the
+/// session bearer), so this route adds no ownership rule of its own.
+async fn get_run_trace(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    bearer: VerifiedModelBearer,
+    Path(run_id): Path<String>,
+    Query(query): Query<RunTraceQuery>,
+) -> Result<Json<Value>, HttpJsonError> {
+    let run_id = run_id.trim();
+    if !valid_trace_run_id(run_id) {
+        return Err(run_trace_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_run_id",
+            "run_id must be 1 to 64 characters of [A-Za-z0-9_-]",
+        ));
+    }
+    let limit = query
+        .limit
+        .unwrap_or(RUN_TRACE_DEFAULT_LIMIT)
+        .clamp(1, RUN_TRACE_MAX_LIMIT);
+    let cursor = query
+        .cursor
+        .as_deref()
+        .map(str::trim)
+        .filter(|cursor| !cursor.is_empty());
+    if cursor.is_some_and(|cursor| cursor.len() > RUN_TRACE_MAX_CURSOR_LEN) {
+        return Err(run_trace_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_cursor",
+            "the cursor is too long",
+        ));
+    }
+    let event_types = parse_trace_types(query.types.as_deref())?;
+    let request = mp_contracts::model_plane::v1::QueryEventsRequest {
+        filter: Some(mp_contracts::model_plane::v1::EventFilter {
+            org_id: claims.org_id.clone(),
+            run_id: run_id.to_owned(),
+            event_types,
+            ..Default::default()
+        }),
+        cursor: cursor.map(|value| mp_contracts::model_plane::v1::Cursor {
+            value: value.to_owned(),
+        }),
+        limit,
+        reverse: false,
+    };
+    let page = state
+        .event_log_client
+        .clone()
+        .query_events(authenticated_session_request(request, &bearer)?)
+        .await
+        .map_err(|status| run_trace_status_to_http(&status))?
+        .into_inner();
+    let events: Vec<Value> = page.events.iter().map(trace_event_json).collect();
+    let next_cursor = page
+        .next_cursor
+        .map(|cursor| cursor.value)
+        .filter(|value| !value.is_empty());
+    Ok(Json(json!({
+        "data": { "events": events },
+        "meta": { "next_cursor": next_cursor, "has_more": page.has_more },
+    })))
+}
+
+// ---------------------------------------------------------------------------
+// EP-14 S5: `GET /v1/runs/:run_id/timing` - a run's durable, content-free timing.
+// ---------------------------------------------------------------------------
+
+/// A stored timestamp as RFC 3339 UTC to the millisecond, the shape the trace route uses.
+fn timing_rfc3339(ts: Option<&prost_types::Timestamp>) -> Option<String> {
+    let ts = ts?;
+    let nanos = u32::try_from(ts.nanos).ok()?;
+    chrono::DateTime::from_timestamp(ts.seconds, nanos)
+        .map(|at| at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
+}
+
+/// One timing record as the SPA reads it: the report as the JSON object it was stored as. A report
+/// that does not parse is reported as absent, never as its raw text.
+fn run_timing_json(timing: &mp_contracts::model_plane::v1::RunTimingRecorded) -> Value {
+    let report = serde_json::from_str::<Value>(&timing.report_json)
+        .ok()
+        .filter(Value::is_object);
+    json!({
+        "run_id": timing.run_id,
+        "request_id": timing.request_id,
+        "schema": timing.schema,
+        "report": report,
+        "phases_dropped": timing.phases_dropped,
+        "recorded_at": timing_rfc3339(timing.recorded_at.as_ref()),
+    })
+}
+
+fn run_action_timing_json(action: &mp_contracts::model_plane::v1::RunActionTiming) -> Value {
+    json!({
+        "action_id": action.action_id,
+        "tool": action.tool,
+        "status": action.status,
+        "reserved_at": timing_rfc3339(action.reserved_at.as_ref()),
+        "finalized_at": timing_rfc3339(action.finalized_at.as_ref()),
+        "effect_class": (!action.effect_class.is_empty()).then_some(action.effect_class.as_str()),
+    })
+}
+
+/// Session Core's answer to a timing read. A non-owner, an unknown run and a Session Core with the read
+/// switched off all read as 404, so the route says nothing about a run the caller cannot see.
+fn run_timing_status_to_http(status: &tonic::Status) -> HttpJsonError {
+    match status.code() {
+        tonic::Code::NotFound | tonic::Code::PermissionDenied => {
+            run_trace_error(StatusCode::NOT_FOUND, "run_not_found", "no such run")
+        }
+        tonic::Code::Unimplemented => run_trace_error(
+            StatusCode::NOT_FOUND,
+            "run_timing_unavailable",
+            "run timing is not available",
+        ),
+        tonic::Code::InvalidArgument => run_trace_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_run_id",
+            "the run id was refused",
+        ),
+        _ => grpc_status_to_http(status),
+    }
+}
+
+/// `GET /v1/runs/:run_id/timing` - the run's timing records and its tool calls' reserve and finalize
+/// times, `{data: {timings, actions, truncated}}`. Session Core checks that the caller owns the run (the
+/// user behind the session bearer). A zero-retention bearer is refused before anything is read, with
+/// feature `run_inspection`: there is nothing of a ZDR run to inspect, and the refusal says so.
+async fn get_run_timing(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    bearer: VerifiedModelBearer,
+    Path(run_id): Path<String>,
+) -> Result<Json<Value>, HttpJsonError> {
+    if claims.zdr {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(mp_contracts::zdr_refusal::Refusal::feature_not_supported("run_inspection").json_body()),
+        ));
+    }
+    let run_id = run_id.trim();
+    if !valid_trace_run_id(run_id) {
+        return Err(run_trace_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_run_id",
+            "run_id must be 1 to 64 characters of [A-Za-z0-9_-]",
+        ));
+    }
+    let response = state
+        .run_ledger_client
+        .clone()
+        .get_run_timing(authenticated_session_request(
+            mp_contracts::model_plane::v1::GetRunTimingRequest {
+                run_id: run_id.to_owned(),
+            },
+            &bearer,
+        )?)
+        .await
+        .map_err(|status| run_timing_status_to_http(&status))?
+        .into_inner();
+    let timings: Vec<Value> = response.timings.iter().map(run_timing_json).collect();
+    let actions: Vec<Value> = response.actions.iter().map(run_action_timing_json).collect();
+    Ok(Json(json!({
+        "data": { "timings": timings, "actions": actions, "truncated": response.truncated },
+    })))
+}
+
 /// `type_url` of Session Core's `RUN_CANCELLED` row. Session Core has no enum
 /// value for that row, so it replays as `EVENT_TYPE_UNSPECIFIED` and only the
 /// payload discriminator identifies it (as in `durable_thread_event_type`).
@@ -1792,6 +2196,8 @@ fn project_run_replay_event(run_id: &str, event: Event) -> Option<DurableRunEven
             | "EVENT_TYPE_BROWSER_OBSERVATION_RECEIVED"
             | "EVENT_TYPE_BROWSER_RUN_PAUSED"
             | "EVENT_TYPE_BROWSER_RUN_RESUMED"
+            // WS8.G: ids only (run, plan, attach, session run, tab), never a URL or a title.
+            | "EVENT_TYPE_BROWSER_ATTACH_SHARED_JAR"
             | "EVENT_TYPE_BROWSER_ACTION_APPROVAL_REQUIRED"
             | "EVENT_TYPE_BROWSER_ACTION_DECIDED"
             | "EVENT_TYPE_APPROVAL_CONTINUATION_VERIFIED"
@@ -1929,22 +2335,135 @@ struct DecideApprovalBody {
     /// scopes need the grant store (S6), so any other value is refused until it exists.
     #[serde(default)]
     scope: String,
+    /// "Always" (build plan WS13 S7): only the literal `true` asks for a standing rule proposed
+    /// from this grant. Any other value is ignored, as an unknown key always was, so a body that
+    /// carries one reads exactly as it did before the switch existed.
+    #[serde(default)]
+    promote: Value,
 }
 
-/// The decide body's scope: absent or `once` is the one decision that exists today. Anything
-/// else, a well-formed `thread` or `run` included, is refused rather than silently narrowed
-/// to `once`, so a client never believes it granted more than it did.
-fn require_once_scope(scope: &str) -> Result<(), HttpJsonError> {
-    if scope.is_empty() || scope == SCOPE_ONCE {
-        return Ok(());
+/// The scope a decision may carry (build plan WS13 S6). `once` is always available. A standing
+/// scope needs the switch, a granting decision, and an approval whose cause offers that scope: the
+/// server says what is offered, and a client never picks a scope it was not offered.
+fn checked_decision_scope(
+    requested: &str,
+    target: ApprovalState,
+    offered: &[String],
+) -> Result<&'static str, HttpJsonError> {
+    checked_decision_scope_with(
+        requested,
+        target,
+        offered,
+        approval_cause::scope_grants_enabled(),
+    )
+}
+
+fn checked_decision_scope_with(
+    requested: &str,
+    target: ApprovalState,
+    offered: &[String],
+    grants_enabled: bool,
+) -> Result<&'static str, HttpJsonError> {
+    let scope = match requested {
+        "" | SCOPE_ONCE => return Ok(SCOPE_ONCE),
+        SCOPE_THREAD => SCOPE_THREAD,
+        SCOPE_RUN => SCOPE_RUN,
+        _ => {
+            return Err(scope_refusal(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "scope_not_offered",
+                "That scope is not offered for this approval.",
+            ))
+        }
+    };
+    if !matches!(target, ApprovalState::Granted) {
+        return Err(scope_refusal(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "scope_not_applicable",
+            "A scope applies to a grant only.",
+        ));
     }
-    Err((
-        StatusCode::UNPROCESSABLE_ENTITY,
-        Json(json!({ "error": {
-            "code": "scope_not_enabled",
-            "message": "Only a decision for this one call is available.",
-        } })),
-    ))
+    if !grants_enabled {
+        return Err(scope_refusal(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "scope_not_enabled",
+            "Standing scopes are not enabled on this deployment.",
+        ));
+    }
+    if !offered.iter().any(|candidate| candidate == scope) {
+        return Err(scope_refusal(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "scope_not_offered",
+            "That scope is not offered for this approval.",
+        ));
+    }
+    Ok(scope)
+}
+
+fn scope_refusal(status: StatusCode, code: &'static str, message: &'static str) -> HttpJsonError {
+    (
+        status,
+        Json(json!({ "error": { "code": code, "message": message } })),
+    )
+}
+
+/// The proto scope a checked decision scope name stands for.
+fn approval_scope_code(scope: &str) -> i32 {
+    match scope {
+        SCOPE_THREAD => ApprovalScope::Thread as i32,
+        SCOPE_RUN => ApprovalScope::Run as i32,
+        _ => ApprovalScope::Once as i32,
+    }
+}
+
+/// The environment switch for "Always" as a reviewed rule (build plan WS13 S7). Default off; only
+/// the literal `true` enables it, read through the one strict parser the other switches share.
+const RULE_PROPOSALS_ENV: &str = "APPROVAL_RULE_PROPOSALS_ENABLED";
+
+fn rule_proposals_from(value: Option<&str>) -> bool {
+    mp_contracts::loop_fold::switch_from(value)
+}
+
+fn rule_proposals_enabled() -> bool {
+    rule_proposals_from(env::var(RULE_PROPOSALS_ENV).ok().as_deref())
+}
+
+/// Whether a decision is "Always" (build plan WS13 S7): a standing rule proposed from this grant,
+/// for the person to confirm in settings. Returns `true` only for a valid ask under the switch; with
+/// the switch off `promote` is ignored. A rule is proposed from a grant of this thread on an MCP
+/// tool's approval and from nothing else, so every other ask is refused with its typed reason.
+fn checked_rule_proposal(
+    promote: bool,
+    scope: &str,
+    target: ApprovalState,
+    cause: Option<&ApprovalCause>,
+    enabled: bool,
+) -> Result<bool, HttpJsonError> {
+    if !enabled || !promote {
+        return Ok(false);
+    }
+    if !matches!(target, ApprovalState::Granted) {
+        return Err(scope_refusal(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "rule_not_applicable",
+            "A rule is proposed from a grant only.",
+        ));
+    }
+    if scope != SCOPE_THREAD {
+        return Err(scope_refusal(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "rule_requires_thread_scope",
+            "Always applies to a decision for this thread.",
+        ));
+    }
+    if !cause.is_some_and(approval_cause::rule_offered) {
+        return Err(scope_refusal(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "rule_not_offered",
+            "Always is offered only for an MCP tool that you may relax.",
+        ));
+    }
+    Ok(true)
 }
 
 /// The approval step-up switch (build plan WS13 S5). `off` changes nothing; `shadow` counts a grant
@@ -2021,15 +2540,17 @@ fn step_up_required_error() -> HttpJsonError {
     )
 }
 
-/// The durable decision this gateway records for a browser decision (build plan WS13 S3). The
-/// source is always USER: the body has no field for it, so a client-supplied value cannot
-/// reach the record. The scope is ONCE, the only scope the body can name today.
+/// The durable decision this gateway records for a decision (build plan WS13 S3). The source is
+/// always USER: the body has no field for it, so a client-supplied value cannot reach the record.
+/// `rule_proposed` is set only for an "Always" this gateway accepted (build plan WS13 S7).
 fn user_decision_request(
     approval_id: String,
     target_state: ApprovalState,
     user_id: &str,
     org_id: &str,
     reason: String,
+    scope: &str,
+    rule_proposed: bool,
 ) -> DecideApprovalRequest {
     DecideApprovalRequest {
         approval_id,
@@ -2040,7 +2561,8 @@ fn user_decision_request(
         // JWT org, never a client-suppliable value.
         org_id: org_id.to_owned(),
         decision_source: ApprovalDecisionSource::User as i32,
-        scope: ApprovalScope::Once as i32,
+        scope: approval_scope_code(scope),
+        rule_proposed,
         ..Default::default()
     }
 }
@@ -2065,7 +2587,6 @@ async fn decide_approval(
             ))
         }
     };
-    require_once_scope(&body.scope)?;
     let prior_approval = if matches!(target_state, ApprovalState::Granted) {
         state
             .orchestration_client
@@ -2085,6 +2606,22 @@ async fn decide_approval(
     } else {
         None
     };
+    // The scope is checked against what this approval's cause offers, once the approval is known.
+    let offered = prior_approval
+        .as_ref()
+        .and_then(|approval| approval.cause.as_ref())
+        .map(|cause| cause.scope_options.clone())
+        .unwrap_or_default();
+    let scope = checked_decision_scope(&body.scope, target_state, &offered)?;
+    let asks_rule = checked_rule_proposal(
+        body.promote == Value::Bool(true),
+        scope,
+        target_state,
+        prior_approval
+            .as_ref()
+            .and_then(|approval| approval.cause.as_ref()),
+        rule_proposals_enabled(),
+    )?;
     let step_up_claim = step_up.and_then(|Extension(VerifiedStepUp(claim))| claim);
     if step_up_missing(
         target_state,
@@ -2118,6 +2655,8 @@ async fn decide_approval(
                 &claims.user_id,
                 &claims.org_id,
                 body.reason,
+                scope,
+                asks_rule,
             ),
             &session_bearer,
         )?)
@@ -2127,7 +2666,6 @@ async fn decide_approval(
     let approval = resp
         .approval
         .ok_or_else(|| not_found("approval not found"))?;
-
     // A grant is durable authority, but not a restartable continuation: this
     // path never invokes a generic `ResumeRun`. What happens next is read from
     // the approval's derived `continuation` (Session Core joins the delivery
@@ -2336,6 +2874,7 @@ async fn cancel_run(
             // The guard above answered every ZDR posture with a refusal, so a
             // run-control event that reaches this line is persistent.
             zdr: false,
+            ..Default::default()
         };
         if let Err(error) = state
             .publisher
@@ -2385,6 +2924,7 @@ async fn resume_run(
                 checkpoint_id: String::new(),
                 org_id: claims.org_id.clone(),
                 approval_id: String::new(),
+                steer_text: String::new(),
             },
             &execution_bearer,
             &session_bearer,
@@ -2410,6 +2950,7 @@ async fn resume_run(
         // The guard above answered every ZDR posture with a refusal, so a
         // run-control event that reaches this line is persistent.
         zdr: false,
+        ..Default::default()
     };
     state
         .publisher
@@ -2479,6 +3020,19 @@ struct AiChatRequest {
     structured_output_schema: Option<String>,
     #[serde(default)]
     zdr: bool,
+    /// Sampling temperature, 0.0 to 1.0 (WS16.S1). Absent keeps the 0.7 every caller had before
+    /// this field existed. Read as a plain number and range-checked by hand so a value out of
+    /// range answers 400 with a reason, not a deserialiser 422.
+    #[serde(default)]
+    temperature: Option<f64>,
+    /// Output token ceiling, 1 to 8192. Absent keeps the 4096 every caller had before.
+    #[serde(default)]
+    max_tokens: Option<i64>,
+    /// Why a machine caller makes this call. A closed set (`quarry.extract`), and only the
+    /// `service:quarry-edge` principal may name it; it rides on the usage envelope so cost-core
+    /// can attribute the spend.
+    #[serde(default)]
+    purpose: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2710,6 +3264,7 @@ async fn browser_suggest_action(
         .clone()
         .infer(authenticated_inference_request(
             InferRequest {
+                purpose: InferPurpose::BrowserPlanner as i32,
                 request_id: request_id.clone(),
                 org_id: claims.org_id.clone(),
                 model: req.model.clone().unwrap_or_default(),
@@ -2850,12 +3405,23 @@ fn browser_suggestion_prompt(
         },
         1_200,
     );
-    let observation = compact_json_for_prompt(&req.observation, BROWSER_OBSERVATION_PROMPT_CHARS);
-    let visual_observation =
-        compact_json_for_prompt(&req.visual_observation, BROWSER_VISUAL_PROMPT_CHARS);
+    // WS12.S4: the page is untrusted and may hold a credential the user typed or the page
+    // echoed. Credential-shaped strings are masked HERE, on the way into the prompt, before
+    // any cut (`compact_json_for_prompt`, `truncate_for_prompt`) can split one into a
+    // fragment the pattern no longer matches. The request itself is not changed.
+    let observation = compact_json_for_prompt(
+        &scrubbed_live_json(&req.observation),
+        BROWSER_OBSERVATION_PROMPT_CHARS,
+    );
+    let visual_observation = compact_json_for_prompt(
+        &scrubbed_live_json(&req.visual_observation),
+        BROWSER_VISUAL_PROMPT_CHARS,
+    );
     let visual_summary = visual_summary.map_or_else(
         || "not provided".to_owned(),
-        |summary| truncate_for_prompt(summary, BROWSER_VISUAL_PROMPT_CHARS),
+        |summary| {
+            truncate_for_prompt(&mp_scrub::scrub_live(summary), BROWSER_VISUAL_PROMPT_CHARS)
+        },
     );
     let visual_artifact = req
         .visual_observation_artifact_id
@@ -2866,9 +3432,16 @@ fn browser_suggestion_prompt(
 
     format!(
         "Goal:\n{goal}\n\nCurrent URL: {}\nCurrent title: {}\n\nQuarry observation JSON:\n{observation}\n\nOpenCV visual observation artifact id: {visual_artifact}\nOpenCV visual observation JSON:\n{visual_observation}\n\nVLM screenshot summary:\n{visual_summary}\n\nReturn the single next browser action JSON only.",
-        truncate_for_prompt(&req.url, 1_000),
-        truncate_for_prompt(&req.title, 500),
+        truncate_for_prompt(&mp_scrub::scrub_url(&req.url), 1_000),
+        truncate_for_prompt(&mp_scrub::scrub_live(&req.title), 500),
     )
+}
+
+/// A copy of `value` with every credential-shaped string masked (`mp_scrub::scrub_live_json`).
+fn scrubbed_live_json(value: &Value) -> Value {
+    let mut copy = value.clone();
+    mp_scrub::scrub_live_json(&mut copy);
+    copy
 }
 
 fn browser_suggestion_value(parsed: &Value) -> Value {
@@ -2992,13 +3565,181 @@ fn truncate_for_prompt(value: &str, max_chars: usize) -> String {
     out
 }
 
+/// `AiChatRequest::temperature` when the caller sends none.
+const AI_CHAT_DEFAULT_TEMPERATURE: f32 = 0.7;
+/// `AiChatRequest::max_tokens` when the caller sends none.
+const AI_CHAT_DEFAULT_MAX_TOKENS: i32 = 4096;
+/// The ceiling a caller may ask for.
+const AI_CHAT_MAX_TOKENS_CEILING: i64 = 8192;
+/// The one `purpose` value, and the one principal allowed to name it.
+const AI_CHAT_PURPOSE_QUARRY_EXTRACT: &str = "quarry.extract";
+const AI_CHAT_PURPOSE_CALLER: &str = "service:quarry-edge";
+
+/// `MODEL_GATEWAY_AI_CHAT_METERING`: whose `/v1/ai/chat` calls publish a `USAGE_ENVELOPE`.
+///
+/// The build plan's default is `service`; the owner rule is that new behaviour starts off, so the
+/// default here is `off` (assumed decision, recorded in the progress file). Rolling it out is
+/// `MODEL_GATEWAY_AI_CHAT_METERING=service`. `all` also meters user callers, which changes user
+/// accounting and is therefore not a default of anything.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum AiChatMetering {
+    #[default]
+    Off,
+    Service,
+    All,
+}
+
+impl AiChatMetering {
+    /// Anything other than the literal `service` or `all` is `off`.
+    fn parse(raw: Option<&str>) -> Self {
+        match raw.map(|value| value.trim().to_ascii_lowercase()).as_deref() {
+            Some("service") => Self::Service,
+            Some("all") => Self::All,
+            _ => Self::Off,
+        }
+    }
+
+    const fn meters(self, service_caller: bool) -> bool {
+        match self {
+            Self::Off => false,
+            Self::Service => service_caller,
+            Self::All => true,
+        }
+    }
+}
+
+/// The switch, read once per process.
+fn ai_chat_metering() -> AiChatMetering {
+    static MODE: std::sync::OnceLock<AiChatMetering> = std::sync::OnceLock::new();
+    *MODE.get_or_init(|| {
+        AiChatMetering::parse(env::var("MODEL_GATEWAY_AI_CHAT_METERING").ok().as_deref())
+    })
+}
+
+/// The validated sampling parameters of one `/v1/ai/chat` call.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct AiChatParams {
+    temperature: f32,
+    max_tokens: i32,
+    purpose: Option<&'static str>,
+}
+
+fn ai_chat_bad_request(error: &str) -> HttpJsonError {
+    (StatusCode::BAD_REQUEST, Json(json!({ "error": error })))
+}
+
+/// Validate the additive fields. Absent fields keep today's values exactly.
+fn ai_chat_params(req: &AiChatRequest, claims: &Claims) -> Result<AiChatParams, HttpJsonError> {
+    let temperature = match req.temperature {
+        None => AI_CHAT_DEFAULT_TEMPERATURE,
+        Some(value) if value.is_finite() && (0.0..=1.0).contains(&value) => {
+            // The range check above makes the narrowing safe for a sampling knob.
+            #[allow(clippy::cast_possible_truncation)]
+            let narrowed = value as f32;
+            narrowed
+        }
+        Some(_) => return Err(ai_chat_bad_request("temperature must be between 0.0 and 1.0")),
+    };
+    let max_tokens = match req.max_tokens {
+        None => AI_CHAT_DEFAULT_MAX_TOKENS,
+        Some(value) if (1..=AI_CHAT_MAX_TOKENS_CEILING).contains(&value) => {
+            i32::try_from(value).unwrap_or(AI_CHAT_DEFAULT_MAX_TOKENS)
+        }
+        Some(_) => return Err(ai_chat_bad_request("max_tokens must be between 1 and 8192")),
+    };
+    let purpose = match req.purpose.as_deref() {
+        None => None,
+        Some(purpose) => {
+            // Service callers only, and only the one named service. A user token that sends a
+            // purpose is refused rather than ignored, so the field can never read as accepted.
+            if claims.service_principal_id().is_none() || claims.sub != AI_CHAT_PURPOSE_CALLER {
+                return Err((
+                    StatusCode::FORBIDDEN,
+                    Json(json!({ "error": "purpose is not permitted for this caller" })),
+                ));
+            }
+            if purpose != AI_CHAT_PURPOSE_QUARRY_EXTRACT {
+                return Err(ai_chat_bad_request("unknown purpose"));
+            }
+            Some(AI_CHAT_PURPOSE_QUARRY_EXTRACT)
+        }
+    };
+    Ok(AiChatParams {
+        temperature,
+        max_tokens,
+        purpose,
+    })
+}
+
+/// The `USAGE_ENVELOPE` of one metered `/v1/ai/chat` call: the shape `grpc.rs` and `invoke`
+/// publish, plus `route` and `purpose` so cost-core can tell this lane from chat.
+fn ai_chat_usage_envelope(
+    request_id: &str,
+    claims: &Claims,
+    infer: &mp_contracts::model_plane::v1::InferResponse,
+    latency_ms: u64,
+    purpose: Option<&str>,
+    cost_basis: crate::pricing::CostBasis,
+) -> Envelope {
+    // A service is attributed by its subject, a user by their id.
+    let user_id = if claims.service_principal_id().is_some() {
+        claims.sub.clone()
+    } else {
+        claims.user_id.clone()
+    };
+    Envelope {
+        event_id: new_ulid(),
+        event_type: "USAGE_ENVELOPE".to_owned(),
+        schema_version: 1,
+        ts: Utc::now(),
+        producer: "model-gateway".to_owned(),
+        correlation_id: request_id.to_owned(),
+        causation_id: String::new(),
+        idempotency_key: format!("{request_id}-USAGE_ENVELOPE"),
+        org_id: claims.org_id.clone(),
+        user_id: user_id.clone(),
+        resource_ref: format!("request/{request_id}"),
+        payload: json!({
+            "request_id": request_id,
+            "org_id": claims.org_id,
+            "user_id": user_id,
+            "model": infer.model_used,
+            "input_tokens": infer.input_tokens,
+            "output_tokens": infer.output_tokens,
+            "latency_ms": latency_ms,
+            "transport": "http",
+            "route": "ai_chat",
+            "purpose": purpose,
+            "provider_used": infer.provider_used,
+            "residency": infer.residency,
+            "cache_read_input_tokens": infer.cache_read_input_tokens,
+            "cache_creation_input_tokens": infer.cache_creation_input_tokens,
+            "cost_basis": cost_basis.as_str(),
+        }),
+        zdr: false,
+        ..Default::default()
+    }
+}
+
 async fn ai_chat(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
     inference_bearer: VerifiedInferenceBearer,
     Json(req): Json<AiChatRequest>,
 ) -> Result<Json<Value>, HttpJsonError> {
+    ai_chat_with(state, claims, inference_bearer, req, ai_chat_metering()).await
+}
+
+async fn ai_chat_with(
+    state: AppState,
+    claims: Claims,
+    inference_bearer: VerifiedInferenceBearer,
+    req: AiChatRequest,
+    metering: AiChatMetering,
+) -> Result<Json<Value>, HttpJsonError> {
     use mp_contracts::model_plane::v1::{ChatMessage, InferRequest};
+    // Bad sampling fields and a purpose the caller may not name are refused before anything else.
+    let params = ai_chat_params(&req, &claims)?;
     // The posture of this turn, through the resolver: a ZDR turn that names the caller's own
     // connection is refused here, typed, before any model call, and a waiver is honoured only on
     // the connection it names (see `zdr_posture`). Without this, a connection id with no provider
@@ -3021,19 +3762,23 @@ async fn ai_chat(
         })
         .collect();
     let request_id = new_ulid();
+    let (provider_hint, connection_id) =
+        (req.provider.clone(), req.subscription_connection_id.clone());
+    let started = std::time::Instant::now();
     let resp = state
         .inference_client
         .clone()
         .infer(authenticated_inference_request(
             InferRequest {
+                purpose: InferPurpose::Answer as i32,
                 request_id: request_id.clone(),
                 org_id: claims.org_id.clone(),
                 model: req.model,
                 provider_hint: req.provider,
                 subscription_connection_id: req.subscription_connection_id,
                 messages,
-                temperature: 0.7,
-                max_tokens: 4096,
+                temperature: params.temperature,
+                max_tokens: params.max_tokens,
                 structured_output_schema: req.structured_output_schema.unwrap_or_default(),
                 zdr,
                 ..Default::default()
@@ -3043,11 +3788,54 @@ async fn ai_chat(
         .await
         .map_err(|e| grpc_status_to_http(&e))?
         .into_inner();
+    let latency_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    // A subscription call is never priced from API list prices.
+    let cost_basis = crate::pricing::CostBasis::of_route(&provider_hint, &connection_id)
+        .served_by(&resp.provider_used);
+    // Under ZDR nothing about the call is priced, metered or ledgered: the cost is null.
+    let cost_usd = if zdr {
+        None
+    } else {
+        state
+            .pricing
+            .cost_usd_for(
+                cost_basis,
+                &resp.model_used,
+                i64::from(resp.input_tokens.max(0)),
+                i64::from(resp.output_tokens.max(0)),
+                i64::from(resp.cache_read_input_tokens.max(0)),
+                i64::from(resp.cache_creation_input_tokens.max(0)),
+            )
+            .await
+    };
+    if !zdr && metering.meters(claims.service_principal_id().is_some()) {
+        let envelope = ai_chat_usage_envelope(
+            &request_id,
+            &claims,
+            &resp,
+            latency_ms,
+            params.purpose,
+            cost_basis,
+        );
+        if let Err(error) = state
+            .publisher
+            .publish(&subjects::usage_subject(&claims.org_id), &envelope)
+            .await
+        {
+            warn!(%error, "failed to publish ai_chat USAGE_ENVELOPE");
+        }
+    }
     Ok(Json(json!({
         "id": request_id,
         "content": resp.content,
         "model_used": resp.model_used,
-        "usage": { "input_tokens": resp.input_tokens, "output_tokens": resp.output_tokens },
+        "provider_used": resp.provider_used,
+        "usage": {
+            "input_tokens": resp.input_tokens,
+            "output_tokens": resp.output_tokens,
+            "cost_usd": cost_usd,
+            "latency_ms": latency_ms,
+        },
     })))
 }
 
@@ -3210,6 +3998,7 @@ async fn recommend_plan(
         .clone()
         .infer(authenticated_inference_request(
             InferRequest {
+                purpose: InferPurpose::Answer as i32,
                 request_id: request_id.clone(),
                 org_id: claims.org_id.clone(),
                 model: String::new(),
@@ -4746,6 +5535,7 @@ async fn ai_dictate(
         .clone()
         .infer(authenticated_inference_request(
             InferRequest {
+                purpose: InferPurpose::DictationCleanup as i32,
                 request_id: request_id.clone(),
                 org_id: claims.org_id.clone(),
                 model: cleanup_model,
@@ -5944,6 +6734,25 @@ async fn proxy_to_capability_core(
     method: &str,
     body: Option<&Value>,
 ) -> Result<Json<Value>, HttpJsonError> {
+    // Refuse before delegating: the durable-mutation inventory checks this entry point on its own.
+    if method != "GET" {
+        require_non_zdr_durable_mutation(claims)?;
+    }
+    proxy_to_capability_core_with_precondition(state, claims, bearer, path, method, body, None)
+        .await
+}
+
+/// [`proxy_to_capability_core`] with an optional `If-Match` revision on the forwarded request: a write
+/// capability-core applies only at the revision its author read.
+async fn proxy_to_capability_core_with_precondition(
+    state: &AppState,
+    claims: &Claims,
+    bearer: &VerifiedCapabilityBearer,
+    path: &str,
+    method: &str,
+    body: Option<&Value>,
+    if_match: Option<&str>,
+) -> Result<Json<Value>, HttpJsonError> {
     // Capability Core remains authoritative, but stop an obvious issuer-ZDR
     // mutation at the public boundary before forwarding any body or credential.
     if method != "GET" {
@@ -5975,6 +6784,10 @@ async fn proxy_to_capability_core(
         }
     }
     .bearer_auth(bearer.as_str());
+    let builder = match if_match {
+        Some(revision) => builder.header(reqwest::header::IF_MATCH, revision),
+        None => builder,
+    };
     let resp = builder.send().await.map_err(|e| {
         (
             StatusCode::BAD_GATEWAY,
@@ -6196,6 +7009,116 @@ async fn revoke_tool_policy_proxy(
     proxy_to_capability_core(&s, &c, &bearer, &path, "DELETE", None).await
 }
 
+/// Takes the revision a policy write was made against out of its body. capability-core reads it from
+/// `If-Match`, and this proxy forwards only the session's headers, so the SPA names it in the body. A body
+/// without one forwards with no precondition, which capability-core refuses with 428.
+fn take_policy_revision(body: &mut Value) -> Result<Option<String>, HttpJsonError> {
+    let Some(raw) = body
+        .as_object_mut()
+        .and_then(|object| object.remove("revision"))
+    else {
+        return Ok(None);
+    };
+    match raw.as_u64() {
+        Some(revision) if i64::try_from(revision).is_ok() => Ok(Some(revision.to_string())),
+        _ => Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "revision must be a non-negative integer"})),
+        )),
+    }
+}
+
+/// `GET /v1/org/agent-policy` — the org's agent policy in force. Any member of the org reads it.
+async fn get_org_agent_policy_proxy(
+    State(s): State<AppState>,
+    Extension(c): Extension<Claims>,
+    bearer: VerifiedCapabilityBearer,
+) -> Result<Json<Value>, HttpJsonError> {
+    proxy_to_capability_core(&s, &c, &bearer, "org-agent-policy", "GET", None).await
+}
+
+/// `PUT /v1/org/agent-policy` — an org admin replaces the policy at the revision the body names. The rest
+/// of the body is forwarded as sent: capability-core decodes it strictly and decides the admin claim, the
+/// write scope and the ZDR posture from the signed principal.
+async fn set_org_agent_policy_proxy(
+    State(s): State<AppState>,
+    Extension(c): Extension<Claims>,
+    bearer: VerifiedCapabilityBearer,
+    Json(mut body): Json<Value>,
+) -> Result<Json<Value>, HttpJsonError> {
+    require_non_zdr_durable_mutation(&c)?;
+    let revision = take_policy_revision(&mut body)?;
+    proxy_to_capability_core_with_precondition(
+        &s,
+        &c,
+        &bearer,
+        "org-agent-policy",
+        "PUT",
+        Some(&body),
+        revision.as_deref(),
+    )
+    .await
+}
+
+/// `GET /v1/org/agent-policy/effective` — each setting with the value in force for the caller's org. Only
+/// the org layer exists yet, and capability-core accepts only `user=me`, so the read always asks for that.
+async fn get_org_agent_policy_effective_proxy(
+    State(s): State<AppState>,
+    Extension(c): Extension<Claims>,
+    bearer: VerifiedCapabilityBearer,
+) -> Result<Json<Value>, HttpJsonError> {
+    let path = capability_query_path("org-agent-policy/effective", &[("user", "me")]);
+    proxy_to_capability_core(&s, &c, &bearer, &path, "GET", None).await
+}
+
+/// `GET /v1/org/hooks` — the org's active hook rules and the policy revision they are at.
+async fn list_org_hooks_proxy(
+    State(s): State<AppState>,
+    Extension(c): Extension<Claims>,
+    bearer: VerifiedCapabilityBearer,
+) -> Result<Json<Value>, HttpJsonError> {
+    proxy_to_capability_core(&s, &c, &bearer, "org-hooks", "GET", None).await
+}
+
+/// `POST /v1/org/hooks` — an org admin adds a rule. The body is forwarded as sent, so a field that
+/// capability-core does not know, the org id included, is refused rather than dropped.
+async fn create_org_hook_proxy(
+    State(s): State<AppState>,
+    Extension(c): Extension<Claims>,
+    bearer: VerifiedCapabilityBearer,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, HttpJsonError> {
+    require_non_zdr_durable_mutation(&c)?;
+    proxy_to_capability_core(&s, &c, &bearer, "org-hooks", "POST", Some(&body)).await
+}
+
+/// `PUT /v1/org/hooks/:hook_id` — an org admin replaces the content of an active rule.
+async fn update_org_hook_proxy(
+    State(s): State<AppState>,
+    Extension(c): Extension<Claims>,
+    bearer: VerifiedCapabilityBearer,
+    Path(hook_id): Path<String>,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, HttpJsonError> {
+    require_non_zdr_durable_mutation(&c)?;
+    require_registry_identifier(&hook_id, "hook_id")?;
+    let path = format!("org-hooks/{hook_id}");
+    proxy_to_capability_core(&s, &c, &bearer, &path, "PUT", Some(&body)).await
+}
+
+/// `DELETE /v1/org/hooks/:hook_id` — an org admin retires an active rule; the row stays as history.
+async fn delete_org_hook_proxy(
+    State(s): State<AppState>,
+    Extension(c): Extension<Claims>,
+    bearer: VerifiedCapabilityBearer,
+    Path(hook_id): Path<String>,
+) -> Result<Json<Value>, HttpJsonError> {
+    require_non_zdr_durable_mutation(&c)?;
+    require_registry_identifier(&hook_id, "hook_id")?;
+    let path = format!("org-hooks/{hook_id}");
+    proxy_to_capability_core(&s, &c, &bearer, &path, "DELETE", None).await
+}
+
 /// Optional `space_ref` narrows the org's schedules to one room's.
 ///
 /// Forwarded verbatim; capability-core applies it as a filter over rows that
@@ -6311,6 +7234,153 @@ async fn read_process_output(
         "gap_before": response.gap_before,
         "retained_from_seq": response.retained_from_seq,
     })))
+}
+
+/// Lifetime of the thread lease a workspace read acquires. Execution-core's own
+/// thread lease uses the same hour, and every acquire slides it, so a read never
+/// shortens a lease a live run holds.
+const THREAD_WORKSPACE_LEASE_TTL_SECS: i64 = 3_600;
+
+/// `GET /v1/threads/{thread_id}/workspace`: the files one thread keeps across runs
+/// (WS22-S5, DEC-23), each with its content hash and size, never its content.
+///
+/// The workspace is read through a lease, so this acquires the caller's thread
+/// lease first. Acquire is idempotent for the same user and thread, and it carries
+/// the caller's ZDR posture, so a ZDR caller is refused before any lease row is
+/// written. The bearer is the user-bound `aud=sandbox-manager` credential the BFF
+/// attaches per request, and sandbox-manager binds every row to that user.
+async fn get_thread_workspace(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    bearer: VerifiedSandboxBearer,
+    Path(thread_id): Path<String>,
+) -> Result<Json<Value>, HttpJsonError> {
+    let thread_id = require_url_safe_thread_id(&thread_id)?;
+    let zdr = crate::zdr_posture::zdr_or_refuse(&claims, &crate::zdr_posture::Route::plain(false))?;
+    let mut sandbox = state.sandbox_client.clone();
+    let lease = sandbox
+        .acquire_lease(authenticated_sandbox_request(
+            AcquireLeaseRequest {
+                org_id: claims.org_id.clone(),
+                scope_type: "thread".to_owned(),
+                scope_id: thread_id.clone(),
+                ttl: Some(prost_types::Duration {
+                    seconds: THREAD_WORKSPACE_LEASE_TTL_SECS,
+                    nanos: 0,
+                }),
+                zdr,
+                ..Default::default()
+            },
+            &bearer,
+        )?)
+        .await
+        .map_err(|e| grpc_status_to_http(&e))?
+        .into_inner();
+    let response = sandbox
+        .get_thread_workspace(authenticated_sandbox_request(
+            GetThreadWorkspaceRequest {
+                lease_id: lease.lease_id,
+                backend_id: lease.backend_id,
+            },
+            &bearer,
+        )?)
+        .await
+        .map_err(|e| grpc_status_to_http(&e))?
+        .into_inner();
+
+    Ok(Json(json!({
+        "thread_id": thread_id,
+        "revision": response.revision,
+        "files": response.entries.iter().map(|entry| json!({
+            "path": entry.path,
+            "content_hash": entry.content_hash,
+            "size_bytes": entry.size_bytes,
+        })).collect::<Vec<_>>(),
+    })))
+}
+
+/// `DELETE /v1/threads/{thread_id}/workspace`: the user's reset of one thread's
+/// files (WS22-S5). Sandbox-manager removes the thread's rows and then its blobs,
+/// and only the caller's own thread. A thread that holds nothing is a successful
+/// no-op, so a retry finishes an erase whose blob removal failed the first time.
+/// Erasure is not refused under ZDR, because a ZDR thread holds nothing to erase.
+async fn delete_thread_workspace(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    bearer: VerifiedSandboxBearer,
+    Path(thread_id): Path<String>,
+) -> Result<Json<Value>, HttpJsonError> {
+    let thread_id = require_url_safe_thread_id(&thread_id)?;
+    let response = state
+        .sandbox_client
+        .clone()
+        .delete_thread_workspace(authenticated_sandbox_request(
+            DeleteThreadWorkspaceRequest {
+                thread_id: thread_id.clone(),
+                org_id: claims.org_id.clone(),
+            },
+            &bearer,
+        )?)
+        .await
+        .map_err(|e| grpc_status_to_http(&e))?
+        .into_inner();
+
+    Ok(Json(json!({
+        "thread_id": thread_id,
+        "files_deleted": response.files_deleted,
+        "object_prefix": response.object_prefix,
+    })))
+}
+
+/// A thread id the workspace path accepts: the plain key segment the object store
+/// keys blobs by (letters, digits, `_` and `-`, at most 128 bytes). It is refused
+/// here, before any RPC, so a crafted id never reaches a blob prefix.
+fn require_url_safe_thread_id(raw: &str) -> Result<String, HttpJsonError> {
+    let thread_id = raw.trim();
+    if thread_id.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "thread_id is required" })),
+        ));
+    }
+    if thread_id.len() > 128
+        || !thread_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "thread_id must be a plain key segment" })),
+        ));
+    }
+    Ok(thread_id.to_owned())
+}
+
+#[cfg(test)]
+mod thread_workspace_route_tests {
+    use super::*;
+
+    #[test]
+    fn a_thread_id_is_a_plain_key_segment_or_it_is_refused_before_any_rpc() {
+        assert_eq!(
+            require_url_safe_thread_id(" thr_01J9-abc ").unwrap(),
+            "thr_01J9-abc"
+        );
+        let long = "a".repeat(129);
+        for bad in [
+            "",
+            "   ",
+            "thread/1",
+            "../thr",
+            "thr.1",
+            "thr 1",
+            "thr%2F1",
+            long.as_str(),
+        ] {
+            let (status, _) = require_url_safe_thread_id(bad).unwrap_err();
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{bad:?}");
+        }
+    }
 }
 
 /// The same URL-safety rule `/v1/cron` applies, and for the same reason: this
@@ -7192,6 +8262,16 @@ pub(crate) fn approval_value(approval: &Approval) -> Value {
     })
 }
 
+/// The scopes this process offers a person (build plan WS13 S6): `once` alone while standing scopes
+/// are off, so a card never offers a scope the decide route would refuse.
+fn offered_scope_options(cause: &ApprovalCause) -> Vec<String> {
+    if approval_cause::scope_grants_enabled() {
+        cause.scope_options.clone()
+    } else {
+        vec![SCOPE_ONCE.to_owned()]
+    }
+}
+
 /// The part of an approval's cause a browser may read. An allowlist: the stored cause also
 /// holds the call digest and the action key, which are for the gate and the audit trail, and
 /// the approval's `context` (tool arguments) never reaches this projection at all. The code
@@ -7204,7 +8284,7 @@ fn approval_cause_value(cause: &ApprovalCause) -> Value {
         "effect_class": empty_to_null(&cause.effect_class),
         "risk_category": empty_to_null(&cause.risk_category),
         "rule_id": empty_to_null(&cause.rule_id),
-        "scope_options": cause.scope_options,
+        "scope_options": offered_scope_options(cause),
         "step_up_required": step_up_projected(cause, ApprovalStepUpGate::from_env()),
     })
 }
@@ -7377,6 +8457,9 @@ mod approval_step_up_tests {
             "model-gateway/src/grpc.rs",
             // The HTTP decide route, where the step-up gate sits.
             "model-gateway/src/http_routes.rs",
+            // Main's Space member decide route (WS10 S6), merged 2026-11-02. It carries a Control
+            // decision, not the step-up gate; whether a member grant needs step-up is a depth item.
+            "model-gateway/src/space_routes/approvals.rs",
         ]
         .into_iter()
         .collect();
@@ -7408,6 +8491,171 @@ mod approval_step_up_tests {
                     callers.insert(relative.to_string_lossy().replace('\\', "/"));
                 }
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod approval_rule_tests {
+    use super::*;
+
+    /// The digest the fixture tool's definition is pinned to.
+    const PINNED_DIGEST: &str = "2b6a1f0c9d8e7f6a5b4c3d2e1f0a9b8c7d6e5f4a3b2c1d0e9f8a7b6c5d4e3f2a";
+
+    /// An MCP tool's approval as the server states it once the tool is pinned: the given code, the
+    /// declared class, the pinned digest, and the scopes the server computes from them.
+    fn mcp_cause(code: &str, effect_class: &str) -> ApprovalCause {
+        approval_cause::normalized(ApprovalCause {
+            code: code.to_owned(),
+            tool: "mcp__fixture__create_note".to_owned(),
+            effect_class: effect_class.to_owned(),
+            action_key: "mcp__fixture__create_note".to_owned(),
+            call_digest: "digest-of-the-exact-call".to_owned(),
+            tool_digest: PINNED_DIGEST.to_owned(),
+            ..ApprovalCause::default()
+        })
+        .0
+    }
+
+    fn ask(
+        cause: Option<&ApprovalCause>,
+        scope: &str,
+        target: ApprovalState,
+    ) -> Result<bool, HttpJsonError> {
+        checked_rule_proposal(true, scope, target, cause, true)
+    }
+
+    fn refusal_code(result: Result<bool, HttpJsonError>) -> String {
+        let (status, Json(body)) = result.expect_err("the ask is refused");
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        body["error"]["code"]
+            .as_str()
+            .expect("a typed refusal code")
+            .to_owned()
+    }
+
+    #[test]
+    fn an_always_choice_before_confirmation_is_a_thread_grant() {
+        let cause = mcp_cause("risky_effect_under_ask", "external_write");
+        let scope = checked_decision_scope_with(
+            "thread",
+            ApprovalState::Granted,
+            &cause.scope_options,
+            true,
+        )
+        .expect("the thread scope is offered");
+        assert_eq!(scope, SCOPE_THREAD);
+        assert!(ask(Some(&cause), scope, ApprovalState::Granted).expect("an MCP grant may ask"));
+        // The grant is the decision's own: it does not wait for the rule to be confirmed. The rule
+        // is proposed beside it and is in force only once the person confirms it.
+        let request = user_decision_request(
+            "appr-1".to_owned(),
+            ApprovalState::Granted,
+            "user-1",
+            "org-1",
+            String::new(),
+            scope,
+            true,
+        );
+        assert_eq!(request.scope, ApprovalScope::Thread as i32);
+        assert_eq!(request.decision_source, ApprovalDecisionSource::User as i32);
+        assert!(
+            request.rule_proposed,
+            "the proposal travels with the decision"
+        );
+    }
+
+    #[test]
+    fn a_rule_is_proposed_only_from_an_mcp_grant_the_person_may_relax() {
+        let grant = mcp_cause("risky_effect_under_ask", "external_write");
+        let mut built_in = grant.clone();
+        built_in.tool = "write_file".to_owned();
+        assert_eq!(
+            refusal_code(ask(Some(&built_in), SCOPE_THREAD, ApprovalState::Granted)),
+            "rule_not_offered"
+        );
+        for (code, class) in [
+            ("risky_effect_under_ask", "destructive"),
+            ("risky_effect_under_ask", "owner_effect"),
+            ("risky_effect_under_ask", ""),
+            ("hook_ask", "external_write"),
+            ("capability_policy_ask", "external_write"),
+        ] {
+            let cause = mcp_cause(code, class);
+            assert_eq!(
+                refusal_code(ask(Some(&cause), SCOPE_THREAD, ApprovalState::Granted)),
+                "rule_not_offered",
+                "{code} with class {class:?}"
+            );
+        }
+        assert_eq!(
+            refusal_code(ask(None, SCOPE_THREAD, ApprovalState::Granted)),
+            "rule_not_offered"
+        );
+        let mut unpinned = grant.clone();
+        unpinned.tool_digest.clear();
+        assert_eq!(
+            refusal_code(ask(
+                Some(&approval_cause::normalized(unpinned).0),
+                SCOPE_THREAD,
+                ApprovalState::Granted
+            )),
+            "rule_not_offered",
+            "an MCP tool whose definition is not pinned has no rule"
+        );
+        assert_eq!(
+            refusal_code(ask(Some(&grant), SCOPE_ONCE, ApprovalState::Granted)),
+            "rule_requires_thread_scope"
+        );
+        assert_eq!(
+            refusal_code(ask(Some(&grant), SCOPE_THREAD, ApprovalState::Denied)),
+            "rule_not_applicable"
+        );
+        for class in ["read", "sandbox_compute", "context_write", "external_write"] {
+            let cause = mcp_cause("consent_to_disclose", class);
+            assert!(
+                ask(Some(&cause), SCOPE_THREAD, ApprovalState::Granted).expect(class),
+                "{class} may be relaxed"
+            );
+        }
+        // With the switch off nothing is asked, however invalid the ask, and nothing is refused.
+        assert!(!checked_rule_proposal(
+            true,
+            SCOPE_ONCE,
+            ApprovalState::Denied,
+            Some(&built_in),
+            false,
+        )
+        .expect("ignored while the switch is off"));
+        assert!(!checked_rule_proposal(
+            false,
+            SCOPE_THREAD,
+            ApprovalState::Granted,
+            Some(&grant),
+            true,
+        )
+        .expect("an absent ask is not an ask"));
+    }
+
+    #[test]
+    fn promote_is_ignored_while_the_switch_is_off_and_only_the_literal_true_asks() {
+        assert!(!rule_proposals_from(None));
+        assert!(!rule_proposals_from(Some("1")));
+        assert!(!rule_proposals_from(Some("yes")));
+        assert!(rule_proposals_from(Some(" TRUE ")));
+        let literal: DecideApprovalBody = serde_json::from_value(json!({
+            "decision": "approve",
+            "promote": true,
+        }))
+        .expect("a boolean promote parses");
+        assert_eq!(literal.promote, Value::Bool(true));
+        for other in [json!("yes"), json!(1), json!(null)] {
+            let body: DecideApprovalBody = serde_json::from_value(json!({
+                "decision": "approve",
+                "promote": other,
+            }))
+            .expect("any promote value parses, as an unknown key always did");
+            assert_ne!(body.promote, Value::Bool(true));
         }
     }
 }
@@ -7481,6 +8729,8 @@ mod approval_value_tests {
             "user-1",
             "org-1",
             body.reason,
+            "once",
+            false,
         );
         assert_eq!(request.decision_source, ApprovalDecisionSource::User as i32);
         assert_eq!(request.scope, ApprovalScope::Once as i32);
@@ -7506,15 +8756,69 @@ mod approval_value_tests {
     }
 
     #[test]
-    fn a_decision_scope_other_than_once_is_refused_until_grants_exist() {
-        assert!(require_once_scope("").is_ok());
-        assert!(require_once_scope("once").is_ok());
-        for scope in ["thread", "run", "Once", " once", "forever"] {
-            let (status, Json(body)) =
-                require_once_scope(scope).expect_err("a standing scope must be refused");
+    fn a_decision_scope_other_than_once_is_refused_while_grants_are_off() {
+        let offered = vec![SCOPE_ONCE.to_owned(), SCOPE_THREAD.to_owned()];
+        assert_eq!(
+            checked_decision_scope_with("", ApprovalState::Granted, &offered, false).expect("once"),
+            SCOPE_ONCE
+        );
+        for scope in ["thread", "run"] {
+            let (status, Json(body)) = checked_decision_scope_with(
+                scope,
+                ApprovalState::Granted,
+                &offered,
+                false,
+            )
+            .expect_err("a standing scope is refused while grants are off");
             assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{scope}");
             assert_eq!(body["error"]["code"], "scope_not_enabled", "{scope}");
         }
+    }
+
+    #[test]
+    fn decide_refuses_a_scope_the_server_did_not_offer() {
+        let once_only = vec![SCOPE_ONCE.to_owned()];
+        let (status, Json(body)) = checked_decision_scope_with(
+            "thread",
+            ApprovalState::Granted,
+            &once_only,
+            true,
+        )
+        .expect_err("a scope the cause does not offer is refused");
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(body["error"]["code"], "scope_not_offered");
+
+        let offered = vec![
+            SCOPE_ONCE.to_owned(),
+            SCOPE_THREAD.to_owned(),
+            SCOPE_RUN.to_owned(),
+        ];
+        assert_eq!(
+            checked_decision_scope_with("thread", ApprovalState::Granted, &offered, true)
+                .expect("offered"),
+            SCOPE_THREAD
+        );
+        assert_eq!(
+            checked_decision_scope_with("run", ApprovalState::Granted, &offered, true)
+                .expect("offered"),
+            SCOPE_RUN
+        );
+        let (_, Json(body)) = checked_decision_scope_with(
+            "forever",
+            ApprovalState::Granted,
+            &offered,
+            true,
+        )
+        .expect_err("an unknown scope is refused");
+        assert_eq!(body["error"]["code"], "scope_not_offered");
+        let (_, Json(body)) = checked_decision_scope_with(
+            "thread",
+            ApprovalState::Denied,
+            &offered,
+            true,
+        )
+        .expect_err("a denial carries no scope");
+        assert_eq!(body["error"]["code"], "scope_not_applicable");
     }
 
     #[test]
@@ -8036,6 +9340,7 @@ async fn ingest_feedback(
         // The guard at the top of this handler answered every ZDR posture with a refusal,
         // so the feedback event that reaches this line is persistent.
         zdr: false,
+        ..Default::default()
     };
     state
         .publisher
@@ -8183,6 +9488,12 @@ pub struct InvokeRequest {
     /// posture (`HARNESS_PHASE1` §1). Absent → "chat" (auto, non-gating).
     #[serde(default)]
     pub profile: Option<String>,
+    /// The agent mode the person chose for this turn (WS25-S6): `lockdown`, `read_only`, `ask_first`
+    /// or `auto`. Read only while `AGENT_MODES` is on, and then it can only tighten the posture the
+    /// platform already sets; an id this build does not know is refused typed (`agent_mode_unknown`).
+    /// Absent or blank is no choice, and the turn is the one it was before the field existed.
+    #[serde(default, alias = "agentMode")]
+    pub agent_mode: Option<String>,
     /// Response-style / verbosity profile (token-efficiency layer):
     /// `concise` | `detailed` | `minimal` | `normal`. `normal`/unset/unknown
     /// injects no directive. See `crate::verbosity`.
@@ -8234,6 +9545,13 @@ pub struct InvokeRequest {
     /// client is never read. A ZDR token is refused through the `agentic` row.
     #[serde(default, alias = "executeGranted")]
     pub execute_granted: bool,
+    /// The plan an approve-then-execute turn runs (WS14 S2): the plan a plan approval answered
+    /// `continuation: execute_now` for. It is read only while `MODEL_GATEWAY_PLAN_EXECUTE_ON_APPROVE`
+    /// is on, and only together with `execute_granted`. The turn is refused typed
+    /// (`plan_grant_unavailable`) unless the thread's grant names this plan, and the run then binds
+    /// that grant itself (`sse::approve_then_execute_grant`). It carries no rung.
+    #[serde(default, alias = "approvedPlanId")]
+    pub approved_plan_id: Option<String>,
     /// chat-parity §2 function-calling: tool definitions the model may call.
     /// Empty → no tools. With the `tools` feature opted in, the stream path runs
     /// the tool loop (`tool_call`/`tool_result` events) before the final answer.
@@ -8287,12 +9605,40 @@ pub struct InvokeRequest {
     /// not carried here — this field is the text alone.
     #[serde(default)]
     pub persona_instructions: Option<String>,
+    /// The reply tone the person picked (EP-8-S3), resolved server-side from user-core's AI settings
+    /// by the BFF gateway and never client-suppliable, like `persona_instructions`. Only the closed
+    /// names `professional`, `friendly`, `direct`, `warm` and `neutral` mean anything: `default` and any
+    /// other value add nothing. Read only while `MODEL_GATEWAY_TONE_PRESETS` is on.
+    #[serde(default)]
+    pub persona_tone: Option<String>,
     /// WS16-S6 — the viewer's interface language, stamped by the BFF gateway from a closed set
     /// (`nb-NO` or `en-US`; flag `CHAT_LOCALE_HINT`). A framing hint for the reply language,
     /// request-scoped: never stored, grants nothing, and `Honored` under ZDR. See
     /// [`crate::locale_hint`]. Absent on agent wake-ups.
     #[serde(default)]
     pub locale: Option<String>,
+    /// The browser's IANA zone name (`Europe/Oslo`), sent on every turn (EP-8-S1). The BFF gateway
+    /// keeps it only in that closed form; it is checked again here, because it is printed into the
+    /// prompt. Read only while `MODEL_GATEWAY_USER_LOCALE_CONTEXT` is on; never stored.
+    #[serde(default)]
+    pub client_timezone: Option<String>,
+    /// The browser's UTC offset in minutes, east positive (EP-8-S1). Dates and times are computed from
+    /// it, so a value outside the range a browser can report gives no local clock at all.
+    #[serde(default)]
+    pub client_utc_offset_minutes: Option<i32>,
+    /// The app language the browser shows, `no` or `en` (EP-8-S1). Distinct from `locale` above, which
+    /// is the WS16-S6 hint with its own switch and vocabulary (`nb-NO` / `en-US`).
+    #[serde(default)]
+    pub ui_locale: Option<String>,
+    /// EP-6 S10 — the published agent definitions this turn's `subagent.task` may name as a
+    /// role, resolved server-side by the BFF gateway (the Space's bound agents, each at its
+    /// pinned or published version) and never client-suppliable, like `agent_system_prompt`.
+    /// Kept as raw JSON: it is read, bounded and typed only while
+    /// `MODEL_GATEWAY_SUBAGENT_ROLE_CATALOGUE` is on (`sse::compose_agent_roles`), so a body
+    /// carrying it is parsed exactly as before with the switch off. Grants nothing: a role
+    /// only narrows a delegated child's tools.
+    #[serde(default)]
+    pub agent_roles: Option<serde_json::Value>,
 }
 
 /// A tool/function definition supplied by the client (chat-parity §2).
@@ -8952,10 +10298,30 @@ async fn plan_approval(
         state.plan_mode.grant_expires_at(&claims.org_id, &thread_id)
     };
 
+    // WS14 S2: what the client does next. `execute_now` needs the grant recorded durably for this
+    // plan (the durable switch on, the write landed, not waived) and an execute turn accepted here
+    // (the execute switch and the approval-resume switch both on). Otherwise the grant waits for the
+    // person's own next turn, as it always has.
+    let continuation = crate::sse::approval_continuation(
+        crate::sse::plan_execute_on_approve_enabled(),
+        durable_grant && durably_recorded && !body.plan_id.is_empty(),
+        state.plan_mode.execute_enabled() && state.plan_mode.approval_resume_enabled(),
+    );
+    // WS25-S9: the rung the run will actually hold. An enforced org rung cap clamps the grant at dispatch (and the
+    // in-memory copy at record), so the answer states the clamped rung rather than the one asked for.
+    let effective_rung = crate::org_agent_policy::clamp_rung(
+        Some(escalation.to()),
+        crate::org_agent_policy::held_rung_cap(
+            crate::org_agent_policy::policy_mode(),
+            crate::org_agent_policy::shared_cache(),
+            &claims.org_id,
+        ),
+    )
+    .unwrap_or(escalation.to());
     Ok(Json(json!({
         "run_id": run_id,
         "was_in_plan_mode": exited.was_active,
-        "granted_rung": label(escalation.to()),
+        "granted_rung": label(effective_rung),
         "justification": escalation.justification(),
         "persisted": durably_recorded,
         "plan": approved_plan.map(|plan| plan_value(&plan)),
@@ -8964,6 +10330,8 @@ async fn plan_approval(
         // so and refuse to offer a rung that has run out. `null` when no grant is held
         // (a rung the store does not record).
         "grant_expires_at_unix": grant_expires_at_unix,
+        // WS14 S2, additive: `execute_now` or `next_message` (see above).
+        "continuation": continuation,
     })))
 }
 
@@ -9480,6 +10848,41 @@ struct ModelDescriptor {
     /// ladder off serves the same JSON as before.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     effort_levels: Vec<String>,
+    /// The context window in tokens from the declared record. Left out when no sourced
+    /// row names the model, so an unknown model serves the JSON it served before.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    context_window_tokens: Option<u32>,
+    /// The synchronous output ceiling in tokens this model is served at. Left out when
+    /// unknown.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_output_tokens: Option<u32>,
+    /// `ga`, `preview` or `deprecated`. Left out when no sourced row names the model.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    lifecycle: String,
+    /// The catalogue's list price for a chat model, behind
+    /// `MODEL_GATEWAY_CATALOGUE_PRICES`. Left out when there is none, so a deploy
+    /// with the switch off serves the same JSON as before.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    price: Option<crate::catalogue_prices::ModelPrice>,
+    /// What the provider states about this model's request data (`data_use` on inference-core's
+    /// `ModelInfo`). Left out when nothing is stated, so a deploy without an attested deployment
+    /// serves the JSON it served before (EP-9 C5).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    data_use: Option<DataUseDescriptor>,
+}
+
+/// The data-use statements one model's provider makes (`data_use` on `/v1/models`). A field is
+/// left out unless a source states it: an absent field is "not stated", never "no".
+#[derive(Debug, Serialize)]
+struct DataUseDescriptor {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    trains_on_inputs: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    retention_days: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    zdr_attested: Option<bool>,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    statement_ref: String,
 }
 
 /// Wire-numeric → tier label. Mirrors inference-core's `PrivacyTier::label`;
@@ -9496,6 +10899,12 @@ pub(crate) fn privacy_tier_label(value: i32) -> &'static str {
     }
 }
 
+/// A token count the record declares, or `None` when it declares none, so the descriptor
+/// leaves the field out rather than stating zero tokens.
+fn known_tokens(value: u32) -> Option<u32> {
+    (value > 0).then_some(value)
+}
+
 #[derive(Debug, Serialize)]
 struct ListModelsHttpResponse {
     models: Vec<ModelDescriptor>,
@@ -9504,10 +10913,19 @@ struct ListModelsHttpResponse {
     /// same JSON as before.
     #[serde(skip_serializing_if = "Option::is_none")]
     entitlement: Option<ModelEntitlementMeta>,
+    /// Whether side tasks ask the platform role table (`MODEL_GATEWAY_ROLE_ROUTING`, EP-13 S4).
+    /// Left out while off, so a deploy with the switch off serves the same JSON as before.
+    #[serde(skip_serializing_if = "is_false")]
+    role_routing: bool,
     /// What a chat turn may attach, enforced by the stream route. Left out when
     /// the attachment contract is off, so the client keeps its own constants.
     #[serde(skip_serializing_if = "Option::is_none")]
     attachment_policy: Option<crate::attachment_policy::DeclaredAttachmentPolicy>,
+}
+
+/// The serde skip predicate for a flag that is left out while it is off.
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 /// `ModelAccessMeta` as the catalogue's sibling field: counts, a revision and
@@ -9558,18 +10976,35 @@ async fn list_models(
         })?
         .into_inner();
 
+    // One catalogue snapshot prices the whole listing, and none is taken while the switch is off.
+    let rates = crate::catalogue_prices::snapshot_for_listing(&state.pricing).await;
     let models: Vec<ModelDescriptor> = resp
         .models
         .into_iter()
-        .map(|m| ModelDescriptor {
-            id: m.id,
-            provider: m.provider,
-            modality: m.modality,
-            streaming: m.streaming,
-            features: m.features,
-            privacy_tier: privacy_tier_label(m.privacy_tier),
-            residency: m.residency,
-            effort_levels: m.effort_levels,
+        .map(|m| {
+            let price = rates.as_ref().and_then(|rates| {
+                crate::catalogue_prices::model_price(rates, &m.id, &m.provider, &m.modality)
+            });
+            ModelDescriptor {
+                id: m.id,
+                provider: m.provider,
+                modality: m.modality,
+                streaming: m.streaming,
+                features: m.features,
+                privacy_tier: privacy_tier_label(m.privacy_tier),
+                residency: m.residency,
+                effort_levels: m.effort_levels,
+                context_window_tokens: known_tokens(m.context_window_tokens),
+                max_output_tokens: known_tokens(m.max_output_tokens),
+                lifecycle: m.lifecycle,
+                price,
+                data_use: m.data_use.map(|data_use| DataUseDescriptor {
+                    trains_on_inputs: data_use.trains_on_inputs,
+                    retention_days: data_use.retention_days,
+                    zdr_attested: data_use.zdr_attested,
+                    statement_ref: data_use.statement_ref,
+                }),
+            }
         })
         .collect();
     let entitlement = resp.access.map(|access| ModelEntitlementMeta {
@@ -9593,6 +11028,7 @@ async fn list_models(
         models,
         entitlement,
         attachment_policy,
+        role_routing: crate::role_routing::role_routing_enabled(),
     }))
 }
 
@@ -9910,6 +11346,87 @@ struct ListThreadsQuery {
     starred_only: Option<bool>,
 }
 
+/// The wire name of a derived attention state (WS16 S1). `None` for the unspecified value, which
+/// is what a replica with the switch off returns, so the field is omitted and the response is
+/// unchanged. A number this build does not name reads the same way.
+fn attention_state_name(state: i32) -> Option<&'static str> {
+    use mp_contracts::model_plane::v1::AttentionState;
+    match AttentionState::try_from(state).ok()? {
+        AttentionState::Unspecified => None,
+        AttentionState::NeedsApproval => Some("needs_approval"),
+        AttentionState::NeedsInput => Some("needs_input"),
+        AttentionState::PlanReady => Some("plan_ready"),
+        AttentionState::Working => Some("working"),
+        AttentionState::Completed => Some("completed"),
+        AttentionState::Failed => Some("failed"),
+        AttentionState::Archived => Some("archived"),
+        AttentionState::Idle => Some("idle"),
+    }
+}
+
+/// The wire name of an attention reason (WS16 S1): the pending row behind a waiting state, or
+/// `goal` for a thread goal that stopped (EP-7 S5). Tag 4 is reserved for the parked loop of WS03,
+/// so this build names nothing for it.
+fn attention_reason_name(reason: i32) -> Option<&'static str> {
+    use mp_contracts::model_plane::v1::AttentionReason;
+    match AttentionReason::try_from(reason).ok()? {
+        AttentionReason::Unspecified => None,
+        AttentionReason::Approval => Some("approval"),
+        AttentionReason::Plan => Some("plan"),
+        AttentionReason::Input => Some("input"),
+        AttentionReason::Goal => Some("goal"),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct ListAttentionQuery {
+    /// Page size, 1 to 200. Absent or out of range reads as 200 in Session Core.
+    limit: Option<i32>,
+}
+
+#[derive(Debug, Serialize)]
+struct AttentionItemResponse {
+    thread_id: String,
+    /// Omitted for a state this build does not name, rather than guessed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    state: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<&'static str>,
+    /// When the state began, RFC 3339. Omitted when the state has no start.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    since: Option<String>,
+    /// Whether the thread holds an assistant reply the owner has not read.
+    unseen: bool,
+    /// The thread's latest run, for a deep link. Omitted when the thread has no run.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    run_id: String,
+}
+
+/// The counts behind the attention badge.
+#[derive(Debug, Serialize)]
+struct AttentionCountsResponse {
+    needs_you: i32,
+    working: i32,
+    unseen: i32,
+}
+
+#[derive(Debug, Serialize)]
+struct ListAttentionResponse {
+    /// False while the attention switch is off; the items and counts are then empty.
+    enabled: bool,
+    /// Whether the live stream is served (WS16 S5). Omitted while it is off, so the listing reads as
+    /// it did before the stream existed.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    stream: bool,
+    items: Vec<AttentionItemResponse>,
+    counts: AttentionCountsResponse,
+}
+
+#[derive(Debug, Serialize)]
+struct MarkThreadSeenResponse {
+    thread_id: String,
+}
+
 #[derive(Debug, Serialize)]
 struct ThreadSummaryResponse {
     thread_id: String,
@@ -9938,6 +11455,9 @@ struct ThreadSummaryResponse {
     /// `true` here for a pre-persona session-core replica during a rolling
     /// deploy — fail open, never silently disable persona fleet-wide.
     persona_enabled: bool,
+    /// The thread this one was forked from; omitted for a thread that was not forked.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    forked_from_thread_id: String,
     /// Set when the owner archived the thread; omitted for an active thread.
     #[serde(skip_serializing_if = "String::is_empty")]
     archived_at: String,
@@ -9946,6 +11466,16 @@ struct ThreadSummaryResponse {
     /// Whether the thread has a reply the owner has not read yet. This is the one
     /// unread definition (build plan DEC-11); the sidebar dot reads it as is.
     unread: bool,
+    /// The derived attention state (WS16 S1), as its wire name. Omitted while the attention
+    /// switch is off.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    attention_state: Option<&'static str>,
+    /// When the attention state began, RFC 3339. Omitted when the state has no start.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    attention_since: Option<String>,
+    /// Whether the thread has an unread reply. Present only with an attention state.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    attention_unseen: Option<bool>,
     /// Replies after the first message, under the reader's audience ceiling (Session Core's
     /// count); omitted when zero so a thread without replies keeps its shape.
     #[serde(skip_serializing_if = "is_zero_u32")]
@@ -10217,6 +11747,7 @@ async fn list_threads(
             updated_at: timestamp_to_rfc3339(thread.updated_at),
             pinned: thread.pinned,
             space_id: thread.space_id,
+            forked_from_thread_id: thread.forked_from_thread_id,
             latest_run_id: thread.latest_run_id,
             latest_run_status: thread.latest_run_status,
             latest_run_updated_at: thread
@@ -10228,6 +11759,12 @@ async fn list_threads(
             archived_at: timestamp_to_rfc3339(thread.archived_at),
             starred: thread.starred,
             unread: thread.unread,
+            attention_state: attention_state_name(thread.attention_state),
+            attention_since: thread
+                .attention_since
+                .map(|value| timestamp_to_rfc3339(Some(value))),
+            attention_unseen: attention_state_name(thread.attention_state)
+                .map(|_| thread.attention_unseen),
             reply_count: thread.reply_count,
             last_author_subject_id: thread.last_author_subject_id,
             last_message_seq: thread.last_message_seq,
@@ -10288,6 +11825,185 @@ async fn update_thread_presentation(
         .into_inner();
 
     Ok(Json(UpdateThreadPresentationResponse {
+        thread_id: response.thread_id,
+    }))
+}
+
+/// The caller's threads that need attention or are working (WS16 S1). The scope comes from the
+/// verified claims, so a query naming another user changes nothing, and the answer carries
+/// identifiers and the closed state only.
+async fn list_attention(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    bearer: VerifiedModelBearer,
+    Query(query): Query<ListAttentionQuery>,
+) -> Result<Json<ListAttentionResponse>, HttpJsonError> {
+    use mp_contracts::model_plane::v1::ListAttentionRequest;
+
+    let response = state
+        .attention_client
+        .clone()
+        .list_attention(authenticated_session_request(
+            ListAttentionRequest {
+                org_id: claims.org_id.clone(),
+                user_id: claims.user_id.clone(),
+                limit: query.limit.unwrap_or_default(),
+            },
+            &bearer,
+        )?)
+        .await
+        .map_err(|error| session_thread_error("session-core list_attention failed", &error))?
+        .into_inner();
+
+    Ok(Json(ListAttentionResponse {
+        enabled: response.enabled,
+        stream: response.stream_enabled,
+        items: response
+            .items
+            .into_iter()
+            .map(attention_item_response)
+            .collect(),
+        counts: attention_counts_response(response.counts.unwrap_or_default()),
+    }))
+}
+
+/// `GET /v1/attention/stream`: the caller's attention stream as server-sent events (WS16 S5). Each frame
+/// is one event named for its kind, with `<epoch>:<seq>` as its id. Session Core refuses the stream
+/// before its first frame (switch off, cap reached, zero-retention caller), and the refusal reaches the
+/// browser as Session Core sent it.
+async fn stream_attention(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    bearer: VerifiedModelBearer,
+) -> Result<Sse<ReceiverStream<Result<SseEvent, Infallible>>>, HttpJsonError> {
+    use mp_contracts::model_plane::v1::StreamAttentionRequest;
+
+    let mut frames = state
+        .attention_client
+        .clone()
+        .stream_attention(authenticated_session_request(
+            StreamAttentionRequest {
+                org_id: claims.org_id.clone(),
+                user_id: claims.user_id.clone(),
+            },
+            &bearer,
+        )?)
+        .await
+        .map_err(|error| session_thread_error("session-core stream_attention failed", &error))?
+        .into_inner();
+
+    // The relay ends when Session Core ends the stream or the browser leaves. Dropping `frames` then
+    // releases Session Core's side of the stream.
+    let (tx, rx) = tokio::sync::mpsc::channel(ATTENTION_STREAM_BUFFER);
+    tokio::spawn(async move {
+        while let Ok(Some(frame)) = frames.message().await {
+            let Some(event) = attention_stream_event(frame) else {
+                continue;
+            };
+            if tx.send(Ok(event)).await.is_err() {
+                break;
+            }
+        }
+    });
+    Ok(Sse::new(ReceiverStream::new(rx)))
+}
+
+/// The frames a stream holds while the browser reads them.
+const ATTENTION_STREAM_BUFFER: usize = 16;
+
+/// One frame of the attention stream as a server-sent event. The name is the frame's kind; the id is
+/// `<epoch>:<seq>`, so a restarted replica reads as a new epoch rather than as a gap in the old sequence.
+fn attention_stream_event(
+    frame: mp_contracts::model_plane::v1::StreamAttentionResponse,
+) -> Option<SseEvent> {
+    use mp_contracts::model_plane::v1::stream_attention_response::Frame;
+
+    let id = format!("{}:{}", frame.epoch, frame.seq);
+    let (name, data) = match frame.frame? {
+        Frame::Snapshot(snapshot) => (
+            "attention_snapshot",
+            json!({
+                "items": snapshot.items.into_iter().map(attention_item_response).collect::<Vec<_>>(),
+                "counts": attention_counts_response(snapshot.counts.unwrap_or_default()),
+            }),
+        ),
+        Frame::ThreadChanged(changed) => (
+            "attention_changed",
+            json!({
+                "item": attention_item_response(changed.item.unwrap_or_default()),
+                "counts": attention_counts_response(changed.counts.unwrap_or_default()),
+            }),
+        ),
+        Frame::Resync(_) => ("attention_resync", json!({})),
+        Frame::Heartbeat(_) => ("attention_heartbeat", json!({})),
+    };
+    Some(
+        SseEvent::default()
+            .event(name)
+            .id(id)
+            .data(data.to_string()),
+    )
+}
+
+/// One listed thread as the browser reads it (WS16 S1, S5).
+fn attention_item_response(
+    item: mp_contracts::model_plane::v1::AttentionItem,
+) -> AttentionItemResponse {
+    AttentionItemResponse {
+        thread_id: item.thread_id,
+        state: attention_state_name(item.state),
+        reason: attention_reason_name(item.reason),
+        since: item.since.map(|value| timestamp_to_rfc3339(Some(value))),
+        unseen: item.unseen,
+        run_id: item.run_id,
+    }
+}
+
+/// The counts behind the badge, as the browser reads them (WS16 S1, S5).
+fn attention_counts_response(
+    counts: mp_contracts::model_plane::v1::AttentionCounts,
+) -> AttentionCountsResponse {
+    AttentionCountsResponse {
+        needs_you: counts.needs_you,
+        working: counts.working,
+        unseen: counts.unseen,
+    }
+}
+
+/// Marks one of the caller's threads read (WS16 S1). Session Core refuses a zero-retention or
+/// waived caller, and answers 412 while the attention switch is off.
+async fn mark_thread_seen(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    bearer: VerifiedModelBearer,
+    Path(thread_id): Path<String>,
+) -> Result<Json<MarkThreadSeenResponse>, HttpJsonError> {
+    use mp_contracts::model_plane::v1::MarkThreadSeenRequest;
+
+    let thread_id = thread_id.trim();
+    if thread_id.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "thread_id is required"})),
+        ));
+    }
+
+    let response = state
+        .attention_client
+        .clone()
+        .mark_thread_seen(authenticated_session_request(
+            MarkThreadSeenRequest {
+                org_id: claims.org_id.clone(),
+                user_id: claims.user_id.clone(),
+                thread_id: thread_id.to_owned(),
+            },
+            &bearer,
+        )?)
+        .await
+        .map_err(|error| session_thread_error("session-core mark_thread_seen failed", &error))?
+        .into_inner();
+
+    Ok(Json(MarkThreadSeenResponse {
         thread_id: response.thread_id,
     }))
 }
@@ -11033,6 +12749,95 @@ pub(crate) fn history_versions_disabled() -> HttpJsonError {
     )
 }
 
+/// Body of `POST /v1/threads/{id}/fork`: the assistant turn the copy ends with, and an optional
+/// title for the new thread.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ForkThreadBody {
+    from_message_id: String,
+    #[serde(default)]
+    title: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ForkThreadResponse {
+    thread_id: String,
+    forked_from_thread_id: String,
+    copied_message_count: u32,
+}
+
+/// Start a new thread from a copy of this one, up to an assistant turn (build plan WS17 S6). A
+/// zero-retention caller is refused before anything is written. Session Core decides the rest: the
+/// switch, the owner, a Space or waived source, and whether the turn lies on the active path.
+async fn fork_thread(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    bearer: VerifiedModelBearer,
+    Path(thread_id): Path<String>,
+    Json(body): Json<ForkThreadBody>,
+) -> Result<Json<ForkThreadResponse>, HttpJsonError> {
+    use mp_contracts::model_plane::v1::ForkThreadRequest;
+
+    require_non_zdr_durable_mutation(&claims)?;
+    let thread_id = thread_id.trim();
+    if thread_id.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "thread_id is required"})),
+        ));
+    }
+    let response = state
+        .thread_fork_client
+        .clone()
+        .fork_thread(authenticated_session_request(
+            ForkThreadRequest {
+                org_id: claims.org_id.clone(),
+                thread_id: thread_id.to_owned(),
+                from_message_id: body.from_message_id,
+                title: body.title,
+            },
+            &bearer,
+        )?)
+        .await
+        .map_err(|error| fork_thread_error(&error))?
+        .into_inner();
+
+    Ok(Json(ForkThreadResponse {
+        thread_id: response.new_thread_id,
+        forked_from_thread_id: thread_id.to_owned(),
+        copied_message_count: response.copied_message_count,
+    }))
+}
+
+/// Session Core's refusals of a fork, as the typed codes the client acts on. A switch that is off
+/// answers 503 `history_fork_disabled`. A source that cannot be forked answers 409
+/// `history_fork_refused`, carrying Session Core's reason.
+pub(crate) fn fork_thread_error(error: &tonic::Status) -> HttpJsonError {
+    match error.code() {
+        tonic::Code::Unavailable if error.message() == "thread_fork_disabled" => {
+            history_fork_disabled()
+        }
+        tonic::Code::FailedPrecondition => (
+            StatusCode::CONFLICT,
+            Json(json!({"error": {
+                "code": "history_fork_refused",
+                "message": error.message(),
+            }})),
+        ),
+        _ => session_thread_error("session-core fork_thread failed", error),
+    }
+}
+
+pub(crate) fn history_fork_disabled() -> HttpJsonError {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(json!({"error": {
+            "code": "history_fork_disabled",
+            "message": "forking is not enabled on this deployment",
+        }})),
+    )
+}
+
 #[derive(Debug, Deserialize)]
 struct ReplayThreadEventsQuery {
     /// Resume after this event id (exclusive). Empty means from the beginning.
@@ -11152,6 +12957,7 @@ fn durable_thread_event_type(event: &Event) -> String {
             Some("THREAD_PRESENTATION_UPDATED")
         }
         "type.googleapis.com/model_plane.v1.ThreadArchived" => Some("THREAD_ARCHIVED"),
+        "type.googleapis.com/model_plane.v1.ThreadForked" => Some("THREAD_FORKED"),
         _ => None,
     };
 
@@ -11250,6 +13056,7 @@ async fn list_memories(
                 org_id: claims.org_id.clone(),
                 user_id: claims.user_id.clone(),
                 limit: query.limit.unwrap_or(100),
+                ..Default::default()
             },
             &bearer,
         )?)
@@ -11400,6 +13207,7 @@ async fn delete_memory_entry(
                 org_id: claims.org_id.clone(),
                 user_id: claims.user_id.clone(),
                 memory_id: trimmed.to_owned(),
+                ..Default::default()
             },
             &bearer,
         )?)
@@ -11412,6 +13220,219 @@ async fn delete_memory_entry(
         degraded: response.degraded,
         degradation_reason: response.degradation_reason,
     }))
+}
+
+/// Upper bounds of the Space memory routes' body fields (EP-8 S7), the run-control route's own.
+const SPACE_MEMORY_MAX_ID_BYTES: usize = 200;
+const SPACE_MEMORY_MAX_DECISION_REF_BYTES: usize = 512;
+const SPACE_MEMORY_MAX_DECISION_TOKEN_BYTES: usize = 8 * 1024;
+
+/// `POST /v1/spaces/:space_id/memory/{list,delete}` body. The Control `model.space.memory.manage`
+/// decision rides in the body; `memory_id` only on a delete.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SpaceMemoryBody {
+    #[serde(default)]
+    space_control_decision_ref: String,
+    #[serde(default)]
+    space_control_decision_token: String,
+    #[serde(default)]
+    memory_id: String,
+    #[serde(default)]
+    limit: Option<u32>,
+}
+
+/// The decision and ids of a Space memory call, bounded; `None` is a malformed request.
+fn space_memory_fields(space_id: &str, body: &SpaceMemoryBody) -> Option<(String, String, String)> {
+    let space_id = space_id.trim();
+    let decision_ref = body.space_control_decision_ref.trim();
+    let token = body.space_control_decision_token.trim();
+    let bounded = !space_id.is_empty()
+        && space_id.len() <= SPACE_MEMORY_MAX_ID_BYTES
+        && decision_ref.len() <= SPACE_MEMORY_MAX_DECISION_REF_BYTES
+        && token.len() <= SPACE_MEMORY_MAX_DECISION_TOKEN_BYTES
+        && body.memory_id.trim().len() <= SPACE_MEMORY_MAX_ID_BYTES;
+    bounded.then(|| (space_id.to_owned(), decision_ref.to_owned(), token.to_owned()))
+}
+
+/// Session Core's refusal of a Space memory call in fixed words. A permission refusal is one code
+/// whatever its cause (no decision, another role, a revoked member), so nothing about the Space leaks.
+fn space_memory_error(status: &tonic::Status) -> HttpJsonError {
+    let (code, http, message) = match status.code() {
+        tonic::Code::PermissionDenied | tonic::Code::Unauthenticated => (
+            "space_memory_not_authorized",
+            StatusCode::FORBIDDEN,
+            "managing this Space's memory is not permitted",
+        ),
+        tonic::Code::NotFound => (
+            "memory_not_found",
+            StatusCode::NOT_FOUND,
+            "the memory is not available",
+        ),
+        tonic::Code::InvalidArgument => (
+            "invalid_request",
+            StatusCode::BAD_REQUEST,
+            "the Space memory request is invalid",
+        ),
+        _ => (
+            "space_memory_unavailable",
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Space memory is unavailable",
+        ),
+    };
+    (
+        http,
+        Json(json!({"error": {"code": code, "message": message, "details": {}}})),
+    )
+}
+
+#[derive(Debug, Serialize)]
+struct SpaceMemorySummaryResponse {
+    memory_id: String,
+    content: String,
+    updated_at: String,
+    provenance: &'static str,
+    /// `room_statement` or `member_save`.
+    source_label: String,
+    /// The thread the row was learned in, for the source link.
+    thread_id: String,
+    /// `audience_changed` when the room's current audience does not recall the row; omitted otherwise.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    withheld_reason: String,
+}
+
+/// The memory of one Space, for its owner or admin (EP-8 S7). Session Core verifies the Control
+/// Space memory decision; this hop checks the shape only. A read: a zero-retention caller is
+/// answered empty by Session Core, as the personal list is.
+async fn list_space_memories(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    bearer: VerifiedModelBearer,
+    Path(space_id): Path<String>,
+    Json(body): Json<SpaceMemoryBody>,
+) -> Result<Json<Value>, HttpJsonError> {
+    use mp_contracts::model_plane::v1::ListMemoryRequest;
+    let (space_id, decision_ref, token) = space_memory_fields(&space_id, &body).ok_or_else(|| {
+        space_memory_error(&tonic::Status::invalid_argument("invalid Space memory request"))
+    })?;
+    let response = state
+        .memory_client
+        .clone()
+        .list_memory(authenticated_session_request(
+            ListMemoryRequest {
+                org_id: claims.org_id.clone(),
+                user_id: claims.user_id.clone(),
+                limit: body.limit.unwrap_or(100).clamp(1, 200),
+                space_id,
+                space_control_decision_ref: decision_ref,
+                space_control_decision_token: token,
+            },
+            &bearer,
+        )?)
+        .await
+        .map_err(|status| space_memory_error(&status))?
+        .into_inner();
+    let withheld = response
+        .entries
+        .iter()
+        .filter(|entry| !entry.withheld_reason.is_empty())
+        .count();
+    let memories: Vec<SpaceMemorySummaryResponse> = response
+        .entries
+        .into_iter()
+        .map(|entry| SpaceMemorySummaryResponse {
+            memory_id: entry.memory_id,
+            content: entry.content,
+            updated_at: timestamp_to_rfc3339(entry.updated_at),
+            provenance: memory_provenance_label(entry.provenance),
+            source_label: entry.source_label,
+            thread_id: entry.thread_id,
+            withheld_reason: entry.withheld_reason,
+        })
+        .collect();
+    Ok(Json(json!({
+        "memories": memories,
+        "withheld": withheld,
+        "degraded": response.degraded,
+        "degradation_reason": response.degradation_reason,
+    })))
+}
+
+/// Deletes one row of a Space's memory under a decision issued for that row (EP-8 S7). Allowed
+/// under every posture, as every delete is.
+async fn delete_space_memory_entry(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    bearer: VerifiedModelBearer,
+    Path(space_id): Path<String>,
+    Json(body): Json<SpaceMemoryBody>,
+) -> Result<Json<DeleteMemoryHttpResponse>, HttpJsonError> {
+    use mp_contracts::model_plane::v1::DeleteMemoryRequest;
+    let memory_id = body.memory_id.trim().to_owned();
+    let fields = space_memory_fields(&space_id, &body).filter(|_| !memory_id.is_empty());
+    let (space_id, decision_ref, token) = fields.ok_or_else(|| {
+        space_memory_error(&tonic::Status::invalid_argument("invalid Space memory request"))
+    })?;
+    let response = state
+        .memory_client
+        .clone()
+        .delete_memory(authenticated_session_request(
+            DeleteMemoryRequest {
+                org_id: claims.org_id.clone(),
+                user_id: claims.user_id.clone(),
+                memory_id,
+                space_id,
+                space_control_decision_ref: decision_ref,
+                space_control_decision_token: token,
+            },
+            &bearer,
+        )?)
+        .await
+        .map_err(|status| space_memory_error(&status))?
+        .into_inner();
+    Ok(Json(DeleteMemoryHttpResponse {
+        deleted: response.deleted,
+        degraded: response.degraded,
+        degradation_reason: response.degradation_reason,
+    }))
+}
+
+#[cfg(test)]
+mod space_memory_route_tests {
+    use super::*;
+
+    fn body(decision_ref: &str, token: &str, memory_id: &str) -> SpaceMemoryBody {
+        SpaceMemoryBody {
+            space_control_decision_ref: decision_ref.to_owned(),
+            space_control_decision_token: token.to_owned(),
+            memory_id: memory_id.to_owned(),
+            limit: None,
+        }
+    }
+
+    #[test]
+    fn space_memory_fields_are_bounded_and_trimmed() {
+        assert_eq!(
+            space_memory_fields(" space-1 ", &body(" ref ", " tok ", "")),
+            Some(("space-1".to_owned(), "ref".to_owned(), "tok".to_owned()))
+        );
+        assert_eq!(space_memory_fields("  ", &body("ref", "tok", "")), None);
+        assert_eq!(space_memory_fields(&"s".repeat(201), &body("ref", "tok", "")), None);
+        assert_eq!(space_memory_fields("space-1", &body("ref", &"t".repeat(8 * 1024 + 1), "")), None);
+        assert_eq!(space_memory_fields("space-1", &body("ref", "tok", &"m".repeat(201))), None);
+    }
+
+    #[test]
+    fn space_memory_refusals_use_fixed_words_and_object_details() {
+        let (status, Json(body)) =
+            space_memory_error(&tonic::Status::permission_denied("Space membership required for space-1"));
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["error"]["code"], "space_memory_not_authorized");
+        assert!(body["error"]["details"].is_object());
+        assert!(!body.to_string().contains("space-1"), "upstream text never crosses");
+        let (status, _) = space_memory_error(&tonic::Status::internal("db down"));
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    }
 }
 
 fn memory_state_label(tag: i32) -> &'static str {
@@ -11590,6 +13611,130 @@ async fn reset_memory(
     })))
 }
 
+/// The profile as JSON: its text, the ids of the memories behind it (never their
+/// content), how it was made, and why it is not used when it is not.
+fn user_profile_json(response: &mp_contracts::model_plane::v1::UserProfileResponse) -> Value {
+    json!({
+        "profile": response.profile.as_ref().map_or(Value::Null, |profile| json!({
+            "content": profile.content,
+            "source_memory_ids": profile.source_memory_ids,
+            "origin": profile.origin,
+            "revision": profile.revision,
+            "updated_at": profile
+                .updated_at
+                .as_ref()
+                .map_or(Value::Null, prost_ts_to_rfc3339),
+            "sources_deleted_since_edit": profile.sources_deleted_since_edit,
+        })),
+        "skip_reason": response.skip_reason,
+    })
+}
+
+/// A profile write refused for a ZDR or waived credential keeps its catalogue
+/// code and feature; every other refusal (`profile_not_enabled`,
+/// `profile_revision_stale`, `memory_not_enabled:<reason>`) is mapped as the
+/// other memory routes map theirs.
+fn session_profile_error(context: &str, error: &tonic::Status) -> HttpJsonError {
+    if let Some(refusal) = mp_contracts::zdr_refusal::Refusal::from_status(error) {
+        return (StatusCode::CONFLICT, Json(refusal.json_body()));
+    }
+    session_memory_error(context, error)
+}
+
+/// The signed-in user's standing profile. A ZDR caller is answered with no
+/// profile and `skip_reason=zdr` by session-core, so there is no ZDR branch here.
+async fn get_user_profile(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    bearer: VerifiedModelBearer,
+) -> Result<Json<Value>, HttpJsonError> {
+    use mp_contracts::model_plane::v1::GetUserProfileRequest;
+
+    let response = state
+        .memory_client
+        .clone()
+        .get_user_profile(authenticated_session_request(
+            GetUserProfileRequest {
+                org_id: claims.org_id.clone(),
+                user_id: claims.user_id.clone(),
+            },
+            &bearer,
+        )?)
+        .await
+        .map_err(|e| session_profile_error("session-core get_user_profile failed", &e))?
+        .into_inner();
+    Ok(Json(user_profile_json(&response)))
+}
+
+#[derive(Debug, Deserialize)]
+struct SetUserProfileBody {
+    content: String,
+    /// The revision the edit was made against; 0 (the default) when there was none.
+    #[serde(default)]
+    expected_revision: u64,
+}
+
+/// Stores the signed-in user's own edit of their profile. Org and user come from
+/// the verified claims, never the body.
+async fn set_user_profile(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    bearer: VerifiedModelBearer,
+    Json(body): Json<SetUserProfileBody>,
+) -> Result<Json<Value>, HttpJsonError> {
+    use mp_contracts::model_plane::v1::SetUserProfileRequest;
+
+    let response = state
+        .memory_client
+        .clone()
+        .set_user_profile(authenticated_session_request(
+            SetUserProfileRequest {
+                org_id: claims.org_id.clone(),
+                user_id: claims.user_id.clone(),
+                content: body.content,
+                expected_revision: body.expected_revision,
+            },
+            &bearer,
+        )?)
+        .await
+        .map_err(|e| session_profile_error("session-core set_user_profile failed", &e))?
+        .into_inner();
+    Ok(Json(user_profile_json(&response)))
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct RebuildUserProfileBody {
+    /// Replace an edited profile too; without it the edit is kept.
+    #[serde(default)]
+    force: bool,
+}
+
+/// Rebuilds the signed-in user's profile from their accepted memories.
+async fn rebuild_user_profile(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    bearer: VerifiedModelBearer,
+    Json(body): Json<RebuildUserProfileBody>,
+) -> Result<Json<Value>, HttpJsonError> {
+    use mp_contracts::model_plane::v1::RebuildUserProfileRequest;
+
+    let response = state
+        .memory_client
+        .clone()
+        .rebuild_user_profile(authenticated_session_request(
+            RebuildUserProfileRequest {
+                org_id: claims.org_id.clone(),
+                user_id: claims.user_id.clone(),
+                force: body.force,
+            },
+            &bearer,
+        )?)
+        .await
+        .map_err(|e| session_profile_error("session-core rebuild_user_profile failed", &e))?
+        .into_inner();
+    Ok(Json(user_profile_json(&response)))
+}
+
 #[derive(Debug, Deserialize)]
 struct LearningLedgerQuery {
     cursor: Option<String>,
@@ -11747,6 +13892,18 @@ async fn invoke(
             "code": "source_scope_requires_stream", "message": "Conversation-only tasks require the streaming chat endpoint."
         }}))).into());
     }
+    // An agent mode this build does not know is refused before anything runs (WS25-S6). The unary
+    // endpoint runs no agent loop, so a known mode changes nothing here and is not applied.
+    if crate::profile::chosen_agent_mode(
+        crate::profile::agent_modes_enabled(),
+        req.agent_mode.as_deref(),
+    )
+    .is_err()
+    {
+        return Err((StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": {
+            "code": mp_contracts::agent_mode::UNKNOWN_MODE_CODE, "message": "The agent mode is not one this server knows."
+        }}))).into());
+    }
     let start = std::time::Instant::now();
 
     // The turn's posture, decided once through the resolver before anything else: a ZDR token on
@@ -11825,6 +13982,7 @@ async fn invoke(
             .clone()
             .infer(authenticated_inference_request(
                 mp_contracts::model_plane::v1::InferRequest {
+                    purpose: InferPurpose::Answer as i32,
                     request_id: request_id.clone(),
                     org_id: claims.org_id.clone(),
                     model: normalized.model.clone(),
@@ -12087,6 +14245,7 @@ async fn invoke(
             "model": normalized.model,
         }),
         zdr: effective_zdr,
+        ..Default::default()
     };
 
     if let Err(error) = state
@@ -12127,6 +14286,7 @@ async fn invoke(
             .clone()
             .infer(authenticated_inference_request(
                 InferRequest {
+                    purpose: InferPurpose::Answer as i32,
                     request_id: request_id.clone(),
                     org_id: claims.org_id.clone(),
                     model: normalized.model.clone(),
@@ -12295,6 +14455,7 @@ async fn invoke(
             "cost_basis": cost_basis.as_str(),
         }),
         zdr: effective_zdr,
+        ..Default::default()
     };
 
     if let Err(e) = state
@@ -12474,6 +14635,66 @@ mod browser_suggestion_tests {
         assert!(prompt.contains("...[truncated]"));
         assert!(prompt.contains("Inspect page"));
     }
+
+    /// WS12.S4: a credential in the page (an accessibility value the user typed, a title,
+    /// a URL query, the vision model's reading of the screenshot) never reaches the
+    /// planner prompt; ordinary prose and ordinary URLs come through untouched. Secrets
+    /// are built from fragments so no secret-shaped literal sits in the source.
+    #[test]
+    fn browser_suggestion_prompt_masks_ax_value_and_visual_summary() {
+        let jwt = [
+            "eyJhbGciOiJI",
+            "UzI1NiIsInR5cCI6IkpXVCJ9",
+            ".eyJzdWIiOiIxMjM0NTY3ODkw",
+            ".SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c",
+        ]
+        .concat();
+        let key = ["sk-proj-", "Ab12Cd34Ef56", "Gh78Ij90Kl12"].concat();
+        let pat = ["ghp_", "aB3dE6gH9jK2mN5pQ8sT1uV4wX7yZ0"].concat();
+        let req = BrowserSuggestActionRequest {
+            goal: "Log in".to_owned(),
+            url: format!("https://app.example.com/cb?page=2&access_token={pat}&limit=5"),
+            title: format!("Welcome back {key}"),
+            observation: json!({
+                "extracted_text": "the bearer of the message arrived",
+                "page_url": format!("https://svc:hunter2-pw@h.example/p?token={pat}"),
+                "ax": [{ "role": "textbox", "value": jwt, "name": "Token" }],
+            }),
+            visual_observation: json!({ "ocr": [format!("key {key}")] }),
+            ..Default::default()
+        };
+
+        let prompt = browser_suggestion_prompt(
+            &req,
+            Some(&format!("The page shows an API key field containing {key}.")),
+        );
+
+        for secret in [&jwt, &key, &pat, &"hunter2-pw".to_owned()] {
+            assert!(!prompt.contains(secret.as_str()), "secret leaked: {prompt}");
+        }
+        assert!(prompt.contains("access_token=[REDACTED]&limit=5"));
+        assert!(prompt.contains("the bearer of the message arrived"));
+        assert!(prompt.contains("Welcome back [REDACTED]"));
+        assert!(prompt.contains("h.example/p?token=[REDACTED]"));
+        // The request is read, never rewritten.
+        assert!(req.observation.to_string().contains("eyJhbGciOiJI"));
+    }
+
+    #[test]
+    fn browser_suggestion_prompt_leaves_an_ordinary_page_alone() {
+        let req = BrowserSuggestActionRequest {
+            goal: "Inspect page".to_owned(),
+            url: "https://example.com/search?q=rust&page=2#top".to_owned(),
+            title: "Search results".to_owned(),
+            observation: json!({ "extracted_text": "max_tokens=4096 status=completed" }),
+            ..Default::default()
+        };
+        let prompt = browser_suggestion_prompt(&req, Some("a login form"));
+        assert!(prompt.contains("https://example.com/search?q=rust&page=2#top"));
+        assert!(prompt.contains("max_tokens=4096 status=completed"));
+        assert!(prompt.contains("a login form"));
+        assert!(!prompt.contains("[REDACTED]"));
+    }
 }
 
 #[cfg(test)]
@@ -12494,6 +14715,8 @@ mod invoke_zdr_tests {
     #[test]
     fn issuer_enforced_zdr_cannot_be_downgraded_by_the_request_body() {
         let claims = Claims {
+            key_id: None,
+            acting_user_id: None,
             sub: "user-a".to_owned(),
             iss: "issuer".to_owned(),
             exp: i64::MAX,
@@ -12600,6 +14823,8 @@ mod approval_resume_auth_tests {
     #[test]
     fn issuer_zdr_blocks_run_lifecycle_persistence() {
         let claims = Claims {
+            key_id: None,
+            acting_user_id: None,
             sub: "user-a".to_owned(),
             iss: "issuer".to_owned(),
             exp: i64::MAX,
@@ -12635,6 +14860,8 @@ mod capability_contract_tests {
 
     fn proxy_claims(zdr: bool) -> Claims {
         Claims {
+            key_id: None,
+            acting_user_id: None,
             sub: "user-a".to_owned(),
             iss: "test-issuer".to_owned(),
             exp: i64::MAX,
@@ -13055,6 +15282,8 @@ mod capability_contract_tests {
 
     fn mail_task_bridge_claims(org_id: &str) -> Claims {
         Claims {
+            key_id: None,
+            acting_user_id: None,
             sub: "service:verevon-gateway".to_owned(),
             iss: "test-issuer".to_owned(),
             exp: i64::MAX,
@@ -13265,6 +15494,14 @@ mod run_owner_publish_tests {
 
     #[tonic::async_trait]
     impl RunService for OwnerResolver {
+        // Main's RPCs (merged 2026-11-02); this double does not serve them.
+        async fn resolve_approval_authority(
+            &self,
+            _: tonic::Request<mp_contracts::model_plane::v1::ResolveApprovalAuthorityRequest>,
+        ) -> Result<tonic::Response<mp_contracts::model_plane::v1::ResolveApprovalAuthorityResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("resolve_approval_authority is not served by this double"))
+        }
+
         async fn get_run(
             &self,
             _: TonicRequest<GetRunRequest>,
@@ -13390,7 +15627,7 @@ mod run_owner_publish_tests {
         async fn cancel_run_as_room_manager(
             &self,
             _: TonicRequest<mp_contracts::model_plane::v1::CancelRunAsRoomManagerRequest>,
-        ) -> Result<Response<mp_contracts::model_plane::v1::CancelRunAsRoomManagerResponse>, Status> {
+        ) -> Result<TonicResponse<mp_contracts::model_plane::v1::CancelRunAsRoomManagerResponse>, Status> {
             Err(Status::unimplemented("room run stop not needed in this test"))
         }
     }
@@ -13433,6 +15670,11 @@ mod run_owner_publish_tests {
             privacy_tier: "unspecified",
             residency: String::new(),
             effort_levels: effort_levels.iter().map(|level| (*level).to_owned()).collect(),
+            context_window_tokens: None,
+            max_output_tokens: None,
+            lifecycle: String::new(),
+            price: None,
+            data_use: None,
         }
     }
 
@@ -13445,8 +15687,26 @@ mod run_owner_publish_tests {
         assert!(without.get("effort_levels").is_none(), "{without}");
     }
 
+    #[test]
+    fn list_models_descriptor_carries_a_price_only_when_there_is_one() {
+        let unpriced = serde_json::to_value(descriptor(&[])).unwrap();
+        assert!(unpriced.get("price").is_none(), "{unpriced}");
+        let mut priced = descriptor(&[]);
+        priced.price = Some(crate::catalogue_prices::ModelPrice {
+            input_per_million: 3.0,
+            output_per_million: 15.0,
+            currency: "USD".to_owned(),
+            source: "prefix",
+        });
+        let json = serde_json::to_value(priced).unwrap();
+        assert_eq!(json["price"]["source"], "prefix");
+        assert_eq!(json["id"], "gpt-5-mini", "the price sits beside the model's own fields");
+    }
+
     fn claims(org_id: &str, user_id: &str) -> Claims {
         Claims {
+            key_id: None,
+            acting_user_id: None,
             sub: user_id.to_owned(),
             iss: "test-issuer".to_owned(),
             exp: i64::MAX,
@@ -14833,8 +17093,10 @@ mod speech_route_tests {
     /// refuses speech that asks for zero retention. `attested` stands for a
     /// future attested deployment that serves ZDR speech.
     #[derive(Clone, Default)]
-    struct SpeechInference {
+    pub(super) struct SpeechInference {
         attested: bool,
+        /// When set, `infer` answers with this instead of the clean-up stand-in (the ai_chat tests).
+        reply: Arc<Mutex<Option<pb::InferResponse>>>,
         transcribe: Arc<Mutex<Vec<pb::TranscribeSpeechRequest>>>,
         synthesize: Arc<Mutex<Vec<pb::SynthesizeSpeechRequest>>>,
         infer: Arc<Mutex<Vec<pb::InferRequest>>>,
@@ -14861,7 +17123,11 @@ mod speech_route_tests {
             self.synthesize.lock().expect("synthesis capture").clone()
         }
 
-        fn cleanups(&self) -> Vec<pb::InferRequest> {
+        pub(super) fn answering(&self, reply: pb::InferResponse) {
+            *self.reply.lock().expect("reply setting") = Some(reply);
+        }
+
+        pub(super) fn cleanups(&self) -> Vec<pb::InferRequest> {
             self.infer.lock().expect("clean-up capture").clone()
         }
     }
@@ -14885,6 +17151,9 @@ mod speech_route_tests {
                 .lock()
                 .expect("clean-up capture")
                 .push(request.into_inner());
+            if let Some(reply) = self.reply.lock().expect("reply setting").clone() {
+                return Ok(tonic::Response::new(reply));
+            }
             Ok(tonic::Response::new(pb::InferResponse {
                 content: "Hei der.".to_owned(),
                 model_used: "cleanup-model".to_owned(),
@@ -15059,7 +17328,7 @@ mod speech_route_tests {
     }
 
     /// An `AppState` whose inference client talks to `inference`.
-    async fn state_with(inference: SpeechInference) -> AppState {
+    pub(super) async fn state_with(inference: SpeechInference) -> AppState {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind inference stand-in");
@@ -15085,6 +17354,8 @@ mod speech_route_tests {
 
     fn claims(zdr: bool) -> Claims {
         Claims {
+            key_id: None,
+            acting_user_id: None,
             sub: "user-a".to_owned(),
             iss: "test-issuer".to_owned(),
             exp: i64::MAX,
@@ -15103,7 +17374,7 @@ mod speech_route_tests {
         }
     }
 
-    fn bearer() -> VerifiedInferenceBearer {
+    pub(super) fn bearer() -> VerifiedInferenceBearer {
         VerifiedInferenceBearer::for_test("inference-test-bearer")
     }
 
@@ -15520,6 +17791,8 @@ mod tool_policy_proxy_tests {
 
     fn claims(zdr: bool) -> Claims {
         Claims {
+            key_id: None,
+            acting_user_id: None,
             sub: "user-a".to_owned(),
             iss: "test-issuer".to_owned(),
             exp: i64::MAX,
@@ -15786,6 +18059,306 @@ mod tool_policy_proxy_tests {
 }
 
 #[cfg(test)]
+mod org_agent_policy_proxy_tests {
+    use super::*;
+    use crate::auth::VerifiedCapabilityBearer;
+    use std::sync::{Arc, Mutex};
+    use tokio::net::TcpListener;
+
+    fn claims(zdr: bool) -> Claims {
+        Claims {
+            key_id: None,
+            acting_user_id: None,
+            sub: "user-a".to_owned(),
+            iss: "test-issuer".to_owned(),
+            exp: i64::MAX,
+            org_id: "org-a".to_owned(),
+            user_id: "user-a".to_owned(),
+            nbf: None,
+            aud: Some("model-gateway".to_owned()),
+            scopes: Vec::new(),
+            zdr,
+            sovereign: None,
+            org_zdr: None,
+            zdr_waiver: None,
+            principal_type: Some("user".to_owned()),
+            service_id: None,
+            reason: None,
+        }
+    }
+
+    /// What a stand-in capability-core received, in order: `METHOD path?query`, the `If-Match` header and the body.
+    type Received = Arc<Mutex<Vec<(String, Option<String>, Value)>>>;
+
+    async fn recorder() -> (String, Received, tokio::task::JoinHandle<()>) {
+        let received: Received = Arc::new(Mutex::new(Vec::new()));
+        let app = Router::new().fallback(axum::routing::any({
+            let received = Arc::clone(&received);
+            move |method: axum::http::Method,
+                  uri: axum::http::Uri,
+                  headers: axum::http::HeaderMap,
+                  body: String| {
+                let received = Arc::clone(&received);
+                async move {
+                    let if_match = headers
+                        .get("if-match")
+                        .and_then(|value| value.to_str().ok())
+                        .map(str::to_owned);
+                    let body = serde_json::from_str(&body).unwrap_or(Value::Null);
+                    received.lock().expect("recorder lock").push((
+                        format!("{method} {uri}"),
+                        if_match,
+                        body,
+                    ));
+                    Json(json!({"ok": true}))
+                }
+            }
+        }));
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind recorder");
+        let address = listener.local_addr().expect("recorder address");
+        let task = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve recorder");
+        });
+        (format!("http://{address}"), received, task)
+    }
+
+    #[tokio::test]
+    async fn a_policy_write_names_its_revision_in_if_match_and_forwards_the_rest() {
+        let (base_url, received, task) = recorder().await;
+        let mut state = AppState::new();
+        state.capability_core_base_url = base_url;
+        let bearer = VerifiedCapabilityBearer::for_test("capability-test-bearer");
+        let settings = json!({"mode_cap": "read_only", "lockdown": false});
+
+        let _ = set_org_agent_policy_proxy(
+            State(state.clone()),
+            Extension(claims(false)),
+            bearer.clone(),
+            Json(json!({"settings": settings.clone(), "revision": 4})),
+        )
+        .await
+        .expect("a write at a revision");
+        let _ = set_org_agent_policy_proxy(
+            State(state.clone()),
+            Extension(claims(false)),
+            bearer.clone(),
+            Json(json!({"settings": settings.clone()})),
+        )
+        .await
+        .expect("a write with no revision is forwarded, for capability-core to refuse");
+
+        let received = received.lock().expect("lock").clone();
+        assert_eq!(received[0].0, "PUT /api/v1/org-agent-policy");
+        assert_eq!(received[0].1.as_deref(), Some("4"));
+        // The revision leaves the body: capability-core refuses unknown fields.
+        assert_eq!(received[0].2, json!({"settings": settings}));
+        assert_eq!(received[1].1, None);
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn a_revision_that_is_not_a_non_negative_integer_is_refused_before_forwarding() {
+        let (base_url, received, task) = recorder().await;
+        let mut state = AppState::new();
+        state.capability_core_base_url = base_url;
+        let bearer = VerifiedCapabilityBearer::for_test("capability-test-bearer");
+        for revision in [json!("4"), json!(-1), json!(1.5), json!(null)] {
+            let refused = set_org_agent_policy_proxy(
+                State(state.clone()),
+                Extension(claims(false)),
+                bearer.clone(),
+                Json(json!({"settings": {}, "revision": revision.clone()})),
+            )
+            .await
+            .expect_err("a malformed revision must be refused");
+            assert_eq!(refused.0, StatusCode::BAD_REQUEST, "{revision}");
+        }
+        assert!(
+            received.lock().expect("lock").is_empty(),
+            "a malformed revision was forwarded"
+        );
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn a_zdr_caller_is_refused_every_org_policy_and_hook_write_before_anything_is_forwarded()
+    {
+        let (base_url, received, task) = recorder().await;
+        let mut state = AppState::new();
+        state.capability_core_base_url = base_url;
+        let bearer = VerifiedCapabilityBearer::for_test("capability-test-bearer");
+        let zdr = claims(true);
+        let rule = json!({
+            "event": "pre_tool",
+            "tool_matcher": "shell",
+            "decision": "deny",
+            "reason": "no shell"
+        });
+
+        let set = set_org_agent_policy_proxy(
+            State(state.clone()),
+            Extension(zdr.clone()),
+            bearer.clone(),
+            Json(json!({"settings": {}, "revision": 0})),
+        )
+        .await
+        .expect_err("a ZDR policy write must be refused");
+        assert_eq!(set.0, StatusCode::PRECONDITION_FAILED);
+        let create = create_org_hook_proxy(
+            State(state.clone()),
+            Extension(zdr.clone()),
+            bearer.clone(),
+            Json(rule.clone()),
+        )
+        .await
+        .expect_err("a ZDR hook create must be refused");
+        assert_eq!(create.0, StatusCode::PRECONDITION_FAILED);
+        let update = update_org_hook_proxy(
+            State(state.clone()),
+            Extension(zdr.clone()),
+            bearer.clone(),
+            Path("ohr_1".to_owned()),
+            Json(rule.clone()),
+        )
+        .await
+        .expect_err("a ZDR hook update must be refused");
+        assert_eq!(update.0, StatusCode::PRECONDITION_FAILED);
+        let delete = delete_org_hook_proxy(
+            State(state.clone()),
+            Extension(zdr.clone()),
+            bearer.clone(),
+            Path("ohr_1".to_owned()),
+        )
+        .await
+        .expect_err("a ZDR hook retirement must be refused");
+        assert_eq!(delete.0, StatusCode::PRECONDITION_FAILED);
+        assert!(
+            received.lock().expect("lock").is_empty(),
+            "a ZDR write was forwarded"
+        );
+
+        // Reading the policy and the rules is not a durable mutation and stays open under ZDR.
+        let _ = get_org_agent_policy_proxy(
+            State(state.clone()),
+            Extension(zdr.clone()),
+            bearer.clone(),
+        )
+        .await
+        .expect("a ZDR caller may read the policy in force");
+        let _ = list_org_hooks_proxy(State(state), Extension(zdr), bearer)
+            .await
+            .expect("a ZDR caller may read the hook rules");
+        assert_eq!(received.lock().expect("lock").len(), 2);
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn the_gateway_names_the_capability_core_paths_and_pins_the_effective_read() {
+        let (base_url, received, task) = recorder().await;
+        let mut state = AppState::new();
+        state.capability_core_base_url = base_url;
+        let bearer = VerifiedCapabilityBearer::for_test("capability-test-bearer");
+        let rule = json!({
+            "event": "pre_tool",
+            "tool_matcher": "*",
+            "decision": "ask",
+            "reason": "check first",
+            "priority": 5
+        });
+
+        let _ = get_org_agent_policy_effective_proxy(
+            State(state.clone()),
+            Extension(claims(false)),
+            bearer.clone(),
+        )
+        .await
+        .expect("effective");
+        let _ = list_org_hooks_proxy(
+            State(state.clone()),
+            Extension(claims(false)),
+            bearer.clone(),
+        )
+        .await
+        .expect("list");
+        let _ = create_org_hook_proxy(
+            State(state.clone()),
+            Extension(claims(false)),
+            bearer.clone(),
+            Json(rule.clone()),
+        )
+        .await
+        .expect("create");
+        let _ = update_org_hook_proxy(
+            State(state.clone()),
+            Extension(claims(false)),
+            bearer.clone(),
+            Path("ohr_1".to_owned()),
+            Json(rule.clone()),
+        )
+        .await
+        .expect("update");
+        let _ = delete_org_hook_proxy(
+            State(state),
+            Extension(claims(false)),
+            bearer,
+            Path("ohr_1".to_owned()),
+        )
+        .await
+        .expect("delete");
+
+        let received = received.lock().expect("lock").clone();
+        let lines: Vec<&str> = received.iter().map(|(line, _, _)| line.as_str()).collect();
+        assert_eq!(
+            lines,
+            [
+                "GET /api/v1/org-agent-policy/effective?user=me",
+                "GET /api/v1/org-hooks",
+                "POST /api/v1/org-hooks",
+                "PUT /api/v1/org-hooks/ohr_1",
+                "DELETE /api/v1/org-hooks/ohr_1",
+            ]
+        );
+        // A rule is forwarded as sent: the gateway adds no org id and drops nothing from it.
+        assert_eq!(received[2].2, rule);
+        assert_eq!(received[3].2, rule);
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn a_hook_id_that_is_not_an_identifier_is_refused_before_forwarding() {
+        let (base_url, received, task) = recorder().await;
+        let mut state = AppState::new();
+        state.capability_core_base_url = base_url;
+        let bearer = VerifiedCapabilityBearer::for_test("capability-test-bearer");
+        let rule = json!({"event": "pre_tool", "decision": "deny", "reason": "no"});
+
+        let refused = update_org_hook_proxy(
+            State(state.clone()),
+            Extension(claims(false)),
+            bearer.clone(),
+            Path("../org-agent-policy".to_owned()),
+            Json(rule),
+        )
+        .await
+        .expect_err("a path-walking hook id must be refused");
+        assert_eq!(refused.0, StatusCode::BAD_REQUEST);
+        let refused = delete_org_hook_proxy(
+            State(state),
+            Extension(claims(false)),
+            bearer,
+            Path("ohr_1/../../x".to_owned()),
+        )
+        .await
+        .expect_err("a hook id with a slash must be refused");
+        assert_eq!(refused.0, StatusCode::BAD_REQUEST);
+        assert!(received.lock().expect("lock").is_empty());
+        task.abort();
+    }
+}
+
+#[cfg(test)]
 mod memory_controls_route_tests {
     use super::*;
     use mp_contracts::model_plane::v1::{MemoryControls, MemoryState};
@@ -15827,6 +18400,273 @@ mod memory_controls_route_tests {
         assert_eq!(refused.0, StatusCode::CONFLICT);
         assert_eq!(refused.1 .0["error"]["code"], "memory_not_enabled");
         assert_eq!(refused.1 .0["error"]["details"]["reason"], "user_paused");
+    }
+}
+
+#[cfg(test)]
+mod user_profile_route_tests {
+    //! EP-8 S4: the three profile routes send session-core the verified claims' org and user and
+    //! the verified session bearer, whatever the body says, and map its refusals to typed bodies.
+    use super::*;
+    use mp_contracts::model_plane::v1 as pb;
+    use std::sync::{Arc, Mutex};
+    use tokio::net::TcpListener;
+    use tokio_stream::wrappers::TcpListenerStream;
+    use tonic::{Request as TonicRequest, Response as TonicResponse, Status};
+
+    /// What session-core received: the RPC, its org and user, and the forwarded authorization.
+    type Seen = Arc<Mutex<Vec<(&'static str, String, String, String)>>>;
+
+    #[derive(Clone, Default)]
+    struct ProfileMemory {
+        seen: Seen,
+    }
+
+    impl ProfileMemory {
+        fn record<T>(&self, rpc: &'static str, request: &TonicRequest<T>, org: &str, user: &str) {
+            let authorization = request
+                .metadata()
+                .get("authorization")
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or_default()
+                .to_owned();
+            self.seen
+                .lock()
+                .expect("capture")
+                .push((rpc, org.to_owned(), user.to_owned(), authorization));
+        }
+    }
+
+    fn unused<T>() -> Result<TonicResponse<T>, Status> {
+        Err(Status::unimplemented("not used by the profile route tests"))
+    }
+
+    fn profile_answer() -> pb::UserProfileResponse {
+        pb::UserProfileResponse {
+            profile: Some(pb::UserProfile {
+                content: "- Prefers tables".to_owned(),
+                source_memory_ids: vec!["m-1".to_owned()],
+                origin: "built".to_owned(),
+                revision: 3,
+                updated_at: None,
+                sources_deleted_since_edit: 0,
+            }),
+            skip_reason: String::new(),
+        }
+    }
+
+    #[tonic::async_trait]
+    impl pb::memory_service_server::MemoryService for ProfileMemory {
+        async fn search_memory(
+            &self,
+            _: TonicRequest<pb::SearchMemoryRequest>,
+        ) -> Result<TonicResponse<pb::SearchMemoryResponse>, Status> {
+            unused()
+        }
+
+        async fn index_memory(
+            &self,
+            _: TonicRequest<pb::IndexMemoryRequest>,
+        ) -> Result<TonicResponse<pb::IndexMemoryResponse>, Status> {
+            unused()
+        }
+
+        async fn list_memory(
+            &self,
+            _: TonicRequest<pb::ListMemoryRequest>,
+        ) -> Result<TonicResponse<pb::ListMemoryResponse>, Status> {
+            unused()
+        }
+
+        async fn delete_memory(
+            &self,
+            _: TonicRequest<pb::DeleteMemoryRequest>,
+        ) -> Result<TonicResponse<pb::DeleteMemoryResponse>, Status> {
+            unused()
+        }
+
+        async fn health(
+            &self,
+            _: TonicRequest<pb::MemoryHealthRequest>,
+        ) -> Result<TonicResponse<pb::MemoryHealthResponse>, Status> {
+            unused()
+        }
+
+        async fn get_memory_controls(
+            &self,
+            _: TonicRequest<pb::GetMemoryControlsRequest>,
+        ) -> Result<TonicResponse<pb::GetMemoryControlsResponse>, Status> {
+            unused()
+        }
+
+        async fn set_memory_controls(
+            &self,
+            _: TonicRequest<pb::SetMemoryControlsRequest>,
+        ) -> Result<TonicResponse<pb::SetMemoryControlsResponse>, Status> {
+            unused()
+        }
+
+        async fn reset_memory(
+            &self,
+            _: TonicRequest<pb::ResetMemoryRequest>,
+        ) -> Result<TonicResponse<pb::ResetMemoryResponse>, Status> {
+            unused()
+        }
+
+        async fn get_user_profile(
+            &self,
+            request: TonicRequest<pb::GetUserProfileRequest>,
+        ) -> Result<TonicResponse<pb::UserProfileResponse>, Status> {
+            let (org, user) = (request.get_ref().org_id.clone(), request.get_ref().user_id.clone());
+            self.record("get", &request, &org, &user);
+            Ok(TonicResponse::new(profile_answer()))
+        }
+
+        async fn set_user_profile(
+            &self,
+            request: TonicRequest<pb::SetUserProfileRequest>,
+        ) -> Result<TonicResponse<pb::UserProfileResponse>, Status> {
+            let (org, user) = (request.get_ref().org_id.clone(), request.get_ref().user_id.clone());
+            self.record("set", &request, &org, &user);
+            // A ZDR refusal arrives as the catalogue status with its trailers.
+            if request.get_ref().content.contains("zdr") {
+                return Err(mp_contracts::zdr_refusal::Refusal::feature_not_supported("user_profile")
+                    .grpc_status(tonic::Code::FailedPrecondition));
+            }
+            if request.get_ref().expected_revision != 3 {
+                return Err(Status::failed_precondition("profile_revision_stale"));
+            }
+            Ok(TonicResponse::new(profile_answer()))
+        }
+
+        async fn rebuild_user_profile(
+            &self,
+            request: TonicRequest<pb::RebuildUserProfileRequest>,
+        ) -> Result<TonicResponse<pb::UserProfileResponse>, Status> {
+            let (org, user) = (request.get_ref().org_id.clone(), request.get_ref().user_id.clone());
+            self.record(if request.get_ref().force { "rebuild_force" } else { "rebuild" }, &request, &org, &user);
+            Ok(TonicResponse::new(profile_answer()))
+        }
+    }
+
+    async fn state_with(memory: ProfileMemory) -> AppState {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind memory stand-in");
+        let address = listener.local_addr().expect("memory stand-in address");
+        tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .add_service(pb::memory_service_server::MemoryServiceServer::new(memory))
+                .serve_with_incoming(TcpListenerStream::new(listener))
+                .await
+                .ok();
+        });
+        let channel = tonic::transport::Endpoint::from_shared(format!("http://{address}"))
+            .expect("memory stand-in endpoint")
+            .connect()
+            .await
+            .expect("connect memory stand-in");
+        let mut state = AppState::new();
+        state.memory_client = pb::memory_service_client::MemoryServiceClient::new(channel);
+        state
+    }
+
+    fn claims(org_id: &str, user_id: &str) -> Claims {
+        Claims {
+            key_id: None,
+            acting_user_id: None,
+            sub: user_id.to_owned(),
+            iss: "test-issuer".to_owned(),
+            exp: i64::MAX,
+            org_id: org_id.to_owned(),
+            user_id: user_id.to_owned(),
+            nbf: None,
+            aud: Some("model-gateway".to_owned()),
+            scopes: Vec::new(),
+            zdr: false,
+            sovereign: None,
+            org_zdr: None,
+            zdr_waiver: None,
+            principal_type: Some("user".to_owned()),
+            service_id: None,
+            reason: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn profile_routes_take_identity_from_claims() {
+        let memory = ProfileMemory::default();
+        let state = state_with(memory.clone()).await;
+        let bearer = || VerifiedModelBearer::for_test("session-core-token");
+
+        let read = get_user_profile(State(state.clone()), Extension(claims("org-a", "user-a")), bearer())
+            .await
+            .expect("read");
+        assert_eq!(read.0["profile"]["content"], "- Prefers tables");
+        assert_eq!(read.0["profile"]["source_memory_ids"], json!(["m-1"]));
+        assert_eq!(read.0["profile"]["revision"], 3);
+        assert_eq!(read.0["skip_reason"], "");
+
+        // A body naming another user or org cannot reach session-core: the body has no such field.
+        let body: SetUserProfileBody = serde_json::from_value(json!({
+            "content": "- Prefers prose",
+            "expected_revision": 3,
+            "user_id": "user-b",
+            "org_id": "org-b",
+        }))
+        .expect("extra fields are ignored");
+        set_user_profile(State(state.clone()), Extension(claims("org-a", "user-a")), bearer(), Json(body))
+            .await
+            .expect("edit");
+        rebuild_user_profile(
+            State(state.clone()),
+            Extension(claims("org-a", "user-a")),
+            bearer(),
+            Json(RebuildUserProfileBody { force: true }),
+        )
+        .await
+        .expect("rebuild");
+
+        let seen = memory.seen.lock().expect("capture").clone();
+        assert_eq!(
+            seen.iter().map(|(rpc, _, _, _)| *rpc).collect::<Vec<_>>(),
+            ["get", "set", "rebuild_force"]
+        );
+        for (rpc, org, user, authorization) in &seen {
+            assert_eq!((org.as_str(), user.as_str()), ("org-a", "user-a"), "{rpc}");
+            assert_eq!(authorization, "Bearer session-core-token", "{rpc}");
+        }
+    }
+
+    #[tokio::test]
+    async fn profile_refusals_keep_their_typed_codes() {
+        let state = state_with(ProfileMemory::default()).await;
+        let bearer = || VerifiedModelBearer::for_test("session-core-token");
+        let edit = |content: &str, expected_revision: u64| SetUserProfileBody {
+            content: content.to_owned(),
+            expected_revision,
+        };
+
+        let stale = set_user_profile(
+            State(state.clone()),
+            Extension(claims("org-a", "user-a")),
+            bearer(),
+            Json(edit("- Late", 1)),
+        )
+        .await
+        .expect_err("a stale edit is refused");
+        assert_eq!(stale.0, StatusCode::CONFLICT);
+        assert_eq!(stale.1 .0["error"]["code"], "profile_revision_stale");
+
+        let zdr = set_user_profile(
+            State(state),
+            Extension(claims("org-a", "user-a")),
+            bearer(),
+            Json(edit("- zdr", 3)),
+        )
+        .await
+        .expect_err("a ZDR write is refused");
+        assert_eq!(zdr.0, StatusCode::CONFLICT);
+        assert_eq!(zdr.1 .0["error"]["code"], "zdr_feature_not_supported");
+        assert_eq!(zdr.1 .0["error"]["feature"], "user_profile");
     }
 }
 
@@ -16087,6 +18927,8 @@ mod model_access_route_tests {
 
     fn claims(org_id: &str) -> Claims {
         Claims {
+            key_id: None,
+            acting_user_id: None,
             sub: "user-a".to_owned(),
             iss: "test-issuer".to_owned(),
             exp: i64::MAX,
@@ -16316,6 +19158,7 @@ mod thread_messages_page_tests {
     #[test]
     fn a_versioned_turn_says_where_it_sits_among_its_versions() {
         let body = serde_json::to_value(ThreadMessage {
+            entry: None, mentions: Vec::new(), revision: None,
             message_id: "m2".to_owned(),
             role: "assistant".to_owned(),
             content: "answer".to_owned(),
@@ -16534,6 +19377,33 @@ mod run_replay_projection_tests {
     }
 
     #[test]
+    fn an_attach_shared_jar_event_is_replayed_for_its_run() {
+        let payload = r#"{"run_id":"run-1","plan_id":"plan-1","attach_id":"att-1","session_run_id":"user-run-9","tab_id":"tab-3"}"#;
+        let projected = project_run_replay_event(
+            "run-1",
+            event(
+                EventType::BrowserAttachSharedJar as i32,
+                "run:run-1",
+                "run-1",
+                "type.googleapis.com/model_plane.v1.BrowserAttachSharedJar",
+                payload,
+            ),
+        )
+        .expect("a reconnecting client replays the attach audit event");
+        assert_eq!(projected.event_type, "EVENT_TYPE_BROWSER_ATTACH_SHARED_JAR");
+        assert_eq!(projected.payload["attach_id"], "att-1");
+        // Another run's attach event is not replayed.
+        let other = event(
+            EventType::BrowserAttachSharedJar as i32,
+            "run:run-2",
+            "run-2",
+            "type.googleapis.com/model_plane.v1.BrowserAttachSharedJar",
+            r#"{"run_id":"run-2"}"#,
+        );
+        assert!(project_run_replay_event("run-1", other).is_none());
+    }
+
+    #[test]
     fn a_non_slug_failure_code_is_dropped() {
         for code in [
             "Browser_failed",
@@ -16605,6 +19475,39 @@ mod run_replay_projection_tests {
 }
 
 #[cfg(test)]
+mod fork_route_tests {
+    use super::*;
+
+    #[test]
+    fn fork_body_reads_camel_case_defaults_the_title_and_refuses_unknown_fields() {
+        let body: ForkThreadBody =
+            serde_json::from_value(json!({"fromMessageId": "turn-4"})).unwrap();
+        assert_eq!(body.from_message_id, "turn-4");
+        assert!(body.title.is_empty());
+        assert!(serde_json::from_value::<ForkThreadBody>(
+            json!({"fromMessageId": "turn-4", "copyEverything": true})
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn fork_refusals_answer_typed_codes() {
+        let (status, Json(body)) = fork_thread_error(&tonic::Status::unavailable(
+            "thread_fork_disabled",
+        ));
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["error"]["code"], "history_fork_disabled");
+
+        let (status, Json(body)) = fork_thread_error(&tonic::Status::failed_precondition(
+            "fork_source_not_forkable",
+        ));
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["error"]["code"], "history_fork_refused");
+        assert_eq!(body["error"]["message"], "fork_source_not_forkable");
+    }
+}
+
+#[cfg(test)]
 mod space_post_wire_tests {
     use super::*;
 
@@ -16627,6 +19530,7 @@ mod space_post_wire_tests {
 
     fn summary(reply_count: u32, last_author: &str) -> ThreadSummaryResponse {
         ThreadSummaryResponse {
+            attention_state: None, attention_since: None, attention_unseen: None, forked_from_thread_id: String::new(),
             thread_id: "t-1".to_owned(),
             session_key: "k".to_owned(),
             title: "title".to_owned(),
@@ -16760,5 +19664,986 @@ mod memory_withheld_json_tests {
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0]["withheld_reason"], "room_origin_unverified");
         assert!(rows[1].get("withheld_reason").is_none());
+    }
+}
+
+#[cfg(test)]
+mod ai_chat_lane_tests {
+    //! WS16.S1: `POST /v1/ai/chat` as a machine route. The handler runs against a real inference
+    //! stand-in (the speech tests' gRPC server, which records every `InferRequest`), so what these
+    //! tests assert is what inference-core would have received and what the bus would have carried.
+    use super::speech_route_tests::{bearer, state_with, SpeechInference};
+    use super::*;
+    use mp_contracts::model_plane::v1 as pb;
+
+    fn user(zdr: bool) -> Claims {
+        Claims {
+            key_id: None,
+            acting_user_id: None,
+            sub: "user-a".to_owned(),
+            iss: "test-issuer".to_owned(),
+            exp: i64::MAX,
+            org_id: "org-a".to_owned(),
+            user_id: "user-a".to_owned(),
+            nbf: None,
+            aud: Some("model-gateway".to_owned()),
+            scopes: Vec::new(),
+            zdr,
+            sovereign: None,
+            org_zdr: None,
+            zdr_waiver: None,
+            principal_type: Some("user".to_owned()),
+            service_id: None,
+            reason: None,
+        }
+    }
+
+    fn service(sub: &str, zdr: bool) -> Claims {
+        Claims {
+            key_id: None,
+            acting_user_id: None,
+            sub: sub.to_owned(),
+            iss: "test-issuer".to_owned(),
+            exp: i64::MAX,
+            org_id: "org-a".to_owned(),
+            user_id: String::new(),
+            nbf: None,
+            aud: Some("model-gateway".to_owned()),
+            scopes: vec!["models:invoke".to_owned()],
+            zdr,
+            sovereign: None,
+            org_zdr: None,
+            zdr_waiver: None,
+            principal_type: Some("service".to_owned()),
+            service_id: Some(sub.to_owned()),
+            reason: Some("extract structured data from page text".to_owned()),
+        }
+    }
+
+    fn quarry(zdr: bool) -> Claims {
+        service("service:quarry-edge", zdr)
+    }
+
+    fn request(extra: Value) -> AiChatRequest {
+        let mut body = json!({
+            "messages": [{ "role": "user", "content": "extract the title" }],
+            "model": "test-model",
+        });
+        for (key, value) in extra.as_object().expect("extra fields are an object") {
+            body[key] = value.clone();
+        }
+        serde_json::from_value(body).expect("an ai_chat body parses")
+    }
+
+    fn reply() -> pb::InferResponse {
+        pb::InferResponse {
+            content: "{\"title\":\"Hello\"}".to_owned(),
+            model_used: "test-model".to_owned(),
+            provider_used: "azure".to_owned(),
+            input_tokens: 1000,
+            output_tokens: 500,
+            ..Default::default()
+        }
+    }
+
+    async fn call(
+        inference: &SpeechInference,
+        claims: Claims,
+        extra: Value,
+        metering: AiChatMetering,
+    ) -> (AppState, Result<Json<Value>, HttpJsonError>) {
+        let mut state = state_with(inference.clone()).await;
+        state.pricing = crate::pricing::PricingCache::with_rate_for_test("test-model", 1.0, 2.0);
+        let outcome = ai_chat_with(state.clone(), claims, bearer(), request(extra), metering).await;
+        (state, outcome)
+    }
+
+    #[tokio::test]
+    async fn ai_chat_defaults_are_unchanged_without_new_fields() {
+        let inference = SpeechInference::default();
+        inference.answering(reply());
+        let (_, outcome) = call(&inference, user(false), json!({}), AiChatMetering::Off).await;
+        let Json(body) = outcome.expect("a plain chat call succeeds");
+
+        let sent = inference.cleanups();
+        assert_eq!(sent.len(), 1);
+        assert!((sent[0].temperature - 0.7).abs() < f32::EPSILON, "{}", sent[0].temperature);
+        assert_eq!(sent[0].max_tokens, 4096);
+        // The keys every caller already read are all still there.
+        assert_eq!(body["content"], "{\"title\":\"Hello\"}");
+        assert_eq!(body["model_used"], "test-model");
+        assert_eq!(body["usage"]["input_tokens"], 1000);
+        assert_eq!(body["usage"]["output_tokens"], 500);
+        assert!(body["id"].as_str().is_some_and(|id| !id.is_empty()));
+    }
+
+    #[tokio::test]
+    async fn ai_chat_accepts_the_bounds_and_passes_them_through() {
+        let inference = SpeechInference::default();
+        inference.answering(reply());
+        let (_, outcome) = call(
+            &inference,
+            user(false),
+            json!({ "temperature": 0.0, "max_tokens": 8192 }),
+            AiChatMetering::Off,
+        )
+        .await;
+        let _ = outcome.expect("the inclusive bounds are accepted");
+        let sent = inference.cleanups();
+        assert!(sent[0].temperature.abs() < f32::EPSILON);
+        assert_eq!(sent[0].max_tokens, 8192);
+    }
+
+    #[tokio::test]
+    async fn ai_chat_rejects_temperature_above_one_and_max_tokens_above_8192() {
+        for extra in [
+            json!({ "temperature": 1.01 }),
+            json!({ "temperature": -0.1 }),
+            json!({ "max_tokens": 8193 }),
+            json!({ "max_tokens": 0 }),
+            json!({ "max_tokens": -5 }),
+        ] {
+            let inference = SpeechInference::default();
+            let (_, outcome) = call(&inference, user(false), extra.clone(), AiChatMetering::Off).await;
+            let (status, _) = outcome.expect_err("an out-of-range field is refused");
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{extra}");
+            assert!(inference.cleanups().is_empty(), "{extra}: no model call");
+        }
+    }
+
+    #[tokio::test]
+    async fn ai_chat_returns_cost_and_provider() {
+        let inference = SpeechInference::default();
+        inference.answering(reply());
+        let (_, outcome) = call(&inference, quarry(false), json!({}), AiChatMetering::Off).await;
+        let Json(body) = outcome.expect("a service call succeeds");
+        assert_eq!(body["provider_used"], "azure");
+        // 1000 input tokens at 1.0 per million plus 500 output tokens at 2.0 per million.
+        let cost = body["usage"]["cost_usd"].as_f64().expect("a metered call is priced");
+        assert!((cost - 0.002).abs() < 1e-9, "{cost}");
+        assert!(body["usage"]["latency_ms"].is_u64(), "{body}");
+
+        // Under ZDR the cost is null, never a number.
+        let inference = SpeechInference::default();
+        inference.answering(reply());
+        let (_, outcome) = call(&inference, quarry(true), json!({}), AiChatMetering::Service).await;
+        let Json(body) = outcome.expect("a ZDR service call succeeds");
+        assert!(body["usage"]["cost_usd"].is_null(), "{body}");
+        assert_eq!(body["provider_used"], "azure");
+        assert!(inference.cleanups()[0].zdr, "the ZDR flag reaches inference-core");
+    }
+
+    #[tokio::test]
+    async fn a_service_call_publishes_one_usage_envelope_and_a_zdr_call_none() {
+        let inference = SpeechInference::default();
+        inference.answering(reply());
+        let (state, outcome) = call(
+            &inference,
+            quarry(false),
+            json!({ "purpose": "quarry.extract" }),
+            AiChatMetering::Service,
+        )
+        .await;
+        let Json(body) = outcome.expect("the call succeeds");
+        let published = state.publisher.drain();
+        assert_eq!(published.len(), 1, "{published:?}");
+        let (subject, envelope) = &published[0];
+        assert_eq!(subject, &subjects::usage_subject("org-a"));
+        assert_eq!(envelope.event_type, "USAGE_ENVELOPE");
+        assert_eq!(envelope.producer, "model-gateway");
+        assert_eq!(envelope.org_id, "org-a");
+        assert_eq!(envelope.user_id, "service:quarry-edge");
+        let id = body["id"].as_str().expect("the response id");
+        assert_eq!(envelope.idempotency_key, format!("{id}-USAGE_ENVELOPE"));
+        assert!(!envelope.zdr);
+        assert_eq!(envelope.payload["route"], "ai_chat");
+        assert_eq!(envelope.payload["purpose"], "quarry.extract");
+        assert_eq!(envelope.payload["input_tokens"], 1000);
+        assert_eq!(envelope.payload["output_tokens"], 500);
+        assert_eq!(envelope.payload["provider_used"], "azure");
+        assert_eq!(envelope.payload["user_id"], "service:quarry-edge");
+
+        // A ZDR call publishes nothing at all.
+        let inference = SpeechInference::default();
+        inference.answering(reply());
+        let (state, outcome) = call(
+            &inference,
+            quarry(true),
+            json!({ "purpose": "quarry.extract" }),
+            AiChatMetering::Service,
+        )
+        .await;
+        let _ = outcome.expect("the ZDR call succeeds");
+        assert!(state.publisher.drain().is_empty(), "a ZDR call is never ledgered");
+    }
+
+    #[tokio::test]
+    async fn a_user_call_publishes_nothing_in_service_mode() {
+        let inference = SpeechInference::default();
+        inference.answering(reply());
+        let (state, outcome) = call(&inference, user(false), json!({}), AiChatMetering::Service).await;
+        let _ = outcome.expect("the user call succeeds");
+        assert!(state.publisher.drain().is_empty());
+
+        // `all` is the only mode that meters a user, and it attributes the user.
+        let inference = SpeechInference::default();
+        inference.answering(reply());
+        let (state, outcome) = call(&inference, user(false), json!({}), AiChatMetering::All).await;
+        let _ = outcome.expect("the user call succeeds");
+        let published = state.publisher.drain();
+        assert_eq!(published.len(), 1);
+        assert_eq!(published[0].1.user_id, "user-a");
+        assert!(published[0].1.payload["purpose"].is_null());
+    }
+
+    /// New behaviour is off until switched on: no switch, an unknown value and `off` all meter nothing.
+    #[tokio::test]
+    async fn metering_defaults_to_off_and_only_the_literal_modes_enable_it() {
+        assert_eq!(AiChatMetering::parse(None), AiChatMetering::Off);
+        assert_eq!(AiChatMetering::parse(Some("")), AiChatMetering::Off);
+        assert_eq!(AiChatMetering::parse(Some("1")), AiChatMetering::Off);
+        assert_eq!(AiChatMetering::parse(Some("off")), AiChatMetering::Off);
+        assert_eq!(AiChatMetering::parse(Some("service")), AiChatMetering::Service);
+        assert_eq!(AiChatMetering::parse(Some(" ALL ")), AiChatMetering::All);
+
+        let inference = SpeechInference::default();
+        inference.answering(reply());
+        let (state, outcome) = call(&inference, quarry(false), json!({}), AiChatMetering::default()).await;
+        let _ = outcome.expect("the call succeeds");
+        assert!(state.publisher.drain().is_empty(), "a service call is unmetered by default");
+    }
+
+    const CONTRACT_DIR: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../../api/contracts/ai-chat-v1"
+    );
+
+    fn contract(name: &str) -> String {
+        std::fs::read_to_string(format!("{CONTRACT_DIR}/{name}"))
+            .unwrap_or_else(|error| panic!("cannot read ai-chat-v1/{name}: {error}"))
+    }
+
+    /// The `ai-chat-v1` fixtures are what a caller's fake gateway replays (Quarry vendors them), so
+    /// they must be what this handler speaks: the request parses, with its schema as a STRING; the
+    /// ok response has exactly the keys the handler writes; the 412 is the catalogue's own body; and
+    /// the pin file matches the bytes.
+    #[tokio::test]
+    async fn the_ai_chat_v1_fixtures_are_what_the_handler_speaks() {
+        let request_text = contract("request.ok.json");
+        let request: AiChatRequest = serde_json::from_str(&request_text).expect("request.ok.json parses");
+        let schema = request.structured_output_schema.as_deref().expect("the schema is a string");
+        assert!(serde_json::from_str::<Value>(schema).is_ok_and(|v| v.is_object()));
+        assert!(
+            ai_chat_params(&request, &quarry(false)).is_ok(),
+            "the fixture request is admitted for service:quarry-edge"
+        );
+
+        // The ok response and the handler's own body have the same keys.
+        let fixture: Value = serde_json::from_str(&contract("response.ok.json")).expect("response.ok.json");
+        assert_eq!(fixture["status"], 200);
+        let inference = SpeechInference::default();
+        inference.answering(reply());
+        let (_, outcome) = call(&inference, quarry(false), json!({}), AiChatMetering::Off).await;
+        let Json(body) = outcome.expect("the call succeeds");
+        let keys = |value: &Value| -> Vec<String> {
+            let mut keys: Vec<String> = value.as_object().expect("an object").keys().cloned().collect();
+            keys.sort();
+            keys
+        };
+        assert_eq!(keys(&body), keys(&fixture["body"]));
+        assert_eq!(keys(&body["usage"]), keys(&fixture["body"]["usage"]));
+
+        let denied: Value = serde_json::from_str(&contract("response.route-denied.json")).expect("route-denied");
+        assert_eq!(denied["status"], 403);
+        let unavailable: Value =
+            serde_json::from_str(&contract("response.zdr-unavailable.json")).expect("zdr-unavailable");
+        assert_eq!(unavailable["status"], 412);
+        assert_eq!(
+            unavailable["body"],
+            mp_contracts::zdr_refusal::Refusal::UNAVAILABLE.json_body()
+        );
+
+        // SHA256SUMS pins every other file in the directory, byte for byte.
+        use sha2::{Digest, Sha256};
+        let sums = contract("SHA256SUMS");
+        let mut pinned = 0;
+        for line in sums.lines() {
+            let (digest, name) = line.split_once(" *").expect("`<digest> *<file>` lines");
+            let bytes = std::fs::read(format!("{CONTRACT_DIR}/{name}")).expect("a pinned file");
+            assert_eq!(digest, format!("{:x}", Sha256::digest(&bytes)), "{name}");
+            pinned += 1;
+        }
+        assert_eq!(pinned, 4);
+    }
+
+    #[tokio::test]
+    async fn purpose_is_for_service_quarry_edge_only() {
+        for (claims, purpose, expected) in [
+            (user(false), "quarry.extract", StatusCode::FORBIDDEN),
+            (service("service:someone-else", false), "quarry.extract", StatusCode::FORBIDDEN),
+            (quarry(false), "something.else", StatusCode::BAD_REQUEST),
+        ] {
+            let inference = SpeechInference::default();
+            let (_, outcome) = call(
+                &inference,
+                claims.clone(),
+                json!({ "purpose": purpose }),
+                AiChatMetering::Service,
+            )
+            .await;
+            let (status, _) = outcome.expect_err("the purpose is refused");
+            assert_eq!(status, expected, "{} / {purpose}", claims.sub);
+            assert!(inference.cleanups().is_empty(), "no model call for a refused purpose");
+        }
+    }
+}
+
+/// INNH-10 MP-3: an `api_key` principal reaches the two key-grant routes and nothing else. The
+/// route list is read from the source, so a route added anywhere later is covered without a
+/// change here.
+#[cfg(test)]
+mod api_key_route_fence_tests {
+    use super::*;
+    use axum::{body::Body, http::Request as HttpRequest};
+    use tower::ServiceExt;
+
+    /// Routes outside `authed_routes`: the unauthenticated probes of `build_router_with_readiness`.
+    const PUBLIC: &[&str] = &["/healthz", "/readyz", "/version", "/metrics"];
+
+    /// Every production `.route("<path>", ..)` in the crate, as `(file, path)`.
+    fn production_route_paths() -> Vec<(String, String)> {
+        let pattern = regex::Regex::new(r#"\.route\(\s*"([^"]+)""#).expect("a valid pattern");
+        let mut paths = Vec::new();
+        for (file, text) in crate::zdr_posture::tests::read_sources() {
+            let code: String = crate::zdr_posture::tests::strip_test_items(&text)
+                .lines()
+                .filter(|line| !line.trim_start().starts_with("//"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            for capture in pattern.captures_iter(&code) {
+                paths.push((file.clone(), capture[1].to_owned()));
+            }
+        }
+        paths.sort();
+        paths.dedup();
+        paths
+    }
+
+    fn concrete(path: &str) -> String {
+        path.split('/')
+            .map(|segment| {
+                if segment.starts_with(':') || segment.starts_with('*') {
+                    "x1"
+                } else {
+                    segment
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("/")
+    }
+
+    fn key_claims() -> Claims {
+        serde_json::from_value(json!({
+            "sub": "apikey:key-1",
+            "iss": "auth-core",
+            "exp": 4_102_444_800_i64,
+            "org_id": "org-a",
+            "zdr": false,
+            "principal_type": "api_key",
+            "key_id": "key-1",
+            "acting_user_id": "user-a",
+            "scopes": ["browser:agent"],
+        }))
+        .expect("an api key token decodes")
+    }
+
+    #[tokio::test]
+    async fn api_key_is_refused_on_every_other_route() {
+        let paths = production_route_paths();
+        let fenced: Vec<&(String, String)> = paths
+            .iter()
+            .filter(|(_, path)| !PUBLIC.contains(&path.as_str()))
+            .collect();
+        assert!(
+            fenced.len() > 100,
+            "the source scan found only {} routes; it is not reading the route table",
+            fenced.len()
+        );
+        for (_, key_route) in auth::API_KEY_ROUTES {
+            assert!(
+                paths.iter().any(|(_, path)| path == key_route),
+                "{key_route} is not registered"
+            );
+        }
+        let mut state = AppState::new();
+        // On, so the two key routes reach their handler: it answers 401 for the missing key bearer.
+        state.browser_key_grants = Some(true);
+        let router = authed_routes()
+            .layer(middleware::from_fn(auth::authorize_principal_route))
+            .layer(Extension(key_claims()))
+            .with_state(state);
+
+        let mut failures = Vec::new();
+        for (file, path) in fenced {
+            let uri = concrete(path);
+            let is_key_path = auth::API_KEY_ROUTES.iter().any(|(_, key)| key == path);
+            let mut refused = false;
+            for method in ["GET", "POST", "PUT", "PATCH", "DELETE"] {
+                let status = router
+                    .clone()
+                    .oneshot(
+                        HttpRequest::builder()
+                            .method(method)
+                            .uri(&uri)
+                            .header("content-type", "application/json")
+                            .body(Body::from("{}"))
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap()
+                    .status();
+                if auth::API_KEY_ROUTES
+                    .iter()
+                    .any(|(key_method, key_path)| *key_method == method && key_path == path)
+                {
+                    if status != StatusCode::UNAUTHORIZED {
+                        failures.push(format!("{method} {path}: the key route answered {status}"));
+                    }
+                    continue;
+                }
+                match status {
+                    StatusCode::FORBIDDEN => refused = true,
+                    StatusCode::METHOD_NOT_ALLOWED => {}
+                    other => failures.push(format!("{method} {path} ({file}): {other}")),
+                }
+            }
+            if !refused && !is_key_path {
+                failures.push(format!(
+                    "{path} ({file}): no method was refused; is it outside authed_routes?"
+                ));
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "an api key principal reached a route it may not:\n{}",
+            failures.join("\n")
+        );
+    }
+}
+
+/// WS10.S6: the run trace route against a stand-in Session Core EventLog.
+#[cfg(test)]
+mod run_trace_route_tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    use axum::{body::Body, http::Request as HttpRequest};
+    use mp_contracts::model_plane::v1::{
+        event_log_client::EventLogClient,
+        event_log_server::{EventLog, EventLogServer},
+        AgentRef, AppendEventRequest, AppendEventResponse, Cursor, QueryEventsRequest,
+        QueryEventsResponse, RunOrigin, SubscribeEventsRequest,
+    };
+    use tower::ServiceExt;
+
+    #[derive(Clone, Default)]
+    struct FakeEventLog {
+        seen: Arc<Mutex<Vec<(QueryEventsRequest, Option<String>)>>>,
+        failure: Option<tonic::Code>,
+        /// When set, the answer to every query (C6 builds its page here).
+        page: Option<QueryEventsResponse>,
+    }
+
+    #[tonic::async_trait]
+    impl EventLog for FakeEventLog {
+        async fn append_event(
+            &self,
+            _: tonic::Request<AppendEventRequest>,
+        ) -> Result<tonic::Response<AppendEventResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("not used"))
+        }
+
+        async fn query_events(
+            &self,
+            request: tonic::Request<QueryEventsRequest>,
+        ) -> Result<tonic::Response<QueryEventsResponse>, tonic::Status> {
+            let authorization = request
+                .metadata()
+                .get("authorization")
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_owned);
+            self.seen
+                .lock()
+                .unwrap()
+                .push((request.into_inner(), authorization));
+            if let Some(code) = self.failure {
+                return Err(tonic::Status::new(code, "session-core says no"));
+            }
+            if let Some(page) = &self.page {
+                return Ok(tonic::Response::new(page.clone()));
+            }
+            Ok(tonic::Response::new(QueryEventsResponse {
+                events: vec![Event {
+                    event_id: "01JC7K3M9Q4R8T2V5W6X7Y8Z9A".to_owned(),
+                    event_type: EventType::BrowserStepReceiptRecorded as i32,
+                    schema_version: 1,
+                    ts: Some(prost_types::Timestamp {
+                        seconds: 1_793_525_415,
+                        nanos: 250_000_000,
+                    }),
+                    producer: "quarry-edge".to_owned(),
+                    org_id: "org-a".to_owned(),
+                    user_id: "user-a".to_owned(),
+                    payload: Some(prost_types::Any {
+                        type_url: RUN_TRACE_PAYLOAD_TYPE_URL.to_owned(),
+                        value: br#"{"action":"click","step":7}"#.to_vec(),
+                    }),
+                    producer_seq: 7,
+                    agent: Some(AgentRef {
+                        id: "general-v1".to_owned(),
+                        role: "subagent".to_owned(),
+                        parent_id: "primary-v1".to_owned(),
+                    }),
+                    origin: RunOrigin::Agent as i32,
+                    run_id: "run_1".to_owned(),
+                    request_id: "req_1".to_owned(),
+                    ..Default::default()
+                }],
+                next_cursor: Some(Cursor {
+                    value: "42".to_owned(),
+                }),
+                has_more: true,
+            }))
+        }
+
+        type SubscribeEventsStream = futures::stream::Empty<Result<Event, tonic::Status>>;
+
+        async fn subscribe_events(
+            &self,
+            _: tonic::Request<SubscribeEventsRequest>,
+        ) -> Result<tonic::Response<Self::SubscribeEventsStream>, tonic::Status> {
+            Err(tonic::Status::unimplemented("not used"))
+        }
+    }
+
+    fn claims() -> Claims {
+        serde_json::from_value(json!({
+            "sub": "user-a", "iss": "auth-core", "exp": 4_102_444_800_i64, "org_id": "org-a",
+            "user_id": "user-a", "principal_type": "user", "zdr": false
+        }))
+        .expect("claims")
+    }
+
+    async fn app(fake: FakeEventLog, with_session_bearer: bool) -> Router {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = tonic::transport::Server::builder()
+                .add_service(EventLogServer::new(fake))
+                .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
+                .await;
+        });
+        let mut state = AppState::new();
+        state.event_log_client = EventLogClient::connect(format!("http://{address}"))
+            .await
+            .unwrap();
+        let mut router = Router::new()
+            .route("/v1/runs/:run_id/trace", get(get_run_trace))
+            .with_state(state)
+            .layer(Extension(claims()));
+        if with_session_bearer {
+            router = router.layer(Extension(crate::auth::VerifiedSessionBearer::for_test(
+                "session-core-bearer",
+            )));
+        }
+        router
+    }
+
+    async fn get_json(router: Router, uri: &str) -> (StatusCode, Value) {
+        let response = router
+            .oneshot(HttpRequest::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+    }
+
+    #[tokio::test]
+    async fn run_trace_route_requires_the_verified_bearer() {
+        let fake = FakeEventLog::default();
+        let (status, _) = get_json(app(fake.clone(), false).await, "/v1/runs/run_1/trace").await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert!(fake.seen.lock().unwrap().is_empty(), "nothing reaches Session Core");
+
+        let (status, body) = get_json(
+            app(fake.clone(), true).await,
+            "/v1/runs/run_1/trace?cursor=41&limit=9999&types=BROWSER_STEP_RECEIPT_RECORDED,%20RUN_COMPLETED",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let seen = fake.seen.lock().unwrap();
+        let (request, authorization) = &seen[0];
+        assert_eq!(authorization.as_deref(), Some("Bearer session-core-bearer"));
+        let filter = request.filter.as_ref().expect("a filter");
+        assert_eq!(filter.org_id, "org-a", "the org is the token's");
+        assert_eq!(filter.run_id, "run_1");
+        assert_eq!(
+            filter.event_types,
+            [
+                EventType::BrowserStepReceiptRecorded as i32,
+                EventType::RunCompleted as i32
+            ]
+        );
+        assert_eq!(request.cursor.as_ref().map(|c| c.value.as_str()), Some("41"));
+        assert_eq!(request.limit, 500, "the limit is clamped to 1..500");
+        assert!(!request.reverse);
+        assert_eq!(body["meta"], json!({ "next_cursor": "42", "has_more": true }));
+        let event = &body["data"]["events"][0];
+        assert_eq!(event["event_type"], "BROWSER_STEP_RECEIPT_RECORDED");
+        assert_eq!(event["origin"], "AGENT");
+        assert_eq!(event["ts"], "2026-11-01T09:30:15.250Z");
+        assert_eq!(event["payload"], json!({ "action": "click", "step": 7 }));
+        assert_eq!(event["agent"]["parent_id"], "primary-v1");
+        assert_eq!(event["producer_seq"], 7);
+        assert_eq!(event["zdr"], false);
+    }
+
+    /// WS10.S9 C6: the read-API shape of `GET /v1/runs/:run_id/trace`, pinned as an authored
+    /// fixture that the Frontend gateway's type test also reads. The body below is built by the
+    /// real handler from a Session Core page; it must equal the fixture, field for field.
+    #[tokio::test]
+    async fn run_trace_read_response_matches_the_c6_fixture() {
+        use sha2::{Digest, Sha256};
+        const FIXTURE: &str = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../api/contracts/run-trace-read-v1.golden.json"
+        );
+        let text = std::fs::read_to_string(FIXTURE).expect("the C6 fixture");
+        assert!(!text.contains('\r'), "the fixture is hashed byte for byte: LF only");
+        let pin = std::fs::read_to_string(format!("{FIXTURE}.sha256")).expect("the C6 pin");
+        assert_eq!(
+            pin.trim(),
+            format!("{:x} *run-trace-read-v1.golden.json", Sha256::digest(text.as_bytes())),
+            "the fixture changed without its pin (and the sync-script digest)"
+        );
+        let expected: Value = serde_json::from_str(&text).expect("the fixture parses");
+
+        let first = Event {
+            event_id: "01JC7K3M9Q4R8T2V5W6X7Y8Z9A".to_owned(),
+            event_type: EventType::BrowserStepReceiptRecorded as i32,
+            schema_version: 1,
+            ts: Some(prost_types::Timestamp {
+                seconds: 1_793_525_415,
+                nanos: 250_000_000,
+            }),
+            producer: "quarry-edge".to_owned(),
+            org_id: "org-a".to_owned(),
+            user_id: "user-a".to_owned(),
+            payload: Some(prost_types::Any {
+                type_url: RUN_TRACE_PAYLOAD_TYPE_URL.to_owned(),
+                value: br#"{"action":"click","step":7}"#.to_vec(),
+            }),
+            producer_seq: 7,
+            agent: Some(AgentRef {
+                id: "general-v1".to_owned(),
+                role: "subagent".to_owned(),
+                parent_id: "primary-v1".to_owned(),
+            }),
+            origin: RunOrigin::Agent as i32,
+            run_id: "run_1".to_owned(),
+            request_id: "req_1".to_owned(),
+            ..Default::default()
+        };
+        let second = Event {
+            event_id: "01JC7K3M9Q4R8T2V5W6X7Y8Z9B".to_owned(),
+            event_type: EventType::BrowserArtifactRecorded as i32,
+            schema_version: 1,
+            ts: Some(prost_types::Timestamp {
+                seconds: 1_793_525_416,
+                nanos: 0,
+            }),
+            producer: "quarry-edge".to_owned(),
+            correlation_id: "corr_1".to_owned(),
+            causation_id: "01JC7K3M9Q4R8T2V5W6X7Y8Z9A".to_owned(),
+            org_id: "org-a".to_owned(),
+            user_id: "user-a".to_owned(),
+            resource_ref: "artifact_1".to_owned(),
+            // Another payload type is reported by its type_url, never as bytes.
+            payload: Some(prost_types::Any {
+                type_url: "type.googleapis.com/other".to_owned(),
+                value: b"raw bytes".to_vec(),
+            }),
+            zdr: true,
+            producer_seq: 8,
+            run_id: "run_1".to_owned(),
+            request_id: "req_1".to_owned(),
+            ..Default::default()
+        };
+        let fake = FakeEventLog {
+            page: Some(QueryEventsResponse {
+                events: vec![first, second],
+                next_cursor: Some(Cursor {
+                    value: "42".to_owned(),
+                }),
+                has_more: true,
+            }),
+            ..Default::default()
+        };
+        let (status, body) = get_json(app(fake, true).await, "/v1/runs/run_1/trace").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body, expected, "the handler's body drifted from the C6 fixture");
+
+        // The last page: no events, no cursor. The same envelope with the cursor null.
+        let empty = FakeEventLog {
+            page: Some(QueryEventsResponse::default()),
+            ..Default::default()
+        };
+        let (status, body) = get_json(app(empty, true).await, "/v1/runs/run_1/trace").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            body,
+            json!({ "data": { "events": [] }, "meta": { "next_cursor": null, "has_more": false } })
+        );
+    }
+
+    #[tokio::test]
+    async fn run_trace_route_maps_unimplemented_and_not_found() {
+        for (code, want, error_code) in [
+            (tonic::Code::NotFound, StatusCode::NOT_FOUND, "run_not_found"),
+            (tonic::Code::PermissionDenied, StatusCode::NOT_FOUND, "run_not_found"),
+            (tonic::Code::Unimplemented, StatusCode::NOT_IMPLEMENTED, "trace_unavailable"),
+            (tonic::Code::InvalidArgument, StatusCode::BAD_REQUEST, "invalid_trace_query"),
+        ] {
+            let fake = FakeEventLog {
+                failure: Some(code),
+                ..Default::default()
+            };
+            let (status, body) = get_json(app(fake, true).await, "/v1/runs/run_1/trace").await;
+            assert_eq!(status, want, "{code:?}");
+            assert_eq!(body["error"]["code"], error_code, "{code:?}");
+            assert!(
+                !body.to_string().contains("session-core says no"),
+                "the upstream message is not echoed: {body}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn run_trace_route_refuses_bad_input_before_session_core() {
+        for uri in [
+            "/v1/runs/run.1/trace",
+            "/v1/runs/run_1/trace?types=NOT_A_TYPE",
+            "/v1/runs/run_1/trace?types=UNSPECIFIED",
+            "/v1/runs/run_1/trace?types=EVENT_TYPE_RUN_COMPLETED",
+        ] {
+            let fake = FakeEventLog::default();
+            let (status, _) = get_json(app(fake.clone(), true).await, uri).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}");
+            assert!(fake.seen.lock().unwrap().is_empty(), "{uri}");
+        }
+        let long_cursor = format!("/v1/runs/run_1/trace?cursor={}", "1".repeat(513));
+        let fake = FakeEventLog::default();
+        let (status, _) = get_json(app(fake.clone(), true).await, &long_cursor).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        // A missing limit reads the default page, and an unknown payload type is never raw bytes.
+        let (status, _) = get_json(app(fake.clone(), true).await, "/v1/runs/run_1/trace").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(fake.seen.lock().unwrap()[0].0.limit, 100);
+        let opaque = Event {
+            payload: Some(prost_types::Any {
+                type_url: "type.googleapis.com/other".to_owned(),
+                value: b"secret bytes".to_vec(),
+            }),
+            ..Default::default()
+        };
+        let json = trace_event_json(&opaque);
+        assert_eq!(json["payload"], json!({ "type_url": "type.googleapis.com/other" }));
+        assert_eq!(json["origin"], Value::Null);
+    }
+}
+
+/// EP-14 S5: the run timing route against a stand-in Session Core RunLedgerService.
+#[cfg(test)]
+mod run_timing_route_tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    use axum::{body::Body, http::Request as HttpRequest};
+    use mp_contracts::model_plane::v1::{
+        run_ledger_service_client::RunLedgerServiceClient,
+        run_ledger_service_server::{RunLedgerService, RunLedgerServiceServer},
+        GetRunTimingRequest, GetRunTimingResponse, RecordRequestSnapshotRequest,
+        RecordRequestSnapshotResponse, RecordRunTimingRequest, RecordRunTimingResponse,
+        RunActionTiming, RunTimingRecorded,
+    };
+    use tower::ServiceExt;
+
+    /// Session Core as the owner check sees it: `run_1` is user-a's, every other run is absent.
+    #[derive(Clone, Default)]
+    struct FakeRunLedger {
+        seen: Arc<Mutex<Vec<(GetRunTimingRequest, Option<String>)>>>,
+        failure: Option<tonic::Code>,
+    }
+
+    #[tonic::async_trait]
+    impl RunLedgerService for FakeRunLedger {
+        async fn record_request_snapshot(
+            &self,
+            _: tonic::Request<RecordRequestSnapshotRequest>,
+        ) -> Result<tonic::Response<RecordRequestSnapshotResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("not used"))
+        }
+
+        async fn record_run_timing(
+            &self,
+            _: tonic::Request<RecordRunTimingRequest>,
+        ) -> Result<tonic::Response<RecordRunTimingResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("not used"))
+        }
+
+        async fn get_run_timing(
+            &self,
+            request: tonic::Request<GetRunTimingRequest>,
+        ) -> Result<tonic::Response<GetRunTimingResponse>, tonic::Status> {
+            let authorization = request
+                .metadata()
+                .get("authorization")
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_owned);
+            let request = request.into_inner();
+            self.seen
+                .lock()
+                .unwrap()
+                .push((request.clone(), authorization));
+            if let Some(code) = self.failure {
+                return Err(tonic::Status::new(code, "session-core says no"));
+            }
+            if request.run_id != "run_1" {
+                return Err(tonic::Status::not_found("run not found"));
+            }
+            Ok(tonic::Response::new(GetRunTimingResponse {
+                timings: vec![RunTimingRecorded {
+                    run_id: "run_1".to_owned(),
+                    request_id: "req_1".to_owned(),
+                    schema: "turn-timing-v1".to_owned(),
+                    report_json: r#"{"server_ms":1200,"phases":[]}"#.to_owned(),
+                    phases_dropped: 0,
+                    recorded_at: Some(prost_types::Timestamp {
+                        seconds: 1_793_525_415,
+                        nanos: 250_000_000,
+                    }),
+                }],
+                actions: vec![RunActionTiming {
+                    action_id: "act_1".to_owned(),
+                    tool: "web_search".to_owned(),
+                    status: "completed".to_owned(),
+                    reserved_at: Some(prost_types::Timestamp {
+                        seconds: 1_793_525_415,
+                        nanos: 0,
+                    }),
+                    finalized_at: None,
+                    effect_class: String::new(),
+                }],
+                truncated: false,
+            }))
+        }
+    }
+
+    fn claims(zdr: bool) -> Claims {
+        serde_json::from_value(json!({
+            "sub": "user-a", "iss": "auth-core", "exp": 4_102_444_800_i64, "org_id": "org-a",
+            "user_id": "user-a", "principal_type": "user", "zdr": zdr
+        }))
+        .expect("claims")
+    }
+
+    async fn app(fake: FakeRunLedger, zdr: bool) -> Router {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = tonic::transport::Server::builder()
+                .add_service(RunLedgerServiceServer::new(fake))
+                .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
+                .await;
+        });
+        let mut state = AppState::new();
+        state.run_ledger_client = RunLedgerServiceClient::connect(format!("http://{address}"))
+            .await
+            .unwrap();
+        Router::new()
+            .route("/v1/runs/:run_id/timing", get(get_run_timing))
+            .with_state(state)
+            .layer(Extension(claims(zdr)))
+            .layer(Extension(crate::auth::VerifiedSessionBearer::for_test(
+                "session-core-bearer",
+            )))
+    }
+
+    async fn get_json(router: Router, uri: &str) -> (StatusCode, Value) {
+        let response = router
+            .oneshot(HttpRequest::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+    }
+
+    #[tokio::test]
+    async fn get_run_timing_owner_only() {
+        let fake = FakeRunLedger::default();
+        let (status, body) = get_json(app(fake.clone(), false).await, "/v1/runs/run_1/timing").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let data = &body["data"];
+        assert_eq!(data["timings"][0]["schema"], "turn-timing-v1");
+        assert_eq!(data["timings"][0]["report"]["server_ms"], 1200);
+        assert!(data["timings"][0]["recorded_at"].as_str().is_some_and(|at| at.ends_with(".250Z")));
+        assert_eq!(data["actions"][0]["tool"], "web_search");
+        assert_eq!(data["actions"][0]["finalized_at"], Value::Null);
+        assert_eq!(data["actions"][0]["effect_class"], Value::Null);
+        assert_eq!(data["truncated"], false);
+        {
+            let seen = fake.seen.lock().unwrap();
+            assert_eq!(seen[0].1.as_deref(), Some("Bearer session-core-bearer"), "the owner's bearer");
+        }
+
+        // Another user's run reads exactly like a run that does not exist.
+        let (status, body) = get_json(app(fake.clone(), false).await, "/v1/runs/run_2/timing").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["error"]["code"], "run_not_found");
+        let denied = FakeRunLedger {
+            failure: Some(tonic::Code::PermissionDenied),
+            ..FakeRunLedger::default()
+        };
+        let (status, body) = get_json(app(denied, false).await, "/v1/runs/run_1/timing").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["error"]["code"], "run_not_found");
+
+        // Session Core with the read switched off.
+        let off = FakeRunLedger {
+            failure: Some(tonic::Code::Unimplemented),
+            ..FakeRunLedger::default()
+        };
+        let (status, body) = get_json(app(off, false).await, "/v1/runs/run_1/timing").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["error"]["code"], "run_timing_unavailable");
+
+        let (status, _) = get_json(app(fake.clone(), false).await, "/v1/runs/run.1/timing").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn get_run_timing_refuses_zdr_bearer() {
+        let fake = FakeRunLedger::default();
+        let (status, body) = get_json(app(fake.clone(), true).await, "/v1/runs/run_1/timing").await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["error"]["code"], "zdr_feature_not_supported");
+        assert_eq!(body["error"]["feature"], "run_inspection");
+        assert!(fake.seen.lock().unwrap().is_empty(), "nothing reaches Session Core");
     }
 }

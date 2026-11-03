@@ -130,6 +130,39 @@ describe('streamRunEvents dispatch', () => {
     expect(onRunResumed).not.toHaveBeenCalled()
   })
 
+  it('reads a Do-loop tool retry (WS15-S3): ids, counts and a closed reason, nothing else', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      sseResponse([
+        sseFrame('tool_retry_scheduled', {
+          run_id: 'run_1',
+          step_id: 'step_3',
+          tool: 'knowledge_search',
+          attempt: 2,
+          max_attempts: 3,
+          wait_ms: 250,
+          reason: 'timeout',
+          error: 'upstream said something private',
+        }),
+      ]),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const onToolRetryScheduled = vi.fn()
+    await streamRunEvents('run_1', { onToolRetryScheduled })
+
+    expect(onToolRetryScheduled).toHaveBeenCalledTimes(1)
+    expect(onToolRetryScheduled).toHaveBeenCalledWith({
+      runId: 'run_1',
+      stepId: 'step_3',
+      tool: 'knowledge_search',
+      attempt: 2,
+      maxAttempts: 3,
+      waitMs: 250,
+      reason: 'timeout',
+      at: undefined,
+    })
+  })
+
   it('parses goal_summary/batch_id (wide-research fan-out) into goalSummary/batchId', async () => {
     const fetchMock = vi.fn().mockResolvedValue(
       sseResponse([

@@ -634,7 +634,9 @@ pub async fn stage_for_step(
         return Ok(None);
     }
     validate(mounts, tool_name, zdr_or_waived).map_err(refusal_status)?;
-    let source = source.ok_or_else(|| Status::failed_precondition("skill_mounts_unavailable"))?;
+    let Some(source) = source else {
+        return Err(Status::failed_precondition("skill_mounts_unavailable"));
+    };
     let tree = materialise(source, blob_cache(), org_id, mounts, &std::env::temp_dir()).await?;
     global().hold(org_id, run_id, mounts, tree).map(Some)
 }

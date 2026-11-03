@@ -89,3 +89,24 @@ fn each_skill_is_named_as_its_front_matter_declares() {
         );
     }
 }
+
+/// The pptx skill runs its builder from the path the execution-core image copies the
+/// skill to. The builder must sit beside that SKILL.md, and the text must name that path.
+#[test]
+fn the_pptx_skill_ships_and_names_its_builder() {
+    let builder = model_plane_root().join("skills/office/pptx/scripts/build_deck.py");
+    assert!(
+        builder.is_file(),
+        "the pptx skill's builder must sit beside its SKILL.md: {}",
+        builder.display()
+    );
+    let pptx = OFFICE_SKILLS
+        .iter()
+        .find(|skill| skill.dir == "pptx")
+        .expect("the pptx skill is registered");
+    assert!(
+        pptx.text
+            .contains("/opt/verevon/skills/office/pptx/scripts/build_deck.py"),
+        "the pptx SKILL.md must run the builder from /opt/verevon/skills/office/pptx/scripts/"
+    );
+}

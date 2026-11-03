@@ -11,6 +11,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
+import { fileURLToPath } from 'node:url'
 
 import {
   IGNORE_RULES,
@@ -19,6 +20,8 @@ import {
   blockCommentMask,
   classifyFile,
   componentOf,
+  declaredProblems,
+  declaredShapeProblems,
   defaultStateInLine,
   envNamesInLine,
   findUrlsInLine,
@@ -686,4 +689,117 @@ test('main: --verify-doc passes for a complete register and fails for an incompl
   assert.equal(main(['--root', root, '--catalogue', catalogue, '--verify-doc', incomplete], failing.io), 1)
   assert.match(failing.err.join(''), /acme-pay.*no row in the register/)
   assert.equal(main(['--root', root, '--catalogue', catalogue, '--verify-doc', path.join(root, 'nope.md')], capture().io), 2)
+})
+
+// ---------------------------------------------------------------------------------------
+// the declared egress catalogue (EP-9 T1)
+// ---------------------------------------------------------------------------------------
+
+const DECLARED_FIXTURE = [
+  {
+    id: 'acme-pay-api',
+    vendor_id: 'acme-pay',
+    plane: 'Billing Plane',
+    contacting_service: 'pay client',
+    hosts: ['api.acmepay.test-vendor.com'],
+    data_classes: ['metadata'],
+    toggle_env: ['ACMEPAY_API_KEY'],
+    zdr: 'refused',
+    region: 'TBC',
+    notes: 'fixture',
+  },
+  {
+    id: 'acme-ai-api',
+    vendor_id: 'acme-ai',
+    plane: 'Billing Plane',
+    contacting_service: 'ai client',
+    hosts: ['*.acmeai.example-vendor.net'],
+    data_classes: ['prompt'],
+    toggle_env: [],
+    zdr: 'not_gated',
+    region: 'TBC',
+    notes: 'fixture',
+  },
+]
+
+function declaredFor(entries) {
+  return { schema: 1, entries }
+}
+
+test('declared: every scanned vendor needs an entry, and an entry for a vendor with no evidence is stale', () => {
+  const root = makeTree({
+    'apps/Billing Plane/pay/src/client.go': 'package pay\n\nconst base = "https://api.acmepay.test-vendor.com/v1"\nconst key = os.Getenv("ACMEPAY_API_KEY")\n',
+    'apps/Billing Plane/ai/src/client.ts': 'export const base = "https://x.acmeai.example-vendor.net/v1"\n',
+  })
+  const vendors = CATALOGUE.slice(0, 2)
+  const result = scan({ root, vendors, internalEnv: [] })
+  assert.deepEqual(result.vendors.map((vendor) => vendor.id), ['acme-ai', 'acme-pay'])
+  assert.deepEqual(declaredProblems(result, declaredFor(DECLARED_FIXTURE), vendors), [], 'a complete declaration is clean')
+
+  const missing = declaredFor(DECLARED_FIXTURE.slice(0, 1))
+  assert.match(declaredProblems(result, missing, vendors).join('\n'), /scanned vendor "acme-ai" .* has no entry in the declared egress catalogue/)
+
+  const stale = declaredFor([...DECLARED_FIXTURE, { ...DECLARED_FIXTURE[0], id: 'ghost-api', vendor_id: 'ghost-vendor', hosts: ['ghost.vendor-nowhere.org'], toggle_env: [] }])
+  assert.match(declaredProblems(result, stale, CATALOGUE).join('\n'), /declared entry "ghost-api" names vendor "ghost-vendor", which has no evidence/)
+})
+
+test('declared shape: closed enums, unique ids, a catalogue vendor, its own hosts and its own switches', () => {
+  const base = DECLARED_FIXTURE[0]
+  const cases = [
+    [{ zdr: 'maybe' }, /zdr must be one of refused/],
+    [{ data_classes: ['secrets'] }, /unknown data class "secrets"/],
+    [{ data_classes: ['none', 'metadata'] }, /"none" stands alone/],
+    [{ data_classes: [] }, /data_classes must name a class/],
+    [{ vendor_id: 'nobody' }, /vendor_id "nobody" is not a catalogue vendor/],
+    [{ hosts: ['api.other.test-vendor.com'] }, /host "api.other.test-vendor.com" is not a host of vendor acme-pay/],
+    [{ toggle_env: ['SOMETHING_ELSE'] }, /switch SOMETHING_ELSE is not a gating variable of vendor acme-pay/],
+    [{ region: '' }, /region must be a non-empty string/],
+    [{ id: 'Bad Id' }, /has no valid id/],
+  ]
+  for (const [change, pattern] of cases) {
+    const problems = declaredShapeProblems(declaredFor([{ ...base, ...change }]), CATALOGUE)
+    assert.match(problems.join('\n'), pattern, JSON.stringify(change))
+  }
+  assert.match(declaredShapeProblems(declaredFor([base, { ...base }]), CATALOGUE).join('\n'), /is declared twice/)
+  assert.deepEqual(declaredShapeProblems(declaredFor(DECLARED_FIXTURE), CATALOGUE), [])
+  assert.match(declaredShapeProblems(null, CATALOGUE).join('\n'), /must be an object with an "entries" array/)
+  assert.match(declaredShapeProblems({ entries: 'nope' }, CATALOGUE).join('\n'), /"entries" array/)
+})
+
+test('main: --declared fails --strict on an undeclared vendor, reports without --strict, and passes when complete', () => {
+  const root = makeTree({
+    'apps/Billing Plane/pay/src/client.go': 'package pay\n\nconst base = "https://api.acmepay.test-vendor.com/v1"\n',
+    'apps/Billing Plane/pay/src/env.ts': 'export const key = process.env.ACMEPAY_API_KEY\n',
+    'apps/Billing Plane/ai/src/client.ts': 'export const base = "https://x.acmeai.example-vendor.net/v1"\n',
+  })
+  const catalogue = path.join(root, 'catalogue.json')
+  fs.writeFileSync(catalogue, JSON.stringify(CATALOGUE.slice(0, 2)))
+  const partial = path.join(root, 'partial.json')
+  fs.writeFileSync(partial, JSON.stringify(declaredFor(DECLARED_FIXTURE.slice(0, 1))))
+  const complete = path.join(root, 'complete.json')
+  fs.writeFileSync(complete, JSON.stringify(declaredFor(DECLARED_FIXTURE)))
+  const base = ['--root', root, '--catalogue', catalogue]
+
+  const strict = capture()
+  assert.equal(main([...base, '--declared', partial, '--strict'], strict.io), 1)
+  assert.match(strict.err.join(''), /strict: scanned vendor "acme-ai"/)
+
+  const advisory = capture()
+  assert.equal(main([...base, '--declared', partial], advisory.io), 0, 'without --strict the problem is reported and the status stays 0')
+  assert.match(advisory.err.join(''), /declared: scanned vendor "acme-ai"/)
+
+  assert.equal(main([...base, '--declared', complete, '--strict'], capture().io), 0)
+  assert.equal(main([...base, '--declared', path.join(root, 'missing.json')], capture().io), 2)
+  assert.equal(main([...base, '--declared'], capture().io), 2)
+})
+
+test('the committed egress catalogue is well formed, and it declares every built-in vendor exactly through its entries', () => {
+  const here = path.dirname(fileURLToPath(import.meta.url))
+  const committed = JSON.parse(fs.readFileSync(path.join(here, '..', '..', 'egress-catalogue.json'), 'utf8'))
+  assert.deepEqual(declaredShapeProblems(committed), [])
+  assert.deepEqual(
+    [...new Set(committed.entries.map((entry) => entry.vendor_id))].sort(),
+    VENDORS.map((vendor) => vendor.id).sort(),
+    'a vendor added to the scan needs an entry; an entry names a vendor the scan knows',
+  )
 })

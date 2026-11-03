@@ -20,6 +20,14 @@ option go_package = "github.com/triodelab/model-plane/gen/go/model_plane/v1;mpv1
 // defaults). Write path: the Verevon BFF gateway calls SetPolicy on an admin
 // PUT. The gateway's read for the admin UI hits inference-core's effective-view
 // endpoint, not this service, so the UI shows what routing is actually using.
+//
+// Candidate path (EP-14 S10): a change can be proposed as a candidate instead
+// of written to the live row. A candidate carries the proposed config, the
+// offline routing diff, the reviewer's decision and an optional live
+// evaluation. It goes live only through PromoteCandidate, which writes the live
+// row only while the live version is still the one the candidate was proposed
+// against. The candidate RPCs are refused unless
+// SESSION_CORE_ROUTING_CANDIDATES_ENABLED is on.
 service RoutingPolicy {
   // Fetch the current policy (singleton). Returns the seeded empty config until
   // the first SetPolicy write.
@@ -29,6 +37,24 @@ service RoutingPolicy {
   // finetune hyperparameters). `version` is server-incremented; `updated_at`
   // is server-stamped.
   rpc SetPolicy(SetRoutingPolicyRequest) returns (RoutingPolicyMessage);
+
+  // Record a proposed policy as a candidate against the live version. Nothing
+  // goes live. inference-core computes the offline diff and passes it in.
+  rpc ProposeCandidate(ProposeCandidateRequest) returns (ProposeCandidateResponse);
+
+  // Record the reviewer's decision on the offline diff, and the live evaluation
+  // of the candidate. An accepted diff makes the candidate `evaluated`; a
+  // refused one makes it `rejected`. Only a `proposed` candidate takes a review.
+  rpc RecordCandidateEvaluation(RecordCandidateEvaluationRequest) returns (RecordCandidateEvaluationResponse);
+
+  // Make an evaluated candidate the live policy. Refused unless the candidate
+  // carries a passing live evaluation or a waiver reason. When the live version
+  // has moved on since the candidate was proposed, the candidate becomes
+  // `superseded` and the call answers ABORTED.
+  rpc PromoteCandidate(PromoteCandidateRequest) returns (PromoteCandidateResponse);
+
+  // List candidates, newest first.
+  rpc ListCandidates(ListCandidatesRequest) returns (ListCandidatesResponse);
 }
 
 message RoutingPolicyMessage {
@@ -40,6 +66,9 @@ message RoutingPolicyMessage {
   string updated_by = 3;
   // Unix seconds of the last write.
   int64 updated_at = 4;
+  // The candidate this live version was promoted from. Empty when the version
+  // was written directly by SetPolicy.
+  string candidate_id = 5;
 }
 
 message GetRoutingPolicyRequest {}
@@ -47,4 +76,98 @@ message GetRoutingPolicyRequest {}
 message SetRoutingPolicyRequest {
   string config_json = 1;
   string updated_by = 2;
+  // The live version the caller read. 0 skips the check, which is the behaviour
+  // before this field existed. Any other value must equal the live version, or
+  // the write is ABORTED.
+  int64 expected_version = 3;
+}
+
+// A proposed RoutingPolicy change and the trail of its review. Platform-global:
+// it holds configuration and identities, and no org or user content.
+message PolicyCandidate {
+  // Server-issued identifier.
+  string id = 1;
+  // The proposed RoutingPolicy as a JSON string (schema owned by inference-core).
+  string config_json = 2;
+  // The live version the candidate was proposed against.
+  int64 base_version = 3;
+  // Identity that proposed the candidate.
+  string proposed_by = 4;
+  // Unix seconds of the proposal.
+  int64 proposed_at = 5;
+  // One of `proposed`, `evaluated`, `rejected`, `promoted`, `superseded`.
+  string state = 6;
+  // The offline routing diff, as a JSON document computed by inference-core.
+  string diff_json = 7;
+  // The live evaluation as a JSON document. `{}` until one is recorded.
+  string live_eval_json = 8;
+  // The written reason for promoting without a passing live evaluation.
+  string waiver_reason = 9;
+  // Identity that decided the candidate: the reviewer, or the promoter.
+  string decided_by = 10;
+}
+
+// Propose a candidate. The server stamps the base version from the live row.
+message ProposeCandidateRequest {
+  // The proposed RoutingPolicy as a JSON string.
+  string config_json = 1;
+  // Identity that proposes the candidate.
+  string proposed_by = 2;
+  // The offline routing diff, as a JSON document. `{}` when none was computed.
+  string diff_json = 3;
+}
+
+// Record the review of a proposed candidate.
+message RecordCandidateEvaluationRequest {
+  // The candidate under review.
+  string candidate_id = 1;
+  // Whether the reviewer accepts the offline diff. False rejects the candidate.
+  bool diff_accepted = 2;
+  // The live evaluation as a JSON document. Its `passed` flag gates promotion.
+  // Empty means none was recorded.
+  string live_eval_json = 3;
+  // The written reason for promoting without a passing live evaluation. Empty
+  // when the evaluation passed.
+  string waiver_reason = 4;
+  // Identity that recorded the review.
+  string decided_by = 5;
+}
+
+// Make an evaluated candidate the live policy.
+message PromoteCandidateRequest {
+  // The candidate to promote.
+  string candidate_id = 1;
+  // Identity that promotes the candidate.
+  string decided_by = 2;
+}
+
+// List candidates, filtered by nothing and paged by `limit` only.
+message ListCandidatesRequest {
+  // The most candidates to return. 0 means 50, and the server caps the value at
+  // 200.
+  int32 limit = 1;
+}
+
+// The candidates, newest first.
+message ListCandidatesResponse {
+  // Newest first.
+  repeated PolicyCandidate candidates = 1;
+}
+
+// The candidate that the proposal created, in state `proposed`.
+message ProposeCandidateResponse {
+  // The new candidate.
+  PolicyCandidate candidate = 1;
+}
+
+// The candidate after the review, in state `evaluated` or `rejected`.
+message RecordCandidateEvaluationResponse {
+  // The reviewed candidate.
+  PolicyCandidate candidate = 1;
+}
+
+// The live policy the promotion wrote.
+message PromoteCandidateResponse {
+  // The live version the candidate became.
+  RoutingPolicyMessage policy = 1;
 }

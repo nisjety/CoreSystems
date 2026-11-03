@@ -16,6 +16,7 @@ import (
 	"github.com/I-Dacosta/AquatiqCMS/apps/notification-core/internal/feed"
 	"github.com/I-Dacosta/AquatiqCMS/apps/notification-core/internal/notification"
 	"github.com/I-Dacosta/AquatiqCMS/apps/notification-core/internal/preferences"
+	"github.com/I-Dacosta/AquatiqCMS/apps/notification-core/internal/webpush"
 	"github.com/gin-gonic/gin"
 )
 
@@ -30,10 +31,19 @@ type Handler struct {
 	preferences        *preferences.Service
 	channels           *channels.Service
 	recipients         RecipientAuthorizer
+	push               PushSubscriptions
 }
 
 type RecipientAuthorizer interface {
 	ResolveUser(ctx context.Context, organizationID, userID string) (string, error)
+}
+
+// PushSubscriptions is the Web Push surface the handlers call. The composition root leaves it nil while web push
+// is off, and every push route then answers as unavailable.
+type PushSubscriptions interface {
+	PublicKey() string
+	Subscribe(ctx context.Context, organizationID, userID string, input webpush.SubscriptionInput) (string, error)
+	Unsubscribe(ctx context.Context, organizationID, userID, id string) error
 }
 
 // HandlerDeps groups the new services so NewHandler stays append-only.
@@ -45,6 +55,7 @@ type HandlerDeps struct {
 	Preferences        *preferences.Service
 	Channels           *channels.Service
 	Recipients         RecipientAuthorizer
+	Push               PushSubscriptions
 }
 
 func NewHandler(cfg *config.Config, deps HandlerDeps) *Handler {
@@ -57,6 +68,7 @@ func NewHandler(cfg *config.Config, deps HandlerDeps) *Handler {
 		preferences:        deps.Preferences,
 		channels:           deps.Channels,
 		recipients:         deps.Recipients,
+		push:               deps.Push,
 	}
 }
 
@@ -104,7 +116,7 @@ func (h *Handler) ReconcileNotificationDeliveryCallback(c *gin.Context) {
 
 func (h *Handler) Health(c *gin.Context) {
 	deliveryStatus := "ready"
-	if h.cfg.DeliveryMode == "disabled" {
+	if !h.deliveryAvailable() {
 		deliveryStatus = "disabled"
 	}
 	c.JSON(http.StatusOK, gin.H{
@@ -116,13 +128,20 @@ func (h *Handler) Health(c *gin.Context) {
 }
 
 func (h *Handler) Ready(c *gin.Context) {
-	if h.cfg.DeliveryMode == "disabled" {
+	if !h.deliveryAvailable() {
 		c.JSON(http.StatusServiceUnavailable, gin.H{
 			"status": "degraded", "delivery_status": "disabled",
 		})
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"status": "ready", "delivery_status": "ready"})
+}
+
+// deliveryAvailable reports whether this process can deliver anything. The native in-app path needs no
+// provider, so it counts on its own: with native types on, the process is ready while the provider is
+// disabled, and the requests that need the provider still fail as they did before.
+func (h *Handler) deliveryAvailable() bool {
+	return h.cfg.DeliveryMode != "disabled" || h.cfg.NativeTypesEnabled
 }
 
 // ── Dispatch (legacy / V0) ────────────────────────────────────────────────
@@ -229,8 +248,13 @@ func isNotificationTypeAuthorized(serviceID, notificationType string) bool {
 			"sla.breach":      {},
 		},
 		"capability-core": {
-			"modelplane.run_completed": {},
-			"modelplane.run_failed":    {},
+			"modelplane.run_completed":         {},
+			"modelplane.run_failed":            {},
+			"modelplane.needs_approval":        {},
+			"modelplane.needs_input":           {},
+			"modelplane.plan_ready":            {},
+			"modelplane.scheduled_run_outcome": {},
+			"modelplane.goal_stopped":          {},
 		},
 		// Quarry's change monitor tells a user that a page they watch has changed, and
 		// its schedule runner tells the schedule's creator that a run failed or was
@@ -651,6 +675,79 @@ func (h *Handler) PatchChannelConfig(c *gin.Context) {
 // ── Subscribers (internal recipient upsert) ───────────────────────────────
 
 // ── Helpers ───────────────────────────────────────────────────────────────
+
+// ── Web Push (WS16-S6) ────────────────────────────────────────────────────
+
+// PushConfig tells the browser whether this server accepts Web Push, and with which application server key to
+// subscribe. The public key is public by design; the private key never leaves notification-core.
+func (h *Handler) PushConfig(c *gin.Context) {
+	organizationID, _ := requireScope(c)
+	if organizationID == "" {
+		return
+	}
+	if h.push == nil {
+		c.JSON(http.StatusOK, gin.H{"enabled": false})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"enabled": true, "public_key": h.push.PublicKey()})
+}
+
+// CreatePushSubscription stores one browser endpoint for the delegated user. The organization and user come from
+// the signed delegation, never from the body.
+func (h *Handler) CreatePushSubscription(c *gin.Context) {
+	organizationID, userID := requireScope(c)
+	if organizationID == "" {
+		return
+	}
+	if h.push == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "web push is not enabled"})
+		return
+	}
+	var input webpush.SubscriptionInput
+	if err := json.NewDecoder(c.Request.Body).Decode(&input); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+		return
+	}
+	id, err := h.push.Subscribe(c.Request.Context(), organizationID, userID, input)
+	if errors.Is(err, webpush.ErrInvalidSubscription) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid push subscription"})
+		return
+	}
+	if err != nil {
+		log.Printf("notification-core: store web push subscription: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to store push subscription"})
+		return
+	}
+	c.JSON(http.StatusCreated, gin.H{"id": id})
+}
+
+// DeletePushSubscription revokes one of the delegated user's own endpoints. Another user's id answers not found.
+func (h *Handler) DeletePushSubscription(c *gin.Context) {
+	organizationID, userID := requireScope(c)
+	if organizationID == "" {
+		return
+	}
+	if h.push == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "web push is not enabled"})
+		return
+	}
+	id := c.Param("id")
+	if strings.TrimSpace(id) == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "id required"})
+		return
+	}
+	err := h.push.Unsubscribe(c.Request.Context(), organizationID, userID, id)
+	if errors.Is(err, webpush.ErrSubscriptionNotFound) {
+		c.JSON(http.StatusNotFound, gin.H{"error": "push subscription not found"})
+		return
+	}
+	if err != nil {
+		log.Printf("notification-core: revoke web push subscription: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to revoke push subscription"})
+		return
+	}
+	c.Status(http.StatusNoContent)
+}
 
 // requireUserID extracts and validates the `x-user-id` header. Writes a
 // 400 response and returns "" on missing/empty; callers must early-return

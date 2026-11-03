@@ -173,6 +173,9 @@ func TestGenericGlobalHealthAllowlistIsExactlyTheExecutionOwnedRuntimes(t *testi
 		"cap.memory.search":      {},
 		"cap.memory.index":       {},
 		"cap.agent.spawn":        {},
+		// WS21-S5a: execution-core owns the Do-loop BrowserSession and attests it
+		// only when its own browser-broker and Quarry probes answer ready.
+		"cap.browser.observe":    {},
 		"cap.process.background": {},
 		"cap.retrieval.query":    {},
 		"cap.tool.http":          {},

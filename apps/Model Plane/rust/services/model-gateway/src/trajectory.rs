@@ -190,6 +190,7 @@ pub async fn handle_record_trajectory<P: EventPublisher>(
         resource_ref: format!("trajectory/{trajectory_id}"),
         payload: trajectory_to_payload(&stored),
         zdr: false,
+        ..Default::default()
     };
     let was_published = match publisher
         .publish(&subjects::run_event_subject(&stored.run_id), &envelope)

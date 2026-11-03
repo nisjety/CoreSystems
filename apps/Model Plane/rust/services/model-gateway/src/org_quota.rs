@@ -215,6 +215,156 @@ pub async fn fetch_org_limits(
     }
 }
 
+/// Quota key for the browser planner's per-run token ceiling (WS11.S1). Its limit is a token
+/// count. Deliberately NOT [`MAX_TOKENS_PER_RUN`]: that key bounds a chat run's spend through
+/// cost-core, this one bounds only the LLM planner of a browser run.
+pub const BROWSER_AGENT_MAX_TOKENS_PER_RUN: &str = "browser_agent_max_tokens_per_run";
+/// Quota key for the org's LLM-planner switch (WS11.S2): limit 1 = on, 2 = off, anything else =
+/// unset. A quota row is the interim carrier; the final one is a decision for Control Plane.
+pub const BROWSER_AGENT_LLM_PLANNER: &str = "browser_agent_llm_planner";
+
+/// What one read of an org's quota rows came back with, for a caller that needs more than the
+/// two run ceilings of [`OrgQuotaLimits`]. `Unavailable` is a read that did not produce rows
+/// (unconfigured, unreachable, refused, unreadable body); an org with no rows at all is
+/// `Rows(vec![])`. The two are kept apart because the callers fail differently: a token ceiling
+/// fails OPEN (an unreadable ceiling is no ceiling) and the planner switch fails CLOSED.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OrgQuotaKeys {
+    Rows(Vec<(String, i64)>),
+    Unavailable,
+}
+
+impl OrgQuotaKeys {
+    /// Parse an org-core quotas payload. A body that is not the expected shape is `Unavailable`,
+    /// not an empty org: an empty answer is a decision, a garbled one is not.
+    #[must_use]
+    pub fn from_body(body: &str) -> Self {
+        match serde_json::from_str::<QuotasResponse>(body) {
+            Ok(parsed) => Self::Rows(
+                parsed
+                    .quotas
+                    .into_iter()
+                    .map(|row| (row.key, row.limit))
+                    .collect(),
+            ),
+            Err(_) => Self::Unavailable,
+        }
+    }
+
+    /// The limit stored under `key`, if the rows were read and the key is present.
+    #[must_use]
+    pub fn limit(&self, key: &str) -> Option<i64> {
+        match self {
+            Self::Rows(rows) => rows
+                .iter()
+                .find(|(row_key, _)| row_key == key)
+                .map(|(_, limit)| *limit),
+            Self::Unavailable => None,
+        }
+    }
+
+    /// The org's browser planner token ceiling. A limit of 0 or less is "not set", as for the
+    /// other run ceilings; an unreadable read is "not set" too (fail open).
+    #[must_use]
+    pub fn planner_token_ceiling(&self) -> Option<i64> {
+        self.limit(BROWSER_AGENT_MAX_TOKENS_PER_RUN)
+            .filter(|limit| *limit > 0)
+    }
+
+    /// The org's LLM-planner switch (WS11.S2). Fails CLOSED: a read that did not happen is
+    /// `Unavailable`, which the planner policy treats as "do not select the LLM planner".
+    #[must_use]
+    pub fn planner_flag(&self) -> PlannerFlag {
+        match self {
+            Self::Unavailable => PlannerFlag::Unavailable,
+            Self::Rows(_) => match self.limit(BROWSER_AGENT_LLM_PLANNER) {
+                Some(1) => PlannerFlag::On,
+                Some(2) => PlannerFlag::Off,
+                _ => PlannerFlag::Unset,
+            },
+        }
+    }
+}
+
+/// The org's LLM-planner switch as the gateway hands it to execution-core.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlannerFlag {
+    Unset,
+    On,
+    Off,
+    Unavailable,
+}
+
+impl PlannerFlag {
+    /// The value written to `tool_input.planner_flag`. `Unset` writes nothing, so a run for an
+    /// org that never set the switch carries the same `tool_input` it always did.
+    #[must_use]
+    pub const fn wire(self) -> Option<&'static str> {
+        match self {
+            Self::Unset => None,
+            Self::On => Some("on"),
+            Self::Off => Some("off"),
+            Self::Unavailable => Some("unavailable"),
+        }
+    }
+}
+
+/// Read ALL of an org's quota rows from org-core, with the same service credential and URL as
+/// [`fetch_org_limits`]. Never fails the caller: every way the read can go wrong is
+/// [`OrgQuotaKeys::Unavailable`], and each caller decides what that means.
+pub async fn fetch_org_quota_keys(
+    client: &reqwest::Client,
+    org_core_base_url: &str,
+    org_id: &str,
+    service_id: &str,
+    service_token: &str,
+) -> OrgQuotaKeys {
+    if org_core_base_url.trim().is_empty()
+        || org_id.trim().is_empty()
+        || service_token.trim().is_empty()
+    {
+        tracing::debug!(%org_id, "org-core quota read not configured; quota keys unavailable");
+        return OrgQuotaKeys::Unavailable;
+    }
+    let url = format!(
+        "{}/api/v1/organizations/{org_id}/quotas",
+        org_core_base_url.trim_end_matches('/')
+    );
+    let request = client
+        .get(&url)
+        .header("x-service-id", service_id)
+        .header("x-service-token", service_token);
+    match request.send().await {
+        Ok(response) if response.status().is_success() => match response.text().await {
+            Ok(body) => OrgQuotaKeys::from_body(&body),
+            Err(error) => {
+                tracing::warn!(%error, %org_id, "org quota body unreadable");
+                OrgQuotaKeys::Unavailable
+            }
+        },
+        Ok(response) => {
+            tracing::warn!(status = %response.status(), %org_id, "org-core rejected the quota read");
+            OrgQuotaKeys::Unavailable
+        }
+        Err(error) => {
+            tracing::warn!(%error, %org_id, "org-core unreachable for the quota read");
+            OrgQuotaKeys::Unavailable
+        }
+    }
+}
+
+/// `min(request, org ceiling)` for the browser planner's token budget, both positive; either
+/// alone when the other is absent or non-positive. A request can lower the org's ceiling and
+/// never raise it, and an org ceiling that could not be read leaves the request's own value.
+#[must_use]
+pub fn planner_token_ceiling_for(request: Option<i64>, org_ceiling: Option<i64>) -> Option<i64> {
+    let positive = |value: Option<i64>| value.filter(|value| *value > 0);
+    match (positive(request), positive(org_ceiling)) {
+        (Some(asked), Some(ceiling)) => Some(asked.min(ceiling)),
+        (asked, ceiling) => asked.or(ceiling),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -311,5 +461,134 @@ mod tests {
             window_since(ResetPeriod::Monthly, now),
             Some(Utc.with_ymd_and_hms(2026, 10, 1, 0, 0, 0).unwrap())
         );
+    }
+
+    // ---- WS11.S1 / S2: the browser planner's quota keys ----
+
+    fn rows(body: &str) -> OrgQuotaKeys {
+        OrgQuotaKeys::from_body(body)
+    }
+
+    #[test]
+    fn planner_token_ceiling_is_min_of_request_and_org_key() {
+        let org = rows(
+            r#"{"quotas":[{"org_id":"o","key":"browser_agent_max_tokens_per_run","value":0,"limit":50000}]}"#,
+        );
+        assert_eq!(org.planner_token_ceiling(), Some(50_000));
+        // A request below the ceiling lowers it; the org's key alone binds an unasking request.
+        assert_eq!(planner_token_ceiling_for(Some(20_000), org.planner_token_ceiling()), Some(20_000));
+        assert_eq!(planner_token_ceiling_for(None, org.planner_token_ceiling()), Some(50_000));
+        // The request alone, with no org key, passes through for execution-core's own ceilings.
+        assert_eq!(planner_token_ceiling_for(Some(20_000), None), Some(20_000));
+        assert_eq!(planner_token_ceiling_for(None, None), None);
+        // A non-positive value on either side is no bound.
+        assert_eq!(planner_token_ceiling_for(Some(0), Some(-5)), None);
+        assert_eq!(planner_token_ceiling_for(Some(-1), Some(50_000)), Some(50_000));
+        // The chat run's own token key is a different key and is never read here.
+        let chat_only = rows(
+            r#"{"quotas":[{"org_id":"o","key":"max_tokens_per_run","value":0,"limit":999}]}"#,
+        );
+        assert_eq!(chat_only.planner_token_ceiling(), None);
+    }
+
+    #[test]
+    fn request_cannot_raise_the_org_ceiling() {
+        assert_eq!(planner_token_ceiling_for(Some(900_000), Some(50_000)), Some(50_000));
+        assert_eq!(planner_token_ceiling_for(Some(50_001), Some(50_000)), Some(50_000));
+        assert_eq!(planner_token_ceiling_for(Some(i64::MAX), Some(1)), Some(1));
+    }
+
+    #[tokio::test]
+    async fn unreadable_org_quota_leaves_the_default_in_place() {
+        // Unconfigured, unreachable and garbled all read as Unavailable, and an unavailable read
+        // carries no ceiling: the request's value (or nothing) stays, execution-core's own
+        // default and ceiling still apply.
+        let client = reqwest::Client::new();
+        assert_eq!(
+            fetch_org_quota_keys(&client, "", "org", "svc", "tok").await,
+            OrgQuotaKeys::Unavailable
+        );
+        assert_eq!(
+            fetch_org_quota_keys(&client, "http://127.0.0.1:1", "org", "svc", "").await,
+            OrgQuotaKeys::Unavailable
+        );
+        let unreachable = fetch_org_quota_keys(&client, "http://127.0.0.1:1", "org", "svc", "tok").await;
+        assert_eq!(unreachable, OrgQuotaKeys::Unavailable);
+        assert_eq!(unreachable.planner_token_ceiling(), None);
+        assert_eq!(planner_token_ceiling_for(None, unreachable.planner_token_ceiling()), None);
+        assert_eq!(
+            planner_token_ceiling_for(Some(20_000), unreachable.planner_token_ceiling()),
+            Some(20_000)
+        );
+        assert_eq!(rows("not json"), OrgQuotaKeys::Unavailable);
+        // An org that simply has no rows is a decision, not an outage.
+        assert_eq!(rows(r#"{"quotas":[]}"#), OrgQuotaKeys::Rows(Vec::new()));
+    }
+
+    #[tokio::test]
+    async fn quota_keys_are_read_over_http_with_the_service_credential() {
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/organizations/org-a/quotas"))
+            .and(header("x-service-id", "model-gateway"))
+            .and(header("x-service-token", "tok"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                r#"{"quotas":[
+                    {"org_id":"org-a","key":"browser_agent_max_tokens_per_run","value":0,"limit":40000},
+                    {"org_id":"org-a","key":"browser_agent_llm_planner","value":0,"limit":1}
+                ]}"#,
+            ))
+            .mount(&server)
+            .await;
+        let keys = fetch_org_quota_keys(&reqwest::Client::new(), &server.uri(), "org-a", "model-gateway", "tok").await;
+        assert_eq!(keys.planner_token_ceiling(), Some(40_000));
+        assert_eq!(keys.planner_flag(), PlannerFlag::On);
+
+        // A refusal is Unavailable, never an empty org.
+        let refusing = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(403))
+            .mount(&refusing)
+            .await;
+        let keys = fetch_org_quota_keys(&reqwest::Client::new(), &refusing.uri(), "org-a", "model-gateway", "tok").await;
+        assert_eq!(keys, OrgQuotaKeys::Unavailable);
+    }
+
+    #[test]
+    fn planner_flag_one_is_on_two_is_off() {
+        let flag = |limit: i64| {
+            rows(&format!(
+                r#"{{"quotas":[{{"org_id":"o","key":"browser_agent_llm_planner","value":0,"limit":{limit}}}]}}"#
+            ))
+            .planner_flag()
+        };
+        assert_eq!(flag(1), PlannerFlag::On);
+        assert_eq!(flag(2), PlannerFlag::Off);
+        // Any other value, including 0 and negatives, is unset, not a third state.
+        for other in [0, 3, 7, -1, 100] {
+            assert_eq!(flag(other), PlannerFlag::Unset, "{other}");
+        }
+        // No row at all is unset, and unset writes nothing to tool_input.
+        assert_eq!(rows(r#"{"quotas":[]}"#).planner_flag(), PlannerFlag::Unset);
+        assert_eq!(PlannerFlag::Unset.wire(), None);
+        assert_eq!(PlannerFlag::On.wire(), Some("on"));
+        assert_eq!(PlannerFlag::Off.wire(), Some("off"));
+        assert_eq!(PlannerFlag::Unavailable.wire(), Some("unavailable"));
+    }
+
+    #[tokio::test]
+    async fn planner_flag_read_error_is_unavailable() {
+        // Fail CLOSED: where the token ceiling treats an unreadable read as "no ceiling", the
+        // planner switch treats it as "unavailable", which keeps the LLM planner off.
+        let client = reqwest::Client::new();
+        for keys in [
+            fetch_org_quota_keys(&client, "http://127.0.0.1:1", "org", "svc", "tok").await,
+            fetch_org_quota_keys(&client, "", "org", "svc", "tok").await,
+            rows("<html>502</html>"),
+        ] {
+            assert_eq!(keys.planner_flag(), PlannerFlag::Unavailable);
+        }
     }
 }

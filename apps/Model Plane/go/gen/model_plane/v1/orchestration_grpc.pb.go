@@ -1501,13 +1501,13 @@ type OrchestratorWorkflowServiceClient interface {
 	//
 	// Before this RPC existed, every workflow the worker registers had zero
 	// production callers. It is deliberately narrow:
-	//   * `workflow_type` is matched against a server-side ALLOWLIST of the
+	//   - `workflow_type` is matched against a server-side ALLOWLIST of the
 	//     names the worker actually registers. An unknown name is rejected by
 	//     name; a caller string is never handed to Temporal as a workflow type.
-	//   * tenancy is server-authoritative. `org_id`/`user_id` are taken from the
+	//   - tenancy is server-authoritative. `org_id`/`user_id` are taken from the
 	//     verified caller and overwrite whatever `input` carries, so a caller
 	//     cannot start work in another organization.
-	//   * the workflow id is derived deterministically from
+	//   - the workflow id is derived deterministically from
 	//     (workflow_type, org_id, run_id | idempotency_key), so a retried call
 	//     attaches to the existing execution instead of double-starting a run.
 	StartWorkflow(ctx context.Context, in *StartWorkflowRequest, opts ...grpc.CallOption) (*StartWorkflowResponse, error)
@@ -1549,13 +1549,13 @@ type OrchestratorWorkflowServiceServer interface {
 	//
 	// Before this RPC existed, every workflow the worker registers had zero
 	// production callers. It is deliberately narrow:
-	//   * `workflow_type` is matched against a server-side ALLOWLIST of the
+	//   - `workflow_type` is matched against a server-side ALLOWLIST of the
 	//     names the worker actually registers. An unknown name is rejected by
 	//     name; a caller string is never handed to Temporal as a workflow type.
-	//   * tenancy is server-authoritative. `org_id`/`user_id` are taken from the
+	//   - tenancy is server-authoritative. `org_id`/`user_id` are taken from the
 	//     verified caller and overwrite whatever `input` carries, so a caller
 	//     cannot start work in another organization.
-	//   * the workflow id is derived deterministically from
+	//   - the workflow id is derived deterministically from
 	//     (workflow_type, org_id, run_id | idempotency_key), so a retried call
 	//     attaches to the existing execution instead of double-starting a run.
 	StartWorkflow(context.Context, *StartWorkflowRequest) (*StartWorkflowResponse, error)
@@ -1622,6 +1622,324 @@ var OrchestratorWorkflowService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "StartWorkflow",
 			Handler:    _OrchestratorWorkflowService_StartWorkflow_Handler,
+		},
+	},
+	Streams:  []grpc.StreamDesc{},
+	Metadata: "model_plane/v1/orchestration.proto",
+}
+
+const (
+	RunQuestionConsumeService_ConsumeRunQuestion_FullMethodName = "/model_plane.v1.RunQuestionConsumeService/ConsumeRunQuestion"
+)
+
+// RunQuestionConsumeServiceClient is the client API for RunQuestionConsumeService service.
+//
+// For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
+//
+// Spend a `resume` question's answer once, for the continuation of the run that asked it (build
+// plan WS14 S5). Its own service rather than a method of OrchestrationCoreService, as
+// ApprovalScopeGrantService is, so the implementations and test doubles of that service need no
+// change.
+type RunQuestionConsumeServiceClient interface {
+	// Claim an answered `resume` question for its run's continuation. The first claim spends the
+	// answer. The same claim token again is a safe replay that returns the answer; another claim is
+	// reported as already consumed, not as an error. Owner-only and org-scoped.
+	ConsumeRunQuestion(ctx context.Context, in *ConsumeRunQuestionRequest, opts ...grpc.CallOption) (*ConsumeRunQuestionResponse, error)
+}
+
+type runQuestionConsumeServiceClient struct {
+	cc grpc.ClientConnInterface
+}
+
+func NewRunQuestionConsumeServiceClient(cc grpc.ClientConnInterface) RunQuestionConsumeServiceClient {
+	return &runQuestionConsumeServiceClient{cc}
+}
+
+func (c *runQuestionConsumeServiceClient) ConsumeRunQuestion(ctx context.Context, in *ConsumeRunQuestionRequest, opts ...grpc.CallOption) (*ConsumeRunQuestionResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ConsumeRunQuestionResponse)
+	err := c.cc.Invoke(ctx, RunQuestionConsumeService_ConsumeRunQuestion_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// RunQuestionConsumeServiceServer is the server API for RunQuestionConsumeService service.
+// All implementations must embed UnimplementedRunQuestionConsumeServiceServer
+// for forward compatibility.
+//
+// Spend a `resume` question's answer once, for the continuation of the run that asked it (build
+// plan WS14 S5). Its own service rather than a method of OrchestrationCoreService, as
+// ApprovalScopeGrantService is, so the implementations and test doubles of that service need no
+// change.
+type RunQuestionConsumeServiceServer interface {
+	// Claim an answered `resume` question for its run's continuation. The first claim spends the
+	// answer. The same claim token again is a safe replay that returns the answer; another claim is
+	// reported as already consumed, not as an error. Owner-only and org-scoped.
+	ConsumeRunQuestion(context.Context, *ConsumeRunQuestionRequest) (*ConsumeRunQuestionResponse, error)
+	mustEmbedUnimplementedRunQuestionConsumeServiceServer()
+}
+
+// UnimplementedRunQuestionConsumeServiceServer must be embedded to have
+// forward compatible implementations.
+//
+// NOTE: this should be embedded by value instead of pointer to avoid a nil
+// pointer dereference when methods are called.
+type UnimplementedRunQuestionConsumeServiceServer struct{}
+
+func (UnimplementedRunQuestionConsumeServiceServer) ConsumeRunQuestion(context.Context, *ConsumeRunQuestionRequest) (*ConsumeRunQuestionResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ConsumeRunQuestion not implemented")
+}
+func (UnimplementedRunQuestionConsumeServiceServer) mustEmbedUnimplementedRunQuestionConsumeServiceServer() {
+}
+func (UnimplementedRunQuestionConsumeServiceServer) testEmbeddedByValue() {}
+
+// UnsafeRunQuestionConsumeServiceServer may be embedded to opt out of forward compatibility for this service.
+// Use of this interface is not recommended, as added methods to RunQuestionConsumeServiceServer will
+// result in compilation errors.
+type UnsafeRunQuestionConsumeServiceServer interface {
+	mustEmbedUnimplementedRunQuestionConsumeServiceServer()
+}
+
+func RegisterRunQuestionConsumeServiceServer(s grpc.ServiceRegistrar, srv RunQuestionConsumeServiceServer) {
+	// If the following call panics, it indicates UnimplementedRunQuestionConsumeServiceServer was
+	// embedded by pointer and is nil.  This will cause panics if an
+	// unimplemented method is ever invoked, so we test this at initialization
+	// time to prevent it from happening at runtime later due to I/O.
+	if t, ok := srv.(interface{ testEmbeddedByValue() }); ok {
+		t.testEmbeddedByValue()
+	}
+	s.RegisterService(&RunQuestionConsumeService_ServiceDesc, srv)
+}
+
+func _RunQuestionConsumeService_ConsumeRunQuestion_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ConsumeRunQuestionRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RunQuestionConsumeServiceServer).ConsumeRunQuestion(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RunQuestionConsumeService_ConsumeRunQuestion_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RunQuestionConsumeServiceServer).ConsumeRunQuestion(ctx, req.(*ConsumeRunQuestionRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+// RunQuestionConsumeService_ServiceDesc is the grpc.ServiceDesc for RunQuestionConsumeService service.
+// It's only intended for direct use with grpc.RegisterService,
+// and not to be introspected or modified (even as a copy)
+var RunQuestionConsumeService_ServiceDesc = grpc.ServiceDesc{
+	ServiceName: "model_plane.v1.RunQuestionConsumeService",
+	HandlerType: (*RunQuestionConsumeServiceServer)(nil),
+	Methods: []grpc.MethodDesc{
+		{
+			MethodName: "ConsumeRunQuestion",
+			Handler:    _RunQuestionConsumeService_ConsumeRunQuestion_Handler,
+		},
+	},
+	Streams:  []grpc.StreamDesc{},
+	Metadata: "model_plane/v1/orchestration.proto",
+}
+
+const (
+	ApprovalScopeGrantService_UseApprovalScopeGrant_FullMethodName    = "/model_plane.v1.ApprovalScopeGrantService/UseApprovalScopeGrant"
+	ApprovalScopeGrantService_ListApprovalScopeGrants_FullMethodName  = "/model_plane.v1.ApprovalScopeGrantService/ListApprovalScopeGrants"
+	ApprovalScopeGrantService_RevokeApprovalScopeGrant_FullMethodName = "/model_plane.v1.ApprovalScopeGrantService/RevokeApprovalScopeGrant"
+)
+
+// ApprovalScopeGrantServiceClient is the client API for ApprovalScopeGrantService service.
+//
+// For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
+//
+// A standing release for one eligible call, given by a "this thread" or "this run" decision.
+// Served by session-core. It is its own service rather than a method of
+// OrchestrationCoreService, so the implementations of that service, and their test doubles,
+// need no change.
+type ApprovalScopeGrantServiceClient interface {
+	// Atomically matches one live grant for a call and counts the use. The caller is an
+	// execution-core service principal acting for the run's owner. An empty grant_id means no
+	// grant matched, and the call pauses as it did before grants existed.
+	UseApprovalScopeGrant(ctx context.Context, in *UseApprovalScopeGrantRequest, opts ...grpc.CallOption) (*UseApprovalScopeGrantResponse, error)
+	// The verified caller's own grants in one thread.
+	ListApprovalScopeGrants(ctx context.Context, in *ListApprovalScopeGrantsRequest, opts ...grpc.CallOption) (*ListApprovalScopeGrantsResponse, error)
+	// Revokes one of the verified caller's live grants. Revocation takes effect at once.
+	RevokeApprovalScopeGrant(ctx context.Context, in *RevokeApprovalScopeGrantRequest, opts ...grpc.CallOption) (*RevokeApprovalScopeGrantResponse, error)
+}
+
+type approvalScopeGrantServiceClient struct {
+	cc grpc.ClientConnInterface
+}
+
+func NewApprovalScopeGrantServiceClient(cc grpc.ClientConnInterface) ApprovalScopeGrantServiceClient {
+	return &approvalScopeGrantServiceClient{cc}
+}
+
+func (c *approvalScopeGrantServiceClient) UseApprovalScopeGrant(ctx context.Context, in *UseApprovalScopeGrantRequest, opts ...grpc.CallOption) (*UseApprovalScopeGrantResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(UseApprovalScopeGrantResponse)
+	err := c.cc.Invoke(ctx, ApprovalScopeGrantService_UseApprovalScopeGrant_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *approvalScopeGrantServiceClient) ListApprovalScopeGrants(ctx context.Context, in *ListApprovalScopeGrantsRequest, opts ...grpc.CallOption) (*ListApprovalScopeGrantsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListApprovalScopeGrantsResponse)
+	err := c.cc.Invoke(ctx, ApprovalScopeGrantService_ListApprovalScopeGrants_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *approvalScopeGrantServiceClient) RevokeApprovalScopeGrant(ctx context.Context, in *RevokeApprovalScopeGrantRequest, opts ...grpc.CallOption) (*RevokeApprovalScopeGrantResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RevokeApprovalScopeGrantResponse)
+	err := c.cc.Invoke(ctx, ApprovalScopeGrantService_RevokeApprovalScopeGrant_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// ApprovalScopeGrantServiceServer is the server API for ApprovalScopeGrantService service.
+// All implementations must embed UnimplementedApprovalScopeGrantServiceServer
+// for forward compatibility.
+//
+// A standing release for one eligible call, given by a "this thread" or "this run" decision.
+// Served by session-core. It is its own service rather than a method of
+// OrchestrationCoreService, so the implementations of that service, and their test doubles,
+// need no change.
+type ApprovalScopeGrantServiceServer interface {
+	// Atomically matches one live grant for a call and counts the use. The caller is an
+	// execution-core service principal acting for the run's owner. An empty grant_id means no
+	// grant matched, and the call pauses as it did before grants existed.
+	UseApprovalScopeGrant(context.Context, *UseApprovalScopeGrantRequest) (*UseApprovalScopeGrantResponse, error)
+	// The verified caller's own grants in one thread.
+	ListApprovalScopeGrants(context.Context, *ListApprovalScopeGrantsRequest) (*ListApprovalScopeGrantsResponse, error)
+	// Revokes one of the verified caller's live grants. Revocation takes effect at once.
+	RevokeApprovalScopeGrant(context.Context, *RevokeApprovalScopeGrantRequest) (*RevokeApprovalScopeGrantResponse, error)
+	mustEmbedUnimplementedApprovalScopeGrantServiceServer()
+}
+
+// UnimplementedApprovalScopeGrantServiceServer must be embedded to have
+// forward compatible implementations.
+//
+// NOTE: this should be embedded by value instead of pointer to avoid a nil
+// pointer dereference when methods are called.
+type UnimplementedApprovalScopeGrantServiceServer struct{}
+
+func (UnimplementedApprovalScopeGrantServiceServer) UseApprovalScopeGrant(context.Context, *UseApprovalScopeGrantRequest) (*UseApprovalScopeGrantResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method UseApprovalScopeGrant not implemented")
+}
+func (UnimplementedApprovalScopeGrantServiceServer) ListApprovalScopeGrants(context.Context, *ListApprovalScopeGrantsRequest) (*ListApprovalScopeGrantsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListApprovalScopeGrants not implemented")
+}
+func (UnimplementedApprovalScopeGrantServiceServer) RevokeApprovalScopeGrant(context.Context, *RevokeApprovalScopeGrantRequest) (*RevokeApprovalScopeGrantResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method RevokeApprovalScopeGrant not implemented")
+}
+func (UnimplementedApprovalScopeGrantServiceServer) mustEmbedUnimplementedApprovalScopeGrantServiceServer() {
+}
+func (UnimplementedApprovalScopeGrantServiceServer) testEmbeddedByValue() {}
+
+// UnsafeApprovalScopeGrantServiceServer may be embedded to opt out of forward compatibility for this service.
+// Use of this interface is not recommended, as added methods to ApprovalScopeGrantServiceServer will
+// result in compilation errors.
+type UnsafeApprovalScopeGrantServiceServer interface {
+	mustEmbedUnimplementedApprovalScopeGrantServiceServer()
+}
+
+func RegisterApprovalScopeGrantServiceServer(s grpc.ServiceRegistrar, srv ApprovalScopeGrantServiceServer) {
+	// If the following call panics, it indicates UnimplementedApprovalScopeGrantServiceServer was
+	// embedded by pointer and is nil.  This will cause panics if an
+	// unimplemented method is ever invoked, so we test this at initialization
+	// time to prevent it from happening at runtime later due to I/O.
+	if t, ok := srv.(interface{ testEmbeddedByValue() }); ok {
+		t.testEmbeddedByValue()
+	}
+	s.RegisterService(&ApprovalScopeGrantService_ServiceDesc, srv)
+}
+
+func _ApprovalScopeGrantService_UseApprovalScopeGrant_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(UseApprovalScopeGrantRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ApprovalScopeGrantServiceServer).UseApprovalScopeGrant(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ApprovalScopeGrantService_UseApprovalScopeGrant_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ApprovalScopeGrantServiceServer).UseApprovalScopeGrant(ctx, req.(*UseApprovalScopeGrantRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ApprovalScopeGrantService_ListApprovalScopeGrants_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListApprovalScopeGrantsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ApprovalScopeGrantServiceServer).ListApprovalScopeGrants(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ApprovalScopeGrantService_ListApprovalScopeGrants_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ApprovalScopeGrantServiceServer).ListApprovalScopeGrants(ctx, req.(*ListApprovalScopeGrantsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ApprovalScopeGrantService_RevokeApprovalScopeGrant_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RevokeApprovalScopeGrantRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ApprovalScopeGrantServiceServer).RevokeApprovalScopeGrant(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ApprovalScopeGrantService_RevokeApprovalScopeGrant_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ApprovalScopeGrantServiceServer).RevokeApprovalScopeGrant(ctx, req.(*RevokeApprovalScopeGrantRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+// ApprovalScopeGrantService_ServiceDesc is the grpc.ServiceDesc for ApprovalScopeGrantService service.
+// It's only intended for direct use with grpc.RegisterService,
+// and not to be introspected or modified (even as a copy)
+var ApprovalScopeGrantService_ServiceDesc = grpc.ServiceDesc{
+	ServiceName: "model_plane.v1.ApprovalScopeGrantService",
+	HandlerType: (*ApprovalScopeGrantServiceServer)(nil),
+	Methods: []grpc.MethodDesc{
+		{
+			MethodName: "UseApprovalScopeGrant",
+			Handler:    _ApprovalScopeGrantService_UseApprovalScopeGrant_Handler,
+		},
+		{
+			MethodName: "ListApprovalScopeGrants",
+			Handler:    _ApprovalScopeGrantService_ListApprovalScopeGrants_Handler,
+		},
+		{
+			MethodName: "RevokeApprovalScopeGrant",
+			Handler:    _ApprovalScopeGrantService_RevokeApprovalScopeGrant_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

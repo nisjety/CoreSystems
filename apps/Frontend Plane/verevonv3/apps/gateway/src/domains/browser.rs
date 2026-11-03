@@ -558,6 +558,11 @@ fn classed_routes(limiter: &crate::rate_limit::RateLimiter) -> Router<AppState> 
             limiter,
             RateClass::Interactive,
         ))
+        // WS21-S6: the org site policy and the member's own choices. Absent unless
+        // BROWSER_DO_ENABLED is the literal `true`, and under this router's session layer.
+        .merge(crate::domains::browser_sites::routes(
+            crate::domains::browser_sites::enabled_from_env(),
+        ))
 }
 
 pub(crate) async fn create_session(

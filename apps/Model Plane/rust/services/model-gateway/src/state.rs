@@ -10,6 +10,7 @@ use mp_contracts::dataplane::{
 };
 use mp_contracts::model_plane::v1::{
     browser_broker_client::BrowserBrokerClient, capability_core_client::CapabilityCoreClient,
+    event_log_client::EventLogClient,
     execution_core_client::ExecutionCoreClient, finetune_jobs_client::FinetuneJobsClient,
     inference_core_client::InferenceCoreClient,
     learning_governance_service_client::LearningGovernanceServiceClient,
@@ -18,7 +19,10 @@ use mp_contracts::model_plane::v1::{
     message_search_client::MessageSearchClient,
     memory_service_client::MemoryServiceClient,
     message_tree_service_client::MessageTreeServiceClient,
+    thread_fork_service_client::ThreadForkServiceClient,
+    attention_service_client::AttentionServiceClient,
     orchestration_core_service_client::OrchestrationCoreServiceClient,
+    run_ledger_service_client::RunLedgerServiceClient,
     run_service_client::RunServiceClient, sandbox_manager_client::SandboxManagerClient,
     session_core_client::SessionCoreClient, space_attention_client::SpaceAttentionClient,
     space_events_client::SpaceEventsClient,
@@ -93,6 +97,7 @@ mod zdr_publisher_tests {
             resource_ref: "request/test".into(),
             payload: serde_json::json!({"content": "must-not-persist"}),
             zdr: true,
+            ..Default::default()
         };
         publisher.publish("subject", &envelope).await.unwrap();
         assert!(publisher.drain().is_empty());
@@ -111,8 +116,16 @@ pub struct AppState {
     /// Session Core's MessageRevisionService (edit and delete one message), on the same endpoint as
     /// `session_client` (WS12-S6).
     pub message_revision_client: MessageRevisionServiceClient<Channel>,
+    /// Session Core's EventLog (the run trace read path, WS10.S6) on the `session_client` endpoint.
+    pub event_log_client: EventLogClient<Channel>,
+    /// Session Core's RunLedgerService (EP-14 S5 run timing write and read) on the session_client endpoint.
+    pub run_ledger_client: RunLedgerServiceClient<Channel>,
     /// Session Core's MessageTree service on the session_client endpoint (WS17-S8).
     pub message_tree_client: MessageTreeServiceClient<Channel>,
+    /// Session Core's ThreadFork service on the session_client endpoint (WS17-S6).
+    pub thread_fork_client: ThreadForkServiceClient<Channel>,
+    /// Session Core's Attention service on the session_client endpoint (WS16-S1).
+    pub attention_client: AttentionServiceClient<Channel>,
     /// Session Core's LearningGovernance service on the same endpoint as `session_client` (WS07-S9).
     pub learning_client: LearningGovernanceServiceClient<Channel>,
     /// Session Core's SpaceEvents service (the Space event tail), on the same endpoint as
@@ -212,6 +225,10 @@ pub struct AppState {
     /// test sets it so the route does not depend on the process environment,
     /// which parallel tests share.
     pub browser_budget_claim: Option<bool>,
+    /// `MODEL_GATEWAY_BROWSER_KEY_GRANTS` (INNH-10 MP-3) pinned for this state. `None`
+    /// (production) reads the variable on each key-grant request (default off: both key-grant
+    /// routes answer 404); a test sets it so the route does not depend on the process environment.
+    pub browser_key_grants: Option<bool>,
     pub insight_core_base_url: String,
     /// Base URL of social-core's HTTP API (Application Plane social accounts,
     /// posts, and campaigns), e.g. "<http://social-core:3162>". Used by the
@@ -453,7 +470,11 @@ impl AppState {
             inference_client: InferenceCoreClient::new(inference_channel),
             message_search_client: MessageSearchClient::new(session_channel.clone()),
             message_revision_client: MessageRevisionServiceClient::new(session_channel.clone()),
+            event_log_client: EventLogClient::new(session_channel.clone()),
+            run_ledger_client: RunLedgerServiceClient::new(session_channel.clone()),
             message_tree_client: MessageTreeServiceClient::new(session_channel.clone()),
+            thread_fork_client: ThreadForkServiceClient::new(session_channel.clone()),
+            attention_client: AttentionServiceClient::new(session_channel.clone()),
             learning_client: LearningGovernanceServiceClient::new(session_channel.clone()),
             space_events_client: SpaceEventsClient::new(session_channel.clone()),
             space_room_read_client: SpaceRoomReadServiceClient::new(session_channel.clone()),
@@ -484,6 +505,7 @@ impl AppState {
             org_core_service_id: "model-gateway".to_owned(),
             org_core_service_token: String::new(),
             browser_budget_claim: None,
+            browser_key_grants: None,
             insight_core_base_url: "http://localhost:3163".to_owned(),
             social_core_base_url: "http://localhost:3162".to_owned(),
             conversation_core_base_url: "http://localhost:3160".to_owned(),
@@ -630,7 +652,27 @@ impl AppState {
             "SESSION_CORE_ADDR",
             "http://localhost:9091",
         )?);
+        let event_log_client = EventLogClient::new(Self::lazy_channel(
+            "SESSION_CORE_URL",
+            "SESSION_CORE_ADDR",
+            "http://localhost:9091",
+        )?);
+        let run_ledger_client = RunLedgerServiceClient::new(Self::lazy_channel(
+            "SESSION_CORE_URL",
+            "SESSION_CORE_ADDR",
+            "http://localhost:9091",
+        )?);
         let message_tree_client = MessageTreeServiceClient::new(Self::lazy_channel(
+            "SESSION_CORE_URL",
+            "SESSION_CORE_ADDR",
+            "http://localhost:9091",
+        )?);
+        let thread_fork_client = ThreadForkServiceClient::new(Self::lazy_channel(
+            "SESSION_CORE_URL",
+            "SESSION_CORE_ADDR",
+            "http://localhost:9091",
+        )?);
+        let attention_client = AttentionServiceClient::new(Self::lazy_channel(
             "SESSION_CORE_URL",
             "SESSION_CORE_ADDR",
             "http://localhost:9091",
@@ -861,7 +903,11 @@ impl AppState {
             state.session_client = session_client;
             state.message_search_client = message_search_client;
             state.message_revision_client = message_revision_client;
+            state.event_log_client = event_log_client;
+            state.run_ledger_client = run_ledger_client;
             state.message_tree_client = message_tree_client;
+            state.thread_fork_client = thread_fork_client;
+            state.attention_client = attention_client;
             state.learning_client = learning_client;
             state.space_events_client = space_events_client;
             state.space_room_read_client = space_room_read_client;
@@ -925,7 +971,11 @@ impl AppState {
             state.session_client = session_client;
             state.message_search_client = message_search_client;
             state.message_revision_client = message_revision_client;
+            state.event_log_client = event_log_client;
+            state.run_ledger_client = run_ledger_client;
             state.message_tree_client = message_tree_client;
+            state.thread_fork_client = thread_fork_client;
+            state.attention_client = attention_client;
             state.learning_client = learning_client;
             state.space_events_client = space_events_client;
             state.space_room_read_client = space_room_read_client;

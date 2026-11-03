@@ -92,8 +92,16 @@ describe('item 16 — streaming is announced to a screen reader', () => {
     // and formatted by `streamActivityLabel`, so they cannot describe the same
     // wait differently; the phrasing itself is unit-tested in stream-activity.
     expect(page).toContain('spokenActivity()')
-    expect(page).toContain('deriveStreamActivity(pending?.toolCalls)')
-    expect(page).toContain('streamActivityLabel(activity)')
+    expect(page).toContain('deriveStreamActivity(pending?.toolCalls, pending?.lifecycle)')
+    expect(page).toContain('streamActivityLabel(activity, i18n)')
+  })
+
+  it('says one polite sentence per lifecycle notice as it arrives', async () => {
+    const page = await read(PAGE)
+    // WS15 S5: a retry, a compaction, a context change or a reduced answer is said once, through the same
+    // live region, and the heartbeat does not repeat it. The sentence is the one the transcript shows.
+    expect(page).toContain('lifecycleNoticeSentence(notice, i18n)')
+    expect(page).toContain("turn.status === 'waiting')?.lifecycle?.at(-1)")
   })
 
   it('clears the heartbeat by returning a cleanup from the effect', async () => {

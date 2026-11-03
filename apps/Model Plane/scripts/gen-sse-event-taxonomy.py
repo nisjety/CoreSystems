@@ -78,8 +78,6 @@ LITERAL_PRODUCERS = {
     "when it cannot authorise or open the orchestration stream",
     "awaiting_approval": "agentic run paused for approval at the run boundary, before a "
     "derived `step_update` exists",
-    "run_parked": "parked agentic run on the owner's turn stream; the orchestration "
-    "`RunParked` event shares the name",
 }
 
 VARIANT_ARM = re.compile(

@@ -18,6 +18,7 @@ use tracing::{info, warn};
 use chrono::{DateTime, Utc};
 
 use super::effort::{self, Family, Level, Resolved};
+use super::model_record;
 use super::{
     ChatMessage, InferChunk, InferRequest, InferResponse, ModelFamily, ModelInfo, PrivacyTier,
     ProviderCapabilities, ProviderError, ProviderRouter, ProviderTiming, Residency,
@@ -916,16 +917,30 @@ impl CodexSubscriptionProvider {
         }
         self.models
             .iter()
-            .map(|model| ModelInfo {
-                id: model.clone(),
-                provider: PROVIDER_ID.to_owned(),
-                modality: "chat".to_owned(),
-                streaming: true,
-                features: features.clone(),
-                cheap: false,
-                privacy_tier: PrivacyTier::classify(&caps),
-                residency_label: caps.residency.as_str().to_owned(),
-                effort_levels: Vec::new(),
+            .map(|model| {
+                // The subscription declares no ceiling and no row names a Codex model, so
+                // every model here is advertised with an unknown record.
+                let record = model_record::advertised(
+                    Family::Codex,
+                    &effort::ModelAliases::default(),
+                    model,
+                    caps.max_context_tokens,
+                    caps.max_output_tokens,
+                );
+                ModelInfo {
+                    id: model.clone(),
+                    provider: PROVIDER_ID.to_owned(),
+                    modality: "chat".to_owned(),
+                    streaming: true,
+                    features: features.clone(),
+                    cheap: false,
+                    privacy_tier: PrivacyTier::classify(&caps),
+                    residency_label: caps.residency.as_str().to_owned(),
+                    effort_levels: Vec::new(),
+                    context_window_tokens: record.context_window_tokens,
+                    max_output_tokens: record.max_output_tokens,
+                    lifecycle: record.lifecycle,
+                }
             })
             .collect()
     }

@@ -19,8 +19,10 @@
  *   GET  /api/application-plane/token   → ...
  *   POST /api/application-plane/internal-token → ...
  *   POST /api/control-policy/internal-token → Data policy caller (service only)
- *   POST /api/quarry/api-key-exchange   → INNH-10 api-key exchange (gateway only)
- *   POST /api/browser-broker/api-key-exchange → ...
+ *
+ * `POST /api/:audience/api-key-exchange` (INNH-10 CP-1, EP-12 S2) lives on
+ * `ApiKeyExchangeController` (api-key-exchange.controller.ts), the one route
+ * that mints an `api_key` token.
  *
  * The path slug is parsed back into a `PlaneAudience` and validated
  * against the configured set in `ConvexTokenService.isKnownPlaneAudience`
@@ -53,10 +55,6 @@ import { randomUUID } from 'node:crypto';
 import type { Request } from 'express';
 
 import { DirectNatsService } from '../nats/direct-nats.service';
-import {
-  ApiKeyExchangeHandler,
-  type ApiKeyExchangeBody,
-} from './api-key-exchange.controller';
 import { issuedTokenAuditIdentity } from './audit-event-identity';
 import { auth } from './auth';
 import {
@@ -152,17 +150,11 @@ const TOKEN_EXCHANGE_TTL_SECONDS = 90;
 @Controller('api')
 export class PlaneTokenController {
   private readonly logger = new Logger(PlaneTokenController.name);
-  private readonly apiKeyExchange: ApiKeyExchangeHandler;
 
   constructor(
     private readonly convexTokenService: ConvexTokenService,
     private readonly directNats: DirectNatsService,
-  ) {
-    this.apiKeyExchange = new ApiKeyExchangeHandler(
-      convexTokenService,
-      directNats,
-    );
-  }
+  ) {}
 
   /**
    * Mint a plane-scoped JWT from the active Better Auth session. The
@@ -590,28 +582,5 @@ export class PlaneTokenController {
       );
     }
     return response;
-  }
-
-  /**
-   * INNH-10 CP-1: exchange a browser-agent API key for a short-lived
-   * `principal_type: "api_key"` token (`quarry` or `browser-broker` only). The
-   * caller must be a registry principal whose `apiKeyExchange` lists the
-   * audience (the Verevon gateway). Dark unless `API_KEY_ENABLED` and
-   * `API_KEY_AGENT_EXCHANGE_ENABLED` are both `true` (404 otherwise). See
-   * `api-key-exchange.controller.ts` for the full check order. The only path
-   * that mints an `api_key` token.
-   */
-  @Post(':audience/api-key-exchange')
-  @ApiOperation({
-    summary:
-      'Exchange a browser-agent API key for a short-lived api_key plane token (gateway only)',
-  })
-  async exchangeApiKey(
-    @Param('audience') audience: string,
-    @NestHeaders('x-service-id') serviceId: string | undefined,
-    @NestHeaders('x-service-api-key') credential: string | undefined,
-    @Body() body: ApiKeyExchangeBody,
-  ) {
-    return this.apiKeyExchange.exchange(audience, serviceId, credential, body);
   }
 }

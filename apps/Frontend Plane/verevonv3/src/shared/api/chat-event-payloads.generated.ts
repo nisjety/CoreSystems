@@ -15,8 +15,10 @@ export type ChatEventPayloads = {
   }
   /** Rust variants: Attachment. */
   attachment: {
+    check?: Record<string, unknown>
     id: string
     name: string
+    preview?: Record<string, unknown>
     size: number
     type: string
     url: string
@@ -131,9 +133,25 @@ export type ChatEventPayloads = {
     tool: string
     wait_ms: number
   }
+  /** Rust variants: RunParked. */
+  run_parked: {
+    reason: string
+    request_id: string
+    resume_after: string | null
+    run_id: string
+    status: string
+  }
+  /** Rust variants: SandboxState. */
+  sandbox_state: {
+    cause?: string
+    request_id: string
+    scope: string
+    state: string
+  }
   /** Rust variants: SourceScopeApplied. */
   source_scope_applied: {
     excluded_tools: unknown[]
+    knowledge?: Record<string, unknown>
     scope: string
   }
   /** Rust variants: StepUpdate. */
@@ -212,8 +230,17 @@ export type ChatEventPayloads = {
     input_tokens: number
     output_tokens: number
     phase: string
+    routing?: string
     unpriced_calls?: number
     warning?: string
+  }
+  /** Rust variants: UserQuestion. */
+  user_question: {
+    delivery: string
+    expires_at: string | null
+    items: unknown[]
+    question_id: string
+    request_id: string
   }
   /** Rust variants: Verification. */
   verification: {

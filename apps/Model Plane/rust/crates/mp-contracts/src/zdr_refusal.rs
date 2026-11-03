@@ -314,6 +314,10 @@ pub const FEATURES: &[Feature] = &[
         label: "browser run controls",
     },
     Feature {
+        key: "browser_tool",
+        label: "browser tools",
+    },
+    Feature {
         key: "translation",
         label: "translation",
     },
@@ -340,6 +344,37 @@ pub const FEATURES: &[Feature] = &[
     Feature {
         key: "message_versions",
         label: "message versions",
+    },
+    Feature {
+        key: "sandbox_workspace",
+        label: "files kept between calls in a thread workspace",
+    },
+    Feature {
+        key: "user_profile",
+        label: "the standing profile",
+    },
+    // EP-12: the Agent API and conversation export, share and import refuse a ZDR
+    // caller before any read or write, so each key names the surface it stops.
+    Feature {
+        key: "agent_api",
+        label: "the Agent API",
+    },
+    Feature {
+        key: "conversation_export",
+        label: "conversation export and replay",
+    },
+    Feature {
+        key: "conversation_share",
+        label: "conversation sharing",
+    },
+    Feature {
+        key: "conversation_import",
+        label: "conversation import",
+    },
+    // EP-14 S5/S7: the run timing and request-inspection reads refuse a ZDR caller.
+    Feature {
+        key: "run_inspection",
+        label: "run timing and request inspection",
     },
 ];
 
@@ -919,6 +954,33 @@ mod tests {
                 &json!({"error": {"code": "zdr_feature_not_supported", "feature": "made_up"}})
             ),
             None
+        );
+    }
+
+    #[test]
+    fn the_agent_api_and_conversation_keys_are_refusals_that_round_trip() {
+        for key in [
+            "agent_api",
+            "conversation_export",
+            "conversation_share",
+            "conversation_import",
+        ] {
+            let refusal = Refusal::feature_not_supported(key);
+            assert_eq!(refusal.feature(), Some(key));
+            assert_eq!(
+                Refusal::from_body(&refusal.json_body()),
+                Some(refusal),
+                "{key}"
+            );
+            assert_eq!(
+                Refusal::from_status(&refusal.grpc_status(Code::FailedPrecondition)),
+                Some(refusal),
+                "{key}"
+            );
+        }
+        assert_eq!(
+            Refusal::feature_not_supported("agent_api").message(),
+            "This is not supported with zero data retention yet: the Agent API. The request was refused before any model call."
         );
     }
 

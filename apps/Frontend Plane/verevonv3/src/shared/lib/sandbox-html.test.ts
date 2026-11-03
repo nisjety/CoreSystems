@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { sandboxHtmlDocument } from './sandbox-html'
+import { sandboxHtmlDocument, sandboxWidgetDocument } from './sandbox-html'
 
 function parse(html: string): Document {
   return new DOMParser().parseFromString(html, 'text/html')
@@ -38,5 +38,36 @@ describe('sandboxHtmlDocument', () => {
   it('trims surrounding whitespace and handles empty input', () => {
     expectCspFirst(sandboxHtmlDocument('   \n<p>x</p>\n  '))
     expectCspFirst(sandboxHtmlDocument(''))
+  })
+})
+
+describe('sandboxWidgetDocument', () => {
+  const theme = ':root{--vv-text:#111;--vv-accent:#0a5}'
+
+  it('puts the CSP before the theme, and the theme before the widget', () => {
+    const output = sandboxWidgetDocument('<style>body{color:red}</style><p>w</p>', theme)
+    expectCspFirst(output)
+    const head = parse(output).head
+    expect(head.children[1]?.tagName).toBe('STYLE')
+    expect(head.children[1]?.textContent?.startsWith(theme)).toBe(true)
+    expect(output.indexOf(theme)).toBeLessThan(output.indexOf('<body>'))
+    expect(parse(output).body.querySelector('p')?.textContent).toBe('w')
+  })
+
+  it('keeps the CSP first when the widget is a full document with its own head', () => {
+    expectCspFirst(sandboxWidgetDocument('<html><head><meta http-equiv="refresh" content="0"></head><body>x</body></html>', theme))
+  })
+})
+
+describe('sandboxHtmlDocument is unchanged by the widget wrapper', () => {
+  it('writes exactly the preview document it always did', () => {
+    expect(sandboxHtmlDocument(' <p>x</p> ')).toBe(
+      '<!doctype html><html><head><meta http-equiv="Content-Security-Policy" content="' +
+        "default-src 'none'; base-uri 'none'; child-src 'none'; connect-src 'none'; font-src data:; " +
+        "form-action 'none'; frame-ancestors 'none'; frame-src 'none'; img-src data: blob:; " +
+        "media-src data: blob:; object-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; " +
+        "worker-src 'none'" +
+        '"></head><body><p>x</p></body></html>',
+    )
   })
 })

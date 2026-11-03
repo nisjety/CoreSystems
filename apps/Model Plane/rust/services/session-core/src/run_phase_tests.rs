@@ -126,6 +126,7 @@ fn start_request(
     source: pb::ManagedRunSource,
 ) -> pb::StartManagedRunRequest {
     pb::StartManagedRunRequest {
+        wake: None,
         thread_id: thread.to_owned(),
         parent_run_id: parent.to_owned(),
         agent_id: "general-v1".to_owned(),

@@ -20,6 +20,7 @@ const _ = grpc.SupportPackageIsVersion9
 
 const (
 	SpaceRoomReadService_ListSpaceArtifacts_FullMethodName = "/model_plane.v1.SpaceRoomReadService/ListSpaceArtifacts"
+	SpaceRoomReadService_ListSpaceTimeline_FullMethodName  = "/model_plane.v1.SpaceRoomReadService/ListSpaceTimeline"
 )
 
 // SpaceRoomReadServiceClient is the client API for SpaceRoomReadService service.
@@ -45,6 +46,13 @@ type SpaceRoomReadServiceClient interface {
 	// caller must be a user principal and must hold a Control Space read decision
 	// (audience `model-plane`, thread:read) for exactly this org, user and Space.
 	ListSpaceArtifacts(ctx context.Context, in *ListSpaceArtifactsRequest, opts ...grpc.CallOption) (*ListSpaceArtifactsResponse, error)
+	// WS15-S6: one window of the room's posts, newest activity first, from the thread activity
+	// summary (migration 0078). Same authority as ListSpaceArtifacts: a user principal holding a
+	// Control Space read decision for exactly this org, user and Space; the audience ceiling it
+	// carries is applied to every thread. Refused with FAILED_PRECONDITION
+	// "summary_backfill_pending" while the summary backfill has not finished, and with
+	// UNIMPLEMENTED while SPACE_TIMELINE_CORE is off. Summaries only: no message content.
+	ListSpaceTimeline(ctx context.Context, in *ListSpaceTimelineRequest, opts ...grpc.CallOption) (*ListSpaceTimelineResponse, error)
 }
 
 type spaceRoomReadServiceClient struct {
@@ -59,6 +67,16 @@ func (c *spaceRoomReadServiceClient) ListSpaceArtifacts(ctx context.Context, in 
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(ListSpaceArtifactsResponse)
 	err := c.cc.Invoke(ctx, SpaceRoomReadService_ListSpaceArtifacts_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *spaceRoomReadServiceClient) ListSpaceTimeline(ctx context.Context, in *ListSpaceTimelineRequest, opts ...grpc.CallOption) (*ListSpaceTimelineResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListSpaceTimelineResponse)
+	err := c.cc.Invoke(ctx, SpaceRoomReadService_ListSpaceTimeline_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -88,6 +106,13 @@ type SpaceRoomReadServiceServer interface {
 	// caller must be a user principal and must hold a Control Space read decision
 	// (audience `model-plane`, thread:read) for exactly this org, user and Space.
 	ListSpaceArtifacts(context.Context, *ListSpaceArtifactsRequest) (*ListSpaceArtifactsResponse, error)
+	// WS15-S6: one window of the room's posts, newest activity first, from the thread activity
+	// summary (migration 0078). Same authority as ListSpaceArtifacts: a user principal holding a
+	// Control Space read decision for exactly this org, user and Space; the audience ceiling it
+	// carries is applied to every thread. Refused with FAILED_PRECONDITION
+	// "summary_backfill_pending" while the summary backfill has not finished, and with
+	// UNIMPLEMENTED while SPACE_TIMELINE_CORE is off. Summaries only: no message content.
+	ListSpaceTimeline(context.Context, *ListSpaceTimelineRequest) (*ListSpaceTimelineResponse, error)
 	mustEmbedUnimplementedSpaceRoomReadServiceServer()
 }
 
@@ -100,6 +125,9 @@ type UnimplementedSpaceRoomReadServiceServer struct{}
 
 func (UnimplementedSpaceRoomReadServiceServer) ListSpaceArtifacts(context.Context, *ListSpaceArtifactsRequest) (*ListSpaceArtifactsResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ListSpaceArtifacts not implemented")
+}
+func (UnimplementedSpaceRoomReadServiceServer) ListSpaceTimeline(context.Context, *ListSpaceTimelineRequest) (*ListSpaceTimelineResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListSpaceTimeline not implemented")
 }
 func (UnimplementedSpaceRoomReadServiceServer) mustEmbedUnimplementedSpaceRoomReadServiceServer() {}
 func (UnimplementedSpaceRoomReadServiceServer) testEmbeddedByValue()                              {}
@@ -140,6 +168,24 @@ func _SpaceRoomReadService_ListSpaceArtifacts_Handler(srv interface{}, ctx conte
 	return interceptor(ctx, in, info, handler)
 }
 
+func _SpaceRoomReadService_ListSpaceTimeline_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListSpaceTimelineRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SpaceRoomReadServiceServer).ListSpaceTimeline(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SpaceRoomReadService_ListSpaceTimeline_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SpaceRoomReadServiceServer).ListSpaceTimeline(ctx, req.(*ListSpaceTimelineRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // SpaceRoomReadService_ServiceDesc is the grpc.ServiceDesc for SpaceRoomReadService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -150,6 +196,10 @@ var SpaceRoomReadService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ListSpaceArtifacts",
 			Handler:    _SpaceRoomReadService_ListSpaceArtifacts_Handler,
+		},
+		{
+			MethodName: "ListSpaceTimeline",
+			Handler:    _SpaceRoomReadService_ListSpaceTimeline_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

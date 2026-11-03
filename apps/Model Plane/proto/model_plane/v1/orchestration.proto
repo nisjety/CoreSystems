@@ -578,7 +578,8 @@ message ApprovalCause {
   // Browser risk category the Model proposed an action under (`browser_action_risk`).
   string risk_category = 5;
 
-  // Scopes the decider may grant: `once`, `thread`, `run`. Stubbed to `once`.
+  // Scopes the decider may grant: `once`, `thread`, `run`. Computed by the server from the
+  // code and the call's facts (build plan WS13 S6); a sender's list is never kept.
   repeated string scope_options = 6;
 
   // True when granting needs a recent re-authentication (WS13 S5).
@@ -589,6 +590,19 @@ message ApprovalCause {
 
   // Run-salted blake3 digest of the exact (tool, arguments) call.
   string call_digest = 9;
+
+  // sha256 of the MCP tool definition the person reviewed (build plan WS13 S7). Empty unless the
+  // tool is an MCP tool whose definition is pinned: only a pinned MCP tool may be offered a
+  // standing rule or a thread scope.
+  string tool_digest = 10;
+
+  // Closed word for the kind of host a browser gate targets: `none`, `general`,
+  // `sensitive`, `internal` or `unknown` (E3.2-a). Never a host name. Write-only: a
+  // creator states it, session-core stores it as the approval's top-level
+  // `metadata.host_class` (where the authz_decision audit reads it, dropped for a
+  // zero-retention caller), and a read-back cause leaves it empty. Field 11: 10 is
+  // WS13 S7's tool_digest on model-plane, merged with mp-w2w3 on 2026-11-03.
+  string host_class = 11;
 }
 
 // A durable todo record.
@@ -1217,6 +1231,11 @@ message DecideApprovalRequest {
 
   // Reserved for a Control standing-rule proof on a decision (WS10 S4); not read by S6.
   string grant_use_token = 11;
+  // "Always" (build plan WS13 S7): the gateway sets this only for a granted thread-scoped decision
+  // on a pinned MCP tool. Session-core then records a rule proposal linked to the thread grant; the
+  // rule is not in force until the person confirms it.
+  // Field 8 was renumbered to 12 when main was merged: main already used 8-11 for the Space member decide.
+  bool rule_proposed = 12;
 }
 
 message DecideApprovalResponse {
@@ -1543,12 +1562,27 @@ message OrchestrationEvent {
     // number only.
     RunResumed run_resumed = 25;
 
-    // Human-in-the-loop questions (build plan WS14 S3, tags 27 and 28 — additive;
-    // 26 is WS15's ToolRetryScheduled). Ids only: the question text and the
-    // answer are owner-only and are read through ListRunQuestions.
+    // Tool retry (build plan WS15 S3, tag 26 — additive). A tool call that failed transiently
+    // is about to run again. Ids, the tool name, counts and a closed reason only: the error
+    // text never leaves the loop that saw it. Broadcast and replayed on the run's stream,
+    // never persisted.
+    ToolRetryScheduled tool_retry_scheduled = 26;
+
+    // Human-in-the-loop questions (build plan WS14 S3, tags 27 and 28 — additive). Ids only:
+    // the question text and the answer are owner-only and are read through ListRunQuestions.
     QuestionAsked question_asked = 27;
     // A requested question was answered or skipped.
     QuestionAnswered question_answered = 28;
+
+    // Do-run usage progress (build plan WS27 S9, tag 29 — additive). After each round a Do
+    // run's executor counted, the run's cumulative usage. Counts and ids only; session-core
+    // broadcasts it on the run's stream and never persists it.
+    RunUsageProgress run_usage_progress = 29;
+    // Attach mode (build plan WS8.G, tag 30 — additive; 29 is WS27's
+    // RunUsageProgress on branch model-plane). A delegate agent attached to the
+    // user's browser session and reuses the owner's shared cookie jar. Ids only:
+    // no URL, no title.
+    BrowserAttachSharedJar browser_attach_shared_jar = 30;
   }
 
   message PlanTransitioned {
@@ -1670,12 +1704,30 @@ message OrchestrationEvent {
   message BrowserRunPaused {
     string run_id = 1;
     string plan_id = 2;
+    // Why the run paused (WS8.G, additive). Empty for a user-initiated pause;
+    // `user_took_over` when the person took control of an attached tab.
+    string reason = 3;
   }
 
   // User-initiated run resume (Phase 2 B5), mirrors `BrowserRunPaused`.
   message BrowserRunResumed {
     string run_id = 1;
     string plan_id = 2;
+    // Why the run resumed (WS8.G, additive). Empty for a user-initiated resume;
+    // `control_returned` when the person gave control of an attached tab back.
+    string reason = 3;
+  }
+
+  // A delegate agent attached to the owner's browser session with the shared
+  // cookie jar (WS8.G, tag 30). Emitted once per attach as an audit event.
+  // Ids only: no URL and no page title ever ride this event.
+  message BrowserAttachSharedJar {
+    string run_id = 1;
+    string plan_id = 2;
+    string attach_id = 3;
+    // The user's own browser run the delegate attached to.
+    string session_run_id = 4;
+    string tab_id = 5;
   }
 
   // A browser action was classified risky (login, checkout, posting a form,
@@ -1773,6 +1825,49 @@ message OrchestrationEvent {
     string question_id = 2;
     // The state it reached: ANSWERED or SKIPPED.
     QuestionState state = 3;
+  }
+
+  // The cumulative usage of a Do run after one of its counted rounds (build plan WS27 S9).
+  // Counts and ids only. The counts are the run's totals so far, its delegates' rounds
+  // included, as RunUsage states them; the model and provider are the route of the round
+  // that just finished, so a reader can price the increment under the model that served it.
+  message RunUsageProgress {
+    // The run the usage belongs to: the run whose stream carries this event.
+    string run_id = 1;
+    // Inference rounds the run has counted so far, delegated rounds included.
+    uint32 round = 2;
+    // Input tokens so far, folding in both cache legs as RunUsage.input_tokens does.
+    uint64 input_tokens = 3;
+    // Completion tokens so far.
+    uint64 output_tokens = 4;
+    // Input tokens so far that were served from the provider's prompt cache.
+    uint64 cache_read_input_tokens = 5;
+    // Input tokens so far that were written to the provider's prompt cache.
+    uint64 cache_creation_input_tokens = 6;
+    // The model that served the round that just finished, as the provider reported it.
+    string model_used = 7;
+    // The provider that served the round that just finished, as the provider reported it.
+    string provider_used = 8;
+  }
+
+  // A tool call is being retried after a transient failure (build plan WS15 S3). Ids, the tool
+  // name, counts and a closed reason only; the error text stays in the loop that saw it.
+  message ToolRetryScheduled {
+    // The run whose stream carries the retry.
+    string run_id = 1;
+    // The step the retried call belongs to.
+    string step_id = 2;
+    // The tool being retried.
+    string tool = 3;
+    // The attempt about to run (2 or more): the first attempt is never announced.
+    uint32 attempt = 4;
+    // The most attempts one tool call gets.
+    uint32 max_attempts = 5;
+    // The backoff before the attempt that is about to run, in milliseconds.
+    uint64 wait_ms = 6;
+    // Why the failed attempt is retried: a closed token (timeout, connection,
+    // upstream_unavailable, rate_limited, other).
+    string reason = 7;
   }
 }
 
@@ -1919,6 +2014,14 @@ message RunQuestion {
   repeated QuestionAnswerItem answers = 13;
   // The user message that carried the answer, when one did.
   string answered_message_id = 14;
+  // Who authored the question: `model` (the run's own model) or
+  // `mcp_elicitation` (a form an MCP server sent through the run). A row stored
+  // before the origin existed reads `model`. A card must never present a
+  // server's question as the assistant's (EP-4 S5).
+  string origin = 15;
+  // The display name of the server that asked, at most 80 characters. Empty
+  // exactly when `origin` is `model`.
+  string origin_label = 16;
 }
 
 // Put a question to the run's owner. See `CreateRunQuestion`.
@@ -1938,6 +2041,14 @@ message CreateRunQuestionRequest {
   // A retry with the same key (per org) returns the stored question. Callers
   // use `{run_id}:{step_id}`.
   string idempotency_key = 7;
+  // Who authored the question: empty or `model` for the run's model,
+  // `mcp_elicitation` for a form an MCP server sent. Only the execution-core
+  // service principal may send `mcp_elicitation`; any other caller is refused
+  // (EP-4 S5).
+  string origin = 8;
+  // The display name of the asking server, at most 80 characters. Required
+  // with `mcp_elicitation` and refused with `model`.
+  string origin_label = 9;
 }
 
 // The stored question (a retry with the same idempotency key returns it).
@@ -1978,4 +2089,159 @@ message AnswerRunQuestionRequest {
 message AnswerRunQuestionResponse {
   // The answered or skipped question.
   RunQuestion question = 1;
+}
+
+// Spend a `resume` question's answer once, for the continuation of the run that asked it (build
+// plan WS14 S5). Its own service rather than a method of OrchestrationCoreService, as
+// ApprovalScopeGrantService is, so the implementations and test doubles of that service need no
+// change.
+service RunQuestionConsumeService {
+  // Claim an answered `resume` question for its run's continuation. The first claim spends the
+  // answer. The same claim token again is a safe replay that returns the answer; another claim is
+  // reported as already consumed, not as an error. Owner-only and org-scoped.
+  rpc ConsumeRunQuestion(ConsumeRunQuestionRequest) returns (ConsumeRunQuestionResponse);
+}
+
+// Claim a `resume` question's answer for the run's continuation. See `ConsumeRunQuestion`.
+message ConsumeRunQuestionRequest {
+  // The answered question (`RunQuestion.id`).
+  string question_id = 1;
+  // Must equal the caller's verified org.
+  string org_id = 2;
+  // The run the question belongs to; must match the question.
+  string run_id = 3;
+  // An opaque token the continuing segment generates. Only its hash is stored.
+  string claim_token = 4;
+}
+
+// The outcome of a ConsumeRunQuestion.
+message ConsumeRunQuestionResponse {
+  // The question with its answers. Present when the claim is the caller's: consumed now, or the
+  // same claim replaying. Absent for another claim.
+  RunQuestion question = 1;
+  // True when this call spent the answer.
+  bool consumed = 2;
+  // True when the answer had already been spent.
+  bool already_consumed = 3;
+  // With already_consumed: whether the earlier claim used the same token.
+  bool same_claim = 4;
+}
+
+// --- Approval scope grants (build plan WS13 S6) ---
+
+// A standing release for one eligible call, given by a "this thread" or "this run" decision.
+// Served by session-core. It is its own service rather than a method of
+// OrchestrationCoreService, so the implementations of that service, and their test doubles,
+// need no change.
+service ApprovalScopeGrantService {
+  // Atomically matches one live grant for a call and counts the use. The caller is an
+  // execution-core service principal acting for the run's owner. An empty grant_id means no
+  // grant matched, and the call pauses as it did before grants existed.
+  rpc UseApprovalScopeGrant(UseApprovalScopeGrantRequest) returns (UseApprovalScopeGrantResponse);
+
+  // The verified caller's own grants in one thread.
+  rpc ListApprovalScopeGrants(ListApprovalScopeGrantsRequest)
+      returns (ListApprovalScopeGrantsResponse);
+
+  // Revokes one of the verified caller's live grants. Revocation takes effect at once.
+  rpc RevokeApprovalScopeGrant(RevokeApprovalScopeGrantRequest)
+      returns (RevokeApprovalScopeGrantResponse);
+}
+
+// A standing grant as its owner sees it. It never carries an argument value.
+message ApprovalScopeGrant {
+  // Grant identifier (ULID, prefix `apg_`).
+  string id = 1;
+
+  // The thread the grant covers.
+  string thread_id = 2;
+
+  // The run a run grant covers. Empty for a thread grant.
+  string run_id = 3;
+
+  // THREAD or RUN.
+  ApprovalScope scope = 4;
+
+  // The tool the grant releases.
+  string tool_name = 5;
+
+  // Tool and operation, never argument values.
+  string action_key = 6;
+
+  // The declared effect class the grant was created under.
+  string effect_class = 7;
+
+  // The approval whose decision created the grant.
+  string created_from_approval_id = 8;
+
+  // The closed cause code of that approval.
+  string cause_code = 9;
+
+  // When the grant was created.
+  google.protobuf.Timestamp created_at = 10;
+
+  // When the grant stops releasing calls.
+  google.protobuf.Timestamp expires_at = 11;
+
+  // When the owner revoked it. Unset while it is live.
+  google.protobuf.Timestamp revoked_at = 12;
+
+  // How many calls it has released.
+  int64 use_count = 13;
+
+  // When it last released a call. Unset until its first use.
+  google.protobuf.Timestamp last_used_at = 14;
+}
+
+message UseApprovalScopeGrantRequest {
+  // Server-authoritative org scope of the run.
+  string org_id = 1;
+
+  // The run's owner. A grant matches only this user.
+  string user_id = 2;
+
+  // The run's thread.
+  string thread_id = 3;
+
+  // The run the call belongs to.
+  string run_id = 4;
+
+  // The tool the pause would hold.
+  string tool_name = 5;
+
+  // Tool and operation of the call, from the pause's cause.
+  string action_key = 6;
+
+  // The call's declared effect class under the run, from the signed capability decision.
+  string effect_class = 7;
+}
+
+message UseApprovalScopeGrantResponse {
+  // The grant that released the call. Empty when no live grant matches.
+  string grant_id = 1;
+}
+
+message ListApprovalScopeGrantsRequest {
+  // Server-authoritative org scope.
+  string org_id = 1;
+
+  // The thread whose grants are listed.
+  string thread_id = 2;
+}
+
+message ListApprovalScopeGrantsResponse {
+  repeated ApprovalScopeGrant grants = 1;
+}
+
+message RevokeApprovalScopeGrantRequest {
+  // Server-authoritative org scope.
+  string org_id = 1;
+
+  // The grant to revoke.
+  string grant_id = 2;
+}
+
+message RevokeApprovalScopeGrantResponse {
+  // The grant as it stands after the revocation.
+  ApprovalScopeGrant grant = 1;
 }

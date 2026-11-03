@@ -52,6 +52,9 @@ pub enum OrchestrationEventKind {
     RunParked,
     /// A parked run's loop resumed from its park fold (WS03 S8).
     RunResumed,
+    /// A delegate agent attached to the owner's browser session with the
+    /// shared cookie jar (WS8.G). Audit event, ids only.
+    BrowserAttachSharedJar,
 }
 
 /// Independent judgment on whether a claimed outcome actually happened
@@ -206,6 +209,10 @@ pub enum OrchestrationEvent {
         run_id: String,
         /// Browser-agent plan id driving this session.
         plan_id: String,
+        /// Why the run paused (WS8.G): empty for a user-initiated pause,
+        /// `user_took_over` when the person took control of an attached tab.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        reason: String,
         /// Timestamp.
         at: DateTime<Utc>,
     },
@@ -215,6 +222,10 @@ pub enum OrchestrationEvent {
         run_id: String,
         /// Browser-agent plan id driving this session.
         plan_id: String,
+        /// Why the run resumed (WS8.G): empty for a user-initiated resume,
+        /// `control_returned` when the person gave control back.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        reason: String,
         /// Timestamp.
         at: DateTime<Utc>,
     },
@@ -296,6 +307,23 @@ pub enum OrchestrationEvent {
         /// Timestamp.
         at: DateTime<Utc>,
     },
+    /// A delegate agent attached to the owner's browser session and uses the
+    /// shared cookie jar (WS8.G). Emitted once per attach. Ids only: no URL
+    /// and no page title.
+    BrowserAttachSharedJar {
+        /// Run the delegate's browser-agent loop belongs to.
+        run_id: String,
+        /// Browser-agent plan id driving the attach.
+        plan_id: String,
+        /// Quarry attach id.
+        attach_id: String,
+        /// The user's own browser run the delegate attached to.
+        session_run_id: String,
+        /// The delegate's tab.
+        tab_id: String,
+        /// Timestamp.
+        at: DateTime<Utc>,
+    },
 }
 
 impl OrchestrationEvent {
@@ -325,6 +353,7 @@ impl OrchestrationEvent {
             }
             Self::RunParked { .. } => OrchestrationEventKind::RunParked,
             Self::RunResumed { .. } => OrchestrationEventKind::RunResumed,
+            Self::BrowserAttachSharedJar { .. } => OrchestrationEventKind::BrowserAttachSharedJar,
         }
     }
 }
@@ -400,7 +429,49 @@ mod tests {
             OrchestrationEventKind::ApprovalContinuationVerified,
             OrchestrationEventKind::RunParked,
             OrchestrationEventKind::RunResumed,
+            OrchestrationEventKind::BrowserAttachSharedJar,
         ];
-        assert_eq!(kinds.len(), 16);
+        assert_eq!(kinds.len(), 17);
+    }
+
+    #[test]
+    fn pause_reason_is_omitted_when_empty_and_defaults_on_old_json() {
+        let e = OrchestrationEvent::BrowserRunPaused {
+            run_id: "run_01".into(),
+            plan_id: "plan_01".into(),
+            reason: String::new(),
+            at: now(),
+        };
+        let s = serde_json::to_string(&e).unwrap();
+        assert!(!s.contains("reason"), "empty reason must not serialize: {s}");
+        let back: OrchestrationEvent = serde_json::from_str(&s).unwrap();
+        assert_eq!(back, e);
+
+        let with = OrchestrationEvent::BrowserRunResumed {
+            run_id: "run_01".into(),
+            plan_id: "plan_01".into(),
+            reason: "control_returned".into(),
+            at: now(),
+        };
+        let s = serde_json::to_string(&with).unwrap();
+        assert!(s.contains(r#""reason":"control_returned""#), "{s}");
+        assert_eq!(serde_json::from_str::<OrchestrationEvent>(&s).unwrap(), with);
+    }
+
+    #[test]
+    fn attach_shared_jar_carries_ids_only() {
+        let e = OrchestrationEvent::BrowserAttachSharedJar {
+            run_id: "run_01".into(),
+            plan_id: "plan_01".into(),
+            attach_id: "att_01".into(),
+            session_run_id: "qrun_01".into(),
+            tab_id: "tab_01".into(),
+            at: now(),
+        };
+        assert_eq!(e.kind(), OrchestrationEventKind::BrowserAttachSharedJar);
+        let s = serde_json::to_string(&e).unwrap();
+        assert!(s.contains(r#""kind":"browser_attach_shared_jar""#), "{s}");
+        assert!(!s.contains("url") && !s.contains("title"), "{s}");
+        assert_eq!(serde_json::from_str::<OrchestrationEvent>(&s).unwrap(), e);
     }
 }

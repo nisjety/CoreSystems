@@ -142,6 +142,19 @@ export type RunResumedFromParkEvent = {
   at?: string
 }
 
+/** WS15-S3: the Do loop retries a tool after a transient failure. `attempt` is the
+ * attempt about to run (2 or more); `reason` is a closed token, never error text. */
+export type ToolRetryScheduledEvent = {
+  runId?: string
+  stepId?: string
+  tool?: string
+  attempt?: number
+  maxAttempts?: number
+  waitMs?: number
+  reason?: string
+  at?: string
+}
+
 /** Phase 5 HITL gate: a specific browser action (or a run-level condition
  * like persistent-cookie reuse) requires a human decision before it
  * proceeds. `approvalId` lets the UI decide it via the existing generic
@@ -211,6 +224,7 @@ export type RunEventHandlers = {
   onRunResumed?: (event: RunResumedAfterApprovalEvent) => void
   onRunParked?: (event: RunParkedEvent) => void
   onRunResumedFromPark?: (event: RunResumedFromParkEvent) => void
+  onToolRetryScheduled?: (event: ToolRetryScheduledEvent) => void
   onSubagentAttached?: (event: SubagentAttachedEvent) => void
   onSubagentStopped?: (event: SubagentStoppedEvent) => void
   onBrowserAction?: (event: BrowserActionDispatchedEvent) => void
@@ -319,6 +333,18 @@ function dispatch(event: SseEvent, handlers: RunEventHandlers): void {
       handlers.onRunResumedFromPark?.({
         runId: str(payload.run_id) ?? str(payload.runId),
         resumedSegment: nonNegativeInt(payload.resumed_segment),
+        at: str(payload.at),
+      })
+      break
+    case 'tool_retry_scheduled':
+      handlers.onToolRetryScheduled?.({
+        runId: str(payload.run_id) ?? str(payload.runId),
+        stepId: str(payload.step_id) ?? str(payload.stepId),
+        tool: str(payload.tool),
+        attempt: nonNegativeInt(payload.attempt),
+        maxAttempts: nonNegativeInt(payload.max_attempts),
+        waitMs: nonNegativeInt(payload.wait_ms),
+        reason: str(payload.reason),
         at: str(payload.at),
       })
       break
@@ -506,6 +532,87 @@ export async function listRunEventReplay(
       .map(normalizeDurableRunEvent)
       .filter((event): event is DurableRunEvent => event !== null),
     nextEventId,
+    truncated: data?.truncated === true,
+  }
+}
+
+// ── Durable run timing (EP-14 S5) ───────────────────────────────────────────
+// `GET /api/v1/agents/runs/:run_id/timing` reads what the run kept of its timing: an Ask turn's
+// `turn_timing` report (`turn-timing-v1`), a Do run's per-round inference intervals
+// (`round-timing-v1`) and every tool call's reserve and finalize times. Content-free by
+// construction: ids, milliseconds, counts and tool names. A zero-retention run keeps none, and a
+// zero-retention caller is refused with the `run_inspection` feature.
+
+export type RunTimingRecord = {
+  schema: string
+  requestId: string
+  recordedAt?: string
+  phasesDropped: number
+  /** The stored report, as the JSON object of its schema. */
+  report: Record<string, unknown>
+}
+
+export type RunActionTiming = {
+  actionId: string
+  tool: string
+  status: string
+  reservedAt?: string
+  finalizedAt?: string
+  effectClass?: string
+}
+
+export type RunTiming = {
+  timings: RunTimingRecord[]
+  actions: RunActionTiming[]
+  /** More tool calls were recorded than the read returns. */
+  truncated: boolean
+}
+
+function normalizeRunTimingRecord(raw: unknown): RunTimingRecord | null {
+  const item = objectRecord(raw)
+  const report = objectRecord(item?.report)
+  const schema = str(item?.schema)
+  if (!item || !report || !schema) return null
+  return {
+    schema,
+    requestId: str(item.request_id) ?? str(item.requestId) ?? '',
+    recordedAt: normalizeOptionalIsoTimestamp(str(item.recorded_at) ?? str(item.recordedAt)),
+    phasesDropped: nonNegativeInt(item.phases_dropped) ?? nonNegativeInt(item.phasesDropped) ?? 0,
+    report,
+  }
+}
+
+function normalizeRunActionTiming(raw: unknown): RunActionTiming | null {
+  const item = objectRecord(raw)
+  const actionId = str(item?.action_id) ?? str(item?.actionId)
+  const tool = str(item?.tool)
+  if (!item || !actionId || !tool) return null
+  return {
+    actionId,
+    tool,
+    status: str(item.status) ?? '',
+    reservedAt: normalizeOptionalIsoTimestamp(str(item.reserved_at) ?? str(item.reservedAt)),
+    finalizedAt: normalizeOptionalIsoTimestamp(str(item.finalized_at) ?? str(item.finalizedAt)),
+    effectClass: str(item.effect_class) ?? str(item.effectClass),
+  }
+}
+
+/** Fetch a run's durable timing. Records the client cannot read are dropped, never guessed. */
+export async function getRunTiming(runId: string, signal?: AbortSignal): Promise<RunTiming> {
+  const raw = await requestJson<unknown>(
+    `/api/v1/agents/runs/${encodeURIComponent(runId)}/timing`,
+    { signal },
+  )
+  const data = objectRecord(objectRecord(raw)?.data)
+  const timings = Array.isArray(data?.timings) ? data.timings : []
+  const actions = Array.isArray(data?.actions) ? data.actions : []
+  return {
+    timings: timings
+      .map(normalizeRunTimingRecord)
+      .filter((record): record is RunTimingRecord => record !== null),
+    actions: actions
+      .map(normalizeRunActionTiming)
+      .filter((action): action is RunActionTiming => action !== null),
     truncated: data?.truncated === true,
   }
 }

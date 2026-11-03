@@ -1,5 +1,5 @@
 import { removeClientValuesWithPrefix } from './client-storage'
-import { clearHomeDrafts } from './home-draft-storage'
+import { clearChatDrafts, clearHomeDrafts } from './home-draft-storage'
 
 // What Home keeps on this device from things a person typed or looked up, next
 // to the unsent draft (home-draft-storage): the Nett search snapshot and the
@@ -75,10 +75,12 @@ export function clearOmniboxHistories(): void {
 
 /**
  * A workspace that is zero-data-retention allows no local copy of what a person
- * typed or searched for: drafts, saved searches and the Nett history all go.
+ * typed or searched for: drafts (Home's and the chat threads'), saved searches and
+ * the Nett history all go.
  */
 export function clearHomeLocalContent(): void {
   clearHomeDrafts()
+  clearChatDrafts()
   clearWebHistories()
   clearOmniboxHistories()
   clearSearchSnapshots()

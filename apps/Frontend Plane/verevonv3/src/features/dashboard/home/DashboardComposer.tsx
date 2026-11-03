@@ -122,6 +122,8 @@ import {
 	getModelEntitlementMeta,
 	groupChatModels,
 	catalogueAdvertisesConnectorScope,
+	filterModels,
+	formatModelListPrice,
 	hasZeroRetentionModel,
 	isExpensiveModel,
 	listChatThreads,
@@ -134,12 +136,15 @@ import {
 	verevonModeById,
 	VEREVON_BALANCE_MODE_ID,
 	VEREVON_MODES,
+	type AgentModeId,
 	type ChatThreadSession,
 	type EffortLevel,
 	type EffortProfile,
 	type ModelGroup,
 	type ModelInfo,
 } from "@/shared/api/chat-client";
+import { ModelSearchField } from "@/shared/components/ModelSearchField";
+import { agentModeLabel, agentModesWithinCap } from "@/features/customize/AgentModesSection";
 import {
 	browseConnection,
 	fetchConnectionContent,
@@ -376,6 +381,11 @@ export type DashboardComposerSubmitPayload = {
      * without connected apps is unchanged on the wire.
      */
     connectorScope?: string[];
+    /**
+     * The agent mode the person picked for this send (WS25-S11). Omitted unless they picked one, so an
+     * unchanged send is byte-identical. The server resolves it strictest-wins against the org cap.
+     */
+    agentMode?: AgentModeId;
 	actions: ComposerActiveAction[];
 	attachments: DashboardComposerAttachment[];
 	model?: string;
@@ -891,6 +901,14 @@ export function DashboardComposer(props: {
 	onPlanModeChange?: (value: boolean) => void;
 	planMode?: boolean;
 	/**
+	 * The strictest agent mode the organisation allows (WS25-S11), read from the org agent policy. Present only
+	 * where that policy is on: the picker then offers this mode and every stricter one, and no other.
+	 */
+	agentModeCap?: AgentModeId;
+	/** The agent mode the parent holds for the next send. The composer keeps its own choice when unset. */
+	agentMode?: AgentModeId;
+	onAgentModeChange?: (value: AgentModeId | undefined) => void;
+	/**
 	 * A plan the person approved is waiting to run (WS14 S2a). Present only
 	 * then: the chat appearance shows a third "Kjør plan" pill beside Ask and Do.
 	 * `rungLabel` says what the agent may now do; `selected` is whether the next
@@ -981,6 +999,20 @@ export function DashboardComposer(props: {
 	// switch to "Kun samtalen" — mirrors the `temporaryChat()` reset pattern
 	// used elsewhere in this file.
 	createEffect(() => conversationOnly(), (restricted) => { if (restricted) setInternalRetrievalScope('auto'); });
+	// The agent mode the person picked, kept here unless the parent holds it. A choice the org cap no longer
+	// admits is dropped, so a stale mode is never offered or sent.
+	const [internalAgentMode, setInternalAgentMode] = createSignal<AgentModeId | undefined>(undefined);
+	const agentMode = () => props.agentMode ?? internalAgentMode();
+	const setAgentMode = (value: AgentModeId | undefined) => {
+		setInternalAgentMode(value);
+		props.onAgentModeChange?.(value);
+	};
+	const agentModeNotAdmitted = () => {
+		const mode = agentMode();
+		const cap = props.agentModeCap;
+		return mode !== undefined && cap !== undefined && !agentModesWithinCap(cap).includes(mode);
+	};
+	createEffect(() => agentModeNotAdmitted(), (notAdmitted) => { if (notAdmitted) setAgentMode(undefined); });
 	const browseWeb = () =>
 		!subscriptionBacked() && !zeroRetentionTurn() && (props.browseWeb ?? internalBrowseWeb());
 	const setBrowseWeb = (next: boolean | ((current: boolean) => boolean)) => {
@@ -1024,6 +1056,8 @@ export function DashboardComposer(props: {
 		null,
 	);
 	const [modelOpen, setModelOpen] = createSignal(false);
+	const [modelQuery, setModelQuery] = createSignal("");
+	const modelCatalogId = `composer-model-catalog-${createUniqueId()}`;
 	const [contextScopeOpen, setContextScopeOpen] = createSignal(false);
 	const [responseMode, setResponseMode] = createSignal<ResponseMode>("auto");
 	// The picker pins three first-class Verevon intent modes (Budget/Balance/Genius)
@@ -1179,6 +1213,13 @@ export function DashboardComposer(props: {
 	);
 	const flatChatModels = createMemo<ModelInfo[]>(() =>
 		chatModelGroups().flatMap((group) => group.models),
+	);
+	const activeModelQuery = () =>
+		flatChatModels().length > 6 ? modelQuery().trim() : "";
+	const shownChatModelGroups = createMemo<ModelGroup[]>(() =>
+		activeModelQuery() === ""
+			? chatModelGroups()
+			: groupChatModels(filterModels(flatChatModels(), modelQuery())),
 	);
 	const selectedCatalogModel = createMemo(() => {
 		// No truthiness guard on the provider: plenty of real catalog models have
@@ -2704,6 +2745,10 @@ export function DashboardComposer(props: {
 			? normalizeConnectorScope(connectorScope())
 			: [];
 
+		// The mode chosen for this send, read before the tier lookup may wait. Not sent in a conversation-only
+		// turn, which runs no agent.
+		const submittedAgentMode = conversationOnly() ? undefined : agentMode();
+
 		// Pending from here, so the composer is inert (and a second Enter is
 		// refused) while the tier lookup waits.
 		setHandoffPending(true);
@@ -2723,6 +2768,8 @@ export function DashboardComposer(props: {
 			}
 			// Omitted when nothing was picked, like `retrievalScope` above.
 			if (submittedConnectorScope.length > 0) payload.connectorScope = submittedConnectorScope;
+			// Omitted when nothing was picked, like `connectorScope` above.
+			if (submittedAgentMode !== undefined) payload.agentMode = submittedAgentMode;
 			if (submittedConversationOnly) {
 				payload.tools = [];
 				payload.actions = [];
@@ -3044,7 +3091,15 @@ export function DashboardComposer(props: {
 									<summary>
 										{i18n.tr('Velg modell selv', 'Choose a model yourself')}
 									</summary>
+									<Show when={flatChatModels().length > 6}>
+										<ModelSearchField
+											value={modelQuery()}
+											controlsId={modelCatalogId}
+											onChange={setModelQuery}
+										/>
+									</Show>
 									<div
+										id={modelCatalogId}
 										class="dashboard-composer-model-catalog"
 										role="region"
 										aria-label={i18n.tr(
@@ -3053,7 +3108,7 @@ export function DashboardComposer(props: {
 										)}
 										tabindex={0}
 									>
-										<For each={chatModelGroups()}>
+										<For each={shownChatModelGroups()}>
 											{(group) => (
 												<div class="dashboard-composer-model-group">
 													<p class="dashboard-composer-model-group__label">
@@ -3083,6 +3138,13 @@ export function DashboardComposer(props: {
 															</span>
 															<span>
 																{model.name}
+																<Show when={model.price}>
+																	{(price) => (
+																		<span class="dashboard-composer-model-price">
+																			{formatModelListPrice(price(), i18n.locale())}
+																		</span>
+																	)}
+																</Show>
 															</span>
 														</span>
 														<span class="dashboard-composer-model-menu__right">
@@ -3136,6 +3198,11 @@ export function DashboardComposer(props: {
 												</div>
 											)}
 										</For>
+										<Show when={activeModelQuery() !== "" && shownChatModelGroups().length === 0}>
+											<p class="dashboard-composer-model-empty" role="status">
+												{i18n.tr("Ingen modeller passer", "No models match")}
+											</p>
+										</Show>
 									</div>
 								</details>
 								<Show when={selectedPrivacyTier() === "sovereign"}>
@@ -3384,6 +3451,26 @@ export function DashboardComposer(props: {
 								</Show>
 							</div>
 						</Show>
+					</Show>
+					<Show when={props.agentModeCap}>
+						{(cap) => (
+							<label
+								class="dashboard-composer-agent-mode"
+								style={{ display: "inline-flex", "align-items": "center", gap: "6px", "font-size": "12px" }}
+							>
+								<span>{i18n.tr("Agentmodus", "Agent mode")}</span>
+								<select
+									aria-label={i18n.tr("Agentmodus", "Agent mode")}
+									value={agentMode() ?? cap()}
+									disabled={conversationOnly()}
+									onChange={(event) => setAgentMode(event.currentTarget.value as AgentModeId)}
+								>
+									<For each={agentModesWithinCap(cap())}>
+										{(mode) => <option value={mode}>{agentModeLabel(mode, i18n)}</option>}
+									</For>
+								</select>
+							</label>
+						)}
 					</Show>
 					<Show when={props.onTemporaryChatChange}>
 						<ComposerIconButton

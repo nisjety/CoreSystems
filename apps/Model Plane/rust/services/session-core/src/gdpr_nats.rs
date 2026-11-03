@@ -150,6 +150,19 @@ async fn handle_message(
 ) -> anyhow::Result<Outcome> {
     let Some(erasure) = parse_erasure_event(payload).map_err(|e| anyhow::anyhow!(e.to_string()))?
     else {
+        // EP-8 S7: a per-user erasure drops that person's part of Space memory, nothing else.
+        if let Some(user) =
+            crate::gdpr::parse_user_erasure_event(payload).map_err(|e| anyhow::anyhow!(e.to_string()))?
+        {
+            let space =
+                crate::gdpr::erase_user_space_memory_sources(pool, &user.org_id, &user.user_id).await?;
+            info!(
+                org_id = %user.org_id,
+                deleted = space.deleted,
+                narrowed = space.narrowed,
+                "GDPR user erasure: Space memory sources dropped"
+            );
+        }
         return Ok(Outcome::Skipped);
     };
 

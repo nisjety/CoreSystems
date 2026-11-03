@@ -1,4 +1,5 @@
 import type { SpaceThread } from '@/shared/api/spaces-client'
+import { isQueuedRunStatus, isStoppedRunStatus, legacyStateFromRunStatus } from '@/shared/chat/thread-status'
 import { formatDay, formatMoment, isValidTimeZone, type SpaceFormatter } from '@/shared/i18n/format'
 import { localeIntl } from '@/shared/i18n/locales'
 import { COPY, say, type Tr } from './space-copy'
@@ -14,25 +15,9 @@ const NORWEGIAN: SpaceFormatter = { locale: 'no' }
  * different words in two corners of the same room.
  */
 
-/** Session Core's own token for a run paused on a human decision. Named once
- * so the pulse count, the post's approval surface, and the composer guard all
- * agree on what "waiting" means. */
-export const AWAITING_APPROVAL_RUN_STATUS = 'awaiting_approval'
-
-export const ACTIVE_RUN_STATUSES = new Set(['queued', 'running', AWAITING_APPROVAL_RUN_STATUS])
-
-/**
- * Statuses under which an agent is actually producing output right now.
- *
- * Distinct from `ACTIVE_RUN_STATUSES` on purpose: a run paused for approval is
- * active in the sense that it has not finished, but nobody is working — a
- * person is being waited for. The "working" indicator (item 1b) must say the
- * first thing and not the second, or a room stalled on a decision would look
- * busy instead of blocked.
- */
-export const LIVE_RUN_STATUSES = new Set(['queued', 'running'])
-
-export const FAILED_RUN_STATUSES = new Set(['failed'])
+// The run-status sets live in the thread-status module, so the Space classifies a run the same way
+// as the sidebar and the console; they stay exported here for the room's own consumers.
+export { ACTIVE_RUN_STATUSES, AWAITING_APPROVAL_RUN_STATUS, FAILED_RUN_STATUSES, LIVE_RUN_STATUSES } from '@/shared/chat/thread-status'
 
 export function threadTitle(thread: SpaceThread, tr: Tr): string {
   return thread.title?.trim() || thread.preview?.trim() || say(tr, COPY.thread.untitled)
@@ -41,17 +26,20 @@ export function threadTitle(thread: SpaceThread, tr: Tr): string {
 export function threadStatus(thread: SpaceThread, tr: Tr): string {
   const status = thread.latest_run_status
   if (!status) return say(tr, COPY.thread.open)
-  if (status === 'awaiting_approval') return say(tr, COPY.thread.awaitingApproval)
-  if (status === 'running') return say(tr, COPY.thread.running)
-  if (status === 'queued') return say(tr, COPY.thread.queued)
-  if (status === 'completed') return say(tr, COPY.thread.completed)
-  if (status === 'failed') return say(tr, COPY.thread.failed)
   // A recorded stop. Session Core writes `cancelled` when a member presses Stop
   // (model-gateway cancels the direct-inference run rather than letting it
   // finish), and until this line existed the room rendered that as the
   // untranslated enum token "Cancelled" — so a stop the room itself caused read
   // as a foreign word.
-  if (status === 'cancelled') return say(tr, COPY.thread.stopped)
+  if (isStoppedRunStatus(status)) return say(tr, COPY.thread.stopped)
+  // The attention vocabulary reads a queued run as working; the room keeps the
+  // word "queued" so a run waiting for a worker does not look busy.
+  if (isQueuedRunStatus(status)) return say(tr, COPY.thread.queued)
+  const state = legacyStateFromRunStatus(status)
+  if (state === 'needs_approval') return say(tr, COPY.thread.awaitingApproval)
+  if (state === 'working') return say(tr, COPY.thread.running)
+  if (state === 'completed') return say(tr, COPY.thread.completed)
+  if (state === 'failed') return say(tr, COPY.thread.failed)
   return formatLabel(status)
 }
 

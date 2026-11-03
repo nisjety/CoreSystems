@@ -14,8 +14,9 @@ use std::fmt::Write as _;
 
 use chrono::{Datelike, Utc};
 use mp_contracts::dataplane::retrieval_v2::RetrieveRequest;
+use mp_contracts::loop_guard::{self, CallOutcome, CallRecord, LoopGuard, LoopGuardMode, LoopStop, Verdict};
 use mp_contracts::model_plane::v1::{
-    ChatMessage, FinalizeToolActionRequest, InferRequest, PromptTierPlan,
+    ChatMessage, FinalizeToolActionRequest, InferPurpose, InferRequest, PromptTierPlan,
     ReserveToolActionRequest, SearchMemoryRequest, SkillBundleSummary, SkillMount, ToolCall,
     ToolDefinition,
 };
@@ -31,7 +32,7 @@ use crate::{
     grounding,
     quarry::SearchOptions,
     relevance,
-    sse_events::ChatEvent,
+    sse_events::{AttachmentPreview, ChatEvent},
     state::AppState,
 };
 
@@ -75,6 +76,12 @@ pub fn max_tool_rounds() -> usize {
                 parsed.min(MAX_TOOL_ROUNDS_CEILING)
             })
     })
+}
+
+/// `LOOP_GUARD_MODE`, read once per process so the mode cannot change mid-turn. Unset is off.
+fn loop_guard_mode() -> LoopGuardMode {
+    static MODE: std::sync::OnceLock<LoopGuardMode> = std::sync::OnceLock::new();
+    *MODE.get_or_init(|| LoopGuardMode::from_env_value(std::env::var("LOOP_GUARD_MODE").ok().as_deref()))
 }
 
 /// Default allowance for one artifact's private check: review passes,
@@ -414,6 +421,7 @@ fn knowledge_search_failure(status: &tonic::Status, data_plane_mode: Option<&str
 pub(crate) fn tool_artifact_events(
     outcome: &ToolOutcome,
     known_kind: Option<crate::artifacts::ArtifactKind>,
+    office: &mut OfficeDelivery,
 ) -> (Vec<ChatEvent>, Option<String>) {
     if outcome.error.is_some() {
         return (Vec::new(), None);
@@ -425,7 +433,7 @@ pub(crate) fn tool_artifact_events(
         "create_artifact" | "update_artifact" | "result_query" => {
             authored_artifact_events(outcome, known_kind)
         }
-        "code_interpreter" => code_interpreter_events(outcome),
+        "code_interpreter" => code_interpreter_events(outcome, office),
         _ => (Vec::new(), None),
     }
 }
@@ -542,7 +550,106 @@ fn extract_json_object(s: &str) -> Option<Value> {
         .ok()
 }
 
-fn code_interpreter_events(outcome: &ToolOutcome) -> (Vec<ChatEvent>, Option<String>) {
+/// Which Office files this turn has held back under the enforce switch. Off, every file is delivered with its
+/// check. On, a file that failed the structural check is held back the first time its name fails in the turn, so
+/// the model can repair it and run it again. A second failure of that name is delivered with its check, so a file
+/// the model cannot fix still reaches the user, marked as failed.
+#[derive(Debug, Default)]
+pub(crate) struct OfficeDelivery {
+    enforce: bool,
+    held: BTreeSet<String>,
+}
+
+/// The switch that holds back failed Office files. Only the literal `true` enables it.
+const VERIFY_ENFORCE_ENV: &str = "CODE_INTERPRETER_VERIFY_ENFORCE";
+
+impl OfficeDelivery {
+    /// The delivery state for one turn, with the switch read from the environment.
+    #[must_use]
+    pub(crate) fn for_turn() -> Self {
+        Self {
+            enforce: enforce_from(std::env::var(VERIFY_ENFORCE_ENV).ok().as_deref()),
+            held: BTreeSet::new(),
+        }
+    }
+
+    /// Whether the file is held back rather than delivered. Only the first failure of a name in the turn is held.
+    fn holds_back(&mut self, name: &str, check: Option<&OfficeVerification>) -> bool {
+        let failed = check.is_some_and(|report| report.level == VerificationLevel::Failed);
+        self.enforce && failed && self.held.insert(name.to_owned())
+    }
+}
+
+/// Whether the enforce switch is on. Only the literal `true` enables it, so an unset or misspelt value keeps every
+/// file delivered.
+#[must_use]
+fn enforce_from(raw: Option<&str>) -> bool {
+    raw.map(str::trim) == Some("true")
+}
+
+/// The report the verifier made of the file `name`, if it made one. A report that does not parse is no check at
+/// all, so the file carries no verdict rather than a guessed one.
+fn office_report_for(payload: &Value, name: &str) -> Option<OfficeVerification> {
+    let report = payload
+        .get("verification")
+        .and_then(Value::as_array)?
+        .iter()
+        .find(|element| element.get("name").and_then(Value::as_str) == Some(name))?;
+    let kind = OfficeKind::from_file_name(name)?;
+    OfficeVerification::from_untrusted_json(&report.to_string(), name, kind).ok()
+}
+
+/// The largest preview PDF the frame carries: the verifier's 2 MiB cap as base64 characters, 4 * ceil(2 MiB / 3).
+const PREVIEW_PDF_MAX_BASE64: usize = 2_796_204;
+/// The thumbnails a preview carries, the same cap the verifier applies.
+const PREVIEW_MAX_THUMBS: usize = 3;
+
+/// The render the verifier made of the delivered file `name`, when it made one. The PDF and the thumbnails are the
+/// verifier's copies; the download stays the sandbox's bytes. A preview with no report has no page count or font
+/// facts, so it is no preview at all, and one over the cap is dropped rather than cut short.
+fn office_preview_for(payload: &Value, name: &str) -> Option<AttachmentPreview> {
+    let element = payload
+        .get("previews")
+        .and_then(Value::as_array)?
+        .iter()
+        .find(|element| element.get("name").and_then(Value::as_str) == Some(name))?;
+    let pdf_b64 = element.get("pdf_b64").and_then(Value::as_str)?;
+    if pdf_b64.len() > PREVIEW_PDF_MAX_BASE64 {
+        return None;
+    }
+    let report = office_report_for(payload, name)?;
+    let thumbs = element
+        .get("thumbs_b64")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .take(PREVIEW_MAX_THUMBS)
+        .map(|thumb| format!("data:image/png;base64,{thumb}"))
+        .collect();
+    Some(AttachmentPreview {
+        mime: "application/pdf".to_owned(),
+        url: format!("data:application/pdf;base64,{pdf_b64}"),
+        pages: report.stats.get("render_pages").copied().unwrap_or(0),
+        fonts_substituted: report
+            .stats
+            .get("fonts_substituted")
+            .is_some_and(|&count| count > 0),
+        thumbs,
+    })
+}
+
+/// What the model is told about the files a `code_interpreter` call delivered when none was held back.
+const DELIVERED_FILES_NOTE: &str = "\nThese files were delivered to the user as downloadable artifacts, which already appear as download cards below your message — the user can click them right now. Confirm what you produced in plain text (e.g. \"Fil lagret: name.xlsx (N bytes), tilgjengelig for nedlasting nedenfor.\"); NEVER write a markdown link, a bare URL, or a \"sandbox:/\" path for one of these files — no such link exists and it will not work.";
+
+/// What the model is told when the enforce switch held a file back: it was not delivered, so the model must not say
+/// the user has it.
+const WITHHELD_FILES_NOTE: &str = "\nThe files listed under files_withheld failed the structural Office check and were NOT delivered to the user: do not say the user has them, and regenerate each one with code_interpreter before you mention it again. A file listed under files_delivered was delivered as a downloadable artifact, which already appears as a download card below your message. Confirm what you produced in plain text, and NEVER write a markdown link, a bare URL, or a \"sandbox:/\" path for a file — no such link exists and it will not work.";
+
+fn code_interpreter_events(
+    outcome: &ToolOutcome,
+    office: &mut OfficeDelivery,
+) -> (Vec<ChatEvent>, Option<String>) {
     let Some(payload) = extract_json_object(&outcome.output) else {
         return (Vec::new(), None);
     };
@@ -559,6 +666,7 @@ fn code_interpreter_events(outcome: &ToolOutcome) -> (Vec<ChatEvent>, Option<Str
 
     let mut events = Vec::new();
     let mut listed = Vec::new();
+    let mut withheld = Vec::new();
     for (index, file) in files.iter().enumerate() {
         let name = file
             .get("name")
@@ -588,12 +696,19 @@ fn code_interpreter_events(outcome: &ToolOutcome) -> (Vec<ChatEvent>, Option<Str
             ));
             continue;
         }
+        let check = office_report_for(&payload, &name);
+        if office.holds_back(&name, check.as_ref()) {
+            // Held back, not delivered: the model repairs the file and runs it again.
+            withheld.push(format!("{name} ({mime}, {bytes} bytes)"));
+            continue;
+        }
         // A `data:` URI is the established way this gateway hands generated
         // bytes to the browser (the image-generation path does exactly this),
         // so a generated document needs no new storage or route.
         let data_uri = format!("data:{mime};base64,{content_b64}");
         let artifact_id = format!("{}-file-{}", outcome.call_id, index + 1);
         let kind = crate::artifacts::kind_for_generated_file(&mime, &name);
+        let preview = office_preview_for(&payload, &name);
         events.push(crate::artifacts::artifact_event(
             &artifact_id,
             kind,
@@ -607,6 +722,8 @@ fn code_interpreter_events(outcome: &ToolOutcome) -> (Vec<ChatEvent>, Option<Str
             &mime,
             &data_uri,
             bytes,
+            check,
+            preview,
         ));
         listed.push(format!("{name} ({mime}, {bytes} bytes)"));
     }
@@ -629,11 +746,17 @@ fn code_interpreter_events(outcome: &ToolOutcome) -> (Vec<ChatEvent>, Option<Str
         "exit_code": exit_code,
         "files_delivered": listed,
     });
+    // Present only when the enforce switch held a file back, so the summary is unchanged otherwise.
+    if !withheld.is_empty() {
+        summary["files_withheld"] = serde_json::json!(withheld);
+    }
     let repair = add_office_checks(&payload, &mut summary);
     let mut text = summary.to_string();
-    text.push_str(
-        "\nThese files were delivered to the user as downloadable artifacts, which already appear as download cards below your message — the user can click them right now. Confirm what you produced in plain text (e.g. \"Fil lagret: name.xlsx (N bytes), tilgjengelig for nedlasting nedenfor.\"); NEVER write a markdown link, a bare URL, or a \"sandbox:/\" path for one of these files — no such link exists and it will not work.",
-    );
+    text.push_str(if withheld.is_empty() {
+        DELIVERED_FILES_NOTE
+    } else {
+        WITHHELD_FILES_NOTE
+    });
     if repair {
         text.push_str(OFFICE_REPAIR_SENTENCE);
     }
@@ -1699,6 +1822,229 @@ fn web_search_options(args_json: &str, query: &str, allow_paid_providers: bool) 
 }
 
 // ---------------------------------------------------------------------------
+// Batched web search with reference ids (EP-2-S3)
+// ---------------------------------------------------------------------------
+
+/// Environment switch for batched `web_search` (`queries`) and for the `ref` each hit then carries. Off, the
+/// schema, the output, the dispatch and the audit are exactly what they were.
+pub const WEB_SEARCH_BATCH_ENV: &str = "MODEL_GATEWAY_WEB_SEARCH_BATCH";
+
+/// Most queries one `web_search` call may name in `queries`.
+const MAX_BATCH_QUERIES: usize = 4;
+
+/// Most hits a batched search returns, once its queries are merged and de-duplicated.
+const MAX_BATCH_HITS: usize = 8;
+
+/// Whether batched web search is switched on in this process. Only the literal `true` enables it.
+#[must_use]
+pub fn web_search_batch_enabled() -> bool {
+    parse_web_search_batch(std::env::var(WEB_SEARCH_BATCH_ENV).ok().as_deref())
+}
+
+fn parse_web_search_batch(raw: Option<&str>) -> bool {
+    raw.map(str::trim) == Some("true")
+}
+
+/// The references one chat turn has issued: `w1`, `w2`, and so on, each standing for the URL of one search hit.
+///
+/// Held in memory for the turn and dropped with it, never persisted, so a ref names a page only in the
+/// conversation that searched for it. A ref the turn did not issue names nothing and is refused, never guessed
+/// at. A page keeps the ref it was first given for the whole turn, however many searches return it.
+#[derive(Debug, Default)]
+struct TurnRefs {
+    issued: std::sync::Mutex<IssuedRefs>,
+}
+
+#[derive(Debug, Default)]
+struct IssuedRefs {
+    /// The URL each ref names: `w{n}` is `urls[n - 1]`. Refs are issued in order and never reused.
+    urls: Vec<String>,
+    /// The ref already issued for each canonical URL key, see [`canonical_url_key`].
+    by_key: BTreeMap<String, usize>,
+}
+
+impl TurnRefs {
+    /// The ref for `url`, issued the first time this turn sees the page.
+    fn issue(&self, url: &str) -> String {
+        let key = canonical_url_key(url);
+        let mut issued = self
+            .issued
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let number = match issued.by_key.get(&key).copied() {
+            Some(number) => number,
+            None => {
+                issued.urls.push(url.to_owned());
+                let number = issued.urls.len();
+                issued.by_key.insert(key, number);
+                number
+            }
+        };
+        format!("w{number}")
+    }
+
+    /// The URL `reference` names, when this turn issued it. Only the canonical spelling resolves, so `w02` and
+    /// `w+2` name nothing.
+    fn resolve(&self, reference: &str) -> Option<String> {
+        let number: usize = reference.strip_prefix('w')?.parse().ok()?;
+        if format!("w{number}") != reference {
+            return None;
+        }
+        let index = number.checked_sub(1)?;
+        let issued = self
+            .issued
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        issued.urls.get(index).cloned()
+    }
+}
+
+/// The searches one `web_search` call runs: its `query`, or the distinct `queries` of a batched call.
+struct SearchAsk {
+    queries: Vec<String>,
+    /// Whether the call names more than one distinct search. A batched call's hits are merged, de-duplicated and
+    /// capped; any other call's hits are returned as its one search returned them.
+    batched: bool,
+}
+
+impl SearchAsk {
+    /// Read a call's arguments. `batch` is whether batched search is on for the turn: off, `queries` is not read
+    /// at all, so the call is judged exactly as it was before the switch existed.
+    fn parse(arguments_json: &str, batch: bool) -> Result<Self, String> {
+        let query = arg_str(arguments_json, "query");
+        let listed = if batch {
+            serde_json::from_str::<Value>(arguments_json)
+                .ok()
+                .and_then(|args| args.get("queries").cloned())
+        } else {
+            None
+        };
+        let Some(listed) = listed else {
+            return if !query.trim().is_empty() {
+                Ok(Self {
+                    queries: vec![query],
+                    batched: false,
+                })
+            } else if batch {
+                Err("web_search requires a non-empty 'query' or 'queries' argument".to_owned())
+            } else {
+                Err("web_search requires a non-empty 'query' argument".to_owned())
+            };
+        };
+        if !query.trim().is_empty() {
+            return Err("web_search takes either 'query' or 'queries', not both".to_owned());
+        }
+        let Some(items) = listed.as_array() else {
+            return Err("web_search 'queries' must be an array of search strings".to_owned());
+        };
+        if items.len() > MAX_BATCH_QUERIES {
+            return Err(format!(
+                "web_search takes at most {MAX_BATCH_QUERIES} queries in 'queries', and this call names {}. Split the question into at most {MAX_BATCH_QUERIES} distinct searches.",
+                items.len()
+            ));
+        }
+        // Repeats of one search are one search, so they neither spend a provider call nor count as a query.
+        let mut distinct: Vec<String> = Vec::new();
+        for item in items {
+            let Some(text) = item.as_str().map(str::trim).filter(|text| !text.is_empty()) else {
+                return Err("web_search 'queries' must hold only non-empty search strings".to_owned());
+            };
+            let key = loop_guard::normalise_query(text);
+            if !distinct
+                .iter()
+                .any(|seen| loop_guard::normalise_query(seen) == key)
+            {
+                distinct.push(text.to_owned());
+            }
+        }
+        match distinct.len() {
+            0 => Err("web_search 'queries' needs at least one search string".to_owned()),
+            1 => Ok(Self {
+                queries: distinct,
+                batched: false,
+            }),
+            _ => Ok(Self {
+                queries: distinct,
+                batched: true,
+            }),
+        }
+    }
+}
+
+/// The merged hits of a batched search: the replies' hits interleaved by rank, so each query's best hit comes
+/// before any query's second, and a page two queries both return is listed once, at its better rank. A hit with
+/// no URL is dropped, since nothing could be fetched or cited from it.
+fn merge_batched_hits(replies: &[crate::quarry::SearchReply]) -> Vec<Value> {
+    let ranked: Vec<Vec<(&str, Value)>> = replies
+        .iter()
+        .map(|reply| {
+            reply
+                .results
+                .iter()
+                .map(|result| {
+                    (
+                        result.url.as_str(),
+                        crate::quarry::web_search_item(result, reply.rerank.as_ref()),
+                    )
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    let depth = ranked.iter().map(Vec::len).max().unwrap_or(0);
+    let mut seen = BTreeSet::new();
+    let mut merged = Vec::new();
+    for rank in 0..depth {
+        for hits in &ranked {
+            let Some((url, item)) = hits.get(rank) else {
+                continue;
+            };
+            if url.trim().is_empty() || !seen.insert(canonical_url_key(url)) {
+                continue;
+            }
+            merged.push(item.clone());
+            if merged.len() == MAX_BATCH_HITS {
+                return merged;
+            }
+        }
+    }
+    merged
+}
+
+/// The searched question of a `web_search` call, for the relevance gate. A batched call's queries are read as one
+/// question, because its hits are merged; any other call's is its `query`, as it always was.
+fn searched_question(arguments_json: &str, batch: bool) -> String {
+    match SearchAsk::parse(arguments_json, batch) {
+        Ok(asks) => asks.queries.join(" "),
+        Err(_) => arg_str(arguments_json, "query"),
+    }
+}
+
+/// The page a `fetch_url` call reads: its `url`, or on a batched turn the URL behind a `ref` the turn issued. Off
+/// a batched turn `ref` is not read, and a call with no url is refused as it always was.
+fn fetch_target(call: &ToolCall, turn_refs: Option<&TurnRefs>) -> Result<String, String> {
+    let url = arg_str(&call.arguments_json, "url");
+    let Some(refs) = turn_refs else {
+        return if url.trim().is_empty() {
+            Err("fetch_url requires a 'url' argument".to_owned())
+        } else {
+            Ok(url)
+        };
+    };
+    let reference = arg_str(&call.arguments_json, "ref");
+    let reference = reference.trim();
+    match (url.trim().is_empty(), reference.is_empty()) {
+        (true, true) => Err("fetch_url requires a 'url' or a 'ref' argument".to_owned()),
+        (false, false) => Err("fetch_url takes either 'url' or 'ref', not both".to_owned()),
+        (false, true) => Ok(url),
+        (true, false) => refs.resolve(reference).ok_or_else(|| {
+            format!(
+                "fetch_url: ref '{reference}' was not issued in this conversation turn. Use a ref from a web_search result of this turn, or pass the page's url."
+            )
+        }),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Search-query normalization
 // ---------------------------------------------------------------------------
 
@@ -2076,7 +2422,7 @@ fn resolve_forced_web_search_query(messages: &[ChatMessage], query: &str) -> Str
     normalize_search_query(query)
 }
 
-fn err_outcome(call: &ToolCall, msg: impl Into<String>) -> ToolOutcome {
+pub(crate) fn err_outcome(call: &ToolCall, msg: impl Into<String>) -> ToolOutcome {
     ToolOutcome {
         call_id: call.id.clone(),
         name: call.name.clone(),
@@ -2403,6 +2749,8 @@ fn builtin_argument_problem(
     tool_name: &str,
     arguments_json: &str,
     conversation: &str,
+    // The turn's batched-search decision: the schema validated against is the one this turn offered.
+    batch: bool,
 ) -> Option<String> {
     // Schema validation only where we HOLD the schema (a builtin). A
     // client-declared tool is validated against nothing here on purpose —
@@ -2412,7 +2760,7 @@ fn builtin_argument_problem(
     // client-declared `shipping.get_quotes` alias, which is not a builtin, so
     // the early `?` skipped grounding too and the alias walked past the gate
     // into the real shipping executor.
-    if let Some(def) = builtin_tool_defs()
+    if let Some(def) = builtin_tool_defs_for(batch)
         .into_iter()
         .find(|def| def.name == tool_name)
     {
@@ -2461,34 +2809,45 @@ pub(crate) fn with_authorization<T>(value: T, bearer: &str) -> tonic::Request<T>
 /// `browser_agent`, `brreg_lookup_organization`) are exempt: `None` means no
 /// dedup applies, not that the call is invalid. Mirrors execution-core's
 /// `agent.rs::retrieval_signature`.
-fn duplicate_call_signature(call: &ToolCall) -> Option<String> {
+fn duplicate_call_signature(call: &ToolCall, batch: bool) -> Option<String> {
     match call.name.as_str() {
         "fetch_url" => {
             let url = arg_str(&call.arguments_json, "url");
             let url = url.trim();
-            (!url.is_empty()).then(|| format!("fetch_url|{url}"))
+            if !url.is_empty() {
+                return Some(format!("fetch_url|{url}"));
+            }
+            // A ref names one URL for the whole turn, so a repeated ref is a repeated fetch.
+            let reference = arg_str(&call.arguments_json, "ref");
+            let reference = reference.trim();
+            (batch && !reference.is_empty()).then(|| format!("fetch_url|ref|{reference}"))
         }
         "web_search" => {
-            let query = normalize_tool_query(&arg_str(&call.arguments_json, "query"));
+            // The queries of a batch are one search in any order, so they are keyed as a set.
+            let asks = SearchAsk::parse(&call.arguments_json, batch).ok()?;
+            if asks.batched {
+                let mut keys: Vec<String> = asks
+                    .queries
+                    .iter()
+                    .map(|query| loop_guard::normalise_query(query))
+                    .collect();
+                keys.sort_unstable();
+                return Some(format!("web_search[]|{}", keys.join("\u{1f}")));
+            }
+            let query = asks
+                .queries
+                .first()
+                .map(|query| loop_guard::normalise_query(query))
+                .unwrap_or_default();
             (!query.is_empty()).then(|| format!("web_search|{query}"))
         }
         "knowledge_search" => {
-            let query = normalize_tool_query(&arg_str(&call.arguments_json, "query"));
+            let query = loop_guard::normalise_query(&arg_str(&call.arguments_json, "query"));
             let top_k = arg_i64(&call.arguments_json, "top_k").unwrap_or(5);
             (!query.is_empty()).then(|| format!("knowledge_search|{top_k}|{query}"))
         }
         _ => None,
     }
-}
-
-/// Case/whitespace-insensitive normalization so "Aquatiq" and "coresystem " are
-/// treated as the same repeated query.
-fn normalize_tool_query(query: &str) -> String {
-    query
-        .split_whitespace()
-        .map(str::to_lowercase)
-        .collect::<Vec<_>>()
-        .join(" ")
 }
 
 /// The screening decision for one external tool result: the provenance the model is
@@ -2722,6 +3081,22 @@ async fn screen_external_inline(
     }
 }
 
+/// `mp_gateway_loop_guard_verdicts_total`: one count per loop-guard verdict, by mode, verdict and
+/// stop reason (WS25-S1). Every label is a closed set, so the series cannot grow with request data.
+fn record_loop_guard_verdict(mode: LoopGuardMode, verdict: &Verdict) {
+    let reason = match verdict {
+        Verdict::Stop(stop) => stop.reason.label(),
+        Verdict::Continue | Verdict::Remind { .. } => "none",
+    };
+    metrics::counter!(
+        "mp_gateway_loop_guard_verdicts_total",
+        "mode" => mode.label(),
+        "verdict" => verdict.label(),
+        "reason" => reason,
+    )
+    .increment(1);
+}
+
 /// `mp_gateway_tool_screening_total`: one count per tool result the security audit sees, by trust
 /// class and screening posture. Counted where the audit decides rather than inside
 /// [`assess_external_payload`] alone, so an external result that no screening pass saw shows as
@@ -2784,9 +3159,11 @@ pub async fn dispatch_tool(
     allow_paid_providers: bool,
     call: &ToolCall,
     ingestion_bearer: Option<&VerifiedIngestionBearer>,
-    // The delegated user bearer for sandbox-manager, present only on a
-    // Space-scoped turn (see `auth::VerifiedSandboxBearer`). Read by exactly
-    // one arm, `code_interpreter`, and only when `space_id` is set.
+    // The delegated user bearer for sandbox-manager: present on a Space-scoped
+    // turn, and on a non-ZDR personal turn while the thread workspace is switched
+    // on (see `auth::VerifiedSandboxBearer`). Read by exactly one arm,
+    // `code_interpreter`, which names a thread to execution-core only with it
+    // (WS22-S3).
     sandbox_bearer: Option<&VerifiedSandboxBearer>,
     // The turn's Data Plane retrieval mode (`TurnPosture::data_plane_mode`): `ephemeral` for a ZDR turn,
     // `reject` for a waived one, none for a persistent one. Threaded rather than derived from `zdr`, which
@@ -2798,7 +3175,7 @@ pub async fn dispatch_tool(
         conversation, data_plane_bearer, execution_bearer, inference_bearer,
         session_bearer, capability_bearer, zdr, sovereign_required,
         allow_paid_providers, call, ingestion_bearer, sandbox_bearer, None,
-        data_plane_mode, &crate::turn_attachments::ValidatedAttachments::none(), &[], None, None,
+        data_plane_mode, &crate::turn_attachments::ValidatedAttachments::none(), &[], None, None, None,
     ).await
 }
 
@@ -3136,6 +3513,9 @@ async fn dispatch_tool_with_cost(
     classifier_budget: Option<&crate::semantic_screening::ClassifierBudget>,
     // The turn's connected-account selection, when the connected-app read is offered (WS23-S5).
     connector: Option<&connector_reads::ConnectorTurn>,
+    // The turn's batched-search refs: `Some` only on a chat turn with batched web search on. `None` leaves
+    // `web_search` single-query and `fetch_url` url-only, exactly as they were.
+    turn_refs: Option<&TurnRefs>,
 ) -> ToolOutcome {
     if !inline_tool_allowed(&call.name) {
         return err_outcome(
@@ -3157,7 +3537,12 @@ async fn dispatch_tool_with_cost(
     // or unusual schema, an undeclared field, or a coercion executors accept
     // anyway. So this cannot refuse a call that would have worked — which is the
     // only way a pre-dispatch check is safe to add to a live path.
-    if let Some(problem) = builtin_argument_problem(&call.name, &call.arguments_json, conversation)
+    if let Some(problem) = builtin_argument_problem(
+        &call.name,
+        &call.arguments_json,
+        conversation,
+        turn_refs.is_some(),
+    )
     {
         return err_outcome(call, problem);
     }
@@ -3214,6 +3599,7 @@ async fn dispatch_tool_with_cost(
                 org_id,
                 user_id,
                 space_id,
+                thread_id,
                 zdr,
                 &language,
                 &code,
@@ -3499,16 +3885,15 @@ async fn dispatch_tool_with_cost(
             }
         }
         "web_search" => {
-            let query = arg_str(&call.arguments_json, "query");
-            if query.trim().is_empty() {
-                return err_outcome(call, "web_search requires a non-empty 'query' argument");
-            }
+            let asks = match SearchAsk::parse(&call.arguments_json, turn_refs.is_some()) {
+                Ok(asks) => asks,
+                Err(message) => return err_outcome(call, message),
+            };
             let intent = arg_str(&call.arguments_json, "intent");
+            let intent = intent.as_str();
             let limit = i32::try_from(arg_i64(&call.arguments_json, "limit").unwrap_or(5))
                 .unwrap_or(5)
                 .clamp(1, 50);
-            let options =
-                web_search_options(&call.arguments_json, &query, allow_paid_providers);
             // Straight to the Quarry client rather than through
             // `tools::handle_web_search_with_options`, for the same reason
             // `fetch_url` below calls `scrape_readable` directly: the proto
@@ -3518,75 +3903,118 @@ async fn dispatch_tool_with_cost(
             // below has that a hit is on topic — do not survive the projection.
             // The gRPC surface still goes through `tools.rs`; that message
             // belongs to it.
-            match state
-                .quarry
-                .search_reply(&query, limit, &intent, org_id, zdr, &options)
-                .await
-            {
-                Ok(reply) => {
-                    // Each hit carries the rerank report the edge sent for this search, so the
-                    // relevance gate can say in its coverage line what the reranker did. The keys
-                    // and the rule for omitting each one live with the projection, in
-                    // `crate::quarry::web_search_item`.
-                    let items: Vec<serde_json::Value> = reply
-                        .results
-                        .iter()
-                        .map(|r| crate::quarry::web_search_item(r, reply.rerank.as_ref()))
-                        .collect();
-                    let output = serde_json::to_string(&items).unwrap_or_else(|_| "[]".to_owned());
-                    // Untruncated: web_search returns short structured hits
-                    // (url/title/snippet), never a page body, so there is no
-                    // separate pre-truncation step to screen ahead of —
-                    // `output` here already IS the complete payload.
-                    let ExternalScreen { provenance, withheld } = assess_external_payload(
-                        state,
-                        &call.name,
-                        &output,
-                        capability_bearer,
-                        inference_bearer,
-                        org_id,
-                        user_id,
-                        run_id,
-                        // A ZDR or waived turn carries a Data Plane retention mode and sends no derived
-                        // content-safety pass to a processor.
-                        zdr || data_plane_mode.is_some(),
-                        classifier_budget,
-                    )
-                    .await;
-                    if withheld {
-                        return ToolOutcome {
-                            call_id: call.id.clone(),
-                            name: call.name.clone(),
-                            output: crate::semantic_screening::withheld_output(&call.name, &provenance, None),
-                            provenance,
-                            error: None,
-                        };
-                    }
-                    // Over the inline bound, the hits are parked whole when extended parking is
-                    // on; the handle is the model's way to read the rest by `result_query`.
-                    let output = match park_extended_result(
-                        state,
-                        org_id,
-                        user_id,
-                        external_parking_allowed(zdr || data_plane_mode.is_some()),
-                        &call.name,
-                        crate::tool_result_handles::ResultKind::Json,
-                        &output,
-                        MAX_TOOL_OUTPUT_CHARS,
-                        &provenance,
-                    ) {
-                        Some(handle) => handle.to_model_json(),
-                        None => output,
-                    };
-                    ToolOutcome {
-                        call_id: call.id.clone(),
-                        name: call.name.clone(),
-                        provenance,
-                        output,
-                        error: None,
-                    }
+            //
+            // Every query of the call runs at once, each with the turn's own options and paid-provider
+            // entitlement: a batch changes how many searches run, never what any one of them may reach.
+            let searches = futures::future::join_all(asks.queries.iter().map(|query| {
+                let options = web_search_options(&call.arguments_json, query, allow_paid_providers);
+                async move {
+                    state
+                        .quarry
+                        .search_reply(query, limit, intent, org_id, zdr, &options)
+                        .await
                 }
-                Err(e) => err_outcome(call, format!("web_search failed: {e}")),
+            }))
+            .await;
+            let mut replies = Vec::with_capacity(searches.len());
+            for (query, search) in asks.queries.iter().zip(searches) {
+                match search {
+                    Ok(reply) => replies.push(reply),
+                    // A batch that loses one query fails whole: the hits of the others would read as the answer to
+                    // a question that one of them never got to ask. The error names the query, so it can be retried.
+                    Err(e) if asks.batched => {
+                        return err_outcome(
+                            call,
+                            format!(
+                                "web_search failed for the query \"{query}\": {e}. No results were returned for this call; retry with that query, or with fewer queries."
+                            ),
+                        );
+                    }
+                    Err(e) => return err_outcome(call, format!("web_search failed: {e}")),
+                }
+            }
+            // Each hit carries the rerank report the edge sent for this search, so the
+            // relevance gate can say in its coverage line what the reranker did. The keys
+            // and the rule for omitting each one live with the projection, in
+            // `crate::quarry::web_search_item`.
+            let mut items: Vec<serde_json::Value> = if asks.batched {
+                merge_batched_hits(&replies)
+            } else {
+                replies
+                    .iter()
+                    .flat_map(|reply| {
+                        reply.results.iter().map(move |result| {
+                            crate::quarry::web_search_item(result, reply.rerank.as_ref())
+                        })
+                    })
+                    .collect()
+            };
+            // Every hit with a URL gets the turn's ref for it: the model reads the page by that ref, not by a URL
+            // it would have to retype.
+            if let Some(refs) = turn_refs {
+                for item in &mut items {
+                    let Some(url) = item
+                        .get("url")
+                        .and_then(serde_json::Value::as_str)
+                        .filter(|url| !url.trim().is_empty())
+                        .map(str::to_owned)
+                    else {
+                        continue;
+                    };
+                    item["ref"] = serde_json::Value::String(refs.issue(&url));
+                }
+            }
+            let output = serde_json::to_string(&items).unwrap_or_else(|_| "[]".to_owned());
+            // Untruncated: web_search returns short structured hits
+            // (url/title/snippet), never a page body, so there is no
+            // separate pre-truncation step to screen ahead of —
+            // `output` here already IS the complete payload. A batch is screened once, as merged, for the same reason.
+            let ExternalScreen { provenance, withheld } = assess_external_payload(
+                state,
+                &call.name,
+                &output,
+                capability_bearer,
+                inference_bearer,
+                org_id,
+                user_id,
+                run_id,
+                // A ZDR or waived turn carries a Data Plane retention mode and sends no derived
+                // content-safety pass to a processor.
+                zdr || data_plane_mode.is_some(),
+                classifier_budget,
+            )
+            .await;
+            if withheld {
+                return ToolOutcome {
+                    call_id: call.id.clone(),
+                    name: call.name.clone(),
+                    output: crate::semantic_screening::withheld_output(&call.name, &provenance, None),
+                    provenance,
+                    error: None,
+                };
+            }
+            // Over the inline bound, the hits are parked whole when extended parking is
+            // on; the handle is the model's way to read the rest by `result_query`.
+            let output = match park_extended_result(
+                state,
+                org_id,
+                user_id,
+                external_parking_allowed(zdr || data_plane_mode.is_some()),
+                &call.name,
+                crate::tool_result_handles::ResultKind::Json,
+                &output,
+                MAX_TOOL_OUTPUT_CHARS,
+                &provenance,
+            ) {
+                Some(handle) => handle.to_model_json(),
+                None => output,
+            };
+            ToolOutcome {
+                call_id: call.id.clone(),
+                name: call.name.clone(),
+                provenance,
+                output,
+                error: None,
             }
         }
         // Structured, real weather data (information-core → Yr/met.no) for a
@@ -3638,10 +4066,10 @@ async fn dispatch_tool_with_cost(
         // Read a specific web page (reuses Quarry scrape — the canonical web
         // fetch owner). Returns title + final URL + (truncated) page content.
         "fetch_url" => {
-            let url = arg_str(&call.arguments_json, "url");
-            if url.trim().is_empty() {
-                return err_outcome(call, "fetch_url requires a 'url' argument");
-            }
+            let url = match fetch_target(call, turn_refs) {
+                Ok(url) => url,
+                Err(message) => return err_outcome(call, message),
+            };
             // `scrape_readable`, not `scrape`: it resolves Quarry's
             // artifact-referenced page text and escalates once to the
             // browser driver when a plain fetch yields nothing. Deep
@@ -3707,9 +4135,8 @@ async fn dispatch_tool_with_cost(
                         };
                     }
                     // Under `RESULT_HANDLES_EXTENDED` the complete screened page is parked, so
-                    // the part past the cut is reachable by `result_query` range. The first
-                    // 4,000 characters stay inline either way.
-                    let head = truncate_chars(&body, MAX_FETCH_CHARS);
+                    // the part past the cut is reachable by reading it. The first 4,000
+                    // characters stay inline either way.
                     let parked = park_extended_result(
                         state,
                         org_id,
@@ -3721,28 +4148,97 @@ async fn dispatch_tool_with_cost(
                         MAX_FETCH_CHARS,
                         &provenance,
                     );
-                    let out = match parked {
-                        Some(handle) => serde_json::json!({
-                            "final_url": r.final_url,
-                            "title": r.title,
-                            "content": head,
-                            "handle": handle.to_model_value(),
-                        }),
-                        None => serde_json::json!({
-                            "final_url": r.final_url,
-                            "title": r.title,
-                            "content": head,
-                        }),
-                    };
+                    let output = fetched_page_output(
+                        &r.final_url,
+                        &r.title,
+                        &body,
+                        parked.as_ref(),
+                        crate::page_reader::enabled(),
+                    );
                     ToolOutcome {
                         call_id: call.id.clone(),
                         name: call.name.clone(),
                         provenance,
-                        output: out.to_string(),
+                        output,
                         error: None,
                     }
                 }
                 Err(e) => err_outcome(call, format!("fetch_url failed: {e}")),
+            }
+        }
+        // Model-proposed page extraction (WS16.S8): reads one to five pages and returns data the
+        // model pulled out of them, checked against the schema or found verbatim on the page. The
+        // result is web content derived from a page, so it is screened and labelled exactly like
+        // `fetch_url`'s. Advertised only behind `MODEL_GATEWAY_EXTRACT_TOOL`; refused here too, so a
+        // call to a tool that was never offered cannot reach the scrape.
+        "extract_structured" => {
+            if !crate::web_extraction::extract_tool_enabled() {
+                return err_outcome(call, "extract_structured is not available");
+            }
+            let args = match crate::web_extraction::ToolArgs::parse(&call.arguments_json) {
+                Ok(args) => args,
+                Err(message) => return err_outcome(call, format!("extract_structured: {message}")),
+            };
+            if !state.quarry.available() {
+                return err_outcome(call, "extract_structured: the page reader is not configured");
+            }
+            if inference_bearer.trim().is_empty() {
+                return err_outcome(call, "extract_structured: no inference credential on this turn");
+            }
+            let mode = args.mode.clone();
+            let spec = crate::web_extraction::ExtractSpec {
+                request_id: format!("extract-{}", mp_ids::new_ulid()),
+                org_id: org_id.to_owned(),
+                user_id: user_id.to_owned(),
+                urls: args.urls,
+                mode: args.mode,
+                instructions: args.instructions,
+                render: None,
+                model: String::new(),
+                provider: String::new(),
+                zdr,
+                max_output_tokens: crate::web_extraction::DEFAULT_MAX_OUTPUT_TOKENS,
+                inference_bearer: inference_bearer.to_owned(),
+                transport: "tool_loop",
+            };
+            let outcomes = crate::web_extraction::extract(state, &spec).await;
+            if outcomes.iter().all(|o| !o.result.error_message.is_empty()) {
+                let reasons: Vec<&str> = outcomes
+                    .iter()
+                    .map(|o| o.result.error_message.as_str())
+                    .collect();
+                return err_outcome(call, format!("extract_structured failed: {}", reasons.join("; ")));
+            }
+            let body = crate::web_extraction::tool_output(&outcomes, &mode).to_string();
+            // Screen the complete result BEFORE it reaches the model, as `fetch_url` does.
+            let ExternalScreen { provenance, withheld } = assess_external_payload(
+                state,
+                &call.name,
+                &body,
+                capability_bearer,
+                inference_bearer,
+                org_id,
+                user_id,
+                run_id,
+                zdr || data_plane_mode.is_some(),
+                classifier_budget,
+            )
+            .await;
+            if withheld {
+                return ToolOutcome {
+                    call_id: call.id.clone(),
+                    name: call.name.clone(),
+                    output: crate::semantic_screening::withheld_output(&call.name, &provenance, None),
+                    provenance,
+                    error: None,
+                };
+            }
+            ToolOutcome {
+                call_id: call.id.clone(),
+                name: call.name.clone(),
+                provenance,
+                output: body,
+                error: None,
             }
         }
         // Interactive browsing agent (chat-parity Phase 3) — runs a multi-step
@@ -3981,6 +4477,26 @@ async fn dispatch_tool_with_cost(
                 output,
                 error: None,
             }
+        }
+        // The read-only search of the person's own earlier conversations (WS17-S5). Off by default. The gate,
+        // the screening and the framing live in the recall module, and its matches are prior conversation,
+        // never instructions.
+        "recall_conversations" => {
+            let waived_mode = mp_contracts::dataplane_posture::data_plane_zdr_mode(false, true);
+            crate::recall_conversations::outcome(
+                state,
+                call,
+                &crate::recall_conversations::RecallCaller {
+                    org_id,
+                    user_id,
+                    thread_id,
+                    session_bearer,
+                    capability_bearer,
+                    zdr,
+                    waived: data_plane_mode.as_deref() == Some(waived_mode),
+                },
+            )
+            .await
         }
         // Recover a skill the per-prompt budget cut. `skill_budget` degrades
         // before dropping and marks what it cut — honest, and until now
@@ -4559,6 +5075,20 @@ async fn dispatch_tool_with_cost(
                 error: None,
             }
         }
+        "read_page" if crate::page_reader::enabled() => read_page_outcome(
+            state,
+            org_id,
+            user_id,
+            zdr || data_plane_mode.is_some(),
+            call,
+        ),
+        "find_in_page" if crate::page_reader::enabled() => find_in_page_outcome(
+            state,
+            org_id,
+            user_id,
+            zdr || data_plane_mode.is_some(),
+            call,
+        ),
         other => err_outcome(call, format!("unknown tool '{other}'")),
     }
 }
@@ -4676,6 +5206,280 @@ fn read_back_provenance(
     resolved.provenance.clone().unwrap_or_else(|| {
         crate::moderation::ToolProvenance::unscreened(&resolved.capability_id, output)
     })
+}
+
+/// The output a `fetch_url` call returns for a page. The head stays inline as it always has. When the
+/// page was parked under a handle and the reader is on, the output names the handle as `ref` and gives
+/// the outline to read it by; otherwise it carries the handle as it always has, or nothing when the
+/// page was not parked.
+fn fetched_page_output(
+    final_url: &str,
+    title: &str,
+    body: &str,
+    parked: Option<&crate::tool_result_handles::ToolResultHandle>,
+    reader: bool,
+) -> String {
+    let head = truncate_chars(body, MAX_FETCH_CHARS);
+    match parked {
+        Some(handle) if reader => {
+            let sections = crate::page_reader::outline(body);
+            reader_result_within_budget(&sections, |shown| {
+                serde_json::json!({
+                    "final_url": final_url,
+                    "title": title,
+                    "ref": handle.handle_id,
+                    "outline": outline_rows(&sections[..shown]),
+                    "content": head,
+                    "note": reader_fetch_note(body.chars().count(), shown, sections.len()),
+                })
+            })
+        }
+        Some(handle) => serde_json::json!({
+            "final_url": final_url,
+            "title": title,
+            "content": head,
+            "handle": handle.to_model_value(),
+        })
+        .to_string(),
+        None => serde_json::json!({
+            "final_url": final_url,
+            "title": title,
+            "content": head,
+        })
+        .to_string(),
+    }
+}
+
+/// Renders a reader result with as many outline rows as fit one tool result. A result longer than
+/// `MAX_TOOL_OUTPUT_CHARS` is cut at its end, and the keys serialise alphabetically, so `ref` would be
+/// among the first things lost: the outline gives way instead, one row at a time from its last section.
+fn reader_result_within_budget(
+    sections: &[crate::page_reader::Section],
+    render: impl Fn(usize) -> Value,
+) -> String {
+    let mut shown = sections.len();
+    loop {
+        let text = render(shown).to_string();
+        if text.chars().count() <= MAX_TOOL_OUTPUT_CHARS || shown == 0 {
+            return text;
+        }
+        shown -= 1;
+    }
+}
+
+/// The outline a reader shows: one row per section, with the id that reads it.
+fn outline_rows(sections: &[crate::page_reader::Section]) -> Vec<Value> {
+    sections
+        .iter()
+        .map(|section| {
+            serde_json::json!({
+                "id": section.id,
+                "heading": section.heading,
+                "chars": section.chars,
+            })
+        })
+        .collect()
+}
+
+fn reader_fetch_note(total_chars: usize, shown: usize, sections: usize) -> String {
+    format!(
+        "The COMPLETE page ({total_chars} characters) is held under this ref, and only its start is shown \
+         above. Read a section from the outline with read_page, or search the page with find_in_page.{} \
+         The ref stops resolving after about {} minutes.",
+        truncated_outline_note(shown, sections),
+        crate::tool_result_handles::HANDLE_TTL.as_secs() / 60
+    )
+}
+
+/// What the outline says when it lists fewer sections than the page has. Empty when it lists them all.
+fn truncated_outline_note(shown: usize, sections: usize) -> String {
+    if shown < sections {
+        format!(
+            " The outline lists the first {shown} of {sections} sections; find_in_page searches all of them."
+        )
+    } else {
+        String::new()
+    }
+}
+
+/// The fetched page a reader call names, resolved for this exact `(org, user)` and checked to be a
+/// page `fetch_url` parked as text. An unknown, expired, foreign or other ref fails the same way.
+fn resolve_fetched_page(
+    state: &AppState,
+    org_id: &str,
+    user_id: &str,
+    page_ref: &str,
+) -> Result<crate::tool_result_handles::ResolvedResult, String> {
+    let resolved = state
+        .tool_results
+        .resolve(org_id, user_id, page_ref)
+        .ok_or_else(|| {
+            format!(
+                "no page reference '{page_ref}' — it may have expired, or belong to a different \
+                 conversation. Fetch the page again with fetch_url."
+            )
+        })?;
+    if resolved.kind != crate::tool_result_handles::ResultKind::Text
+        || resolved.capability_id != "fetch_url"
+    {
+        return Err(format!(
+            "'{page_ref}' is not a fetched page. Only a page from fetch_url can be read this way; \
+             use result_query for any other result."
+        ));
+    }
+    Ok(resolved)
+}
+
+/// `read_page`: one section of a parked page from a character offset into it, or the outline and the
+/// start of the page when no section is named. Only a turn that can park a page reads one.
+fn read_page_outcome(
+    state: &AppState,
+    org_id: &str,
+    user_id: &str,
+    zdr_or_waived: bool,
+    call: &ToolCall,
+) -> ToolOutcome {
+    if zdr_or_waived {
+        return err_outcome(
+            call,
+            "read_page is not available on this turn: no page is held for reading on it",
+        );
+    }
+    let page_ref = arg_str(&call.arguments_json, "ref");
+    if page_ref.trim().is_empty() {
+        return err_outcome(call, "read_page requires a 'ref' from a fetch_url result");
+    }
+    let resolved = match resolve_fetched_page(state, org_id, user_id, page_ref.trim()) {
+        Ok(resolved) => resolved,
+        Err(message) => return err_outcome(call, message),
+    };
+    let text = resolved.payload.as_str().unwrap_or_default();
+    let sections = crate::page_reader::outline(text);
+    let section_arg = arg_str(&call.arguments_json, "section");
+    let requested = section_arg.trim();
+    let output = if requested.is_empty() {
+        reader_result_within_budget(&sections, |shown| {
+            serde_json::json!({
+                "ref": page_ref.trim(),
+                "total_chars": text.chars().count(),
+                "outline": outline_rows(&sections[..shown]),
+                "content": truncate_chars(text, MAX_FETCH_CHARS),
+                "note": format!(
+                    "This is the start of the page. Name a section id from the outline to read that section.{}",
+                    truncated_outline_note(shown, sections.len())
+                ),
+            })
+        })
+    } else {
+        let Some(section) = sections.iter().find(|section| section.id == requested) else {
+            return err_outcome(
+                call,
+                format!(
+                    "this page has no section '{requested}'. Use a section id from its outline."
+                ),
+            );
+        };
+        let offset = arg_i64(&call.arguments_json, "offset").unwrap_or(0).max(0);
+        let offset = usize::try_from(offset).unwrap_or(0);
+        let read = crate::page_reader::read_section(text, section, offset);
+        let note = match read.next_offset {
+            Some(next) => format!(
+                "This section continues: read it again with section '{}' and offset {next} for the rest.",
+                section.id
+            ),
+            None => format!("This is the end of section '{}'.", section.id),
+        };
+        serde_json::json!({
+            "ref": page_ref.trim(),
+            "section": {"id": section.id, "heading": section.heading, "chars": section.chars},
+            "offset": read.offset,
+            "text": read.text,
+            "returned_chars": read.returned_chars,
+            "next_offset": read.next_offset,
+            "note": note,
+        })
+        .to_string()
+    };
+    let provenance = read_back_provenance(&resolved, &output);
+    ToolOutcome {
+        call_id: call.id.clone(),
+        name: call.name.clone(),
+        provenance,
+        output,
+        error: None,
+    }
+}
+
+/// `find_in_page`: the passages of a parked page that best match a query, each with its section.
+fn find_in_page_outcome(
+    state: &AppState,
+    org_id: &str,
+    user_id: &str,
+    zdr_or_waived: bool,
+    call: &ToolCall,
+) -> ToolOutcome {
+    if zdr_or_waived {
+        return err_outcome(
+            call,
+            "find_in_page is not available on this turn: no page is held for reading on it",
+        );
+    }
+    let page_ref = arg_str(&call.arguments_json, "ref");
+    if page_ref.trim().is_empty() {
+        return err_outcome(
+            call,
+            "find_in_page requires a 'ref' from a fetch_url result",
+        );
+    }
+    let query = arg_str(&call.arguments_json, "query");
+    if query.trim().is_empty() {
+        return err_outcome(
+            call,
+            "find_in_page requires a 'query' of the words to look for",
+        );
+    }
+    let resolved = match resolve_fetched_page(state, org_id, user_id, page_ref.trim()) {
+        Ok(resolved) => resolved,
+        Err(message) => return err_outcome(call, message),
+    };
+    let text = resolved.payload.as_str().unwrap_or_default();
+    let sections = crate::page_reader::outline(text);
+    let passages: Vec<Value> = crate::page_reader::find(
+        text,
+        &sections,
+        query.trim(),
+        crate::page_reader::FIND_CHARS,
+    )
+    .into_iter()
+    .map(|passage| {
+        serde_json::json!({
+            "section": passage.section_id,
+            "heading": passage.heading,
+            "offset": passage.offset,
+            "text": passage.text,
+        })
+    })
+    .collect();
+    let note = if passages.is_empty() {
+        "No passage of this page shares a word with the query. Read a section from the outline with read_page, or search again with other words."
+    } else {
+        "The passages are the closest matches, most relevant first. Read a passage's section with read_page for the text around it."
+    };
+    let output = serde_json::json!({
+        "ref": page_ref.trim(),
+        "query": query.trim(),
+        "passages": passages,
+        "note": note,
+    })
+    .to_string();
+    let provenance = read_back_provenance(&resolved, &output);
+    ToolOutcome {
+        call_id: call.id.clone(),
+        name: call.name.clone(),
+        provenance,
+        output,
+        error: None,
+    }
 }
 
 /// Parse a `result_query` call's arguments into a validated
@@ -4798,6 +5602,55 @@ async fn until_read_deadline(
     }
 }
 
+/// The attempts one chat tool call gets (build plan WS15 S3). `attempt` runs the call once. A
+/// failure that looks transient gets another attempt, up to `MAX_TOOL_ATTEMPTS`, and each retry is
+/// announced on `retry_sink` before its attempt runs. The announcement carries the closed reason,
+/// never the error text.
+async fn attempts_with_retries<F, Fut>(
+    request_id: &str,
+    tool: &str,
+    retry_sink: Option<&crate::sse_events::RichEventSink>,
+    mut attempt: F,
+) -> ToolOutcome
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = ToolOutcome>,
+{
+    let mut number = 1;
+    loop {
+        if number > 1 {
+            tokio::time::sleep(crate::tool_retry::backoff_before_attempt(number)).await;
+        }
+        let result = attempt().await;
+        let error = result.error.as_deref().unwrap_or_default();
+        let transient =
+            result.error.is_some() && crate::tool_retry::is_transient_tool_failure(error);
+        if number >= crate::tool_retry::MAX_TOOL_ATTEMPTS || !transient {
+            return result;
+        }
+        tracing::warn!(
+            request_id = %request_id,
+            tool = %tool,
+            attempt = number,
+            error,
+            "chat tool loop: retrying after a transient failure"
+        );
+        if let Some(sink) = retry_sink {
+            let wait = crate::tool_retry::backoff_before_attempt(number + 1);
+            sink.emit(crate::sse_events::ChatEvent::RetryScheduled {
+                scope: "tool",
+                tool: tool.to_owned(),
+                attempt: number + 1,
+                max_attempts: crate::tool_retry::MAX_TOOL_ATTEMPTS,
+                wait_ms: u64::try_from(wait.as_millis()).unwrap_or(u64::MAX),
+                reason: crate::tool_retry::transient_reason(error),
+            })
+            .await;
+        }
+        number += 1;
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn dispatch_audited_tool(
     state: &AppState,
@@ -4841,6 +5694,11 @@ async fn dispatch_audited_tool(
     classifier_budget: Option<&crate::semantic_screening::ClassifierBudget>,
     // The turn's connected-account selection, when the connected-app read is offered (WS23-S5).
     connector: Option<&connector_reads::ConnectorTurn>,
+    // Where each retry is announced before its attempt (WS15 S3). `None` for a caller that buffers
+    // its events, and for every caller while the lifecycle switch is off.
+    retry_sink: Option<&crate::sse_events::RichEventSink>,
+    // The turn's batched-search refs (see `dispatch_tool_with_cost`). `None` for every caller but the chat loop.
+    turn_refs: Option<&TurnRefs>,
 ) -> Result<ToolOutcome, &'static str> {
     if session_bearer.is_empty() {
         return Err("tool audit credential unavailable");
@@ -4879,60 +5737,36 @@ async fn dispatch_audited_tool(
     // `inline_tool_allowed` already refused every side-effecting tool before
     // this point, so a replay costs latency, never a duplicated effect. See
     // `crate::tool_retry`'s module doc.
-    let attempts = async {
-        let mut outcome = None;
-        for attempt in 1..=crate::tool_retry::MAX_TOOL_ATTEMPTS {
-            if attempt > 1 {
-                tokio::time::sleep(crate::tool_retry::backoff_before_attempt(attempt)).await;
-            }
-            let result = dispatch_tool_with_cost(
-                state,
-                run_id,
-                org_id,
-                user_id,
-                thread_id,
-                space_id,
-                prompt_contents,
-                conversation,
-                data_plane_bearer,
-                execution_bearer,
-                inference_bearer,
-                session_bearer,
-                capability_bearer,
-                zdr,
-                sovereign_required,
-                allow_paid_providers,
-                call,
-                ingestion_bearer,
-                sandbox_bearer,
-                cost_bearer,
-                data_plane_mode.clone(),
-                attachments,
-                skill_mounts,
-                classifier_budget,
-                connector,
-            )
-            .await;
-            let should_retry = attempt < crate::tool_retry::MAX_TOOL_ATTEMPTS
-                && result
-                    .error
-                    .as_deref()
-                    .is_some_and(crate::tool_retry::is_transient_tool_failure);
-            if !should_retry {
-                outcome = Some(result);
-                break;
-            }
-            tracing::warn!(
-                request_id = %request_id,
-                tool = %call.name,
-                attempt,
-                error = result.error.as_deref().unwrap_or_default(),
-                "chat tool loop: retrying after a transient failure"
-            );
-            outcome = Some(result);
-        }
-        outcome.expect("MAX_TOOL_ATTEMPTS >= 1 always yields an outcome")
-    };
+    let attempts = attempts_with_retries(request_id, &call.name, retry_sink, || {
+        dispatch_tool_with_cost(
+            state,
+            run_id,
+            org_id,
+            user_id,
+            thread_id,
+            space_id,
+            prompt_contents,
+            conversation,
+            data_plane_bearer,
+            execution_bearer,
+            inference_bearer,
+            session_bearer,
+            capability_bearer,
+            zdr,
+            sovereign_required,
+            allow_paid_providers,
+            call,
+            ingestion_bearer,
+            sandbox_bearer,
+            cost_bearer,
+            data_plane_mode.clone(),
+            attachments,
+            skill_mounts,
+            classifier_budget,
+            connector,
+            turn_refs,
+        )
+    });
     let outcome = until_read_deadline(call, read_deadline, attempts).await;
     // One line per tool dispatch, unconditionally — this is the server-side
     // trace the audit found missing (F-11, §3.4): a future tool failure must
@@ -5060,6 +5894,10 @@ pub(crate) async fn dispatch_web_tool_audited(
         None,
         // Web tools only: the connected-app read is never reached from this path.
         None,
+        // This path streams no events, so there is no stream to announce a retry on.
+        None,
+        // Deep research's searches are single queries and issue no refs: batched search is a chat-turn feature.
+        None,
     )
     .await
 }
@@ -5105,7 +5943,7 @@ pub fn conversation_tool_allowed(name: &str) -> bool {
 
 /// The public-web-search half of the retrieval-scope tool buckets
 /// (chat-wave2 scope spec §2.3): excluded from an org-`knowledge_only` turn.
-const WEB_CLASS_TOOLS: &[&str] = &["web_search", "fetch_url"];
+const WEB_CLASS_TOOLS: &[&str] = &["web_search", "fetch_url", "read_page", "find_in_page", "extract_structured"];
 /// The org-knowledge half: excluded from a `web_only` turn.
 ///
 /// `mcp_call`, `action_execute` and `browser_agent` are deliberately in
@@ -5164,6 +6002,33 @@ fn tools_for_connector_scope(mut tools: Vec<ToolDefinition>, offered: bool) -> V
     tools
 }
 
+/// The page reader's place in a turn's tool set. Offered only beside `fetch_url`, so a turn that was
+/// refused web reads never sees it, and only where a fetched page can be parked. A client's copy of
+/// either name gives way to the server's own definition, which is added last so the cached prefix holds.
+fn tools_for_web_reader(mut tools: Vec<ToolDefinition>, offered: bool) -> Vec<ToolDefinition> {
+    if !offered || !tools.iter().any(|tool| tool.name == "fetch_url") {
+        return tools;
+    }
+    tools.retain(|tool| !matches!(tool.name.as_str(), "read_page" | "find_in_page"));
+    tools.extend(web_reader_tool_definitions());
+    tools
+}
+
+fn web_reader_tool_definitions() -> Vec<ToolDefinition> {
+    vec![
+        ToolDefinition {
+            name: "read_page".to_owned(),
+            description: "Read one section of a long web page that fetch_url held for reading. The section ids come from the page's outline. Each read returns up to 4000 characters, and the result says whether the section continues and the offset to continue from. Read a section you have not read yet rather than fetching the page again. Only pages fetched in this conversation can be read, and only while their ref is live.".to_owned(),
+            parameters_json: r#"{"type":"object","properties":{"ref":{"type":"string","description":"The ref from a fetch_url result"},"section":{"type":"string","description":"A section id from the outline, such as s3. Omit to read the outline and the start of the page."},"offset":{"type":"integer","minimum":0,"description":"Characters into the section to start from: the next_offset of the previous read. Defaults to 0."}},"required":["ref"]}"#.to_owned(),
+        },
+        ToolDefinition {
+            name: "find_in_page".to_owned(),
+            description: "Search a long web page that fetch_url held for reading. Returns the passages that best match the query, each with the section it is in, most relevant first (at most two). Use it when the outline does not show where the answer is, or to check one specific fact on the page. Read the surrounding section with read_page when a passage is not enough.".to_owned(),
+            parameters_json: r#"{"type":"object","properties":{"ref":{"type":"string","description":"The ref from a fetch_url result"},"query":{"type":"string","description":"The words to look for on the page"}},"required":["ref","query"]}"#.to_owned(),
+        },
+    ]
+}
+
 /// Whether a loaded history carries a compaction marker — the gate for
 /// offering `reattach_context`. Both markers are leading `system` messages the
 /// compactor itself writes, so nothing the user typed can match by accident.
@@ -5178,6 +6043,21 @@ pub fn history_was_compacted(messages: &[ChatMessage]) -> bool {
 
 #[must_use]
 pub fn builtin_tool_defs() -> Vec<ToolDefinition> {
+    builtin_tool_defs_for(web_search_batch_enabled())
+}
+
+/// [`builtin_tool_defs`] for a turn that does or does not run batched web search. The argument check reads the
+/// schema of the turn that made the call, so a batched call is not refused for lacking a `query`.
+fn builtin_tool_defs_for(batch: bool) -> Vec<ToolDefinition> {
+    let mut defs = builtin_tool_defs_with(crate::web_extraction::extract_tool_enabled());
+    advertise_batched_search(&mut defs, batch);
+    defs
+}
+
+/// [`builtin_tool_defs`] with the Model-proposed extraction tool (WS16.S8) decided by the caller, so a
+/// test can pin both sides without touching the process environment.
+#[must_use]
+pub fn builtin_tool_defs_with(extract_tool: bool) -> Vec<ToolDefinition> {
     let mut defs = vec![
         ToolDefinition {
             name: "count_words".to_owned(),
@@ -5244,6 +6124,7 @@ pub fn builtin_tool_defs() -> Vec<ToolDefinition> {
             description: "Replace the content of an artifact you created earlier with create_artifact, producing a new version the user can step back through. Use this whenever the user asks to change, extend, shorten, translate, or fix an existing artifact — never create a second artifact for a revision of the same thing. Always send the COMPLETE new content, not a diff or a fragment: read the current text with read_artifact first when you no longer have it in front of you.".to_owned(),
             parameters_json: r#"{"type":"object","properties":{"id":{"type":"string","description":"The id you used with create_artifact"},"content":{"type":"string","description":"The complete replacement content"},"title":{"type":"string","description":"Optional new title; omit to keep the current one"}},"required":["id","content"]}"#.to_owned(),
         },
+        crate::recall_conversations::tool_definition(),
         // §23.6. Only usable with a `handle_id` the model was given in an
         // earlier tool result, so advertising it unconditionally is safe: a
         // turn that produced no handle (every ZDR turn, and any result small
@@ -5332,6 +6213,14 @@ pub fn builtin_tool_defs() -> Vec<ToolDefinition> {
             parameters_json: r#"{"type":"object","properties":{"status":{"type":"string","enum":["draft","active","completed","archived"],"description":"Optional status filter. Omit for all statuses."},"limit":{"type":"integer","description":"Max campaigns to return, 1-100 (default 25)"}}}"#.to_owned(),
         },
     ];
+    if extract_tool {
+        // Beside `fetch_url`'s neighbours at the end: the list above is the cached prefix.
+        defs.push(ToolDefinition {
+            name: "extract_structured".to_owned(),
+            description: crate::web_extraction::tool_description().to_owned(),
+            parameters_json: crate::web_extraction::tool_parameters().to_owned(),
+        });
+    }
     advertise_text_range(&mut defs, crate::tool_result_handles::extended_enabled());
     defs
 }
@@ -5349,6 +6238,31 @@ fn advertise_text_range(defs: &mut [ToolDefinition], enabled: bool) {
             r#"{"type":"object","properties":{"range":{"type":"object","description":"For a parked text result, such as a fetched page: the window to read, as offset and length in characters. At most 4000 characters a read. Omit to read from the start.","properties":{"offset":{"type":"integer"},"length":{"type":"integer"}}},"#,
             1,
         );
+    }
+}
+
+/// Advertises batched `web_search` (`queries` beside `query`, and a ref on each hit) and `fetch_url` taking a
+/// `ref` in place of its `url`, only on a batched turn. Off, the list is exactly what it was.
+fn advertise_batched_search(defs: &mut [ToolDefinition], enabled: bool) {
+    if !enabled {
+        return;
+    }
+    for def in defs.iter_mut() {
+        match def.name.as_str() {
+            "web_search" => {
+                def.description.push_str(
+                    " Pass queries (up to 4 distinct searches) instead of query only when the question has distinct parts: they run together and come back as one list. Each result has a ref such as w2; to read that page, pass the ref to fetch_url and do not retype its URL.",
+                );
+                def.parameters_json = r#"{"type":"object","properties":{"query":{"type":"string","description":"One search query. Use queries instead when you have several."},"queries":{"type":"array","items":{"type":"string"},"minItems":1,"maxItems":4,"description":"Up to 4 distinct search queries, run together. Use only when the question has distinct parts."},"limit":{"type":"integer","description":"Max results 1-50 for each query"}}}"#.to_owned();
+            }
+            "fetch_url" => {
+                def.description.push_str(
+                    " Pass the ref of a web_search result from this turn, such as w2, instead of its url.",
+                );
+                def.parameters_json = r#"{"type":"object","properties":{"url":{"type":"string","description":"Absolute http(s) URL to read"},"ref":{"type":"string","description":"The ref of a web_search result from this turn, such as w2, instead of a url"}}}"#.to_owned();
+            }
+            _ => {}
+        }
     }
 }
 
@@ -5545,6 +6459,9 @@ pub struct ToolRounds {
     /// caller, which holds the catalogue. A call that failed reports no tokens and
     /// is absent.
     pub usage: Vec<crate::usage_meter::CallUsage>,
+    /// The loop guard's stop, when `LOOP_GUARD_MODE=enforce` ended the tool phase early.
+    /// Content-free: a tool name, a hash of the call's signature and a count.
+    pub loop_stop: Option<LoopStop>,
 }
 
 /// The usage of one provider call the tool phase made, as the provider reported
@@ -5573,13 +6490,31 @@ pub(crate) fn metered_call(
     }
 }
 
+/// The routing token a call's route note states on its progress frame (WS27-S7). One mapping serves every
+/// call site, so a budget move names itself the same way wherever it happened. Inference-core sets the flags
+/// only under a constrained or an exhausted budget, so a healthy or unknown one states no token.
+pub(crate) fn route_shift(
+    note: Option<&mp_contracts::model_plane::v1::RouteNote>,
+) -> Option<&'static str> {
+    let note = note?;
+    if note.cheap_fallback_forced {
+        Some("cheap_fallback")
+    } else if note.tier_shifted {
+        Some("tier_shifted")
+    } else {
+        None
+    }
+}
+
 /// Records one provider call the tool phase made and streams the turn's running total after it, when the
 /// turn's sink records calls: it streams usage progress or tracks a run ceiling (WS27-S6). The call is
-/// priced only then, so a turn with neither reads the catalogue no more often than it did before.
+/// priced only then, so a turn with neither reads the catalogue no more often than it did before. `routing`
+/// is the token the call's route note states, if any (WS27-S7).
 pub(crate) async fn stream_call_usage(
     state: &AppState,
     sink: &crate::sse_events::RichEventSink,
     call: &crate::usage_meter::CallUsage,
+    routing: Option<&'static str>,
 ) {
     if !sink.records_calls() {
         return;
@@ -5588,7 +6523,7 @@ pub(crate) async fn stream_call_usage(
         .pricing
         .priced(call.basis, &call.model, call.legs())
         .await;
-    sink.record_call(call, &priced).await;
+    sink.record_call(call, &priced, routing).await;
 }
 
 /// Keep tool selection from drafting an answer that this phase discards. This
@@ -6275,6 +7210,10 @@ pub async fn run_forced_web_search_for_model(
         None,
         // A forced web search reads no connected account.
         None,
+        // The forced search announces no retry: WS15 S3 wires the chat tool loop only.
+        None,
+        // A forced search runs before the turn's tool loop and issues no refs: batched search is a loop feature.
+        None,
     )
     .await?;
     // Gate BEFORE anything is emitted: the citations are built from the surviving
@@ -6350,6 +7289,8 @@ pub async fn run_forced_web_search_for_model(
         web_citations,
         // A web lookup, not a model call: the search client bills no tokens.
         usage: Vec::new(),
+        // The forced search runs no tool-deciding rounds, so the guard never observes it.
+        loop_stop: None,
     })
 }
 
@@ -6403,6 +7344,9 @@ struct WebSearchHit {
     /// Empty on every deployment until Quarry populates `SearchResult::engines`;
     /// [`relevance::assess_with_signals`] scores an empty list as no signal.
     engines: Vec<String>,
+    /// The ref this turn issued for the hit (`w{n}`), when batched search is on. The gated text shows it beside
+    /// the hit so `fetch_url` can read the page by ref; `None` otherwise.
+    reference: Option<String>,
 }
 
 /// Whether one `name=value` pair is a tracking parameter.
@@ -6547,6 +7491,12 @@ fn parse_web_search_hits(outcome: &ToolOutcome) -> Option<Vec<WebSearchHit>> {
                         .filter(|score| score.is_finite()),
                     highlights: string_list(item, "highlights"),
                     engines: string_list(item, "engines"),
+                    reference: item
+                        .get("ref")
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .filter(|reference| !reference.is_empty())
+                        .map(ToOwned::to_owned),
                 })
             })
             .collect(),
@@ -6758,6 +7708,13 @@ fn rerank_report_of(outcome: &ToolOutcome) -> Option<(String, Option<String>)> {
     Some((status, reason))
 }
 
+/// The ref a hit shows in the gated text, `[w2] `, or nothing when the hit has none.
+fn reference_label(hit: &WebSearchHit) -> String {
+    hit.reference
+        .as_deref()
+        .map_or_else(String::new, |reference| format!("[{reference}] "))
+}
+
 /// Rewrite a gated result set into the text the model reads.
 ///
 /// Filtering has to be VISIBLE. A silently shortened result list makes the model
@@ -6824,13 +7781,21 @@ fn gated_web_search_output(
              read the page, and prefer the read pages when they and a snippet disagree."
         );
     }
+    // Said only when a hit carries a ref, so the text of a turn without batched search is unchanged.
+    if hits.iter().any(|hit| hit.reference.is_some()) {
+        let _ = writeln!(
+            out,
+            "Each hit shows its ref in brackets, such as [w2]. To read a hit's page, pass its ref to fetch_url instead of retyping the URL.\n"
+        );
+    }
     let _ = writeln!(out, "KEPT ({citable_count}, citable):");
     for (rank, index) in citable.iter().enumerate() {
         if let (Some(hit), Some(verdict)) = (hits.get(*index), verdicts.get(*index)) {
             let _ = writeln!(
                 out,
-                "{}. {} — {} (relevance {:.2}){}\n   {}",
+                "{}. {}{} — {} (relevance {:.2}){}\n   {}",
                 rank + 1,
+                reference_label(hit),
                 hit.title,
                 hit.url,
                 verdict.score,
@@ -6849,7 +7814,8 @@ fn gated_web_search_output(
             if let Some(hit) = hits.get(*index) {
                 let _ = writeln!(
                     out,
-                    "- {} — {}{} — {reason}",
+                    "- {}{} — {}{} — {reason}",
+                    reference_label(hit),
                     hit.title,
                     hit.url,
                     grounding_label(grounded.get(index))
@@ -7362,8 +8328,9 @@ pub async fn run_tool_rounds(
     tools: Vec<ToolDefinition>,
     tool_choice: String,
     ingestion_bearer: Option<&VerifiedIngestionBearer>,
-    // Delegated user bearer for sandbox-manager, present only on a Space-scoped
-    // turn; threaded to `code_interpreter` alongside `space_id` above.
+    // Delegated user bearer for sandbox-manager, present on a Space-scoped turn and
+    // on a non-ZDR personal turn while the thread workspace is switched on (WS22-S3);
+    // threaded to `code_interpreter` alongside `space_id` above.
     sandbox_bearer: Option<&VerifiedSandboxBearer>,
     sink: Option<&crate::sse_events::RichEventSink>,
 ) -> Result<ToolRounds, &'static str> {
@@ -7537,6 +8504,9 @@ pub async fn run_tool_rounds_for_model_with_attachments(
     // property of the turn, and a value re-derived per round is a value that can
     // disagree with itself mid-turn.
     let allow_paid_providers = paid_providers_allowed(requested_model, zdr);
+    // Batched web search is decided once for the turn, so every call of the turn agrees, and its refs live only in
+    // this map, dropped with the turn. `None` (the switch off) leaves every web-search path as it was.
+    let turn_refs = web_search_batch_enabled().then(TurnRefs::default);
     // The turn's `/skills` mounts, read once for the turn (WS19-S8). The model names none of them.
     let skill_mounts =
         skill_mounts_for_turn(state, request_id, org_id, user_id, capability_bearer, zdr).await;
@@ -7561,6 +8531,11 @@ pub async fn run_tool_rounds_for_model_with_attachments(
         connector_turn,
     );
     let tools = tools_for_connector_scope(tools, connector_offered);
+    // The page reader is offered only where a fetched page can be parked, which a ZDR or waived turn never
+    // can (see `external_parking_allowed`). With its switch off the list is left exactly as it was.
+    let reader_offered =
+        crate::page_reader::enabled() && external_parking_allowed(zdr || data_plane_mode.is_some());
+    let tools = tools_for_web_reader(tools, reader_offered);
     let connector_turn = connector_turn.filter(|_| connector_offered);
     // The turn's clock rides on the live sink; a caller without one (tests,
     // other routes) times nothing.
@@ -7595,6 +8570,11 @@ pub async fn run_tool_rounds_for_model_with_attachments(
     // Persists across rounds: an exact repeat later in the same turn is still
     // suppressed, not just within one round.
     let mut attempted_calls: BTreeSet<String> = BTreeSet::new();
+    // The loop guard observes the model's rounds in this turn (WS25-S1). It is built only when
+    // `LOOP_GUARD_MODE` observes, so with the switch off no guard runs at all.
+    let guard_mode = loop_guard_mode();
+    let mut loop_guard = guard_mode.observes().then(LoopGuard::new);
+    let mut loop_stop: Option<LoopStop> = None;
     // Artifact id → kind, for artifacts authored during THIS turn. An
     // `update_artifact` does not resupply the kind (changing it mid-history
     // would break the client's renderer for older versions), so the kind has to
@@ -7604,6 +8584,8 @@ pub async fn run_tool_rounds_for_model_with_attachments(
         String,
         crate::artifacts::ArtifactKind,
     > = std::collections::HashMap::new();
+    // The Office files this turn has delivered or held back under the verifier's switch (WS19-S3).
+    let mut office_delivery = OfficeDelivery::for_turn();
     // The question this turn is about, snapshotted BEFORE the loop starts
     // appending tool context: the last thing the user actually wrote. A
     // `web_search` is judged against the query the model composed (that is what
@@ -7897,6 +8879,10 @@ pub async fn run_tool_rounds_for_model_with_attachments(
                 mp_contracts::prompt_tier::cache_scope_key(org_id, thread_id).unwrap_or_default();
             let mut decision = with_authorization(
                 InferRequest {
+                    purpose: InferPurpose::ToolRound as i32,
+                    // Attributes the round's request snapshot to its run (EP-14 S6); empty for a
+                    // turn without a run. It routes nothing.
+                    run_id: run_id.to_owned(),
                     // A source-bound plan has many authority/dependency distinctions.
                     // Spend reasoning before drafting to avoid slower private repair
                     // rounds and keep the existing high-effort review independent.
@@ -7927,6 +8913,7 @@ pub async fn run_tool_rounds_for_model_with_attachments(
                     prompt_tiers: decision_tiers,
                     cache_scope_key,
                     image_parts: Vec::new(),
+                    role_fallback_model: String::new(),
                 },
                 inference_bearer,
             );
@@ -8047,7 +9034,13 @@ pub async fn run_tool_rounds_for_model_with_attachments(
             subscription_connection_id,
         );
         if let Some(sink) = sink {
-            stream_call_usage(state, sink, &round_usage).await;
+            stream_call_usage(
+                state,
+                sink,
+                &round_usage,
+                route_shift(resp.route_note.as_ref()),
+            )
+            .await;
         }
         usage.push(round_usage);
         let truncated_call_was_finish = resp.tool_calls.last().is_some_and(|call| call.name == FINISH_TOOL_PHASE);
@@ -8207,6 +9200,7 @@ pub async fn run_tool_rounds_for_model_with_attachments(
             events.push(ChatEvent::StepUpdate { id: format!("{}:source-check", call.id), title: if source_context.is_some() { "Kontrollerer utkastet mot kildene" } else { "Bevarer valgte avsnitt" }.to_owned(),
                 detail: if source_context.is_some() { "Kontrollerer påstander og bevarer avsnitt som skal stå uendret" } else { "Bevarer innholdet fra forrige versjon" }.to_owned(), status: "running".to_owned() }).await;
             let request = InferRequest { request_id: format!("{request_id}-{}", call.id), org_id: org_id.to_owned(),
+                purpose: InferPurpose::Validation as i32,
                 model: resolved_model.clone().unwrap_or_else(|| model.to_owned()),
                 provider_hint: provider_hint.to_owned(), subscription_connection_id: subscription_connection_id.to_owned(),
                 messages: review_messages.clone(),
@@ -8265,7 +9259,7 @@ pub async fn run_tool_rounds_for_model_with_attachments(
                                 subscription_connection_id,
                             );
                             if let Some(sink) = sink {
-                                stream_call_usage(state, sink, &overhead).await;
+                                stream_call_usage(state, sink, &overhead, None).await;
                             }
                             if let Ok(mut recorded) = check_usage.lock() {
                                 recorded.push(overhead);
@@ -8377,18 +9371,35 @@ pub async fn run_tool_rounds_for_model_with_attachments(
             // arguments are an accident of where the ceiling fell, and letting
             // them into the signature set could suppress the model's retry.
             let is_duplicate = !is_truncated
-                && duplicate_call_signature(call)
+                && duplicate_call_signature(call, turn_refs.is_some())
                     .is_some_and(|signature| !attempted_calls.insert(signature));
             prepared.push((call, is_duplicate, is_truncated));
         }
+        // The guard's view of each call: its signature, and whether an identical call already
+        // suppressed it. Read before `prepared` moves into the dispatch below.
+        let loop_keys: Vec<(String, bool)> = if loop_guard.is_some() {
+            prepared
+                .iter()
+                .map(|(call, is_duplicate, _)| {
+                    (loop_guard::call_signature(&call.name, &call.arguments_json), *is_duplicate)
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
         let offered_tools = &round_tools;
         let dispatch_started = timing.map(crate::turn_timing::TurnTiming::now_ms);
         // A shared reference, so each per-call future copies it rather than moving the turn's value.
         let data_plane_mode_ref = &data_plane_mode;
+        // The turn's batched-search refs, shared the same way.
+        let turn_refs_ref = turn_refs.as_ref();
         // The same, for the turn's classifier budget: each per-call future copies the reference.
         let classifier_budget_ref = &classifier_budget;
         // The same, for the turn's skill mounts: each per-call future copies the reference.
         let skill_mounts_ref = &skill_mounts;
+        // A retry is announced only on a live stream, and only while the lifecycle switch is on
+        // (WS15 S3): a caller that buffers its events hears none.
+        let retry_sink = sink.filter(|_| mp_contracts::lifecycle_notice::enabled());
         let dispatched = futures::future::join_all(prepared.into_iter().map(
             |(call, is_duplicate, is_truncated)| async move {
                 if !offered_tools.iter().any(|tool| tool.name == call.name) {
@@ -8444,6 +9455,8 @@ pub async fn run_tool_rounds_for_model_with_attachments(
                     skill_mounts_ref,
                     Some(classifier_budget_ref),
                     connector_turn,
+                    retry_sink,
+                    turn_refs_ref,
                 )
                 .await
             },
@@ -8477,7 +9490,8 @@ pub async fn run_tool_rounds_for_model_with_attachments(
             let artifact_kind_hint =
                 artifact_id_of(&outcome).and_then(|id| state.artifact_versions.kind_of(thread_id, &id)
                     .or_else(|| authored_artifact_kinds.get(&id).copied()));
-            let (artifact_events, rewritten) = tool_artifact_events(&outcome, artifact_kind_hint);
+            let (artifact_events, rewritten) =
+                tool_artifact_events(&outcome, artifact_kind_hint, &mut office_delivery);
             let checked_artifact_ids: Vec<&String> = artifact_events.iter().filter_map(|event| match event {
                     ChatEvent::Artifact { id, content, .. } if result_checks.iter().any(|check| check["artifactId"] == *id
                         && check["contentHash"] == crate::result_validation::content_hash(content)) => Some(id),
@@ -8516,7 +9530,7 @@ pub async fn run_tool_rounds_for_model_with_attachments(
                     .tool_calls
                     .iter()
                     .find(|candidate| candidate.id == outcome.call_id)
-                    .map(|candidate| arg_str(&candidate.arguments_json, "query"))
+                    .map(|candidate| searched_question(&candidate.arguments_json, turn_refs.is_some()))
                     .unwrap_or_default();
                 // Grounded on the same terms as the forced path: the tier is
                 // the one the USER asked for, never `model` — that is the
@@ -8723,6 +9737,55 @@ pub async fn run_tool_rounds_for_model_with_attachments(
             messages.push(ChatMessage { role: "system".to_owned(), content: "The two word-count batches for this request are used. Reuse the best counted draft and now create/update the requested artifact. Do not keep polishing or switch to a code sandbox for more counts. The document validation gate checks the supported final body limit. A word count alone does not complete a document request.".to_owned(), ..Default::default() });
         }
 
+        // The guard reads this round's calls against the whole turn. It never runs a tool: a
+        // reminder goes to the model, and a stop ends the tool phase here. The gateway's own
+        // prefetch is no model round, so it is not observed.
+        if let Some(guard) = loop_guard.as_mut().filter(|_| round.is_some()) {
+            debug_assert_eq!(loop_keys.len(), outcomes.len(), "one signature per dispatched call");
+            let records: Vec<CallRecord> = loop_keys
+                .iter()
+                .zip(&outcomes)
+                .map(|((signature, suppressed), outcome)| CallRecord {
+                    tool: outcome.name.clone(),
+                    signature: signature.clone(),
+                    outcome: if *suppressed {
+                        CallOutcome::Suppressed
+                    } else if outcome.error.is_some() {
+                        CallOutcome::Err
+                    } else {
+                        CallOutcome::Ok
+                    },
+                })
+                .collect();
+            let verdict = guard.observe_round(&records);
+            record_loop_guard_verdict(guard_mode, &verdict);
+            match verdict {
+                Verdict::Continue => {}
+                Verdict::Remind { level, text } => {
+                    tracing::info!(%request_id, mode = guard_mode.label(), level, "loop_guard verdict: remind");
+                    if guard_mode.enforces() {
+                        messages.push(ChatMessage { role: "system".to_owned(), content: text.to_owned(), ..Default::default() });
+                    }
+                }
+                Verdict::Stop(stop) => {
+                    tracing::info!(
+                        %request_id,
+                        mode = guard_mode.label(),
+                        reason = stop.reason.label(),
+                        tool = %stop.tool,
+                        count = stop.count,
+                        signature_hash = %stop.signature_hash,
+                        "loop_guard verdict: stop"
+                    );
+                    if guard_mode.enforces() {
+                        messages.push(ChatMessage { role: "system".to_owned(), content: loop_guard::STOP_NOTE.to_owned(), ..Default::default() });
+                        loop_stop = Some(stop);
+                        break;
+                    }
+                }
+            }
+        }
+
         // "There is no need to search more when the answer is so easily
         // available." The remaining rounds would each cost an inference and a
         // search, and their only effect on an answer already carried by a dated
@@ -8750,6 +9813,7 @@ pub async fn run_tool_rounds_for_model_with_attachments(
         document_tool_failures,
         web_citations,
         usage,
+        loop_stop,
     })
 }
 
@@ -8757,6 +9821,26 @@ pub async fn run_tool_rounds_for_model_with_attachments(
 mod tests {
     use super::*;
     use mp_contracts::model_plane::v1 as mpv1;
+
+    /// A call the budget did not move states no token; a call it moved states the token of its move.
+    #[test]
+    fn route_shift_names_only_a_budget_move() {
+        let note = |tier_shifted, cheap_fallback_forced| mpv1::RouteNote {
+            budget_posture: "constrained".to_owned(),
+            tier_shifted,
+            cheap_fallback_forced,
+            applied_effort: String::new(),
+            role: String::new(),
+            role_source: String::new(),
+        };
+        assert_eq!(route_shift(None), None);
+        assert_eq!(route_shift(Some(&note(false, false))), None);
+        assert_eq!(route_shift(Some(&note(true, false))), Some("tier_shifted"));
+        assert_eq!(
+            route_shift(Some(&note(false, true))),
+            Some("cheap_fallback")
+        );
+    }
 
     /// Every tool result the audit sees is counted under its trust class and posture, so an external
     /// result that no screening pass saw appears as `not-applicable` rather than going missing.
@@ -10410,6 +11494,64 @@ mod tests {
         }
     }
 
+    /// WS16.S8: the Model-proposed extraction tool is offered only behind `MODEL_GATEWAY_EXTRACT_TOOL`
+    /// (default off). The switch is decided by the caller of `builtin_tool_defs_with`, so both sides are
+    /// pinned without touching the process environment; the default itself is pinned in
+    /// `web_extraction::tests::the_flag_enables_only_on_the_literals`.
+    #[test]
+    fn extract_structured_is_advertised_only_when_the_flag_is_on() {
+        let names = |on: bool| -> Vec<String> {
+            builtin_tool_defs_with(on).into_iter().map(|def| def.name).collect()
+        };
+        let off = names(false);
+        assert!(!off.iter().any(|name| name == "extract_structured"));
+        let on = names(true);
+        assert_eq!(on.iter().filter(|name| *name == "extract_structured").count(), 1);
+        // Nothing else moves, and the existing tools keep their order (the cached prefix).
+        let without: Vec<&String> = on.iter().filter(|name| *name != "extract_structured").collect();
+        assert_eq!(without, off.iter().collect::<Vec<_>>());
+        // The default list is the switch-off list while the variable is unset.
+        if std::env::var("MODEL_GATEWAY_EXTRACT_TOOL").is_err() {
+            assert_eq!(
+                builtin_tool_defs().into_iter().map(|def| def.name).collect::<Vec<_>>(),
+                off
+            );
+        }
+        // The tool is a web-class tool: a knowledge-only turn never sees it.
+        assert!(!tool_allowed_for_retrieval_scope(
+            "extract_structured",
+            crate::normalize::RetrievalScope::KnowledgeOnly
+        ));
+        assert!(tool_allowed_for_retrieval_scope(
+            "extract_structured",
+            crate::normalize::RetrievalScope::WebOnly
+        ));
+    }
+
+    /// An advertised `extract_structured` reaches a dispatch arm that reads its arguments, and a call
+    /// that arrives while the tool is off is refused before anything is fetched.
+    #[tokio::test]
+    async fn extract_structured_has_a_dispatch_arm_and_validates_before_fetching() {
+        let state = crate::state::AppState::new();
+        let off = tool_call("extract_structured", r#"{"url":"https://a.example","question":"q"}"#);
+        let outcome = dispatch_tool(
+            &state, "run_test", "org_test", "user_test", "thread_test", "", &[], "", None, None, "", "",
+            None, true, false, false, &off, None, None,
+            crate::retrieval::data_plane_zdr_mode(true, false),
+        )
+        .await;
+        let error = outcome.error.unwrap_or_default();
+        assert!(!error.contains("unknown tool"), "{error}");
+        assert!(error.contains("extract_structured"), "{error}");
+        // The advertised parameters are valid minimal arguments for the dispatcher's pre-check.
+        let def = builtin_tool_defs_with(true)
+            .into_iter()
+            .find(|def| def.name == "extract_structured")
+            .expect("advertised");
+        let schema: Value = serde_json::from_str(&def.parameters_json).expect("json schema");
+        assert_eq!(schema["type"], "object");
+    }
+
     /// The sovereignty axis has to be POPULATED, not merely present: Data Plane
     /// v2 reads an absent `sovereign_required` as `true`, which its Azure-hosted
     /// embedding provider cannot satisfy, so `None` here is the outage.
@@ -11058,6 +12200,89 @@ mod tests {
         assert_eq!(streamed, 2, "each event reached the client exactly once");
     }
 
+    /// A tool call the retry tests run through `attempts_with_retries`.
+    fn retry_test_call() -> ToolCall {
+        ToolCall {
+            id: "call-1".to_owned(),
+            name: "knowledge_search".to_owned(),
+            arguments_json: r#"{"query":"q"}"#.to_owned(),
+        }
+    }
+
+    /// Runs `attempts_with_retries` on a call whose every attempt fails with `error`, announcing on
+    /// a live sink when `streamed`. Returns how many attempts ran and the frames the sink streamed.
+    async fn failing_attempts_with_retries(error: &str, streamed: bool) -> (u32, Vec<String>) {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+        let sink = crate::sse_events::RichEventSink::new(
+            tx,
+            vec!["steps".to_owned()],
+            "req-1".to_owned(),
+        );
+        let call = retry_test_call();
+        let mut attempts: u32 = 0;
+        let outcome = attempts_with_retries("req-1", &call.name, streamed.then_some(&sink), || {
+            attempts += 1;
+            let failed = err_outcome(&call, error);
+            async move { failed }
+        })
+        .await;
+        assert!(outcome.error.is_some(), "the last failed attempt is the outcome");
+        drop(sink);
+        let mut frames = Vec::new();
+        while let Some(Ok(frame)) = rx.recv().await {
+            frames.push(format!("{frame:?}"));
+        }
+        (attempts, frames)
+    }
+
+    #[tokio::test]
+    async fn a_transient_failure_emits_one_retry_scheduled_per_extra_attempt() {
+        let (attempts, frames) =
+            failing_attempts_with_retries("transport error: connection reset by peer", true).await;
+        assert_eq!(attempts, crate::tool_retry::MAX_TOOL_ATTEMPTS);
+        let scheduled: Vec<&String> = frames
+            .iter()
+            .filter(|frame| frame.contains("retry_scheduled"))
+            .collect();
+        assert_eq!(scheduled.len(), 2, "one frame per extra attempt, got {frames:?}");
+        assert!(scheduled[0].contains(r#"\"attempt\":2"#), "{}", scheduled[0]);
+        assert!(scheduled[1].contains(r#"\"attempt\":3"#), "{}", scheduled[1]);
+        assert!(scheduled
+            .iter()
+            .all(|frame| frame.contains(r#"\"reason\":\"connection\""#)));
+    }
+
+    #[tokio::test]
+    async fn buffered_events_mode_emits_none() {
+        let (attempts, frames) =
+            failing_attempts_with_retries("transport error: connection reset by peer", false)
+                .await;
+        assert_eq!(attempts, crate::tool_retry::MAX_TOOL_ATTEMPTS, "the retries still run");
+        assert!(frames.is_empty(), "a buffering caller hears no retry: {frames:?}");
+    }
+
+    #[tokio::test]
+    async fn retry_frame_never_contains_the_error_text() {
+        let upstream = "https://quarry.internal.example/search?token=sk-retry-secret-42 connection reset";
+        let (_, frames) = failing_attempts_with_retries(upstream, true).await;
+        assert_eq!(
+            frames.iter().filter(|frame| frame.contains("retry_scheduled")).count(),
+            2
+        );
+        for frame in &frames {
+            assert!(!frame.contains("sk-retry-secret-42"), "{frame}");
+            assert!(!frame.contains("quarry.internal.example"), "{frame}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_non_transient_failure_is_never_retried_or_announced() {
+        let (attempts, frames) =
+            failing_attempts_with_retries("invalid json: expected value at line 1", true).await;
+        assert_eq!(attempts, 1, "a deterministic failure is not replayed");
+        assert!(frames.is_empty(), "{frames:?}");
+    }
+
     #[tokio::test]
     async fn buffered_tool_events_are_returned_for_a_non_streaming_caller() {
         let mut events = ToolEvents::Buffered(Vec::new());
@@ -11368,20 +12593,20 @@ mod tests {
 
     #[test]
     fn duplicate_signature_catches_exact_repeat_fetch_url() {
-        let first = duplicate_call_signature(&tool_call(
-            "fetch_url",
-            r#"{"url":"https://coresystem.no"}"#,
-        ))
+        let first = duplicate_call_signature(
+            &tool_call("fetch_url", r#"{"url":"https://coresystem.no"}"#),
+            false,
+        )
         .expect("fetch_url signature");
-        let same = duplicate_call_signature(&tool_call(
-            "fetch_url",
-            r#"{"url":"https://coresystem.no"}"#,
-        ))
+        let same = duplicate_call_signature(
+            &tool_call("fetch_url", r#"{"url":"https://coresystem.no"}"#),
+            false,
+        )
         .expect("fetch_url signature");
-        let different = duplicate_call_signature(&tool_call(
-            "fetch_url",
-            r#"{"url":"https://coresystem.no/about"}"#,
-        ))
+        let different = duplicate_call_signature(
+            &tool_call("fetch_url", r#"{"url":"https://coresystem.no/about"}"#),
+            false,
+        )
         .expect("fetch_url signature");
         assert_eq!(first, same);
         assert_ne!(first, different);
@@ -11389,28 +12614,36 @@ mod tests {
 
     #[test]
     fn duplicate_signature_web_search_is_case_and_whitespace_insensitive() {
-        let first = duplicate_call_signature(&tool_call(
-            "web_search",
-            r#"{"query":"  Coresystem   AS "}"#,
-        ))
+        let first = duplicate_call_signature(
+            &tool_call("web_search", r#"{"query":"  Coresystem   AS "}"#),
+            false,
+        )
         .expect("web_search signature");
-        let same =
-            duplicate_call_signature(&tool_call("web_search", r#"{"query":"coresystem as"}"#))
-                .expect("web_search signature");
+        let same = duplicate_call_signature(
+            &tool_call("web_search", r#"{"query":"coresystem as"}"#),
+            false,
+        )
+        .expect("web_search signature");
         assert_eq!(first, same);
     }
 
     #[test]
     fn duplicate_signature_does_not_apply_to_stateful_or_side_effecting_tools() {
-        assert!(
-            duplicate_call_signature(&tool_call("browser_agent", r#"{"objective":"x"}"#)).is_none()
-        );
-        assert!(
-            duplicate_call_signature(&tool_call("recall_memory", r#"{"query":"x"}"#)).is_none()
-        );
-        assert!(
-            duplicate_call_signature(&tool_call("save_memory", r#"{"content":"x"}"#)).is_none()
-        );
+        assert!(duplicate_call_signature(
+            &tool_call("browser_agent", r#"{"objective":"x"}"#),
+            false
+        )
+        .is_none());
+        assert!(duplicate_call_signature(
+            &tool_call("recall_memory", r#"{"query":"x"}"#),
+            false
+        )
+        .is_none());
+        assert!(duplicate_call_signature(
+            &tool_call("save_memory", r#"{"content":"x"}"#),
+            false
+        )
+        .is_none());
     }
 
     #[test]
@@ -11525,6 +12758,7 @@ mod tests {
             document_tool_failures: 0,
             web_citations: 0,
             usage: Vec::new(),
+            loop_stop: None,
         };
         assert_eq!(rounds.resolved_model.as_deref(), Some("claude-sonnet-4-6"));
     }
@@ -12606,7 +13840,8 @@ mod tests {
             1,
         );
         let outcome = outcome_for("create_artifact", payload);
-        let (events, rewritten) = tool_artifact_events(&outcome, None);
+        let (events, rewritten) =
+            tool_artifact_events(&outcome, None, &mut OfficeDelivery::default());
 
         assert_eq!(events.len(), 1);
         match &events[0] {
@@ -12650,7 +13885,11 @@ mod tests {
         let payload = updated_artifact_payload("landing", "", "<html></html>", 2);
         let outcome = outcome_for("update_artifact", payload);
         let (events, rewritten) =
-            tool_artifact_events(&outcome, Some(crate::artifacts::ArtifactKind::Html));
+            tool_artifact_events(
+                &outcome,
+                Some(crate::artifacts::ArtifactKind::Html),
+                &mut OfficeDelivery::default(),
+            );
         match &events[0] {
             ChatEvent::Artifact { kind, version, .. } => {
                 assert_eq!(kind, "html", "the remembered kind must win");
@@ -12699,7 +13938,8 @@ mod tests {
         })
         .to_string();
         let outcome = outcome_for("code_interpreter", payload);
-        let (events, rewritten) = tool_artifact_events(&outcome, None);
+        let (events, rewritten) =
+            tool_artifact_events(&outcome, None, &mut OfficeDelivery::default());
 
         assert_eq!(events.len(), 2, "one artifact + one attachment");
         match &events[0] {
@@ -12785,7 +14025,8 @@ mod tests {
         // JSON — this is the part the old code could not parse.
         let prefixed_output = format!("[source: org-internal]\n{payload}");
         let outcome = outcome_for("code_interpreter", prefixed_output);
-        let (events, rewritten) = tool_artifact_events(&outcome, None);
+        let (events, rewritten) =
+            tool_artifact_events(&outcome, None, &mut OfficeDelivery::default());
 
         assert_eq!(
             events.len(),
@@ -12844,7 +14085,11 @@ mod tests {
         })
         .to_string();
         let (_events, summary) =
-            tool_artifact_events(&outcome_for("code_interpreter", with_report), None);
+            tool_artifact_events(
+                &outcome_for("code_interpreter", with_report),
+                None,
+                &mut OfficeDelivery::default(),
+            );
         let summary = summary.expect("a summary for delivered files");
         assert!(
             summary.contains(
@@ -12872,10 +14117,237 @@ mod tests {
         })
         .to_string();
         let (_events, summary) =
-            tool_artifact_events(&outcome_for("code_interpreter", without_report), None);
+            tool_artifact_events(
+                &outcome_for("code_interpreter", without_report),
+                None,
+                &mut OfficeDelivery::default(),
+            );
         let summary = summary.expect("a summary for delivered files");
         assert!(!summary.contains("office_checks"), "{summary}");
         assert!(!summary.contains("Regenerate each failed file"));
+    }
+
+    /// A delivered Office file carries the render of its check as its preview, and its download stays the file the
+    /// sandbox wrote, byte for byte. The preview is a view of the deliverable, never the deliverable.
+    #[test]
+    fn a_delivered_office_file_carries_its_render_preview_and_its_own_download() {
+        let output = serde_json::json!({
+            "stdout": "",
+            "stderr": "",
+            "exit_code": 0,
+            "files": [{
+                "name": "budget.xlsx",
+                "mime": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                "bytes": 3,
+                "content_b64": "QUFB",
+            }],
+            "verification": [{
+                "name": "budget.xlsx",
+                "kind": "xlsx",
+                "level": "passed",
+                "checks": [],
+                "stats": { "render_pages": 2, "fonts_substituted": 1 },
+            }],
+            "previews": [{
+                "name": "budget.xlsx",
+                "pdf_b64": "JVBERi0=",
+                "thumbs_b64": ["iVBORw0KGgo=", "iVBORw0KGgo=", "iVBORw0KGgo=", "iVBORw0KGgo="],
+            }],
+        })
+        .to_string();
+        let (events, _) = tool_artifact_events(
+            &outcome_for("code_interpreter", output),
+            None,
+            &mut OfficeDelivery::default(),
+        );
+        let (url, preview) = events
+            .iter()
+            .find_map(|event| match event {
+                ChatEvent::Attachment { url, preview, .. } => Some((url.clone(), preview.clone())),
+                _ => None,
+            })
+            .expect("the delivered file is an attachment");
+        assert_eq!(
+            url,
+            "data:application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;base64,QUFB"
+        );
+        let preview = preview.expect("the render made a preview");
+        assert_eq!(preview.url, "data:application/pdf;base64,JVBERi0=");
+        assert_eq!(preview.pages, 2);
+        assert!(preview.fonts_substituted);
+        assert_eq!(
+            preview.thumbs.len(),
+            3,
+            "at most three thumbnails reach the frame"
+        );
+    }
+
+    /// A preview with no report has no page count or font facts, and one over the cap is dropped, not cut short.
+    #[test]
+    fn a_preview_without_a_report_or_over_the_cap_is_no_preview() {
+        let without_report = serde_json::json!({
+            "previews": [{ "name": "budget.xlsx", "pdf_b64": "JVBERi0=", "thumbs_b64": [] }],
+        });
+        assert!(office_preview_for(&without_report, "budget.xlsx").is_none());
+
+        let oversized = "A".repeat(PREVIEW_PDF_MAX_BASE64 + 1);
+        let over_cap = serde_json::json!({
+            "previews": [{ "name": "budget.xlsx", "pdf_b64": oversized, "thumbs_b64": [] }],
+            "verification": [{
+                "name": "budget.xlsx",
+                "kind": "xlsx",
+                "level": "passed",
+                "checks": [],
+                "stats": { "render_pages": 1 },
+            }],
+        });
+        assert!(office_preview_for(&over_cap, "budget.xlsx").is_none());
+    }
+
+    /// A `code_interpreter` result that delivers one Office file and the verifier's report on it.
+    fn one_office_file(name: &str, level: &str, checks: Value) -> String {
+        serde_json::json!({
+            "stdout": "",
+            "stderr": "",
+            "exit_code": 0,
+            "files": [{
+                "name": name,
+                "mime": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                "bytes": 4096,
+                "content_b64": "QUFBQUFBQUFBQQ",
+            }],
+            "verification": [{
+                "name": name,
+                "kind": "docx",
+                "level": level,
+                "checks": checks,
+                "stats": {},
+            }],
+        })
+        .to_string()
+    }
+
+    fn container_fault() -> Value {
+        serde_json::json!([{
+            "id": "container",
+            "level": "failed",
+            "message": "the file is not a readable zip package",
+        }])
+    }
+
+    /// With the enforce switch on, a failed Office file is held back the first time its name fails in a turn, so the
+    /// model can repair it. The second failure of that name is delivered with its check, marked failed.
+    #[test]
+    fn a_failed_file_is_withheld_once_then_delivered() {
+        let mut office = OfficeDelivery {
+            enforce: true,
+            ..OfficeDelivery::default()
+        };
+        let broken = one_office_file("deck.docx", "failed", container_fault());
+
+        let (events, text) = tool_artifact_events(
+            &outcome_for("code_interpreter", broken.clone()),
+            None,
+            &mut office,
+        );
+        assert!(events.is_empty(), "the first failure is held back, not delivered: {events:?}");
+        let text = text.expect("the model is still told what was held back");
+        assert!(text.contains("files_withheld"), "{text}");
+        assert!(text.contains("were NOT delivered"), "{text}");
+        assert!(text.contains("Regenerate each failed file"), "{text}");
+
+        let (events, text) =
+            tool_artifact_events(&outcome_for("code_interpreter", broken), None, &mut office);
+        assert_eq!(events.len(), 2, "the second failure of the same name is delivered: {events:?}");
+        match &events[1] {
+            ChatEvent::Attachment { name, check: Some(report), .. } => {
+                assert_eq!(name, "deck.docx");
+                assert_eq!(report.level, VerificationLevel::Failed);
+            }
+            other => panic!("expected an attachment carrying its failed check, got {other:?}"),
+        }
+        let text = text.expect("a summary for the delivered file");
+        assert!(text.contains("These files were delivered"), "{text}");
+        assert!(!text.contains("files_withheld"), "{text}");
+
+        // The hold is per name: a different file that fails in the same turn is held back too.
+        let other = one_office_file("sheet.docx", "failed", container_fault());
+        let (events, _) =
+            tool_artifact_events(&outcome_for("code_interpreter", other), None, &mut office);
+        assert!(events.is_empty(), "a new failing name is held back: {events:?}");
+    }
+
+    /// With the switch off, which is the default, a failed file is delivered as it always was and its check says it
+    /// failed. Nothing is held back, however often the same file fails.
+    #[test]
+    fn enforce_off_delivers_failed_with_check() {
+        let broken = one_office_file("deck.docx", "failed", container_fault());
+        let mut office = OfficeDelivery::default();
+        for _ in 0..2 {
+            let (events, text) =
+                tool_artifact_events(&outcome_for("code_interpreter", broken.clone()), None, &mut office);
+            assert_eq!(events.len(), 2, "with the switch off nothing is held back: {events:?}");
+            match &events[1] {
+                ChatEvent::Attachment { check: Some(report), .. } => {
+                    assert_eq!(report.level, VerificationLevel::Failed);
+                }
+                other => panic!("expected an attachment carrying its failed check, got {other:?}"),
+            }
+            let text = text.expect("a summary for the delivered file");
+            assert!(text.contains("These files were delivered"), "{text}");
+            assert!(!text.contains("files_withheld"), "{text}");
+            assert!(text.contains("Regenerate each failed file"), "{text}");
+        }
+    }
+
+    /// A delivered file carries the verifier's report for its own name only. A file the verifier reported on nothing
+    /// carries no check, so no chip can say it was checked.
+    #[test]
+    fn a_delivered_file_carries_only_its_own_report() {
+        let file = |name: &str| {
+            serde_json::json!({
+                "name": name,
+                "mime": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                "bytes": 4096,
+                "content_b64": "QUFBQUFBQUFBQQ",
+            })
+        };
+        let payload = serde_json::json!({
+            "stdout": "",
+            "stderr": "",
+            "exit_code": 0,
+            "files": [file("letter.docx"), file("notes.docx")],
+            "verification": [{
+                "name": "letter.docx",
+                "kind": "docx",
+                "level": "passed",
+                "checks": [],
+                "stats": { "paragraphs": 4 },
+            }],
+        })
+        .to_string();
+        let (events, _) = tool_artifact_events(
+            &outcome_for("code_interpreter", payload),
+            None,
+            &mut OfficeDelivery::default(),
+        );
+        let checks: Vec<Option<VerificationLevel>> = events
+            .iter()
+            .filter_map(|event| match event {
+                ChatEvent::Attachment { check, .. } => Some(check.as_ref().map(|report| report.level)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(checks, vec![Some(VerificationLevel::Passed), None]);
+    }
+
+    #[test]
+    fn only_the_literal_true_switches_enforcement_on() {
+        assert!(enforce_from(Some("true")));
+        assert!(enforce_from(Some(" true ")));
+        for off in [None, Some(""), Some("TRUE"), Some("1"), Some("yes"), Some("false")] {
+            assert!(!enforce_from(off), "{off:?} must not switch enforcement on");
+        }
     }
 
     #[test]
@@ -12884,7 +14356,8 @@ mod tests {
             "code_interpreter",
             "[source: org-internal]\nsandbox unavailable, no output produced".to_owned(),
         );
-        let (events, rewritten) = tool_artifact_events(&outcome, None);
+        let (events, rewritten) =
+            tool_artifact_events(&outcome, None, &mut OfficeDelivery::default());
         assert!(events.is_empty());
         assert!(rewritten.is_none());
     }
@@ -12901,7 +14374,8 @@ mod tests {
         })
         .to_string();
         let outcome = outcome_for("code_interpreter", payload);
-        let (events, rewritten) = tool_artifact_events(&outcome, None);
+        let (events, rewritten) =
+            tool_artifact_events(&outcome, None, &mut OfficeDelivery::default());
         assert!(events.is_empty());
         assert!(
             rewritten.is_none(),
@@ -12927,7 +14401,8 @@ mod tests {
         })
         .to_string();
         let outcome = outcome_for("code_interpreter", payload);
-        let (events, rewritten) = tool_artifact_events(&outcome, None);
+        let (events, rewritten) =
+            tool_artifact_events(&outcome, None, &mut OfficeDelivery::default());
         assert!(
             events.is_empty(),
             "no artifact may be emitted for bytes we do not have"
@@ -12942,7 +14417,8 @@ mod tests {
     fn failed_outcomes_produce_no_artifacts() {
         let mut outcome = outcome_for("create_artifact", "{}".to_owned());
         outcome.error = Some("boom".to_owned());
-        let (events, rewritten) = tool_artifact_events(&outcome, None);
+        let (events, rewritten) =
+            tool_artifact_events(&outcome, None, &mut OfficeDelivery::default());
         assert!(events.is_empty());
         assert!(rewritten.is_none());
     }
@@ -12952,7 +14428,8 @@ mod tests {
     #[test]
     fn unrelated_tools_are_untouched() {
         let outcome = outcome_for("web_search", r#"[{"url":"https://a"}]"#.to_owned());
-        let (events, rewritten) = tool_artifact_events(&outcome, None);
+        let (events, rewritten) =
+            tool_artifact_events(&outcome, None, &mut OfficeDelivery::default());
         assert!(events.is_empty());
         assert!(rewritten.is_none());
     }
@@ -13122,6 +14599,7 @@ mod tests {
             provider_score: None,
             highlights: Vec::new(),
             engines: Vec::new(),
+            reference: None,
         };
         let hits = vec![
             hit("https://example.com/alpha", "Alpha"),
@@ -14183,6 +15661,7 @@ mod tests {
             provider_score: None,
             highlights: Vec::new(),
             engines: Vec::new(),
+            reference: None,
         };
         let at_floor = [hit("x".repeat(MIN_CITABLE_SNIPPET_CHARS))];
         let under = [hit("x".repeat(MIN_CITABLE_SNIPPET_CHARS - 1))];
@@ -14559,7 +16038,7 @@ mod tests {
         for def in builtin_tool_defs() {
             let args = minimal_valid_arguments(&def.parameters_json);
             assert!(
-                builtin_argument_problem(&def.name, &args, "").is_none(),
+                builtin_argument_problem(&def.name, &args, "", false).is_none(),
                 "'{}' rejects its own minimally valid arguments {args} — a false positive here \
                  breaks a working tool",
                 def.name
@@ -14582,6 +16061,7 @@ mod tests {
             "shipping.get_quotes",
             fabricated,
             "hva vil det koste å sende 3 kg fra Bergen til Stavanger?",
+            false,
         )
         .expect("invented postal codes and dimensions must be refused on the alias too");
         assert!(problem.contains("appear nowhere in this conversation"));
@@ -14596,6 +16076,7 @@ mod tests {
             grounded,
             "compare shipping prices for a 5 kg parcel, 30x20x15 cm, from Storgata 1, \
              0155 Oslo to Kongens gate 2, 7011 Trondheim",
+            false,
         )
         .is_none());
     }
@@ -14629,12 +16110,13 @@ mod tests {
         assert!(builtin_argument_problem(
             "knowledge_search",
             r#"{"query":"x","some_future_field":true}"#,
-            ""
+            "",
+            false
         )
         .is_none());
         // A tool we hold no schema for — a client-declared or MCP tool. Guessing
         // against a schema we do not have would be worse than not checking.
-        assert!(builtin_argument_problem("mcp__acme__do_thing", "{}", "").is_none());
+        assert!(builtin_argument_problem("mcp__acme__do_thing", "{}", "", false).is_none());
     }
 
     /// The asymmetry that makes the fail-open posture coherent, and which I got
@@ -14645,7 +16127,7 @@ mod tests {
     /// as a missing field, which is what treating bad JSON as `{}` would do.
     #[test]
     fn unparseable_arguments_are_named_as_such_not_reported_as_a_missing_field() {
-        let problem = builtin_argument_problem("knowledge_search", "{not json", "")
+        let problem = builtin_argument_problem("knowledge_search", "{not json", "", false)
             .expect("malformed arguments are unambiguously wrong");
         assert!(
             problem.contains("did not parse"),
@@ -14663,7 +16145,7 @@ mod tests {
     /// the schema or the model can only guess again.
     #[tokio::test]
     async fn a_missing_required_argument_is_refused_before_dispatch_with_the_schema() {
-        let problem = builtin_argument_problem("knowledge_search", "{}", "")
+        let problem = builtin_argument_problem("knowledge_search", "{}", "", false)
             .expect("knowledge_search requires 'query'");
         assert!(
             problem.contains("query"),
@@ -14994,6 +16476,492 @@ mod tests {
         assert_eq!(slice["matched_rows"], 1);
     }
 
+    /// The batched-search switch is read as the literal `true` and nothing else, as every new switch is.
+    #[test]
+    fn batched_search_switch_reads_only_the_literal_true() {
+        assert_eq!(WEB_SEARCH_BATCH_ENV, "MODEL_GATEWAY_WEB_SEARCH_BATCH");
+        assert!(parse_web_search_batch(Some("true")));
+        assert!(parse_web_search_batch(Some(" true ")));
+        for off in [
+            None,
+            Some(""),
+            Some("1"),
+            Some("on"),
+            Some("yes"),
+            Some("TRUE"),
+            Some("false"),
+        ] {
+            assert!(
+                !parse_web_search_batch(off),
+                "{off:?} must not enable batched search"
+            );
+        }
+    }
+
+    /// A batched call names its searches in `queries`, and only a batched turn reads `queries`.
+    #[test]
+    fn batched_search_reads_queries_only_on_a_batched_turn() {
+        let batched = r#"{"queries":["strømpris Oslo","elpris Norge"]}"#;
+        let asks = SearchAsk::parse(batched, true).expect("two distinct queries");
+        assert!(asks.batched);
+        assert_eq!(asks.queries, ["strømpris Oslo", "elpris Norge"]);
+        assert_eq!(
+            SearchAsk::parse(batched, false).err().as_deref(),
+            Some("web_search requires a non-empty 'query' argument"),
+        );
+        let single = SearchAsk::parse(r#"{"query":"strømpris"}"#, true).expect("one query");
+        assert!(!single.batched);
+        assert_eq!(single.queries, ["strømpris"]);
+    }
+
+    /// Five queries, both forms at once and an empty list are refused with a reason; repeats of one search are
+    /// one search, and neither spend a provider call nor count toward the limit.
+    #[test]
+    fn batched_search_refuses_five_queries_both_forms_and_an_empty_list() {
+        let five = r#"{"queries":["a one","b two","c three","d four","e five"]}"#;
+        let refusal = SearchAsk::parse(five, true)
+            .err()
+            .expect("five queries are refused");
+        assert!(refusal.contains("at most 4 queries"), "{refusal}");
+        let both = SearchAsk::parse(r#"{"query":"a one","queries":["b two"]}"#, true)
+            .err()
+            .expect("both forms are refused");
+        assert!(both.contains("not both"), "{both}");
+        assert!(SearchAsk::parse(r#"{"queries":[]}"#, true).is_err());
+        assert!(SearchAsk::parse(r#"{"queries":["a one",""]}"#, true).is_err());
+        assert!(SearchAsk::parse(r#"{"queries":"a one"}"#, true).is_err());
+        let repeats = SearchAsk::parse(r#"{"queries":["Oslo  vær","oslo vær","OSLO vær"]}"#, true)
+            .expect("one distinct search");
+        assert!(!repeats.batched);
+        assert_eq!(repeats.queries, ["Oslo  vær"]);
+    }
+
+    /// A ref names one URL for the turn that issued it, a page keeps its ref across searches, and a ref the turn
+    /// did not issue, or a respelled one, names nothing.
+    #[test]
+    fn batched_search_refs_name_one_url_per_turn_and_resolve_only_there() {
+        let refs = TurnRefs::default();
+        assert_eq!(refs.issue("https://a.test/page"), "w1");
+        assert_eq!(refs.issue("https://b.test/other"), "w2");
+        // The same page, respelled, keeps its ref: it is not issued twice.
+        assert_eq!(refs.issue("http://www.a.test/page/?utm_source=x"), "w1");
+        assert_eq!(refs.resolve("w1").as_deref(), Some("https://a.test/page"));
+        assert_eq!(refs.resolve("w2").as_deref(), Some("https://b.test/other"));
+        assert_eq!(refs.resolve("w3"), None);
+        assert_eq!(refs.resolve("w0"), None);
+        assert_eq!(refs.resolve("w02"), None);
+        assert_eq!(refs.resolve("https://a.test/page"), None);
+        assert_eq!(TurnRefs::default().resolve("w1"), None, "another turn starts from nothing");
+    }
+
+    /// `fetch_url` takes a `ref` only on a batched turn, reads the URL the ref names, and refuses one the turn
+    /// did not issue.
+    #[test]
+    fn batched_search_fetch_takes_a_ref_only_on_a_batched_turn() {
+        let refs = TurnRefs::default();
+        let issued = refs.issue("https://one.test/a");
+        let by_ref = tool_call("fetch_url", &format!(r#"{{"ref":"{issued}"}}"#));
+        assert_eq!(
+            fetch_target(&by_ref, Some(&refs)),
+            Ok("https://one.test/a".to_owned())
+        );
+        // Off the batched turn `ref` is not read, so the call has no url, as it always had.
+        assert_eq!(
+            fetch_target(&by_ref, None),
+            Err("fetch_url requires a 'url' argument".to_owned())
+        );
+        let unissued = tool_call("fetch_url", r#"{"ref":"w9"}"#);
+        let refusal = fetch_target(&unissued, Some(&refs)).expect_err("an unissued ref is refused");
+        assert!(refusal.contains("was not issued"), "{refusal}");
+        let both = tool_call(
+            "fetch_url",
+            &format!(r#"{{"url":"https://one.test/a","ref":"{issued}"}}"#),
+        );
+        assert!(fetch_target(&both, Some(&refs)).is_err(), "a url and a ref are one choice");
+        let plain = tool_call("fetch_url", r#"{"url":"https://one.test/a"}"#);
+        assert_eq!(
+            fetch_target(&plain, Some(&refs)),
+            Ok("https://one.test/a".to_owned())
+        );
+    }
+
+    /// One call through the real dispatch. The turn's refs decide whether batched search is on for it.
+    async fn dispatch_with_refs(
+        state: &crate::state::AppState,
+        call: &ToolCall,
+        refs: Option<&TurnRefs>,
+        allow_paid: bool,
+    ) -> ToolOutcome {
+        dispatch_tool_with_cost(
+            state,
+            "run_test",
+            "org_test",
+            "user_test",
+            "thread_test",
+            "",
+            &[],
+            "",
+            None,
+            None,
+            "",
+            "",
+            None,
+            false,
+            false,
+            allow_paid,
+            call,
+            None,
+            None,
+            None,
+            None,
+            &crate::turn_attachments::ValidatedAttachments::none(),
+            &[],
+            None,
+            None,
+            refs,
+        )
+        .await
+    }
+
+    /// A `web_search` call through the real dispatch, against a Quarry double that answers each query with its own
+    /// results. Returns the outcome and every `/v1/search` body the double received.
+    async fn search_against_quarry(
+        arguments_json: &str,
+        answers: &[(&str, Value)],
+        refs: Option<&TurnRefs>,
+        allow_paid: bool,
+    ) -> (ToolOutcome, Vec<Value>) {
+        let server = wiremock::MockServer::start().await;
+        for (query, results) in answers {
+            wiremock::Mock::given(wiremock::matchers::method("POST"))
+                .and(wiremock::matchers::path("/v1/search"))
+                .and(wiremock::matchers::body_partial_json(
+                    serde_json::json!({ "query": query }),
+                ))
+                .respond_with(
+                    wiremock::ResponseTemplate::new(200)
+                        .set_body_json(serde_json::json!({ "results": results })),
+                )
+                .mount(&server)
+                .await;
+        }
+        let mut state = crate::state::AppState::new();
+        state.quarry = crate::quarry::Client::new(crate::quarry::Config {
+            base_url: server.uri(),
+            token: "test-token".to_owned(),
+            timeout: std::time::Duration::from_secs(5),
+        });
+        let call = tool_call("web_search", arguments_json);
+        let outcome = dispatch_with_refs(&state, &call, refs, allow_paid).await;
+        let bodies: Vec<Value> = server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .iter()
+            .map(|request| serde_json::from_slice(&request.body).expect("a JSON search body"))
+            .collect();
+        (outcome, bodies)
+    }
+
+    /// Every query of a batched call is searched with the turn's own paid-provider entitlement, and no other.
+    #[tokio::test]
+    async fn batched_search_gives_every_query_the_turns_paid_entitlement() {
+        for allow_paid in [false, true] {
+            let refs = TurnRefs::default();
+            let (outcome, bodies) = search_against_quarry(
+                r#"{"queries":["alpha query","beta query"]}"#,
+                &[
+                    ("alpha query", serde_json::json!([])),
+                    ("beta query", serde_json::json!([])),
+                ],
+                Some(&refs),
+                allow_paid,
+            )
+            .await;
+            assert!(outcome.error.is_none(), "{:?}", outcome.error);
+            assert_eq!(bodies.len(), 2, "one search per query");
+            for body in &bodies {
+                assert_eq!(
+                    body["allow_paid_providers"],
+                    Value::Bool(allow_paid),
+                    "{body}"
+                );
+            }
+        }
+    }
+
+    /// A batched call's hits come back interleaved by rank, a page two queries both return is listed once at its
+    /// better rank, and each hit carries the ref the turn issued for it.
+    #[tokio::test]
+    async fn batched_search_merges_interleaves_and_refs_the_hits() {
+        let refs = TurnRefs::default();
+        let (outcome, _) = search_against_quarry(
+            r#"{"queries":["alpha query","beta query"]}"#,
+            &[
+                (
+                    "alpha query",
+                    serde_json::json!([
+                        {"url": "https://one.test/a", "title": "A"},
+                        {"url": "https://one.test/b", "title": "B"}
+                    ]),
+                ),
+                (
+                    "beta query",
+                    serde_json::json!([
+                        {"url": "https://one.test/a?utm_source=beta", "title": "A again"},
+                        {"url": "https://two.test/c", "title": "C"}
+                    ]),
+                ),
+            ],
+            Some(&refs),
+            false,
+        )
+        .await;
+        assert!(outcome.error.is_none(), "{:?}", outcome.error);
+        let items: Vec<Value> = serde_json::from_str(&outcome.output).expect("the merged hits");
+        let shown: Vec<(&str, &str)> = items
+            .iter()
+            .map(|item| {
+                (
+                    item["url"].as_str().unwrap_or_default(),
+                    item["ref"].as_str().unwrap_or_default(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            shown,
+            [
+                ("https://one.test/a", "w1"),
+                ("https://one.test/b", "w2"),
+                ("https://two.test/c", "w3"),
+            ]
+        );
+    }
+
+    /// Four queries merge to at most eight hits: the first round of every query, then the second.
+    #[tokio::test]
+    async fn batched_search_caps_the_merged_list_at_eight_hits() {
+        let refs = TurnRefs::default();
+        let hits = |host: &str| {
+            serde_json::json!([
+                {"url": format!("https://{host}.test/1")},
+                {"url": format!("https://{host}.test/2")},
+                {"url": format!("https://{host}.test/3")}
+            ])
+        };
+        let (outcome, _) = search_against_quarry(
+            r#"{"queries":["q one","q two","q three","q four"]}"#,
+            &[
+                ("q one", hits("one")),
+                ("q two", hits("two")),
+                ("q three", hits("three")),
+                ("q four", hits("four")),
+            ],
+            Some(&refs),
+            false,
+        )
+        .await;
+        assert!(outcome.error.is_none(), "{:?}", outcome.error);
+        let items: Vec<Value> = serde_json::from_str(&outcome.output).expect("the merged hits");
+        let urls: Vec<&str> = items
+            .iter()
+            .map(|item| item["url"].as_str().unwrap_or_default())
+            .collect();
+        assert_eq!(urls.len(), 8, "{urls:?}");
+        assert_eq!(urls[0], "https://one.test/1");
+        assert_eq!(urls[3], "https://four.test/1");
+        assert_eq!(urls[4], "https://one.test/2");
+        assert_eq!(items[7]["ref"], "w8");
+    }
+
+    /// A batch that loses one of its queries fails whole, and the error names the query that failed.
+    #[tokio::test]
+    async fn batched_search_fails_whole_when_one_query_fails() {
+        let refs = TurnRefs::default();
+        let (outcome, _) = search_against_quarry(
+            r#"{"queries":["alpha query","gamma query"]}"#,
+            &[(
+                "alpha query",
+                serde_json::json!([{"url": "https://one.test/a"}]),
+            )],
+            Some(&refs),
+            false,
+        )
+        .await;
+        let error = outcome.error.expect("a batch that loses a query fails");
+        assert!(error.contains("gamma query"), "{error}");
+        assert!(outcome.output.is_empty());
+    }
+
+    /// Off the batched turn one query is one search, its hits come back as they came, and none carries a ref.
+    #[tokio::test]
+    async fn batched_search_off_turn_returns_one_query_hits_without_refs() {
+        let (outcome, bodies) = search_against_quarry(
+            r#"{"query":"alpha query"}"#,
+            &[(
+                "alpha query",
+                serde_json::json!([{"url": "https://one.test/a", "title": "A"}]),
+            )],
+            None,
+            false,
+        )
+        .await;
+        assert!(outcome.error.is_none(), "{:?}", outcome.error);
+        assert_eq!(bodies.len(), 1);
+        let items: Vec<Value> = serde_json::from_str(&outcome.output).expect("the hits");
+        assert_eq!(items.len(), 1);
+        assert!(items[0].get("ref").is_none(), "{}", outcome.output);
+    }
+
+    /// A ref this turn did not issue is refused before anything is fetched. A ref it did issue is read by URL,
+    /// which this test does not reach (no Quarry is configured here), so its error is the fetch's, not the ref's.
+    #[tokio::test]
+    async fn batched_search_fetch_refuses_an_unissued_ref_before_any_fetch() {
+        let state = crate::state::AppState::new();
+        let refs = TurnRefs::default();
+        let issued = refs.issue("https://one.test/a");
+        let unissued = tool_call("fetch_url", r#"{"ref":"w9"}"#);
+        let outcome = dispatch_with_refs(&state, &unissued, Some(&refs), false).await;
+        let error = outcome.error.expect("an unissued ref is an error");
+        assert!(error.contains("was not issued"), "{error}");
+        let issued_call = tool_call("fetch_url", &format!(r#"{{"ref":"{issued}"}}"#));
+        let outcome = dispatch_with_refs(&state, &issued_call, Some(&refs), false).await;
+        assert!(!outcome.error.unwrap_or_default().contains("was not issued"));
+    }
+
+    /// The batched definitions are advertised only on a batched turn; the list off it is the list that always was.
+    #[test]
+    fn batched_search_schema_is_advertised_only_on_a_batched_turn() {
+        let off = builtin_tool_defs_for(false);
+        let on = builtin_tool_defs_for(true);
+        let find = |defs: &[ToolDefinition], name: &str| -> ToolDefinition {
+            defs.iter()
+                .find(|def| def.name == name)
+                .cloned()
+                .expect("advertised")
+        };
+        let search_off = find(&off, "web_search");
+        let search_off_schema: Value =
+            serde_json::from_str(&search_off.parameters_json).expect("json");
+        assert_eq!(search_off_schema["required"], serde_json::json!(["query"]));
+        assert!(search_off_schema["properties"].get("queries").is_none());
+        let search_on = find(&on, "web_search");
+        let search_on_schema: Value =
+            serde_json::from_str(&search_on.parameters_json).expect("json");
+        assert!(
+            search_on_schema.get("required").is_none(),
+            "a query or queries is required, not both"
+        );
+        assert_eq!(
+            search_on_schema["properties"]["queries"]["maxItems"],
+            serde_json::json!(4)
+        );
+        assert!(
+            search_on.description.contains("ref"),
+            "the rule for refs is in the description"
+        );
+        let fetch_on = find(&on, "fetch_url");
+        let fetch_on_schema: Value = serde_json::from_str(&fetch_on.parameters_json).expect("json");
+        assert!(
+            fetch_on_schema.get("required").is_none(),
+            "a url or a ref is required"
+        );
+        assert!(fetch_on_schema["properties"].get("ref").is_some());
+        for (before, after) in off.iter().zip(on.iter()) {
+            if before.name != "web_search" && before.name != "fetch_url" {
+                assert_eq!(
+                    before.parameters_json, after.parameters_json,
+                    "{} is untouched",
+                    before.name
+                );
+            }
+        }
+    }
+
+    /// A batch is one search however its queries are ordered or spelled; a ref repeats a fetch on a batched turn
+    /// only.
+    #[test]
+    fn batched_search_signature_keys_a_batch_as_a_set_of_queries() {
+        let batch =
+            |arguments: &str| duplicate_call_signature(&tool_call("web_search", arguments), true);
+        assert_eq!(
+            batch(r#"{"queries":["a one","b two"]}"#),
+            batch(r#"{"queries":["B two","a  one"]}"#),
+        );
+        assert_ne!(
+            batch(r#"{"queries":["a one","b two"]}"#),
+            batch(r#"{"queries":["a one"]}"#)
+        );
+        assert_eq!(
+            batch(r#"{"queries":["a one"]}"#),
+            duplicate_call_signature(&tool_call("web_search", r#"{"query":"a one"}"#), false),
+        );
+        assert!(duplicate_call_signature(
+            &tool_call("web_search", r#"{"queries":["a one","b two"]}"#),
+            false
+        )
+        .is_none());
+        assert!(duplicate_call_signature(&tool_call("fetch_url", r#"{"ref":"w1"}"#), false).is_none());
+        assert_eq!(
+            duplicate_call_signature(&tool_call("fetch_url", r#"{"ref":"w1"}"#), true).as_deref(),
+            Some("fetch_url|ref|w1"),
+        );
+    }
+
+    /// The relevance gate judges a batch against its queries read as one question; a plain call keeps its query.
+    #[test]
+    fn batched_search_gate_reads_the_queries_as_one_question() {
+        let batched = r#"{"queries":["strømpris Oslo","elpris Norge"]}"#;
+        assert_eq!(
+            searched_question(batched, true),
+            "strømpris Oslo elpris Norge"
+        );
+        assert_eq!(searched_question(batched, false), "");
+        assert_eq!(
+            searched_question(r#"{"query":"strømpris"}"#, false),
+            "strømpris"
+        );
+    }
+
+    /// The gated text names each kept hit's ref and says so once. With no refs the text has neither.
+    #[test]
+    fn batched_search_gated_text_shows_refs_only_when_issued() {
+        let hit = |url: &str, title: &str, reference: Option<&str>| {
+            let mut item = serde_json::json!({
+                "url": url,
+                "title": title,
+                "snippet": format!("{title} i dag: pris per kWh og nettleie, {}", "x".repeat(160)),
+            });
+            if let Some(reference) = reference {
+                item["ref"] = Value::String(reference.to_owned());
+            }
+            item
+        };
+        let gate = |items: Value| {
+            let mut outcome = outcome_for("web_search", items.to_string());
+            let _ = gate_web_search_outcome("strømpris Oslo elpris Norge", &mut outcome);
+            outcome.output
+        };
+        let with_refs = gate(serde_json::json!([
+            hit("https://one.test/a", "Strømpris Oslo", Some("w1")),
+            hit("https://two.test/b", "Elpris Norge", Some("w2")),
+        ]));
+        assert!(with_refs.contains("Each hit shows its ref"), "{with_refs}");
+        assert!(
+            with_refs.contains("[w1] ") || with_refs.contains("[w2] "),
+            "{with_refs}"
+        );
+        let without_refs = gate(serde_json::json!([
+            hit("https://one.test/a", "Strømpris Oslo", None),
+            hit("https://two.test/b", "Elpris Norge", None),
+        ]));
+        assert!(
+            !without_refs.contains("Each hit shows its ref"),
+            "{without_refs}"
+        );
+        assert!(!without_refs.contains("[w"), "{without_refs}");
+    }
+
     #[test]
     fn the_range_argument_is_advertised_only_when_extended_parking_is_on() {
         let untouched = builtin_tool_defs();
@@ -15299,6 +17267,424 @@ mod tests {
         };
         let request = Box::pin(first_decision_request(head, Some(plan))).await;
         assert_eq!(request.prompt_tiers, None);
+    }
+
+    /// A tool definition with only its name, for the offer tests below.
+    fn offered_def(name: &str) -> ToolDefinition {
+        ToolDefinition {
+            name: name.to_owned(),
+            description: String::new(),
+            parameters_json: String::new(),
+        }
+    }
+
+    fn offered_names(tools: &[ToolDefinition]) -> Vec<&str> {
+        tools.iter().map(|tool| tool.name.as_str()).collect()
+    }
+
+    #[test]
+    fn reader_tools_are_offered_only_beside_a_fetch_url_and_only_when_switched_on() {
+        let web = || vec![offered_def("web_search"), offered_def("fetch_url")];
+        assert_eq!(
+            offered_names(&tools_for_web_reader(web(), false)),
+            ["web_search", "fetch_url"]
+        );
+        assert_eq!(
+            offered_names(&tools_for_web_reader(web(), true)),
+            ["web_search", "fetch_url", "read_page", "find_in_page"]
+        );
+        assert_eq!(
+            offered_names(&tools_for_web_reader(vec![offered_def("web_search")], true)),
+            ["web_search"]
+        );
+        // A client's copy of either name gives way to the server's own definition, added last.
+        let client = vec![offered_def("fetch_url"), offered_def("read_page")];
+        assert_eq!(
+            offered_names(&tools_for_web_reader(client, true)),
+            ["fetch_url", "read_page", "find_in_page"]
+        );
+    }
+
+    #[test]
+    fn reader_tool_definitions_name_the_arguments_they_take() {
+        let defs = web_reader_tool_definitions();
+        let schema = |name: &str| -> Value {
+            let def = defs.iter().find(|def| def.name == name).expect("defined");
+            serde_json::from_str(&def.parameters_json).expect("a JSON schema")
+        };
+        assert_eq!(schema("read_page")["required"], serde_json::json!(["ref"]));
+        assert_eq!(
+            schema("find_in_page")["required"],
+            serde_json::json!(["ref", "query"])
+        );
+        assert!(schema("read_page")["properties"]["section"].is_object());
+    }
+
+    #[test]
+    fn reader_fetch_output_is_the_old_head_when_nothing_was_parked() {
+        let page = "word ".repeat(2_000);
+        let output = fetched_page_output("https://a.test/p", "P", &page, None, true);
+        let expected = serde_json::json!({
+            "final_url": "https://a.test/p",
+            "title": "P",
+            "content": truncate_chars(&page, MAX_FETCH_CHARS),
+        })
+        .to_string();
+        assert_eq!(output, expected);
+    }
+
+    #[tokio::test]
+    async fn reader_switch_off_keeps_the_handle_output_byte_identical() {
+        let state = crate::state::AppState::new();
+        let (page, provenance) = screened_page(crate::moderation::ScreeningPosture::Clean, 10_000);
+        let handle = park_extended_result(
+            &state,
+            "org",
+            "user",
+            true,
+            "fetch_url",
+            crate::tool_result_handles::ResultKind::Text,
+            &page,
+            MAX_FETCH_CHARS,
+            &provenance,
+        )
+        .expect("a page past the cut is parked");
+        let output = fetched_page_output("https://a.test/p", "P", &page, Some(&handle), false);
+        let expected = serde_json::json!({
+            "final_url": "https://a.test/p",
+            "title": "P",
+            "content": truncate_chars(&page, MAX_FETCH_CHARS),
+            "handle": handle.to_model_value(),
+        })
+        .to_string();
+        assert_eq!(output, expected);
+        assert!(!output.contains("\"ref\""));
+    }
+
+    #[tokio::test]
+    async fn reader_on_a_parked_page_names_the_ref_the_outline_and_the_first_chunk() {
+        let state = crate::state::AppState::new();
+        let page = format!(
+            "# Intro\n{}\n# Costs\nThe costs were high.\n",
+            "x".repeat(5_000)
+        );
+        let (_, provenance) = screened_page(crate::moderation::ScreeningPosture::Clean, 1);
+        let handle = park_extended_result(
+            &state,
+            "org",
+            "user",
+            true,
+            "fetch_url",
+            crate::tool_result_handles::ResultKind::Text,
+            &page,
+            MAX_FETCH_CHARS,
+            &provenance,
+        )
+        .expect("a page past the cut is parked");
+        let output: Value = serde_json::from_str(&fetched_page_output(
+            "https://a.test/p",
+            "P",
+            &page,
+            Some(&handle),
+            true,
+        ))
+        .expect("JSON");
+        assert_eq!(output["ref"], serde_json::json!(handle.handle_id));
+        assert_eq!(output["outline"].as_array().map(Vec::len), Some(2));
+        assert_eq!(output["outline"][1]["heading"], "Costs");
+        assert_eq!(
+            output["content"],
+            serde_json::json!(truncate_chars(&page, MAX_FETCH_CHARS))
+        );
+        assert!(output.get("handle").is_none());
+    }
+
+    #[tokio::test]
+    async fn reader_read_page_resolves_only_the_callers_own_ref() {
+        let state = crate::state::AppState::new();
+        let (page, provenance) = screened_page(crate::moderation::ScreeningPosture::Clean, 10_000);
+        let handle = park_extended_result(
+            &state,
+            "org",
+            "alice",
+            true,
+            "fetch_url",
+            crate::tool_result_handles::ResultKind::Text,
+            &page,
+            MAX_FETCH_CHARS,
+            &provenance,
+        )
+        .expect("parked");
+        let call = tool_call(
+            "read_page",
+            &format!(r#"{{"ref":"{}","section":"c2"}}"#, handle.handle_id),
+        );
+        let theirs = read_page_outcome(&state, "org", "bob", false, &call);
+        assert!(
+            theirs.error.is_some(),
+            "another user's ref must not resolve"
+        );
+        let own = read_page_outcome(&state, "org", "alice", false, &call);
+        assert!(own.error.is_none(), "{:?}", own.error);
+        let value: Value = serde_json::from_str(&own.output).expect("JSON");
+        assert_eq!(value["section"]["id"], "c2");
+        assert_eq!(value["returned_chars"], serde_json::json!(4_000));
+    }
+
+    #[tokio::test]
+    async fn reader_read_page_on_an_unknown_ref_fails_and_says_how_to_recover() {
+        let state = crate::state::AppState::new();
+        let call = tool_call("read_page", r#"{"ref":"res_does_not_exist"}"#);
+        let outcome = read_page_outcome(&state, "org", "alice", false, &call);
+        let error = outcome.error.unwrap_or_default();
+        assert!(error.contains("no page reference"), "{error}");
+        assert!(error.contains("fetch_url"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn reader_read_page_is_refused_on_a_zdr_or_waived_turn_even_for_a_held_ref() {
+        let state = crate::state::AppState::new();
+        let (page, provenance) = screened_page(crate::moderation::ScreeningPosture::Clean, 10_000);
+        let handle = park_extended_result(
+            &state,
+            "org",
+            "alice",
+            true,
+            "fetch_url",
+            crate::tool_result_handles::ResultKind::Text,
+            &page,
+            MAX_FETCH_CHARS,
+            &provenance,
+        )
+        .expect("parked");
+        let call = tool_call("read_page", &format!(r#"{{"ref":"{}"}}"#, handle.handle_id));
+        let outcome = read_page_outcome(&state, "org", "alice", true, &call);
+        assert!(outcome
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("not available on this turn")));
+    }
+
+    #[tokio::test]
+    async fn reader_read_page_refuses_a_ref_that_is_not_a_fetched_page() {
+        let state = crate::state::AppState::new();
+        let (page, provenance) = screened_page(crate::moderation::ScreeningPosture::Clean, 10_000);
+        let handle = park_extended_result(
+            &state,
+            "org",
+            "alice",
+            true,
+            "web_search",
+            crate::tool_result_handles::ResultKind::Text,
+            &page,
+            MAX_FETCH_CHARS,
+            &provenance,
+        )
+        .expect("parked");
+        let call = tool_call("read_page", &format!(r#"{{"ref":"{}"}}"#, handle.handle_id));
+        let outcome = read_page_outcome(&state, "org", "alice", false, &call);
+        assert!(outcome
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("is not a fetched page")));
+    }
+
+    #[tokio::test]
+    async fn reader_flagged_page_keeps_its_screening_label_on_every_read() {
+        let state = crate::state::AppState::new();
+        let (page, provenance) =
+            screened_page(crate::moderation::ScreeningPosture::Flagged, 10_000);
+        let handle = park_extended_result(
+            &state,
+            "org",
+            "alice",
+            true,
+            "fetch_url",
+            crate::tool_result_handles::ResultKind::Text,
+            &page,
+            MAX_FETCH_CHARS,
+            &provenance,
+        )
+        .expect("parked");
+        for section in ["c1", "c3"] {
+            let call = tool_call(
+                "read_page",
+                &format!(r#"{{"ref":"{}","section":"{section}"}}"#, handle.handle_id),
+            );
+            let outcome = read_page_outcome(&state, "org", "alice", false, &call);
+            assert!(outcome.error.is_none(), "{:?}", outcome.error);
+            assert!(
+                matches!(
+                    outcome.provenance.screening.posture,
+                    crate::moderation::ScreeningPosture::Flagged
+                ),
+                "{section}"
+            );
+            let context = format_tool_context(std::slice::from_ref(&outcome));
+            assert!(context.contains("SCREENING:"), "{context}");
+        }
+    }
+
+    #[tokio::test]
+    async fn reader_find_in_page_returns_the_passage_and_the_section_it_is_in() {
+        let state = crate::state::AppState::new();
+        let filler = "Plain filler sentence about nothing at all here.\n".repeat(100);
+        let page = format!(
+            "# Intro\n{filler}# Lice\nSea lice treatment cut the lice count in every pen this spring season.\n"
+        );
+        let (_, provenance) = screened_page(crate::moderation::ScreeningPosture::Clean, 1);
+        let handle = park_extended_result(
+            &state,
+            "org",
+            "alice",
+            true,
+            "fetch_url",
+            crate::tool_result_handles::ResultKind::Text,
+            &page,
+            MAX_FETCH_CHARS,
+            &provenance,
+        )
+        .expect("parked");
+        let call = tool_call(
+            "find_in_page",
+            &format!(
+                r#"{{"ref":"{}","query":"lice treatment"}}"#,
+                handle.handle_id
+            ),
+        );
+        let outcome = find_in_page_outcome(&state, "org", "alice", false, &call);
+        assert!(outcome.error.is_none(), "{:?}", outcome.error);
+        let value: Value = serde_json::from_str(&outcome.output).expect("JSON");
+        assert_eq!(value["passages"][0]["section"], "s2");
+        assert_eq!(value["passages"][0]["heading"], "Lice");
+    }
+
+    #[tokio::test]
+    async fn reader_find_in_page_says_so_when_no_passage_matches() {
+        let state = crate::state::AppState::new();
+        let (page, provenance) = screened_page(crate::moderation::ScreeningPosture::Clean, 10_000);
+        let handle = park_extended_result(
+            &state,
+            "org",
+            "alice",
+            true,
+            "fetch_url",
+            crate::tool_result_handles::ResultKind::Text,
+            &page,
+            MAX_FETCH_CHARS,
+            &provenance,
+        )
+        .expect("parked");
+        let call = tool_call(
+            "find_in_page",
+            &format!(
+                r#"{{"ref":"{}","query":"zebra crossing"}}"#,
+                handle.handle_id
+            ),
+        );
+        let outcome = find_in_page_outcome(&state, "org", "alice", false, &call);
+        let value: Value = serde_json::from_str(&outcome.output).expect("JSON");
+        assert_eq!(value["passages"].as_array().map(Vec::len), Some(0));
+        assert!(value["note"]
+            .as_str()
+            .is_some_and(|note| note.starts_with("No passage")));
+    }
+
+    #[tokio::test]
+    async fn reader_waived_turn_keeps_the_inline_head_and_no_reader_surface() {
+        assert!(!external_parking_allowed(true));
+        let state = crate::state::AppState::new();
+        let (page, provenance) = screened_page(crate::moderation::ScreeningPosture::Clean, 10_000);
+        let parked = park_extended_result(
+            &state,
+            "org",
+            "alice",
+            external_parking_allowed(true),
+            "fetch_url",
+            crate::tool_result_handles::ResultKind::Text,
+            &page,
+            MAX_FETCH_CHARS,
+            &provenance,
+        );
+        assert!(parked.is_none());
+        let output: Value = serde_json::from_str(&fetched_page_output(
+            "https://a.test/p",
+            "P",
+            &page,
+            parked.as_ref(),
+            true,
+        ))
+        .expect("JSON");
+        assert!(output.get("ref").is_none());
+        assert!(output.get("outline").is_none());
+        assert!(output.get("handle").is_none());
+        assert_eq!(
+            output["content"],
+            serde_json::json!(truncate_chars(&page, MAX_FETCH_CHARS))
+        );
+    }
+
+    #[tokio::test]
+    async fn reader_outline_gives_way_before_the_ref_is_cut_from_the_result() {
+        let state = crate::state::AppState::new();
+        let mut page = String::new();
+        for part in 0..40 {
+            page.push_str(&format!(
+                "## Part {part:02} of the long report on the subject, continued {}\n{}",
+                "x".repeat(40),
+                "A line of body text about the section.\n".repeat(3)
+            ));
+        }
+        let (_, provenance) = screened_page(crate::moderation::ScreeningPosture::Clean, 1);
+        let handle = park_extended_result(
+            &state,
+            "org",
+            "alice",
+            true,
+            "fetch_url",
+            crate::tool_result_handles::ResultKind::Text,
+            &page,
+            MAX_FETCH_CHARS,
+            &provenance,
+        )
+        .expect("parked");
+        let rows = outline_rows(&crate::page_reader::outline(&page));
+        assert_eq!(rows.len(), 40);
+        let untrimmed = serde_json::json!({
+            "ref": handle.handle_id,
+            "outline": rows,
+            "content": truncate_chars(&page, MAX_FETCH_CHARS),
+            "note": "x",
+        })
+        .to_string();
+        assert!(
+            untrimmed.chars().count() > MAX_TOOL_OUTPUT_CHARS,
+            "the premise: all forty rows would be cut"
+        );
+        let output = fetched_page_output("https://a.test/p", "P", &page, Some(&handle), true);
+        assert!(output.chars().count() <= MAX_TOOL_OUTPUT_CHARS, "{}", output.chars().count());
+        let value: Value = serde_json::from_str(&output).expect("the result stays valid JSON");
+        assert_eq!(value["ref"], serde_json::json!(handle.handle_id));
+        let shown = value["outline"].as_array().map_or(0, Vec::len);
+        assert!(shown > 0 && shown < 40, "{shown}");
+        assert!(value["note"]
+            .as_str()
+            .is_some_and(|note| note.contains(&format!("the first {shown} of 40 sections"))));
+    }
+
+    #[test]
+    fn reader_is_neither_offered_nor_read_on_a_knowledge_only_turn() {
+        use crate::normalize::RetrievalScope;
+        for name in ["read_page", "find_in_page"] {
+            assert!(
+                !tool_allowed_for_retrieval_scope(name, RetrievalScope::KnowledgeOnly),
+                "{name}"
+            );
+            assert!(
+                tool_allowed_for_retrieval_scope(name, RetrievalScope::WebOnly),
+                "{name}"
+            );
+        }
     }
 }
 

@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { cleanup, render, screen, waitFor } from '@solidjs/testing-library'
+import { cleanup, fireEvent, render, screen, waitFor } from '@solidjs/testing-library'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ModelEntitlementMeta, ModelInfo } from '@/shared/api/chat-client'
 
@@ -70,5 +70,19 @@ describe('AiModelPicker under an organisation model policy', () => {
     await new Promise((resolve) => setTimeout(resolve, 50))
     expect(onChange).not.toHaveBeenCalled()
     expect(screen.queryByText(/tillater ikke lenger/)).toBeNull()
+  })
+
+  it('keeps the policy notice while the search narrows the menu', async () => {
+    mockMeta.mockReturnValue(meta())
+    const many = ['gpt-mini', 'gpt-nano', 'gpt-large', 'gpt-vision', 'gpt-audio', 'gpt-turbo', 'gpt-omni'].map((id) => chat(id))
+    const loadMany = async () => many
+    render(() => <AiModelPicker orgId="org-1" catalogue={loadMany} />)
+
+    expect(await screen.findByText(/Organisasjonen din tillater ikke lenger GPT Big/)).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: /velg ai-modell/i }))
+    fireEvent.input(await screen.findByRole('searchbox', { name: /søk etter modell/i }), { target: { value: 'claude' } })
+
+    expect(await screen.findByText('Ingen modeller passer')).toBeTruthy()
+    expect(screen.getByText(/Organisasjonen din tillater ikke lenger GPT Big/)).toBeTruthy()
   })
 })

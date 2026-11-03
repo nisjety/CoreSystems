@@ -59,6 +59,8 @@ macro_rules! one_call_per_client {
             call!(state, session_client.create_thread),
             call!(state, message_search_client.search_messages),
             call!(state, message_tree_client.set_active_leaf),
+            call!(state, thread_fork_client.fork_thread),
+            call!(state, attention_client.list_attention),
             call!(state, learning_client.list_learning_ledger),
             call!(state, space_events_client.stream_space_events),
             call!(state, space_room_read_client.list_space_artifacts),

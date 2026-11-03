@@ -95,6 +95,21 @@ describe('personal chat organization', () => {
     }
   })
 
+  it('files the legacy run statuses under active and attention by the shared attention states', () => {
+    const runs: ChatThreadHistoryItem[] = [
+      { threadId: 'queued', title: 'Queued', preview: '', updatedAt: '2026-09-28T12:00:00Z', latestRunStatus: 'queued' },
+      { threadId: 'pending', title: 'Pending', preview: '', updatedAt: '2026-09-28T11:00:00Z', latestRunStatus: 'pending' },
+      { threadId: 'paused', title: 'Paused', preview: '', updatedAt: '2026-09-28T10:00:00Z', latestRunStatus: 'paused' },
+      { threadId: 'denied', title: 'Denied', preview: '', updatedAt: '2026-09-28T09:00:00Z', latestRunStatus: 'denied' },
+      { threadId: 'cancelled', title: 'Cancelled', preview: '', updatedAt: '2026-09-28T08:00:00Z', latestRunStatus: 'cancelled' },
+      { threadId: 'done', title: 'Done', preview: '', updatedAt: '2026-09-28T07:00:00Z', latestRunStatus: 'completed' },
+    ]
+    const state = emptyChatOrganization()
+    const filtered = (filter: 'active' | 'attention') => ids(selectOrganizedChats(runs, apply(state, { type: 'view.update', view: { ...state.view, filter } }), ''))
+    expect(filtered('active')).toEqual(['queued', 'pending'])
+    expect(filtered('attention')).toEqual(['paused', 'denied'])
+  })
+
   it('sorts deterministically without rearranging the source history', () => {
     const state = emptyChatOrganization()
     expect(ids(selectOrganizedChats(rows, state, ''))).toEqual(['b', 'c', 'a'])

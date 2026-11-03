@@ -1,0 +1,72 @@
+syntax = "proto3";
+
+package model_plane.v1;
+
+option go_package = "github.com/triodelab/model-plane/gen/go/model_plane/v1;mpv1";
+
+// QuestionItem and QuestionAnswerItem: an MCP form is asked and answered with the
+// same closed question shape as a run question (WS14).
+import "model_plane/v1/orchestration.proto";
+
+// MCP elicitation (build plan EP-4 S4).
+//
+// An MCP server may ask the user a question in the middle of a `tools/call`
+// (`elicitation/create`). When the governed caller allows it, the gateway holds
+// that call in memory, answers ProxyMcpTool with the pending form, and completes
+// the same call once AnswerMcpElicitation brings the owner's answer. A separate
+// file and service so that ModelGateway and every implementation or test double
+// of it stay source-compatible.
+
+// A form an MCP server asked during a held tool call.
+message McpElicitationPending {
+  // The held call's handle (`el_<ulid>`). Valid only on the gateway replica
+  // that holds the call and only until expires_at_unix.
+  string elicitation_id = 1;
+  // The registered MCP server that asked.
+  string server_id = 2;
+  // The server's display name, shown as the question's origin.
+  string server_label = 3;
+  // The server's own text explaining what it asks for.
+  string message = 4;
+  // The server's `requestedSchema`, as JSON, kept for audit and display only;
+  // answers are mapped back by the gateway.
+  string requested_schema_json = 5;
+  // The form mapped onto question items (at most four; no secret kind exists).
+  repeated QuestionItem items = 6;
+  // When the gateway cancels the held call if no answer arrived (Unix seconds).
+  int64 expires_at_unix = 7;
+}
+
+// Answers the forms of MCP calls the gateway holds.
+service McpElicitationService {
+  // Send the owner's answer (or a decline or a cancel) to the server that asked,
+  // and read the held call on. Service principal of execution-core only; the
+  // user must be the one the call was held for. A call this replica does not
+  // hold reads as `mcp_elicitation_expired` in error_message.
+  rpc AnswerMcpElicitation(AnswerMcpElicitationRequest) returns (AnswerMcpElicitationResponse);
+}
+
+// The answer to one held form. See `AnswerMcpElicitation`.
+message AnswerMcpElicitationRequest {
+  // McpElicitationPending.elicitation_id.
+  string elicitation_id = 1;
+  // Must equal the caller's verified org.
+  string org_id = 2;
+  // The run owner the call was held for; any other user is refused.
+  string user_id = 3;
+  // `accept` (answers carry the content), `decline` or `cancel`.
+  string action = 4;
+  // One answer per item of the pending form; empty for decline and cancel.
+  repeated QuestionAnswerItem answers = 5;
+}
+
+// The held call's outcome after the answer.
+message AnswerMcpElicitationResponse {
+  // JSON-encoded tool output when the call finished.
+  string output_json = 1;
+  // Non-empty when the call failed, expired or the answer was refused.
+  string error_message = 2;
+  // Set when the server asked again; output_json and error_message are then
+  // empty and the call stays held.
+  McpElicitationPending elicitation = 3;
+}

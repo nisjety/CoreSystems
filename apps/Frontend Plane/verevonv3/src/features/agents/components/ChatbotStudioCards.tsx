@@ -1,3 +1,4 @@
+import { Show } from 'solid-js'
 import {
   MoreHorizontal,
   Smartphone,
@@ -6,11 +7,14 @@ import {
 } from '@/shared/icons'
 import { Dynamic } from '@solidjs/web'
 import { Button } from '@/shared/ui/Button'
+import { ButtonLink } from '@/shared/ui/ButtonLink'
 import { VerevonIconButton } from '@/shared/ui/verevon/VerevonIconButton'
 import { VerevonSwitch } from '@/shared/ui/verevon/VerevonSwitch'
 import { cn } from '@/shared/lib/cn'
 import type { StudioIcon } from '@/features/agents/components/ChatbotStudioPrimitives'
 import { useI18n } from '@/shared/i18n'
+import { createResource } from '@/shared/lib/create-resource-compat'
+import { orgAgentPolicyAvailable } from '@/features/customize/AgentModesSection'
 
 export function IntegrationCard(props: {
   Icon: StudioIcon
@@ -56,6 +60,7 @@ export function ActionCard(props: {
   title: string
 }) {
   const i18n = useI18n()
+  const [policyAvailable] = createResource(() => orgAgentPolicyAvailable().catch(() => false))
 
   return (
     <article class="flex min-h-[260px] flex-col rounded-[12px] border border-[#E4E5E8] bg-white p-8 shadow-[0_1px_2px_rgba(16,24,40,0.04)] dark:border-[#303238] dark:bg-[#15161A]">
@@ -70,14 +75,23 @@ export function ActionCard(props: {
         <Zap class="size-4" />
         {props.subtitle}
       </p>
-      {/* Phase 4 honesty sweep: tool menu/customize have no backend yet. */}
+      {/* The tool menu has no backend yet. Customize opens the hub only where the org agent policy API is on. */}
       <div class="mt-auto flex justify-end gap-3">
         <VerevonIconButton size="lg" shape="rounded" disabled aria-label={i18n.tr(`Åpne verktøymeny for ${props.title}`, `Open ${props.title} tool menu`)}>
           <MoreHorizontal class="size-5" />
         </VerevonIconButton>
-        <Button shape="rounded" size="md" disabled>
-          {i18n.tr('Tilpass', 'Customize')}
-        </Button>
+        <Show
+          when={policyAvailable() === true}
+          fallback={(
+            <Button shape="rounded" size="md" disabled>
+              {i18n.tr('Tilpass', 'Customize')}
+            </Button>
+          )}
+        >
+          <ButtonLink href="/agents/customize" shape="rounded" size="md">
+            {i18n.tr('Tilpass', 'Customize')}
+          </ButtonLink>
+        </Show>
       </div>
     </article>
   )

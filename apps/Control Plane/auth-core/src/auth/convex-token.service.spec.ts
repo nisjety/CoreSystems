@@ -761,3 +761,202 @@ describe('ConvexTokenService delegated-identity token exchange (verifyPlaneSubje
     ).toThrow(/verification failed/i);
   });
 });
+
+describe('ConvexTokenService api_key principal (EP-12 S2)', () => {
+  const originalEnv = { ...process.env };
+
+  afterEach(() => {
+    process.env = { ...originalEnv };
+  });
+
+  const claimsOf = (token: string) =>
+    JSON.parse(
+      Buffer.from(token.split('.')[1], 'base64url').toString('utf8'),
+    ) as Record<string, unknown>;
+
+  // The identity alone; the posture and lifetime are added per case so a
+  // case can leave either out.
+  const apiKeyIdentity = {
+    userId: 'apikey:key-1',
+    orgId: 'org-a',
+    scopes: ['agent:runs'],
+    principalType: 'api_key' as const,
+    keyId: 'key-1',
+    actingUserId: 'user-a',
+    tokenId: 'jti-1',
+  };
+  const orgPosture = {
+    zdr: false,
+    authority: 'interactive-org-retention-policy' as const,
+  };
+  const withoutOverride = {
+    ...apiKeyIdentity,
+    retentionPosture: orgPosture,
+  };
+  const apiKeyClaims = { ...withoutOverride, ttlSecondsOverride: 120 };
+
+  const newService = () => {
+    process.env.NODE_ENV = 'test';
+    for (const name of keyEnvNames) delete process.env[name];
+    return new ConvexTokenService();
+  };
+
+  it('mints the exact api_key shape for a plane audience and for model-gateway', () => {
+    const service = newService();
+    for (const token of [
+      service.issuePlaneToken('session-core', apiKeyClaims).token,
+      service.issueModelPlaneToken(apiKeyClaims).token,
+    ]) {
+      const claims = claimsOf(token);
+      expect(claims).toMatchObject({
+        sub: 'apikey:key-1',
+        principal_type: 'api_key',
+        key_id: 'key-1',
+        acting_user_id: 'user-a',
+        org_id: 'org-a',
+        jti: 'jti-1',
+        scopes: ['agent:runs'],
+        zdr: false,
+      });
+      expect(claims.user_id).toBeUndefined();
+      expect(claims.service_id).toBeUndefined();
+      expect(claims.email).toBeUndefined();
+    }
+  });
+
+  it('caps an api_key token at 120 s whatever the audience default or override', () => {
+    process.env.PLANE_TOKEN_TTL_SESSION_CORE_SECONDS = '3600';
+    process.env.MODEL_PLANE_AUTH_TOKEN_TTL_SECONDS = '3600';
+    const service = newService();
+    for (const bundle of [
+      service.issuePlaneToken('session-core', withoutOverride),
+      service.issuePlaneToken('session-core', {
+        ...apiKeyClaims,
+        ttlSecondsOverride: 900,
+      }),
+      service.issueModelPlaneToken(withoutOverride),
+    ]) {
+      const claims = claimsOf(bundle.token);
+      expect(bundle.expiresInSeconds).toBe(120);
+      expect((claims.exp as number) - (claims.iat as number)).toBe(120);
+    }
+    expect(
+      service.issuePlaneToken('session-core', {
+        ...apiKeyClaims,
+        ttlSecondsOverride: 90,
+      }).expiresInSeconds,
+    ).toBe(90);
+  });
+
+  it('fails an api_key token closed to zdr:true without the organization-policy authority', () => {
+    const service = newService();
+    expect(
+      claimsOf(service.issuePlaneToken('session-core', apiKeyIdentity).token)
+        .zdr,
+    ).toBe(true);
+    expect(
+      claimsOf(
+        service.issuePlaneToken('session-core', {
+          ...apiKeyClaims,
+          retentionPosture: {
+            zdr: false,
+            authority: 'service-principal-policy',
+          },
+        }).token,
+      ).zdr,
+    ).toBe(true);
+    expect(
+      claimsOf(
+        service.issuePlaneToken('session-core', {
+          ...apiKeyClaims,
+          retentionPosture: {
+            zdr: true,
+            authority: 'interactive-org-retention-policy',
+          },
+        }).token,
+      ).zdr,
+    ).toBe(true);
+  });
+
+  it.each<
+    [
+      string,
+      Partial<{
+        userId: string;
+        keyId: string;
+        actingUserId: string;
+        serviceId: string;
+        email: string;
+        tokenId: string;
+      }>,
+    ]
+  >([
+    ['a sub that is not the key', { userId: 'apikey:key-2' }],
+    ['a sub without the prefix', { userId: 'key-1' }],
+    ['a missing key id', { keyId: undefined }],
+    ['a key id with a space', { keyId: 'key 1', userId: 'apikey:key 1' }],
+    [
+      'a key id over 128 bytes',
+      { keyId: 'k'.repeat(129), userId: `apikey:${'k'.repeat(129)}` },
+    ],
+    ['a missing owner', { actingUserId: undefined }],
+    ['a padded owner', { actingUserId: ' user-a' }],
+    ['an owner that is a key', { actingUserId: 'apikey:key-9' }],
+    ['a service identity', { serviceId: 'gateway' }],
+    ['an email', { email: 'a@example.test' }],
+    ['no jti', { tokenId: undefined }],
+  ])('refuses an api_key token with %s', (_case, override) => {
+    const service = newService();
+    expect(() =>
+      service.issuePlaneToken('session-core', { ...apiKeyClaims, ...override }),
+    ).toThrow(/API-key token identity is ambiguous/);
+    expect(() =>
+      service.issueModelPlaneToken({ ...apiKeyClaims, ...override }),
+    ).toThrow(/API-key token identity is ambiguous/);
+  });
+
+  it('refuses a step-up on a model-gateway api_key token', () => {
+    const service = newService();
+    expect(() =>
+      service.issueModelPlaneToken({
+        ...apiKeyClaims,
+        stepUp: { at: 1, method: 'password' },
+      }),
+    ).toThrow(/step-up/);
+  });
+
+  it('keeps key identity off every other principal type', () => {
+    const service = newService();
+    expect(() =>
+      service.issuePlaneToken('session-core', {
+        userId: 'user-a',
+        orgId: 'org-a',
+        keyId: 'key-1',
+      }),
+    ).toThrow(/key identity/);
+    expect(() =>
+      service.issuePlaneToken('session-core', {
+        userId: 'user-a',
+        orgId: 'org-a',
+        actingUserId: 'user-b',
+      }),
+    ).toThrow(/Acting-user identity/);
+    expect(() =>
+      service.issueModelPlaneToken({
+        userId: 'user-a',
+        orgId: 'org-a',
+        actingUserId: 'user-b',
+      }),
+    ).toThrow(/key identity/);
+    expect(() =>
+      service.issueModelPlaneToken({
+        userId: 'service:gateway',
+        orgId: 'org-a',
+        principalType: 'service',
+        serviceId: 'gateway',
+        reason: 'key identity check',
+        keyId: 'key-1',
+      }),
+    ).toThrow(/key identity/);
+  });
+});

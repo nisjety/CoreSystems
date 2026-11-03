@@ -129,6 +129,9 @@ pub const FIELD_TREATMENTS: &[(&str, Treatment)] = &[
     // `chat` is honored. A deployed-agent profile is an unattended agent, which
     // ZDR refuses.
     ("profile", refused_feature("deployed_agent")),
+    // The mode a person chose is resolved before a turn is admitted (WS25-S6): it only tightens the
+    // posture, and a plan gate it sets is refused through `plan_mode` like any plan flag.
+    ("agent_mode", Treatment::Honored),
     ("verbosity", Treatment::Honored),
     ("effort", Treatment::Honored),
     ("features", Treatment::PerMember),
@@ -144,6 +147,7 @@ pub const FIELD_TREATMENTS: &[(&str, Treatment)] = &[
     // An execute turn runs an executing loop under a plan grant. A ZDR turn keeps no
     // plan and no grant, so it is refused through the `agentic` feature it rides on.
     ("execute_granted", refused_feature("agentic")),
+    ("approved_plan_id", refused_feature("agentic")),
     // A client's own tool definitions. Those the composer derives from its
     // actions are declared here too, so an action is refused the same way.
     ("tools", refused_feature("client_tools")),
@@ -154,7 +158,17 @@ pub const FIELD_TREATMENTS: &[(&str, Treatment)] = &[
     ("org_instructions", Treatment::Honored),
     ("space_instructions", Treatment::Honored),
     ("persona_instructions", Treatment::Honored),
+    ("persona_tone", Treatment::Honored),
     ("locale", Treatment::Honored),
+    ("client_timezone", Treatment::Honored),
+    ("client_utc_offset_minutes", Treatment::Honored),
+    ("ui_locale", Treatment::Honored),
+    (
+        "agent_roles",
+        Treatment::Inert(
+            "no tool loop runs on a ZDR turn, so no subagent takes a role; the catalogue is never built",
+        ),
+    ),
 ];
 
 /// The feature strings the gateway reads, each with its treatment. A feature
@@ -245,6 +259,7 @@ pub fn invoke_field_names(request: &InvokeRequest) -> Vec<&'static str> {
         max_cost_usd: _,
         max_tokens: _,
         profile: _,
+        agent_mode: _,
         verbosity: _,
         effort: _,
         features: _,
@@ -253,6 +268,7 @@ pub fn invoke_field_names(request: &InvokeRequest) -> Vec<&'static str> {
         generate_image: _,
         plan_mode: _,
         execute_granted: _,
+        approved_plan_id: _,
         tools: _,
         org_name: _,
         user_name: _,
@@ -261,7 +277,12 @@ pub fn invoke_field_names(request: &InvokeRequest) -> Vec<&'static str> {
         org_instructions: _,
         space_instructions: _,
         persona_instructions: _,
+        persona_tone: _,
         locale: _,
+        client_timezone: _,
+        client_utc_offset_minutes: _,
+        ui_locale: _,
+        agent_roles: _,
     } = request;
     vec![
         "content",
@@ -289,6 +310,7 @@ pub fn invoke_field_names(request: &InvokeRequest) -> Vec<&'static str> {
         "max_cost_usd",
         "max_tokens",
         "profile",
+        "agent_mode",
         "verbosity",
         "effort",
         "features",
@@ -297,6 +319,7 @@ pub fn invoke_field_names(request: &InvokeRequest) -> Vec<&'static str> {
         "generate_image",
         "plan_mode",
         "execute_granted",
+        "approved_plan_id",
         "tools",
         "org_name",
         "user_name",
@@ -305,7 +328,12 @@ pub fn invoke_field_names(request: &InvokeRequest) -> Vec<&'static str> {
         "org_instructions",
         "space_instructions",
         "persona_instructions",
+        "persona_tone",
         "locale",
+        "client_timezone",
+        "client_utc_offset_minutes",
+        "ui_locale",
+        "agent_roles",
     ]
 }
 
@@ -339,6 +367,9 @@ pub fn refusal(request: &InvokeRequest) -> Option<Refusal> {
         return feature("agentic");
     }
     if request.execute_granted {
+        return feature("agentic");
+    }
+    if request.approved_plan_id.as_deref().is_some_and(|id| !id.trim().is_empty()) {
         return feature("agentic");
     }
     if request.regenerate_of_message_id.as_deref().is_some_and(|id| !id.trim().is_empty())

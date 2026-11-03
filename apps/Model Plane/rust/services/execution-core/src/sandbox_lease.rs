@@ -18,21 +18,24 @@
 //! two points execution-core can observe a run's actual end: `CancelRun`,
 //! and a governed `RunAgent`'s own `finalize()`. A run driven purely by
 //! repeated direct `ExecuteStep` calls (the inline chat `code_interpreter`
-//! path) has no such signal at all — confirmed by tracing the call graph,
-//! not assumed — so that lease's only backstop is [`LEASE_TTL`] expiring
-//! server-side, and any hydrated workspace such a run creates is never
-//! uploaded OR deleted by this module at all — its edits are lost, and its
-//! local directory persists until the container itself restarts. This is a
-//! known gap, sharing the same root cause and same existing "inline
-//! ExecuteStep chat path has no run-ended signal" limitation the B.2 release
-//! design already documented — not a new one this phase introduced, and not
-//! an oversight.
+//! path) has no such signal, so that lease's only backstop is [`LEASE_TTL`]
+//! expiring server-side. Nothing in this module removes its hydrated
+//! workspace, and with the default settings its edits are never uploaded.
+//!
+//! `EXECUTION_CORE_SPACE_WORKSPACE_WRITE_THROUGH=enabled` (WS22-S4) closes that
+//! loss: each inline Space step records its changes through `SnapshotSandbox`
+//! before the step returns ([`workspace_sync::record_space_step`]), and the
+//! run's release records what is left the same way. The directory is still
+//! removed only at release, so an inline run's directory outlives its steps
+//! until the container restarts. Nothing promotes the overlay into the Space
+//! yet, so it is visible only to its own lease (DEC-24).
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use mp_contracts::model_plane::v1::WorkspaceChangedFile;
+use mp_contracts::zdr_refusal::Refusal;
 use tonic::Status;
 use tracing::warn;
 
@@ -43,6 +46,11 @@ use crate::sandbox_manager_client::{LeaseRequest, SandboxManagerClient};
 use crate::state::{HydratedWorkspace, SandboxLease, StateStore};
 use crate::workspace_cas::CasClient;
 use crate::workspace_hydrate::WorkspaceFileEntry;
+
+/// The thread workspace (WS22-S2). It is declared here rather than in `lib.rs`, so the slice stays
+/// in the files it owns: the source sits beside the others, and the module is a child of this one.
+#[path = "workspace_sync.rs"]
+pub mod workspace_sync;
 
 /// One hour: generous for a single agent run's `code_interpreter` calls,
 /// bounded so a lease neither `CancelRun` nor `RunAgent`'s own `finalize()`
@@ -174,6 +182,56 @@ pub async fn ensure_sandbox_lease(
         processes_permitted: response.processes_permitted,
     };
     state.cache_sandbox_lease(run_id, lease.clone());
+    Ok(lease)
+}
+
+/// Returns this run's lease on the workspace of `thread_id`, acquiring it if this process holds
+/// none (WS22-S2). The lease is the thread's own row in sandbox-manager, get-or-create by owner and
+/// thread: a second run of the thread gets the same lease, and so the same files.
+///
+/// # Errors
+/// Refused before any RPC when `persistence_free` (zero retention or a waiver): nothing is
+/// acquired, hydrated or written. Otherwise sandbox-manager's own status, unchanged.
+pub async fn ensure_thread_lease(
+    client: &SandboxManagerClient,
+    bearer: &str,
+    state: &StateStore,
+    run_id: &str,
+    org_id: &str,
+    thread_id: &str,
+    persistence_free: bool,
+) -> Result<SandboxLease, Status> {
+    // The thread workspace zdr guard: a persistence-free call never reaches sandbox-manager.
+    if persistence_free {
+        return Err(Refusal::feature_not_supported("sandbox_workspace")
+            .grpc_status(tonic::Code::FailedPrecondition));
+    }
+    if let Some(existing) = state.thread_lease(run_id, thread_id) {
+        return Ok(existing);
+    }
+    let response = client
+        .acquire_lease(
+            bearer,
+            &LeaseRequest {
+                scope_id: thread_id,
+                scope_type: "thread",
+                ttl: LEASE_TTL,
+                org_id,
+                space_id: "",
+                capability_decision: "",
+                capability_claims_json: "",
+            },
+        )
+        .await
+        .inspect_err(|status| {
+            warn!(code = ?status.code(), "sandbox-manager AcquireLease for a thread failed");
+        })?;
+    let lease = SandboxLease {
+        lease_id: response.lease_id,
+        backend_id: response.backend_id,
+        processes_permitted: response.processes_permitted,
+    };
+    state.cache_thread_lease(run_id, thread_id, lease.clone());
     Ok(lease)
 }
 
@@ -544,11 +602,48 @@ async fn upload_and_discard_workspace(
     lease: &SandboxLease,
     workspace: &HydratedWorkspace,
 ) -> WorkspaceUploadOutcome {
+    let outcome = record_workspace_overlay(
+        sandbox_manager_client,
+        cas_client,
+        token,
+        lease,
+        workspace,
+        workspace_sync::space_write_through_switched_on(),
+    )
+    .await;
+    cleanup_workspace_dir(&workspace.path);
+    outcome
+}
+
+/// Diffs `workspace` against its baseline, uploads what changed, records it as `lease`'s overlay
+/// through `SnapshotSandbox`, and settles the outcome. The directory is left in place: the caller
+/// decides when it goes. With `syncable_only` the diff keeps only what the thread keeps
+/// ([`crate::workspace_hydrate::is_syncable`]), so the staged program, the scratch directories, the
+/// attachments mount and oversized files never reach the overlay. The baseline is never moved: a
+/// changed file's `base_hash` stays the hash this run hydrated, which the promote compare-and-swap
+/// relies on.
+async fn record_workspace_overlay(
+    sandbox_manager_client: &SandboxManagerClient,
+    cas_client: Option<&CasClient>,
+    token: &str,
+    lease: &SandboxLease,
+    workspace: &HydratedWorkspace,
+    syncable_only: bool,
+) -> WorkspaceUploadOutcome {
     let mut outcome = WorkspaceUploadOutcome::default();
     if let Some(cas) = cas_client {
-        match crate::workspace_hydrate::diff_and_upload(cas, &workspace.path, &workspace.baseline)
+        let diffed = if syncable_only {
+            crate::workspace_hydrate::diff_and_upload_syncable(
+                cas,
+                &workspace.path,
+                &workspace.baseline,
+            )
             .await
-        {
+        } else {
+            crate::workspace_hydrate::diff_and_upload(cas, &workspace.path, &workspace.baseline)
+                .await
+        };
+        match diffed {
             Ok(changed) if changed.is_empty() => outcome.uploaded = true,
             Ok(changed) => {
                 outcome.changed = changed.len();
@@ -587,7 +682,6 @@ async fn upload_and_discard_workspace(
         outcome.error = Some("CAS is not configured".to_owned());
     }
 
-    cleanup_workspace_dir(&workspace.path);
     settle_workspace_outcome(outcome, &lease.lease_id)
 }
 

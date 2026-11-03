@@ -187,6 +187,7 @@ fn cases() -> Vec<(&'static str, Value, Expect)> {
             refused("deployed_agent"),
         ),
         ("profile", with("profile", json!("chat")), None),
+        ("agent_mode", with("agent_mode", json!("auto")), None),
         ("verbosity", with("verbosity", json!("concise")), None),
         ("effort", with("effort", json!("deep")), None),
         (
@@ -265,6 +266,19 @@ fn cases() -> Vec<(&'static str, Value, Expect)> {
             refused("agentic"),
         ),
         ("execute_granted", with("execute_granted", json!(false)), None),
+        // WS14-S2: naming an approved plan asks for an execute run, so a ZDR turn refuses it
+        // through `agentic` like `execute_granted`; a blank id names no plan.
+        (
+            "approved_plan_id",
+            with("approved_plan_id", json!("plan-1")),
+            refused("agentic"),
+        ),
+        (
+            "approved_plan_id",
+            with("approvedPlanId", json!("plan-1")),
+            refused("agentic"),
+        ),
+        ("approved_plan_id", with("approved_plan_id", json!("  ")), None),
         (
             "tools",
             with(
@@ -294,6 +308,27 @@ fn cases() -> Vec<(&'static str, Value, Expect)> {
         (
             "persona_instructions",
             with("persona_instructions", json!("Friendly.")),
+            None,
+        ),
+        (
+            "persona_tone",
+            with("persona_tone", json!("direct")),
+            None,
+        ),
+        (
+            "client_timezone",
+            with("client_timezone", json!("Europe/Oslo")),
+            None,
+        ),
+        (
+            "client_utc_offset_minutes",
+            with("client_utc_offset_minutes", json!(60)),
+            None,
+        ),
+        ("ui_locale", with("ui_locale", json!("no")), None),
+        (
+            "agent_roles",
+            with("agent_roles", json!([{"agent_ref": "a", "version": 1}])),
             None,
         ),
     ]
@@ -474,4 +509,50 @@ fn function_body<'a>(source: &'a str, signature: &str) -> &'a str {
         .find("\n}\n")
         .map_or(source.len(), |offset| start + offset);
     &source[start..end]
+}
+
+/// The knowledge receipt (WS18-S3) is built on the ordinary path only: the persistence-free ZDR branch
+/// returns before any Space knowledge is read, so a ZDR turn cannot carry a receipt.
+#[test]
+fn the_knowledge_receipt_is_built_after_the_zdr_branch_returns() {
+    let sse = include_str!("../src/sse.rs");
+    let zdr_return = sse
+        .find("return zdr_direct_stream(")
+        .expect("the ZDR branch returns its direct stream");
+    let receipt = sse
+        .find("knowledge_receipt::knowledge_receipt(")
+        .expect("the ordinary path builds the receipt");
+    assert!(
+        zdr_return < receipt,
+        "the knowledge receipt must not be built before the ZDR branch returns"
+    );
+}
+
+/// The page reader is offered only in the tool loop, and only where a fetched page can be parked. A ZDR
+/// turn returns before that loop starts, and a waived turn parks nothing. Read from the source, as the
+/// other turn-ordering checks in this file are.
+#[test]
+fn the_web_reader_is_offered_only_where_a_fetched_page_can_be_parked() {
+    let sse = include_str!("../src/sse.rs");
+    let zdr_return = sse
+        .find("return zdr_direct_stream(")
+        .expect("the ZDR branch hands the turn to zdr_direct_stream");
+    let first_rounds = sse
+        .find("run_tool_rounds_for_model_with_attachments(")
+        .expect("the ordinary path runs the tool rounds");
+    assert!(
+        zdr_return < first_rounds,
+        "a ZDR turn returns before the tool loop can offer the reader"
+    );
+    let tool_loop = include_str!("../src/tool_loop.rs");
+    let offer = tool_loop
+        .split("let reader_offered =")
+        .nth(1)
+        .and_then(|rest| rest.split(';').next())
+        .expect("the tool loop decides whether the reader is offered");
+    assert!(offer.contains("page_reader::enabled()"), "{offer}");
+    assert!(
+        offer.contains("external_parking_allowed(zdr || data_plane_mode.is_some())"),
+        "{offer}"
+    );
 }

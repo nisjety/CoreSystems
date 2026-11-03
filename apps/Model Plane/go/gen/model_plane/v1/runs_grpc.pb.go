@@ -30,6 +30,7 @@ const (
 	RunService_ResolveApprovalAuthority_FullMethodName      = "/model_plane.v1.RunService/ResolveApprovalAuthority"
 	RunService_ResolveScheduledStepAuthority_FullMethodName = "/model_plane.v1.RunService/ResolveScheduledStepAuthority"
 	RunService_AuthorizeRoomRunAttach_FullMethodName        = "/model_plane.v1.RunService/AuthorizeRoomRunAttach"
+	RunService_CancelRunAsRoomManager_FullMethodName        = "/model_plane.v1.RunService/CancelRunAsRoomManager"
 )
 
 // RunServiceClient is the client API for RunService service.
@@ -97,6 +98,16 @@ type RunServiceClient interface {
 	// ids, the honest run phase and a validity window; never run content. Called at subscribe and
 	// again every 15 seconds for as long as the stream lives.
 	AuthorizeRoomRunAttach(ctx context.Context, in *AuthorizeRoomRunAttachRequest, opts ...grpc.CallOption) (*AuthorizeRoomRunAttachResponse, error)
+	// CancelRunAsRoomManager cancels one live room run on behalf of a room manager or owner who is
+	// NOT the run's owner (build plan WS09-S8). The caller presents the Control `model.run.control`
+	// decision (action model.run.control, permissions exactly [run:cancel], audience model-plane,
+	// payload digest bound to run_id and operation "cancel"). Session Core verifies it, the
+	// caller's membership, that the run is a root run of a thread of the decision's Space inside
+	// its audience ceiling, and that nothing about the run or the decision is zero-retention, then
+	// cancels through the same transaction as CancelRun and records `acting_as` and the decision
+	// reference on the RUN_CANCELLED receipt. NotFound for a run outside the audience (no oracle).
+	// Returns the run owner's identity so the caller can stop that owner's live producer.
+	CancelRunAsRoomManager(ctx context.Context, in *CancelRunAsRoomManagerRequest, opts ...grpc.CallOption) (*CancelRunAsRoomManagerResponse, error)
 }
 
 type runServiceClient struct {
@@ -217,6 +228,16 @@ func (c *runServiceClient) AuthorizeRoomRunAttach(ctx context.Context, in *Autho
 	return out, nil
 }
 
+func (c *runServiceClient) CancelRunAsRoomManager(ctx context.Context, in *CancelRunAsRoomManagerRequest, opts ...grpc.CallOption) (*CancelRunAsRoomManagerResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CancelRunAsRoomManagerResponse)
+	err := c.cc.Invoke(ctx, RunService_CancelRunAsRoomManager_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // RunServiceServer is the server API for RunService service.
 // All implementations must embed UnimplementedRunServiceServer
 // for forward compatibility.
@@ -282,6 +303,16 @@ type RunServiceServer interface {
 	// ids, the honest run phase and a validity window; never run content. Called at subscribe and
 	// again every 15 seconds for as long as the stream lives.
 	AuthorizeRoomRunAttach(context.Context, *AuthorizeRoomRunAttachRequest) (*AuthorizeRoomRunAttachResponse, error)
+	// CancelRunAsRoomManager cancels one live room run on behalf of a room manager or owner who is
+	// NOT the run's owner (build plan WS09-S8). The caller presents the Control `model.run.control`
+	// decision (action model.run.control, permissions exactly [run:cancel], audience model-plane,
+	// payload digest bound to run_id and operation "cancel"). Session Core verifies it, the
+	// caller's membership, that the run is a root run of a thread of the decision's Space inside
+	// its audience ceiling, and that nothing about the run or the decision is zero-retention, then
+	// cancels through the same transaction as CancelRun and records `acting_as` and the decision
+	// reference on the RUN_CANCELLED receipt. NotFound for a run outside the audience (no oracle).
+	// Returns the run owner's identity so the caller can stop that owner's live producer.
+	CancelRunAsRoomManager(context.Context, *CancelRunAsRoomManagerRequest) (*CancelRunAsRoomManagerResponse, error)
 	mustEmbedUnimplementedRunServiceServer()
 }
 
@@ -324,6 +355,9 @@ func (UnimplementedRunServiceServer) ResolveScheduledStepAuthority(context.Conte
 }
 func (UnimplementedRunServiceServer) AuthorizeRoomRunAttach(context.Context, *AuthorizeRoomRunAttachRequest) (*AuthorizeRoomRunAttachResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method AuthorizeRoomRunAttach not implemented")
+}
+func (UnimplementedRunServiceServer) CancelRunAsRoomManager(context.Context, *CancelRunAsRoomManagerRequest) (*CancelRunAsRoomManagerResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method CancelRunAsRoomManager not implemented")
 }
 func (UnimplementedRunServiceServer) mustEmbedUnimplementedRunServiceServer() {}
 func (UnimplementedRunServiceServer) testEmbeddedByValue()                    {}
@@ -544,6 +578,24 @@ func _RunService_AuthorizeRoomRunAttach_Handler(srv interface{}, ctx context.Con
 	return interceptor(ctx, in, info, handler)
 }
 
+func _RunService_CancelRunAsRoomManager_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CancelRunAsRoomManagerRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RunServiceServer).CancelRunAsRoomManager(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RunService_CancelRunAsRoomManager_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RunServiceServer).CancelRunAsRoomManager(ctx, req.(*CancelRunAsRoomManagerRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // RunService_ServiceDesc is the grpc.ServiceDesc for RunService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -594,6 +646,10 @@ var RunService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "AuthorizeRoomRunAttach",
 			Handler:    _RunService_AuthorizeRoomRunAttach_Handler,
+		},
+		{
+			MethodName: "CancelRunAsRoomManager",
+			Handler:    _RunService_CancelRunAsRoomManager_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

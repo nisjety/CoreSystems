@@ -39,6 +39,7 @@ import type {
   GeneratedFile,
   GeneratedImagePreview,
   Citation,
+  LifecycleNotice,
   StreamFailureAction,
 } from '@/features/chat/components/chat-types'
 import type { Approval, ApprovalDecision } from '@/shared/api/orchestration-client'
@@ -115,9 +116,20 @@ export type ConversationNode =
    * the concrete "shown in the receipt" surface. Only ever present when the
    * turn's effective scope was `knowledge_only`/`web_only` — an `auto` turn
    * produces no node, exactly like `memory-recall` above produces none when
-   * nothing was recalled.
+   * nothing was recalled. An `auto` node exists only as a Space's knowledge
+   * receipt (WS18-S3): it carries `knowledge` and filters nothing.
    */
-  | { kind: 'source-scope'; scope: 'knowledge_only' | 'web_only'; excludedTools: string[] }
+  | {
+      kind: 'source-scope';
+      scope: 'knowledge_only' | 'web_only' | 'auto';
+      excludedTools: string[];
+      knowledge?: import('@/shared/api/chat-client').ChatKnowledgeReceipt;
+    }
+  /**
+   * What the gateway did to this turn while it ran (retries, compaction, context changes, a reduced answer).
+   * One node per turn, holding every notice in arrival order, so the transcript keys it once.
+   */
+  | { kind: 'lifecycle-notices'; notices: LifecycleNotice[] }
   | { kind: 'truncated'; stopReason: string }
   | { kind: 'tool-chips'; tools: ComposerToolId[] }
   | { kind: 'attachments'; attachments: ComposerAttachment[] }

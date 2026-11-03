@@ -145,6 +145,7 @@ fn proxy_request(
         // Re-authorized per-user gateway-side (defense in depth).
         user_id: user_id.to_owned(),
         expected_digest: expected_digest.to_owned(),
+        allow_elicitation: false,
     }
 }
 

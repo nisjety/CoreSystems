@@ -355,6 +355,18 @@ impl PlanModeStore {
         {
             return;
         }
+        // The org's rung cap binds the grant when it is recorded as well as when it is sent. The rung the thread
+        // holds is then the one `granted_rung` reports (WS25-S9). An org whose policy is not held keeps the grant as
+        // approved: the dispatch holds the run to the narrowest rung instead.
+        let rung = crate::org_agent_policy::clamp_rung(
+            Some(rung),
+            crate::org_agent_policy::held_rung_cap(
+                crate::org_agent_policy::policy_mode(),
+                crate::org_agent_policy::shared_cache(),
+                org_id,
+            ),
+        )
+        .unwrap_or(rung);
         self.grants.insert(
             thread_id.to_owned(),
             GrantEntry {
@@ -517,6 +529,7 @@ pub async fn handle_enter_plan_mode<P: EventPublisher>(
             "ttl_seconds": ttl,
         }),
         zdr: false,
+        ..Default::default()
     };
     if let Err(e) = publisher
         .publish(&subjects::run_event_subject(&req.run_id), &envelope)
@@ -667,6 +680,7 @@ async fn exit_plan_mode<P: EventPublisher>(
                 "plan_id": (!plan_id.is_empty()).then(|| plan_id.to_owned()),
             }),
             zdr: false,
+            ..Default::default()
         };
         if let Err(e) = publisher
             .publish(&subjects::run_event_subject(&req.run_id), &envelope)

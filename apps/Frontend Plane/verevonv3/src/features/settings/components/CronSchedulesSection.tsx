@@ -1,15 +1,8 @@
-import { CalendarClock, Clock, Loader2, Trash2 } from '@/shared/icons'
+import { CalendarClock, Loader2 } from '@/shared/icons'
 import { createMemo, createSignal, For, Show } from 'solid-js'
-import { createResource } from '@/shared/lib/create-resource-compat'
-import {
-  createCronSchedule,
-  deleteCronSchedule,
-  listCronSchedules,
-  updateCronSchedule,
-  type CronSchedule,
-  type CronTaskTemplate,
-} from '@/shared/api/cron-client'
+import { createCronSchedule, type CronTaskTemplate } from '@/shared/api/cron-client'
 import { translateApiError, useI18n } from '@/shared/i18n'
+import { AutomationsList } from '@/features/automations/components/AutomationsList'
 import { SectionHeader, SettingsButton } from '@/features/settings/components/settings-ui'
 import { VerevonInput } from '@/shared/ui/verevon/VerevonInput'
 import { getSession } from '@/shared/session/session-store'
@@ -23,15 +16,6 @@ import { hasWorkspaceAdminAccess } from '@/shared/session/access'
  * kjøringen og beregner neste kjøring. Bare administratorer kan opprette, endre
  * eller slette planer.
  */
-function formatWhen(value?: string | null): string {
-  if (!value) return '—'
-  try {
-    return new Date(value).toLocaleString('nb-NO', { dateStyle: 'short', timeStyle: 'short' })
-  } catch {
-    return value
-  }
-}
-
 /**
  * Which workflow a schedule may start, mirroring orchestrator-core's
  * `workflowAllowlist` (internal/orchestration/workflowreg.go). Kept in the same
@@ -101,11 +85,11 @@ const INTERACTIVE_RUN_CHOICE: WorkflowChoice = {
 // and the (now-dead-but-harmless) `needsInput`/`inputExample` machinery below
 // keep working unchanged for it, and an EXISTING schedule created earlier
 // with one of the six broken types still displays correctly in the list
-// (`scheduleWorkflowType`/`workflowChoice` fall back to
-// `INTERACTIVE_RUN_CHOICE`'s label only for an unrecognized value, which is
-// not quite right for those six specifically, but showing a plain string
-// stored on the row is preferable to `<option>` re-adding the ability to
-// pick a workflow that cannot fire).
+// (the shared list's `workflowTypeOf` shows the stored type as-is, and
+// `workflowChoice` falls back to `INTERACTIVE_RUN_CHOICE`'s label only for an
+// unrecognized value, which is not quite right for those six specifically, but
+// showing a plain string stored on the row is preferable to `<option>`
+// re-adding the ability to pick a workflow that cannot fire).
 const WORKFLOW_CHOICES: readonly WorkflowChoice[] = [INTERACTIVE_RUN_CHOICE]
 
 const DEFAULT_WORKFLOW = INTERACTIVE_RUN_CHOICE.value
@@ -114,26 +98,13 @@ function workflowChoice(value: string): WorkflowChoice {
   return WORKFLOW_CHOICES.find((choice) => choice.value === value) ?? INTERACTIVE_RUN_CHOICE
 }
 
-/** The workflow an existing schedule fires, for display in the list. */
-function scheduleWorkflowType(schedule: CronSchedule): string {
-  const template = schedule.task_template
-  if (template && typeof template === 'object' && !Array.isArray(template)) {
-    const value = (template as { workflow_type?: unknown }).workflow_type
-    if (typeof value === 'string' && value.trim()) return value.trim()
-  }
-  return DEFAULT_WORKFLOW
-}
-
 export function CronSchedulesSection() {
   const i18n = useI18n()
   const session = getSession()
   const orgId = createMemo(() => session.activeOrg?.id ?? '')
   const isAdmin = createMemo(() => hasWorkspaceAdminAccess(session))
-
-  const [schedules, { refetch }] = createResource(
-    () => orgId() || undefined,
-    (id) => listCronSchedules(id).then((result) => result.schedules),
-  )
+  // Bumped after a create, so the shared list reads the org again.
+  const [revision, setRevision] = createSignal(0)
 
   const [name, setName] = createSignal('')
   const [expr, setExpr] = createSignal('')
@@ -145,11 +116,7 @@ export function CronSchedulesSection() {
   const selectedWorkflow = createMemo(() => workflowChoice(workflowType()))
 
   const [submitting, setSubmitting] = createSignal(false)
-  const [busyId, setBusyId] = createSignal<string | null>(null)
   const [formError, setFormError] = createSignal<string | null>(null)
-  const [actionError, setActionError] = createSignal<string | null>(null)
-
-  const list = createMemo(() => schedules() ?? [])
 
   const resetForm = () => {
     setName('')
@@ -216,53 +183,13 @@ export function CronSchedulesSection() {
         enabled: true,
       })
       resetForm()
-      await refetch()
+      setRevision((value) => value + 1)
     } catch (err) {
       setFormError(
         translateApiError(err, i18n.tr, { no: 'Kunne ikke opprette planen.', en: 'Could not create the schedule.' }),
       )
     } finally {
       setSubmitting(false)
-    }
-  }
-
-  const handleToggle = async (schedule: CronSchedule) => {
-    const id = orgId()
-    if (!id || busyId()) return
-    setBusyId(schedule.id)
-    setActionError(null)
-    try {
-      await updateCronSchedule(id, schedule.id, { enabled: !schedule.enabled })
-      await refetch()
-    } catch (err) {
-      setActionError(
-        translateApiError(err, i18n.tr, { no: 'Kunne ikke oppdatere planen.', en: 'Could not update the schedule.' }),
-      )
-    } finally {
-      setBusyId(null)
-    }
-  }
-
-  const handleDelete = async (schedule: CronSchedule) => {
-    const id = orgId()
-    if (!id || busyId()) return
-    if (
-      typeof window !== 'undefined' &&
-      !window.confirm(`Slette planen «${schedule.name}»?`)
-    ) {
-      return
-    }
-    setBusyId(schedule.id)
-    setActionError(null)
-    try {
-      await deleteCronSchedule(id, schedule.id)
-      await refetch()
-    } catch (err) {
-      setActionError(
-        translateApiError(err, i18n.tr, { no: 'Kunne ikke slette planen.', en: 'Could not delete the schedule.' }),
-      )
-    } finally {
-      setBusyId(null)
     }
   }
 
@@ -273,88 +200,7 @@ export function CronSchedulesSection() {
         description="Tidsstyrte oppgaver agenten kjører automatisk. Hver plan har et cron-uttrykk; sweeperen lager en oppgave, logger kjøringen og beregner neste kjøring."
       />
 
-      <Show when={actionError()}>
-        {(message) => (
-          <p class="verevon-settings-status-message verevon-settings-status-message--error" role="alert">
-            {message()}
-          </p>
-        )}
-      </Show>
-
-      <Show when={schedules.error}>
-        <p class="verevon-settings-status-message verevon-settings-status-message--error" role="alert">
-          Kunne ikke laste planlagte kjøringer.
-        </p>
-      </Show>
-
-      <Show
-        when={!schedules.loading}
-        fallback={
-          <p class="verevon-settings-subnote" role="status" aria-busy="true">
-            Laster planer…
-          </p>
-        }
-      >
-        <Show
-          when={list().length > 0}
-          fallback={
-            <div class="verevon-settings-list-card">
-              <p class="verevon-settings-empty-row">
-                Ingen planlagte kjøringer ennå. Legg til en nedenfor.
-              </p>
-            </div>
-          }
-        >
-          <div class="verevon-settings-list-card">
-            <For each={list()}>
-              {(schedule) => (
-                <div class="verevon-settings-integration-row">
-                  <div>
-                    <p>
-                      {schedule.name}{' '}
-                      <span class="verevon-trust-chip" aria-label={`Status: ${schedule.enabled ? 'aktiv' : 'pauset'}`}>
-                        {schedule.enabled ? 'aktiv' : 'pauset'}
-                      </span>
-                    </p>
-                    <span>
-                      <code>{schedule.schedule_expr}</code> · {schedule.timezone}
-                      {' '}· <code>{scheduleWorkflowType(schedule)}</code>
-                      {' '}· <Clock size={12} aria-hidden="true" /> neste: {formatWhen(schedule.next_fire_at)}
-                      <Show when={schedule.last_fire_at}> · sist: {formatWhen(schedule.last_fire_at)}</Show>
-                    </span>
-                  </div>
-                  <Show when={isAdmin()}>
-                    <div>
-                      <SettingsButton
-                        settingsSize="sm"
-                        disabled={busyId() === schedule.id}
-                        onClick={() => void handleToggle(schedule)}
-                        aria-label={`${schedule.enabled ? 'Pause' : 'Aktiver'} ${schedule.name}`}
-                      >
-                        <Show
-                          when={busyId() === schedule.id}
-                          fallback={<>{schedule.enabled ? 'Pause' : 'Aktiver'}</>}
-                        >
-                          <Loader2 size={14} aria-hidden="true" /> Lagrer…
-                        </Show>
-                      </SettingsButton>{' '}
-                      <SettingsButton
-                        settingsSize="sm"
-                        danger
-                        disabled={busyId() === schedule.id}
-                        onClick={() => void handleDelete(schedule)}
-                        aria-label={`Slett ${schedule.name}`}
-                      >
-                        <Trash2 size={14} aria-hidden="true" /> Slett
-                      </SettingsButton>
-                    </div>
-                  </Show>
-                </div>
-              )}
-            </For>
-          </div>
-        </Show>
-      </Show>
+      <AutomationsList scope="org" revision={revision()} />
 
       <Show
         when={isAdmin()}

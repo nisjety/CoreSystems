@@ -17,6 +17,8 @@ use axum::response::sse::Event;
 use serde_json::{json, Value};
 use tokio::sync::mpsc::Sender;
 
+use crate::knowledge_receipt::KnowledgeReceipt;
+
 // Declared here, not in lib.rs, so this slice stays inside its owned files (WS27-S6).
 #[path = "run_ceiling.rs"]
 pub mod run_ceiling;
@@ -143,6 +145,23 @@ impl RetentionClass {
     }
 }
 
+/// The render of an Office file for the artifact panel: its pages as a PDF and the first pages as thumbnails.
+/// It is a view of the file the sandbox wrote, never the download, and it is transient: it rides on the
+/// attachment frame and is not kept with the thread.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AttachmentPreview {
+    /// Always `application/pdf`.
+    pub mime: String,
+    /// A `data:` URI of the rendered PDF.
+    pub url: String,
+    /// The pages the render layer produced.
+    pub pages: u64,
+    /// Whether a font the file names was drawn with a stand-in, so the viewer can say so.
+    pub fonts_substituted: bool,
+    /// `data:` URIs of the first pages, in page order.
+    pub thumbs: Vec<String>,
+}
+
 /// A rich chat-stream event beyond the plain text delta.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ChatEvent {
@@ -236,18 +255,22 @@ pub enum ChatEvent {
     /// Per-turn retrieval-source filter transparency frame (chat-wave2 scope
     /// spec §2.2/§2.3's "shown in the receipt" requirement). Emitted at most
     /// once per turn, only when the turn's effective `RetrievalScope`
-    /// (`crate::normalize::RetrievalScope`) is not `Auto`. Consumed by
+    /// (`crate::normalize::RetrievalScope`) is not `Auto`, or when a Space scopes the turn and it
+    /// carries a `knowledge` receipt (WS18-S3). Consumed by
     /// `ChatPanels.tsx`'s assembled-context inspector and `ChatMessages.tsx`'s
     /// scope badge — the concrete UI surface the spec's "shown in the
     /// receipt" requirement asks for.
     SourceScopeApplied {
-        /// `"knowledge_only"` or `"web_only"` — never `"auto"`, which never
-        /// emits this frame at all.
+        /// `"knowledge_only"` or `"web_only"`, or `"auto"` for a turn whose only receipt is
+        /// `knowledge`. An ordinary turn emits no frame at all.
         scope: String,
         /// Builtin tool names this turn's offered set excluded because of
         /// `scope`, for a concrete "Nett-kilder ekskludert" / "Organisasjons-
         /// kilder ekskludert" style disclosure rather than a vague claim.
         excluded_tools: Vec<String>,
+        /// What the Space's knowledge did for this turn (WS18-S3). Absent for a turn no Space
+        /// scopes, so those frames stay byte-identical to before.
+        knowledge: Option<KnowledgeReceipt>,
     },
     /// Structured internal grounding payload rendered by the chat UI.
     Grounding {
@@ -268,6 +291,12 @@ pub enum ChatEvent {
         mime: String,
         url: String,
         size: i64,
+        /// The structural check of a generated Office or PDF file, when the
+        /// verifier made one. Carried on this frame, not in a new event name.
+        check: Option<mp_contracts::office_verification::OfficeVerification>,
+        /// The render of a generated Office file, when the render layer made one.
+        /// Transient: it rides on this frame only, and the download is still the file.
+        preview: Option<AttachmentPreview>,
     },
     /// Usage/latency/cost/confidence for the insight chip + reasoning popover.
     Usage {
@@ -336,6 +365,17 @@ pub enum ChatEvent {
         plan_id: String,
         summary: String,
         steps: Value,
+    },
+    /// The question a Do run's `ask_user` call put to the run's owner, sent once the run completed with
+    /// it still waiting (WS14 S4). Control event, ungated: a client that never opted in still has to see
+    /// that its turn waits on an answer. `items` is the question as the card reads it, the shape of
+    /// `ListRunQuestions`' items. An older client ignores the unknown event name and reads the prose
+    /// the turn ends with, which is the degrade path.
+    UserQuestion {
+        question_id: String,
+        delivery: String,
+        expires_at: Option<String>,
+        items: Value,
     },
     /// Deterministic "memory was used" indicator (harness-adoption §7.9,
     /// hermes-agent's `RecallStatus`, MIT): emitted once per turn, before the
@@ -411,6 +451,9 @@ pub enum ChatEvent {
         /// The turn's run ceiling, on the frames that carry one (WS27-S6). `None` leaves the frame
         /// as it was before the ceiling existed.
         ceiling: Option<crate::sse_events::run_ceiling::CeilingProgress>,
+        /// How the budget moved this call's route (WS27-S7): `tier_shifted` or `cheap_fallback`, only when
+        /// inference-core's route note says the posture moved it. `None` keeps the frame's earlier shape.
+        routing: Option<&'static str>,
     },
     // ---- end usage progress (WS27) ----
     // ---- lifecycle (WS15) ----
@@ -443,6 +486,25 @@ pub enum ChatEvent {
         skills_dropped: Option<u32>,
         layer: Option<&'static str>,
         state: Option<&'static str>,
+    },
+    /// A parked run (WS03 S8-A): the executor stopped the run on a closed reason and it resumes
+    /// later. A control event, ungated: a client that never opted in still has to hear that its
+    /// answer is waiting. Ids, a closed token and a time only. The keys are the ones WS03 shipped
+    /// and the SPA reads, so this variant adds and renames none.
+    RunParked {
+        run_id: String,
+        reason: mp_contracts::loop_fold::ParkReason,
+        /// When the run can be resumed (RFC 3339, UTC), or `None` when that time is unreadable.
+        resume_after: Option<String>,
+    },
+    /// The workspace of the sandboxed computer a tool call used: where its files are kept, and whether they
+    /// were (WS22-S6). `scope` is the workspace, `state` its outcome, and `cause` the closed reason when the
+    /// lease recorded one. A `steps` family frame, so only a client that asked for step detail sees it.
+    /// Closed tokens only: no path, file name, content or error text.
+    SandboxState {
+        scope: &'static str,
+        state: &'static str,
+        cause: Option<&'static str>,
     },
     // ---- end lifecycle (WS15) ----
     /// Terminal control: generation stopped/cancelled by the user.
@@ -481,6 +543,23 @@ pub enum ChatEvent {
 }
 
 impl ChatEvent {
+    /// The `sandbox_state` frame for a workspace result a tool call produced (WS22-S6). Each token must be a
+    /// member of its closed list, so a result that carries free text or a path yields `None` rather than a
+    /// frame that could show it.
+    #[must_use]
+    pub fn sandbox_state(scope: &str, state: &str, cause: Option<&str>) -> Option<Self> {
+        use mp_contracts::lifecycle_notice::{closed_token, SANDBOX_CAUSES, SANDBOX_SCOPES, SANDBOX_STATES};
+        let cause = match cause {
+            Some(token) => Some(closed_token(&SANDBOX_CAUSES, token)?),
+            None => None,
+        };
+        Some(Self::SandboxState {
+            scope: closed_token(&SANDBOX_SCOPES, scope)?,
+            state: closed_token(&SANDBOX_STATES, state)?,
+            cause,
+        })
+    }
+
     /// The opt-in feature family this event belongs to, or `None` if it is a
     /// control event that is ALWAYS emitted (never gated).
     #[must_use]
@@ -503,6 +582,8 @@ impl ChatEvent {
             ChatEvent::MemoryRecall { .. } => Some("memory"),
             // ---- lifecycle (WS15) ----
             ChatEvent::RetryScheduled { .. } => Some("steps"),
+            // ---- sandbox state (WS22-S6) ----
+            ChatEvent::SandboxState { .. } => Some("steps"),
             // control events — always allowed (Title/FollowUps only exist when
             // the gateway actually generated them; gating on a feature family
             // would silently drop them for the plain `chat` profile, which is
@@ -525,7 +606,10 @@ impl ChatEvent {
             | ChatEvent::SubscriptionError { .. }
             // ---- lifecycle (WS15) ----
             | ChatEvent::Compaction { .. }
-            | ChatEvent::ContextChange { .. } => None,
+            | ChatEvent::ContextChange { .. }
+            | ChatEvent::RunParked { .. }
+            // The question a run waits on (WS14 S4): the card needs it whatever the client opted into.
+            | ChatEvent::UserQuestion { .. } => None,
         }
     }
 
@@ -561,11 +645,14 @@ impl ChatEvent {
             ChatEvent::MemoryRecall { .. } => "memory_recall",
             // ---- lifecycle (WS15) ----
             ChatEvent::RetryScheduled { .. } => "retry_scheduled",
+            ChatEvent::SandboxState { .. } => "sandbox_state",
             ChatEvent::Compaction { .. } => "compaction",
             ChatEvent::ContextChange { .. } => "context_change",
+            ChatEvent::RunParked { .. } => "run_parked",
             ChatEvent::Title { .. } => "title",
             ChatEvent::FollowUps { .. } => "follow_ups",
             ChatEvent::PlanProposed { .. } => "plan_proposed",
+            ChatEvent::UserQuestion { .. } => "user_question",
             ChatEvent::QueuedInput { .. } | ChatEvent::QueuedInputReceipted { .. } => "queued_input",
             ChatEvent::RetrievalNotice { .. } => "retrieval_notice",
             // ---- usage progress (WS27) ----
@@ -646,8 +733,12 @@ impl ChatEvent {
                 }
                 payload
             }
-            ChatEvent::SourceScopeApplied { scope, excluded_tools } => {
-                json!({ "scope": scope, "excluded_tools": excluded_tools })
+            ChatEvent::SourceScopeApplied { scope, excluded_tools, knowledge } => {
+                let mut payload = json!({ "scope": scope, "excluded_tools": excluded_tools });
+                if let Some(receipt) = knowledge {
+                    payload["knowledge"] = serde_json::to_value(receipt).unwrap_or_else(|_| json!({}));
+                }
+                payload
             }
             ChatEvent::Grounding { grounding } => {
                 serde_json::to_value(grounding).unwrap_or_else(|_| json!({}))
@@ -667,8 +758,26 @@ impl ChatEvent {
                 mime,
                 url,
                 size,
+                check,
+                preview,
             } => {
-                json!({ "id": id, "name": name, "type": mime, "url": url, "size": size })
+                let mut attachment =
+                    json!({ "id": id, "name": name, "type": mime, "url": url, "size": size });
+                // Optional, and only where the verifier ran: an attachment with no check keeps its old keys.
+                if let Some(report) = check {
+                    attachment["check"] = serde_json::to_value(report).unwrap_or_else(|_| json!({}));
+                }
+                // The same rule for the render: no preview, no key.
+                if let Some(preview) = preview {
+                    attachment["preview"] = json!({
+                        "mime": preview.mime,
+                        "url": preview.url,
+                        "pages": preview.pages,
+                        "fonts_substituted": preview.fonts_substituted,
+                        "thumbs": preview.thumbs,
+                    });
+                }
+                attachment
             }
             ChatEvent::Usage {
                 input_tokens,
@@ -780,6 +889,18 @@ impl ChatEvent {
                 "steps": steps,
                 "request_id": request_id,
             }),
+            ChatEvent::UserQuestion {
+                question_id,
+                delivery,
+                expires_at,
+                items,
+            } => json!({
+                "question_id": question_id,
+                "delivery": delivery,
+                "expires_at": expires_at,
+                "items": items,
+                "request_id": request_id,
+            }),
             ChatEvent::QueuedInput { messages } => {
                 json!({ "messages": messages, "request_id": request_id })
             }
@@ -797,6 +918,7 @@ impl ChatEvent {
                 phase,
                 snapshot,
                 ceiling,
+                routing,
             } => {
                 let mut payload = json!({
                     "calls": snapshot.calls,
@@ -832,6 +954,10 @@ impl ChatEvent {
                         payload["warning"] = json!(warning.as_str());
                     }
                 }
+                // Stated only on a call the budget moved, so an unmoved frame keeps its shape.
+                if let Some(routing) = routing {
+                    payload["routing"] = json!(routing);
+                }
                 payload
             }
             // ---- end usage progress (WS27) ----
@@ -852,6 +978,14 @@ impl ChatEvent {
                 "reason": reason,
                 "request_id": request_id,
             }),
+            ChatEvent::SandboxState { scope, state, cause } => {
+                let mut payload = json!({ "scope": scope, "state": state, "request_id": request_id });
+                // Omitted, not null, when the workspace names no cause: a frame that says the files were kept carries none.
+                if let Some(cause) = cause {
+                    payload["cause"] = json!(cause);
+                }
+                payload
+            }
             ChatEvent::Compaction {
                 scope,
                 outcome,
@@ -897,6 +1031,18 @@ impl ChatEvent {
                 }
                 payload
             }
+            // The keys and their values are WS03's `run_parked` frame exactly, so the wire is unchanged.
+            ChatEvent::RunParked {
+                run_id,
+                reason,
+                resume_after,
+            } => json!({
+                "run_id": run_id,
+                "request_id": request_id,
+                "status": "parked",
+                "reason": reason.as_str(),
+                "resume_after": resume_after,
+            }),
             ChatEvent::Stopped { reason } => json!({ "reason": reason, "request_id": request_id }),
             ChatEvent::Error {
                 code,
@@ -1084,11 +1230,12 @@ struct SinkResume {
     next_seq: tokio::sync::Mutex<u64>,
 }
 
-/// A generated image or file, whose payload is an inline `data:` URI.
+/// A generated image or file, whose payload is an inline `data:` URI. A preview is binary as well, and it is the
+/// larger of the two, so it bypasses the resume buffer with the file it was rendered from.
 fn carries_binary(event: &ChatEvent) -> bool {
     match event {
         ChatEvent::Artifact { content, .. } => content.starts_with("data:"),
-        ChatEvent::Attachment { url, .. } => url.starts_with("data:"),
+        ChatEvent::Attachment { url, preview, .. } => url.starts_with("data:") || preview.is_some(),
         _ => false,
     }
 }
@@ -1430,6 +1577,7 @@ impl RichEventSink {
         &self,
         call: &crate::usage_meter::CallUsage,
         priced: &crate::pricing::Priced,
+        routing: Option<&'static str>,
     ) {
         if !self.records_calls() {
             return;
@@ -1450,6 +1598,7 @@ impl RichEventSink {
                 phase: call.phase,
                 snapshot,
                 ceiling,
+                routing,
             })
             .await;
         }
@@ -1944,6 +2093,82 @@ mod tests {
         assert_eq!(payload["request_id"], "req-1");
     }
 
+    /// WS22-S6: the sandbox_state frame is a steps-family frame whose payload is its closed tokens and the
+    /// request id, and nothing else. Its constructor admits only members of the closed lists.
+    #[test]
+    fn sandbox_state_frame_contract() {
+        use mp_contracts::lifecycle_notice::{SANDBOX_CAUSES, SANDBOX_SCOPES, SANDBOX_STATES, SANDBOX_STATE_KEYS};
+        let kept = ChatEvent::sandbox_state("thread", "kept", None).expect("closed scope and state");
+        assert_eq!(kept.name(), "sandbox_state");
+        assert_eq!(kept.family(), Some("steps"));
+        assert!(!kept.should_emit(&[]), "a client that asked for no steps must not see the workspace");
+        assert!(kept.should_emit(&["steps".to_string()]));
+        let payload = kept.payload("req-1");
+        let keys: std::collections::BTreeSet<&str> =
+            payload.as_object().expect("an object").keys().map(String::as_str).collect();
+        assert_eq!(keys, ["request_id", "scope", "state"].into_iter().collect(), "{payload}");
+
+        let conflict = ChatEvent::sandbox_state("thread", "conflict", Some("workspace_conflict"))
+            .expect("closed tokens");
+        let payload = conflict.payload("req-1");
+        assert_eq!(payload["cause"], "workspace_conflict");
+        for (key, value) in payload.as_object().expect("an object") {
+            if key == "request_id" {
+                continue;
+            }
+            assert!(SANDBOX_STATE_KEYS.contains(&key.as_str()), "{key} is not a sandbox_state key");
+            let token = value.as_str().expect("every sandbox_state value is a closed token");
+            let closed: &[&str] = match key.as_str() {
+                "scope" => &SANDBOX_SCOPES,
+                "state" => &SANDBOX_STATES,
+                _ => &SANDBOX_CAUSES,
+            };
+            assert!(closed.contains(&token), "{key}={token} is not a closed token");
+        }
+
+        // A workspace, a state or a cause outside its closed list, or one that carries a path or free
+        // text, is refused rather than shown.
+        for (scope, state, cause) in [
+            ("workspace", "kept", None),
+            ("thread", "kept; rm -rf /", None),
+            ("thread", "conflict", Some("/home/user/a.txt")),
+            ("thread", "conflict", Some("workspace_conflict ")),
+        ] {
+            assert!(ChatEvent::sandbox_state(scope, state, cause).is_none(), "{scope} {state} {cause:?}");
+        }
+    }
+
+    #[test]
+    fn run_parked_is_a_control_event() {
+        // A park reaches a plain client, and its keys are the ones WS03 shipped and the SPA reads.
+        let no_features: Vec<String> = vec![];
+        let parked = ChatEvent::RunParked {
+            run_id: "run-42".into(),
+            reason: mp_contracts::loop_fold::ParkReason::ProviderExhausted,
+            resume_after: Some("2026-10-20T12:00:00Z".into()),
+        };
+        assert_eq!(parked.family(), None);
+        assert!(parked.should_emit(&no_features));
+        assert_eq!(parked.name(), "run_parked");
+        assert_eq!(
+            parked.payload("req-1"),
+            json!({
+                "run_id": "run-42",
+                "request_id": "req-1",
+                "status": "parked",
+                "reason": "provider_exhausted",
+                "resume_after": "2026-10-20T12:00:00Z",
+            })
+        );
+        // An unreadable time is null, not an omitted key.
+        let unreadable = ChatEvent::RunParked {
+            run_id: "run-42".into(),
+            reason: mp_contracts::loop_fold::ParkReason::CredentialWindow,
+            resume_after: None,
+        };
+        assert!(unreadable.payload("req-1")["resume_after"].is_null());
+    }
+
     #[test]
     fn opt_in_unlocks_only_the_requested_families() {
         let feats = families(&["reasoning", "usage"]);
@@ -1971,6 +2196,7 @@ mod tests {
             phase: crate::usage_meter::CallPhase::ToolRound,
             snapshot: running_total(&[(crate::pricing::CostBasis::Metered, Some(0.01))]),
             ceiling: None,
+            routing: None,
         };
         assert!(progress.should_emit(&feats));
         // Not opted in:
@@ -2048,6 +2274,7 @@ mod tests {
             phase: crate::usage_meter::CallPhase::Overhead,
             snapshot: running_total(calls),
             ceiling: None,
+            routing: None,
         }
         .payload("req-1")
         .as_object()
@@ -2121,6 +2348,7 @@ mod tests {
             phase: crate::usage_meter::CallPhase::Answer,
             snapshot: running_total(&[(crate::pricing::CostBasis::Metered, Some(0.25))]),
             ceiling: None,
+            routing: None,
         };
         assert_eq!(event.family(), Some("usage"));
         assert_eq!(event.name(), "usage_progress");
@@ -2157,8 +2385,8 @@ mod tests {
                 }),
                 source: crate::pricing::PriceSource::Exact,
             };
-            sink.record_call(&call, &priced).await;
-            sink.record_call(&call, &priced).await;
+            sink.record_call(&call, &priced, None).await;
+            sink.record_call(&call, &priced, None).await;
             drop(sink);
             let mut sent = 0;
             while rx.try_recv().is_ok() {
@@ -2208,12 +2436,12 @@ mod tests {
             }),
             source: crate::pricing::PriceSource::Exact,
         };
-        sink.record_call(&call, &priced).await;
+        sink.record_call(&call, &priced, None).await;
         assert!(
             !sink.run_ceiling_stops_tool_phase(),
             "half of the cap is not the cap"
         );
-        sink.record_call(&call, &priced).await;
+        sink.record_call(&call, &priced, None).await;
         assert!(
             sink.run_ceiling_stops_tool_phase(),
             "two calls reach the cap"
@@ -2232,6 +2460,7 @@ mod tests {
                 fraction: Some(0.8),
                 warning: Some(crate::sse_events::run_ceiling::CeilingWarning::Eighty),
             }),
+            routing: None,
         }
         .payload("req-1");
         assert_eq!(carried["ceiling_usd"], json!(0.05));
@@ -2327,6 +2556,7 @@ mod tests {
             phase: crate::usage_meter::CallPhase::Answer,
             snapshot: running_total(&[(crate::pricing::CostBasis::Metered, Some(0.01))]),
             ceiling: None,
+            routing: None,
         };
         assert_eq!(progress.name(), "usage_progress");
 
@@ -2432,8 +2662,103 @@ mod tests {
             mime: "image/png".into(),
             url: "blob:1".into(),
             size: 99,
+            check: None,
+            preview: None,
         };
         assert_eq!(att.payload("r")["type"], "image/png");
+    }
+
+    /// The check rides on the attachment frame only when the verifier made one, and it carries the report's
+    /// own level and findings. Nothing in the frame says the file was verified in Office.
+    #[test]
+    fn attachment_event_carries_check_only_when_present() {
+        let report = mp_contracts::office_verification::OfficeVerification::from_untrusted_json(
+            r#"{"kind":"docx","level":"warnings","checks":[{"id":"rels","level":"warnings","message":"a relationship points nowhere"}],"stats":{"paragraphs":2}}"#,
+            "letter.docx",
+            mp_contracts::office_verification::OfficeKind::Docx,
+        )
+        .expect("a well-formed report");
+        let attachment = |check| ChatEvent::Attachment {
+            id: "a".into(),
+            name: "letter.docx".into(),
+            mime: "application/vnd.openxmlformats-officedocument.wordprocessingml.document".into(),
+            url: "data:application/octet-stream;base64,AA".into(),
+            size: 2,
+            check,
+            preview: None,
+        };
+
+        let plain = attachment(None).payload("r");
+        assert!(plain.get("check").is_none(), "no verifier ran, so the key is absent: {plain}");
+        assert_eq!(plain["size"], 2);
+
+        let checked = attachment(Some(report)).payload("r");
+        assert_eq!(checked["check"]["level"], "warnings");
+        assert_eq!(checked["check"]["checks"][0]["id"], "rels");
+        assert_eq!(checked["check"]["checks"][0]["message"], "a relationship points nowhere");
+        assert_eq!(checked["check"]["stats"]["paragraphs"], 2);
+        assert_eq!(checked["name"], "letter.docx");
+    }
+
+    /// The preview rides on the attachment frame only when the render layer made one. The download URL stays the
+    /// file itself, so the viewer is never the deliverable.
+    #[test]
+    fn attachment_event_carries_preview_only_when_present() {
+        let preview = AttachmentPreview {
+            mime: "application/pdf".into(),
+            url: "data:application/pdf;base64,AA".into(),
+            pages: 3,
+            fonts_substituted: true,
+            thumbs: vec!["data:image/png;base64,AA".into()],
+        };
+        let attachment = |preview| ChatEvent::Attachment {
+            id: "a".into(),
+            name: "budget.xlsx".into(),
+            mime: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet".into(),
+            url: "data:application/octet-stream;base64,AA".into(),
+            size: 2,
+            check: None,
+            preview,
+        };
+
+        let plain = attachment(None).payload("r");
+        assert!(
+            plain.get("preview").is_none(),
+            "no render ran, so the key is absent: {plain}"
+        );
+
+        let rendered = attachment(Some(preview)).payload("r");
+        assert_eq!(rendered["preview"]["mime"], "application/pdf");
+        assert_eq!(rendered["preview"]["url"], "data:application/pdf;base64,AA");
+        assert_eq!(rendered["preview"]["pages"], 3);
+        assert_eq!(rendered["preview"]["fonts_substituted"], true);
+        assert_eq!(rendered["preview"]["thumbs"][0], "data:image/png;base64,AA");
+        assert_eq!(rendered["url"], "data:application/octet-stream;base64,AA");
+    }
+
+    #[test]
+    fn carries_binary_is_true_for_a_preview_attachment() {
+        let preview = AttachmentPreview {
+            mime: "application/pdf".into(),
+            url: "data:application/pdf;base64,AA".into(),
+            pages: 1,
+            fonts_substituted: false,
+            thumbs: Vec::new(),
+        };
+        let attachment = |url: &str, preview| ChatEvent::Attachment {
+            id: "a".into(),
+            name: "budget.xlsx".into(),
+            mime: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet".into(),
+            url: url.into(),
+            size: 2,
+            check: None,
+            preview,
+        };
+        assert!(carries_binary(&attachment("blob:1", Some(preview))));
+        assert!(!carries_binary(&attachment(
+            "https://example.test/budget.xlsx",
+            None
+        )));
     }
 
     #[test]
@@ -2912,7 +3237,8 @@ mod payload_contract {
     use serde::Serialize;
     use serde_json::{json, Value};
 
-    use super::{ChatEvent, RetentionClass, ServedBy};
+    use super::{AttachmentPreview, ChatEvent, RetentionClass, ServedBy};
+    use crate::knowledge_receipt::{KnowledgeMode, KnowledgeReceipt};
 
     const REQUEST_ID: &str = "req-sample";
 
@@ -2944,6 +3270,7 @@ mod payload_contract {
         "Title",
         "FollowUps",
         "PlanProposed",
+        "UserQuestion",
         "Verification",
         "MemoryRecall",
         "QueuedInput",
@@ -2956,6 +3283,8 @@ mod payload_contract {
         "RetryScheduled",
         "Compaction",
         "ContextChange",
+        "RunParked",
+        "SandboxState",
     ];
 
     /// The variant's name. No wildcard arm, so a new `ChatEvent` variant is a compile error here.
@@ -2977,6 +3306,7 @@ mod payload_contract {
             ChatEvent::Title { .. } => "Title",
             ChatEvent::FollowUps { .. } => "FollowUps",
             ChatEvent::PlanProposed { .. } => "PlanProposed",
+            ChatEvent::UserQuestion { .. } => "UserQuestion",
             ChatEvent::Verification { .. } => "Verification",
             ChatEvent::MemoryRecall { .. } => "MemoryRecall",
             ChatEvent::QueuedInput { .. } => "QueuedInput",
@@ -2989,11 +3319,34 @@ mod payload_contract {
             ChatEvent::RetryScheduled { .. } => "RetryScheduled",
             ChatEvent::Compaction { .. } => "Compaction",
             ChatEvent::ContextChange { .. } => "ContextChange",
+            ChatEvent::RunParked { .. } => "RunParked",
+            ChatEvent::SandboxState { .. } => "SandboxState",
         }
     }
 
     fn s(text: &str) -> String {
         text.to_owned()
+    }
+
+    /// The structural check of a generated file that failed, the optional `check` key the full attachment sample sets.
+    fn office_check() -> mp_contracts::office_verification::OfficeVerification {
+        mp_contracts::office_verification::OfficeVerification::from_untrusted_json(
+            r#"{"kind":"docx","level":"failed","checks":[{"id":"container","level":"failed","message":"the file is not a readable zip package"}],"stats":{}}"#,
+            "f.docx",
+            mp_contracts::office_verification::OfficeKind::Docx,
+        )
+        .expect("a well-formed report")
+    }
+
+    /// The render of the file `office_check` judges, the optional `preview` key the full attachment sample sets.
+    fn office_preview() -> AttachmentPreview {
+        AttachmentPreview {
+            mime: s("application/pdf"),
+            url: s("data:application/pdf;base64,AA"),
+            pages: 1,
+            fonts_substituted: false,
+            thumbs: vec![s("data:image/png;base64,AA")],
+        }
     }
 
     fn citation(full: bool) -> ChatEvent {
@@ -3101,7 +3454,7 @@ mod payload_contract {
         basis: Option<crate::pricing::CostBasis>,
         unpriced_calls: u32,
     ) -> ChatEvent {
-        usage_progress_with_ceiling(calls, cost_usd, basis, unpriced_calls, None)
+        usage_progress_with_ceiling(calls, cost_usd, basis, unpriced_calls, None, None)
     }
 
     /// A progress frame of the same turn, carrying the run ceiling it states.
@@ -3111,6 +3464,7 @@ mod payload_contract {
         basis: Option<crate::pricing::CostBasis>,
         unpriced_calls: u32,
         ceiling: Option<crate::sse_events::run_ceiling::CeilingProgress>,
+        routing: Option<&'static str>,
     ) -> ChatEvent {
         ChatEvent::UsageProgress {
             phase: crate::usage_meter::CallPhase::ToolRound,
@@ -3131,6 +3485,7 @@ mod payload_contract {
                 }),
             },
             ceiling,
+            routing,
         }
     }
 
@@ -3227,14 +3582,44 @@ mod payload_contract {
             ChatEvent::ToolResult { id: s("1"), status: s("error"), output: s("out"), error: Some(s("boom")) },
             citation(false),
             citation(true),
-            ChatEvent::SourceScopeApplied { scope: s("web_only"), excluded_tools: Vec::new() },
-            ChatEvent::SourceScopeApplied { scope: s("knowledge_only"), excluded_tools: vec![s("web_search")] },
+            ChatEvent::SourceScopeApplied { scope: s("web_only"), excluded_tools: Vec::new(), knowledge: None },
+            ChatEvent::SourceScopeApplied {
+                scope: s("knowledge_only"),
+                excluded_tools: vec![s("web_search")],
+                knowledge: None,
+            },
+            ChatEvent::SourceScopeApplied {
+                scope: s("auto"),
+                excluded_tools: Vec::new(),
+                knowledge: Some(KnowledgeReceipt { mode: KnowledgeMode::NotEntitled, sources: None }),
+            },
+            ChatEvent::SourceScopeApplied {
+                scope: s("knowledge_only"),
+                excluded_tools: vec![s("web_search")],
+                knowledge: Some(KnowledgeReceipt { mode: KnowledgeMode::Retrieval, sources: Some(3) }),
+            },
             grounding(false),
             grounding(true),
             ChatEvent::Artifact { id: s("a1"), kind: s("document"), title: s(""), content: s(""), version: 1 },
             ChatEvent::Artifact { id: s("a1"), kind: s("code"), title: s("T"), content: s("body"), version: 2 },
-            ChatEvent::Attachment { id: s("f1"), name: s("f.png"), mime: s("image/png"), url: s("blob:1"), size: 0 },
-            ChatEvent::Attachment { id: s("f1"), name: s("f.png"), mime: s("image/png"), url: s("blob:1"), size: 2048 },
+            ChatEvent::Attachment {
+                id: s("f1"),
+                name: s("f.png"),
+                mime: s("image/png"),
+                url: s("blob:1"),
+                size: 0,
+                check: None,
+                preview: None,
+            },
+            ChatEvent::Attachment {
+                id: s("f1"),
+                name: s("f.docx"),
+                mime: s("application/vnd.openxmlformats-officedocument.wordprocessingml.document"),
+                url: s("data:application/octet-stream;base64,AA"),
+                size: 2048,
+                check: Some(office_check()),
+                preview: Some(office_preview()),
+            },
             usage(false),
             usage(true),
             usage_progress(1, None, Some(crate::pricing::CostBasis::Subscription), 0),
@@ -3259,7 +3644,10 @@ mod payload_contract {
                     fraction: Some(0.8),
                     warning: Some(crate::sse_events::run_ceiling::CeilingWarning::Eighty),
                 }),
+                None,
             ),
+            // A frame whose call the budget moved states its routing (WS27-S7).
+            usage_progress_with_ceiling(2, Some(0.001), Some(crate::pricing::CostBasis::Metered), 0, None, Some("tier_shifted")),
             turn_timing(false),
             turn_timing(true),
             ChatEvent::Title { title: s("") },
@@ -3271,6 +3659,24 @@ mod payload_contract {
                 plan_id: s("p1"),
                 summary: s("Summary"),
                 steps: json!([{ "id": "s1", "title": "T", "operation": "write" }]),
+            },
+            ChatEvent::UserQuestion {
+                question_id: s("q_1"),
+                delivery: s("next_turn"),
+                expires_at: None,
+                items: json!([]),
+            },
+            ChatEvent::UserQuestion {
+                question_id: s("q_2"),
+                delivery: s("next_turn"),
+                expires_at: Some(s("2026-11-02T10:00:00Z")),
+                items: json!([{
+                    "id": "carrier",
+                    "kind": "single",
+                    "prompt": "Which carrier?",
+                    "options": [{ "id": "bring", "label": "Bring", "description": null }],
+                    "allow_other": true,
+                }]),
             },
             ChatEvent::Verification { verdict: "unrelated", kb_citations: 0, web_citations: 0, web_allowed: false },
             ChatEvent::Verification { verdict: "supports", kb_citations: 2, web_citations: 1, web_allowed: true },
@@ -3339,6 +3745,26 @@ mod payload_contract {
                 skills_dropped: Some(0),
                 layer: Some("memory"),
                 state: Some("skipped_by_policy"),
+            },
+            ChatEvent::RunParked {
+                run_id: s("run-1"),
+                reason: mp_contracts::loop_fold::ParkReason::CredentialWindow,
+                resume_after: None,
+            },
+            ChatEvent::RunParked {
+                run_id: s("run-1"),
+                reason: mp_contracts::loop_fold::ParkReason::ProviderExhausted,
+                resume_after: Some(s("2026-10-20T12:00:00Z")),
+            },
+            ChatEvent::SandboxState {
+                scope: "thread",
+                state: "kept",
+                cause: None,
+            },
+            ChatEvent::SandboxState {
+                scope: "thread",
+                state: "conflict",
+                cause: Some("workspace_conflict"),
             },
             ChatEvent::SubscriptionError {
                 code: s("rate_limited"),
@@ -3444,6 +3870,30 @@ mod payload_contract {
         let mut text = serde_json::to_string_pretty(&contract).expect("the contract serializes");
         text.push('\n');
         text
+    }
+
+    /// `user_question` is a control event that carries the card's keys and the question itself, and
+    /// nothing else (WS14 S4).
+    #[test]
+    fn user_question_is_a_control_event_with_the_card_keys() {
+        let event = ChatEvent::UserQuestion {
+            question_id: "q_abc".into(),
+            delivery: "next_turn".into(),
+            expires_at: Some("2026-11-02T10:00:00Z".into()),
+            items: json!([{ "id": "carrier", "kind": "single" }]),
+        };
+        assert_eq!(event.name(), "user_question");
+        assert!(
+            event.family().is_none(),
+            "a question is a control event, never feature-gated"
+        );
+        assert!(event.should_emit(&[]));
+        let payload = event.payload("req-4");
+        assert_eq!(payload["question_id"], "q_abc");
+        assert_eq!(payload["delivery"], "next_turn");
+        assert_eq!(payload["expires_at"], "2026-11-02T10:00:00Z");
+        assert_eq!(payload["items"][0]["id"], "carrier");
+        assert_eq!(payload["request_id"], "req-4");
     }
 
     #[test]

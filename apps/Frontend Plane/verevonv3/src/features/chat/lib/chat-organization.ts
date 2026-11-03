@@ -1,4 +1,5 @@
 import { chatOrganizationActionSchema, chatOrganizationSchema, type ChatOrganization, type ChatOrganizationAction } from '@/shared/actions/chat-organization'
+import { isWaitingState, legacyStateFromRunStatus } from '@/shared/chat/thread-status'
 import { LocalizedError } from '@/shared/i18n/errors'
 import { readClientValue, writeClientJson } from '@/shared/session/client-storage'
 import type { ChatThreadHistoryItem } from './chat-thread-history'
@@ -47,15 +48,14 @@ export function applyChatOrganizationAction(state: ChatOrganization, input: Chat
   return { ...state, projects: state.projects.map((project) => project.id !== action.id ? project : action.type === 'project.rename' ? { ...project, name: action.name } : { ...project, pinned: action.pinned }) }
 }
 
-const activeStatuses = new Set(['running', 'in_progress', 'queued', 'pending'])
-const attentionStatuses = new Set(['failed', 'timed_out', 'denied', 'rejected', 'awaiting_approval', 'waiting_approval', 'paused', 'blocked', 'ambiguous'])
 export function selectOrganizedChats(items: ChatThreadHistoryItem[], state: ChatOrganization, query: string): ChatThreadHistoryItem[] {
   const needle = query.trim().toLocaleLowerCase()
   const matches = items.filter((item) => {
     const projectName = state.projects.find((project) => project.id === state.assignments[item.threadId])?.name ?? ''
     if (needle && !`${item.title} ${item.preview} ${projectName}`.toLocaleLowerCase().includes(needle)) return false
-    const status = item.latestRunStatus?.trim().toLowerCase() ?? ''
-    return state.view.filter === 'all' || (state.view.filter === 'pinned' && item.pinned === true) || (state.view.filter === 'active' && activeStatuses.has(status)) || (state.view.filter === 'attention' && attentionStatuses.has(status))
+    // "Attention" is the same set the rail shows: a run that failed or waits on the person.
+    const runState = legacyStateFromRunStatus(item.latestRunStatus)
+    return state.view.filter === 'all' || (state.view.filter === 'pinned' && item.pinned === true) || (state.view.filter === 'active' && runState === 'working') || (state.view.filter === 'attention' && (runState === 'failed' || isWaitingState(runState)))
   })
   return matches.sort((a, b) => {
     if (state.view.sort === 'title') return a.title.localeCompare(b.title) || a.threadId.localeCompare(b.threadId)

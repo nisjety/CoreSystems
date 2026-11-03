@@ -236,6 +236,8 @@ struct Call {
     rpc: &'static str,
     caller: CallerSlot,
     settled: AtomicBool,
+    /// The wire `InferPurpose` the request named (EP-13 S3); 0, unspecified, for every other RPC.
+    purpose: i32,
 }
 
 impl Call {
@@ -248,9 +250,16 @@ impl Call {
                 rpc,
                 caller,
                 settled: AtomicBool::new(false),
+                purpose: 0,
             },
             request,
         )
+    }
+
+    /// Count this call under the purpose its request named (EP-13 S3).
+    fn with_purpose(mut self, purpose: i32) -> Self {
+        self.purpose = purpose;
+        self
     }
 
     /// Claim the one count this call gets. False when it has been counted.
@@ -290,16 +299,18 @@ impl Call {
         let service = self.caller.label();
         match response.served() {
             Some(by) => {
-                metrics::record_request(
+                metrics::record_request_with_purpose(
                     self.rpc,
+                    self.purpose,
                     service,
                     by.model,
                     by.provider,
                     response.outcome(),
                 );
                 if !response.was_cached() {
-                    metrics::record_tokens(
+                    metrics::record_tokens_with_purpose(
                         service,
+                        self.purpose,
                         by.model,
                         by.provider,
                         non_negative(by.input_tokens),
@@ -307,7 +318,14 @@ impl Call {
                     );
                 }
             }
-            None => metrics::record_request(self.rpc, service, metrics::NONE, metrics::NONE, "ok"),
+            None => metrics::record_request_with_purpose(
+                self.rpc,
+                self.purpose,
+                service,
+                metrics::NONE,
+                metrics::NONE,
+                "ok",
+            ),
         }
     }
 
@@ -319,8 +337,9 @@ impl Call {
         if !self.settle() {
             return;
         }
-        metrics::record_request(
+        metrics::record_request_with_purpose(
             self.rpc,
+            self.purpose,
             self.caller.label(),
             metrics::UNKNOWN,
             metrics::UNKNOWN,
@@ -405,6 +424,7 @@ impl<S: InferenceCore> InferenceCore for MeteredCore<S> {
         request: Request<pb::InferRequest>,
     ) -> Result<Response<pb::InferResponse>, Status> {
         let (call, request) = Call::begin("infer", request);
+        let call = call.with_purpose(request.get_ref().purpose);
         call.finish(self.inner.infer(request).await)
     }
 
@@ -415,6 +435,7 @@ impl<S: InferenceCore> InferenceCore for MeteredCore<S> {
         request: Request<pb::InferRequest>,
     ) -> Result<Response<Self::InferStreamStream>, Status> {
         let (call, request) = Call::begin("infer_stream", request);
+        let call = call.with_purpose(request.get_ref().purpose);
         call.finish_stream(self.inner.infer_stream(request).await)
     }
 
@@ -901,6 +922,41 @@ mod tests {
             series(&text, "inference_tokens_total", &["direction=\"input\""]).as_deref(),
             Some("2000"),
             "the cache hit adds no tokens: {text}"
+        );
+    }
+
+    /// EP-13 S3: an infer call is counted under the purpose its request named, its tokens
+    /// too; a request that names none stays in the unspecified series.
+    #[test]
+    fn an_answer_call_is_counted_under_its_purpose() {
+        let answer = pb::InferResponse {
+            model_used: "gpt-4o-mini".to_owned(),
+            provider_used: "azure-openai".to_owned(),
+            input_tokens: 40,
+            output_tokens: 7,
+            ..pb::InferResponse::default()
+        };
+        let text = rendered(async {
+            let (call, _request) = Call::begin("infer", Request::new(()));
+            let call = call.with_purpose(pb::InferPurpose::Answer as i32);
+            let _ = call.finish(Ok(Response::new(answer.clone())));
+            let (call, _request) = Call::begin("infer", Request::new(()));
+            let _ = call.finish(Ok(Response::new(answer)));
+        });
+        assert_eq!(
+            series(&text, "inference_requests_total", &["rpc=\"infer\"", "purpose=\"answer\""]).as_deref(),
+            Some("1"),
+            "{text}"
+        );
+        assert_eq!(
+            series(&text, "inference_requests_total", &["rpc=\"infer\"", "purpose=\"unspecified\""]).as_deref(),
+            Some("1"),
+            "{text}"
+        );
+        assert_eq!(
+            series(&text, "inference_tokens_total", &["purpose=\"answer\"", "direction=\"output\""]).as_deref(),
+            Some("7"),
+            "{text}"
         );
     }
 }

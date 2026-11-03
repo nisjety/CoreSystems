@@ -37,6 +37,43 @@ pub const NEXT_TURN_TTL_SECS: u32 = 24 * 60 * 60;
 /// Lifetime ceiling of a `resume` question, which holds a run open.
 pub const RESUME_TTL_SECS: u32 = 60 * 60;
 
+/// The question was authored by the run's own model. An empty origin on the wire means this.
+pub const ORIGIN_MODEL: &str = "model";
+/// The question is a form an MCP server sent through the run (EP-4 S5). It names the server, so
+/// the card never presents a server's question as the assistant's.
+pub const ORIGIN_MCP_ELICITATION: &str = "mcp_elicitation";
+/// Most characters of an origin label (the asking server's display name).
+pub const MAX_ORIGIN_LABEL: usize = 80;
+
+/// Check a question's origin and its label, and return the stored origin token. An empty origin
+/// reads as [`ORIGIN_MODEL`]. A model question carries no label; a server question must name
+/// its server. Who may send a non-model origin is the store's caller check, not this one.
+///
+/// # Errors
+/// [`Problem`] with reason `unsupported_origin`, `label_on_model_origin`, or the text reasons of
+/// a label (`empty_text`, `text_too_long`, `control_character`).
+pub fn validate_origin(origin: &str, label: &str) -> Result<&'static str, Problem> {
+    match origin {
+        "" | ORIGIN_MODEL => {
+            if label.is_empty() {
+                Ok(ORIGIN_MODEL)
+            } else {
+                Err(Problem::at("origin_label", "label_on_model_origin"))
+            }
+        }
+        ORIGIN_MCP_ELICITATION => {
+            // A blank label would render as an anonymous server (check_text refuses it).
+            check_text("origin_label", label, MAX_ORIGIN_LABEL, false)?;
+            // The label is one line on the card; check_text admits a newline or tab in prompts.
+            if label.contains('\n') || label.contains('\t') {
+                return Err(Problem::at("origin_label", "control_character"));
+            }
+            Ok(ORIGIN_MCP_ELICITATION)
+        }
+        _ => Err(Problem::at("origin", "unsupported_origin")),
+    }
+}
+
 /// The lifetime ceiling of `delivery`, or `None` for a delivery that does not exist.
 #[must_use]
 pub fn delivery_ttl_secs(delivery: &str) -> Option<u32> {
@@ -388,6 +425,60 @@ mod tests {
         assert_eq!(delivery_ttl_secs(DELIVERY_NEXT_TURN), Some(86_400));
         assert_eq!(delivery_ttl_secs(DELIVERY_RESUME), Some(3_600));
         assert_eq!(delivery_ttl_secs("later"), None);
+    }
+
+    #[test]
+    fn an_empty_or_model_origin_is_the_model_and_takes_no_label() {
+        assert_eq!(validate_origin("", ""), Ok(ORIGIN_MODEL));
+        assert_eq!(validate_origin(ORIGIN_MODEL, ""), Ok(ORIGIN_MODEL));
+        assert_eq!(
+            validate_origin(ORIGIN_MODEL, "Fixture").unwrap_err().reason,
+            "label_on_model_origin"
+        );
+        assert_eq!(
+            validate_origin("", "Fixture").unwrap_err().reason,
+            "label_on_model_origin"
+        );
+    }
+
+    #[test]
+    fn a_server_origin_needs_a_one_line_label_of_at_most_80_characters() {
+        assert_eq!(
+            validate_origin(ORIGIN_MCP_ELICITATION, "Fixture"),
+            Ok(ORIGIN_MCP_ELICITATION)
+        );
+        let at_bound = "æ".repeat(MAX_ORIGIN_LABEL);
+        assert_eq!(
+            validate_origin(ORIGIN_MCP_ELICITATION, &at_bound),
+            Ok(ORIGIN_MCP_ELICITATION)
+        );
+        for (label, reason) in [
+            ("", "empty_text"),
+            ("   ", "empty_text"),
+            (&*"x".repeat(MAX_ORIGIN_LABEL + 1), "text_too_long"),
+            ("two\nlines", "control_character"),
+            ("tab\there", "control_character"),
+            ("bell\u{7}", "control_character"),
+        ] {
+            assert_eq!(
+                validate_origin(ORIGIN_MCP_ELICITATION, label)
+                    .unwrap_err()
+                    .reason,
+                reason,
+                "{label:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unknown_origin_is_refused() {
+        for origin in ["Model", "mcp", "user", "assistant", " model", "mcp_elicitation "] {
+            assert_eq!(
+                validate_origin(origin, "").unwrap_err().reason,
+                "unsupported_origin",
+                "{origin:?}"
+            );
+        }
     }
 
     #[test]

@@ -2573,10 +2573,13 @@ describe('registry schema fields of R-13 PR 1: webPolicyByAudience and apiKeyExc
     ).toThrow(/not authorized/i);
   });
 
-  it('refuses the whole registry for an apiKeyExchange that is not a duplicate-free list of quarry or browser-broker', () => {
+  it('refuses the whole registry for an apiKeyExchange that is not a duplicate-free list of exchange audiences', () => {
+    // The closed set is API_KEY_EXCHANGE_AUDIENCE_SCOPES (api-key-exchange.ts):
+    // model-gateway, session-core and inference-core (EP-12 S2) and quarry and
+    // browser-broker (INNH-10). Anything else, and any repeat, is refused.
     for (const apiKeyExchange of [
       [],
-      ['model-gateway'],
+      ['data-plane'],
       ['quarry', 'quarry'],
       ['quarry', ''],
       ['*'],
@@ -2603,9 +2606,13 @@ describe('registry schema fields of R-13 PR 1: webPolicyByAudience and apiKeyExc
       (name) => policy?.[name]?.apiKeyExchange !== undefined,
     );
     expect(exchangers).toEqual(['verevon-gateway']);
-    expect(policy?.['verevon-gateway']?.apiKeyExchange).toEqual([
+    // INNH-10 (browser agent) and EP-12 S2 (Agent API) audiences.
+    expect([...(policy?.['verevon-gateway']?.apiKeyExchange ?? [])].sort()).toEqual([
       'browser-broker',
+      'inference-core',
+      'model-gateway',
       'quarry',
+      'session-core',
     ]);
     // Holding the exchange adds no service-token lane to the gateway.
     expect(policy?.['verevon-gateway']?.audiences).toEqual(['model-gateway']);

@@ -1179,6 +1179,7 @@ mod tests {
 
     fn start_request() -> pb::StartManagedRunRequest {
         pb::StartManagedRunRequest {
+            wake: None,
             thread_id: "thread-1".to_owned(),
             parent_run_id: "run-1".to_owned(),
             agent_id: "task".to_owned(),
@@ -1400,6 +1401,7 @@ mod tests {
     /// A root run of the gateway's own start, as a user starts it in `thread_id`.
     fn root_request(thread_id: &str, start_key: &str) -> pb::StartManagedRunRequest {
         pb::StartManagedRunRequest {
+            wake: None,
             thread_id: thread_id.to_owned(),
             parent_run_id: String::new(),
             agent_id: "execution-agent".to_owned(),

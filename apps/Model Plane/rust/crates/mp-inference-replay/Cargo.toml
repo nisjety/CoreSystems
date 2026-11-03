@@ -1,0 +1,23 @@
+[package]
+name = "mp-inference-replay"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+# Dev-only. Services name this crate under [dev-dependencies] and never under [dependencies]:
+# tests/cassette_lint.rs fails when that changes. A replayed session is a test fixture, never a
+# runtime path, so nothing this crate defines can reach a production binary.
+
+[dependencies]
+mp-contracts = { path = "../mp-contracts" }
+futures = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = "0.10"
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tokio-stream = { version = "0.1", features = ["net"] }
+tonic = { workspace = true }
+ulid = { workspace = true }

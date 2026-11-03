@@ -66,6 +66,9 @@ import {
   type ComposerAttachment,
   type ComposerToolId,
   type GeneratedFile,
+  type GeneratedFilePreview,
+  type GeneratedFileCheck,
+  type GeneratedFileCheckLevel,
   type QueuedInput,
   type StreamAttachment,
   type StreamFailureAction,
@@ -1628,6 +1631,48 @@ export function normalizeArtifact(event: { id?: string; kind?: string; title?: s
   }
 }
 
+function isGeneratedFileCheckLevel(value: unknown): value is GeneratedFileCheckLevel {
+  return value === 'passed' || value === 'warnings' || value === 'failed' || value === 'skipped'
+}
+
+/**
+ * The structural check the gateway attached to a generated file, read as the
+ * wire sends it. A malformed check is no check at all: the file still arrives,
+ * and no chip is shown for a verdict the gateway did not give.
+ */
+export function normalizeGeneratedFileCheck(value: unknown): GeneratedFileCheck | undefined {
+  if (!value || typeof value !== 'object') return undefined
+  const record = value as Record<string, unknown>
+  if (!isGeneratedFileCheckLevel(record.level) || !Array.isArray(record.checks)) return undefined
+  const checks: GeneratedFileCheck['checks'] = []
+  for (const item of record.checks as unknown[]) {
+    if (!item || typeof item !== 'object') continue
+    const finding = item as Record<string, unknown>
+    if (typeof finding.id === 'string' && typeof finding.message === 'string' && isGeneratedFileCheckLevel(finding.level)) {
+      checks.push({ id: finding.id, level: finding.level, message: finding.message })
+    }
+  }
+  return { level: record.level, checks }
+}
+
+/**
+ * The rendered PDF copy the gateway attached to a generated Office file, read as
+ * the wire sends it. Anything but a PDF `data:` URI with its page facts is no
+ * preview, and only PNG `data:` thumbnails are kept, so the frame never loads a URL.
+ */
+export function normalizeGeneratedFilePreview(value: unknown): GeneratedFilePreview | undefined {
+  if (!value || typeof value !== 'object') return undefined
+  const record = value as Record<string, unknown>
+  if (record.mime !== 'application/pdf') return undefined
+  if (typeof record.url !== 'string' || !record.url.startsWith('data:application/pdf;base64,')) return undefined
+  if (typeof record.pages !== 'number' || typeof record.fonts_substituted !== 'boolean') return undefined
+  if (!Array.isArray(record.thumbs)) return undefined
+  const thumbs = (record.thumbs as unknown[]).filter(
+    (thumb): thumb is string => typeof thumb === 'string' && thumb.startsWith('data:image/png;base64,'),
+  )
+  return { mime: 'application/pdf', url: record.url, pages: record.pages, fontsSubstituted: record.fonts_substituted, thumbs }
+}
+
 export function normalizeGeneratedFile(event: {
   id?: string
   name?: string
@@ -1635,14 +1680,20 @@ export function normalizeGeneratedFile(event: {
   type?: string
   url?: string
   size?: number
+  check?: unknown
+  preview?: unknown
 }): GeneratedFile | null {
   if (!event.url || !event.name) return null
+  const check = normalizeGeneratedFileCheck(event.check)
+  const preview = normalizeGeneratedFilePreview(event.preview)
   return {
     id: event.id ?? event.url,
     name: event.name,
     mime: event.mime ?? event.type ?? 'application/octet-stream',
     size: event.size ?? 0,
     url: event.url,
+    ...(check ? { check } : {}),
+    ...(preview ? { preview } : {}),
   }
 }
 
@@ -1653,7 +1704,7 @@ function citationOrigin(value: unknown): Citation['origin'] {
   return CITATION_ORIGINS.find((origin) => origin === value)
 }
 
-export function normalizeCitation(event: { id?: string; title?: string; url?: string; snippet?: string; claimId?: string; sourceGroupId?: string; sourceGroupLabel?: string; start?: number; end?: number; origin?: string }): Citation | null {
+export function normalizeCitation(event: { id?: string; title?: string; url?: string; snippet?: string; number?: number; claimId?: string; sourceGroupId?: string; sourceGroupLabel?: string; start?: number; end?: number; origin?: string }): Citation | null {
   if (!event.url) return null
   const origin = citationOrigin(event.origin)
   return {
@@ -1661,6 +1712,7 @@ export function normalizeCitation(event: { id?: string; title?: string; url?: st
     title: event.title ?? hostname(event.url),
     url: event.url,
     snippet: event.snippet ?? '',
+    ...(event.number !== undefined ? { number: event.number } : {}),
     ...(event.claimId ? { claimId: event.claimId } : {}),
     ...(event.sourceGroupId ? { sourceGroupId: event.sourceGroupId } : {}),
     ...(event.sourceGroupLabel ? { sourceGroupLabel: event.sourceGroupLabel } : {}),

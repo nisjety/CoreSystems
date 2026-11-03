@@ -625,6 +625,107 @@ test('migration 0004 is idempotent, has a down migration, and adds the three pol
   assert.doesNotMatch(up + down, /browser_grants_no_zdr_id_check/);
 });
 
+// INNH-10 MP-2: API-key grants. key_id is field 60 on the two grant responses only (54-59 stay reserved); the
+// generated Go carries it; the switch is off in the Go default and in compose; migration 0005 is idempotent.
+test('INNH-10: key_id is field 60 on Acquire/ValidateGrantResponse, the key switch defaults off, 0005 reruns', () => {
+  const messages = parseProto(read(UPSTREAM_PROTO));
+  const keyField = { name: 'key_id', type: 'string', repeated: false };
+  for (const name of ['AcquireGrantResponse', 'ValidateGrantResponse']) {
+    assert.deepEqual(messages.get(name).get(60), keyField, `${name}.key_id must be string = 60`);
+  }
+  for (const [name, fields] of messages) {
+    if (name === 'AcquireGrantResponse' || name === 'ValidateGrantResponse') continue;
+    for (const [number, field] of fields) {
+      assert.notEqual(field.name, 'key_id', `${name}.key_id (= ${number}): only the two responses carry the key`);
+    }
+  }
+  const generated = read('apps/Model Plane/go/gen/model_plane/v1/browser.pb.go');
+  assert.equal((generated.match(/protobuf:"bytes,60,opt,name=key_id,/g) || []).length, 2, 'regenerate browser.pb.go');
+
+  const config = read('apps/Model Plane/go/services/browser-broker/internal/server/config.go');
+  const defaults = config.match(/func DefaultConfig\(\) Config \{([\s\S]*?)\n\}/);
+  assert.ok(defaults, 'DefaultConfig not found');
+  assert.doesNotMatch(defaults[1], /KeyGrantsEnabled/, 'the key switch must default off (zero value)');
+  assert.match(config, /DefaultKeyGrantTTL\s+= 10 \* time\.Minute/);
+  assert.match(config, /MaxKeyGrantTTL\s+= 15 \* time\.Minute/);
+  assert.match(read('apps/Model Plane/go/services/browser-broker/internal/grant/grant.go'), /DefaultMaxActivePerKey = 2/);
+  const dev = composeService(read('apps/Model Plane/deploy/docker-compose.yml'), 'browser-broker');
+  assert.match(dev, /BROWSER_BROKER_KEY_GRANTS_ENABLED: \$\{BROWSER_BROKER_KEY_GRANTS_ENABLED:-0\}/);
+  assert.match(dev, /BROWSER_BROKER_KEY_GRANT_TTL_SECONDS: \$\{BROWSER_BROKER_KEY_GRANT_TTL_SECONDS:-600\}/);
+  assert.match(dev, /BROWSER_BROKER_MAX_ACTIVE_GRANTS_PER_KEY: \$\{BROWSER_BROKER_MAX_ACTIVE_GRANTS_PER_KEY:-2\}/);
+  assert.doesNotMatch(
+    read('apps/Model Plane/deploy/docker-compose.production.yml'),
+    /BROWSER_BROKER_KEY_GRANTS_ENABLED: \$\{BROWSER_BROKER_KEY_GRANTS_ENABLED:-(1|true|on)\}/i,
+  );
+
+  const dir = 'apps/Model Plane/go/services/browser-broker/migrations';
+  const up = read(`${dir}/0005_browser_grants_key.up.sql`).replace(/--.*$/gm, '');
+  assert.match(up, /ADD COLUMN IF NOT EXISTS key_id\b/);
+  assert.doesNotMatch(up, /\bADD COLUMN (?!IF NOT EXISTS)/i, 'a non-idempotent ADD COLUMN');
+  assert.doesNotMatch(up, /\bCREATE (UNIQUE )?INDEX (?!IF NOT EXISTS)/i, 'a non-idempotent CREATE INDEX');
+  assert.doesNotMatch(up.replace(/DO \$\$[\s\S]*?\$\$;/g, ''), /ADD CONSTRAINT/i, 'a bare ADD CONSTRAINT');
+  assert.doesNotMatch(up, /\bzdr\b/, 'a ZDR key grant never reaches the table');
+  const down = read(`${dir}/0005_browser_grants_key.down.sql`).replace(/--.*$/gm, '');
+  // Key grants are deleted before the column goes, so none becomes the owner's ordinary grant.
+  assert.ok(down.indexOf('DELETE FROM browser_grants WHERE key_id IS NOT NULL') >= 0, 'down must delete key grants');
+  assert.ok(
+    down.indexOf('DELETE FROM browser_grants') < down.indexOf('DROP COLUMN IF EXISTS key_id'),
+    'down deletes key grants before dropping key_id',
+  );
+});
+
+// E3.2-e1 (OD13): origin-extension grants. Fields 21-22 on the request, 21 on the two responses (the F-t2-032 band
+// is 21-39); the switch is off in the Go default and in compose; 0006 is idempotent; the pattern language is a
+// draft constant that is off.
+test('E3.2-e1: consent fields use 21-22, the extension switch defaults off, 0006 reruns, the pattern language is off', () => {
+  const messages = parseProto(read(UPSTREAM_PROTO));
+  const request = messages.get('AcquireGrantRequest');
+  assert.deepEqual(request.get(21), { name: 'consent_scope', type: 'string', repeated: false });
+  assert.deepEqual(request.get(22), { name: 'consent_denied_domains', type: 'string', repeated: true });
+  for (const name of ['AcquireGrantResponse', 'ValidateGrantResponse']) {
+    assert.deepEqual(messages.get(name).get(21), { name: 'consent_scope', type: 'string', repeated: false });
+  }
+  for (const [name, fields] of messages) {
+    for (const [number, field] of fields) {
+      if (field.name.startsWith('consent_')) {
+        assert.ok(number >= 21 && number <= 39, `${name}.${field.name} = ${number} is outside the 21-39 band`);
+      }
+    }
+  }
+  const generated = read('apps/Model Plane/go/gen/model_plane/v1/browser.pb.go');
+  assert.equal((generated.match(/protobuf:"bytes,21,opt,name=consent_scope,/g) || []).length, 3, 'regenerate browser.pb.go');
+
+  const config = read('apps/Model Plane/go/services/browser-broker/internal/server/config.go');
+  const defaults = config.match(/func DefaultConfig\(\) Config \{([\s\S]*?)\n\}/);
+  assert.ok(defaults, 'DefaultConfig not found');
+  assert.doesNotMatch(defaults[1], /OriginExtensionEnabled/, 'the extension switch must default off (zero value)');
+  const dev = composeService(read('apps/Model Plane/deploy/docker-compose.yml'), 'browser-broker');
+  assert.match(dev, /BROWSER_BROKER_ORIGIN_EXTENSION_ENABLED: \$\{BROWSER_BROKER_ORIGIN_EXTENSION_ENABLED:-0\}/);
+  assert.doesNotMatch(
+    read('apps/Model Plane/deploy/docker-compose.production.yml'),
+    /BROWSER_BROKER_ORIGIN_EXTENSION_ENABLED: \$\{BROWSER_BROKER_ORIGIN_EXTENSION_ENABLED:-(1|true|on)\}/i,
+  );
+  assert.match(
+    read('apps/Model Plane/go/services/browser-broker/internal/grant/extension.go'),
+    /const ConsentPatternLanguageApproved = false\b/,
+    'the consent pattern language is a draft until counsel approves it (OD13)',
+  );
+
+  const dir = 'apps/Model Plane/go/services/browser-broker/migrations';
+  const up = read(`${dir}/0006_browser_grants_extension.up.sql`).replace(/--.*$/gm, '');
+  assert.match(up, /ADD COLUMN IF NOT EXISTS consent_scope\b/);
+  assert.doesNotMatch(up, /\bADD COLUMN (?!IF NOT EXISTS)/i, 'a non-idempotent ADD COLUMN');
+  assert.doesNotMatch(up, /\bCREATE (UNIQUE )?INDEX (?!IF NOT EXISTS)/i, 'a non-idempotent CREATE INDEX');
+  assert.doesNotMatch(up.replace(/DO \$\$[\s\S]*?\$\$;/g, ''), /ADD CONSTRAINT/i, 'a bare ADD CONSTRAINT');
+  assert.doesNotMatch(up, /\bzdr\b/, 'a ZDR extension never reaches the table');
+  const down = read(`${dir}/0006_browser_grants_extension.down.sql`).replace(/--.*$/gm, '');
+  assert.ok(down.indexOf("DELETE FROM browser_grants WHERE kind = 'origin_extension'") >= 0, 'down must delete extensions');
+  assert.ok(
+    down.indexOf('DELETE FROM browser_grants') < down.indexOf('DROP COLUMN IF EXISTS consent_scope'),
+    'down deletes extensions before dropping consent_scope',
+  );
+});
+
 test('the gateway reads BROWSER_GRANT_ENFORCEMENT from compose with an empty default, so the code picks the mode per environment', () => {
   const compose = read('apps/Frontend Plane/verevonv3/docker-compose.yml');
   assert.match(compose, /^\s+BROWSER_GRANT_ENFORCEMENT: \$\{BROWSER_GRANT_ENFORCEMENT:-\}\s*$/m);

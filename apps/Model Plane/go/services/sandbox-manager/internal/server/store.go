@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	mpv1 "github.com/triodelab/model-plane/gen/go/model_plane/v1"
 	"github.com/triodelab/model-plane/services/sandbox-manager/internal/lease"
 	"github.com/triodelab/model-plane/services/sandbox-manager/internal/process"
 	"github.com/triodelab/model-plane/services/sandbox-manager/internal/snapshot"
@@ -40,6 +41,9 @@ type LeaseStore interface {
 	// AcquireThread is the idempotent get-or-create behind AcquireLease for a
 	// thread scope (WS22-S1): the same user and thread get the same live lease.
 	AcquireThread(ctx context.Context, threadID, orgID, ownerID, backendID string, ttl time.Duration) (*lease.Lease, error)
+	// RecordActivity stamps a lease's last use and records the failure cause the latest thread-workspace
+	// apply produced (WS22-S6).
+	RecordActivity(ctx context.Context, id, orgID, ownerID string, cause mpv1.SandboxFailureCause, at time.Time) error
 }
 
 // ThreadWorkspaceStore is the narrow surface Server calls on the per-thread

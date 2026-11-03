@@ -8,6 +8,8 @@ package policy
 import (
 	"context"
 	"fmt"
+	"slices"
+	"time"
 
 	"github.com/triodelab/model-plane/services/capability-core/internal/domain"
 	"github.com/triodelab/model-plane/services/capability-core/internal/models"
@@ -103,6 +105,9 @@ type Engine struct {
 	// is never loaded, so it cannot change a decision.
 	toolPolicies     ToolPolicySource
 	policiesEnforced bool
+	// orgExtensions is read only when orgExtensionsEnforced; with it off the org's policy is never loaded.
+	orgExtensions         OrgExtensionSource
+	orgExtensionsEnforced bool
 }
 
 // WithScopeResolver attaches a durable scope-grant resolver. Returns the same
@@ -147,6 +152,9 @@ type ToolBinding struct {
 	ToolDigest string
 	// ReviewState is empty for a built-in tool.
 	ReviewState string
+	// ServerID is the MCP server the tool belongs to. Empty for a built-in tool, and for a binding the
+	// caller could not resolve to a server, which an approved_only allow-list refuses.
+	ServerID string
 }
 
 // CeilingBinding is the binding a named tool is held to when the registry holds
@@ -227,6 +235,9 @@ type ToolPolicy struct {
 	// PinnedDigest is the tool definition an `allow` was given for; empty for a
 	// tightening policy.
 	PinnedDigest string
+	// ExpiresAt is when an `allow` lapses (build plan WS13 S7); zero for a policy
+	// that does not lapse.
+	ExpiresAt time.Time
 }
 
 // ToolPolicySource loads the active policies that apply to one person's call of
@@ -271,8 +282,8 @@ const relaxedBudget = "tokens=10000,cost_usd=0.50"
 // source as it is. Relaxing is narrower:
 // an `allow` turns the risk-level ask of an `mcp_tool` row into an allow only
 // when the tool's class and floor are within what the policy's scope may relax
-// (CanRelax) and the policy is pinned to the definition the registry pins now. An
-// `allow` for a definition that has since changed is read as an `ask`; an `allow`
+// (CanRelax) and the policy is pinned to the definition the registry pins now and has not lapsed.
+// An `allow` for a definition that has since changed, or that has lapsed, is read as an `ask`; an `allow`
 // on a built-in tool, or on a class it may not relax, is ignored. A denial from
 // Decide (a tool not approved, a gate) is never relaxed.
 func DecideWithPolicies(base *Result, capEntry *models.Capability, binding *ToolBinding, policies []ToolPolicy) *Result {
@@ -294,7 +305,7 @@ func DecideWithPolicies(base *Result, capEntry *models.Capability, binding *Tool
 			if !relaxable || !CanRelax(p.ScopeKind, binding.SideEffectClass, binding.ApprovalFloor) {
 				continue
 			}
-			if p.PinnedDigest == "" || p.PinnedDigest != binding.ToolDigest {
+			if p.PinnedDigest == "" || p.PinnedDigest != binding.ToolDigest || lapsed(p, time.Now()) {
 				ask = true
 				continue
 			}
@@ -325,6 +336,13 @@ func DecideWithPolicies(base *Result, capEntry *models.Capability, binding *Tool
 	return result
 }
 
+// lapsed reports whether a stored allow has passed its expiry (build plan WS13 S7, K3-10). A lapsed
+// allow is read as a stale one, an ask and never a relaxation; the person renews it by confirming
+// the rule again. A policy with no expiry never lapses.
+func lapsed(p ToolPolicy, now time.Time) bool {
+	return !p.ExpiresAt.IsZero() && !now.Before(p.ExpiresAt)
+}
+
 // EvaluateCapability evaluates a capability snapshot that the caller has
 // already resolved through a tenant-aware registry lookup. Keeping lookup and
 // evaluation separate lets authenticated boundaries avoid re-reading a mixed
@@ -332,6 +350,9 @@ func DecideWithPolicies(base *Result, capEntry *models.Capability, binding *Tool
 func (e *Engine) EvaluateCapability(ctx context.Context, capEntry *models.Capability, runID, agentID, orgID, scope string) (*Result, error) {
 	denial, err := e.gate(ctx, capEntry, runID, agentID, orgID, scope)
 	if err != nil || denial != nil {
+		return denial, err
+	}
+	if denial, err := e.denyOnOrgExtension(ctx, capEntry, nil, orgID); err != nil || denial != nil {
 		return denial, err
 	}
 	result := riskResult(capEntry)
@@ -349,6 +370,9 @@ func (e *Engine) EvaluateCapability(ctx context.Context, capEntry *models.Capabi
 func (e *Engine) EvaluateTool(ctx context.Context, capEntry *models.Capability, binding *ToolBinding, userID, runID, agentID, orgID, scope string) (*Result, error) {
 	denial, err := e.gate(ctx, capEntry, runID, agentID, orgID, scope)
 	if err != nil || denial != nil {
+		return denial, err
+	}
+	if denial, err := e.denyOnOrgExtension(ctx, capEntry, binding, orgID); err != nil || denial != nil {
 		return denial, err
 	}
 	var policies []ToolPolicy
@@ -446,6 +470,139 @@ func EffectivePolicy(capEntry *models.Capability, binding *ToolBinding) string {
 		return DecisionDeny
 	}
 	return Decide(riskResult(capEntry), binding).Decision
+}
+
+// OrgExtensionAllowListEnv switches the org's extension allow-list on at the signed gate (WS25-S9). Off by default:
+// with it off the gate never reads the org's policy, so every decision is what it was before the registry existed.
+const OrgExtensionAllowListEnv = "ORG_EXTENSION_ALLOWLIST"
+
+// OrgExtensionAllowListFromLookup reads OrgExtensionAllowListEnv strictly: only the literal "true" enables it.
+func OrgExtensionAllowListFromLookup(lookup func(string) string) bool {
+	return lookup(OrgExtensionAllowListEnv) == "true"
+}
+
+// ReasonOrgExtensionNotAllowed is the reason an MCP server the org has not approved is denied with. The org's policy
+// names it and the gate enforces it, so a gateway that offered the server anyway could not run its tools.
+const ReasonOrgExtensionNotAllowed = "org_extension_not_allowed"
+
+// The modes of the org's MCP server allow-list (ext.mcp_servers in the org agent policy schema).
+const (
+	OrgServersAny          = "any"
+	OrgServersApprovedOnly = "approved_only"
+	OrgServersNone         = "none"
+)
+
+// OrgExtensionRule is the part of an org's agent policy the signed gate enforces for MCP servers and tools (WS25-S9).
+type OrgExtensionRule struct {
+	// ServersMode is OrgServersAny, OrgServersApprovedOnly or OrgServersNone.
+	ServersMode string
+	// ServerIDs are the servers an approved_only allow-list names.
+	ServerIDs []string
+	// ToolApprovalApprovedOnly offers an MCP tool only with a pinned definition (mcp_tool_approval).
+	ToolApprovalApprovedOnly bool
+}
+
+// OrgExtensionRuleFromSettings reads the rule from an org agent policy document. The lockdown bundle allows no MCP
+// server. A value this build cannot read narrows, as the schema's fail-closed values do: an allow-list it cannot read
+// allows nothing, and a tool-approval mode it cannot read requires approval. A key the document omits takes its default.
+func OrgExtensionRuleFromSettings(settings map[string]any) OrgExtensionRule {
+	rule := OrgExtensionRule{ServersMode: OrgServersAny}
+	if raw, present := settings["ext.mcp_servers"]; present {
+		rule.ServersMode, rule.ServerIDs = readOrgServersAllowList(raw)
+	}
+	if lockdown, _ := settings["lockdown"].(bool); lockdown {
+		rule.ServersMode, rule.ServerIDs = OrgServersNone, nil
+	}
+	if raw, present := settings["mcp_tool_approval"]; present {
+		approval, isString := raw.(string)
+		rule.ToolApprovalApprovedOnly = !isString || approval != "trust_annotations"
+	}
+	return rule
+}
+
+// readOrgServersAllowList reads {"mode": ..., "ids": [...]}. A shape it cannot read allows no server.
+func readOrgServersAllowList(raw any) (string, []string) {
+	allowList, isMap := raw.(map[string]any)
+	if !isMap {
+		return OrgServersNone, nil
+	}
+	mode, _ := allowList["mode"].(string)
+	switch mode {
+	case OrgServersAny:
+		return OrgServersAny, nil
+	case OrgServersApprovedOnly:
+		rawIDs, _ := allowList["ids"].([]any)
+		ids := make([]string, 0, len(rawIDs))
+		for _, rawID := range rawIDs {
+			if id, isString := rawID.(string); isString && id != "" {
+				ids = append(ids, id)
+			}
+		}
+		return OrgServersApprovedOnly, ids
+	default:
+		return OrgServersNone, nil
+	}
+}
+
+// AllowsServer reports whether the rule lets a call reach the MCP server. An approved_only rule names servers by id, so
+// a call whose server is not known allows nothing.
+func (r OrgExtensionRule) AllowsServer(serverID string) bool {
+	switch r.ServersMode {
+	case OrgServersAny:
+		return true
+	case OrgServersApprovedOnly:
+		return serverID != "" && slices.Contains(r.ServerIDs, serverID)
+	default:
+		return false
+	}
+}
+
+// OrgExtensionSource reads the org's extension rule for an evaluation. An error fails the evaluation: the gate never
+// decides an MCP call without knowing what the org allows.
+type OrgExtensionSource interface {
+	OrgExtensionRule(ctx context.Context, orgID string) (OrgExtensionRule, error)
+}
+
+// WithOrgExtensionPolicy attaches the org's extension rule. It is enforced only when enabled is true, which main wires
+// from ORG_EXTENSION_ALLOWLIST; a nil source can never be enforced.
+func (e *Engine) WithOrgExtensionPolicy(source OrgExtensionSource, enabled bool) *Engine {
+	e.orgExtensions = source
+	e.orgExtensionsEnforced = enabled && source != nil
+	return e
+}
+
+// denyOnOrgExtension refuses an MCP server or tool the org's extension rule does not allow. A built-in tool is not an
+// extension and is never held to the rule. It returns (denial, nil) on a refusal and (nil, err) when the rule cannot be
+// read.
+func (e *Engine) denyOnOrgExtension(ctx context.Context, capEntry *models.Capability, binding *ToolBinding, orgID string) (*Result, error) {
+	if !e.orgExtensionsEnforced || capEntry.Kind != models.KindMCPTool {
+		return nil, nil
+	}
+	rule, err := e.orgExtensions.OrgExtensionRule(ctx, orgID)
+	if err != nil {
+		return nil, fmt.Errorf("load org extension rule: %w", err)
+	}
+	serverID := ""
+	if binding != nil {
+		serverID = binding.ServerID
+	}
+	if !rule.AllowsServer(serverID) {
+		return orgExtensionDenial(ctx, capEntry, ReasonOrgExtensionNotAllowed), nil
+	}
+	if rule.ToolApprovalApprovedOnly && (binding == nil || binding.ToolDigest == "") {
+		return orgExtensionDenial(ctx, capEntry, models.ReasonToolNotApproved), nil
+	}
+	return nil, nil
+}
+
+// orgExtensionDenial is a refusal under an org's extension rule, counted as every other denial is.
+func orgExtensionDenial(ctx context.Context, capEntry *models.Capability, reason string) *Result {
+	telemetry.PolicyDecisionsTotal.Add(ctx, 1, metric.WithAttributes(
+		attribute.String("decision", DecisionDeny),
+		attribute.String("risk", string(capEntry.RiskLevel)),
+		attribute.String("reason", reason),
+	))
+	return &Result{Decision: DecisionDeny, Reason: reason, PolicySource: PolicySourceCapabilityGate}
 }
 
 // denyOnScope returns a Deny Result unless the capability explicitly declares

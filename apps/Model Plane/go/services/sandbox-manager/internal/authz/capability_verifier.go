@@ -21,7 +21,30 @@ const (
 	spaceCapabilityAction          = "model.space.capability_profile"
 	spaceCapabilityAudience        = "model-plane-sandbox-manager"
 	spaceCapabilitySchema          = "sha256:space-capability-profile-v1"
+	// spaceCapabilitySchemaV2 is Control's egress-tier decision (EP-9 E2,
+	// user-core SPACE_SANDBOX_EGRESS_TIERS): the digest also binds the
+	// allow-list and egress is granted as space:egress:<tier>. Both schemas
+	// are accepted so user-core can flip its switch after this deploys.
+	spaceCapabilitySchemaV2 = "sha256:space-capability-profile-v2"
 )
+
+// Sandbox egress tiers, mirroring user-core's closed vocabulary
+// (internal/spaces/authority.go). The order matters: a higher tier reaches
+// strictly more of the network. A value missing here is refused, never read
+// as a wider reach.
+const (
+	EgressTierOff        = "off"
+	EgressTierRegistries = "registries"
+	EgressTierAllowlist  = "allowlist"
+	EgressTierAll        = "all"
+)
+
+var egressTierRank = map[string]int{
+	EgressTierOff: 0, EgressTierRegistries: 1, EgressTierAllowlist: 2, EgressTierAll: 3,
+}
+
+// egressDisabledByDefault is the legacy egress claim, read as off.
+const egressDisabledByDefault = "disabled_by_default"
 
 // SpaceCapabilityVerifier verifies only Control's public, key-identified
 // Space capability decision envelope (user-core's
@@ -104,6 +127,9 @@ type SpaceCapabilityClaims struct {
 	Backup         bool   `json:"backup"`
 	Egress         string `json:"egress"`
 	CredentialMode string `json:"credential_mode"`
+	// EgressAllowlist is present only on a v2 decision granting allowlist; its
+	// digest is bound into the payload digest. A v1 decision never carries it.
+	EgressAllowlist []string `json:"egress_allowlist,omitempty"`
 }
 
 // CapabilityExpectation is the request-derived context a verified decision
@@ -143,6 +169,10 @@ type VerifiedCapability struct {
 	// ZeroDataRetention is the decision's ZDR flag. Nothing refuses on it yet:
 	// scratch-only leases (WS06-S6b, decision WS06-D2) are its first reader.
 	ZeroDataRetention bool
+	// EgressTier is the egress tier the decision granted: the tier of its
+	// space:egress:<tier> permission on a v2 decision, otherwise off. Nothing
+	// reads it yet; E3 records it on the lease and execution-core enforces it.
+	EgressTier string
 }
 
 // HasPermission reports whether the decision granted permission.
@@ -179,7 +209,7 @@ func (v *SpaceCapabilityVerifier) Verify(token, claimsJSON string, expect Capabi
 	}
 	if decision.OrgID != expect.OrgID || decision.SpaceRef != expect.SpaceRef || decision.SubjectID != expect.SubjectID ||
 		decision.ServiceAudience != spaceCapabilityAudience || decision.ActionID != spaceCapabilityAction ||
-		decision.ActionSchemaHash != spaceCapabilitySchema {
+		(decision.ActionSchemaHash != spaceCapabilitySchema && decision.ActionSchemaHash != spaceCapabilitySchemaV2) {
 		return VerifiedCapability{}, fmt.Errorf("Space capability decision does not match the claimed lease request")
 	}
 	now := expect.Now
@@ -192,15 +222,80 @@ func (v *SpaceCapabilityVerifier) Verify(token, claimsJSON string, expect Capabi
 	if decision.PayloadDigest != expectedCapabilityPayloadDigest(decision, claims) {
 		return VerifiedCapability{}, fmt.Errorf("Space capability decision payload does not bind this claim")
 	}
-	if claims.Egress != "disabled_by_default" && !hasPermission(decision.Permissions, "space:egress") {
-		return VerifiedCapability{}, fmt.Errorf("Space capability decision does not grant egress for the claimed profile")
+	egressTier, err := verifiedEgressTier(decision, claims)
+	if err != nil {
+		return VerifiedCapability{}, err
 	}
 	return VerifiedCapability{
 		Claims:                    claims,
 		Permissions:               decision.Permissions,
 		RecipientAudienceRevision: decision.RecipientAudienceRevision,
 		ZeroDataRetention:         decision.ZeroDataRetention,
+		EgressTier:                egressTier,
 	}, nil
+}
+
+// verifiedEgressTier checks the egress half of a digest-verified decision and
+// returns the granted tier.
+//
+// v1 keeps its rule unchanged: an egress-capable claim needs the bare
+// space:egress permission, and a tier permission or an allow-list (which v1
+// never signs, and whose list v1 does not bind) is refused.
+//
+// v2 refuses an unknown claim, an unknown or repeated tier permission, the
+// bare permission (Control never signs it in v2), a grant above the claim, any
+// grant under zero data retention, and an allow-list that does not match the
+// grant. An egress-capable claim with no tier granted is still refused
+// outright, as in v1; granting such a lease at off is decision D-E2, which
+// lands with E3 behind its own switch.
+func verifiedEgressTier(decision spaceCapabilityDecision, claims SpaceCapabilityClaims) (string, error) {
+	granted := EgressTierOff
+	for _, permission := range decision.Permissions {
+		tier, isTier := strings.CutPrefix(permission, "space:egress:")
+		if !isTier {
+			continue
+		}
+		if _, known := egressTierRank[tier]; !known || tier == EgressTierOff {
+			return "", fmt.Errorf("Space capability decision grants an unknown egress tier")
+		}
+		if granted != EgressTierOff {
+			return "", fmt.Errorf("Space capability decision grants more than one egress tier")
+		}
+		granted = tier
+	}
+	if decision.ActionSchemaHash != spaceCapabilitySchemaV2 {
+		if granted != EgressTierOff || len(claims.EgressAllowlist) > 0 {
+			return "", fmt.Errorf("Space capability decision carries egress fields its schema does not bind")
+		}
+		if claims.Egress != egressDisabledByDefault && !hasPermission(decision.Permissions, "space:egress") {
+			return "", fmt.Errorf("Space capability decision does not grant egress for the claimed profile")
+		}
+		return EgressTierOff, nil
+	}
+	claimed := claims.Egress
+	if claimed == egressDisabledByDefault {
+		claimed = EgressTierOff
+	}
+	claimRank, known := egressTierRank[claimed]
+	if !known {
+		return "", fmt.Errorf("Space capability claim names an unknown egress tier")
+	}
+	if hasPermission(decision.Permissions, "space:egress") {
+		return "", fmt.Errorf("Space capability decision carries an untiered egress permission")
+	}
+	if egressTierRank[granted] > claimRank {
+		return "", fmt.Errorf("Space capability decision grants more egress than the backend claims")
+	}
+	if decision.ZeroDataRetention && granted != EgressTierOff {
+		return "", fmt.Errorf("Space capability decision grants egress under zero data retention")
+	}
+	if (granted == EgressTierAllowlist) != (len(claims.EgressAllowlist) > 0) {
+		return "", fmt.Errorf("Space capability decision allow-list does not match the granted egress tier")
+	}
+	if claimRank > 0 && granted == EgressTierOff {
+		return "", fmt.Errorf("Space capability decision does not grant egress for the claimed profile")
+	}
+	return granted, nil
 }
 
 // verifyEnvelope checks the parts every Control Space decision shares —
@@ -264,10 +359,12 @@ func hasPermission(permissions []string, required string) bool {
 // decision itself, plus the intent-only values carried in the unsigned
 // claims sidecar. Length-prefixed for the same collision-resistance reason
 // as every other Space decision digest in this repo.
+//
+// The schema is the decision's own: Verify has already refused any schema but
+// v1 and v2, and a v2 decision binds one more field, the allow-list digest,
+// after the v1 fields (Control's spaceCapabilityPayloadDigestFor).
 func expectedCapabilityPayloadDigest(decision spaceCapabilityDecision, claims SpaceCapabilityClaims) string {
-	hash := sha256.New()
-	hash.Write([]byte("model.space.capability_profile\x00v1\x00"))
-	for _, field := range []struct{ name, value string }{
+	fields := []struct{ name, value string }{
 		{"org_id", decision.OrgID}, {"user_id", decision.SubjectID},
 		{"space_id", decision.SpaceRef}, {"backend_id", claims.BackendID},
 		{"profile_digest", claims.ProfileDigest}, {"persistence", claims.Persistence},
@@ -275,8 +372,14 @@ func expectedCapabilityPayloadDigest(decision spaceCapabilityDecision, claims Sp
 		{"egress", claims.Egress}, {"credential_mode", claims.CredentialMode},
 		{"recipient_audience_ref", decision.RecipientAudienceRef}, {"recipient_audience_hash", decision.RecipientAudienceHash},
 		{"privacy_policy_ref", decision.PrivacyPolicyRef}, {"resource_authorization_ref", decision.ResourceAuthorizationRef},
-		{"action_schema_hash", spaceCapabilitySchema}, {"idempotency_key", decision.IdempotencyKey},
-	} {
+		{"action_schema_hash", decision.ActionSchemaHash}, {"idempotency_key", decision.IdempotencyKey},
+	}
+	if decision.ActionSchemaHash == spaceCapabilitySchemaV2 {
+		fields = append(fields, struct{ name, value string }{"egress_allowlist_digest", egressAllowlistDigest(claims.EgressAllowlist)})
+	}
+	hash := sha256.New()
+	hash.Write([]byte("model.space.capability_profile\x00v1\x00"))
+	for _, field := range fields {
 		hash.Write([]byte(field.name))
 		hash.Write([]byte{0})
 		var length [8]byte
@@ -299,6 +402,22 @@ func expectedCapabilityPayloadDigest(decision spaceCapabilityDecision, claims Sp
 		var encoded [8]byte
 		binary.BigEndian.PutUint64(encoded[:], uint64(revision.value))
 		hash.Write(encoded[:])
+	}
+	return "sha256:" + hex.EncodeToString(hash.Sum(nil))
+}
+
+// egressAllowlistDigest mirrors Control's EgressAllowlistDigest
+// (user-core/internal/spaces/space_capability_decision.go): each host
+// length-prefixed, in the order signed. A missing list digests like an empty
+// one, which is what Control signs for every grant below allowlist.
+func egressAllowlistDigest(hosts []string) string {
+	hash := sha256.New()
+	hash.Write([]byte("model.space.capability_profile.egress_allowlist\x00v1\x00"))
+	for _, host := range hosts {
+		var length [8]byte
+		binary.BigEndian.PutUint64(length[:], uint64(len(host)))
+		hash.Write(length[:])
+		hash.Write([]byte(host))
 	}
 	return "sha256:" + hex.EncodeToString(hash.Sum(nil))
 }

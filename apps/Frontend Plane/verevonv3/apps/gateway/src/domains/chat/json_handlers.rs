@@ -132,6 +132,7 @@ async fn invoke_chat_json(
     }
     let outbound_body =
         shared::with_identity_context(outbound_body, &user.user_name, &org_name);
+    let outbound_body = shared::with_locale_context(outbound_body);
     let mut outbound_body =
         shared::with_viewer_locale(outbound_body, state.space_features.chat_locale_hint);
     shared::apply_org_zdr_posture(&state, &user, &mut outbound_body).await;
@@ -416,6 +417,65 @@ pub(super) struct ThreadEventsQuery {
     #[serde(default)]
     after_event_id: Option<String>,
     limit: Option<u32>,
+}
+
+/// The files one thread keeps across runs, and the user's reset of them (WS22-S5).
+/// A pure proxy: model-gateway acquires the thread's lease and reads or erases it.
+/// This forwards the caller's own model credential, plus the sandbox credential
+/// minted for this request, which sandbox-manager binds to the caller's user.
+pub(super) async fn get_thread_workspace(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Path(thread_id): Path<String>,
+) -> Response {
+    proxy_thread_workspace(&state, &user, &headers, &thread_id, Method::GET).await
+}
+
+pub(super) async fn reset_thread_workspace(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Path(thread_id): Path<String>,
+) -> Response {
+    proxy_thread_workspace(&state, &user, &headers, &thread_id, Method::DELETE).await
+}
+
+async fn proxy_thread_workspace(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    thread_id: &str,
+    method: Method,
+) -> Response {
+    let thread_id = thread_id.trim();
+    if thread_id.is_empty() {
+        return bad_request("thread_id is required.");
+    }
+    let Ok(sandbox) = shared::required_sandbox_token(state, user, headers).await else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": "sandbox credential is unavailable" })),
+        )
+            .into_response();
+    };
+    let token = shared::model_token(state, user, headers).await;
+    let url = format!(
+        "{}/v1/threads/{}/workspace",
+        state.model_gateway_url,
+        urlencoding::encode(thread_id),
+    );
+    let (status, Json(body)) = shared::proxy_model_json_with_sandbox(
+        state,
+        method,
+        &url,
+        None,
+        token.as_deref(),
+        Some(&sandbox),
+        user,
+    )
+    .await;
+    (status, Json(body)).into_response()
 }
 
 /// Itemized context window for a thread — the context inspector's read.
@@ -807,5 +867,97 @@ mod tests {
 
         assert_eq!(status, StatusCode::NOT_FOUND);
         assert_eq!(body["error"], "route not found");
+    }
+}
+
+#[cfg(test)]
+mod thread_workspace_proxy_tests {
+    use super::*;
+    use wiremock::{
+        matchers::{header, method, path},
+        Mock, MockServer, ResponseTemplate,
+    };
+
+    fn test_user() -> AuthenticatedUser {
+        AuthenticatedUser {
+            user_id: "user-test".to_owned(),
+            user_email: "user@example.test".to_owned(),
+            user_name: "User Test".to_owned(),
+            user_image: None,
+            email_verified: true,
+            auth_role: Some("member".to_owned()),
+            active_org_id: Some("org-test".to_owned()),
+            authorized_membership: Some(crate::middleware::AuthorizedMembership {
+                organization_id: "org-test".to_owned(),
+                role: "member".to_owned(),
+            }),
+        }
+    }
+
+    /// The list is a GET and the reset a DELETE on the same path, and both carry the
+    /// sandbox credential minted for the request.
+    #[tokio::test]
+    async fn the_workspace_proxy_forwards_the_sandbox_credential_and_its_method() {
+        let auth_core = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/sandbox-manager/token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "token": "sandbox-token",
+                "expiresInSeconds": 300,
+            })))
+            .mount(&auth_core)
+            .await;
+        let model_gateway = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/threads/thr_1/workspace"))
+            .and(header("x-sandbox-authorization", "Bearer sandbox-token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "thread_id": "thr_1",
+                "revision": 0,
+                "files": [],
+            })))
+            .expect(1)
+            .mount(&model_gateway)
+            .await;
+        Mock::given(method("DELETE"))
+            .and(path("/v1/threads/thr_1/workspace"))
+            .and(header("x-sandbox-authorization", "Bearer sandbox-token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "thread_id": "thr_1",
+                "files_deleted": 0,
+                "object_prefix": "cas/thread/org-test/thr_1/",
+            })))
+            .expect(1)
+            .mount(&model_gateway)
+            .await;
+
+        let mut state = crate::domains::browser::tests::test_app_state();
+        state.auth_core_url = auth_core.uri();
+        state.model_gateway_url = model_gateway.uri();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::COOKIE,
+            "better-auth.session=verified".parse().expect("cookie"),
+        );
+        let user = test_user();
+
+        let listed = proxy_thread_workspace(&state, &user, &headers, "thr_1", Method::GET).await;
+        assert_eq!(listed.status(), StatusCode::OK);
+        let reset = proxy_thread_workspace(&state, &user, &headers, "thr_1", Method::DELETE).await;
+        assert_eq!(reset.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn the_workspace_proxy_refuses_an_empty_thread_id_before_any_call() {
+        let state = crate::domains::browser::tests::test_app_state();
+        let response = proxy_thread_workspace(
+            &state,
+            &test_user(),
+            &HeaderMap::new(),
+            "  ",
+            Method::GET,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 }

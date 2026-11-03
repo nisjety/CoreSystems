@@ -22,6 +22,21 @@ const DEFAULT_JWT_LEEWAY_SECS: u64 = 30;
 const MAX_JWT_LEEWAY_SECS: u64 = 300;
 const MAX_JWKS_BYTES: usize = 1_048_576;
 
+/// `sub` of an `api_key` principal is this prefix plus its `key_id` (EP-12 S6). The shape rules
+/// below are model-gateway's `is_well_formed_api_key` and auth-core's `apiKeyIdentityClaims`.
+const API_KEY_SUBJECT_PREFIX: &str = "apikey:";
+const MAX_API_KEY_ID_LEN: usize = 128;
+const MAX_ACTING_USER_ID_LEN: usize = 256;
+/// The one scope auth-core's API-key exchange grants for `aud=inference-core`. An `api_key`
+/// principal invokes a provider with it; `inference:invoke` is never read from a key token.
+const API_KEY_INVOKE_SCOPE: &str = "agent:runs";
+
+/// `INFERENCE_API_KEY_PRINCIPAL`: admit the `api_key` principal type (EP-12 S6). Only the literal
+/// `true` enables it; off, an `api_key` token is `unauthenticated` exactly as before.
+fn api_key_principal_enabled(raw: Option<&str>) -> bool {
+    raw.is_some_and(|value| value.trim() == "true")
+}
+
 /// Verifies independently signed user and workload credentials before a
 /// request can reach a provider or the prompt cache.
 #[derive(Clone)]
@@ -34,6 +49,8 @@ pub struct JwtVerifier {
     client: reqwest::Client,
     cache: Arc<RwLock<CachedJwks>>,
     refresh_lock: Arc<Mutex<()>>,
+    /// Whether an `api_key` token is a principal here (`INFERENCE_API_KEY_PRINCIPAL`).
+    accept_api_key: bool,
 }
 
 impl fmt::Debug for JwtVerifier {
@@ -45,6 +62,7 @@ impl fmt::Debug for JwtVerifier {
             .field("jwks_url", &self.jwks_url)
             .field("jwks_ttl", &self.jwks_ttl)
             .field("leeway_secs", &self.leeway_secs)
+            .field("accept_api_key", &self.accept_api_key)
             .finish_non_exhaustive()
     }
 }
@@ -87,6 +105,12 @@ struct Claims {
     /// on a persistent user token of a ZDR org. A malformed waiver fails the whole token.
     #[serde(default)]
     zdr_waiver: Option<ZdrWaiverClaim>,
+    /// `key_id`: the Better Auth key an `api_key` token was exchanged for. Read only on that type.
+    #[serde(default)]
+    key_id: Option<String>,
+    /// `acting_user_id`: the key's owner on an `api_key` token, the entitlement subject.
+    #[serde(default)]
+    acting_user_id: Option<String>,
 }
 
 /// The wire shape of the `zdr_waiver` claim, the matrix's `waiver` object. Auth Core may add fields
@@ -140,6 +164,15 @@ impl From<ZdrWaiverClaim> for ZdrWaiver {
     }
 }
 
+/// The identity of a verified `api_key` principal (EP-12 S6, D2): the key owns the call, the person
+/// who owns the key is the entitlement subject only. Neither is a user id, so nothing that reads
+/// `user_id` treats a key as that person.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ApiKeyIdentity {
+    key_id: String,
+    acting_user_id: String,
+}
+
 /// Canonical identity derived only from a verified credential. The original
 /// bearer is retained for a future scoped downstream delegation path and is
 /// deliberately redacted from `Debug`.
@@ -152,6 +185,7 @@ pub struct AuthenticatedPrincipal {
     issuer_zdr: bool,
     issuer_org_zdr: Option<bool>,
     zdr_waiver: Option<ZdrWaiver>,
+    api_key: Option<ApiKeyIdentity>,
     bearer: Arc<str>,
 }
 
@@ -166,6 +200,7 @@ impl fmt::Debug for AuthenticatedPrincipal {
             .field("issuer_zdr", &self.issuer_zdr)
             .field("issuer_org_zdr", &self.issuer_org_zdr)
             .field("zdr_waiver", &self.zdr_waiver)
+            .field("api_key", &self.api_key)
             .field("bearer", &"[REDACTED]")
             .finish()
     }
@@ -183,6 +218,7 @@ impl AuthenticatedPrincipal {
             issuer_zdr,
             issuer_org_zdr: None,
             zdr_waiver: None,
+            api_key: None,
             bearer: Arc::from("test-bearer"),
         }
     }
@@ -202,6 +238,7 @@ impl AuthenticatedPrincipal {
                 provider: PROVIDER_ID.to_owned(),
                 connection: connection.to_owned(),
             }),
+            api_key: None,
             bearer: Arc::from("test-bearer"),
         }
     }
@@ -231,7 +268,13 @@ impl AuthenticatedPrincipal {
     /// exact `inference:invoke` scope.
     #[allow(clippy::result_large_err)]
     pub fn authorize_invoke(&self) -> Result<(), Status> {
-        if self.scopes.iter().any(|scope| scope == "inference:invoke") {
+        // A key token holds the Agent API scope its exchange granted, never `inference:invoke`.
+        let required = if self.api_key.is_some() {
+            API_KEY_INVOKE_SCOPE
+        } else {
+            "inference:invoke"
+        };
+        if self.scopes.iter().any(|scope| scope == required) {
             return Ok(());
         }
         warn!("verified principal lacks inference invocation scope");
@@ -245,6 +288,11 @@ impl AuthenticatedPrincipal {
     /// Returns `permission_denied` when neither exact scope is present.
     #[allow(clippy::result_large_err)]
     pub fn authorize_catalog(&self) -> Result<(), Status> {
+        // An API key reaches the chat turn only (EP-12 S6), so no catalogue read either.
+        if self.api_key.is_some() {
+            warn!("api key principal refused on an inference catalogue read");
+            return Err(Status::permission_denied("inference scope required"));
+        }
         if self
             .scopes
             .iter()
@@ -264,10 +312,13 @@ impl AuthenticatedPrincipal {
     /// exact `inference:policy:admin` scope.
     #[allow(clippy::result_large_err)]
     pub fn authorize_policy_admin(&self) -> Result<(), Status> {
-        if self
-            .scopes
-            .iter()
-            .any(|scope| scope == "inference:policy:admin")
+        // Routing-policy administration is a person's or an operator's act, never a key's, even
+        // if a key token were ever minted with the scope.
+        if self.api_key.is_none()
+            && self
+                .scopes
+                .iter()
+                .any(|scope| scope == "inference:policy:admin")
         {
             return Ok(());
         }
@@ -275,6 +326,42 @@ impl AuthenticatedPrincipal {
         Err(Status::permission_denied(
             "inference policy administration scope required",
         ))
+    }
+
+    /// Admit an `api_key` principal only on an RPC the caller names as a chat turn (`Infer`,
+    /// `InferStream`; EP-12 S6). The caller decides `chat_turn` from the request type, so an RPC
+    /// added later is refused to a key until it is listed. Every other principal passes.
+    ///
+    /// # Errors
+    /// Returns `permission_denied` for an `api_key` principal on any other RPC.
+    #[allow(clippy::result_large_err)]
+    pub fn authorize_api_key_rpc(&self, chat_turn: bool) -> Result<(), Status> {
+        if self.api_key.is_none() || chat_turn {
+            return Ok(());
+        }
+        warn!("api key principal refused on an inference RPC outside the chat turn");
+        Err(Status::permission_denied("api key principals may only run a chat turn"))
+    }
+
+    /// Whether this credential is an `api_key` principal.
+    #[must_use]
+    pub const fn is_api_key(&self) -> bool {
+        self.api_key.is_some()
+    }
+
+    /// The key id of an `api_key` principal, for attribution; `None` for every other principal.
+    #[must_use]
+    pub fn api_key_id(&self) -> Option<&str> {
+        self.api_key.as_ref().map(|key| key.key_id.as_str())
+    }
+
+    /// The person whose entitlement applies to this call (WS10: Control decides, Model enforces at
+    /// admission): the verified user, or the owner of an `api_key` principal. `None` is a service.
+    #[must_use]
+    pub fn entitlement_user_id(&self) -> Option<&str> {
+        self.user_id
+            .as_deref()
+            .or_else(|| self.api_key.as_ref().map(|key| key.acting_user_id.as_str()))
     }
 
     /// Issuer-selected ZDR can only make request policy stricter.
@@ -314,6 +401,13 @@ impl AuthenticatedPrincipal {
         connection_id: &str,
         request_zdr: bool,
     ) -> Result<(), Status> {
+        // A connection belongs to a person; a key never runs on its owner's connection (EP-12 D2).
+        if self.api_key.is_some() && !connection_id.is_empty() {
+            warn!("api key principal refused on a user connection");
+            return Err(Status::permission_denied(
+                "api key principals cannot use a user connection",
+            ));
+        }
         if self.issuer_org_zdr.is_none() && self.zdr_waiver.is_none() {
             return Ok(());
         }
@@ -365,8 +459,14 @@ impl AuthenticatedPrincipal {
         self.enforce_zdr_route("", "", request_zdr)
     }
 
+    /// The user scope of a provider request (prompt cache, budget, capture). An `api_key` principal
+    /// is scoped by its own subject `apikey:<key_id>`, so a key neither shares a cache entry with
+    /// another key or a service nor passes for its owner.
     #[must_use]
     pub fn budget_user_id(&self) -> String {
+        if self.api_key.is_some() {
+            return self.subject.clone();
+        }
         self.user_id.clone().unwrap_or_default()
     }
 
@@ -423,7 +523,18 @@ impl JwtVerifier {
     /// Returns an error for missing configuration, HTTP client construction,
     /// or an unavailable/malformed JWKS document.
     pub async fn from_env() -> anyhow::Result<Self> {
-        Self::from_config(AuthConfig::from_env()?).await
+        let raw = std::env::var("INFERENCE_API_KEY_PRINCIPAL").ok();
+        let accept_api_key = api_key_principal_enabled(raw.as_deref());
+        Ok(Self::from_config(AuthConfig::from_env()?)
+            .await?
+            .with_api_key_principal(accept_api_key))
+    }
+
+    /// Admit or refuse the `api_key` principal type. [`Self::from_config`] refuses it.
+    #[must_use]
+    pub(crate) fn with_api_key_principal(mut self, accept: bool) -> Self {
+        self.accept_api_key = accept;
+        self
     }
 
     pub(crate) async fn from_config(config: AuthConfig) -> anyhow::Result<Self> {
@@ -447,6 +558,7 @@ impl JwtVerifier {
                 missing_kids: HashSet::new(),
             })),
             refresh_lock: Arc::new(Mutex::new(())),
+            accept_api_key: false,
         })
     }
 
@@ -487,7 +599,7 @@ impl JwtVerifier {
         let claims = decode::<Claims>(token, &key, &validation)
             .map_err(|_| Status::unauthenticated("invalid credential"))?
             .claims;
-        validate_claims(claims, token, self.leeway_secs)
+        validate_claims(claims, token, self.leeway_secs, self.accept_api_key)
     }
 
     async fn jwk_for(&self, kid: &str) -> Result<jsonwebtoken::jwk::Jwk, Status> {
@@ -564,6 +676,7 @@ fn validate_claims(
     claims: Claims,
     token: &str,
     leeway_secs: u64,
+    accept_api_key: bool,
 ) -> Result<AuthenticatedPrincipal, Status> {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -608,11 +721,29 @@ fn validate_claims(
         {
             None
         }
+        // Only while INFERENCE_API_KEY_PRINCIPAL is on; off, the type falls to the refusal below.
+        "api_key" if accept_api_key && is_well_formed_api_key(&claims) => None,
         _ => return Err(Status::unauthenticated("invalid credential")),
     };
+    let api_key = if claims.principal_type.as_deref() == Some("api_key") {
+        claims
+            .key_id
+            .clone()
+            .zip(claims.acting_user_id.clone())
+            .map(|(key_id, acting_user_id)| ApiKeyIdentity {
+                key_id,
+                acting_user_id,
+            })
+    } else {
+        // While keys are admitted, a key id on any other type makes the token ambiguous.
+        if accept_api_key && claims.key_id.is_some() {
+            return Err(Status::unauthenticated("invalid credential"));
+        }
+        None
+    };
 
-    // A waiver decides one person's connection. A service credential has no connection of its own,
-    // so it can never carry one.
+    // A waiver decides one person's connection. A service credential or an API key has no
+    // connection of its own, so it can never carry one.
     if claims.zdr_waiver.is_some() && user_id.is_none() {
         return Err(Status::unauthenticated("invalid credential"));
     }
@@ -625,8 +756,29 @@ fn validate_claims(
         issuer_zdr: claims.zdr,
         issuer_org_zdr: claims.org_zdr,
         zdr_waiver: claims.zdr_waiver.map(ZdrWaiver::from),
+        api_key,
         bearer: Arc::from(token),
     })
+}
+
+/// The `api_key` shape model-gateway and auth-core agree on: a bounded printable `key_id`,
+/// `sub == "apikey:" + key_id`, an owner that is present, unpadded and not itself a key, and no
+/// person or service attribute beside them.
+fn is_well_formed_api_key(claims: &Claims) -> bool {
+    let (Some(key_id), Some(owner)) = (claims.key_id.as_deref(), claims.acting_user_id.as_deref())
+    else {
+        return false;
+    };
+    (1..=MAX_API_KEY_ID_LEN).contains(&key_id.len())
+        && key_id.bytes().all(|byte| (0x21..=0x7e).contains(&byte))
+        && claims.sub.strip_prefix(API_KEY_SUBJECT_PREFIX) == Some(key_id)
+        && claims.user_id.is_empty()
+        && claims.service_id.is_none()
+        && claims.reason.is_none()
+        && !owner.is_empty()
+        && owner.len() <= MAX_ACTING_USER_ID_LEN
+        && owner == owner.trim()
+        && !owner.starts_with(API_KEY_SUBJECT_PREFIX)
 }
 
 /// The provider a request names, spelled as the chain matches it: case, surrounding space and `_`
@@ -843,6 +995,46 @@ mod tests {
         assert_eq!(service.user_id, None);
         assert_eq!(service.subject, "service:retrieval");
         assert_eq!(service.budget_user_id(), "");
+    }
+
+    /// WS16.S1: the second bearer a machine caller of the gateway's `/v1/ai/chat` presents.
+    /// `service:quarry-edge` holds `inference:invoke` and `models:invoke`; the first authorises
+    /// provider execution here, the second is what the gateway's route table checks upstream.
+    #[tokio::test]
+    async fn a_service_token_with_both_scopes_is_admitted() {
+        let verifier = verifier("key-both").await;
+        let mut claims = service_claims();
+        claims["sub"] = json!("service:quarry-edge");
+        claims["service_id"] = json!("service:quarry-edge");
+        claims["reason"] = json!("extract structured data from page text");
+        claims["scopes"] = json!(["inference:invoke", "models:invoke"]);
+        claims["zdr"] = json!(false);
+        let token = sign(&claims, "key-both");
+        let principal = verifier
+            .authenticate(&request(&token))
+            .await
+            .expect("a service token with both scopes authenticates");
+        assert_eq!(principal.subject, "service:quarry-edge");
+        assert_eq!(principal.user_id, None);
+        assert!(principal.authorize_org("org-1").is_ok());
+        assert!(principal.authorize_invoke().is_ok());
+        assert!(principal.authorize_catalog().is_ok());
+        assert!(!principal.effective_zdr(false), "a non-ZDR org stays non-ZDR");
+        assert!(principal.effective_zdr(true), "the request can still make it stricter");
+        // The same token minted for another org cannot be used for org-1's request.
+        assert!(principal.authorize_org("org-2").is_err());
+
+        // Holding only the gateway scope is not provider-execution authority.
+        claims["scopes"] = json!(["models:invoke"]);
+        let token = sign(&claims, "key-both");
+        let principal = verifier
+            .authenticate(&request(&token))
+            .await
+            .expect("it still authenticates");
+        assert_eq!(
+            principal.authorize_invoke().unwrap_err().code(),
+            tonic::Code::PermissionDenied
+        );
     }
 
     #[tokio::test]
@@ -1246,5 +1438,227 @@ mod tests {
             .enforce_zdr_route("openai-codex-subscription", "conn-a", false)
             .is_ok());
         assert!(principal.enforce_non_chat_zdr_posture(false).is_ok());
+    }
+
+    /// An `api_key` token as auth-core's API-key exchange mints it for `aud=inference-core`.
+    fn api_key_claims() -> Value {
+        json!({
+            "sub": "apikey:key-1", "iss": "auth-core", "aud": "inference-core",
+            "iat": now(), "nbf": now() - 5, "exp": now() + 120,
+            "org_id": "org-1", "principal_type": "api_key",
+            "key_id": "key-1", "acting_user_id": "user-1", "jti": "jti-1",
+            "scopes": ["agent:runs"], "zdr": false
+        })
+    }
+
+    async fn api_key_verifier(kid: &str) -> JwtVerifier {
+        verifier(kid).await.with_api_key_principal(true)
+    }
+
+    #[tokio::test]
+    async fn api_key_shape_is_exact() {
+        let kid = "key-api-shape";
+        let verifier = api_key_verifier(kid).await;
+        let principal = verifier
+            .authenticate(&request(&sign(&api_key_claims(), kid)))
+            .await
+            .expect("a well-formed api key token");
+        assert!(principal.is_api_key());
+        assert_eq!(principal.subject, "apikey:key-1");
+        assert_eq!(principal.user_id, None);
+
+        let long_key = "k".repeat(129);
+        for (field, value) in [
+            ("sub", json!("apikey:key-2")),
+            ("sub", json!("key-1")),
+            ("key_id", json!("")),
+            ("key_id", json!("key 1")),
+            ("key_id", json!(long_key)),
+            ("key_id", Value::Null),
+            ("acting_user_id", json!("")),
+            ("acting_user_id", json!(" user-1")),
+            ("acting_user_id", json!("apikey:key-9")),
+            ("acting_user_id", json!("u".repeat(257))),
+            ("acting_user_id", Value::Null),
+            ("user_id", json!("user-1")),
+            ("service_id", json!("service:x")),
+            ("reason", json!("a reason a key never has")),
+            ("principal_type", json!("apikey")),
+        ] {
+            let mut claims = api_key_claims();
+            if value.is_null() {
+                claims.as_object_mut().expect("claims object").remove(field);
+            } else {
+                claims[field] = value.clone();
+            }
+            assert_eq!(
+                verifier
+                    .authenticate(&request(&sign(&claims, kid)))
+                    .await
+                    .unwrap_err()
+                    .code(),
+                tonic::Code::Unauthenticated,
+                "{field} = {value}"
+            );
+        }
+
+        // A key never carries a waiver, and a key id on a person's token is ambiguous.
+        let mut waived = api_key_claims();
+        waived["org_zdr"] = json!(true);
+        waived["zdr_waiver"] =
+            json!({"version": 1, "provider": "openai-codex-subscription", "connection": "conn-a"});
+        let mut user_with_key = user_claims();
+        user_with_key["key_id"] = json!("key-1");
+        for claims in [waived, user_with_key] {
+            assert_eq!(
+                verifier
+                    .authenticate(&request(&sign(&claims, kid)))
+                    .await
+                    .unwrap_err()
+                    .code(),
+                tonic::Code::Unauthenticated
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn api_key_refused_when_switch_off() {
+        let kid = "key-api-off";
+        let verifier = verifier(kid).await;
+        assert_eq!(
+            verifier
+                .authenticate(&request(&sign(&api_key_claims(), kid)))
+                .await
+                .unwrap_err()
+                .code(),
+            tonic::Code::Unauthenticated
+        );
+        // Off, a user token is read exactly as before, a stray key id included.
+        let mut user_with_key = user_claims();
+        user_with_key["key_id"] = json!("key-1");
+        let user = verifier
+            .authenticate(&request(&sign(&user_with_key, kid)))
+            .await
+            .expect("unchanged while the switch is off");
+        assert!(!user.is_api_key());
+        assert_eq!(user.budget_user_id(), "user-1");
+    }
+
+    #[test]
+    fn api_key_principal_parser_takes_only_literal_true() {
+        assert!(api_key_principal_enabled(Some("true")));
+        assert!(api_key_principal_enabled(Some(" true ")));
+        for raw in [None, Some(""), Some("TRUE"), Some("1"), Some("false")] {
+            assert!(!api_key_principal_enabled(raw), "{raw:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn api_key_only_reaches_infer() {
+        let kid = "key-api-rpcs";
+        let verifier = api_key_verifier(kid).await;
+        let key = verifier
+            .authenticate(&request(&sign(&api_key_claims(), kid)))
+            .await
+            .expect("api key");
+        assert!(key.authorize_invoke().is_ok());
+        assert!(key.authorize_org("org-1").is_ok());
+        assert!(key.authorize_api_key_rpc(true).is_ok());
+        assert_eq!(
+            key.authorize_api_key_rpc(false).unwrap_err().code(),
+            tonic::Code::PermissionDenied
+        );
+        assert_eq!(
+            key.authorize_catalog().unwrap_err().code(),
+            tonic::Code::PermissionDenied
+        );
+        assert_eq!(
+            key.authorize_policy_admin().unwrap_err().code(),
+            tonic::Code::PermissionDenied
+        );
+
+        // Neither the person's invoke scope nor the admin scope widens a key.
+        let mut widened = api_key_claims();
+        widened["scopes"] = json!(["inference:invoke", "inference:policy:admin"]);
+        let widened = verifier
+            .authenticate(&request(&sign(&widened, kid)))
+            .await
+            .expect("still a key");
+        assert_eq!(
+            widened.authorize_invoke().unwrap_err().code(),
+            tonic::Code::PermissionDenied
+        );
+        assert_eq!(
+            widened.authorize_policy_admin().unwrap_err().code(),
+            tonic::Code::PermissionDenied
+        );
+
+        // The RPC gate leaves every other principal as it was.
+        let user = AuthenticatedPrincipal::for_test("org-1", Some("user-1"), false);
+        assert!(user.authorize_api_key_rpc(false).is_ok());
+    }
+
+    #[tokio::test]
+    async fn entitlement_subject_is_the_key_owner() {
+        let kid = "key-api-entitlement";
+        let verifier = api_key_verifier(kid).await;
+        let key = verifier
+            .authenticate(&request(&sign(&api_key_claims(), kid)))
+            .await
+            .expect("api key");
+        assert_eq!(key.entitlement_user_id(), Some("user-1"));
+        assert_eq!(key.api_key_id(), Some("key-1"));
+        // The key is never the person: no user id, and its own scope for cache and budget.
+        assert_eq!(key.user_id, None);
+        assert_eq!(key.budget_user_id(), "apikey:key-1");
+
+        let user = AuthenticatedPrincipal::for_test("org-1", Some("user-1"), false);
+        assert_eq!(user.entitlement_user_id(), Some("user-1"));
+        assert_eq!(user.api_key_id(), None);
+        let service = AuthenticatedPrincipal::for_test("org-1", None, false);
+        assert_eq!(service.entitlement_user_id(), None);
+    }
+
+    #[tokio::test]
+    async fn zdr_api_key_takes_the_zdr_route_or_is_refused() {
+        let kid = "key-api-zdr";
+        let verifier = api_key_verifier(kid).await;
+        let mut zdr = api_key_claims();
+        zdr["zdr"] = json!(true);
+        let key = verifier
+            .authenticate(&request(&sign(&zdr, kid)))
+            .await
+            .expect("a zdr key");
+        // The token's ZDR holds whatever the request says.
+        assert!(key.effective_zdr(false));
+        assert!(key.effective_zdr(true));
+        assert!(key.enforce_zdr_route("", "", false).is_ok());
+        // A connection is never a key's route, ZDR or not.
+        for claims in [zdr.clone(), api_key_claims()] {
+            let key = verifier
+                .authenticate(&request(&sign(&claims, kid)))
+                .await
+                .expect("a key");
+            assert_eq!(
+                key.enforce_zdr_route("openai-codex-subscription", "conn-a", false)
+                    .unwrap_err()
+                    .code(),
+                tonic::Code::PermissionDenied
+            );
+        }
+        // A persistent key token of a ZDR org is refused, never served as persistent.
+        let mut mixed = api_key_claims();
+        mixed["org_zdr"] = json!(true);
+        let key = verifier
+            .authenticate(&request(&sign(&mixed, kid)))
+            .await
+            .expect("a mixed-posture key");
+        let status = key
+            .enforce_zdr_route("", "", false)
+            .expect_err("never downgraded");
+        assert_eq!(
+            Refusal::from_status(&status),
+            Some(Refusal::POSTURE_MISMATCH)
+        );
     }
 }

@@ -323,9 +323,10 @@ async function planAndApprove(
     expiresAtMs?: number
     rung?: 'workspace_write' | 'danger_full_access'
     draft?: string
+    continuation?: 'execute_now' | 'next_message'
   } = {},
 ): Promise<string> {
-  const { finish = true, expiresAtMs, rung = 'workspace_write', draft } = options
+  const { finish = true, expiresAtMs, rung = 'workspace_write', draft, continuation = 'next_message' } = options
   await tick()
   controller.setPlanMode(true)
   flush()
@@ -348,6 +349,7 @@ async function planAndApprove(
     grantedRung: rung,
     wasInPlanMode: true,
     persisted: true,
+    continuation,
     ...(expiresAtMs !== undefined ? { grantExpiresAtMs: expiresAtMs } : {}),
   })
   const planTurnId = controller.state.turns.find((turn) => turn.role === 'assistant')!.id
@@ -862,6 +864,60 @@ describe('WS14 S2a: the execute turn is offered only where the build says it can
       await controller.approveTurnPlan(planTurnId, 'workspace_write', 'writes its report', [])
       flush()
       expect(controller.approvedPlanView()).toEqual({ rung: 'workspace_write', selected: true })
+    })
+  })
+})
+
+// WS14 S2, approve then execute: an approval the gateway answered `execute_now` for sends its one
+// execute turn itself, and that turn names the plan. Any other answer leaves the S2a pill as it was.
+describe('WS14 S2: approve then execute', () => {
+  it('sends one execute turn that names the approved plan, and arms no pill', async () => {
+    await withController(async (controller) => {
+      await planAndApprove(controller, { continuation: 'execute_now' })
+      await tick()
+
+      expect(streams).toHaveLength(2)
+      expect(streams[1]!.request).toMatchObject({
+        planMode: false,
+        executeGranted: true,
+        approvedPlanId: 'plan_1',
+        threadId: 't-1',
+      })
+      expect(controller.approvedPlanView()?.selected).toBe(false)
+    })
+  })
+
+  it('leaves the draft the person typed where it is', async () => {
+    await withController(async (controller) => {
+      await planAndApprove(controller, { continuation: 'execute_now', draft: 'Husk å si fra til Kari' })
+      await tick()
+
+      expect(streams).toHaveLength(2)
+      expect(controller.input()).toBe('Husk å si fra til Kari')
+    })
+  })
+
+  it('answers next_message with nothing sent, and the pill armed as it was before', async () => {
+    await withController(async (controller) => {
+      await planAndApprove(controller, { continuation: 'next_message' })
+      await tick()
+
+      expect(streams).toHaveLength(1)
+      expect(controller.approvedPlanView()).toEqual({ rung: 'workspace_write', selected: true })
+    })
+  })
+
+  it('when the execute turn never connects, the grant stays ours and the plan card offers the retry', async () => {
+    await withController(async (controller) => {
+      const planTurnId = await planAndApprove(controller, { continuation: 'execute_now' })
+      await tick()
+
+      streams[1]!.handlers.onError?.({ code: 'inference_stream_error', message: 'Stream failed' })
+      streams[1]!.resolve()
+      await tick(8)
+
+      expect(controller.approvedPlanView()).toEqual({ rung: 'workspace_write', selected: true })
+      expect(controller.planApprovalError()[planTurnId]).toMatch(/Plan godkjent - Kjør nå|Plan approved - run now/)
     })
   })
 })

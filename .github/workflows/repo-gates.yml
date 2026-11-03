@@ -8,20 +8,24 @@ on:
       - 'scripts/gates/**'
       - 'scripts/tests/**'
       - 'apps/**'
-      - '.github/workflows/repo-gates.yml'
+      - 'docs/compliance/**'
+      - '.github/workflows/**'
+      - '.github/actions/**'
   push:
     branches: [main, fix/ui-premium-restore]
     paths:
       - 'scripts/gates/**'
       - 'scripts/tests/**'
       - 'apps/**'
-      - '.github/workflows/repo-gates.yml'
+      - 'docs/compliance/**'
+      - '.github/workflows/**'
+      - '.github/actions/**'
 jobs:
   buf-lint-ratchet-selftest:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: '3.12'
       - name: buf lint ratchet unit tests
@@ -29,8 +33,8 @@ jobs:
   log-content:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: '3.12'
       - name: log-content gate unit tests
@@ -45,10 +49,10 @@ jobs:
     steps:
       # fetch-depth 0 keeps the base commits, so --base-ref can read the baseline
       # and the cap the change is compared against.
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: '3.12'
       - name: size ratchet unit tests
@@ -78,10 +82,10 @@ jobs:
     steps:
       # fetch-depth 0 keeps the base commits, so --base-ref can read the policy
       # and the rules the change is compared against.
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: '3.12'
       - name: plane boundary gate unit tests
@@ -106,3 +110,33 @@ jobs:
             echo "::notice::no previous commit to compare with (new branch); checking the boundary only"
             python3 scripts/gates/plane-boundary.py --check
           fi
+  egress-catalogue:
+    # EP-9 T1: the declared egress catalogue must name every vendor the scan finds, and the
+    # disclosure must be the one the catalogue generates. Non-required for its first week:
+    # the owner adds this job to the branch rule once it has been green on main.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: '22'
+      - name: egress catalogue and scanner unit tests
+        run: node --test docs/compliance/evidence/tools/scan-egress.test.mjs scripts/gates/gen-egress-disclosure.test.mjs
+      - name: declared egress catalogue matches the scan
+        run: node docs/compliance/evidence/tools/scan-egress.mjs --strict --declared docs/compliance/egress-catalogue.json
+      - name: egress disclosure is generated from the catalogue
+        run: node scripts/gates/gen-egress-disclosure.mjs --check
+  pinned-actions:
+    # EP-9 C6: every uses: in the workflows and composite actions names a commit SHA with its tag
+    # in a trailing comment, so a re-pointed tag cannot change what a job runs. The gate reads the
+    # files only, so it needs no token and no history.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+      - name: pin-actions gate unit tests
+        run: python3 -m unittest scripts/tests/test_pin_actions.py
+      - name: every uses is pinned to a commit SHA
+        run: python3 scripts/gates/pin-actions.py --check

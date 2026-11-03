@@ -10,6 +10,8 @@ import {
 } from 'node:fs';
 import { isAbsolute, normalize } from 'node:path';
 
+import { isApiKeyExchangeAudience } from './api-key-exchange';
+
 /**
  * A principal's retention posture for one audience, as the deployment-owned
  * registry states it. Exactly one of:
@@ -107,12 +109,16 @@ type ServicePrincipalConfig = {
    */
   webPolicyByAudience?: Readonly<Record<string, 'tenant'>>;
   /**
-   * Audiences this principal may present an API key for, to exchange it for a
-   * short-lived agent token (INNH-10 CP-1, `POST /api/:audience/api-key-exchange`).
-   * Each is `quarry` or `browser-broker`. It is not an audience the principal
-   * may mint a service token for: it needs no entry in `audiences`, so the Verevon
-   * gateway gains no service-token capability for these audiences by holding it.
-   * Absent by default.
+   * API-key exchange (EP-12 S2, INNH-10 CP-1): the audiences this principal
+   * may turn a user's API key into an `api_key` token for, through
+   * `POST /api/:audience/api-key-exchange`. Each must be one of the closed
+   * `API_KEY_EXCHANGE_AUDIENCE_SCOPES` audiences (`model-gateway`,
+   * `session-core`, `inference-core`, `quarry`, `browser-broker`), listed once.
+   * Independent of `audiences`: opting in here gives the caller no
+   * `/internal-token` for that audience, so the Verevon gateway gains no
+   * service-token capability by holding it. Absent by default, so no principal
+   * gains the capability until a deployment names it (only the Verevon gateway
+   * is meant to).
    */
   apiKeyExchange?: readonly string[];
 };
@@ -454,7 +460,7 @@ function validApiKeyExchange(config: Partial<ServicePrincipalConfig>): boolean {
     nonEmptyStrings(config.apiKeyExchange) &&
     new Set(config.apiKeyExchange).size === config.apiKeyExchange.length &&
     config.apiKeyExchange.every((audience) =>
-      webPolicyAudiences.includes(audience),
+      isApiKeyExchangeAudience(audience),
     )
   );
 }
@@ -734,5 +740,68 @@ export function authorizePlaneApiKeyExchange(
     serviceId,
     subject: `service:${serviceId}`,
     audience: request.audience,
+  };
+}
+
+export type PlaneServiceApiKeyExchangeRequest = {
+  serviceId: string;
+  credential: string;
+  /** The audience the key is exchanged into (one per call). */
+  audience: string;
+  /** The organization the key must be bound to; the key policy checks that. */
+  orgId: string;
+};
+
+/**
+ * Result of authorizing the CALLER of an API-key exchange. Like the token
+ * exchange it carries no scopes and no retention: the minted token's scopes
+ * come from the key's own permissions and its `zdr` from the org posture
+ * raised by the key flag, never from this principal's registry row.
+ */
+export type AuthorizedPlaneServiceApiKeyExchange = {
+  serviceId: string;
+  subject: string;
+  orgId: string;
+  orgBinding: PrincipalOrgBinding;
+};
+
+/**
+ * Authorizes the registered service that presents a user's API key to
+ * `POST /api/:audience/api-key-exchange` (EP-12 S2). The one place
+ * `apiKeyExchange` is read. A directory-bound row needs no lookup: the key's
+ * org binding plus the owner's canonical membership in that org prove the
+ * organization more strongly. A fixed-list row still may not exchange outside
+ * its list.
+ */
+export function authorizePlaneServiceApiKeyExchange(
+  rawRegistry: string,
+  request: PlaneServiceApiKeyExchangeRequest,
+): AuthorizedPlaneServiceApiKeyExchange {
+  const registry = parseRegistry(rawRegistry);
+  const serviceId = request.serviceId.trim();
+  const orgId = request.orgId.trim();
+  const principal = registry[serviceId];
+  const orgBinding =
+    principal && orgId ? orgBindingFor(principal, orgId) : undefined;
+
+  if (
+    !principal ||
+    !request.credential ||
+    !secureEqual(principal.credential, request.credential) ||
+    !principal.apiKeyExchange ||
+    !principal.apiKeyExchange.includes(request.audience) ||
+    !orgId ||
+    !orgBinding
+  ) {
+    throw new ServicePrincipalAuthorizationError(
+      'Service principal API-key exchange is not authorized',
+    );
+  }
+
+  return {
+    serviceId,
+    subject: `service:${serviceId}`,
+    orgId,
+    orgBinding,
   };
 }

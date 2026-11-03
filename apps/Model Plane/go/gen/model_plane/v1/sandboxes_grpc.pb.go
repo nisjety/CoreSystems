@@ -36,6 +36,7 @@ const (
 	SandboxManager_GetThreadWorkspace_FullMethodName          = "/model_plane.v1.SandboxManager/GetThreadWorkspace"
 	SandboxManager_ApplyThreadWorkspaceChanges_FullMethodName = "/model_plane.v1.SandboxManager/ApplyThreadWorkspaceChanges"
 	SandboxManager_DeleteThreadWorkspace_FullMethodName       = "/model_plane.v1.SandboxManager/DeleteThreadWorkspace"
+	SandboxManager_GetLeaseStatus_FullMethodName              = "/model_plane.v1.SandboxManager/GetLeaseStatus"
 )
 
 // SandboxManagerClient is the client API for SandboxManager service.
@@ -102,9 +103,13 @@ type SandboxManagerClient interface {
 	// Apply per-path changes and deletes, each compare-and-swapped on its
 	// base_hash. A conflicting path is reported and never overwritten.
 	ApplyThreadWorkspaceChanges(ctx context.Context, in *ApplyThreadWorkspaceChangesRequest, opts ...grpc.CallOption) (*ApplyThreadWorkspaceChangesResponse, error)
-	// Erase a thread's rows and its object-store prefix. Declared here, implemented
-	// with the retention sweeper (WS22-S5); until then it refuses every caller.
+	// Erase a thread's rows and its object-store prefix (WS22-S5). Owner-bound: the
+	// caller's own sandbox bearer; service principals are refused.
 	DeleteThreadWorkspace(ctx context.Context, in *DeleteThreadWorkspaceRequest, opts ...grpc.CallOption) (*DeleteThreadWorkspaceResponse, error)
+	// Read a lease's lifecycle: its state, the failure cause the latest thread-workspace apply recorded,
+	// when it was last used, and the counts its thread workspace holds (WS22-S6). Descriptive, like
+	// GetProcess: a released or expired lease still answers, so a client can say why its files are not kept.
+	GetLeaseStatus(ctx context.Context, in *GetLeaseStatusRequest, opts ...grpc.CallOption) (*GetLeaseStatusResponse, error)
 }
 
 type sandboxManagerClient struct {
@@ -285,6 +290,16 @@ func (c *sandboxManagerClient) DeleteThreadWorkspace(ctx context.Context, in *De
 	return out, nil
 }
 
+func (c *sandboxManagerClient) GetLeaseStatus(ctx context.Context, in *GetLeaseStatusRequest, opts ...grpc.CallOption) (*GetLeaseStatusResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetLeaseStatusResponse)
+	err := c.cc.Invoke(ctx, SandboxManager_GetLeaseStatus_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // SandboxManagerServer is the server API for SandboxManager service.
 // All implementations must embed UnimplementedSandboxManagerServer
 // for forward compatibility.
@@ -349,9 +364,13 @@ type SandboxManagerServer interface {
 	// Apply per-path changes and deletes, each compare-and-swapped on its
 	// base_hash. A conflicting path is reported and never overwritten.
 	ApplyThreadWorkspaceChanges(context.Context, *ApplyThreadWorkspaceChangesRequest) (*ApplyThreadWorkspaceChangesResponse, error)
-	// Erase a thread's rows and its object-store prefix. Declared here, implemented
-	// with the retention sweeper (WS22-S5); until then it refuses every caller.
+	// Erase a thread's rows and its object-store prefix (WS22-S5). Owner-bound: the
+	// caller's own sandbox bearer; service principals are refused.
 	DeleteThreadWorkspace(context.Context, *DeleteThreadWorkspaceRequest) (*DeleteThreadWorkspaceResponse, error)
+	// Read a lease's lifecycle: its state, the failure cause the latest thread-workspace apply recorded,
+	// when it was last used, and the counts its thread workspace holds (WS22-S6). Descriptive, like
+	// GetProcess: a released or expired lease still answers, so a client can say why its files are not kept.
+	GetLeaseStatus(context.Context, *GetLeaseStatusRequest) (*GetLeaseStatusResponse, error)
 	mustEmbedUnimplementedSandboxManagerServer()
 }
 
@@ -412,6 +431,9 @@ func (UnimplementedSandboxManagerServer) ApplyThreadWorkspaceChanges(context.Con
 }
 func (UnimplementedSandboxManagerServer) DeleteThreadWorkspace(context.Context, *DeleteThreadWorkspaceRequest) (*DeleteThreadWorkspaceResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method DeleteThreadWorkspace not implemented")
+}
+func (UnimplementedSandboxManagerServer) GetLeaseStatus(context.Context, *GetLeaseStatusRequest) (*GetLeaseStatusResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetLeaseStatus not implemented")
 }
 func (UnimplementedSandboxManagerServer) mustEmbedUnimplementedSandboxManagerServer() {}
 func (UnimplementedSandboxManagerServer) testEmbeddedByValue()                        {}
@@ -740,6 +762,24 @@ func _SandboxManager_DeleteThreadWorkspace_Handler(srv interface{}, ctx context.
 	return interceptor(ctx, in, info, handler)
 }
 
+func _SandboxManager_GetLeaseStatus_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetLeaseStatusRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SandboxManagerServer).GetLeaseStatus(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SandboxManager_GetLeaseStatus_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SandboxManagerServer).GetLeaseStatus(ctx, req.(*GetLeaseStatusRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // SandboxManager_ServiceDesc is the grpc.ServiceDesc for SandboxManager service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -814,6 +854,10 @@ var SandboxManager_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "DeleteThreadWorkspace",
 			Handler:    _SandboxManager_DeleteThreadWorkspace_Handler,
+		},
+		{
+			MethodName: "GetLeaseStatus",
+			Handler:    _SandboxManager_GetLeaseStatus_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

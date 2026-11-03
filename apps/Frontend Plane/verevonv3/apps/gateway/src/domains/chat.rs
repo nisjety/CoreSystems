@@ -55,6 +55,11 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
             "/api/v1/chat/threads/{thread_id}/rewind",
             post(json_handlers::rewind_thread),
         )
+        // Start a new thread from a copy of this one, up to an assistant turn (build plan WS17 S6).
+        .route(
+            "/api/v1/chat/threads/{thread_id}/fork",
+            post(history::fork_thread),
+        )
         .route(
             "/api/v1/chat/stream/resume/{request_id}",
             get(streams::resume_stream),
@@ -80,6 +85,11 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
         .route(
             "/api/v1/chat/threads/{thread_id}/context",
             get(json_handlers::get_thread_context),
+        )
+        // The files a thread keeps across runs, and the user's reset of them (WS22-S5).
+        .route(
+            "/api/v1/chat/threads/{thread_id}/workspace",
+            get(json_handlers::get_thread_workspace).delete(json_handlers::reset_thread_workspace),
         )
         // Browser-run screenshots. The id is Quarry-v2's artifact id, which the
         // Model Plane already carries on BrowserObservationReceived.

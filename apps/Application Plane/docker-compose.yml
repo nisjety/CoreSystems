@@ -827,6 +827,18 @@ services:
             # for run-watch notifications (AUTO-2). Empty disables this
             # principal entirely, matching support-worker's optional pattern.
             NOTIFICATION_CAPABILITY_CORE_SERVICE_TOKEN: ${NOTIFICATION_CAPABILITY_CORE_SERVICE_TOKEN:-}
+            # Attention and scheduled-run notices (WS16-S4, WS20-S7) go through the native adapter, not the provider.
+            # Off by default and read as the literal "true". Turn it on before capability-core's
+            # CAPABILITY_CORE_ATTENTION_NOTIFY_ENABLED: while it is off those types take the disabled provider path.
+            NOTIFICATION_NATIVE_TYPES_ENABLED: ${NOTIFICATION_NATIVE_TYPES_ENABLED:-false}
+            # Web Push (WS16-S6), off by default and read as the literal "true". The VAPID pair and the
+            # subscription key are minted and persisted by scripts/run-application-plane.sh, never typed by hand.
+            # Only this service receives the private key; the gateway and the browser never do.
+            NOTIFICATION_WEB_PUSH_ENABLED: ${NOTIFICATION_WEB_PUSH_ENABLED:-false}
+            NOTIFICATION_VAPID_PUBLIC_KEY: ${NOTIFICATION_VAPID_PUBLIC_KEY:-}
+            NOTIFICATION_VAPID_PRIVATE_KEY: ${NOTIFICATION_VAPID_PRIVATE_KEY:-}
+            NOTIFICATION_VAPID_SUBJECT: ${NOTIFICATION_VAPID_SUBJECT:-mailto:ops@verevon.local}
+            NOTIFICATION_PUSH_SUBSCRIPTION_KEY: ${NOTIFICATION_PUSH_SUBSCRIPTION_KEY:-}
             # Optional fourth caller: Convex's Space attention courier (WS11-S9),
             # service id space-attention. Empty disables the principal.
             NOTIFICATION_SPACE_ATTENTION_SERVICE_TOKEN: ${NOTIFICATION_SPACE_ATTENTION_SERVICE_TOKEN:-}

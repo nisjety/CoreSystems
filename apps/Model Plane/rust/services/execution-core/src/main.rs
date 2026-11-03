@@ -17,6 +17,11 @@ async fn main() -> Result<()> {
     // startup log, before any tool has run. Result is cached for the process.
     execution_core::sandbox::log_support();
 
+    // One line on the browser planner: the mode in force, how big the allowlist
+    // is, the procedure and the limits. A `default_on` request without its
+    // acknowledgement is downgraded here, on the record.
+    execution_core::tool_bridge::log_browser_planner_banner();
+
     // Attest what the sandbox probe just measured to capability-core, then keep
     // attesting: capability-core denies dispatch for any capability whose runtime
     // health has never been attested (or whose attestation has expired), and

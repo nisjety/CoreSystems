@@ -1,0 +1,20 @@
+{
+  "event_id": "run_attention:session-core:88428348626181a668ba45cb302cf80d80c597493aa257da1e5e03cdcdf8f72d",
+  "event_type": "RUN_ATTENTION",
+  "schema_version": 1,
+  "ts": "2026-07-29T10:11:12Z",
+  "producer": "session-core",
+  "correlation_id": "run-abc",
+  "causation_id": "apr-1",
+  "idempotency_key": "<idempotency hash: the hex tail of event_id>",
+  "org_id": "org-1",
+  "user_id": "user-1",
+  "resource_ref": "run:run-abc",
+  "payload": {
+    "run_id": "run-abc",
+    "source_id": "apr-1",
+    "state": "ATTENTION_STATE_NEEDS_APPROVAL",
+    "thread_id": "thread-9"
+  },
+  "zdr": false
+}

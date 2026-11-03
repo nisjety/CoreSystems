@@ -39,8 +39,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mp_protos = &[
         "model_plane/v1/ids.proto",
         "model_plane/v1/events.proto",
+        // EventLog service (WS10.S6: session-core serves QueryEvents from it).
+        "model_plane/v1/eventlog.proto",
         "model_plane/v1/gateway.proto",
         "model_plane/v1/sessions.proto",
+        "model_plane/v1/attention.proto",
         "model_plane/v1/runs.proto",
         "model_plane/v1/capabilities.proto",
         "model_plane/v1/sandboxes.proto",
@@ -57,10 +60,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "model_plane/v1/proof_bundle.proto",
         "model_plane/v1/finetune.proto",
         "model_plane/v1/routing_policy.proto",
+        "model_plane/v1/run_ledger.proto",
         "model_plane/v1/space_room.proto",
         "model_plane/v1/space_events.proto",
         "model_plane/v1/space_history.proto",
         "model_plane/v1/space_attention.proto",
+        // EP-4 S4: McpElicitationService (gateway.proto imports it too).
+        "model_plane/v1/mcp_elicitation.proto",
     ];
 
     let dp_protos = &[
@@ -97,7 +103,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Hit again 2026-09-07 adding ListRunsRequest.space_id + the Space read
     // decision fields: model-gateway rebuilt and session-core did not, so the
     // room Work listing would have compiled against a contract without the
-    // fields. Touching this comment is the fingerprint bust.
+    // fields. Touching this comment is the fingerprint bust (last: EP-14 S5,
+    // run_ledger.proto's timing RPCs and RunAgentResponse.round_timing).
     for p in &proto_paths {
         println!("cargo:rerun-if-changed={}", p.display());
     }

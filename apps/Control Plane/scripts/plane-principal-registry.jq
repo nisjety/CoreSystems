@@ -100,9 +100,13 @@ def org_ids($name; $row):
 # validAudienceScopeMap, validAudienceRetentionMap, validTokenExchangeMap,
 # validWebPolicyMap and validApiKeyExchange).
 #
-# The audiences that carry a web_policy claim and the only ones an API key may be
-# exchanged into (webPolicyAudiences in plane-service-principal.ts).
+# The audiences that carry a web_policy claim (webPolicyAudiences in
+# plane-service-principal.ts).
 def web_policy_audiences: ["quarry", "browser-broker"];
+
+# The closed set of audiences an API key may be exchanged into
+# (API_KEY_EXCHANGE_AUDIENCE_SCOPES in api-key-exchange.ts).
+def api_key_exchange_audiences: ["model-gateway", "session-core", "inference-core", "quarry", "browser-broker"];
 
 def check_maps($name; $row; $audiences; $scopes):
   (if ($row | has("scopesByAudience")) then
@@ -135,11 +139,12 @@ def check_maps($name; $row; $audiences; $scopes):
          elif ([$m[] | . == "tenant"] | all | not) then fail($name; "\"webPolicyByAudience\" values must be tenant")
          else . end
      else . end)
+  # EP-12 S2 / INNH-10 CP-1: the audiences this caller may ask auth-core's api-key-exchange to mint for.
   | (if ($row | has("apiKeyExchange")) then
        $row.apiKeyExchange as $m
        | if ($m | non_empty_strings | not) then fail($name; "\"apiKeyExchange\" must be a non-empty array of non-empty strings")
          elif ($m | length) != ($m | unique | length) then fail($name; "\"apiKeyExchange\" lists an audience twice")
-         elif ([$m[] | IN(web_policy_audiences[])] | all | not) then fail($name; "\"apiKeyExchange\" may name only quarry or browser-broker")
+         elif ([$m[] | IN(api_key_exchange_audiences[])] | all | not) then fail($name; "\"apiKeyExchange\" audiences must be model-gateway, session-core, inference-core, quarry or browser-broker")
          else . end
      else . end);
 

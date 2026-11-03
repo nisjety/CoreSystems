@@ -21,6 +21,7 @@ use orchestration_event::{
     BrowserActionApprovalRequired as PbBrowserActionApprovalRequired,
     BrowserActionDecided as PbBrowserActionDecided,
     BrowserActionDispatched as PbBrowserActionDispatched,
+    BrowserAttachSharedJar as PbBrowserAttachSharedJar,
     BrowserObservationReceived as PbBrowserObservationReceived,
     BrowserRunPaused as PbBrowserRunPaused, BrowserRunResumed as PbBrowserRunResumed,
     Event as ProtoEvent, PlanTransitioned as PbPlanTransitioned,
@@ -401,18 +402,45 @@ impl From<OrchestrationEvent> for ProtoOrchestrationEvent {
             OrchestrationEvent::BrowserRunPaused {
                 run_id,
                 plan_id,
+                reason,
                 at,
             } => envelope(
                 at,
-                ProtoEvent::BrowserRunPaused(PbBrowserRunPaused { run_id, plan_id }),
+                ProtoEvent::BrowserRunPaused(PbBrowserRunPaused {
+                    run_id,
+                    plan_id,
+                    reason,
+                }),
             ),
             OrchestrationEvent::BrowserRunResumed {
                 run_id,
                 plan_id,
+                reason,
                 at,
             } => envelope(
                 at,
-                ProtoEvent::BrowserRunResumed(PbBrowserRunResumed { run_id, plan_id }),
+                ProtoEvent::BrowserRunResumed(PbBrowserRunResumed {
+                    run_id,
+                    plan_id,
+                    reason,
+                }),
+            ),
+            OrchestrationEvent::BrowserAttachSharedJar {
+                run_id,
+                plan_id,
+                attach_id,
+                session_run_id,
+                tab_id,
+                at,
+            } => envelope(
+                at,
+                ProtoEvent::BrowserAttachSharedJar(PbBrowserAttachSharedJar {
+                    run_id,
+                    plan_id,
+                    attach_id,
+                    session_run_id,
+                    tab_id,
+                }),
             ),
             OrchestrationEvent::BrowserActionApprovalRequired {
                 run_id,
@@ -585,11 +613,21 @@ impl TryFrom<ProtoOrchestrationEvent> for OrchestrationEvent {
             ProtoEvent::BrowserRunPaused(p) => OrchestrationEvent::BrowserRunPaused {
                 run_id: p.run_id,
                 plan_id: p.plan_id,
+                reason: p.reason,
                 at,
             },
             ProtoEvent::BrowserRunResumed(p) => OrchestrationEvent::BrowserRunResumed {
                 run_id: p.run_id,
                 plan_id: p.plan_id,
+                reason: p.reason,
+                at,
+            },
+            ProtoEvent::BrowserAttachSharedJar(p) => OrchestrationEvent::BrowserAttachSharedJar {
+                run_id: p.run_id,
+                plan_id: p.plan_id,
+                attach_id: p.attach_id,
+                session_run_id: p.session_run_id,
+                tab_id: p.tab_id,
                 at,
             },
             ProtoEvent::BrowserActionApprovalRequired(p) => {
@@ -637,7 +675,10 @@ impl TryFrom<ProtoOrchestrationEvent> for OrchestrationEvent {
                 resumed_segment: p.resumed_segment,
                 at,
             },
-            ProtoEvent::QuestionAsked(_) | ProtoEvent::QuestionAnswered(_) => {
+            ProtoEvent::QuestionAsked(_)
+            | ProtoEvent::QuestionAnswered(_)
+            | ProtoEvent::RunUsageProgress(_)
+            | ProtoEvent::ToolRetryScheduled(_) => {
                 return Err(ShimError::UnsupportedEvent);
             }
         })
@@ -729,6 +770,13 @@ mod tests {
         round_trip(&OrchestrationEvent::BrowserRunPaused {
             run_id: "run-1".into(),
             plan_id: "plan-1".into(),
+            reason: String::new(),
+            at: fixture_at(),
+        });
+        round_trip(&OrchestrationEvent::BrowserRunPaused {
+            run_id: "run-1".into(),
+            plan_id: "plan-1".into(),
+            reason: "user_took_over".into(),
             at: fixture_at(),
         });
     }
@@ -738,8 +786,55 @@ mod tests {
         round_trip(&OrchestrationEvent::BrowserRunResumed {
             run_id: "run-1".into(),
             plan_id: "plan-1".into(),
+            reason: "control_returned".into(),
             at: fixture_at(),
         });
+    }
+
+    #[test]
+    fn round_trip_browser_attach_shared_jar() {
+        round_trip(&OrchestrationEvent::BrowserAttachSharedJar {
+            run_id: "run-1".into(),
+            plan_id: "plan-1".into(),
+            attach_id: "att-1".into(),
+            session_run_id: "qrun-1".into(),
+            tab_id: "tab-1".into(),
+            at: fixture_at(),
+        });
+    }
+
+    #[test]
+    fn attach_shared_jar_is_oneof_tag_30_and_reason_is_field_3() {
+        use prost::Message;
+        let pb: ProtoOrchestrationEvent = OrchestrationEvent::BrowserAttachSharedJar {
+            run_id: "r".into(),
+            plan_id: "p".into(),
+            attach_id: "a".into(),
+            session_run_id: "s".into(),
+            tab_id: "t".into(),
+            at: fixture_at(),
+        }
+        .into();
+        let bytes = pb.encode_to_vec();
+        // oneof arm 30, wire type 2 => key 0xF2 0x01
+        assert!(
+            bytes.windows(2).any(|w| w == [0xF2, 0x01]),
+            "BrowserAttachSharedJar must be oneof tag 30: {bytes:?}"
+        );
+        let paused: ProtoOrchestrationEvent = OrchestrationEvent::BrowserRunPaused {
+            run_id: "r".into(),
+            plan_id: "p".into(),
+            reason: "user_took_over".into(),
+            at: fixture_at(),
+        }
+        .into();
+        let b = paused.encode_to_vec();
+        // field 3, wire type 2 => 0x1A, then len 14 and the reason bytes
+        let needle = [&[0x1Au8, 14][..], b"user_took_over"].concat();
+        assert!(
+            b.windows(needle.len()).any(|w| w == needle.as_slice()),
+            "reason must be field 3 of BrowserRunPaused: {b:?}"
+        );
     }
 
     #[test]

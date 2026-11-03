@@ -13,6 +13,7 @@ import { identityTables } from "./schema/identity";
 import { chatTables } from "./schema/chat";
 import { plannerTables } from "./schema/planner";
 import { agentTables } from "./schema/agents";
+import { agentDefinitionVersionTables } from "./schema/agentDefinitionVersions";
 import { ingestTables } from "./schema/ingest";
 import { spaceTables } from "./schema/spaces";
 import { spaceDeletionTables } from "./schema/spaceDeletion";
@@ -28,6 +29,7 @@ export default defineSchema({
   ...chatTables,
   ...plannerTables,
   ...agentTables,
+  ...agentDefinitionVersionTables,
   ...ingestTables,
   ...spaceTables,
   ...spaceDeletionTables,

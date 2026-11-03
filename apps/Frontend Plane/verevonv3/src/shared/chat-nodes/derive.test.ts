@@ -343,6 +343,18 @@ describe('source-scope node', () => {
     })
     expect(kinds(streaming)).not.toContain('source-scope')
   })
+
+  it("shows a Space's knowledge receipt on an auto turn, the one auto badge there is", () => {
+    const node = deriveConversationNodes(assistantTurn({
+      scopeApplied: { scope: 'auto', excludedTools: [], knowledge: { mode: 'retrieval', sources: 2 } },
+    })).find((entry) => entry.kind === 'source-scope')
+    expect(node).toEqual({
+      kind: 'source-scope',
+      scope: 'auto',
+      excludedTools: [],
+      knowledge: { mode: 'retrieval', sources: 2 },
+    })
+  })
 })
 
 /**
@@ -626,5 +638,54 @@ describe('recalled memories survive every path', () => {
       (entry) => entry.kind === 'memory-recall',
     )
     expect(node).toMatchObject({ count: 2, memories: [] })
+  })
+})
+
+describe('lifecycle notices (WS15)', () => {
+  const retry = { kind: 'retry' as const, tool: 'web_search', attempt: 2, maxAttempts: 3, reason: 'timeout' }
+
+  it('derives no lifecycle node for a plain turn', () => {
+    expect(kinds(assistantTurn())).not.toContain('lifecycle-notices')
+    expect(kinds(assistantTurn({ lifecycle: [] }))).not.toContain('lifecycle-notices')
+  })
+
+  /** One node for the whole turn, after the memory recall and before the truncation notice. */
+  it('places one node per turn between the memory recall and the truncation notice', () => {
+    const turn = assistantTurn({
+      memoryRecallCount: 1,
+      stopReason: 'max_tokens',
+      lifecycle: [retry, { kind: 'compaction', scope: 'history', outcome: 'summarized' }],
+    })
+    expect(kinds(turn)).toEqual([
+      'answer',
+      'memory-recall',
+      'lifecycle-notices',
+      'truncated',
+      'tool-chips',
+      'attachments',
+    ])
+    expect(deriveConversationNodes(turn).find((node) => node.kind === 'lifecycle-notices')).toEqual({
+      kind: 'lifecycle-notices',
+      notices: turn.lifecycle,
+    })
+  })
+
+  it('keeps the notices while the answer is still pending', () => {
+    const turn = assistantTurn({ status: 'waiting', streaming: true, content: '', lifecycle: [retry] })
+    expect(kinds(turn)).toContain('lifecycle-notices')
+  })
+
+  it('reads a retry as the pending activity of the call it was matched to', () => {
+    const turn = assistantTurn({
+      status: 'waiting',
+      streaming: true,
+      content: '',
+      toolCalls: [{ id: 'tc-1', name: 'web_search', status: 'running' }],
+      lifecycle: [{ ...retry, callId: 'tc-1' }],
+    })
+    const answer = deriveConversationNodes(turn).find((node) => node.kind === 'answer')
+    expect(answer).toMatchObject({
+      answer: { state: 'pending', activity: { kind: 'retrying', tool: 'Web search', attempt: 2, max: 3 } },
+    })
   })
 })

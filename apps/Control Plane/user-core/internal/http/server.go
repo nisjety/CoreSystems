@@ -298,6 +298,10 @@ func (s *Server) setupRoutes() {
 			settings.GET("/ai", s.getAISettings)
 			// PUT /api/v1/settings/ai - Update AI/Copilot settings
 			settings.PUT("/ai", s.updateAISettings)
+			// GET /api/v1/settings/onboarding - Get the personal first-run state (EP-8-S8)
+			settings.GET("/onboarding", s.getOnboardingSettings)
+			// PUT /api/v1/settings/onboarding - Update the personal first-run state (EP-8-S8)
+			settings.PUT("/onboarding", s.updateOnboardingSettings)
 
 			// GET /api/v1/settings/storage - Get storage & sync settings
 			settings.GET("/storage", s.getStorageSettings)

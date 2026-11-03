@@ -1,0 +1,6 @@
+{
+  "raw": "{\"action\":\"navigate\",\"url\":\"https://exa",
+  "expect": {
+    "kind": "error"
+  }
+}

@@ -22,8 +22,10 @@ use metrics_exporter_prometheus::PrometheusHandle;
 use tracing::info;
 
 use crate::auth::JwtVerifier;
+use crate::provider::fallback::FallbackChain;
 use crate::provider::policy_client::PolicyClient;
 use crate::provider::routing_policy::RoutingPolicy;
+use crate::provider::ModelInfo;
 use crate::readiness::GrpcReadiness;
 
 /// Shared state for the routing-policy admin routes.
@@ -36,6 +38,8 @@ pub struct PolicyState {
     pub policy: Arc<ArcSwap<RoutingPolicy>>,
     /// session-core client for the write path. `None` → PUT returns 503.
     pub client: Option<Arc<PolicyClient>>,
+    /// The chain the policy steers. A role table must fit its chat catalogue (EP-13 S4).
+    pub chain: FallbackChain,
 }
 
 /// Start the HTTP health server on :8082. `metrics` is the handle of the
@@ -142,6 +146,12 @@ async fn put_policy(
     if let Err(response) = authorize_policy_admin(&state.auth, &headers).await {
         return response;
     }
+    if let Some(response) = role_table_refusal(&policy, &state.chain.list_models("chat", "")) {
+        return response;
+    }
+    if let Some(response) = promotion_gate(promotion_required()) {
+        return response;
+    }
     let Some(client) = state.client else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -167,6 +177,56 @@ async fn put_policy(
         )
             .into_response(),
     }
+}
+
+/// The refusal for a role table the chat catalogue does not support (EP-13 S4), or `None` when the table
+/// is valid. The table is platform-wide, so a bad entry would reach every org's side tasks. It is refused
+/// here rather than skipped at every call.
+fn role_table_refusal(policy: &RoutingPolicy, catalogue: &[ModelInfo]) -> Option<Response> {
+    let errors = policy.validate_roles(catalogue).err()?;
+    Some(
+        (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": {
+                    "code": "invalid_role_table",
+                    "message": "the role table does not fit the chat catalogue",
+                    "details": { "issues": errors },
+                }
+            })),
+        )
+            .into_response(),
+    )
+}
+
+/// The switch that makes a policy change a candidate (EP-14 S10). Read on each write; only the literal `true`
+/// enables it.
+const PROMOTION_REQUIRED_ENV: &str = "ROUTING_POLICY_PROMOTION_REQUIRED";
+
+fn promotion_required_from(raw: Option<&str>) -> bool {
+    raw.is_some_and(|value| value.trim() == "true")
+}
+
+fn promotion_required() -> bool {
+    promotion_required_from(std::env::var(PROMOTION_REQUIRED_ENV).ok().as_deref())
+}
+
+/// The refusal for a direct write while promotion is required (EP-14 S10), or `None` when the write may go straight
+/// to the store. With the switch on, a write has to become a candidate, and this process cannot reach the candidate
+/// store yet. The write is refused rather than applied, so a PUT never takes a policy live.
+fn promotion_gate(required: bool) -> Option<Response> {
+    required.then(|| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({
+                "error": {
+                    "code": "candidate_store_unwired",
+                    "message": "ROUTING_POLICY_PROMOTION_REQUIRED is on, so a policy change must be proposed as a candidate, and this process cannot reach the candidate store yet",
+                }
+            })),
+        )
+            .into_response()
+    })
 }
 
 async fn authorize_policy_admin(
@@ -213,8 +273,63 @@ fn auth_error(status: StatusCode, message: &str) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::provider::routing_policy::{RoleEntry, RolePurpose};
     use crate::readiness::GrpcReadiness;
     use axum::Extension;
+
+    #[tokio::test]
+    async fn put_policy_refuses_unknown_model_in_roles() {
+        let catalogue = vec![ModelInfo {
+            id: "gpt-4o-mini".to_owned(),
+            modality: "chat".to_owned(),
+            ..Default::default()
+        }];
+        let mut policy = RoutingPolicy::default();
+        policy.roles.insert(
+            RolePurpose::Title,
+            RoleEntry {
+                candidates: vec!["no-such-model".to_owned()],
+                effort: None,
+            },
+        );
+
+        let refusal = role_table_refusal(&policy, &catalogue).expect("an unknown model is refused");
+        assert_eq!(refusal.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(refusal.into_body(), usize::MAX)
+            .await
+            .expect("the refusal body");
+        let value: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        assert_eq!(value["error"]["code"], "invalid_role_table");
+        assert_eq!(value["error"]["details"]["issues"][0]["reason"], "unknown_model");
+
+        assert!(role_table_refusal(&RoutingPolicy::default(), &catalogue).is_none());
+    }
+
+    #[test]
+    fn promotion_switch_reads_only_the_literal_true() {
+        assert!(promotion_required_from(Some("true")));
+        assert!(promotion_required_from(Some(" true ")));
+        for raw in [None, Some(""), Some("1"), Some("TRUE"), Some("yes"), Some("false")] {
+            assert!(!promotion_required_from(raw), "{raw:?}");
+        }
+    }
+
+    #[test]
+    fn put_with_switch_off_unchanged() {
+        // Off, the gate is silent and the write takes the path it always took.
+        assert!(promotion_gate(false).is_none());
+    }
+
+    #[tokio::test]
+    async fn put_with_switch_on_refuses_a_direct_write() {
+        let refusal = promotion_gate(true).expect("a switched-on write is refused");
+        assert_eq!(refusal.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = axum::body::to_bytes(refusal.into_body(), usize::MAX)
+            .await
+            .expect("the refusal body");
+        let value: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        assert_eq!(value["error"]["code"], "candidate_store_unwired");
+    }
 
     #[tokio::test]
     async fn readyz_fails_until_grpc_listener_is_bound() {

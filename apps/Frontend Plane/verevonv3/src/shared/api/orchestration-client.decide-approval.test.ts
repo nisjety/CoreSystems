@@ -50,3 +50,39 @@ describe('decideApproval contract check', () => {
     expect(fetchMock).not.toHaveBeenCalled()
   })
 })
+
+// "Always" (build plan WS13 S7) is sent only on an approval of a thread grant, and only when asked for.
+describe('decideApproval Always', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('sends promote with an approval of a thread grant', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ approval: { id: 'appr_1', state: 'APPROVAL_STATE_GRANTED' } }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await decideApproval('appr_1', 'approve', '', undefined, 'thread', true)
+
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit]
+    expect(JSON.parse(init.body as string)).toEqual({ decision: 'approve', reason: '', scope: 'thread', promote: true })
+  })
+
+  it('sends neither the scope nor promote for a one-call approval', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ approval: { id: 'appr_1', state: 'APPROVAL_STATE_GRANTED' } }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await decideApproval('appr_1', 'approve')
+
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit]
+    expect(JSON.parse(init.body as string)).toEqual({ decision: 'approve', reason: '' })
+  })
+
+  it('refuses an Always that is not an approval of a thread grant, without sending anything', async () => {
+    const fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(decideApproval('appr_1', 'approve', '', undefined, 'once', true)).rejects.toBeInstanceOf(ApiError)
+    await expect(decideApproval('appr_1', 'reject', '', undefined, 'thread', true)).rejects.toBeInstanceOf(ApiError)
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+})

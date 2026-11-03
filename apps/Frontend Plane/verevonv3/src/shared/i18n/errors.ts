@@ -39,6 +39,7 @@ type ApiErrorLike =
       blockReason?: string | null
       resumable?: boolean
       feature?: string | null
+      details?: Record<string, unknown> | null
     }
   | null
   | undefined
@@ -78,6 +79,7 @@ export const ERROR_COPY: Record<string, ErrorCopy> = {
   create_failed: { no: 'Kunne ikke opprette dette. Prøv igjen.', en: 'Could not create this. Try again.' },
   upstream_error: { no: 'En bakenforliggende tjeneste svarte med en feil. Prøv igjen.', en: 'A backing service returned an error. Try again.' },
   upstream_unavailable: { no: 'Tjenesten er utilgjengelig akkurat nå. Prøv igjen om litt.', en: 'The service is unavailable right now. Try again shortly.' },
+  fork_unavailable: { no: 'Kunne ikke lage en kopi av tråden akkurat nå.', en: 'Could not copy the thread right now.' },
   upstream_shape_error: { no: 'Fikk et uventet svar fra tjenesten. Prøv igjen.', en: 'Got an unexpected response from the service. Try again.' },
   upload_requires_multipart: { no: 'Opplasting krever filvedlegg, ikke bare tekst.', en: 'Upload requires a file attachment, not just text.' },
 
@@ -386,6 +388,10 @@ export const ERROR_COPY: Record<string, ErrorCopy> = {
     no: 'Bare en avgjørelse for dette ene kallet er tilgjengelig.',
     en: 'Only a decision for this one call is available.',
   },
+  rule_requires_thread_scope: {
+    no: '«Alltid» kan bare brukes på en godkjenning for denne tråden.',
+    en: 'An Always applies only to an approval for this thread.',
+  },
   body_too_large: {
     no: 'Policyen er for stor. Kort den ned og prøv igjen.',
     en: 'The policy is too large. Shorten it and try again.',
@@ -411,6 +417,10 @@ export const ERROR_COPY: Record<string, ErrorCopy> = {
   schedule_action_unavailable: {
     no: 'Denne handlingen for planlagte kjøringer er ikke slått på her ennå.',
     en: 'This action for scheduled runs is not turned on here yet.',
+  },
+  zdr_durable_mutation_forbidden: {
+    no: 'Legitimasjon med Zero Data Retention kan ikke opprette, endre eller slette varig data.',
+    en: 'Zero Data Retention credentials cannot create, change, or delete durable state.',
   },
   zdr_persistent_profile_forbidden: {
     no: 'Denne organisasjonen lagrer ikke data, så nettleseren kan ikke bruke en varig profil. Bruk en midlertidig profil.',
@@ -1195,6 +1205,28 @@ export const BLOCK_REASON_COPY: Record<string, ErrorCopy> = {
   },
 }
 
+/**
+ * Why a memory save was refused in a shared Space or an agent run, keyed by the
+ * `details.reason` of a `memory_not_enabled` refusal. The person's own pause or
+ * off keeps the generic copy: those are theirs to switch back on, these are not.
+ */
+const MEMORY_SCOPE_COPY: ReadonlyMap<string, ErrorCopy> = new Map<string, ErrorCopy>([
+  [
+    'space_scope',
+    {
+      no: 'Personlig minne brukes og lagres ikke i delte Spaces, så dette ble ikke lagret.',
+      en: 'Personal memory is not used or saved in shared Spaces, so this was not saved.',
+    },
+  ],
+  [
+    'agent_run_scope',
+    {
+      no: 'Minne lagres ikke fra en agentkjøring, så dette ble ikke lagret.',
+      en: 'Memory is not saved from an agent run, so this was not saved.',
+    },
+  ],
+])
+
 const BLOCKED_CODES = new Set(['site_blocked', 'browser_site_blocked', 'challenge_detected', 'CHALLENGE_DETECTED'])
 const TAKEOVER_CODES = new Set(['USER_TOOK_OVER', 'browser_human_takeover_active'])
 const SESSION_LOST_CODES = new Set(['browser_process_lost', 'browser_session_reaped', 'session_reaped'])
@@ -1295,7 +1327,9 @@ function describe(
 
   // A typed Space denial (WS03): the reason, not the operation code, says why. A
   // message the SPA wrote itself (LocalizedError) still wins.
-  if (isSpaceDenial(err) && !(err instanceof LocalizedError)) {
+  // A memory refusal is Session Core's, not Control's: its `details.reason` (`space_scope`,
+  // `agent_run_scope`) shares a token with the Space denial vocabulary, so it is read below.
+  if (isSpaceDenial(err) && !(err instanceof LocalizedError) && code !== 'memory_not_enabled') {
     return {
       code,
       kind,
@@ -1309,6 +1343,9 @@ function describe(
   if (err instanceof LocalizedError) copy = err.copy
   // A refusal that names why the wall is up gets the sentence for that reason.
   if (kind === 'blocked' && typeof like?.blockReason === 'string') copy = BLOCK_REASON_COPY[like.blockReason]
+  // A memory refusal that names a shared Space or an agent run says so.
+  const memoryScope = like?.details?.reason
+  if (code === 'memory_not_enabled' && typeof memoryScope === 'string') copy ??= MEMORY_SCOPE_COPY.get(memoryScope)
   copy ??= code ? ERROR_COPY[code] : undefined
   if (!copy) {
     if (kind === 'unauthenticated') copy = ERROR_COPY.unauthenticated

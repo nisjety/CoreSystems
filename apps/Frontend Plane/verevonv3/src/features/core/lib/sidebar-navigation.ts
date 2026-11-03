@@ -36,6 +36,7 @@ import {
   TrendingUp,
   Users,
   LayoutTemplate,
+  SlidersHorizontal,
   type IconNode,
   type LucideProps,
 } from '@/shared/icons'
@@ -245,6 +246,7 @@ export const sidebarSections: SidebarSection[] = [
           { id: 'agents-all', label: 'Alle agenter', href: '/agents', icon: HatGlasses, description: 'Se og konfigurer agentroller.' },
           { id: 'agents-cost', label: 'Kostnad', href: '/agents/cost', icon: Coins, description: 'Reell modellbruk og kostnad per kjøring fra hovedboken.' },
           { id: 'agents-quality', label: 'Kvalitet', href: '/agents/quality', icon: Gauge, description: 'Nøyaktighet, drift og kvalitetssignal fra kjøringshistorikken.' },
+          { id: 'agents-customize', label: 'Tilpass', href: '/agents/customize', icon: SlidersHorizontal, description: 'Agentmodus, hooks, MCP-servere, ferdigheter, instrukser og plugins.' },
         ],
       },
     ],

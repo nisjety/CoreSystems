@@ -1,0 +1,57 @@
+{
+  "data": {
+    "events": [
+      {
+        "event_id": "01JC7K3M9Q4R8T2V5W6X7Y8Z9A",
+        "event_type": "BROWSER_STEP_RECEIPT_RECORDED",
+        "schema_version": 1,
+        "ts": "2026-11-01T09:30:15.250Z",
+        "producer": "quarry-edge",
+        "correlation_id": "",
+        "causation_id": "",
+        "org_id": "org-a",
+        "user_id": "user-a",
+        "resource_ref": "",
+        "payload": {
+          "action": "click",
+          "step": 7
+        },
+        "zdr": false,
+        "producer_seq": 7,
+        "agent": {
+          "id": "general-v1",
+          "role": "subagent",
+          "parent_id": "primary-v1"
+        },
+        "origin": "AGENT",
+        "run_id": "run_1",
+        "request_id": "req_1"
+      },
+      {
+        "event_id": "01JC7K3M9Q4R8T2V5W6X7Y8Z9B",
+        "event_type": "BROWSER_ARTIFACT_RECORDED",
+        "schema_version": 1,
+        "ts": "2026-11-01T09:30:16.000Z",
+        "producer": "quarry-edge",
+        "correlation_id": "corr_1",
+        "causation_id": "01JC7K3M9Q4R8T2V5W6X7Y8Z9A",
+        "org_id": "org-a",
+        "user_id": "user-a",
+        "resource_ref": "artifact_1",
+        "payload": {
+          "type_url": "type.googleapis.com/other"
+        },
+        "zdr": true,
+        "producer_seq": 8,
+        "agent": null,
+        "origin": null,
+        "run_id": "run_1",
+        "request_id": "req_1"
+      }
+    ]
+  },
+  "meta": {
+    "next_cursor": "42",
+    "has_more": true
+  }
+}

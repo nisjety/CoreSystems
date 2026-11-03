@@ -19,6 +19,7 @@ use tracing::{debug, info, warn};
 use mp_contracts::prompt_tier::PromptTier;
 
 use super::effort::{self, Family, Wire};
+use super::model_record;
 use super::zdr::ZdrAttestation;
 use super::{InferChunk, InferRequest, InferResponse, ModelInfo, ProviderError, ProviderRouter};
 
@@ -1492,6 +1493,7 @@ impl ProviderRouter for AnthropicProvider {
         // Venice-style per-model privacy disclosure, derived from this
         // provider's own declared residency + ZDR attestation.
         let caps = self.capabilities();
+        let aliases = effort::ModelAliases::from_env();
         let provider_features = vec![
             "tools".to_owned(),
             "vision".to_owned(),
@@ -1508,6 +1510,13 @@ impl ProviderRouter for AnthropicProvider {
                 let cheap = is_cheap_claude(&id);
                 let effort_levels = advertised_effort_levels(&id, ladder);
                 let features = super::features_for_model(&caps, &provider_features, &id);
+                let record = model_record::advertised(
+                    Family::Anthropic,
+                    &aliases,
+                    &id,
+                    caps.max_context_tokens,
+                    caps.max_output_tokens,
+                );
                 ModelInfo {
                     id,
                     provider: provider.clone(),
@@ -1518,6 +1527,9 @@ impl ProviderRouter for AnthropicProvider {
                     privacy_tier,
                     residency_label: residency_label.clone(),
                     effort_levels,
+                    context_window_tokens: record.context_window_tokens,
+                    max_output_tokens: record.max_output_tokens,
+                    lifecycle: record.lifecycle,
                 }
             })
             .collect()

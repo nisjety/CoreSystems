@@ -24,7 +24,7 @@ use std::sync::Arc;
 
 use dashmap::DashMap;
 
-use crate::sse_events::ChatEvent;
+use crate::sse_events::{AttachmentPreview, ChatEvent};
 
 /// Artifact kinds the chat client knows how to render. Kept as an enum here
 /// (rather than free-form strings at each call site) so a typo cannot silently
@@ -477,14 +477,25 @@ pub fn artifact_event(
 
 /// Builds the `attachment` event for a generated binary, so the file is
 /// downloadable from the message itself and not only from the artifact panel.
+/// `check` is the structural check of an Office or PDF file, when one ran.
 #[must_use]
-pub fn attachment_event(id: &str, name: &str, mime: &str, data_uri: &str, size: i64) -> ChatEvent {
+pub fn attachment_event(
+    id: &str,
+    name: &str,
+    mime: &str,
+    data_uri: &str,
+    size: i64,
+    check: Option<mp_contracts::office_verification::OfficeVerification>,
+    preview: Option<AttachmentPreview>,
+) -> ChatEvent {
     ChatEvent::Attachment {
         id: id.to_owned(),
         name: name.to_owned(),
         mime: mime.to_owned(),
         url: data_uri.to_owned(),
         size,
+        check,
+        preview,
     }
 }
 
@@ -797,6 +808,8 @@ mod tests {
             "application/x",
             "data:application/x;base64,AA",
             2,
+            None,
+            None,
         ) {
             ChatEvent::Attachment {
                 id,
@@ -804,12 +817,15 @@ mod tests {
                 mime,
                 url,
                 size,
+                check,
+                preview: _,
             } => {
                 assert_eq!(id, "f1");
                 assert_eq!(name, "r.xlsx");
                 assert_eq!(mime, "application/x");
                 assert!(url.starts_with("data:"));
                 assert_eq!(size, 2);
+                assert!(check.is_none(), "no verifier ran, so no check is carried");
             }
             other => panic!("expected attachment, got {other:?}"),
         }

@@ -314,6 +314,40 @@ fn list_models_carries_effort_levels() {
     );
 }
 
+/// The record fields reach `/v1/models` the way the effort levels do: the descriptor
+/// carries each one, leaves it out when unknown, and is filled from inference-core's
+/// `ModelInfo`. The tags are the ones the plan reserves for `ModelInfo` (EP-13 S2).
+#[test]
+fn list_models_carries_context_and_lifecycle() {
+    let routes = read("src/http_routes.rs");
+    let descriptor = function_body(&routes, "struct ModelDescriptor {");
+    assert!(
+        descriptor.contains("context_window_tokens: Option<u32>,")
+            && descriptor.contains("max_output_tokens: Option<u32>,")
+            && descriptor.contains("lifecycle: String,")
+            && descriptor
+                .matches("skip_serializing_if = \"Option::is_none\"")
+                .count()
+                >= 2
+            && descriptor.contains("skip_serializing_if = \"String::is_empty\""),
+        "`/v1/models` lists the record fields, and leaves each one out when it is unknown"
+    );
+    assert!(
+        routes.contains("context_window_tokens: known_tokens(m.context_window_tokens),")
+            && routes.contains("max_output_tokens: known_tokens(m.max_output_tokens),")
+            && routes.contains("lifecycle: m.lifecycle,"),
+        "the descriptor is filled from inference-core's ModelInfo, with zero read as unknown"
+    );
+    let proto = read("../../../proto/model_plane/v1/inference.proto");
+    for declaration in [
+        "uint32 context_window_tokens = 9;",
+        "uint32 max_output_tokens = 10;",
+        "string lifecycle = 11;",
+    ] {
+        assert!(proto.contains(declaration), "ModelInfo must declare `{declaration}`");
+    }
+}
+
 /// Additivity of `inference.proto`, proved by tag number rather than by
 /// `buf breaking` (vacuous until its baseline is committed): the new fields sit
 /// at the tags the plan reserves, and every field that existed before keeps

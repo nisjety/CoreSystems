@@ -532,8 +532,11 @@
       ]
     },
     "apiKeyExchange": [
-      "browser-broker",
-      "quarry"
+      "model-gateway",
+      "session-core",
+      "inference-core",
+      "quarry",
+      "browser-broker"
     ]
   },
   "verevon-gateway-retention-decision": {

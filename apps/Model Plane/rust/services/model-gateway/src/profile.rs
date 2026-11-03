@@ -14,6 +14,32 @@
 //! the Approval primitives in mp-orchestration / session-core). This module is
 //! the policy mapping the gateway stamps onto the invoke so that loop and the
 //! operator surfaces agree on the posture.
+//!
+//! The agent mode a person picks (WS25-S6) resolves onto this posture, never beside it: the
+//! mode's floor is the mode that states the posture already in force, so a choice can only tighten.
+
+use std::sync::OnceLock;
+
+use mp_contracts::agent_mode::{self, AgentMode, Resolved, UnknownAgentMode};
+
+/// The environment switch of the agent modes (WS25-S6). Off by default: with it off no choice is
+/// read, and a turn is byte-identical to one sent before the field existed. Parsed by the shared
+/// strict parser, so only the literal `true` enables it.
+pub const AGENT_MODES_ENV: &str = "AGENT_MODES";
+
+/// The one strict parser of the agent modes switch.
+#[must_use]
+pub fn agent_modes_from(value: Option<&str>) -> bool {
+    mp_contracts::loop_fold::switch_from(value)
+}
+
+/// Whether the agent modes switch is on in this process. Read once, so it cannot change under a
+/// request.
+#[must_use]
+pub fn agent_modes_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| agent_modes_from(std::env::var(AGENT_MODES_ENV).ok().as_deref()))
+}
 
 /// Resolved harness profile.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -120,6 +146,47 @@ pub fn resolve_posture(floor: ApprovalPosture, requested: AgentProfile) -> Appro
     floor.stricter(requested.posture())
 }
 
+/// The agent mode that states a posture already in force: `auto` for `Auto`, and `ask_first` for
+/// `Ask`, whose permission gate is the posture itself. A mode resolved from this floor is never
+/// looser than the posture the turn would have run under without one.
+#[must_use]
+pub fn mode_floor_from(posture: ApprovalPosture) -> AgentMode {
+    match posture {
+        ApprovalPosture::Auto => AgentMode::Auto,
+        ApprovalPosture::Ask => AgentMode::AskFirst,
+    }
+}
+
+/// The agent mode the person chose for this turn (WS25-S6), or `None` when none applies.
+///
+/// Absent with the switch off, so an unchanged request is never read. A blank id is absent, as every
+/// optional id on the invoke request is. An id this build does not know is an error, which the caller
+/// refuses before any run exists; it never falls back to a mode.
+///
+/// # Errors
+///
+/// [`UnknownAgentMode`] for a non-blank id that is not one of the four modes.
+pub fn chosen_agent_mode(
+    enabled: bool,
+    chosen: Option<&str>,
+) -> Result<Option<AgentMode>, UnknownAgentMode> {
+    match chosen.map(str::trim).filter(|id| !id.is_empty()) {
+        Some(id) if enabled => AgentMode::parse(id).map(Some),
+        _ => Ok(None),
+    }
+}
+
+/// What the chosen mode resolves to for a turn that would otherwise run under `requested`: the
+/// strictest of that posture's mode and the choice. The posture is the floor, so a choice looser
+/// than it changes nothing, and the source names the floor.
+#[must_use]
+pub fn resolve_turn_mode(
+    chosen: Option<AgentMode>,
+    requested: ApprovalPosture,
+) -> Option<Resolved> {
+    chosen.map(|choice| agent_mode::resolve(mode_floor_from(requested), None, Some(choice), &[]))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -204,5 +271,106 @@ mod tests {
             resolve_posture(floor, AgentProfile::from_wire(Some("chat"))),
             ApprovalPosture::Ask
         );
+    }
+
+    #[test]
+    fn the_mode_floor_states_the_posture_already_in_force() {
+        use ApprovalPosture::{Ask, Auto};
+        assert_eq!(mode_floor_from(Auto), AgentMode::Auto);
+        assert_eq!(mode_floor_from(Ask), AgentMode::AskFirst);
+        for posture in [Auto, Ask] {
+            assert_eq!(
+                mode_floor_from(posture).preset().permission_mode,
+                posture.as_permission_mode(),
+                "{posture:?}"
+            );
+        }
+    }
+
+    /// The byte-identical guarantee on the posture: with no choice, the turn resolves to nothing, and
+    /// the posture it runs under is the one the platform and the client's profile already set.
+    #[test]
+    fn a_turn_with_no_choice_resolves_to_no_mode_and_keeps_its_posture() {
+        use ApprovalPosture::{Ask, Auto};
+        for requested in [Auto, Ask] {
+            for absent in [None, Some(""), Some("   ")] {
+                let chosen =
+                    chosen_agent_mode(true, absent).expect("an absent choice is not an error");
+                assert_eq!(chosen, None, "{absent:?}");
+                assert_eq!(resolve_turn_mode(chosen, requested), None, "{absent:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_agent_mode_switch_is_strict_and_off_reads_no_choice() {
+        assert!(agent_modes_from(Some("true")));
+        assert!(agent_modes_from(Some("  TRUE ")));
+        for off in [
+            None,
+            Some(""),
+            Some("false"),
+            Some("1"),
+            Some("on"),
+            Some("yes"),
+            Some("truee"),
+        ] {
+            assert!(!agent_modes_from(off), "{off:?} must stay off");
+        }
+        // Off: a choice is not read at all, not even to refuse it, so the request is the one it was.
+        assert_eq!(chosen_agent_mode(false, Some("read_only")), Ok(None));
+        assert_eq!(chosen_agent_mode(false, Some("malformed")), Ok(None));
+    }
+
+    #[test]
+    fn an_unknown_mode_is_refused_and_never_becomes_a_mode() {
+        for unknown in ["malformed", "full_access", "Read_Only", "read-only"] {
+            assert_eq!(
+                chosen_agent_mode(true, Some(unknown)),
+                Err(UnknownAgentMode),
+                "{unknown:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_read_only_choice_holds_the_turn_to_its_plan_gate_and_only_tightens() {
+        let chosen = chosen_agent_mode(true, Some("read_only")).expect("a known mode");
+        let resolved = resolve_turn_mode(chosen, ApprovalPosture::Auto).expect("a choice resolves");
+        assert_eq!(resolved.mode, AgentMode::ReadOnly);
+        assert!(resolved.preset.plan_gate);
+        assert_eq!(resolved.preset.permission_mode, "ask");
+        assert_eq!(resolved.source, agent_mode::Source::User);
+
+        // A choice looser than the posture already in force changes nothing: the floor decides.
+        let looser = chosen_agent_mode(true, Some("auto")).expect("a known mode");
+        let kept = resolve_turn_mode(looser, ApprovalPosture::Ask).expect("a choice resolves");
+        assert_eq!(kept.mode, AgentMode::AskFirst);
+        assert_eq!(kept.source, agent_mode::Source::Floor);
+    }
+
+    #[test]
+    fn a_choice_never_loosens_the_permission_the_posture_set() {
+        use ApprovalPosture::{Ask, Auto};
+        for requested in [Auto, Ask] {
+            for id in ["lockdown", "read_only", "ask_first", "auto"] {
+                let chosen = chosen_agent_mode(true, Some(id)).expect("a known mode");
+                let resolved = resolve_turn_mode(chosen, requested).expect("a choice resolves");
+                if requested == Ask {
+                    assert_eq!(
+                        resolved.preset.permission_mode, "ask",
+                        "{id} over an ask posture"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_lockdown_choice_allows_no_do_run() {
+        let chosen = chosen_agent_mode(true, Some("lockdown")).expect("a known mode");
+        let resolved = resolve_turn_mode(chosen, ApprovalPosture::Auto).expect("a choice resolves");
+        assert_eq!(resolved.mode, AgentMode::Lockdown);
+        assert!(!resolved.preset.do_runs);
     }
 }

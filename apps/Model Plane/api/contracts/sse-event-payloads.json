@@ -47,6 +47,12 @@
         "Attachment"
       ],
       "keys": {
+        "check": {
+          "types": [
+            "object"
+          ],
+          "presence": "optional"
+        },
         "id": {
           "types": [
             "string"
@@ -58,6 +64,12 @@
             "string"
           ],
           "presence": "always"
+        },
+        "preview": {
+          "types": [
+            "object"
+          ],
+          "presence": "optional"
         },
         "size": {
           "types": [
@@ -612,6 +624,77 @@
         }
       }
     },
+    "run_parked": {
+      "family": null,
+      "variants": [
+        "RunParked"
+      ],
+      "keys": {
+        "reason": {
+          "types": [
+            "string"
+          ],
+          "presence": "always"
+        },
+        "request_id": {
+          "types": [
+            "string"
+          ],
+          "presence": "always"
+        },
+        "resume_after": {
+          "types": [
+            "null",
+            "string"
+          ],
+          "presence": "always"
+        },
+        "run_id": {
+          "types": [
+            "string"
+          ],
+          "presence": "always"
+        },
+        "status": {
+          "types": [
+            "string"
+          ],
+          "presence": "always"
+        }
+      }
+    },
+    "sandbox_state": {
+      "family": "steps",
+      "variants": [
+        "SandboxState"
+      ],
+      "keys": {
+        "cause": {
+          "types": [
+            "string"
+          ],
+          "presence": "optional"
+        },
+        "request_id": {
+          "types": [
+            "string"
+          ],
+          "presence": "always"
+        },
+        "scope": {
+          "types": [
+            "string"
+          ],
+          "presence": "always"
+        },
+        "state": {
+          "types": [
+            "string"
+          ],
+          "presence": "always"
+        }
+      }
+    },
     "source_scope_applied": {
       "family": "citations",
       "variants": [
@@ -623,6 +706,12 @@
             "array"
           ],
           "presence": "always"
+        },
+        "knowledge": {
+          "types": [
+            "object"
+          ],
+          "presence": "optional"
         },
         "scope": {
           "types": [
@@ -1016,6 +1105,12 @@
           ],
           "presence": "always"
         },
+        "routing": {
+          "types": [
+            "string"
+          ],
+          "presence": "optional"
+        },
         "unpriced_calls": {
           "types": [
             "integer"
@@ -1027,6 +1122,45 @@
             "string"
           ],
           "presence": "optional"
+        }
+      }
+    },
+    "user_question": {
+      "family": null,
+      "variants": [
+        "UserQuestion"
+      ],
+      "keys": {
+        "delivery": {
+          "types": [
+            "string"
+          ],
+          "presence": "always"
+        },
+        "expires_at": {
+          "types": [
+            "null",
+            "string"
+          ],
+          "presence": "always"
+        },
+        "items": {
+          "types": [
+            "array"
+          ],
+          "presence": "always"
+        },
+        "question_id": {
+          "types": [
+            "string"
+          ],
+          "presence": "always"
+        },
+        "request_id": {
+          "types": [
+            "string"
+          ],
+          "presence": "always"
         }
       }
     },

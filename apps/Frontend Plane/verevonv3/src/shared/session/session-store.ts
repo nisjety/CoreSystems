@@ -2,7 +2,7 @@ import { createStore, untrack } from 'solid-js'
 import { getCurrentSession, probeAuthSession, type AuthUser, type OnboardingStatus } from '../api/auth-client'
 import { ApiError } from '../api/http'
 import { clearSupportChatThreads } from '../chat/support-chat-thread'
-import { clearHomeDrafts } from './home-draft-storage'
+import { clearChatDrafts, clearHomeDrafts } from './home-draft-storage'
 import { clearSearchSnapshots } from './home-local-content'
 
 export type SessionStatus = 'idle' | 'loading' | 'authenticated' | 'unauthenticated'
@@ -74,6 +74,7 @@ export async function loadSession(options?: { disableAuthCookieCache?: boolean }
     if (session.user?.id && session.user.id !== data.user.id) {
       clearSupportChatThreads()
       clearHomeDrafts()
+      clearChatDrafts()
       clearSearchSnapshots()
     }
     const onboardingStatus =
@@ -110,6 +111,7 @@ export function setSessionUser(user: AuthUser): void {
   if (session.user?.id && session.user.id !== user.id) {
     clearSupportChatThreads()
     clearHomeDrafts()
+    clearChatDrafts()
     clearSearchSnapshots()
   }
   setSession((s) => {
@@ -133,6 +135,7 @@ export function markSessionOnboardingComplete(activeOrg?: SessionOrg | null): vo
 export function clearSession(): void {
   clearSupportChatThreads()
   clearHomeDrafts()
+  clearChatDrafts()
   clearSearchSnapshots()
   setSession((s) => {
     s.status = 'unauthenticated'

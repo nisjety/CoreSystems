@@ -852,6 +852,7 @@ async fn legacy_room_origin_rows_are_withheld_and_listed() {
                 org_id: world.org.clone(),
                 user_id: "owner-1".to_owned(),
                 limit: 50,
+                ..Default::default()
             },
             identity_for(&world.org, "owner-1"),
         ))

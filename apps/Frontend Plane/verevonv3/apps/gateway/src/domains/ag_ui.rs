@@ -124,6 +124,7 @@ async fn stream_agent_ui(
     }
     let org_name = crate::domains::auth::resolve_org_name(&state, &user, &org_id).await;
     let body = shared::with_identity_context(body, &user.user_name, &org_name);
+    let body = shared::with_locale_context(body);
     let mut body = shared::with_viewer_locale(body, state.space_features.chat_locale_hint);
     shared::apply_org_zdr_posture(&state, &user, &mut body).await;
     // After `inject_personal_thread_context`: only minted once Control has
@@ -923,7 +924,9 @@ fn map_upstream_frame(run: &mut AgUiRunState, frame: SseFrame) -> Vec<Event> {
         // WS15 lifecycle notices: counts and closed tokens only, shown as they arrive.
         | "retry_scheduled"
         | "compaction"
-        | "context_change" => {
+        | "context_change"
+        // WS22-S6: a tool call's workspace state, closed tokens only, shown as it arrives.
+        | "sandbox_state" => {
             vec![ag_ui_event(json!({
                 "type": "CUSTOM",
                 "name": event,
@@ -1380,6 +1383,11 @@ mod tests {
                 "context_change",
                 r#"{"change":"history_shed","messages_dropped":4,"request_id":"req_1"}"#,
                 "history_shed",
+            ),
+            (
+                "sandbox_state",
+                r#"{"scope":"thread","state":"conflict","cause":"workspace_conflict","request_id":"req_1"}"#,
+                "workspace_conflict",
             ),
         ] {
             let mut run = AgUiRunState::default();

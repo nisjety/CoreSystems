@@ -89,6 +89,10 @@ pub const RETRIEVAL_QUERY_CAPABILITY: &str = "cap.retrieval.query";
 /// `web.search`/`web.read` aliases).
 pub const WEB_HTTP_CAPABILITY: &str = "cap.tool.http";
 
+/// The Do loop's browser read tools (`browser.open`, `browser.observe`; WS21-S5a). Attested only
+/// while the switch is on here, BrowserBroker answers its health check and Quarry reports ready.
+pub const BROWSER_OBSERVE_CAPABILITY: &str = "cap.browser.observe";
+
 /// Scope required to attest a `global` capability row. capability-core's handler
 /// looks the row up with `GetGlobal` only for a service principal holding this
 /// scope; with the tenant-level health scope it would instead look for a
@@ -152,6 +156,9 @@ const DEPENDENCY_PROBE_TIMEOUT: Duration = Duration::from_secs(3);
 /// Ceiling on the whole web probe: the edge `/ready` call plus up to two token
 /// mints (the token client itself allows 10 s, which would be far too long here).
 const WEB_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// The whole browser probe: the broker's health check and Quarry's readiness, together.
+const BROWSER_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// What execution-core measured about its own runtimes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -482,6 +489,9 @@ pub struct DependencyProbes {
     pub retrieval: bool,
     /// quarry-edge is ready AND the web tools' credentials mint.
     pub web: bool,
+    /// The Do loop's browser tools are switched on here, BrowserBroker answers its health check and
+    /// Quarry reports ready.
+    pub browser: bool,
 }
 
 /// Every dependency-backed attestation a round's probes justify. A failed probe
@@ -492,7 +502,23 @@ pub fn dependency_attestations(probes: DependencyProbes) -> Vec<Attestation> {
     let mut planned = memory_attestations(probes.session_core);
     planned.extend(retrieval_attestations(probes.retrieval));
     planned.extend(web_attestations(probes.web));
+    planned.extend(browser_attestations(probes.browser));
     planned
+}
+
+/// The browser read tools' attestation: one row for `cap.browser.observe`, and only when the probe
+/// that [`browser_ready`] runs passed. A failed probe attests nothing, so the row lapses.
+#[must_use]
+pub fn browser_attestations(browser_up: bool) -> Vec<Attestation> {
+    if !browser_up {
+        return Vec::new();
+    }
+    vec![attestation_with_cost(
+        BROWSER_OBSERVE_CAPABILITY,
+        "browser_broker_and_quarry_ready",
+        "The BrowserBroker health check passed, Quarry reported ready, and the Do loop's browser tools are switched on.",
+        COST_CLASS_VARIABLE,
+    )]
 }
 
 /// The retrieval engine's own readiness, over its unauthenticated HTTP route.
@@ -664,16 +690,40 @@ async fn web_tools_ready(org_id: &str) -> bool {
 /// own timeout, so a hung dependency delays the round by one timeout at most
 /// and one failure never blocks another's attestation.
 pub async fn probe_dependencies(org_id: &str) -> DependencyProbes {
-    let (session_core, retrieval, web) = tokio::join!(
+    let (session_core, retrieval, web, browser) = tokio::join!(
         session_core_reachable(),
         retrieval_engine_ready(),
-        web_tools_ready(org_id)
+        web_tools_ready(org_id),
+        browser_ready()
     );
     DependencyProbes {
         session_core,
         retrieval,
         web,
+        browser,
     }
+}
+
+/// Whether the Do loop's browser read tools can be served on this instance: the switch is on, the
+/// BrowserBroker health check passes and Quarry reports ready. The switch being off is never
+/// attested, whatever the dependencies say.
+async fn browser_ready() -> bool {
+    if !crate::runtime_loop::agent::do_browser_enabled() {
+        return false;
+    }
+    let Ok(Some(quarry)) = crate::quarry_agent::QuarryAgentClient::from_env() else {
+        return false;
+    };
+    let probe = async {
+        let (broker, ready) = tokio::join!(
+            crate::browser_session::production_broker().healthy(),
+            quarry.ready()
+        );
+        broker && ready
+    };
+    tokio::time::timeout(BROWSER_PROBE_TIMEOUT, probe)
+        .await
+        .unwrap_or(false)
 }
 
 /// The program the import probe runs: it imports every module in
@@ -1225,6 +1275,7 @@ mod tests {
             PROCESS_CAPABILITY,
             RETRIEVAL_QUERY_CAPABILITY,
             WEB_HTTP_CAPABILITY,
+            BROWSER_OBSERVE_CAPABILITY,
             WORKSPACE_READ_CAPABILITY,
             WORKSPACE_WRITE_CAPABILITY,
         ] {
@@ -1255,6 +1306,24 @@ mod tests {
             ]
         );
         assert!(up.iter().all(|a| a.state == "available"));
+    }
+
+    #[test]
+    fn the_browser_read_tools_are_attested_only_when_their_probe_passes() {
+        let attested = dependency_attestations(DependencyProbes {
+            browser: true,
+            ..DependencyProbes::default()
+        });
+        let ids: Vec<&str> = attested
+            .iter()
+            .map(|row| row.capability_id.as_str())
+            .collect();
+        assert_eq!(ids, [BROWSER_OBSERVE_CAPABILITY]);
+        assert!(
+            dependency_attestations(DependencyProbes::default()).is_empty(),
+            "a round whose browser probe failed attests no browser row"
+        );
+        assert!(browser_attestations(false).is_empty());
     }
 
     #[test]
@@ -1840,6 +1909,7 @@ mod tests {
                 session_core: bits & 1 != 0,
                 retrieval: bits & 2 != 0,
                 web: bits & 4 != 0,
+                browser: false,
             };
             let ids: Vec<String> = dependency_attestations(probes)
                 .into_iter()
@@ -2320,6 +2390,7 @@ mod tests {
                 session_core: false,
                 retrieval: true,
                 web: false,
+                browser: false,
             })
             .await;
         assert_eq!(attested, 1);
@@ -2352,6 +2423,7 @@ mod tests {
                 session_core: false,
                 retrieval: false,
                 web: true,
+                browser: false,
             })
             .await;
         assert_eq!(attested, 1);
@@ -2389,6 +2461,7 @@ mod tests {
                 session_core: true,
                 retrieval: true,
                 web: true,
+                browser: false,
             })
             .await;
         assert_eq!(attested, 5);
@@ -2429,6 +2502,7 @@ mod tests {
                 session_core: false,
                 retrieval: true,
                 web: true,
+                browser: false,
             })
             .await;
         assert_eq!(attested, 1);

@@ -99,3 +99,7 @@ apps/**/src/auth/fixtures/*.sha256 text eol=lf
 "apps/Model Plane/rust/services/session-core/migrations/0031_agent_skills_ownership.sql" -text
 "apps/Model Plane/rust/services/session-core/migrations/0033_dispatch_unreachable_failure_code.sql" -text
 "apps/Model Plane/rust/services/session-core/migrations/0034_thread_origin.sql" -text
+
+# WS16.S1: the ai-chat-v1 fixtures are pinned by SHA256SUMS and vendored by Quarry byte for byte.
+apps/**/contracts/ai-chat-v1/SHA256SUMS text eol=lf
+apps/**/model-gateway-contract/**/SHA256SUMS text eol=lf
