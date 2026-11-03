@@ -78,8 +78,8 @@ use crate::stitch;
 use crate::screenshot_mask;
 use crate::actions::ScrollTarget;
 use crate::deadlines::{
-    best_effort, deadline, library_timeout, read_with_retry, timeout_error, with_deadline,
-    with_limit, Op,
+    best_effort, deadline, library_timeout, read_with_retry, slice_within, timeout_error,
+    with_deadline, with_limit, DeadlineWarning, DeadlineWarningCode, Op,
 };
 use crate::navigation::{guard_navigation_target, guard_page_request_target};
 use crate::profile_capture;
@@ -3059,9 +3059,222 @@ fn sanitize_download_filename(raw: &str) -> String {
 const AX_PROJECTION_NODE_LIMIT: usize = 300;
 const FRAME_PROJECTION_LIMIT: usize = 64;
 
+/// The most executable targets one snapshot carries with `QUARRY_BROWSER_AX_PER_FRAME` on (E3.3-k).
+/// The runtime keeps the first 50 of them as the snapshot's refs (`build_active_snapshot`), and the
+/// planner reads the first 40 of those (`planner_infer_request`), so no target past the cap can reach
+/// a model. With the flag off the driver keeps `AX_PROJECTION_NODE_LIMIT`, as it always did.
+const AX_PER_FRAME_TARGET_CAP: usize = 50;
+
+/// `QUARRY_BROWSER_AX_PER_FRAME` (E3.3-k). When on, a frame the top-level accessibility read leaves
+/// out gets its own read under `Op::AxFrame`, the whole snapshot stays under `Op::AxSnapshot`, and
+/// the executable targets are capped at [`AX_PER_FRAME_TARGET_CAP`]. Off by default.
+pub const AX_PER_FRAME_FLAG: &str = "QUARRY_BROWSER_AX_PER_FRAME";
+
+/// Whether the flag's value turns the per-frame read on. Anything but a yes value leaves it off.
+fn parse_ax_per_frame(raw: Option<&str>) -> bool {
+    matches!(
+        raw.map(|value| value.trim().to_ascii_lowercase())
+            .as_deref(),
+        Some("1" | "true" | "yes" | "on")
+    )
+}
+
+/// The flag, read on each snapshot (as `QUARRY_EDGE__HIT_TEST` is), so a change takes effect on the
+/// next observation without a restart.
+fn ax_per_frame_enabled() -> bool {
+    parse_ax_per_frame(std::env::var(AX_PER_FRAME_FLAG).ok().as_deref())
+}
+
+fn millis_of(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
+
+/// The frame ids of a `Page.getFrameTree` frame: this frame first, then each child in document
+/// order, until `output` holds `limit` ids. The top frame is the first id.
+fn frame_ids_in_order(frame_tree: &serde_json::Value, limit: usize, output: &mut Vec<String>) {
+    if output.len() >= limit {
+        return;
+    }
+    let Some(frame_id) = frame_tree
+        .get("frame")
+        .and_then(|frame| frame.get("id"))
+        .and_then(serde_json::Value::as_str)
+    else {
+        return;
+    };
+    output.push(frame_id.to_owned());
+    for child in frame_tree
+        .get("childFrames")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        frame_ids_in_order(child, limit, output);
+    }
+}
+
+/// The frames the top-level accessibility read did not carry (E3.3-k): each frame after the top
+/// one that no node of that read names as its `frameId`. An out-of-process child is one of them.
+/// A same-process child's nodes come inside the top-level read, under that read's own bound.
+fn frames_to_read(frame_ids: &[String], root_nodes: &[serde_json::Value]) -> Vec<String> {
+    let carried: HashSet<&str> = root_nodes
+        .iter()
+        .filter_map(|node| node.get("frameId").and_then(serde_json::Value::as_str))
+        .collect();
+    frame_ids
+        .iter()
+        .skip(1)
+        .filter(|frame_id| !carried.contains(frame_id.as_str()))
+        .cloned()
+        .collect()
+}
+
+/// The key that makes two accessibility nodes one: the DOM node, which one document keeps under one
+/// backend id, or, for a node without one, its frame and AX id. `None` for a node with neither.
+fn ax_node_key(node: &serde_json::Value) -> Option<String> {
+    if let Some(backend) = node
+        .get("backendDOMNodeId")
+        .and_then(serde_json::Value::as_i64)
+    {
+        return Some(format!("dom:{backend}"));
+    }
+    let ax_id = node.get("nodeId").and_then(serde_json::Value::as_str)?;
+    let frame_id = node
+        .get("frameId")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    Some(format!("ax:{frame_id}:{ax_id}"))
+}
+
+/// The top-level read's nodes, then the frames' nodes that are not already there, as one tree.
+fn merged_ax_tree(
+    root_nodes: Vec<serde_json::Value>,
+    frame_nodes: Vec<serde_json::Value>,
+) -> serde_json::Value {
+    let mut seen = HashSet::new();
+    let mut merged = Vec::with_capacity(root_nodes.len() + frame_nodes.len());
+    for node in root_nodes.into_iter().chain(frame_nodes) {
+        let fresh = match ax_node_key(&node) {
+            Some(key) => seen.insert(key),
+            None => true,
+        };
+        if fresh {
+            merged.push(node);
+        }
+    }
+    json!({ "nodes": merged })
+}
+
+/// One frame's accessibility nodes, read under `limit`: the frame's own bound, already cut to the
+/// snapshot's budget. The one call is `Accessibility.getFullAXTree` for that frame. A failure keeps
+/// its class only, never the page's text.
+async fn frame_ax_nodes(
+    page: &Page,
+    frame_id: &str,
+    limit: Duration,
+) -> QuarryResult<Vec<serde_json::Value>> {
+    let tree = with_limit(Op::AxFrame, limit, async {
+        page.execute(
+            GetFullAxTreeParams::builder()
+                .depth(8)
+                .frame_id(FrameId::new(frame_id))
+                .build(),
+        )
+        .await
+        .map_err(|error| {
+            QuarryError::new(
+                ErrorCode::DriverFailed,
+                "chromiumoxide frame accessibility tree capture failed",
+            )
+            .with_details(json!({ "class": crate::deadlines::cdp_class(&error) }))
+        })
+    })
+    .await?;
+    let tree = serde_json::to_value(&tree.result).map_err(|error| {
+        QuarryError::new(
+            ErrorCode::Internal,
+            "chromiumoxide frame accessibility tree serialization failed",
+        )
+        .with_details(json!({ "error": error.to_string() }))
+    })?;
+    Ok(tree
+        .get("nodes")
+        .and_then(serde_json::Value::as_array)
+        .cloned()
+        .unwrap_or_default())
+}
+
+/// The warning for a frame whose read failed under `limit`: a timeout when the bound ended the
+/// read, otherwise an unavailable frame. Neither keeps the error text.
+fn frame_warning(error: &QuarryError, frame_id: &str, limit: Duration) -> DeadlineWarning {
+    let frame_id = Some(frame_id.to_owned());
+    if error.code == ErrorCode::Timeout {
+        DeadlineWarning {
+            code: DeadlineWarningCode::AxFrameTimeout,
+            frame_id,
+            deadline_ms: Some(millis_of(limit)),
+        }
+    } else {
+        DeadlineWarning {
+            code: DeadlineWarningCode::AxFrameUnavailable,
+            frame_id,
+            deadline_ms: None,
+        }
+    }
+}
+
+/// The nodes of the frames the top-level read left out (E3.3-k), each read under its own bound and
+/// all of them under the snapshot's `Op::AxSnapshot` budget, counted from `started`. A frame that
+/// does not answer is left out and named in a warning; the others still come through. Once the
+/// budget is spent, the frames after that point are not read, and one warning says so.
+async fn frames_outside_the_root_read(
+    page: &Page,
+    frame_ids: &[String],
+    frame_limit_reached: bool,
+    root_nodes: &[serde_json::Value],
+    started: Instant,
+) -> (Vec<serde_json::Value>, Vec<DeadlineWarning>) {
+    let mut nodes = Vec::new();
+    let mut warnings = Vec::new();
+    if frame_limit_reached {
+        warnings.push(DeadlineWarning {
+            code: DeadlineWarningCode::AxFrameLimit,
+            frame_id: None,
+            deadline_ms: None,
+        });
+    }
+    let budget = deadline(Op::AxSnapshot);
+    let frame_bound = deadline(Op::AxFrame);
+    for frame_id in frames_to_read(frame_ids, root_nodes) {
+        let slice = slice_within(frame_bound, budget, started.elapsed());
+        if slice.is_zero() {
+            warnings.push(DeadlineWarning {
+                code: DeadlineWarningCode::AxBudgetExhausted,
+                frame_id: None,
+                deadline_ms: Some(millis_of(budget)),
+            });
+            break;
+        }
+        match frame_ax_nodes(page, &frame_id, slice).await {
+            Ok(frame_nodes) => nodes.extend(frame_nodes),
+            Err(error) => warnings.push(frame_warning(&error, &frame_id, slice)),
+        }
+    }
+    (nodes, warnings)
+}
+
 fn native_projection_from_cdp(
     ax_tree: serde_json::Value,
     frame_tree: serde_json::Value,
+) -> BrowserNativeProjection {
+    native_projection_from_cdp_capped(ax_tree, frame_tree, AX_PROJECTION_NODE_LIMIT)
+}
+
+/// [`native_projection_from_cdp`] with the executable targets capped at `target_cap`.
+fn native_projection_from_cdp_capped(
+    ax_tree: serde_json::Value,
+    frame_tree: serde_json::Value,
+    target_cap: usize,
 ) -> BrowserNativeProjection {
     let raw_nodes = ax_tree
         .get("nodes")
@@ -3110,7 +3323,7 @@ fn native_projection_from_cdp(
         &mut frames,
     );
 
-    let targets = raw_nodes_to_native_targets(&ax_tree);
+    let targets = raw_nodes_to_native_targets(&ax_tree, target_cap);
 
     BrowserNativeProjection {
         accessibility: Some(AccessibilityProjection {
@@ -3129,7 +3342,10 @@ fn native_projection_from_cdp(
 /// inside Quarry until the matching snapshot action executes. Runtime requires
 /// the dedicated `frame_*_ref` contract for a child-frame binding, so observing
 /// a cross-origin iframe never grants a bare top-level ref authority.
-fn raw_nodes_to_native_targets(ax_tree: &serde_json::Value) -> Vec<BrowserNativeTarget> {
+fn raw_nodes_to_native_targets(
+    ax_tree: &serde_json::Value,
+    target_cap: usize,
+) -> Vec<BrowserNativeTarget> {
     ax_tree
         .get("nodes")
         .and_then(serde_json::Value::as_array)
@@ -3168,7 +3384,7 @@ fn raw_nodes_to_native_targets(ax_tree: &serde_json::Value) -> Vec<BrowserNative
                 field_kind: None,
             })
         })
-        .take(AX_PROJECTION_NODE_LIMIT)
+        .take(target_cap)
         .collect()
 }
 
@@ -5565,74 +5781,11 @@ impl BrowserDriver for ChromiumoxideDriver {
         &self,
         session: &BrowserSession,
     ) -> QuarryResult<BrowserNativeProjection> {
-        let page = self.current_page(session).await?;
-        let (ax_tree, frame_tree) = read_with_retry(Op::AxSnapshot, || async {
-            page.execute(AccessibilityEnableParams::default())
-                .await
-                .map_err(|error| {
-                    QuarryError::new(
-                        ErrorCode::DriverFailed,
-                        "chromiumoxide accessibility domain enable failed",
-                    )
-                    .with_details(json!({ "error": error.to_string() }))
-                })?;
-            let ax_tree = page
-                .execute(GetFullAxTreeParams::builder().depth(8).build())
-                .await
-                .map_err(|error| {
-                    QuarryError::new(
-                        ErrorCode::DriverFailed,
-                        "chromiumoxide accessibility tree capture failed",
-                    )
-                    .with_details(json!({ "error": error.to_string() }))
-                })?;
-            let frame_tree =
-                page.execute(GetFrameTreeParams::default())
-                    .await
-                    .map_err(|error| {
-                        QuarryError::new(
-                            ErrorCode::DriverFailed,
-                            "chromiumoxide frame tree capture failed",
-                        )
-                        .with_details(json!({ "error": error.to_string() }))
-                    })?;
-            Ok((ax_tree, frame_tree))
-        })
-        .await?;
-        let ax_tree = serde_json::to_value(&ax_tree.result).map_err(|error| {
-            QuarryError::new(
-                ErrorCode::Internal,
-                "chromiumoxide accessibility tree serialization failed",
-            )
-            .with_details(json!({ "error": error.to_string() }))
-        })?;
-        let frame_tree = serde_json::to_value(&frame_tree.result).map_err(|error| {
-            QuarryError::new(
-                ErrorCode::Internal,
-                "chromiumoxide frame tree serialization failed",
-            )
-            .with_details(json!({ "error": error.to_string() }))
-        })?;
-        // WS12.S1: read the field facts of every editable control, then mask the
-        // projection before it leaves the driver. Off means no probe and every
-        // editable value masked (fail closed).
-        let probe_targets = crate::field_probe::collect_probe_targets(&ax_tree);
-        let setting = crate::field_probe::probe_setting();
-        let probe = match setting {
-            crate::field_probe::ProbeSetting::On => {
-                crate::field_probe::run_probe(&page, &probe_targets, crate::field_probe::PROBE_BUDGET)
-                    .await
-            }
-            crate::field_probe::ProbeSetting::Off => crate::field_probe::ProbeOutcome::default(),
-        };
-        let mut projection = native_projection_from_cdp(ax_tree, frame_tree);
-        crate::field_probe::mask_projection(
-            &mut projection,
-            &probe,
-            setting,
-            quarry_core::redaction::mode(),
-        );
-        Ok(projection)
+        // The warnings have no field on the projection yet (E3.3-k, ask 1 in the status file).
+        // The accessibility projection's `truncated` flag already says that it is partial.
+        self.native_page_projection_checked(session)
+            .await
+            .map(|(projection, _warnings)| projection)
     }
 
     async fn dialogs(&self, session: &BrowserSession) -> QuarryResult<Vec<BrowserDialog>> {
@@ -6484,6 +6637,126 @@ impl ChromiumoxideDriver {
             backend_node_ids: backend_chain(&links, backend, HIT_TEST_CHAIN_LIMIT),
             frame_id,
         }))
+    }
+}
+
+impl ChromiumoxideDriver {
+    /// The native projection and the deadline warnings that came with it (E3.3-k). Without
+    /// `QUARRY_BROWSER_AX_PER_FRAME` this is the single whole-page read it always was. With it on,
+    /// the frames the top-level read leaves out are read one by one under their own bound (see
+    /// [`frames_outside_the_root_read`]); a frame that does not answer is left out and named in a
+    /// warning, and the accessibility projection is marked `truncated`.
+    pub(crate) async fn native_page_projection_checked(
+        &self,
+        session: &BrowserSession,
+    ) -> QuarryResult<(BrowserNativeProjection, Vec<DeadlineWarning>)> {
+        let started = Instant::now();
+        let page = self.current_page(session).await?;
+        let per_frame = ax_per_frame_enabled();
+        let (ax_tree, frame_tree) = read_with_retry(Op::AxSnapshot, || async {
+            page.execute(AccessibilityEnableParams::default())
+                .await
+                .map_err(|error| {
+                    QuarryError::new(
+                        ErrorCode::DriverFailed,
+                        "chromiumoxide accessibility domain enable failed",
+                    )
+                    .with_details(json!({ "error": error.to_string() }))
+                })?;
+            let ax_tree = page
+                .execute(GetFullAxTreeParams::builder().depth(8).build())
+                .await
+                .map_err(|error| {
+                    QuarryError::new(
+                        ErrorCode::DriverFailed,
+                        "chromiumoxide accessibility tree capture failed",
+                    )
+                    .with_details(json!({ "error": error.to_string() }))
+                })?;
+            let frame_tree =
+                page.execute(GetFrameTreeParams::default())
+                    .await
+                    .map_err(|error| {
+                        QuarryError::new(
+                            ErrorCode::DriverFailed,
+                            "chromiumoxide frame tree capture failed",
+                        )
+                        .with_details(json!({ "error": error.to_string() }))
+                    })?;
+            Ok((ax_tree, frame_tree))
+        })
+        .await?;
+        let ax_tree = serde_json::to_value(&ax_tree.result).map_err(|error| {
+            QuarryError::new(
+                ErrorCode::Internal,
+                "chromiumoxide accessibility tree serialization failed",
+            )
+            .with_details(json!({ "error": error.to_string() }))
+        })?;
+        let frame_tree = serde_json::to_value(&frame_tree.result).map_err(|error| {
+            QuarryError::new(
+                ErrorCode::Internal,
+                "chromiumoxide frame tree serialization failed",
+            )
+            .with_details(json!({ "error": error.to_string() }))
+        })?;
+        let (ax_tree, warnings) = if per_frame {
+            let mut frame_ids = Vec::new();
+            frame_ids_in_order(
+                frame_tree
+                    .get("frameTree")
+                    .unwrap_or(&serde_json::Value::Null),
+                FRAME_PROJECTION_LIMIT + 1,
+                &mut frame_ids,
+            );
+            let frame_limit_reached = frame_ids.len() > FRAME_PROJECTION_LIMIT;
+            frame_ids.truncate(FRAME_PROJECTION_LIMIT);
+            let root_nodes = ax_tree
+                .get("nodes")
+                .and_then(serde_json::Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            let (frame_nodes, warnings) = frames_outside_the_root_read(
+                &page,
+                &frame_ids,
+                frame_limit_reached,
+                &root_nodes,
+                started,
+            )
+            .await;
+            (merged_ax_tree(root_nodes, frame_nodes), warnings)
+        } else {
+            (ax_tree, Vec::new())
+        };
+        // WS12.S1: read the field facts of every editable control, then mask the
+        // projection before it leaves the driver. Off means no probe and every
+        // editable value masked (fail closed).
+        let probe_targets = crate::field_probe::collect_probe_targets(&ax_tree);
+        let setting = crate::field_probe::probe_setting();
+        let probe = match setting {
+            crate::field_probe::ProbeSetting::On => {
+                crate::field_probe::run_probe(&page, &probe_targets, crate::field_probe::PROBE_BUDGET)
+                    .await
+            }
+            crate::field_probe::ProbeSetting::Off => crate::field_probe::ProbeOutcome::default(),
+        };
+        let mut projection = if per_frame {
+            native_projection_from_cdp_capped(ax_tree, frame_tree, AX_PER_FRAME_TARGET_CAP)
+        } else {
+            native_projection_from_cdp(ax_tree, frame_tree)
+        };
+        if !warnings.is_empty() {
+            if let Some(accessibility) = projection.accessibility.as_mut() {
+                accessibility.truncated = true;
+            }
+        }
+        crate::field_probe::mask_projection(
+            &mut projection,
+            &probe,
+            setting,
+            quarry_core::redaction::mode(),
+        );
+        Ok((projection, warnings))
     }
 }
 
@@ -10775,6 +11048,144 @@ mod hit_test_chain_tests {
         assert!(no_node_at_location("no node found at given location"));
         assert!(!no_node_at_location("Request timed out."));
         assert!(!no_node_at_location("Invalid parameters"));
+    }
+}
+
+/// E3.3-k, the parts that need no browser: the flag, the order of the frames and which of them the
+/// top-level read leaves out, the merge of the frames' nodes, the warning a failed frame becomes, and
+/// the target cap.
+#[cfg(test)]
+mod ax_per_frame_tests {
+    use super::*;
+
+    #[test]
+    fn the_flag_is_off_unless_it_is_set_to_a_yes_value() {
+        for off in [
+            None,
+            Some(""),
+            Some("0"),
+            Some("false"),
+            Some("no"),
+            Some("off"),
+            Some("2"),
+        ] {
+            assert!(!parse_ax_per_frame(off), "{off:?}");
+        }
+        for on in [Some("1"), Some("true"), Some(" YES "), Some("on")] {
+            assert!(parse_ax_per_frame(on), "{on:?}");
+        }
+    }
+
+    #[test]
+    fn frames_come_top_first_in_document_order_and_stop_at_the_limit() {
+        let tree = json!({
+            "frame": {"id": "top"},
+            "childFrames": [
+                {"frame": {"id": "a"}, "childFrames": [{"frame": {"id": "a1"}}]},
+                {"frame": {"id": "b"}}
+            ]
+        });
+        let mut ids = Vec::new();
+        frame_ids_in_order(&tree, 64, &mut ids);
+        assert_eq!(ids, ["top", "a", "a1", "b"]);
+        let mut capped = Vec::new();
+        frame_ids_in_order(&tree, 2, &mut capped);
+        assert_eq!(capped, ["top", "a"]);
+    }
+
+    #[test]
+    fn only_the_frames_the_top_level_read_does_not_carry_are_read() {
+        let ids: Vec<String> = ["top", "same", "out"]
+            .iter()
+            .map(|id| id.to_string())
+            .collect();
+        let root_nodes = vec![
+            json!({"nodeId": "1", "frameId": "top"}),
+            json!({"nodeId": "2", "frameId": "same"}),
+        ];
+        assert_eq!(frames_to_read(&ids, &root_nodes), ["out"]);
+        assert!(frames_to_read(&ids[..1], &root_nodes).is_empty());
+    }
+
+    #[test]
+    fn a_node_the_top_level_read_already_has_is_not_merged_again() {
+        let root = vec![json!({"nodeId": "1", "backendDOMNodeId": 7, "frameId": "top"})];
+        let frames = vec![
+            json!({"nodeId": "9", "backendDOMNodeId": 7, "frameId": "top"}),
+            json!({"nodeId": "2", "backendDOMNodeId": 8, "frameId": "out"}),
+            json!({"nodeId": "3", "frameId": "out"}),
+            json!({"nodeId": "3", "frameId": "out"}),
+            json!({"role": {"value": "generic"}}),
+            json!({"role": {"value": "generic"}}),
+        ];
+        let merged = merged_ax_tree(root, frames);
+        let ids: Vec<String> = merged["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|node| {
+                node.get("nodeId")
+                    .and_then(|id| id.as_str())
+                    .unwrap_or("-")
+                    .to_owned()
+            })
+            .collect();
+        // DOM node 7 is kept once, from the top-level read; DOM node 8 and AX node 3 once each; the
+        // two nodes with neither id are never merged.
+        assert_eq!(ids, ["1", "2", "3", "-", "-"]);
+    }
+
+    #[test]
+    fn a_failed_frame_is_a_timeout_or_an_unavailable_warning_with_no_text() {
+        let timeout = QuarryError::new(ErrorCode::Timeout, "browser operation ax_frame timed out");
+        assert_eq!(
+            frame_warning(&timeout, "F1", Duration::from_millis(2000)),
+            DeadlineWarning {
+                code: DeadlineWarningCode::AxFrameTimeout,
+                frame_id: Some("F1".to_owned()),
+                deadline_ms: Some(2000),
+            }
+        );
+        let failed = QuarryError::new(
+            ErrorCode::DriverFailed,
+            "chromiumoxide frame accessibility tree capture failed",
+        )
+        .with_details(json!({ "class": "cdp" }));
+        let warning = frame_warning(&failed, "F2", Duration::from_millis(2000));
+        assert_eq!(warning.code, DeadlineWarningCode::AxFrameUnavailable);
+        assert_eq!(warning.frame_id.as_deref(), Some("F2"));
+        assert_eq!(warning.deadline_ms, None);
+        assert!(!serde_json::to_string(&warning).unwrap().contains("cdp"));
+    }
+
+    #[test]
+    fn the_target_cap_bounds_the_executable_targets_in_tree_order() {
+        let nodes: Vec<serde_json::Value> = (1..=60_i64)
+            .map(|n| {
+                json!({
+                    "nodeId": n.to_string(),
+                    "backendDOMNodeId": 100 + n,
+                    "frameId": "top",
+                    "role": {"value": "button"},
+                    "name": {"value": format!("button {n}")},
+                })
+            })
+            .collect();
+        let ax_tree = json!({ "nodes": nodes });
+        let frame_tree = json!({ "frameTree": { "frame": { "id": "top" } } });
+        let capped = native_projection_from_cdp_capped(
+            ax_tree.clone(),
+            frame_tree.clone(),
+            AX_PER_FRAME_TARGET_CAP,
+        );
+        assert_eq!(capped.targets.len(), 50);
+        assert_eq!(capped.targets[0].ax_node_id, "1");
+        assert_eq!(capped.targets[49].ax_node_id, "50");
+        // Off, the driver keeps up to the node limit, as it did before.
+        assert_eq!(
+            native_projection_from_cdp(ax_tree, frame_tree).targets.len(),
+            60
+        );
     }
 }
 
