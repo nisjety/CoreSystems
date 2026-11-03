@@ -297,4 +297,160 @@ describe('createBrowserSessionController (WS9.F)', () => {
       expect.objectContaining({ method: 'DELETE', keepalive: true }),
     )
   })
+
+  it('reads busy in the same tick as the action that set it, without a flush', async () => {
+    const controller = makeController()
+    vi.mocked(browserClient.createBrowserSession).mockResolvedValue(sessionResponse('sess-1'))
+    await controller.open('https://example.test/')
+
+    let release: (value: unknown) => void = () => undefined
+    vi.mocked(browserClient.runBrowserAction).mockImplementation(
+      () => new Promise((resolve) => { release = resolve }) as never,
+    )
+
+    const pending = controller.runAction({ type: 'back' })
+    // The signals read through latest(), so the write is visible without a flush (D2-175).
+    expect(controller.busy()).toBe(true)
+
+    release(sessionResponse('sess-1'))
+    await pending
+
+    expect(controller.busy()).toBe(false)
+  })
+
+  it('reads the cleared preview in the same tick as close()', async () => {
+    const controller = makeController()
+    vi.mocked(browserClient.createBrowserSession).mockResolvedValue(sessionResponse('sess-1'))
+    await controller.open('https://example.test/')
+    expect(controller.preview()?.browserSession?.session.id).toBe('sess-1')
+
+    const closing = controller.close()
+
+    expect(controller.preview()).toBeNull()
+    expect(controller.view()).toBeNull()
+    await closing
+    expect(browserClient.closeBrowserSession).toHaveBeenCalledWith(ORG, 'sess-1')
+  })
+
+  it('drops an action reply that arrives after the session was replaced', async () => {
+    const controller = makeController()
+    vi.mocked(browserClient.createBrowserSession)
+      .mockResolvedValueOnce(sessionResponse('sess-a'))
+      .mockResolvedValueOnce(sessionResponse('sess-b'))
+    await controller.open('https://a.example/')
+
+    let resolveAction: (value: unknown) => void = () => undefined
+    vi.mocked(browserClient.runBrowserAction).mockImplementation(
+      () => new Promise((resolve) => { resolveAction = resolve }) as never,
+    )
+    const action = controller.runAction({ type: 'navigate', url: 'https://slow.example/' })
+
+    await controller.open('https://b.example/')
+    expect(controller.preview()?.browserSession?.session.id).toBe('sess-b')
+
+    resolveAction(sessionResponse('sess-a', { url: 'https://slow.example/' }))
+    await action
+
+    expect(controller.preview()?.browserSession?.session.id).toBe('sess-b')
+    expect(controller.navigationError()).toBeNull()
+    expect(controller.error()).toBeNull()
+  })
+
+  it('drops a failed action that arrives after the session was closed', async () => {
+    const controller = makeController()
+    vi.mocked(browserClient.createBrowserSession).mockResolvedValue(sessionResponse('sess-1'))
+    await controller.open('https://example.test/')
+
+    let rejectAction: (reason: unknown) => void = () => undefined
+    vi.mocked(browserClient.runBrowserAction).mockImplementation(
+      () => new Promise((_resolve, reject) => { rejectAction = reject }) as never,
+    )
+    const action = controller.runAction({ type: 'navigate', url: 'not a url' })
+
+    await controller.close()
+    rejectAction(new ApiError('bad', 400, 'invalid_url'))
+    await action
+
+    expect(controller.navigationError()).toBeNull()
+    expect(controller.error()).toBeNull()
+  })
+
+  it('does not show a tab error from a session that was replaced', async () => {
+    const controller = makeController()
+    vi.mocked(browserClient.createBrowserSession)
+      .mockResolvedValueOnce(sessionResponse('sess-a'))
+      .mockResolvedValueOnce(sessionResponse('sess-b'))
+    await controller.open('https://a.example/')
+
+    let rejectTab: (reason: unknown) => void = () => undefined
+    vi.mocked(browserClient.createBrowserTab).mockImplementation(
+      () => new Promise((_resolve, reject) => { rejectTab = reject }) as never,
+    )
+    const tab = controller.newTab()
+
+    await controller.open('https://b.example/')
+    rejectTab(new ApiError('boom', 500, 'driver_failed'))
+    await tab
+
+    expect(controller.preview()?.browserSession?.session.id).toBe('sess-b')
+    expect(controller.error()).toBeNull()
+  })
+
+  it('keeps busy for a new session action while an action of a replaced session settles', async () => {
+    const controller = makeController()
+    vi.mocked(browserClient.createBrowserSession)
+      .mockResolvedValueOnce(sessionResponse('sess-a'))
+      .mockResolvedValueOnce(sessionResponse('sess-b'))
+    await controller.open('https://a.example/')
+
+    const resolvers: Array<(value: unknown) => void> = []
+    vi.mocked(browserClient.runBrowserAction).mockImplementation(
+      () => new Promise((resolve) => { resolvers.push(resolve) }) as never,
+    )
+    const staleAction = controller.runAction({ type: 'back' })
+    await controller.open('https://b.example/')
+    const freshAction = controller.runAction({ type: 'forward' })
+    expect(controller.busy()).toBe(true)
+
+    resolvers[0]?.(sessionResponse('sess-a'))
+    await staleAction
+    expect(controller.busy()).toBe(true)
+
+    resolvers[1]?.(sessionResponse('sess-b'))
+    await freshAction
+    expect(controller.busy()).toBe(false)
+  })
+
+  it('closes a session whose open settles after close(), and never attaches it', async () => {
+    const controller = makeController()
+    let resolveOpen: (value: unknown) => void = () => undefined
+    vi.mocked(browserClient.createBrowserSession).mockImplementationOnce(
+      () => new Promise((resolve) => { resolveOpen = resolve }) as never,
+    )
+
+    const opening = controller.open('https://late.example/')
+    await controller.close()
+    resolveOpen(sessionResponse('sess-late'))
+    await opening
+
+    expect(controller.preview()).toBeNull()
+    expect(controller.busy()).toBe(false)
+    expect(browserClient.closeBrowserSession).toHaveBeenCalledWith(ORG, 'sess-late')
+  })
+
+  it('closes a session whose open settles after dispose(), and never attaches it', async () => {
+    const controller = makeController()
+    let resolveOpen: (value: unknown) => void = () => undefined
+    vi.mocked(browserClient.createBrowserSession).mockImplementationOnce(
+      () => new Promise((resolve) => { resolveOpen = resolve }) as never,
+    )
+
+    const opening = controller.open('https://late.example/')
+    await controller.dispose()
+    resolveOpen(sessionResponse('sess-late'))
+    await opening
+
+    expect(controller.preview()).toBeNull()
+    expect(browserClient.closeBrowserSession).toHaveBeenCalledWith(ORG, 'sess-late')
+  })
 })
