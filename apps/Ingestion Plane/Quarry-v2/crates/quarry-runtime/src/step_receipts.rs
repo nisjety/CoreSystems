@@ -160,12 +160,91 @@ fn is_first_segment(segment: &u32) -> bool {
     *segment == 0
 }
 
+/// The durable status of a browser run's checkpoint (E3.4-1).
+///
+/// This is the persisted side of the one session state machine (D8-10, `RunLive` and
+/// `TabLedger` in the edge); it is not a second state enum. It only records where the
+/// durable descriptor stands on the `expired` -> `resumable` -> `live` arc:
+///
+/// - `Active`: the run is live in some edge process (or was, until a crash).
+/// - `Suspended`: the run was released on purpose with its profile persisted; a resume
+///   with a fresh grant may continue it.
+/// - `Expired`: the run's idle or absolute TTL ran out and the reaper released it; a
+///   resume with a fresh grant may continue it (non-ZDR only, like every resume).
+/// - `Closed`: terminal. Nothing moves a checkpoint out of `Closed`.
+///
+/// A checkpoint written before E3.4-1 has `active` or `closed` and reads unchanged.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentRunStatus {
     #[default]
     Active,
+    Suspended,
+    Expired,
     Closed,
+}
+
+impl AgentRunStatus {
+    /// The wire and column value (`quarry_agent_run_checkpoints.status`, migration 0020).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AgentRunStatus::Active => "active",
+            AgentRunStatus::Suspended => "suspended",
+            AgentRunStatus::Expired => "expired",
+            AgentRunStatus::Closed => "closed",
+        }
+    }
+
+    /// Parse a column value. `None` for anything outside the four values, so a caller
+    /// fails closed instead of guessing.
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "active" => Some(AgentRunStatus::Active),
+            "suspended" => Some(AgentRunStatus::Suspended),
+            "expired" => Some(AgentRunStatus::Expired),
+            "closed" => Some(AgentRunStatus::Closed),
+            _ => None,
+        }
+    }
+
+    /// `Closed` is terminal; every other status may still be resumed.
+    pub fn is_terminal(self) -> bool {
+        self == AgentRunStatus::Closed
+    }
+
+    /// The run is not live but may be resumed (the `expired` -> `resumable` step).
+    pub fn is_resumable(self) -> bool {
+        matches!(self, AgentRunStatus::Suspended | AgentRunStatus::Expired)
+    }
+
+    /// Whether a checkpoint in `self` may move to `next`. Only `Closed` is sticky:
+    /// a closed run is never suspended, expired or reopened.
+    pub fn can_move_to(self, next: AgentRunStatus) -> bool {
+        !self.is_terminal() || next == AgentRunStatus::Closed
+    }
+}
+
+impl AgentRunCheckpoint {
+    /// E3.4-1: the store-level resume gate. A closed run cannot be resumed
+    /// (`Conflict`), and a ZDR run never can (`Forbidden`): its state must not come back
+    /// from durable storage (ZDR callers do not save checkpoints, so one found here is
+    /// refused rather than trusted). `Active`, `Suspended` and `Expired` pass; ownership
+    /// and the fresh grant are the caller's checks.
+    pub fn check_resumable(&self) -> QuarryResult<()> {
+        if self.status.is_terminal() {
+            return Err(QuarryError::new(
+                ErrorCode::Conflict,
+                "agent run is already closed",
+            ));
+        }
+        if self.zdr.is_active() {
+            return Err(QuarryError::new(
+                ErrorCode::Forbidden,
+                "ZDR runs cannot be resumed from durable state",
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// The authority currently allowed to drive a browser run. This is an owner
@@ -724,6 +803,19 @@ pub trait StepReceiptStore: Send + Sync {
         Ok(())
     }
 
+    /// E3.4-1: move one tenant's checkpoint to `status` (suspend, expire, or back to
+    /// active on a resume). `Closed` is terminal: a closed checkpoint keeps `Closed`
+    /// whatever is asked. A missing checkpoint is not an error (the same as
+    /// `close_run_checkpoint`). Stores without durable checkpoints do nothing.
+    async fn mark_run_checkpoint(
+        &self,
+        _org_id: &str,
+        _run_id: &RunKind,
+        _status: AgentRunStatus,
+    ) -> QuarryResult<()> {
+        Ok(())
+    }
+
     /// W2-U49 (X-19 condition c): delete every receipt and browser timeline
     /// event one user initiated in one org. Idempotent, counts only. The default
     /// refuses, so a store that cannot erase says so instead of reporting zeros.
@@ -866,6 +958,25 @@ impl StepReceiptStore for InMemoryStepReceiptStore {
             .get_mut(&(org_id.to_owned(), run_id.to_string()))
         {
             checkpoint.status = AgentRunStatus::Closed;
+        }
+        Ok(())
+    }
+
+    async fn mark_run_checkpoint(
+        &self,
+        org_id: &str,
+        run_id: &RunKind,
+        status: AgentRunStatus,
+    ) -> QuarryResult<()> {
+        if let Some(checkpoint) = self
+            .checkpoints
+            .write()
+            .await
+            .get_mut(&(org_id.to_owned(), run_id.to_string()))
+        {
+            if checkpoint.status.can_move_to(status) {
+                checkpoint.status = status;
+            }
         }
         Ok(())
     }
@@ -2315,5 +2426,187 @@ mod user_erasure_pg_tests {
             .unwrap();
         assert_eq!(second, ActorReceiptPurge::default());
         assert!(purge_actor_receipts_pg(&pool, "org_a", "").await.is_err());
+    }
+}
+
+/// E3.4-1: the widened checkpoint status (suspended, expired), its terminal `Closed`,
+/// and the store-level resume gate that refuses ZDR.
+#[cfg(test)]
+mod checkpoint_status_tests {
+    use super::*;
+    use quarry_core::contracts::AgentConstraints;
+    use quarry_core::ids::Id;
+
+    fn checkpoint(run_id: &RunKind, zdr: ZdrMode, status: AgentRunStatus) -> AgentRunCheckpoint {
+        AgentRunCheckpoint {
+            org_id: "org_a".into(),
+            actor_id: "user_a".into(),
+            run_id: run_id.to_string(),
+            lease_id: String::new(),
+            profile_id: "prof_01ARZ3NDEKTSV4RRFFQ69G5FAV".into(),
+            step: 1,
+            current_url: "https://example.com".into(),
+            page_hash: String::new(),
+            constraints: AgentConstraints {
+                max_steps: 5,
+                allowed_domains: vec!["example.com".into()],
+                max_runtime_s: Some(60),
+                max_cost_usd: None,
+            },
+            persist_profile: true,
+            profile_scope: BrowserProfileScope::UserPrivate,
+            viewport: None,
+            zdr,
+            grant_id: None,
+            status,
+            control_mode: BrowserControlMode::AgentControl,
+            control_epoch: 0,
+            budget: None,
+            policy_mode: None,
+            next_step: 2,
+            trace_seq: 0,
+            policy_ask: None,
+        }
+    }
+
+    #[test]
+    fn status_wire_values_round_trip_and_unknown_fails_closed() {
+        for status in [
+            AgentRunStatus::Active,
+            AgentRunStatus::Suspended,
+            AgentRunStatus::Expired,
+            AgentRunStatus::Closed,
+        ] {
+            assert_eq!(AgentRunStatus::parse(status.as_str()), Some(status));
+            let json = serde_json::to_value(status).unwrap();
+            assert_eq!(json, serde_json::Value::String(status.as_str().into()));
+            assert_eq!(
+                serde_json::from_value::<AgentRunStatus>(json).unwrap(),
+                status
+            );
+        }
+        assert_eq!(AgentRunStatus::parse("paused"), None);
+        assert_eq!(AgentRunStatus::parse(""), None);
+        assert!(serde_json::from_value::<AgentRunStatus>(serde_json::json!("paused")).is_err());
+    }
+
+    #[test]
+    fn legacy_checkpoint_statuses_read_unchanged() {
+        let legacy = serde_json::json!({
+            "org_id": "org_a",
+            "run_id": "run_a",
+            "profile_id": "prof_a",
+            "step": 1,
+            "current_url": "",
+            "constraints": { "max_steps": 5, "allowed_domains": ["example.com"] },
+            "zdr": "off",
+        });
+        let no_status: AgentRunCheckpoint = serde_json::from_value(legacy.clone()).unwrap();
+        assert_eq!(no_status.status, AgentRunStatus::Active);
+        let mut closed = legacy;
+        closed["status"] = serde_json::json!("closed");
+        let closed: AgentRunCheckpoint = serde_json::from_value(closed).unwrap();
+        assert_eq!(closed.status, AgentRunStatus::Closed);
+    }
+
+    #[test]
+    fn closed_is_terminal_and_the_arc_moves_freely() {
+        use AgentRunStatus::*;
+        for next in [Active, Suspended, Expired] {
+            assert!(!Closed.can_move_to(next), "closed never moves to {next:?}");
+        }
+        assert!(Closed.can_move_to(Closed));
+        // expired -> resumable -> live, and a live run may be suspended or expired.
+        assert!(Active.can_move_to(Suspended));
+        assert!(Active.can_move_to(Expired));
+        assert!(Expired.can_move_to(Active));
+        assert!(Suspended.can_move_to(Active));
+        assert!(Suspended.can_move_to(Closed));
+        assert!(Suspended.is_resumable() && Expired.is_resumable());
+        assert!(!Active.is_resumable() && !Closed.is_resumable());
+    }
+
+    #[test]
+    fn resume_gate_refuses_zdr_and_closed() {
+        let run_id: RunKind = Id::new();
+        for status in [
+            AgentRunStatus::Active,
+            AgentRunStatus::Suspended,
+            AgentRunStatus::Expired,
+        ] {
+            checkpoint(&run_id, ZdrMode::Off, status)
+                .check_resumable()
+                .unwrap_or_else(|error| panic!("{status:?} resumes: {error}"));
+            let zdr = checkpoint(&run_id, ZdrMode::On, status)
+                .check_resumable()
+                .expect_err("a ZDR run never resumes");
+            assert_eq!(zdr.code, ErrorCode::Forbidden);
+        }
+        let closed = checkpoint(&run_id, ZdrMode::Off, AgentRunStatus::Closed)
+            .check_resumable()
+            .expect_err("a closed run never resumes");
+        assert_eq!(closed.code, ErrorCode::Conflict);
+        let closed_zdr = checkpoint(&run_id, ZdrMode::On, AgentRunStatus::Closed)
+            .check_resumable()
+            .expect_err("a closed ZDR run never resumes");
+        assert_eq!(closed_zdr.code, ErrorCode::Conflict);
+    }
+
+    async fn status_of(store: &InMemoryStepReceiptStore, run_id: &RunKind) -> AgentRunStatus {
+        store
+            .load_run_checkpoint("org_a", run_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status
+    }
+
+    #[tokio::test]
+    async fn in_memory_mark_moves_the_arc_and_keeps_closed_terminal() {
+        let store = InMemoryStepReceiptStore::new();
+        let run_id: RunKind = Id::new();
+        store
+            .save_run_checkpoint(checkpoint(&run_id, ZdrMode::Off, AgentRunStatus::Active))
+            .await
+            .unwrap();
+
+        store
+            .mark_run_checkpoint("org_a", &run_id, AgentRunStatus::Expired)
+            .await
+            .unwrap();
+        assert_eq!(status_of(&store, &run_id).await, AgentRunStatus::Expired);
+        // Another tenant cannot move it.
+        store
+            .mark_run_checkpoint("org_b", &run_id, AgentRunStatus::Closed)
+            .await
+            .unwrap();
+        assert_eq!(status_of(&store, &run_id).await, AgentRunStatus::Expired);
+        store
+            .mark_run_checkpoint("org_a", &run_id, AgentRunStatus::Active)
+            .await
+            .unwrap();
+        store
+            .mark_run_checkpoint("org_a", &run_id, AgentRunStatus::Suspended)
+            .await
+            .unwrap();
+        assert_eq!(status_of(&store, &run_id).await, AgentRunStatus::Suspended);
+
+        store.close_run_checkpoint("org_a", &run_id).await.unwrap();
+        for next in [
+            AgentRunStatus::Active,
+            AgentRunStatus::Suspended,
+            AgentRunStatus::Expired,
+        ] {
+            store
+                .mark_run_checkpoint("org_a", &run_id, next)
+                .await
+                .unwrap();
+            assert_eq!(status_of(&store, &run_id).await, AgentRunStatus::Closed);
+        }
+        // A missing checkpoint is not an error.
+        store
+            .mark_run_checkpoint("org_a", &Id::new(), AgentRunStatus::Expired)
+            .await
+            .unwrap();
     }
 }
