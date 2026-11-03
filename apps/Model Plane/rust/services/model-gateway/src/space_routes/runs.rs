@@ -295,12 +295,21 @@ async fn run_live(
         }
     };
 
-    // 4b. The run's posture on the route it names. Session Core's verdict does not name the run's
-    // provider or connection yet, so the run is decided on the default route, where a waiver is a route
-    // mismatch and is refused (fail closed). Once the verdict carries the route, decide on it here.
-    match crate::zdr_posture::decide_for(&claims, &crate::zdr_posture::Route::plain(false)) {
-        Ok(crate::zdr_posture::TurnPosture::Persistent) => {}
-        Ok(_) => {
+    // 4b. The run's posture on the route it names. Session Core names the provider and connection of a
+    // zero-retention-waived run bound to this caller's waiver; a persistent run names none and is decided
+    // on the default route, where a waiver would be a route mismatch (fail closed).
+    let run_route = if verdict.connection.is_empty() {
+        crate::zdr_posture::Route::plain(false)
+    } else {
+        crate::zdr_posture::Route::named(
+            Some(verdict.provider.as_str()),
+            Some(verdict.connection.as_str()),
+            false,
+        )
+    };
+    match crate::zdr_posture::decide_for(&claims, &run_route) {
+        Ok(crate::zdr_posture::TurnPosture::Persistent | crate::zdr_posture::TurnPosture::Waived { .. }) => {}
+        Ok(crate::zdr_posture::TurnPosture::Zdr { .. }) => {
             count_attach("zdr");
             return (
                 StatusCode::FORBIDDEN,

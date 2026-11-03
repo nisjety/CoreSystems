@@ -12377,7 +12377,7 @@ mod tests {
         assistant_reply_slot_is_open, authorize_dataplane, claim_scheduled_step_inner,
         complete_step_inner, derive_idempotency_hash, finalize_tool_action_inner,
         normalize_thread_presentation_text, pb, persist_scheduled_run_bindings,
-        record_scheduled_run_result_inner,
+        record_scheduled_run_result_inner, thread_revise_payload_digest,
         record_scheduled_step_receipt_inner, reserve_tool_action_inner, resolve_dataplane_addr,
         resolve_residency, resolve_thread_origin, run_origin_at_birth,
         scheduled_run_execution_payload_digest,
