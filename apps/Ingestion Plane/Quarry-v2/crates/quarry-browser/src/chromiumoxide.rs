@@ -53,6 +53,7 @@ use ::chromiumoxide::cdp::browser_protocol::page::{
 };
 use ::chromiumoxide::cdp::js_protocol::runtime::{
     CallArgument, CallFunctionOnParams, EventConsoleApiCalled, ReleaseObjectParams,
+    RemoteObjectId,
 };
 use ::chromiumoxide::error::CdpError;
 use ::chromiumoxide::handler::viewport::Viewport as ChromiumViewport;
@@ -384,6 +385,13 @@ pub struct ChromiumoxideDriver {
     /// on a top-level target run the actionability pipeline and send trusted
     /// input (WS3.K). Off by default.
     trusted_input: bool,
+    /// E3.1-c: `QUARRY_EDGE__FILL_OTP` (default off). Off, the one-time-code
+    /// precheck and insert are refused `UNSUPPORTED`.
+    fill_otp: bool,
+    /// E3.1-c: loaders (top-frame documents) a one-time code was delivered
+    /// into, per session key. A navigation makes a new loader, so the mark is
+    /// left behind; the session's release forgets it.
+    credential_delivered: Arc<Mutex<HashMap<String, HashSet<String>>>>,
 }
 
 /// How a native target action reaches its element.
@@ -446,6 +454,10 @@ impl ChromiumoxideDriver {
                     .ok()
                     .as_deref(),
             ),
+            fill_otp: actionability::parse_fill_otp(
+                std::env::var(actionability::FILL_OTP_FLAG).ok().as_deref(),
+            ),
+            credential_delivered: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -551,6 +563,8 @@ impl ChromiumoxideDriver {
             dialog_sequence: self.dialog_sequence.clone(),
             profiles: self.profiles.clone(),
             trusted_input: self.trusted_input,
+            fill_otp: self.fill_otp,
+            credential_delivered: self.credential_delivered.clone(),
         }
     }
 
@@ -1147,6 +1161,7 @@ impl ChromiumoxideDriver {
         self.dialog_pages.lock().await.remove(&session_key);
         self.live_frames.lock().await.remove(&session_key);
         self.attach_locks.lock().await.remove(&session_key);
+        self.credential_delivered.lock().await.remove(&session_key);
     }
 
     fn session_key(session: &BrowserSession) -> String {
@@ -6051,6 +6066,330 @@ async fn root_frame_id(page: &Page) -> QuarryResult<String> {
                 "chromiumoxide root frame id is unavailable for governed download",
             )
         })
+}
+
+/// E3.1-c: what the one-time-code preconditions found on a target that passed
+/// them. No value and no page text: the loader id of the top frame (the
+/// credential-delivered mark is keyed on it and a navigation changes it), the
+/// top frame id and the origin that the page, the frame and the grant share.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OtpFillPrecheck {
+    pub loader_id: String,
+    pub frame_id: String,
+    pub origin: String,
+}
+
+/// The top frame of a page as `Page.getFrameTree` reports it.
+struct RootFrameInfo {
+    id: String,
+    loader_id: String,
+    url: String,
+    security_origin: String,
+}
+
+/// Read the top frame's id, loader id, URL and security origin. The values stay
+/// in the driver; none of them is put in an error.
+async fn root_frame_info(page: &Page) -> QuarryResult<RootFrameInfo> {
+    let frame_tree = with_deadline(Op::AxSnapshot, async {
+        page.execute(GetFrameTreeParams::default())
+            .await
+            .map_err(|error| {
+                QuarryError::new(
+                    ErrorCode::DriverFailed,
+                    "chromiumoxide frame tree read failed for a one-time-code fill",
+                )
+                .with_details(json!({ "class": crate::deadlines::cdp_class(&error) }))
+            })
+    })
+    .await?;
+    let tree = serde_json::to_value(&frame_tree.result).unwrap_or(serde_json::Value::Null);
+    let frame = tree
+        .get("frameTree")
+        .and_then(|frame_tree| frame_tree.get("frame"))
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    let text = |key: &str| {
+        frame
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_owned()
+    };
+    let info = RootFrameInfo {
+        id: text("id"),
+        loader_id: text("loaderId"),
+        url: text("url"),
+        security_origin: text("securityOrigin"),
+    };
+    if info.id.is_empty() || info.loader_id.is_empty() {
+        return Err(QuarryError::new(
+            ErrorCode::DriverFailed,
+            "chromiumoxide top frame or loader id is unavailable for a one-time-code fill",
+        ));
+    }
+    Ok(info)
+}
+
+async fn release_object_bounded(page: &Page, object_id: RemoteObjectId) {
+    let _ = tokio::time::timeout(
+        Duration::from_millis(500),
+        page.execute(ReleaseObjectParams::new(object_id)),
+    )
+    .await;
+}
+
+/// Check every E3.1-c precondition on `target` and return what passed with the
+/// still-held handle of the element. The caller releases the handle.
+///
+/// Order: the top frame (a target in a child frame is refused before anything
+/// is resolved), the origins (https; frame origin equals the top and the grant
+/// origin), then the element and its document (one visible required
+/// non-password text input, no options, no QR).
+async fn otp_check_on(
+    page: &Page,
+    target: &BrowserNativeTarget,
+    grant_origin: &str,
+) -> QuarryResult<(OtpFillPrecheck, RemoteObjectId)> {
+    let root = root_frame_info(page).await?;
+    if let Some(frame_id) = target.frame_id.as_deref() {
+        if frame_id != root.id {
+            return Err(actionability::otp_refused(
+                actionability::otp_reason::NOT_TOP_FRAME,
+            ));
+        }
+    }
+    let origin = actionability::check_otp_origins(
+        &root.url,
+        &root.security_origin,
+        grant_origin,
+        cfg!(test),
+    )
+    .map_err(actionability::otp_refused)?;
+    // The exact backend node of the observation, resolved in the top frame's
+    // realm (the default when no execution context is named): never a selector.
+    let resolve =
+        ResolveNodeParams::builder().backend_node_id(BackendNodeId::new(target.backend_node_id));
+    let resolved = page.execute(resolve.build()).await.map_err(|error| {
+        QuarryError::new(
+            ErrorCode::TargetRepairRequired,
+            "one-time-code target is no longer live; observe again",
+        )
+        .with_details(json!({
+            "ax_node_id": target.ax_node_id,
+            "class": crate::deadlines::cdp_class(&error),
+        }))
+    })?;
+    let object_id = resolved.object.object_id.clone().ok_or_else(|| {
+        QuarryError::new(
+            ErrorCode::TargetRepairRequired,
+            "one-time-code target could not be resolved; observe again",
+        )
+        .with_details(json!({ "ax_node_id": target.ax_node_id }))
+    })?;
+    let checked = match actionability::probe_otp(page, &object_id).await {
+        Ok(probe) => actionability::decide_otp(&probe).map_err(actionability::otp_refused),
+        Err(error) => Err(error),
+    };
+    if let Err(error) = checked {
+        release_object_bounded(page, object_id).await;
+        return Err(error);
+    }
+    Ok((
+        OtpFillPrecheck {
+            loader_id: root.loader_id,
+            frame_id: root.id,
+            origin,
+        },
+        object_id,
+    ))
+}
+
+/// E3.1-c: the Chromium side of `fill_otp_ref` (lane C1). The runtime's
+/// `OtpFillTarget` adapter (E3.1-d) calls these three in order: precheck,
+/// trusted insert, credential-delivered mark. Every call except the mark is
+/// refused while `QUARRY_EDGE__FILL_OTP` is off.
+impl ChromiumoxideDriver {
+    /// Turn one-time-code fills on or off, overriding `QUARRY_EDGE__FILL_OTP`.
+    /// Call before the first `acquire`.
+    pub fn with_fill_otp(mut self, enabled: bool) -> Self {
+        self.fill_otp = enabled;
+        self
+    }
+
+    fn require_fill_otp(&self) -> QuarryResult<()> {
+        if self.fill_otp {
+            Ok(())
+        } else {
+            Err(actionability::otp_refused(
+                actionability::otp_reason::FLAG_OFF,
+            ))
+        }
+    }
+
+    /// Check the fill preconditions on `target` (a native AX target of the
+    /// current page) against the approval's `grant_origin`. Reads nothing from
+    /// a mailbox: the runtime reads the code only after this passed.
+    pub async fn otp_fill_precheck(
+        &self,
+        session: &BrowserSession,
+        target: &BrowserNativeTarget,
+        grant_origin: &str,
+    ) -> QuarryResult<OtpFillPrecheck> {
+        self.require_fill_otp()?;
+        let page = self.current_page(session).await?;
+        with_deadline(Op::NativeAction, async {
+            let (precheck, object_id) = otp_check_on(&page, target, grant_origin).await?;
+            release_object_bounded(&page, object_id).await;
+            Ok(precheck)
+        })
+        .await
+    }
+
+    /// Insert `code` into `target` as trusted input. Every precondition is
+    /// checked again right before the insert, and the top frame's loader must
+    /// still be the one `precheck` saw (a navigation in between refuses). The
+    /// code is not kept, logged or put in an error.
+    pub async fn otp_insert_trusted(
+        &self,
+        session: &BrowserSession,
+        target: &BrowserNativeTarget,
+        precheck: &OtpFillPrecheck,
+        code: &str,
+    ) -> QuarryResult<()> {
+        self.require_fill_otp()?;
+        let page = self.current_page(session).await?;
+        with_deadline(Op::NativeAction, async {
+            let (again, object_id) = otp_check_on(&page, target, &precheck.origin).await?;
+            if again.loader_id != precheck.loader_id || again.frame_id != precheck.frame_id {
+                release_object_bounded(&page, object_id).await;
+                return Err(actionability::otp_refused(
+                    actionability::otp_reason::LOADER_CHANGED,
+                ));
+            }
+            let outcome = actionability::insert_otp(&page, &object_id, code).await;
+            release_object_bounded(&page, object_id).await;
+            outcome
+        })
+        .await
+    }
+
+    /// Mark `loader_id` of `session` credential-delivered. Always allowed (also
+    /// with the flag off: marking only ever denies more). The mark is keyed on
+    /// the loader, so a navigation (a new loader) leaves it behind; the
+    /// session's release forgets it.
+    pub async fn mark_otp_credential_delivered(
+        &self,
+        session: &BrowserSession,
+        loader_id: &str,
+    ) -> QuarryResult<()> {
+        self.mark_credential_delivered_for_key(&Self::session_key(session), loader_id)
+            .await
+    }
+
+    async fn mark_credential_delivered_for_key(
+        &self,
+        session_key: &str,
+        loader_id: &str,
+    ) -> QuarryResult<()> {
+        if loader_id.trim().is_empty() {
+            return Err(QuarryError::new(
+                ErrorCode::Internal,
+                "credential-delivered mark needs a loader id",
+            ));
+        }
+        self.credential_delivered
+            .lock()
+            .await
+            .entry(session_key.to_owned())
+            .or_default()
+            .insert(loader_id.to_owned());
+        Ok(())
+    }
+
+    async fn credential_delivered_for_key(&self, session_key: &str, loader_id: &str) -> bool {
+        self.credential_delivered
+            .lock()
+            .await
+            .get(session_key)
+            .is_some_and(|loaders| loaders.contains(loader_id))
+    }
+
+    /// Whether `loader_id` of `session` was marked credential-delivered.
+    pub async fn otp_credential_delivered(&self, session: &BrowserSession, loader_id: &str) -> bool {
+        self.credential_delivered_for_key(&Self::session_key(session), loader_id)
+            .await
+    }
+
+    /// Whether the current page's top-frame loader was marked
+    /// credential-delivered: the read the E3.1-e denial asks before an AX, DOM
+    /// or screenshot read. A page whose loader cannot be read counts as
+    /// delivered when the session has any mark (fail closed).
+    pub async fn current_loader_credential_delivered(
+        &self,
+        session: &BrowserSession,
+    ) -> QuarryResult<bool> {
+        let session_key = Self::session_key(session);
+        let any_mark = self
+            .credential_delivered
+            .lock()
+            .await
+            .get(&session_key)
+            .is_some_and(|loaders| !loaders.is_empty());
+        if !any_mark {
+            return Ok(false);
+        }
+        let page = self.current_page(session).await?;
+        match root_frame_info(&page).await {
+            Ok(root) => Ok(self
+                .credential_delivered_for_key(&session_key, &root.loader_id)
+                .await),
+            Err(_) => Ok(true),
+        }
+    }
+}
+
+#[cfg(test)]
+mod otp_fill_driver_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn every_fill_call_is_refused_while_the_flag_is_off() {
+        let driver = ChromiumoxideDriver::new().with_fill_otp(false);
+        let error = driver.require_fill_otp().unwrap_err();
+        assert_eq!(error.code, ErrorCode::Unsupported);
+        assert_eq!(error.details.unwrap()["reason"], "otp_fill_disabled");
+        assert!(ChromiumoxideDriver::new()
+            .with_fill_otp(true)
+            .require_fill_otp()
+            .is_ok());
+    }
+
+    #[tokio::test]
+    async fn a_marked_loader_stays_delivered_until_the_session_is_released() {
+        let driver = ChromiumoxideDriver::new();
+        assert!(!driver.credential_delivered_for_key("s1", "loader-a").await);
+        driver
+            .mark_credential_delivered_for_key("s1", "loader-a")
+            .await
+            .unwrap();
+        assert!(driver.credential_delivered_for_key("s1", "loader-a").await);
+        // Another loader (a navigation) and another session are not marked.
+        assert!(!driver.credential_delivered_for_key("s1", "loader-b").await);
+        assert!(!driver.credential_delivered_for_key("s2", "loader-a").await);
+        // A mark needs a loader id.
+        assert_eq!(
+            driver
+                .mark_credential_delivered_for_key("s1", " ")
+                .await
+                .unwrap_err()
+                .code,
+            ErrorCode::Internal
+        );
+        // A view shares the marks; the release forgets them.
+        assert!(driver.share().credential_delivered_for_key("s1", "loader-a").await);
+        driver.teardown_locked("s1").await;
+        assert!(!driver.credential_delivered_for_key("s1", "loader-a").await);
+    }
 }
 
 impl Drop for ChromiumoxideDriver {
