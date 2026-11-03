@@ -2406,6 +2406,28 @@ fn require_persistent_run_for_question(
     }
 }
 
+/// The one principal that may say a question is not the model's (EP-4 S5). Execution-core relays
+/// an MCP server's form; nothing else knows a server asked, and a person's credential must not be
+/// able to dress its own question as a named server's.
+const QUESTION_ORIGIN_SERVICE: &str = "service:execution-core";
+
+/// Check a create request's origin and who sent it, and return the origin token to store. Pure:
+/// it runs before any lookup. An empty origin is the model's, which any caller may state.
+#[allow(clippy::result_large_err)]
+fn question_origin(
+    caller: &VerifiedIdentity,
+    req: &proto::CreateRunQuestionRequest,
+) -> Result<&'static str, Status> {
+    let origin = user_question::validate_origin(&req.origin, &req.origin_label)
+        .map_err(|problem| invalid_question(&problem))?;
+    if origin != user_question::ORIGIN_MODEL
+        && !(caller.is_service() && caller.principal_id() == QUESTION_ORIGIN_SERVICE)
+    {
+        return Err(Status::permission_denied("question_origin_not_allowed"));
+    }
+    Ok(origin)
+}
+
 /// The typed status of an invalid question. The message is `invalid_question: <field>: <reason>`
 /// and the gateway reads the code and the problem back out of it.
 fn invalid_question(problem: &user_question::Problem) -> Status {
@@ -2521,6 +2543,8 @@ fn run_question_from_row(row: &store::RunQuestionRow) -> Result<proto::RunQuesti
         answered_at: row.answered_at.map(ts),
         answers: question_answers_to_proto(&answers),
         answered_message_id: row.answered_message_id.clone(),
+        origin: row.origin.clone(),
+        origin_label: row.origin_label.clone(),
     })
 }
 
@@ -3882,6 +3906,7 @@ impl OrchestrationCoreService for OrchestrationGrpc {
                 return Err(Status::invalid_argument("run_id is required"));
             }
             caller.authorize_org(&req.org_id)?;
+            let origin = question_origin(&caller, &req)?;
             let scope = store::run_question_scope(&self.pool, &req.run_id)
                 .await
                 .map_err(|e| Status::internal(e.to_string()))?
@@ -3910,6 +3935,10 @@ impl OrchestrationCoreService for OrchestrationGrpc {
                     spec: &prepared.spec,
                     idempotency_key: &req.idempotency_key,
                     expires_at: Utc::now() + prepared.expires_in,
+                    origin,
+                    // `question_origin` refused a label on a model question, so this is empty
+                    // there and the server's checked name otherwise.
+                    origin_label: &req.origin_label,
                 },
                 user_question::MAX_QUESTIONS_PER_RUN,
             )
@@ -6786,6 +6815,8 @@ mod tests {
             requested_at: Utc::now(),
             expires_at: Utc::now() + chrono::Duration::hours(1),
             answered_at: None,
+            origin: "model".to_owned(),
+            origin_label: String::new(),
         }
     }
 
@@ -7084,6 +7115,79 @@ mod tests {
             .expect_err("refused")
             .code(),
             tonic::Code::PermissionDenied
+        );
+    }
+
+    // EP-4 S5: only execution-core may say an MCP server asked. A person's credential, or any other
+    // service, is refused before the run is looked up, so the refusal needs no database.
+    #[tokio::test]
+    async fn run_question_user_principal_cannot_set_a_server_origin() {
+        let (svc, _rx) = lazy_unreachable_service();
+        let mut create = create_question_request(vec![question_item("scope", "single")]);
+        create.origin = "mcp_elicitation".to_owned();
+        create.origin_label = "Fixture".to_owned();
+        for caller in [
+            VerifiedIdentity::user_for_test("org_q", "user_q"),
+            VerifiedIdentity::service_for_test_as(
+                "org_q",
+                "service:model-gateway",
+                &["orchestration:write"],
+                false,
+            ),
+        ] {
+            let refused = svc
+                .create_run_question(with_caller(create.clone(), caller))
+                .await
+                .expect_err("refused");
+            assert_eq!(refused.code(), tonic::Code::PermissionDenied);
+            assert_eq!(refused.message(), "question_origin_not_allowed");
+        }
+    }
+
+    #[test]
+    fn run_question_origin_is_checked_and_only_execution_core_may_name_a_server() {
+        let user = VerifiedIdentity::user_for_test("org_q", "user_q");
+        let execution =
+            VerifiedIdentity::service_for_test_as("org_q", QUESTION_ORIGIN_SERVICE, &["orchestration:write"], false);
+        let with = |origin: &str, label: &str| {
+            let mut req = create_question_request(vec![question_item("scope", "single")]);
+            req.origin = origin.to_owned();
+            req.origin_label = label.to_owned();
+            req
+        };
+        // Unset and `model` read as the model's, for every caller.
+        for caller in [&user, &execution] {
+            assert_eq!(question_origin(caller, &with("", "")).expect("model"), "model");
+            assert_eq!(question_origin(caller, &with("model", "")).expect("model"), "model");
+        }
+        assert_eq!(
+            question_origin(&execution, &with("mcp_elicitation", "Fixture")).expect("server"),
+            "mcp_elicitation"
+        );
+        for (origin, label, message) in [
+            ("mcp_elicitation", "", "invalid_question: origin_label: empty_text"),
+            ("model", "Fixture", "invalid_question: origin_label: label_on_model_origin"),
+            ("mcp_elicitation", &*"x".repeat(81), "invalid_question: origin_label: text_too_long"),
+            ("assistant", "", "invalid_question: origin: unsupported_origin"),
+        ] {
+            let refused = question_origin(&execution, &with(origin, label)).expect_err("invalid");
+            assert_eq!(refused.code(), tonic::Code::InvalidArgument);
+            assert_eq!(refused.message(), message);
+        }
+    }
+
+    #[test]
+    fn run_question_list_returns_origin() {
+        let row = stored_question(serde_json::json!([]));
+        let wire = run_question_from_row(&row).expect("readable");
+        assert_eq!((wire.origin.as_str(), wire.origin_label.as_str()), ("model", ""));
+        let mut row = row;
+        row.origin = "mcp_elicitation".to_owned();
+        row.origin_label = "Fixture".to_owned();
+        let wire = run_question_from_row(&row).expect("readable");
+        assert_eq!(
+            (wire.origin.as_str(), wire.origin_label.as_str()),
+            ("mcp_elicitation", "Fixture")
         );
     }
 

@@ -2014,6 +2014,14 @@ message RunQuestion {
   repeated QuestionAnswerItem answers = 13;
   // The user message that carried the answer, when one did.
   string answered_message_id = 14;
+  // Who authored the question: `model` (the run's own model) or
+  // `mcp_elicitation` (a form an MCP server sent through the run). A row stored
+  // before the origin existed reads `model`. A card must never present a
+  // server's question as the assistant's (EP-4 S5).
+  string origin = 15;
+  // The display name of the server that asked, at most 80 characters. Empty
+  // exactly when `origin` is `model`.
+  string origin_label = 16;
 }
 
 // Put a question to the run's owner. See `CreateRunQuestion`.
@@ -2033,6 +2041,14 @@ message CreateRunQuestionRequest {
   // A retry with the same key (per org) returns the stored question. Callers
   // use `{run_id}:{step_id}`.
   string idempotency_key = 7;
+  // Who authored the question: empty or `model` for the run's model,
+  // `mcp_elicitation` for a form an MCP server sent. Only the execution-core
+  // service principal may send `mcp_elicitation`; any other caller is refused
+  // (EP-4 S5).
+  string origin = 8;
+  // The display name of the asking server, at most 80 characters. Required
+  // with `mcp_elicitation` and refused with `model`.
+  string origin_label = 9;
 }
 
 // The stored question (a retry with the same idempotency key returns it).

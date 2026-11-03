@@ -2795,11 +2795,15 @@ pub struct RunQuestionRow {
     pub requested_at: DateTime<Utc>,
     pub expires_at: DateTime<Utc>,
     pub answered_at: Option<DateTime<Utc>>,
+    /// `model` or `mcp_elicitation` (migration 0105); a row from before reads `model`.
+    pub origin: String,
+    /// The asking server's name; empty exactly when `origin` is `model`.
+    pub origin_label: String,
 }
 
 const RUN_QUESTION_COLUMNS: &str = "id, run_id, thread_id, step_id, org_id, user_id, state, \
      delivery, spec, answers, answers_digest, answered_message_id, idempotency_key, \
-     requested_at, expires_at, answered_at";
+     requested_at, expires_at, answered_at, origin, origin_label";
 
 /// Who owns a run and where it lives: the facts a question is bound to.
 #[derive(sqlx::FromRow, Debug, Clone)]
@@ -2837,6 +2841,10 @@ pub struct NewRunQuestion<'a> {
     pub spec: &'a JsonValue,
     pub idempotency_key: &'a str,
     pub expires_at: DateTime<Utc>,
+    /// A validated origin token (`mp_contracts::user_question::validate_origin`).
+    pub origin: &'a str,
+    /// Empty for a `model` origin; the server's name otherwise.
+    pub origin_label: &'a str,
 }
 
 /// What [`create_run_question`] did.
@@ -2902,8 +2910,8 @@ pub async fn create_run_question(
 
     let row = sqlx::query_as::<_, RunQuestionRow>(&format!(
         "INSERT INTO run_questions (id, run_id, thread_id, step_id, org_id, user_id, delivery, \
-         spec, idempotency_key, expires_at) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) \
+         spec, idempotency_key, expires_at, origin, origin_label) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) \
          RETURNING {RUN_QUESTION_COLUMNS}"
     ))
     .bind(new.id)
@@ -2916,6 +2924,8 @@ pub async fn create_run_question(
     .bind(new.spec)
     .bind(new.idempotency_key)
     .bind(new.expires_at)
+    .bind(new.origin)
+    .bind(new.origin_label)
     .fetch_one(&mut *transaction)
     .await?;
     transaction.commit().await?;
@@ -5209,6 +5219,8 @@ mod run_question_db_tests {
                 spec: &spec,
                 idempotency_key: key,
                 expires_at: Utc::now() + expires_in,
+                origin: "model",
+                origin_label: "",
             },
             3,
         )
@@ -5310,6 +5322,8 @@ mod run_question_db_tests {
                         spec: &spec,
                         idempotency_key: &format!("race-{n}"),
                         expires_at: Utc::now() + chrono::Duration::hours(1),
+                        origin: "model",
+                        origin_label: "",
                     },
                     3,
                 )
@@ -5535,6 +5549,8 @@ mod run_question_db_tests {
                 spec: &spec,
                 idempotency_key: key,
                 expires_at: Utc::now() + expires_in,
+                origin: "model",
+                origin_label: "",
             },
             3,
         )
@@ -5645,6 +5661,152 @@ mod run_question_db_tests {
         let seed = seed_run(&pool, "lapsed").await;
         let question = resume_question(&pool, &seed, "lapsed-1", -chrono::Duration::hours(1)).await;
         assert!(matches!(spend(&pool, &seed, &question.id, "x").await, ConsumedRunQuestion::Expired));
+    }
+
+    /// A `next_turn` question with the given origin, straight to the store: the schema's own
+    /// CHECKs are what these tests read, so nothing validates the origin first.
+    async fn ask_with_origin(
+        pool: &Pool,
+        seed: &Seed,
+        key: &str,
+        origin: &str,
+        origin_label: &str,
+    ) -> Result<CreatedRunQuestion> {
+        let id = format!("q_{}", mp_ids::new_ulid());
+        let spec = spec();
+        create_run_question(
+            pool,
+            &NewRunQuestion {
+                id: &id,
+                run_id: &seed.run_id,
+                thread_id: &seed.thread_id,
+                step_id: "step-1",
+                org_id: &seed.org,
+                user_id: &seed.user,
+                delivery: "next_turn",
+                spec: &spec,
+                idempotency_key: key,
+                expires_at: Utc::now() + chrono::Duration::hours(1),
+                origin,
+                origin_label,
+            },
+            3,
+        )
+        .await
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+    async fn run_question_origin_defaults_to_model() {
+        let Some(pool) = scratch_pool().await else { return };
+        let seed = seed_run(&pool, "origin-default").await;
+        let row = created(&pool, &seed, "origin-default-1").await;
+        assert_eq!((row.origin.as_str(), row.origin_label.as_str()), ("model", ""));
+        // A writer that predates the columns names neither, and its row reads as the model's.
+        let id = format!("q_{}", mp_ids::new_ulid());
+        sqlx::query(
+            "INSERT INTO run_questions (id, run_id, thread_id, org_id, user_id, spec, expires_at) \
+             VALUES ($1, $2, $3, $4, $5, '[]'::jsonb, now() + interval '1 hour')",
+        )
+        .bind(&id).bind(&seed.run_id).bind(&seed.thread_id).bind(&seed.org).bind(&seed.user)
+        .execute(&pool).await.expect("insert without origin");
+        let old = get_run_question(&pool, &id, &seed.org, &seed.user)
+            .await
+            .expect("get")
+            .expect("row");
+        assert_eq!((old.origin.as_str(), old.origin_label.as_str()), ("model", ""));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+    async fn run_question_mcp_origin_needs_a_label() {
+        let Some(pool) = scratch_pool().await else { return };
+        let seed = seed_run(&pool, "origin-needs-label").await;
+        assert!(ask_with_origin(&pool, &seed, "needs-label-1", "mcp_elicitation", "").await.is_err());
+        let CreatedRunQuestion::Created(row) =
+            ask_with_origin(&pool, &seed, "needs-label-2", "mcp_elicitation", "Fixture")
+                .await
+                .expect("create")
+        else {
+            panic!("a labelled server question is stored");
+        };
+        assert_eq!((row.origin.as_str(), row.origin_label.as_str()), ("mcp_elicitation", "Fixture"));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+    async fn run_question_model_origin_refuses_a_label() {
+        let Some(pool) = scratch_pool().await else { return };
+        let seed = seed_run(&pool, "origin-model-label").await;
+        assert!(ask_with_origin(&pool, &seed, "model-label-1", "model", "Fixture").await.is_err());
+        assert!(ask_with_origin(&pool, &seed, "model-label-2", "assistant", "").await.is_err());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+    async fn run_question_label_over_80_is_refused() {
+        let Some(pool) = scratch_pool().await else { return };
+        let seed = seed_run(&pool, "origin-label-80").await;
+        // Postgres counts characters, as the contract does: 80 multi-byte characters fit.
+        let at_bound = "æ".repeat(80);
+        assert!(matches!(
+            ask_with_origin(&pool, &seed, "label-80", "mcp_elicitation", &at_bound).await,
+            Ok(CreatedRunQuestion::Created(_))
+        ));
+        let past = "x".repeat(81);
+        assert!(ask_with_origin(&pool, &seed, "label-81", "mcp_elicitation", &past).await.is_err());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+    async fn run_question_list_returns_origin() {
+        let Some(pool) = scratch_pool().await else { return };
+        let seed = seed_run(&pool, "origin-list").await;
+        created(&pool, &seed, "list-model").await;
+        ask_with_origin(&pool, &seed, "list-server", "mcp_elicitation", "Fixture")
+            .await
+            .expect("create");
+        let listed = list_run_questions(&pool, &seed.run_id, &seed.org, &seed.user)
+            .await
+            .expect("list");
+        let origins: Vec<(&str, &str)> = listed
+            .iter()
+            .map(|row| (row.origin.as_str(), row.origin_label.as_str()))
+            .collect();
+        assert_eq!(origins, [("model", ""), ("mcp_elicitation", "Fixture")]);
+    }
+
+    #[test]
+    fn run_question_migration_0105_adds_the_origin_and_its_revert_drops_it() {
+        let up = include_str!("../migrations/0105_run_question_origin.sql");
+        let down = include_str!("../migrations/revert/0105_run_question_origin.down.sql");
+        let sql = |text: &'static str| -> String {
+            text.lines()
+                .filter(|line| !line.trim_start().starts_with("--"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let (up, down) = (sql(up), sql(down));
+        for fact in [
+            "ADD COLUMN IF NOT EXISTS origin TEXT NOT NULL DEFAULT 'model'",
+            "CHECK (origin IN ('model', 'mcp_elicitation'))",
+            "ADD COLUMN IF NOT EXISTS origin_label TEXT NOT NULL DEFAULT ''",
+            "CHECK (length(origin_label) <= 80)",
+            "CHECK ((origin = 'model') = (origin_label = ''))",
+        ] {
+            assert!(up.contains(fact), "0105 must hold {fact}");
+        }
+        for fact in [
+            "DROP CONSTRAINT IF EXISTS run_questions_origin_label_chk",
+            "DROP COLUMN IF EXISTS origin_label",
+            "DROP COLUMN IF EXISTS origin;",
+            "BEGIN;",
+            "COMMIT;",
+        ] {
+            assert!(down.contains(fact), "the revert must hold {fact}");
+        }
+        // The revert touches only what 0105 added.
+        assert!(!down.contains("DROP TABLE"));
     }
 }
 
