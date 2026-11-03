@@ -40,8 +40,10 @@ import {
   getPresetAgent,
   presetAgentChatActions,
   presetAgents,
+  resolvePresetAgent,
   type PresetAgent,
   type PresetAgentId,
+  type ResolvedPresetAgent,
 } from '@/shared/actions/preset-agents'
 import {
   streamChat,
@@ -635,6 +637,11 @@ export default function AgentRunConsole() {
   const runTask = () => {
     const content = goal().trim()
     if (!content || isActive()) return
+    // An unavailable preset sends nothing, so the check runs before the run state is reset. The
+    // empty Set stands in until an admitted-set client exists; with the switch off this is a no-op.
+    const preset = presetId() ? getPresetAgent(presetId()!) : undefined
+    const resolved: ResolvedPresetAgent | undefined = preset ? resolvePresetAgent(preset, new Set<string>()) : undefined
+    if (resolved && !resolved.available) return
 
     // A new run aborts the previous controller first — no leaked streams. Any
     // history replay is torn down and the telemetry panel re-pins to the live
@@ -793,8 +800,7 @@ export default function AgentRunConsole() {
     // contracts (and their approval gating) instead of only the free-text goal.
     // `planMode: true` is never overridden by a preset — every action still runs
     // through the console's normal HITL/approval deck.
-    const preset = presetId() ? getPresetAgent(presetId()!) : undefined
-    const presetActions = preset ? presetAgentChatActions(preset) : undefined
+    const presetActions = resolved ? presetAgentChatActions(resolved) : undefined
 
     void streamChat(
       {
@@ -1274,11 +1280,12 @@ function PresetPicker(props: {
         <For each={presetAgents}>
           {(preset) => {
             const active = () => props.activeId === preset.id
+            const available = () => resolvePresetAgent(preset, new Set<string>()).available
             return (
               <button
                 type="button"
                 aria-pressed={active() ? 'true' : 'false'}
-                disabled={props.disabled}
+                disabled={props.disabled || !available()}
                 onClick={() => props.onSelect(preset)}
                 class={cn(
                   'verevon-run-preset',
@@ -1288,6 +1295,11 @@ function PresetPicker(props: {
               >
                 <span class="verevon-run-preset__label">{preset.label}</span>
                 <span class="verevon-run-preset__desc">{preset.description}</span>
+                <Show when={!available()}>
+                  <span class="verevon-run-preset__desc">
+                    {i18n.tr('Ikke tilgjengelig i denne organisasjonen', 'Not available in this org')}
+                  </span>
+                </Show>
               </button>
             )
           }}

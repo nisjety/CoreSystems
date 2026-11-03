@@ -60,6 +60,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "model_plane/v1/proof_bundle.proto",
         "model_plane/v1/finetune.proto",
         "model_plane/v1/routing_policy.proto",
+        "model_plane/v1/run_ledger.proto",
         "model_plane/v1/space_room.proto",
         "model_plane/v1/space_events.proto",
         "model_plane/v1/space_history.proto",

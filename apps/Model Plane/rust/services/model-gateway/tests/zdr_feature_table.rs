@@ -311,6 +311,11 @@ fn cases() -> Vec<(&'static str, Value, Expect)> {
             None,
         ),
         (
+            "persona_tone",
+            with("persona_tone", json!("direct")),
+            None,
+        ),
+        (
             "client_timezone",
             with("client_timezone", json!("Europe/Oslo")),
             None,

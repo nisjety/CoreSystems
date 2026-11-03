@@ -609,6 +609,7 @@ mod tests {
             org_instructions: None,
             space_instructions: None,
             persona_instructions: None,
+            persona_tone: None,
             locale: None,
             client_timezone: None,
             client_utc_offset_minutes: None,

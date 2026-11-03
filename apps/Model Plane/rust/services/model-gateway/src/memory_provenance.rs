@@ -241,6 +241,9 @@ mod tests {
             provenance: MemoryProvenance::Stated as i32,
             origin_space_ref: String::new(),
             withheld_reason: String::new(),
+            scope: String::new(),
+            scope_id: String::new(),
+            source_label: String::new(),
         };
         overrides(&mut entry);
         entry

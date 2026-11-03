@@ -382,6 +382,12 @@ type InferRequest struct {
 	// know, count as `unspecified`, so an older caller and a newer one both work.
 	// It carries no content, so Zero Data Retention does not change it.
 	Purpose InferPurpose `protobuf:"varint,21,opt,name=purpose,proto3,enum=model_plane.v1.InferPurpose" json:"purpose,omitempty"`
+	// The run this call belongs to (EP-14 S6). It only attributes a request
+	// snapshot to its run: when INFERENCE_REQUEST_CAPTURE is on, inference-core
+	// records what was sent for a call that names a run and is neither ZDR nor
+	// waived. Empty means no run and no snapshot. It routes nothing and is never
+	// sent to a provider.
+	RunId string `protobuf:"bytes,22,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
 	// The model the turn itself was served by (EP-13 S4). Read only when `model`
 	// is `verevon-role`: the role table tries its own candidates first, then this
 	// model, then the cheap fallback. Empty names none. It carries no content, so
@@ -566,6 +572,13 @@ func (x *InferRequest) GetPurpose() InferPurpose {
 		return x.Purpose
 	}
 	return InferPurpose_INFER_PURPOSE_UNSPECIFIED
+}
+
+func (x *InferRequest) GetRunId() string {
+	if x != nil {
+		return x.RunId
+	}
+	return ""
 }
 
 func (x *InferRequest) GetRoleFallbackModel() string {
@@ -6291,7 +6304,7 @@ var File_model_plane_v1_inference_proto protoreflect.FileDescriptor
 
 const file_model_plane_v1_inference_proto_rawDesc = "" +
 	"\n" +
-	"\x1emodel_plane/v1/inference.proto\x12\x0emodel_plane.v1\"\x9d\b\n" +
+	"\x1emodel_plane/v1/inference.proto\x12\x0emodel_plane.v1\"\xb4\b\n" +
 	"\fInferRequest\x12\x1d\n" +
 	"\n" +
 	"request_id\x18\x01 \x01(\tR\trequestId\x12\x15\n" +
@@ -6318,7 +6331,8 @@ const file_model_plane_v1_inference_proto_rawDesc = "" +
 	"\x0fcache_scope_key\x18\x13 \x01(\tR\rcacheScopeKey\x12?\n" +
 	"\vimage_parts\x18\x14 \x03(\v2\x1e.model_plane.v1.InferImagePartR\n" +
 	"imageParts\x126\n" +
-	"\apurpose\x18\x15 \x01(\x0e2\x1c.model_plane.v1.InferPurposeR\apurpose\x12.\n" +
+	"\apurpose\x18\x15 \x01(\x0e2\x1c.model_plane.v1.InferPurposeR\apurpose\x12\x15\n" +
+	"\x06run_id\x18\x16 \x01(\tR\x05runId\x12.\n" +
 	"\x13role_fallback_model\x18\x17 \x01(\tR\x11roleFallbackModel\"f\n" +
 	"\x0eInferImagePart\x12#\n" +
 	"\rmessage_index\x18\x01 \x01(\rR\fmessageIndex\x12\x12\n" +

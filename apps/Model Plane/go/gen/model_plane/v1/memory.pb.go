@@ -355,8 +355,19 @@ type MemoryEntry struct {
 	// in a shared room before containment existed. The owner may keep or delete
 	// it; no conversation recalls it. Empty for an ordinary row.
 	WithheldReason string `protobuf:"bytes,10,opt,name=withheld_reason,json=withheldReason,proto3" json:"withheld_reason,omitempty"`
-	unknownFields  protoimpl.UnknownFields
-	sizeCache      protoimpl.SizeCache
+	// The row's scope kind (agent_memory.scope): "user", "org", "thread", ...,
+	// "space" or "agent" (EP-8 S6). Empty when the reader does not report it;
+	// set by the Space memory readers (EP-8 S7).
+	Scope string `protobuf:"bytes,11,opt,name=scope,proto3" json:"scope,omitempty"`
+	// The scope instance: the Space id for "space", "<space_id>:<agent_id>" for
+	// "agent". Empty for every other kind. Ids only, never content.
+	ScopeId string `protobuf:"bytes,12,opt,name=scope_id,json=scopeId,proto3" json:"scope_id,omitempty"`
+	// How a Space or agent row came to exist: "room_statement" (extracted from a
+	// room turn), "member_save" (an explicit save in a room), "agent_memory".
+	// Closed vocabulary; empty for every other row.
+	SourceLabel   string `protobuf:"bytes,13,opt,name=source_label,json=sourceLabel,proto3" json:"source_label,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *MemoryEntry) Reset() {
@@ -455,6 +466,27 @@ func (x *MemoryEntry) GetOriginSpaceRef() string {
 func (x *MemoryEntry) GetWithheldReason() string {
 	if x != nil {
 		return x.WithheldReason
+	}
+	return ""
+}
+
+func (x *MemoryEntry) GetScope() string {
+	if x != nil {
+		return x.Scope
+	}
+	return ""
+}
+
+func (x *MemoryEntry) GetScopeId() string {
+	if x != nil {
+		return x.ScopeId
+	}
+	return ""
+}
+
+func (x *MemoryEntry) GetSourceLabel() string {
+	if x != nil {
+		return x.SourceLabel
 	}
 	return ""
 }
@@ -1480,7 +1512,7 @@ const file_model_plane_v1_memory_proto_rawDesc = "" +
 	"\bdegraded\x18\x02 \x01(\bR\bdegraded\x12-\n" +
 	"\x12degradation_reason\x18\x03 \x01(\tR\x11degradationReason\x12\x1f\n" +
 	"\vskip_reason\x18\x04 \x01(\tR\n" +
-	"skipReason\"\xf6\x02\n" +
+	"skipReason\"\xca\x03\n" +
 	"\vMemoryEntry\x12\x1b\n" +
 	"\tmemory_id\x18\x01 \x01(\tR\bmemoryId\x12\x1b\n" +
 	"\tthread_id\x18\x02 \x01(\tR\bthreadId\x12\x14\n" +
@@ -1495,7 +1527,10 @@ const file_model_plane_v1_memory_proto_rawDesc = "" +
 	"provenance\x12(\n" +
 	"\x10origin_space_ref\x18\t \x01(\tR\x0eoriginSpaceRef\x12'\n" +
 	"\x0fwithheld_reason\x18\n" +
-	" \x01(\tR\x0ewithheldReason\"\xc6\x01\n" +
+	" \x01(\tR\x0ewithheldReason\x12\x14\n" +
+	"\x05scope\x18\v \x01(\tR\x05scope\x12\x19\n" +
+	"\bscope_id\x18\f \x01(\tR\ascopeId\x12!\n" +
+	"\fsource_label\x18\r \x01(\tR\vsourceLabel\"\xc6\x01\n" +
 	"\x12IndexMemoryRequest\x12\x1b\n" +
 	"\tthread_id\x18\x01 \x01(\tR\bthreadId\x12\x14\n" +
 	"\x05topic\x18\x02 \x01(\tR\x05topic\x12\x18\n" +

@@ -3684,6 +3684,43 @@ pub(super) async fn dispatch_settings_update_setting(
     owner_json_response_to_envelope("settings.update_setting", user, status, resp)
 }
 
+// Saves the caller's reply tone (EP-8-S3). user-core writes every AI field back on a PUT, so the
+// four existing fields are read first and sent unchanged; a PUT of the tone alone would reset them.
+pub(super) async fn dispatch_settings_set_tone_preset(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    input: &Value,
+) -> Response {
+    let tone = ticket_string(input, "tonePreset");
+    if !crate::domains::persona::is_tone_preset(tone) {
+        return ticket_bad_request(
+            "settings.set_tone_preset requires a tonePreset of default, professional, friendly, direct, warm or neutral",
+        );
+    }
+    let actor = actor_for_user(user);
+    let url = format!("{}/api/v1/settings/ai", state.user_core_url);
+    let (status, Json(mut settings)) =
+        proxy_json(state, Method::GET, &url, None, None, Some(&actor), None).await;
+    if !status.is_success() {
+        return owner_json_response_to_envelope("settings.set_tone_preset", user, status, settings);
+    }
+    if let Some(object) = settings.as_object_mut() {
+        object.remove("tonePresetsAvailable");
+        object.insert("tonePreset".to_owned(), json!(tone));
+    }
+    let (status, Json(resp)) = proxy_json(
+        state,
+        Method::PUT,
+        &url,
+        Some(settings),
+        None,
+        Some(&actor),
+        None,
+    )
+    .await;
+    owner_json_response_to_envelope("settings.set_tone_preset", user, status, resp)
+}
+
 // Reuses the real create_api_key/delete_api_key rather than re-deriving them:
 // create_api_key's response carries a raw, one-time credential secret
 // (auth-core never returns it again), and both authenticate to auth-core via

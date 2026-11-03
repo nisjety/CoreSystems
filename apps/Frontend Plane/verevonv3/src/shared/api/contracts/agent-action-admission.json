@@ -2193,6 +2193,19 @@
       "zdr_allowed": false
     },
     {
+      "actionId": "settings.set_tone_preset",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "external_write",
+      "exemptReason": "human_identity_or_security",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:9b309b7c7585c5e5ffdf77a21aead48ec1b8beacb36404a87a3790f2cd9d72bc",
+      "zdr_allowed": false
+    },
+    {
       "actionId": "settings.update_me",
       "registry": true,
       "access": "none",

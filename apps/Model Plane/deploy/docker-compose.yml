@@ -418,6 +418,7 @@ services:
       # EP-8 S1: the person's local date, time and app language in the prompt. Only the literal
       # true turns it on; nothing is stored. Keep it off until the time precision is decided.
       MODEL_GATEWAY_USER_LOCALE_CONTEXT: ${MODEL_GATEWAY_USER_LOCALE_CONTEXT:-false}
+      MODEL_GATEWAY_TONE_PRESETS: ${MODEL_GATEWAY_TONE_PRESETS:-false}
       # WS27-S2: a turn's usage frame and ledger rows count every tool round and the overhead calls, with run_id. Off by
       # default; only the literal `true`. Billing attribution (DEC-18, WS27-D5) must be confirmed before it is turned on.
       MODEL_GATEWAY_TURN_USAGE_COMPLETE: ${MODEL_GATEWAY_TURN_USAGE_COMPLETE:-false}
@@ -1122,6 +1123,12 @@ services:
       # How long a parked run waits for its continuation, in seconds, counted from the park save
       # (WS03 S8-4). Default one day, clamped to 60..2592000. Only read while park recovery is on.
       SESSION_CORE_PARK_TTL_SECONDS: ${SESSION_CORE_PARK_TTL_SECONDS:-86400}
+      # EP-8 S6: Space memory stays off until D2-480, D2-481 and D2-461 are closed.
+      SESSION_SPACE_MEMORY_ENABLED: ${SESSION_SPACE_MEMORY_ENABLED:-false}
+      # EP-14 S6: request snapshot writer and its TTL sweep (off until S7 and D3).
+      SESSION_CORE_REQUEST_SNAPSHOTS_ENABLED: ${SESSION_CORE_REQUEST_SNAPSHOTS_ENABLED:-false}
+      SESSION_CORE_REQUEST_SNAPSHOTS_SWEEP_ENABLED: ${SESSION_CORE_REQUEST_SNAPSHOTS_SWEEP_ENABLED:-false}
+      SESSION_CORE_REQUEST_SNAPSHOT_TTL_DAYS: ${SESSION_CORE_REQUEST_SNAPSHOT_TTL_DAYS:-7}
       # Dreaming's LLM memory extraction (dream_extractor.rs). Unset this
       # address, or set DREAMING_LLM_EXTRACTION=0, and Dreaming falls back to
       # the deterministic phrase matcher alone.
@@ -1240,6 +1247,8 @@ services:
       INFERENCE_ANTHROPIC_TIERED_SYSTEM: ${INFERENCE_ANTHROPIC_TIERED_SYSTEM:-false}
       INFERENCE_CORE_EFFORT_MODEL_ALIASES: ${INFERENCE_CORE_EFFORT_MODEL_ALIASES:-}
       INFERENCE_ROUTE_NOTE: ${INFERENCE_ROUTE_NOTE:-false}
+      # EP-14 S6: capture of what each model call was sent (off until S7 and D3).
+      INFERENCE_REQUEST_CAPTURE: ${INFERENCE_REQUEST_CAPTURE:-false}
       # EP-14 S10: a policy PUT must go through a candidate. Keep it off: this build answers
       # 503 candidate_store_unwired with it on (owner decision D9 and the candidate client are open).
       ROUTING_POLICY_PROMOTION_REQUIRED: ${ROUTING_POLICY_PROMOTION_REQUIRED:-false}
