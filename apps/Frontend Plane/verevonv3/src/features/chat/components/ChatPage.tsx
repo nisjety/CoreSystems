@@ -123,6 +123,8 @@ export default function ChatPage() {
     setActiveTab,
     copiedTurnId,
     uiEvents,
+    ledgerInspect,
+    inspectLedgerCall,
     traceReplayTruncated,
     launchMotion,
     showScrollDown,
@@ -944,6 +946,7 @@ export default function ChatPage() {
           screen={latestScreen()}
           events={uiEvents()}
           onStopTask={handleStop}
+          onInspectCall={inspectLedgerCall}
         />
         <ContextWindowPanel
           context={threadContext()}
@@ -953,7 +956,7 @@ export default function ChatPage() {
         />
       </Match>
       <Match when={activeTab() === 'trace'}>
-        <TracePanel runId={liveRunId()} events={uiEvents()} replayTruncated={traceReplayTruncated()} />
+        <TracePanel runId={liveRunId()} events={uiEvents()} replayTruncated={traceReplayTruncated()} inspectRequest={ledgerInspect()} />
       </Match>
     </Switch>
   )

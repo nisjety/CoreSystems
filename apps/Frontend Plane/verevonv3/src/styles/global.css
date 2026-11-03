@@ -23830,6 +23830,25 @@ body.verevon-chat-canvas-resizing * {
   margin: 0;
 }
 
+/* EP-14-S4: the run ledger in the Trace panel. Rows are buttons, so the trace-log li rules do not apply. */
+.verevon-chat-ledger { display: grid; gap: 8px; min-width: 0; }
+.verevon-chat-ledger__summary, .verevon-chat-ledger__note { margin: 0; color: var(--verevon-e-subtle); font-size: 11px; }
+.verevon-chat-ledger__layout { display: grid; grid-template-columns: minmax(0, 1fr); gap: 10px; min-width: 0; }
+@media (min-width: 960px) { .verevon-chat-ledger__layout { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); } }
+.verevon-chat-ledger__turns { display: grid; gap: 6px; min-width: 0; }
+.verevon-chat-ledger__turn { border: 1px solid var(--verevon-border-warm); border-radius: 8px; min-width: 0; }
+.verevon-chat-ledger__turn-head, .verevon-chat-ledger__row { display: flex; align-items: baseline; gap: 7px; width: 100%; min-width: 0; padding: 6px 8px; border: 0; background: transparent; color: inherit; font: inherit; font-size: 12px; text-align: left; cursor: pointer; }
+.verevon-chat-ledger__turn-head { font-weight: 600; }
+.verevon-chat-ledger__records { display: grid; border-top: 1px solid var(--verevon-border-warm); }
+.verevon-chat-ledger__row[aria-current='true'] { background: var(--verevon-surface-muted, rgba(0, 0, 0, 0.04)); }
+.verevon-chat-ledger__row:focus-visible, .verevon-chat-ledger__turn-head:focus-visible, .verevon-chat-ledger__close:focus-visible { outline: 2px solid currentColor; outline-offset: -2px; }
+.verevon-chat-ledger__row-title { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.verevon-chat-ledger__row em, .verevon-chat-ledger__row time, .verevon-chat-ledger__turn-head time { flex: 0 0 auto; color: var(--verevon-e-subtle); font-size: 10px; font-style: normal; }
+.verevon-chat-ledger__inspector { display: grid; gap: 6px; align-content: start; min-width: 0; padding: 8px; border: 1px solid var(--verevon-border-warm); border-radius: 8px; font-size: 12px; overflow-wrap: anywhere; }
+.verevon-chat-ledger__id { font-family: var(--font-mono); font-size: 11px; color: var(--verevon-e-muted); }
+.verevon-chat-ledger__copy-status { color: var(--verevon-e-subtle); font-size: 11px; }
+.verevon-chat-ledger__close { justify-self: end; border: 0; background: transparent; color: inherit; cursor: pointer; }
+
 @media (max-width: 720px) {
   .verevon-chat-telemetry {
     grid-template-columns: repeat(2, minmax(0, 1fr));
