@@ -2664,6 +2664,30 @@ Built so far: WS13-S0, WS13-S1, WS13-S2; WS14-S1, WS14-S2 (partial), WS14-S3; WS
 | D3-071 | EP-2-S2 | test-gap | P2 | Switch-off byte-identity of the fetch arm and the screen-before-park property are asserted on the helpers (fetched_page_output, park_extended_result), not through the Quarry-backed arm; a quarry seam would close the gap. | open |
 | D3-072 | EP-2-S2 | follow-up | P3 | 26 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W3-02.json | open |
 
+
+### Wave-mode batch W3-03 (2026-11-03)
+
+| ID | Slice | Kind | P | Finding | Status |
+|---|---|---|---|---|---|
+| D3-073 | EP-13-S6 | decision | P1 | A unary Gemini safety block is RequestRejected, so the chain walks on and another provider can answer a prompt Gemini refused, while a stream safety block ends as stop_reason content_filter; the owner must choose one policy and align both paths before enablement. | open |
+| D3-074 | EP-13-S6 | decision | P1 | No thinkingConfig or maxOutputTokens/thinking interaction is verified: Gemini 2.5 models think by default, thoughtsTokenCount is billed into output_tokens, and S7/S8 must confirm the budget and price it with a live call. | open |
+| D3-075 | EP-13-S6 | decision | P1 | No safetySettings are sent, so Vertex default thresholds apply to every Gemini call; the owner must accept or set thresholds before S8. | open |
+| D3-076 | EP-13-S6 | live-proof | P1 | The endpoint shape, the eu multi-region path segment (Google's page confirms only the host aiplatform.eu.rep.googleapis.com), the token exchange, the generateContent body and the SSE framing are unverified against Google; the S8 owner-funded run must prove them. | open |
+| D3-077 | EP-13-S6 | risk | P1 | The gemini-2.5-pro and gemini-2.5-flash pages announce retirement on 2026-10-20, already past on 2026-11-03, so S8 must choose currently served model ids and source their rows before enablement. | open |
+| D3-078 | EP-13-S6 | risk | P1 | Google's locations page leaves the per-region Gemini support cells blank, so S8 must confirm availability in each allowlisted europe-* region before any location is enabled. | open |
+| D3-079 | EP-13-S6 | decision | P1 | No safetySettings and no thinkingConfig are sent. Vertex default thresholds apply, and Gemini 2.5 thinks by default, with thoughtsTokenCount billed into output_tokens. Both need owner sign-off and live pricing before S8. | open |
+| D3-080 | EP-13-S6 | risk | P1 | The model_record rows for gemini-2.5-pro and gemini-2.5-flash carry an announced retirement date of 2026-10-20, which has already passed. S8 must source rows for model ids Google still serves before enablement. | open |
+| D3-081 | EP-13-S6 | follow-up | P3 | 22 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W3-03.json | open |
+| D3-082 | EP-14-S4 | risk | P1 | Every ledger record is mounted and buildLedger returns new record objects on each event, so each append re-creates every row; measure a reloaded 5,000-event replay (one unattributed group) before VITE_CHAT_RUN_LEDGER is ever turned on. | open |
+| D3-083 | EP-14-S4 | risk | P1 | RunLedger mounts every record with no virtualisation (the design asks for reuse of the WS09 window planner), and buildLedger rebuilds every record object on each appended event, so each event re-renders all rows. A 5,000-event replay must be measured before VITE_CHAT_RUN_LEDGER is switched on. | open |
+| D3-084 | EP-14-S4 | live-proof | P1 | Lead shared edits are not applied: ChatPage.tsx must destructure ledgerInspect and inspectLedgerCall, pass onInspectCall to StepsPanel and inspectRequest to TracePanel. Until then the Inspect action never renders and the Trace opens with nothing selected. | open |
+| D3-085 | EP-14-S4 | live-proof | P1 | Lead shared edit to global.css (the .verevon-chat-ledger* and .verevon-chat-tool-call__inspect rules) is not applied, so the ledger rows are unstyled when the switch is on. | open |
+| D3-086 | EP-14-S4 | live-proof | P1 | Live proof (depth phase): a second dev server with VITE_CHAT_RUN_LEDGER=true. Check an Ask turn and a Do run, copy to the real clipboard, Inspect from the Steps tab, and the reload view (unattributed group). Take 1280 and 375 px screenshots and do a keyboard-only pass. | open |
+| D3-087 | EP-14-S4 | live-proof | P1 | Rounds from turn_timing are absent, so the design's 'Ask turn shows 3 rounds' DoD check cannot pass until ChatPage passes turn timing or the timing is projected as a UI event. | open |
+| D3-088 | EP-14-S4 | live-proof | P1 | /* EP-14 S4 run ledger (VITE_CHAT_RUN_LEDGER). Trace's own rules still reach its headings, times and codes. */ | open |
+| D3-089 | EP-14-S4 | live-proof | P1 | .verevon-chat-ledger { display: grid; gap: 10px; min-width: 0; } | open |
+| D3-090 | EP-14-S4 | follow-up | P3 | 38 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W3-03.json | open |
+
 ## Cross-wave
 
 | ID | Kind | P | Finding | Status |
@@ -2899,3 +2923,4 @@ Slices that touch authority, audit, ZDR, money or data-loss and were built in wa
 | WS14-S2 | authority, zdr, audit | W2-47 | no |
 | EP-8-S2 | zdr, authority, data-loss | W3-01 | no |
 | EP-2-S2 | zdr | W3-02 | no |
+| EP-13-S6 | zdr, authority, auth, policy | W3-03 | no |
