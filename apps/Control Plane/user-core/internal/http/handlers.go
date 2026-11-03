@@ -1009,6 +1009,21 @@ type AppearanceSettings struct {
 	ColorScheme string `json:"colorScheme"` // "blue" | "green" | "purple" | "orange"
 	FontSize    string `json:"fontSize"`    // "small" | "medium" | "large"
 	CompactMode bool   `json:"compactMode"`
+
+	// TranscriptDensity is the chat transcript level (EP-14 S2): one of transcriptDensityLevels, or
+	// absent. Absent is not a level: the chat then derives one from CompactMode. It is optional, so a
+	// save that omits it keeps the stored level, and a client written before it never sees it.
+	TranscriptDensity string `json:"transcriptDensity,omitempty"`
+}
+
+// transcriptDensityLevels is the closed set of transcript levels (EP-14 S2), from the fullest view to the
+// most condensed one.
+var transcriptDensityLevels = []string{"detailed", "standard", "compact", "minimal"}
+
+// validTranscriptDensity reports whether a save names a level in the closed set. A save that names none
+// passes: the key is then empty, the patch omits it, and the merge keeps the stored level.
+func validTranscriptDensity(level string) bool {
+	return level == "" || slices.Contains(transcriptDensityLevels, level)
 }
 
 // LanguageSettings represents user language preferences
@@ -1191,6 +1206,14 @@ func (s *Server) updateAppearanceSettings(c *gin.Context) {
 	var req AppearanceSettings
 	patch, ok := bindSettingsPatch(c, &req)
 	if !ok {
+		return
+	}
+	if !validTranscriptDensity(req.TranscriptDensity) {
+		c.JSON(http.StatusUnprocessableEntity, typedErrorBody(
+			"transcript_density_invalid",
+			"transcriptDensity must be one of detailed, standard, compact or minimal.",
+			map[string]any{"allowed": transcriptDensityLevels},
+		))
 		return
 	}
 	updated, err := s.userService.UpsertSettings(c.Request.Context(), userID, "appearance", patch)

@@ -83,6 +83,8 @@ import { loadEffectiveAgentModeCap } from '@/features/customize/AgentModesSectio
 import { audienceConfirmRequired, chatProjectRefusal, sandboxToolsRefusedNotice, type ChatProjectRefusal } from './use-chat-project'
 import { planTranscriptWindow, resolveTurnHeights, virtualizeTranscript } from '../lib/transcript-window'
 import { foldPlan, settledFoldEnabled } from '../lib/settled-fold'
+import { createTranscriptDensity, transcriptDensityEnabled } from '../lib/transcript-density'
+import { DensityMenu } from './DensityMenu'
 
 export default function ChatPage() {
   const i18n = useI18n()
@@ -179,6 +181,9 @@ export default function ChatPage() {
   const [projectContext] = createResource(projectRef, (spaceRef) => readProjectContext(spaceRef))
   // WS25-S11. The org's effective mode cap; the composer lists only the modes at or below it.
   const [agentModeCap] = createResource(() => loadEffectiveAgentModeCap())
+  // EP-14 S2, behind `VITE_CHAT_TRANSCRIPT_DENSITY`. The level the transcript shows and the rules it applies. With the
+  // switch off the rules change nothing, so the transcript renders as it did.
+  const transcriptDensity = createTranscriptDensity()
   const projectName = () => {
     if (projectContext.loading) return i18n.tr('laster ...', 'loading ...')
     const context = projectContext()
@@ -454,7 +459,7 @@ export default function ChatPage() {
   // `<For>` mappers are untracked in Solid 2. Derive the neighboring turns and
   // all per-row reactive values up front so each mapper receives plain row data
   // instead of reading the live store while it renders.
-  const settledFolds = createMemo(() => (settledFoldEnabled ? foldPlan(state.turns, { activeTurnId: (isStreaming() || liveRunId()) ? state.turns.at(-1)?.id : undefined }) : undefined))
+  const settledFolds = createMemo(() => (settledFoldEnabled && transcriptDensity.rules().foldSettled ? foldPlan(state.turns, { activeTurnId: (isStreaming() || liveRunId()) ? state.turns.at(-1)?.id : undefined }) : undefined))
   const messageRows = createMemo(() => state.turns.map((turn, index, turns) => ({
     turn,
     createdAt: turn.createdAt,
@@ -1150,6 +1155,7 @@ export default function ChatPage() {
 
       <section
         class="verevon-chat-section"
+        data-transcript-process={transcriptDensity.rules().showProcess ? undefined : 'hidden'}
         aria-label={i18n.tr('Verevon chat-arbeidsflate', 'Verevon chat workspace')}
       >
         <Show when={hasMessages()}>
@@ -1171,6 +1177,9 @@ export default function ChatPage() {
             onNewChat={startNewChat}
             onRegenerate={regenerateLatest}
           />
+          <Show when={transcriptDensityEnabled}>
+            <DensityMenu density={transcriptDensity.level()} onChoose={transcriptDensity.choose} />
+          </Show>
         </Show>
         <Show when={hasMessages() && state.threadId && !isActiveThreadTemporary()}>
           <ThreadWorkspacePanel threadId={state.threadId ?? ''} />

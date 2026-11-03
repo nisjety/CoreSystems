@@ -83,6 +83,25 @@ fn canonical_color_scheme(value: &str) -> Option<&str> {
     is_hex.then_some(value)
 }
 
+/// The transcript levels the chat reads (EP-14 S2): the closed set user-core stores, matched exactly.
+/// A stored value outside the set is dropped rather than carried, so an old or hand-edited row
+/// cannot make a later save fail.
+pub(crate) fn canonical_transcript_density(value: &str) -> Option<&'static str> {
+    match value {
+        "detailed" => Some("detailed"),
+        "standard" => Some("standard"),
+        "compact" => Some("compact"),
+        "minimal" => Some("minimal"),
+        _ => None,
+    }
+}
+
+/// The known transcript level a current appearance object carries (EP-14 S2). Every writer that
+/// rebuilds the appearance object carries the level through with this.
+pub(crate) fn carried_transcript_density(current: &Value) -> Option<&'static str> {
+    first_str(current, &["transcriptDensity"]).and_then(canonical_transcript_density)
+}
+
 fn appearance_payload(settings: &Value, configured: bool) -> Value {
     let stored_theme = first_str(settings, &["theme"])
         .and_then(canonical_theme)
@@ -408,12 +427,17 @@ async fn save_theme(
     let font_size = first_str(&current, &["fontSize", "font_size"])
         .filter(|value| matches!(*value, "small" | "medium" | "large"))
         .unwrap_or("medium");
-    let appearance = json!({
+    let mut appearance = json!({
         "theme": theme,
         "colorScheme": color_scheme.unwrap_or_else(|| "blue".to_owned()),
         "fontSize": font_size,
         "compactMode": bool_field(&current, "compactMode"),
     });
+    // A theme save names only the theme and the colour, so the level the person chose is carried over
+    // from the current object rather than reset (EP-14 S2).
+    if let Some(density) = carried_transcript_density(&current) {
+        appearance["transcriptDensity"] = json!(density);
+    }
     let (status, Json(saved_body)) = proxy_json(
         &state,
         Method::PUT,
@@ -555,7 +579,10 @@ async fn submit_support(
 mod tests {
     use serde_json::json;
 
-    use super::{appearance_payload, canonical_color_scheme, canonical_theme};
+    use super::{
+        appearance_payload, canonical_color_scheme, canonical_theme, canonical_transcript_density,
+        carried_transcript_density,
+    };
 
     #[test]
     fn appearance_payload_maps_user_core_auto_to_the_spa_system_theme() {
@@ -573,5 +600,18 @@ mod tests {
         assert_eq!(canonical_color_scheme("#2F6BFF"), Some("#2F6BFF"));
         assert_eq!(canonical_color_scheme("purple"), Some("purple"));
         assert_eq!(canonical_color_scheme("red; color: white"), None);
+    }
+
+    // A theme save carries the level the person chose, and only a level in the closed set: user-core
+    // matches the set exactly, so a near miss must not be carried into a PUT it would refuse.
+    #[test]
+    fn navbar_theme_save_keeps_transcript_density() {
+        let current = json!({ "transcriptDensity": "compact", "compactMode": false });
+        assert_eq!(carried_transcript_density(&current), Some("compact"));
+        assert_eq!(carried_transcript_density(&json!({ "transcriptDensity": "Compact" })), None);
+        assert_eq!(carried_transcript_density(&json!({ "transcriptDensity": "huge" })), None);
+        assert_eq!(carried_transcript_density(&json!({ "compactMode": true })), None);
+        assert_eq!(canonical_transcript_density("minimal"), Some("minimal"));
+        assert_eq!(canonical_transcript_density(""), None);
     }
 }

@@ -1028,6 +1028,14 @@ const chatSetAgentModeInput = z
   })
   .strict()
 
+// The transcript level is the person's own display choice (EP-14 S2): the four levels user-core stores, and
+// nothing else a caller could widen the view with.
+const chatSetTranscriptDensityInput = z
+  .object({
+    transcriptDensity: z.enum(['detailed', 'standard', 'compact', 'minimal']),
+  })
+  .strict()
+
 // The org-admin schemas below all describe operations whose owner requires
 // require_org_admin (or, for the two self-service deletion checkpoints,
 // require_active_org) — enforced server-side, not by this schema. Getting the
@@ -3688,6 +3696,17 @@ export const actionRegistry = [
     requiresApproval: false,
     reversible: true,
     inputSchema: chatSetAgentModeInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'chat.set_transcript_density',
+    label: 'Choose how much chat work the transcript shows',
+    description: 'Name the transcript level the person reads chat work at: detailed, standard, compact (settled turns fold to one row) or minimal (answers, decisions and files, with the tool and reasoning trail hidden). The level is stored in the person\'s appearance settings and applies to every chat they open. Never model-executable: a model does not choose how the person reads its work.',
+    ownerPlane: 'control',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: chatSetTranscriptDensityInput,
     outputSchema: envelopeStatusOutput,
   },
   {

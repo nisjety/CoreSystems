@@ -596,6 +596,24 @@ describe('action registry', () => {
     expect(schema?.safeParse({ mode: 'auto', rung: 'danger_full_access' }).success).toBe(false)
   })
 
+  it('registers the transcript level as a control-plane action the model cannot execute, and accepts only the four level ids', () => {
+    const density = getActionDescriptor('chat.set_transcript_density')
+
+    expect(density).toMatchObject({ ownerPlane: 'control', risk: 'low', requiresApproval: false, reversible: true })
+    expect(isModelExecutableAction('chat.set_transcript_density')).toBe(false)
+    expect(density?.description ?? '').toContain('Never model-executable')
+
+    const schema = density?.inputSchema
+    for (const level of ['detailed', 'standard', 'compact', 'minimal']) {
+      expect(schema?.safeParse({ transcriptDensity: level }).success).toBe(true)
+    }
+    for (const level of ['full', 'Compact', '', 'none']) {
+      expect(schema?.safeParse({ transcriptDensity: level }).success).toBe(false)
+    }
+    // The person is the caller the server reads, never a field a client names.
+    expect(schema?.safeParse({ transcriptDensity: 'minimal', userId: 'user_x' }).success).toBe(false)
+  })
+
   function registered(id: string) {
     return actionRegistry.find((action) => action.id === id)
   }
@@ -847,7 +865,8 @@ describe('action registry', () => {
     // 251 after EP-8-S3 registered settings.set_tone_preset, the caller's own reply tone.
     // 253 after EP-8-S4 registered memory.profile.save and memory.profile.rebuild; that slice did not move this count.
     // 255 after EP-8-S8 registered settings.complete_personal_setup and settings.skip_personal_setup, the first-run step.
-    expect(ids).toHaveLength(255)
+    // 256 after EP-14-S2 registered chat.set_transcript_density, the person's transcript level.
+    expect(ids).toHaveLength(256)
 
     const spaceIds = ids.filter((id) => id.startsWith('spaces.'))
     const first = ids.indexOf(spaceIds[0] as string)
