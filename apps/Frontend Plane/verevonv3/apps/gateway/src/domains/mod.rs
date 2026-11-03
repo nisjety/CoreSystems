@@ -12,6 +12,7 @@ pub mod auth;
 pub mod billing;
 pub mod briefs;
 pub mod browser;
+pub mod browser_context;
 pub mod browser_evidence;
 pub mod chat;
 pub mod client_config;

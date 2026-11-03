@@ -1,0 +1,166 @@
+name: Quarry-v2 eval Tier C (live providers, capped spend)
+
+# E3.9.7 (audit F-t2-044, W3-E3.9.6-7). Tier C is the live eval: the only place the Quarry-v2
+# eval reaches real providers, so the only place it spends money. The hosted-runner gates are
+# quarry-v2-eval.yml (E3.9.1). This workflow is scheduled, capped and off until the owner turns
+# it on.
+#
+# Off by default. The schedule runs only when the repository variable QUARRY_TIER_C_ENABLED is
+# 'true'. A manual run (workflow_dispatch) always runs, because a person started it.
+#
+# What runs, in order, on the self-hosted runner:
+#   1. quarry-eval             fixture suite, offline, writes scoreboard.json
+#   2. quarry-provider-matrix  live fingerprint capture. It reads PROVIDERS_PATH. With no file it
+#                              runs offline and spends nothing. It runs only when step 1 passed.
+#   3. quarry-release-matrix   gate roll-up. Writes release_score.json with the cost section and
+#                              the spend_cap gate. It runs even when an earlier gate failed.
+#
+# Spend cap, stated plainly:
+# - The cap is the input spend_cap_usd. A blank input uses the repository variable
+#   QUARRY_TIER_C_SPEND_CAP_USD, and a blank variable uses 1 USD (the X-12 per-run budget, not
+#   ratified). The preflight step refuses anything that is not a plain amount, before any spend.
+# - The cap is checked AFTER the run, against the WS6.C usage meter snapshot
+#   (lab/evals/usage_meters.json). It does not stop a run part way through. The job timeout
+#   bounds the time. The real limit on provider spend is the capped credential's own limit at the
+#   provider, and that must be set before the first run.
+# - The gate fails closed: no snapshot, a metered quantity with no price, an unreadable price
+#   table, or an invalid cap all fail it. Nothing in this repository writes the snapshot yet, so
+#   the gate fails until a producer exists. That is intended.
+# - The provider sessions that quarry-provider-matrix opens are not WS6.C meters, so the cap does
+#   not see them.
+#
+# Credential: one secret, referenced by name only: QUARRY_TIER_C_CREDENTIAL. This file does not
+# create it. The owner creates it in the repository secrets. The providers file must name the
+# environment variable QUARRY_TIER_C_CREDENTIAL in api_key_env or token_env. The secret is set on
+# the provider step only, never on the whole job.
+#
+# Runner: self-hosted with the label quarry-tier-c. The owner registers it, as dp2-eval is
+# registered for dataplane-v2-eval-nightly.yml. Linux x64 with git, Rust and protoc.
+#
+# Uploads are content-free: the fixture scoreboard, the usage snapshot, the release matrix and the
+# score file. The provider matrix report is NOT uploaded. quarry-provider-matrix sends the
+# Browserless token in the request URL and keeps the request error text, so the report can carry
+# the token. It is also printed to the job log, where GitHub masks only the exact secret value.
+# See D-E3967-1 in .plan-work/quarry-w1w2/W23-depth-lane-c.md.
+
+on:
+  schedule:
+    # Mondays at 04:41 UTC: off-peak and off the hour. Weekly on purpose, because every run spends.
+    - cron: "41 4 * * 1"
+  workflow_dispatch:
+    inputs:
+      spend_cap_usd:
+        description: "Spend cap for this run in USD, for example 1 or 0.50. Blank uses the variable QUARRY_TIER_C_SPEND_CAP_USD, else 1."
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  # One Tier C run at a time, and never cancel a run that is already spending.
+  group: quarry-v2-eval-tier-c
+  cancel-in-progress: false
+
+jobs:
+  tier-c:
+    name: Tier C (live providers, capped spend)
+    if: github.event_name == 'workflow_dispatch' || vars.QUARRY_TIER_C_ENABLED == 'true'
+    # A label the owner registers on the runner. Not a GitHub-hosted runner: Tier C holds a
+    # live provider credential.
+    runs-on: [self-hosted, quarry-tier-c]
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: 'apps/Ingestion Plane/Quarry-v2'
+    env:
+      CARGO_TERM_COLOR: always
+      # Debug info is most of a debug binary's size; the eval bins need none.
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      # Stamped into release_score.json so the SCOREBOARD row can cite the commit.
+      QUARRY_RELEASE_COMMIT: ${{ github.sha }}
+      # Relative to the working directory. With no file here, the provider capture is offline.
+      PROVIDERS_PATH: lab/evals/provider_matrix.json
+      # Read by quarry-release-matrix. The preflight step refuses anything but a plain amount.
+      QUARRY_EVAL_SPEND_CAP_USD: ${{ inputs.spend_cap_usd || vars.QUARRY_TIER_C_SPEND_CAP_USD || '1' }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: 'apps/Ingestion Plane/Quarry-v2 -> target'
+
+      - uses: arduino/setup-protoc@v3
+        with:
+          version: '27.x'
+
+      - name: Preflight - the spend cap is a plain USD amount
+        # Runs before the build and before any provider call, so a bad cap spends nothing.
+        shell: bash
+        run: |
+          cap="${QUARRY_EVAL_SPEND_CAP_USD}"
+          if [[ ! "$cap" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+            echo "::error::spend cap must be a plain USD amount such as 1 or 0.50, got '$cap'"
+            exit 1
+          fi
+          echo "Spend cap for this run: $cap USD. It is checked after the run by the spend_cap gate."
+
+      - name: Build the Tier C binaries
+        run: >-
+          cargo build -p quarry-evals
+          --bin quarry-eval --bin quarry-provider-matrix --bin quarry-release-matrix
+
+      - name: Clear stale eval outputs
+        # A score or a usage snapshot from an earlier run must never pass this one. The price
+        # table is an owner input, so it is not cleared.
+        run: |
+          rm -f lab/evals/scoreboard.json lab/evals/bakeoff.json lab/evals/bakeoff.md \
+            lab/evals/release_matrix.json lab/evals/release_matrix.md \
+            lab/evals/release_score.json lab/evals/provider_matrix.report.json \
+            lab/evals/usage_meters.json
+
+      - name: Gate 1 - fixture suite (quarry-eval, offline)
+        run: cargo run -q -p quarry-evals --bin quarry-eval
+
+      - name: Gate 2 - live provider capture (skipped when the fixtures fail, so nothing is spent)
+        env:
+          # Set on this step only. The value is never printed.
+          QUARRY_TIER_C_CREDENTIAL: ${{ secrets.QUARRY_TIER_C_CREDENTIAL }}
+        run: |
+          if [ -z "${QUARRY_TIER_C_CREDENTIAL:-}" ]; then
+            echo "::warning::QUARRY_TIER_C_CREDENTIAL is not set; providers that need it are recorded as skipped"
+          fi
+          cargo run -q -p quarry-evals --bin quarry-provider-matrix
+
+      - name: Gate 3 - release matrix, cost section and spend cap (always runs, so the score is written)
+        if: always()
+        run: cargo run -q -p quarry-evals --bin quarry-release-matrix
+
+      - name: Publish the score to the job summary
+        if: always()
+        run: |
+          {
+            echo "### Quarry-v2 eval Tier C score"
+            echo ""
+            echo '```json'
+            cat lab/evals/release_score.json 2>/dev/null || echo '{"error":"release_score.json was not written"}'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the content-free outputs
+        # The provider matrix report is left out on purpose (see the header).
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: quarry-v2-eval-tier-c-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            apps/Ingestion Plane/Quarry-v2/lab/evals/scoreboard.json
+            apps/Ingestion Plane/Quarry-v2/lab/evals/usage_meters.json
+            apps/Ingestion Plane/Quarry-v2/lab/evals/release_matrix.json
+            apps/Ingestion Plane/Quarry-v2/lab/evals/release_matrix.md
+            apps/Ingestion Plane/Quarry-v2/lab/evals/release_score.json
+          if-no-files-found: warn
+          retention-days: 90
