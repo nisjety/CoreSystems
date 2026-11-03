@@ -32,10 +32,14 @@ No flag. The permit ordering is a bug fix (D2-161) and the two counter calls wir
 
 ## Assumed decisions
 
-- Permit ordering: the start is reserved and waited out before the global permit, and the per-host slot is taken after it. Start-to-start spacing is unchanged, because the start time is still reserved under the scheduler lock in the order `acquire` used. Recommended default taken without asking.
+- Permit ordering: the start is reserved and waited out before the global permit, and the per-host slot is taken after it, as the plan specifies. The spacing between reserved starts is unchanged. The spacing between actual fetch starts is not guaranteed; see Open risk. Recommended default taken without asking.
 - `crawl_sitemap.rs` counts by the lookup's presence, not by a separate mode check, because the report is built inside `select`. The handler is unchanged. A future caller that passes a lookup without enforcing would miscount; the comment at the call site says so.
 - Sitemap refusals and page-link refusals share `quarry_robots_link_refusals_total`, which has no source label. Recorded as a depth row for the soak.
 - The tests use `metrics::with_local_recorder` with a `PrometheusRecorder` built for the closure, so no global recorder is needed and `tests/metrics_recorder.rs` is not changed (it is outside this unit's file list).
+
+## Open risk (owner decision before enforce)
+
+Crawl-delay spacing is enforced on reserved start times, not on actual fetch starts. A request that waits for a permit after its reserved start can fetch late, and the next request on the same host can then fetch at its own reserved start, closer than the `Crawl-delay`. Under global-permit contention this is new: before this change the global permit came first and the reservation after it, so the spacing held, but a request sleeping out its delay held a global permit (D2-161). The per-host slot already had this gap before the change (reserve, wait, then slot). Closing it needs the last actual fetch start per host, read after both permits are taken. That lives in `host_scheduler.rs`, outside this unit's files. Robots enforce is off (X-10), so the gap is latent until the flip. Depth row added to `W23-depth-lane-c.md`.
 
 ## MP asks
 
