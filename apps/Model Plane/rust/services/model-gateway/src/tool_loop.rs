@@ -1822,6 +1822,229 @@ fn web_search_options(args_json: &str, query: &str, allow_paid_providers: bool) 
 }
 
 // ---------------------------------------------------------------------------
+// Batched web search with reference ids (EP-2-S3)
+// ---------------------------------------------------------------------------
+
+/// Environment switch for batched `web_search` (`queries`) and for the `ref` each hit then carries. Off, the
+/// schema, the output, the dispatch and the audit are exactly what they were.
+pub const WEB_SEARCH_BATCH_ENV: &str = "MODEL_GATEWAY_WEB_SEARCH_BATCH";
+
+/// Most queries one `web_search` call may name in `queries`.
+const MAX_BATCH_QUERIES: usize = 4;
+
+/// Most hits a batched search returns, once its queries are merged and de-duplicated.
+const MAX_BATCH_HITS: usize = 8;
+
+/// Whether batched web search is switched on in this process. Only the literal `true` enables it.
+#[must_use]
+pub fn web_search_batch_enabled() -> bool {
+    parse_web_search_batch(std::env::var(WEB_SEARCH_BATCH_ENV).ok().as_deref())
+}
+
+fn parse_web_search_batch(raw: Option<&str>) -> bool {
+    raw.map(str::trim) == Some("true")
+}
+
+/// The references one chat turn has issued: `w1`, `w2`, and so on, each standing for the URL of one search hit.
+///
+/// Held in memory for the turn and dropped with it, never persisted, so a ref names a page only in the
+/// conversation that searched for it. A ref the turn did not issue names nothing and is refused, never guessed
+/// at. A page keeps the ref it was first given for the whole turn, however many searches return it.
+#[derive(Debug, Default)]
+struct TurnRefs {
+    issued: std::sync::Mutex<IssuedRefs>,
+}
+
+#[derive(Debug, Default)]
+struct IssuedRefs {
+    /// The URL each ref names: `w{n}` is `urls[n - 1]`. Refs are issued in order and never reused.
+    urls: Vec<String>,
+    /// The ref already issued for each canonical URL key, see [`canonical_url_key`].
+    by_key: BTreeMap<String, usize>,
+}
+
+impl TurnRefs {
+    /// The ref for `url`, issued the first time this turn sees the page.
+    fn issue(&self, url: &str) -> String {
+        let key = canonical_url_key(url);
+        let mut issued = self
+            .issued
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let number = match issued.by_key.get(&key).copied() {
+            Some(number) => number,
+            None => {
+                issued.urls.push(url.to_owned());
+                let number = issued.urls.len();
+                issued.by_key.insert(key, number);
+                number
+            }
+        };
+        format!("w{number}")
+    }
+
+    /// The URL `reference` names, when this turn issued it. Only the canonical spelling resolves, so `w02` and
+    /// `w+2` name nothing.
+    fn resolve(&self, reference: &str) -> Option<String> {
+        let number: usize = reference.strip_prefix('w')?.parse().ok()?;
+        if format!("w{number}") != reference {
+            return None;
+        }
+        let index = number.checked_sub(1)?;
+        let issued = self
+            .issued
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        issued.urls.get(index).cloned()
+    }
+}
+
+/// The searches one `web_search` call runs: its `query`, or the distinct `queries` of a batched call.
+struct SearchAsk {
+    queries: Vec<String>,
+    /// Whether the call names more than one distinct search. A batched call's hits are merged, de-duplicated and
+    /// capped; any other call's hits are returned as its one search returned them.
+    batched: bool,
+}
+
+impl SearchAsk {
+    /// Read a call's arguments. `batch` is whether batched search is on for the turn: off, `queries` is not read
+    /// at all, so the call is judged exactly as it was before the switch existed.
+    fn parse(arguments_json: &str, batch: bool) -> Result<Self, String> {
+        let query = arg_str(arguments_json, "query");
+        let listed = if batch {
+            serde_json::from_str::<Value>(arguments_json)
+                .ok()
+                .and_then(|args| args.get("queries").cloned())
+        } else {
+            None
+        };
+        let Some(listed) = listed else {
+            return if !query.trim().is_empty() {
+                Ok(Self {
+                    queries: vec![query],
+                    batched: false,
+                })
+            } else if batch {
+                Err("web_search requires a non-empty 'query' or 'queries' argument".to_owned())
+            } else {
+                Err("web_search requires a non-empty 'query' argument".to_owned())
+            };
+        };
+        if !query.trim().is_empty() {
+            return Err("web_search takes either 'query' or 'queries', not both".to_owned());
+        }
+        let Some(items) = listed.as_array() else {
+            return Err("web_search 'queries' must be an array of search strings".to_owned());
+        };
+        if items.len() > MAX_BATCH_QUERIES {
+            return Err(format!(
+                "web_search takes at most {MAX_BATCH_QUERIES} queries in 'queries', and this call names {}. Split the question into at most {MAX_BATCH_QUERIES} distinct searches.",
+                items.len()
+            ));
+        }
+        // Repeats of one search are one search, so they neither spend a provider call nor count as a query.
+        let mut distinct: Vec<String> = Vec::new();
+        for item in items {
+            let Some(text) = item.as_str().map(str::trim).filter(|text| !text.is_empty()) else {
+                return Err("web_search 'queries' must hold only non-empty search strings".to_owned());
+            };
+            let key = loop_guard::normalise_query(text);
+            if !distinct
+                .iter()
+                .any(|seen| loop_guard::normalise_query(seen) == key)
+            {
+                distinct.push(text.to_owned());
+            }
+        }
+        match distinct.len() {
+            0 => Err("web_search 'queries' needs at least one search string".to_owned()),
+            1 => Ok(Self {
+                queries: distinct,
+                batched: false,
+            }),
+            _ => Ok(Self {
+                queries: distinct,
+                batched: true,
+            }),
+        }
+    }
+}
+
+/// The merged hits of a batched search: the replies' hits interleaved by rank, so each query's best hit comes
+/// before any query's second, and a page two queries both return is listed once, at its better rank. A hit with
+/// no URL is dropped, since nothing could be fetched or cited from it.
+fn merge_batched_hits(replies: &[crate::quarry::SearchReply]) -> Vec<Value> {
+    let ranked: Vec<Vec<(&str, Value)>> = replies
+        .iter()
+        .map(|reply| {
+            reply
+                .results
+                .iter()
+                .map(|result| {
+                    (
+                        result.url.as_str(),
+                        crate::quarry::web_search_item(result, reply.rerank.as_ref()),
+                    )
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    let depth = ranked.iter().map(Vec::len).max().unwrap_or(0);
+    let mut seen = BTreeSet::new();
+    let mut merged = Vec::new();
+    for rank in 0..depth {
+        for hits in &ranked {
+            let Some((url, item)) = hits.get(rank) else {
+                continue;
+            };
+            if url.trim().is_empty() || !seen.insert(canonical_url_key(url)) {
+                continue;
+            }
+            merged.push(item.clone());
+            if merged.len() == MAX_BATCH_HITS {
+                return merged;
+            }
+        }
+    }
+    merged
+}
+
+/// The searched question of a `web_search` call, for the relevance gate. A batched call's queries are read as one
+/// question, because its hits are merged; any other call's is its `query`, as it always was.
+fn searched_question(arguments_json: &str, batch: bool) -> String {
+    match SearchAsk::parse(arguments_json, batch) {
+        Ok(asks) => asks.queries.join(" "),
+        Err(_) => arg_str(arguments_json, "query"),
+    }
+}
+
+/// The page a `fetch_url` call reads: its `url`, or on a batched turn the URL behind a `ref` the turn issued. Off
+/// a batched turn `ref` is not read, and a call with no url is refused as it always was.
+fn fetch_target(call: &ToolCall, turn_refs: Option<&TurnRefs>) -> Result<String, String> {
+    let url = arg_str(&call.arguments_json, "url");
+    let Some(refs) = turn_refs else {
+        return if url.trim().is_empty() {
+            Err("fetch_url requires a 'url' argument".to_owned())
+        } else {
+            Ok(url)
+        };
+    };
+    let reference = arg_str(&call.arguments_json, "ref");
+    let reference = reference.trim();
+    match (url.trim().is_empty(), reference.is_empty()) {
+        (true, true) => Err("fetch_url requires a 'url' or a 'ref' argument".to_owned()),
+        (false, false) => Err("fetch_url takes either 'url' or 'ref', not both".to_owned()),
+        (false, true) => Ok(url),
+        (true, false) => refs.resolve(reference).ok_or_else(|| {
+            format!(
+                "fetch_url: ref '{reference}' was not issued in this conversation turn. Use a ref from a web_search result of this turn, or pass the page's url."
+            )
+        }),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Search-query normalization
 // ---------------------------------------------------------------------------
 
@@ -2526,6 +2749,8 @@ fn builtin_argument_problem(
     tool_name: &str,
     arguments_json: &str,
     conversation: &str,
+    // The turn's batched-search decision: the schema validated against is the one this turn offered.
+    batch: bool,
 ) -> Option<String> {
     // Schema validation only where we HOLD the schema (a builtin). A
     // client-declared tool is validated against nothing here on purpose —
@@ -2535,7 +2760,7 @@ fn builtin_argument_problem(
     // client-declared `shipping.get_quotes` alias, which is not a builtin, so
     // the early `?` skipped grounding too and the alias walked past the gate
     // into the real shipping executor.
-    if let Some(def) = builtin_tool_defs()
+    if let Some(def) = builtin_tool_defs_for(batch)
         .into_iter()
         .find(|def| def.name == tool_name)
     {
@@ -2584,15 +2809,36 @@ pub(crate) fn with_authorization<T>(value: T, bearer: &str) -> tonic::Request<T>
 /// `browser_agent`, `brreg_lookup_organization`) are exempt: `None` means no
 /// dedup applies, not that the call is invalid. Mirrors execution-core's
 /// `agent.rs::retrieval_signature`.
-fn duplicate_call_signature(call: &ToolCall) -> Option<String> {
+fn duplicate_call_signature(call: &ToolCall, batch: bool) -> Option<String> {
     match call.name.as_str() {
         "fetch_url" => {
             let url = arg_str(&call.arguments_json, "url");
             let url = url.trim();
-            (!url.is_empty()).then(|| format!("fetch_url|{url}"))
+            if !url.is_empty() {
+                return Some(format!("fetch_url|{url}"));
+            }
+            // A ref names one URL for the whole turn, so a repeated ref is a repeated fetch.
+            let reference = arg_str(&call.arguments_json, "ref");
+            let reference = reference.trim();
+            (batch && !reference.is_empty()).then(|| format!("fetch_url|ref|{reference}"))
         }
         "web_search" => {
-            let query = loop_guard::normalise_query(&arg_str(&call.arguments_json, "query"));
+            // The queries of a batch are one search in any order, so they are keyed as a set.
+            let asks = SearchAsk::parse(&call.arguments_json, batch).ok()?;
+            if asks.batched {
+                let mut keys: Vec<String> = asks
+                    .queries
+                    .iter()
+                    .map(|query| loop_guard::normalise_query(query))
+                    .collect();
+                keys.sort_unstable();
+                return Some(format!("web_search[]|{}", keys.join("\u{1f}")));
+            }
+            let query = asks
+                .queries
+                .first()
+                .map(|query| loop_guard::normalise_query(query))
+                .unwrap_or_default();
             (!query.is_empty()).then(|| format!("web_search|{query}"))
         }
         "knowledge_search" => {
@@ -2929,7 +3175,7 @@ pub async fn dispatch_tool(
         conversation, data_plane_bearer, execution_bearer, inference_bearer,
         session_bearer, capability_bearer, zdr, sovereign_required,
         allow_paid_providers, call, ingestion_bearer, sandbox_bearer, None,
-        data_plane_mode, &crate::turn_attachments::ValidatedAttachments::none(), &[], None, None,
+        data_plane_mode, &crate::turn_attachments::ValidatedAttachments::none(), &[], None, None, None,
     ).await
 }
 
@@ -3267,6 +3513,9 @@ async fn dispatch_tool_with_cost(
     classifier_budget: Option<&crate::semantic_screening::ClassifierBudget>,
     // The turn's connected-account selection, when the connected-app read is offered (WS23-S5).
     connector: Option<&connector_reads::ConnectorTurn>,
+    // The turn's batched-search refs: `Some` only on a chat turn with batched web search on. `None` leaves
+    // `web_search` single-query and `fetch_url` url-only, exactly as they were.
+    turn_refs: Option<&TurnRefs>,
 ) -> ToolOutcome {
     if !inline_tool_allowed(&call.name) {
         return err_outcome(
@@ -3288,7 +3537,12 @@ async fn dispatch_tool_with_cost(
     // or unusual schema, an undeclared field, or a coercion executors accept
     // anyway. So this cannot refuse a call that would have worked — which is the
     // only way a pre-dispatch check is safe to add to a live path.
-    if let Some(problem) = builtin_argument_problem(&call.name, &call.arguments_json, conversation)
+    if let Some(problem) = builtin_argument_problem(
+        &call.name,
+        &call.arguments_json,
+        conversation,
+        turn_refs.is_some(),
+    )
     {
         return err_outcome(call, problem);
     }
@@ -3631,16 +3885,15 @@ async fn dispatch_tool_with_cost(
             }
         }
         "web_search" => {
-            let query = arg_str(&call.arguments_json, "query");
-            if query.trim().is_empty() {
-                return err_outcome(call, "web_search requires a non-empty 'query' argument");
-            }
+            let asks = match SearchAsk::parse(&call.arguments_json, turn_refs.is_some()) {
+                Ok(asks) => asks,
+                Err(message) => return err_outcome(call, message),
+            };
             let intent = arg_str(&call.arguments_json, "intent");
+            let intent = intent.as_str();
             let limit = i32::try_from(arg_i64(&call.arguments_json, "limit").unwrap_or(5))
                 .unwrap_or(5)
                 .clamp(1, 50);
-            let options =
-                web_search_options(&call.arguments_json, &query, allow_paid_providers);
             // Straight to the Quarry client rather than through
             // `tools::handle_web_search_with_options`, for the same reason
             // `fetch_url` below calls `scrape_readable` directly: the proto
@@ -3650,75 +3903,118 @@ async fn dispatch_tool_with_cost(
             // below has that a hit is on topic — do not survive the projection.
             // The gRPC surface still goes through `tools.rs`; that message
             // belongs to it.
-            match state
-                .quarry
-                .search_reply(&query, limit, &intent, org_id, zdr, &options)
-                .await
-            {
-                Ok(reply) => {
-                    // Each hit carries the rerank report the edge sent for this search, so the
-                    // relevance gate can say in its coverage line what the reranker did. The keys
-                    // and the rule for omitting each one live with the projection, in
-                    // `crate::quarry::web_search_item`.
-                    let items: Vec<serde_json::Value> = reply
-                        .results
-                        .iter()
-                        .map(|r| crate::quarry::web_search_item(r, reply.rerank.as_ref()))
-                        .collect();
-                    let output = serde_json::to_string(&items).unwrap_or_else(|_| "[]".to_owned());
-                    // Untruncated: web_search returns short structured hits
-                    // (url/title/snippet), never a page body, so there is no
-                    // separate pre-truncation step to screen ahead of —
-                    // `output` here already IS the complete payload.
-                    let ExternalScreen { provenance, withheld } = assess_external_payload(
-                        state,
-                        &call.name,
-                        &output,
-                        capability_bearer,
-                        inference_bearer,
-                        org_id,
-                        user_id,
-                        run_id,
-                        // A ZDR or waived turn carries a Data Plane retention mode and sends no derived
-                        // content-safety pass to a processor.
-                        zdr || data_plane_mode.is_some(),
-                        classifier_budget,
-                    )
-                    .await;
-                    if withheld {
-                        return ToolOutcome {
-                            call_id: call.id.clone(),
-                            name: call.name.clone(),
-                            output: crate::semantic_screening::withheld_output(&call.name, &provenance, None),
-                            provenance,
-                            error: None,
-                        };
-                    }
-                    // Over the inline bound, the hits are parked whole when extended parking is
-                    // on; the handle is the model's way to read the rest by `result_query`.
-                    let output = match park_extended_result(
-                        state,
-                        org_id,
-                        user_id,
-                        external_parking_allowed(zdr || data_plane_mode.is_some()),
-                        &call.name,
-                        crate::tool_result_handles::ResultKind::Json,
-                        &output,
-                        MAX_TOOL_OUTPUT_CHARS,
-                        &provenance,
-                    ) {
-                        Some(handle) => handle.to_model_json(),
-                        None => output,
-                    };
-                    ToolOutcome {
-                        call_id: call.id.clone(),
-                        name: call.name.clone(),
-                        provenance,
-                        output,
-                        error: None,
-                    }
+            //
+            // Every query of the call runs at once, each with the turn's own options and paid-provider
+            // entitlement: a batch changes how many searches run, never what any one of them may reach.
+            let searches = futures::future::join_all(asks.queries.iter().map(|query| {
+                let options = web_search_options(&call.arguments_json, query, allow_paid_providers);
+                async move {
+                    state
+                        .quarry
+                        .search_reply(query, limit, intent, org_id, zdr, &options)
+                        .await
                 }
-                Err(e) => err_outcome(call, format!("web_search failed: {e}")),
+            }))
+            .await;
+            let mut replies = Vec::with_capacity(searches.len());
+            for (query, search) in asks.queries.iter().zip(searches) {
+                match search {
+                    Ok(reply) => replies.push(reply),
+                    // A batch that loses one query fails whole: the hits of the others would read as the answer to
+                    // a question that one of them never got to ask. The error names the query, so it can be retried.
+                    Err(e) if asks.batched => {
+                        return err_outcome(
+                            call,
+                            format!(
+                                "web_search failed for the query \"{query}\": {e}. No results were returned for this call; retry with that query, or with fewer queries."
+                            ),
+                        );
+                    }
+                    Err(e) => return err_outcome(call, format!("web_search failed: {e}")),
+                }
+            }
+            // Each hit carries the rerank report the edge sent for this search, so the
+            // relevance gate can say in its coverage line what the reranker did. The keys
+            // and the rule for omitting each one live with the projection, in
+            // `crate::quarry::web_search_item`.
+            let mut items: Vec<serde_json::Value> = if asks.batched {
+                merge_batched_hits(&replies)
+            } else {
+                replies
+                    .iter()
+                    .flat_map(|reply| {
+                        reply.results.iter().map(move |result| {
+                            crate::quarry::web_search_item(result, reply.rerank.as_ref())
+                        })
+                    })
+                    .collect()
+            };
+            // Every hit with a URL gets the turn's ref for it: the model reads the page by that ref, not by a URL
+            // it would have to retype.
+            if let Some(refs) = turn_refs {
+                for item in &mut items {
+                    let Some(url) = item
+                        .get("url")
+                        .and_then(serde_json::Value::as_str)
+                        .filter(|url| !url.trim().is_empty())
+                        .map(str::to_owned)
+                    else {
+                        continue;
+                    };
+                    item["ref"] = serde_json::Value::String(refs.issue(&url));
+                }
+            }
+            let output = serde_json::to_string(&items).unwrap_or_else(|_| "[]".to_owned());
+            // Untruncated: web_search returns short structured hits
+            // (url/title/snippet), never a page body, so there is no
+            // separate pre-truncation step to screen ahead of —
+            // `output` here already IS the complete payload. A batch is screened once, as merged, for the same reason.
+            let ExternalScreen { provenance, withheld } = assess_external_payload(
+                state,
+                &call.name,
+                &output,
+                capability_bearer,
+                inference_bearer,
+                org_id,
+                user_id,
+                run_id,
+                // A ZDR or waived turn carries a Data Plane retention mode and sends no derived
+                // content-safety pass to a processor.
+                zdr || data_plane_mode.is_some(),
+                classifier_budget,
+            )
+            .await;
+            if withheld {
+                return ToolOutcome {
+                    call_id: call.id.clone(),
+                    name: call.name.clone(),
+                    output: crate::semantic_screening::withheld_output(&call.name, &provenance, None),
+                    provenance,
+                    error: None,
+                };
+            }
+            // Over the inline bound, the hits are parked whole when extended parking is
+            // on; the handle is the model's way to read the rest by `result_query`.
+            let output = match park_extended_result(
+                state,
+                org_id,
+                user_id,
+                external_parking_allowed(zdr || data_plane_mode.is_some()),
+                &call.name,
+                crate::tool_result_handles::ResultKind::Json,
+                &output,
+                MAX_TOOL_OUTPUT_CHARS,
+                &provenance,
+            ) {
+                Some(handle) => handle.to_model_json(),
+                None => output,
+            };
+            ToolOutcome {
+                call_id: call.id.clone(),
+                name: call.name.clone(),
+                provenance,
+                output,
+                error: None,
             }
         }
         // Structured, real weather data (information-core → Yr/met.no) for a
@@ -3770,10 +4066,10 @@ async fn dispatch_tool_with_cost(
         // Read a specific web page (reuses Quarry scrape — the canonical web
         // fetch owner). Returns title + final URL + (truncated) page content.
         "fetch_url" => {
-            let url = arg_str(&call.arguments_json, "url");
-            if url.trim().is_empty() {
-                return err_outcome(call, "fetch_url requires a 'url' argument");
-            }
+            let url = match fetch_target(call, turn_refs) {
+                Ok(url) => url,
+                Err(message) => return err_outcome(call, message),
+            };
             // `scrape_readable`, not `scrape`: it resolves Quarry's
             // artifact-referenced page text and escalates once to the
             // browser driver when a plain fetch yields nothing. Deep
@@ -5401,6 +5697,8 @@ async fn dispatch_audited_tool(
     // Where each retry is announced before its attempt (WS15 S3). `None` for a caller that buffers
     // its events, and for every caller while the lifecycle switch is off.
     retry_sink: Option<&crate::sse_events::RichEventSink>,
+    // The turn's batched-search refs (see `dispatch_tool_with_cost`). `None` for every caller but the chat loop.
+    turn_refs: Option<&TurnRefs>,
 ) -> Result<ToolOutcome, &'static str> {
     if session_bearer.is_empty() {
         return Err("tool audit credential unavailable");
@@ -5466,6 +5764,7 @@ async fn dispatch_audited_tool(
             skill_mounts,
             classifier_budget,
             connector,
+            turn_refs,
         )
     });
     let outcome = until_read_deadline(call, read_deadline, attempts).await;
@@ -5596,6 +5895,8 @@ pub(crate) async fn dispatch_web_tool_audited(
         // Web tools only: the connected-app read is never reached from this path.
         None,
         // This path streams no events, so there is no stream to announce a retry on.
+        None,
+        // Deep research's searches are single queries and issue no refs: batched search is a chat-turn feature.
         None,
     )
     .await
@@ -5742,7 +6043,15 @@ pub fn history_was_compacted(messages: &[ChatMessage]) -> bool {
 
 #[must_use]
 pub fn builtin_tool_defs() -> Vec<ToolDefinition> {
-    builtin_tool_defs_with(crate::web_extraction::extract_tool_enabled())
+    builtin_tool_defs_for(web_search_batch_enabled())
+}
+
+/// [`builtin_tool_defs`] for a turn that does or does not run batched web search. The argument check reads the
+/// schema of the turn that made the call, so a batched call is not refused for lacking a `query`.
+fn builtin_tool_defs_for(batch: bool) -> Vec<ToolDefinition> {
+    let mut defs = builtin_tool_defs_with(crate::web_extraction::extract_tool_enabled());
+    advertise_batched_search(&mut defs, batch);
+    defs
 }
 
 /// [`builtin_tool_defs`] with the Model-proposed extraction tool (WS16.S8) decided by the caller, so a
@@ -5929,6 +6238,31 @@ fn advertise_text_range(defs: &mut [ToolDefinition], enabled: bool) {
             r#"{"type":"object","properties":{"range":{"type":"object","description":"For a parked text result, such as a fetched page: the window to read, as offset and length in characters. At most 4000 characters a read. Omit to read from the start.","properties":{"offset":{"type":"integer"},"length":{"type":"integer"}}},"#,
             1,
         );
+    }
+}
+
+/// Advertises batched `web_search` (`queries` beside `query`, and a ref on each hit) and `fetch_url` taking a
+/// `ref` in place of its `url`, only on a batched turn. Off, the list is exactly what it was.
+fn advertise_batched_search(defs: &mut [ToolDefinition], enabled: bool) {
+    if !enabled {
+        return;
+    }
+    for def in defs.iter_mut() {
+        match def.name.as_str() {
+            "web_search" => {
+                def.description.push_str(
+                    " Pass queries (up to 4 distinct searches) instead of query only when the question has distinct parts: they run together and come back as one list. Each result has a ref such as w2; to read that page, pass the ref to fetch_url and do not retype its URL.",
+                );
+                def.parameters_json = r#"{"type":"object","properties":{"query":{"type":"string","description":"One search query. Use queries instead when you have several."},"queries":{"type":"array","items":{"type":"string"},"minItems":1,"maxItems":4,"description":"Up to 4 distinct search queries, run together. Use only when the question has distinct parts."},"limit":{"type":"integer","description":"Max results 1-50 for each query"}}}"#.to_owned();
+            }
+            "fetch_url" => {
+                def.description.push_str(
+                    " Pass the ref of a web_search result from this turn, such as w2, instead of its url.",
+                );
+                def.parameters_json = r#"{"type":"object","properties":{"url":{"type":"string","description":"Absolute http(s) URL to read"},"ref":{"type":"string","description":"The ref of a web_search result from this turn, such as w2, instead of a url"}}}"#.to_owned();
+            }
+            _ => {}
+        }
     }
 }
 
@@ -6878,6 +7212,8 @@ pub async fn run_forced_web_search_for_model(
         None,
         // The forced search announces no retry: WS15 S3 wires the chat tool loop only.
         None,
+        // A forced search runs before the turn's tool loop and issues no refs: batched search is a loop feature.
+        None,
     )
     .await?;
     // Gate BEFORE anything is emitted: the citations are built from the surviving
@@ -7008,6 +7344,9 @@ struct WebSearchHit {
     /// Empty on every deployment until Quarry populates `SearchResult::engines`;
     /// [`relevance::assess_with_signals`] scores an empty list as no signal.
     engines: Vec<String>,
+    /// The ref this turn issued for the hit (`w{n}`), when batched search is on. The gated text shows it beside
+    /// the hit so `fetch_url` can read the page by ref; `None` otherwise.
+    reference: Option<String>,
 }
 
 /// Whether one `name=value` pair is a tracking parameter.
@@ -7152,6 +7491,12 @@ fn parse_web_search_hits(outcome: &ToolOutcome) -> Option<Vec<WebSearchHit>> {
                         .filter(|score| score.is_finite()),
                     highlights: string_list(item, "highlights"),
                     engines: string_list(item, "engines"),
+                    reference: item
+                        .get("ref")
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .filter(|reference| !reference.is_empty())
+                        .map(ToOwned::to_owned),
                 })
             })
             .collect(),
@@ -7363,6 +7708,13 @@ fn rerank_report_of(outcome: &ToolOutcome) -> Option<(String, Option<String>)> {
     Some((status, reason))
 }
 
+/// The ref a hit shows in the gated text, `[w2] `, or nothing when the hit has none.
+fn reference_label(hit: &WebSearchHit) -> String {
+    hit.reference
+        .as_deref()
+        .map_or_else(String::new, |reference| format!("[{reference}] "))
+}
+
 /// Rewrite a gated result set into the text the model reads.
 ///
 /// Filtering has to be VISIBLE. A silently shortened result list makes the model
@@ -7429,13 +7781,21 @@ fn gated_web_search_output(
              read the page, and prefer the read pages when they and a snippet disagree."
         );
     }
+    // Said only when a hit carries a ref, so the text of a turn without batched search is unchanged.
+    if hits.iter().any(|hit| hit.reference.is_some()) {
+        let _ = writeln!(
+            out,
+            "Each hit shows its ref in brackets, such as [w2]. To read a hit's page, pass its ref to fetch_url instead of retyping the URL.\n"
+        );
+    }
     let _ = writeln!(out, "KEPT ({citable_count}, citable):");
     for (rank, index) in citable.iter().enumerate() {
         if let (Some(hit), Some(verdict)) = (hits.get(*index), verdicts.get(*index)) {
             let _ = writeln!(
                 out,
-                "{}. {} — {} (relevance {:.2}){}\n   {}",
+                "{}. {}{} — {} (relevance {:.2}){}\n   {}",
                 rank + 1,
+                reference_label(hit),
                 hit.title,
                 hit.url,
                 verdict.score,
@@ -7454,7 +7814,8 @@ fn gated_web_search_output(
             if let Some(hit) = hits.get(*index) {
                 let _ = writeln!(
                     out,
-                    "- {} — {}{} — {reason}",
+                    "- {}{} — {}{} — {reason}",
+                    reference_label(hit),
                     hit.title,
                     hit.url,
                     grounding_label(grounded.get(index))
@@ -8143,6 +8504,9 @@ pub async fn run_tool_rounds_for_model_with_attachments(
     // property of the turn, and a value re-derived per round is a value that can
     // disagree with itself mid-turn.
     let allow_paid_providers = paid_providers_allowed(requested_model, zdr);
+    // Batched web search is decided once for the turn, so every call of the turn agrees, and its refs live only in
+    // this map, dropped with the turn. `None` (the switch off) leaves every web-search path as it was.
+    let turn_refs = web_search_batch_enabled().then(TurnRefs::default);
     // The turn's `/skills` mounts, read once for the turn (WS19-S8). The model names none of them.
     let skill_mounts =
         skill_mounts_for_turn(state, request_id, org_id, user_id, capability_bearer, zdr).await;
@@ -9007,7 +9371,7 @@ pub async fn run_tool_rounds_for_model_with_attachments(
             // arguments are an accident of where the ceiling fell, and letting
             // them into the signature set could suppress the model's retry.
             let is_duplicate = !is_truncated
-                && duplicate_call_signature(call)
+                && duplicate_call_signature(call, turn_refs.is_some())
                     .is_some_and(|signature| !attempted_calls.insert(signature));
             prepared.push((call, is_duplicate, is_truncated));
         }
@@ -9027,6 +9391,8 @@ pub async fn run_tool_rounds_for_model_with_attachments(
         let dispatch_started = timing.map(crate::turn_timing::TurnTiming::now_ms);
         // A shared reference, so each per-call future copies it rather than moving the turn's value.
         let data_plane_mode_ref = &data_plane_mode;
+        // The turn's batched-search refs, shared the same way.
+        let turn_refs_ref = turn_refs.as_ref();
         // The same, for the turn's classifier budget: each per-call future copies the reference.
         let classifier_budget_ref = &classifier_budget;
         // The same, for the turn's skill mounts: each per-call future copies the reference.
@@ -9090,6 +9456,7 @@ pub async fn run_tool_rounds_for_model_with_attachments(
                     Some(classifier_budget_ref),
                     connector_turn,
                     retry_sink,
+                    turn_refs_ref,
                 )
                 .await
             },
@@ -9163,7 +9530,7 @@ pub async fn run_tool_rounds_for_model_with_attachments(
                     .tool_calls
                     .iter()
                     .find(|candidate| candidate.id == outcome.call_id)
-                    .map(|candidate| arg_str(&candidate.arguments_json, "query"))
+                    .map(|candidate| searched_question(&candidate.arguments_json, turn_refs.is_some()))
                     .unwrap_or_default();
                 // Grounded on the same terms as the forced path: the tier is
                 // the one the USER asked for, never `model` — that is the
@@ -12226,20 +12593,20 @@ mod tests {
 
     #[test]
     fn duplicate_signature_catches_exact_repeat_fetch_url() {
-        let first = duplicate_call_signature(&tool_call(
-            "fetch_url",
-            r#"{"url":"https://coresystem.no"}"#,
-        ))
+        let first = duplicate_call_signature(
+            &tool_call("fetch_url", r#"{"url":"https://coresystem.no"}"#),
+            false,
+        )
         .expect("fetch_url signature");
-        let same = duplicate_call_signature(&tool_call(
-            "fetch_url",
-            r#"{"url":"https://coresystem.no"}"#,
-        ))
+        let same = duplicate_call_signature(
+            &tool_call("fetch_url", r#"{"url":"https://coresystem.no"}"#),
+            false,
+        )
         .expect("fetch_url signature");
-        let different = duplicate_call_signature(&tool_call(
-            "fetch_url",
-            r#"{"url":"https://coresystem.no/about"}"#,
-        ))
+        let different = duplicate_call_signature(
+            &tool_call("fetch_url", r#"{"url":"https://coresystem.no/about"}"#),
+            false,
+        )
         .expect("fetch_url signature");
         assert_eq!(first, same);
         assert_ne!(first, different);
@@ -12247,28 +12614,36 @@ mod tests {
 
     #[test]
     fn duplicate_signature_web_search_is_case_and_whitespace_insensitive() {
-        let first = duplicate_call_signature(&tool_call(
-            "web_search",
-            r#"{"query":"  Coresystem   AS "}"#,
-        ))
+        let first = duplicate_call_signature(
+            &tool_call("web_search", r#"{"query":"  Coresystem   AS "}"#),
+            false,
+        )
         .expect("web_search signature");
-        let same =
-            duplicate_call_signature(&tool_call("web_search", r#"{"query":"coresystem as"}"#))
-                .expect("web_search signature");
+        let same = duplicate_call_signature(
+            &tool_call("web_search", r#"{"query":"coresystem as"}"#),
+            false,
+        )
+        .expect("web_search signature");
         assert_eq!(first, same);
     }
 
     #[test]
     fn duplicate_signature_does_not_apply_to_stateful_or_side_effecting_tools() {
-        assert!(
-            duplicate_call_signature(&tool_call("browser_agent", r#"{"objective":"x"}"#)).is_none()
-        );
-        assert!(
-            duplicate_call_signature(&tool_call("recall_memory", r#"{"query":"x"}"#)).is_none()
-        );
-        assert!(
-            duplicate_call_signature(&tool_call("save_memory", r#"{"content":"x"}"#)).is_none()
-        );
+        assert!(duplicate_call_signature(
+            &tool_call("browser_agent", r#"{"objective":"x"}"#),
+            false
+        )
+        .is_none());
+        assert!(duplicate_call_signature(
+            &tool_call("recall_memory", r#"{"query":"x"}"#),
+            false
+        )
+        .is_none());
+        assert!(duplicate_call_signature(
+            &tool_call("save_memory", r#"{"content":"x"}"#),
+            false
+        )
+        .is_none());
     }
 
     #[test]
@@ -14224,6 +14599,7 @@ mod tests {
             provider_score: None,
             highlights: Vec::new(),
             engines: Vec::new(),
+            reference: None,
         };
         let hits = vec![
             hit("https://example.com/alpha", "Alpha"),
@@ -15285,6 +15661,7 @@ mod tests {
             provider_score: None,
             highlights: Vec::new(),
             engines: Vec::new(),
+            reference: None,
         };
         let at_floor = [hit("x".repeat(MIN_CITABLE_SNIPPET_CHARS))];
         let under = [hit("x".repeat(MIN_CITABLE_SNIPPET_CHARS - 1))];
@@ -15661,7 +16038,7 @@ mod tests {
         for def in builtin_tool_defs() {
             let args = minimal_valid_arguments(&def.parameters_json);
             assert!(
-                builtin_argument_problem(&def.name, &args, "").is_none(),
+                builtin_argument_problem(&def.name, &args, "", false).is_none(),
                 "'{}' rejects its own minimally valid arguments {args} — a false positive here \
                  breaks a working tool",
                 def.name
@@ -15684,6 +16061,7 @@ mod tests {
             "shipping.get_quotes",
             fabricated,
             "hva vil det koste å sende 3 kg fra Bergen til Stavanger?",
+            false,
         )
         .expect("invented postal codes and dimensions must be refused on the alias too");
         assert!(problem.contains("appear nowhere in this conversation"));
@@ -15698,6 +16076,7 @@ mod tests {
             grounded,
             "compare shipping prices for a 5 kg parcel, 30x20x15 cm, from Storgata 1, \
              0155 Oslo to Kongens gate 2, 7011 Trondheim",
+            false,
         )
         .is_none());
     }
@@ -15731,12 +16110,13 @@ mod tests {
         assert!(builtin_argument_problem(
             "knowledge_search",
             r#"{"query":"x","some_future_field":true}"#,
-            ""
+            "",
+            false
         )
         .is_none());
         // A tool we hold no schema for — a client-declared or MCP tool. Guessing
         // against a schema we do not have would be worse than not checking.
-        assert!(builtin_argument_problem("mcp__acme__do_thing", "{}", "").is_none());
+        assert!(builtin_argument_problem("mcp__acme__do_thing", "{}", "", false).is_none());
     }
 
     /// The asymmetry that makes the fail-open posture coherent, and which I got
@@ -15747,7 +16127,7 @@ mod tests {
     /// as a missing field, which is what treating bad JSON as `{}` would do.
     #[test]
     fn unparseable_arguments_are_named_as_such_not_reported_as_a_missing_field() {
-        let problem = builtin_argument_problem("knowledge_search", "{not json", "")
+        let problem = builtin_argument_problem("knowledge_search", "{not json", "", false)
             .expect("malformed arguments are unambiguously wrong");
         assert!(
             problem.contains("did not parse"),
@@ -15765,7 +16145,7 @@ mod tests {
     /// the schema or the model can only guess again.
     #[tokio::test]
     async fn a_missing_required_argument_is_refused_before_dispatch_with_the_schema() {
-        let problem = builtin_argument_problem("knowledge_search", "{}", "")
+        let problem = builtin_argument_problem("knowledge_search", "{}", "", false)
             .expect("knowledge_search requires 'query'");
         assert!(
             problem.contains("query"),
@@ -16094,6 +16474,492 @@ mod tests {
         )
         .expect("row query");
         assert_eq!(slice["matched_rows"], 1);
+    }
+
+    /// The batched-search switch is read as the literal `true` and nothing else, as every new switch is.
+    #[test]
+    fn batched_search_switch_reads_only_the_literal_true() {
+        assert_eq!(WEB_SEARCH_BATCH_ENV, "MODEL_GATEWAY_WEB_SEARCH_BATCH");
+        assert!(parse_web_search_batch(Some("true")));
+        assert!(parse_web_search_batch(Some(" true ")));
+        for off in [
+            None,
+            Some(""),
+            Some("1"),
+            Some("on"),
+            Some("yes"),
+            Some("TRUE"),
+            Some("false"),
+        ] {
+            assert!(
+                !parse_web_search_batch(off),
+                "{off:?} must not enable batched search"
+            );
+        }
+    }
+
+    /// A batched call names its searches in `queries`, and only a batched turn reads `queries`.
+    #[test]
+    fn batched_search_reads_queries_only_on_a_batched_turn() {
+        let batched = r#"{"queries":["strømpris Oslo","elpris Norge"]}"#;
+        let asks = SearchAsk::parse(batched, true).expect("two distinct queries");
+        assert!(asks.batched);
+        assert_eq!(asks.queries, ["strømpris Oslo", "elpris Norge"]);
+        assert_eq!(
+            SearchAsk::parse(batched, false).err().as_deref(),
+            Some("web_search requires a non-empty 'query' argument"),
+        );
+        let single = SearchAsk::parse(r#"{"query":"strømpris"}"#, true).expect("one query");
+        assert!(!single.batched);
+        assert_eq!(single.queries, ["strømpris"]);
+    }
+
+    /// Five queries, both forms at once and an empty list are refused with a reason; repeats of one search are
+    /// one search, and neither spend a provider call nor count toward the limit.
+    #[test]
+    fn batched_search_refuses_five_queries_both_forms_and_an_empty_list() {
+        let five = r#"{"queries":["a one","b two","c three","d four","e five"]}"#;
+        let refusal = SearchAsk::parse(five, true)
+            .err()
+            .expect("five queries are refused");
+        assert!(refusal.contains("at most 4 queries"), "{refusal}");
+        let both = SearchAsk::parse(r#"{"query":"a one","queries":["b two"]}"#, true)
+            .err()
+            .expect("both forms are refused");
+        assert!(both.contains("not both"), "{both}");
+        assert!(SearchAsk::parse(r#"{"queries":[]}"#, true).is_err());
+        assert!(SearchAsk::parse(r#"{"queries":["a one",""]}"#, true).is_err());
+        assert!(SearchAsk::parse(r#"{"queries":"a one"}"#, true).is_err());
+        let repeats = SearchAsk::parse(r#"{"queries":["Oslo  vær","oslo vær","OSLO vær"]}"#, true)
+            .expect("one distinct search");
+        assert!(!repeats.batched);
+        assert_eq!(repeats.queries, ["Oslo  vær"]);
+    }
+
+    /// A ref names one URL for the turn that issued it, a page keeps its ref across searches, and a ref the turn
+    /// did not issue, or a respelled one, names nothing.
+    #[test]
+    fn batched_search_refs_name_one_url_per_turn_and_resolve_only_there() {
+        let refs = TurnRefs::default();
+        assert_eq!(refs.issue("https://a.test/page"), "w1");
+        assert_eq!(refs.issue("https://b.test/other"), "w2");
+        // The same page, respelled, keeps its ref: it is not issued twice.
+        assert_eq!(refs.issue("http://www.a.test/page/?utm_source=x"), "w1");
+        assert_eq!(refs.resolve("w1").as_deref(), Some("https://a.test/page"));
+        assert_eq!(refs.resolve("w2").as_deref(), Some("https://b.test/other"));
+        assert_eq!(refs.resolve("w3"), None);
+        assert_eq!(refs.resolve("w0"), None);
+        assert_eq!(refs.resolve("w02"), None);
+        assert_eq!(refs.resolve("https://a.test/page"), None);
+        assert_eq!(TurnRefs::default().resolve("w1"), None, "another turn starts from nothing");
+    }
+
+    /// `fetch_url` takes a `ref` only on a batched turn, reads the URL the ref names, and refuses one the turn
+    /// did not issue.
+    #[test]
+    fn batched_search_fetch_takes_a_ref_only_on_a_batched_turn() {
+        let refs = TurnRefs::default();
+        let issued = refs.issue("https://one.test/a");
+        let by_ref = tool_call("fetch_url", &format!(r#"{{"ref":"{issued}"}}"#));
+        assert_eq!(
+            fetch_target(&by_ref, Some(&refs)),
+            Ok("https://one.test/a".to_owned())
+        );
+        // Off the batched turn `ref` is not read, so the call has no url, as it always had.
+        assert_eq!(
+            fetch_target(&by_ref, None),
+            Err("fetch_url requires a 'url' argument".to_owned())
+        );
+        let unissued = tool_call("fetch_url", r#"{"ref":"w9"}"#);
+        let refusal = fetch_target(&unissued, Some(&refs)).expect_err("an unissued ref is refused");
+        assert!(refusal.contains("was not issued"), "{refusal}");
+        let both = tool_call(
+            "fetch_url",
+            &format!(r#"{{"url":"https://one.test/a","ref":"{issued}"}}"#),
+        );
+        assert!(fetch_target(&both, Some(&refs)).is_err(), "a url and a ref are one choice");
+        let plain = tool_call("fetch_url", r#"{"url":"https://one.test/a"}"#);
+        assert_eq!(
+            fetch_target(&plain, Some(&refs)),
+            Ok("https://one.test/a".to_owned())
+        );
+    }
+
+    /// One call through the real dispatch. The turn's refs decide whether batched search is on for it.
+    async fn dispatch_with_refs(
+        state: &crate::state::AppState,
+        call: &ToolCall,
+        refs: Option<&TurnRefs>,
+        allow_paid: bool,
+    ) -> ToolOutcome {
+        dispatch_tool_with_cost(
+            state,
+            "run_test",
+            "org_test",
+            "user_test",
+            "thread_test",
+            "",
+            &[],
+            "",
+            None,
+            None,
+            "",
+            "",
+            None,
+            false,
+            false,
+            allow_paid,
+            call,
+            None,
+            None,
+            None,
+            None,
+            &crate::turn_attachments::ValidatedAttachments::none(),
+            &[],
+            None,
+            None,
+            refs,
+        )
+        .await
+    }
+
+    /// A `web_search` call through the real dispatch, against a Quarry double that answers each query with its own
+    /// results. Returns the outcome and every `/v1/search` body the double received.
+    async fn search_against_quarry(
+        arguments_json: &str,
+        answers: &[(&str, Value)],
+        refs: Option<&TurnRefs>,
+        allow_paid: bool,
+    ) -> (ToolOutcome, Vec<Value>) {
+        let server = wiremock::MockServer::start().await;
+        for (query, results) in answers {
+            wiremock::Mock::given(wiremock::matchers::method("POST"))
+                .and(wiremock::matchers::path("/v1/search"))
+                .and(wiremock::matchers::body_partial_json(
+                    serde_json::json!({ "query": query }),
+                ))
+                .respond_with(
+                    wiremock::ResponseTemplate::new(200)
+                        .set_body_json(serde_json::json!({ "results": results })),
+                )
+                .mount(&server)
+                .await;
+        }
+        let mut state = crate::state::AppState::new();
+        state.quarry = crate::quarry::Client::new(crate::quarry::Config {
+            base_url: server.uri(),
+            token: "test-token".to_owned(),
+            timeout: std::time::Duration::from_secs(5),
+        });
+        let call = tool_call("web_search", arguments_json);
+        let outcome = dispatch_with_refs(&state, &call, refs, allow_paid).await;
+        let bodies: Vec<Value> = server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .iter()
+            .map(|request| serde_json::from_slice(&request.body).expect("a JSON search body"))
+            .collect();
+        (outcome, bodies)
+    }
+
+    /// Every query of a batched call is searched with the turn's own paid-provider entitlement, and no other.
+    #[tokio::test]
+    async fn batched_search_gives_every_query_the_turns_paid_entitlement() {
+        for allow_paid in [false, true] {
+            let refs = TurnRefs::default();
+            let (outcome, bodies) = search_against_quarry(
+                r#"{"queries":["alpha query","beta query"]}"#,
+                &[
+                    ("alpha query", serde_json::json!([])),
+                    ("beta query", serde_json::json!([])),
+                ],
+                Some(&refs),
+                allow_paid,
+            )
+            .await;
+            assert!(outcome.error.is_none(), "{:?}", outcome.error);
+            assert_eq!(bodies.len(), 2, "one search per query");
+            for body in &bodies {
+                assert_eq!(
+                    body["allow_paid_providers"],
+                    Value::Bool(allow_paid),
+                    "{body}"
+                );
+            }
+        }
+    }
+
+    /// A batched call's hits come back interleaved by rank, a page two queries both return is listed once at its
+    /// better rank, and each hit carries the ref the turn issued for it.
+    #[tokio::test]
+    async fn batched_search_merges_interleaves_and_refs_the_hits() {
+        let refs = TurnRefs::default();
+        let (outcome, _) = search_against_quarry(
+            r#"{"queries":["alpha query","beta query"]}"#,
+            &[
+                (
+                    "alpha query",
+                    serde_json::json!([
+                        {"url": "https://one.test/a", "title": "A"},
+                        {"url": "https://one.test/b", "title": "B"}
+                    ]),
+                ),
+                (
+                    "beta query",
+                    serde_json::json!([
+                        {"url": "https://one.test/a?utm_source=beta", "title": "A again"},
+                        {"url": "https://two.test/c", "title": "C"}
+                    ]),
+                ),
+            ],
+            Some(&refs),
+            false,
+        )
+        .await;
+        assert!(outcome.error.is_none(), "{:?}", outcome.error);
+        let items: Vec<Value> = serde_json::from_str(&outcome.output).expect("the merged hits");
+        let shown: Vec<(&str, &str)> = items
+            .iter()
+            .map(|item| {
+                (
+                    item["url"].as_str().unwrap_or_default(),
+                    item["ref"].as_str().unwrap_or_default(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            shown,
+            [
+                ("https://one.test/a", "w1"),
+                ("https://one.test/b", "w2"),
+                ("https://two.test/c", "w3"),
+            ]
+        );
+    }
+
+    /// Four queries merge to at most eight hits: the first round of every query, then the second.
+    #[tokio::test]
+    async fn batched_search_caps_the_merged_list_at_eight_hits() {
+        let refs = TurnRefs::default();
+        let hits = |host: &str| {
+            serde_json::json!([
+                {"url": format!("https://{host}.test/1")},
+                {"url": format!("https://{host}.test/2")},
+                {"url": format!("https://{host}.test/3")}
+            ])
+        };
+        let (outcome, _) = search_against_quarry(
+            r#"{"queries":["q one","q two","q three","q four"]}"#,
+            &[
+                ("q one", hits("one")),
+                ("q two", hits("two")),
+                ("q three", hits("three")),
+                ("q four", hits("four")),
+            ],
+            Some(&refs),
+            false,
+        )
+        .await;
+        assert!(outcome.error.is_none(), "{:?}", outcome.error);
+        let items: Vec<Value> = serde_json::from_str(&outcome.output).expect("the merged hits");
+        let urls: Vec<&str> = items
+            .iter()
+            .map(|item| item["url"].as_str().unwrap_or_default())
+            .collect();
+        assert_eq!(urls.len(), 8, "{urls:?}");
+        assert_eq!(urls[0], "https://one.test/1");
+        assert_eq!(urls[3], "https://four.test/1");
+        assert_eq!(urls[4], "https://one.test/2");
+        assert_eq!(items[7]["ref"], "w8");
+    }
+
+    /// A batch that loses one of its queries fails whole, and the error names the query that failed.
+    #[tokio::test]
+    async fn batched_search_fails_whole_when_one_query_fails() {
+        let refs = TurnRefs::default();
+        let (outcome, _) = search_against_quarry(
+            r#"{"queries":["alpha query","gamma query"]}"#,
+            &[(
+                "alpha query",
+                serde_json::json!([{"url": "https://one.test/a"}]),
+            )],
+            Some(&refs),
+            false,
+        )
+        .await;
+        let error = outcome.error.expect("a batch that loses a query fails");
+        assert!(error.contains("gamma query"), "{error}");
+        assert!(outcome.output.is_empty());
+    }
+
+    /// Off the batched turn one query is one search, its hits come back as they came, and none carries a ref.
+    #[tokio::test]
+    async fn batched_search_off_turn_returns_one_query_hits_without_refs() {
+        let (outcome, bodies) = search_against_quarry(
+            r#"{"query":"alpha query"}"#,
+            &[(
+                "alpha query",
+                serde_json::json!([{"url": "https://one.test/a", "title": "A"}]),
+            )],
+            None,
+            false,
+        )
+        .await;
+        assert!(outcome.error.is_none(), "{:?}", outcome.error);
+        assert_eq!(bodies.len(), 1);
+        let items: Vec<Value> = serde_json::from_str(&outcome.output).expect("the hits");
+        assert_eq!(items.len(), 1);
+        assert!(items[0].get("ref").is_none(), "{}", outcome.output);
+    }
+
+    /// A ref this turn did not issue is refused before anything is fetched. A ref it did issue is read by URL,
+    /// which this test does not reach (no Quarry is configured here), so its error is the fetch's, not the ref's.
+    #[tokio::test]
+    async fn batched_search_fetch_refuses_an_unissued_ref_before_any_fetch() {
+        let state = crate::state::AppState::new();
+        let refs = TurnRefs::default();
+        let issued = refs.issue("https://one.test/a");
+        let unissued = tool_call("fetch_url", r#"{"ref":"w9"}"#);
+        let outcome = dispatch_with_refs(&state, &unissued, Some(&refs), false).await;
+        let error = outcome.error.expect("an unissued ref is an error");
+        assert!(error.contains("was not issued"), "{error}");
+        let issued_call = tool_call("fetch_url", &format!(r#"{{"ref":"{issued}"}}"#));
+        let outcome = dispatch_with_refs(&state, &issued_call, Some(&refs), false).await;
+        assert!(!outcome.error.unwrap_or_default().contains("was not issued"));
+    }
+
+    /// The batched definitions are advertised only on a batched turn; the list off it is the list that always was.
+    #[test]
+    fn batched_search_schema_is_advertised_only_on_a_batched_turn() {
+        let off = builtin_tool_defs_for(false);
+        let on = builtin_tool_defs_for(true);
+        let find = |defs: &[ToolDefinition], name: &str| -> ToolDefinition {
+            defs.iter()
+                .find(|def| def.name == name)
+                .cloned()
+                .expect("advertised")
+        };
+        let search_off = find(&off, "web_search");
+        let search_off_schema: Value =
+            serde_json::from_str(&search_off.parameters_json).expect("json");
+        assert_eq!(search_off_schema["required"], serde_json::json!(["query"]));
+        assert!(search_off_schema["properties"].get("queries").is_none());
+        let search_on = find(&on, "web_search");
+        let search_on_schema: Value =
+            serde_json::from_str(&search_on.parameters_json).expect("json");
+        assert!(
+            search_on_schema.get("required").is_none(),
+            "a query or queries is required, not both"
+        );
+        assert_eq!(
+            search_on_schema["properties"]["queries"]["maxItems"],
+            serde_json::json!(4)
+        );
+        assert!(
+            search_on.description.contains("ref"),
+            "the rule for refs is in the description"
+        );
+        let fetch_on = find(&on, "fetch_url");
+        let fetch_on_schema: Value = serde_json::from_str(&fetch_on.parameters_json).expect("json");
+        assert!(
+            fetch_on_schema.get("required").is_none(),
+            "a url or a ref is required"
+        );
+        assert!(fetch_on_schema["properties"].get("ref").is_some());
+        for (before, after) in off.iter().zip(on.iter()) {
+            if before.name != "web_search" && before.name != "fetch_url" {
+                assert_eq!(
+                    before.parameters_json, after.parameters_json,
+                    "{} is untouched",
+                    before.name
+                );
+            }
+        }
+    }
+
+    /// A batch is one search however its queries are ordered or spelled; a ref repeats a fetch on a batched turn
+    /// only.
+    #[test]
+    fn batched_search_signature_keys_a_batch_as_a_set_of_queries() {
+        let batch =
+            |arguments: &str| duplicate_call_signature(&tool_call("web_search", arguments), true);
+        assert_eq!(
+            batch(r#"{"queries":["a one","b two"]}"#),
+            batch(r#"{"queries":["B two","a  one"]}"#),
+        );
+        assert_ne!(
+            batch(r#"{"queries":["a one","b two"]}"#),
+            batch(r#"{"queries":["a one"]}"#)
+        );
+        assert_eq!(
+            batch(r#"{"queries":["a one"]}"#),
+            duplicate_call_signature(&tool_call("web_search", r#"{"query":"a one"}"#), false),
+        );
+        assert!(duplicate_call_signature(
+            &tool_call("web_search", r#"{"queries":["a one","b two"]}"#),
+            false
+        )
+        .is_none());
+        assert!(duplicate_call_signature(&tool_call("fetch_url", r#"{"ref":"w1"}"#), false).is_none());
+        assert_eq!(
+            duplicate_call_signature(&tool_call("fetch_url", r#"{"ref":"w1"}"#), true).as_deref(),
+            Some("fetch_url|ref|w1"),
+        );
+    }
+
+    /// The relevance gate judges a batch against its queries read as one question; a plain call keeps its query.
+    #[test]
+    fn batched_search_gate_reads_the_queries_as_one_question() {
+        let batched = r#"{"queries":["strømpris Oslo","elpris Norge"]}"#;
+        assert_eq!(
+            searched_question(batched, true),
+            "strømpris Oslo elpris Norge"
+        );
+        assert_eq!(searched_question(batched, false), "");
+        assert_eq!(
+            searched_question(r#"{"query":"strømpris"}"#, false),
+            "strømpris"
+        );
+    }
+
+    /// The gated text names each kept hit's ref and says so once. With no refs the text has neither.
+    #[test]
+    fn batched_search_gated_text_shows_refs_only_when_issued() {
+        let hit = |url: &str, title: &str, reference: Option<&str>| {
+            let mut item = serde_json::json!({
+                "url": url,
+                "title": title,
+                "snippet": format!("{title} i dag: pris per kWh og nettleie, {}", "x".repeat(160)),
+            });
+            if let Some(reference) = reference {
+                item["ref"] = Value::String(reference.to_owned());
+            }
+            item
+        };
+        let gate = |items: Value| {
+            let mut outcome = outcome_for("web_search", items.to_string());
+            let _ = gate_web_search_outcome("strømpris Oslo elpris Norge", &mut outcome);
+            outcome.output
+        };
+        let with_refs = gate(serde_json::json!([
+            hit("https://one.test/a", "Strømpris Oslo", Some("w1")),
+            hit("https://two.test/b", "Elpris Norge", Some("w2")),
+        ]));
+        assert!(with_refs.contains("Each hit shows its ref"), "{with_refs}");
+        assert!(
+            with_refs.contains("[w1] ") || with_refs.contains("[w2] "),
+            "{with_refs}"
+        );
+        let without_refs = gate(serde_json::json!([
+            hit("https://one.test/a", "Strømpris Oslo", None),
+            hit("https://two.test/b", "Elpris Norge", None),
+        ]));
+        assert!(
+            !without_refs.contains("Each hit shows its ref"),
+            "{without_refs}"
+        );
+        assert!(!without_refs.contains("[w"), "{without_refs}");
     }
 
     #[test]
