@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -16,25 +17,43 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/triodelab/quarry-v2/pkg/quarrycontracts"
+	"github.com/triodelab/quarry-v2/services/quarry-control/internal/audit"
 	"github.com/triodelab/quarry-v2/services/quarry-control/internal/httpx"
 	"github.com/triodelab/quarry-v2/services/quarry-control/internal/notify"
 	"github.com/triodelab/quarry-v2/services/quarry-control/internal/store"
 )
 
 // JobsOption customises MountJobs.
-type JobsOption func(*Admission)
+type JobsOption func(*jobsConfig)
+
+// jobsConfig is what the JobsOptions set. The zero value is the behaviour
+// before either option existed, except that a job asking to ignore robots.txt
+// is refused (no audit sink, no override).
+type jobsConfig struct {
+	adm         Admission
+	robotsAudit RobotsAuditor
+}
 
 // WithAdmission enables the job-admission policy (per-organization caps, a
 // bounded backlog, the claim endpoint). Without it control behaves as before.
 func WithAdmission(a Admission) JobsOption {
-	return func(into *Admission) { *into = a }
+	return func(into *jobsConfig) { into.adm = a }
+}
+
+// WithRobotsAudit gives POST /v1/jobs the audit sink that a robots.txt
+// override must be written to before the job exists (WS14.S7b). Without it, or
+// with a nil sink, every job that asks to ignore robots.txt answers 503 and
+// nothing is stored; every other job is unaffected.
+func WithRobotsAudit(a RobotsAuditor) JobsOption {
+	return func(into *jobsConfig) { into.robotsAudit = a }
 }
 
 func MountJobs(r chi.Router, db store.DB, opts ...JobsOption) {
-	var adm Admission
+	var cfg jobsConfig
 	for _, opt := range opts {
-		opt(&adm)
+		opt(&cfg)
 	}
+	adm := cfg.adm
 	// Dispatcher-only: take leased work instead of reading a window. Mounted
 	// under the same HMAC group as every other /v1 route; 404 while admission is
 	// off so a newer dispatcher falls back to listing.
@@ -47,7 +66,7 @@ func MountJobs(r chi.Router, db store.DB, opts ...JobsOption) {
 	r.Post("/v1/internal/jobs/{id}/finalize", finalizeJob(db))
 	r.Route("/v1/jobs", func(r chi.Router) {
 		r.Get("/", listJobs(db))
-		r.Post("/", createJob(db, adm))
+		r.Post("/", createJob(db, adm, cfg.robotsAudit))
 		r.Get("/{id}", getJob(db))
 		r.Put("/{id}", updateJob(db))
 		r.Get("/{id}/events", jobEvents(db))
@@ -340,7 +359,12 @@ func listJobs(db store.DB) http.HandlerFunc {
 // `?org_id` query param (never the request body) and stamped onto the
 // job — mirrors createSourceHandler's guard, which rejects an empty org
 // rather than let a job land unattributed to any tenant.
-func createJob(db store.DB, adm Admission) http.HandlerFunc {
+//
+// WS14.S7b: a job whose params ask to ignore robots.txt is audited
+// (crawl.robots_ignored) BEFORE it is stored and acknowledged. No audit row, no
+// job: a missing audit sink or an audit-core failure answers 503 and stores
+// nothing. Jobs that do not ask to ignore robots.txt never reach the sink.
+func createJob(db store.DB, adm Admission, robotsAudit RobotsAuditor) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		org := orgFromQuery(r)
 		if org == "" {
@@ -358,6 +382,11 @@ func createJob(db store.DB, adm Admission) http.HandlerFunc {
 			return
 		}
 		origin, err := resolveJobOrigin(in.Origin)
+		if err != nil {
+			httpx.WriteErr(w, r, quarrycontracts.CodeBadRequest, err.Error(), nil)
+			return
+		}
+		robotsIgnore, err := robotsIgnoreFromParams(in.Params)
 		if err != nil {
 			httpx.WriteErr(w, r, quarrycontracts.CodeBadRequest, err.Error(), nil)
 			return
@@ -401,6 +430,16 @@ func createJob(db store.DB, adm Admission) http.HandlerFunc {
 			k := idemKey
 			job.IdempotencyKey = &k
 		}
+		if robotsIgnore != nil {
+			if err := recordRobotsIgnored(r.Context(), robotsAudit, job, *robotsIgnore, httpx.RequestIDOf(r.Context())); err != nil {
+				log.Error().Err(err).Str("org_id", org).Str("job_id", string(job.ID)).
+					Msg("createJob: robots.txt override not audited; job refused")
+				httpx.WriteErr(w, r, quarrycontracts.CodeRuntimeNotReady,
+					"the robots.txt override could not be audited, so no job was created",
+					map[string]any{"reason": "robots_override_audit_unavailable"})
+				return
+			}
+		}
 		if err := db.Jobs().Create(job); err != nil {
 			// Race: another request with the same idempotency key
 			// landed between our lookup and our Create. Re-fetch and
@@ -416,6 +455,120 @@ func createJob(db store.DB, adm Admission) http.HandlerFunc {
 		}
 		httpx.WriteJSON(w, r, http.StatusCreated, job)
 	}
+}
+
+// RobotsAuditor is the audit sink a robots.txt override is written to before
+// the job exists. *audit.Client satisfies it.
+type RobotsAuditor interface {
+	RecordAudit(ctx context.Context, event audit.Event) error
+}
+
+// RobotsIgnoredEvent is the audit event type written for every job that
+// ignores robots.txt.
+const RobotsIgnoredEvent = "crawl.robots_ignored"
+
+// robotsAuditTimeout bounds the audit write so a slow audit-core cannot hold
+// the create request open; a timeout is a refusal like any other failure.
+const robotsAuditTimeout = 5 * time.Second
+
+// robotsIgnoreRequest is what a job asking to ignore robots.txt carries.
+type robotsIgnoreRequest struct {
+	UserID    string
+	Authority string
+	Rev       any
+	SeedHost  string
+}
+
+// robotsIgnoreFromParams reports whether the job asks to ignore robots.txt.
+// Two shapes count, so neither can slip past the audit:
+//
+//   - params.robots == "ignore", the string the edge stamps today and the one
+//     the orchestrator honours (workflows/inputs.go stringFromParam);
+//   - params.robots == {mode:"ignore", authority, rev}, the object WS14.S7a
+//     stamps for a granted override.
+//
+// The mode compares case-insensitively, so "IGNORE" is audited (and refused
+// without a sink) rather than slipping through as an unknown value. Any other
+// mode, an absent key or null is not an override (nil, nil). An override with
+// no params.user_id is a 400: the audit row must name the person.
+func robotsIgnoreFromParams(params map[string]any) (*robotsIgnoreRequest, error) {
+	raw, present := params["robots"]
+	if !present || raw == nil {
+		return nil, nil
+	}
+	var mode, authority string
+	var rev any
+	switch robots := raw.(type) {
+	case string:
+		mode = robots
+	case map[string]any:
+		mode, _ = robots["mode"].(string)
+		authority, _ = robots["authority"].(string)
+		rev = robots["rev"]
+	default:
+		return nil, nil
+	}
+	if !strings.EqualFold(strings.TrimSpace(mode), "ignore") {
+		return nil, nil
+	}
+	userID, _ := params["user_id"].(string)
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		return nil, fmt.Errorf("params.user_id is required when params.robots asks to ignore robots.txt")
+	}
+	return &robotsIgnoreRequest{
+		UserID:    userID,
+		Authority: strings.TrimSpace(authority),
+		Rev:       rev,
+		SeedHost:  seedHostFromParams(params),
+	}, nil
+}
+
+// seedHostFromParams is the lower-cased host of params.url (or seed_url), or
+// "" when neither parses. Only the host is audited, never the path or query.
+func seedHostFromParams(params map[string]any) string {
+	for _, key := range []string{"url", "seed_url"} {
+		raw, _ := params[key].(string)
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			continue
+		}
+		if u, err := url.Parse(raw); err == nil && u.Hostname() != "" {
+			return strings.ToLower(u.Hostname())
+		}
+	}
+	return ""
+}
+
+// recordRobotsIgnored writes the one crawl.robots_ignored row for a job. The
+// event_id is derived from the job id, so audit-core's idempotency makes a
+// repeated write for the same job a duplicate, not a second row.
+func recordRobotsIgnored(ctx context.Context, sink RobotsAuditor, job store.Job, req robotsIgnoreRequest, requestID string) error {
+	if sink == nil {
+		return audit.ErrNotConfigured
+	}
+	details := map[string]any{
+		"seed_host": req.SeedHost,
+		"authority": req.Authority,
+		"kind":      job.Kind,
+	}
+	if req.Rev != nil {
+		details["rev"] = req.Rev
+	}
+	ctx, cancel := context.WithTimeout(ctx, robotsAuditTimeout)
+	defer cancel()
+	return sink.RecordAudit(ctx, audit.Event{
+		EventID:    "quarry-control:" + RobotsIgnoredEvent + ":" + string(job.ID),
+		OccurredAt: time.Now().UTC(),
+		OrgID:      job.OrgID,
+		UserID:     req.UserID,
+		Event:      RobotsIgnoredEvent,
+		Subject:    "quarry.job",
+		ResourceID: string(job.ID),
+		Outcome:    "ok",
+		Details:    details,
+		RequestID:  requestID,
+	})
 }
 
 type createJobInput struct {

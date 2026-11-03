@@ -20,6 +20,7 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/triodelab/quarry-v2/pkg/quarryotel"
+	"github.com/triodelab/quarry-v2/services/quarry-control/internal/audit"
 	"github.com/triodelab/quarry-v2/services/quarry-control/internal/dispatcher"
 	"github.com/triodelab/quarry-v2/services/quarry-control/internal/gdpr"
 	"github.com/triodelab/quarry-v2/services/quarry-control/internal/httpx"
@@ -159,6 +160,24 @@ func main() {
 		Dur("backlog_ttl", admission.BacklogTTL).
 		Msg("job admission")
 
+	// WS14.S7b: a job that ignores robots.txt is written to audit-core
+	// (crawl.robots_ignored, producer quarry-control, plane ingestion) before it
+	// is acknowledged. AUDIT_CORE_URL and AUDIT_CORE_SERVICE_TOKEN both unset is
+	// the default: the client is off and every such job answers 503. Exactly one
+	// set, or an invalid URL, is logged and treated as off (never fatal: nothing
+	// else depends on it). Jobs that respect robots.txt never touch it.
+	jobsOpts := []resources.JobsOption{resources.WithAdmission(admission)}
+	robotsAudit, err := audit.FromEnv(os.Getenv, nil)
+	switch {
+	case err != nil:
+		log.Warn().Err(err).Msg("audit-core client misconfigured: jobs that ignore robots.txt are refused")
+	case robotsAudit == nil:
+		log.Info().Msg("audit-core client off (AUDIT_CORE_URL unset): jobs that ignore robots.txt are refused")
+	default:
+		jobsOpts = append(jobsOpts, resources.WithRobotsAudit(robotsAudit))
+		log.Info().Msg("audit-core client on: robots.txt overrides are audited before the job is acknowledged")
+	}
+
 	var db store.DB
 	var dbPinger httpx.Pinger
 	if dsn == "" {
@@ -195,7 +214,7 @@ func main() {
 	r.Group(func(r chi.Router) {
 		r.Use(httpx.SplitHMAC(orchestratorVerifier, hmacVerifier))
 
-		resources.MountJobs(r, db, resources.WithAdmission(admission))
+		resources.MountJobs(r, db, jobsOpts...)
 		resources.MountStores(r, db)
 		// Legacy snapshot CRUD was folded into MountSnapshotsV2 below — the
 		// enriched list is the only /v1/snapshots surface; restore reads the
