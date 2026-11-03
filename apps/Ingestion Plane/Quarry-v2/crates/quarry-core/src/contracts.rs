@@ -131,6 +131,12 @@ pub struct BrowserTelemetry {
     /// only. Absent for a session without a saved profile.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile_restore: Option<ProfileRestoreSummary>,
+    /// E3.3-j: how long the page's DOM took to go quiet after the action this observation follows,
+    /// in ms, never more than the settle bound (`QUARRY_BROWSER_ACTION_SETTLE_MS`, default 300, max
+    /// 2000). A value equal to the bound means the DOM was still changing when the bound ran out.
+    /// Absent when the settle is off or the action only read the page, so the wire is unchanged then.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settle_ms: Option<u64>,
 }
 
 /// WS17.C2: what restoring a saved profile did. Counts and flags only: never a cookie name,

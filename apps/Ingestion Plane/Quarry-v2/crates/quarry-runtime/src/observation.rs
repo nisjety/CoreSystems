@@ -650,6 +650,17 @@ impl ObservationRunner {
 
         ctx.key_focus = focus_after;
 
+        // E3.3-j: how long the page took to go quiet after this action, when the settle is on.
+        // A read-only action is not settled. A failed action returned above, so only an action
+        // that ran is settled. Nothing is retried.
+        let settle_ms = match crate::browser_driver::action_settle_bound() {
+            Some(bound) if !action_only_observes(&effective_action) => Some(
+                crate::browser_driver::settle_after_action(self.browser.as_ref(), session, bound)
+                    .await,
+            ),
+            _ => None,
+        };
+
         // SC4 T3: a page that did not answer one of the reads below in time does not
         // answer the next one either (a load that still holds it, a renderer in a
         // loop). Each read has its own deadline, so reading on made a step wait for
@@ -1088,6 +1099,7 @@ impl ObservationRunner {
             observed_action_count: ctx.observed_action_count,
             challenge_observation_count: ctx.challenge_observation_count,
             challenge_rate_per_mille,
+            settle_ms,
             ..driver_telemetry
         };
         let mut artifact_ids = Vec::new();
@@ -3303,6 +3315,7 @@ mod tests {
         assert!(!signal.requires_escalation);
         assert_eq!(observation.telemetry.challenge_observation_count, 0);
         assert_eq!(observation.telemetry.challenge_rate_per_mille, 0);
+        assert_eq!(observation.telemetry.settle_ms, None, "the settle is off unless its flag is set");
         // Repeated visits never exhaust anything: it is not a block.
         for _ in 0..4 {
             runner.execute(&request, &session, &mut ctx).await.expect("login stays reachable");
