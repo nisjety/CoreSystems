@@ -20,6 +20,7 @@ import (
 
 	"github.com/triodelab/integration-corev2/internal/config"
 	"github.com/triodelab/integration-corev2/internal/egress"
+	"github.com/triodelab/integration-corev2/internal/events"
 	"github.com/triodelab/integration-corev2/internal/oauth"
 	"github.com/triodelab/integration-corev2/internal/store"
 )
@@ -105,6 +106,12 @@ type Service struct {
 	// pin "now" and assert the exact window sent to the provider; NewService
 	// sets it to time.Now.
 	now func() time.Time
+	// otpReadEnabled is the INTEGRATION_OTP_READ flag (default off) for the
+	// executor-only mail.otp.read operation (mail_otp.go).
+	otpReadEnabled bool
+	// otpAudit is the events publisher mail.otp.read audits through; nil
+	// refuses every mail.otp.read call (mail_otp.go, SetOTPAuditPublisher).
+	otpAudit events.Publisher
 }
 
 type ExecuteInput struct {
@@ -113,6 +120,10 @@ type ExecuteInput struct {
 	Operation   string
 	Params      map[string]any
 	Body        map[string]any
+	// Caller is the verified identity of the request, filled by the HTTP
+	// layer. Pre-existing operations ignore it; mail.otp.read requires a
+	// service principal with integration:otp:read (mail_otp.go).
+	Caller CallerIdentity
 }
 
 type ExecuteResult struct {
@@ -128,7 +139,7 @@ func NewService(cfg config.Config, httpClient *http.Client) *Service {
 		// URL; egress.SafeClient vets that host before connecting.
 		httpClient = egress.SafeClient(egress.ClientConfig{RequestTimeout: defaultActionTimeout})
 	}
-	return &Service{cfg: cfg, httpClient: httpClient, contentClient: redirectFollowingClient(httpClient), now: time.Now}
+	return &Service{cfg: cfg, httpClient: httpClient, contentClient: redirectFollowingClient(httpClient), now: time.Now, otpReadEnabled: otpReadFlagFromEnv()}
 }
 
 // redirectFollowingClient builds the content-read client described on
@@ -169,6 +180,20 @@ func (s *Service) Execute(ctx context.Context, input ExecuteInput) (ExecuteResul
 	operation := strings.TrimSpace(input.Operation)
 	if operation == "" {
 		return ExecuteResult{}, fmt.Errorf("operation is required")
+	}
+	// mail.otp.read is executor-only and is dispatched before the provider
+	// switches so its caller gate, flag and audit always run (mail_otp.go).
+	if isMailOTPReadOperation(operation) {
+		result, err := s.executeMailOTPRead(ctx, input, operation)
+		if err != nil {
+			return ExecuteResult{}, reconnectableError(input.Connection.ProviderKey, err)
+		}
+		return ExecuteResult{ProviderKey: input.Connection.ProviderKey, Operation: OperationMailOTPRead, Result: result}, nil
+	}
+	// A token scoped to integration:otp:read alone may not reach any other
+	// operation, whatever the HTTP layer admits.
+	if err := refuseOTPOnlyCaller(input.Caller, operation); err != nil {
+		return ExecuteResult{}, err
 	}
 	var result any
 	var err error
