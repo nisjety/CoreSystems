@@ -209,5 +209,5 @@ Open items:
 - W2-U63: Crawl-delay spacing is enforced on reserved, not actual, fetch starts (owner decision before enforce, X-10). W23-STATUS.md line about wiring the W2-U63 call sites (W2-B batch open items) is now done by this step.
 - W2-U39b: renewer stays unwired pending the MP ask (service RenewGrant); W2-CP-WS7I: MP ask to re-vendor the model-gateway golden copy; zdr-contract-sync.test.sh is expected RED on the two model-gateway rows until it lands (not run).
 - MP asks added to MP-ASKS.md by W2-U39b and W2-CP-WS7I.
-- 48 depth rows appended to W23-depth.md (a 13, b 8 plus table header, c 7, d 14).
+- 42 depth rows appended to W23-depth.md (a 13, b 8 plus the table header, c 7, d 14).
 - Four tracked .sha256 files in the integ worktree still show as modified (CRLF/LF checkout artifacts); none committed.
