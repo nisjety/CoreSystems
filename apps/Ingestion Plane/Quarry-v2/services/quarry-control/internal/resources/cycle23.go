@@ -6,8 +6,9 @@
 //   - /v1/team/activity        → moved to cycle24.go
 //   - /v1/schedules/:id/pause   (alias for /disable)
 //   - /v1/schedules/:id/unpause (alias for /enable)
-//   - /v1/schedules/:id/trigger  (proxies to Temporal when wired; 501 otherwise)
-//   - /v1/schedules/:id/backfill (proxies to Temporal when wired; 501 otherwise)
+//   - /v1/schedules/:id/trigger  (202 request row with QUARRY_CONTROL__SCHEDULE_REQUESTS;
+//     otherwise proxies to Temporal when wired, 501 when not)
+//   - /v1/schedules/:id/backfill (same; see schedule_requests.go, WS15.S3)
 //
 // /v1/benchmarks was removed in cycle 28 follow-up: with no source
 // of truth (no `quarry_benchmarks` table, no `lab/evals` table reader
@@ -26,6 +27,7 @@ package resources
 import (
 	"encoding/json"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -281,17 +283,31 @@ func pickQuery(r *http.Request, name, def string) string {
 // pause/unpause/trigger/backfill; we accept those forms so callers
 // don't see a vocabulary mismatch.
 //
-// `tc` may be nil — in that case trigger/backfill return 501 with a
-// typed `UNSUPPORTED` envelope (per the gap-quarry honesty rule:
-// never 202-fake an effect that was never executed). Production
-// wires a real `temporal.SDKClient` once `go.temporal.io/sdk` is in
-// go.mod; dev/test environments may pass nil.
+// WS15.S3: with QUARRY_CONTROL__SCHEDULE_REQUESTS on, trigger and
+// backfill insert a pull-model request row and answer 202 (the
+// orchestrator claims and executes it); `tc` is then unused. With the
+// flag off (default) the previous behaviour stays: `tc` may be nil, in
+// which case trigger/backfill return 501 with a typed `UNSUPPORTED`
+// envelope (per the gap-quarry honesty rule: never 202-fake an effect
+// that was never executed).
 func MountScheduleAliases(r chi.Router, db store.DB, tc temporalclient.Client) {
+	mountScheduleAliases(r, db, tc, ScheduleRequestsEnabled(os.Getenv))
+}
+
+func mountScheduleAliases(r chi.Router, db store.DB, tc temporalclient.Client, requests bool) {
 	s := db.Schedules()
 	// pause == disable; unpause == enable. The wire shapes match —
 	// both return 204 NoContent.
 	r.Post("/v1/schedules/{id}/pause", scheduleSetEnabled(s, false))
 	r.Post("/v1/schedules/{id}/unpause", scheduleSetEnabled(s, true))
+	if requests {
+		// A 202 here is honest: the row is durable and the orchestrator
+		// executes it; GET /v1/schedules/{id}/requests/{rid} reports the outcome.
+		r.Post("/v1/schedules/{id}/trigger", requestScheduleTrigger(db))
+		r.Post("/v1/schedules/{id}/backfill", requestScheduleBackfill(db))
+		mountScheduleRequests(r, db)
+		return
+	}
 	// trigger + backfill are Temporal-owned operations. When the
 	// client is wired we proxy through to it; when it isn't we
 	// surface an honest 501 rather than a fake 202.
