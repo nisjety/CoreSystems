@@ -569,6 +569,153 @@ pub(super) fn admit_tab_operation(
     })
 }
 
+/// E3.2-e1: apply a person's per-origin consent to a live run. The origin-extension grant the
+/// broker issued (a child of the run grant; contract in `agent_policy_gate`) is validated, the
+/// run grant is revalidated as gate 4 does it, any deny beats the approval, and only then is the
+/// run's browser egress widened through `configure_egress_policy`. The widened boundary is
+/// stored on the lane's context, so every later action of that lane installs it again
+/// (`ObservationRunner` reads `ctx.egress_policy`). Nothing is persisted: the boundary is
+/// process-local, a resumed run starts from its grant again, and a ZDR run holds a
+/// turn-scoped extension only.
+///
+/// What this does not widen: the navigation gate (gate 11) still holds an agent's own
+/// `navigate` to the run's allow list; the extension covers what the page reaches (an SSO
+/// redirect, a frame, a CDN, a link the person follows). Flag `QUARRY_EDGE__ORIGIN_CONSENT`,
+/// default off: off, the call is refused with 403 before any broker call.
+// Not wired to a route yet: the route that carries the extension grant id is outside this
+// unit's files (E3.2-e1 status, BUILD-LEFT).
+#[allow(dead_code)]
+pub(super) async fn admit_origin_extension(
+    state: &AppState,
+    handle: &RunHandle,
+    entry: &RunEntry,
+    ctx: &mut ObservationContext,
+    extension_grant_id: &str,
+) -> QuarryResult<crate::agent_policy_gate::OriginExtension> {
+    admit_origin_extension_with(
+        crate::agent_policy_gate::origin_consent_enabled(),
+        state,
+        handle,
+        entry,
+        ctx,
+        extension_grant_id,
+    )
+    .await
+}
+
+/// [`admit_origin_extension`] with the flag passed in (tests).
+#[allow(dead_code)]
+pub(super) async fn admit_origin_extension_with(
+    enabled: bool,
+    state: &AppState,
+    handle: &RunHandle,
+    entry: &RunEntry,
+    ctx: &mut ObservationContext,
+    extension_grant_id: &str,
+) -> QuarryResult<crate::agent_policy_gate::OriginExtension> {
+    use crate::agent_policy_gate::{
+        check_origin_extension, extended_egress_policy, origin_extension_from_grant,
+        ExtensionRun, OriginExtensionRefusal,
+    };
+
+    let refuse = |refusal: OriginExtensionRefusal| {
+        metrics::counter!("quarry_origin_extension_refused_total", "reason" => refusal.as_str())
+            .increment(1);
+        tracing::warn!(
+            target: "quarry_edge::agent",
+            run_id = %entry.run_id,
+            reason = refusal.as_str(),
+            "origin extension refused"
+        );
+        refusal.to_error()
+    };
+
+    if !enabled {
+        return Err(refuse(OriginExtensionRefusal::FlagOff));
+    }
+    if entry.closed {
+        return Err(QuarryError::new(ErrorCode::NotFound, "agent run is not live")
+            .with_details(serde_json::json!({ "reason": "run_not_live" })));
+    }
+    // An API key has no person to consent (INNH-10).
+    if entry.key_id.is_some() {
+        return Err(refuse(OriginExtensionRefusal::ApiKeyRun));
+    }
+    let Some(run_grant_id) = entry.grant_id.as_deref() else {
+        return Err(refuse(OriginExtensionRefusal::GrantInvalid));
+    };
+
+    // The run grant first, exactly as gate 4 checks it, then its snapshot for the org caps and
+    // the grant layer.
+    validate_run_grant(
+        state,
+        &entry.org_id,
+        run_grant_id,
+        entry.key_id.as_deref(),
+        &entry.constraints.allowed_domains,
+        &entry.nav_policy,
+    )
+    .await?;
+    let run_grant = state
+        .grant_validator
+        .validate_for_org(&entry.org_id, run_grant_id)
+        .await?;
+
+    let extension_grant = state
+        .grant_validator
+        .validate_for_org(&entry.org_id, extension_grant_id)
+        .await?;
+    let zdr = entry.zdr.is_active();
+    let extension = origin_extension_from_grant(
+        &extension_grant,
+        &ExtensionRun {
+            parent_grant_id: run_grant_id,
+            owner_id: &entry.actor_id,
+            zdr,
+        },
+    )
+    .map_err(refuse)?;
+
+    // Any deny beats the approval: the org caps, the run's decision, the grant snapshot, and the
+    // denied list of an open-web run.
+    let run_denied: &[String] = match &entry.nav_policy {
+        super::human_browse::RunNavPolicy::OpenWeb { denied } => denied,
+        super::human_browse::RunNavPolicy::Allowlist => &[],
+    };
+    check_origin_extension(state, &handle.live, zdr, run_denied, &run_grant, &extension)
+        .map_err(refuse)?;
+
+    // Widen the boundary. An open-web run already reaches every public host that is not denied,
+    // and an unconstrained allow list needs no widening; both keep their boundary.
+    let egress = super::human_browse::open_web_egress(
+        &entry.nav_policy,
+        extended_egress_policy(
+            state,
+            &handle.live,
+            zdr,
+            &entry.constraints.allowed_domains,
+            &extension,
+        ),
+    );
+    state
+        .agent_driver
+        .configure_egress_policy(&entry.session, egress.clone())
+        .await?;
+    ctx.egress_policy = Some(egress);
+
+    metrics::counter!("quarry_origin_extension_applied_total", "scope" => extension.scope.as_str())
+        .increment(1);
+    // Counts and closed labels only: never a host.
+    tracing::info!(
+        target: "quarry_edge::agent",
+        run_id = %entry.run_id,
+        scope = extension.scope.as_str(),
+        hosts = extension.hosts.len() + 1,
+        "origin extension applied"
+    );
+    Ok(extension)
+}
+
 #[cfg(test)]
 mod dns_guard_tests {
     use super::super::human_browse::RunNavPolicy;
