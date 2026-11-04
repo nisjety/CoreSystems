@@ -65,17 +65,22 @@ const TOOL_LISTS: [ToolList; 4] = [
         source: AGENT,
         signature: "fn browser_tool_defs()",
     },
+    // The chat loop's definitions live in `builtin_tool_defs_with` (WS16.S8 made `builtin_tool_defs` a
+    // one-line wrapper), so the extraction tool it adds behind its switch is pinned with the rest.
     ToolList {
         source: TOOL_LOOP,
-        signature: "pub fn builtin_tool_defs()",
+        signature: "pub fn builtin_tool_defs_with(",
     },
 ];
 
 /// Functions that build one tool definition in code and are offered to a run. A list that calls
-/// one by a bare call must name it here, or the test fails.
-const TOOL_BUILDERS: [(&str, &str); 2] = [
+/// one by a bare call must name it here, or the test fails. A function that rewrites offered
+/// definitions behind a switch is pinned here too, as its whole text.
+const TOOL_BUILDERS: [(&str, &str); 3] = [
     (AGENT, "fn browser_act_tool_def()"),
     (RECALL_CONVERSATIONS, "pub fn tool_definition()"),
+    // EP-2 S3: batched web_search rewrites the web_search and fetch_url text and schemas.
+    (TOOL_LOOP, "fn advertise_batched_search("),
 ];
 
 #[derive(Clone, Debug, PartialEq, Eq)]

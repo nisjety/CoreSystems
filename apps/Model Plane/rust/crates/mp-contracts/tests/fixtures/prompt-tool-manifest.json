@@ -257,7 +257,7 @@
     },
     {
       "id": "prompt/prompt_context.rs/render_legacy",
-      "sha256": "28764cf5367cf4ef6006c1218756fde605db57e4b32a912d68eddf8781694ded",
+      "sha256": "6811efcc813482990a98e14bccb839420e3d81589f94f6f150c3fb31d211f47a",
       "source": "services/model-gateway/src/prompt_context.rs"
     },
     {
@@ -267,7 +267,7 @@
     },
     {
       "id": "prompt/prompt_context.rs/render_stable_prefix",
-      "sha256": "5f8160896fd6174b2885ac4fb0a67d5067a7ba820d773976d178778c40b4dc85",
+      "sha256": "114743367df7283af8f4f4574dac19a5d82b94f7639f794c012186a4104abfa0",
       "source": "services/model-gateway/src/prompt_context.rs"
     },
     {
@@ -296,6 +296,11 @@
       "source": "services/model-gateway/src/recall_conversations.rs"
     },
     {
+      "id": "tool-builder/tool_loop.rs/advertise_batched_search",
+      "sha256": "39a2fe9c3848457605d5bcf252005a5f526cdb551b90c6558ed7228f6656a9aa",
+      "source": "services/model-gateway/src/tool_loop.rs"
+    },
+    {
       "id": "tool/agent.rs/book_shipment",
       "sha256": "4d4e024c1a3a3eaf36fd6f8211d53c7a167e6dcea11970b5f8a8e66ab4697df9",
       "source": "services/execution-core/src/runtime_loop/agent.rs"
@@ -303,6 +308,11 @@
     {
       "id": "tool/agent.rs/browser.close",
       "sha256": "da2ac890d4bf6a4ecf843a557491ff0f20c25c44ebb859a8545288222a5563bb",
+      "source": "services/execution-core/src/runtime_loop/agent.rs"
+    },
+    {
+      "id": "tool/agent.rs/browser.console",
+      "sha256": "79787fc049c8e80eaba1742181780573547c9456c7d4b9c5f63a9d1f994eb084",
       "source": "services/execution-core/src/runtime_loop/agent.rs"
     },
     {
@@ -478,6 +488,11 @@
     {
       "id": "tool/tool_loop.rs/create_artifact",
       "sha256": "79d955200e9a12d901b012a188008a5485c34612636ccadc5e5838ad44c73437",
+      "source": "services/model-gateway/src/tool_loop.rs"
+    },
+    {
+      "id": "tool/tool_loop.rs/extract_structured",
+      "sha256": "0c1ef6101919d548c2f00c9293271db4dc1fd5c4c79db03a81fb637fc654d435",
       "source": "services/model-gateway/src/tool_loop.rs"
     },
     {
