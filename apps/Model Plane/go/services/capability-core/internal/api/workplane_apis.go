@@ -1312,7 +1312,8 @@ func (h *CronHandler) listOrCreate(w http.ResponseWriter, r *http.Request) {
 
 // cronFireRow is one fire of a schedule as its owner reads it. It carries
 // identifiers, closed tokens and counts only. The answer itself is read from the
-// scheduled thread named by thread_id.
+// scheduled thread named by thread_id. fire_key tells a Run now (manual:<request id>,
+// EP-6-S3) from a schedule's own fire, whose key is its slot time.
 type cronFireRow struct {
 	ID              string     `json:"id"`
 	FiredAt         time.Time  `json:"fired_at"`
@@ -1322,6 +1323,7 @@ type cronFireRow struct {
 	RunID           string     `json:"run_id"`
 	ThreadID        string     `json:"thread_id"`
 	WithheldEffects int        `json:"withheld_effects"`
+	FireKey         string     `json:"fire_key"`
 }
 
 const (
@@ -1355,7 +1357,7 @@ func (h *CronHandler) listFires(w http.ResponseWriter, r *http.Request, schedule
 		return
 	}
 	rows, err := h.pool.Query(r.Context(), `
-		SELECT id, fired_at, status, outcome, completed_at, run_id, thread_id, withheld_effects
+		SELECT id, fired_at, status, outcome, completed_at, run_id, thread_id, withheld_effects, fire_key
 		FROM cron_fires
 		WHERE schedule_id=$1
 		ORDER BY fired_at DESC, id DESC
@@ -1370,7 +1372,7 @@ func (h *CronHandler) listFires(w http.ResponseWriter, r *http.Request, schedule
 	for rows.Next() {
 		var f cronFireRow
 		if err := rows.Scan(&f.ID, &f.FiredAt, &f.Status, &f.Outcome, &f.CompletedAt,
-			&f.RunID, &f.ThreadID, &f.WithheldEffects); err != nil {
+			&f.RunID, &f.ThreadID, &f.WithheldEffects, &f.FireKey); err != nil {
 			jsonErr(w, "database unavailable", http.StatusInternalServerError)
 			return
 		}

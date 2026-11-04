@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import type { CronSchedule, CronScheduleFire } from '@/shared/api/cron-client'
+import type { CronSchedule } from '@/shared/api/cron-client'
 import {
   approvalOf,
   approvalLapsed,
@@ -39,53 +39,53 @@ function approval(expiresAt: string): Record<string, unknown> {
   }
 }
 
-function fire(outcome: string | null): CronScheduleFire {
-  return { id: 'fire_1', fired_at: '2026-11-02T07:00:00Z', status: 'paused', outcome, withheld_effects: 0 }
-}
-
 function row(id: string, state: AutomationState): AutomationRow {
   return { schedule: schedule({ id }), state }
 }
 
 describe('automationStateOf', () => {
   it('shows an enabled schedule with no approval as active', () => {
-    expect(automationStateOf(schedule({ enabled: true }), undefined, NOW)).toBe('active')
+    expect(automationStateOf(schedule({ enabled: true }), NOW)).toBe('active')
   })
 
   it('shows a disabled schedule with no fire yet as paused by its owner', () => {
-    expect(automationStateOf(schedule({ enabled: false }), undefined, NOW)).toBe('paused_by_owner')
-    expect(automationStateOf(schedule({ enabled: false }), null, NOW)).toBe('paused_by_owner')
+    expect(automationStateOf(schedule({ enabled: false }), NOW)).toBe('paused_by_owner')
+    expect(automationStateOf(schedule({ enabled: false, last_outcome: '' }), NOW)).toBe('paused_by_owner')
   })
 
   it('shows a disabled schedule whose last fire the guards paused for failures as paused after failures', () => {
-    expect(automationStateOf(schedule({ enabled: false }), fire('paused_failures'), NOW)).toBe('paused_failures')
+    expect(automationStateOf(schedule({ enabled: false, last_outcome: 'paused_failures' }), NOW)).toBe('paused_failures')
   })
 
   it('keeps the owner pause for any other reason recorded on the last fire', () => {
-    expect(automationStateOf(schedule({ enabled: false }), fire('paused_expired'), NOW)).toBe('paused_by_owner')
+    expect(automationStateOf(schedule({ enabled: false, last_outcome: 'paused_expired' }), NOW)).toBe('paused_by_owner')
+  })
+
+  it('shows a schedule switched back on as active, even when its last fire paused it', () => {
+    expect(automationStateOf(schedule({ enabled: true, last_outcome: 'paused_failures' }), NOW)).toBe('active')
   })
 
   it('expires a schedule whose approval has lapsed, whether or not it is still switched on', () => {
     const lapsed = { task_template: approval('2026-01-01T00:00:00Z') }
-    expect(automationStateOf(schedule({ enabled: true, ...lapsed }), undefined, NOW)).toBe('expired')
-    expect(automationStateOf(schedule({ enabled: false, ...lapsed }), undefined, NOW)).toBe('expired')
+    expect(automationStateOf(schedule({ enabled: true, ...lapsed }), NOW)).toBe('expired')
+    expect(automationStateOf(schedule({ enabled: false, ...lapsed }), NOW)).toBe('expired')
   })
 
   it('keeps a schedule with a live approval active or paused by its owner', () => {
     const live = { task_template: approval('2099-01-01T00:00:00Z') }
-    expect(automationStateOf(schedule({ enabled: true, ...live }), undefined, NOW)).toBe('active')
-    expect(automationStateOf(schedule({ enabled: false, ...live }), undefined, NOW)).toBe('paused_by_owner')
+    expect(automationStateOf(schedule({ enabled: true, ...live }), NOW)).toBe('active')
+    expect(automationStateOf(schedule({ enabled: false, ...live }), NOW)).toBe('paused_by_owner')
   })
 
   it('never expires a contract-free schedule, however old the clock says it is', () => {
     const contractFree = schedule({ enabled: false, task_template: { kind: 'cron', description: 'x' } })
     expect(approvalLapsed(contractFree, NOW)).toBe(false)
-    expect(automationStateOf(contractFree, undefined, Date.parse('2100-01-01T00:00:00Z'))).toBe('paused_by_owner')
+    expect(automationStateOf(contractFree, Date.parse('2100-01-01T00:00:00Z'))).toBe('paused_by_owner')
   })
 
   it('treats an approval that cannot be read as lapsed', () => {
     const unreadable = schedule({ enabled: true, task_template: { approval_contract: 'not json' } })
-    expect(automationStateOf(unreadable, undefined, NOW)).toBe('expired')
+    expect(automationStateOf(unreadable, NOW)).toBe('expired')
   })
 })
 
