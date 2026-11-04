@@ -1989,6 +1989,8 @@ pub struct StartRunParams<'a> {
     pub org_id: &'a str,
     pub constraints: &'a AgentConstraints,
     pub zdr: bool,
+    /// A persistent Quarry profile to start on. [`Self::new`] leaves it `None`, and the Do loop keeps
+    /// it so: a login made in a Do run's browser must end with that run (EP-1 D8).
     pub profile_id: Option<String>,
     pub grant_id: &'a str,
     pub policy: Option<WireRequestAsk>,
@@ -3626,6 +3628,24 @@ mod tests {
     }
 
     #[test]
+    fn start_run_params_new_asks_for_no_profile() {
+        let constraints = AgentConstraints::default();
+        let params = StartRunParams::new("org_1", &constraints, false, "g");
+        assert_eq!(params.profile_id, None);
+        let body = StartRunRequest {
+            org_id: "org_1".into(),
+            grant_id: "g".into(),
+            constraints: constraints.clone(),
+            profile_id: params.profile_id,
+            zdr: false,
+            policy: None,
+            trace: None,
+        };
+        let json = serde_json::to_value(&body).unwrap();
+        assert!(json.get("profile_id").is_none(), "{json}");
+    }
+
+    #[test]
     fn start_run_omits_policy_and_trace_when_none() {
         let constraints = AgentConstraints::default();
         let mut params = StartRunParams::new("org_1", &constraints, false, "g");
@@ -4679,5 +4699,56 @@ mod tests {
             control_epoch: 2,
         }
         .person_holds());
+    }
+
+    /// EP-1 S3: nothing a person did during a takeover reaches the model, so the client has no
+    /// reader of a run's receipts, owner timeline, frames or events. The test pins the client's
+    /// whole public surface and every route it calls: a new method or route fails here and must
+    /// be weighed against that rule first. `devtools` reads the console of the browser MCP tool's
+    /// own run (WS9.E); the Do loop's session never names its run to the model.
+    #[test]
+    fn client_has_no_receipt_or_timeline_reader() {
+        let source = include_str!("quarry_agent.rs");
+        let body = source
+            .split_once("impl QuarryAgentClient {")
+            .and_then(|(_, rest)| rest.split_once("\n}"))
+            .map(|(body, _)| body)
+            .expect("the client's impl block");
+        let methods: Vec<&str> = body
+            .lines()
+            .filter_map(|line| {
+                line.strip_prefix("    pub async fn ")
+                    .or_else(|| line.strip_prefix("    pub fn "))
+            })
+            .filter_map(|rest| rest.split(['(', '<']).next())
+            .collect();
+        assert_eq!(
+            methods,
+            [
+                "new",
+                "from_env",
+                "start_run",
+                "step",
+                "close_run",
+                "close_run_with",
+                "attach_run",
+                "release_attach",
+                "tab_state",
+                "run_control",
+                "open_tab",
+                "select_tab",
+                "close_tab",
+                "mark_tab",
+                "devtools",
+                "step_attached",
+                "ready",
+            ]
+        );
+        for forbidden in ["receipt", "timeline", "frames", "/events", "projection"] {
+            assert!(
+                !body.contains(forbidden),
+                "the client reads `{forbidden}` of a run"
+            );
+        }
     }
 }

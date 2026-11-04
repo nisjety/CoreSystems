@@ -92,6 +92,12 @@ const TERMINAL_RUN_STATUSES = new Set([
  */
 export const chatBrowserTakeoverEnabled = () => import.meta.env.VITE_CHAT_BROWSER_TAKEOVER === 'true'
 
+/**
+ * The longest note the person may hand back with the browser (EP-1 S3, D6). The note is the
+ * person's own words to the agent; execution-core holds the model to the same cap.
+ */
+export const GIVE_BACK_NOTE_MAX_CHARS = 500
+
 function isTerminalRunStatus(status?: string): boolean {
   return TERMINAL_RUN_STATUSES.has((status ?? '').trim().toLowerCase())
 }
@@ -252,8 +258,11 @@ export function ChatLiveRunPanel(props: {
   /**
    * The person gave the browser back (EP-1 S1). The owning chat turn decides the open
    * `browser_human_assist` approval and continues the run; the panel never decides approvals.
+   * `note` is the person's optional hand-back note (EP-1 S3), trimmed and capped, empty when they
+   * wrote none: the turn sends it as the approval's decision reason, the one way it reaches the
+   * model. Nothing typed into the page is ever sent.
    */
-  onBrowserGiveBack?: (runId: string) => void
+  onBrowserGiveBack?: (runId: string, note: string) => void
 }) {
   const i18n = useI18n()
   // One name for two attributes: the button carries the same text as its
@@ -478,8 +487,12 @@ export function ChatLiveRunPanel(props: {
   )
 
   const [takeoverPending, setTakeoverPending] = createSignal(false)
+  /** The person's hand-back note (EP-1 S3), kept until the give-back is accepted. */
+  const [giveBackNote, setGiveBackNote] = createSignal('')
   /** Take over and Give back are offered only with the switch on, for a non-ZDR turn, in an org. */
   const takeover = () => chatBrowserTakeoverEnabled() && !zdr() && Boolean(props.orgId?.trim())
+  /** The note field shows only while the person holds the turn's browser. */
+  const personHolds = () => takeover() && watch()?.browserControl?.controlMode === 'human_takeover'
   /**
    * Flips who holds the turn's browser through the existing BFF control route, compare-and-set on
    * the epoch the person saw. Quarry answers with the new control, which the panel shows; a stale
@@ -507,7 +520,11 @@ export function ChatLiveRunPanel(props: {
         setControlError(i18n.tr(STALE_CONTROL_COPY.no, STALE_CONTROL_COPY.en))
         return
       }
-      if (mode === 'agent_control') props.onBrowserGiveBack?.(currentRunId)
+      if (mode === 'agent_control') {
+        const note = giveBackNote().trim().slice(0, GIVE_BACK_NOTE_MAX_CHARS)
+        setGiveBackNote('')
+        props.onBrowserGiveBack?.(currentRunId, note)
+      }
     } catch (error) {
       setControlError(translateApiError(error, i18n.tr, { no: 'Styringen av nettleseren kunne ikke endres.', en: 'Browser control could not be changed.' }))
     } finally {
@@ -689,14 +706,28 @@ export function ChatLiveRunPanel(props: {
                 )}
               >
                 {(model) => (
-                  <BrowserChrome
-                    compact
-                    session={model()}
-                    browserBusy={takeoverPending()}
-                    onBrowserControlMode={takeover() && model().sessionId
-                      ? (mode, expectedEpoch) => void changeTakeover(mode, expectedEpoch)
-                      : undefined}
-                  />
+                  <>
+                    <BrowserChrome
+                      compact
+                      session={model()}
+                      browserBusy={takeoverPending()}
+                      onBrowserControlMode={takeover() && model().sessionId
+                        ? (mode, expectedEpoch) => void changeTakeover(mode, expectedEpoch)
+                        : undefined}
+                    />
+                    <Show when={personHolds() && model().sessionId}>
+                      <label class="verevon-chat-run-panel__give-back-note">
+                        <span>{i18n.tr('Beskjed til agenten når du gir tilbake (valgfritt)', 'Note to the agent when you give back (optional)')}</span>
+                        <textarea
+                          maxlength={GIVE_BACK_NOTE_MAX_CHARS}
+                          rows={2}
+                          value={giveBackNote()}
+                          disabled={takeoverPending()}
+                          onInput={(event) => setGiveBackNote(event.currentTarget.value)}
+                        />
+                      </label>
+                    </Show>
+                  </>
                 )}
               </Show>
 
