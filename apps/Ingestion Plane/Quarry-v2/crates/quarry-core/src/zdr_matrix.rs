@@ -607,6 +607,17 @@ pub const ROWS: &[Row] = &[
         log: Log::Unverified,
     },
     Row {
+        id: "agent_hit_test",
+        routes: &["/v1/agent/runs/{run_id}/hit-test"],
+        treatment: Treatment::Inert {
+            reason: "a read-only point lookup on the caller's own live run; it writes no receipt, timeline row, artifact or cache entry, and logs no page text",
+        },
+        status: Status::Enforced,
+        enforced_by: &["hit_test::hit_test_tests::the_wire_answer_carries_refs_and_no_browser_handles"],
+        basis: "agent_routes::hit_test::hit_test_point (E3.3-h, dark behind QUARRY_EDGE__HIT_TEST: 403 hit_test_disabled when off, and 501 unsupported when on until the driver trait gains its point method) reads DOM.getNodeForLocation and the partial accessibility tree, maps the hit to the person's lane's last observed @e ref, and answers the run's zdr flag with it. The AX name it returns is page text the same caller's observation already carries under ZDR; no backend node id or frame id is on the wire. Nothing is stored, so ZDR has nothing to suppress and the route is not refused",
+        log: Log::Unverified,
+    },
+    Row {
         id: "fleets",
         routes: &[
             "/v1/fleets",
@@ -686,6 +697,20 @@ pub const ROWS: &[Row] = &[
         status: Status::Enforced,
         enforced_by: &[],
         basis: "internal_routes::purge_org_profiles checks the shared internal token, walks the org erasure families in AppState and reports row, tombstone and cache-key counts (WS17.E3); it is how a ZDR organization's erasure is carried out, so it is never refused",
+        log: Log::Unverified,
+    },
+    Row {
+        id: "internal_user_receipt_purge",
+        routes: &["/v1/internal/orgs/{org}/users/{user}/receipts"],
+        treatment: Treatment::Inert {
+            reason: "erases one user's step receipts and browser timeline events in one organization and answers counts only; it stores nothing",
+        },
+        status: Status::Enforced,
+        enforced_by: &[
+            "internal_routes::tests::the_user_report_is_one_counts_only_family",
+            "step_receipts::user_erasure_tests::purge_for_actor_removes_only_that_user_in_that_org_and_is_idempotent",
+        ],
+        basis: "internal_routes::purge_user_receipts (W2-U49, X-19 condition c) checks the shared internal token and both path ids, deletes the rows whose org_id and actor_id match (Postgres over the queue pool when present, else the receipt store's purge_for_actor) and reports one counts-only step_receipts family. quarry-control calls it for a user or user_anonymize erasure event only when QUARRY_CONTROL_GDPR_USER_RECEIPTS is on (default off). A ZDR run writes no receipts, so there is nothing of it to find; like the org purge it is how erasure is carried out, so it is never refused",
         log: Log::Unverified,
     },
     Row {
