@@ -82,6 +82,11 @@
     "only_main_content": {
       "type": "boolean"
     },
+    "redact_pii": {
+      "description": "E3.6-5: `on` when the returned text went through the PII scanner, `off` (the default)\nwhen it did not. Always reported, so a caller can see what was applied.",
+      "$ref": "#/$defs/PiiRedaction",
+      "default": "off"
+    },
     "remove_base64_images": {
       "type": "boolean"
     },
@@ -185,6 +190,14 @@
         "readability",
         "clean_full",
         "raw"
+      ]
+    },
+    "PiiRedaction": {
+      "description": "E3.6-5: whether the text a scrape returns goes through the PII scanner\n(`quarry_transform::pii`). `Off` is the default. `On` is served under zero data\nretention only, and never with a capture or an action (see `ScrapeOptions::resolve`).",
+      "type": "string",
+      "enum": [
+        "off",
+        "on"
       ]
     },
     "ScrapeFormat": {
