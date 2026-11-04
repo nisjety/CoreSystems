@@ -22,6 +22,12 @@ with a pointer forward. Newest first.
 
 ---
 
+## 2026-11-04 - Wave 3 owner decisions taken at their recommended options
+
+**Status: decided by the owner ("run the recomended and continue"); no switch flipped.** The 105 open decision rows listed in docs/plans/wave3/OWNER-DECISIONS.md (depth register D0-036 and later, D3-261 and later) are decided at each design's recommended option. For the rows built dark on an assumed default, that default stands. Switches stay off until each feature's live proof; the remaining blocked-decision slices become buildable. Supersedes nothing.
+
+---
+
 ## 2026-11-03 - mp-w2w3 (Model Plane rows of Quarry W2/W3) merged into model-plane; host_class moves to field 11
 
 **Status: merged on model-plane (local merge commit), compile-checked only (cargo check of the workspace, go build of every Model Plane Go module); no test run, not deployed.** On the coordinator's order (2026-11-03) the 177 mp-w2w3 commits come into the Model Plane line, so main takes one Model Plane branch. Decisions: `ApprovalCause.host_class` (mp-w2w3, E3.2-a) moves from field 10 to 11, because model-plane's WS13 S7 `tool_digest` holds 10 and neither is on main; code uses the field by name. The event oneof keeps both `run_usage_progress = 29` and `browser_attach_shared_jar = 30`. Python bindings are regenerated through buf managed mode with the remote plugin (the raw-protoc output of two earlier model-plane regenerations is replaced). Model-plane's Do-loop browser session now calls the C0 Quarry client through `StartRunParams` and `StepParams`; a typed 404/410 from Quarry still ends the session, and a policy denial is a refusal (`GRANT_REFUSED` on open, `ACT_REFUSED` on act). The dreaming candidate query applies both model-plane's memory containment and mp-w2w3's external-content skip. `browser.console` rides the Do browser offer behind the same switch, served by the grant-bound MCP path. Supersedes nothing.

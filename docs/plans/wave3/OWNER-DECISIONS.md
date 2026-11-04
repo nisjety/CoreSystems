@@ -1,10 +1,12 @@
-# Wave 3 owner decisions (open)
+# Wave 3 owner decisions (decided 2026-11-04)
 
 Generated 2026-11-04 from `docs/plans/model-plane-depth-register.md` (rows D0-036 and later, D3-261 and later, kind `decision` or status `open (owner)`), after the Wave 3 code build on branch `model-plane`.
 
 Wave 3 was built code-first on the owner's order (2026-11-03): a row that waited on an owner decision was built on its design's **recommended** option, dark, behind a switch that defaults off, and the assumption was recorded. So for most rows below the recommendation is: **confirm the assumed default** (or name the other option, and the slice is changed before its switch goes on). Nothing here is switched on; no decision below is needed to merge the code, only to turn a feature on.
 
 105 open rows in 13 groups.
+
+**Owner ruling 2026-11-04:** "run the recomended and continue": every row below is decided at its recommended option (for rows built dark, the assumed default stands). Switches stay off until each feature's live proof.
 
 ## EP-1 (6)
 
