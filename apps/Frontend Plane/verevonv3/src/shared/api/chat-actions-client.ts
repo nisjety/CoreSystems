@@ -1,4 +1,5 @@
 import { loadComposerSettingsItems } from './composer-settings-client'
+import { requestJson } from './http'
 
 // "Specialized actions" power the composer's `/` menu. Built-ins map to local
 // composer behaviors (attach file, image mode, web search); skills /
@@ -14,7 +15,7 @@ export type SpecializedAction = {
   description?: string
   kind: SpecializedActionKind
   /** Present only for built-ins — selects the local composer behavior. */
-  builtin?: 'file' | 'image' | 'web_search'
+  builtin?: 'file' | 'image' | 'web_search' | 'learn'
 }
 
 export const BUILTIN_ACTIONS: SpecializedAction[] = [
@@ -40,6 +41,63 @@ export const BUILTIN_ACTIONS: SpecializedAction[] = [
     builtin: 'web_search',
   },
 ]
+
+/**
+ * `/learn` (EP-11 S7): ask Verevon to distil this conversation into a skill proposal for the
+ * learning inbox. Not in `BUILTIN_ACTIONS`: the composer registers it only where
+ * `learnCommandAvailable` says so, through its slash-command registry.
+ */
+export const LEARN_ACTION: SpecializedAction = {
+  id: '__learn',
+  name: 'Learn from this conversation',
+  description: 'Verevon proposes a skill from this conversation; nothing is used until you accept it.',
+  kind: 'builtin',
+  builtin: 'learn',
+}
+
+/** The longest note a `/learn` carries, as the gateway and capability-core bound it. */
+export const LEARN_NOTE_MAX_CHARS = 500
+
+export type LearnCommandContext = {
+  /** The saved conversation the command would learn from; absent before the first send. */
+  threadId?: string | null
+  /** A temporary chat runs under zero data retention: nothing is kept to learn from. */
+  temporaryChat: boolean
+  /** The session itself is zero data retention. */
+  zeroRetention: boolean
+  /** The memory controls' `learning_allowed`: the owner and the organization allow learning. */
+  learningAllowed: boolean
+}
+
+/**
+ * Whether `/learn` is offered. Hidden on a temporary or ZDR chat, before the conversation is
+ * saved, and whenever the memory controls say learning is off (the person's pause, or an
+ * organization that has not opted in). The server refuses each of these on its own; hiding the
+ * command only keeps the person from asking for something that cannot happen.
+ */
+export function learnCommandAvailable(context: LearnCommandContext): boolean {
+  return (
+    !context.temporaryChat &&
+    !context.zeroRetention &&
+    context.learningAllowed &&
+    Boolean(context.threadId?.trim())
+  )
+}
+
+export type LearnRequestState = { state: string }
+
+/**
+ * Asks Verevon to learn from one of the caller's own conversations. Answers once the request is
+ * queued; the proposal reaches the learning inbox when the review is done. Whose conversation it
+ * is comes from the session on the server, never from anything sent here.
+ */
+export async function requestLearnFromThread(threadId: string, note?: string): Promise<LearnRequestState> {
+  const trimmed = note?.trim() ?? ''
+  return requestJson<LearnRequestState>('/api/v1/learning/learn', {
+    method: 'POST',
+    body: JSON.stringify(trimmed ? { threadId, note: trimmed } : { threadId }),
+  })
+}
 
 /** Stable de-dup / list key for an action (raw ids can collide across kinds). */
 export function actionKey(action: Pick<SpecializedAction, 'id' | 'kind'>): string {

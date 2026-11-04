@@ -486,6 +486,9 @@ fn authed_routes() -> Router<AppState> {
         )
         // Wave 3 EP-3 S3: artifact revision history and the composer's capability read.
         .merge(crate::artifact_revision_routes::router())
+        // Wave 3 EP-11 S7: /learn, a person's request to distil one of their threads into a skill
+        // proposal. capability-core runs it and answers 404 while LEARN_COMMAND_ENABLED is off.
+        .route("/v1/learning/learn", post(learn_from_thread))
 }
 
 /// `/v1/orchestration/*` read + mutation routes. Merged into the auth-gated router.
@@ -664,6 +667,7 @@ fn proxy_routes() -> Router<AppState> {
                 .patch(patch_skill_proxy)
                 .delete(delete_skill_proxy),
         )
+        .route("/v1/skills/:id/versions", get(list_skill_versions_proxy))
         // Plugins
         .route(
             "/v1/plugins",
@@ -685,6 +689,9 @@ fn proxy_routes() -> Router<AppState> {
                 .post(create_run_watcher_proxy)
                 .delete(delete_run_watcher_proxy),
         )
+        // The HTML app an MCP tool declares, read with the viewer's authority and never stored
+        // (Wave 3 EP-4 S8); 404 while MCP_APPS_ENABLED is off.
+        .route("/v1/mcp-apps/resource", get(get_mcp_app_resource))
 }
 
 // ---------------------------------------------------------------------------
@@ -747,6 +754,127 @@ async fn deck_templates_listing(
     .await
     .map_err(|status| grpc_status_to_http(&status))?;
     Ok(Json(json!({ "data": { "templates": templates } })))
+}
+
+// ---------------------------------------------------------------------------
+// Wave 3 EP-4 S8: `GET /v1/mcp-apps/resource` - an MCP tool's `ui://` app document.
+// ---------------------------------------------------------------------------
+
+/// `?server_id=&tool=`. Both default to empty so a missing one is answered by the handler, after
+/// the switch, not by the extractor.
+#[derive(Debug, Default, Deserialize)]
+struct McpAppResourceQuery {
+    #[serde(default)]
+    server_id: String,
+    #[serde(default)]
+    tool: String,
+}
+
+/// `GET /v1/mcp-apps/resource` - see [`mcp_app_resource`].
+async fn get_mcp_app_resource(
+    state: State<AppState>,
+    claims: Extension<Claims>,
+    bearer: Option<Extension<VerifiedCapabilityBearer>>,
+    query: Query<McpAppResourceQuery>,
+) -> Result<Json<Value>, HttpJsonError> {
+    mcp_app_resource(state, claims, bearer, query, crate::mcp_apps::enabled()).await
+}
+
+/// The app document `tool` on `server_id` declares, `{data: {uri, html, needs_network}}`
+/// (`crate::mcp_apps`). With the switch off the route is a 404 as if it did not exist, decided
+/// before anything else. A zero-retention bearer is refused before any read, with feature
+/// `mcp_execution`: the read egresses to the MCP server as a tool call does. The org and the viewer
+/// come from the verified claims only; the registry is refreshed from capability-core with the
+/// caller's capability bearer, so a fresh replica answers from the system of record.
+async fn mcp_app_resource(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    bearer: Option<Extension<VerifiedCapabilityBearer>>,
+    Query(query): Query<McpAppResourceQuery>,
+    enabled: bool,
+) -> Result<Json<Value>, HttpJsonError> {
+    if !enabled {
+        return Err(run_trace_error(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "no such route",
+        ));
+    }
+    if claims.zdr {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(
+                mp_contracts::zdr_refusal::Refusal::feature_not_supported(
+                    crate::mcp_apps::ZDR_FEATURE,
+                )
+                .json_body(),
+            ),
+        ));
+    }
+    let server_id = query.server_id.trim();
+    let tool = query.tool.trim();
+    if [server_id, tool]
+        .iter()
+        .any(|value| value.is_empty() || value.len() > crate::mcp_apps::MAX_NAME_BYTES)
+    {
+        return Err(run_trace_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "server_id and tool are required",
+        ));
+    }
+    let Some(Extension(bearer)) = bearer.filter(|Extension(bearer)| !bearer.as_str().trim().is_empty())
+    else {
+        return Err(run_trace_error(
+            StatusCode::UNAUTHORIZED,
+            "capability_credential_required",
+            "reading an MCP app needs a verified capability credential",
+        ));
+    };
+    if let Err(error) = crate::runtime_registries::hydrate_mcp_registry(
+        &state.mcp,
+        &state.ownership,
+        &state.http_client,
+        &state.capability_core_base_url,
+        &claims.org_id,
+        bearer.as_str(),
+    )
+    .await
+    {
+        warn!(org_id = %claims.org_id, %error, "MCP catalog hydration failed for an app read");
+        return Err(run_trace_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "registry_unavailable",
+            "capability registry is unavailable",
+        ));
+    }
+    let oauth_token = crate::mcp_oauth::resolve_stored_oauth_token(
+        &state.http_client,
+        &state.capability_core_base_url,
+        &state.mcp_oauth_service_token,
+        &claims.org_id,
+        server_id,
+    )
+    .await;
+    let resource = crate::mcp_apps::read_app_resource(
+        &state.mcp,
+        &state.ownership,
+        crate::mcp_apps::AppResourceCache::global(),
+        &claims.org_id,
+        &claims.user_id,
+        server_id,
+        tool,
+        oauth_token.as_deref(),
+    )
+    .await
+    .map_err(|error| run_trace_error(error.status(), error.code(), error.message()))?;
+    Ok(Json(json!({
+        "data": {
+            "uri": resource.uri,
+            "html": resource.html,
+            "needs_network": resource.needs_network,
+        }
+    })))
 }
 
 /// Request body cap for the two audio routes, `/v1/ai/dictate` and
@@ -8288,6 +8416,31 @@ async fn delete_skill_proxy(
 ) -> Result<Json<Value>, HttpJsonError> {
     proxy_to_capability_core(&s, &c, &bearer, &format!("skills/{id}"), "DELETE", None).await
 }
+/// EP-11 S2: a skill's immutable versions (capability-core
+/// `GET /api/v1/skills/{id}/versions`, 404 while SKILL_VERSIONS_API is off).
+/// Only the paging parameters pass, and only as plain digits.
+async fn list_skill_versions_proxy(
+    State(s): State<AppState>,
+    Extension(c): Extension<Claims>,
+    bearer: VerifiedCapabilityBearer,
+    Path(id): Path<String>,
+    Query(q): Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<Value>, HttpJsonError> {
+    let mut path = format!("skills/{id}/versions");
+    let paging: Vec<String> = ["limit", "before_version"]
+        .iter()
+        .filter_map(|key| {
+            q.get(*key)
+                .filter(|v| !v.is_empty() && v.bytes().all(|b| b.is_ascii_digit()))
+                .map(|v| format!("{key}={v}"))
+        })
+        .collect();
+    if !paging.is_empty() {
+        path.push('?');
+        path.push_str(&paging.join("&"));
+    }
+    proxy_to_capability_core(&s, &c, &bearer, &path, "GET", None).await
+}
 
 /// `GET /v1/runs/:run_id/watchers` — the caller's own watch status on this
 /// run. capability-core derives org_id/user_id from the forwarded
@@ -8729,6 +8882,12 @@ fn parse_skill_decision(word: &str) -> Option<mp_contracts::model_plane::v1::Ski
 /// camelCase. Timestamps are emitted as RFC3339 strings (null when unset) and
 /// the arbitrary `metadata` Struct is flattened to plain JSON.
 fn run_detail_value(run: &RunDetail) -> Value {
+    run_detail_value_with(run, run_origin_field_enabled())
+}
+
+/// `run_detail_value` with the origin switch passed in, so a test can name either
+/// setting without touching the process environment.
+fn run_detail_value_with(run: &RunDetail, origin_field: bool) -> Value {
     let mut value = json!({
         "run_id": run.run_id,
         "thread_id": run.thread_id,
@@ -8752,7 +8911,22 @@ fn run_detail_value(run: &RunDetail) -> Value {
     if !run.owner_subject_id.is_empty() {
         value["owner_subject_id"] = json!(run.owner_subject_id);
     }
+    // EP-12 S1: the origin the run was stamped with, at the top level, so the Agent
+    // API and the trigger chip read one field. It is read from the metadata projected
+    // above, and a stamp outside the closed token set projects as null, not a guess.
+    if origin_field {
+        value["origin"] = mp_contracts::run_origin::RunOrigin::from_metadata(&value["metadata"])
+            .map_or(Value::Null, |origin| json!(origin.as_str()));
+    }
     value
+}
+
+/// The switch that adds the top-level `origin` to a run projection (EP-12 S1). Default
+/// off; the strict parser the other gateway switches share reads it.
+const RUN_ORIGIN_FIELD_ENV: &str = "MODEL_GATEWAY_RUN_ORIGIN_FIELD";
+
+fn run_origin_field_enabled() -> bool {
+    mp_contracts::loop_fold::switch_from(std::env::var(RUN_ORIGIN_FIELD_ENV).ok().as_deref())
 }
 
 #[cfg(test)]
@@ -8785,6 +8959,64 @@ mod run_detail_value_tests {
         // The projection still says what it always said.
         assert_eq!(value["run_id"], "run-1");
         assert_eq!(value["status"], "awaiting_approval");
+    }
+
+    /// A run whose stored metadata carries `stamp` as its origin, the shape Session Core returns.
+    fn run_stamped(stamp: &str) -> RunDetail {
+        RunDetail {
+            run_id: "run-1".to_owned(),
+            thread_id: "thread-1".to_owned(),
+            metadata: Some(prost_types::Struct {
+                fields: [(
+                    "origin".to_owned(),
+                    prost_types::Value {
+                        kind: Some(prost_types::value::Kind::StringValue(stamp.to_owned())),
+                    },
+                )]
+                .into_iter()
+                .collect(),
+            }),
+            ..Default::default()
+        }
+    }
+
+    /// With the switch on, the top-level `origin` names the run's stamp, and a run
+    /// with no stamp reads as chat.
+    #[test]
+    fn run_detail_value_names_origin_when_switch_on() {
+        for (stamp, origin) in [("api", "api"), ("schedule", "schedule"), ("chat", "chat")] {
+            let value = run_detail_value_with(&run_stamped(stamp), true);
+            assert_eq!(value["origin"], origin, "{stamp}");
+        }
+        let unstamped = RunDetail {
+            run_id: "run-2".to_owned(),
+            ..Default::default()
+        };
+        assert_eq!(run_detail_value_with(&unstamped, true)["origin"], "chat");
+    }
+
+    /// With the switch off the projection is what it was: no `origin` key, and the
+    /// metadata unchanged.
+    #[test]
+    fn run_detail_value_unchanged_when_switch_off() {
+        let run = run_stamped("api");
+        let off = run_detail_value_with(&run, false);
+        let object = off.as_object().expect("a run is a JSON object");
+        assert!(!object.contains_key("origin"), "{off}");
+        assert_eq!(off["metadata"]["origin"], "api");
+        // Switching the field on adds exactly one key and changes nothing else.
+        let mut expected = off.clone();
+        expected["origin"] = json!("api");
+        assert_eq!(run_detail_value_with(&run, true), expected);
+    }
+
+    /// A stamp outside the closed token set projects as null, and the metadata still
+    /// shows what was stored.
+    #[test]
+    fn unknown_origin_stamp_projects_null() {
+        let value = run_detail_value_with(&run_stamped("sheduled"), true);
+        assert!(value["origin"].is_null(), "{value}");
+        assert_eq!(value["metadata"]["origin"], "sheduled");
     }
 }
 
@@ -15360,6 +15592,303 @@ async fn undo_learning_entry(
         "skill_id": response.skill_id,
         "revision": response.revision,
     })))
+}
+
+/// The ZDR feature key a `/learn` refusal names (`zdr-refusals.json`, EP-11 S7).
+pub const LEARN_COMMAND_ZDR_FEATURE: &str = "learn_command";
+
+/// The longest note a `/learn` carries, in characters. capability-core refuses a longer one too;
+/// it is checked here so an oversized body never crosses the hop.
+const LEARN_NOTE_MAX_CHARS: usize = 500;
+
+/// The longest thread id a `/learn` names, as the SPA's action contract bounds it.
+const LEARN_THREAD_ID_MAX_BYTES: usize = 128;
+
+/// `current_thread_id` of the thread check below. The check reuses the thread reference read, which
+/// refuses reading the thread a turn runs in; no turn is reading here, so this names no thread.
+const LEARN_PROBE_CURRENT_THREAD: &str = "learn-command";
+
+/// Whether a `/learn` caller's posture is refused, before anything is read. A ZDR credential and a
+/// waived one are refused with the `learn_command` feature: a review sends the transcript to the
+/// review model and keeps what it distils, which neither posture allows (DEC-32). Any other
+/// posture refusal is answered as the resolver words it.
+#[must_use]
+pub fn learn_command_refusal(claims: &Claims) -> Option<mp_contracts::zdr_refusal::Refusal> {
+    use crate::zdr_posture::{decide_for, Route, TurnPosture};
+    use mp_contracts::zdr_refusal::{code, Refusal};
+    match decide_for(claims, &Route::plain(false)) {
+        Ok(TurnPosture::Persistent) => None,
+        Ok(TurnPosture::Zdr { .. } | TurnPosture::Waived { .. }) => {
+            Some(Refusal::feature_not_supported(LEARN_COMMAND_ZDR_FEATURE))
+        }
+        // A waiver binds one chat route; on this route it is a waived caller like any other.
+        Err(refusal) if refusal.code() == code::WAIVER_ROUTE_MISMATCH => {
+            Some(Refusal::feature_not_supported(LEARN_COMMAND_ZDR_FEATURE))
+        }
+        Err(refusal) => Some(refusal),
+    }
+}
+
+fn learn_error(status: StatusCode, code: &str, message: &str) -> HttpJsonError {
+    (
+        status,
+        Json(json!({ "error": { "code": code, "message": message, "details": {} } })),
+    )
+}
+
+/// Session Core's answer to the thread check, as `/learn` answers it. A thread that holds a ZDR or
+/// waived run is the catalogue's `learn_command` refusal; a Space, agent or other non-chat thread and
+/// an archived one are not a person's conversation to learn from; a thread the caller does not own
+/// reads as one that does not exist.
+fn learn_thread_refusal(error: &tonic::Status) -> HttpJsonError {
+    match (error.code(), error.message()) {
+        (tonic::Code::FailedPrecondition, "thread_reference_retention") => {
+            crate::zdr_posture::http(&mp_contracts::zdr_refusal::Refusal::feature_not_supported(
+                LEARN_COMMAND_ZDR_FEATURE,
+            ))
+        }
+        (tonic::Code::FailedPrecondition, "thread_reference_not_chat") => learn_error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "learn_thread_not_chat",
+            "only your own chat conversations can be learned from",
+        ),
+        (tonic::Code::FailedPrecondition, "thread_reference_archived") => learn_error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "learn_thread_archived",
+            "an archived conversation is not learned from",
+        ),
+        (tonic::Code::NotFound | tonic::Code::PermissionDenied, _) => learn_error(
+            StatusCode::NOT_FOUND,
+            "learn_thread_not_found",
+            "no such conversation",
+        ),
+        _ => learn_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "learn_unavailable",
+            "learning from a conversation is unavailable",
+        ),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct LearnFromThreadBody {
+    thread_id: String,
+    #[serde(default)]
+    note: Option<String>,
+}
+
+/// The body forwarded to capability-core, or the refusal of a malformed one. Only the thread and
+/// the trimmed note cross; whose thread it is comes from the verified claims on both sides.
+fn learn_forward_body(body: &LearnFromThreadBody) -> Result<Value, HttpJsonError> {
+    let thread_id = body.thread_id.trim();
+    if thread_id.is_empty() || thread_id.len() > LEARN_THREAD_ID_MAX_BYTES {
+        return Err(learn_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_thread_id",
+            "thread_id is required",
+        ));
+    }
+    let note = body.note.as_deref().map_or("", str::trim);
+    if note.chars().count() > LEARN_NOTE_MAX_CHARS {
+        return Err(learn_error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "learn_note_too_long",
+            "the note is longer than 500 characters",
+        ));
+    }
+    Ok(json!({ "thread_id": thread_id, "note": note }))
+}
+
+/// `/learn` (EP-11 S7): the signed-in person asks Verevon to distil one of their own chat threads
+/// into a skill proposal for their learning inbox. The caller's posture is refused first, then
+/// Session Core confirms on the person's own credential that the thread is theirs, a chat thread,
+/// not archived and holds no ZDR or waived run (the thread reference read applies exactly those
+/// rules, and refuses before it reads a turn). capability-core then runs the learning review's own
+/// gates and answers 202 `{ data: { state: "queued" } }` or a typed refusal, relayed unchanged; it
+/// answers 404 while `LEARN_COMMAND_ENABLED` is off there.
+async fn learn_from_thread(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    bearer: VerifiedModelBearer,
+    capability_bearer: VerifiedCapabilityBearer,
+    Json(body): Json<LearnFromThreadBody>,
+) -> Result<(StatusCode, Json<Value>), HttpJsonError> {
+    use mp_contracts::model_plane::v1::{ReadThreadForReferenceRequest, ThreadReferenceMode};
+    if let Some(refusal) = learn_command_refusal(&claims) {
+        return Err(crate::zdr_posture::http(&refusal));
+    }
+    let forward = learn_forward_body(&body)?;
+    let thread_id = forward["thread_id"].as_str().unwrap_or_default().to_owned();
+
+    // One outline line is the smallest read the RPC offers; it is discarded, and every refusal
+    // above comes before Session Core reads a turn.
+    state
+        .thread_reference_client
+        .clone()
+        .read_thread_for_reference(authenticated_session_request(
+            ReadThreadForReferenceRequest {
+                org_id: claims.org_id.clone(),
+                user_id: claims.user_id.clone(),
+                thread_id,
+                mode: ThreadReferenceMode::Outline as i32,
+                before_message_id: String::new(),
+                limit: 1,
+                current_thread_id: LEARN_PROBE_CURRENT_THREAD.to_owned(),
+            },
+            &bearer,
+        )?)
+        .await
+        .map_err(|error| learn_thread_refusal(&error))?;
+
+    if state.capability_core_base_url.is_empty() {
+        return Err(learn_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "learn_unavailable",
+            "learning from a conversation is unavailable",
+        ));
+    }
+    let url = format!("{}/api/v1/learning/learn", state.capability_core_base_url);
+    let response = state
+        .http_client
+        .post(url)
+        .bearer_auth(capability_bearer.as_str())
+        .json(&forward)
+        .send()
+        .await
+        .map_err(|error| {
+            warn!(error = %error, "capability-core /learn unavailable");
+            learn_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "learn_unavailable",
+                "learning from a conversation is unavailable",
+            )
+        })?;
+    let status = StatusCode::from_u16(response.status().as_u16())
+        .unwrap_or(StatusCode::BAD_GATEWAY);
+    match response.json::<Value>().await {
+        Ok(body) if status.is_success() => Ok((status, Json(body))),
+        Ok(body) => Err((status, Json(body))),
+        // The mux's own 404 (the switch is off there) and any other bodiless answer keep their
+        // status with a typed body.
+        Err(_) if status == StatusCode::NOT_FOUND => Err(learn_error(
+            StatusCode::NOT_FOUND,
+            "learn_command_disabled",
+            "learning from a conversation is not enabled on this deployment",
+        )),
+        Err(_) => Err(learn_error(
+            StatusCode::BAD_GATEWAY,
+            "learn_unavailable",
+            "learning from a conversation is unavailable",
+        )),
+    }
+}
+
+#[cfg(test)]
+mod learn_command_tests {
+    use super::*;
+
+    fn claims(payload: Value) -> Claims {
+        let mut base = json!({
+            "sub": "user-1",
+            "iss": "https://auth.test/model",
+            "aud": "model-gateway",
+            "exp": 4_102_444_800_i64,
+            "nbf": 1_700_000_000_i64,
+            "org_id": "org-1",
+            "user_id": "user-1",
+            "principal_type": "user",
+        });
+        if let (Some(base), Some(extra)) = (base.as_object_mut(), payload.as_object()) {
+            base.extend(extra.clone());
+        }
+        serde_json::from_value(base).expect("a minted token's payload is valid Claims")
+    }
+
+    #[test]
+    fn a_persistent_caller_is_not_refused() {
+        assert!(learn_command_refusal(&claims(json!({ "zdr": false, "org_zdr": false }))).is_none());
+    }
+
+    #[test]
+    fn a_zdr_or_waived_caller_is_refused_with_the_learn_command_feature() {
+        let waiver = json!({
+            "version": 1,
+            "provider": mp_contracts::agentic_subscription::PROVIDER_ID,
+            "connection": "conn-1",
+        });
+        for token in [
+            claims(json!({ "zdr": true })),
+            claims(json!({ "zdr": false, "org_zdr": true, "zdr_waiver": waiver })),
+        ] {
+            let refusal = learn_command_refusal(&token).expect("refused");
+            assert_eq!(refusal.code(), mp_contracts::zdr_refusal::code::FEATURE_NOT_SUPPORTED);
+            assert_eq!(refusal.feature(), Some(LEARN_COMMAND_ZDR_FEATURE));
+        }
+    }
+
+    #[test]
+    fn learn_thread_refusals_are_typed() {
+        let cases = [
+            (
+                tonic::Status::failed_precondition("thread_reference_retention"),
+                StatusCode::PRECONDITION_FAILED,
+                "zdr_feature_not_supported",
+            ),
+            (
+                tonic::Status::failed_precondition("thread_reference_not_chat"),
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "learn_thread_not_chat",
+            ),
+            (
+                tonic::Status::failed_precondition("thread_reference_archived"),
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "learn_thread_archived",
+            ),
+            (
+                tonic::Status::not_found("thread not found"),
+                StatusCode::NOT_FOUND,
+                "learn_thread_not_found",
+            ),
+            (
+                tonic::Status::unavailable("down"),
+                StatusCode::SERVICE_UNAVAILABLE,
+                "learn_unavailable",
+            ),
+        ];
+        for (error, status, code) in cases {
+            let (got_status, Json(body)) = learn_thread_refusal(&error);
+            assert_eq!(got_status, status, "{error:?}");
+            assert_eq!(body["error"]["code"], code, "{error:?}");
+        }
+        let (_, Json(body)) =
+            learn_thread_refusal(&tonic::Status::failed_precondition("thread_reference_retention"));
+        assert_eq!(body["error"]["feature"], LEARN_COMMAND_ZDR_FEATURE);
+    }
+
+    #[test]
+    fn learn_forward_body_carries_only_the_thread_and_the_trimmed_note() {
+        let body = LearnFromThreadBody {
+            thread_id: " thread-1 ".to_owned(),
+            note: Some("  keep the steps  ".to_owned()),
+        };
+        assert_eq!(
+            learn_forward_body(&body).expect("valid"),
+            json!({ "thread_id": "thread-1", "note": "keep the steps" })
+        );
+        let blank = LearnFromThreadBody {
+            thread_id: "  ".to_owned(),
+            note: None,
+        };
+        assert_eq!(learn_forward_body(&blank).unwrap_err().0, StatusCode::BAD_REQUEST);
+        let long = LearnFromThreadBody {
+            thread_id: "thread-1".to_owned(),
+            note: Some("å".repeat(LEARN_NOTE_MAX_CHARS + 1)),
+        };
+        let (status, Json(refusal)) = learn_forward_body(&long).unwrap_err();
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(refusal["error"]["code"], "learn_note_too_long");
+        assert!(refusal["error"]["details"].is_object());
+    }
 }
 
 #[allow(clippy::too_many_lines)]
@@ -22515,5 +23044,109 @@ mod deck_templates_route_tests {
         odd["deck_template"] = json!({ "id": "skill-brand" });
         let odd: InvokeRequest = serde_json::from_value(odd).unwrap();
         assert_eq!(crate::deck_templates::requested(odd.deck_template.as_ref()), None);
+    }
+}
+
+#[cfg(test)]
+mod mcp_app_resource_route_tests {
+    //! Wave 3 EP-4 S8: the MCP app resource route. The switch, the zero-retention refusal, the
+    //! query and the missing credential are all decided before capability-core or an MCP server is
+    //! asked, so these tests need neither; the read itself is covered by `mcp_apps::tests`.
+    use super::*;
+
+    use axum::{body::Body, http::Request as HttpRequest};
+    use tower::ServiceExt;
+
+    fn claims(zdr: bool) -> Claims {
+        serde_json::from_value(json!({
+            "sub": "user-a", "iss": "auth-core", "exp": 4_102_444_800_i64, "org_id": "org-a",
+            "user_id": "user-a", "principal_type": "user", "zdr": zdr
+        }))
+        .expect("claims")
+    }
+
+    /// The route with its switch on and with it off; the env read stays out of parallel tests.
+    fn app(zdr: bool, with_bearer: bool) -> Router {
+        let router = Router::new()
+            .route(
+                "/v1/mcp-apps/resource",
+                get(
+                    |state: State<AppState>,
+                     claims: Extension<Claims>,
+                     bearer: Option<Extension<VerifiedCapabilityBearer>>,
+                     query: Query<McpAppResourceQuery>| {
+                        mcp_app_resource(state, claims, bearer, query, true)
+                    },
+                ),
+            )
+            .route(
+                "/off/v1/mcp-apps/resource",
+                get(
+                    |state: State<AppState>,
+                     claims: Extension<Claims>,
+                     bearer: Option<Extension<VerifiedCapabilityBearer>>,
+                     query: Query<McpAppResourceQuery>| {
+                        mcp_app_resource(state, claims, bearer, query, false)
+                    },
+                ),
+            )
+            .with_state(AppState::new())
+            .layer(Extension(claims(zdr)));
+        if with_bearer {
+            router.layer(Extension(VerifiedCapabilityBearer::for_test("capability-bearer")))
+        } else {
+            router
+        }
+    }
+
+    async fn get_json(router: Router, uri: &str) -> (StatusCode, Value) {
+        let response = router
+            .oneshot(HttpRequest::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+    }
+
+    const QUERY: &str = "?server_id=srv-1&tool=show_chart";
+
+    #[tokio::test]
+    async fn route_404_when_switch_off() {
+        // Off reads as no route at all, for a ZDR caller, a caller with no credential and no query.
+        for (zdr, with_bearer, query) in [(false, true, QUERY), (true, true, QUERY), (false, false, "")] {
+            let (status, body) =
+                get_json(app(zdr, with_bearer), &format!("/off/v1/mcp-apps/resource{query}")).await;
+            assert_eq!(status, StatusCode::NOT_FOUND, "zdr={zdr} bearer={with_bearer}");
+            assert_eq!(body["error"]["code"], "not_found");
+        }
+    }
+
+    #[tokio::test]
+    async fn zdr_token_is_refused() {
+        let (status, body) = get_json(app(true, true), &format!("/v1/mcp-apps/resource{QUERY}")).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["error"]["code"], "zdr_feature_not_supported");
+        assert_eq!(body["error"]["feature"], "mcp_execution");
+    }
+
+    #[tokio::test]
+    async fn server_and_tool_are_required() {
+        for query in ["", "?server_id=srv-1", "?tool=show_chart", "?server_id=%20&tool=show_chart"] {
+            let (status, body) =
+                get_json(app(false, true), &format!("/v1/mcp-apps/resource{query}")).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{query}");
+            assert_eq!(body["error"]["code"], "invalid_request");
+        }
+    }
+
+    #[tokio::test]
+    async fn needs_a_capability_credential() {
+        let (status, body) =
+            get_json(app(false, false), &format!("/v1/mcp-apps/resource{QUERY}")).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body["error"]["code"], "capability_credential_required");
     }
 }

@@ -506,6 +506,18 @@ fn every_refusal_the_spec_names_is_a_catalogue_refusal() {
     }
 }
 
+/// `/learn` (EP-11 S7) is a route, not an invoke field: a ZDR caller is refused with the
+/// catalogue's `learn_command` feature before anything is read, and that feature is in the
+/// catalogue, so the refusal reaches the client typed.
+#[test]
+fn the_learn_command_route_refuses_a_zdr_caller_with_its_catalogue_feature() {
+    use model_gateway::http_routes::{learn_command_refusal, LEARN_COMMAND_ZDR_FEATURE};
+    let refusal = learn_command_refusal(&zdr_token()).expect("a ZDR caller is refused");
+    assert_eq!(refusal.code(), code::FEATURE_NOT_SUPPORTED);
+    assert_eq!(refusal.feature(), Some(LEARN_COMMAND_ZDR_FEATURE));
+    assert!(Refusal::new(code::FEATURE_NOT_SUPPORTED, Some(LEARN_COMMAND_ZDR_FEATURE)).is_some());
+}
+
 #[test]
 fn every_inert_field_states_its_reason() {
     for (field, treatment) in FIELD_TREATMENTS.iter().chain(FEATURE_TREATMENTS.iter()) {
