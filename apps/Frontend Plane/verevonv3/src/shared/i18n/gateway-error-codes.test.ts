@@ -468,6 +468,10 @@ const ADDED_CODES = [
   'UNSUPPORTED',
   'UNSUPPORTED_MEDIA',
   'BUDGET_EXHAUSTED',
+  // W3-E3.8.5: the fetch reasons of a failed scrape (gateway knowledge/shared.rs).
+  'scrape_host_not_found',
+  'scrape_unreachable',
+  'scrape_tls_failed',
 ] as readonly string[]
 
 // An internal id in a sentence: snake_case or UPPER_SNAKE words, plus the names

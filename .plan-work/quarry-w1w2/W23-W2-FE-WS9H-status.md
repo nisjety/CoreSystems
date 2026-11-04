@@ -1,10 +1,15 @@
-# W2-FE-WS9H status: WS9.H interactive dock pane (dark), lane a (branch w23/lane-a)
+# W2-FE-WS9H status: WS9.H interactive dock pane (dark), lane a (landed on branch w23f/lane-a)
 
-## Status: NOT LANDED. Drafts only.
+## Status
 
-This session is rooted at `vigorous-perlman-e7ae5b`. The harness refused Write into the lane worktree (`innh-lane-a`) under the different-worktree rule. Entering the lane with EnterWorktree was not done: that tool is for explicit worktree instructions from the user or CLAUDE.md, and this unit's instruction came from a workflow script. Writing the lane files through Bash or python would have routed around the same refusal, so it was not done either. Nothing is in the lane: no commits, no edits, no status file, no depth rows. The lane checkout was read only, and `git status` in the lane is still clean.
+**Landed 2026-11-04. Built. Code only, compile-checked at integration (not compiled here).**
 
-The code is staged in the scratchpad folder `ws9h-drafts/`. It must be applied from a session rooted at `innh-lane-a`.
+- Commits on `w23f/lane-a` (base main `9bea43473`): `b804dec7d` feat(browser): interactive dock pane beside the chat behind VITE_CHAT_BROWSER_DOCK (W2-FE-WS9H), with all eight new files under `src/features/browser/dock/` plus `ChatPanels.tsx` and `ChatPage.tsx`; and the docs commit that carries this file, the depth rows in `W23-depth-lane-a.md`, and the removal of the landed drafts folder `.plan-work/quarry-w1w2/w23-unlanded-drafts/W2-FE-WS9H/`.
+- How it was applied: the seven `.ts`/`.tsx` drafts were copied as they were (LF, matching the `eol=lf` attribute of the folder); `interactive-browser-pane.css` was copied in CRLF (like `browser-dock.css`). `ws9h-chatpanels.patch` applied cleanly with `git apply` after its CRLF checkout was converted to LF. `ws9h-chatpage.patch` did not apply with `git apply` against main: main's `ChatPage.tsx` gained imports above the anchor (EP-14-S2 and chat-projects lines) after the drafts were made. It was applied with `patch --binary`: hunk 1 with fuzz 1 (only its leading context line moved), hunks 2 to 7 with offsets of 94 to 173 lines, no rejects. The result was read back: the new imports sit right after `BrowserDockControls`, and the class element, header slot, run-panel `hidden` change and pane mount are in place.
+- Checked by reading against main: every identifier the ChatPage hunks use exists (`browserDock`, `toggleRunPanel`, `setBrowserDockPosition`, `liveRunId`, `isActiveThreadTemporary`, `startNewChat`, `selectChatThread(threadId: string)`, `setInput`, `session`, `state.threadId`, `activeTab`); `browserDockPageClass` and `chatPerTab` exist in `browser-dock-state.ts`; `JSX` is imported in `ChatPanels.tsx`; every module and named export the new files import exists; every `BrowserChrome` prop the pane passes is in its props type; every controller member used is on `BrowserSessionController`.
+- The Gb pin test `ChatPage.browser-dock.test.ts` was not edited (its 18 strings were checked present in the draft; main's later edits did not touch the pinned lines this patch changes, by reading).
+
+The original drafts note (made in the vigorous-perlman session, kept for the record): the code was staged in the scratchpad because that session could not write into `innh-lane-a`.
 
 ## Built (code only, not compiled)
 
@@ -58,18 +63,9 @@ None. The pane uses the existing human-session endpoints (`/api/v1/browser/sessi
 
 ## Not done (could not)
 
-- Writing to the lane, so no commits. The lane branch `w23/lane-a` is unchanged.
-- The status file and depth rows could not be written into the lane. Drafts are in `ws9h-drafts/`.
-- Nothing pushed, no PR, no Docker touched.
+- Nothing pushed, no PR. Not compiled, no test run (owner order). tsc baseline: the S12 integration recorded a whole-project count of 1 pre-existing error (`schedule-contract.test.ts`).
 
 ## Apply steps (from a session rooted at `innh-lane-a`)
 
-1. Copy the seven new `.ts` and `.tsx` files into `apps/Frontend Plane/verevonv3/src/features/browser/dock/`.
-2. Copy `interactive-browser-pane.css` into the same folder and convert it to CRLF.
-3. From the repo root, `git apply` `ws9h-chatpanels.patch` and `ws9h-chatpage.patch`.
-4. Commit with explicit paths, with the trailer `Co-Authored-By: Claude Haiku 5.5 <noreply@anthropic.com>`:
-   - `feat(browser): chat-per-tab map and dock session hook (W2-FE-WS9H)`
-   - `feat(browser): interactive dock pane, open button and ask affordance (W2-FE-WS9H)`
-   - `feat(chat): header slot and dock body switch for the interactive browser (W2-FE-WS9H)`
-   - `docs(plan-work): W2-FE-WS9H status and lane a depth rows`
-5. Compile check at integration: `pnpm typecheck` (baseline 33), then `pnpm exec vitest run src/features/chat` and `pnpm exec vitest run src/features/browser/dock`.
+Done 2026-11-04 (see Status). Compile check at integration: `tsc6 -p tsconfig.app.json --noEmit`, then `pnpm exec vitest run src/features/chat` and `pnpm exec vitest run src/features/browser/dock`.
+

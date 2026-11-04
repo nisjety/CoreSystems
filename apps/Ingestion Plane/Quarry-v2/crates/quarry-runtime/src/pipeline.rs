@@ -307,17 +307,19 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
-/// E3.6-6b: the one call into the E3.6-6a client (imports-core, ephemeral). If
-/// the client is named differently there, this is the single line to correct.
+/// E3.6-6b: the one call into the E3.6-6a client (imports-core, ephemeral). The
+/// bearer is minted for the run's org; the URL path only picks the ODF subtype.
 async fn extract_office(
+    org_id: &str,
     kind: quarry_transform::sniff::ContentKind,
     body: Vec<u8>,
+    filename_hint: Option<&str>,
 ) -> QuarryResult<crate::content_route::ParsedDocument> {
     #[cfg(test)]
     if let Some(reply) = TEST_OFFICE_REPLY.with(|slot| slot.borrow_mut().take()) {
         return reply;
     }
-    crate::content_route::extract_office_via_imports(kind, body).await
+    crate::content_route::extract_office_via_imports(org_id, kind, body, filename_hint).await
 }
 
 /// E3.6-4a: the environment variable that turns the fail-closed PII redaction
@@ -1571,7 +1573,14 @@ impl PageRunner {
             Some(found)
                 if takes_imports_route(self.doc_routing, office_via_imports_mode(), found.kind) =>
             {
-                match extract_office(found.kind, resp.body.clone()).await {
+                match extract_office(
+                    self.org_id.as_deref().unwrap_or_default(),
+                    found.kind,
+                    resp.body.clone(),
+                    Some(resp.final_url.path()),
+                )
+                .await
+                {
                     Ok(parsed) => Some(parsed),
                     Err(error) => {
                         self.emit_page_event(

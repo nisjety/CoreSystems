@@ -200,22 +200,25 @@ func sortedKeys(set map[string]struct{}) []string {
 
 // enqueueChildrenBatch enqueues the links of one page with a single activity call
 // (WS14.S3). A link with a blank URL is skipped. The request id is the one the
-// per-link path uses, so the queue refuses a link it already has.
+// per-link path uses, so the queue refuses a link it already has. With canonical on
+// (W3 E3.7.6) a link goes in under its canonical form, as on the per-link path.
 func enqueueChildrenBatch(
 	ctx workflow.Context,
 	a *activities.Activities,
 	queue, orgID, runID string,
 	depth uint32,
 	links []string,
+	canonical bool,
 ) error {
 	items := make([]activities.FrontierBatchItem, 0, len(links))
 	for _, link := range links {
 		if strings.TrimSpace(link) == "" {
 			continue
 		}
+		requestID, target := frontierTarget(runID, link, canonical)
 		items = append(items, activities.FrontierBatchItem{
-			RequestID: durableFrontierRequestID(runID, link),
-			URL:       link,
+			RequestID: requestID,
+			URL:       target,
 			Depth:     depth,
 		})
 	}

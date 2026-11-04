@@ -736,6 +736,410 @@ fn devtools_event_matches(event: &BrowserDevtoolsEvent, filter: &DevtoolsFilter)
     true
 }
 
+// ---------------------------------------------------------------------------
+// W3 E3.2-e2: consent for attach-mode tabs (the route half; the ledger half is in
+// `tab_ledger.rs`).
+//
+// Attach mode (WS8.G) offers the person's visible tab to an agent attachment. Before that tab
+// can be attached, its current origin must carry the person's consent: an origin-extension
+// grant that passes the E3.2-e1 gate (`agent_policy_gate::origin_extension_from_grant` and
+// `check_origin_extension`: org caps, then deny beats approval) and whose hosts cover the tab's
+// host, which must itself pass the run's web policy. A policy deny is recorded on the tab and is
+// sticky; an approval is recorded with the host it was checked for. The attach itself
+// (`tab_ledger::attach_consented_tab`) then refuses any tab without an approval for the host it
+// is on, so a denied tab is never attached.
+//
+// Flag: follows `QUARRY_EDGE__ORIGIN_CONSENT` (default off). Off, every check is refused with 403
+// `origin_consent_disabled` before any driver or broker call. Dark: no route calls
+// `admit_attach_mode_tab` until the Model Plane attach driver's attach-mode request lands.
+// ---------------------------------------------------------------------------
+
+/// What a consent check approved for an attach-mode tab. Ids and closed labels only: no host.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
+pub(super) struct AttachTabConsent {
+    pub tab_id: String,
+    /// The origin-extension grant that approved the tab's origin.
+    pub grant_id: String,
+    pub scope: crate::agent_policy_gate::ConsentScope,
+    /// The tab's epoch when the consent was recorded (unchanged by the check).
+    pub tab_epoch: u64,
+}
+
+/// The host of a tab's page, lower case and without a trailing dot, for an http(s) page only.
+/// `None` for anything else (a blank tab, a `file:` or `chrome:` page, no URL).
+pub(super) fn tab_consent_host(url: Option<&str>) -> Option<String> {
+    let parsed = Url::parse(url?).ok()?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return None;
+    }
+    let host = parsed
+        .host_str()?
+        .trim_end_matches('.')
+        .to_ascii_lowercase();
+    (!host.is_empty()).then_some(host)
+}
+
+/// Whether an origin extension covers `host`: one of its hosts, or a host under one of them on
+/// a dot boundary (the allow-list rule the widened egress boundary applies).
+pub(super) fn extension_covers_host(
+    extension: &crate::agent_policy_gate::OriginExtension,
+    host: &str,
+) -> bool {
+    extension.all_hosts().iter().any(|entry| {
+        host == entry
+            || host
+                .strip_suffix(entry.as_str())
+                .is_some_and(|rest| rest.ends_with('.'))
+    })
+}
+
+/// Whether a refusal of the E3.2-e1 gate is a deny that sticks to the tab. A malformed grant, a
+/// grant of another run or a host the extension does not list is no deny of the tab: nothing is
+/// approved either, so the tab still cannot be attached, and a correct grant may follow.
+pub(super) fn consent_refusal_is_sticky(
+    refusal: crate::agent_policy_gate::OriginExtensionRefusal,
+) -> bool {
+    use crate::agent_policy_gate::OriginExtensionRefusal;
+    matches!(
+        refusal,
+        OriginExtensionRefusal::Denied
+            | OriginExtensionRefusal::OrgDisabled
+            | OriginExtensionRefusal::OrgScope
+    )
+}
+
+/// The typed error of a ledger consent refusal. The details carry closed labels only.
+pub(super) fn tab_consent_error(error: TabConsentError) -> QuarryError {
+    let (code, message) = match error {
+        TabConsentError::NotFound => (ErrorCode::NotFound, "the tab is not open on this run"),
+        TabConsentError::Denied { .. } => (
+            ErrorCode::SecurityBlocked,
+            "consent for this tab's origin was denied; the tab is never attached",
+        ),
+        TabConsentError::ConsentRequired => (
+            ErrorCode::Forbidden,
+            "this tab's origin has no consent for attach mode",
+        ),
+        TabConsentError::NotHumanHeld => (
+            ErrorCode::Conflict,
+            "only a tab the person holds can be attached",
+        ),
+        TabConsentError::AlreadyAttached => (
+            ErrorCode::Conflict,
+            "the tab already belongs to an attachment",
+        ),
+        TabConsentError::NoAttachedAgent => (
+            ErrorCode::Conflict,
+            "no live attachment is pinned to this tab",
+        ),
+        TabConsentError::Stale { .. } => (
+            ErrorCode::Conflict,
+            "the tab's epoch has moved since it was read",
+        ),
+    };
+    let mut details = serde_json::json!({ "reason": error.as_str() });
+    match error {
+        TabConsentError::Denied { reason } => details["denial"] = serde_json::json!(reason),
+        TabConsentError::Stale { current } => details["tab_epoch"] = serde_json::json!(current),
+        _ => {}
+    }
+    QuarryError::new(code, message).with_details(details)
+}
+
+fn count_attach_tab_consent_refused(run_id: &str, reason: &'static str) {
+    metrics::counter!("quarry_attach_tab_consent_refused_total", "reason" => reason).increment(1);
+    // Closed labels only: never a host or a URL.
+    tracing::warn!(
+        target: "quarry_edge::agent",
+        run_id = %run_id,
+        reason,
+        "attach-mode tab consent refused"
+    );
+}
+
+/// Check and record the person's consent for attaching their visible tab `tab_id` (attach mode),
+/// reading the flag from the process environment.
+#[allow(dead_code)]
+pub(super) async fn admit_attach_mode_tab(
+    state: &AppState,
+    handle: &RunHandle,
+    entry: &RunEntry,
+    tab_id: &str,
+    extension_grant_id: &str,
+) -> QuarryResult<AttachTabConsent> {
+    admit_attach_mode_tab_with(
+        crate::agent_policy_gate::origin_consent_enabled(),
+        state,
+        handle,
+        entry,
+        tab_id,
+        extension_grant_id,
+    )
+    .await
+}
+
+/// [`admit_attach_mode_tab`] with the flag passed in (tests). The caller holds the run's entry
+/// lock. Order: the flag, the run (live, not a key run, not ZDR, has a grant), the tab from the
+/// driver (open, the active tab, held by the person), a sticky deny (before any broker call), the
+/// tab's origin, the run grant as gate 4 checks it, the origin-extension grant (E3.2-e1 reading),
+/// org caps and deny-beats-approval (E3.2-e1 gate), the tab host's own web-policy check, coverage
+/// of the tab host by the extension; then the approval is recorded.
+#[allow(dead_code)]
+pub(super) async fn admit_attach_mode_tab_with(
+    enabled: bool,
+    state: &AppState,
+    handle: &RunHandle,
+    entry: &RunEntry,
+    tab_id: &str,
+    extension_grant_id: &str,
+) -> QuarryResult<AttachTabConsent> {
+    use crate::agent_policy_gate::{
+        check_origin_extension, origin_extension_from_grant, ExtensionRun, OriginExtensionRefusal,
+    };
+    let run_id = entry.run_id.to_string();
+    let ledger_refusal = |error: TabConsentError| {
+        count_attach_tab_consent_refused(&run_id, error.as_str());
+        tab_consent_error(error)
+    };
+    let gate_refusal = |refusal: OriginExtensionRefusal| {
+        count_attach_tab_consent_refused(&run_id, refusal.as_str());
+        refusal.to_error()
+    };
+
+    if !enabled {
+        return Err(gate_refusal(OriginExtensionRefusal::FlagOff));
+    }
+    if entry.closed {
+        return Err(QuarryError::new(ErrorCode::NotFound, "agent run is not live")
+            .with_details(serde_json::json!({ "reason": "run_not_live" })));
+    }
+    // An API key has no person to consent (INNH-10).
+    if entry.key_id.is_some() {
+        return Err(gate_refusal(OriginExtensionRefusal::ApiKeyRun));
+    }
+    // Attach refuses ZDR runs (WS8.F); attach mode does too.
+    if entry.zdr.is_active() {
+        count_attach_tab_consent_refused(&run_id, "attach_zdr_refused");
+        return Err(QuarryError::new(ErrorCode::Forbidden, "attach_zdr_refused")
+            .with_details(serde_json::json!({ "reason": "attach_zdr_refused" })));
+    }
+    let Some(run_grant_id) = entry.grant_id.as_deref() else {
+        return Err(gate_refusal(OriginExtensionRefusal::GrantInvalid));
+    };
+
+    // The tab as the browser has it now. Tabs the ledger does not know are the person's.
+    let tabs = state.agent_driver.list_tabs(&entry.session).await?;
+    {
+        let ids: Vec<&str> = tabs.iter().map(|tab| tab.tab_id.as_str()).collect();
+        let mut ledger = handle.live.tabs();
+        ledger.retain_live(&ids);
+        for tab in &tabs {
+            ledger.seed(&tab.tab_id, OpenedBy::Human);
+        }
+    }
+    let Some(tab) = tabs.iter().find(|tab| tab.tab_id == tab_id) else {
+        return Err(ledger_refusal(TabConsentError::NotFound));
+    };
+    let (prior, holder) = {
+        let ledger = handle.live.tabs();
+        (
+            ledger.consent(tab_id).cloned(),
+            ledger.get(tab_id).map(|meta| meta.holder),
+        )
+    };
+    // A deny sticks to the tab: no broker call can lift it.
+    if let Some(TabConsent::Denied { reason }) = prior {
+        return Err(ledger_refusal(TabConsentError::Denied { reason }));
+    }
+    if holder != Some(BrowserTabHolder::Human) {
+        return Err(ledger_refusal(TabConsentError::NotHumanHeld));
+    }
+    // Attach mode is for the tab the person is looking at.
+    if !tab.active {
+        count_attach_tab_consent_refused(&run_id, "attach_tab_not_visible");
+        return Err(QuarryError::new(
+            ErrorCode::Conflict,
+            "attach mode takes the person's visible tab only",
+        )
+        .with_details(serde_json::json!({ "reason": "attach_tab_not_visible" })));
+    }
+    // A blank or non-web page has no origin to consent to; not a deny (it may navigate).
+    let Some(host) = tab_consent_host(tab.url.as_deref()) else {
+        return Err(ledger_refusal(TabConsentError::ConsentRequired));
+    };
+
+    // The run grant first, exactly as gate 4 checks it, then its snapshot for the org caps and
+    // the grant layer.
+    validate_run_grant(
+        state,
+        &entry.org_id,
+        run_grant_id,
+        entry.key_id.as_deref(),
+        &entry.constraints.allowed_domains,
+        &entry.nav_policy,
+    )
+    .await?;
+    let run_grant = state
+        .grant_validator
+        .validate_for_org(&entry.org_id, run_grant_id)
+        .await?;
+    let extension_grant = state
+        .grant_validator
+        .validate_for_org(&entry.org_id, extension_grant_id)
+        .await?;
+    let extension = origin_extension_from_grant(
+        &extension_grant,
+        &ExtensionRun {
+            parent_grant_id: run_grant_id,
+            owner_id: &entry.actor_id,
+            zdr: false,
+        },
+    )
+    .map_err(&gate_refusal)?;
+
+    let deny = |reason: OriginExtensionRefusal| {
+        if consent_refusal_is_sticky(reason) {
+            // The tab is open (seeded above), so this records; a race with a close is harmless.
+            let _ = handle.live.tabs().deny_consent(tab_id, reason.as_str());
+        }
+        gate_refusal(reason)
+    };
+    let run_denied: &[String] = match &entry.nav_policy {
+        super::human_browse::RunNavPolicy::OpenWeb { denied } => denied,
+        super::human_browse::RunNavPolicy::Allowlist => &[],
+    };
+    check_origin_extension(state, &handle.live, false, run_denied, &run_grant, &extension)
+        .map_err(&deny)?;
+    // The tab's own host, which may sit under a listed host, must pass the web policy too.
+    if crate::agent_policy_gate::gate_visit(state, &handle.live, false, &format!("https://{host}/"))
+        .is_err()
+        || run_denied.iter().any(|denied_host| {
+            host == *denied_host
+                || host
+                    .strip_suffix(denied_host.as_str())
+                    .is_some_and(|rest| rest.ends_with('.'))
+        })
+    {
+        return Err(deny(OriginExtensionRefusal::Denied));
+    }
+    if !extension_covers_host(&extension, &host) {
+        return Err(ledger_refusal(TabConsentError::ConsentRequired));
+    }
+
+    let tab_epoch = {
+        let mut ledger = handle.live.tabs();
+        ledger
+            .approve_consent(tab_id, &host, &extension.grant_id)
+            .map_err(&ledger_refusal)?;
+        ledger.get(tab_id).map_or(0, |meta| meta.epoch)
+    };
+    metrics::counter!("quarry_attach_tab_consent_approved_total", "scope" => extension.scope.as_str())
+        .increment(1);
+    tracing::info!(
+        target: "quarry_edge::agent",
+        run_id = %run_id,
+        scope = extension.scope.as_str(),
+        "attach-mode tab consent recorded"
+    );
+    Ok(AttachTabConsent {
+        tab_id: tab_id.to_owned(),
+        grant_id: extension.grant_id,
+        scope: extension.scope,
+        tab_epoch,
+    })
+}
+
+#[cfg(test)]
+mod attach_tab_consent_tests {
+    use super::*;
+    use crate::agent_policy_gate::{ConsentScope, OriginExtension, OriginExtensionRefusal};
+
+    fn extension(start: &str, hosts: &[&str]) -> OriginExtension {
+        OriginExtension {
+            grant_id: "grant_ext_1".to_owned(),
+            start_host: start.to_owned(),
+            hosts: hosts.iter().map(|host| (*host).to_owned()).collect(),
+            scope: ConsentScope::Conversation,
+        }
+    }
+
+    #[test]
+    fn the_tab_host_is_read_from_web_pages_only() {
+        assert_eq!(
+            tab_consent_host(Some("https://Shop.Example.com/cart?x=1")),
+            Some("shop.example.com".to_owned())
+        );
+        assert_eq!(
+            tab_consent_host(Some("http://shop.example.com./")),
+            Some("shop.example.com".to_owned())
+        );
+        assert_eq!(tab_consent_host(Some("about:blank")), None);
+        assert_eq!(tab_consent_host(Some("file:///etc/passwd")), None);
+        assert_eq!(tab_consent_host(Some("chrome://settings")), None);
+        assert_eq!(tab_consent_host(Some("not a url")), None);
+        assert_eq!(tab_consent_host(None), None);
+    }
+
+    #[test]
+    fn an_extension_covers_its_hosts_and_their_subdomains_only() {
+        let ext = extension("shop.example.com", &["login.example.net"]);
+        assert!(extension_covers_host(&ext, "shop.example.com"));
+        assert!(extension_covers_host(&ext, "login.example.net"));
+        assert!(extension_covers_host(&ext, "eu.shop.example.com"));
+        assert!(!extension_covers_host(&ext, "example.com"), "a parent is not covered");
+        assert!(!extension_covers_host(&ext, "evilshop.example.com"), "a dot boundary only");
+        assert!(!extension_covers_host(&ext, "other.example.org"));
+    }
+
+    #[test]
+    fn only_policy_denies_stick_to_the_tab() {
+        assert!(consent_refusal_is_sticky(OriginExtensionRefusal::Denied));
+        assert!(consent_refusal_is_sticky(OriginExtensionRefusal::OrgDisabled));
+        assert!(consent_refusal_is_sticky(OriginExtensionRefusal::OrgScope));
+        for loose in [
+            OriginExtensionRefusal::FlagOff,
+            OriginExtensionRefusal::GrantInvalid,
+            OriginExtensionRefusal::HostInvalid,
+            OriginExtensionRefusal::TooManyHosts,
+            OriginExtensionRefusal::ZdrScope,
+            OriginExtensionRefusal::OrgUnreadable,
+            OriginExtensionRefusal::ApiKeyRun,
+        ] {
+            assert!(!consent_refusal_is_sticky(loose), "{}", loose.as_str());
+        }
+    }
+
+    #[test]
+    fn ledger_refusals_map_to_typed_errors_with_closed_labels() {
+        let denied = tab_consent_error(TabConsentError::Denied {
+            reason: "origin_extension_denied",
+        });
+        assert_eq!(denied.code, ErrorCode::SecurityBlocked);
+        let required = tab_consent_error(TabConsentError::ConsentRequired);
+        assert_eq!(required.code.http_status(), 403);
+        assert_eq!(
+            tab_consent_error(TabConsentError::NotFound).code.http_status(),
+            404
+        );
+        for conflict in [
+            TabConsentError::NotHumanHeld,
+            TabConsentError::AlreadyAttached,
+            TabConsentError::NoAttachedAgent,
+            TabConsentError::Stale { current: 3 },
+        ] {
+            assert_eq!(tab_consent_error(conflict).code.http_status(), 409);
+        }
+    }
+
+    #[test]
+    fn the_flag_off_refusal_is_403_before_anything_else() {
+        // `admit_attach_mode_tab_with(false, ..)` returns this before any driver or broker call.
+        let error = OriginExtensionRefusal::FlagOff.to_error();
+        assert_eq!(error.code.http_status(), 403);
+    }
+}
+
 #[cfg(test)]
 mod devtools_filter_tests {
     use super::*;

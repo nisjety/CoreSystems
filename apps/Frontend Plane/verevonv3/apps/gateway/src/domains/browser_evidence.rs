@@ -2,6 +2,11 @@
 //! procedure reads behind the BrowserChrome evidence panels, and the allowlist
 //! that the devtools read passes through before Quarry sees it.
 //!
+//! E3.3-d adds the region and selection attach route behind `BROWSER_REGION_ATTACH`
+//! (default off): the browser crops the streamed frame, and the gateway re-resolves
+//! the tab and the region against Quarry before it hands back an ephemeral
+//! attachment classified `browser-scraped`. A zero-data-retention session is refused.
+//!
 //! Every route here is owner-gated. The verified session is checked against
 //! Quarry's own `browser-session` projection (the gate the devtools read already
 //! uses), and Quarry calls carry the verified caller's token. No handler reads a
@@ -14,17 +19,19 @@ use std::collections::BTreeMap;
 use axum::{
     body::Bytes,
     extract::{Extension, Path, State},
-    http::{HeaderMap, StatusCode, Uri},
+    http::{header, HeaderMap, StatusCode, Uri},
     response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
 };
+use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use reqwest::Method;
+use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::{
     config::AppState,
-    envelope::{error, ok, unwrap_data},
+    envelope::{error, error_with_details, ok, unwrap_data},
     middleware::{require_session, AuthenticatedUser},
     rate_limit::{with_rate_class, RateClass},
 };
@@ -45,8 +52,42 @@ const DEVTOOLS_LEVELS: [&str; 7] = ["debug", "info", "log", "warn", "warning", "
 const DEVTOOLS_CATEGORIES: [&str; 3] = ["console", "network", "lifecycle"];
 const PROCEDURE_ID_MAX_CHARS: usize = 64;
 
+/// `BROWSER_REGION_ATTACH` (E3.3-d): mounts the region and selection attach route.
+/// Default off. Read once when the router is built, never inside a handler.
+const REGION_ATTACH_FLAG: &str = "BROWSER_REGION_ATTACH";
+const REGION_ATTACH_PATH: &str = "/api/v1/browser/sessions/{session_id}/attachments/region";
+/// Decoded bytes of one cropped region image. The base64 body stays under the
+/// router's default 2 MB request limit.
+const REGION_IMAGE_MAX_BYTES: usize = 1024 * 1024;
+/// The smallest region edge, in viewport CSS pixels, after clamping.
+const REGION_MIN_EDGE_PX: u32 = 8;
+/// A cropped image may be at most this many times the region's size (a high
+/// device pixel ratio frame); a smaller (downscaled) image is fine.
+const REGION_MAX_IMAGE_SCALE: u64 = 3;
+/// Relative aspect ratio difference allowed between the image and the region.
+const REGION_ASPECT_TOLERANCE: f64 = 0.05;
+const SELECTION_MAX_CHARS: usize = 4000;
+const TAB_LABEL_MAX_CHARS: usize = 200;
+/// The wire name of `TrustClass::BrowserScraped` (mp-content-safety `trust.rs`).
+const REGION_TRUST_CLASS: &str = "browser-scraped";
+
 pub(crate) fn router(state: AppState) -> Router<AppState> {
-    let routes = Router::new()
+    router_with(state, region_attach_enabled_from_env())
+}
+
+fn region_attach_flag_on(value: Option<&str>) -> bool {
+    matches!(
+        value.map(|value| value.trim().to_ascii_lowercase()).as_deref(),
+        Some("1" | "true" | "yes" | "on")
+    )
+}
+
+fn region_attach_enabled_from_env() -> bool {
+    region_attach_flag_on(std::env::var(REGION_ATTACH_FLAG).ok().as_deref())
+}
+
+fn router_with(state: AppState, region_attach: bool) -> Router<AppState> {
+    let mut routes = Router::new()
         .route(
             "/api/v1/browser/sessions/{session_id}/receipts",
             get(get_session_receipts),
@@ -59,6 +100,9 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
             "/api/v1/browser/sessions/{session_id}/procedure",
             post(compile_session_procedure),
         );
+    if region_attach {
+        routes = routes.route(REGION_ATTACH_PATH, post(attach_session_region));
+    }
     with_rate_class(routes, &state.rate_limiter, RateClass::Interactive)
         .route_layer(axum::middleware::from_fn_with_state(state, require_session))
 }
@@ -596,6 +640,447 @@ async fn compile_procedure_view(
 }
 
 // ---------------------------------------------------------------------------
+// Region and selection attach (E3.3-d)
+// ---------------------------------------------------------------------------
+
+/// What the browser sends: the tab it believes it showed, the dragged region in
+/// viewport CSS pixels, the image it cropped from the streamed frame, and an
+/// optional selected text. None of it is trusted: the tab and the region are
+/// re-resolved here and the image is checked against the resolved region.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RegionAttachBody {
+    tab_id: String,
+    region: RegionRectInput,
+    image: RegionImageInput,
+    #[serde(default)]
+    selection_text: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RegionRectInput {
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RegionImageInput {
+    mime_type: String,
+    data_base64: String,
+}
+
+/// A region in whole viewport CSS pixels, inside the viewport.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RegionRect {
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+}
+
+#[derive(Debug)]
+struct RegionImage {
+    mime_type: &'static str,
+    bytes: Vec<u8>,
+    width: u32,
+    height: u32,
+}
+
+fn invalid_attachment(message: &'static str) -> Response {
+    bad_request("invalid_browser_attachment", message)
+}
+
+/// Page content from a zero-data-retention session is never attached.
+fn zdr_attachment_refused() -> Response {
+    (
+        StatusCode::CONFLICT,
+        Json(error(
+            "browser_attachment_refused_zdr",
+            "Page regions cannot be attached from a zero-data-retention browser session.",
+        )),
+    )
+        .into_response()
+}
+
+fn attachment_unresolved(code: &'static str, message: &'static str, reason: &'static str) -> Response {
+    (
+        StatusCode::CONFLICT,
+        Json(error_with_details(code, message, json!({ "reason": reason }))),
+    )
+        .into_response()
+}
+
+/// The session viewport from Quarry's projection, or None when it is not stated.
+/// The region is never resolved against a guessed viewport.
+fn projection_viewport(projection: &Value) -> Option<(u32, u32)> {
+    let viewport = projection.get("viewport")?;
+    let width = viewport
+        .get("width")
+        .and_then(Value::as_u64)
+        .and_then(|value| u32::try_from(value).ok())
+        .filter(|value| *value > 0)?;
+    let height = viewport
+        .get("height")
+        .and_then(Value::as_u64)
+        .and_then(|value| u32::try_from(value).ok())
+        .filter(|value| *value > 0)?;
+    Some((width, height))
+}
+
+/// Snap the requested region outward to whole pixels and clamp it to the
+/// viewport. Refused when a value is not finite, an edge is not positive, or the
+/// clamped region is smaller than the minimum edge (outside the viewport).
+fn resolve_region(
+    input: RegionRectInput,
+    viewport_width: u32,
+    viewport_height: u32,
+) -> Result<RegionRect, &'static str> {
+    let RegionRectInput {
+        x,
+        y,
+        width,
+        height,
+    } = input;
+    if ![x, y, width, height].iter().all(|value| value.is_finite()) {
+        return Err("region values must be finite numbers");
+    }
+    if width <= 0.0 || height <= 0.0 {
+        return Err("region width and height must be positive");
+    }
+    let viewport_w = f64::from(viewport_width);
+    let viewport_h = f64::from(viewport_height);
+    let left = x.floor().clamp(0.0, viewport_w);
+    let top = y.floor().clamp(0.0, viewport_h);
+    let right = (x + width).ceil().clamp(0.0, viewport_w);
+    let bottom = (y + height).ceil().clamp(0.0, viewport_h);
+    let min_edge = f64::from(REGION_MIN_EDGE_PX);
+    if right - left < min_edge || bottom - top < min_edge {
+        return Err("region is outside the viewport or smaller than 8 pixels");
+    }
+    // Every value is a whole number in [0, viewport], so the casts are exact.
+    Ok(RegionRect {
+        x: left as u32,
+        y: top as u32,
+        width: (right - left) as u32,
+        height: (bottom - top) as u32,
+    })
+}
+
+const PNG_SIGNATURE: [u8; 8] = [0x89, b'P', b'N', b'G', b'\r', b'\n', 0x1a, b'\n'];
+
+/// Width and height from a PNG's IHDR chunk.
+fn png_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
+    if bytes.len() < 24 || bytes[..8] != PNG_SIGNATURE || &bytes[12..16] != b"IHDR" {
+        return None;
+    }
+    let width = u32::from_be_bytes([bytes[16], bytes[17], bytes[18], bytes[19]]);
+    let height = u32::from_be_bytes([bytes[20], bytes[21], bytes[22], bytes[23]]);
+    (width > 0 && height > 0).then_some((width, height))
+}
+
+/// Width and height from a JPEG's first start-of-frame segment.
+fn jpeg_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
+    if bytes.len() < 4 || bytes[0] != 0xFF || bytes[1] != 0xD8 {
+        return None;
+    }
+    let mut index = 2;
+    while index + 1 < bytes.len() {
+        if bytes[index] != 0xFF {
+            return None;
+        }
+        let marker = bytes[index + 1];
+        // Fill bytes before a marker.
+        if marker == 0xFF {
+            index += 1;
+            continue;
+        }
+        // Markers without a length.
+        if marker == 0x01 || (0xD0..=0xD8).contains(&marker) {
+            index += 2;
+            continue;
+        }
+        // Start of scan or end of image before a frame header: no size.
+        if marker == 0xDA || marker == 0xD9 {
+            return None;
+        }
+        if index + 4 > bytes.len() {
+            return None;
+        }
+        let length = usize::from(u16::from_be_bytes([bytes[index + 2], bytes[index + 3]]));
+        if length < 2 {
+            return None;
+        }
+        let is_frame_header =
+            (0xC0..=0xCF).contains(&marker) && !matches!(marker, 0xC4 | 0xC8 | 0xCC);
+        if is_frame_header {
+            if index + 9 > bytes.len() {
+                return None;
+            }
+            let height = u32::from(u16::from_be_bytes([bytes[index + 5], bytes[index + 6]]));
+            let width = u32::from(u16::from_be_bytes([bytes[index + 7], bytes[index + 8]]));
+            return (width > 0 && height > 0).then_some((width, height));
+        }
+        index += 2 + length;
+    }
+    None
+}
+
+/// Decode and check the cropped image: PNG or JPEG only, at most 1 MiB, and
+/// bytes that match the declared type.
+fn decode_region_image(input: &RegionImageInput) -> Result<RegionImage, &'static str> {
+    let mime_type: &'static str = match input.mime_type.trim().to_ascii_lowercase().as_str() {
+        "image/png" => "image/png",
+        "image/jpeg" | "image/jpg" => "image/jpeg",
+        _ => return Err("image mimeType must be image/png or image/jpeg"),
+    };
+    let encoded = input.data_base64.trim();
+    if encoded.is_empty() {
+        return Err("image dataBase64 is empty");
+    }
+    if encoded.len() > (REGION_IMAGE_MAX_BYTES / 3 + 1) * 4 {
+        return Err("image is larger than 1 MiB");
+    }
+    let bytes = BASE64_STANDARD
+        .decode(encoded.as_bytes())
+        .map_err(|_| "image dataBase64 is not valid base64")?;
+    if bytes.len() > REGION_IMAGE_MAX_BYTES {
+        return Err("image is larger than 1 MiB");
+    }
+    let dimensions = match mime_type {
+        "image/png" => png_dimensions(&bytes),
+        _ => jpeg_dimensions(&bytes),
+    };
+    let Some((width, height)) = dimensions else {
+        return Err("image bytes do not match the declared type");
+    };
+    Ok(RegionImage {
+        mime_type,
+        bytes,
+        width,
+        height,
+    })
+}
+
+/// The cropped image must have the region's shape (within 5 percent, or one
+/// pixel of rounding) and must not be more than three times its size, so an
+/// arbitrary image cannot be passed off as a crop of the resolved region.
+fn image_matches_region(width: u32, height: u32, region: RegionRect) -> bool {
+    if width == 0 || height == 0 || region.width == 0 || region.height == 0 {
+        return false;
+    }
+    if u64::from(width) > u64::from(region.width) * REGION_MAX_IMAGE_SCALE
+        || u64::from(height) > u64::from(region.height) * REGION_MAX_IMAGE_SCALE
+    {
+        return false;
+    }
+    let image_ratio = f64::from(width) / f64::from(height);
+    let region_ratio = f64::from(region.width) / f64::from(region.height);
+    if (image_ratio - region_ratio).abs() / region_ratio <= REGION_ASPECT_TOLERANCE {
+        return true;
+    }
+    // One pixel of rounding in either dimension for small crops.
+    let cross = (i64::from(width) * i64::from(region.height)
+        - i64::from(height) * i64::from(region.width))
+    .unsigned_abs();
+    cross <= u64::from(region.width.max(region.height))
+}
+
+/// Selected text is page content: control characters other than newline and
+/// tab become spaces, it is trimmed, and blank text is no selection.
+fn sanitize_selection(raw: Option<&str>) -> Result<Option<String>, &'static str> {
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    let cleaned: String = raw
+        .chars()
+        .map(|ch| {
+            if ch == '\n' || ch == '\t' || !ch.is_control() {
+                ch
+            } else {
+                ' '
+            }
+        })
+        .collect();
+    let trimmed = cleaned.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    if trimmed.chars().count() > SELECTION_MAX_CHARS {
+        return Err("selectionText is longer than 4000 characters");
+    }
+    Ok(Some(trimmed.to_owned()))
+}
+
+/// Re-resolve the tab against Quarry's live tab list, failing closed. The streamed
+/// frame only ever shows the active tab, so a known tab that is not active is
+/// refused too.
+fn resolve_attach_tab<'a>(tabs: &'a [Value], tab_id: &str) -> Result<&'a Value, &'static str> {
+    if tabs.is_empty() {
+        return Err("no-tabs");
+    }
+    let matches: Vec<&Value> = tabs
+        .iter()
+        .filter(|tab| tab.get("tabId").and_then(Value::as_str) == Some(tab_id))
+        .collect();
+    match matches.as_slice() {
+        [] => Err("unknown-tab"),
+        [tab] if tab.get("active").and_then(Value::as_bool) == Some(true) => Ok(*tab),
+        [_] => Err("tab-not-active"),
+        _ => Err("ambiguous-tab"),
+    }
+}
+
+/// Origin and path of an http(s) URL, with credentials, query and fragment dropped.
+fn safe_attach_target(raw: Option<&str>) -> Option<String> {
+    let parsed = url::Url::parse(raw?.trim()).ok()?;
+    if parsed.scheme() != "http" && parsed.scheme() != "https" {
+        return None;
+    }
+    Some(format!(
+        "{}{}",
+        parsed.origin().ascii_serialization(),
+        parsed.path()
+    ))
+}
+
+/// Tab title without control characters, at most 200 characters.
+fn safe_tab_title(raw: Option<&str>) -> Option<String> {
+    let title: String = raw?
+        .chars()
+        .filter(|ch| !ch.is_control())
+        .take(TAB_LABEL_MAX_CHARS)
+        .collect();
+    let title = title.trim();
+    (!title.is_empty()).then(|| title.to_owned())
+}
+
+/// The attachment the browser gets back. It is ephemeral (the gateway stores
+/// nothing), grants nothing, and is classified browser-scraped wherever it goes.
+fn region_attachment_view(
+    session_id: &str,
+    tab: &Value,
+    region: RegionRect,
+    viewport: (u32, u32),
+    image: &RegionImage,
+    selection: Option<String>,
+) -> Value {
+    let tab_id = tab.get("tabId").and_then(Value::as_str).unwrap_or_default();
+    let target = safe_attach_target(tab.get("url").and_then(Value::as_str));
+    let title = safe_tab_title(tab.get("title").and_then(Value::as_str));
+    let label = title
+        .clone()
+        .or_else(|| target.clone())
+        .unwrap_or_else(|| tab_id.to_owned());
+    let selection = selection.map(|text| {
+        let length = text.chars().count();
+        json!({ "text": text, "length": length })
+    });
+    json!({
+        "attachment": {
+            "kind": "browser-region",
+            "trustClass": REGION_TRUST_CLASS,
+            "grant": "none",
+            "retention": "ephemeral",
+            "sessionId": session_id,
+            "tabId": tab_id,
+            "label": label,
+            "title": title,
+            "target": target,
+            "region": {
+                "x": region.x,
+                "y": region.y,
+                "width": region.width,
+                "height": region.height,
+            },
+            "viewport": { "width": viewport.0, "height": viewport.1 },
+            "image": {
+                "mimeType": image.mime_type,
+                "dataBase64": BASE64_STANDARD.encode(&image.bytes),
+                "width": image.width,
+                "height": image.height,
+                "byteLength": image.bytes.len(),
+            },
+            "selection": selection,
+        }
+    })
+}
+
+async fn region_attach_view(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    session_id: &str,
+    input: RegionAttachBody,
+) -> Result<Value, Response> {
+    // Everything that needs no upstream is checked first.
+    let tab_id = input.tab_id.trim();
+    if !valid_tab_id(tab_id) {
+        return Err(bad_request(
+            "invalid_input",
+            "tabId must be 1 to 64 letters, digits, '-' or '_'.",
+        ));
+    }
+    let image = decode_region_image(&input.image).map_err(invalid_attachment)?;
+    let selection =
+        sanitize_selection(input.selection_text.as_deref()).map_err(invalid_attachment)?;
+
+    let (token, projection) = owner_gate(state, user, headers, session_id).await?;
+    // A projection that does not state the flag is refused like a ZDR session,
+    // and Quarry's tab list is not read at all.
+    if receipts_refused(&projection) {
+        return Err(zdr_attachment_refused());
+    }
+    let Some(viewport) = projection_viewport(&projection) else {
+        return Err(attachment_unresolved(
+            "browser_attachment_region_unresolved",
+            "The browser session's viewport is not known, so the region cannot be resolved.",
+            "viewport-unknown",
+        ));
+    };
+    let region = resolve_region(input.region, viewport.0, viewport.1).map_err(invalid_attachment)?;
+    if !image_matches_region(image.width, image.height, region) {
+        return Err(invalid_attachment(
+            "the image does not match the shape of the resolved region",
+        ));
+    }
+
+    let (status, body) = quarry_call(
+        state,
+        Method::GET,
+        &format!("/v1/agent/runs/{}/tabs", urlencoding::encode(session_id)),
+        None,
+        token.as_deref(),
+        &user.user_id,
+    )
+    .await;
+    if !status.is_success() {
+        return Err(forward_quarry_failure(status, body));
+    }
+    let tabs: Vec<Value> = unwrap_data(&body)
+        .get("tabs")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let tab = match resolve_attach_tab(&tabs, tab_id) {
+        Ok(tab) => tab,
+        Err(reason) => {
+            return Err(attachment_unresolved(
+                "browser_attachment_tab_unresolved",
+                "The tab could not be resolved to the live tab the frame shows.",
+                reason,
+            ))
+        }
+    };
+    Ok(region_attachment_view(
+        session_id, tab, region, viewport, &image, selection,
+    ))
+}
+
+// ---------------------------------------------------------------------------
 // Routes
 // ---------------------------------------------------------------------------
 
@@ -671,6 +1156,39 @@ async fn compile_session_procedure(
     };
     match compile_procedure_view(&state, &user, &headers, &session_id, procedure_id).await {
         Ok(data) => (StatusCode::OK, Json(ok(data))).into_response(),
+        Err(response) => response,
+    }
+}
+
+/// `POST /api/v1/browser/sessions/{session_id}/attachments/region` with
+/// `{ tabId, region: { x, y, width, height }, image: { mimeType, dataBase64 }, selectionText? }`
+/// (E3.3-d, mounted only with `BROWSER_REGION_ATTACH`).
+async fn attach_session_region(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Path(session_id): Path<String>,
+    body: Bytes,
+) -> Response {
+    if !is_valid_path_segment(&session_id) {
+        return invalid_session();
+    }
+    let input: RegionAttachBody = match serde_json::from_slice(&body) {
+        Ok(input) => input,
+        Err(_) => {
+            return bad_request(
+                "invalid_input",
+                "The region attach body must be JSON with tabId, region and image only.",
+            )
+        }
+    };
+    match region_attach_view(&state, &user, &headers, &session_id, input).await {
+        Ok(data) => (
+            StatusCode::OK,
+            [(header::CACHE_CONTROL, "private, no-store")],
+            Json(ok(data)),
+        )
+            .into_response(),
         Err(response) => response,
     }
 }
@@ -772,6 +1290,7 @@ mod tests {
                 "/api/v1/browser/sessions/{session_id}/procedure",
                 post(compile_session_procedure),
             )
+            .route(REGION_ATTACH_PATH, post(attach_session_region))
             .layer(axum::middleware::from_fn(insert_test_user))
             .with_state(state)
     }
@@ -1049,5 +1568,369 @@ mod tests {
         assert!(!rendered.contains("hunter2"), "{rendered}");
         assert_eq!(body["data"]["quality"]["promotionAllowed"], true);
         assert_eq!(body["data"]["procedure"]["steps"][0]["action"]["text"]["length"], 7);
+    }
+
+    // -----------------------------------------------------------------------
+    // Region and selection attach (E3.3-d)
+    // -----------------------------------------------------------------------
+
+    const REGION_URI: &str = "/api/v1/browser/sessions/run-1/attachments/region";
+
+    /// The first 24 bytes of a PNG: signature and IHDR with the given size.
+    fn png_bytes(width: u32, height: u32) -> Vec<u8> {
+        let mut bytes = PNG_SIGNATURE.to_vec();
+        bytes.extend_from_slice(&13u32.to_be_bytes());
+        bytes.extend_from_slice(b"IHDR");
+        bytes.extend_from_slice(&width.to_be_bytes());
+        bytes.extend_from_slice(&height.to_be_bytes());
+        bytes.extend_from_slice(&[8, 6, 0, 0, 0]);
+        bytes
+    }
+
+    /// SOI, an APP0 segment, then a baseline SOF0 with the given size.
+    fn jpeg_bytes(width: u16, height: u16) -> Vec<u8> {
+        let mut bytes = vec![0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10];
+        bytes.extend_from_slice(b"JFIF\0");
+        bytes.extend_from_slice(&[1, 1, 0, 0, 1, 0, 1, 0, 0]);
+        bytes.extend_from_slice(&[0xFF, 0xC0, 0x00, 0x11, 0x08]);
+        bytes.extend_from_slice(&height.to_be_bytes());
+        bytes.extend_from_slice(&width.to_be_bytes());
+        bytes.extend_from_slice(&[3, 1, 0x22, 0, 2, 0x11, 1, 3, 0x11, 1]);
+        bytes
+    }
+
+    fn rect(x: f64, y: f64, width: f64, height: f64) -> RegionRectInput {
+        RegionRectInput {
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+
+    fn region_body(tab_id: &str, image: &[u8], extra: Option<(&str, Value)>) -> String {
+        let mut body = json!({
+            "tabId": tab_id,
+            "region": { "x": 10.4, "y": 20, "width": 200, "height": 100 },
+            "image": { "mimeType": "image/png", "dataBase64": BASE64_STANDARD.encode(image) },
+            "selectionText": "Total due\u{0007}: 42 NOK"
+        });
+        if let Some((key, value)) = extra {
+            body[key] = value;
+        }
+        body.to_string()
+    }
+
+    /// Quarry knows run-1 for the caller, with a 1280x720 viewport.
+    async fn mount_owned_run_with_viewport(quarry: &MockServer, zdr: Value) {
+        let mut data = json!({
+            "runId": "run-1",
+            "controlMode": "agent_control",
+            "viewport": { "width": 1280, "height": 720 }
+        });
+        if !zdr.is_null() {
+            data["zdr"] = zdr;
+        }
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/v1/agent/runs/run-1/browser-session"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "data": data })))
+            .mount(quarry)
+            .await;
+    }
+
+    async fn mount_tabs(quarry: &MockServer, tabs: Value, expected_calls: u64) {
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/v1/agent/runs/run-1/tabs"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({ "data": { "tabs": tabs } })),
+            )
+            .expect(expected_calls)
+            .mount(quarry)
+            .await;
+    }
+
+    #[test]
+    fn region_attach_flag_defaults_off() {
+        assert!(!region_attach_flag_on(None));
+        assert!(!region_attach_flag_on(Some("")));
+        assert!(!region_attach_flag_on(Some("0")));
+        assert!(!region_attach_flag_on(Some("false")));
+        assert!(region_attach_flag_on(Some("1")));
+        assert!(region_attach_flag_on(Some(" TRUE ")));
+    }
+
+    #[test]
+    fn region_is_snapped_outward_and_clamped_to_the_viewport() {
+        assert_eq!(
+            resolve_region(rect(10.4, 20.0, 200.0, 100.0), 1280, 720),
+            Ok(RegionRect {
+                x: 10,
+                y: 20,
+                width: 201,
+                height: 100
+            })
+        );
+        assert_eq!(
+            resolve_region(rect(-50.0, 700.0, 100.0, 100.0), 1280, 720),
+            Ok(RegionRect {
+                x: 0,
+                y: 700,
+                width: 50,
+                height: 20
+            })
+        );
+    }
+
+    #[test]
+    fn region_outside_the_viewport_or_degenerate_is_refused() {
+        let cases = [
+            rect(f64::NAN, 0.0, 10.0, 10.0),
+            rect(0.0, 0.0, f64::INFINITY, 10.0),
+            rect(0.0, 0.0, 0.0, 10.0),
+            rect(0.0, 0.0, 10.0, -5.0),
+            rect(1300.0, 10.0, 50.0, 50.0),
+            rect(10.0, -100.0, 50.0, 50.0),
+            rect(0.0, 0.0, 4.0, 40.0),
+        ];
+        for case in cases {
+            assert!(resolve_region(case, 1280, 720).is_err(), "{case:?} is refused");
+        }
+    }
+
+    #[test]
+    fn image_dimensions_come_from_the_bytes_not_the_mime_type() {
+        assert_eq!(png_dimensions(&png_bytes(201, 100)), Some((201, 100)));
+        assert_eq!(jpeg_dimensions(&jpeg_bytes(402, 200)), Some((402, 200)));
+        assert_eq!(png_dimensions(&jpeg_bytes(10, 10)), None);
+        assert_eq!(jpeg_dimensions(&png_bytes(10, 10)), None);
+        assert_eq!(png_dimensions(&png_bytes(0, 10)), None);
+        assert_eq!(jpeg_dimensions(&[0xFF, 0xD8, 0xFF, 0xDA, 0, 2]), None);
+
+        let mislabelled = RegionImageInput {
+            mime_type: "image/jpeg".to_owned(),
+            data_base64: BASE64_STANDARD.encode(png_bytes(10, 10)),
+        };
+        assert!(decode_region_image(&mislabelled).is_err());
+        let svg = RegionImageInput {
+            mime_type: "image/svg+xml".to_owned(),
+            data_base64: BASE64_STANDARD.encode(b"<svg/>"),
+        };
+        assert!(decode_region_image(&svg).is_err());
+        let too_large = RegionImageInput {
+            mime_type: "image/png".to_owned(),
+            data_base64: BASE64_STANDARD.encode(vec![0u8; REGION_IMAGE_MAX_BYTES + 1]),
+        };
+        assert!(decode_region_image(&too_large).is_err());
+    }
+
+    #[test]
+    fn image_must_have_the_shape_of_the_resolved_region() {
+        let region = RegionRect {
+            x: 0,
+            y: 0,
+            width: 201,
+            height: 100,
+        };
+        assert!(image_matches_region(201, 100, region));
+        assert!(image_matches_region(402, 200, region), "a 2x frame");
+        assert!(image_matches_region(100, 50, region), "a downscaled frame");
+        assert!(!image_matches_region(100, 100, region), "wrong shape");
+        assert!(!image_matches_region(1206, 600, region), "more than 3x");
+        assert!(!image_matches_region(0, 100, region));
+    }
+
+    #[test]
+    fn selection_text_is_cleaned_and_capped() {
+        assert_eq!(sanitize_selection(None), Ok(None));
+        assert_eq!(sanitize_selection(Some("  \u{0}  ")), Ok(None));
+        assert_eq!(
+            sanitize_selection(Some(" a\u{0007}b\nc\td ")),
+            Ok(Some("a b\nc\td".to_owned()))
+        );
+        assert!(sanitize_selection(Some("x".repeat(SELECTION_MAX_CHARS + 1).as_str())).is_err());
+    }
+
+    #[test]
+    fn attach_tab_resolution_fails_closed() {
+        let tabs = vec![
+            json!({ "tabId": "tab_a", "active": true }),
+            json!({ "tabId": "tab_b", "active": false }),
+            json!({ "tabId": "tab_c", "active": true }),
+            json!({ "tabId": "tab_c", "active": true }),
+        ];
+        assert!(resolve_attach_tab(&tabs, "tab_a").is_ok());
+        assert_eq!(resolve_attach_tab(&tabs, "tab_b").unwrap_err(), "tab-not-active");
+        assert_eq!(resolve_attach_tab(&tabs, "tab_c").unwrap_err(), "ambiguous-tab");
+        assert_eq!(resolve_attach_tab(&tabs, "tab_z").unwrap_err(), "unknown-tab");
+        assert_eq!(resolve_attach_tab(&[], "tab_a").unwrap_err(), "no-tabs");
+    }
+
+    #[test]
+    fn attach_target_drops_query_fragment_and_credentials() {
+        assert_eq!(
+            safe_attach_target(Some("https://user:pw@example.com/a/b?token=secret#frag")),
+            Some("https://example.com/a/b".to_owned())
+        );
+        assert_eq!(safe_attach_target(Some("about:blank")), None);
+        assert_eq!(safe_attach_target(Some("javascript:alert(1)")), None);
+        assert_eq!(safe_attach_target(None), None);
+    }
+
+    #[tokio::test]
+    async fn region_route_is_not_mounted_with_the_flag_off() {
+        let state = test_app_state();
+        let app = router_with(state.clone(), false).with_state(state);
+        let (status, _) = send(app, "POST", REGION_URI, &region_body("tab_a", &png_bytes(201, 100), None)).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn region_attach_resolves_the_live_tab_and_classifies_browser_scraped() {
+        let quarry = MockServer::start().await;
+        mount_owned_run_with_viewport(&quarry, json!(false)).await;
+        mount_tabs(
+            &quarry,
+            json!([
+                { "tabId": "tab_a", "title": "Invoice\u{0007} 42", "url": "https://example.com/inv?token=secret#x", "active": true },
+                { "tabId": "tab_b", "title": null, "url": null, "active": false }
+            ]),
+            1,
+        )
+        .await;
+        let mut state = test_app_state();
+        state.quarry_edge_url = quarry.uri();
+
+        let (status, body) = send(
+            evidence_app(state),
+            "POST",
+            REGION_URI,
+            &region_body("tab_a", &png_bytes(402, 200), None),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let attachment = &body["data"]["attachment"];
+        assert_eq!(attachment["kind"], "browser-region");
+        assert_eq!(attachment["trustClass"], "browser-scraped");
+        assert_eq!(attachment["grant"], "none");
+        assert_eq!(attachment["retention"], "ephemeral");
+        assert_eq!(attachment["tabId"], "tab_a");
+        assert_eq!(attachment["target"], "https://example.com/inv");
+        assert_eq!(attachment["label"], "Invoice 42");
+        assert_eq!(attachment["region"], json!({ "x": 10, "y": 20, "width": 201, "height": 100 }));
+        assert_eq!(attachment["viewport"], json!({ "width": 1280, "height": 720 }));
+        assert_eq!(attachment["image"]["width"], 402);
+        assert_eq!(attachment["selection"]["text"], "Total due : 42 NOK");
+        assert!(!body.to_string().contains("token=secret"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn region_attach_is_refused_for_zdr_without_reading_tabs() {
+        for zdr in [json!(true), Value::Null] {
+            let quarry = MockServer::start().await;
+            mount_owned_run_with_viewport(&quarry, zdr.clone()).await;
+            mount_tabs(&quarry, json!([{ "tabId": "tab_a", "active": true }]), 0).await;
+            let mut state = test_app_state();
+            state.quarry_edge_url = quarry.uri();
+
+            let (status, body) = send(
+                evidence_app(state),
+                "POST",
+                REGION_URI,
+                &region_body("tab_a", &png_bytes(201, 100), None),
+            )
+            .await;
+            assert_eq!(status, StatusCode::CONFLICT, "zdr {zdr}: {body}");
+            assert_eq!(body["error"]["code"], "browser_attachment_refused_zdr");
+        }
+    }
+
+    #[tokio::test]
+    async fn region_attach_refuses_a_tab_the_frame_does_not_show() {
+        let quarry = MockServer::start().await;
+        mount_owned_run_with_viewport(&quarry, json!(false)).await;
+        mount_tabs(
+            &quarry,
+            json!([
+                { "tabId": "tab_a", "active": true },
+                { "tabId": "tab_b", "active": false }
+            ]),
+            1,
+        )
+        .await;
+        let mut state = test_app_state();
+        state.quarry_edge_url = quarry.uri();
+
+        let (status, body) = send(
+            evidence_app(state),
+            "POST",
+            REGION_URI,
+            &region_body("tab_b", &png_bytes(201, 100), None),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert_eq!(body["error"]["code"], "browser_attachment_tab_unresolved");
+        assert_eq!(body["error"]["details"]["reason"], "tab-not-active");
+    }
+
+    #[tokio::test]
+    async fn region_attach_refuses_a_foreign_session_and_bad_input_before_tabs() {
+        let quarry = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/v1/agent/runs/run-1/browser-session"))
+            .respond_with(ResponseTemplate::new(404).set_body_json(json!({
+                "error": { "code": "NOT_FOUND", "message": "agent run not found" }
+            })))
+            .mount(&quarry)
+            .await;
+        mount_tabs(&quarry, json!([{ "tabId": "tab_a", "active": true }]), 0).await;
+        let mut state = test_app_state();
+        state.quarry_edge_url = quarry.uri();
+
+        let (status, _) = send(
+            evidence_app(state.clone()),
+            "POST",
+            REGION_URI,
+            &region_body("tab_a", &png_bytes(201, 100), None),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "owner gated");
+
+        let (status, body) = send(
+            evidence_app(state.clone()),
+            "POST",
+            REGION_URI,
+            &region_body("tab_a", &png_bytes(201, 100), Some(("orgId", json!("org_b")))),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "unknown keys are refused: {body}");
+
+        let (status, body) = send(
+            evidence_app(state),
+            "POST",
+            REGION_URI,
+            &region_body("tab/../a", &png_bytes(201, 100), None),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert_eq!(body["error"]["code"], "invalid_input");
+    }
+
+    #[tokio::test]
+    async fn region_attach_refuses_an_image_of_another_shape() {
+        let quarry = MockServer::start().await;
+        mount_owned_run_with_viewport(&quarry, json!(false)).await;
+        mount_tabs(&quarry, json!([{ "tabId": "tab_a", "active": true }]), 0).await;
+        let mut state = test_app_state();
+        state.quarry_edge_url = quarry.uri();
+
+        let (status, body) = send(
+            evidence_app(state),
+            "POST",
+            REGION_URI,
+            &region_body("tab_a", &png_bytes(300, 300), None),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert_eq!(body["error"]["code"], "invalid_browser_attachment");
     }
 }

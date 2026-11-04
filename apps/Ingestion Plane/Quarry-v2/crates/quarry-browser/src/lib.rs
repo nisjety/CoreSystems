@@ -22,6 +22,10 @@ use quarry_core::QuarryResult;
 
 use crate::actions::ScrollTarget;
 
+pub use quarry_security::preflight::{
+    HostReputation, HostStanding, ReputationMode, REPUTATION_MODE_ENV,
+};
+
 /// The run-scoped authority enforced at the browser request boundary.
 ///
 /// This deliberately lives with the browser abstraction rather than the HTTP
@@ -42,6 +46,78 @@ pub struct BrowserEgressPolicy {
     /// Only consulted in `OpenWeb` mode. Canonical, lower-case, dot-suffix
     /// matched; a host equal to or under an entry is refused.
     denied_domains: Vec<String>,
+    /// The URL reputation hook (E3.8.7, D2-100). `None` (the default, and
+    /// always when the mode is `Off`) never consults a list.
+    reputation: Option<ReputationHook>,
+}
+
+/// A reputation source and the mode the run's org applies it in (E3.8.7). Two
+/// hooks are equal when they share one source and one mode.
+#[derive(Clone)]
+pub struct ReputationHook {
+    source: Arc<dyn HostReputation>,
+    mode: ReputationMode,
+}
+
+impl ReputationHook {
+    /// The mode this hook applies, never `Off`.
+    pub fn mode(&self) -> ReputationMode {
+        self.mode
+    }
+}
+
+impl std::fmt::Debug for ReputationHook {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ReputationHook")
+            .field("source", &self.source.source())
+            .field("mode", &self.mode)
+            .finish()
+    }
+}
+
+impl PartialEq for ReputationHook {
+    fn eq(&self, other: &Self) -> bool {
+        // The data pointers only: two vtables for one type can differ across codegen units.
+        std::ptr::eq(
+            Arc::as_ptr(&self.source) as *const (),
+            Arc::as_ptr(&other.source) as *const (),
+        ) && self.mode == other.mode
+    }
+}
+
+impl Eq for ReputationHook {}
+
+/// What the reputation hook decided for one request (E3.8.7). `source` is the
+/// hook's stable name; it never carries a host or URL.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReputationOutcome {
+    /// Listed, and the org runs in `warn`: the request goes on and the receipt says so.
+    Warn { source: &'static str },
+    /// Listed, and the org runs in `block`: the request is refused.
+    Block { source: &'static str },
+}
+
+impl ReputationOutcome {
+    pub fn is_block(&self) -> bool {
+        matches!(self, Self::Block { .. })
+    }
+
+    pub fn source(&self) -> &'static str {
+        match self {
+            Self::Warn { source } | Self::Block { source } => source,
+        }
+    }
+
+    /// The stricter of two outcomes (a block beats a warning beats nothing),
+    /// for a request two policies govern (a session and its tab).
+    pub fn strictest(first: Option<Self>, second: Option<Self>) -> Option<Self> {
+        match (first, second) {
+            (Some(outcome), _) if outcome.is_block() => Some(outcome),
+            (_, Some(outcome)) if outcome.is_block() => Some(outcome),
+            (Some(outcome), _) | (None, Some(outcome)) => Some(outcome),
+            (None, None) => None,
+        }
+    }
 }
 
 /// How a browser egress policy admits hosts. Default is `Allowlist`, so every
@@ -128,6 +204,7 @@ impl BrowserEgressPolicy {
             restricted: true,
             mode: EgressMode::Allowlist,
             denied_domains: Vec::new(),
+            reputation: None,
         }
     }
 
@@ -174,6 +251,7 @@ impl BrowserEgressPolicy {
             restricted,
             mode: EgressMode::Allowlist,
             denied_domains: Vec::new(),
+            reputation: None,
         }
     }
 
@@ -192,6 +270,7 @@ impl BrowserEgressPolicy {
             restricted: true,
             mode: EgressMode::OpenWeb,
             denied_domains,
+            reputation: None,
         }
     }
 
@@ -215,6 +294,53 @@ impl BrowserEgressPolicy {
             self.denied_domains.sort();
         }
         self
+    }
+
+    /// Attach a URL reputation source in the org's mode (E3.8.7, D2-100). The
+    /// caller resolves the mode with `ReputationMode::from_env().for_org(..)`.
+    /// `Off` removes any hook, so the policy is the one built without this call.
+    /// The hook is consulted by [`Self::reputation_outcome`] only, never by
+    /// [`Self::allows_url`]: the grant decides first, then the reputation, then
+    /// the DNS guard, and each refusal keeps its own receipt category.
+    pub fn with_reputation(mut self, source: Arc<dyn HostReputation>, mode: ReputationMode) -> Self {
+        self.reputation = match mode {
+            ReputationMode::Off => None,
+            mode => Some(ReputationHook { source, mode }),
+        };
+        self
+    }
+
+    /// The reputation mode this policy applies (`Off` without a hook).
+    pub fn reputation_mode(&self) -> ReputationMode {
+        self.reputation
+            .as_ref()
+            .map_or(ReputationMode::Off, |hook| hook.mode)
+    }
+
+    /// The reputation decision for one request URL, or `None` when there is no
+    /// hook, the URL is not http(s) with a host, or the host is not listed. A
+    /// source that cannot answer at once (`Unknown`) is taken as unlisted.
+    pub fn reputation_outcome(&self, raw: &str) -> Option<ReputationOutcome> {
+        let hook = self.reputation.as_ref()?;
+        let url = url::Url::parse(raw).ok()?;
+        if !matches!(url.scheme(), "http" | "https") {
+            return None;
+        }
+        let host = url
+            .host_str()?
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .trim_end_matches('.')
+            .to_ascii_lowercase();
+        if host.is_empty() || hook.source.standing(&host) != HostStanding::Listed {
+            return None;
+        }
+        let source = hook.source.source();
+        match hook.mode {
+            ReputationMode::Off => None,
+            ReputationMode::Warn => Some(ReputationOutcome::Warn { source }),
+            ReputationMode::Block => Some(ReputationOutcome::Block { source }),
+        }
     }
 
     /// The hosts this policy refuses whatever else it allows.
@@ -1310,6 +1436,118 @@ impl BrowserSession {
 pub struct SessionInner {
     pub connected: bool,
     pub pages_served: u64,
+}
+
+#[cfg(test)]
+mod reputation_hook_tests {
+    use super::*;
+
+    struct Listed(&'static [&'static str]);
+
+    impl HostReputation for Listed {
+        fn standing(&self, host: &str) -> HostStanding {
+            if self.0.contains(&host) {
+                HostStanding::Listed
+            } else {
+                HostStanding::Unlisted
+            }
+        }
+
+        fn source(&self) -> &'static str {
+            "test_list"
+        }
+    }
+
+    struct Busy;
+
+    impl HostReputation for Busy {
+        fn standing(&self, _host: &str) -> HostStanding {
+            HostStanding::Unknown
+        }
+    }
+
+    fn listed() -> Arc<dyn HostReputation> {
+        Arc::new(Listed(&["evil.example"]))
+    }
+
+    fn open() -> BrowserEgressPolicy {
+        BrowserEgressPolicy::from_allowed_domains(&[])
+    }
+
+    #[test]
+    fn off_attaches_nothing_and_leaves_the_policy_unchanged() {
+        let policy = open().with_reputation(listed(), ReputationMode::Off);
+        assert_eq!(policy, open());
+        assert_eq!(policy.reputation_mode(), ReputationMode::Off);
+        assert_eq!(policy.reputation_outcome("https://evil.example/"), None);
+        // An earlier hook is removed by an Off call.
+        let cleared = open()
+            .with_reputation(listed(), ReputationMode::Block)
+            .with_reputation(listed(), ReputationMode::Off);
+        assert_eq!(cleared, open());
+    }
+
+    #[test]
+    fn warn_and_block_name_the_listed_host_with_the_source() {
+        let warn = open().with_reputation(listed(), ReputationMode::Warn);
+        assert_eq!(
+            warn.reputation_outcome("https://evil.example/path?q=1"),
+            Some(ReputationOutcome::Warn { source: "test_list" })
+        );
+        let block = open().with_reputation(listed(), ReputationMode::Block);
+        assert_eq!(
+            block.reputation_outcome("http://EVIL.example./"),
+            Some(ReputationOutcome::Block { source: "test_list" })
+        );
+        assert_eq!(block.reputation_outcome("https://good.example/"), None);
+        assert_eq!(block.reputation_mode(), ReputationMode::Block);
+    }
+
+    #[test]
+    fn non_web_urls_and_unknown_standing_are_not_listed() {
+        let block = open().with_reputation(listed(), ReputationMode::Block);
+        for raw in [
+            "data:text/plain,evil.example",
+            "blob:https://evil.example/uuid",
+            "ftp://evil.example/",
+            "not a url",
+        ] {
+            assert_eq!(block.reputation_outcome(raw), None, "{raw}");
+        }
+        let busy = open().with_reputation(Arc::new(Busy), ReputationMode::Block);
+        assert_eq!(busy.reputation_outcome("https://evil.example/"), None);
+    }
+
+    #[test]
+    fn the_hook_never_changes_what_the_grant_allows() {
+        let grant = BrowserEgressPolicy::from_allowed_domains(&["evil.example".to_owned()]);
+        let hooked = grant.clone().with_reputation(listed(), ReputationMode::Block);
+        for raw in ["https://evil.example/", "https://other.example/"] {
+            assert_eq!(hooked.allows_url(raw), grant.allows_url(raw), "{raw}");
+        }
+    }
+
+    #[test]
+    fn hooks_are_equal_only_for_one_source_in_one_mode() {
+        let source = listed();
+        let a = open().with_reputation(source.clone(), ReputationMode::Warn);
+        let b = open().with_reputation(source.clone(), ReputationMode::Warn);
+        assert_eq!(a, b);
+        assert_ne!(a, open().with_reputation(source, ReputationMode::Block));
+        assert_ne!(a, open().with_reputation(listed(), ReputationMode::Warn));
+        assert!(format!("{a:?}").contains("test_list"));
+    }
+
+    #[test]
+    fn the_strictest_outcome_wins() {
+        let warn = Some(ReputationOutcome::Warn { source: "a" });
+        let block = Some(ReputationOutcome::Block { source: "b" });
+        assert_eq!(ReputationOutcome::strictest(None, None), None);
+        assert_eq!(ReputationOutcome::strictest(warn, None), warn);
+        assert_eq!(ReputationOutcome::strictest(None, warn), warn);
+        assert_eq!(ReputationOutcome::strictest(warn, block), block);
+        assert_eq!(ReputationOutcome::strictest(block, warn), block);
+    }
 }
 
 #[cfg(test)]

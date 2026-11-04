@@ -150,6 +150,14 @@ import { narrate } from '@/shared/activity/narration'
 import { isEffectfulChatTurn } from '@/shared/chat/effect-class'
 import { translateApiError, useI18n } from '@/shared/i18n'
 import { approvalHeadline, approvalReason } from '@/shared/approvals/approval-copy'
+import { BrowserApprovalDecisionCard } from '@/features/browser/approval/BrowserApprovalDecisionCard'
+import {
+  APPROVAL_REDIRECT_ENABLED,
+  browserApprovalCardEnabled,
+  runApprovalFitsCard,
+  runApprovalToCardModel,
+  type ApprovalCardModel,
+} from '@/features/browser/approval/approval-model'
 import { confirmStepUp } from '@/shared/approvals/step-up'
 import { createPlayingSpeechId, speechPlayer } from '@/features/voice/speech-playback'
 import { readAloudBlockedMessage, readAloudUnavailableMessage } from '@/features/voice/voice-mode-state'
@@ -2325,10 +2333,28 @@ export function ApprovalRequests(props: {
     decide(approval.id, 'approve', scope)
   }
 
+  // E3.2-b swap: the shared keyboard-first card (W3-B1-06), inline in the
+  // transcript (D9), behind VITE_BROWSER_APPROVAL_CARD. Only an approval the
+  // card can express takes it (no password step-up, no standing scope); the
+  // copy is the cause wording this deck already shows.
+  const cardModel = (approval: Approval): ApprovalCardModel | null => {
+    if (!browserApprovalCardEnabled() || !runApprovalFitsCard(approval)) return null
+    const base = runApprovalToCardModel(approval)
+    if (!base) return null
+    return {
+      ...base,
+      reason: approvalReason(approval, i18n) ?? '',
+      actionType: approvalHeadline(approval, i18n),
+    }
+  }
+
   return (
     <div class="verevon-chat-approvals" role="group" aria-label={i18n.tr('Godkjenninger', 'Approvals')}>
       <For each={props.approvals}>
         {(approval) => (
+          <Show
+            when={cardModel(approval)}
+            fallback={
           <div class="verevon-chat-approval">
             <div class="verevon-chat-approval__head">
               <span class="verevon-chat-approval__badge">{i18n.tr('Godkjenning', 'Approval')}</span>
@@ -2422,6 +2448,20 @@ export function ApprovalRequests(props: {
               </form>
             </Show>
           </div>
+            }
+          >
+            {(card) => (
+              <BrowserApprovalDecisionCard
+                approval={card()}
+                allowRedirect={APPROVAL_REDIRECT_ENABLED}
+                decide={(request) => {
+                  // The parent owns the decide call and the transcript refresh.
+                  decide(request.approvalId, request.decision)
+                  return Promise.resolve()
+                }}
+              />
+            )}
+          </Show>
         )}
       </For>
     </div>

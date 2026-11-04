@@ -139,7 +139,7 @@ GOLDENS=(
   # the_golden_and_markdown_are_what_the_table_generates (crates/quarry-core/src/zdr_matrix.rs),
   # which quarry-v2-ci.yml runs through cargo test --workspace. A regenerated golden needs
   # its digest here updated in the same change.
-  "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/contracts/zdr-feature-matrix.json|fbcb6d3c8d81ce5a3ba6de43983a49c6ba6b19fde6f7a7f31c1b9cb14533e8bf"
+  "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/contracts/zdr-feature-matrix.json|842bc936af7058de2343b60b4e736d68321b3495b22a863281140253aa853752"
 
   # WS4.J: the allowlist of the ZDR run tombstone, the ONLY fields that egress path may carry.
   # AUTHORED data owned by Quarry. quarry-edge's serializer (src/zdr_tombstone.rs, tests/
@@ -206,7 +206,7 @@ GOLDENS=(
   # (VEREVON_UPDATE_GOLDEN=1 pnpm vitest run src/shared/actions/admission-contract.test.ts) from the typed
   # side map (model-access.ts) and the registry, never written by hand. Each plane that admits an agent
   # action vendors it, with the pin beside it, in the VENDORED rows below.
-  "apps/Model Plane/api/contracts/agent-action-admission.json|0df146d975cb7bc62312937d68d71e1ff75cab43f2350a5c6a0843919d190b1b"
+  "apps/Model Plane/api/contracts/agent-action-admission.json|091abfa21ab8b6efcff308bf1e1ffb32ece123b08d45cfad3b59f458b0aaac02"
   # WS21-S0 and WS21-S3: the browser policy goldens, authored (not generated). org-core's validate and resolve tests
   # and execution-core's canonicaliser test read vendored copies (VENDORED); the other consumers are pending (CONSUMERS).
   "apps/Model Plane/api/contracts/browser-domain-canonical.json|ef6bfb8e63f3a1c34b90a0d26d0f27fb5ef224f138a652bf851dc179573ac45d"

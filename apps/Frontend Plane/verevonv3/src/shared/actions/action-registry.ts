@@ -1647,6 +1647,21 @@ const browserBlockedTryOtherSourceInput = z.object({
   runId: z.string().min(1).optional(),
 })
 
+// The downloads drawer (E3.4-7) sends one file the browser downloaded in a session. Both ids are
+// opaque handles the session reported: the owner checks that the artifact belongs to this session
+// and to the caller's org, and refuses an artifact it does not hold.
+export const browserDownloadSendToKnowledgeInput = z.object({
+  sessionId: z.string().trim().min(1).max(64),
+  artifactId: z.string().trim().min(1).max(64),
+}).strict()
+
+// The Data Plane document the owner created and how far its indexing has got. Indexing runs after
+// the write, so a fresh document reports `pending`.
+export const browserDownloadSendToKnowledgeOutput = z.object({
+  documentId: z.string().min(1),
+  indexStatus: z.enum(['pending', 'indexed', 'failed', 'skipped']),
+})
+
 const routerPolicyModeTableInput = z.object({
   simple: z.string().min(1),
   moderate: z.string().min(1),
@@ -1973,7 +1988,9 @@ export const actionRegistry = [
   {
     id: 'knowledge.crawl_site',
     label: 'Crawl site',
-    description: 'Crawl a website with Quarry v2 and ingest discovered pages into Data Plane v2.',
+    // E3.7.9a: approval depends on the page count, so the flag stays false; use
+    // actionRequiresApproval(id, input) to decide. The description states the rule.
+    description: 'Crawl a website with Quarry v2 and ingest discovered pages into Data Plane v2. Up to 50 pages run under the run budget; a larger crawl needs its page count approved before it starts.',
     ownerPlane: 'ingestion',
     risk: 'medium',
     requiresApproval: false,
@@ -4217,6 +4234,17 @@ export const actionRegistry = [
     outputSchema: envelopeStatusOutput,
   },
   {
+    id: 'browser_download.send_to_knowledge',
+    label: 'Send download to knowledge',
+    description: 'Send one file the browser downloaded in this session to the knowledge base. Human-only, from the downloads drawer. Only PDF, plain text, Markdown and CSV are admitted: their parsed text goes to Data Plane through Ingestion Plane under the caller\'s org, and the file itself is not sent. Refused under zero data retention, for other file types and for an artifact the session does not hold. The owner dedupes on the request key, so a retry cannot add the document twice.',
+    ownerPlane: 'ingestion',
+    risk: 'medium',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: browserDownloadSendToKnowledgeInput,
+    outputSchema: browserDownloadSendToKnowledgeOutput,
+  },
+  {
     id: 'router_policy.update',
     label: 'Update model router policy',
     description: 'Replace the organization\'s entire model-routing policy document (cost caps, complexity scoring, which model serves which tier). The owner enforces no admin gate of its own today, so this stays approval-gated at the registry level.',
@@ -4409,4 +4437,47 @@ export type ActionId = (typeof actionRegistry)[number]['id']
 
 export function getActionDescriptor(actionId: ActionId) {
   return actionRegistry.find((action) => action.id === actionId)
+}
+
+/**
+ * E3.7.9a: a whole-site crawl above this many pages needs approval before it starts (owner
+ * decision 2, 2026-10-23). The gateway's CRAWL_APPROVAL_PAGES may only lower it, so the
+ * threshold the server applied (the 409 `approval_required` details carry it) is the one to
+ * show a person.
+ */
+export const CRAWL_SITE_APPROVAL_PAGES = 50
+
+/** The page ceiling the gateway applies to a crawl. A crawl with no bound is estimated at it. */
+export const CRAWL_SITE_MAX_PAGES = 5000
+
+/**
+ * The page count a crawl is estimated to fetch: its bound, held to the ceiling. This is the
+ * `pages` unit the E3.7.8 job price estimate takes for a crawl.
+ */
+export function crawlSiteEstimatedPages(maxPages: number | undefined): number {
+  if (maxPages === undefined) return CRAWL_SITE_MAX_PAGES
+  return Math.min(maxPages, CRAWL_SITE_MAX_PAGES)
+}
+
+/** Whether a knowledge.crawl_site request needs approval before it starts. */
+export function crawlSiteRequiresApproval(input: unknown): boolean {
+  const parsed = crawlSiteInput.safeParse(input)
+  const maxPages = parsed.success ? parsed.data.maxPages : undefined
+  return crawlSiteEstimatedPages(maxPages) > CRAWL_SITE_APPROVAL_PAGES
+}
+
+/**
+ * Actions whose approval depends on their input rather than on the static flag. The flag is a
+ * boolean and cannot carry the page threshold, so callers that decide approval ask
+ * actionRequiresApproval, which consults this table.
+ */
+const conditionalApproval: Partial<Record<ActionId, (input: unknown) => boolean>> = {
+  'knowledge.crawl_site': crawlSiteRequiresApproval,
+}
+
+export function actionRequiresApproval(actionId: ActionId, input: unknown): boolean {
+  const descriptor = getActionDescriptor(actionId)
+  if (!descriptor) throw new Error(`Unknown action: ${actionId}`)
+  if (descriptor.requiresApproval) return true
+  return conditionalApproval[actionId]?.(input) ?? false
 }
