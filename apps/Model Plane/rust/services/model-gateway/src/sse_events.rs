@@ -464,6 +464,11 @@ pub enum ChatEvent {
         delivery: String,
         expires_at: Option<String>,
         items: Value,
+        /// `mcp_elicitation` for a form an MCP server sent through the run (EP-4 S6). `None` is the run's
+        /// model, and the key is then left off the frame, so a model question reads as it always did.
+        origin: Option<String>,
+        /// The asking server's display name, set exactly when `origin` is (EP-4 S6).
+        origin_label: Option<String>,
     },
     /// The editable deep-research plan a plan turn ends with (Wave 3 EP-2 S5), sent only while
     /// `DEEP_RESEARCH_PLAN_TURN` is on. Control event, ungated: the plan card is the turn's whole
@@ -1060,13 +1065,25 @@ impl ChatEvent {
                 delivery,
                 expires_at,
                 items,
-            } => json!({
-                "question_id": question_id,
-                "delivery": delivery,
-                "expires_at": expires_at,
-                "items": items,
-                "request_id": request_id,
-            }),
+                origin,
+                origin_label,
+            } => {
+                let mut payload = json!({
+                    "question_id": question_id,
+                    "delivery": delivery,
+                    "expires_at": expires_at,
+                    "items": items,
+                    "request_id": request_id,
+                });
+                // The origin keys come only with a server's question, so a model question's frame is unchanged.
+                if let Some(origin) = origin {
+                    payload["origin"] = json!(origin);
+                }
+                if let Some(origin_label) = origin_label {
+                    payload["origin_label"] = json!(origin_label);
+                }
+                payload
+            }
             ChatEvent::ResearchPlan {
                 sub_queries,
                 questions,
@@ -4006,6 +4023,8 @@ mod payload_contract {
                 delivery: s("next_turn"),
                 expires_at: None,
                 items: json!([]),
+                origin: None,
+                origin_label: None,
             },
             ChatEvent::UserQuestion {
                 question_id: s("q_2"),
@@ -4018,6 +4037,8 @@ mod payload_contract {
                     "options": [{ "id": "bring", "label": "Bring", "description": null }],
                     "allow_other": true,
                 }]),
+                origin: Some(s("mcp_elicitation")),
+                origin_label: Some(s("Fixture server")),
             },
             ChatEvent::ResearchPlan { sub_queries: Vec::new(), questions: Vec::new(), max_sub_queries: 1 },
             ChatEvent::ResearchPlan {
@@ -4252,6 +4273,8 @@ mod payload_contract {
             delivery: "next_turn".into(),
             expires_at: Some("2026-11-02T10:00:00Z".into()),
             items: json!([{ "id": "carrier", "kind": "single" }]),
+            origin: None,
+            origin_label: None,
         };
         assert_eq!(event.name(), "user_question");
         assert!(
@@ -4265,6 +4288,47 @@ mod payload_contract {
         assert_eq!(payload["expires_at"], "2026-11-02T10:00:00Z");
         assert_eq!(payload["items"][0]["id"], "carrier");
         assert_eq!(payload["request_id"], "req-4");
+    }
+
+    /// A model question's frame has no origin key, so an older client and today's read it the same way
+    /// (EP-4 S6).
+    #[test]
+    fn user_question_without_origin_is_byte_identical() {
+        let event = ChatEvent::UserQuestion {
+            question_id: "q_abc".into(),
+            delivery: "next_turn".into(),
+            expires_at: None,
+            items: json!([]),
+            origin: None,
+            origin_label: None,
+        };
+        assert_eq!(
+            event.payload("req-5"),
+            json!({
+                "question_id": "q_abc",
+                "delivery": "next_turn",
+                "expires_at": null,
+                "items": [],
+                "request_id": "req-5",
+            })
+        );
+    }
+
+    /// A server's question carries the server's name, so the card can say who asked it (EP-4 S6).
+    #[test]
+    fn user_question_with_server_origin_carries_it() {
+        let event = ChatEvent::UserQuestion {
+            question_id: "q_srv".into(),
+            delivery: "resume".into(),
+            expires_at: None,
+            items: json!([]),
+            origin: Some("mcp_elicitation".into()),
+            origin_label: Some("Fixture server".into()),
+        };
+        let payload = event.payload("req-6");
+        assert_eq!(payload["question_id"], "q_srv");
+        assert_eq!(payload["origin"], "mcp_elicitation");
+        assert_eq!(payload["origin_label"], "Fixture server");
     }
 
     /// `research_plan` is a control event carrying the plan, the questions and the cap the card
