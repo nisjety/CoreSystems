@@ -5,7 +5,12 @@
  * The frame is `sandbox="allow-scripts"` and nothing else, the same isolation as
  * `ArtifactHtmlPreview`: `allow-same-origin` beside `allow-scripts` would let the
  * widget lift its own sandbox, and forms, popups and top navigation stay closed.
- * There is no bridge yet: nothing the frame posts is listened to.
+ *
+ * With `VITE_CHAT_WIDGET_BRIDGE` on (EP-4 S3) the frame gets the bridge shim and
+ * one `message` listener: a widget may size itself, stage a follow-up chip the
+ * person clicks, and ask to open a safe link the person confirms
+ * (`chat.stage_widget_followup`, `chat.open_widget_link`; limits in
+ * `widget-bridge.ts`). Off, nothing the frame posts is listened to.
  */
 
 import { createContext, createMemo, createSignal, onCleanup, Show, useContext } from 'solid-js'
@@ -13,10 +18,17 @@ import type { JSX } from '@solidjs/web'
 import { useI18n } from '@/shared/i18n'
 import { sandboxWidgetDocument } from '@/shared/lib/sandbox-html'
 import { MAX_WIDGET_CHARS, isWithinLiveWindow, widgetThemeCss, widgetTitle, widgetTooLong } from '../lib/inline-widget'
+import { BRIDGE_SHIM, createAnswerFollowupBudget, createWidgetBridgeHost, type TokenBucket } from '../lib/widget-bridge'
 import './inline-widget.css'
 
 /** `VITE_CHAT_INLINE_WIDGETS`, literal `'true'` only. Off: a widget fence is an ordinary code block. */
 export const inlineWidgetsEnabled = () => import.meta.env.VITE_CHAT_INLINE_WIDGETS === 'true'
+
+/**
+ * `VITE_CHAT_WIDGET_BRIDGE`, literal `'true'` only; it acts only where a widget
+ * already runs (the switch above). Off: no shim in the frame and no listener.
+ */
+export const widgetBridgeEnabled = () => import.meta.env.VITE_CHAT_WIDGET_BRIDGE === 'true'
 
 export type InlineWidgetSurfaceKind = 'live' | 'inert'
 
@@ -27,6 +39,28 @@ export type InlineWidgetSurfaceKind = 'live' | 'inert'
  * assistant answer provides `live`.
  */
 export const InlineWidgetSurface = createContext<InlineWidgetSurfaceKind>('inert')
+
+/** What one assistant answer gives its widgets: the follow-up handler and the budget they share. */
+type InlineWidgetAnswerScope = {
+  /** Read when a follow-up arrives: a turn without the handler stages nothing. */
+  followUpHandler: () => ((text: string) => void) | undefined
+  followupBudget: TokenBucket
+}
+
+const InlineWidgetAnswerContext = createContext<InlineWidgetAnswerScope | undefined>(undefined)
+
+/**
+ * Wraps one assistant answer, so its widgets' staged follow-ups go through the
+ * answer's own follow-up handler (the one its follow-up chips use) and share one
+ * budget. Without it a widget stages nothing.
+ */
+export function InlineWidgetAnswer(props: { onSelectFollowUp?: (text: string) => void; children: JSX.Element }): JSX.Element {
+  const scope: InlineWidgetAnswerScope = {
+    followUpHandler: () => props.onSelectFollowUp,
+    followupBudget: createAnswerFollowupBudget(),
+  }
+  return <InlineWidgetAnswerContext value={scope}>{props.children}</InlineWidgetAnswerContext>
+}
 
 /** Whether a widget fence drawn here may run. */
 export function useInlineWidgetsLive(): boolean {
@@ -87,8 +121,75 @@ function InlineWidgetFrame(props: { source: string; fallback: JSX.Element }): JS
   const live = createMemo(() => activated() || isWithinLiveWindow(mountedWidgets(), seq))
 
   const title = createMemo(() => widgetTitle(props.source) ?? i18n.tr('Interaktiv widget', 'Interactive widget'))
+  // Read once: a frame keeps the bridge it was drawn with.
+  const bridgeOn = widgetBridgeEnabled()
   // The theme is read once per source: the frame reloads whenever srcdoc changes.
-  const documentHtml = createMemo(() => sandboxWidgetDocument(props.source, hostThemeCss()))
+  const documentHtml = createMemo(() =>
+    sandboxWidgetDocument(props.source, hostThemeCss(), bridgeOn ? { bridgeShim: BRIDGE_SHIM } : {}),
+  )
+
+  const answer = useContext(InlineWidgetAnswerContext)
+  let frameElement: HTMLIFrameElement | undefined
+  const [height, setHeight] = createSignal<number | null>(null)
+  const [stagedFollowup, setStagedFollowup] = createSignal<string | null>(null)
+  const [pendingLink, setPendingLink] = createSignal<string | null>(null)
+  const [linkRefused, setLinkRefused] = createSignal(false)
+
+  const bridge = bridgeOn
+    ? createWidgetBridgeHost({
+      frameWindow: () => frameElement?.contentWindow ?? null,
+      // Outside an answer scope a frame still gets a budget of its own, but stages nothing (no handler).
+      followupBudget: answer?.followupBudget ?? createAnswerFollowupBudget(),
+    })
+    : null
+
+  if (bridge) {
+    const onMessage = (event: MessageEvent) => {
+      const outcome = bridge.handle(event)
+      if (!outcome.ok) {
+        if (outcome.reason === 'unsafe_link') setLinkRefused(true)
+        return
+      }
+      const action = outcome.action
+      if (!action) return
+      switch (action.kind) {
+        case 'resize':
+          setHeight(action.height)
+          return
+        case 'stage_followup':
+          if (!answer?.followUpHandler()) {
+            bridge.releaseFollowup()
+            return
+          }
+          setStagedFollowup(action.text)
+          return
+        case 'confirm_link':
+          // One question at a time: a widget cannot stack link prompts over the one the person reads.
+          if (pendingLink() === null) {
+            setLinkRefused(false)
+            setPendingLink(action.url)
+          }
+          return
+      }
+    }
+    window.addEventListener('message', onMessage)
+    onCleanup(() => window.removeEventListener('message', onMessage))
+  }
+
+  // The expanded frame fills the overlay; a widget's own height applies inline only.
+  const frameStyle = () => {
+    const asked = height()
+    return asked !== null && !expanded() ? { height: `${asked}px` } : undefined
+  }
+
+  const clearFollowup = () => {
+    setStagedFollowup(null)
+    bridge?.releaseFollowup()
+  }
+  const sendFollowup = (text: string) => {
+    clearFollowup()
+    answer?.followUpHandler()?.(text)
+  }
 
   return (
     <figure
@@ -125,13 +226,62 @@ function InlineWidgetFrame(props: { source: string; fallback: JSX.Element }): JS
         }
       >
         <iframe
+          ref={(element) => { frameElement = element }}
           class="verevon-inline-widget__frame"
           title={title()}
           sandbox={WIDGET_SANDBOX}
           srcdoc={documentHtml()}
           referrerpolicy="no-referrer"
           loading="lazy"
+          style={frameStyle()}
         />
+      </Show>
+      <Show when={stagedFollowup()}>
+        {(text) => (
+          <div
+            class="verevon-chat-followups"
+            role="group"
+            aria-label={i18n.tr('Forslag fra widgeten', 'Suggestion from the widget')}
+          >
+            <span class="verevon-inline-widget__note">{i18n.tr('Forslag fra widgeten:', 'Suggestion from the widget:')}</span>
+            <button type="button" class="verevon-chat-followup-chip" onClick={() => sendFollowup(text())}>
+              {text()}
+            </button>
+            <button type="button" class="verevon-inline-widget__action" onClick={clearFollowup}>
+              {i18n.tr('Avvis', 'Dismiss')}
+            </button>
+          </div>
+        )}
+      </Show>
+      <Show when={pendingLink()}>
+        {(url) => (
+          <div
+            class="verevon-chat-followups"
+            role="group"
+            aria-label={i18n.tr('Lenke fra widgeten', 'Link from the widget')}
+          >
+            <span class="verevon-inline-widget__note">
+              {i18n.tr('Widgeten vil åpne:', 'The widget wants to open:')} {url()}
+            </span>
+            <a
+              class="verevon-chat-followup-chip"
+              href={url()}
+              target="_blank"
+              rel="noopener noreferrer"
+              onClick={() => setPendingLink(null)}
+            >
+              {i18n.tr('Åpne lenken', 'Open the link')}
+            </a>
+            <button type="button" class="verevon-inline-widget__action" onClick={() => setPendingLink(null)}>
+              {i18n.tr('Avbryt', 'Cancel')}
+            </button>
+          </div>
+        )}
+      </Show>
+      <Show when={linkRefused()}>
+        <p class="verevon-inline-widget__note" role="note">
+          {i18n.tr('Lenke blokkert: ukjent adresse', 'Link blocked: unsupported address')}
+        </p>
       </Show>
       <Show when={showCode()}>
         <div class="verevon-inline-widget__code">{props.fallback}</div>

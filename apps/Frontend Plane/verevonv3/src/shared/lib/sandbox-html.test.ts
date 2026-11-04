@@ -57,6 +57,25 @@ describe('sandboxWidgetDocument', () => {
   it('keeps the CSP first when the widget is a full document with its own head', () => {
     expectCspFirst(sandboxWidgetDocument('<html><head><meta http-equiv="refresh" content="0"></head><body>x</body></html>', theme))
   })
+
+  it('writes no script without the bridge, the same document as before', () => {
+    const plain = sandboxWidgetDocument('<p>w</p>', theme)
+    expect(sandboxWidgetDocument('<p>w</p>', theme, {})).toBe(plain)
+    expect(sandboxWidgetDocument('<p>w</p>', theme, { bridgeShim: '' })).toBe(plain)
+    expect(parse(plain).head.querySelector('script')).toBeNull()
+  })
+
+  it('puts the bridge shim after the CSP and theme and before the widget', () => {
+    const shim = 'window.verevon={}'
+    const output = sandboxWidgetDocument('<script>verevon.resize(200)</script>', theme, { bridgeShim: shim })
+    expectCspFirst(output)
+    const head = parse(output).head
+    expect(head.children[1]?.tagName).toBe('STYLE')
+    expect(head.children[2]?.tagName).toBe('SCRIPT')
+    expect(head.children[2]?.textContent).toBe(shim)
+    expect(output.indexOf(shim)).toBeLessThan(output.indexOf('<body>'))
+    expect(output.indexOf(shim)).toBeGreaterThan(output.indexOf(theme))
+  })
 })
 
 describe('sandboxHtmlDocument is unchanged by the widget wrapper', () => {

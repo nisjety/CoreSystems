@@ -47,8 +47,13 @@ const WIDGET_BASE_CSS =
  * (`themeCss`, the `:root{--vv-*}` rule from `widgetThemeCss`) and a base reset,
  * then the widget. `themeCss` is host-built from filtered token values; the
  * widget's own markup only ever lands in the body.
+ *
+ * With `bridgeShim` (EP-4 S3, the bridge switch on) the host's own script goes
+ * after the theme and before the body, so `window.verevon` exists before any
+ * widget script runs. Without it the document is exactly the S1 one.
  */
-export function sandboxWidgetDocument(html: string, themeCss: string): string {
+export function sandboxWidgetDocument(html: string, themeCss: string, options: { bridgeShim?: string } = {}): string {
   const source = html.trim()
-  return `<!doctype html><html><head>${CSP_META}<style>${themeCss}${WIDGET_BASE_CSS}</style></head><body>${source}</body></html>`
+  const shim = options.bridgeShim ? `<script>${options.bridgeShim}</script>` : ''
+  return `<!doctype html><html><head>${CSP_META}<style>${themeCss}${WIDGET_BASE_CSS}</style>${shim}</head><body>${source}</body></html>`
 }
