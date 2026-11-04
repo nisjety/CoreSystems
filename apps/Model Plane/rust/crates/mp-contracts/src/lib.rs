@@ -33,6 +33,7 @@ pub mod run_origin;
 pub mod run_timing;
 pub mod sandbox_report;
 pub mod scheduled_contract;
+pub mod shell_rule;
 pub mod skill_bundle;
 pub mod skill_recovery;
 pub mod space_attention;
