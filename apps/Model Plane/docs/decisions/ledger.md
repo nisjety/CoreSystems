@@ -631,6 +631,14 @@ Open and logged in the depth register: with the switch off the gRPC `ExitPlanMod
 
 **EP-9-C1.** the design's entry 'Retention is Control policy, session-core sweeps, holds never deleted automatically' (D-C2 last-activity clock, 30..3650 bounds, unset = keep; D-C4 org_compliance.data_retention_days ignored). Also record migration 031 instead of 030, and holds placed by owner or compliance only.
 
+## 2026-11-04 - Wave-mode batch W3-19: decisions recorded by its slices
+
+**Status: built in wave mode (unit tests only; depth in the register).**
+
+**EP-9-C2.** entry 'Retention is Control policy, session-core sweeps, holds never deleted automatically' (D-C2, D-C4). It must say: SESSION_RETENTION_SWEEP treats an unknown value as dry_run, a deliberate deviation from K3-26 because this switch deletes data; enforce runs dry until EP-9 C3; the retention clock is last activity (newest message, or latest run change if later), with 30..3650-day bounds; org-core unreachable means no candidates.
+
+**EP-9-C4.** add the entry 'D-C1 Legal hold versus erasure (EP-9 C4): a hold blocks thread delete, bulk history delete, org hard and soft delete and the session-core org purge with erasure_blocked_legal_hold; a check outage refuses with the retryable erasure_hold_check_unavailable; org-core 404 means the org and its holds are gone; release happens in Control (legal-hold routes), no override in Model Plane; switch ERASURE_HOLD_CHECK on session-core and org-core, default off. Decided by the owner at the recommended option 2026-11-04; counsel input outstanding.'
+
 ## 2026-10-21 - The reasoning-effort ladder lives in inference-core (WS11-S1)
 
 **Status: implemented (code only, inert).** The canonical ladder (`Level` Minimal..Max, `Wire`, a `support(family, model)` table with a per-row `verified_on`, `resolve` clamping to the nearest weaker supported level, `from_legacy_budget`, `allowance`, deployment aliases from `INFERENCE_CORE_EFFORT_MODEL_ALIASES`) lives in `inference-core/src/provider/effort.rs`; model-gateway derives only the requested level (WS11-S5) and never a per-provider shape. One owner, so the three per-path budget derivations (normal, ZDR, source validation) stop being three decisions. `InferRequest.reasoning_effort` and `ModelInfo.effort_levels` exist but no adapter reads them yet; the response-cache key now hashes the level, so a quick and a deep turn of one prompt cannot share an entry. Default applied (DEC-36, Q3): the provider ceiling rises by the per-level allowance (Low 1024 to Max 16384), total cap 32768, pending per-model measurement. Every support row is `verified_on = None` until the P0 live probe runs; the Anthropic split (budget through 4.6, adaptive from 4.7, unknown claude names adaptive) comes from the plan's cached claude-api reference, not a live check. A model with no declared row is treated as having no effort control, because an unsupported parameter is a 400 and an omitted one is a no-op.
