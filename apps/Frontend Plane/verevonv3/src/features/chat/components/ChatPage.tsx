@@ -83,7 +83,12 @@ import { loadEffectiveAgentModeCap } from '@/features/customize/AgentModesSectio
 import { audienceConfirmRequired, chatProjectRefusal, sandboxToolsRefusedNotice, type ChatProjectRefusal } from './use-chat-project'
 import { planTranscriptWindow, resolveTurnHeights, virtualizeTranscript } from '../lib/transcript-window'
 import { BrowserDockControls } from '@/features/browser/dock/BrowserDockControls'
+import { InteractiveBrowserPane } from '@/features/browser/dock/InteractiveBrowserPane'
+import { OpenBrowserButton } from '@/features/browser/dock/OpenBrowserButton'
+import { useDockBrowserSession } from '@/features/browser/dock/dock-session'
+import { createChatThreadByTab, planChatForTabSwitch } from '@/features/browser/dock/chat-per-tab'
 import {
+  browserDockPageClass,
   browserDockSizeCss,
   isChatBrowserDockEnabled,
   nextBrowserDockPosition,
@@ -302,6 +307,74 @@ export default function ChatPage() {
     if (!isChatBrowserDockEnabled() || !liveRunId() || position === 'hidden') return null
     return position
   })
+
+  // The browser body of the dock (WS9.H): the run watch, or the interactive browser beside the chat. It
+  // is kept for this page only; the layout itself stays in the dock record. Showing the browser needs no
+  // live run, so this body is what opens the dock on a chat without one.
+  const [dockBody, setDockBody] = createSignal<'run' | 'browser'>('run')
+  const browserBodyOpen = () => (
+    isChatBrowserDockEnabled() && dockBody() === 'browser' && browserDock().position !== 'hidden'
+  )
+  // The browser body shows only on the chat tab. A canvas tab owns the rail, as it does for the run watch.
+  const browserBodyShown = () => browserBodyOpen() && activeTab() === 'chat'
+  // Hiding the dock returns the rail to the run watch, so restoring it shows the run again.
+  createEffect(
+    () => browserDock().position === 'hidden',
+    (hidden) => {
+      if (hidden) setDockBody('run')
+    },
+  )
+  const openBrowserBody = () => {
+    if (browserDock().position === 'hidden') toggleRunPanel()
+    setDockBody('browser')
+  }
+  const closeBrowserBody = () => {
+    setDockBody('run')
+    if (!liveRunId()) setBrowserDockPosition('hidden')
+  }
+  const toggleBrowserBody = () => {
+    if (browserBodyOpen()) closeBrowserBody()
+    else openBrowserBody()
+  }
+  // The layout class of the browser body. The run watch's own class still comes from dockLayout.
+  const browserBodyDock = () => (browserBodyOpen() ? browserDockPageClass(browserDock().position) : null) ?? ''
+
+  // One interactive browser session per chat page (WS9.H). Its zero retention follows the thread on
+  // screen and the workspace's retention verdict.
+  const dockSession = useDockBrowserSession({
+    orgId: () => session.activeOrg?.id,
+    threadTemporary: () => isActiveThreadTemporary(),
+    tr: i18n.tr,
+  })
+
+  // Chat per browser tab (WS9.H). The rule comes from the dock record: `keep` unless the record says `new`.
+  // A chat moves only when the browser's active tab changes, and never without a browser session.
+  const chatThreadsByTab = createChatThreadByTab()
+  createEffect(
+    () => dockSession.controller?.preview()?.browserSession?.session.tabs?.find((tab) => tab.active)?.tabId ?? null,
+    (tabKey, previousKey) => {
+      // A temporary chat is never remembered for a tab: the banner promises it is kept in no memory.
+      if (previousKey && state.threadId && !isActiveThreadTemporary()) chatThreadsByTab.remember(previousKey, state.threadId)
+      const plan = planChatForTabSwitch({
+        previousTab: previousKey ?? null,
+        nextTab: tabKey,
+        rule: browserDock().chatPerTab,
+        threadFor: chatThreadsByTab.threadFor,
+      })
+      if (plan.kind === 'new-thread') startNewChat()
+      else if (plan.kind === 'select-thread') selectChatThread(plan.threadId)
+    },
+  )
+
+  // The composer, found the way the focus-composer shortcut finds it.
+  const focusComposer = () => {
+    document.querySelector<HTMLTextAreaElement>('.verevon-dashboard-textarea')?.focus()
+  }
+  // The omnibox's "Ask Verevon" row: the typed text becomes the message and the composer takes focus.
+  const askVerevonFromBrowser = (text: string) => {
+    setInput(text)
+    focusComposer()
+  }
 
   useChatShortcuts({
     startNewChat,
@@ -1024,6 +1097,12 @@ export default function ChatPage() {
       ? <BrowserDockControls position={browserDock().position} onPositionChange={setBrowserDockPosition} />
       : undefined
   ))
+  // The browser header control (WS9.H), built once. Absent while the dock is off in this build.
+  const browserHeaderButton = createMemo(() => (
+    isChatBrowserDockEnabled()
+      ? <OpenBrowserButton open={browserBodyOpen} onToggle={toggleBrowserBody} />
+      : undefined
+  ))
 
   /**
    * Arrow keys move between messages (audit item 26 / plan item 14).
@@ -1177,6 +1256,7 @@ export default function ChatPage() {
           'verevon-chat-page--dock-bottom': dockLayout() === 'bottom',
           'verevon-chat-page--dock-maximised': dockLayout() === 'maximised',
         },
+        browserBodyDock(),
       ]}
       style={dockLayout() ? { '--browser-dock-size': browserDockSizeCss(browserDock()) } : undefined}
     >
@@ -1211,6 +1291,7 @@ export default function ChatPage() {
             title={title()}
             traceAvailable={Boolean(liveRunId())}
             onChange={setActiveTab}
+            browserSlot={browserHeaderButton()}
             onNewChat={startNewChat}
             onRegenerate={regenerateLatest}
           />
@@ -1430,7 +1511,7 @@ export default function ChatPage() {
       */}
       <ChatLiveRunPanel
         collapsed={workCanvasActive() ? false : runPanelCollapsed()}
-        hidden={activeTab() !== 'chat' && !workCanvasActive()}
+        hidden={(activeTab() !== 'chat' && !workCanvasActive()) || browserBodyShown()}
         onToggleCollapsed={toggleRunPanel}
         orgId={session.activeOrg?.id}
         runId={liveRunId()}
@@ -1443,6 +1524,23 @@ export default function ChatPage() {
         wideResearch={liveRailWideResearch()}
         dockControls={liveRailDockControls()}
       />
+      {/* The interactive browser body (WS9.H) takes the rail while the browser is open beside the chat. */}
+      <Show when={browserBodyOpen() ? dockSession.controller : null}>
+        {(controller) => (
+          <InteractiveBrowserPane
+            controller={controller()}
+            orgId={() => session.activeOrg?.id}
+            zdr={dockSession.zdr}
+            dockPosition={browserDock().position}
+            onDockPositionChange={setBrowserDockPosition}
+            sizeCss={browserDockSizeCss(browserDock())}
+            hidden={activeTab() !== 'chat'}
+            onAskVerevon={askVerevonFromBrowser}
+            onAskAboutPage={focusComposer}
+            onClose={closeBrowserBody}
+          />
+        )}
+      </Show>
       <Show when={scheduleDialogOpen()}>
         <Portal>
           <ScheduleDialog
