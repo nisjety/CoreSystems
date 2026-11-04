@@ -161,6 +161,13 @@ import {
 	type ConnectorScopeBlock,
 } from "@/shared/actions/chat-connector-scope";
 import { zdrRefusalPresentation } from "@/shared/api/zdr-refusals";
+import type { BrowserTab } from "@/shared/api/browser-client";
+import {
+	parseTabMentions,
+	resolveTabMentions,
+	type TabMentionResolution,
+	type TabMentionUnresolvedReason,
+} from "@/features/browser/page-context/tab-mention";
 import {
 	listChatGptSubscriptions,
 	OPENAI_CODEX_SUBSCRIPTION_PROVIDER,
@@ -367,6 +374,62 @@ export type ComposerActiveAction = {
 	kind: "skill" | "capability" | "connector";
 };
 
+/** One `@tab` token as sent (E3.3-c): the token text and the tab id it names. */
+export type DashboardComposerTabMention = {
+	token: string;
+	tabId: string | null;
+};
+
+/** The browser page context a turn asks for (E3.3-c). Mention-only, never a grant. */
+export type DashboardComposerBrowserContext = {
+	sessionId: string;
+	tabMentions: DashboardComposerTabMention[];
+};
+
+/**
+ * Build-time switch for the `@tab` chip and its payload field (E3.3-c).
+ * Only `1` turns it on, like VITE_BROWSER_OMNIBOX_SEARCH.
+ */
+export function tabMentionChipsEnabled(): boolean {
+	return import.meta.env.VITE_BROWSER_TAB_MENTIONS === "1";
+}
+
+/**
+ * The `browserContext` a send carries, or undefined when it carries none:
+ * no session, a zero-retention turn, or no `@tab` token in the text.
+ */
+export function composerBrowserContext(
+	text: string,
+	sessionId: string | null | undefined,
+	zeroRetention: boolean,
+): DashboardComposerBrowserContext | undefined {
+	const id = sessionId?.trim();
+	if (!id || zeroRetention) return undefined;
+	const tabMentions = parseTabMentions(text).map((mention) => ({
+		token: text.slice(mention.start, mention.end),
+		tabId: mention.tabId,
+	}));
+	return tabMentions.length > 0 ? { sessionId: id, tabMentions } : undefined;
+}
+
+function tabMentionReasonText(
+	reason: TabMentionUnresolvedReason,
+	tr: (noText: string, enText: string) => string,
+): string {
+	switch (reason) {
+		case "zero-retention":
+			return tr("ikke i midlertidig samtale", "not in a temporary chat");
+		case "no-tabs":
+			return tr("ingen åpne faner", "no open tabs");
+		case "no-active-tab":
+			return tr("ingen aktiv fane", "no active tab");
+		case "ambiguous-tab":
+			return tr("flere faner passer", "more than one tab matches");
+		case "unknown-tab":
+			return tr("ukjent fane", "unknown tab");
+	}
+}
+
 export type DashboardComposerSubmitPayload = {
     sourceScope?: import('@/shared/actions/chat-source-scope').ChatSourceScope;
     /**
@@ -386,6 +449,17 @@ export type DashboardComposerSubmitPayload = {
      * unchanged send is byte-identical. The server resolves it strictest-wins against the org cap.
      */
     agentMode?: AgentModeId;
+	/**
+	 * `@tab` mentions in the sent text (E3.3-c), with the browser session they
+	 * name. Each entry carries the token exactly as typed and the tab id it
+	 * spells (null for the bare `@tab`, the active tab). This is a hint only:
+	 * the gateway re-resolves every mention against Quarry's live tabs
+	 * (`POST /api/v1/browser/sessions/{id}/context/tab-mentions`) and fails
+	 * closed before anything reaches a model. Never carries page content or a
+	 * grant. Omitted unless VITE_BROWSER_TAB_MENTIONS is on, a session is
+	 * known, the turn is not zero-retention and the text has a mention.
+	 */
+	browserContext?: DashboardComposerBrowserContext;
 	actions: ComposerActiveAction[];
 	attachments: DashboardComposerAttachment[];
 	model?: string;
@@ -942,6 +1016,14 @@ export function DashboardComposer(props: {
 	/** "Midlertidig samtale" (ChatGPT's Temporary Chat) — maps to the request's ZDR flag. */
 	temporaryChat?: boolean;
 	onTemporaryChatChange?: (value: boolean) => void;
+	/**
+	 * The Quarry browser session `@tab` mentions name, and the tab list the
+	 * caller holds for it (E3.3-c). The list only drives the chips; the
+	 * gateway re-resolves against the live tabs. Both are ignored unless
+	 * VITE_BROWSER_TAB_MENTIONS is on.
+	 */
+	browserSessionId?: string | null;
+	browserTabs?: readonly BrowserTab[] | null;
 	/** Once a message has been sent in a temporary thread, the toggle can no longer be turned off mid-conversation. */
 	temporaryChatLocked?: boolean;
 	/**
@@ -1185,6 +1267,15 @@ export function DashboardComposer(props: {
 	);
 	const zeroRetentionTurn = () =>
 		Boolean(props.temporaryChatLocked || props.temporaryChat) || orgZeroRetention() === true;
+	// `@tab` chips (E3.3-c, D9): one per token in the draft, resolved against
+	// the caller's tab list as a preview only. Empty with the flag off or no
+	// session, so nothing renders.
+	const tabMentionResolutions = createMemo<TabMentionResolution[]>(() => {
+		if (!tabMentionChipsEnabled() || !props.browserSessionId?.trim()) return [];
+		return resolveTabMentions(parseTabMentions(props.message), props.browserTabs, {
+			zeroRetention: zeroRetentionTurn(),
+		});
+	});
 	const zeroRetentionWebTitle = () =>
 		i18n.tr(
 			"Nettsøk er ikke tilgjengelig med nullagring ennå",
@@ -2741,6 +2832,13 @@ export function DashboardComposer(props: {
 		const submittedSourceScope = sourceScope();
 		const submittedConversationOnly = conversationOnly();
 		const submittedRetrievalScope = retrievalScope();
+		const submittedBrowserContext = tabMentionChipsEnabled()
+			? composerBrowserContext(
+					initialSnapshot.submittedText,
+					props.browserSessionId,
+					zeroRetentionTurn() || temporaryChat(),
+				)
+			: undefined;
 		const submittedConnectorScope = connectorScopeBlockReason() === null && connectorScopeAdvertised()
 			? normalizeConnectorScope(connectorScope())
 			: [];
@@ -2770,6 +2868,8 @@ export function DashboardComposer(props: {
 			if (submittedConnectorScope.length > 0) payload.connectorScope = submittedConnectorScope;
 			// Omitted when nothing was picked, like `connectorScope` above.
 			if (submittedAgentMode !== undefined) payload.agentMode = submittedAgentMode;
+			// Omitted unless the text has a mention; a conversation-only turn reads no page.
+			if (submittedBrowserContext && !submittedConversationOnly) payload.browserContext = submittedBrowserContext;
 			if (submittedConversationOnly) {
 				payload.tools = [];
 				payload.actions = [];
@@ -3817,6 +3917,59 @@ export function DashboardComposer(props: {
 						</Show>
 					</div>
 
+					<Show when={tabMentionResolutions().length > 0}>
+						<div
+							class="dashboard-composer-tab-mentions"
+							role="list"
+							aria-label={i18n.tr("Faner nevnt i meldingen", "Tabs mentioned in the message")}
+							style={{ display: "flex", "flex-wrap": "wrap", gap: "4px", padding: "2px 12px" }}
+						>
+							<For each={tabMentionResolutions()}>
+								{(resolution) => (
+									<span
+										role="listitem"
+										class="dashboard-composer-tab-chip"
+										data-status={resolution.status}
+										title={
+											resolution.status === "resolved"
+												? i18n.tr(
+														"Fanetittelen kommer fra nettsiden og er ikke kontrollert. Gir ingen tilgang til å handle.",
+														"The tab title comes from the web page and is not verified. Grants no permission to act.",
+													)
+												: i18n.tr("Denne fanen legges ikke ved.", "This tab will not be attached.")
+										}
+										style={{
+											display: "inline-flex",
+											"align-items": "center",
+											gap: "4px",
+											"max-width": "240px",
+											padding: "1px 8px",
+											"border-radius": "999px",
+											"font-size": "12px",
+											border: "1px solid currentColor",
+											opacity: resolution.status === "resolved" ? "1" : "0.7",
+										}}
+									>
+										<span aria-hidden="true">@tab</span>
+										{resolution.status === "resolved" ? (
+											<>
+												<span
+													style={{ overflow: "hidden", "text-overflow": "ellipsis", "white-space": "nowrap" }}
+												>
+													{resolution.ref.label}
+												</span>
+												<span class="sr-only">
+													{i18n.tr("(sideinnhold, ikke kontrollert)", "(page content, not verified)")}
+												</span>
+											</>
+										) : (
+											<span>{tabMentionReasonText(resolution.reason, i18n.tr)}</span>
+										)}
+									</span>
+								)}
+							</For>
+						</div>
+					</Show>
 					<Show when={voiceRecording()}>
 						<div class="dashboard-composer-loading-bar">
 							<span />

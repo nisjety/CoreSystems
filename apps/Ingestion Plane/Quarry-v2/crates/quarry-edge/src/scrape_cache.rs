@@ -215,7 +215,7 @@ pub async fn rehydrate(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use quarry_core::scrape::{ScrapeLimits, ScrapeOptions};
+    use quarry_core::scrape::{CacheState, EffectiveScrapeOptions, ScrapeLimits, ScrapeOptions};
     use quarry_runtime::artifact_store::InMemoryStore;
     use serde_json::json;
 
@@ -470,5 +470,191 @@ mod tests {
         assert!(parts.markdown.is_some());
         assert!(parts.html.is_none() && parts.raw_html.is_none());
         assert_eq!(parts.omitted, vec!["html".to_owned(), "raw_html".to_owned()]);
+    }
+
+    // ---- freshness metadata and the monitor path (INNH-7 gaps, E3.8.4d) ----------
+
+    /// The three calls that reach the URL result cache: the key, the read and the write.
+    const URL_CACHE_CALLS: [&str; 3] = ["result_key(", "get_result(", "put_result("];
+
+    /// The source before its first inline `#[cfg(test)] mod name {`: the production code.
+    fn production_part(source: &str) -> String {
+        let text = source.replace("\r\n", "\n");
+        let lines: Vec<&str> = text.split('\n').collect();
+        let mut offset = 0usize;
+        for (index, line) in lines.iter().enumerate() {
+            if line.trim() == "#[cfg(test)]" {
+                let following = lines[index + 1..]
+                    .iter()
+                    .find(|next| !next.trim_start().starts_with("#["));
+                if following.is_some_and(|next| {
+                    let next = next.trim_start();
+                    next.starts_with("mod ") && !next.trim_end().ends_with(';')
+                }) {
+                    return text[..offset].to_owned();
+                }
+            }
+            offset += line.len() + 1;
+        }
+        text
+    }
+
+    /// The body of `fn name(...) { ... }` in `source`, from its opening brace to the
+    /// matching close. Braces inside string literals and line comments are skipped.
+    fn fn_body<'a>(source: &'a str, name: &str) -> Option<&'a str> {
+        let at = source.find(&format!("fn {name}("))?;
+        let open = at + source[at..].find('{')?;
+        let mut depth = 0i32;
+        let mut in_string = false;
+        let mut escaped = false;
+        let mut chars = source[open..].char_indices().peekable();
+        while let Some((offset, c)) = chars.next() {
+            if in_string {
+                match c {
+                    _ if escaped => escaped = false,
+                    '\\' => escaped = true,
+                    '"' => in_string = false,
+                    _ => {}
+                }
+                continue;
+            }
+            match c {
+                '"' => in_string = true,
+                '/' if chars.peek().is_some_and(|&(_, next)| next == '/') => {
+                    for (_, next) in chars.by_ref() {
+                        if next == '\n' {
+                            break;
+                        }
+                    }
+                }
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(&source[open..open + offset + 1]);
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
+    /// Every `.rs` file under `dir`, recursively.
+    fn rust_sources(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                rust_sources(&path, out);
+            } else if path.extension().is_some_and(|ext| ext == "rs") {
+                out.push(path);
+            }
+        }
+    }
+
+    /// The monitor path never reaches the URL result cache. A change monitor fetches
+    /// through `/v1/internal/run_page` (the orchestrator's RunPage, which sends no
+    /// `prev_fingerprint`, `cache` or `max_age`) and records through
+    /// `/v1/internal/change/record`. Neither route may call the key, the read or the
+    /// write, and no other edge route may either: only `scrape_with`, the public
+    /// `POST /v1/scrape`, does. This is structural, over the production source; the
+    /// Redis runs in tests/scrape_max_age.rs cover the behaviour.
+    #[test]
+    fn monitor_paths_never_reach_the_url_cache() {
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let routes_file = src.join("routes.rs");
+        let routes = production_part(&std::fs::read_to_string(&routes_file).unwrap());
+        // The positive control: the scan reads the route that does use the cache.
+        let scrape = fn_body(&routes, "scrape_with").expect("scrape_with is in routes.rs");
+        for call in URL_CACHE_CALLS {
+            assert!(scrape.contains(call), "scrape_with no longer calls {call}: the scan would prove nothing");
+        }
+        let start = scrape.as_ptr() as usize - routes.as_ptr() as usize;
+        let allowed = start..start + scrape.len();
+        // The monitor's own fetch route names none of them.
+        let run_page = fn_body(&routes, "internal_run_page").expect("internal_run_page is in routes.rs");
+        for call in URL_CACHE_CALLS {
+            assert!(!run_page.contains(call), "internal_run_page (the monitor's fetch) calls {call}");
+        }
+
+        let mut files = Vec::new();
+        rust_sources(&src, &mut files);
+        let mut scanned = 0usize;
+        let mut found = Vec::new();
+        for file in &files {
+            // cache.rs defines the three calls; this file names them in its constant above.
+            let own = file
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name == "cache.rs" || name == "scrape_cache.rs");
+            if own {
+                continue;
+            }
+            scanned += 1;
+            let text = production_part(&std::fs::read_to_string(file).unwrap());
+            for call in URL_CACHE_CALLS {
+                for (at, _) in text.match_indices(call) {
+                    if file == &routes_file && allowed.contains(&at) {
+                        continue;
+                    }
+                    let line = text[..at].matches('\n').count() + 1;
+                    found.push(format!("{}:{line} calls {call}", file.display()));
+                }
+            }
+        }
+        assert!(scanned >= 20, "only {scanned} edge sources were scanned");
+        assert!(
+            found.is_empty(),
+            "the URL result cache is reached outside scrape_with:\n  {}",
+            found.join("\n  ")
+        );
+    }
+
+    /// The freshness fields of a ZDR response. A ZDR request is the bypass state, and only
+    /// a hit carries `cached_at` and `cache_age_ms`; the eligibility that produced the
+    /// bypass is `Zdr`, with the warning the matrix row names.
+    #[test]
+    fn a_zdr_response_carries_no_cache_freshness_fields() {
+        let resolved = resolved(json!({ "max_age": 60_000 }));
+        let value = serde_json::to_value(EffectiveScrapeOptions::new(
+            &resolved,
+            true,
+            CacheState::Bypass,
+            "shadow",
+            false,
+            &[],
+        ))
+        .unwrap();
+        assert_eq!(value["cache_state"], "bypass");
+        assert_eq!(value["zdr"], true);
+        assert_eq!(value["max_age"], 60_000);
+        assert!(value.get("cached_at").is_none() && value.get("cache_age_ms").is_none(), "{value}");
+        assert_eq!(verdict(json!({ "max_age": 60_000 }), |r| r.zdr_blocks_cache = true), Eligibility::Zdr);
+        let warning = Eligibility::Zdr.warning().expect("a ZDR refusal says why");
+        assert_eq!(warning.code.as_str(), "max_age_ignored_zdr");
+    }
+
+    /// The freshness fields of a hit come from the stored fetch: `cached_at` is the
+    /// original `fetched_at` (not the hit time), `cache_age_ms` is how old the result was,
+    /// and the window includes `max_age` itself.
+    #[test]
+    fn a_hit_reports_the_original_fetch_time_and_its_age() {
+        let now = Utc::now();
+        let fetched = now - chrono::Duration::milliseconds(1500);
+        let age = age_ms(fetched, now);
+        assert_eq!(age, 1500);
+        assert!(is_fresh(age, 2000), "inside the window: served");
+        assert!(!is_fresh(age, 1000), "outside the window: refetched");
+        let resolved = resolved(json!({ "max_age": 2000 }));
+        let hit = EffectiveScrapeOptions::new(&resolved, false, CacheState::Miss, "shadow", false, &[])
+            .served_from_cache(fetched, age);
+        let value = serde_json::to_value(&hit).unwrap();
+        assert_eq!(value["cache_state"], "hit");
+        assert_eq!(value["cache_age_ms"], 1500);
+        let cached_at = chrono::DateTime::parse_from_rfc3339(value["cached_at"].as_str().unwrap()).unwrap();
+        assert_eq!(cached_at.with_timezone(&Utc), fetched, "cached_at is the original fetch");
     }
 }

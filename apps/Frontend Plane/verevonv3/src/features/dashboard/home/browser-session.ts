@@ -127,15 +127,10 @@ export function browserSessionFromPreview(preview: ScrapePreview): BrowserSessio
     ?? resolveVisualObservationUrl(session?.id, visualObservationArtifactId)
 
   return {
-    capabilities: session?.capabilities ?? ['annotate', 'dom_select', 'knowledge_ingest'],
-    commentAnchors: [
-      {
-        id: 'comment-1',
-        label: '1',
-        x: 0.07,
-        y: 0.18,
-      },
-    ],
+    // No session: the gateway advertised no capability, so the fallback claims none.
+    capabilities: session?.capabilities ?? [],
+    // No placeholder anchor: the annotate capability is not built.
+    commentAnchors: [],
     consoleEntries: observation?.console_summary ?? [],
     domNodes: observation?.dom_summary
       ? domNodesFromObservation(observation)
