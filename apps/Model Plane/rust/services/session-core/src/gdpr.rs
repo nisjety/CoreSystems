@@ -33,6 +33,8 @@
 
 use serde::Deserialize;
 use sqlx::{Postgres, Transaction};
+use std::{sync::OnceLock, time::Duration};
+use tonic::Status;
 
 use crate::store::Pool;
 
@@ -232,6 +234,247 @@ impl PurgeSummary {
     }
 }
 
+// ---------------------------------------------------------------------------------------------
+// Legal holds against erasure (EP-9 C4, decision D-C1).
+//
+// org-core is the hold record (EP-9 C1). Before a user deletes a thread, bulk-deletes their
+// history, or an organisation erasure purges the org, session-core asks org-core's check route
+// whether the organisation or any of the threads is held. A held scope is refused with
+// `erasure_blocked_legal_hold`; the hold is released in Control, never overridden here. A check
+// that cannot be answered refuses with the retryable `erasure_hold_check_unavailable`: a hold
+// that cannot be ruled out is treated as present, because a wrong refusal is retried and a
+// wrong erasure is not recoverable.
+// ---------------------------------------------------------------------------------------------
+
+/// The switch. Only the literal `true` turns the check on; off, no hold is asked and every
+/// erasure runs exactly as before.
+pub(crate) const ERASURE_HOLD_CHECK_ENV: &str = "ERASURE_HOLD_CHECK";
+
+/// Typed refusal words on the `x-mp-error-code` trailer.
+pub(crate) const ERASURE_BLOCKED_LEGAL_HOLD: &str = "erasure_blocked_legal_hold";
+pub(crate) const ERASURE_HOLD_CHECK_UNAVAILABLE: &str = "erasure_hold_check_unavailable";
+
+/// What a hold keeps when it blocks a thread erase: every content family `delete_thread_rows`
+/// and the org purge remove, named so the refusal says what stays. Thread goals and artifact
+/// revisions are thread-bound tables of their own (C-B9) and must stay in this list.
+pub(crate) const HELD_THREAD_CONTENT: &[&str] = &[
+    "messages",
+    "runs",
+    "plans",
+    "approvals",
+    "tasks",
+    "agent_memory",
+    "thread_goals",
+    "artifact_revisions",
+];
+
+/// The most thread ids one check call may name (org-core `retention.MaxCheckThreadIDs`).
+const CHECK_PAGE: usize = 500;
+/// A full page of held ids is well under this; anything larger is not a check answer.
+const MAX_CHECK_BODY_BYTES: usize = 128 * 1024;
+const CHECK_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
+/// Above org-core's own 3 s bound on the check, so its typed answer arrives first.
+const CHECK_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Why an erasure was refused.
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum ErasureHoldError {
+    /// An active org hold covers every thread of the organisation.
+    #[error("erasure_blocked_legal_hold: an active legal hold covers the organisation")]
+    OrgHeld,
+    /// Active thread holds cover this many of the threads asked about.
+    #[error("erasure_blocked_legal_hold: an active legal hold covers {0} of the threads")]
+    ThreadsHeld(usize),
+    /// No answer could be had, so no hold can be ruled out. The text is for logs only.
+    #[error("erasure_hold_check_unavailable: {0}")]
+    Unavailable(String),
+}
+
+impl ErasureHoldError {
+    /// The gRPC refusal. Held is `FailedPrecondition` (retrying changes nothing until the hold is
+    /// released); unavailable is `Unavailable` (a retry may succeed). The message never carries
+    /// the internal cause, which can hold org-core's address.
+    pub(crate) fn into_status(self) -> Status {
+        let held = |scope: &str| {
+            Status::failed_precondition(format!(
+                "a legal hold covers {scope}, so nothing was deleted; its {} are kept until the hold is released",
+                HELD_THREAD_CONTENT.join(", ")
+            ))
+        };
+        match self {
+            Self::OrgHeld => crate::space::mentions::coded_status(
+                held("this organisation"),
+                ERASURE_BLOCKED_LEGAL_HOLD,
+            ),
+            Self::ThreadsHeld(count) => crate::space::mentions::coded_status(
+                held(&format!("{count} of these conversations")),
+                ERASURE_BLOCKED_LEGAL_HOLD,
+            ),
+            Self::Unavailable(cause) => {
+                tracing::warn!(%cause, "legal hold check unavailable; erasure refused");
+                crate::space::mentions::coded_status(
+                    Status::unavailable(
+                        "legal holds could not be checked, so nothing was deleted; try again shortly",
+                    ),
+                    ERASURE_HOLD_CHECK_UNAVAILABLE,
+                )
+            }
+        }
+    }
+}
+
+/// org-core's check answer, read strictly: both fields are required. The window and revision
+/// it also carries are the sweeper's, not this gate's.
+#[derive(Deserialize)]
+struct CheckWire {
+    org_held: bool,
+    held_thread_ids: Vec<String>,
+}
+
+/// Asks org-core's check route on behalf of session-core. Holds a service credential, so it has
+/// no `Debug`.
+pub(crate) struct HoldChecker {
+    base_url: String,
+    token: String,
+    client: reqwest::Client,
+}
+
+impl HoldChecker {
+    /// `None` when org-core's address or the service token is unset. It reuses the org policy
+    /// poller's credentials: one session-core principal at org-core, holding the check scope.
+    fn from_lookup(get: &impl Fn(&str) -> Option<String>) -> Option<Self> {
+        let base_url = get(crate::org_policy::ORG_CORE_URL_ENV)?.trim().to_owned();
+        let token = get(crate::org_policy::SERVICE_TOKEN_ENV)?.trim().to_owned();
+        if base_url.is_empty() || token.is_empty() {
+            return None;
+        }
+        let client = reqwest::Client::builder()
+            .connect_timeout(CHECK_CONNECT_TIMEOUT)
+            .timeout(CHECK_REQUEST_TIMEOUT)
+            .build()
+            .ok()?;
+        Some(Self { base_url, token, client })
+    }
+
+    fn check_url(&self, org_id: &str) -> Result<reqwest::Url, ErasureHoldError> {
+        let mut url = reqwest::Url::parse(&self.base_url)
+            .map_err(|_| ErasureHoldError::Unavailable("ORG_CORE_URL is not a URL".to_owned()))?;
+        url.path_segments_mut()
+            .map_err(|()| ErasureHoldError::Unavailable("ORG_CORE_URL cannot carry a path".to_owned()))?
+            .pop_if_empty()
+            .extend(["internal", "orgs", org_id, "retention", "check"]);
+        Ok(url)
+    }
+
+    /// One page. `None` is org-core's definitive 404: the organisation is not live, and its
+    /// holds went with it (`org_legal_holds` cascades from the organisation).
+    async fn ask_page(&self, org_id: &str, page: &[String]) -> Result<Option<CheckWire>, ErasureHoldError> {
+        let unavailable = ErasureHoldError::Unavailable;
+        let response = self
+            .client
+            .post(self.check_url(org_id)?)
+            .header("x-service-id", "session-core")
+            .header("x-service-token", &self.token)
+            .json(&serde_json::json!({ "thread_ids": page }))
+            .send()
+            .await
+            .map_err(|error| unavailable(format!("check request failed: {error}")))?;
+        let status = response.status();
+        if status == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        if !status.is_success() {
+            return Err(unavailable(format!("check answered {status}")));
+        }
+        let body = response
+            .bytes()
+            .await
+            .map_err(|error| unavailable(format!("check body unreadable: {error}")))?;
+        if body.len() > MAX_CHECK_BODY_BYTES {
+            return Err(unavailable("check body too large".to_owned()));
+        }
+        serde_json::from_slice(&body)
+            .map(Some)
+            .map_err(|error| unavailable(format!("check body is not a check answer: {error}")))
+    }
+
+    /// Whether the organisation or any of `thread_ids` is held, paging the ids. An org hold
+    /// answers at once; thread holds are counted over every page.
+    async fn ensure_not_held(&self, org_id: &str, thread_ids: &[String]) -> Result<(), ErasureHoldError> {
+        let empty: [String; 0] = [];
+        let pages: Vec<&[String]> = if thread_ids.is_empty() {
+            vec![&empty[..]]
+        } else {
+            thread_ids.chunks(CHECK_PAGE).collect()
+        };
+        let mut held = 0usize;
+        for page in pages {
+            let Some(answer) = self.ask_page(org_id, page).await? else {
+                return Ok(());
+            };
+            if answer.org_held {
+                return Err(ErasureHoldError::OrgHeld);
+            }
+            held += answer.held_thread_ids.len();
+        }
+        if held > 0 {
+            return Err(ErasureHoldError::ThreadsHeld(held));
+        }
+        Ok(())
+    }
+}
+
+/// The gate every erasure path asks.
+pub(crate) enum ErasureHoldGate {
+    /// The switch is off: nothing is asked.
+    Off,
+    /// The switch is on but org-core cannot be addressed: every erasure is refused as
+    /// unavailable, since no hold can be ruled out.
+    Unconfigured,
+    On(HoldChecker),
+}
+
+impl ErasureHoldGate {
+    pub(crate) fn from_lookup(get: impl Fn(&str) -> Option<String>) -> Self {
+        if get(ERASURE_HOLD_CHECK_ENV).as_deref() != Some("true") {
+            return Self::Off;
+        }
+        HoldChecker::from_lookup(&get).map_or(Self::Unconfigured, Self::On)
+    }
+
+    /// Refuses when the organisation or any of `thread_ids` (empty: the organisation alone) is
+    /// under an active legal hold, or when that cannot be ruled out.
+    ///
+    /// # Errors
+    ///
+    /// [`ErasureHoldError`] names the refusal.
+    pub(crate) async fn ensure_not_held(&self, org_id: &str, thread_ids: &[String]) -> Result<(), ErasureHoldError> {
+        match self {
+            Self::Off => Ok(()),
+            Self::Unconfigured => Err(ErasureHoldError::Unavailable(format!(
+                "{ERASURE_HOLD_CHECK_ENV} is true but {} or {} is unset",
+                crate::org_policy::ORG_CORE_URL_ENV,
+                crate::org_policy::SERVICE_TOKEN_ENV
+            ))),
+            Self::On(checker) => checker.ensure_not_held(org_id, thread_ids).await,
+        }
+    }
+}
+
+/// The process gate, read once.
+pub(crate) fn erasure_hold_gate() -> &'static ErasureHoldGate {
+    static GATE: OnceLock<ErasureHoldGate> = OnceLock::new();
+    GATE.get_or_init(|| {
+        let gate = ErasureHoldGate::from_lookup(|name| std::env::var(name).ok());
+        if matches!(gate, ErasureHoldGate::Unconfigured) {
+            tracing::error!(
+                "{ERASURE_HOLD_CHECK_ENV} is true but org-core credentials are unset: every thread delete and org erasure is refused"
+            );
+        }
+        gate
+    })
+}
+
 /// Hard-purge every org-scoped row this crate owns for `org_id`, in one
 /// transaction. Deletion order respects every FK with no `ON DELETE
 /// CASCADE` (children before parents); `approval_delivery_outbox`,
@@ -244,7 +487,9 @@ impl PurgeSummary {
 ///
 /// Returns an error if the transaction fails to begin, any statement fails,
 /// or the commit fails. On error nothing is purged — the transaction rolls
-/// back, so a NAK'd redelivery retries the whole purge cleanly.
+/// back, so a NAK'd redelivery retries the whole purge cleanly. With
+/// `ERASURE_HOLD_CHECK` on it also returns an [`ErasureHoldError`] before any
+/// statement when the organisation is held or its holds cannot be checked.
 // Fields are populated one statement at a time (not as a single struct
 // literal) because the comments between them document real FK-ordering
 // dependencies between the awaited statements — collapsing this into one
@@ -255,6 +500,10 @@ pub async fn purge_organization_data(
     org_id: &str,
     letta: Option<&crate::letta_adapter::LettaMemoryAdapter>,
 ) -> anyhow::Result<PurgeSummary> {
+    // EP-9 C4: a held organisation is not purged. Asked before the transaction opens, so a
+    // refusal touches nothing and the consumer's redelivery retries it after the release.
+    erasure_hold_gate().ensure_not_held(org_id, &[]).await?;
+
     let mut tx: Transaction<'_, Postgres> = pool.begin().await?;
     let mut summary = PurgeSummary::default();
 
@@ -1254,5 +1503,222 @@ mod tests {
         );
         sqlx::query("DELETE FROM agent_memory WHERE org_id = $1").bind(&org).execute(&pool).await.ok();
         test_support::clean_space(&pool, &org, &space).await;
+    }
+
+    // EP-9 C4: legal holds against erasure.
+
+    fn hold_env(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
+        let map: std::collections::HashMap<String, String> = pairs
+            .iter()
+            .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
+            .collect();
+        move |name| map.get(name).cloned()
+    }
+
+    fn hold_gate(url: &str) -> ErasureHoldGate {
+        ErasureHoldGate::from_lookup(hold_env(&[
+            (ERASURE_HOLD_CHECK_ENV, "true"),
+            (crate::org_policy::ORG_CORE_URL_ENV, url),
+            (crate::org_policy::SERVICE_TOKEN_ENV, "session-token"),
+        ]))
+    }
+
+    fn check_answer(org_held: bool, held: &[&str]) -> wiremock::ResponseTemplate {
+        wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "organization_id": "org_1",
+            "window_days": null,
+            "revision": 0,
+            "org_held": org_held,
+            "held_thread_ids": held,
+        }))
+    }
+
+    async fn mount_check(server: &wiremock::MockServer, answer: wiremock::ResponseTemplate) {
+        use wiremock::matchers::{header, method, path};
+        server.reset().await;
+        wiremock::Mock::given(method("POST"))
+            .and(path("/internal/orgs/org_1/retention/check"))
+            .and(header("x-service-id", "session-core"))
+            .and(header("x-service-token", "session-token"))
+            .respond_with(answer)
+            .mount(server)
+            .await;
+    }
+
+    fn trailer(status: &Status) -> Option<String> {
+        status
+            .metadata()
+            .get(crate::run_phase::ERROR_CODE_TRAILER)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned)
+    }
+
+    #[test]
+    fn erasure_hold_switch_is_strict() {
+        for value in ["", "1", "TRUE", "True", "yes", " true"] {
+            let gate = ErasureHoldGate::from_lookup(hold_env(&[
+                (ERASURE_HOLD_CHECK_ENV, value),
+                (crate::org_policy::ORG_CORE_URL_ENV, "http://org-core:8080"),
+                (crate::org_policy::SERVICE_TOKEN_ENV, "session-token"),
+            ]));
+            assert!(matches!(gate, ErasureHoldGate::Off), "{value:?} must leave the check off");
+        }
+        assert!(matches!(ErasureHoldGate::from_lookup(hold_env(&[])), ErasureHoldGate::Off));
+        assert!(matches!(hold_gate("http://org-core:8080"), ErasureHoldGate::On(_)));
+        assert!(matches!(
+            ErasureHoldGate::from_lookup(hold_env(&[(ERASURE_HOLD_CHECK_ENV, "true")])),
+            ErasureHoldGate::Unconfigured
+        ));
+    }
+
+    #[tokio::test]
+    async fn erasure_hold_gate_off_asks_nothing() {
+        // No server at all: an Off gate must not try to reach one.
+        let gate = ErasureHoldGate::from_lookup(hold_env(&[]));
+        assert_eq!(gate.ensure_not_held("org_1", &["thr_1".to_owned()]).await, Ok(()));
+        assert_eq!(gate.ensure_not_held("org_1", &[]).await, Ok(()));
+    }
+
+    #[tokio::test]
+    async fn erasure_hold_unconfigured_refuses_as_unavailable() {
+        let gate = ErasureHoldGate::from_lookup(hold_env(&[(ERASURE_HOLD_CHECK_ENV, "true")]));
+        let refusal = gate.ensure_not_held("org_1", &["thr_1".to_owned()]).await.unwrap_err();
+        assert!(matches!(refusal, ErasureHoldError::Unavailable(_)));
+        let status = refusal.into_status();
+        assert_eq!(status.code(), tonic::Code::Unavailable);
+        assert_eq!(trailer(&status).as_deref(), Some(ERASURE_HOLD_CHECK_UNAVAILABLE));
+    }
+
+    /// A held thread is refused, and the same delete passes once the hold is released.
+    #[tokio::test]
+    async fn thread_hold_refuses_until_released() {
+        let server = wiremock::MockServer::start().await;
+        let gate = hold_gate(&server.uri());
+        let thread = ["thr_1".to_owned()];
+
+        mount_check(&server, check_answer(false, &["thr_1"])).await;
+        let refusal = gate.ensure_not_held("org_1", &thread).await.unwrap_err();
+        assert_eq!(refusal, ErasureHoldError::ThreadsHeld(1));
+        let status = refusal.into_status();
+        assert_eq!(status.code(), tonic::Code::FailedPrecondition);
+        assert_eq!(trailer(&status).as_deref(), Some(ERASURE_BLOCKED_LEGAL_HOLD));
+        assert!(
+            status.message().contains("thread_goals") && status.message().contains("artifact_revisions"),
+            "the refusal names goals and revisions among what is kept: {}",
+            status.message()
+        );
+
+        mount_check(&server, check_answer(false, &[])).await;
+        assert_eq!(gate.ensure_not_held("org_1", &thread).await, Ok(()));
+    }
+
+    /// An org hold blocks a thread delete and the org purge alike, until released.
+    #[tokio::test]
+    async fn org_hold_refuses_until_released() {
+        let server = wiremock::MockServer::start().await;
+        let gate = hold_gate(&server.uri());
+
+        mount_check(&server, check_answer(true, &[])).await;
+        assert_eq!(
+            gate.ensure_not_held("org_1", &["thr_free".to_owned()]).await,
+            Err(ErasureHoldError::OrgHeld)
+        );
+        assert_eq!(gate.ensure_not_held("org_1", &[]).await, Err(ErasureHoldError::OrgHeld));
+
+        mount_check(&server, check_answer(false, &[])).await;
+        assert_eq!(gate.ensure_not_held("org_1", &[]).await, Ok(()));
+    }
+
+    /// An outage, an unexpected status or a body that is not a check answer refuses with the
+    /// retryable code; org-core's definitive 404 (organisation gone, holds with it) does not.
+    #[tokio::test]
+    async fn hold_check_failures_refuse_and_a_gone_org_does_not() {
+        let server = wiremock::MockServer::start().await;
+        let gate = hold_gate(&server.uri());
+        let thread = ["thr_1".to_owned()];
+
+        for answer in [
+            wiremock::ResponseTemplate::new(500),
+            wiremock::ResponseTemplate::new(503),
+            wiremock::ResponseTemplate::new(403),
+            wiremock::ResponseTemplate::new(200).set_body_string("not json"),
+            wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({"held_thread_ids": []})),
+        ] {
+            mount_check(&server, answer).await;
+            assert!(matches!(
+                gate.ensure_not_held("org_1", &thread).await,
+                Err(ErasureHoldError::Unavailable(_))
+            ));
+        }
+
+        mount_check(&server, wiremock::ResponseTemplate::new(404)).await;
+        assert_eq!(gate.ensure_not_held("org_1", &thread).await, Ok(()));
+
+        // Unreachable org-core: nothing listens on the dropped server's port.
+        let gone = hold_gate("http://127.0.0.1:9");
+        assert!(matches!(
+            gone.ensure_not_held("org_1", &thread).await,
+            Err(ErasureHoldError::Unavailable(_))
+        ));
+    }
+
+    /// A bulk erase of more threads than one check may name is asked page by page, and a hold
+    /// on the last page still refuses it.
+    #[tokio::test]
+    async fn hold_check_pages_large_erases() {
+        use wiremock::matchers::{body_partial_json, method, path};
+        let server = wiremock::MockServer::start().await;
+        let gate = hold_gate(&server.uri());
+        let threads: Vec<String> = (0..(CHECK_PAGE + 3)).map(|i| format!("thr_{i:04}")).collect();
+
+        wiremock::Mock::given(method("POST"))
+            .and(path("/internal/orgs/org_1/retention/check"))
+            .and(body_partial_json(serde_json::json!({"thread_ids": [format!("thr_{:04}", CHECK_PAGE)]})))
+            .respond_with(check_answer(false, &["thr_0502"]))
+            .with_priority(1)
+            .expect(1)
+            .mount(&server)
+            .await;
+        wiremock::Mock::given(method("POST"))
+            .and(path("/internal/orgs/org_1/retention/check"))
+            .respond_with(check_answer(false, &[]))
+            .with_priority(2)
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        assert_eq!(
+            gate.ensure_not_held("org_1", &threads).await,
+            Err(ErasureHoldError::ThreadsHeld(1))
+        );
+        server.verify().await;
+    }
+
+    /// C-B9: the held scope names thread goals and artifact revisions, and both erase paths
+    /// still remove them, so the list and the deletes cannot drift apart unnoticed.
+    #[test]
+    fn held_scope_names_goals_and_revisions_that_erasure_removes() {
+        for table in ["thread_goals", "artifact_revisions"] {
+            assert!(HELD_THREAD_CONTENT.contains(&table), "{table} must be in the held scope");
+            assert!(
+                include_str!("grpc.rs").contains(&format!("DELETE FROM {table} WHERE thread_id = $1")),
+                "delete_thread_rows must remove {table}"
+            );
+            assert!(
+                include_str!("gdpr.rs").contains(&format!("DELETE FROM {table} WHERE org_id = $1")),
+                "the org purge must remove {table}"
+            );
+        }
+    }
+
+    /// The org purge asks the gate before it opens its transaction.
+    #[test]
+    fn org_purge_checks_holds_before_any_delete() {
+        let source = include_str!("gdpr.rs");
+        let check = source
+            .find("erasure_hold_gate().ensure_not_held(org_id, &[])")
+            .expect("the purge asks the hold gate");
+        let begin = source.find("let mut tx: Transaction<'_, Postgres> = pool.begin()").expect("purge transaction");
+        assert!(check < begin, "the hold check must precede the purge transaction");
     }
 }

@@ -3010,6 +3010,51 @@ fn skill_write_skipped(reason: &str) -> pb::UpsertAgentSkillResponse {
     }
 }
 
+/// The skill lint mode (`SKILL_LINT_MODE`), read once. Off unless the value is
+/// exactly `report` or `enforce`.
+fn skill_lint_mode() -> mp_contracts::skill_lint::Mode {
+    static MODE: std::sync::OnceLock<mp_contracts::skill_lint::Mode> = std::sync::OnceLock::new();
+    *MODE.get_or_init(|| {
+        mp_contracts::skill_lint::Mode::from_env_value(
+            env::var(mp_contracts::skill_lint::MODE_ENV).ok().as_deref(),
+        )
+    })
+}
+
+/// Runs the shared skill lint on one write. Off runs nothing; report and enforce
+/// count every finding by code; only enforce refuses, with `skill_lint:<code>` of
+/// the first error. A warning never refuses, and no finding carries the text.
+fn skill_lint_refusal(
+    mode: mp_contracts::skill_lint::Mode,
+    req: &pb::UpsertAgentSkillRequest,
+) -> Option<String> {
+    use mp_contracts::skill_lint::{first_error, lint, Mode, SkillInput, SKIP_REASON_PREFIX};
+    if mode == Mode::Off {
+        return None;
+    }
+    let findings = lint(&SkillInput {
+        name: &req.name,
+        description: &req.description,
+        content: &req.content,
+        trigger_keywords: &req.trigger_keywords,
+        tool_restrictions: &req.tool_restrictions,
+        frontmatter_name: None,
+    });
+    for rule in &findings {
+        metrics::counter!(
+            "skill_lint_findings_total",
+            "code" => rule.code,
+            "severity" => rule.severity.as_str(),
+            "mode" => mode.as_str()
+        )
+        .increment(1);
+    }
+    if mode != Mode::Enforce {
+        return None;
+    }
+    first_error(&findings).map(|rule| format!("{SKIP_REASON_PREFIX}{}", rule.code))
+}
+
 /// Why a learned skill may not be written for this owner, or `None`. Their own
 /// state (paused, off) and the organization's policy (memory disabled, learning
 /// review not opted in, policy unreadable) both end it, with different tokens so
@@ -9510,24 +9555,19 @@ impl SessionCore for SessionService {
                 }
                 ("user", owner.to_owned(), "proposed", false)
             } else {
+                // A human write is accepted and keeps `enabled`, so only a person may
+                // make one. A service holding the write scope could otherwise write an
+                // enabled org-wide skill by claiming origin "user" (D2-509).
+                let Some(person) = caller.user_id() else {
+                    return Ok(Response::new(skill_write_skipped("origin_requires_person")));
+                };
                 match req.scope.as_str() {
                     "" | "org" => ("org", String::new(), "accepted", req.enabled),
                     "user" => {
-                        let owner = match caller.user_id() {
-                            Some(verified) => {
-                                if !req.owner_user_id.is_empty() {
-                                    caller.authorize_user(&req.owner_user_id)?;
-                                }
-                                verified.to_owned()
-                            }
-                            None => req.owner_user_id.trim().to_owned(),
-                        };
-                        if owner.is_empty() {
-                            return Err(Status::invalid_argument(
-                                "owner_user_id is required for a user-scoped skill",
-                            ));
+                        if !req.owner_user_id.is_empty() {
+                            caller.authorize_user(&req.owner_user_id)?;
                         }
-                        ("user", owner, "accepted", req.enabled)
+                        ("user", person.to_owned(), "accepted", req.enabled)
                     }
                     other => {
                         return Err(Status::invalid_argument(format!("invalid scope: {other}")));
@@ -9597,6 +9637,10 @@ impl SessionCore for SessionService {
                 &skill,
             ) {
                 return Ok(Response::new(skill_write_skipped(&code.skill_token())));
+            }
+            // The shared skill lint (EP-11 S4), the same rules capability-core's routes run.
+            if let Some(token) = skill_lint_refusal(skill_lint_mode(), &req) {
+                return Ok(Response::new(skill_write_skipped(&token)));
             }
             // The conflict key is (org, scope, owner, name). A learned skill
             // refreshes only a proposal it wrote itself and never touches
@@ -10841,6 +10885,13 @@ impl SessionCore for SessionService {
             }
             caller.authorize_org(&req.org_id)?;
             authorize_thread_deletion_owner(&self.pool, &caller, &req.thread_id).await?;
+            // EP-9 C4: a held thread, or any thread of a held org, is not erased. Asked after
+            // the owner check, so only the owner learns the thread is held, and before the
+            // transaction, so a refusal or an org-core outage changes nothing.
+            crate::gdpr::erasure_hold_gate()
+                .ensure_not_held(&req.org_id, std::slice::from_ref(&req.thread_id))
+                .await
+                .map_err(crate::gdpr::ErasureHoldError::into_status)?;
 
             let mut tx = self
                 .pool
@@ -10926,6 +10977,14 @@ impl SessionCore for SessionService {
             .fetch_all(&mut *tx)
             .await
             .map_err(|error| Status::internal(error.to_string()))?;
+            // EP-9 C4: the whole erase is refused when the org or any of these threads is
+            // held; the locks above keep the set fixed while org-core is asked, and a refusal
+            // drops the transaction, so nothing is deleted.
+            let held_candidates: Vec<String> = thread_ids.iter().map(|(id,)| id.clone()).collect();
+            crate::gdpr::erasure_hold_gate()
+                .ensure_not_held(&req.org_id, &held_candidates)
+                .await
+                .map_err(crate::gdpr::ErasureHoldError::into_status)?;
 
             let mut erased_memories: Vec<crate::memory_erasure::ErasedMemory> = Vec::new();
             for (thread_id,) in &thread_ids {
@@ -20252,6 +20311,7 @@ mod tests {
             "accepted_exists",
             "rejected_exists",
             "owner_required",
+            "origin_requires_person",
         ] {
             let response = super::skill_write_skipped(token);
             assert!(!response.skipped_protected && response.id.is_empty() && !response.created);
@@ -20259,6 +20319,117 @@ mod tests {
         }
         let protected = super::skill_write_skipped("protected");
         assert!(protected.skipped_protected, "a human's row keeps the old flag");
+    }
+
+    /// Counts `skill_lint_findings_total` increments by their `code` label.
+    #[derive(Default, Clone)]
+    struct LintCounts(std::sync::Arc<std::sync::Mutex<Vec<String>>>);
+
+    struct LintCount {
+        code: String,
+        into: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    impl metrics::CounterFn for LintCount {
+        fn increment(&self, _value: u64) {
+            self.into.lock().expect("lint counts").push(self.code.clone());
+        }
+        fn absolute(&self, _value: u64) {}
+    }
+
+    impl metrics::Recorder for LintCounts {
+        fn describe_counter(&self, _: metrics::KeyName, _: Option<metrics::Unit>, _: metrics::SharedString) {}
+        fn describe_gauge(&self, _: metrics::KeyName, _: Option<metrics::Unit>, _: metrics::SharedString) {}
+        fn describe_histogram(&self, _: metrics::KeyName, _: Option<metrics::Unit>, _: metrics::SharedString) {}
+        fn register_counter(&self, key: &metrics::Key, _: &metrics::Metadata<'_>) -> metrics::Counter {
+            if key.name() != "skill_lint_findings_total" {
+                return metrics::Counter::noop();
+            }
+            let code = key
+                .labels()
+                .find(|label| label.key() == "code")
+                .map(|label| label.value().to_owned())
+                .unwrap_or_default();
+            metrics::Counter::from_arc(std::sync::Arc::new(LintCount {
+                code,
+                into: std::sync::Arc::clone(&self.0),
+            }))
+        }
+        fn register_gauge(&self, _: &metrics::Key, _: &metrics::Metadata<'_>) -> metrics::Gauge {
+            metrics::Gauge::noop()
+        }
+        fn register_histogram(&self, _: &metrics::Key, _: &metrics::Metadata<'_>) -> metrics::Histogram {
+            metrics::Histogram::noop()
+        }
+    }
+
+    fn linted_skill(content: &str) -> mp_contracts::model_plane::v1::UpsertAgentSkillRequest {
+        let mut request = skill_request("org-l", "Weekly report", content, "user", "user", "");
+        request.tool_restrictions = vec!["*".to_owned()];
+        request
+    }
+
+    #[test]
+    fn lint_off_runs_nothing() {
+        use mp_contracts::skill_lint::Mode;
+        let counts = LintCounts::default();
+        let refusal = metrics::with_local_recorder(&counts, || {
+            super::skill_lint_refusal(Mode::Off, &linted_skill(""))
+        });
+        assert_eq!(refusal, None);
+        assert!(counts.0.lock().expect("lint counts").is_empty(), "off counts nothing");
+    }
+
+    #[test]
+    fn lint_report_mode_counts_and_writes() {
+        use mp_contracts::skill_lint::Mode;
+        let counts = LintCounts::default();
+        let refusal = metrics::with_local_recorder(&counts, || {
+            super::skill_lint_refusal(Mode::Report, &linted_skill("User: a\nAssistant: b\nUser: c"))
+        });
+        assert_eq!(refusal, None, "report never refuses, so the write goes ahead");
+        assert_eq!(
+            *counts.0.lock().expect("lint counts"),
+            ["transcript_shape", "tool_restriction_invalid"]
+        );
+    }
+
+    #[test]
+    fn lint_enforce_refuses_with_token() {
+        use mp_contracts::skill_lint::Mode;
+        let counts = LintCounts::default();
+        let refusal = metrics::with_local_recorder(&counts, || {
+            super::skill_lint_refusal(Mode::Enforce, &linted_skill(&"x".repeat(32_001)))
+        });
+        assert_eq!(refusal.as_deref(), Some("skill_lint:content_too_long"), "the first error is named");
+        assert_eq!(
+            *counts.0.lock().expect("lint counts"),
+            ["content_too_long", "tool_restriction_invalid"]
+        );
+        let mut clean = linted_skill("steps");
+        clean.tool_restrictions.clear();
+        clean.description = String::new();
+        assert_eq!(
+            super::skill_lint_refusal(Mode::Enforce, &clean),
+            None,
+            "a missing description is a warning and never refuses"
+        );
+    }
+
+    /// The refusal sits after the content policy and before the statement, so a
+    /// refused write opens no row and keeps a stored proposal's text.
+    #[test]
+    fn upsert_agent_skill_lints_before_the_write() {
+        let source = include_str!("grpc.rs");
+        let handler = &source[source
+            .find("async fn upsert_agent_skill(")
+            .expect("the handler")..];
+        let policy = handler.find("write_policy::gate_skill(").expect("the content policy");
+        let lint = handler
+            .find("skill_lint_refusal(skill_lint_mode(), &req)")
+            .expect("the lint call");
+        let insert = handler.find("INSERT INTO agent_skills").expect("the write");
+        assert!(policy < lint && lint < insert);
     }
 
     /// The learned arm of the conflict update changes content and provenance
@@ -21136,6 +21307,80 @@ mod tests {
             learned_skill_content(&pool, &org, "owner-a", "Weekly report").await,
             "steps"
         );
+
+        clear_skill_rows(&pool, &org).await;
+    }
+
+    // -- D2-509: a human write needs a person (EP-11 S4, real Postgres) ---------
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a Postgres with session-core migrations"]
+    async fn service_caller_cannot_write_origin_user() {
+        use mp_contracts::model_plane::v1::session_core_server::SessionCore;
+        let Some((svc, pool, org)) = skills_service().await else {
+            return;
+        };
+        for scope in ["org", "user", ""] {
+            let refused = svc
+                .upsert_agent_skill(as_service(
+                    &org,
+                    &["session:skills:write"],
+                    skill_request(&org, "Runbook", "steps", "user", scope, "owner-a"),
+                ))
+                .await
+                .expect("a skipped write is not an error")
+                .into_inner();
+            assert_eq!(refused.skip_reason, "origin_requires_person", "scope {scope:?}");
+            assert!(!refused.created && refused.id.is_empty() && !refused.skipped_protected);
+        }
+        let (rows,): (i64,) = sqlx::query_as("SELECT count(*) FROM agent_skills WHERE org_id = $1")
+            .bind(&org)
+            .fetch_one(&pool)
+            .await
+            .expect("count");
+        assert_eq!(rows, 0, "a service claiming origin user writes nothing");
+
+        // A person still writes their own skill exactly as before.
+        let mine = svc
+            .upsert_agent_skill(as_user(
+                &org,
+                "owner-a",
+                skill_request(&org, "Runbook", "steps", "user", "user", ""),
+            ))
+            .await
+            .expect("person write")
+            .into_inner();
+        assert!(mine.created && mine.skip_reason.is_empty());
+
+        clear_skill_rows(&pool, &org).await;
+    }
+
+    /// The learning review is the RPC's only service caller and sends
+    /// `background_review`; the D2-509 check must not refuse it.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a Postgres with session-core migrations"]
+    async fn learning_path_still_writes_proposals() {
+        use mp_contracts::model_plane::v1::session_core_server::SessionCore;
+        let Some((svc, pool, org)) = skills_service().await else {
+            return;
+        };
+        for origin in ["background_review", ""] {
+            let name = format!("Learned {origin}");
+            let written = svc
+                .upsert_agent_skill(as_service(
+                    &org,
+                    &["session:skills:write"],
+                    skill_request(&org, &name, "steps", origin, "", "owner-a"),
+                ))
+                .await
+                .expect("proposal")
+                .into_inner();
+            assert!(written.created && written.skip_reason.is_empty(), "origin {origin:?}");
+            assert_eq!(
+                skill_row_state(&pool, &org, &name, "user", "owner-a").await,
+                Some((false, "user".into(), "owner-a".into(), "proposed".into()))
+            );
+        }
 
         clear_skill_rows(&pool, &org).await;
     }

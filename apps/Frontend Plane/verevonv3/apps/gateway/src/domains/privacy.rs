@@ -29,7 +29,7 @@ use serde_json::{json, Value};
 use crate::{
     config::AppState,
     contracts::ActionActor,
-    envelope::error,
+    envelope::{error, error_with_details},
     middleware::{require_session, AuthenticatedUser},
     upstream::{authorized_org_id, proxy_json},
 };
@@ -78,6 +78,36 @@ fn confirm_requested(body: &Option<Value>) -> bool {
         .unwrap_or(false)
 }
 
+/// EP-9 C4: the two refusals an erasure upstream sends under a legal hold, rebuilt from fixed
+/// words so nothing of the upstream body (internal ids, counts of other people's holds) reaches
+/// the browser. Held is final until the hold is released in Control; unavailable is retryable.
+/// Every other answer passes through unchanged.
+fn map_erase_refusal(status: StatusCode, body: Value) -> (StatusCode, Json<Value>) {
+    let code = body
+        .get("error")
+        .and_then(|error| error.get("code"))
+        .and_then(Value::as_str);
+    match code {
+        Some("erasure_blocked_legal_hold") => (
+            StatusCode::CONFLICT,
+            Json(error_with_details(
+                "erasure_blocked_legal_hold",
+                "A legal hold covers this data, so nothing was erased. It can be erased once the hold is released.",
+                json!({ "retryable": false }),
+            )),
+        ),
+        Some("erasure_hold_check_unavailable") => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(error_with_details(
+                "erasure_hold_check_unavailable",
+                "Legal holds could not be checked, so nothing was erased. Try again shortly.",
+                json!({ "retryable": true }),
+            )),
+        ),
+        _ => (status, Json(body)),
+    }
+}
+
 async fn export(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -115,7 +145,7 @@ pub(crate) async fn erase(
     }
     let org_id = authorized_org_id(&state, &user).await;
     let url = erase_url(&state.user_core_url, &user.user_id);
-    let response = proxy_json(
+    let (status, Json(body)) = proxy_json(
         &state,
         Method::DELETE,
         &url,
@@ -125,6 +155,7 @@ pub(crate) async fn erase(
         None,
     )
     .await;
+    let response = map_erase_refusal(status, body);
 
     // The Frontend Plane holds its OWN copy of this subject's conversations —
     // the chat-history index and per-thread transcripts in Dragonfly (see
@@ -170,5 +201,41 @@ mod tests {
         assert!(!confirm_requested(&Some(json!({ "confirm": false }))));
         assert!(!confirm_requested(&Some(json!({ "confirm": "true" })))); // string, not bool
         assert!(confirm_requested(&Some(json!({ "confirm": true }))));
+    }
+
+    #[test]
+    fn a_legal_hold_refusal_is_typed_and_carries_nothing_upstream() {
+        let upstream = json!({ "error": {
+            "code": "erasure_blocked_legal_hold",
+            "message": "internal hold lh_0123 on org-9",
+            "details": { "org_holds": 1, "thread_holds": 4 },
+        }});
+        let (status, Json(body)) = map_erase_refusal(StatusCode::PRECONDITION_FAILED, upstream);
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["error"]["code"], "erasure_blocked_legal_hold");
+        assert_eq!(body["error"]["details"], json!({ "retryable": false }));
+        assert!(!body.to_string().contains("lh_0123"), "upstream words never pass: {body}");
+    }
+
+    #[test]
+    fn a_hold_check_outage_is_retryable() {
+        let upstream = json!({ "error": { "code": "erasure_hold_check_unavailable", "message": "org-core down" } });
+        let (status, Json(body)) = map_erase_refusal(StatusCode::BAD_GATEWAY, upstream);
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["error"]["code"], "erasure_hold_check_unavailable");
+        assert_eq!(body["error"]["details"]["retryable"], true);
+        assert!(!body.to_string().contains("org-core"));
+    }
+
+    #[test]
+    fn other_erase_answers_pass_through_unchanged() {
+        for (status, body) in [
+            (StatusCode::OK, json!({ "data": { "erased": true } })),
+            (StatusCode::FORBIDDEN, json!({ "error": { "code": "forbidden", "message": "no" } })),
+            (StatusCode::BAD_GATEWAY, json!({ "error": "plain string" })),
+        ] {
+            let (mapped, Json(mapped_body)) = map_erase_refusal(status, body.clone());
+            assert_eq!((mapped, mapped_body), (status, body));
+        }
     }
 }

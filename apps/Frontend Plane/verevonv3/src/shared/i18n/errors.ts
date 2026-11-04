@@ -541,6 +541,17 @@ export const ERROR_COPY: Record<string, ErrorCopy> = {
     no: 'Fant ingen slettingsforespørsel for dette rommet. Den kan allerede være fullført eller avbrutt.',
     en: 'No deletion request was found for this space. It may already be finished or cancelled.',
   },
+  // EP-9 C4: a legal hold blocks a delete or an erasure until it is released in the
+  // organization's settings; retrying changes nothing. An outage of the check is retryable.
+  erasure_blocked_legal_hold: {
+    no: 'En juridisk tilbakeholdelse gjelder disse dataene, så ingenting ble slettet. Samtalen og målene og versjonene i den beholdes til tilbakeholdelsen oppheves.',
+    en: 'A legal hold covers this data, so nothing was deleted. The conversation and its goals and revisions are kept until the hold is released.',
+  },
+  erasure_hold_check_unavailable: {
+    no: 'Juridiske tilbakeholdelser kunne ikke kontrolleres, så ingenting ble slettet.',
+    en: 'Legal holds could not be checked, so nothing was deleted.',
+    retryable: true,
+  },
   space_provisioning_unavailable: {
     no: 'Rommet kunne ikke opprettes akkurat nå, og ingenting ble satt opp. Prøv igjen om litt.',
     en: 'The space could not be created right now, and nothing was set up. Try again shortly.',

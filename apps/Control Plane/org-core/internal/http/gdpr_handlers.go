@@ -1,11 +1,15 @@
 package http
 
 import (
+	"context"
 	"errors"
+	"log"
 	"net/http"
+	"os"
 	"strings"
 
 	orgcore "github.com/I-Dacosta/AquatiqCMS/apps/org-core/internal/org"
+	"github.com/I-Dacosta/AquatiqCMS/apps/org-core/internal/retention"
 	"github.com/gin-gonic/gin"
 )
 
@@ -49,6 +53,77 @@ const errErasureNotConfirmed = "erasure is irreversible; set \"confirm\": true t
 // org_name does not exactly match the organization's real, server-fetched
 // name (the "type the org name to confirm" destructive-action pattern).
 const errOrgNameConfirmationMismatch = "organization name confirmation does not match; type the exact organization name to confirm"
+
+// Legal holds against erasure (EP-9 C4, decision D-C1). While any legal hold of
+// the organisation is active, neither erasure route runs: an org hold covers
+// everything, and a thread hold covers a thread the org purge would erase with
+// the rest. The hold is released through the legal-hold routes first; there is
+// no override here.
+const (
+	// envErasureHoldCheck is the switch. Only the literal "true" turns it on; off,
+	// the erasure routes behave exactly as before.
+	envErasureHoldCheck = "ERASURE_HOLD_CHECK"
+
+	codeErasureBlockedLegalHold     = "erasure_blocked_legal_hold"
+	codeErasureHoldCheckUnavailable = "erasure_hold_check_unavailable"
+)
+
+// heldErasureContent names what a hold keeps in Model Plane when it blocks an
+// org erasure, matching session-core's held scope (thread goals and artifact
+// revisions included, C-B9).
+var heldErasureContent = []string{"messages", "runs", "plans", "approvals", "tasks", "agent_memory", "thread_goals", "artifact_revisions"}
+
+// erasureHoldCheckEnabled reads the switch on every request, so a test or an
+// operator flip needs no restart.
+func erasureHoldCheckEnabled() bool {
+	return os.Getenv(envErasureHoldCheck) == "true"
+}
+
+// refuseHeldErasure writes the refusal and reports true when orgID may not be
+// erased now: 409 erasure_blocked_legal_hold while a hold is active, 503
+// erasure_hold_check_unavailable when the holds cannot be read (a hold that
+// cannot be ruled out is treated as present; the caller retries). Every refusal
+// is logged with the actor; with the switch off it reads nothing.
+func (s *Server) refuseHeldErasure(c *gin.Context, orgID, actorID, op string) bool {
+	if !erasureHoldCheckEnabled() {
+		return false
+	}
+	if s.retention == nil {
+		log.Printf("gdpr: %s of org=%s by actor=%s refused: no retention service to read legal holds", op, orgID, actorID)
+		writeRetentionError(c, http.StatusServiceUnavailable, codeErasureHoldCheckUnavailable,
+			"Legal holds could not be checked, so nothing was erased. Try again shortly.", gin.H{"retryable": true})
+		return true
+	}
+	ctx, cancel := context.WithTimeout(c.Request.Context(), retentionCheckTimeout)
+	defer cancel()
+	// Active holds are listed first, so the bounded list never hides one behind
+	// released rows.
+	list, err := s.retention.Holds(ctx, orgID)
+	if err != nil {
+		log.Printf("gdpr: %s of org=%s by actor=%s refused: legal holds unreadable: %v", op, orgID, actorID, err)
+		writeRetentionError(c, http.StatusServiceUnavailable, codeErasureHoldCheckUnavailable,
+			"Legal holds could not be checked, so nothing was erased. Try again shortly.", gin.H{"retryable": true})
+		return true
+	}
+	orgHolds, threadHolds := 0, 0
+	for _, hold := range list.Holds {
+		switch {
+		case !hold.Active():
+		case hold.Scope == retention.ScopeOrg:
+			orgHolds++
+		default:
+			threadHolds++
+		}
+	}
+	if orgHolds+threadHolds == 0 {
+		return false
+	}
+	log.Printf("gdpr: %s of org=%s by actor=%s refused: %d org and %d thread legal holds active", op, orgID, actorID, orgHolds, threadHolds)
+	writeRetentionError(c, http.StatusConflict, codeErasureBlockedLegalHold,
+		"A legal hold covers this organization, so nothing was erased. The hold must be released first.",
+		gin.H{"org_holds": orgHolds, "thread_holds": threadHolds, "held_content": heldErasureContent, "retryable": false})
+	return true
+}
 
 // confirmedErasure reports whether an irreversible erasure may proceed. Erasure
 // is irreversible, so the caller MUST pass confirm:true. Extracted as a pure
@@ -139,6 +214,10 @@ func (s *Server) hardDeleteOrganization(c *gin.Context) {
 		return
 	}
 
+	if s.refuseHeldErasure(c, orgID, actorID, "hard delete") {
+		return
+	}
+
 	receipt, err := s.orgService.HardDelete(c.Request.Context(), orgID, actorID, actorRole)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to erase organization"})
@@ -177,6 +256,12 @@ func (s *Server) softDeleteOrganization(c *gin.Context) {
 
 	if !confirmedErasure(req.Confirm) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": errErasureNotConfirmed})
+		return
+	}
+
+	// A soft delete starts the clock of the automatic purge, so a held org may
+	// not enter it either.
+	if s.refuseHeldErasure(c, orgID, actorID, "soft delete") {
 		return
 	}
 
