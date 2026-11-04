@@ -258,7 +258,14 @@ impl PolicyBaseline {
         org: OrgInput,
         request: Option<PolicyLayer>,
     ) -> Result<Decision, PolicyDenial> {
-        let org = if self.claim == Enforcement::Off {
+        // An observed claim that cannot change the resolution (the `{"v":1,"rev":"0"}` every
+        // token carries) is no org layer at all: the run never runs under an observed claim, and
+        // an org layer kept in the run would stamp its `org_rev` into the policy digest, so
+        // `web_policy_edge::is_default` would turn the page and answer caches off for every
+        // token that carries the claim.
+        let org = if self.claim == Enforcement::Off
+            || (self.claim == Enforcement::Observe && !org_has_effect(&org))
+        {
             OrgInput::Absent
         } else {
             org
@@ -465,6 +472,27 @@ mod tests {
             rev: 0,
         }));
         assert!(org_has_effect(&OrgInput::Unreadable));
+    }
+
+    #[test]
+    fn an_observed_empty_claim_leaves_the_run_on_the_catalogue_default() {
+        // The `{"v":1,"rev":"0"}` claim every token carries must not stamp its rev into the
+        // run: a non-default digest turns the page and answer caches off (zdr_claim_floor).
+        let empty = || OrgInput::Present {
+            layer: PolicyLayer::default(),
+            rev: 0,
+        };
+        let baseline = PolicyBaseline::default();
+        for zdr in [false, true] {
+            let with_claim = baseline
+                .decide_with_org(Principal::Human, zdr, empty(), None)
+                .expect("decided");
+            let without = baseline
+                .decide_with_org(Principal::Human, zdr, OrgInput::Absent, None)
+                .expect("decided");
+            assert_eq!(with_claim.policy().digest(), without.policy().digest());
+            assert!(crate::web_policy_edge::is_default(&with_claim));
+        }
     }
 
     #[test]
