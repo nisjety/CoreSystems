@@ -434,6 +434,8 @@ pub(crate) fn tool_artifact_events(
             authored_artifact_events(outcome, known_kind)
         }
         "code_interpreter" => code_interpreter_events(outcome, office),
+        // The manifest as a `deck` artifact, then the built pptx through the arm above (EP-5 S2).
+        "deck" => crate::deck_tool::deck_events(outcome, office),
         _ => (Vec::new(), None),
     }
 }
@@ -542,7 +544,7 @@ fn public_tool_output(outcome: &ToolOutcome, source_checked: bool, norwegian: bo
 /// exact wording, and `Deserializer::from_str(..).into_iter().next()` stops
 /// after the first value so trailing text (a trailing newline, or anything
 /// else appended after the JSON) cannot fail the parse either.
-fn extract_json_object(s: &str) -> Option<Value> {
+pub(crate) fn extract_json_object(s: &str) -> Option<Value> {
     let start = s.find('{')?;
     serde_json::Deserializer::from_str(&s[start..])
         .into_iter::<Value>()
@@ -646,7 +648,7 @@ const DELIVERED_FILES_NOTE: &str = "\nThese files were delivered to the user as 
 /// the user has it.
 const WITHHELD_FILES_NOTE: &str = "\nThe files listed under files_withheld failed the structural Office check and were NOT delivered to the user: do not say the user has them, and regenerate each one with code_interpreter before you mention it again. A file listed under files_delivered was delivered as a downloadable artifact, which already appears as a download card below your message. Confirm what you produced in plain text, and NEVER write a markdown link, a bare URL, or a \"sandbox:/\" path for a file — no such link exists and it will not work.";
 
-fn code_interpreter_events(
+pub(crate) fn code_interpreter_events(
     outcome: &ToolOutcome,
     office: &mut OfficeDelivery,
 ) -> (Vec<ChatEvent>, Option<String>) {
@@ -3624,6 +3626,28 @@ async fn dispatch_tool_with_cost(
                 Err(e) => err_outcome(call, e),
             }
         }
+        // Typed slide operations on a gateway-owned manifest; a build is a code_interpreter step the
+        // gateway writes itself, sent with the same credentials as the arm above (EP-5 S2).
+        "deck" => {
+            crate::deck_tool::dispatch(
+                &crate::deck_tool::DeckTurn {
+                    state,
+                    execution_bearer,
+                    data_plane_bearer,
+                    sandbox_bearer,
+                    inference_bearer,
+                    session_bearer,
+                    run_id,
+                    org_id,
+                    user_id,
+                    space_id,
+                    thread_id,
+                    zdr,
+                },
+                call,
+            )
+            .await
+        }
         // The canvas tools do no I/O: they validate, then hand the content back
         // for the loop to turn into an `artifact` event. Keeping them in
         // `dispatch_tool` (rather than special-casing them in the loop) means
@@ -3665,6 +3689,10 @@ async fn dispatch_tool_with_cost(
                     };
                     if state.artifact_versions.kind_of(thread_id, &id).is_some_and(|existing| existing != kind) {
                         return err_outcome(call, "an existing artifact cannot change kind; use update_artifact to revise its content");
+                    }
+                    // A create that resolves to the artifact a selection edit holds is a rewrite of it (EP-3 S6).
+                    if let Err(message) = crate::selection_guard::check_update(run_id, &id, &content) {
+                        return err_outcome(call, message);
                     }
                     let version = state.artifact_versions.next_version(thread_id, &id);
                     state
@@ -3766,6 +3794,11 @@ async fn dispatch_tool_with_cost(
                         crate::artifacts::MAX_TEXT_ARTIFACT_CHARS
                     ),
                 );
+            }
+            // A rewrite under a selection edit keeps the text outside the selected range (EP-3 S6). A refused
+            // write records no revision, and the model is told what to change.
+            if let Err(message) = crate::selection_guard::check_update(run_id, id, &content) {
+                return err_outcome(call, message);
             }
             // Kind is intentionally NOT re-supplied on update: an artifact that
             // changed kind mid-history would break the client's renderer
@@ -4494,6 +4527,28 @@ async fn dispatch_tool_with_cost(
                     capability_bearer,
                     zdr,
                     waived: data_plane_mode.as_deref() == Some(waived_mode),
+                },
+            )
+            .await
+        }
+        // The read-only thread reference tools (EP-3 S7). Off by default. The model names a thread only by
+        // its position among the threads the person attached to this run; the gate, the screening and the
+        // framing live in the module, and what it reads is prior conversation, never instructions.
+        crate::thread_reference_tools::OUTLINE_TOOL
+        | crate::thread_reference_tools::SEARCH_TOOL
+        | crate::thread_reference_tools::READ_TOOL => {
+            crate::thread_reference_tools::outcome(
+                state,
+                call,
+                &crate::thread_reference_tools::ThreadReferenceCaller {
+                    org_id,
+                    user_id,
+                    thread_id,
+                    run_id,
+                    session_bearer,
+                    capability_bearer,
+                    zdr,
+                    retention_mode: data_plane_mode.is_some(),
                 },
             )
             .await
@@ -5580,7 +5635,7 @@ fn writes_document(tool: &str) -> bool {
 /// read. A document write finishes in place, and a browser run or sandbox job
 /// has its own lifecycle, which no longer waiting for it would not end.
 fn stops_at_validation_deadline(tool: &str) -> bool {
-    !writes_document(tool) && !matches!(tool, "browser_agent" | "code_interpreter")
+    !writes_document(tool) && !matches!(tool, "browser_agent" | "code_interpreter" | "deck")
 }
 
 /// What the model is told about a read cut off at that deadline.
@@ -5941,7 +5996,7 @@ pub const MAX_READ_ARTIFACT_CHARS: usize = 24_000;
 /// A task-scoped source boundary, also enforced against the final offered tool
 /// set before dispatch. Calculation runs in the existing networkless sandbox.
 pub fn conversation_tool_allowed(name: &str) -> bool {
-    matches!(name, "create_artifact" | "read_artifact" | "update_artifact" | "count_words" | "code_interpreter" | "reattach_context" | "skill_file")
+    matches!(name, "create_artifact" | "read_artifact" | "update_artifact" | "count_words" | "code_interpreter" | "reattach_context" | "skill_file" | "deck")
 }
 
 /// The public-web-search half of the retrieval-scope tool buckets
@@ -6054,6 +6109,8 @@ pub fn builtin_tool_defs() -> Vec<ToolDefinition> {
 fn builtin_tool_defs_for(batch: bool) -> Vec<ToolDefinition> {
     let mut defs = builtin_tool_defs_with(crate::web_extraction::extract_tool_enabled());
     advertise_batched_search(&mut defs, batch);
+    // Last, and only while its switch is on, so the list is unchanged when it is off (EP-5 S2).
+    crate::deck_tool::offer(&mut defs, crate::deck_tool::enabled());
     defs
 }
 
@@ -8545,6 +8602,15 @@ pub async fn run_tool_rounds_for_model_with_attachments(
     let reader_offered =
         crate::page_reader::enabled() && external_parking_allowed(zdr || data_plane_mode.is_some());
     let tools = tools_for_web_reader(tools, reader_offered);
+    // The thread reference tools (EP-3 S7) are offered only on a run whose person attached earlier
+    // conversations, and never on a ZDR or waived turn. With the switch off the list is left as it was.
+    let thread_refs_offered = crate::thread_reference_tools::offered_count(
+        crate::thread_reference_tools::enabled(),
+        run_id,
+        zdr,
+        data_plane_mode.is_some(),
+    );
+    let tools = crate::thread_reference_tools::tools_for_turn(tools, thread_refs_offered);
     let connector_turn = connector_turn.filter(|_| connector_offered);
     // The turn's clock rides on the live sink; a caller without one (tests,
     // other routes) times nothing.
@@ -8818,7 +8884,9 @@ pub async fn run_tool_rounds_for_model_with_attachments(
         // A recognised dated-post revision may be answered with that post's
         // section alone (opt-in `dated_post_section_only`): this round then
         // offers the section-only `update_artifact` and adds its notice below.
-        let section_only = section_only_revision(state.latency_levers, &state.artifact_versions, thread_id, &turn_question, new_note_pending, &round_tools);
+        // A selection edit sends the whole artifact, so the section-only wording is not offered to it (EP-3 S6).
+        let section_only = !crate::selection_guard::active(run_id)
+            && section_only_revision(state.latency_levers, &state.artifact_versions, thread_id, &turn_question, new_note_pending, &round_tools);
         if section_only { offer_section_only_update(&mut round_tools); }
         let document_pending = pending_checked_document(&turn_question, source_context.is_some(), document_written_for_instruction);
         if document_pending && !round_tools.iter().any(|tool| matches!(tool.name.as_str(), "create_artifact" | "update_artifact")) {
@@ -8846,6 +8914,10 @@ pub async fn run_tool_rounds_for_model_with_attachments(
             if !kept.is_empty() {
                 decision_messages.push(ChatMessage { role: "system".into(), content: section_only_subheadings_notice(&kept), ..Default::default() });
             }
+        }
+        // A run that holds a selection edit carries its instruction into every decision round (EP-3 S6).
+        if let Some(notice) = crate::selection_guard::prompt_notice(run_id) {
+            decision_messages.push(ChatMessage { role: "system".into(), content: notice, ..Default::default() });
         }
         // A new note's only possible prior source, or a scoped revision's
         // sole document, is read before the first model round, through the
@@ -9795,6 +9867,11 @@ pub async fn run_tool_rounds_for_model_with_attachments(
             }
         }
 
+        // The second refused rewrite of a selection edit ends the turn here, so no later round can revise the
+        // artifact (EP-3 S6).
+        if crate::selection_guard::rejected(run_id) {
+            return Err(crate::selection_guard::REJECTED_REASON);
+        }
         // "There is no need to search more when the answer is so easily
         // available." The remaining rounds would each cost an inference and a
         // search, and their only effect on an answer already carried by a dated
@@ -9806,6 +9883,10 @@ pub async fn run_tool_rounds_for_model_with_attachments(
         }
     }
 
+    // A selection edit refused twice ends the turn on every exit from the loop, including a stop by the loop guard (EP-3 S6).
+    if crate::selection_guard::rejected(run_id) {
+        return Err(crate::selection_guard::REJECTED_REASON);
+    }
     if pending_checked_document(&turn_question, source_context.is_some(), document_written_for_instruction) {
         return Err(crate::result_validation::VALIDATION_FAILED);
     }

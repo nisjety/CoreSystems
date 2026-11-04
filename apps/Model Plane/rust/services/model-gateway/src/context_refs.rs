@@ -9,8 +9,12 @@
 //! * `space`: must equal the thread's existing Space, or the turn is refused. It never widens a
 //!   scope: Space access never widens an owner-plane ACL.
 //! * `skill`: merged into the turn's explicit skill picks, which the catalogue resolves as before.
-//! * `thread` and `artifact_selection`: refused until the thread tools (EP-3 S7) and the selection
-//!   edit (EP-3 S6) exist, so a reference is never accepted and then silently ignored.
+//! * `thread`: admitted only while the thread reference tools (EP-3 S7) are on, so a reference is
+//!   never accepted and then silently ignored; the tools read it lazily. A waived turn and a
+//!   conversation-only or web-only turn are refused.
+//! * `artifact_selection`: admitted only with the selection edit on (`TurnFacts::selection_edit`) and
+//!   outside a Space. Its range is checked against the head, and held for the run, by `selection_guard`
+//!   once the turn's heads are seeded (EP-3 S6).
 //!
 //! A Do turn takes `document`, `skill` and `space` only. A ZDR turn with any reference is refused
 //! with the catalogue's `context_references` feature (`zdr_features` refuses it too, so the answer
@@ -65,11 +69,15 @@ pub struct TurnFacts<'a> {
     pub zdr: bool,
     /// The turn runs under a retention waiver (DEC-32).
     pub waived: bool,
+    /// The thread reference tools (EP-3 S7) are switched on, so a thread reference can be read.
+    pub thread_references: bool,
     /// A Do (`agentic`) turn.
     pub agentic: bool,
     /// Organisation knowledge is searched and skills are matched on this turn (it is neither
     /// conversation-only nor web-only, the two filters under which the turn reads neither).
     pub knowledge: bool,
+    /// The selection edit is on for this turn: the switch, with artifact revisions `on` (EP-3 S6).
+    pub selection_edit: bool,
     /// The thread's Space, from the Control-signed context the BFF injected; `None` off a Space.
     pub space_id: Option<&'a str>,
 }
@@ -227,22 +235,48 @@ pub fn resolve(
                     "kind_not_in_do_mode",
                 ));
             }
-            // OD-7 also keeps thread references from a waived turn (recall excludes waived content).
-            // Until the thread tools exist every thread reference is refused, so the waiver adds no
-            // separate answer yet.
+            // OD-7: a thread is read lazily by the thread reference tools, never injected. A waived turn reads no
+            // other conversation (recall excludes waived content, DEC-32), and a conversation-only or web-only turn
+            // is offered no tool that could read it.
             ContextRefKind::Thread => {
-                return Err(ContextRefRefusal::typed(
-                    UNSUPPORTED_CODE,
-                    "References to other conversations are not available yet. Remove them and send again.",
-                    "thread_refs_unavailable",
-                ));
+                if !facts.thread_references {
+                    return Err(ContextRefRefusal::typed(
+                        UNSUPPORTED_CODE,
+                        "References to other conversations are not available yet. Remove them and send again.",
+                        "thread_refs_unavailable",
+                    ));
+                }
+                if facts.waived {
+                    return Err(ContextRefRefusal::typed(
+                        UNSUPPORTED_CODE,
+                        "Other conversations cannot be referenced on this connection. Remove them and send again.",
+                        "thread_refs_waived",
+                    ));
+                }
+                if !facts.knowledge {
+                    return Err(ContextRefRefusal::typed(
+                        UNSUPPORTED_CODE,
+                        "Referenced conversations cannot be used with a conversation-only or web-only source filter. Switch the source filter back to include knowledge.",
+                        "thread_refs_need_knowledge",
+                    ));
+                }
             }
+            // A Space keeps no artifact versions (OD-9), so a selection there is refused before the switch is read.
             ContextRefKind::ArtifactSelection => {
-                return Err(ContextRefRefusal::typed(
-                    UNSUPPORTED_CODE,
-                    "Editing a selection is not available yet. Remove the selection and send again.",
-                    "selection_edit_unavailable",
-                ));
+                if facts.space_id.is_some() {
+                    return Err(ContextRefRefusal::typed(
+                        UNSUPPORTED_CODE,
+                        "Editing a selection is not available in a Space conversation. Remove the selection and send again.",
+                        "selection_edit_in_space",
+                    ));
+                }
+                if !facts.selection_edit {
+                    return Err(ContextRefRefusal::typed(
+                        UNSUPPORTED_CODE,
+                        "Editing a selection is not available yet. Remove the selection and send again.",
+                        "selection_edit_unavailable",
+                    ));
+                }
             }
             ContextRefKind::Space => {
                 if facts.space_id != Some(reference.id.as_str()) {
@@ -512,6 +546,27 @@ mod tests {
         assert_eq!(refused_code(result), UNSUPPORTED_CODE);
     }
 
+    fn refused_reason(result: Result<Option<ResolvedContextRefs>, ContextRefRefusal>) -> &'static str {
+        match result {
+            Err(ContextRefRefusal::Typed { reason, .. }) => reason,
+            other => panic!("expected a typed refusal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn thread_ref_admitted_with_thread_tools_on_except_waived() {
+        let on = TurnFacts { thread_references: true, ..facts() };
+        let resolved = resolve(true, Some(&one("thread", "thread-1")), &on).expect("admitted").expect("references");
+        assert_eq!(resolved.refs.len(), 1);
+        let waived = TurnFacts { waived: true, ..on };
+        assert_eq!(refused_reason(resolve(true, Some(&one("thread", "thread-1")), &waived)), "thread_refs_waived");
+        let no_knowledge = TurnFacts { knowledge: false, ..on };
+        assert_eq!(
+            refused_reason(resolve(true, Some(&one("thread", "thread-1")), &no_knowledge)),
+            "thread_refs_need_knowledge"
+        );
+    }
+
     #[test]
     fn selection_ref_refused_while_selection_edit_off() {
         let raw = json!([{
@@ -519,6 +574,44 @@ mod tests {
             "selection": {"artifactId": "art-1", "version": 2, "start": 0, "end": 5, "quoteSha256": "b".repeat(64)}
         }]);
         assert_eq!(refused_code(resolve(true, Some(&raw), &facts())), UNSUPPORTED_CODE);
+    }
+
+    #[test]
+    fn selection_ref_admitted_when_selection_edit_is_on() {
+        let raw = json!([{
+            "kind": "artifact_selection", "id": "art-1", "label": "Avsnitt",
+            "selection": {"artifactId": "art-1", "version": 2, "start": 0, "end": 5, "quoteSha256": "b".repeat(64)}
+        }]);
+        let on = TurnFacts { selection_edit: true, ..facts() };
+        let resolved = resolve(true, Some(&raw), &on).expect("admitted").expect("references");
+        assert_eq!(resolved.refs.len(), 1);
+        let selection = resolved.refs[0].selection.as_ref().expect("the range travels with the reference");
+        assert_eq!((selection.artifact_id.as_str(), selection.version, selection.start, selection.end), ("art-1", 2, 0, 5));
+        assert!(resolved.document_ids.is_empty() && resolved.skill_ids.is_empty());
+    }
+
+    #[test]
+    fn selection_ref_is_refused_in_a_space_and_on_a_do_turn() {
+        let raw = json!([{
+            "kind": "artifact_selection", "id": "art-1", "label": "Avsnitt",
+            "selection": {"artifactId": "art-1", "version": 2, "start": 0, "end": 5, "quoteSha256": "b".repeat(64)}
+        }]);
+        let space = TurnFacts { selection_edit: true, space_id: Some("space-a"), ..facts() };
+        match resolve(true, Some(&raw), &space) {
+            Err(ContextRefRefusal::Typed { code, reason, .. }) => {
+                assert_eq!(code, UNSUPPORTED_CODE);
+                assert_eq!(reason, "selection_edit_in_space");
+            }
+            other => panic!("expected the Space refusal, got {other:?}"),
+        }
+        let agentic = TurnFacts { selection_edit: true, agentic: true, ..facts() };
+        match resolve(true, Some(&raw), &agentic) {
+            Err(ContextRefRefusal::Typed { code, reason, .. }) => {
+                assert_eq!(code, UNSUPPORTED_CODE);
+                assert_eq!(reason, "kind_not_in_do_mode");
+            }
+            other => panic!("expected the Do-mode refusal, got {other:?}"),
+        }
     }
 
     #[test]
