@@ -1146,6 +1146,18 @@ export type ChatSourceScopeAppliedEvent = {
   knowledge?: ChatKnowledgeReceipt
 }
 /**
+ * Which search providers served a turn's web searches, and the route its entitlement allowed (`search_provenance`,
+ * EP-9 W1). The ids are closed: a provider the SPA does not name arrives as `other`, and the line is worded by id in
+ * the SPA's own two languages, so no provider name the server sends reaches the screen unread. Consumed by the
+ * "Searched via" line beside the source-scope notice (`ChatMessages.tsx`).
+ */
+export type ChatSearchProviderId = 'tantivy_local' | 'brave' | 'serper' | 'searxng' | 'stract' | 'verevon' | 'other'
+export type ChatSearchRoute = 'free_chain' | 'paid_allowed' | 'zdr_free_only'
+export type ChatSearchProvenanceEvent = {
+  providers: { id: ChatSearchProviderId; hits: number }[]
+  route: ChatSearchRoute
+}
+/**
  * AI-generated thread title, emitted once by model-gateway after a thread's
  * FIRST exchange completes (before the terminal `done`). Already sanitized
  * server-side: single line, no quotes/emoji, ≤64 chars.
@@ -1282,6 +1294,8 @@ export type ChatStreamHandlers = {
   onResultReceipt?: (event: ChatResultReceiptEvent) => void
   /** See `ChatSourceScopeAppliedEvent`. */
   onSourceScopeApplied?: (event: ChatSourceScopeAppliedEvent) => void
+  /** See `ChatSearchProvenanceEvent`. */
+  onSearchProvenance?: (event: ChatSearchProvenanceEvent) => void
   /**
    * A message the user sent mid-run has reached the agent. Emitted at delivery
    * rather than at enqueue: the POST already confirmed acceptance, and what the
@@ -1759,6 +1773,35 @@ function sourceScopeAppliedEvent(payload: Record<string, unknown>): ChatSourceSc
     return knowledge ? { scope, excludedTools, knowledge } : { scope, excludedTools }
   }
   return scope === 'auto' && knowledge ? { scope, excludedTools, knowledge } : undefined
+}
+
+const SEARCH_PROVIDER_IDS: readonly ChatSearchProviderId[] = [
+  'tantivy_local',
+  'brave',
+  'serper',
+  'searxng',
+  'stract',
+  'verevon',
+  'other',
+]
+const SEARCH_ROUTES: readonly ChatSearchRoute[] = ['free_chain', 'paid_allowed', 'zdr_free_only']
+
+/**
+ * A `search_provenance` frame as the SPA reads it. A provider id the SPA does not name is read as `other`, so a
+ * provider Quarry adds later cannot reach the line under its raw name. A count that is not a whole number, a route
+ * the SPA does not name, or a frame that names no provider drops the frame.
+ */
+function searchProvenanceEvent(payload: Record<string, unknown>): ChatSearchProvenanceEvent | undefined {
+  const route = SEARCH_ROUTES.find((candidate) => candidate === payload.route)
+  if (!route || !Array.isArray(payload.providers)) return undefined
+  const providers = payload.providers.flatMap((entry) => {
+    const provider = objectValue(entry)
+    const hits = num(provider?.hits)
+    if (!provider || hits === undefined || !Number.isInteger(hits) || hits < 0) return []
+    const id = SEARCH_PROVIDER_IDS.find((candidate) => candidate === provider.id) ?? 'other'
+    return [{ id, hits }]
+  })
+  return providers.length > 0 ? { providers, route } : undefined
 }
 
 function knowledgeReceiptValue(value: unknown): ChatKnowledgeReceipt | undefined {
@@ -2642,6 +2685,11 @@ function dispatchEvent(event: SseEvent, handlers: ChatStreamHandlers): void {
     case 'source_scope_applied': {
       const applied = sourceScopeAppliedEvent(payload)
       if (applied) handlers.onSourceScopeApplied?.(applied)
+      break
+    }
+    case 'search_provenance': {
+      const provenance = searchProvenanceEvent(payload)
+      if (provenance) handlers.onSearchProvenance?.(provenance)
       break
     }
     case 'citations':

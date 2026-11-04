@@ -74,7 +74,16 @@ import type { DockedNodes } from '@/shared/chat-nodes/types'
 import type { ChatContextRef } from '@/shared/actions/chat-context-refs'
 // The barrel does not re-export it yet; one more line there when it next changes.
 import { nodeKey } from '@/shared/chat-nodes/derive'
-import type { AutonomyRung, ChatKnowledgeReceipt, ChatPlanStep, MemoryOrigin, RecalledMemory } from '@/shared/api/chat-client'
+import type {
+  AutonomyRung,
+  ChatKnowledgeReceipt,
+  ChatPlanStep,
+  ChatSearchProviderId,
+  ChatSearchProvenanceEvent,
+  ChatSearchRoute,
+  MemoryOrigin,
+  RecalledMemory,
+} from '@/shared/api/chat-client'
 import { isSafeLinkHref } from '../lib/safe-href'
 import { isWidgetFence } from '../lib/inline-widget'
 import type { SettledFold } from '../lib/settled-fold'
@@ -85,6 +94,11 @@ import { listNotifications, type Notification } from '@/shared/api/notifications
 import { MIN_PLAN_JUSTIFICATION_CHARS } from '@/shared/api/chat-client'
 import { answerProcessingNote } from '@/shared/api/privacy-tier'
 import { correctMemory, deleteMemory, listMemories, rememberMemory } from '@/shared/api/memory-client'
+import { memberSkillAuthoring } from '@/shared/api/skills-client'
+import { SaveAsSkillDialog } from '@/features/skills/components/SaveAsSkillDialog'
+import { createResource } from '@/shared/lib/create-resource-compat'
+import { hasWorkspaceAdminAccess } from '@/shared/session/access'
+import { getSession } from '@/shared/session/session-store'
 import { ApiError } from '@/shared/api/http'
 import {
   For,
@@ -314,6 +328,10 @@ const CHAT_NODE_REGISTRY = createConversationNodeRegistry({
     render: (node) => (
       <SourceScopeNotice scope={node.scope} excludedTools={node.excludedTools} knowledge={node.knowledge} />
     ),
+  },
+  'search-provenance': {
+    kind: 'search-provenance',
+    render: (node) => <SearchProvenanceNotice provenance={node.provenance} />,
   },
   'lifecycle-notices': {
     kind: 'lifecycle-notices',
@@ -604,6 +622,22 @@ export function AssistantMessage(props: {
       setRemembered(err instanceof ApiError && err.code === 'memory_not_enabled' ? 'paused' : 'failed')
     }
   }
+  // "Lagre som ferdighet" (EP-11 S1): an admin may save a private skill from an answer, a member only while
+  // the member switch is on. A temporary chat and a conversation not yet saved never offer it. The member
+  // answer is asked only for a signed-in member on an answer that could show the action, so an anonymous
+  // or temporary render never calls the gateway.
+  const [savingSkill, setSavingSkill] = createSignal(false)
+  const skillActionShape = () =>
+    !props.temporaryChat && Boolean(props.threadId) && !props.message.streaming && Boolean(props.message.content.trim())
+  const askMemberSkillAuthoring = () =>
+    skillActionShape() && getSession().status === 'authenticated' && !hasWorkspaceAdminAccess(getSession())
+  const [memberSkills] = createResource(
+    () => (askMemberSkillAuthoring() ? true : undefined),
+    () => memberSkillAuthoring(),
+  )
+  const canSaveAsSkill = () =>
+    skillActionShape() && (hasWorkspaceAdminAccess(getSession()) || memberSkills() === true)
+
   const toggleReadAloud = () => {
     if (player.playingId() === props.message.id) {
       player.stop()
@@ -876,6 +910,14 @@ export function AssistantMessage(props: {
                 onClick={() => void rememberThis()}
               >
                 {remembered() === 'saved' ? <Check size={14} /> : <Brain size={14} />}
+              </MessageAction>
+            </Show>
+            <Show when={canSaveAsSkill()}>
+              <MessageAction
+                label={i18n.tr('Lagre som ferdighet', 'Save as skill')}
+                onClick={() => setSavingSkill(true)}
+              >
+                <Sparkles size={14} />
               </MessageAction>
             </Show>
             {/*
@@ -1151,6 +1193,15 @@ export function AssistantMessage(props: {
               </p>
             )}
           </Show>
+        </Show>
+        <Show when={savingSkill()}>
+          <SaveAsSkillDialog
+            threadId={props.threadId ?? ''}
+            messageId={props.message.id}
+            content={props.message.content}
+            temporary={props.temporaryChat}
+            onClose={() => setSavingSkill(false)}
+          />
         </Show>
       </div>
     </article>
@@ -4381,6 +4432,45 @@ export function SourceScopeNotice(props: {
         )}
       </Show>
     </>
+  )
+}
+
+/**
+ * "Searched via X" (EP-9 W1): which search providers served this turn's web searches, and the route that allowed
+ * them. The wording is keyed by the closed provider id, so a provider the server does not name shows as "other
+ * provider" and never as its raw id. Names and a reason only: no query and no URL reach this line.
+ */
+export function SearchProvenanceNotice(props: { provenance: ChatSearchProvenanceEvent }) {
+  const i18n = useI18n()
+  const providerName = (id: ChatSearchProviderId) => {
+    if (id === 'tantivy_local') return i18n.tr('Verevon-indeks', 'Verevon index')
+    if (id === 'verevon') return i18n.tr('Verevon-søk', 'Verevon search')
+    if (id === 'brave') return 'Brave Search'
+    if (id === 'serper') return i18n.tr('Serper (Google-resultater)', 'Serper (Google results)')
+    if (id === 'searxng') return 'SearXNG'
+    if (id === 'stract') return 'Stract'
+    return i18n.tr('annen leverandør', 'other provider')
+  }
+  const routeText = (route: ChatSearchRoute) => {
+    if (route === 'zdr_free_only') {
+      return i18n.tr(
+        'Nulldatalagring er på, så bare gratis søketjenester ble brukt.',
+        'Zero data retention is on, so only free search providers were used.',
+      )
+    }
+    if (route === 'paid_allowed') {
+      return i18n.tr('Betalte søketjenester er tillatt for dette svaret.', 'Paid search providers are allowed for this answer.')
+    }
+    return i18n.tr('Bare gratis søketjenester er tillatt for dette svaret.', 'Only free search providers are allowed for this answer.')
+  }
+  return (
+    <p class="verevon-chat-source-scope-notice" role="note">
+      <Info size={12} />
+      {i18n.tr('Søkt via ', 'Searched via ')}
+      {props.provenance.providers.map((provider) => providerName(provider.id)).join(', ')}
+      {'. '}
+      {routeText(props.provenance.route)}
+    </p>
   )
 }
 

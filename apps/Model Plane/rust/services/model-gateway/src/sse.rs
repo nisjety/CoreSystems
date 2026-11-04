@@ -2259,6 +2259,24 @@ pub async fn invoke_stream_sse(
             );
         }
     };
+    // The org's web switches (Wave 3 EP-9 W2), read from the policy the admission above left warm. `None` when the
+    // policy does not bind this turn, so its web access stays what the person chose.
+    let org_web_off = crate::org_agent_policy::held_web_caps(
+        crate::org_agent_policy::policy_mode(),
+        crate::org_agent_policy::shared_cache(),
+        &org_id,
+    )
+    .is_some_and(|caps| !caps.live);
+    // Deep research is a web turn by definition: it searches outside the tool loop, so an organisation that turned web
+    // access off refuses it here, before any plan or search runs.
+    if req.deep_research && org_web_off {
+        return error_stream(
+            &request_id,
+            "org_web_off",
+            "The organisation has turned web access off, so deep research cannot run.",
+            false,
+        );
+    }
     let chosen_mode = match crate::profile::chosen_agent_mode(
         crate::profile::agent_modes_enabled(),
         req.agent_mode.as_deref(),
@@ -3954,6 +3972,20 @@ pub async fn invoke_stream_sse(
             tool_defs.push(web_search);
         }
     }
+    // The organisation's web switch (Wave 3 EP-9 W2) withholds the public web tools whatever the turn asked for, so
+    // the model is not shown them and a call to one is refused as not offered. Taken out before the scope filter
+    // below, so each withheld tool is named once, here. The notice further down says what was withheld and why.
+    let excluded_by_org_web: Vec<String> = if org_web_off {
+        let withheld: Vec<String> = tool_defs
+            .iter()
+            .filter(|tool| crate::tool_loop::is_public_web_tool(&tool.name))
+            .map(|tool| tool.name.clone())
+            .collect();
+        tool_defs.retain(|tool| !crate::tool_loop::is_public_web_tool(&tool.name));
+        withheld
+    } else {
+        Vec::new()
+    };
     if conversation_only {
         tool_defs.retain(|tool| crate::tool_loop::conversation_tool_allowed(&tool.name));
         prompt.conversation_scope = Some(ChatMessage {
@@ -4308,6 +4340,14 @@ pub async fn invoke_stream_sse(
         ))
         .with_usage_progress(usage_progress_switch())
         .with_run_ceiling(run_ceiling)
+        // The turn's web-search provenance (EP-9 W1): every answered search records here, and the one frame after
+        // the tool phase names them all. Attached only while the line is switched on.
+        .with_search_provenance(crate::search_provenance::enabled().then(|| {
+            crate::search_provenance::SearchProvenanceTurn::new(crate::search_provenance::Route::for_turn(
+                effective_zdr,
+                crate::tool_loop::paid_providers_allowed(&model_clone, effective_zdr),
+            ))
+        }))
         .buffering(stream_buffers.clone(), buffer_key.clone(), seq);
 
         // Grounding's citations were already sent on the wire above (chat-
@@ -4341,16 +4381,26 @@ pub async fn invoke_stream_sse(
         // receipt has no frame. `conversation_only` forces the filter to
         // `Auto`, so a Space-scoped conversation-only turn reaches this frame
         // only through its knowledge receipt (WS18-S3).
-        if retrieval_scope != crate::normalize::RetrievalScope::Auto || knowledge.is_some() {
+        // An organisation withholding web tools is a reason to say so too, with the same frame (Wave 3 EP-9 W2).
+        if retrieval_scope != crate::normalize::RetrievalScope::Auto
+            || knowledge.is_some()
+            || !excluded_by_org_web.is_empty()
+        {
             sink.emit(crate::sse_events::ChatEvent::SourceScopeApplied {
                 scope: match retrieval_scope {
                     crate::normalize::RetrievalScope::KnowledgeOnly => "knowledge_only".to_owned(),
                     crate::normalize::RetrievalScope::WebOnly => "web_only".to_owned(),
-                    // Reached only with a knowledge receipt, since the guard above admits Auto for nothing else.
+                    // Reached with a knowledge receipt or an organisation withholding, since the guard above admits
+                    // Auto for nothing else.
                     crate::normalize::RetrievalScope::Auto => "auto".to_owned(),
                 },
-                excluded_tools: excluded_by_retrieval_scope.clone(),
+                excluded_tools: excluded_by_org_web
+                    .iter()
+                    .chain(excluded_by_retrieval_scope.iter())
+                    .cloned()
+                    .collect(),
                 knowledge,
+                reason: (!excluded_by_org_web.is_empty()).then(|| "org_web_off".to_owned()),
             })
             .await;
         }
@@ -4739,6 +4789,15 @@ pub async fn invoke_stream_sse(
                     answer_model = tool_phase_model;
                 }
             }
+        }
+
+        // The turn's web-search provenance, sent once the tool phase is over: every search it ran, forced or
+        // looped, is on the record. Only a turn with the line switched on has a record, so with the switch off
+        // the cursor is not touched at all.
+        if sink.search_provenance().is_some() {
+            seq = sink.sync_cursor(seq).await;
+            sink.emit_search_provenance().await;
+            seq = sink.sync_cursor(seq).await;
         }
 
         // Reasoning request, derived server-side from the client's effort
@@ -12682,6 +12741,14 @@ fn spawn_run_dispatch(
             crate::org_agent_policy::shared_cache(),
             org_id,
         ),
+    );
+    // The org's web switches travel with the run (Wave 3 EP-9 W2), so execution-core withholds the public web tools by
+    // the policy the run was admitted under. An enforced org the cache does not hold is held to the fail-closed switches.
+    crate::org_agent_policy::stamp_web_policy(
+        crate::org_agent_policy::policy_mode(),
+        crate::org_agent_policy::shared_cache(),
+        org_id,
+        &mut run_agent_req.org_policy,
     );
     // The question tool's cap for this run (build plan WS14 S4), set by the caller as the org policy is.
     run_agent_req.max_questions = max_questions;

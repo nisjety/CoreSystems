@@ -596,6 +596,11 @@ export type ChatTurn = {
    * turn's offered set did NOT include because of the filter.
    */
   scopeApplied?: import('@/shared/api/chat-client').ChatSourceScopeAppliedEvent
+  /**
+   * The search providers that served this turn's web searches, and the route its entitlement allowed
+   * (`search_provenance` SSE event, EP-9 W1). Live only: nothing stores it, so a reloaded turn has none.
+   */
+  searchProvenance?: import('@/shared/api/chat-client').ChatSearchProvenanceEvent
 }
 
 export type AgentTaskStep = {

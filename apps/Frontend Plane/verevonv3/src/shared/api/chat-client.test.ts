@@ -302,6 +302,50 @@ describe('chat-client stream-event coverage', () => {
     })
   })
 
+  it('reads a search_provenance frame, and reads a provider the SPA does not name as other', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        sseResponse([
+          `event: search_provenance\ndata: ${JSON.stringify({
+            providers: [
+              { id: 'brave', label: 'Brave Search', hits: 2 },
+              { id: 'zzz_new_engine', label: 'zzz_new_engine', hits: 1 },
+            ],
+            route: 'free_chain',
+          })}\n\n`,
+        ]),
+      ),
+    )
+    const onSearchProvenance = vi.fn()
+    await streamChat({ content: 'hi' }, { onSearchProvenance })
+
+    expect(onSearchProvenance).toHaveBeenCalledTimes(1)
+    expect(onSearchProvenance).toHaveBeenCalledWith({
+      providers: [
+        { id: 'brave', hits: 2 },
+        { id: 'other', hits: 1 },
+      ],
+      route: 'free_chain',
+    })
+  })
+
+  it('drops a search_provenance frame with a route the SPA does not name, or with no provider', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        sseResponse([
+          `event: search_provenance\ndata: ${JSON.stringify({ providers: [{ id: 'brave', hits: 1 }], route: 'bogus' })}\n\n`,
+          `event: search_provenance\ndata: ${JSON.stringify({ providers: [], route: 'zdr_free_only' })}\n\n`,
+        ]),
+      ),
+    )
+    const onSearchProvenance = vi.fn()
+    await streamChat({ content: 'hi' }, { onSearchProvenance })
+
+    expect(onSearchProvenance).not.toHaveBeenCalled()
+  })
+
   it('carries a Space knowledge receipt on the source-scope frame, auto scope included', async () => {
     vi.stubGlobal(
       'fetch',

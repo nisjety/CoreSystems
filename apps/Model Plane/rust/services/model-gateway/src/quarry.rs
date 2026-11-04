@@ -412,6 +412,10 @@ pub struct SearchReply {
     /// `None` when the edge sent no rerank report, or said the rerank was not configured. Either
     /// way the relevance gate has no rerank fact to report.
     pub rerank: Option<RerankOutcome>,
+    /// The envelope's `provider`: the router or provider that answered, such as `smart_router`. A hit's own
+    /// `source` names the provider that served it, so this is read only for a hit that names none, and for a
+    /// search that returned no hits (EP-9 W1). Empty when the edge sent none.
+    pub provider: String,
 }
 
 /// One `web_search` hit as the tool loop and deep research read it back.
@@ -1236,7 +1240,18 @@ fn reply_from_payload(payload: &Value, calibration: Option<&Calibration>) -> Sea
             result
         })
         .collect();
-    SearchReply { results, rerank }
+    // Read whole rather than per hit: the envelope names the answering router, which the disclosure line needs
+    // for a hit that names no provider of its own.
+    let provider = payload
+        .get("provider")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    SearchReply {
+        results,
+        rerank,
+        provider,
+    }
 }
 
 /// The rerank report Quarry sent, or `None` for an absent report or the `rerank-not-configured`
@@ -2926,6 +2941,22 @@ mod tests {
         assert_eq!(legacy_judged.wire_score(), Some(0.3));
 
         assert_eq!(bare_result("https://d.no/").wire_score(), None);
+    }
+
+    /// The envelope's provider rides on the reply, so the disclosure line can name a search that found nothing
+    /// (EP-9 W1). An edge that names none leaves it empty.
+    #[test]
+    fn the_reply_carries_the_envelope_provider() {
+        let answered = reply_from_payload(
+            &serde_json::json!({"provider": "smart_router", "results": []}),
+            None,
+        );
+        assert_eq!(answered.provider, "smart_router");
+        assert!(answered.results.is_empty());
+        assert_eq!(
+            reply_from_payload(&serde_json::json!({"results": []}), None).provider,
+            ""
+        );
     }
 
     /// The legacy hit keeps the keys it always had with the same values, and what carries nothing is

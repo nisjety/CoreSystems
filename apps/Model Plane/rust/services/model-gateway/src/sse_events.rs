@@ -342,6 +342,16 @@ pub enum ChatEvent {
         /// What the Space's knowledge did for this turn (WS18-S3). Absent for a turn no Space
         /// scopes, so those frames stay byte-identical to before.
         knowledge: Option<KnowledgeReceipt>,
+        /// Why tools were withheld for a reason the person did not ask for (Wave 3 EP-9 W2): `"org_web_off"` when
+        /// the organisation turned web access off. Absent otherwise, so those frames stay byte-identical to before.
+        reason: Option<String>,
+    },
+    /// The search providers that served this turn's web searches, and the route its entitlement allowed (EP-9 W1).
+    /// Sent once, after the tool phase, and only while `MODEL_GATEWAY_SEARCH_PROVENANCE` is on and a search ran.
+    /// Provider ids, labels and counts only: no query, URL or hit text rides it. It is a `citations`-family frame,
+    /// so it arrives beside the source-scope frame it explains.
+    SearchProvenance {
+        provenance: crate::search_provenance::SearchProvenance,
     },
     /// Structured internal grounding payload rendered by the chat UI.
     Grounding {
@@ -692,7 +702,8 @@ impl ChatEvent {
             ChatEvent::Citation { .. }
             | ChatEvent::Grounding { .. }
             | ChatEvent::Verification { .. }
-            | ChatEvent::SourceScopeApplied { .. } => Some("citations"),
+            | ChatEvent::SourceScopeApplied { .. }
+            | ChatEvent::SearchProvenance { .. } => Some("citations"),
             ChatEvent::Artifact { .. } | ChatEvent::Attachment { .. } => Some("artifacts"),
             ChatEvent::Usage { .. }
             | ChatEvent::ResultReceipt { .. }
@@ -761,6 +772,7 @@ impl ChatEvent {
             ChatEvent::ToolResult { .. } => "tool_result",
             ChatEvent::Citation { .. } => "citation",
             ChatEvent::SourceScopeApplied { .. } => "source_scope_applied",
+            ChatEvent::SearchProvenance { .. } => "search_provenance",
             ChatEvent::Grounding { .. } => "grounding",
             ChatEvent::Artifact { .. } => "artifact",
             ChatEvent::Attachment { .. } => "attachment",
@@ -869,13 +881,22 @@ impl ChatEvent {
                 }
                 payload
             }
-            ChatEvent::SourceScopeApplied { scope, excluded_tools, knowledge } => {
+            ChatEvent::SourceScopeApplied { scope, excluded_tools, knowledge, reason } => {
                 let mut payload = json!({ "scope": scope, "excluded_tools": excluded_tools });
                 if let Some(receipt) = knowledge {
                     payload["knowledge"] = serde_json::to_value(receipt).unwrap_or_else(|_| json!({}));
                 }
+                if let Some(reason) = reason {
+                    payload["reason"] = json!(reason);
+                }
                 payload
             }
+            // Closed ids, labels and counts, and the route: nothing a query, a URL or a hit carries.
+            ChatEvent::SearchProvenance { provenance } => json!({
+                "providers": provenance.providers,
+                "route": provenance.route,
+                "request_id": request_id,
+            }),
             ChatEvent::Grounding { grounding } => {
                 serde_json::to_value(grounding).unwrap_or_else(|_| json!({}))
             }
@@ -1353,6 +1374,9 @@ pub struct RichEventSink {
     /// The connected accounts the person selected for this turn (WS23-S5), read by the Ask loop's
     /// connected-app read. It rides here as the clock does, so the loop takes no new parameter.
     connector_turn: Option<crate::tool_loop::connector_reads::ConnectorTurn>,
+    /// The turn's web-search provenance record (EP-9 W1), attached only while the line is switched on. Every
+    /// answered search records on it, forced or looped, so the one frame after the tool phase names them all.
+    search_provenance: Option<crate::search_provenance::SearchProvenanceTurn>,
     /// The stream's resume buffer and its shared frame cursor, when the caller
     /// attached them. Tool calls, tool results and steps used to go out on the
     /// live channel only, so a reload during the tool phase, source review or
@@ -1564,6 +1588,7 @@ impl RichEventSink {
             tally: std::sync::Mutex::new(RunTally::default()),
             timing: None,
             connector_turn: None,
+            search_provenance: None,
             resume: None,
             subscription_failure: std::sync::Mutex::new(None),
         }
@@ -1630,6 +1655,35 @@ impl RichEventSink {
     #[must_use]
     pub fn connector_turn(&self) -> Option<&crate::tool_loop::connector_reads::ConnectorTurn> {
         self.connector_turn.as_ref()
+    }
+
+    /// Attach the turn's web-search provenance record (EP-9 W1). The caller attaches one only while the line is
+    /// switched on, so with the switch off the sink never records or sends anything for it.
+    #[must_use]
+    pub fn with_search_provenance(
+        mut self,
+        turn: Option<crate::search_provenance::SearchProvenanceTurn>,
+    ) -> Self {
+        self.search_provenance = turn;
+        self
+    }
+
+    /// The turn's web-search provenance record, when the caller attached one.
+    #[must_use]
+    pub fn search_provenance(&self) -> Option<&crate::search_provenance::SearchProvenanceTurn> {
+        self.search_provenance.as_ref()
+    }
+
+    /// Send the turn's search-provenance frame, once. The caller invokes it after the tool phase, so every
+    /// search of the turn is on the record. Sends nothing while no record is attached or no search ran.
+    pub async fn emit_search_provenance(&self) {
+        if let Some(provenance) = self
+            .search_provenance
+            .as_ref()
+            .and_then(crate::search_provenance::SearchProvenanceTurn::take_provenance)
+        {
+            self.emit(ChatEvent::SearchProvenance { provenance }).await;
+        }
     }
 
     /// Buffer every frame this sink sends for resume, under the stream's own
@@ -3489,6 +3543,7 @@ mod payload_contract {
 
     use super::{AttachmentPreview, ChatEvent, RetentionClass, ServedBy};
     use crate::knowledge_receipt::{KnowledgeMode, KnowledgeReceipt};
+    use crate::search_provenance::{ProviderUse, Route, SearchProvenance};
 
     const REQUEST_ID: &str = "req-sample";
 
@@ -3511,6 +3566,7 @@ mod payload_contract {
         "ToolResult",
         "Citation",
         "SourceScopeApplied",
+        "SearchProvenance",
         "Grounding",
         "Artifact",
         "Attachment",
@@ -3549,6 +3605,7 @@ mod payload_contract {
             ChatEvent::ToolResult { .. } => "ToolResult",
             ChatEvent::Citation { .. } => "Citation",
             ChatEvent::SourceScopeApplied { .. } => "SourceScopeApplied",
+            ChatEvent::SearchProvenance { .. } => "SearchProvenance",
             ChatEvent::Grounding { .. } => "Grounding",
             ChatEvent::Artifact { .. } => "Artifact",
             ChatEvent::Attachment { .. } => "Attachment",
@@ -3840,21 +3897,39 @@ mod payload_contract {
             ChatEvent::ToolResult { id: s("1"), status: s("error"), output: s("out"), error: Some(s("boom")) },
             citation(false),
             citation(true),
-            ChatEvent::SourceScopeApplied { scope: s("web_only"), excluded_tools: Vec::new(), knowledge: None },
+            ChatEvent::SourceScopeApplied { scope: s("web_only"), excluded_tools: Vec::new(), knowledge: None, reason: None },
             ChatEvent::SourceScopeApplied {
                 scope: s("knowledge_only"),
                 excluded_tools: vec![s("web_search")],
                 knowledge: None,
+                reason: None,
             },
             ChatEvent::SourceScopeApplied {
                 scope: s("auto"),
                 excluded_tools: Vec::new(),
                 knowledge: Some(KnowledgeReceipt { mode: KnowledgeMode::NotEntitled, sources: None }),
+                reason: None,
             },
             ChatEvent::SourceScopeApplied {
                 scope: s("knowledge_only"),
                 excluded_tools: vec![s("web_search")],
                 knowledge: Some(KnowledgeReceipt { mode: KnowledgeMode::Retrieval, sources: Some(3) }),
+                reason: None,
+            },
+            ChatEvent::SearchProvenance {
+                provenance: SearchProvenance {
+                    providers: vec![ProviderUse { id: "brave", label: "Brave Search", hits: 2 }],
+                    route: Route::FreeChain,
+                },
+            },
+            ChatEvent::SearchProvenance {
+                provenance: SearchProvenance {
+                    providers: vec![
+                        ProviderUse { id: "verevon", label: "Verevon search", hits: 1 },
+                        ProviderUse { id: "other", label: "other provider", hits: 0 },
+                    ],
+                    route: Route::ZdrFreeOnly,
+                },
             },
             grounding(false),
             grounding(true),
@@ -4212,6 +4287,26 @@ mod payload_contract {
         assert_eq!(payload.as_object().map(serde_json::Map::len), Some(4));
     }
 
+    /// `search_provenance` is a `citations`-family frame that names providers and a route, and nothing else (EP-9 W1).
+    #[test]
+    fn search_provenance_names_providers_and_a_route_only() {
+        let event = ChatEvent::SearchProvenance {
+            provenance: SearchProvenance {
+                providers: vec![ProviderUse { id: "brave", label: "Brave Search", hits: 2 }],
+                route: Route::PaidAllowed,
+            },
+        };
+        assert_eq!(event.name(), "search_provenance");
+        assert_eq!(event.family(), Some("citations"));
+        assert!(!event.should_emit(&[]), "a client that asked for no citations does not see it");
+        assert!(event.should_emit(&["citations".to_string()]));
+        let payload = event.payload("req-w1");
+        assert_eq!(payload["providers"], json!([{ "id": "brave", "label": "Brave Search", "hits": 2 }]));
+        assert_eq!(payload["route"], "paid_allowed");
+        assert_eq!(payload["request_id"], "req-w1");
+        assert_eq!(payload.as_object().map(serde_json::Map::len), Some(3));
+    }
+
     #[test]
     fn every_variant_has_a_minimal_and_a_full_sample() {
         let mut count: BTreeMap<&str, usize> = BTreeMap::new();
@@ -4250,6 +4345,28 @@ mod payload_contract {
         assert_eq!(key("error", "action").unwrap()["presence"], "optional");
         assert_eq!(key("error", "feature").unwrap()["presence"], "optional");
         assert_eq!(key("retrieval_notice", "wording_key").unwrap()["presence"], "always");
+    }
+
+    #[test]
+    fn source_scope_applied_names_the_org_web_switch_only_when_it_withheld_a_tool() {
+        let withheld = ChatEvent::SourceScopeApplied {
+            scope: s("auto"),
+            excluded_tools: vec![s("web_search"), s("fetch_url")],
+            knowledge: None,
+            reason: Some(s("org_web_off")),
+        };
+        let payload = withheld.payload("req-1");
+        assert_eq!(payload["reason"], "org_web_off");
+        assert_eq!(payload["excluded_tools"], json!(["web_search", "fetch_url"]));
+
+        // A turn no organisation switch touched keeps its frame as it was: no reason key at all.
+        let plain = ChatEvent::SourceScopeApplied {
+            scope: s("web_only"),
+            excluded_tools: Vec::new(),
+            knowledge: None,
+            reason: None,
+        };
+        assert!(plain.payload("req-1").get("reason").is_none());
     }
 
     #[test]

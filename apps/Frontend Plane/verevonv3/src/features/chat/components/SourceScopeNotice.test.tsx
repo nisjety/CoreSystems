@@ -2,7 +2,7 @@
 
 import { render } from '@solidjs/testing-library'
 import { describe, expect, it } from 'vitest'
-import { SourceScopeNotice } from './ChatMessages'
+import { SearchProvenanceNotice, SourceScopeNotice } from './ChatMessages'
 
 /** chat-wave2 scope spec §2.2 and WS18-S3: the source filter note and the Space knowledge chip. */
 describe('SourceScopeNotice', () => {
@@ -60,6 +60,55 @@ describe('SourceScopeNotice', () => {
       <SourceScopeNotice scope="web_only" excludedTools={['knowledge_search']} />
     ))
     expect(container.textContent).toBe('Kilder: kun nett')
+    unmount()
+  })
+})
+
+/** EP-9 W1: the "Searched via" line names the providers that served a turn's searches, and the route that allowed them. */
+describe('SearchProvenanceNotice', () => {
+  it('names one provider and the free-chain reason', () => {
+    const { container, unmount } = render(() => (
+      <SearchProvenanceNotice provenance={{ providers: [{ id: 'brave', hits: 3 }], route: 'free_chain' }} />
+    ))
+    expect(container.textContent).toBe('Søkt via Brave Search. Bare gratis søketjenester er tillatt for dette svaret.')
+    unmount()
+  })
+
+  it('joins two providers in the order the server sent them', () => {
+    const { container, unmount } = render(() => (
+      <SearchProvenanceNotice
+        provenance={{
+          providers: [
+            { id: 'tantivy_local', hits: 1 },
+            { id: 'brave', hits: 2 },
+          ],
+          route: 'paid_allowed',
+        }}
+      />
+    ))
+    expect(container.textContent).toBe(
+      'Søkt via Verevon-indeks, Brave Search. Betalte søketjenester er tillatt for dette svaret.',
+    )
+    unmount()
+  })
+
+  it('words a provider the SPA does not name as other provider', () => {
+    const { container, unmount } = render(() => (
+      <SearchProvenanceNotice provenance={{ providers: [{ id: 'other', hits: 1 }], route: 'free_chain' }} />
+    ))
+    expect(container.textContent).toBe(
+      'Søkt via annen leverandør. Bare gratis søketjenester er tillatt for dette svaret.',
+    )
+    unmount()
+  })
+
+  it('gives the zero-retention reason on a ZDR turn, which can only have free providers', () => {
+    const { container, unmount } = render(() => (
+      <SearchProvenanceNotice provenance={{ providers: [{ id: 'verevon', hits: 0 }], route: 'zdr_free_only' }} />
+    ))
+    expect(container.textContent).toBe(
+      'Søkt via Verevon-søk. Nulldatalagring er på, så bare gratis søketjenester ble brukt.',
+    )
     unmount()
   })
 })
