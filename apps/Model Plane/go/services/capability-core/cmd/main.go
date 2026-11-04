@@ -340,6 +340,18 @@ func main() {
 	api.NewSafetyHandler(pool).WithPublisher(recPub).
 		WithDocumentPIIPolicy(api.DocumentPIIPolicyFromLookup(os.Getenv)).Register(protectedMux)
 	api.NewMemoryHandler(pool, runClient).WithMemoryControls(memoryClient).Register(protectedMux)
+	// EP-11 S7 /learn: off unless LEARN_COMMAND_ENABLED is exactly true and the learning review is on.
+	// Without a learner (a backend not dialled) the switched-on route answers 503.
+	learnOn := api.LearnCommandAPIFromLookup(os.Getenv) && learningReviewEnabled()
+	var learner *sessionreview.Learner
+	if learnOn && sessionClient != nil && inferenceClient != nil && memoryClient != nil {
+		learnOpts := []sessionreview.Option{sessionreview.WithMemoryControls(memoryClient)}
+		if cost, costOn, costErr := sessionreview.CostControlsFromLookup(os.Getenv); costErr == nil && costOn {
+			learnOpts = append(learnOpts, sessionreview.WithCostControls(cost))
+		}
+		learner = sessionreview.NewLearner(sessionClient, inferenceClient, os.Getenv("LEARNING_REVIEW_MODEL"), learnOpts...)
+	}
+	api.NewLearnCommandHandler(learnOn, runClient, learner).Register(protectedMux)
 	api.NewTasksHandler(pool).Register(protectedMux)
 	// AUTO-2: lets a user register/inspect/cancel a watch on one run. The
 	// consumer that actually fires the notification is wired below,

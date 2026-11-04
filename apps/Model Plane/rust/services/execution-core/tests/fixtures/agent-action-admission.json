@@ -1868,6 +1868,19 @@
       "zdr_allowed": false
     },
     {
+      "actionId": "learning.learn_from_thread",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "context_write",
+      "exemptReason": "agent_cannot_self_govern",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:7c51ab86c8c325489874edf4cc38366353fc7d017493330fc3c2306c2afb3c50",
+      "zdr_allowed": false
+    },
+    {
       "actionId": "learning.reject_skill",
       "registry": true,
       "access": "none",
@@ -2947,6 +2960,19 @@
       "executor": {},
       "hashBasis": "catalog_entry",
       "schemaHash": "sha256:f7671a1c385b07ff3ffbf9933f3dae8bb5d8762e4cf82c7e953f071fbc8c122c",
+      "zdr_allowed": false
+    },
+    {
+      "actionId": "skills.versions.list",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "read",
+      "exemptReason": "no_owner_executor",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:13d07132851184e7213d021e8e4e9905aa59566f1ececd959ea5e794309c170e",
       "zdr_allowed": false
     },
     {

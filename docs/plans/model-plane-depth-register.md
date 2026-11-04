@@ -3808,6 +3808,11 @@ Built so far: WS13-S0, WS13-S1, WS13-S2; WS14-S1, WS14-S2 (partial), WS14-S3; WS
 | D3-1101 | EP-12-S9 | live-proof | P1 | Guard: run `cargo fmt` on session-core/src/thread_export.rs if `cargo fmt --check` complains. Lines were hand-wrapped to 100 columns, but the tool was not run. | open |
 | D3-1102 | EP-12-S9 | risk | P2 | The FULL profile passes every other metadata key through unchanged and strips binary bodies only from the top-level `attachments` key, so a base64 body nested under another key (revision_preservation shows nested attachments) would reach a full export. | open |
 | D3-1103 | EP-12-S9 | test-gap | P2 | The 8 MiB cap is applied after up to 2,001 rows are loaded into memory, so one export can hold far more than 8 MiB in session-core before truncating; a SQL-side byte bound is depth work. | open |
+| D3-1104 | W3-20 guard | follow-up | P2 | guard skipped: apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardComposer.tsx /learn slash command + test: needs UI design (no memory-controls source in the composer); see still_broken | open |
+| D3-1105 | W3-20 guard | follow-up | P2 | guard skipped: apps/Model Plane/api/contracts/zdr-posture-matrix.json: EP-12-S9 says no row (keyed on bearers already covered) | open |
+| D3-1106 | W3-20 guard | follow-up | P2 | guard skipped: EP-4-S8 S12 docs rows (ZDR.md, capability-ownership-matrix): the builder deferred them to S12 | open |
+| D3-1107 | W3-20 guard | test-gap | P1 | still broken after the guard: EP-4-S7: the patch is empty (0 bytes). The slice is blocked on WS14-S5 and the builder asks for it to be re-queued. | open |
+| D3-1108 | W3-20 guard | test-gap | P1 | still broken after the guard: EP-11-S7 shared-edit for apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardComposer.tsx (register the /learn slash command, gated by learnCommandAvailable, plus the composer test learn_hidden_on_temporary_chat): NOT applied. This is UI feature work, not a shared line. The composer has no memory-controls source for learningAllowed, and it needs a run path with the typed refusal plus a new test. That needs a design decision from the owning slice. /learn still works through the BFF route and the new action dispatcher, but nothing in the UI reaches it yet. | open |
 
 ## Cross-wave
 

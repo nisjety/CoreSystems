@@ -4218,7 +4218,15 @@ type AgentSkill struct {
 	// RFC 3339, UTC.
 	UpdatedAt string `protobuf:"bytes,17,opt,name=updated_at,json=updatedAt,proto3" json:"updated_at,omitempty"`
 	// The skill's newest revision number in the revision log.
-	Revision      int64 `protobuf:"varint,18,opt,name=revision,proto3" json:"revision,omitempty"`
+	Revision int64 `protobuf:"varint,18,opt,name=revision,proto3" json:"revision,omitempty"`
+	// EP-11 S2. The skill's newest immutable version: 0 for a proposal that was
+	// never accepted, then 1, 2, ... each time the digest of the accepted row
+	// changes. Set by a database trigger, never by a writer.
+	Version int32 `protobuf:"varint,19,opt,name=version,proto3" json:"version,omitempty"`
+	// EP-11 S2. Lowercase hex sha256 of the versioned fields of `version`; empty
+	// while `version` is 0. SkillVersionService (skill_versions.proto) reads the
+	// body of any version.
+	Digest        string `protobuf:"bytes,20,opt,name=digest,proto3" json:"digest,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -4377,6 +4385,20 @@ func (x *AgentSkill) GetRevision() int64 {
 		return x.Revision
 	}
 	return 0
+}
+
+func (x *AgentSkill) GetVersion() int32 {
+	if x != nil {
+		return x.Version
+	}
+	return 0
+}
+
+func (x *AgentSkill) GetDigest() string {
+	if x != nil {
+		return x.Digest
+	}
+	return ""
 }
 
 type ListAgentSkillsResponse struct {
@@ -10459,7 +10481,7 @@ const file_model_plane_v1_sessions_proto_rawDesc = "" +
 	"\x16ListAgentSkillsRequest\x12\x15\n" +
 	"\x06org_id\x18\x01 \x01(\tR\x05orgId\x12!\n" +
 	"\fenabled_only\x18\x02 \x01(\bR\venabledOnly\x12\x1e\n" +
-	"\vfor_user_id\x18\x03 \x01(\tR\tforUserId\"\xda\x04\n" +
+	"\vfor_user_id\x18\x03 \x01(\tR\tforUserId\"\x8c\x05\n" +
 	"\n" +
 	"AgentSkill\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x12\n" +
@@ -10482,7 +10504,9 @@ const file_model_plane_v1_sessions_proto_rawDesc = "" +
 	"\x0fproposal_reason\x18\x10 \x01(\tR\x0eproposalReason\x12\x1d\n" +
 	"\n" +
 	"updated_at\x18\x11 \x01(\tR\tupdatedAt\x12\x1a\n" +
-	"\brevision\x18\x12 \x01(\x03R\brevision\"M\n" +
+	"\brevision\x18\x12 \x01(\x03R\brevision\x12\x18\n" +
+	"\aversion\x18\x13 \x01(\x05R\aversion\x12\x16\n" +
+	"\x06digest\x18\x14 \x01(\tR\x06digest\"M\n" +
 	"\x17ListAgentSkillsResponse\x122\n" +
 	"\x06skills\x18\x01 \x03(\v2\x1a.model_plane.v1.AgentSkillR\x06skills\"\xc6\x03\n" +
 	"\x17ListConversationRequest\x12\x15\n" +

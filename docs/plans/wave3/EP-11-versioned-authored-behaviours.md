@@ -155,7 +155,7 @@ Flag vocabulary: every new switch is "only the literal `true` enables" (the WS19
 **Goal.** Every accepted change to a skill gets a numbered, immutable version with a digest; the Skills page shows "v3" and a read-only history. This removes "an edit silently changes every run" as an invisible event: the change is now a visible new version.
 
 **Files.**
-- NEW `SC/migrations/0096_agent_skill_versions.sql` (head 0071; number assigned by round B) + `revert/0096_agent_skill_versions.down.sql`:
+- NEW `SC/migrations/0108_agent_skill_versions.sql` (renumbered from 0096 so it applies in order) + `revert/0108_agent_skill_versions.down.sql`:
   - `agent_skills` ADD `version INTEGER NOT NULL DEFAULT 0`, `digest TEXT NOT NULL DEFAULT ''`, `bundle_sha256 TEXT NOT NULL DEFAULT ''`.
   - NEW `agent_skill_versions (org_id TEXT NOT NULL, skill_id TEXT NOT NULL, version INTEGER NOT NULL, digest TEXT NOT NULL CHECK (digest ~ '^[0-9a-f]{64}$'), body JSONB NOT NULL, bundle_sha256 TEXT NOT NULL DEFAULT '', scope TEXT NOT NULL, owner_user_id TEXT NOT NULL DEFAULT '', actor_kind TEXT NOT NULL, actor_id TEXT NOT NULL DEFAULT '', created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(), PRIMARY KEY (skill_id, version))`, index `(org_id, owner_user_id)`.
   - Function `agent_skill_digest(agent_skills)` (D2 field list; `kind`/`settings` read as `'skill'`/`'{}'` until S6 adds the columns, then the function is replaced in S6's migration, which changes no existing digest because the values are the defaults [verify in S6 test]).

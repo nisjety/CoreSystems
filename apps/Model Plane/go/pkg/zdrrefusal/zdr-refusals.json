@@ -248,6 +248,14 @@
     {
       "key": "legal_hold",
       "label_en": "a legal hold on a thread"
+    },
+    {
+      "key": "learn_command",
+      "label_en": "learning from this conversation"
+    },
+    {
+      "key": "skill_authoring",
+      "label_en": "saving or editing skills"
     }
   ],
   "generated_by": "mp-contracts zdr_refusal tests (MP_UPDATE_GOLDEN=1)",

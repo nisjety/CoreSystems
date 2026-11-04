@@ -1613,7 +1613,9 @@ describe('action registry', () => {
     // +1 after EP-11-S1 registered skills.save_from_message, the Save-as-skill message action.
     // +1 after EP-9-T2 registered policy.read_effective, the thread's effective-policy read.
     // +2 after EP-4-S3 registered chat.stage_widget_followup and chat.open_widget_link, the widget bridge.
-    expect(ids).toHaveLength(304)
+    // +1 after EP-11-S2 registered skills.versions.list, the Skills page's history read.
+    // +1 after EP-11-S7 registered learning.learn_from_thread, the /learn command.
+    expect(ids).toHaveLength(306)
 
     // The fragments also carry ids outside the `spaces.` prefix (`space.files.*`), so the Space
     // entries are the ones the fragments declare.

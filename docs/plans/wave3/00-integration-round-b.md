@@ -18,7 +18,7 @@ Finding that changes the numbering rule: round A reserved session-core 0072-0076
 | 0093 | session-core | EP-7 S3 | `0093_thread_goal_verdicts` (optional; only if the verdict columns do not fold into 0092) |
 | 0094 | session-core | EP-7 S6 (gated) | `0094_cron_schedule_goal_link` (+ revert) |
 | 0107 | session-core | EP-9 C2 | `0107_retention_sweep_runs` (+ revert; renumbered from 0095 at the W3-19 close, after 0100-0105 landed) |
-| 0096 | session-core | EP-11 S2 | `0096_agent_skill_versions` (+ revert) |
+| 0108 | session-core | EP-11 S2 | `0108_agent_skill_versions` (+ revert; renumbered from 0096 at the W3-20 close, after 0100-0107 landed) |
 | 0097 | session-core | EP-11 S5 | `0097_agent_skill_drafts` (+ revert) |
 | 0098 | session-core | EP-11 S6 | `0098_authored_behaviour_kind` (+ revert) |
 | 0099 | session-core | EP-11 S9 | `0099_agent_skills_space_scope` (+ revert) |

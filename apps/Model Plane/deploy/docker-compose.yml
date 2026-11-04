@@ -372,6 +372,10 @@ services:
       # WS17-S8: message versions (branch and rewind). Off by default; set it together with
       # SESSION_CORE_MESSAGE_VERSIONS_ENABLED on session-core.
       MODEL_GATEWAY_MESSAGE_VERSIONS_ENABLED: ${MODEL_GATEWAY_MESSAGE_VERSIONS_ENABLED:-false}
+      # EP-12 S1: the top-level origin on run projections. Only the literal true turns it on.
+      MODEL_GATEWAY_RUN_ORIGIN_FIELD: ${MODEL_GATEWAY_RUN_ORIGIN_FIELD:-false}
+      # EP-4 S8: MCP App resources (read-through, never stored). Only the literal true; EP-4 S12 flips it.
+      MCP_APPS_ENABLED: ${MCP_APPS_ENABLED:-false}
       # WS04-S5: a mirror in Redis/Dragonfly that holds ids only (run_id, skill ids, 24 h), so a turn streamed on one
       # replica can be rated on another. On by default since the WS04-S9 proof; only the literal `true` turns it on.
       # Dragonfly eviction degrades to the single-replica behaviour.
@@ -1194,12 +1198,19 @@ services:
       SESSION_CORE_REQUEST_SNAPSHOT_TTL_DAYS: ${SESSION_CORE_REQUEST_SNAPSHOT_TTL_DAYS:-7}
       # EP-14 S5: the GetRunTiming read. Only the literal true.
       SESSION_CORE_RUN_LEDGER_READ: ${SESSION_CORE_RUN_LEDGER_READ:-false}
+      # EP-12 S1: a child run inherits its parent's origin token. Only the literal true turns it on.
+      SESSION_RUN_ORIGIN_INHERIT: ${SESSION_RUN_ORIGIN_INHERIT:-false}
       # EP-14 S7: the request inspector read (GetRequestSnapshot). Only the literal true.
       SESSION_CORE_REQUEST_INSPECTOR_READ: ${SESSION_CORE_REQUEST_INSPECTOR_READ:-false}
       # EP-3 S2: the ArtifactRevisionService store. Only the literal true.
       SESSION_CORE_ARTIFACT_REVISIONS_ENABLED: ${SESSION_CORE_ARTIFACT_REVISIONS_ENABLED:-false}
       # EP-7 S1: the ThreadGoalService store. Only the literal true.
       SESSION_CORE_THREAD_GOALS_ENABLED: ${SESSION_CORE_THREAD_GOALS_ENABLED:-false}
+      # EP-12 S9: the owner's ExportThread (ThreadExportService). Only the literal true.
+      SESSION_THREAD_EXPORT_ENABLED: ${SESSION_THREAD_EXPORT_ENABLED:-false}
+      # EP-11 S2: the SkillVersionService read of immutable skill versions. Only the literal true;
+      # set it together with SKILL_VERSIONS_API on capability-core.
+      SKILL_VERSIONS_API: ${SKILL_VERSIONS_API:-false}
       # Dreaming's LLM memory extraction (dream_extractor.rs). Unset this
       # address, or set DREAMING_LLM_EXTRACTION=0, and Dreaming falls back to
       # the deterministic phrase matcher alone.
@@ -2168,6 +2179,12 @@ services:
       LEARNING_REVIEW_MAX_TRANSCRIPT_CHARS: ${LEARNING_REVIEW_MAX_TRANSCRIPT_CHARS:-60000}
       LEARNING_REVIEW_MAX_PER_USER_PER_DAY: ${LEARNING_REVIEW_MAX_PER_USER_PER_DAY:-5}
       LEARNING_REVIEW_MAX_PER_ORG_PER_DAY: ${LEARNING_REVIEW_MAX_PER_ORG_PER_DAY:-100}
+      # EP-11 S7 /learn: a person's request to distil one thread into a skill proposal. Off unless
+      # exactly true; it also needs LEARNING_REVIEW_ENABLED and a review counter (else budget_unavailable).
+      LEARN_COMMAND_ENABLED: ${LEARN_COMMAND_ENABLED:-false}
+      # EP-11 S2: GET /api/v1/skills/{id}/versions (404 while off). Only the literal true; set it
+      # together with SKILL_VERSIONS_API on session-core.
+      SKILL_VERSIONS_API: ${SKILL_VERSIONS_API:-false}
       # Capability Core reauthorizes every due scheduled fire directly with
       # Control before it can prepare a service-owned Session Core thread.
       # The credential must be registered only as capability-core with

@@ -397,6 +397,17 @@ pub const FEATURES: &[Feature] = &[
         key: "legal_hold",
         label: "a legal hold on a thread",
     },
+    // EP-11 S7: /learn sends a thread's transcript to the review model and keeps what it distils, so a
+    // ZDR or waived caller, and a thread holding a ZDR or waived run, is refused before any read.
+    Feature {
+        key: "learn_command",
+        label: "learning from this conversation",
+    },
+    // EP-11 S1/S8: saving, editing or importing a skill is configuration a ZDR credential cannot write.
+    Feature {
+        key: "skill_authoring",
+        label: "saving or editing skills",
+    },
 ];
 
 /// The catalogue entry for `code`, if it is a catalogue code.

@@ -59,7 +59,9 @@ use crate::domains::knowledge::quarry::{
 };
 use crate::domains::knowledge::products::{extract_products, summarize_products};
 use crate::domains::knowledge::sync::register_sharepoint;
-use crate::domains::learning::{decide_proposal, undo_entry, LearningDecisionBody};
+use crate::domains::learning::{
+    decide_proposal, learn_from_thread, undo_entry, LearnBody, LearningDecisionBody,
+};
 use crate::domains::mcp::{delete_server as delete_mcp_server, share_server as share_mcp_server};
 use crate::domains::memory::{
     delete_memory, remember_memory, reset_memory, set_memory_controls, RememberBody, ResetBody,
@@ -3638,6 +3640,37 @@ pub(super) async fn dispatch_learning_undo(
     .into_response();
     let (status, payload) = response_to_status_and_json(response).await;
     owner_json_response_to_envelope("learning.undo", user, status, payload)
+}
+
+/// EP-11 S7: `/learn` through the action surface, the same call as the BFF route. The thread and
+/// the optional note are all that cross; the owner is the verified session.
+pub(super) async fn dispatch_learning_learn_from_thread(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    input: &Value,
+) -> Response {
+    let thread_id = ticket_string(input, "threadId");
+    if thread_id.is_empty() {
+        return ticket_bad_request("learning.learn_from_thread requires a non-empty 'threadId'");
+    }
+    let note = input
+        .get("note")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let response = learn_from_thread(
+        StateExtractor(state.clone()),
+        ExtensionExtractor(user.clone()),
+        headers.clone(),
+        Json(LearnBody {
+            thread_id: thread_id.to_owned(),
+            note,
+        }),
+    )
+    .await
+    .into_response();
+    let (status, payload) = response_to_status_and_json(response).await;
+    owner_json_response_to_envelope("learning.learn_from_thread", user, status, payload)
 }
 
 pub(super) async fn dispatch_settings_update_me(
