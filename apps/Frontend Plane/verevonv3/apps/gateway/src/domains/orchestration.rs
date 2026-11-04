@@ -95,6 +95,10 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
             get(get_quarantine_preview),
         )
         .route(
+            "/api/v1/orchestration/approvals/{approval_id}/preview",
+            get(get_approval_preview),
+        )
+        .route(
             "/api/v1/orchestration/threads/{thread_id}/lineage",
             get(get_lineage),
         )
@@ -495,6 +499,24 @@ async fn get_quarantine_preview(
             "/v1/orchestration/approvals/{}/quarantine-preview",
             enc(&approval_id)
         ),
+    )
+    .await
+}
+
+/// The full draft behind a pending write approval (EP-10-S1). A plain pass-through: model-gateway
+/// owns the switch and refuses a zero-retention caller, and Session Core answers only the run's
+/// owner while the approval is pending, so the gateway adds no authority of its own.
+async fn get_approval_preview(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Path(approval_id): Path<String>,
+) -> impl IntoResponse {
+    mg_get(
+        &state,
+        &user,
+        &headers,
+        &format!("/v1/orchestration/approvals/{}/preview", enc(&approval_id)),
     )
     .await
 }
@@ -2057,5 +2079,67 @@ mod tests {
         assert!(source.contains(
             "\"/api/v1/orchestration/questions/{question_id}/answer\",\n            post(answer_run_question),"
         ));
+    }
+
+    /// EP-10-S1: the preview route is a GET pass-through to model-gateway's preview route.
+    #[test]
+    fn orchestration_approval_preview_route_is_registered_as_a_get() {
+        let source = include_str!("orchestration.rs").replace("\r\n", "\n");
+        assert!(source.contains(
+            "\"/api/v1/orchestration/approvals/{approval_id}/preview\",\n            get(get_approval_preview),"
+        ));
+    }
+
+    /// EP-10-S1: the owner's session bearer reaches model-gateway's preview route, and its answer
+    /// (the preview, or the typed 404 with the switch off) reaches the browser unchanged.
+    #[tokio::test]
+    async fn orchestration_approval_preview_passes_the_answer_through_unchanged() {
+        use axum::{
+            extract::{Path, State},
+            response::IntoResponse,
+            Extension,
+        };
+        use http_body_util::BodyExt;
+        use wiremock::{
+            matchers::{header, method, path},
+            Mock, MockServer, ResponseTemplate,
+        };
+
+        for (upstream_status, upstream_body) in [
+            (
+                200_u16,
+                json!({"data": {"preview": {"kind": "mail_send", "to": ["a@example.com"], "body_text": "Hei"}}}),
+            ),
+            (
+                404_u16,
+                json!({"error": {"code": "preview_unavailable", "message": "the approval preview is not available"}}),
+            ),
+        ] {
+            let server = MockServer::start().await;
+            mount_token_mocks(&server).await;
+            Mock::given(method("GET"))
+                .and(path("/v1/orchestration/approvals/apr-1/preview"))
+                .and(header("x-session-authorization", "Bearer session-test-token"))
+                .respond_with(ResponseTemplate::new(upstream_status).set_body_json(upstream_body.clone()))
+                .expect(1)
+                .mount(&server)
+                .await;
+
+            let mut state = test_state(false);
+            state.auth_core_url = server.uri();
+            state.model_gateway_url = server.uri();
+            let response = super::get_approval_preview(
+                State(state),
+                Extension(test_user()),
+                HeaderMap::new(),
+                Path("apr-1".to_owned()),
+            )
+            .await
+            .into_response();
+            assert_eq!(response.status().as_u16(), upstream_status);
+            let bytes = response.into_body().collect().await.expect("body").to_bytes();
+            let body: serde_json::Value = serde_json::from_slice(&bytes).expect("JSON");
+            assert_eq!(body, upstream_body);
+        }
     }
 }

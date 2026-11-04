@@ -271,6 +271,13 @@ impl OrchestrationCoreService for MockOrchestration {
         Err(tonic::Status::unimplemented("get_quarantine_preview is not served by this double"))
     }
 
+    async fn get_approval_preview(
+        &self,
+        _: tonic::Request<mp_contracts::model_plane::v1::GetApprovalPreviewRequest>,
+    ) -> Result<tonic::Response<mp_contracts::model_plane::v1::GetApprovalPreviewResponse>, tonic::Status> {
+        Err(tonic::Status::unimplemented("get_approval_preview is not served by this double"))
+    }
+
     type StreamRunEventsStream = MockEventStream;
 
     async fn list_plans(
@@ -1416,6 +1423,13 @@ impl OrchestrationCoreService for OrgScopedMock {
         _: tonic::Request<mp_contracts::model_plane::v1::GetQuarantinePreviewRequest>,
     ) -> Result<tonic::Response<mp_contracts::model_plane::v1::GetQuarantinePreviewResponse>, tonic::Status> {
         Err(tonic::Status::unimplemented("get_quarantine_preview is not served by this double"))
+    }
+
+    async fn get_approval_preview(
+        &self,
+        _: tonic::Request<mp_contracts::model_plane::v1::GetApprovalPreviewRequest>,
+    ) -> Result<tonic::Response<mp_contracts::model_plane::v1::GetApprovalPreviewResponse>, tonic::Status> {
+        Err(tonic::Status::unimplemented("get_approval_preview is not served by this double"))
     }
 
     async fn list_plans(

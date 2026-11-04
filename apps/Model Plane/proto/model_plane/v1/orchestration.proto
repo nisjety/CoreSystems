@@ -95,6 +95,11 @@ service OrchestrationCoreService {
   // approval and no one else (build plan WS10 S8).
   rpc GetQuarantinePreview(GetQuarantinePreviewRequest) returns (GetQuarantinePreviewResponse);
 
+  // EP-10 S1: the full draft a pending approval would release, shaped from its retained
+  // descriptor, for the run owner only. Refused for zero-retention and waived callers; every
+  // other miss (unknown, other org, not the owner, decided, expired) is NOT_FOUND. Read-only.
+  rpc GetApprovalPreview(GetApprovalPreviewRequest) returns (GetApprovalPreviewResponse);
+
   // Claim due durable approval deliveries for an authenticated internal
   // worker. Claims are tenant-scoped, leased, and opaque; the caller identity
   // is derived from its verified service credential, never from this request.
@@ -1047,6 +1052,53 @@ message GetQuarantinePreviewResponse {
   string tool_key = 3;
   // Trust class label of the source.
   string trust_class = 4;
+}
+
+// EP-10 S1: GetApprovalPreview asks for the draft behind one pending approval.
+message GetApprovalPreviewRequest {
+  // EP-10 S1: the pending approval to preview.
+  string approval_id = 1;
+  // EP-10 S1: server-authoritative org scope; must match the caller.
+  string org_id = 2;
+}
+
+// EP-10 S1: what an approval would release, in display fields. Never the raw descriptor: a kind
+// other than "mail_send" carries no argument values.
+message ApprovalPreview {
+  // EP-10 S1: "mail_send", "other" (another tool call, no values) or "none" (the approval has
+  // no retained descriptor, such as a browser takeover; nothing beyond the card to show).
+  string kind = 1;
+  // EP-10 S1: the provider the operation belongs to ("google", "microsoft"); empty when unknown.
+  string provider = 2;
+  // EP-10 S1: the provider operation as drafted.
+  string operation = 3;
+  // EP-10 S1: the connection the call is pinned to.
+  string connection_id = 4;
+  // EP-10 S1: every recipient of a mail send, in draft order.
+  repeated string to = 5;
+  // EP-10 S1: the full subject of a mail send.
+  string subject = 6;
+  // EP-10 S1: the full plain-text body of a mail send. Show as text, never as markup.
+  string body_text = 7;
+  // EP-10 S1: true when the draft also carries a formatted (HTML) body, which is not shown.
+  bool has_html = 8;
+  // EP-10 S1: true when the send replies in an existing thread (threadId or inReplyTo set).
+  bool is_reply = 9;
+  // EP-10 S1: true for a Gmail raw draft, whose fields are inside an encoded message.
+  bool raw_only = 10;
+  // EP-10 S1: the fields a later edit may change ("to", "subject", "body_text"); empty when
+  // the draft is not editable.
+  repeated string editable_fields = 11;
+  // EP-10 S1: the descriptor's action fingerprint, so a later edit can name what it saw.
+  string action_fingerprint = 12;
+  // EP-10 S1: the descriptor revision the preview was shaped from; 0 until edits exist (S4).
+  uint32 revision = 13;
+}
+
+// EP-10 S1: the preview of one pending approval.
+message GetApprovalPreviewResponse {
+  // EP-10 S1: the shaped preview.
+  ApprovalPreview preview = 1;
 }
 
 // ConsumeApproval claims one granted loop-mode approval for the loop that is

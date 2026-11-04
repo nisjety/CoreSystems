@@ -2393,6 +2393,29 @@ fn refuse_zdr_or_waived_question_caller(caller: &VerifiedIdentity) -> Result<(),
     Ok(())
 }
 
+/// The wire form of an approval preview (EP-10-S1). The revision stays 0 until edited descriptors
+/// exist (EP-10-S4).
+fn approval_preview_to_proto(
+    view: mp_contracts::write_preview::ApprovalPreviewView,
+    action_fingerprint: String,
+) -> proto::ApprovalPreview {
+    proto::ApprovalPreview {
+        kind: view.kind.as_str().to_owned(),
+        provider: view.provider,
+        operation: view.operation,
+        connection_id: view.connection_id,
+        to: view.to,
+        subject: view.subject,
+        body_text: view.body_text,
+        has_html: view.has_html,
+        is_reply: view.is_reply,
+        raw_only: view.raw_only,
+        editable_fields: view.editable_fields.into_iter().map(str::to_owned).collect(),
+        action_fingerprint,
+        revision: 0,
+    }
+}
+
 /// Only a persistent run keeps a question: a zero-retention run keeps nothing, and a waived run is
 /// persistent only for chat, so it asks nothing and stores nothing new (DEC-32).
 #[allow(clippy::result_large_err)]
@@ -3611,6 +3634,65 @@ impl OrchestrationCoreService for OrchestrationGrpc {
         }
         .await;
         record_metrics("get_approval", started, result.is_ok());
+        result
+    }
+
+    // EP-10-S1 (decision D4): the full draft behind a pending approval, for the run's owner and
+    // no one else. The descriptor is decrypted here and only the shaped preview leaves; neither is
+    // logged nor put in an event. A ZDR caller has no descriptor to read and a waived one counts
+    // as ZDR (D9), so both are refused before any lookup; every other miss is the same NOT_FOUND.
+    async fn get_approval_preview(
+        &self,
+        request: Request<proto::GetApprovalPreviewRequest>,
+    ) -> Result<Response<proto::GetApprovalPreviewResponse>, Status> {
+        let started = Instant::now();
+        let result: Result<Response<proto::GetApprovalPreviewResponse>, Status> = async {
+            let caller = identity(&request)?;
+            refuse_zdr_or_waived_question_caller(&caller)?;
+            authorize_operation(&caller, "orchestration:read")?;
+            let req = request.into_inner();
+            if req.approval_id.is_empty() {
+                return Err(Status::invalid_argument("approval_id is required"));
+            }
+            validate_approval_org(&req.org_id)?;
+            caller.authorize_org(&req.org_id)?;
+            let user_id = caller
+                .user_id()
+                .ok_or_else(|| Status::permission_denied("user-bound approval credential required"))?
+                .to_owned();
+            let read =
+                store::read_descriptor_for_owner(&self.pool, &req.approval_id, &req.org_id, &user_id)
+                    .await
+                    .map_err(|_| Status::internal("approval preview unavailable"))?;
+            let preview = match read {
+                store::OwnerDescriptor::NotFound => {
+                    return Err(Status::not_found("approval not found"));
+                }
+                store::OwnerDescriptor::NoDescriptor => approval_preview_to_proto(
+                    mp_contracts::write_preview::ApprovalPreviewView::no_descriptor(),
+                    String::new(),
+                ),
+                store::OwnerDescriptor::Descriptor {
+                    descriptor,
+                    action_fingerprint,
+                } => {
+                    let tool_name = descriptor
+                        .get("tool_name")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("");
+                    let input = descriptor.get("input").unwrap_or(&serde_json::Value::Null);
+                    approval_preview_to_proto(
+                        mp_contracts::write_preview::preview_from_input(tool_name, input),
+                        action_fingerprint,
+                    )
+                }
+            };
+            Ok(Response::new(proto::GetApprovalPreviewResponse {
+                preview: Some(preview),
+            }))
+        }
+        .await;
+        record_metrics("get_approval_preview", started, result.is_ok());
         result
     }
 
@@ -7119,6 +7201,100 @@ mod tests {
             .code(),
             tonic::Code::PermissionDenied
         );
+    }
+
+    fn preview_request(org_id: &str) -> proto::GetApprovalPreviewRequest {
+        proto::GetApprovalPreviewRequest {
+            approval_id: "appr_1".to_owned(),
+            org_id: org_id.to_owned(),
+        }
+    }
+
+    // EP-10-S1 (D4, D9): a ZDR caller has no descriptor and a waived one counts as ZDR, so both are
+    // refused with the typed refusal before anything is read. The pool is unreachable: reaching
+    // the database would answer Internal.
+    #[tokio::test]
+    async fn preview_refuses_zdr_and_waived_identities() {
+        let (svc, _rx) = lazy_unreachable_service();
+        for caller in [
+            VerifiedIdentity::user_for_test_with_zdr("org_p", "user_p", true),
+            VerifiedIdentity::user_for_test_with_waiver("org_p", "user_p", "conn-1", "ack-1"),
+        ] {
+            let refused = svc
+                .get_approval_preview(with_caller(preview_request("org_p"), caller))
+                .await
+                .expect_err("refused");
+            assert_ne!(refused.code(), tonic::Code::Internal, "the preview reached the database");
+            assert!(Refusal::from_status(&refused).is_some(), "typed refusal: {refused}");
+        }
+    }
+
+    // The org is the verified credential's, never the request's: another org is refused before
+    // any lookup.
+    #[tokio::test]
+    async fn preview_refuses_another_org_before_any_lookup() {
+        let (svc, _rx) = lazy_unreachable_service();
+        let refused = svc
+            .get_approval_preview(with_caller(
+                preview_request("org_other"),
+                VerifiedIdentity::user_for_test("org_p", "user_p"),
+            ))
+            .await
+            .expect_err("refused");
+        assert_eq!(refused.code(), tonic::Code::PermissionDenied);
+    }
+
+    // The handler gates before it reads, and neither the descriptor nor the preview reaches a log
+    // line or an event: the body has no tracing macro and no event write.
+    #[test]
+    fn preview_is_never_logged() {
+        let source = include_str!("orchestration_grpc.rs").replace("\r\n", "\n");
+        let start = source
+            .find("    async fn get_approval_preview(")
+            .expect("the preview handler is present");
+        let rest = &source[start..];
+        let body = &rest[..rest
+            .find("record_metrics(\"get_approval_preview\"")
+            .expect("the end of the handler")];
+        let gate = body
+            .find("refuse_zdr_or_waived_question_caller(&caller)?;")
+            .expect("the ZDR gate");
+        let org = body.find("caller.authorize_org(&req.org_id)?;").expect("the org gate");
+        let lookup = body.find("store::read_descriptor_for_owner(").expect("the store read");
+        assert!(gate < org && org < lookup, "the preview gate order");
+        for forbidden in [
+            "info!", "warn!", "debug!", "error!", "trace!", "tracing::", "println!", "eprintln!",
+            "broadcast", "record_orchestration_event", "persist_",
+        ] {
+            assert!(!body.contains(forbidden), "the preview handler must not use {forbidden}");
+        }
+    }
+
+    #[test]
+    fn preview_wire_form_carries_the_shaped_draft_and_the_fingerprint() {
+        let view = mp_contracts::write_preview::preview_from_input(
+            "execute_provider_action",
+            &serde_json::json!({
+                "connection_id": "conn-1",
+                "operation": "mail.send",
+                "body": { "to": "a@example.com, b@example.com", "subject": "S", "bodyText": "Body" },
+            }),
+        );
+        let wire = approval_preview_to_proto(view, "f".repeat(64));
+        assert_eq!(wire.kind, "mail_send");
+        assert_eq!(wire.provider, "microsoft");
+        assert_eq!(wire.to, vec!["a@example.com", "b@example.com"]);
+        assert_eq!(wire.body_text, "Body");
+        assert_eq!(wire.editable_fields, vec!["to", "subject", "body_text"]);
+        assert_eq!(wire.action_fingerprint, "f".repeat(64));
+        assert_eq!(wire.revision, 0);
+
+        let none = approval_preview_to_proto(
+            mp_contracts::write_preview::ApprovalPreviewView::no_descriptor(),
+            String::new(),
+        );
+        assert_eq!(none.kind, "none");
+        assert!(none.operation.is_empty() && none.to.is_empty() && none.action_fingerprint.is_empty());
     }
 
     // EP-4 S5: only execution-core may say an MCP server asked. A person's credential, or any other

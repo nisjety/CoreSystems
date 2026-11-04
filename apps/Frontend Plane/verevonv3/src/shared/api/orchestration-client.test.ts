@@ -14,6 +14,7 @@ import {
   continueParkedRun,
   continueRun,
   decideApproval,
+  getApprovalPreview,
   listApprovals,
   listRunQuestions,
   normalizePlan,
@@ -829,5 +830,76 @@ describe('run questions', () => {
       .map(([path]) => path.slice(src.length + 1).replaceAll('\\', '/'))
       .filter((path) => !path.endsWith('.test.ts'))
     expect(naming.sort()).toEqual(['features/chat/components/use-chat-controller.ts', 'shared/api/orchestration-client.ts'])
+  })
+})
+
+describe('getApprovalPreview (EP-10-S1)', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  const errorResponse = (status: number, code: string) =>
+    new Response(JSON.stringify({ error: { code, message: code, details: {} } }), {
+      status,
+      headers: { 'Content-Type': 'application/json' },
+    })
+
+  it('reads the shaped draft from the preview route, every recipient and the full body', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      jsonResponse({
+        preview: {
+          kind: 'mail_send',
+          provider: 'google',
+          operation: 'gmail.send',
+          connection_id: 'conn-1',
+          to: ['a@example.com', 'b@example.com', 7],
+          subject: 'Status',
+          body_text: 'Hei,\n\nthe whole body',
+          has_html: true,
+          is_reply: true,
+          raw_only: false,
+          editable_fields: ['to', 'subject', 'body_text'],
+          action_fingerprint: 'f'.repeat(64),
+          revision: 0,
+          format: 'plain_text',
+        },
+      }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const preview = await getApprovalPreview('appr 1')
+
+    expect(String(fetchMock.mock.calls[0]?.[0])).toContain('/api/v1/orchestration/approvals/appr%201/preview')
+    expect(preview).toEqual({
+      kind: 'mail_send',
+      provider: 'google',
+      operation: 'gmail.send',
+      connectionId: 'conn-1',
+      to: ['a@example.com', 'b@example.com'],
+      subject: 'Status',
+      bodyText: 'Hei,\n\nthe whole body',
+      hasHtml: true,
+      isReply: true,
+      rawOnly: false,
+      editableFields: ['to', 'subject', 'body_text'],
+      actionFingerprint: 'f'.repeat(64),
+      revision: 0,
+    })
+  })
+
+  it('answers null for every 404 (not the owner, decided, switched off) and for an unknown kind', async () => {
+    for (const code of ['approval_not_found', 'preview_unavailable']) {
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(errorResponse(404, code)))
+      await expect(getApprovalPreview('appr_1')).resolves.toBeNull()
+    }
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse({ preview: { kind: 'calendar_event' } })))
+    await expect(getApprovalPreview('appr_1')).resolves.toBeNull()
+  })
+
+  it('throws a zero-retention refusal typed, so the card can say why', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(errorResponse(412, 'zdr_durable_mutation_forbidden')))
+    const refused = await getApprovalPreview('appr_1').catch((error: unknown) => error)
+    expect(refused).toBeInstanceOf(ApiError)
+    expect((refused as ApiError).code).toBe('zdr_durable_mutation_forbidden')
   })
 })

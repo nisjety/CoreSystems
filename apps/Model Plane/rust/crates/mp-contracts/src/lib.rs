@@ -43,6 +43,7 @@ pub mod telemetry_labels;
 pub mod tool_arguments;
 pub mod tool_class;
 pub mod user_question;
+pub mod write_preview;
 pub mod zdr_refusal;
 
 /// Generated protobuf and gRPC types for the Model Plane.

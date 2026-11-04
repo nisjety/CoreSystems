@@ -151,6 +151,9 @@ export function normalizeApprovalCause(raw: unknown): ApprovalCause | undefined 
       ? cause.scope_options.filter((scope): scope is string => typeof scope === 'string')
       : [],
     stepUpRequired: cause.step_up_required === true,
+    assistKind: str(cause.assist_kind),
+    assistOrigin: str(cause.assist_origin),
+    host: str(cause.host),
   }
 }
 
@@ -422,6 +425,72 @@ export async function readQuarantinePreview(
     truncated: raw.truncated === true,
     toolKey: str(raw.tool_key),
     trustClass: str(raw.trust_class),
+  }
+}
+
+/**
+ * The full draft behind a pending write approval (EP-10-S1, action `approvals.preview`). A mail
+ * send carries every recipient, the full subject and the full body; `other` names only the
+ * operation; `none` is an approval with no retained call. Plain text only: render it as text.
+ */
+export type ApprovalPreview = {
+  kind: 'mail_send' | 'other' | 'none'
+  provider: string
+  operation: string
+  connectionId: string
+  to: string[]
+  subject: string
+  bodyText: string
+  hasHtml: boolean
+  isReply: boolean
+  rawOnly: boolean
+  editableFields: string[]
+  actionFingerprint: string
+  revision: number
+}
+
+const APPROVAL_PREVIEW_KINDS: ReadonlySet<string> = new Set(['mail_send', 'other', 'none'])
+
+const textList = (value: unknown): string[] =>
+  Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : []
+
+/**
+ * Read the full draft of a pending approval. Answered only to the run's owner while the approval
+ * is pending; every other case (another person, a decided or expired approval, the preview
+ * switched off) is a 404, returned here as `null` so the card says "preview not available". A
+ * zero-retention or waived refusal and every other failure throw, typed, as `ApiError`.
+ */
+export async function getApprovalPreview(
+  approvalId: string,
+  signal?: AbortSignal,
+): Promise<ApprovalPreview | null> {
+  // The `{data: {preview}}` envelope is unwrapped by `requestJson`.
+  let payload: { preview?: Record<string, unknown> }
+  try {
+    payload = await requestJson<{ preview?: Record<string, unknown> }>(
+      `/api/v1/orchestration/approvals/${encodeURIComponent(approvalId)}/preview`,
+      { signal },
+    )
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 404) return null
+    throw error
+  }
+  const raw = payload.preview
+  if (!raw || typeof raw.kind !== 'string' || !APPROVAL_PREVIEW_KINDS.has(raw.kind)) return null
+  return {
+    kind: raw.kind as ApprovalPreview['kind'],
+    provider: str(raw.provider) ?? '',
+    operation: str(raw.operation) ?? '',
+    connectionId: str(raw.connection_id) ?? '',
+    to: textList(raw.to),
+    subject: typeof raw.subject === 'string' ? raw.subject : '',
+    bodyText: typeof raw.body_text === 'string' ? raw.body_text : '',
+    hasHtml: raw.has_html === true,
+    isReply: raw.is_reply === true,
+    rawOnly: raw.raw_only === true,
+    editableFields: textList(raw.editable_fields),
+    actionFingerprint: str(raw.action_fingerprint) ?? '',
+    revision: Number.isInteger(raw.revision) && (raw.revision as number) >= 0 ? (raw.revision as number) : 0,
   }
 }
 

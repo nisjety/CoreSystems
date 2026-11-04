@@ -1,6 +1,7 @@
 import { ForkAction, threadForkEnabled } from './ForkAction'
 import { formatResetTime, humanizeToolName, refreshResetTimeWording, workStepLabel } from './chat-normalizers'
 import { RunNotifyButton } from './RunNotifyButton'
+import { WritePreviewDisclosure, approvalWritePreviewEnabled, isMailSendApproval } from './WritePreview'
 import {
   type Approval,
   type ApprovalDecision,
@@ -149,7 +150,14 @@ import { streamActivityLabel, type StreamActivity, type Translator } from '@/fea
 import { narrate } from '@/shared/activity/narration'
 import { isEffectfulChatTurn } from '@/shared/chat/effect-class'
 import { translateApiError, useI18n } from '@/shared/i18n'
-import { approvalHeadline, approvalReason } from '@/shared/approvals/approval-copy'
+import {
+  approvalHeadline,
+  approvalReason,
+  browserAssistActionLabel,
+  browserAssistKindOf,
+  browserAssistNoTakeOverLine,
+} from '@/shared/approvals/approval-copy'
+import type { ChatRunBrowserControl } from '@/features/chat/lib/chat-run-watch'
 import { BrowserApprovalDecisionCard } from '@/features/browser/approval/BrowserApprovalDecisionCard'
 import {
   APPROVAL_REDIRECT_ENABLED,
@@ -2260,9 +2268,61 @@ export function BrowserSiteConsentCard(props: {
   )
 }
 
+/**
+ * EP-1 S2: the agent asks the person to clear a wall on the page (a sign-in, a human check, a
+ * consent choice, a firewall). The words and the host come from the approval's cause, the record
+ * the server keeps, never from text on the page. Take over flips the browser to the person through
+ * the same control call the live panel uses, compare-and-set on the epoch the projection shows; it is
+ * offered only when the turn's browser is bound and the owner may take it (`onTakeOver` present).
+ * Skip this site declines the request: the run closes the page and looks elsewhere.
+ */
+export function BrowserHumanAssistCard(props: {
+  approval: Approval
+  control?: ChatRunBrowserControl
+  onTakeOver?: (sessionId: string, expectedEpoch: number | null) => void
+  onSkip: () => void
+}) {
+  const i18n = useI18n()
+  const control = () => (props.onTakeOver ? props.control : undefined)
+  return (
+    <div class="verevon-chat-approval" role="group" aria-label={approvalHeadline(props.approval, i18n)}>
+      <div class="verevon-chat-approval__head">
+        <span class="verevon-chat-approval__badge">{i18n.tr('Hjelp', 'Help')}</span>
+        <span class="verevon-chat-approval__kind">{approvalHeadline(props.approval, i18n)}</span>
+      </div>
+      <Show when={approvalReason(props.approval, i18n)}>
+        {(reason) => <p class="verevon-chat-approval__detail">{reason()}</p>}
+      </Show>
+      <Show when={!control()}>
+        <p class="verevon-chat-approval__detail">{browserAssistNoTakeOverLine(i18n)}</p>
+      </Show>
+      <div class="verevon-chat-approval__actions">
+        <Show when={control()}>
+          {(bound) => (
+            <button
+              type="button"
+              class="verevon-chat-approval__approve"
+              onClick={() => props.onTakeOver?.(bound().sessionId, bound().controlEpoch)}
+            >
+              {browserAssistActionLabel('take_over', i18n)}
+            </button>
+          )}
+        </Show>
+        <button type="button" class="verevon-chat-approval__reject" onClick={() => props.onSkip()}>
+          {browserAssistActionLabel('skip', i18n)}
+        </button>
+      </div>
+    </div>
+  )
+}
+
 export function ApprovalRequests(props: {
   approvals: Approval[]
   onDecide: (approvalId: string, decision: ApprovalDecision, scope?: ApprovalScope) => void
+  /** The turn's browser, as the person may address it (EP-1 S1); a help card offers Take over with it. */
+  browserControl?: ChatRunBrowserControl
+  /** Takes the turn's browser for a help request (EP-1 S2). Absent while takeover is not offered. */
+  onBrowserTakeOver?: (sessionId: string, expectedEpoch: number | null) => void
 }) {
   const i18n = useI18n()
   // An approval whose cause asks for a fresh password confirmation before it is granted (build
@@ -2353,6 +2413,17 @@ export function ApprovalRequests(props: {
       <For each={props.approvals}>
         {(approval) => (
           <Show
+            when={!browserAssistKindOf(approval.cause)}
+            fallback={
+              <BrowserHumanAssistCard
+                approval={approval}
+                control={props.browserControl}
+                onTakeOver={props.onBrowserTakeOver}
+                onSkip={() => props.onDecide(approval.id, 'reject')}
+              />
+            }
+          >
+          <Show
             when={cardModel(approval)}
             fallback={
           <div class="verevon-chat-approval">
@@ -2362,6 +2433,9 @@ export function ApprovalRequests(props: {
             </div>
             <Show when={approvalReason(approval, i18n)}>
               {(reason) => <p class="verevon-chat-approval__detail">{reason()}</p>}
+            </Show>
+            <Show when={approvalWritePreviewEnabled() && isMailSendApproval(approval)}>
+              <WritePreviewDisclosure approvalId={approval.id} />
             </Show>
             <Show
               when={confirming() === approval.id}
@@ -2461,6 +2535,7 @@ export function ApprovalRequests(props: {
                 }}
               />
             )}
+          </Show>
           </Show>
         )}
       </For>

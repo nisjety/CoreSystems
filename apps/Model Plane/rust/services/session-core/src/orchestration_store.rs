@@ -2370,6 +2370,74 @@ pub async fn get_approval_for_org(
     Ok(row)
 }
 
+/// What the preview of one approval may read (EP-10-S1).
+#[derive(Debug, Clone, PartialEq)]
+pub enum OwnerDescriptor {
+    /// Not a pending, unexpired approval of a persistent run the caller owns in this org. One
+    /// answer for every such case, so a miss discloses nothing about another owner's approval.
+    NotFound,
+    /// A pending approval of the caller's that retains no descriptor (a browser takeover, a cause
+    /// with no tool call).
+    NoDescriptor,
+    /// The decrypted descriptor and its stored fingerprint.
+    Descriptor {
+        descriptor: JsonValue,
+        action_fingerprint: String,
+    },
+}
+
+/// Read and decrypt the retained descriptor of a pending approval for the run's owner, for the
+/// approval card's preview (EP-10-S1, decision D4). The approval must be `requested` and
+/// unexpired, its run must be the caller's and persistent (a waived run counts as ZDR, D9), and
+/// the descriptor is decrypted with the same scope binding it was encrypted under. The caller
+/// shapes the result through `mp_contracts::write_preview` and never logs it.
+///
+/// # Errors
+///
+/// Returns an error when the query fails, the key is missing, or the stored ciphertext does not
+/// decrypt to JSON.
+pub async fn read_descriptor_for_owner(
+    pool: &Pool,
+    approval_id: &str,
+    org_id: &str,
+    user_id: &str,
+) -> Result<OwnerDescriptor> {
+    if org_id.trim().is_empty() || user_id.trim().is_empty() {
+        return Ok(OwnerDescriptor::NotFound);
+    }
+    let row: Option<(Option<String>, Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT d.user_id, d.action_fingerprint, d.ciphertext \
+         FROM approvals a \
+         JOIN runs r ON r.id = a.run_id AND r.org_id = a.org_id \
+         LEFT JOIN approval_continuation_descriptors d \
+           ON d.approval_id = a.id AND d.org_id = a.org_id AND d.run_id = a.run_id \
+         WHERE a.id = $1 AND a.org_id = $2 AND a.user_id = $3 AND r.user_id = $3 \
+           AND a.status = 'requested' AND (a.expires_at IS NULL OR a.expires_at > now()) \
+           AND r.retention_class = 'persistent'",
+    )
+    .bind(approval_id)
+    .bind(org_id)
+    .bind(user_id)
+    .fetch_optional(pool)
+    .await?;
+    let Some((descriptor_user, fingerprint, ciphertext)) = row else {
+        return Ok(OwnerDescriptor::NotFound);
+    };
+    let (Some(descriptor_user), Some(action_fingerprint), Some(ciphertext)) =
+        (descriptor_user, fingerprint, ciphertext)
+    else {
+        return Ok(OwnerDescriptor::NoDescriptor);
+    };
+    let plaintext =
+        DescriptorCipher::from_env()?.decrypt(approval_id, org_id, &descriptor_user, &ciphertext)?;
+    let descriptor: JsonValue = serde_json::from_str(&plaintext)
+        .map_err(|_| anyhow::anyhow!("stored continuation descriptor is invalid"))?;
+    Ok(OwnerDescriptor::Descriptor {
+        descriptor,
+        action_fingerprint,
+    })
+}
+
 /// Fetch a single approval by its `(org_id, idempotency_key)` pair. Used to
 /// resolve the existing durable record when an idempotent re-request hit the
 /// `ON CONFLICT ... DO NOTHING` no-op path and so returned no new id. (D-1)
@@ -6423,5 +6491,203 @@ mod approval_scope_grant_db_tests {
                 .await
                 .expect("count proposals");
         assert_eq!(proposals, 0);
+    }
+}
+
+#[cfg(test)]
+mod approval_preview_db_tests {
+    //! EP-10-S1: the owner-only descriptor read behind the approval card's preview. Every miss is
+    //! the one `NotFound`, so another owner, another org, a decided or expired approval and a
+    //! waived run all look the same.
+    use super::*;
+    use base64::Engine as _;
+    use sqlx::postgres::PgPoolOptions;
+
+    async fn scratch_pool() -> Option<Pool> {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping: DATABASE_URL unset");
+            return None;
+        };
+        assert!(url.contains("test"), "the scratch database name must say test");
+        let pool = PgPoolOptions::new()
+            .max_connections(4)
+            .connect(&url)
+            .await
+            .expect("connect pg");
+        sqlx::migrate!("./migrations").run(&pool).await.expect("migrate");
+        // The retained descriptor is encrypted: the process needs its key.
+        std::env::set_var(
+            "SESSION_CORE_CONTINUATION_DESCRIPTOR_KEY",
+            base64::engine::general_purpose::STANDARD.encode([7_u8; 32]),
+        );
+        Some(pool)
+    }
+
+    const FINGERPRINT: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    struct Seed {
+        run_id: String,
+        org: String,
+        user: String,
+    }
+
+    /// A waived run must name its acknowledgement and connection, and no other class may (a
+    /// table CHECK).
+    async fn seed_run(pool: &Pool, tag: &str, class: &str) -> Seed {
+        let sfx = mp_ids::new_ulid();
+        let (thread_id, run_id, org, user) = (
+            format!("pv-t-{tag}-{sfx}"),
+            format!("pv-r-{tag}-{sfx}"),
+            format!("pv-org-{sfx}"),
+            "u1".to_owned(),
+        );
+        sqlx::query("INSERT INTO threads (id,session_key,org_id,user_id) VALUES ($1,$1,$2,$3)")
+            .bind(&thread_id).bind(&org).bind(&user).execute(pool).await.expect("seed thread");
+        let (ack, connection) = if class == "zdr_waived" {
+            (Some("ack-1"), Some("conn-1"))
+        } else {
+            (None, None)
+        };
+        sqlx::query(
+            "INSERT INTO runs (id,thread_id,goal,org_id,user_id,retention_class,waiver_ack_id,waiver_connection_id) \
+             VALUES ($1,$2,'g',$3,$4,$5,$6,$7)",
+        )
+        .bind(&run_id).bind(&thread_id).bind(&org).bind(&user)
+        .bind(class).bind(ack).bind(connection)
+        .execute(pool).await.expect("seed run");
+        Seed { run_id, org, user }
+    }
+
+    fn mail_descriptor(seed: &Seed) -> JsonValue {
+        serde_json::json!({
+            "version": 1,
+            "run_id": seed.run_id,
+            "org_id": seed.org,
+            "user_id": seed.user,
+            "step_id": "tool_1_call-1",
+            "action_kind": "tool_call",
+            "action_fingerprint": FINGERPRINT,
+            "tool_name": "execute_provider_action",
+            "input": {
+                "connection_id": "conn-1",
+                "operation": "gmail.send",
+                "body": { "to": "a@example.com", "subject": "S", "bodyText": "the whole body" },
+            },
+            "permission_mode": "ask",
+        })
+    }
+
+    async fn approval(pool: &Pool, seed: &Seed, descriptor: Option<&JsonValue>) -> String {
+        let id = format!("appr_{}", mp_ids::new_ulid());
+        request_approval(
+            pool,
+            &id,
+            &seed.run_id,
+            None,
+            "tool_call",
+            &seed.user,
+            &seed.org,
+            &seed.user,
+            "",
+            &serde_json::json!({}),
+            descriptor,
+            Some(Utc::now() + chrono::Duration::minutes(5)),
+            "",
+        )
+        .await
+        .expect("request approval")
+        .expect("inserted");
+        id
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+    async fn preview_is_owner_only() {
+        let Some(pool) = scratch_pool().await else { return };
+        let seed = seed_run(&pool, "owner", "persistent").await;
+        let descriptor = mail_descriptor(&seed);
+        let id = approval(&pool, &seed, Some(&descriptor)).await;
+        let read = read_descriptor_for_owner(&pool, &id, &seed.org, &seed.user)
+            .await
+            .expect("read");
+        assert_eq!(
+            read,
+            OwnerDescriptor::Descriptor {
+                descriptor,
+                action_fingerprint: FINGERPRINT.to_owned(),
+            }
+        );
+        let other = read_descriptor_for_owner(&pool, &id, &seed.org, "u2").await.expect("read");
+        assert_eq!(other, OwnerDescriptor::NotFound, "another member of the org reads nothing");
+        let unknown = read_descriptor_for_owner(&pool, "appr_missing", &seed.org, &seed.user)
+            .await
+            .expect("read");
+        assert_eq!(unknown, OwnerDescriptor::NotFound);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+    async fn preview_refuses_other_org_as_not_found() {
+        let Some(pool) = scratch_pool().await else { return };
+        let seed = seed_run(&pool, "org", "persistent").await;
+        let id = approval(&pool, &seed, Some(&mail_descriptor(&seed))).await;
+        let read = read_descriptor_for_owner(&pool, &id, "pv-org-other", &seed.user)
+            .await
+            .expect("read");
+        assert_eq!(read, OwnerDescriptor::NotFound);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+    async fn preview_refuses_decided_and_expired_approvals() {
+        let Some(pool) = scratch_pool().await else { return };
+        let seed = seed_run(&pool, "state", "persistent").await;
+        let decided = approval(&pool, &seed, Some(&mail_descriptor(&seed))).await;
+        decide_approval(&pool, &decided, &seed.org, Some(&seed.user), "denied", &seed.user, "no")
+            .await
+            .expect("decide");
+        assert_eq!(
+            read_descriptor_for_owner(&pool, &decided, &seed.org, &seed.user).await.expect("read"),
+            OwnerDescriptor::NotFound,
+            "a decided approval is not previewed"
+        );
+        let expired = approval(&pool, &seed, Some(&mail_descriptor(&seed))).await;
+        sqlx::query("UPDATE approvals SET expires_at = now() - interval '1 minute' WHERE id = $1")
+            .bind(&expired)
+            .execute(&pool)
+            .await
+            .expect("expire");
+        assert_eq!(
+            read_descriptor_for_owner(&pool, &expired, &seed.org, &seed.user).await.expect("read"),
+            OwnerDescriptor::NotFound,
+            "an expired approval is not previewed"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+    async fn preview_refuses_a_waived_run_as_not_found() {
+        let Some(pool) = scratch_pool().await else { return };
+        let seed = seed_run(&pool, "waived", "zdr_waived").await;
+        let id = approval(&pool, &seed, Some(&mail_descriptor(&seed))).await;
+        assert_eq!(
+            read_descriptor_for_owner(&pool, &id, &seed.org, &seed.user).await.expect("read"),
+            OwnerDescriptor::NotFound,
+            "a waived run counts as ZDR (D9)"
+        );
+    }
+
+    /// Integration round B C-B4: a cause with no descriptor (`browser_human_assist`) previews as
+    /// the no-descriptor form, not as a miss.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+    async fn preview_of_an_approval_without_a_descriptor_is_the_no_descriptor_form() {
+        let Some(pool) = scratch_pool().await else { return };
+        let seed = seed_run(&pool, "assist", "persistent").await;
+        let id = approval(&pool, &seed, None).await;
+        assert_eq!(
+            read_descriptor_for_owner(&pool, &id, &seed.org, &seed.user).await.expect("read"),
+            OwnerDescriptor::NoDescriptor
+        );
     }
 }
