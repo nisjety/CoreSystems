@@ -615,6 +615,11 @@ mod tests {
             client_utc_offset_minutes: None,
             ui_locale: None,
             agent_roles: None,
+            agent_ref: None,
+            agent_version: None,
+            agent_digest: None,
+            agent_tool_capability_ids: None,
+            agent_autonomy_cap: None,
         }
     }
 

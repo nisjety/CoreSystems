@@ -207,6 +207,11 @@ pub(crate) struct SpaceFeatureFlags {
     /// Off answers 404 `feature_unavailable`. A rollout control, never an authorization input: Control's
     /// `model.space.memory.manage` decision decides who may list or delete.
     pub(crate) memory_ui: bool,
+    /// `AGENT_VERSION_PINNING` (EP-6 S9): a mention turn runs the binding's pinned (else published) agent
+    /// version and carries its allowlist and cap to the model gateway. Only the literal `true` turns it on,
+    /// never by default in development. Off keeps the legacy persona injection. A rollout control, never an
+    /// authorization input: the allowlist and cap only narrow.
+    pub(crate) agent_version_pinning: bool,
     /// `CHAT_LOCALE_HINT` (WS16-S6): stamp the viewer's interface language (`nb-NO` or `en-US`) on
     /// the model-bound body as the request-scoped `locale` field. Off removes the field, whatever
     /// the browser sent. A rollout control, never an authorization input: the field is a framing
@@ -477,6 +482,7 @@ impl SpaceFeatureFlags {
             approval_scopes: space_flag("SPACE_APPROVAL_SCOPES_ENABLED"),
             append_retrieval: env::var("GATEWAY_SPACE_APPEND_RETRIEVAL").is_ok_and(|value| value == "true"),
             memory_ui: env::var("GATEWAY_SPACE_MEMORY_UI").is_ok_and(|value| value == "true"),
+            agent_version_pinning: env::var("AGENT_VERSION_PINNING").is_ok_and(|value| value == "true"),
             chat_locale_hint: space_flag("CHAT_LOCALE_HINT"),
             denials_typed: space_flag("SPACE_DENIALS_TYPED"),
             dm_api: space_flag("SPACE_DM_API"),

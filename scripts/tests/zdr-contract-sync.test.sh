@@ -115,7 +115,7 @@ GOLDENS=(
   # (MP_UPDATE_GOLDEN=1 cargo test -p mp-contracts zdr_refusal), never written by hand.
   # Every refusal code the matrix can expect must be in it (check_schema passes it to
   # the loader with --refusals). The SPA's own copy is vendored by Z-05b.
-  "apps/Model Plane/api/contracts/zdr-refusals.json|96cce805b28ece23aace053e6d2a7b726318effd4defe72113174e7128086515"
+  "apps/Model Plane/api/contracts/zdr-refusals.json|7b28a8283afa50db279a4f6fe72ea0f1a239129c168239611a208b45a48ebbdf"
 
   # WS25-S7: the org agent policy schema. AUTHORED (not generated), read by mp-contracts and by
   # capability-core's org agent policy API.
@@ -206,7 +206,7 @@ GOLDENS=(
   # (VEREVON_UPDATE_GOLDEN=1 pnpm vitest run src/shared/actions/admission-contract.test.ts) from the typed
   # side map (model-access.ts) and the registry, never written by hand. Each plane that admits an agent
   # action vendors it, with the pin beside it, in the VENDORED rows below.
-  "apps/Model Plane/api/contracts/agent-action-admission.json|04798a51742c11aa8f9ae5414d49dba62a961e7606aa6c059af036d12a9a54a9"
+  "apps/Model Plane/api/contracts/agent-action-admission.json|2609c9a7289d2dfc83484667b0c2df0a75b1416391686a5ef9b9aa300bc33e2e"
   # WS21-S0 and WS21-S3: the browser policy goldens, authored (not generated). org-core's validate and resolve tests
   # and execution-core's canonicaliser test read vendored copies (VENDORED); the other consumers are pending (CONSUMERS).
   "apps/Model Plane/api/contracts/browser-domain-canonical.json|ef6bfb8e63f3a1c34b90a0d26d0f27fb5ef224f138a652bf851dc179573ac45d"
@@ -226,7 +226,7 @@ GOLDENS=(
   # model-gateway zdr_posture` (every non-GET route has a row) and the gateway
   # tests/space_routes_zdr_classes.rs (every /api/v1/spaces route has a row). The consumers vendor a
   # copy, with the pin, in the same slice as those lints (VENDORED and CONSUMERS rows then).
-  "apps/Model Plane/api/contracts/space-surface.v1.json|7ffab6522a97ec2f997eea5fa369ee5ddcae99d1101b2ccc4e390ff728d14b2d"
+  "apps/Model Plane/api/contracts/space-surface.v1.json|d8e871c98c172a9b79e8b73de51ed6ab0f2d26608799b813c2c29f0bcf7b2995"
 
   # WS02-S3: the Space event stream vocabulary (SSE events, cursor grammar, kind registry, closing codes,
   # refs allowlist, HTTP error map). AUTHORED by hand with the slice that serves it (session-core

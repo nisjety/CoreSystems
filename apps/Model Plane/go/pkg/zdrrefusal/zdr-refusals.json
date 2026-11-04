@@ -178,6 +178,10 @@
       "label_en": "browser tools"
     },
     {
+      "key": "browser_human_assist",
+      "label_en": "browser help requests"
+    },
+    {
       "key": "translation",
       "label_en": "translation"
     },

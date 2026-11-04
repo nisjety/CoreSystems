@@ -260,6 +260,7 @@ impl BrowserEventSink for OrchestrationEventSink {
                 plan_id: config.plan_id.clone(),
                 // A user-initiated pause or resume carries no reason.
                 reason: String::new(),
+                control_epoch: 0,
             });
         self.publish(&config.run_id, event).await;
     }
@@ -274,6 +275,7 @@ impl BrowserEventSink for OrchestrationEventSink {
                 plan_id: config.plan_id.clone(),
                 // A user-initiated pause or resume carries no reason.
                 reason: String::new(),
+                control_epoch: 0,
             });
         self.publish(&config.run_id, event).await;
     }
@@ -290,6 +292,7 @@ impl BrowserEventSink for OrchestrationEventSink {
                 run_id: config.run_id.clone(),
                 plan_id: config.plan_id.clone(),
                 reason: PAUSED_REASON_USER_TOOK_OVER.to_owned(),
+                control_epoch: 0,
             });
         self.publish(&config.run_id, event).await;
     }
@@ -304,6 +307,7 @@ impl BrowserEventSink for OrchestrationEventSink {
                 run_id: config.run_id.clone(),
                 plan_id: config.plan_id.clone(),
                 reason: RESUMED_REASON_CONTROL_RETURNED.to_owned(),
+                control_epoch: 0,
             });
         self.publish(&config.run_id, event).await;
     }

@@ -1593,7 +1593,20 @@ type ApprovalCause struct {
 	// `metadata.host_class` (where the authz_decision audit reads it, dropped for a
 	// zero-retention caller), and a read-back cause leaves it empty. Field 11: 10 is
 	// WS13 S7's tool_digest on model-plane, merged with mp-w2w3 on 2026-11-03.
-	HostClass     string `protobuf:"bytes,11,opt,name=host_class,json=hostClass,proto3" json:"host_class,omitempty"`
+	HostClass string `protobuf:"bytes,11,opt,name=host_class,json=hostClass,proto3" json:"host_class,omitempty"`
+	// What a `browser_human_assist` pause hands to the person (EP-1): `user_takeover`
+	// when the person took the browser, or the challenge the agent asks help with
+	// (`login`, `captcha`, `consent`, `waf`). Closed; empty for every other code.
+	AssistKind string `protobuf:"bytes,13,opt,name=assist_kind,json=assistKind,proto3" json:"assist_kind,omitempty"`
+	// Who started a `browser_human_assist` pause (EP-1): `person` (a takeover) or
+	// `agent` (a help request). Closed; empty for every other code.
+	AssistOrigin string `protobuf:"bytes,14,opt,name=assist_origin,json=assistOrigin,proto3" json:"assist_origin,omitempty"`
+	// The host of the browser session a `browser_human_assist` pause is about (EP-1),
+	// shown on the card from the approval record, never from the page. Stored in the
+	// cause, so it is never kept for a zero-retention caller. Field 15, not the 11 the
+	// EP-1 design reserved: `host_class` took 11 in the mp-w2w3 merge. WS21-S6's
+	// site-consent cause reuses this field.
+	Host          string `protobuf:"bytes,15,opt,name=host,proto3" json:"host,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1701,6 +1714,27 @@ func (x *ApprovalCause) GetToolDigest() string {
 func (x *ApprovalCause) GetHostClass() string {
 	if x != nil {
 		return x.HostClass
+	}
+	return ""
+}
+
+func (x *ApprovalCause) GetAssistKind() string {
+	if x != nil {
+		return x.AssistKind
+	}
+	return ""
+}
+
+func (x *ApprovalCause) GetAssistOrigin() string {
+	if x != nil {
+		return x.AssistOrigin
+	}
+	return ""
+}
+
+func (x *ApprovalCause) GetHost() string {
+	if x != nil {
+		return x.Host
 	}
 	return ""
 }
@@ -8845,8 +8879,12 @@ type OrchestrationEvent_BrowserRunPaused struct {
 	RunId  string                 `protobuf:"bytes,1,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
 	PlanId string                 `protobuf:"bytes,2,opt,name=plan_id,json=planId,proto3" json:"plan_id,omitempty"`
 	// Why the run paused (WS8.G, additive). Empty for a user-initiated pause;
-	// `user_took_over` when the person took control of an attached tab.
-	Reason        string `protobuf:"bytes,3,opt,name=reason,proto3" json:"reason,omitempty"`
+	// `user_took_over` when the person took control of an attached tab, or of
+	// the browser a chat Do run holds (EP-1).
+	Reason string `protobuf:"bytes,3,opt,name=reason,proto3" json:"reason,omitempty"`
+	// Quarry's control epoch the pause was seen in (EP-1, additive). Zero when
+	// the pause is not a takeover, or the epoch could not be read.
+	ControlEpoch  uint64 `protobuf:"varint,4,opt,name=control_epoch,json=controlEpoch,proto3" json:"control_epoch,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -8902,14 +8940,25 @@ func (x *OrchestrationEvent_BrowserRunPaused) GetReason() string {
 	return ""
 }
 
+func (x *OrchestrationEvent_BrowserRunPaused) GetControlEpoch() uint64 {
+	if x != nil {
+		return x.ControlEpoch
+	}
+	return 0
+}
+
 // User-initiated run resume (Phase 2 B5), mirrors `BrowserRunPaused`.
 type OrchestrationEvent_BrowserRunResumed struct {
 	state  protoimpl.MessageState `protogen:"open.v1"`
 	RunId  string                 `protobuf:"bytes,1,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
 	PlanId string                 `protobuf:"bytes,2,opt,name=plan_id,json=planId,proto3" json:"plan_id,omitempty"`
 	// Why the run resumed (WS8.G, additive). Empty for a user-initiated resume;
-	// `control_returned` when the person gave control of an attached tab back.
-	Reason        string `protobuf:"bytes,3,opt,name=reason,proto3" json:"reason,omitempty"`
+	// `control_returned` when the person gave control of an attached tab, or of
+	// a chat Do run's browser (EP-1), back.
+	Reason string `protobuf:"bytes,3,opt,name=reason,proto3" json:"reason,omitempty"`
+	// Quarry's control epoch the give-back was seen in (EP-1, additive). Zero
+	// when the resume is not a give-back, or the epoch could not be read.
+	ControlEpoch  uint64 `protobuf:"varint,4,opt,name=control_epoch,json=controlEpoch,proto3" json:"control_epoch,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -8963,6 +9012,13 @@ func (x *OrchestrationEvent_BrowserRunResumed) GetReason() string {
 		return x.Reason
 	}
 	return ""
+}
+
+func (x *OrchestrationEvent_BrowserRunResumed) GetControlEpoch() uint64 {
+	if x != nil {
+		return x.ControlEpoch
+	}
+	return 0
 }
 
 // A delegate agent attached to the owner's browser session with the shared
@@ -9867,7 +9923,7 @@ const file_model_plane_v1_orchestration_proto_rawDesc = "" +
 	"\x14requester_subject_id\x18\x15 \x01(\tR\x12requesterSubjectId\x12\x1b\n" +
 	"\tgrant_ref\x18\x16 \x01(\tR\bgrantRef\x12\x1f\n" +
 	"\vturn_origin\x18\x17 \x01(\tR\n" +
-	"turnOrigin\"\xe7\x02\n" +
+	"turnOrigin\"\xc1\x03\n" +
 	"\rApprovalCause\x12\x12\n" +
 	"\x04code\x18\x01 \x01(\tR\x04code\x12\x12\n" +
 	"\x04tool\x18\x02 \x01(\tR\x04tool\x12!\n" +
@@ -9884,7 +9940,11 @@ const file_model_plane_v1_orchestration_proto_rawDesc = "" +
 	" \x01(\tR\n" +
 	"toolDigest\x12\x1d\n" +
 	"\n" +
-	"host_class\x18\v \x01(\tR\thostClass\"\x92\x04\n" +
+	"host_class\x18\v \x01(\tR\thostClass\x12\x1f\n" +
+	"\vassist_kind\x18\r \x01(\tR\n" +
+	"assistKind\x12#\n" +
+	"\rassist_origin\x18\x0e \x01(\tR\fassistOrigin\x12\x12\n" +
+	"\x04host\x18\x0f \x01(\tR\x04host\"\x92\x04\n" +
 	"\x04Todo\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1b\n" +
 	"\tthread_id\x18\x02 \x01(\tR\bthreadId\x12\x15\n" +
@@ -10214,7 +10274,7 @@ const file_model_plane_v1_orchestration_proto_rawDesc = "" +
 	"\alineage\x18\x02 \x01(\v2\x1f.model_plane.v1.SubagentLineageR\alineage\"U\n" +
 	"\x16StreamRunEventsRequest\x12\x15\n" +
 	"\x06run_id\x18\x01 \x01(\tR\x05runId\x12$\n" +
-	"\x0eafter_event_id\x18\x02 \x01(\tR\fafterEventId\"\xb9/\n" +
+	"\x0eafter_event_id\x18\x02 \x01(\tR\fafterEventId\"\x840\n" +
 	"\x12OrchestrationEvent\x12*\n" +
 	"\x02at\x18\x01 \x01(\v2\x1a.google.protobuf.TimestampR\x02at\x12\x19\n" +
 	"\bevent_id\x18\x02 \x01(\tR\aeventId\x12b\n" +
@@ -10304,15 +10364,17 @@ const file_model_plane_v1_orchestration_proto_rawDesc = "" +
 	"\n" +
 	"page_title\x18\x06 \x01(\tR\tpageTitle\x12%\n" +
 	"\x0escreenshot_ref\x18\a \x01(\tR\rscreenshotRef\x12(\n" +
-	"\x10dom_snapshot_ref\x18\b \x01(\tR\x0edomSnapshotRef\x1aZ\n" +
+	"\x10dom_snapshot_ref\x18\b \x01(\tR\x0edomSnapshotRef\x1a\x7f\n" +
 	"\x10BrowserRunPaused\x12\x15\n" +
 	"\x06run_id\x18\x01 \x01(\tR\x05runId\x12\x17\n" +
 	"\aplan_id\x18\x02 \x01(\tR\x06planId\x12\x16\n" +
-	"\x06reason\x18\x03 \x01(\tR\x06reason\x1a[\n" +
+	"\x06reason\x18\x03 \x01(\tR\x06reason\x12#\n" +
+	"\rcontrol_epoch\x18\x04 \x01(\x04R\fcontrolEpoch\x1a\x80\x01\n" +
 	"\x11BrowserRunResumed\x12\x15\n" +
 	"\x06run_id\x18\x01 \x01(\tR\x05runId\x12\x17\n" +
 	"\aplan_id\x18\x02 \x01(\tR\x06planId\x12\x16\n" +
-	"\x06reason\x18\x03 \x01(\tR\x06reason\x1a\xa2\x01\n" +
+	"\x06reason\x18\x03 \x01(\tR\x06reason\x12#\n" +
+	"\rcontrol_epoch\x18\x04 \x01(\x04R\fcontrolEpoch\x1a\xa2\x01\n" +
 	"\x16BrowserAttachSharedJar\x12\x15\n" +
 	"\x06run_id\x18\x01 \x01(\tR\x05runId\x12\x17\n" +
 	"\aplan_id\x18\x02 \x01(\tR\x06planId\x12\x1b\n" +

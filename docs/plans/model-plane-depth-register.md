@@ -3262,6 +3262,12 @@ Built so far: WS13-S0, WS13-S1, WS13-S2; WS14-S1, WS14-S2 (partial), WS14-S3; WS
 | D3-597 | EP-3-S2 | risk | P2 | source_message_id is resolved in session-core through managed_run_terminalization_outbox.completion_message_sequence; on the legacy two-call save path that row may be absent, leaving source_message_id NULL, which the live proof should check. | open |
 | D3-598 | EP-3-S2 | test-gap | P2 | The gateway tests (mock ArtifactRevisionService on a local port) and the session-core gdpr/DB tests are written but not compiled or run. | open |
 | D3-599 | EP-3-S2 | follow-up | P3 | 1 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W3-13.json | open |
+| D3-600 | W3-13 guard | follow-up | P2 | guard skipped: EP-1-S1 'update the row counts in the zdr_refusal_inventory.rs tests': those tests hold no feature count. The only feature-count assert is Quarry-v2 quarry-edge/tests/zdr_feature_matrix.rs:450 (expects 32). The catalogue already had 40 features before this batch, so that assert was failing already. Left as is. | open |
+| D3-601 | W3-13 guard | follow-up | P2 | guard skipped: Builder-requested cargo fmt on connector_reads.rs and capability_policy.rs: the workspace is far from fmt-clean at HEAD (hundreds of diffs per file, connector_reads.rs already had 15 at HEAD), so fmt --check is not a usable gate. Not reformatted, per the rule against whole-file reformatting. | open |
+| D3-602 | W3-13 guard | follow-up | P2 | guard skipped: Builder test commands (go test, cargo test, vitest beyond the golden generation): not run, per the guard rules | open |
+| D3-603 | W3-13 guard | test-gap | P1 | still broken after the guard: EP-2-S4: no patch (builder blocked: wrong worktree base). Needs a re-run from model-plane. | open |
+| D3-604 | W3-13 guard | test-gap | P1 | still broken after the guard: EP-2-S8: no patch (builder blocked: worktree cut from 21d636a5a). Needs a re-run from model-plane. | open |
+| D3-605 | W3-13 guard | test-gap | P1 | still broken after the guard: EP-10-S1: no patch (builder blocked: worktree cut from 21d636a5a). Needs a re-run from model-plane. | open |
 
 ## Cross-wave
 

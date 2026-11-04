@@ -6473,6 +6473,7 @@ mod tests {
                     run_id: "run_p".into(),
                     plan_id: "plan_p".into(),
                     reason: String::new(),
+                    control_epoch: 0,
                 },
             )),
         };
@@ -6486,6 +6487,7 @@ mod tests {
                     run_id: "run_p".into(),
                     plan_id: "plan_p".into(),
                     reason: "control_returned".into(),
+                    control_epoch: 0,
                 },
             )),
         };
@@ -6601,6 +6603,7 @@ mod tests {
                     run_id: "run_x".into(),
                     plan_id: "plan_x".into(),
                     reason: String::new(),
+                    control_epoch: 0,
                 },
             )),
         };

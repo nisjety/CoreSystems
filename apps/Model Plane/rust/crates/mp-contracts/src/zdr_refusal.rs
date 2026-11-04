@@ -318,6 +318,10 @@ pub const FEATURES: &[Feature] = &[
         label: "browser tools",
     },
     Feature {
+        key: "browser_human_assist",
+        label: "browser help requests",
+    },
+    Feature {
         key: "translation",
         label: "translation",
     },

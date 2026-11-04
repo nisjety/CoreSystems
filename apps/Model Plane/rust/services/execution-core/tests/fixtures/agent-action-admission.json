@@ -1235,6 +1235,32 @@
       "zdr_allowed": false
     },
     {
+      "actionId": "integrations.list_connector_policies",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "read",
+      "exemptReason": "agent_cannot_self_govern",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:f270ce3314882116a3658b46b74f066d25d1cb319174556274afa0dcb806d4d6",
+      "zdr_allowed": false
+    },
+    {
+      "actionId": "integrations.set_connector_policy",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "external_write",
+      "exemptReason": "agent_cannot_self_govern",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:ebf28a0c7cc53fdd70627c845697f0fc60e4760ebe2bbff5ee7bb61996bf954a",
+      "zdr_allowed": false
+    },
+    {
       "actionId": "integrations.start_chatgpt_subscription",
       "registry": true,
       "access": "none",
@@ -2372,6 +2398,19 @@
       "executor": {},
       "hashBasis": "catalog_entry",
       "schemaHash": "sha256:4787ea52c0873062138d0f9cd77cc4b7873b879fd9f3b91ba44c8fe469d5cc9b",
+      "zdr_allowed": false
+    },
+    {
+      "actionId": "schedule.run_now",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "external_write",
+      "exemptReason": "agent_cannot_self_govern",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:1a588268dad9c87cb4ca9caff81a5fb67f9f14da8bf1881dce2f2f94b8812b43",
       "zdr_allowed": false
     },
     {

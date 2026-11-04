@@ -8524,12 +8524,16 @@ pub async fn run_tool_rounds_for_model_with_attachments(
     // The connected-account read is offered on a turn the person selected accounts for (WS23-S5). The
     // selection rides on the live sink, as the turn's clock does, so a caller without a sink offers nothing.
     let connector_turn = sink.and_then(crate::sse_events::RichEventSink::connector_turn);
+    // The org's connected-app policy may hold the read back to Do mode (EP-10-S7). It is read only on a turn
+    // that already offers the read, so every other turn makes no extra call.
     let connector_offered = connector_reads::offered(
         connector_reads::enabled(),
         zdr,
         !space_id.is_empty(),
         connector_turn,
-    );
+    ) && connector_reads::read_policy(state, org_id, user_id, capability_bearer)
+        .await
+        .admits_ask_loop();
     let tools = tools_for_connector_scope(tools, connector_offered);
     // The page reader is offered only where a fetched page can be parked, which a ZDR or waived turn never
     // can (see `external_parking_allowed`). With its switch off the list is left exactly as it was.

@@ -1621,6 +1621,23 @@
       "reason": "Refuses a ZDR or waived token before it runs (zdr_posture.rs DURABLE_MUTATIONS)."
     },
     {
+      "id": "mg:POST:/v1/cron/:id/run",
+      "kind": "route",
+      "plane": "model",
+      "service": "model-gateway",
+      "method": "POST",
+      "path": "/v1/cron/:id/run",
+      "handler": "http_routes.rs::run_cron_now_proxy",
+      "decision_type": "token_posture",
+      "min_role": "authenticated",
+      "zdr_class": "refuse",
+      "basis": "guard:proxy_to_capability_core",
+      "idempotency": "unspecified",
+      "flag": "CRON_RUN_NOW_ENABLED",
+      "payload_allow_list": [],
+      "reason": "Refuses a ZDR or waived token before it runs (zdr_posture.rs DURABLE_MUTATIONS); capability-core also refuses a ZDR principal and Control refuses ZDR at both fire decisions."
+    },
+    {
       "id": "mg:POST:/v1/documents",
       "kind": "route",
       "plane": "model",

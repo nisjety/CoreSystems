@@ -169,6 +169,13 @@ pub const FIELD_TREATMENTS: &[(&str, Treatment)] = &[
             "no tool loop runs on a ZDR turn, so no subagent takes a role; the catalogue is never built",
         ),
     ),
+    // EP-6 S9: the pinned agent version is read before the ZDR branch, so its allowlist and
+    // autonomy cap narrow a ZDR turn exactly as any other; only ids and the digest are logged.
+    ("agent_ref", Treatment::Honored),
+    ("agent_version", Treatment::Honored),
+    ("agent_digest", Treatment::Honored),
+    ("agent_tool_capability_ids", Treatment::Honored),
+    ("agent_autonomy_cap", Treatment::Honored),
 ];
 
 /// The feature strings the gateway reads, each with its treatment. A feature
@@ -283,6 +290,11 @@ pub fn invoke_field_names(request: &InvokeRequest) -> Vec<&'static str> {
         client_utc_offset_minutes: _,
         ui_locale: _,
         agent_roles: _,
+        agent_ref: _,
+        agent_version: _,
+        agent_digest: _,
+        agent_tool_capability_ids: _,
+        agent_autonomy_cap: _,
     } = request;
     vec![
         "content",
@@ -334,6 +346,11 @@ pub fn invoke_field_names(request: &InvokeRequest) -> Vec<&'static str> {
         "client_utc_offset_minutes",
         "ui_locale",
         "agent_roles",
+        "agent_ref",
+        "agent_version",
+        "agent_digest",
+        "agent_tool_capability_ids",
+        "agent_autonomy_cap",
     ]
 }
 

@@ -52,6 +52,7 @@ export type ZdrFeatureKey =
   | 'browser_run'
   | 'browser_run_control'
   | 'browser_tool'
+  | 'browser_human_assist'
   | 'translation'
   | 'document_analysis'
   | 'language_analysis'
@@ -186,6 +187,7 @@ export const FEATURE_LABELS: Record<ZdrFeatureKey, Copy> = {
   browser_run: { no: 'nettleserkjøringer', en: 'browser runs' },
   browser_run_control: { no: 'kontroll av nettleserkjøringer', en: 'browser run controls' },
   browser_tool: { no: 'nettleserverktøy', en: 'browser tools' },
+  browser_human_assist: { no: 'hjelpeforespørsler i nettleseren', en: 'browser help requests' },
   translation: { no: 'oversettelse', en: 'translation' },
   document_analysis: { no: 'dokumentanalyse', en: 'document analysis' },
   language_analysis: { no: 'språkanalyse', en: 'language analysis' },

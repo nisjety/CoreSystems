@@ -278,6 +278,7 @@ services:
       SPACE_HUMAN_MARKDOWN_UI: ${SPACE_HUMAN_MARKDOWN_UI:-true}
       SPACE_ROOM_FILES_API: ${SPACE_ROOM_FILES_API:-false}
       SPACE_ROOM_FILES_UI: ${SPACE_ROOM_FILES_UI:-false}
+      AGENT_VERSION_PINNING: ${AGENT_VERSION_PINNING:-false}
       SPACE_TURN_ATTACHMENTS_UI: ${SPACE_TURN_ATTACHMENTS_UI:-false}
       # WS13-S3: permission-checked message search + entry addresses (relayed to model-gateway, which has
       # its own SPACE_MESSAGE_SEARCH_API) and the feature report for the search, link, palette and fork UIs.

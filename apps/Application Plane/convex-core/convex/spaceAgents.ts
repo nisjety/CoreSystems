@@ -119,6 +119,8 @@ export const spaceAgentBindingsForGateway = query({
         triggerModes: binding.triggerModes,
         allowedTools: binding.allowedTools,
         approvalMode: binding.approvalMode,
+        // EP-6 S9: the agent version this binding pins; absent follows the published version.
+        pinnedVersion: binding.pinnedVersion,
         // WS08-S5: who may wake this agent. Absent means `members`; projection only, the
         // gateway enforces it on the mention path.
         respondTo: binding.respondTo,
