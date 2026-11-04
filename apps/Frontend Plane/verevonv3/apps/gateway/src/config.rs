@@ -202,6 +202,11 @@ pub(crate) struct SpaceFeatureFlags {
     /// Read once in `build_state`, and only the literal `true` turns it on: unlike the other Space flags
     /// it never defaults on in development, so every other value leaves the follow-up as it was.
     pub(crate) append_retrieval: bool,
+    /// `GATEWAY_SPACE_MEMORY_UI` (EP-8 S7): the Space memory routes (`GET /api/v1/spaces/{space_ref}/memory`,
+    /// `DELETE .../memory/{memory_id}`). Only the literal `true` turns it on, never by default in development.
+    /// Off answers 404 `feature_unavailable`. A rollout control, never an authorization input: Control's
+    /// `model.space.memory.manage` decision decides who may list or delete.
+    pub(crate) memory_ui: bool,
     /// `CHAT_LOCALE_HINT` (WS16-S6): stamp the viewer's interface language (`nb-NO` or `en-US`) on
     /// the model-bound body as the request-scoped `locale` field. Off removes the field, whatever
     /// the browser sent. A rollout control, never an authorization input: the field is a framing
@@ -471,6 +476,7 @@ impl SpaceFeatureFlags {
             mention_records_api: space_flag("SPACE_MENTION_RECORDS_API"),
             approval_scopes: space_flag("SPACE_APPROVAL_SCOPES_ENABLED"),
             append_retrieval: env::var("GATEWAY_SPACE_APPEND_RETRIEVAL").is_ok_and(|value| value == "true"),
+            memory_ui: env::var("GATEWAY_SPACE_MEMORY_UI").is_ok_and(|value| value == "true"),
             chat_locale_hint: space_flag("CHAT_LOCALE_HINT"),
             denials_typed: space_flag("SPACE_DENIALS_TYPED"),
             dm_api: space_flag("SPACE_DM_API"),

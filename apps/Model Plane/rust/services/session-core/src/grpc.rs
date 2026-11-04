@@ -14,6 +14,8 @@ use mp_contracts::dataplane::retrieval_v2::{
 };
 use mp_contracts::model_plane::v1::{
     self as pb,
+    approval_scope_grant_service_server::ApprovalScopeGrantServiceServer,
+    attention_service_server::AttentionServiceServer,
     finetune_jobs_server::FinetuneJobsServer,
     learning_governance_service_server::{LearningGovernanceService, LearningGovernanceServiceServer},
     managed_run_lifecycle_server::{ManagedRunLifecycle, ManagedRunLifecycleServer},
@@ -22,7 +24,9 @@ use mp_contracts::model_plane::v1::{
     message_search_server::MessageSearchServer,
     message_tree_service_server::MessageTreeServiceServer,
     orchestration_core_service_server::OrchestrationCoreServiceServer,
+    run_question_consume_service_server::RunQuestionConsumeServiceServer,
     routing_policy_server::RoutingPolicyServer,
+    run_ledger_service_server::RunLedgerServiceServer,
     run_service_server::RunServiceServer,
     session_core_server::{SessionCore, SessionCoreServer},
     session_retention_service_server::{SessionRetentionService, SessionRetentionServiceServer},
@@ -31,6 +35,7 @@ use mp_contracts::model_plane::v1::{
     space_history_service_server::SpaceHistoryServiceServer,
     space_room_read_service_server::SpaceRoomReadServiceServer,
     thread_autonomy_server::{ThreadAutonomy, ThreadAutonomyServer},
+    thread_fork_service_server::ThreadForkServiceServer,
 };
 use mp_contracts::run_origin::{RunOrigin, ORIGIN_METADATA_KEY};
 use mp_contracts::retention::{space_zdr_mode, SpaceZdrMode};
@@ -44,6 +49,7 @@ use tonic::transport::Channel;
 use tonic::{Request, Response, Status};
 use tracing::{info, warn};
 
+use crate::attention;
 use crate::auth::{
     authorize_operation, authorize_owner_housekeeping, authorize_owner_row,
     authorize_scheduled_step_service, authorize_space_deletion_service, authorize_system_run_owner,
@@ -60,7 +66,7 @@ use crate::terminalization;
 
 /// Standard gRPC health names registered on the unauthenticated health-only
 /// surface. Business RPCs remain independently intercepted.
-pub const HEALTH_SERVICE_NAMES: [&str; 13] = [
+pub const HEALTH_SERVICE_NAMES: [&str; 14] = [
     "model_plane.v1.SessionCore",
     "model_plane.v1.ManagedRunLifecycle",
     "model_plane.v1.OrchestrationCoreService",
@@ -74,6 +80,7 @@ pub const HEALTH_SERVICE_NAMES: [&str; 13] = [
     "model_plane.v1.SpaceEvents",
     "model_plane.v1.SpaceHistoryService",
     "model_plane.v1.SpaceAttention",
+    "model_plane.v1.EventLog",
 ];
 
 const RUN_STARTED_TYPE_URL: &str = "type.googleapis.com/model_plane.v1.RunStarted";
@@ -756,8 +763,9 @@ fn bucket_memory_segments(rows: Vec<(String, String)>) -> TopicBuckets {
     buckets
 }
 
+#[derive(Clone)]
 pub struct SessionService {
-    pool: PgPool,
+    pub(crate) pool: PgPool,
     retrieval_client: Option<RetrievalServiceClient<Channel>>,
     graph_client: Option<GraphServiceClient<Channel>>,
     knowledge_client: Option<KnowledgeServiceClient<Channel>>,
@@ -883,7 +891,7 @@ async fn authorize_thread_deletion_owner(
 /// is gone there is nothing left in Postgres to find that twin by. The caller
 /// propagates after commit — see [`crate::memory_erasure`] for why this is not
 /// done inside the transaction.
-async fn delete_thread_rows(
+pub(crate) async fn delete_thread_rows(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     thread_id: &str,
 ) -> Result<Vec<crate::memory_erasure::ErasedMemory>, Status> {
@@ -2386,9 +2394,14 @@ fn learned_skill_withheld(
         return None;
     }
     Some(match decision.reason {
-        MemoryReason::UserPaused | MemoryReason::UserOff | MemoryReason::ThreadOff => {
-            "memory_state"
-        }
+        // Thread containment is decided per thread and never by the owner's gate asked
+        // here; these arms only keep the match exhaustive, and withhold as a thread set
+        // off does.
+        MemoryReason::UserPaused
+        | MemoryReason::UserOff
+        | MemoryReason::ThreadOff
+        | MemoryReason::SpaceScope
+        | MemoryReason::AgentRunScope => "memory_state",
         MemoryReason::Zdr => "zdr",
         // `On` with learning refused is the organization not having opted in.
         MemoryReason::On | MemoryReason::OrgDisabled | MemoryReason::PolicyUnavailable => {
@@ -3592,6 +3605,208 @@ pub(crate) fn verify_run_control_space_decision(
         space_id,
         run_id,
         idempotency_key,
+        &key_id,
+        key,
+        now,
+    )
+}
+
+/// The Control action, schema and sole permission of a Space memory decision (EP-8 S7). Control
+/// issues it only to the Space's owner or admin; it is disjoint from every thread, run-control,
+/// wake and approval decision in both directions, so no other token lists or deletes room memory.
+pub(crate) const CONTROL_SPACE_MEMORY_ACTION: &str = "model.space.memory.manage";
+pub(crate) const CONTROL_SPACE_MEMORY_SCHEMA: &str = "sha256:space-memory-manage-v1";
+pub(crate) const SPACE_MEMORY_PERMISSION: &str = "memory:manage";
+/// The two operations a Space memory decision binds.
+pub(crate) const SPACE_MEMORY_OPERATION_LIST: &str = "list";
+pub(crate) const SPACE_MEMORY_OPERATION_DELETE: &str = "delete";
+
+/// What a verified Space memory decision tells the reader: the Space's audience as Control signed
+/// it now, so the owner's list can mark the rows a current member is not shown, and the
+/// zero-retention claim.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct VerifiedSpaceMemoryManage {
+    pub(crate) recipient_audience_hash: String,
+    pub(crate) zero_data_retention: bool,
+}
+
+/// Recompute Control's `model.space.memory.manage` payload digest from the claims plus the request's
+/// own operation and memory id (empty for a list). Binds a delete token to the one row it was issued
+/// for, so a list token never deletes and one delete token never deletes another row.
+fn space_memory_payload_digest(
+    claims: &ControlSpaceDecisionClaims,
+    operation: &str,
+    memory_id: &str,
+) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"model.space.memory.manage\0v1\0");
+    for (name, value) in [
+        ("org_id", claims.org_id.as_str()),
+        ("user_id", claims.subject_id.as_str()),
+        ("space_id", claims.space_ref.as_str()),
+        ("space_decision_ref", claims.decision_ref.as_str()),
+        (
+            "recipient_audience_ref",
+            claims.recipient_audience_ref.as_str(),
+        ),
+        (
+            "recipient_audience_hash",
+            claims.recipient_audience_hash.as_str(),
+        ),
+        ("privacy_policy_ref", claims.privacy_policy_ref.as_str()),
+        (
+            "resource_authorization_ref",
+            claims.resource_authorization_ref.as_str(),
+        ),
+        ("operation", operation),
+        ("memory_id", memory_id),
+        ("action_schema_hash", CONTROL_SPACE_MEMORY_SCHEMA),
+        ("idempotency_key", claims.idempotency_key.as_str()),
+    ] {
+        digest.update(name.as_bytes());
+        digest.update([0]);
+        digest.update((value.len() as u64).to_be_bytes());
+        digest.update(value.as_bytes());
+    }
+    digest.update(b"authority_revision\0");
+    digest.update(claims.authority_revision.to_be_bytes());
+    digest.update(b"recipient_audience_revision\0");
+    digest.update(claims.recipient_audience_revision.to_be_bytes());
+    format!("sha256:{:x}", digest.finalize())
+}
+
+#[allow(clippy::result_large_err)]
+#[allow(clippy::too_many_arguments)]
+fn verify_space_memory_decision_with_key(
+    token: &str,
+    decision_ref: &str,
+    org_id: &str,
+    user_id: &str,
+    space_id: &str,
+    operation: &str,
+    memory_id: &str,
+    expected_key_id: &str,
+    key: &VerifyingKey,
+    now: DateTime<Utc>,
+) -> Result<VerifiedSpaceMemoryManage, Status> {
+    const DENIED: &str = "Control Space decision does not authorize this Space memory request";
+    if token.len() > MAX_CONTROL_SPACE_DECISION_TOKEN_BYTES {
+        return Err(Status::invalid_argument(
+            "Control Space memory decision is too large",
+        ));
+    }
+    let parts: Vec<&str> = token.split('.').collect();
+    if parts.len() != 4 || parts[0] != CONTROL_SPACE_DECISION_VERSION {
+        return Err(Status::permission_denied(DENIED));
+    }
+    URL_SAFE_NO_PAD
+        .decode(parts[1])
+        .ok()
+        .and_then(|raw| String::from_utf8(raw).ok())
+        .filter(|id| !id.trim().is_empty() && id == expected_key_id)
+        .ok_or_else(|| Status::permission_denied("untrusted Control Space decision key"))?;
+    let payload = URL_SAFE_NO_PAD
+        .decode(parts[2])
+        .map_err(|_| Status::permission_denied(DENIED))?;
+    let signature = URL_SAFE_NO_PAD
+        .decode(parts[3])
+        .ok()
+        .and_then(|raw| Signature::from_slice(&raw).ok())
+        .ok_or_else(|| Status::permission_denied(DENIED))?;
+    key.verify(
+        format!("{}.{}.{}", parts[0], parts[1], parts[2]).as_bytes(),
+        &signature,
+    )
+    .map_err(|_| Status::permission_denied(DENIED))?;
+    let claims: ControlSpaceDecisionClaims =
+        serde_json::from_slice(&payload).map_err(|_| Status::permission_denied(DENIED))?;
+
+    // Exactly the one permission: a read, append, run-control, wake or approval token carries another
+    // and fails here, and this token carries no thread permission.
+    let matches_request = claims.decision_ref == decision_ref
+        && claims.org_id == org_id
+        && claims.subject_id == user_id
+        && claims.space_ref == space_id
+        && claims.service_audience == CONTROL_SPACE_DECISION_AUDIENCE
+        && claims.action_id == CONTROL_SPACE_MEMORY_ACTION
+        && claims.action_schema_hash == CONTROL_SPACE_MEMORY_SCHEMA
+        && claims.payload_digest == space_memory_payload_digest(&claims, operation, memory_id)
+        && claims.permissions.len() == 1
+        && claims.permissions[0] == SPACE_MEMORY_PERMISSION;
+    if !matches_request {
+        return Err(Status::permission_denied(DENIED));
+    }
+    let privacy_complete = [
+        claims.purpose.as_str(),
+        claims.lawful_basis.as_str(),
+        claims.privacy_class.as_str(),
+        claims.retention_class.as_str(),
+        claims.residency.as_str(),
+        claims.deletion_scope.as_str(),
+    ]
+    .iter()
+    .all(|value| !value.trim().is_empty());
+    if !privacy_complete
+        || claims.nonce.trim().is_empty()
+        || claims.recipient_audience_ref.trim().is_empty()
+        || claims.recipient_audience_hash.trim().is_empty()
+        || claims.recipient_audience_revision == 0
+        || claims.issued_at > now + chrono::Duration::minutes(1)
+        || claims.expires_at <= now
+    {
+        return Err(Status::permission_denied(
+            "Control Space memory decision is expired or incomplete",
+        ));
+    }
+    Ok(VerifiedSpaceMemoryManage {
+        recipient_audience_hash: claims.recipient_audience_hash,
+        zero_data_retention: claims.zero_data_retention,
+    })
+}
+
+/// Key lookup and verification of the Control `model.space.memory.manage` decision that lets a
+/// Space's owner or admin list (`operation = list`, empty `memory_id`) or delete one row of the
+/// Space's memory (EP-8 S7). Bound to the caller, org, Space, operation and row; Session Core is the
+/// authority, the gateway and the BFF only carry it.
+#[allow(clippy::result_large_err)]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn verify_space_memory_decision(
+    token: &str,
+    decision_ref: &str,
+    org_id: &str,
+    user_id: &str,
+    space_id: &str,
+    operation: &str,
+    memory_id: &str,
+    now: DateTime<Utc>,
+) -> Result<VerifiedSpaceMemoryManage, Status> {
+    if token.trim().is_empty() || decision_ref.trim().is_empty() || space_id.trim().is_empty() {
+        return Err(Status::permission_denied(
+            "Space memory requires a Control Space memory decision",
+        ));
+    }
+    if user_id.trim().is_empty() {
+        return Err(Status::permission_denied(
+            "Space memory requires an authenticated user subject",
+        ));
+    }
+    let keys = configured_control_space_decision_keys()?;
+    let key_id = token
+        .split('.')
+        .nth(1)
+        .and_then(|part| URL_SAFE_NO_PAD.decode(part).ok())
+        .and_then(|raw| String::from_utf8(raw).ok())
+        .filter(|id| !id.trim().is_empty())
+        .ok_or_else(|| Status::permission_denied("untrusted Control Space decision key"))?;
+    let key = crate::decision_keys::lookup_key(&keys, &key_id)?;
+    verify_space_memory_decision_with_key(
+        token,
+        decision_ref,
+        org_id,
+        user_id,
+        space_id,
+        operation,
+        memory_id,
         &key_id,
         key,
         now,
@@ -5059,6 +5274,21 @@ pub(crate) async fn append_message_in_tx_as(
         crate::space::memory_scope::thread_is_contained(thread.2.as_deref(), space_kind.as_deref());
     let candidates = if conversation_only || post_kind == "post" { Vec::new() } else if contained {
         crate::space::memory_scope::record_contained("append_extract");
+        // EP-8 S6: with Space memory switched on, what the room states is kept for the room
+        // (`scope = 'space'`, stamped with this message's audience), never for its owner; off, the
+        // writer returns before reading anything. Either way no personal candidate exists here.
+        crate::space_memory::write_inline(
+            crate::space_memory::enabled(),
+            tx,
+            &thread.0,
+            &thread.1,
+            &req.thread_id,
+            &msg_id,
+            &req.role,
+            &req.content,
+        )
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?;
         Vec::new()
     } else {
         crate::dreaming::extract_memory_candidates(&req.role, &req.content, &req.thread_id)
@@ -5066,7 +5296,8 @@ pub(crate) async fn append_message_in_tx_as(
     // A paused or off user, or a thread set off, learns nothing from this turn:
     // no candidate is persisted and none reaches the Letta mirror. Asked under the
     // user's row lock, which `persist_candidates` takes again, so the pause cannot
-    // land between the two.
+    // land between the two. A Space room and an agent run's thread are contained by
+    // the same gate (`memory_control::thread_containment`), whatever the user chose.
     let candidates = if candidates.is_empty() {
         candidates
     } else if crate::memory_control::resolve_in_tx_for_thread(
@@ -6682,7 +6913,7 @@ async fn record_run_terminal(
 /// Core of `SessionCore::complete_step`, factored out to keep the trait method
 /// small. Appends the `STEP_COMPLETED` event and, on a terminal status, the
 /// run-terminal event + status flip, all in one tx.
-async fn complete_step_inner(
+pub(crate) async fn complete_step_inner(
     pool: &PgPool,
     audit_publisher: Option<&crate::audit_publisher::AuditOutbox>,
     req: pb::CompleteStepRequest,
@@ -6836,6 +7067,13 @@ async fn enqueue_tool_action_audit(
     };
 
     let tool = crate::audit_publisher::resolve_tool_name(&detail, &req.step_id);
+    // WS11.S7: a COMPLETED step of a web, browser or third-party-MCP tool taints the run (and its
+    // ancestors) in the same transaction as the step; a failed one read nothing from outside.
+    if req.status == "completed" && crate::external_content::is_external_content_tool(&tool) {
+        crate::external_content::mark_external_content(tx, &req.run_id)
+            .await
+            .map_err(|error| Status::internal(error.to_string()))?;
+    }
     let body = crate::audit_publisher::build_tool_action_body(
         &org_id,
         &user_id,
@@ -7026,6 +7264,14 @@ pub(crate) async fn reserve_tool_action_inner(
         return Err(Status::already_exists(
             "tool action identity is bound to different immutable input",
         ));
+    }
+
+    // WS11.S7: the inline loop has no CompleteStep, so the reservation (before the tool runs, which
+    // also marks a call that later fails: the conservative side) taints the run and its ancestors.
+    if crate::external_content::is_external_content_tool(&req.tool) {
+        crate::external_content::mark_external_content(&mut tx, &req.run_id)
+            .await
+            .map_err(|error| Status::internal(error.to_string()))?;
     }
 
     let detail = tool_action_detail(&req.tool, &req.data_category, req.zdr);
@@ -7360,6 +7606,7 @@ fn replay_event_row_to_proto(row: ReplayEventRow) -> pb::Event {
             value: serde_json::to_vec(&payload).unwrap_or_default(),
         }),
         zdr: false,
+        ..Default::default()
     }
 }
 
@@ -7807,7 +8054,7 @@ async fn get_context_assembly_inner(
             .map_err(|e| Status::internal(e.to_string()))?;
 
     let thread_messages = load_thread_messages(&svc.pool, &thread_id).await?;
-    let memory_rows = load_context_memory_rows(
+    let mut memory_rows = load_context_memory_rows(
         svc,
         retention,
         &thread_id,
@@ -7815,6 +8062,20 @@ async fn get_context_assembly_inner(
         &thread_messages,
     )
     .await?;
+    // EP-8 S10: on a run a verified wake addressed to a bound agent, that agent's own notes for
+    // this Space, quoted, in the episodic bucket below every instruction layer. A ZDR or waived
+    // credential reads none; off, nothing is queried.
+    if crate::space_memory::agent_enabled() && retention == MemoryRetention::Durable && !run_id.is_empty() {
+        let mut agent_notes = crate::space_memory::recall_agent_memory(
+            &svc.pool,
+            &thread_id,
+            &run_id,
+            crate::dreaming::AGENT_MEMORY_CONTEXT_LIMIT,
+        )
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?;
+        memory_rows.append(&mut agent_notes);
+    }
     let memory = bucket_memory_segments(memory_rows);
 
     let evidence = svc
@@ -9356,6 +9617,7 @@ impl SessionCore for SessionService {
                 starred: bool,
                 unread: bool,
                 last_read_at: DateTime<Utc>,
+                forked_from_thread_id: Option<String>,
                 // {reply_count, last_author}: one JSON column so the row stays a flat struct.
                 reply_stats: Option<serde_json::Value>,
             }
@@ -9366,7 +9628,8 @@ impl SessionCore for SessionService {
                            t.origin, t.user_id, t.persona_enabled, t.archived_at,
                            (t.starred_at IS NOT NULL) AS starred,
                            (t.last_assistant_at IS NOT NULL AND t.last_assistant_at > t.last_read_at) AS unread,
-                           t.last_read_at
+                           t.last_read_at,
+                           t.forked_from_thread_id
                     FROM threads t
                     WHERE t.org_id = $1
                       AND ($6::BIGINT IS NULL
@@ -9409,6 +9672,7 @@ impl SessionCore for SessionService {
                     page.starred,
                     page.unread,
                     page.last_read_at,
+                    page.forked_from_thread_id,
                     jsonb_build_object('reply_count', reply_stats.reply_count,
                                        'last_author', reply_stats.last_author) AS reply_stats
                  FROM page
@@ -9497,7 +9761,7 @@ impl SessionCore for SessionService {
             };
             rows.truncate(page_size);
 
-            let threads = rows
+            let mut threads: Vec<pb::ThreadSummary> = rows
                 .into_iter()
                 .map(
                     |row| {
@@ -9520,6 +9784,7 @@ impl SessionCore for SessionService {
                             starred,
                             unread,
                             last_read_at,
+                            forked_from_thread_id,
                             reply_stats,
                         } = row;
                         let fallback_title = if session_key.trim().is_empty() {
@@ -9550,6 +9815,10 @@ impl SessionCore for SessionService {
                             starred,
                             unread,
                             last_read_at: Some(to_proto_timestamp(last_read_at)),
+                            forked_from_thread_id: forked_from_thread_id.unwrap_or_default(),
+                            attention_state: pb::AttentionState::Unspecified as i32,
+                            attention_since: None,
+                            attention_unseen: false,
                             reply_count: reply_stats
                                 .as_ref()
                                 .and_then(|stats| stats["reply_count"].as_u64())
@@ -9566,6 +9835,11 @@ impl SessionCore for SessionService {
                     },
                 )
                 .collect();
+            // The attention fields are a post-step on the rows already read: one batched read of
+            // the pending rows, and nothing at all while the switch is off (WS16 S1).
+            if attention::enabled() {
+                attention::enrich(&self.pool, &req.org_id, &mut threads).await?;
+            }
 
             Ok(Response::new(pb::ListThreadsResponse {
                 threads,
@@ -10148,6 +10422,26 @@ impl SessionCore for SessionService {
                 .execute(&mut *tx)
                 .await
                 .map_err(|error| Status::internal(error.to_string()))?;
+            }
+            // EP-8 S7: the room's own memory and its agents' memory go with the Space, in the same
+            // transaction. These rows are the Space's, not any thread's (owner ''), so the thread
+            // loop above never reaches them; they have no Letta copy (EP-8 S6), so no receipt.
+            // Compared by prefix, not LIKE, so a Space id holding '%' or '_' matches only itself.
+            let erased_space_memory = sqlx::query(
+                "DELETE FROM agent_memory
+                 WHERE org_id = $1
+                   AND ((scope = 'space' AND scope_id = $2)
+                     OR (scope = 'agent' AND left(scope_id, length($2) + 1) = $2 || ':'))",
+            )
+            .bind(&req.org_id)
+            .bind(&req.space_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| Status::internal(error.to_string()))?
+            .rows_affected();
+            if erased_space_memory > 0 {
+                metrics::counter!("mp_session_space_memory_erased_total", "op" => "space_deletion")
+                    .increment(erased_space_memory);
             }
             tx.commit()
                 .await
@@ -11237,7 +11531,7 @@ pub(crate) fn assemble_segments(inputs: &AssemblyInputs) -> (Vec<pb::ContextSegm
     (segments, total)
 }
 
-fn event_type_to_i32(s: &str) -> i32 {
+pub(crate) fn event_type_to_i32(s: &str) -> i32 {
     match s {
         "SESSION_START" => 1,
         "SESSION_END" => 2,
@@ -11255,6 +11549,17 @@ fn event_type_to_i32(s: &str) -> i32 {
         "BROWSER_ACTION_APPROVAL_REQUIRED" => 144,
         "BROWSER_ACTION_DECIDED" => 145,
         "APPROVAL_CONTINUATION_VERIFIED" => 146,
+        // Run-trace events (WS10.S2); names are the proto enum without EVENT_TYPE_.
+        "BROWSER_SESSION_OPENED" => 150,
+        "BROWSER_SESSION_CLOSED" => 151,
+        "BROWSER_CONTROL_CHANGED" => 152,
+        "BROWSER_TAB_CHANGED" => 153,
+        "BROWSER_STEP_RECEIPT_RECORDED" => 154,
+        "BROWSER_EGRESS_DECIDED" => 155,
+        "BROWSER_ARTIFACT_RECORDED" => 156,
+        "BROWSER_ATTACH_SHARED_JAR" => 160,
+        // EP-14 S5: a run's content-free timing record (run_ledger_grpc.rs).
+        "RUN_TIMING_RECORDED" => 161,
         _ => 0,
     }
 }
@@ -11351,6 +11656,16 @@ pub async fn serve(
         }
     };
 
+    // Standing approval scopes refuse to boot without their audit rows (build plan K3-2), rather
+    // than failing each grant call at run time.
+    crate::orchestration_grpc::check_scope_grant_startup().map_err(anyhow::Error::msg)?;
+    // The grant service (build plan WS13 S6) shares the store but never the event replay, so it
+    // gets its own instance.
+    let approval_scope_grants =
+        crate::orchestration_grpc::OrchestrationGrpc::new(pool.clone(), events_tx.clone());
+    // The resume-answer spend (build plan WS14 S5) likewise shares the store and not the replay.
+    let run_question_consume =
+        crate::orchestration_grpc::OrchestrationGrpc::new(pool.clone(), events_tx.clone());
     let orchestration =
         crate::orchestration_grpc::OrchestrationGrpc::new_from_env(pool.clone(), events_tx).await;
 
@@ -11362,10 +11677,14 @@ pub async fn serve(
     // `routing_policy` JSONB row in this same Postgres; the BFF writes and
     // inference-core polls it.
     let routing = crate::routing_policy_grpc::RoutingPolicyService::new(pool.clone());
+    // EP-14 S6: the request snapshot writer (refuses unless SESSION_CORE_REQUEST_SNAPSHOTS_ENABLED).
+    let run_ledger = crate::run_ledger_grpc::RunLedgerGrpc::new(pool.clone());
     // Run read model + cancel path for the runs-history UI. Owns the `runs` +
     // `events` tables in this same Postgres (read-only here, plus the cancel
     // status flip).
     let runs = crate::run_service_grpc::RunServiceImpl::new(pool.clone());
+    // Run-trace read path (WS10.S6): QueryEvents over `run_trace_events`.
+    let event_log_pool = pool.clone();
 
     // Tool-action intent is committed to Postgres with the step. The outbox
     // reconnects and retries NATS delivery independently.
@@ -11395,6 +11714,7 @@ pub async fn serve(
         enabled: crate::message_search::message_search_enabled(),
     };
     let message_tree = crate::message_tree::MessageTreeGrpc { pool: pool.clone() };
+    let thread_fork = crate::thread_fork::ThreadForkGrpc { pool: pool.clone() };
 
     // Space event stream (WS02-S3): its own small read pool, built before `pool` moves.
     let space_events = crate::space_stream_grpc::SpaceEventsGrpc::new(pool.clone(), space_wakes);
@@ -11427,7 +11747,8 @@ pub async fn serve(
 
     tonic::transport::Server::builder()
         .add_service(health_service)
-        .add_service(SessionCoreServer::with_interceptor(session, auth.clone()))
+        .add_service(SessionCoreServer::with_interceptor(session.clone(), auth.clone()))
+        .add_service(AttentionServiceServer::with_interceptor(session, auth.clone()))
         .add_service(ManagedRunLifecycleServer::with_interceptor(
             managed_lifecycle,
             auth.clone(),
@@ -11436,9 +11757,19 @@ pub async fn serve(
             orchestration,
             auth.clone(),
         ))
+        // WS14-S5: the single-use spend of a resume question's answer.
+        .add_service(RunQuestionConsumeServiceServer::with_interceptor(
+            run_question_consume,
+            auth.clone(),
+        ))
+        .add_service(ApprovalScopeGrantServiceServer::with_interceptor(
+            approval_scope_grants,
+            auth.clone(),
+        ))
         .add_service(FinetuneJobsServer::with_interceptor(finetune, auth.clone()))
         .add_service(MemoryServiceServer::with_interceptor(memory, auth.clone()))
         .add_service(RoutingPolicyServer::with_interceptor(routing, auth.clone()))
+        .add_service(RunLedgerServiceServer::with_interceptor(run_ledger, auth.clone()))
         .add_service(SessionRetentionServiceServer::with_interceptor(
             retention,
             auth.clone(),
@@ -11453,6 +11784,10 @@ pub async fn serve(
         ))
         .add_service(MessageTreeServiceServer::with_interceptor(
             message_tree,
+            auth.clone(),
+        ))
+        .add_service(ThreadForkServiceServer::with_interceptor(
+            thread_fork,
             auth.clone(),
         ))
         .add_service(LearningGovernanceServiceServer::with_interceptor(
@@ -11483,6 +11818,10 @@ pub async fn serve(
         ))
         .add_service(MessageRevisionServiceServer::with_interceptor(
             crate::space::revisions::MessageRevisionGrpc::new(message_revision_pool, letta_for_revisions),
+            auth.clone(),
+        ))
+        .add_service(crate::eventlog_grpc::EventLogServer::with_interceptor(
+            crate::eventlog_grpc::EventLogService::new(event_log_pool),
             auth.clone(),
         ))
         .add_service(RunServiceServer::with_interceptor(runs, auth))
@@ -11700,6 +12039,12 @@ fn validate_grant_plan_id(plan_id: &str, grant_stated: bool) -> Result<(), Statu
     Ok(())
 }
 
+/// The refusal of an approve-then-execute bind that finds no live grant naming its plan
+/// (WS14 S2). The message is the typed code the gateway maps to `plan_grant_unavailable`.
+fn plan_grant_unavailable() -> Status {
+    Status::failed_precondition("plan_grant_unavailable")
+}
+
 /// Record an approved grant on its thread, inside the caller's transaction. The newest
 /// approval replaces the previous one, exactly as the gateway's in-memory grant did, and
 /// the expiry is counted from now by the database clock. Org-scoped: a thread of another
@@ -11825,6 +12170,86 @@ impl ThreadAutonomy for ThreadAutonomyGrpc {
         }
         .await;
         record_metrics("get_thread_grant", started, result.is_ok());
+        result
+    }
+
+    /// WS14 S2, approve then execute: copies the thread's live grant onto the run that executes
+    /// the plan it was approved with. One statement does the whole bind, so the rung is always
+    /// the one the thread holds and never one the caller stated, and the run record gets it only
+    /// while the thread still names exactly that plan and the grant has not lapsed.
+    async fn bind_grant_to_run(
+        &self,
+        request: Request<pb::BindGrantToRunRequest>,
+    ) -> Result<Response<pb::BindGrantToRunResponse>, Status> {
+        let started = Instant::now();
+        let result: Result<Response<pb::BindGrantToRunResponse>, Status> = async {
+            let caller = identity(&request)?;
+            authorize_operation(&caller, "session:write")?;
+            // A grant is a durable record, which a zero-retention or waived credential never
+            // writes (the same refusal as `record_run_context`).
+            if caller.zdr() || caller.zdr_waiver().is_some() {
+                return Err(Refusal::DURABLE_MUTATION_FORBIDDEN
+                    .grpc_status(tonic::Code::FailedPrecondition));
+            }
+            let req = request.into_inner();
+            if req.run_id.is_empty() || req.thread_id.is_empty() || req.org_id.is_empty() {
+                return Err(Status::invalid_argument("run_id, thread_id and org_id are required"));
+            }
+            if req.approved_plan_id.is_empty() {
+                return Err(Status::invalid_argument("approved_plan_id is required"));
+            }
+            validate_grant_plan_id(&req.approved_plan_id, true)?;
+            caller.authorize_org(&req.org_id)?;
+            authorize_run_owner(&self.pool, &caller, &req.run_id, OwnerIntent::Mutate).await?;
+            // Without the 0050 columns the thread holds no grant to bind, and the statement below
+            // must not name a column that is not there.
+            if !self.grant_columns.records_grants() {
+                return Err(plan_grant_unavailable());
+            }
+            // The run takes the grant only where the thread is the run's own and of the same org,
+            // the thread still names the plan, and the grant has not lapsed (the database clock,
+            // as `record_thread_grant` counts it). `||` merges, so the run's other keys are kept.
+            let bound: Option<(Option<String>, Option<String>, Option<String>)> = sqlx::query_as(
+                "UPDATE runs AS r
+                    SET metadata = COALESCE(r.metadata, '{}'::jsonb) || jsonb_build_object(
+                            'autonomy_rung', t.granted_rung,
+                            'autonomy_justification', t.granted_justification,
+                            'approved_plan_id', t.granted_plan_id,
+                            'grant_bound_at', $5::text),
+                        updated_at = now()
+                   FROM threads AS t
+                  WHERE r.id = $1 AND r.org_id = $2 AND r.thread_id = $3
+                    AND t.id = r.thread_id AND t.org_id = r.org_id
+                    AND t.granted_plan_id = $4 AND t.granted_expires_at > now()
+                  RETURNING t.granted_rung, t.granted_justification, t.granted_plan_id",
+            )
+            .bind(&req.run_id)
+            .bind(&req.org_id)
+            .bind(&req.thread_id)
+            .bind(&req.approved_plan_id)
+            .bind(Utc::now().to_rfc3339())
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|e| {
+                warn!(error = %e, "bind_grant_to_run failed");
+                Status::internal(e.to_string())
+            })?;
+            let Some((rung, justification, plan_id)) = bound else {
+                return Err(plan_grant_unavailable());
+            };
+            let granted_rung = rung
+                .as_deref()
+                .and_then(mp_contracts::autonomy::rung_from_keyword)
+                .filter(|rung| *rung != pb::AutonomyRung::Unspecified)
+                .ok_or_else(plan_grant_unavailable)?;
+            Ok(Response::new(pb::BindGrantToRunResponse {
+                granted_rung: granted_rung as i32,
+                justification: justification.unwrap_or_default(),
+                approved_plan_id: plan_id.unwrap_or_default(),
+            }))
+        }
+        .await;
+        record_metrics("bind_grant_to_run", started, result.is_ok());
         result
     }
 }
@@ -12399,6 +12824,9 @@ mod tests {
         DEFAULT_RESIDENCY, HEALTH_SERVICE_NAMES, MAX_USER_CHECKPOINT_ID_BYTES,
         MAX_USER_CHECKPOINT_STATE_BYTES, MESSAGE_APPENDED_TYPE_URL, STEP_COMPLETED_TYPE_URL,
         THREAD_ORIGINS, THREAD_TITLE_MAX_CHARS, ZDR_MEMORY_READ_SUPPRESSED,
+        space_memory_payload_digest, verify_space_memory_decision_with_key,
+        CONTROL_SPACE_MEMORY_ACTION, CONTROL_SPACE_MEMORY_SCHEMA, SPACE_MEMORY_OPERATION_DELETE,
+        SPACE_MEMORY_OPERATION_LIST, SPACE_MEMORY_PERMISSION,
     };
     use crate::auth::{SPACE_DELETION_SCOPE, SPACE_DELETION_SERVICE};
     use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
@@ -12427,6 +12855,29 @@ mod tests {
             assert_eq!(kind, pb::EventType::Unspecified, "{stored}");
             assert_eq!(kind.as_str_name(), "EVENT_TYPE_UNSPECIFIED", "{stored}");
         }
+    }
+
+    #[test]
+    fn event_type_to_i32_knows_the_trace_types() {
+        let names = [
+            "BROWSER_SESSION_OPENED",
+            "BROWSER_SESSION_CLOSED",
+            "BROWSER_CONTROL_CHANGED",
+            "BROWSER_TAB_CHANGED",
+            "BROWSER_STEP_RECEIPT_RECORDED",
+            "BROWSER_EGRESS_DECIDED",
+            "BROWSER_ARTIFACT_RECORDED",
+            "BROWSER_ATTACH_SHARED_JAR",
+        ];
+        for name in names {
+            let n = super::event_type_to_i32(name);
+            assert_ne!(n, 0, "{name} must map to a real EventType");
+            let kind = pb::EventType::try_from(n).expect("a valid EventType");
+            assert_eq!(kind.as_str_name(), format!("EVENT_TYPE_{name}"));
+        }
+        assert_eq!(super::event_type_to_i32("BROWSER_STEP_RECEIPT_RECORDED"), 154);
+        // A name the Model Plane has not allocated still reads as unspecified.
+        assert_eq!(super::event_type_to_i32("BROWSER_NOT_A_TYPE"), 0);
     }
 
     #[test]
@@ -14205,6 +14656,179 @@ mod tests {
         (token, decision_ref, key_id)
     }
 
+    /// Mint a signed `model.space.memory.manage` decision (EP-8 S7) the way Control would, bound
+    /// to `operation` and `memory_id`.
+    fn signed_space_memory_decision(
+        signing_key: &SigningKey,
+        now: DateTime<Utc>,
+        permissions: &[&str],
+        operation: &str,
+        memory_id: &str,
+    ) -> (String, String, String) {
+        let key_id = "control-test-key".to_owned();
+        let key_part = URL_SAFE_NO_PAD.encode(key_id.as_bytes());
+        let decision_ref = "memory-decision-1".to_owned();
+        let mut claims = serde_json::json!({
+            "decision_ref": decision_ref,
+            "org_id": "org-1",
+            "space_ref": "space-room",
+            "subject_id": "user-1",
+            "service_audience": CONTROL_SPACE_DECISION_AUDIENCE,
+            "action_id": CONTROL_SPACE_MEMORY_ACTION,
+            "action_schema_hash": CONTROL_SPACE_MEMORY_SCHEMA,
+            "payload_digest": "",
+            "idempotency_key": "space-memory-1",
+            "recipient_audience_ref": "audience:space-room:4",
+            "recipient_audience_hash": "sha256:test-audience",
+            "privacy_policy_ref": "privacy:org-1:5",
+            "resource_authorization_ref": "control:space-room:memory:7",
+            "purpose": "assistant_collaboration",
+            "lawful_basis": "contract",
+            "privacy_class": "internal",
+            "third_party_processing_allowed": false,
+            "retention_class": "standard",
+            "residency": "swedencentral",
+            "deletion_scope": "space",
+            "zero_data_retention": false,
+            "nonce": "nonce-1",
+            "authority_revision": 7,
+            "membership_revision": 4,
+            "privacy_revision": 5,
+            "recipient_audience_revision": 4,
+            "entitlement_revision": 3,
+            "permissions": permissions,
+            "issued_at": now.to_rfc3339(),
+            "expires_at": (now + chrono::Duration::minutes(1)).to_rfc3339(),
+        });
+        let parsed: ControlSpaceDecisionClaims =
+            serde_json::from_value(claims.clone()).expect("claims fixture");
+        claims["payload_digest"] =
+            serde_json::json!(space_memory_payload_digest(&parsed, operation, memory_id));
+        let encoded = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims).expect("claims"));
+        let signed = format!("{CONTROL_SPACE_DECISION_VERSION}.{key_part}.{encoded}");
+        let signature = signing_key.sign(signed.as_bytes());
+        let token = format!("{signed}.{}", URL_SAFE_NO_PAD.encode(signature.to_bytes()));
+        (token, decision_ref, key_id)
+    }
+
+    /// The Space owner's list token admits exactly its caller, Space and operation, and carries the
+    /// Space's current audience for the withheld marks.
+    #[test]
+    fn space_memory_decision_binds_subject_space_operation_and_row() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-11-03T12:00:00Z")
+            .expect("test time")
+            .with_timezone(&Utc);
+        let signing_key = SigningKey::from_bytes(&[41_u8; 32]);
+        let verify = |token: &str, decision_ref: &str, key_id: &str, user: &str, space: &str, op: &str, id: &str, at| {
+            verify_space_memory_decision_with_key(
+                token,
+                decision_ref,
+                "org-1",
+                user,
+                space,
+                op,
+                id,
+                key_id,
+                &signing_key.verifying_key(),
+                at,
+            )
+        };
+        let (list, list_ref, key_id) = signed_space_memory_decision(
+            &signing_key,
+            now,
+            &[SPACE_MEMORY_PERMISSION],
+            SPACE_MEMORY_OPERATION_LIST,
+            "",
+        );
+        let verified = verify(&list, &list_ref, &key_id, "user-1", "space-room", SPACE_MEMORY_OPERATION_LIST, "", now)
+            .expect("the owner's list decision verifies");
+        assert_eq!(verified.recipient_audience_hash, "sha256:test-audience");
+        assert!(!verified.zero_data_retention);
+        for (user, space, op, id, why) in [
+            ("user-2", "space-room", SPACE_MEMORY_OPERATION_LIST, "", "another subject"),
+            ("user-1", "space-other", SPACE_MEMORY_OPERATION_LIST, "", "another Space"),
+            ("user-1", "space-room", SPACE_MEMORY_OPERATION_DELETE, "mem-1", "a delete with a list token"),
+        ] {
+            assert_eq!(
+                verify(&list, &list_ref, &key_id, user, space, op, id, now).expect_err(why).code(),
+                tonic::Code::PermissionDenied,
+                "{why}"
+            );
+        }
+        let (delete, delete_ref, _) = signed_space_memory_decision(
+            &signing_key,
+            now,
+            &[SPACE_MEMORY_PERMISSION],
+            SPACE_MEMORY_OPERATION_DELETE,
+            "mem-1",
+        );
+        assert!(verify(&delete, &delete_ref, &key_id, "user-1", "space-room", SPACE_MEMORY_OPERATION_DELETE, "mem-1", now).is_ok());
+        assert!(
+            verify(&delete, &delete_ref, &key_id, "user-1", "space-room", SPACE_MEMORY_OPERATION_DELETE, "mem-2", now).is_err(),
+            "a delete token deletes only the row it was issued for"
+        );
+        assert!(
+            verify(&list, &list_ref, &key_id, "user-1", "space-room", SPACE_MEMORY_OPERATION_LIST, "", now + chrono::Duration::minutes(5)).is_err(),
+            "an expired decision is refused"
+        );
+    }
+
+    /// Only the one permission: a member's read token (or one that also carries `thread:read`)
+    /// never lists or deletes room memory.
+    #[test]
+    fn space_memory_decision_refuses_any_other_permission_set() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-11-03T12:00:00Z")
+            .expect("test time")
+            .with_timezone(&Utc);
+        let signing_key = SigningKey::from_bytes(&[42_u8; 32]);
+        for permissions in [
+            &["thread:read"][..],
+            &[SPACE_MEMORY_PERMISSION, "thread:read"][..],
+            &[][..],
+        ] {
+            let (token, decision_ref, key_id) = signed_space_memory_decision(
+                &signing_key,
+                now,
+                permissions,
+                SPACE_MEMORY_OPERATION_LIST,
+                "",
+            );
+            assert_eq!(
+                verify_space_memory_decision_with_key(
+                    &token,
+                    &decision_ref,
+                    "org-1",
+                    "user-1",
+                    "space-room",
+                    SPACE_MEMORY_OPERATION_LIST,
+                    "",
+                    &key_id,
+                    &signing_key.verifying_key(),
+                    now,
+                )
+                .expect_err("only memory:manage alone is accepted")
+                .code(),
+                tonic::Code::PermissionDenied,
+                "{permissions:?}"
+            );
+        }
+        let (read_token, read_ref, key_id) =
+            signed_thread_read_decision(&signing_key, now, &["thread:read"], 4);
+        assert!(verify_space_memory_decision_with_key(
+            &read_token,
+            &read_ref,
+            "org-1",
+            "user-1",
+            "space-room",
+            SPACE_MEMORY_OPERATION_LIST,
+            "",
+            &key_id,
+            &signing_key.verifying_key(),
+            now,
+        )
+        .is_err());
+    }
+
     /// The read path's whole purpose: admit a member who does NOT own the
     /// thread, and only for the exact Space and subject Control resolved.
     #[test]
@@ -14818,6 +15442,7 @@ mod tests {
                 "model_plane.v1.SpaceEvents",
                 "model_plane.v1.SpaceHistoryService",
                 "model_plane.v1.SpaceAttention",
+                "model_plane.v1.EventLog",
             ]
         );
     }
@@ -15642,6 +16267,175 @@ mod tests {
         let without = ThreadGrantColumns::detect_in(&pool, Some(&scratch)).await;
         sqlx::query(&format!("DROP SCHEMA {scratch} CASCADE")).execute(&pool).await.expect("drop");
         assert_eq!(without, ThreadGrantColumns::absent(), "a threads table without the columns");
+    }
+
+    /// WS14 S2, DB-gated: a run takes the thread's grant only while the thread names the plan the
+    /// run executes. The plan the approval recorded binds the rung, the reason and the plan id onto
+    /// the run record; another plan, another org, a member who does not own the run, a zero-retention
+    /// caller and a lapsed grant bind nothing, and each refusal leaves the run record as it was.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a Postgres with session-core migrations"]
+    async fn bind_grant_to_run_takes_only_the_plan_the_thread_names_against_real_pg() {
+        use super::{SessionService, ThreadAutonomyGrpc, ThreadGrantColumns};
+        use mp_contracts::model_plane::v1::session_core_server::SessionCore;
+        use mp_contracts::model_plane::v1::thread_autonomy_server::ThreadAutonomy;
+
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping: DATABASE_URL unset");
+            return;
+        };
+        let pool = sqlx::PgPool::connect(&url).await.expect("connect pg");
+        sqlx::migrate!("./migrations").run(&pool).await.expect("migrate");
+        let sfx = format!("bind-{}", std::process::id());
+        let (thread_id, run_id, org) = (format!("t-{sfx}"), format!("r-{sfx}"), format!("org-{sfx}"));
+        sqlx::query("INSERT INTO threads (id,session_key,org_id,user_id) VALUES ($1,$1,$2,'u1')")
+            .bind(&thread_id).bind(&org).execute(&pool).await.expect("seed thread");
+        sqlx::query("INSERT INTO runs (id,thread_id,goal,org_id,user_id) VALUES ($1,$2,'g',$3,'u1')")
+            .bind(&run_id).bind(&thread_id).bind(&org).execute(&pool).await.expect("seed run");
+        let svc = SessionService {
+            pool: pool.clone(),
+            retrieval_client: None,
+            graph_client: None,
+            knowledge_client: None,
+            letta_memory: None,
+            audit_publisher: None,
+            auth: None,
+            grant_columns: ThreadGrantColumns::present(),
+        };
+        // The approval records the grant on the thread, naming plan-1, in the same transaction.
+        svc.set_run_mode(as_user(
+            &org,
+            "u1",
+            pb::SetRunModeRequest {
+                run_id: run_id.clone(),
+                mode: "execute".into(),
+                org_id: org.clone(),
+                granted_rung: pb::AutonomyRung::WorkspaceWrite as i32,
+                justification: "writes the report into the workspace".into(),
+                approved_plan_id: "plan-1".into(),
+            },
+        ))
+        .await
+        .expect("the approval records its grant");
+        let reader = ThreadAutonomyGrpc { pool: pool.clone(), grant_columns: ThreadGrantColumns::present() };
+        let bind = |org: &str, plan: &str| {
+            as_user(
+                org,
+                "u1",
+                pb::BindGrantToRunRequest {
+                    run_id: run_id.clone(),
+                    thread_id: thread_id.clone(),
+                    org_id: org.to_owned(),
+                    approved_plan_id: plan.into(),
+                },
+            )
+        };
+        let plan_metadata = |sql: &'static str| {
+            let pool = pool.clone();
+            let run_id = run_id.clone();
+            async move {
+                sqlx::query_as::<_, (Option<String>,)>(sql)
+                    .bind(run_id)
+                    .fetch_one(&pool)
+                    .await
+                    .expect("read the run record")
+                    .0
+            }
+        };
+
+        let other_plan = reader.bind_grant_to_run(bind(&org, "plan-2")).await.expect_err("a plan the thread does not name");
+        assert_eq!(other_plan.code(), tonic::Code::FailedPrecondition);
+        assert_eq!(other_plan.message(), "plan_grant_unavailable");
+        assert_eq!(
+            plan_metadata("SELECT metadata->>'approved_plan_id' FROM runs WHERE id = $1").await,
+            None,
+            "a refused bind writes nothing to the run"
+        );
+        let other_org = reader.bind_grant_to_run(bind("org-other", "plan-1")).await;
+        assert!(other_org.is_err(), "another org's caller binds nothing");
+
+        let bound = reader
+            .bind_grant_to_run(bind(&org, "plan-1"))
+            .await
+            .expect("the grant the thread names binds to the run")
+            .into_inner();
+        assert_eq!(bound.granted_rung, pb::AutonomyRung::WorkspaceWrite as i32);
+        assert_eq!(bound.approved_plan_id, "plan-1");
+        assert_eq!(
+            plan_metadata("SELECT metadata->>'autonomy_rung' FROM runs WHERE id = $1").await.as_deref(),
+            Some("workspace_write"),
+        );
+        assert_eq!(
+            plan_metadata("SELECT metadata->>'approved_plan_id' FROM runs WHERE id = $1").await.as_deref(),
+            Some("plan-1"),
+        );
+        assert!(
+            plan_metadata("SELECT metadata->>'grant_bound_at' FROM runs WHERE id = $1").await.is_some(),
+            "the bind is timed on the run record"
+        );
+        // Only the run's own owner binds it: another member of the same org is refused.
+        let bind_run = |user: &str, run: &str| {
+            as_user(
+                &org,
+                user,
+                pb::BindGrantToRunRequest {
+                    run_id: run.to_owned(),
+                    thread_id: thread_id.clone(),
+                    org_id: org.clone(),
+                    approved_plan_id: "plan-1".into(),
+                },
+            )
+        };
+        assert!(
+            reader
+                .bind_grant_to_run(bind_run("u2", &run_id))
+                .await
+                .is_err(),
+            "a member who does not own the run binds nothing"
+        );
+        // A zero-retention caller writes no grant, so it binds none either.
+        let mut zdr = bind_run("u1", &run_id);
+        zdr.extensions_mut()
+            .insert(VerifiedIdentity::user_for_test_with_zdr(&org, "u1", true));
+        let zdr_refusal = reader
+            .bind_grant_to_run(zdr)
+            .await
+            .expect_err("a zero-retention caller binds nothing");
+        assert_eq!(zdr_refusal.code(), tonic::Code::FailedPrecondition);
+        // A lapsed grant binds nothing: the thread's grant is backdated and a second run asks for it.
+        let late_run = format!("{run_id}-late");
+        sqlx::query(
+            "INSERT INTO runs (id,thread_id,goal,org_id,user_id) VALUES ($1,$2,'g',$3,'u1')",
+        )
+        .bind(&late_run)
+        .bind(&thread_id)
+        .bind(&org)
+        .execute(&pool)
+        .await
+        .expect("seed the late run");
+        sqlx::query(
+            "UPDATE threads SET granted_expires_at = now() - interval '1 minute' WHERE id = $1",
+        )
+        .bind(&thread_id)
+        .execute(&pool)
+        .await
+        .expect("backdate the grant");
+        let lapsed = reader
+            .bind_grant_to_run(bind_run("u1", &late_run))
+            .await
+            .expect_err("a lapsed grant binds nothing");
+        assert_eq!(lapsed.message(), "plan_grant_unavailable");
+        let late_plan = sqlx::query_as::<_, (Option<String>,)>(
+            "SELECT metadata->>'approved_plan_id' FROM runs WHERE id = $1",
+        )
+        .bind(&late_run)
+        .fetch_one(&pool)
+        .await
+        .expect("read the late run");
+        assert_eq!(
+            late_plan.0, None,
+            "a refused bind writes nothing to the run"
+        );
     }
 
     /// DB-gated: SetRunMode and GetThreadGrant with the gate shut, against a database that has
@@ -16934,6 +17728,93 @@ mod tests {
                 .await
                 .expect("cleanup preserved thread");
         }
+    }
+
+    /// EP-8 S7: deleting a Space erases its room memory and its agents' memory in the same
+    /// transaction, and nothing of another Space, even one whose id extends this one's.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres whose name contains \"test\""]
+    async fn space_deletion_erases_space_rows() {
+        let Some(pool) = crate::space::test_support::connect().await else { return };
+        let suffix = mp_ids::new_ulid();
+        let org_id = format!("org-space-memory-erase-{suffix}");
+        let owner = "owner-1";
+        let space = format!("space-erase-{suffix}");
+        let longer_space = format!("{space}x");
+        let thread = format!("thread-space-erase-{suffix}");
+        crate::space::test_support::seed_space_thread(&pool, &org_id, &space, &thread, owner).await;
+        let insert = |scope: &'static str, scope_id: String| {
+            let pool = pool.clone();
+            let org_id = org_id.clone();
+            async move {
+                let id = mp_ids::new_ulid();
+                sqlx::query(
+                    "INSERT INTO agent_memory (id, org_id, scope, scope_id, key, content, kind, confidence, \
+                     owner, source_links, review_state, audience_hash, audience_revision, source_label) \
+                     VALUES ($1, $2, $3, $4, $5, 'c', 'fact', 0.9, '', '{}', 'accepted', 'sha256:audience-1', 1, \
+                     CASE WHEN $3 = 'agent' THEN 'agent_memory' ELSE 'room_statement' END)",
+                )
+                .bind(&id)
+                .bind(&org_id)
+                .bind(scope)
+                .bind(&scope_id)
+                .bind(format!("{scope_id}/k-{id}"))
+                .execute(&pool)
+                .await
+                .expect("seed memory row");
+                id
+            }
+        };
+        let room = insert("space", space.clone()).await;
+        let agent = insert("agent", format!("{space}:agent-1")).await;
+        let other_room = insert("space", longer_space.clone()).await;
+        let other_agent = insert("agent", format!("{longer_space}:agent-1")).await;
+
+        let svc = super::SessionService {
+            pool: pool.clone(),
+            retrieval_client: None,
+            graph_client: None,
+            knowledge_client: None,
+            letta_memory: None,
+            audit_publisher: None,
+            auth: None,
+            grant_columns: crate::grpc::ThreadGrantColumns::present(),
+        };
+        let mut request = Request::new(pb::DeleteSpaceThreadsRequest {
+            org_id: org_id.clone(),
+            space_id: space.clone(),
+            owner_principal_id: owner.to_owned(),
+            deletion_request_id: format!("deletion-request-{suffix}"),
+        });
+        request
+            .extensions_mut()
+            .insert(VerifiedIdentity::service_for_test_as(
+                &org_id,
+                SPACE_DELETION_SERVICE,
+                &[SPACE_DELETION_SCOPE],
+                false,
+            ));
+        svc.delete_space_threads(request).await.expect("space deletion");
+
+        for (id, expected, why) in [
+            (&room, 0_i64, "the room's memory goes with the Space"),
+            (&agent, 0_i64, "the room's agent memory goes with the Space"),
+            (&other_room, 1_i64, "another Space's memory stays"),
+            (&other_agent, 1_i64, "an agent memory of another Space stays"),
+        ] {
+            let (count,): (i64,) = sqlx::query_as("SELECT count(*) FROM agent_memory WHERE id = $1")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .expect("count");
+            assert_eq!(count, expected, "{why}");
+        }
+        sqlx::query("DELETE FROM agent_memory WHERE org_id = $1")
+            .bind(&org_id)
+            .execute(&pool)
+            .await
+            .ok();
+        crate::space::test_support::clean_space(&pool, &org_id, &space).await;
     }
 
     #[tokio::test]

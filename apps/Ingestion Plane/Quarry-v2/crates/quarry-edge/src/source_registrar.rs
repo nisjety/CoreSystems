@@ -28,6 +28,17 @@ impl SourceRegistrar for EdgeSourceRegistrar {
         url: &str,
         kind: &str,
     ) -> QuarryResult<()> {
+        // The crawl that triggered this registration passed the web policy of its caller. The
+        // registrar has no token, so it re-checks under the baseline (the operator deny list) as a
+        // human principal: an allow list binds autonomous callers only, and a row for a URL the
+        // operator denies is never written. Best-effort by contract: the caller logs and swallows.
+        let decision = crate::web_policy_edge::decide_for_principal(
+            &self.state.policy,
+            quarry_core::web_policy::Principal::Human,
+            false,
+            None,
+        )?;
+        crate::web_policy_edge::gate_url(&decision, url)?;
         upsert_source_internal(&self.state, org_id, name, url, kind).await
     }
 }

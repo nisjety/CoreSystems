@@ -102,6 +102,29 @@ describe('chat organizer star and unread', () => {
   })
 })
 
+describe('chat organizer lineage', () => {
+  const pair = [
+    { threadId: 'thread-a', title: 'Planning', preview: 'A draft', updatedAt: '2026-09-28T12:00:00Z' },
+    { threadId: 'thread-b', title: 'Research', preview: 'Notes', updatedAt: '2026-09-27T12:00:00Z' },
+  ]
+  afterEach(() => vi.unstubAllEnvs())
+
+  it('marks a forked chat with a Forked chip while forking is on', () => {
+    vi.stubEnv('VITE_CHAT_THREAD_FORK', 'true')
+    render(() => <ChatSidebarOrganizer sessions={pair} loading={false} onNewChat={() => {}} renderRow={(item) => <span>{item.title}</span>} forkedThreadIds={new Set(['thread-b'])} />)
+    flush()
+    const chips = screen.getAllByText('Forked')
+    expect(chips).toHaveLength(1)
+    expect(chips[0]?.closest('.chat-organizer__draggable')?.textContent).toContain('Research')
+  })
+
+  it('shows no Forked chip while forking is off, even for a forked chat', () => {
+    render(() => <ChatSidebarOrganizer sessions={pair} loading={false} onNewChat={() => {}} renderRow={(item) => <span>{item.title}</span>} forkedThreadIds={new Set(['thread-b'])} />)
+    flush()
+    expect(screen.queryByText('Forked')).toBeNull()
+  })
+})
+
 describe('chat organizer interactions', () => {
   it('creates a project and switches the view atomically, preserving it after remount', async () => {
     const first = mount()

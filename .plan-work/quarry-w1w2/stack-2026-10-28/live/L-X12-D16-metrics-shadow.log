@@ -1,0 +1,21 @@
+# HELP quarry_agent_budget_exhausted_total Agent runs that reached a budget bound, by dimension, class and mode (shadow = would have been refused).
+# TYPE quarry_agent_budget_exhausted_total counter
+quarry_agent_budget_exhausted_total{dimension="steps",class="agent",mode="shadow"} 1
+quarry_agent_budget_exhausted_total{dimension="steps",class="agent",mode="shadow"} 1
+quarry_agent_takeover_exempt_steps_total 4
+quarry_agent_takeover_exempt_step_duration_seconds_bucket{le="0.005"} 0
+quarry_agent_takeover_exempt_step_duration_seconds_bucket{le="0.01"} 0
+quarry_agent_takeover_exempt_step_duration_seconds_bucket{le="0.025"} 0
+quarry_agent_takeover_exempt_step_duration_seconds_bucket{le="0.05"} 0
+quarry_agent_takeover_exempt_step_duration_seconds_bucket{le="0.1"} 0
+quarry_agent_takeover_exempt_step_duration_seconds_bucket{le="0.25"} 4
+quarry_agent_takeover_exempt_step_duration_seconds_bucket{le="0.5"} 4
+quarry_agent_takeover_exempt_step_duration_seconds_bucket{le="1"} 4
+quarry_agent_takeover_exempt_step_duration_seconds_bucket{le="2.5"} 4
+quarry_agent_takeover_exempt_step_duration_seconds_bucket{le="5"} 4
+quarry_agent_takeover_exempt_step_duration_seconds_bucket{le="10"} 4
+quarry_agent_takeover_exempt_step_duration_seconds_bucket{le="30"} 4
+quarry_agent_takeover_exempt_step_duration_seconds_bucket{le="60"} 4
+quarry_agent_takeover_exempt_step_duration_seconds_bucket{le="+Inf"} 4
+quarry_agent_takeover_exempt_step_duration_seconds_sum 0.574193799
+quarry_agent_takeover_exempt_step_duration_seconds_count 4

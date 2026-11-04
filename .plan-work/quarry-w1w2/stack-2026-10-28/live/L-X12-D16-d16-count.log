@@ -1,0 +1,40 @@
+BEGIN
+== 1. totals
+ rows_total | owned | ownerless 
+------------+-------+-----------
+          0 |     0 |         0
+(1 row)
+
+== 2. ownerless rows by scope (what enforce does to them)
+ scope | under_enforce | rows 
+-------+---------------+------
+(0 rows)
+
+== 3. legacy private rows: before and after the stamp reached the edge
+ before_stamp | after_stamp | hidden_total 
+--------------+-------------+--------------
+            0 |           0 |            0
+(1 row)
+
+== 4. legacy private rows by how much they hold
+ kind | rows 
+------+------
+(0 rows)
+
+== 5. legacy private rows by age of the last write
+ last_write | rows 
+------------+------
+(0 rows)
+
+== 6. organizations with legacy private rows (top 20; tenant ids, counts only)
+ org_id | hidden_rows | last_write 
+--------+-------------+------------
+(0 rows)
+
+== 7. sanity: a service principal must never be an owner (expect 0)
+ service_owned_rows 
+--------------------
+                  0
+(1 row)
+
+COMMIT

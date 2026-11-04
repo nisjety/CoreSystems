@@ -6,6 +6,8 @@ import {
   integrationsFetchConnectionContentInput,
 } from '@/shared/actions/action-registry'
 import { spaceActions } from '@/shared/actions/domains/spaces'
+import { chatProjectSchema } from '@/shared/actions/chat-project'
+import { MODEL_ACCESS } from '@/shared/actions/model-access'
 import { isModelExecutableAction } from '@/shared/actions/model-eligibility'
 import { buildModelContextPack } from '@/shared/context-packs/context-pack'
 
@@ -417,6 +419,62 @@ describe('action registry', () => {
     }).success).toBe(false)
   })
 
+  it('takes the whole router policy, the ladder and the role table included, so a save through the action resets neither', () => {
+    const action = getActionDescriptor('router_policy.update')
+    const row = { simple: 'gpt-4o-mini', moderate: 'gpt-4o-mini', complex: 'claude-sonnet-5-5' }
+    const policy = {
+      enabled: true,
+      budget_cap_usd: 50,
+      constrained_fraction: 0.8,
+      cheap_fallback: 'gpt-4o-mini',
+      complexity: {
+        large_total_chars: 4000,
+        large_total_chars_score: 2,
+        medium_total_chars: 1200,
+        medium_total_chars_score: 1,
+        long_user_turn_chars: 800,
+        long_user_turn_score: 1,
+        code_fence_score: 1,
+        keyword_score: 1,
+        tool_use_score: 2,
+        deep_conversation_turns: 12,
+        deep_conversation_score: 1,
+        moderate_threshold: 1,
+        complex_threshold: 3,
+        keywords: ['analyze'],
+        tool_use_floors_complex: false,
+      },
+      table: { budget: row, balance: row, genius: row },
+      tool_fallback_ladder: ['claude-sonnet-4-6', 'gpt-4o-mini'],
+      roles: {
+        title: { candidates: ['claude-sonnet-5-5'], effort: 'minimal' },
+        research_plan: { candidates: ['claude-opus-4-8'] },
+      },
+    }
+
+    const parsed = action?.inputSchema.safeParse(policy)
+    expect(parsed?.success).toBe(true)
+    expect(parsed?.success && parsed.data).toMatchObject({
+      tool_fallback_ladder: ['claude-sonnet-4-6', 'gpt-4o-mini'],
+      roles: policy.roles,
+      complexity: { tool_use_floors_complex: false },
+    })
+    // A save that leaves the ladder or the complexity flag out would reset it on the server, so it is refused.
+    expect(action?.inputSchema.safeParse({ ...policy, tool_fallback_ladder: undefined }).success).toBe(false)
+    expect(action?.inputSchema.safeParse({
+      ...policy,
+      complexity: { ...policy.complexity, tool_use_floors_complex: undefined },
+    }).success).toBe(false)
+    // The role table is optional, and a role names one to four models and only the four purposes.
+    expect(action?.inputSchema.safeParse({ ...policy, roles: undefined }).success).toBe(true)
+    expect(action?.inputSchema.safeParse({ ...policy, roles: { title: { candidates: [] } } }).success).toBe(false)
+    expect(action?.inputSchema.safeParse({
+      ...policy,
+      roles: { title: { candidates: ['a', 'b', 'c', 'd', 'e'] } },
+    }).success).toBe(false)
+    expect(action?.inputSchema.safeParse({ ...policy, roles: { summarise: { candidates: ['a'] } } }).success).toBe(false)
+  })
+
   it('registers the memory controls with their risk: pausing is light, resetting is gated and final', () => {
     const setState = getActionDescriptor('memory.set_state')
     const reset = getActionDescriptor('memory.reset')
@@ -441,6 +499,25 @@ describe('action registry', () => {
     expect(reset?.inputSchema.safeParse({}).success).toBe(false)
     expect(remember?.inputSchema.safeParse({ threadId: 't1', content: 'Jeg heter Ima' }).success).toBe(true)
     expect(remember?.inputSchema.safeParse({ threadId: 't1', content: '   ' }).success).toBe(false)
+  })
+
+  it('registers the profile edit and rebuild as human-only and bounded like the server (EP-8 S4)', () => {
+    const save = getActionDescriptor('memory.profile.save')
+    const rebuild = getActionDescriptor('memory.profile.rebuild')
+
+    expect(save).toMatchObject({ ownerPlane: 'model', risk: 'low', requiresApproval: false, reversible: true })
+    expect(rebuild).toMatchObject({ ownerPlane: 'model', risk: 'low', requiresApproval: false, reversible: false })
+    // A model never writes the profile it is later shown.
+    for (const id of ['memory.profile.save', 'memory.profile.rebuild'] as const) {
+      expect(isModelExecutableAction(id)).toBe(false)
+    }
+
+    expect(save?.inputSchema.safeParse({ content: '- Prefers tables', expectedRevision: 2 }).success).toBe(true)
+    expect(save?.inputSchema.safeParse({ content: 'x'.repeat(1401), expectedRevision: 2 }).success).toBe(false)
+    expect(save?.inputSchema.safeParse({ content: '- Prefers tables' }).success).toBe(false)
+    expect(save?.inputSchema.safeParse({ content: '- Prefers tables', expectedRevision: -1 }).success).toBe(false)
+    expect(rebuild?.inputSchema.safeParse({ force: true }).success).toBe(true)
+    expect(rebuild?.inputSchema.safeParse({}).success).toBe(false)
   })
 
   it('registers the connected-app reads as low-risk, ungated owner contracts the model cannot execute', () => {
@@ -500,6 +577,144 @@ describe('action registry', () => {
     expect(schema?.safeParse({ connectionIds: ['x'.repeat(129)] }).success).toBe(false)
     // The user, the org and the turn are the server's, never a client input.
     expect(schema?.safeParse({ connectionIds: [], userId: 'user_x' }).success).toBe(false)
+  })
+
+  it('registers the agent-mode choice as a model-plane action the model cannot execute, and accepts only the four mode ids', () => {
+    const mode = getActionDescriptor('chat.set_agent_mode')
+
+    expect(mode).toMatchObject({ ownerPlane: 'model', risk: 'low', requiresApproval: false, reversible: true })
+    expect(isModelExecutableAction('chat.set_agent_mode')).toBe(false)
+    expect(mode?.description ?? '').toContain('Never model-executable')
+
+    const schema = mode?.inputSchema
+    for (const id of ['lockdown', 'read_only', 'ask_first', 'auto']) {
+      expect(schema?.safeParse({ mode: id }).success).toBe(true)
+    }
+    for (const id of ['full_access', 'Auto', 'read-only', '', 'danger_full_access']) {
+      expect(schema?.safeParse({ mode: id }).success).toBe(false)
+    }
+    // A mode is the person's choice for one turn, never a field a caller can widen with a second key.
+    expect(schema?.safeParse({ mode: 'auto', rung: 'danger_full_access' }).success).toBe(false)
+  })
+
+  it('registers the transcript level as a control-plane action the model cannot execute, and accepts only the four level ids', () => {
+    const density = getActionDescriptor('chat.set_transcript_density')
+
+    expect(density).toMatchObject({ ownerPlane: 'control', risk: 'low', requiresApproval: false, reversible: true })
+    expect(isModelExecutableAction('chat.set_transcript_density')).toBe(false)
+    expect(density?.description ?? '').toContain('Never model-executable')
+
+    const schema = density?.inputSchema
+    for (const level of ['detailed', 'standard', 'compact', 'minimal']) {
+      expect(schema?.safeParse({ transcriptDensity: level }).success).toBe(true)
+    }
+    for (const level of ['full', 'Compact', '', 'none']) {
+      expect(schema?.safeParse({ transcriptDensity: level }).success).toBe(false)
+    }
+    // The person is the caller the server reads, never a field a client names.
+    expect(schema?.safeParse({ transcriptDensity: 'minimal', userId: 'user_x' }).success).toBe(false)
+  })
+
+  function registered(id: string) {
+    return actionRegistry.find((action) => action.id === id)
+  }
+
+  it('registers the org agent policy and its hook rules as model-plane actions the model cannot execute, the writes high-risk', () => {
+    for (const id of [
+      'org.set_agent_policy',
+      'org.preview_effective_policy',
+      'org.create_hook',
+      'org.update_hook',
+      'org.delete_hook',
+    ]) {
+      expect(registered(id), id).toMatchObject({ ownerPlane: 'model', requiresApproval: false, reversible: true })
+      expect(isModelExecutableAction(id), id).toBe(false)
+      expect(registered(id)?.description ?? '', id).toContain('model-executable')
+    }
+    for (const id of ['org.set_agent_policy', 'org.create_hook', 'org.update_hook', 'org.delete_hook']) {
+      expect(registered(id), id).toMatchObject({ risk: 'high' })
+    }
+    expect(registered('org.preview_effective_policy')).toMatchObject({ risk: 'low' })
+  })
+
+  it('takes the closed policy settings and no organization from the client, and never a reserved key', () => {
+    const setPolicy = registered('org.set_agent_policy')?.inputSchema
+
+    expect(setPolicy?.safeParse({ revision: 3, settings: {} }).success).toBe(true)
+    expect(
+      setPolicy?.safeParse({
+        revision: 3,
+        settings: { mode_cap: 'read_only', rung_cap: 'workspace_write', lockdown: false, mcp_tool_approval: 'approved_only' },
+      }).success,
+    ).toBe(true)
+    expect(
+      setPolicy?.safeParse({ revision: 3, settings: { 'ext.mcp_servers': { mode: 'approved_only', ids: ['srv-a', 'srv-b'] } } })
+        .success,
+    ).toBe(true)
+    // The revision is required and a whole number; the organization is the session's, never the body's.
+    expect(setPolicy?.safeParse({ settings: {} }).success).toBe(false)
+    expect(setPolicy?.safeParse({ revision: -1, settings: {} }).success).toBe(false)
+    expect(setPolicy?.safeParse({ revision: 3, orgId: 'org-1', settings: {} }).success).toBe(false)
+    expect(setPolicy?.safeParse({ revision: 3, settings: { orgId: 'org-1' } }).success).toBe(false)
+    // Only the enforced closed values are offered: a value outside the schema, a reserved key and ids on
+    // a mode that takes none are all refused.
+    expect(setPolicy?.safeParse({ revision: 3, settings: { mode_cap: 'full_access' } }).success).toBe(false)
+    expect(setPolicy?.safeParse({ revision: 3, settings: { 'ext.skills': { mode: 'any', ids: [] } } }).success).toBe(false)
+    expect(setPolicy?.safeParse({ revision: 3, settings: { 'ext.mcp_servers': { mode: 'any', ids: ['srv-a'] } } }).success).toBe(
+      false,
+    )
+  })
+
+  it('keeps a post-tool rule to a denial, takes no organization, and bounds the matcher like the engine', () => {
+    const create = registered('org.create_hook')?.inputSchema
+
+    expect(create?.safeParse({ event: 'pre_tool', toolMatcher: 'shell', decision: 'deny', reason: 'no shell' }).success).toBe(true)
+    expect(
+      create?.safeParse({ event: 'pre_tool', toolMatcher: 'mcp__crm_*', decision: 'ask', reason: 'check first', priority: 5 })
+        .success,
+    ).toBe(true)
+    expect(create?.safeParse({ event: 'post_tool', decision: 'deny', reason: 'withhold the result' }).success).toBe(true)
+    expect(create?.safeParse({ event: 'post_tool', decision: 'ask', reason: 'check first' }).success).toBe(false)
+    expect(create?.safeParse({ event: 'pre_tool', decision: 'allow', reason: 'open' }).success).toBe(false)
+    expect(create?.safeParse({ event: 'pre_tool', decision: 'deny', reason: '   ' }).success).toBe(false)
+    expect(create?.safeParse({ event: 'pre_tool', toolMatcher: '../shell', decision: 'deny', reason: 'no' }).success).toBe(false)
+    expect(create?.safeParse({ event: 'pre_tool', toolMatcher: 'shell*x', decision: 'deny', reason: 'no' }).success).toBe(false)
+    expect(create?.safeParse({ event: 'pre_tool', decision: 'deny', reason: 'no', priority: 1.5 }).success).toBe(false)
+    expect(create?.safeParse({ event: 'pre_tool', decision: 'deny', reason: 'no', orgId: 'org-1' }).success).toBe(false)
+
+    const update = registered('org.update_hook')?.inputSchema
+    expect(update?.safeParse({ hookId: 'ohr_1', event: 'pre_tool', decision: 'deny', reason: 'no shell' }).success).toBe(true)
+    expect(update?.safeParse({ event: 'pre_tool', decision: 'deny', reason: 'no shell' }).success).toBe(false)
+    expect(update?.safeParse({ hookId: 'ohr_1', event: 'post_tool', decision: 'ask', reason: 'no' }).success).toBe(false)
+
+    const retire = registered('org.delete_hook')?.inputSchema
+    expect(retire?.safeParse({ hookId: 'ohr_1' }).success).toBe(true)
+    expect(retire?.safeParse({ hookId: 'ohr_1', orgId: 'org-1' }).success).toBe(false)
+  })
+
+  it('lets a chat project reuse the registered Space actions, and its contract grants nothing', () => {
+    // A project is a Space, so creating one and editing its instructions are the Space
+    // actions the room and Space pages already use: no second route and no new authority.
+    const createRoomAction = getActionDescriptor('spaces.create_room')
+    const instructionsAction = getActionDescriptor('spaces.update_space_instructions')
+
+    expect(createRoomAction?.ownerPlane).toBe('application')
+    expect(createRoomAction?.requiresApproval).toBe(false)
+    expect(createRoomAction?.inputSchema.safeParse({ kind: 'room', name: 'Launch' }).success).toBe(true)
+    // A project is a named room: a personal Space is not created from the project list.
+    expect(createRoomAction?.inputSchema.safeParse({ kind: 'personal', name: 'Mine' }).success).toBe(false)
+    expect(createRoomAction?.inputSchema.safeParse({ kind: 'room', name: '   ' }).success).toBe(false)
+
+    expect(instructionsAction?.ownerPlane).toBe('application')
+    expect(instructionsAction?.inputSchema.safeParse({ spaceRef: 'space_1', instructions: 'Answer in numbered steps.' }).success).toBe(true)
+    expect(instructionsAction?.inputSchema.safeParse({ spaceRef: '', instructions: 'Answer in numbered steps.' }).success).toBe(false)
+    // Writing the instructions is the gateway's editor, manager or owner floor; the descriptor says so.
+    expect(instructionsAction?.description).toContain('editor, manager, or owner')
+
+    // The project shape describes where a chat goes. A viewer is not a role a project chat can start from.
+    expect(chatProjectSchema.safeParse({ spaceRef: 'space_1', name: 'Launch', kind: 'room', role: 'editor' }).success).toBe(true)
+    expect(chatProjectSchema.safeParse({ spaceRef: 'space_1', name: 'Launch', kind: 'room', role: 'viewer' }).success).toBe(false)
+    expect(chatProjectSchema.safeParse({ spaceRef: 'space_1', name: 'Launch', kind: 'organization', role: 'owner' }).success).toBe(false)
   })
 
   it('registers the human post actions as low-risk, ungated, model-plane actions the model cannot execute (WS01-S5)', () => {
@@ -642,14 +857,152 @@ describe('action registry', () => {
   // P-SPA1 moved the spaces.* entries into per-workstream fragments under
   // domains/spaces/*.ts and spread them once. The move must not add, drop, rename
   // or reorder an id: the order is what the contract probes and the context pack read.
+  it('registers the six schedule contracts the automations hub calls, as model-plane actions the model cannot execute', () => {
+    const scheduleIds = [
+      'schedule.list',
+      'schedule.pause',
+      'schedule.resume',
+      'schedule.update_time',
+      'schedule.delete',
+      'schedule.fires.list',
+    ] as const
+
+    for (const id of scheduleIds) {
+      const action = getActionDescriptor(id)
+      expect(action?.ownerPlane, id).toBe('model')
+      expect(action?.requiresApproval, id).toBe(false)
+      expect(isModelExecutableAction(id), id).toBe(false)
+    }
+    expect(getActionDescriptor('schedule.delete')).toMatchObject({ risk: 'high', reversible: false })
+  })
+
+  it('takes the schedule id, the cron expression and the fires limit, and nothing else the hub never sends', () => {
+    const pause = getActionDescriptor('schedule.pause')
+    expect(pause?.inputSchema.safeParse({ scheduleId: 'cron_1' }).success).toBe(true)
+    expect(pause?.inputSchema.safeParse({ scheduleId: '' }).success).toBe(false)
+    expect(pause?.inputSchema.safeParse({ scheduleId: 'cron_1', enabled: false }).success).toBe(false)
+
+    // The time change is a PATCH of the cadence alone: a goal, an approval or a creator is refused.
+    const updateTime = getActionDescriptor('schedule.update_time')
+    expect(updateTime?.inputSchema.safeParse({ scheduleId: 'cron_1', scheduleExpr: '0 8 * * 1-5' }).success).toBe(true)
+    for (const extra of ['description', 'enabled', 'task_template', 'creator_subject_id']) {
+      expect(
+        updateTime?.inputSchema.safeParse({ scheduleId: 'cron_1', scheduleExpr: '0 8 * * 1-5', [extra]: 'x' }).success,
+        extra,
+      ).toBe(false)
+    }
+
+    const firesList = getActionDescriptor('schedule.fires.list')
+    expect(firesList?.inputSchema.safeParse({ scheduleId: 'cron_1', limit: 5 }).success).toBe(true)
+    expect(firesList?.inputSchema.safeParse({ scheduleId: 'cron_1', limit: 0 }).success).toBe(false)
+    expect(firesList?.inputSchema.safeParse({ scheduleId: 'cron_1', limit: 101 }).success).toBe(false)
+
+    // The list takes no filter from the caller: the creator scope is applied by the hub, not by a parameter.
+    const list = getActionDescriptor('schedule.list')
+    expect(list?.inputSchema.safeParse({}).success).toBe(true)
+    expect(list?.inputSchema.safeParse({ creator: 'someone-else' }).success).toBe(false)
+  })
+
+  it('closes each schedule contract in the side map with the reason that matches what it does', () => {
+    expect(MODEL_ACCESS['schedule.list']).toMatchObject({
+      access: 'none',
+      exemptReason: 'no_owner_executor',
+      sideEffectClass: 'read',
+    })
+    expect(MODEL_ACCESS['schedule.fires.list']).toMatchObject({
+      access: 'none',
+      exemptReason: 'no_owner_executor',
+      sideEffectClass: 'read',
+    })
+    // A model that could pause, resume or retime its own schedule would govern its own autonomy.
+    for (const id of ['schedule.pause', 'schedule.resume', 'schedule.update_time'] as const) {
+      expect(MODEL_ACCESS[id], id).toMatchObject({ access: 'none', exemptReason: 'agent_cannot_self_govern' })
+    }
+    expect(MODEL_ACCESS['schedule.delete']).toMatchObject({
+      access: 'none',
+      exemptReason: 'irreversible_destructive',
+      sideEffectClass: 'destructive',
+    })
+  })
+
+  it('registers the agent installations read as a low-risk, ungated application contract the model cannot execute', () => {
+    const action = getActionDescriptor('agents.installations.list')
+    expect(action).toMatchObject({ ownerPlane: 'application', risk: 'low', requiresApproval: false, reversible: true })
+    expect(isModelExecutableAction('agents.installations.list')).toBe(false)
+    expect(MODEL_ACCESS['agents.installations.list']).toMatchObject({
+      access: 'none',
+      exemptReason: 'no_owner_executor',
+      sideEffectClass: 'read',
+    })
+
+    // The organisation comes from the session, so the read takes no parameter a caller could widen.
+    expect(action?.inputSchema.safeParse({}).success).toBe(true)
+    expect(action?.inputSchema.safeParse({ orgId: 'org_other' }).success).toBe(false)
+  })
+
+  it('registers the agent builder contracts as application actions the model cannot execute (EP-6-S8)', () => {
+    for (const id of ['agents.draft.save', 'agents.publish', 'agents.versions.list'] as const) {
+      const action = getActionDescriptor(id)
+      expect(action?.ownerPlane, id).toBe('application')
+      expect(action?.requiresApproval, id).toBe(false)
+      expect(isModelExecutableAction(id), id).toBe(false)
+    }
+    expect(getActionDescriptor('agents.versions.list')).toMatchObject({ risk: 'low', reversible: true })
+    // A model that could rewrite or publish an agent's instructions would govern its own behaviour.
+    for (const id of ['agents.draft.save', 'agents.publish'] as const) {
+      expect(MODEL_ACCESS[id], id).toMatchObject({ access: 'none', exemptReason: 'agent_cannot_self_govern' })
+    }
+    expect(MODEL_ACCESS['agents.versions.list']).toMatchObject({
+      access: 'none',
+      exemptReason: 'no_owner_executor',
+      sideEffectClass: 'read',
+    })
+  })
+
+  it('takes a draft of capability ids and a bounded autonomy cap, and nothing the builder never sends', () => {
+    const save = getActionDescriptor('agents.draft.save')
+    const draft = {
+      name: 'Driftsassistent',
+      system_prompt: 'Svar kort.',
+      model: 'Verevon Balance',
+      tool_capability_ids: ['cap.tool.ticket.create'],
+      autonomy_cap: 'ask_first',
+    }
+    expect(save?.inputSchema.safeParse({ agentRef: 'agent_1', draft }).success).toBe(true)
+    // The cap never widens to lockdown, and a free tool name is not a capability id.
+    expect(save?.inputSchema.safeParse({ agentRef: 'agent_1', draft: { ...draft, autonomy_cap: 'lockdown' } }).success).toBe(false)
+    expect(save?.inputSchema.safeParse({ agentRef: 'agent_1', draft: { ...draft, tool_capability_ids: ['Send Email'] } }).success).toBe(false)
+    expect(save?.inputSchema.safeParse({ agentRef: 'agent_1', draft: { ...draft, system_prompt: 'x'.repeat(4001) } }).success).toBe(false)
+    for (const extra of ['version', 'digest', 'published_by']) {
+      expect(save?.inputSchema.safeParse({ agentRef: 'agent_1', draft: { ...draft, [extra]: 'x' } }).success, extra).toBe(false)
+    }
+
+    // Publishing takes the agent alone: the version number and digest are the server's.
+    const publish = getActionDescriptor('agents.publish')
+    expect(publish?.inputSchema.safeParse({ agentRef: 'agent_1' }).success).toBe(true)
+    expect(publish?.inputSchema.safeParse({ agentRef: 'agent_1', version: 3 }).success).toBe(false)
+    expect(publish?.inputSchema.safeParse({ agentRef: '' }).success).toBe(false)
+  })
+
   it('keeps every action id unique and the spaces.* entries contiguous and in their pre-fragment order (P-SPA1)', () => {
     const ids: string[] = actionRegistry.map((action) => action.id)
     expect(new Set(ids).size).toBe(ids.length)
     // 187 before the move, plus the seven W1 additions (create_post, reply_in_thread, the two
     // effect-policy actions, update_room_details, change_member_role, leave_room), plus the
-    // eight actions main added on its own side (195 before the Space merge), plus the Wave 2
-    // Space fragments and the Model Plane additions that landed with them (236 at W2 test time).
-    expect(ids).toHaveLength(236)
+    // eight actions main added on its own side (195 before the Space merge).
+    // 243 after main was merged into model-plane (2026-11-02): main's 202 plus model-plane's own actions.
+    // 249 after EP-6-S1 registered the six schedule contracts the automations hub calls.
+    // 250 after EP-6-S5 registered agents.installations.list, the read the agents landing shows.
+    // 251 after EP-8-S3 registered settings.set_tone_preset, the caller's own reply tone.
+    // 253 after EP-8-S4 registered memory.profile.save and memory.profile.rebuild; that slice did not move this count.
+    // 255 after EP-8-S8 registered settings.complete_personal_setup and settings.skip_personal_setup, the first-run step.
+    // 256 after EP-14-S2 registered chat.set_transcript_density, the person's transcript level.
+    // 259 after EP-6-S8 registered agents.draft.save, agents.publish and agents.versions.list.
+    // 269 after w23/integ (Quarry W2/W3) was merged with model-plane: the four Innhenting actions of the
+    // ingestions and monitoring domains (job_control, start_agent_run, create_monitor, delete_monitor),
+    // the six ingestions run and schedule controls (get_run_status, pause_run, resume_run, cancel_run,
+    // pause_schedule, change_schedule_state) that replace run_schedule_action, and browser_run.steer.
+    expect(ids).toHaveLength(269)
 
     // The fragments also carry ids outside the `spaces.` prefix (`space.files.*`), so the Space
     // entries are the ones the fragments declare.

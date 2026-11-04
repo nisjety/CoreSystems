@@ -216,6 +216,10 @@ paths:
             QUARRY_CHALLENGE_CLASSIFIER=v2 (the default; legacy does not classify a scrape). The
             refusal itself is switched on with QUARRY_CHALLENGE_ENFORCE=enforce; under the default
             log the page is returned as before and only counted by reason in a log line.
+            An AI format (json, summary, question, highlights) asked for by a service principal
+            without the extract:ai scope, or on a request labelled initiated_by "agent", is code
+            FORBIDDEN with details.reason extract_ai_scope_required and details.field formats[i];
+            nothing is fetched.
           content:
             application/json:
               schema:
@@ -232,7 +236,10 @@ paths:
           description: >-
             The browser cannot do what was asked: a capture or actions on a browser that
             cannot run them, or no browser wired on the endpoint. Code UNSUPPORTED,
-            details.reason browser_capability_unavailable.
+            details.reason browser_capability_unavailable. Also code UNSUPPORTED for an AI
+            format when the endpoint has no model: details.reason model_plane_unavailable
+            (QUARRY_EDGE__MODEL_PLANE_URL is unset) or model_lane_not_granted (no usable model
+            credential on this deployment). Answered before the page is fetched.
           content:
             application/json:
               schema:
@@ -313,7 +320,11 @@ paths:
 
         per-step events (page_fetched, change_detected, artifact_written, etc.)
 
-        followed by the final result or error.
+        followed by the final result or error. Captures, actions and the AI formats
+
+        are not served here: the error event is BAD_REQUEST with details.reason
+
+        unsupported_in_stream.
 
         '
       tags:
@@ -349,6 +360,8 @@ paths:
           application/json:
             schema:
               $ref: '#/components/schemas/CrawlRequest'
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
       responses:
         '200':
           description: Crawl job accepted
@@ -391,9 +404,13 @@ paths:
           application/json:
             schema:
               $ref: '#/components/schemas/BatchRequest'
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
       responses:
         '200':
-          description: Batch job accepted
+          description: >-
+            Batch job accepted. A repeated Idempotency-Key answers 200 too, with the job the first request created;
+            that repeat is not billed.
           content:
             application/json:
               schema:
@@ -406,6 +423,15 @@ paths:
                 $ref: '#/components/schemas/Envelope_Error'
         '402':
           description: "The organization's configured batch URL (quarry.batch.url) allowance is spent (WS6.D-s; only a source that reports an allowance produces this, the default static source never does). Body is BUDGET_EXHAUSTED with details dimension org_allowance, metric, limit_source entitlement and resumable false. No job is created."
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Envelope_Error'
+        '409':
+          description: >-
+            A repeated Idempotency-Key that reuses the key for a different URL list or ingest flag, with
+            QUARRY_EDGE__BATCH_IDEMPOTENCY on. The body is CONFLICT with details.reason idempotency_key_reused and
+            details.job_id, the job the key already holds. Nothing is created and nothing is billed.
           content:
             application/json:
               schema:
@@ -455,7 +481,10 @@ paths:
         '400':
           description: >-
             Refused before any search runs. ZDR_REQUIRED: a service caller did not send zdr. SCORE_KIND_UNSUPPORTED:
-            score_kinds names a score kind this edge does not produce.
+            score_kinds names a score kind this edge does not produce. BAD_REQUEST: a scrape limit (1 to 10),
+            max_chars (1 to 50000) or timeout_ms (1000 to 55000) is out of range. UNSUPPORTED_OPTION: a scrape
+            formats entry other than markdown. These checks run only with QUARRY_EDGE__SEARCH_SCRAPE on; off, the
+            scrape block is ignored.
           content:
             application/json:
               schema:
@@ -472,17 +501,150 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorBody'
+  /v1/answer:
+    post:
+      operationId: answer
+      summary: One-call grounded answer with citations
+      description: >-
+        Searches, reads the top pages and synthesizes one answer through the Model
+        Plane, with the sources as citations. Metered as `quarry.answer.synth`, once
+        per synthesis. Off until the operator turns it on: it needs
+        `QUARRY_EDGE__ANSWER_SYNTHESIS=1` (decided by the Model Plane boot gate,
+        which refuses a switch that has no granted model path), a search provider
+        and `QUARRY_EDGE__MODEL_PLANE_URL`, and a Model Plane that accepts the
+        edge's service token. When it is not available the response names the
+        reason, see `AnswerErrorBody`. The same pipeline serves `include_answer` on
+        `POST /v1/search`, which reports the same reasons as `answer_status` and
+        `answer_reason`. A zero data retention request (the body flag or the
+        token's floor) is refused with a 403, reason `zdr_unavailable`, before the
+        pipeline starts: the model hop carries no ZDR posture, so there is no
+        search, no page fetch and no Model Plane call. The refusal leaves a
+        metadata-only tombstone when that is switched on.
+      tags:
+      - search
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AnswerRequest'
+      responses:
+        '200':
+          description: >-
+            The answer. With no usable source `answer` is empty and `model` is
+            empty; no model was called.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AnswerResponse'
+        '400':
+          description: The query is empty
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AnswerErrorBody'
+        '403':
+          description: >-
+            Zero data retention (the body flag or the token's floor): refused
+            before any work, `code` `FORBIDDEN`, `reason` `zdr_unavailable`. The
+            Model Plane hop carries no ZDR posture, so nothing is searched,
+            fetched or sent to a model.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AnswerErrorBody'
+        '501':
+          description: >-
+            The answer pipeline is not wired. `reason` is the first closed gate:
+            `synthesis_disabled`, `model_path_refused` (the switch is on and the
+            boot gate refused it), `no_model_plane_url`, `no_search_provider` or
+            `model_client_init_failed`; `hint` names the exact setting.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AnswerErrorBody'
+        '502':
+          description: >-
+            The Model Plane failed the call (`reason` `model_plane_error`), or the
+            search or page-fetch step failed (`answer_search_failed`)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AnswerErrorBody'
+        '503':
+          description: >-
+            The pipeline is wired but the Model Plane refused the edge's service
+            token (`reason` `model_plane_auth_refused`). A deployment fact, not a
+            fault of the caller; the caller's own token is fine.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AnswerErrorBody'
+  /v1/answer/stream:
+    post:
+      operationId: answerStream
+      summary: Server-sent events variant of /v1/answer
+      description: >-
+        Same pipeline and same request. Frames: `event: citations` (the citation
+        array), `event: delta` (`{"delta": text}`, repeated), then `event: done`
+        (`{"answer", "cached"}`); `event: error` (`{"message", "reason"}`) on
+        failure, where `reason` is the closed code of `AnswerErrorBody`. A warm
+        org-scoped answer-cache hit replays with no model call. A ZDR request is
+        refused with the same JSON 403 as `/v1/answer` (reason `zdr_unavailable`),
+        not a stream. When the pipeline is not wired the response is the same 501
+        as `/v1/answer`, not a stream. Metered as
+        `quarry.answer.synth` when an answer is produced.
+      tags:
+      - search
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AnswerRequest'
+      responses:
+        '200':
+          description: SSE stream of citations, deltas and a final `done`
+          content:
+            text/event-stream:
+              schema:
+                type: string
+        '400':
+          description: The query is empty
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AnswerErrorBody'
+        '403':
+          description: Zero data retention; refused before the stream starts, `reason` `zdr_unavailable`
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AnswerErrorBody'
+        '501':
+          description: The answer pipeline is not wired; `reason` as for `/v1/answer`
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AnswerErrorBody'
   /v1/agent/runs:
     post:
       operationId: startAgentRun
       summary: Acquire a governed browser-agent run
-      description: 'Creates a tenant-owned browser lease. BrowserBroker grants are
-
+      description: >-
+        Creates a tenant-owned browser lease. BrowserBroker grants are
         revalidated at run start and before every action; non-ZDR runs receive
-
         a durable continuation checkpoint.
-
-        '
+        API-key callers (INNH-10, off until `QUARRY_EDGE__API_KEY_AGENT_RUNS` is on):
+        the bearer is a short-lived token of the `api_key` principal type
+        (`sub` `apikey:<key_id>`, scope `browser:agent`) that Auth Core minted for the
+        key; the key itself never reaches Quarry. A key run needs a `grant_id`
+        in every environment, issued to that key (an allow-list session grant with
+        hosts and a budget; its hosts replace `constraints.allowed_domains`),
+        takes no `resume_run_id`, `profile_id` or `persist_profile`, is always an agent run,
+        and may call only the routes of the key allow-list (see CONTRACTS.md, "API-key agent runs").
+        The refusals are 403 with `error.details.reason` `api_key_*` and 429 `per_key_run_cap`;
+        see ERROR_REASONS.md.
       tags:
       - agent
       requestBody:
@@ -515,6 +677,12 @@ paths:
             `human_browse_service_refused`, `human_browse_owner_mismatch`, `human_browse_zdr_posture`
             or `human_browse_policy_unknown`. A resumed run whose stored policy mode differs is refused
             with "resumed run policy no longer matches its broker grant".
+            An API-key caller (INNH-10) is refused with `error.details.reason` one of
+            `api_key_agent_runs_disabled`, `api_key_scope_missing`, `api_key_route_refused`,
+            `api_key_grant_required`, `api_key_grant_kind_refused`, `api_key_open_web_refused`,
+            `api_key_grant_owner_mismatch`, `api_key_grant_budget_required`,
+            `api_key_grant_hosts_required`, `api_key_profile_refused`, `api_key_resume_refused`
+            or `api_key_budget_not_enforced`.
           content:
             application/json:
               schema:
@@ -522,8 +690,9 @@ paths:
         '429':
           description: >-
             RATE_LIMITED. A run cap is full: `error.details.reason` is
-            `global_run_cap`, `org_run_cap`, `org_interactive_run_cap` or
-            `org_plan_cap` (the organization's plan bounds this class of run), with
+            `global_run_cap`, `org_run_cap`, `org_interactive_run_cap`,
+            `org_plan_cap` (the organization's plan bounds this class of run) or
+            `per_key_run_cap` (an API key has its maximum of live runs), with
             `scope`, `limit`, `active` and `retry_after_seconds`. Retryable. See
             ERROR_REASONS.md.
           content:
@@ -534,6 +703,11 @@ paths:
     post:
       operationId: agentStep
       summary: Execute one governed browser action
+      description: >-
+        For an API-key caller (INNH-10) the grant is revalidated on every step and must
+        still be the key's own; a dialog reply, an upload or a download is refused with 403
+        `error.details.reason` `api_key_sensitive_action_refused` before the driver or the
+        broker is asked, and a run belongs to the key that started it (another caller gets 404).
       tags:
       - agent
       parameters:
@@ -1291,6 +1465,19 @@ paths:
 
         isolation — one failure never sinks the batch.
 
+
+        `schema` alone is schema-guided extraction. `prompt` alone asks the model for one
+
+        free-form JSON object (`data`, status `ok`, no `schema_valid`). Both together is
+
+        schema-guided extraction with the prompt as extra instructions. Neither returns
+
+        cleaned markdown (status `fetched`). Under zero data retention no page text is sent
+
+        to a model: each source answers status `error` with a `ZDR_UNAVAILABLE` message,
+
+        and its `structured` harvest still comes back.
+
         '
       tags:
       - extract
@@ -1308,17 +1495,49 @@ paths:
               schema:
                 $ref: '#/components/schemas/ExtractResponse'
         '400':
-          description: No valid URLs in request
+          description: No valid URLs in request, or a `prompt` that is empty after trimming or over 10000 characters
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorBody'
         '501':
-          description: Structured extraction requires a Model Plane
+          description: >-
+            A `schema` or a `prompt` was sent and the Model Plane cannot be used (never for a ZDR
+            request, and never when neither field is sent). The body is `{error, code, hint,
+            next_actions}` with `code` `UNSUPPORTED`; the three cases differ in `error`. (1) No
+            Model Plane URL: `structured extraction needs the Model Plane, and
+            QUARRY_EDGE__MODEL_PLANE_URL is not set on this deployment`. (2) A URL but no model
+            credential: `structured extraction needs a granted Model Plane lane, and this
+            deployment holds no model credential`. (3) The gateway refused the first model call
+            (answered after one fetch and one model call, only while no source was extracted):
+            `structured extraction needs a granted Model Plane lane, and the Model Plane refused
+            this service`. The retry is the same request without `schema` and `prompt`
+            (cleaned markdown). A deployed stack gets one of these until WS16.S1 to S3 and
+            decision X-7 land; no flag unlocks it. See RUNBOOKS, "Enable structured extract and
+            AI formats".
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorBody'
+              examples:
+                no_model_plane_url:
+                  summary: No Model Plane URL
+                  value:
+                    error: structured extraction needs the Model Plane, and QUARRY_EDGE__MODEL_PLANE_URL is not set on this deployment
+                    code: UNSUPPORTED
+                    hint: 'omit `schema` and `prompt` to receive cleaned markdown. Operators: the URL QUARRY_EDGE__MODEL_PLANE_URL is missing, and setting it alone is not enough because the model lane must also be granted; see docs/RUNBOOKS.md, "Enable structured extract and AI formats"'
+                    next_actions:
+                    - retry without `schema` and `prompt` to receive cleaned markdown
+                    - 'operators: see docs/RUNBOOKS.md, "Enable structured extract and AI formats"'
+                model_lane_refused:
+                  summary: The Model Plane refused this service
+                  value:
+                    error: structured extraction needs a granted Model Plane lane, and the Model Plane refused this service
+                    code: UNSUPPORTED
+                    hint: 'omit `schema` and `prompt` to receive cleaned markdown. Operators: the model lane is not granted to this service (the gateway refused the first model call, so no further page was fetched); see docs/RUNBOOKS.md, "Enable structured extract and AI formats"'
+                    next_actions:
+                    - retry without `schema` and `prompt` to receive cleaned markdown
+                    - 'operators: see docs/RUNBOOKS.md, "Enable structured extract and AI formats"'
   /v1/artifacts:
     get:
       operationId: list_artifacts
@@ -1341,6 +1560,7 @@ paths:
         description: Opaque cursor from a prior page
       - name: kind
         in: query
+        description: Keep only artifacts of this kind. Any other value is a 400 (`error.details.field` is `kind`).
         schema:
           type: string
           enum:
@@ -1350,6 +1570,12 @@ paths:
           - pdf
           - screenshot
           - extract
+      - name: run_id
+        in: query
+        description: Keep only the artifacts one run wrote (`run_...`, as `ArtifactSummary.run_id` and the per-job results carry it). Any other value is a 400 (`error.details.field` is `run_id`). The filter works on the in-memory and filesystem backends; an S3 backend cannot list, so it lists nothing.
+        schema:
+          type: string
+          pattern: '^run_'
       responses:
         '200':
           description: Artifact page
@@ -1590,7 +1816,12 @@ paths:
       description: >-
         Org-scoped by the verified token. A job id of another organization, or an id
         that is not a job, answers 404. The document carries status, phase, origin,
-        counts, total and total_kind, warnings and the control state.
+        counts, total and total_kind, warnings and the control state. For a page-priced
+        job (crawl, batch, scrape, extract) it also carries `credits`, an estimate derived
+        from the fetched-page count, once the control service has `QUARRY_CONTROL__JOB_CREDITS`
+        on (default off).
+        To cancel, use DELETE /v1/crawl/{job_id} or DELETE /v1/batch/{job_id} (WS15.L2). Crawl and batch jobs are
+        refused under zero data retention, so there is no such job to read here under ZDR.
       parameters:
         - name: job_id
           in: path
@@ -1605,8 +1836,15 @@ paths:
             application/json:
               schema:
                 type: object
+                properties:
+                  data:
+                    $ref: '#/components/schemas/JobStatusView'
         '404':
           description: Not found for this organization, or not a job id.
+        '408':
+          description: >-
+            The route deadline (60 s by default) passed before the status was read. The body is empty, with no
+            error envelope. The x-request-id header is still echoed.
   /v1/crawl/ongoing:
     get:
       operationId: list_ongoing_crawls
@@ -1637,6 +1875,9 @@ paths:
             application/json:
               schema:
                 type: object
+                properties:
+                  data:
+                    $ref: '#/components/schemas/JobStatusView'
         '404':
           description: Not found, a foreign id, or a job of another kind.
     delete:
@@ -1779,6 +2020,88 @@ paths:
             application/json:
               schema:
                 type: object
+  /v1/crawl/{job_id}/results:
+    get:
+      operationId: get_crawl_results
+      summary: The pages a crawl fetched, with their artifact ids (INNH-12)
+      description: |
+        The pages a crawl fetched, one row for each fetch (INNH-12): the page URL, the
+        fetch metadata and the ids of the stored artifacts. This is the dataset of a run; the
+        page content is not in the response, read it by id with `GET /v1/artifacts/{id}`
+        (`markdown_artifact_id` is the page as Markdown, `source_artifact_id` the HTML or the
+        original document). Failed and blocked pages are not rows: they are on `/errors`.
+
+        Rows are in the order the pages were fetched. `after_seq` pages forward: pass the
+        `next_seq` of the last page (also in `meta.page.next`). `next_seq` is absent on the
+        last page. A URL fetched twice (a retry, an escalation to a browser) has two rows;
+        `latest=true` returns the latest fetch of each URL instead, still in `seq` order.
+        When a job has more than 20 000 fetches, `latest=true` reads the first 20 000 only
+        and `scan_capped` is true.
+
+        A row from before this release carries `url`, `status`, `title` and `fetched_at`
+        only. The artifact ids are absent when nothing was stored (never under Zero Data
+        Retention). On the in-memory artifact backend the ids stop resolving when the edge
+        restarts.
+
+        Off unless the edge runs with `QUARRY_EDGE__JOB_RESULTS=1` (501 otherwise). 403 for a
+        caller under Zero Data Retention (`error.details.reason` is `job_result_urls`) and for
+        a service principal. The organization comes from the token.
+      tags:
+      - crawl
+      security:
+      - bearerAuth: []
+      parameters:
+        - name: job_id
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: '^job_'
+        - name: after_seq
+          in: query
+          required: false
+          description: The `next_seq` of the previous page.
+          schema:
+            type: integer
+            minimum: 0
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 500
+            default: 100
+        - name: latest
+          in: query
+          required: false
+          description: Keep only the latest fetch of each URL.
+          schema:
+            type: boolean
+            default: false
+      responses:
+        '200':
+          description: One page of results.
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                - data
+                - meta
+                properties:
+                  data:
+                    $ref: '#/components/schemas/JobResultsView'
+                  meta:
+                    $ref: '#/components/schemas/ResponseMeta'
+        '400':
+          description: A bad `limit` (not 1 to 500), `after_seq` or `latest`. `error.details.field` names it.
+        '403':
+          description: The token's ZDR floor is set (`error.details.reason` is `job_result_urls`), or the caller is a service principal.
+        '404':
+          description: Not found for this organization, a foreign id, or a job of another kind.
+        '501':
+          description: Job results are not enabled on this edge (QUARRY_EDGE__JOB_RESULTS).
   /v1/batch/{job_id}:
     get:
       operationId: get_batch_status
@@ -1797,6 +2120,9 @@ paths:
             application/json:
               schema:
                 type: object
+                properties:
+                  data:
+                    $ref: '#/components/schemas/JobStatusView'
         '404':
           description: Not found, a foreign id, or a job of another kind.
     delete:
@@ -1961,6 +2287,170 @@ paths:
           description: The token's ZDR floor is set; error URLs are not returned.
         '404':
           description: Not found for this organization.
+  /v1/batch/{job_id}/results:
+    get:
+      operationId: get_batch_results
+      summary: The pages a batch fetched, with their artifact ids (INNH-12)
+      description: |
+        The pages a batch fetched, one row for each fetch (INNH-12): the page URL, the
+        fetch metadata and the ids of the stored artifacts. This is the dataset of a run; the
+        page content is not in the response, read it by id with `GET /v1/artifacts/{id}`
+        (`markdown_artifact_id` is the page as Markdown, `source_artifact_id` the HTML or the
+        original document). Failed and blocked pages are not rows: they are on `/errors`.
+
+        Rows are in the order the pages were fetched. `after_seq` pages forward: pass the
+        `next_seq` of the last page (also in `meta.page.next`). `next_seq` is absent on the
+        last page. A URL fetched twice (a retry, an escalation to a browser) has two rows;
+        `latest=true` returns the latest fetch of each URL instead, still in `seq` order.
+        When a job has more than 20 000 fetches, `latest=true` reads the first 20 000 only
+        and `scan_capped` is true.
+
+        A row from before this release carries `url`, `status`, `title` and `fetched_at`
+        only. The artifact ids are absent when nothing was stored (never under Zero Data
+        Retention). On the in-memory artifact backend the ids stop resolving when the edge
+        restarts.
+
+        Off unless the edge runs with `QUARRY_EDGE__JOB_RESULTS=1` (501 otherwise). 403 for a
+        caller under Zero Data Retention (`error.details.reason` is `job_result_urls`) and for
+        a service principal. The organization comes from the token.
+      tags:
+      - batch
+      security:
+      - bearerAuth: []
+      parameters:
+        - name: job_id
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: '^job_'
+        - name: after_seq
+          in: query
+          required: false
+          description: The `next_seq` of the previous page.
+          schema:
+            type: integer
+            minimum: 0
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 500
+            default: 100
+        - name: latest
+          in: query
+          required: false
+          description: Keep only the latest fetch of each URL.
+          schema:
+            type: boolean
+            default: false
+      responses:
+        '200':
+          description: One page of results.
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                - data
+                - meta
+                properties:
+                  data:
+                    $ref: '#/components/schemas/JobResultsView'
+                  meta:
+                    $ref: '#/components/schemas/ResponseMeta'
+        '400':
+          description: A bad `limit` (not 1 to 500), `after_seq` or `latest`. `error.details.field` names it.
+        '403':
+          description: The token's ZDR floor is set (`error.details.reason` is `job_result_urls`), or the caller is a service principal.
+        '404':
+          description: Not found for this organization, a foreign id, or a job of another kind.
+        '501':
+          description: Job results are not enabled on this edge (QUARRY_EDGE__JOB_RESULTS).
+  /v1/jobs/{job_id}/results:
+    get:
+      operationId: get_job_results
+      summary: The pages any durable job fetched, with their artifact ids (INNH-12)
+      description: |
+        The pages a job fetched, one row for each fetch (INNH-12): the page URL, the
+        fetch metadata and the ids of the stored artifacts. This is the dataset of a run; the
+        page content is not in the response, read it by id with `GET /v1/artifacts/{id}`
+        (`markdown_artifact_id` is the page as Markdown, `source_artifact_id` the HTML or the
+        original document). Failed and blocked pages are not rows: they are on `/errors`.
+
+        Rows are in the order the pages were fetched. `after_seq` pages forward: pass the
+        `next_seq` of the last page (also in `meta.page.next`). `next_seq` is absent on the
+        last page. A URL fetched twice (a retry, an escalation to a browser) has two rows;
+        `latest=true` returns the latest fetch of each URL instead, still in `seq` order.
+        When a job has more than 20 000 fetches, `latest=true` reads the first 20 000 only
+        and `scan_capped` is true.
+
+        A row from before this release carries `url`, `status`, `title` and `fetched_at`
+        only. The artifact ids are absent when nothing was stored (never under Zero Data
+        Retention). On the in-memory artifact backend the ids stop resolving when the edge
+        restarts.
+
+        Off unless the edge runs with `QUARRY_EDGE__JOB_RESULTS=1` (501 otherwise). 403 for a
+        caller under Zero Data Retention (`error.details.reason` is `job_result_urls`) and for
+        a service principal. The organization comes from the token.
+      tags:
+      - resources
+      security:
+      - bearerAuth: []
+      parameters:
+        - name: job_id
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: '^job_'
+        - name: after_seq
+          in: query
+          required: false
+          description: The `next_seq` of the previous page.
+          schema:
+            type: integer
+            minimum: 0
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 500
+            default: 100
+        - name: latest
+          in: query
+          required: false
+          description: Keep only the latest fetch of each URL.
+          schema:
+            type: boolean
+            default: false
+      responses:
+        '200':
+          description: One page of results.
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                - data
+                - meta
+                properties:
+                  data:
+                    $ref: '#/components/schemas/JobResultsView'
+                  meta:
+                    $ref: '#/components/schemas/ResponseMeta'
+        '400':
+          description: A bad `limit` (not 1 to 500), `after_seq` or `latest`. `error.details.field` names it.
+        '403':
+          description: The token's ZDR floor is set (`error.details.reason` is `job_result_urls`), or the caller is a service principal.
+        '404':
+          description: Not found for this organization, a foreign id, or a job of another kind.
+        '501':
+          description: Job results are not enabled on this edge (QUARRY_EDGE__JOB_RESULTS).
   /v1/{kind}/jobs:
     get:
       operationId: list_jobs_by_kind
@@ -2572,6 +3062,114 @@ paths:
                     $ref: '#/components/schemas/ResponseMeta'
                   error:
                     $ref: '#/components/schemas/ErrorDetail'
+  /v1/change/diff:
+    get:
+      operationId: change_diff
+      summary: The two versions of a tracked page and the paragraph diff between them (INNH-4)
+      description: |
+        Returns the stored text of two baselines of a tracked URL and the paragraph diff between
+        them. A baseline keeps its page text only for a change monitor, only when the edge runs
+        with `QUARRY_EDGE__CHANGE_TEXT_DIFF` on, and never under Zero Data Retention.
+
+        Pick the pair one way: `url` alone compares the latest two baselines; `url` with `from`
+        and `to` compares two named baselines of that url (any two, in the order given);
+        `diff_id` reads the diff a `quarry.change.detected` event announced (`url` may be added
+        and must then be the diff's url). `include=markdown` adds the two pages' text, each cut
+        at 1 MiB.
+
+        The diff is paragraph-level and set-based: a paragraph is added when the newer text has
+        it and the older does not, removed in the opposite case, moved when it kept its text but
+        changed its place among the paragraphs both versions hold (an inserted paragraph does
+        not make the rest move). Whitespace and line endings are ignored. `real_delta` is false
+        when nothing was added or removed, which is the honest answer for a page whose raw
+        bytes changed (an ad, a timestamp in the markup) and whose text did not. The diff holds
+        at most 500 ops and 2 KB of text per op; the counts are complete and `truncated` says
+        whether anything was cut.
+
+        When the pair has no readable text the answer is 200 with `available: false` and a
+        `reason`: `no_previous_version` (the url has one baseline), `no_previous_text` (the older
+        baseline was recorded before text was kept), `no_text` (the newer one has none) or
+        `artifact_gone` (a stored page was evicted or cannot be read). The two sides' metadata
+        is returned either way.
+
+        An id of another organization answers 404 exactly like an id that does not exist.
+        501 when the edge runs without the flag; 403 for a Zero Data Retention caller.
+      tags:
+      - change-tracking
+      security:
+      - bearerAuth: []
+      parameters:
+      - name: url
+        in: query
+        description: The tracked URL. Required unless `diff_id` is given.
+        schema:
+          type: string
+          format: uri
+      - name: from
+        in: query
+        description: The older baseline id (`bln_...`). Needs `to` and `url`.
+        schema:
+          type: string
+          maxLength: 128
+      - name: to
+        in: query
+        description: The newer baseline id (`bln_...`). Needs `from` and `url`.
+        schema:
+          type: string
+          maxLength: 128
+      - name: diff_id
+        in: query
+        description: A stored diff id (`diff_...`), as `quarry.change.detected` and `ChangeRecord.diff_id` carry it. Cannot be combined with `from` or `to`.
+        schema:
+          type: string
+          maxLength: 128
+      - name: include
+        in: query
+        description: '`markdown` adds the stored text of both versions.'
+        schema:
+          type: string
+          enum:
+          - markdown
+      responses:
+        '200':
+          description: The two versions and the diff, or why there is no diff
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                - meta
+                properties:
+                  data:
+                    $ref: '#/components/schemas/ChangeDiffView'
+                  meta:
+                    $ref: '#/components/schemas/ResponseMeta'
+                  error:
+                    $ref: '#/components/schemas/ErrorDetail'
+        '400':
+          description: Neither `url` nor `diff_id`; `from` without `to`; `diff_id` with `from` or `to`; baselines of different urls or the same baseline twice; an unknown `include`; an id over 128 characters
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '403':
+          description: The caller is under Zero Data Retention. Stored page text is not readable.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '404':
+          description: No baseline for this org and url, or an unknown baseline or diff id, or one that belongs to another organization
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '501':
+          description: Change text diffs are not enabled on this edge (QUARRY_EDGE__CHANGE_TEXT_DIFF), or the edge has no baseline store
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
   /v1/change/snapshot:
     post:
       operationId: promote_tracked_result_to_snapshot
@@ -3066,8 +3664,560 @@ paths:
           description: A service principal, or a ZDR organization with the flag on (action probe).
         '404':
           description: Not found, or not visible to the caller under enforce.
+  /v1/webhook-subscriptions:
+    post:
+      operationId: create_webhook_subscription
+      summary: Subscribe an HTTPS endpoint to change events (INNH-5)
+      description: |
+        Registers a webhook for the caller's organization. Quarry sends the endpoint a signed
+        `POST` for every event type named in `events`; v1 has one: `change_detected` (the stored
+        event type; the `payload.subject` of the delivery stays `quarry.change.detected`).
+        The delivery format, the signature and the retry rules are in `docs/CONTRACTS.md`,
+        section 4.
+
+        The response carries the HMAC `secret` (`whsec_` and 64 hex characters). It is shown
+        here once and by `rotate-secret`; no read returns it again, only `secret_hint`.
+
+        The URL must be `https`, carry no credentials or fragment, be at most 2048 characters,
+        and resolve only to public addresses (a private, loopback, link-local, metadata or
+        carrier-grade-NAT address is refused; every delivery is vetted again at connect time).
+        An organization holds at most 10 subscriptions. Unknown body fields are a 400.
+
+        Off unless the edge runs with `QUARRY_EDGE__WEBHOOK_SUBSCRIPTIONS` on and control with
+        `QUARRY_CONTROL__WEBHOOK_SUBSCRIPTIONS` on (501 otherwise). A Zero Data Retention
+        caller gets 403 (`details.reason` is `webhook_off_process`): a subscription pushes page
+        URLs off-process.
+      tags:
+      - webhooks
+      security:
+      - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateWebhookSubscription'
+      responses:
+        '201':
+          description: The subscription and its secret, once.
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                - data
+                - meta
+                properties:
+                  data:
+                    $ref: '#/components/schemas/WebhookSubscriptionCreated'
+                  meta:
+                    $ref: '#/components/schemas/ResponseMeta'
+        '400':
+          description: A field is invalid. `error.details.field` is `url`, `events`, `description` or `body`; `error.details.reason` is one of `url_invalid`, `url_too_long`, `url_not_https`, `url_userinfo`, `url_fragment`, `url_private_address`, `url_unresolvable`, `events_empty`, `events_unsupported`, `description_too_long`, `body_invalid`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '403':
+          description: The token's ZDR floor is set (`error.details.reason` is `webhook_off_process`), or the caller is a service principal.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '409':
+          description: The organization already has a subscription with this URL and these events (`error.details.reason` is `subscription_exists`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '429':
+          description: The organization holds the maximum of 10 subscriptions (`error.details.reason` is `subscription_limit`, `error.details.limit` is 10).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '501':
+          description: Not enabled (QUARRY_EDGE__WEBHOOK_SUBSCRIPTIONS on the edge, QUARRY_CONTROL__WEBHOOK_SUBSCRIPTIONS on control; the message names the one that is off).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+    get:
+      operationId: list_webhook_subscriptions
+      summary: List the organization's webhook subscriptions (INNH-5)
+      description: Newest first. Never returns a secret. Each item carries the status of its latest delivery in `last_delivery`.
+      tags:
+      - webhooks
+      security:
+      - bearerAuth: []
+      parameters:
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 200
+          default: 50
+      - name: cursor
+        in: query
+        required: false
+        description: The `next_cursor` of the previous page.
+        schema:
+          type: string
+          maxLength: 256
+      responses:
+        '200':
+          description: One page of subscriptions.
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                - data
+                - meta
+                properties:
+                  data:
+                    $ref: '#/components/schemas/WebhookSubscriptionList'
+                  meta:
+                    $ref: '#/components/schemas/ResponseMeta'
+        '400':
+          description: A bad `limit` or `cursor` (`error.details.field`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '501':
+          description: Not enabled.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+  /v1/webhook-subscriptions/{subscription_id}:
+    get:
+      operationId: get_webhook_subscription
+      summary: Read one webhook subscription (INNH-5)
+      tags:
+      - webhooks
+      security:
+      - bearerAuth: []
+      parameters:
+      - $ref: '#/components/parameters/WebhookSubscriptionId'
+      responses:
+        '200':
+          description: The subscription. No secret.
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                - data
+                - meta
+                properties:
+                  data:
+                    $ref: '#/components/schemas/WebhookSubscription'
+                  meta:
+                    $ref: '#/components/schemas/ResponseMeta'
+        '404':
+          description: Unknown id, an id of another organization (the same answer), or a malformed id.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '501':
+          description: Not enabled.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+    patch:
+      operationId: update_webhook_subscription
+      summary: Pause, resume or change the events of a subscription (INNH-5)
+      description: |
+        Names at least one of `active`, `events`, `description`. The URL is not editable: delete
+        the subscription and create a new one, so every target goes through the create-time
+        check. Refused for a Zero Data Retention caller (403, `webhook_off_process`), because it
+        can resume pushing.
+      tags:
+      - webhooks
+      security:
+      - bearerAuth: []
+      parameters:
+      - $ref: '#/components/parameters/WebhookSubscriptionId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateWebhookSubscription'
+      responses:
+        '200':
+          description: The subscription after the change.
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                - data
+                - meta
+                properties:
+                  data:
+                    $ref: '#/components/schemas/WebhookSubscription'
+                  meta:
+                    $ref: '#/components/schemas/ResponseMeta'
+        '400':
+          description: No field named (`reason` is `empty_patch`), an unsupported event, a description over 200 characters, or an unknown field (`body_invalid`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '403':
+          description: Zero Data Retention (`error.details.reason` is `webhook_off_process`), or a service principal.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '404':
+          description: Unknown or foreign id.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '501':
+          description: Not enabled.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+    delete:
+      operationId: delete_webhook_subscription
+      summary: Delete a subscription and its delivery log (INNH-5)
+      description: A hard delete. Pending deliveries of the subscription are dropped with it. Open to a Zero Data Retention caller (wind-down).
+      tags:
+      - webhooks
+      security:
+      - bearerAuth: []
+      parameters:
+      - $ref: '#/components/parameters/WebhookSubscriptionId'
+      responses:
+        '204':
+          description: Deleted. No body.
+        '404':
+          description: Unknown or foreign id.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '501':
+          description: Not enabled.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+  /v1/webhook-subscriptions/{subscription_id}/rotate-secret:
+    post:
+      operationId: rotate_webhook_subscription_secret
+      summary: Mint a new secret for a subscription (INNH-5)
+      description: The old secret stops working at once; deliveries already queued are signed with the new one. The new secret is in this response only.
+      tags:
+      - webhooks
+      security:
+      - bearerAuth: []
+      parameters:
+      - $ref: '#/components/parameters/WebhookSubscriptionId'
+      responses:
+        '200':
+          description: The new secret, once.
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                - data
+                - meta
+                properties:
+                  data:
+                    $ref: '#/components/schemas/WebhookSecretRotated'
+                  meta:
+                    $ref: '#/components/schemas/ResponseMeta'
+        '404':
+          description: Unknown or foreign id.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '501':
+          description: Not enabled.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+  /v1/webhook-subscriptions/{subscription_id}/deliveries:
+    get:
+      operationId: list_webhook_deliveries
+      summary: The delivery log of a subscription (INNH-5)
+      description: |
+        Newest first. A delivery shows its status and attempt count, never the payload or the
+        raw error: `last_error` is `http_<status>`, `timeout`, `blocked_target`, `transport`,
+        `inactive` or `error`. A delivery is `dlq` after five failed attempts or at once on a
+        4xx other than 408 and 429. Finished deliveries are deleted after 14 days.
+      tags:
+      - webhooks
+      security:
+      - bearerAuth: []
+      parameters:
+      - $ref: '#/components/parameters/WebhookSubscriptionId'
+      - name: status
+        in: query
+        required: false
+        schema:
+          type: string
+          enum:
+          - pending
+          - in_flight
+          - success
+          - failed
+          - dlq
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 200
+          default: 50
+      - name: cursor
+        in: query
+        required: false
+        schema:
+          type: string
+          maxLength: 256
+      responses:
+        '200':
+          description: One page of deliveries.
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                - data
+                - meta
+                properties:
+                  data:
+                    $ref: '#/components/schemas/WebhookDeliveryList'
+                  meta:
+                    $ref: '#/components/schemas/ResponseMeta'
+        '400':
+          description: A bad `status`, `limit` or `cursor` (`error.details.field`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '404':
+          description: Unknown or foreign subscription id.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '501':
+          description: Not enabled.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+  /v1/webhook-subscriptions/{subscription_id}/deliveries/{delivery_id}/retry:
+    post:
+      operationId: retry_webhook_delivery
+      summary: Re-queue a failed delivery (INNH-5)
+      description: Only a `failed` or `dlq` delivery can be retried (409 `delivery_not_retryable` otherwise). The attempt count restarts at zero. Refused for a Zero Data Retention caller.
+      tags:
+      - webhooks
+      security:
+      - bearerAuth: []
+      parameters:
+      - $ref: '#/components/parameters/WebhookSubscriptionId'
+      - name: delivery_id
+        in: path
+        required: true
+        schema:
+          type: string
+          pattern: '^whkd_'
+      responses:
+        '202':
+          description: The delivery, now pending.
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                - data
+                - meta
+                properties:
+                  data:
+                    $ref: '#/components/schemas/WebhookDeliveryView'
+                  meta:
+                    $ref: '#/components/schemas/ResponseMeta'
+        '403':
+          description: Zero Data Retention (`webhook_off_process`), or a service principal.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '404':
+          description: Unknown or foreign subscription or delivery id.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '409':
+          description: The delivery is pending, in flight or delivered (`error.details.reason` is `delivery_not_retryable`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '501':
+          description: Not enabled.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+  /v1/parse:
+    post:
+      operationId: parse_document
+      summary: Parse an uploaded PDF or DOCX to text and store nothing (INNH-11)
+      description: >-
+        The request body is the document's raw bytes, not a URL and not multipart (a URL is
+        `POST /v1/scrape` with QUARRY_EDGE__DOC_ROUTING=on). The answer is the document's text in
+        the typed envelope. Nothing is stored: no artifact, no cache entry, no index row, no durable
+        event, no usage record, no ingest; the response carries `Cache-Control: no-store`, and no
+        filename or text is logged. The route is idempotent and has no side effect.
+
+
+        The bytes decide the kind (PDF or DOCX); `Content-Type` is only checked. It may be absent,
+        `application/octet-stream`, `application/pdf` or the DOCX media type; any other type is a
+        415, and a PDF or DOCX type that the bytes contradict is a 415 `content_type_mismatch`.
+        The body limit is 25 MiB (QUARRY_EDGE__PARSE_MAX_BYTES lowers it). The parse runs in an
+        isolated child process under memory and CPU limits with a 15 second deadline. An
+        organisation may have one parse in flight (QUARRY_EDGE__PARSE_CONCURRENCY_PER_ORG); a second
+        gets a 429 with `Retry-After` before its body is read.
+
+
+        The text is plain (`structure: plain`): paragraphs, no headings, lists or tables. A PDF page
+        with no text layer (a scan) has no text and a `document_has_no_text_layer` warning (or
+        `some_pages_have_no_text_layer`); there is no OCR. No redaction is applied to the returned
+        text: personal data in the document comes back as it is.
+
+
+        Dark: with QUARRY_EDGE__PARSE_ROUTE off (the default) the route answers 501. A service
+        principal needs the `parse:write` scope; a user token needs none.
+      tags:
+        - parse
+      requestBody:
+        required: true
+        content:
+          application/pdf:
+            schema:
+              type: string
+              format: binary
+          application/vnd.openxmlformats-officedocument.wordprocessingml.document:
+            schema:
+              type: string
+              format: binary
+          application/octet-stream:
+            schema:
+              type: string
+              format: binary
+      responses:
+        '200':
+          description: The text of the document.
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                enum: [no-store]
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ParseResponse'
+        '400':
+          description: An empty body (`details.reason` `empty_body`), or a body that could not be read.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ParseError'
+        '401':
+          description: No valid token.
+        '403':
+          description: A service principal without the `parse:write` scope.
+        '413':
+          description: The body is over the limit (`details.reason` `too_large`, `details.max_bytes`), by its declared length or by its bytes.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ParseError'
+        '415':
+          description: >-
+            Not a document the route reads. `details.reason` is `unsupported_media` (the bytes are
+            not a PDF or DOCX, or the declared type is not one the route takes),
+            `content_type_mismatch` (the declared type names the other document type than the
+            bytes), `pdf_parse_failed` or `docx_parse_failed` (the parser could not read the file,
+            or was stopped by its limits), or `too_large` (the parser's own size or inflate limit).
+            `details.supported` is `[pdf, docx]`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ParseError'
+        '429':
+          description: >-
+            The organisation already has a document being parsed (`org_parse_busy`), the process is
+            buffering as many uploads as it will (`parse_capacity`), or the parser stayed busy
+            (`parser_busy`). `Retry-After` says when to come back.
+          headers:
+            Retry-After:
+              schema:
+                type: integer
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ParseError'
+        '501':
+          description: >-
+            Off (`details.reason` `parse_route_disabled`, `details.env` QUARRY_EDGE__PARSE_ROUTE), or on
+            while documents would be parsed inside the edge (`isolation_required`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ParseError'
+        '504':
+          description: The parse did not finish in 15 seconds (`TIMEOUT`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ParseError'
 components:
   parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      description: >-
+        A caller-chosen key for POST /v1/batch and POST /v1/crawl. At most 128 bytes after trimming. An empty,
+        longer or not visible ASCII value is ignored, as if no key were sent. Keys are unique per organization
+        (control migration 028). A repeated key answers 200 with the job the first request created (the same
+        job_id), and that repeat is not billed again. With QUARRY_EDGE__BATCH_IDEMPOTENCY on, a batch that reuses
+        a key for a different URL list or ingest flag is a 409 CONFLICT with details.reason idempotency_key_reused.
+        With the flag off, or on a crawl, a reused key re-attaches to the held job whatever the body says.
+      schema:
+        type: string
+        maxLength: 128
+    WebhookSubscriptionId:
+      name: subscription_id
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: '^whk_'
+      description: A webhook subscription id (`whk_...`) of the caller's organization
     AgentRunId:
       name: run_id
       in: path
@@ -3110,6 +4260,104 @@ components:
         $ref: '#/components/schemas/AdvisoryIdentifier'
       description: ADVISORY. A short label the caller gave its agent. Recorded, never trusted. `agent_label` is accepted too.
   schemas:
+    ParseWarning:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          enum: [document_has_no_text_layer, some_pages_have_no_text_layer, document_has_no_text, truncated_at_8mib]
+          description: >-
+            `document_has_no_text_layer`: no page of the PDF has text (a scan; no OCR).
+            `some_pages_have_no_text_layer`: some do not, and their text is missing.
+            `document_has_no_text`: a DOCX with no text. `truncated_at_8mib`: the text was cut.
+        message:
+          type: string
+    ParseData:
+      type: object
+      required: [markdown, kind, bytes, structure, truncated, warnings]
+      properties:
+        markdown:
+          type: string
+          description: The text of the document. Plain paragraphs, see `structure`.
+        kind:
+          type: string
+          enum: [pdf, docx]
+          description: What the bytes were read as.
+        bytes:
+          type: integer
+          description: The size of the uploaded document.
+        structure:
+          type: string
+          enum: [plain]
+          description: Paragraphs only. Headings, lists and tables are not marked up.
+        truncated:
+          type: boolean
+          description: The text was cut at 8 MiB.
+        pages:
+          type: integer
+          description: Pages of a PDF. Absent for a DOCX.
+        warnings:
+          type: array
+          items:
+            $ref: '#/components/schemas/ParseWarning'
+    ParseResponse:
+      type: object
+      required: [data, meta]
+      properties:
+        data:
+          $ref: '#/components/schemas/ParseData'
+        meta:
+          type: object
+          required: [request_id]
+          properties:
+            request_id:
+              type: string
+    ParseError:
+      type: object
+      required: [error, meta]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              enum: [BAD_REQUEST, UNSUPPORTED_MEDIA, RATE_LIMITED, UNSUPPORTED, TIMEOUT, INTERNAL]
+            message:
+              type: string
+            details:
+              type: object
+              properties:
+                reason:
+                  type: string
+                  description: >-
+                    empty_body, body_unreadable, too_large, unsupported_media, content_type_mismatch,
+                    pdf_parse_failed, docx_parse_failed, org_parse_busy, parse_capacity, parser_busy,
+                    parse_route_disabled, isolation_required.
+                kind:
+                  type: string
+                detected:
+                  type: string
+                  description: What the bytes were (`html`, `image`, `archive`, `binary`, `pdf`, `docx`, ...).
+                declared:
+                  type: string
+                supported:
+                  type: array
+                  items:
+                    type: string
+                    enum: [pdf, docx]
+                max_bytes:
+                  type: integer
+                retry_after_seconds:
+                  type: integer
+                env:
+                  type: string
+        meta:
+          type: object
+          properties:
+            request_id:
+              type: string
     ProfileSummary:
       type: object
       required: [profile_id, scope, owner_is_caller]
@@ -3428,6 +4676,74 @@ components:
         source_url:
           type: string
           nullable: true
+        run_id:
+          type: string
+          description: The run that wrote the artifact (`run_...`). Absent when the backend cannot tell.
+        page_hash:
+          type: string
+          description: The page the artifact belongs to, the hash of its URL and content fingerprint. A changed page in a later run has a different one.
+    JobResultsView:
+      type: object
+      description: The data of GET /v1/{crawl,batch,jobs}/{job_id}/results (INNH-12)
+      required:
+      - items
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/JobResult'
+        next_seq:
+          type: integer
+          minimum: 0
+          description: Present when more rows remain. Pass it back as `after_seq`.
+        scan_capped:
+          type: boolean
+          description: True only for a `latest=true` read of a job with more than 20 000 fetches, whose answer covers the first 20 000.
+    JobResult:
+      type: object
+      description: One page a job fetched. Fields after `fetched_at` are absent when the fetch event predates them or nothing was stored.
+      required:
+      - seq
+      - url
+      - status
+      - fetched_at
+      properties:
+        seq:
+          type: integer
+          minimum: 0
+          description: Position of the fetch in the job's event log. The cursor is the last row's seq.
+        url:
+          type: string
+          description: The URL the job fetched (as requested; a redirect target is not recorded here).
+        status:
+          type: integer
+          description: HTTP status of the fetch.
+        content_type:
+          type: string
+        title:
+          type: string
+        fetched_at:
+          type: string
+          format: date-time
+        word_count:
+          type: integer
+          minimum: 0
+        driver:
+          type: string
+          enum:
+          - static
+          - tls
+          - browser
+        markdown_artifact_id:
+          type: string
+          description: The stored Markdown of the page. Read it with `GET /v1/artifacts/{id}`.
+        source_artifact_id:
+          type: string
+          description: The stored HTML, or the original document. Read it with `GET /v1/artifacts/{id}`.
+        bytes:
+          type: integer
+          minimum: 0
+          description: Size in bytes of the stored Markdown.
     JobSummary:
       type: object
       required:
@@ -3472,6 +4788,140 @@ components:
           nullable: true
         stats:
           description: Kind-specific counters
+        origin:
+          $ref: '#/components/schemas/JobRunOrigin'
+        phase:
+          type: string
+          description: What a person reads; queued while waiting, otherwise the status.
+        credits:
+          $ref: '#/components/schemas/JobCredits'
+    JobRunOrigin:
+      type: object
+      required:
+      - type
+      properties:
+        type:
+          type: string
+          description: user, agent, schedule, webhook, api, or unknown for rows written before the origin existed.
+        actor:
+          type: string
+        ref:
+          type: string
+          description: The Model Plane run id, for agent origins only.
+    JobCredits:
+      type: object
+      description: >-
+        Credits a job has used, derived at read time from its fetched-page count
+        (pages fetched x price_per_page). A Quarry-side estimate, not what billing-core
+        invoices: a flat price per fetched page, a browser-rendered page priced like any
+        other, failed and blocked pages free. Present only for page-priced kinds (crawl,
+        batch, scrape, extract) and only while the control service runs with
+        QUARRY_CONTROL__JOB_CREDITS on (default off); absent, never null, otherwise.
+        GET /v1/team/credit-usage sums the same page_fetched events at the same price.
+      required:
+      - used
+      - unit
+      - basis
+      - price_per_page
+      - estimated
+      - final
+      properties:
+        used:
+          type: number
+          description: Credits used so far.
+        unit:
+          type: string
+          enum:
+          - credit
+        basis:
+          type: string
+          enum:
+          - pages_fetched
+        price_per_page:
+          type: number
+        estimated:
+          type: boolean
+          description: Always true.
+        final:
+          type: boolean
+          description: False while the job can still fetch pages; true once its status is terminal.
+    JobStatusView:
+      type: object
+      description: The status document of a crawl, batch or other durable job (WS15.L1).
+      required:
+      - job_id
+      - kind
+      - status
+      - phase
+      - terminal
+      - created_at
+      - counts
+      - control
+      properties:
+        job_id:
+          type: string
+        kind:
+          type: string
+        status:
+          type: string
+        phase:
+          type: string
+        terminal:
+          type: boolean
+        origin:
+          $ref: '#/components/schemas/JobRunOrigin'
+        created_at:
+          type: string
+          format: date-time
+        finished_at:
+          type: string
+          format: date-time
+        deadline_at:
+          type: string
+          format: date-time
+        counts:
+          type: object
+          properties:
+            completed:
+              type: integer
+            failed:
+              type: integer
+            blocked:
+              type: integer
+            retried:
+              type: integer
+        total:
+          type: integer
+        total_kind:
+          type: string
+          enum:
+          - exact
+          - budget
+        warnings:
+          type: array
+          items:
+            type: object
+            required:
+            - code
+            - message
+            properties:
+              code:
+                type: string
+              message:
+                type: string
+        control:
+          type: object
+          properties:
+            desired:
+              type: string
+            pending:
+              type: boolean
+        schedule_id:
+          type: string
+        run_id:
+          type: string
+        credits:
+          $ref: '#/components/schemas/JobCredits'
     RequestQueueSummary:
       type: object
       required:
@@ -3816,6 +5266,7 @@ components:
         artifact_id:
           type: string
           nullable: true
+          description: The stored markdown of this version (INNH-4). Set on a baseline a change monitor recorded with QUARRY_EDGE__CHANGE_TEXT_DIFF on; absent on older baselines and always under Zero Data Retention.
         prev_baseline_id:
           type: string
           nullable: true
@@ -3853,10 +5304,143 @@ components:
         diff_id:
           type: string
           nullable: true
-          description: Present only for status=changed
+          description: Present only for status=changed. A monitor's change event carries it with QUARRY_EDGE__CHANGE_TEXT_DIFF on (`GET /v1/change/diff?diff_id=`).
         checked_at:
           type: string
           format: date-time
+    ChangeDiffView:
+      type: object
+      description: The data of GET /v1/change/diff (INNH-4)
+      required:
+      - source_url
+      - from
+      - to
+      - diff_id
+      - available
+      properties:
+        source_url:
+          type: string
+          format: uri
+        from:
+          nullable: true
+          description: The older version. null when the url has one baseline only.
+          allOf:
+          - $ref: '#/components/schemas/ChangeDiffSide'
+        to:
+          $ref: '#/components/schemas/ChangeDiffSide'
+        diff_id:
+          type: [string, 'null']
+          description: The stored diff record of the pair. null when none was stored (the pair is not a change the monitor recorded, or it was recorded before text diffs); the diff is then computed for this request.
+        available:
+          type: boolean
+          description: True when `diff` is present.
+        reason:
+          $ref: '#/components/schemas/ChangeDiffUnavailable'
+        diff:
+          $ref: '#/components/schemas/ParagraphDiff'
+        markdown:
+          $ref: '#/components/schemas/ChangeDiffMarkdown'
+    ChangeDiffSide:
+      type: object
+      required:
+      - baseline_id
+      - fingerprint
+      - captured_at
+      - artifact_id
+      properties:
+        baseline_id:
+          type: string
+        fingerprint:
+          type: string
+          description: blake3 of the raw page bytes
+        captured_at:
+          type: string
+          format: date-time
+        artifact_id:
+          type: [string, 'null']
+          description: The stored markdown (`GET /v1/artifacts/{id}`). null for a baseline recorded without text.
+    ChangeDiffUnavailable:
+      type: string
+      description: Why a diff is not available. Absent when it is.
+      enum:
+      - no_previous_version
+      - no_previous_text
+      - no_text
+      - artifact_gone
+    ChangeDiffMarkdown:
+      type: object
+      description: Only with include=markdown. Each text is cut at 1 MiB.
+      required:
+      - from
+      - to
+      - truncated
+      properties:
+        from:
+          type: [string, 'null']
+        to:
+          type: [string, 'null']
+        truncated:
+          type: boolean
+    ParagraphDiff:
+      type: object
+      required:
+      - format
+      - real_delta
+      - added
+      - removed
+      - moved
+      - unchanged
+      - ops
+      - truncated
+      properties:
+        format:
+          type: string
+          enum:
+          - paragraph
+        real_delta:
+          type: boolean
+          description: False when no paragraph was added or removed.
+        added:
+          type: integer
+        removed:
+          type: integer
+        moved:
+          type: integer
+        unchanged:
+          type: integer
+        ops:
+          type: array
+          maxItems: 500
+          description: Added and removed ops first, then moved ones.
+          items:
+            $ref: '#/components/schemas/TextDiffOp'
+        truncated:
+          type: boolean
+          description: An op was dropped, a text was cut at 2 KB, or an input page was cut at 1 MiB. The counts are complete.
+    TextDiffOp:
+      type: object
+      required:
+      - op
+      properties:
+        op:
+          type: string
+          enum:
+          - added
+          - removed
+          - moved
+        index:
+          type: integer
+          description: For added, the paragraph's position in the newer text; for removed, in the older text.
+        text:
+          type: string
+          maxLength: 2048
+          description: For added and removed. Cut at 2 KB on a character boundary.
+        from:
+          type: integer
+          description: For moved, the paragraph's position in the older text.
+        to:
+          type: integer
+          description: For moved, its position in the newer text.
     OverlapPolicy:
       type: string
       enum:
@@ -6130,6 +7714,11 @@ components:
         include_answer:
           type: boolean
           default: false
+          description: >-
+            Also synthesize an answer, as `POST /v1/answer` does. Never fails the
+            search: the response carries `answer_status` (and `answer_reason`) to say
+            whether `answer` is a real answer. Metered as `quarry.answer.synth` once
+            per synthesis, never on a cache hit. Skipped under zero data retention.
         format:
           type: string
           nullable: true
@@ -6160,6 +7749,8 @@ components:
             type: string
             enum:
             - cross_encoder.v1
+        scrape:
+          $ref: '#/components/schemas/SearchScrapeBlock'
     SearchResultItem:
       type: object
       required:
@@ -6217,6 +7808,35 @@ components:
         answer:
           type: string
           nullable: true
+        answer_status:
+          type: string
+          description: >-
+            Present only when the request set `include_answer`. `ok`: `answer` is a
+            synthesized answer. `no_sources`: the pipeline ran and no source had text,
+            `answer` is empty and no model was called. `skipped_zdr`: zero data
+            retention is on, nothing was sent to a model and `answer` is absent.
+            `unavailable`: no answer, `answer_reason` says why.
+          enum:
+          - ok
+          - no_sources
+          - skipped_zdr
+          - unavailable
+        answer_reason:
+          type: string
+          description: >-
+            Present only with `answer_status` `unavailable`. A closed code, never
+            provider text. See `AnswerErrorBody.reason` for what each one means and
+            the setting that fixes it.
+          enum:
+          - synthesis_disabled
+          - model_path_refused
+          - no_search_provider
+          - no_model_plane_url
+          - model_client_init_failed
+          - model_plane_auth_refused
+          - model_plane_rate_limited
+          - model_plane_error
+          - answer_search_failed
         citations:
           type: array
           nullable: true
@@ -6248,6 +7868,129 @@ components:
           - cross_encoder.v1
         rerank:
           $ref: '#/components/schemas/RerankReport'
+        scrape:
+          $ref: '#/components/schemas/SearchScrapeReport'
+    SearchScrapeBlock:
+      type: object
+      description: >-
+        E3.7.7a. Hydrates the top results of this search through the edge's markdown fetch path, with the
+        request's web policy and the security preflight applied to every URL before its fetch. Read only when
+        QUARRY_EDGE__SEARCH_SCRAPE is on. Out-of-range values are refused with 400 BAD_REQUEST, not clamped.
+        Hydrated text travels inline in this response only: it is never cached, never evented and never logged,
+        under zero data retention too.
+      properties:
+        limit:
+          type: integer
+          minimum: 1
+          maximum: 10
+          default: 5
+          description: How many of the top results to hydrate.
+        max_chars:
+          type: integer
+          minimum: 1
+          maximum: 50000
+          default: 8000
+          description: Characters of markdown kept per result. The camelCase alias maxChars is accepted.
+        timeout_ms:
+          type: integer
+          minimum: 1000
+          maximum: 55000
+          default: 15000
+          description: One time budget for the whole block, in milliseconds. The camelCase alias timeoutMs is accepted.
+        formats:
+          type: array
+          description: Only markdown is supported, and it is the default. Any other entry is a 400 UNSUPPORTED_OPTION.
+          items:
+            type: string
+            enum:
+            - markdown
+    SearchScrapeReport:
+      type: object
+      description: >-
+        The scrape block's result. It is present only when the request sent a scrape block. With the flag off
+        the status is disabled and nothing was fetched.
+      required:
+      - status
+      - requested
+      - hydrated
+      - failed
+      properties:
+        status:
+          type: string
+          enum:
+          - ok
+          - disabled
+        requested:
+          type: integer
+          minimum: 0
+          description: Results the block tried to hydrate.
+        hydrated:
+          type: integer
+          minimum: 0
+          description: Results that came back with markdown.
+        failed:
+          type: integer
+          minimum: 0
+          description: Results that came back with a failure code.
+        items:
+          type: array
+          description: One entry per result the block tried, in result order. Absent when there are none.
+          items:
+            $ref: '#/components/schemas/SearchScrapeItem'
+    SearchScrapeItem:
+      type: object
+      description: >-
+        One hydrated result. Status ok carries markdown, chars and truncated. Status failed carries a closed
+        code, and http_status when the code is http_status. A failure never carries page text, host or provider
+        text.
+      required:
+      - url
+      - position
+      - status
+      properties:
+        url:
+          type: string
+          description: The result's URL, as the search returned it.
+        position:
+          type: integer
+          minimum: 1
+          description: 1-based position in results.
+        status:
+          type: string
+          enum:
+          - ok
+          - failed
+        markdown:
+          type: string
+          description: Present when status is ok. The page as markdown, cut at max_chars.
+        chars:
+          type: integer
+          minimum: 0
+          description: Present when status is ok. Characters in markdown after the cap.
+        truncated:
+          type: boolean
+          description: Present when status is ok. True when the page had more than max_chars characters.
+        code:
+          type: string
+          description: >-
+            Present when status is failed. policy_denied, blocked and invalid_url are refused before the fetch and
+            are not billed. The others happen after it.
+          enum:
+          - policy_denied
+          - blocked
+          - invalid_url
+          - deadline_exceeded
+          - http_status
+          - too_large
+          - decode
+          - extract
+          - timeout
+          - transport
+          - empty
+          - too_short
+        http_status:
+          type: integer
+          description: Present when code is http_status. The status the origin answered with.
     RerankReport:
       type: object
       description: >-
@@ -6345,6 +8088,14 @@ components:
         prompt:
           type: string
           nullable: true
+          maxLength: 10000
+          description: >-
+            Instructions for the model, 1 to 10000 characters after trimming (control
+            characters other than line breaks and tabs are dropped). With `schema` they
+            steer the schema-guided extraction and cannot relax the schema; alone they ask
+            for one free-form JSON object. The page text is sent as data, outside the
+            instructions. The prompt is never echoed in a response or written to a log.
+            An empty or over-long prompt is a 400.
         max_urls:
           type: integer
           format: int32
@@ -6371,6 +8122,22 @@ components:
         error:
           type: string
           nullable: true
+        schema_valid:
+          type: boolean
+          description: >-
+            Present when a `schema` was sent and the model answered: whether `data`
+            conforms to it. `status` stays `ok` either way. Absent for a prompt-only
+            request.
+        schema_issues:
+          type: array
+          items:
+            type: string
+          description: Why `data` does not conform, one line per issue. Present only when `schema_valid` is false.
+        truncated_input:
+          type: boolean
+          description: >-
+            True when the page was longer than the 20000-byte input cap and `markdown`
+            or the text the model read is only its start. Absent otherwise.
     StructuredData:
       type: object
       description: >-
@@ -6439,6 +8206,113 @@ components:
           type: integer
         requested:
           type: integer
+    AnswerRequest:
+      type: object
+      required:
+      - query
+      properties:
+        query:
+          type: string
+        top_k:
+          type: integer
+          nullable: true
+          description: Sources to read, 1 to 20 (default 5)
+        country:
+          type: string
+          nullable: true
+        language:
+          type: string
+          nullable: true
+        zdr:
+          type: boolean
+          nullable: true
+          description: Raised, never lowered, by the token's zero data retention floor
+    AnswerCitation:
+      type: object
+      required:
+      - url
+      - rank
+      properties:
+        url:
+          type: string
+        title:
+          type: string
+          nullable: true
+        rank:
+          type: integer
+        provider:
+          type: string
+        outcome:
+          type: object
+          description: >-
+            Where the cited text came from: `kind` is `fetched`, `snippet_fallback`
+            (the page fetch failed and the search snippet stood in; `reason` says why),
+            `failed` or `budget_exhausted`.
+        structured:
+          type: object
+          description: The structured facts harvested from the page, when it had any
+    AnswerResponse:
+      type: object
+      required:
+      - query
+      - answer
+      - citations
+      - model
+      - latency_ms
+      - sources_used
+      - sources_skipped
+      properties:
+        query:
+          type: string
+        answer:
+          type: string
+        citations:
+          type: array
+          items:
+            $ref: '#/components/schemas/AnswerCitation'
+        model:
+          type: string
+        latency_ms:
+          type: integer
+        sources_used:
+          type: integer
+        sources_skipped:
+          type: integer
+        sources_snippet_fallback:
+          type: integer
+    AnswerErrorBody:
+      allOf:
+      - $ref: '#/components/schemas/ErrorBody'
+      - type: object
+        properties:
+          reason:
+            type: string
+            description: >-
+              A closed code, never provider text. `synthesis_disabled`: set
+              `QUARRY_EDGE__ANSWER_SYNTHESIS=1`. `model_path_refused`: the switch is
+              on but the boot gate refused it (the cross-plane manifest row
+              `model-invoke` is not granted, or there is no service identity); read
+              the edge boot log. `no_search_provider`: configure a
+              search provider. `no_model_plane_url`: set
+              `QUARRY_EDGE__MODEL_PLANE_URL`. `model_client_init_failed`: the URL is
+              not a usable base URL, read the edge boot log. These five are 501
+              `UNSUPPORTED`. `zdr_unavailable`: 403 `FORBIDDEN`, zero data retention
+              (ADR-4), refused before any work. `model_plane_auth_refused`: 503 `UNAVAILABLE`, the
+              Control Plane registry or the Model Plane gateway refuses quarry-edge
+              (an owner decision, INNH-8b). `model_plane_rate_limited` and
+              `model_plane_error`: the model call failed. `answer_search_failed`: the
+              search or page-fetch step failed. Absent on a 400.
+            enum:
+            - synthesis_disabled
+            - zdr_unavailable
+            - model_path_refused
+            - no_search_provider
+            - no_model_plane_url
+            - model_client_init_failed
+            - model_plane_auth_refused
+            - model_plane_rate_limited
+            - model_plane_error
+            - answer_search_failed
     ErrorBody:
       type: object
       required:
@@ -6452,6 +8326,11 @@ components:
         hint:
           type: string
           nullable: true
+        next_actions:
+          type: array
+          description: Suggested client next steps; present on a 429 and on the 501 of `/v1/extract`.
+          items:
+            type: string
     RateLimitError:
       allOf:
       - $ref: '#/components/schemas/ErrorBody'
@@ -6608,7 +8487,17 @@ components:
             last two are in every response already). Naming formats makes the
             request non-default: it neither reads nor writes the page cache. Under
             ZDR the default is `["markdown"]`. `json`, `summary`, `question` and
-            `highlights` are reserved and rejected with `reserved_format`.
+            `highlights` (INNH-1, see ScrapeAiFormat and CONTRACTS.md "Scrape AI
+            formats") ask a model about the page: objects, and `summary` also as the
+            string. Refused with 400 `feature_disabled` at `formats[i]` while
+            QUARRY_EDGE__AI_FORMATS is not `on`, and at most one of each kind
+            (`too_many`). The bare strings `json`, `question` and `highlights` are
+            400 `missing_field` at `formats[i].schema`, `.question` and `.query`. The
+            result is inline only (`json`, `summary`, `answer`, `highlights` on the
+            response, a report in `ai`); it is never stored, cached or put in an
+            event. Under Zero Data Retention every AI format is answered `skipped`
+            with code `ZDR_UNAVAILABLE` and no model is called. A model failure never
+            fails the scrape: it is an `error` or `skipped` entry in `ai` inside the 200.
             `screenshot` and `pdf` are captures (WS13.4b), given as a string or as an
             object `{"type": "screenshot"}` or `{"type": "pdf"}` with options (see
             CONTRACTS.md section 10). Refused with 400 `feature_disabled` at `formats`
@@ -6616,7 +8505,7 @@ components:
           items:
             oneOf:
             - type: string
-              enum: [markdown, html, rawHtml, links, metadata, screenshot, pdf]
+              enum: [markdown, html, rawHtml, links, metadata, screenshot, pdf, summary]
             - type: object
               required:
               - type
@@ -6624,6 +8513,7 @@ components:
                 type:
                   type: string
                   enum: [screenshot, pdf]
+            - $ref: '#/components/schemas/ScrapeAiFormat'
         only_main_content:
           type: boolean
           default: true
@@ -6700,6 +8590,34 @@ components:
             outcome of every action in error.details.actions; continue goes on to the
             next action. There is no retry: a replayed click or type can submit twice.
             Alias actionsOnError.
+        max_age:
+          type: integer
+          minimum: 0
+          maximum: 2592000000
+          description: >-
+            INNH-7. Serve a stored result no older than this many milliseconds
+            (Firecrawl's maxAge) instead of fetching. Alias maxAge. Absent: the
+            result cache is not read and the request behaves as before. 0: it is
+            not read (the fresh result is still written). N: the result stored for
+            the same organization, canonical URL (fragment and tracking parameters
+            dropped) and options (formats, selectors, extractor), if it was fetched
+            at most N ms ago; otherwise the page is fetched and the entry replaced.
+            A hit makes no fetch, is not metered as scrape.page, has no scrape_id,
+            keeps the ORIGINAL data.fetched_at, and says so in
+            effective_options (cache_state hit, cached_at, cache_age_ms); markdown,
+            html and rawHtml are rebuilt from the stored artifacts, and a result
+            whose artifacts are gone is a miss. Entries live for cache.max_age_s
+            (default 3600 s), so a max_age beyond that behaves as that TTL. Never
+            served or written for ZDR (warning max_age_ignored_zdr), captures,
+            actions, AI formats, the browser driver, a non-default web policy,
+            ingest, or a private privacy class (warning max_age_ignored); with no
+            cache backend it is ignored with the warning cache_unavailable. 400
+            feature_disabled at max_age while QUARRY_EDGE__SCRAPE_MAX_AGE is not
+            on; 400 out_of_range above 30 days, invalid_type for a non-integer.
+            Not on crawl, batch or run_page. cache.max_age_s is a different
+            thing: the TTL, in seconds, of the entry this request writes.
+            A 2xx page the run flagged as a bot wall or a soft-404 is returned
+            as usual but never written, so the next call fetches again.
       description: >-
         Fields not listed here are unknown: ignored with an unknown_field warning
         (and Deprecation and Sunset headers) unless the edge runs strict, where they
@@ -6776,14 +8694,78 @@ components:
             crawl under the seed URL's directory (reported as `same_directory_only`).
         sitemap:
           type: string
-          enum: [skip]
-          description: WS14.S6. Only `skip` is accepted; any other value is a 400 `unsupported_option` (F-t2-041).
+          enum: [skip, include, only]
+          default: skip
+          description: >-
+            WS14.S6, INNH-6a. `skip` (absent) follows links only. `include` also seeds the crawl
+            with the URLs of the site's sitemaps (the robots.txt `Sitemap:` lines, else /sitemap.xml;
+            gzip and indexes are read, within bounds), one level below the seed. `only` crawls the
+            seed and the sitemap's URLs and follows no page link. Every sitemap URL goes through the
+            crawl scope (host, include/exclude paths, extensions), robots.txt and the page bound
+            before it is queued, and again when its page runs. A sitemap on another host is never
+            fetched. Dark: with QUARRY_EDGE__CRAWL_SITEMAP off, `include` and `only` are a 400
+            `unsupported_option`. Needs the crawl scope switch on (QUARRY_EDGE__CRAWL_SCOPE_MODE
+            observe or enforce). The counts (`discovered`, `seeded`, `skipped`) are in the
+            `run_completed` event as `sitemap`; when the discovery fails, `only` ends with
+            `run_failed` code `sitemap_unavailable` and `include` goes on with links only.
         ignore_query_parameters:
           type: boolean
           description: WS14.S6. Reserved; any value is a 400 `unsupported_option` (F-t2-041).
         scrape_options:
           type: object
-          description: WS14.S6. Reserved; any value is a 400 `unsupported_option` until WS5 slice 4 (references only).
+          description: >-
+            INNH-6b. The per-page extraction options, applied to every page the crawl fetches.
+            Dark: with QUARRY_EDGE__CRAWL_SCRAPE_OPTIONS off the field is a 400 `unsupported_option`.
+            The same validators as /v1/scrape; the same limits (32 selectors of 256 characters,
+            `timeout_ms` 1000 to 55000) and the same camelCase aliases. Only the options that can
+            apply per page are accepted: `actions`, `actions_on_error`, `max_inline_bytes`,
+            `screenshot`, `pdf`, `json`, `summary`, `question`, `highlights` and capture or AI
+            `formats` are a 400 `unsupported_option` with the path (`scrape_options.actions`). The
+            stored markdown and html artifacts of each page, and the text `ingest: true` sends to
+            the Data Plane, are the cleaned content. Links are discovered from the whole page
+            whatever `include_tags` and `exclude_tags` cut. A page cleaned differently from the
+            default neither reads nor writes the page cache. `data.effective.scrape_options` echoes
+            the resolved form.
+          properties:
+            formats:
+              type: array
+              items:
+                type: string
+                enum: [markdown, html, rawHtml, links, metadata]
+              description: >-
+                Accepted for parity with /v1/scrape. A crawl page stores its artifacts whatever the
+                list says, so it changes nothing that is stored.
+            only_main_content:
+              type: boolean
+              description: Default true (the main-content extractor). false keeps the whole body. Alias onlyMainContent.
+            include_tags:
+              type: array
+              maxItems: 32
+              items:
+                type: string
+                maxLength: 256
+              description: CSS selectors; only the matching parts are kept. Alias includeTags.
+            exclude_tags:
+              type: array
+              maxItems: 32
+              items:
+                type: string
+                maxLength: 256
+              description: CSS selectors removed before extraction. Alias excludeTags.
+            remove_base64_images:
+              type: boolean
+              description: Alias removeBase64Images.
+            extractor:
+              type: string
+              enum: [readability, clean_full, raw]
+              description: >-
+                `readability` goes with only_main_content true; `clean_full` and `raw` go with
+                false. A disagreement is a 400 `conflicts_with_only_main_content`.
+            timeout_ms:
+              type: integer
+              minimum: 1000
+              maximum: 55000
+              description: The bound on one page's run. Alias timeoutMs.
         ignore_robots_txt:
           type: boolean
           description: >-
@@ -6814,7 +8796,11 @@ components:
         max_age_s:
           type: integer
           default: 0
-          description: Custom TTL in seconds (0 = use default 3600s)
+          description: >-
+            The TTL in seconds of a result this request writes to the cache (0 = use
+            the default 3600 s). It is not the freshness a read requires: that is the
+            request's max_age, in milliseconds. `mode` may be left out (INNH-7: it was
+            required by the Rust type although documented as defaulting to read_write).
     DriverSignals:
       type: object
       properties:
@@ -7079,6 +9065,23 @@ components:
               type: array
               items:
                 type: string
+            sitemap:
+              type: string
+              enum: [include, only]
+              description: INNH-6a. Present only when the request asked for `include` or `only`.
+            scrape_options:
+              type: object
+              description: INNH-6b. Present only when the request had scrape_options. The resolved, canonical form the pages run with.
+            request_warnings:
+              type: array
+              items:
+                type: object
+                properties:
+                  code:
+                    type: string
+                  field:
+                    type: string
+              description: Keys the request carried that nothing read (lenient mode); a key inside scrape_options is named `scrape_options.<key>`.
         limits:
           type: object
           description: >-
@@ -7197,7 +9200,7 @@ components:
             description: Inline fields left out for exceeding max_inline_bytes (not ZDR); read the matching formats.* artifact.
           effective_options:
             type: object
-            description: The options the response was produced with, including ignored_fields, cache_state (hit, miss, bypass), doc_routing and strict. With actions, `actions` is a summary (count, types, total_wait_ms, capture_count, on_error), never a selector or a typed text.
+            description: The options the response was produced with, including ignored_fields, cache_state (hit, miss, bypass), doc_routing and strict. With max_age, `max_age` (echo, in ms) and, on a result served from the cache, `cached_at` (RFC 3339, the original fetch) and `cache_age_ms`. With actions, `actions` is a summary (count, types, total_wait_ms, capture_count, on_error), never a selector or a typed text.
           warnings:
             type: array
             items:
@@ -7247,6 +9250,231 @@ components:
               written, so the bytes stay inline in the response.
             items:
               $ref: '#/components/schemas/ScrapeActionOutcome'
+          json:
+            type: object
+            description: >-
+              INNH-1. The json AI format's result, inline only. Present only when ai.json.status is
+              ok, and then it validates against the schema of the request. Never stored. Model output
+              derived from page text: untrusted data.
+          summary:
+            type: string
+            description: >-
+              INNH-1. The summary AI format's result, at most max_chars characters, cut on a
+              character boundary. Present when ai.summary.status is ok. Untrusted data (it cannot be
+              verified against the page).
+          answer:
+            type: string
+            description: >-
+              INNH-1. The question AI format's answer, at most 10,000 characters. Present when
+              ai.question.status is ok and ai.question.found is true. Untrusted data; ai.question.grounded
+              says whether the model's supporting quote is verbatim on the page.
+          highlights:
+            type: array
+            description: >-
+              INNH-1. The highlights AI format's result: exact spans of the page text, in page order and
+              not overlapping. May be empty (an honest "nothing found"). start and end are Unicode scalar
+              (char) offsets, end-exclusive, into the AI source text (the page markdown before any
+              inline truncation).
+            items:
+              $ref: '#/components/schemas/Highlight'
+          ai:
+            $ref: '#/components/schemas/AiReport'
+    ScrapeAiFormat:
+      description: >-
+        An AI format of a scrape (INNH-1). Unknown keys in the object are 400 unknown_field. Every field
+        error is 400 with details.fields[] {path, code, message} and never echoes a value. A json schema
+        may use only the keywords type, properties, required, items, enum, minItems, maxItems, minLength,
+        maxLength, minimum, maximum, additionalProperties (true or false), description and title
+        ($schema, $id and $comment are dropped); any other keyword (for example $ref, anyOf, oneOf, allOf,
+        not, const, pattern, format) is 400 schema_keyword_not_supported at its path, because the
+        validator would ignore it. The schema root must be an object schema; at most 65,536 bytes,
+        10 levels and 200 properties (schema_root_not_object, schema_too_large, schema_too_complex).
+      oneOf:
+      - type: object
+        required: [type, schema]
+        additionalProperties: false
+        properties:
+          type:
+            type: string
+            enum: [json]
+          schema:
+            type: object
+            description: JSON Schema the output must satisfy. Root type object.
+          prompt:
+            type: string
+            minLength: 1
+            maxLength: 10000
+            description: Extra instruction for the extraction. The caller's own text.
+      - type: object
+        required: [type]
+        additionalProperties: false
+        properties:
+          type:
+            type: string
+            enum: [summary]
+          max_chars:
+            type: integer
+            minimum: 200
+            maximum: 10000
+            default: 2000
+          language:
+            type: string
+            pattern: '^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})?$'
+            description: Language of the summary. Default the page's own language.
+      - type: object
+        required: [type, question]
+        additionalProperties: false
+        properties:
+          type:
+            type: string
+            enum: [question]
+          question:
+            type: string
+            minLength: 1
+            maxLength: 10000
+      - type: object
+        required: [type, query]
+        additionalProperties: false
+        properties:
+          type:
+            type: string
+            enum: [highlights]
+          query:
+            type: string
+            minLength: 1
+            maxLength: 1000
+          max_highlights:
+            type: integer
+            minimum: 1
+            maximum: 10
+            default: 3
+          max_chars_each:
+            type: integer
+            minimum: 40
+            maximum: 1000
+            default: 300
+    Highlight:
+      type: object
+      required: [text, start, end]
+      description: >-
+        An exact span of the page text. start and end are Unicode scalar (char) offsets, end-exclusive,
+        into the AI source text; text is the slice (8 to max_chars_each characters).
+      properties:
+        text:
+          type: string
+        start:
+          type: integer
+          minimum: 0
+        end:
+          type: integer
+          minimum: 0
+    AiFormatReport:
+      type: object
+      required: [status, untrusted_source]
+      description: >-
+        What one AI format did. A model failure is a status in a 200 body, never an HTTP error:
+        ok (a result field is present), error (a model call was made and failed) or skipped
+        (no model call was made for this format). These codes are strings in the body, not wire
+        error codes.
+      properties:
+        status:
+          type: string
+          enum: [ok, error, skipped]
+        code:
+          type: string
+          enum: [MODEL_UNAVAILABLE, MODEL_RATE_LIMITED, SCHEMA_INVALID, ZDR_UNAVAILABLE, BUDGET_EXHAUSTED, EMPTY_SOURCE, PRIVACY_POLICY]
+          description: >-
+            Absent when status is ok. ZDR_UNAVAILABLE: the request is under Zero Data Retention (skipped, no
+            model call). BUDGET_EXHAUSTED: the request's call or token budget is spent (skipped).
+            EMPTY_SOURCE: the page had no text (skipped). PRIVACY_POLICY: the request's privacy block
+            (privacy_classification credential_or_secret or zdr_ephemeral) forbids a model hop (skipped,
+            no model call). MODEL_RATE_LIMITED: error, with retry_after_s;
+            formats not yet started are skipped with the same code. MODEL_UNAVAILABLE: error, see reason.
+            SCHEMA_INVALID: the json output could not be made valid (error); data.json is absent and
+            schema_issues lists paths and codes.
+        reason:
+          type: string
+          enum: [model_lane_denied, model_lane_unauthorized, model_rejected_request, upstream_unavailable, timeout, transport, bad_reply, not_json, too_large, deadline]
+        retry_after_s:
+          type: integer
+          minimum: 0
+          description: MODEL_RATE_LIMITED only.
+        model:
+          type: string
+          description: The model the gateway answered with (a routing alias, or what it resolved to).
+        usage:
+          type: object
+          required: [input_tokens, output_tokens]
+          properties:
+            input_tokens:
+              type: integer
+              minimum: 0
+            output_tokens:
+              type: integer
+              minimum: 0
+        truncated_input:
+          type: boolean
+          description: The page text was cut to the input budget before it was sent.
+        untrusted_source:
+          type: boolean
+          description: True on every ok entry. The output was derived from page text and is data, never instructions.
+        schema_valid:
+          type: boolean
+          description: json only. When true, data.json validates against the schema of the request.
+        repair:
+          type: string
+          enum: [none, local, model]
+          description: json only. none, a local fix (a code fence, a trailing comma) or one extra model call that carries the invalid output and the schema, never the page.
+        schema_issues:
+          type: array
+          maxItems: 20
+          description: json only. Where the output broke the schema. Paths and codes, never values.
+          items:
+            type: object
+            required: [path, code]
+            properties:
+              path:
+                type: string
+              code:
+                type: string
+        found:
+          type: boolean
+          description: question only. False when the page does not answer the question (no answer field).
+        grounded:
+          type: boolean
+          description: question only. True when the model's supporting quote is verbatim on the page.
+        dropped:
+          type: integer
+          minimum: 0
+          description: highlights only. Model quotes that are not on the page, dropped.
+    AiReport:
+      type: object
+      required: [total]
+      description: >-
+        data.ai: one entry per AI format asked for, and a total. Token usage is reported; nothing is billed
+        for it in this version.
+      properties:
+        json:
+          $ref: '#/components/schemas/AiFormatReport'
+        summary:
+          $ref: '#/components/schemas/AiFormatReport'
+        question:
+          $ref: '#/components/schemas/AiFormatReport'
+        highlights:
+          $ref: '#/components/schemas/AiFormatReport'
+        total:
+          type: object
+          required: [calls, input_tokens, output_tokens]
+          properties:
+            calls:
+              type: integer
+              minimum: 0
+            input_tokens:
+              type: integer
+              minimum: 0
+            output_tokens:
+              type: integer
+              minimum: 0
     ScrapeActionOutcome:
       type: object
       required: [index, type, status, duration_ms]
@@ -7347,6 +9575,183 @@ components:
               type: string
             message:
               type: string
+    CreateWebhookSubscription:
+      type: object
+      additionalProperties: false
+      required:
+      - url
+      - events
+      properties:
+        url:
+          type: string
+          format: uri
+          maxLength: 2048
+          description: An `https` URL that resolves to public addresses only.
+        events:
+          type: array
+          minItems: 1
+          items:
+            type: string
+            enum:
+            - change_detected
+          description: Stored event types. `change_detected` is the only one in v1; run-finished events will be added without a contract change.
+        description:
+          type: string
+          maxLength: 200
+    UpdateWebhookSubscription:
+      type: object
+      additionalProperties: false
+      properties:
+        active:
+          type: boolean
+        events:
+          type: array
+          minItems: 1
+          items:
+            type: string
+            enum:
+            - change_detected
+        description:
+          type: string
+          maxLength: 200
+    WebhookLastDelivery:
+      type: object
+      required:
+      - status
+      - at
+      - event_id
+      properties:
+        status:
+          type: string
+          enum:
+          - pending
+          - in_flight
+          - success
+          - failed
+          - dlq
+        at:
+          type: string
+          format: date-time
+        event_id:
+          type: string
+    WebhookSubscription:
+      type: object
+      description: A webhook subscription. It has no secret field.
+      required:
+      - id
+      - url
+      - events
+      - active
+      - secret_hint
+      - created_at
+      properties:
+        id:
+          type: string
+          pattern: '^whk_'
+        url:
+          type: string
+          format: uri
+        events:
+          type: array
+          items:
+            type: string
+        active:
+          type: boolean
+        description:
+          type: string
+        secret_hint:
+          type: string
+          description: '`whsec_...` and the last four characters of the secret.'
+        created_at:
+          type: string
+          format: date-time
+        last_delivery:
+          $ref: '#/components/schemas/WebhookLastDelivery'
+    WebhookSubscriptionCreated:
+      allOf:
+      - $ref: '#/components/schemas/WebhookSubscription'
+      - type: object
+        required:
+        - secret
+        properties:
+          secret:
+            type: string
+            description: The HMAC key, `whsec_` and 64 hex characters. Shown here and by rotate-secret only.
+    WebhookSecretRotated:
+      type: object
+      required:
+      - id
+      - secret
+      - secret_hint
+      properties:
+        id:
+          type: string
+        secret:
+          type: string
+        secret_hint:
+          type: string
+    WebhookSubscriptionList:
+      type: object
+      required:
+      - items
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/WebhookSubscription'
+        next_cursor:
+          type: string
+          description: Present when more rows remain. Pass it back as `cursor`.
+    WebhookDeliveryView:
+      type: object
+      description: One delivery of an event to a subscription. No payload body.
+      required:
+      - id
+      - event_id
+      - event_type
+      - status
+      - attempt
+      - created_at
+      properties:
+        id:
+          type: string
+          pattern: '^whkd_'
+        event_id:
+          type: string
+        event_type:
+          type: string
+        status:
+          type: string
+          enum:
+          - pending
+          - in_flight
+          - success
+          - failed
+          - dlq
+        attempt:
+          type: integer
+          minimum: 0
+        next_attempt_at:
+          type: string
+          format: date-time
+          description: Present while the delivery is pending.
+        last_error:
+          type: string
+          description: '`http_<status>`, `timeout`, `blocked_target`, `transport`, `inactive` or `error`.'
+        created_at:
+          type: string
+          format: date-time
+    WebhookDeliveryList:
+      type: object
+      required:
+      - items
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/WebhookDeliveryView'
+        next_cursor:
+          type: string
 tags:
 - name: search
   description: Tavily-lineage web discovery
@@ -7368,3 +9773,7 @@ tags:
   description: Versioned URL change tracking — baselines, checks, promotion, refresh
 - name: schedules
   description: Cron / one-shot / change-monitor schedules
+- name: webhooks
+  description: Webhook subscriptions for change events (INNH-5)
+- name: parse
+  description: Parse an uploaded PDF or DOCX to text without storing it

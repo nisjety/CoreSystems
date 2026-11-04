@@ -1,0 +1,30 @@
+start 1 -> run_01M622HK06GTHC221ZF82NAG24
+{"data":{"run_id":"run_01M622HK06GTHC221ZF82NAG24","step":0,"url":"http://fixtur ... HTTP=200
+start 2 -> run_01M622HKFSM9J5M0RFAE7XZKAD
+{"data":{"run_id":"run_01M622HKFSM9J5M0RFAE7XZKAD","step":0,"url":"http://fixtur ... HTTP=200
+start 3 -> run_01M622HM35FJ7SKCTX46JP0RFS
+{"data":{"run_id":"run_01M622HM35FJ7SKCTX46JP0RFS","step":0,"url":"http://fixtur ... HTTP=200
+start 4 -> run_01M622HMNWFC9PGM0RNPBPT2HW
+{"data":{"run_id":"run_01M622HMNWFC9PGM0RNPBPT2HW","step":0,"url":"http://fixtur ... HTTP=200
+start 5 -> run_01M622HNF3K7990HHPDQ4VD994
+{"data":{"run_id":"run_01M622HNF3K7990HHPDQ4VD994","step":0,"url":"http://fixtur ... HTTP=200
+start 6 -> run_01M622HP82YE1JSDWWXMB2CP8S
+{"data":{"run_id":"run_01M622HP82YE1JSDWWXMB2CP8S","step":0,"url":"http://fixtur ... HTTP=200
+start 7 -> run_01M622HPW7YCWC30TG7SPF7GPG
+{"data":{"run_id":"run_01M622HPW7YCWC30TG7SPF7GPG","step":0,"url":"http://fixtur ... HTTP=200
+start 8 -> run_01M622HQP6BERXSNEPJJD3SMRC
+{"data":{"run_id":"run_01M622HQP6BERXSNEPJJD3SMRC","step":0,"url":"http://fixtur ... HTTP=200
+--- ready
+{"max_sessions":40,"sessions_open":8,"slots":[{"generation":1,"healthy":true,"pages":8,"probe_failures":0,"sessions":8,"slot":0,"status":"ready"}],"state":"healthy"}
+--- stats
+quarry-edge 375.6MiB / 15.42GiB 2.38%
+--- extra start (cap+1)
+HTTP/1.1 429 Too Many Requests
+content-type: application/json
+retry-after: 10
+x-request-id: req_01M622HV2ME3886KBYD7H5N5TJ
+content-length: 268
+date: Wed, 28 Oct 2026 20:17:16 GMT
+
+{"data":null,"meta":{"request_id":"req_01M622HV2ME3886KBYD7H5N5TJ"},"error":{"code":"RATE_LIMITED","message":"browser capacity is full; try again shortly","details":{"active":8,"limit":8,"reason":"org_run_cap","retry_after_seconds":10,"scope":"org"},"retryable":true}}
+{"data":null,"meta":{"request_id":"req_01M622HV2ME3886KBYD7H5N5TJ"},"error":{"code":"RATE_LIMITED","message":"browser capacity is full; try again shortly","details":{"active":8,"limit":8,"reason":"org_run_cap","retry_after_seconds":10,"scope":"org"},"retryable":true}}

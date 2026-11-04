@@ -1238,6 +1238,7 @@ fn is_interaction(action: &AgentAction) -> bool {
         | AgentAction::FrameUploadRef { .. }
         | AgentAction::DownloadRef { .. }
         | AgentAction::FrameDownloadRef { .. }
+        | AgentAction::FillOtpRef { .. }
         | AgentAction::Evaluate { .. } => true,
         AgentAction::Navigate { .. }
         | AgentAction::Scroll { .. }
@@ -1511,6 +1512,7 @@ impl BlockEpisodes {
             | AgentAction::FrameUploadRef { .. }
             | AgentAction::DownloadRef { .. }
             | AgentAction::FrameDownloadRef { .. }
+            | AgentAction::FillOtpRef { .. }
             | AgentAction::Evaluate { .. } => {
                 (!current_host.is_empty() && self.is_exhausted(current_host, zdr))
                     .then(|| current_host.to_ascii_lowercase())
@@ -2437,6 +2439,7 @@ mod tests {
             AgentAction::FrameUploadRef { snapshot_id: snapshot(), generation: 1, frame_id: "f1".into(), ref_id: "e1".into(), artifact_id: artifact(), approval_grant_id: "g".into() },
             AgentAction::DownloadRef { snapshot_id: snapshot(), generation: 1, ref_id: "e1".into(), approval_grant_id: "g".into() },
             AgentAction::FrameDownloadRef { snapshot_id: snapshot(), generation: 1, frame_id: "f1".into(), ref_id: "e1".into(), approval_grant_id: "g".into() },
+            AgentAction::FillOtpRef { snapshot_id: snapshot(), generation: 1, ref_id: "e1".into(), approval_grant_id: "g".into() },
             AgentAction::Screenshot { full_page: false },
             AgentAction::Pdf,
             AgentAction::Evaluate { script: "1".into() },
@@ -2469,6 +2472,7 @@ mod tests {
             | AgentAction::FrameUploadRef { .. }
             | AgentAction::DownloadRef { .. }
             | AgentAction::FrameDownloadRef { .. }
+            | AgentAction::FillOtpRef { .. }
             | AgentAction::Evaluate { .. } => true,
             AgentAction::Scroll { .. }
             | AgentAction::MouseWheel { .. }

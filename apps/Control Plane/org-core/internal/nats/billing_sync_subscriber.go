@@ -28,12 +28,39 @@ import (
 // account write, so a single missed delivery self-heals on the next one.
 type BillingSyncSubscriber struct {
 	client     *Client
-	orgService *orgcore.Service
+	orgService billingSyncOrgService
 	sub        *nats.Subscription
+	// zdrSignal, when set (SetZDRSignal), emits the ZDR-enabled event for a
+	// billing sync that turns the org's effective ZDR on (X-9). Nil keeps the
+	// old behaviour: no posture reads, no extra publish.
+	zdrSignal zdrBillingSyncSignaler
+}
+
+// billingSyncOrgService is the part of *orgcore.Service the subscriber uses.
+type billingSyncOrgService interface {
+	ApplyBillingPlanSync(ctx context.Context, orgID, plan string) (bool, error)
+	GetRetentionPosture(ctx context.Context, id string) (*orgcore.RetentionPosture, error)
+}
+
+// zdrBillingSyncSignaler is satisfied by *SharedPublisher.
+type zdrBillingSyncSignaler interface {
+	PublishZDREnabledForBillingSync(ctx context.Context, orgID, plan string) error
 }
 
 func NewBillingSyncSubscriber(client *Client, orgService *orgcore.Service) *BillingSyncSubscriber {
 	return &BillingSyncSubscriber{client: client, orgService: orgService}
+}
+
+// SetZDRSignal enables the billing-sync ZDR-enabled signal. A nil or typed-nil
+// publisher (shared NATS not configured) leaves it off.
+func (s *BillingSyncSubscriber) SetZDRSignal(signal zdrBillingSyncSignaler) {
+	if s == nil || signal == nil {
+		return
+	}
+	if sp, ok := signal.(*SharedPublisher); ok && sp == nil {
+		return
+	}
+	s.zdrSignal = signal
 }
 
 func (s *BillingSyncSubscriber) Start(ctx context.Context) error {
@@ -77,6 +104,7 @@ func (s *BillingSyncSubscriber) handle(ctx context.Context) nats.MsgHandler {
 			return
 		}
 
+		before, haveBefore := s.postureBefore(ctx, orgID)
 		skippedOverride, err := s.orgService.ApplyBillingPlanSync(ctx, orgID, plan)
 		switch {
 		case err != nil:
@@ -85,6 +113,45 @@ func (s *BillingSyncSubscriber) handle(ctx context.Context) nats.MsgHandler {
 			log.Printf("nats: billing sync skipped for org=%s — manual plan_override in effect", orgID)
 		default:
 			log.Printf("nats: billing sync applied for org=%s plan=%s", orgID, plan)
+			if haveBefore {
+				s.signalZDRIfTurnedOn(ctx, orgID, plan, before)
+			}
 		}
 	}
+}
+
+// postureBefore reads the posture ahead of the sync when the ZDR signal is on.
+// A failed read turns the signal off for this delivery (logged): without the
+// "before" posture a transition cannot be told from a steady state.
+func (s *BillingSyncSubscriber) postureBefore(ctx context.Context, orgID string) (orgcore.RetentionPosture, bool) {
+	if s.zdrSignal == nil {
+		return orgcore.RetentionPosture{}, false
+	}
+	posture, err := s.orgService.GetRetentionPosture(ctx, orgID)
+	if err != nil || posture == nil {
+		log.Printf("nats: billing sync ZDR signal: posture read before sync failed for org=%s: %v", orgID, err)
+		return orgcore.RetentionPosture{}, false
+	}
+	return *posture, true
+}
+
+// signalZDRIfTurnedOn emits the ZDR-enabled event when the sync turned the
+// org's effective ZDR on (X-9). Failures are logged: this subscriber is core
+// NATS at-most-once, and billing-core republishes on every account write, but
+// a republish finds the plan already applied (no transition), so a failed emit
+// here is not retried. Recorded as a depth item in the X-9 status.
+func (s *BillingSyncSubscriber) signalZDRIfTurnedOn(ctx context.Context, orgID, plan string, before orgcore.RetentionPosture) {
+	after, err := s.orgService.GetRetentionPosture(ctx, orgID)
+	if err != nil || after == nil {
+		log.Printf("nats: billing sync ZDR signal: posture read after sync failed for org=%s: %v", orgID, err)
+		return
+	}
+	if !zdrTurnedOn(before, *after) {
+		return
+	}
+	if err := s.zdrSignal.PublishZDREnabledForBillingSync(ctx, orgID, plan); err != nil {
+		log.Printf("nats: billing sync ZDR signal: publish failed for org=%s: %v", orgID, err)
+		return
+	}
+	log.Printf("nats: billing sync turned ZDR on for org=%s: ZDR-enabled event published", orgID)
 }

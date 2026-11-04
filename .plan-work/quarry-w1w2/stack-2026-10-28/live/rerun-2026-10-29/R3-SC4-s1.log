@@ -1,0 +1,41 @@
+=== S1 start 2026-10-29T02:37:09Z ready={"generation":0,"sessions_open":0}
+--- S1 try 1 run=run_01M62R9DSX8WHSSWH8H2JW4CDQ allowed_domains=[fixture-a.crawl.test, slow.crawl.test]
+receipts before: 0
+navigate about:blank: http=403 time=0.004785
+  {"code":"SECURITY_BLOCKED","message":"browser navigation is outside the run's allowed domains","retryable":false,"details":null}
+receipts after about:blank: 0 (a gate refusal takes no step key)
+browser-session: {"currentUrl":"","title":null,"status":"active","live":true}
+navigate fixture-b (not on the list): http=403 time=0.004604
+  {"code":"SECURITY_BLOCKED","message":"browser navigation is outside the run's allowed domains","retryable":false,"details":null}
+receipts after off-list target: 0
+navigate slow.crawl.test/redir (302 to fixture-b): http=504 time=25.195259
+  {"code":"TIMEOUT","message":"browser operation navigate timed out","retryable":false,"details":{"deadline_ms":25000,"effect":"unknown","op":"navigate"}}
+  fixture-b in body: 0 any-http-url: 0
+browser-session: {"currentUrl":"","title":null,"status":"active","live":true}
+wait on the off-list page: http=200 time=0.219348
+  {"url":"about:blank","title":null,"step":1,"ax_nodes":3,"ax_names":[]}
+navigate fixture-a: http=200 time=0.400946 {"url":"http://fixture-a.crawl.test/","title":"Fixture A","step":2,"ax_nodes":37,"ax_names":["Fixture A","Fixture A","docs"," "]}
+receipts: [{"step":0,"a":"navigate","s":"failed","code":"TIMEOUT"},{"step":1,"a":"wait","s":"completed","code":null},{"step":2,"a":"navigate","s":"completed","code":null}]
+close: HTTP=200
+ready: {"generation":1,"sessions_open":0}
+--- S1 try 2 run=run_01M62RAC5J9DV76RWFP6YHAXDJ allowed_domains=[fixture-a.crawl.test, slow.crawl.test]
+warm navigate fixture-a: http=200 time=0.365490 {"url":"http://fixture-a.crawl.test/","title":"Fixture A","step":0,"ax_nodes":37,"ax_names":["Fixture A","Fixt
+receipts before: 1
+navigate about:blank: http=403 time=0.004962
+  {"code":"SECURITY_BLOCKED","message":"browser navigation is outside the run's allowed domains","retryable":false,"details":null}
+receipts after about:blank: 1 (a gate refusal takes no step key)
+browser-session: {"currentUrl":"http://fixture-a.crawl.test/","title":null,"status":"active","live":true}
+navigate fixture-b (not on the list): http=403 time=0.003343
+  {"code":"SECURITY_BLOCKED","message":"browser navigation is outside the run's allowed domains","retryable":false,"details":null}
+receipts after off-list target: 1
+navigate slow.crawl.test/redir (302 to fixture-b): http=504 time=25.039456
+  {"code":"TIMEOUT","message":"browser operation navigate timed out","retryable":false,"details":{"deadline_ms":25000,"effect":"unknown","op":"navigate"}}
+  fixture-b in body: 0 any-http-url: 0
+browser-session: {"currentUrl":"http://fixture-a.crawl.test/","title":null,"status":"active","live":true}
+wait on the off-list page: http=200 time=0.186189
+  {"url":"http://fixture-a.crawl.test/","title":"Fixture A","step":2,"ax_nodes":37,"ax_names":["Fixture A","Fixture A","docs"," "]}
+navigate fixture-a: http=200 time=0.182277 {"url":"http://fixture-a.crawl.test/","title":"Fixture A","step":3,"ax_nodes":37,"ax_names":["Fixture A","Fixture A","docs"," "]}
+receipts: [{"step":0,"a":"navigate","s":"completed","code":null},{"step":1,"a":"navigate","s":"failed","code":"TIMEOUT"},{"step":2,"a":"wait","s":"completed","code":null},{"step":3,"a":"navigate","s":"completed","code":null}]
+close: HTTP=200
+ready: {"generation":1,"sessions_open":0}
+=== S1 end 2026-10-29T02:38:11Z ready={"generation":1,"sessions_open":0}

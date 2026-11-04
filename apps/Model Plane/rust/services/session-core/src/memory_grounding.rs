@@ -70,7 +70,7 @@
 
 use crate::service_token::ServiceTokenProvider;
 use mp_contracts::model_plane::v1::{
-    inference_core_client::InferenceCoreClient, ChatMessage, InferRequest,
+    inference_core_client::InferenceCoreClient, ChatMessage, InferPurpose, InferRequest,
 };
 use serde::Deserialize;
 use std::time::Duration;
@@ -402,6 +402,7 @@ impl GroundingClassifier {
         };
 
         let request = InferRequest {
+            purpose: InferPurpose::MemoryGrounding as i32,
             request_id: mp_ids::new_ulid(),
             org_id: org_id.to_owned(),
             model: self.model.clone(),

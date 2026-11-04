@@ -17,6 +17,7 @@ import { createSignal, createStore, flush } from 'solid-js'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { __resetPlanDraftsForTests, AssistantMessage } from './ChatMessages'
 import type { ChatTurn } from './chat-types'
+import type { SettledFold } from '../lib/settled-fold'
 import type { DockedNodes } from '@/shared/chat-nodes/types'
 
 const planTurn = (overrides: Partial<ChatTurn> = {}): ChatTurn => ({
@@ -42,7 +43,13 @@ const planTurn = (overrides: Partial<ChatTurn> = {}): ChatTurn => ({
 
 type Status = { pending: boolean; error?: string } | undefined
 
-function mount(turn: ChatTurn, onApprovePlan = vi.fn(), onRejectPlan = vi.fn(), initialDocked?: DockedNodes) {
+function mount(
+  turn: ChatTurn,
+  onApprovePlan = vi.fn(),
+  onRejectPlan = vi.fn(),
+  initialDocked?: DockedNodes,
+  settledFold?: SettledFold,
+) {
   const [message, setMessage] = createStore<ChatTurn>(turn)
   const [status, setStatus] = createSignal<Status>(undefined)
   const [docked, setDocked] = createSignal<DockedNodes | undefined>(initialDocked)
@@ -59,6 +66,7 @@ function mount(turn: ChatTurn, onApprovePlan = vi.fn(), onRejectPlan = vi.fn(), 
       onRejectPlan={onRejectPlan}
       planApproval={status()}
       docked={docked()}
+      settledFold={settledFold}
       onViewSteps={() => {}}
     />
   ))
@@ -185,5 +193,46 @@ describe('a plan the composer dock holds', () => {
     // The plan is docked, the approval is not: the approval keeps its card.
     expect(view.container.querySelector('.verevon-chat-approvals')).not.toBeNull()
     expect(view.container.querySelectorAll('.verevon-chat-docked-pointer')).toHaveLength(1)
+  })
+})
+
+describe('a settled plan turn inside the fold', () => {
+  const FOLD: SettledFold = { defaultFolded: true, steps: 1, files: 0, durationMs: 252_000 }
+  const RAN_A_TOOL = { toolCalls: [{ id: 'call_1', name: 'web_search', args: { query: 'faktura' } }] }
+  const foldBody = (container: HTMLElement) => container.querySelector('.verevon-chat-settled-fold__body')
+
+  it('keeps the plan card outside the folded body, with its approve control', () => {
+    const view = mount(planTurn(RAN_A_TOOL), vi.fn(), vi.fn(), undefined, FOLD)
+    expect(foldBody(view.container)?.hasAttribute('hidden')).toBe(true)
+    expect(view.container.querySelector('.verevon-chat-plan')?.closest('[hidden]')).toBeNull()
+    expect(view.container.querySelector('.verevon-chat-plan__approve')?.closest('[hidden]')).toBeNull()
+  })
+
+  it('folds the work behind the row, and keeps the answer in view', () => {
+    const view = mount(planTurn(RAN_A_TOOL), vi.fn(), vi.fn(), undefined, FOLD)
+    expect(foldBody(view.container)?.querySelector('.verevon-chat-steps-pill')).not.toBeNull()
+    const answer = Array.from(view.container.querySelectorAll('p')).find(
+      (paragraph) => paragraph.textContent === 'Her er planen.',
+    )
+    expect(answer).toBeDefined()
+    expect(answer?.closest('[hidden]')).toBeNull()
+  })
+
+  it('keeps a pending approval outside the folded body', () => {
+    const view = mount(
+      planTurn({ ...RAN_A_TOOL, pendingApprovals: [{ id: 'a1', kind: 'APPROVAL_KIND_TOOL_CALL' }] }),
+      vi.fn(),
+      vi.fn(),
+      undefined,
+      FOLD,
+    )
+    expect(view.container.querySelector('.verevon-chat-approvals')).not.toBeNull()
+    expect(view.container.querySelector('.verevon-chat-approvals')?.closest('[hidden]')).toBeNull()
+  })
+
+  it('renders no fold when the page passes none, as with the switch off', () => {
+    const view = mount(planTurn(RAN_A_TOOL))
+    expect(view.container.querySelector('.verevon-chat-settled-fold')).toBeNull()
+    expect(view.container.querySelector('.verevon-chat-plan')).not.toBeNull()
   })
 })

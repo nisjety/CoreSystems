@@ -23,8 +23,10 @@ use crate::policy_baseline::{Decision, PolicyBaseline};
 const ECHO_LIMIT: usize = 64;
 
 /// The principal a verified token is: a service token is autonomous, a user is human.
+/// INNH-10: an API key is autonomous too. There is never a person behind it, so it must not
+/// get the web-policy latitude of a human.
 pub fn principal(claims: &Claims) -> Principal {
-    if claims.is_service() {
+    if claims.is_service() || claims.is_api_key() {
         Principal::Autonomous
     } else {
         Principal::Human
@@ -34,7 +36,8 @@ pub fn principal(claims: &Claims) -> Principal {
 /// Decide the policy for one request of a caller with a token. The org layer is the token's
 /// `web_policy` claim (WS7.J). The ask's shape is checked first, in every enforcement mode (a
 /// malformed ask is a 400, not a policy decision); then the baseline's mode decides what the
-/// claim, the ask and the baseline do.
+/// claim, the ask and the baseline do, and the claim mode (`observe` by default) whether the
+/// claim binds the run or is only checked and counted beside it.
 pub fn decide(
     baseline: &PolicyBaseline,
     claims: &Claims,
@@ -83,13 +86,20 @@ fn decide_with(
 /// Gate one URL of the request. Under `observe` the shadow decision is checked first
 /// and counted, and the run's own decision (which never denies) decides. Under
 /// `enforce` a denied URL is a 403 whose details name the layer that decided.
+///
+/// A would-be denial is counted only for a URL the run's own policy lets through: a URL the
+/// run refuses anyway is one enforced denial, not also a would-be one (W2-CP-U35: with the
+/// claim observed under `enforce`, the shadow repeats every denial of the run).
 pub fn gate_url(decision: &Decision, url: &str) -> Result<(), QuarryError> {
-    if let Some(shadow) = decision.shadow() {
-        if let Err(denial) = shadow.check_url(url) {
-            record_denial(&denial, false);
+    let enforced = decision.policy().check_url(url);
+    if enforced.is_ok() {
+        if let Some(shadow) = decision.shadow() {
+            if let Err(denial) = shadow.check_url(url) {
+                record_denial(&denial, false);
+            }
         }
     }
-    match decision.policy().check_url(url) {
+    match enforced {
         Ok(()) => Ok(()),
         Err(denial) => {
             record_denial(&denial, true);
@@ -188,15 +198,20 @@ pub fn gate_urls<'a>(
     let mut first: Option<PolicyDenial> = None;
     let mut denied = 0usize;
     for url in urls {
-        if let Some(shadow) = decision.shadow() {
-            if let Err(denial) = shadow.check_url(url) {
-                record_denial(&denial, false);
+        match decision.policy().check_url(url) {
+            Ok(()) => {
+                // A would-be denial only for a URL the run itself lets through (see gate_url).
+                if let Some(shadow) = decision.shadow() {
+                    if let Err(denial) = shadow.check_url(url) {
+                        record_denial(&denial, false);
+                    }
+                }
             }
-        }
-        if let Err(denial) = decision.policy().check_url(url) {
-            record_denial(&denial, true);
-            denied += 1;
-            first.get_or_insert(denial);
+            Err(denial) => {
+                record_denial(&denial, true);
+                denied += 1;
+                first.get_or_insert(denial);
+            }
         }
     }
     let Some(denial) = first else {
@@ -240,12 +255,34 @@ fn ask_error(error: LayerError) -> QuarryError {
 
 /// A denial as the error envelope carries it. A domain denial names its capability
 /// (`domains.deny` or `domains.allow`), which the core's details do not carry.
+///
+/// D2-054: `policy_rev` leaves the edge as the issuer's 12 hex digest, the form the claim
+/// carried and org-core stored, never as the number the core keeps internally.
 pub fn quarry_error(denial: &PolicyDenial) -> QuarryError {
     let mut details = denial.details();
     if let Some(capability) = domain_capability(denial) {
         details["capability"] = json!(capability);
     }
+    if let PolicyDenial::PolicyDenied {
+        policy_rev: Some(rev),
+        ..
+    } = denial
+    {
+        details["policy_rev"] = json!(policy_rev_hex(*rev));
+    }
     QuarryError::new(denial.error_code(), denial.message()).with_details(details)
+}
+
+/// The wire form of an org policy revision (D2-054): `"0"` for no policy, otherwise 12
+/// lowercase hex digits, zero-padded. org-core mints exactly this form (WS7.H/WS7.I), so the
+/// round trip is exact: the denial's `policy_rev` equals the stored `rev` as a string. A
+/// claim whose rev is shorter than 12 digits (no issuer mints one) comes back padded.
+pub fn policy_rev_hex(rev: u64) -> String {
+    if rev == 0 {
+        "0".to_owned()
+    } else {
+        format!("{rev:012x}")
+    }
 }
 
 fn domain_capability(denial: &PolicyDenial) -> Option<&'static str> {

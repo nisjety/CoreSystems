@@ -435,10 +435,7 @@ impl StepReceiptStore for PostgresStepReceiptStore {
         .bind(&checkpoint.current_url)
         .bind(&checkpoint.page_hash)
         .bind(state)
-        .bind(match checkpoint.status {
-            AgentRunStatus::Active => "active",
-            AgentRunStatus::Closed => "closed",
-        })
+        .bind(checkpoint.status.as_str())
         .execute(&self.pool)
         .await
         .map_err(|error| db_err("save agent checkpoint", error))?;
@@ -451,7 +448,7 @@ impl StepReceiptStore for PostgresStepReceiptStore {
         run_id: &RunKind,
     ) -> QuarryResult<Option<AgentRunCheckpoint>> {
         let row = sqlx::query(
-            "SELECT state FROM quarry_agent_run_checkpoints
+            "SELECT state, status FROM quarry_agent_run_checkpoints
              WHERE org_id = $1 AND run_id = $2",
         )
         .bind(org_id)
@@ -463,20 +460,39 @@ impl StepReceiptStore for PostgresStepReceiptStore {
             let state: serde_json::Value = row
                 .try_get("state")
                 .map_err(|error| db_err("decode agent checkpoint", error))?;
-            serde_json::from_value(state).map_err(|error| {
+            let column: String = row
+                .try_get("status")
+                .map_err(|error| db_err("decode agent checkpoint status", error))?;
+            let mut checkpoint: AgentRunCheckpoint =
+                serde_json::from_value(state).map_err(|error| {
+                    QuarryError::new(
+                        ErrorCode::Internal,
+                        format!("decode agent checkpoint: {error}"),
+                    )
+                })?;
+            // E3.4-1: the status column is the authority. `close_run_checkpoint` once
+            // updated only the column, so a closed run's state JSON can still say
+            // `active`; reading the column keeps that run closed. An unknown value fails
+            // closed instead of being guessed.
+            checkpoint.status = AgentRunStatus::parse(&column).ok_or_else(|| {
                 QuarryError::new(
                     ErrorCode::Internal,
-                    format!("decode agent checkpoint: {error}"),
+                    "decode agent checkpoint: unknown status",
                 )
-            })
+            })?;
+            Ok(checkpoint)
         })
         .transpose()
     }
 
     async fn close_run_checkpoint(&self, org_id: &str, run_id: &RunKind) -> QuarryResult<()> {
+        // The state JSON is kept in step with the column (E3.4-1), so a reader of either
+        // sees the run closed.
         sqlx::query(
             "UPDATE quarry_agent_run_checkpoints
-             SET status = 'closed', updated_at = NOW()
+             SET status = 'closed',
+                 state = jsonb_set(state, '{status}', to_jsonb('closed'::text), true),
+                 updated_at = NOW()
              WHERE org_id = $1 AND run_id = $2",
         )
         .bind(org_id)
@@ -484,6 +500,31 @@ impl StepReceiptStore for PostgresStepReceiptStore {
         .execute(&self.pool)
         .await
         .map_err(|error| db_err("close agent checkpoint", error))?;
+        Ok(())
+    }
+
+    /// E3.4-1: suspend, expire or reactivate one tenant's checkpoint. A closed row is
+    /// never matched (`status <> 'closed'`), so `Closed` stays terminal; a missing row
+    /// updates nothing and is not an error.
+    async fn mark_run_checkpoint(
+        &self,
+        org_id: &str,
+        run_id: &RunKind,
+        status: AgentRunStatus,
+    ) -> QuarryResult<()> {
+        sqlx::query(
+            "UPDATE quarry_agent_run_checkpoints
+             SET status = $3,
+                 state = jsonb_set(state, '{status}', to_jsonb($3::text), true),
+                 updated_at = NOW()
+             WHERE org_id = $1 AND run_id = $2 AND status <> 'closed'",
+        )
+        .bind(org_id)
+        .bind(run_id.to_string())
+        .bind(status.as_str())
+        .execute(&self.pool)
+        .await
+        .map_err(|error| db_err("mark agent checkpoint", error))?;
         Ok(())
     }
 }
@@ -733,6 +774,11 @@ mod tests {
             budget: None,
             policy_mode: None,
             next_step: 6,
+            trace_seq: 41,
+            policy_ask: Some(quarry_core::web_policy::RequestAsk {
+                disable: vec!["browser.act.upload".into()],
+                ..Default::default()
+            }),
         };
         store.save_run_checkpoint(checkpoint).await.unwrap();
 
@@ -747,6 +793,13 @@ mod tests {
             "the state JSON keeps the step key high-water mark"
         );
         assert_eq!(loaded.control_mode, BrowserControlMode::HumanTakeover);
+        // D2-061 / D2-051: the trace's next seq and the start-time policy ask ride in the
+        // state JSON, so no column or migration is needed.
+        assert_eq!(loaded.trace_seq, 41);
+        assert_eq!(
+            loaded.policy_ask.as_ref().map(|ask| ask.disable.clone()),
+            Some(vec!["browser.act.upload".to_string()])
+        );
         assert!(store
             .load_run_checkpoint("org_b", &run_id)
             .await
@@ -1014,5 +1067,182 @@ mod tests {
                 },
             ]
         );
+    }
+
+    /// E3.4-1: suspended and expired round-trip through the column and the state JSON, a
+    /// close is seen by a load (the column is the authority), `Closed` is terminal, and
+    /// the tenant bound holds. Needs DATABASE_URL and the migrations through 0020.
+    #[tokio::test]
+    #[ignore = "needs DATABASE_URL and the migrations through 0020"]
+    async fn checkpoint_status_arc_round_trips_and_closed_is_terminal() {
+        let Some(pool) = fresh_pool().await else {
+            eprintln!("skipping: DATABASE_URL not set");
+            return;
+        };
+        let store = PostgresStepReceiptStore::new(pool.clone());
+        let run_id: RunKind = Id::new();
+        let checkpoint = AgentRunCheckpoint {
+            org_id: "org_a".into(),
+            actor_id: "user_a".into(),
+            run_id: run_id.to_string(),
+            lease_id: String::new(),
+            profile_id: "prof_01ARZ3NDEKTSV4RRFFQ69G5FAV".into(),
+            step: 2,
+            current_url: "https://example.com".into(),
+            page_hash: String::new(),
+            constraints: AgentConstraints {
+                max_steps: 5,
+                allowed_domains: vec!["example.com".into()],
+                max_runtime_s: Some(60),
+                max_cost_usd: None,
+            },
+            persist_profile: true,
+            profile_scope: BrowserProfileScope::UserPrivate,
+            viewport: None,
+            zdr: ZdrMode::Off,
+            grant_id: None,
+            status: AgentRunStatus::Suspended,
+            control_mode: BrowserControlMode::AgentControl,
+            control_epoch: 0,
+            budget: None,
+            policy_mode: None,
+            next_step: 3,
+            trace_seq: 0,
+            policy_ask: None,
+        };
+        store.save_run_checkpoint(checkpoint).await.unwrap();
+        let load = |org: &'static str| {
+            let store = store.clone();
+            let run_id = run_id.clone();
+            async move { store.load_run_checkpoint(org, &run_id).await.unwrap() }
+        };
+        assert_eq!(load("org_a").await.unwrap().status, AgentRunStatus::Suspended);
+
+        store
+            .mark_run_checkpoint("org_a", &run_id, AgentRunStatus::Expired)
+            .await
+            .unwrap();
+        assert_eq!(load("org_a").await.unwrap().status, AgentRunStatus::Expired);
+        let state_status: String = sqlx::query_scalar(
+            "SELECT state->>'status' FROM quarry_agent_run_checkpoints
+             WHERE org_id = 'org_a' AND run_id = $1",
+        )
+        .bind(run_id.to_string())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(state_status, "expired", "the state JSON follows the column");
+
+        // Another tenant cannot move it.
+        store
+            .mark_run_checkpoint("org_b", &run_id, AgentRunStatus::Closed)
+            .await
+            .unwrap();
+        assert_eq!(load("org_a").await.unwrap().status, AgentRunStatus::Expired);
+        assert!(load("org_b").await.is_none());
+
+        store
+            .mark_run_checkpoint("org_a", &run_id, AgentRunStatus::Active)
+            .await
+            .unwrap();
+        assert_eq!(load("org_a").await.unwrap().status, AgentRunStatus::Active);
+
+        store.close_run_checkpoint("org_a", &run_id).await.unwrap();
+        let closed = load("org_a").await.unwrap();
+        assert_eq!(closed.status, AgentRunStatus::Closed, "a load sees the close");
+        assert!(closed.check_resumable().is_err());
+        for next in [AgentRunStatus::Suspended, AgentRunStatus::Expired, AgentRunStatus::Active] {
+            store.mark_run_checkpoint("org_a", &run_id, next).await.unwrap();
+            assert_eq!(load("org_a").await.unwrap().status, AgentRunStatus::Closed);
+        }
+    }
+
+    /// E3.4-1: a row closed by the old `close_run_checkpoint` (column `closed`, state JSON
+    /// still `active`) loads as closed.
+    #[tokio::test]
+    #[ignore = "needs DATABASE_URL and the migrations through 0020"]
+    async fn legacy_close_with_stale_state_json_loads_closed() {
+        let Some(pool) = fresh_pool().await else {
+            eprintln!("skipping: DATABASE_URL not set");
+            return;
+        };
+        let store = PostgresStepReceiptStore::new(pool.clone());
+        let run_id: RunKind = Id::new();
+        sqlx::query(
+            "INSERT INTO quarry_agent_run_checkpoints
+             (org_id, run_id, profile_id, step, state, status)
+             VALUES ('org_a', $1, 'prof_a', 1, $2, 'closed')",
+        )
+        .bind(run_id.to_string())
+        .bind(serde_json::json!({
+            "org_id": "org_a",
+            "run_id": run_id.to_string(),
+            "profile_id": "prof_a",
+            "step": 1,
+            "current_url": "",
+            "constraints": { "max_steps": 5, "allowed_domains": ["example.com"] },
+            "zdr": "off",
+            "status": "active",
+        }))
+        .execute(&pool)
+        .await
+        .unwrap();
+        let loaded = store
+            .load_run_checkpoint("org_a", &run_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(loaded.status, AgentRunStatus::Closed);
+    }
+
+    /// E3.4-1: migration 0020 applies twice, accepts the four statuses, refuses anything
+    /// else, and leaves existing rows alone.
+    #[tokio::test]
+    #[ignore = "needs DATABASE_URL and the migrations through 0020"]
+    async fn migration_0020_widens_the_status_check_and_is_idempotent() {
+        use sqlx::Executor;
+
+        let Some(pool) = fresh_pool().await else {
+            eprintln!("skipping: DATABASE_URL not set");
+            return;
+        };
+        (&pool)
+            .execute(include_str!("../migrations/0020_agent_run_checkpoint_status.sql"))
+            .await
+            .expect("migration 0020 is idempotent");
+        let run_id: RunKind = Id::new();
+        for status in ["active", "suspended", "expired", "closed"] {
+            sqlx::query(
+                "INSERT INTO quarry_agent_run_checkpoints
+                 (org_id, run_id, profile_id, state, status)
+                 VALUES ('org_m', $1, 'prof_a', '{}'::jsonb, $2)
+                 ON CONFLICT (org_id, run_id) DO UPDATE SET status = EXCLUDED.status",
+            )
+            .bind(run_id.to_string())
+            .bind(status)
+            .execute(&pool)
+            .await
+            .unwrap_or_else(|error| panic!("the CHECK accepts {status}: {error}"));
+        }
+        assert!(
+            sqlx::query(
+                "UPDATE quarry_agent_run_checkpoints SET status = 'paused'
+                 WHERE org_id = 'org_m'"
+            )
+            .execute(&pool)
+            .await
+            .is_err(),
+            "the CHECK refuses a status outside the four"
+        );
+        let constraints: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM pg_constraint
+             WHERE conrelid = 'quarry_agent_run_checkpoints'::regclass
+               AND contype = 'c'
+               AND conname = 'quarry_agent_run_checkpoints_status_check'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(constraints, 1, "one status CHECK, not two");
     }
 }

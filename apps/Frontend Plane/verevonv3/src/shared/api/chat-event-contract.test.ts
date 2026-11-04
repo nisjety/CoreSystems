@@ -29,7 +29,6 @@ const TRANSPORT_EVENTS: Record<string, string> = {
   chunk: 'a text delta on the transport',
   done: 'the stream terminal',
   awaiting_approval: 'an orchestration event with no golden payload yet',
-  run_parked: 'an orchestration event with no golden payload yet; run-park.ts reads it',
   citations: 'a batched citation list; each item is read as a citation',
   search_results: 'the batched citation list under its older name, read through `results`',
 }
@@ -61,6 +60,8 @@ const UNUSED_KEYS: Record<string, readonly string[]> = {
   verification: ['request_id'],
   // The whole frame is handed to the grounding normaliser, which reads these (chat-normalizers.ts).
   grounding: ['factCount', 'facts', 'lowConfidence', 'mode', 'query', 'sourceCount', 'sources'],
+  // The whole frame is handed to run-park.ts's runParkedFrameOf, which reads and validates these (run-park.test.ts).
+  run_parked: ['reason', 'request_id', 'resume_after', 'run_id', 'status'],
 }
 
 /** The tables `violationsOf` checks against; a test may pass its own to exercise a finding. */
@@ -79,9 +80,9 @@ const TABLES: Tables = {
 }
 
 /** Helpers in chat-client.ts that read the payload they are given; their reads belong to the case that calls them. */
-const READING_HELPERS: readonly string[] = ['emitCitation', 'failureTiming', 'failureFeature', 'parseTurnTiming', 'usageProgressFrame']
+const READING_HELPERS: readonly string[] = ['emitCitation', 'failureTiming', 'failureFeature', 'parseTurnTiming', 'usageProgressFrame', 'sourceScopeAppliedEvent']
 /** Helpers that read the payload in another module, which that module's own tests cover. */
-const READ_ELSEWHERE: readonly string[] = ['servedByField']
+const READ_ELSEWHERE: readonly string[] = ['servedByField', 'runParkedFrameOf']
 
 type CaseReads = {
   /** Keys read from the payload, directly or through the helpers it is handed to. */
@@ -304,6 +305,14 @@ describe('the SPA reads of the chat event payloads', () => {
         "reasoning_delta does not read the always-present key 'delta'",
       ]),
     )
+  })
+
+  it('reports a citation number read under a key the golden does not list', () => {
+    const renamed = source.replace('num(payload.number)', 'num(payload.citation_number)')
+    expect(renamed).not.toBe(source)
+    expect(violationsOf(renamed, golden)).toEqual([
+      "citation reads 'citation_number', which the golden does not list",
+    ])
   })
 
   it('reports a golden key renamed while the SPA still reads the old name', () => {

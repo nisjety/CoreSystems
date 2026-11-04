@@ -5,7 +5,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ApiError } from '@/shared/api/http'
 import { translateApiError } from '@/shared/i18n/errors'
 import { CATALOGUE_TIER_WAIT_MS } from '@/features/dashboard/home/submit-privacy-tier'
+import type { SpaceRunLiveHandlers } from '@/shared/api/space-run-live-client'
 import { publishSpaceThreads, resetLiveWorkForTests } from '../lib/space-live-work'
+import { spaceRunStore } from '../lib/space-run-store'
 import { createSpaceSendJournal, type SpaceSendJournal } from '../lib/space-send-journal'
 
 const chatClient = vi.hoisted(() => ({
@@ -38,6 +40,12 @@ const spacesClient = vi.hoisted(() => ({
 vi.mock('@/shared/api/spaces-client', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/shared/api/spaces-client')>()),
   ...spacesClient,
+}))
+// WS09-S2: the live stream of the run a send-when-ready waits behind; the test drives its frames.
+const runLive = vi.hoisted(() => ({ streamSpaceRunLive: vi.fn() }))
+vi.mock('@/shared/api/space-run-live-client', async (importOriginal) => ({
+  ...await importOriginal<typeof import('@/shared/api/space-run-live-client')>(),
+  ...runLive,
 }))
 const skillsClient = vi.hoisted(() => ({ listAvailableSkills: vi.fn(), MAX_PICKED_SKILLS: 4 }))
 vi.mock('@/shared/api/skills-client', () => skillsClient)
@@ -133,11 +141,14 @@ beforeEach(() => {
   spacesClient.replyInSpaceThread.mockReset()
   spacesClient.updateSpaceThreadPresentation.mockResolvedValue({ thread_id: 't-new' })
   resetLiveWorkForTests()
+  runLive.streamSpaceRunLive.mockReset()
+  runLive.streamSpaceRunLive.mockImplementation(() => new Promise<void>(() => {}))
 })
 
 afterEach(() => {
   vi.unstubAllEnvs()
   cleanup()
+  spaceRunStore.dispose()
   window.localStorage.clear()
 })
 
@@ -1519,6 +1530,7 @@ describe('SpaceRoomComposer — owner mid-run steer (WS09-S2)', () => {
   })
 
   // Send when ready (WS09-S2): a busy thread holds the message here instead of refusing it.
+  // With the live view off no done event can arrive, so the room's projection stands in for it.
   it('keeps a message for a thread another member\'s agent is working in, and sends it once that work is done', async () => {
     publishSpaceThreads('room-1', [{ thread_id: 't1', space_id: 'room-1', title: 'Innkjøp', latest_run_status: 'running' }])
     flush()
@@ -1594,5 +1606,92 @@ describe('SpaceRoomComposer — owner mid-run steer (WS09-S2)', () => {
 
     await waitFor(() => expect((screen.getByRole('textbox') as HTMLTextAreaElement).value).toBe('Oppdater lista'))
     expect(chatClient.streamChat).toHaveBeenCalledTimes(1)
+  })
+
+  // With the room's live view on, the run the message waits behind has a stream of its own, and its
+  // `finished` frame is the done event the message waits for. An idle projection is not.
+  it('sends a waiting message on the run\'s done event, not when the projection first shows the thread idle', async () => {
+    let onFrame: SpaceRunLiveHandlers['onFrame'] = () => {}
+    runLive.streamSpaceRunLive.mockImplementation((_spaceRef: string, _runId: string, handlers: SpaceRunLiveHandlers) => {
+      onFrame = handlers.onFrame
+      return new Promise<void>(() => {})
+    })
+    publishSpaceThreads('room-1', [{ thread_id: 't1', space_id: 'room-1', latest_run_id: 'run-9', latest_run_status: 'running' }])
+    flush()
+    renderInThread({ ...STEER_ON, live: true })
+
+    typeAndSubmit('Oppdater lista')
+    await screen.findByText(/Venter på at agenten blir ferdig/)
+    await waitFor(() => expect(runLive.streamSpaceRunLive).toHaveBeenCalledWith('room-1', 'run-9', expect.anything(), expect.anything()))
+
+    publishSpaceThreads('room-1', [{ thread_id: 't1', space_id: 'room-1', latest_run_id: 'run-9', latest_run_status: 'completed' }])
+    flush()
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(chatClient.streamChat).not.toHaveBeenCalled()
+    expect(screen.getByText(/Venter på at agenten blir ferdig/)).toBeTruthy()
+
+    onFrame({ type: 'finished', outcome: 'completed', reason: null }, undefined)
+    flush()
+
+    await waitFor(() => expect(chatClient.streamChat).toHaveBeenCalledTimes(1))
+    expect(chatClient.streamChat.mock.calls[0]?.[0]).toMatchObject({ content: 'Oppdater lista', threadId: 't1' })
+  })
+
+  it('cancelling a waiting message gives back its skill and its agent mention, not only its words', async () => {
+    skillsClient.listAvailableSkills.mockReset()
+    skillsClient.listAvailableSkills.mockResolvedValue([{ id: 'sk-hms', name: 'HMS-runde', description: '', enabled: true, scope: 'org' }])
+    scriptedStream()
+    const agent = {
+      subject_id: 'agent-1',
+      role: 'editor',
+      revision: 1,
+      identity_published: true,
+      name: 'Driftsassistent',
+      status: 'active',
+      definition_status: 'published',
+      delivery_targets: [],
+    }
+    publishSpaceThreads('room-1', [{ thread_id: 't1', space_id: 'room-1', latest_run_status: 'running' }])
+    flush()
+    render(() => (
+      <SpaceRoomComposer
+        spaceRef="room-1"
+        roster={() => []}
+        agents={() => [agent] as never}
+        threads={() => []}
+        replyTarget={() => ({ threadId: 't1', title: 'Innkjøp' })}
+        agentWork={() => STEER_ON as never}
+      />
+    ))
+    const box = screen.getByRole('textbox') as HTMLTextAreaElement
+    fireEvent.input(box, { target: { value: '/hms' } })
+    flush()
+    fireEvent.click(await screen.findByRole('option', { name: /HMS-runde/ }))
+    flush()
+    fireEvent.input(box, { target: { value: '@Drif' } })
+    flush()
+    fireEvent.click(await screen.findByRole('option', { name: /Driftsassistent/ }))
+    flush()
+    fireEvent.input(box, { target: { value: '@Driftsassistent se på lista' } })
+    flush()
+    fireEvent.submit(box.closest('form') as HTMLFormElement)
+    await screen.findByText(/Venter på at agenten blir ferdig/)
+    expect(screen.queryByRole('list', { name: 'Valgte ferdigheter' })).toBeNull()
+
+    screen.getByRole('button', { name: 'Avbryt' }).click()
+    flush()
+    await waitFor(() => expect(box.value).toBe('@Driftsassistent se på lista'))
+    expect(screen.getByRole('list', { name: 'Valgte ferdigheter' }).textContent).toContain('HMS-runde')
+
+    // The thread is free now: the message goes out as it was first asked, with the picks given back.
+    publishSpaceThreads('room-1', [{ thread_id: 't1', space_id: 'room-1', latest_run_status: 'completed' }])
+    flush()
+    fireEvent.submit(box.closest('form') as HTMLFormElement)
+    await waitFor(() => expect(chatClient.streamChat).toHaveBeenCalledTimes(1))
+    expect(chatClient.streamChat.mock.calls[0]?.[0]).toMatchObject({
+      content: '@Driftsassistent se på lista',
+      mentionedAgentRef: 'agent-1',
+      actions: [{ id: 'sk-hms', name: 'HMS-runde', kind: 'skill' }],
+    })
   })
 })

@@ -5,7 +5,7 @@
 //! could ship a false privacy guarantee).
 
 /// Resource types that may be user-owned / private and support per-user grants.
-pub const OWNABLE: &[&str] = &["document"];
+pub const OWNABLE: &[&str] = &["conversation_snapshot", "document"];
 
 /// Resource types that are always org-scoped; private visibility and per-user
 /// grants are rejected for them. Read by `scripts/lint-resource-taxonomy.sh`
@@ -46,5 +46,14 @@ mod tests {
     fn document_is_ownable_inbox_is_not() {
         assert!(is_ownable("document"));
         assert!(!is_ownable("inbox"));
+    }
+
+    // The share snapshot is ownable while the live conversation stays
+    // team-shared: the two are distinct types so each sits in exactly one set.
+    #[test]
+    fn conversation_snapshot_is_ownable_conversation_is_not() {
+        assert!(is_ownable("conversation_snapshot"));
+        assert!(!TEAM_SHARED.contains(&"conversation_snapshot"));
+        assert!(!is_ownable("conversation"));
     }
 }

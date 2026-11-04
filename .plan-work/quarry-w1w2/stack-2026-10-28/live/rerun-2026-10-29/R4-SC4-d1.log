@@ -1,0 +1,58 @@
+=== D1 start 2026-10-29T10:02:50Z ready={"generation":0,"sessions_open":0}
+--- D1a try 1 run=run_01M63HSGS15F2S48H4J5CSVNW7 (first step = wait, no page yet)
+tabs before: {"n":0,"tabs":[]}
+first wait: http=200 time=0.432465
+  {"url":"about:blank","title":null,"step":0,"ax_nodes":3,"ax_names":[]}
+  no_current_page=0 action_outcome={"status":"verified","reason_code":"wait_completed"}
+tabs after wait: {"n":1,"tabs":[{"id":null,"url":"about:blank","active":true}]}
+browser-session: {"currentUrl":"about:blank","title":null,"status":"active","live":true}
+checkpoint (step|status|[url]|next_step): 1|active|[]|1
+navigate fixture-a: http=200 time=0.295503
+  {"url":"http://fixture-a.crawl.test/","title":"Fixture A","step":1,"ax_nodes":37,"ax_names":["Fixture A","Fixture A","docs"," "]}
+tabs after navigate: {"n":1,"tabs":[{"id":null,"url":"http://fixture-a.crawl.test/","active":true}]}
+wait after: http=200 time=0.207156 {"url":"http://fixture-a.crawl.test/","title":"Fixture A","step":2,"ax_nodes":37,"ax_names":["Fixture A","Fixture A","do
+receipts: [{"step":0,"a":"wait","s":"completed","code":null},{"step":1,"a":"navigate","s":"completed","code":null},{"step":2,"a":"wait","s":"completed","code":null}]
+close: HTTP=200
+ready: {"generation":1,"sessions_open":0}
+--- D1a try 2 run=run_01M63HSQ33KBASM0CZ6MXATZ8G (first step = wait, no page yet)
+tabs before: {"n":0,"tabs":[]}
+first wait: http=200 time=0.411434
+  {"url":"about:blank","title":null,"step":0,"ax_nodes":3,"ax_names":[]}
+  no_current_page=0 action_outcome={"status":"verified","reason_code":"wait_completed"}
+tabs after wait: {"n":1,"tabs":[{"id":null,"url":"about:blank","active":true}]}
+browser-session: {"currentUrl":"about:blank","title":null,"status":"active","live":true}
+checkpoint (step|status|[url]|next_step): 1|active|[]|1
+navigate fixture-a: http=200 time=0.288319
+  {"url":"http://fixture-a.crawl.test/","title":"Fixture A","step":1,"ax_nodes":37,"ax_names":["Fixture A","Fixture A","docs"," "]}
+tabs after navigate: {"n":1,"tabs":[{"id":null,"url":"http://fixture-a.crawl.test/","active":true}]}
+wait after: http=200 time=0.157312 {"url":"http://fixture-a.crawl.test/","title":"Fixture A","step":2,"ax_nodes":37,"ax_names":["Fixture A","Fixture A","do
+receipts: [{"step":0,"a":"wait","s":"completed","code":null},{"step":1,"a":"navigate","s":"completed","code":null},{"step":2,"a":"wait","s":"completed","code":null}]
+close: HTTP=200
+ready: {"generation":1,"sessions_open":0}
+--- D1a try 3 run=run_01M63HSW11JVHVB50DY7Y4P2FC (first step = wait, no page yet)
+tabs before: {"n":0,"tabs":[]}
+first wait: http=200 time=0.317348
+  {"url":"about:blank","title":null,"step":0,"ax_nodes":3,"ax_names":[]}
+  no_current_page=0 action_outcome={"status":"verified","reason_code":"wait_completed"}
+tabs after wait: {"n":1,"tabs":[{"id":null,"url":"about:blank","active":true}]}
+browser-session: {"currentUrl":"about:blank","title":null,"status":"active","live":true}
+checkpoint (step|status|[url]|next_step): 1|active|[]|1
+navigate fixture-a: http=200 time=0.215769
+  {"url":"http://fixture-a.crawl.test/","title":"Fixture A","step":1,"ax_nodes":37,"ax_names":["Fixture A","Fixture A","docs"," "]}
+tabs after navigate: {"n":1,"tabs":[{"id":null,"url":"http://fixture-a.crawl.test/","active":true}]}
+wait after: http=200 time=0.344281 {"url":"http://fixture-a.crawl.test/","title":"Fixture A","step":2,"ax_nodes":37,"ax_names":["Fixture A","Fixture A","do
+receipts: [{"step":0,"a":"wait","s":"completed","code":null},{"step":1,"a":"navigate","s":"completed","code":null},{"step":2,"a":"wait","s":"completed","code":null}]
+close: HTTP=200
+ready: {"generation":1,"sessions_open":0}
+--- D1b try 1 run=run_01M63HT0KBXKG4R7GJJKP2RWX1 (first step = wait_for body)
+first wait_for body: http=200 time=0.198910
+  {"url":"about:blank","title":null,"step":0,"ax_nodes":3,"ax_names":[]}
+  no_current_page=0 action_outcome={"status":"verified","reason_code":"selector_observed"}
+tabs after wait_for: {"n":1,"tabs":[{"id":null,"url":"about:blank","active":true}]}
+navigate fixture-a: http=200 time=0.237473
+  {"url":"http://fixture-a.crawl.test/","title":"Fixture A","step":1,"ax_nodes":37,"ax_names":["Fixture A","Fixture A","docs"," "]}
+tabs after navigate: {"n":1,"tabs":[{"id":null,"url":"http://fixture-a.crawl.test/","active":true}]}
+receipts: [{"step":0,"a":"wait_for","s":"completed","code":null},{"step":1,"a":"navigate","s":"completed","code":null}]
+close: HTTP=200
+ready: {"generation":1,"sessions_open":0}
+=== D1 end 2026-10-29T10:03:10Z ready={"generation":1,"sessions_open":0}

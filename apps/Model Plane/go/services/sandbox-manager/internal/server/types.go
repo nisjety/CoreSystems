@@ -47,3 +47,7 @@ type ApplyThreadWorkspaceChangesResponse = mpv1.ApplyThreadWorkspaceChangesRespo
 type DeleteThreadWorkspaceRequest = mpv1.DeleteThreadWorkspaceRequest
 type DeleteThreadWorkspaceResponse = mpv1.DeleteThreadWorkspaceResponse
 type ThreadDeletedPath = mpv1.ThreadDeletedPath
+
+// WS22-S6 lease lifecycle status.
+type GetLeaseStatusRequest = mpv1.GetLeaseStatusRequest
+type GetLeaseStatusResponse = mpv1.GetLeaseStatusResponse

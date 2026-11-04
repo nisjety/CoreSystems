@@ -16,13 +16,27 @@ pub enum PermissionMode {
 }
 
 impl PermissionMode {
+    /// The wire form of a permission mode, read strictly: `ask`, `deny` or `auto` and nothing
+    /// else. New code reads the mode through this, so an unknown value is never a mode.
+    #[must_use]
+    pub fn parse_strict(mode: &str) -> Option<Self> {
+        match mode {
+            "ask" => Some(Self::Ask),
+            "deny" => Some(Self::Deny),
+            "auto" => Some(Self::Auto),
+            _ => None,
+        }
+    }
+
+    /// The mode a caller stated on the wire. An unset value is the posture that predates the
+    /// field, `auto`. A value this build does not know is `ask`, never `auto`, so a typo cannot
+    /// switch a gate off (WS25-S6, DEC-15).
     #[must_use]
     pub fn from_wire(mode: &str) -> Self {
-        match mode {
-            "ask" => Self::Ask,
-            "deny" => Self::Deny,
-            _ => Self::Auto,
+        if mode.is_empty() {
+            return Self::Auto;
         }
+        Self::parse_strict(mode).unwrap_or(Self::Ask)
     }
 }
 
@@ -208,7 +222,11 @@ const EXECUTE_PROVIDER_ACTION_TOOL: &str = "execute_provider_action";
 #[must_use]
 pub fn is_restricted_context_write(tool_name: &str) -> bool {
     let name = tool_name.trim();
-    name == "save_memory" || crate::workspace_tools::is_workspace_write(name)
+    // E3.7.10: a crawl or a batch can ingest pages into the org's knowledge base, a durable
+    // write the seed declares `context_write`; plan mode and a delegated leaf must not run it.
+    name == "save_memory"
+        || crate::web_tools::is_durable_crawl_tool(name)
+        || crate::workspace_tools::is_workspace_write(name)
 }
 
 /// Operation-aware risk classification for a specific tool call. Extends
@@ -806,6 +824,25 @@ pub fn run_view(org_id: &str, run_id: &str, tool_name: &str) -> Option<ToolClass
 mod tests {
     use super::*;
 
+    /// The fail-open reading of an unknown wire value is gone: `ask` gates and `deny` denies, an
+    /// unset value is the posture that predates the field, and anything else asks.
+    #[test]
+    fn an_unknown_wire_mode_asks_and_only_an_unset_one_is_auto() {
+        assert_eq!(PermissionMode::from_wire(""), PermissionMode::Auto);
+        assert_eq!(PermissionMode::from_wire("auto"), PermissionMode::Auto);
+        assert_eq!(PermissionMode::from_wire("ask"), PermissionMode::Ask);
+        assert_eq!(PermissionMode::from_wire("deny"), PermissionMode::Deny);
+        for unknown in ["ASK", "execute", "malformed", " auto"] {
+            assert_eq!(
+                PermissionMode::from_wire(unknown),
+                PermissionMode::Ask,
+                "{unknown:?}"
+            );
+            assert_eq!(PermissionMode::parse_strict(unknown), None, "{unknown:?}");
+        }
+        assert_eq!(PermissionMode::parse_strict(""), None);
+    }
+
     #[test]
     fn deny_mode_always_denies() {
         assert_eq!(
@@ -1315,7 +1352,10 @@ mod tests {
 MCP__s__t                  risky=no/no restricted=no rung=read_only/read_only owner=no consent=no ask=Allow/Allow auto=Allow/Allow
 book_shipment              risky=yes/yes restricted=no rung=danger_full_access/danger_full_access owner=no consent=no ask=AwaitApproval/AwaitApproval auto=Allow/Allow
 browser.act                risky=yes/yes restricted=no rung=danger_full_access/danger_full_access owner=no consent=no ask=AwaitApproval/AwaitApproval auto=Allow/Allow
+browser.close              risky=no/no restricted=no rung=read_only/read_only owner=no consent=no ask=Allow/Allow auto=Allow/Allow
+browser.console            risky=no/no restricted=no rung=read_only/read_only owner=no consent=no ask=Allow/Allow auto=Allow/Allow
 browser.observe            risky=no/no restricted=no rung=read_only/read_only owner=no consent=no ask=Allow/Allow auto=Allow/Allow
+browser.open               risky=no/no restricted=no rung=read_only/read_only owner=no consent=no ask=Allow/Allow auto=Allow/Allow
 code_interpreter           risky=no/no restricted=no rung=read_only/read_only owner=no consent=no ask=Allow/Allow auto=Allow/Allow
 company_lookup             risky=no/no restricted=no rung=read_only/read_only owner=no consent=no ask=Allow/Allow auto=Allow/Allow
 execute_provider_action    risky=no/yes restricted=no rung=read_only/danger_full_access owner=no consent=no ask=Allow/AwaitApproval auto=Allow/Allow
@@ -1387,6 +1427,7 @@ yr_weather                 risky=no/no restricted=no rung=read_only/read_only ow
         names.extend(
             [
                 "tickets.create",
+                "browser.act",
                 "mcp__s__t",
                 "MCP__s__t",
                 " mcp__s__t ",

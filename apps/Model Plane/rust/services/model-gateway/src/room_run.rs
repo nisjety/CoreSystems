@@ -340,6 +340,8 @@ pub const BUILTIN_TOOL_CLASSES: &[(&str, Option<StepClass>)] = &[
     ("skill_file", Some(StepClass::Lookup)),
     ("web_search", Some(StepClass::Web)),
     ("fetch_url", Some(StepClass::Web)),
+    ("read_page", Some(StepClass::Web)),
+    ("find_in_page", Some(StepClass::Web)),
     ("get_weather", Some(StepClass::Lookup)),
     ("get_statistics", Some(StepClass::Lookup)),
     ("code_interpreter", Some(StepClass::Code)),

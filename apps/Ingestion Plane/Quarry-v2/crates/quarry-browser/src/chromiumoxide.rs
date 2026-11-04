@@ -8,14 +8,14 @@
 //! each lease owns a small tab set keyed by its session affinity key.
 
 use ::chromiumoxide::cdp::browser_protocol::accessibility::{
-    EnableParams as AccessibilityEnableParams, GetFullAxTreeParams,
+    EnableParams as AccessibilityEnableParams, GetFullAxTreeParams, GetPartialAxTreeParams,
 };
 use ::chromiumoxide::cdp::browser_protocol::browser::{
     BrowserContextId, CancelDownloadParams, DownloadProgressState, EventDownloadProgress,
     EventDownloadWillBegin, SetDownloadBehaviorBehavior, SetDownloadBehaviorParams,
 };
 use ::chromiumoxide::cdp::browser_protocol::dom::{
-    BackendNodeId, ResolveNodeParams, SetFileInputFilesParams,
+    BackendNodeId, GetNodeForLocationParams, ResolveNodeParams, SetFileInputFilesParams,
 };
 use ::chromiumoxide::cdp::browser_protocol::emulation::{
     SetDeviceMetricsOverrideParams, SetFocusEmulationEnabledParams, SetTouchEmulationEnabledParams,
@@ -53,6 +53,7 @@ use ::chromiumoxide::cdp::browser_protocol::page::{
 };
 use ::chromiumoxide::cdp::js_protocol::runtime::{
     CallArgument, CallFunctionOnParams, EventConsoleApiCalled, ReleaseObjectParams,
+    RemoteObjectId,
 };
 use ::chromiumoxide::error::CdpError;
 use ::chromiumoxide::handler::viewport::Viewport as ChromiumViewport;
@@ -92,8 +93,8 @@ use crate::slots::{
     SlotStatus,
 };
 use crate::tab_control::{
-    addressed_tab_id, resolve_tab_egress_policy, visible_through_pin, OpenTabOptions,
-    PINNED_TAB_CLOSED_REASON,
+    addressed_tab_id, keeps_tab_on_navigation_failure, resolve_tab_egress_policy,
+    timed_out_open_error, visible_through_pin, OpenTabOptions, PINNED_TAB_CLOSED_REASON,
 };
 use crate::{
     BrowserDevtoolsEvent, BrowserDownloadedFile, BrowserDriver, BrowserDriverCapabilities,
@@ -384,6 +385,13 @@ pub struct ChromiumoxideDriver {
     /// on a top-level target run the actionability pipeline and send trusted
     /// input (WS3.K). Off by default.
     trusted_input: bool,
+    /// E3.1-c: `QUARRY_EDGE__FILL_OTP` (default off). Off, the one-time-code
+    /// precheck and insert are refused `UNSUPPORTED`.
+    fill_otp: bool,
+    /// E3.1-c: loaders (top-frame documents) a one-time code was delivered
+    /// into, per session key. A navigation makes a new loader, so the mark is
+    /// left behind; the session's release forgets it.
+    credential_delivered: Arc<Mutex<HashMap<String, HashSet<String>>>>,
 }
 
 /// How a native target action reaches its element.
@@ -446,6 +454,10 @@ impl ChromiumoxideDriver {
                     .ok()
                     .as_deref(),
             ),
+            fill_otp: actionability::parse_fill_otp(
+                std::env::var(actionability::FILL_OTP_FLAG).ok().as_deref(),
+            ),
+            credential_delivered: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -551,6 +563,8 @@ impl ChromiumoxideDriver {
             dialog_sequence: self.dialog_sequence.clone(),
             profiles: self.profiles.clone(),
             trusted_input: self.trusted_input,
+            fill_otp: self.fill_otp,
+            credential_delivered: self.credential_delivered.clone(),
         }
     }
 
@@ -1147,6 +1161,7 @@ impl ChromiumoxideDriver {
         self.dialog_pages.lock().await.remove(&session_key);
         self.live_frames.lock().await.remove(&session_key);
         self.attach_locks.lock().await.remove(&session_key);
+        self.credential_delivered.lock().await.remove(&session_key);
     }
 
     fn session_key(session: &BrowserSession) -> String {
@@ -1527,20 +1542,37 @@ impl ChromiumoxideDriver {
             FirstNavigation::InAttach => initial_url,
             FirstNavigation::ByCaller | FirstNavigation::Placeholder => "about:blank",
         };
+        // W2-U07: an `open_tab` whose navigation times out keeps its tab. The navigation is
+        // abandoned, not the tab: it is stopped here, so the tab is readable; it is marked
+        // when the tab is registered below, so the tab's next `goto` drains it (SC4 T3); and
+        // the caller gets the tab's id with the typed timeout. Any other failure closes the
+        // tab, as before.
+        let mut timed_out: Option<QuarryError> = None;
+        let mut stopped = false;
         if committed_url != "about:blank" {
             // No recovery here: a tab whose first navigation fails is closed by the
             // attach guard, abandoned navigation and all. A refused one fails at once
             // (SC4 D3), not at the navigate deadline.
-            goto_watched(
+            if let Err(error) = goto_watched(
                 &self.navigation_watches,
                 &page,
                 committed_url,
                 deadline(Op::Navigate),
             )
-            .await?;
+            .await
+            {
+                if first_navigation != FirstNavigation::InAttach
+                    || !keeps_tab_on_navigation_failure(error.code)
+                {
+                    return Err(error);
+                }
+                stopped = stop_abandoned_navigation(&page, deadline(Op::NavigateRecovery)).await;
+                timed_out = Some(error);
+            }
         }
-        // The bridge is per document: the caller's navigation installs it on its own.
-        if committed_url == initial_url {
+        // The bridge is per document: the caller's navigation installs it on its own. A
+        // timed-out navigation has no committed document to install it on, as in `goto`.
+        if committed_url == initial_url && timed_out.is_none() {
             install_popup_bridge(&page).await?;
         }
 
@@ -1549,7 +1581,7 @@ impl ChromiumoxideDriver {
         if let Some(error) = self.not_admitted_error(&session_key) {
             return Err(error);
         }
-        let session_pages = pages.entry(session_key).or_default();
+        let session_pages = pages.entry(session_key.clone()).or_default();
         if let Some(context_id) = attach.context.take() {
             session_pages.browser_context_id = Some(context_id);
             session_pages.download_dir = attach.download_dir.take();
@@ -1573,8 +1605,27 @@ impl ChromiumoxideDriver {
         if activate || session_pages.active_tab_id.is_none() {
             session_pages.active_tab_id = Some(tab_id.clone());
         }
+        if timed_out.is_some() {
+            // Marked in the same step as the tab, so no `goto` finds the tab unmarked. The
+            // mark goes with the tab (`forget_abandoned_navigations`, when it closes).
+            self.abandoned_navigations
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .insert(page.target_id().clone());
+        }
         attach.disarm();
-        Ok((tab_id, page))
+        drop(pages);
+        let Some(error) = timed_out else {
+            return Ok((tab_id, page));
+        };
+        // The kept tab's metadata and the cached frame follow it, as a `goto` that stopped
+        // its navigation does.
+        if stopped {
+            self.update_tab_metadata(&session_key, &tab_id, &page).await;
+        }
+        let owner = self.admission(session);
+        self.invalidate_live_frame_cache(session, owner).await;
+        Err(timed_out_open_error(&tab_id, error))
     }
 
     /// Count a page against the session's slot, or say why it cannot open:
@@ -2497,7 +2548,8 @@ fn chromium_launch_dirs_in(root: &Path) -> std::io::Result<ChromiumLaunchDirs> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum FirstNavigation {
     /// The attach, before the tab is committed: a tab whose navigation fails is closed
-    /// and the caller gets no tab (`open_tab`, which answers with the tab it made).
+    /// and the caller gets no tab (`open_tab`). A TIMEOUT keeps the tab instead, and the
+    /// caller gets the typed timeout with its id (W2-U07).
     InAttach,
     /// The caller, once the tab is committed on `about:blank`: a navigation that times
     /// out leaves the tab as any later one does, readable and drained at the next `goto`
@@ -5248,6 +5300,8 @@ impl BrowserDriver for ChromiumoxideDriver {
         .await
     }
 
+    /// A navigation that times out keeps the tab it opened (W2-U07): the error is the typed
+    /// navigate TIMEOUT with `details.tab_id`, and the tab is listed and readable.
     async fn open_tab(
         &self,
         session: &BrowserSession,
@@ -6012,6 +6066,469 @@ async fn root_frame_id(page: &Page) -> QuarryResult<String> {
                 "chromiumoxide root frame id is unavailable for governed download",
             )
         })
+}
+
+/// E3.1-c: what the one-time-code preconditions found on a target that passed
+/// them. No value and no page text: the loader id of the top frame (the
+/// credential-delivered mark is keyed on it and a navigation changes it), the
+/// top frame id and the origin that the page, the frame and the grant share.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OtpFillPrecheck {
+    pub loader_id: String,
+    pub frame_id: String,
+    pub origin: String,
+}
+
+/// The top frame of a page as `Page.getFrameTree` reports it.
+struct RootFrameInfo {
+    id: String,
+    loader_id: String,
+    url: String,
+    security_origin: String,
+}
+
+/// Read the top frame's id, loader id, URL and security origin. The values stay
+/// in the driver; none of them is put in an error.
+async fn root_frame_info(page: &Page) -> QuarryResult<RootFrameInfo> {
+    let frame_tree = with_deadline(Op::AxSnapshot, async {
+        page.execute(GetFrameTreeParams::default())
+            .await
+            .map_err(|error| {
+                QuarryError::new(
+                    ErrorCode::DriverFailed,
+                    "chromiumoxide frame tree read failed for a one-time-code fill",
+                )
+                .with_details(json!({ "class": crate::deadlines::cdp_class(&error) }))
+            })
+    })
+    .await?;
+    let tree = serde_json::to_value(&frame_tree.result).unwrap_or(serde_json::Value::Null);
+    let frame = tree
+        .get("frameTree")
+        .and_then(|frame_tree| frame_tree.get("frame"))
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    let text = |key: &str| {
+        frame
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_owned()
+    };
+    let info = RootFrameInfo {
+        id: text("id"),
+        loader_id: text("loaderId"),
+        url: text("url"),
+        security_origin: text("securityOrigin"),
+    };
+    if info.id.is_empty() || info.loader_id.is_empty() {
+        return Err(QuarryError::new(
+            ErrorCode::DriverFailed,
+            "chromiumoxide top frame or loader id is unavailable for a one-time-code fill",
+        ));
+    }
+    Ok(info)
+}
+
+async fn release_object_bounded(page: &Page, object_id: RemoteObjectId) {
+    let _ = tokio::time::timeout(
+        Duration::from_millis(500),
+        page.execute(ReleaseObjectParams::new(object_id)),
+    )
+    .await;
+}
+
+/// Check every E3.1-c precondition on `target` and return what passed with the
+/// still-held handle of the element. The caller releases the handle.
+///
+/// Order: the top frame (a target in a child frame is refused before anything
+/// is resolved), the origins (https; frame origin equals the top and the grant
+/// origin), then the element and its document (one visible required
+/// non-password text input, no options, no QR).
+async fn otp_check_on(
+    page: &Page,
+    target: &BrowserNativeTarget,
+    grant_origin: &str,
+) -> QuarryResult<(OtpFillPrecheck, RemoteObjectId)> {
+    let root = root_frame_info(page).await?;
+    if let Some(frame_id) = target.frame_id.as_deref() {
+        if frame_id != root.id {
+            return Err(actionability::otp_refused(
+                actionability::otp_reason::NOT_TOP_FRAME,
+            ));
+        }
+    }
+    let origin = actionability::check_otp_origins(
+        &root.url,
+        &root.security_origin,
+        grant_origin,
+        cfg!(test),
+    )
+    .map_err(actionability::otp_refused)?;
+    // The exact backend node of the observation, resolved in the top frame's
+    // realm (the default when no execution context is named): never a selector.
+    let resolve =
+        ResolveNodeParams::builder().backend_node_id(BackendNodeId::new(target.backend_node_id));
+    let resolved = page.execute(resolve.build()).await.map_err(|error| {
+        QuarryError::new(
+            ErrorCode::TargetRepairRequired,
+            "one-time-code target is no longer live; observe again",
+        )
+        .with_details(json!({
+            "ax_node_id": target.ax_node_id,
+            "class": crate::deadlines::cdp_class(&error),
+        }))
+    })?;
+    let object_id = resolved.object.object_id.clone().ok_or_else(|| {
+        QuarryError::new(
+            ErrorCode::TargetRepairRequired,
+            "one-time-code target could not be resolved; observe again",
+        )
+        .with_details(json!({ "ax_node_id": target.ax_node_id }))
+    })?;
+    let checked = match actionability::probe_otp(page, &object_id).await {
+        Ok(probe) => actionability::decide_otp(&probe).map_err(actionability::otp_refused),
+        Err(error) => Err(error),
+    };
+    if let Err(error) = checked {
+        release_object_bounded(page, object_id).await;
+        return Err(error);
+    }
+    Ok((
+        OtpFillPrecheck {
+            loader_id: root.loader_id,
+            frame_id: root.id,
+            origin,
+        },
+        object_id,
+    ))
+}
+
+/// E3.1-c: the Chromium side of `fill_otp_ref` (lane C1). The runtime's
+/// `OtpFillTarget` adapter (E3.1-d) calls these three in order: precheck,
+/// trusted insert, credential-delivered mark. Every call except the mark is
+/// refused while `QUARRY_EDGE__FILL_OTP` is off.
+impl ChromiumoxideDriver {
+    /// Turn one-time-code fills on or off, overriding `QUARRY_EDGE__FILL_OTP`.
+    /// Call before the first `acquire`.
+    pub fn with_fill_otp(mut self, enabled: bool) -> Self {
+        self.fill_otp = enabled;
+        self
+    }
+
+    fn require_fill_otp(&self) -> QuarryResult<()> {
+        if self.fill_otp {
+            Ok(())
+        } else {
+            Err(actionability::otp_refused(
+                actionability::otp_reason::FLAG_OFF,
+            ))
+        }
+    }
+
+    /// Check the fill preconditions on `target` (a native AX target of the
+    /// current page) against the approval's `grant_origin`. Reads nothing from
+    /// a mailbox: the runtime reads the code only after this passed.
+    pub async fn otp_fill_precheck(
+        &self,
+        session: &BrowserSession,
+        target: &BrowserNativeTarget,
+        grant_origin: &str,
+    ) -> QuarryResult<OtpFillPrecheck> {
+        self.require_fill_otp()?;
+        let page = self.current_page(session).await?;
+        with_deadline(Op::NativeAction, async {
+            let (precheck, object_id) = otp_check_on(&page, target, grant_origin).await?;
+            release_object_bounded(&page, object_id).await;
+            Ok(precheck)
+        })
+        .await
+    }
+
+    /// Insert `code` into `target` as trusted input. Every precondition is
+    /// checked again right before the insert, and the top frame's loader must
+    /// still be the one `precheck` saw (a navigation in between refuses). The
+    /// code is not kept, logged or put in an error.
+    pub async fn otp_insert_trusted(
+        &self,
+        session: &BrowserSession,
+        target: &BrowserNativeTarget,
+        precheck: &OtpFillPrecheck,
+        code: &str,
+    ) -> QuarryResult<()> {
+        self.require_fill_otp()?;
+        let page = self.current_page(session).await?;
+        with_deadline(Op::NativeAction, async {
+            let (again, object_id) = otp_check_on(&page, target, &precheck.origin).await?;
+            if again.loader_id != precheck.loader_id || again.frame_id != precheck.frame_id {
+                release_object_bounded(&page, object_id).await;
+                return Err(actionability::otp_refused(
+                    actionability::otp_reason::LOADER_CHANGED,
+                ));
+            }
+            let outcome = actionability::insert_otp(&page, &object_id, code).await;
+            release_object_bounded(&page, object_id).await;
+            outcome
+        })
+        .await
+    }
+
+    /// Mark `loader_id` of `session` credential-delivered. Always allowed (also
+    /// with the flag off: marking only ever denies more). The mark is keyed on
+    /// the loader, so a navigation (a new loader) leaves it behind; the
+    /// session's release forgets it.
+    pub async fn mark_otp_credential_delivered(
+        &self,
+        session: &BrowserSession,
+        loader_id: &str,
+    ) -> QuarryResult<()> {
+        self.mark_credential_delivered_for_key(&Self::session_key(session), loader_id)
+            .await
+    }
+
+    async fn mark_credential_delivered_for_key(
+        &self,
+        session_key: &str,
+        loader_id: &str,
+    ) -> QuarryResult<()> {
+        if loader_id.trim().is_empty() {
+            return Err(QuarryError::new(
+                ErrorCode::Internal,
+                "credential-delivered mark needs a loader id",
+            ));
+        }
+        self.credential_delivered
+            .lock()
+            .await
+            .entry(session_key.to_owned())
+            .or_default()
+            .insert(loader_id.to_owned());
+        Ok(())
+    }
+
+    async fn credential_delivered_for_key(&self, session_key: &str, loader_id: &str) -> bool {
+        self.credential_delivered
+            .lock()
+            .await
+            .get(session_key)
+            .is_some_and(|loaders| loaders.contains(loader_id))
+    }
+
+    /// Whether `loader_id` of `session` was marked credential-delivered.
+    pub async fn otp_credential_delivered(&self, session: &BrowserSession, loader_id: &str) -> bool {
+        self.credential_delivered_for_key(&Self::session_key(session), loader_id)
+            .await
+    }
+
+    /// Whether the current page's top-frame loader was marked
+    /// credential-delivered: the read the E3.1-e denial asks before an AX, DOM
+    /// or screenshot read. A page whose loader cannot be read counts as
+    /// delivered when the session has any mark (fail closed).
+    pub async fn current_loader_credential_delivered(
+        &self,
+        session: &BrowserSession,
+    ) -> QuarryResult<bool> {
+        let session_key = Self::session_key(session);
+        let any_mark = self
+            .credential_delivered
+            .lock()
+            .await
+            .get(&session_key)
+            .is_some_and(|loaders| !loaders.is_empty());
+        if !any_mark {
+            return Ok(false);
+        }
+        let page = self.current_page(session).await?;
+        match root_frame_info(&page).await {
+            Ok(root) => Ok(self
+                .credential_delivered_for_key(&session_key, &root.loader_id)
+                .await),
+            Err(_) => Ok(true),
+        }
+    }
+}
+
+/// The most backend node ids one point hit returns: the node under the point and its
+/// accessibility ancestors, nearest first.
+pub const HIT_TEST_CHAIN_LIMIT: usize = 32;
+
+/// What a point hit test found (E3.3-h). `backend_node_ids[0]` is the DOM node under the point and
+/// the rest are its accessibility ancestors, nearest first; `frame_id` is the frame that owns the
+/// node. These are CDP handles: they stay inside Quarry and never reach a response or an
+/// observation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PointHit {
+    pub backend_node_ids: Vec<i64>,
+    pub frame_id: Option<String>,
+}
+
+/// One accessibility node of a partial tree, reduced to the fields the ancestor walk reads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AxLink {
+    ax_id: String,
+    parent_ax_id: Option<String>,
+    backend_node_id: Option<i64>,
+}
+
+/// The backend node ids from `start` up through the accessibility parents, nearest first, at most
+/// `limit` long. `start` is always first, even when no link carries it. The walk ends at a root,
+/// at a parent the tree does not hold, and at a cycle.
+fn backend_chain(links: &[AxLink], start: i64, limit: usize) -> Vec<i64> {
+    let mut chain = vec![start];
+    let Some(first) = links
+        .iter()
+        .find(|link| link.backend_node_id == Some(start))
+    else {
+        return chain;
+    };
+    let by_ax_id: HashMap<&str, &AxLink> = links
+        .iter()
+        .map(|link| (link.ax_id.as_str(), link))
+        .collect();
+    let mut seen: HashSet<&str> = HashSet::from([first.ax_id.as_str()]);
+    let mut current = first;
+    while chain.len() < limit {
+        let Some(parent) = current
+            .parent_ax_id
+            .as_deref()
+            .and_then(|id| by_ax_id.get(id).copied())
+        else {
+            break;
+        };
+        if !seen.insert(parent.ax_id.as_str()) {
+            break;
+        }
+        if let Some(backend) = parent.backend_node_id {
+            if !chain.contains(&backend) {
+                chain.push(backend);
+            }
+        }
+        current = parent;
+    }
+    chain
+}
+
+/// Whether a CDP error is Chromium's answer that no node lies at the point. That is a miss, not a
+/// failure.
+fn no_node_at_location(message: &str) -> bool {
+    message.to_ascii_lowercase().contains("no node found")
+}
+
+impl ChromiumoxideDriver {
+    /// E3.3-h: the DOM node under a viewport point and its accessibility ancestors. The point is in
+    /// CSS pixels from the top-left of the viewport, the `DOM.getNodeForLocation` coordinates. The
+    /// reads are read-only: no focus, scroll, input, navigation or profile write, and nothing is
+    /// retained. `Ok(None)` when Chromium finds no node at the point. Each read is bounded by
+    /// `Op::AxSnapshot` and retried once when the context went away under it.
+    pub async fn hit_test_point(
+        &self,
+        session: &BrowserSession,
+        x: i64,
+        y: i64,
+    ) -> QuarryResult<Option<PointHit>> {
+        let page = self.current_page(session).await?;
+        let located = read_with_retry(Op::AxSnapshot, || async {
+            match page.execute(GetNodeForLocationParams::new(x, y)).await {
+                Ok(response) => Ok(Some(response.result)),
+                Err(error) if no_node_at_location(&error.to_string()) => Ok(None),
+                Err(error) => Err(QuarryError::new(
+                    ErrorCode::DriverFailed,
+                    "chromiumoxide point hit test failed",
+                )
+                .with_details(json!({ "error": error.to_string() }))),
+            }
+        })
+        .await?;
+        let Some(located) = located else {
+            return Ok(None);
+        };
+        let backend = *located.backend_node_id.inner();
+        let frame_id = Some(located.frame_id.inner().clone()).filter(|id| !id.is_empty());
+        let ax_tree = read_with_retry(Op::AxSnapshot, || async {
+            page.execute(AccessibilityEnableParams::default())
+                .await
+                .map_err(|error| {
+                    QuarryError::new(
+                        ErrorCode::DriverFailed,
+                        "chromiumoxide accessibility domain enable failed",
+                    )
+                    .with_details(json!({ "error": error.to_string() }))
+                })?;
+            page.execute(
+                GetPartialAxTreeParams::builder()
+                    .backend_node_id(BackendNodeId::new(backend))
+                    .fetch_relatives(true)
+                    .build(),
+            )
+            .await
+            .map_err(|error| {
+                QuarryError::new(
+                    ErrorCode::DriverFailed,
+                    "chromiumoxide partial accessibility tree failed",
+                )
+                .with_details(json!({ "error": error.to_string() }))
+            })
+        })
+        .await?;
+        let links: Vec<AxLink> = ax_tree
+            .result
+            .nodes
+            .iter()
+            .map(|node| AxLink {
+                ax_id: node.node_id.inner().clone(),
+                parent_ax_id: node.parent_id.as_ref().map(|id| id.inner().clone()),
+                backend_node_id: node.backend_dom_node_id.as_ref().map(|id| *id.inner()),
+            })
+            .collect();
+        Ok(Some(PointHit {
+            backend_node_ids: backend_chain(&links, backend, HIT_TEST_CHAIN_LIMIT),
+            frame_id,
+        }))
+    }
+}
+
+#[cfg(test)]
+mod otp_fill_driver_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn every_fill_call_is_refused_while_the_flag_is_off() {
+        let driver = ChromiumoxideDriver::new().with_fill_otp(false);
+        let error = driver.require_fill_otp().unwrap_err();
+        assert_eq!(error.code, ErrorCode::Unsupported);
+        assert_eq!(error.details.unwrap()["reason"], "otp_fill_disabled");
+        assert!(ChromiumoxideDriver::new()
+            .with_fill_otp(true)
+            .require_fill_otp()
+            .is_ok());
+    }
+
+    #[tokio::test]
+    async fn a_marked_loader_stays_delivered_until_the_session_is_released() {
+        let driver = ChromiumoxideDriver::new();
+        assert!(!driver.credential_delivered_for_key("s1", "loader-a").await);
+        driver
+            .mark_credential_delivered_for_key("s1", "loader-a")
+            .await
+            .unwrap();
+        assert!(driver.credential_delivered_for_key("s1", "loader-a").await);
+        // Another loader (a navigation) and another session are not marked.
+        assert!(!driver.credential_delivered_for_key("s1", "loader-b").await);
+        assert!(!driver.credential_delivered_for_key("s2", "loader-a").await);
+        // A mark needs a loader id.
+        assert_eq!(
+            driver
+                .mark_credential_delivered_for_key("s1", " ")
+                .await
+                .unwrap_err()
+                .code,
+            ErrorCode::Internal
+        );
+        // A view shares the marks; the release forgets them.
+        assert!(driver.share().credential_delivered_for_key("s1", "loader-a").await);
+        driver.teardown_locked("s1").await;
+        assert!(!driver.credential_delivered_for_key("s1", "loader-a").await);
+    }
 }
 
 impl Drop for ChromiumoxideDriver {
@@ -9558,6 +10075,81 @@ mod tests {
         silent_task.abort();
     }
 
+    /// W2-U07 against a real Chromium: an `open_tab` whose navigation hangs ends in the typed
+    /// navigate TIMEOUT and keeps its tab. The error names the tab (`details.tab_id`, never
+    /// the URL), the tab is listed and active, its abandoned navigation is marked, and the
+    /// tab's next `goto` drains it and navigates. Slow: the navigate deadline is 25 s, and the
+    /// URL guard looks the host up, so `example.com` must resolve to a public address.
+    #[tokio::test]
+    #[ignore = "W2-U07 live lane, slow (25 s): needs Chromium (CHROMIUMOXIDE_TEST=1) and a public DNS answer for example.com"]
+    async fn a_timed_out_open_tab_keeps_its_tab_and_names_it() {
+        if !live_enabled() {
+            return;
+        }
+        let (endpoint, proxy_task) = fixture_proxy().await;
+        let driver = ChromiumoxideDriver::new()
+            .with_pinned_egress_proxy(Arc::new(FixtureProxyProvider(endpoint)))
+            .with_pool_config(quiet_pool());
+        let session = driver
+            .acquire(&make_lease_with_key("w2-u07-open"))
+            .await
+            .expect("acquire");
+        driver
+            .configure_egress_policy(
+                &session,
+                BrowserEgressPolicy::from_allowed_domains(&["example.com".to_owned()]),
+            )
+            .await
+            .expect("allow example.com");
+
+        let started = Instant::now();
+        let error = driver
+            .open_tab(
+                &session,
+                OpenTabOptions {
+                    url: Some("http://example.com/slow.html".to_owned()),
+                    activate: true,
+                    egress_policy: None,
+                },
+            )
+            .await
+            .expect_err("the held navigation times out");
+        let waited = started.elapsed();
+        assert_eq!(error.code, ErrorCode::Timeout, "{error:?}");
+        assert!(!error.retryable, "{error:?}");
+        assert!(waited < Duration::from_secs(40), "{waited:?}");
+        let details = error.details.clone().expect("details");
+        assert_eq!(details["op"], "navigate");
+        assert_eq!(details["effect"], "unknown");
+        assert!(!details.to_string().contains("example.com"), "{details}");
+        let tab_id = details["tab_id"].as_str().expect("the tab id").to_owned();
+
+        let tabs = driver.list_tabs(&session).await.expect("tabs");
+        assert!(
+            tabs.iter().any(|tab| tab.tab_id == tab_id && tab.active),
+            "the timed-out tab is kept and active: {tabs:?}"
+        );
+        assert_eq!(
+            abandoned_count(&driver),
+            1,
+            "the abandoned navigation is marked"
+        );
+
+        let started = Instant::now();
+        driver
+            .goto(&session, "http://example.com/next.html")
+            .await
+            .expect("the next navigation drains the abandoned one");
+        let next_step = started.elapsed();
+        eprintln!("next step took {next_step:?} after a timed-out open_tab");
+        assert!(next_step < Duration::from_secs(8), "{next_step:?}");
+        assert!(page_html(&driver, &session).await.contains("sc4-next-page"));
+        assert_eq!(abandoned_count(&driver), 0, "the drain takes the mark");
+        driver.release(session).await.expect("release");
+        driver.shutdown().await;
+        proxy_task.abort();
+    }
+
     /// The end-to-end loopback-egress proof lives in
     /// `quarry-runtime/tests/browser_egress_boundary.rs`, not here.
     ///
@@ -9618,6 +10210,40 @@ mod tests {
         let html = driver.content(&session).await.expect("content");
         let html = String::from_utf8_lossy(&html);
         assert!(html.contains("<h1>hi</h1>"), "content was: {html}");
+
+        driver.release(session).await.expect("release");
+    }
+
+    /// E3.3-h: a point over a rendered button gives the node under it, and a point outside the
+    /// viewport gives no node. Integration test that requires a local Chromium/Chrome binary.
+    /// Skipped unless `CHROMIUMOXIDE_TEST=1` is set.
+    #[tokio::test]
+    async fn hit_test_point_finds_the_node_under_a_point() {
+        if !live_enabled() {
+            return;
+        }
+        let driver = live_driver();
+        let session = live_session(&driver, "live-hit-test").await;
+        driver.new_tab(&session, None).await.expect("blank tab");
+        let page = driver.current_page(&session).await.expect("current page");
+        page.set_content(
+            "<html><body style=\"margin:0\"><button style=\"position:absolute;left:100px;top:100px;width:200px;height:50px\"><span>Save</span></button></body></html>",
+        )
+        .await
+        .expect("inject page");
+
+        let hit = driver
+            .hit_test_point(&session, 150, 120)
+            .await
+            .expect("hit test")
+            .expect("a node under the point");
+        assert!(!hit.backend_node_ids.is_empty());
+        assert!(hit.frame_id.is_some());
+        assert!(driver
+            .hit_test_point(&session, 5000, 5000)
+            .await
+            .expect("a point outside the viewport is a miss, not an error")
+            .is_none());
 
         driver.release(session).await.expect("release");
     }
@@ -10082,6 +10708,74 @@ mod tests {
     include!("profile_capture_live.rs");
     // WS17.C2: restore against a real Chromium.
     include!("profile_restore_live.rs");
+}
+
+#[cfg(test)]
+mod hit_test_chain_tests {
+    use super::*;
+
+    fn link(ax_id: &str, parent: Option<&str>, backend: Option<i64>) -> AxLink {
+        AxLink {
+            ax_id: ax_id.to_owned(),
+            parent_ax_id: parent.map(str::to_owned),
+            backend_node_id: backend,
+        }
+    }
+
+    #[test]
+    fn the_chain_starts_at_the_hit_node_and_climbs_its_ancestors() {
+        // A span (backend 30) in a button (backend 20), under a generic node with no DOM node,
+        // under the root (backend 1).
+        let links = vec![
+            link("5", Some("4"), Some(30)),
+            link("4", Some("3"), None),
+            link("3", Some("2"), Some(20)),
+            link("2", None, Some(1)),
+        ];
+        assert_eq!(
+            backend_chain(&links, 30, HIT_TEST_CHAIN_LIMIT),
+            vec![30, 20, 1]
+        );
+    }
+
+    #[test]
+    fn a_hit_node_without_an_accessibility_entry_is_its_own_chain() {
+        let links = vec![link("9", None, Some(7))];
+        assert_eq!(backend_chain(&links, 30, HIT_TEST_CHAIN_LIMIT), vec![30]);
+    }
+
+    #[test]
+    fn the_walk_stops_at_a_cycle_a_dangling_parent_and_the_limit() {
+        let cycle = vec![
+            link("1", Some("2"), Some(10)),
+            link("2", Some("1"), Some(11)),
+        ];
+        assert_eq!(
+            backend_chain(&cycle, 10, HIT_TEST_CHAIN_LIMIT),
+            vec![10, 11]
+        );
+
+        let dangling = vec![link("1", Some("missing"), Some(10))];
+        assert_eq!(backend_chain(&dangling, 10, HIT_TEST_CHAIN_LIMIT), vec![10]);
+
+        let deep: Vec<AxLink> = (1..=40_i64)
+            .map(|n| {
+                let parent = (n + 1).to_string();
+                link(&n.to_string(), Some(parent.as_str()), Some(100 + n))
+            })
+            .collect();
+        assert_eq!(backend_chain(&deep, 101, 5), vec![101, 102, 103, 104, 105]);
+    }
+
+    #[test]
+    fn only_chromiums_no_node_answer_is_a_miss() {
+        assert!(no_node_at_location(
+            "Server error: No node found at given location"
+        ));
+        assert!(no_node_at_location("no node found at given location"));
+        assert!(!no_node_at_location("Request timed out."));
+        assert!(!no_node_at_location("Invalid parameters"));
+    }
 }
 
 /// WS3.D and WS3.F, the parts that need no browser: every CDP call is bounded, the

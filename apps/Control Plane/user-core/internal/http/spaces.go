@@ -1162,6 +1162,11 @@ type sandboxCapabilityClaims struct {
 	Backup         bool   `json:"backup"`
 	Egress         string `json:"egress"`
 	CredentialMode string `json:"credential_mode"`
+	// EgressAllowlist is set only on a v2 (egress tier) decision whose grant
+	// is allowlist; its digest is bound into the payload digest, so
+	// sandbox-manager refuses a list altered in transit. Omitted otherwise,
+	// which keeps the v1 sidecar byte-identical.
+	EgressAllowlist []string `json:"egress_allowlist,omitempty"`
 }
 
 // issueSpaceCapabilityDecision is deliberately execution-core-only. It
@@ -1185,12 +1190,17 @@ func (s *Server) issueSpaceCapabilityDecision(c *gin.Context) {
 		Backup: request.Intent.Backup, Egress: request.Intent.Egress,
 		CredentialMode: request.Intent.CredentialMode, IdempotencyKey: request.Intent.IdempotencyKey,
 	}
-	if err := intent.Validate(); err != nil {
+	tiered := s.spaceRepo.SandboxEgressTiersEnabled()
+	if err := intent.ValidateWithEgressTiers(tiered); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "valid space capability intent is required"})
 		return
 	}
 	evidence, ok := s.resolvePersonalThreadEvidence(c, intent.SpaceRef, intent.OrgID, intent.SubjectID, "personal Space sandbox authority unavailable")
 	if !ok {
+		return
+	}
+	if tiered {
+		s.issueTieredSpaceCapabilityDecision(c, evidence, intent)
 		return
 	}
 	key, decisionRef, nonce, ok := spaceDecisionMaterial(c)
@@ -1212,6 +1222,48 @@ func (s *Server) issueSpaceCapabilityDecision(c *gin.Context) {
 		Backup: intent.Backup, Egress: intent.Egress, CredentialMode: intent.CredentialMode,
 	}
 	c.JSON(http.StatusOK, gin.H{"data": gin.H{"decision": token, "claims": claims}})
+}
+
+// issueTieredSpaceCapabilityDecision is the SPACE_SANDBOX_EGRESS_TIERS form of
+// the decision (EP-9 E2). It reads the org's egress ceiling, refuses to sign
+// when the ceiling was read at a different entitlement revision than the
+// authority evidence (a ceiling change raced this request; the caller
+// retries), and returns the granted tier and allow-list beside the token so
+// execution-core can configure its egress proxy (E3).
+func (s *Server) issueTieredSpaceCapabilityDecision(c *gin.Context, evidence spaces.PersonalThreadDecisionEvidence, intent spaces.SpaceCapabilityIntent) {
+	ceiling, entitlementRevision, err := s.spaceRepo.ResolveSandboxEgressCeiling(c.Request.Context(), intent.SpaceRef, intent.OrgID)
+	if err != nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": gin.H{
+			"code": "sandbox_egress_policy_unavailable", "message": "personal Space sandbox authority unavailable", "details": gin.H{},
+		}})
+		return
+	}
+	if entitlementRevision != evidence.Membership.Revisions.Entitlement {
+		c.JSON(http.StatusConflict, gin.H{"error": gin.H{
+			"code": "sandbox_egress_policy_changed", "message": "Space sandbox egress policy changed; retry the decision", "details": gin.H{},
+		}})
+		return
+	}
+	key, decisionRef, nonce, ok := spaceDecisionMaterial(c)
+	if !ok {
+		return
+	}
+	decision, grant, err := spaces.IssueTieredSpaceCapabilityDecision(evidence, intent, ceiling, decisionRef, nonce, time.Now().UTC())
+	if err != nil {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Space sandbox capability is not authorized"})
+		return
+	}
+	token, ok := signSpaceDecision(c, key, decision)
+	if !ok {
+		return
+	}
+	claims := sandboxCapabilityClaims{
+		BackendID: intent.BackendID, ProfileDigest: intent.ProfileDigest,
+		Persistence: intent.Persistence, Processes: intent.Processes,
+		Backup: intent.Backup, Egress: intent.Egress, CredentialMode: intent.CredentialMode,
+		EgressAllowlist: grant.Allowlist,
+	}
+	c.JSON(http.StatusOK, gin.H{"data": gin.H{"decision": token, "claims": claims, "egress_grant": grant}})
 }
 
 // issueScheduledRunDecision authorizes only preparation of the service-owned
@@ -1470,6 +1522,14 @@ func (s *Server) upsertSpaceEffectPolicy(c *gin.Context) {
 			provided[spec.Key] = true
 		}
 	}
+	// The sandbox egress ceiling (EP-9 E2) rides the same operator body while
+	// SPACE_SANDBOX_EGRESS_TIERS is on, and is validated before anything is
+	// written so a refused tier never leaves half a policy behind. With the
+	// switch off the two keys are ignored, as every unknown key always was.
+	egress, egressStated, ok := sandboxEgressPolicyFromBody(c, s.spaceRepo.SandboxEgressTiersEnabled(), stated)
+	if !ok {
+		return
+	}
 	actor := spaces.EffectPolicyActor{Type: "service", ID: controlSpacePolicyPrincipal}
 	updated, err := s.spaceRepo.UpsertEffectPolicyPartial(c.Request.Context(), policy, actor, provided)
 	if err != nil {
@@ -1480,7 +1540,56 @@ func (s *Server) upsertSpaceEffectPolicy(c *gin.Context) {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Space effect policy unavailable"})
 		return
 	}
+	if egressStated {
+		egressUpdated, err := s.spaceRepo.UpsertSandboxEgressPolicy(c.Request.Context(), policy.OrgID, egress, actor)
+		if err != nil {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": gin.H{
+				"code": "sandbox_egress_policy_unavailable", "message": "Space sandbox egress policy unavailable", "details": gin.H{},
+			}})
+			return
+		}
+		updated = updated || egressUpdated
+	}
 	c.JSON(http.StatusOK, gin.H{"data": gin.H{"updated": updated}})
+}
+
+// sandboxEgressPolicyFromBody reads the optional sandbox_egress_tier and
+// sandbox_egress_allowlist keys of an operator effect-policy body. Both must
+// be stated together when either is: a partial egress write would have to
+// guess the other half. It returns stated=false when the switch is off or
+// neither key is present, and writes a typed 400 and ok=false when the pair
+// is malformed or refused (unknown tier, all, a non-canonical host, more than
+// 32 hosts).
+func sandboxEgressPolicyFromBody(c *gin.Context, enabled bool, stated map[string]json.RawMessage) (spaces.SandboxEgressPolicy, bool, bool) {
+	if !enabled {
+		return spaces.SandboxEgressPolicy{}, false, true
+	}
+	rawTier, hasTier := stated["sandbox_egress_tier"]
+	rawAllowlist, hasAllowlist := stated["sandbox_egress_allowlist"]
+	if !hasTier && !hasAllowlist {
+		return spaces.SandboxEgressPolicy{}, false, true
+	}
+	refuse := func(reason string) (spaces.SandboxEgressPolicy, bool, bool) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{
+			"code": "invalid_sandbox_egress_policy", "message": "invalid Space sandbox egress policy", "details": gin.H{"reason": reason},
+		}})
+		return spaces.SandboxEgressPolicy{}, false, false
+	}
+	if !hasTier || !hasAllowlist {
+		return refuse("sandbox_egress_tier and sandbox_egress_allowlist must be stated together")
+	}
+	var policy spaces.SandboxEgressPolicy
+	if err := json.Unmarshal(rawTier, &policy.Tier); err != nil {
+		return refuse("sandbox_egress_tier must be a string")
+	}
+	if err := json.Unmarshal(rawAllowlist, &policy.Allowlist); err != nil || policy.Allowlist == nil {
+		return refuse("sandbox_egress_allowlist must be an array of host names")
+	}
+	normalized, err := policy.Normalize()
+	if err != nil {
+		return refuse(err.Error())
+	}
+	return normalized, true, true
 }
 
 func randomDecisionPart() (string, error) {

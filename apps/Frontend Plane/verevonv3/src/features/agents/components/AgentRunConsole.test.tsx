@@ -766,6 +766,58 @@ describe('AgentRunConsole sub-agent timeline', () => {
   })
 })
 
+describe('AgentRunConsole run-cost meter (WS27-S4)', () => {
+  beforeEach(() => {
+    mockStreamChat.mockReset()
+    mockStreamRunEvents.mockReset().mockImplementation(() => new Promise<void>(() => {}))
+    mockListApprovals.mockReset().mockResolvedValue([])
+    mockGetRun.mockReset().mockResolvedValue(null)
+    mockGetRunProofBundle.mockReset().mockResolvedValue(null)
+    mockListRuns.mockReset().mockResolvedValue({ runs: [], hasMore: false })
+    mockListSystemRuns.mockReset().mockResolvedValue({ runs: [], hasMore: false })
+    mockGetRunWatchStatus.mockReset().mockResolvedValue({ watching: false })
+  })
+
+  /** Starts a run whose chat stream delivers the given frames before it stays open. */
+  function startStreamingRun(deliver: (handlers: ChatStreamHandlers) => void) {
+    mockStreamChat.mockImplementation((_request: unknown, handlers: ChatStreamHandlers) => {
+      handlers.onConnected?.({ runId: 'run_meter', threadId: 'thread_meter', model: 'balanced' })
+      deliver(handlers)
+      return new Promise<void>(() => {})
+    })
+    renderConsole()
+    fireEvent.input(screen.getByLabelText(/hva skal agenten gjøre/i), { target: { value: 'Summarise the report' } })
+    // Solid 2 batches the goal-signal write; without flushing, runTask() reads an empty goal.
+    flush()
+    fireEvent.click(screen.getByRole('button', { name: /kjør oppgave/i }))
+  }
+
+  const meterText = () => document.querySelector('.verevon-run-trust .verevon-run-cost-meter')?.textContent ?? ''
+
+  it('shows a subscription run as included in the subscription, never as $0', async () => {
+    startStreamingRun((handlers) => {
+      handlers.onUsageProgress?.({ calls: 1, phase: 'answer', inputTokens: 500, outputTokens: 50, costBasis: 'subscription' })
+      // The wire's placeholder cost rides on the final frame and must not reach the meter.
+      handlers.onUsage?.({ inputTokens: 500, outputTokens: 50, costUsd: 0, costBasis: 'subscription', calls: 1, unpricedCalls: 0 })
+    })
+
+    await waitFor(() => expect(meterText()).toMatch(/Inkludert i abonnementet|Included in the subscription/))
+    expect(meterText()).not.toContain('$')
+  })
+
+  it('keeps the running total from the progress frames and ignores a late frame that counts fewer calls', async () => {
+    startStreamingRun((handlers) => {
+      handlers.onUsageProgress?.({ calls: 1, phase: 'tool_round', inputTokens: 900, outputTokens: 40, costUsd: 0.002, costBasis: 'metered' })
+      handlers.onUsageProgress?.({ calls: 2, phase: 'answer', inputTokens: 1200, outputTokens: 90, costUsd: 0.0031, costBasis: 'metered' })
+      handlers.onUsageProgress?.({ calls: 1, phase: 'tool_round', inputTokens: 1, outputTokens: 1, costUsd: 0.0001, costBasis: 'metered' })
+    })
+
+    await waitFor(() => expect(meterText()).toContain('$0.0031'))
+    expect(meterText()).toMatch(/2 kall|2 calls/)
+    expect(meterText()).not.toContain('$0.0001')
+  })
+})
+
 describe('AgentRunConsole zero-retention refusal', () => {
   beforeEach(() => {
     mockStreamChat.mockReset()
@@ -803,5 +855,35 @@ describe('AgentRunConsole zero-retention refusal', () => {
     const shown = container.querySelector('.verevon-run-console__error')?.textContent ?? ''
     expect(shown).toContain('Slå av funksjonen og send på nytt.')
     expect(shown).not.toContain('Server operator text')
+  })
+})
+
+// A history row replays its stored status into the header pill. The console maps
+// that status onto its own RunStatus union, so a stop must read as stopped and a
+// queued run as running, not both as idle.
+describe('AgentRunConsole history replay status', () => {
+  beforeEach(() => {
+    mockStreamRunEvents.mockReset().mockReturnValue(new Promise<void>(() => {}))
+    mockListApprovals.mockReset().mockResolvedValue([])
+    mockGetRun.mockReset().mockResolvedValue(null)
+    mockGetRunProofBundle.mockReset().mockResolvedValue(null)
+    mockGetRunWatchStatus.mockReset().mockResolvedValue({ watching: false })
+    mockListRuns.mockReset().mockResolvedValue({ runs: [], hasMore: false })
+  })
+
+  it.each([
+    ['queued', 'Kjører'],
+    ['awaiting_approval', 'Satt på pause for godkjenning'],
+    ['completed', 'Fullført'],
+    ['cancelled', 'Kansellert'],
+  ])('replays a %s run with the header reading the matching state', async (status, label) => {
+    mockListSystemRuns.mockResolvedValue({
+      runs: [{ ...runDetail(), runId: 'run_history', goal: 'Replayed goal', status, createdAt: '2026-08-08T09:00:00Z' }],
+      hasMore: false,
+    })
+    renderConsole()
+    fireEvent.click(screen.getByRole('tab', { name: /planlagte/i }))
+    fireEvent.click(await screen.findByRole('button', { name: /replayed goal/i }))
+    await waitFor(() => expect(document.querySelector('.verevon-run-console__status')?.textContent).toBe(label))
   })
 })

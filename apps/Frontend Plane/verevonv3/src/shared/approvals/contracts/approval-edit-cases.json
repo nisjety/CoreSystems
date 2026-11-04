@@ -1,0 +1,601 @@
+{
+  "contract": "model-plane.approval-edit",
+  "version": 1,
+  "note": "EP-10-S3. Owned by mp-contracts (src/approval_edit.rs); the SPA holds a byte-identical copy pinned by sha256. A value {\"$repeat\": s, \"count\": n} stands for s repeated n times. 'client' is what the SPA's limit check returns for the patch alone (null: only the server can tell).",
+  "limits": {
+    "min_recipients": 1,
+    "max_recipients": 50,
+    "max_subject_bytes": 998,
+    "max_body_text_bytes": 49152,
+    "max_recipient_bytes": 320
+  },
+  "codes": [
+    "not_editable",
+    "invalid_recipient",
+    "too_many_recipients",
+    "invalid_subject",
+    "invalid_body",
+    "edit_too_large",
+    "no_change"
+  ],
+  "edited_fields": [
+    "to",
+    "subject",
+    "body_text"
+  ],
+  "cases": [
+    {
+      "name": "subject_edit_keeps_html_and_threading",
+      "input": {
+        "connection_id": "conn-1",
+        "operation": "gmail.send",
+        "params": {
+          "userId": "me"
+        },
+        "body": {
+          "to": "alice@example.com, bob@example.com",
+          "subject": "Status",
+          "bodyText": "Hei",
+          "bodyHtml": "<p>Hei</p>",
+          "threadId": "t-1",
+          "inReplyTo": "<m-1@example.com>"
+        }
+      },
+      "patch": {
+        "subject": "  Status, revised "
+      },
+      "expect": {
+        "input": {
+          "connection_id": "conn-1",
+          "operation": "gmail.send",
+          "params": {
+            "userId": "me"
+          },
+          "body": {
+            "to": "alice@example.com, bob@example.com",
+            "subject": "Status, revised",
+            "bodyText": "Hei",
+            "bodyHtml": "<p>Hei</p>",
+            "threadId": "t-1",
+            "inReplyTo": "<m-1@example.com>"
+          }
+        },
+        "edited_fields": [
+          "subject"
+        ]
+      },
+      "client": null
+    },
+    {
+      "name": "body_edit_drops_html",
+      "input": {
+        "connection_id": "conn-1",
+        "operation": "gmail.send",
+        "params": {
+          "userId": "me"
+        },
+        "body": {
+          "to": "alice@example.com, bob@example.com",
+          "subject": "Status",
+          "bodyText": "Hei",
+          "bodyHtml": "<p>Hei</p>",
+          "threadId": "t-1",
+          "inReplyTo": "<m-1@example.com>"
+        }
+      },
+      "patch": {
+        "bodyText": "Hei igjen"
+      },
+      "expect": {
+        "input": {
+          "connection_id": "conn-1",
+          "operation": "gmail.send",
+          "params": {
+            "userId": "me"
+          },
+          "body": {
+            "to": "alice@example.com, bob@example.com",
+            "subject": "Status",
+            "bodyText": "Hei igjen",
+            "threadId": "t-1",
+            "inReplyTo": "<m-1@example.com>"
+          }
+        },
+        "edited_fields": [
+          "body_text"
+        ]
+      },
+      "client": null
+    },
+    {
+      "name": "recipient_added_becomes_a_list",
+      "input": {
+        "connection_id": "conn-1",
+        "operation": "gmail.send",
+        "params": {
+          "userId": "me"
+        },
+        "body": {
+          "to": "alice@example.com, bob@example.com",
+          "subject": "Status",
+          "bodyText": "Hei",
+          "bodyHtml": "<p>Hei</p>",
+          "threadId": "t-1",
+          "inReplyTo": "<m-1@example.com>"
+        }
+      },
+      "patch": {
+        "to": [
+          "alice@example.com",
+          "bob@example.com",
+          "Carol <carol@example.org>"
+        ]
+      },
+      "expect": {
+        "input": {
+          "connection_id": "conn-1",
+          "operation": "gmail.send",
+          "params": {
+            "userId": "me"
+          },
+          "body": {
+            "to": [
+              "alice@example.com",
+              "bob@example.com",
+              "Carol <carol@example.org>"
+            ],
+            "subject": "Status",
+            "bodyText": "Hei",
+            "bodyHtml": "<p>Hei</p>",
+            "threadId": "t-1",
+            "inReplyTo": "<m-1@example.com>"
+          }
+        },
+        "edited_fields": [
+          "to"
+        ]
+      },
+      "client": null
+    },
+    {
+      "name": "all_three_fields_in_fixed_order",
+      "input": {
+        "connection_id": "conn-2",
+        "operation": "mail.send",
+        "body": {
+          "to": [
+            "dana@example.no"
+          ],
+          "subject": "Tilbud",
+          "bodyText": "Hei Dana"
+        }
+      },
+      "patch": {
+        "bodyText": "Hei igjen",
+        "subject": "Nytt tilbud",
+        "to": [
+          "erik@example.no"
+        ]
+      },
+      "expect": {
+        "input": {
+          "connection_id": "conn-2",
+          "operation": "mail.send",
+          "body": {
+            "to": [
+              "erik@example.no"
+            ],
+            "subject": "Nytt tilbud",
+            "bodyText": "Hei igjen"
+          }
+        },
+        "edited_fields": [
+          "to",
+          "subject",
+          "body_text"
+        ]
+      },
+      "client": null
+    },
+    {
+      "name": "unchanged_field_is_not_listed",
+      "input": {
+        "connection_id": "conn-2",
+        "operation": "mail.send",
+        "body": {
+          "to": [
+            "dana@example.no"
+          ],
+          "subject": "Tilbud",
+          "bodyText": "Hei Dana"
+        }
+      },
+      "patch": {
+        "subject": "Tilbud",
+        "bodyText": "Hei Dana, ny tekst"
+      },
+      "expect": {
+        "input": {
+          "connection_id": "conn-2",
+          "operation": "mail.send",
+          "body": {
+            "to": [
+              "dana@example.no"
+            ],
+            "subject": "Tilbud",
+            "bodyText": "Hei Dana, ny tekst"
+          }
+        },
+        "edited_fields": [
+          "body_text"
+        ]
+      },
+      "client": null
+    },
+    {
+      "name": "same_values_are_no_change",
+      "input": {
+        "connection_id": "conn-1",
+        "operation": "gmail.send",
+        "params": {
+          "userId": "me"
+        },
+        "body": {
+          "to": "alice@example.com, bob@example.com",
+          "subject": "Status",
+          "bodyText": "Hei",
+          "bodyHtml": "<p>Hei</p>",
+          "threadId": "t-1",
+          "inReplyTo": "<m-1@example.com>"
+        }
+      },
+      "patch": {
+        "to": [
+          " alice@example.com",
+          "bob@example.com"
+        ],
+        "subject": "Status",
+        "bodyText": "Hei"
+      },
+      "error": "no_change",
+      "client": null
+    },
+    {
+      "name": "empty_patch_is_no_change",
+      "input": {
+        "connection_id": "conn-1",
+        "operation": "gmail.send",
+        "params": {
+          "userId": "me"
+        },
+        "body": {
+          "to": "alice@example.com, bob@example.com",
+          "subject": "Status",
+          "bodyText": "Hei",
+          "bodyHtml": "<p>Hei</p>",
+          "threadId": "t-1",
+          "inReplyTo": "<m-1@example.com>"
+        }
+      },
+      "patch": {},
+      "error": "no_change",
+      "client": null
+    },
+    {
+      "name": "gmail_raw_draft_is_not_editable",
+      "input": {
+        "connection_id": "conn-1",
+        "operation": "gmail.send",
+        "body": {
+          "raw": "TUlNRQ"
+        }
+      },
+      "patch": {
+        "subject": "x"
+      },
+      "error": "not_editable",
+      "client": null
+    },
+    {
+      "name": "other_write_is_not_editable",
+      "input": {
+        "connection_id": "conn-3",
+        "operation": "message.send",
+        "body": {
+          "text": "hi"
+        }
+      },
+      "patch": {
+        "subject": "x"
+      },
+      "error": "not_editable",
+      "client": null
+    },
+    {
+      "name": "not_editable_wins_over_a_bad_field",
+      "input": {
+        "connection_id": "conn-1",
+        "operation": "gmail.send",
+        "body": {
+          "raw": "TUlNRQ"
+        }
+      },
+      "patch": {
+        "subject": "a\nb"
+      },
+      "error": "not_editable",
+      "client": "invalid_subject"
+    },
+    {
+      "name": "no_recipients_is_invalid",
+      "input": {
+        "connection_id": "conn-1",
+        "operation": "gmail.send",
+        "params": {
+          "userId": "me"
+        },
+        "body": {
+          "to": "alice@example.com, bob@example.com",
+          "subject": "Status",
+          "bodyText": "Hei",
+          "bodyHtml": "<p>Hei</p>",
+          "threadId": "t-1",
+          "inReplyTo": "<m-1@example.com>"
+        }
+      },
+      "patch": {
+        "to": []
+      },
+      "error": "invalid_recipient",
+      "client": "invalid_recipient"
+    },
+    {
+      "name": "unparsable_recipient_is_invalid",
+      "input": {
+        "connection_id": "conn-1",
+        "operation": "gmail.send",
+        "params": {
+          "userId": "me"
+        },
+        "body": {
+          "to": "alice@example.com, bob@example.com",
+          "subject": "Status",
+          "bodyText": "Hei",
+          "bodyHtml": "<p>Hei</p>",
+          "threadId": "t-1",
+          "inReplyTo": "<m-1@example.com>"
+        }
+      },
+      "patch": {
+        "to": [
+          "alice@"
+        ]
+      },
+      "error": "invalid_recipient",
+      "client": null
+    },
+    {
+      "name": "comma_cannot_smuggle_a_recipient",
+      "input": {
+        "connection_id": "conn-1",
+        "operation": "gmail.send",
+        "params": {
+          "userId": "me"
+        },
+        "body": {
+          "to": "alice@example.com, bob@example.com",
+          "subject": "Status",
+          "bodyText": "Hei",
+          "bodyHtml": "<p>Hei</p>",
+          "threadId": "t-1",
+          "inReplyTo": "<m-1@example.com>"
+        }
+      },
+      "patch": {
+        "to": [
+          "alice@example.com, eve@example.com"
+        ]
+      },
+      "error": "invalid_recipient",
+      "client": null
+    },
+    {
+      "name": "header_injection_in_a_recipient_is_invalid",
+      "input": {
+        "connection_id": "conn-1",
+        "operation": "gmail.send",
+        "params": {
+          "userId": "me"
+        },
+        "body": {
+          "to": "alice@example.com, bob@example.com",
+          "subject": "Status",
+          "bodyText": "Hei",
+          "bodyHtml": "<p>Hei</p>",
+          "threadId": "t-1",
+          "inReplyTo": "<m-1@example.com>"
+        }
+      },
+      "patch": {
+        "to": [
+          "alice@example.com\r\nBcc: eve@example.com"
+        ]
+      },
+      "error": "invalid_recipient",
+      "client": null
+    },
+    {
+      "name": "fifty_one_recipients_are_too_many",
+      "input": {
+        "connection_id": "conn-1",
+        "operation": "gmail.send",
+        "params": {
+          "userId": "me"
+        },
+        "body": {
+          "to": "alice@example.com, bob@example.com",
+          "subject": "Status",
+          "bodyText": "Hei",
+          "bodyHtml": "<p>Hei</p>",
+          "threadId": "t-1",
+          "inReplyTo": "<m-1@example.com>"
+        }
+      },
+      "patch": {
+        "to": [
+          "p0@x.example",
+          "p1@x.example",
+          "p2@x.example",
+          "p3@x.example",
+          "p4@x.example",
+          "p5@x.example",
+          "p6@x.example",
+          "p7@x.example",
+          "p8@x.example",
+          "p9@x.example",
+          "p10@x.example",
+          "p11@x.example",
+          "p12@x.example",
+          "p13@x.example",
+          "p14@x.example",
+          "p15@x.example",
+          "p16@x.example",
+          "p17@x.example",
+          "p18@x.example",
+          "p19@x.example",
+          "p20@x.example",
+          "p21@x.example",
+          "p22@x.example",
+          "p23@x.example",
+          "p24@x.example",
+          "p25@x.example",
+          "p26@x.example",
+          "p27@x.example",
+          "p28@x.example",
+          "p29@x.example",
+          "p30@x.example",
+          "p31@x.example",
+          "p32@x.example",
+          "p33@x.example",
+          "p34@x.example",
+          "p35@x.example",
+          "p36@x.example",
+          "p37@x.example",
+          "p38@x.example",
+          "p39@x.example",
+          "p40@x.example",
+          "p41@x.example",
+          "p42@x.example",
+          "p43@x.example",
+          "p44@x.example",
+          "p45@x.example",
+          "p46@x.example",
+          "p47@x.example",
+          "p48@x.example",
+          "p49@x.example",
+          "p50@x.example"
+        ]
+      },
+      "error": "too_many_recipients",
+      "client": "too_many_recipients"
+    },
+    {
+      "name": "subject_with_a_line_break_is_invalid",
+      "input": {
+        "connection_id": "conn-1",
+        "operation": "gmail.send",
+        "params": {
+          "userId": "me"
+        },
+        "body": {
+          "to": "alice@example.com, bob@example.com",
+          "subject": "Status",
+          "bodyText": "Hei",
+          "bodyHtml": "<p>Hei</p>",
+          "threadId": "t-1",
+          "inReplyTo": "<m-1@example.com>"
+        }
+      },
+      "patch": {
+        "subject": "Status\r\nBcc: eve@example.com"
+      },
+      "error": "invalid_subject",
+      "client": "invalid_subject"
+    },
+    {
+      "name": "subject_over_998_bytes_is_invalid",
+      "input": {
+        "connection_id": "conn-1",
+        "operation": "gmail.send",
+        "params": {
+          "userId": "me"
+        },
+        "body": {
+          "to": "alice@example.com, bob@example.com",
+          "subject": "Status",
+          "bodyText": "Hei",
+          "bodyHtml": "<p>Hei</p>",
+          "threadId": "t-1",
+          "inReplyTo": "<m-1@example.com>"
+        }
+      },
+      "patch": {
+        "subject": {
+          "$repeat": "€",
+          "count": 333
+        }
+      },
+      "error": "invalid_subject",
+      "client": "invalid_subject"
+    },
+    {
+      "name": "blank_body_is_invalid",
+      "input": {
+        "connection_id": "conn-1",
+        "operation": "gmail.send",
+        "params": {
+          "userId": "me"
+        },
+        "body": {
+          "to": "alice@example.com, bob@example.com",
+          "subject": "Status",
+          "bodyText": "Hei",
+          "bodyHtml": "<p>Hei</p>",
+          "threadId": "t-1",
+          "inReplyTo": "<m-1@example.com>"
+        }
+      },
+      "patch": {
+        "bodyText": " \n "
+      },
+      "error": "invalid_body",
+      "client": "invalid_body"
+    },
+    {
+      "name": "body_over_48_kib_is_too_large",
+      "input": {
+        "connection_id": "conn-1",
+        "operation": "gmail.send",
+        "params": {
+          "userId": "me"
+        },
+        "body": {
+          "to": "alice@example.com, bob@example.com",
+          "subject": "Status",
+          "bodyText": "Hei",
+          "bodyHtml": "<p>Hei</p>",
+          "threadId": "t-1",
+          "inReplyTo": "<m-1@example.com>"
+        }
+      },
+      "patch": {
+        "bodyText": {
+          "$repeat": "x",
+          "count": 49153
+        }
+      },
+      "error": "edit_too_large",
+      "client": "edit_too_large"
+    }
+  ]
+}

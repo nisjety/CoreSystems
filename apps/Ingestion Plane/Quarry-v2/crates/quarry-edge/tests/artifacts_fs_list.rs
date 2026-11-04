@@ -221,6 +221,19 @@ impl Edge {
         response.json().await.expect("scrape envelope")
     }
 
+    /// `GET /v1/artifacts{query}` as `bearer`: the status and the whole body.
+    async fn list_raw(&self, bearer: &str, query: &str) -> (u16, Value) {
+        let response = self
+            .client
+            .get(format!("http://{}/v1/artifacts{query}", self.addr))
+            .bearer_auth(bearer)
+            .send()
+            .await
+            .expect("request reaches the edge");
+        let status = response.status().as_u16();
+        (status, response.json().await.unwrap_or(Value::Null))
+    }
+
     /// `GET /v1/artifacts{query}` as `bearer`: the page (`data`) of a 200.
     async fn list(&self, bearer: &str, query: &str) -> Value {
         let response = self
@@ -375,5 +388,69 @@ async fn limit_and_cursor_page_through_the_listing_without_overlap() {
     reversed.reverse();
     assert_eq!(oldest, reversed, "sort=oldest is the reverse of the default");
     edge.stop().await;
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+// ---- INNH-12: the run_id and kind filters of the artifact list --------------------
+
+fn kinds(page: &Value) -> Vec<String> {
+    page["items"]
+        .as_array()
+        .expect("items array")
+        .iter()
+        .map(|item| item["kind"].as_str().expect("kind").to_owned())
+        .collect()
+}
+
+#[tokio::test]
+async fn run_id_and_kind_filter_the_listing_and_survive_a_restart() {
+    let root = scratch_root("run-kind");
+    let edge = Edge::start(&root).await;
+    edge.scrape(&org_a(), scrape_body("one")).await;
+    tokio::time::sleep(std::time::Duration::from_millis(3)).await;
+    edge.scrape(&org_a(), scrape_body("two")).await;
+
+    // Every row names its run and page.
+    let all = edge.list(&org_a(), "").await;
+    let rows = all["items"].as_array().expect("items");
+    let page_rows: Vec<&Value> = rows.iter().filter(|r| r["page_hash"].is_string()).collect();
+    assert!(page_rows.len() >= 6, "html, markdown and meta of two pages: {all}");
+
+    // kind=markdown keeps only markdown artifacts (the documented filter, now real).
+    let markdown = edge.list(&org_a(), "?kind=markdown").await;
+    assert_eq!(kinds(&markdown).len(), 2, "one markdown per scraped page: {markdown}");
+    assert!(kinds(&markdown).iter().all(|k| k == "markdown"));
+
+    // run_id keeps one run's artifacts, and combines with kind.
+    let run_id = markdown["items"][0]["run_id"].as_str().expect("run_id").to_owned();
+    let of_run = edge.list(&org_a(), &format!("?run_id={run_id}")).await;
+    assert!(!ids(&of_run).is_empty());
+    assert!(of_run["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|r| r["run_id"] == run_id.as_str()));
+    assert!(ids(&of_run).len() < ids(&all).len(), "the other scrape's run is left out");
+    let md_of_run = edge.list(&org_a(), &format!("?run_id={run_id}&kind=markdown")).await;
+    assert_eq!(ids(&md_of_run).len(), 1, "{md_of_run}");
+
+    // Another organization does not see the run through the filter.
+    let foreign = edge.list(&org_b(), &format!("?run_id={run_id}")).await;
+    assert!(ids(&foreign).is_empty(), "{foreign}");
+
+    // A filter that cannot match is a 400 naming the field, not an empty page.
+    let (status, body) = edge.list_raw(&org_a(), "?kind=bogus").await;
+    assert_eq!(status, 400, "{body}");
+    assert_eq!(body["error"]["details"]["field"], "kind");
+    let (status, body) = edge.list_raw(&org_a(), "?run_id=not-a-run").await;
+    assert_eq!(status, 400, "{body}");
+    assert_eq!(body["error"]["details"]["field"], "run_id");
+    edge.stop().await;
+
+    // The filter reads the durable index: a restarted edge answers the same.
+    let restarted = Edge::start(&root).await;
+    let again = restarted.list(&org_a(), &format!("?run_id={run_id}")).await;
+    assert_eq!(ids(&again), ids(&of_run));
+    restarted.stop().await;
     let _ = std::fs::remove_dir_all(&root);
 }

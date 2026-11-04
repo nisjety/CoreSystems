@@ -10,6 +10,8 @@ import "google/protobuf/struct.proto";
 import "model_plane/v1/inference.proto";
 // AutonomyRung — the shared autonomy ladder a plan approval grants.
 import "model_plane/v1/runs.proto";
+// McpElicitationPending (EP-4 S4) — the form a held MCP call waits on.
+import "model_plane/v1/mcp_elicitation.proto";
 
 // ModelGateway — public boundary for HTTP/gRPC/SSE/WebSocket.
 // Owns: auth verification, request normalization, rate limiting, usage envelopes.
@@ -470,6 +472,28 @@ message ExtractStructuredRequest {
   // Zero Data Retention — no durable artifact or event on either the
   // fetch path (Quarry zdr) or the inference path.
   bool zdr = 9;
+
+  // WS16.S8 additions (all optional; an unset request behaves as before).
+  //
+  // More than one page. When non-empty these are extracted (at most 5, three
+  // at a time, each isolated: one page failing does not fail the others) and
+  // `url` is ignored. Empty -> the single `url` above.
+  repeated string urls = 10;
+
+  // What to produce from each page: "json" (default when empty; fill
+  // `schema_json`), "question" (answer `question`, grounded by a verbatim
+  // quote) or "highlights" (up to `max_highlights` verbatim passages matching
+  // `question`).
+  string mode = 11;
+
+  // The question for mode "question", or the query for mode "highlights".
+  string question = 12;
+
+  // Upper bound on highlights for mode "highlights"; 0 -> 3, clamped to 10.
+  int32 max_highlights = 13;
+
+  // Output-token ceiling for the extraction call; 0 -> 2048, clamped to 8192.
+  int32 max_output_tokens = 14;
 }
 
 // ExtractStructuredResponse — LLM output coerced to the requested schema.
@@ -507,6 +531,55 @@ message ExtractStructuredResponse {
   // gRPC OK in this case so callers see a structured failure rather
   // than a generic Internal error.
   string error_message = 10;
+
+  // WS16.S8: one entry per requested page, in request order. The scalar
+  // fields above mirror results[0] so existing callers keep working.
+  repeated ExtractStructuredResult results = 11;
+}
+
+// One verbatim passage found on the page. Offsets are Unicode scalar (char)
+// offsets into the text the model was shown, end-exclusive.
+message ExtractStructuredHighlight {
+  string text = 1;
+  uint64 start = 2;
+  uint64 end = 3;
+}
+
+// The outcome for one page of an ExtractStructured call. A failure of this
+// page is `error_message`; the RPC itself stays OK.
+message ExtractStructuredResult {
+  // The page as requested, and after redirects.
+  string url = 1;
+  string final_url = 2;
+  string title = 3;
+  string source_fingerprint = 4;
+
+  // mode "json": the validated JSON object. Empty when the model could not
+  // produce one that conforms to the schema (see `error_message`).
+  string extracted_json = 5;
+
+  // mode "question": the answer ("" when `found` is false).
+  string answer = 6;
+  bool found = 7;
+  // True when the supporting quote was found verbatim on the page.
+  bool grounded = 8;
+
+  // mode "highlights": the passages that are verbatim on the page.
+  repeated ExtractStructuredHighlight highlights = 9;
+  // Quotes the model gave that are not on the page (dropped).
+  uint32 highlights_dropped = 10;
+
+  string model_used = 11;
+  int32 input_tokens = 12;
+  int32 output_tokens = 13;
+
+  // mode "json": true when `extracted_json` validated against the schema.
+  bool schema_valid = 14;
+  // True when one repair call was needed to get there.
+  bool repaired = 15;
+
+  // Non-empty when this page failed. Never carries page text.
+  string error_message = 16;
 }
 
 // =============================================================
@@ -1183,6 +1256,10 @@ message ProxyMcpToolRequest {
   // gateway refuses the call with `tool_definition_changed` unless the server's
   // current definition still hashes to it. Empty keeps today's behaviour.
   string expected_digest = 7;
+  // EP-4 S4: the caller allows the server to ask the run's owner a question
+  // during this call. False keeps today's protocol revision and empty
+  // capabilities. Ignored while the gateway's MCP_ELICITATION_ENABLED is off.
+  bool allow_elicitation = 8;
 }
 
 message ProxyMcpToolResponse {
@@ -1191,6 +1268,10 @@ message ProxyMcpToolResponse {
   string output_json = 2;
   // Non-empty when the proxy or remote server returned an error.
   string error_message = 3;
+  // EP-4 S4: set when the server asked a question and the call is held;
+  // output_json and error_message are then empty. Answer it with
+  // McpElicitationService.AnswerMcpElicitation.
+  McpElicitationPending elicitation = 4;
 }
 
 // =============================================================
@@ -1311,13 +1392,22 @@ message Hook {
   // to this. Retained so existing callers keep parsing. Use `decision`.
   string callback_url = 4 [deprecated = true];
   bool enabled = 5;
-  // What this rule does when it matches: "deny" blocks the call outright,
-  // "ask" escalates it to human approval, "allow" (or anything unrecognised)
-  // permits it. Empty means allow — a rule with no decision must not silently
-  // become a block.
+  // What this rule does when it matches: "deny" blocks the call outright and
+  // "ask" escalates it to human approval. The registry stores only those two: an
+  // "allow" rule would add nothing, since allow never overrides a deny, and anything
+  // unrecognised is read as "ask", never as allow.
   string decision = 6;
   // Human-readable reason surfaced to the user on deny/ask.
   string reason = 7;
+  // Evaluation order of the rules the gateway forwards: higher first, then by hook_id.
+  // Strictest-wins makes the order irrelevant to the verdict; this fixes the serialised
+  // context, so one registry always sends the same bytes.
+  int32 priority = 8;
+  // The org policy revision the rule was read at from capability-core's durable store (WS25-S8).
+  // Zero for a rule that lives only in the gateway's in-memory registry.
+  int64 revision = 9;
+  // The person who created the durable rule, as capability-core recorded it (WS25-S8).
+  string created_by = 10;
 }
 
 message RegisterHookRequest {

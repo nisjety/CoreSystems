@@ -158,3 +158,42 @@ export function submitNavbarSupportRequest(input: {
     body: JSON.stringify(input),
   })
 }
+
+/**
+ * The transcript levels a person can pick (EP-14 S2), from the fullest view to the most condensed. This is the
+ * closed set user-core stores and the gateway matches exactly.
+ */
+export const TRANSCRIPT_DENSITY_LEVELS = ['detailed', 'standard', 'compact', 'minimal'] as const
+export type TranscriptDensity = (typeof TRANSCRIPT_DENSITY_LEVELS)[number]
+
+/** The appearance object user-core stores, as `GET /api/v1/settings/appearance` returns it. */
+export type AppearanceSettings = {
+  colorScheme: string
+  compactMode: boolean
+  fontSize: string
+  theme: string
+  /** Absent until the person chooses a level. The chat then derives one from `compactMode`. */
+  transcriptDensity?: string
+}
+
+export function getAppearanceSettings(signal?: AbortSignal): Promise<AppearanceSettings> {
+  return requestJson<AppearanceSettings>('/api/v1/settings/appearance', { signal })
+}
+
+/**
+ * Saves the transcript level. user-core writes every appearance field back on a PUT, so the theme, colour, font
+ * and compact flag are read first and sent unchanged: a PUT of the level alone would reset them.
+ */
+export async function saveTranscriptDensity(transcriptDensity: TranscriptDensity): Promise<AppearanceSettings> {
+  const current = await getAppearanceSettings()
+  return requestJson<AppearanceSettings>('/api/v1/settings/appearance', {
+    method: 'PUT',
+    body: JSON.stringify({
+      colorScheme: current.colorScheme,
+      compactMode: current.compactMode,
+      fontSize: current.fontSize,
+      theme: current.theme,
+      transcriptDensity,
+    }),
+  })
+}

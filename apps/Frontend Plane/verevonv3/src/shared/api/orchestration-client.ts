@@ -38,6 +38,14 @@ export type {
 
 export type ApprovalDecision = 'approve' | 'reject'
 
+/**
+ * How far an approval decision reaches (build plan WS13 S6). `once` is the one decision that always
+ * exists; `thread` and `run` are standing grants, which the server offers only where the approval's
+ * cause allows them and the deployment has switched them on.
+ */
+export type ApprovalScope = 'once' | 'thread' | 'run'
+
+const APPROVAL_SCOPES: readonly ApprovalScope[] = ['once', 'thread', 'run']
 /** What approving does with the paused work (build plan WS10 S1). Server-stated, never guessed. */
 export type ApprovalResumeClass = 'action_continuation' | 'live_poll' | 'none'
 
@@ -210,20 +218,83 @@ export async function decideApproval(
   decision: ApprovalDecision,
   reason?: string,
   signal?: AbortSignal,
+  scope: ApprovalScope = 'once',
+  promote = false,
 ): Promise<Approval | null> {
   const checked = orchestrationDecideApprovalInput.safeParse({ approvalId, decision, reason: reason ?? '' })
-  if (!checked.success) {
+  // "Always" (build plan WS13 S7) is an approval of a thread grant and nothing else.
+  if (
+    !checked.success ||
+    !APPROVAL_SCOPES.includes(scope) ||
+    (promote && (decision !== 'approve' || scope !== 'thread'))
+  ) {
     throw new ApiError('Ugyldig godkjenningsavgjørelse.', 400, 'invalid_approval_decision')
   }
   const payload = await requestJson<{ approval?: RawApproval }>(
     `/api/v1/orchestration/approvals/${encodeURIComponent(approvalId)}/decide`,
     {
       method: 'POST',
-      body: JSON.stringify({ decision, reason: checked.data.reason ?? '' }),
+      // The scope and "Always" are sent only when asked for: the one decision carries neither field.
+      body: JSON.stringify({
+        decision,
+        reason: checked.data.reason ?? '',
+        ...(scope === 'once' ? {} : { scope }),
+        ...(promote ? { promote: true } : {}),
+      }),
       signal,
     },
   )
   return payload.approval ? normalizeApproval(payload.approval) : null
+}
+
+/**
+ * A rule an "Always" choice on an MCP tool's approval proposed (build plan WS13 S7). It is not a rule
+ * until the person confirms it: confirming writes a digest-pinned user-scope allow.
+ */
+export type ApprovalRuleProposal = {
+  id: string
+  capabilityId: string
+  toolName: string
+  toolDigest: string
+  createdAt: string
+}
+
+/** The lifetime a confirmed rule gets: ninety days, which the server applies to every rule (K3-10). */
+export const RULE_LIFETIME_MS = 90 * 24 * 60 * 60 * 1000
+
+/**
+ * The write that confirms a proposed rule (build plan WS13 S7): a user-scope allow pinned to the
+ * digest the person reviewed, lapsing ninety days from `now`. Pure, so what a confirm sends is
+ * checked without a network.
+ */
+export function ruleConfirmationRequest(
+  proposal: ApprovalRuleProposal,
+  now: Date,
+): { capabilityId: string; body: Record<string, unknown> } {
+  return {
+    capabilityId: proposal.capabilityId,
+    body: {
+      scope: 'user',
+      decision: 'allow',
+      pinned_digest: proposal.toolDigest,
+      reason: '',
+      expires_at: new Date(now.getTime() + RULE_LIFETIME_MS).toISOString(),
+    },
+  }
+}
+
+/** Confirm a proposed rule through the tool-policy route. The server checks the digest and the tool. */
+export async function confirmApprovalRule(
+  proposal: ApprovalRuleProposal,
+  now: Date = new Date(),
+  signal?: AbortSignal,
+): Promise<void> {
+  const { capabilityId, body } = ruleConfirmationRequest(proposal, now)
+  await requestJson<unknown>(`/api/v1/tool-policies/${encodeURIComponent(capabilityId)}`, {
+    method: 'PUT',
+    body: JSON.stringify(body),
+    signal,
+  })
 }
 
 /** The kind token of an approval that holds tool output back for review (build plan WS10 S8). */

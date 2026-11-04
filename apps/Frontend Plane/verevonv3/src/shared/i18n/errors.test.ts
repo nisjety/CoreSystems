@@ -10,6 +10,25 @@ describe('translateApiError', () => {
     expect(translateApiError({ code: 'delivery_unavailable' }, tr)).toMatch(/ikke sendt eller lagret/i)
   })
 
+  // A memory save refused in a shared Space or an agent run says why. The person's
+  // own pause keeps the generic copy: that choice is theirs to change, these are not.
+  it('says why memory was not saved in a shared Space or an agent run', () => {
+    const no = (norwegian: string) => norwegian
+    const en = (_norwegian: string, english: string) => english
+
+    expect(translateApiError({ code: 'memory_not_enabled', details: { reason: 'space_scope' } }, no)).toMatch(
+      /delte Spaces, så dette ble ikke lagret/,
+    )
+    expect(translateApiError({ code: 'memory_not_enabled', details: { reason: 'space_scope' } }, en)).toMatch(
+      /shared Spaces, so this was not saved/,
+    )
+    expect(translateApiError({ code: 'memory_not_enabled', details: { reason: 'agent_run_scope' } }, en)).toMatch(
+      /from an agent run, so this was not saved/,
+    )
+    const paused = translateApiError({ code: 'memory_not_enabled', details: { reason: 'user_paused' } }, en)
+    expect(paused).not.toMatch(/Spaces|agent run/)
+  })
+
   // Owner ruling (5): a personal Microsoft/Google connection's two ownership
   // failures must surface as their own specific copy, not the generic
   // fallback — this is the seam the connector-attach picker relies on.

@@ -54,6 +54,12 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
             get(get_memory_controls).put(set_memory_controls),
         )
         .route("/api/v1/memory/reset", post(reset_memory))
+        // The standing profile (EP-8 S4); session-core refuses it while its switch is off.
+        .route(
+            "/api/v1/memory/profile",
+            get(get_user_profile).put(set_user_profile),
+        )
+        .route("/api/v1/memory/profile/rebuild", post(rebuild_user_profile))
         .route(
             "/api/v1/memory/{id}",
             patch(correct_memory).delete(delete_memory),
@@ -336,6 +342,80 @@ pub(crate) async fn reset_memory(
     .await
 }
 
+/// The user's standing profile: its text, the ids of the memories behind it and
+/// why it is not used, when it is not.
+async fn get_user_profile(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    forward_memory(
+        &state,
+        &user,
+        &headers,
+        Method::GET,
+        "/v1/memories/profile",
+        None,
+    )
+    .await
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SetProfileBody {
+    pub(crate) content: String,
+    /// The revision the edit was made against; 0 when there was no profile.
+    #[serde(default)]
+    pub(crate) expected_revision: u64,
+}
+
+/// Only the text and the revision cross: a client cannot name another user or org.
+/// The length bound and the revision check are session-core's.
+pub(crate) async fn set_user_profile(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Json(body): Json<SetProfileBody>,
+) -> impl IntoResponse {
+    forward_memory(
+        &state,
+        &user,
+        &headers,
+        Method::PUT,
+        "/v1/memories/profile",
+        Some(json!({
+            "content": body.content,
+            "expected_revision": body.expected_revision,
+        })),
+    )
+    .await
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub(crate) struct RebuildProfileBody {
+    #[serde(default)]
+    pub(crate) force: bool,
+}
+
+/// "Rebuild from my memories". `force` is passed through as sent, so an absent
+/// field keeps an edited profile rather than replacing it.
+pub(crate) async fn rebuild_user_profile(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Json(body): Json<RebuildProfileBody>,
+) -> impl IntoResponse {
+    forward_memory(
+        &state,
+        &user,
+        &headers,
+        Method::POST,
+        "/v1/memories/profile/rebuild",
+        Some(json!({ "force": body.force })),
+    )
+    .await
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct RememberBody {
@@ -402,8 +482,9 @@ pub(crate) async fn delete_memory(
 #[cfg(test)]
 mod tests {
     use super::{
-        get_memory_controls, remember_memory, reset_memory, set_memory_controls, OriginalOutcome,
-        RememberBody, ResetBody, SetControlsBody,
+        get_memory_controls, get_user_profile, rebuild_user_profile, remember_memory, reset_memory,
+        set_memory_controls, set_user_profile, OriginalOutcome, RebuildProfileBody, RememberBody,
+        ResetBody, SetControlsBody, SetProfileBody,
     };
     use axum::{extract::State, http::StatusCode, response::IntoResponse, Extension, Json};
     use serde_json::json;
@@ -641,6 +722,87 @@ mod tests {
         assert_eq!(
             forwarded(&model_gateway, "/v1/memories").await,
             vec![json!({ "thread_id": "thread-1", "content": "Jeg heter Ima" })]
+        );
+    }
+
+    #[tokio::test]
+    async fn profile_read_passes_the_switch_refusal_through() {
+        let (_auth, model_gateway, state) = upstreams(
+            "GET",
+            "/v1/memories/profile",
+            409,
+            json!({ "error": { "code": "profile_not_enabled", "message": "profile_not_enabled", "details": { "reason": "" } } }),
+        )
+        .await;
+        let response = get_user_profile(
+            State(state),
+            Extension(member()),
+            axum::http::HeaderMap::new(),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            forwarded(&model_gateway, "/v1/memories/profile").await.len(),
+            1
+        );
+    }
+
+    /// Only the text and the revision cross: a client-supplied user or org id is
+    /// dropped before the hop.
+    #[tokio::test]
+    async fn profile_edit_forwards_only_text_and_revision() {
+        let (_auth, model_gateway, state) = upstreams(
+            "PUT",
+            "/v1/memories/profile",
+            200,
+            json!({ "profile": null, "skip_reason": "" }),
+        )
+        .await;
+        let body: SetProfileBody = serde_json::from_value(json!({
+            "content": "- Prefers tables",
+            "expectedRevision": 2,
+            "userId": "user-2",
+            "orgId": "org-2",
+        }))
+        .expect("extra fields are ignored");
+        let response = set_user_profile(
+            State(state),
+            Extension(member()),
+            axum::http::HeaderMap::new(),
+            Json(body),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            forwarded(&model_gateway, "/v1/memories/profile").await,
+            vec![json!({ "content": "- Prefers tables", "expected_revision": 2 })]
+        );
+    }
+
+    #[tokio::test]
+    async fn profile_rebuild_without_force_is_forwarded_as_false() {
+        let (_auth, model_gateway, state) = upstreams(
+            "POST",
+            "/v1/memories/profile/rebuild",
+            200,
+            json!({ "profile": null, "skip_reason": "" }),
+        )
+        .await;
+        let body: RebuildProfileBody = serde_json::from_value(json!({})).expect("force is optional");
+        let response = rebuild_user_profile(
+            State(state),
+            Extension(member()),
+            axum::http::HeaderMap::new(),
+            Json(body),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            forwarded(&model_gateway, "/v1/memories/profile/rebuild").await,
+            vec![json!({ "force": false })]
         );
     }
 }

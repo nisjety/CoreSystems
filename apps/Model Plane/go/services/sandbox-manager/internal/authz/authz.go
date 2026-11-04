@@ -75,6 +75,8 @@ func Authorize(principal authctx.Principal, method string, request any) error {
 	case "/model_plane.v1.SandboxManager/Health",
 		"/model_plane.v1.SandboxManager/GetWorkspaceManifest",
 		"/model_plane.v1.SandboxManager/GetThreadWorkspace",
+		// WS22-S6 lease lifecycle status: a read, and owner-bound for a thread lease in GetLeaseStatus.
+		"/model_plane.v1.SandboxManager/GetLeaseStatus",
 		// S4.2 process registry reads.
 		"/model_plane.v1.SandboxManager/GetProcess",
 		"/model_plane.v1.SandboxManager/ListProcesses",

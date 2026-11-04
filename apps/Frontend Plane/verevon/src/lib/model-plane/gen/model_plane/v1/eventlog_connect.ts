@@ -9,22 +9,30 @@ import { Event } from "./events_pbjs";
 
 /**
  * EventLog — durable, append-only event log surface.
- *
+ * 
  * Ownership: session-core owns the Postgres `events` table (see
  * `rust/services/session-core/migrations/0002_events_and_ordinals.sql`). This
  * service is the canonical RPC facade over that table for:
  *   - producers that emit one-off or bursty events (AppendEvent)
  *   - consumers that replay historical state (QueryEvents)
  *   - consumers that follow the live tail (SubscribeEvents)
- *
+ * 
  * Idempotency: AppendEvent honours the envelope's (org_id, idempotency_key)
  * uniqueness constraint. A duplicate append returns the prior event rather
  * than creating a second row; `deduplicated=true` in the response.
- *
- * Ordering: within a run_id, events are ordered by (ts, event_id). Across runs,
- * ordering is per-org by (ts, event_id). step_ordinal is monotonic per-run for
- * STEP_COMPLETED / ACTION_COMPLETED and is assigned by the DB trigger in
- * migration 0002 — producers MUST NOT set it.
+ * 
+ * Ordering: for the `events` table, within a run_id events are ordered by
+ * (ts, event_id) and across runs per-org by (ts, event_id). step_ordinal is
+ * monotonic per-run for STEP_COMPLETED / ACTION_COMPLETED and is assigned by the
+ * DB trigger in migration 0002 — producers MUST NOT set it.
+ * 
+ * Run trace (WS10): QueryEvents with a filter.run_id is served from session-core's
+ * `run_trace_events` table, which holds the browser trace events Quarry publishes
+ * (Event fields producer_seq, agent, origin, run_id, request_id). That path is
+ * ordered by the server-assigned `ingest_seq`, not by (ts, event_id): the cursor
+ * is an opaque encoding of the last `ingest_seq`, the run is required, and only
+ * the run's owner may read it. Per-producer order is `producer_seq`; a gap in it
+ * is a dropped event, never a reordering.
  *
  * @generated from service model_plane.v1.EventLog
  */

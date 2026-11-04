@@ -20083,7 +20083,7 @@ h3 {
   align-items: center;
   gap: 6px;
   font-size: 12px;
-  color: var(--verevon-danger, #b42318);
+  color: var(--danger);
 }
 
 .knowledge-chunks-panel__delete:hover {
@@ -23830,6 +23830,25 @@ body.verevon-chat-canvas-resizing * {
   margin: 0;
 }
 
+/* EP-14-S4: the run ledger in the Trace panel. Rows are buttons, so the trace-log li rules do not apply. */
+.verevon-chat-ledger { display: grid; gap: 8px; min-width: 0; }
+.verevon-chat-ledger__summary, .verevon-chat-ledger__note { margin: 0; color: var(--verevon-e-subtle); font-size: 11px; }
+.verevon-chat-ledger__layout { display: grid; grid-template-columns: minmax(0, 1fr); gap: 10px; min-width: 0; }
+@media (min-width: 960px) { .verevon-chat-ledger__layout { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); } }
+.verevon-chat-ledger__turns { display: grid; gap: 6px; min-width: 0; }
+.verevon-chat-ledger__turn { border: 1px solid var(--verevon-border-warm); border-radius: 8px; min-width: 0; }
+.verevon-chat-ledger__turn-head, .verevon-chat-ledger__row { display: flex; align-items: baseline; gap: 7px; width: 100%; min-width: 0; padding: 6px 8px; border: 0; background: transparent; color: inherit; font: inherit; font-size: 12px; text-align: left; cursor: pointer; }
+.verevon-chat-ledger__turn-head { font-weight: 600; }
+.verevon-chat-ledger__records { display: grid; border-top: 1px solid var(--verevon-border-warm); }
+.verevon-chat-ledger__row[aria-current='true'] { background: var(--verevon-surface-muted, rgba(0, 0, 0, 0.04)); }
+.verevon-chat-ledger__row:focus-visible, .verevon-chat-ledger__turn-head:focus-visible, .verevon-chat-ledger__close:focus-visible { outline: 2px solid currentColor; outline-offset: -2px; }
+.verevon-chat-ledger__row-title { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.verevon-chat-ledger__row em, .verevon-chat-ledger__row time, .verevon-chat-ledger__turn-head time { flex: 0 0 auto; color: var(--verevon-e-subtle); font-size: 10px; font-style: normal; }
+.verevon-chat-ledger__inspector { display: grid; gap: 6px; align-content: start; min-width: 0; padding: 8px; border: 1px solid var(--verevon-border-warm); border-radius: 8px; font-size: 12px; overflow-wrap: anywhere; }
+.verevon-chat-ledger__id { font-family: var(--font-mono); font-size: 11px; color: var(--verevon-e-muted); }
+.verevon-chat-ledger__copy-status { color: var(--verevon-e-subtle); font-size: 11px; }
+.verevon-chat-ledger__close { justify-self: end; border: 0; background: transparent; color: inherit; cursor: pointer; }
+
 @media (max-width: 720px) {
   .verevon-chat-telemetry {
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -26489,6 +26508,25 @@ body.verevon-chat-canvas-resizing * {
   padding: 4px 6px;
 }
 
+/* WS19-S3: the structural check of a generated file. It never claims Office
+   opens the file; the title says so. */
+.verevon-chat-generated-file__check {
+  border-radius: 999px;
+  background: var(--verevon-surface-soft);
+  padding: 3px 8px;
+  color: var(--verevon-e-muted);
+  font-size: 10.5px;
+  font-weight: 550;
+}
+
+.verevon-chat-generated-file__check--warnings {
+  color: var(--warning-ink);
+}
+
+.verevon-chat-generated-file__check--failed {
+  color: var(--verevon-danger, #b42318);
+}
+
 .verevon-chat-image-previews {
   display: grid;
   width: min(100%, 520px);
@@ -27268,14 +27306,24 @@ body.verevon-chat-canvas-resizing * {
 
 .verevon-chat-memory-recall-notice svg,
 .verevon-chat-truncated-notice svg,
-.verevon-chat-source-scope-notice svg {
+.verevon-chat-source-scope-notice svg,
+.verevon-chat-lifecycle-notice svg {
   flex-shrink: 0;
 }
 
 /* Per-turn retrieval-source filter receipt (chat-wave2 scope spec §2.2).
    Same neutral, informational tone as memory-recall above — a filter the
    user chose, reported back, not a warning. */
-.verevon-chat-source-scope-notice {
+/* Turn lifecycle notes (WS15-S5): a retried tool, a compaction, a trimmed
+   context. Informational, in the same tone as the source-scope receipt. */
+.verevon-chat-lifecycle-notices {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+}
+
+.verevon-chat-source-scope-notice,
+.verevon-chat-lifecycle-notice {
   display: inline-flex;
   width: fit-content;
   align-items: center;
@@ -28178,6 +28226,46 @@ body.verevon-chat-canvas-resizing * {
 
 /* Sandboxed preview of untrusted model-generated HTML (see ArtifactHtmlPreview
    — the iframe carries `sandbox="allow-scripts"` and no `allow-same-origin`). */
+.verevon-chat-artifact-office {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 0;
+}
+
+.verevon-chat-artifact-office__notice {
+  margin: 0;
+  font-size: 12px;
+  color: var(--verevon-e-muted);
+}
+
+.verevon-chat-artifact-office__pages {
+  display: flex;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  overflow-x: auto;
+  list-style: none;
+}
+
+.verevon-chat-artifact-office__pages button {
+  padding: 2px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: none;
+  cursor: pointer;
+}
+
+.verevon-chat-artifact-office__pages button[aria-current="page"] {
+  border-color: var(--accent);
+}
+
+.verevon-chat-artifact-office__pages img {
+  display: block;
+  height: 96px;
+  width: auto;
+}
+
 .verevon-chat-artifact-frame {
   overflow: hidden;
   border: 0;
@@ -49733,4 +49821,134 @@ so it
   margin: 10px 0 0;
   font-size: 12px;
   color: var(--verevon-text-muted);
+}
+
+/* EP-13-S1: model search and list price in the composer picker */
+.dashboard-composer-model-search { display: block; box-sizing: border-box; width: calc(100% - 20px); margin: 6px 10px 4px; padding: 6px 10px; border: 1px solid var(--verevon-border-warm); border-radius: 8px; background: transparent; color: inherit; font: inherit; font-size: 13px; }
+.dashboard-composer-model-price { display: block; margin-top: 1px; font-size: 11px; font-weight: 400; color: var(--verevon-text-muted); }
+/* EP-9-C5: provider data-use line under a model name in the composer picker */
+.dashboard-composer-model-data-use { display: block; margin-top: 1px; font-size: 11px; font-weight: 400; color: var(--verevon-text-muted); }
+.dashboard-composer-model-empty { margin: 6px 12px; font-size: 13px; color: var(--verevon-text-muted); }
+
+/* EP-14-S3: the docked step strip. Never display:none: the live region stays in the accessibility tree. */
+.verevon-chat-step-strip { min-width: 0; overflow: hidden; color: var(--verevon-e-subtle, var(--subtle)); font-size: 12px; line-height: 1.4; white-space: nowrap; text-overflow: ellipsis; }
+.verevon-chat-step-strip:not(:empty) { margin-top: 8px; }
+
+/* Automations hub (/agents/automations, EP-6 S1). */
+.verevon-automations-page {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  max-width: 960px;
+  margin: 0 auto;
+  padding: 24px 16px;
+}
+
+.verevon-automations-page__topbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.verevon-automations-page__topbar h1 {
+  margin: 0;
+  font-size: 22px;
+}
+
+.verevon-automations-page__back {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 999px;
+  color: var(--verevon-text);
+}
+
+.verevon-automations-page__intro {
+  margin: 0;
+  color: var(--verevon-text-muted);
+  font-size: 14px;
+}
+
+.verevon-automations-hub {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
+
+.verevon-automations-hub__filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.verevon-automations-hub__list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.verevon-automations-hub__row {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+  border: 1px solid var(--verevon-border);
+  border-radius: 12px;
+  background: var(--verevon-surface);
+  padding: 12px 14px;
+}
+
+.verevon-automations-hub__name {
+  margin: 0;
+  font-weight: 650;
+  overflow-wrap: anywhere;
+}
+
+.verevon-automations-hub__meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+  margin-top: 4px;
+  color: var(--verevon-text-muted);
+  font-size: 12px;
+}
+
+.verevon-automations-hub__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.verevon-automations-hub__retime {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 8px;
+}
+
+.verevon-automations-hub__retime label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  color: var(--verevon-text-muted);
+  font-size: 12px;
+}
+
+.verevon-automations-hub__retime select,
+.verevon-automations-hub__retime input {
+  max-width: 100%;
+  min-width: 0;
+}
+
+.verevon-automations-hub__empty {
+  margin: 0;
+  color: var(--verevon-text-muted);
+  font-size: 14px;
 }

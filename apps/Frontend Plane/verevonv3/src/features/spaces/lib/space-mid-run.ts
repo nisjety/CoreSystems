@@ -8,6 +8,7 @@ import {
 import type { QueuedInput } from '@/features/chat/components/chat-types'
 import { queueInvocationInput, type QueuedInputResult } from '@/shared/api/chat-client'
 import type { Skill } from '@/shared/api/skills-client'
+import type { AddressedAgent, MentionedPerson } from './mention-model'
 
 /**
  * Owner mid-run steer in the room composer (WS09-S2).
@@ -30,7 +31,8 @@ import type { Skill } from '@/shared/api/skills-client'
  *               says why. Never silent.
  *
  * `deferred` is the fifth thing, outside the strip: a message waiting for the agent to be free
- * ("send when ready"), kept in this browser until the thread is idle.
+ * ("send when ready"), kept in this browser until the run it waits behind says it is done (the
+ * run's live stream `finished`). See `deferredSendReady`.
  *
  * Every read-then-write is a functional update. Solid 2 answers a plain read outside a reactive
  * scope with the last committed value, so a read right after a write would miss that write.
@@ -53,13 +55,59 @@ export interface SpaceSteerTarget {
   readonly spaceRef: string
 }
 
+/**
+ * The mention picks the box held when a message was put to wait, as the composer keeps them, so a
+ * cancel can put them back. Presentation state only; the send itself carries `mentionedAgentRef`.
+ */
+export interface SpaceDeferredPicks {
+  /** The single legacy `@agent` pick (rooms without the structured picker). */
+  readonly mentionedAgentRef?: string
+  /** People named through the structured picker. */
+  readonly people: readonly MentionedPerson[]
+  /** Agents the words named through the structured picker (`typed`; locked ones never leave the bar). */
+  readonly agents: readonly AddressedAgent[]
+}
+
 /** A message waiting for the agent to be free, kept in this browser only. */
 export interface SpaceDeferredSend {
   readonly content: string
   readonly threadId: string
+  /** The run the thread was busy with, when the room listing named it: its `finished` frame frees the message. */
+  readonly runId?: string
   /** What the member had chosen when they sent, so waiting does not change what is asked. */
   readonly mentionedAgentRef?: string
   readonly skills?: readonly Skill[]
+  /** The picks to give back with the words on a cancel. */
+  readonly picks?: SpaceDeferredPicks
+}
+
+/**
+ * What the run a waiting message is held behind says about itself: `running` until its live stream
+ * sends `finished`, then `done`. `unknown` when there is no live stream to hear it from (the room's
+ * live view is off, the listing named no run, or the attach was refused).
+ */
+export type SpaceDeferredRunState = 'running' | 'done' | 'unknown'
+
+/**
+ * Whether the waiting message goes out now. The run's own done event decides; a polled projection
+ * that shows the thread idle does not, because it is a reading of the run, not the run's own word.
+ * Only when no done event can arrive
+ * (`unknown`) does the room's projection stand in, and then only on an observed room: absence of
+ * data is not idleness.
+ */
+export function deferredSendReady(input: {
+  readonly waiting: SpaceDeferredSend | undefined
+  /** This composer has a send in flight. */
+  readonly busy: boolean
+  readonly run: SpaceDeferredRunState
+  /** The room's projection has been read at least once. */
+  readonly observed: boolean
+  /** The room's projection lists the waiting thread as working. */
+  readonly threadLive: boolean
+}): boolean {
+  if (!input.waiting || input.busy) return false
+  if (input.run !== 'unknown') return input.run === 'done'
+  return input.observed && !input.threadLive
 }
 
 /** The gateway call a steer makes. The composer uses `queueInvocationInput`; tests pass a fake. */

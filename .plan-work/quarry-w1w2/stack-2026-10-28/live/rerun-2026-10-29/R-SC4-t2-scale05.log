@@ -1,0 +1,50 @@
+=== t2 start 2026-10-28T23:18:21Z ready={"generation":0,"sessions_open":0}
+--- nav try 1 run=run_01M62CXD6XGPYZZ91ZD3S8SEQM
+warm navigate fixture-a: http=200 time=0.329781 {"url":"http://fixture-a.crawl.test/","title":"Fixture A","step":0,"ax_nodes":37}
+hang navigate slow.html: http=504 time=12.534877
+  body: {"code":"TIMEOUT","message":"browser operation navigate timed out","retryable":false,"details":{"deadline_ms":12500,"effect":"unknown","op":"navigate"}}
+  url-in-body: slow.crawl.test=0 any-http-url=0
+next (nav): http=200 time=0.233041
+  ok: {"url":"http://fixture-a.crawl.test/","title":"Fixture A","step":2,"ax_nodes":37}
+  ax_snapshot TIMEOUT in next body: 0
+step after next (wait): http=200 time=0.185823 {"url":"http://fixture-a.crawl.test/","title":"Fixture A","step":3,"ax_nodes":37}
+receipts: [{"step":0,"a":"navigate","s":"completed"},{"step":1,"a":"navigate","s":"failed"},{"step":2,"a":"navigate","s":"completed"},{"step":3,"a":"wait","s":"completed"}]
+close: HTTP=200
+ready: {"generation":1,"sessions_open":0}
+--- nav try 2 run=run_01M62CXX19JZJDNNCDBYFKCSK1
+warm navigate fixture-a: http=200 time=0.319132 {"url":"http://fixture-a.crawl.test/","title":"Fixture A","step":0,"ax_nodes":37}
+hang navigate slow.html: http=504 time=12.538409
+  body: {"code":"TIMEOUT","message":"browser operation navigate timed out","retryable":false,"details":{"deadline_ms":12500,"effect":"unknown","op":"navigate"}}
+  url-in-body: slow.crawl.test=0 any-http-url=0
+next (nav): http=200 time=0.327337
+  ok: {"url":"http://fixture-a.crawl.test/","title":"Fixture A","step":2,"ax_nodes":37}
+  ax_snapshot TIMEOUT in next body: 0
+step after next (wait): http=200 time=0.194137 {"url":"http://fixture-a.crawl.test/","title":"Fixture A","step":3,"ax_nodes":37}
+receipts: [{"step":0,"a":"navigate","s":"completed"},{"step":1,"a":"navigate","s":"failed"},{"step":2,"a":"navigate","s":"completed"},{"step":3,"a":"wait","s":"completed"}]
+close: HTTP=200
+ready: {"generation":1,"sessions_open":0}
+--- wait try 1 run=run_01M62CYCTG32BCJ8WJQYH2J5W3
+warm navigate fixture-a: http=200 time=0.256120 {"url":"http://fixture-a.crawl.test/","title":"Fixture A","step":0,"ax_nodes":37}
+hang navigate slow.html: http=504 time=12.528378
+  body: {"code":"TIMEOUT","message":"browser operation navigate timed out","retryable":false,"details":{"deadline_ms":12500,"effect":"unknown","op":"navigate"}}
+  url-in-body: slow.crawl.test=0 any-http-url=0
+next (wait): http=200 time=0.159999
+  ok: {"url":"http://fixture-a.crawl.test/","title":"Fixture A","step":2,"ax_nodes":37}
+  ax_snapshot TIMEOUT in next body: 0
+step after next (wait): http=200 time=0.175079 {"url":"http://fixture-a.crawl.test/","title":"Fixture A","step":3,"ax_nodes":37}
+receipts: [{"step":0,"a":"navigate","s":"completed"},{"step":1,"a":"navigate","s":"failed"},{"step":2,"a":"wait","s":"completed"},{"step":3,"a":"wait","s":"completed"}]
+close: HTTP=200
+ready: {"generation":1,"sessions_open":0}
+--- wait try 2 run=run_01M62CYW6WFBXCBE3VM5RHK7ZS
+warm navigate fixture-a: http=200 time=0.303280 {"url":"http://fixture-a.crawl.test/","title":"Fixture A","step":0,"ax_nodes":37}
+hang navigate slow.html: http=504 time=12.531882
+  body: {"code":"TIMEOUT","message":"browser operation navigate timed out","retryable":false,"details":{"deadline_ms":12500,"effect":"unknown","op":"navigate"}}
+  url-in-body: slow.crawl.test=0 any-http-url=0
+next (wait): http=200 time=0.160712
+  ok: {"url":"http://fixture-a.crawl.test/","title":"Fixture A","step":2,"ax_nodes":37}
+  ax_snapshot TIMEOUT in next body: 0
+step after next (wait): http=200 time=0.186572 {"url":"http://fixture-a.crawl.test/","title":"Fixture A","step":3,"ax_nodes":37}
+receipts: [{"step":0,"a":"navigate","s":"completed"},{"step":1,"a":"navigate","s":"failed"},{"step":2,"a":"wait","s":"completed"},{"step":3,"a":"wait","s":"completed"}]
+close: HTTP=200
+ready: {"generation":1,"sessions_open":0}
+=== t2 end 2026-10-28T23:19:25Z ready={"generation":1,"sessions_open":0}

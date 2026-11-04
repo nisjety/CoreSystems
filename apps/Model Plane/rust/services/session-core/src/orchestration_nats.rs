@@ -305,6 +305,7 @@ mod tests {
             OrchestrationEvent::BrowserRunResumed {
                 run_id: "run_1".into(),
                 plan_id: "plan_1".into(),
+                reason: String::new(),
                 at: fixed_at(),
             },
         ] {

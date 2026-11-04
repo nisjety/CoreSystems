@@ -47,6 +47,8 @@ credential_names=(
   USER_CORE_RETRIEVAL_TOKEN USER_CORE_MAIL_TASK_WORKER_TOKEN
   AUTH_USER_CORE_GRPC_SERVICE_TOKEN USER_AUTH_INTERNAL_SERVICE_TOKEN
   QUARRY_AUTH_INTERNAL_SERVICE_TOKEN
+  QUARRY_ORG_CORE_SERVICE_TOKEN QUARRY_BILLING_CORE_SERVICE_TOKEN
+  QUARRY_CONTROL_AUDIT_CORE_SERVICE_TOKEN
   DATA_ORCHESTRATOR_COST_SERVICE_API_KEY GATEWAY_RETENTION_DECISION_SERVICE_API_KEY
 )
 
@@ -74,6 +76,26 @@ fi
 fingerprints=()
 fingerprint_owners=()
 failed=0
+
+# The Quarry edge's Prometheus scrape token (U48) is a mounted file, and only when an
+# operator configures one (QUARRY_METRICS_TOKEN_FILE; unset means the empty placeholder
+# and the quarry-edge scrape job reads as down, which is the default while the edge's
+# QUARRY_EDGE_METRICS_ENABLED stays 0). A configured file must hold a real token: the
+# edge refuses to start in production with a metrics token under 32 characters. The
+# value is never printed.
+if [[ -n "${QUARRY_METRICS_TOKEN_FILE:-}" ]]; then
+  if [[ ! -f "$QUARRY_METRICS_TOKEN_FILE" || ! -r "$QUARRY_METRICS_TOKEN_FILE" ]]; then
+    printf 'credential preflight: QUARRY_METRICS_TOKEN_FILE is not a readable file\n' >&2
+    failed=1
+  else
+    quarry_metrics_token="$(tr -d '\r\n' <"$QUARRY_METRICS_TOKEN_FILE")"
+    if (( ${#quarry_metrics_token} < 32 )); then
+      printf 'credential preflight: QUARRY_METRICS_TOKEN_FILE holds fewer than 32 characters\n' >&2
+      failed=1
+    fi
+    unset quarry_metrics_token
+  fi
+fi
 
 if [[ "$audit_chain_keys_required" == "1" && -z "${AUDIT_CHAIN_KEY_ID:-}" ]]; then
   printf 'credential preflight: AUDIT_CHAIN_KEY_ID is missing\n' >&2

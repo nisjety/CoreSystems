@@ -1,4 +1,6 @@
-import { createSignal } from 'solid-js'
+// Signals are read through latest(): a read in the same tick as a write sees that write.
+// Solid 2 otherwise exposes the last committed value until its queue flushes (D2-175).
+import { createSignal } from '@/shared/lib/create-immediate-signal'
 import {
   browserErrorMessage,
   closeBrowserSession,
@@ -54,8 +56,9 @@ import { emptyBrowserPreview, viewModelOf } from './browser-preview-adapter'
  * Rules kept from the composer:
  * - ZDR: `open` sends `zdr: true` and never a profile field, whatever the picker
  *   shows. The gateway enforces the same rule independently.
- * - A reply for a session that is no longer the current one is dropped, and a
- *   session created by an `open` that was superseded is closed again.
+ * - A reply for a session that is no longer the current one is dropped, its
+ *   preview, error, approval and busy updates included. A session created by an
+ *   `open` that was superseded or closed meanwhile is closed again.
  * - Browser actions are gated by `busy`, so one action runs at a time.
  * - Navigation failures become a `navigationError` card (WS9.B); other failures
  *   become `error`.
@@ -151,6 +154,12 @@ export function createBrowserSessionController(
   const setBusy = (value: boolean) => {
     busyFlag = value
     setBusyState(value)
+  }
+
+  // Clears busy only while the session that set it is still current. A reply from a
+  // replaced session must not clear the gate of the session that is current now.
+  const releaseBusy = (sessionId: string) => {
+    if (currentSessionId() === sessionId) setBusy(false)
   }
 
   const closeSessionById = (sessionId: string | null | undefined): Promise<void> => {
@@ -285,7 +294,7 @@ export function createBrowserSessionController(
         }))
       }
     } finally {
-      setBusy(false)
+      releaseBusy(sessionId)
     }
   }
 
@@ -308,15 +317,18 @@ export function createBrowserSessionController(
         if (!current || current.browserSession?.session.id !== sessionId) return current
         return attachBrowserSession(current, outcome.response)
       })
-      if (outcome.stale) setError(tr(STALE_CONTROL_COPY.no, STALE_CONTROL_COPY.en))
+      if (outcome.stale && currentSessionId() === sessionId) {
+        setError(tr(STALE_CONTROL_COPY.no, STALE_CONTROL_COPY.en))
+      }
       void refreshTimeline(sessionId)
     } catch (reason) {
+      if (currentSessionId() !== sessionId) return
       setError(browserErrorMessage(reason, tr, {
         no: 'Kunne ikke endre nettleserkontroll.',
         en: 'Could not change browser control.',
       }))
     } finally {
-      setBusy(false)
+      releaseBusy(sessionId)
     }
   }
 
@@ -337,9 +349,10 @@ export function createBrowserSessionController(
       })
       void refreshTimeline(sessionId)
     } catch (reason) {
+      if (currentSessionId() !== sessionId) return
       setError(browserErrorMessage(reason, tr, failure))
     } finally {
-      setBusy(false)
+      releaseBusy(sessionId)
     }
   }
 
@@ -459,6 +472,8 @@ export function createBrowserSessionController(
   const decideApproval = async (entryKey: string, decision: ApprovalDecision): Promise<void> => {
     const entry = approvals().find((candidate) => candidate.key === entryKey)
     if (!entry) return
+    // The decision belongs to the session that was current when it was made.
+    const sessionId = currentSessionId()
     setDecidingApprovalKeys((keys) => (keys.includes(entryKey) ? keys : [...keys, entryKey]))
     try {
       let approvalId = entry.approvalId
@@ -468,6 +483,7 @@ export function createBrowserSessionController(
           return
         }
         const pending = await listApprovals(entry.runId)
+        if (currentSessionId() !== sessionId) return
         const match = pending.find((candidate) => (candidate.status ?? '').toUpperCase() === 'PENDING')
         if (!match) {
           setError(tr(
@@ -479,6 +495,8 @@ export function createBrowserSessionController(
         approvalId = match.id
       }
       await decideApprovalRequest(approvalId, decision)
+      // A decision made for a replaced session is recorded on the server; this page has moved on.
+      if (currentSessionId() !== sessionId) return
       // Optimistic: the run's own `browser_action_decided` event confirms it later.
       const resolved = decision === 'approve' ? 'granted' : 'denied'
       setApprovals((entries) => withBrowserApprovalDecided(entries, {
@@ -489,6 +507,7 @@ export function createBrowserSessionController(
       }))
       loop.onApprovalDecided(resolved)
     } catch (reason) {
+      if (currentSessionId() !== sessionId) return
       setError(browserErrorMessage(reason, tr, {
         no: 'Kunne ikke registrere beslutningen.',
         en: 'Could not record the decision.',

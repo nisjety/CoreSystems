@@ -1,0 +1,1 @@
+[{"step":0,"s":"completed","code":null,"cost_micro_usd":1000,"cost_source":"flat_table"},{"step":1,"s":"completed","code":null,"cost_micro_usd":1000,"cost_source":"flat_table"},{"step":2,"s":"failed","code":"SECURITY_BLOCKED","cost_micro_usd":100,"cost_source":"flat_table"},{"step":3,"s":"completed","code":null,"cost_micro_usd":1000,"cost_source":"flat_table"}]

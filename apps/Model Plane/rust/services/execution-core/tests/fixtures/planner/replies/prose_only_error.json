@@ -1,0 +1,6 @@
+{
+  "raw": "I will now navigate to the site.",
+  "expect": {
+    "kind": "error"
+  }
+}

@@ -1,0 +1,88 @@
+t0 2026-10-28T20:31:16Z ready: [0,0]
+A1(agent)=run_01M623BFNHANFA74N03WTYCKVC I1(interactive, no viewer)=run_01M623BG60T5KYN4S0M1Y439N2 V1(viewer, close test)=run_01M623BGAHPQ9PPQD8T05B3EAC V2(viewer, backstop)=run_01M623BGEQ8WN9K3D4MJEJXTR9
+HTTP=200 HTTP=200 HTTP=200 HTTP=200 
+after navigate + viewers: ready [1,4]   (expect sessions_open 4)
+class of each (browser-session): 
+ckpt at t+3: run_01M623BFNHANFA74N03WTYCKVC|active|1|http://fixture-a.crawl.test/
+ckpt at t+3: run_01M623BG60T5KYN4S0M1Y439N2|active|1|http://fixture-a.crawl.test/
+ckpt at t+3: run_01M623BGAHPQ9PPQD8T05B3EAC|active|1|http://fixture-a.crawl.test/
+ckpt at t+3: run_01M623BGEQ8WN9K3D4MJEJXTR9|active|1|http://fixture-a.crawl.test/
+--- waiting 62 s (idle TTL 40 s)
+t+65 2026-10-28T20:32:26Z ready: [1,2]   (expect 2: V1 and V2 held by viewers)
+--- sweeper log lines
+run expired run=run_01M623BFNHANFA74N03WTYCKVC class=agent reason=idle idle_s=42 age_s=48
+run expired run=run_01M623BG60T5KYN4S0M1Y439N2 class=interactive reason=idle idle_s=42 age_s=48
+--- A1 step after expiry (expect 404 run_not_live + resumable)
+{"code":"NOT_FOUND","message":"agent run is not live","details":{"reason":"run_not_live","resumable":true,"resume_run_id":"run_01M623BFNHANFA74N03WTYCKVC"}}
+{"data":null,"meta":{"request_id":"req_01M623DMAVJJP5XXK16CGS3HWY"},"error":{"code":"NOT_FOUND","message":"agent run is not live","details":{"reason":"run_not_live","resumable":true,"resume_run_id":"run_01M623BFNHANFA74N03WTYCKVC"},"retryable":false}} HTTP=404
+--- A1 checkpoint (expect row, status active)
+run_01M623BFNHANFA74N03WTYCKVC|active|1|http://fixture-a.crawl.test/|2026-10-28 20:31:18.532218+00
+rows for A1: 1
+I1 ckpt: run_01M623BG60T5KYN4S0M1Y439N2|active|1
+--- V1/V2 still open under viewer? browser-session:
+{"runId":"run_01M623BGAHPQ9PPQD8T05B3EAC","status":"active","live":true}
+{"runId":"run_01M623BGEQ8WN9K3D4MJEJXTR9","status":"active","live":true}
+--- resume A1 (resume_run_id), expect 200
+{"data":{"run_id":"run_01M623BFNHANFA74N03WTYCKVC","lease_id":"lease_01M623DPEH6Q2F0XHRJDVERZJB","profile_id":"prof_01M623BFNHN5P2SSGB6AYAWGM9","driver_capabilities":{"persistent_profile":true,"devtoo
+ready after resume: [1,3]
+--- close V1 while its viewer is attached (viewer pid alive: yes)
+d":"req_01M623DQ04NS2374ZJ0RDM6ZJ4"},"error":null} HTTP=200
+close took 185 ms
+viewer socket for V1 still alive after close: no
+sse-v1 tail:
+: agent.completed
+id: 4
+data: {"event_id":"evt_01M623DQ0R67HVF4VTXQM7KZE4","run_id":"run_01M623BGAHPQ9PPQD8T05B3EAC","type":"agent_completed","ts":"2026-10-28T20:32:30.232624758Z","seq":4,"payload":{},"idempotency_key":"run_01M623BGAHPQ9PPQD8T05B3EAC:agent_completed"}
+
+event: done
+data: run_closed
+
+
+ready after V1 close: [1,2]   (expect resumed A1 + V2 = 2)
+resumed id: 
+ready: [1,2]   (expect 1: V2 only)
+--- waiting for V2 (viewer attached) to hit the max age 150 s (started 2026-10-28T20:31:16Z)
+V2 gone at 2026-10-28T20:33:51Z (poll 16)
+viewer socket for V2 alive after expiry: no
+:
+
+:
+
+:
+
+:
+
+:
+
+:
+
+:
+
+:
+
+:
+
+:
+
+event: agent.expired
+id: 4
+data: {"event_id":"evt_01M623G5M98TAJBWPSFBCD8WRF","run_id":"run_01M623BGEQ8WN9K3D4MJEJXTR9","type":"agent_expired","ts":"2026-10-28T20:33:50.729935677Z","seq":4,"payload":{"age_s":152,"idle_s":81,"reason":"max_age"},"idempotency_key":"run_01M623BGEQ8WN9K3D4MJEJXTR9:agent_expired"}
+
+event: done
+data: run_closed
+
+
+run expired run=run_01M623BFNHANFA74N03WTYCKVC class=agent reason=idle idle_s=42 age_s=48
+run expired run=run_01M623BG60T5KYN4S0M1Y439N2 class=interactive reason=idle idle_s=42 age_s=48
+run expired run=run_01M623BFNHANFA74N03WTYCKVC class=agent reason=idle idle_s=40 age_s=40
+run expired run=run_01M623BGEQ8WN9K3D4MJEJXTR9 class=interactive reason=max_age idle_s=81 age_s=152
+--- metrics (expired / run starts)
+quarry_agent_run_expired_total{reason="idle"} 3
+quarry_agent_run_expired_total{reason="max_age"} 1
+quarry_agent_run_starts_total{class="interactive",outcome="started"} 3
+quarry_agent_run_starts_total{class="agent",outcome="started"} 1
+quarry_agent_run_starts_total{class="agent",outcome="resumed"} 1
+ready final: [1,0]
+not found","retryable":false}} HTTP=404
+not found","retryable":false}} HTTP=404
+not found","retryable":false}} HTTP=404

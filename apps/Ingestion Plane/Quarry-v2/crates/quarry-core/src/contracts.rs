@@ -131,6 +131,12 @@ pub struct BrowserTelemetry {
     /// only. Absent for a session without a saved profile.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile_restore: Option<ProfileRestoreSummary>,
+    /// E3.3-j: how long the page's DOM took to go quiet after the action this observation follows,
+    /// in ms, never more than the settle bound (`QUARRY_BROWSER_ACTION_SETTLE_MS`, default 300, max
+    /// 2000). A value equal to the bound means the DOM was still changing when the bound ran out.
+    /// Absent when the settle is off or the action only read the page, so the wire is unchanged then.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settle_ms: Option<u64>,
 }
 
 /// WS17.C2: what restoring a saved profile did. Counts and flags only: never a cookie name,
@@ -622,6 +628,47 @@ pub struct InteractiveElement {
     pub click_index: Option<u32>,
 }
 
+/// A box in CSS pixels, relative to the viewport as the browser's layout
+/// reports it, so it may lie partly or wholly outside the viewport. Presentation
+/// only: a client may draw a highlight with it. No resolver, action or receipt
+/// reads it, and it carries no page content.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct ElementRect {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
+impl ElementRect {
+    /// The axis-aligned bounds of one CDP quad: eight numbers, the x and y of
+    /// the four corners in order (`DOM.getBoxModel` `content`, or one entry of
+    /// `DOM.getContentQuads`). A rotated box gives the box around its corners.
+    /// `None` unless the quad has exactly eight finite numbers and a positive
+    /// width and height.
+    pub fn from_content_quad(quad: &[f64]) -> Option<Self> {
+        if quad.len() != 8 || quad.iter().any(|value| !value.is_finite()) {
+            return None;
+        }
+        let xs = [quad[0], quad[2], quad[4], quad[6]];
+        let ys = [quad[1], quad[3], quad[5], quad[7]];
+        let x = xs.iter().copied().fold(f64::INFINITY, f64::min);
+        let y = ys.iter().copied().fold(f64::INFINITY, f64::min);
+        let width = xs.iter().copied().fold(f64::NEG_INFINITY, f64::max) - x;
+        let height = ys.iter().copied().fold(f64::NEG_INFINITY, f64::max) - y;
+        if width > 0.0 && height > 0.0 {
+            Some(Self {
+                x,
+                y,
+                width,
+                height,
+            })
+        } else {
+            None
+        }
+    }
+}
+
 /// One compact row of a [`DomSummary`] click map. Deliberately narrower than
 /// [`InteractiveElement`]: a planner scans this list cheaply and only fans
 /// out to the full element (via `index`) when it needs placeholder, test-id,
@@ -948,6 +995,20 @@ pub enum AgentAction {
         ref_id: String,
         approval_grant_id: String,
     },
+    /// E3.1-a (ADR-2a): fill a one-time code into an exact input from the
+    /// latest snapshot. The code is never on the wire, in either direction:
+    /// the caller names only the target and a fresh BrowserBroker approval for
+    /// the sensitive action `fill_otp`, and Quarry's executor reads the code
+    /// from the approved mail connection and inserts it through trusted input.
+    /// The approval is single use per live run, like [`Self::UploadRef`]. There
+    /// is no frame variant: a child-frame target fails closed. The edge refuses
+    /// this action (403) unless `QUARRY_EDGE__FILL_OTP` is on (default off).
+    FillOtpRef {
+        snapshot_id: String,
+        generation: u32,
+        ref_id: String,
+        approval_grant_id: String,
+    },
     Screenshot {
         full_page: bool,
     },
@@ -1152,6 +1213,61 @@ pub struct ExtractionUsage {
 }
 
 #[cfg(test)]
+mod fill_otp_contract_tests {
+    use super::AgentAction;
+
+    #[test]
+    fn fill_otp_ref_roundtrips_with_the_snake_case_tag() {
+        let wire = r#"{"type":"fill_otp_ref","snapshot_id":"snap","generation":3,"ref_id":"@e4","approval_grant_id":"g1"}"#;
+        let action: AgentAction = serde_json::from_str(wire).unwrap();
+        match &action {
+            AgentAction::FillOtpRef {
+                snapshot_id,
+                generation,
+                ref_id,
+                approval_grant_id,
+            } => {
+                assert_eq!(snapshot_id, "snap");
+                assert_eq!(*generation, 3);
+                assert_eq!(ref_id, "@e4");
+                assert_eq!(approval_grant_id, "g1");
+            }
+            other => panic!("expected FillOtpRef, got {other:?}"),
+        }
+        let back: serde_json::Value = serde_json::to_value(&action).unwrap();
+        assert_eq!(
+            back,
+            serde_json::json!({
+                "type": "fill_otp_ref",
+                "snapshot_id": "snap",
+                "generation": 3,
+                "ref_id": "@e4",
+                "approval_grant_id": "g1",
+            })
+        );
+    }
+
+    #[test]
+    fn fill_otp_ref_carries_no_value_on_the_wire() {
+        // A caller that tries to send the code gets it dropped: the variant has
+        // no field for it, so it is neither kept nor echoed back.
+        let wire = r#"{"type":"fill_otp_ref","snapshot_id":"s","generation":1,"ref_id":"@e1","approval_grant_id":"g","value":"123456","code":"123456","text":"123456"}"#;
+        let action: AgentAction = serde_json::from_str(wire).unwrap();
+        let back = serde_json::to_string(&action).unwrap();
+        assert!(!back.contains("123456"), "{back}");
+        for key in ["\"value\"", "\"code\"", "\"text\""] {
+            assert!(!back.contains(key), "{key} in {back}");
+        }
+    }
+
+    #[test]
+    fn fill_otp_ref_requires_its_approval_grant() {
+        let missing = r#"{"type":"fill_otp_ref","snapshot_id":"s","generation":1,"ref_id":"@e1"}"#;
+        assert!(serde_json::from_str::<AgentAction>(missing).is_err());
+    }
+}
+
+#[cfg(test)]
 mod reload_contract_tests {
     use super::AgentAction;
 
@@ -1167,5 +1283,88 @@ mod reload_contract_tests {
         assert!(matches!(back, AgentAction::Reload { ignore_cache: true }));
         // Unknown keys stay accepted by default; a URL field is not part of the variant.
         assert!(serde_json::from_str::<AgentAction>(r#"{"type":"reload","url":"x"}"#).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod element_rect_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn a_content_quad_gives_its_bounds() {
+        let quad = [10.0, 20.0, 110.0, 20.0, 110.0, 50.0, 10.0, 50.0];
+        assert_eq!(
+            ElementRect::from_content_quad(&quad),
+            Some(ElementRect {
+                x: 10.0,
+                y: 20.0,
+                width: 100.0,
+                height: 30.0
+            })
+        );
+    }
+
+    #[test]
+    fn a_rotated_box_gives_the_box_around_its_corners() {
+        let diamond = [50.0, 0.0, 100.0, 25.0, 50.0, 50.0, 0.0, 25.0];
+        assert_eq!(
+            ElementRect::from_content_quad(&diamond),
+            Some(ElementRect {
+                x: 0.0,
+                y: 0.0,
+                width: 100.0,
+                height: 50.0
+            })
+        );
+    }
+
+    #[test]
+    fn a_box_scrolled_off_screen_keeps_its_negative_position() {
+        let quad = [-40.0, -10.0, 60.0, -10.0, 60.0, 20.0, -40.0, 20.0];
+        assert_eq!(
+            ElementRect::from_content_quad(&quad),
+            Some(ElementRect {
+                x: -40.0,
+                y: -10.0,
+                width: 100.0,
+                height: 30.0
+            })
+        );
+    }
+
+    #[test]
+    fn a_quad_that_is_not_eight_finite_numbers_gives_none() {
+        let short = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0];
+        let not_a_number = [0.0, 0.0, 10.0, 0.0, 10.0, f64::NAN, 0.0, 10.0];
+        let infinite = [0.0, 0.0, f64::INFINITY, 0.0, 10.0, 10.0, 0.0, 10.0];
+        assert_eq!(ElementRect::from_content_quad(&short), None);
+        assert_eq!(ElementRect::from_content_quad(&not_a_number), None);
+        assert_eq!(ElementRect::from_content_quad(&infinite), None);
+    }
+
+    #[test]
+    fn a_box_with_no_area_gives_none() {
+        let point = [10.0, 20.0, 10.0, 20.0, 10.0, 20.0, 10.0, 20.0];
+        let line = [10.0, 20.0, 50.0, 20.0, 50.0, 20.0, 10.0, 20.0];
+        assert_eq!(ElementRect::from_content_quad(&point), None);
+        assert_eq!(ElementRect::from_content_quad(&line), None);
+    }
+
+    #[test]
+    fn the_wire_form_uses_plain_field_names_and_round_trips() {
+        let rect = ElementRect {
+            x: 1.0,
+            y: 2.0,
+            width: 3.0,
+            height: 4.0,
+        };
+        let value = serde_json::to_value(rect).unwrap();
+        assert_eq!(
+            value,
+            json!({ "x": 1.0, "y": 2.0, "width": 3.0, "height": 4.0 })
+        );
+        let back: ElementRect = serde_json::from_value(value).unwrap();
+        assert_eq!(back, rect);
     }
 }

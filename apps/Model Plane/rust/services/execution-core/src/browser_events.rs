@@ -30,6 +30,36 @@ use crate::state::{RunStatus, StateStore};
 /// The tool whose actions the in-loop gate holds, named on the approval's cause.
 const BROWSER_AGENT_TOOL: &str = "browser_agent";
 
+/// E3.2-a: longest decider name published on the decision event.
+const MAX_DECIDED_BY_CHARS: usize = 128;
+/// E3.2-a: the decider label when the gate failed closed before any person could
+/// decide (no durable approval could be made).
+const DECIDED_BY_FAIL_CLOSED: &str = "system:fail-closed";
+/// The labels the cancel and timeout paths already send to `DecideApproval`.
+const DECIDED_BY_USER_CANCELLED: &str = "system:user-cancelled";
+const DECIDED_BY_TIMEOUT: &str = "system:approval-timeout";
+
+/// E3.2-c: the internal decision word for a person's rejection that carries
+/// instructions. Never published: the timeline sees `denied`.
+const DECISION_REDIRECTED: &str = "redirected";
+
+/// E3.2-c: the redirect text of a denied approval record, if the loop should
+/// treat the rejection as a redirect: the flag is on, a person (not a
+/// `system:*` decider such as the cancel path, and not nobody) decided it, and
+/// some text is left after bounding. The text is the decision reason, bounded.
+fn redirect_text(enabled: bool, decided_by: &str, reason: &str) -> Option<String> {
+    let decider = decided_by.trim();
+    if !enabled || decider.is_empty() || decider.starts_with("system:") {
+        return None;
+    }
+    crate::browser_agent::bound_redirect_text(reason)
+}
+
+/// `BrowserRunPaused.reason` when a person took the agent tab (WS8.G).
+pub const PAUSED_REASON_USER_TOOK_OVER: &str = "user_took_over";
+/// `BrowserRunResumed.reason` when the person gave the tab back (WS8.G).
+pub const RESUMED_REASON_CONTROL_RETURNED: &str = "control_returned";
+
 /// Publishes browser-agent events to session-core's orchestration broadcast.
 ///
 /// Holds the shared session-core channel; a fresh client is cheaply cloned per
@@ -134,7 +164,15 @@ impl OrchestrationEventSink {
         approval_id: &str,
         decision: &str,
         reason: &str,
+        decided_by: &str,
     ) -> ApprovalOutcome {
+        // E3.2-c: a redirect is a rejection on the timeline ("denied"); only the
+        // outcome the loop gets differs.
+        let published = if decision == DECISION_REDIRECTED {
+            "denied"
+        } else {
+            decision
+        };
         self.publish(
             &config.run_id,
             orchestration_event::Event::BrowserActionDecided(
@@ -143,13 +181,16 @@ impl OrchestrationEventSink {
                     plan_id: config.plan_id.clone(),
                     action_id: detail.action_id.clone(),
                     approval_id: approval_id.to_owned(),
-                    decision: decision.to_owned(),
-                    // The decider's identity lives on the durable Approval
-                    // record itself (`decided_by`, set by whoever called
-                    // `DecideApproval`); this sink has no independent
-                    // knowledge of it beyond what `GetApproval` last returned,
-                    // which callers can fetch separately if needed.
-                    decided_by: String::new(),
+                    decision: published.to_owned(),
+                    // E3.2-a: the decider as the durable Approval record names it
+                    // (`GetApproval.decided_by`, set by whoever called
+                    // `DecideApproval`), or the `system:*` label of the path that
+                    // ended the wait here. A ZDR run names nobody on the event.
+                    decided_by: if config.zdr {
+                        String::new()
+                    } else {
+                        decided_by.chars().take(MAX_DECIDED_BY_CHARS).collect()
+                    },
                 },
             ),
         )
@@ -157,6 +198,7 @@ impl OrchestrationEventSink {
         match decision {
             "granted" => ApprovalOutcome::Granted,
             "timed_out" => ApprovalOutcome::TimedOut,
+            DECISION_REDIRECTED => ApprovalOutcome::Redirect(reason.to_owned()),
             _ => ApprovalOutcome::Denied(reason.to_owned()),
         }
     }
@@ -193,8 +235,12 @@ impl BrowserEventSink for OrchestrationEventSink {
                 plan_id: config.plan_id.clone(),
                 action_id: observation.action_id.clone(),
                 status: observation.status.as_str().to_owned(),
-                page_url: observation.page_url.clone(),
-                page_title: observation.page_title.clone(),
+                // WS12.S4: the event leaves the loop (session-core fans it out
+                // to the UI and the log), so the URL loses a query token and
+                // the title a credential shape here, at the boundary. The
+                // observation itself is untouched.
+                page_url: crate::scrub::scrub_url(&observation.page_url),
+                page_title: crate::scrub::scrub_live(&observation.page_title),
                 // Reference ids only — never inlined bytes, and `extracted_text`
                 // is deliberately excluded from the wire event (ZDR intent).
                 screenshot_ref: observation.screenshot_ref.clone(),
@@ -212,6 +258,8 @@ impl BrowserEventSink for OrchestrationEventSink {
             orchestration_event::Event::BrowserRunPaused(orchestration_event::BrowserRunPaused {
                 run_id: config.run_id.clone(),
                 plan_id: config.plan_id.clone(),
+                // A user-initiated pause or resume carries no reason.
+                reason: String::new(),
             });
         self.publish(&config.run_id, event).await;
     }
@@ -224,7 +272,63 @@ impl BrowserEventSink for OrchestrationEventSink {
             orchestration_event::Event::BrowserRunResumed(orchestration_event::BrowserRunResumed {
                 run_id: config.run_id.clone(),
                 plan_id: config.plan_id.clone(),
+                // A user-initiated pause or resume carries no reason.
+                reason: String::new(),
             });
+        self.publish(&config.run_id, event).await;
+    }
+
+    /// WS8.G: the person took the agent tab of an attached run. The same
+    /// `BrowserRunPaused` as a user pause, told apart by its reason. The tab id
+    /// is not on the event (the proto carries the run's ids only).
+    async fn paused_by_user(&self, config: &PlanConfig, _tab_id: &str) {
+        if config.run_id.is_empty() {
+            return;
+        }
+        let event =
+            orchestration_event::Event::BrowserRunPaused(orchestration_event::BrowserRunPaused {
+                run_id: config.run_id.clone(),
+                plan_id: config.plan_id.clone(),
+                reason: PAUSED_REASON_USER_TOOK_OVER.to_owned(),
+            });
+        self.publish(&config.run_id, event).await;
+    }
+
+    /// WS8.G: the person gave the agent tab back; the run goes on.
+    async fn resumed_after_takeover(&self, config: &PlanConfig, _tab_id: &str) {
+        if config.run_id.is_empty() {
+            return;
+        }
+        let event =
+            orchestration_event::Event::BrowserRunResumed(orchestration_event::BrowserRunResumed {
+                run_id: config.run_id.clone(),
+                plan_id: config.plan_id.clone(),
+                reason: RESUMED_REASON_CONTROL_RETURNED.to_owned(),
+            });
+        self.publish(&config.run_id, event).await;
+    }
+
+    /// WS8.G (D4): the one-time audit that an attached run shares the person's
+    /// cookie jar. Ids only: never a URL or a page title.
+    async fn attach_shared_jar(
+        &self,
+        config: &PlanConfig,
+        session_run_id: &str,
+        attach_id: &str,
+        tab_id: &str,
+    ) {
+        if config.run_id.is_empty() {
+            return;
+        }
+        let event = orchestration_event::Event::BrowserAttachSharedJar(
+            orchestration_event::BrowserAttachSharedJar {
+                run_id: config.run_id.clone(),
+                plan_id: config.plan_id.clone(),
+                attach_id: attach_id.to_owned(),
+                session_run_id: session_run_id.to_owned(),
+                tab_id: tab_id.to_owned(),
+            },
+        );
         self.publish(&config.run_id, event).await;
     }
 
@@ -336,6 +440,17 @@ impl BrowserEventSink for OrchestrationEventSink {
                 tool: BROWSER_AGENT_TOOL.to_owned(),
                 action_key: BROWSER_AGENT_TOOL.to_owned(),
                 risk_category: detail.risk_category.as_str().to_owned(),
+                // E3.2-a: a closed class word for the host, never the host. A ZDR
+                // run states none (session-core stores none for it either).
+                host_class: if config.zdr {
+                    String::new()
+                } else {
+                    crate::browser_agent::host_class(
+                        detail.risk_category,
+                        &detail.url,
+                    )
+                    .to_owned()
+                },
                 ..approval_cause::for_code(CauseCode::BrowserActionRisk)
             }),
             ..Default::default()
@@ -356,6 +471,7 @@ impl BrowserEventSink for OrchestrationEventSink {
                             "",
                             "denied",
                             "approval creation returned no durable record",
+                            DECIDED_BY_FAIL_CLOSED,
                         )
                         .await;
                 }
@@ -369,6 +485,7 @@ impl BrowserEventSink for OrchestrationEventSink {
                         "",
                         "denied",
                         &format!("approval creation failed: {error}"),
+                        DECIDED_BY_FAIL_CLOSED,
                     )
                     .await;
             }
@@ -403,6 +520,7 @@ impl BrowserEventSink for OrchestrationEventSink {
                         &approval_id,
                         "denied",
                         "run cancelled by user while awaiting approval",
+                        DECIDED_BY_USER_CANCELLED,
                     )
                     .await;
             }
@@ -425,10 +543,33 @@ impl BrowserEventSink for OrchestrationEventSink {
                         match pb::ApprovalState::try_from(approval.state) {
                             Ok(pb::ApprovalState::Granted) => {
                                 return self
-                                    .decided(config, detail, &approval_id, "granted", "")
+                                    .decided(
+                                        config,
+                                        detail,
+                                        &approval_id,
+                                        "granted",
+                                        "",
+                                        &approval.decided_by,
+                                    )
                                     .await;
                             }
                             Ok(pb::ApprovalState::Denied) => {
+                                if let Some(text) = redirect_text(
+                                    config.approval_redirect,
+                                    &approval.decided_by,
+                                    &approval.decision_reason,
+                                ) {
+                                    return self
+                                        .decided(
+                                            config,
+                                            detail,
+                                            &approval_id,
+                                            DECISION_REDIRECTED,
+                                            &text,
+                                            &approval.decided_by,
+                                        )
+                                        .await;
+                                }
                                 return self
                                     .decided(
                                         config,
@@ -436,6 +577,7 @@ impl BrowserEventSink for OrchestrationEventSink {
                                         &approval_id,
                                         "denied",
                                         &approval.decision_reason,
+                                        &approval.decided_by,
                                     )
                                     .await;
                             }
@@ -447,6 +589,7 @@ impl BrowserEventSink for OrchestrationEventSink {
                                         &approval_id,
                                         "timed_out",
                                         &approval.decision_reason,
+                                        &approval.decided_by,
                                     )
                                     .await;
                             }
@@ -487,6 +630,7 @@ impl BrowserEventSink for OrchestrationEventSink {
                         &approval_id,
                         "timed_out",
                         "approval wait budget exceeded",
+                        DECIDED_BY_TIMEOUT,
                     )
                     .await;
             }
@@ -558,36 +702,42 @@ mod tests {
 
     #[tonic::async_trait]
     impl OrchestrationCoreService for NeverResolvingOrchestration {
+        // Main's RPCs (merged 2026-11-02); this double does not serve them.
         async fn reroute_approval(
             &self,
             _: tonic::Request<mp_contracts::model_plane::v1::RerouteApprovalRequest>,
         ) -> Result<tonic::Response<mp_contracts::model_plane::v1::RerouteApprovalResponse>, tonic::Status> {
-            Err(tonic::Status::unimplemented("not needed in this test"))
+            Err(tonic::Status::unimplemented("reroute_approval is not served by this double"))
         }
+
         async fn claim_once_approval(
             &self,
             _: tonic::Request<mp_contracts::model_plane::v1::ClaimOnceApprovalRequest>,
         ) -> Result<tonic::Response<mp_contracts::model_plane::v1::ClaimOnceApprovalResponse>, tonic::Status> {
-            Err(tonic::Status::unimplemented("not needed in this test"))
+            Err(tonic::Status::unimplemented("claim_once_approval is not served by this double"))
         }
+
         async fn hold_quarantined_output(
             &self,
             _: tonic::Request<mp_contracts::model_plane::v1::HoldQuarantinedOutputRequest>,
         ) -> Result<tonic::Response<mp_contracts::model_plane::v1::HoldQuarantinedOutputResponse>, tonic::Status> {
-            Err(tonic::Status::unimplemented("not needed in this test"))
+            Err(tonic::Status::unimplemented("hold_quarantined_output is not served by this double"))
         }
+
         async fn claim_quarantine_release(
             &self,
             _: tonic::Request<mp_contracts::model_plane::v1::ClaimQuarantineReleaseRequest>,
         ) -> Result<tonic::Response<mp_contracts::model_plane::v1::ClaimQuarantineReleaseResponse>, tonic::Status> {
-            Err(tonic::Status::unimplemented("not needed in this test"))
+            Err(tonic::Status::unimplemented("claim_quarantine_release is not served by this double"))
         }
+
         async fn get_quarantine_preview(
             &self,
             _: tonic::Request<mp_contracts::model_plane::v1::GetQuarantinePreviewRequest>,
         ) -> Result<tonic::Response<mp_contracts::model_plane::v1::GetQuarantinePreviewResponse>, tonic::Status> {
-            Err(tonic::Status::unimplemented("not needed in this test"))
+            Err(tonic::Status::unimplemented("get_quarantine_preview is not served by this double"))
         }
+
         async fn get_run_proof_bundle(
             &self,
             _: TonicRequest<mp_contracts::model_plane::v1::GetRunProofBundleRequest>,
@@ -670,7 +820,8 @@ mod tests {
                     decided_at: None,
                     expires_at: None,
                     org_id: request.org_id,
-                    cause: request.cause, ..Default::default()
+                    cause: request.cause,
+                    ..Default::default()
                 }),
             }))
         }
@@ -714,7 +865,8 @@ mod tests {
                     decided_at: None,
                     expires_at: None,
                     org_id: "org_test".into(),
-                    cause: None, ..Default::default()
+                    cause: None,
+                    ..Default::default()
                 }),
             }))
         }
@@ -783,7 +935,8 @@ mod tests {
                     decided_at: None,
                     expires_at: None,
                     org_id: "org_test".into(),
-                    cause: None, ..Default::default()
+                    cause: None,
+                    ..Default::default()
                 }),
             }))
         }
@@ -881,6 +1034,7 @@ mod tests {
             profile_id: None,
             start_url: None,
             postcondition: String::new(),
+            ..Default::default()
         }
     }
 
@@ -1061,5 +1215,244 @@ mod tests {
             cause.call_digest.is_empty() && !cause.action_key.contains("example.com"),
             "no URL or selector reaches the cause: {cause:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn a_browser_gate_states_a_closed_host_class_and_none_under_zdr() {
+        let created = Arc::default();
+        let channel = spawn_mock(NeverResolvingOrchestration {
+            created: Arc::clone(&created),
+            ..Default::default()
+        })
+        .await;
+        let sink = OrchestrationEventSink::new(channel, None).with_verified_bearer("test-bearer");
+
+        let _ = sink.require_approval(&test_config(), &test_detail()).await;
+        let mut zdr = test_config();
+        zdr.zdr = true;
+        zdr.run_id = "run_zdr".to_owned();
+        let _ = sink.require_approval(&zdr, &test_detail()).await;
+
+        let sent = created.lock().unwrap();
+        assert_eq!(sent.len(), 2);
+        let class = |index: usize| sent[index].cause.as_ref().unwrap().host_class.clone();
+        // A sign-in step on a public host; the word, never the host.
+        assert_eq!(class(0), "sensitive");
+        assert!(!format!("{:?}", sent[0].cause).contains("example.com"));
+        assert_eq!(class(1), "", "a ZDR run states no class");
+    }
+
+    #[tokio::test]
+    async fn the_decision_event_names_the_decider_the_record_names_and_nobody_under_zdr() {
+        let recorded = Arc::default();
+        let channel = spawn_mock(NeverResolvingOrchestration {
+            recorded: Arc::clone(&recorded),
+            ..Default::default()
+        })
+        .await;
+        let sink = OrchestrationEventSink::new(channel, None).with_verified_bearer("test-bearer");
+        let detail = test_detail();
+        let mut zdr = test_config();
+        zdr.zdr = true;
+
+        let _ = sink
+            .decided(&test_config(), &detail, "appr_1", "granted", "", "user_42")
+            .await;
+        let _ = sink
+            .decided(&test_config(), &detail, "appr_2", "timed_out", "x", "system:approval-timeout")
+            .await;
+        let _ = sink.decided(&zdr, &detail, "appr_3", "granted", "", "user_42").await;
+
+        let sent = recorded.lock().unwrap();
+        let deciders: Vec<String> = sent
+            .iter()
+            .filter_map(|request| request.event.as_ref()?.event.clone())
+            .filter_map(|event| match event {
+                orchestration_event::Event::BrowserActionDecided(decided) => Some(decided.decided_by),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            deciders,
+            vec!["user_42".to_owned(), "system:approval-timeout".to_owned(), String::new()]
+        );
+    }
+
+    #[tokio::test]
+    async fn takeover_pause_resume_and_shared_jar_carry_reasons_and_ids_only() {
+        let recorded = Arc::default();
+        let channel = spawn_mock(NeverResolvingOrchestration {
+            recorded: Arc::clone(&recorded),
+            ..Default::default()
+        })
+        .await;
+        let sink = OrchestrationEventSink::new(channel, None).with_verified_bearer("test-bearer");
+        let config = test_config();
+
+        sink.run_paused(&config).await;
+        sink.paused_by_user(&config, "tab_9").await;
+        sink.resumed_after_takeover(&config, "tab_9").await;
+        sink.attach_shared_jar(&config, "run_user", "att_1", "tab_9").await;
+        // No run, no run-scoped event.
+        let no_run = PlanConfig {
+            run_id: String::new(),
+            ..test_config()
+        };
+        sink.attach_shared_jar(&no_run, "run_user", "att_1", "tab_9").await;
+
+        let sent = recorded.lock().unwrap();
+        let events: Vec<_> = sent
+            .iter()
+            .filter_map(|request| request.event.as_ref()?.event.clone())
+            .collect();
+        assert_eq!(events.len(), 4);
+        let orchestration_event::Event::BrowserRunPaused(user_pause) = &events[0] else {
+            panic!("{:?}", events[0]);
+        };
+        assert_eq!(user_pause.reason, "", "a user pause carries no reason");
+        let orchestration_event::Event::BrowserRunPaused(took_over) = &events[1] else {
+            panic!("{:?}", events[1]);
+        };
+        assert_eq!(took_over.reason, "user_took_over");
+        assert_eq!(took_over.run_id, config.run_id);
+        let orchestration_event::Event::BrowserRunResumed(given_back) = &events[2] else {
+            panic!("{:?}", events[2]);
+        };
+        assert_eq!(given_back.reason, "control_returned");
+        let orchestration_event::Event::BrowserAttachSharedJar(jar) = &events[3] else {
+            panic!("{:?}", events[3]);
+        };
+        assert_eq!(
+            jar,
+            &orchestration_event::BrowserAttachSharedJar {
+                run_id: config.run_id.clone(),
+                plan_id: config.plan_id.clone(),
+                attach_id: "att_1".to_owned(),
+                session_run_id: "run_user".to_owned(),
+                tab_id: "tab_9".to_owned(),
+            }
+        );
+    }
+
+    fn observation_at(url: &str, title: &str) -> BrowserObservation {
+        BrowserObservation {
+            observation_id: "obs_1".to_owned(),
+            action_id: "act_1".to_owned(),
+            grant_id: "grant_001".to_owned(),
+            status: crate::browser_agent::ObservationStatus::Success,
+            page_url: url.to_owned(),
+            page_title: title.to_owned(),
+            extracted_text: "never on the wire".to_owned(),
+            screenshot_ref: String::new(),
+            dom_snapshot_ref: "snap-1".to_owned(),
+            snapshot_generation: None,
+            snapshot_targets: Vec::new(),
+            error_message: String::new(),
+            challenge: None,
+            redaction_rule_version: None,
+            quality: Default::default(),
+        }
+    }
+
+    #[test]
+    fn redirect_text_needs_the_flag_a_person_and_some_text() {
+        assert_eq!(redirect_text(true, "user_1", "use the guest option").as_deref(), Some("use the guest option"));
+        // Off, a system decider, nobody, or no text: a plain denial.
+        assert_eq!(redirect_text(false, "user_1", "use the guest option"), None);
+        assert_eq!(redirect_text(true, "system:user-cancelled", "run cancelled by user while awaiting approval"), None);
+        assert_eq!(redirect_text(true, "system:timeout", "expired"), None);
+        assert_eq!(redirect_text(true, "", "text"), None);
+        assert_eq!(redirect_text(true, "user_1", "   "), None);
+        // Bounded.
+        let long = "y".repeat(5_000);
+        assert_eq!(redirect_text(true, "user_1", &long).map(|t| t.chars().count()), Some(1000));
+    }
+
+    #[tokio::test]
+    async fn a_redirected_decision_is_denied_on_the_timeline_and_a_redirect_for_the_loop() {
+        let recorded = Arc::default();
+        let channel = spawn_mock(NeverResolvingOrchestration {
+            recorded: Arc::clone(&recorded),
+            ..Default::default()
+        })
+        .await;
+        let sink = OrchestrationEventSink::new(channel, None).with_verified_bearer("test-bearer");
+        let config = test_config();
+        let detail = RiskyActionDetail {
+            action_id: "act_1".to_owned(),
+            action_type: "click".to_owned(),
+            url: "https://example.com/checkout".to_owned(),
+            selector: String::new(),
+            risk_category: crate::browser_agent::RiskCategory::Checkout,
+            reason: "checkout".to_owned(),
+        };
+        let outcome = sink
+            .decided(&config, &detail, "appr_1", DECISION_REDIRECTED, "use guest", "user_1")
+            .await;
+        assert_eq!(outcome, ApprovalOutcome::Redirect("use guest".to_owned()));
+        let sent = recorded.lock().unwrap();
+        let decisions: Vec<_> = sent
+            .iter()
+            .filter_map(|request| request.event.as_ref()?.event.clone())
+            .filter_map(|event| match event {
+                orchestration_event::Event::BrowserActionDecided(decided) => Some(decided.decision),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(decisions, vec!["denied".to_owned()]);
+        drop(sent);
+        assert_eq!(
+            sink.decided(&config, &detail, "appr_1", "denied", "no", "user_1").await,
+            ApprovalOutcome::Denied("no".to_owned())
+        );
+    }
+
+    #[tokio::test]
+    async fn observation_received_event_has_no_url_token() {
+        let recorded = Arc::default();
+        let channel = spawn_mock(NeverResolvingOrchestration {
+            recorded: Arc::clone(&recorded),
+            ..Default::default()
+        })
+        .await;
+        let sink = OrchestrationEventSink::new(channel, None).with_verified_bearer("test-bearer");
+        let config = test_config();
+        let jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abcdEFGH1234";
+
+        // Assembled at run time so no credential-shaped literal sits in the source.
+        let secret = ["tok", "abc123def456ghi789"].join("_");
+        sink.observation_received(
+            &config,
+            &observation_at(
+                &format!("https://example.com/cb?lang=en&access_token={secret}"),
+                &format!("Welcome {jwt}"),
+            ),
+        )
+        .await;
+        // A clean page is byte-identical.
+        sink.observation_received(
+            &config,
+            &observation_at("https://example.com/a?b=1", "Example Domain"),
+        )
+        .await;
+
+        let sent = recorded.lock().unwrap();
+        let events: Vec<_> = sent
+            .iter()
+            .filter_map(|request| request.event.as_ref()?.event.clone())
+            .collect();
+        assert_eq!(events.len(), 2);
+        let orchestration_event::Event::BrowserObservationReceived(masked) = &events[0] else {
+            panic!("{:?}", events[0]);
+        };
+        assert!(!masked.page_url.contains(&secret), "{}", masked.page_url);
+        assert!(masked.page_url.starts_with("https://example.com/cb?lang=en"), "{}", masked.page_url);
+        assert!(!masked.page_title.contains("eyJhbGciOiJIUzI1NiJ9"), "{}", masked.page_title);
+        assert!(masked.page_title.starts_with("Welcome "), "{}", masked.page_title);
+        let orchestration_event::Event::BrowserObservationReceived(clean) = &events[1] else {
+            panic!("{:?}", events[1]);
+        };
+        assert_eq!(clean.page_url, "https://example.com/a?b=1");
+        assert_eq!(clean.page_title, "Example Domain");
     }
 }

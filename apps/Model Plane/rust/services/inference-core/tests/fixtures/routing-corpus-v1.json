@@ -1,0 +1,45 @@
+{
+  "corpus": "routing-corpus-v1",
+  "synthetic": true,
+  "description": "Synthetic requests for the offline routing diff (EP-14 S10). Written by hand against the intent layer's own thresholds (intent.rs classify). No user traffic. A turn's repeat count builds a length without a long literal.",
+  "cases": [
+    {"id": "greeting", "turns": [{"role": "user", "content": "hi"}]},
+    {"id": "short-question", "turns": [{"role": "user", "content": "Hva er hovedstaden i Norge?"}]},
+    {"id": "long-user-turn", "turns": [{"role": "user", "content": "Kort tekst. ", "repeat": 80}]},
+    {"id": "medium-context", "turns": [
+      {"role": "system", "content": "Systemtekst. ", "repeat": 120},
+      {"role": "user", "content": "Oppsummer dette."}
+    ]},
+    {"id": "large-context", "turns": [
+      {"role": "user", "content": "Dokument: ", "repeat": 500},
+      {"role": "user", "content": "Oppsummer."}
+    ]},
+    {"id": "code-fence", "turns": [{"role": "user", "content": "Her er koden:\n```python\nprint(1)\n```\nHva gjør den?"}]},
+    {"id": "reasoning-keyword", "turns": [{"role": "user", "content": "Please analyze the trade-offs step by step."}]},
+    {"id": "keyword-and-code", "turns": [{"role": "user", "content": "Refactor this:\n```rust\nfn f() {}\n```"}]},
+    {"id": "keyword-inside-a-word", "turns": [{"role": "user", "content": "Can you approve the change?"}]},
+    {"id": "norwegian-characters", "turns": [{"role": "user", "content": "æøå ", "repeat": 150}]},
+    {"id": "tool-offered-auto", "turns": [{"role": "user", "content": "Hva har vi tomt for i lageret?"}], "tools": ["search_inventory"], "tool_choice": "auto"},
+    {"id": "tool-required", "turns": [{"role": "user", "content": "Hei"}], "tools": ["lookup_order"], "tool_choice": "required"},
+    {"id": "deep-conversation", "turns": [
+      {"role": "user", "content": "Ok."},
+      {"role": "assistant", "content": "Ok."},
+      {"role": "user", "content": "Ok."},
+      {"role": "assistant", "content": "Ok."},
+      {"role": "user", "content": "Ok."},
+      {"role": "assistant", "content": "Ok."},
+      {"role": "user", "content": "Ok."},
+      {"role": "assistant", "content": "Ok."},
+      {"role": "user", "content": "Ok."},
+      {"role": "assistant", "content": "Ok."},
+      {"role": "user", "content": "Ok."},
+      {"role": "assistant", "content": "Ok."},
+      {"role": "user", "content": "Og i morgen?"}
+    ]},
+    {"id": "short-followup", "turns": [
+      {"role": "user", "content": "Takk"},
+      {"role": "assistant", "content": "Bare hyggelig."},
+      {"role": "user", "content": "Og i morgen?"}
+    ]}
+  ]
+}

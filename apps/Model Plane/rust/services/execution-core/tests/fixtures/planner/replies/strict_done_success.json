@@ -1,0 +1,8 @@
+{
+  "raw": "{\"action\": \"done\", \"selector\": \"\", \"snapshot_id\": \"\", \"generation\": -1, \"ref_id\": \"\", \"frame_id\": \"\", \"value\": \"\", \"url\": \"\", \"reason\": \"goal met\", \"risk_category\": \"none\", \"answer\": \"Open Monday to Friday, 9 to 5.\", \"outcome\": \"success\"}",
+  "expect": {
+    "kind": "done",
+    "outcome": "success",
+    "answer": "Open Monday to Friday, 9 to 5."
+  }
+}

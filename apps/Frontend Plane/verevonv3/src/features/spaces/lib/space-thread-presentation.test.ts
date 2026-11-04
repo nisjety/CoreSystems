@@ -167,3 +167,17 @@ describe('continuesTurnGroup', () => {
     expect(continuesTurnGroup(human('u1', at(3)), human('u1', at(1)), 'Verevon')).toBe(false)
   })
 })
+
+// The room reads both spellings of a stop and a timed-out run the way the sidebar does (the shared
+// thread-status vocabulary), and keeps a raw token for a state it does not name.
+describe('threadStatus shared run-status vocabulary', () => {
+  it('reads the second spelling of a stop as Stopped and a timed-out run as Failed', () => {
+    expect(threadStatus(thread('canceled'), en)).toBe('Stopped')
+    expect(threadStatus(thread('timed_out'), en)).toBe('Failed')
+  })
+
+  it('keeps a raw token for a state the room does not name', () => {
+    expect(threadStatus(thread('paused'), en)).toBe('Paused')
+    expect(threadStatus(thread('blocked'), en)).toBe('Blocked')
+  })
+})

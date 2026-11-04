@@ -1,0 +1,10 @@
+"budget":{"class":"agent","steps":1,"attempts":1,"max_steps":5,"max_attempts":10,"elapsed_s":0.727,"max_runtime_s":900,"spent_usd":0.001,"max_cost_usd":0.0013,"estimated":true,"cost_source":"flat_table"}
+nav 200
+"budget":{"class":"agent","steps":2,"attempts":2,"max_steps":5,"max_attempts":10,"elapsed_s":0.912,"max_runtime_s":900,"spent_usd":0.0011,"max_cost_usd":0.0013,"estimated":true,"cost_source":"flat_table"}
+wait1 200
+"budget":{"class":"agent","steps":3,"attempts":3,"max_steps":5,"max_attempts":10,"elapsed_s":1.096,"max_runtime_s":900,"spent_usd":0.00123,"max_cost_usd":0.0013,"estimated":true,"cost_source":"flat_table"}
+wait2 200
+"error":{"code":"BUDGET_EXHAUSTED","message":"agent run budget exhausted: cost (limit 0.0013, used 0.00123 usd)","details":{"dimension":"cost","estimated":true,"limit":0.0013,"limit_source":"run_budget","resumable":false,"spent":0.00123,"unit":"usd"},"retryable":false}
+wait3 402
+"error":{"code":"BUDGET_EXHAUSTED","message":"agent run budget exhausted: cost (limit 0.0013, used 0.00123 usd)","details":{"dimension":"cost","estimated":true,"limit":0.0013,"limit_source":"run_budget","resumable":false,"spent":0.00123,"unit":"usd"},"retryable":false}
+wait4 402

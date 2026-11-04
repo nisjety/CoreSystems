@@ -218,6 +218,8 @@ const KIND_LABELS: Record<string, (i18n: ApprovalCopyI18n) => string> = {
   permission: (i18n) => i18n.tr('Tillatelse', 'Permission'),
   destructive: (i18n) => i18n.tr('Ødeleggende handling', 'A destructive action'),
   cost: (i18n) => i18n.tr('Kostnad', 'Cost'),
+  // Main's quarantine hold (WS10 S8): tool output held back for review.
+  untrusted_content: (i18n) => i18n.tr('Tilbakeholdt innhold', 'Held content'),
 }
 
 /** A plain label for an approval kind a proof or an event states; never the wire token. */

@@ -22,6 +22,7 @@ const NAMED_SITES: &[(&str, &str)] = &[
     ("auth.rs", "delegated browser bearer"),
     ("auth.rs", "delegated Data Plane bearer"),
     ("auth.rs", "delegated sandbox bearer"),
+    ("sandbox_lease.rs", "thread workspace zdr guard"),
 ];
 
 fn source_files(directory: &Path, found: &mut Vec<PathBuf>) {

@@ -43,6 +43,10 @@ Returns the most-recent `BaselineSnapshot` for the URL, or 404.
 Paginated list of baselines, newest-first, walking the `prev_baseline_id`
 chain.
 
+### `GET /v1/change/diff` (INNH-4, behind `QUARRY_EDGE__CHANGE_TEXT_DIFF`)
+
+The two versions of a tracked page and the paragraph diff between them: `?url=` (latest two), `?url=&from=&to=` (two named baselines), `?diff_id=` (the diff a `quarry.change.detected` event announced), `&include=markdown` (the stored text of both). The contract, caps, the unavailable reasons and the ZDR rule are in `docs/CONTRACTS.md`, "Change text diff". Off by default (501); only change monitors keep text, and nothing is kept under ZDR.
+
 ## Data model
 
 ```rust
@@ -98,6 +102,14 @@ statically impossible.
 `status=Changed` events emit a webhook with subject
 `quarry.change.detected` (mirrors the cluster #7 subject taxonomy).
 Payload mirrors the HTTP response from `/v1/change/check`.
+
+The edge posts it to control (`POST /v1/webhooks/change?org_id=<org>`, internal HMAC), where it
+becomes a `change_detected` event and is delivered to the **webhook subscriptions of that
+organization** (INNH-5): an organization registers an HTTPS endpoint with
+`POST /v1/webhook-subscriptions` (dark behind `QUARRY_EDGE__WEBHOOK_SUBSCRIPTIONS` and
+`QUARRY_CONTROL__WEBHOOK_SUBSCRIPTIONS`). What the endpoint receives, how it is signed and how
+failures are retried is `docs/CONTRACTS.md` section 4; the API is "Webhook subscriptions" there.
+Under Zero Data Retention nothing is emitted, and a ZDR organization cannot create a subscription.
 
 ## Tests
 

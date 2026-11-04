@@ -509,6 +509,187 @@ func generateUserSettingsID() (string, error) {
 }
 
 // ============================================
+// BROWSER CONSENT SETTINGS (W3 E3.2-e3)
+// ============================================
+
+// BrowserConsentCategory is the user_settings category holding a person's
+// per-origin browser consent decisions. Its rows are user-scoped by the RLS
+// policy of migration 044: every read and write below runs in a transaction
+// that sets app.current_user_id, so a scoped request can never see or write
+// another person's row. Erasure needs no extra hop: both GDPR erasure modes
+// delete user_settings by user_id (anonymize explicitly, hard delete through
+// the users FK cascade), and the policy permits an unscoped delete.
+const BrowserConsentCategory = "browser_consent"
+
+// browserConsentAuditResource is the resource of the user_activity_log audit
+// row written in the same transaction as every consent change.
+const browserConsentAuditResource = "user_settings/browser_consent"
+
+// BrowserConsentAudit is the audit event a consent mutation records. Details
+// must stay content-free: decision, scope, kind, counts and host digests only.
+type BrowserConsentAudit struct {
+	Action  string
+	Details map[string]any
+}
+
+// BrowserConsentMutation receives the stored settings (an empty map when the
+// person has none yet) and returns the full replacement document plus the
+// audit event to record. An error aborts the transaction and is returned to
+// the caller unwrapped, so a typed validation error survives.
+type BrowserConsentMutation func(current map[string]any) (next map[string]any, audit *BrowserConsentAudit, err error)
+
+// BrowserConsentRepository returns a settings repository over the ACL
+// repository's database handle, so the HTTP layer can reach the user-scoped
+// consent store without a new constructor in main. Nil when unwired.
+func (a *AclRepository) BrowserConsentRepository() *Repository {
+	if a == nil || a.db == nil {
+		return nil
+	}
+	return &Repository{db: a.db}
+}
+
+// withUserScope runs fn in a transaction whose app.current_user_id is the
+// given user (SET LOCAL semantics: the setting ends with the transaction).
+func (r *Repository) withUserScope(ctx context.Context, userID string, fn func(pgx.Tx) error) error {
+	if userID == "" {
+		return fmt.Errorf("user-scoped settings access requires a user id")
+	}
+	tx, err := r.db.Pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin user-scoped transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `SELECT set_config('app.current_user_id', $1, true)`, userID); err != nil {
+		return fmt.Errorf("set user scope: %w", err)
+	}
+	if err := fn(tx); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit user-scoped transaction: %w", err)
+	}
+	return nil
+}
+
+// GetBrowserConsentSettings reads the person's browser_consent row inside a
+// user-scoped transaction. Returns nil, nil when the person has none.
+func (r *Repository) GetBrowserConsentSettings(ctx context.Context, userID string) (*UserSettings, error) {
+	var out *UserSettings
+	err := r.withUserScope(ctx, userID, func(tx pgx.Tx) error {
+		row := &UserSettings{}
+		var raw []byte
+		err := tx.QueryRow(ctx, `
+			SELECT id, user_id, category, settings, created_at, updated_at
+			FROM user_settings
+			WHERE user_id = $1 AND category = $2
+		`, userID, BrowserConsentCategory).Scan(
+			&row.ID, &row.UserID, &row.Category, &raw, &row.CreatedAt, &row.UpdatedAt,
+		)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("failed to get browser consent settings: %w", err)
+		}
+		if err := json.Unmarshal(raw, &row.Settings); err != nil {
+			return fmt.Errorf("failed to unmarshal browser consent settings: %w", err)
+		}
+		out = row
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// MutateBrowserConsentSettings is the only write path of the category: it
+// locks the person's row (creating an empty one first), hands the stored
+// document to mutate, replaces it with the result (no JSONB merge, so a
+// revoked origin really disappears) and writes the audit row, all in one
+// user-scoped transaction.
+func (r *Repository) MutateBrowserConsentSettings(ctx context.Context, userID string, mutate BrowserConsentMutation) (*UserSettings, error) {
+	if mutate == nil {
+		return nil, fmt.Errorf("browser consent mutation is required")
+	}
+	id, err := generateUserSettingsID()
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate user settings id: %w", err)
+	}
+	var out *UserSettings
+	err = r.withUserScope(ctx, userID, func(tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO user_settings (id, user_id, category, settings)
+			VALUES ($1, $2, $3, '{}'::jsonb)
+			ON CONFLICT (user_id, category) DO NOTHING
+		`, id, userID, BrowserConsentCategory); err != nil {
+			return fmt.Errorf("failed to ensure browser consent row: %w", err)
+		}
+		var raw []byte
+		if err := tx.QueryRow(ctx, `
+			SELECT settings FROM user_settings
+			WHERE user_id = $1 AND category = $2
+			FOR UPDATE
+		`, userID, BrowserConsentCategory).Scan(&raw); err != nil {
+			return fmt.Errorf("failed to lock browser consent settings: %w", err)
+		}
+		current := map[string]any{}
+		if len(raw) > 0 {
+			if err := json.Unmarshal(raw, &current); err != nil {
+				return fmt.Errorf("failed to unmarshal browser consent settings: %w", err)
+			}
+			if current == nil {
+				current = map[string]any{}
+			}
+		}
+		next, audit, err := mutate(current)
+		if err != nil {
+			return err
+		}
+		if next == nil {
+			next = map[string]any{}
+		}
+		nextRaw, err := json.Marshal(next)
+		if err != nil {
+			return fmt.Errorf("failed to marshal browser consent settings: %w", err)
+		}
+		row := &UserSettings{}
+		var returned []byte
+		if err := tx.QueryRow(ctx, `
+			UPDATE user_settings
+			SET settings = $3::jsonb, updated_at = NOW()
+			WHERE user_id = $1 AND category = $2
+			RETURNING id, user_id, category, settings, created_at, updated_at
+		`, userID, BrowserConsentCategory, nextRaw).Scan(
+			&row.ID, &row.UserID, &row.Category, &returned, &row.CreatedAt, &row.UpdatedAt,
+		); err != nil {
+			return fmt.Errorf("failed to save browser consent settings: %w", err)
+		}
+		if err := json.Unmarshal(returned, &row.Settings); err != nil {
+			return fmt.Errorf("failed to unmarshal saved browser consent settings: %w", err)
+		}
+		if audit != nil && audit.Action != "" {
+			details, err := json.Marshal(audit.Details)
+			if err != nil {
+				details = []byte("{}")
+			}
+			if _, err := tx.Exec(ctx, `
+				INSERT INTO user_activity_log (user_id, action, resource, details)
+				VALUES ($1, $2, $3, $4)
+			`, userID, audit.Action, browserConsentAuditResource, details); err != nil {
+				return fmt.Errorf("failed to audit browser consent change: %w", err)
+			}
+		}
+		out = row
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// ============================================
 // PROVIDER ACCOUNTS REPOSITORY
 // ============================================
 

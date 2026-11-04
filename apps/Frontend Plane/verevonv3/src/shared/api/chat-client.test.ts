@@ -300,6 +300,116 @@ describe('chat-client stream-event coverage', () => {
       payload: { hello: 'world' },
     })
   })
+
+  it('carries a Space knowledge receipt on the source-scope frame, auto scope included', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        sseResponse([
+          `event: source_scope_applied\ndata: ${JSON.stringify({
+            scope: 'auto',
+            excluded_tools: [],
+            knowledge: { mode: 'retrieval', sources: 2 },
+          })}\n\n`,
+          `event: source_scope_applied\ndata: ${JSON.stringify({
+            scope: 'knowledge_only',
+            excluded_tools: ['web_search'],
+            knowledge: { mode: 'not_entitled' },
+          })}\n\n`,
+        ]),
+      ),
+    )
+    const onSourceScopeApplied = vi.fn()
+    await streamChat({ content: 'hi' }, { onSourceScopeApplied })
+
+    expect(onSourceScopeApplied).toHaveBeenNthCalledWith(1, {
+      scope: 'auto',
+      excludedTools: [],
+      knowledge: { mode: 'retrieval', sources: 2 },
+    })
+    expect(onSourceScopeApplied).toHaveBeenNthCalledWith(2, {
+      scope: 'knowledge_only',
+      excludedTools: ['web_search'],
+      knowledge: { mode: 'not_entitled' },
+    })
+  })
+
+  it('reads the knowledge receipt on the AG-UI custom form of the frame too', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        sseResponse([
+          `event: CUSTOM\ndata: ${JSON.stringify({
+            type: 'CUSTOM',
+            name: 'source_scope_applied',
+            value: { scope: 'auto', excluded_tools: [], knowledge: { mode: 'not_searched' } },
+          })}\n\n`,
+        ]),
+      ),
+    )
+    const onSourceScopeApplied = vi.fn()
+    await streamChat({ content: 'hi' }, { onSourceScopeApplied })
+
+    expect(onSourceScopeApplied).toHaveBeenCalledWith({
+      scope: 'auto',
+      excludedTools: [],
+      knowledge: { mode: 'not_searched' },
+    })
+  })
+
+  it('drops an auto frame with no receipt, and a receipt mode the SPA does not name, keeping the filter', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        sseResponse([
+          // An ordinary turn sends no frame; an auto frame with nothing to say is not a filter.
+          `event: source_scope_applied\ndata: ${JSON.stringify({ scope: 'auto', excluded_tools: [] })}\n\n`,
+          `event: source_scope_applied\ndata: ${JSON.stringify({
+            scope: 'web_only',
+            excluded_tools: ['knowledge_search'],
+            knowledge: { mode: 'in_context' },
+          })}\n\n`,
+        ]),
+      ),
+    )
+    const onSourceScopeApplied = vi.fn()
+    await streamChat({ content: 'hi' }, { onSourceScopeApplied })
+
+    expect(onSourceScopeApplied).toHaveBeenCalledTimes(1)
+    expect(onSourceScopeApplied).toHaveBeenCalledWith({ scope: 'web_only', excludedTools: ['knowledge_search'] })
+    expect(onSourceScopeApplied.mock.calls[0]?.[0]).not.toHaveProperty('knowledge')
+  })
+})
+
+describe('chat-client sandbox state (WS22-S6)', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('routes sandbox_state by scope, state and cause, and ignores a frame that names neither scope nor state', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        sseResponse([
+          `event: sandbox_state\ndata: ${JSON.stringify({ scope: 'thread', state: 'conflict', cause: 'workspace_conflict', request_id: 'req-1' })}\n\n`,
+          `event: sandbox_state\ndata: ${JSON.stringify({ scope: 'thread', state: 'kept', request_id: 'req-1' })}\n\n`,
+          // A frame that says nothing about where the files went cannot be shown as a workspace state.
+          `event: sandbox_state\ndata: ${JSON.stringify({ cause: 'quota_exceeded' })}\n\n`,
+        ]),
+      ),
+    )
+    const onSandboxState = vi.fn()
+    await streamChat({ content: 'hi' }, { onSandboxState })
+
+    expect(onSandboxState).toHaveBeenCalledTimes(2)
+    expect(onSandboxState).toHaveBeenNthCalledWith(1, {
+      scope: 'thread',
+      state: 'conflict',
+      cause: 'workspace_conflict',
+      requestId: 'req-1',
+    })
+    expect(onSandboxState).toHaveBeenNthCalledWith(2, { scope: 'thread', state: 'kept', requestId: 'req-1' })
+  })
 })
 
 describe('mid-run queued input', () => {
@@ -960,6 +1070,64 @@ describe('chat-client tool wiring', () => {
     })
   })
 
+  it('carries the server citation number through a single citation event', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      sseResponse([
+        `event: citation\ndata: ${JSON.stringify({
+          id: 'c3',
+          title: 'Third',
+          url: 'https://example.com/3',
+          snippet: 'Snippet',
+          number: 3,
+        })}\n\n`,
+      ]),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const onCitation = vi.fn()
+    await streamChat({ content: 'hi' }, { onCitation })
+
+    expect(onCitation).toHaveBeenCalledWith(expect.objectContaining({ id: 'c3', number: 3 }))
+  })
+
+  it('carries each server citation number through a batched citations event', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      sseResponse([
+        `event: citations\ndata: ${JSON.stringify({
+          citations: [
+            { id: 'c1', title: 'First', url: 'https://example.com/1', snippet: '', number: 1 },
+            { id: 'c3', title: 'Third', url: 'https://example.com/3', snippet: '', number: 3 },
+          ],
+        })}\n\n`,
+      ]),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const onCitation = vi.fn()
+    await streamChat({ content: 'hi' }, { onCitation })
+
+    expect(onCitation.mock.calls.map(([event]) => event.number)).toEqual([1, 3])
+  })
+
+  it('reads the server citation number on the AG-UI custom form of a citation too', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        sseResponse([
+          `event: CUSTOM\ndata: ${JSON.stringify({
+            type: 'CUSTOM',
+            name: 'citation',
+            value: { id: 'c3', title: 'Third', url: 'https://example.com/3', snippet: '', number: 3 },
+          })}\n\n`,
+        ]),
+      ),
+    )
+    const onCitation = vi.fn()
+    await streamChat({ content: 'hi' }, { onCitation })
+
+    expect(onCitation).toHaveBeenCalledWith(expect.objectContaining({ id: 'c3', number: 3 }))
+  })
+
   it('maps a follow_ups event into onFollowUps, dropping non-string/empty entries', async () => {
     const fetchMock = vi.fn().mockResolvedValue(
       sseResponse([
@@ -992,6 +1160,58 @@ describe('chat-client tool wiring', () => {
     await streamChat({ content: 'hi' }, { onFollowUps })
 
     expect(onFollowUps).not.toHaveBeenCalled()
+  })
+
+  /** WS14 S4: a question a run put to its owner reads into the card's shape; a malformed one is dropped. */
+  it('maps a user_question event into onUserQuestion and drops what the card cannot answer', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      sseResponse([
+        `event: user_question\ndata: ${JSON.stringify({
+          question_id: 'q_1',
+          delivery: 'next_turn',
+          expires_at: '2026-11-02T10:00:00Z',
+          items: [
+            {
+              id: 'carrier',
+              kind: 'single',
+              prompt: 'Which carrier?',
+              options: [
+                { id: 'bring', label: 'Bring' },
+                { id: 'postnord', label: 'PostNord', description: 'Next day' },
+              ],
+              allow_other: true,
+            },
+            { id: 'pin', kind: 'password', prompt: 'Your PIN?' },
+          ],
+          request_id: 'req_2',
+        })}\n\n`,
+        `event: user_question\ndata: ${JSON.stringify({ items: [] })}\n\n`,
+      ]),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const onUserQuestion = vi.fn()
+    await streamChat({ content: 'hi' }, { onUserQuestion })
+
+    expect(onUserQuestion).toHaveBeenCalledTimes(1)
+    expect(onUserQuestion).toHaveBeenCalledWith({
+      questionId: 'q_1',
+      delivery: 'next_turn',
+      expiresAt: '2026-11-02T10:00:00Z',
+      items: [
+        {
+          id: 'carrier',
+          kind: 'single',
+          prompt: 'Which carrier?',
+          options: [
+            { id: 'bring', label: 'Bring' },
+            { id: 'postnord', label: 'PostNord', description: 'Next day' },
+          ],
+          allowOther: true,
+        },
+      ],
+      requestId: 'req_2',
+    })
   })
 
   /** plan-gate §2.1: the model's structured plan-mode plan. */
@@ -1404,6 +1624,53 @@ describe('chat-client server thread history', () => {
         spaceRef: 'space_1',
       },
     ])
+  })
+
+  it('carries the derived attention state, drops a state outside the closed set, and omits it when off', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({
+        data: {
+          sessions: [
+            {
+              threadId: 'thread_waiting',
+              title: 'Waiting',
+              preview: '',
+              updatedAt: '2026-06-17T10:00:00.000Z',
+              attentionState: 'needs_approval',
+              attentionSince: '2026-06-17T09:59:00.000Z',
+              attentionUnseen: true,
+            },
+            {
+              threadId: 'thread_unknown',
+              title: 'Unknown state',
+              preview: '',
+              updatedAt: '2026-06-17T10:00:00.000Z',
+              attentionState: 'paused_somehow',
+              attentionUnseen: true,
+            },
+            {
+              threadId: 'thread_flag_off',
+              title: 'Switch off',
+              preview: '',
+              updatedAt: '2026-06-17T10:00:00.000Z',
+            },
+          ],
+        },
+      }), { headers: { 'Content-Type': 'application/json' }, status: 200 }),
+    ))
+
+    const [waiting, unknown, flagOff] = await listChatThreads()
+
+    expect(waiting).toMatchObject({
+      threadId: 'thread_waiting',
+      attentionState: 'needs_approval',
+      attentionSince: '2026-06-17T09:59:00.000Z',
+      attentionUnseen: true,
+    })
+    expect(unknown).not.toHaveProperty('attentionState')
+    expect(unknown).not.toHaveProperty('attentionUnseen')
+    expect(flagOff).not.toHaveProperty('attentionState')
+    expect(flagOff).not.toHaveProperty('attentionUnseen')
   })
 
   it('reads a server-owned pin, and treats anything non-true as unpinned', async () => {
@@ -2685,5 +2952,66 @@ describe('chat-client thread listing under WS09 S6', () => {
     await Promise.all([listChatThreads(), listChatThreads()])
 
     expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
+})
+
+// WS14 S2, approve then execute: the one execute turn an approval that answered `execute_now`
+// sends names the plan it runs. The plan id rides only on an execute turn, and the answer says
+// what the client does next.
+describe('chat-client approve then execute (WS14 S2)', () => {
+  afterEach(() => {
+    clearSupportChatThreads()
+  })
+
+  const respond = (body: unknown) =>
+    new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } })
+
+  const execute = { content: 'Kjør den godkjente planen', threadId: 'thread_1', executeGranted: true }
+
+  it('names the approved plan on the execute turn, and nowhere else', () => {
+    const body = buildChatWireBody({ ...execute, approvedPlanId: 'plan_1' })
+
+    expect(body.execute_granted).toBe(true)
+    expect(body.approved_plan_id).toBe('plan_1')
+    expect(body).not.toHaveProperty('granted_rung')
+    // Exactly the plan id differs from the same execute turn without it.
+    expect(body).toEqual({ ...buildChatWireBody(execute), approved_plan_id: 'plan_1' })
+    // Without the execute flag the plan id never goes out.
+    expect(buildChatWireBody({ content: 'hi', threadId: 'thread_1', approvedPlanId: 'plan_1' })).not.toHaveProperty(
+      'approved_plan_id',
+    )
+    expect(buildChatWireBody({ content: 'hi', threadId: 'thread_1', executeGranted: false, approvedPlanId: 'plan_1' })).not.toHaveProperty(
+      'approved_plan_id',
+    )
+  })
+
+  it('omits a blank plan id, so an execute turn without one is the S2a turn exactly', () => {
+    expect(buildChatWireBody({ ...execute, approvedPlanId: '   ' })).toEqual(buildChatWireBody(execute))
+    expect(buildChatWireBody({ ...execute, approvedPlanId: '' })).not.toHaveProperty('approved_plan_id')
+  })
+
+  it('reads continuation: execute_now only as that exact answer, and next_message otherwise', async () => {
+    for (const [answer, expected] of [
+      ['execute_now', 'execute_now'],
+      ['next_message', 'next_message'],
+      [undefined, 'next_message'],
+      ['run_it_now', 'next_message'],
+    ] as const) {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn().mockResolvedValue(
+          respond({
+            granted_rung: 'workspace_write',
+            was_in_plan_mode: true,
+            persisted: true,
+            ...(answer === undefined ? {} : { continuation: answer }),
+          }),
+        ),
+      )
+
+      const result = await approvePlan('run_1', 'workspace_write', 'writes its report', 'plan_1', [])
+
+      expect(result.continuation, `answer ${String(answer)}`).toBe(expected)
+    }
   })
 })

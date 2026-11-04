@@ -1363,8 +1363,15 @@ export function parseInline(text: string, citations?: readonly Citation[]): Arra
         .slice(1, -1)
         .split(',')
         .map((value) => Number(value.trim()))
+      // The server numbers each source and the numbering has gaps (an unread source takes no number), so a
+      // marker binds to the source carrying its number. Array position is the fallback only when no source in
+      // the turn has a number: an older gateway, or a stored turn written before numbers were kept.
+      const numbered = citations.some((citation) => typeof citation.number === 'number')
       const sources = indexes
-        .map((index) => ({ index, citation: citations[index - 1] }))
+        .map((index) => ({
+          index,
+          citation: numbered ? citations.find((citation) => citation.number === index) : citations[index - 1],
+        }))
         .filter((entry): entry is { index: number; citation: Citation } => Boolean(entry.citation))
       // Keep a marker unchanged if even one requested source is absent. A
       // partial chip would silently rewrite the model's intended evidence set.

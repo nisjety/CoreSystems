@@ -498,6 +498,9 @@ Internal API key required (even healthcheck); user identity via forwarded header
 | DELETE | `/notifications/:id` | Delete from feed | HTTP | core |
 | GET | `/preferences` | Notification preferences | HTTP | core |
 | PUT | `/preferences/:eventType/:channel` | Update one preference | HTTP | core |
+| GET | `/push/config` (BFF `/api/v1/push/config`) | Web Push config: VAPID public key and whether push is on | HTTP | core |
+| POST | `/push/subscriptions` (BFF `/api/v1/push/subscriptions`) | Register one browser push endpoint for the caller | HTTP | core |
+| DELETE | `/push/subscriptions/:id` (BFF `/api/v1/push/subscriptions/{id}`) | Revoke one of the caller's push endpoints | HTTP | core |
 | GET/PATCH | `/channels/config[...]` | Channel config (admin-ish) | HTTP | **later** |
 | POST | `/internal/recipients/upsert` | Identity sync (internal) | HTTP | none |
 

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { citationFromUnknown, normalizeCitation } from './chat-normalizers'
+import { citationFromUnknown, normalizeCitation, transcriptTurnToChatTurn, upsertCitation } from './chat-normalizers'
 
 // WS23 S6: a connected-account citation is origin `connector`. Before this origin was accepted the
 // SPA dropped it silently, so the Kilder panel never showed a connected item the answer relied on.
@@ -51,5 +51,42 @@ describe('connector citations', () => {
       .toMatchObject({ origin: 'web' })
     expect(citationFromUnknown({ id: 'k', title: 'K', url: 'https://intranet/k', snippet: '', origin: 'knowledge' }, 0))
       .toMatchObject({ origin: 'knowledge' })
+  })
+})
+
+// The server's citation number is what a `[n]` marker binds to. A citation without one must not carry an
+// explicit `number: undefined`, or the merge in `upsertCitation` would clear the number an earlier frame set.
+describe('server citation numbers', () => {
+  it('carries the number the server assigned on a live citation event', () => {
+    expect(normalizeCitation({
+      id: 'kb-1',
+      title: 'Refund policy',
+      url: 'https://intranet/refunds',
+      snippet: '',
+      number: 3,
+      origin: 'knowledge',
+    })).toMatchObject({ id: 'kb-1', number: 3 })
+  })
+
+  it('leaves the number off a citation that carries none', () => {
+    expect(normalizeCitation({ id: 'w', title: 'W', url: 'https://example.com/w', snippet: '' }))
+      .not.toHaveProperty('number')
+  })
+
+  it('keeps an earlier number when a later frame for the same source carries none', () => {
+    const first = normalizeCitation({ id: 'c3', title: 'Third', url: 'https://example.com/3', snippet: '', number: 3 })
+    const later = normalizeCitation({ id: 'c3', title: 'Third', url: 'https://example.com/3', snippet: '' })
+    expect(first && later && upsertCitation([first], later)).toMatchObject([{ id: 'c3', number: 3 }])
+  })
+
+  it('keeps the number on a citation read back from a stored turn', () => {
+    const turn = transcriptTurnToChatTurn({
+      id: 'turn-1',
+      role: 'assistant',
+      content: 'The claim [3].',
+      createdAt: '',
+      citations: [{ id: 'c3', title: 'Third', url: 'https://example.com/3', snippet: '', number: 3 }],
+    })
+    expect(turn.citations).toEqual([expect.objectContaining({ id: 'c3', number: 3 })])
   })
 })

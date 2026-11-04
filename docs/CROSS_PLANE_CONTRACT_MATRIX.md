@@ -313,7 +313,7 @@
 | **L5 Application** | ✅ JWT + Org events | ✅ Retrieval API | 🚫 | ✅ AI API | — | 🚫 |
 | **L6 Frontend** | ✅ Auth cookies | 🚫 | 🚫 | 🚫 | ✅ REST/WS | — |
 
-The 🚫 in the L1 Control → L3 Ingestion cell holds except for the two edges recorded as E1 and E2 under "Recorded Exceptions".
+The 🚫 in the L1 Control → L3 Ingestion cell holds except for the two edges recorded as E1 and E2 under "Recorded Exceptions". A claim carried on a token is not a call; the claim edges are listed under "Claim Edges".
 
 **Rules governing this matrix:**
 1. Authority flows DOWN only (upper calls lower)
@@ -340,6 +340,15 @@ Constraints that E2 must keep when it is built:
 - **Fails closed.** When integration-corev2 is unreachable or slow the decision is refused and zero retention stays on. The answer is never guessed.
 - **One writer of the digest.** integration-corev2 computes the connection's capability digest; auth-core compares it as an opaque string and never recomputes it, so two languages cannot disagree on the canonical form.
 - **Records are not editable by the generic routes.** The capability fields and the acknowledgement ledger cannot be written through the generic connection upsert or patch.
+
+## Claim Edges
+
+A claim is not a call. An issuer signs a claim onto a token that the consumer already receives, so the consumer reads the claim and never asks the issuer. Each claim edge is listed here so that a change to its issuer, its audience or its shape is checked against this table. The consumer enforces a claim; it never mints, re-signs or widens it.
+
+| # | Claim | Issuer → consumer | Carried on | Value comes from | Consumer rule | State |
+|---|-------|-------------------|------------|------------------|---------------|-------|
+| C1 | `web_policy`: `v`, `rev`, and the optional `caps`, `robots_max`, `proxy_max` and `domains`; at most 2 KiB | auth-core → quarry-edge (`aud=quarry`) | User tokens; service tokens of the principals that hold a `webPolicyByAudience` tenant row for `quarry` (`execution-core`, `model-gateway`) | org-core `GET /internal/orgs/:orgId/web-policy` (scope `org:web-policy:read:any`, auth-core only) | Enforce the claim; a request may tighten it and never widen it. Staleness is about 345 s (300 s audience TTL plus 45 s resolver cache). | Built, dark: `WEB_POLICY_CLAIM_ENABLED` is off, so the claim reads `"rev": "0"` |
+| C2 | `web_policy`, as C1 | auth-core → browser-broker (`aud=browser-broker`; Model Plane) | User tokens | As C1 | The broker's token verifier must accept the claim unread until WS7.K reads it. Not verified in this lane. | Built, dark in auth-core; the broker side is not built |
 
 ## Known Violations (Migration Backlog)
 

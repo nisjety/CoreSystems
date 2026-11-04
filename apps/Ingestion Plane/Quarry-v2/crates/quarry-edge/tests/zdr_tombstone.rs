@@ -759,7 +759,7 @@ async fn a_zdr_answer_and_a_zdr_extract_each_emit_one() {
     let (capture, emitter) = capturing();
     let addr = spawn_edge(Some(emitter)).await;
     let (status, _) = post(addr, "/v1/answer", json!({ "query": "private canary", "zdr": true })).await;
-    assert_eq!(status, 501);
+    assert_eq!(status, 403, "INNH-8: a ZDR answer is refused (ADR-4), whatever the deployment's gate says");
     let (status, _) = post(addr, "/v1/extract", json!({ "urls": [SECRET_URL], "zdr": true })).await;
     assert_eq!(status, 200);
     wait_for(&capture, 2).await;
@@ -845,25 +845,27 @@ async fn spawn_answer_edge(tombstones: Option<Arc<TombstoneEmitter>>, behaviour:
     addr
 }
 
-/// A finished ZDR answer stream leaves one `ok` tombstone with no query in it; a standard
-/// stream leaves none; a request refused before any work (an empty query) is not a run.
+/// INNH-8 (ADR-4): a ZDR answer stream is refused before it starts, so it leaves one `refused`
+/// tombstone (class `FORBIDDEN`, no query in it) and never an `ok` one; a standard stream leaves
+/// none; a request refused before any work (an empty query) is not a run.
 #[tokio::test]
-async fn a_zdr_answer_stream_emits_one_ok_tombstone_at_its_end() {
+async fn a_zdr_answer_stream_is_refused_before_it_starts_and_leaves_one_refused_tombstone() {
     let (capture, emitter) = capturing();
     let addr = spawn_answer_edge(Some(emitter), SearchBehaviour::Empty).await;
 
     let (status, body) = post(addr, "/v1/answer/stream", json!({ "query": "private canary stream", "zdr": true })).await;
-    assert_eq!(status, 200);
-    assert!(body.contains("event: done"), "the stream ran to its done frame: {body}");
+    assert_eq!(status, 403, "{body}");
+    assert!(!body.contains("event:"), "a refusal is JSON, not a stream: {body}");
+    assert!(body.contains("zdr_unavailable"), "{body}");
     wait_for(&capture, 1).await;
     settle().await;
     let bodies = capture.all();
-    assert_eq!(bodies.len(), 1, "exactly one tombstone for the one streamed run: {bodies:?}");
+    assert_eq!(bodies.len(), 1, "exactly one tombstone for the one refused run: {bodies:?}");
     validate(&bodies[0]).unwrap();
     assert_eq!(bodies[0]["kind"], "answer");
-    assert_eq!(bodies[0]["outcome"], "ok");
+    assert_eq!(bodies[0]["outcome"], "refused");
+    assert_eq!(bodies[0]["error_class"], "FORBIDDEN");
     assert_eq!(bodies[0]["retention_class"], "zdr");
-    assert!(bodies[0].get("error_class").is_none(), "{:?}", bodies[0]);
     assert!(!bodies[0].to_string().contains("canary"));
 
     let (status, _) = post(addr, "/v1/answer/stream", json!({ "query": "plain stream" })).await;
@@ -874,70 +876,44 @@ async fn a_zdr_answer_stream_emits_one_ok_tombstone_at_its_end() {
     assert_eq!(capture.all().len(), 1, "a standard stream and a refused request add none: {:?}", capture.all());
 }
 
-/// A ZDR stream that ends in an `error` frame carries the closed class of the error that
-/// ended it, never its text; a ZDR stream with no pipeline behind it is a refused run.
+/// INNH-8: whatever the pipeline behind it would have done (finish, fail, hang, or not exist), a
+/// ZDR answer stream is the same prompt 403 with the same refused tombstone: the refusal comes
+/// before the pipeline and before the deployment's gate, so no provider is ever asked.
 #[tokio::test]
-async fn a_zdr_answer_stream_that_fails_or_is_refused_carries_its_class() {
+async fn a_zdr_answer_stream_never_reaches_the_pipeline_whatever_it_would_do() {
     let (capture, emitter) = capturing();
-    let failing = spawn_answer_edge(Some(emitter.clone()), SearchBehaviour::Fails(ErrorCode::Timeout)).await;
-    let (status, body) = post(failing, "/v1/answer/stream", json!({ "query": "private canary", "zdr": true })).await;
-    assert_eq!(status, 200, "the failure travels as an SSE error frame");
-    assert!(body.contains("event: error"), "{body}");
-    wait_for(&capture, 1).await;
-    settle().await;
-    let bodies = capture.all();
-    assert_eq!(bodies.len(), 1, "{bodies:?}");
-    validate(&bodies[0]).unwrap();
-    assert_eq!(bodies[0]["outcome"], "timeout");
-    assert_eq!(bodies[0]["error_class"], "TIMEOUT");
-    assert!(!bodies[0].to_string().contains("must not travel"), "{:?}", bodies[0]);
-
-    // No pipeline configured: 501, the same refused tombstone as /v1/answer.
+    let mut expected = 0;
+    for behaviour in [
+        SearchBehaviour::Empty,
+        SearchBehaviour::Fails(ErrorCode::Timeout),
+        SearchBehaviour::Hangs,
+    ] {
+        let addr = spawn_answer_edge(Some(emitter.clone()), behaviour).await;
+        let started = std::time::Instant::now();
+        let (status, body) = post(addr, "/v1/answer/stream", json!({ "query": "private canary", "zdr": true })).await;
+        assert_eq!(status, 403, "{body}");
+        assert!(started.elapsed() < Duration::from_secs(20), "a hanging provider was waited for");
+        assert!(!body.contains("must not travel"), "{body}");
+        expected += 1;
+    }
+    // No pipeline configured: the same 403, not the 501 a standard request gets.
     let unconfigured = spawn_edge(Some(emitter)).await;
     let (status, _) = post(unconfigured, "/v1/answer/stream", json!({ "query": "private canary", "zdr": true })).await;
+    assert_eq!(status, 403);
+    let (status, _) = post(unconfigured, "/v1/answer/stream", json!({ "query": "private canary" })).await;
     assert_eq!(status, 501);
-    wait_for(&capture, 2).await;
+    expected += 1;
+    wait_for(&capture, expected).await;
     settle().await;
     let bodies = capture.all();
-    assert_eq!(bodies.len(), 2, "{bodies:?}");
-    validate(&bodies[1]).unwrap();
-    assert_eq!(bodies[1]["kind"], "answer");
-    assert_eq!(bodies[1]["outcome"], "refused");
-    assert_eq!(bodies[1]["error_class"], "UNSUPPORTED");
-}
-
-/// Cancellation: the client goes away while the stream is still running. The server drops
-/// the stream, and dropping it sends one `cancelled` tombstone with no error class.
-#[tokio::test]
-async fn a_zdr_answer_stream_the_client_abandons_is_a_cancelled_tombstone() {
-    let (capture, emitter) = capturing();
-    let addr = spawn_answer_edge(Some(emitter), SearchBehaviour::Hangs).await;
-    let client = reqwest::Client::builder().timeout(Duration::from_millis(400)).build().unwrap();
-    let abandoned = client
-        .post(format!("http://{addr}/v1/answer/stream"))
-        .bearer_auth(BEARER)
-        .json(&json!({ "query": "private canary", "zdr": true }))
-        .send()
-        .await;
-    let outcome_of_read = match abandoned {
-        Ok(response) => response.text().await.map(|_| ()),
-        Err(error) => Err(error),
-    };
-    assert!(outcome_of_read.is_err(), "the client gave up before the stream could finish");
-    for _ in 0..150 {
-        if !capture.all().is_empty() {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(30)).await;
+    assert_eq!(bodies.len(), expected, "{bodies:?}");
+    for body in &bodies {
+        validate(body).unwrap();
+        assert_eq!(body["kind"], "answer");
+        assert_eq!(body["outcome"], "refused");
+        assert_eq!(body["error_class"], "FORBIDDEN");
+        assert!(!body.to_string().contains("canary"), "{body:?}");
     }
-    settle().await;
-    let bodies = capture.all();
-    assert_eq!(bodies.len(), 1, "one tombstone for the abandoned run: {bodies:?}");
-    validate(&bodies[0]).unwrap();
-    assert_eq!(bodies[0]["kind"], "answer");
-    assert_eq!(bodies[0]["outcome"], "cancelled");
-    assert!(bodies[0].get("error_class").is_none(), "{:?}", bodies[0]);
-    assert!(!bodies[0].to_string().contains("canary"));
 }
 
 /// The guard itself, without a server: a drop with nothing recorded is `cancelled`; a

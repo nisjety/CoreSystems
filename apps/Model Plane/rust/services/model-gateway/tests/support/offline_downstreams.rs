@@ -38,6 +38,8 @@ use mp_contracts::model_plane::v1::{
     memory_service_client::MemoryServiceClient,
     message_search_client::MessageSearchClient,
     message_tree_service_client::MessageTreeServiceClient,
+    thread_fork_service_client::ThreadForkServiceClient,
+    attention_service_client::AttentionServiceClient,
     orchestration_core_service_client::OrchestrationCoreServiceClient,
     run_service_client::RunServiceClient, sandbox_manager_client::SandboxManagerClient,
     session_core_client::SessionCoreClient, space_events_client::SpaceEventsClient,
@@ -71,6 +73,8 @@ pub fn offline_state() -> AppState {
     state.session_client = SessionCoreClient::new(offline_channel());
     state.message_search_client = MessageSearchClient::new(offline_channel());
     state.message_tree_client = MessageTreeServiceClient::new(offline_channel());
+    state.thread_fork_client = ThreadForkServiceClient::new(offline_channel());
+    state.attention_client = AttentionServiceClient::new(offline_channel());
     state.learning_client = LearningGovernanceServiceClient::new(offline_channel());
     state.space_events_client = SpaceEventsClient::new(offline_channel());
     state.space_room_read_client = SpaceRoomReadServiceClient::new(offline_channel());

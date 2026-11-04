@@ -159,44 +159,72 @@ impl HostScheduler {
     /// Acquire a slot for `host`. Awaits until target concurrency
     /// drops below the per-host limit. The returned [`SlotPermit`]
     /// releases the slot on drop — including on panic.
+    ///
+    /// A host with a `Crawl-delay` makes the caller wait for its start time
+    /// first and only then takes the concurrency slot, so a request that is
+    /// merely waiting out the delay holds no slot (the slot is scarce: it caps
+    /// real in-flight requests, and a queue of sleepers would hold all of them).
     pub async fn acquire(&self, host: &str) -> SlotPermit {
-        let (semaphore, start_at) = {
+        let ticket = self.reserve_start(host).await;
+        self.acquire_reserved(ticket).await
+    }
+
+    /// Reserve the next start time on `host` without taking a concurrency
+    /// slot. A host with no minimum interval hands out a ticket that is ready
+    /// at once. Wait for the ticket with [`StartTicket::wait`], then take the
+    /// slot with [`HostScheduler::acquire_reserved`]; a caller that holds a
+    /// process-wide permit can wait for the ticket before taking that permit,
+    /// so a `Crawl-delay` wait holds no permit at all.
+    pub async fn reserve_start(&self, host: &str) -> StartTicket {
+        let mut hosts = self.hosts.lock().await;
+        let slot = hosts
+            .entry(host.to_string())
+            .or_insert_with(|| HostSlot::new(self.config.initial_target));
+        slot.last_activity_at = Instant::now();
+        // A host with a minimum interval hands out start times under the
+        // lock, one interval apart; the wait itself happens outside the lock.
+        // A zero interval takes no start time at all.
+        let start_at = if slot.min_interval.is_zero() {
+            None
+        } else {
+            let now = tokio::time::Instant::now();
+            let start = slot.next_start.map_or(now, |next| next.max(now));
+            slot.next_start = Some(start + slot.min_interval);
+            Some(start)
+        };
+        StartTicket {
+            host: host.to_string(),
+            start_at,
+        }
+    }
+
+    /// Take the concurrency slot for a ticket from
+    /// [`HostScheduler::reserve_start`]. Waits out the ticket's start time
+    /// first (no slot is held while it does), then awaits a free slot.
+    pub async fn acquire_reserved(&self, ticket: StartTicket) -> SlotPermit {
+        ticket.wait().await;
+        let host = ticket.host;
+        let semaphore = {
             // Take the lock just long enough to look up / install the
             // host slot + clone its semaphore Arc. The actual acquire
             // happens OUTSIDE the lock so one slow host can't block
             // the scheduler for every other host.
             let mut hosts = self.hosts.lock().await;
             let slot = hosts
-                .entry(host.to_string())
+                .entry(host.clone())
                 .or_insert_with(|| HostSlot::new(self.config.initial_target));
             slot.last_activity_at = Instant::now();
-            // A host with a minimum interval hands out start times under the
-            // lock, one interval apart; the wait itself happens below, outside
-            // the lock. A zero interval takes no start time at all.
-            let start_at = if slot.min_interval.is_zero() {
-                None
-            } else {
-                let now = tokio::time::Instant::now();
-                let start = slot.next_start.map_or(now, |next| next.max(now));
-                slot.next_start = Some(start + slot.min_interval);
-                Some(start)
-            };
-            (slot.semaphore.clone(), start_at)
+            slot.semaphore.clone()
         };
 
         let permit = semaphore
             .acquire_owned()
             .await
             .expect("semaphore is never closed by the scheduler");
-        // The permit is held while waiting for the start time: the request owns
-        // its slot, and the interval is counted from start to start.
-        if let Some(start) = start_at {
-            tokio::time::sleep_until(start).await;
-        }
 
         SlotPermit {
             permit: Some(permit),
-            host: host.to_string(),
+            host,
             scheduler: Some(self.clone()),
             acquired_at: Instant::now(),
         }
@@ -350,6 +378,29 @@ impl HostScheduler {
     }
 }
 
+/// A reserved request start on one host. Holds no concurrency slot.
+#[derive(Debug)]
+pub struct StartTicket {
+    host: String,
+    /// `None` when the host had no minimum interval: ready at once.
+    start_at: Option<tokio::time::Instant>,
+}
+
+impl StartTicket {
+    /// The host the ticket was reserved on.
+    pub fn host(&self) -> &str {
+        &self.host
+    }
+
+    /// Wait until the reserved start time. Returns at once when there is no
+    /// delay or the time has passed.
+    pub async fn wait(&self) {
+        if let Some(start) = self.start_at {
+            tokio::time::sleep_until(start).await;
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct HostStats {
     pub target_concurrency: u32,
@@ -482,6 +533,92 @@ mod tests {
         // Setting zero on a host that was never seen creates no slot.
         s.set_min_interval("never.com", Duration::ZERO).await;
         assert!(s.stats("never.com").await.is_none());
+    }
+
+    /// Free slots on a host's semaphore, read from the test module.
+    async fn free_slots(s: &HostScheduler, host: &str) -> usize {
+        s.hosts.lock().await.get(host).unwrap().semaphore.available_permits()
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_crawl_delay_wait_holds_no_concurrency_slot() {
+        let s = HostScheduler::new(test_config());
+        s.set_min_interval("a.com", Duration::from_secs(30)).await;
+        let first = s.acquire("a.com").await;
+        let before = free_slots(&s, "a.com").await;
+        // A second request waits out the 30 s delay. While it sleeps it must not be holding
+        // one of the host's slots.
+        let waiter = {
+            let s = s.clone();
+            tokio::spawn(async move { s.acquire("a.com").await })
+        };
+        sleep(TokioDuration::from_secs(10)).await;
+        assert!(!waiter.is_finished(), "still waiting for its start time");
+        assert_eq!(free_slots(&s, "a.com").await, before, "the sleeper holds no slot");
+        sleep(TokioDuration::from_secs(21)).await;
+        let second = waiter.await.unwrap();
+        assert_eq!(free_slots(&s, "a.com").await, before - 1);
+        drop((first, second));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn queued_requests_keep_their_spacing_with_a_single_slot() {
+        // One slot, a 60 s delay and three queued requests: the starts stay 60 s apart and the
+        // sleepers do not queue behind each other for the only slot.
+        let cfg = SchedulerConfig {
+            initial_target: 1,
+            max_target: 1,
+            ..test_config()
+        };
+        let s = HostScheduler::new(cfg);
+        s.set_min_interval("a.com", Duration::from_secs(60)).await;
+        let t0 = tokio::time::Instant::now();
+        let mut handles = Vec::new();
+        for _ in 0..3 {
+            let s = s.clone();
+            handles.push(tokio::spawn(async move {
+                let permit = s.acquire("a.com").await;
+                let at = tokio::time::Instant::now() - t0;
+                drop(permit);
+                at
+            }));
+        }
+        let mut starts = Vec::new();
+        for h in handles {
+            starts.push(h.await.unwrap());
+        }
+        starts.sort();
+        assert_eq!(starts, vec![Duration::ZERO, Duration::from_secs(60), Duration::from_secs(120)]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_ticket_can_be_waited_for_before_any_other_permit_is_taken() {
+        let s = HostScheduler::new(test_config());
+        s.set_min_interval("a.com", Duration::from_secs(5)).await;
+        let t0 = tokio::time::Instant::now();
+        let first = s.reserve_start("a.com").await;
+        let second = s.reserve_start("a.com").await;
+        assert_eq!(first.host(), "a.com");
+        // Reserving takes no slot.
+        assert_eq!(free_slots(&s, "a.com").await, 4);
+        first.wait().await;
+        assert_eq!(tokio::time::Instant::now() - t0, Duration::ZERO);
+        second.wait().await;
+        assert_eq!(tokio::time::Instant::now() - t0, Duration::from_secs(5));
+        // The wait is spent; taking the slot adds no further delay.
+        let permit = s.acquire_reserved(second).await;
+        assert_eq!(tokio::time::Instant::now() - t0, Duration::from_secs(5));
+        assert_eq!(free_slots(&s, "a.com").await, 3);
+        drop(permit);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_host_without_a_delay_gets_a_ticket_that_is_ready_at_once() {
+        let s = HostScheduler::new(test_config());
+        let t0 = tokio::time::Instant::now();
+        let ticket = s.reserve_start("plain.com").await;
+        ticket.wait().await;
+        assert_eq!(tokio::time::Instant::now() - t0, Duration::ZERO);
     }
 
     #[tokio::test]

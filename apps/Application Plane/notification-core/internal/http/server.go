@@ -89,6 +89,12 @@ func newRouter(handler *Handler, verifier *delegation.Verifier) *gin.Engine {
 		preferenceRoutes.GET("", handler.ListPreferences)
 		preferenceRoutes.PUT("/:eventType/:channel", handler.SetPreference)
 
+		// Web Push (WS16-S6): the delegated user's own browser endpoints only.
+		pushRoutes := gated.Group("/push", requireScopedIdentityHeaders(), requireActiveMembership(handler.recipients))
+		pushRoutes.GET("/config", handler.PushConfig)
+		pushRoutes.POST("/subscriptions", handler.CreatePushSubscription)
+		pushRoutes.DELETE("/subscriptions/:id", handler.DeletePushSubscription)
+
 		// Channel configs (admin-controlled — internal-only)
 		channelRoutes := gated.Group("/channels/config", requireOrganizationHeader(), requireAdminRole(), requireActiveMembership(handler.recipients))
 		channelRoutes.GET("", handler.ListChannelConfigs)

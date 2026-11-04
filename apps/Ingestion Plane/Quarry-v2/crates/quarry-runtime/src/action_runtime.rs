@@ -1344,3 +1344,487 @@ mod tests {
         }
     }
 }
+
+/// W3-E3.4-4: the download admission policy (default-deny, caps, type allow-list).
+///
+/// A download is admitted only on the single-use `download_ref` path: the agent names an
+/// exact target and carries a one-shot BrowserBroker approval (the edge's sensitive
+/// approval admission spends that grant). Everything else a page starts is an unsolicited
+/// download and is refused here; the Chromium driver quarantines and drops it (E3.4-6).
+///
+/// The edge applies this policy while `QUARRY_EDGE__DOWNLOADS` is on (default off). With
+/// the flag off the edge runs no part of it and the earlier behaviour holds.
+pub mod downloads {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    use std::time::{Duration, Instant};
+
+    use quarry_core::error::{ErrorCode, QuarryError, QuarryResult};
+
+    /// The most one download may be. The Chromium driver refuses a larger file before
+    /// it is read (`MAX_GOVERNED_DOWNLOAD_BYTES`); the policy checks it again.
+    pub const MAX_DOWNLOAD_BYTES: u64 = 25 * 1024 * 1024;
+
+    /// The most one browser session (one agent run) may download in total.
+    pub const DEFAULT_SESSION_MAX_BYTES: u64 = 100 * 1024 * 1024;
+
+    /// A session's ledger row is dropped after this long without a download, so a run
+    /// that ended without its close path releasing it does not hold memory forever.
+    pub const SESSION_IDLE_TTL: Duration = Duration::from_secs(6 * 60 * 60);
+
+    /// The object-store kind the observation runner stores an admitted download under.
+    pub const DOWNLOAD_ARTIFACT_KIND: &str = "browser_download";
+
+    /// How a download began.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum DownloadOrigin {
+        /// A `download_ref` / `frame_download_ref` step with its single-use approval.
+        DownloadRef,
+        /// Anything else: a page script, a navigation answered with
+        /// `Content-Disposition: attachment`, a click that was not a `download_ref`.
+        Unsolicited,
+    }
+
+    /// The admitted download types. The allow-list: PDF, plain text, Markdown, CSV.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum DownloadType {
+        Pdf,
+        PlainText,
+        Markdown,
+        Csv,
+    }
+
+    impl DownloadType {
+        pub fn as_str(self) -> &'static str {
+            match self {
+                Self::Pdf => "pdf",
+                Self::PlainText => "text",
+                Self::Markdown => "markdown",
+                Self::Csv => "csv",
+            }
+        }
+
+        pub fn mime(self) -> &'static str {
+            match self {
+                Self::Pdf => "application/pdf",
+                Self::PlainText => "text/plain",
+                Self::Markdown => "text/markdown",
+                Self::Csv => "text/csv",
+            }
+        }
+    }
+
+    /// Office extensions refused by name, whatever the bytes say.
+    const OFFICE_EXTENSIONS: &[&str] = &[
+        "doc", "docx", "docm", "dot", "dotx", "xls", "xlsx", "xlsm", "xlsb", "xlt", "xltx",
+        "ppt", "pptx", "pptm", "pps", "ppsx", "odt", "ods", "odp", "rtf", "vsd", "vsdx",
+    ];
+
+    fn refused(code: ErrorCode, reason: &'static str) -> QuarryError {
+        QuarryError::new(code, reason)
+    }
+
+    /// Default-deny: an unsolicited download is never admitted.
+    pub fn admit_origin(origin: DownloadOrigin) -> QuarryResult<()> {
+        match origin {
+            DownloadOrigin::DownloadRef => Ok(()),
+            DownloadOrigin::Unsolicited => Err(refused(
+                ErrorCode::SecurityBlocked,
+                "unsolicited browser downloads are refused; use download_ref with an approval",
+            )),
+        }
+    }
+
+    /// Zero data retention keeps no bytes, so it admits no download at all.
+    pub fn admit_zdr(zdr_active: bool) -> QuarryResult<()> {
+        if zdr_active {
+            return Err(refused(
+                ErrorCode::SecurityBlocked,
+                "browser downloads are refused in zero-data-retention mode",
+            ));
+        }
+        Ok(())
+    }
+
+    fn extension_of(filename: Option<&str>) -> String {
+        filename
+            .and_then(|name| name.rsplit_once('.'))
+            .map(|(_, extension)| extension.trim().to_ascii_lowercase())
+            .unwrap_or_default()
+    }
+
+    fn looks_like_html(text: &str) -> bool {
+        let head: String = text
+            .trim_start_matches('\u{feff}')
+            .trim_start()
+            .chars()
+            .take(64)
+            .collect::<String>()
+            .to_ascii_lowercase();
+        head.starts_with("<!doctype html")
+            || head.starts_with("<html")
+            || head.starts_with("<head")
+            || head.starts_with("<body")
+            || head.starts_with("<script")
+            || head.starts_with("<svg")
+            || head.starts_with("<?xml")
+    }
+
+    /// The type check. `filename` is the page's suggested name (an untrusted hint, or
+    /// `None` when only the bytes are at hand); the bytes decide.
+    ///
+    /// Refused: Office documents (by name, and by their OLE or ZIP container), every
+    /// executable container, HTML/SVG/XML (a page comes through the page path), images,
+    /// archives, and any file whose bytes do not match an allow-listed type.
+    pub fn admit_type(filename: Option<&str>, bytes: &[u8]) -> QuarryResult<DownloadType> {
+        if bytes.len() as u64 > MAX_DOWNLOAD_BYTES {
+            return Err(refused(
+                ErrorCode::BadRequest,
+                "browser download exceeds the per-file size limit",
+            ));
+        }
+        let extension = extension_of(filename);
+        let ole_container = bytes.starts_with(&[0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]);
+        let zip_container = bytes.starts_with(b"PK\x03\x04");
+        if OFFICE_EXTENSIONS.contains(&extension.as_str()) || ole_container || bytes.starts_with(b"{\\rtf") {
+            return Err(refused(
+                ErrorCode::SecurityBlocked,
+                "office documents are not admitted as browser downloads",
+            ));
+        }
+        let executable = bytes.starts_with(b"MZ")
+            || bytes.starts_with(b"\x7fELF")
+            || bytes.starts_with(&[0xcf, 0xfa, 0xed, 0xfe])
+            || bytes.starts_with(&[0xfe, 0xed, 0xfa, 0xcf])
+            || bytes.starts_with(&[0xca, 0xfe, 0xba, 0xbe])
+            || bytes.starts_with(b"#!");
+        if executable {
+            return Err(refused(
+                ErrorCode::SecurityBlocked,
+                "executable content is not admitted as a browser download",
+            ));
+        }
+        if zip_container {
+            // An OOXML/ODF document is a ZIP; so is every other archive. Neither is admitted.
+            return Err(refused(
+                ErrorCode::SecurityBlocked,
+                "archives and office documents are not admitted as browser downloads",
+            ));
+        }
+        if bytes.starts_with(b"%PDF-") {
+            if !extension.is_empty() && extension != "pdf" {
+                return Err(refused(
+                    ErrorCode::SecurityBlocked,
+                    "browser download name does not match its PDF bytes",
+                ));
+            }
+            return Ok(DownloadType::Pdf);
+        }
+        if extension == "pdf" {
+            return Err(refused(
+                ErrorCode::SecurityBlocked,
+                "browser download named .pdf is not a PDF",
+            ));
+        }
+        if bytes.is_empty() || bytes.contains(&0) {
+            return Err(refused(
+                ErrorCode::SecurityBlocked,
+                "browser download bytes do not match an admitted type",
+            ));
+        }
+        let Ok(text) = std::str::from_utf8(bytes) else {
+            return Err(refused(
+                ErrorCode::SecurityBlocked,
+                "browser download bytes do not match an admitted type",
+            ));
+        };
+        if looks_like_html(text) {
+            return Err(refused(
+                ErrorCode::SecurityBlocked,
+                "html, svg and xml are not admitted as browser downloads",
+            ));
+        }
+        match extension.as_str() {
+            "" | "txt" | "text" | "log" => Ok(DownloadType::PlainText),
+            "md" | "markdown" => Ok(DownloadType::Markdown),
+            "csv" => Ok(DownloadType::Csv),
+            _ => Err(refused(
+                ErrorCode::SecurityBlocked,
+                "browser download type is not on the allow-list (pdf, text, markdown, csv)",
+            )),
+        }
+    }
+
+    /// Whether an object key names an artifact stored as a browser download. An empty
+    /// key (a backend that does not report keys) is not proof either way: the caller
+    /// then relies on the observation runner's ordering.
+    pub fn is_download_artifact_key(key: &str) -> bool {
+        key.is_empty() || key.contains(DOWNLOAD_ARTIFACT_KIND)
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    struct SessionRow {
+        bytes: u64,
+        downloads: u32,
+        last_used: Instant,
+    }
+
+    /// The per-session byte ledger: every admitted download is charged to its session,
+    /// and a download that would pass the session cap is refused. Rows are released by
+    /// [`SessionDownloadLedger::release`] (run close) or dropped after
+    /// [`SESSION_IDLE_TTL`] without a download (cleanup).
+    #[derive(Debug)]
+    pub struct SessionDownloadLedger {
+        max_session_bytes: u64,
+        idle_ttl: Duration,
+        rows: Mutex<HashMap<String, SessionRow>>,
+    }
+
+    impl SessionDownloadLedger {
+        pub fn new(max_session_bytes: u64, idle_ttl: Duration) -> Self {
+            Self {
+                max_session_bytes,
+                idle_ttl,
+                rows: Mutex::new(HashMap::new()),
+            }
+        }
+
+        pub fn max_session_bytes(&self) -> u64 {
+            self.max_session_bytes
+        }
+
+        fn rows(&self) -> std::sync::MutexGuard<'_, HashMap<String, SessionRow>> {
+            self.rows.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+        }
+
+        fn sweep(rows: &mut HashMap<String, SessionRow>, now: Instant, ttl: Duration) {
+            rows.retain(|_, row| now.saturating_duration_since(row.last_used) < ttl);
+        }
+
+        /// Refuses a new download when the session has already spent its cap.
+        pub fn check_open(&self, session: &str) -> QuarryResult<()> {
+            self.check_open_at(session, Instant::now())
+        }
+
+        pub fn check_open_at(&self, session: &str, now: Instant) -> QuarryResult<()> {
+            let mut rows = self.rows();
+            Self::sweep(&mut rows, now, self.idle_ttl);
+            let used = rows.get(session).map_or(0, |row| row.bytes);
+            if used >= self.max_session_bytes {
+                return Err(refused(
+                    ErrorCode::BudgetExhausted,
+                    "this session has reached its download byte limit",
+                )
+                .with_details(serde_json::json!({
+                    "dimension": "download_bytes",
+                    "used_bytes": used,
+                    "max_bytes": self.max_session_bytes,
+                })));
+            }
+            Ok(())
+        }
+
+        /// Charges `bytes` to the session, or refuses (and charges nothing) when that
+        /// would pass the cap.
+        pub fn charge(&self, session: &str, bytes: u64) -> QuarryResult<u64> {
+            self.charge_at(session, bytes, Instant::now())
+        }
+
+        pub fn charge_at(&self, session: &str, bytes: u64, now: Instant) -> QuarryResult<u64> {
+            let mut rows = self.rows();
+            Self::sweep(&mut rows, now, self.idle_ttl);
+            let used = rows.get(session).map_or(0, |row| row.bytes);
+            let total = used.saturating_add(bytes);
+            if total > self.max_session_bytes {
+                return Err(refused(
+                    ErrorCode::BudgetExhausted,
+                    "this download would pass the session's download byte limit",
+                )
+                .with_details(serde_json::json!({
+                    "dimension": "download_bytes",
+                    "used_bytes": used,
+                    "download_bytes": bytes,
+                    "max_bytes": self.max_session_bytes,
+                })));
+            }
+            let row = rows.entry(session.to_owned()).or_insert(SessionRow {
+                bytes: 0,
+                downloads: 0,
+                last_used: now,
+            });
+            row.bytes = total;
+            row.downloads = row.downloads.saturating_add(1);
+            row.last_used = now;
+            Ok(total)
+        }
+
+        /// The bytes a session has downloaded so far.
+        pub fn used(&self, session: &str) -> u64 {
+            self.rows().get(session).map_or(0, |row| row.bytes)
+        }
+
+        /// Cleanup: forget a session (its run closed or was released).
+        pub fn release(&self, session: &str) {
+            self.rows().remove(session);
+        }
+
+        /// Cleanup: drop every row idle past the TTL. Returns how many were dropped.
+        pub fn sweep_idle(&self, now: Instant) -> usize {
+            let mut rows = self.rows();
+            let before = rows.len();
+            Self::sweep(&mut rows, now, self.idle_ttl);
+            before - rows.len()
+        }
+
+        pub fn len(&self) -> usize {
+            self.rows().len()
+        }
+
+        pub fn is_empty(&self) -> bool {
+            self.len() == 0
+        }
+    }
+
+    /// The process-wide ledger the edge charges. The cap is read once, from
+    /// `QUARRY_EDGE__DOWNLOADS_SESSION_MAX_BYTES` (default 100 MiB).
+    pub fn session_ledger() -> &'static SessionDownloadLedger {
+        static LEDGER: OnceLock<SessionDownloadLedger> = OnceLock::new();
+        LEDGER.get_or_init(|| {
+            let max = std::env::var("QUARRY_EDGE__DOWNLOADS_SESSION_MAX_BYTES")
+                .ok()
+                .and_then(|raw| raw.trim().parse::<u64>().ok())
+                .filter(|max| *max > 0)
+                .unwrap_or(DEFAULT_SESSION_MAX_BYTES);
+            SessionDownloadLedger::new(max, SESSION_IDLE_TTL)
+        })
+    }
+
+    /// The whole post-download admission: origin, ZDR, type, then the session charge.
+    pub fn admit_download(
+        ledger: &SessionDownloadLedger,
+        session: &str,
+        origin: DownloadOrigin,
+        zdr_active: bool,
+        filename: Option<&str>,
+        bytes: &[u8],
+    ) -> QuarryResult<DownloadType> {
+        admit_origin(origin)?;
+        admit_zdr(zdr_active)?;
+        let kind = admit_type(filename, bytes)?;
+        ledger.charge(session, bytes.len() as u64)?;
+        Ok(kind)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        fn ledger(max: u64) -> SessionDownloadLedger {
+            SessionDownloadLedger::new(max, Duration::from_secs(60))
+        }
+
+        #[test]
+        fn unsolicited_downloads_are_refused_by_default() {
+            let err = admit_origin(DownloadOrigin::Unsolicited).unwrap_err();
+            assert_eq!(err.code, ErrorCode::SecurityBlocked);
+            assert!(admit_origin(DownloadOrigin::DownloadRef).is_ok());
+            let l = ledger(1024);
+            let err = admit_download(&l, "s", DownloadOrigin::Unsolicited, false, Some("a.pdf"), b"%PDF-1.7")
+                .unwrap_err();
+            assert_eq!(err.code, ErrorCode::SecurityBlocked);
+            assert_eq!(l.used("s"), 0, "a refused download is never charged");
+        }
+
+        #[test]
+        fn zdr_refuses_every_download() {
+            let l = ledger(1024);
+            let err = admit_download(&l, "s", DownloadOrigin::DownloadRef, true, Some("a.pdf"), b"%PDF-1.7")
+                .unwrap_err();
+            assert_eq!(err.code, ErrorCode::SecurityBlocked);
+            assert_eq!(l.used("s"), 0);
+        }
+
+        #[test]
+        fn allow_listed_types_are_admitted() {
+            assert_eq!(admit_type(Some("r.pdf"), b"%PDF-1.7\n").unwrap(), DownloadType::Pdf);
+            assert_eq!(admit_type(None, b"%PDF-1.4").unwrap(), DownloadType::Pdf);
+            assert_eq!(admit_type(Some("n.txt"), b"hello").unwrap(), DownloadType::PlainText);
+            assert_eq!(admit_type(None, b"hello").unwrap(), DownloadType::PlainText);
+            assert_eq!(admit_type(Some("README.md"), b"# t").unwrap(), DownloadType::Markdown);
+            assert_eq!(admit_type(Some("d.CSV"), b"a,b\n1,2").unwrap(), DownloadType::Csv);
+        }
+
+        #[test]
+        fn office_documents_are_refused() {
+            for name in ["a.docx", "a.xlsx", "a.pptx", "a.doc", "a.odt", "a.rtf"] {
+                let err = admit_type(Some(name), b"plain words").unwrap_err();
+                assert_eq!(err.code, ErrorCode::SecurityBlocked, "{name}");
+            }
+            // By bytes, under an innocent name: an OLE container and an OOXML zip.
+            let ole: [u8; 10] = [0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1, 0, 0];
+            assert!(admit_type(Some("a.txt"), &ole).is_err());
+            assert!(admit_type(Some("a.txt"), b"PK\x03\x04[Content_Types].xml").is_err());
+            assert!(admit_type(None, b"{\\rtf1\\ansi").is_err());
+        }
+
+        #[test]
+        fn other_types_are_refused() {
+            assert!(admit_type(Some("a.exe"), b"MZ\x90\x00").is_err());
+            assert!(admit_type(Some("a.txt"), b"\x7fELF").is_err());
+            assert!(admit_type(Some("a.sh"), b"#!/bin/sh\n").is_err());
+            assert!(admit_type(Some("a.png"), b"\x89PNG\r\n\x1a\n").is_err());
+            assert!(admit_type(Some("a.html"), b"<!DOCTYPE html><p>x").is_err());
+            assert!(admit_type(Some("a.txt"), b"  <html><body>").is_err());
+            assert!(admit_type(Some("a.svg"), b"<svg xmlns=''/>").is_err());
+            assert!(admit_type(Some("a.json"), b"{}").is_err());
+            assert!(admit_type(Some("a.pdf"), b"not a pdf").is_err());
+            assert!(admit_type(Some("a.txt"), b"%PDF-1.7").is_err());
+            assert!(admit_type(Some("a.txt"), b"bin\0ary").is_err());
+            assert!(admit_type(Some("a.txt"), b"").is_err());
+        }
+
+        #[test]
+        fn per_file_cap_is_enforced() {
+            let big = vec![b'a'; (MAX_DOWNLOAD_BYTES + 1) as usize];
+            let err = admit_type(Some("a.txt"), &big).unwrap_err();
+            assert_eq!(err.code, ErrorCode::BadRequest);
+        }
+
+        #[test]
+        fn session_byte_cap_is_enforced_and_charges_only_admitted_bytes() {
+            let l = ledger(10);
+            assert_eq!(l.charge("s", 6).unwrap(), 6);
+            let err = l.charge("s", 5).unwrap_err();
+            assert_eq!(err.code, ErrorCode::BudgetExhausted);
+            assert_eq!(l.used("s"), 6, "the refused download is not charged");
+            assert_eq!(l.charge("s", 4).unwrap(), 10);
+            assert_eq!(l.check_open("s").unwrap_err().code, ErrorCode::BudgetExhausted);
+            // Another session has its own cap.
+            assert!(l.check_open("t").is_ok());
+            assert_eq!(l.charge("t", 10).unwrap(), 10);
+        }
+
+        #[test]
+        fn release_and_idle_sweep_clean_up_sessions() {
+            let l = ledger(100);
+            let start = Instant::now();
+            l.charge_at("a", 5, start).unwrap();
+            l.charge_at("b", 5, start).unwrap();
+            l.release("a");
+            assert_eq!(l.used("a"), 0);
+            assert_eq!(l.len(), 1);
+            assert_eq!(l.sweep_idle(start + Duration::from_secs(61)), 1);
+            assert!(l.is_empty());
+            // A swept session starts from zero again.
+            l.charge_at("b", 5, start + Duration::from_secs(62)).unwrap();
+            assert_eq!(l.used("b"), 5);
+        }
+
+        #[test]
+        fn download_artifact_keys() {
+            assert!(is_download_artifact_key("org/run/browser_download/abc"));
+            assert!(is_download_artifact_key(""));
+            assert!(!is_download_artifact_key("org/run/screenshot/abc"));
+        }
+    }
+}

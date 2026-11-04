@@ -34,6 +34,27 @@ pub struct ParsedDocument {
     pub truncated: bool,
 }
 
+/// Page facts of a PDF, read in the same bounded parse as its text (INNH-11).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PdfPageSummary {
+    /// Pages in the document.
+    pub pages: u32,
+    /// Pages that carry no text layer: scanned (an image and no text) or empty.
+    pub pages_without_text: u32,
+}
+
+/// A parsed document with the page facts of a PDF. `pdf` is `None` for a DOCX and
+/// whenever the page classification itself could not be read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParsedDocumentInfo {
+    pub document: ParsedDocument,
+    pub pdf: Option<PdfPageSummary>,
+}
+
+/// A caller that gives up waiting for a parse slot after its own queue timeout is
+/// told to come back after this many seconds.
+pub const PARSER_BUSY_RETRY_AFTER_S: u64 = 5;
+
 fn permits() -> &'static Arc<Semaphore> {
     static PERMITS: OnceLock<Arc<Semaphore>> = OnceLock::new();
     PERMITS.get_or_init(|| Arc::new(Semaphore::new(DOC_PARSE_CONCURRENCY)))
@@ -59,6 +80,29 @@ pub async fn parse_document(kind: ContentKind, body: Vec<u8>) -> QuarryResult<Pa
     }
 }
 
+/// E3.6-6b integration placeholder for the E3.6-6a imports-core extract client
+/// (`POST /api/v1/import/extract`), which is not on any branch yet. Until 6a
+/// lands it refuses every body with the typed 415 the Office kinds already get,
+/// so `QUARRY_EDGE__OFFICE_VIA_IMPORTS=on` changes nothing visible. E3.6-6a
+/// replaces this body (same name and signature).
+pub async fn extract_office_via_imports(
+    kind: ContentKind,
+    body: Vec<u8>,
+) -> QuarryResult<ParsedDocument> {
+    let _ = body;
+    Err(QuarryError::new(
+        ErrorCode::UnsupportedMedia,
+        format!(
+            "the {} could not be read: the imports extract client is not available",
+            kind.label()
+        ),
+    )
+    .with_details(serde_json::json!({
+        "reason": "imports_client_unavailable",
+        "route": "imports",
+    })))
+}
+
 /// Parse with an explicit backend and deadline: what [`parse_document`] does,
 /// for callers (and tests) that bring their own.
 pub async fn parse_document_with(
@@ -77,6 +121,101 @@ pub async fn parse_document_with(
             })
             .await
         }
+    }
+}
+
+/// As [`parse_document`], and the page facts of a PDF (INNH-11, `POST /v1/parse`).
+/// `queue_timeout` bounds the wait for a parse slot: past it the answer is
+/// `RATE_LIMITED` with `details.retry_after_seconds`, not a long hang.
+pub async fn parse_document_info(
+    kind: ContentKind,
+    body: Vec<u8>,
+    queue_timeout: Duration,
+) -> QuarryResult<ParsedDocumentInfo> {
+    parse_document_info_with(parse_backend(), kind, body, DOC_PARSE_TIMEOUT, queue_timeout).await
+}
+
+/// [`parse_document_info`] with an explicit backend and deadline.
+pub async fn parse_document_info_with(
+    backend: &ParseBackend,
+    kind: ContentKind,
+    body: Vec<u8>,
+    deadline: Duration,
+    queue_timeout: Duration,
+) -> QuarryResult<ParsedDocumentInfo> {
+    match backend {
+        ParseBackend::Process(process) => {
+            parse_in_child_info(
+                process,
+                kind,
+                body,
+                permits().clone(),
+                deadline,
+                true,
+                Some(queue_timeout),
+            )
+            .await
+        }
+        ParseBackend::InProcess => {
+            parse_with_info(
+                kind,
+                body,
+                permits().clone(),
+                deadline,
+                Some(queue_timeout),
+                |kind, body| extract_info(kind, body),
+            )
+            .await
+        }
+    }
+}
+
+/// Text and, for a PDF, the page classification. A classification that cannot be
+/// read leaves the summary out; it never fails a parse that produced text.
+fn extract_info(
+    kind: ContentKind,
+    body: &[u8],
+) -> QuarryResult<(String, Option<PdfPageSummary>)> {
+    let text = extract(kind, body)?;
+    let summary = if kind == ContentKind::Pdf {
+        quarry_transform::pdf::classify_pages(body).ok().map(|pages| PdfPageSummary {
+            pages: pages.len() as u32,
+            pages_without_text: pages
+                .iter()
+                .filter(|page| page.kind != quarry_transform::pdf::PageKind::Text)
+                .count() as u32,
+        })
+    } else {
+        None
+    };
+    Ok((text, summary))
+}
+
+/// Wait for a parse slot. With a `queue_timeout` shorter than the deadline, running
+/// out of that wait is the parser being busy (a 429 to retry), not a timeout.
+async fn acquire_slot(
+    permits: Arc<Semaphore>,
+    kind: ContentKind,
+    deadline: Duration,
+    queue_timeout: Option<Duration>,
+) -> QuarryResult<tokio::sync::OwnedSemaphorePermit> {
+    let busy = queue_timeout.filter(|queue| *queue < deadline);
+    let wait = busy.unwrap_or(deadline);
+    match tokio::time::timeout(wait, permits.acquire_owned()).await {
+        Ok(Ok(permit)) => Ok(permit),
+        Ok(Err(_)) => Err(QuarryError::new(
+            ErrorCode::Internal,
+            "document parser is shut down",
+        )),
+        Err(_) if busy.is_some() => Err(QuarryError::new(
+            ErrorCode::RateLimited,
+            "the document parser is busy, try again shortly",
+        )
+        .with_details(serde_json::json!({
+            "reason": "parser_busy",
+            "retry_after_seconds": PARSER_BUSY_RETRY_AFTER_S,
+        }))),
+        Err(_) => Err(timeout_error(kind)),
     }
 }
 
@@ -99,18 +238,33 @@ pub(crate) async fn parse_with(
     deadline: Duration,
     extractor: impl FnOnce(ContentKind, &[u8]) -> QuarryResult<String> + Send + 'static,
 ) -> QuarryResult<ParsedDocument> {
+    parse_with_info(kind, body, permits, deadline, None, move |kind, body| {
+        extractor(kind, body).map(|text| (text, None))
+    })
+    .await
+    .map(|info| info.document)
+}
+
+/// [`parse_with`] with the page facts and an optional queue timeout.
+pub(crate) async fn parse_with_info(
+    kind: ContentKind,
+    body: Vec<u8>,
+    permits: Arc<Semaphore>,
+    deadline: Duration,
+    queue_timeout: Option<Duration>,
+    extractor: impl FnOnce(ContentKind, &[u8]) -> QuarryResult<(String, Option<PdfPageSummary>)>
+        + Send
+        + 'static,
+) -> QuarryResult<ParsedDocumentInfo> {
     let started = tokio::time::Instant::now();
-    let permit = tokio::time::timeout(deadline, permits.acquire_owned())
-        .await
-        .map_err(|_| timeout_error(kind))?
-        .map_err(|_| QuarryError::new(ErrorCode::Internal, "document parser is shut down"))?;
+    let permit = acquire_slot(permits, kind, deadline, queue_timeout).await?;
     let remaining = deadline.saturating_sub(started.elapsed());
     let handle = tokio::task::spawn_blocking(move || {
         // Held until the parse thread ends, even if the caller gave up.
         let _permit = permit;
         extractor(kind, &body)
     });
-    let text = match tokio::time::timeout(remaining, handle).await {
+    let (text, pdf) = match tokio::time::timeout(remaining, handle).await {
         Err(_) => return Err(timeout_error(kind)),
         Ok(Err(join)) => {
             return Err(QuarryError::new(
@@ -122,7 +276,10 @@ pub(crate) async fn parse_with(
     };
     let (text, truncated) =
         quarry_core::scrape::truncate_on_char_boundary(&text, MAX_DOC_TEXT_BYTES);
-    Ok(ParsedDocument { text, truncated })
+    Ok(ParsedDocumentInfo {
+        document: ParsedDocument { text, truncated },
+        pdf,
+    })
 }
 
 fn timeout_error(kind: ContentKind) -> QuarryError {
@@ -280,19 +437,27 @@ pub fn parse_backend() -> &'static ParseBackend {
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum ChildReply {
-    Ok { text: String, truncated: bool },
+    Ok {
+        text: String,
+        truncated: bool,
+        /// Present when the caller asked for the page facts of a PDF (`pdf-pages`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pdf: Option<PdfPageSummary>,
+    },
     Error { code: String, message: String },
 }
 
 /// The child side: read the document from stdin, write one JSON line on stdout,
 /// and return the process exit code (0 parsed, 2 not parsed). No sockets, no
-/// configuration, no async runtime.
+/// configuration, no async runtime. The kind is `pdf`, `docx`, or `pdf-pages`
+/// (a PDF whose page classification is also answered, INNH-11).
 pub fn run_child(kind: Option<&str>) -> i32 {
     use std::io::{Read, Write};
 
-    let kind = match kind {
-        Some("pdf") => ContentKind::Pdf,
-        Some("docx") => ContentKind::Docx,
+    let (kind, with_pages) = match kind {
+        Some("pdf") => (ContentKind::Pdf, false),
+        Some("pdf-pages") => (ContentKind::Pdf, true),
+        Some("docx") => (ContentKind::Docx, false),
         _ => return 2,
     };
     let mut body = Vec::new();
@@ -305,11 +470,15 @@ pub fn run_child(kind: Option<&str>) -> i32 {
     {
         return 2;
     }
-    let reply = match extract(kind, &body) {
-        Ok(text) => {
+    let reply = match extract_child(kind, with_pages, &body) {
+        Ok((text, pdf)) => {
             let (text, truncated) =
                 quarry_core::scrape::truncate_on_char_boundary(&text, MAX_DOC_TEXT_BYTES);
-            ChildReply::Ok { text, truncated }
+            ChildReply::Ok {
+                text,
+                truncated,
+                pdf,
+            }
         }
         Err(error) => ChildReply::Error {
             code: error.code.wire_name().to_owned(),
@@ -330,6 +499,18 @@ pub fn run_child(kind: Option<&str>) -> i32 {
     }
 }
 
+fn extract_child(
+    kind: ContentKind,
+    with_pages: bool,
+    body: &[u8],
+) -> QuarryResult<(String, Option<PdfPageSummary>)> {
+    if with_pages {
+        extract_info(kind, body)
+    } else {
+        extract(kind, body).map(|text| (text, None))
+    }
+}
+
 /// Parse in a child process. The permit and the deadline are the same as for the
 /// in-process path; the child is killed when the deadline passes or this future
 /// is dropped.
@@ -340,16 +521,28 @@ async fn parse_in_child(
     permits: Arc<Semaphore>,
     deadline: Duration,
 ) -> QuarryResult<ParsedDocument> {
+    parse_in_child_info(backend, kind, body, permits, deadline, false, None)
+        .await
+        .map(|info| info.document)
+}
+
+async fn parse_in_child_info(
+    backend: &ProcessBackend,
+    kind: ContentKind,
+    body: Vec<u8>,
+    permits: Arc<Semaphore>,
+    deadline: Duration,
+    want_pages: bool,
+    queue_timeout: Option<Duration>,
+) -> QuarryResult<ParsedDocumentInfo> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     let started = tokio::time::Instant::now();
-    let _permit = tokio::time::timeout(deadline, permits.acquire_owned())
-        .await
-        .map_err(|_| timeout_error(kind))?
-        .map_err(|_| QuarryError::new(ErrorCode::Internal, "document parser is shut down"))?;
+    let _permit = acquire_slot(permits, kind, deadline, queue_timeout).await?;
     let remaining = deadline.saturating_sub(started.elapsed());
 
     let kind_arg = match kind {
+        ContentKind::Pdf if want_pages => "pdf-pages",
         ContentKind::Pdf => "pdf",
         ContentKind::Docx => "docx",
         other => {
@@ -415,7 +608,10 @@ async fn parse_in_child(
     let succeeded = status.as_ref().is_ok_and(|status| status.success());
     let reply = serde_json::from_slice::<ChildReply>(out.split(|byte| *byte == b'\n').next().unwrap_or_default()).ok();
     match (succeeded, reply) {
-        (true, Some(ChildReply::Ok { text, truncated })) => Ok(ParsedDocument { text, truncated }),
+        (true, Some(ChildReply::Ok { text, truncated, pdf })) => Ok(ParsedDocumentInfo {
+            document: ParsedDocument { text, truncated },
+            pdf,
+        }),
         (_, Some(ChildReply::Error { code, message })) => {
             let code = if code == ErrorCode::UnsupportedMedia.wire_name() {
                 ErrorCode::UnsupportedMedia
@@ -509,6 +705,73 @@ mod tests {
         .unwrap();
         assert!(parsed.truncated);
         assert_eq!(parsed.text.len(), MAX_DOC_TEXT_BYTES);
+    }
+
+    #[tokio::test]
+    async fn page_facts_travel_with_the_text() {
+        let info = parse_with_info(
+            ContentKind::Pdf,
+            b"x".to_vec(),
+            Arc::new(Semaphore::new(1)),
+            Duration::from_secs(2),
+            None,
+            |_, _| {
+                Ok((
+                    "hello".to_owned(),
+                    Some(PdfPageSummary {
+                        pages: 3,
+                        pages_without_text: 1,
+                    }),
+                ))
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(info.document.text, "hello");
+        assert_eq!(
+            info.pdf,
+            Some(PdfPageSummary {
+                pages: 3,
+                pages_without_text: 1
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn a_busy_parser_is_a_retryable_429_after_the_queue_timeout() {
+        // No slot is ever free: the caller waits its queue timeout, not the deadline.
+        let started = std::time::Instant::now();
+        let error = parse_with_info(
+            ContentKind::Pdf,
+            b"x".to_vec(),
+            Arc::new(Semaphore::new(0)),
+            Duration::from_secs(30),
+            Some(Duration::from_millis(50)),
+            |_, _| Ok((String::new(), None)),
+        )
+        .await
+        .unwrap_err();
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert_eq!(error.code, ErrorCode::RateLimited);
+        let details = error.details.expect("details");
+        assert_eq!(details["reason"], "parser_busy");
+        assert_eq!(details["retry_after_seconds"], PARSER_BUSY_RETRY_AFTER_S);
+    }
+
+    #[tokio::test]
+    async fn waiting_past_the_deadline_is_still_a_timeout() {
+        // A queue timeout at or past the deadline is the deadline.
+        let error = parse_with_info(
+            ContentKind::Pdf,
+            b"x".to_vec(),
+            Arc::new(Semaphore::new(0)),
+            Duration::from_millis(50),
+            Some(Duration::from_secs(10)),
+            |_, _| Ok((String::new(), None)),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.code, ErrorCode::Timeout);
     }
 
     #[tokio::test]

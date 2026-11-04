@@ -8,6 +8,9 @@
 //! `request_approval`) stays in `browser_agent.rs` alongside `decide_next_action`.
 
 use super::{extract_host, ActionType, BrowserAction, BrowserObservation, BrowserSnapshotTarget};
+use crate::quarry_agent::{
+    browser_action_from_wire, observation_from_wire, AgentAction, WireObservation,
+};
 
 /// Category of elevated-risk browser action or run-level condition requiring
 /// human approval before it proceeds (Phase 5 — HITL gates, plan capability
@@ -79,6 +82,77 @@ impl RiskCategory {
     }
 }
 
+impl RiskCategory {
+    /// The category of an action as Quarry receives it (WS21-S5b): the rules of
+    /// [`classify_action_risk`] applied to the loop's form of the action, so a Do run's browser act is
+    /// judged on what it sends. A reference-bound action is judged by its element's label only when
+    /// `observation` is the page the reference was taken from. Without that page it has its own address
+    /// and selector to judge and nothing more. An action the loop cannot name is `None`.
+    #[must_use]
+    pub(crate) fn of_wire_action(
+        action: &AgentAction,
+        observation: Option<&WireObservation>,
+    ) -> Option<Self> {
+        let action = browser_action_from_wire(action)?;
+        let observation = observation.map(|wire| observation_from_wire(wire, "", ""));
+        classify_action_risk(&action, observation.as_ref())
+    }
+}
+
+/// The longest a private-range octet string can be, for the IPv4 check.
+const IPV4_OCTETS: usize = 4;
+
+/// E3.2-a: the closed word for the kind of host a gated browser action targets,
+/// stamped on the approval as `metadata.host_class` so the authz audit says more
+/// than `none`. One of `none` (no URL), `general`, `sensitive` (a sign-in or
+/// payment step on a public host), `internal` (a local, private or single-label
+/// host) or `unknown` (a URL that names no readable host). The word is a class,
+/// never the host.
+#[must_use]
+pub fn host_class(category: RiskCategory, url: &str) -> &'static str {
+    let url = url.trim();
+    if url.is_empty() {
+        return "none";
+    }
+    let Some(host) = extract_host(url) else {
+        return "unknown";
+    };
+    if is_internal_host(&host) {
+        return "internal";
+    }
+    match category {
+        RiskCategory::Login | RiskCategory::Checkout => "sensitive",
+        _ => "general",
+    }
+}
+
+fn is_internal_host(host: &str) -> bool {
+    // A bracketed IP literal is not a public name.
+    if host.starts_with('[') {
+        return true;
+    }
+    if host == "localhost"
+        || [".localhost", ".local", ".internal", ".lan", ".home.arpa"]
+            .iter()
+            .any(|suffix| host.ends_with(suffix))
+    {
+        return true;
+    }
+    let octets: Vec<&str> = host.split('.').collect();
+    if octets.len() == IPV4_OCTETS && octets.iter().all(|part| part.parse::<u8>().is_ok()) {
+        let n: Vec<u8> = octets.iter().filter_map(|part| part.parse().ok()).collect();
+        return n[0] == 0
+            || n[0] == 10
+            || n[0] == 127
+            || (n[0] == 169 && n[1] == 254)
+            || (n[0] == 172 && (16..=31).contains(&n[1]))
+            || (n[0] == 192 && n[1] == 168)
+            || (n[0] == 100 && (64..=127).contains(&n[1]));
+    }
+    // A single label ("intranet", "wiki") is a name only a private network resolves.
+    !host.contains('.')
+}
+
 /// Detail describing WHICH browser action (or run-level condition) triggered
 /// the Phase 5 HITL approval gate, and WHY — carried onto the
 /// `BrowserActionApprovalRequired`/`BrowserActionDecided` orchestration
@@ -106,6 +180,12 @@ pub enum ApprovalOutcome {
     /// A human denied it, or the gate could not be reached at all (fail
     /// closed — see `BrowserEventSink::require_approval`'s doc).
     Denied(String),
+    /// E3.2-c: a person rejected the action and left instructions (the
+    /// decision reason). Produced only when `PlanConfig.approval_redirect` is
+    /// on and the record was decided by a person (never a `system:*` decider).
+    /// The loop tells the planner and plans again instead of aborting; the
+    /// rejected action is never sent.
+    Redirect(String),
     /// No decision arrived within the wait budget.
     TimedOut,
 }
@@ -252,13 +332,31 @@ pub(super) fn classify_action_risk(
     action: &BrowserAction,
     last_observation: Option<&BrowserObservation>,
 ) -> Option<RiskCategory> {
-    let deterministic = classify_deterministic_risk(action, last_observation);
+    classify_action_risk_with_focus(action, last_observation, None)
+}
+
+/// [`classify_action_risk`] with the run's focus hint: the field the last
+/// `type` or `select` acted on. A `press Enter` or `press Space` submits or
+/// activates whatever has focus, so it is judged like a click on that field.
+/// `back` and `wait_for` change nothing on the page and are never gated.
+pub(super) fn classify_action_risk_with_focus(
+    action: &BrowserAction,
+    last_observation: Option<&BrowserObservation>,
+    focus: Option<&BrowserSnapshotTarget>,
+) -> Option<RiskCategory> {
+    let deterministic = classify_deterministic_risk(action, last_observation, focus);
     deterministic.or(action.risk_category)
+}
+
+/// A `press` of a key that activates the focused control.
+fn activates_focus(action: &BrowserAction) -> bool {
+    action.action_type == ActionType::Press && matches!(action.value.trim(), "Enter" | "Space")
 }
 
 fn classify_deterministic_risk(
     action: &BrowserAction,
     last_observation: Option<&BrowserObservation>,
+    focus: Option<&BrowserSnapshotTarget>,
 ) -> Option<RiskCategory> {
     // Cross-domain navigation: compare the target host of a `Goto` against
     // the host of the last page actually observed — NOT the allow-list
@@ -279,7 +377,7 @@ fn classify_deterministic_risk(
         }
     }
 
-    let evidence = Evidence::of(action, last_observation);
+    let evidence = Evidence::of(action, last_observation, focus);
 
     if evidence.holds_any(CHECKOUT_MARKERS) {
         return Some(RiskCategory::Checkout);
@@ -290,7 +388,9 @@ fn classify_deterministic_risk(
     if evidence.holds_any(DESTRUCTIVE_MARKERS) {
         return Some(RiskCategory::Destructive);
     }
-    if matches!(action.action_type, ActionType::Click) && evidence.holds_any(POSTING_MARKERS) {
+    if (action.action_type == ActionType::Click || activates_focus(action))
+        && evidence.holds_any(POSTING_MARKERS)
+    {
         return Some(RiskCategory::PostingForm);
     }
 
@@ -321,12 +421,29 @@ struct Evidence {
 }
 
 impl Evidence {
-    fn of(action: &BrowserAction, last_observation: Option<&BrowserObservation>) -> Self {
+    fn of(
+        action: &BrowserAction,
+        last_observation: Option<&BrowserObservation>,
+        focus: Option<&BrowserSnapshotTarget>,
+    ) -> Self {
         let mut texts = vec![
             EvidenceText::new(&percent_decode(&action.url)),
             EvidenceText::new(&percent_decode(&action.selector)),
         ];
-        if let Some(target) = bound_target(action, last_observation) {
+        let target = if activates_focus(action) {
+            // The focus hint stands in for the control the key activates.
+            focus
+        } else {
+            bound_target(action, last_observation)
+        };
+        if activates_focus(action) && focus.is_none() {
+            // Nothing is known about the focused control: the page the key is
+            // pressed on is the only evidence there is.
+            if let Some(observation) = last_observation {
+                texts.push(EvidenceText::new(&percent_decode(&observation.page_url)));
+            }
+        }
+        if let Some(target) = target {
             texts.extend(target.role.as_deref().map(EvidenceText::new));
             texts.extend(target.name.as_deref().map(EvidenceText::new));
             // A field's `text` is its current content (Quarry falls back to
@@ -346,7 +463,7 @@ impl Evidence {
     }
 }
 
-/// The snapshot target a click or type is bound to. The ref is looked up in
+/// The snapshot target a click, type or select is bound to. The ref is looked up in
 /// the last observation by its id alone: ids are unique within a snapshot, and
 /// Quarry refuses a ref from another generation, but the gate must not lean on
 /// that refusal, so a ref naming `@e3` is judged by the `@e3` the planner was
@@ -355,7 +472,10 @@ fn bound_target<'a>(
     action: &BrowserAction,
     last_observation: Option<&'a BrowserObservation>,
 ) -> Option<&'a BrowserSnapshotTarget> {
-    if !matches!(action.action_type, ActionType::Click | ActionType::Type) {
+    if !matches!(
+        action.action_type,
+        ActionType::Click | ActionType::Type | ActionType::Select
+    ) {
         return None;
     }
     let bound = action.target.as_ref()?;
@@ -517,8 +637,51 @@ pub(crate) fn approval_timeout_seconds() -> u32 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn host_class_is_a_closed_word_and_never_the_host() {
+        use RiskCategory::{CrossDomainNavigation, Login, Checkout, PostingForm};
+        // No URL.
+        assert_eq!(host_class(Login, ""), "none");
+        assert_eq!(host_class(Login, "   "), "none");
+        // A public host: sensitive for a sign-in or payment step, general otherwise.
+        assert_eq!(host_class(Login, "https://bank.example.com/login"), "sensitive");
+        assert_eq!(host_class(Checkout, "https://shop.example.com/pay?x=1"), "sensitive");
+        assert_eq!(host_class(PostingForm, "https://forum.example.com/new"), "general");
+        assert_eq!(host_class(CrossDomainNavigation, "https://other.example.org/"), "general");
+        // A local or private host is internal whatever the step.
+        for url in [
+            "http://localhost:3000/login",
+            "https://app.localhost/x",
+            "http://127.0.0.1/admin",
+            "http://10.0.0.7/x",
+            "http://172.16.4.1/",
+            "http://172.31.255.1/",
+            "http://192.168.1.10/login",
+            "http://169.254.169.254/latest/meta-data",
+            "http://100.64.0.1/",
+            "https://wiki/",
+            "https://printer.local/",
+            "https://git.corp.internal/",
+            "http://[::1]:8080/",
+        ] {
+            assert_eq!(host_class(Login, url), "internal", "{url}");
+        }
+        // Outside the private ranges stays public.
+        assert_eq!(host_class(Login, "http://172.32.0.1/"), "sensitive");
+        assert_eq!(host_class(PostingForm, "http://8.8.8.8/"), "general");
+        // A URL with no readable host.
+        assert_eq!(host_class(Login, "not a url"), "unknown");
+        assert_eq!(host_class(Login, "file:///etc/passwd"), "unknown");
+        // Whatever the input, the answer is one of the five words.
+        for url in ["", "x", "https://a.b/", "http://localhost", "ftp://h/"] {
+            assert!(["none", "general", "sensitive", "internal", "unknown"]
+                .contains(&host_class(Checkout, url)), "{url}");
+        }
+    }
+
     use super::*;
     use crate::browser_agent::{BrowserSnapshotTarget, BrowserTargetRef, ObservationStatus};
+    use crate::quarry_agent::{action_to_wire, WireBrowserSnapshot, WireSnapshotTarget};
 
     fn action(action_type: ActionType, url: &str, selector: &str, value: &str) -> BrowserAction {
         BrowserAction {
@@ -550,6 +713,8 @@ mod tests {
             snapshot_targets: vec![],
             error_message: String::new(),
             challenge: None,
+            redaction_rule_version: None,
+            quality: Default::default(),
         }
     }
 
@@ -727,6 +892,184 @@ mod tests {
             rows.len(),
             misses.join("\n")
         );
+        // A Do run judges the wire form of the action, read back against the page Quarry reports, so
+        // the same verdict must come out of that. The wire carries no planner self-report, so a row that
+        // sets one is judged on the loop's form alone. Only a navigation carries a url on the wire
+        // (`action_to_wire`), and the planner is told to leave it empty for every other action, so
+        // a row that names one has no wire form to compare with.
+        let wire_misses: Vec<String> = rows
+            .iter()
+            .filter(|row| row.action.risk_category.is_none())
+            .filter(|row| row.action.url.is_empty() || row.action.action_type == ActionType::Goto)
+            .filter_map(|row| {
+                let page = row.page.as_ref().map(wire_page);
+                let got = RiskCategory::of_wire_action(&action_to_wire(&row.action), page.as_ref());
+                (got != row.expect).then(|| {
+                    format!(
+                        "  {} (wire): expected {:?}, got {got:?}",
+                        row.name, row.expect
+                    )
+                })
+            })
+            .collect();
+        assert!(
+            wire_misses.is_empty(),
+            "{} of {} rows misclassified on the wire:\n{}",
+            wire_misses.len(),
+            rows.len(),
+            wire_misses.join("\n")
+        );
+    }
+
+    /// The page a row was chosen from, as Quarry reports it: the observation a wire action is judged
+    /// against.
+    fn wire_page(page: &BrowserObservation) -> WireObservation {
+        WireObservation {
+            url: page.page_url.clone(),
+            title: Some(page.page_title.clone()),
+            snapshot: Some(WireBrowserSnapshot {
+                snapshot_id: page.dom_snapshot_ref.clone(),
+                generation: page.snapshot_generation.unwrap_or_default(),
+                targets: page
+                    .snapshot_targets
+                    .iter()
+                    .map(|target| WireSnapshotTarget {
+                        ref_id: target.ref_id.clone(),
+                        role: target.role.clone(),
+                        name: target.name.clone(),
+                        text: target.text.clone(),
+                        frame_id: target.frame_id.clone(),
+                    })
+                    .collect(),
+                frames: Vec::new(),
+            }),
+            ..WireObservation::default()
+        }
+    }
+
+    /// The direct fixtures above, judged on the wire: the verdict a Do run gives must be the verdict
+    /// the loop gives for the same action.
+    #[test]
+    fn the_direct_fixtures_agree_on_the_wire() {
+        let cases: Vec<(
+            BrowserAction,
+            Option<BrowserObservation>,
+            Option<RiskCategory>,
+        )> = vec![
+            (
+                action(
+                    ActionType::Goto,
+                    "https://shop.example.com/checkout",
+                    "",
+                    "",
+                ),
+                None,
+                Some(RiskCategory::Checkout),
+            ),
+            (
+                action(
+                    ActionType::Type,
+                    "https://example.com/account",
+                    "input[type=password]",
+                    "hunter2",
+                ),
+                None,
+                Some(RiskCategory::Login),
+            ),
+            (
+                action(
+                    ActionType::Click,
+                    "https://example.com/settings",
+                    "button.delete-account",
+                    "",
+                ),
+                None,
+                Some(RiskCategory::Destructive),
+            ),
+            (
+                action(
+                    ActionType::Click,
+                    "https://example.com/comments",
+                    "button[type=submit]",
+                    "",
+                ),
+                None,
+                Some(RiskCategory::PostingForm),
+            ),
+            (
+                action(
+                    ActionType::Scroll,
+                    "https://example.com/comments",
+                    "button[type=submit]",
+                    "",
+                ),
+                None,
+                None,
+            ),
+            (
+                action(
+                    ActionType::Goto,
+                    "https://alt-domain.example/landing",
+                    "",
+                    "",
+                ),
+                Some(observation_at("https://shop.example.com/cart")),
+                Some(RiskCategory::CrossDomainNavigation),
+            ),
+            (
+                action(ActionType::Goto, "https://shop.example.com/about", "", ""),
+                Some(observation_at("https://shop.example.com/cart")),
+                None,
+            ),
+            (
+                action(ActionType::Goto, "https://example.com/", "", ""),
+                None,
+                None,
+            ),
+            (action(ActionType::Observe, "", "", ""), None, None),
+        ];
+        for (action, page, expect) in cases {
+            let wire = action_to_wire(&action);
+            let page = page.as_ref().map(wire_page);
+            assert_eq!(
+                RiskCategory::of_wire_action(&wire, page.as_ref()),
+                expect,
+                "{wire:?}"
+            );
+        }
+    }
+
+    /// A reference-bound act is judged by the label of the element it names, and only with the page the
+    /// reference came from. Without that page the same act reads as having no evidence, which is what
+    /// a Do run's approval shows until the session keeps the page.
+    #[test]
+    fn a_reference_is_judged_by_its_label_only_with_the_page_it_came_from() {
+        let page = page_with(vec![
+            snapshot_target("@e1", "link", Some("Hjem"), Some("Hjem")),
+            snapshot_target("@e2", "button", Some("Slett konto"), Some("Slett konto")),
+        ]);
+        let mut bound = action(ActionType::Click, "", "", "");
+        bound.target = Some(BrowserTargetRef {
+            snapshot_id: "snap_1".to_owned(),
+            generation: 1,
+            ref_id: "@e2".to_owned(),
+            frame_id: None,
+        });
+        let wire = action_to_wire(&bound);
+        assert_eq!(
+            RiskCategory::of_wire_action(&wire, Some(&wire_page(&page))),
+            Some(RiskCategory::Destructive)
+        );
+        assert_eq!(RiskCategory::of_wire_action(&wire, None), None);
+    }
+
+    /// A wire action the loop cannot name has nothing to judge, so it carries no category.
+    #[test]
+    fn a_wire_action_the_loop_cannot_name_carries_no_category() {
+        let press = AgentAction::Press {
+            key: "Enter".to_owned(),
+        };
+        assert_eq!(RiskCategory::of_wire_action(&press, None), None);
     }
 
     fn snapshot_target(
@@ -1159,6 +1502,96 @@ mod tests {
             target.frame_id = Some("frame_pay".to_owned());
         }
         assert_eq!(classify_action_risk(&typed, Some(&page)), LOGIN);
+    }
+
+    fn press(key: &str) -> BrowserAction {
+        action(ActionType::Press, "", "", key)
+    }
+
+    #[test]
+    fn press_enter_in_password_field_is_login_risk() {
+        let page = page_with(vec![snapshot_target(
+            "@e2",
+            "textbox",
+            Some("Password"),
+            Some("hunter2"),
+        )]);
+        let focus = page.snapshot_targets[0].clone();
+        assert_eq!(
+            classify_action_risk_with_focus(&press("Enter"), Some(&page), Some(&focus)),
+            Some(RiskCategory::Login)
+        );
+        assert_eq!(
+            classify_action_risk_with_focus(&press("Space"), Some(&page), Some(&focus)),
+            Some(RiskCategory::Login)
+        );
+        // A key that does not activate the field is not judged by it.
+        assert_eq!(
+            classify_action_risk_with_focus(&press("Tab"), Some(&page), Some(&focus)),
+            NONE
+        );
+    }
+
+    #[test]
+    fn press_enter_in_field_named_send_is_posting_risk() {
+        let page = page_with(vec![snapshot_target("@e2", "textbox", Some("Send"), None)]);
+        let focus = page.snapshot_targets[0].clone();
+        assert_eq!(
+            classify_action_risk_with_focus(&press("Enter"), Some(&page), Some(&focus)),
+            Some(RiskCategory::PostingForm)
+        );
+    }
+
+    #[test]
+    fn press_enter_with_no_focus_hint_on_checkout_url_is_checkout_risk() {
+        let page = observation_at("https://butikk.example.no/checkout/payment");
+        assert_eq!(
+            classify_action_risk_with_focus(&press("Enter"), Some(&page), None),
+            Some(RiskCategory::Checkout)
+        );
+        // No hint and an ordinary page: nothing to flag.
+        let plain = observation_at("https://butikk.example.no/produkter");
+        assert_eq!(
+            classify_action_risk_with_focus(&press("Enter"), Some(&plain), None),
+            NONE
+        );
+    }
+
+    #[test]
+    fn select_on_destructive_labelled_control_is_destructive_risk() {
+        let page = page_with(vec![snapshot_target(
+            "@e3",
+            "combobox",
+            Some("Delete account"),
+            Some("keep"),
+        )]);
+        let mut select = bound_to(action(ActionType::Select, "", "", "confirm"), "@e3");
+        select.value = "confirm".to_owned();
+        assert_eq!(
+            classify_action_risk_with_focus(&select, Some(&page), None),
+            Some(RiskCategory::Destructive)
+        );
+        // The option value is content, not evidence.
+        let calm = page_with(vec![snapshot_target("@e3", "combobox", Some("Shipping"), None)]);
+        let mut pick = bound_to(action(ActionType::Select, "", "", "delete"), "@e3");
+        pick.value = "delete".to_owned();
+        assert_eq!(classify_action_risk_with_focus(&pick, Some(&calm), None), NONE);
+    }
+
+    #[test]
+    fn press_enter_in_search_box_is_not_risky() {
+        let page = page_with(vec![snapshot_target("@e1", "searchbox", Some("Search"), None)]);
+        let focus = page.snapshot_targets[0].clone();
+        assert_eq!(
+            classify_action_risk_with_focus(&press("Enter"), Some(&page), Some(&focus)),
+            NONE
+        );
+        // back and wait_for are never gated, even on a risky-looking page.
+        let risky = observation_at("https://butikk.example.no/checkout");
+        for verb in [ActionType::Back, ActionType::WaitFor] {
+            let a = bound_to(action(verb, "", "", ""), "@e1");
+            assert_eq!(classify_action_risk_with_focus(&a, Some(&risky), Some(&focus)), NONE);
+        }
     }
 
     #[test]

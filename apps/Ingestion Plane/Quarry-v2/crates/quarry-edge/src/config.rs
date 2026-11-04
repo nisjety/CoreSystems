@@ -317,9 +317,17 @@ pub struct EdgeConfig {
     /// backfill). Env: `QUARRY_EDGE__PROFILE_ENCRYPTION_REQUIRED`.
     #[serde(default)]
     pub profile_encryption_required: bool,
-    /// WS17.E1: key provider. Only `env` is built; `org_core` is WS17.E2. Env: `QUARRY_EDGE__PROFILE_KEY_PROVIDER`.
+    /// WS17.E1/E2b: key provider, `env` (default) or `org_core` (DEKs from org-core under
+    /// the org's KEK; needs `org_core_keys_url` and the token, checked at boot in `main.rs`).
+    /// Env: `QUARRY_EDGE__PROFILE_KEY_PROVIDER`.
     #[serde(default)]
     pub profile_key_provider: String,
+    /// WS17.E2b: org-core base URL for the `org_core` key provider. The service token is
+    /// NOT a config field: it is read from `QUARRY_EDGE__ORG_CORE_KEYS_TOKEN` by name
+    /// (`quarry_runtime::profile_keys::OrgCoreKeyProvider::from_env`).
+    /// Env: `QUARRY_EDGE__ORG_CORE_KEYS_URL`.
+    #[serde(default)]
+    pub org_core_keys_url: Option<String>,
 }
 
 fn default_vector_retrieval_budget() -> u32 {
@@ -474,6 +482,7 @@ impl EdgeConfig {
             profile_encryption: String::new(),
             profile_encryption_required: false,
             profile_key_provider: String::new(),
+            org_core_keys_url: None,
         }
     }
 }

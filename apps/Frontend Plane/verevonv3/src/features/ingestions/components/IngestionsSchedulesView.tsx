@@ -5,7 +5,7 @@ import { cn } from '@/shared/lib/cn'
 import { Button } from '@/shared/ui/Button'
 import { VerevonInput } from '@/shared/ui/verevon/VerevonInput'
 import { VerevonSelect } from '@/shared/ui/verevon/VerevonSelect'
-import type { ScheduleItem } from '@/shared/api/ingestions-client'
+import type { ScheduleItem, SchedulePauseAction, ScheduleStateAction } from '@/shared/api/ingestions-client'
 import { cronPresetLabel, cronPresets, describeCron } from '@/features/ingestions/lib/cron'
 import { EmptyState, StatusBadge, kindLabel, relativeTime } from '@/features/ingestions/components/ingestions-ui'
 
@@ -24,7 +24,7 @@ export function IngestionsSchedulesView(props: {
   schedules: ScheduleItem[]
   onFormChange: (patch: Partial<ScheduleFormState>) => void
   onSubmit: () => Promise<void>
-  onAction: (action: string, scheduleId: string) => Promise<void>
+  onAction: (action: SchedulePauseAction | ScheduleStateAction, scheduleId: string) => Promise<void>
 }) {
   const i18n = useI18n()
   const tr = i18n.tr

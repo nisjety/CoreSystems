@@ -55,6 +55,14 @@ const (
 	auditActionToolPolicyRevoked = "tool_policy_revoked"
 	auditEntityToolPolicy        = "tool_policy"
 
+	// A confirmed "Always" rule (build plan WS13 S7, K3-10) is an allow with an expiry:
+	// ninety days by default, and no confirmation may ask for longer than a year.
+	ruleExpiryDefault = 90 * 24 * time.Hour
+	ruleExpiryMax     = 365 * 24 * time.Hour
+
+	auditActionToolPolicyRuleCreated   = "tool_policy_rule_created"
+	auditActionToolPolicyRuleConfirmed = "tool_policy_rule_confirmed"
+
 	// pgUniqueViolation is the SQLSTATE of the active-key index refusing a second
 	// concurrent first write.
 	pgUniqueViolation = "23505"
@@ -101,7 +109,7 @@ func (h *ToolPoliciesHandler) Register(mux *http.ServeMux) {
 // policies on a capability and, when userID is set, that person's own.
 func (h *ToolPoliciesHandler) ActiveToolPolicies(ctx context.Context, orgID, userID, capabilityID string) ([]policy.ToolPolicy, error) {
 	rows, err := h.pool.Query(ctx, `
-		SELECT scope_kind, decision, COALESCE(pinned_digest, '')
+		SELECT scope_kind, decision, COALESCE(pinned_digest, ''), expires_at
 		FROM tool_policies
 		WHERE org_id = $1 AND capability_id = $2 AND revoked_at IS NULL
 		  AND (scope_kind = 'org' OR (scope_kind = 'user' AND $3::text <> '' AND scope_value = $3::text))
@@ -113,8 +121,12 @@ func (h *ToolPoliciesHandler) ActiveToolPolicies(ctx context.Context, orgID, use
 	var policies []policy.ToolPolicy
 	for rows.Next() {
 		var p policy.ToolPolicy
-		if err := rows.Scan(&p.ScopeKind, &p.Decision, &p.PinnedDigest); err != nil {
+		var expiresAt *time.Time
+		if err := rows.Scan(&p.ScopeKind, &p.Decision, &p.PinnedDigest, &expiresAt); err != nil {
 			return nil, fmt.Errorf("scan tool policy: %w", err)
+		}
+		if expiresAt != nil {
+			p.ExpiresAt = *expiresAt
 		}
 		policies = append(policies, p)
 	}
@@ -125,16 +137,17 @@ func (h *ToolPoliciesHandler) ActiveToolPolicies(ctx context.Context, orgID, use
 }
 
 type toolPolicyView struct {
-	ID           string    `json:"id"`
-	ScopeKind    string    `json:"scope_kind"`
-	ScopeValue   string    `json:"scope_value"`
-	CapabilityID string    `json:"capability_id"`
-	Decision     string    `json:"decision"`
-	PinnedDigest string    `json:"pinned_digest"`
-	Reason       string    `json:"reason"`
-	SetBy        string    `json:"set_by"`
-	CreatedAt    time.Time `json:"created_at"`
-	UpdatedAt    time.Time `json:"updated_at"`
+	ID           string     `json:"id"`
+	ScopeKind    string     `json:"scope_kind"`
+	ScopeValue   string     `json:"scope_value"`
+	CapabilityID string     `json:"capability_id"`
+	Decision     string     `json:"decision"`
+	PinnedDigest string     `json:"pinned_digest"`
+	Reason       string     `json:"reason"`
+	SetBy        string     `json:"set_by"`
+	CreatedAt    time.Time  `json:"created_at"`
+	UpdatedAt    time.Time  `json:"updated_at"`
+	ExpiresAt    *time.Time `json:"expires_at,omitempty"`
 }
 
 // list is GET /api/v1/tool-policies?capability_id=: the org's active policies and
@@ -151,7 +164,7 @@ func (h *ToolPoliciesHandler) list(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rows, err := h.pool.Query(r.Context(), `
-		SELECT id, scope_kind, scope_value, capability_id, decision, COALESCE(pinned_digest, ''), reason, set_by, created_at, updated_at
+		SELECT id, scope_kind, scope_value, capability_id, decision, COALESCE(pinned_digest, ''), reason, set_by, created_at, updated_at, expires_at
 		FROM tool_policies
 		WHERE org_id = $1 AND revoked_at IS NULL
 		  AND (scope_kind = 'org' OR (scope_kind = 'user' AND scope_value = $2))
@@ -169,7 +182,7 @@ func (h *ToolPoliciesHandler) list(w http.ResponseWriter, r *http.Request) {
 	views := []toolPolicyView{}
 	for rows.Next() {
 		var v toolPolicyView
-		if err := rows.Scan(&v.ID, &v.ScopeKind, &v.ScopeValue, &v.CapabilityID, &v.Decision, &v.PinnedDigest, &v.Reason, &v.SetBy, &v.CreatedAt, &v.UpdatedAt); err != nil {
+		if err := rows.Scan(&v.ID, &v.ScopeKind, &v.ScopeValue, &v.CapabilityID, &v.Decision, &v.PinnedDigest, &v.Reason, &v.SetBy, &v.CreatedAt, &v.UpdatedAt, &v.ExpiresAt); err != nil {
 			slog.Error("scan tool policy failed", "error", err)
 			jsonErr(w, "database unavailable", http.StatusInternalServerError)
 			return
@@ -192,6 +205,29 @@ type setToolPolicyRequest struct {
 	// reviewed. Required for an allow, refused for ask and never.
 	PinnedDigest string `json:"pinned_digest"`
 	Reason       string `json:"reason"`
+	// ExpiresAt is when an allow lapses, as RFC 3339. Only an allow may carry one; left
+	// out, an allow lapses ninety days from the write.
+	ExpiresAt string `json:"expires_at"`
+}
+
+// ruleExpiry is when an allow written at now lapses (build plan WS13 S7, K3-10): the time the
+// request asks for, or ninety days when it asks for none. A lapse must lie after now and no more
+// than a year after it.
+func ruleExpiry(now time.Time, requested string) (time.Time, error) {
+	if requested == "" {
+		return now.Add(ruleExpiryDefault), nil
+	}
+	at, err := time.Parse(time.RFC3339, requested)
+	if err != nil {
+		return time.Time{}, errors.New("expires_at must be an RFC 3339 time")
+	}
+	if !at.After(now) {
+		return time.Time{}, errors.New("expires_at must be in the future")
+	}
+	if at.After(now.Add(ruleExpiryMax)) {
+		return time.Time{}, errors.New("expires_at is limited to 365 days")
+	}
+	return at, nil
 }
 
 // policyWriter checks what every write needs, before the body is read, and
@@ -278,6 +314,18 @@ func (h *ToolPoliciesHandler) set(w http.ResponseWriter, r *http.Request, capabi
 		jsonErr(w, "decision must be allow, ask or never", http.StatusBadRequest)
 		return
 	}
+	var expiresAt *time.Time
+	if request.Decision == policy.ToolPolicyAllow {
+		at, err := ruleExpiry(time.Now().UTC(), request.ExpiresAt)
+		if err != nil {
+			jsonErr(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		expiresAt = &at
+	} else if request.ExpiresAt != "" {
+		jsonErr(w, "expires_at is only for an allow", http.StatusBadRequest)
+		return
+	}
 	if utf8.RuneCountInString(request.Reason) > maxToolPolicyReasonLen {
 		jsonErr(w, fmt.Sprintf("reason is limited to %d characters", maxToolPolicyReasonLen), http.StatusBadRequest)
 		return
@@ -305,13 +353,21 @@ func (h *ToolPoliciesHandler) set(w http.ResponseWriter, r *http.Request, capabi
 	}
 
 	scopeValue := scopeValueOf(request.Scope, orgID, principal.ActorID)
-	auditDiff, err := json.Marshal(map[string]any{
+	diff := map[string]any{
 		"capability_id": capabilityID,
 		"scope_kind":    request.Scope,
 		"scope_value":   scopeValue,
 		"decision":      request.Decision,
 		"pinned_digest": request.PinnedDigest,
-	})
+	}
+	// A rule is audited as created on its first write and as confirmed on every later one, so a
+	// renewal reads as a confirmation. Its row carries the lapse time and nothing the person wrote.
+	updateAction, insertAction := auditActionToolPolicySet, auditActionToolPolicySet
+	if expiresAt != nil {
+		diff["expires_at"] = expiresAt.Format(time.RFC3339)
+		updateAction, insertAction = auditActionToolPolicyRuleConfirmed, auditActionToolPolicyRuleCreated
+	}
+	auditDiff, err := json.Marshal(diff)
 	if err != nil {
 		jsonErr(w, "database unavailable", http.StatusInternalServerError)
 		return
@@ -320,7 +376,7 @@ func (h *ToolPoliciesHandler) set(w http.ResponseWriter, r *http.Request, capabi
 	err = h.pool.QueryRow(r.Context(), setToolPolicySQL,
 		orgID, request.Scope, scopeValue, capabilityID, request.Decision, nullableDigest(request.PinnedDigest),
 		request.Reason, principal.ActorID, "tpol_"+uuid.NewString(), "ral_"+uuid.NewString(),
-		auditActionToolPolicySet, string(auditDiff),
+		updateAction, string(auditDiff), expiresAt, insertAction,
 	).Scan(&id)
 	if err != nil {
 		var pgErr *pgconn.PgError
@@ -333,13 +389,17 @@ func (h *ToolPoliciesHandler) set(w http.ResponseWriter, r *http.Request, capabi
 		jsonErr(w, "database unavailable", http.StatusInternalServerError)
 		return
 	}
-	writeJSON(w, map[string]any{
+	response := map[string]any{
 		"id":            id,
 		"capability_id": capabilityID,
 		"scope_kind":    request.Scope,
 		"decision":      request.Decision,
 		"pinned_digest": request.PinnedDigest,
-	})
+	}
+	if expiresAt != nil {
+		response["expires_at"] = expiresAt.Format(time.RFC3339)
+	}
+	writeJSON(w, response)
 }
 
 func nullableDigest(digest string) any {
@@ -384,23 +444,27 @@ func (h *ToolPoliciesHandler) checkRelaxable(ctx context.Context, orgID, capabil
 // setToolPolicySQL updates the active policy of the key or inserts the first
 // one, and appends the audit row, as one statement. Parameters: $1 org, $2 scope
 // kind, $3 scope value, $4 capability, $5 decision, $6 pinned digest, $7 reason,
-// $8 actor, $9 new policy id, $10 audit id, $11 audit action, $12 audit diff.
+// $8 actor, $9 new policy id, $10 audit id, $11 audit action when the policy
+// existed, $12 audit diff, $13 lapse time (NULL for a policy that does not lapse),
+// $14 audit action when it was created.
 const setToolPolicySQL = `
 WITH upd AS (
     UPDATE tool_policies
-    SET decision = $5, pinned_digest = $6, reason = $7, set_by = $8, updated_at = now()
+    SET decision = $5, pinned_digest = $6, reason = $7, set_by = $8, expires_at = $13::timestamptz, updated_at = now()
     WHERE org_id = $1 AND scope_kind = $2 AND scope_value = $3 AND capability_id = $4 AND revoked_at IS NULL
     RETURNING id
 ), ins AS (
-    INSERT INTO tool_policies (id, org_id, scope_kind, scope_value, capability_id, decision, pinned_digest, reason, set_by)
-    SELECT $9, $1, $2, $3, $4, $5, $6, $7, $8
+    INSERT INTO tool_policies (id, org_id, scope_kind, scope_value, capability_id, decision, pinned_digest, reason, set_by, expires_at)
+    SELECT $9, $1, $2, $3, $4, $5, $6, $7, $8, $13::timestamptz
     WHERE NOT EXISTS (SELECT 1 FROM upd)
     RETURNING id
 ), pol AS (
     SELECT id FROM upd UNION ALL SELECT id FROM ins
 ), aud AS (
     INSERT INTO registry_audit_log (id, entity_kind, entity_id, action, actor, org_id, diff_json)
-    SELECT $10, '` + auditEntityToolPolicy + `', pol.id, $11, $8, $1, $12::jsonb FROM pol
+    SELECT $10, '` + auditEntityToolPolicy + `', pol.id,
+           CASE WHEN EXISTS (SELECT 1 FROM upd) THEN $11::text ELSE $14::text END,
+           $8, $1, $12::jsonb FROM pol
     RETURNING 1
 )
 SELECT id FROM pol

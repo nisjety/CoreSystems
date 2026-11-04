@@ -55,6 +55,22 @@ fn pick_driver(
     planned
 }
 
+/// E3.8.3: the retry config of the synchronous scrape path, read from
+/// `QUARRY_EDGE__SCRAPE_RETRIES` once. `None` (the default) leaves every fetch as it was.
+fn scrape_retry_config() -> Option<&'static quarry_runtime::retry::ScrapeRetry> {
+    static CONFIG: std::sync::OnceLock<Option<quarry_runtime::retry::ScrapeRetry>> =
+        std::sync::OnceLock::new();
+    CONFIG
+        .get_or_init(|| {
+            quarry_runtime::retry::scrape_retry_from_flag(
+                std::env::var(quarry_runtime::retry::SCRAPE_RETRIES_ENV)
+                    .ok()
+                    .as_deref(),
+            )
+        })
+        .as_ref()
+}
+
 fn should_read(p: &Option<CachePolicy>) -> bool {
     match p {
         None => true,
@@ -117,6 +133,12 @@ pub fn router(state: AppState) -> Router {
         // (stamped by the orchestrator from the schedule memo, verified at
         // schedule-creation). The handler enforces the token itself.
         .route("/v1/internal/run_page", post(internal_run_page))
+        // INNH-6a: sitemap discovery for a crawl. Same runtime token and org binding as
+        // run_page; served only with QUARRY_EDGE__CRAWL_SITEMAP on (501 otherwise).
+        .route(
+            "/v1/internal/crawl/sitemap",
+            post(crate::crawl_sitemap::internal_sitemap),
+        )
         // Fire-time preflight of an executable scheduled job (WS15.S2). Runtime token
         // plus the schedule run binding; S2 always allows (S4 adds the checks).
         .route(
@@ -127,6 +149,11 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/v1/internal/orgs/:org/profiles",
             delete(crate::internal_routes::purge_org_profiles),
+        )
+        // W2-U49: user-level erasure of step receipts. Same token, counts only.
+        .route(
+            "/v1/internal/orgs/:org/users/:user/receipts",
+            delete(crate::internal_routes::purge_user_receipts),
         )
         .merge(crate::queue_routes::internal_router());
 
@@ -139,6 +166,24 @@ pub fn router(state: AppState) -> Router {
         .layer(DefaultBodyLimit::max(crate::profile_routes::IMPORT_MAX_BYTES))
         .layer(RequestBodyLimitLayer::new(crate::profile_routes::IMPORT_MAX_BYTES))
         .layer(middleware::from_fn(crate::auth::require_service_route_scope))
+        // INNH-10: an `api_key` principal is held to its route allow-list (dark behind
+        // QUARRY_EDGE__API_KEY_AGENT_RUNS; user and service tokens pass through untouched).
+        .layer(middleware::from_fn(crate::api_key::require_api_key_route_fence))
+        .layer(middleware::from_fn(crate::zdr_log::mark_floor))
+        .layer(middleware::from_fn(crate::auth::require_auth));
+
+    // INNH-11 — POST /v1/parse. Its own router: the body is a whole document, up to 25 MiB,
+    // past the 1 MB cap of the surface below. The handler enforces the limit itself, so a
+    // refusal is the typed envelope, and it takes no AppState: it has nothing to store to.
+    // The auth chain is the surface's. Served only with QUARRY_EDGE__PARSE_ROUTE on.
+    let parse_upload = Router::new()
+        .route("/v1/parse", post(crate::parse_routes::parse))
+        .layer(middleware::from_fn(crate::auth::require_service_route_scope))
+        // INNH-10 x INNH-11: an `api_key` principal is held to its allow-list here too; /v1/parse
+        // is not on it, so a key is refused (403 `api_key_route_refused`). This router's layers
+        // also wrap the fallback of the merged router, so the fence must be here for an unknown
+        // path to be answered 403 to a key, as the other two routers do.
+        .layer(middleware::from_fn(crate::api_key::require_api_key_route_fence))
         .layer(middleware::from_fn(crate::zdr_log::mark_floor))
         .layer(middleware::from_fn(crate::auth::require_auth));
 
@@ -159,6 +204,34 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/crawl/ongoing", get(crate::job_lifecycle_routes::ongoing_crawl))
         .route("/v1/crawl/:id", get(crate::job_lifecycle_routes::get_crawl))
         .route("/v1/crawl/:id/errors", get(crate::job_lifecycle_routes::crawl_errors))
+        // INNH-12: the pages a job fetched. Off unless QUARRY_EDGE__JOB_RESULTS is on.
+        .route("/v1/crawl/:id/results", get(crate::job_results_routes::crawl_results))
+        .route("/v1/batch/:id/results", get(crate::job_results_routes::batch_results))
+        .route("/v1/jobs/:id/results", get(crate::job_results_routes::job_results))
+        // INNH-5: org-scoped webhook subscriptions (control owns them; the edge passes the
+        // verified org). Off unless QUARRY_EDGE__WEBHOOK_SUBSCRIPTIONS is on (501).
+        .route(
+            "/v1/webhook-subscriptions",
+            get(crate::webhook_subscription_routes::list).post(crate::webhook_subscription_routes::create),
+        )
+        .route(
+            "/v1/webhook-subscriptions/:id",
+            get(crate::webhook_subscription_routes::get)
+                .patch(crate::webhook_subscription_routes::patch)
+                .delete(crate::webhook_subscription_routes::delete),
+        )
+        .route(
+            "/v1/webhook-subscriptions/:id/rotate-secret",
+            post(crate::webhook_subscription_routes::rotate_secret),
+        )
+        .route(
+            "/v1/webhook-subscriptions/:id/deliveries",
+            get(crate::webhook_subscription_routes::deliveries),
+        )
+        .route(
+            "/v1/webhook-subscriptions/:id/deliveries/:did/retry",
+            post(crate::webhook_subscription_routes::retry_delivery),
+        )
         .route("/v1/batch/ongoing", get(crate::job_lifecycle_routes::ongoing_batch))
         .route("/v1/batch/:id", get(crate::job_lifecycle_routes::get_batch))
         .route("/v1/batch/:id/errors", get(crate::job_lifecycle_routes::batch_errors))
@@ -277,6 +350,9 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/change/check", post(crate::change_routes::check))
         .route("/v1/change/latest", get(crate::change_routes::latest))
         .route("/v1/change/history", get(crate::change_routes::history))
+        // INNH-4: the two versions of a tracked page and the diff between them. 501 unless
+        // QUARRY_EDGE__CHANGE_TEXT_DIFF is on.
+        .route("/v1/change/diff", get(crate::change_routes::diff))
         // Parity finishers — PromoteTrackedResultToSnapshot +
         // ScheduleRefreshRun over the PostgresBaselineStore / durable
         // frontier. Both 501 with a hint when postgres-queue is off.
@@ -327,6 +403,8 @@ pub fn router(state: AppState) -> Router {
         .layer(middleware::from_fn(
             crate::auth::require_service_route_scope,
         ))
+        // INNH-10: the API-key route fence, beside the service scope (see the profile router).
+        .layer(middleware::from_fn(crate::api_key::require_api_key_route_fence))
         // After require_auth (which inserts the claims), before the handler: a
         // user of a ZDR org is marked ZDR for the log from the first line.
         .layer(middleware::from_fn(crate::zdr_log::mark_floor))
@@ -349,6 +427,7 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .merge(limited)
         .merge(profile_import)
+        .merge(parse_upload)
         .layer(middleware::from_fn(crate::retry_after::retry_after_header))
         // Method and path only: tower-http's default span records the full URI,
         // query string included.
@@ -497,6 +576,13 @@ pub struct ScrapeRequest {
     /// values are ignored.
     #[serde(default)]
     pub initiated_by: Option<String>,
+    /// E3.6-5: the raw `redact_pii`. The stream route refuses anything but `off`; on
+    /// `/v1/scrape` the contract parse checks the value.
+    #[serde(default)]
+    pub redact_pii: Option<serde_json::Value>,
+    /// E3.6-5: the camelCase spelling of `redact_pii`, read the same way.
+    #[serde(default, rename = "redactPii")]
+    pub redact_pii_camel: Option<serde_json::Value>,
 }
 
 /// Wire-level shape for [`RenderHints`]. Kept separate from the runtime
@@ -550,6 +636,70 @@ fn contract_error(
     )
 }
 
+/// E3.6-5: pass the text a `redact_pii: on` scrape returns through the PII scanner
+/// (`quarry_transform::pii`). Redacted: the inline markdown, html, raw_html and AI
+/// source; the page title, description, author and keywords; the extraction's title,
+/// excerpt and summary. A field the markers grow past `max_inline_bytes` is cut again
+/// on a character boundary and named in `truncated`. The text fingerprint is cleared,
+/// since it hashes the text as the page had it. URLs, the branding block and the
+/// raw-byte fingerprint are not text the scanner reads.
+fn redact_pii_text(
+    output: &mut quarry_core::output::NormalizedOutput,
+    inline: &mut quarry_runtime::InlineParts,
+    max_inline_bytes: usize,
+) {
+    fn redact_slot(slot: &mut Option<String>) {
+        if let Some(text) = slot.as_mut() {
+            *text = quarry_transform::pii::redact(text.as_str());
+        }
+    }
+    // True when the redacted field had to be cut again to fit the cap.
+    fn redact_inline(slot: &mut Option<String>, max_bytes: usize) -> bool {
+        let Some(text) = slot.as_mut() else {
+            return false;
+        };
+        let redacted = quarry_transform::pii::redact(text.as_str());
+        let (cut, was_cut) = quarry_core::scrape::truncate_on_char_boundary(&redacted, max_bytes);
+        *text = cut;
+        was_cut
+    }
+
+    for (name, slot) in [
+        ("markdown", &mut inline.markdown),
+        ("html", &mut inline.html),
+        ("raw_html", &mut inline.raw_html),
+    ] {
+        if redact_inline(slot, max_inline_bytes)
+            && !inline.truncated.iter().any(|field| field.as_str() == name)
+        {
+            inline.truncated.push(name.to_owned());
+        }
+    }
+    if let Some(source) = inline.ai_source.as_mut() {
+        *source = quarry_transform::pii::redact(source.as_str());
+    }
+
+    redact_slot(&mut output.metadata.title);
+    redact_slot(&mut output.metadata.description);
+    redact_slot(&mut output.metadata.author);
+    redact_slot(&mut output.metadata.keywords);
+    if let Some(extraction) = output.extraction.as_mut() {
+        extraction.title = quarry_transform::pii::redact(extraction.title.as_str());
+        extraction.excerpt = quarry_transform::pii::redact(extraction.excerpt.as_str());
+        redact_slot(&mut extraction.summary);
+    }
+    output.text_fp = None;
+}
+
+/// E3.6-5: whether a stream request asks for a `redact_pii` other than `off`. The
+/// stream serves no redaction: its events carry the page text as the run emits it.
+fn stream_requests_redaction(req: &ScrapeRequest) -> bool {
+    [req.redact_pii.as_ref(), req.redact_pii_camel.as_ref()]
+        .into_iter()
+        .flatten()
+        .any(|value| !value.is_null() && value.as_str() != Some("off"))
+}
+
 /// `/v1/scrape` with its settings passed in, so tests can pick strictness.
 async fn scrape_with(
     state: AppState,
@@ -557,7 +707,7 @@ async fn scrape_with(
     body: &[u8],
     settings: &crate::scrape_contract::ScrapeSettings,
 ) -> Result<axum::response::Response, (StatusCode, axum::response::Response)> {
-    use quarry_core::scrape::{CacheState, EffectiveScrapeOptions, ScrapeFormat};
+    use quarry_core::scrape::{CacheState, EffectiveScrapeOptions, PiiRedaction, ScrapeFormat};
 
     let request_id = crate::request_id::current();
     let parsed = crate::scrape_contract::parse_body(body, settings, chrono::Utc::now())
@@ -614,7 +764,38 @@ async fn scrape_with(
             ));
         }
     }
+    // INNH-1: AI formats (json, summary, question, highlights). The flag is already
+    // on when any is present (the resolve above refused them otherwise). Who may ask
+    // and whether a model can be reached are decided here, before the page is
+    // fetched: a refused request spends no fetch. Under ZDR the model is never
+    // reached, so its availability is not asked.
+    let ai_specs: Vec<quarry_core::ai_spec::AiSpec> =
+        resolved.ai_specs().into_iter().cloned().collect();
+    if !ai_specs.is_empty() {
+        let refusal = crate::scrape_contract::ai_formats::check_principal(
+            &claims,
+            req.initiated_by.as_deref(),
+            crate::scrape_contract::ai_formats::first_ai_index(parsed.value.get("formats")),
+        )
+        .and_then(|()| {
+            if zdr.is_active() {
+                Ok(())
+            } else {
+                crate::scrape_contract::ai_formats::availability(&state)
+            }
+        });
+        if let Err(error) = refusal {
+            return Err((
+                StatusCode::from_u16(error.code.http_status())
+                    .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+                Json(Envelope::<()>::err(&request_id, error)).into_response(),
+            ));
+        }
+    }
     let privacy = effective_privacy(req.privacy.clone(), zdr);
+    // INNH-1: the same rule the page-title hop uses. The AI formats are skipped
+    // (no model call) when the request's privacy block forbids a model hop.
+    let ai_model_hop_allowed = quarry_runtime::page_extract::model_hop_allowed(zdr, &privacy);
     // An explicit durable-write request must not degrade into read-only
     // capture because this local runtime has no Data Plane adapter. Check
     // before cache lookup or fetching so neither can mask a missing write.
@@ -713,6 +894,99 @@ async fn scrape_with(
         }
     }
 
+    // INNH-7: the URL result cache, behind QUARRY_EDGE__SCRAPE_MAX_AGE. Read when the
+    // request carries `max_age`; written after every cacheable success, so a later
+    // request can read it. The same gates the page cache has run first (the web
+    // policy above, ZDR below); ZDR is answered before a key exists.
+    let mut max_age_warnings: Vec<quarry_core::scrape::ScrapeWarning> = Vec::new();
+    let inline_request = quarry_runtime::InlineRequest {
+        markdown: resolved.wants(ScrapeFormat::Markdown),
+        html: resolved.wants(ScrapeFormat::Html),
+        raw_html: resolved.wants(ScrapeFormat::RawHtml),
+        max_bytes: resolved.max_inline_bytes,
+        clean: quarry_transform::clean_html::CleanOptions {
+            only_main_content: resolved.only_main_content,
+            include_tags: resolved.include_tags.clone(),
+            exclude_tags: resolved.exclude_tags.clone(),
+            remove_base64_images: resolved.remove_base64_images,
+            extractor: resolved.extractor,
+        },
+        // INNH-1: the page text the AI formats read. One char more than the
+        // model's input cap, so the engine does the cut and can tell a page that
+        // is over the cap (`truncated_input`) from one of exactly the cap. Asked
+        // for only when the request carries an AI format and a model hop is allowed.
+        ai_source_max_chars: (!ai_specs.is_empty() && ai_model_hop_allowed).then(|| {
+            crate::scrape_contract::ai_formats::settings()
+                .max_input_chars
+                .saturating_add(1)
+        }),
+    };
+    let mut result_key: Option<String> = None;
+    if settings.max_age_enabled {
+        let eligibility = crate::scrape_cache::eligibility(&crate::scrape_cache::Request {
+            resolved: &resolved,
+            zdr_blocks_cache: quarry_core::zdr::guard(zdr, quarry_core::zdr::WriteKind::Cache)
+                .is_err(),
+            driver: plan.driver,
+            default_web_policy: crate::web_policy_edge::is_default(&decision),
+            privacy: &privacy,
+            ingest: req.ingest.unwrap_or(false),
+        });
+        if eligibility == crate::scrape_cache::Eligibility::Eligible {
+            result_key = state.cache.as_ref().and_then(|_| {
+                crate::cache::PageCache::result_key(
+                    &org_id,
+                    url.as_str(),
+                    &resolved.canonical_options_key(),
+                )
+            });
+            if result_key.is_none() && resolved.max_age_ms.is_some() {
+                max_age_warnings.push(crate::scrape_cache::unavailable_warning());
+            }
+        } else if resolved.max_age_ms.is_some() {
+            max_age_warnings.extend(eligibility.warning());
+        }
+    }
+    if let (Some(key), Some(max_age_ms), Some(cache)) =
+        (result_key.as_ref(), resolved.max_age_ms, state.cache.as_ref())
+    {
+        if max_age_ms > 0 && should_read(&req.cache) {
+            cache_state = CacheState::Miss;
+            if let Some(cached) = cache.get_result(key).await {
+                let now = chrono::Utc::now();
+                let age_ms = crate::scrape_cache::age_ms(cached.output.fetched_at, now);
+                if crate::scrape_cache::is_fresh(age_ms, max_age_ms) {
+                    // A stored result whose artifacts are gone is a miss, not an error.
+                    if let Some(parts) = crate::scrape_cache::rehydrate(
+                        state.artifacts.as_ref(),
+                        &org_id,
+                        &cached,
+                        &inline_request,
+                    )
+                    .await
+                    {
+                        let fetched_at = cached.output.fetched_at;
+                        let mut data = quarry_core::scrape::ScrapeResponse::from_output(cached.output);
+                        data.markdown = parts.markdown;
+                        data.html = parts.html;
+                        data.raw_html = parts.raw_html;
+                        data.truncated = parts.truncated;
+                        data.omitted = parts.omitted;
+                        let mut warnings = unknown_warnings.clone();
+                        warnings.extend(max_age_warnings);
+                        warnings.extend(parts.warnings);
+                        data.warnings = warnings;
+                        // Not metered as a scrape.page (the page cache does not either) and
+                        // no new record: `scrape_id` is absent on a hit.
+                        data.effective_options =
+                            Some(effective(CacheState::Hit).served_from_cache(fetched_at, age_ms));
+                        return Ok(finish(data));
+                    }
+                }
+            }
+        }
+    }
+
     // WS13.4b: a capture needs the browser. Without one, refuse with 501 rather
     // than hand the plan to the default driver, which would drop the capture.
     // WS13.5: actions need it for the same reason (the default driver would run the
@@ -728,6 +1002,25 @@ async fn scrape_with(
     }
 
     let driver = pick_driver(&state, &plan, req.prefer_http3);
+    // E3.8.3: the fetch retries under the scrape config, except in two cases. A browser
+    // render runs for seconds, and a repeat is not a transport retry. A configured proxy
+    // pool (`QUARRY_PROXY_POOL`) rotates identities inside the driver chain, and a chain
+    // error keeps only each tier's message, so a retry could reach proxies beyond the
+    // first attempt's plan (ADR-5). The retries share the run's own deadline.
+    let driver = match scrape_retry_config() {
+        Some(config)
+            if plan.driver != quarry_core::output::DriverKind::Browser
+                && state.proxy_pool_name.is_empty() =>
+        {
+            let until = tokio::time::Instant::now()
+                + Duration::from_millis(crate::scrape_actions::run_deadline_ms(
+                    resolved.actions.is_some(),
+                    resolved.timeout_ms,
+                ));
+            quarry_runtime::retry::RetryingDriver::wrap(driver, config.clone(), Some(until))
+        }
+        _ => driver,
+    };
 
     let ingest_client = if req.ingest.unwrap_or(false) {
         state.ingest.clone()
@@ -735,6 +1028,7 @@ async fn scrape_with(
         None
     };
 
+    let redact_pii = resolved.redact_pii == PiiRedaction::On;
     // WS13.5: a page an action changed is not evidence of its URL, so nothing that
     // indexes, titles, re-renders or ingests it runs for an actions request
     // (`scrape_actions::safe_mode_runner`, applied right after the runner is built).
@@ -749,7 +1043,7 @@ async fn scrape_with(
         user_id: Some(claims.actor_id().to_owned()),
         privacy: privacy.clone(),
         cancel_token: None,
-        local_index: state.local_index.clone(),
+        local_index: if redact_pii { None } else { state.local_index.clone() },
         policy: quarry_runtime::RunPolicy::from(decision.policy()),
         scheduler: state.scheduler.clone(),
         autoscale: Some(quarry_runtime::global_autoscale()),
@@ -773,7 +1067,7 @@ async fn scrape_with(
         // Ad-hoc single-page scrape, not a crawl target — don't materialize
         // a "tracked website" row for it.
         source_registrar: None,
-        title_enricher: state.page_title_enricher.clone(),
+        title_enricher: if redact_pii { None } else { state.page_title_enricher.clone() },
         doc_routing,
         robots: None,
     };
@@ -781,19 +1075,6 @@ async fn scrape_with(
 
     let run_id: RunKind = quarry_core::ids::Id::new();
     let prev_fp = req.prev_fingerprint.clone();
-    let inline_request = quarry_runtime::InlineRequest {
-        markdown: resolved.wants(ScrapeFormat::Markdown),
-        html: resolved.wants(ScrapeFormat::Html),
-        raw_html: resolved.wants(ScrapeFormat::RawHtml),
-        max_bytes: resolved.max_inline_bytes,
-        clean: quarry_transform::clean_html::CleanOptions {
-            only_main_content: resolved.only_main_content,
-            include_tags: resolved.include_tags.clone(),
-            exclude_tags: resolved.exclude_tags.clone(),
-            remove_base64_images: resolved.remove_base64_images,
-            extractor: resolved.extractor,
-        },
-    };
     let tombstone_started = chrono::Utc::now();
     // The caller's bound, never past the table's cap, so the typed Timeout
     // reaches the caller before the router's own limit drops the request.
@@ -836,13 +1117,31 @@ async fn scrape_with(
         },
     );
     match run {
-        Ok((out, inline)) => {
+        Ok((mut out, mut inline)) => {
+            if redact_pii {
+                redact_pii_text(&mut out, &mut inline, resolved.max_inline_bytes);
+            }
             if cache_allowed && should_write(&req.cache) {
                 if let Some(cache) = state.cache.as_ref() {
                     let ttl = effective_ttl(&req.cache, DEFAULT_TTL_SECS);
                     if let Err(e) = cache.put_with_ttl(&org_id, &out.fingerprint, &out, ttl).await {
                         // zdr-log-ok: reached only when the ZDR guard allows a cache write (cache_allowed, or !zdr.is_active()); the redis error text is what an operator needs
                         tracing::warn!(error = %e, "cache put failed");
+                    }
+                }
+            }
+            // INNH-7: the URL result cache. A key exists only for a non-ZDR, cacheable
+            // request on a stack with a cache; the write honours `cache.mode` and its TTL.
+            if let (Some(key), Some(cache)) = (result_key.as_ref(), state.cache.as_ref()) {
+                if should_write(&req.cache) && crate::scrape_cache::is_storable(&out, &inline) {
+                    let ttl = effective_ttl(&req.cache, DEFAULT_TTL_SECS);
+                    let entry = crate::cache::CachedScrape {
+                        output: out.clone(),
+                        warnings: inline.warnings.clone(),
+                    };
+                    if let Err(e) = cache.put_result(key, &entry, ttl).await {
+                        // zdr-log-ok: reached only with a result key, which a ZDR request never has (scrape_cache::eligibility); the redis error text is what an operator needs
+                        tracing::warn!(error = %e, "scrape result cache put failed");
                     }
                 }
             }
@@ -860,7 +1159,27 @@ async fn scrape_with(
                     scrape_usage_metadata(&state.usage, &claims, &out, zdr, &privacy),
                 ))
                 .await;
+            // INNH-1: the AI formats read the page text and answer inline only. The
+            // result is never stored: not in the scrape record below, not in the
+            // cache (these requests never touch it), not in an artifact or event.
+            // A model failure leaves the scrape a 200 with the failure in `ai`.
+            let (ai_fields, ai_report) = if ai_specs.is_empty() {
+                (quarry_runtime::ai_scrape::AiFields::default(), None)
+            } else {
+                let (fields, report) = crate::scrape_contract::ai_formats::run_ai_formats(
+                    &state,
+                    &org_id,
+                    &ai_specs,
+                    inline.ai_source.as_deref().unwrap_or(""),
+                    zdr.is_active(),
+                    ai_model_hop_allowed,
+                    &request_id,
+                )
+                .await;
+                (fields, Some(report))
+            };
             let mut warnings = unknown_warnings;
+            warnings.extend(max_age_warnings);
             warnings.extend(inline.warnings);
             let effective_options = effective(cache_state);
             // One small record per non-ZDR scrape, so the result can be read
@@ -906,6 +1225,11 @@ async fn scrape_with(
                 pdf: inline.pdf,
                 captures: inline.captures,
                 actions: inline.actions,
+                json: ai_fields.json,
+                summary: ai_fields.summary,
+                answer: ai_fields.answer,
+                highlights: ai_fields.highlights,
+                ai: ai_report,
             }))
         }
         Err(err) => {
@@ -1027,8 +1351,38 @@ async fn crawl_handoff(
         crate::crawl_request::CrawlRequestSettings::current(),
     )
     .map_err(|refusal| crawl_request_refusal(&request_id, refusal))?;
+    // WS14.S7a: `ignore_robots_txt: true` is decided here, where the caller's claims are, and
+    // before anything else, so a refused ask is the same 403 `policy_denied` it was when the
+    // body check refused it. Only a person whose org's signed policy raises the robots ceiling
+    // to `ignore`, with web policy and the claim both enforced, on an org the operators
+    // granted, gets it. Never a service principal (the Model) or an API key.
+    let robots_override = crate::crawl_request::robots_override(
+        &req,
+        &claims,
+        &state.policy,
+        crate::crawl_request::RobotsOverrideGrants::current(),
+    )
+    .map_err(|refusal| crawl_request_refusal(&request_id, refusal))?;
     refuse_durable_job_under_zdr(&claims, req.zdr, &request_id, "crawl")?;
     refuse_while_draining(&request_id)?;
+    // INNH-6a: a sitemap is seeded through the crawl scope. A crawl that runs with the scope
+    // switch off is a legacy one, with no scope to check the sitemap's URLs against.
+    if req.sitemap != crate::crawl_request::SitemapMode::Skip
+        && matches!(
+            crate::crawl_policy::CrawlScopeSwitch::current(),
+            crate::crawl_policy::CrawlScopeSwitch::Off
+        )
+    {
+        return Err(crawl_request_refusal(
+            &request_id,
+            crate::crawl_request::Refusal::Invalid(vec![crate::crawl_request::RequestField {
+                path: "sitemap".to_owned(),
+                code: "unsupported_option",
+                message: "sitemap include and only need the crawl scope (QUARRY_EDGE__CRAWL_SCOPE_MODE observe or enforce)"
+                    .to_owned(),
+            }]),
+        ));
+    }
     // WS7.E: the seed is gated by the web policy before the handoff. A denial is a 403 and
     // the orchestrator is never called. The durable refusal above already decided ZDR, so
     // the decision is taken for a non-ZDR run.
@@ -1090,32 +1444,55 @@ async fn crawl_handoff(
     // carries its origin (WS15.L1) and the caller's Idempotency-Key, if sent.
     // WS14.S3: the scope this crawl runs with, stamped into the job and echoed in the ack.
     // The switch is read once at boot; `off` stamps `legacy` so the orchestrator runs it as before.
-    let scope = crate::crawl_policy::handoff_scope(
+    let mut scope = crate::crawl_policy::handoff_scope(
         crate::crawl_policy::CrawlScopeSwitch::current(),
         req.scope.allow_subdomains,
         req.scope.allow_external_links,
     )
     .with_request_scope(&req.scope);
+    // WS14.S7a: an allowed override runs the crawl with robots ignored (`effective.robots`).
+    if robots_override.is_some() {
+        scope.robots = quarry_core::crawl_scope::RobotsMode::Ignore;
+    }
     let origin = crate::handoff::run_origin_from_request(&claims, &headers);
     let idempotency_key = crate::handoff::idempotency_key_from_request(&headers);
+    let mut job_params = serde_json::json!({
+        "kind": "crawl",
+        "url": req.url,
+        "scope": scope.scope_value(),
+        "scope_mode": scope.scope_mode_label(),
+        "robots": scope.robots_label(),
+        "max_pages": limits.max_pages.effective,
+        "max_depth": limits.max_depth.effective,
+        "max_pages_requested": req.max_pages,
+        "max_depth_requested": req.max_depth,
+        "org_id": org_id,
+        "user_id": claims.user_id,
+        "ingest": req.ingest,
+    });
+    // INNH-6: stamped only when asked for, so a job without them is byte-identical to before.
+    if let Some(params) = job_params.as_object_mut() {
+        if req.sitemap != crate::crawl_request::SitemapMode::Skip {
+            params.insert("sitemap".to_owned(), serde_json::json!(req.sitemap.wire()));
+        }
+        if let Some(options) = req.scrape_options.as_ref() {
+            params.insert("scrape_options".to_owned(), options.to_value());
+        }
+        // WS14.S7a: an override job's `robots` is the object quarry-control audits before it
+        // acknowledges the job (`crawl.robots_ignored`, WS14.S7b): mode, the authority and the
+        // org policy rev that allowed it. `user_id` (stamped above) is the person it is
+        // attributed to. Every other job keeps the `"respect"` string, byte-identical.
+        if let Some(allowed) = robots_override.as_ref() {
+            params.insert("robots".to_owned(), allowed.params_value());
+        }
+    }
+    // WS7.G 6b: the policy this crawl was admitted under rides with the job to every page.
+    stamp_policy_snapshot(&mut job_params, &state, &decision);
     let ack = crate::handoff::forward_job_signed(
         &state.control_base_url,
         &org_id,
         "crawl",
-        crate::handoff::with_admission(serde_json::json!({
-            "kind": "crawl",
-            "url": req.url,
-            "scope": scope.scope_value(),
-            "scope_mode": scope.scope_mode_label(),
-            "robots": scope.robots_label(),
-            "max_pages": limits.max_pages.effective,
-            "max_depth": limits.max_depth.effective,
-            "max_pages_requested": req.max_pages,
-            "max_depth_requested": req.max_depth,
-            "org_id": org_id,
-            "user_id": claims.user_id,
-            "ingest": req.ingest,
-        }), &org_limits),
+        crate::handoff::with_admission(job_params, &org_limits),
         &origin,
         idempotency_key.as_deref(),
         state.internal_signer.as_deref(),
@@ -1170,6 +1547,17 @@ async fn crawl_handoff(
             let mut effective =
                 scope.effective(limits.max_pages.effective, limits.max_depth.effective);
             if let Some(object) = effective.as_object_mut() {
+                if req.sitemap != crate::crawl_request::SitemapMode::Skip {
+                    object.insert("sitemap".to_owned(), serde_json::json!(req.sitemap.wire()));
+                }
+                if let Some(options) = req.scrape_options.as_ref() {
+                    object.insert("scrape_options".to_owned(), options.to_value());
+                }
+                // WS14.S7a: `robots` is `"ignore"` (from the scope); the authority and rev
+                // that allowed it ride beside it.
+                if let Some(allowed) = robots_override.as_ref() {
+                    object.insert("robots_override".to_owned(), allowed.effective_value());
+                }
                 object.insert(
                     "request_warnings".to_owned(),
                     serde_json::Value::Array(
@@ -1216,6 +1604,11 @@ async fn batch_handoff(
     // When none can be crawled the batch is a 400 with `details.rejected`; otherwise the
     // accepted URLs go on and the refused ones come back in `HandoffAck.rejected`. The policy
     // gate below sees only the accepted URLs.
+    // W3-E3.7.1 (`QUARRY_EDGE__BATCH_IDEMPOTENCY`, default off): the hash of the request as
+    // the caller sent it, taken before the URL check and the allowance clamp, so a retry of
+    // the same request hashes the same even when the plan changed in between.
+    let batch_payload_hash = crate::handoff::batch_idempotency_enabled()
+        .then(|| crate::handoff::batch_payload_hash(&req.urls, req.ingest));
     let mut req = req;
     let check = crate::batch_check::validate_batch_urls(
         &req.urls,
@@ -1255,23 +1648,47 @@ async fn batch_handoff(
     req.urls.truncate(urls_bound.accepted);
     let origin = crate::handoff::run_origin_from_request(&claims, &headers);
     let idempotency_key = crate::handoff::idempotency_key_from_request(&headers);
-    let ack = crate::handoff::forward_job_signed(
-        &state.control_base_url,
-        &claims.org_id,
-        "batch",
-        crate::handoff::with_admission(serde_json::json!({
-            "kind": "batch",
-            "urls": req.urls,
-            "robots": "respect",
-            "org_id": claims.org_id,
-            "user_id": claims.user_id,
-            "ingest": req.ingest,
-        }), &org_limits),
-        &origin,
-        idempotency_key.as_deref(),
-        state.internal_signer.as_deref(),
-    )
-    .await;
+    let mut batch_params = serde_json::json!({
+        "kind": "batch",
+        "urls": req.urls,
+        "robots": "respect",
+        "org_id": claims.org_id,
+        "user_id": claims.user_id,
+        "ingest": req.ingest,
+    });
+    // WS7.G 6b: the policy this batch was admitted under rides with the job to every page.
+    stamp_policy_snapshot(&mut batch_params, &state, &decision);
+    let batch_params = crate::handoff::with_admission(batch_params, &org_limits);
+    // W3-E3.7.1: with the flag on and a key sent, a replay of a different batch under the
+    // same key is a 409 and a retry of the same batch re-attaches to the held job. Off, or
+    // without a key, the handoff is exactly as before.
+    let ack = match (idempotency_key.as_deref(), batch_payload_hash.as_deref()) {
+        (Some(key), Some(payload_hash)) => {
+            crate::handoff::forward_job_idempotent(
+                &state.control_base_url,
+                &claims.org_id,
+                "batch",
+                batch_params,
+                &origin,
+                key,
+                payload_hash,
+                state.internal_signer.as_deref(),
+            )
+            .await
+        }
+        _ => {
+            crate::handoff::forward_job_signed(
+                &state.control_base_url,
+                &claims.org_id,
+                "batch",
+                batch_params,
+                &origin,
+                idempotency_key.as_deref(),
+                state.internal_signer.as_deref(),
+            )
+            .await
+        }
+    };
 
     // P3 / cluster #billing — one batch.url event with quantity = url
     // count. Cheaper than emitting N individual events; billing-core can
@@ -1395,6 +1812,20 @@ pub struct InternalRunPage {
     /// Only a crawl page is metered (`quarry.crawl.page`).
     #[serde(default)]
     pub kind: Option<String>,
+    /// INNH-6b: the crawl's checked `scrape_options` (`crawl_scrape::CrawlScrapeOptions`).
+    /// Raw JSON, re-validated here. Absent (or null) leaves the page run and the response
+    /// exactly as they were. Honoured only with `QUARRY_EDGE__CRAWL_SCRAPE_OPTIONS` on; with
+    /// the flag off the field is ignored and the response lacks `scrape_applied`.
+    #[serde(default)]
+    pub scrape: Option<serde_json::Value>,
+    /// WS7.G 6b: the web policy the handoff resolved for the durable job
+    /// (`ResolvedPolicy::snapshot_json`), stamped on the job's params and carried by every page.
+    /// Raw JSON, re-validated here. Its sha256 is part of the signed run-binding string, so it
+    /// cannot be added, swapped or stripped without the shared secret. Honoured only with
+    /// `QUARRY_EDGE__WEB_POLICY_SNAPSHOT` at `enforce` (counted at `observe`); with the flag off
+    /// the field is ignored. Absent (or null) leaves the page run exactly as it was.
+    #[serde(default)]
+    pub policy_snapshot: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1439,6 +1870,30 @@ pub struct InternalRunPageResult {
     /// WS14.S2: set only when the request carried `crawl`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub crawl: Option<quarry_core::crawl_scope::CrawlReport>,
+    /// INNH-4: id of the stored markdown artifact of this page (org-bound, readable through
+    /// `GET /v1/artifacts/{id}`). General, not change-specific: the change monitor keeps it
+    /// on a baseline, and the per-run results of a crawl or batch can list it (INNH-12).
+    /// Absent when nothing was stored, always so under ZDR. An older runtime omits it, and
+    /// so does every response when no page artifact was written.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub markdown_artifact_id: Option<String>,
+    /// INNH-12: id of the stored source of this page (`html`, or `raw` for a document), read
+    /// through the same org-bound `GET /v1/artifacts/{id}`. Absent whenever the markdown id is.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_artifact_id: Option<String>,
+    /// INNH-12: size in bytes of the stored markdown. Absent whenever the markdown id is.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bytes: Option<u64>,
+    /// INNH-6b: `true` when the request's `scrape` options were applied to this page. Absent
+    /// when the request carried none. An orchestrator that sent options and does not see this
+    /// ends the run (an edge that ignores the field would crawl with the default cleaning).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scrape_applied: Option<bool>,
+    /// E3.5-4: the page's normalised text fingerprint (`NormalizedOutput::text_fp`). The
+    /// change monitor sends it on `/v1/internal/change/record` as `fresh_text_fingerprint`;
+    /// `fingerprint` above stays the raw-byte hash. Absent for an output that predates it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text_fp: Option<String>,
 }
 
 impl InternalRunPageResult {
@@ -1469,6 +1924,20 @@ impl InternalRunPageResult {
                     .unwrap_or_default()
             }),
             crawl: None,
+            markdown_artifact_id: out
+                .formats
+                .markdown
+                .as_ref()
+                .map(|format| format.artifact_id.to_string()),
+            source_artifact_id: out
+                .formats
+                .html
+                .as_ref()
+                .or(out.formats.raw.as_ref())
+                .map(|format| format.artifact_id.to_string()),
+            bytes: out.formats.markdown.as_ref().map(|format| format.bytes),
+            scrape_applied: None,
+            text_fp: out.text_fp.clone(),
         }
     }
 }
@@ -1506,6 +1975,15 @@ fn compile_crawl(
     }
 }
 
+/// INNH-6b: mark whether the request's `scrape` options were applied to this page.
+fn with_scrape_applied(
+    mut result: InternalRunPageResult,
+    applied: Option<bool>,
+) -> InternalRunPageResult {
+    result.scrape_applied = applied;
+    result
+}
+
 /// WS14.S2: when the request carried `crawl`, replace the page's links with the
 /// scope's allowed links and attach the report. Without a scope the result is
 /// returned exactly as built, so the response is unchanged for existing callers.
@@ -1528,6 +2006,11 @@ fn with_crawl(
     let mut outcome = scope.evaluate(&page, &result.links, lookup);
     if let Some(gate) = robots {
         outcome.report.crawl_delay_ms = gate.crawl_delay_ms(&page);
+        // WS14.S4, D2-091: the links the robots decision removed, counted only when the gate
+        // enforces. Observe and off remove no link, so they count none.
+        if gate.mode() == quarry_runtime::RobotsEnforceMode::Enforce {
+            crate::metrics::record_robots_link_refusals(&outcome.report);
+        }
     }
     result.links = outcome.links;
     result.crawl = Some(outcome.report);
@@ -1589,6 +2072,96 @@ pub(crate) fn verify_runtime_token(headers: &HeaderMap) -> Result<(), QuarryErro
     }
 }
 
+/// WS7.G 6b: stamp the policy a durable job's handoff resolved onto the job's params, for the
+/// orchestrator to carry to every page run. Stamped only with `QUARRY_EDGE__WEB_POLICY_SNAPSHOT`
+/// at `observe` or `enforce`, and only when the policy differs from the catalogue default (a
+/// default policy carries nothing a page does not already apply), so a job without a tightening
+/// is byte-identical to one built before the snapshot existed.
+///
+/// The policy stamped is the one `enforce` would apply (`shadow` under `observe`): the page's
+/// own web-policy enforcement mode decides whether it binds.
+fn stamp_policy_snapshot(
+    params: &mut serde_json::Value,
+    state: &AppState,
+    decision: &crate::policy_baseline::Decision,
+) {
+    use crate::policy_baseline::Enforcement;
+    if state.policy.snapshot_mode() == Enforcement::Off {
+        return;
+    }
+    let policy = decision.shadow().unwrap_or_else(|| decision.policy());
+    if quarry_runtime::RunPolicy::from(policy).web_policy.is_none() {
+        return;
+    }
+    if let Some(object) = params.as_object_mut() {
+        object.insert("policy_snapshot".to_owned(), policy.snapshot_json());
+    }
+}
+
+/// WS7.G 6b: meet the page's decision with the job's policy snapshot. Returns the decision the
+/// page runs under and whether the snapshot bound it.
+///
+/// * flag `off`, or no snapshot: the decision is returned unchanged;
+/// * `observe`: the decision is returned unchanged; pages the snapshot would tighten, and pages
+///   it would refuse, are counted (`web_policy_snapshot_tighter_total`,
+///   `web_policy_snapshot_would_deny_total`; no label, no URL);
+/// * `enforce`: the decision is resolved again with the snapshot as the request layer, so the
+///   page can only be as restrictive as, or more than, the handoff's policy.
+///
+/// A snapshot the current version cannot read is a 400 in `observe` and `enforce`, never a
+/// silent run under a looser policy.
+fn apply_policy_snapshot(
+    state: &AppState,
+    decision: crate::policy_baseline::Decision,
+    snapshot: Option<&serde_json::Value>,
+    zdr: bool,
+    url: &str,
+    request_id: &str,
+) -> Result<(crate::policy_baseline::Decision, bool), (StatusCode, Json<Envelope<()>>)> {
+    use crate::policy_baseline::Enforcement;
+    use quarry_core::web_policy::{OrgInput, PolicyLayer, Principal};
+    let Some(raw) = snapshot.filter(|value| !value.is_null()) else {
+        return Ok((decision, false));
+    };
+    let mode = state.policy.snapshot_mode();
+    if mode == Enforcement::Off {
+        tracing::warn!(
+            target: "quarry.web_policy",
+            "run_page policy snapshot ignored: QUARRY_EDGE__WEB_POLICY_SNAPSHOT is off"
+        );
+        return Ok((decision, false));
+    }
+    let layer = PolicyLayer::from_snapshot_json(raw).map_err(|_| {
+        let err = QuarryError::new(ErrorCode::BadRequest, "the policy snapshot is invalid")
+            .with_details(serde_json::json!({ "reason": "invalid_policy_snapshot", "retryable": false }));
+        (
+            StatusCode::BAD_REQUEST,
+            Json(Envelope::<()>::err(request_id, err)),
+        )
+    })?;
+    let met = state
+        .policy
+        .decide_with_org(Principal::Autonomous, zdr, OrgInput::Absent, Some(layer))
+        .map_err(|denial| {
+            crate::web_policy_edge::record_denial(&denial, true);
+            crate::web_policy_edge::envelope_error(request_id, crate::web_policy_edge::quarry_error(&denial))
+        })?;
+    if mode == Enforcement::Enforce {
+        return Ok((met, true));
+    }
+    // observe: what `enforce` would have decided, beside what the page decided without it.
+    let with_snapshot = met.shadow().unwrap_or_else(|| met.policy());
+    let without = decision.shadow().unwrap_or_else(|| decision.policy());
+    if with_snapshot.digest() != without.digest() {
+        metrics::counter!("web_policy_snapshot_tighter_total").increment(1);
+        if with_snapshot.check_url(url).is_err() && without.check_url(url).is_ok() {
+            metrics::counter!("web_policy_snapshot_would_deny_total").increment(1);
+            tracing::info!(target: "quarry.web_policy", "policy.snapshot_would_deny");
+        }
+    }
+    Ok((decision, false))
+}
+
 async fn internal_run_page(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1629,7 +2202,15 @@ async fn internal_run_page(
             .get("x-quarry-run-sig")
             .and_then(|v| v.to_str().ok())
             .unwrap_or("");
-        if !signer.verify_run_binding(&org_id, &req.url, sig) {
+        // WS7.G 6b: a page that carries a policy snapshot signs its hash too, whatever the
+        // snapshot flag says, so the binding holds before anything decides to use it.
+        // WS14.S7a: and a page whose crawl context does not respect robots.txt signs the hash of
+        // its `crawl.robots`, so a captured respecting page cannot be replayed as ignoring.
+        let extras = crate::internal_auth::RunBindingExtras::for_page(
+            req.policy_snapshot.as_ref(),
+            req.crawl.as_ref(),
+        );
+        if !signer.verify_run_binding_with(&org_id, &req.url, &extras, sig) {
             tracing::warn!(
                 had_sig = !sig.is_empty(),
                 "run_page HMAC org-binding failed"
@@ -1674,6 +2255,47 @@ async fn internal_run_page(
     // WS14.S2: a malformed `crawl` is refused before anything is fetched.
     let crawl_scope = compile_crawl(req.crawl.clone(), &request_id)?;
 
+    // INNH-6b: the crawl's per-page options, re-checked here with the rules the handoff used.
+    // Off (the default), the field is ignored and the response says nothing of it, so an
+    // orchestrator that sent options sees they were not applied and ends the run.
+    let scrape_options = match req.scrape.as_ref().filter(|value| !value.is_null()) {
+        Some(raw) if crate::crawl_policy::CrawlFeatures::current().scrape_options => {
+            Some(
+                crate::crawl_scrape::CrawlScrapeOptions::from_stamped(raw).map_err(|errors| {
+                    let fields: Vec<serde_json::Value> = errors
+                        .iter()
+                        .map(|e| {
+                            serde_json::json!({
+                                "path": format!("scrape.{}", e.path),
+                                "code": e.code,
+                                "message": e.message,
+                            })
+                        })
+                        .collect();
+                    let err = QuarryError::new(ErrorCode::BadRequest, "the scrape options are invalid")
+                        .with_details(serde_json::json!({ "fields": fields }));
+                    (
+                        StatusCode::BAD_REQUEST,
+                        Json(Envelope::<()>::err(&request_id, err)),
+                    )
+                })?,
+            )
+        }
+        Some(_) => {
+            tracing::warn!(
+                "run_page scrape options ignored: QUARRY_EDGE__CRAWL_SCRAPE_OPTIONS is off"
+            );
+            None
+        }
+        None => None,
+    };
+    let scrape_applied = scrape_options.as_ref().map(|_| true);
+    // The page cache is keyed by the page's fingerprint alone: a page cleaned differently from
+    // the default must neither read it nor write it.
+    let scrape_cache_ok = scrape_options
+        .as_ref()
+        .map_or(true, crate::crawl_scrape::CrawlScrapeOptions::cache_admissible);
+
     // WS7.C: no JWT on this route. The caller is the orchestrator, an autonomous
     // principal, so the decision is the baseline and the invariants (no ask).
     let decision = crate::web_policy_edge::decide_for_principal(
@@ -1683,6 +2305,12 @@ async fn internal_run_page(
         None,
     )
     .map_err(|error| crate::web_policy_edge::envelope_error(&request_id, error))?;
+    // WS7.G 6b: the policy the handoff resolved meets this page's own (tighten-only). Under
+    // `observe` the page runs as before and the tightening is counted; under `enforce` the
+    // page runs under the met policy. A tightened page is not a default page, so it neither
+    // reads nor writes the page cache.
+    let (decision, snapshot_tightened) =
+        apply_policy_snapshot(&state, decision, req.policy_snapshot.as_ref(), zdr.is_active(), &req.url, &request_id)?;
     crate::web_policy_edge::gate_url(&decision, &req.url)
         .map_err(|error| crate::web_policy_edge::envelope_error(&request_id, error))?;
 
@@ -1744,7 +2372,8 @@ async fn internal_run_page(
         None => quarry_core::ids::Id::new(),
     };
 
-    if !zdr.is_active() && should_read(&req.cache) {
+    let snapshot_cache_ok = !(snapshot_tightened && !crate::web_policy_edge::is_default(&decision));
+    if !zdr.is_active() && scrape_cache_ok && snapshot_cache_ok && should_read(&req.cache) {
         if let (Some(prev), Some(cache)) = (req.prev_fingerprint.as_ref(), state.cache.as_ref()) {
             if let Some(cached) = cache.get(&org_id, prev).await {
                 // WS14.S4, D2-161: a cached page gets the robots.txt decision that a fetched
@@ -1758,7 +2387,10 @@ async fn internal_run_page(
                 }
                 meter_crawl_page(&state, req.kind.as_deref(), &req.url, req.user_id.as_deref(), &run_id, &org_id, zdr).await;
                 return Ok(Json(with_crawl(
-                    InternalRunPageResult::from_output(run_id.to_string(), &cached),
+                    with_scrape_applied(
+                        InternalRunPageResult::from_output(run_id.to_string(), &cached),
+                        scrape_applied,
+                    ),
                     &cached.url.final_url,
                     crawl_scope.as_ref(),
                     state.robots.as_deref(),
@@ -1768,9 +2400,37 @@ async fn internal_run_page(
     }
 
     let prev_fp = req.prev_fingerprint.clone();
-    match runner.run(&run_id, &url, prev_fp).await {
+    // INNH-6b: with options, the page is cleaned with them (the stored markdown and what an
+    // ingest sends on are the cleaned text) and bounded by `timeout_ms` when one was given.
+    let run_result = match scrape_options.as_ref() {
+        None => runner.run(&run_id, &url, prev_fp).await,
+        Some(options) => {
+            let inline_request = quarry_runtime::InlineRequest {
+                clean: options.clean_options(),
+                ..quarry_runtime::InlineRequest::default_for(zdr)
+            };
+            let run = runner.run_with_inline_request(&run_id, &url, prev_fp, &inline_request);
+            let finished = match options.timeout_ms {
+                Some(ms) => tokio::time::timeout(Duration::from_millis(ms), run)
+                    .await
+                    .unwrap_or_else(|_| {
+                        Err(QuarryError::new(
+                            ErrorCode::Timeout,
+                            "the page did not finish within scrape_options.timeout_ms",
+                        ))
+                    }),
+                None => run.await,
+            };
+            finished.map(|(output, _inline)| output)
+        }
+    };
+    match run_result {
         Ok(out) => {
-            if !zdr.is_active() && crate::web_policy_edge::is_default(&decision) && should_write(&req.cache) {
+            if !zdr.is_active()
+                && scrape_cache_ok
+                && crate::web_policy_edge::is_default(&decision)
+                && should_write(&req.cache)
+            {
                 if let Some(cache) = state.cache.as_ref() {
                     let ttl = effective_ttl(&req.cache, DEFAULT_TTL_SECS);
                     if let Err(e) = cache.put_with_ttl(&org_id, &out.fingerprint, &out, ttl).await {
@@ -1781,7 +2441,10 @@ async fn internal_run_page(
             }
             meter_crawl_page(&state, req.kind.as_deref(), &req.url, req.user_id.as_deref(), &run_id, &org_id, zdr).await;
             Ok(Json(with_crawl(
-                InternalRunPageResult::from_output(run_id.to_string(), &out),
+                with_scrape_applied(
+                    InternalRunPageResult::from_output(run_id.to_string(), &out),
+                    scrape_applied,
+                ),
                 &out.url.final_url,
                 crawl_scope.as_ref(),
                 state.robots.as_deref(),
@@ -1880,6 +2543,28 @@ async fn scrape_stream(
             let error = QuarryError::new(
                 ErrorCode::BadRequest,
                 "screenshot and pdf formats are not served on the stream route",
+            )
+            .with_details(serde_json::json!({ "reason": "unsupported_in_stream" }));
+            yield Ok(Event::default().event("error").data(serde_json::to_string(&error).unwrap_or_default()));
+            return;
+        }
+        // E3.6-5: the stream serves no PII redaction (its events carry the page text as the
+        // run emits it). Refused, not dropped; `off` is the default and passes.
+        if stream_requests_redaction(&req) {
+            let error = QuarryError::new(
+                ErrorCode::BadRequest,
+                "redact_pii is not served on the stream route",
+            )
+            .with_details(serde_json::json!({ "reason": "unsupported_in_stream" }));
+            yield Ok(Event::default().event("error").data(serde_json::to_string(&error).unwrap_or_default()));
+            return;
+        }
+        // INNH-1: the stream serves no AI formats. Refused whatever the switch says,
+        // before any fetch, so a caller learns it is the route and not the flag.
+        if crate::scrape_contract::ai_formats::requests_ai_format(req.formats.as_ref()) {
+            let error = QuarryError::new(
+                ErrorCode::BadRequest,
+                "AI formats are not served on the stream route",
             )
             .with_details(serde_json::json!({ "reason": "unsupported_in_stream" }));
             yield Ok(Event::default().event("error").data(serde_json::to_string(&error).unwrap_or_default()));
@@ -2218,6 +2903,7 @@ mod tests {
             page_title_enricher: None,
             service_token_provider: None,
             answer_pipeline: None,
+            answer_status: crate::answer_status::AnswerPipelineStatus::SynthesisDisabled,
             model_plane: Default::default(),
             local_index: None,
             usage: Arc::new(NoopUsageMeter),
@@ -2260,6 +2946,8 @@ mod tests {
             aud: None,
             scopes: Vec::new(),
             zdr: None,
+            key_id: None,
+            acting_user_id: None,
         }
     }
 
@@ -2633,6 +3321,61 @@ mod tests {
         assert_eq!(body["data"]["effective_options"]["formats"], serde_json::json!(["markdown"]));
     }
 
+    const PII_PAGE: &[u8] = b"<html><head><title>Contact page</title></head><body><main><p>Write to ola.nordmann@example.no or call +47 22 33 44 55 about the order, long enough to read as content for the extractor.</p></main></body></html>";
+
+    fn pii_page_state() -> AppState {
+        let calls = Arc::new(AtomicU32::new(0));
+        let driver = Arc::new(TestDriver::ok(DriverKind::Static, calls, PII_PAGE));
+        let mut drivers = DriverRegistry::new(DriverKind::Static);
+        drivers.register(driver.clone());
+        test_state(driver, drivers, None)
+    }
+
+    #[tokio::test]
+    async fn redact_pii_under_zdr_redacts_the_inline_text_and_says_so() {
+        let response = call_scrape_with(
+            pii_page_state(),
+            serde_json::json!({ "url": "https://example.com/contact", "zdr": true, "redact_pii": "on" }),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = crate::test_support::response_json(response).await;
+        let data = &body["data"];
+        let markdown = data["markdown"].as_str().expect("ZDR returns the markdown inline");
+        assert!(!markdown.contains("ola.nordmann@example.no"), "{markdown}");
+        assert!(!markdown.contains("22 33 44 55"), "{markdown}");
+        assert!(markdown.contains("[redacted:pii.email]"), "{markdown}");
+        assert!(markdown.contains("[redacted:pii.phone]"), "{markdown}");
+        assert_eq!(data["effective_options"]["redact_pii"], "on");
+        assert!(data.get("scrape_id").is_none(), "ZDR stores no record");
+    }
+
+    #[tokio::test]
+    async fn redact_pii_outside_zdr_is_refused_with_the_field_named() {
+        let response = call_scrape_with(
+            pii_page_state(),
+            serde_json::json!({ "url": "https://example.com/contact", "redact_pii": "on" }),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = crate::test_support::response_json(response).await;
+        assert_eq!(body["error"]["details"]["fields"][0]["path"], "redact_pii");
+        assert_eq!(body["error"]["details"]["fields"][0]["code"], "requires_zdr");
+    }
+
+    #[tokio::test]
+    async fn redact_pii_is_off_by_default_and_the_text_is_the_pages() {
+        let response = call_scrape_with(
+            pii_page_state(),
+            serde_json::json!({ "url": "https://example.com/contact", "zdr": true }),
+        )
+        .await;
+        let body = crate::test_support::response_json(response).await;
+        let data = &body["data"];
+        assert!(data["markdown"].as_str().unwrap().contains("ola.nordmann@example.no"));
+        assert_eq!(data["effective_options"]["redact_pii"], "off");
+    }
+
     #[tokio::test]
     async fn lenient_mode_warns_about_unknown_fields_and_says_so_in_headers() {
         let settings = crate::scrape_contract::ScrapeSettings {
@@ -2928,4 +3671,181 @@ mod tests {
         assert!(body["data"].get("scrape_id").is_none());
     }
 
+    // ---- INNH-4: run_page hands back the id of the stored markdown ----
+
+    fn output_with_markdown(markdown: Option<&str>) -> NormalizedOutput {
+        let mut formats = serde_json::json!({});
+        if let Some(id) = markdown {
+            formats = serde_json::json!({ "markdown": { "artifact_id": id, "bytes": 12 } });
+        }
+        serde_json::from_value(serde_json::json!({
+            "run_id": quarry_core::ids::kinds::RunKind::new(),
+            "url": { "requested": "https://example.com/p", "final_url": "https://example.com/p" },
+            "status": 200,
+            "fetched_at": "2026-01-01T00:00:00Z",
+            "fingerprint": "blake3:fp",
+            "formats": formats,
+            "change": { "status": "new" },
+            "metadata": {},
+            "driver": { "kind": "static", "duration_ms": 1 }
+        }))
+        .expect("a minimal NormalizedOutput")
+    }
+
+    #[test]
+    fn run_page_result_carries_the_markdown_artifact_id() {
+        let id = quarry_core::ids::kinds::ArtifactKind::new().to_string();
+        let out = output_with_markdown(Some(&id));
+        let result = InternalRunPageResult::from_output("run_1".into(), &out);
+        assert_eq!(result.markdown_artifact_id.as_deref(), Some(id.as_str()));
+        let wire = serde_json::to_value(&result).unwrap();
+        assert_eq!(wire["markdown_artifact_id"], id);
+    }
+
+    #[test]
+    fn run_page_result_omits_the_markdown_artifact_id_when_nothing_was_stored() {
+        // ZDR (and a failed write) leave `formats.markdown` empty: the wire carries no key,
+        // so the orchestrator forwards nothing and no hash-only stand-in exists.
+        let out = output_with_markdown(None);
+        let result = InternalRunPageResult::from_output("run_1".into(), &out);
+        assert!(result.markdown_artifact_id.is_none());
+        let wire = serde_json::to_value(&result).unwrap();
+        assert!(wire.get("markdown_artifact_id").is_none(), "{wire}");
+        assert!(wire.get("source_artifact_id").is_none(), "{wire}");
+        assert!(wire.get("bytes").is_none(), "{wire}");
+    }
+
+    // ---- W3-E3.5-4: run_page hands back the text fingerprint ----
+
+    #[test]
+    fn run_page_result_carries_the_text_fingerprint_next_to_the_raw_one() {
+        let mut out = output_with_markdown(None);
+        out.text_fp = Some("blake3:text".into());
+        let result = InternalRunPageResult::from_output("run_1".into(), &out);
+        assert_eq!(result.text_fp.as_deref(), Some("blake3:text"));
+        let wire = serde_json::to_value(&result).unwrap();
+        assert_eq!(wire["text_fp"], "blake3:text");
+        assert_eq!(wire["fingerprint"], "blake3:fp");
+    }
+
+    #[test]
+    fn run_page_result_omits_the_text_fingerprint_for_an_older_output() {
+        let out = output_with_markdown(None);
+        let result = InternalRunPageResult::from_output("run_1".into(), &out);
+        let wire = serde_json::to_value(&result).unwrap();
+        assert!(wire.get("text_fp").is_none(), "{wire}");
+    }
+
+    fn output_with_formats(formats: serde_json::Value) -> NormalizedOutput {
+        let mut out = output_with_markdown(None);
+        out.formats = serde_json::from_value(formats).expect("formats");
+        out
+    }
+
+    // ---- INNH-12: the per-run results read these fields off page_fetched ----
+
+    #[test]
+    fn run_page_result_carries_the_source_artifact_and_markdown_bytes() {
+        let md = quarry_core::ids::kinds::ArtifactKind::new().to_string();
+        let html = quarry_core::ids::kinds::ArtifactKind::new().to_string();
+        let out = output_with_formats(serde_json::json!({
+            "markdown": { "artifact_id": md, "bytes": 321 },
+            "html": { "artifact_id": html, "bytes": 9000 }
+        }));
+        let wire = serde_json::to_value(InternalRunPageResult::from_output("run_1".into(), &out))
+            .unwrap();
+        assert_eq!(wire["markdown_artifact_id"], md);
+        assert_eq!(wire["source_artifact_id"], html);
+        assert_eq!(wire["bytes"], 321, "bytes is the markdown size, not the source size");
+    }
+
+    #[test]
+    fn run_page_result_source_is_the_raw_artifact_for_a_document() {
+        let md = quarry_core::ids::kinds::ArtifactKind::new().to_string();
+        let raw = quarry_core::ids::kinds::ArtifactKind::new().to_string();
+        let out = output_with_formats(serde_json::json!({
+            "markdown": { "artifact_id": md, "bytes": 5 },
+            "raw": { "artifact_id": raw, "bytes": 77 }
+        }));
+        let result = InternalRunPageResult::from_output("run_1".into(), &out);
+        assert_eq!(result.source_artifact_id.as_deref(), Some(raw.as_str()));
+    }
+
+    // ---- WS14.S4, D2-091: a robots link refusal is counted only when the gate enforces ----
+
+    /// Answers every robots.txt with the same body.
+    struct FixedRobots(&'static str);
+
+    #[async_trait]
+    impl quarry_runtime::RobotsFetcher for FixedRobots {
+        async fn fetch(&self, _origin: &str, _org_id: &str) -> quarry_runtime::RobotsFetch {
+            quarry_runtime::RobotsFetch::Found(self.0.to_owned())
+        }
+    }
+
+    /// A gate in `mode` whose cache already holds the page's origin, so the link filter reads
+    /// the rules from the cache as it does on a live crawl.
+    async fn gate_with_cached_rules(
+        mode: quarry_runtime::RobotsEnforceMode,
+        page: &Url,
+    ) -> quarry_runtime::RobotsGate {
+        let gate = quarry_runtime::RobotsGate::with_fetcher(
+            Arc::new(FixedRobots("User-agent: *\nDisallow: /private/\n")),
+            quarry_runtime::RobotsGateConfig {
+                mode,
+                ..quarry_runtime::RobotsGateConfig::default()
+            },
+        );
+        let _ = gate.rules_for_origin(page, "org_test", false).await;
+        gate
+    }
+
+    #[tokio::test]
+    async fn robots_link_refusals_are_counted_only_when_the_gate_enforces() {
+        let page = "https://example.test/docs/landing";
+        let page_url: Url = page.parse().unwrap();
+        let scope = quarry_runtime::crawl_filter::CompiledScope::compile(
+            &quarry_core::crawl_scope::CrawlContext::default(),
+        )
+        .expect("the default scope compiles");
+        let page_links = || {
+            let mut result =
+                InternalRunPageResult::from_output("run_1".into(), &output_with_markdown(None));
+            result.links = vec![
+                "https://example.test/private/x".to_owned(),
+                "https://example.test/docs/a".to_owned(),
+            ];
+            result
+        };
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+
+        let observe =
+            gate_with_cached_rules(quarry_runtime::RobotsEnforceMode::Observe, &page_url).await;
+        let kept = metrics::with_local_recorder(&recorder, || {
+            with_crawl(page_links(), page, Some(&scope), Some(&observe))
+        });
+        assert_eq!(kept.links.len(), 2, "observe removes no link");
+        assert!(
+            !handle
+                .render()
+                .contains("quarry_robots_link_refusals_total"),
+            "observe counts no refusal: {}",
+            handle.render()
+        );
+
+        let enforce =
+            gate_with_cached_rules(quarry_runtime::RobotsEnforceMode::Enforce, &page_url).await;
+        let kept = metrics::with_local_recorder(&recorder, || {
+            with_crawl(page_links(), page, Some(&scope), Some(&enforce))
+        });
+        assert_eq!(kept.links, vec!["https://example.test/docs/a".to_owned()]);
+        assert!(
+            handle
+                .render()
+                .contains(r#"quarry_robots_link_refusals_total{outcome="denied"} 1"#),
+            "{}",
+            handle.render()
+        );
+    }
 }

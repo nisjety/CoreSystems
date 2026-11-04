@@ -949,6 +949,33 @@ mod tests {
         assert!(room_work_summary(&buffers, work_policy(true), true, false, "key_text").await.is_none());
     }
 
+    #[tokio::test]
+    async fn the_fallback_finalize_records_zero_steps_and_nothing_under_zdr() {
+        // The fallback runs no tool loop: its buffer holds a steer and answer text, never a step.
+        let buffers = StreamBufferStore::new();
+        buffers.append("key_fb", 0, "queued_input", r#"{"messages":["SECRET steer"]}"#).await;
+        buffers.append("key_fb", 1, "chunk", r#"{"delta":"SECRET answer"}"#).await;
+
+        let work = room_work_summary(&buffers, work_policy(true), true, false, "key_fb")
+            .await
+            .expect("a summary");
+        assert_eq!(work, json!({ "v": 1, "steps": [], "steer": 1 }));
+        let stored = crate::session_flow::with_work_summary(None, Some(&work), false).expect("metadata");
+        assert!(stored.fields.contains_key(crate::room_run::WORK_KEY));
+        assert!(!format!("{stored:?}").contains("SECRET"), "no steer or answer text is stored");
+
+        assert!(
+            room_work_summary(&buffers, work_policy(true), true, true, "key_fb").await.is_none(),
+            "no summary under ZDR"
+        );
+        assert!(
+            crate::session_flow::with_work_summary(None, Some(&work), true).is_none(),
+            "nothing is written under ZDR"
+        );
+        assert!(room_work_summary(&buffers, work_policy(true), false, false, "key_fb").await.is_none());
+        assert!(room_work_summary(&buffers, work_policy(false), true, false, "key_fb").await.is_none());
+    }
+
     #[test]
     fn the_finalize_wrapper_writes_the_summary_only_when_retained_and_valid() {
         let work = json!({ "v": 1, "steps": [{ "id": "call_1", "class": "code", "state": "error" }], "steer": 2 });

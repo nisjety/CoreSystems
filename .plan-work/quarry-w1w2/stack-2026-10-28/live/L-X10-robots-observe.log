@@ -1,0 +1,21 @@
+start 2026-10-28T19:58:17Z
+evidence: C:/dev/CoresSystem/.claude/worktrees/vigorous-perlman-e7ae5b/.plan-work/quarry-w1w2/stack-2026-10-28/live/x10/observe
+edge health: ok
+PASS crawl_accepted: HTTP 200
+job: job_01M621F331P869C18ZSK2VCZYR
+PASS crawl_finished: statistics present
+pages fetched per fixture host (robots.txt excluded):
+  crawl-fixture-a: 8
+  crawl-fixture-b: 1
+PASS observe_robots_fetched: 1
+PASS observe_private_still_fetched: 1
+evidence files: C:/dev/CoresSystem/.claude/worktrees/vigorous-perlman-e7ae5b/.plan-work/quarry-w1w2/stack-2026-10-28/live/x10/observe (fixture-a.log, fixture-b.log, job.json, crawl-response.json)
+SUMMARY expect=observe pass=4 fail=0 not_run=0
+end 2026-10-28T19:58:31Z
+--- robots metrics after observe
+quarry_robots_decisions_total{mode="observe",outcome="would_unreachable"} 0
+quarry_robots_decisions_total{mode="enforce",outcome="denied"} 0
+quarry_robots_decisions_total{mode="any",outcome="allowed"} 7
+quarry_robots_decisions_total{mode="observe",outcome="would_deny"} 2
+quarry_robots_decisions_total{mode="enforce",outcome="unreachable"} 0
+quarry_robots_cache_entries 3

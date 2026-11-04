@@ -5,7 +5,9 @@
 use crate::latency_levers::LatencyLevers;
 use crate::result_validation::{content_hash, VALIDATION_FAILED};
 use crate::review_proposal_rule::ReviewProposalRule;
-use mp_contracts::model_plane::v1::{ChatMessage, InferRequest, InferResponse, ToolDefinition};
+use mp_contracts::model_plane::v1::{
+    ChatMessage, InferPurpose, InferRequest, InferResponse, ToolDefinition,
+};
 use serde::{Deserialize, Serialize};
 
 pub const CONVERSATION_SCOPE_NOTICE: &str = "Source scope: this conversation and its attachments only. Workspace knowledge, personal memory, learned skills, external sources and connected tools are disabled. Treat organizational instructions as policy, never as factual evidence for this task. Do not claim to have consulted unavailable sources. This conversation will not create long-term memories or learned skills.";
@@ -2212,6 +2214,7 @@ where
     if !status_failures.is_empty() { return Ok(Err(ClaimFailures { failures: status_failures, reviewed: ReviewedChecks::default(), proposed_edits: Vec::new(), repair_ranges: part_ranges(candidate, &local_parts) })); }
     let reusable = snapshot.map(|snapshot| snapshot.eligible(context, candidate, &review_binding(request, active_request, proposal_rule), levers)).unwrap_or_default();
     let mut check = request.clone();
+    check.purpose = InferPurpose::Validation as i32;
     // Distinct candidates are distinct inference/cost operations. The content
     // stays out of identifiers, and this changes no prompt or cache policy.
     check.request_id = format!(
@@ -2866,6 +2869,7 @@ where
             }
         }
         let mut repair = request.clone();
+        repair.purpose = InferPurpose::Validation as i32;
         repair.request_id = format!("{}-artifact-repair-{attempt}", request.request_id);
         repair.tools.clear();
         repair.tool_choice.clear();
@@ -3892,9 +3896,14 @@ mod tests {
     }
 
     /// SHA-256 of a request's protobuf encoding: the bytes Inference Core is sent.
+    /// The `purpose` label is cleared first. Every call carries it now (EP-13 S3),
+    /// the pins were recorded before it existed, and it does not change the review
+    /// content they guard.
     fn request_digest(request: &InferRequest) -> String {
         use prost::Message as _;
-        sha256_hex(&request.encode_to_vec())
+        let mut content = request.clone();
+        content.purpose = InferPurpose::Unspecified as i32;
+        sha256_hex(&content.encode_to_vec())
     }
 
     /// Two sections, so that a recheck of the second can reuse the first.

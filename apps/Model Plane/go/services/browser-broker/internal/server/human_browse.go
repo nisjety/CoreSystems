@@ -96,6 +96,8 @@ func (s *Server) acquireResponse(g *grant.Grant) *AcquireGrantResponse {
 		PolicyMode:         policyModeOf(g),
 		DeniedDomains:      append([]string(nil), g.DeniedDomains...),
 		AbsoluteExpiresAt:  timestamppb.New(absoluteOf(g)),
+		KeyId:              g.KeyID,
+		ConsentScope:       g.ConsentScope,
 	}
 }
 

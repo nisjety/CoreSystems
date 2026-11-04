@@ -33,7 +33,14 @@ import {
 import { useI18n } from '@/shared/i18n'
 import { translateApiError } from '@/shared/i18n/errors'
 import { isSpaceObserved, liveThreadsIn, ownStream } from '../lib/space-live-work'
-import { createSpaceMidRun, type SpaceDeferredSend, type SpaceMidRunResend } from '../lib/space-mid-run'
+import {
+  createSpaceMidRun,
+  deferredSendReady,
+  type SpaceDeferredRunState,
+  type SpaceDeferredSend,
+  type SpaceMidRunResend,
+} from '../lib/space-mid-run'
+import { spaceRunStore, trackLiveRuns } from '../lib/space-run-store'
 import { agentAvatarColor } from '../lib/agent-avatar'
 import { AgentAvatar } from './AgentAvatar'
 import { threadTitle } from '../lib/space-thread-presentation'
@@ -394,7 +401,7 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
         // started, so nothing was sent, and the member gets the words back.
         const waiting = flushingDeferred
         flushingDeferred = undefined
-        if (waiting && pipeline.exchange()?.errorCode === 'thread_run_active') giveBack(waiting.content)
+        if (waiting && pipeline.exchange()?.errorCode === 'thread_run_active') giveBack(waiting)
         // A steer the run never took goes out again only after a clean finish; a stop or a failure sends
         // nothing the member did not ask for. See endOfTurn.
         endOfTurn()
@@ -637,18 +644,40 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
   }
   const sendWhenReadyOffered = () => busyReplyThread() !== undefined && files().length === 0
   props.registerFocusHandle?.(() => textareaRef?.focus())
-  // A message waiting for the agent to be free goes out once the room's projection no longer shows
-  // its thread working. Only on an observed room: absence of data is not idleness.
+  // A message waiting for the agent to be free goes out when the run it waits behind says it is done:
+  // the `finished` frame of that run's live stream. The composer holds the run's live view while the
+  // message waits; the store shares one stream per run, so beside the run strip this opens no second.
+  // With the room's live view off, or no run named, no done event can arrive and the room's projection
+  // stands in (`deferredSendReady`).
+  const waitingRunId = () => (props.agentWork?.()?.live === true ? midRun.deferred()?.runId : undefined)
+  trackLiveRuns(
+    () => props.spaceRef,
+    () => {
+      const runId = waitingRunId()
+      return runId ? [runId] : []
+    },
+    () => waitingRunId() !== undefined,
+  )
+  const waitingRunState = (): SpaceDeferredRunState => {
+    const runId = waitingRunId()
+    const view = runId ? spaceRunStore.view(runId) : undefined
+    if (!view || view.status === 'unavailable') return 'unknown'
+    return view.finished ? 'done' : 'running'
+  }
   createEffect(
-    () => ({
-      waiting: midRun.deferred(),
-      busy: submitting(),
-      observed: isSpaceObserved(props.spaceRef),
-      threads: liveThreadsIn(props.spaceRef),
-    }),
-    ({ waiting, busy, observed, threads }) => {
-      if (!waiting || busy || !observed) return
-      if (threads.some((thread) => thread.thread_id === waiting.threadId)) return
+    () => {
+      const waiting = midRun.deferred()
+      return deferredSendReady({
+        waiting,
+        busy: submitting(),
+        run: waitingRunState(),
+        observed: isSpaceObserved(props.spaceRef),
+        threadLive: waiting !== undefined
+          && liveThreadsIn(props.spaceRef).some((thread) => thread.thread_id === waiting.threadId),
+      })
+    },
+    (send) => {
+      if (!send) return
       const ready = midRun.takeDeferred()
       if (!ready) return
       midRun.startTurn(false)
@@ -1062,11 +1091,20 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
     // Another run is live in the thread being replied to: keep the message here until it is free.
     const busyThread = busyReplyThread()
     if (busyThread && files().length === 0) {
+      const runId = othersWorking().find((thread) => thread.thread_id === busyThread)?.latest_run_id?.trim()
+      const legacyAgentRef = mentionedAgentRef()
       midRun.defer({
         content,
         threadId: busyThread,
+        ...(runId ? { runId } : {}),
         mentionedAgentRef: askAgentRef(),
         skills: pickedSkills(),
+        // What the box held besides the words, so a cancel gives it all back. Locked agents stay in the bar.
+        picks: {
+          ...(legacyAgentRef ? { mentionedAgentRef: legacyAgentRef } : {}),
+          people: mention.people(),
+          agents: mention.agents().filter((agent) => agent.source === 'typed'),
+        },
       })
       setText('')
       discardDraft()
@@ -1182,14 +1220,43 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
     if (outcome === 'resend' && !turnInFlight) endOfTurn()
   }
 
-  // Cancelling a send-when-ready stops the send, not the message: the words go back into the box.
+  // Cancelling a send-when-ready stops the send, not the message: it goes back into the box as it was.
   function cancelWaiting(): void {
     const waiting = midRun.takeDeferred()
-    if (waiting) giveBack(waiting.content)
+    if (waiting) giveBack(waiting)
   }
-  // Words that were waiting for the agent go back into the box, above anything typed since.
-  function giveBack(content: string): void {
-    setText((current) => (current.trim() === '' ? content : `${content}\n\n${current}`))
+  // A message that was waiting for the agent goes back into the box: its words above anything typed
+  // since, and its skills and mention picks beside any made since (the skill cap still holds).
+  function giveBack(waiting: SpaceDeferredSend): void {
+    setText((current) => (current.trim() === '' ? waiting.content : `${waiting.content}\n\n${current}`))
+    const skills = waiting.skills ?? []
+    if (skills.length > 0) {
+      setPickedSkills((current) => {
+        const merged = [...current]
+        for (const skill of skills) {
+          if (merged.length >= MAX_PICKED_SKILLS) break
+          if (!merged.some((picked) => picked.id === skill.id)) merged.push(skill)
+        }
+        return merged
+      })
+    }
+    const picks = waiting.picks
+    if (!picks) return
+    const legacyAgentRef = picks.mentionedAgentRef
+    if (legacyAgentRef) setMentionedAgentRef((current) => current ?? legacyAgentRef)
+    for (const person of picks.people) {
+      mention.pick({ id: `user:${person.subjectId}`, kind: 'person', subjectId: person.subjectId, name: person.label, label: person.label })
+    }
+    for (const agent of picks.agents) {
+      mention.pick({
+        id: `agent:${agent.subjectId}`,
+        kind: 'agent',
+        subjectId: agent.subjectId,
+        name: agent.label,
+        label: agent.label,
+        ...(agent.color ? { color: agent.color } : {}),
+      })
+    }
   }
 
   // The thread pane's composer is aimed at one thread for as long as the pane is open; the pane title

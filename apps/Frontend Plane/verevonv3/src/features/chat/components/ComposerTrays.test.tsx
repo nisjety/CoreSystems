@@ -155,4 +155,35 @@ describe('ComposerTrays', () => {
     expect(document.activeElement).toBe(field)
     field.remove()
   })
+
+  /** WS14 S4: a question takes the tray behind an approval and ahead of a plan. */
+  it('shows a waiting question ahead of a plan, and behind an approval', () => {
+    const question = {
+      questionId: 'q_1',
+      delivery: 'next_turn',
+      items: [
+        {
+          id: 'carrier',
+          kind: 'single' as const,
+          prompt: 'Which carrier?',
+          options: [
+            { id: 'bring', label: 'Bring' },
+            { id: 'postnord', label: 'PostNord' },
+          ],
+          allowOther: false,
+        },
+      ],
+    }
+    const handlers = { onApprovalDecision: vi.fn(), onApprovePlan: vi.fn(), onRejectPlan: vi.fn() }
+
+    const ahead = render(() => <ComposerTrays trays={[planTray()]} question={question} {...handlers} />)
+    flush()
+    expect(ahead.container.querySelector('.verevon-question-card')).not.toBeNull()
+    cleanup()
+
+    const behind = render(() => <ComposerTrays trays={[approvalTray()]} question={question} {...handlers} />)
+    flush()
+    expect(behind.container.querySelector('.verevon-question-card')).toBeNull()
+    cleanup()
+  })
 })

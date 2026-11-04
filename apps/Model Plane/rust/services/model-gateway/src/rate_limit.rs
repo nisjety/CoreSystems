@@ -30,6 +30,20 @@ pub struct RateLimiter {
     /// gateway-owned `OrgPolicy` that genuinely belongs at the edge — it
     /// protects THIS process, so no plane can enforce it on our behalf.
     org_rpm: Arc<DashMap<String, f64>>,
+    /// Requests per minute for ONE service principal inside one org (WS16.S1). A machine caller
+    /// (`service:quarry-edge` and the like) draws from its own bucket, so it can neither exhaust nor
+    /// be starved by the org's interactive users.
+    service_rpm: f64,
+}
+
+/// Default for `MODEL_GATEWAY_SERVICE_RPM`.
+pub const DEFAULT_SERVICE_RPM: f64 = 120.0;
+
+/// The bucket key of a service principal: `<org_id>|svc:<service_id>`. A user's key stays the bare
+/// `org_id`, which is exactly what it was before this key existed.
+#[must_use]
+pub fn service_bucket_key(org_id: &str, service_id: &str) -> String {
+    format!("{org_id}|svc:{service_id}")
 }
 
 impl RateLimiter {
@@ -42,10 +56,19 @@ impl RateLimiter {
             .and_then(|v| v.parse().ok())
             .unwrap_or(100.0);
 
+        // `MODEL_GATEWAY_SERVICE_RPM`: the ceiling of one service principal. A value that is not
+        // a positive number falls back to the default rather than locking the service out.
+        let service_rpm = std::env::var("MODEL_GATEWAY_SERVICE_RPM")
+            .ok()
+            .and_then(|v| v.trim().parse::<f64>().ok())
+            .filter(|v| v.is_finite() && *v > 0.0)
+            .unwrap_or(DEFAULT_SERVICE_RPM);
+
         Self {
             buckets: Arc::new(DashMap::new()),
             rpm,
             org_rpm: Arc::new(DashMap::new()),
+            service_rpm,
         }
     }
 
@@ -76,13 +99,21 @@ impl RateLimiter {
     /// Try to consume one token for the given org. Returns `Ok(())` if allowed,
     /// or `Err(retry_after_secs)` if the bucket is exhausted.
     fn try_acquire(&self, org_id: &str) -> Result<(), u64> {
+        self.acquire_from(org_id, self.org_rpm(org_id))
+    }
+
+    /// Try to consume one token from the service principal's own bucket inside its org.
+    fn try_acquire_service(&self, org_id: &str, service_id: &str) -> Result<(), u64> {
+        self.acquire_from(&service_bucket_key(org_id, service_id), self.service_rpm)
+    }
+
+    fn acquire_from(&self, key: &str, rpm: f64) -> Result<(), u64> {
         let now = Instant::now();
-        let rpm = self.org_rpm(org_id);
         let refill_rate = rpm / 60.0; // tokens per second
 
         let mut entry = self
             .buckets
-            .entry(org_id.to_owned())
+            .entry(key.to_owned())
             .or_insert_with(|| TokenBucket {
                 tokens: rpm,
                 last_refill: now,
@@ -115,7 +146,10 @@ pub async fn rate_limit_middleware(request: Request, next: Next) -> Response {
     let claims = request.extensions().get::<Claims>().cloned();
 
     match (limiter, claims) {
-        (Some(limiter), Some(claims)) => match limiter.try_acquire(&claims.org_id) {
+        (Some(limiter), Some(claims)) => match claims.service_principal_id().map_or_else(
+            || limiter.try_acquire(&claims.org_id),
+            |service_id| limiter.try_acquire_service(&claims.org_id, service_id),
+        ) {
             Ok(()) => next.run(request).await,
             Err(retry_after) => {
                 tracing::warn!(
@@ -147,6 +181,7 @@ mod tests {
         let limiter = RateLimiter {
             buckets: Arc::new(DashMap::new()),
             org_rpm: Arc::new(DashMap::new()),
+            service_rpm: DEFAULT_SERVICE_RPM,
             rpm: 10.0,
         };
 
@@ -160,6 +195,7 @@ mod tests {
         let limiter = RateLimiter {
             buckets: Arc::new(DashMap::new()),
             org_rpm: Arc::new(DashMap::new()),
+            service_rpm: DEFAULT_SERVICE_RPM,
             rpm: 2.0,
         };
 
@@ -173,6 +209,7 @@ mod tests {
         let limiter = RateLimiter {
             buckets: Arc::new(DashMap::new()),
             org_rpm: Arc::new(DashMap::new()),
+            service_rpm: DEFAULT_SERVICE_RPM,
             rpm: 1.0,
         };
 
@@ -186,6 +223,7 @@ mod tests {
         let limiter = RateLimiter {
             buckets: Arc::new(DashMap::new()),
             org_rpm: Arc::new(DashMap::new()),
+            service_rpm: DEFAULT_SERVICE_RPM,
             rpm: 100.0,
         };
         assert!((limiter.org_rpm("org") - 100.0).abs() < f64::EPSILON);
@@ -204,10 +242,37 @@ mod tests {
     }
 
     #[test]
+    fn service_bucket_is_separate_from_the_org_bucket() {
+        let limiter = RateLimiter {
+            buckets: Arc::new(DashMap::new()),
+            org_rpm: Arc::new(DashMap::new()),
+            service_rpm: 2.0,
+            rpm: 1.0,
+        };
+        // The org's interactive bucket is spent after one request ...
+        assert!(limiter.try_acquire("org").is_ok());
+        assert!(limiter.try_acquire("org").is_err());
+        // ... and a service in that org still has its own, larger bucket.
+        assert!(limiter.try_acquire_service("org", "service:quarry-edge").is_ok());
+        assert!(limiter.try_acquire_service("org", "service:quarry-edge").is_ok());
+        assert!(limiter.try_acquire_service("org", "service:quarry-edge").is_err());
+        // Spending the service bucket leaves the org's users alone: refill one token worth of
+        // time cannot be waited for here, so assert the reverse direction on a fresh org.
+        assert!(limiter.try_acquire_service("org2", "service:quarry-edge").is_ok());
+        assert!(limiter.try_acquire_service("org2", "service:quarry-edge").is_ok());
+        assert!(limiter.try_acquire("org2").is_ok(), "a drained service bucket must not drain the org's");
+        // Another service in the same org has its own bucket too.
+        assert!(limiter.try_acquire_service("org", "service:other").is_ok());
+        // The key shape is the documented one.
+        assert_eq!(service_bucket_key("org", "service:quarry-edge"), "org|svc:service:quarry-edge");
+    }
+
+    #[test]
     fn lowering_a_ceiling_bites_immediately_rather_than_after_the_old_bucket_drains() {
         let limiter = RateLimiter {
             buckets: Arc::new(DashMap::new()),
             org_rpm: Arc::new(DashMap::new()),
+            service_rpm: DEFAULT_SERVICE_RPM,
             rpm: 100.0,
         };
         // Spend from the generous default bucket.

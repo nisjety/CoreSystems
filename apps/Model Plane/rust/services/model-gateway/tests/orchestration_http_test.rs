@@ -235,36 +235,42 @@ impl MockOrchestration {
 
 #[tonic::async_trait]
 impl OrchestrationCoreService for MockOrchestration {
+    // Main's RPCs (merged 2026-11-02); this double does not serve them.
     async fn reroute_approval(
         &self,
-        _request: tonic::Request<mp_contracts::model_plane::v1::RerouteApprovalRequest>,
+        _: tonic::Request<mp_contracts::model_plane::v1::RerouteApprovalRequest>,
     ) -> Result<tonic::Response<mp_contracts::model_plane::v1::RerouteApprovalResponse>, tonic::Status> {
-        Err(tonic::Status::unimplemented("not exercised by this test"))
+        Err(tonic::Status::unimplemented("reroute_approval is not served by this double"))
     }
+
     async fn claim_once_approval(
         &self,
-        _request: tonic::Request<mp_contracts::model_plane::v1::ClaimOnceApprovalRequest>,
+        _: tonic::Request<mp_contracts::model_plane::v1::ClaimOnceApprovalRequest>,
     ) -> Result<tonic::Response<mp_contracts::model_plane::v1::ClaimOnceApprovalResponse>, tonic::Status> {
-        Err(tonic::Status::unimplemented("not exercised by this test"))
+        Err(tonic::Status::unimplemented("claim_once_approval is not served by this double"))
     }
+
     async fn hold_quarantined_output(
         &self,
-        _request: tonic::Request<mp_contracts::model_plane::v1::HoldQuarantinedOutputRequest>,
+        _: tonic::Request<mp_contracts::model_plane::v1::HoldQuarantinedOutputRequest>,
     ) -> Result<tonic::Response<mp_contracts::model_plane::v1::HoldQuarantinedOutputResponse>, tonic::Status> {
-        Err(tonic::Status::unimplemented("not exercised by this test"))
+        Err(tonic::Status::unimplemented("hold_quarantined_output is not served by this double"))
     }
+
     async fn claim_quarantine_release(
         &self,
-        _request: tonic::Request<mp_contracts::model_plane::v1::ClaimQuarantineReleaseRequest>,
+        _: tonic::Request<mp_contracts::model_plane::v1::ClaimQuarantineReleaseRequest>,
     ) -> Result<tonic::Response<mp_contracts::model_plane::v1::ClaimQuarantineReleaseResponse>, tonic::Status> {
-        Err(tonic::Status::unimplemented("not exercised by this test"))
+        Err(tonic::Status::unimplemented("claim_quarantine_release is not served by this double"))
     }
+
     async fn get_quarantine_preview(
         &self,
-        _request: tonic::Request<mp_contracts::model_plane::v1::GetQuarantinePreviewRequest>,
+        _: tonic::Request<mp_contracts::model_plane::v1::GetQuarantinePreviewRequest>,
     ) -> Result<tonic::Response<mp_contracts::model_plane::v1::GetQuarantinePreviewResponse>, tonic::Status> {
-        Err(tonic::Status::unimplemented("not exercised by this test"))
+        Err(tonic::Status::unimplemented("get_quarantine_preview is not served by this double"))
     }
+
     type StreamRunEventsStream = MockEventStream;
 
     async fn list_plans(
@@ -889,6 +895,8 @@ fn scripted_question(id: &str, run_id: &str, state: QuestionState) -> RunQuestio
         answered_at: None,
         answers: Vec::new(),
         answered_message_id: String::new(),
+        origin: String::new(),
+        origin_label: String::new(),
     }
 }
 
@@ -931,12 +939,14 @@ struct MockRunOwner {
 
 #[tonic::async_trait]
 impl RunService for MockRunOwner {
+    // Main's RPCs (merged 2026-11-02); this double does not serve them.
     async fn resolve_approval_authority(
         &self,
-        _request: tonic::Request<mp_contracts::model_plane::v1::ResolveApprovalAuthorityRequest>,
+        _: tonic::Request<mp_contracts::model_plane::v1::ResolveApprovalAuthorityRequest>,
     ) -> Result<tonic::Response<mp_contracts::model_plane::v1::ResolveApprovalAuthorityResponse>, tonic::Status> {
-        Err(tonic::Status::unimplemented("not exercised by this test"))
+        Err(tonic::Status::unimplemented("resolve_approval_authority is not served by this double"))
     }
+
     async fn get_run(
         &self,
         request: TonicRequest<GetRunRequest>,
@@ -1372,36 +1382,42 @@ struct OrgScopedMock {
 
 #[tonic::async_trait]
 impl OrchestrationCoreService for OrgScopedMock {
+    // Main's RPCs (merged 2026-11-02); this double does not serve them.
     async fn reroute_approval(
         &self,
-        _request: tonic::Request<mp_contracts::model_plane::v1::RerouteApprovalRequest>,
+        _: tonic::Request<mp_contracts::model_plane::v1::RerouteApprovalRequest>,
     ) -> Result<tonic::Response<mp_contracts::model_plane::v1::RerouteApprovalResponse>, tonic::Status> {
-        Err(tonic::Status::unimplemented("not exercised by this test"))
+        Err(tonic::Status::unimplemented("reroute_approval is not served by this double"))
     }
+
     async fn claim_once_approval(
         &self,
-        _request: tonic::Request<mp_contracts::model_plane::v1::ClaimOnceApprovalRequest>,
+        _: tonic::Request<mp_contracts::model_plane::v1::ClaimOnceApprovalRequest>,
     ) -> Result<tonic::Response<mp_contracts::model_plane::v1::ClaimOnceApprovalResponse>, tonic::Status> {
-        Err(tonic::Status::unimplemented("not exercised by this test"))
+        Err(tonic::Status::unimplemented("claim_once_approval is not served by this double"))
     }
+
     async fn hold_quarantined_output(
         &self,
-        _request: tonic::Request<mp_contracts::model_plane::v1::HoldQuarantinedOutputRequest>,
+        _: tonic::Request<mp_contracts::model_plane::v1::HoldQuarantinedOutputRequest>,
     ) -> Result<tonic::Response<mp_contracts::model_plane::v1::HoldQuarantinedOutputResponse>, tonic::Status> {
-        Err(tonic::Status::unimplemented("not exercised by this test"))
+        Err(tonic::Status::unimplemented("hold_quarantined_output is not served by this double"))
     }
+
     async fn claim_quarantine_release(
         &self,
-        _request: tonic::Request<mp_contracts::model_plane::v1::ClaimQuarantineReleaseRequest>,
+        _: tonic::Request<mp_contracts::model_plane::v1::ClaimQuarantineReleaseRequest>,
     ) -> Result<tonic::Response<mp_contracts::model_plane::v1::ClaimQuarantineReleaseResponse>, tonic::Status> {
-        Err(tonic::Status::unimplemented("not exercised by this test"))
+        Err(tonic::Status::unimplemented("claim_quarantine_release is not served by this double"))
     }
+
     async fn get_quarantine_preview(
         &self,
-        _request: tonic::Request<mp_contracts::model_plane::v1::GetQuarantinePreviewRequest>,
+        _: tonic::Request<mp_contracts::model_plane::v1::GetQuarantinePreviewRequest>,
     ) -> Result<tonic::Response<mp_contracts::model_plane::v1::GetQuarantinePreviewResponse>, tonic::Status> {
-        Err(tonic::Status::unimplemented("not exercised by this test"))
+        Err(tonic::Status::unimplemented("get_quarantine_preview is not served by this double"))
     }
+
     async fn list_plans(
         &self,
         _: TonicRequest<ListPlansRequest>,
@@ -1990,6 +2006,28 @@ async fn post_plan_approval(
     let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let json = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
     (status, json)
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn an_approval_answers_next_message_while_the_execute_switch_is_off() {
+    // WS14 S2: with the approve-then-execute switch off (the default) the answer is the one it
+    // always was: the grant waits for the person's own next message, and nothing is sent by itself.
+    let harness = plan_gate_harness().await;
+    let (status, body) = post_plan_approval(
+        &harness,
+        "run-owned",
+        &harness.owner,
+        serde_json::json!({
+            "decision": "approve",
+            "granted_rung": "workspace_write",
+            "justification": "writes the report into the workspace",
+            "plan_id": "plan-7",
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["continuation"], "next_message", "{body}");
 }
 
 #[tokio::test]
@@ -2687,7 +2725,8 @@ async fn run_question_an_answer_never_touches_an_approval() {
 use mp_contracts::model_plane::v1::{
     thread_autonomy_client::ThreadAutonomyClient,
     thread_autonomy_server::{ThreadAutonomy, ThreadAutonomyServer},
-    GetThreadGrantRequest, GetThreadGrantResponse, SetRunModeRequest, SetRunModeResponse,
+    BindGrantToRunRequest, BindGrantToRunResponse, GetThreadGrantRequest, GetThreadGrantResponse,
+    SetRunModeRequest, SetRunModeResponse,
 };
 
 #[derive(Clone, Debug)]
@@ -2810,6 +2849,33 @@ impl ThreadAutonomy for SessionCoreDouble {
         };
         Ok(Response::new(answer))
     }
+
+    /// WS14 S2: binds only the grant the thread holds for exactly the plan asked for, as the
+    /// real bind does; anything else is the refusal the gateway treats as no bound grant.
+    async fn bind_grant_to_run(
+        &self,
+        request: TonicRequest<BindGrantToRunRequest>,
+    ) -> Result<Response<BindGrantToRunResponse>, Status> {
+        if request.metadata().get("authorization").is_none() {
+            return Err(Status::unauthenticated("verified session credential required"));
+        }
+        let request = request.into_inner();
+        match self.grant.lock().unwrap().clone() {
+            Some(grant)
+                if grant.org_id == request.org_id
+                    && grant.thread_id == request.thread_id
+                    && grant.plan_id == request.approved_plan_id
+                    && grant.expires_at > unix_now() =>
+            {
+                Ok(Response::new(BindGrantToRunResponse {
+                    granted_rung: grant.rung,
+                    justification: String::new(),
+                    approved_plan_id: grant.plan_id,
+                }))
+            }
+            _ => Err(Status::failed_precondition("plan_grant_unavailable")),
+        }
+    }
 }
 
 /// Only `SessionCore.SetRunMode` of the real service's surface; every other method answers
@@ -2908,12 +2974,21 @@ struct DurableGrantHarness {
 }
 
 async fn durable_grant_harness(durable: bool) -> DurableGrantHarness {
+    durable_grant_harness_with(durable, false).await
+}
+
+/// [`durable_grant_harness`] with the approve-then-execute switches of the plan store stated: the
+/// execute switch and the approval-resume switch, which an `execute_now` answer needs (WS14 S2).
+/// With `execute` false the store is the one `durable_grant_harness` has always built.
+async fn durable_grant_harness_with(durable: bool, execute: bool) -> DurableGrantHarness {
     let auth = AuthFixture::start().await;
     let owner = AuthFixture::user_tokens("org-owner", "owner-user");
     let double = SessionCoreDouble::default();
     let (session_client, grant_client) = spawn_session_core_double(&double).await;
     let configured = || {
-        let store = model_gateway::coordinator::PlanModeStore::default();
+        let store = model_gateway::coordinator::PlanModeStore::default()
+            .with_execute_enabled(execute)
+            .with_approval_resume_enabled(execute);
         if durable {
             store
                 .with_durable_grant_enabled(true)
@@ -2971,6 +3046,27 @@ async fn post_durable_approval(
     let status = response.status();
     let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     (status, serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null))
+}
+
+/// WS14 S2, approve then execute: a plan approval answers `execute_now` only when the approve
+/// switch is on, the grant is recorded durably for the plan, and an execute turn is accepted here
+/// (the execute switch and the approval-resume switch). Turning the execute switch off answers
+/// `next_message`, as it did before the switch existed.
+#[tokio::test]
+#[serial_test::serial]
+async fn an_approval_answers_execute_now_only_when_every_switch_and_the_durable_record_hold() {
+    std::env::set_var("MODEL_GATEWAY_PLAN_EXECUTE_ON_APPROVE", "true");
+    let on = durable_grant_harness_with(true, true).await;
+    let (status, body) = post_durable_approval(&on, "run-owned", &on.owner).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["persisted"], true, "{body}");
+    assert_eq!(body["continuation"], "execute_now", "{body}");
+
+    let execute_off = durable_grant_harness_with(true, false).await;
+    let (status, body) = post_durable_approval(&execute_off, "run-owned", &execute_off.owner).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["continuation"], "next_message", "{body}");
+    std::env::remove_var("MODEL_GATEWAY_PLAN_EXECUTE_ON_APPROVE");
 }
 
 /// The slice's point: approve on replica A, and a run started on replica B reads the rung and

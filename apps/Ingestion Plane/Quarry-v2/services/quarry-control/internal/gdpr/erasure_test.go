@@ -3,7 +3,11 @@ package gdpr
 import (
 	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"testing"
+
+	"github.com/rs/zerolog"
 
 	"github.com/triodelab/quarry-v2/services/quarry-control/internal/store"
 )
@@ -261,5 +265,205 @@ func TestHandleErasureWithEdge_UserSubjectNeverReachesTheEdge(t *testing.T) {
 	}
 	if len(edge.calls) != 0 {
 		t.Fatalf("edge calls=%v want none for a user subject", edge.calls)
+	}
+}
+
+// fakeUsers is an in-test UserReceiptPurger (W2-U49).
+type fakeUsers struct {
+	calls  [][2]string
+	result EdgePurgeResult
+	err    error
+}
+
+func (f *fakeUsers) PurgeEdgeUserReceipts(orgID, userID string) (EdgePurgeResult, error) {
+	f.calls = append(f.calls, [2]string{orgID, userID})
+	return f.result, f.err
+}
+
+// userErasurePayload mirrors user-core's erasureFanoutPayload
+// (apps/Control Plane/user-core/internal/users/gdpr_erasure_saga.go).
+func userErasurePayload(t *testing.T, subjectType, userID, orgID string) []byte {
+	t.Helper()
+	body, err := json.Marshal(map[string]any{
+		"event_id":     "op_1:" + orgID,
+		"operation_id": "op_1",
+		"subject_type": subjectType,
+		"subject_id":   userID,
+		"org_id":       orgID,
+		"requested_by": "admin_a",
+		"mode":         "hard",
+		"ts":           "2026-11-03T12:00:00.000000000Z",
+	})
+	if err != nil {
+		t.Fatalf("marshal fixture payload: %v", err)
+	}
+	return body
+}
+
+func TestHandleErasureWithUsers_UserSubjectDeletesThatUsersReceipts(t *testing.T) {
+	t.Parallel()
+	for _, subjectType := range []string{"user", "user_anonymize"} {
+		purger := &fakePurger{}
+		edge := &fakeEdge{}
+		users := &fakeUsers{result: EdgePurgeResult{Families: []EdgePurgeFamily{{Family: "step_receipts", RowsDeleted: 3}}}}
+		payload := userErasurePayload(t, subjectType, "user_a", "org_a")
+
+		_, edgeResult, err := HandleErasureWithUsers(purger, edge, users, payload)
+		if err != nil {
+			t.Fatalf("%s: HandleErasureWithUsers: %v", subjectType, err)
+		}
+		if len(users.calls) != 1 || users.calls[0] != [2]string{"org_a", "user_a"} {
+			t.Fatalf("%s: user hop calls=%v want=[[org_a user_a]]", subjectType, users.calls)
+		}
+		if len(purger.calls) != 0 || len(edge.calls) != 0 {
+			t.Fatalf("%s: a user event reached the org purge (store=%v edge=%v)", subjectType, purger.calls, edge.calls)
+		}
+		if edgeResult.Total() != 3 {
+			t.Errorf("%s: Total()=%d want=3", subjectType, edgeResult.Total())
+		}
+	}
+}
+
+func TestHandleErasureWithUsers_FlagOffKeepsUserEventsANoOp(t *testing.T) {
+	t.Parallel()
+	edge := &fakeEdge{}
+	payload := userErasurePayload(t, "user", "user_a", "org_a")
+	if _, res, err := HandleErasureWithUsers(&fakePurger{}, edge, nil, payload); err != nil || res.Total() != 0 {
+		t.Fatalf("nil user hop: res=%+v err=%v want a no-op", res, err)
+	}
+	if len(edge.calls) != 0 {
+		t.Fatalf("edge calls=%v want none", edge.calls)
+	}
+}
+
+func TestHandleErasureWithUsers_MissingIdsAreANoOp(t *testing.T) {
+	t.Parallel()
+	users := &fakeUsers{}
+	for _, payload := range [][]byte{
+		userErasurePayload(t, "user", "", "org_a"),
+		userErasurePayload(t, "user", "user_a", ""),
+	} {
+		if _, _, err := HandleErasureWithUsers(&fakePurger{}, nil, users, payload); err != nil {
+			t.Fatalf("HandleErasureWithUsers: %v", err)
+		}
+	}
+	if len(users.calls) != 0 {
+		t.Fatalf("user hop calls=%v want none when an id is missing", users.calls)
+	}
+}
+
+func TestHandleErasureWithUsers_HopFailureIsRetryableNotPoison(t *testing.T) {
+	t.Parallel()
+	users := &fakeUsers{err: errors.New("gdpr: edge purge call failed")}
+	payload := userErasurePayload(t, "user", "user_a", "org_a")
+	_, _, err := HandleErasureWithUsers(&fakePurger{}, nil, users, payload)
+	if err == nil {
+		t.Fatal("hop failure returned nil error; the erasure would be acked and lost")
+	}
+	var poison *poisonEventError
+	if errors.As(err, &poison) {
+		t.Fatalf("hop failure classified as poison (%v); it must be retried", err)
+	}
+}
+
+// A redelivery repeats the same idempotent call; zeros the second time are fine.
+func TestHandleErasureWithUsers_RedeliveryRepeatsTheIdempotentCall(t *testing.T) {
+	t.Parallel()
+	users := &fakeUsers{}
+	payload := userErasurePayload(t, "user", "user_a", "org_a")
+	for i := 0; i < 2; i++ {
+		if _, _, err := HandleErasureWithUsers(&fakePurger{}, nil, users, payload); err != nil {
+			t.Fatalf("delivery %d: %v", i+1, err)
+		}
+	}
+	if len(users.calls) != 2 {
+		t.Fatalf("user hop calls=%d want=2", len(users.calls))
+	}
+}
+
+func TestHandleErasureWithUsers_OrganizationEventIsUnchanged(t *testing.T) {
+	t.Parallel()
+	purger := &fakePurger{result: store.PurgeResult{JobsDeleted: 1}}
+	users := &fakeUsers{}
+	payload := orgErasurePayload(t, "org_a", "system:org-core-purge-cron")
+	if _, _, err := HandleErasureWithUsers(purger, nil, users, payload); err != nil {
+		t.Fatalf("HandleErasureWithUsers: %v", err)
+	}
+	if len(purger.calls) != 1 || len(users.calls) != 0 {
+		t.Fatalf("store calls=%v user calls=%v want the org purge only", purger.calls, users.calls)
+	}
+}
+
+func TestUserReceiptPurgerFromEnv_OffByDefault(t *testing.T) {
+	t.Parallel()
+	edge := NewHTTPEdgePurger("http://edge", "tok", nil)
+	for _, raw := range []string{"", "off", "0", "false"} {
+		got := UserReceiptPurgerFromEnv(func(string) string { return raw }, edge, zerolog.Nop())
+		if got != nil {
+			t.Fatalf("flag %q built a user hop", raw)
+		}
+	}
+}
+
+func TestUserReceiptPurgerFromEnv_OnUsesTheEdgeHop(t *testing.T) {
+	t.Parallel()
+	edge := NewHTTPEdgePurger("http://edge", "tok", nil)
+	got := UserReceiptPurgerFromEnv(func(k string) string {
+		if k == UserReceiptsFlagEnv {
+			return "on"
+		}
+		return ""
+	}, edge, zerolog.Nop())
+	if got != edge {
+		t.Fatalf("flag on returned %T, want the HTTP edge purger", got)
+	}
+}
+
+func TestUserReceiptPurgerFromEnv_OnWithoutEdgeFailsEveryCall(t *testing.T) {
+	t.Parallel()
+	got := UserReceiptPurgerFromEnv(func(string) string { return "true" }, nil, zerolog.Nop())
+	if got == nil {
+		t.Fatal("flag on with no edge hop returned nil; user erasures would be acked and lost")
+	}
+	if _, err := got.PurgeEdgeUserReceipts("org_a", "user_a"); err == nil {
+		t.Fatal("a misconfigured user hop accepted a call")
+	}
+}
+
+func TestHTTPEdgePurger_UserReceiptsRouteAndEscaping(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodDelete {
+			t.Errorf("method=%s want DELETE", r.Method)
+		}
+		if r.URL.EscapedPath() != "/v1/internal/orgs/org_a/users/user%2Fb/receipts" {
+			t.Errorf("path=%s", r.URL.EscapedPath())
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer tok" {
+			t.Errorf("authorization header=%q want Bearer tok", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":{"families":[{"family":"step_receipts","rows_deleted":4,"tombstones_deleted":0,"cache_keys_deleted":0,"keys_evicted":false}]}}`))
+	}))
+	defer srv.Close()
+
+	p := NewHTTPEdgePurger(srv.URL, "tok", nil)
+	res, err := p.PurgeEdgeUserReceipts("org_a", "user/b")
+	if err != nil {
+		t.Fatalf("PurgeEdgeUserReceipts: %v", err)
+	}
+	if res.Total() != 4 || len(res.Families) != 1 || res.Families[0].Family != "step_receipts" {
+		t.Fatalf("result=%+v want one step_receipts family with 4 rows", res)
+	}
+}
+
+func TestHTTPEdgePurger_UserReceiptsRefusalIsAnError(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotImplemented)
+	}))
+	defer srv.Close()
+	if _, err := NewHTTPEdgePurger(srv.URL, "tok", nil).PurgeEdgeUserReceipts("org_a", "user_a"); err == nil {
+		t.Fatal("a 501 from the edge was accepted")
 	}
 }

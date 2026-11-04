@@ -116,17 +116,44 @@ An open agent run has its own trace. Its events are numbered densely per run fro
 
 Flags: `QUARRY_EDGE__TRACE_RING_EVENTS` (default 512; `0` disables the ring, so a resume that missed events gets `replay_gap`) and `QUARRY_EDGE__TRACE_RING_MAX_BYTES` (default 1 MiB, must be at least 1). An unparsable value aborts boot.
 
-## 4. Webhook payload
+## 4. Webhook delivery: what a subscriber's endpoint receives (INNH-5, 2026-10-31)
+
+This section used to describe a `{delivery_id, signature, event}` wrapper signed with an "org webhook secret". Neither was ever built. What control sends is below; it is what `internal/dispatcher` does and what its tests pin. The subscription API that creates the endpoint's registration is the section "Webhook subscriptions" further down.
+
+**Request.** `POST <the subscription's url>`, `Content-Type: application/json`, one header `X-Quarry-Signature`, and the body below. No redirect is followed. The connection is made to an address vetted at connect time: a private, loopback, link-local, metadata or carrier-grade-NAT address is refused (a blocked target is dead-lettered at once, `last_error` is `blocked_target`). The timeout is 30 seconds.
+
+**Body** is the control event as JSON, byte for byte what was signed:
 
 ```json
 {
-  "delivery_id": "whk_...",
-  "signature": "sha256=<hmac>",
-  "event": { <event envelope> }
+  "event_id": "evt_...",
+  "run_id": "run_...",
+  "job_id": "job_...",
+  "type": "change_detected",
+  "ts": "2026-10-31T10:00:06Z",
+  "seq": 0,
+  "payload": {
+    "subject": "quarry.change.detected",
+    "emitted_at": "2026-10-31T10:00:06Z",
+    "source_url": "https://example.com/pricing",
+    "org_id": "org_...",
+    "status": "changed",
+    "new_baseline": { "baseline_id": "bln_...", "fingerprint": "blake3:...", "artifact_id": "art_...", "captured_at": "..." },
+    "prev_baseline": { "baseline_id": "bln_...", "fingerprint": "blake3:...", "captured_at": "..." },
+    "diff_id": "diff_...",
+    "checked_at": "2026-10-31T10:00:05Z"
+  },
+  "idempotency_key": "..."
 }
 ```
 
-HMAC over raw body using org webhook secret. Retries: exp backoff, max 24h, DLQ to `quarry-control`.
+`type` is the stored event type (`change_detected`); `payload.subject` keeps the dotted subject `quarry.change.detected`. `run_id` and `job_id` are present only when the event belongs to one. `new_baseline`, `prev_baseline`, `diff_id` and `artifact_id` are present when the change monitor recorded them (see "Change text diff"). No page text is in the body; `GET /v1/change/diff?diff_id=` reads it, org-scoped. A page URL and two content fingerprints are in it, which is why a Zero Data Retention organization cannot subscribe.
+
+**Signature.** `X-Quarry-Signature: t=<unix seconds>,v1=<hex>`, where `<hex>` is the lowercase hex of HMAC-SHA256 keyed with the subscription secret (the whole `whsec_...` string, as UTF-8 bytes) over the ASCII string `<t>` + `.` + the raw request body. To verify: split the header on `,`, read `t` and `v1`, recompute over the raw bytes you received (not a re-serialised JSON), compare in constant time, and reject a `t` more than 5 minutes from your clock (replay). The timestamp is that of this attempt, so a retry carries a fresh signature over the same body. After `rotate-secret` the old secret stops verifying at once.
+
+**Outcome and retries.** A `2xx` is delivered. `408`, `429` and `5xx` and a transport failure are retried after 5 s, 30 s, 5 min and 1 h; the fifth failed attempt makes the delivery `dlq`. Any other `4xx` is `dlq` at once. A `dlq` delivery is visible in the delivery log and can be re-queued from the API; it is not retried on its own. Delivery is at least once and not ordered: de-duplicate on `event_id`. One detected change reaches control by more than one path; control keeps one delivery per subscription for it (the key is the org, the URL and the new baseline),; that de-duplication applies only when the event names a baseline id.
+
+**Tenancy.** An event is delivered only to the active subscriptions of the organization that owns it. An event whose owner is unknown is delivered to nobody. A subscription without an organization (rows from before migration 025) receives nothing, and the dispatcher re-checks that at send time.
 
 ## 5. Artifact naming
 
@@ -274,7 +301,7 @@ Today `formats` holds `html`, `markdown`, `raw`, `links`, `screenshot`, `pdf` an
 
 ### Requested formats schema
 
-What `POST /v1/scrape` accepts today is in 9.1: `markdown`, `html`, `rawHtml`, `links` and `metadata`, where `links` and `metadata` change nothing because both are in every response. `json`, `screenshot`, `summary`, `question` and `highlights` are reserved and refused with 400 `reserved_format`. Any other name, and any object form such as `{ "type": "json" }`, is refused with 400 `unsupported_format`. The example and the rules below are the target design for the formats not built yet.
+What `POST /v1/scrape` accepts today is in 9.1: `markdown`, `html`, `rawHtml`, `links` and `metadata`, where `links` and `metadata` change nothing because both are in every response. `screenshot` and `pdf` (WS13.4b) and `json`, `summary`, `question` and `highlights` (INNH-1, "Scrape AI formats" below) are accepted as strings or objects behind their flags, each refused with 400 `feature_disabled` at its field while its flag is off; the bare strings `json`, `question` and `highlights` are 400 `missing_field`. `reserved_format` no longer exists. Any other name, and any object whose `type` is not one of these six, is refused with 400 `unsupported_format`. The example and the rules below are the target design for the formats not built yet.
 
 ```json
 {
@@ -534,6 +561,8 @@ Denial reasons are emitted as `page.blocked` payloads or stored in crawl status 
 
 ### Change detail artifact
 
+This is a planned shape and nothing produces it. What a change monitor stores, with `QUARRY_EDGE__CHANGE_TEXT_DIFF` on, is the paragraph diff in "Change text diff" below.
+
 ```json
 {
   "status": "new | changed | unchanged",
@@ -708,13 +737,24 @@ Which agent opened a tab. Every request that carries the initiator hint takes it
 
 > WS13.8: this section lists the inline formats of v1. `screenshot` and `pdf` (WS13.4b) and `actions` (WS13.5) are described in section 10 below. Each is refused with 400 `feature_disabled` at its field until its flag is on.
 
-Root-level, all optional, snake_case with a camelCase alias: `formats` (`markdown`, `html`, `rawHtml`, `links`, `metadata`; `links` and `metadata` change nothing, since both are already in every response), `only_main_content`, `include_tags`, `exclude_tags`, `remove_base64_images`, `extractor` (`readability`, `clean_full`, `raw`), `timeout_ms` (1000 to 55000, default 55000), `max_inline_bytes` (1 to 8 MiB, default 1 MiB).
+Root-level, all optional, snake_case with a camelCase alias: `formats` (`markdown`, `html`, `rawHtml`, `links`, `metadata`; `links` and `metadata` change nothing, since both are already in every response; `screenshot` and `pdf` are in section 10 and the AI formats `json`, `summary`, `question` and `highlights` in "Scrape AI formats"), `only_main_content`, `include_tags`, `exclude_tags`, `remove_base64_images`, `extractor` (`readability`, `clean_full`, `raw`), `timeout_ms` (1000 to 55000, default 55000), `max_inline_bytes` (1 to 8 MiB, default 1 MiB), and `max_age` (milliseconds, 0 to 30 days; INNH-7, see "`max_age`" below).
 
-All eight are applied. `exclude_tags` (CSS selectors) removes every match and its subtree. `include_tags` keeps only the matching subtrees, in document order, each once; an explicit selection beats the main-content heuristic, so the heuristic does not run on it, and a list that matches nothing gives empty markdown and the warning `include_tags_matched_nothing`, never the whole page. The selection is then cleaned the way `clean_full` cleans a page (lazy images resolved, inline images stripped), whatever `extractor` and `remove_base64_images` say. A selector that does not parse is a 400 `invalid_selector` at `include_tags[i]` or `exclude_tags[i]`. `only_main_content` (default true) and `extractor` say one thing two ways: `readability` is the main-content heuristic, `clean_full` keeps the whole body minus head, scripts, styles, noscript, templates and iframes (lazy images resolved, inline images stripped) and `raw` converts the document as it is. An unset one follows the other; setting them to disagree is a 400 `conflicts_with_only_main_content` on `extractor`. `remove_base64_images` strips inline `data:` images on the readability and raw paths too. With default options the markdown is byte-identical to what a scrape returned before these options existed. `html` is the HTML the markdown was made from (after exclusion, inclusion and cleaning); `rawHtml` is the document as fetched. `effective_options.ignored_fields` now lists only unknown request keys. `json`, `screenshot`, `summary`, `question` and `highlights` are reserved: a 400 `reserved_format`.
+All eight are applied. `exclude_tags` (CSS selectors) removes every match and its subtree. `include_tags` keeps only the matching subtrees, in document order, each once; an explicit selection beats the main-content heuristic, so the heuristic does not run on it, and a list that matches nothing gives empty markdown and the warning `include_tags_matched_nothing`, never the whole page. The selection is then cleaned the way `clean_full` cleans a page (lazy images resolved, inline images stripped), whatever `extractor` and `remove_base64_images` say. A selector that does not parse is a 400 `invalid_selector` at `include_tags[i]` or `exclude_tags[i]`. `only_main_content` (default true) and `extractor` say one thing two ways: `readability` is the main-content heuristic, `clean_full` keeps the whole body minus head, scripts, styles, noscript, templates and iframes (lazy images resolved, inline images stripped) and `raw` converts the document as it is. An unset one follows the other; setting them to disagree is a 400 `conflicts_with_only_main_content` on `extractor`. `remove_base64_images` strips inline `data:` images on the readability and raw paths too. With default options the markdown is byte-identical to what a scrape returned before these options existed. `html` is the HTML the markdown was made from (after exclusion, inclusion and cleaning); `rawHtml` is the document as fetched. `effective_options.ignored_fields` now lists only unknown request keys. The AI formats (`json`, `summary`, `question`, `highlights`) are in "Scrape AI formats" below; `reserved_format` is gone.
 
-Response additions on `data`: `markdown`, `html`, `raw_html` (inline, only when asked for; `markdown` also by default under ZDR), `truncated[]` (ZDR: cut at the cap), `omitted[]` (not ZDR: over the cap, read the `formats.*` artifact), `warnings[]`, `effective_options`. `formats.*` artifact references are unchanged. A request that names `formats`, `include_tags`, `exclude_tags`, `remove_base64_images`, `only_main_content: false` or an `extractor` other than `readability` neither reads nor writes the page cache. So does a request whose `signals` select the browser driver (any `actions`, `screenshot`, `pdf`, `prior_block_signals` of 2 or more under `QUARRY_BLOCK_ESCALATION=legacy` (the field is deprecated and ignored under `honest`), or `profile_required`): a cached static result cannot carry what the browser renders or captures. `timeout_ms` and `max_inline_bytes` change delivery, not the result, so they do not bypass it. ZDR never touches it.
+Response additions on `data`: `markdown`, `html`, `raw_html` (inline, only when asked for; `markdown` also by default under ZDR), `truncated[]` (ZDR: cut at the cap), `omitted[]` (not ZDR: over the cap, read the `formats.*` artifact), `warnings[]`, `effective_options`. `formats.*` artifact references are unchanged. A request that names `formats`, `include_tags`, `exclude_tags`, `remove_base64_images`, `only_main_content: false` or an `extractor` other than `readability` neither reads nor writes the page cache. So does a request whose `signals` select the browser driver (any `actions`, `screenshot`, `pdf`, `prior_block_signals` of 2 or more under `QUARRY_BLOCK_ESCALATION=legacy` (the field is deprecated and ignored under `honest`), or `profile_required`): a cached static result cannot carry what the browser renders or captures. `timeout_ms` and `max_inline_bytes` change delivery, not the result, so they do not bypass it. ZDR never touches it. This paragraph is about the page cache (`quarry:page:...`, read only through `prev_fingerprint`); the URL result cache that `max_age` reads is a separate key space with its own rules (below), and both are untouched by a request without `max_age` and without `prev_fingerprint`.
 
 Unknown keys: ignored with a `warnings[] {code: "unknown_field", field}` entry, `effective_options.ignored_fields`, `Deprecation: true` (and `Sunset` when `QUARRY_EDGE__SCRAPE_STRICT_AFTER` is set) and a `quarry.scrape.unknown_field` log line naming the keys. `QUARRY_EDGE__SCRAPE_REQUEST_VALIDATION=strict` (or a passed strict-after date) makes them a 400. `skipTlsVerification`, `skip_tls_verification`, `proxy`, `proxyUrl`, `headers`, `mobile` and `stealth` are always a 400 `reserved_field`. A bad value is a 400 `BAD_REQUEST` with `details.fields[] {path, code, message}`, including a body that is not JSON. `QUARRY_EDGE__SCRAPE_OPTIONS_ENABLED=0` turns the option keys back into unknown keys (the kill switch); `QUARRY_EDGE__SCRAPE_INLINE_MAX_BYTES` changes the default inline cap.
+
+**`max_age` (INNH-7, `QUARRY_EDGE__SCRAPE_MAX_AGE`, off by default).** `max_age` is an integer in milliseconds (0 to 2592000000, alias `maxAge`) and means what Firecrawl's `maxAge` means: serve a stored result no older than this instead of fetching. It reads a second cache, `quarry:scrape:{org}:{blake3(canonical URL, options key)}`, never the page cache. The key is the organization (a hard boundary; an empty org id is never a key), the canonical URL (host case, default port, fragment and `utm_*`/`gclid`-style parameters do not matter; a trailing slash and the query order do) and the options that change a result (`formats`, `include_tags`, `exclude_tags`, `only_main_content`, `extractor`, `remove_base64_images`), so one URL under two option sets is two entries. `max_age`, `timeout_ms` and `max_inline_bytes` are not in the key.
+
+- Absent: the cache is not read; the response is what it was. `0`: not read, but the fresh result is written. `N`: a stored result for the key is served when `now - fetched_at <= N`; otherwise the page is fetched and the entry replaced.
+- A hit does not fetch, is not metered as `scrape.page` (the existing page-cache hit is not either; whether a cache hit bills is a product decision, recorded as open), makes no new record (`scrape_id` is absent), and returns the ORIGINAL `data.fetched_at`. `effective_options` gains `max_age` (the echo), and on a hit `cache_state: "hit"`, `cached_at` (RFC 3339, the original fetch) and `cache_age_ms`. On a miss `cache_state` is `miss` (it is `bypass` when the cache was not consulted: `max_age` 0, `cache.mode` `bypass` or `write_only`, or the request is not cacheable).
+- The entry holds the output (with its artifact references) and the run's warnings, never inline text. A hit rebuilds `markdown`, `html` and `rawHtml` from the stored artifacts of the run that produced it, cut at the request's `max_inline_bytes` as a run would; an artifact that is missing makes the entry a miss and the page is fetched again, never an error.
+- Written after every cacheable 2xx success of the static or TLS driver that the run did not flag as a bot wall or a soft-404 (the pipeline marks both in every `QUARRY_CHALLENGE_ENFORCE` mode: under the default `log` such a page is still returned, with `cache_state` `miss`, but it is never written, so the next `max_age` call fetches again; under `enforce` a bot wall fails the run), for the TTL `cache.max_age_s` (default 3600 s). A `max_age` longer than the TTL therefore behaves as the TTL. `cache.mode` gates it: `read_only` never writes, `write_only` and `bypass` never read. `cache` with only `max_age_s` (no `mode`) is valid and means `read_write`; `cache.max_age_s` is the write TTL in seconds and `max_age` the read freshness in milliseconds.
+- Never cached, with the warning `max_age_ignored` when `max_age` was sent: a capture (`screenshot`, `pdf`), `actions`, an AI format (`json`, `summary`, `question`, `highlights`), a request planned on the browser driver (and a result the browser served), a non-default web policy, `ingest: true`, a privacy class of `zdr_ephemeral` or `credential_or_secret`, a non-2xx result. Under ZDR (body flag or the token's floor) the cache is neither read nor written and no key is computed, not even a hashed one: the warning is `max_age_ignored_zdr`, `cache_state` is `bypass`. With no cache backend (no Redis) `max_age` is ignored with the warning `cache_unavailable`, never an error.
+- The URL is still gated by the web policy before the cache is read, so a denied page is never served from it.
+- Switch off: `max_age` is a 400 `feature_disabled` at `max_age`. `QUARRY_EDGE__SCRAPE_OPTIONS_ENABLED=0` turns it, like every option, back into an unknown key. In strict validation `max_age` is a known key. Errors: `out_of_range` (above 30 days), `invalid_type` (not a non-negative integer), `conflicting_aliases` (`max_age` and `maxAge` with different values).
+- Not in this version: crawl, batch and `/v1/internal/run_page` have no `max_age` (they keep `prev_fingerprint`), nor `stale_while_revalidate_s`, `min_age` or a `store` switch.
 
 **Scrape record (WS5.F).** A non-ZDR scrape stores one small `scrape_record` artifact (the normalized output and `effective_options`, never inline text) and returns its id as `data.scrape_id`. `GET /v1/scrape/{id}` returns it again for the same organization: another organization's id is a 404, an id that is not a scrape record is a 404, and a reader whose organization is under ZDR gets a 403 even for an earlier record. A ZDR scrape stores nothing and has no `scrape_id`; a failed write adds the warning `scrape_record_unavailable`. Service principals need `scrape:read` or `scrape:write`. `QUARRY_EDGE__SCRAPE_RECORDS=0` stops storing records. Records live as long as artifacts do.
 
@@ -760,6 +800,321 @@ Why it is deferred: the WS5.B definition of done allows the step to be "landed o
 
 To pick it up: route `fetch_page` in `crates/quarry-edge/src/extract_routes.rs` through `quarry_transform::sniff::detect` and `quarry_runtime::content_route::parse_document`, answer a document it cannot read with a typed per-source `UNSUPPORTED_MEDIA` that uses the reason codes of `/v1/scrape`, and test that a PDF in a batch fails only its own source.
 
+## Scrape AI formats: `json`, `summary`, `question`, `highlights` (INNH-1, U1 to U3, 2026-10-31)
+
+Status: built and tested in tests, dark. The contract and its parser are in `quarry-core` (`ai_spec.rs`, `scrape.rs`, U1), the engine and the `/v1/ai/chat` client in `quarry-runtime` (`ai_scrape.rs`, `ai_verify.rs`, `mp_client.rs`, U2), and the edge wiring in `quarry-edge` (`scrape_contract/ai_formats.rs`, `routes.rs`, U3). The flag `QUARRY_EDGE__AI_FORMATS` exists and is off, so every AI format is `400 feature_disabled` until an operator sets it. It is on no stack: the compose files default it to `0`, and no deployed stack can turn it on yet (see "Not in this version"). No real Model Plane gateway has been called; the lane is proven against a strict double only. The design and its decisions are `.plan-work/quarry-w1w2/INNH-1-design.md`.
+
+**Request (additive, `POST /v1/scrape`).** `formats[]` items may be these objects. Unknown keys inside an object are 400 `unknown_field` at `formats[i]`, as for `screenshot` and `pdf`.
+
+```json
+{ "type": "json",       "schema": { "...": "..." }, "prompt": "optional" }
+{ "type": "summary",    "max_chars": 2000, "language": "nb" }
+{ "type": "question",   "question": "..." }
+{ "type": "highlights", "query": "...", "max_highlights": 3, "max_chars_each": 300 }
+"summary"
+```
+
+`"summary"` as a string means the defaults. The strings `"json"`, `"question"` and `"highlights"` cannot be honoured (each has a required input) and are 400 `missing_field` at `formats[i].schema`, `formats[i].question` and `formats[i].query`. `reserved_format` no longer exists: while the flag is off the four formats are 400 `feature_disabled` at `formats[i]` (the same step `screenshot` took in WS13.4b).
+
+All field errors are 400 `BAD_REQUEST` with `details.fields[] {path, code, message}`; a value is never echoed.
+
+| Field | Rule | Code |
+|---|---|---|
+| any AI kind | at most one of each kind per request | `too_many` at `formats[i]` |
+| `json.schema` | required; a JSON object; root `"type": "object"`; at most 65,536 bytes serialized; at most 10 levels (`properties` and `items` each add one, the root is 1); at most 200 `properties` entries in all | `missing_field`, `invalid_type`, `schema_root_not_object`, `schema_too_large`, `schema_too_complex` at `formats[i].schema` |
+| `json.schema` keywords | allowed: `type`, `properties`, `required`, `items` (one schema), `enum`, `minItems`, `maxItems`, `minLength`, `maxLength`, `minimum`, `maximum`, `additionalProperties` (`true` or `false`), `description`, `title`; `$schema`, `$id` and `$comment` are dropped; anything else is refused | `schema_keyword_not_supported` at `formats[i].schema.<path to the keyword>`; a wrong value type is `invalid_type` or `invalid_value` at the keyword |
+| `json.prompt` | optional string, 1 to 10,000 characters | `empty`, `text_too_long`, `invalid_type` |
+| `summary.max_chars` | optional integer, 200 to 10,000, default 2,000 | `out_of_range`, `invalid_type` |
+| `summary.language` | optional, `[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})?`; default the page's own language | `invalid_value` |
+| `question.question` | required string, 1 to 10,000 characters | `missing_field`, `empty`, `text_too_long` |
+| `highlights.query` | required string, 1 to 1,000 characters | `missing_field`, `empty`, `text_too_long` |
+| `highlights.max_highlights` | optional integer, 1 to 10, default 3 | `out_of_range` |
+| `highlights.max_chars_each` | optional integer, 40 to 1,000, default 300 | `out_of_range` |
+| any AI kind, flag off | | `feature_disabled` at `formats[i]` |
+
+The schema keywords that the validator in `quarry_core::json_schema` ignores (`$ref`, `anyOf`, `oneOf`, `allOf`, `not`, `const`, `pattern`, `format`, `if`/`then`/`else`, `patternProperties`, `dependent*`, `default`, `uniqueItems`, ...) are refused rather than accepted, because a schema Quarry cannot check would make `schema_valid: true` a lie. Widening the validator is a separate slice.
+
+`effective_options.formats` lists an AI format by its wire name only (`json`, `summary`, `question`, `highlights`): no schema, prompt, question or query is echoed or stored. A request with an AI format is not a default request: it neither reads nor writes the page cache, and `canonical_options_key` carries one `ai:<kind>:<hash16>` per AI format (the first 16 hex digits of blake3 over the spec as canonical JSON, keys sorted, defaults filled in, `$schema`/`$id`/`$comment` dropped), so a future result cache cannot confuse two specs and the content never appears in a key. A request without an AI format keeps the key it had before.
+
+**Request errors decided by the edge, before the page is fetched (INNH-1 U3).** 403 `FORBIDDEN` `details.reason: extract_ai_scope_required` (a service principal without the scope `extract:ai`, or a request labelled `initiated_by: "agent"`); 501 `UNSUPPORTED` `model_plane_unavailable` (no `QUARRY_EDGE__MODEL_PLANE_URL`) or `model_lane_not_granted` (no usable model credential); `POST /v1/scrape/stream` refuses any AI format with `unsupported_in_stream` (an SSE `error` event, before any fetch, whatever the switch says; it looks at the raw `formats` for an object whose `type` is one of the four, or the string `summary`). `details.field` of the 403 is `formats[i]` of the first AI format. The 403 comes first, then the 501s, both after the field validation (a malformed AI format is still a 400 with its path) and before the fetch, so a refused request spends no fetch. ZDR is never a request error for an AI format: the scrape succeeds and each AI entry says `ZDR_UNAVAILABLE`; the 501 checks are not made for a ZDR request, because it never reaches a model. Reasons are in `docs/ERROR_REASONS.md`.
+
+**Response (`data`, all optional, present only when asked for).**
+
+| Field | Type | Present when |
+|---|---|---|
+| `json` | object | `ai.json.status` is `ok`; then it always validates against the request's schema |
+| `summary` | string, at most `max_chars` characters (cut on a character boundary) | `ai.summary.status` is `ok` |
+| `answer` | string, at most 10,000 characters | `ai.question.status` is `ok` and `ai.question.found` |
+| `highlights` | `[{text, start, end}]`, in page order, not overlapping, each 8 to `max_chars_each` characters | `ai.highlights.status` is `ok`; may be `[]`, an honest empty result |
+| `ai` | `AiReport` | any AI format was asked for |
+
+`start` and `end` are Unicode scalar (char) offsets, end-exclusive, into the AI source text: the page markdown Quarry produced, before any inline truncation (the same as `data.markdown` when that came back whole; otherwise the `formats.markdown` artifact). `text` is the exact slice. A `json` output that still fails the schema after repair is not put in `data.json`; invalid data travels only as `schema_issues` (paths and codes).
+
+`ai` is `{json?, summary?, question?, highlights?: AiFormatReport, total: {calls, input_tokens, output_tokens}}`. An `AiFormatReport` is `{status, code?, reason?, retry_after_s?, model?, usage?: {input_tokens, output_tokens}, truncated_input?, untrusted_source, schema_valid?, repair?, schema_issues?, found?, grounded?, dropped?}`:
+
+- `status` `ok`: the result field is present. `skipped`: no model call was made for this format (`ZDR_UNAVAILABLE`, `PRIVACY_POLICY` when the request's `privacy.privacy_classification` is `credential_or_secret` or `zdr_ephemeral`, `BUDGET_EXHAUSTED`, `EMPTY_SOURCE`, or `MODEL_RATE_LIMITED` for formats not started when a sibling was rate limited). `error`: a call was made and failed (`MODEL_UNAVAILABLE` with a `reason`, `MODEL_RATE_LIMITED` with `retry_after_s`, `SCHEMA_INVALID` with `schema_issues`).
+- `reason` is one of `model_lane_denied`, `model_lane_unauthorized`, `model_rejected_request`, `upstream_unavailable`, `timeout`, `transport`, `bad_reply`, `not_json`, `too_large`, `deadline`.
+- A model failure never fails the scrape: the status stays 200 with the page fields. The codes are strings inside a 200 body, not wire `ErrorCode`s.
+- `untrusted_source` is true on every `ok` entry: the output is model text derived from the page and is data, never instructions. `repair` (`none`, `local`, `model`) says how a `json` output was made valid; the one model repair call carries the invalid output, the issues and the schema, never the page. `grounded` says the model's supporting quote for an `answer` is verbatim on the page; `dropped` counts highlight quotes that are not on the page.
+- `model` is what the gateway answered with (a routing alias or what it resolved to), never a vendor id chosen by the caller. `cost_usd` is added to `usage` when the Model Plane returns it.
+
+Model output is untrusted and checked by Quarry, not by the model: `json` is validated against the caller's schema after a local repair and at most one model repair; `highlights` and the `question` quote are verified verbatim against the page text (whitespace runs, no-break spaces and typographic quotes are folded, minimum 8 characters, de-duplicated, non-overlapping); `summary` cannot be verified and is labelled. The page reaches the model inside a per-call random delimiter it cannot know, with rules that call it data. AI output is inline only: never an artifact, never in the scrape record (`GET /v1/scrape/{id}` has no AI fields), never in the page cache, an event, a log or a span.
+
+**Zero Data Retention.** Effective ZDR (the token floor or the body flag) plus any AI format: every AI entry is `skipped` with `ZDR_UNAVAILABLE`, no Model Plane call is made, nothing is written, and the page itself is returned as an ordinary ZDR scrape. `QUARRY_EDGE__AI_FORMATS_ZDR` accepts only `refuse` in v1 (ADR-4); `allow` is reserved and behaves as `refuse`. The rows `scrape` and `scrape_stream` in `docs/ZDR_MATRIX.md` say so.
+
+**Privacy block.** The request's `privacy` block is honoured before the model hop, by the rule the page-title hop uses (`model_hop_allowed`): a `privacy_classification` of `credential_or_secret` or `zdr_ephemeral` skips every requested AI format with `PRIVACY_POLICY`, makes no Model Plane call, and returns the page itself as a normal scrape. Any other classification (or none) calls the model as usual. ZDR is answered first (`ZDR_UNAVAILABLE`). `truncated_input: true` is set on an entry that made a model call when the page text was longer than `QUARRY_EDGE__AI_FORMATS_MAX_INPUT_CHARS`; a page of exactly the cap is not truncated.
+
+**Flags (INNH-1 U3; each read once at the first request; default off).** `QUARRY_EDGE__AI_FORMATS` (`on`, `1` or `true`, ignoring case and spaces, enables; anything else is off, so a typo never widens the endpoint), `QUARRY_EDGE__AI_FORMATS_ZDR` (`refuse`; `allow` is reserved, is logged once at start as ignored and behaves as `refuse`), `QUARRY_EDGE__AI_FORMATS_MODEL_JSON` (routing alias, default `verevon-balance`), `QUARRY_EDGE__AI_FORMATS_MODEL_TEXT` (summary, question, highlights and the json repair call; default `verevon-budget`), `QUARRY_EDGE__AI_FORMATS_MAX_INPUT_CHARS` (page characters per call, 1,000 to 80,000, default 60,000; a value above the ceiling is the ceiling), `QUARRY_EDGE__AI_FORMATS_MAX_TOTAL_TOKENS` (reported tokens per request, at least 1,000, default 200,000), `QUARRY_EDGE__AI_FORMATS_MAX_CALLS` (1 to 8, default 8, repair included) and `QUARRY_EDGE__AI_FORMATS_CONCURRENCY` (1 to 4 per request, default 4; the process-wide cap is 16). The models are routing aliases, never vendor ids. A malformed number falls back to its default.
+
+**The model lane (development only).** The edge calls `POST /v1/ai/chat` with the credential it holds for the Model Plane: `state.model_plane_token`, which `main.rs` sets only under the auth dev bypass (`QUARRY_EDGE__MODEL_PLANE_TOKEN`), sent as `Authorization`, and `QUARRY_EDGE__MODEL_PLANE_INFERENCE_TOKEN` (the token for the inference audience; when unset the one dev token goes in both headers) as `x-inference-authorization`. With no `QUARRY_EDGE__MODEL_PLANE_URL` the answer is 501 `model_plane_unavailable`; with a URL and no such credential, 501 `model_lane_not_granted`. The Auth Core minted path is not built (owner decision OD-1).
+
+**Who may ask.** A user token. A service principal needs the scope `extract:ai`, which no registry principal holds today; a request labelled `initiated_by: "agent"` is refused whatever the token, the scope included. Both are the 403 above.
+
+**Deadline.** While the switch is on, `POST /v1/scrape` gets the 125 s router deadline that scrape actions have (the fetch keeps its own cap, and the model phase has 45 s of its own); every other route keeps 60 s.
+
+**Not in this version.** No billing for AI formats (token usage is reported only; pricing is an owner decision). No result cache. Not on `/v1/scrape/stream`, crawl or batch. `/v1/extract` has its own `prompt` (next section, INNH-2). The Model Plane lane for a deployed stack (a grant for Quarry on `/v1/ai/chat`, decision X-7) is not built: a deployed stack cannot turn the flag on until it is.
+
+## `/v1/extract`: the `prompt` takes effect (INNH-2, 2026-10-31)
+
+`POST /v1/extract` used to read `prompt` and drop it. It is now sent to the model. No new endpoint, no new switch: the model arm is still gated by `QUARRY_EDGE__MODEL_PLANE_URL` and a model credential, as the schema arm always was. Callers that never sent `prompt` see no change except the additive item fields below.
+
+**Modes.** `schema` alone: schema-guided extraction, as before. `schema` + `prompt`: the same, with the prompt as extra instructions that say what to extract and cannot relax the schema. `prompt` alone: the model is asked for one JSON object that answers the instructions; the item is status `ok` and `data` is that object (a reply that is not an object is a per-source `error`). Neither: cleaned markdown, status `fetched`, unchanged.
+
+**Prompt rules.** 1 to 10000 characters after cleaning (characters, not bytes). Control characters other than line breaks and tabs are dropped and the ends are trimmed. An empty result, or more than 10000 characters before cleaning, is a 400 `BAD_REQUEST` with a `hint`; the message never repeats the prompt, and a refused prompt costs no fetch and no model call. The prompt is trusted text and goes before the page, outside a fence whose id is 128 random bits and is not in the page, so text on the page cannot close the fence or pose as the instructions. The output is still validated against `schema` when there is one. The prompt is not echoed in any response and not logged.
+
+**ExtractItem additions (additive).** `schema_valid` (bool): present when a `schema` was sent and the model answered; false means `data` does not conform, and `status` stays `ok` (the `fetched | ok | error` enum is unchanged). `schema_issues` (string[]): one line per issue, present only when `schema_valid` is false. `truncated_input` (bool): present and true when the page was cut at the 20000-byte input cap, whatever the status, so a caller knows the model (or the markdown) saw only the start of the page.
+
+**Errors.** 400 for the prompt rules above. 429 short-circuit unchanged. 501 `UNSUPPORTED` (INNH-3) when a `schema` or a `prompt` is sent and the Model Plane cannot be used. The body is exactly `{error, code, hint, next_actions}`: `code` is `UNSUPPORTED`, `hint` starts with "omit `schema` and `prompt` to receive cleaned markdown" and points at `docs/RUNBOOKS.md`, "Enable structured extract and AI formats", and `next_actions` has two entries, the first being the retry without `schema` and `prompt`. There is no `details`; the four cases differ in `error`: (0) `structured extraction is not available on this edge: QUARRY_EDGE__AI_FORMATS is off` (QB-T17: a URL is set, the switch is off or was refused at boot; checked before the others when a URL is set); (1) `structured extraction needs the Model Plane, and QUARRY_EDGE__MODEL_PLANE_URL is not set on this deployment` (no URL; also an empty or blank URL); (2) `structured extraction needs a granted Model Plane lane, and this deployment holds no model credential` (a URL, no service key and no development token); (3) `structured extraction needs a granted Model Plane lane, and the Model Plane refused this service` (the gateway answered 401 or 403 to the first model call, or Auth Core would not mint the token). Cases 0, 1 and 2 are answered before any page is fetched. Case 3 is answered after one page fetch and one model call, only while no source has been extracted; it replaces the former 200 with one `status: error` per source. A refusal after a source came back `ok`, a timeout, a 5xx, a non-JSON answer and a ZDR or privacy refusal stay per source in the 200. No case names a URL, host or token. `QUARRY_EDGE__AI_FORMATS` is named only in case 0: QB-T17 (merged from main) makes it the gate of the model arm of `/v1/extract` as well as of the AI formats of `/v1/scrape`. A deployed stack gets one of these until WS16.S1 to S3 and decision X-7 land.
+
+**ZDR (ADR-4).** The model hop carries no ZDR posture, so under ZDR (the body flag, or the token's floor for a user of a ZDR org) no page text is sent to a model. The page is still fetched under ZDR; each source answers status `error`, `error` starting `ZDR_UNAVAILABLE:`, with its `structured` harvest, which needs no model. This is not a 501 and does not need a Model Plane. The engine refuses a ZDR call as well (`AiFormatRunner::extract_for_org`), so a future caller cannot reach the model by skipping the route check. The `extract` row of the ZDR matrix says so.
+
+**Privacy block (INNH-1).** The request's `privacy` block is honoured the same way as on `/v1/scrape`: a `privacy_classification` of `credential_or_secret` or `zdr_ephemeral` sends no page text to the model. The source answers status `error`, `error` starting `PRIVACY_POLICY:`, with its `structured` harvest; no model call is made and it is not a 501. Any other classification calls the model as before.
+
+**Time budget.** Sources are read one after another and every model call is paid. After 50 seconds from the start of the request a source that has not been read by the model answers status `error` with a message that names the budget, instead of the router cutting the whole request at 60 seconds. Send fewer URLs per request, or `max_urls` lower.
+
+**Not in this version.** No per-call output cap and no `cost_usd` (WS16.S1). No LLM usage metric: metering is unchanged (`quarry.extract.url` per `ok` or `fetched` source). The Verevon gateway re-adding `prompt` to its own contract is the Innhenting session's change. The model lane for a deployed stack (a grant on the Model Plane, decision X-7) is not built, so a deployed stack still cannot run this arm.
+
+## Change text diff: stored page text, the paragraph diff and `GET /v1/change/diff` (INNH-4, 2026-10-31)
+
+A change monitor (a schedule with `target_kind=change_monitor`) used to keep a fingerprint per version and nothing a person could read. With `QUARRY_EDGE__CHANGE_TEXT_DIFF` on (default off) it keeps the page text and the difference between two versions. Off, nothing below exists: the recorder is what it was and `GET /v1/change/diff` answers 501. The flag is read per request.
+
+**What is stored.** `PageRunner` already writes a `markdown` artifact on every non-ZDR page run. `POST /v1/internal/run_page` now returns its id as `markdown_artifact_id` (general: any caller, and the per-run results of a crawl, can use it; absent when nothing was stored, always so under ZDR). The orchestrator passes it on `POST /v1/internal/change/record`. With the flag on and the body not `zdr: true`, a new or changed check:
+1. checks the id is a markdown artifact the body's `org_id` can read (a 400 otherwise, nothing saved; another org's id reads as not found, so it fails here);
+2. saves the new baseline with `artifact_id` set to it (an unchanged check saves nothing);
+3. on a change, computes the paragraph diff of the older baseline's markdown and the new one and stores it as an artifact of kind `change_diff` (extension `change_diff.json`, `application/json`), then a `DiffRecord` with `format: "json"`, `artifact_id` pointing at it and `summary` (at most 1 KB, for example `+3 -1 paragraphs, 2 moved`, `no paragraph change (the page markup changed, its text did not)` or `text diff unavailable: no_previous_text`);
+4. puts the saved baseline in `ChangeRecord.new_baseline` and the diff record in `ChangeRecord.diff_id` before the event and the webhook go out. Both were empty before: the `change_detected` event's idempotency key ended in an empty baseline id. The `quarry.change.detected` body is the same `ChangeRecord` plus `subject` and `emitted_at`; it now carries `new_baseline` (with `artifact_id`) and `diff_id`. No page text is in it.
+
+A baseline recorded before the flag has no `artifact_id`. The first change after it stores an unavailable diff (`reason: no_previous_text`) and the next one diffs. Unchanged, unreachable and ZDR-declared results persist no text.
+
+**The stored diff** (artifact kind `change_diff`, field names pinned by `quarry-core` `change_history`):
+
+```json
+{
+  "version": 1,
+  "source_url": "https://example.com/pricing",
+  "from_baseline_id": "bln_...", "to_baseline_id": "bln_...",
+  "from_fingerprint": "blake3:...", "to_fingerprint": "blake3:...",
+  "available": true,
+  "reason": "no_previous_text",
+  "diff": {
+    "format": "paragraph", "real_delta": true,
+    "added": 1, "removed": 1, "moved": 0, "unchanged": 14,
+    "ops": [
+      { "op": "added", "index": 6, "text": "Pro plan: 12 EUR per seat" },
+      { "op": "removed", "index": 6, "text": "Pro plan: 10 EUR per seat" },
+      { "op": "moved", "from": 2, "to": 5 }
+    ],
+    "truncated": false
+  }
+}
+```
+
+`reason` is present only when `available` is false (then there is no `diff`). The diff is paragraph-level and set-based: paragraphs are blocks separated by a blank line (a block over 8192 bytes is cut into units), compared by a hash of their text with whitespace collapsed and line endings ignored. `added`: in the new text and not the old; `removed`: the opposite; `moved`: kept its text but changed place among the paragraphs both texts hold (an inserted or dropped paragraph does not make the rest move; a repeated paragraph counts once). `real_delta` is `added + removed > 0`. The change fingerprint is still the raw-byte one, so a page whose bytes changed and whose text did not (an ad, a timestamp in the markup) is `status: changed` with `real_delta: false`; switching the monitor to a text fingerprint is a separate slice. Caps: 500 ops (added and removed first, then moved), 2048 bytes of text per op (cut on a character boundary), 1 MiB of markdown read per side; the counts are always complete and `truncated` says anything was cut.
+
+**`GET /v1/change/diff`** (bearer; org from the token). Query: `url`; `from` and `to` (baseline ids, together, with `url`); `diff_id`; `include=markdown`.
+- `url` alone: the latest two baselines. `url` + `from` + `to`: those two, in that order. `diff_id`: the diff a webhook announced (optionally with its `url`).
+- 200 `data`: `{ source_url, from: {baseline_id, fingerprint, captured_at, artifact_id|null} | null, to: {...}, diff_id: string|null, available, reason?, diff?, markdown?: {from, to, truncated} }`. `diff_id` is the stored record when the pair has one and its artifact reads back (the diff the webhook announced); otherwise the diff is computed from the two stored pages for this request and `diff_id` is null. `reason` is one of `no_previous_version` (one baseline; `from` is null), `no_previous_text`, `no_text`, `artifact_gone` (retention evicted a page; a stored diff still answers, it holds its own text). `markdown` only with `include=markdown`, each text cut at 1 MiB.
+- 400: no `url` and no `diff_id`; `from` without `to`; `diff_id` with `from` or `to`; baselines of another url than `url`, or the same baseline twice; `include` other than `markdown`; an id over 128 characters. 404 (`NOT_FOUND`, one message): no baseline for the org and url, or an unknown baseline or diff id, or one of another organization; there is no 403 for another tenant. 501: the flag is off (the message names `QUARRY_EDGE__CHANGE_TEXT_DIFF`) or the edge has no baseline store. 403: a Zero Data Retention caller (the token's floor or the body flag), refused like a stored scrape record: stored page text is not readable under ZDR.
+
+**ZDR.** A ZDR run stores no markdown, so `run_page` returns no id and nothing is kept; the record route also ignores a markdown id on a `zdr: true` body (the baseline row of an observe-mode ZDR body is still written, with no text). Row `change_diff_read` in `ZDR_MATRIX.md`: refused. No hash of a page is ever returned as a stand-in.
+
+**Not in this version.** `POST /v1/change/check` takes a caller-supplied fingerprint, fetches nothing and stores nothing, so it has no text diff; only scheduled monitors do. No consumer exists for `POST /v1/change/refresh`. The artifact janitor deletes by age only: if it is armed, old baselines lose their text (`artifact_gone`) until it learns to spare baseline artifacts. A retried record activity can write a second baseline (the record route ignores the idempotency key).
+
+## Webhook subscriptions: the API (INNH-5, 2026-10-31)
+
+A subscription is an HTTPS endpoint that receives `change_detected` events of the caller's organization. Off, nothing below exists: `QUARRY_EDGE__WEBHOOK_SUBSCRIPTIONS` and `QUARRY_CONTROL__WEBHOOK_SUBSCRIPTIONS` are unset in the default composes. The edge routes answer 501 while the edge switch is off, and the edge reports control's plain 404 (switch off there) as 501 naming `QUARRY_CONTROL__WEBHOOK_SUBSCRIPTIONS`. The fan-out tenancy fix and the retirement of the old global routes are not behind a switch: they close a hole that has no legitimate user.
+
+Edge routes (bearer; the organization is the token's, a caller-supplied `org_id` is ignored; control mirrors them under the same paths with `?org_id=` and the internal HMAC):
+
+| Method and path | Answer |
+|---|---|
+| `POST /v1/webhook-subscriptions` | 201 `data`: the subscription plus `secret` |
+| `GET /v1/webhook-subscriptions?limit&cursor` | 200 `data: {items, next_cursor?}` |
+| `GET /v1/webhook-subscriptions/{id}` | 200 `data`: the subscription |
+| `PATCH /v1/webhook-subscriptions/{id}` | 200 `data`; body names at least one of `active`, `events`, `description` |
+| `DELETE /v1/webhook-subscriptions/{id}` | 204, no body |
+| `POST /v1/webhook-subscriptions/{id}/rotate-secret` | 200 `data: {id, secret, secret_hint}` |
+| `GET /v1/webhook-subscriptions/{id}/deliveries?status&limit&cursor` | 200 `data: {items, next_cursor?}` |
+| `POST /v1/webhook-subscriptions/{id}/deliveries/{delivery_id}/retry` | 202 `data`: the delivery, `pending` |
+
+Create body: `{ "url": "https://hooks.example.com/q", "events": ["change_detected"], "description": "prod" }`; an unknown field is a 400. A subscription is:
+
+```json
+{ "id": "whk_...", "url": "...", "events": ["change_detected"], "active": true, "description": "prod",
+  "secret_hint": "whsec_...ab12", "created_at": "2026-10-31T10:00:00Z",
+  "last_delivery": { "status": "success", "at": "2026-10-31T10:05:00Z", "event_id": "evt_..." } }
+```
+
+`description` and `last_delivery` are absent when empty. A delivery is `{ id, event_id, event_type, status, attempt, next_attempt_at?, last_error?, created_at }`; there is no payload in it, and `last_error` is a closed token: `http_<status>`, `timeout`, `blocked_target`, `transport`, `inactive`, `error`.
+
+- **Secret.** Minted by control (32 random bytes, `whsec_` + 64 hex characters). Returned by create and by rotate-secret and by nothing else: the reads are typed views with no secret field, and the edge rebuilds every answer from a typed view as well. Control stores it in plaintext (the HMAC needs the key); see the owner decision in `RUNBOOKS.md`.
+- **URL.** `https` only; no user info or fragment; at most 2048 characters; every address the host resolves to must be public (checked at create with the egress guard, and again at every connect). The URL cannot be edited; delete and create.
+- **Events.** A closed list, `change_detected` today. The stored event type is `change_detected`; the `quarry.change.detected` subject appears in the delivery body only. Run-finished events (INNH-13) join the list without a contract change.
+- **Limits.** 10 subscriptions per organization (429 `subscription_limit`); the same URL with the same events twice is a 409 `subscription_exists`.
+- **Errors.** 400 with `error.details.field` and `error.details.reason` (`docs/ERROR_REASONS.md`); 404 for an unknown, foreign or malformed id (one answer); 403 for a service principal and for a Zero Data Retention caller on create, patch and retry (`details.reason` is `webhook_off_process`; reads, delete and rotate-secret stay open so an organization can wind down); 409 `delivery_not_retryable` for a delivery that is pending, in flight or delivered.
+- **Retention.** A delivery row holds the event payload. Finished deliveries (`success`, `failed`, `dlq`) are deleted after 14 days (`QUARRY_CONTROL__WEBHOOK_DELIVERY_RETENTION_DAYS`, 1 to 3650). Deleting a subscription deletes its deliveries. Organization erasure deletes both tables for the organization.
+- **Retired.** `GET/POST /v1/webhooks`, `GET /v1/webhooks/{id}` and `/v1/webhook-deliveries...` on control answer 410 `GONE`: they listed every organization's rows and returned secrets in cleartext, and nothing called them. `POST /v1/webhooks/change` (the edge's signed receiver) is unchanged.
+
+**Not in this version.** A test-ping route; auto-disable after repeated dead letters; two secrets during a rotation (the old one stops at once); encryption of the secret at rest; a per-subscription rate limit; run-finished and job events (the store and fan-out are ready, the list is closed).
+
+## Crawl `sitemap` and `scrape_options` (INNH-6, built, 2026-10-31)
+
+Status: built and tested in tests, dark. Two flags, one per half, both default off: `QUARRY_EDGE__CRAWL_SITEMAP` (6a) and `QUARRY_EDGE__CRAWL_SCRAPE_OPTIONS` (6b), read once, `on`, `1` or `true` (any case) enables and anything else is off. With a flag off the handoff answers the 400 `unsupported_option` it always did for that option and nothing else changes. Neither is on any stack. Code: `crates/quarry-edge/src/{crawl_request,crawl_scrape,crawl_sitemap,crawl_policy}.rs` and `routes.rs`; `services/quarry-orchestrator/internal/{activities/crawl_sitemap.go,workflows/crawl_sitemap.go}`.
+
+**Request (`POST /v1/crawl`, response envelope unchanged).**
+- `sitemap`: `skip` (absent, today's behaviour), `include` or `only`. `include` seeds the crawl with the sitemap's URLs and still follows links. `only` crawls the seed and the sitemap's URLs and follows no page link. A wrong string is 400 `invalid_option`, a non-string 400 `invalid_type`. It needs the crawl scope switch: with `QUARRY_EDGE__CRAWL_SCOPE_MODE=off` (a legacy crawl) `include` and `only` are 400 `unsupported_option`.
+- `scrape_options`: an object with `formats` (`markdown`, `html`, `rawHtml`, `links`, `metadata`), `only_main_content`, `include_tags`, `exclude_tags`, `remove_base64_images`, `extractor` (`readability`, `clean_full`, `raw`) and `timeout_ms` (1000 to 55000), each with its camelCase alias. It is validated by the validators `/v1/scrape` uses (`ScrapeOptions::from_value` and `resolve`), so the limits and the codes are the same: 32 selectors of 256 characters (`too_many`, `empty`, `too_long`), `out_of_range`, `unsupported_extractor`, `conflicts_with_only_main_content`, `invalid_type`, `conflicting_aliases`. The keys that cannot apply per page are 400 `unsupported_option`, with the path: `actions`, `actions_on_error`, `max_inline_bytes`, `screenshot`, `pdf`, `json`, `summary`, `question`, `highlights`, and a capture, object or AI entry of `formats` (`scrape_options.formats[1]`). The reserved keys are `reserved_field`. An unknown key inside is a warning in `effective.request_warnings` (`scrape_options.<key>`) in lenient mode and 400 `unknown_field` in strict. Error paths are prefixed `scrape_options.`.
+- The handoff stamps the canonical, resolved form into the job params (`sitemap` only when not `skip`; `scrape_options` only when present, so a job without them is byte-identical to before) and echoes both in `data.effective`.
+
+**Per-page semantics (6b).** Every page of the crawl is cleaned with the options: the stored `markdown` and `html` artifacts, the excerpt, and the text `ingest: true` sends to the Data Plane are the cleaned content. Links are discovered from the whole page whatever `include_tags` and `exclude_tags` cut. `formats` is accepted for parity and changes nothing that is stored, because a crawl page stores its artifacts whatever the list says. `timeout_ms` bounds one page's run (504 `TIMEOUT` when exceeded; the activity retries as for any timeout). A page cleaned differently from the default neither reads nor writes the page cache (the cache is keyed by the fingerprint alone); a page whose options only name `formats` or `timeout_ms` still uses it. `POST /v1/internal/run_page` takes the stamped object as `scrape`, re-validates it (400 with `details.fields` under `scrape.`) and answers `scrape_applied: true`. An orchestrator that sent options and does not read the echo (an edge that predates the field, or has the flag off) ends the run with `run_failed` code `edge_scrape_options_unsupported`, like `edge_scope_unsupported` does for the scope.
+
+**Sitemap discovery (6a).** `POST /v1/internal/crawl/sitemap` (internal; runtime token and the `x-quarry-run-sig` org binding over the org and the seed URL, as `run_page`; 501 with the flag off). Body `{url, org_id, crawl, max_urls}`, answer `{urls[], discovered, sitemaps_fetched, nested_fetched, skipped{out_of_scope, robots_disallowed, duplicate, cap, invalid, sitemaps_refused, sitemaps_unavailable}, truncated}`. The edge reads the seed origin's robots.txt `Sitemap:` lines (at most 5), else `/sitemap.xml`; reads gzip bodies (compressed cap 10 MiB, decoded cap 50 MiB); follows an index to 2 levels, 5 children per index, 20 files in all, 30 seconds. Every sitemap file goes through the web policy, the static SSRF heuristics, the security preflight and the public-address DNS guard, and must be on one of the crawl's hosts (the seed hosts, with subdomains only when the scope allows them; `allow_external_links` does not widen it). A `Sitemap:` line or an index child on another host, or at an internal address, is counted in `sitemaps_refused` and never fetched. Each `<loc>` has its XML entities decoded, is canonicalised (`canonical_url`, default options), de-duplicated, and run through the crawl scope in enforce mode whatever the crawl's own mode is (host, section, include and exclude patterns, extensions), then robots.txt when the gate enforces. Page URLs are never fetched here.
+
+**Orchestrator.** A crawl whose params carry `sitemap: include|only` calls the `SitemapSeeds` activity once, after `run_started` and before its loop, under `workflow.GetVersion(ctx, "crawl-sitemap-seeds-v1", DefaultVersion, 1)`; a crawl without the param never reaches the call, so an in-flight history replays unchanged. On the durable frontier the activity enqueues the URLs itself in batches of 500 (request ids shared with the link path, so a URL reached both ways is one entry, and a retry adds nothing) and returns counts only: no URL passes through the workflow history. On the in-memory frontier the URLs come back in the result and are capped at 500. Sitemap URLs are queued at depth 1, one level below the seed: a redirect off the host cannot add a host to the scope (that is a depth-0 right) and the depth bound counts their links. The seed is still fetched at depth 0 in `only`. The counts ride the existing events: `run_started.sitemap` (the mode) and `run_completed.sitemap` (`mode`, `discovered`, `sitemaps_fetched`, `nested_fetched`, `seeded`, `skipped{...}`, `truncated`, or `error`); no new event type. A failed discovery ends an `only` crawl with `run_failed` code `sitemap_unavailable` (nothing else to crawl) and lets an `include` crawl go on with links only, with `run_completed.sitemap.error` set. The pages it seeds count against `max_pages` and are metered as any crawl page (`quarry.crawl.page`); the sitemap fetches themselves are not metered.
+
+**ZDR.** Crawls are refused under ZDR, so neither option has a ZDR path. The internal route declares non-ZDR and answers 400 to a body that sets `zdr`; it stores nothing. See the row `internal_crawl_sitemap` in `docs/ZDR_MATRIX.md`.
+
+## Answer synthesis: `/v1/answer`, `/v1/answer/stream` and `include_answer` (INNH-8a, 2026-10-31)
+
+One pipeline (search, read the top pages, synthesize through the Model Plane) serves three surfaces. Before INNH-8a, when it was not wired `/v1/answer` said 501 with a hint that named two of the gates and `include_answer` said `answer: null` with no reason, and cached that null. This section is the contract after INNH-8a, merged with the QB-T17 boot gate. The enablement steps are in `docs/RUNBOOKS.md`, "Answer synthesis".
+
+**The switch (QB-T17, default off) and its boot gate.** `QUARRY_EDGE__ANSWER_SYNTHESIS` (`1`, `true` or `on` enables; anything else is off; compose `QUARRY_EDGE_ANSWER_SYNTHESIS`, default `0`) is one of the Model Plane switches that `crates/quarry-edge/src/model_plane_gate.rs` decides once at boot. A switch that is on is still REFUSED, and stays off, unless the edge has a model path: `QUARRY_EDGE__MODEL_PLANE_URL`, and either a service identity whose cross-plane token-request manifest row `model-invoke` is `granted`, or the development bypass credential. The shipped manifest grants nothing, so today a switch that is on is refused at boot with an `ERROR` log that names it. The answer pipeline is built only with the gate's enablement AND a search provider AND a Model Plane client that builds. The edge derives the FIRST closed gate from the gate's decision (there is no second switch) and reports it: `synthesis_disabled`, `model_path_refused`, `no_model_plane_url`, `no_search_provider`, `model_client_init_failed`. A deployment that already set `MODEL_PLANE_URL` for another consumer (autoprompt, rerank, page titles, AI formats) gets no answer synthesis until it also sets the switch.
+
+**`POST /v1/answer` and `POST /v1/answer/stream`.** Request `{query, top_k?, country?, language?, zdr?}`. 200 `{query, answer, citations[], model, latency_ms, sources_used, sources_skipped, sources_snippet_fallback}`; the stream sends `citations`, `delta`, `done {answer, cached}` and `error {message, reason}` events. Errors keep the legacy body `{error, code, hint?}` (not the typed envelope) and gain one optional field, `reason`, a closed code that is never provider text:
+| status and `code` | `reason` | meaning and fix |
+|---|---|---|
+| 400 `BAD_REQUEST` | none | empty query |
+| 501 `UNSUPPORTED` | `synthesis_disabled` | the switch is off: set `QUARRY_EDGE__ANSWER_SYNTHESIS=1` |
+| 501 `UNSUPPORTED` | `model_path_refused` | the switch is on but the boot gate refused it: the manifest row `model-invoke` is not granted (or there is no service identity), so the feature stays off and no Model Plane call is made. The boot log names the refusal; the fix is the cross-plane grant (owner decision INNH-8b, below) |
+| 403 `FORBIDDEN` | `zdr_unavailable` | zero data retention (the body flag or the token's floor): the model hop carries no ZDR posture (ADR-4), so the request is refused before any work. See ZDR below |
+| 501 `UNSUPPORTED` | `no_search_provider` | configure `SEARXNG_URL`, `BRAVE_SEARCH_KEY` or `SERPER_KEY` |
+| 501 `UNSUPPORTED` | `no_model_plane_url` | set `QUARRY_EDGE__MODEL_PLANE_URL` (`MODEL_PLANE_URL` in compose) |
+| 501 `UNSUPPORTED` | `model_client_init_failed` | the URL is set but no client could be built from it: read the edge boot log |
+| 503 `UNAVAILABLE` | `model_plane_auth_refused` | wired, but Auth Core refused to mint the edge's Model Plane token or the gateway answered 401 or 403 to it. A deployment fact, never a 403 on the caller. The fix is cross-plane (owner decision INNH-8b, below) |
+| 429 `RATE_LIMITED` | `model_plane_rate_limited` | Auth Core rate limited the mint. It is the edge's service call that was limited, not the caller's own quota |
+| 502 `DRIVER_FAILED` (or the code the error had) | `model_plane_error` | the Model Plane call failed (transport, 5xx, undecodable) |
+| the status the error had | `answer_search_failed` | the search or page-fetch half failed before a model was asked |
+The `code` of an error is the wire name of the error code (`DRIVER_FAILED`, `RATE_LIMITED`, `FORBIDDEN`), the same string `ErrorBody.code` documents in `openapi.yaml`. The `hint` of a 501, of the 403 and of the 503 is fixed text that names the setting and `docs/RUNBOOKS.md`. The message of a 503 is fixed too; the gateway's own text never reaches the body. A stream whose pipeline is not wired answers the same 501 as JSON, not a stream.
+
+**`include_answer` on `POST /v1/search`.** The search never fails because of the answer. Two optional response fields, present only when the request set `include_answer`:
+| `answer_status` | `answer` | `answer_reason` | what happened |
+|---|---|---|---|
+| `ok` | the answer | absent | synthesized (or replayed from the search cache) |
+| `no_sources` | `""` | absent | the pipeline ran and no source had text; no model was called |
+| `skipped_zdr` | absent | absent | zero data retention (body flag or the token's floor): nothing was sent to a model |
+| `unavailable` | absent | one of the closed codes of the table above (`synthesis_disabled`, `model_path_refused`, `no_search_provider`, `no_model_plane_url`, `model_client_init_failed`, `model_plane_auth_refused`, `model_plane_rate_limited`, `model_plane_error`, `answer_search_failed`) | no answer |
+A request without `include_answer` carries neither field and is byte for byte what it was. ZDR is checked before the gates, so a ZDR request says `skipped_zdr` even when the switch is off. The `answer` and `citations` fields are unchanged.
+
+**Metering.** `include_answer` is metered like `/v1/answer`: one `quarry.answer.synth` (quantity 1; metadata `sources_used`, `sources_skipped`, `model`, `latency_ms`, `via: "search.include_answer"`) per model call, on top of the one `quarry.search.query` the search always meters (whose metadata gains `answer_status`). Never on a cache hit, a refused or failed synthesis, a `no_sources` result or a ZDR request. The two events have different ids.
+
+**Cache.** A search that asked for an answer and has none (switch off, refused, failed) is not written to the search cache, so turning the pipeline on shows on the very next query and not after the TTL (it used to cache `answer: null`). An older entry of that kind is treated as a miss. A real answer, and an empty `no_sources` answer, are cached as before; ZDR never reads or writes the cache.
+
+**ZDR (ADR-4).** The model hop carries no ZDR posture, so no ZDR request reaches a model. `include_answer` under ZDR sends nothing to a model (`skipped_zdr`, 200, the search itself runs under ZDR). `POST /v1/answer` and `POST /v1/answer/stream` REFUSE a ZDR request (the body flag or the token's floor) with `403 FORBIDDEN`, `reason: zdr_unavailable`, before the deployment's gate, the answer cache and the pipeline: no search, no page fetch, no model call (a stream is answered as that JSON 403, not as a stream). The refusal comes before the 501 checks, so a ZDR caller learns nothing about this edge's switches. A refused ZDR run leaves only the metadata-only tombstone (outcome `refused`, class `FORBIDDEN`) when tombstones are on. A caller under ZDR has no synthesis today; `/v1/search` and `/v1/scrape` run under ZDR without a model.
+
+**Owner decision INNH-8b (not built).** A deployed stack cannot turn synthesis on, whatever the edge is set to, until the cross-plane grant exists: the Control Plane registry must give quarry-edge the `model-gateway` audience (scope `models:invoke`, retention lane `zdr`), the Model Plane gateway must let a service principal reach the route Quarry calls (today only `POST /v1/ai/chat` and `/v1/ai/embeddings`; Quarry calls `/v1/invoke`), Quarry must send the second `x-inference-authorization` header, and the `model-invoke` manifest row flips to `granted: true` together with the registry grant. Until the row is granted, the boot gate REFUSES the switch (`model_path_refused`, with the ERROR log); with the dev bypass credential the switch takes effect and a gateway that refuses the call answers `model_plane_auth_refused`.
+
+## API-key agent runs (INNH-10, Quarry side built dark, NOT run, 2026-10-31)
+
+A caller that holds an API key (not a person's session, not a service) may drive a fenced browser run on `/v1/agent/*`. The switch is `QUARRY_EDGE__API_KEY_AGENT_RUNS` (default `0`); with it off, behaviour is exactly what it was and an API-key token is refused on every route (`api_key_agent_runs_disabled`). The whole path stays dark until Auth Core mints the token, the BrowserBroker issues key grants and the Verevon gateway composes them (design: `.plan-work/quarry-w1w2/INNH-10-design.md`). **Quarry consumes what is described here; it issues nothing.** An API key never reaches Quarry: Auth Core exchanges it for a short-lived token, the BrowserBroker issues the grant, Quarry admits the run.
+
+**The token Quarry reads.** An RS256 JWT, `aud: quarry`, like every plane token, with these claims; anything else is a 401 (`principal_type` `api_key` is accepted only in this exact shape):
+
+| claim | value |
+|---|---|
+| `principal_type` | `api_key` |
+| `sub` | `apikey:<key_id>` (must equal `apikey:` plus `key_id`) |
+| `key_id` | the key's id, 1 to 128 printable ASCII bytes with no space; never the key |
+| `acting_user_id` | the user who owns the key, 1 to 256 bytes, no padding or control character |
+| `org_id` | the organization the key is bound to |
+| `scopes` | `["browser:agent"]`; a token without it is refused on every route (`api_key_scope_missing`) |
+| `zdr` | the organization's posture raised by the key's own flag; counts as a floor like a user's |
+| `user_id`, `service_id` | absent (either one makes the token ambiguous: 401) |
+| `exp` | auth-core mints at most 120 s; Quarry rejects an expired token as for any other, and an event stream ends at `exp` |
+
+The run's actor is `apikey:<key_id>`, so the ordinary scoping applies: a run a key starts belongs to that key, and neither its owner's session nor another key of the same owner can step, read or close it (404), and the key cannot touch the owner's runs. `acting_user_id` is read only for the grant owner check. A key is always an agent: the `initiated_by` hint cannot make it a person, the receipts say `initiated_by: agent` with `agent: {basis: "api_key", principalId: "apikey:<key_id>"}` (`basis` is a new value beside `service_principal` and `user_session`), and the web policy treats it as an autonomous principal.
+
+**The route allow-list** (method and path, nothing else; anything else is `api_key_route_refused`, a trailing slash included):
+
+| method | path |
+|---|---|
+| `POST` | `/v1/agent/runs` |
+| `POST` | `/v1/agent/runs/{run_id}/step` |
+| `GET` | `/v1/agent/runs/{run_id}/receipts` and `/egress-receipts` |
+| `GET`, `POST` | `/v1/agent/runs/{run_id}/tabs` |
+| `POST` | `/v1/agent/runs/{run_id}/tabs/{tab_id}/select` |
+| `DELETE` | `/v1/agent/runs/{run_id}/tabs/{tab_id}` |
+| `GET` | `/v1/agent/runs/{run_id}/events/stream` (closed with `done: token_expired` when the token that opened it expires) |
+| `DELETE` | `/v1/agent/runs/{run_id}` |
+
+Refused by omission: `interact`, `browser-session*`, `attach*`, `live-view`, `frame`, `frames/*`, `devtools`, `procedure*`, `tabs/{id}/control`, `/v1/profiles*`, `/v1/artifacts*` and every scrape, crawl, search, extract, job, schedule, change, team and fleet route.
+
+**The grant Quarry consumes** (`ValidateGrant`, unchanged call, one new field). The grant must be an allow-list session grant issued to this key:
+
+| field | rule |
+|---|---|
+| `key_id` | new, optional on the wire; must equal the token's `key_id`. Empty (every person's grant, an older broker, the gRPC validator until `proto/browser.proto` carries the field) never matches, so a key run is refused: fail closed |
+| `owner_id` | must equal the token's `acting_user_id` |
+| `kind` | `""` or `session`; `human_browse` is `api_key_open_web_refused`, any other kind `api_key_grant_kind_refused` |
+| `policy_mode` | `""` or `allowlist`; `open_web` is `api_key_open_web_refused`, an unknown mode `api_key_grant_kind_refused` |
+| `allowed_domains` | non-empty and canonical (the broker's list); they ALWAYS replace the request's `constraints.allowed_domains`, in every environment |
+| `budget` | must bound at least one of `micro_usd`, `max_steps`, `max_runtime_s`; applied to the run whatever `QUARRY_EDGE__GRANT_BUDGET_CLAIM` says |
+| `parent_grant_id`, `resource_id` | must be empty (no derived grants) |
+| `zdr` | a ZDR grant cannot back a non-ZDR run (the existing rule) |
+
+A key grant backs only its key's runs: a person (the owner included), another person or a service that presents one gets `api_key_grant_owner_mismatch`. Every step and every tab open revalidates the grant, and the run stops when the grant is inactive, expired, no longer carries the key's id or no longer matches the run's hosts.
+
+**Start rules.** `POST /v1/agent/runs` with a key token: a `grant_id` is required whatever `REQUIRE_BROWSER_GRANTS` says; `resume_run_id`, `profile_id` and `persist_profile` are refused; the run is always an agent run (the organization's agent caps, plan caps and allowance apply); at most `QUARRY_EDGE__MAX_CONCURRENT_RUNS_PER_KEY` (2) live runs per key (429 `per_key_run_cap`); and `QUARRY_EDGE__BUDGET_ENFORCEMENT` must be `on` (`api_key_budget_not_enforced`), because in `shadow` the grant's budget would bound nothing. Sensitive actions (a dialog reply, an upload, a download) are refused on the action's kind (`api_key_sensitive_action_refused`) before the driver or the broker is asked. Nothing the request carries (a hint, a body field) loosens any of this.
+
+**ZDR.** A key run keeps exactly the persistence of any agent run: under ZDR no checkpoint, timeline row or receipt. A key run never resumes or keeps a profile in any posture. See the row `agent_run_api_key` in `docs/ZDR_MATRIX.md`.
+
+**Reasons.** Closed list in `docs/ERROR_REASONS.md`, "API-key agent runs": `api_key_agent_runs_disabled`, `api_key_scope_missing`, `api_key_route_refused`, `api_key_grant_required`, `api_key_grant_kind_refused`, `api_key_open_web_refused`, `api_key_grant_owner_mismatch`, `api_key_grant_budget_required`, `api_key_grant_hosts_required`, `api_key_profile_refused`, `api_key_resume_refused`, `api_key_sensitive_action_refused`, `api_key_budget_not_enforced`; and 429 `per_key_run_cap`.
+
+**Audit.** Quarry has no durable audit stream. The trail is Auth Core (who got a token), the BrowserBroker (who got a grant) and Quarry's receipts, which name `apikey:<key_id>` per step. Quarry logs `agent.run.started` and `agent.run.refused` with ids only (run, organization, key, grant, ZDR flag, class, reason): never a host, a token or the key.
+
+## `POST /v1/parse`: a PDF or DOCX to text, nothing stored (INNH-11, built, 2026-10-31)
+
+Status: built and tested in tests, dark. Default off: `QUARRY_EDGE__PARSE_ROUTE` (`on`, `1`, `true` or `yes`, read per request). With it off the route answers 501 `UNSUPPORTED` with `details {reason: "parse_route_disabled", env: "QUARRY_EDGE__PARSE_ROUTE"}`, after the auth chain. It is on no stack. Code: `crates/quarry-edge/src/parse_routes.rs`, `routes.rs` (its own router, because the body is up to 25 MiB), `auth.rs` (the scope), `crates/quarry-runtime/src/content_route.rs` (`parse_document_info`, the page facts).
+
+**Request.** The body is the document's raw bytes. Not a URL (a URL is `POST /v1/scrape` with `QUARRY_EDGE__DOC_ROUTING=on`), and not multipart: multipart is out of v1 (it needs a multipart parser in the edge, and the gateway can forward raw bytes). `Content-Type` is absent, `application/octet-stream`, `application/pdf` or `application/vnd.openxmlformats-officedocument.wordprocessingml.document`; any other type is a 415 before the body is read. The bytes decide the kind (`quarry_transform::sniff`, magic numbers only): a PDF marker in the first kilobyte, or a ZIP whose `[Content_Types].xml` names WordprocessingML. A declared PDF or DOCX type that the bytes contradict is a 415 `content_type_mismatch`; bytes that are neither are a 415 `unsupported_media` with `details.detected`. No header is read for a filename and none is echoed, stored or logged. No JSON body.
+
+**Response 200**, in the typed envelope, with `Cache-Control: no-store`:
+```
+{ "data": { "markdown": "...", "kind": "pdf" | "docx", "bytes": 1599, "structure": "plain",
+            "truncated": false, "pages": 1, "warnings": [ { "code": "...", "message": "..." } ] },
+  "meta": { "request_id": "..." } }
+```
+`pages` is for a PDF only (absent for a DOCX, never null). `structure` is always `plain`: the text is paragraphs, with no headings, lists or tables marked up, and a PDF whose text sits in `Tj` and `TJ` runs loses its layout. `warnings` is always present, usually empty: `document_has_no_text_layer` (no page of the PDF has a text layer, a scan, so the text is empty), `some_pages_have_no_text_layer` (a mixed PDF; the message says how many pages), `document_has_no_text` (a DOCX with no text), `truncated_at_8mib` (the text was cut at 8 MiB, `truncated` is true). There is no OCR. **No redaction is applied** (`pii.rs` is not wired): personal data in a document comes back as it is, to the authenticated caller. No artifact id, no scrape id: nothing was kept to point at.
+
+**Errors**, in the standard envelope: 400 `empty_body` (or `body_unreadable`); 413 `too_large` with `max_bytes`, by the declared `Content-Length` before the body is read, or by the bytes when none was declared (the limit is 25 MiB, the parsers' own; `QUARRY_EDGE__PARSE_MAX_BYTES` lowers it, never raises it); 415 as above, and `pdf_parse_failed`, `docx_parse_failed` or `too_large` from the parser (a file it cannot read, or that its limits stopped), each with `details.kind` and `details.supported: ["pdf","docx"]`; 429 `RATE_LIMITED` with `Retry-After`; 501 as above, or `isolation_required`; 504 `TIMEOUT` (the 15 second deadline). 401 and 403 come from the auth chain.
+
+**Limits.** One organisation may have `QUARRY_EDGE__PARSE_CONCURRENCY_PER_ORG` parses in flight (default 1, at most 8) and the process `QUARRY_EDGE__PARSE_MAX_INFLIGHT` uploads (default 4, at most 32); past either the answer is a 429 (`org_parse_busy`, `parse_capacity`) with `retry_after_seconds` 2 and `Retry-After: 2`, before the body is read. A request that has a slot then waits at most 3 seconds for one of the two process-wide parse slots (shared with the scrape pipeline): past that, 429 `parser_busy` with `Retry-After: 5`. The parse itself: a child process under 768 MiB of address space, 20 s of CPU and 16 file descriptors, the 15 second deadline, the 8 MiB text cap, 25 MiB of input.
+
+**Isolation.** The route refuses to serve (501 `isolation_required`) while documents would be parsed inside the edge process (`QUARRY_EDGE__DOC_PARSE_ISOLATION=inprocess`, or an edge that is not a Unix `quarry-edge-rs`): a hostile file could take the edge down. `QUARRY_EDGE__PARSE_ALLOW_INPROCESS=1` lifts that for a single-tenant development box. The boot line `document parse route is on` reports `isolation` and `serving`.
+
+**Auth.** A user token needs no scope. A service principal needs `parse:write` (like `scrape:write`, it is not in the scope registry of the Control Plane yet: a cross-plane ask, see the INNH-11 status). No other scope stands in for it. An `api_key` principal (INNH-10) is refused with 403 `api_key_route_refused`: the route is not on a key's allow-list.
+
+**ZDR and storage.** The handler takes no `AppState`: it has no artifact store, cache, index, event sink, usage meter or ingest to write to, and a test reads its source to keep it so. It logs nothing about a request. A ZDR caller is served the same way. See the row `parse` in `docs/ZDR_MATRIX.md`. **Billing:** the route is not metered in this version (no usage record, no Lago metric); the owner decides whether a parse is billable.
+
 ## Crawl scope and robots: planned status and vocabulary (WS14.S0, 2026-10-23)
 
 Read this with `docs/CRAWL_SCOPE_ROBOTS.md`, which is the contract for WS14. The examples earlier in this file that show crawl and map scope fields, and the crawl denial reason schema, describe the target shape. They are not what the edge applies today.
@@ -804,6 +1159,27 @@ page ceiling, not a prediction), `warnings` (closed codes; `max_pages_clamped` w
 requested page limit was lowered), `control` (`desired`, `pending`), `schedule_id`,
 `run_id`. A foreign id and a kind mismatch are both 404.
 
+**Credits per job (INNH-9, built, NOT run, 2026-10-31).** `GET /v1/crawl/{id}`, `/v1/batch/{id}`,
+`/v1/jobs/{id}` and the list rows (`GET /v1/{kind}/jobs`, `/v1/crawl/ongoing`, `/v1/batch/ongoing`)
+gain an optional `credits` object:
+`{"used": 12.0, "unit": "credit", "basis": "pages_fetched", "price_per_page": 1.0,
+"estimated": true, "final": false}`. It is derived at read time, never stored: `used` is the
+job's `page_fetched` event count (`counts.completed`) times `price_per_page`, so it is
+retroactive for old jobs and a late page after the terminal event is still counted.
+`final` is false while the status is `accepted`, `running` or `paused` and true once it is
+terminal. It is an estimate (`estimated` is always true), not what billing-core invoices:
+a flat price per fetched page, a browser-rendered page priced like any other, failed and
+blocked pages free. The field is absent (not null) for `search`, `research` and `agent`
+jobs, which are not page-priced, and for every job while control runs with
+`QUARRY_CONTROL__JOB_CREDITS` off (the default, read per request). The edge forwards what
+control sends and holds no price or flag. Additive: no request change, no new route, no new
+error code. The one price is `store.CreditsPerPage` in quarry-control, used by both this
+figure and `GET /v1/team/credit-usage`. That team figure changed on Postgres: it used to add
+one credit for every event with a job id (`run_started`, `page_queued`, ...) and now counts
+`page_fetched` events only, as the in-memory store always did (the unused `payload.pages`
+multiplier is gone). Team credits on Postgres therefore read lower than before and equal the
+sum of the per-job credits. Control's own `GET /v1/jobs/{id}/summary` carries `credits` first.
+
 **Errors (edge).** `GET .../errors`: `errors` lists failed or retried pages whose final
 attempt the orchestrator marked (`final: true`), with `code` and `category`, `status` and
 `retryable` where known. `blocked` lists pages a rule blocked, with `reason`.
@@ -811,6 +1187,44 @@ attempt the orchestrator marked (`final: true`), with `code` and `category`, `st
 recorded is not returned. `next_seq` is set when the page was full; pass it as
 `after_seq`. Under the token's ZDR floor the whole route answers 403, because it returns
 URLs.
+
+**Job results (INNH-12, the dataset of a run).** `GET /v1/crawl/{id}/results`,
+`/v1/batch/{id}/results` and `/v1/jobs/{id}/results` list the pages a job fetched, one row
+for each fetch, in the order they were fetched. The edge answers `{data: {items, next_seq?},
+meta: {request_id, page: {next?, limit}}}`. A row is `{seq, url, status, content_type?,
+title?, fetched_at, word_count?, driver?, markdown_artifact_id?, source_artifact_id?,
+bytes?}`: `url` is the URL the job fetched (as requested), `bytes` the size of the stored
+Markdown, `driver` one of `static`, `tls`, `browser`. The rows come from the job's
+`page_fetched` events, which now carry the artifact ids, `bytes`, `word_count` and `driver`
+(content-free, closed fields). The page content is not in the response: read it with
+`GET /v1/artifacts/{id}` (org-bound, 404 when gone). Failed and blocked pages are not rows;
+they stay on `/errors`.
+
+Query: `limit` (1 to 500, default 100; anything else is a 400 naming the field),
+`after_seq` (the `next_seq` of the previous page, also `meta.page.next`; `next_seq` is
+absent on the last page) and `latest` (default false). A URL fetched twice (a retry, an
+escalation to a browser) has two rows; `latest=true` keeps the latest fetch of each URL, in
+`seq` order, and pages the kept rows by `after_seq`. A `latest=true` read looks at the first
+20 000 fetches of a job at most and sets `scan_capped: true` when there were more. A row
+written before the fields existed has `url`, `status`, `title` and `fetched_at` only; the
+ids are also absent when nothing was stored, which is every ZDR run.
+
+Off unless `QUARRY_EDGE__JOB_RESULTS=1` (501 `UNSUPPORTED`, checked first). 403 `FORBIDDEN`
+with `details.reason: job_result_urls` under the token's ZDR floor, because a row names a
+URL and a title (the same floor as `/errors`); crawl and batch are refused for ZDR callers at
+handoff, so no ZDR job has rows. A service principal gets 403 from the route scope, as on
+`/errors`. The organization is the token's: control answers a foreign or unknown id, a
+batch id on the crawl path and the reverse with the same 404. The artifact ids dangle after
+an edge restart on the in-memory artifact backend (the compose default), and an S3 backend
+cannot list artifacts (the ids still resolve by `GET /v1/artifacts/{id}`). Org erasure does
+not purge the events a row is read from (the existing posture of `/events` and `/errors`).
+
+**Artifact list filters (INNH-12).** `GET /v1/artifacts` takes `kind` (one of `markdown`,
+`html`, `raw`, `pdf`, `screenshot`, `extract`, as the OpenAPI always said and now enforced)
+and `run_id` (`run_...`), alone or together, on top of the paging filters. Another value of
+either is a 400 with `details.field`. `ArtifactSummary` gains `run_id` and `page_hash`
+(additive). The filters work on the in-memory and filesystem backends; they are not behind
+the results flag.
 
 **Ongoing.** `GET /v1/crawl/ongoing` and `/v1/batch/ongoing` list the org's jobs in
 `accepted`, `running` or `paused`, oldest first.
@@ -914,3 +1328,72 @@ Errors: 501 `UNSUPPORTED` `details.reason = "browser_capability_unavailable"` (a
 - The eight `/v1/internal/*` routes of the Go control service (quarry-control: jobs claim, pending-control, control-ack, running, finalize; schedules desired and runs; zdr-tombstones) are not described yet. They move with the D2-050 internal secret split.
 - Every route the edge registers is in one of the two spec files or on `scripts/openapi-route-allowlist.json` with a reason (`scripts/tests/openapi-route-coverage.test.mjs`).
 - The generator does not delete files it no longer writes. After a spec change, delete the generated files that no longer exist (the gitignored `sdks/python/quarry_client`, `sdks/python/docs`, `sdks/python/test`, `sdks/typescript/src`, and the tracked `sdks/typescript/docs`).
+
+## E3.7 additions: batch idempotency, the 408 envelope, job get and cancel, the search scrape block, sitemap options (W3-E3.7.11, 2026-11-03)
+
+Status: a record of the E3.7 units as the code stands on 2026-11-03. Code only, not compiled, not run. `docs/openapi.yaml` carries the wire shapes: `Idempotency-Key` on `POST /v1/batch` and `POST /v1/crawl`, the batch `409`, the route-deadline `408` on `GET /v1/jobs/{job_id}`, and `SearchRequest.scrape` with `SearchResponse.scrape`. This section says what the edge serves, what it does not, and under which switch. Every switch named here is read by the code and defaults off.
+
+| Item | State | Switch (default) |
+|---|---|---|
+| Batch `Idempotency-Key`, org-scoped (E3.7.1) | built | `QUARRY_EDGE__BATCH_IDEMPOTENCY` (off); migration 028 is not flagged |
+| Job get and cancel (WS15.L1, WS15.L2) | built, documented in openapi | cancel needs `QUARRY_EDGE__JOB_CONTROL` (off) |
+| Wait-or-resume job get with a 408 envelope and a resume token (E3.7.3) | not built | none yet |
+| `scrape` block on `POST /v1/search` (E3.7.7a) | built | `QUARRY_EDGE__SEARCH_SCRAPE` (off) |
+| Answer reuse of the hydrated pages (E3.7.7b) | not wired on the edge | none |
+| Crawl `sitemap` skip, include, only (INNH-6a, which is E3.7.5) | built, documented in the INNH-6 section | `QUARRY_EDGE__CRAWL_SITEMAP` (off) |
+| Gzip sitemaps and the Sitemap-line parse on `/v1/map` (E3.7.4) | not built | none yet |
+
+### Batch `Idempotency-Key` (E3.7.1)
+
+- The header is read on `POST /v1/batch` and on `POST /v1/crawl`. It is trimmed and used when it is 1 to 128 bytes. An empty, longer or not visible ASCII value is ignored, and the request proceeds as if no key were sent.
+- Keys are unique per organization. Control migration 028 replaces the global unique index with one on `(org_id, idempotency_key)`. The migration is not behind a flag: it only stops two organizations colliding on one key.
+- Flag off (the default). A repeated key answers `200` with the job the first request created, the same `job_id`. The repeat is not billed. The body is not compared, so a repeat with a different body re-attaches to the first job.
+- Flag on (`QUARRY_EDGE__BATCH_IDEMPOTENCY`, batch only). The edge stores a SHA-256 of the batch as sent (the URL list in order, and `ingest`) on the job as `idempotency_payload_hash`, inside the signed body. A repeat with the same hash re-attaches exactly as with the flag off. A repeat with a different hash answers `409`: `error.code` is `CONFLICT` and `error.details` is `{"reason": "idempotency_key_reused", "job_id": "<the held job>"}`. Nothing is created and nothing is billed.
+- The hash is taken before the URL check and the allowance clamp, so a retry is not refused because the plan or the policy changed between attempts.
+- A held job with no stored hash (created with the flag off, by the crawl path or by another client) re-attaches as before, because it cannot be compared.
+- Crawls are forwarded with the key but are not hashed. With the flag on, a crawl key reused for a different URL still re-attaches silently.
+- A fresh request is unchanged by the flag: `200` with the `HandoffAck`.
+
+### The 408 envelope (E3.7.3)
+
+- Served today: the route deadline. Each edge route has one: 60 seconds, or 125 seconds for `POST /v1/scrape` while actions or AI formats are on. Past it the edge answers `408` with an empty body and no error envelope, and echoes `x-request-id`. It is the only `408` the edge answers itself. `GET /v1/jobs/{job_id}` documents it in openapi.
+- Not built: the wait-or-resume answer. The E3.7.3 design gives `GET /v1/jobs/{job_id}` a wait: when the wait ends before the job does, the answer is a `408` with a JSON envelope and a resume token, and the caller calls again with the token. Neither the wait parameter, the token nor the envelope exists in the edge or in control today. Do not build a client against it until E3.7.3 lands and this section changes.
+- A route-deadline `408` on `POST /v1/batch` or `POST /v1/crawl` can be retried with the same `Idempotency-Key`. If the first attempt created a job, the retry re-attaches to it. Without a key, a retry can create a second job.
+
+### Job get and cancel (WS15.L1, WS15.L2)
+
+- Read: `GET /v1/jobs/{job_id}` for any kind. `GET /v1/crawl/{job_id}` and `GET /v1/batch/{job_id}` check the kind: a job of the other kind is `404`. Errors are at `/v1/jobs/{job_id}/errors` and at the kind-specific `errors` paths. Reads are org-scoped by the verified token: another organization's job is `404`.
+- Cancel: `DELETE /v1/crawl/{job_id}` and `DELETE /v1/batch/{job_id}`. The replies are `202` when recorded and not yet applied (`control.pending`), `200` when the job already reflects the request, `404`, `409` (`details.reason` is `ended`, `not_running` or `not_controllable`), and `501` when `QUARRY_EDGE__JOB_CONTROL` is off. Pause and resume are `POST` on `/pause` and `/resume` under the same paths.
+- There is no generic `DELETE /v1/jobs/{job_id}`. A caller cancels through the path of the kind it created.
+- Non-ZDR only: crawl and batch are durable jobs. Both handoffs answer `403` under zero data retention (`zdr_refusal`), so no ZDR caller has a job for these routes to read or cancel.
+
+### The search `scrape` block (E3.7.7a)
+
+Request: `SearchRequest.scrape`, optional.
+
+- `limit`: 1 to 10, default 5.
+- `max_chars` (also `maxChars`): 1 to 50 000, default 8 000.
+- `timeout_ms` (also `timeoutMs`): 1 000 to 55 000, default 15 000. One budget for the whole block.
+- `formats`: `markdown` only, which is the default. Any other entry is `400 UNSUPPORTED_OPTION`.
+
+Out-of-range values are `400 BAD_REQUEST`. They are not clamped. Both refusals use the flat search error body (`error`, `code`, optional `hint`), and the message never repeats the caller's input. The checks run only with the flag on.
+
+Response: `SearchResponse.scrape`, present only when the request sent a block.
+
+- Flag `QUARRY_EDGE__SEARCH_SCRAPE` (default off, read per request). Off: the block is not validated, nothing is fetched, and `scrape` is `{"status": "disabled", "requested": 0, "hydrated": 0, "failed": 0}`. Turning the flag off never turns a search into a `400`.
+- On: the first `limit` results, in the order the caller sees (after diversity and rerank), are fetched concurrently under one deadline. Each URL passes the request's web policy, then the security preflight (blocklists, private hosts, host rules), then a static markdown fetch with a 2 MB body cap. The browser is not used: no render and no actions.
+- `scrape` is `{"status": "ok", "requested", "hydrated", "failed", "items": [...]}`, with `items` in result order. An item carries `url`, `position` (1-based in `results`), and either `status: "ok"` with `markdown`, `chars` and `truncated`, or `status: "failed"` with `code` (and `http_status` when the code is `http_status`).
+- Failure codes are closed. `policy_denied`, `blocked` and `invalid_url` are refused before the fetch and are not billed. `deadline_exceeded`, `http_status`, `too_large`, `decode`, `extract`, `timeout`, `transport`, `empty` and `too_short` happen after it. The search never fails because a hydration did.
+- Zero data retention: hydration runs inline only. Nothing is cached (it runs after the cache step, on hits and misses alike), written to an event or logged. The page text is in this response and nowhere else.
+- Metering: one `quarry.scrape.page` event per request, with the quantity of fetch units that left the edge (successes, and failures after the fetch began). The estimate in its metadata uses placeholder rates from the job pricing helper.
+- Not yet: `format=context` and `include_answer` do not use the hydrated text. A request with a scrape block and `include_answer` fetches the answer's sources a second time, and those fetches are not metered as `quarry.scrape.page`, until the edge passes the hydrated pages into the answer path (E3.7.7b).
+
+### Sitemap options (INNH-6a covers E3.7.5; E3.7.6 and E3.7.4 as noted)
+
+- Crawl `sitemap` (built; see the INNH-6 section above): `skip` (absent) follows links only; `include` seeds the crawl from the site's sitemaps and still follows links; `only` crawls the seed and the sitemap's URLs and follows no page link. Gzip sitemaps and sitemap indexes are read within bounds (`quarry_transform::sitemap::parse_body`, 50 MiB decoded cap). With `QUARRY_EDGE__CRAWL_SITEMAP` off, `include` and `only` are `400 unsupported_option`.
+- Canonical URL helper (E3.7.6): `quarry_transform::canonical_url` already canonicalises and de-duplicates the `<loc>` values of a crawl sitemap (INNH-6a). Its wiring into the frontier enqueue of page links and into redirect seen-marking is not built.
+- `/v1/map` (E3.7.4, not built): the route still reads its sitemaps as text (`quarry_transform::sitemap::parse`), with no gzip handling and no Sitemap-line parse. No switch is added for it here.
+
+### What the SDKs carry
+
+`sdks/generate.sh` generates the Python and TypeScript clients from `docs/openapi.yaml` in Docker (openapi-generator 7.22.0). This unit did not regenerate them. Until the integration step runs the generator, the in-tree clients may lack the `Idempotency-Key` parameter, the `scrape` fields and the batch `409`.

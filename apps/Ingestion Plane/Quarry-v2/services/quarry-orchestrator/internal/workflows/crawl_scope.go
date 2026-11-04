@@ -22,6 +22,9 @@ import (
 // of the page is enqueued.
 const edgeScopeUnsupported = "edge_scope_unsupported"
 
+// crawlScopeTolerantVersion is the GetVersion id of the tolerant applied-by check (W2-U64).
+const crawlScopeTolerantVersion = "crawl-scope-applied-tolerant-v1"
+
 // crawlScopeRun carries one crawl's scope through its loop. It is nil for a
 // legacy crawl, and every method is then skipped by the caller.
 type crawlScopeRun struct {
@@ -34,6 +37,11 @@ type crawlScopeRun struct {
 	hostsAdded  map[string]struct{}
 	linksDenied uint32
 	denials     *denialAgg
+	// tolerateUnapplied is set on executions that carry the crawl-scope-applied-tolerant-v1
+	// marker (W2-U64). An edge that does not report scope_applied (an edge older than the
+	// orchestrator during a rolling deploy) then lets an observe-mode crawl go on as a
+	// legacy-unscoped one. Enforce still refuses it.
+	tolerateUnapplied bool
 }
 
 // newCrawlScopeRun builds the scope of a crawl, or returns nil for a legacy one.
@@ -108,6 +116,34 @@ func (s *crawlScopeRun) absorb(report *activities.CrawlReport) {
 // appliedBy reports whether the edge's report proves the edge applied the scope.
 func appliedBy(report *activities.CrawlReport) bool {
 	return report != nil && report.ScopeApplied
+}
+
+// scopeVerdict is what a crawl does with the report of one page (W2-U64, D2-073).
+type scopeVerdict int
+
+const (
+	// verdictApplied: the edge proved it applied the scope; the report is absorbed.
+	verdictApplied scopeVerdict = iota
+	// verdictLegacyUnscoped: the edge did not report scope_applied (version skew), the crawl
+	// is in observe mode, so the page counts as a legacy-unscoped one. Nothing is absorbed.
+	verdictLegacyUnscoped
+	// verdictRefused: the crawl ends with edge_scope_unsupported (fail closed).
+	verdictRefused
+)
+
+// verdict decides one page. A report that proves the scope is applied always passes. A
+// missing or false scope_applied is the version-skew case: tolerated in observe mode only
+// (the scope was never going to change what the page returned), refused in enforce mode
+// (links the scope would drop must not be followed), and refused on an execution recorded
+// before the tolerant marker, which keeps the strict behaviour it replays with.
+func (s *crawlScopeRun) verdict(report *activities.CrawlReport) scopeVerdict {
+	if appliedBy(report) {
+		return verdictApplied
+	}
+	if s.tolerateUnapplied && s.base.ScopeMode != activities.ScopeModeEnforce {
+		return verdictLegacyUnscoped
+	}
+	return verdictRefused
 }
 
 // The two codes of the robots.txt refusals (WS14.S4), as the edge names them in

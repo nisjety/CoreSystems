@@ -95,7 +95,6 @@ func TestNormalizeSCIMUserName(t *testing.T) {
 		{name: "uppercase", in: "Ada.Lovelace@Corp.EXAMPLE.com", wantEmail: "ada.lovelace@corp.example.com", wantDomain: "corp.example.com"},
 		{name: "surrounding space", in: "  ada@corp.example.com\t", wantEmail: "ada@corp.example.com", wantDomain: "corp.example.com"},
 		{name: "plus tag kept", in: "ada+idp@corp.example.com", wantEmail: "ada+idp@corp.example.com", wantDomain: "corp.example.com"},
-		{name: "trailing dot domain", in: "ada@corp.example.com.", wantEmail: "ada@corp.example.com.", wantDomain: "corp.example.com"},
 		{name: "idn domain to punycode", in: "ada@bücher.example", wantEmail: "ada@bücher.example", wantDomain: "xn--bcher-kva.example"},
 
 		{name: "empty", in: "", refused: true},
@@ -112,6 +111,9 @@ func TestNormalizeSCIMUserName(t *testing.T) {
 		{name: "single label domain", in: "ada@localhost", refused: true},
 		{name: "public suffix domain", in: "ada@co.uk", refused: true},
 		{name: "scheme in domain", in: "ada@https://corp.example.com", refused: true},
+		{name: "trailing dot domain", in: "ada@corp.example.com.", refused: true},
+		{name: "two trailing dots", in: "ada@corp.example.com..", refused: true},
+		{name: "single letter tld", in: "ada@corp.example.c", refused: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

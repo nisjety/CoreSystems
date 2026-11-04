@@ -1,0 +1,17 @@
+ step |   type   |    key     |  status   |     rv      
+------+----------+------------+-----------+-------------
+    0 | navigate |            | completed | qr-redact/4
+    1 | click    |            | completed | qr-redact/4
+    2 | press    | [redacted] | completed | qr-redact/4
+    3 | press    | [redacted] | completed | qr-redact/4
+    4 | press    | [redacted] | completed | qr-redact/4
+    5 | press    | [redacted] | completed | qr-redact/4
+    6 | press    | [redacted] | completed | qr-redact/4
+    7 | press    | [redacted] | completed | qr-redact/4
+    8 | press    | [redacted] | completed | qr-redact/4
+    9 | press    | [redacted] | completed | qr-redact/4
+   10 | press    | [redacted] | completed | qr-redact/4
+   11 | press    | [redacted] | completed | qr-redact/4
+   12 | press    | [redacted] | completed | qr-redact/4
+(13 rows)
+

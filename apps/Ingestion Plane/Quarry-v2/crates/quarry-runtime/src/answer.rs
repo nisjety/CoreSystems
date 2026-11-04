@@ -85,6 +85,32 @@ const MAX_TOTAL_CHARS: usize = 40_000;
 /// prose small enough for this to be the larger half anyway.
 const MAX_FIGURE_BLOCK_CHARS: usize = 2_000;
 
+/// Key and value of the detail `AnswerPipeline::answer` stamps on an error from the model hop
+/// (the Model Plane call), so a caller can tell a refused service token from a failed search
+/// without reading provider text. INNH-8a.
+pub const MODEL_HOP_KEY: &str = "hop";
+pub const MODEL_HOP: &str = "model_plane";
+
+/// Stamp `hop: model_plane` on an error from the model call. Existing details are kept.
+pub fn mark_model_hop(mut error: QuarryError) -> QuarryError {
+    match error.details.as_mut() {
+        Some(serde_json::Value::Object(map)) => {
+            map.insert(MODEL_HOP_KEY.into(), MODEL_HOP.into());
+        }
+        Some(_) => {}
+        None => {
+            error.details = Some(serde_json::json!({ MODEL_HOP_KEY: MODEL_HOP }));
+        }
+    }
+    error
+}
+
+/// A per-request gate on the URLs the pipeline may fetch (D2-055). Returns `true` when the URL
+/// may be fetched. The edge builds it from the request's web-policy decision; a denied URL is
+/// skipped with [`FetchFailure::PolicyDenied`] and no fetch, no snippet stand-in and no corpus
+/// write-back happen for it.
+pub type UrlGate = Arc<dyn Fn(&str) -> bool + Send + Sync>;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AnswerRequest {
     pub query: String,
@@ -138,6 +164,9 @@ pub enum FetchFailure {
     /// shell, and rejecting it on prose length alone discards the answer with
     /// the markup. See [`has_answerable_fact`].
     TooShort,
+    /// The caller's URL gate refused this result URL (D2-055): it was never fetched. The web
+    /// policy of the request decided; nothing about the host or the rule is carried here.
+    PolicyDenied,
 }
 
 impl std::fmt::Display for FetchFailure {
@@ -151,6 +180,7 @@ impl std::fmt::Display for FetchFailure {
             FetchFailure::Transport => f.write_str("connection failed"),
             FetchFailure::Empty => f.write_str("page had no extractable content"),
             FetchFailure::TooShort => f.write_str("extracted content too short to be the page"),
+            FetchFailure::PolicyDenied => f.write_str("denied by web policy"),
         }
     }
 }
@@ -391,6 +421,17 @@ impl AnswerPipeline {
     /// verified `org_id` flows through so private-corpus providers filter to the
     /// tenant; public-web providers ignore it.
     pub async fn prepare(&self, req: &AnswerRequest) -> QuarryResult<PreparedAnswer> {
+        self.prepare_gated(req, None).await
+    }
+
+    /// [`AnswerPipeline::prepare`] with a URL gate: every result URL is checked BEFORE its fetch.
+    /// A denied URL is never fetched and is reported as a failed source with
+    /// [`FetchFailure::PolicyDenied`]; the search snippet does not stand in for it.
+    pub async fn prepare_gated(
+        &self,
+        req: &AnswerRequest,
+        gate: Option<&UrlGate>,
+    ) -> QuarryResult<PreparedAnswer> {
         if req.query.trim().is_empty() {
             return Err(QuarryError::new(
                 ErrorCode::BadRequest,
@@ -439,7 +480,13 @@ impl AnswerPipeline {
         let fetch_futures = results.iter().map(|r| {
             let url = r.url.clone();
             let fetcher = self.fetcher.clone();
-            async move { fetcher.fetch_extraction(&url, zdr).await }
+            let allowed = gate.map_or(true, |gate| gate(&url));
+            async move {
+                if !allowed {
+                    return Err(FetchFailure::PolicyDenied);
+                }
+                fetcher.fetch_extraction(&url, zdr).await
+            }
         });
         let fetched = futures::future::join_all(fetch_futures).await;
 
@@ -512,6 +559,14 @@ impl AnswerPipeline {
             // and callers were previously given no way to notice.
             let (source_text, mut outcome): (Option<String>, SourceOutcome) = match fetched {
                 Ok(extraction) => (Some(extraction.markdown.clone()), SourceOutcome::Fetched),
+                // A policy-denied URL is skipped outright: the snippet is the page's own text as
+                // the provider saw it, so it must not stand in for a page the policy refused.
+                Err(FetchFailure::PolicyDenied) => (
+                    None,
+                    SourceOutcome::Failed {
+                        reason: FetchFailure::PolicyDenied,
+                    },
+                ),
                 Err(reason) => match result.snippet.clone().filter(|s| !s.trim().is_empty()) {
                     Some(snippet) => (
                         Some(snippet),
@@ -605,8 +660,17 @@ impl AnswerPipeline {
     }
 
     pub async fn answer(&self, req: AnswerRequest) -> QuarryResult<AnswerResult> {
+        self.answer_gated(req, None).await
+    }
+
+    /// [`AnswerPipeline::answer`] with a URL gate (see [`AnswerPipeline::prepare_gated`]).
+    pub async fn answer_gated(
+        &self,
+        req: AnswerRequest,
+        gate: Option<&UrlGate>,
+    ) -> QuarryResult<AnswerResult> {
         let started = Instant::now();
-        let prepared = self.prepare(&req).await?;
+        let prepared = self.prepare_gated(&req, gate).await?;
         if prepared.sources_used == 0 {
             // No source contributed text — citations-only empty answer.
             return Ok(AnswerResult {
@@ -625,12 +689,14 @@ impl AnswerPipeline {
             Some(org_id) => {
                 self.formats
                     .query_for_org(org_id, &prepared.combined, &req.query, zdr)
-                    .await?
+                    .await
+                    .map_err(mark_model_hop)?
             }
             None => {
                 self.formats
                     .query(&prepared.combined, &req.query, zdr)
-                    .await?
+                    .await
+                    .map_err(mark_model_hop)?
             }
         };
         Ok(AnswerResult {
@@ -882,6 +948,24 @@ mod tests {
     use quarry_transform::structured::{FigureSource, KeyFigure};
     use serde_json::json;
     use std::sync::Mutex;
+
+    #[test]
+    fn the_model_hop_stamp_keeps_existing_details_and_is_added_to_a_bare_error() {
+        let bare = mark_model_hop(QuarryError::new(ErrorCode::Forbidden, "refused"));
+        assert_eq!(bare.details.as_ref().unwrap()[MODEL_HOP_KEY], MODEL_HOP);
+
+        let with = mark_model_hop(
+            QuarryError::new(ErrorCode::DriverFailed, "x")
+                .with_details(serde_json::json!({ "status": 500 })),
+        );
+        let details = with.details.unwrap();
+        assert_eq!(details["status"], 500, "existing details survive");
+        assert_eq!(details[MODEL_HOP_KEY], MODEL_HOP);
+        // The wire message and the code are untouched.
+        let again = mark_model_hop(QuarryError::new(ErrorCode::RateLimited, "slow"));
+        assert_eq!(again.code, ErrorCode::RateLimited);
+        assert_eq!(again.message, "slow");
+    }
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 

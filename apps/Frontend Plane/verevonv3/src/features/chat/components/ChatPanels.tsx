@@ -62,7 +62,11 @@ import {
   type Citation,
   type EvidenceSource,
   type IconComponent,
+  type RunMeter,
 } from './chat-types'
+import { RunCostMeter } from './RunCostMeter'
+import { RunLedger } from './RunLedger'
+import { runLedgerEnabled } from '../lib/run-ledger'
 import { uiEventLabel, type VerevonUiEvent } from '@/shared/chat/verevon-ui-events'
 import { availableChatSurfaces, type ChatSurfaceAvailability } from '../lib/chat-surfaces'
 import { useI18n } from '@/shared/i18n'
@@ -683,9 +687,10 @@ export function ContextWindowPanel(props: {
    * Per-turn retrieval-source filter receipt (chat-wave2 scope spec §2.2's
    * "shown in the receipt" requirement) — the concrete transparency surface
    * for the excluded tool classes, sourced from the turn's own
-   * `source_scope_applied` SSE frame. Absent for an `auto` turn.
+   * `source_scope_applied` SSE frame. Absent for an `auto` turn; a Space's
+   * `auto` receipt names no excluded source, so it shows nothing here.
    */
-  scopeApplied?: { scope: 'knowledge_only' | 'web_only'; excludedTools: string[] }
+  scopeApplied?: import('@/shared/api/chat-client').ChatSourceScopeAppliedEvent
 }) {
   const i18n = useI18n()
   const [open, setOpen] = createSignal(false)
@@ -720,7 +725,7 @@ export function ContextWindowPanel(props: {
         <ChevronRight size={14} class={{ 'verevon-chat-rotate': open() }} />
       </button>
       <Show when={open()}>
-        <Show when={props.scopeApplied}>
+        <Show when={props.scopeApplied?.scope === 'auto' ? undefined : props.scopeApplied}>
           {(scopeApplied) => (
             <p class="verevon-chat-context-window__note">
               {scopeApplied().scope === 'knowledge_only'
@@ -807,7 +812,11 @@ export function StepsPanel(props: {
    */
   toolCalls?: ChatToolCall[]
   screen?: ChatArtifact | null
+  /** The turn's running cost and usage (WS27-S4), shown under the Work header. */
+  meter?: RunMeter
   onStopTask: () => void
+  /** Opens the Trace on a tool call (EP-14 S4). The cards offer it only with the run ledger on. */
+  onInspectCall?: (callId: string) => void
 }) {
   const i18n = useI18n()
   const activeTask = () => props.turnStatus !== 'stopped' && props.turnStatus !== 'error'
@@ -907,6 +916,10 @@ export function StepsPanel(props: {
               {i18n.tr('Stopp', 'Stop')}
             </button>
           </div>
+          <RunCostMeter
+            meter={props.meter}
+            quotaRefreshKey={`${props.threadId ?? ''}:${activeTask() ? 'live' : 'settled'}`}
+          />
           {/* Step count drives the plan refetch: session-core mirrors each
               completed execution step into the run's plan, so a new task step
               is the cheapest available signal that the durable plan has more
@@ -972,7 +985,12 @@ export function StepsPanel(props: {
               <section class="verevon-chat-steps-tools">
                 <h3>{i18n.tr('Verktøykall', 'Tool calls')}</h3>
                 <For each={props.toolCalls ?? []}>
-                  {(call) => <ToolCallCard call={call} />}
+                  {(call) => (
+                    <ToolCallCard
+                      call={call}
+                      onInspect={runLedgerEnabled && props.onInspectCall ? () => props.onInspectCall?.(call.id) : undefined}
+                    />
+                  )}
                 </For>
               </section>
             </Show>
@@ -997,15 +1015,17 @@ export function StepsPanel(props: {
                         ? Math.round((outputTokens / latencyMs) * 1000)
                         : null
                     }
+                    // The run-cost meter's cache figures, so this line and the meter cannot disagree.
+                    const cacheRead = () => props.meter?.cacheReadTokens ?? current.cacheReadTokens ?? 0
                     const cacheTotal = () => {
-                      return (current.cacheReadTokens ?? 0) + (current.cacheWriteTokens ?? 0)
+                      return cacheRead() + (props.meter?.cacheWriteTokens ?? current.cacheWriteTokens ?? 0)
                     }
                     return (
                       <div class="verevon-chat-telemetry" aria-label={i18n.tr('Kjøringsmålinger', 'Run metrics')}>
                         <Metric label="Output" value={`${current.outputTokens ?? '—'} tokens`} />
                         <Metric label="Tokens/sec" value={tokensPerSecond() != null ? String(tokensPerSecond()) : '—'} />
                         <Show when={cacheTotal() > 0}>
-                          <Metric label="Prompt cache" value={`${current.cacheReadTokens ?? 0} read`} />
+                          <Metric label="Prompt cache" value={`${cacheRead()} read`} />
                         </Show>
                       </div>
                     )
@@ -1483,6 +1503,8 @@ export function TracePanel(props: {
   events: readonly VerevonUiEvent[]
   replayTruncated?: boolean
   runId?: string | null
+  /** A tool call the Inspect action asked the ledger to select (EP-14 S4). Read only with the ledger on. */
+  inspectRequest?: { callId: string } | null
 }) {
   const i18n = useI18n()
   return (
@@ -1500,38 +1522,44 @@ export function TracePanel(props: {
           </div>
           <span>{props.events.length} hendelser</span>
         </header>
-        <Show when={props.replayTruncated}>
-          {/* An audit record that is incomplete must say so. This fires both
-              when the durable replay hits its page ceiling and when a long
-              live run reaches the same cap in memory. */}
-          <p class="verevon-chat-trace-log__notice" role="status">
-            Visningen er avkortet ved 5&nbsp;000 hendelser — de eldste vises ikke
-            her. Den varige loggen er fortsatt komplett.
-          </p>
-        </Show>
-        <Show
-          when={props.events.length > 0}
-          fallback={<p class="verevon-chat-trace-log__empty">{i18n.tr('Ingen hendelser er registrert ennå.', 'No events have been recorded yet.')}</p>}
-        >
-          <ol>
-            <For each={props.events}>
-              {(event) => (
-                <li>
-                  <span class="verevon-chat-trace-log__marker" aria-hidden="true" />
-                  <div>
-                    <span class="verevon-chat-trace-log__event-copy">
-                      <strong>{uiEventLabel(event)}</strong>
-                      <Show when={cancellationReceipt(event)}>
-                        {(receipt) => <code title={receipt()}>kvittering {shortReceipt(receipt())}</code>}
-                      </Show>
-                    </span>
-                    <time>{formatTime(event.at)}</time>
-                  </div>
-                </li>
-              )}
-            </For>
-          </ol>
-        </Show>
+        {runLedgerEnabled ? (
+          <RunLedger events={props.events} replayTruncated={props.replayTruncated} inspectRequest={props.inspectRequest} />
+        ) : (
+          <>
+            <Show when={props.replayTruncated}>
+              {/* An audit record that is incomplete must say so. This fires both
+                  when the durable replay hits its page ceiling and when a long
+                  live run reaches the same cap in memory. */}
+              <p class="verevon-chat-trace-log__notice" role="status">
+                Visningen er avkortet ved 5&nbsp;000 hendelser — de eldste vises ikke
+                her. Den varige loggen er fortsatt komplett.
+              </p>
+            </Show>
+            <Show
+              when={props.events.length > 0}
+              fallback={<p class="verevon-chat-trace-log__empty">{i18n.tr('Ingen hendelser er registrert ennå.', 'No events have been recorded yet.')}</p>}
+            >
+              <ol>
+                <For each={props.events}>
+                  {(event) => (
+                    <li>
+                      <span class="verevon-chat-trace-log__marker" aria-hidden="true" />
+                      <div>
+                        <span class="verevon-chat-trace-log__event-copy">
+                          <strong>{uiEventLabel(event)}</strong>
+                          <Show when={cancellationReceipt(event)}>
+                            {(receipt) => <code title={receipt()}>kvittering {shortReceipt(receipt())}</code>}
+                          </Show>
+                        </span>
+                        <time>{formatTime(event.at)}</time>
+                      </div>
+                    </li>
+                  )}
+                </For>
+              </ol>
+            </Show>
+          </>
+        )}
       </section>
     </div>
   )

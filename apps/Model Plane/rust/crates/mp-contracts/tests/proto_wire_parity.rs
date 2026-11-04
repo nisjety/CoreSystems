@@ -25,6 +25,7 @@ fn canonical_event() -> Event {
             value: b"{}".to_vec(),
         }),
         zdr: false,
+        ..Default::default()
     }
 }
 
@@ -68,5 +69,44 @@ fn event_decode_rejects_truncated_payload() {
     assert!(
         err.to_string().contains("buffer") || err.to_string().contains("eof"),
         "unexpected decode error: {err}"
+    );
+}
+
+/// The run-trace fields (21-25) on their own, as the Go twin pins them
+/// (`goldenTraceFieldsWireHex`). Appended to the pre-trace golden it is the
+/// canonical encoding of the same event with the trace fields set.
+const GOLDEN_TRACE_FIELDS_WIRE_HEX: &str = "a80107b201150a0a67656e6572616c2d763112077072696d617279b80102c2011a30314852554e3031323334353637383930414243444546474849ca010a7265715f616263313233";
+
+fn trace_event() -> Event {
+    Event {
+        producer_seq: 7,
+        agent: Some(mp_contracts::model_plane::v1::AgentRef {
+            id: "general-v1".to_string(),
+            role: "primary".to_string(),
+            parent_id: String::new(),
+        }),
+        origin: mp_contracts::model_plane::v1::RunOrigin::Agent as i32,
+        run_id: "01HRUN01234567890ABCDEFGHI".to_string(),
+        request_id: "req_abc123".to_string(),
+        ..canonical_event()
+    }
+}
+
+#[test]
+fn event_with_trace_fields_encodes_to_golden_hex() {
+    let got_hex = hex_encode_lower(&trace_event().encode_to_vec());
+    assert_eq!(
+        got_hex,
+        format!("{GOLDEN_EVENT_WIRE_HEX}{GOLDEN_TRACE_FIELDS_WIRE_HEX}")
+    );
+}
+
+#[test]
+fn event_without_trace_fields_still_encodes_to_the_pre_trace_golden() {
+    // The new fields add no bytes when unset, so every pre-trace consumer sees
+    // exactly what it saw before.
+    assert_eq!(
+        hex_encode_lower(&canonical_event().encode_to_vec()),
+        GOLDEN_EVENT_WIRE_HEX
     );
 }

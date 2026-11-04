@@ -56,6 +56,24 @@ for required_control_credential in \
   fi
 done
 
+# The Quarry static credentials (R-13 PR 2): compose requires each one, so a release
+# that lacks one cannot render, and the three must stay pairwise distinct.
+for required_quarry_credential in \
+  QUARRY_ORG_CORE_SERVICE_TOKEN \
+  QUARRY_BILLING_CORE_SERVICE_TOKEN \
+  QUARRY_CONTROL_AUDIT_CORE_SERVICE_TOKEN; do
+  if ! printf '%s\n' "${names[@]}" | grep -qx "$required_quarry_credential"; then
+    printf 'credential preflight omits Quarry static credential %s\n' \
+      "$required_quarry_credential" >&2
+    exit 1
+  fi
+  if ! grep -q "\${$required_quarry_credential:?" "$root/docker-compose.yml"; then
+    printf 'compose does not require Quarry static credential %s\n' \
+      "$required_quarry_credential" >&2
+    exit 1
+  fi
+done
+
 # The presenting-end credentials of the Data Plane principal bundle
 # (config/plane-service-principals.json `consumerEnv`): the registry holds the same
 # value, so a release missing one registers a principal nobody can present.
@@ -254,6 +272,24 @@ expect_failure USER_AUTH_INTERNAL_CLIENT_CREDENTIAL_FILE \
   USER_AUTH_INTERNAL_CLIENT_CREDENTIAL_FILE="$runtime_dir/invalid-user-auth-client-credential.json"
 expect_failure CONVEX_AUTH_PRIVATE_KEY_FILE \
   CONVEX_AUTH_PRIVATE_KEY_FILE="$runtime_dir/missing-private.pem"
+
+expect_failure QUARRY_ORG_CORE_SERVICE_TOKEN QUARRY_ORG_CORE_SERVICE_TOKEN=
+expect_failure QUARRY_BILLING_CORE_SERVICE_TOKEN QUARRY_BILLING_CORE_SERVICE_TOKEN=short
+expect_failure QUARRY_CONTROL_AUDIT_CORE_SERVICE_TOKEN \
+  QUARRY_CONTROL_AUDIT_CORE_SERVICE_TOKEN=change-me-0123456789abcdef0123456789abcdef
+reused_quarry_credential='reused-quarry-credential-0123456789abcdef'
+expect_failure QUARRY_BILLING_CORE_SERVICE_TOKEN \
+  QUARRY_ORG_CORE_SERVICE_TOKEN="$reused_quarry_credential" \
+  QUARRY_BILLING_CORE_SERVICE_TOKEN="$reused_quarry_credential"
+
+# The Prometheus token file is optional (unset = the placeholder, scrape reads down) and,
+# once configured, must be a readable file holding a real token. Its value is never printed.
+printf '%s' 'quarry-metrics-token-0123456789abcdef0123456789abcdef' >"$runtime_dir/quarry_metrics_token"
+printf '%s' 'short' >"$runtime_dir/short_quarry_metrics_token"
+env "${base_env[@]}" QUARRY_METRICS_TOKEN_FILE="$runtime_dir/quarry_metrics_token" "$preflight" >/dev/null
+env "${base_env[@]}" QUARRY_METRICS_TOKEN_FILE= "$preflight" >/dev/null
+expect_failure QUARRY_METRICS_TOKEN_FILE QUARRY_METRICS_TOKEN_FILE="$runtime_dir/missing_quarry_metrics_token"
+expect_failure QUARRY_METRICS_TOKEN_FILE QUARRY_METRICS_TOKEN_FILE="$runtime_dir/short_quarry_metrics_token"
 
 reused_new_control='reused-new-control-credential-0123456789abcdef'
 expect_failure USER_AUTH_INTERNAL_SERVICE_TOKEN \

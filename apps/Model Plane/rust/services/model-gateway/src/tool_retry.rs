@@ -60,6 +60,41 @@ const TRANSIENT_MARKERS: &[&str] = &[
     "rate_limit",
 ];
 
+/// See `execution-core`'s `runtime_loop::retry::REASON_MARKERS`. Kept identical by
+/// `tests/tool_retry_contract.rs`. The first class whose marker the error contains names the
+/// failure; the reason is a closed token, never the error text.
+const REASON_MARKERS: &[(&str, &[&str])] = &[
+    ("timeout", &["timed out", "timeout", "deadline exceeded"]),
+    (
+        "connection",
+        &[
+            "connection refused",
+            "connection reset",
+            "connection closed",
+            "connection error",
+            "broken pipe",
+            "transport error",
+            "no route to host",
+            "dns error",
+            "unexpected eof",
+        ],
+    ),
+    (
+        "upstream_unavailable",
+        &[
+            "service unavailable",
+            "temporarily unavailable",
+            "502 bad gateway",
+            "503",
+            "504",
+        ],
+    ),
+    (
+        "rate_limited",
+        &["too many requests", "429", "rate limit", "rate_limit"],
+    ),
+];
+
 /// See `execution-core`'s `runtime_loop::retry::NOT_TRANSIENT_MARKERS`. Kept
 /// byte-identical by `tests/tool_retry_contract.rs`.
 ///
@@ -111,7 +146,18 @@ pub fn is_transient_tool_failure(error: &str) -> bool {
         .any(|marker| haystack.contains(marker))
 }
 
-/// Backoff before `attempt` (1-indexed; the wait BEFORE attempt 2 is
+/// The closed reason a transient failure reports (`mp_contracts::lifecycle_notice::RETRY_REASONS`).
+/// Only the token leaves the loop, so no frame or log built from it can carry the error text.
+#[must_use]
+pub fn transient_reason(error: &str) -> &'static str {
+    let haystack = error.to_ascii_lowercase();
+    REASON_MARKERS
+        .iter()
+        .find(|(_, markers)| markers.iter().any(|marker| haystack.contains(marker)))
+        .map_or("other", |&(reason, _)| reason)
+}
+
+/// Backoff before `attempt` (1-indexed: the wait BEFORE attempt 2 is
 /// `backoff_before_attempt(2)`).
 #[must_use]
 pub fn backoff_before_attempt(attempt: u32) -> Duration {
@@ -122,6 +168,40 @@ pub fn backoff_before_attempt(attempt: u32) -> Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_transient_marker_names_a_closed_reason() {
+        // An uncovered marker would report a retried failure as "other", which hides its class
+        // from the client. The reason must also be one of the closed tokens the wire allows.
+        for marker in TRANSIENT_MARKERS {
+            let reason = transient_reason(marker);
+            assert!(
+                mp_contracts::lifecycle_notice::is_closed_token(
+                    &mp_contracts::lifecycle_notice::RETRY_REASONS,
+                    reason,
+                ),
+                "{marker:?} named {reason:?}, which is not a closed retry reason"
+            );
+            assert_ne!(reason, "other", "{marker:?} is transient but has no class");
+        }
+    }
+
+    #[test]
+    fn the_reason_names_the_class_of_a_real_failure() {
+        assert_eq!(transient_reason("operation timed out"), "timeout");
+        assert_eq!(
+            transient_reason("transport error: connection reset by peer"),
+            "connection"
+        );
+        assert_eq!(
+            transient_reason("upstream returned 503 Service Unavailable"),
+            "upstream_unavailable"
+        );
+        assert_eq!(
+            transient_reason("provider returned 429 Too Many Requests"),
+            "rate_limited"
+        );
+    }
 
     #[test]
     fn transient_transport_failures_are_retryable_here_too() {

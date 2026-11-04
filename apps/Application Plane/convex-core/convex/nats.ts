@@ -8,6 +8,7 @@
  * - verevon.controlplane.org.{created,updated,deleted}
  * - verevon.controlplane.org.member.{added,removed}
  * - verevon.ingestion.import.completed
+ * - mp.v1.trace.run.{runId} (WS10.S7b, `onBrowserTraceEvent`, off by default)
  */
 
 import { v } from "convex/values";
@@ -21,6 +22,12 @@ import {
   organizationProjectionFingerprint,
   type ProjectionState,
 } from "./authorityProjection";
+import {
+  type BrowserActivity,
+  type BrowserActivityUpdate,
+  upsertBrowserActivityHandler,
+} from "./agentRuns";
+import { envFlagOn } from "./spaceAttentionRules";
 
 // Control-Plane-owned shared key; no hardcoded fallback. Empty only if the env
 // is misconfigured, in which case the receiving validator rejects the call.
@@ -1070,3 +1077,237 @@ function mapAgentRunStatus(
       return null;
   }
 }
+
+/**
+ * WS10.S7b (ADR-8 part 2): consumer for browser run trace events.
+ *
+ * Input: one JSON twin of `model_plane.v1.Event` published by Quarry
+ * (`quarry-trace-producer`, publish-only) on `mp.v1.trace.run.{runId}`, plus
+ * the subject it arrived on. Output: at most one `upsertBrowserActivity` write
+ * on the existing `agentRuns` row of that run. Rules:
+ *   - off unless the Convex env `BROWSER_TRACE_CONSUMER_ENABLED` is on
+ *     (default off): disabled, the handler reads and writes nothing;
+ *   - the run id comes from the subject (the NATS grant is the verification:
+ *     only the trace producer may publish there), and the org is the one the
+ *     run lifecycle mirror recorded for that run, never the payload's
+ *     `org_id`; a payload `org_id` that differs drops the event;
+ *   - a ZDR run is ignored: anything but an explicit `"zdr": false` drops the
+ *     event before the run row is read (the producer always writes the key);
+ *   - idempotent by `producer_seq`: a duplicate or older seq is skipped by
+ *     `upsertBrowserActivity` (monotonic `lastProducerSeq`);
+ *   - counters are approximate: +1 on the stored total per accepted event, so
+ *     an event that arrives after a newer one is lost, never double counted;
+ *   - only labels and counters are written (`payload.mode` as the control
+ *     label, `payload.decision` to count blocks); no payload text lands;
+ *   - never throws for a bad event, so the subscriber never redelivers one.
+ */
+export const BROWSER_TRACE_SUBJECT_PREFIX = "mp.v1.trace.run.";
+
+const BROWSER_TRACE_RUN_ID = /^[A-Za-z0-9_-]{1,128}$/;
+const BROWSER_TRACE_MODE = /^[a-z][a-z0-9_]{0,31}$/;
+const BROWSER_TRACE_BLOCK_DECISIONS = new Set(["block", "blocked", "deny", "denied"]);
+
+export const BROWSER_TRACE_EVENT_TYPES = [
+  "BROWSER_SESSION_OPENED",
+  "BROWSER_SESSION_CLOSED",
+  "BROWSER_CONTROL_CHANGED",
+  "BROWSER_TAB_CHANGED",
+  "BROWSER_STEP_RECEIPT_RECORDED",
+  "BROWSER_EGRESS_DECIDED",
+  "BROWSER_ARTIFACT_RECORDED",
+] as const;
+
+export type BrowserTraceEventType = (typeof BROWSER_TRACE_EVENT_TYPES)[number];
+
+export type BrowserTraceDropReason =
+  | "bad_subject"
+  | "zdr"
+  | "invalid"
+  | "not_browser"
+  | "run_mismatch"
+  | "unknown_run"
+  | "org_mismatch";
+
+export type ParsedBrowserTraceEvent = {
+  runId: string;
+  eventType: BrowserTraceEventType;
+  producerSeq: number;
+  eventAt?: number;
+  payloadOrgId?: string;
+  mode?: string;
+  blocked: boolean;
+};
+
+export function browserTraceConsumerEnabled(
+  value: string | undefined = process.env.BROWSER_TRACE_CONSUMER_ENABLED,
+): boolean {
+  return envFlagOn(value);
+}
+
+/** `mp.v1.trace.run.{runId}` -> runId; anything else (extra tokens, wildcards) -> null. */
+export function runIdFromTraceSubject(subject: unknown): string | null {
+  if (typeof subject !== "string" || !subject.startsWith(BROWSER_TRACE_SUBJECT_PREFIX)) {
+    return null;
+  }
+  const runId = subject.slice(BROWSER_TRACE_SUBJECT_PREFIX.length);
+  return BROWSER_TRACE_RUN_ID.test(runId) ? runId : null;
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** proto3 JSON may carry a uint64 as a string; both forms are accepted. */
+function parseProducerSeq(value: unknown): number | null {
+  if (typeof value === "number") {
+    return Number.isSafeInteger(value) && value >= 1 ? value : null;
+  }
+  if (typeof value === "string" && /^[1-9][0-9]{0,14}$/.test(value)) {
+    return Number(value);
+  }
+  return null;
+}
+
+function parseEventAt(value: unknown): number | undefined {
+  if (typeof value === "number" && Number.isFinite(value) && value > 0) return value;
+  if (typeof value === "string" && value.length <= 64) {
+    const parsed = Date.parse(value);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return undefined;
+}
+
+function browserTraceEventType(value: unknown): BrowserTraceEventType | null {
+  if (typeof value !== "string") return null;
+  const name = value.startsWith("EVENT_TYPE_") ? value.slice("EVENT_TYPE_".length) : value;
+  return (BROWSER_TRACE_EVENT_TYPES as readonly string[]).includes(name)
+    ? (name as BrowserTraceEventType)
+    : null;
+}
+
+/**
+ * Pure, no database: the subject and the event's envelope fields. The ZDR
+ * check runs before anything else of the event is looked at.
+ */
+export function parseBrowserTraceEvent(
+  subject: unknown,
+  event: unknown,
+): { kind: "ok"; event: ParsedBrowserTraceEvent } | { kind: "drop"; reason: BrowserTraceDropReason } {
+  const runId = runIdFromTraceSubject(subject);
+  if (!runId) return { kind: "drop", reason: "bad_subject" };
+  if (!isPlainObject(event)) return { kind: "drop", reason: "invalid" };
+  if (event.zdr !== false) return { kind: "drop", reason: "zdr" };
+
+  const eventType = browserTraceEventType(event.event_type);
+  if (!eventType) return { kind: "drop", reason: "not_browser" };
+  const producerSeq = parseProducerSeq(event.producer_seq);
+  if (producerSeq === null) return { kind: "drop", reason: "invalid" };
+  if (event.run_id !== undefined && event.run_id !== "" && event.run_id !== runId) {
+    return { kind: "drop", reason: "run_mismatch" };
+  }
+
+  const payload = isPlainObject(event.payload) ? event.payload : {};
+  const parsed: ParsedBrowserTraceEvent = { runId, eventType, producerSeq, blocked: false };
+  const eventAt = parseEventAt(event.ts);
+  if (eventAt !== undefined) parsed.eventAt = eventAt;
+  if (typeof event.org_id === "string" && event.org_id !== "") {
+    parsed.payloadOrgId = event.org_id;
+  }
+  if (
+    eventType === "BROWSER_CONTROL_CHANGED" &&
+    typeof payload.mode === "string" &&
+    BROWSER_TRACE_MODE.test(payload.mode)
+  ) {
+    parsed.mode = payload.mode;
+  }
+  if (
+    eventType === "BROWSER_EGRESS_DECIDED" &&
+    typeof payload.decision === "string" &&
+    BROWSER_TRACE_BLOCK_DECISIONS.has(payload.decision.toLowerCase())
+  ) {
+    parsed.blocked = true;
+  }
+  return { kind: "ok", event: parsed };
+}
+
+/**
+ * Pure: the `upsertBrowserActivity` arguments for one parsed event against the
+ * run row the subject names. The org is the row's, never the payload's.
+ */
+export function browserActivityUpdateFromTrace(
+  parsed: ParsedBrowserTraceEvent,
+  run: { externalOrgId: string; browserActivity?: BrowserActivity } | null,
+  now: number,
+): { kind: "ok"; update: BrowserActivityUpdate } | { kind: "drop"; reason: BrowserTraceDropReason } {
+  if (!run) return { kind: "drop", reason: "unknown_run" };
+  if (parsed.payloadOrgId !== undefined && parsed.payloadOrgId !== run.externalOrgId) {
+    return { kind: "drop", reason: "org_mismatch" };
+  }
+  const previous = run.browserActivity;
+  const update: BrowserActivityUpdate = {
+    runId: parsed.runId,
+    externalOrgId: run.externalOrgId,
+    producerSeq: parsed.producerSeq,
+    eventType: parsed.eventType,
+    eventAt: parsed.eventAt ?? now,
+  };
+  switch (parsed.eventType) {
+    case "BROWSER_SESSION_OPENED":
+      update.sessionState = "open";
+      break;
+    case "BROWSER_SESSION_CLOSED":
+      update.sessionState = "closed";
+      break;
+    case "BROWSER_CONTROL_CHANGED":
+      if (parsed.mode !== undefined) update.control = parsed.mode;
+      break;
+    case "BROWSER_STEP_RECEIPT_RECORDED":
+      update.steps = (previous?.steps ?? 0) + 1;
+      break;
+    case "BROWSER_EGRESS_DECIDED":
+      if (parsed.blocked) update.blockedEgress = (previous?.blockedEgress ?? 0) + 1;
+      break;
+    case "BROWSER_ARTIFACT_RECORDED":
+      update.artifacts = (previous?.artifacts ?? 0) + 1;
+      break;
+    case "BROWSER_TAB_CHANGED":
+      break;
+  }
+  return { kind: "ok", update };
+}
+
+export type BrowserTraceResult =
+  | { status: "disabled" }
+  | { status: "dropped"; reason: BrowserTraceDropReason }
+  | { status: "applied" }
+  | { status: "skipped"; reason?: string };
+
+export async function onBrowserTraceEventHandler(
+  ctx: any,
+  args: { subject: string; event: unknown },
+): Promise<BrowserTraceResult> {
+  if (!browserTraceConsumerEnabled()) return { status: "disabled" };
+  const parsed = parseBrowserTraceEvent(args.subject, args.event);
+  if (parsed.kind === "drop") return { status: "dropped", reason: parsed.reason };
+
+  const run = await ctx.db
+    .query("agentRuns")
+    .withIndex("by_run", (q: any) => q.eq("runId", parsed.event.runId))
+    .unique();
+  const next = browserActivityUpdateFromTrace(parsed.event, run, Date.now());
+  if (next.kind === "drop") return { status: "dropped", reason: next.reason };
+
+  const result = await upsertBrowserActivityHandler(ctx, next.update);
+  return result.applied ? { status: "applied" } : { status: "skipped", reason: result.reason };
+}
+
+/**
+ * Called once per `mp.v1.trace.run.*` message with the subject and the event.
+ * The subscriber and its webhook route are not wired yet (see
+ * `.plan-work/quarry-w1w2/W23-W2-AP-S7b-status.md`); until then and while the
+ * flag is off nothing reaches `browserActivity`.
+ */
+export const onBrowserTraceEvent = internalMutation({
+  args: { subject: v.string(), event: v.any() },
+  handler: onBrowserTraceEventHandler,
+});

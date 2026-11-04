@@ -1,0 +1,9 @@
+HTTP=200 HTTP=200 HTTP=200 HTTP=200 HTTP=200 HTTP=200 HTTP=200 HTTP=200 
+== 8 contexts: ready [1,8,8]
+docker stats quarry-edge: 353.9MiB / 15.42GiB
+cgroup_memory.current_MiB=429
+inactive_file_MiB=69
+pss_sum_MiB=618
+rss_sum_MiB=2143
+renderer_procs=11
+chromium_procs=18

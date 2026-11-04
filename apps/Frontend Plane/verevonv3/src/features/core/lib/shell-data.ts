@@ -46,6 +46,7 @@ export type VerevonRoute =
   | '/agents/runs'
   | '/agents/cost'
   | '/agents/quality'
+  | '/agents/customize'
   | '/account'
   | '/settings'
   | '/settings/workspace'

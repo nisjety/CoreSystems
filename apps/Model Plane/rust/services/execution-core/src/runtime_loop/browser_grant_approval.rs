@@ -21,6 +21,11 @@
 //! from an approval floor or a stored policy, or the hook and permission gates
 //! that run after it. The agent loop and scheduled steps hold no validated grant,
 //! so they can never lift.
+//!
+//! An attach grant (WS8.G) lifts on the same terms: model-gateway derives it with
+//! the user's own bearer from their session or human_browse grant, for one named
+//! session, with explicit hosts (at most eight), and the broker re-validates it
+//! the same way, so it carries the same narrower "yes" as a run grant.
 
 use std::fmt::Write as _;
 
@@ -36,6 +41,7 @@ const BROWSER_CAPABILITY_ID: &str = "cap.browser.open";
 const RISK_LEVEL_SOURCE: &str = "risk_level";
 /// A grant derived from a session grant for one run.
 const RUN_GRANT_KIND: &str = "run";
+const ATTACH_GRANT_KIND: &str = "attach";
 
 /// Why a high-risk ask was satisfied, as metadata only: nothing here is a URL,
 /// a domain, a goal or a prompt.
@@ -72,7 +78,7 @@ pub(crate) fn satisfies_high_risk_ask(
     }
     let grant = browser_grant?;
     let user_id = user_id.trim();
-    if grant.kind() != RUN_GRANT_KIND
+    if !matches!(grant.kind(), RUN_GRANT_KIND | ATTACH_GRANT_KIND)
         || grant.parent_grant_id().trim().is_empty()
         || user_id.is_empty()
         || grant.owner_id() != user_id
@@ -241,8 +247,19 @@ mod tests {
     }
 
     #[test]
+    fn a_derived_attach_grant_of_the_runs_user_lifts_like_a_run_grant() {
+        let grant = ValidatedBrowserGrant::for_test("grant-att", "attach", "grant-session", USER, false);
+        assert!(lift("browser_agent", &input(), &ask(), Some(&grant), USER).is_some());
+        // The same owner and parent rules hold.
+        let orphan = ValidatedBrowserGrant::for_test("grant-att", "attach", " ", USER, false);
+        assert!(lift("browser_agent", &input(), &ask(), Some(&orphan), USER).is_none());
+        let other = ValidatedBrowserGrant::for_test("grant-att", "attach", "grant-session", "user-other", false);
+        assert!(lift("browser_agent", &input(), &ask(), Some(&other), USER).is_none());
+    }
+
+    #[test]
     fn only_a_derived_run_grant_lifts() {
-        for kind in ["session", "sensitive_approval", "", "Run"] {
+        for kind in ["session", "human_browse", "sensitive_approval", "", "Run", "Attach"] {
             let grant =
                 ValidatedBrowserGrant::for_test("grant-run", kind, "grant-session", USER, false);
             assert!(

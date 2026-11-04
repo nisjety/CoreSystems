@@ -1,0 +1,8 @@
+{
+  "raw": "{\"action\": \"done\", \"answer\": \"A captcha stops me.\", \"outcome\": \"blocked\"}",
+  "expect": {
+    "kind": "done",
+    "outcome": "blocked",
+    "answer": "A captcha stops me."
+  }
+}

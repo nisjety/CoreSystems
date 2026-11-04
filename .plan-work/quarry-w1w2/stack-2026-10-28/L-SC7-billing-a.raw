@@ -1,0 +1,7 @@
+HTTP/1.1 200 OK
+content-type: application/json
+x-request-id: req_01M61QZVXHTJV03BFHSDMER59D
+content-length: 626
+date: Wed, 28 Oct 2026 17:12:42 GMT
+
+{"data":{"job_id":"job_01M61QZVY04YPRBQYXX58C6TVE","accepted_at":"2026-10-28T17:12:42.193682309Z","limits":{"max_pages":{"requested":null,"effective":1000,"clamped_by":["default"]},"max_depth":{"requested":null,"effective":5,"clamped_by":["default"]}},"effective":{"legacy":false,"max_depth":5,"max_pages":1000,"request_warnings":[],"robots":"respect","scope":{"allow_external_links":false,"allow_subdomains":false,"crawl_entire_domain":true,"deny_extensions":null,"exclude_paths":[],"include_paths":[],"legacy":false},"scope_mode":"observe","warnings":[]}},"meta":{"request_id":"req_01M61QZVXHTJV03BFHSDMER59D"},"error":null}

@@ -5,12 +5,26 @@
 
 import { describe, expect, it } from 'vitest'
 import { deriveStreamActivity, streamActivityLabel } from './stream-activity'
-import type { ChatToolCall } from '@/features/chat/components/chat-types'
+import type { ChatToolCall, LifecycleNotice } from '@/features/chat/components/chat-types'
 
 const call = (overrides: Partial<ChatToolCall> = {}): ChatToolCall => ({
   id: 'tc-1',
   name: 'web_search',
   status: 'running',
+  ...overrides,
+})
+
+/** The two locales the app ships, as its translator reads them. */
+const norwegian = { tr: (noText: string) => noText }
+const english = { tr: (_noText: string, enText: string) => enText }
+
+const retry = (overrides: Partial<Extract<LifecycleNotice, { kind: 'retry' }>> = {}): LifecycleNotice => ({
+  kind: 'retry',
+  tool: 'web_search',
+  attempt: 2,
+  maxAttempts: 3,
+  reason: 'timeout',
+  callId: 'tc-1',
   ...overrides,
 })
 
@@ -64,12 +78,40 @@ describe('deriveStreamActivity', () => {
       failed: true,
     })
   })
+
+  /** WS15: a retry is named from its notice, and only for the call the notice was matched to. */
+  it('names a tool that is being retried, with the attempt about to run', () => {
+    expect(deriveStreamActivity([call()], [retry()])).toEqual({
+      kind: 'retrying',
+      tool: 'Web search',
+      attempt: 2,
+      max: 3,
+    })
+  })
+
+  it('does not read a later call of the same tool as retrying', () => {
+    const activity = deriveStreamActivity(
+      [call({ id: 'tc-1', status: 'done', output: '{}' }), call({ id: 'tc-2' })],
+      [retry({ callId: 'tc-1' })],
+    )
+    expect(activity).toEqual({ kind: 'tool-running', tool: 'Web search' })
+  })
+
+  it('ignores a notice that names no call', () => {
+    expect(deriveStreamActivity([call()], [retry({ callId: undefined })])).toEqual({
+      kind: 'tool-running',
+      tool: 'Web search',
+    })
+  })
 })
 
 describe('streamActivityLabel', () => {
   it('says what is running', () => {
-    expect(streamActivityLabel({ kind: 'tool-running', tool: 'Web search' })).toBe(
+    expect(streamActivityLabel({ kind: 'tool-running', tool: 'Web search' }, norwegian)).toBe(
       'Kjører Web search',
+    )
+    expect(streamActivityLabel({ kind: 'tool-running', tool: 'Web search' }, english)).toBe(
+      'Running Web search',
     )
   })
 
@@ -79,14 +121,26 @@ describe('streamActivityLabel', () => {
    * known is that the tool came back and the answer has not.
    */
   it('reports a finished tool as a wait, not as a composing model', () => {
-    const label = streamActivityLabel({ kind: 'tool-settled', tool: 'Web search', failed: false })
+    const label = streamActivityLabel({ kind: 'tool-settled', tool: 'Web search', failed: false }, norwegian)
     expect(label).toBe('Web search fullført – venter på svar')
     expect(label).not.toContain('skriver')
+    expect(streamActivityLabel({ kind: 'tool-settled', tool: 'Web search', failed: false }, english)).toBe(
+      'Web search done – waiting for answer',
+    )
   })
 
   it('says a tool failed when it did', () => {
-    expect(streamActivityLabel({ kind: 'tool-settled', tool: 'Web search', failed: true })).toBe(
+    expect(streamActivityLabel({ kind: 'tool-settled', tool: 'Web search', failed: true }, norwegian)).toBe(
       'Web search feilet – venter på svar',
     )
+    expect(streamActivityLabel({ kind: 'tool-settled', tool: 'Web search', failed: true }, english)).toBe(
+      'Web search failed – waiting for answer',
+    )
+  })
+
+  it('says a retry with its attempt, in both locales', () => {
+    const activity = { kind: 'retrying' as const, tool: 'Web search', attempt: 2, max: 3 }
+    expect(streamActivityLabel(activity, norwegian)).toBe('Prøver Web search på nytt (forsøk 2 av 3)')
+    expect(streamActivityLabel(activity, english)).toBe('Retrying Web search (attempt 2 of 3)')
   })
 })

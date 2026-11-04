@@ -1,0 +1,1487 @@
+{
+  "events": [
+    {
+      "eventId": "1",
+      "eventTime": "2026-01-05T09:00:01Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_EXECUTION_STARTED",
+      "workflowExecutionStartedEventAttributes": {
+        "workflowType": {
+          "name": "CrawlJobWF"
+        },
+        "taskQueue": {
+          "name": "quarry-orchestrator",
+          "kind": "TASK_QUEUE_KIND_NORMAL"
+        },
+        "input": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg=="
+              },
+              "data": "eyJydW5faWQiOiJydW5fcmVwbGF5X3Njb3BlZF9kdXJhYmxlIiwiam9iX2lkIjoiam9iX3J1bl9yZXBsYXlfc2NvcGVkX2R1cmFibGUiLCJvcmdfaWQiOiJvcmdfcmVwbGF5Iiwic2VlZHMiOlsiaHR0cHM6Ly9zaXRlLnRlc3QvIl0sIm1heF9kZXB0aCI6MywibWF4X3BhZ2VzIjoyMCwic2NvcGUiOnsiYWxsb3dfc3ViZG9tYWlucyI6ZmFsc2UsImFsbG93X2V4dGVybmFsX2xpbmtzIjpmYWxzZSwiY3Jhd2xfZW50aXJlX2RvbWFpbiI6dHJ1ZX0sInNjb3BlX21vZGUiOiJlbmZvcmNlIn0="
+            }
+          ]
+        },
+        "workflowExecutionTimeout": "86400s",
+        "workflowRunTimeout": "86400s",
+        "workflowTaskTimeout": "10s",
+        "originalExecutionRunId": "replay-fixture-run",
+        "identity": "replay-fixture",
+        "firstExecutionRunId": "replay-fixture-run",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "2",
+      "eventTime": "2026-01-05T09:00:02Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
+      "workflowTaskScheduledEventAttributes": {
+        "taskQueue": {
+          "name": "quarry-orchestrator",
+          "kind": "TASK_QUEUE_KIND_NORMAL"
+        },
+        "startToCloseTimeout": "10s",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "3",
+      "eventTime": "2026-01-05T09:00:03Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
+      "workflowTaskStartedEventAttributes": {
+        "scheduledEventId": "2",
+        "identity": "replay-fixture",
+        "requestId": "req-3"
+      }
+    },
+    {
+      "eventId": "4",
+      "eventTime": "2026-01-05T09:00:04Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+      "workflowTaskCompletedEventAttributes": {
+        "scheduledEventId": "2",
+        "startedEventId": "3",
+        "identity": "replay-fixture"
+      }
+    },
+    {
+      "eventId": "5",
+      "eventTime": "2026-01-05T09:00:05Z",
+      "eventType": "EVENT_TYPE_MARKER_RECORDED",
+      "markerRecordedEventAttributes": {
+        "markerName": "Version",
+        "details": {
+          "change-id": {
+            "payloads": [
+              {
+                "metadata": {
+                  "encoding": "anNvbi9wbGFpbg=="
+                },
+                "data": "ImNyYXdsLWJvdW5kZWQtdjEi"
+              }
+            ]
+          },
+          "version": {
+            "payloads": [
+              {
+                "metadata": {
+                  "encoding": "anNvbi9wbGFpbg=="
+                },
+                "data": "MQ=="
+              }
+            ]
+          }
+        },
+        "workflowTaskCompletedEventId": "4"
+      }
+    },
+    {
+      "eventId": "6",
+      "eventTime": "2026-01-05T09:00:06Z",
+      "eventType": "EVENT_TYPE_UPSERT_WORKFLOW_SEARCH_ATTRIBUTES",
+      "upsertWorkflowSearchAttributesEventAttributes": {
+        "workflowTaskCompletedEventId": "4",
+        "searchAttributes": {
+          "indexedFields": {
+            "TemporalChangeVersion": {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg==",
+                "type": "S2V5d29yZA=="
+              },
+              "data": "WyJjcmF3bC1ib3VuZGVkLXYxLTEiXQ=="
+            }
+          }
+        }
+      }
+    },
+    {
+      "eventId": "7",
+      "eventTime": "2026-01-05T09:00:07Z",
+      "eventType": "EVENT_TYPE_MARKER_RECORDED",
+      "markerRecordedEventAttributes": {
+        "markerName": "Version",
+        "details": {
+          "change-id": {
+            "payloads": [
+              {
+                "metadata": {
+                  "encoding": "anNvbi9wbGFpbg=="
+                },
+                "data": "ImNyYXdsLXNjb3BlLXYxIg=="
+              }
+            ]
+          },
+          "version": {
+            "payloads": [
+              {
+                "metadata": {
+                  "encoding": "anNvbi9wbGFpbg=="
+                },
+                "data": "MQ=="
+              }
+            ]
+          }
+        },
+        "workflowTaskCompletedEventId": "4"
+      }
+    },
+    {
+      "eventId": "8",
+      "eventTime": "2026-01-05T09:00:08Z",
+      "eventType": "EVENT_TYPE_UPSERT_WORKFLOW_SEARCH_ATTRIBUTES",
+      "upsertWorkflowSearchAttributesEventAttributes": {
+        "workflowTaskCompletedEventId": "4",
+        "searchAttributes": {
+          "indexedFields": {
+            "TemporalChangeVersion": {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg==",
+                "type": "S2V5d29yZA=="
+              },
+              "data": "WyJjcmF3bC1ib3VuZGVkLXYxLTEiLCJjcmF3bC1zY29wZS12MS0xIl0="
+            }
+          }
+        }
+      }
+    },
+    {
+      "eventId": "9",
+      "eventTime": "2026-01-05T09:00:09Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_SCHEDULED",
+      "activityTaskScheduledEventAttributes": {
+        "activityId": "9",
+        "activityType": {
+          "name": "EmitEvent"
+        },
+        "taskQueue": {
+          "name": "quarry-orchestrator",
+          "kind": "TASK_QUEUE_KIND_NORMAL"
+        },
+        "scheduleToCloseTimeout": "0s",
+        "scheduleToStartTimeout": "0s",
+        "startToCloseTimeout": "300s",
+        "workflowTaskCompletedEventId": "4"
+      }
+    },
+    {
+      "eventId": "10",
+      "eventTime": "2026-01-05T09:00:10Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_STARTED",
+      "activityTaskStartedEventAttributes": {
+        "scheduledEventId": "9",
+        "identity": "replay-fixture",
+        "requestId": "act-10",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "11",
+      "eventTime": "2026-01-05T09:00:11Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_COMPLETED",
+      "activityTaskCompletedEventAttributes": {
+        "scheduledEventId": "9",
+        "startedEventId": "10",
+        "identity": "replay-fixture"
+      }
+    },
+    {
+      "eventId": "12",
+      "eventTime": "2026-01-05T09:00:12Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
+      "workflowTaskScheduledEventAttributes": {
+        "taskQueue": {
+          "name": "quarry-orchestrator",
+          "kind": "TASK_QUEUE_KIND_NORMAL"
+        },
+        "startToCloseTimeout": "10s",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "13",
+      "eventTime": "2026-01-05T09:00:13Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
+      "workflowTaskStartedEventAttributes": {
+        "scheduledEventId": "12",
+        "identity": "replay-fixture",
+        "requestId": "req-13"
+      }
+    },
+    {
+      "eventId": "14",
+      "eventTime": "2026-01-05T09:00:14Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+      "workflowTaskCompletedEventAttributes": {
+        "scheduledEventId": "12",
+        "startedEventId": "13",
+        "identity": "replay-fixture"
+      }
+    },
+    {
+      "eventId": "15",
+      "eventTime": "2026-01-05T09:00:15Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_SCHEDULED",
+      "activityTaskScheduledEventAttributes": {
+        "activityId": "15",
+        "activityType": {
+          "name": "FrontierEnqueue"
+        },
+        "taskQueue": {
+          "name": "quarry-orchestrator",
+          "kind": "TASK_QUEUE_KIND_NORMAL"
+        },
+        "scheduleToCloseTimeout": "0s",
+        "scheduleToStartTimeout": "0s",
+        "startToCloseTimeout": "300s",
+        "workflowTaskCompletedEventId": "14"
+      }
+    },
+    {
+      "eventId": "16",
+      "eventTime": "2026-01-05T09:00:16Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_STARTED",
+      "activityTaskStartedEventAttributes": {
+        "scheduledEventId": "15",
+        "identity": "replay-fixture",
+        "requestId": "act-16",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "17",
+      "eventTime": "2026-01-05T09:00:17Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_COMPLETED",
+      "activityTaskCompletedEventAttributes": {
+        "scheduledEventId": "15",
+        "startedEventId": "16",
+        "identity": "replay-fixture"
+      }
+    },
+    {
+      "eventId": "18",
+      "eventTime": "2026-01-05T09:00:18Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
+      "workflowTaskScheduledEventAttributes": {
+        "taskQueue": {
+          "name": "quarry-orchestrator",
+          "kind": "TASK_QUEUE_KIND_NORMAL"
+        },
+        "startToCloseTimeout": "10s",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "19",
+      "eventTime": "2026-01-05T09:00:19Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
+      "workflowTaskStartedEventAttributes": {
+        "scheduledEventId": "18",
+        "identity": "replay-fixture",
+        "requestId": "req-19"
+      }
+    },
+    {
+      "eventId": "20",
+      "eventTime": "2026-01-05T09:00:20Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+      "workflowTaskCompletedEventAttributes": {
+        "scheduledEventId": "18",
+        "startedEventId": "19",
+        "identity": "replay-fixture"
+      }
+    },
+    {
+      "eventId": "21",
+      "eventTime": "2026-01-05T09:00:21Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_SCHEDULED",
+      "activityTaskScheduledEventAttributes": {
+        "activityId": "21",
+        "activityType": {
+          "name": "FrontierPop"
+        },
+        "taskQueue": {
+          "name": "quarry-orchestrator",
+          "kind": "TASK_QUEUE_KIND_NORMAL"
+        },
+        "scheduleToCloseTimeout": "0s",
+        "scheduleToStartTimeout": "0s",
+        "startToCloseTimeout": "300s",
+        "workflowTaskCompletedEventId": "20"
+      }
+    },
+    {
+      "eventId": "22",
+      "eventTime": "2026-01-05T09:00:22Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_STARTED",
+      "activityTaskStartedEventAttributes": {
+        "scheduledEventId": "21",
+        "identity": "replay-fixture",
+        "requestId": "act-22",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "23",
+      "eventTime": "2026-01-05T09:00:23Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_COMPLETED",
+      "activityTaskCompletedEventAttributes": {
+        "result": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg=="
+              },
+              "data": "eyJyZXF1ZXN0X2lkIjoiZnJvbnRpZXItYTg4YTMwZWJhMmM4Y2QzZTc5ODcyNjM3ZmM3ZTM4YWQxNGM1YzYyYmY2MzRiMWJlYTQ3MDc5NDlmYmI5YWM5ZCIsInVybCI6Imh0dHBzOi8vc2l0ZS50ZXN0LyIsInBheWxvYWQiOnsiZGVwdGgiOjB9LCJhdHRlbXB0IjoxfQ=="
+            }
+          ]
+        },
+        "scheduledEventId": "21",
+        "startedEventId": "22",
+        "identity": "replay-fixture"
+      }
+    },
+    {
+      "eventId": "24",
+      "eventTime": "2026-01-05T09:00:24Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
+      "workflowTaskScheduledEventAttributes": {
+        "taskQueue": {
+          "name": "quarry-orchestrator",
+          "kind": "TASK_QUEUE_KIND_NORMAL"
+        },
+        "startToCloseTimeout": "10s",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "25",
+      "eventTime": "2026-01-05T09:00:25Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
+      "workflowTaskStartedEventAttributes": {
+        "scheduledEventId": "24",
+        "identity": "replay-fixture",
+        "requestId": "req-25"
+      }
+    },
+    {
+      "eventId": "26",
+      "eventTime": "2026-01-05T09:00:26Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+      "workflowTaskCompletedEventAttributes": {
+        "scheduledEventId": "24",
+        "startedEventId": "25",
+        "identity": "replay-fixture"
+      }
+    },
+    {
+      "eventId": "27",
+      "eventTime": "2026-01-05T09:00:27Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_SCHEDULED",
+      "activityTaskScheduledEventAttributes": {
+        "activityId": "27",
+        "activityType": {
+          "name": "RunPage"
+        },
+        "taskQueue": {
+          "name": "quarry-orchestrator",
+          "kind": "TASK_QUEUE_KIND_NORMAL"
+        },
+        "scheduleToCloseTimeout": "0s",
+        "scheduleToStartTimeout": "0s",
+        "startToCloseTimeout": "300s",
+        "workflowTaskCompletedEventId": "26"
+      }
+    },
+    {
+      "eventId": "28",
+      "eventTime": "2026-01-05T09:00:28Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_STARTED",
+      "activityTaskStartedEventAttributes": {
+        "scheduledEventId": "27",
+        "identity": "replay-fixture",
+        "requestId": "act-28",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "29",
+      "eventTime": "2026-01-05T09:00:29Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_COMPLETED",
+      "activityTaskCompletedEventAttributes": {
+        "result": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg=="
+              },
+              "data": "eyJydW5faWQiOiIiLCJzdGF0dXMiOjIwMCwiZmluZ2VycHJpbnQiOiJibGFrZTM6aHR0cHM6Ly9zaXRlLnRlc3QvIiwibGlua3MiOlsiaHR0cHM6Ly9zaXRlLnRlc3QvYSIsImh0dHBzOi8vc2l0ZS50ZXN0L3AyIl0sImNyYXdsIjp7InYiOjAsInNjb3BlX2FwcGxpZWQiOnRydWUsIm1vZGUiOiIiLCJsaW5rc19zZWVuIjowLCJsaW5rc19hbGxvd2VkIjowLCJsaW5rc19kZW5pZWQiOjAsImxpbmtzX3VuZXZhbHVhdGVkIjowLCJkZW5pYWxzIjp7ImNvdW50cyI6bnVsbCwic2FtcGxlcyI6bnVsbCwicm9ib3RzIjpudWxsfX19"
+            }
+          ]
+        },
+        "scheduledEventId": "27",
+        "startedEventId": "28",
+        "identity": "replay-fixture"
+      }
+    },
+    {
+      "eventId": "30",
+      "eventTime": "2026-01-05T09:00:30Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
+      "workflowTaskScheduledEventAttributes": {
+        "taskQueue": {
+          "name": "quarry-orchestrator",
+          "kind": "TASK_QUEUE_KIND_NORMAL"
+        },
+        "startToCloseTimeout": "10s",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "31",
+      "eventTime": "2026-01-05T09:00:31Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
+      "workflowTaskStartedEventAttributes": {
+        "scheduledEventId": "30",
+        "identity": "replay-fixture",
+        "requestId": "req-31"
+      }
+    },
+    {
+      "eventId": "32",
+      "eventTime": "2026-01-05T09:00:32Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+      "workflowTaskCompletedEventAttributes": {
+        "scheduledEventId": "30",
+        "startedEventId": "31",
+        "identity": "replay-fixture"
+      }
+    },
+    {
+      "eventId": "33",
+      "eventTime": "2026-01-05T09:00:33Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_SCHEDULED",
+      "activityTaskScheduledEventAttributes": {
+        "activityId": "33",
+        "activityType": {
+          "name": "EmitEvent"
+        },
+        "taskQueue": {
+          "name": "quarry-orchestrator",
+          "kind": "TASK_QUEUE_KIND_NORMAL"
+        },
+        "scheduleToCloseTimeout": "0s",
+        "scheduleToStartTimeout": "0s",
+        "startToCloseTimeout": "300s",
+        "workflowTaskCompletedEventId": "32"
+      }
+    },
+    {
+      "eventId": "34",
+      "eventTime": "2026-01-05T09:00:34Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_STARTED",
+      "activityTaskStartedEventAttributes": {
+        "scheduledEventId": "33",
+        "identity": "replay-fixture",
+        "requestId": "act-34",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "35",
+      "eventTime": "2026-01-05T09:00:35Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_COMPLETED",
+      "activityTaskCompletedEventAttributes": {
+        "scheduledEventId": "33",
+        "startedEventId": "34",
+        "identity": "replay-fixture"
+      }
+    },
+    {
+      "eventId": "36",
+      "eventTime": "2026-01-05T09:00:36Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
+      "workflowTaskScheduledEventAttributes": {
+        "taskQueue": {
+          "name": "quarry-orchestrator",
+          "kind": "TASK_QUEUE_KIND_NORMAL"
+        },
+        "startToCloseTimeout": "10s",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "37",
+      "eventTime": "2026-01-05T09:00:37Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
+      "workflowTaskStartedEventAttributes": {
+        "scheduledEventId": "36",
+        "identity": "replay-fixture",
+        "requestId": "req-37"
+      }
+    },
+    {
+      "eventId": "38",
+      "eventTime": "2026-01-05T09:00:38Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+      "workflowTaskCompletedEventAttributes": {
+        "scheduledEventId": "36",
+        "startedEventId": "37",
+        "identity": "replay-fixture"
+      }
+    },
+    {
+      "eventId": "39",
+      "eventTime": "2026-01-05T09:00:39Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_SCHEDULED",
+      "activityTaskScheduledEventAttributes": {
+        "activityId": "39",
+        "activityType": {
+          "name": "FrontierEnqueueBatch"
+        },
+        "taskQueue": {
+          "name": "quarry-orchestrator",
+          "kind": "TASK_QUEUE_KIND_NORMAL"
+        },
+        "scheduleToCloseTimeout": "0s",
+        "scheduleToStartTimeout": "0s",
+        "startToCloseTimeout": "300s",
+        "workflowTaskCompletedEventId": "38"
+      }
+    },
+    {
+      "eventId": "40",
+      "eventTime": "2026-01-05T09:00:40Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_STARTED",
+      "activityTaskStartedEventAttributes": {
+        "scheduledEventId": "39",
+        "identity": "replay-fixture",
+        "requestId": "act-40",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "41",
+      "eventTime": "2026-01-05T09:00:41Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_COMPLETED",
+      "activityTaskCompletedEventAttributes": {
+        "result": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg=="
+              },
+              "data": "Mg=="
+            }
+          ]
+        },
+        "scheduledEventId": "39",
+        "startedEventId": "40",
+        "identity": "replay-fixture"
+      }
+    },
+    {
+      "eventId": "42",
+      "eventTime": "2026-01-05T09:00:42Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
+      "workflowTaskScheduledEventAttributes": {
+        "taskQueue": {
+          "name": "quarry-orchestrator",
+          "kind": "TASK_QUEUE_KIND_NORMAL"
+        },
+        "startToCloseTimeout": "10s",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "43",
+      "eventTime": "2026-01-05T09:00:43Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
+      "workflowTaskStartedEventAttributes": {
+        "scheduledEventId": "42",
+        "identity": "replay-fixture",
+        "requestId": "req-43"
+      }
+    },
+    {
+      "eventId": "44",
+      "eventTime": "2026-01-05T09:00:44Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+      "workflowTaskCompletedEventAttributes": {
+        "scheduledEventId": "42",
+        "startedEventId": "43",
+        "identity": "replay-fixture"
+      }
+    },
+    {
+      "eventId": "45",
+      "eventTime": "2026-01-05T09:00:45Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_SCHEDULED",
+      "activityTaskScheduledEventAttributes": {
+        "activityId": "45",
+        "activityType": {
+          "name": "FrontierAck"
+        },
+        "taskQueue": {
+          "name": "quarry-orchestrator",
+          "kind": "TASK_QUEUE_KIND_NORMAL"
+        },
+        "scheduleToCloseTimeout": "0s",
+        "scheduleToStartTimeout": "0s",
+        "startToCloseTimeout": "300s",
+        "workflowTaskCompletedEventId": "44"
+      }
+    },
+    {
+      "eventId": "46",
+      "eventTime": "2026-01-05T09:00:46Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_STARTED",
+      "activityTaskStartedEventAttributes": {
+        "scheduledEventId": "45",
+        "identity": "replay-fixture",
+        "requestId": "act-46",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "47",
+      "eventTime": "2026-01-05T09:00:47Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_COMPLETED",
+      "activityTaskCompletedEventAttributes": {
+        "scheduledEventId": "45",
+        "startedEventId": "46",
+        "identity": "replay-fixture"
+      }
+    },
+    {
+      "eventId": "48",
+      "eventTime": "2026-01-05T09:00:48Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
+      "workflowTaskScheduledEventAttributes": {
+        "taskQueue": {
+          "name": "quarry-orchestrator",
+          "kind": "TASK_QUEUE_KIND_NORMAL"
+        },
+        "startToCloseTimeout": "10s",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "49",
+      "eventTime": "2026-01-05T09:00:49Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
+      "workflowTaskStartedEventAttributes": {
+        "scheduledEventId": "48",
+        "identity": "replay-fixture",
+        "requestId": "req-49"
+      }
+    },
+    {
+      "eventId": "50",
+      "eventTime": "2026-01-05T09:00:50Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+      "workflowTaskCompletedEventAttributes": {
+        "scheduledEventId": "48",
+        "startedEventId": "49",
+        "identity": "replay-fixture"
+      }
+    },
+    {
+      "eventId": "51",
+      "eventTime": "2026-01-05T09:00:51Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_SCHEDULED",
+      "activityTaskScheduledEventAttributes": {
+        "activityId": "51",
+        "activityType": {
+          "name": "FrontierPop"
+        },
+        "taskQueue": {
+          "name": "quarry-orchestrator",
+          "kind": "TASK_QUEUE_KIND_NORMAL"
+        },
+        "scheduleToCloseTimeout": "0s",
+        "scheduleToStartTimeout": "0s",
+        "startToCloseTimeout": "300s",
+        "workflowTaskCompletedEventId": "50"
+      }
+    },
+    {
+      "eventId": "52",
+      "eventTime": "2026-01-05T09:00:52Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_STARTED",
+      "activityTaskStartedEventAttributes": {
+        "scheduledEventId": "51",
+        "identity": "replay-fixture",
+        "requestId": "act-52",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "53",
+      "eventTime": "2026-01-05T09:00:53Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_COMPLETED",
+      "activityTaskCompletedEventAttributes": {
+        "result": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg=="
+              },
+              "data": "eyJyZXF1ZXN0X2lkIjoiZnJvbnRpZXItNTIyMzY4MzBlOTM0ZTU3YmQ1ZmVhZDU1NDFkMTVlZGE2ZGU3OGJlYWQ0YTYzZGQzZWNmNTk3ODczZTBjOTRmNiIsInVybCI6Imh0dHBzOi8vc2l0ZS50ZXN0L2EiLCJwYXlsb2FkIjp7ImRlcHRoIjoxfSwiYXR0ZW1wdCI6MX0="
+            }
+          ]
+        },
+        "scheduledEventId": "51",
+        "startedEventId": "52",
+        "identity": "replay-fixture"
+      }
+    },
+    {
+      "eventId": "54",
+      "eventTime": "2026-01-05T09:00:54Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
+      "workflowTaskScheduledEventAttributes": {
+        "taskQueue": {
+          "name": "quarry-orchestrator",
+          "kind": "TASK_QUEUE_KIND_NORMAL"
+        },
+        "startToCloseTimeout": "10s",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "55",
+      "eventTime": "2026-01-05T09:00:55Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
+      "workflowTaskStartedEventAttributes": {
+        "scheduledEventId": "54",
+        "identity": "replay-fixture",
+        "requestId": "req-55"
+      }
+    },
+    {
+      "eventId": "56",
+      "eventTime": "2026-01-05T09:00:56Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+      "workflowTaskCompletedEventAttributes": {
+        "scheduledEventId": "54",
+        "startedEventId": "55",
+        "identity": "replay-fixture"
+      }
+    },
+    {
+      "eventId": "57",
+      "eventTime": "2026-01-05T09:00:57Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_SCHEDULED",
+      "activityTaskScheduledEventAttributes": {
+        "activityId": "57",
+        "activityType": {
+          "name": "RunPage"
+        },
+        "taskQueue": {
+          "name": "quarry-orchestrator",
+          "kind": "TASK_QUEUE_KIND_NORMAL"
+        },
+        "scheduleToCloseTimeout": "0s",
+        "scheduleToStartTimeout": "0s",
+        "startToCloseTimeout": "300s",
+        "workflowTaskCompletedEventId": "56"
+      }
+    },
+    {
+      "eventId": "58",
+      "eventTime": "2026-01-05T09:00:58Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_STARTED",
+      "activityTaskStartedEventAttributes": {
+        "scheduledEventId": "57",
+        "identity": "replay-fixture",
+        "requestId": "act-58",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "59",
+      "eventTime": "2026-01-05T09:00:59Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_COMPLETED",
+      "activityTaskCompletedEventAttributes": {
+        "result": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg=="
+              },
+              "data": "eyJydW5faWQiOiIiLCJzdGF0dXMiOjIwMCwiZmluZ2VycHJpbnQiOiJibGFrZTM6aHR0cHM6Ly9zaXRlLnRlc3QvYSIsImxpbmtzIjpudWxsLCJjcmF3bCI6eyJ2IjowLCJzY29wZV9hcHBsaWVkIjp0cnVlLCJtb2RlIjoiIiwibGlua3Nfc2VlbiI6MCwibGlua3NfYWxsb3dlZCI6MCwibGlua3NfZGVuaWVkIjowLCJsaW5rc191bmV2YWx1YXRlZCI6MCwiZGVuaWFscyI6eyJjb3VudHMiOm51bGwsInNhbXBsZXMiOm51bGwsInJvYm90cyI6bnVsbH19fQ=="
+            }
+          ]
+        },
+        "scheduledEventId": "57",
+        "startedEventId": "58",
+        "identity": "replay-fixture"
+      }
+    },
+    {
+      "eventId": "60",
+      "eventTime": "2026-01-05T09:01:00Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
+      "workflowTaskScheduledEventAttributes": {
+        "taskQueue": {
+          "name": "quarry-orchestrator",
+          "kind": "TASK_QUEUE_KIND_NORMAL"
+        },
+        "startToCloseTimeout": "10s",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "61",
+      "eventTime": "2026-01-05T09:01:01Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
+      "workflowTaskStartedEventAttributes": {
+        "scheduledEventId": "60",
+        "identity": "replay-fixture",
+        "requestId": "req-61"
+      }
+    },
+    {
+      "eventId": "62",
+      "eventTime": "2026-01-05T09:01:02Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+      "workflowTaskCompletedEventAttributes": {
+        "scheduledEventId": "60",
+        "startedEventId": "61",
+        "identity": "replay-fixture"
+      }
+    },
+    {
+      "eventId": "63",
+      "eventTime": "2026-01-05T09:01:03Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_SCHEDULED",
+      "activityTaskScheduledEventAttributes": {
+        "activityId": "63",
+        "activityType": {
+          "name": "EmitEvent"
+        },
+        "taskQueue": {
+          "name": "quarry-orchestrator",
+          "kind": "TASK_QUEUE_KIND_NORMAL"
+        },
+        "scheduleToCloseTimeout": "0s",
+        "scheduleToStartTimeout": "0s",
+        "startToCloseTimeout": "300s",
+        "workflowTaskCompletedEventId": "62"
+      }
+    },
+    {
+      "eventId": "64",
+      "eventTime": "2026-01-05T09:01:04Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_STARTED",
+      "activityTaskStartedEventAttributes": {
+        "scheduledEventId": "63",
+        "identity": "replay-fixture",
+        "requestId": "act-64",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "65",
+      "eventTime": "2026-01-05T09:01:05Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_COMPLETED",
+      "activityTaskCompletedEventAttributes": {
+        "scheduledEventId": "63",
+        "startedEventId": "64",
+        "identity": "replay-fixture"
+      }
+    },
+    {
+      "eventId": "66",
+      "eventTime": "2026-01-05T09:01:06Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
+      "workflowTaskScheduledEventAttributes": {
+        "taskQueue": {
+          "name": "quarry-orchestrator",
+          "kind": "TASK_QUEUE_KIND_NORMAL"
+        },
+        "startToCloseTimeout": "10s",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "67",
+      "eventTime": "2026-01-05T09:01:07Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
+      "workflowTaskStartedEventAttributes": {
+        "scheduledEventId": "66",
+        "identity": "replay-fixture",
+        "requestId": "req-67"
+      }
+    },
+    {
+      "eventId": "68",
+      "eventTime": "2026-01-05T09:01:08Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+      "workflowTaskCompletedEventAttributes": {
+        "scheduledEventId": "66",
+        "startedEventId": "67",
+        "identity": "replay-fixture"
+      }
+    },
+    {
+      "eventId": "69",
+      "eventTime": "2026-01-05T09:01:09Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_SCHEDULED",
+      "activityTaskScheduledEventAttributes": {
+        "activityId": "69",
+        "activityType": {
+          "name": "FrontierAck"
+        },
+        "taskQueue": {
+          "name": "quarry-orchestrator",
+          "kind": "TASK_QUEUE_KIND_NORMAL"
+        },
+        "scheduleToCloseTimeout": "0s",
+        "scheduleToStartTimeout": "0s",
+        "startToCloseTimeout": "300s",
+        "workflowTaskCompletedEventId": "68"
+      }
+    },
+    {
+      "eventId": "70",
+      "eventTime": "2026-01-05T09:01:10Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_STARTED",
+      "activityTaskStartedEventAttributes": {
+        "scheduledEventId": "69",
+        "identity": "replay-fixture",
+        "requestId": "act-70",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "71",
+      "eventTime": "2026-01-05T09:01:11Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_COMPLETED",
+      "activityTaskCompletedEventAttributes": {
+        "scheduledEventId": "69",
+        "startedEventId": "70",
+        "identity": "replay-fixture"
+      }
+    },
+    {
+      "eventId": "72",
+      "eventTime": "2026-01-05T09:01:12Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
+      "workflowTaskScheduledEventAttributes": {
+        "taskQueue": {
+          "name": "quarry-orchestrator",
+          "kind": "TASK_QUEUE_KIND_NORMAL"
+        },
+        "startToCloseTimeout": "10s",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "73",
+      "eventTime": "2026-01-05T09:01:13Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
+      "workflowTaskStartedEventAttributes": {
+        "scheduledEventId": "72",
+        "identity": "replay-fixture",
+        "requestId": "req-73"
+      }
+    },
+    {
+      "eventId": "74",
+      "eventTime": "2026-01-05T09:01:14Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+      "workflowTaskCompletedEventAttributes": {
+        "scheduledEventId": "72",
+        "startedEventId": "73",
+        "identity": "replay-fixture"
+      }
+    },
+    {
+      "eventId": "75",
+      "eventTime": "2026-01-05T09:01:15Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_SCHEDULED",
+      "activityTaskScheduledEventAttributes": {
+        "activityId": "75",
+        "activityType": {
+          "name": "FrontierPop"
+        },
+        "taskQueue": {
+          "name": "quarry-orchestrator",
+          "kind": "TASK_QUEUE_KIND_NORMAL"
+        },
+        "scheduleToCloseTimeout": "0s",
+        "scheduleToStartTimeout": "0s",
+        "startToCloseTimeout": "300s",
+        "workflowTaskCompletedEventId": "74"
+      }
+    },
+    {
+      "eventId": "76",
+      "eventTime": "2026-01-05T09:01:16Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_STARTED",
+      "activityTaskStartedEventAttributes": {
+        "scheduledEventId": "75",
+        "identity": "replay-fixture",
+        "requestId": "act-76",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "77",
+      "eventTime": "2026-01-05T09:01:17Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_COMPLETED",
+      "activityTaskCompletedEventAttributes": {
+        "result": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg=="
+              },
+              "data": "eyJyZXF1ZXN0X2lkIjoiZnJvbnRpZXItOWY4NTczNjc2OTEwMmMyZmIzMzVkODJhNTNlMWQxM2M0OWNhMzRkNWRhYTdhYzAxZGRjMmJhNWFlZjkwODhiNCIsInVybCI6Imh0dHBzOi8vc2l0ZS50ZXN0L3AyIiwicGF5bG9hZCI6eyJkZXB0aCI6MX0sImF0dGVtcHQiOjF9"
+            }
+          ]
+        },
+        "scheduledEventId": "75",
+        "startedEventId": "76",
+        "identity": "replay-fixture"
+      }
+    },
+    {
+      "eventId": "78",
+      "eventTime": "2026-01-05T09:01:18Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
+      "workflowTaskScheduledEventAttributes": {
+        "taskQueue": {
+          "name": "quarry-orchestrator",
+          "kind": "TASK_QUEUE_KIND_NORMAL"
+        },
+        "startToCloseTimeout": "10s",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "79",
+      "eventTime": "2026-01-05T09:01:19Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
+      "workflowTaskStartedEventAttributes": {
+        "scheduledEventId": "78",
+        "identity": "replay-fixture",
+        "requestId": "req-79"
+      }
+    },
+    {
+      "eventId": "80",
+      "eventTime": "2026-01-05T09:01:20Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+      "workflowTaskCompletedEventAttributes": {
+        "scheduledEventId": "78",
+        "startedEventId": "79",
+        "identity": "replay-fixture"
+      }
+    },
+    {
+      "eventId": "81",
+      "eventTime": "2026-01-05T09:01:21Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_SCHEDULED",
+      "activityTaskScheduledEventAttributes": {
+        "activityId": "81",
+        "activityType": {
+          "name": "RunPage"
+        },
+        "taskQueue": {
+          "name": "quarry-orchestrator",
+          "kind": "TASK_QUEUE_KIND_NORMAL"
+        },
+        "scheduleToCloseTimeout": "0s",
+        "scheduleToStartTimeout": "0s",
+        "startToCloseTimeout": "300s",
+        "workflowTaskCompletedEventId": "80"
+      }
+    },
+    {
+      "eventId": "82",
+      "eventTime": "2026-01-05T09:01:22Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_STARTED",
+      "activityTaskStartedEventAttributes": {
+        "scheduledEventId": "81",
+        "identity": "replay-fixture",
+        "requestId": "act-82",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "83",
+      "eventTime": "2026-01-05T09:01:23Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_COMPLETED",
+      "activityTaskCompletedEventAttributes": {
+        "result": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg=="
+              },
+              "data": "eyJydW5faWQiOiIiLCJzdGF0dXMiOjIwMCwiZmluZ2VycHJpbnQiOiJibGFrZTM6aHR0cHM6Ly9zaXRlLnRlc3QvcDIiLCJsaW5rcyI6bnVsbCwiY3Jhd2wiOnsidiI6MCwic2NvcGVfYXBwbGllZCI6dHJ1ZSwibW9kZSI6IiIsImxpbmtzX3NlZW4iOjAsImxpbmtzX2FsbG93ZWQiOjAsImxpbmtzX2RlbmllZCI6MCwibGlua3NfdW5ldmFsdWF0ZWQiOjAsImRlbmlhbHMiOnsiY291bnRzIjpudWxsLCJzYW1wbGVzIjpudWxsLCJyb2JvdHMiOm51bGx9fX0="
+            }
+          ]
+        },
+        "scheduledEventId": "81",
+        "startedEventId": "82",
+        "identity": "replay-fixture"
+      }
+    },
+    {
+      "eventId": "84",
+      "eventTime": "2026-01-05T09:01:24Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
+      "workflowTaskScheduledEventAttributes": {
+        "taskQueue": {
+          "name": "quarry-orchestrator",
+          "kind": "TASK_QUEUE_KIND_NORMAL"
+        },
+        "startToCloseTimeout": "10s",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "85",
+      "eventTime": "2026-01-05T09:01:25Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
+      "workflowTaskStartedEventAttributes": {
+        "scheduledEventId": "84",
+        "identity": "replay-fixture",
+        "requestId": "req-85"
+      }
+    },
+    {
+      "eventId": "86",
+      "eventTime": "2026-01-05T09:01:26Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+      "workflowTaskCompletedEventAttributes": {
+        "scheduledEventId": "84",
+        "startedEventId": "85",
+        "identity": "replay-fixture"
+      }
+    },
+    {
+      "eventId": "87",
+      "eventTime": "2026-01-05T09:01:27Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_SCHEDULED",
+      "activityTaskScheduledEventAttributes": {
+        "activityId": "87",
+        "activityType": {
+          "name": "EmitEvent"
+        },
+        "taskQueue": {
+          "name": "quarry-orchestrator",
+          "kind": "TASK_QUEUE_KIND_NORMAL"
+        },
+        "scheduleToCloseTimeout": "0s",
+        "scheduleToStartTimeout": "0s",
+        "startToCloseTimeout": "300s",
+        "workflowTaskCompletedEventId": "86"
+      }
+    },
+    {
+      "eventId": "88",
+      "eventTime": "2026-01-05T09:01:28Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_STARTED",
+      "activityTaskStartedEventAttributes": {
+        "scheduledEventId": "87",
+        "identity": "replay-fixture",
+        "requestId": "act-88",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "89",
+      "eventTime": "2026-01-05T09:01:29Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_COMPLETED",
+      "activityTaskCompletedEventAttributes": {
+        "scheduledEventId": "87",
+        "startedEventId": "88",
+        "identity": "replay-fixture"
+      }
+    },
+    {
+      "eventId": "90",
+      "eventTime": "2026-01-05T09:01:30Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
+      "workflowTaskScheduledEventAttributes": {
+        "taskQueue": {
+          "name": "quarry-orchestrator",
+          "kind": "TASK_QUEUE_KIND_NORMAL"
+        },
+        "startToCloseTimeout": "10s",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "91",
+      "eventTime": "2026-01-05T09:01:31Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
+      "workflowTaskStartedEventAttributes": {
+        "scheduledEventId": "90",
+        "identity": "replay-fixture",
+        "requestId": "req-91"
+      }
+    },
+    {
+      "eventId": "92",
+      "eventTime": "2026-01-05T09:01:32Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+      "workflowTaskCompletedEventAttributes": {
+        "scheduledEventId": "90",
+        "startedEventId": "91",
+        "identity": "replay-fixture"
+      }
+    },
+    {
+      "eventId": "93",
+      "eventTime": "2026-01-05T09:01:33Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_SCHEDULED",
+      "activityTaskScheduledEventAttributes": {
+        "activityId": "93",
+        "activityType": {
+          "name": "FrontierAck"
+        },
+        "taskQueue": {
+          "name": "quarry-orchestrator",
+          "kind": "TASK_QUEUE_KIND_NORMAL"
+        },
+        "scheduleToCloseTimeout": "0s",
+        "scheduleToStartTimeout": "0s",
+        "startToCloseTimeout": "300s",
+        "workflowTaskCompletedEventId": "92"
+      }
+    },
+    {
+      "eventId": "94",
+      "eventTime": "2026-01-05T09:01:34Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_STARTED",
+      "activityTaskStartedEventAttributes": {
+        "scheduledEventId": "93",
+        "identity": "replay-fixture",
+        "requestId": "act-94",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "95",
+      "eventTime": "2026-01-05T09:01:35Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_COMPLETED",
+      "activityTaskCompletedEventAttributes": {
+        "scheduledEventId": "93",
+        "startedEventId": "94",
+        "identity": "replay-fixture"
+      }
+    },
+    {
+      "eventId": "96",
+      "eventTime": "2026-01-05T09:01:36Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
+      "workflowTaskScheduledEventAttributes": {
+        "taskQueue": {
+          "name": "quarry-orchestrator",
+          "kind": "TASK_QUEUE_KIND_NORMAL"
+        },
+        "startToCloseTimeout": "10s",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "97",
+      "eventTime": "2026-01-05T09:01:37Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
+      "workflowTaskStartedEventAttributes": {
+        "scheduledEventId": "96",
+        "identity": "replay-fixture",
+        "requestId": "req-97"
+      }
+    },
+    {
+      "eventId": "98",
+      "eventTime": "2026-01-05T09:01:38Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+      "workflowTaskCompletedEventAttributes": {
+        "scheduledEventId": "96",
+        "startedEventId": "97",
+        "identity": "replay-fixture"
+      }
+    },
+    {
+      "eventId": "99",
+      "eventTime": "2026-01-05T09:01:39Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_SCHEDULED",
+      "activityTaskScheduledEventAttributes": {
+        "activityId": "99",
+        "activityType": {
+          "name": "FrontierPop"
+        },
+        "taskQueue": {
+          "name": "quarry-orchestrator",
+          "kind": "TASK_QUEUE_KIND_NORMAL"
+        },
+        "scheduleToCloseTimeout": "0s",
+        "scheduleToStartTimeout": "0s",
+        "startToCloseTimeout": "300s",
+        "workflowTaskCompletedEventId": "98"
+      }
+    },
+    {
+      "eventId": "100",
+      "eventTime": "2026-01-05T09:01:40Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_STARTED",
+      "activityTaskStartedEventAttributes": {
+        "scheduledEventId": "99",
+        "identity": "replay-fixture",
+        "requestId": "act-100",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "101",
+      "eventTime": "2026-01-05T09:01:41Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_COMPLETED",
+      "activityTaskCompletedEventAttributes": {
+        "scheduledEventId": "99",
+        "startedEventId": "100",
+        "identity": "replay-fixture"
+      }
+    },
+    {
+      "eventId": "102",
+      "eventTime": "2026-01-05T09:01:42Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
+      "workflowTaskScheduledEventAttributes": {
+        "taskQueue": {
+          "name": "quarry-orchestrator",
+          "kind": "TASK_QUEUE_KIND_NORMAL"
+        },
+        "startToCloseTimeout": "10s",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "103",
+      "eventTime": "2026-01-05T09:01:43Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
+      "workflowTaskStartedEventAttributes": {
+        "scheduledEventId": "102",
+        "identity": "replay-fixture",
+        "requestId": "req-103"
+      }
+    },
+    {
+      "eventId": "104",
+      "eventTime": "2026-01-05T09:01:44Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+      "workflowTaskCompletedEventAttributes": {
+        "scheduledEventId": "102",
+        "startedEventId": "103",
+        "identity": "replay-fixture"
+      }
+    },
+    {
+      "eventId": "105",
+      "eventTime": "2026-01-05T09:01:45Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_SCHEDULED",
+      "activityTaskScheduledEventAttributes": {
+        "activityId": "105",
+        "activityType": {
+          "name": "EmitEvent"
+        },
+        "taskQueue": {
+          "name": "quarry-orchestrator",
+          "kind": "TASK_QUEUE_KIND_NORMAL"
+        },
+        "scheduleToCloseTimeout": "0s",
+        "scheduleToStartTimeout": "0s",
+        "startToCloseTimeout": "300s",
+        "workflowTaskCompletedEventId": "104"
+      }
+    },
+    {
+      "eventId": "106",
+      "eventTime": "2026-01-05T09:01:46Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_STARTED",
+      "activityTaskStartedEventAttributes": {
+        "scheduledEventId": "105",
+        "identity": "replay-fixture",
+        "requestId": "act-106",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "107",
+      "eventTime": "2026-01-05T09:01:47Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_COMPLETED",
+      "activityTaskCompletedEventAttributes": {
+        "scheduledEventId": "105",
+        "startedEventId": "106",
+        "identity": "replay-fixture"
+      }
+    },
+    {
+      "eventId": "108",
+      "eventTime": "2026-01-05T09:01:48Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
+      "workflowTaskScheduledEventAttributes": {
+        "taskQueue": {
+          "name": "quarry-orchestrator",
+          "kind": "TASK_QUEUE_KIND_NORMAL"
+        },
+        "startToCloseTimeout": "10s",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "109",
+      "eventTime": "2026-01-05T09:01:49Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
+      "workflowTaskStartedEventAttributes": {
+        "scheduledEventId": "108",
+        "identity": "replay-fixture",
+        "requestId": "req-109"
+      }
+    },
+    {
+      "eventId": "110",
+      "eventTime": "2026-01-05T09:01:50Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+      "workflowTaskCompletedEventAttributes": {
+        "scheduledEventId": "108",
+        "startedEventId": "109",
+        "identity": "replay-fixture"
+      }
+    },
+    {
+      "eventId": "111",
+      "eventTime": "2026-01-05T09:01:51Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_EXECUTION_COMPLETED",
+      "workflowExecutionCompletedEventAttributes": {
+        "workflowTaskCompletedEventId": "110"
+      }
+    }
+  ]
+}

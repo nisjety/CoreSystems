@@ -23,6 +23,7 @@ import {
 import { createSelectedAgentToolSpecs } from '@/shared/actions/agent-tools'
 import { parseChatHistoryAction } from '@/shared/actions/chat-history'
 import { isSupportChatThread } from '@/shared/chat/support-chat-thread'
+import { isLocale, localeIntl, localeStorageKey, type Locale } from '@/shared/i18n/locales'
 import { isAgUiEventName, toVerevonUiEvent, type VerevonUiEvent } from '@/shared/chat/verevon-ui-events'
 import {
   applyServerRetention,
@@ -64,6 +65,9 @@ export type ChatAttachment = {
   mime_type?: string
   url?: string
 }
+
+/** The four agent modes a person can choose for a turn (WS25-S6). The ids match `api/contracts/agent-modes.json`. */
+export type AgentModeId = 'lockdown' | 'read_only' | 'ask_first' | 'auto'
 
 export type ChatInvokeRequest = {
   sourceScope?: import('@/shared/actions/chat-source-scope').ChatSourceScope
@@ -169,6 +173,12 @@ export type ChatInvokeRequest = {
    */
   planMode?: boolean
   /**
+   * The agent mode this turn runs under, when the person chose one (WS25-S6). Sent as `agent_mode` only
+   * when set, so an unchanged turn is byte-identical; the server refuses an id it does not know and can
+   * only tighten the posture the platform already sets.
+   */
+  agentMode?: AgentModeId
+  /**
    * This turn runs the plan the person just approved (WS14 S2a "Run the
    * approved plan"). Only the chat controller sets it, and only after it has
    * checked that a grant for this thread is armed and usable. It carries NO rung:
@@ -180,6 +190,13 @@ export type ChatInvokeRequest = {
    * execute. Regenerate, edit-resubmit, continue-generation and retry never set it.
    */
   executeGranted?: boolean
+  /**
+   * The plan this execute turn runs (WS14 S2, approve then execute): sent only with
+   * `executeGranted`, and only for the turn a plan approval answered `execute_now` for. The
+   * gateway binds the thread's grant to the run only when that grant names this plan, so a
+   * stale or replaced approval refuses the turn (`plan_grant_unavailable`) instead of running it.
+   */
+  approvedPlanId?: string
   /**
    * The id this send is named with (the receipt). Sent as `idempotency_key`, which the gateway
    * already reads as the retry identity of a send; with send receipts on it also stores the
@@ -351,6 +368,17 @@ export type ChatContextChangeEvent = {
   state?: string
   requestId?: string
 }
+/**
+ * The workspace state of a tool call's sandboxed files (`sandbox_state`, `steps` family, WS22-S6): where
+ * they were kept and whether they were. Closed tokens and an optional cause only; the gateway sends no path,
+ * file name or content. An unknown `state` or `cause` is passed through as-is, as the lifecycle notices are.
+ */
+export type ChatSandboxStateEvent = {
+  scope: string
+  state: string
+  cause?: string
+  requestId?: string
+}
 export type ChatErrorEvent = {
   code: string
   message: string
@@ -408,6 +436,8 @@ export type ChatCitationEvent = {
   sourceGroupLabel?: string
   start?: number
   end?: number
+  /** The server's `[n]` for this source (see `Citation.number`); a chip binds by it, not by position. */
+  number?: number
   /** See `Citation.origin` (chat-wave2 scope spec §2.2). */
   origin?: string
 }
@@ -431,6 +461,9 @@ export type ChatAttachmentEvent = {
   type?: string
   url?: string
   size?: number
+  /** The gateway's structural check of an Office or PDF file, as sent; the normalizer validates it. */
+  check?: unknown
+  preview?: unknown
 }
 /**
  * How a turn's cost was reached. `subscription` means a user-owned model
@@ -506,6 +539,8 @@ export type ChatUsageProgressEvent = {
   fraction?: number
   /** The ceiling warning this frame is the first to carry. */
   warning?: 'run_ceiling_80' | 'run_ceiling_reached'
+  /** How the budget moved this call's route (WS27-S7), stated only on a call it moved. */
+  routing?: 'tier_shifted' | 'cheap_fallback'
 }
 
 function costBasisValue(value: unknown): ChatCostBasis | undefined {
@@ -536,6 +571,10 @@ function runCeilingWarningValue(value: unknown): 'run_ceiling_80' | 'run_ceiling
   return value === 'run_ceiling_80' || value === 'run_ceiling_reached' ? value : undefined
 }
 
+function routingValue(value: unknown): 'tier_shifted' | 'cheap_fallback' | undefined {
+  return value === 'tier_shifted' || value === 'cheap_fallback' ? value : undefined
+}
+
 /** A `usage_progress` payload, read by its closed keys and nothing else. */
 function usageProgressFrame(payload: Record<string, unknown>): ChatUsageProgressEvent {
   return {
@@ -552,6 +591,7 @@ function usageProgressFrame(payload: Record<string, unknown>): ChatUsageProgress
     ceilingTokens: num(payload.ceiling_tokens),
     fraction: num(payload.fraction),
     warning: runCeilingWarningValue(payload.warning),
+    routing: routingValue(payload.routing),
   }
 }
 
@@ -761,15 +801,26 @@ export type ChatResultReceiptEvent = {
   requestId?: string
 }
 /**
+ * What a Space's knowledge did for one turn (`knowledge` on `source_scope_applied`, WS18-S3): a mode and,
+ * when a search ran this turn, its source count. A mode and a count, never content.
+ */
+export type ChatKnowledgeReceipt = {
+  mode: 'retrieval' | 'not_entitled' | 'not_searched'
+  sources?: number
+}
+/**
  * Per-turn retrieval-source filter transparency frame (chat-wave2 scope
  * spec §2.2/§2.3's "shown in the receipt" requirement, `source_scope_applied`
- * family `citations`). Emitted at most once per turn, only when the turn's
- * effective `RetrievalScope` was not `auto`. Consumed by `ChatMessages.tsx`'s
- * scope badge and `ChatPanels.tsx`'s assembled-context inspector line.
+ * family `citations`). Emitted at most once per turn, when the turn's
+ * effective `RetrievalScope` was not `auto`, or when a Space scoped the turn
+ * and so carries a `knowledge` receipt. An `auto` scope arrives only with that
+ * receipt. Consumed by `ChatMessages.tsx`'s scope badge and `ChatPanels.tsx`'s
+ * assembled-context inspector line.
  */
 export type ChatSourceScopeAppliedEvent = {
-  scope: 'knowledge_only' | 'web_only'
+  scope: 'knowledge_only' | 'web_only' | 'auto'
   excludedTools: string[]
+  knowledge?: ChatKnowledgeReceipt
 }
 /**
  * AI-generated thread title, emitted once by model-gateway after a thread's
@@ -798,6 +849,41 @@ export type ChatPlanProposedEvent = {
   summary: string
   steps: ChatPlanStep[]
   requestId?: string
+}
+
+/** One choice of a question's single- or multi-choice item (WS14 S4). */
+export type ChatQuestionOption = { id: string; label: string; description?: string }
+
+/**
+ * One thing a run's `ask_user` call asks its owner (WS14 S4). `options` is empty for a free-text item;
+ * `allowOther` says a single- or multi-choice item also takes the person's own words.
+ */
+export type ChatQuestionItem = {
+  id: string
+  kind: 'single' | 'multi' | 'text'
+  prompt: string
+  options: ChatQuestionOption[]
+  allowOther: boolean
+}
+
+/**
+ * The question a run put to its owner, sent once that run completed with the question still waiting
+ * (WS14 S4). The card records its answer through the question's answer route, and the answer is then the
+ * person's next turn.
+ */
+export type ChatUserQuestionEvent = {
+  questionId: string
+  delivery: string
+  /** RFC 3339. Past it the question reads as expired and cannot be answered. */
+  expiresAt?: string
+  items: ChatQuestionItem[]
+  requestId?: string
+}
+
+/** The owner's answer to a question, one entry per item, or a skip (WS14 S4). */
+export type ChatQuestionAnswer = {
+  answers: { itemId: string; optionIds: string[]; text: string }[]
+  skip?: boolean
 }
 
 /**
@@ -860,6 +946,8 @@ export type ChatStreamHandlers = {
   onFollowUps?: (event: ChatFollowUpsEvent) => void
   /** See `ChatPlanProposedEvent`. */
   onPlanProposed?: (event: ChatPlanProposedEvent) => void
+  /** See `ChatUserQuestionEvent`. Ungated: the card is the only way to answer the question. */
+  onUserQuestion?: (event: ChatUserQuestionEvent) => void
   onStopped?: (event: ChatStoppedEvent) => void
   onMemoryRecall?: (event: ChatMemoryRecallEvent) => void
   onVerification?: (event: ChatVerificationEvent) => void
@@ -886,6 +974,8 @@ export type ChatStreamHandlers = {
   onCompaction?: (event: ChatCompactionEvent) => void
   /** The context the model was given changed (`context_change`). Ungated. See `ChatContextChangeEvent`. */
   onContextChange?: (event: ChatContextChangeEvent) => void
+  /** The workspace state of a tool call's files (`sandbox_state`, `steps` family). See `ChatSandboxStateEvent`. */
+  onSandboxState?: (event: ChatSandboxStateEvent) => void
   /**
    * The run was PARKED (WS03 S8-A): it stopped on a typed, recoverable failure and stays open, so
    * it can be resumed later. Display only: read with `runParkedFrameOf`, and a frame whose reason
@@ -964,6 +1054,23 @@ export type ChatMessageVersion = {
   siblings: string[]
 }
 
+/**
+ * The attention state of a thread, as Session Core derives it (build plan WS16 S1). A closed set:
+ * a value outside it is dropped rather than guessed at.
+ */
+const CHAT_ATTENTION_STATES = [
+  'needs_approval',
+  'needs_input',
+  'plan_ready',
+  'working',
+  'completed',
+  'failed',
+  'archived',
+  'idle',
+] as const
+
+export type ChatAttentionState = (typeof CHAT_ATTENTION_STATES)[number]
+
 export type ChatThreadSession = {
   preview: string
   threadId: string
@@ -998,6 +1105,8 @@ export type ChatThreadSession = {
   origin?: string
   /** Set when the owner archived the thread. Absent for an active thread. */
   archivedAt?: string
+  /** The thread this one was forked from (build plan WS17 S6). Absent for a thread that was not forked. */
+  forkedFromThreadId?: string
   /** Whether the owner starred the thread. Server-owned, like `pinned`. */
   starred?: boolean
   /**
@@ -1006,6 +1115,15 @@ export type ChatThreadSession = {
    * with the owner's last read, and the client never derives its own.
    */
   unread?: boolean
+  /**
+   * The derived attention state (WS16 S1). Absent while the server's attention switch is off, and
+   * for a state this build does not name.
+   */
+  attentionState?: ChatAttentionState
+  /** When the attention state began (ISO 8601). Absent when the state has no start. */
+  attentionSince?: string
+  /** Whether the thread holds an unread reply. Present only with an attention state. */
+  attentionUnseen?: boolean
 }
 
 export type ChatThreadTranscriptSnapshot = {
@@ -1126,6 +1244,32 @@ export function isEffortLevel(value: unknown): value is EffortLevel {
   return typeof value === 'string' && (EFFORT_LEVELS as readonly string[]).includes(value)
 }
 
+/**
+ * A chat model's list price per one million tokens, as the catalogue states it
+ * (`price` on `/v1/models`). It is shown only when every part is present.
+ */
+export type ModelPrice = {
+  inputPerMillion: number
+  outputPerMillion: number
+  currency: string
+}
+
+/** The vendor lifecycle stage a catalogue record names (`lifecycle` on `/v1/models`). */
+export type ModelLifecycle = 'ga' | 'preview' | 'deprecated'
+
+/**
+ * The data-use statements a catalogue record makes for a model (`data_use` on `/v1/models`). A field is
+ * set only when a source states it: `undefined` is "not stated", never "no".
+ */
+export type ModelDataUse = {
+  /** Whether the provider states it trains on the inputs it receives. */
+  trainsOnInputs?: boolean
+  /** Days the provider states it keeps the inputs; `0` when it states none are kept. */
+  retentionDays?: number
+  /** `true` only when the deployment carries a verified zero-retention attestation in force. */
+  zdrAttested?: boolean
+}
+
 export type ModelInfo = {
   id: string
   name: string
@@ -1152,6 +1296,22 @@ export type ModelInfo = {
    * or the gateway's ladder is off.
    */
   effortLevels?: EffortLevel[]
+  /**
+   * Context window in tokens (`context_window_tokens` on `/v1/models`). `undefined` when the
+   * catalogue has no sourced record for the model, so no window is claimed.
+   */
+  contextWindowTokens?: number
+  /** Largest synchronous output in tokens this model is served at (`max_output_tokens`). */
+  maxOutputTokens?: number
+  /** Vendor lifecycle stage (`lifecycle`). `undefined` when the catalogue names none. */
+  lifecycle?: ModelLifecycle
+  /**
+   * The catalogue's list price for a chat model (`price` on `/v1/models`). Present only when
+   * the gateway's list-price switch is on and the catalogue names a price.
+   */
+  price?: ModelPrice
+  /** What the provider states about the request data sent to this model (`data_use`). Absent when none is stated. */
+  dataUse?: ModelDataUse
 }
 
 // Opt-in rich SSE families the model-gateway understands (chat-parity §2).
@@ -1171,6 +1331,36 @@ function str(value: unknown): string | undefined {
   return typeof value === 'string' ? value : undefined
 }
 
+/**
+ * The items of a `user_question` frame, read defensively: an item this build cannot read is dropped, and a
+ * choice item with fewer than two readable options is dropped with it (it is not a choice).
+ */
+function normalizeQuestionItems(value: unknown): ChatQuestionItem[] {
+  if (!Array.isArray(value)) return []
+  return value
+    .map((item): ChatQuestionItem | null => {
+      const raw = objectValue(item)
+      if (!raw) return null
+      const id = str(raw.id)
+      const prompt = str(raw.prompt)
+      const kind = raw.kind === 'single' || raw.kind === 'multi' || raw.kind === 'text' ? raw.kind : undefined
+      if (!id || !prompt || !kind) return null
+      const options = (Array.isArray(raw.options) ? raw.options : [])
+        .map((option): ChatQuestionOption | null => {
+          const entry = objectValue(option)
+          const optionId = str(entry?.id)
+          const label = str(entry?.label)
+          if (!optionId || !label) return null
+          const description = str(entry?.description)
+          return description ? { id: optionId, label, description } : { id: optionId, label }
+        })
+        .filter((option): option is ChatQuestionOption => option !== null)
+      if (kind !== 'text' && options.length < 2) return null
+      return { id, kind, prompt, options, allowOther: raw.allow_other === true }
+    })
+    .filter((item): item is ChatQuestionItem => item !== null)
+}
+
 function strOrJson(value: unknown): string | undefined {
   if (typeof value === 'string') return value
   if (value == null) return undefined
@@ -1187,6 +1377,31 @@ function num(value: unknown): number | undefined {
 
 function objectValue(value: unknown): Record<string, unknown> | undefined {
   return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : undefined
+}
+
+/**
+ * A `source_scope_applied` frame as the SPA reads it. An `auto` scope arrives only with a knowledge receipt
+ * (WS18-S3), so an `auto` frame without one is not a filter and is dropped. A receipt whose mode the SPA does
+ * not name is dropped on its own, and the frame's scope still applies.
+ */
+function sourceScopeAppliedEvent(payload: Record<string, unknown>): ChatSourceScopeAppliedEvent | undefined {
+  const scope = str(payload.scope)
+  const excludedTools = Array.isArray(payload.excluded_tools)
+    ? payload.excluded_tools.filter((name): name is string => typeof name === 'string')
+    : []
+  const knowledge = knowledgeReceiptValue(payload.knowledge)
+  if (scope === 'knowledge_only' || scope === 'web_only') {
+    return knowledge ? { scope, excludedTools, knowledge } : { scope, excludedTools }
+  }
+  return scope === 'auto' && knowledge ? { scope, excludedTools, knowledge } : undefined
+}
+
+function knowledgeReceiptValue(value: unknown): ChatKnowledgeReceipt | undefined {
+  const receipt = objectValue(value)
+  const mode = str(receipt?.mode)
+  if (mode !== 'retrieval' && mode !== 'not_entitled' && mode !== 'not_searched') return undefined
+  const sources = num(receipt?.sources)
+  return sources === undefined ? { mode } : { mode, sources }
 }
 
 /**
@@ -1233,6 +1448,7 @@ function emitCitation(value: unknown, handlers: ChatStreamHandlers): void {
     sourceGroupLabel: str(payload.source_group_label) ?? str(payload.sourceGroupLabel),
     start: num(payload.start) ?? num(payload.start_offset) ?? num(payload.startOffset),
     end: num(payload.end) ?? num(payload.end_offset) ?? num(payload.endOffset),
+    number: num(payload.number),
     origin: str(payload.origin),
   })
 }
@@ -1314,6 +1530,32 @@ export class AttachmentsNotSentError extends Error {
   constructor() {
     super('attachments_not_sent')
     this.name = 'AttachmentsNotSentError'
+  }
+}
+
+/** The browser's IANA zone name, when the runtime reports one (EP-8-S1). */
+export function clientTimeZone(): string | undefined {
+  return Intl.DateTimeFormat().resolvedOptions().timeZone || undefined
+}
+
+/**
+ * The UTC offset in minutes, east positive (EP-8-S1). `getTimezoneOffset` reports minutes behind UTC, so
+ * it is negated; `|| 0` folds negative zero, which UTC produces, into zero.
+ */
+export function clientUtcOffsetMinutes(now: Pick<Date, 'getTimezoneOffset'>): number {
+  return -now.getTimezoneOffset() || 0
+}
+
+/**
+ * The app language the person chose, for a turn that names none (EP-8-S1): the stored setting the app shows.
+ * An unreadable store, or a value outside the app's two languages, gives none rather than a guess.
+ */
+function storedUiLocale(): Locale | undefined {
+  try {
+    const stored = window.localStorage.getItem(localeStorageKey)
+    return isLocale(stored) ? stored : undefined
+  } catch {
+    return undefined
   }
 }
 
@@ -1402,6 +1644,7 @@ export function buildChatWireBody(request: ChatInvokeRequest): Record<string, un
     ? []
     : normalizeConnectorScope(request.connectorScope)
 
+  const uiLocale = request.locale ?? storedUiLocale()
   return {
     content: request.content,
     model: request.model,
@@ -1413,6 +1656,12 @@ export function buildChatWireBody(request: ChatInvokeRequest): Record<string, un
     space_ref: request.spaceRef?.trim() || undefined,
     // Narrowed inline like `retrievalScope` above: only the two known codes ever reach the wire.
     locale: request.locale === 'no' || request.locale === 'en' ? request.locale : undefined,
+    // The browser's own clock and app language, on every turn (EP-8-S1). The gateway keeps each one only in its
+    // closed form and reads it for the prompt alone; nothing stores it. `ui_locale` is the turn's language, else
+    // the stored app setting, and absent when neither is set.
+    client_timezone: clientTimeZone(),
+    client_utc_offset_minutes: clientUtcOffsetMinutes(new Date()),
+    ...(uiLocale ? { ui_locale: uiLocale } : {}),
     mentioned_agent_ref: request.mentionedAgentRef?.trim() || undefined,
     // Present only on a wake, so every other body is byte-identical to what it was.
     ...(request.wake ? { wake: { message_id: request.wake.messageId, client_wake_id: request.wake.clientWakeId } } : {}),
@@ -1437,9 +1686,21 @@ export function buildChatWireBody(request: ChatInvokeRequest): Record<string, un
         ? (request.planMode ?? false) && !conversationOnly
         : request.planMode ?? false,
     // Present ONLY on an execute turn, so every other body is byte-identical to
-    // what it was before this field existed. It carries no rung and no plan id:
-    // the server holds the grant, and a rung supplied here would never be read.
-    ...(executeGranted ? { execute_granted: true } : {}),
+    // what it was before this field existed. It carries no rung: the server holds
+    // the grant, and a rung supplied here would never be read. The plan id rides
+    // along only on the approve-then-execute turn (WS14 S2), which the gateway
+    // checks against the thread's grant before the run starts.
+    ...(executeGranted
+      ? {
+          execute_granted: true,
+          ...(request.approvedPlanId?.trim()
+            ? { approved_plan_id: request.approvedPlanId.trim() }
+            : {}),
+        }
+      : {}),
+    // Present only when the person chose a mode (WS25-S6), so every other body is byte-identical to what it
+    // was before the field existed. The gateway resolves it onto the posture and refuses an id it does not know.
+    ...(request.agentMode ? { agent_mode: request.agentMode } : {}),
     // Deep research is its OWN field, not just `browse_web`. "Dyp research"
     // used to set only browseWeb, so it was indistinguishable from a plain
     // Search turn — the same failure planMode had. The gateway keys the
@@ -1665,6 +1926,8 @@ function dispatchAgUiEvent(
             type: str(value.type),
             url: str(value.url),
             size: num(value.size),
+            check: value.check,
+            preview: value.preview,
           })
           break
         case 'reasoning_delta':
@@ -1681,19 +1944,13 @@ function dispatchAgUiEvent(
             sourceGroupLabel: str(value.source_group_label) ?? str(value.sourceGroupLabel),
             start: num(value.start) ?? num(value.start_offset) ?? num(value.startOffset),
             end: num(value.end) ?? num(value.end_offset) ?? num(value.endOffset),
+            number: num(value.number),
             origin: str(value.origin),
           })
           break
         case 'source_scope_applied': {
-          const scope = str(value.scope)
-          if (scope === 'knowledge_only' || scope === 'web_only') {
-            handlers.onSourceScopeApplied?.({
-              scope,
-              excludedTools: Array.isArray(value.excluded_tools)
-                ? value.excluded_tools.filter((name): name is string => typeof name === 'string')
-                : [],
-            })
-          }
+          const applied = sourceScopeAppliedEvent(value)
+          if (applied) handlers.onSourceScopeApplied?.(applied)
           break
         }
         case 'grounding':
@@ -1906,6 +2163,8 @@ function dispatchEvent(event: SseEvent, handlers: ChatStreamHandlers): void {
         type: str(payload.type),
         url: str(payload.url),
         size: num(payload.size),
+        check: payload.check,
+        preview: payload.preview,
       })
       break
     case 'reasoning_delta':
@@ -1930,15 +2189,8 @@ function dispatchEvent(event: SseEvent, handlers: ChatStreamHandlers): void {
       emitCitation(payload, handlers)
       break
     case 'source_scope_applied': {
-      const scope = str(payload.scope)
-      if (scope === 'knowledge_only' || scope === 'web_only') {
-        handlers.onSourceScopeApplied?.({
-          scope,
-          excludedTools: Array.isArray(payload.excluded_tools)
-            ? payload.excluded_tools.filter((name): name is string => typeof name === 'string')
-            : [],
-        })
-      }
+      const applied = sourceScopeAppliedEvent(payload)
+      if (applied) handlers.onSourceScopeApplied?.(applied)
       break
     }
     case 'citations':
@@ -2055,6 +2307,22 @@ function dispatchEvent(event: SseEvent, handlers: ChatStreamHandlers): void {
       }
       break
     }
+    case 'user_question': {
+      // A question with no id or no answerable item is a malformed frame. The prose the turn ends with
+      // still carries the question, so dropping the card loses nothing the person needs to read.
+      const questionId = str(payload.question_id)
+      const items = normalizeQuestionItems(payload.items)
+      if (questionId && items.length > 0) {
+        handlers.onUserQuestion?.({
+          questionId,
+          delivery: str(payload.delivery) || 'next_turn',
+          expiresAt: str(payload.expires_at) || undefined,
+          items,
+          requestId: str(payload.request_id),
+        })
+      }
+      break
+    }
     case 'verification': {
       // Only the three verdicts the backend defines. An unrecognized one is a
       // contract drift, and rendering "checked" from a value we cannot read
@@ -2162,6 +2430,15 @@ function dispatchEvent(event: SseEvent, handlers: ChatStreamHandlers): void {
           state: str(payload.state),
           requestId: str(payload.request_id),
         })
+      }
+      break
+    }
+    case 'sandbox_state': {
+      // A frame that names neither the workspace nor its state cannot say where the files went, so it is not reported.
+      const scope = str(payload.scope)
+      const state = str(payload.state)
+      if (scope && state) {
+        handlers.onSandboxState?.({ scope, state, cause: str(payload.cause), requestId: str(payload.request_id) })
       }
       break
     }
@@ -2377,6 +2654,13 @@ export type PlanApprovalResult = {
    * for the UI only: the gateway's grant is the authority, never this value.
    */
   grantExpiresAtMs?: number
+  /**
+   * What the client does next (WS14 S2). `execute_now`: the gateway has recorded the grant for
+   * this plan and will run one execute turn that names it, so the client sends that turn now.
+   * `next_message` (the answer of every gateway without the switch, and of any approval the
+   * gateway did not record for the plan): the grant waits for the person's own next message.
+   */
+  continuation: 'execute_now' | 'next_message'
 }
 
 /**
@@ -2424,6 +2708,7 @@ export async function approvePlan(
     raw.grant_expires_at_unix > 0
       ? { grantExpiresAtMs: raw.grant_expires_at_unix * 1000 }
       : {}),
+    continuation: raw.continuation === 'execute_now' ? 'execute_now' : 'next_message',
   }
 }
 
@@ -2880,6 +3165,32 @@ async function postChatThreadArchiveState(
   return normalizeChatThreadSession(objectValue(raw)?.session)
 }
 
+/**
+ * Start a new thread from a copy of this one, up to an assistant turn (build plan WS17 S6). Resolves
+ * to the new thread's session. Rejects with the server's typed refusal: `history_fork_disabled` while
+ * forking is off, `history_fork_refused` when the source cannot be copied.
+ */
+export async function forkChatThread(
+  threadId: string,
+  input: { fromMessageId: string; title?: string },
+): Promise<ChatThreadSession | null> {
+  parseChatHistoryAction({
+    type: 'thread.fork',
+    threadId,
+    fromMessageId: input.fromMessageId,
+    ...(input.title ? { title: input.title } : {}),
+  })
+  const raw = await requestJson<unknown>(
+    `/api/v1/chat/threads/${encodeURIComponent(threadId)}/fork`,
+    {
+      method: 'POST',
+      body: JSON.stringify({ fromMessageId: input.fromMessageId, title: input.title ?? '' }),
+    },
+  )
+  applyRetentionFrom(raw)
+  return normalizeChatThreadSession(objectValue(raw)?.session)
+}
+
 /** Where a branch move landed: the new active leaf, and the path up to it (WS17 S9). */
 export type ChatBranchMove = {
   activeLeafMessageId: string
@@ -3224,6 +3535,8 @@ function normalizeChatThreadSession(raw: unknown): ChatThreadSession | null {
   const archivedAt = normalizeOptionalIsoTimestamp(
     str(item.archivedAt) ?? str(item.archived_at),
   )
+  const attentionState = normalizeChatAttentionState(str(item.attentionState))
+  const attentionSince = normalizeOptionalIsoTimestamp(str(item.attentionSince))
   return {
     threadId,
     title,
@@ -3240,7 +3553,11 @@ function normalizeChatThreadSession(raw: unknown): ChatThreadSession | null {
     spaceRef: str(item.spaceRef) ?? str(item.space_ref),
     origin: str(item.origin),
     ...(item.starred === true ? { starred: true } : {}),
+    ...(str(item.forkedFromThreadId) ? { forkedFromThreadId: str(item.forkedFromThreadId) } : {}),
     ...(item.unread === true ? { unread: true } : {}),
+    ...(attentionState ? { attentionState } : {}),
+    ...(attentionState && attentionSince ? { attentionSince } : {}),
+    ...(attentionState ? { attentionUnseen: item.attentionUnseen === true } : {}),
     ...(archivedAt ? { archivedAt } : {}),
   }
 }
@@ -3298,6 +3615,11 @@ function normalizeIsoTimestamp(value: string | undefined): string {
   if (!value) return new Date().toISOString()
   const parsed = Date.parse(value)
   return Number.isNaN(parsed) ? new Date().toISOString() : new Date(parsed).toISOString()
+}
+
+/** The attention state a wire value names, or `undefined` for a value outside the closed set. */
+function normalizeChatAttentionState(value: string | undefined): ChatAttentionState | undefined {
+  return CHAT_ATTENTION_STATES.find((state) => state === value)
 }
 
 function normalizeOptionalIsoTimestamp(value: string | undefined): string | undefined {
@@ -3366,6 +3688,50 @@ function normalizeEffortLevels(value: unknown): ModelInfo['effortLevels'] {
   if (!Array.isArray(value)) return undefined
   const levels = value.filter(isEffortLevel)
   return levels.length > 0 ? levels : undefined
+}
+
+/**
+ * A list price is kept whole or not at all: two finite, non-negative rates and a three-letter
+ * currency. A partial or unexpected shape is dropped, never completed with a guess.
+ */
+function normalizeModelPrice(value: unknown): ModelPrice | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined
+  const record = value as Record<string, unknown>
+  const input = record.input_per_million
+  const output = record.output_per_million
+  const currency = str(record.currency)?.trim().toUpperCase()
+  if (typeof input !== 'number' || typeof output !== 'number') return undefined
+  if (!Number.isFinite(input) || !Number.isFinite(output) || input < 0 || output < 0) return undefined
+  if (!currency || !/^[A-Z]{3}$/.test(currency)) return undefined
+  return { inputPerMillion: input, outputPerMillion: output, currency }
+}
+
+/** The data-use record a catalogue entry carries. A statement the record does not make stays unset. */
+function normalizeModelDataUse(value: unknown): ModelDataUse | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined
+  const record = value as Record<string, unknown>
+  const trainsOnInputs = readBool(record.trains_on_inputs)
+  const days = record.retention_days
+  const retentionDays =
+    typeof days === 'number' && Number.isSafeInteger(days) && days >= 0 ? days : undefined
+  const zdrAttested = readBool(record.zdr_attested)
+  const dataUse: ModelDataUse = {
+    ...(trainsOnInputs === undefined ? {} : { trainsOnInputs }),
+    ...(retentionDays === undefined ? {} : { retentionDays }),
+    ...(zdrAttested === undefined ? {} : { zdrAttested }),
+  }
+  return Object.keys(dataUse).length > 0 ? dataUse : undefined
+}
+
+/** A token count the record names as a positive whole number; anything else is unknown. */
+function normalizeTokenCount(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value > 0 ? value : undefined
+}
+
+const MODEL_LIFECYCLES: readonly ModelLifecycle[] = ['ga', 'preview', 'deprecated']
+
+function normalizeLifecycle(value: unknown): ModelLifecycle | undefined {
+  return MODEL_LIFECYCLES.find((stage) => stage === value)
 }
 
 function readBool(value: unknown): boolean | undefined {
@@ -3534,6 +3900,11 @@ export function getModelEntitlementMeta(): ModelEntitlementMeta | undefined {
 export interface ModelCatalogue {
   readonly models: ModelInfo[]
   readonly entitlement?: ModelEntitlementMeta
+  /**
+   * Whether side tasks ask the platform role table (`role_routing` beside `models`). The gateway leaves it out
+   * while the switch is off, so `undefined` means off.
+   */
+  readonly roleRouting?: boolean
 }
 
 /**
@@ -3611,10 +3982,19 @@ export async function listModelCatalogue(): Promise<ModelCatalogue> {
         residency: str(item.residency),
         cheap: readBool(item.cheap) ?? readBool(item.is_cheap),
         effortLevels: normalizeEffortLevels(item.effort_levels ?? item.effortLevels),
+        contextWindowTokens: normalizeTokenCount(item.context_window_tokens),
+        maxOutputTokens: normalizeTokenCount(item.max_output_tokens),
+        lifecycle: normalizeLifecycle(item.lifecycle),
+        price: normalizeModelPrice(item.price),
+        dataUse: normalizeModelDataUse(item.data_use),
       }
     })
     .filter((model) => model.id.length > 0)
-  return { models, ...(entitlement ? { entitlement } : {}) }
+  return {
+    models,
+    ...(entitlement ? { entitlement } : {}),
+    ...(envelope?.role_routing === true ? { roleRouting: true } : {}),
+  }
 }
 
 export async function listModels(): Promise<ModelInfo[]> {
@@ -3760,6 +4140,16 @@ export function modelEffortLevels(model: Pick<ModelInfo, 'effortLevels'> | undef
   return model?.effortLevels ?? []
 }
 
+/**
+ * The context window as a picker row states it, such as "200k kontekst" or "1M kontekst".
+ * `undefined` when no window is known, so a row never claims one it has not been given.
+ */
+export function formatContextWindow(tokens: number | undefined): string | undefined {
+  if (tokens === undefined) return undefined
+  if (tokens >= 1_000_000 && tokens % 1_000_000 === 0) return `${tokens / 1_000_000}M kontekst`
+  return `${Math.round(tokens / 1_000)}k kontekst`
+}
+
 /** Patterns that mark a model as expensive enough to warrant a deliberate pick. */
 const EXPENSIVE_ID_PATTERNS: readonly RegExp[] = [/opus/i, /sonnet/i, /gpt-5/i, /\bo[13]\b/i, /\bo3\b/i]
 
@@ -3804,11 +4194,15 @@ const PROVIDER_GROUP_ORDER: readonly { label: string; test: (m: ModelInfo) => bo
   { label: 'DeepSeek', test: (m) => m.provider === 'deepseek' || /deepseek/i.test(`${m.id} ${m.name}`) },
 ]
 
-export type ModelGroup = { label: string; models: ModelInfo[] }
+export type ModelGroup = { label: string; models: ModelInfo[]; folded?: boolean }
+
+/** The fold that holds models the vendor has deprecated: listed last and collapsed. */
+const DEPRECATED_GROUP_LABEL = 'Eldre modeller'
 
 /**
  * Group chat models by family/provider for the picker. Unmatched providers fall
  * into an "Other models" bucket. Empty groups are dropped. Group order is stable.
+ * A deprecated model leaves its provider group and sits in a folded last group.
  *
  * Verevon intent modes are filtered out here: the backend may advertise them
  * synthetically (`provider === 'verevon'` or a `verevon-*` mode id), but the pinned
@@ -3821,8 +4215,13 @@ export function groupChatModels(models: readonly ModelInfo[]): ModelGroup[] {
     .filter((model) => model.provider !== 'verevon' && !isVerevonModeId(model.id))
   const buckets = new Map<string, ModelInfo[]>()
   const otherLabel = 'Other models'
+  const deprecated: ModelInfo[] = []
 
   for (const model of chat) {
+    if (model.lifecycle === 'deprecated') {
+      deprecated.push(model)
+      continue
+    }
     const group = PROVIDER_GROUP_ORDER.find((g) => g.test(model))
     const label = group?.label ?? otherLabel
     const existing = buckets.get(label)
@@ -3837,7 +4236,52 @@ export function groupChatModels(models: readonly ModelInfo[]): ModelGroup[] {
   }
   const other = buckets.get(otherLabel)
   if (other && other.length > 0) ordered.push({ label: otherLabel, models: other })
+  if (deprecated.length > 0) {
+    ordered.push({ label: DEPRECATED_GROUP_LABEL, models: deprecated, folded: true })
+  }
   return ordered
+}
+
+/**
+ * Lower-cases and drops accents so `cafe` finds `café`. The Norwegian letters æ, ø and å are kept
+ * as they are: they are letters of their own, not accented forms of other letters.
+ */
+const NORWEGIAN_LETTERS: ReadonlySet<string> = new Set(['æ', 'ø', 'å'])
+
+function searchKey(value: string): string {
+  return Array.from(value.normalize('NFC').toLowerCase(), (char) =>
+    NORWEGIAN_LETTERS.has(char) ? char : char.normalize('NFD').replace(/\p{M}/gu, ''),
+  ).join('')
+}
+
+function matchesModelQuery(query: string, ...fields: readonly string[]): boolean {
+  const needle = searchKey(query.trim())
+  if (needle === '') return true
+  return fields.some((field) => searchKey(field).includes(needle))
+}
+
+/**
+ * The models whose name, id or provider match the query, case- and accent-insensitively. An empty
+ * query keeps every model in its order.
+ */
+export function filterModels(models: readonly ModelInfo[], query: string): ModelInfo[] {
+  if (query.trim() === '') return [...models]
+  return models.filter((model) => matchesModelQuery(query, model.name, model.id, model.provider ?? ''))
+}
+
+/** A list price as one line of picker copy, in the reader's language and currency format. */
+export function formatModelListPrice(price: ModelPrice, locale: Locale): string {
+  const money = new Intl.NumberFormat(localeIntl(locale), {
+    style: 'currency',
+    currency: price.currency,
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 4,
+  })
+  const input = money.format(price.inputPerMillion)
+  const output = money.format(price.outputPerMillion)
+  return locale === 'no'
+    ? `${input} inn / ${output} ut per million tokens`
+    : `${input} in / ${output} out per million tokens`
 }
 
 export type ChatFeedbackRating = 'positive' | 'negative'

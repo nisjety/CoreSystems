@@ -167,3 +167,36 @@ func TestLoadClaimBatch(t *testing.T) {
 		require.ErrorContains(t, err, "QUARRY_JOB_CLAIM_BATCH", bad)
 	}
 }
+
+// W2-U64 (D2-073): a crawl with no scope object is a legacy-unscoped crawl in observe mode and
+// is refused when the job names scope_mode enforce.
+func TestCrawlInputFromJobAbsentScope(t *testing.T) {
+	limits := DefaultCrawlLimits()
+	base := func(extra map[string]any) job {
+		params := map[string]any{"url": "https://example.com", "org_id": "org_a"}
+		for k, v := range extra {
+			params[k] = v
+		}
+		return job{ID: "job_x", Kind: "crawl", Params: params}
+	}
+
+	in, err := crawlInputFromJob(base(nil), "run_x", limits)
+	require.NoError(t, err, "no scope and no mode: the legacy crawl a pre-scope job always was")
+	require.NotNil(t, in.Scope)
+	require.True(t, in.Scope.Legacy)
+
+	in, err = crawlInputFromJob(base(map[string]any{"scope_mode": "observe"}), "run_x", limits)
+	require.NoError(t, err, "no scope in observe mode runs unscoped")
+	require.True(t, in.Scope.Legacy)
+
+	_, err = crawlInputFromJob(base(map[string]any{"scope_mode": "enforce"}), "run_x", limits)
+	require.Error(t, err, "enforce promises a scope: an absent one is refused")
+	_, err = crawlInputFromJob(base(map[string]any{"scope_mode": "enforce", "scope": nil}), "run_x", limits)
+	require.Error(t, err, "a null scope is an absent one")
+
+	in, err = crawlInputFromJob(base(map[string]any{
+		"scope_mode": "enforce", "scope": map[string]any{"crawl_entire_domain": true},
+	}), "run_x", limits)
+	require.NoError(t, err, "enforce with a scope is the normal case")
+	require.False(t, in.Scope.Legacy)
+}

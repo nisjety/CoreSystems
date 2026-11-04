@@ -251,6 +251,13 @@ message RunAgentRequest {
   // this message in the build plan's proto reservation table (section 4.3).
   ReasoningEffort reasoning_effort = 21;
 
+  // The most questions the run's `ask_user` tool may put to its owner (build plan WS14 S4). Zero
+  // means the tool is not offered: the gateway sends zero for a zero-retention, waived, plan-mode,
+  // Space-scoped or continuation run, and while AGENT_ASK_USER_ENABLED is off. Execution-core
+  // offers the tool only when this is above zero and caps it at the shared question limit. Field 22
+  // is reserved for this message in the build plan's proto reservation table (section 4.3).
+  uint32 max_questions = 22;
+
   // The connected accounts the person selected for this turn (build plan WS23 S4). Absent or empty
   // selects none: no connector read is offered, and one that is attempted is refused. The gateway
   // refuses a selection under zero retention, in a Space, under a knowledge-only or web-only source
@@ -258,6 +265,22 @@ message RunAgentRequest {
   // accounts. Field 23 is reserved for this message in the build plan's proto reservation table
   // (section 4.3).
   ConnectorScope connector_scope = 23;
+  // The org policy this run was resolved under (build plan WS25 S3): the org's hook rules,
+  // which the run's hook engine enforces on every tool call. Absent when HOOKS_DO_RUNS is off
+  // or the org has no rules, so the run is exactly as it was before the field existed.
+  OrgPolicyContext org_policy = 24;
+}
+
+// OrgPolicyContext is the org's policy for one Do run (build plan WS25 S3). Its rules can only
+// narrow what the run may do: execution-core enforces them, and no rule lets a call past the
+// signed gate.
+message OrgPolicyContext {
+  // The hook rules as execution-core's hook context JSON ({"rules":[...]}); empty means none.
+  string hook_context = 1;
+  // The revision of the org policy the rules were read at. Zero until the policy registry (WS25 S7).
+  int64 policy_revision = 2;
+  // Digest of the policy document the rules came from. Empty until WS25 S7.
+  string policy_digest = 3;
 }
 
 // ConnectorScope names the Integration Core connections one run may read (build plan WS23 S4).
@@ -296,6 +319,13 @@ message AgentResume {
   // consume itself (the retained approval descriptor is the only source of the
   // approved call), so nothing the client supplies names what the segment runs.
   reserved 9;
+  // The `resume` question a continuation answers (build plan WS14 S5): its `q_` id. Set only
+  // together with `answer_json`, and only by the `/continue` of a run paused for that question;
+  // an approval continuation leaves both empty.
+  string question_id = 10;
+  // The owner's answer to `question_id`, as the `user_question` answer JSON. It is data, never an
+  // instruction and never a grant, and the shared contract bounds it.
+  string answer_json = 11;
 }
 
 // RunContext - what the gateway hands an agent run beyond its goal.
@@ -309,6 +339,41 @@ message RunContext {
   string memory_block = 3;
   // How each part was assembled, for the run record.
   RunContextStatus status = 4;
+  // Fields 5 and 6 stay reserved for WS08 and WS20 (see the comment above).
+  // The person's standing profile as a finished, bounded block (EP-8 S5),
+  // placed by the loop in the Context tier of the root loop only. Empty unless
+  // MODEL_GATEWAY_USER_PROFILE_PREFIX is on and the run's memory decision
+  // allows it; never set on a ZDR, waived or Space-scoped run.
+  string user_profile = 7;
+  // The roles a `subagent.task` call of this run may name (EP-6 S10; owner:
+  // model-gateway composes it, execution-core reads it). Built from published
+  // agent definitions the caller may use, at most 8 entries. In flight only:
+  // never persisted, never built for a ZDR, waived or scheduled run, and
+  // ignored by execution-core with EXECUTION_CORE_SUBAGENT_ROLES off.
+  repeated AgentRoleSpec agent_roles = 8;
+}
+
+// AgentRoleSpec - one published agent definition a delegated subagent may take
+// on as its role (EP-6 S10). It only narrows: the child's tools are the
+// parent's tools intersected with `tool_capability_ids`, never more.
+message AgentRoleSpec {
+  // The agent definition's stable id, the value `subagent.task`'s `role` names.
+  string agent_ref = 1;
+  // The published version this entry was read from (immutable, from 1).
+  uint32 version = 2;
+  // The published version's canonical digest ("sha256:<hex>").
+  string digest = 3;
+  // The agent's display name, shown to the parent model.
+  string name = 4;
+  // The agent's authored instructions, at most 4096 bytes.
+  string instructions = 5;
+  // Capability ids (WS05 registry) the role allows; the child keeps only the
+  // parent's tools whose capability is listed here.
+  repeated string tool_capability_ids = 6;
+  // The role's autonomy cap ("read_only", "ask_first" or "auto"; empty when
+  // the definition states none). A delegated child is read/analysis only
+  // whatever the cap, so the cap can never widen it.
+  string autonomy_cap = 7;
 }
 
 // RunAgentResponse — terminal outcome of a driven agent run.
@@ -376,6 +441,14 @@ message RunAgentResponse {
   // `failure_code` is empty.
   string park_reason = 11;
 
+  // Why the run's own loop guard ended it, as a closed token: "loop_detected" when
+  // the Do loop's loop guard stopped this run's loop (WS25-S2). A delegated loop's
+  // stop is a child result, so it never sets this field. Empty for every other
+  // outcome. The run appended its fixed reply and its terminal receipt still says
+  // "execution_failed"; this field alone names the stop. It is not `failure_code`,
+  // which is taken by the subscription vocabulary (tag 6).
+  string loop_stop_code = 10;
+
   // What this invocation of the run's loop spent on inference: every round of the
   // run and of the subagents it delegated to, summed. Counts and ids only, never
   // content. Unset when the executor predates the field, which is not the same as
@@ -383,6 +456,31 @@ message RunAgentResponse {
   // parked run reports the usage of the invocation that paused or parked; the
   // continuation that follows is a new invocation with its own tally.
   RunUsage usage = 9;
+
+  // When each inference round of this invocation's own loop ran (EP-14 S5), in
+  // round order. Milliseconds and counts only, never content. Empty unless
+  // EXECUTION_ROUND_TIMING is on; delegated loops are not listed (their time
+  // falls inside the parent round's dispatch). The gateway stores it as the
+  // run's `round-timing-v1` record when the run is persistent.
+  repeated RoundTiming round_timing = 12;
+}
+
+// RoundTiming - one inference round of a Do run's loop (EP-14 S5). Offsets are
+// milliseconds from the start of the invocation's loop, read from one monotonic
+// clock, so they never go backwards.
+message RoundTiming {
+  // The round's number within the invocation, from 1.
+  uint32 round = 1;
+  // When the round's inference call was sent.
+  uint64 inference_start_ms = 2;
+  // When its response (or its failure) came back.
+  uint64 inference_end_ms = 3;
+  // When the loop moved on from the round: its tool calls were dispatched, or
+  // the loop ended. Equal to `inference_end_ms` for a round with no tool calls.
+  uint64 dispatch_end_ms = 4;
+  // The tool calls the round's response asked for. 0 for an answering round
+  // and for a round whose inference failed.
+  uint32 tool_count = 5;
 }
 
 // RunUsage - the inference a run's loop spent in one invocation.
@@ -493,6 +591,12 @@ message ExecuteStepRequest {
   // zero-retention step refuses a non-empty list at the boundary.
   repeated RunAttachment attachments = 12;
 
+  // The thread this step's run belongs to, read only to find the thread's
+  // workspace (WS22-S2, DEC-23). Memory tools never receive it: the direct
+  // ExecuteStep RPC still passes them an empty thread context, and a Space step
+  // and a zero-retention step ignore it.
+  string thread_id = 13;
+
   // Bundles of the skills this turn matched that have one, mounted read-only at
   // /skills/<name> for this call (WS19-S8). The gateway derives them from the turn's
   // own matches, never from the model's arguments; at most three. Field 13 is
@@ -580,6 +684,13 @@ message ResumeRunRequest {
   // transition. Empty is valid only for a user-paused run; it can never
   // resume an approval gate.
   string approval_id = 4;
+
+  // Text the person typed for a live browser run (E3.3-f). Queued for the run
+  // and read by the planner at its next step boundary, as the person's
+  // unverified message: it approves nothing and widens no domain. Empty = none.
+  // Refused (FAILED_PRECONDITION) when the steer switch is off; at most 2000
+  // characters, at most 3 waiting per run.
+  string steer_text = 5;
 }
 
 // ResumeRunResponse — acknowledgement that the run has been resumed.
@@ -598,6 +709,10 @@ message PauseRunRequest {
 
   // Tenant identifier.
   string org_id = 2;
+
+  // Same as ResumeRunRequest.steer_text: queued before the run is paused, read
+  // by the planner when the run next passes a step boundary (E3.3-f).
+  string steer_text = 3;
 }
 
 // PauseRunResponse — acknowledgement that the run has been paused.

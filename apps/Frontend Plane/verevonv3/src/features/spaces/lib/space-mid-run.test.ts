@@ -2,9 +2,11 @@ import { createRoot, flush } from 'solid-js'
 import { describe, expect, it, vi } from 'vitest'
 
 import type { QueuedInputResult } from '@/shared/api/chat-client'
+import type { Skill } from '@/shared/api/skills-client'
 
 import {
   createSpaceMidRun,
+  deferredSendReady,
   type SpaceDeferredSend,
   type SpaceQueueCall,
   type SpaceSteerTarget,
@@ -246,6 +248,26 @@ describe('createSpaceMidRun: the send-when-ready message (WS09-S2)', () => {
     expect(midRun.takeDeferred()).toBeUndefined()
   })
 
+  it('keeps the skills and mention picks it was put to wait with, for a cancel to give back', () => {
+    const { midRun } = setup()
+    const waiting: SpaceDeferredSend = {
+      content: '@Kari @Drift se på lista',
+      threadId: 'thr-1',
+      runId: 'run-9',
+      mentionedAgentRef: 'agent-1',
+      skills: [{ id: 'sk-1', name: 'Innkjøpsrutine' } as Skill],
+      picks: {
+        people: [{ subjectId: 'user-2', label: 'Kari' }],
+        agents: [{ subjectId: 'agent-1', label: 'Drift', source: 'typed' }],
+      },
+    }
+
+    midRun.defer(waiting)
+    flush()
+
+    expect(midRun.takeDeferred()).toEqual(waiting)
+  })
+
   it('is dropped by a cancel, and is never sent', () => {
     const { queue, midRun } = setup()
     midRun.defer({ content: 'Vent', threadId: 'thr-1' })
@@ -254,5 +276,32 @@ describe('createSpaceMidRun: the send-when-ready message (WS09-S2)', () => {
 
     expect(midRun.deferred()).toBeUndefined()
     expect(queue).not.toHaveBeenCalled()
+  })
+})
+
+describe('deferredSendReady: when a send-when-ready goes out (WS09-S2)', () => {
+  const waiting: SpaceDeferredSend = { content: 'Oppdater lista', threadId: 'thr-1', runId: 'run-9' }
+  const base = { waiting, busy: false, observed: true, threadLive: true }
+
+  it('goes out on the run\'s done event, even while the projection still lists the thread as working', () => {
+    expect(deferredSendReady({ ...base, run: 'done', threadLive: true })).toBe(true)
+  })
+
+  it('does not go out when the projection shows the thread idle but the run has not said it is done', () => {
+    expect(deferredSendReady({ ...base, run: 'running', threadLive: false })).toBe(false)
+  })
+
+  it('waits for this composer\'s own send to settle, whatever the run says', () => {
+    expect(deferredSendReady({ ...base, run: 'done', busy: true })).toBe(false)
+  })
+
+  it('falls back to an observed, idle projection only when no done event can arrive', () => {
+    expect(deferredSendReady({ ...base, run: 'unknown', threadLive: false })).toBe(true)
+    expect(deferredSendReady({ ...base, run: 'unknown', threadLive: true })).toBe(false)
+    expect(deferredSendReady({ ...base, run: 'unknown', threadLive: false, observed: false })).toBe(false)
+  })
+
+  it('has nothing to send when nothing waits', () => {
+    expect(deferredSendReady({ ...base, waiting: undefined, run: 'done' })).toBe(false)
   })
 })

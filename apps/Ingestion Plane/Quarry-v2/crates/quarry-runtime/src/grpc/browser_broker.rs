@@ -15,7 +15,9 @@ use tonic::transport::{Channel, ClientTlsConfig, Endpoint};
 use quarry_core::error::{ErrorCode, QuarryError, QuarryResult};
 
 use super::model_plane::v1::browser_broker_client::BrowserBrokerClient;
-use super::model_plane::v1::{RevokeGrantRequest, ValidateGrantRequest, ValidateGrantResponse};
+use super::model_plane::v1::{
+    RevokeGrantRequest, ValidateGrantRequest, ValidateGrantResponse, WebPolicy,
+};
 use crate::grant_validator::{GrantBudget, GrantValidation, GrantValidator};
 use crate::service_tokens::{ServiceTokenRequest, SharedServiceTokenProvider};
 
@@ -307,6 +309,8 @@ pub(crate) fn inactive_validation(grant_id: &str) -> GrantValidation {
         denied_domains: Vec::new(),
         absolute_expires_at: None,
         resource_id: String::new(),
+        key_id: String::new(),
+        web_policy: None,
     }
 }
 
@@ -337,7 +341,46 @@ pub(crate) fn validation_from_response(resp: ValidateGrantResponse) -> GrantVali
         denied_domains: resp.denied_domains,
         absolute_expires_at: resp.absolute_expires_at.and_then(prost_ts_to_chrono),
         resource_id: resp.resource_id,
+        // INNH-10: the vendored `proto/browser.proto` has no `key_id` on `ValidateGrantResponse`
+        // yet (the Model Plane owner picks the field number, ask MP-2). Until it is vendored this
+        // is always empty, so no API-key run is admitted through the gRPC validator: it fails closed.
+        key_id: String::new(),
+        // WS7.K: the broker's snapshot (field 20), in the claim's shape. Unset is no grant layer.
+        web_policy: resp.web_policy.map(web_policy_json),
     }
+}
+
+/// WS7.K: the broker's web-policy snapshot (field 20) in the shape of the `web_policy` claim it
+/// was derived from, so the edge reads both with the same rules. An empty ceiling is left out
+/// (no ceiling); both domain lists are always written (an empty allow list is no allow rule,
+/// as in the claim). The capability keys are sorted, so the value is stable. Nothing is checked
+/// here: an unknown version or value is carried through for the edge to refuse (fail closed),
+/// never dropped, since dropping a rule would loosen the grant.
+pub(crate) fn web_policy_json(policy: WebPolicy) -> serde_json::Value {
+    use serde_json::Value;
+
+    let caps: serde_json::Map<String, Value> = policy
+        .caps
+        .into_iter()
+        .collect::<std::collections::BTreeMap<String, String>>()
+        .into_iter()
+        .map(|(key, mode)| (key, Value::String(mode)))
+        .collect();
+    let mut out = serde_json::Map::new();
+    out.insert("v".to_owned(), Value::from(policy.v));
+    out.insert("rev".to_owned(), Value::String(policy.rev));
+    out.insert("caps".to_owned(), Value::Object(caps));
+    if !policy.robots_max.is_empty() {
+        out.insert("robots_max".to_owned(), Value::String(policy.robots_max));
+    }
+    if !policy.proxy_max.is_empty() {
+        out.insert("proxy_max".to_owned(), Value::String(policy.proxy_max));
+    }
+    out.insert(
+        "domains".to_owned(),
+        serde_json::json!({ "allow": policy.domains_allow, "deny": policy.domains_deny }),
+    );
+    Value::Object(out)
 }
 
 /// gRPC status codes considered transient for retry purposes.
@@ -418,6 +461,63 @@ mod tests {
         ] {
             assert_eq!(validation_from_response(resp).budget, None);
         }
+    }
+
+    #[test]
+    fn the_web_policy_snapshot_on_a_validate_response_is_carried_in_the_claim_shape() {
+        let resp = ValidateGrantResponse {
+            grant_id: "g1".into(),
+            active: true,
+            kind: "run".into(),
+            web_policy: Some(WebPolicy {
+                v: 1,
+                rev: "0123456789ab".into(),
+                caps: [
+                    ("browser.act.upload".to_owned(), "disabled".to_owned()),
+                    ("browser.act.input".to_owned(), "disabled".to_owned()),
+                ]
+                .into_iter()
+                .collect(),
+                robots_max: "respect".into(),
+                proxy_max: String::new(),
+                domains_allow: Vec::new(),
+                domains_deny: vec!["ads.example".into()],
+            }),
+            ..Default::default()
+        };
+        let grant = validation_from_response(resp);
+        assert_eq!(
+            grant.web_policy,
+            Some(serde_json::json!({
+                "v": 1,
+                "rev": "0123456789ab",
+                "caps": { "browser.act.input": "disabled", "browser.act.upload": "disabled" },
+                "robots_max": "respect",
+                "domains": { "allow": [], "deny": ["ads.example"] },
+            })),
+            "an empty proxy ceiling is no ceiling and is left out"
+        );
+    }
+
+    #[test]
+    fn a_validate_response_without_a_snapshot_carries_none_and_an_unknown_version_is_kept() {
+        // An old broker (field 20 unset) and an inactive grant: no grant layer.
+        assert_eq!(validation_from_response(ValidateGrantResponse::default()).web_policy, None);
+        assert_eq!(inactive_validation("g").web_policy, None);
+        // A version this build does not know is carried through, for the edge to refuse; the
+        // mapping never drops a snapshot it does not understand.
+        let grant = validation_from_response(ValidateGrantResponse {
+            web_policy: Some(WebPolicy {
+                v: 2,
+                rev: "1".into(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        let snapshot = grant.web_policy.expect("the snapshot is kept");
+        assert_eq!(snapshot["v"], 2);
+        assert_eq!(snapshot["caps"], serde_json::json!({}));
+        assert!(snapshot.get("robots_max").is_none());
     }
 
     #[test]
@@ -842,6 +942,30 @@ mod tests {
         let error = validator.revoke("grant_1", "done").await.unwrap_err();
         assert_eq!(error.code, ErrorCode::Forbidden);
         assert!(mint_bodies(&auth_core).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_web_policy_snapshot_survives_the_wire_from_a_real_grpc_peer() {
+        let mut answer = active("grant_1");
+        answer.web_policy = Some(WebPolicy {
+            v: 1,
+            rev: "00000000002a".into(),
+            caps: [("browser.act.download".to_owned(), "disabled".to_owned())]
+                .into_iter()
+                .collect(),
+            domains_deny: vec!["tracker.example".into()],
+            ..Default::default()
+        });
+        let broker = ScriptedBroker::answering(vec![Ok(answer), Ok(active("grant_2"))]);
+        let validator = validator_for(broker).await.with_bearer_token("static-dev-token");
+
+        let grant = validator.validate("grant_1").await.unwrap();
+        let snapshot = grant.web_policy.expect("field 20 reached the validator");
+        assert_eq!(snapshot["rev"], "00000000002a");
+        assert_eq!(snapshot["caps"]["browser.act.download"], "disabled");
+        assert_eq!(snapshot["domains"]["deny"], serde_json::json!(["tracker.example"]));
+        // A grant the broker stored without a snapshot has none.
+        assert_eq!(validator.validate("grant_2").await.unwrap().web_policy, None);
     }
 
     #[test]

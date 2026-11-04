@@ -1,0 +1,6 @@
+# /ready and container state at the end of each container (shipped rows; RS with sweeper flags; final after the revert)
+shipped: {"status":"ready","so":0,"slot":{"generation":1,"healthy":true,"pages":0,"probe_failures":0,"sessions":0,"slot":0,"status":"ready"}} rc=0 
+rs: {"status":"ready","so":0,"slot":{"generation":1,"healthy":true,"pages":0,"probe_failures":0,"sessions":0,"slot":0,"status":"ready"}} rc=0 
+final: {"status":"ready","so":0,"slot":{"generation":1,"healthy":true,"pages":0,"probe_failures":0,"sessions":0,"slot":0,"status":"ready"}} rc=0 started=2026-10-29T10:10:25.322505617Z health=healthy 
+runs: 25 distinct, close HTTP=200 x25; SELECT status, count(*) FROM quarry_agent_run_checkpoints WHERE run_id IN (those): closed|25
+extra: 1 tabs-shape probe run on the final container at ~10:12Z (run_01M63JCVK4W8JJ2BNE7YDAWSQC: wait 200, GET /tabs -> {data:{tabs:[{tabId:"tab-1",title:null,url:"about:blank",active:true}]}}, close HTTP=200); SELECT status: closed. Total 26 runs, 26 closed.

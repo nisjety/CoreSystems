@@ -157,5 +157,96 @@ export function parseKeywords(raw: string): string[] {
     .filter((keyword) => keyword.length > 0)
 }
 
+/** The side-task purposes the role table names, in the order the page lists them (the keys of `roles`). */
+export const ROUTER_POLICY_ROLE_PURPOSES = ['title', 'follow_ups', 'verification_judge', 'research_plan'] as const
+export type RouterPolicyRolePurpose = (typeof ROUTER_POLICY_ROLE_PURPOSES)[number]
+
+/** A role names one to this many models. The platform refuses more, and a role with none is removed. */
+export const ROUTER_POLICY_ROLE_MAX_CANDIDATES = 4
+
+/** One purpose's entry: the models tried in order, and the effort the entry sets when it chooses the model. */
+export interface RouterPolicyRoleEntry {
+  candidates: string[]
+  effort?: string
+}
+
+/** The side-task role table, keyed by purpose. The gateway leaves it out of the document while it is empty. */
+export type RouterPolicyRoleTable = Partial<Record<RouterPolicyRolePurpose, RouterPolicyRoleEntry>>
+
+/**
+ * The document as the gateway returns it. A save is a full-document PUT, so the page edits a copy of it and sends
+ * back every field it was given. The ladder, the role table and the complexity flag are not shown on the page, and a
+ * field left out of a save is reset on the server.
+ */
+export type RouterPolicyDocument = RoutingPolicy & {
+  tool_fallback_ladder?: string[]
+  roles?: RouterPolicyRoleTable
+  complexity: RouterPolicyComplexityConfig & { tool_use_floors_complex?: boolean }
+}
+
+/** The entry a purpose has, or `undefined` while the purpose names no models. */
+export function roleEntryOf(
+  document: RouterPolicyDocument,
+  purpose: RouterPolicyRolePurpose,
+): RouterPolicyRoleEntry | undefined {
+  return document.roles?.[purpose]
+}
+
+/**
+ * The document with one purpose's candidates replaced and its effort kept. An empty list removes the purpose, and a
+ * table left with no purpose is removed too, so the body matches what the server writes for an empty table.
+ */
+export function withRoleCandidates(
+  document: RouterPolicyDocument,
+  purpose: RouterPolicyRolePurpose,
+  candidates: readonly string[],
+): RouterPolicyDocument {
+  const table: RouterPolicyRoleTable = { ...document.roles }
+  if (candidates.length === 0) delete table[purpose]
+  else table[purpose] = { ...table[purpose], candidates: [...candidates] }
+  const next: RouterPolicyDocument = { ...document, roles: table }
+  if (Object.keys(table).length === 0) delete next.roles
+  return next
+}
+
+/** The candidates with the one at `index` moved one place earlier (-1) or later (+1). A move off either end changes nothing. */
+export function moveCandidate(candidates: readonly string[], index: number, step: -1 | 1): string[] {
+  const next = [...candidates]
+  const moved = next[index]
+  const target = next[index + step]
+  if (moved === undefined || target === undefined) return next
+  next[index] = target
+  next[index + step] = moved
+  return next
+}
+
+/** One refusal of a role table, as inference-core names it under `details.issues` of an `invalid_role_table` error. */
+export interface RouterPolicyRoleIssue {
+  purpose: RouterPolicyRolePurpose
+  reason: string
+  model?: string
+  effort?: string
+}
+
+/** The refusals in an `invalid_role_table` body that name a purpose the page shows. Anything else is dropped. */
+export function roleIssuesFrom(details: unknown): RouterPolicyRoleIssue[] {
+  const listed = details && typeof details === 'object' ? (details as Record<string, unknown>).issues : undefined
+  if (!Array.isArray(listed)) return []
+  const issues: RouterPolicyRoleIssue[] = []
+  for (const item of listed as unknown[]) {
+    if (!item || typeof item !== 'object') continue
+    const record = item as Record<string, unknown>
+    const purpose = ROUTER_POLICY_ROLE_PURPOSES.find((known) => known === record.purpose)
+    if (purpose === undefined || typeof record.reason !== 'string') continue
+    issues.push({
+      purpose,
+      reason: record.reason,
+      ...(typeof record.model === 'string' ? { model: record.model } : {}),
+      ...(typeof record.effort === 'string' ? { effort: record.effort } : {}),
+    })
+  }
+  return issues
+}
+
 export { ROUTER_POLICY_COMPLEXITIES, ROUTER_POLICY_MODES }
 export type { RouterPolicyComplexity, RouterPolicyMode, RoutingPolicy }

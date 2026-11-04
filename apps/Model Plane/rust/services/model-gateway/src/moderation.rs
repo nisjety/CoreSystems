@@ -274,7 +274,27 @@ impl ToolProvenance {
         capability_core_base_url: &str,
         capability_bearer: Option<&str>,
     ) -> Self {
-        let trust = TrustClass::classify(tool_name);
+        Self::assess_as(
+            TrustClass::classify(tool_name),
+            text,
+            screening_semaphore,
+            http_client,
+            capability_core_base_url,
+            capability_bearer,
+        )
+        .await
+    }
+
+    /// [`Self::assess`] for a payload whose source class the caller already knows. Prior conversation has no
+    /// entry in the tool-name table, so classifying its tool by name would frame it as org-internal.
+    pub async fn assess_as(
+        trust: TrustClass,
+        text: &str,
+        screening_semaphore: &tokio::sync::Semaphore,
+        http_client: &reqwest::Client,
+        capability_core_base_url: &str,
+        capability_bearer: Option<&str>,
+    ) -> Self {
         let screening = screen_tool_payload(
             text,
             screening_semaphore,

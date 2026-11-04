@@ -73,7 +73,7 @@ export const navItems: readonly NavItem[] = [
     id: 'agents',
     href: '/agents',
     label: 'Agents',
-    description: 'Roles, tools, policies, and deployment controls.',
+    description: 'Your agents, automations and runs.',
     icon: Bot,
   },
   {

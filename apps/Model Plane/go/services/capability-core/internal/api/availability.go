@@ -118,6 +118,9 @@ var genericGlobalHealthCapabilityIDs = map[string]struct{}{
 	"cap.memory.index":    {},
 	"cap.agent.spawn":     {},
 
+	// WS21-S5a: the Do loop's server-bound browser.open/observe/close.
+	"cap.browser.observe": {},
+
 	"cap.process.background": {},
 
 	"cap.retrieval.query": {},

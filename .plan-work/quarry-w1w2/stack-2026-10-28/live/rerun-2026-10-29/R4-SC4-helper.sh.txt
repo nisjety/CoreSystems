@@ -1,0 +1,29 @@
+#!/bin/bash
+# R4-SC4 helper (the R3-SC4 recipe plus one page): qlive-rerun-slow (nginx:alpine,
+# alias slow.crawl.test on network crawl-fixture).
+#   /slow.html        limit_rate 1: the page never finishes (T4b-1, T1)
+#   /held.html        fast HTML page with an <img> under /held/ (limit_rate 1): the load never ends (T4b-2)
+#   /redir            302 to http://fixture-b.crawl.test/ext (D3a: a redirect outside an allow-list run)
+#   /toblank.html     an allowed page whose script moves the tab to about:blank#off after 300 ms
+#   /img.html         an allowed page with an <img> on fixture-b.crawl.test, a host outside the run's list (D3b)
+set -e
+docker rm -f qlive-rerun-slow >/dev/null 2>&1 || true
+docker run -d --name qlive-rerun-slow --network crawl-fixture --network-alias slow.crawl.test nginx:alpine sh -c '
+cat > /etc/nginx/conf.d/default.conf <<EOF
+server {
+  listen 80 default_server;
+  root /usr/share/nginx/html;
+  gzip off;
+  location = /slow.html { limit_rate 1; }
+  location /held/ { limit_rate 1; }
+  location = /redir { return 302 http://fixture-b.crawl.test/ext; }
+  location / { }
+}
+EOF
+mkdir -p /usr/share/nginx/html/held
+{ echo "<html><head><title>R-SC4 slow page</title></head><body>"; head -c 300000 /dev/zero | tr "\0" "a"; echo "</body></html>"; } > /usr/share/nginx/html/slow.html
+head -c 300000 /dev/zero | tr "\0" "b" > /usr/share/nginx/html/held/pixel.png
+echo "<html><head><title>R-SC4 held image page</title></head><body><h1>Held image</h1><p>The image below never finishes.</p><img src=\"/held/pixel.png\"></body></html>" > /usr/share/nginx/html/held.html
+echo "<html><head><title>R3-SC4 to blank</title></head><body><p>moving</p><script>setTimeout(function(){location.href=\"about:blank#off\"},300)</script></body></html>" > /usr/share/nginx/html/toblank.html
+echo "<html><head><title>R4-SC4 offlist image</title></head><body><h1>Off-list image</h1><p>The image below is on a host outside the run list.</p><img src=\"http://fixture-b.crawl.test/pixel.png\" alt=\"offlist\"></body></html>" > /usr/share/nginx/html/img.html
+exec nginx -g "daemon off;"'

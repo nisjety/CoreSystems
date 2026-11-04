@@ -1,0 +1,51 @@
+event: action.started
+id: 2
+data: {"event_id":"evt_01M62DD509E8FPZ0QJRXQ40FSA","run_id":"run_01M62DD2EWDPY9A28S438DCP3W","type":"action_started","ts":"2026-10-28T23:26:57.545197599Z","seq":2,"payload":{"action":{"type":"navigate","url":"http://fixture-a.crawl.test/"},"step":0},"idempotency_key":"run_01M62DD2EWDPY9A28S438DCP3W:action:0:started"}
+
+event: observation.ready
+id: 3
+data: {"event_id":"evt_01M62DD5CGEYP2VVKNVFHJCWRB","run_id":"run_01M62DD2EWDPY9A28S438DCP3W","type":"observation_ready","ts":"2026-10-28T23:26:57.936298905Z","seq":3,"payload":{"has_evidence_delta":true,"has_screenshot":true,"step":0,"url":"http://fixture-a.crawl.test/"},"idempotency_key":"run_01M62DD2EWDPY9A28S438DCP3W:observation:0:ready"}
+
+event: action.started
+id: 4
+data: {"event_id":"evt_01M62DD5TWB468SMS9BE9A9KF5","run_id":"run_01M62DD2EWDPY9A28S438DCP3W","type":"action_started","ts":"2026-10-28T23:26:58.396615215Z","seq":4,"payload":{"action":{"ms":0,"type":"wait"},"step":1},"idempotency_key":"run_01M62DD2EWDPY9A28S438DCP3W:action:1:started"}
+
+event: observation.ready
+id: 5
+data: {"event_id":"evt_01M62DD5WNZS5VTWM0BR0B77NY","run_id":"run_01M62DD2EWDPY9A28S438DCP3W","type":"observation_ready","ts":"2026-10-28T23:26:58.453519044Z","seq":5,"payload":{"has_evidence_delta":true,"has_screenshot":true,"step":1,"url":"http://fixture-a.crawl.test/"},"idempotency_key":"run_01M62DD2EWDPY9A28S438DCP3W:observation:1:ready"}
+
+event: action.started
+id: 6
+data: {"event_id":"evt_01M62DD69KKF91RYJH6SF33M28","run_id":"run_01M62DD2EWDPY9A28S438DCP3W","type":"action_started","ts":"2026-10-28T23:26:58.867387339Z","seq":6,"payload":{"action":{"ms":0,"type":"wait"},"step":2},"idempotency_key":"run_01M62DD2EWDPY9A28S438DCP3W:action:2:started"}
+
+event: observation.ready
+id: 7
+data: {"event_id":"evt_01M62DD6BBQKCF1985B1ER3XHB","run_id":"run_01M62DD2EWDPY9A28S438DCP3W","type":"observation_ready","ts":"2026-10-28T23:26:58.923102849Z","seq":7,"payload":{"has_evidence_delta":true,"has_screenshot":true,"step":2,"url":"http://fixture-a.crawl.test/"},"idempotency_key":"run_01M62DD2EWDPY9A28S438DCP3W:observation:2:ready"}
+
+event: action.started
+id: 8
+data: {"event_id":"evt_01M62DD6W0TWQ7V412KM3CRS4C","run_id":"run_01M62DD2EWDPY9A28S438DCP3W","type":"action_started","ts":"2026-10-28T23:26:59.456149201Z","seq":8,"payload":{"action":{"ms":0,"type":"wait"},"step":3},"idempotency_key":"run_01M62DD2EWDPY9A28S438DCP3W:action:3:started"}
+
+event: observation.ready
+id: 9
+data: {"event_id":"evt_01M62DD6XFS8FX8M0R5N11V05M","run_id":"run_01M62DD2EWDPY9A28S438DCP3W","type":"observation_ready","ts":"2026-10-28T23:26:59.503360896Z","seq":9,"payload":{"has_evidence_delta":true,"has_screenshot":true,"step":3,"url":"http://fixture-a.crawl.test/"},"idempotency_key":"run_01M62DD2EWDPY9A28S438DCP3W:observation:3:ready"}
+
+event: action.started
+id: 10
+data: {"event_id":"evt_01M62DD79YM7KVD2T1TGK122FT","run_id":"run_01M62DD2EWDPY9A28S438DCP3W","type":"action_started","ts":"2026-10-28T23:26:59.902749252Z","seq":10,"payload":{"action":{"ms":0,"type":"wait"},"step":4},"idempotency_key":"run_01M62DD2EWDPY9A28S438DCP3W:action:4:started"}
+
+event: observation.ready
+id: 11
+data: {"event_id":"evt_01M62DD7BHJ5SGKBZBQYKT3T6T","run_id":"run_01M62DD2EWDPY9A28S438DCP3W","type":"observation_ready","ts":"2026-10-28T23:26:59.953622908Z","seq":11,"payload":{"has_evidence_delta":true,"has_screenshot":true,"step":4,"url":"http://fixture-a.crawl.test/"},"idempotency_key":"run_01M62DD2EWDPY9A28S438DCP3W:observation:4:ready"}
+
+event: agent.budget_exhausted
+id: 12
+data: {"event_id":"evt_01M62DD7R3PFD6K042EX432A4R","run_id":"run_01M62DD2EWDPY9A28S438DCP3W","type":"agent_budget_exhausted","ts":"2026-10-28T23:27:00.355569792Z","seq":12,"payload":{"dimension":"steps","estimated":false,"limit":5.0,"limit_source":"run_budget","spent":5.0,"unit":"count"},"idempotency_key":"run_01M62DD2EWDPY9A28S438DCP3W:agent_budget_exhausted:925316cc-ac53-45c0-a91b-47ff9c7915f8"}
+
+event: agent.completed
+id: 13
+data: {"event_id":"evt_01M62DDCYW5588Q9Y9RB0ZV02N","run_id":"run_01M62DD2EWDPY9A28S438DCP3W","type":"agent_completed","ts":"2026-10-28T23:27:05.692287802Z","seq":13,"payload":{},"idempotency_key":"run_01M62DD2EWDPY9A28S438DCP3W:agent_completed"}
+
+event: done
+data: run_closed
+

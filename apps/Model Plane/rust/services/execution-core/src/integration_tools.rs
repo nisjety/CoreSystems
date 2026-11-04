@@ -1199,119 +1199,9 @@ pub fn operation_is_write(operation: &str) -> Option<bool> {
     None
 }
 
-/// Most recipients an approval names before it says how many more there are.
-const SUMMARY_RECIPIENTS: usize = 10;
-/// Most characters of a mail's subject an approval shows.
-const SUMMARY_SUBJECT_CHARS: usize = 200;
-/// Most characters of a mail's opening an approval shows.
-const SUMMARY_OPENING_CHARS: usize = 120;
-
-/// What a provider write would do, in words that follow "The agent would" (WS23-S8). Defined for a
-/// mail send only, and read the way integration-corev2 reads the send: the recipients in `body.to`
-/// (a comma-separated string or a list), the subject, and the first 120 characters of the
-/// plain-text body. `None` for every other operation and for an input that does not parse.
-///
-/// The caller keeps these words in the approval's reason and nowhere else. That reason is scrubbed,
-/// and no audit row, outbox event or log line repeats it.
-#[must_use]
-pub fn provider_effect_summary(tool_input: &str) -> Option<String> {
-    #[derive(serde::Deserialize)]
-    struct Input {
-        operation: String,
-        #[serde(default)]
-        body: Value,
-    }
-    let input: Input = serde_json::from_str(tool_input).ok()?;
-    if !is_mail_send(&input.operation) {
-        return None;
-    }
-    let recipients = mail_recipients(input.body.get("to"));
-    let mut summary = String::from("send an email to ");
-    if recipients.is_empty() {
-        summary.push_str("no one");
-    } else {
-        let shown: Vec<&str> = recipients
-            .iter()
-            .take(SUMMARY_RECIPIENTS)
-            .map(String::as_str)
-            .collect();
-        summary.push_str(&shown.join(", "));
-        if recipients.len() > SUMMARY_RECIPIENTS {
-            let _ = write!(
-                summary,
-                " and {} more",
-                recipients.len() - SUMMARY_RECIPIENTS
-            );
-        }
-    }
-    match input
-        .body
-        .get("subject")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|subject| !subject.is_empty())
-    {
-        Some(subject) => {
-            let _ = write!(
-                summary,
-                " with the subject '{}'",
-                one_line(subject, SUMMARY_SUBJECT_CHARS)
-            );
-        }
-        None => summary.push_str(" with no subject"),
-    }
-    if let Some(text) = input
-        .body
-        .get("bodyText")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|text| !text.is_empty())
-    {
-        let _ = write!(
-            summary,
-            "; it opens '{}'",
-            one_line(text, SUMMARY_OPENING_CHARS)
-        );
-    }
-    Some(summary)
-}
-
-/// Whether an operation sends a mail, under the names integration-corev2 gates for approval.
-fn is_mail_send(operation: &str) -> bool {
-    matches!(
-        operation.trim().to_ascii_lowercase().as_str(),
-        "gmail.send" | "google.gmail.send" | "mail.send" | "microsoft.mail.send"
-    )
-}
-
-/// The recipients a mail send reaches, split as integration-corev2 splits them: a string on commas,
-/// or each string item of a list.
-fn mail_recipients(to: Option<&Value>) -> Vec<String> {
-    let raw: Vec<&str> = match to {
-        Some(Value::String(list)) => list.split(',').collect(),
-        Some(Value::Array(items)) => items.iter().filter_map(Value::as_str).collect(),
-        _ => Vec::new(),
-    };
-    raw.into_iter()
-        .map(str::trim)
-        .filter(|recipient| !recipient.is_empty())
-        .map(str::to_owned)
-        .collect()
-}
-
-/// The first `max` characters of `text` on one line, marked when cut. A line break becomes a
-/// space, so a summary never spans lines in an approval.
-fn one_line(text: &str, max: usize) -> String {
-    let mut line: String = text
-        .chars()
-        .take(max)
-        .map(|c| if c.is_control() { ' ' } else { c })
-        .collect();
-    if text.chars().count() > max {
-        line.push('…');
-    }
-    line
-}
+/// What a provider write would do, in words for the approval's reason (WS23-S8). Moved to
+/// mp-contracts (EP-10-S3) so session-core recomputes the same words for an edited approval.
+pub use mp_contracts::provider_writes::provider_effect_summary;
 
 fn render_provider_actions(connections: &[ConnectionSummary]) -> String {
     if connections.is_empty() {
@@ -1695,6 +1585,32 @@ mod tests {
 
         assert_eq!(catalogued, contract);
         assert_eq!(contract.len(), READ_OPERATIONS.len(), "golden rows are unique");
+    }
+
+    /// The write golden (integration-corev2, copied into mp-contracts) lists the writes that
+    /// execution-core must catalogue as writes. A write marked as a read here would skip the
+    /// approval it needs, and a catalogued write the golden does not name would have no
+    /// integration-corev2 check behind it.
+    #[test]
+    fn catalog_writes_match_contract_table() {
+        use mp_contracts::provider_writes::WRITE_OPERATIONS;
+        use std::collections::BTreeSet;
+
+        let contract: BTreeSet<(&str, &str)> = WRITE_OPERATIONS
+            .iter()
+            .map(|write| (write.provider, write.operation))
+            .collect();
+        let catalogued: BTreeSet<(&str, &str)> = CATALOG
+            .iter()
+            .flat_map(|(provider, ops)| {
+                ops.iter()
+                    .filter(|op| op.is_write)
+                    .map(move |op| (*provider, op.operation))
+            })
+            .collect();
+
+        assert_eq!(catalogued, contract);
+        assert_eq!(contract.len(), WRITE_OPERATIONS.len(), "golden rows are unique");
     }
 
     // -------------------------------------------------------------------

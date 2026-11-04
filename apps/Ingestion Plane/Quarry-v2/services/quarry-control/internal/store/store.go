@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -22,7 +23,7 @@ type DB interface {
 	Profiles() ResourceStore[BrowserProfile]
 	Schedules() SchedulesStore
 	Sources() SourcesStore
-	Webhooks() ResourceStore[Webhook]
+	Webhooks() WebhooksStore
 	WebhookDeliveries() WebhookDeliveryStore
 	Blocklists() ResourceStore[BlocklistEntry]
 	Events() EventLog
@@ -81,12 +82,44 @@ type WebhookDeliveryStore interface {
 	ResourceStore[WebhookDelivery]
 	Update(d WebhookDelivery) error
 	ClaimDue(now int64, limit int) ([]WebhookDelivery, error)
+	// GetByOrg and ListByWebhook are the tenant reads (INNH-5): a delivery of another
+	// org answers exactly like a missing one. status "" lists every status.
+	GetByOrg(id quarrycontracts.ID, orgID string) (WebhookDelivery, bool)
+	ListByWebhook(orgID string, webhookID quarrycontracts.ID, status string, limit int, cursor string) ([]WebhookDelivery, string)
+	// DeleteTerminalBefore hard-deletes deliveries that reached a terminal status
+	// (success, failed, dlq) and were created before cutoff (unix seconds): the delivery
+	// rows hold the whole event payload, so they are bounded by a retention window.
+	DeleteTerminalBefore(cutoff int64) (int64, error)
+}
+
+// WebhooksStore is the webhook subscription table. The tenant methods (GetByOrg,
+// ListByOrg, CountByOrg, DeleteByOrg, UpdateByOrg, CreateCapped) are the only ones the
+// org-scoped /v1/webhook-subscriptions routes reach: a row of another org answers exactly
+// like a missing one. ListActiveByOrg is the fan-out read and takes an org by design:
+// there is no all-orgs read of subscriptions, so delivery cannot leak across tenants.
+// The unscoped ResourceStore methods stay for the dispatcher (Get by delivery.webhook_id)
+// and for tests.
+type WebhooksStore interface {
+	ResourceStore[Webhook]
+	// CreateCapped inserts an org-scoped subscription unless the org already holds
+	// maxPerOrg of them (ErrQuotaExceeded) or has one with the same url and events
+	// (ErrConflict). The count and the insert are one atomic step.
+	CreateCapped(w Webhook, maxPerOrg int) error
+	GetByOrg(id quarrycontracts.ID, orgID string) (Webhook, bool)
+	ListByOrg(orgID string, limit int, cursor string) ([]Webhook, string)
+	CountByOrg(orgID string) int
+	DeleteByOrg(id quarrycontracts.ID, orgID string) error
+	// UpdateByOrg writes the mutable fields (Events, Active, Secret, SecretHint,
+	// Description) of the row with w.ID in w.OrgID.
+	UpdateByOrg(w Webhook) error
+	// ListActiveByOrg returns up to limit active subscriptions of orgID. orgID "" returns none.
+	ListActiveByOrg(orgID string, limit int) []Webhook
 }
 
 // SchedulesStore is the schedule table. The tenant methods (GetByOrg,
-// ListByOrg, DeleteByOrg, UpdateEnabledByOrg) are the only ones the edge
-// reaches; a row that belongs to another org answers exactly like a missing
-// one. The unscoped methods (Get, List, Delete, UpdateEnabled, ListDesired)
+// ListByOrg, ListByOrgTag, DeleteByOrg, UpdateEnabledByOrg, UpdateTagByOrg)
+// are the only ones the edge reaches; a row that belongs to another org
+// answers exactly like a missing one. The unscoped methods (Get, List, Delete, UpdateEnabled, ListDesired)
 // serve the orchestrator reconciler and the internal source-monitor path.
 type SchedulesStore interface {
 	ResourceStore[Schedule]
@@ -95,6 +128,15 @@ type SchedulesStore interface {
 	ListByOrg(orgID string, limit int, cursor string) ([]Schedule, string)
 	DeleteByOrg(id quarrycontracts.ID, orgID string) error
 	UpdateEnabledByOrg(id quarrycontracts.ID, orgID string, enabled bool) error
+	// ListByOrgTag is ListByOrg restricted to the schedules of orgID whose tag is
+	// tag. The tag goes through NormalizeTag first, so "Pricing" finds "pricing".
+	// "" lists the untagged schedules. An empty orgID, or a tag that does not
+	// normalise, matches nothing.
+	ListByOrgTag(orgID string, tag string, limit int, cursor string) ([]Schedule, string)
+	// UpdateTagByOrg sets the tag of the schedule id in orgID ("" clears it). A row
+	// of another org answers ErrNotFound, as a missing one does. It does not move
+	// updated_at, which stays the create or enable/disable stamp.
+	UpdateTagByOrg(id quarrycontracts.ID, orgID string, tag string) error
 	// ListDesired is the orchestrator's all-orgs read (internal path only).
 	ListDesired(limit int, cursor string) ([]Schedule, string)
 	// UpdateRuntime writes the executor's bookkeeping (WS15.S2 writes it; the
@@ -116,6 +158,29 @@ func invalid(reason, format string, args ...any) error {
 	return &ValidationError{Reason: reason, Message: fmt.Sprintf(format, args...)}
 }
 
+// maxTagLength bounds one tag (E3.5-6, migration 027). A tag is a short operator
+// label that groups monitors and sources; it is not free text.
+const maxTagLength = 32
+
+// tagPattern is the tag grammar once lowercased: a letter or a digit first, then
+// letters, digits, '.', '_' or '-'.
+var tagPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]*$`)
+
+// NormalizeTag returns the stored form of a tag: trimmed and lowercased. The
+// empty string is the untagged value and is valid. Anything else must be 1 to
+// 32 characters of the tag grammar, or it is refused with reason invalid_tag.
+// The message never echoes the input, so a long value cannot inflate a response.
+func NormalizeTag(raw string) (string, error) {
+	t := strings.ToLower(strings.TrimSpace(raw))
+	if t == "" {
+		return "", nil
+	}
+	if len(t) > maxTagLength || !tagPattern.MatchString(t) {
+		return "", invalid("invalid_tag", "tag must be 1 to %d characters: a-z, 0-9, '.', '_' or '-', starting with a letter or digit", maxTagLength)
+	}
+	return t, nil
+}
+
 // SourcesStore is the durable registry of recurring ingestion targets a
 // tenant has registered (Cycle 23 `quarry_sources`, migration 005). Every
 // method is ORG-SCOPED: the org id is a verified value the edge stamps from
@@ -125,6 +190,12 @@ type SourcesStore interface {
 	// ListByOrg returns the org's non-deleted sources, newest-first, with an
 	// opaque keyset cursor.
 	ListByOrg(orgID string, limit int, cursor string) ([]Source, string)
+	// ListByOrgTag is ListByOrg restricted to the org's live sources whose tag is
+	// tag, with the same tag rules as SchedulesStore.ListByOrgTag.
+	ListByOrgTag(orgID, tag string, limit int, cursor string) ([]Source, string)
+	// UpdateTagByOrg sets the tag of a live source the org owns ("" clears it) and
+	// bumps updated_at. A cross-tenant or soft-deleted id answers ErrNotFound.
+	UpdateTagByOrg(orgID string, id quarrycontracts.ID, tag string) error
 	// Create inserts a new source. The caller mints the org-prefixed id and
 	// stamps the org id; Create does not derive either.
 	Create(s Source) error
@@ -622,6 +693,9 @@ type Schedule struct {
 	// Name is the operator-facing label (WS15.S1, migration 017). Empty for
 	// legacy rows; the tenant view falls back to the target.
 	Name string `json:"name,omitempty"`
+	// Tag is the operator label that groups this monitor (E3.5-6, migration 027).
+	// "" is untagged; a stored value has been through NormalizeTag.
+	Tag string `json:"tag,omitempty"`
 	// Config is the per-kind payload: {url} for scrape and crawl, {urls} for
 	// batch, plus max_pages, max_depth and ingest. JSONB in the table.
 	Config map[string]any `json:"config,omitempty"`
@@ -676,6 +750,8 @@ func (s *Schedule) ApplyDefaults(now int64) {
 // without a Go-flavor envelope. OrgID is stamped server-side from the verified
 // JWT and is NOT NULL in the DB; the JSON tag carries it on the wire so the edge
 // surfaces it. CreatedAt/UpdatedAt are unix-millis to match the rest of the store.
+// Tag (E3.5-6, migration 027) is the operator label: "" is untagged, and a stored
+// value has been through NormalizeTag.
 type Source struct {
 	ID        quarrycontracts.ID `json:"source_id"`
 	OrgID     string             `json:"org_id"`
@@ -684,29 +760,43 @@ type Source struct {
 	Kind      string             `json:"kind"`   // crawl | scrape | search
 	Status    string             `json:"status"` // active | paused | deleted
 	Config    map[string]any     `json:"config,omitempty"`
+	Tag       string             `json:"tag,omitempty"`
 	CreatedAt int64              `json:"created_at"`
 	UpdatedAt int64              `json:"updated_at"`
 }
 
+// Webhook is a delivery subscription. OrgID is the tenant that owns it; a row with an empty
+// OrgID (created before INNH-5) belongs to nobody and receives no delivery. Secret is the
+// HMAC key and is never serialized: the subscription routes show it once, on create and on
+// rotate, from the value they minted.
 type Webhook struct {
-	ID        quarrycontracts.ID `json:"id"`
-	URL       string             `json:"url"`
-	Secret    string             `json:"secret"`
-	Events    []string           `json:"events"`
-	Active    bool               `json:"active"`
-	CreatedAt int64              `json:"created_at"`
+	ID          quarrycontracts.ID `json:"id"`
+	OrgID       string             `json:"org_id,omitempty"`
+	URL         string             `json:"url"`
+	Secret      string             `json:"-"`
+	SecretHint  string             `json:"secret_hint,omitempty"`
+	Events      []string           `json:"events"`
+	Active      bool               `json:"active"`
+	Description string             `json:"description,omitempty"`
+	CreatedBy   string             `json:"created_by,omitempty"`
+	CreatedAt   int64              `json:"created_at"`
 }
 
 type WebhookDelivery struct {
-	ID            quarrycontracts.ID `json:"id"`
-	WebhookID     quarrycontracts.ID `json:"webhook_id"`
-	EventID       quarrycontracts.ID `json:"event_id"`
-	Payload       string             `json:"payload"`
-	Attempt       int                `json:"attempt"`
-	Status        string             `json:"status"` // pending | in_flight | success | failed | dlq
-	LastError     string             `json:"last_error,omitempty"`
-	NextAttemptAt int64              `json:"next_attempt_at"`
-	CreatedAt     int64              `json:"created_at"`
+	ID        quarrycontracts.ID `json:"id"`
+	WebhookID quarrycontracts.ID `json:"webhook_id"`
+	OrgID     string             `json:"org_id,omitempty"`
+	EventID   quarrycontracts.ID `json:"event_id"`
+	EventType string             `json:"event_type,omitempty"`
+	// DedupeKey, when set, is unique per webhook: a second delivery of the same logical
+	// event (one change reaching control by two paths) is dropped with ErrConflict.
+	DedupeKey     string `json:"dedupe_key,omitempty"`
+	Payload       string `json:"payload"`
+	Attempt       int    `json:"attempt"`
+	Status        string `json:"status"` // pending | in_flight | success | failed | dlq
+	LastError     string `json:"last_error,omitempty"`
+	NextAttemptAt int64  `json:"next_attempt_at"`
+	CreatedAt     int64  `json:"created_at"`
 }
 
 type BlocklistEntry struct {
@@ -727,13 +817,14 @@ type memDB struct {
 	profiles     *genericStore[BrowserProfile]
 	schedules    *genericStore[Schedule]
 	sources      *memSources
-	webhooks     *genericStore[Webhook]
+	webhooks     *memWebhooks
 	whDeliveries *genericStore[WebhookDelivery]
 	blocklists   *genericStore[BlocklistEntry]
 	events       *memEventLog
 	snapshotsV2  *memSnapshotsV2
 	jobClaims    *jobClaimTable
 	zdrTombs     *memZdrTombstones
+	schedReqs    *memScheduleRequests
 }
 
 func NewMemory() DB {
@@ -745,13 +836,14 @@ func NewMemory() DB {
 		profiles:     newGeneric[BrowserProfile](func(p BrowserProfile) quarrycontracts.ID { return p.ID }),
 		schedules:    newGeneric[Schedule](func(s Schedule) quarrycontracts.ID { return s.ID }),
 		sources:      newMemSources(),
-		webhooks:     newGeneric[Webhook](func(w Webhook) quarrycontracts.ID { return w.ID }),
+		webhooks:     &memWebhooks{newGeneric[Webhook](func(w Webhook) quarrycontracts.ID { return w.ID })},
 		whDeliveries: newGeneric[WebhookDelivery](func(d WebhookDelivery) quarrycontracts.ID { return d.ID }),
 		blocklists:   newGeneric[BlocklistEntry](func(b BlocklistEntry) quarrycontracts.ID { return b.ID }),
 		events:       &memEventLog{},
 		snapshotsV2:  &memSnapshotsV2{},
 		jobClaims:    &jobClaimTable{until: map[quarrycontracts.ID]time.Time{}},
 		zdrTombs:     newMemZdrTombstones(),
+		schedReqs:    newMemScheduleRequests(),
 	}
 }
 
@@ -764,7 +856,7 @@ func (d *memDB) Artifacts() ResourceStore[Artifact]      { return d.arts }
 func (d *memDB) Profiles() ResourceStore[BrowserProfile] { return d.profiles }
 func (d *memDB) Schedules() SchedulesStore               { return &memSchedules{d.schedules} }
 func (d *memDB) Sources() SourcesStore                   { return d.sources }
-func (d *memDB) Webhooks() ResourceStore[Webhook]        { return d.webhooks }
+func (d *memDB) Webhooks() WebhooksStore                 { return d.webhooks }
 func (d *memDB) WebhookDeliveries() WebhookDeliveryStore {
 	return &memWebhookDeliveries{d.whDeliveries}
 }
@@ -775,6 +867,11 @@ type memSchedules struct{ *genericStore[Schedule] }
 
 // Create applies the same defaults the pg store applies (ApplyDefaults).
 func (m *memSchedules) Create(s Schedule) error {
+	tag, err := NormalizeTag(s.Tag)
+	if err != nil {
+		return err
+	}
+	s.Tag = tag
 	s.ApplyDefaults(time.Now().Unix())
 	return m.genericStore.Create(s)
 }
@@ -812,6 +909,46 @@ func (m *memSchedules) ListByOrg(orgID string, limit int, cursor string) ([]Sche
 	}
 	m.mu.RUnlock()
 	return pageSchedulesMem(all, limit, cursor)
+}
+
+// ListByOrgTag is ListByOrg restricted to the schedules of orgID whose tag is
+// tag, after NormalizeTag. An empty orgID, or a tag that does not normalise,
+// matches nothing.
+func (m *memSchedules) ListByOrgTag(orgID, tag string, limit int, cursor string) ([]Schedule, string) {
+	norm, err := NormalizeTag(tag)
+	if err != nil || orgID == "" {
+		return nil, ""
+	}
+	m.mu.RLock()
+	all := make([]Schedule, 0, len(m.items))
+	for _, it := range m.items {
+		if it.OrgID == orgID && it.Tag == norm {
+			all = append(all, it)
+		}
+	}
+	m.mu.RUnlock()
+	return pageSchedulesMem(all, limit, cursor)
+}
+
+// UpdateTagByOrg sets the tag of a schedule the org owns. Like the pg store, it
+// leaves UpdatedAt alone.
+func (m *memSchedules) UpdateTagByOrg(id quarrycontracts.ID, orgID string, tag string) error {
+	norm, err := NormalizeTag(tag)
+	if err != nil {
+		return err
+	}
+	if orgID == "" {
+		return ErrNotFound
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	it, ok := m.items[id]
+	if !ok || it.OrgID != orgID {
+		return ErrNotFound
+	}
+	it.Tag = norm
+	m.items[id] = it
+	return nil
 }
 
 func (m *memSchedules) ListDesired(limit int, cursor string) ([]Schedule, string) {
@@ -905,6 +1042,11 @@ func newMemSources() *memSources {
 }
 
 func (m *memSources) Create(s Source) error {
+	tag, err := NormalizeTag(s.Tag)
+	if err != nil {
+		return err
+	}
+	s.Tag = tag
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if _, exists := m.items[s.ID]; exists {
@@ -920,6 +1062,11 @@ func (m *memSources) Create(s Source) error {
 // index). A match refreshes updated_at and is returned as-is; no match
 // inserts `s` the same way Create does.
 func (m *memSources) UpsertByOrgAndURL(s Source) (Source, bool, error) {
+	tag, err := NormalizeTag(s.Tag)
+	if err != nil {
+		return Source{}, false, err
+	}
+	s.Tag = tag
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for _, id := range m.order {
@@ -973,6 +1120,57 @@ func (m *memSources) ListByOrg(orgID string, limit int, _ string) ([]Source, str
 		out = append(out, s)
 	}
 	return out, ""
+}
+
+// ListByOrgTag is ListByOrg restricted to the org's live sources whose tag is
+// tag, after NormalizeTag. Like ListByOrg it returns no cursor: the in-memory
+// store is the dev store and does not page sources.
+func (m *memSources) ListByOrgTag(orgID, tag string, limit int, _ string) ([]Source, string) {
+	norm, err := NormalizeTag(tag)
+	if err != nil || orgID == "" {
+		return nil, ""
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if limit <= 0 {
+		limit = 50
+	}
+	out := make([]Source, 0, limit)
+	// Newest-first: walk insertion order in reverse.
+	for i := len(m.order) - 1; i >= 0; i-- {
+		id := m.order[i]
+		if m.deleted[id] {
+			continue
+		}
+		s := m.items[id]
+		if s.OrgID != orgID || s.Tag != norm {
+			continue
+		}
+		if len(out) == limit {
+			break
+		}
+		out = append(out, s)
+	}
+	return out, ""
+}
+
+// UpdateTagByOrg sets the tag of a live source the org owns and bumps updated_at.
+// A cross-tenant or soft-deleted id answers ErrNotFound, as SoftDeleteByOrg does.
+func (m *memSources) UpdateTagByOrg(orgID string, id quarrycontracts.ID, tag string) error {
+	norm, err := NormalizeTag(tag)
+	if err != nil {
+		return err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	s, ok := m.items[id]
+	if !ok || m.deleted[id] || s.OrgID != orgID || orgID == "" {
+		return ErrNotFound
+	}
+	s.Tag = norm
+	s.UpdatedAt = time.Now().UnixMilli()
+	m.items[id] = s
+	return nil
 }
 
 func (m *memSources) SoftDeleteByOrg(orgID string, id quarrycontracts.ID) error {
@@ -1380,6 +1578,225 @@ func (m *memJobs) ListBySchedule(sid quarrycontracts.ID, limit int, cur string) 
 
 type memWebhookDeliveries struct{ *genericStore[WebhookDelivery] }
 
+func (m *memWebhookDeliveries) Create(d WebhookDelivery) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, exists := m.items[d.ID]; exists {
+		return ErrConflict
+	}
+	if d.DedupeKey != "" {
+		for _, it := range m.items {
+			if it.WebhookID == d.WebhookID && it.DedupeKey == d.DedupeKey {
+				return ErrConflict
+			}
+		}
+	}
+	m.items[d.ID] = d
+	m.order = append(m.order, d.ID)
+	return nil
+}
+
+func (m *memWebhookDeliveries) GetByOrg(id quarrycontracts.ID, orgID string) (WebhookDelivery, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	it, ok := m.items[id]
+	if !ok || orgID == "" || it.OrgID != orgID {
+		return WebhookDelivery{}, false
+	}
+	return it, true
+}
+
+func (m *memWebhookDeliveries) ListByWebhook(orgID string, webhookID quarrycontracts.ID, status string, limit int, cursor string) ([]WebhookDelivery, string) {
+	m.mu.RLock()
+	var all []WebhookDelivery
+	if orgID != "" {
+		for _, it := range m.items {
+			if it.OrgID == orgID && it.WebhookID == webhookID && (status == "" || it.Status == status) {
+				all = append(all, it)
+			}
+		}
+	}
+	m.mu.RUnlock()
+	sort.Slice(all, func(i, j int) bool {
+		if all[i].CreatedAt != all[j].CreatedAt {
+			return all[i].CreatedAt > all[j].CreatedAt
+		}
+		return all[i].ID > all[j].ID
+	})
+	return pageByLastID(all, limit, cursor, func(d WebhookDelivery) quarrycontracts.ID { return d.ID })
+}
+
+func (m *memWebhookDeliveries) DeleteTerminalBefore(cutoff int64) (int64, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var removed int64
+	kept := make([]quarrycontracts.ID, 0, len(m.order))
+	for _, id := range m.order {
+		it := m.items[id]
+		if it.CreatedAt < cutoff && (it.Status == "success" || it.Status == "failed" || it.Status == "dlq") {
+			delete(m.items, id)
+			removed++
+			continue
+		}
+		kept = append(kept, id)
+	}
+	m.order = kept
+	return removed, nil
+}
+
+// pageByLastID pages a newest-first slice by the id of the last row of the previous page.
+func pageByLastID[T any](all []T, limit int, cursor string, idOf func(T) quarrycontracts.ID) ([]T, string) {
+	if limit <= 0 {
+		limit = 50
+	}
+	start := 0
+	if cursor != "" {
+		start = len(all)
+		for i, it := range all {
+			if string(idOf(it)) == cursor {
+				start = i + 1
+				break
+			}
+		}
+	}
+	end := start + limit
+	if end > len(all) {
+		end = len(all)
+	}
+	out := append([]T(nil), all[start:end]...)
+	next := ""
+	if end < len(all) && len(out) > 0 {
+		next = string(idOf(out[len(out)-1]))
+	}
+	return out, next
+}
+
+// memWebhooks is the in-memory WebhooksStore. Every tenant method enforces the org guard
+// itself, because the pg store relies on its WHERE clause for the same invariant.
+type memWebhooks struct{ *genericStore[Webhook] }
+
+func sameEvents(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func (m *memWebhooks) CreateCapped(w Webhook, maxPerOrg int) error {
+	if w.OrgID == "" {
+		return fmt.Errorf("store: CreateCapped requires an org")
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, exists := m.items[w.ID]; exists {
+		return ErrConflict
+	}
+	count := 0
+	for _, it := range m.items {
+		if it.OrgID != w.OrgID {
+			continue
+		}
+		count++
+		if it.URL == w.URL && sameEvents(it.Events, w.Events) {
+			return ErrConflict
+		}
+	}
+	if maxPerOrg > 0 && count >= maxPerOrg {
+		return ErrQuotaExceeded
+	}
+	m.items[w.ID] = w
+	m.order = append(m.order, w.ID)
+	return nil
+}
+
+func (m *memWebhooks) GetByOrg(id quarrycontracts.ID, orgID string) (Webhook, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	it, ok := m.items[id]
+	if !ok || orgID == "" || it.OrgID != orgID {
+		return Webhook{}, false
+	}
+	return it, true
+}
+
+func (m *memWebhooks) ListByOrg(orgID string, limit int, cursor string) ([]Webhook, string) {
+	m.mu.RLock()
+	var all []Webhook
+	if orgID != "" {
+		for _, it := range m.items {
+			if it.OrgID == orgID {
+				all = append(all, it)
+			}
+		}
+	}
+	m.mu.RUnlock()
+	sort.Slice(all, func(i, j int) bool {
+		if all[i].CreatedAt != all[j].CreatedAt {
+			return all[i].CreatedAt > all[j].CreatedAt
+		}
+		return all[i].ID > all[j].ID
+	})
+	return pageByLastID(all, limit, cursor, func(w Webhook) quarrycontracts.ID { return w.ID })
+}
+
+func (m *memWebhooks) CountByOrg(orgID string) int {
+	if orgID == "" {
+		return 0
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	n := 0
+	for _, it := range m.items {
+		if it.OrgID == orgID {
+			n++
+		}
+	}
+	return n
+}
+
+func (m *memWebhooks) DeleteByOrg(id quarrycontracts.ID, orgID string) error {
+	if _, ok := m.GetByOrg(id, orgID); !ok {
+		return ErrNotFound
+	}
+	return m.genericStore.Delete(id)
+}
+
+func (m *memWebhooks) UpdateByOrg(w Webhook) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	it, ok := m.items[w.ID]
+	if !ok || w.OrgID == "" || it.OrgID != w.OrgID {
+		return ErrNotFound
+	}
+	it.Events, it.Active, it.Secret, it.SecretHint, it.Description = w.Events, w.Active, w.Secret, w.SecretHint, w.Description
+	m.items[w.ID] = it
+	return nil
+}
+
+func (m *memWebhooks) ListActiveByOrg(orgID string, limit int) []Webhook {
+	if orgID == "" {
+		return nil
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	var out []Webhook
+	for _, id := range m.order {
+		it := m.items[id]
+		if it.OrgID == orgID && it.Active {
+			out = append(out, it)
+			if limit > 0 && len(out) >= limit {
+				break
+			}
+		}
+	}
+	return out
+}
+
 func (m *memWebhookDeliveries) Update(d WebhookDelivery) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -1640,4 +2057,267 @@ func (l *memEventLog) FindByIdempotencyKey(key string) (quarrycontracts.Event, b
 		}
 	}
 	return quarrycontracts.Event{}, false
+}
+
+// ---- schedule requests (WS15.S3, migration 026) ----------------------------
+
+// Schedule request actions and states. A trigger or backfill is recorded as a
+// row that the orchestrator claims (pull model, X-9 / D14 option 2): control
+// holds no Temporal client, so a request is durable before anything runs and an
+// orchestrator restart between request and claim loses nothing.
+const (
+	ScheduleRequestTrigger  = "trigger"
+	ScheduleRequestBackfill = "backfill"
+
+	ScheduleRequestPending  = "pending"
+	ScheduleRequestClaimed  = "claimed"
+	ScheduleRequestDone     = "done"
+	ScheduleRequestFailed   = "failed"
+	ScheduleRequestRejected = "rejected"
+)
+
+// ScheduleRequest is one trigger or backfill of a schedule. Times are unix
+// milliseconds. Params is {start_at, end_at, overlap_policy} for a backfill and
+// empty for a trigger; Result is what the orchestrator reported (the workflow
+// or schedule id). The row holds no page content.
+type ScheduleRequest struct {
+	ID             quarrycontracts.ID `json:"id"`
+	ScheduleID     quarrycontracts.ID `json:"schedule_id"`
+	OrgID          string             `json:"org_id"`
+	Action         string             `json:"action"`
+	Params         map[string]any     `json:"params,omitempty"`
+	Status         string             `json:"status"`
+	ClaimedBy      string             `json:"claimed_by,omitempty"`
+	LeaseUntil     int64              `json:"lease_until,omitempty"`
+	Attempts       int                `json:"attempts"`
+	Result         map[string]any     `json:"result,omitempty"`
+	Error          string             `json:"error,omitempty"`
+	RequestedBy    string             `json:"requested_by,omitempty"`
+	IdempotencyKey string             `json:"-"`
+	CreatedAt      int64              `json:"created_at"`
+	FinishedAt     *int64             `json:"finished_at,omitempty"`
+}
+
+// ScheduleRequestTerminal reports whether status ends a request.
+func ScheduleRequestTerminal(status string) bool {
+	switch status {
+	case ScheduleRequestDone, ScheduleRequestFailed, ScheduleRequestRejected:
+		return true
+	}
+	return false
+}
+
+// ScheduleRequestsStore is the request table. Create refuses a second open
+// (pending or claimed) request of the same schedule and a repeated
+// (org, idempotency key) with ErrConflict. Claim hands each claimable row to one
+// worker: a pending row, or a claimed row whose lease ran out (the worker died).
+// Complete, Fail and Release act only on a row the named worker still holds;
+// anything else is ErrConflict, an unknown id ErrNotFound.
+type ScheduleRequestsStore interface {
+	Create(req ScheduleRequest) error
+	// GetByOrg is the tenant read: a request of another org is not found.
+	GetByOrg(id quarrycontracts.ID, orgID string) (ScheduleRequest, bool)
+	// HasPending reports an open request of the schedule. action "" matches any.
+	HasPending(scheduleID quarrycontracts.ID, action string) bool
+	Claim(worker string, limit int, lease time.Duration, now time.Time) ([]ScheduleRequest, error)
+	Complete(id quarrycontracts.ID, worker string, result map[string]any, now time.Time) error
+	// Fail ends a held request as failed or rejected with a short reason.
+	Fail(id quarrycontracts.ID, worker, status, reason string, now time.Time) error
+	// Release gives a held request back to the queue (a transient error); the
+	// attempt stays counted and the reason is kept as the last error.
+	Release(id quarrycontracts.ID, worker, reason string) error
+}
+
+// ScheduleRequestsProvider is implemented by a DB that has the request table.
+// It is optional, like RequestQueueReader, so a DB without it answers 501
+// instead of failing to compile; both backends here implement it.
+type ScheduleRequestsProvider interface {
+	ScheduleRequests() ScheduleRequestsStore
+}
+
+// ScheduleRequestReasonMax bounds the stored error text.
+const ScheduleRequestReasonMax = 256
+
+// ClipScheduleRequestReason trims a reason to ScheduleRequestReasonMax bytes.
+func ClipScheduleRequestReason(s string) string {
+	if len(s) > ScheduleRequestReasonMax {
+		return s[:ScheduleRequestReasonMax]
+	}
+	return s
+}
+
+type memScheduleRequests struct {
+	mu    sync.Mutex
+	items map[quarrycontracts.ID]ScheduleRequest
+	order []quarrycontracts.ID
+}
+
+func newMemScheduleRequests() *memScheduleRequests {
+	return &memScheduleRequests{items: map[quarrycontracts.ID]ScheduleRequest{}}
+}
+
+func (d *memDB) ScheduleRequests() ScheduleRequestsStore { return d.schedReqs }
+
+func copyAnyMap(in map[string]any) map[string]any {
+	if in == nil {
+		return nil
+	}
+	out := make(map[string]any, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
+}
+
+func cloneScheduleRequest(r ScheduleRequest) ScheduleRequest {
+	r.Params = copyAnyMap(r.Params)
+	r.Result = copyAnyMap(r.Result)
+	if r.FinishedAt != nil {
+		v := *r.FinishedAt
+		r.FinishedAt = &v
+	}
+	return r
+}
+
+func (m *memScheduleRequests) Create(req ScheduleRequest) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, dup := m.items[req.ID]; dup {
+		return ErrConflict
+	}
+	for _, id := range m.order {
+		it := m.items[id]
+		if it.ScheduleID == req.ScheduleID && !ScheduleRequestTerminal(it.Status) {
+			return ErrConflict
+		}
+		if req.IdempotencyKey != "" && it.OrgID == req.OrgID && it.IdempotencyKey == req.IdempotencyKey {
+			return ErrConflict
+		}
+	}
+	if req.Status == "" {
+		req.Status = ScheduleRequestPending
+	}
+	m.items[req.ID] = cloneScheduleRequest(req)
+	m.order = append(m.order, req.ID)
+	return nil
+}
+
+func (m *memScheduleRequests) GetByOrg(id quarrycontracts.ID, orgID string) (ScheduleRequest, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	it, ok := m.items[id]
+	if !ok || orgID == "" || it.OrgID != orgID {
+		return ScheduleRequest{}, false
+	}
+	return cloneScheduleRequest(it), true
+}
+
+func (m *memScheduleRequests) HasPending(scheduleID quarrycontracts.ID, action string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, id := range m.order {
+		it := m.items[id]
+		if it.ScheduleID != scheduleID || ScheduleRequestTerminal(it.Status) {
+			continue
+		}
+		if action == "" || it.Action == action {
+			return true
+		}
+	}
+	return false
+}
+
+func (m *memScheduleRequests) Claim(worker string, limit int, lease time.Duration, now time.Time) ([]ScheduleRequest, error) {
+	if worker == "" {
+		return nil, fmt.Errorf("claim: worker required")
+	}
+	if limit <= 0 {
+		limit = 1
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	nowMs := now.UnixMilli()
+	var out []ScheduleRequest
+	// Oldest first: order is insertion order, which is created_at order.
+	for _, id := range m.order {
+		if len(out) >= limit {
+			break
+		}
+		it := m.items[id]
+		claimable := it.Status == ScheduleRequestPending ||
+			(it.Status == ScheduleRequestClaimed && it.LeaseUntil < nowMs)
+		if !claimable {
+			continue
+		}
+		it.Status = ScheduleRequestClaimed
+		it.ClaimedBy = worker
+		it.LeaseUntil = now.Add(lease).UnixMilli()
+		it.Attempts++
+		m.items[id] = it
+		out = append(out, cloneScheduleRequest(it))
+	}
+	return out, nil
+}
+
+// held returns the row when worker still holds it.
+func (m *memScheduleRequests) held(id quarrycontracts.ID, worker string) (ScheduleRequest, error) {
+	it, ok := m.items[id]
+	if !ok {
+		return ScheduleRequest{}, ErrNotFound
+	}
+	if it.Status != ScheduleRequestClaimed || it.ClaimedBy != worker {
+		return ScheduleRequest{}, ErrConflict
+	}
+	return it, nil
+}
+
+func (m *memScheduleRequests) Complete(id quarrycontracts.ID, worker string, result map[string]any, now time.Time) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	it, err := m.held(id, worker)
+	if err != nil {
+		return err
+	}
+	fin := now.UnixMilli()
+	it.Status = ScheduleRequestDone
+	it.Result = copyAnyMap(result)
+	it.Error = ""
+	it.LeaseUntil = 0
+	it.FinishedAt = &fin
+	m.items[id] = it
+	return nil
+}
+
+func (m *memScheduleRequests) Fail(id quarrycontracts.ID, worker, status, reason string, now time.Time) error {
+	if status != ScheduleRequestFailed && status != ScheduleRequestRejected {
+		return fmt.Errorf("fail: status must be failed or rejected")
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	it, err := m.held(id, worker)
+	if err != nil {
+		return err
+	}
+	fin := now.UnixMilli()
+	it.Status = status
+	it.Error = ClipScheduleRequestReason(reason)
+	it.LeaseUntil = 0
+	it.FinishedAt = &fin
+	m.items[id] = it
+	return nil
+}
+
+func (m *memScheduleRequests) Release(id quarrycontracts.ID, worker, reason string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	it, err := m.held(id, worker)
+	if err != nil {
+		return err
+	}
+	it.Status = ScheduleRequestPending
+	it.ClaimedBy = ""
+	it.LeaseUntil = 0
+	it.Error = ClipScheduleRequestReason(reason)
+	m.items[id] = it
+	return nil
 }

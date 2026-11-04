@@ -32,6 +32,12 @@ const contract = JSON.parse(readFileSync(contractPath, 'utf8')) as {
   codes: { code: string }[]
 }
 
+// The kinds are the proto's: a kind added to `ApprovalKind` without words would headline every card
+// of that kind with the generic line, so the enum is read the way the contract is.
+const protoPath = resolve(here, '../../../../../Model Plane/proto/model_plane/v1/orchestration.proto')
+const kindEnum = readFileSync(protoPath, 'utf8').split('enum ApprovalKind {')[1]?.split('}')[0] ?? ''
+const protoKinds = [...kindEnum.matchAll(/(APPROVAL_KIND_[A-Z_]+)\s*=\s*\d+;/g)].map((match) => match[1])
+
 describe('the cause vocabulary', () => {
   it('is exactly the set the Model Plane contract lists, in its order', () => {
     expect([...APPROVAL_CAUSE_CODES]).toEqual(contract.codes.map((entry) => entry.code))
@@ -157,6 +163,14 @@ describe('the approval kind a proof or an event states', () => {
     for (const kind of [undefined, '', 'APPROVAL_KIND_UNSPECIFIED', 'APPROVAL_KIND_FROM_A_NEWER_SERVER', 'constructor']) {
       expect(approvalKindLabel(kind, en)).toBe('Action')
       expect(approvalKindLabel(kind, no)).toBe('Handling')
+    }
+  })
+
+  it('words every kind the proto declares, so no card falls back to the generic line', () => {
+    expect(protoKinds).toContain('APPROVAL_KIND_TOOL_CALL')
+    for (const kind of protoKinds.filter((name) => name !== 'APPROVAL_KIND_UNSPECIFIED')) {
+      expect(approvalKindLabel(kind, en), kind).not.toBe('Action')
+      expect(approvalKindLabel(kind, no), kind).not.toBe('Handling')
     }
   })
 })

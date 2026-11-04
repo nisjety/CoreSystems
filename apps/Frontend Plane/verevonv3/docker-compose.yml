@@ -155,6 +155,8 @@ services:
       # WS21-S2: mint a browser bearer for a personal, non-ZDR agentic turn and forward it to model-gateway. Off by
       # default; only the literal `true`. execution-core's EXECUTION_DO_BROWSER_ENABLED must be on too.
       BROWSER_DO_ENABLED: ${BROWSER_DO_ENABLED:-false}
+      # WS22-S3: mint the sandbox-manager credential for a personal non-ZDR turn; off by default; only the literal true.
+      SANDBOX_THREAD_WORKSPACE_ENABLED: ${SANDBOX_THREAD_WORKSPACE_ENABLED:-false}
       # WS21-S7: a workspace AI run starts under a real broker grant and carries the browser bearer. Off by default; only
       # the literal `true`. Keep it off until Quarry accepts broker grants and the broker site policy is shadow or enforce.
       BROWSER_AI_RUN_REAL_GRANT: ${BROWSER_AI_RUN_REAL_GRANT:-false}
@@ -200,6 +202,9 @@ services:
       # user-core registry entry of the same name (that one is audience user-core).
       MAIL_TASK_GATEWAY_BRIDGE_SERVICE_API_KEY: ${MAIL_TASK_GATEWAY_BRIDGE_SERVICE_API_KEY:-}
       MAIL_TASK_GATEWAY_BRIDGE_SERVICE_ID: ${MAIL_TASK_GATEWAY_BRIDGE_SERVICE_ID:-verevon-gateway}
+      # EP-12 S8: public Agent API ingress (/api/agent/v1/*); exchanges x-api-key at auth-core with the verevon-gateway principal above.
+      GATEWAY_AGENT_API_ENABLED: ${GATEWAY_AGENT_API_ENABLED:-false}
+      GATEWAY_AGENT_API_RPM_PER_KEY: ${GATEWAY_AGENT_API_RPM_PER_KEY:-60}
       # NOTE: there is deliberately no SCRAPE_ENHANCED_* stealth-proxy tier here.
       # The BFF used to fetch bot-walled sites itself through Scrapfly / Bright
       # Data, which sent the org's target URL and the page's full content to a
@@ -457,6 +462,7 @@ services:
       VITE_ALLOW_DEV_AUTH_BYPASS: ${VITE_ALLOW_DEV_AUTH_BYPASS:-false}
       VITE_TURNSTILE_SITE_KEY: ${VITE_TURNSTILE_SITE_KEY:-}
       VITE_PLAN_EXECUTE_ENABLED: ${VITE_PLAN_EXECUTE_ENABLED:-false}
+      VITE_CHAT_PROJECTS_ENABLED: ${VITE_CHAT_PROJECTS_ENABLED:-false}
       # WS08-S4: images ride as parts. Flip together with the gateway's CHAT_VISION_AS_PARTS_ENABLED.
       VITE_CHAT_VISION_AS_PARTS_ENABLED: ${VITE_CHAT_VISION_AS_PARTS_ENABLED:-false}
     healthcheck:

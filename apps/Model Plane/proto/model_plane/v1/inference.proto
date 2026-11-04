@@ -127,6 +127,46 @@ enum ReasoningEffort {
   REASONING_EFFORT_MAX = 6;
 }
 
+// InferPurpose — what a call is for. The closed vocabulary behind the `purpose`
+// metrics label; a call names exactly one. A side task names its own purpose
+// (title, follow-ups, judge) rather than the answer it accompanies. Owner: EP-13 S3.
+enum InferPurpose {
+  // No purpose named. Counted as `unspecified`.
+  INFER_PURPOSE_UNSPECIFIED = 0;
+  // The user-visible answer to a chat turn.
+  INFER_PURPOSE_ANSWER = 1;
+  // A model round that decides or runs a tool inside a chat turn.
+  INFER_PURPOSE_TOOL_ROUND = 2;
+  // A round of a governed Do run.
+  INFER_PURPOSE_AGENT_ROUND = 3;
+  // The sidebar title of a thread.
+  INFER_PURPOSE_TITLE = 4;
+  // The follow-up questions offered after an answer.
+  INFER_PURPOSE_FOLLOW_UPS = 5;
+  // Whether retrieved sources back an answer.
+  INFER_PURPOSE_VERIFICATION_JUDGE = 6;
+  // The plan of a deep research run.
+  INFER_PURPOSE_RESEARCH_PLAN = 7;
+  // The report of a deep research run.
+  INFER_PURPOSE_RESEARCH_SYNTHESIS = 8;
+  // The summary that replaces compacted thread history.
+  INFER_PURPOSE_COMPACTION_SUMMARY = 9;
+  // Facts extracted from a conversation for the memory store.
+  INFER_PURPOSE_MEMORY_EXTRACTION = 10;
+  // Whether a candidate memory duplicates or updates an existing one.
+  INFER_PURPOSE_MEMORY_GROUNDING = 11;
+  // The browser planner choosing the next action.
+  INFER_PURPOSE_BROWSER_PLANNER = 12;
+  // Screening of content for injected instructions.
+  INFER_PURPOSE_SAFETY_SCREEN = 13;
+  // Checking an answer or artifact against its sources or its length.
+  INFER_PURPOSE_VALIDATION = 14;
+  // Cleaning up a dictated transcript.
+  INFER_PURPOSE_DICTATION_CLEANUP = 15;
+  // One round of a scheduled run.
+  INFER_PURPOSE_SCHEDULED_ROUND = 16;
+}
+
 // InferRequest — a single inference request to be routed to a provider.
 message InferRequest {
   // Client-supplied request identifier for tracing.
@@ -247,6 +287,25 @@ message InferRequest {
   // the images. The bytes are request-scope memory only: never cached, never
   // logged, and a field of the internal request that the Debug output redacts.
   repeated InferImagePart image_parts = 20;
+
+  // What this call is for (owner: EP-13 S3). Labels the inference metrics by
+  // purpose and routes nothing. UNSPECIFIED, and any value this build does not
+  // know, count as `unspecified`, so an older caller and a newer one both work.
+  // It carries no content, so Zero Data Retention does not change it.
+  InferPurpose purpose = 21;
+
+  // The run this call belongs to (EP-14 S6). It only attributes a request
+  // snapshot to its run: when INFERENCE_REQUEST_CAPTURE is on, inference-core
+  // records what was sent for a call that names a run and is neither ZDR nor
+  // waived. Empty means no run and no snapshot. It routes nothing and is never
+  // sent to a provider.
+  string run_id = 22;
+
+  // The model the turn itself was served by (EP-13 S4). Read only when `model`
+  // is `verevon-role`: the role table tries its own candidates first, then this
+  // model, then the cheap fallback. Empty names none. It carries no content, so
+  // Zero Data Retention does not change it.
+  string role_fallback_model = 23;
 }
 
 // InferImagePart — one image attached to a message of an InferRequest. Bytes
@@ -401,6 +460,11 @@ message InferResponse {
   // successful response; unset from a server that predates the field. See
   // ProviderTiming.
   ProviderTiming provider_timing = 14;
+
+  // What the budget did to how this call was routed (WS27-S7), when the intent
+  // layer routed it under a budget posture. Absent for a pinned model or while
+  // INFERENCE_ROUTE_NOTE is off.
+  RouteNote route_note = 15;
 }
 
 // InferChunk — a single chunk in a streaming inference response.
@@ -464,6 +528,10 @@ message InferChunk {
   // the final chunk only (same rule as the token counts above). Unset on every
   // non-final chunk. See ProviderTiming.
   ProviderTiming provider_timing = 15;
+
+  // The route note of the call, on the final chunk only, as provider_timing is
+  // (WS27-S7). Absent for a pinned model or while INFERENCE_ROUTE_NOTE is off.
+  RouteNote route_note = 16;
 }
 
 // ProviderTiming — where inference-core's share of one Infer or InferStream
@@ -528,6 +596,38 @@ message ProviderTiming {
   // (for example a subscription broker's process start). Empty when the
   // upstream reports none, which is every provider today.
   map<string, uint64> upstream_ms = 11;
+}
+
+// RouteNote — what the budget did to one Verevon-routed call (WS27-S7). Shared
+// with WS11's applied-effort report. Closed tokens and booleans only: never a
+// price, a count or a model name, so it is safe to log and to forward on
+// zero-data-retention turns.
+message RouteNote {
+  // The org's budget posture when the call was routed: "healthy",
+  // "constrained", "exhausted", or "unknown" when no posture could be read.
+  string budget_posture = 1;
+
+  // True when a constrained budget moved the call one tier cheaper: the same
+  // policy at a healthy budget would have answered with another model.
+  bool tier_shifted = 2;
+
+  // True when an exhausted budget forced the cheap fallback model.
+  bool cheap_fallback_forced = 3;
+
+  // The effort level the budget clamped the call to, when it did. Empty when
+  // the budget left the requested effort alone.
+  string applied_effort = 4;
+
+  // The role-table purpose whose entry chose the model, for a `verevon-role`
+  // call (EP-13 S4): "title", "follow_ups", "verification_judge" or
+  // "research_plan". Empty when no table entry chose the model, that is when the
+  // turn's own model or the cheap fallback did, and for every other call.
+  string role = 5;
+
+  // Which step of the `verevon-role` resolution chose the model (EP-13 S4):
+  // "table", "turn_model" or "cheap_fallback". Empty for every call that named
+  // no role.
+  string role_source = 6;
 }
 
 // CreateEmbeddingRequest — text to embed via a provider-owned model/deployment.
@@ -620,6 +720,45 @@ message ModelInfo {
   // "max"). Empty means the model has no effort control or the provider does
   // not advertise one yet; a client must offer no effort choice in that case.
   repeated string effort_levels = 8;
+
+  // Context window of the model in tokens, lowered to the serving surface's own
+  // ceiling. 0 means no sourced record names the model (EP-13 S2).
+  uint32 context_window_tokens = 9;
+
+  // Largest synchronous output in tokens this model is served at on this surface.
+  // 0 means no sourced record names the model (EP-13 S2).
+  uint32 max_output_tokens = 10;
+
+  // Vendor lifecycle stage: "ga", "preview" or "deprecated". Empty means no sourced
+  // record names the model (EP-13 S2).
+  string lifecycle = 11;
+
+  // What the provider states about how it handles the request data sent to this model
+  // (EP-9 C5). Unset when neither an attested deployment nor a cited source states
+  // anything, which is "not stated", never "no".
+  ProviderDataUse data_use = 12;
+}
+
+// ProviderDataUse — the data-handling statements a provider makes for one model (EP-9 C5).
+// A field is set only when its source states it. The scalars are `optional` for that reason:
+// an absent value is "not stated", while a `false` or `0` is a statement the source made.
+message ProviderDataUse {
+  // True when the provider states it trains on the inputs it receives, false when it
+  // states it does not. Unset when no source says either.
+  optional bool trains_on_inputs = 1;
+
+  // Days the provider states it keeps the inputs, zero when it states none are kept.
+  // Unset when no source states a period.
+  optional int32 retention_days = 2;
+
+  // True only when this deployment carries a zero-data-retention attestation that is in
+  // force now (the operator's evidence-bound retention approval). Unset otherwise: an
+  // unattested deployment is not stated to retain data.
+  optional bool zdr_attested = 3;
+
+  // Reference to the public statement the fields above cite, such as a vendor policy URL.
+  // Empty when none is cited, including when the fields come from an attestation.
+  string statement_ref = 4;
 }
 
 // ListModelsResponse — available models in the active provider chain.

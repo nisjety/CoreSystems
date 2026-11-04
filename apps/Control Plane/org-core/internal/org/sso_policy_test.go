@@ -79,18 +79,6 @@ func reasonsFor(t *testing.T, admin *fakeIdentityAdmin, domains []string, provid
 	return reasons
 }
 
-func equalStrings(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
-}
-
 func TestEnforcePreconditionsPassWhenEverythingHolds(t *testing.T) {
 	admin := &fakeIdentityAdmin{signedIn: true, facts: []SSOMemberFact{ownerWithTwoFactor("owner-1")}}
 	reasons := reasonsFor(t, admin, []string{"example.com"}, verifiedProvider(), nil, []string{"owner-1"})

@@ -284,3 +284,151 @@ async fn screenshot_mask_live_ignores_a_hidden_password_and_refuses_a_pdf_with_a
     assert_eq!(error.code, ErrorCode::SecurityBlocked);
     driver.release(session).await.expect("release");
 }
+
+// W2-U52 (D2-066, D2-067, D2-114): the isolated scan world and the cross-origin
+// iframe modes. Written against the unit-tested seams; NOT RUN when this was
+// written (no Chromium in the build lane). They pass a `MaskConfig` straight to
+// `capture_masked`, so no environment variable is touched.
+
+/// The page's own script makes every `querySelectorAll` answer empty, which blinds a
+/// scan that runs in the page's world.
+const MASK_LIVE_HOSTILE_SCRIPT: &str = "<script>\
+for (const P of [Document.prototype, Element.prototype, DocumentFragment.prototype]) {\
+  P.querySelectorAll = function () { return []; };\
+}\
+</script>";
+
+async fn mask_live_capture(
+    page: &::chromiumoxide::Page,
+    config: &crate::screenshot_mask::MaskConfig,
+) -> crate::screenshot_mask::Captured<()> {
+    crate::screenshot_mask::capture_masked(
+        page,
+        config,
+        crate::screenshot_mask::Origin::Legacy,
+        || {
+            let page = page.clone();
+            async move { capture_png(&page, false).await.map(|png| (png, ())) }
+        },
+    )
+    .await
+    .expect("capture")
+}
+
+#[tokio::test]
+#[ignore = "W2-U52 live lane: needs Chromium (CHROMIUMOXIDE_TEST=1)"]
+async fn screenshot_mask_live_isolated_world_masks_a_field_a_hostile_page_hides() {
+    if !live_enabled() {
+        return;
+    }
+    use crate::screenshot_mask::{Captured, MaskConfig};
+    use crate::sensitive_rects::{scan_page, ScanWorld};
+    let driver = live_driver();
+    let session = live_session_sized(&driver, "w2u52-world", None, "mask-world").await;
+    let page = driver.current_page(&session).await.expect("current page");
+    page.set_content(mask_live_page(MASK_LIVE_HOSTILE_SCRIPT))
+        .await
+        .expect("inject page");
+    // The page's own world is blinded: the scan finds no sensitive field.
+    let main_scan = scan_page(&page, ScanWorld::Main).await.expect("a scan");
+    assert!(
+        main_scan.rects.is_empty(),
+        "the main world was fooled: {main_scan:?}"
+    );
+    // The isolated world still sees it.
+    let isolated_scan = scan_page(&page, ScanWorld::Isolated)
+        .await
+        .expect("a scan");
+    assert_eq!(isolated_scan.rects.len(), 1, "{isolated_scan:?}");
+    let config = MaskConfig::from_values(None, None, Some("isolated"), true);
+    match mask_live_capture(&page, &config).await {
+        Captured::Image { bytes, rects, state, .. } => {
+            assert_eq!(state, quarry_core::redaction::ScreenshotState::Masked);
+            assert_eq!(rects.len(), 1);
+            assert_rect_is_masked(&bytes, rects[0]);
+        }
+        other => panic!("expected a masked image, got {other:?}"),
+    }
+    driver.release(session).await.expect("release");
+}
+
+#[tokio::test]
+#[ignore = "W2-U52 live lane: needs Chromium (CHROMIUMOXIDE_TEST=1)"]
+async fn screenshot_mask_live_withhold_mode_refuses_a_cross_origin_iframe() {
+    if !live_enabled() {
+        return;
+    }
+    use crate::screenshot_mask::{Captured, MaskConfig, Withheld};
+    let driver = live_driver();
+    let session = live_session_sized(&driver, "w2u52-oopif", None, "mask-oopif").await;
+    let page = driver.current_page(&session).await.expect("current page");
+    // A data: document is its own opaque origin: its contentDocument is not readable.
+    let html = "<!doctype html><html><body style=\"margin:0\"><p>top</p>\
+        <iframe width=\"320\" height=\"120\" \
+         src=\"data:text/html,%3Cinput%20type%3Dpassword%20value%3Dsecret%3E\"></iframe>\
+        </body></html>";
+    page.set_content(html).await.expect("inject page");
+    // Default (allow): the image comes back, the frame is counted.
+    match mask_live_capture(&page, &MaskConfig::default()).await {
+        Captured::Image { oopif_frames, .. } => assert_eq!(oopif_frames, 1),
+        other => panic!("expected an image, got {other:?}"),
+    }
+    // mask: the frame rectangle is painted.
+    let mask = MaskConfig::from_values(None, Some("mask"), None, true);
+    match mask_live_capture(&page, &mask).await {
+        Captured::Image { rects, state, .. } => {
+            assert_eq!(state, quarry_core::redaction::ScreenshotState::Masked);
+            assert_eq!(rects.len(), 1);
+        }
+        other => panic!("expected a masked image, got {other:?}"),
+    }
+    // withhold: no image, with the closed note.
+    let withhold = MaskConfig::from_values(None, Some("withhold"), Some("isolated"), true);
+    match mask_live_capture(&page, &withhold).await {
+        Captured::Withheld { reason, oopif_frames, .. } => {
+            assert_eq!(reason, Withheld::OopifUnscannable);
+            assert_eq!(oopif_frames, 1);
+        }
+        other => panic!("expected a withheld image, got {other:?}"),
+    }
+    // The PDF is refused too, with its own closed reason.
+    assert_eq!(
+        crate::screenshot_mask::pdf_allowed(&page, &withhold).await,
+        Err(crate::screenshot_mask::PDF_WITHHELD_OOPIF)
+    );
+    driver.release(session).await.expect("release");
+}
+
+#[tokio::test]
+#[ignore = "W2-U52 live lane (D2-114 evidence): needs Chromium (CHROMIUMOXIDE_TEST=1)"]
+async fn screenshot_mask_live_mask_ms_p95_in_each_world() {
+    if !live_enabled() {
+        return;
+    }
+    use crate::screenshot_mask::{Captured, MaskConfig};
+    let driver = live_driver();
+    let viewport = BrowserViewport {
+        width: 1280,
+        height: 800,
+        device_scale_factor: 1.0,
+        is_mobile: false,
+    };
+    let session = live_session_sized(&driver, "w2u52-ms", Some(viewport), "mask-ms").await;
+    let page = driver.current_page(&session).await.expect("current page");
+    page.set_content(mask_live_page("")).await.expect("inject page");
+    for (label, world) in [("main", None), ("isolated", Some("isolated"))] {
+        let config = MaskConfig::from_values(None, None, world, true);
+        let mut samples = Vec::new();
+        for _ in 0..30 {
+            match mask_live_capture(&page, &config).await {
+                Captured::Image { mask_ms, .. } => samples.push(mask_ms),
+                other => panic!("expected an image, got {other:?}"),
+            }
+        }
+        samples.sort_unstable();
+        let p95 = samples[(samples.len() * 95).div_ceil(100) - 1];
+        println!("mask_ms {label}: p50={} p95={p95}", samples[samples.len() / 2]);
+        assert!(p95 <= 150, "{label} p95 {p95} ms is over the 150 ms budget");
+    }
+    driver.release(session).await.expect("release");
+}

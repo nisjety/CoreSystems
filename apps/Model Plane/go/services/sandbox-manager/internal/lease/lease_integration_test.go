@@ -63,6 +63,8 @@ func setupLeaseDB(t *testing.T) string {
 		// that AcquireThread's ON CONFLICT needs.
 		"0005_thread_workspace.up.sql",
 		"0006_thread_lease_unique.up.sql",
+		// WS22-S6: the lifecycle columns that scanLease and the status read now select.
+		"0007_lease_lifecycle.up.sql",
 	} {
 		sqlBytes, readErr := os.ReadFile(filepath.Join("..", "..", "migrations", migration))
 		if readErr != nil {
@@ -274,5 +276,40 @@ func TestLeaseStore_AcquireThreadIsIdempotentInPostgres(t *testing.T) {
 	}
 	if fresh.ID == first.ID {
 		t.Fatal("a released (DESTROYED) thread lease was revived instead of replaced")
+	}
+}
+
+// TestLeaseStore_LifecycleColumnsRoundTripInPostgres checks what the stub cannot: that migration 0007's
+// columns exist, that the nullable heartbeat scans as unset, and that RecordActivity's write reads back
+// through GetAny with the same instant.
+func TestLeaseStore_LifecycleColumnsRoundTripInPostgres(t *testing.T) {
+	dsn := setupLeaseDB(t)
+	ctx := context.Background()
+	store := newPoolStore(t, dsn)
+
+	l, err := store.AcquireThread(ctx, "thread-1", "org-a", "user-a", "backend-a", time.Minute)
+	if err != nil {
+		t.Fatalf("AcquireThread: %v", err)
+	}
+	if l.FailureCause != mpv1.SandboxFailureCause_SANDBOX_FAILURE_CAUSE_UNSPECIFIED || l.HeartbeatAt != nil {
+		t.Fatalf("a fresh lease reads cause %v and heartbeat %v; want no cause and no heartbeat", l.FailureCause, l.HeartbeatAt)
+	}
+
+	at := time.Now().UTC().Truncate(time.Microsecond)
+	if err := store.RecordActivity(ctx, l.ID, "org-a", "user-a", mpv1.SandboxFailureCause_SANDBOX_FAILURE_CAUSE_QUOTA_EXCEEDED, at); err != nil {
+		t.Fatalf("RecordActivity: %v", err)
+	}
+	got, err := store.GetAny(ctx, l.ID, "org-a", "user-a", "backend-a")
+	if err != nil {
+		t.Fatalf("GetAny: %v", err)
+	}
+	if got.FailureCause != mpv1.SandboxFailureCause_SANDBOX_FAILURE_CAUSE_QUOTA_EXCEEDED {
+		t.Fatalf("failure cause = %v, want QUOTA_EXCEEDED", got.FailureCause)
+	}
+	if !got.LastActivityAt.Equal(at) {
+		t.Fatalf("last activity = %v, want %v", got.LastActivityAt, at)
+	}
+	if got.HeartbeatAt != nil {
+		t.Fatalf("heartbeat = %v, want unset until WS22-S8 writes one", got.HeartbeatAt)
 	}
 }

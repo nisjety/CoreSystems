@@ -26,7 +26,9 @@ use quarry_tls::TlsProfile;
 mod agent_routes;
 mod fleet_routes;
 mod answer_routes;
+mod answer_status;
 mod api_error;
+mod api_key;
 mod budget;
 mod audio_routes;
 mod audit_page;
@@ -34,6 +36,10 @@ mod audit_seo;
 mod auth;
 mod cache;
 mod canary;
+// INNH-4: the text diff of a monitored URL; it reads and writes the baseline store, so it exists
+// only where that does.
+#[cfg(feature = "postgres-queue")]
+mod change_diff;
 mod change_routes;
 // Only consumed by the postgres-queue-gated fan-out in change_routes; the
 // bin target has no external consumers, so an ungated declaration would be
@@ -51,12 +57,16 @@ mod handoff;
 mod internal_auth;
 mod internal_routes;
 mod job_lifecycle_routes;
+mod job_results_routes;
 mod job_stream;
 mod crawl_policy;
 mod crawl_request;
+mod crawl_scrape;
+mod crawl_sitemap;
 mod batch_check;
 mod limits;
 mod map_routes;
+mod parse_routes;
 mod metrics;
 mod model_plane_gate;
 mod policy_baseline;
@@ -73,6 +83,7 @@ mod run_limits;
 mod schedule_preflight;
 mod schedule_routes;
 mod scrape_actions;
+mod scrape_cache;
 mod scrape_contract;
 mod scrape_routes;
 mod search_routes;
@@ -83,6 +94,7 @@ mod usage_attrs;
 mod zdr_log;
 mod zdr_refusal;
 mod web_policy_edge;
+mod webhook_subscription_routes;
 #[cfg(feature = "browser-agent")]
 mod agent_policy_gate;
 mod zdr_tombstone;
@@ -169,6 +181,14 @@ async fn run() -> anyhow::Result<()> {
     telemetry::init_telemetry();
     // Choose (and log) how documents are parsed before the first one arrives.
     quarry_runtime::content_route::parse_backend();
+    if parse_routes::route_enabled() {
+        // INNH-11: the parse route serves uploads, so it also reports whether it may.
+        tracing::info!(
+            isolation = quarry_runtime::content_route::parse_backend().label(),
+            serving = !parse_routes::blocked_by_isolation(),
+            "document parse route is on"
+        );
+    }
 
     // Production safety net: `QUARRY_EDGE_AUTH_DEV_BYPASS=1` accepts any
     // bearer without verifying it against auth-core's JWKS. That's fine
@@ -362,8 +382,14 @@ async fn run() -> anyhow::Result<()> {
             .as_deref()
             .is_some_and(|credential| !credential.trim().is_empty()),
         dev_bypass: cfg.cross_plane_auth_dev_bypass,
+        api_key_runs: run_limits::api_key_agent_runs_enabled(),
     })
     .map_err(|refusal| anyhow::anyhow!("{refusal}"))?;
+    if run_limits::api_key_agent_runs_enabled() {
+        tracing::warn!(
+            "QUARRY_EDGE__API_KEY_AGENT_RUNS is on: API-key principals may start fenced agent runs under key grants"
+        );
+    }
     match grant_validator_choice {
         grant_boot::ValidatorChoice::Grpc => {}
         grant_boot::ValidatorChoice::Http => tracing::warn!(
@@ -698,16 +724,44 @@ async fn run() -> anyhow::Result<()> {
     // usage meter. When NATS is up we publish to `usage.>` subjects;
     // otherwise we noop so dev / offline boots silently. Billing-core's
     // HTTP recovery endpoint covers any gap if NATS drops mid-flight.
-    let inner_usage: Arc<dyn quarry_runtime::UsageMeter> = match shared_nats_bus.as_ref() {
-        Some(bus) => {
-            tracing::info!("usage meter: NATS (publishes to usage.>)");
-            Arc::new(quarry_runtime::NatsUsageMeter::from_bus(bus))
-        }
-        None => {
-            tracing::warn!("usage meter: noop (no NATS) — billing-core will see no usage events");
-            Arc::new(quarry_runtime::NoopUsageMeter)
-        }
+    //
+    // U37: with QUARRY_EDGE__USAGE_BUS_URL set, the meter publishes to the Control NATS that
+    // billing-core subscribes and awaits each JetStream ack (at-least-once). Unset (the default)
+    // keeps today's path below. Half-set credentials stop the edge here; a failed connect falls
+    // back to today's path with a warning. The URL is never logged (it may carry userinfo).
+    let usage_bus = quarry_runtime::usage::UsageBusConfig::from_env()
+        .map_err(|e| anyhow::anyhow!("usage bus: {e}"))?;
+    let usage_bus_meter: Option<quarry_runtime::NatsUsageMeter> = match usage_bus.as_ref() {
+        Some(bus_cfg) => match quarry_runtime::NatsUsageMeter::connect_usage_bus(bus_cfg).await {
+            Ok(meter) => Some(meter),
+            Err(e) => {
+                // zdr-log-ok: a NATS connect error; no URL, credential or caller content
+                tracing::warn!(
+                    error = %e,
+                    "usage bus connect failed; usage stays on the Quarry bus"
+                );
+                None
+            }
+        },
+        None => None,
     };
+    let inner_usage: Arc<dyn quarry_runtime::UsageMeter> =
+        match (usage_bus_meter, shared_nats_bus.as_ref()) {
+            (Some(meter), _) => {
+                tracing::info!("usage meter: Control usage bus (usage.>, acked)");
+                Arc::new(meter)
+            }
+            (None, Some(bus)) => {
+                tracing::info!("usage meter: NATS (publishes to usage.>)");
+                Arc::new(quarry_runtime::NatsUsageMeter::from_bus(bus))
+            }
+            (None, None) => {
+                tracing::warn!(
+                    "usage meter: noop (no NATS) — billing-core will see no usage events"
+                );
+                Arc::new(quarry_runtime::NoopUsageMeter)
+            }
+        };
     // WS6.C-e: the gate in front of the meter applies QUARRY_EDGE__USAGE_BROWSER_METRICS to the
     // seven browser metrics (default off); every other event passes through unchanged.
     let browser_metrics = usage_attrs::browser_metrics_mode_from_env();
@@ -826,14 +880,9 @@ async fn run() -> anyhow::Result<()> {
     // Otherwise the dev-default `InMemoryProfileStore` runs. Either
     // backend can be wrapped with Redis hot-cache via
     // `cached_profile_store::maybe_cache`.
-    // WS17.E1: profile envelope encryption. Validated before any profile store is built.
-    let profile_plan = profile_encryption::plan_from_settings(
-        &cfg.profile_encryption,
-        cfg.profile_encryption_required,
-        &cfg.profile_key_provider,
-        std::env::var(profile_encryption::MASTER_KEYS_ENV).ok().as_deref(),
-        std::env::var(profile_encryption::MASTER_KEY_ACTIVE_ENV).ok().as_deref(),
-    )?;
+    // WS17.E1/E2b: profile envelope encryption and its key provider. Validated before any
+    // profile store is built.
+    let profile_plan = profile_encryption_plan(&cfg)?;
     #[allow(unused_mut)]
     let mut profile_blobs: Option<Arc<dyn quarry_runtime::profile_blob_store::ProfileBlobStore>> =
         None;
@@ -914,17 +963,101 @@ async fn run() -> anyhow::Result<()> {
 
     // WS17.E3: the erasure families the internal purge route walks. Profiles first;
     // the rows live in the durable table, so this needs the Postgres blob store.
-    let org_erasables: Vec<Arc<dyn quarry_runtime::org_erasure::OrgErasable>> = match erasure_blobs {
-        Some(blobs) => vec![Arc::new(
-            quarry_runtime::org_erasure::ProfileErasure::connect(
-                blobs,
-                profile_plan.keys.clone(),
-                cfg.redis_url.as_deref(),
-            )
-            .await,
-        )],
-        None => Vec::new(),
-    };
+    // W2-U41a: the families beyond profiles (QUARRY_ORG_ERASURE_FAMILIES, none by
+    // default), the profile tombstone guard (D2-077, off by default) and the
+    // backfill release gate for migration 0017 (QUARRY_PROFILE_BACKFILL_GATE, off).
+    let erasure_families = quarry_runtime::org_erasure::FamilySelection::parse(
+        std::env::var(quarry_runtime::org_erasure::FAMILIES_ENV)
+            .ok()
+            .as_deref(),
+    )
+    .map_err(|name| {
+        anyhow::anyhow!(
+            "{}: unknown erasure family {name:?}",
+            quarry_runtime::org_erasure::FAMILIES_ENV
+        )
+    })?;
+    let erasure_tombstone_guard = quarry_runtime::org_erasure::flag_on(
+        std::env::var(quarry_runtime::org_erasure::PROFILE_TOMBSTONE_GUARD_ENV)
+            .ok()
+            .as_deref(),
+    );
+    let backfill_gate = quarry_runtime::profile_backfill::ReleaseGateMode::parse(
+        std::env::var(quarry_runtime::profile_backfill::RELEASE_GATE_ENV)
+            .ok()
+            .as_deref(),
+    )
+    .ok_or_else(|| {
+        anyhow::anyhow!(
+            "{} must be off, observe or enforce",
+            quarry_runtime::profile_backfill::RELEASE_GATE_ENV
+        )
+    })?;
+    if let Some(blobs) = erasure_blobs.as_deref() {
+        quarry_runtime::profile_backfill::check_release_gate(
+            blobs,
+            backfill_gate,
+            profile_plan.mode == quarry_runtime::envelope_profile_store::EncryptionMode::On,
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("{}", e.message))?;
+    }
+    #[allow(unused_mut)]
+    let mut org_erasables: Vec<Arc<dyn quarry_runtime::org_erasure::OrgErasable>> =
+        match erasure_blobs {
+            Some(blobs) => vec![Arc::new(
+                quarry_runtime::org_erasure::ProfileErasure::connect(
+                    blobs,
+                    profile_plan.keys.clone(),
+                    cfg.redis_url.as_deref(),
+                )
+                .await
+                .with_tombstone_guard(erasure_tombstone_guard),
+            )],
+            None => Vec::new(),
+        };
+    #[cfg(feature = "postgres-queue")]
+    {
+        if !erasure_families.is_empty() {
+            match cfg.database_url.as_deref().filter(|s| !s.is_empty()) {
+                Some(dsn) => match sqlx::postgres::PgPool::connect(dsn).await {
+                    Ok(pool) => org_erasables.extend(
+                        quarry_runtime::org_erasure::PgTableErasure::families(
+                            &pool,
+                            &erasure_families,
+                        ),
+                    ),
+                    Err(_) => tracing::warn!(
+                        "org erasure: database connect failed; table families not registered"
+                    ),
+                },
+                None => {
+                    tracing::warn!("org erasure: no database_url; table families not registered")
+                }
+            }
+        }
+    }
+    if erasure_families.includes(quarry_runtime::org_erasure::ARTIFACTS_FAMILY) {
+        match artifact_backend.as_str() {
+            "fs" | "filesystem" => org_erasables.push(Arc::new(
+                quarry_runtime::org_erasure::ArtifactErasure::filesystem(&cfg.artifact_root),
+            )),
+            "s3" => {
+                if let Some(bucket) = cfg.s3_bucket.clone() {
+                    org_erasables.push(Arc::new(
+                        quarry_runtime::org_erasure::ArtifactErasure::s3_from_env(bucket).await,
+                    ));
+                }
+            }
+            _ => tracing::info!("org erasure: in-memory artifacts; artifact family not registered"),
+        }
+    }
+    if !erasure_families.is_empty() {
+        tracing::info!(
+            families = org_erasables.len(),
+            "org erasure: families registered (route scope=org)"
+        );
+    }
     // P0 action proof. A production agent must not report readiness while
     // receipts would disappear with the edge process. The durable store uses
     // the same migration set as the queue/history stores and enforces org_id
@@ -1522,13 +1655,24 @@ async fn run() -> anyhow::Result<()> {
     };
 
     // Cycle 19 / cluster #18: AnswerPipeline (Tavily replacement).
-    // Requires QUARRY_EDGE__ANSWER_SYNTHESIS on (QB-T17), a SearchProvider and a model path.
-    // When any is missing, /v1/answer returns 501 Unsupported with a hint.
-    let answer_pipeline: Option<Arc<quarry_runtime::answer::AnswerPipeline>> = match (
+    // INNH-8a: the switch (QB-T17, `mp.answer_synthesis`) is decided by `model_plane_gate`; the
+    // pipeline also needs a SearchProvider and a Model Plane URL. The first closed gate, including
+    // a switch the gate refused (no granted `model-invoke` row), is kept on the state, so
+    // /v1/answer answers 501 with the exact reason and include_answer says why it has no answer.
+    let answer_gate = answer_status::AnswerPipelineStatus::from_decision(
+        &model_plane_decision,
+        search.is_some(),
+        cfg.model_plane_url.as_deref().is_some_and(|s| !s.trim().is_empty()),
+    );
+    let (answer_pipeline, answer_pipeline_status): (
+        Option<Arc<quarry_runtime::answer::AnswerPipeline>>,
+        answer_status::AnswerPipelineStatus,
+    ) = match (
+        answer_gate,
         &search,
-        cfg.model_plane_url.as_deref().filter(|s| !s.is_empty()),
+        cfg.model_plane_url.as_deref().filter(|s| !s.trim().is_empty()),
     ) {
-        (Some(search_arc), Some(mp_url)) if mp.answer_synthesis => {
+        (answer_status::AnswerPipelineStatus::Ready, Some(search_arc), Some(mp_url)) => {
             match build_model_client(mp_url) {
                 Ok(mp_client) => {
                     let mp_arc = Arc::new(mp_client);
@@ -1550,25 +1694,31 @@ async fn run() -> anyhow::Result<()> {
                         formats,
                     );
                     tracing::info!("answer pipeline: wired (search + model plane)");
-                    Some(Arc::new(pipeline))
+                    (
+                        Some(Arc::new(pipeline)),
+                        answer_status::AnswerPipelineStatus::Ready,
+                    )
                 }
                 Err(e) => {
-                    tracing::warn!(error = %e, "answer pipeline disabled: model plane client init failed");
-                    None
+                    tracing::warn!(error = %e, reason = "model_client_init_failed", "answer pipeline disabled: model plane client init failed");
+                    (
+                        None,
+                        answer_status::AnswerPipelineStatus::ModelClientInitFailed,
+                    )
                 }
             }
         }
-        _ => {
-            if mp.answer_synthesis && search.is_none() {
+        (gate, _, _) => {
+            if gate == answer_status::AnswerPipelineStatus::NoSearchProvider {
                 tracing::error!(
                     "QUARRY_EDGE__ANSWER_SYNTHESIS is on but no SearchProvider is configured: answer synthesis stays OFF"
                 );
-            } else {
-                tracing::info!(
-                    "answer pipeline off (QUARRY_EDGE__ANSWER_SYNTHESIS is not on, or no SearchProvider)"
-                );
             }
-            None
+            tracing::info!(
+                reason = gate.reason().map(|r| r.as_str()).unwrap_or("none"),
+                "answer pipeline off (needs QUARRY_EDGE__ANSWER_SYNTHESIS=1 with a granted model-invoke row, a search provider and QUARRY_EDGE__MODEL_PLANE_URL)"
+            );
+            (None, gate)
         }
     };
 
@@ -1819,6 +1969,7 @@ async fn run() -> anyhow::Result<()> {
         page_title_enricher,
         service_token_provider: cross_plane_tokens.clone(),
         answer_pipeline,
+        answer_status: answer_pipeline_status,
         model_plane: mp,
         local_index,
         usage,
@@ -1985,6 +2136,76 @@ async fn run() -> anyhow::Result<()> {
     Ok(())
 }
 // zdr-log-ok-end
+
+/// WS17.E1/E2b: validate the profile encryption settings and build the key provider.
+///
+/// `env` (the default, and anything but `org_core`) is `profile_encryption::plan_from_settings`
+/// unchanged. `org_core` is the boot check of WS17.E2b: the org-core URL and token must be
+/// set (whatever the mode, so a misconfigured flip stops the edge instead of failing on the
+/// first restore). New wraps then go to org-core through a `KeyRouter`; the env master, when
+/// still configured, is kept only to read `env:`-sealed rows until they reseal lazily.
+fn profile_encryption_plan(
+    cfg: &config::EdgeConfig,
+) -> anyhow::Result<profile_encryption::EncryptionPlan> {
+    use quarry_runtime::envelope_profile_store::EncryptionMode;
+    use quarry_runtime::profile_keys::{
+        KeyRouter, OrgCoreKeyProvider, ProfileKeyProvider, ORG_CORE_KEYS_TOKEN_ENV,
+        ORG_CORE_KEYS_URL_ENV,
+    };
+
+    let master_keys = std::env::var(profile_encryption::MASTER_KEYS_ENV).ok();
+    let master_active = std::env::var(profile_encryption::MASTER_KEY_ACTIVE_ENV).ok();
+    if !cfg.profile_key_provider.trim().eq_ignore_ascii_case("org_core") {
+        return profile_encryption::plan_from_settings(
+            &cfg.profile_encryption,
+            cfg.profile_encryption_required,
+            &cfg.profile_key_provider,
+            master_keys.as_deref(),
+            master_active.as_deref(),
+        );
+    }
+    let Some(mode) = EncryptionMode::parse(&cfg.profile_encryption) else {
+        anyhow::bail!("QUARRY_EDGE__PROFILE_ENCRYPTION must be off, compat or on");
+    };
+    if cfg.profile_encryption_required && mode != EncryptionMode::On {
+        anyhow::bail!(
+            "QUARRY_EDGE__PROFILE_ENCRYPTION_REQUIRED=1 refuses profile_encryption={}; set on first",
+            mode.as_str()
+        );
+    }
+    let org_core = OrgCoreKeyProvider::from_env(cfg.org_core_keys_url.as_deref()).map_err(|e| {
+        anyhow::anyhow!(
+            "QUARRY_EDGE__PROFILE_KEY_PROVIDER=org_core refused at boot ({}); set {ORG_CORE_KEYS_URL_ENV} and {ORG_CORE_KEYS_TOKEN_ENV}",
+            e.class()
+        )
+    })?;
+    if mode == EncryptionMode::Off {
+        return Ok(profile_encryption::EncryptionPlan { mode, keys: None });
+    }
+    // The env master reads `env:` rows only. Validated by the env rules; `compat` here only
+    // selects the validation (the real mode is `mode`) and skips the env-only warning.
+    let env_keys: Option<Arc<dyn ProfileKeyProvider>> =
+        if master_keys.as_deref().is_some_and(|s| !s.trim().is_empty()) {
+            profile_encryption::plan_from_settings(
+                "compat",
+                false,
+                "env",
+                master_keys.as_deref(),
+                master_active.as_deref(),
+            )?
+            .keys
+        } else {
+            tracing::warn!(
+                "profile key provider org_core without env master keys: env-sealed profile rows cannot be read"
+            );
+            None
+        };
+    tracing::info!("profile key provider: org_core (env master kept for env-sealed rows only)");
+    Ok(profile_encryption::EncryptionPlan {
+        mode,
+        keys: Some(Arc::new(KeyRouter::new(env_keys, Arc::new(org_core)))),
+    })
+}
 
 fn env_flag(name: &str) -> bool {
     std::env::var(name)

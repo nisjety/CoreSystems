@@ -1,0 +1,6 @@
+{"schema":"mp-replay-v1","id":"01-plain-answer","synthetic":true,"zdr":false,"description":"One plain question with no tools offered; the model answers in one word. No source backs the answer, so the verification pass draws the question twice more (self-consistency); both draws repeat the answer. Mirrors eval case 01 (plain invoke correctness and usage accounting).","tokenised_ids":[]}
+{"call":1,"purpose":"ANSWER","expect":{"tools_offered":[],"last_role":"user"},"response":{"content":"PONG","stop_reason":"end_turn","input_tokens":14,"output_tokens":2}}
+{"call":2,"purpose":"VALIDATION","expect":{"tools_offered":[],"last_role":"user"},"response":{"content":"PONG","stop_reason":"end_turn","input_tokens":14,"output_tokens":2}}
+{"call":3,"purpose":"VALIDATION","expect":{"tools_offered":[],"last_role":"user"},"response":{"content":"PONG","stop_reason":"end_turn","input_tokens":14,"output_tokens":2}}
+{"call":4,"purpose":"TITLE","expect":{"tools_offered":[],"last_role":"user"},"response":{"content":"Greeting","stop_reason":"end_turn","input_tokens":157,"output_tokens":3}}
+{"call":5,"purpose":"FOLLOW_UPS","expect":{"tools_offered":[],"last_role":"user"},"response":{"content":"What can you help me with?\nCan you say more?","stop_reason":"end_turn","input_tokens":238,"output_tokens":14}}

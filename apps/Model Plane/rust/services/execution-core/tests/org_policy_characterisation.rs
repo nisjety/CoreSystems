@@ -3,11 +3,14 @@
 //!
 //! Every assertion here pins a behaviour that a later WS25 slice reverses on
 //! purpose: the Do loop sending an empty hook context (S3), `from_wire` mapping
-//! an unknown mode to `auto` (S3), `hook::evaluate` taking the first matching
+//! an unknown mode to `auto` (S6), `hook::evaluate` taking the first matching
 //! rule with no strictest-wins (S3), and a malformed hook context failing open
 //! (S3). The slice that changes one of these changes its golden in the same
 //! change and records the decision in the ledger. A golden that starts failing
 //! without such a change is a regression, not a stale test.
+//!
+//! WS25-S3 reversed the first-match and unknown-token goldens below. The malformed-context
+//! golden holds only while `HOOKS_FAIL_CLOSED` is off, its default.
 //!
 //! `resolve_mode` and the Do loop's dispatch call are private to
 //! `runtime_loop/agent.rs`, so their goldens read that source at run time, the
@@ -41,16 +44,18 @@ fn function_body<'a>(source: &'a str, signature: &str) -> &'a str {
     &rest[..end]
 }
 
+/// WS25-S6 reversed this golden: a non-empty value this build does not know asks, and only an
+/// unset (empty) value is `auto`.
 #[test]
-fn from_wire_maps_only_the_literal_ask_and_deny_and_everything_else_to_auto() {
+fn from_wire_maps_an_unknown_non_empty_mode_to_ask_and_only_an_unset_one_to_auto() {
     let table = [
         ("ask", PermissionMode::Ask),
         ("deny", PermissionMode::Deny),
         ("auto", PermissionMode::Auto),
         ("", PermissionMode::Auto),
-        ("execute", PermissionMode::Auto),
-        ("ASK", PermissionMode::Auto),
-        ("malformed", PermissionMode::Auto),
+        ("execute", PermissionMode::Ask),
+        ("ASK", PermissionMode::Ask),
+        ("malformed", PermissionMode::Ask),
     ];
     for (wire, expected) in table {
         assert_eq!(
@@ -70,8 +75,8 @@ fn the_do_loop_resolve_mode_is_fail_closed_to_ask_and_is_applied_to_the_request_
         .map(str::trim)
         .filter(|line| !line.is_empty() && !line.starts_with("//"))
         .collect();
-    // Table: "auto" -> Auto, "deny" -> Deny, every other wire value -> Ask. Note
-    // that this differs from `from_wire` above for "" and every unknown value.
+    // Table: "auto" -> Auto, "deny" -> Deny, every other wire value -> Ask. Since
+    // WS25-S6 this differs from `from_wire` above only for the empty value.
     assert_eq!(
         arms,
         [
@@ -90,9 +95,9 @@ fn the_do_loop_resolve_mode_is_fail_closed_to_ask_and_is_applied_to_the_request_
 }
 
 #[test]
-fn the_do_loop_dispatches_every_tool_call_with_an_empty_hook_context() {
+fn the_do_loop_dispatches_every_tool_call_with_the_run_hook_context() {
     let source = execution_core_source("runtime_loop/agent.rs");
-    let header = "runtime_loop::execute_step_with_subagent(\n";
+    let header = "runtime_loop::execute_step_with_result_handles(\n";
     let dispatches: Vec<&str> = source
         .match_indices(header)
         .map(|(at, _)| &source[at + header.len()..])
@@ -103,8 +108,8 @@ fn the_do_loop_dispatches_every_tool_call_with_an_empty_hook_context() {
         1,
         "the Do loop has exactly one tool dispatch"
     );
-    // The fourth argument is `hook_context`. The Do loop passes the literal empty
-    // string, so no org hook rule reaches a Do run's tool calls today.
+    // The fourth argument is `hook_context`: the run's org hook rules (WS25-S3), read from
+    // `RunAgentRequest.org_policy` into the loop's context, so a Do run's tool calls are governed.
     let arguments: Vec<&str> = dispatches[0].lines().take(4).map(str::trim).collect();
     assert_eq!(
         arguments,
@@ -112,7 +117,7 @@ fn the_do_loop_dispatches_every_tool_call_with_an_empty_hook_context() {
             "&call.name,",
             "&call.arguments_json,",
             "ctx.permission_wire,",
-            "\"\",",
+            "ctx.hook_context,",
         ]
     );
 }
@@ -149,14 +154,16 @@ fn a_malformed_hook_context_allows_every_call_and_never_locks_a_tool_out() {
 }
 
 #[test]
-fn the_first_matching_rule_decides_and_a_later_deny_cannot_override_an_earlier_allow() {
+fn the_strictest_matching_rule_decides_whatever_the_order() {
     let allow_first = r#"{"rules":[
         {"event":"pre_tool_use","tools":"shell","decision":"allow"},
         {"event":"pre_tool_use","tools":"*","decision":"deny","reason":"default deny"}
     ]}"#;
     assert_eq!(
         evaluate(allow_first, HookEvent::PreToolUse, "shell"),
-        HookDecision::Allow
+        HookDecision::Deny {
+            reason: "default deny".to_owned()
+        }
     );
 
     let deny_first = r#"{"rules":[
@@ -172,25 +179,27 @@ fn the_first_matching_rule_decides_and_a_later_deny_cannot_override_an_earlier_a
 }
 
 #[test]
-fn an_earlier_ask_outranks_a_later_deny_for_the_same_tool() {
+fn a_later_deny_outranks_an_earlier_ask_for_the_same_tool() {
     let ask_then_deny = r#"{"rules":[
         {"event":"pre_tool_use","tools":"shell","decision":"ask","reason":"confirm"},
         {"event":"pre_tool_use","tools":"shell","decision":"deny","reason":"never"}
     ]}"#;
     assert_eq!(
         evaluate(ask_then_deny, HookEvent::PreToolUse, "shell"),
-        HookDecision::Ask {
-            reason: "confirm".to_owned()
+        HookDecision::Deny {
+            reason: "never".to_owned()
         }
     );
 }
 
 #[test]
-fn an_unknown_decision_token_is_an_allow() {
+fn an_unknown_decision_token_asks() {
     let ctx = r#"{"rules":[{"event":"pre_tool_use","tools":"shell","decision":"quarantine","reason":"x"}]}"#;
     assert_eq!(
         evaluate(ctx, HookEvent::PreToolUse, "shell"),
-        HookDecision::Allow
+        HookDecision::Ask {
+            reason: "x".to_owned()
+        }
     );
 }
 

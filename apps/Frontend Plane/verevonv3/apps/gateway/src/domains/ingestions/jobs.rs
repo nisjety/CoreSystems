@@ -460,7 +460,8 @@ pub(super) fn to_job_detail(job: &Value) -> Value {
         "status": str_at(job, "status"),
         "phase": str_at(job, "phase"),
         "terminal": job.get("terminal").and_then(Value::as_bool).unwrap_or(false),
-        "origin": job.get("origin").cloned().unwrap_or(Value::Null),
+        // `{ type, ref }`: the internal actor stays inside (as on the run rows).
+        "origin": super::runs::origin_view(job),
         "createdAt": str_at(job, "created_at"),
         "finishedAt": str_or_null(job, "finished_at"),
         "deadlineAt": str_or_null(job, "deadline_at"),

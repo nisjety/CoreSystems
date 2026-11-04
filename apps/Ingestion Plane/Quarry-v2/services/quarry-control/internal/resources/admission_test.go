@@ -177,7 +177,8 @@ func TestAdmissionFromEnv(t *testing.T) {
 		return func(name string) string { return vars[name] }
 	}
 	def, err := AdmissionFromEnv(get(nil))
-	if err != nil || def.Enabled || def.CapDefault != 3 || def.BacklogDefault != 200 || def.BacklogTTL != 24*time.Hour || def.ClaimLease != time.Minute {
+	if err != nil || def.Enabled || def.CapDefault != 3 || def.BacklogDefault != 200 || def.BacklogTTL != 24*time.Hour || def.ClaimLease != time.Minute ||
+		def.CapMax != 50 || def.BacklogMax != 10_000 {
 		t.Fatalf("defaults = %#v, %v", def, err)
 	}
 	on, err := AdmissionFromEnv(get(map[string]string{
@@ -190,9 +191,191 @@ func TestAdmissionFromEnv(t *testing.T) {
 	for name, bad := range map[string]string{
 		"QUARRY_JOB_ADMISSION": "maybe", "QUARRY_JOB_CAP_DEFAULT": "0", "QUARRY_JOB_BACKLOG_DEFAULT": "many",
 		"QUARRY_JOB_BACKLOG_TTL": "-5m", "QUARRY_JOB_CLAIM_LEASE": "soon",
+		"QUARRY_JOB_CAP_MAX": "0", "QUARRY_JOB_BACKLOG_MAX": "lots",
 	} {
 		if _, err := AdmissionFromEnv(get(map[string]string{name: bad})); err == nil {
 			t.Errorf("%s=%q must be rejected", name, bad)
 		}
+	}
+}
+
+// W2-CP-L2 (U32): the plan-cap stamp at admission.
+
+// createdJob posts a job and returns it as stored.
+func createdJob(t *testing.T, h http.Handler, db store.DB, org string, body map[string]any) store.Job {
+	t.Helper()
+	w := postJob(h, org, body)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("create: %d %s", w.Code, w.Body.String())
+	}
+	var env struct {
+		Data struct {
+			ID quarrycontracts.ID `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &env); err != nil {
+		t.Fatal(err)
+	}
+	job, ok := db.Jobs().Get(env.Data.ID)
+	if !ok {
+		t.Fatalf("job %s was not stored", env.Data.ID)
+	}
+	return job
+}
+
+func planAdmission() Admission {
+	return Admission{Enabled: true, CapDefault: 2, BacklogDefault: 10, BacklogTTL: time.Hour, ClaimLease: time.Minute, CapMax: 5, BacklogMax: 20}
+}
+
+func TestPlanCapStampIsFixedOntoTheStoredJob(t *testing.T) {
+	t.Parallel()
+	h, db := admissionServer(t, planAdmission())
+	job := createdJob(t, h, db, "org_a", map[string]any{"kind": "crawl", "params": map[string]any{
+		"url":       "https://example.com",
+		"admission": map[string]any{"cap": 4, "backlog_cap": 7, "priority": "high"},
+	}})
+	got, ok := job.Params["admission"].(map[string]any)
+	if !ok {
+		t.Fatalf("admission stamp missing: %#v", job.Params)
+	}
+	if got["cap"] != float64(4) || got["backlog_cap"] != float64(7) || got["source"] != "plan" {
+		t.Fatalf("stamp = %#v", got)
+	}
+	if _, kept := got["priority"]; kept {
+		t.Fatalf("a key that is not a plan cap must not survive: %#v", got)
+	}
+	if _, clamped := got["clamped"]; clamped {
+		t.Fatalf("an in-range stamp is not clamped: %#v", got)
+	}
+	if job.Params["url"] != "https://example.com" {
+		t.Fatalf("the rest of params must be untouched: %#v", job.Params)
+	}
+	if c := store.JobAdmissionCap(job, 2); c != 4 {
+		t.Fatalf("the claim reads cap %d, want the plan's 4", c)
+	}
+}
+
+func TestPlanCapStampIsClampedToTheCeiling(t *testing.T) {
+	t.Parallel()
+	h, db := admissionServer(t, planAdmission())
+	job := createdJob(t, h, db, "org_a", map[string]any{"kind": "crawl", "params": map[string]any{
+		"admission": map[string]any{"cap": 99, "backlog_cap": 5000},
+	}})
+	got := job.Params["admission"].(map[string]any)
+	if got["cap"] != float64(5) || got["backlog_cap"] != float64(20) || got["clamped"] != true || got["source"] != "plan" {
+		t.Fatalf("stamp = %#v", got)
+	}
+}
+
+func TestAnInvalidPlanStampIsRemovedSoTheDefaultsApply(t *testing.T) {
+	t.Parallel()
+	h, db := admissionServer(t, planAdmission())
+	for name, stamp := range map[string]any{
+		"zero and words":   map[string]any{"cap": 0, "backlog_cap": "lots"},
+		"negative":         map[string]any{"cap": -3},
+		"fraction":         map[string]any{"cap": 1.5},
+		"not an object":    "cap=9",
+		"empty":            map[string]any{},
+		"only foreign key": map[string]any{"weight": 3},
+	} {
+		job := createdJob(t, h, db, "org_a", map[string]any{"kind": "crawl", "params": map[string]any{"admission": stamp}})
+		if _, present := job.Params["admission"]; present {
+			t.Errorf("%s: an invalid stamp must be removed, got %#v", name, job.Params["admission"])
+		}
+		if c := store.JobAdmissionCap(job, 2); c != 2 {
+			t.Errorf("%s: cap %d, want the default 2", name, c)
+		}
+	}
+	// One valid value is enough to keep the stamp; the invalid one is dropped.
+	job := createdJob(t, h, db, "org_z", map[string]any{"kind": "crawl", "params": map[string]any{
+		"admission": map[string]any{"cap": 3, "backlog_cap": -1},
+	}})
+	got := job.Params["admission"].(map[string]any)
+	if got["cap"] != float64(3) || got["source"] != "plan" {
+		t.Fatalf("stamp = %#v", got)
+	}
+	if _, kept := got["backlog_cap"]; kept {
+		t.Fatalf("the invalid backlog_cap must be dropped: %#v", got)
+	}
+}
+
+func TestPlanStampIsUntouchedWhileAdmissionIsOffOrTheKindIsNotDispatched(t *testing.T) {
+	t.Parallel()
+	off, offDB := admissionServer(t, Admission{})
+	job := createdJob(t, off, offDB, "org_a", map[string]any{"kind": "crawl", "params": map[string]any{
+		"admission": map[string]any{"cap": 99, "priority": "high"},
+	}})
+	got := job.Params["admission"].(map[string]any)
+	if got["cap"] != float64(99) || got["priority"] != "high" {
+		t.Fatalf("admission off must leave params as sent: %#v", got)
+	}
+	if _, stamped := got["source"]; stamped {
+		t.Fatalf("admission off must not stamp: %#v", got)
+	}
+	on, onDB := admissionServer(t, planAdmission())
+	job = createdJob(t, on, onDB, "org_a", map[string]any{"kind": "search", "params": map[string]any{
+		"admission": map[string]any{"cap": 99},
+	}})
+	if got := job.Params["admission"].(map[string]any); got["cap"] != float64(99) {
+		t.Fatalf("a kind the dispatcher does not run is not stamped: %#v", got)
+	}
+}
+
+func TestTheStampedBacklogCapIsClampedBeforeTheBacklogCheck(t *testing.T) {
+	t.Parallel()
+	adm := planAdmission()
+	adm.BacklogMax = 1
+	h, _ := admissionServer(t, adm)
+	body := func() map[string]any {
+		return map[string]any{"kind": "crawl", "params": map[string]any{"admission": map[string]any{"backlog_cap": 50}}}
+	}
+	if w := postJob(h, "org_a", body()); w.Code != http.StatusCreated {
+		t.Fatalf("first: %d", w.Code)
+	}
+	w := postJob(h, "org_a", body())
+	if w.Code != http.StatusTooManyRequests {
+		t.Fatalf("a stamp above the ceiling must be held to it: %d", w.Code)
+	}
+	var env struct {
+		Error struct {
+			Details map[string]any `json:"details"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &env); err != nil {
+		t.Fatal(err)
+	}
+	if env.Error.Details["limit"] != float64(1) {
+		t.Fatalf("details = %#v", env.Error.Details)
+	}
+}
+
+func TestTwoPlansClaimTwoDifferentCaps(t *testing.T) {
+	t.Parallel()
+	h, _ := admissionServer(t, planAdmission())
+	for i := 0; i < 4; i++ {
+		postJob(h, "org_small", map[string]any{"kind": "crawl", "params": map[string]any{"admission": map[string]any{"cap": 1}}})
+		postJob(h, "org_large", map[string]any{"kind": "crawl", "params": map[string]any{"admission": map[string]any{"cap": 3}}})
+		postJob(h, "org_plain", map[string]any{"kind": "crawl"})
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/internal/jobs/claim", bytes.NewReader([]byte(`{"limit":50}`)))
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("claim: %d %s", w.Code, w.Body.String())
+	}
+	var env struct {
+		Data []struct {
+			OrgID string `json:"org_id"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &env); err != nil {
+		t.Fatal(err)
+	}
+	per := map[string]int{}
+	for _, job := range env.Data {
+		per[job.OrgID]++
+	}
+	if per["org_small"] != 1 || per["org_large"] != 3 || per["org_plain"] != 2 {
+		t.Fatalf("claimed per org = %#v, want small 1 (plan), large 3 (plan), plain 2 (default)", per)
 	}
 }

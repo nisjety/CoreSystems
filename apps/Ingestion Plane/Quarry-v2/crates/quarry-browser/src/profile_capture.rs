@@ -12,9 +12,13 @@
 //! 3. **IndexedDB** of every live tab, by the same serializer, its own budget.
 //! 4. Origins that no live tab covers any more: what their pages flushed on `pagehide` while
 //!    alive (`FLUSH_JS`, delivered through `Runtime.addBinding`), kept in the [`OriginJournal`].
-//!    Web storage only: IndexedDB cannot be read from a `pagehide` handler. Whether the
-//!    frame-less `IndexedDB` CDP domain can cover a closed tab's origin is the S0 spike's
-//!    question (`tests/profile_cdp_spike.rs`); it is not built here.
+//!    Web storage only: IndexedDB cannot be read from a `pagehide` handler.
+//! 4b. With `QUARRY_BROWSER_CAPTURE_CLOSED_ORIGINS` on (default off, D2-070): the IndexedDB of
+//!    those same closed origins, read through the frame-less `IndexedDB` CDP domain on a blank
+//!    carrier page opened in the same browser context for the phase, never on a live tab
+//!    (S0 probe P3, `tests/profile_cdp_spike.rs`; see `ClosedCarrier`), bounded by
+//!    its own time budget, a per-origin cap and an all-origins cap. A read that fails, finds
+//!    nothing or runs out of time never erases what the journal already holds.
 //!
 //! Budget: 10 s overall (the caller wraps this in `Op::ProfileCapture`), cookies 2 s,
 //! storage 4 s, IndexedDB 4 s. A phase that runs out is flagged `truncated` and the capture
@@ -30,6 +34,7 @@ use ::chromiumoxide::cdp::browser_protocol::browser::BrowserContextId;
 use ::chromiumoxide::cdp::browser_protocol::network as net;
 use ::chromiumoxide::cdp::browser_protocol::page::AddScriptToEvaluateOnNewDocumentParams;
 use ::chromiumoxide::cdp::browser_protocol::storage::GetCookiesParams;
+use ::chromiumoxide::cdp::browser_protocol::target::CreateTargetParams;
 use ::chromiumoxide::cdp::js_protocol::runtime::{
     AddBindingParams, EvaluateParams, EventBindingCalled, EventExecutionContextCreated,
     ExecutionContextId,
@@ -42,9 +47,10 @@ use serde_json::json;
 
 use crate::deadlines::{timeout_error, with_deadline, Op};
 use crate::profile_snapshot::{
-    merge_and_cap, normalize_origin, CapOutcome, CaptureReport, CookiePriority, IdbDatabase,
-    OriginJournal, OriginState, PartitionKey, ProfileCaps, SameSite, SourceScheme,
-    BUDGET_COOKIES_MS, BUDGET_IDB_MS, BUDGET_STORAGE_MS, MAX_FLUSH_PAYLOAD_BYTES, SNAPSHOT_VERSION,
+    merge_and_cap, normalize_origin, parse_flag, CapOutcome, CaptureReport, CookiePriority,
+    IdbDatabase, IdbIndex, IdbRecord, IdbStore, OriginJournal, OriginState, PartitionKey,
+    ProfileCaps, SameSite, SourceScheme, BUDGET_COOKIES_MS, BUDGET_IDB_MS, BUDGET_STORAGE_MS,
+    BUDGET_TOTAL_MS, MAX_FLUSH_PAYLOAD_BYTES, SNAPSHOT_VERSION,
 };
 use crate::session::{Cookie, SessionSnapshot};
 
@@ -335,6 +341,10 @@ pub(crate) struct ProfileCapture {
     pub snapshot: SessionSnapshot,
     pub report: CaptureReport,
     pub outcome: CapOutcome,
+    /// What the closed-origin phase did (all zero with the flag off). `capture_profile` logs
+    /// it itself; the caller (chromiumoxide.rs) may surface it later.
+    #[allow(dead_code)]
+    pub closed: ClosedReport,
 }
 
 // ---------------------------------------------------------------------------------------
@@ -477,6 +487,655 @@ pub(crate) async fn capture_origin_state(
 }
 
 // ---------------------------------------------------------------------------------------
+// Closed-tab origins (D2-070)
+// ---------------------------------------------------------------------------------------
+
+/// `QUARRY_BROWSER_CAPTURE_CLOSED_ORIGINS`: capture the IndexedDB of origins the session
+/// visited whose tabs have closed (or navigated away) before this capture. Default off.
+pub(crate) const CAPTURE_CLOSED_ORIGINS_ENV: &str = "QUARRY_BROWSER_CAPTURE_CLOSED_ORIGINS";
+
+/// The closed-origin phase's own budget. It also never runs past [`BUDGET_TOTAL_MS`] minus a
+/// margin, so it cannot cost the capture its cookies to the caller's overall deadline.
+pub(crate) const BUDGET_CLOSED_MS: u64 = 2_000;
+const CLOSED_MARGIN_MS: u64 = 500;
+/// Origins read per capture (the journal's sorted order decides which).
+pub(crate) const MAX_CLOSED_ORIGINS: usize = 16;
+/// Databases read per origin.
+pub(crate) const MAX_CLOSED_DATABASES: usize = 16;
+/// Serialized bytes kept per closed origin.
+pub(crate) const MAX_CLOSED_ORIGIN_BYTES: usize = 2 * 1024 * 1024;
+/// Serialized bytes kept over all closed origins of one capture.
+pub(crate) const MAX_CLOSED_TOTAL_BYTES: usize = 8 * 1024 * 1024;
+/// Records kept per closed origin.
+pub(crate) const MAX_CLOSED_RECORDS: usize = 10_000;
+/// Records asked for in one `IndexedDB.requestData`.
+pub(crate) const CLOSED_PAGE_SIZE: usize = 100;
+
+/// The switch. Off by default: today's capture, unchanged.
+pub(crate) fn closed_origins_capture_enabled() -> bool {
+    closed_flag(std::env::var(CAPTURE_CLOSED_ORIGINS_ENV).ok().as_deref())
+}
+
+fn closed_flag(raw: Option<&str>) -> bool {
+    parse_flag(raw, false)
+}
+
+/// What one closed-origin read may keep. Derived from the snapshot caps, never above them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ClosedLimits {
+    pub origins: usize,
+    pub databases: usize,
+    pub origin_bytes: usize,
+    pub total_bytes: usize,
+    pub origin_records: usize,
+    pub page_size: usize,
+}
+
+impl ClosedLimits {
+    pub(crate) fn from_caps(caps: &ProfileCaps) -> Self {
+        Self {
+            origins: MAX_CLOSED_ORIGINS,
+            databases: MAX_CLOSED_DATABASES,
+            origin_bytes: MAX_CLOSED_ORIGIN_BYTES.min(caps.max_origin_bytes),
+            total_bytes: MAX_CLOSED_TOTAL_BYTES.min(caps.max_bytes / 2),
+            origin_records: MAX_CLOSED_RECORDS.min(caps.max_idb_records),
+            page_size: CLOSED_PAGE_SIZE,
+        }
+    }
+}
+
+/// One page of an object store's records, already in the tagged encoding.
+#[derive(Debug, Default)]
+pub(crate) struct RecordPage {
+    pub records: Vec<IdbRecord>,
+    /// Values that could not be carried (counted, not kept).
+    pub dropped: u32,
+    pub has_more: bool,
+}
+
+/// Where a closed origin's IndexedDB is read from. The real source is the frame-less
+/// `IndexedDB` CDP domain on a [`ClosedCarrier`] of the same browser context
+/// ([`CdpClosedIdb`]); the unit tests use a mock.
+pub(crate) trait ClosedIdbSource {
+    async fn database_names(&self, origin: &str) -> QuarryResult<Vec<String>>;
+    /// The database's version and its stores' definitions (no records).
+    async fn database(&self, origin: &str, name: &str) -> QuarryResult<IdbDatabase>;
+    async fn records(
+        &self,
+        origin: &str,
+        database: &str,
+        store: &str,
+        skip: usize,
+        page_size: usize,
+    ) -> QuarryResult<RecordPage>;
+}
+
+/// What the closed-origin phase did. Counts only.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub(crate) struct ClosedReport {
+    pub enabled: bool,
+    /// Visited origins no live tab covers.
+    pub candidates: u32,
+    /// Candidates left out by [`MAX_CLOSED_ORIGINS`] or by running out of budget.
+    pub skipped: u32,
+    pub origins_read: u32,
+    /// Origins whose read failed (their earlier state is kept).
+    pub origins_failed: u32,
+    pub databases: u32,
+    pub records: u32,
+    pub truncated: bool,
+    pub timed_out: bool,
+    /// No carrier page could be opened to send the CDP calls through.
+    pub no_page: bool,
+}
+
+/// The IndexedDB read for one closed origin.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub(crate) struct ClosedOrigin {
+    pub origin: String,
+    pub idb: Vec<IdbDatabase>,
+    pub dropped: u32,
+    pub truncated: bool,
+}
+
+/// The visited origins that no live tab covers, at most `max` of them (sorted, so the choice
+/// is stable), and how many were left out.
+pub(crate) fn closed_origin_candidates<'a>(
+    visited: impl Iterator<Item = &'a String>,
+    live: &BTreeSet<String>,
+    max: usize,
+) -> (Vec<String>, usize) {
+    let all: Vec<String> = visited.filter(|origin| !live.contains(*origin)).cloned().collect();
+    let skipped = all.len().saturating_sub(max);
+    (all.into_iter().take(max).collect(), skipped)
+}
+
+enum Stop {
+    Timeout,
+    Failed,
+}
+
+async fn within<T>(
+    until: Instant,
+    call: impl std::future::Future<Output = QuarryResult<T>>,
+) -> Result<T, Stop> {
+    match tokio::time::timeout(remaining(until), call).await {
+        Err(_) => Err(Stop::Timeout),
+        Ok(Err(_)) => Err(Stop::Failed),
+        Ok(Ok(value)) => Ok(value),
+    }
+}
+
+fn record_bytes(record: &IdbRecord) -> usize {
+    serde_json::to_vec(record).map_or(0, |bytes| bytes.len())
+}
+
+/// Read one origin: every database (up to the cap), every store, records page by page until
+/// a cap. A failure or the deadline anywhere in the origin discards the whole origin (a
+/// half-read database must not replace a complete one); a cap keeps what was read and says
+/// `truncated`.
+async fn read_closed_origin<S: ClosedIdbSource>(
+    source: &S,
+    origin: &str,
+    limits: &ClosedLimits,
+    until: Instant,
+    total_left: usize,
+) -> Result<ClosedOrigin, Stop> {
+    let mut out = ClosedOrigin {
+        origin: origin.to_owned(),
+        ..Default::default()
+    };
+    let byte_budget = limits.origin_bytes.min(total_left);
+    let mut bytes = 0usize;
+    let mut records = 0usize;
+
+    let mut names = within(until, source.database_names(origin)).await?;
+    names.sort();
+    names.dedup();
+    if names.len() > limits.databases {
+        names.truncate(limits.databases);
+        out.truncated = true;
+    }
+    for name in names {
+        let mut db = within(until, source.database(origin, &name)).await?;
+        for store in &mut db.stores {
+            store.records = Vec::new();
+            let mut skip = 0usize;
+            'pages: loop {
+                if records >= limits.origin_records || bytes >= byte_budget {
+                    out.truncated = true;
+                    break;
+                }
+                let want = limits.page_size.min(limits.origin_records - records);
+                let page = within(
+                    until,
+                    source.records(origin, &db.name, &store.name, skip, want),
+                )
+                .await?;
+                let fetched = page.records.len();
+                out.dropped += page.dropped;
+                for record in page.records {
+                    let size = record_bytes(&record);
+                    if bytes + size > byte_budget || records >= limits.origin_records {
+                        out.truncated = true;
+                        break 'pages;
+                    }
+                    bytes += size;
+                    records += 1;
+                    store.records.push(record);
+                }
+                skip += fetched;
+                if !page.has_more || fetched == 0 {
+                    break;
+                }
+            }
+            // A store cut before it kept one record keeps its definition only, flagged as
+            // the caps do, so a restore does not recreate an empty store as if it were whole.
+            if store.records.is_empty() && out.truncated {
+                store.omitted = true;
+            }
+        }
+        out.idb.push(db);
+    }
+    Ok(out)
+}
+
+/// Read the IndexedDB of `origins` (the closed ones) from `source`, until `until`.
+pub(crate) async fn capture_closed_origins<S: ClosedIdbSource>(
+    source: &S,
+    origins: &[String],
+    limits: &ClosedLimits,
+    until: Instant,
+) -> (Vec<ClosedOrigin>, ClosedReport) {
+    let mut report = ClosedReport {
+        enabled: true,
+        candidates: origins.len() as u32,
+        ..Default::default()
+    };
+    let mut done: Vec<ClosedOrigin> = Vec::new();
+    let mut total_left = limits.total_bytes;
+    for (index, origin) in origins.iter().enumerate() {
+        if total_left == 0 {
+            report.truncated = true;
+            report.skipped += (origins.len() - index) as u32;
+            break;
+        }
+        match read_closed_origin(source, origin, limits, until, total_left).await {
+            Ok(read) => {
+                report.origins_read += 1;
+                report.databases += read.idb.len() as u32;
+                let kept: usize = read
+                    .idb
+                    .iter()
+                    .flat_map(|db| db.stores.iter())
+                    .flat_map(|store| store.records.iter())
+                    .map(record_bytes)
+                    .sum();
+                report.records += read
+                    .idb
+                    .iter()
+                    .flat_map(|db| db.stores.iter())
+                    .map(|store| store.records.len() as u32)
+                    .sum::<u32>();
+                report.truncated |= read.truncated;
+                total_left = total_left.saturating_sub(kept);
+                done.push(read);
+            }
+            Err(Stop::Failed) => report.origins_failed += 1,
+            Err(Stop::Timeout) => {
+                report.timed_out = true;
+                report.truncated = true;
+                report.skipped += (origins.len() - index) as u32;
+                break;
+            }
+        }
+    }
+    (done, report)
+}
+
+/// Fold the closed origins' IndexedDB into the states the journal holds for them. A read that
+/// found no database never erases what the journal (or the loaded profile) held: only a
+/// positive read replaces it. An origin the journal has no web storage for becomes a state
+/// of its own.
+pub(crate) fn merge_closed_idb(
+    mut states: Vec<OriginState>,
+    closed: Vec<ClosedOrigin>,
+) -> Vec<OriginState> {
+    for read in closed {
+        if read.idb.is_empty() {
+            continue;
+        }
+        match states.iter_mut().find(|state| state.origin == read.origin) {
+            Some(state) => {
+                state.indexed_db = read.idb;
+                state.dropped_values += read.dropped;
+                state.truncated |= read.truncated;
+            }
+            None => states.push(OriginState {
+                origin: read.origin,
+                indexed_db: read.idb,
+                dropped_values: read.dropped,
+                truncated: read.truncated,
+                ..Default::default()
+            }),
+        }
+    }
+    states
+}
+
+/// A remote object that is not an object (no `objectId`) as the tagged encoding. `None` for a
+/// value that cannot be carried (a symbol, a function). Pure.
+pub(crate) fn primitive_to_tagged(
+    kind: &str,
+    value: Option<&serde_json::Value>,
+    unserializable: Option<&str>,
+) -> Option<serde_json::Value> {
+    match kind {
+        "undefined" => Some(json!({ "$t": "undefined" })),
+        "boolean" | "string" => value.cloned(),
+        "number" => match unserializable {
+            Some(text @ ("NaN" | "Infinity" | "-Infinity" | "-0")) => {
+                Some(json!({ "$t": "num", "v": text }))
+            }
+            Some(_) => None,
+            None => value.cloned(),
+        },
+        "bigint" => unserializable
+            .map(|text| text.strip_suffix('n').unwrap_or(text))
+            .map(|digits| json!({ "$t": "bigint", "v": digits })),
+        // `null` arrives as an object without an id.
+        "object" => Some(serde_json::Value::Null),
+        _ => None,
+    }
+}
+
+/// A `KeyPath` of the IndexedDB domain as the snapshot stores it.
+fn key_path_value(path: &::chromiumoxide::cdp::browser_protocol::indexed_db::KeyPath) -> serde_json::Value {
+    use ::chromiumoxide::cdp::browser_protocol::indexed_db::KeyPathType;
+    match path.r#type {
+        KeyPathType::Null => serde_json::Value::Null,
+        KeyPathType::String => path
+            .string
+            .clone()
+            .map_or(serde_json::Value::Null, serde_json::Value::String),
+        KeyPathType::Array => json!(path.array.clone().unwrap_or_default()),
+    }
+}
+
+/// Run on a `requestData` entry's object (as `this`): the structured-clone value in the tagged
+/// encoding, as a JSON string `{ v, dropped }`. The same encoding as [`SERIALIZER_JS`].
+const ENCODE_REMOTE_JS: &str = r#"async function () {
+  const MAX = __MAX_BYTES__;
+  let dropped = 0;
+  let bytes = 0;
+  const DROPPED = { $t: 'dropped' };
+  const drop = () => { dropped++; return DROPPED; };
+  const b64 = (u8) => {
+    let s = '';
+    for (let i = 0; i < u8.length; i += 0x8000) {
+      s += String.fromCharCode.apply(null, u8.subarray(i, i + 0x8000));
+    }
+    return btoa(s);
+  };
+  const TYPED = new Set(['Int8Array', 'Uint8Array', 'Uint8ClampedArray', 'Int16Array',
+    'Uint16Array', 'Int32Array', 'Uint32Array', 'Float32Array', 'Float64Array',
+    'BigInt64Array', 'BigUint64Array', 'DataView']);
+  const enc = async (v, seen, depth) => {
+    if (v === undefined) return { $t: 'undefined' };
+    if (v === null) return null;
+    switch (typeof v) {
+      case 'boolean': case 'string': return v;
+      case 'number':
+        if (Number.isFinite(v) && !Object.is(v, -0)) return v;
+        return { $t: 'num', v: Object.is(v, -0) ? '-0' : String(v) };
+      case 'bigint': return { $t: 'bigint', v: v.toString() };
+      case 'function': case 'symbol': return drop();
+    }
+    if (depth > 64 || seen.has(v)) return drop();
+    seen.add(v);
+    try {
+      if (v instanceof Date) {
+        const t = v.getTime();
+        return { $t: 'date', v: Number.isNaN(t) ? 'invalid' : t };
+      }
+      if (v instanceof RegExp) return { $t: 'regexp', source: v.source, flags: v.flags };
+      if (v instanceof ArrayBuffer) {
+        bytes += v.byteLength;
+        if (bytes > MAX) return drop();
+        return { $t: 'bytes', k: 'ArrayBuffer', v: b64(new Uint8Array(v)) };
+      }
+      if (ArrayBuffer.isView(v)) {
+        bytes += v.byteLength;
+        if (bytes > MAX) return drop();
+        const k = TYPED.has(v.constructor && v.constructor.name) ? v.constructor.name : 'Uint8Array';
+        return { $t: 'bytes', k, v: b64(new Uint8Array(v.buffer, v.byteOffset, v.byteLength)) };
+      }
+      if (typeof Blob !== 'undefined' && v instanceof Blob) {
+        bytes += v.size;
+        if (bytes > MAX) return drop();
+        return { $t: 'blob', mime: v.type || '', v: b64(new Uint8Array(await v.arrayBuffer())) };
+      }
+      if (v instanceof Map) {
+        const entries = [];
+        for (const [k, val] of v) entries.push([await enc(k, seen, depth + 1), await enc(val, seen, depth + 1)]);
+        return { $t: 'map', v: entries };
+      }
+      if (v instanceof Set) {
+        const items = [];
+        for (const item of v) items.push(await enc(item, seen, depth + 1));
+        return { $t: 'set', v: items };
+      }
+      if (Array.isArray(v)) {
+        const items = [];
+        for (let i = 0; i < v.length; i++) items.push(await enc(v[i], seen, depth + 1));
+        return items;
+      }
+      const proto = Object.getPrototypeOf(v);
+      if (proto === Object.prototype || proto === null) {
+        const o = {};
+        for (const k of Object.keys(v)) o[k] = await enc(v[k], seen, depth + 1);
+        return Object.prototype.hasOwnProperty.call(o, '$t') ? { $t: 'obj', v: o } : o;
+      }
+      return drop();
+    } finally {
+      seen.delete(v);
+    }
+  };
+  const v = await enc(this, new WeakSet(), 0);
+  return JSON.stringify({ v, dropped });
+}"#;
+
+/// What the closed-origin carrier page loads: nothing.
+pub(crate) const CLOSED_CARRIER_URL: &str = "about:blank";
+
+/// The target the closed-origin phase opens: a fresh `about:blank` page of the session's
+/// own browser context (never another context: the IndexedDB domain reads the carrier's
+/// storage partition).
+pub(crate) fn closed_carrier_params(context: &BrowserContextId) -> CreateTargetParams {
+    let mut params = CreateTargetParams::new(CLOSED_CARRIER_URL);
+    params.browser_context_id = Some(context.clone());
+    params
+}
+
+/// The page the closed-origin phase reads through: opened for the phase, closed after it
+/// (on drop too, so a capture cut by the overall deadline does not leave it open).
+///
+/// Never a live tab (security review of W2-U55). `IndexedDB.requestData` materialises the
+/// closed origin's records as objects in the carrier's main world, and the encoder runs
+/// there through `Runtime.callFunctionOn`. A live tab's page is another origin, possibly
+/// hostile: by patching the intrinsics the encoder calls (`JSON.stringify`,
+/// `WeakSet.prototype.add`, `Blob.prototype.arrayBuffer`, ...) it would read the closed
+/// origin's IndexedDB, or rewrite what is persisted for it and restored into it later. A
+/// blank target that no page script has run in has nothing patched, and no page holds a
+/// reference to it. It also keeps the closed origin's data out of another site's renderer
+/// and releases the encoder's remote objects with the page.
+pub(crate) struct ClosedCarrier {
+    page: Option<Page>,
+}
+
+impl ClosedCarrier {
+    /// Open the carrier in `context`, or `None` when it did not open before `until`.
+    pub(crate) async fn open(
+        browser: &Browser,
+        context: &BrowserContextId,
+        until: Instant,
+    ) -> Option<Self> {
+        match tokio::time::timeout(
+            remaining(until),
+            browser.new_page(closed_carrier_params(context)),
+        )
+        .await
+        {
+            Ok(Ok(page)) => Some(Self { page: Some(page) }),
+            _ => None,
+        }
+    }
+
+    fn page(&self) -> &Page {
+        self.page
+            .as_ref()
+            .expect("the carrier page is held until drop")
+    }
+}
+
+impl Drop for ClosedCarrier {
+    fn drop(&mut self) {
+        let Some(page) = self.page.take() else {
+            return;
+        };
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(async move {
+                let _ = page.close().await;
+            });
+        }
+    }
+}
+
+/// The real source: the `IndexedDB` CDP domain, asked through the [`ClosedCarrier`] with the
+/// closed origin named as `securityOrigin`. The domain needs no frame for that origin (S0
+/// probe P3a/P3b, read from an `about:blank` page); it does need a target to send through.
+/// It holds a carrier, not a `Page`, so a live tab cannot be passed in.
+pub(crate) struct CdpClosedIdb<'a> {
+    carrier: &'a ClosedCarrier,
+}
+
+impl<'a> CdpClosedIdb<'a> {
+    pub(crate) fn on(carrier: &'a ClosedCarrier) -> Self {
+        Self { carrier }
+    }
+}
+
+impl CdpClosedIdb<'_> {
+    fn page(&self) -> &Page {
+        self.carrier.page()
+    }
+
+    fn cdp_error(what: &str, error: &impl std::fmt::Display) -> QuarryError {
+        QuarryError::new(ErrorCode::DriverFailed, format!("chromiumoxide {what} failed"))
+            .with_details(json!({ "error": error.to_string() }))
+    }
+
+    /// One remote object (a record's key or value) as the tagged encoding plus how many
+    /// parts of it were dropped.
+    async fn encode(
+        &self,
+        object: &::chromiumoxide::cdp::js_protocol::runtime::RemoteObject,
+    ) -> QuarryResult<(serde_json::Value, u32)> {
+        use ::chromiumoxide::cdp::js_protocol::runtime::CallFunctionOnParams;
+        let dropped = || (json!({ "$t": "dropped" }), 1u32);
+        let Some(object_id) = object.object_id.clone() else {
+            let encoded = primitive_to_tagged(
+                object.r#type.as_ref(),
+                object.value.as_ref(),
+                object.unserializable_value.as_ref().map(AsRef::as_ref),
+            );
+            return Ok(encoded.map_or_else(dropped, |value| (value, 0)));
+        };
+        let mut params = CallFunctionOnParams::new(
+            ENCODE_REMOTE_JS.replace("__MAX_BYTES__", &MAX_CLOSED_ORIGIN_BYTES.to_string()),
+        );
+        params.object_id = Some(object_id);
+        params.await_promise = Some(true);
+        params.return_by_value = Some(true);
+        let response = self
+            .page()
+            .execute(params)
+            .await
+            .map_err(|error| Self::cdp_error("closed-origin value encode", &error))?;
+        if response.result.exception_details.is_some() {
+            return Ok(dropped());
+        }
+        let Some(serde_json::Value::String(text)) = response.result.result.value else {
+            return Ok(dropped());
+        };
+        #[derive(Deserialize)]
+        struct Encoded {
+            v: serde_json::Value,
+            #[serde(default)]
+            dropped: u32,
+        }
+        match serde_json::from_str::<Encoded>(&text) {
+            Ok(encoded) => Ok((encoded.v, encoded.dropped)),
+            Err(_) => Ok(dropped()),
+        }
+    }
+}
+
+impl ClosedIdbSource for CdpClosedIdb<'_> {
+    async fn database_names(&self, origin: &str) -> QuarryResult<Vec<String>> {
+        use ::chromiumoxide::cdp::browser_protocol::indexed_db::RequestDatabaseNamesParams;
+        let response = self
+            .page()
+            .execute(RequestDatabaseNamesParams {
+                security_origin: Some(origin.to_owned()),
+                storage_key: None,
+                storage_bucket: None,
+            })
+            .await
+            .map_err(|error| Self::cdp_error("IndexedDB.requestDatabaseNames", &error))?;
+        Ok(response.result.database_names.clone())
+    }
+
+    async fn database(&self, origin: &str, name: &str) -> QuarryResult<IdbDatabase> {
+        use ::chromiumoxide::cdp::browser_protocol::indexed_db::RequestDatabaseParams;
+        let mut params = RequestDatabaseParams::new(name);
+        params.security_origin = Some(origin.to_owned());
+        let response = self
+            .page()
+            .execute(params)
+            .await
+            .map_err(|error| Self::cdp_error("IndexedDB.requestDatabase", &error))?;
+        let db = &response.result.database_with_object_stores;
+        Ok(IdbDatabase {
+            name: db.name.clone(),
+            version: db.version.max(0.0) as u64,
+            stores: db
+                .object_stores
+                .iter()
+                .map(|store| IdbStore {
+                    name: store.name.clone(),
+                    key_path: key_path_value(&store.key_path),
+                    auto_increment: store.auto_increment,
+                    indexes: store
+                        .indexes
+                        .iter()
+                        .map(|index| IdbIndex {
+                            name: index.name.clone(),
+                            key_path: key_path_value(&index.key_path),
+                            unique: index.unique,
+                            multi_entry: index.multi_entry,
+                        })
+                        .collect(),
+                    records: Vec::new(),
+                    omitted: false,
+                })
+                .collect(),
+        })
+    }
+
+    async fn records(
+        &self,
+        origin: &str,
+        database: &str,
+        store: &str,
+        skip: usize,
+        page_size: usize,
+    ) -> QuarryResult<RecordPage> {
+        use ::chromiumoxide::cdp::browser_protocol::indexed_db::RequestDataParams;
+        let response = self
+            .page()
+            .execute(RequestDataParams {
+                security_origin: Some(origin.to_owned()),
+                storage_key: None,
+                storage_bucket: None,
+                database_name: database.to_owned(),
+                object_store_name: store.to_owned(),
+                index_name: None,
+                skip_count: skip as i64,
+                page_size: page_size as i64,
+                key_range: None,
+            })
+            .await
+            .map_err(|error| Self::cdp_error("IndexedDB.requestData", &error))?;
+        let mut page = RecordPage {
+            has_more: response.result.has_more,
+            ..Default::default()
+        };
+        for entry in &response.result.object_store_data_entries {
+            let (key, key_dropped) = self.encode(&entry.key).await?;
+            let (value, value_dropped) = self.encode(&entry.value).await?;
+            page.dropped += key_dropped + value_dropped;
+            // A record without a key it can be put back under is worth nothing.
+            if key == json!({ "$t": "dropped" }) {
+                continue;
+            }
+            page.records.push(IdbRecord { key, value });
+        }
+        Ok(page)
+    }
+}
+
+// ---------------------------------------------------------------------------------------
 // The flush: web storage of a page that is about to go away
 // ---------------------------------------------------------------------------------------
 
@@ -604,6 +1263,7 @@ pub(crate) async fn capture_profile(
     idb: bool,
 ) -> QuarryResult<ProfileCapture> {
     let mut report = CaptureReport::default();
+    let capture_started = Instant::now();
 
     // 1. Cookies. Everything else is optional; this is not.
     let started = Instant::now();
@@ -699,15 +1359,67 @@ pub(crate) async fn capture_profile(
     report.idb_ms = started.elapsed().as_millis() as u64;
 
     // 4. Origins no live tab covers: what their pages flushed while alive.
-    let flushed = match journal.lock() {
+    let want_closed = idb && closed_origins_capture_enabled();
+    let limits = ClosedLimits::from_caps(&caps);
+    let mut closed_candidates: Vec<String> = Vec::new();
+    let mut closed_skipped = 0usize;
+    let mut flushed = match journal.lock() {
         Ok(mut journal) => {
             for origin in &live_origins {
                 journal.record_visit(origin);
+            }
+            if want_closed {
+                (closed_candidates, closed_skipped) =
+                    closed_origin_candidates(journal.visited(), &live_origins, limits.origins);
             }
             journal.flushed_not_in(&live_origins)
         }
         Err(_) => Vec::new(),
     };
+
+    // 4b. The IndexedDB of those closed origins (D2-070), flag-gated and budgeted. It goes
+    // through a blank carrier page of this context opened for the phase, never through a
+    // live tab (see [`ClosedCarrier`]).
+    let mut closed_report = ClosedReport::default();
+    if want_closed && !closed_candidates.is_empty() {
+        let overall_end = capture_started
+            + Duration::from_millis(BUDGET_TOTAL_MS.saturating_sub(CLOSED_MARGIN_MS));
+        let until = (Instant::now() + Duration::from_millis(BUDGET_CLOSED_MS)).min(overall_end);
+        if Instant::now() >= until {
+            closed_report.enabled = true;
+            closed_report.candidates = closed_candidates.len() as u32;
+            closed_report.timed_out = true;
+            closed_report.truncated = true;
+            closed_report.skipped = closed_candidates.len() as u32;
+        } else if let Some(carrier) = ClosedCarrier::open(browser, context, until).await {
+            let source = CdpClosedIdb::on(&carrier);
+            let (reads, phase) =
+                capture_closed_origins(&source, &closed_candidates, &limits, until).await;
+            drop(carrier);
+            closed_report = phase;
+            flushed = merge_closed_idb(flushed, reads);
+        } else {
+            closed_report.enabled = true;
+            closed_report.candidates = closed_candidates.len() as u32;
+            closed_report.no_page = true;
+            closed_report.skipped = closed_candidates.len() as u32;
+        }
+        closed_report.skipped += closed_skipped as u32;
+        report.truncated |= closed_report.truncated;
+        tracing::info!(
+            event = "profile_capture_closed_origins",
+            candidates = closed_report.candidates,
+            read = closed_report.origins_read,
+            failed = closed_report.origins_failed,
+            skipped = closed_report.skipped,
+            databases = closed_report.databases,
+            records = closed_report.records,
+            timed_out = closed_report.timed_out,
+            truncated = closed_report.truncated,
+            no_page = closed_report.no_page,
+            "closed-tab origin IndexedDB captured"
+        );
+    }
     report.origins_live = live.len() as u32;
     report.origins_flushed = flushed.len() as u32;
 
@@ -750,6 +1462,7 @@ pub(crate) async fn capture_profile(
         snapshot,
         report,
         outcome,
+        closed: closed_report,
     })
 }
 
@@ -879,6 +1592,709 @@ mod tests {
             SERIALIZER_JS.matches('{').count(),
             SERIALIZER_JS.matches('}').count(),
             "balanced braces"
+        );
+    }
+
+    // -----------------------------------------------------------------------------------
+    // Closed-tab origins (D2-070): the mock source stands in for the CDP domain
+    // -----------------------------------------------------------------------------------
+
+    use std::collections::HashMap;
+
+    #[derive(Default, Clone)]
+    struct MockOrigin {
+        /// (database name, store name, record count)
+        dbs: Vec<(String, Vec<(String, usize)>)>,
+        fail: bool,
+        hang: bool,
+    }
+
+    #[derive(Default)]
+    struct MockSource {
+        origins: HashMap<String, MockOrigin>,
+        calls: Mutex<Vec<String>>,
+    }
+
+    impl MockSource {
+        fn with(mut self, origin: &str, spec: MockOrigin) -> Self {
+            self.origins.insert(origin.to_owned(), spec);
+            self
+        }
+
+        fn origin(&self, origin: &str, what: &str) -> QuarryResult<MockOrigin> {
+            self.calls.lock().unwrap().push(format!("{what}:{origin}"));
+            let spec = self.origins.get(origin).cloned().unwrap_or_default();
+            if spec.fail {
+                return Err(QuarryError::new(ErrorCode::DriverFailed, "mock failure"));
+            }
+            Ok(spec)
+        }
+
+        fn calls(&self, prefix: &str) -> usize {
+            self.calls
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|call| call.starts_with(prefix))
+                .count()
+        }
+    }
+
+    fn record(n: usize, pad: usize) -> IdbRecord {
+        IdbRecord {
+            key: json!(n),
+            value: json!({ "n": n, "pad": "x".repeat(pad) }),
+        }
+    }
+
+    impl ClosedIdbSource for MockSource {
+        async fn database_names(&self, origin: &str) -> QuarryResult<Vec<String>> {
+            let spec = self.origin(origin, "names")?;
+            if spec.hang {
+                std::future::pending::<()>().await;
+            }
+            Ok(spec.dbs.iter().map(|(name, _)| name.clone()).collect())
+        }
+
+        async fn database(&self, origin: &str, name: &str) -> QuarryResult<IdbDatabase> {
+            let spec = self.origin(origin, "db")?;
+            let (_, stores) = spec
+                .dbs
+                .iter()
+                .find(|(db, _)| db == name)
+                .expect("database exists");
+            Ok(IdbDatabase {
+                name: name.to_owned(),
+                version: 3,
+                stores: stores
+                    .iter()
+                    .map(|(store, _)| IdbStore {
+                        name: store.clone(),
+                        key_path: json!("id"),
+                        ..Default::default()
+                    })
+                    .collect(),
+            })
+        }
+
+        async fn records(
+            &self,
+            origin: &str,
+            database: &str,
+            store: &str,
+            skip: usize,
+            page_size: usize,
+        ) -> QuarryResult<RecordPage> {
+            let spec = self.origin(origin, "records")?;
+            let total = spec
+                .dbs
+                .iter()
+                .find(|(db, _)| db == database)
+                .and_then(|(_, stores)| stores.iter().find(|(name, _)| name == store))
+                .map(|(_, count)| *count)
+                .expect("store exists");
+            let end = (skip + page_size).min(total);
+            Ok(RecordPage {
+                records: (skip..end).map(|n| record(n, 8)).collect(),
+                dropped: 0,
+                has_more: end < total,
+            })
+        }
+    }
+
+    fn one_db(stores: &[(&str, usize)]) -> MockOrigin {
+        MockOrigin {
+            dbs: vec![(
+                "app".to_owned(),
+                stores
+                    .iter()
+                    .map(|(name, count)| ((*name).to_owned(), *count))
+                    .collect(),
+            )],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn closed_carrier_is_a_blank_target_of_the_session_context() {
+        let context = BrowserContextId::new("ctx-session-a");
+        let params = closed_carrier_params(&context);
+        assert_eq!(params.url, "about:blank");
+        assert_eq!(params.browser_context_id, Some(context));
+        // A blank page: no navigation, so no egress and no page script in its main world.
+        assert_eq!(CLOSED_CARRIER_URL, "about:blank");
+    }
+
+    #[test]
+    fn closed_phase_never_reads_through_a_live_tab() {
+        // The production path builds its source only from a carrier it opened. The type
+        // enforces it (`CdpClosedIdb` holds a `ClosedCarrier`, not a `Page`); this guards
+        // the call site against a later edit that hands a live tab's page back in.
+        let source = include_str!("profile_capture.rs");
+        let body = source
+            .split("pub(crate) async fn capture_profile(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n}").next())
+            .expect("capture_profile body");
+        let phase = body
+            .split("// 4b.")
+            .nth(1)
+            .and_then(|rest| rest.split("profile_capture_closed_origins").next())
+            .expect("the closed-origin phase");
+        assert!(phase.contains("ClosedCarrier::open(browser, context, until)"));
+        assert!(phase.contains("CdpClosedIdb::on(&carrier)"));
+        assert!(!phase.contains("tabs"), "the closed phase must not pick a live tab");
+        assert!(!phase.contains(".page"), "the closed phase must not use a live page");
+    }
+
+    fn limits() -> ClosedLimits {
+        ClosedLimits::from_caps(&ProfileCaps::default())
+    }
+
+    fn soon() -> Instant {
+        Instant::now() + Duration::from_secs(30)
+    }
+
+    fn names(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    #[test]
+    fn closed_origin_flag_defaults_off_and_parses_like_the_other_profile_flags() {
+        assert!(!closed_flag(None));
+        assert!(!closed_flag(Some("")));
+        assert!(!closed_flag(Some("maybe")));
+        assert!(closed_flag(Some("1")));
+        assert!(closed_flag(Some(" On ")));
+        assert!(closed_flag(Some("true")));
+        assert!(!closed_flag(Some("0")));
+        assert!(!closed_flag(Some("off")));
+        assert_eq!(
+            CAPTURE_CLOSED_ORIGINS_ENV,
+            "QUARRY_BROWSER_CAPTURE_CLOSED_ORIGINS"
+        );
+    }
+
+    #[test]
+    fn closed_limits_never_exceed_the_snapshot_caps() {
+        let defaults = ClosedLimits::from_caps(&ProfileCaps::default());
+        assert_eq!(defaults.origin_bytes, MAX_CLOSED_ORIGIN_BYTES);
+        assert_eq!(defaults.total_bytes, MAX_CLOSED_TOTAL_BYTES);
+        assert_eq!(defaults.origin_records, MAX_CLOSED_RECORDS);
+        let tight = ClosedLimits::from_caps(&ProfileCaps {
+            max_bytes: 1_000,
+            max_origin_bytes: 300,
+            max_origins: 4,
+            max_idb_records: 7,
+        });
+        assert_eq!(tight.origin_bytes, 300);
+        assert_eq!(tight.total_bytes, 500);
+        assert_eq!(tight.origin_records, 7);
+    }
+
+    #[test]
+    fn candidates_are_the_visited_origins_no_live_tab_covers() {
+        let visited: BTreeSet<String> =
+            ["https://a.test", "https://b.test", "https://c.test", "https://d.test"]
+                .iter()
+                .map(|s| (*s).to_owned())
+                .collect();
+        let live: BTreeSet<String> = ["https://b.test".to_owned()].into_iter().collect();
+        let (all, skipped) = closed_origin_candidates(visited.iter(), &live, 10);
+        assert_eq!(all, names(&["https://a.test", "https://c.test", "https://d.test"]));
+        assert_eq!(skipped, 0);
+        let (two, skipped) = closed_origin_candidates(visited.iter(), &live, 2);
+        assert_eq!(two, names(&["https://a.test", "https://c.test"]));
+        assert_eq!(skipped, 1);
+        let (none, skipped) = closed_origin_candidates(visited.iter(), &visited, 10);
+        assert!(none.is_empty() && skipped == 0);
+    }
+
+    #[tokio::test]
+    async fn a_closed_origin_is_read_page_by_page() {
+        let source = MockSource::default().with(
+            "https://a.test",
+            one_db(&[("orders", 250), ("meta", 3)]),
+        );
+        let (reads, report) =
+            capture_closed_origins(&source, &names(&["https://a.test"]), &limits(), soon()).await;
+        assert_eq!(reads.len(), 1);
+        let db = &reads[0].idb[0];
+        assert_eq!((db.name.as_str(), db.version), ("app", 3));
+        let orders = db.stores.iter().find(|s| s.name == "orders").unwrap();
+        assert_eq!(orders.records.len(), 250);
+        assert_eq!(orders.records[249].key, json!(249));
+        assert_eq!(orders.key_path, json!("id"));
+        assert!(!reads[0].truncated && !orders.omitted);
+        // 250 records at 100 per page is three requests; the 3-record store one.
+        assert_eq!(source.calls("records:"), 4);
+        assert_eq!(report.origins_read, 1);
+        assert_eq!((report.databases, report.records), (1, 253));
+        assert!(!report.truncated && !report.timed_out && report.origins_failed == 0);
+    }
+
+    #[tokio::test]
+    async fn the_per_origin_record_cap_keeps_what_was_read_and_says_truncated() {
+        let source = MockSource::default().with("https://a.test", one_db(&[("orders", 500)]));
+        let capped = ClosedLimits {
+            origin_records: 120,
+            ..limits()
+        };
+        let (reads, report) =
+            capture_closed_origins(&source, &names(&["https://a.test"]), &capped, soon()).await;
+        let store = &reads[0].idb[0].stores[0];
+        assert_eq!(store.records.len(), 120);
+        assert!(reads[0].truncated && report.truncated);
+        assert!(!store.omitted, "records were kept");
+        // The second request asked for 20, not a whole page.
+        assert_eq!(source.calls("records:"), 2);
+    }
+
+    #[tokio::test]
+    async fn the_per_origin_byte_cap_stops_the_read() {
+        let source = MockSource::default().with("https://a.test", one_db(&[("orders", 500)]));
+        let one = record_bytes(&record(0, 8));
+        let capped = ClosedLimits {
+            origin_bytes: one * 10 + 5,
+            ..limits()
+        };
+        let (reads, _) =
+            capture_closed_origins(&source, &names(&["https://a.test"]), &capped, soon()).await;
+        let kept: usize = reads[0].idb[0].stores[0].records.iter().map(record_bytes).sum();
+        assert!(kept <= capped.origin_bytes);
+        assert!(reads[0].idb[0].stores[0].records.len() >= 9);
+        assert!(reads[0].truncated);
+    }
+
+    #[tokio::test]
+    async fn a_store_cut_before_its_first_record_keeps_its_definition_flagged_omitted() {
+        let source = MockSource::default().with("https://a.test", one_db(&[("orders", 5)]));
+        let capped = ClosedLimits {
+            origin_bytes: 1,
+            ..limits()
+        };
+        let (reads, _) =
+            capture_closed_origins(&source, &names(&["https://a.test"]), &capped, soon()).await;
+        let store = &reads[0].idb[0].stores[0];
+        assert!(store.records.is_empty() && store.omitted);
+        assert!(reads[0].truncated);
+    }
+
+    #[tokio::test]
+    async fn the_all_origins_byte_cap_leaves_later_origins_out() {
+        let source = MockSource::default()
+            .with("https://a.test", one_db(&[("s", 40)]))
+            .with("https://b.test", one_db(&[("s", 40)]))
+            .with("https://c.test", one_db(&[("s", 40)]));
+        let one = record_bytes(&record(0, 8));
+        let capped = ClosedLimits {
+            origin_bytes: one * 60,
+            total_bytes: one * 45,
+            ..limits()
+        };
+        let all = names(&["https://a.test", "https://b.test", "https://c.test"]);
+        let (reads, report) = capture_closed_origins(&source, &all, &capped, soon()).await;
+        let total: usize = reads
+            .iter()
+            .flat_map(|r| r.idb.iter())
+            .flat_map(|d| d.stores.iter())
+            .flat_map(|s| s.records.iter())
+            .map(record_bytes)
+            .sum();
+        assert!(total <= capped.total_bytes, "{total} > {}", capped.total_bytes);
+        assert_eq!(reads[0].idb[0].stores[0].records.len(), 40);
+        assert!(report.truncated);
+        assert!(reads.len() < 3 || reads[2].idb[0].stores[0].records.len() < 40);
+    }
+
+    #[tokio::test]
+    async fn databases_over_the_per_origin_cap_are_left_out() {
+        let many = MockOrigin {
+            dbs: (0..20)
+                .map(|n| (format!("db{n:02}"), vec![("s".to_owned(), 1)]))
+                .collect(),
+            ..Default::default()
+        };
+        let source = MockSource::default().with("https://a.test", many);
+        let (reads, report) =
+            capture_closed_origins(&source, &names(&["https://a.test"]), &limits(), soon()).await;
+        assert_eq!(reads[0].idb.len(), MAX_CLOSED_DATABASES);
+        assert!(reads[0].truncated && report.truncated);
+        assert_eq!(reads[0].idb[0].name, "db00");
+    }
+
+    #[tokio::test]
+    async fn one_failing_origin_costs_only_itself() {
+        let source = MockSource::default()
+            .with("https://a.test", one_db(&[("s", 2)]))
+            .with(
+                "https://b.test",
+                MockOrigin {
+                    fail: true,
+                    ..Default::default()
+                },
+            )
+            .with("https://c.test", one_db(&[("s", 2)]));
+        let all = names(&["https://a.test", "https://b.test", "https://c.test"]);
+        let (reads, report) = capture_closed_origins(&source, &all, &limits(), soon()).await;
+        let read: Vec<&str> = reads.iter().map(|r| r.origin.as_str()).collect();
+        assert_eq!(read, ["https://a.test", "https://c.test"]);
+        assert_eq!((report.origins_read, report.origins_failed), (2, 1));
+        assert!(!report.timed_out);
+    }
+
+    #[tokio::test]
+    async fn a_failure_in_a_later_page_discards_the_whole_origin() {
+        // The mock fails at the records call: names and database succeed first.
+        struct FailsOnRecords;
+        impl ClosedIdbSource for FailsOnRecords {
+            async fn database_names(&self, _: &str) -> QuarryResult<Vec<String>> {
+                Ok(vec!["app".to_owned()])
+            }
+            async fn database(&self, _: &str, name: &str) -> QuarryResult<IdbDatabase> {
+                Ok(IdbDatabase {
+                    name: name.to_owned(),
+                    version: 1,
+                    stores: vec![IdbStore {
+                        name: "s".to_owned(),
+                        ..Default::default()
+                    }],
+                })
+            }
+            async fn records(
+                &self,
+                _: &str,
+                _: &str,
+                _: &str,
+                _: usize,
+                _: usize,
+            ) -> QuarryResult<RecordPage> {
+                Err(QuarryError::new(ErrorCode::DriverFailed, "gone"))
+            }
+        }
+        let (reads, report) = capture_closed_origins(
+            &FailsOnRecords,
+            &names(&["https://a.test"]),
+            &limits(),
+            soon(),
+        )
+        .await;
+        assert!(reads.is_empty());
+        assert_eq!(report.origins_failed, 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn running_out_of_time_keeps_finished_origins_and_skips_the_rest() {
+        let source = MockSource::default()
+            .with("https://a.test", one_db(&[("s", 2)]))
+            .with(
+                "https://b.test",
+                MockOrigin {
+                    hang: true,
+                    ..Default::default()
+                },
+            )
+            .with("https://c.test", one_db(&[("s", 2)]));
+        let all = names(&["https://a.test", "https://b.test", "https://c.test"]);
+        let until = Instant::now() + Duration::from_millis(BUDGET_CLOSED_MS);
+        let (reads, report) = capture_closed_origins(&source, &all, &limits(), until).await;
+        assert_eq!(reads.len(), 1);
+        assert_eq!(reads[0].origin, "https://a.test");
+        assert!(report.timed_out && report.truncated);
+        assert_eq!(report.skipped, 2, "the hung origin and the one after it");
+        assert_eq!(source.calls("names:https://c.test"), 0);
+    }
+
+    #[tokio::test]
+    async fn an_origin_with_no_database_reads_empty() {
+        let source = MockSource::default().with("https://a.test", MockOrigin::default());
+        let (reads, report) =
+            capture_closed_origins(&source, &names(&["https://a.test"]), &limits(), soon()).await;
+        assert_eq!(reads.len(), 1);
+        assert!(reads[0].idb.is_empty());
+        assert_eq!((report.origins_read, report.databases, report.records), (1, 0, 0));
+    }
+
+    fn web_state(origin: &str) -> OriginState {
+        OriginState {
+            origin: origin.to_owned(),
+            local_storage: vec![("k".to_owned(), "v".to_owned())],
+            ..Default::default()
+        }
+    }
+
+    fn db(name: &str, records: usize) -> IdbDatabase {
+        IdbDatabase {
+            name: name.to_owned(),
+            version: 1,
+            stores: vec![IdbStore {
+                name: "s".to_owned(),
+                records: (0..records).map(|n| record(n, 1)).collect(),
+                ..Default::default()
+            }],
+        }
+    }
+
+    #[test]
+    fn merge_replaces_idb_keeps_web_storage_and_adds_origins_the_journal_lacked() {
+        let mut stale = web_state("https://a.test");
+        stale.indexed_db = vec![db("old", 1)];
+        let closed = vec![
+            ClosedOrigin {
+                origin: "https://a.test".to_owned(),
+                idb: vec![db("new", 2)],
+                dropped: 3,
+                truncated: true,
+            },
+            ClosedOrigin {
+                origin: "https://z.test".to_owned(),
+                idb: vec![db("z", 1)],
+                ..Default::default()
+            },
+        ];
+        let merged = merge_closed_idb(vec![stale], closed);
+        assert_eq!(merged.len(), 2);
+        let a = &merged[0];
+        assert_eq!(a.indexed_db.len(), 1);
+        assert_eq!(a.indexed_db[0].name, "new");
+        assert_eq!(a.local_storage, vec![("k".to_owned(), "v".to_owned())]);
+        assert_eq!(a.dropped_values, 3);
+        assert!(a.truncated);
+        let z = &merged[1];
+        assert_eq!(z.origin, "https://z.test");
+        assert!(z.local_storage.is_empty());
+        assert_eq!(z.indexed_db[0].name, "z");
+    }
+
+    #[test]
+    fn an_empty_read_never_erases_the_idb_the_journal_holds() {
+        let mut carried = web_state("https://a.test");
+        carried.indexed_db = vec![db("kept", 4)];
+        let closed = vec![
+            ClosedOrigin {
+                origin: "https://a.test".to_owned(),
+                ..Default::default()
+            },
+            // A read that found nothing for an origin with no state adds no empty state.
+            ClosedOrigin {
+                origin: "https://nothing.test".to_owned(),
+                ..Default::default()
+            },
+        ];
+        let merged = merge_closed_idb(vec![carried.clone()], closed);
+        assert_eq!(merged, vec![carried]);
+    }
+
+    #[test]
+    fn merged_closed_idb_goes_through_the_same_caps_as_a_live_origin() {
+        let closed = vec![ClosedOrigin {
+            origin: "https://a.test".to_owned(),
+            idb: vec![db("big", 100)],
+            ..Default::default()
+        }];
+        let flushed = merge_closed_idb(Vec::new(), closed);
+        let caps = ProfileCaps {
+            max_idb_records: 10,
+            ..ProfileCaps::default()
+        };
+        let (origins, outcome) = merge_and_cap(Vec::new(), flushed, 0, &caps);
+        assert_eq!(origins.len(), 1);
+        assert!(origins[0].idb_record_count() <= 10);
+        assert!(outcome.truncated);
+    }
+
+    #[test]
+    fn remote_primitives_become_the_tagged_encoding() {
+        let some = |v: serde_json::Value| Some(v);
+        assert_eq!(
+            primitive_to_tagged("undefined", None, None),
+            some(json!({ "$t": "undefined" }))
+        );
+        assert_eq!(
+            primitive_to_tagged("string", Some(&json!("hi")), None),
+            some(json!("hi"))
+        );
+        assert_eq!(
+            primitive_to_tagged("boolean", Some(&json!(true)), None),
+            some(json!(true))
+        );
+        assert_eq!(
+            primitive_to_tagged("number", Some(&json!(1.5)), None),
+            some(json!(1.5))
+        );
+        assert_eq!(
+            primitive_to_tagged("number", None, Some("NaN")),
+            some(json!({ "$t": "num", "v": "NaN" }))
+        );
+        assert_eq!(
+            primitive_to_tagged("number", None, Some("-0")),
+            some(json!({ "$t": "num", "v": "-0" }))
+        );
+        assert_eq!(
+            primitive_to_tagged("bigint", None, Some("123n")),
+            some(json!({ "$t": "bigint", "v": "123" }))
+        );
+        assert_eq!(
+            primitive_to_tagged("object", Some(&serde_json::Value::Null), None),
+            some(serde_json::Value::Null)
+        );
+        assert_eq!(primitive_to_tagged("symbol", None, None), None);
+        assert_eq!(primitive_to_tagged("function", None, None), None);
+        assert_eq!(primitive_to_tagged("number", None, Some("weird")), None);
+    }
+
+    #[test]
+    fn the_encoded_values_round_trip_through_the_snapshot_decoder() {
+        // What the encoder writes is what restore reads: every shape above decodes.
+        for value in [
+            json!({ "$t": "undefined" }),
+            json!({ "$t": "num", "v": "Infinity" }),
+            json!({ "$t": "bigint", "v": "123" }),
+            json!({ "$t": "date", "v": 1_700_000_000_000u64 }),
+            json!("plain"),
+            json!(null),
+        ] {
+            assert!(
+                crate::profile_snapshot::IdbValue::from_json(&value).is_ok(),
+                "{value}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_remote_encoder_is_one_async_function_with_its_budget_placeholder() {
+        assert!(ENCODE_REMOTE_JS.trim_start().starts_with("async function ()"));
+        assert!(ENCODE_REMOTE_JS.trim_end().ends_with('}'));
+        assert!(ENCODE_REMOTE_JS.contains("__MAX_BYTES__"));
+        assert_eq!(
+            ENCODE_REMOTE_JS.matches('{').count(),
+            ENCODE_REMOTE_JS.matches('}').count(),
+            "balanced braces"
+        );
+        let ready = ENCODE_REMOTE_JS.replace("__MAX_BYTES__", "2097152");
+        assert!(!ready.contains("__MAX_BYTES__"));
+        // The tags it writes are the ones the snapshot decoder reads.
+        for tag in ["undefined", "num", "bigint", "date", "regexp", "bytes", "blob", "map", "set", "obj", "dropped"] {
+            assert!(ENCODE_REMOTE_JS.contains(&format!("$t: '{tag}'")), "tag {tag}");
+        }
+    }
+
+    /// Live: a visited origin whose tab closed is still readable through the IndexedDB
+    /// domain from another tab of the same context. Needs a pinned Chromium; not run in the
+    /// unit lane.
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "live Chromium: CHROMIUMOXIDE_TEST=1 QUARRY_BROWSER_NO_SANDBOX=1, run with --ignored"]
+    async fn live_closed_tab_origin_idb_is_captured_through_another_tab() {
+        use ::chromiumoxide::cdp::browser_protocol::target::{
+            CreateBrowserContextParams, CreateTargetParams,
+        };
+        use ::chromiumoxide::handler::viewport::Viewport;
+        use ::chromiumoxide::BrowserConfig;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        if !crate::live_gate::live_enabled() {
+            return;
+        }
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        let server = tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 4096];
+                    let _ = socket.read(&mut buf).await;
+                    let body = "<!doctype html><title>t</title>";
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = socket.write_all(response.as_bytes()).await;
+                    let _ = socket.shutdown().await;
+                });
+            }
+        });
+        let profile = tempfile::tempdir().expect("profile dir");
+        let mut builder = BrowserConfig::builder()
+            .user_data_dir(profile.path())
+            .arg("--disable-dev-shm-usage")
+            .viewport(None::<Viewport>);
+        if std::env::var("QUARRY_BROWSER_NO_SANDBOX").ok().as_deref() == Some("1") {
+            builder = builder.no_sandbox();
+        }
+        let (browser, mut handler) =
+            Browser::launch(builder.build().expect("config")).await.expect("launch");
+        tokio::spawn(async move { while handler.next().await.is_some() {} });
+        let context = browser
+            .create_browser_context(CreateBrowserContextParams::default())
+            .await
+            .expect("context");
+        let mut params = CreateTargetParams::new("about:blank");
+        params.browser_context_id = Some(context.clone());
+        let hostile = browser.new_page(params.clone()).await.expect("hostile live tab");
+        let victim = browser.new_page(params).await.expect("victim tab");
+        let origin = format!("http://127.0.0.1:{port}");
+        victim.goto(format!("{origin}/")).await.expect("goto");
+        let mut setup = EvaluateParams::new(
+            r#"(async () => {
+              const db = await new Promise((res, rej) => {
+                const r = indexedDB.open('closed-live', 2);
+                r.onupgradeneeded = () => r.result.createObjectStore('items', { keyPath: 'id' });
+                r.onsuccess = () => res(r.result);
+                r.onerror = () => rej(r.error);
+              });
+              await new Promise((res, rej) => {
+                const tx = db.transaction('items', 'readwrite');
+                tx.objectStore('items').put({ id: 1, when: new Date(1700000000000), n: 7n });
+                tx.objectStore('items').put({ id: 2, bytes: new Uint8Array([1, 2, 3]) });
+                tx.oncomplete = () => res();
+                tx.onerror = () => rej(tx.error);
+              });
+              db.close();
+              return 'stored';
+            })()"#,
+        );
+        setup.await_promise = Some(true);
+        setup.return_by_value = Some(true);
+        victim.execute(setup).await.expect("seed IndexedDB");
+        victim.close().await.expect("close the tab");
+
+        // A live tab of the same context patches the intrinsics the encoder calls. It must
+        // see nothing of the closed origin's records, and must not change them.
+        let mut patch = EvaluateParams::new(
+            "window.__leak = []; const s = JSON.stringify; \
+             JSON.stringify = function (v) { window.__leak.push(s(v)); return s({ v: 'forged', dropped: 0 }); }; \
+             const a = WeakSet.prototype.add; \
+             WeakSet.prototype.add = function (v) { window.__leak.push('seen'); return a.call(this, v); }; 'patched'",
+        );
+        patch.return_by_value = Some(true);
+        hostile.execute(patch).await.expect("patch the live tab");
+
+        let until = Instant::now() + Duration::from_secs(10);
+        let carrier = ClosedCarrier::open(&browser, &context, until)
+            .await
+            .expect("carrier page");
+        let source = CdpClosedIdb::on(&carrier);
+        let (reads, report) =
+            capture_closed_origins(&source, std::slice::from_ref(&origin), &limits(), until).await;
+        drop(carrier);
+        server.abort();
+        let mut leak = EvaluateParams::new("window.__leak.length");
+        leak.return_by_value = Some(true);
+        let leaked = hostile.execute(leak).await.expect("read the leak counter");
+        assert_eq!(leaked.result.result.value, Some(json!(0)), "the live tab saw records");
+        assert_eq!(report.origins_read, 1, "{report:?}");
+        let db = &reads[0].idb[0];
+        assert_eq!((db.name.as_str(), db.version), ("closed-live", 2));
+        let store = &db.stores[0];
+        assert_eq!(store.name, "items");
+        assert_eq!(store.key_path, json!("id"));
+        assert_eq!(store.records.len(), 2, "{:?}", store.records);
+        let first = &store.records[0];
+        assert_eq!(first.key, json!(1));
+        assert_eq!(first.value["when"], json!({ "$t": "date", "v": 1_700_000_000_000u64 }));
+        assert_eq!(first.value["n"], json!({ "$t": "bigint", "v": "7" }));
+        assert_eq!(
+            store.records[1].value["bytes"],
+            json!({ "$t": "bytes", "k": "Uint8Array", "v": "AQID" })
         );
     }
 }

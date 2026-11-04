@@ -13,10 +13,19 @@
 //!
 //! ## ZDR
 //!
-//! Events themselves are control-plane signals, not source content, so the
-//! payload is allowed to flow through JetStream regardless of run-level ZDR.
-//! Callers must NOT include scraped content / artifact bytes in the payload —
-//! only refs (artifact IDs, fingerprints, URLs).
+//! Run and crawl events are control-plane signals, not source content, so the
+//! payload is allowed to flow through JetStream. Callers must NOT include
+//! scraped content / artifact bytes in the payload — only refs (artifact IDs,
+//! fingerprints, URLs). A ZDR run never reaches this bus at all: the sink routes
+//! it through `emit_ephemeral`, which stays in process.
+//!
+//! ## Agent-class events (D2-098, D10)
+//!
+//! Agent-run events (`agent_*`, `action_*`, `observation_ready`) carry what the
+//! agent saw and did: URLs, element labels, action arguments. They never go out
+//! raw on JetStream, ZDR or not. They reach the run's own SSE stream and the
+//! in-memory replay ring in the sink; a cross-plane consumer gets them only
+//! through a redacted projection (WS10.S4), not from this bus.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -337,6 +346,13 @@ impl NatsEventBus {
         event_type: EventType,
         payload_bytes: Bytes,
     ) -> QuarryResult<()> {
+        // D2-098: an agent-class event never goes out raw. Both entry points
+        // (`publish` and `publish_event`) pass through here, so one check covers
+        // them. Dropping is Ok: the event is still on the run's SSE stream and in
+        // the replay ring; only the cross-plane copy is withheld.
+        if is_agent_class(&event_type) {
+            return Ok(());
+        }
         let primary_subject = self.subject_for(run_id, &event_type);
         let aggregate_subject = self.aggregate_subject_for(&event_type);
 
@@ -391,6 +407,56 @@ impl NatsEventBus {
                 format!("nats publish both subjects failed (primary: {p_err}; aggregate: {a_err})"),
             )),
         }
+    }
+}
+
+/// True for an event that belongs to an agent run: it can carry what the agent saw
+/// or did (URLs, element labels, action arguments), so it must not enter JetStream
+/// raw. The match has no wildcard arm on purpose: a new `EventType` variant is a
+/// compile error here until someone decides which side it is on.
+pub fn is_agent_class(t: &EventType) -> bool {
+    match t {
+        EventType::AgentStarted
+        | EventType::ActionStarted
+        | EventType::ActionCompleted
+        | EventType::ActionFailed
+        | EventType::ObservationReady
+        | EventType::AgentCompleted
+        | EventType::AgentFailed
+        | EventType::AgentExpired
+        | EventType::AgentBudgetExhausted
+        | EventType::AgentAttached
+        | EventType::AgentDetached => true,
+        EventType::RunStarted
+        | EventType::RunPaused
+        | EventType::RunResumed
+        | EventType::RunCancelled
+        | EventType::RunCompleted
+        | EventType::RunFailed
+        | EventType::PageQueued
+        | EventType::PageFetched
+        | EventType::PageFailed
+        | EventType::PageBlocked
+        | EventType::PageRetried
+        | EventType::PageEscalated
+        | EventType::ArtifactWritten
+        | EventType::SnapshotCreated
+        | EventType::StoreRecordWritten
+        | EventType::StoreRecordFailed
+        | EventType::LeaseAcquired
+        | EventType::LeaseReleased
+        | EventType::ProfileRestored
+        | EventType::ProfileCaptured
+        | EventType::ChangeDetected
+        | EventType::ChangeUnchanged
+        | EventType::ScheduleFired
+        | EventType::SearchIssued
+        | EventType::HostDiscovered
+        | EventType::BrandingExtracted
+        | EventType::PageExtracted
+        | EventType::ControlRequested
+        | EventType::RunTimedOut
+        | EventType::ScheduleSkipped => false,
     }
 }
 
@@ -449,6 +515,100 @@ mod tests {
         let c = NatsConfig::new("nats://localhost:4222");
         assert_eq!(c.subject_prefix, "quarry");
         assert_eq!(c.stream_name, "QUARRY_EVENTS");
+    }
+
+    /// Every `EventType`, listed once. `is_agent_class` has no wildcard arm, so a new
+    /// variant fails to compile there; this list keeps the expectations below honest.
+    const AGENT_CLASS: &[EventType] = &[
+        EventType::AgentStarted,
+        EventType::ActionStarted,
+        EventType::ActionCompleted,
+        EventType::ActionFailed,
+        EventType::ObservationReady,
+        EventType::AgentCompleted,
+        EventType::AgentFailed,
+        EventType::AgentExpired,
+        EventType::AgentBudgetExhausted,
+        EventType::AgentAttached,
+        EventType::AgentDetached,
+    ];
+    const RUN_AND_CRAWL_CLASS: &[EventType] = &[
+        EventType::RunStarted,
+        EventType::RunPaused,
+        EventType::RunResumed,
+        EventType::RunCancelled,
+        EventType::RunCompleted,
+        EventType::RunFailed,
+        EventType::PageQueued,
+        EventType::PageFetched,
+        EventType::PageFailed,
+        EventType::PageBlocked,
+        EventType::PageRetried,
+        EventType::PageEscalated,
+        EventType::ArtifactWritten,
+        EventType::SnapshotCreated,
+        EventType::StoreRecordWritten,
+        EventType::StoreRecordFailed,
+        EventType::LeaseAcquired,
+        EventType::LeaseReleased,
+        EventType::ProfileRestored,
+        EventType::ProfileCaptured,
+        EventType::ChangeDetected,
+        EventType::ChangeUnchanged,
+        EventType::ScheduleFired,
+        EventType::SearchIssued,
+        EventType::HostDiscovered,
+        EventType::BrandingExtracted,
+        EventType::PageExtracted,
+        EventType::ControlRequested,
+        EventType::RunTimedOut,
+        EventType::ScheduleSkipped,
+    ];
+
+    #[test]
+    fn agent_class_events_are_not_published_raw() {
+        for t in AGENT_CLASS {
+            assert!(is_agent_class(t), "{t:?} must be agent class");
+        }
+    }
+
+    #[test]
+    fn run_and_crawl_events_are_published_as_before() {
+        for t in RUN_AND_CRAWL_CLASS {
+            assert!(!is_agent_class(t), "{t:?} must still be published");
+        }
+    }
+
+    #[test]
+    fn the_two_lists_cover_every_event_type_without_overlap() {
+        // 11 agent-class + 30 run/crawl = the 41 variants of EventType. If a variant
+        // is added, `is_agent_class` stops compiling first; this catches a list that
+        // was not updated with it.
+        let mut tokens: Vec<&str> = AGENT_CLASS
+            .iter()
+            .chain(RUN_AND_CRAWL_CLASS.iter())
+            .map(event_type_token)
+            .collect();
+        let n = tokens.len();
+        tokens.sort_unstable();
+        tokens.dedup();
+        assert_eq!(tokens.len(), n, "an event type is listed twice");
+        assert_eq!(n, 41);
+    }
+
+    #[test]
+    fn both_publish_entry_points_pass_through_the_agent_gate() {
+        // The live publish path needs a broker, so this scans the source: the gate
+        // sits at the top of `publish_encoded`, which `publish` and `publish_event`
+        // both call, ahead of any `js.publish`.
+        let src = include_str!("nats_event_bus.rs").replace("\r\n", "\n");
+        let body = src
+            .split("async fn publish_encoded(")
+            .nth(1)
+            .expect("publish_encoded present");
+        let gate = body.find("is_agent_class(&event_type)").expect("gate present");
+        let first_publish = body.find("let primary_pub").expect("js publish present");
+        assert!(gate < first_publish, "the gate must precede the JetStream publish");
     }
 
     #[test]

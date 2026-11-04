@@ -25,9 +25,14 @@
 // either match nothing or require an indirect join via run_id/job_id that
 // this package will not risk introducing (the safety rule for every purge
 // statement is a direct, literal org_id column, never a derived subject
-// set): stores (datasets), snapshots, artifacts, profiles, webhooks,
-// webhook_deliveries, blocklist_entries, events. In the current schema
-// these are shared/global resources, not per-tenant data.
+// set): stores (datasets), snapshots, artifacts, profiles, blocklist_entries,
+// events. In the current schema these are shared/global resources, not
+// per-tenant data.
+//
+// webhooks and webhook_deliveries ARE org data since migration 025 (INNH-5, org_id NOT
+// NULL DEFAULT ”): a subscription holds a customer URL and a secret, a delivery holds the
+// whole event payload (page URLs, fingerprints). Both are purged by org_id. A legacy row
+// with org_id ” belongs to no org and is never matched here.
 //
 // The Postgres implementation (internal/store/pg/gdpr_purge.go) mirrors this
 // exact table list.
@@ -52,11 +57,16 @@ type PurgeResult struct {
 	BenchmarksDeleted      int64 `json:"benchmarks_deleted"`
 	IdempotencyKeysDeleted int64 `json:"idempotency_keys_deleted"`
 	ZdrTombstonesDeleted   int64 `json:"zdr_tombstones_deleted"`
+	// WebhooksDeleted and WebhookDeliveriesDeleted: the org's webhook subscriptions and
+	// their delivery rows, which hold full event payloads (INNH-5, migration 025).
+	WebhooksDeleted          int64 `json:"webhooks_deleted"`
+	WebhookDeliveriesDeleted int64 `json:"webhook_deliveries_deleted"`
 }
 
 // Total sums every deleted-row count. Convenience for logging and tests.
 func (r PurgeResult) Total() int64 {
-	return r.JobsDeleted + r.SchedulesDeleted + r.SourcesDeleted + r.BenchmarksDeleted + r.IdempotencyKeysDeleted + r.ZdrTombstonesDeleted
+	return r.JobsDeleted + r.SchedulesDeleted + r.SourcesDeleted + r.BenchmarksDeleted + r.IdempotencyKeysDeleted + r.ZdrTombstonesDeleted +
+		r.WebhooksDeleted + r.WebhookDeliveriesDeleted
 }
 
 // PurgeOrg hard-deletes every row this in-memory store holds for orgID
@@ -75,11 +85,15 @@ func (d *memDB) PurgeOrg(orgID string) (PurgeResult, error) {
 	schedulesDeleted := d.schedules.purgeByOrg(orgID, func(s Schedule) string { return s.OrgID })
 	sourcesDeleted := d.sources.PurgeByOrg(orgID)
 	tombstonesDeleted := d.zdrTombs.purgeByOrg(orgID)
+	deliveriesDeleted := d.whDeliveries.purgeByOrg(orgID, func(w WebhookDelivery) string { return w.OrgID })
+	webhooksDeleted := d.webhooks.purgeByOrg(orgID, func(w Webhook) string { return w.OrgID })
 	return PurgeResult{
-		JobsDeleted:          int64(jobsDeleted),
-		SchedulesDeleted:     int64(schedulesDeleted),
-		SourcesDeleted:       int64(sourcesDeleted),
-		ZdrTombstonesDeleted: tombstonesDeleted,
+		JobsDeleted:              int64(jobsDeleted),
+		SchedulesDeleted:         int64(schedulesDeleted),
+		SourcesDeleted:           int64(sourcesDeleted),
+		ZdrTombstonesDeleted:     tombstonesDeleted,
+		WebhooksDeleted:          int64(webhooksDeleted),
+		WebhookDeliveriesDeleted: int64(deliveriesDeleted),
 	}, nil
 }
 

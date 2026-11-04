@@ -1,0 +1,3 @@
+{"t":"2026-10-29T10:08:05.302037Z","m":"run expired","class":"agent","reason":"idle","idle_s":31,"run":"run_01M63J1ADAF8J79N0D8HTRZG57"}
+{"t":"2026-10-29T10:09:10.296780Z","m":"run expired","class":"agent","reason":"idle","idle_s":30,"run":"run_01M63J3B12EP2BRXES9NC1YXKD"}
+{"t":"2026-10-29T10:09:55.294638Z","m":"run expired","class":"agent","reason":"idle","idle_s":31,"run":"run_01M63J5EKM6H3K4NY9VKMPFJYV"}

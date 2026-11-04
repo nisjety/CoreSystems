@@ -548,8 +548,9 @@ const DECIDE_REASON_MAX_CHARS: usize = 500;
 
 /// The body a decision accepts (build plan WS13 S2). Nothing else crosses: who decides is the
 /// verified credential's, so a client field naming a decider, a decision source or a grant is
-/// refused, not forwarded. `scope` is how far the decision reaches; only `once` exists until
-/// standing grants do.
+/// refused, not forwarded. `scope` is how far the decision reaches: `once`, or `thread` and `run`
+/// for a standing grant, which the gateway offers only where the cause allows it (WS13 S6).
+/// `promote` is "Always" (WS13 S7): a rule proposed from a thread grant, for the person to confirm.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct DecideBody {
@@ -558,14 +559,18 @@ struct DecideBody {
     reason: String,
     #[serde(default)]
     scope: Option<String>,
+    #[serde(default)]
+    promote: bool,
 }
 
 /// The upstream body, rebuilt from the accepted fields alone, or the refusal to send. An
-/// unknown key, an unknown decision or an over-long reason is a 400; a scope other than
-/// `once` is a typed 422, so a client never believes it granted more than it did.
+/// unknown key, an unknown decision or an over-long reason is a 400; a scope the gateway does not
+/// know is a typed 422, and so is an Always that is not an approval of a thread grant, so a client
+/// never believes it granted or proposed more than it did.
 fn decide_upstream_body(raw: Value) -> Result<Value, (StatusCode, Json<Value>)> {
-    let body: DecideBody = serde_json::from_value(raw)
-        .map_err(|_| invalid_chat_request("a decision takes a decision, a reason and a scope"))?;
+    let body: DecideBody = serde_json::from_value(raw).map_err(|_| {
+        invalid_chat_request("a decision takes a decision, a reason, a scope and promote")
+    })?;
     if !matches!(body.decision.as_str(), "approve" | "reject") {
         return Err(invalid_chat_request("the decision is approve or reject"));
     }
@@ -574,16 +579,28 @@ fn decide_upstream_body(raw: Value) -> Result<Value, (StatusCode, Json<Value>)> 
     }
     let mut upstream = serde_json::json!({ "decision": body.decision, "reason": body.reason });
     if let Some(scope) = body.scope {
-        if scope != "once" {
+        if !matches!(scope.as_str(), "once" | "thread" | "run") {
             return Err((
                 StatusCode::UNPROCESSABLE_ENTITY,
                 Json(error(
                     "scope_not_enabled",
-                    "Only a decision for this one call is available.",
+                    "Only a decision for this one call, this thread or this run is available.",
                 )),
             ));
         }
         upstream["scope"] = Value::String(scope);
+    }
+    if body.promote {
+        if body.decision != "approve" || upstream["scope"] != "thread" {
+            return Err((
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(error(
+                    "rule_requires_thread_scope",
+                    "An Always applies to an approval for this thread.",
+                )),
+            ));
+        }
+        upstream["promote"] = Value::Bool(true);
     }
     Ok(upstream)
 }
@@ -950,14 +967,54 @@ mod tests {
     }
 
     #[test]
-    fn a_scope_other_than_once_is_a_typed_422_until_grants_exist() {
-        for scope in ["thread", "run", "", "ONCE"] {
+    fn the_known_scopes_are_forwarded_and_an_unknown_scope_is_a_typed_422() {
+        for scope in ["once", "thread", "run"] {
+            let forwarded = decide_upstream_body(json!({"decision": "approve", "scope": scope}))
+                .expect("the gateway decides what each scope may do");
+            assert_eq!(forwarded["scope"], scope);
+        }
+        for scope in ["", "ONCE", "forever"] {
             let (status, Json(refusal)) =
                 decide_upstream_body(json!({"decision": "approve", "scope": scope}))
-                    .expect_err("a standing scope is refused");
+                    .expect_err("an unknown scope is refused");
             assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{scope}");
             assert_eq!(refusal["error"]["code"], "scope_not_enabled", "{scope}");
         }
+    }
+
+    #[test]
+    fn an_always_is_forwarded_only_for_an_approval_of_a_thread_grant() {
+        let forwarded = decide_upstream_body(
+            json!({"decision": "approve", "scope": "thread", "promote": true}),
+        )
+        .expect("an Always on a thread grant");
+        assert_eq!(forwarded["promote"], true);
+        let plain = decide_upstream_body(json!({"decision": "approve", "scope": "thread"}))
+            .expect("a thread grant without an Always");
+        assert!(
+            plain.get("promote").is_none(),
+            "promote is sent only when asked for"
+        );
+        for body in [
+            json!({"decision": "approve", "scope": "once", "promote": true}),
+            json!({"decision": "approve", "promote": true}),
+            json!({"decision": "approve", "scope": "run", "promote": true}),
+            json!({"decision": "reject", "scope": "thread", "promote": true}),
+        ] {
+            let (status, Json(refusal)) = decide_upstream_body(body.clone()).expect_err("refused");
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+            assert_eq!(
+                refusal["error"]["code"], "rule_requires_thread_scope",
+                "{body}"
+            );
+        }
+        assert!(
+            decide_upstream_body(
+                json!({"decision": "approve", "scope": "thread", "promote": "yes"})
+            )
+            .is_err(),
+            "promote is a boolean"
+        );
     }
 
     #[test]

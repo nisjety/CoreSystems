@@ -72,7 +72,7 @@ trap 'rm -rf "$WORK"' EXIT
 # comparison with a row that simply omits the key).
 POLICY_VIEW='
   with_entries(.value |= (
-    {audiences, orgIds, scopes, scopesByAudience, retentionByAudience, tokenExchange, allowAnyOrg, tenancy}
+    {audiences, orgIds, scopes, scopesByAudience, retentionByAudience, tokenExchange, webPolicyByAudience, apiKeyExchange, allowAnyOrg, tenancy}
     | with_entries(select(.value != null))))'
 
 # What the development profile must make of the policy: `tenancy: "directory"` rows keep

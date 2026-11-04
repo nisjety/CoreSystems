@@ -183,6 +183,18 @@ impl Priced {
     }
 }
 
+/// What the catalogue lists a model at, per one million tokens, before any call
+/// is priced. Only a row that names the model has one (see
+/// [`RateSnapshot::list_price`]).
+#[derive(Clone, Debug, PartialEq)]
+pub struct ListPrice {
+    pub input_per_million: f64,
+    pub output_per_million: f64,
+    pub currency: String,
+    /// [`PriceSource::Exact`] or [`PriceSource::Prefix`].
+    pub source: PriceSource,
+}
+
 /// Cache-leg prices for one model, as multiples of its base input rate. Both
 /// legs are already counted inside `input_tokens` at the full rate; these say
 /// what each leg should have cost instead.
@@ -244,6 +256,8 @@ struct Rate {
     input_per_million: f64,
     #[serde(default)]
     output_per_million: f64,
+    #[serde(default)]
+    currency: String,
 }
 
 #[derive(Deserialize)]
@@ -282,6 +296,25 @@ impl PricingCache {
             http,
             inner: Arc::new(RwLock::new(CacheInner::default())),
         }
+    }
+
+    /// A cache that already holds one rate row, so a test can price a call without cost-core.
+    #[cfg(test)]
+    pub(crate) fn with_rate_for_test(model: &str, input_per_million: f64, output_per_million: f64) -> Self {
+        let cache = Self::new(None, reqwest::Client::new());
+        let mut inner = cache
+            .inner
+            .try_write()
+            .expect("a fresh cache is not locked");
+        inner.rates = vec![Rate {
+            model: model.trim().to_lowercase(),
+            input_per_million,
+            output_per_million,
+            currency: "USD".to_owned(),
+        }];
+        inner.fetched_at = Some(Instant::now());
+        drop(inner);
+        cache
     }
 
     /// Price one call. A subscription call is never priced from API list
@@ -418,6 +451,27 @@ impl RateSnapshot {
         }
         price(&self.rates, model, legs)
     }
+
+    /// The list price of a model the catalogue names: under its own key, or under a
+    /// key that prefixes it, by the same resolver as [`Self::priced`]. A subscription
+    /// call has no list price, and neither does a model only the `default` row matches.
+    #[must_use]
+    pub fn list_price(&self, basis: CostBasis, model: &str) -> Option<ListPrice> {
+        if basis == CostBasis::Subscription {
+            return None;
+        }
+        let (rate, source) = match lookup(&self.rates, model)? {
+            Lookup::Exact(rate) => (rate, PriceSource::Exact),
+            Lookup::Prefix(rate) => (rate, PriceSource::Prefix),
+            Lookup::Default => return None,
+        };
+        Some(ListPrice {
+            input_per_million: rate.input_per_million,
+            output_per_million: rate.output_per_million,
+            currency: rate.currency.clone(),
+            source,
+        })
+    }
 }
 
 /// Price a metered call against the catalogue. The `default` row prices
@@ -550,16 +604,19 @@ mod tests {
                 model: "default".into(),
                 input_per_million: 3.0,
                 output_per_million: 15.0,
+                currency: "USD".into(),
             },
             Rate {
                 model: "gpt-4o-mini".into(),
                 input_per_million: 0.15,
                 output_per_million: 0.60,
+                currency: "USD".into(),
             },
             Rate {
                 model: "claude-sonnet".into(),
                 input_per_million: 3.0,
                 output_per_million: 15.0,
+                currency: "USD".into(),
             },
         ]
     }
@@ -574,6 +631,7 @@ mod tests {
             model: "claude-sonnet".into(),
             input_per_million: 3.0,
             output_per_million: 15.0,
+            currency: "USD".into(),
         };
         let plain = 1_000.0 / 1_000_000.0 * 3.0 + 500.0 / 1_000_000.0 * 15.0;
         for model in ["claude-sonnet-4-6", "gpt-4o-mini", "gpt-5.6-terra"] {
@@ -592,6 +650,7 @@ mod tests {
             model: "claude-sonnet".into(),
             input_per_million: 3.0,
             output_per_million: 15.0,
+            currency: "USD".into(),
         };
         let got = cost_from_rate(&rate, cache_rates("claude-sonnet-4-6"), 8_520, 42, 8_000, 0);
         let want = 520.0 / 1_000_000.0 * 3.0 // fresh input, full rate
@@ -652,6 +711,7 @@ mod tests {
             model: "gpt-4o-mini".into(),
             input_per_million: 0.15,
             output_per_million: 0.60,
+            currency: "USD".into(),
         };
         let got = cost_from_rate(
             &rate,
@@ -673,6 +733,7 @@ mod tests {
             model: "default".into(),
             input_per_million: 3.0,
             output_per_million: 15.0,
+            currency: "USD".into(),
         };
         // 2,000 prompt tokens: 1,024 read from the cache, 512 written to it,
         // 464 plain input.
@@ -690,6 +751,7 @@ mod tests {
             model: "claude-sonnet".into(),
             input_per_million: 3.0,
             output_per_million: 15.0,
+            currency: "USD".into(),
         };
         let with_write = cost_from_rate(&rate, cache_rates("claude-sonnet-4-6"), 2_000, 50, 0, 512);
         let without = cost_from_rate(&rate, cache_rates("claude-sonnet-4-6"), 2_000, 50, 0, 0);
@@ -761,6 +823,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn list_price_names_only_the_models_the_catalogue_lists() {
+        let cache = PricingCache::new(None, reqwest::Client::new());
+        cache.inner.write().await.rates = rates();
+        let snapshot = cache.snapshot().await;
+
+        let exact = snapshot
+            .list_price(CostBasis::Metered, "gpt-4o-mini")
+            .expect("an exact key is listed");
+        assert_eq!(exact.source, PriceSource::Exact);
+        assert_eq!(
+            (exact.input_per_million, exact.output_per_million),
+            (0.15, 0.60)
+        );
+        assert_eq!(exact.currency, "USD");
+        let prefix = snapshot
+            .list_price(CostBasis::Metered, "claude-sonnet-5-5")
+            .expect("a prefix key is listed");
+        assert_eq!(prefix.source, PriceSource::Prefix);
+        assert_eq!(
+            (prefix.input_per_million, prefix.output_per_million),
+            (3.0, 15.0)
+        );
+        // Only the default row matches these, so the catalogue names no price for them.
+        for model in ["a-model-the-catalogue-does-not-list", "default", "", "  "] {
+            assert_eq!(
+                snapshot.list_price(CostBasis::Metered, model),
+                None,
+                "{model:?}"
+            );
+        }
+        // A subscription call has no list price, even for a model the catalogue lists.
+        assert_eq!(
+            snapshot.list_price(CostBasis::Subscription, "gpt-4o-mini"),
+            None
+        );
+        let empty = PricingCache::new(None, reqwest::Client::new())
+            .snapshot()
+            .await;
+        assert_eq!(empty.list_price(CostBasis::Metered, "gpt-4o-mini"), None);
+    }
+
+    #[tokio::test]
     async fn a_cold_catalogue_is_unavailable_and_a_subscription_is_a_known_zero() {
         let cache = PricingCache::new(None, reqwest::Client::new());
         let legs = TokenLegs {
@@ -785,6 +889,7 @@ mod tests {
             model: "claude-sonnet".into(),
             input_per_million: 3.0,
             output_per_million: 15.0,
+            currency: "USD".into(),
         };
         // (input, output, cache read, cache write): the legs always fit inside
         // the input, as a provider reports them.
@@ -830,6 +935,7 @@ mod tests {
             model: "default".into(),
             input_per_million: 3.0,
             output_per_million: 15.0,
+            currency: "USD".into(),
         };
         let parts = cost_categories(
             &rate,

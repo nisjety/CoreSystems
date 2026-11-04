@@ -40,6 +40,31 @@ pub fn takeover_enforced() -> bool {
 /// and stops the edge at boot (`RunLimits::from_lookup`).
 pub const ENV_HUMAN_BROWSE: &str = "QUARRY_EDGE__HUMAN_BROWSE";
 
+/// INNH-10: the switch for API-key agent runs. Off by default: an `api_key` principal token is
+/// refused on EVERY route (`api_key_agent_runs_disabled`) while it is off, and the edge does not
+/// boot with it on and no real grant validator (`grant_boot`). An unreadable value is off here
+/// and stops the edge at boot (`RunLimits::from_lookup`).
+pub const ENV_API_KEY_AGENT_RUNS: &str = "QUARRY_EDGE__API_KEY_AGENT_RUNS";
+
+/// Parse the API-key switch: unset, empty, `0`, `false` or `off` is off; `1`, `true` or `on` is
+/// on; anything else is an error naming the variable.
+pub fn parse_api_key_agent_runs(raw: Option<&str>) -> Result<bool, String> {
+    match raw.map(|value| value.trim().to_ascii_lowercase()).as_deref() {
+        None | Some("") | Some("0") | Some("false") | Some("off") => Ok(false),
+        Some("1") | Some("true") | Some("on") => Ok(true),
+        Some(other) => Err(format!(
+            "{ENV_API_KEY_AGENT_RUNS} must be 0, 1, on, off, true or false, got {other:?}"
+        )),
+    }
+}
+
+/// Whether API-key agent runs are accepted now. Read at each request, like
+/// [`human_browse_enabled`], so a test or an operator changing the variable is seen by the
+/// next request; unreadable is off.
+pub fn api_key_agent_runs_enabled() -> bool {
+    parse_api_key_agent_runs(std::env::var(ENV_API_KEY_AGENT_RUNS).ok().as_deref()).unwrap_or(false)
+}
+
 /// How a person's step is recorded on a non-ZDR run (WS8.B): `metadata` (the
 /// default: redacted action, no observation), `full` (today's storage, for dev and
 /// procedure recording) or `none` (no receipt). ZDR runs write nothing either way.
@@ -147,6 +172,10 @@ pub struct RunLimits {
     /// How many of an organization's runs may be a person's own sessions, so open
     /// tabs cannot crowd out its agent runs.
     pub max_interactive_runs_per_org: u32,
+    /// INNH-10: how many runs one API key may have live (`QUARRY_EDGE__MAX_CONCURRENT_RUNS_PER_KEY`).
+    /// Counted per key id inside the organization; at least 1, `0` (no cap) only for the
+    /// unlimited registry of tests and tools.
+    pub max_runs_per_key: u32,
     /// What a refused start tells the caller to wait.
     pub cap_retry_after_s: u64,
     /// WS8.F: whether an agent may attach to a person's live run (`QUARRY_EDGE__ATTACH`).
@@ -173,6 +202,7 @@ impl Default for RunLimits {
             max_concurrent_runs: 32,
             max_runs_per_org: 8,
             max_interactive_runs_per_org: 6,
+            max_runs_per_key: 2,
             cap_retry_after_s: 10,
             attach_enabled: false,
             attach_idle_ttl_s: 180,
@@ -189,6 +219,7 @@ impl RunLimits {
             max_concurrent_runs: 0,
             max_runs_per_org: 0,
             max_interactive_runs_per_org: 0,
+            max_runs_per_key: 0,
             ..Self::default()
         }
     }
@@ -202,6 +233,7 @@ impl RunLimits {
         // The human-browse switches fail loud at boot, like the bounds below.
         parse_human_browse(get(ENV_HUMAN_BROWSE).as_deref())?;
         parse_human_receipt_mode(get(ENV_HUMAN_RECEIPT_MODE).as_deref())?;
+        parse_api_key_agent_runs(get(ENV_API_KEY_AGENT_RUNS).as_deref())?;
         let defaults = Self::default();
         let flag = |name: &str, default: bool| -> Result<bool, String> {
             let full = format!("QUARRY_EDGE__{name}");
@@ -256,6 +288,15 @@ impl RunLimits {
                 "MAX_INTERACTIVE_RUNS_PER_ORG",
                 defaults.max_interactive_runs_per_org,
             )?,
+            max_runs_per_key: {
+                let value = number(
+                    "MAX_CONCURRENT_RUNS_PER_KEY",
+                    u64::from(defaults.max_runs_per_key),
+                    1,
+                )?;
+                u32::try_from(value)
+                    .map_err(|_| format!("QUARRY_EDGE__MAX_CONCURRENT_RUNS_PER_KEY is too large: {value}"))?
+            },
             cap_retry_after_s: number("RUN_CAP_RETRY_AFTER_S", defaults.cap_retry_after_s, 1)?,
             attach_enabled: flag("ATTACH", defaults.attach_enabled)?,
             attach_idle_ttl_s: number("ATTACH_IDLE_TTL_S", defaults.attach_idle_ttl_s, 1)?,
@@ -301,7 +342,7 @@ impl fmt::Display for RunLimits {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "global={} org={} interactive={} sweeper={} dry_run={} interval_s={} agent_idle_s={} agent_max_s={} interactive_idle_s={} interactive_max_s={} takeover_idle_s={}",
+            "global={} org={} interactive={} sweeper={} dry_run={} interval_s={} agent_idle_s={} agent_max_s={} interactive_idle_s={} interactive_max_s={} takeover_idle_s={} per_key={}",
             self.max_concurrent_runs,
             self.max_runs_per_org,
             self.max_interactive_runs_per_org,
@@ -313,6 +354,7 @@ impl fmt::Display for RunLimits {
             self.interactive_idle_ttl_s,
             self.interactive_max_ttl_s,
             self.takeover_idle_ttl_s,
+            self.max_runs_per_key,
         )
     }
 }
@@ -363,6 +405,7 @@ mod tests {
         assert_eq!(limits.max_runs_per_org, 8);
         assert_eq!(limits.max_interactive_runs_per_org, 6);
         assert_eq!(limits.cap_retry_after_s, 10);
+        assert_eq!(limits.max_runs_per_key, 2);
         assert!(limits.ordering_warnings(3600, 21_600).is_empty());
     }
 
@@ -399,6 +442,35 @@ mod tests {
         assert_eq!(limits.ordering_warnings(3600, 21_600).len(), 0);
         let warnings = limits.ordering_warnings(600, 7200);
         assert_eq!(warnings.len(), 2, "{warnings:?}");
+    }
+
+    #[test]
+    fn api_key_switch_is_off_unless_asked_and_a_typo_stops_the_edge() {
+        assert_eq!(parse_api_key_agent_runs(None), Ok(false));
+        assert_eq!(parse_api_key_agent_runs(Some("")), Ok(false));
+        assert_eq!(parse_api_key_agent_runs(Some("0")), Ok(false));
+        assert_eq!(parse_api_key_agent_runs(Some("False")), Ok(false));
+        assert_eq!(parse_api_key_agent_runs(Some("off")), Ok(false));
+        assert_eq!(parse_api_key_agent_runs(Some("1")), Ok(true));
+        assert_eq!(parse_api_key_agent_runs(Some(" TRUE ")), Ok(true));
+        assert_eq!(parse_api_key_agent_runs(Some("on")), Ok(true));
+        let error = parse_api_key_agent_runs(Some("enabled")).unwrap_err();
+        assert!(error.contains(ENV_API_KEY_AGENT_RUNS), "{error}");
+        // The edge stops at boot on a value it cannot read, like the other switches.
+        let error = from(&[("API_KEY_AGENT_RUNS", "maybe")]).unwrap_err();
+        assert!(error.contains(ENV_API_KEY_AGENT_RUNS), "{error}");
+        assert!(from(&[("API_KEY_AGENT_RUNS", "1")]).is_ok());
+    }
+
+    #[test]
+    fn per_key_cap_defaults_to_two_and_is_at_least_one() {
+        assert_eq!(from(&[]).unwrap().max_runs_per_key, 2);
+        assert_eq!(from(&[("MAX_CONCURRENT_RUNS_PER_KEY", "5")]).unwrap().max_runs_per_key, 5);
+        let error = from(&[("MAX_CONCURRENT_RUNS_PER_KEY", "0")]).unwrap_err();
+        assert!(error.contains("QUARRY_EDGE__MAX_CONCURRENT_RUNS_PER_KEY"), "{error}");
+        let error = from(&[("MAX_CONCURRENT_RUNS_PER_KEY", "many")]).unwrap_err();
+        assert!(error.contains("QUARRY_EDGE__MAX_CONCURRENT_RUNS_PER_KEY"), "{error}");
+        assert_eq!(RunLimits::unlimited().max_runs_per_key, 0);
     }
 
     #[test]

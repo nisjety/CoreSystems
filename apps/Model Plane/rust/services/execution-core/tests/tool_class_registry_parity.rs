@@ -98,7 +98,11 @@ fn seeded_rows() -> Vec<Seeded> {
         "0019_workspace_write_capability.up.sql",
         "0020_result_query_capability.up.sql",
         "0024_provider_read_tool.up.sql",
+        "0027_browser_tool_capabilities.up.sql",
         "0026_knowledge_list_documents_tool.up.sql",
+        "0029_ask_user_tool_class.up.sql",
+        "0031_web_crawl_tool_capabilities.up.sql",
+        "0034_browser_console_tool.up.sql",
     ] {
         sql.push_str(&read_text(&format!(
             "../../../go/services/capability-core/migrations/{later}"
@@ -108,8 +112,20 @@ fn seeded_rows() -> Vec<Seeded> {
         r"\('global', '([^']+)', '([^']+)', '([a-z_]+)', '([a-z_]+)', (NULL|'[a-z_]+'), 'seed'\)",
     )
     .expect("seed row pattern");
+    // 0025 moves browser.observe and browser.act off cap.browser.open; its DELETE is the record of the
+    // move, so the effective seed no longer carries those two rows under cap.browser.open.
+    assert!(
+        read_text(
+            "../../../go/services/capability-core/migrations/0027_browser_tool_capabilities.up.sql",
+        )
+        .contains("tool_name IN ('browser.observe', 'browser.act')"),
+        "0025 no longer moves browser.observe and browser.act; update the moved set"
+    );
     let rows: Vec<Seeded> = row
         .captures_iter(&sql)
+        .filter(|c| {
+            !(&c[1] == "cap.browser.open" && matches!(&c[2], "browser.observe" | "browser.act"))
+        })
         .map(|c| Seeded {
             capability_id: c[1].to_owned(),
             tool: c[2].to_owned(),
@@ -294,6 +310,11 @@ fn declared_posture(
 /// ceiling) must not see a durable write as a read. The permission engine switch
 /// in WS05-S4 must keep `plan.propose` callable in plan mode through an explicit
 /// rule, because the declared class alone would refuse it there.
+///
+/// `ask_user` (WS14-S4, seeded by migration 0029) is declared `context_write` for
+/// the same reason: it writes a question durably into `run_questions`, onto the
+/// person's surface, so a consumer with a read-only ceiling must not see it as a
+/// read. An answer is never a grant (DEC-05), so the class carries no floor.
 struct DeclaredStricterException {
     tool: &'static str,
     declared_class: SideEffectClass,
@@ -301,12 +322,20 @@ struct DeclaredStricterException {
     reason: &'static str,
 }
 
-const DECLARED_STRICTER_EXCEPTIONS: &[DeclaredStricterException] = &[DeclaredStricterException {
-    tool: "plan.propose",
-    declared_class: SideEffectClass::ContextWrite,
-    differing_fields: &["restricted_context_write", "rung"],
-    reason: "durable approval-surface write: declared context_write, legacy read_only",
-}];
+const DECLARED_STRICTER_EXCEPTIONS: &[DeclaredStricterException] = &[
+    DeclaredStricterException {
+        tool: "plan.propose",
+        declared_class: SideEffectClass::ContextWrite,
+        differing_fields: &["restricted_context_write", "rung"],
+        reason: "durable approval-surface write: declared context_write, legacy read_only",
+    },
+    DeclaredStricterException {
+        tool: "ask_user",
+        declared_class: SideEffectClass::ContextWrite,
+        differing_fields: &["restricted_context_write", "rung"],
+        reason: "durable run_questions write onto the owner's surface: declared context_write, legacy read_only",
+    },
+];
 
 #[test]
 fn the_documented_exceptions_are_exactly_these() {
@@ -316,7 +345,7 @@ fn the_documented_exceptions_are_exactly_these() {
         .collect();
     assert_eq!(
         names,
-        ["plan.propose"],
+        ["plan.propose", "ask_user"],
         "the set of tools whose declared class may disagree with the name heuristics changed; \
          a new exception needs a ledger entry and a reviewer, not a quiet edit here"
     );

@@ -4,6 +4,7 @@ import { ApiError } from '@/shared/api/api-error'
 import { announce } from '@/shared/a11y/announcer'
 import {
   getSpacesAttention,
+  getSpacesAttentionFeature,
   type AttentionRoom,
   type AttentionTotals,
   type SpacesAttention,
@@ -32,6 +33,14 @@ import {
  * `AttentionRoom.badge` is computed once, in the gateway, and is rendered as given. Nothing here (or
  * in a component) adds counts up or derives a badge: that is how `space-unread.ts` drifted from
  * Convex once, and the plan forbids a second implementation.
+ *
+ * # Off means not asked
+ *
+ * Before its first aggregate request a session reads the shell flag `attention` from
+ * `GET /api/v1/spaces/features`. A gateway that says `false` is never asked for the aggregate: the
+ * store goes `disabled` and every reader reports nothing. An unknown flag (the route failed, or an
+ * older gateway names no `attention`) does not block; the aggregate's own 404
+ * `space_attention_disabled` stays the second line.
  *
  * # Absence is not zero
  *
@@ -83,25 +92,25 @@ const store = createRoot(() => {
 
 /** The server's numbers for one room, or undefined when nothing is known about it (not "zero"). */
 export function spaceAttentionRoom(spaceRef: string): AttentionRoom | undefined {
-  const snapshot = store.state().snapshot
-  if (!snapshot || snapshot.mode !== 'live') return undefined
+  const { snapshot, disabled } = store.state()
+  if (disabled || !snapshot || snapshot.mode !== 'live') return undefined
   return snapshot.rooms.find((room) => room.spaceRef === spaceRef)
 }
 
 /** The sums across rooms, or undefined when unknown. `badge` is the server's, rendered as given. */
 export function spaceAttentionTotals(): AttentionTotals | undefined {
-  const snapshot = store.state().snapshot
-  return snapshot && snapshot.mode === 'live' ? snapshot.totals : undefined
+  const { snapshot, disabled } = store.state()
+  return !disabled && snapshot && snapshot.mode === 'live' ? snapshot.totals : undefined
 }
 
 /** True once the last good answer is older than 90 s (or the poller keeps failing). */
 export function spaceAttentionStale(): boolean {
-  const { receivedAt, snapshot } = store.state()
-  if (!snapshot || receivedAt === null) return false
+  const { receivedAt, snapshot, disabled } = store.state()
+  if (disabled || !snapshot || receivedAt === null) return false
   return store.now() - receivedAt > ATTENTION_STALE_AFTER_MS
 }
 
-/** False once the gateway reported the attention surface off. */
+/** False once the gateway reported the attention surface off (the shell flag, or the aggregate's 404). */
 export function spaceAttentionAvailable(): boolean {
   return !store.state().disabled
 }
@@ -125,6 +134,20 @@ let lastPollAt = 0
 let lastAnswer: Answer | undefined
 /** Bumped on every stop, so a request that was on its way then cannot touch the next session's state. */
 let generation = 0
+/** This session's reading of the shell flag `attention`, asked once per start and shared while in flight. */
+let featureLookup: Promise<boolean | undefined> | undefined
+
+/** The shell flag for this session: `false` is off, `undefined` is unknown (the 404 fallback decides). */
+function attentionFeature(): Promise<boolean | undefined> {
+  featureLookup ??= (async () => {
+    try {
+      return await getSpacesAttentionFeature()
+    } catch {
+      return undefined
+    }
+  })()
+  return featureLookup
+}
 
 /**
  * Start (or join) the shared poller. Returns the release function; the poller stops when the last
@@ -179,6 +202,7 @@ function stop(): void {
   generation += 1
   inflight = false
   queued = false
+  featureLookup = undefined
   yieldLeadership()
   try {
     channel?.close()
@@ -312,6 +336,14 @@ async function pollNow(): Promise<void> {
   let nextMs = ATTENTION_POLL_MS
   let off = false
   try {
+    // First line: the shell flag. Off means the aggregate is never requested this session.
+    const feature = await attentionFeature()
+    if (session !== generation) return
+    if (feature === false) {
+      store.setState((current) => ({ ...current, disabled: true }))
+      post({ type: 'disabled' })
+      return // no next poll: the session stays off
+    }
     const snapshot = await getSpacesAttention()
     if (session !== generation) return // stopped while on its way: the answer belongs to a session that ended
     failures = 0

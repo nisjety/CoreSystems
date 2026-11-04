@@ -16,6 +16,11 @@
 //! organization-scoped storage. All stores are append-only; never mutate or
 //! delete a receipt. To override a step, append a corrective receipt with
 //! `correction_of: <prior_id>`.
+//!
+//! The one exception is erasure: an org erasure (`org_erasure::PgTableErasure`,
+//! family `step_receipts`) and a user-level erasure
+//! ([`StepReceiptStore::purge_for_actor`], W2-U49, X-19 condition c) delete
+//! rows. Both report counts only.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -98,6 +103,23 @@ pub struct AgentRunCheckpoint {
     /// key repeats in a run. 0 on a checkpoint written before it existed (D2).
     #[serde(default)]
     pub next_step: u32,
+    /// The `seq` the run's event trace mints next (WS10.S4, D2-061). A resume opens its
+    /// trace here instead of at 1, so a client holding an old `Last-Event-ID` never sees a
+    /// seq reused for a different event after an expiry or an edge restart. 0 on a
+    /// checkpoint written before it existed (the resume then starts at 1, as it did).
+    #[serde(default, skip_serializing_if = "is_zero_seq")]
+    pub trace_seq: u64,
+    /// The `policy` ask the run was started with (WS7.D, D2-051). A resume re-applies it
+    /// (merged with the resume request's own ask, which can only tighten it), so a
+    /// restriction the caller asked for is never dropped by a resume. Absent when the
+    /// start carried no ask, and on a checkpoint written before it existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy_ask: Option<quarry_core::web_policy::RequestAsk>,
+}
+
+/// serde skip rule: a trace that has minted nothing is the default and is not written.
+fn is_zero_seq(seq: &u64) -> bool {
+    *seq == 0
 }
 
 /// The budget ledger of a run, stored with its checkpoint so a resume restores
@@ -138,12 +160,91 @@ fn is_first_segment(segment: &u32) -> bool {
     *segment == 0
 }
 
+/// The durable status of a browser run's checkpoint (E3.4-1).
+///
+/// This is the persisted side of the one session state machine (D8-10, `RunLive` and
+/// `TabLedger` in the edge); it is not a second state enum. It only records where the
+/// durable descriptor stands on the `expired` -> `resumable` -> `live` arc:
+///
+/// - `Active`: the run is live in some edge process (or was, until a crash).
+/// - `Suspended`: the run was released on purpose with its profile persisted; a resume
+///   with a fresh grant may continue it.
+/// - `Expired`: the run's idle or absolute TTL ran out and the reaper released it; a
+///   resume with a fresh grant may continue it (non-ZDR only, like every resume).
+/// - `Closed`: terminal. Nothing moves a checkpoint out of `Closed`.
+///
+/// A checkpoint written before E3.4-1 has `active` or `closed` and reads unchanged.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentRunStatus {
     #[default]
     Active,
+    Suspended,
+    Expired,
     Closed,
+}
+
+impl AgentRunStatus {
+    /// The wire and column value (`quarry_agent_run_checkpoints.status`, migration 0020).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AgentRunStatus::Active => "active",
+            AgentRunStatus::Suspended => "suspended",
+            AgentRunStatus::Expired => "expired",
+            AgentRunStatus::Closed => "closed",
+        }
+    }
+
+    /// Parse a column value. `None` for anything outside the four values, so a caller
+    /// fails closed instead of guessing.
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "active" => Some(AgentRunStatus::Active),
+            "suspended" => Some(AgentRunStatus::Suspended),
+            "expired" => Some(AgentRunStatus::Expired),
+            "closed" => Some(AgentRunStatus::Closed),
+            _ => None,
+        }
+    }
+
+    /// `Closed` is terminal; every other status may still be resumed.
+    pub fn is_terminal(self) -> bool {
+        self == AgentRunStatus::Closed
+    }
+
+    /// The run is not live but may be resumed (the `expired` -> `resumable` step).
+    pub fn is_resumable(self) -> bool {
+        matches!(self, AgentRunStatus::Suspended | AgentRunStatus::Expired)
+    }
+
+    /// Whether a checkpoint in `self` may move to `next`. Only `Closed` is sticky:
+    /// a closed run is never suspended, expired or reopened.
+    pub fn can_move_to(self, next: AgentRunStatus) -> bool {
+        !self.is_terminal() || next == AgentRunStatus::Closed
+    }
+}
+
+impl AgentRunCheckpoint {
+    /// E3.4-1: the store-level resume gate. A closed run cannot be resumed
+    /// (`Conflict`), and a ZDR run never can (`Forbidden`): its state must not come back
+    /// from durable storage (ZDR callers do not save checkpoints, so one found here is
+    /// refused rather than trusted). `Active`, `Suspended` and `Expired` pass; ownership
+    /// and the fresh grant are the caller's checks.
+    pub fn check_resumable(&self) -> QuarryResult<()> {
+        if self.status.is_terminal() {
+            return Err(QuarryError::new(
+                ErrorCode::Conflict,
+                "agent run is already closed",
+            ));
+        }
+        if self.zdr.is_active() {
+            return Err(QuarryError::new(
+                ErrorCode::Forbidden,
+                "ZDR runs cannot be resumed from durable state",
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// The authority currently allowed to drive a browser run. This is an owner
@@ -304,6 +405,10 @@ pub enum AgentIdentityBasis {
     /// hint (the gateway sends one for an action the model proposed through the
     /// person's own session). Which agent it was is only what the caller said.
     UserSession,
+    /// Verified (INNH-10): the call carried an API key's own signed token, and
+    /// `principal_id` is that token's actor, `apikey:<key_id>`. The key id is the
+    /// verified part; there is never a person behind the call.
+    ApiKey,
 }
 
 /// Which agent was behind an operation an agent initiated. Ids and classes only:
@@ -311,7 +416,7 @@ pub enum AgentIdentityBasis {
 /// allow ids.
 ///
 /// `principal_id` is the only verified part, and only for
-/// `AgentIdentityBasis::ServicePrincipal`. `ai_run_id` and `label` are what the
+/// `AgentIdentityBasis::ServicePrincipal` and `AgentIdentityBasis::ApiKey`. `ai_run_id` and `label` are what the
 /// caller supplied (identifier-shaped, bounded): advisory, never used for an
 /// authorization decision.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -334,7 +439,10 @@ impl AgentIdentity {
     /// True when `principal_id` was established from a verified token.
     #[must_use]
     pub fn is_verified(&self) -> bool {
-        self.basis == AgentIdentityBasis::ServicePrincipal && self.principal_id.is_some()
+        matches!(
+            self.basis,
+            AgentIdentityBasis::ServicePrincipal | AgentIdentityBasis::ApiKey
+        ) && self.principal_id.is_some()
     }
 }
 
@@ -503,6 +611,83 @@ pub enum StepOutcome {
     Skipped { reason: String },
 }
 
+/// What one user-level receipt erasure removed (W2-U49). Counts only: no id,
+/// run or payload leaves the store.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct ActorReceiptPurge {
+    /// Step receipts whose `org_id` and `actor_id` matched.
+    pub receipts: u64,
+    /// Browser timeline events whose `org_id` and `actor_id` matched.
+    pub timeline_events: u64,
+}
+
+impl ActorReceiptPurge {
+    /// Rows removed across both tables.
+    pub fn total(&self) -> u64 {
+        self.receipts + self.timeline_events
+    }
+}
+
+/// Both ids are required: an empty actor would otherwise read as "every row of
+/// the org" in a store that matched loosely.
+fn validate_actor_purge(org_id: &str, actor_id: &str) -> QuarryResult<()> {
+    if org_id.trim().is_empty() || actor_id.trim().is_empty() {
+        return Err(QuarryError::new(
+            ErrorCode::BadRequest,
+            "org_id and actor_id are required",
+        ));
+    }
+    Ok(())
+}
+
+/// W2-U49: delete one user's step receipts and browser timeline events in one
+/// org, in one transaction (`DELETE ... WHERE org_id = $1 AND actor_id = $2`).
+/// Idempotent: a second call removes nothing and reports zeros. Rows written
+/// before migration 0008 have a NULL `actor_id`; they cannot be attributed to a
+/// user and are reached only by the org erasure family.
+///
+/// A free function over the pool rather than a `PostgresStepReceiptStore`
+/// override, so the edge can call it with the pool it already holds; the store
+/// override is a one-line delegation to this (depth row).
+#[cfg(feature = "postgres-queue")]
+pub async fn purge_actor_receipts_pg(
+    pool: &sqlx::postgres::PgPool,
+    org_id: &str,
+    actor_id: &str,
+) -> QuarryResult<ActorReceiptPurge> {
+    validate_actor_purge(org_id, actor_id)?;
+    // The class only: a sqlx error can echo bound values.
+    fn fail(step: &'static str) -> QuarryError {
+        QuarryError::new(
+            ErrorCode::Internal,
+            format!("user receipt erasure: database {step} failed"),
+        )
+    }
+    let mut tx = pool.begin().await.map_err(|_| fail("begin"))?;
+    let timeline_events = sqlx::query(
+        "DELETE FROM quarry_browser_timeline_events WHERE org_id = $1 AND actor_id = $2",
+    )
+    .bind(org_id)
+    .bind(actor_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(|_| fail("delete"))?
+    .rows_affected();
+    let receipts =
+        sqlx::query("DELETE FROM quarry_step_receipts WHERE org_id = $1 AND actor_id = $2")
+            .bind(org_id)
+            .bind(actor_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|_| fail("delete"))?
+            .rows_affected();
+    tx.commit().await.map_err(|_| fail("commit"))?;
+    Ok(ActorReceiptPurge {
+        receipts,
+        timeline_events,
+    })
+}
+
 #[async_trait]
 pub trait StepReceiptStore: Send + Sync {
     /// Append a receipt. MUST be idempotent on `receipt_id`.
@@ -616,6 +801,33 @@ pub trait StepReceiptStore: Send + Sync {
 
     async fn close_run_checkpoint(&self, _org_id: &str, _run_id: &RunKind) -> QuarryResult<()> {
         Ok(())
+    }
+
+    /// E3.4-1: move one tenant's checkpoint to `status` (suspend, expire, or back to
+    /// active on a resume). `Closed` is terminal: a closed checkpoint keeps `Closed`
+    /// whatever is asked. A missing checkpoint is not an error (the same as
+    /// `close_run_checkpoint`). Stores without durable checkpoints do nothing.
+    async fn mark_run_checkpoint(
+        &self,
+        _org_id: &str,
+        _run_id: &RunKind,
+        _status: AgentRunStatus,
+    ) -> QuarryResult<()> {
+        Ok(())
+    }
+
+    /// W2-U49 (X-19 condition c): delete every receipt and browser timeline
+    /// event one user initiated in one org. Idempotent, counts only. The default
+    /// refuses, so a store that cannot erase says so instead of reporting zeros.
+    async fn purge_for_actor(
+        &self,
+        _org_id: &str,
+        _actor_id: &str,
+    ) -> QuarryResult<ActorReceiptPurge> {
+        Err(QuarryError::new(
+            ErrorCode::Unsupported,
+            "user receipt erasure is not configured for this store",
+        ))
     }
 }
 
@@ -748,6 +960,63 @@ impl StepReceiptStore for InMemoryStepReceiptStore {
             checkpoint.status = AgentRunStatus::Closed;
         }
         Ok(())
+    }
+
+    async fn mark_run_checkpoint(
+        &self,
+        org_id: &str,
+        run_id: &RunKind,
+        status: AgentRunStatus,
+    ) -> QuarryResult<()> {
+        if let Some(checkpoint) = self
+            .checkpoints
+            .write()
+            .await
+            .get_mut(&(org_id.to_owned(), run_id.to_string()))
+        {
+            if checkpoint.status.can_move_to(status) {
+                checkpoint.status = status;
+            }
+        }
+        Ok(())
+    }
+
+    async fn purge_for_actor(
+        &self,
+        org_id: &str,
+        actor_id: &str,
+    ) -> QuarryResult<ActorReceiptPurge> {
+        validate_actor_purge(org_id, actor_id)?;
+        let owned = |receipt: &StepReceipt| {
+            receipt.org_id.as_deref() == Some(org_id) && receipt.actor_id.as_deref() == Some(actor_id)
+        };
+        let mut by_id = self.by_id.write().await;
+        let before = by_id.len();
+        by_id.retain(|_, receipt| !owned(&*receipt));
+        let receipts = (before - by_id.len()) as u64;
+        drop(by_id);
+        let mut by_run = self.by_run.write().await;
+        for stream in by_run.values_mut() {
+            stream.retain(|receipt| !owned(receipt));
+        }
+        by_run.retain(|_, stream| !stream.is_empty());
+        drop(by_run);
+        let mut timeline_events: u64 = 0;
+        self.timeline_events
+            .write()
+            .await
+            .retain(|(event_org, event_actor, _), stream| {
+                if event_org.as_str() == org_id && event_actor.as_str() == actor_id {
+                    timeline_events += stream.len() as u64;
+                    false
+                } else {
+                    true
+                }
+            });
+        Ok(ActorReceiptPurge {
+            receipts,
+            timeline_events,
+        })
     }
 }
 
@@ -1152,6 +1421,8 @@ mod tests {
             budget: None,
             policy_mode: None,
             next_step: 3,
+            trace_seq: 0,
+            policy_ask: None,
         };
         store.save_run_checkpoint(checkpoint).await.unwrap();
         assert!(store
@@ -1566,6 +1837,8 @@ mod tests {
             control_mode: BrowserControlMode::AgentControl,
             control_epoch: 0,
             next_step: 2,
+            trace_seq: 0,
+            policy_ask: None,
             budget: Some(BudgetCheckpoint {
                 class: "agent".into(),
                 steps: 2,
@@ -1943,5 +2216,397 @@ mod redaction_tests {
         let json = serde_json::to_string(&masked).unwrap();
         assert!(!json.contains("eyJ"));
         assert!(!tally.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod user_erasure_tests {
+    use super::*;
+    use quarry_core::ids::Id;
+
+    fn action() -> AgentAction {
+        AgentAction::Navigate {
+            url: "https://example.com".into(),
+        }
+    }
+
+    fn receipt(run_id: &RunKind, step: u32, org: &str, actor: &str) -> StepReceipt {
+        ReceiptBuilder::start(run_id.to_string(), step)
+            .org_id(org)
+            .actor_id(actor)
+            .complete(action(), None, 0.001)
+    }
+
+    fn control_event(org: &str, actor: &str, run_id: &RunKind) -> BrowserTimelineEvent {
+        BrowserTimelineEvent::new(
+            org,
+            actor,
+            run_id.to_string(),
+            BrowserTimelineEventKind::Control {
+                mode: BrowserControlMode::HumanTakeover,
+                initiated_by: BrowserTimelineInitiator::Human,
+                control_epoch: 1,
+            },
+        )
+    }
+
+    #[tokio::test]
+    async fn purge_for_actor_removes_only_that_user_in_that_org_and_is_idempotent() {
+        let store = InMemoryStepReceiptStore::new();
+        let run_id: RunKind = Id::new();
+        for r in [
+            receipt(&run_id, 1, "org_a", "user_a"),
+            receipt(&run_id, 2, "org_a", "user_a"),
+            receipt(&run_id, 3, "org_a", "user_b"),
+            receipt(&run_id, 4, "org_b", "user_a"),
+        ] {
+            store.append(r).await.unwrap();
+        }
+        // A legacy receipt with no actor binding is never attributed to a user.
+        let mut legacy = receipt(&run_id, 5, "org_a", "user_a");
+        legacy.actor_id = None;
+        store.append(legacy).await.unwrap();
+        for event in [
+            control_event("org_a", "user_a", &run_id),
+            control_event("org_a", "user_b", &run_id),
+        ] {
+            store.append_browser_timeline_event(event).await.unwrap();
+        }
+
+        let first = store.purge_for_actor("org_a", "user_a").await.unwrap();
+        assert_eq!(
+            first,
+            ActorReceiptPurge {
+                receipts: 2,
+                timeline_events: 1
+            }
+        );
+        assert_eq!(first.total(), 3);
+        assert_eq!(store.count().await, 3, "other user, other org and legacy rows stay");
+        let left = store.list(&run_id).await.unwrap();
+        assert!(left.iter().all(|r| !(r.org_id.as_deref() == Some("org_a")
+            && r.actor_id.as_deref() == Some("user_a"))));
+        assert!(store
+            .list_browser_timeline_events("org_a", "user_a", &run_id)
+            .await
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            store
+                .list_browser_timeline_events("org_a", "user_b", &run_id)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+
+        let second = store.purge_for_actor("org_a", "user_a").await.unwrap();
+        assert_eq!(second, ActorReceiptPurge::default(), "a redelivery reports zeros");
+    }
+
+    #[tokio::test]
+    async fn purge_for_actor_refuses_empty_ids() {
+        let store = InMemoryStepReceiptStore::new();
+        for (org, actor) in [("", "user_a"), ("org_a", ""), ("org_a", "  ")] {
+            let err = store.purge_for_actor(org, actor).await.unwrap_err();
+            assert_eq!(err.code, ErrorCode::BadRequest);
+        }
+    }
+
+    struct NoErasureStore;
+
+    #[async_trait]
+    impl StepReceiptStore for NoErasureStore {
+        async fn append(&self, _receipt: StepReceipt) -> QuarryResult<()> {
+            Ok(())
+        }
+        async fn list(&self, _run_id: &RunKind) -> QuarryResult<Vec<StepReceipt>> {
+            Ok(Vec::new())
+        }
+        async fn get(&self, _receipt_id: &str) -> QuarryResult<Option<StepReceipt>> {
+            Ok(None)
+        }
+    }
+
+    #[tokio::test]
+    async fn a_store_without_erasure_refuses_rather_than_reporting_zeros() {
+        let err = NoErasureStore
+            .purge_for_actor("org_a", "user_a")
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, ErrorCode::Unsupported);
+    }
+}
+
+// Needs DATABASE_URL (self-skips without it; REQUIRE_CONTRACT=1 makes that a
+// failure), like the other postgres_* store tests.
+#[cfg(all(test, feature = "postgres-queue"))]
+mod user_erasure_pg_tests {
+    use super::*;
+    use crate::postgres_step_receipts::PostgresStepReceiptStore;
+    use quarry_core::ids::Id;
+
+    #[tokio::test]
+    async fn pg_purge_actor_receipts_deletes_one_user_in_one_org_and_is_idempotent() {
+        let Some(pool) =
+            crate::postgres_test_support::isolated_pool("user receipt erasure (W2-U49)").await
+        else {
+            eprintln!("skipping: DATABASE_URL not set");
+            return;
+        };
+        let store = PostgresStepReceiptStore::new(pool.clone());
+        let run_id: RunKind = Id::new();
+        let make = |step: u32, org: &str, actor: &str| {
+            ReceiptBuilder::start(run_id.to_string(), step)
+                .org_id(org)
+                .actor_id(actor)
+                .complete(
+                    AgentAction::Navigate {
+                        url: "https://example.com".into(),
+                    },
+                    None,
+                    0.001,
+                )
+        };
+        for r in [
+            make(1, "org_a", "user_a"),
+            make(2, "org_a", "user_a"),
+            make(3, "org_a", "user_b"),
+            make(4, "org_b", "user_a"),
+        ] {
+            store.append(r).await.unwrap();
+        }
+        store
+            .append_browser_timeline_event(BrowserTimelineEvent::new(
+                "org_a",
+                "user_a",
+                run_id.to_string(),
+                BrowserTimelineEventKind::Control {
+                    mode: BrowserControlMode::HumanTakeover,
+                    initiated_by: BrowserTimelineInitiator::Human,
+                    control_epoch: 1,
+                },
+            ))
+            .await
+            .unwrap();
+
+        let first = purge_actor_receipts_pg(&pool, "org_a", "user_a")
+            .await
+            .unwrap();
+        assert_eq!(
+            first,
+            ActorReceiptPurge {
+                receipts: 2,
+                timeline_events: 1
+            }
+        );
+        assert!(store
+            .list_for_actor("org_a", "user_a", &run_id)
+            .await
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            store
+                .list_for_actor("org_a", "user_b", &run_id)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            store
+                .list_for_actor("org_b", "user_a", &run_id)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        let second = purge_actor_receipts_pg(&pool, "org_a", "user_a")
+            .await
+            .unwrap();
+        assert_eq!(second, ActorReceiptPurge::default());
+        assert!(purge_actor_receipts_pg(&pool, "org_a", "").await.is_err());
+    }
+}
+
+/// E3.4-1: the widened checkpoint status (suspended, expired), its terminal `Closed`,
+/// and the store-level resume gate that refuses ZDR.
+#[cfg(test)]
+mod checkpoint_status_tests {
+    use super::*;
+    use quarry_core::contracts::AgentConstraints;
+    use quarry_core::ids::Id;
+
+    fn checkpoint(run_id: &RunKind, zdr: ZdrMode, status: AgentRunStatus) -> AgentRunCheckpoint {
+        AgentRunCheckpoint {
+            org_id: "org_a".into(),
+            actor_id: "user_a".into(),
+            run_id: run_id.to_string(),
+            lease_id: String::new(),
+            profile_id: "prof_01ARZ3NDEKTSV4RRFFQ69G5FAV".into(),
+            step: 1,
+            current_url: "https://example.com".into(),
+            page_hash: String::new(),
+            constraints: AgentConstraints {
+                max_steps: 5,
+                allowed_domains: vec!["example.com".into()],
+                max_runtime_s: Some(60),
+                max_cost_usd: None,
+            },
+            persist_profile: true,
+            profile_scope: BrowserProfileScope::UserPrivate,
+            viewport: None,
+            zdr,
+            grant_id: None,
+            status,
+            control_mode: BrowserControlMode::AgentControl,
+            control_epoch: 0,
+            budget: None,
+            policy_mode: None,
+            next_step: 2,
+            trace_seq: 0,
+            policy_ask: None,
+        }
+    }
+
+    #[test]
+    fn status_wire_values_round_trip_and_unknown_fails_closed() {
+        for status in [
+            AgentRunStatus::Active,
+            AgentRunStatus::Suspended,
+            AgentRunStatus::Expired,
+            AgentRunStatus::Closed,
+        ] {
+            assert_eq!(AgentRunStatus::parse(status.as_str()), Some(status));
+            let json = serde_json::to_value(status).unwrap();
+            assert_eq!(json, serde_json::Value::String(status.as_str().into()));
+            assert_eq!(
+                serde_json::from_value::<AgentRunStatus>(json).unwrap(),
+                status
+            );
+        }
+        assert_eq!(AgentRunStatus::parse("paused"), None);
+        assert_eq!(AgentRunStatus::parse(""), None);
+        assert!(serde_json::from_value::<AgentRunStatus>(serde_json::json!("paused")).is_err());
+    }
+
+    #[test]
+    fn legacy_checkpoint_statuses_read_unchanged() {
+        let legacy = serde_json::json!({
+            "org_id": "org_a",
+            "run_id": "run_a",
+            "profile_id": "prof_a",
+            "step": 1,
+            "current_url": "",
+            "constraints": { "max_steps": 5, "allowed_domains": ["example.com"] },
+            "zdr": "off",
+        });
+        let no_status: AgentRunCheckpoint = serde_json::from_value(legacy.clone()).unwrap();
+        assert_eq!(no_status.status, AgentRunStatus::Active);
+        let mut closed = legacy;
+        closed["status"] = serde_json::json!("closed");
+        let closed: AgentRunCheckpoint = serde_json::from_value(closed).unwrap();
+        assert_eq!(closed.status, AgentRunStatus::Closed);
+    }
+
+    #[test]
+    fn closed_is_terminal_and_the_arc_moves_freely() {
+        use AgentRunStatus::*;
+        for next in [Active, Suspended, Expired] {
+            assert!(!Closed.can_move_to(next), "closed never moves to {next:?}");
+        }
+        assert!(Closed.can_move_to(Closed));
+        // expired -> resumable -> live, and a live run may be suspended or expired.
+        assert!(Active.can_move_to(Suspended));
+        assert!(Active.can_move_to(Expired));
+        assert!(Expired.can_move_to(Active));
+        assert!(Suspended.can_move_to(Active));
+        assert!(Suspended.can_move_to(Closed));
+        assert!(Suspended.is_resumable() && Expired.is_resumable());
+        assert!(!Active.is_resumable() && !Closed.is_resumable());
+    }
+
+    #[test]
+    fn resume_gate_refuses_zdr_and_closed() {
+        let run_id: RunKind = Id::new();
+        for status in [
+            AgentRunStatus::Active,
+            AgentRunStatus::Suspended,
+            AgentRunStatus::Expired,
+        ] {
+            checkpoint(&run_id, ZdrMode::Off, status)
+                .check_resumable()
+                .unwrap_or_else(|error| panic!("{status:?} resumes: {error}"));
+            let zdr = checkpoint(&run_id, ZdrMode::On, status)
+                .check_resumable()
+                .expect_err("a ZDR run never resumes");
+            assert_eq!(zdr.code, ErrorCode::Forbidden);
+        }
+        let closed = checkpoint(&run_id, ZdrMode::Off, AgentRunStatus::Closed)
+            .check_resumable()
+            .expect_err("a closed run never resumes");
+        assert_eq!(closed.code, ErrorCode::Conflict);
+        let closed_zdr = checkpoint(&run_id, ZdrMode::On, AgentRunStatus::Closed)
+            .check_resumable()
+            .expect_err("a closed ZDR run never resumes");
+        assert_eq!(closed_zdr.code, ErrorCode::Conflict);
+    }
+
+    async fn status_of(store: &InMemoryStepReceiptStore, run_id: &RunKind) -> AgentRunStatus {
+        store
+            .load_run_checkpoint("org_a", run_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status
+    }
+
+    #[tokio::test]
+    async fn in_memory_mark_moves_the_arc_and_keeps_closed_terminal() {
+        let store = InMemoryStepReceiptStore::new();
+        let run_id: RunKind = Id::new();
+        store
+            .save_run_checkpoint(checkpoint(&run_id, ZdrMode::Off, AgentRunStatus::Active))
+            .await
+            .unwrap();
+
+        store
+            .mark_run_checkpoint("org_a", &run_id, AgentRunStatus::Expired)
+            .await
+            .unwrap();
+        assert_eq!(status_of(&store, &run_id).await, AgentRunStatus::Expired);
+        // Another tenant cannot move it.
+        store
+            .mark_run_checkpoint("org_b", &run_id, AgentRunStatus::Closed)
+            .await
+            .unwrap();
+        assert_eq!(status_of(&store, &run_id).await, AgentRunStatus::Expired);
+        store
+            .mark_run_checkpoint("org_a", &run_id, AgentRunStatus::Active)
+            .await
+            .unwrap();
+        store
+            .mark_run_checkpoint("org_a", &run_id, AgentRunStatus::Suspended)
+            .await
+            .unwrap();
+        assert_eq!(status_of(&store, &run_id).await, AgentRunStatus::Suspended);
+
+        store.close_run_checkpoint("org_a", &run_id).await.unwrap();
+        for next in [
+            AgentRunStatus::Active,
+            AgentRunStatus::Suspended,
+            AgentRunStatus::Expired,
+        ] {
+            store
+                .mark_run_checkpoint("org_a", &run_id, next)
+                .await
+                .unwrap();
+            assert_eq!(status_of(&store, &run_id).await, AgentRunStatus::Closed);
+        }
+        // A missing checkpoint is not an error.
+        store
+            .mark_run_checkpoint("org_a", &Id::new(), AgentRunStatus::Expired)
+            .await
+            .unwrap();
     }
 }

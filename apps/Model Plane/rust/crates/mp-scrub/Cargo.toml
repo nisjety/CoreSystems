@@ -1,0 +1,15 @@
+[package]
+name = "mp-scrub"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+regex = "1"
+serde_json = { workspace = true }
+
+[dev-dependencies]
+serde = { workspace = true }
+sha2 = "0.10"

@@ -19,14 +19,17 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	MemoryService_SearchMemory_FullMethodName      = "/model_plane.v1.MemoryService/SearchMemory"
-	MemoryService_IndexMemory_FullMethodName       = "/model_plane.v1.MemoryService/IndexMemory"
-	MemoryService_ListMemory_FullMethodName        = "/model_plane.v1.MemoryService/ListMemory"
-	MemoryService_DeleteMemory_FullMethodName      = "/model_plane.v1.MemoryService/DeleteMemory"
-	MemoryService_Health_FullMethodName            = "/model_plane.v1.MemoryService/Health"
-	MemoryService_GetMemoryControls_FullMethodName = "/model_plane.v1.MemoryService/GetMemoryControls"
-	MemoryService_SetMemoryControls_FullMethodName = "/model_plane.v1.MemoryService/SetMemoryControls"
-	MemoryService_ResetMemory_FullMethodName       = "/model_plane.v1.MemoryService/ResetMemory"
+	MemoryService_SearchMemory_FullMethodName       = "/model_plane.v1.MemoryService/SearchMemory"
+	MemoryService_IndexMemory_FullMethodName        = "/model_plane.v1.MemoryService/IndexMemory"
+	MemoryService_ListMemory_FullMethodName         = "/model_plane.v1.MemoryService/ListMemory"
+	MemoryService_DeleteMemory_FullMethodName       = "/model_plane.v1.MemoryService/DeleteMemory"
+	MemoryService_Health_FullMethodName             = "/model_plane.v1.MemoryService/Health"
+	MemoryService_GetMemoryControls_FullMethodName  = "/model_plane.v1.MemoryService/GetMemoryControls"
+	MemoryService_SetMemoryControls_FullMethodName  = "/model_plane.v1.MemoryService/SetMemoryControls"
+	MemoryService_ResetMemory_FullMethodName        = "/model_plane.v1.MemoryService/ResetMemory"
+	MemoryService_GetUserProfile_FullMethodName     = "/model_plane.v1.MemoryService/GetUserProfile"
+	MemoryService_SetUserProfile_FullMethodName     = "/model_plane.v1.MemoryService/SetUserProfile"
+	MemoryService_RebuildUserProfile_FullMethodName = "/model_plane.v1.MemoryService/RebuildUserProfile"
 )
 
 // MemoryServiceClient is the client API for MemoryService service.
@@ -61,6 +64,21 @@ type MemoryServiceClient interface {
 	// and semantic copies, in one confirmed step. Org-owned memory is left alone.
 	// Open to a ZDR caller too: erasure only removes, and pre-ZDR rows may exist.
 	ResetMemory(ctx context.Context, in *ResetMemoryRequest, opts ...grpc.CallOption) (*ResetMemoryResponse, error)
+	// The caller's standing profile (EP-8 S4): a short text built from their
+	// accepted personal memories, or as they last edited it. A ZDR caller gets
+	// an empty answer with skip_reason "zdr", never an error. Refused with
+	// failed_precondition "profile_not_enabled" while SESSION_USER_PROFILE_ENABLED
+	// is off.
+	GetUserProfile(ctx context.Context, in *GetUserProfileRequest, opts ...grpc.CallOption) (*UserProfileResponse, error)
+	// Replace the profile text with the person's own edit. User callers only, for
+	// themselves; a stale expected_revision is refused (failed_precondition
+	// "profile_revision_stale"); a ZDR or waived credential is refused
+	// zdr_feature_not_supported (feature "user_profile").
+	SetUserProfile(ctx context.Context, in *SetUserProfileRequest, opts ...grpc.CallOption) (*UserProfileResponse, error)
+	// Rebuild the profile from the person's accepted memories. Refused while
+	// memory is paused, off or disabled; an edited profile is kept unless force
+	// is set. Same caller and ZDR rules as SetUserProfile.
+	RebuildUserProfile(ctx context.Context, in *RebuildUserProfileRequest, opts ...grpc.CallOption) (*UserProfileResponse, error)
 }
 
 type memoryServiceClient struct {
@@ -151,6 +169,36 @@ func (c *memoryServiceClient) ResetMemory(ctx context.Context, in *ResetMemoryRe
 	return out, nil
 }
 
+func (c *memoryServiceClient) GetUserProfile(ctx context.Context, in *GetUserProfileRequest, opts ...grpc.CallOption) (*UserProfileResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(UserProfileResponse)
+	err := c.cc.Invoke(ctx, MemoryService_GetUserProfile_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *memoryServiceClient) SetUserProfile(ctx context.Context, in *SetUserProfileRequest, opts ...grpc.CallOption) (*UserProfileResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(UserProfileResponse)
+	err := c.cc.Invoke(ctx, MemoryService_SetUserProfile_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *memoryServiceClient) RebuildUserProfile(ctx context.Context, in *RebuildUserProfileRequest, opts ...grpc.CallOption) (*UserProfileResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(UserProfileResponse)
+	err := c.cc.Invoke(ctx, MemoryService_RebuildUserProfile_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // MemoryServiceServer is the server API for MemoryService service.
 // All implementations must embed UnimplementedMemoryServiceServer
 // for forward compatibility.
@@ -183,6 +231,21 @@ type MemoryServiceServer interface {
 	// and semantic copies, in one confirmed step. Org-owned memory is left alone.
 	// Open to a ZDR caller too: erasure only removes, and pre-ZDR rows may exist.
 	ResetMemory(context.Context, *ResetMemoryRequest) (*ResetMemoryResponse, error)
+	// The caller's standing profile (EP-8 S4): a short text built from their
+	// accepted personal memories, or as they last edited it. A ZDR caller gets
+	// an empty answer with skip_reason "zdr", never an error. Refused with
+	// failed_precondition "profile_not_enabled" while SESSION_USER_PROFILE_ENABLED
+	// is off.
+	GetUserProfile(context.Context, *GetUserProfileRequest) (*UserProfileResponse, error)
+	// Replace the profile text with the person's own edit. User callers only, for
+	// themselves; a stale expected_revision is refused (failed_precondition
+	// "profile_revision_stale"); a ZDR or waived credential is refused
+	// zdr_feature_not_supported (feature "user_profile").
+	SetUserProfile(context.Context, *SetUserProfileRequest) (*UserProfileResponse, error)
+	// Rebuild the profile from the person's accepted memories. Refused while
+	// memory is paused, off or disabled; an edited profile is kept unless force
+	// is set. Same caller and ZDR rules as SetUserProfile.
+	RebuildUserProfile(context.Context, *RebuildUserProfileRequest) (*UserProfileResponse, error)
 	mustEmbedUnimplementedMemoryServiceServer()
 }
 
@@ -216,6 +279,15 @@ func (UnimplementedMemoryServiceServer) SetMemoryControls(context.Context, *SetM
 }
 func (UnimplementedMemoryServiceServer) ResetMemory(context.Context, *ResetMemoryRequest) (*ResetMemoryResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ResetMemory not implemented")
+}
+func (UnimplementedMemoryServiceServer) GetUserProfile(context.Context, *GetUserProfileRequest) (*UserProfileResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetUserProfile not implemented")
+}
+func (UnimplementedMemoryServiceServer) SetUserProfile(context.Context, *SetUserProfileRequest) (*UserProfileResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method SetUserProfile not implemented")
+}
+func (UnimplementedMemoryServiceServer) RebuildUserProfile(context.Context, *RebuildUserProfileRequest) (*UserProfileResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method RebuildUserProfile not implemented")
 }
 func (UnimplementedMemoryServiceServer) mustEmbedUnimplementedMemoryServiceServer() {}
 func (UnimplementedMemoryServiceServer) testEmbeddedByValue()                       {}
@@ -382,6 +454,60 @@ func _MemoryService_ResetMemory_Handler(srv interface{}, ctx context.Context, de
 	return interceptor(ctx, in, info, handler)
 }
 
+func _MemoryService_GetUserProfile_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetUserProfileRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(MemoryServiceServer).GetUserProfile(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: MemoryService_GetUserProfile_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(MemoryServiceServer).GetUserProfile(ctx, req.(*GetUserProfileRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _MemoryService_SetUserProfile_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SetUserProfileRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(MemoryServiceServer).SetUserProfile(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: MemoryService_SetUserProfile_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(MemoryServiceServer).SetUserProfile(ctx, req.(*SetUserProfileRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _MemoryService_RebuildUserProfile_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RebuildUserProfileRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(MemoryServiceServer).RebuildUserProfile(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: MemoryService_RebuildUserProfile_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(MemoryServiceServer).RebuildUserProfile(ctx, req.(*RebuildUserProfileRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // MemoryService_ServiceDesc is the grpc.ServiceDesc for MemoryService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -420,6 +546,18 @@ var MemoryService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ResetMemory",
 			Handler:    _MemoryService_ResetMemory_Handler,
+		},
+		{
+			MethodName: "GetUserProfile",
+			Handler:    _MemoryService_GetUserProfile_Handler,
+		},
+		{
+			MethodName: "SetUserProfile",
+			Handler:    _MemoryService_SetUserProfile_Handler,
+		},
+		{
+			MethodName: "RebuildUserProfile",
+			Handler:    _MemoryService_RebuildUserProfile_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

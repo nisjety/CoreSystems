@@ -2,13 +2,19 @@
 import { flush } from 'solid-js'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
+  CHAT_DRAFT_MAX_THREADS,
   HOME_DRAFT_MAX_CHARS,
   capHomeDraft,
+  chatDraftClearEpoch,
+  chatDraftStorageKey,
+  clearChatDrafts,
   clearHomeDrafts,
   homeDraftClearEpoch,
   homeDraftStorageKey,
   readHomeDraft,
+  removeChatDraft,
   removeHomeDraft,
+  writeChatDraft,
   writeHomeDraft,
 } from './home-draft-storage'
 import { clearSession, setSessionUser } from './session-store'
@@ -141,5 +147,83 @@ describe('clearing the drafts', () => {
     flush()
     expect(sessionStorage.getItem(keyA)).toBeNull()
     clearSession()
+  })
+})
+
+describe('chat thread drafts', () => {
+  const chatKey = (thread: string) => chatDraftStorageKey('user-a', 'org-a', thread)!
+  // The keys of the stored drafts only: the index of the drafts is not one of them.
+  const chatDraftKeys = () => {
+    const keys: string[] = []
+    for (let index = 0; index < sessionStorage.length; index += 1) {
+      const key = sessionStorage.key(index)
+      if (key?.startsWith('verevon.chat-draft.v1:') && !Array.isArray(JSON.parse(sessionStorage.getItem(key)!))) keys.push(key)
+    }
+    return keys
+  }
+
+  it('is keyed by workspace, user and thread, and exists only when all three are known', () => {
+    expect(chatKey('thread-1')).toBe('verevon.chat-draft.v1:org-a:user-a:thread-1')
+    expect(chatDraftStorageKey('user-a', 'org-a', 'new')).toBe('verevon.chat-draft.v1:org-a:user-a:new')
+    expect(chatDraftStorageKey(undefined, 'org-a', 'thread-1')).toBeNull()
+    expect(chatDraftStorageKey('user-a', ' ', 'thread-1')).toBeNull()
+    expect(chatDraftStorageKey('user-a', 'org-a', '  ')).toBeNull()
+  })
+
+  it('never shares a key with the Home draft, whose storage it leaves as it was', () => {
+    expect(chatKey('new')).not.toBe(keyA)
+    writeChatDraft(chatKey('new'), 'chat')
+    writeHomeDraft(keyA, 'home')
+    expect(readHomeDraft(keyA)).toBe('home')
+    expect(readHomeDraft(chatKey('new'))).toBe('chat')
+  })
+
+  it('stores the text in sessionStorage, and removes the entry for blank text', () => {
+    expect(writeChatDraft(chatKey('thread-1'), 'Hei')).toBe('Hei')
+    expect(JSON.parse(sessionStorage.getItem(chatKey('thread-1'))!)).toEqual({ text: 'Hei' })
+    expect(readHomeDraft(chatKey('thread-1'))).toBe('Hei')
+    expect(writeChatDraft(chatKey('thread-1'), ' \n ')).toBe('')
+    expect(sessionStorage.getItem(chatKey('thread-1'))).toBeNull()
+    expect(chatDraftKeys()).toEqual([])
+  })
+
+  it('caps the length as the Home draft does', () => {
+    expect(writeChatDraft(chatKey('thread-1'), 'a'.repeat(HOME_DRAFT_MAX_CHARS + 5))).toHaveLength(HOME_DRAFT_MAX_CHARS)
+  })
+
+  it('keeps at most thirty thread drafts, and removes the least recently written one first', () => {
+    for (let index = 0; index < CHAT_DRAFT_MAX_THREADS; index += 1) writeChatDraft(chatKey(`thread-${index}`), `draft ${index}`)
+    expect(chatDraftKeys()).toHaveLength(CHAT_DRAFT_MAX_THREADS)
+
+    // Writing thread-0 again makes it the most recent, so thread-1 is the one that goes.
+    writeChatDraft(chatKey('thread-0'), 'draft 0 again')
+    writeChatDraft(chatKey('thread-new-one'), 'the newest')
+
+    expect(chatDraftKeys()).toHaveLength(CHAT_DRAFT_MAX_THREADS)
+    expect(readHomeDraft(chatKey('thread-1'))).toBe('')
+    expect(readHomeDraft(chatKey('thread-0'))).toBe('draft 0 again')
+    expect(readHomeDraft(chatKey('thread-new-one'))).toBe('the newest')
+  })
+
+  it('forgets a removed draft, so it does not count toward the thirty', () => {
+    for (let index = 0; index < CHAT_DRAFT_MAX_THREADS; index += 1) writeChatDraft(chatKey(`thread-${index}`), 'x')
+    removeChatDraft(chatKey('thread-0'))
+    writeChatDraft(chatKey('thread-extra'), 'y')
+    expect(chatDraftKeys()).toHaveLength(CHAT_DRAFT_MAX_THREADS)
+    expect(readHomeDraft(chatKey('thread-1'))).toBe('x')
+  })
+
+  it('is removed by clearing the chat drafts, and clearing the Home drafts leaves it alone', () => {
+    writeHomeDraft(keyA, 'home')
+    writeChatDraft(chatKey('thread-1'), 'chat')
+    const before = chatDraftClearEpoch()
+
+    clearHomeDrafts()
+    expect(readHomeDraft(chatKey('thread-1'))).toBe('chat')
+
+    clearChatDrafts()
+    expect(chatDraftKeys()).toEqual([])
+    expect(sessionStorage.length).toBe(0)
+    expect(chatDraftClearEpoch()).toBe(before + 1)
   })
 })

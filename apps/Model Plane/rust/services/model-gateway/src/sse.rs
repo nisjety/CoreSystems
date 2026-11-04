@@ -14,7 +14,8 @@ use chrono::Utc;
 use futures::Stream;
 use mp_contracts::model_plane::v1::{
     orchestration_event, ApprovalKind, ApprovalState, CancelRunRequest, ChatMessage,
-    ContextSegment, GetContextAssemblyRequest, InferRequest, OrchestrationEvent, PlanState,
+    ContextSegment, GetContextAssemblyRequest, InferPurpose, InferRequest, OrchestrationEvent,
+    PlanState,
     RunAgentRequest, RunAgentResponse, StreamRunEventsRequest, SubagentRole, TodoState,
     ToolDefinition, VerificationStatus,
 };
@@ -42,6 +43,7 @@ use crate::{
     },
     gateway_metrics,
     http_routes::InvokeRequest,
+    role_routing,
     state::AppState,
 };
 
@@ -141,6 +143,132 @@ fn space_append_retrieval_enabled() -> bool {
 
 fn space_append_retrieval_enabled_with(get: &dyn Fn(&str) -> Option<String>) -> bool {
     get(SPACE_APPEND_RETRIEVAL_VAR).is_some_and(|value| value == "true")
+}
+
+/// The switch that lets a Do run's `knowledge_search` retrieve under the Space decision its turn holds
+/// (WS18-S5). Opt-in: only the literal `true` enables it. Off, a Do run searches the organisation's own
+/// knowledge, as it always has. execution-core reads no switch of its own: this one decides whether the
+/// run carries the Space retrieval header at all.
+const SPACE_AGENTIC_RETRIEVAL_VAR: &str = "AGENTIC_SPACE_RETRIEVAL_ENABLED";
+
+fn space_agentic_retrieval_enabled() -> bool {
+    space_agentic_retrieval_enabled_with(&|key| std::env::var(key).ok())
+}
+
+fn space_agentic_retrieval_enabled_with(get: &dyn Fn(&str) -> Option<String>) -> bool {
+    get(SPACE_AGENTIC_RETRIEVAL_VAR).is_some_and(|value| value == "true")
+}
+
+/// The Space retrieval a Do run's `knowledge_search` is authorised with, forwarded to execution-core in
+/// `x-space-retrieval-authorization` (WS18-S5). `None` (no header) for a run that is not Space-scoped and
+/// for every run while the switch is off, so those runs leave exactly as before. A Space-scoped run with
+/// the switch on carries its decision, or an empty value when its turn holds none: execution-core refuses
+/// that run's search rather than let it run organisation-wide. The decision is a request-only credential.
+fn agentic_space_retrieval(space_id: &str, decision: Option<&str>, enabled: bool) -> Option<String> {
+    if !enabled || space_id.is_empty() {
+        return None;
+    }
+    Some(decision.unwrap_or_default().trim().to_owned())
+}
+
+/// The switch that lets a Do run carry its agent role catalogue to execution-core (EP-6 S10). Opt-in:
+/// only the literal `true` enables it. Off, `InvokeRequest.agent_roles` is never read and the run's
+/// `RunContext` carries no roles. execution-core honours the catalogue only under its own switch,
+/// `EXECUTION_CORE_SUBAGENT_ROLES`; this one decides whether the gateway sends it at all.
+const SUBAGENT_ROLE_CATALOGUE_VAR: &str = "MODEL_GATEWAY_SUBAGENT_ROLE_CATALOGUE";
+
+fn subagent_role_catalogue_enabled() -> bool {
+    subagent_role_catalogue_enabled_with(&|key| std::env::var(key).ok())
+}
+
+fn subagent_role_catalogue_enabled_with(get: &dyn Fn(&str) -> Option<String>) -> bool {
+    get(SUBAGENT_ROLE_CATALOGUE_VAR).is_some_and(|value| value.trim() == "true")
+}
+
+/// At most this many roles reach a run; later entries are left out.
+const MAX_AGENT_ROLES: usize = 8;
+
+/// A role's instructions are cut to this many bytes (on a character boundary).
+const MAX_AGENT_ROLE_INSTRUCTIONS_BYTES: usize = 4_096;
+
+/// Longest `agent_ref` sent on: it becomes part of the child run's `agent_id`.
+const MAX_AGENT_REF_BYTES: usize = 128;
+
+/// The WS25-S6 mode vocabulary a role's autonomy cap may name; empty means none stated.
+const AGENT_ROLE_AUTONOMY_CAPS: &[&str] = &["", "read_only", "ask_first", "auto"];
+
+/// One role as the BFF gateway sends it (the fields of `AgentRoleSpec`).
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(default)]
+struct AgentRoleInput {
+    agent_ref: String,
+    version: u32,
+    digest: String,
+    name: String,
+    instructions: String,
+    tool_capability_ids: Vec<String>,
+    autonomy_cap: String,
+}
+
+/// The bounded role catalogue a Do run carries in `RunContext.agent_roles` (EP-6 S10).
+///
+/// Empty with the switch off, for a ZDR or waived turn (Do and delegation are refused there, so the
+/// catalogue is never built), and for a body that is not a list of roles. Each entry must name an
+/// `agent_ref` of `[A-Za-z0-9_.:-]`, a published version (from 1) and an autonomy cap from the closed
+/// vocabulary, or it is left out: an unknown cap could read as a widening. Duplicates keep the first,
+/// instructions are cut to 4 KB and at most 8 roles are kept. Nothing here grants: execution-core
+/// intersects a role's tools with the parent's.
+fn compose_agent_roles(
+    enabled: bool,
+    raw: Option<&Value>,
+    zdr_or_waived: bool,
+) -> Vec<mp_contracts::model_plane::v1::AgentRoleSpec> {
+    if !enabled || zdr_or_waived {
+        return Vec::new();
+    }
+    let Some(inputs) =
+        raw.and_then(|raw| serde_json::from_value::<Vec<AgentRoleInput>>(raw.clone()).ok())
+    else {
+        return Vec::new();
+    };
+    let mut seen = std::collections::BTreeSet::new();
+    inputs
+        .into_iter()
+        .filter(|role| {
+            !role.agent_ref.is_empty()
+                && role.agent_ref.len() <= MAX_AGENT_REF_BYTES
+                && role
+                    .agent_ref
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b':'))
+                && role.version >= 1
+                && AGENT_ROLE_AUTONOMY_CAPS.contains(&role.autonomy_cap.as_str())
+        })
+        .filter(|role| seen.insert(role.agent_ref.clone()))
+        .take(MAX_AGENT_ROLES)
+        .map(|role| mp_contracts::model_plane::v1::AgentRoleSpec {
+            agent_ref: role.agent_ref,
+            version: role.version,
+            digest: role.digest,
+            name: role.name.chars().filter(|c| !c.is_control()).collect(),
+            instructions: within_bytes(&role.instructions, MAX_AGENT_ROLE_INSTRUCTIONS_BYTES)
+                .to_owned(),
+            tool_capability_ids: role.tool_capability_ids,
+            autonomy_cap: role.autonomy_cap,
+        })
+        .collect()
+}
+
+/// The longest prefix of `text` within `max_bytes`, cut on a character boundary.
+fn within_bytes(text: &str, max_bytes: usize) -> &str {
+    if text.len() <= max_bytes {
+        return text;
+    }
+    let mut end = max_bytes;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
 }
 
 /// The Space retrieval decision a turn's grounding is scoped by. A scoped thread's first message
@@ -749,6 +877,8 @@ async fn emit_turn_timing(
     resume: (&crate::stream_buffer::StreamBufferStore, &str, &mut u64, &[String]),
 ) {
     if let Some(report) = timing.report(outcome) {
+        // EP-14 S5: an armed turn keeps this same report, written on its own task.
+        crate::run_timing_persist::persist_turn(&report);
         let (buffers, buffer_key, seq, features) = resume;
         let event = crate::sse_events::ChatEvent::TurnTiming { report };
         emit_and_buffer(tx, buffers, buffer_key, seq, features, req_id, event).await;
@@ -779,15 +909,27 @@ fn stream_ended_with_no_content(prompt: &str, stop_reason: &str, assistant_outpu
 
 /// Auxiliary calls inherit the subscription selected for the turn. They must
 /// never spend another provider's quota just because their default is cheaper.
-fn subscription_scoped_request(mut request: InferRequest, route: &InferRequest) -> InferRequest {
+pub(crate) fn subscription_scoped_request(request: InferRequest, route: &InferRequest) -> InferRequest {
+    let mut request = inherit_turn_floors(request, route);
     if !route.subscription_connection_id.is_empty() {
         request.model.clone_from(&route.model);
         request.provider_hint.clone_from(&route.provider_hint);
         request.subscription_connection_id.clone_from(&route.subscription_connection_id);
         request.zdr = route.zdr;
-        request.min_privacy_tier = route.min_privacy_tier;
-        request.min_residency.clone_from(&route.min_residency);
     }
+    request
+}
+
+/// Auxiliary calls take the turn's privacy-tier and residency floors on every
+/// route. Only a subscription route carried them before, so a title or a source
+/// judge of a floored turn could reach a provider the turn itself would refuse.
+///
+/// They also name the turn's run, so a request snapshot of a side call is filed
+/// under the run it served (EP-14 S6). The run id routes nothing.
+fn inherit_turn_floors(mut request: InferRequest, route: &InferRequest) -> InferRequest {
+    request.min_privacy_tier = route.min_privacy_tier;
+    request.min_residency.clone_from(&route.min_residency);
+    request.run_id.clone_from(&route.run_id);
     request
 }
 
@@ -817,6 +959,207 @@ fn share_tool_round_prefix(
     }
 }
 
+/// Records in the answer's metadata that an enforced loop stop ended the tool phase early, so the
+/// durable turn carries it beside its evidence. The entry is content-free: the reason, the tool's
+/// name, a hash of the call's signature (never its arguments) and how many calls the pattern
+/// covers. With no stop, which is every turn unless `LOOP_GUARD_MODE=enforce` ended the tool
+/// phase, the metadata is returned as it was.
+fn with_loop_stop(
+    metadata: Option<prost_types::Struct>,
+    stop: Option<&mp_contracts::loop_guard::LoopStop>,
+) -> Option<prost_types::Struct> {
+    use prost_types::value::Kind;
+
+    let Some(stop) = stop else {
+        return metadata;
+    };
+    let text = |value: &str| prost_types::Value {
+        kind: Some(Kind::StringValue(value.to_owned())),
+    };
+    let fields = std::collections::BTreeMap::from([
+        ("reason".to_owned(), text(stop.reason.label())),
+        ("tool".to_owned(), text(stop.tool.as_str())),
+        ("signature_hash".to_owned(), text(stop.signature_hash.as_str())),
+        (
+            "count".to_owned(),
+            prost_types::Value {
+                kind: Some(Kind::NumberValue(f64::from(stop.count))),
+            },
+        ),
+    ]);
+    let mut metadata = metadata.unwrap_or_default();
+    metadata.fields.insert(
+        "loop_stop".to_owned(),
+        prost_types::Value {
+            kind: Some(Kind::StructValue(prost_types::Struct { fields })),
+        },
+    );
+    Some(metadata)
+}
+
+#[cfg(test)]
+mod agent_mode_turn_tests {
+    use super::*;
+    use crate::profile::{chosen_agent_mode, resolve_turn_mode, ApprovalPosture};
+    use mp_contracts::agent_mode::AgentMode;
+    use mp_contracts::model_plane::v1::AutonomyRung;
+
+    fn run() -> crate::session_flow::SessionRun {
+        crate::session_flow::SessionRun {
+            thread_id: "thread-1".to_owned(),
+            run_id: "run-1".to_owned(),
+            org_id: "org-1".to_owned(),
+            already_started: false,
+            terminal_source: mp_contracts::model_plane::v1::ManagedRunSource::ExecutionAgent,
+        }
+    }
+
+    /// The request a fresh Do run sends, built by the one function a dispatch uses, from the posture and
+    /// plan flag the caller resolved and the thread's grant it names.
+    fn fresh_request(
+        permission_mode: &str,
+        plan_mode: bool,
+        granted: Option<AutonomyRung>,
+    ) -> RunAgentRequest {
+        resolved_run_agent_request(
+            &run(),
+            "org-1",
+            "user-1",
+            "gpt-5.6-terra",
+            "research the Q3 numbers",
+            &[],
+            false,
+            0,
+            permission_mode,
+            plan_mode,
+            granted,
+            "",
+            None,
+            &AgentRoute::default(),
+            crate::run_budget::RunBudget::default(),
+            None,
+            None,
+            Vec::new(),
+            Vec::new(),
+            0,
+        )
+    }
+
+    fn choice(id: &str) -> Option<AgentMode> {
+        chosen_agent_mode(true, Some(id)).expect("a known mode")
+    }
+
+    /// With no choice the request is what the posture alone decides: that posture, no plan gate and no
+    /// rung of its own, so a thread's grant decides exactly as it did before modes existed (WS25-S6).
+    #[test]
+    fn a_turn_with_no_choice_sends_the_posture_the_platform_set() {
+        for requested in [ApprovalPosture::Auto, ApprovalPosture::Ask] {
+            assert!(resolve_turn_mode(None, requested).is_none());
+            let request = fresh_request(requested.as_permission_mode(), false, None);
+            assert_eq!(request.mode, requested.as_permission_mode());
+            assert!(!request.plan_mode);
+            assert_eq!(request.autonomy_rung, AutonomyRung::Unspecified as i32);
+        }
+    }
+
+    /// A read-only choice is a plan gate: the run is a plan run whose rung is READ_ONLY, and a grant the
+    /// thread holds does not widen it, because plan mode wins wherever the run is dispatched.
+    #[test]
+    fn a_read_only_choice_sends_a_plan_run_that_no_grant_widens() {
+        let turn = resolve_turn_mode(choice("read_only"), ApprovalPosture::Auto)
+            .expect("a choice resolves");
+        assert!(turn.preset.plan_gate);
+        let request = fresh_request(
+            turn.preset.permission_mode,
+            turn.preset.plan_gate,
+            Some(AutonomyRung::WorkspaceWrite),
+        );
+        assert!(request.plan_mode);
+        assert_eq!(request.autonomy_rung, AutonomyRung::ReadOnly as i32);
+        assert_eq!(request.mode, "ask");
+    }
+
+    /// An ask-first choice has no plan gate and states no rung of its own: it asks before a risky call and
+    /// leaves the thread's grant to decide the rung, as it does for every run without a mode.
+    #[test]
+    fn an_ask_first_choice_asks_and_leaves_the_grant_to_decide_the_rung() {
+        let turn = resolve_turn_mode(choice("ask_first"), ApprovalPosture::Auto)
+            .expect("a choice resolves");
+        assert!(!turn.preset.plan_gate);
+        assert_eq!(turn.preset.rung, AutonomyRung::Unspecified);
+        let no_grant = fresh_request(turn.preset.permission_mode, false, None);
+        assert_eq!(no_grant.mode, "ask");
+        assert!(!no_grant.plan_mode);
+        assert_eq!(no_grant.autonomy_rung, AutonomyRung::Unspecified as i32);
+        let granted = fresh_request(
+            turn.preset.permission_mode,
+            false,
+            Some(AutonomyRung::WorkspaceWrite),
+        );
+        assert_eq!(granted.autonomy_rung, AutonomyRung::WorkspaceWrite as i32);
+    }
+}
+
+#[cfg(test)]
+mod loop_stop_tests {
+    use super::*;
+    use mp_contracts::loop_guard::{LoopStop, StopReason};
+    use prost_types::value::Kind;
+
+    fn a_repeat_stop() -> LoopStop {
+        LoopStop {
+            reason: StopReason::Repeat,
+            tool: "fetch_url".to_owned(),
+            signature_hash: "9d2c".to_owned(),
+            count: 8,
+        }
+    }
+
+    fn text(value: &prost_types::Value) -> Option<&str> {
+        match &value.kind {
+            Some(Kind::StringValue(text)) => Some(text.as_str()),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn an_enforced_stop_writes_exactly_four_content_free_fields() {
+        let metadata = with_loop_stop(None, Some(&a_repeat_stop()))
+            .expect("a stop writes the answer's metadata");
+        assert_eq!(metadata.fields.len(), 1, "nothing else is written beside the stop");
+        let Some(Kind::StructValue(entry)) = &metadata.fields["loop_stop"].kind else {
+            panic!("the stop is a struct under loop_stop");
+        };
+        let keys: Vec<&str> = entry.fields.keys().map(String::as_str).collect();
+        assert_eq!(keys, ["count", "reason", "signature_hash", "tool"], "four fields, no arguments");
+        assert_eq!(text(&entry.fields["reason"]), Some("repeat"));
+        assert_eq!(text(&entry.fields["tool"]), Some("fetch_url"));
+        assert_eq!(text(&entry.fields["signature_hash"]), Some("9d2c"));
+        let count = match &entry.fields["count"].kind {
+            Some(Kind::NumberValue(count)) => *count,
+            _ => panic!("the count is a number"),
+        };
+        assert!((count - 8.0).abs() < f64::EPSILON, "the count is {count}");
+    }
+
+    #[test]
+    fn without_a_stop_the_answer_metadata_is_returned_as_it_was() {
+        assert!(with_loop_stop(None, None).is_none(), "no stop and no evidence writes nothing");
+        let evidence = prost_types::Struct {
+            fields: std::collections::BTreeMap::from([(
+                "citations".to_owned(),
+                prost_types::Value {
+                    kind: Some(Kind::StringValue("kept".to_owned())),
+                },
+            )]),
+        };
+        assert!(
+            with_loop_stop(Some(evidence.clone()), None) == Some(evidence),
+            "with the switch off or in shadow the metadata is unchanged"
+        );
+    }
+}
+
 #[cfg(test)]
 mod subscription_route_tests {
     use super::*;
@@ -836,6 +1179,62 @@ mod subscription_route_tests {
         assert!(!scoped.zdr, "the auxiliary call takes the connection turn's posture, never ZDR");
         let ordinary=subscription_scoped_request(InferRequest {model:"gpt-4o-mini".into(),..Default::default()}, &InferRequest::default());
         assert_eq!(ordinary.model,"gpt-4o-mini");
+    }
+
+    #[test]
+    fn subscription_route_still_overrides_model_and_hint() {
+        let route = InferRequest {
+            model: "gpt-5.6-terra".into(),
+            provider_hint: "openai-codex-subscription".into(),
+            subscription_connection_id: "connection".into(),
+            ..Default::default()
+        };
+        let scoped = subscription_scoped_request(
+            InferRequest {
+                model: "gpt-4o-mini".into(),
+                provider_hint: "azure-openai".into(),
+                ..Default::default()
+            },
+            &route,
+        );
+        assert_eq!(scoped.model, "gpt-5.6-terra");
+        assert_eq!(scoped.provider_hint, "openai-codex-subscription");
+        assert_eq!(scoped.subscription_connection_id, "connection");
+    }
+
+    #[test]
+    fn title_request_inherits_the_turn_privacy_floor() {
+        // A floored turn on an ordinary route: its title must not reach a provider
+        // the turn itself would refuse.
+        let route = InferRequest {
+            model: "gpt-5-mini".into(),
+            provider_hint: "azure-openai".into(),
+            min_privacy_tier: 2,
+            min_residency: "eu".into(),
+            ..Default::default()
+        };
+        let title = title_request(&route, "gpt-5-mini", "req-1", "org-1", "question", "answer");
+        assert_eq!(title.min_privacy_tier, 2);
+        assert_eq!(title.min_residency, "eu");
+        assert_eq!(title.purpose, InferPurpose::Title as i32);
+        assert!(!title.zdr);
+    }
+
+    #[test]
+    fn judge_request_inherits_residency_floor() {
+        let route = InferRequest {
+            model: "gpt-5-mini".into(),
+            min_privacy_tier: 4,
+            min_residency: "norway".into(),
+            ..Default::default()
+        };
+        let snippets = vec!["a retrieved source".to_owned()];
+        let judge = verification_judge_request(
+            &route, "gpt-5-mini", "req-1", "org-1", "question", "answer", &snippets, false,
+        );
+        assert_eq!(judge.min_residency, "norway");
+        assert_eq!(judge.min_privacy_tier, 4);
+        assert_eq!(judge.purpose, InferPurpose::VerificationJudge as i32);
     }
 
     #[test]
@@ -912,9 +1311,9 @@ mod aux_model_tests {
         };
         let snippets = vec!["A retrieved passage.".to_owned()];
         let requests = [
-            title_request(&metered, "req-1", "org-1", "question", "answer"),
-            follow_ups_request(&metered, "req-1", "org-1", "question", "answer"),
-            verification_judge_request(&metered, "req-1", "org-1", "question", "answer", &snippets, false),
+            title_request(&metered, "claude-sonnet-5-5", "req-1", "org-1", "question", "answer"),
+            follow_ups_request(&metered, "claude-sonnet-5-5", "req-1", "org-1", "question", "answer"),
+            verification_judge_request(&metered, "claude-sonnet-5-5", "req-1", "org-1", "question", "answer", &snippets, false),
         ];
         let ids: Vec<&str> = requests.iter().map(|request| request.request_id.as_str()).collect();
         assert_eq!(ids, ["req-1-title", "req-1-follow-ups", "req-1-verify"]);
@@ -923,7 +1322,7 @@ mod aux_model_tests {
         }
         // The judge inherits the turn's retention posture; the title and the
         // follow-ups only ever carry non-ZDR exchange content.
-        assert!(verification_judge_request(&metered, "req-1", "org-1", "question", "answer", &snippets, true).zdr);
+        assert!(verification_judge_request(&metered, "claude-sonnet-5-5", "req-1", "org-1", "question", "answer", &snippets, true).zdr);
         assert!(!requests[0].zdr && !requests[1].zdr && !requests[2].zdr);
 
         // On a subscription turn the auxiliary calls keep the turn's own model whatever
@@ -934,12 +1333,45 @@ mod aux_model_tests {
             subscription_connection_id: "connection".into(),
             ..Default::default()
         };
-        assert_eq!(title_request(&subscription, "req-2", "org-1", "question", "answer").model, "gpt-5.6-terra");
-        assert_eq!(follow_ups_request(&subscription, "req-2", "org-1", "question", "answer").model, "gpt-5.6-terra");
+        assert_eq!(title_request(&subscription, "gpt-5.6-terra", "req-2", "org-1", "question", "answer").model, "gpt-5.6-terra");
+        assert_eq!(follow_ups_request(&subscription, "gpt-5.6-terra", "req-2", "org-1", "question", "answer").model, "gpt-5.6-terra");
         assert_eq!(
-            verification_judge_request(&subscription, "req-2", "org-1", "question", "answer", &snippets, false).model,
+            verification_judge_request(&subscription, "gpt-5.6-terra", "req-2", "org-1", "question", "answer", &snippets, false).model,
             "gpt-5.6-terra"
         );
+    }
+
+    #[test]
+    fn aux_requests_keep_the_aux_model_while_the_switch_is_off() {
+        // The switch is read once from the environment, which a test does not set. With it off a side
+        // task names the aux model and carries no role fallback, exactly the request it sent before.
+        let route = InferRequest {
+            model: "claude-sonnet-5-5".into(),
+            ..Default::default()
+        };
+        let title = title_request(&route, "claude-sonnet-5-5", "req-3", "org-1", "question", "answer");
+        assert_eq!(title.model, aux_model());
+        assert!(title.role_fallback_model.is_empty());
+        let follow_ups = follow_ups_request(&route, "claude-sonnet-5-5", "req-3", "org-1", "question", "answer");
+        assert_eq!(follow_ups.model, aux_model());
+        assert!(follow_ups.role_fallback_model.is_empty());
+    }
+
+    #[test]
+    fn aux_requests_name_the_turns_run() {
+        // A side call's request snapshot is filed under the run it served (EP-14 S6); a turn with no
+        // run gives its side calls none.
+        let route = InferRequest {
+            model: "claude-sonnet-5-5".into(),
+            run_id: "run-1".into(),
+            ..Default::default()
+        };
+        let title = title_request(&route, "claude-sonnet-5-5", "req-3", "org-1", "question", "answer");
+        assert_eq!(title.run_id, "run-1");
+        let follow_ups = follow_ups_request(&route, "claude-sonnet-5-5", "req-3", "org-1", "question", "answer");
+        assert_eq!(follow_ups.run_id, "run-1");
+        let no_run = title_request(&InferRequest::default(), "claude-sonnet-5-5", "req-3", "org-1", "question", "answer");
+        assert!(no_run.run_id.is_empty());
     }
 }
 
@@ -1519,6 +1951,61 @@ pub async fn invoke_stream_sse(
             return error_stream(&request_id, refusal.code.as_str(), &refusal.message, false);
         }
     }
+    // The posture and the agent mode the person chose (WS25-S6), resolved before normalisation so the
+    // admission rules below judge the plan gate a chosen mode sets exactly as they judge a plan_mode
+    // the client sent. The posture is decided by the server (approval-enforcement audit): the platform
+    // floor from the verified scopes, and the client's `profile` only as a request that can ratchet it
+    // stricter, never to disable gating. Switch off, or no choice, and the request is not changed here.
+    let profile = crate::profile::AgentProfile::from_wire(req.profile.as_deref());
+    let requested_posture = crate::profile::resolve_posture(posture_floor(&claims), profile);
+    // The org's agent policy (WS25-S9), read before the mode is resolved so the org's cap binds a turn the person
+    // did not choose a mode for. Off, nothing is read; a Do turn whose policy cannot be read is refused.
+    let org_mode_cap = match crate::org_agent_policy::admit_turn(
+        crate::org_agent_policy::policy_mode(),
+        crate::org_agent_policy::shared_cache(),
+        &state.http_client,
+        &state.capability_core_base_url,
+        &org_id,
+        capability_bearer.as_ref().map_or("", VerifiedCapabilityBearer::as_str),
+        features.iter().any(|feature| feature == "agentic"),
+    )
+    .await
+    {
+        Ok(cap) => cap,
+        Err(code) => {
+            return error_stream(
+                &request_id,
+                code,
+                crate::org_agent_policy::POLICY_UNAVAILABLE_MESSAGE,
+                true,
+            );
+        }
+    };
+    let chosen_mode = match crate::profile::chosen_agent_mode(
+        crate::profile::agent_modes_enabled(),
+        req.agent_mode.as_deref(),
+    ) {
+        Ok(chosen_mode) => chosen_mode,
+        Err(_) => {
+            return error_stream(
+                &request_id,
+                mp_contracts::agent_mode::UNKNOWN_MODE_CODE,
+                "The agent mode is not one this server knows.",
+                false,
+            );
+        }
+    };
+    let turn_mode = crate::org_agent_policy::resolve_turn(requested_posture, chosen_mode, org_mode_cap);
+    if let Some(turn) = turn_mode {
+        req.plan_mode |= turn.preset.plan_gate;
+        tracing::info!(
+            agent_mode = turn.mode.as_str(),
+            source = turn.source.label(),
+            permission_mode = turn.preset.permission_mode,
+            plan_mode = req.plan_mode,
+            "agent mode resolved for the turn"
+        );
+    }
     // Normalize and validate BEFORE branching: an unknown tier numeric must
     // fail closed on both the durable and the persistence-free path, and the
     // ZDR branch threads the same floor onto its inference call.
@@ -1790,17 +2277,13 @@ pub async fn invoke_stream_sse(
         run_ceiling_enforce_switch(),
     );
 
-    // Resolve the harness profile → approval posture. Recorded on the opened
-    // envelope so the run loop and operator surfaces agree (HARNESS_PHASE1 §1).
-    //
-    // SECURITY (approval-enforcement audit): the client-supplied `profile` is
-    // NOT trusted for the approval-relevant decision. It keeps its benign role
-    // (SSE stream shape — see `sse_events`), but the approval POSTURE is
-    // resolved server-side from the authenticated principal and the client can
-    // only ratchet it STRICTER — never send `profile:"chat"` to disable gating.
-    let profile = crate::profile::AgentProfile::from_wire(req.profile.as_deref());
-    let posture =
-        crate::profile::resolve_posture(posture_floor(&claims), profile).as_permission_mode();
+    // The approval posture of the turn, recorded on the opened envelope so the run loop and operator
+    // surfaces agree (HARNESS_PHASE1 §1). A chosen agent mode sets the posture its preset states
+    // (WS25-S6); with no choice it is the posture resolved above, byte for byte.
+    let posture = turn_mode.map_or_else(
+        || requested_posture.as_permission_mode(),
+        |turn| turn.preset.permission_mode,
+    );
 
     let start = std::time::Instant::now();
 
@@ -1950,6 +2433,35 @@ pub async fn invoke_stream_sse(
         state.plan_mode.approval_resume_enabled(),
     ) {
         return error_stream(&request_id, code, message, false);
+    }
+    // A chosen mode that allows no Do run refuses an agentic turn, typed, before any run exists
+    // (WS25-S6). A plain answer is not agentic, so lockdown still gives one.
+    if agentic_requested && turn_mode.is_some_and(|turn| !turn.preset.do_runs) {
+        return error_stream(
+            &request_id,
+            mp_contracts::agent_mode::LOCKDOWN_CODE,
+            "This chat is locked to plain answers, so it cannot start an agent run.",
+            false,
+        );
+    }
+    // WS14 S2, approve then execute: the plan an execute turn names. With its switch off the field
+    // is ignored, so the request runs exactly as it did before the field existed. With it on, the
+    // turn is refused here, before any run exists, unless the thread's grant names that plan: the
+    // run binds the grant itself once the plan is claimed (`agentic_run_stream`).
+    let approved_plan = approved_plan_of(&req, plan_execute_on_approve_enabled()).map(str::to_owned);
+    if let Some(plan_id) = approved_plan.as_deref() {
+        if !req.execute_granted {
+            return error_stream(
+                &request_id,
+                "invalid_request",
+                "approved_plan_id needs execute_granted",
+                false,
+            );
+        }
+        let read = durable_thread_grant(&state, &org_id, req.thread_id.as_deref().unwrap_or_default(), &model_bearer).await;
+        if !grant_names_plan(&read, plan_id) {
+            return error_stream(&request_id, PLAN_GRANT_UNAVAILABLE, PLAN_GRANT_UNAVAILABLE_MESSAGE, false);
+        }
     }
     // Images as parts of the turn (WS08-S4), decided before any run exists. With the switch off
     // this is empty and the vision diversion below decides, as it always did. A Do turn with an
@@ -2165,6 +2677,17 @@ pub async fn invoke_stream_sse(
     let thread_scope = session_run.thread_id.clone();
     let prepared_ms = timing.close(crate::turn_timing::Phase::SessionPrepare, admitted_ms);
     timing.set_run(&session_run.run_id);
+    // EP-14 S5: an Ask turn of a persistent run keeps its timing report (no-op with the switch off).
+    if !agentic_requested {
+        crate::run_timing_persist::arm_turn(
+            &state,
+            &request_id,
+            &session_run.run_id,
+            &model_bearer,
+            turn_posture.zdr(),
+            turn_posture.is_waived(),
+        );
+    }
 
     // Planmodus: record plan mode against THIS run, in both the authoritative
     // in-memory store the tool-dispatch middleware consults (`is_plan_mode`) and
@@ -2258,11 +2781,33 @@ pub async fn invoke_stream_sse(
             .or(req.space_append_context.as_ref())
             .map(|context| context.space_id.clone())
             .unwrap_or_default();
+        // The Space retrieval the run's `knowledge_search` is authorised with (WS18-S5): the decision the
+        // turn's own retrieval reads, with the same fallback to an append turn's.
+        let agentic_space_retrieval = agentic_space_retrieval(
+            &agentic_space_id,
+            space_retrieval_decision(
+                req.space_context.as_ref(),
+                req.space_append_context.as_ref(),
+                space_append_retrieval_enabled(),
+            ),
+            space_agentic_retrieval_enabled(),
+        );
         // A turn on the ChatGPT subscription pins the run to it, so the loop
         // can neither fall back to its default (paid) route nor run on another
         // provider. Every other turn leaves the route empty and the request
         // unchanged.
         let agentic_route = AgentRoute::for_turn(&normalized);
+        // The roles a delegated subagent may take on (EP-6 S10): empty with the switch off and
+        // for a ZDR or waived turn.
+        let agent_roles = compose_agent_roles(
+            subagent_role_catalogue_enabled(),
+            req.agent_roles.as_ref(),
+            effective_zdr
+                || matches!(
+                    retention_class,
+                    Some(crate::sse_events::RetentionClass::ZdrWaived { .. })
+                ),
+        );
         timing.hand_off("agentic");
         return agentic_run_stream(
             state.clone(),
@@ -2286,11 +2831,13 @@ pub async fn invoke_stream_sse(
             posture.to_owned(),
             req.plan_mode,
             req.execute_granted,
+            approved_plan,
             execution_bearer,
             data_plane_bearer,
             model_bearer,
             inference_bearer,
             agentic_space_id,
+            agentic_space_retrieval,
             sandbox_bearer,
             // The Do turn's browser bearer, forwarded only on a run that keeps no ZDR (WS21-S2).
             browser_bearer,
@@ -2314,6 +2861,18 @@ pub async fn invoke_stream_sse(
                         req.content.clone()
                     }
                 },
+                // The turn's local date and app language for the Do preamble (EP-8-S1).
+                || {
+                    crate::locale_context::turn_notice(
+                        Utc::now(),
+                        crate::locale_context::clock_for_turn(
+                            req.client_timezone.as_deref(),
+                            req.client_utc_offset_minutes,
+                        )
+                        .as_ref(),
+                        crate::locale_context::language_for_turn(req.ui_locale.as_deref()),
+                    )
+                },
             ),
             do_attachments,
             connector_ids,
@@ -2323,6 +2882,7 @@ pub async fn invoke_stream_sse(
                 req.effort.as_deref().unwrap_or_default(),
                 crate::thinking::ladder_enabled(),
             ),
+            agent_roles,
         );
     }
 
@@ -2476,17 +3036,57 @@ pub async fn invoke_stream_sse(
     // now; only the gRPC Invoke path had it. Skipped for trivial prompts
     // ("ja", "thanks!") where recalled context can only derail the reply, and
     // timeout-bounded so a slow backend costs the recall, never the turn.
+    //
+    // The standing profile (EP-8-S5) is read beside it under the same skip
+    // conditions and used only when this thread's memory decision says the
+    // memory is used (D8): `decide_profile` is the one rule for both paths.
+    // Switch off, nothing is read or counted and the prompt is unchanged.
+    let user_profile_prefix = crate::run_context::user_profile_prefix_enabled();
     let memory_recall_status = if conversation_only || retrieval_scope == crate::normalize::RetrievalScope::WebOnly || crate::memory_prefetch::is_trivial_prompt(&req.content) {
+        if user_profile_prefix {
+            crate::run_context::record_user_profile_outcome("skipped_turn");
+        }
         None
     } else {
-        let (memory_entries, recall_status) = fetch_chat_memory_context(
-            &state,
-            &org_id,
-            &session_run.thread_id,
-            &user_content,
-            &model_bearer,
-        )
-        .await;
+        let mut memory_skip_reason = None;
+        let profile_read = async {
+            // A ZDR or waived turn never reads it: the decision below refuses it anyway.
+            if user_profile_prefix && !turn_posture.zdr() && !turn_posture.is_waived() {
+                crate::run_context::load_user_profile(&state, &org_id, &user_id, &model_bearer)
+                    .await
+            } else {
+                None
+            }
+        };
+        let ((memory_entries, recall_status), profile_read) = tokio::join!(
+            fetch_chat_memory_context(
+                &state,
+                &org_id,
+                &session_run.thread_id,
+                &user_content,
+                &model_bearer,
+                &mut memory_skip_reason,
+            ),
+            profile_read
+        );
+        if user_profile_prefix {
+            let injection =
+                crate::run_context::decide_profile(&crate::run_context::ProfileReads {
+                    zdr: turn_posture.zdr(),
+                    waived: turn_posture.is_waived(),
+                    memory_skip_reason: memory_skip_reason.as_deref(),
+                    profile: profile_read
+                        .as_ref()
+                        .map(|(skip_reason, content)| (skip_reason.as_str(), content.as_str())),
+                });
+            crate::run_context::record_user_profile_outcome(injection.outcome());
+            prompt.profile = injection.into_block().map(|block| ChatMessage {
+                compaction_summary: String::new(),
+                role: "system".to_owned(),
+                content: block,
+                name: String::new(),
+            });
+        }
         if let Some(memory_block) = crate::memory_provenance::memory_context_block(&memory_entries)
         {
             // Same block format as grpc.rs's `build_messages`, so both paths
@@ -2664,7 +3264,14 @@ pub async fn invoke_stream_sse(
     // Whether the model knows what day it is must never depend on an
     // unrelated lookup succeeding. See temporal_awareness_message's doc
     // comment for the failure this closes.
-    prompt.date_notice = Some(temporal_awareness_message());
+    prompt.date_notice = Some(temporal_awareness_message(
+        Utc::now(),
+        crate::locale_context::clock_for_turn(
+            req.client_timezone.as_deref(),
+            req.client_utc_offset_minutes,
+        )
+        .as_ref(),
+    ));
     // Reads the user turns only, which all live in the history.
     prompt.calendar =
         crate::calendar_context::reference_calendar(&prompt.history).map(|calendar| ChatMessage {
@@ -2821,6 +3428,25 @@ pub async fn invoke_stream_sse(
             || client_requested_web_search
             || web_search_signal
             || deep_research_requested);
+    // The recall tool reads the person's other conversations, so it is offered only when the switch is on,
+    // this turn reads its own sources in full, and the person's memory allows recall. The switch is read
+    // first, so a deployment that leaves it off makes no memory read.
+    let recall_offered = features.iter().any(|f| f == "tools")
+        && crate::recall_conversations::enabled()
+        && crate::recall_conversations::turn_permits(
+            conversation_only,
+            retrieval_scope == crate::normalize::RetrievalScope::WebOnly,
+            effective_zdr,
+            turn_posture.is_waived(),
+        )
+        && crate::recall_conversations::memory_refusal(
+            &state,
+            &org_id,
+            &user_id,
+            model_bearer.as_str(),
+        )
+        .await
+        .is_none();
     let mut tool_defs: Vec<ToolDefinition> = if features.iter().any(|f| f == "tools") {
         let mut defs: Vec<ToolDefinition> = req
             .tools
@@ -2848,6 +3474,9 @@ pub async fn invoke_stream_sse(
                 continue;
             }
             if builtin.name == "reattach_context" && !thread_was_compacted {
+                continue;
+            }
+            if builtin.name == crate::recall_conversations::TOOL_NAME && !recall_offered {
                 continue;
             }
             if builtin.name == "skill_file" && !skill_file_offered {
@@ -3011,6 +3640,18 @@ pub async fn invoke_stream_sse(
     let verify_bearer = data_plane_bearer.clone();
     let verify_sovereign = sovereign_retrieval;
     let verify_space_decision = retrieval_space_decision(&req).map(str::to_owned);
+    // The turn's knowledge receipt (WS18-S3), read from the Space decision that scoped its retrieval and the
+    // search it returned, before `grounding` moves into the task. A turn no Space scopes has none.
+    let knowledge = {
+        let decision = retrieval_space_decision(&req);
+        crate::knowledge_receipt::knowledge_receipt(
+            decision.is_some(),
+            decision.is_some_and(|token| token.trim().is_empty()),
+            retrieval_scope,
+            conversation_only,
+            grounding.as_ref(),
+        )
+    };
     let verify_web_allowed =
         crate::verification::may_escalate_to_web(tool_defs.iter().map(|tool| &tool.name));
     let structured_output_schema = req.structured_output_schema.clone().unwrap_or_default();
@@ -3227,17 +3868,20 @@ pub async fn invoke_stream_sse(
         // Per-turn retrieval-source filter receipt (chat-wave2 scope spec
         // §2.2/§2.3): the concrete "shown in the receipt" surface, emitted
         // once per turn right alongside the citations it's most relevant
-        // next to. Never fires under `conversation_only`, which already has
-        // its own long-standing disclosure via `CONVERSATION_SCOPE_NOTICE`
-        // and offers no separate receipt frame.
-        if retrieval_scope != crate::normalize::RetrievalScope::Auto {
+        // next to. A turn with no source filter and no Space knowledge
+        // receipt has no frame. `conversation_only` forces the filter to
+        // `Auto`, so a Space-scoped conversation-only turn reaches this frame
+        // only through its knowledge receipt (WS18-S3).
+        if retrieval_scope != crate::normalize::RetrievalScope::Auto || knowledge.is_some() {
             sink.emit(crate::sse_events::ChatEvent::SourceScopeApplied {
                 scope: match retrieval_scope {
                     crate::normalize::RetrievalScope::KnowledgeOnly => "knowledge_only".to_owned(),
                     crate::normalize::RetrievalScope::WebOnly => "web_only".to_owned(),
-                    crate::normalize::RetrievalScope::Auto => unreachable!("Auto excluded by the guard above"),
+                    // Reached only with a knowledge receipt, since the guard above admits Auto for nothing else.
+                    crate::normalize::RetrievalScope::Auto => "auto".to_owned(),
                 },
                 excluded_tools: excluded_by_retrieval_scope.clone(),
+                knowledge,
             })
             .await;
         }
@@ -3446,6 +4090,9 @@ pub async fn invoke_stream_sse(
         // Failed document writes this turn. Unlike a failed read, one withholds
         // the fixed completion text of a checked document.
         let mut document_tool_failures: u32 = 0;
+        // The loop guard's stop, when `LOOP_GUARD_MODE=enforce` ended the tool phase early. The
+        // answer records it, so an enforced stop leaves a durable trace and not only a log line.
+        let mut loop_stop: Option<mp_contracts::loop_guard::LoopStop> = None;
         if !tool_defs.is_empty() {
             seq = sink.sync_cursor(seq).await;
             // The research and forced-search passes above may have rewritten the head of the prompt,
@@ -3572,6 +4219,7 @@ pub async fn invoke_stream_sse(
             turn_evidence.tool_failures += rounds.tool_failures;
             turn_evidence.web_citations += rounds.web_citations;
             document_tool_failures = rounds.document_tool_failures;
+            loop_stop = rounds.loop_stop;
             messages = rounds.messages;
             tool_usage.extend(rounds.usage);
             last_round_tools = rounds.last_round_tools;
@@ -3612,10 +4260,14 @@ pub async fn invoke_stream_sse(
             structured_output_schema,
             zdr: effective_zdr,
             // The caller's privacy floor rides on the ANSWER call and every
-            // retry/fallback derived from `grpc_req` below; auxiliary
-            // micro-calls (title, follow-ups, compaction summary) keep their
-            // own posture because they carry only already-persisted text.
+            // retry/fallback derived from `grpc_req` below. The auxiliary calls
+            // take it too, through `inherit_turn_floors`; the compaction summary
+            // takes its own through `direct_infer`.
             min_privacy_tier: min_privacy_tier_wire,
+            purpose: InferPurpose::Answer as i32,
+            // Attributes the answer's request snapshot to the turn's run (EP-14 S6);
+            // the side calls inherit it through `inherit_turn_floors`. It routes nothing.
+            run_id: session_run_for_terminal.run_id.clone(),
             thinking_budget_tokens: thinking_plan.budget_tokens,
             reasoning_effort: thinking_plan.effort_wire(),
             prompt_tiers: answer_tiers,
@@ -4004,6 +4656,7 @@ pub async fn invoke_stream_sse(
                 &tool_usage,
                 &sink,
                 retrieval_decline,
+                room_turn,
             )
             .await;
             finish_stream_registrations(&cancels, &queued_inputs, &req_id);
@@ -4298,6 +4951,8 @@ pub async fn invoke_stream_sse(
                         cache_read: i64::from(cache_read_tokens),
                         cache_write: i64::from(cache_creation_tokens),
                     });
+                    // The route note rides the final chunk, so the answer's routing is read with its call (WS27-S7).
+                    let answer_routing = crate::tool_loop::route_shift(chunk.route_note.as_ref());
                     let latency_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
                     // inference-core sets this ONLY when the provider connection
                     // broke before any proper termination signal arrived — a
@@ -4491,6 +5146,7 @@ pub async fn invoke_stream_sse(
                                     let judge_started = timing.now_ms();
                                     verdict = judge_sources(
                                         &grpc_req,
+                                        &model_used,
                                         &session_state,
                                         &req_id,
                                         &org_clone,
@@ -4606,6 +5262,7 @@ pub async fn invoke_stream_sse(
                                 let judge_started = timing.now_ms();
                                 verdict = judge_sources(
                                     &grpc_req,
+                                    &model_used,
                                     &session_state,
                                     &req_id,
                                     &org_clone,
@@ -4848,56 +5505,59 @@ pub async fn invoke_stream_sse(
                             crate::session_flow::DirectAnswer {
                                 content: &assistant_output,
                                 agent_name: session_agent_name.as_deref(),
-                                metadata: crate::compaction::stamp_generation(
-                                    crate::session_flow::with_work_summary(
-                                    crate::session_flow::with_head_summary(
-                                        crate::session_flow::with_compaction_summary(
-                                            crate::session_flow::with_result_receipt(
-                                                // Why Control declined retrieval for this turn (D1-242) is
-                                                // stored as its typed code beside the evidence, so a thread
-                                                // reopened later says what the live stream said.
-                                                crate::session_flow::with_retrieval_decline(
-                                                crate::session_flow::turn_evidence_metadata(
-                                                    session_grounding.as_ref(),
-                                                    &sink.recorded_citations(),
-                                                    &sink.recorded_artifacts(),
-                                                    // Scored, and where applicable verified, just
-                                                    // above — so the durable turn carries the same
-                                                    // number the stream reported, and a reader who
-                                                    // opens this thread on another device sees why.
-                                                    crate::session_flow::TurnQuality {
-                                                        confidence,
-                                                        verification: verification_decision
-                                                            .should_verify()
-                                                            .then(|| {
-                                                                crate::session_flow::TurnVerification {
-                                                                    verdict: verdict.as_str(),
-                                                                    kb_citations: evidence.kb_citations,
-                                                                    web_citations: evidence
-                                                                        .web_citations,
-                                                                    web_allowed: verify_web_allowed,
-                                                                }
-                                                            }),
-                                                    },
+                                metadata: with_loop_stop(
+                                    crate::compaction::stamp_generation(
+                                        crate::session_flow::with_work_summary(
+                                        crate::session_flow::with_head_summary(
+                                            crate::session_flow::with_compaction_summary(
+                                                crate::session_flow::with_result_receipt(
+                                                    // Why Control declined retrieval for this turn (D1-242) is
+                                                    // stored as its typed code beside the evidence, so a thread
+                                                    // reopened later says what the live stream said.
+                                                    crate::session_flow::with_retrieval_decline(
+                                                    crate::session_flow::turn_evidence_metadata(
+                                                        session_grounding.as_ref(),
+                                                        &sink.recorded_citations(),
+                                                        &sink.recorded_artifacts(),
+                                                        // Scored, and where applicable verified, just
+                                                        // above — so the durable turn carries the same
+                                                        // number the stream reported, and a reader who
+                                                        // opens this thread on another device sees why.
+                                                        crate::session_flow::TurnQuality {
+                                                            confidence,
+                                                            verification: verification_decision
+                                                                .should_verify()
+                                                                .then(|| {
+                                                                    crate::session_flow::TurnVerification {
+                                                                        verdict: verdict.as_str(),
+                                                                        kb_citations: evidence.kb_citations,
+                                                                        web_citations: evidence
+                                                                            .web_citations,
+                                                                        web_allowed: verify_web_allowed,
+                                                                    }
+                                                                }),
+                                                        },
+                                                    ),
+                                                    retrieval_decline,
+                                                    ),
+                                                    result_receipt
+                                                        .lock()
+                                                        .ok()
+                                                        .and_then(|receipt| receipt.clone())
+                                                        .as_ref(),
                                                 ),
-                                                retrieval_decline,
-                                                ),
-                                                result_receipt
-                                                    .lock()
-                                                    .ok()
-                                                    .and_then(|receipt| receipt.clone())
-                                                    .as_ref(),
+                                                &chunk.compaction_summary,
+                                                effective_zdr,
                                             ),
-                                            &chunk.compaction_summary,
+                                            head_summary.as_ref().map(|new| &new.record),
                                             effective_zdr,
                                         ),
-                                        head_summary.as_ref().map(|new| &new.record),
+                                        work_summary.as_ref(),
                                         effective_zdr,
+                                        ),
+                                        head_summary.as_ref(),
                                     ),
-                                    work_summary.as_ref(),
-                                    effective_zdr,
-                                    ),
-                                    head_summary.as_ref(),
+                                    loop_stop.as_ref(),
                                 ),
                             },
                             &req_id,
@@ -5288,6 +5948,7 @@ pub async fn invoke_stream_sse(
                                 phase: crate::usage_meter::CallPhase::Answer,
                                 snapshot: turn,
                                 ceiling: sink.run_ceiling_at_turn_end(&turn, turn_metered),
+                                routing: answer_routing,
                             },
                         )
                         .await;
@@ -5349,6 +6010,7 @@ pub async fn invoke_stream_sse(
                             let title_call = timing.call(crate::turn_timing::Phase::Title);
                             let title = generate_thread_title(
                                 &grpc_req,
+                                &model_used,
                                 &session_state,
                                 &req_id,
                                 &org_clone,
@@ -5398,6 +6060,7 @@ pub async fn invoke_stream_sse(
                         let follow_ups_call = timing.call(crate::turn_timing::Phase::FollowUps);
                         let suggestions = generate_follow_ups(
                             &grpc_req,
+                            &model_used,
                             &session_state,
                             &req_id,
                             &org_clone,
@@ -6286,12 +6949,18 @@ struct MemoryRecallStatus {
 /// Returns the recalled entries plus a recall status for the indicator
 /// event. Every failure mode — missing credential, timeout, backend error —
 /// degrades to "no memory this turn", exactly like the gRPC twin.
+///
+/// `memory_skip_reason` receives the search's `skip_reason` when session-core
+/// answered (empty when the thread's memory is used) and stays `None` when it
+/// did not: the standing profile follows that decision (EP-8-S5, D8), so a
+/// failed read leaves the profile out too.
 async fn fetch_chat_memory_context(
     state: &AppState,
     org_id: &str,
     thread_id: &str,
     query: &str,
     bearer: &VerifiedModelBearer,
+    memory_skip_reason: &mut Option<String>,
 ) -> (Vec<String>, Option<MemoryRecallStatus>) {
     use mp_contracts::model_plane::v1::SearchMemoryRequest;
 
@@ -6329,6 +6998,7 @@ async fn fetch_chat_memory_context(
     let (recalled, skip_reason) = match response {
         Ok(Ok(resp)) => {
             let resp = resp.into_inner();
+            *memory_skip_reason = Some(resp.skip_reason.clone());
             (resp.entries, resp.skip_reason)
         }
         Ok(Err(error)) => {
@@ -6386,6 +7056,7 @@ pub(crate) const MEMORY_PREFETCH_OUTCOMES: &[&str] = &[
     "skipped_paused",
     "skipped_off",
     "skipped_org_policy",
+    "skipped_space_scope",
 ];
 
 /// The outcome label for a `SearchMemoryResponse.skip_reason` (the closed
@@ -6396,6 +7067,7 @@ pub(crate) fn skipped_prefetch_outcome(skip_reason: &str) -> Option<&'static str
         "user_paused" => Some("skipped_paused"),
         "user_off" => Some("skipped_off"),
         "org_disabled" | "policy_unavailable" => Some("skipped_org_policy"),
+        "space_scope" => Some("skipped_space_scope"),
         _ => None,
     }
 }
@@ -6421,6 +7093,17 @@ mod memory_prefetch_skip_tests {
         for reason in ["", "zdr", "something_new"] {
             assert_eq!(skipped_prefetch_outcome(reason), None, "{reason:?}");
         }
+    }
+
+    /// A room's recall that session-core left out is counted under its own declared
+    /// label, never as an unlisted one. Checked against the declared set rather than
+    /// by calling the recorder: the source-scan over `fetch_chat_memory_context` counts
+    /// recorder calls, and this test must not add one.
+    #[test]
+    fn space_scope_prefetch_outcome_is_listed() {
+        let outcome = skipped_prefetch_outcome("space_scope").expect("a Space skip has a label");
+        assert_eq!(outcome, "skipped_space_scope");
+        assert!(MEMORY_PREFETCH_OUTCOMES.contains(&outcome));
     }
 }
 
@@ -7298,6 +7981,8 @@ fn image_gen_stream(
                         mime: generated_image_mime(&content).to_owned(),
                         url: content.clone(),
                         size: generated_image_size(&content),
+                        check: None,
+                        preview: None,
                     };
                     if attachment.should_emit(&features) {
                         let _ = tx.send(Ok(attachment.to_sse(&request_id))).await;
@@ -7589,13 +8274,20 @@ async fn mark_run_plan_mode(state: &AppState, org_id: &str, run_id: &str, sessio
     }
 }
 
-fn temporal_awareness_message() -> ChatMessage {
-    let today = Utc::now().format("%Y-%m-%d");
+/// `local` is the turn's clock when the local context switch is on and the request carried a valid one
+/// (EP-8-S1), and the date then reads in that zone. Without one the date is the UTC date, as it always was.
+fn temporal_awareness_message(
+    now: chrono::DateTime<Utc>,
+    local: Option<&crate::locale_context::LocalClock>,
+) -> ChatMessage {
+    let date = local
+        .and_then(|clock| crate::locale_context::date_clause(now, clock))
+        .unwrap_or_else(|| format!("Today's real date is {}.", now.format("%Y-%m-%d")));
     ChatMessage {
         compaction_summary: String::new(),
         role: "system".to_owned(),
         content: format!(
-            "Today's real date is {today}. Your training data has a cutoff before this date, so anything that changes over time — population counts, prices, exchange rates, software versions, current office-holders, schedules, sports results, or any other figure that could be stale — may no longer match what you remember. When the web_search tool is available this turn, use it before stating such a fact so your answer reflects the present, not your training snapshot. When it is not available, do not state a time-sensitive fact as current, unqualified truth: say what you know from training and clearly note it may be outdated (for example, \"as of my training data, roughly X — this may have changed\") rather than presenting a remembered figure as if it were verified today."
+            "{date} Your training data has a cutoff before this date, so anything that changes over time — population counts, prices, exchange rates, software versions, current office-holders, schedules, sports results, or any other figure that could be stale — may no longer match what you remember. When the web_search tool is available this turn, use it before stating such a fact so your answer reflects the present, not your training snapshot. When it is not available, do not state a time-sensitive fact as current, unqualified truth: say what you know from training and clearly note it may be outdated (for example, \"as of my training data, roughly X — this may have changed\") rather than presenting a remembered figure as if it were verified today."
         ),
         name: String::new(),
     }
@@ -7660,6 +8352,7 @@ pub(crate) fn authored_layers(
         org: req.org_instructions.clone(),
         space: req.space_instructions.clone(),
         persona: req.persona_instructions.clone(),
+        tone: crate::run_context::tone_for_turn(req.persona_tone.as_deref()),
         agent: agent_persona_message(req).map(|message| message.content),
     }
 }
@@ -7701,7 +8394,25 @@ fn agent_persona_message(req: &InvokeRequest) -> Option<ChatMessage> {
     })
 }
 
+/// Who the model is talking to, and, while the local context switch is on, the line that names the app
+/// language (EP-8-S1). The language is stable per person, so it stays in the Context tier with this slot.
 fn identity_context_message(req: &InvokeRequest) -> Option<ChatMessage> {
+    let language = crate::locale_context::language_for_turn(req.ui_locale.as_deref());
+    let content = match (org_identity_text(req), language) {
+        (identity, None) => identity?,
+        (Some(identity), Some(line)) => format!("{identity} {line}"),
+        (None, Some(line)) => line.to_owned(),
+    };
+    Some(ChatMessage {
+        compaction_summary: String::new(),
+        role: "system".to_owned(),
+        content,
+        name: String::new(),
+    })
+}
+
+/// The org and user sentence of the identity slot, or `None` when the org name is not resolved.
+fn org_identity_text(req: &InvokeRequest) -> Option<String> {
     let org_name = req
         .org_name
         .as_deref()
@@ -7720,12 +8431,7 @@ fn identity_context_message(req: &InvokeRequest) -> Option<ChatMessage> {
             "You are Verevon, the AI assistant currently helping {org_name}. When the user says \"we\", \"us\", \"our\", or \"the company\", they mean {org_name} — not Verevon itself. For broad questions like \"who are we\" or \"what do we offer\", treat it as a question about {org_name} and use the knowledge_search tool to ground your answer in {org_name}'s own information rather than answering from general knowledge."
         ),
     };
-    Some(ChatMessage {
-        compaction_summary: String::new(),
-        role: "system".to_owned(),
-        content,
-        name: String::new(),
-    })
+    Some(content)
 }
 
 /// Fallback used when `InferStream` is unavailable: call the (working)
@@ -7775,6 +8481,8 @@ async fn run_infer_fallback(
     sink: &crate::sse_events::RichEventSink,
     // Why Control declined retrieval for this turn (D1-242), stored on the answer as on the streaming path.
     retrieval_decline: Option<crate::retrieval_metadata::RetrievalDeclineReason>,
+    // Whether the turn is a room turn, for its WS09-S3 `metadata.work` (as on the streaming path).
+    room_turn: bool,
 ) {
     let publisher = state.publisher.clone();
     let buffers = state.stream_buffers.clone();
@@ -7980,6 +8688,16 @@ async fn run_infer_fallback(
                 grounding.as_ref().is_some_and(|g| g.low_confidence),
                 model_certainty(resp.token_confidence.as_ref()),
             );
+            // WS09-S3 `metadata.work`, as on the streaming path. No tool loop runs here, so it has
+            // no steps of its own; only frames the caller already buffered (a steer) can count.
+            let work_summary = crate::space_sse::room_work_summary(
+                &buffers,
+                state.space_run_policy,
+                room_turn,
+                fallback_zdr,
+                &buffer_key,
+            )
+            .await;
             // The streaming path's atomic save-and-complete: the answer and
             // the Completed receipt commit together or not at all.
             let completion = crate::session_flow::complete_direct_inference_run_with_message(
@@ -7992,6 +8710,7 @@ async fn run_infer_fallback(
                     // is the only evidence it can have — and it runs no
                     // verification pass either, so there is no verdict to record.
                     metadata: crate::compaction::stamp_generation(
+                        crate::session_flow::with_work_summary(
                         crate::session_flow::with_head_summary(
                             crate::session_flow::with_compaction_summary(
                                 crate::session_flow::with_retrieval_decline(
@@ -8012,6 +8731,9 @@ async fn run_infer_fallback(
                             head_summary.map(|new| &new.record),
                             fallback_zdr,
                             ),
+                        work_summary.as_ref(),
+                        fallback_zdr,
+                        ),
                         head_summary,
                     ),
                 },
@@ -8282,6 +9004,7 @@ async fn run_infer_fallback(
                         phase: crate::usage_meter::CallPhase::Answer,
                         snapshot: turn,
                         ceiling: sink.run_ceiling_at_turn_end(&turn, turn_metered),
+                        routing: crate::tool_loop::route_shift(resp.route_note.as_ref()),
                     },
                 )
                 .await;
@@ -9154,6 +9877,7 @@ async fn direct_infer(
         temperature,
         zdr,
         min_privacy_tier,
+        InferPurpose::CompactionSummary as i32,
         inference_bearer,
     )
     .await
@@ -9178,6 +9902,7 @@ async fn direct_infer_turn(
     temperature: f32,
     zdr: bool,
     min_privacy_tier: i32,
+    purpose: i32,
     inference_bearer: &VerifiedInferenceBearer,
 ) -> Result<DirectAnswer, tonic::Status> {
     let mut client = state.inference_client.clone();
@@ -9205,6 +9930,8 @@ async fn direct_infer_turn(
                 // Same caller privacy floor as the primary paths — a fallback
                 // must never reach a provider the main chain would refuse.
                 min_privacy_tier,
+                // What the call is for: the compaction summary, or the ZDR answer.
+                purpose,
                 ..Default::default()
             },
             inference_bearer,
@@ -9306,7 +10033,7 @@ const VERIFICATION_JUDGE_MAX_TOKENS: i32 = 8;
 /// The model the auxiliary calls use. It is read from the environment once per
 /// process, so every auxiliary call in the process agrees on it and the
 /// environment is not consulted on each request.
-fn aux_model() -> &'static str {
+pub(crate) fn aux_model() -> &'static str {
     static MODEL: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     MODEL
         .get_or_init(|| aux_model_from(std::env::var(AUX_MODEL_VAR).ok().as_deref()))
@@ -9325,9 +10052,11 @@ fn aux_model_from(value: Option<&str>) -> String {
 }
 
 /// The source judge's request: one classification over the snippets, carried on
-/// the turn's subscription when it has one, as every auxiliary call is.
+/// the turn's subscription when it has one, as every auxiliary call is. With role
+/// routing on it names the role table and carries the turn's served model instead.
 fn verification_judge_request(
     route: &InferRequest,
+    served_model: &str,
     request_id: &str,
     org_id: &str,
     question: &str,
@@ -9335,11 +10064,15 @@ fn verification_judge_request(
     snippets: &[String],
     zdr: bool,
 ) -> InferRequest {
+    let (model, role_fallback_model) =
+        role_routing::side_task_model(role_routing::role_routing_enabled(), aux_model(), served_model);
     subscription_scoped_request(
         InferRequest {
             request_id: format!("{request_id}-verify"),
+            purpose: InferPurpose::VerificationJudge as i32,
             org_id: org_id.to_owned(),
-            model: aux_model().to_owned(),
+            model,
+            role_fallback_model,
             provider_hint: String::new(),
             messages: vec![ChatMessage {
                 compaction_summary: String::new(),
@@ -9371,6 +10104,7 @@ fn verification_judge_request(
 /// judge that times out or errors can never raise a score.
 async fn judge_sources(
     route: &InferRequest,
+    served_model: &str,
     state: &AppState,
     request_id: &str,
     org_id: &str,
@@ -9389,7 +10123,7 @@ async fn judge_sources(
     let response = tokio::time::timeout(
         VERIFICATION_JUDGE_TIMEOUT,
         client.infer(authenticated_inference_request(
-            verification_judge_request(route, request_id, org_id, question, answer, snippets, zdr),
+            verification_judge_request(route, served_model, request_id, org_id, question, answer, snippets, zdr),
             inference_bearer,
         )),
     )
@@ -9404,7 +10138,7 @@ async fn judge_sources(
                 &route.provider_hint,
                 &route.subscription_connection_id,
             );
-            crate::tool_loop::stream_call_usage(state, sink, &call).await;
+            crate::tool_loop::stream_call_usage(state, sink, &call, None).await;
             sink.record_overhead(call);
             crate::verification::parse_verdict(&resp.content)
         }
@@ -9447,6 +10181,7 @@ async fn resample_answer(
         let mut request = authenticated_inference_request(
             subscription_scoped_request(InferRequest {
                 request_id: format!("{request_id}-resample-{index}"),
+                purpose: InferPurpose::Validation as i32,
                 org_id: org_id.to_owned(),
                 model: model.to_owned(),
                 provider_hint: String::new(),
@@ -9481,7 +10216,7 @@ async fn resample_answer(
                     &route.provider_hint,
                     &route.subscription_connection_id,
                 );
-                crate::tool_loop::stream_call_usage(state, sink, &call).await;
+                crate::tool_loop::stream_call_usage(state, sink, &call, None).await;
                 sink.record_overhead(call);
                 samples.push(resp.content);
             }
@@ -9495,19 +10230,25 @@ async fn resample_answer(
 }
 
 /// The thread-title request: one bounded, non-streaming user turn on the
-/// auxiliary model, carried on the turn's subscription when it has one.
+/// auxiliary model, carried on the turn's subscription when it has one. With role
+/// routing on it names the role table and carries the turn's served model instead.
 fn title_request(
     route: &InferRequest,
+    served_model: &str,
     request_id: &str,
     org_id: &str,
     user_content: &str,
     assistant_answer: &str,
 ) -> InferRequest {
+    let (model, role_fallback_model) =
+        role_routing::side_task_model(role_routing::role_routing_enabled(), aux_model(), served_model);
     subscription_scoped_request(
         InferRequest {
             request_id: format!("{request_id}-title"),
+            purpose: InferPurpose::Title as i32,
             org_id: org_id.to_owned(),
-            model: aux_model().to_owned(),
+            model,
+            role_fallback_model,
             provider_hint: String::new(),
             messages: vec![ChatMessage {
                 compaction_summary: String::new(),
@@ -9536,6 +10277,7 @@ fn title_request(
 /// ledger. Best-effort: every failure path returns `None` after a debug log.
 async fn generate_thread_title(
     route: &InferRequest,
+    served_model: &str,
     state: &AppState,
     request_id: &str,
     org_id: &str,
@@ -9547,7 +10289,7 @@ async fn generate_thread_title(
     let response = tokio::time::timeout(
         TITLE_GENERATION_TIMEOUT,
         client.infer(authenticated_inference_request(
-            title_request(route, request_id, org_id, user_content, assistant_answer),
+            title_request(route, served_model, request_id, org_id, user_content, assistant_answer),
             inference_bearer,
         )),
     )
@@ -9596,19 +10338,25 @@ fn thread_title_prompt(user_content: &str, assistant_answer: &str) -> String {
 }
 
 /// The follow-up suggestion request: one bounded, non-streaming user turn on the
-/// auxiliary model, carried on the turn's subscription when it has one.
+/// auxiliary model, carried on the turn's subscription when it has one. With role
+/// routing on it names the role table and carries the turn's served model instead.
 fn follow_ups_request(
     route: &InferRequest,
+    served_model: &str,
     request_id: &str,
     org_id: &str,
     user_content: &str,
     assistant_answer: &str,
 ) -> InferRequest {
+    let (model, role_fallback_model) =
+        role_routing::side_task_model(role_routing::role_routing_enabled(), aux_model(), served_model);
     subscription_scoped_request(
         InferRequest {
             request_id: format!("{request_id}-follow-ups"),
+            purpose: InferPurpose::FollowUps as i32,
             org_id: org_id.to_owned(),
-            model: aux_model().to_owned(),
+            model,
+            role_fallback_model,
             provider_hint: String::new(),
             messages: vec![ChatMessage {
                 compaction_summary: String::new(),
@@ -9637,6 +10385,7 @@ fn follow_ups_request(
 /// like a call that produced no usable title).
 async fn generate_follow_ups(
     route: &InferRequest,
+    served_model: &str,
     state: &AppState,
     request_id: &str,
     org_id: &str,
@@ -9648,7 +10397,7 @@ async fn generate_follow_ups(
     let response = tokio::time::timeout(
         FOLLOW_UPS_GENERATION_TIMEOUT,
         client.infer(authenticated_inference_request(
-            follow_ups_request(route, request_id, org_id, user_content, assistant_answer),
+            follow_ups_request(route, served_model, request_id, org_id, user_content, assistant_answer),
             inference_bearer,
         )),
     )
@@ -9879,20 +10628,33 @@ impl ZdrTurnSettings {
 /// instructions. Persona is on for the turn: a ZDR turn has no thread, so the
 /// per-thread override is unknown, and the global switch was applied upstream.
 pub(crate) fn zdr_turn_settings(state: &AppState, req: &InvokeRequest) -> ZdrTurnSettings {
-    zdr_turn_settings_with(state, req, crate::thinking::ladder_enabled())
+    let local_notice = crate::locale_context::turn_notice(
+        Utc::now(),
+        crate::locale_context::clock_for_turn(
+            req.client_timezone.as_deref(),
+            req.client_utc_offset_minutes,
+        )
+        .as_ref(),
+        crate::locale_context::language_for_turn(req.ui_locale.as_deref()),
+    );
+    zdr_turn_settings_with(state, req, crate::thinking::ladder_enabled(), local_notice)
 }
 
-/// [`zdr_turn_settings`] with the effort-ladder switch passed in, so the ZDR
-/// derivation can be compared with the streamed path's without the process
-/// environment.
+/// [`zdr_turn_settings`] with the effort-ladder switch and the turn's local notice passed in, so the ZDR
+/// derivation can be compared with the streamed path's without the process environment.
 fn zdr_turn_settings_with(
     state: &AppState,
     req: &InvokeRequest,
     ladder_on: bool,
+    local_notice: Option<String>,
 ) -> ZdrTurnSettings {
     let mut sections: Vec<String> = Vec::new();
     if let Some(identity) = crate::zdr_features::identity_framing(req) {
         sections.push(identity);
+    }
+    // The local date and the app language (EP-8-S1), with nothing stored: they are sent for this turn only.
+    if let Some(notice) = local_notice {
+        sections.push(notice);
     }
     if let Some(authored) = authored_instructions_message(state, req, true) {
         sections.push(authored.content);
@@ -10009,6 +10771,7 @@ async fn zdr_direct_stream(
         0.7,
         true,
         min_privacy_tier,
+        InferPurpose::Answer as i32,
         &inference_bearer,
     )
     .await
@@ -10264,7 +11027,7 @@ fn posture_floor(claims: &crate::auth::Claims) -> crate::profile::ApprovalPostur
 
 /// Build the independently authenticated Execution Core request. Failure here
 /// is deterministic and happens before any remote dispatch attempt.
-#[allow(clippy::result_large_err)]
+#[allow(clippy::result_large_err, clippy::too_many_arguments)]
 fn authenticated_run_agent_request(
     request: RunAgentRequest,
     execution_bearer: &VerifiedExecutionBearer,
@@ -10273,6 +11036,7 @@ fn authenticated_run_agent_request(
     inference_bearer: &VerifiedInferenceBearer,
     sandbox_bearer: Option<&VerifiedSandboxBearer>,
     browser_bearer: Option<&VerifiedBrowserBearer>,
+    space_retrieval: Option<&str>,
 ) -> Result<tonic::Request<RunAgentRequest>, tonic::Status> {
     let zdr = request.zdr;
     let authorization = format!("Bearer {}", execution_bearer.as_str())
@@ -10327,6 +11091,16 @@ fn authenticated_run_agent_request(
                 .map_err(|_| {
                     tonic::Status::unauthenticated("malformed verified browser credential")
                 })?,
+        );
+    }
+    // Present only for a Space-scoped run while the switch is on (WS18-S5). Its value is the Control
+    // retrieval decision, or empty for a run that holds none, which execution-core refuses to search under.
+    if let Some(space_retrieval) = space_retrieval {
+        request.metadata_mut().insert(
+            "x-space-retrieval-authorization",
+            space_retrieval.parse().map_err(|_| {
+                tonic::Status::unauthenticated("malformed space retrieval decision")
+            })?,
         );
     }
     Ok(request)
@@ -10742,6 +11516,93 @@ fn latest_proposed_plan(
         .find(|p| p.state == PlanState::Proposed as i32)
 }
 
+/// Whether the deployment offers the `ask_user` tool (build plan WS14 S4), read once per process so a run
+/// cannot see it change. Only the literal `true` enables it, and the default is off.
+fn ask_user_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| ask_user_switch(std::env::var("AGENT_ASK_USER_ENABLED").ok().as_deref()))
+}
+
+/// The strict reading of `AGENT_ASK_USER_ENABLED`: only the literal `true` enables it.
+fn ask_user_switch(raw: Option<&str>) -> bool {
+    raw == Some("true")
+}
+
+/// The most questions a run may put to its owner, sent as `RunAgentRequest.max_questions` (build plan WS14
+/// S4). Zero, which offers the tool to nothing, unless the switch is on and the run may ask: not zero
+/// retention, not waived, not a plan run, not Space-scoped, and not a continuation (which runs the tool set
+/// its pause retained). Execution-core applies the same rule and caps the number at the shared limit.
+fn ask_user_max_questions(
+    on: bool,
+    zdr: bool,
+    waived: bool,
+    plan_mode: bool,
+    space_scoped: bool,
+    continuation: bool,
+) -> u32 {
+    let may_ask = on && !zdr && !waived && !plan_mode && !space_scoped && !continuation;
+    if may_ask {
+        u32::try_from(mp_contracts::user_question::MAX_QUESTIONS_PER_RUN).unwrap_or(0)
+    } else {
+        0
+    }
+}
+
+/// The question a run is waiting on, if its `ask_user` call put one to the owner (build plan WS14 S4): the
+/// newest `REQUESTED` question of the run in session-core's run-scoped list. Best-effort: a failed lookup
+/// sends no card, and the prose the turn ends with still carries the question.
+async fn requested_question_for_run(
+    state: &AppState,
+    run_id: &str,
+    org_id: &str,
+    bearer: &VerifiedModelBearer,
+) -> Option<mp_contracts::model_plane::v1::RunQuestion> {
+    let request = authenticated_session_request(
+        mp_contracts::model_plane::v1::ListRunQuestionsRequest {
+            run_id: run_id.to_owned(),
+            org_id: org_id.to_owned(),
+        },
+        bearer,
+    )
+    .ok()?;
+    let questions = state
+        .orchestration_client
+        .clone()
+        .list_run_questions(request)
+        .await
+        .ok()?
+        .into_inner()
+        .questions;
+    questions.into_iter().rev().find(|question| {
+        question.state == mp_contracts::model_plane::v1::QuestionState::Requested as i32
+    })
+}
+
+#[cfg(test)]
+mod ask_user_tests {
+    use super::*;
+
+    #[test]
+    fn the_switch_reads_only_the_literal_true() {
+        assert!(ask_user_switch(Some("true")));
+        for raw in [None, Some(""), Some("TRUE"), Some("1"), Some("yes"), Some("true ")] {
+            assert!(!ask_user_switch(raw), "{raw:?} must not enable the tool");
+        }
+    }
+
+    #[test]
+    fn a_run_is_offered_the_shared_cap_only_when_it_may_ask() {
+        let cap = u32::try_from(mp_contracts::user_question::MAX_QUESTIONS_PER_RUN).unwrap();
+        assert_eq!(ask_user_max_questions(true, false, false, false, false, false), cap);
+        assert_eq!(ask_user_max_questions(false, false, false, false, false, false), 0, "switch off");
+        assert_eq!(ask_user_max_questions(true, true, false, false, false, false), 0, "zero retention");
+        assert_eq!(ask_user_max_questions(true, false, true, false, false, false), 0, "waived");
+        assert_eq!(ask_user_max_questions(true, false, false, true, false, false), 0, "plan run");
+        assert_eq!(ask_user_max_questions(true, false, false, false, true, false), 0, "Space run");
+        assert_eq!(ask_user_max_questions(true, false, false, false, false, true), 0, "continuation");
+    }
+}
+
 /// The typed code of an execute turn (`execute_granted`) that has no live plan grant to run
 /// under: the run is refused and terminalized (`dispatch_rejected`), and execution-core is
 /// never called (WS14 S2a). It travels as the message of the `failed_precondition` status
@@ -10890,12 +11751,166 @@ fn execute_refusal(
 fn dispatch_rejection_event(status: &tonic::Status) -> (&'static str, &'static str) {
     if status.code() == tonic::Code::FailedPrecondition && status.message() == PLAN_GRANT_UNAVAILABLE
     {
-        (
-            PLAN_GRANT_UNAVAILABLE,
-            "No live plan grant exists for this conversation: it expired or the service restarted. Plan again and approve the plan.",
-        )
+        (PLAN_GRANT_UNAVAILABLE, PLAN_GRANT_UNAVAILABLE_MESSAGE)
     } else {
         ("agent_dispatch_rejected", "The agent run could not be accepted.")
+    }
+}
+
+/// The message of the typed `plan_grant_unavailable` refusal. One wording whichever refusal raised
+/// it, so the person sees the same explanation.
+const PLAN_GRANT_UNAVAILABLE_MESSAGE: &str = "No live plan grant exists for this conversation: it expired or the service restarted. Plan again and approve the plan.";
+
+/// The environment variable of the approve-then-execute switch (WS14 S2). With it on, a plan
+/// approval whose grant is durably recorded for the plan answers `continuation: execute_now`, and
+/// the client sends one execute turn that names the approved plan. Named and read here only.
+pub(crate) const PLAN_EXECUTE_ON_APPROVE_ENV: &str = "MODEL_GATEWAY_PLAN_EXECUTE_ON_APPROVE";
+
+/// The one strict parser of that switch: `true` in any case with surrounding whitespace, and
+/// nothing else, so a typo never enables the path.
+#[must_use]
+pub(crate) fn plan_execute_on_approve_from(value: Option<&str>) -> bool {
+    mp_contracts::loop_fold::switch_from(value)
+}
+
+/// Whether the approve-then-execute switch is on in this process. The variable does not change for
+/// the life of the process, so reading it per request answers the same as reading it once.
+#[must_use]
+pub(crate) fn plan_execute_on_approve_enabled() -> bool {
+    plan_execute_on_approve_from(std::env::var(PLAN_EXECUTE_ON_APPROVE_ENV).ok().as_deref())
+}
+
+/// What a plan approval answers (WS14 S2). `execute_now` only when the switch is on, the grant the
+/// approval made is durably recorded for its plan, and an execute turn would be accepted here
+/// (`execute_accepted`: the execute switch and the approval-resume switch are both on). Otherwise
+/// `next_message`: the grant waits for the person's own next turn, exactly as before this switch.
+#[must_use]
+pub(crate) fn approval_continuation(
+    switch_on: bool,
+    recorded_for_plan: bool,
+    execute_accepted: bool,
+) -> &'static str {
+    if switch_on && recorded_for_plan && execute_accepted {
+        "execute_now"
+    } else {
+        "next_message"
+    }
+}
+
+/// The plan an approve-then-execute turn names, or `None`. With the switch off the field is ignored
+/// whatever it says, so such a request runs exactly as it did before the field existed.
+#[must_use]
+pub(crate) fn approved_plan_of(req: &InvokeRequest, switch_on: bool) -> Option<&str> {
+    if !switch_on {
+        return None;
+    }
+    req.approved_plan_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+}
+
+/// Whether a thread's grant, as read for this run, names the plan an approve-then-execute turn
+/// executes: the read was answered rather than failed, a rung is stated, and the plan is that one.
+#[must_use]
+pub(crate) fn grant_names_plan(grant: &crate::session_flow::ThreadGrant, plan_id: &str) -> bool {
+    !grant.read_failed && grant.rung.is_some() && grant.approved_plan_id.as_deref() == Some(plan_id)
+}
+
+/// The deadline on binding an approve-then-execute run to its grant (WS14 S2). As on the read of
+/// the grant, a Session Core that does not answer costs a bounded delay and no more.
+const BIND_GRANT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Session Core's bind of the thread's grant to this run (WS14 S2, `ThreadAutonomy.BindGrantToRun`),
+/// with the caller's own credential. Only the answer that names the plan asked for is used.
+async fn bind_grant_to_run(
+    state: &AppState,
+    run_id: &str,
+    org_id: &str,
+    thread_id: &str,
+    plan_id: &str,
+    bearer: &VerifiedModelBearer,
+) -> Result<crate::session_flow::ThreadGrant, tonic::Status> {
+    let Some(mut client) = state.plan_mode.durable_grant_client() else {
+        return Err(tonic::Status::unavailable(
+            "the durable plan grant reader is not configured",
+        ));
+    };
+    let request = authenticated_session_request(
+        mp_contracts::model_plane::v1::BindGrantToRunRequest {
+            run_id: run_id.to_owned(),
+            thread_id: thread_id.to_owned(),
+            org_id: org_id.to_owned(),
+            approved_plan_id: plan_id.to_owned(),
+        },
+        bearer,
+    )?;
+    let response = tokio::time::timeout(BIND_GRANT_TIMEOUT, client.bind_grant_to_run(request))
+        .await
+        .map_err(|_| {
+            tonic::Status::deadline_exceeded("binding the approved plan to its run timed out")
+        })??;
+    bound_grant_from(response.into_inner(), plan_id)
+}
+
+/// The grant a bind answered, when it states a rung and names the plan asked for. Pure.
+fn bound_grant_from(
+    response: mp_contracts::model_plane::v1::BindGrantToRunResponse,
+    plan_id: &str,
+) -> Result<crate::session_flow::ThreadGrant, tonic::Status> {
+    use mp_contracts::model_plane::v1::AutonomyRung;
+    let rung = AutonomyRung::try_from(response.granted_rung)
+        .ok()
+        .filter(|rung| *rung != AutonomyRung::Unspecified);
+    match rung {
+        Some(rung) if response.approved_plan_id == plan_id => Ok(crate::session_flow::ThreadGrant {
+            rung: Some(rung),
+            approved_plan_id: Some(plan_id.to_owned()),
+            expires_at_unix: None,
+            read_failed: false,
+        }),
+        _ => Err(tonic::Status::failed_precondition("plan_grant_unavailable")),
+    }
+}
+
+/// The grant an approve-then-execute run dispatches with (WS14 S2), decided after the plan claim.
+/// It is the grant Session Core BOUND to this run, and only when the plan was claimed here (the
+/// single-use guard: this run is the one that executes it), the grant the run read names the plan,
+/// and Session Core binds exactly that plan. Any other outcome is the unreadable grant, on which an
+/// execute turn is refused (`resolve_autonomy_rung`): typed, before execution-core is called, the
+/// same refusal a grant that could not be read gets.
+#[allow(clippy::too_many_arguments)]
+async fn approve_then_execute_grant(
+    state: &AppState,
+    run_id: &str,
+    org_id: &str,
+    thread_id: &str,
+    plan_id: &str,
+    bearer: &VerifiedModelBearer,
+    read: Option<&crate::session_flow::ThreadGrant>,
+    claimed: bool,
+) -> crate::session_flow::ThreadGrant {
+    if !claimed || !read.is_some_and(|grant| grant_names_plan(grant, plan_id)) {
+        tracing::warn!(
+            run_id,
+            org_id,
+            thread_id,
+            "approve-then-execute: the plan was not claimed for this run or the thread's grant does not name it; the run is refused"
+        );
+        return crate::session_flow::ThreadGrant::unreadable();
+    }
+    match bind_grant_to_run(state, run_id, org_id, thread_id, plan_id, bearer).await {
+        Ok(bound) => bound,
+        Err(status) => {
+            tracing::warn!(
+                code = ?status.code(),
+                run_id,
+                org_id,
+                thread_id,
+                "approve-then-execute: session-core did not bind the grant to the run; the run is refused"
+            );
+            crate::session_flow::ThreadGrant::unreadable()
+        }
     }
 }
 
@@ -10929,6 +11944,9 @@ fn spawn_run_dispatch(
     session_bearer: &VerifiedModelBearer,
     inference_bearer: &VerifiedInferenceBearer,
     space_id: &str,
+    // The Space retrieval the run's `knowledge_search` is authorised with (WS18-S5); see
+    // `agentic_space_retrieval`. `None` leaves the request without the header.
+    space_retrieval: Option<&str>,
     sandbox_bearer: Option<&VerifiedSandboxBearer>,
     browser_bearer: Option<&VerifiedBrowserBearer>,
     // plan-gate §2.4: the plan approved together with this thread's grant,
@@ -10954,6 +11972,9 @@ fn spawn_run_dispatch(
     // The run's effort level (WS11-S8), from `thinking::run_level` on the turn's clamped
     // profile; 0 with the ladder off, and for every continuation.
     run_effort: i32,
+    // The most questions the run's `ask_user` tool may put to its owner (build plan WS14 S4); zero offers
+    // none. Decided by the caller, which knows the turn's posture and whether it is a continuation.
+    max_questions: u32,
 ) -> Result<tokio::task::JoinHandle<Result<RunAgentResponse, tonic::Status>>, tonic::Status> {
     let mut execution_client = state.execution_client.clone();
     // The graded authority execution-core enforces PER CALL.
@@ -10995,6 +12016,16 @@ fn spawn_run_dispatch(
     let granted = mp_contracts::model_plane::v1::AutonomyRung::try_from(rung)
         .ok()
         .filter(|rung| *rung != mp_contracts::model_plane::v1::AutonomyRung::Unspecified);
+    // The org's rung cap (WS25-S9) holds a fresh run to the narrower of its grant and the cap, and states the cap
+    // when it has no grant. Plan and resumed runs state no rung of their own (`dispatch_autonomy_rung`).
+    let granted = crate::org_agent_policy::clamp_rung(
+        granted,
+        crate::org_agent_policy::dispatch_rung_cap(
+            crate::org_agent_policy::policy_mode(),
+            crate::org_agent_policy::shared_cache(),
+            org_id,
+        ),
+    );
     // The posture ratchet: an execute turn at the widest rung asks for a per-call approval.
     let ratcheted = execute_permission_mode(permission_mode, execute_granted, rung);
     if ratcheted != permission_mode {
@@ -11018,7 +12049,7 @@ fn spawn_run_dispatch(
         max_subagents = budget.max_subagents,
         "RunAgent budget resolved"
     );
-    let run_agent_req = resolved_run_agent_request(
+    let mut run_agent_req = resolved_run_agent_request(
         run,
         org_id,
         user_id,
@@ -11040,6 +12071,30 @@ fn spawn_run_dispatch(
         connector_scope,
         run_effort,
     );
+    // What the request states about its own authority, content-free: the posture, the plan flag and the
+    // rung it is sent with, so a live run shows the agent mode it ran under (WS25-S6).
+    tracing::info!(
+        run_id = %run.run_id,
+        mode = %run_agent_req.mode,
+        plan_mode = run_agent_req.plan_mode,
+        autonomy_rung = run_agent_req.autonomy_rung,
+        "RunAgent authority resolved"
+    );
+    // The org's hook rules for this Do run (WS25-S3), from the registry the gateway owns. With the
+    // switch off, or with no rules, the request carries no org policy, as it did before the field.
+    run_agent_req.org_policy =
+        crate::runtime_registries::do_run_org_policy(&state.hooks, org_id, hooks_do_runs_mode());
+    // The run is attributed to the org policy revision it was admitted under (WS25-S9), with or without hook rules.
+    crate::org_agent_policy::stamp_policy_revision(
+        &mut run_agent_req.org_policy,
+        crate::org_agent_policy::held_revision(
+            crate::org_agent_policy::policy_mode(),
+            crate::org_agent_policy::shared_cache(),
+            org_id,
+        ),
+    );
+    // The question tool's cap for this run (build plan WS14 S4), set by the caller as the org policy is.
+    run_agent_req.max_questions = max_questions;
     let run_agent_req = authenticated_run_agent_request(
         run_agent_req,
         execution_bearer,
@@ -11048,6 +12103,7 @@ fn spawn_run_dispatch(
         inference_bearer,
         sandbox_bearer,
         browser_bearer,
+        space_retrieval,
     )?;
     Ok(tokio::spawn(async move {
         let result = execution_client
@@ -11291,7 +12347,23 @@ fn build_run_agent_request(
         // it for a fresh run, so this builder's bytes stay as they were. execution-core uses it
         // only with EXECUTION_CORE_RUN_EFFORT on.
         reasoning_effort: mp_contracts::model_plane::v1::ReasoningEffort::Unspecified as i32,
+        // The org's hook rules are set by the caller from the registry (`spawn_run_dispatch`),
+        // which this pure builder cannot read; none here.
+        org_policy: None,
+        // The question tool's cap is decided by the caller (`spawn_run_dispatch`), as the org policy is; none here.
+        max_questions: 0,
     }
+}
+
+/// `HOOKS_DO_RUNS` (WS25-S3), read once per process so the mode cannot change under a run.
+fn hooks_do_runs_mode() -> crate::runtime_registries::HooksDoRunsMode {
+    static MODE: std::sync::OnceLock<crate::runtime_registries::HooksDoRunsMode> =
+        std::sync::OnceLock::new();
+    *MODE.get_or_init(|| {
+        crate::runtime_registries::HooksDoRunsMode::from_env_value(
+            std::env::var("HOOKS_DO_RUNS").ok().as_deref(),
+        )
+    })
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -11332,6 +12404,25 @@ fn agent_subscription_failure(
     })
 }
 
+/// The loop guard's code on `RunAgentResponse.loop_stop_code` (WS25-S2), spelled as execution-core
+/// writes it. execution-core's cross-service contract test pins the two spellings together.
+const LOOP_DETECTED_CODE: &str = "loop_detected";
+
+/// What the frame of a run the loop guard stopped says (WS25-S2). The code stays `agent_run_failed`,
+/// because the run-end codes are a closed list the SPA shares: a loop stop is told by its words.
+const LOOP_STOPPED_MESSAGE: &str =
+    "The agent stopped because its tool calls kept repeating without making progress.";
+
+/// The words of a failed agent run's error frame: the generic line, or, for a run the loop guard
+/// stopped, the line that says why.
+fn agent_failure_message(response: &RunAgentResponse) -> &'static str {
+    if response.loop_stop_code.trim() == LOOP_DETECTED_CODE {
+        LOOP_STOPPED_MESSAGE
+    } else {
+        "The governed agent run failed."
+    }
+}
+
 fn classify_agentic_run_outcome(status: &str) -> AgenticRunOutcome {
     match status {
         "completed" => AgenticRunOutcome::Completed,
@@ -11347,12 +12438,15 @@ fn classify_agentic_run_outcome(status: &str) -> AgenticRunOutcome {
     }
 }
 
-/// The `run_parked` frame of a run the executor parked (WS03 S8-A), sent on the owner's turn
-/// stream: the run, this request, the status, the closed park reason and when the run can be
-/// resumed (`resume_after`, the executor's `resets_at`, RFC 3339, or `null` when it is not a
-/// readable time). Ids, a closed token and a timestamp only. `None` when the response names
-/// no park reason this build knows: the stream then answers as for an unknown status.
-fn run_parked_event(request_id: &str, run_id: &str, response: &RunAgentResponse) -> Option<Event> {
+/// The `run_parked` event of a run the executor parked (WS03 S8-A), for the owner's turn stream:
+/// the run, the closed park reason and when the run can be resumed (`resume_after`, the executor's
+/// `resets_at`, RFC 3339, or `null` when it is not a readable time). Ids, a closed token and a
+/// timestamp only. `None` when the response names no park reason this build knows: the stream then
+/// answers as for an unknown status.
+fn run_parked_event(
+    run_id: &str,
+    response: &RunAgentResponse,
+) -> Option<crate::sse_events::ChatEvent> {
     let reason = mp_contracts::loop_fold::ParkReason::parse(&response.park_reason)?;
     let resume_after = chrono::DateTime::parse_from_rfc3339(response.resets_at.trim())
         .ok()
@@ -11360,18 +12454,11 @@ fn run_parked_event(request_id: &str, run_id: &str, response: &RunAgentResponse)
             at.with_timezone(&Utc)
                 .to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true)
         });
-    Some(
-        Event::default().event("run_parked").data(
-            json!({
-                "run_id": run_id,
-                "request_id": request_id,
-                "status": "parked",
-                "reason": reason.as_str(),
-                "resume_after": resume_after,
-            })
-            .to_string(),
-        ),
-    )
+    Some(crate::sse_events::ChatEvent::RunParked {
+        run_id: run_id.to_owned(),
+        reason,
+        resume_after,
+    })
 }
 
 /// Only these gRPC codes prove the remote execution boundary rejected the
@@ -11571,12 +12658,17 @@ fn agentic_run_events(
 /// so the tail is not drained. The order is the dispatch result, then the stop,
 /// then the deadline, so a run that finished in the same poll keeps its answer
 /// and a Stop that lands at the deadline is still a Stop.
+///
+/// Each event the tail delivers goes through two mappers, in order: `step_frame`
+/// for the chat timeline and `usage_frame` for the run's usage meter (WS27 S9).
+#[allow(clippy::too_many_arguments)] // the two frame mappers ride beside the follow's own handles
 async fn follow_agentic_run<S>(
     events: S,
     mut dispatch: tokio::task::JoinHandle<Result<RunAgentResponse, tonic::Status>>,
     deadline_at: tokio::time::Instant,
     drain_grace: std::time::Duration,
     step_frame: impl Fn(&OrchestrationEvent) -> Option<Event>,
+    mut usage_frame: impl FnMut(&OrchestrationEvent) -> Option<Event>,
     tx: &tokio::sync::mpsc::Sender<Result<Event, Infallible>>,
     stop: &std::sync::atomic::AtomicBool,
 ) -> Result<DispatchJoin, DeadlineExpired>
@@ -11609,6 +12701,9 @@ where
                     if let Some(frame) = step_frame(&event) {
                         let _ = tx.send(Ok(frame)).await;
                     }
+                    if let Some(frame) = usage_frame(&event) {
+                        let _ = tx.send(Ok(frame)).await;
+                    }
                 }
                 Some(Err(status)) => {
                     tracing::debug!(%status, "orchestration tail failed; following the dispatch alone");
@@ -11629,6 +12724,9 @@ where
                 next = events.next() => match next {
                     Some(Ok(event)) => {
                         if let Some(frame) = step_frame(&event) {
+                            let _ = tx.send(Ok(frame)).await;
+                        }
+                        if let Some(frame) = usage_frame(&event) {
                             let _ = tx.send(Ok(frame)).await;
                         }
                     }
@@ -11723,6 +12821,10 @@ fn agentic_run_stream(
     // An execute turn (WS14 S2a): the run takes the thread's live plan grant or is refused,
     // typed, before execution-core is called. `false` for a continuation and every other turn.
     execute_granted: bool,
+    // The plan an approve-then-execute turn runs (WS14 S2), `None` for every other turn. The run
+    // binds the thread's grant only when that grant names this plan, and only after the plan is
+    // claimed (`approve_then_execute_grant`).
+    approved_plan_id: Option<String>,
     execution_bearer: VerifiedExecutionBearer,
     data_plane_bearer: VerifiedBearer,
     model_bearer: VerifiedModelBearer,
@@ -11731,6 +12833,9 @@ fn agentic_run_stream(
     // Space-scoped turn (see `auth::VerifiedSandboxBearer`'s doc for why the
     // governed agent loop needs it too, not only the inline ExecuteStep path).
     space_id: String,
+    // The Space retrieval the run's `knowledge_search` is authorised with (WS18-S5). `None` for a run that
+    // is not Space-scoped, for a continuation, and with the switch off; see `agentic_space_retrieval`.
+    space_retrieval: Option<String>,
     sandbox_bearer: Option<VerifiedSandboxBearer>,
     // The browser bearer of a Do turn that may be offered the browser tools (WS21-S2). `None` for
     // every continuation, which never forwards one, and for every turn with the switch off.
@@ -11757,6 +12862,9 @@ fn agentic_run_stream(
     // The run's effort level (WS11-S8), from `thinking::run_level` at the launch; 0 for a
     // continuation and with the ladder off.
     run_effort: i32,
+    // The run's agent role catalogue (EP-6 S10, `compose_agent_roles`), carried in the run
+    // context. Empty with `MODEL_GATEWAY_SUBAGENT_ROLE_CATALOGUE` off and for a continuation.
+    agent_roles: Vec<mp_contracts::model_plane::v1::AgentRoleSpec>,
 ) -> Sse<ReceiverStream<Result<Event, Infallible>>> {
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(32);
     tokio::spawn(async move {
@@ -11820,12 +12928,20 @@ fn agentic_run_stream(
                     },
                     &run,
                     &org_id,
+                    // The caller's own id, from the claims: whose profile the run may read.
+                    &user_id,
                     &model_bearer,
                 )
                 .await,
             ),
             _ => None,
         };
+        // The role catalogue rides in the composed context only (EP-6 S10): in flight, never part
+        // of the run record. A run whose context is not composed carries none.
+        let run_context = run_context.map(|mut context| {
+            context.agent_roles = agent_roles;
+            context
+        });
 
         // plan-gate §2.4: a run that is itself in plan mode has no authority
         // to consume a plan with yet, and a continuation takes its goal and
@@ -11845,7 +12961,14 @@ fn agentic_run_stream(
         } else {
             None
         };
-        let plan_context = if plan_context_wanted(plan_mode, resume.is_some()) {
+        // WS14 S2: an approve-then-execute turn claims only the plan its grant names. A grant that
+        // names another plan is left alone, so a refused turn never consumes a plan it did not run.
+        let plan_context = if plan_context_wanted(plan_mode, resume.is_some())
+            && approved_plan_id.as_deref().map_or(true, |plan_id| {
+                durable_grant
+                    .as_ref()
+                    .is_some_and(|grant| grant_names_plan(grant, plan_id))
+            }) {
             approved_plan_context(
                 &state,
                 &org_id,
@@ -11857,7 +12980,41 @@ fn agentic_run_stream(
         } else {
             None
         };
+        // WS14 S2: an approve-then-execute turn runs with the grant its plan binds, or not at all.
+        // The claim above is the single-use guard, so a second execute of the same plan finds it
+        // spent, and a grant that no longer names the plan is refused; both are typed, before
+        // execution-core is called. Otherwise the run dispatches with the grant as it was read.
+        let durable_grant = match approved_plan_id.as_deref() {
+            Some(plan_id) => Some(
+                approve_then_execute_grant(
+                    &state,
+                    &run.run_id,
+                    &org_id,
+                    &thread_id,
+                    plan_id,
+                    &model_bearer,
+                    durable_grant.as_ref(),
+                    plan_context.is_some(),
+                )
+                .await,
+            ),
+            None => durable_grant,
+        };
 
+        // The question tool's cap for this run (build plan WS14 S4): a Do run that may ask is offered the
+        // tool, a continuation or any other run is not. The completion below asks for the question only
+        // when this is above zero.
+        let max_questions = ask_user_max_questions(
+            ask_user_enabled(),
+            zdr,
+            matches!(
+                retention_class,
+                Some(crate::sse_events::RetentionClass::ZdrWaived { .. })
+            ),
+            plan_mode,
+            !space_id.is_empty(),
+            resume.is_some(),
+        );
         // Construct the authenticated request before reporting the run as
         // started. A deterministic local credential/metadata failure is a
         // confirmed pre-dispatch rejection, not an ambiguous remote outage.
@@ -11879,6 +13036,7 @@ fn agentic_run_stream(
             &model_bearer,
             &inference_bearer,
             &space_id,
+            space_retrieval.as_deref(),
             sandbox_bearer.as_ref(),
             browser_bearer.as_ref(),
             plan_context.as_deref(),
@@ -11904,6 +13062,7 @@ fn agentic_run_stream(
             },
             durable_grant.as_ref(),
             run_effort,
+            max_questions,
         ) {
             Ok(dispatch) => dispatch,
             Err(error) => {
@@ -12004,6 +13163,14 @@ fn agentic_run_stream(
             std::env::var(key).ok()
         });
         let followed_at = std::time::Instant::now();
+        // The run's usage meter (WS27 S9): one catalogue snapshot for the whole run, read only
+        // when the progress switch is on and the run may state a cost. A ZDR or waived run
+        // states none.
+        let mut agent_usage = if usage_progress_switch() && !zdr && retention_class.is_none() {
+            Some(AgentRunUsage::start(&state.pricing, &model, &route).await)
+        } else {
+            None
+        };
         let dispatch_result = follow_agentic_run(
             agentic_run_events(&state, &run.run_id, &model_bearer),
             dispatch,
@@ -12013,6 +13180,16 @@ fn agentic_run_stream(
                 orchestration_event_to_step_update(event)
                     .filter(|step| step.should_emit(&features))
                     .map(|step| step.to_sse(&request_id))
+                    .or_else(|| lifecycle_frame(event, &features, &request_id))
+            },
+            |event| match event.event.as_ref()? {
+                orchestration_event::Event::RunUsageProgress(progress) => {
+                    let frame = agent_usage.as_mut()?.record_round(progress);
+                    frame
+                        .should_emit(&features)
+                        .then(|| frame.to_sse(&request_id))
+                }
+                _ => None,
             },
             &tx,
             &cancel_flag,
@@ -12343,6 +13520,16 @@ fn agentic_run_stream(
             }
             Ok(Ok(Ok(response))) => response,
         };
+        // EP-14 S5: the run's round timing, kept for a persistent run (no-op with either switch off).
+        crate::run_timing_persist::persist_rounds(
+            &state,
+            &run.run_id,
+            &request_id,
+            &model_bearer,
+            zdr,
+            retention_class.is_some(),
+            &response.round_timing,
+        );
 
         // Compaction is LOSSY and otherwise invisible: an answer built on a
         // prompt whose earlier tool results were cleared can be worse for a
@@ -12453,13 +13640,18 @@ fn agentic_run_stream(
                             spend,
                         )
                     }
-                    None => run_end_error_event(
-                        &request_id,
-                        &run.run_id,
-                        "agent_run_failed",
-                        "The governed agent run failed.",
-                        spend,
-                    ),
+                    None => {
+                        // Bound first: the run-end contract reads the call's arguments only up
+                        // to the first `)`, so a nested call would hide `spend`.
+                        let message = agent_failure_message(&response);
+                        run_end_error_event(
+                            &request_id,
+                            &run.run_id,
+                            "agent_run_failed",
+                            message,
+                            spend,
+                        )
+                    }
                 };
                 let _ = tx.send(Ok(event)).await;
                 return;
@@ -12467,17 +13659,15 @@ fn agentic_run_stream(
             // A parked run (WS03 S8-A), for every turn: non-terminal, nothing appended, no
             // receipt. The run subject is told RUN_PARKED and the owner's stream gets the
             // `run_parked` frame. A park reason this build does not know is an unknown status.
-            AgenticRunOutcome::Parked
-                if run_parked_event(&request_id, &run.run_id, &response).is_some() =>
-            {
+            AgenticRunOutcome::Parked if run_parked_event(&run.run_id, &response).is_some() => {
                 let parked =
                     build_stream_envelope(&request_id, "RUN_PARKED", &org_id, &user_id, &model);
                 let _ = state
                     .publisher
                     .publish(&subjects::run_event_subject(&run.run_id), &parked)
                     .await;
-                if let Some(frame) = run_parked_event(&request_id, &run.run_id, &response) {
-                    let _ = tx.send(Ok(frame)).await;
+                if let Some(event) = run_parked_event(&run.run_id, &response) {
+                    let _ = tx.send(Ok(event.to_sse(&request_id))).await;
                 }
                 return;
             }
@@ -12528,6 +13718,24 @@ fn agentic_run_stream(
                             "operation": s.operation,
                         }))
                         .collect::<Vec<_>>()),
+                };
+                let _ = tx.send(Ok(event.to_sse(&request_id))).await;
+            }
+        }
+
+        // The question the run's `ask_user` call put to the owner (build plan WS14 S4): the card's event,
+        // sent once the run completed with it still waiting. A lookup failure sends no card; the prose the
+        // turn ends with carries the question either way.
+        if max_questions > 0 {
+            if let Some(question) =
+                requested_question_for_run(&state, &run.run_id, &org_id, &model_bearer).await
+            {
+                let fields = crate::http_routes::run_question_value(&question);
+                let event = crate::sse_events::ChatEvent::UserQuestion {
+                    question_id: question.id,
+                    delivery: question.delivery,
+                    expires_at: fields["expires_at"].as_str().map(str::to_owned),
+                    items: fields["items"].clone(),
                 };
                 let _ = tx.send(Ok(event.to_sse(&request_id))).await;
             }
@@ -12589,30 +13797,44 @@ fn agentic_run_stream(
         // Phase 7 B6 — emit the quality signal for the agentic run so the Agent
         // Run Console's confidence column goes live. The tokens are the ones
         // execution-core summed over the run's rounds and its delegates' (zero from
-        // an executor that predates the field). Their price is not known at this
-        // layer, so cost_usd stays null rather than a fabricated 0. The ledger rows
-        // are not published here: `AgentUsageLedger::publish` publishes them from the
-        // dispatch task itself, the moment the executor answers, because this stream
-        // may have given up at its deadline long before. Confidence is scored over the run's
-        // final answer.
+        // an executor that predates the field). The cost is priced from those legs only
+        // when the run streamed its meter (see `AgentRunUsage`), and is null otherwise
+        // rather than a fabricated 0. The ledger rows are not published here:
+        // `AgentUsageLedger::publish` publishes them from the dispatch task itself, the
+        // moment the executor answers, because this stream may have given up at its
+        // deadline long before. Confidence is scored over the run's final answer.
         let latency_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
         // HONESTY_CONTRACT: `grounded` reflects whether a knowledge_search call
         // in this run actually returned org knowledge (execution-core's
         // `run_agent` sets it from a real "status": "ok" tool outcome, not a
         // guess) — see agent.rs::knowledge_search_found_grounding.
         let run_usage = response.usage.clone().unwrap_or_default();
+        // The legs priced under the meter's snapshot, so the final frame agrees with the progress
+        // frames. The rounds whose price is unknown are counted, not the calls.
+        let (cost_usd, cost_basis, cost_by_category, unpriced_calls) = match agent_usage.as_ref() {
+            Some(meter) => {
+                let (total, unpriced_rounds) = meter.total(&run_usage);
+                (
+                    frame_cost_usd(&total),
+                    total.basis,
+                    total.by_category,
+                    unpriced_rounds,
+                )
+            }
+            None => (None, None, None, run_usage.inference_rounds),
+        };
         let usage_event = crate::sse_events::ChatEvent::Usage {
             cache_read_tokens: saturating_u32(run_usage.cache_read_input_tokens),
             cache_write_tokens: saturating_u32(run_usage.cache_creation_input_tokens),
             input_tokens: saturating_u32(run_usage.input_tokens),
             output_tokens: saturating_u32(run_usage.output_tokens),
-            cost_usd: None,
-            // Nor its basis: no price is established here.
-            cost_basis: None,
-            // Every round of the run is a call whose price is not established here.
+            cost_usd,
+            cost_basis,
+            // Every round of the run is a call; `unpriced_calls` counts the rounds whose price
+            // is unknown.
             calls: run_usage.inference_rounds,
-            unpriced_calls: run_usage.inference_rounds,
-            cost_by_category: None,
+            unpriced_calls,
+            cost_by_category,
             latency_ms,
             confidence: crate::confidence::score(
                 &final_text,
@@ -12681,6 +13903,7 @@ fn build_stream_envelope(
         resource_ref: format!("request/{request_id}"),
         payload: serde_json::json!({ "model": model }),
         zdr: false,
+        ..Default::default()
     }
 }
 
@@ -12739,6 +13962,7 @@ fn build_usage_envelope(
             "cost_basis": cost_basis.as_str(),
         }),
         zdr: false,
+        ..Default::default()
     }
 }
 
@@ -12919,11 +14143,7 @@ fn build_agent_usage_envelope(
     } else {
         &leg.model_used
     };
-    let cost_basis = crate::pricing::CostBasis::of_route(
-        &route.provider_hint,
-        &route.subscription_connection_id,
-    )
-    .served_by(&leg.provider_used);
+    let cost_basis = agent_leg_basis(route, &leg.provider_used);
     let mut envelope = build_usage_envelope(
         request_id,
         org_id,
@@ -13030,6 +14250,163 @@ impl AgentUsageLedger {
     }
 }
 
+/// The cost basis of a round that `route` served through `provider_used`: subscription when the
+/// provider that served it is the subscription, whatever the route asked for (see
+/// `CostBasis::served_by`).
+fn agent_leg_basis(route: &AgentRoute, provider_used: &str) -> crate::pricing::CostBasis {
+    crate::pricing::CostBasis::of_route(&route.provider_hint, &route.subscription_connection_id)
+        .served_by(provider_used)
+}
+
+/// A token count as the meter's signed counter: a count past `i64::MAX` is the largest counter.
+fn call_tokens(tokens: u64) -> i64 {
+    i64::try_from(tokens).unwrap_or(i64::MAX)
+}
+
+/// The four token counts of a run's usage, as one value.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct RunTokens {
+    input: u64,
+    output: u64,
+    cache_read: u64,
+    cache_write: u64,
+}
+
+impl RunTokens {
+    fn of_leg(leg: &mp_contracts::model_plane::v1::RunUsageLeg) -> Self {
+        Self {
+            input: leg.input_tokens,
+            output: leg.output_tokens,
+            cache_read: leg.cache_read_input_tokens,
+            cache_write: leg.cache_creation_input_tokens,
+        }
+    }
+
+    /// What `self` adds over `earlier`, count by count: a report behind `earlier` adds nothing.
+    fn since(self, earlier: Self) -> Self {
+        Self {
+            input: self.input.saturating_sub(earlier.input),
+            output: self.output.saturating_sub(earlier.output),
+            cache_read: self.cache_read.saturating_sub(earlier.cache_read),
+            cache_write: self.cache_write.saturating_sub(earlier.cache_write),
+        }
+    }
+
+    /// The larger of each count.
+    fn at_least(self, other: Self) -> Self {
+        Self {
+            input: self.input.max(other.input),
+            output: self.output.max(other.output),
+            cache_read: self.cache_read.max(other.cache_read),
+            cache_write: self.cache_write.max(other.cache_write),
+        }
+    }
+}
+
+/// A Do run's usage as its frames state it (build plan WS27 S9). Each round the executor counted
+/// reports the run's totals so far. The increment since the last report is one call, priced under
+/// the model that served it, so a run that changed model mid-run is priced at each model's rates.
+/// The final `usage` frame prices the run's legs the same way, so it agrees with the progress
+/// frames.
+struct AgentRunUsage {
+    rates: crate::pricing::RateSnapshot,
+    /// The gateway's own model, which stands in for a round that named none (as the ledger rows
+    /// do).
+    model: String,
+    route: AgentRoute,
+    meter: crate::usage_meter::UsageMeter,
+    /// The largest totals reported so far, so a late or reordered report adds nothing.
+    reported: RunTokens,
+}
+
+impl AgentRunUsage {
+    /// The meter of one run. The catalogue is read once, so every round of the run is priced
+    /// against the same rates.
+    async fn start(
+        pricing: &crate::pricing::PricingCache,
+        model: &str,
+        route: &AgentRoute,
+    ) -> Self {
+        Self {
+            rates: pricing.snapshot().await,
+            model: model.to_owned(),
+            route: route.clone(),
+            meter: crate::usage_meter::UsageMeter::default(),
+            reported: RunTokens::default(),
+        }
+    }
+
+    /// One provider call of the run: `tokens` served by `model` through `provider`.
+    fn call(
+        &self,
+        provider: &str,
+        model: &str,
+        tokens: RunTokens,
+    ) -> crate::usage_meter::CallUsage {
+        crate::usage_meter::CallUsage {
+            phase: crate::usage_meter::CallPhase::AgentRound,
+            model: if model.is_empty() {
+                self.model.clone()
+            } else {
+                model.to_owned()
+            },
+            provider: provider.to_owned(),
+            basis: agent_leg_basis(&self.route, provider),
+            input: call_tokens(tokens.input),
+            output: call_tokens(tokens.output),
+            cache_read: call_tokens(tokens.cache_read),
+            cache_write: call_tokens(tokens.cache_write),
+        }
+    }
+
+    /// Record one counted round's report, and return the run so far as its progress frame.
+    fn record_round(
+        &mut self,
+        progress: &mp_contracts::model_plane::v1::orchestration_event::RunUsageProgress,
+    ) -> crate::sse_events::ChatEvent {
+        let reported = RunTokens {
+            input: progress.input_tokens,
+            output: progress.output_tokens,
+            cache_read: progress.cache_read_input_tokens,
+            cache_write: progress.cache_creation_input_tokens,
+        };
+        let call = self.call(
+            &progress.provider_used,
+            &progress.model_used,
+            reported.since(self.reported),
+        );
+        self.reported = self.reported.at_least(reported);
+        let priced = self.rates.priced(call.basis, &call.model, call.legs());
+        crate::sse_events::ChatEvent::UsageProgress {
+            phase: crate::usage_meter::CallPhase::AgentRound,
+            snapshot: self.meter.record(&call, &priced),
+            ceiling: None,
+            routing: None,
+        }
+    }
+
+    /// The run's total as its final frame states it, and the rounds whose price is unknown. The
+    /// total is the sum of the legs the executor reported, which is what the ledger rows are too.
+    fn total(
+        &self,
+        usage: &mp_contracts::model_plane::v1::RunUsage,
+    ) -> (crate::usage_meter::Snapshot, u32) {
+        let mut meter = crate::usage_meter::UsageMeter::default();
+        let mut unpriced_rounds = 0u32;
+        let mut unpriced_calls = 0u32;
+        for leg in agent_usage_legs(usage) {
+            let call = self.call(&leg.provider_used, &leg.model_used, RunTokens::of_leg(&leg));
+            let priced = self.rates.priced(call.basis, &call.model, call.legs());
+            let snapshot = meter.record(&call, &priced);
+            if snapshot.unpriced_calls > unpriced_calls {
+                unpriced_calls = snapshot.unpriced_calls;
+                unpriced_rounds = unpriced_rounds.saturating_add(leg.inference_rounds);
+            }
+        }
+        (meter.snapshot(), unpriced_rounds)
+    }
+}
+
 fn orchestration_event_to_sse(event: &OrchestrationEvent) -> Option<Event> {
     let payload = event_payload_value(event)?;
     let event_name = match event.event.as_ref()? {
@@ -13044,6 +14421,7 @@ fn orchestration_event_to_sse(event: &OrchestrationEvent) -> Option<Event> {
         orchestration_event::Event::BrowserObservationReceived(_) => "browser_observation_received",
         orchestration_event::Event::BrowserRunPaused(_) => "browser_run_paused",
         orchestration_event::Event::BrowserRunResumed(_) => "browser_run_resumed",
+        orchestration_event::Event::BrowserAttachSharedJar(_) => "browser_attach_shared_jar",
         orchestration_event::Event::BrowserActionApprovalRequired(_) => {
             "browser_action_approval_required"
         }
@@ -13053,6 +14431,7 @@ fn orchestration_event_to_sse(event: &OrchestrationEvent) -> Option<Event> {
         }
         orchestration_event::Event::RunParked(_) => "run_parked",
         orchestration_event::Event::RunResumed(_) => "run_resumed",
+        orchestration_event::Event::ToolRetryScheduled(_) => "tool_retry_scheduled",
         // The question events reach the chat stream as the user_question
         // ChatEvent (WS14-S4), not as a raw orchestration event. They get no named
         // arm so the SSE taxonomy generator, which counts named arms, stays in step.
@@ -13060,6 +14439,44 @@ fn orchestration_event_to_sse(event: &OrchestrationEvent) -> Option<Event> {
     };
     let data = serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_owned());
     Some(Event::default().event(event_name).data(data))
+}
+
+/// The lifecycle notice a Do run's tool retry stands for (build plan WS15 S3): the same
+/// `retry_scheduled` a chat tool loop streams. The reason must be a closed token, so anything
+/// else is dropped rather than forwarded.
+fn orchestration_event_to_lifecycle(
+    event: &OrchestrationEvent,
+) -> Option<crate::sse_events::ChatEvent> {
+    let orchestration_event::Event::ToolRetryScheduled(retry) = event.event.as_ref()? else {
+        return None;
+    };
+    let reason = mp_contracts::lifecycle_notice::RETRY_REASONS
+        .into_iter()
+        .find(|token| *token == retry.reason)?;
+    Some(crate::sse_events::ChatEvent::RetryScheduled {
+        scope: "tool",
+        tool: retry.tool.clone(),
+        attempt: retry.attempt,
+        max_attempts: retry.max_attempts,
+        wait_ms: retry.wait_ms,
+        reason,
+    })
+}
+
+/// The frame a Do run's tool retry puts on the chat stream, while the lifecycle switch is on and
+/// the client asked for step detail (the family a `retry_scheduled` belongs to).
+fn lifecycle_frame(
+    event: &OrchestrationEvent,
+    features: &[String],
+    request_id: &str,
+) -> Option<Event> {
+    if !mp_contracts::lifecycle_notice::enabled() {
+        return None;
+    }
+    let notice = orchestration_event_to_lifecycle(event)?;
+    notice
+        .should_emit(features)
+        .then(|| notice.to_sse(request_id))
 }
 
 /// Map an orchestration event to the unified chat-parity `step_update`
@@ -13178,13 +14595,21 @@ fn orchestration_event_to_step_update(
         Event::BrowserRunPaused(p) => (
             p.run_id.clone(),
             "Paused".to_owned(),
-            "user paused the browser run".to_owned(),
+            if p.reason == "user_took_over" {
+                "you took control of the browser tab".to_owned()
+            } else {
+                "user paused the browser run".to_owned()
+            },
             "paused".to_owned(),
         ),
         Event::BrowserRunResumed(p) => (
             p.run_id.clone(),
             "Resumed".to_owned(),
-            "user resumed the browser run".to_owned(),
+            if p.reason == "control_returned" {
+                "control of the browser tab was given back".to_owned()
+            } else {
+                "user resumed the browser run".to_owned()
+            },
             "running".to_owned(),
         ),
         Event::BrowserActionApprovalRequired(p) => {
@@ -13236,10 +14661,16 @@ fn orchestration_event_to_step_update(
         // A park and its resume are not steps of the chat timeline: the owner's turn
         // stream carries its own `run_parked` frame (WS03 S8), and the run console reads
         // the raw orchestration events.
+        // The run's usage is a meter, not a step: its frame is `usage_progress` (WS27 S9).
+        // The shared-jar attach is an audit event for the run console, not a step.
         Event::RunParked(_)
         | Event::RunResumed(_)
+        | Event::BrowserAttachSharedJar(_)
         | Event::QuestionAsked(_)
-        | Event::QuestionAnswered(_) => return None,
+        | Event::QuestionAnswered(_)
+        | Event::RunUsageProgress(_)
+        // A retry is a lifecycle notice on the chat stream, never a step (WS15 S3).
+        | Event::ToolRetryScheduled(_) => return None,
     };
     Some(crate::sse_events::ChatEvent::StepUpdate {
         id,
@@ -13356,13 +14787,29 @@ fn event_payload_value(event: &OrchestrationEvent) -> Option<Value> {
                 json!(payload.dom_snapshot_ref),
             );
         }
+        // `reason` is only present when the pause/resume has one (attach mode,
+        // WS8.G), so a user-initiated pause keeps its frame byte-identical.
         orchestration_event::Event::BrowserRunPaused(payload) => {
             object.insert("run_id".to_owned(), json!(payload.run_id));
             object.insert("plan_id".to_owned(), json!(payload.plan_id));
+            if !payload.reason.is_empty() {
+                object.insert("reason".to_owned(), json!(payload.reason));
+            }
         }
         orchestration_event::Event::BrowserRunResumed(payload) => {
             object.insert("run_id".to_owned(), json!(payload.run_id));
             object.insert("plan_id".to_owned(), json!(payload.plan_id));
+            if !payload.reason.is_empty() {
+                object.insert("reason".to_owned(), json!(payload.reason));
+            }
+        }
+        // Ids only: never a URL or a page title (WS8.G).
+        orchestration_event::Event::BrowserAttachSharedJar(payload) => {
+            object.insert("run_id".to_owned(), json!(payload.run_id));
+            object.insert("plan_id".to_owned(), json!(payload.plan_id));
+            object.insert("attach_id".to_owned(), json!(payload.attach_id));
+            object.insert("session_run_id".to_owned(), json!(payload.session_run_id));
+            object.insert("tab_id".to_owned(), json!(payload.tab_id));
         }
         orchestration_event::Event::BrowserActionApprovalRequired(payload) => {
             object.insert("run_id".to_owned(), json!(payload.run_id));
@@ -13410,9 +14857,20 @@ fn event_payload_value(event: &OrchestrationEvent) -> Option<Value> {
                 json!(payload.resumed_segment),
             );
         }
+        // Ids, counts and a closed reason only: the error text never reaches an orchestration event.
+        orchestration_event::Event::ToolRetryScheduled(payload) => {
+            object.insert("run_id".to_owned(), json!(payload.run_id));
+            object.insert("step_id".to_owned(), json!(payload.step_id));
+            object.insert("tool".to_owned(), json!(payload.tool));
+            object.insert("attempt".to_owned(), json!(payload.attempt));
+            object.insert("max_attempts".to_owned(), json!(payload.max_attempts));
+            object.insert("wait_ms".to_owned(), json!(payload.wait_ms));
+            object.insert("reason".to_owned(), json!(payload.reason));
+        }
         // Never forwarded raw (see the name map), so there is nothing to project.
         orchestration_event::Event::QuestionAsked(_)
-        | orchestration_event::Event::QuestionAnswered(_) => {}
+        | orchestration_event::Event::QuestionAnswered(_)
+        | orchestration_event::Event::RunUsageProgress(_) => {}
     }
 
     Some(Value::Object(object))
@@ -13555,13 +15013,15 @@ fn publish_implicit_dissatisfaction(
 #[cfg(test)]
 mod tests {
     use super::{
-        agent_persona_message, agent_subscription_failure, approved_plan_is_for,
+        agent_failure_message, agent_persona_message, agent_subscription_failure, approved_plan_is_for,
         authored_instructions_message, build_stream_envelope, build_usage_envelope,
         classify_agentic_run_outcome, dispatch_never_reached_execution_core,
         format_approved_plan_block, frame_cost_usd, is_confirmed_agent_dispatch_rejection,
-        latest_proposed_plan, orchestration_event_to_step_update, sanitize_follow_up_suggestions,
+        latest_proposed_plan, orchestration_event_to_lifecycle, orchestration_event_to_step_update,
+        sanitize_follow_up_suggestions,
         sanitize_thread_title, stream_ended_with_no_content, turn_call_rows, turn_usage,
         turn_usage_complete_enabled, usage_progress_enabled, AgenticRunOutcome, PlanState,
+        LOOP_DETECTED_CODE, LOOP_STOPPED_MESSAGE,
     };
     use crate::http_routes::InvokeRequest;
     use crate::state::AppState;
@@ -14095,7 +15555,7 @@ mod tests {
         for profile in ["quick", "deep", "standard", "xhigh", "wat"] {
             let req = invoke_request(serde_json::json!({ "effort": profile }));
             for ladder_on in [false, true] {
-                let settings = super::zdr_turn_settings_with(&state, &req, ladder_on);
+                let settings = super::zdr_turn_settings_with(&state, &req, ladder_on, None);
                 assert_eq!(
                     settings.thinking,
                     crate::thinking::plan(profile, settings.max_tokens, ladder_on),
@@ -14104,15 +15564,15 @@ mod tests {
             }
         }
         let deep = invoke_request(serde_json::json!({ "effort": "deep" }));
-        let on = super::zdr_turn_settings_with(&state, &deep, true).thinking;
+        let on = super::zdr_turn_settings_with(&state, &deep, true, None).thinking;
         assert_eq!(on.effort, mp_contracts::model_plane::v1::ReasoningEffort::High);
         assert_eq!(on.budget_tokens, 0);
-        let off = super::zdr_turn_settings_with(&state, &deep, false).thinking;
+        let off = super::zdr_turn_settings_with(&state, &deep, false, None).thinking;
         assert_eq!(off.effort, mp_contracts::model_plane::v1::ReasoningEffort::Unspecified);
         // A caller cap below the ceiling is what the legacy budget is sized
         // against: `deep` does not fit 2048 with headroom and steps down.
         let capped = invoke_request(serde_json::json!({ "effort": "deep", "max_tokens": 2048 }));
-        let stepped = super::zdr_turn_settings_with(&state, &capped, false).thinking;
+        let stepped = super::zdr_turn_settings_with(&state, &capped, false, None).thinking;
         assert_eq!(stepped.budget_tokens, 1_024);
     }
 
@@ -14367,6 +15827,48 @@ mod tests {
     }
 
     #[test]
+    fn a_tool_retry_is_a_lifecycle_notice_and_never_a_step() {
+        use mp_contracts::model_plane::v1::{orchestration_event, OrchestrationEvent};
+        let retry = |reason: &str| OrchestrationEvent {
+            event_id: String::new(),
+            at: None,
+            event: Some(orchestration_event::Event::ToolRetryScheduled(
+                orchestration_event::ToolRetryScheduled {
+                    run_id: "run-1".to_owned(),
+                    step_id: "step-1".to_owned(),
+                    tool: "knowledge_search".to_owned(),
+                    attempt: 2,
+                    max_attempts: 3,
+                    wait_ms: 100,
+                    reason: reason.to_owned(),
+                },
+            )),
+        };
+        match orchestration_event_to_lifecycle(&retry("connection")) {
+            Some(crate::sse_events::ChatEvent::RetryScheduled {
+                scope,
+                tool,
+                attempt,
+                max_attempts,
+                wait_ms,
+                reason,
+            }) => assert_eq!(
+                (scope, tool.as_str(), attempt, max_attempts, wait_ms, reason),
+                ("tool", "knowledge_search", 2, 3, 100, "connection")
+            ),
+            other => panic!(
+                "expected a retry_scheduled notice, got {:?}",
+                other.map(|event| event.name())
+            ),
+        }
+        assert!(
+            orchestration_event_to_lifecycle(&retry("connection reset by peer")).is_none(),
+            "free text is never a reason"
+        );
+        assert!(orchestration_event_to_step_update(&retry("connection")).is_none());
+    }
+
+    #[test]
     fn orchestration_plan_event_maps_to_step_update() {
         use mp_contracts::model_plane::v1::{orchestration_event, OrchestrationEvent};
         use orchestration_event::PlanTransitioned;
@@ -14598,6 +16100,237 @@ mod tests {
             .mount(server)
             .await;
         crate::pricing::PricingCache::new(Some(server.uri()), reqwest::Client::new())
+    }
+
+    /// A catalogue for the Do run tests: `mock` at 1 and 2, `other` at 5 and 10 USD per million
+    /// input and output tokens, and the `default` row.
+    async fn run_usage_pricing(server: &wiremock::MockServer) -> crate::pricing::PricingCache {
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/api/v1/pricing"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "rates": [
+                    { "model": "default", "input_per_million": 3.0, "output_per_million": 15.0 },
+                    { "model": "mock", "input_per_million": 1.0, "output_per_million": 2.0 },
+                    { "model": "other", "input_per_million": 5.0, "output_per_million": 10.0 },
+                ],
+            })))
+            .mount(server)
+            .await;
+        crate::pricing::PricingCache::new(Some(server.uri()), reqwest::Client::new())
+    }
+
+    /// The report execution-core publishes after one counted round of a Do run.
+    fn round_report(
+        round: u32,
+        input: u64,
+        output: u64,
+        model: &str,
+        provider: &str,
+    ) -> mp_contracts::model_plane::v1::orchestration_event::RunUsageProgress {
+        mp_contracts::model_plane::v1::orchestration_event::RunUsageProgress {
+            run_id: "run-1".to_owned(),
+            round,
+            input_tokens: input,
+            output_tokens: output,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+            model_used: model.to_owned(),
+            provider_used: provider.to_owned(),
+        }
+    }
+
+    /// The snapshot a `usage_progress` frame states.
+    fn progress_snapshot(event: crate::sse_events::ChatEvent) -> crate::usage_meter::Snapshot {
+        match event {
+            crate::sse_events::ChatEvent::UsageProgress { snapshot, .. } => snapshot,
+            _ => panic!("expected a usage_progress frame"),
+        }
+    }
+
+    /// The counts of one leg of a Do run's usage.
+    fn run_leg(
+        provider: &str,
+        model: &str,
+        input: u64,
+        output: u64,
+        rounds: u32,
+    ) -> mp_contracts::model_plane::v1::RunUsageLeg {
+        mp_contracts::model_plane::v1::RunUsageLeg {
+            provider_used: provider.to_owned(),
+            model_used: model.to_owned(),
+            input_tokens: input,
+            output_tokens: output,
+            inference_rounds: rounds,
+            ..Default::default()
+        }
+    }
+
+    fn priced_legs(input: i64, output: i64) -> crate::pricing::TokenLegs {
+        crate::pricing::TokenLegs {
+            input_tokens: input,
+            output_tokens: output,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+        }
+    }
+
+    /// A Do run that changes model mid-run is priced round by round: each increment at the rates
+    /// of the model that served it (build plan WS27 S9).
+    #[tokio::test]
+    async fn agent_run_usage_prices_each_round_under_the_model_that_served_it() {
+        let server = wiremock::MockServer::start().await;
+        let pricing = run_usage_pricing(&server).await;
+        let rates = pricing.snapshot().await;
+        let mut run =
+            super::AgentRunUsage::start(&pricing, "mock", &super::AgentRoute::default()).await;
+
+        let first = progress_snapshot(run.record_round(&round_report(1, 1_000, 100, "mock", "")));
+        let second = progress_snapshot(run.record_round(&round_report(2, 1_500, 150, "other", "")));
+
+        let mock_round = rates
+            .priced(
+                crate::pricing::CostBasis::Metered,
+                "mock",
+                priced_legs(1_000, 100),
+            )
+            .usd
+            .expect("mock is listed");
+        let other_round = rates
+            .priced(
+                crate::pricing::CostBasis::Metered,
+                "other",
+                priced_legs(500, 50),
+            )
+            .usd
+            .expect("other is listed");
+        assert!((first.cost_usd.expect("priced") - mock_round).abs() < 1e-12);
+        assert!(
+            (second.cost_usd.expect("priced") - (mock_round + other_round)).abs() < 1e-12,
+            "the second round is priced under its own model: {second:?}"
+        );
+        assert_eq!((second.calls, second.input, second.output), (2, 1_500, 150));
+    }
+
+    /// A round whose model the catalogue does not list states no cost. The run's total is then
+    /// null and counts that round as unpriced, never a sum of the rounds that were priced (WS27 S9).
+    #[tokio::test]
+    async fn agent_run_usage_states_no_cost_for_an_unlisted_model() {
+        let server = wiremock::MockServer::start().await;
+        let pricing = run_usage_pricing(&server).await;
+        let mut run =
+            super::AgentRunUsage::start(&pricing, "mock", &super::AgentRoute::default()).await;
+
+        let first = progress_snapshot(run.record_round(&round_report(1, 1_000, 100, "mock", "")));
+        let second =
+            progress_snapshot(run.record_round(&round_report(2, 1_500, 150, "unlisted", "")));
+        assert!(first.cost_usd.is_some());
+        assert_eq!((second.cost_usd, second.unpriced_calls), (None, 1));
+
+        let usage = mp_contracts::model_plane::v1::RunUsage {
+            inference_rounds: 2,
+            input_tokens: 1_500,
+            output_tokens: 150,
+            legs: vec![
+                run_leg("", "mock", 1_000, 100, 1),
+                run_leg("", "unlisted", 500, 50, 1),
+            ],
+            ..Default::default()
+        };
+        let (total, unpriced_rounds) = run.total(&usage);
+        assert_eq!((total.cost_usd, unpriced_rounds), (None, 1));
+    }
+
+    /// A subscription round adds its tokens and no dollars. The final total states the subscription
+    /// basis and a known zero, not a null cost, so the run is not shown as unpriced (WS27 S9).
+    #[tokio::test]
+    async fn agent_run_usage_states_a_subscription_run_as_included_and_not_unpriced() {
+        let server = wiremock::MockServer::start().await;
+        let pricing = run_usage_pricing(&server).await;
+        let route = super::AgentRoute {
+            provider_hint: "openai-codex-subscription".to_owned(),
+            subscription_connection_id: "conn_1".to_owned(),
+        };
+        let mut run = super::AgentRunUsage::start(&pricing, "gpt-5.6-terra", &route).await;
+
+        let progress = progress_snapshot(run.record_round(&round_report(
+            1,
+            1_000,
+            100,
+            "gpt-5.6-terra",
+            "openai-codex-subscription",
+        )));
+        assert_eq!(
+            (progress.cost_usd, progress.basis, progress.unpriced_calls),
+            (None, Some(crate::pricing::CostBasis::Subscription), 0)
+        );
+
+        let usage = mp_contracts::model_plane::v1::RunUsage {
+            inference_rounds: 1,
+            input_tokens: 1_000,
+            output_tokens: 100,
+            legs: vec![run_leg(
+                "openai-codex-subscription",
+                "gpt-5.6-terra",
+                1_000,
+                100,
+                1,
+            )],
+            ..Default::default()
+        };
+        let (total, unpriced_rounds) = run.total(&usage);
+        assert_eq!(
+            (super::frame_cost_usd(&total), total.basis, unpriced_rounds),
+            (Some(0.0), Some(crate::pricing::CostBasis::Subscription), 0)
+        );
+    }
+
+    /// Once every round has reported, the final total prices the same legs under the same snapshot,
+    /// so it agrees with the cost the progress frames streamed (WS27 S9).
+    #[tokio::test]
+    async fn agent_run_usage_final_total_agrees_with_the_progress_it_streamed() {
+        let server = wiremock::MockServer::start().await;
+        let pricing = run_usage_pricing(&server).await;
+        let mut run =
+            super::AgentRunUsage::start(&pricing, "mock", &super::AgentRoute::default()).await;
+
+        run.record_round(&round_report(1, 1_000, 100, "mock", ""));
+        let streamed =
+            progress_snapshot(run.record_round(&round_report(2, 1_500, 150, "other", "")))
+                .cost_usd
+                .expect("both models are listed");
+
+        let usage = mp_contracts::model_plane::v1::RunUsage {
+            inference_rounds: 2,
+            input_tokens: 1_500,
+            output_tokens: 150,
+            legs: vec![
+                run_leg("", "mock", 1_000, 100, 1),
+                run_leg("", "other", 500, 50, 1),
+            ],
+            ..Default::default()
+        };
+        let (total, unpriced_rounds) = run.total(&usage);
+        assert!((total.cost_usd.expect("priced") - streamed).abs() < 1e-12);
+        assert_eq!(unpriced_rounds, 0);
+    }
+
+    /// A report behind the last one adds no tokens, so a late or reordered report cannot inflate the
+    /// run (WS27 S9).
+    #[tokio::test]
+    async fn agent_run_usage_ignores_a_report_that_goes_backwards() {
+        let server = wiremock::MockServer::start().await;
+        let pricing = run_usage_pricing(&server).await;
+        let mut run =
+            super::AgentRunUsage::start(&pricing, "mock", &super::AgentRoute::default()).await;
+
+        let ahead = progress_snapshot(run.record_round(&round_report(2, 200, 20, "mock", "")));
+        let behind = progress_snapshot(run.record_round(&round_report(1, 100, 10, "mock", "")));
+        assert_eq!((behind.input, behind.output), (200, 20));
+        assert_eq!(
+            behind.calls, 2,
+            "the late report is still one reported call"
+        );
+        assert_eq!(behind.cost_usd, ahead.cost_usd);
     }
 
     fn turn_call(
@@ -15263,6 +16996,19 @@ mod tests {
         assert_eq!(opened.correlation_id, request_id);
     }
 
+    /// With the local context switch off the date notice is the UTC sentence it has always been, byte for
+    /// byte, so no prompt changes until the switch is turned on (EP-8-S1).
+    #[test]
+    fn locale_context_switch_off_notice_is_byte_identical() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-11-02T09:14:00Z")
+            .expect("a valid instant")
+            .with_timezone(&chrono::Utc);
+        assert_eq!(
+            super::temporal_awareness_message(now, None).content,
+            "Today's real date is 2026-11-02. Your training data has a cutoff before this date, so anything that changes over time — population counts, prices, exchange rates, software versions, current office-holders, schedules, sports results, or any other figure that could be stale — may no longer match what you remember. When the web_search tool is available this turn, use it before stating such a fact so your answer reflects the present, not your training snapshot. When it is not available, do not state a time-sensitive fact as current, unqualified truth: say what you know from training and clearly note it may be outdated (for example, \"as of my training data, roughly X — this may have changed\") rather than presenting a remembered figure as if it were verified today.",
+        );
+    }
+
     /// The regression this pins: nothing ever told the model today's real date,
     /// so it had no basis to suspect a remembered fact (a city's population, a
     /// software version) might be stale — a real turn stated a 2024 figure as
@@ -15274,7 +17020,7 @@ mod tests {
     /// unavailable-search turn like the Oslo one.
     #[test]
     fn temporal_awareness_message_always_carries_the_real_date() {
-        let message = super::temporal_awareness_message();
+        let message = super::temporal_awareness_message(chrono::Utc::now(), None);
         assert_eq!(message.role, "system");
         let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
         assert!(
@@ -15671,6 +17417,7 @@ mod tests {
             &super::VerifiedInferenceBearer::for_test("inference-token"),
             None,
             None,
+            None,
         )
         .expect("build execution request");
 
@@ -15721,6 +17468,7 @@ mod tests {
             &super::VerifiedInferenceBearer::for_test("inference-token"),
             Some(&super::VerifiedSandboxBearer::for_test("sandbox-token")),
             None,
+            None,
         )
         .expect("build execution request");
 
@@ -15747,6 +17495,7 @@ mod tests {
                 &super::VerifiedInferenceBearer::for_test("inference-token"),
                 None,
                 browser,
+                None,
             )
             .expect("build execution request")
         };
@@ -15771,6 +17520,34 @@ mod tests {
             header(&dispatch(true, Some(&browser))),
             None,
             "a zero-retention run never carries one"
+        );
+    }
+
+    #[test]
+    fn a_loop_stop_is_worded_as_one_and_an_unknown_code_is_the_generic_failure() {
+        use mp_contracts::model_plane::v1::RunAgentResponse;
+        let stopped = RunAgentResponse {
+            status: "failed".to_owned(),
+            loop_stop_code: LOOP_DETECTED_CODE.to_owned(),
+            ..Default::default()
+        };
+        assert_eq!(agent_failure_message(&stopped), LOOP_STOPPED_MESSAGE);
+        assert!(
+            agent_subscription_failure(&stopped, true).is_none(),
+            "a loop stop carries no subscription code"
+        );
+        let unknown = RunAgentResponse {
+            status: "failed".to_owned(),
+            loop_stop_code: "loop_exploded".to_owned(),
+            ..Default::default()
+        };
+        assert_eq!(
+            agent_failure_message(&unknown),
+            "The governed agent run failed."
+        );
+        assert_eq!(
+            agent_failure_message(&RunAgentResponse::default()),
+            "The governed agent run failed."
         );
     }
 
@@ -16202,6 +17979,7 @@ mod agentic_follow_tests {
                 recorder.lock().unwrap().push((id.clone(), started.elapsed()));
                 Some(Event::default().event("step_update").data(id))
             },
+            |_| None,
             &tx,
             stop,
         )
@@ -16303,6 +18081,83 @@ mod agentic_follow_tests {
             .collect();
         assert!(positions.windows(2).all(|pair| pair[0] < pair[1]), "{}", run.wire);
         assert_eq!(expect_response(run.result).status, "completed");
+    }
+
+    /// A usage report as execution-core publishes it after a counted round: the run's totals so
+    /// far.
+    fn usage_event(round: u32) -> OrchestrationEvent {
+        OrchestrationEvent {
+            event_id: format!("evt-usage-{round}"),
+            at: None,
+            event: Some(orchestration_event::Event::RunUsageProgress(
+                orchestration_event::RunUsageProgress {
+                    run_id: "run-1".to_owned(),
+                    round,
+                    input_tokens: u64::from(round),
+                    output_tokens: u64::from(round),
+                    model_used: "mock".to_owned(),
+                    ..Default::default()
+                },
+            )),
+        }
+    }
+
+    /// Each usage report goes through the usage mapper, and the frame it yields reaches the client
+    /// in event order beside the step frames (WS27 S9). The step mapper never sees a usage report.
+    #[tokio::test(start_paused = true)]
+    async fn follow_agentic_run_forwards_each_usage_frame_in_event_order() {
+        let (dispatch, _) = dispatch_after(secs(5), Ok(completed()));
+        let tail = open_tail(vec![
+            (secs(1), usage_event(1)),
+            (secs(2), plan_event("plan-1")),
+            (secs(3), usage_event(2)),
+        ]);
+        let usage_seen = Arc::new(Mutex::new(Vec::new()));
+        let recorder = usage_seen.clone();
+        let (tx, rx) = mpsc::channel(32);
+        let result = follow_agentic_run(
+            tail,
+            dispatch,
+            Instant::now() + secs(120),
+            AGENTIC_EVENT_DRAIN_GRACE,
+            |event| match event.event.as_ref() {
+                Some(orchestration_event::Event::PlanTransitioned(_)) => Some(
+                    Event::default()
+                        .event("step_update")
+                        .data(plan_id_of(event)),
+                ),
+                _ => None,
+            },
+            move |event| match event.event.as_ref() {
+                Some(orchestration_event::Event::RunUsageProgress(progress)) => {
+                    recorder.lock().unwrap().push(progress.round);
+                    Some(
+                        Event::default()
+                            .event("usage_progress")
+                            .data(format!("round-{}", progress.round)),
+                    )
+                }
+                _ => None,
+            },
+            &tx,
+            &AtomicBool::new(false),
+        )
+        .await;
+        drop(tx);
+        let wire = wire(ReceiverStream::new(rx)).await;
+
+        assert_eq!(
+            *usage_seen.lock().unwrap(),
+            vec![1, 2],
+            "one usage frame per report, in order"
+        );
+        assert_eq!(wire.matches("event: usage_progress").count(), 2, "{wire}");
+        assert!(
+            wire.find("data: round-1").expect("the first usage frame")
+                < wire.find("data: plan-1").expect("the step frame"),
+            "{wire}"
+        );
+        assert_eq!(expect_response(result).status, "completed");
     }
 
     /// The last step update of a run can land just behind its result. It is
@@ -17651,6 +19506,7 @@ fn run_agent_request_is_buildable(
         inference_bearer,
         None,
         None,
+        None,
     )
     .map(|_| ())
 }
@@ -18373,11 +20229,16 @@ pub(crate) async fn continue_run(
             false,
             // A continuation is never an execute turn: its authority is the pause's.
             false,
+            // Nor an approve-then-execute turn (WS14 S2): it names no plan.
+            None,
             execution_bearer,
             data_plane_bearer,
             model_bearer,
             inference_bearer,
             String::new(),
+            // A continuation is never Space-scoped here (its authority is the pause's), so it carries no
+            // Space retrieval (WS18-S5).
+            None,
             None,
             // A continuation never forwards a browser bearer (WS21-S2).
             None,
@@ -18392,6 +20253,8 @@ pub(crate) async fn continue_run(
             Vec::new(),
             // A continuation carries no effort level (WS11-S8).
             0,
+            // Nor a role catalogue: it carries no run context (EP-6 S10).
+            Vec::new(),
         )
     };
     if !resume_enabled {
@@ -18867,7 +20730,7 @@ mod continue_run_tests {
         // request sits behind the decision, exactly once.
         let gate = plan_context_gate();
         let decision = gate
-            .find("if plan_context_wanted(plan_mode, resume.is_some()) {")
+            .find("if plan_context_wanted(plan_mode, resume.is_some())")
             .expect("the plan context is requested only behind plan_context_wanted");
         let request = gate
             .find("approved_plan_context(")
@@ -20176,6 +22039,7 @@ mod continue_run_tests {
                 &inference,
                 None,
                 None,
+                None,
             )
             .expect_err(broken);
             assert_eq!(launch.code(), refused.code(), "{broken}: the pre-check is the launch's check");
@@ -20267,11 +22131,13 @@ mod continue_run_tests {
             CONTINUE_PERMISSION_MODE.to_owned(),
             false,
             false,
+            None,
             execution,
             data_plane,
             session,
             inference,
             String::new(),
+            None,
             None,
             None,
             AgentRoute::default(),
@@ -20282,6 +22148,7 @@ mod continue_run_tests {
             Vec::new(),
             Vec::new(),
             0,
+            Vec::new(),
         );
         let frames = frames_of_stream(stream).await;
         let names: Vec<&str> = frames.iter().map(|(name, _)| name.as_str()).collect();
@@ -20318,7 +22185,8 @@ mod continue_run_tests {
         }
         let stream = squash(&stream_code());
         for code in CONTINUE_SPENT_RUN_END_FRAMES {
-            let call = format!("run_end_error_event( &request_id, &run.run_id, \"{code}\", \"");
+            // The message may be a literal or a bound value (a loop stop's wording, WS25-S2).
+            let call = format!("run_end_error_event( &request_id, &run.run_id, \"{code}\", ");
             assert_eq!(stream.matches(&call).count(), 1, "{code}: exactly one site");
             let at = stream.find(&call).expect("the call is in the stream");
             let call = &stream[at..];
@@ -21348,9 +23216,9 @@ mod continue_run_tests {
             "upstream_unavailable",
             "reauth_required",
         ] {
-            let event = run_parked_event("req-1", "run-42", &parked_answer(reason, "2026-10-20T12:00:00Z"))
+            let event = run_parked_event("run-42", &parked_answer(reason, "2026-10-20T12:00:00Z"))
                 .unwrap_or_else(|| panic!("{reason} is a known park reason"));
-            let (name, frame) = frame_of(event).await;
+            let (name, frame) = frame_of(event.to_sse("req-1")).await;
             assert_eq!(name, "run_parked");
             assert_eq!(
                 frame,
@@ -21365,9 +23233,9 @@ mod continue_run_tests {
             );
         }
         // An unreadable time is null, never echoed.
-        let event = run_parked_event("req-1", "run-42", &parked_answer("provider_exhausted", "soon, maybe"))
+        let event = run_parked_event("run-42", &parked_answer("provider_exhausted", "soon, maybe"))
             .expect("a known reason");
-        let (_, frame) = frame_of(event).await;
+        let (_, frame) = frame_of(event.to_sse("req-1")).await;
         assert!(frame["resume_after"].is_null(), "{frame}");
     }
 
@@ -21377,14 +23245,14 @@ mod continue_run_tests {
     fn an_unknown_park_reason_is_agent_run_state_unknown() {
         for reason in ["", "Provider_Exhausted", "provider_exhausted ", "a sentence"] {
             assert!(
-                run_parked_event("req-1", "run-42", &parked_answer(reason, "")).is_none(),
+                run_parked_event("run-42", &parked_answer(reason, "")).is_none(),
                 "{reason:?}"
             );
         }
         let stream = squash(&stream_code());
         assert!(
             stream.contains(
-                "AgenticRunOutcome::Parked if run_parked_event(&request_id, &run.run_id, &response).is_some() =>"
+                "AgenticRunOutcome::Parked if run_parked_event(&run.run_id, &response).is_some() =>"
             ),
             "{stream}"
         );
@@ -21417,6 +23285,96 @@ mod continue_run_tests {
         assert!(
             frame.get("reason").is_none() && frame.get("park_reason").is_none(),
             "the park reason is never broadcast: {frame}"
+        );
+    }
+
+    #[test]
+    fn run_usage_progress_is_never_forwarded_raw() {
+        let event = OrchestrationEvent {
+            event: Some(orchestration_event::Event::RunUsageProgress(
+                orchestration_event::RunUsageProgress {
+                    run_id: "run-42".to_owned(),
+                    round: 1,
+                    ..Default::default()
+                },
+            )),
+            ..Default::default()
+        };
+        assert!(
+            super::orchestration_event_to_sse(&event).is_none(),
+            "the meter reaches the stream as its own usage_progress frame, never as a raw event"
+        );
+        assert!(
+            super::orchestration_event_to_step_update(&event).is_none(),
+            "a meter is not a step"
+        );
+    }
+
+    #[tokio::test]
+    async fn orchestration_browser_pause_resume_frames_carry_reason_only_when_set() {
+        let paused = |reason: &str| OrchestrationEvent {
+            event: Some(orchestration_event::Event::BrowserRunPaused(
+                orchestration_event::BrowserRunPaused {
+                    run_id: "run-42".to_owned(),
+                    plan_id: "plan-1".to_owned(),
+                    reason: reason.to_owned(),
+                },
+            )),
+            ..Default::default()
+        };
+        let (name, frame) = frame_of(orchestration_event_to_sse(&paused("")).expect("a frame")).await;
+        assert_eq!(name, "browser_run_paused");
+        assert!(frame.get("reason").is_none(), "{frame}");
+        let (_, frame) =
+            frame_of(orchestration_event_to_sse(&paused("user_took_over")).expect("a frame")).await;
+        assert_eq!(frame["reason"], "user_took_over");
+
+        let resumed = OrchestrationEvent {
+            event: Some(orchestration_event::Event::BrowserRunResumed(
+                orchestration_event::BrowserRunResumed {
+                    run_id: "run-42".to_owned(),
+                    plan_id: "plan-1".to_owned(),
+                    reason: "control_returned".to_owned(),
+                },
+            )),
+            ..Default::default()
+        };
+        let (name, frame) = frame_of(orchestration_event_to_sse(&resumed).expect("a frame")).await;
+        assert_eq!(name, "browser_run_resumed");
+        assert_eq!(frame["reason"], "control_returned");
+        let Some(crate::sse_events::ChatEvent::StepUpdate { detail, .. }) =
+            orchestration_event_to_step_update(&resumed)
+        else {
+            panic!("a resume is a step");
+        };
+        assert!(detail.contains("given back"), "{detail}");
+    }
+
+    #[tokio::test]
+    async fn orchestration_browser_attach_shared_jar_frame_is_ids_only() {
+        let event = OrchestrationEvent {
+            event: Some(orchestration_event::Event::BrowserAttachSharedJar(
+                orchestration_event::BrowserAttachSharedJar {
+                    run_id: "run-42".to_owned(),
+                    plan_id: "plan-1".to_owned(),
+                    attach_id: "att-1".to_owned(),
+                    session_run_id: "qrun-9".to_owned(),
+                    tab_id: "tab-3".to_owned(),
+                },
+            )),
+            ..Default::default()
+        };
+        let (name, frame) = frame_of(orchestration_event_to_sse(&event).expect("a frame")).await;
+        assert_eq!(name, "browser_attach_shared_jar");
+        let mut keys: Vec<&str> = frame.as_object().unwrap().keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            ["attach_id", "plan_id", "run_id", "session_run_id", "tab_id"]
+        );
+        assert!(
+            orchestration_event_to_step_update(&event).is_none(),
+            "an audit event is not a chat step"
         );
     }
 
@@ -21661,11 +23619,13 @@ mod continue_run_tests {
             CONTINUE_PERMISSION_MODE.to_owned(),
             false,
             false,
+            None,
             execution,
             data_plane,
             session,
             inference,
             String::new(),
+            None,
             None,
             None,
             AgentRoute::default(),
@@ -21676,6 +23636,7 @@ mod continue_run_tests {
             Vec::new(),
             Vec::new(),
             0,
+            Vec::new(),
         );
         let frames = frames_of_stream(stream).await;
         let names: Vec<&str> = frames.iter().map(|(name, _)| name.as_str()).collect();
@@ -21728,6 +23689,133 @@ mod continue_run_tests {
             agent_subscription_failure(&failed, true).map(|failure| failure.code),
             Some("subscription_usage_limit")
         );
+    }
+}
+
+/// WS14 S2, approve then execute: the gateway's decisions. A plan approval answers `execute_now`
+/// only when every condition holds; an execute turn names a plan only while its switch is on; the
+/// grant it runs under names that plan and is the one Session Core bound. The order of the claim,
+/// the bind and the dispatch is pinned by name here and driven end to end on the proof stack.
+#[cfg(test)]
+mod approve_then_execute_tests {
+    use super::*;
+    use mp_contracts::model_plane::v1::AutonomyRung as Rung;
+
+    fn request(extra: serde_json::Value) -> InvokeRequest {
+        let mut body = serde_json::json!({ "content": "run the plan" });
+        body.as_object_mut()
+            .expect("object")
+            .extend(extra.as_object().expect("object").clone());
+        serde_json::from_value(body).expect("a wire body parses")
+    }
+
+    fn grant(rung: Option<Rung>, plan: Option<&str>) -> crate::session_flow::ThreadGrant {
+        crate::session_flow::ThreadGrant {
+            rung,
+            approved_plan_id: plan.map(str::to_owned),
+            expires_at_unix: None,
+            read_failed: false,
+        }
+    }
+
+    #[test]
+    fn the_switch_takes_only_the_literal_true() {
+        assert!(plan_execute_on_approve_from(Some("true")));
+        assert!(plan_execute_on_approve_from(Some(" true ")));
+        for value in [None, Some(""), Some("false"), Some("1"), Some("yes"), Some("on")] {
+            assert!(!plan_execute_on_approve_from(value), "{value:?} must not enable the path");
+        }
+    }
+
+    #[test]
+    fn approval_answers_execute_now_only_when_all_three_conditions_hold() {
+        for switch_on in [false, true] {
+            for recorded in [false, true] {
+                for accepted in [false, true] {
+                    let expected = if switch_on && recorded && accepted {
+                        "execute_now"
+                    } else {
+                        "next_message"
+                    };
+                    assert_eq!(
+                        approval_continuation(switch_on, recorded, accepted),
+                        expected,
+                        "switch {switch_on}, recorded {recorded}, accepted {accepted}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_plan_field_is_ignored_while_its_switch_is_off() {
+        let req = request(serde_json::json!({ "execute_granted": true, "approvedPlanId": " plan-1 " }));
+        assert_eq!(approved_plan_of(&req, false), None, "switch off: the request runs as before");
+        assert_eq!(approved_plan_of(&req, true), Some("plan-1"), "trimmed when the switch is on");
+        let blank = request(serde_json::json!({ "execute_granted": true, "approved_plan_id": "   " }));
+        assert_eq!(approved_plan_of(&blank, true), None, "a blank id names no plan");
+        let absent = request(serde_json::json!({ "execute_granted": true }));
+        assert_eq!(approved_plan_of(&absent, true), None, "no field, no plan");
+    }
+
+    #[test]
+    fn an_execute_turn_runs_only_under_a_grant_that_names_its_plan() {
+        assert!(grant_names_plan(&grant(Some(Rung::WorkspaceWrite), Some("plan-1")), "plan-1"));
+        assert!(
+            !grant_names_plan(&grant(Some(Rung::WorkspaceWrite), Some("plan-1")), "plan-2"),
+            "a grant for another plan"
+        );
+        assert!(!grant_names_plan(&grant(None, Some("plan-1")), "plan-1"), "no rung stated");
+        assert!(!grant_names_plan(&grant(Some(Rung::WorkspaceWrite), None), "plan-1"), "no plan named");
+        assert!(
+            !grant_names_plan(&crate::session_flow::ThreadGrant::unreadable(), "plan-1"),
+            "an unanswered read is not a grant"
+        );
+    }
+
+    #[test]
+    fn a_bind_is_used_only_when_it_states_a_rung_for_the_plan_asked_for() {
+        let answer = |rung: Rung, plan: &str| mp_contracts::model_plane::v1::BindGrantToRunResponse {
+            granted_rung: rung as i32,
+            justification: "writes the report".to_owned(),
+            approved_plan_id: plan.to_owned(),
+        };
+        let bound = bound_grant_from(answer(Rung::WorkspaceWrite, "plan-1"), "plan-1")
+            .expect("the bound grant");
+        assert_eq!(bound.rung, Some(Rung::WorkspaceWrite));
+        assert_eq!(bound.approved_plan_id.as_deref(), Some("plan-1"));
+        assert!(!bound.read_failed);
+        assert!(
+            bound_grant_from(answer(Rung::WorkspaceWrite, "plan-2"), "plan-1").is_err(),
+            "a bind of another plan is refused"
+        );
+        assert!(
+            bound_grant_from(answer(Rung::Unspecified, "plan-1"), "plan-1").is_err(),
+            "a bind that states no rung is refused"
+        );
+    }
+
+    #[test]
+    fn the_bind_follows_the_claim_and_precedes_the_dispatch() {
+        let source = include_str!("sse.rs").replace("\r\n", "\n");
+        let start = source.find("fn agentic_run_stream(").expect("the stream launch");
+        let rest = &source[start..];
+        let body = &rest[..rest.find("\n}\n").expect("the end of the launch")];
+        let claim = body.find("approved_plan_context(").expect("the claim");
+        let bind = body.find("approve_then_execute_grant(").expect("the bind");
+        let dispatch = body.find("spawn_run_dispatch(").expect("the dispatch");
+        assert!(claim < bind && bind < dispatch, "the claim, then the bind, then the dispatch");
+    }
+
+    #[test]
+    fn the_pre_run_check_sits_before_the_stream_starts() {
+        let source = include_str!("sse.rs").replace("\r\n", "\n");
+        let start = source.find("pub async fn invoke_stream_sse(").expect("the invoke handler");
+        let rest = &source[start..];
+        let body = &rest[..rest.find("\n}\n").expect("the end of the handler")];
+        let check = body.find("approved_plan_of(").expect("the pre-run check");
+        let stream = body.find("agentic_run_stream(").expect("the stream call");
+        assert!(check < stream, "the check runs before the run is started");
     }
 }
 
@@ -22300,6 +24388,28 @@ mod execute_turn_tests {
         );
     }
 
+    /// The budget's routing rides only the progress frame of the call it moved: a frame that states it carries
+    /// the closed token, and one that does not keeps the shape it had before the note existed (WS27-S7).
+    #[test]
+    fn a_routed_progress_frame_states_its_routing_and_an_unrouted_one_does_not() {
+        use crate::usage_meter::CallPhase::ToolRound;
+        let snapshot = crate::usage_meter::UsageMeter::default().snapshot();
+        let routed = crate::sse_events::ChatEvent::UsageProgress {
+            phase: ToolRound,
+            snapshot,
+            ceiling: None,
+            routing: Some("tier_shifted"),
+        };
+        assert_eq!(routed.payload("req-route")["routing"], "tier_shifted");
+        let unrouted = crate::sse_events::ChatEvent::UsageProgress {
+            phase: ToolRound,
+            snapshot,
+            ceiling: None,
+            routing: None,
+        };
+        assert!(unrouted.payload("req-route").get("routing").is_none());
+    }
+
     /// Only an ordinary request's flag reaches the stream; a continuation passes false; and the
     /// refusal of an unavailable grant keeps the run's terminalization (`dispatch_rejected`).
     #[test]
@@ -22307,8 +24417,8 @@ mod execute_turn_tests {
         let invoke = code_of("pub async fn invoke_stream_sse(", "\n}\n");
         assert_eq!(
             invoke.matches("req.execute_granted").count(),
-            // the waiver refusal, and the one stream call
-            2,
+            // the waiver refusal, the approve-then-execute shape check (WS14 S2), and the one stream call
+            3,
             "{invoke}"
         );
         let stream_call = &invoke[invoke.find("agentic_run_stream(").expect("the stream call")..];
@@ -22675,6 +24785,83 @@ mod do_attachment_tests {
         }));
     }
 
+    #[test]
+    fn the_agentic_space_retrieval_switch_is_strict() {
+        for value in [
+            None,
+            Some(""),
+            Some("1"),
+            Some("TRUE"),
+            Some(" true"),
+            Some("yes"),
+            Some("false"),
+        ] {
+            let value = value.map(str::to_owned);
+            assert!(
+                !space_agentic_retrieval_enabled_with(&|_| value.clone()),
+                "{value:?}"
+            );
+        }
+        assert!(space_agentic_retrieval_enabled_with(&|key| {
+            (key == SPACE_AGENTIC_RETRIEVAL_VAR).then(|| "true".to_owned())
+        }));
+    }
+
+    /// The header follows the Space and the switch alone: a run that is not Space-scoped, or any run with the
+    /// switch off, carries none; a Space-scoped run with the switch on carries its decision, and an empty value
+    /// when its turn holds none (WS18-S5).
+    #[test]
+    fn a_do_run_carries_its_space_retrieval_only_when_scoped_and_switched_on() {
+        assert_eq!(agentic_space_retrieval("room-1", Some("decision-1"), false), None);
+        assert_eq!(agentic_space_retrieval("", Some("decision-1"), true), None);
+        assert_eq!(agentic_space_retrieval("", None, true), None);
+        assert_eq!(
+            agentic_space_retrieval("room-1", Some("decision-1"), true),
+            Some("decision-1".to_owned())
+        );
+        assert_eq!(
+            agentic_space_retrieval("room-1", Some(" decision-1 "), true),
+            Some("decision-1".to_owned())
+        );
+        assert_eq!(
+            agentic_space_retrieval("room-1", Some(""), true),
+            Some(String::new()),
+            "a forbidden decision is passed empty, so the run's search is withheld"
+        );
+        assert_eq!(
+            agentic_space_retrieval("room-1", None, true),
+            Some(String::new()),
+            "a Space run with no decision is withheld, never left without the header"
+        );
+    }
+
+    #[test]
+    fn execution_dispatch_forwards_the_space_retrieval_only_when_present() {
+        let header = |space_retrieval: Option<&str>| {
+            super::authenticated_run_agent_request(
+                super::RunAgentRequest::default(),
+                &super::VerifiedExecutionBearer::for_test("execution-token"),
+                &super::VerifiedBearer::for_test("data-token"),
+                &super::VerifiedModelBearer::for_test("session-token"),
+                &super::VerifiedInferenceBearer::for_test("inference-token"),
+                None,
+                None,
+                space_retrieval,
+            )
+            .expect("build execution request")
+            .metadata()
+            .get("x-space-retrieval-authorization")
+            .map(|value| value.to_str().expect("ascii metadata").to_owned())
+        };
+        assert_eq!(header(None), None, "a run that is not Space-scoped carries no header");
+        assert_eq!(header(Some("decision-1")), Some("decision-1".to_owned()));
+        assert_eq!(
+            header(Some("")),
+            Some(String::new()),
+            "a Space-scoped run with no decision says so, rather than sending none"
+        );
+    }
+
     fn space_decision(retrieval_token: &str) -> crate::session_flow::ThreadSpaceContext {
         crate::session_flow::ThreadSpaceContext {
             space_id: "room-1".to_owned(),
@@ -22927,5 +25114,79 @@ mod ask_turn_tests {
             + declared.len();
         let end = inference[start..].find('"').expect("a closing quote");
         assert_eq!(&inference[start..start + end], VISION_UNSUPPORTED);
+    }
+}
+
+/// EP-6 S10: the agent role catalogue a Do run carries to execution-core.
+#[cfg(test)]
+mod agent_role_catalogue_tests {
+    use super::*;
+
+    fn role(agent_ref: &str) -> Value {
+        json!({
+            "agent_ref": agent_ref,
+            "version": 2,
+            "digest": "sha256:ab",
+            "name": "Analyst",
+            "instructions": "Answer briefly.",
+            "tool_capability_ids": ["cap.retrieval.query"],
+            "autonomy_cap": "read_only",
+        })
+    }
+
+    #[test]
+    fn the_catalogue_switch_reads_only_the_literal_true() {
+        let with = |value: Option<&str>| {
+            let value = value.map(str::to_owned);
+            subagent_role_catalogue_enabled_with(&move |key: &str| {
+                (key == SUBAGENT_ROLE_CATALOGUE_VAR).then(|| value.clone()).flatten()
+            })
+        };
+        assert!(with(Some("true")));
+        for off in [None, Some(""), Some("1"), Some("TRUE"), Some("yes")] {
+            assert!(!with(off), "{off:?} must not enable the catalogue");
+        }
+    }
+
+    #[test]
+    fn no_catalogue_with_the_switch_off_or_on_a_zdr_or_waived_turn() {
+        let body = json!([role("analyst")]);
+        assert!(compose_agent_roles(false, Some(&body), false).is_empty());
+        assert!(compose_agent_roles(true, Some(&body), true).is_empty());
+        assert!(compose_agent_roles(true, None, false).is_empty());
+        assert!(compose_agent_roles(true, Some(&json!("analyst")), false).is_empty());
+        let roles = compose_agent_roles(true, Some(&body), false);
+        assert_eq!(roles.len(), 1);
+        assert_eq!(roles[0].agent_ref, "analyst");
+        assert_eq!(roles[0].version, 2);
+        assert_eq!(roles[0].tool_capability_ids, ["cap.retrieval.query"]);
+    }
+
+    #[test]
+    fn the_catalogue_is_bounded() {
+        let many: Vec<Value> = (0..12).map(|n| role(&format!("agent{n}"))).collect();
+        assert_eq!(
+            compose_agent_roles(true, Some(&Value::Array(many)), false).len(),
+            MAX_AGENT_ROLES
+        );
+
+        let mut long = role("long");
+        long["instructions"] = json!("æ".repeat(MAX_AGENT_ROLE_INSTRUCTIONS_BYTES));
+        let roles = compose_agent_roles(true, Some(&json!([long])), false);
+        assert!(roles[0].instructions.len() <= MAX_AGENT_ROLE_INSTRUCTIONS_BYTES);
+        assert!(roles[0].instructions.starts_with('æ'));
+
+        let mut unversioned = role("v0");
+        unversioned["version"] = json!(0);
+        let mut widening = role("wide");
+        widening["autonomy_cap"] = json!("unrestricted");
+        let bad_ref = role("bad ref");
+        let roles = compose_agent_roles(
+            true,
+            Some(&json!([unversioned, widening, bad_ref, role("ok"), role("ok")])),
+            false,
+        );
+        let refs: Vec<&str> = roles.iter().map(|r| r.agent_ref.as_str()).collect();
+        assert_eq!(refs, ["ok"], "invalid entries and duplicates are left out");
     }
 }

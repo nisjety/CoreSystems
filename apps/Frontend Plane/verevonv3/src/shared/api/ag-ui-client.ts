@@ -196,6 +196,7 @@ export function toAgUiEvent(event: VerevonUiEvent): AgUiEvent | null {
     case 'lifecycle.retry':
     case 'lifecycle.compaction':
     case 'lifecycle.context':
+    case 'lifecycle.sandbox':
       return null
     case 'unknown':
       return null

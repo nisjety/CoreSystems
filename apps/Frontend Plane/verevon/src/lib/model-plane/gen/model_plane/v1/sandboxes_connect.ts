@@ -3,7 +3,7 @@
 /* eslint-disable */
 // @ts-nocheck
 
-import { AcquireLeaseRequest, AcquireLeaseResponse, ActivateLeaseRequest, ActivateLeaseResponse, AppendProcessOutputRequest, AppendProcessOutputResponse, ApplyThreadWorkspaceChangesRequest, ApplyThreadWorkspaceChangesResponse, DeleteThreadWorkspaceRequest, DeleteThreadWorkspaceResponse, GetProcessRequest, GetProcessResponse, GetThreadWorkspaceRequest, GetThreadWorkspaceResponse, GetWorkspaceManifestRequest, GetWorkspaceManifestResponse, ListProcessesRequest, ListProcessesResponse, PromoteWorkspaceRequest, PromoteWorkspaceResponse, ReadProcessOutputRequest, ReadProcessOutputResponse, ReconcileProcessesRequest, ReconcileProcessesResponse, RegisterProcessRequest, RegisterProcessResponse, ReleaseLeaseRequest, ReleaseLeaseResponse, SandboxHealthRequest, SandboxHealthResponse, SnapshotRequest, SnapshotResponse, UpdateProcessStateRequest, UpdateProcessStateResponse } from "./sandboxes_pbjs";
+import { AcquireLeaseRequest, AcquireLeaseResponse, ActivateLeaseRequest, ActivateLeaseResponse, AppendProcessOutputRequest, AppendProcessOutputResponse, ApplyThreadWorkspaceChangesRequest, ApplyThreadWorkspaceChangesResponse, DeleteThreadWorkspaceRequest, DeleteThreadWorkspaceResponse, GetLeaseStatusRequest, GetLeaseStatusResponse, GetProcessRequest, GetProcessResponse, GetThreadWorkspaceRequest, GetThreadWorkspaceResponse, GetWorkspaceManifestRequest, GetWorkspaceManifestResponse, ListProcessesRequest, ListProcessesResponse, PromoteWorkspaceRequest, PromoteWorkspaceResponse, ReadProcessOutputRequest, ReadProcessOutputResponse, ReconcileProcessesRequest, ReconcileProcessesResponse, RegisterProcessRequest, RegisterProcessResponse, ReleaseLeaseRequest, ReleaseLeaseResponse, SandboxHealthRequest, SandboxHealthResponse, SnapshotRequest, SnapshotResponse, UpdateProcessStateRequest, UpdateProcessStateResponse } from "./sandboxes_pbjs";
 import { MethodKind } from "@bufbuild/protobuf";
 
 /**
@@ -217,8 +217,8 @@ export const SandboxManager = {
       kind: MethodKind.Unary,
     },
     /**
-     * Erase a thread's rows and its object-store prefix. Declared here, implemented
-     * with the retention sweeper (WS22-S5); until then it refuses every caller.
+     * Erase a thread's rows and its object-store prefix (WS22-S5). Owner-bound: the
+     * caller's own sandbox bearer; service principals are refused.
      *
      * @generated from rpc model_plane.v1.SandboxManager.DeleteThreadWorkspace
      */
@@ -226,6 +226,19 @@ export const SandboxManager = {
       name: "DeleteThreadWorkspace",
       I: DeleteThreadWorkspaceRequest,
       O: DeleteThreadWorkspaceResponse,
+      kind: MethodKind.Unary,
+    },
+    /**
+     * Read a lease's lifecycle: its state, the failure cause the latest thread-workspace apply recorded,
+     * when it was last used, and the counts its thread workspace holds (WS22-S6). Descriptive, like
+     * GetProcess: a released or expired lease still answers, so a client can say why its files are not kept.
+     *
+     * @generated from rpc model_plane.v1.SandboxManager.GetLeaseStatus
+     */
+    getLeaseStatus: {
+      name: "GetLeaseStatus",
+      I: GetLeaseStatusRequest,
+      O: GetLeaseStatusResponse,
       kind: MethodKind.Unary,
     },
   }

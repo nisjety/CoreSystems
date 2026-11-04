@@ -203,6 +203,35 @@ fn every_test_a_row_cites_exists() {
     assert!(missing.is_empty(), "tests the matrix cites that do not exist:\n  {}", missing.join("\n  "));
 }
 
+/// INNH-1 U3: the AI formats of `/v1/scrape` are refused under ZDR (ADR-4), and the
+/// matrix says so with the tests that fail if that stops being true. The model call
+/// is the one place page text would leave the process for a third party, so the
+/// scrape rows pin it by name.
+#[test]
+fn the_scrape_rows_pin_the_ai_format_zdr_refusal() {
+    let row = |id: &str| ROWS.iter().find(|row| row.id == id).unwrap_or_else(|| panic!("no `{id}` row"));
+
+    let scrape = row("scrape");
+    for needle in ["json, summary, question, highlights", "ZDR_UNAVAILABLE", "no Model Plane call", "ADR-4"] {
+        assert!(scrape.basis.contains(needle), "the scrape basis no longer says `{needle}`");
+    }
+    for test in [
+        "ai_formats::zdr_skips_every_format_with_no_model_call_and_stores_nothing",
+        "ai_formats_real_token::a_zdr_org_user_gets_every_format_skipped_even_when_the_body_says_zdr_false",
+    ] {
+        assert!(scrape.enforced_by.contains(&test), "the scrape row does not cite {test}");
+    }
+
+    let stream = row("scrape_stream");
+    assert!(stream.basis.contains("unsupported_in_stream"), "the stream basis no longer says it refuses AI formats");
+    assert!(
+        stream
+            .enforced_by
+            .contains(&"ai_formats::the_stream_route_refuses_ai_formats_before_any_fetch"),
+        "the stream row does not cite the stream refusal test"
+    );
+}
+
 #[test]
 fn every_enforced_honouring_row_cites_a_test_or_says_why_it_cannot() {
     use quarry_core::zdr_matrix::{Status, Treatment};
@@ -384,11 +413,20 @@ const PENDING_FEATURES: &[&str] = &[
     "persistent_profile",
     "resume",
     "scrape_record_read",
+    // INNH-4: `GET /v1/change/diff` returns stored page text and is refused for a ZDR reader.
+    "change_diff_read",
     // D-B2-zdr-pins: the W2 routes' own refusals. `job_error_urls`: a crawl, batch or job
     // errors read names the URL of every page that failed (WS15.L1). `agent_attach`: the
     // agent attachment to a person's live run is refused for a ZDR run (WS8.F).
     "job_error_urls",
     "agent_attach",
+    // INNH-12: a job results read names the URL and title of every page the job fetched.
+    "job_result_urls",
+    // INNH-5: a webhook subscription pushes page URLs and fingerprints off-process; refused to create under ZDR.
+    "webhook_off_process",
+    // INNH-8: `/v1/answer` and `/v1/answer/stream` are refused under ZDR (ADR-4), because the Model
+    // Plane hop carries no ZDR posture. The catalogue has no key for answer synthesis.
+    "answer_synthesis",
 ];
 
 fn refusals_named_by_the_matrix() -> (BTreeSet<&'static str>, BTreeSet<&'static str>) {
@@ -409,7 +447,7 @@ fn every_code_and_feature_the_matrix_names_is_in_the_closed_catalogue_list() {
     let catalogue_codes = catalogue_codes();
     let catalogue_features = catalogue_features();
     assert_eq!(catalogue_codes.len(), 10, "the plan's closed list has 10 codes");
-    assert_eq!(catalogue_features.len(), 30, "the plan's closed list has 30 feature keys");
+    assert_eq!(catalogue_features.len(), 32, "the closed list has 32 feature keys (the plan's 30 plus connector_read and message_versions, Model Plane W2-25)");
     let (codes, features) = refusals_named_by_the_matrix();
     assert!(!codes.is_empty() && !features.is_empty(), "no refusal row names a code: the premise is gone");
 

@@ -94,7 +94,29 @@ pub struct Claims {
     /// decides, and an unreadable claim fails closed there.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub web_policy: Option<serde_json::Value>,
+    /// INNH-10: the id of the API key an `api_key` principal token was minted for. Absent on
+    /// every user and service token. Never the key itself. Read it through [`Claims::key_id`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_id: Option<String>,
+    /// INNH-10: the user who owns the API key (the grant owner an `api_key` principal acts
+    /// for). Read it through [`Claims::key_owner_user_id`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acting_user_id: Option<String>,
 }
+
+/// INNH-10: the only scope an `api_key` principal token carries. The route fence
+/// (`crate::api_key::require_api_key_route_fence`) refuses a key token without it. It is not
+/// `browser:execute`, which is the Model Plane service scope.
+pub const SCOPE_BROWSER_AGENT: &str = "browser:agent";
+
+/// INNH-10: the longest `key_id` an `api_key` token may carry, in bytes.
+pub const API_KEY_ID_MAX_LEN: usize = 128;
+
+/// INNH-10: the longest `acting_user_id` an `api_key` token may carry, in bytes.
+pub const API_KEY_OWNER_MAX_LEN: usize = 256;
+
+/// INNH-10: the `sub` prefix of an `api_key` principal: `apikey:<key_id>`.
+pub const API_KEY_SUB_PREFIX: &str = "apikey:";
 
 impl Claims {
     /// Does the token carry the given scope?
@@ -106,6 +128,43 @@ impl Claims {
     #[must_use]
     pub fn is_service(&self) -> bool {
         self.principal_type.as_deref() == Some("service")
+    }
+
+    /// INNH-10: true only for a canonical `api_key` principal (a token auth-core minted for an
+    /// API key). It is neither a person nor a service: code that reads "not a service" as
+    /// "a person" must also ask this, or a key inherits a person's powers.
+    #[must_use]
+    pub fn is_api_key(&self) -> bool {
+        self.principal_type.as_deref() == Some("api_key")
+    }
+
+    /// INNH-10: the key id of an `api_key` principal, `None` for every other principal even
+    /// when the claim is present (it is refused at verification, this is the second guard).
+    #[must_use]
+    pub fn key_id(&self) -> Option<&str> {
+        if self.is_api_key() {
+            self.key_id.as_deref()
+        } else {
+            None
+        }
+    }
+
+    /// INNH-10: the user who owns the key behind an `api_key` principal. It is used for the
+    /// grant owner check and for attribution only, never as the run's actor (the actor is
+    /// `apikey:<key_id>`). `None` for every other principal.
+    #[must_use]
+    pub fn key_owner_user_id(&self) -> Option<&str> {
+        if self.is_api_key() {
+            self.acting_user_id.as_deref()
+        } else {
+            None
+        }
+    }
+
+    /// INNH-10: a person's session: neither a service nor an API key.
+    #[must_use]
+    pub fn is_person(&self) -> bool {
+        !self.is_service() && !self.is_api_key()
     }
 
     /// The ZDR posture the TOKEN itself imposes, as a floor under whatever the
@@ -123,6 +182,11 @@ impl Claims {
     /// A token without a `principal_type` is the legacy user shape
     /// (`validate_and_normalize_principal` accepts it only with a `user_id`
     /// and no `service_id`), so everything that is not a service counts.
+    ///
+    /// INNH-10: an `api_key` principal counts like a user. Its `zdr` claim is the
+    /// organization's standing posture, raised by the key's own ZDR flag (auth-core never
+    /// lowers it), so the claim is a property of the caller's tenant, not of a registry row.
+    /// `!is_service()` already says so; `api_key_token_zdr_floor_counts` pins it.
     #[must_use]
     pub fn zdr_floor(&self) -> bool {
         !self.is_service() && self.zdr == Some(true)
@@ -167,14 +231,44 @@ impl Claims {
                     || self.sub != service_id
                     || !self.user_id.trim().is_empty()
                     || !service_id.starts_with("service:")
+                    || self.key_id.is_some()
                 {
                     return Err(());
                 }
                 self.user_id = service_id.to_owned();
                 Ok(())
             }
+            Some("api_key") => {
+                // INNH-10: a canonical key principal is `sub = apikey:<key_id>`, a bounded
+                // printable key id, the owning user, and nothing that names a person or a
+                // service. The actor becomes the `sub`, as a service's becomes its service id,
+                // so a run a key starts is scoped to the key and never to its owner.
+                let key_id = self.key_id.as_deref().unwrap_or("");
+                let owner = self.acting_user_id.as_deref().unwrap_or("");
+                let key_id_ok = !key_id.is_empty()
+                    && key_id.len() <= API_KEY_ID_MAX_LEN
+                    && key_id.bytes().all(|b| (0x21..=0x7e).contains(&b));
+                let owner_ok = !owner.is_empty()
+                    && owner.len() <= API_KEY_OWNER_MAX_LEN
+                    && owner == owner.trim()
+                    && !owner.chars().any(char::is_control);
+                if !key_id_ok
+                    || !owner_ok
+                    || self.sub != format!("{API_KEY_SUB_PREFIX}{key_id}")
+                    || !self.user_id.trim().is_empty()
+                    || self.service_id.is_some()
+                {
+                    return Err(());
+                }
+                self.user_id = self.sub.clone();
+                Ok(())
+            }
             Some("user") | None => {
-                if self.user_id.trim().is_empty() || self.service_id.is_some() {
+                // A key id on a token that is not a key principal is ambiguous: refused.
+                if self.user_id.trim().is_empty()
+                    || self.service_id.is_some()
+                    || self.key_id.is_some()
+                {
                     Err(())
                 } else {
                     Ok(())
@@ -221,6 +315,13 @@ pub struct WebPolicyClaim {
 /// The check lives in the scrape handler (`scrape_actions::check_principal`), like
 /// `scrape:write` for ingest; a user token does not need it.
 pub const SCOPE_SCRAPE_INTERACT: &str = "scrape:interact";
+
+/// INNH-1: the scope a service principal needs to send AI formats (`json`,
+/// `summary`, `question`, `highlights`) on `POST /v1/scrape`. They spend model
+/// money, so a service gets them only by name. The check lives in the scrape
+/// handler (`scrape_contract::ai_formats::check_principal`); a user token needs
+/// no scope.
+pub const SCOPE_EXTRACT_AI: &str = "extract:ai";
 
 pub const WEB_POLICY_CLAIM_VERSION: u64 = 1;
 
@@ -599,11 +700,14 @@ fn dev_bypass_stub_claims() -> Claims {
         service_id: None,
         nbf: None,
         aud: None,
-        // WS17.P0: the dev stub carries the profile import scope so a local run and the edge
-        // tests can save a profile. The bypass is refused in production, so no real token does.
-        scopes: vec![crate::profile_guard::IMPORT_SCOPE.to_owned()],
+        // D2-055: the dev stub carries NO scopes. It used to hold the profile import scope, which
+        // let a failed-verification bearer import browser state wherever the bypass was on. A
+        // local run or a test that must save a profile uses a token that holds the scope.
+        scopes: Vec::new(),
         // The dev stub asserts no posture: it can only ever run on the body flag.
         zdr: None,
+        key_id: None,
+        acting_user_id: None,
     }
 }
 
@@ -721,6 +825,8 @@ pub async fn require_service_route_scope(req: Request, next: Next) -> Result<Res
         "/v1/search" => claims.has_scope("search:read"),
         "/v1/map" => claims.has_scope("map:read"),
         "/v1/extract" => claims.has_scope("extract:read"),
+        // INNH-11: parse an uploaded PDF/DOCX. Nothing is stored, but it spends CPU.
+        "/v1/parse" => claims.has_scope("parse:write"),
         // Reading one artifact by id is part of the scrape/agent contract, not a
         // separate capability: `/v1/scrape` answers with
         // `FormatRef{artifact_id,bytes}` and never inline page text, and agent
@@ -776,6 +882,19 @@ mod tests {
         Router::new()
             .route("/", get(ok_handler))
             .layer(middleware::from_fn(require_auth))
+    }
+
+    /// D2-055: the dev-bypass stub holds no scope, so it cannot import a profile (or use any
+    /// other scoped capability) whatever the bypass is set to.
+    #[test]
+    fn the_dev_bypass_stub_holds_no_scope_and_cannot_import_profiles() {
+        let stub = dev_bypass_stub_claims();
+        assert!(stub.scopes.is_empty(), "{:?}", stub.scopes);
+        assert!(!stub.has_scope(crate::profile_guard::IMPORT_SCOPE));
+        assert_eq!(
+            crate::profile_guard::principal_refusal(&stub, crate::profile_guard::ProfileOp::Import),
+            Some(crate::profile_guard::PrincipalRefusal::MissingImportScope)
+        );
     }
 
     #[test]
@@ -837,6 +956,8 @@ mod tests {
             aud: None,
             scopes: Vec::new(),
             zdr: None,
+            key_id: None,
+            acting_user_id: None,
         };
         let s = serde_json::to_string(&c).unwrap();
         assert!(!s.contains("\"aud\""));
@@ -863,6 +984,8 @@ mod tests {
             aud: Some("quarry-edge".into()),
             scopes: vec!["search:read".into(), "crawl:write".into()],
             zdr: None,
+            key_id: None,
+            acting_user_id: None,
         };
         assert!(c.has_scope("search:read"));
         assert!(!c.has_scope("admin"));
@@ -885,6 +1008,8 @@ mod tests {
             aud: Some("quarry".into()),
             scopes: vec!["search:read".into()],
             zdr: None,
+            key_id: None,
+            acting_user_id: None,
         };
 
         claims.validate_and_normalize_principal().unwrap();
@@ -926,8 +1051,164 @@ mod tests {
             aud: Some("quarry".into()),
             scopes: vec!["search:read".into()],
             zdr: None,
+            key_id: None,
+            acting_user_id: None,
         };
         assert!(claims.validate_and_normalize_principal().is_err());
+    }
+
+    fn api_key_claims() -> Claims {
+        Claims {
+            web_policy: None,
+            sub: "apikey:key-1".into(),
+            iss: "auth-core".into(),
+            exp: i64::MAX,
+            org_id: "alpha".into(),
+            user_id: String::new(),
+            principal_type: Some("api_key".into()),
+            service_id: None,
+            nbf: None,
+            aud: Some("quarry".into()),
+            scopes: vec![SCOPE_BROWSER_AGENT.into()],
+            zdr: None,
+            key_id: Some("key-1".into()),
+            acting_user_id: Some("user-owner".into()),
+        }
+    }
+
+    #[test]
+    fn api_key_principal_derives_its_actor_from_the_signed_key_id() {
+        let mut claims = api_key_claims();
+        claims.validate_and_normalize_principal().unwrap();
+        assert!(claims.is_api_key());
+        assert!(!claims.is_service());
+        assert!(!claims.is_person());
+        assert_eq!(claims.actor_id(), "apikey:key-1");
+        assert_eq!(claims.key_id(), Some("key-1"));
+        assert_eq!(claims.key_owner_user_id(), Some("user-owner"));
+        assert!(claims.has_scope(SCOPE_BROWSER_AGENT));
+    }
+
+    #[test]
+    fn canonical_api_key_payload_deserializes_and_normalizes() {
+        let mut claims: Claims = serde_json::from_value(serde_json::json!({
+            "sub": "apikey:key-9",
+            "iss": "auth-core",
+            "exp": 1_900_000_000_i64,
+            "org_id": "alpha",
+            "principal_type": "api_key",
+            "key_id": "key-9",
+            "acting_user_id": "user-owner",
+            "aud": "quarry",
+            "scopes": ["browser:agent"],
+            "zdr": true
+        }))
+        .expect("the key token payload must deserialize");
+        assert!(claims.user_id.is_empty());
+        claims.validate_and_normalize_principal().unwrap();
+        assert_eq!(claims.actor_id(), "apikey:key-9");
+        assert!(claims.zdr_floor());
+    }
+
+    #[test]
+    fn ambiguous_or_incomplete_api_key_principals_are_rejected() {
+        let long_key = "k".repeat(API_KEY_ID_MAX_LEN + 1);
+        let at_limit = "k".repeat(API_KEY_ID_MAX_LEN);
+        let cases: Vec<(&str, Box<dyn Fn(&mut Claims)>)> = vec![
+            ("missing key_id", Box::new(|c| c.key_id = None)),
+            ("empty key_id", Box::new(|c| c.key_id = Some(String::new()))),
+            ("sub does not match the key", Box::new(|c| c.sub = "apikey:key-2".into())),
+            ("sub without the prefix", Box::new(|c| c.sub = "key-1".into())),
+            ("sub of a service", Box::new(|c| c.sub = "service:model-gateway".into())),
+            ("user_id present", Box::new(|c| c.user_id = "user-owner".into())),
+            ("service_id present", Box::new(|c| c.service_id = Some("service:x".into()))),
+            ("missing acting_user_id", Box::new(|c| c.acting_user_id = None)),
+            ("blank acting_user_id", Box::new(|c| c.acting_user_id = Some("  ".into()))),
+            ("padded acting_user_id", Box::new(|c| c.acting_user_id = Some(" user-owner".into()))),
+            ("key_id with a space", Box::new(|c| {
+                c.key_id = Some("key 1".into());
+                c.sub = "apikey:key 1".into();
+            })),
+            ("key_id with a control character", Box::new(|c| {
+                c.key_id = Some("key\n1".into());
+                c.sub = "apikey:key\n1".into();
+            })),
+            ("key_id over the bound", Box::new(move |c| {
+                c.key_id = Some(long_key.clone());
+                c.sub = format!("apikey:{long_key}");
+            })),
+            ("empty org", Box::new(|c| c.org_id = String::new())),
+        ];
+        for (label, mutate) in &cases {
+            let mut claims = api_key_claims();
+            mutate(&mut claims);
+            assert!(
+                claims.validate_and_normalize_principal().is_err(),
+                "{label} must be refused"
+            );
+        }
+        // The bound is inclusive.
+        let mut claims = api_key_claims();
+        claims.key_id = Some(at_limit.clone());
+        claims.sub = format!("apikey:{at_limit}");
+        assert!(claims.validate_and_normalize_principal().is_ok());
+    }
+
+    #[test]
+    fn a_key_id_on_a_user_or_service_token_is_ambiguous_and_refused() {
+        let mut user = Claims {
+            principal_type: Some("user".into()),
+            sub: "u1".into(),
+            user_id: "u1".into(),
+            key_id: Some("key-1".into()),
+            acting_user_id: None,
+            ..api_key_claims()
+        };
+        assert!(user.validate_and_normalize_principal().is_err());
+        let mut service = service_claims(&["browser:execute"]);
+        service.user_id = String::new();
+        service.key_id = Some("key-1".into());
+        assert!(service.validate_and_normalize_principal().is_err());
+    }
+
+    #[test]
+    fn legacy_user_and_service_tokens_are_unchanged_by_the_key_principal() {
+        let mut user = Claims {
+            principal_type: None,
+            sub: "u1".into(),
+            user_id: "u1".into(),
+            key_id: None,
+            acting_user_id: None,
+            scopes: Vec::new(),
+            ..api_key_claims()
+        };
+        user.validate_and_normalize_principal().unwrap();
+        assert!(user.is_person());
+        assert!(!user.is_api_key());
+        assert_eq!(user.actor_id(), "u1");
+        assert_eq!(user.key_id(), None);
+        assert_eq!(user.key_owner_user_id(), None);
+
+        // A service token may carry `acting_user_id` (token exchange mints it): that is not a key.
+        let mut service = service_claims(&["browser:execute"]);
+        service.user_id = String::new();
+        service.acting_user_id = Some("user-owner".into());
+        service.validate_and_normalize_principal().unwrap();
+        assert!(service.is_service());
+        assert!(!service.is_api_key());
+        assert!(!service.is_person());
+        assert_eq!(service.key_id(), None);
+        assert_eq!(service.key_owner_user_id(), None, "only a key principal has a key owner");
+    }
+
+    #[test]
+    fn api_key_token_zdr_floor_counts() {
+        let mut zdr_key = api_key_claims();
+        zdr_key.zdr = Some(true);
+        assert!(zdr_key.zdr_floor(), "a key of a ZDR org cannot lower the posture");
+        assert!(zdr_key.effective_zdr(false));
+        assert!(!api_key_claims().zdr_floor());
+        assert!(api_key_claims().effective_zdr(true), "the body can still raise it");
     }
 
     fn scoped_router(claims: Claims) -> Router {
@@ -963,6 +1244,8 @@ mod tests {
             aud: Some("quarry".into()),
             scopes: scopes.iter().map(|s| (*s).to_owned()).collect(),
             zdr: None,
+            key_id: None,
+            acting_user_id: None,
         }
     }
 
@@ -1088,6 +1371,8 @@ mod tests {
             aud: Some("quarry".into()),
             scopes: vec!["search:read".into()],
             zdr: None,
+            key_id: None,
+            acting_user_id: None,
         };
 
         let search = HttpRequest::builder()
@@ -1131,6 +1416,8 @@ mod tests {
             aud: Some("quarry".into()),
             scopes: Vec::new(),
             zdr: None,
+            key_id: None,
+            acting_user_id: None,
         };
         let request = HttpRequest::builder()
             .uri("/v1/other")
@@ -1324,6 +1611,8 @@ mod tests {
             aud: None,
             scopes: Vec::new(),
             zdr: None,
+            key_id: None,
+            acting_user_id: None,
         };
         let token = sign_jwt(&claims, kid);
 
@@ -1376,6 +1665,8 @@ mod tests {
             aud: None,
             scopes: Vec::new(),
             zdr: None,
+            key_id: None,
+            acting_user_id: None,
         };
         let token = sign_jwt(&claims, "unknown-kid");
 
@@ -1424,6 +1715,8 @@ mod tests {
             aud: Some("quarry".into()),
             scopes: Vec::new(),
             zdr,
+            key_id: None,
+            acting_user_id: None,
         }
     }
 

@@ -14,9 +14,14 @@
 //! were inline in `intent.rs`, so default behaviour is byte-identical to the
 //! compile-time policy.**
 
-use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
+use serde::{Deserialize, Serialize};
+use thiserror::Error;
+
+use super::effort::Level;
 use super::intent::{Complexity, VerevonMode, CHEAP_FALLBACK};
+use super::ModelInfo;
 
 /// The full runtime routing policy. Serializes as `snake_case` JSON; the
 /// canonical schema is this struct (session-core stores it as an opaque string).
@@ -52,6 +57,79 @@ pub struct RoutingPolicy {
     pub complexity: ComplexityWeights,
     /// The (mode × complexity) → concrete model id routing table.
     pub table: ModeTable,
+    /// The side-task role table (EP-13 S4): the models `verevon-role` picks from,
+    /// one entry per purpose. Empty by default and left out of the stored JSON
+    /// while empty, so a policy that never set it reads and writes as before.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub roles: RoleTable,
+}
+
+/// The side-task purposes the role table can name (EP-13 S4). The snake_case
+/// names are the table's keys in the stored JSON and in the admin API.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RolePurpose {
+    Title,
+    FollowUps,
+    VerificationJudge,
+    ResearchPlan,
+}
+
+impl RolePurpose {
+    /// The purpose's name as the table and the wire spell it.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Title => "title",
+            Self::FollowUps => "follow_ups",
+            Self::VerificationJudge => "verification_judge",
+            Self::ResearchPlan => "research_plan",
+        }
+    }
+
+    /// Whether the call's output budget is small enough that hidden reasoning
+    /// can spend all of it, so a candidate must accept a no-reasoning call (D7).
+    #[must_use]
+    pub const fn is_small_budget(self) -> bool {
+        matches!(self, Self::Title | Self::FollowUps | Self::VerificationJudge)
+    }
+}
+
+impl std::fmt::Display for RolePurpose {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+/// One purpose's entry in the role table: the models to try in order, and the
+/// reasoning effort a call takes when the entry chooses its model.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct RoleEntry {
+    /// Candidate model ids, tried first to last. One to four of them.
+    pub candidates: Vec<String>,
+    /// Canonical effort name (`minimal` through `max`) applied when this entry
+    /// chooses the model and the call names no effort of its own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+}
+
+/// The side-task role table, keyed by purpose.
+pub type RoleTable = BTreeMap<RolePurpose, RoleEntry>;
+
+/// A role table entry the platform refuses (EP-13 S4). Serialized as the
+/// `details` of an `invalid_role_table` refusal, so an admin row can show it.
+#[derive(Debug, Clone, PartialEq, Eq, Error, Serialize)]
+#[serde(tag = "reason", rename_all = "snake_case")]
+pub enum RoleError {
+    #[error("{purpose} needs one to four candidates, found {count}")]
+    CandidateCount { purpose: RolePurpose, count: usize },
+    #[error("{purpose} names `{model}`, which the chat catalogue does not list")]
+    UnknownModel { purpose: RolePurpose, model: String },
+    #[error("{purpose} needs a model that accepts a no-reasoning call, and `{model}` does not")]
+    ReasoningOnly { purpose: RolePurpose, model: String },
+    #[error("{purpose} names effort `{effort}`, which is not a canonical level")]
+    UnknownEffort { purpose: RolePurpose, effort: String },
 }
 
 /// The (mode × complexity) routing table: one [`ComplexityModels`] row per mode.
@@ -132,6 +210,7 @@ impl Default for RoutingPolicy {
             cheap_fallback: CHEAP_FALLBACK.to_owned(),
             tool_fallback_ladder: default_tool_fallback_ladder(),
             complexity: ComplexityWeights::default(),
+            roles: RoleTable::new(),
             // Ladder over the deployed roster, ascending cost/capability:
             //   gpt-5-nano < gpt-4o-mini < gpt-5-mini < claude-sonnet-4-6 < claude-opus-4-8.
             // Each mode owns a distinct cost/quality identity; complexity climbs
@@ -255,6 +334,54 @@ const COMPLEX_KEYWORDS: &[&str] = &[
 ];
 
 impl RoutingPolicy {
+    /// Every way the role table fails against the chat catalogue, in purpose
+    /// order. An empty table is valid, and so is a table whose entries all pass.
+    ///
+    /// # Errors
+    /// The refusals, each naming its purpose and, where one applies, its model.
+    pub fn validate_roles(&self, catalogue: &[ModelInfo]) -> Result<(), Vec<RoleError>> {
+        let mut errors = Vec::new();
+        for (&purpose, entry) in &self.roles {
+            if !(1..=4).contains(&entry.candidates.len()) {
+                errors.push(RoleError::CandidateCount {
+                    purpose,
+                    count: entry.candidates.len(),
+                });
+            }
+            if let Some(effort) = &entry.effort {
+                if Level::from_name(effort).is_none() {
+                    errors.push(RoleError::UnknownEffort {
+                        purpose,
+                        effort: effort.clone(),
+                    });
+                }
+            }
+            for candidate in &entry.candidates {
+                match catalogue
+                    .iter()
+                    .find(|model| model.id.eq_ignore_ascii_case(candidate))
+                {
+                    None => errors.push(RoleError::UnknownModel {
+                        purpose,
+                        model: candidate.clone(),
+                    }),
+                    Some(model) if purpose.is_small_budget() && !accepts_no_reasoning(model) => {
+                        errors.push(RoleError::ReasoningOnly {
+                            purpose,
+                            model: candidate.clone(),
+                        });
+                    }
+                    Some(_) => {}
+                }
+            }
+        }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors)
+        }
+    }
+
     /// The model id for a `(mode, complexity)` pair, before any budget posture
     /// adjustment. Mirrors the old `choose()` table body.
     #[must_use]
@@ -270,6 +397,12 @@ impl RoutingPolicy {
             Complexity::Complex => &row.complex,
         }
     }
+}
+
+/// Whether a model takes a call with no reasoning in it: it has no effort control,
+/// or it accepts the `minimal` level (EP-13 D7). A small-budget side task needs one.
+fn accepts_no_reasoning(model: &ModelInfo) -> bool {
+    model.effort_levels.is_empty() || model.effort_levels.contains(&Level::Minimal)
 }
 
 #[cfg(test)]
@@ -397,6 +530,142 @@ mod tests {
             "claude-opus-4-8"
         );
         assert_eq!(parsed.complexity.keywords, vec!["prove", "derive"]);
+    }
+
+    #[test]
+    fn a_policy_without_roles_reads_and_writes_as_before() {
+        // A policy stored before the role table existed has no `roles` key, and the
+        // default policy must not add one on write, so the stored JSON stays the same.
+        let policy = RoutingPolicy::default();
+        assert!(policy.roles.is_empty());
+        let value = serde_json::to_value(&policy).expect("to_value");
+        assert!(value.get("roles").is_none(), "{value}");
+        let legacy: RoutingPolicy = serde_json::from_value(value).expect("parse");
+        assert!(legacy.roles.is_empty());
+    }
+
+    #[test]
+    fn roles_round_trip() {
+        let mut policy = RoutingPolicy::default();
+        policy.roles.insert(
+            RolePurpose::Title,
+            RoleEntry {
+                candidates: vec!["gpt-5-nano".to_owned()],
+                effort: Some("minimal".to_owned()),
+            },
+        );
+        policy.roles.insert(
+            RolePurpose::ResearchPlan,
+            RoleEntry {
+                candidates: vec!["claude-opus-4-8".to_owned()],
+                effort: None,
+            },
+        );
+        let value = serde_json::to_value(&policy).expect("to_value");
+        assert_eq!(value["roles"]["title"]["effort"], "minimal");
+        assert_eq!(value["roles"]["research_plan"]["candidates"][0], "claude-opus-4-8");
+        assert!(value["roles"]["research_plan"].get("effort").is_none());
+        let parsed: RoutingPolicy = serde_json::from_value(value).expect("parse");
+        assert_eq!(parsed, policy);
+    }
+
+    fn role_catalogue() -> Vec<ModelInfo> {
+        let model = |id: &str, levels: &[Level]| ModelInfo {
+            id: id.to_owned(),
+            modality: "chat".to_owned(),
+            effort_levels: levels.to_vec(),
+            ..Default::default()
+        };
+        vec![
+            model("gpt-5-nano", &[Level::Minimal, Level::Low]),
+            model("gpt-4o-mini", &[]),
+            model("claude-opus-4-8", &[Level::Low, Level::High]),
+        ]
+    }
+
+    fn table_with(purpose: RolePurpose, candidates: &[&str], effort: Option<&str>) -> RoutingPolicy {
+        let mut policy = RoutingPolicy::default();
+        policy.roles.insert(
+            purpose,
+            RoleEntry {
+                candidates: candidates.iter().map(|id| (*id).to_owned()).collect(),
+                effort: effort.map(str::to_owned),
+            },
+        );
+        policy
+    }
+
+    #[test]
+    fn a_valid_role_table_passes_and_an_empty_one_passes() {
+        assert_eq!(RoutingPolicy::default().validate_roles(&role_catalogue()), Ok(()));
+        let policy = table_with(RolePurpose::Title, &["gpt-5-nano", "gpt-4o-mini"], Some("minimal"));
+        assert_eq!(policy.validate_roles(&role_catalogue()), Ok(()));
+    }
+
+    #[test]
+    fn validation_names_each_refusal_with_its_purpose_and_model() {
+        let catalogue = role_catalogue();
+        let unknown = table_with(RolePurpose::Title, &["no-such-model"], None);
+        assert_eq!(
+            unknown.validate_roles(&catalogue),
+            Err(vec![RoleError::UnknownModel {
+                purpose: RolePurpose::Title,
+                model: "no-such-model".to_owned(),
+            }])
+        );
+        let too_many = table_with(RolePurpose::ResearchPlan, &["gpt-4o-mini"; 5], None);
+        assert_eq!(
+            too_many.validate_roles(&catalogue),
+            Err(vec![RoleError::CandidateCount {
+                purpose: RolePurpose::ResearchPlan,
+                count: 5,
+            }])
+        );
+        let empty = table_with(RolePurpose::FollowUps, &[], None);
+        assert_eq!(
+            empty.validate_roles(&catalogue),
+            Err(vec![RoleError::CandidateCount {
+                purpose: RolePurpose::FollowUps,
+                count: 0,
+            }])
+        );
+        // A small-budget purpose cannot run on a model that only reasons.
+        let reasoning_only = table_with(RolePurpose::VerificationJudge, &["claude-opus-4-8"], None);
+        assert_eq!(
+            reasoning_only.validate_roles(&catalogue),
+            Err(vec![RoleError::ReasoningOnly {
+                purpose: RolePurpose::VerificationJudge,
+                model: "claude-opus-4-8".to_owned(),
+            }])
+        );
+        // The research plan has the budget to reason, so the same model is fine there.
+        let planner = table_with(RolePurpose::ResearchPlan, &["claude-opus-4-8"], None);
+        assert_eq!(planner.validate_roles(&catalogue), Ok(()));
+        let bad_effort = table_with(RolePurpose::Title, &["gpt-4o-mini"], Some("extreme"));
+        assert_eq!(
+            bad_effort.validate_roles(&catalogue),
+            Err(vec![RoleError::UnknownEffort {
+                purpose: RolePurpose::Title,
+                effort: "extreme".to_owned(),
+            }])
+        );
+    }
+
+    #[test]
+    fn a_refusal_serializes_with_its_reason_for_the_admin_row() {
+        let refusal = RoleError::UnknownModel {
+            purpose: RolePurpose::FollowUps,
+            model: "no-such-model".to_owned(),
+        };
+        let value = serde_json::to_value(&refusal).expect("to_value");
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "reason": "unknown_model",
+                "purpose": "follow_ups",
+                "model": "no-such-model",
+            })
+        );
     }
 
     /// The Default policy's routing must match the old compile-time `choose()`

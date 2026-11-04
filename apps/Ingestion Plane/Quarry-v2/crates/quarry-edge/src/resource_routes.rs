@@ -60,7 +60,16 @@ pub struct ListQuery {
     pub cursor: Option<String>,
     #[serde(default)]
     pub sort: Option<String>,
+    /// `GET /v1/artifacts` only (INNH-12); other lists ignore it.
+    #[serde(default)]
+    pub run_id: Option<String>,
+    /// `GET /v1/artifacts` only (INNH-12); other lists ignore it.
+    #[serde(default)]
+    pub kind: Option<String>,
 }
+
+/// The artifact kinds `GET /v1/artifacts?kind=` accepts, as `docs/openapi.yaml` lists them.
+pub const ARTIFACT_LIST_KINDS: [&str; 6] = ["markdown", "html", "raw", "pdf", "screenshot", "extract"];
 
 impl ListQuery {
     fn into_filter(self) -> Result<ListFilter, QuarryError> {
@@ -93,6 +102,8 @@ impl ListQuery {
             limit: self.limit,
             cursor: self.cursor,
             sort,
+            run_id: self.run_id,
+            kind: self.kind,
         })
     }
 }
@@ -117,6 +128,29 @@ fn err_response(request_id: &str, err: QuarryError) -> (StatusCode, Json<Envelop
 // /v1/artifacts — served locally from ArtifactStore
 // =============================================================================
 
+/// `run_id` must be a run id and `kind` one of the documented kinds: a filter that cannot match
+/// is a 400 that names the field, never an empty page that looks like "no artifacts".
+fn check_artifact_filters(filter: &ListFilter) -> Result<(), QuarryError> {
+    let bad = |field: &str, message: String| {
+        QuarryError::new(ErrorCode::BadRequest, message)
+            .with_details(serde_json::json!({ "field": field }))
+    };
+    if let Some(run_id) = &filter.run_id {
+        if run_id.parse::<quarry_core::ids::kinds::RunKind>().is_err() {
+            return Err(bad("run_id", "run_id must be a run id (run_...)".to_string()));
+        }
+    }
+    if let Some(kind) = &filter.kind {
+        if !ARTIFACT_LIST_KINDS.contains(&kind.as_str()) {
+            return Err(bad(
+                "kind",
+                format!("kind must be one of {}", ARTIFACT_LIST_KINDS.join(", ")),
+            ));
+        }
+    }
+    Ok(())
+}
+
 pub async fn list_artifacts(
     State(state): State<AppState>,
     Extension(claims): Extension<crate::auth::Claims>,
@@ -124,6 +158,7 @@ pub async fn list_artifacts(
 ) -> Result<Json<Envelope<Page<ArtifactSummary>>>, (StatusCode, Json<Envelope<()>>)> {
     let request_id = crate::request_id::current();
     let filter = q.into_filter().map_err(|e| err_response(&request_id, e))?;
+    check_artifact_filters(&filter).map_err(|e| err_response(&request_id, e))?;
     let page = state
         .artifacts
         .list(&claims.org_id, &filter)
@@ -583,6 +618,13 @@ pub async fn create_source(
             ),
         ));
     }
+    // A source is a URL the platform fetches later, so a denied URL is refused at create
+    // time, under the same org web policy as the scrape family. The fetch itself is gated
+    // again where it happens (the scrape, crawl and batch routes a tracked source feeds).
+    let source_zdr = claims.effective_zdr(req.zdr.unwrap_or(false));
+    crate::web_policy_edge::decide(&state.policy, &claims, source_zdr, None)
+        .and_then(|decision| crate::web_policy_edge::gate_url(&decision, url))
+        .map_err(|error| crate::web_policy_edge::envelope_error(&request_id, error))?;
     // Re-build the control-facing body from validated, trimmed fields. We
     // never forward a client-supplied org_id — it isn't part of the request
     // shape and control reads org from the `?org_id` query param exclusively.
@@ -1036,6 +1078,7 @@ pub async fn list_run_events(
             .list_events(&claims.org_id, &parsed_run_id, limit)
             .await
             .map_err(|e| err_response(&request_id, e))?;
+        let events = scope_run_events(&claims, events).map_err(|e| err_response(&request_id, e))?;
         return Ok(Json(Envelope::ok(
             request_id,
             Page {
@@ -1055,7 +1098,7 @@ pub async fn list_run_events(
         limit: q.limit,
         ..Default::default()
     };
-    let page = forward_list::<quarry_core::job_history::JobHistoryEvent>(
+    let mut page = forward_list::<quarry_core::job_history::JobHistoryEvent>(
         &state,
         &request_id,
         &claims.org_id,
@@ -1064,7 +1107,35 @@ pub async fn list_run_events(
     )
     .await
     .map_err(|e| err_response(&request_id, e))?;
+    page.items = scope_run_events(&claims, page.items).map_err(|e| err_response(&request_id, e))?;
     Ok(Json(Envelope::ok(request_id, page)))
+}
+
+/// What a caller may read of a run's events.
+///
+/// - Another org's run is a 404. Control's `GET /v1/runs/{id}/events` resolves
+///   the run by id alone and ignores `org_id`, so the edge checks the `org_id`
+///   every event carries and refuses the whole page on any mismatch.
+/// - Under the token's ZDR floor the payload keeps only numbers, booleans and
+///   the closed string fields (D2-057, W2-U31): these are the same job events
+///   the job drain redacts, and the drain hands out the `run_id`.
+fn scope_run_events(
+    claims: &crate::auth::Claims,
+    mut events: Vec<quarry_core::job_history::JobHistoryEvent>,
+) -> Result<Vec<quarry_core::job_history::JobHistoryEvent>, QuarryError> {
+    if events.iter().any(|event| event.org_id != claims.org_id) {
+        tracing::warn!(
+            org_id = %claims.org_id,
+            "run events of another org refused at the edge"
+        );
+        return Err(QuarryError::new(ErrorCode::NotFound, "not found"));
+    }
+    if claims.effective_zdr(false) {
+        for event in &mut events {
+            event.payload = job_stream::redact_payload_for_zdr(std::mem::take(&mut event.payload));
+        }
+    }
+    Ok(events)
 }
 
 // =============================================================================
@@ -1171,6 +1242,11 @@ async fn job_events(
         .as_deref()
         .is_some_and(|v| matches!(v.trim(), "1" | "true"));
     if follow_requested && job_stream::follow_enabled() {
+        // A ZDR caller never gets the live tail: its events name page URLs (D2-057).
+        // Decided before control is asked and before a stream permit is taken.
+        if claims.effective_zdr(false) {
+            return err_response(&request_id, job_stream::zdr_follow_refusal()).into_response();
+        }
         return follow_job(state, claims, request_id, job_id, q, last_event_id, kind).await;
     }
 
@@ -1193,6 +1269,12 @@ async fn job_events(
     {
         Ok(events) => events,
         Err(e) => return err_response(&request_id, e).into_response(),
+    };
+    // The drain never returns page URLs, titles or excerpts to a ZDR caller (D2-057).
+    let events: Vec<serde_json::Value> = if claims.effective_zdr(false) {
+        events.into_iter().map(job_stream::redact_event_for_zdr).collect()
+    } else {
+        events
     };
 
     let stream = async_stream::stream! {
@@ -1358,6 +1440,8 @@ mod tests {
             sort: Some("oldest".into()),
             status: Some("running".into()),
             cursor: Some("opaque".into()),
+            run_id: None,
+            kind: None,
         };
         let f = q.into_filter().unwrap();
         assert_eq!(f.status.as_deref(), Some("running"));
@@ -1367,6 +1451,35 @@ mod tests {
             quarry_core::pagination::SortDirection::Oldest
         ));
         assert!(f.created_before.is_some());
+    }
+
+    #[test]
+    fn artifact_filters_accept_a_run_id_and_a_documented_kind_only() {
+        let run = quarry_core::ids::kinds::RunKind::new().to_string();
+        let ok = ListQuery {
+            run_id: Some(run.clone()),
+            kind: Some("markdown".into()),
+            ..Default::default()
+        }
+        .into_filter()
+        .unwrap();
+        assert_eq!(ok.run_id.as_deref(), Some(run.as_str()));
+        assert_eq!(ok.kind.as_deref(), Some("markdown"));
+        assert!(check_artifact_filters(&ok).is_ok());
+        assert!(check_artifact_filters(&ListFilter::default()).is_ok());
+
+        for kind in ["meta", "MARKDOWN", "", "markdown,html"] {
+            let filter = ListFilter { kind: Some(kind.into()), ..Default::default() };
+            let err = check_artifact_filters(&filter).unwrap_err();
+            assert_eq!(err.code, ErrorCode::BadRequest, "kind={kind:?}");
+            assert_eq!(err.details.as_ref().unwrap()["field"], "kind");
+        }
+        for run_id in ["art_01", "", "not-a-run", "run_"] {
+            let filter = ListFilter { run_id: Some(run_id.into()), ..Default::default() };
+            let err = check_artifact_filters(&filter).unwrap_err();
+            assert_eq!(err.code, ErrorCode::BadRequest, "run_id={run_id:?}");
+            assert_eq!(err.details.as_ref().unwrap()["field"], "run_id");
+        }
     }
 
     #[test]

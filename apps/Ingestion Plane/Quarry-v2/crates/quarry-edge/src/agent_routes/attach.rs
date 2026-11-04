@@ -924,6 +924,8 @@ mod attach_tests {
             denied_domains: Vec::new(),
             absolute_expires_at: None,
             resource_id: resource.to_owned(),
+            key_id: String::new(),
+            web_policy: None,
         }
     }
 
@@ -1070,6 +1072,8 @@ mod delegate_lane_tests {
                 denied_domains: Vec::new(),
                 absolute_expires_at: None,
                 resource_id: self.0.lock().unwrap().clone(),
+                key_id: String::new(),
+                web_policy: None,
             })
         }
     }

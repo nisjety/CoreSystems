@@ -8,6 +8,7 @@ package spaces
 
 import (
 	"fmt"
+	"net"
 	"sort"
 	"strings"
 	"time"
@@ -298,6 +299,111 @@ func (p EffectPolicy) Validate() error {
 		}
 	}
 	return nil
+}
+
+// Sandbox egress tiers (EP-9 E2, decision D-E3). The vocabulary is closed and
+// ordered: a higher tier reaches strictly more of the network. Control signs
+// at most min(claim, org ceiling), and nothing above off under Zero Data
+// Retention. Mirrored by sandbox-manager's authz egress tiers and, from E3, by
+// execution-core; the spelling is bound into the capability decision.
+const (
+	SandboxEgressOff        = "off"
+	SandboxEgressRegistries = "registries"
+	SandboxEgressAllowlist  = "allowlist"
+	// SandboxEgressAll is in the vocabulary so a backend can state what it can
+	// enforce, but it is not storable in W3: no org ceiling can be all, so no
+	// decision ever grants it.
+	SandboxEgressAll = "all"
+)
+
+// maxSandboxEgressAllowlistHosts bounds an org's allow-list. Migration 044
+// enforces the same cap as a backstop for a writer that bypasses this package.
+const maxSandboxEgressAllowlistHosts = 32
+
+// sandboxEgressRank orders the tiers. A value missing here is not a tier;
+// callers treat it as off (unknown means off), never as a wider reach.
+var sandboxEgressRank = map[string]int{
+	SandboxEgressOff: 0, SandboxEgressRegistries: 1, SandboxEgressAllowlist: 2, SandboxEgressAll: 3,
+}
+
+// SandboxEgressPolicy is an org's sandbox egress ceiling, stored beside the
+// effect policy (space_effect_policies.sandbox_egress_tier and
+// sandbox_egress_allowlist). It is a separate type rather than EffectPolicy
+// fields because EffectPolicy is compared with == by the effect-policy writer
+// and a slice would make it incomparable. Host names only, never content.
+type SandboxEgressPolicy struct {
+	Tier      string   `json:"sandbox_egress_tier"`
+	Allowlist []string `json:"sandbox_egress_allowlist"`
+}
+
+// Normalize validates a policy for storage and returns it with the allow-list
+// in canonical form (lower-case, de-duplicated, sorted). It refuses all (not
+// storable in W3) and every value outside the vocabulary, so a typo is an
+// error rather than a silent off. An allow-list may be stored under a lower
+// tier; it is only signed into a decision whose granted tier is allowlist.
+func (p SandboxEgressPolicy) Normalize() (SandboxEgressPolicy, error) {
+	tier := strings.TrimSpace(p.Tier)
+	switch tier {
+	case SandboxEgressOff, SandboxEgressRegistries, SandboxEgressAllowlist:
+	case SandboxEgressAll:
+		return SandboxEgressPolicy{}, fmt.Errorf("sandbox egress tier %q is not storable", tier)
+	default:
+		return SandboxEgressPolicy{}, fmt.Errorf("unknown sandbox egress tier %q", p.Tier)
+	}
+	if len(p.Allowlist) > maxSandboxEgressAllowlistHosts {
+		return SandboxEgressPolicy{}, fmt.Errorf("sandbox egress allow-list exceeds %d hosts", maxSandboxEgressAllowlistHosts)
+	}
+	hosts := make([]string, 0, len(p.Allowlist))
+	seen := make(map[string]struct{}, len(p.Allowlist))
+	for _, raw := range p.Allowlist {
+		host, err := CanonicalEgressHost(raw)
+		if err != nil {
+			return SandboxEgressPolicy{}, err
+		}
+		if _, duplicate := seen[host]; duplicate {
+			continue
+		}
+		seen[host] = struct{}{}
+		hosts = append(hosts, host)
+	}
+	sort.Strings(hosts)
+	return SandboxEgressPolicy{Tier: tier, Allowlist: hosts}, nil
+}
+
+// CanonicalEgressHost returns the canonical spelling of one allow-list host:
+// a lower-case DNS name of at least two labels, with no scheme, port, path,
+// wildcard or IP literal. IP literals are refused because an allow-list entry
+// must name a host the egress proxy resolves and checks itself (E3 refuses
+// private and metadata addresses after resolution); a literal would bypass
+// that check. Internationalized names must be given in punycode.
+func CanonicalEgressHost(raw string) (string, error) {
+	host := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(raw)), ".")
+	if host == "" || len(host) > 253 {
+		return "", fmt.Errorf("sandbox egress host %q is not a valid host name", raw)
+	}
+	if net.ParseIP(host) != nil {
+		return "", fmt.Errorf("sandbox egress host %q is an IP literal", raw)
+	}
+	labels := strings.Split(host, ".")
+	if len(labels) < 2 {
+		return "", fmt.Errorf("sandbox egress host %q is not a fully qualified host name", raw)
+	}
+	for _, label := range labels {
+		if len(label) == 0 || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			return "", fmt.Errorf("sandbox egress host %q is not a valid host name", raw)
+		}
+		for _, ch := range label {
+			if (ch < 'a' || ch > 'z') && (ch < '0' || ch > '9') && ch != '-' {
+				return "", fmt.Errorf("sandbox egress host %q is not a valid host name", raw)
+			}
+		}
+	}
+	// An all-digit last label is a numeric address in another spelling
+	// (for example 127.1), which ParseIP does not catch.
+	if strings.Trim(labels[len(labels)-1], "0123456789") == "" {
+		return "", fmt.Errorf("sandbox egress host %q is an IP literal", raw)
+	}
+	return host, nil
 }
 
 // RosterMember is one participant of a Space as shown to another participant.

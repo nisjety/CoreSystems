@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
@@ -1008,6 +1009,21 @@ type AppearanceSettings struct {
 	ColorScheme string `json:"colorScheme"` // "blue" | "green" | "purple" | "orange"
 	FontSize    string `json:"fontSize"`    // "small" | "medium" | "large"
 	CompactMode bool   `json:"compactMode"`
+
+	// TranscriptDensity is the chat transcript level (EP-14 S2): one of transcriptDensityLevels, or
+	// absent. Absent is not a level: the chat then derives one from CompactMode. It is optional, so a
+	// save that omits it keeps the stored level, and a client written before it never sees it.
+	TranscriptDensity string `json:"transcriptDensity,omitempty"`
+}
+
+// transcriptDensityLevels is the closed set of transcript levels (EP-14 S2), from the fullest view to the
+// most condensed one.
+var transcriptDensityLevels = []string{"detailed", "standard", "compact", "minimal"}
+
+// validTranscriptDensity reports whether a save names a level in the closed set. A save that names none
+// passes: the key is then empty, the patch omits it, and the merge keeps the stored level.
+func validTranscriptDensity(level string) bool {
+	return level == "" || slices.Contains(transcriptDensityLevels, level)
 }
 
 // LanguageSettings represents user language preferences
@@ -1190,6 +1206,14 @@ func (s *Server) updateAppearanceSettings(c *gin.Context) {
 	var req AppearanceSettings
 	patch, ok := bindSettingsPatch(c, &req)
 	if !ok {
+		return
+	}
+	if !validTranscriptDensity(req.TranscriptDensity) {
+		c.JSON(http.StatusUnprocessableEntity, typedErrorBody(
+			"transcript_density_invalid",
+			"transcriptDensity must be one of detailed, standard, compact or minimal.",
+			map[string]any{"allowed": transcriptDensityLevels},
+		))
 		return
 	}
 	updated, err := s.userService.UpsertSettings(c.Request.Context(), userID, "appearance", patch)
@@ -1439,6 +1463,64 @@ type AISettings struct {
 	ModelPreference        string `json:"modelPreference"` // "auto"|"gpt-4"|"gpt-4o"|"claude"
 	DataCollectionEnabled  bool   `json:"dataCollectionEnabled"`
 	PersonalizationEnabled bool   `json:"personalizationEnabled"`
+	// TonePreset is the reply tone the person picked (EP-8-S3): one of tonePresets. "default" asks for
+	// nothing extra. It is a setting, not content, so it is stored with the rest of the ai category.
+	TonePreset string `json:"tonePreset"`
+}
+
+// tonePresets is the closed set of reply tones. model-gateway renders one fixed sentence for each name
+// except "default", so nothing outside this list may be stored.
+var tonePresets = []string{"default", "professional", "friendly", "direct", "warm", "neutral"}
+
+// aiSettingsResponse is what GET and PUT /api/v1/settings/ai return: the stored settings plus two flags
+// that say what this deployment shows (the tone selector, EP-8-S3, and the personal first-run card,
+// EP-8-S8). The flags are set on every response and never stored, so a save cannot write them.
+type aiSettingsResponse struct {
+	AISettings
+	TonePresetsAvailable   bool `json:"tonePresetsAvailable"`
+	PersonalSetupAvailable bool `json:"personalSetupAvailable"`
+}
+
+// aiSettingsDefaults are what a person reads before they save any AI setting.
+func aiSettingsDefaults() map[string]any {
+	return map[string]any{
+		"aiEnabled": true, "modelPreference": "auto",
+		"dataCollectionEnabled": true, "personalizationEnabled": true,
+		"tonePreset": "default",
+	}
+}
+
+// tonePresetsVisible reads the user-core switch that shows the tone selector (EP-8-S3). Opt-in: only
+// the literal true enables it. It hides the selector and nothing else: a stored tone is still read and
+// written.
+func tonePresetsVisible() bool {
+	return os.Getenv("TONE_PRESETS_VISIBLE") == "true"
+}
+
+// applyTonePresetPatch settles the tone in a bound AI settings save. A save that names no tone keeps
+// the stored one: the key leaves the patch, so a client written before tones existed cannot reset it.
+// A named tone must be in the closed set.
+func applyTonePresetPatch(req AISettings, patch map[string]any) bool {
+	if req.TonePreset == "" {
+		delete(patch, "tonePreset")
+		return true
+	}
+	return slices.Contains(tonePresets, req.TonePreset)
+}
+
+// writeAISettings writes stored AI settings in the response shape.
+func writeAISettings(c *gin.Context, settings map[string]any) {
+	var result aiSettingsResponse
+	if err := mapToStruct(settings, &result); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to decode settings"})
+		return
+	}
+	if result.TonePreset == "" {
+		result.TonePreset = "default"
+	}
+	result.TonePresetsAvailable = tonePresetsVisible()
+	result.PersonalSetupAvailable = personalSetupVisible()
+	c.JSON(http.StatusOK, result)
 }
 
 // GET /api/v1/settings/ai
@@ -1447,17 +1529,13 @@ func (s *Server) getAISettings(c *gin.Context) {
 	if !ok {
 		return
 	}
-	defaults := map[string]any{
-		"aiEnabled": true, "modelPreference": "auto",
-		"dataCollectionEnabled": true, "personalizationEnabled": true,
-	}
-	settings, err := s.userService.GetSettings(c.Request.Context(), userID, "ai", defaults)
+	settings, err := s.userService.GetSettings(c.Request.Context(), userID, "ai", aiSettingsDefaults())
 	if err != nil {
 		log.Error().Err(err).Str("user_id", userID).Msg("failed to get AI settings")
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to retrieve settings"})
 		return
 	}
-	writeSettingsResponse[AISettings](c, settings)
+	writeAISettings(c, settings)
 }
 
 // PUT /api/v1/settings/ai
@@ -1471,15 +1549,139 @@ func (s *Server) updateAISettings(c *gin.Context) {
 	if !ok {
 		return
 	}
+	if !applyTonePresetPatch(req, patch) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{
+			"code":    "tone_preset_invalid",
+			"message": "tonePreset must be one of default, professional, friendly, direct, warm or neutral.",
+			"details": gin.H{"allowed": tonePresets},
+		}})
+		return
+	}
 	updated, err := s.userService.UpsertSettings(c.Request.Context(), userID, "ai", patch)
 	if err != nil {
 		log.Error().Err(err).Str("user_id", userID).Msg("failed to update AI settings")
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to save settings"})
 		return
 	}
-	var result AISettings
-	_ = mapToStruct(updated, &result)
+	writeAISettings(c, updated)
+}
+
+// ============================================
+// PERSONAL FIRST-RUN STEP (EP-8-S8)
+// ============================================
+
+// The closed states of the personal first-run step (EP-8-S8, D10). A person who has not answered is
+// pending, and the card shows only in that state. Nothing outside this list is ever stored.
+const (
+	personalStepPending   = "pending"
+	personalStepCompleted = "completed"
+	personalStepSkipped   = "skipped"
+)
+
+var personalSteps = []string{personalStepPending, personalStepCompleted, personalStepSkipped}
+
+// onboardingVersion is the version of the first-run step. A later step bumps it so a person who answered
+// this one can be asked once more. The server writes it; a client cannot.
+const onboardingVersion = 1
+
+// OnboardingSettings is the stored first-run state, the "onboarding" settings category. updatedAt is set
+// by the server on every write.
+type OnboardingSettings struct {
+	PersonalStep string `json:"personalStep"`
+	Version      int    `json:"version"`
+	UpdatedAt    string `json:"updatedAt"`
+}
+
+// updateOnboardingSettingsRequest is the body of PUT /api/v1/settings/onboarding. The step is the only
+// field a client writes; the version and the time are stamped by the server.
+type updateOnboardingSettingsRequest struct {
+	PersonalStep string `json:"personalStep"`
+}
+
+// onboardingSettingsDefaults are what a person reads before they answer the first-run step.
+func onboardingSettingsDefaults() map[string]any {
+	return map[string]any{"personalStep": personalStepPending, "version": onboardingVersion, "updatedAt": ""}
+}
+
+// personalSetupVisible reads the user-core switch that shows the personal first-run card (EP-8-S8).
+// Opt-in: only the literal true enables it. It hides the card and nothing else: a stored state is still
+// read and written.
+func personalSetupVisible() bool {
+	return os.Getenv("PERSONAL_SETUP_VISIBLE") == "true"
+}
+
+// onboardingStepPatch is the stored patch for a step the person chose. Only the step comes from the
+// request: the version and the time are stamped here, so a save cannot forge either. A step outside the
+// closed set is refused.
+func onboardingStepPatch(step string, now time.Time) (map[string]any, bool) {
+	if !slices.Contains(personalSteps, step) {
+		return nil, false
+	}
+	return map[string]any{
+		"personalStep": step,
+		"version":      onboardingVersion,
+		"updatedAt":    now.UTC().Format(time.RFC3339),
+	}, true
+}
+
+// writeOnboardingSettings writes the stored first-run state. A stored step outside the closed set reads as
+// pending, never as completed: an unknown value must not hide the card for good.
+func writeOnboardingSettings(c *gin.Context, settings map[string]any) {
+	var result OnboardingSettings
+	if err := mapToStruct(settings, &result); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to decode settings"})
+		return
+	}
+	if !slices.Contains(personalSteps, result.PersonalStep) {
+		result.PersonalStep = personalStepPending
+	}
+	if result.Version == 0 {
+		result.Version = onboardingVersion
+	}
 	c.JSON(http.StatusOK, result)
+}
+
+// GET /api/v1/settings/onboarding
+func (s *Server) getOnboardingSettings(c *gin.Context) {
+	userID, ok := requireAuthenticatedUserID(c)
+	if !ok {
+		return
+	}
+	settings, err := s.userService.GetSettings(c.Request.Context(), userID, "onboarding", onboardingSettingsDefaults())
+	if err != nil {
+		log.Error().Err(err).Str("user_id", userID).Msg("failed to get onboarding settings")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to retrieve settings"})
+		return
+	}
+	writeOnboardingSettings(c, settings)
+}
+
+// PUT /api/v1/settings/onboarding
+func (s *Server) updateOnboardingSettings(c *gin.Context) {
+	userID, ok := requireAuthenticatedUserID(c)
+	if !ok {
+		return
+	}
+	var req updateOnboardingSettingsRequest
+	if !bindJSONRequest(c, &req, "Invalid request body") {
+		return
+	}
+	patch, ok := onboardingStepPatch(req.PersonalStep, time.Now())
+	if !ok {
+		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{
+			"code":    "personal_step_invalid",
+			"message": "personalStep must be one of pending, completed or skipped.",
+			"details": gin.H{"allowed": personalSteps},
+		}})
+		return
+	}
+	updated, err := s.userService.UpsertSettings(c.Request.Context(), userID, "onboarding", patch)
+	if err != nil {
+		log.Error().Err(err).Str("user_id", userID).Msg("failed to update onboarding settings")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to save settings"})
+		return
+	}
+	writeOnboardingSettings(c, updated)
 }
 
 // ============================================

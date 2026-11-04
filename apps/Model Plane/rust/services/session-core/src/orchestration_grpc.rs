@@ -19,6 +19,8 @@ use futures::{Stream, StreamExt};
 use mp_contracts::approval_cause::{self, CauseCode};
 use mp_contracts::model_plane::v1::{
     self as proto,
+    approval_scope_grant_service_server::ApprovalScopeGrantService,
+    run_question_consume_service_server::RunQuestionConsumeService,
     orchestration_core_service_server::{OrchestrationCoreService, OrchestrationCoreServiceServer},
     orchestration_event,
 };
@@ -382,6 +384,67 @@ const APPROVAL_AUDIT_EVENTS_ENV: &str = "APPROVAL_AUDIT_EVENTS_ENABLED";
 
 fn approval_audit_switch_from(value: Option<&str>) -> bool {
     value.is_some_and(|value| value.trim().eq_ignore_ascii_case("true"))
+}
+
+/// Standing approval scopes may act only with the approval audit events on (build plan K3-2): every
+/// standing release has its audit row, or there is no standing release. `Err` names the refused
+/// combination.
+fn scope_grants_require_audit(
+    grants_enabled: bool,
+    audit_enabled: bool,
+) -> Result<(), &'static str> {
+    if grants_enabled && !audit_enabled {
+        return Err("APPROVAL_SCOPE_GRANTS_ENABLED=true needs APPROVAL_AUDIT_EVENTS_ENABLED=true");
+    }
+    Ok(())
+}
+
+/// The startup form of [`scope_grants_require_audit`], read from the environment once at boot.
+pub(crate) fn check_scope_grant_startup() -> Result<(), &'static str> {
+    scope_grants_require_audit(
+        approval_cause::scope_grants_enabled(),
+        approval_audit_events_enabled(),
+    )
+}
+
+/// A refused standing scope reaches the caller as its typed token; any other store failure is
+/// internal (build plan WS13 S6).
+fn decision_error_status(error: anyhow::Error) -> Status {
+    match error.downcast_ref::<store::ScopeGrantRefusal>() {
+        Some(refusal) => Status::failed_precondition(refusal.code()),
+        None => Status::internal(error.to_string()),
+    }
+}
+
+/// The verified caller's own user, after its org is checked. Every grant call binds to this owner.
+fn grant_owner(caller: &VerifiedIdentity, org_id: &str) -> Result<String, Status> {
+    validate_approval_org(org_id)?;
+    caller.authorize_org(org_id)?;
+    caller
+        .user_id()
+        .map(str::to_owned)
+        .ok_or_else(|| Status::permission_denied("user-bound approval credential required"))
+}
+
+/// The owner's view of one standing grant. It names the tool, its action key and its class, and
+/// never an argument.
+fn approval_scope_grant_proto(row: &store::ApprovalScopeGrantRow) -> proto::ApprovalScopeGrant {
+    proto::ApprovalScopeGrant {
+        id: row.id.clone(),
+        thread_id: row.thread_id.clone(),
+        run_id: row.run_id.clone().unwrap_or_default(),
+        scope: approval_scope_from_str(&row.scope),
+        tool_name: row.tool_name.clone(),
+        action_key: row.action_key.clone(),
+        effect_class: row.effect_class.clone(),
+        created_from_approval_id: row.created_from_approval_id.clone(),
+        cause_code: row.cause_code.clone(),
+        created_at: Some(ts(row.created_at)),
+        expires_at: Some(ts(row.expires_at)),
+        revoked_at: row.revoked_at.map(ts),
+        use_count: row.use_count,
+        last_used_at: row.last_used_at.map(ts),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1411,6 +1474,18 @@ fn new_approval_metadata(
         }
         stored_code = Some(CauseCode::from_wire(&cause.code).as_str());
         metadata_map.insert("cause".to_owned(), approval_cause::to_metadata(&cause));
+        // E3.2-a: the host class a browser gate states, as a closed word (anything
+        // else reads `unknown`; a host name is never stored). Top level, because
+        // that is where the authz_decision audit reads it. A zero-retention caller
+        // stores none (the `filter` above).
+        if !cause.host_class.trim().is_empty() {
+            metadata_map.insert(
+                "host_class".to_owned(),
+                JsonValue::String(
+                    crate::audit_publisher::host_class_word(&cause.host_class).to_owned(),
+                ),
+            );
+        }
     }
     (JsonValue::Object(metadata_map), stored_code)
 }
@@ -2019,17 +2094,32 @@ async fn persist_browser_event(
             }),
             "type.googleapis.com/model_plane.v1.BrowserObservationReceived",
         ),
+        // `reason` (WS8.G attach mode) is stored only when set, so a user-initiated
+        // pause keeps the payload it always had.
         Some(orchestration_event::Event::BrowserRunPaused(value)) => (
             "BROWSER_RUN_PAUSED",
             value.run_id.as_str(),
-            serde_json::json!({ "run_id": value.run_id, "plan_id": value.plan_id }),
+            pause_resume_payload(&value.run_id, &value.plan_id, &value.reason),
             "type.googleapis.com/model_plane.v1.BrowserRunPaused",
         ),
         Some(orchestration_event::Event::BrowserRunResumed(value)) => (
             "BROWSER_RUN_RESUMED",
             value.run_id.as_str(),
-            serde_json::json!({ "run_id": value.run_id, "plan_id": value.plan_id }),
+            pause_resume_payload(&value.run_id, &value.plan_id, &value.reason),
             "type.googleapis.com/model_plane.v1.BrowserRunResumed",
+        ),
+        // Attach mode audit event (WS8.G): ids only, never a URL or a title.
+        Some(orchestration_event::Event::BrowserAttachSharedJar(value)) => (
+            "BROWSER_ATTACH_SHARED_JAR",
+            value.run_id.as_str(),
+            serde_json::json!({
+                "run_id": value.run_id,
+                "plan_id": value.plan_id,
+                "attach_id": value.attach_id,
+                "session_run_id": value.session_run_id,
+                "tab_id": value.tab_id,
+            }),
+            "type.googleapis.com/model_plane.v1.BrowserAttachSharedJar",
         ),
         Some(orchestration_event::Event::BrowserActionApprovalRequired(value)) => (
             "BROWSER_ACTION_APPROVAL_REQUIRED",
@@ -2207,6 +2297,15 @@ fn broadcast_approval_decision_events(
     );
 }
 
+/// The stored payload of a browser pause or resume. `reason` is present only when set.
+fn pause_resume_payload(run_id: &str, plan_id: &str, reason: &str) -> serde_json::Value {
+    let mut payload = serde_json::json!({ "run_id": run_id, "plan_id": plan_id });
+    if !reason.is_empty() {
+        payload["reason"] = serde_json::Value::String(reason.to_owned());
+    }
+    payload
+}
+
 fn event_run_id(ev: &proto::OrchestrationEvent) -> Option<&str> {
     match ev.event.as_ref()? {
         orchestration_event::Event::PlanTransitioned(p) => Some(&p.run_id),
@@ -2227,6 +2326,7 @@ fn event_run_id(ev: &proto::OrchestrationEvent) -> Option<&str> {
         orchestration_event::Event::BrowserObservationReceived(p) => Some(&p.run_id),
         orchestration_event::Event::BrowserRunPaused(p) => Some(&p.run_id),
         orchestration_event::Event::BrowserRunResumed(p) => Some(&p.run_id),
+        orchestration_event::Event::BrowserAttachSharedJar(p) => Some(&p.run_id),
         // Phase 5 — browser-specific HITL approval-gate detail events. Reuse
         // the same `RecordOrchestrationEvent` best-effort delivery path as
         // `BrowserActionDispatched`/`BrowserObservationReceived` above; the
@@ -2243,6 +2343,13 @@ fn event_run_id(ev: &proto::OrchestrationEvent) -> Option<&str> {
         // Questions (WS14 S3): run-scoped, ids only.
         orchestration_event::Event::QuestionAsked(p) => Some(&p.run_id),
         orchestration_event::Event::QuestionAnswered(p) => Some(&p.run_id),
+        // Do-run usage progress (WS27 S9): run-scoped, counts and ids only. It is broadcast and
+        // replayed like the other run events, and never persisted (`persist_browser_event` has no
+        // arm for it).
+        orchestration_event::Event::RunUsageProgress(p) => Some(&p.run_id),
+        // Tool retry (WS15 S3): run-scoped, ids and counts. Broadcast and replayed like the other run
+        // events, and never persisted (`persist_browser_event` has no arm for it).
+        orchestration_event::Event::ToolRetryScheduled(p) => Some(&p.run_id),
     }
 }
 
@@ -2297,6 +2404,28 @@ fn require_persistent_run_for_question(
     } else {
         Err(Refusal::DURABLE_MUTATION_FORBIDDEN.grpc_status(tonic::Code::FailedPrecondition))
     }
+}
+
+/// The one principal that may say a question is not the model's (EP-4 S5). Execution-core relays
+/// an MCP server's form; nothing else knows a server asked, and a person's credential must not be
+/// able to dress its own question as a named server's.
+const QUESTION_ORIGIN_SERVICE: &str = "service:execution-core";
+
+/// Check a create request's origin and who sent it, and return the origin token to store. Pure:
+/// it runs before any lookup. An empty origin is the model's, which any caller may state.
+#[allow(clippy::result_large_err)]
+fn question_origin(
+    caller: &VerifiedIdentity,
+    req: &proto::CreateRunQuestionRequest,
+) -> Result<&'static str, Status> {
+    let origin = user_question::validate_origin(&req.origin, &req.origin_label)
+        .map_err(|problem| invalid_question(&problem))?;
+    if origin != user_question::ORIGIN_MODEL
+        && !(caller.is_service() && caller.principal_id() == QUESTION_ORIGIN_SERVICE)
+    {
+        return Err(Status::permission_denied("question_origin_not_allowed"));
+    }
+    Ok(origin)
 }
 
 /// The typed status of an invalid question. The message is `invalid_question: <field>: <reason>`
@@ -2414,6 +2543,8 @@ fn run_question_from_row(row: &store::RunQuestionRow) -> Result<proto::RunQuesti
         answered_at: row.answered_at.map(ts),
         answers: question_answers_to_proto(&answers),
         answered_message_id: row.answered_message_id.clone(),
+        origin: row.origin.clone(),
+        origin_label: row.origin_label.clone(),
     })
 }
 
@@ -2531,6 +2662,206 @@ fn question_answered_event(row: &store::RunQuestionRow) -> proto::OrchestrationE
 // ---------------------------------------------------------------------------
 // Service implementation
 // ---------------------------------------------------------------------------
+
+/// The response to a claim on a question's answer (build plan WS14 S5). Only the claim that spent the
+/// answer, or replays its spend, is handed the answers; another claim learns that it was spent and nothing
+/// more. The refusals are closed codes, read before any answer leaves the service.
+#[allow(clippy::result_large_err)]
+fn consume_question_response(
+    outcome: store::ConsumedRunQuestion,
+) -> Result<proto::ConsumeRunQuestionResponse, Status> {
+    let (question, consumed, already_consumed, same_claim) = match outcome {
+        store::ConsumedRunQuestion::Consumed(row) => {
+            (Some(run_question_from_row(&row)?), true, false, false)
+        }
+        store::ConsumedRunQuestion::Replay(row) => {
+            (Some(run_question_from_row(&row)?), false, true, true)
+        }
+        store::ConsumedRunQuestion::AlreadyConsumed => (None, false, true, false),
+        store::ConsumedRunQuestion::NotAnswered => {
+            return Err(Status::failed_precondition("question_not_answered"));
+        }
+        store::ConsumedRunQuestion::NotResumable => {
+            return Err(Status::failed_precondition("question_not_resumable"));
+        }
+        store::ConsumedRunQuestion::Expired => {
+            return Err(Status::failed_precondition("question_expired"));
+        }
+        store::ConsumedRunQuestion::NotFound => {
+            return Err(Status::not_found("question_not_found"));
+        }
+    };
+    Ok(proto::ConsumeRunQuestionResponse {
+        question,
+        consumed,
+        already_consumed,
+        same_claim,
+    })
+}
+
+// Build plan WS14 S5: the continuation of a `resume` question claims its answer exactly once. Owner-only
+// and org-scoped; a ZDR or waived caller is refused before any lookup.
+#[tonic::async_trait]
+impl RunQuestionConsumeService for OrchestrationGrpc {
+    async fn consume_run_question(
+        &self,
+        request: Request<proto::ConsumeRunQuestionRequest>,
+    ) -> Result<Response<proto::ConsumeRunQuestionResponse>, Status> {
+        let started = Instant::now();
+        let result: Result<Response<proto::ConsumeRunQuestionResponse>, Status> = async {
+            let caller = identity(&request)?;
+            refuse_zdr_or_waived_question_caller(&caller)?;
+            authorize_operation(&caller, "orchestration:write")?;
+            let req = request.into_inner();
+            if req.question_id.is_empty()
+                || req.run_id.is_empty()
+                || req.org_id.is_empty()
+                || req.claim_token.is_empty()
+            {
+                return Err(Status::invalid_argument(
+                    "question_id, run_id, org_id and claim_token are required",
+                ));
+            }
+            caller.authorize_org(&req.org_id)?;
+            let user_id = caller
+                .user_id()
+                .ok_or_else(|| Status::permission_denied("user-bound credential required"))?;
+            // Only a hash of the claim token is stored.
+            let claim_hash = blake3::hash(req.claim_token.as_bytes()).to_hex().to_string();
+            let outcome = store::consume_run_question(
+                &self.pool,
+                &req.question_id,
+                &req.org_id,
+                user_id,
+                &req.run_id,
+                &claim_hash,
+            )
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+            Ok(Response::new(consume_question_response(outcome)?))
+        }
+        .await;
+        record_metrics("consume_run_question", started, result.is_ok());
+        result
+    }
+}
+
+/// The standing approval grants (build plan WS13 S6). A release is a service call for the run's
+/// owner, and listing or revoking is the owner's own. Every query is bound to the owner and the
+/// org, and a ZDR credential is refused by the operation scope.
+#[tonic::async_trait]
+impl ApprovalScopeGrantService for OrchestrationGrpc {
+    async fn use_approval_scope_grant(
+        &self,
+        request: Request<proto::UseApprovalScopeGrantRequest>,
+    ) -> Result<Response<proto::UseApprovalScopeGrantResponse>, Status> {
+        let started = Instant::now();
+        let result: Result<Response<proto::UseApprovalScopeGrantResponse>, Status> = async {
+            let caller = identity(&request)?;
+            retention_receipt::refuse_zdr_continuation(&caller)?;
+            authorize_operation(&caller, "approval:grant_use")?;
+            if !caller.is_service() {
+                return Err(Status::permission_denied(
+                    "service identity required to release a call under a grant",
+                ));
+            }
+            let req = request.into_inner();
+            validate_approval_org(&req.org_id)?;
+            caller.authorize_org(&req.org_id)?;
+            if req.user_id.trim().is_empty() || req.thread_id.is_empty() || req.run_id.is_empty() {
+                return Err(Status::invalid_argument(
+                    "user_id, thread_id and run_id are required",
+                ));
+            }
+            if req.tool_name.trim().is_empty() || req.action_key.is_empty() {
+                return Err(Status::invalid_argument(
+                    "tool_name and action_key are required",
+                ));
+            }
+            // A release is never granted while the switch is off, whatever the caller sent.
+            if !approval_cause::scope_grants_enabled() {
+                return Ok(Response::new(proto::UseApprovalScopeGrantResponse {
+                    grant_id: String::new(),
+                }));
+            }
+            scope_grants_require_audit(true, approval_audit_events_enabled())
+                .map_err(Status::failed_precondition)?;
+            let grant_id = store::use_approval_scope_grant(
+                &self.pool,
+                &store::ScopeGrantUse {
+                    org_id: &req.org_id,
+                    user_id: &req.user_id,
+                    thread_id: &req.thread_id,
+                    run_id: &req.run_id,
+                    tool_name: req.tool_name.trim(),
+                    action_key: &req.action_key,
+                    effect_class: &req.effect_class,
+                },
+            )
+            .await
+            .map_err(|error| Status::internal(error.to_string()))?;
+            Ok(Response::new(proto::UseApprovalScopeGrantResponse {
+                grant_id: grant_id.unwrap_or_default(),
+            }))
+        }
+        .await;
+        record_metrics("use_approval_scope_grant", started, result.is_ok());
+        result
+    }
+
+    async fn list_approval_scope_grants(
+        &self,
+        request: Request<proto::ListApprovalScopeGrantsRequest>,
+    ) -> Result<Response<proto::ListApprovalScopeGrantsResponse>, Status> {
+        let started = Instant::now();
+        let result: Result<Response<proto::ListApprovalScopeGrantsResponse>, Status> = async {
+            let caller = identity(&request)?;
+            retention_receipt::refuse_zdr_continuation(&caller)?;
+            authorize_operation(&caller, "approval:grant_manage")?;
+            let req = request.into_inner();
+            let owner = grant_owner(&caller, &req.org_id)?;
+            authorize_thread_owner(&self.pool, &caller, &req.thread_id, OwnerIntent::Read).await?;
+            let rows =
+                store::list_approval_scope_grants(&self.pool, &req.org_id, &owner, &req.thread_id)
+                    .await
+                    .map_err(|error| Status::internal(error.to_string()))?;
+            Ok(Response::new(proto::ListApprovalScopeGrantsResponse {
+                grants: rows.iter().map(approval_scope_grant_proto).collect(),
+            }))
+        }
+        .await;
+        record_metrics("list_approval_scope_grants", started, result.is_ok());
+        result
+    }
+
+    async fn revoke_approval_scope_grant(
+        &self,
+        request: Request<proto::RevokeApprovalScopeGrantRequest>,
+    ) -> Result<Response<proto::RevokeApprovalScopeGrantResponse>, Status> {
+        let started = Instant::now();
+        let result: Result<Response<proto::RevokeApprovalScopeGrantResponse>, Status> = async {
+            let caller = identity(&request)?;
+            retention_receipt::refuse_zdr_continuation(&caller)?;
+            authorize_operation(&caller, "approval:grant_manage")?;
+            let req = request.into_inner();
+            let owner = grant_owner(&caller, &req.org_id)?;
+            if req.grant_id.is_empty() {
+                return Err(Status::invalid_argument("grant_id is required"));
+            }
+            let row =
+                store::revoke_approval_scope_grant(&self.pool, &req.org_id, &owner, &req.grant_id)
+                    .await
+                    .map_err(|error| Status::internal(error.to_string()))?
+                    .ok_or_else(|| Status::not_found("approval grant not found"))?;
+            Ok(Response::new(proto::RevokeApprovalScopeGrantResponse {
+                grant: Some(approval_scope_grant_proto(&row)),
+            }))
+        }
+        .await;
+        record_metrics("revoke_approval_scope_grant", started, result.is_ok());
+        result
+    }
+}
 
 #[tonic::async_trait]
 #[allow(clippy::too_many_lines)]
@@ -3453,6 +3784,7 @@ impl OrchestrationCoreService for OrchestrationGrpc {
                 }
             }
 
+            let created_new = created.is_some();
             // Counted when a row was inserted, so a retried request that collapses onto
             // an existing approval is not counted twice.
             if let (Some(_), Some(code)) = (&created, cause_code) {
@@ -3479,6 +3811,36 @@ impl OrchestrationCoreService for OrchestrationGrpc {
             }
             .ok_or_else(|| Status::internal("approval vanished after insert"))?;
             let approval = approval_from_row(&row);
+
+            // E3.2-d: the approval-requested signal, for a request that inserted a row (a
+            // retried one that collapsed onto an existing approval raises none). Best effort:
+            // a notification that cannot be queued never fails the approval itself.
+            if created_new && crate::audit_publisher::approval_notify_enabled() {
+                if let Err(error) = store::enqueue_approval_requested(
+                    &self.pool,
+                    &crate::audit_publisher::ApprovalRequestedSignal {
+                        org_id: &row.org_id,
+                        user_id: &row.user_id,
+                        run_id: &row.run_id,
+                        approval_id: &row.id,
+                        kind: &row.kind,
+                        tool: &row.metadata["cause"]["tool"]
+                            .as_str()
+                            .unwrap_or_default()
+                            .to_owned(),
+                        cause_code: &row.metadata["cause"]["code"]
+                            .as_str()
+                            .unwrap_or_default()
+                            .to_owned(),
+                        zdr: caller.zdr(),
+                        occurred_at: Utc::now(),
+                    },
+                )
+                .await
+                {
+                    warn!(error = %error, "approval_requested signal not queued");
+                }
+            }
 
             // Operator surfaces (run-event feed, snapshot) consume both: the
             // approval entering REQUESTED and the run pausing for it. A row a standing rule
@@ -3544,6 +3906,7 @@ impl OrchestrationCoreService for OrchestrationGrpc {
                 return Err(Status::invalid_argument("run_id is required"));
             }
             caller.authorize_org(&req.org_id)?;
+            let origin = question_origin(&caller, &req)?;
             let scope = store::run_question_scope(&self.pool, &req.run_id)
                 .await
                 .map_err(|e| Status::internal(e.to_string()))?
@@ -3572,6 +3935,10 @@ impl OrchestrationCoreService for OrchestrationGrpc {
                     spec: &prepared.spec,
                     idempotency_key: &req.idempotency_key,
                     expires_at: Utc::now() + prepared.expires_in,
+                    origin,
+                    // `question_origin` refused a label on a model question, so this is empty
+                    // there and the server's checked name otherwise.
+                    origin_label: &req.origin_label,
                 },
                 user_question::MAX_QUESTIONS_PER_RUN,
             )
@@ -4034,6 +4401,16 @@ impl OrchestrationCoreService for OrchestrationGrpc {
                 .ok_or_else(|| Status::invalid_argument("invalid decision source"))?;
             let scope = approval_scope_to_str(req.scope)
                 .ok_or_else(|| Status::invalid_argument("invalid decision scope"))?;
+            if scope != "once" {
+                if new_status != "granted" {
+                    return Err(Status::invalid_argument("a scope applies to a grant only"));
+                }
+                if !approval_cause::scope_grants_enabled() {
+                    return Err(Status::failed_precondition("scope_not_enabled"));
+                }
+                scope_grants_require_audit(true, approval_audit_events_enabled())
+                    .map_err(Status::failed_precondition)?;
+            }
             // Turn origin rules (build plan WS10 S7): an unwatched turn takes a `once` decision only.
             crate::space::approval_gate::refuse_wide_scope_for_origin(
                 &self.pool,
@@ -4046,6 +4423,9 @@ impl OrchestrationCoreService for OrchestrationGrpc {
                 source,
                 scope,
                 audit: approval_audit_events_enabled(),
+                grant_ttl_secs: approval_cause::thread_grant_ttl_secs(),
+                rule_proposed: req.rule_proposed,
+                authz_audit: crate::audit_publisher::authz_decision_audit_enabled(),
             };
             let decision_write = match member_space.as_deref() {
                 Some(space_id) => {
@@ -4075,7 +4455,7 @@ impl OrchestrationCoreService for OrchestrationGrpc {
                     .await
                 }
             }
-            .map_err(|e| Status::internal(e.to_string()))?;
+            .map_err(decision_error_status)?;
             let updated = decision_write.updated;
             if updated {
                 metrics::counter!("mp_session_approval_decisions_total", "source" => source)
@@ -5521,6 +5901,30 @@ mod tests {
     }
 
     #[test]
+    fn a_stated_host_class_is_stored_as_a_closed_word_and_never_for_a_zdr_caller() {
+        let with_class = |class: &str| {
+            let mut req = create_with_cause("browser_action_risk");
+            req.cause.as_mut().unwrap().host_class = class.to_owned();
+            req
+        };
+        for class in ["none", "general", "sensitive", "internal", "unknown"] {
+            let (metadata, _) = new_approval_metadata(&with_class(class), false);
+            assert_eq!(metadata["host_class"], class);
+        }
+        // A host name (or anything off the list) reads `unknown`; it is never stored.
+        let (metadata, _) = new_approval_metadata(&with_class("bank.example.com"), false);
+        assert_eq!(metadata["host_class"], "unknown");
+        // Nothing stated, nothing stored; and the cause itself carries no host class.
+        let (metadata, _) = new_approval_metadata(&with_class("  "), false);
+        assert!(metadata.get("host_class").is_none());
+        let (metadata, _) = new_approval_metadata(&with_class("sensitive"), false);
+        assert!(metadata["cause"].get("host_class").is_none());
+        // Zero retention keeps none of the cause, host class included.
+        let (metadata, _) = new_approval_metadata(&with_class("sensitive"), true);
+        assert!(metadata.get("host_class").is_none());
+    }
+
+    #[test]
     fn a_stated_cause_is_stored_beside_the_reason_and_read_back() {
         let (metadata, code) =
             new_approval_metadata(&create_with_cause("risky_effect_under_ask"), false);
@@ -5910,6 +6314,26 @@ mod tests {
     }
 
     #[test]
+    fn event_run_id_extracts_tool_retry() {
+        let retry = proto::OrchestrationEvent {
+            event_id: String::new(),
+            at: None,
+            event: Some(orchestration_event::Event::ToolRetryScheduled(
+                orchestration_event::ToolRetryScheduled {
+                    run_id: "run_r".into(),
+                    step_id: "step_1".into(),
+                    tool: "knowledge_search".into(),
+                    attempt: 2,
+                    max_attempts: 3,
+                    wait_ms: 100,
+                    reason: "connection".into(),
+                },
+            )),
+        };
+        assert_eq!(event_run_id(&retry), Some("run_r"));
+    }
+
+    #[test]
     // One assertion per oneof variant — a single flat test keeps the mapping
     // exhaustively visible in one place instead of splitting trivial per-variant
     // fixtures across many tiny tests.
@@ -6048,6 +6472,7 @@ mod tests {
                 orchestration_event::BrowserRunPaused {
                     run_id: "run_p".into(),
                     plan_id: "plan_p".into(),
+                    reason: String::new(),
                 },
             )),
         };
@@ -6060,10 +6485,35 @@ mod tests {
                 orchestration_event::BrowserRunResumed {
                     run_id: "run_p".into(),
                     plan_id: "plan_p".into(),
+                    reason: "control_returned".into(),
                 },
             )),
         };
         assert_eq!(event_run_id(&resumed_run), Some("run_p"));
+
+        let shared_jar = proto::OrchestrationEvent {
+            event_id: String::new(),
+            at: None,
+            event: Some(orchestration_event::Event::BrowserAttachSharedJar(
+                orchestration_event::BrowserAttachSharedJar {
+                    run_id: "run_j".into(),
+                    plan_id: "plan_j".into(),
+                    attach_id: "att_j".into(),
+                    session_run_id: "qrun_j".into(),
+                    tab_id: "tab_j".into(),
+                },
+            )),
+        };
+        assert_eq!(event_run_id(&shared_jar), Some("run_j"));
+
+        assert_eq!(
+            pause_resume_payload("r", "p", ""),
+            serde_json::json!({ "run_id": "r", "plan_id": "p" })
+        );
+        assert_eq!(
+            pause_resume_payload("r", "p", "user_took_over"),
+            serde_json::json!({ "run_id": "r", "plan_id": "p", "reason": "user_took_over" })
+        );
 
         // A durable-loop park and its resume are run-scoped, so both reach the
         // per-run stream and the replay buffer (WS03 S8).
@@ -6089,6 +6539,25 @@ mod tests {
             )),
         };
         assert_eq!(event_run_id(&loop_resumed), Some("run_k"));
+
+        // A Do run's usage progress (WS27 S9) is run-scoped, so it reaches the run's stream.
+        let usage_progress = proto::OrchestrationEvent {
+            event_id: String::new(),
+            at: None,
+            event: Some(orchestration_event::Event::RunUsageProgress(
+                orchestration_event::RunUsageProgress {
+                    run_id: "run_u".into(),
+                    round: 2,
+                    input_tokens: 3,
+                    output_tokens: 4,
+                    cache_read_input_tokens: 0,
+                    cache_creation_input_tokens: 0,
+                    model_used: "gpt-5.6-terra".into(),
+                    provider_used: "openai-codex-subscription".into(),
+                },
+            )),
+        };
+        assert_eq!(event_run_id(&usage_progress), Some("run_u"));
     }
 
     fn park_event(resumed: bool, run_id: &str) -> proto::OrchestrationEvent {
@@ -6131,6 +6600,7 @@ mod tests {
                 orchestration_event::BrowserRunPaused {
                     run_id: "run_x".into(),
                     plan_id: "plan_x".into(),
+                    reason: String::new(),
                 },
             )),
         };
@@ -6345,6 +6815,8 @@ mod tests {
             requested_at: Utc::now(),
             expires_at: Utc::now() + chrono::Duration::hours(1),
             answered_at: None,
+            origin: "model".to_owned(),
+            origin_label: String::new(),
         }
     }
 
@@ -6646,6 +7118,79 @@ mod tests {
         );
     }
 
+    // EP-4 S5: only execution-core may say an MCP server asked. A person's credential, or any other
+    // service, is refused before the run is looked up, so the refusal needs no database.
+    #[tokio::test]
+    async fn run_question_user_principal_cannot_set_a_server_origin() {
+        let (svc, _rx) = lazy_unreachable_service();
+        let mut create = create_question_request(vec![question_item("scope", "single")]);
+        create.origin = "mcp_elicitation".to_owned();
+        create.origin_label = "Fixture".to_owned();
+        for caller in [
+            VerifiedIdentity::user_for_test("org_q", "user_q"),
+            VerifiedIdentity::service_for_test_as(
+                "org_q",
+                "service:model-gateway",
+                &["orchestration:write"],
+                false,
+            ),
+        ] {
+            let refused = svc
+                .create_run_question(with_caller(create.clone(), caller))
+                .await
+                .expect_err("refused");
+            assert_eq!(refused.code(), tonic::Code::PermissionDenied);
+            assert_eq!(refused.message(), "question_origin_not_allowed");
+        }
+    }
+
+    #[test]
+    fn run_question_origin_is_checked_and_only_execution_core_may_name_a_server() {
+        let user = VerifiedIdentity::user_for_test("org_q", "user_q");
+        let execution =
+            VerifiedIdentity::service_for_test_as("org_q", QUESTION_ORIGIN_SERVICE, &["orchestration:write"], false);
+        let with = |origin: &str, label: &str| {
+            let mut req = create_question_request(vec![question_item("scope", "single")]);
+            req.origin = origin.to_owned();
+            req.origin_label = label.to_owned();
+            req
+        };
+        // Unset and `model` read as the model's, for every caller.
+        for caller in [&user, &execution] {
+            assert_eq!(question_origin(caller, &with("", "")).expect("model"), "model");
+            assert_eq!(question_origin(caller, &with("model", "")).expect("model"), "model");
+        }
+        assert_eq!(
+            question_origin(&execution, &with("mcp_elicitation", "Fixture")).expect("server"),
+            "mcp_elicitation"
+        );
+        for (origin, label, message) in [
+            ("mcp_elicitation", "", "invalid_question: origin_label: empty_text"),
+            ("model", "Fixture", "invalid_question: origin_label: label_on_model_origin"),
+            ("mcp_elicitation", &*"x".repeat(81), "invalid_question: origin_label: text_too_long"),
+            ("assistant", "", "invalid_question: origin: unsupported_origin"),
+        ] {
+            let refused = question_origin(&execution, &with(origin, label)).expect_err("invalid");
+            assert_eq!(refused.code(), tonic::Code::InvalidArgument);
+            assert_eq!(refused.message(), message);
+        }
+    }
+
+    #[test]
+    fn run_question_list_returns_origin() {
+        let row = stored_question(serde_json::json!([]));
+        let wire = run_question_from_row(&row).expect("readable");
+        assert_eq!((wire.origin.as_str(), wire.origin_label.as_str()), ("model", ""));
+        let mut row = row;
+        row.origin = "mcp_elicitation".to_owned();
+        row.origin_label = "Fixture".to_owned();
+        let wire = run_question_from_row(&row).expect("readable");
+        assert_eq!(
+            (wire.origin.as_str(), wire.origin_label.as_str()),
+            ("mcp_elicitation", "Fixture")
+        );
+    }
+
     // The question events say a row was written, so no caller may publish them.
     #[tokio::test]
     async fn run_question_events_cannot_be_published_through_record_orchestration_event() {
@@ -6709,6 +7254,62 @@ mod tests {
     // The handlers need a database to run, so the order of their gates is read from the source:
     // the ZDR gate first, the scope gate, then the org, and only then any lookup. The event is
     // broadcast only for the call that won the write.
+    #[test]
+    fn consume_question_response_hands_answers_only_to_the_claim_that_spent_or_replays_them() {
+        let mut row = stored_question(serde_json::json!([{
+            "id": "scope", "kind": "single", "prompt": "Which one?",
+            "options": [{"id": "a", "label": "A"}, {"id": "b", "label": "B"}]
+        }]));
+        row.state = "answered".to_owned();
+        row.delivery = "resume".to_owned();
+        row.answers = Some(serde_json::json!([]));
+        let spent = consume_question_response(store::ConsumedRunQuestion::Consumed(row.clone()))
+            .expect("the claim that spent the answer");
+        assert!(spent.consumed && !spent.already_consumed && !spent.same_claim);
+        assert!(spent.question.is_some());
+        let replay = consume_question_response(store::ConsumedRunQuestion::Replay(row))
+            .expect("the same claim replays");
+        assert!(!replay.consumed && replay.already_consumed && replay.same_claim);
+        assert!(replay.question.is_some());
+        let other = consume_question_response(store::ConsumedRunQuestion::AlreadyConsumed)
+            .expect("another claim is told it was spent");
+        assert!(!other.consumed && other.already_consumed && !other.same_claim);
+        assert!(other.question.is_none(), "another claim is handed no answer");
+        for (outcome, code) in [
+            (store::ConsumedRunQuestion::NotAnswered, "question_not_answered"),
+            (store::ConsumedRunQuestion::NotResumable, "question_not_resumable"),
+            (store::ConsumedRunQuestion::Expired, "question_expired"),
+        ] {
+            let refused = consume_question_response(outcome).expect_err("refused");
+            assert_eq!(refused.message(), code);
+            assert_eq!(refused.code(), tonic::Code::FailedPrecondition, "{code}");
+        }
+        let missing = consume_question_response(store::ConsumedRunQuestion::NotFound)
+            .expect_err("refused");
+        assert_eq!(missing.code(), tonic::Code::NotFound);
+    }
+
+    #[test]
+    fn consume_run_question_gates_before_the_store() {
+        let source = include_str!("orchestration_grpc.rs");
+        let start = source
+            .find("    async fn consume_run_question(")
+            .expect("the spend handler is present");
+        let rest = &source[start..];
+        let body = &rest[..rest
+            .find("record_metrics(\"consume_run_question\"")
+            .expect("the end of the handler")];
+        let gate = body
+            .find("refuse_zdr_or_waived_question_caller(&caller)?;")
+            .expect("the ZDR gate");
+        let operation = body
+            .find("authorize_operation(&caller, \"orchestration:write\")?;")
+            .expect("the scope gate");
+        let org = body.find("caller.authorize_org(&req.org_id)?;").expect("the org gate");
+        let lookup = body.find("store::consume_run_question(").expect("the store call");
+        assert!(gate < operation && operation < org && org < lookup, "the spend gate order");
+    }
+
     #[test]
     fn run_question_handlers_gate_before_they_look_anything_up() {
         let source = include_str!("orchestration_grpc.rs").replace("\r\n", "\n");
@@ -9150,5 +9751,31 @@ mod tests {
             assert_eq!(db.status_of(&plan.id).await, "approved");
             db.cleanup().await;
         }
+    }
+}
+
+#[cfg(test)]
+mod approval_scope_grant_tests {
+    use super::*;
+
+    #[test]
+    fn grants_flag_requires_audit_flag() {
+        assert!(scope_grants_require_audit(false, false).is_ok());
+        assert!(scope_grants_require_audit(false, true).is_ok());
+        assert!(scope_grants_require_audit(true, true).is_ok());
+        assert!(
+            scope_grants_require_audit(true, false).is_err(),
+            "grants without the approval audit trail are refused"
+        );
+    }
+
+    #[test]
+    fn a_refused_scope_reaches_the_caller_as_its_typed_token() {
+        let status =
+            decision_error_status(anyhow::Error::from(store::ScopeGrantRefusal::NotOffered));
+        assert_eq!(status.code(), tonic::Code::FailedPrecondition);
+        assert_eq!(status.message(), "scope_not_offered");
+        let other = decision_error_status(anyhow::anyhow!("database unavailable"));
+        assert_eq!(other.code(), tonic::Code::Internal);
     }
 }

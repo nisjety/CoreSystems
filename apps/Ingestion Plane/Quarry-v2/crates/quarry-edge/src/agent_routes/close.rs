@@ -176,6 +176,21 @@ pub(super) async fn finish_run(
                 .receipts
                 .close_run_checkpoint(&entry.org_id, &rid)
                 .await?;
+        } else {
+            // D2-061: the terminal `agent.expired` below takes the next seq of the trace, and
+            // the checkpoint stays `active` for a resume. Save it now, while the run is still
+            // registered (so no resume can read a stale one), with that seq already spent,
+            // so the resumed trace never reuses it. A failed save is logged: the resume then
+            // starts from the checkpoint of the last step.
+            let mut checkpoint = checkpoint_for_entry(&entry, &handle.live);
+            checkpoint.trace_seq = checkpoint.trace_seq.saturating_add(1);
+            if let Err(error) = state.receipts.save_run_checkpoint(checkpoint).await {
+                tracing::warn!(
+                    run_id,
+                    error_class = crate::zdr_log::class(&error),
+                    "could not checkpoint the trace seq of an ended run"
+                );
+            }
         }
     }
 

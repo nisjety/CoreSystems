@@ -1,0 +1,86 @@
+=== D3 start 2026-10-29T10:03:34Z ready={"generation":1,"sessions_open":0}
+--- D3a try 1 run=run_01M63HTTJNJA1GAX5GBDPJ9ZNB (redirect as the FIRST step)
+receipts before: 0
+navigate slow.crawl.test/redir (302 to fixture-b): http=403 time=0.148249
+  body: {"code":"SECURITY_BLOCKED","message":"browser navigation is outside the run's allowed domains","retryable":false,"details":{"op":"navigate","reason":"domain_grant_blocked"}}
+  leak-check: fixture-b=0 crawl.test=0 any-http-url=0 redir=0
+receipts after: 1 {"step":0,"a":"navigate","s":"failed","code":"SECURITY_BLOCKED"}
+browser-session: {"currentUrl":"","title":null,"status":"active","live":true}
+tabs: {"n":1,"tabs":[{"id":null,"url":"about:blank","active":true}]}
+next wait: http=200 time=0.187812
+  {"url":"about:blank","title":null,"step":1,"ax_nodes":3,"ax_names":[]}
+  egress (tab-scoped) in this observation: [{"tab_id":"tab-1","method":"GET","url":"http://slow.crawl.test/redir","decision":"allow","policy":"url_dns_public"},{"tab_id":"tab-1","method":"GET","url":"http://fixture-b.crawl.test/ext","decision":"block","policy":"domain_grant_blocked"}]
+navigate fixture-a: http=200 time=0.263710 {"url":"http://fixture-a.crawl.test/","title":"Fixture A","step":2,"ax_nodes":37,"ax_names":["Fixture A","Fixture A","docs"," "]}
+wait after: http=200 time=0.187000 {"url":"http://fixture-a.crawl.test/","title":"Fixture A","step":3,"ax_nodes":37,"ax_names":["Fixtur
+tabs at end: {"n":1,"tabs":[{"id":null,"url":"http://fixture-a.crawl.test/","active":true}]}
+receipts: [{"step":0,"a":"navigate","s":"failed","code":"SECURITY_BLOCKED"},{"step":1,"a":"wait","s":"completed","code":null},{"step":2,"a":"navigate","s":"completed","code":null},{"step":3,"a":"wait","s":"completed","code":null}]
+egress-receipts endpoint (tab-scoped, fixture-b rows): [{"tab_id":"tab-1","method":"GET","url":"http://fixture-b.crawl.test/ext","host":null,"decision":"block","policy":"domain_grant_blocked"}]
+close: HTTP=200
+ready: {"generation":1,"sessions_open":0}
+--- D3a try 2 run=run_01M63HTZ2BV11W9JBH78JGEA0S (redirect as a LATER step)
+warm navigate fixture-a: http=200 time=0.280357 {"url":"http://fixture-a.crawl.test/","title":"Fixture A","step":0,"ax_nodes":37,"ax_names":["Fixture A","Fixt
+receipts before: 1
+navigate slow.crawl.test/redir (302 to fixture-b): http=403 time=0.036815
+  body: {"code":"SECURITY_BLOCKED","message":"browser navigation is outside the run's allowed domains","retryable":false,"details":{"op":"navigate","reason":"domain_grant_blocked"}}
+  leak-check: fixture-b=0 crawl.test=0 any-http-url=0 redir=0
+receipts after: 2 {"step":1,"a":"navigate","s":"failed","code":"SECURITY_BLOCKED"}
+browser-session: {"currentUrl":"http://fixture-a.crawl.test/","title":null,"status":"active","live":true}
+tabs: {"n":1,"tabs":[{"id":null,"url":"http://fixture-a.crawl.test/","active":true}]}
+next wait: http=200 time=0.166337
+  {"url":"http://fixture-a.crawl.test/","title":"Fixture A","step":2,"ax_nodes":37,"ax_names":["Fixture A","Fixture A","docs"," "]}
+  egress (tab-scoped) in this observation: [{"tab_id":"tab-1","method":"GET","url":"http://slow.crawl.test/redir","decision":"allow","policy":"url_dns_public"},{"tab_id":"tab-1","method":"GET","url":"http://fixture-b.crawl.test/ext","decision":"block","policy":"domain_grant_blocked"}]
+navigate fixture-a: http=200 time=0.187818 {"url":"http://fixture-a.crawl.test/","title":"Fixture A","step":3,"ax_nodes":37,"ax_names":["Fixture A","Fixture A","docs"," "]}
+wait after: http=200 time=0.163528 {"url":"http://fixture-a.crawl.test/","title":"Fixture A","step":4,"ax_nodes":37,"ax_names":["Fixtur
+tabs at end: {"n":1,"tabs":[{"id":null,"url":"http://fixture-a.crawl.test/","active":true}]}
+receipts: [{"step":0,"a":"navigate","s":"completed","code":null},{"step":1,"a":"navigate","s":"failed","code":"SECURITY_BLOCKED"},{"step":2,"a":"wait","s":"completed","code":null},{"step":3,"a":"navigate","s":"completed","code":null},{"step":4,"a":"wait","s":"completed","code":null}]
+egress-receipts endpoint (tab-scoped, fixture-b rows): [{"tab_id":"tab-1","method":"GET","url":"http://fixture-b.crawl.test/ext","host":null,"decision":"block","policy":"domain_grant_blocked"}]
+close: HTTP=200
+ready: {"generation":1,"sessions_open":0}
+--- D3a try 3 run=run_01M63HV3QSGPW0T2VGVATRBGZE (redirect as a LATER step)
+warm navigate fixture-a: http=200 time=0.274211 {"url":"http://fixture-a.crawl.test/","title":"Fixture A","step":0,"ax_nodes":37,"ax_names":["Fixture A","Fixt
+receipts before: 1
+navigate slow.crawl.test/redir (302 to fixture-b): http=403 time=0.052751
+  body: {"code":"SECURITY_BLOCKED","message":"browser navigation is outside the run's allowed domains","retryable":false,"details":{"op":"navigate","reason":"domain_grant_blocked"}}
+  leak-check: fixture-b=0 crawl.test=0 any-http-url=0 redir=0
+receipts after: 2 {"step":1,"a":"navigate","s":"failed","code":"SECURITY_BLOCKED"}
+browser-session: {"currentUrl":"http://fixture-a.crawl.test/","title":null,"status":"active","live":true}
+tabs: {"n":1,"tabs":[{"id":null,"url":"http://fixture-a.crawl.test/","active":true}]}
+next wait: http=200 time=0.166958
+  {"url":"http://fixture-a.crawl.test/","title":"Fixture A","step":2,"ax_nodes":37,"ax_names":["Fixture A","Fixture A","docs"," "]}
+  egress (tab-scoped) in this observation: [{"tab_id":"tab-1","method":"GET","url":"http://slow.crawl.test/redir","decision":"allow","policy":"url_dns_public"},{"tab_id":"tab-1","method":"GET","url":"http://fixture-b.crawl.test/ext","decision":"block","policy":"domain_grant_blocked"}]
+navigate fixture-a: http=200 time=0.182771 {"url":"http://fixture-a.crawl.test/","title":"Fixture A","step":3,"ax_nodes":37,"ax_names":["Fixture A","Fixture A","docs"," "]}
+wait after: http=200 time=0.164889 {"url":"http://fixture-a.crawl.test/","title":"Fixture A","step":4,"ax_nodes":37,"ax_names":["Fixtur
+tabs at end: {"n":1,"tabs":[{"id":null,"url":"http://fixture-a.crawl.test/","active":true}]}
+receipts: [{"step":0,"a":"navigate","s":"completed","code":null},{"step":1,"a":"navigate","s":"failed","code":"SECURITY_BLOCKED"},{"step":2,"a":"wait","s":"completed","code":null},{"step":3,"a":"navigate","s":"completed","code":null},{"step":4,"a":"wait","s":"completed","code":null}]
+egress-receipts endpoint (tab-scoped, fixture-b rows): [{"tab_id":"tab-1","method":"GET","url":"http://fixture-b.crawl.test/ext","host":null,"decision":"block","policy":"domain_grant_blocked"}]
+close: HTTP=200
+ready: {"generation":1,"sessions_open":0}
+--- D3b try 1 run=run_01M63HV8G4CD4B1G6CEDNG5NME (allowed page, <img> on fixture-b)
+navigate slow.crawl.test/img.html: http=200 time=0.245780
+  {"url":"http://slow.crawl.test/img.html","title":"R4-SC4 offlist image","step":0,"ax_nodes":10,"ax_names":["R4-SC4 offlist image","Off-list image","offlist","Off-list image"]}
+  egress (tab-scoped): [{"tab_id":"tab-1","method":"GET","url":"http://slow.crawl.test/img.html","decision":"allow","policy":"url_dns_public"},{"tab_id":"tab-1","method":"GET","url":"http://fixture-b.crawl.test/pixel.png","decision":"block","policy":"domain_grant_blocked"}]
+wait: http=200 time=0.164033 {"url":"http://slow.crawl.test/img.html","title":"R4-SC4 offlist image","step":1,"ax_nodes":10,"ax_names":["R4-SC4 offlist image","Off-list 
+  egress (tab-scoped): [{"tab_id":"tab-1","method":"GET","url":"http://slow.crawl.test/favicon.ico","decision":"allow","policy":"url_dns_public"}]
+receipts: [{"step":0,"a":"navigate","s":"completed","code":null},{"step":1,"a":"wait","s":"completed","code":null}]
+close: HTTP=200
+ready: {"generation":1,"sessions_open":0}
+--- D3b try 2 run=run_01M63HVABS72E0K6M0N8KDM1GW (allowed page, <img> on fixture-b)
+warm navigate fixture-a: http=200 time=0.294807
+navigate slow.crawl.test/img.html: http=200 time=0.126158
+  {"url":"http://slow.crawl.test/img.html","title":"R4-SC4 offlist image","step":1,"ax_nodes":10,"ax_names":["R4-SC4 offlist image","Off-list image","offlist","Off-list image"]}
+  egress (tab-scoped): [{"tab_id":"tab-1","method":"GET","url":"http://slow.crawl.test/img.html","decision":"allow","policy":"url_dns_public"},{"tab_id":"tab-1","method":"GET","url":"http://fixture-b.crawl.test/pixel.png","decision":"block","policy":"domain_grant_blocked"}]
+wait: http=200 time=0.178723 {"url":"http://slow.crawl.test/img.html","title":"R4-SC4 offlist image","step":2,"ax_nodes":10,"ax_names":["R4-SC4 offlist image","Off-list 
+  egress (tab-scoped): []
+receipts: [{"step":0,"a":"navigate","s":"completed","code":null},{"step":1,"a":"navigate","s":"completed","code":null},{"step":2,"a":"wait","s":"completed","code":null}]
+close: HTTP=200
+ready: {"generation":1,"sessions_open":0}
+--- S1a run=run_01M63HVCN4KCX4ST3M2V976XD4 (about:blank as a navigate target, after a page)
+warm navigate fixture-a: http=200 time=0.353200
+receipts before: 1
+navigate about:blank: http=403 time=0.004580
+  {"code":"SECURITY_BLOCKED","message":"browser navigation is outside the run's allowed domains","retryable":false,"details":null}
+receipts after: 1
+browser-session: {"currentUrl":"http://fixture-a.crawl.test/","title":null,"status":"active","live":true}
+close: HTTP=200
+ready: {"generation":1,"sessions_open":0}
+=== D3 end 2026-10-29T10:03:54Z ready={"generation":1,"sessions_open":0}

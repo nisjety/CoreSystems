@@ -28,6 +28,12 @@ const (
 	MaxHumanAbsoluteTTL = 24 * time.Hour
 	// DefaultMaxAttachDomains bounds the hosts of one attach grant.
 	DefaultMaxAttachDomains = grant.DefaultMaxAttachDomains
+	// INNH-10 key grants: own lifetime (default 600 s, clamped 30-900 s, never
+	// renewed) and a live-grant cap per API key.
+	DefaultKeyGrantTTL           = 10 * time.Minute
+	MinKeyGrantTTL               = 30 * time.Second
+	MaxKeyGrantTTL               = 15 * time.Minute
+	DefaultMaxActiveGrantsPerKey = grant.DefaultMaxActivePerKey
 )
 
 // Environment variables read by ConfigFromEnv.
@@ -41,6 +47,12 @@ const (
 	EnvHumanAbsoluteTTLSeconds = "BROWSER_BROKER_HUMAN_ABSOLUTE_TTL_SECONDS"
 	EnvDenySuffixes            = "BROWSER_BROKER_DENY_SUFFIXES"
 	EnvMaxAttachDomains        = "BROWSER_BROKER_MAX_ATTACH_DOMAINS"
+	// INNH-10: API-key grants. Off unless the switch is exactly 1, true or on.
+	EnvKeyGrantsEnabled      = "BROWSER_BROKER_KEY_GRANTS_ENABLED"
+	EnvKeyGrantTTLSeconds    = "BROWSER_BROKER_KEY_GRANT_TTL_SECONDS"
+	EnvMaxActiveGrantsPerKey = "BROWSER_BROKER_MAX_ACTIVE_GRANTS_PER_KEY"
+	// E3.2-e1 (OD13): origin-extension grants. Off unless exactly 1, true or on.
+	EnvOriginExtensionEnabled = "BROWSER_BROKER_ORIGIN_EXTENSION_ENABLED"
 )
 
 // Config holds the limits applied when issuing grants.
@@ -68,6 +80,21 @@ type Config struct {
 	// Policy decides which hosts may be granted. Nil means a StaticPolicy with
 	// MaxSessionDomains.
 	Policy grant.PolicyResolver
+	// KeyGrantsEnabled lets an api_key principal acquire a key grant
+	// (INNH-10, BROWSER_BROKER_KEY_GRANTS_ENABLED). Off by default: every
+	// api_key call is PermissionDenied and an existing key grant validates as
+	// revoked, so turning it off is also the kill switch.
+	KeyGrantsEnabled bool
+	// KeyGrantTTL is a key grant's lifetime; a request may only shorten it.
+	KeyGrantTTL time.Duration
+	// MaxActivePerKey caps live grants per API key. Key grants count against
+	// the owner's MaxActivePerOwner too.
+	MaxActivePerKey int
+	// OriginExtensionEnabled lets a signed-in user obtain an origin_extension
+	// grant for a run (E3.2-e1, BROWSER_BROKER_ORIGIN_EXTENSION_ENABLED). Off
+	// by default: every request is PermissionDenied and an existing extension
+	// validates as revoked, so turning it off is also the kill switch.
+	OriginExtensionEnabled bool
 }
 
 // DefaultConfig returns the defaults.
@@ -79,6 +106,8 @@ func DefaultConfig() Config {
 		MaxRunDomains:     DefaultMaxRunDomains,
 		HumanAbsoluteTTL:  grant.DefaultHumanAbsoluteTTL,
 		MaxAttachDomains:  DefaultMaxAttachDomains,
+		KeyGrantTTL:       DefaultKeyGrantTTL,
+		MaxActivePerKey:   DefaultMaxActiveGrantsPerKey,
 	}
 }
 
@@ -124,6 +153,18 @@ func ConfigFromEnv(getenv func(string) string) (Config, error) {
 	} else if ok {
 		cfg.MaxAttachDomains = min(v, hardMaxSessionDomains)
 	}
+	cfg.KeyGrantsEnabled = switchOn(getenv(EnvKeyGrantsEnabled))
+	cfg.OriginExtensionEnabled = switchOn(getenv(EnvOriginExtensionEnabled))
+	if v, ok, err := positiveInt(getenv, EnvKeyGrantTTLSeconds); err != nil {
+		return Config{}, err
+	} else if ok {
+		cfg.KeyGrantTTL = clampDuration(time.Duration(v)*time.Second, MinKeyGrantTTL, MaxKeyGrantTTL)
+	}
+	if v, ok, err := positiveInt(getenv, EnvMaxActiveGrantsPerKey); err != nil {
+		return Config{}, err
+	} else if ok {
+		cfg.MaxActivePerKey = v
+	}
 	if raw := strings.TrimSpace(getenv(EnvDenySuffixes)); raw != "" {
 		denied, err := grant.NormalizeDeniedDomains(strings.Split(raw, ","))
 		if err != nil {
@@ -145,6 +186,17 @@ func boolEnv(getenv func(string) string, name string) (bool, error) {
 		return true, nil
 	default:
 		return false, fmt.Errorf("%s must be 1, 0, true or false", name)
+	}
+}
+
+// switchOn reads a default-off switch: exactly 1, true or on (any case) turns
+// it on; anything else, a typo included, leaves it off.
+func switchOn(raw string) bool {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "1", "true", "on":
+		return true
+	default:
+		return false
 	}
 }
 

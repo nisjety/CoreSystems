@@ -80,8 +80,10 @@ pub const ROWS: &[Row] = &[
             "zdr_claim_floor::scrape_runs_as_zdr_for_a_zdr_org_user_and_not_for_a_registry_zdr_service",
             "zdr_log_capture::scrape_meter_metadata_under_zdr_has_no_url_or_fingerprint",
             "routes::tests::a_zdr_scrape_has_no_scrape_id_and_stores_no_artifact",
+            "ai_formats::zdr_skips_every_format_with_no_model_call_and_stores_nothing",
+            "ai_formats_real_token::a_zdr_org_user_gets_every_format_skipped_even_when_the_body_says_zdr_false",
         ],
-        basis: "no artifact, page-cache entry, scrape record or durable event; the text comes back in the response (default format markdown), cut at max_inline_bytes",
+        basis: "no artifact, page-cache entry, URL-result-cache entry (INNH-7, see scrape_max_age), scrape record or durable event; the text comes back in the response (default format markdown), cut at max_inline_bytes. The AI formats (json, summary, question, highlights; INNH-1, dark behind QUARRY_EDGE__AI_FORMATS) are refused under ZDR (ADR-4): each is answered status skipped, code ZDR_UNAVAILABLE inside the 200, with no Model Plane call, so no page text leaves for a model; QUARRY_EDGE__AI_FORMATS_ZDR accepts only refuse in v1 and the engine refuses a ZDR input as well",
         log: Log::Canary {
             test: "zdr_log_capture::a_zdr_scrape_logs_no_url_and_no_title_even_at_debug",
         },
@@ -93,11 +95,26 @@ pub const ROWS: &[Row] = &[
         status: Status::Enforced,
         enforced_by: &[
             "zdr_claim_floor::scrape_stream_runs_as_zdr_for_a_zdr_org_user_and_not_for_a_registry_zdr_service",
+            "ai_formats::the_stream_route_refuses_ai_formats_before_any_fetch",
         ],
-        basis: "the run's posture is the request flag raised by the token floor; page events go to live subscribers only",
+        basis: "the run's posture is the request flag raised by the token floor; page events go to live subscribers only. The AI formats are not served on the stream at all (400 unsupported_in_stream, INNH-1), so no model call can happen on this route",
         log: Log::Canary {
             test: "zdr_log_capture::a_zdr_streamed_scrape_logs_no_url_from_its_spawned_runner",
         },
+    },
+    Row {
+        id: "scrape_max_age",
+        routes: &[],
+        treatment: Treatment::Degraded {
+            warning: "max_age_ignored_zdr",
+        },
+        status: Status::Enforced,
+        enforced_by: &[
+            "scrape_max_age::zdr_never_reads_or_writes_the_url_cache_and_says_so",
+            "scrape_cache::tests::zdr_wins_over_everything_else",
+        ],
+        basis: "same route as scrape: INNH-7 max_age reads and writes quarry:scrape:{org}:{hash} (the output and warnings, no inline text; the text is rebuilt from artifacts), dark behind QUARRY_EDGE__SCRAPE_MAX_AGE. Under ZDR (body flag or the token's floor) the cache is neither read nor written and no key is computed, not even a hashed URL (a hash of a known URL is a membership oracle); the scrape runs as a fresh fetch and the response carries the warning max_age_ignored_zdr with cache_state bypass. The decision is made in scrape_cache::eligibility before any key exists",
+        log: Log::Unverified,
     },
     Row {
         id: "scrape_record_read",
@@ -134,8 +151,9 @@ pub const ROWS: &[Row] = &[
         enforced_by: &[
             "zdr_claim_floor::a_user_token_from_a_zdr_org_runs_search_as_zdr_even_when_the_body_says_false",
             "zdr_claim_floor::a_user_token_from_a_zdr_org_runs_search_as_zdr_when_the_body_omits_the_flag",
+            "answer_provider_status::include_answer_under_zdr_is_skipped_with_no_model_call_and_no_meter",
         ],
-        basis: "paid providers closed, search cache bypassed, no durable SearchIssued event; the provider failure is logged as a class only",
+        basis: "paid providers closed, search cache bypassed, no durable SearchIssued event; the provider failure is logged as a class only. include_answer (INNH-8a) sends nothing to a model under ZDR: answer_status skipped_zdr, the answer pipeline never starts, no answer usage is metered",
         log: Log::Canary {
             test: "zdr_log_capture::a_zdr_search_with_a_failing_provider_logs_no_query",
         },
@@ -176,13 +194,17 @@ pub const ROWS: &[Row] = &[
     Row {
         id: "answer",
         routes: &["/v1/answer", "/v1/answer/stream"],
-        treatment: Treatment::Honored,
+        treatment: Treatment::Refused {
+            code: "FORBIDDEN",
+            feature: "answer_synthesis",
+        },
         status: Status::Enforced,
         enforced_by: &[
-            "zdr_claim_floor::answer_runs_as_zdr_for_a_zdr_org_user_and_as_before_otherwise",
-            "zdr_claim_floor::answer_stream_runs_as_zdr_for_a_zdr_org_user_and_as_before_otherwise",
+            "zdr_claim_floor::answer_is_refused_for_a_zdr_org_user_and_runs_as_before_otherwise",
+            "zdr_claim_floor::answer_stream_is_refused_for_a_zdr_org_user_and_runs_as_before_otherwise",
+            "answer_provider_status::a_zdr_answer_is_refused_before_the_pipeline_starts_and_nothing_reaches_the_model",
         ],
-        basis: "the answer pipeline runs with the effective ZDR posture: no paid providers, no durable search event",
+        basis: "answer_routes::answer_run and ::answer_stream refuse a request under effective ZDR (the body flag or the token's floor) with a 403 FORBIDDEN, reason zdr_unavailable, before the deployment's gate, the answer cache and the pipeline start: no search, no page fetch and no Model Plane call, because the model hop carries no ZDR posture (ADR-4) and would take the query and the page text. A refused ZDR run leaves only a metadata-only tombstone (outcome refused). include_answer on /v1/search is not refused: it is answered answer_status skipped_zdr, with the search itself run under ZDR and no model call",
         log: Log::Unverified,
     },
     Row {
@@ -192,8 +214,25 @@ pub const ROWS: &[Row] = &[
         status: Status::Enforced,
         enforced_by: &[
             "zdr_claim_floor::extract_runs_as_zdr_for_a_zdr_org_user_and_not_for_a_registry_zdr_service",
+            "zdr_claim_floor::extract_with_a_prompt_or_schema_never_reaches_the_model_for_a_zdr_org_user",
+            "extract_routes::a_zdr_request_never_reaches_the_model",
+            "ai_formats::extraction_under_zdr_is_refused_before_any_request",
         ],
-        basis: "the page runs carry the effective ZDR posture, so no artifact or durable page event is written",
+        basis: "the page runs carry the effective ZDR posture, so no artifact or durable page event is written. A schema or a prompt (INNH-2) would send page text to the Model Plane, whose invoke call has no ZDR posture (ADR-4), so under ZDR each source is answered status error, ZDR_UNAVAILABLE, with no Model Plane call; the harvested structured data still returns; the engine refuses a ZDR call as well",
+        log: Log::Unverified,
+    },
+    Row {
+        id: "parse",
+        routes: &["/v1/parse"],
+        treatment: Treatment::Inert {
+            reason: "reads the PDF or DOCX bytes the caller uploaded, answers their text and stores nothing: no artifact, cache entry, index row, event, usage record or ingest; the handler takes no AppState",
+        },
+        status: Status::Enforced,
+        enforced_by: &[
+            "parse_route::nothing_is_stored_for_a_standard_or_a_zdr_caller",
+            "parse_route::the_handler_cannot_reach_a_store",
+        ],
+        basis: "parse_routes::parse (INNH-11, dark behind QUARRY_EDGE__PARSE_ROUTE) reads the body, sniffs it and parses it through content_route in the isolated child; it logs nothing about the request and reads no filename header. The response carries Cache-Control: no-store. No redaction is applied to the returned text",
         log: Log::Unverified,
     },
     Row {
@@ -305,6 +344,47 @@ pub const ROWS: &[Row] = &[
         log: Log::Unverified,
     },
     Row {
+        id: "job_results",
+        routes: &[
+            "/v1/crawl/{id}/results",
+            "/v1/batch/{id}/results",
+            "/v1/jobs/{id}/results",
+        ],
+        treatment: Treatment::Refused {
+            code: "FORBIDDEN",
+            feature: "job_result_urls",
+        },
+        status: Status::Enforced,
+        enforced_by: &[
+            "job_results::a_zdr_token_is_403_with_the_reason_and_control_is_not_called",
+            "job_results::flag_off_is_501_and_control_is_not_called",
+        ],
+        basis: "job_results_routes::gate refuses a caller whose token floor is ZDR before it asks Control Plane anything: a row is the URL, title and artifact ids of a page the job fetched (INNH-12), read from control's page_fetched events. Dark behind QUARRY_EDGE__JOB_RESULTS (501 off, which wins over the refusal); a service principal is refused 403 by the route scope. No ZDR job exists to have results (crawl and batch are refused at handoff) and a ZDR run stores no artifact, so the ids are absent for it as well. Page content is not in the response: it is read by id through the artifacts row, which binds the read to the org",
+        log: Log::Unverified,
+    },
+    Row {
+        id: "webhook_subscriptions",
+        routes: &[
+            "/v1/webhook-subscriptions",
+            "/v1/webhook-subscriptions/{id}",
+            "/v1/webhook-subscriptions/{id}/rotate-secret",
+            "/v1/webhook-subscriptions/{id}/deliveries",
+            "/v1/webhook-subscriptions/{id}/deliveries/{did}/retry",
+        ],
+        treatment: Treatment::Refused {
+            code: "FORBIDDEN",
+            feature: "webhook_off_process",
+        },
+        status: Status::Enforced,
+        enforced_by: &[
+            "webhook_subscriptions::a_zdr_token_cannot_create_patch_or_retry_and_control_is_not_called",
+            "webhook_subscriptions::flag_off_is_501_and_control_is_not_called",
+            "webhook_subscription_routes::tests::zdr_refuses_what_pushes_and_leaves_wind_down_open",
+        ],
+        basis: "webhook_subscription_routes::gate refuses create, patch and delivery retry for a caller whose token floor is ZDR before it asks Control Plane anything (403, details.reason webhook_off_process): a subscription pushes the page URL and fingerprints of every detected change to a third party. Reads, delete and secret rotation stay open so a ZDR organization can wind down what it holds. Dark behind QUARRY_EDGE__WEBHOOK_SUBSCRIPTIONS (501 off, which wins over the refusal); a service principal is refused 403 by the route scope and by the gate. Nothing is sent for a ZDR run in any case: emit_change_side_effects suppresses the change event and webhook for a declared zdr, so a subscription an organization made before it turned ZDR receives nothing from a ZDR check. Control keeps a subscription (URL and the HMAC secret, the secret stored in plaintext: see the owner decision in docs/RUNBOOKS.md) and each delivery row (the event payload) until delete, org erasure or the delivery retention sweep (default 14 days)",
+        log: Log::Unverified,
+    },
+    Row {
         id: "job_control",
         routes: &[
             "/v1/crawl/{id}/pause",
@@ -358,7 +438,22 @@ pub const ROWS: &[Row] = &[
         // No test here fails if the baseline write stops being true: this binary wires
         // no baseline store, so the write is unreachable (see the test's own doc).
         enforced_by: &[],
-        basis: "record_internal calls zdr_refusal::refuse on the body's declared zdr before the store (flag on: 403; flag off: zdr.would_refuse and the baseline is stored as before); emit_change_side_effects suppresses the change event and webhook for a declared zdr in both modes. The orchestrator declares the posture quarry-control stamped on the schedule at create (migration 023); a schedule created before that (NULL) or before its org turned ZDR on declares nothing or false and is stored (pinned by zdr_posture_stamp::record_trusts_the_stamp_not_the_current_posture); the orchestrator also declares the stamp on the run_page fetch that precedes the record call, so a stamped-ZDR monitor's fetch runs in ZDR mode and persists no page artifact, event or local-index write-back; ChangeMonitorWF still emits run_started and change_detected with the URL. No test observes the baseline write, because the harness wires no baseline store",
+        basis: "record_internal calls zdr_refusal::refuse on the body's declared zdr before the store (flag on: 403; flag off: zdr.would_refuse and the baseline is stored as before); emit_change_side_effects suppresses the change event and webhook for a declared zdr in both modes; with QUARRY_EDGE__CHANGE_TEXT_DIFF on (INNH-4) record_core still keeps no page text, markdown artifact id or text diff for a declared zdr in either mode (change_routes::record_tests::a_zdr_declared_check_never_stores_text_even_with_the_flag_on). The orchestrator declares the posture quarry-control stamped on the schedule at create (migration 023); a schedule created before that (NULL) or before its org turned ZDR on declares nothing or false and is stored (pinned by zdr_posture_stamp::record_trusts_the_stamp_not_the_current_posture); the orchestrator also declares the stamp on the run_page fetch that precedes the record call, so a stamped-ZDR monitor's fetch runs in ZDR mode and persists no page artifact, event or local-index write-back; ChangeMonitorWF still emits run_started and change_detected with the URL. No test observes the baseline write, because the harness wires no baseline store",
+        log: Log::Unverified,
+    },
+    Row {
+        id: "change_diff_read",
+        routes: &["/v1/change/diff"],
+        treatment: Treatment::Refused {
+            code: "FORBIDDEN",
+            feature: "change_diff_read",
+        },
+        status: Status::Enforced,
+        enforced_by: &[
+            "change_diff::tests::the_gate_names_the_variable_off_and_refuses_zdr",
+            "change_diff_route::the_route_is_off_by_default_then_gates_zdr_and_the_query",
+        ],
+        basis: "change_routes::diff calls change_diff::gate, which refuses a reader whose organization is under ZDR (the token's floor or the body flag) before the store is asked, even for a baseline stored before it was; dark behind QUARRY_EDGE__CHANGE_TEXT_DIFF (501 off, which wins over the refusal). The route returns stored page text (the markdown of two baselines and a paragraph diff of it). The text exists only for a change monitor that was not ZDR when it ran: a ZDR run stores no markdown artifact and run_page returns no markdown_artifact_id, and record_core keeps no text or diff for a body that declares zdr in either refusal mode. No hash of a page is returned in its place",
         log: Log::Unverified,
     },
     Row {
@@ -435,6 +530,19 @@ pub const ROWS: &[Row] = &[
         status: Status::Enforced,
         enforced_by: &[],
         basis: "same route as agent_run: lifecycle::start_run refuses a resume of a ZDR checkpoint (none is written)",
+        log: Log::Unverified,
+    },
+    Row {
+        id: "agent_run_api_key",
+        routes: &[],
+        treatment: Treatment::Honored,
+        status: Status::Enforced,
+        enforced_by: &[
+            "api_key_agent_runs::a_zdr_key_token_makes_a_zdr_run_and_a_zdr_grant_needs_one",
+            "api_key_agent_runs::a_key_run_takes_no_profile_and_no_resume",
+            "api_key_fence::switch_on_with_the_scope_refuses_every_route_off_the_allow_list",
+        ],
+        basis: "an API-key principal (INNH-10, dark behind QUARRY_EDGE__API_KEY_AGENT_RUNS) starts a run on the agent_run route and keeps exactly the persistence of agent_run: a ZDR run writes no checkpoint, timeline row or receipt. On top of that, in every posture: no resume and no profile or persist_profile (api_key_resume_refused, api_key_profile_refused, so a key run never reads or writes a durable profile or checkpoint of its own), no artifacts route (the route fence refuses /v1/artifacts*, api_key_route_refused), no sensitive action. The token's zdr claim is the organization's posture raised by the key's own flag and counts as a floor like a user's (auth::Claims::zdr_floor), and a ZDR grant cannot back a non-ZDR run. Quarry sends nothing to a model on these routes",
         log: Log::Unverified,
     },
     Row {
@@ -544,6 +652,19 @@ pub const ROWS: &[Row] = &[
         log: Log::Unverified,
     },
     Row {
+        id: "internal_crawl_sitemap",
+        routes: &["/v1/internal/crawl/sitemap"],
+        treatment: Treatment::Inert {
+            reason: "reads the public sitemap files of a crawl's site and answers URLs and counts; it stores nothing, and a crawl is never ZDR (the handoff refuses it), so a body that declares zdr is a 400",
+        },
+        status: Status::Enforced,
+        enforced_by: &[
+            "crawl_sitemap::the_route_checks_the_token_the_org_binding_and_the_body",
+        ],
+        basis: "crawl_sitemap::internal_sitemap (INNH-6a, dark behind QUARRY_EDGE__CRAWL_SITEMAP) fetches robots.txt through the shared gate and each sitemap file through the guarded driver chain, then returns the URLs the crawl scope and robots allow; it writes no artifact, event, cache entry or record. The robots rules it reads are cached by the gate as for any page",
+        log: Log::Unverified,
+    },
+    Row {
         id: "internal_schedule_preflight",
         routes: &["/v1/internal/schedules/preflight"],
         treatment: Treatment::Inert {
@@ -598,9 +719,12 @@ pub const ROWS: &[Row] = &[
 /// table cannot make quietly.
 pub const MUST_STAY_REFUSED: &[&str] = &[
     "durable_jobs",
+    "answer",
     "agent_persistent_profile",
     "agent_resume",
     "scrape_record_read",
+    "change_diff_read",
+    "webhook_subscriptions",
 ];
 
 fn normalize(path: &str) -> String {

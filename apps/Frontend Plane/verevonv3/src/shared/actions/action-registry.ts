@@ -691,6 +691,18 @@ const memoryRememberInput = z.object({
   content: z.string().trim().min(1),
 })
 
+// The caller's own profile text (EP-8 S4), bounded as session-core bounds it, and the
+// revision it was edited against; whose profile it is never comes from here.
+const memoryProfileSaveInput = z.object({
+  content: z.string().max(1400),
+  expectedRevision: z.number().int().min(0),
+})
+
+// `force` replaces an edited profile; the person's own button always sends it.
+const memoryProfileRebuildInput = z.object({
+  force: z.boolean(),
+})
+
 // A learned-skill proposal, by the skill's id. Only its owner may decide it, and
 // session-core checks that; the caller's own identity never comes from here.
 const learningSkillDecisionInput = z.object({
@@ -732,6 +744,24 @@ const settingsUpdateSettingInput = z.object({
   key: z.string().trim().min(1),
   value: z.unknown(),
 })
+
+// The caller's own reply tone (EP-8-S3), the closed set user-core stores. `default` asks for nothing extra.
+const settingsSetTonePresetInput = z.object({
+  tonePreset: z.enum(['default', 'professional', 'friendly', 'direct', 'warm', 'neutral']),
+})
+
+// The answers a person gives once, on first use (EP-8-S8). Every field is optional and bounded; user-core
+// checks the time zone and the language again before it stores them. Whose settings these are never comes
+// from the input: it is the verified caller.
+const settingsCompletePersonalSetupInput = z.object({
+  displayName: z.string().trim().max(80).optional(),
+  timezone: z.string().trim().max(64).optional(),
+  language: z.enum(['nb-NO', 'en-US']).optional(),
+  tonePreset: z.enum(['default', 'professional', 'friendly', 'direct', 'warm', 'neutral']).optional(),
+})
+
+// Skipping takes no input: it records only that the person chose not to answer now.
+const settingsSkipPersonalSetupInput = z.object({})
 
 // The response carries a raw, one-time API key secret auth-core never
 // returns again — real credential material, not a routine settings change.
@@ -902,27 +932,40 @@ const ingestionsStartAgentRunInput = z.object({
   allowedDomains: z.array(z.string().min(1)).max(50).optional(),
 })
 
+// WS15.L5: a schedule is created paused-by-default upstream and activated by a
+// separate step, so this input has no 'activate' member and the client never
+// sends one. 'batch' schedules carry 'urls' (the owner rejects a batch with no
+// valid URL); every other kind carries 'targetUrl'.
 const ingestionsCreateScheduleInput = z
   .object({
     name: z.string().trim().min(1),
     kind: z.string().min(1),
-    targetUrl: z.string().url(),
+    targetUrl: z.string().url().optional(),
+    urls: z.array(z.string().url()).min(1).optional(),
+    maxPages: z.number().int().positive().optional(),
+    overlapPolicy: z.enum(['skip', 'cancel', 'allow']).optional(),
     cron: z.string().trim().optional(),
     scheduleAt: z.string().datetime().optional(),
   })
+  .strict()
   .refine((value) => !!value.cron || !!value.scheduleAt, {
     message: "Provide either 'cron' or 'scheduleAt'",
   })
+  .refine((value) => (value.kind === 'batch' ? (value.urls?.length ?? 0) > 0 : !!value.targetUrl), {
+    message: "kind 'batch' requires a non-empty 'urls' array; any other kind requires 'targetUrl'",
+  })
 
-const ingestionsRunScheduleActionInput = z
+// Pausing a schedule is reversible and loses nothing, so it needs no approval.
+const ingestionsPauseScheduleInput = z.object({
+  scheduleId: z.string().min(1),
+})
+
+// Every other schedule state change goes through one approval-gated action.
+// The 'action' values are the wire verbs POST /api/ingestions/actions already
+// takes, so the gateway split is routing only.
+const ingestionsChangeScheduleStateInput = z
   .object({
-    action: z.enum([
-      'pause_schedule',
-      'unpause_schedule',
-      'trigger_schedule',
-      'backfill_schedule',
-      'delete_schedule',
-    ]),
+    action: z.enum(['unpause_schedule', 'trigger_schedule', 'backfill_schedule', 'delete_schedule']),
     scheduleId: z.string().min(1),
     startAt: z.string().datetime().optional(),
     endAt: z.string().datetime().optional(),
@@ -930,6 +973,15 @@ const ingestionsRunScheduleActionInput = z
   .refine((value) => value.action !== 'backfill_schedule' || (!!value.startAt && !!value.endAt), {
     message: "backfill_schedule requires 'startAt' and 'endAt'",
   })
+
+// Run control (WS15.L5). 'kind' picks the Quarry job family; crawl is the only one the
+// gateway proxies today, so it is also the default when 'kind' is omitted.
+const ingestionsRunControlKind = z.enum(['crawl'])
+
+const ingestionsRunRefInput = z.object({
+  runId: z.string().trim().min(1),
+  kind: ingestionsRunControlKind.optional(),
+})
 
 const ingestionsCreateSourceInput = z.object({
   name: z.string().trim().min(1),
@@ -1012,6 +1064,22 @@ const chatSetConnectorScopeInput = z
       .array(z.string().regex(/^[A-Za-z0-9_-]{1,128}$/))
       .max(8)
       .refine((ids) => new Set(ids).size === ids.length, { message: 'connection ids must be distinct' }),
+  })
+  .strict()
+
+// The agent mode one chat turn runs under (WS25-S6): the four ids of `api/contracts/agent-modes.json`,
+// read by the gateway as `agent_mode`. A closed list, so an id outside it is refused.
+const chatSetAgentModeInput = z
+  .object({
+    mode: z.enum(['lockdown', 'read_only', 'ask_first', 'auto']),
+  })
+  .strict()
+
+// The transcript level is the person's own display choice (EP-14 S2): the four levels user-core stores, and
+// nothing else a caller could widen the view with.
+const chatSetTranscriptDensityInput = z
+  .object({
+    transcriptDensity: z.enum(['detailed', 'standard', 'compact', 'minimal']),
   })
   .strict()
 
@@ -1129,6 +1197,118 @@ const orgUpdateAgentLearningPolicyInput = z.object({
   memory: z.enum(['allow', 'disabled']).optional(),
   learningReview: z.enum(['disabled', 'proposals']).optional(),
 })
+
+// The organization agent policy and its hook rules (WS25-S10). Inputs name no organization: the session
+// supplies it. The settings keys are the closed set of api/contracts/org-agent-policy-schema.json; reserved
+// keys are not writable from here. Inputs are camelCase like the rest of the registry; the REST bodies and
+// the outputs are capability-core's wire form.
+const orgAgentPolicyAllowListInput = z
+  .object({
+    mode: z.enum(['none', 'approved_only', 'any']),
+    ids: z.array(z.string().min(1).max(200)).max(64),
+  })
+  .strict()
+  .refine((input) => input.ids.length === 0 || input.mode === 'approved_only', {
+    message: 'ids are only allowed with mode approved_only',
+    path: ['ids'],
+  })
+
+const orgSetAgentPolicyInput = z
+  .object({
+    revision: z.number().int().min(0),
+    settings: z
+      .object({
+        mode_cap: z.enum(['lockdown', 'read_only', 'ask_first', 'auto']).optional(),
+        rung_cap: z.enum(['read_only', 'workspace_write', 'danger_full_access']).optional(),
+        lockdown: z.boolean().optional(),
+        'ext.mcp_servers': orgAgentPolicyAllowListInput.optional(),
+        mcp_tool_approval: z.enum(['approved_only', 'trust_annotations']).optional(),
+      })
+      .strict(),
+  })
+  .strict()
+
+const orgPreviewEffectivePolicyInput = z.object({}).strict()
+
+// A tool matcher is empty or "*" for any tool, a tool name, or a name ending in one "*" (hook/mod.rs).
+const orgHookRuleFields = z.object({
+  event: z.enum(['pre_tool', 'post_tool']),
+  toolMatcher: z
+    .string()
+    .max(200)
+    .regex(/^(\*|[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}\*?)?$/)
+    .optional(),
+  decision: z.enum(['deny', 'ask']),
+  reason: z.string().trim().min(1).max(500),
+  priority: z.number().int().min(-2147483648).max(2147483647).optional(),
+  enabled: z.boolean().optional(),
+})
+
+// A post_tool rule may only deny: the tool has already acted by the time its result is seen (WS25-D7).
+const postToolRuleMustDeny = (input: { event: string; decision: string }) =>
+  input.event !== 'post_tool' || input.decision === 'deny'
+const postToolRuleMustDenyIssue = { message: 'a post_tool rule may only deny', path: ['decision'] }
+
+const orgCreateHookInput = orgHookRuleFields
+  .strict()
+  .refine(postToolRuleMustDeny, postToolRuleMustDenyIssue)
+
+const orgUpdateHookInput = orgHookRuleFields
+  .extend({ hookId: z.string().min(1).max(200) })
+  .strict()
+  .refine(postToolRuleMustDeny, postToolRuleMustDenyIssue)
+
+const orgDeleteHookInput = z.object({ hookId: z.string().min(1).max(200) }).strict()
+
+const orgAgentPolicyOutput = z
+  .object({
+    org_id: z.string(),
+    revision: z.number().int().min(0),
+    digest: z.string(),
+    settings: z.record(z.string(), z.unknown()),
+  })
+  .passthrough()
+
+const orgEffectivePolicyOutput = z
+  .object({
+    org_id: z.string(),
+    revision: z.number().int().min(0),
+    digest: z.string(),
+    settings: z.array(
+      z
+        .object({
+          key: z.string(),
+          kind: z.enum(['enum', 'bool', 'allow_list']),
+          status: z.enum(['enforced', 'reserved']),
+          value: z.unknown(),
+          source: z.enum(['platform_default', 'org_policy']),
+          fail_closed_value: z.unknown(),
+        })
+        .passthrough(),
+    ),
+  })
+  .passthrough()
+
+const orgHookRuleOutput = z
+  .object({
+    id: z.string(),
+    event: z.enum(['pre_tool', 'post_tool']),
+    tool_matcher: z.string(),
+    decision: z.enum(['deny', 'ask']),
+    reason: z.string(),
+    priority: z.number().int(),
+    enabled: z.boolean(),
+    revision: z.number().int().min(0),
+  })
+  .passthrough()
+
+const orgHookRevokeOutput = z
+  .object({
+    id: z.string(),
+    revoked: z.literal(true),
+    revision: z.number().int().min(0),
+  })
+  .passthrough()
 
 const membershipInviteMemberInput = z.object({
   orgId: z.string().min(1),
@@ -1262,6 +1442,10 @@ const chatDeleteThreadInput = z.object({
   threadId: z.string().min(1),
 })
 
+const chatMarkThreadSeenInput = z.object({
+  threadId: z.string().trim().min(1),
+})
+
 const chatSaveThreadSnapshotInput = z.object({
   threadId: z.string().min(1),
   title: z.string().trim().optional(),
@@ -1333,6 +1517,26 @@ const browserRunStartInput = z.object({
 const browserRunControlInput = z.object({
   runId: z.string().min(1),
   action: z.enum(['pause', 'resume', 'stop']),
+})
+
+// A person's steer into a live browser-agent run (E3.3-g): one message typed in the dock while the
+// run works, which the run takes at its next step. `clientMessageId` names the message, so a repeated
+// send of the same id is one message. The owner holds the text in memory until a step takes it, and
+// never writes it to the run's event log or to the transcript.
+const browserRunSteerInput = z.object({
+  runId: z.string().min(1).max(128),
+  content: z.string().trim().min(1).max(2000),
+  clientMessageId: z
+    .string()
+    .regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/)
+    .optional(),
+}).strict()
+
+// `queued`: the run has the message and takes it at its next step. `run_ended`: the run ended first, so
+// nothing was taken and nothing was started, and the person decides what happens to the text.
+export const browserRunSteerOutput = z.object({
+  outcome: z.enum(['queued', 'run_ended']),
+  clientMessageId: z.string().min(1).max(128).optional(),
 })
 
 const browserOmniboxSearchInput = z.object({
@@ -1449,10 +1653,20 @@ const routerPolicyModeTableInput = z.object({
   complex: z.string().min(1),
 })
 
+// The side-task purposes the role table names (EP-13 S4); inference-core refuses any other key.
+const routerPolicyRolePurposes = ['title', 'follow_ups', 'verification_judge', 'research_plan'] as const
+
+const routerPolicyRoleInput = z.object({
+  candidates: z.array(z.string().min(1)).min(1).max(4),
+  effort: z.string().optional(),
+})
+
 // The owner enforces no admin gate on this write today — only org-scoping.
 // See dispatch_router_policy_update's own comment: the high risk/
 // requires-approval posture here compensates for that at the registry level,
 // since this is a full-document PUT of the org's entire model-routing table.
+// Every field of the document is listed, the ones the page does not show included:
+// the owner defaults a field it does not receive, so an unlisted field is reset by a save.
 const routerPolicyUpdateInput = z.object({
   enabled: z.boolean(),
   budget_cap_usd: z.number().nonnegative(),
@@ -1473,12 +1687,15 @@ const routerPolicyUpdateInput = z.object({
     moderate_threshold: z.number(),
     complex_threshold: z.number(),
     keywords: z.array(z.string()),
+    tool_use_floors_complex: z.boolean(),
   }),
   table: z.object({
     budget: routerPolicyModeTableInput,
     balance: routerPolicyModeTableInput,
     genius: routerPolicyModeTableInput,
   }),
+  tool_fallback_ladder: z.array(z.string().min(1)).max(8),
+  roles: z.partialRecord(z.enum(routerPolicyRolePurposes), routerPolicyRoleInput).optional(),
 })
 
 const chatSubmitFeedbackInput = z.object({
@@ -1613,6 +1830,120 @@ const auditDeleteSiemDestinationInput = z.object({
 
 const envelopeStatusOutput = z.object({
   status: z.string(),
+})
+
+// The automations hub's schedule calls (EP-6-S1). Strict, so a field the hub never sends (a goal,
+// an approval, a creator) is refused here rather than dropped. Creator-or-admin is enforced by the
+// BFF (authorize_own_schedule), not by these shapes.
+const scheduleListInput = z.object({}).strict()
+
+const scheduleIdInput = z
+  .object({
+    scheduleId: z.string().trim().min(1).max(200),
+  })
+  .strict()
+
+const scheduleUpdateTimeInput = z
+  .object({
+    scheduleId: z.string().trim().min(1).max(200),
+    scheduleExpr: z.string().trim().min(1).max(120),
+  })
+  .strict()
+
+const scheduleFiresListInput = z
+  .object({
+    scheduleId: z.string().trim().min(1).max(200),
+    limit: z.number().int().min(1).max(100).optional(),
+  })
+  .strict()
+
+// The agents landing's read of the org's definitions and the rooms each is installed in (EP-6-S5).
+// Strict and empty: the organisation comes from the session, never from the caller.
+const agentInstallationsListInput = z.object({}).strict()
+
+const agentInstallationsListOutput = z.object({
+  definitions: z.array(
+    z.object({
+      agent_ref: z.string(),
+      name: z.string().optional(),
+      description: z.string().optional(),
+      definition_status: z.enum(['active', 'inactive', 'draft']).optional(),
+      installations: z.array(
+        z.object({
+          space_ref: z.string(),
+          space_name: z.string(),
+          space_kind: z.enum(['personal', 'room', 'project', 'case']),
+          status: z.enum(['pending', 'active', 'paused', 'revoked', 'failed']).optional(),
+        }),
+      ),
+    }),
+  ),
+})
+
+// The agent builder's calls (EP-6-S8, AGENT_DEFINITION_VERSIONS). Strict, so a field the builder
+// never sends (a version, a digest, a publisher) is refused here rather than dropped. Who may edit
+// (org admin, the creator, or a manager of the room a room-born agent came from) is enforced by the
+// BFF (authorize_agent_builder), not by these shapes.
+const agentRefInput = z
+  .object({
+    agentRef: z.string().trim().min(1).max(128),
+  })
+  .strict()
+
+const agentAutonomyCap = z.enum(['read_only', 'ask_first', 'auto'])
+
+const agentDraftBody = z
+  .object({
+    name: z.string().trim().min(2).max(60),
+    system_prompt: z.string().max(4000),
+    model: z.string().trim().min(1).max(200),
+    // Capability ids from the WS05 registry, never free tool names.
+    tool_capability_ids: z
+      .array(z.string().regex(/^[a-z][a-z0-9_.-]{0,127}$/))
+      .max(64),
+    autonomy_cap: agentAutonomyCap,
+    knowledge_bindings: z
+      .object({
+        scope: z.enum(['all', 'selected']),
+        document_ids: z.array(z.string()).optional(),
+        source_ids: z.array(z.string()).optional(),
+        include_qna: z.boolean().optional(),
+      })
+      .strict()
+      .optional(),
+  })
+  .strict()
+
+const agentDraftSaveInput = z
+  .object({
+    agentRef: z.string().trim().min(1).max(128),
+    draft: agentDraftBody,
+  })
+  .strict()
+
+const agentDraftSaveOutput = z.object({
+  draft: agentDraftBody,
+})
+
+const agentPublishOutput = z.object({
+  version: z.number().int().min(1),
+  digest: z.string().regex(/^sha256:[0-9a-f]{64}$/),
+})
+
+const agentVersionsListOutput = z.object({
+  versions: z.array(
+    z.object({
+      version: z.number().int().min(1),
+      digest: z.string(),
+      name: z.string(),
+      system_prompt: z.string(),
+      model: z.string(),
+      tool_capability_ids: z.array(z.string()),
+      autonomy_cap: agentAutonomyCap,
+      published_by: z.string(),
+      published_at: z.number(),
+    }),
+  ),
 })
 
 // Registry entries are the product contract shared by humans and the Model Plane.
@@ -2576,6 +2907,28 @@ export const actionRegistry = [
     outputSchema: envelopeStatusOutput,
   },
   {
+    id: 'memory.profile.save',
+    label: 'Save profile',
+    description: 'Replace the caller\'s standing profile with their own text. Kept as written until they choose to rebuild it. Refused while memory is off and under Zero Data Retention.',
+    ownerPlane: 'model',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: memoryProfileSaveInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'memory.profile.rebuild',
+    label: 'Rebuild profile',
+    description: 'Rebuild the caller\'s standing profile from the memories they have accepted, replacing their edit. Refused while memory is paused or off and under Zero Data Retention.',
+    ownerPlane: 'model',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: false,
+    inputSchema: memoryProfileRebuildInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
     id: 'learning.accept_skill',
     label: 'Accept learned skill',
     description: 'Accept a skill Verevon proposed from the caller\'s own conversation, so it is used in their chats. Only the owner of the proposal can decide it.',
@@ -2639,6 +2992,39 @@ export const actionRegistry = [
     requiresApproval: false,
     reversible: true,
     inputSchema: settingsUpdateSettingInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'settings.set_tone_preset',
+    label: 'Set reply tone',
+    description: 'Set the caller\'s own reply tone (default, professional, friendly, direct, warm or neutral). It applies to the caller\'s new chats and runs, beneath the organization\'s and Space\'s instructions.',
+    ownerPlane: 'control',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: settingsSetTonePresetInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'settings.complete_personal_setup',
+    label: 'Complete personal setup',
+    description: 'Save the caller\'s own display name, time zone, language and reply tone, then mark the first-run personal setup done. Only the fields given are saved, and the setup is marked done last, once they are saved.',
+    ownerPlane: 'control',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: settingsCompletePersonalSetupInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'settings.skip_personal_setup',
+    label: 'Skip personal setup',
+    description: 'Record that the caller skipped the first-run personal setup. The card does not show again.',
+    ownerPlane: 'control',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: settingsSkipPersonalSetupInput,
     outputSchema: envelopeStatusOutput,
   },
   {
@@ -2706,6 +3092,61 @@ export const actionRegistry = [
     reversible: true,
     inputSchema: toolsSetPolicyInput,
     outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'org.set_agent_policy',
+    label: 'Set organization agent policy',
+    description: 'Replace the organization-wide agent policy: the highest mode agents may run in, the highest rung they may be granted, lockdown, the MCP servers they may use and how their tools are approved. Takes the revision it was read at and is refused if the policy has changed since. Takes effect only where the deployment has switched policy enforcement on. An org admin only. Refused typed under zero data retention. Never model-executable: a model does not set the rules it runs under.',
+    ownerPlane: 'model',
+    risk: 'high',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: orgSetAgentPolicyInput,
+    outputSchema: orgAgentPolicyOutput,
+  },
+  {
+    id: 'org.preview_effective_policy',
+    label: 'Preview effective agent policy',
+    description: 'Read the organization agent policy in force, setting by setting: the value each takes, whether it is enforced or reserved, and whether it comes from the organization or the platform default. Any member of the organization may read it. Never model-executable.',
+    ownerPlane: 'model',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: orgPreviewEffectivePolicyInput,
+    outputSchema: orgEffectivePolicyOutput,
+  },
+  {
+    id: 'org.create_hook',
+    label: 'Add organization hook rule',
+    description: 'Add a rule that denies, or asks first about, a tool call in the agent runs of the organization. A rule only narrows a run, and a post-tool rule may only deny, because the tool has already acted by then. Takes effect only where the deployment has switched durable hook rules on. An org admin only. Refused typed under zero data retention. Never model-executable: a model does not set the rules it runs under.',
+    ownerPlane: 'model',
+    risk: 'high',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: orgCreateHookInput,
+    outputSchema: orgHookRuleOutput,
+  },
+  {
+    id: 'org.update_hook',
+    label: 'Update organization hook rule',
+    description: 'Replace the content of an active organization hook rule, under the same rules as adding one. An org admin only. Refused typed under zero data retention. Never model-executable.',
+    ownerPlane: 'model',
+    risk: 'high',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: orgUpdateHookInput,
+    outputSchema: orgHookRuleOutput,
+  },
+  {
+    id: 'org.delete_hook',
+    label: 'Retire organization hook rule',
+    description: 'Retire an active organization hook rule. The rule stays in the history and can be added again. An org admin only. Refused typed under zero data retention. Never model-executable.',
+    ownerPlane: 'model',
+    risk: 'high',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: orgDeleteHookInput,
+    outputSchema: orgHookRevokeOutput,
   },
   {
     id: 'monitoring.check_now',
@@ -2875,7 +3316,7 @@ export const actionRegistry = [
   {
     id: 'ingestions.create_schedule',
     label: 'Create ingestion schedule',
-    description: 'Create a recurring or one-time-scheduled ingestion job for a target URL.',
+    description: 'Create a recurring or one-time-scheduled ingestion job (crawl, scrape, extract, search, or a batch of URLs). The schedule is created inactive and is never activated by this action.',
     ownerPlane: 'ingestion',
     risk: 'medium',
     requiresApproval: false,
@@ -2884,14 +3325,69 @@ export const actionRegistry = [
     outputSchema: envelopeStatusOutput,
   },
   {
-    id: 'ingestions.run_schedule_action',
-    label: 'Run schedule action',
-    description: 'Pause, unpause, trigger, backfill, or delete an existing ingestion schedule.',
+    id: 'ingestions.get_run_status',
+    label: 'Get ingestion run status',
+    description: 'Read the status, phase, desired state and progress of one crawl job. Read only.',
+    ownerPlane: 'ingestion',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: ingestionsRunRefInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'ingestions.pause_run',
+    label: 'Pause ingestion run',
+    description: 'Ask a running crawl to pause. Work already fetched is kept; resume continues it.',
     ownerPlane: 'ingestion',
     risk: 'medium',
     requiresApproval: false,
     reversible: true,
-    inputSchema: ingestionsRunScheduleActionInput,
+    inputSchema: ingestionsRunRefInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'ingestions.resume_run',
+    label: 'Resume ingestion run',
+    description: 'Ask a paused crawl to continue from where it stopped.',
+    ownerPlane: 'ingestion',
+    risk: 'medium',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: ingestionsRunRefInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'ingestions.cancel_run',
+    label: 'Cancel ingestion run',
+    description: 'Stop a crawl for good. A cancelled run cannot be resumed; pages already stored are kept.',
+    ownerPlane: 'ingestion',
+    risk: 'medium',
+    requiresApproval: true,
+    reversible: false,
+    inputSchema: ingestionsRunRefInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'ingestions.pause_schedule',
+    label: 'Pause ingestion schedule',
+    description: 'Pause an ingestion schedule so it stops firing. Unpausing is a separate state change.',
+    ownerPlane: 'ingestion',
+    risk: 'medium',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: ingestionsPauseScheduleInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'ingestions.change_schedule_state',
+    label: 'Change schedule state',
+    description: 'Unpause, trigger, backfill, or delete an existing ingestion schedule. Deleting a schedule cannot be undone.',
+    ownerPlane: 'ingestion',
+    risk: 'medium',
+    requiresApproval: true,
+    reversible: false,
+    inputSchema: ingestionsChangeScheduleStateInput,
     outputSchema: envelopeStatusOutput,
   },
   {
@@ -3357,6 +3853,18 @@ export const actionRegistry = [
     outputSchema: envelopeStatusOutput,
   },
   {
+    id: 'chat.mark_thread_seen',
+    label: 'Mark chat thread seen',
+    description:
+      "Mark one of the caller's threads read. Owner-only; refused for zero-retention and temporary chats, which keep read state on the client. Never model-executable.",
+    ownerPlane: 'model',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: chatMarkThreadSeenInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
     id: 'chat.save_thread_snapshot',
     label: 'Save chat thread snapshot',
     description: 'Save a chat thread\'s title, pin state, or preview.',
@@ -3409,6 +3917,28 @@ export const actionRegistry = [
     requiresApproval: false,
     reversible: true,
     inputSchema: chatSetConnectorScopeInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'chat.set_agent_mode',
+    label: 'Choose the agent mode for a chat turn',
+    description: 'Name the agent mode one chat turn runs under: lockdown (no agent runs), read_only (a plan run that refuses writes), ask_first (asks before a risky call) or auto (no gate beyond the platform floor). The server resolves it strictest-wins against the posture the platform already sets, so a choice can only tighten. It is sent as agent_mode on that turn only and is never remembered between turns. Never model-executable: a model does not choose the mode it runs under.',
+    ownerPlane: 'model',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: chatSetAgentModeInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'chat.set_transcript_density',
+    label: 'Choose how much chat work the transcript shows',
+    description: 'Name the transcript level the person reads chat work at: detailed, standard, compact (settled turns fold to one row) or minimal (answers, decisions and files, with the tool and reasoning trail hidden). The level is stored in the person\'s appearance settings and applies to every chat they open. Never model-executable: a model does not choose how the person reads its work.',
+    ownerPlane: 'control',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: chatSetTranscriptDensityInput,
     outputSchema: envelopeStatusOutput,
   },
   {
@@ -3487,6 +4017,17 @@ export const actionRegistry = [
     reversible: true,
     inputSchema: browserRunControlInput,
     outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'browser_run.steer',
+    label: 'Steer browser agent run',
+    description: 'Send one message from the person into a running browser-agent run. The run takes it at its next step. If the run ends first it answers run_ended and nothing starts. Human-only, from the browser dock: a model cannot send it. Ephemeral: the owner holds the text in memory until a step takes it and never writes it to the run event log or the transcript. Refused under zero data retention. Not reversible once taken.',
+    ownerPlane: 'model',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: false,
+    inputSchema: browserRunSteerInput,
+    outputSchema: browserRunSteerOutput,
   },
   {
     id: 'browser_omnibox.search',
@@ -3751,6 +4292,116 @@ export const actionRegistry = [
     reversible: false,
     inputSchema: auditDeleteSiemDestinationInput,
     outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'schedule.list',
+    label: 'List schedules',
+    description: 'List the schedules the signed-in person created in this organization, with cadence, enabled state and next run. Read only.',
+    ownerPlane: 'model',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: scheduleListInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'schedule.pause',
+    label: 'Pause schedule',
+    description: 'Stop the future fires of one schedule. A run already in progress finishes. The creator or an organization admin may pause it.',
+    ownerPlane: 'model',
+    risk: 'medium',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: scheduleIdInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'schedule.resume',
+    label: 'Resume schedule',
+    description: 'Start the fires of a paused schedule again. A schedule whose approval has expired cannot be resumed; renewing the approval creates a new schedule.',
+    ownerPlane: 'model',
+    risk: 'medium',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: scheduleIdInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'schedule.update_time',
+    label: 'Change schedule time',
+    description: 'Change the cron expression of one schedule. Only the time changes: the goal, the approval and the creator stay as they are.',
+    ownerPlane: 'model',
+    risk: 'medium',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: scheduleUpdateTimeInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'schedule.delete',
+    label: 'Delete schedule',
+    description: 'Delete one schedule. It stops firing at once and cannot be restored from the product. The creator or an organization admin may delete it.',
+    ownerPlane: 'model',
+    risk: 'high',
+    requiresApproval: false,
+    reversible: false,
+    inputSchema: scheduleIdInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'schedule.fires.list',
+    label: 'List schedule fires',
+    description: 'List the most recent fires of one of your schedules, with their status, outcome and the thread that holds the answer. Schedule creator or org admin only.',
+    ownerPlane: 'model',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: scheduleFiresListInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'agents.installations.list',
+    label: 'List agent installations',
+    description: 'List the agent definitions in this organization, with the rooms each one is added to and each installation\'s status. Read only: it shows where an agent is installed, not whether the caller may act in that room.',
+    ownerPlane: 'application',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: agentInstallationsListInput,
+    outputSchema: agentInstallationsListOutput,
+  },
+  {
+    id: 'agents.draft.save',
+    label: 'Save agent draft',
+    description: 'Save the editable draft of one agent: name, instructions, model, tools by capability id and autonomy cap. Nothing a running turn reads changes until the draft is published. Org admin, the agent\'s creator, or a manager of the room it was created in.',
+    ownerPlane: 'application',
+    risk: 'medium',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: agentDraftSaveInput,
+    outputSchema: agentDraftSaveOutput,
+  },
+  {
+    id: 'agents.publish',
+    label: 'Publish agent',
+    description: 'Publish the saved draft as the agent\'s next numbered version. Earlier versions are kept unchanged; going back means publishing an older version again as a new number.',
+    ownerPlane: 'application',
+    risk: 'medium',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: agentRefInput,
+    outputSchema: agentPublishOutput,
+  },
+  {
+    id: 'agents.versions.list',
+    label: 'List agent versions',
+    description: 'List the published versions of one agent, newest first, with each version\'s instructions, tools, autonomy cap and who published it. Read only; the same people who may edit the agent may read it.',
+    ownerPlane: 'application',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: agentRefInput,
+    outputSchema: agentVersionsListOutput,
   },
 ] as const satisfies readonly ActionDescriptor[]
 

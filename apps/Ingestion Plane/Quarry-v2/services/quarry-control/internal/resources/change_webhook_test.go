@@ -96,9 +96,9 @@ var changedBody = []byte(`{
 }`)
 
 type changeAck struct {
-	Status   string             `json:"status"`
-	EventID  quarrycontracts.ID `json:"event_id"`
-	Duplicate bool              `json:"duplicate"`
+	Status    string             `json:"status"`
+	EventID   quarrycontracts.ID `json:"event_id"`
+	Duplicate bool               `json:"duplicate"`
 }
 
 func doChange(t *testing.T, h http.Handler, req *http.Request) (int, changeAck) {
@@ -194,7 +194,7 @@ func TestChangeWebhook_BadSignatureRejected401(t *testing.T) {
 	// Tampered body AFTER signing → hash mismatch.
 	req := signedChangePost(t, "o1", changedBody, "", 0, "nonce-bad")
 	req.Body = httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(
-		bytes.Replace(changedBody, []byte("changed"), []byte("tampered", ), 1))).Body
+		bytes.Replace(changedBody, []byte("changed"), []byte("tampered"), 1))).Body
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
 	if w.Code != http.StatusUnauthorized {
@@ -255,9 +255,9 @@ func TestChangeWebhook_OrgScopingGuards(t *testing.T) {
 	h, _ := newChangeWebhookServer(t)
 
 	cases := []struct {
-		name   string
-		org    string
-		body   func() []byte
+		name string
+		org  string
+		body func() []byte
 	}{
 		{"missing org_id query", "", func() []byte { return changedBody }},
 		{"body/query mismatch", "o2", func() []byte { return changedBody }}, // body says o1
@@ -285,6 +285,7 @@ func TestChangeWebhook_FanoutCreatesDeliveryRows(t *testing.T) {
 	whID := quarrycontracts.NewID(quarrycontracts.KindWebhook)
 	if err := db.Webhooks().Create(store.Webhook{
 		ID:     whID,
+		OrgID:  "o1",
 		URL:    "https://hooks.example/quarry",
 		Events: []string{"change_detected"},
 		Active: true,

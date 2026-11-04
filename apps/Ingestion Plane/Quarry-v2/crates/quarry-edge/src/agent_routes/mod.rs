@@ -48,6 +48,8 @@ mod projection;
 #[cfg(feature = "browser-agent")]
 mod lifecycle;
 #[cfg(feature = "browser-agent")]
+mod api_key_runs;
+#[cfg(feature = "browser-agent")]
 mod close;
 #[cfg(feature = "browser-agent")]
 mod queries;
@@ -57,6 +59,8 @@ mod step;
 mod receipts;
 #[cfg(feature = "browser-agent")]
 mod live;
+#[cfg(feature = "browser-agent")]
+mod hit_test;
 #[cfg(feature = "browser-agent")]
 mod ws;
 #[cfg(feature = "browser-agent")]
@@ -100,6 +104,8 @@ pub use self::step::*;
 pub use self::receipts::*;
 #[cfg(feature = "browser-agent")]
 pub use self::live::*;
+#[cfg(feature = "browser-agent")]
+pub use self::hit_test::*;
 #[cfg(feature = "browser-agent")]
 pub use self::ws::*;
 #[cfg(feature = "browser-agent")]

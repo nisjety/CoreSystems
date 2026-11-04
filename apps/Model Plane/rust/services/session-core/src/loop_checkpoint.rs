@@ -2376,6 +2376,9 @@ fn after() { WRITE }
     const TEST_SEEDING_WRITES: &[(&str, &str)] = &[(
         "run_phase_tests.rs",
         "WS09-S1 DB tests seed a terminal status to prove the thread run guard releases",
+    ), (
+        "grpc_space_mentions_tests.rs",
+        "WS08-S2 DB tests seed a run status to prove the mention wake fold; test-only",
     )];
 
     fn rust_sources(dir: &std::path::Path, found: &mut Vec<std::path::PathBuf>) {

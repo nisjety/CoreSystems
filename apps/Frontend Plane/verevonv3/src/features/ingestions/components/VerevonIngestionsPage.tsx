@@ -35,7 +35,9 @@ import {
   type ProfilePayload,
   type RunItem,
   type ScheduleCapabilities,
+  type SchedulePauseAction,
   type ScheduleItem,
+  type ScheduleStateAction,
   type SourceCreateInput,
   type SourcePayload,
 } from '@/shared/api/ingestions-client'
@@ -594,7 +596,7 @@ export default function VerevonIngestionsPage() {
     }
   }
 
-  async function runScheduleAction(action: string, scheduleId: string) {
+  async function runScheduleAction(action: SchedulePauseAction | ScheduleStateAction, scheduleId: string) {
     setError(null)
     try {
       await runIngestionScheduleAction(action, scheduleId)

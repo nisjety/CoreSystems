@@ -121,6 +121,10 @@ pub(crate) enum MemoryReason {
     OrgDisabled,
     Zdr,
     PolicyUnavailable,
+    /// A Space thread reads no personal or org memory and writes none (EP-8 D2).
+    SpaceScope,
+    /// An agent run's own thread reads the owner's memory and writes none (EP-8 D1).
+    AgentRunScope,
 }
 
 impl MemoryReason {
@@ -133,6 +137,8 @@ impl MemoryReason {
             Self::OrgDisabled => "org_disabled",
             Self::Zdr => "zdr",
             Self::PolicyUnavailable => "policy_unavailable",
+            Self::SpaceScope => "space_scope",
+            Self::AgentRunScope => "agent_run_scope",
         }
     }
 }
@@ -163,6 +169,9 @@ impl MemoryDecision {
     pub(crate) fn skip_reason(&self) -> &'static str {
         match self.reason {
             MemoryReason::On => "",
+            // An agent run's own thread still reads the owner's memory; only its writes
+            // are refused, and `refusal` names that.
+            MemoryReason::AgentRunScope => "",
             other => other.as_str(),
         }
     }
@@ -233,6 +242,51 @@ pub(crate) fn apply_thread_mode(
         ThreadMemoryMode::Inherit => decision,
         ThreadMemoryMode::Off if decision.access == MemoryAccess::None => decision,
         ThreadMemoryMode::Off => MemoryDecision::denied(MemoryReason::ThreadOff),
+    }
+}
+
+/// What a thread's origin and Space impose on memory. One rule, which Dreaming's
+/// batch predicate repeats in SQL (pinned by a source-scan test): a Space thread,
+/// or any thread with a Space, reads and writes nothing personal or org-wide; an
+/// agent run's thread reads the owner's memory and writes none.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Containment {
+    None,
+    SpaceScope,
+    AgentRunScope,
+}
+
+pub(crate) fn thread_containment(origin: &str, has_space: bool) -> Containment {
+    // A thread inside a Space is governed by the Space plan's containment (WS17-S1,
+    // `space::memory_scope`): a shared room, a dm or a kind-less thread is contained, a
+    // personal Space still learns. That rule came with the merge of main (2026-11-02) and
+    // replaces EP-8 S2's first reading, under which no Space thread learned at all. A
+    // Space-origin thread that has lost its Space id has no kind to read, so it stays closed.
+    if origin == "agent_run" {
+        Containment::AgentRunScope
+    } else if origin == "space" && !has_space {
+        Containment::SpaceScope
+    } else {
+        Containment::None
+    }
+}
+
+/// Applies a thread's containment to the user's decision. It holds whether or
+/// not the kill switch is on: it is a data-boundary rule, not a user control. A
+/// denial that already leaves nothing readable keeps its own reason (ZDR, org
+/// policy), as [`apply_thread_mode`] does.
+fn contain(decision: MemoryDecision, containment: Containment) -> MemoryDecision {
+    match containment {
+        Containment::None => decision,
+        Containment::SpaceScope if decision.access == MemoryAccess::None => decision,
+        Containment::SpaceScope => MemoryDecision::denied(MemoryReason::SpaceScope),
+        Containment::AgentRunScope if !decision.generation_allowed => decision,
+        Containment::AgentRunScope => MemoryDecision {
+            reason: MemoryReason::AgentRunScope,
+            generation_allowed: false,
+            learning_allowed: false,
+            ..decision
+        },
     }
 }
 
@@ -379,33 +433,49 @@ pub(crate) async fn resolve_in_tx(
     Ok(decide_with_org(false, stored, mirror.as_ref()))
 }
 
-/// A thread's own mode. A thread that does not exist (or is another
-/// organization's) has no mode to restrict.
-async fn thread_mode<'e, E>(
+/// What the gate reads of a thread: its own mode, and the containment its origin
+/// and Space impose. A thread that does not exist (or is another organization's)
+/// has no mode to restrict and nothing to contain.
+struct ThreadFacts {
+    mode: ThreadMemoryMode,
+    containment: Containment,
+}
+
+async fn thread_facts<'e, E>(
     executor: E,
     org: &str,
     thread_id: &str,
-) -> Result<ThreadMemoryMode, sqlx::Error>
+) -> Result<ThreadFacts, sqlx::Error>
 where
     E: sqlx::PgExecutor<'e>,
 {
-    let mode: Option<String> =
-        sqlx::query_scalar("SELECT memory_mode FROM threads WHERE id = $1 AND org_id = $2")
-            .bind(thread_id)
-            .bind(org)
-            .fetch_optional(executor)
-            .await?;
-    // The CHECK constraint closes the set; an unknown value is treated as the
-    // most protective one.
-    Ok(mode.map_or(ThreadMemoryMode::Inherit, |value| {
-        ThreadMemoryMode::from_wire(&value).unwrap_or(ThreadMemoryMode::Off)
-    }))
+    let row: Option<(String, String, bool)> = sqlx::query_as(
+        "SELECT memory_mode, origin, space_id IS NOT NULL FROM threads WHERE id = $1 AND org_id = $2",
+    )
+    .bind(thread_id)
+    .bind(org)
+    .fetch_optional(executor)
+    .await?;
+    Ok(match row {
+        None => ThreadFacts {
+            mode: ThreadMemoryMode::Inherit,
+            containment: Containment::None,
+        },
+        // The CHECK constraints close both sets; an unknown mode is treated as the
+        // most protective one.
+        Some((mode, origin, has_space)) => ThreadFacts {
+            mode: ThreadMemoryMode::from_wire(&mode).unwrap_or(ThreadMemoryMode::Off),
+            containment: thread_containment(&origin, has_space),
+        },
+    })
 }
 
-/// [`resolve`] for a reader that works on one thread: the thread's own mode is
-/// folded in, so a thread set off recalls nothing while the user's other
-/// threads are untouched. The kill switch restores the behaviour before either
-/// choice existed.
+/// [`resolve`] for a reader that works on one thread: the thread's containment
+/// and own mode are folded in, so a Space thread reads no personal or org rows,
+/// an agent run's thread reads the owner's rows but no writes, and a thread set
+/// off recalls nothing while the user's other threads are untouched. The kill
+/// switch restores the mode and the user's state as they were before, but not
+/// the containment.
 pub(crate) async fn resolve_for_thread(
     pool: &PgPool,
     zdr: bool,
@@ -414,19 +484,22 @@ pub(crate) async fn resolve_for_thread(
     thread_id: &str,
 ) -> Result<MemoryDecision, sqlx::Error> {
     let decision = resolve(pool, zdr, org, user).await?;
-    if zdr || !controls_enabled() {
+    if zdr {
         return Ok(decision);
     }
-    Ok(apply_thread_mode(
-        decision,
-        thread_mode(pool, org, thread_id).await?,
-    ))
+    let thread = thread_facts(pool, org, thread_id).await?;
+    let decision = contain(decision, thread.containment);
+    if !controls_enabled() {
+        return Ok(decision);
+    }
+    Ok(apply_thread_mode(decision, thread.mode))
 }
 
 /// [`resolve_in_tx`] for a writer that works on one thread. The thread's mode is
 /// read under the user's row lock, which the presentation update also takes
 /// ([`lock_user`]) when it changes the mode, so a thread set off while an
-/// extraction is in flight is seen at write time.
+/// extraction is in flight is seen at write time. Containment is read the same
+/// way; a thread's origin and Space never change after it is created.
 pub(crate) async fn resolve_in_tx_for_thread(
     tx: &mut Transaction<'_, Postgres>,
     zdr: bool,
@@ -435,13 +508,15 @@ pub(crate) async fn resolve_in_tx_for_thread(
     thread_id: &str,
 ) -> Result<MemoryDecision, sqlx::Error> {
     let decision = resolve_in_tx(tx, zdr, org, user).await?;
-    if zdr || !controls_enabled() {
+    if zdr {
         return Ok(decision);
     }
-    Ok(apply_thread_mode(
-        decision,
-        thread_mode(&mut **tx, org, thread_id).await?,
-    ))
+    let thread = thread_facts(&mut **tx, org, thread_id).await?;
+    let decision = contain(decision, thread.containment);
+    if !controls_enabled() {
+        return Ok(decision);
+    }
+    Ok(apply_thread_mode(decision, thread.mode))
 }
 
 /// Takes the row lock and reads the state under it. [`lock_user`] is the same
@@ -916,6 +991,8 @@ mod tests {
             MemoryReason::OrgDisabled,
             MemoryReason::Zdr,
             MemoryReason::PolicyUnavailable,
+            MemoryReason::SpaceScope,
+            MemoryReason::AgentRunScope,
         ]
         .into_iter()
         .map(MemoryReason::as_str)
@@ -929,9 +1006,153 @@ mod tests {
                 "thread_off",
                 "org_disabled",
                 "zdr",
-                "policy_unavailable"
+                "policy_unavailable",
+                "space_scope",
+                "agent_run_scope"
             ]
         );
+    }
+
+    /// EP-8 S2: a Space thread (by its id or its origin) is contained, an agent run's
+    /// thread is read-only, and every other origin is untouched.
+    #[test]
+    fn containment_table() {
+        for (origin, has_space, expected) in [
+            ("chat", false, Containment::None),
+            ("support", false, Containment::None),
+            ("system", false, Containment::None),
+            ("mail_task", false, Containment::None),
+            ("space", false, Containment::SpaceScope),
+            // A thread in a Space is left to `space::memory_scope` (WS17-S1).
+            ("space", true, Containment::None),
+            ("chat", true, Containment::None),
+            ("agent_run", false, Containment::AgentRunScope),
+        ] {
+            assert_eq!(
+                thread_containment(origin, has_space),
+                expected,
+                "origin={origin} has_space={has_space}"
+            );
+        }
+    }
+
+    /// The containment's effect on the user's decision: a Space thread denies every
+    /// reader (org rows included) and keeps an existing denial's reason; an agent
+    /// run keeps the reads and refuses the writes, keeping a refusal's reason.
+    #[test]
+    fn containment_narrows_the_decision_and_never_widens_it() {
+        use MemoryState::{On, Paused};
+        use OrgMemoryPolicy::{Allow, Disabled};
+        let on = decide(false, Allow, On);
+
+        let space = contain(on, Containment::SpaceScope);
+        assert_eq!(
+            space,
+            MemoryDecision {
+                reason: MemoryReason::SpaceScope,
+                access: MemoryAccess::None,
+                generation_allowed: false,
+                learning_allowed: false,
+            }
+        );
+        assert_eq!(space.skip_reason(), "space_scope");
+        assert_eq!(space.refusal(), "memory_not_enabled:space_scope");
+        assert_eq!(
+            contain(decide(false, Allow, Paused), Containment::SpaceScope).access,
+            MemoryAccess::None,
+            "paused leaves org rows readable; a Space thread does not"
+        );
+        assert_eq!(
+            contain(decide(true, Allow, On), Containment::SpaceScope).reason,
+            MemoryReason::Zdr
+        );
+        assert_eq!(
+            contain(decide(false, Disabled, On), Containment::SpaceScope).reason,
+            MemoryReason::OrgDisabled
+        );
+
+        let run = contain(on, Containment::AgentRunScope);
+        assert_eq!(
+            run,
+            MemoryDecision {
+                reason: MemoryReason::AgentRunScope,
+                access: MemoryAccess::Full,
+                generation_allowed: false,
+                learning_allowed: false,
+            }
+        );
+        assert_eq!(run.skip_reason(), "", "the reads were not left out");
+        assert_eq!(run.refusal(), "memory_not_enabled:agent_run_scope");
+        assert_eq!(
+            contain(decide(false, Allow, Paused), Containment::AgentRunScope).reason,
+            MemoryReason::UserPaused
+        );
+        assert_eq!(
+            contain(decide(true, Allow, On), Containment::AgentRunScope).reason,
+            MemoryReason::Zdr
+        );
+        assert_eq!(contain(on, Containment::None), on);
+    }
+
+    /// Containment is applied before the kill switch's early return in both thread
+    /// readers, so switching the controls off cannot reopen a Space or an agent
+    /// run's thread.
+    #[test]
+    fn containment_is_applied_before_the_kill_switch() {
+        let source = include_str!("memory_control.rs");
+        for (name, end) in [
+            (
+                "pub(crate) async fn resolve_for_thread(",
+                "pub(crate) async fn resolve_in_tx_for_thread(",
+            ),
+            (
+                "pub(crate) async fn resolve_in_tx_for_thread(",
+                "/// Takes the row lock and reads the state under it.",
+            ),
+        ] {
+            let (_, _, body) = between(source, name, end);
+            let contained = body
+                .find("contain(decision, thread.containment)")
+                .unwrap_or_else(|| panic!("{name} applies the thread's containment"));
+            let switch = body
+                .find("controls_enabled()")
+                .unwrap_or_else(|| panic!("{name} reads the kill switch"));
+            assert!(
+                contained < switch,
+                "{name}: containment must precede the kill switch"
+            );
+        }
+    }
+
+    /// Dreaming's batch loader excludes the threads the gate contains: a Space (by
+    /// its id or its origin) and an agent run. Pinned to the SQL text, so either
+    /// side changing alone fails here.
+    #[test]
+    fn dreaming_predicate_matches_containment_helper() {
+        let source = include_str!("dreaming.rs");
+        let predicate = "AND NOT (t.origin = 'agent_run' OR (t.origin = 'space' AND t.space_id IS NULL))";
+        assert!(
+            source.contains(predicate),
+            "the Dreaming batch loader must exclude the contained threads"
+        );
+        let origins = [
+            "chat",
+            "space",
+            "agent_run",
+            "support",
+            "system",
+            "mail_task",
+        ];
+        for origin in origins {
+            let excluded = matches!(origin, "space" | "agent_run");
+            assert_eq!(
+                thread_containment(origin, false) != Containment::None,
+                excluded,
+                "origin={origin}"
+            );
+        }
+        // A thread in a Space is the Space plan's to contain (WS17-S1), not this helper's.
+        assert_eq!(thread_containment("chat", true), Containment::None);
     }
 
     #[test]
@@ -1227,6 +1448,49 @@ mod tests {
         id
     }
 
+    /// A Space room's thread, with the Control-verified Space context on the row
+    /// the way the create path stores it.
+    async fn seed_space_thread(pool: &PgPool, org: &str, user: &str) -> String {
+        let thread = mp_ids::new_ulid();
+        sqlx::query(
+            "INSERT INTO threads (id, session_key, org_id, user_id, space_id, space_decision_ref, \
+             recipient_audience_ref, privacy_policy_ref, resource_authorization_ref, authority_revision, \
+             recipient_audience_revision, recipient_audience_hash, origin) \
+             VALUES ($1, $1, $2, $3, 'space-room', 'decision-1', 'audience-1', 'policy-1', \
+             'resource-1', 1, 1, 'audience-hash-1', 'space')",
+        )
+        .bind(&thread)
+        .bind(org)
+        .bind(user)
+        .execute(pool)
+        .await
+        .unwrap();
+        thread
+    }
+
+    /// An agent run's own thread: origin `agent_run`, no Space.
+    async fn seed_agent_run_thread(pool: &PgPool, org: &str, user: &str) -> String {
+        let thread = mp_ids::new_ulid();
+        sqlx::query(
+            "INSERT INTO threads (id, session_key, org_id, user_id, origin) VALUES ($1, $1, $2, $3, 'agent_run')",
+        )
+        .bind(&thread)
+        .bind(org)
+        .bind(user)
+        .execute(pool)
+        .await
+        .unwrap();
+        thread
+    }
+
+    async fn dream_runs_for(pool: &PgPool, thread: &str) -> i64 {
+        sqlx::query_scalar("SELECT COUNT(*) FROM dream_runs WHERE thread_id = $1")
+            .bind(thread)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
     fn request<T>(value: T, identity: VerifiedIdentity) -> tonic::Request<T> {
         let mut request = tonic::Request::new(value);
         request.extensions_mut().insert(identity);
@@ -1439,6 +1703,7 @@ mod tests {
                     org_id: org.clone(),
                     user_id: "user-a".into(),
                     limit: 10,
+                    ..Default::default()
                 },
                 identity(),
             )
@@ -1495,6 +1760,7 @@ mod tests {
                     org_id: org.clone(),
                     user_id: "user-a".into(),
                     memory_id: id,
+                    ..Default::default()
                 },
                 identity(),
             ))
@@ -1627,5 +1893,159 @@ mod tests {
         assert_eq!(controls.reason, "zdr");
         assert!(!controls.use_allowed && !controls.generation_allowed);
         assert_eq!(controls.state, pb::MemoryState::Unspecified as i32);
+    }
+
+    /// EP-8 S2: a message said in a Space room is never mined into its speaker's own
+    /// memory, inline or in the background, and the room's turn starts no Dreaming run.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres"]
+    async fn space_turn_creates_no_personal_memory_inline() {
+        let pool = disposable_pool().await;
+        let org = format!("space-inline-{}", mp_ids::new_ulid());
+        let room = seed_space_thread(&pool, &org, "user-a").await;
+        append_user_message(&pool, &room, "user-a", FACT).await;
+        assert!(
+            memory_rows(&pool, &org).await.is_empty(),
+            "a Space turn writes no inline row"
+        );
+        dream(&pool).await;
+        assert!(
+            memory_rows(&pool, &org).await.is_empty(),
+            "a Space turn is not mined in the background"
+        );
+        // The Space plan's loop records its skip (`skipped_space_scope`, WS17-S1); it learns nothing.
+    }
+
+    /// EP-8 D1: an agent run's own turn is read, not learned from, inline or in the
+    /// background.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres"]
+    async fn agent_run_turn_creates_no_memory_inline() {
+        let pool = disposable_pool().await;
+        let org = format!("agent-run-inline-{}", mp_ids::new_ulid());
+        let run = seed_agent_run_thread(&pool, &org, "user-a").await;
+        append_user_message(&pool, &run, "user-a", FACT).await;
+        assert!(memory_rows(&pool, &org).await.is_empty());
+        dream(&pool).await;
+        assert!(memory_rows(&pool, &org).await.is_empty());
+        assert_eq!(dream_runs_for(&pool, &run).await, 0);
+    }
+
+    /// The regression guard: an ordinary chat turn still learns inline, as it did
+    /// before containment existed.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres"]
+    async fn chat_thread_unchanged() {
+        let pool = disposable_pool().await;
+        let org = format!("chat-unchanged-{}", mp_ids::new_ulid());
+        let thread = seed_thread(&pool, &org, "user-a").await;
+        append_user_message(&pool, &thread, "user-a", FACT).await;
+        assert_eq!(
+            memory_rows(&pool, &org).await.len(),
+            2,
+            "the name and the instruction are both learned from a chat turn"
+        );
+    }
+
+    /// EP-8 S2: a Space thread's context carries no personal and no org row. The
+    /// gate answers no access, so the loader returns nothing.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres"]
+    async fn space_thread_context_assembly_has_no_user_or_org_rows() {
+        let pool = disposable_pool().await;
+        let org = format!("space-context-{}", mp_ids::new_ulid());
+        seed_row(
+            &pool,
+            &org,
+            "org",
+            "",
+            "org:policy",
+            "Org fact: invoices close on the 5th.",
+        )
+        .await;
+        seed_row(
+            &pool,
+            &org,
+            "user",
+            "user-a",
+            "user:name",
+            "User fact: the name is Ima.",
+        )
+        .await;
+        let room = seed_space_thread(&pool, &org, "user-a").await;
+        // The room reads under the Space plan's contained scope (WS17-S1, merged from main):
+        // its own rows only, so the owner's and the org's rows stay out.
+        let decision = resolve_for_thread(&pool, false, &org, "user-a", &room)
+            .await
+            .unwrap();
+        let context = crate::dreaming::load_agent_memory_context_rows(
+            &pool,
+            &room,
+            Some("user-a"),
+            10,
+            decision.access,
+        )
+        .await
+        .unwrap();
+        assert!(context.is_empty(), "a Space's context: {context:?}");
+    }
+
+    /// Round A C5: a scheduled fire runs on its creator's agent-run thread. It reads
+    /// the creator's memory and nobody else's, and writes none, inline or through the
+    /// gate.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres"]
+    async fn scheduled_agent_run_reads_as_its_creator_and_writes_none() {
+        let pool = disposable_pool().await;
+        let org = format!("scheduled-run-{}", mp_ids::new_ulid());
+        seed_row(
+            &pool,
+            &org,
+            "user",
+            "user-a",
+            "user:name",
+            "User fact: the name is Ima.",
+        )
+        .await;
+        seed_row(
+            &pool,
+            &org,
+            "user",
+            "user-b",
+            "user:name",
+            "User fact: the name is Kari.",
+        )
+        .await;
+        let run = seed_agent_run_thread(&pool, &org, "user-a").await;
+        let decision = resolve_for_thread(&pool, false, &org, "user-a", &run)
+            .await
+            .unwrap();
+        assert_eq!(decision.reason, MemoryReason::AgentRunScope);
+        assert_eq!(decision.access, MemoryAccess::Full);
+        assert!(!decision.generation_allowed);
+        let context = crate::dreaming::load_agent_memory_context_rows(
+            &pool,
+            &run,
+            Some("user-a"),
+            10,
+            decision.access,
+        )
+        .await
+        .unwrap();
+        assert!(
+            context.iter().any(|(_, row)| row.contains("Ima")),
+            "{context:?}"
+        );
+        assert!(
+            context.iter().all(|(_, row)| !row.contains("Kari")),
+            "{context:?}"
+        );
+
+        append_user_message(&pool, &run, "user-a", FACT).await;
+        assert_eq!(
+            memory_rows(&pool, &org).await.len(),
+            2,
+            "the scheduled fire writes no memory: only the two seeded rows remain"
+        );
     }
 }

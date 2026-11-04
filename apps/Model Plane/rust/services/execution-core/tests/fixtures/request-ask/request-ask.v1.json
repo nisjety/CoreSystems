@@ -1,0 +1,53 @@
+{
+  "schema": "quarry.web_policy.RequestAsk",
+  "version": 1,
+  "provenance": "execution-core authored; replace byte-for-byte with Quarry's request-ask.v1.json when it exists (MP-ASKS A1)",
+  "note": "Only disable, deny_domains and allow_domains are ever sent by a model-driven run. robots_max and proxy_max are never sent. Empty lists and an absent allow_domains are omitted.",
+  "cases": [
+    {
+      "name": "empty",
+      "ask": {},
+      "json": {}
+    },
+    {
+      "name": "plan_mode",
+      "ask": {
+        "disable": [
+          "browser.act.input",
+          "browser.act.interact",
+          "browser.act.upload",
+          "browser.act.download"
+        ]
+      },
+      "json": {
+        "disable": [
+          "browser.act.input",
+          "browser.act.interact",
+          "browser.act.upload",
+          "browser.act.download"
+        ]
+      }
+    },
+    {
+      "name": "hosts",
+      "ask": {
+        "deny_domains": ["ads.example.net"],
+        "allow_domains": ["example.com", "docs.example.com"]
+      },
+      "json": {
+        "deny_domains": ["ads.example.net"],
+        "allow_domains": ["example.com", "docs.example.com"]
+      }
+    },
+    {
+      "name": "allow_nothing",
+      "ask": {
+        "allow_domains": []
+      },
+      "json": {
+        "allow_domains": []
+      }
+    }
+  ],
+  "refused_keys": ["robots_max", "proxy_max", "mode", "enable"]
+}

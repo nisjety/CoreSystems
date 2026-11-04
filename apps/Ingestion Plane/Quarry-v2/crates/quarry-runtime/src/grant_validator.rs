@@ -76,6 +76,23 @@ pub struct GrantValidation {
     /// The resource a derived attach grant is bound to (WS8.C/WS8.F). Empty otherwise.
     #[serde(default)]
     pub resource_id: String,
+    /// INNH-10: the id of the API key a key grant was issued for (never the key itself).
+    /// Empty on every grant a person or a service holds, and from a broker that predates it.
+    /// Quarry admits an `api_key` run only under a grant whose `key_id` equals the token's, so
+    /// an empty value refuses every key run (fail closed). The vendored gRPC proto does not
+    /// carry the field yet, so the gRPC validator always yields an empty one (see
+    /// `docs/RUNBOOKS.md`, "API-key agent runs").
+    #[serde(default)]
+    pub key_id: String,
+    /// WS7.K: the org web-policy snapshot the broker stored on the grant (proto field 20), in
+    /// the shape of the `web_policy` claim it was derived from:
+    /// `{"v":1,"rev":"<hex>","caps":{..},"robots_max":..,"proxy_max":..,"domains":{"allow":[..],"deny":[..]}}`.
+    /// `None` from a broker that predates it and for a grant minted without a claim, which is no
+    /// grant layer. Carried verbatim and never derived from the caller; the edge reads it as the
+    /// grant layer of the web policy (`agent_policy_gate::GrantSnapshot`), and a snapshot it
+    /// cannot read fails closed there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub web_policy: Option<serde_json::Value>,
 }
 
 /// A grant's budget claim, as the broker stored it. A bound of 0 means that
@@ -248,6 +265,8 @@ impl GrantValidator for NoopGrantValidator {
             denied_domains: Vec::new(),
             absolute_expires_at: None,
             resource_id: String::new(),
+            key_id: String::new(),
+            web_policy: None,
         })
     }
 }
@@ -335,6 +354,8 @@ impl GrantValidator for HttpGrantValidator {
                 denied_domains: Vec::new(),
                 absolute_expires_at: None,
                 resource_id: String::new(),
+                key_id: String::new(),
+                web_policy: None,
             });
         }
         if !status.is_success() {
@@ -382,6 +403,8 @@ mod tests {
             denied_domains: Vec::new(),
             absolute_expires_at: None,
             resource_id: String::new(),
+            key_id: String::new(),
+            web_policy: None,
         };
         assert!(!g.is_usable());
     }
@@ -406,6 +429,8 @@ mod tests {
             denied_domains: Vec::new(),
             absolute_expires_at: None,
             resource_id: String::new(),
+            key_id: String::new(),
+            web_policy: None,
         };
         assert!(!g.is_usable());
     }
@@ -430,6 +455,8 @@ mod tests {
             denied_domains: Vec::new(),
             absolute_expires_at: None,
             resource_id: String::new(),
+            key_id: String::new(),
+            web_policy: None,
         };
         assert!(g.is_usable());
     }
@@ -454,6 +481,8 @@ mod tests {
             denied_domains: Vec::new(),
             absolute_expires_at: None,
             resource_id: String::new(),
+            key_id: String::new(),
+            web_policy: None,
         };
         assert!(g.is_usable());
     }
@@ -566,6 +595,42 @@ mod tests {
         assert_eq!((claim.micro_usd, claim.max_steps, claim.max_runtime_s), (250_000, 10, 0));
         // And an absent claim is not written back out.
         assert!(serde_json::to_value(&old).unwrap().get("budget").is_none());
+    }
+
+    #[tokio::test]
+    async fn noop_validator_carries_no_web_policy_snapshot() {
+        // No snapshot is no grant layer: the Noop validator never adds one.
+        let grant = NoopGrantValidator.validate("any").await.unwrap();
+        assert_eq!(grant.web_policy, None);
+    }
+
+    #[test]
+    fn the_http_shim_json_may_omit_the_web_policy_snapshot_and_may_carry_it() {
+        let old: GrantValidation =
+            serde_json::from_value(json!({ "grant_id": "g", "active": true })).unwrap();
+        assert_eq!(old.web_policy, None);
+        // An absent snapshot is not written back out.
+        assert!(serde_json::to_value(&old).unwrap().get("web_policy").is_none());
+        let null: GrantValidation =
+            serde_json::from_value(json!({ "grant_id": "g", "active": true, "web_policy": null }))
+                .unwrap();
+        assert_eq!(null.web_policy, None);
+
+        let snapshot = json!({
+            "v": 1,
+            "rev": "0123456789ab",
+            "caps": { "browser.act.upload": "disabled" },
+            "domains": { "allow": [], "deny": ["ads.example"] },
+        });
+        let new: GrantValidation = serde_json::from_value(json!({
+            "grant_id": "g",
+            "active": true,
+            "web_policy": snapshot.clone(),
+        }))
+        .unwrap();
+        // Carried verbatim: the validator does not read or reshape it.
+        assert_eq!(new.web_policy, Some(snapshot.clone()));
+        assert_eq!(serde_json::to_value(&new).unwrap()["web_policy"], snapshot);
     }
 
     #[tokio::test]

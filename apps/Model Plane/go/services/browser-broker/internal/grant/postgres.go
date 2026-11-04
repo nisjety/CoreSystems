@@ -38,6 +38,8 @@ const (
 	lockNsOwnerSessions int32 = 0x62620001
 	lockNsParentRuns    int32 = 0x62620002
 	lockNsRevokeRoot    int32 = 0x62620003
+	lockNsKeyGrants     int32 = 0x62620004
+	lockNsParentExts    int32 = 0x62620005
 )
 
 // Purger removes grants that expired before a cutoff.
@@ -67,6 +69,7 @@ type PgStore struct {
 var (
 	_ Repository = (*PgStore)(nil)
 	_ Purger     = (*PgStore)(nil)
+	_ KeyRevoker = (*PgStore)(nil)
 )
 
 // NewPgStore returns a PgStore over pool. The schema is applied by the
@@ -154,7 +157,8 @@ const grantColumns = `id, kind, org_id, owner_id, session_key, scope_url, allowe
 	COALESCE(parent_grant_id, ''), expires_at, revoked_at IS NOT NULL, COALESCE(revoked_reason, ''),
 	COALESCE(budget_micro_usd, 0), COALESCE(budget_max_steps, 0), COALESCE(budget_max_runtime_s, 0),
 	COALESCE(budget_source, ''), COALESCE(budget_minted_at_unix, 0),
-	policy_mode, denied_domains, COALESCE(resource_id, ''), absolute_expires_at`
+	policy_mode, denied_domains, COALESCE(resource_id, ''), absolute_expires_at, COALESCE(key_id, ''),
+	COALESCE(consent_scope, '')`
 
 // fetch reads one grant; lock is "", " FOR SHARE" or " FOR UPDATE". A
 // missing row is ErrGrantNotFound.
@@ -166,7 +170,8 @@ func (s *PgStore) fetch(ctx context.Context, q querier, op, id, lock string) (*G
 		&g.AllowedActions, &g.AllowedFrameIDs, &g.AllowedDialogIDs, &g.AllowedArtifactIDs,
 		&g.ParentGrantID, &g.ExpiresAt, &g.Revoked, &g.RevokedReason,
 		&g.Budget.MicroUSD, &g.Budget.MaxSteps, &g.Budget.MaxRuntimeS, &g.Budget.Source, &g.Budget.MintedAtUnix,
-		&g.PolicyMode, &g.DeniedDomains, &g.ResourceID, &g.AbsoluteExpiresAt,
+		&g.PolicyMode, &g.DeniedDomains, &g.ResourceID, &g.AbsoluteExpiresAt, &g.KeyID,
+		&g.ConsentScope,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrGrantNotFound
@@ -248,10 +253,10 @@ const insertGrant = `INSERT INTO browser_grants (id, kind, org_id, owner_id, ses
 	allowed_domains, allowed_actions, allowed_frame_ids, allowed_dialog_ids, allowed_artifact_ids,
 	parent_grant_id, expires_at, absolute_expires_at,
 	budget_micro_usd, budget_max_steps, budget_max_runtime_s, budget_source, budget_minted_at_unix,
-	policy_mode, denied_domains, resource_id)
+	policy_mode, denied_domains, resource_id, key_id, consent_scope)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NULLIF($12, ''), $13, $19,
 	NULLIF($14::bigint, 0), NULLIF($15::int, 0), NULLIF($16::int, 0), NULLIF($17::text, ''), NULLIF($18::bigint, 0),
-	$20, $21, NULLIF($22::text, ''))`
+	$20, $21, NULLIF($22::text, ''), NULLIF($23::text, ''), NULLIF($24::text, ''))`
 
 func insertArgs(g *Grant) []any {
 	absolute := g.AbsoluteExpiresAt
@@ -267,7 +272,7 @@ func insertArgs(g *Grant) []any {
 		nonNil(g.AllowedDomains), nonNil(g.AllowedActions), nonNil(g.AllowedFrameIDs),
 		nonNil(g.AllowedDialogIDs), nonNil(g.AllowedArtifactIDs), g.ParentGrantID, g.ExpiresAt,
 		g.Budget.MicroUSD, g.Budget.MaxSteps, g.Budget.MaxRuntimeS, g.Budget.Source, g.Budget.MintedAtUnix,
-		absolute, mode, nonNil(g.DeniedDomains), g.ResourceID,
+		absolute, mode, nonNil(g.DeniedDomains), g.ResourceID, g.KeyID, g.ConsentScope,
 	}
 }
 
@@ -280,6 +285,9 @@ func (s *PgStore) CreateSession(ctx context.Context, p CreateSessionParams) (*Gr
 	}
 	if !validText(p.OrgID, p.OwnerID, p.SessionKey, p.ScopeURL) {
 		return nil, ErrInvalidGrantText
+	}
+	if p.KeyID != "" && !ValidKeyID(p.KeyID) {
+		return nil, ErrInvalidKeyID
 	}
 	domains, err := NormalizeAllowedDomains(p.AllowedDomains)
 	if err != nil {
@@ -300,7 +308,7 @@ func (s *PgStore) CreateSession(ctx context.Context, p CreateSessionParams) (*Gr
 	g := &Grant{
 		ID: id, Kind: KindSession, OrgID: p.OrgID, OwnerID: p.OwnerID, SessionKey: p.SessionKey,
 		ScopeURL: p.ScopeURL, AllowedDomains: domains, Budget: budget, ExpiresAt: now.Add(p.TTL),
-		PolicyMode: PolicyModeAllowlist,
+		PolicyMode: PolicyModeAllowlist, KeyID: p.KeyID,
 	}
 	g.AbsoluteExpiresAt = g.ExpiresAt
 	err = s.inTx(ctx, "create_session", func(tx pgx.Tx) error {
@@ -316,6 +324,23 @@ func (s *PgStore) CreateSession(ctx context.Context, p CreateSessionParams) (*Gr
 				return s.dbErr(ctx, "create_session", err)
 			}
 			if active >= p.MaxActivePerOwner {
+				return ErrTooManyGrants
+			}
+		}
+		if p.KeyID != "" {
+			// After the owner lock (always that order), so the per-key count
+			// and the insert are exact, and a concurrent RevokeByKey (which
+			// takes this lock) either sees this grant or runs before it.
+			if err := s.advisoryLock(ctx, tx, "create_session", lockNsKeyGrants, p.KeyID); err != nil {
+				return err
+			}
+			var active int
+			if err := tx.QueryRow(ctx, `SELECT count(*) FROM browser_grants
+				WHERE org_id = $1 AND key_id = $2 AND revoked_at IS NULL AND expires_at >= $3`,
+				p.OrgID, p.KeyID, now).Scan(&active); err != nil {
+				return s.dbErr(ctx, "create_session", err)
+			}
+			if active >= maxPerKey(p.MaxActivePerKey) {
 				return ErrTooManyGrants
 			}
 		}
@@ -376,7 +401,8 @@ func (s *PgStore) CreateScopedSensitiveApproval(ctx context.Context, p ApprovalP
 		if err := scoped(parent, p.OrgID, p.OwnerID, now); err != nil {
 			return err
 		}
-		if _, ok := approvalParents[parent.Kind]; !ok || parent.SessionKey != p.SessionKey || len(parent.AllowedActions) != 0 {
+		if _, ok := approvalParents[parent.Kind]; !ok || parent.SessionKey != p.SessionKey || len(parent.AllowedActions) != 0 ||
+			parent.KeyID != "" {
 			return ErrApprovalParentInvalid
 		}
 		domains, err := NormalizeAllowedDomains(p.AllowedDomains)
@@ -661,6 +687,45 @@ func (s *PgStore) RevokeScoped(ctx context.Context, id, orgID, ownerID, reason s
 		}
 		return nil
 	})
+}
+
+// revokeKeySubtree revokes every not-yet-revoked grant of one API key and
+// anything derived from one (none should exist), in one statement.
+const revokeKeySubtree = `WITH RECURSIVE subtree(id) AS (
+	SELECT id FROM browser_grants WHERE key_id = $1
+	UNION
+	SELECT c.id FROM browser_grants c JOIN subtree t ON c.parent_grant_id = t.id
+)
+UPDATE browser_grants g
+SET revoked_at = $2, revoked_reason = $3
+FROM subtree WHERE g.id = subtree.id AND g.revoked_at IS NULL`
+
+// RevokeByKey revokes every live grant issued for keyID (INNH-10, the
+// api_key_revoked consumer), in every org. It takes the per-key advisory lock
+// CreateSession takes for a key grant, so a key grant being created
+// concurrently either commits first (and is revoked here) or waits and is
+// created after; the broker's revoked-key list refuses that second case.
+func (s *PgStore) RevokeByKey(ctx context.Context, keyID, reason string) (int64, error) {
+	if !ValidKeyID(keyID) {
+		return 0, ErrInvalidKeyID
+	}
+	reason = truncateReason(reason)
+	var n int64
+	err := s.inTx(ctx, "revoke_key", func(tx pgx.Tx) error {
+		if err := s.advisoryLock(ctx, tx, "revoke_key", lockNsKeyGrants, keyID); err != nil {
+			return err
+		}
+		tag, err := tx.Exec(ctx, revokeKeySubtree, keyID, s.clock(), reason)
+		if err != nil {
+			return s.dbErr(ctx, "revoke_key", err)
+		}
+		n = tag.RowsAffected()
+		return nil
+	})
+	if err != nil {
+		return 0, err
+	}
+	return n, nil
 }
 
 // PurgeExpired deletes grants that expired before the cutoff; a deleted

@@ -1009,6 +1009,9 @@ type CronHandler struct {
 	// scheduleContract is SCHEDULE_CONTRACT_ENABLED. Off, a template that carries
 	// an approval_contract is refused, so a schedule without a contract stays draft-only.
 	scheduleContract bool
+	// contractGuards is CRON_CONTRACT_GUARDS_ENABLED. On, a bare re-enable of a
+	// schedule whose approval has lapsed is refused (WS20-S8).
+	contractGuards bool
 }
 
 // NewCronHandler constructs the handler.
@@ -1024,6 +1027,13 @@ func (h *CronHandler) WithSpaceDecisionVerifier(verifier *cron.ControlDecisionVe
 // WithScheduleContract enables stored-consent contracts on schedule create.
 func (h *CronHandler) WithScheduleContract(enabled bool) *CronHandler {
 	h.scheduleContract = enabled
+	return h
+}
+
+// WithContractGuards refuses a bare re-enable of a schedule whose approval has lapsed
+// (WS20-S8). Off, a re-enable is accepted exactly as before.
+func (h *CronHandler) WithContractGuards(enabled bool) *CronHandler {
+	h.contractGuards = enabled
 	return h
 }
 
@@ -1354,6 +1364,24 @@ func (h *CronHandler) patch(w http.ResponseWriter, r *http.Request, id string) {
 		return
 	}
 	now := time.Now().UTC()
+	if h.contractGuards && update.Enabled != nil && *update.Enabled {
+		// A bare re-enable never revives an approval that has lapsed. Renewal is a new
+		// create decision, so the schedule must be created again (WS20-S8).
+		var template []byte
+		err := h.pool.QueryRow(r.Context(), `SELECT task_template FROM cron_schedules WHERE id=$1 AND org_id=$2 AND deleted_at IS NULL`, id, verifiedOrganizationID(r)).Scan(&template)
+		if errors.Is(err, pgx.ErrNoRows) {
+			jsonErr(w, "not found", http.StatusNotFound)
+			return
+		}
+		if err != nil {
+			jsonErr(w, "database unavailable", http.StatusInternalServerError)
+			return
+		}
+		if cron.ApprovalContractLapsed(template, now) {
+			jsonErr(w, "the schedule's approval has expired; renew it before resuming", http.StatusConflict)
+			return
+		}
+	}
 	var nextFireAt any
 	if update.ScheduleExpr != nil {
 		var timezone string

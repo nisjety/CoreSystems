@@ -13,6 +13,7 @@ into `browser_capacity_reached` with `Retry-After`. Retryable.
 | `global_run_cap` | `global` | the edge has this many live runs | `MAX_CONCURRENT_RUNS` (32) |
 | `org_run_cap` | `org` | this organization has this many live runs | `MAX_CONCURRENT_RUNS_PER_ORG` (8) |
 | `org_interactive_run_cap` | `org` | this organization has this many of a person's own sessions open; the sub-cap leaves room for its agent runs | `MAX_INTERACTIVE_RUNS_PER_ORG` (6) |
+| `per_key_run_cap` | `key` | an API key (INNH-10) has this many live runs; counted per key id inside the organization, and checked right after `global_run_cap` for API-key starts only | `MAX_CONCURRENT_RUNS_PER_KEY` (2, at least 1) |
 | `org_plan_cap` | `org` | the organization's plan bounds this class of run (agent runs or a person's sessions) and it has this many live; `limit` is the plan value, never above `MAX_CONCURRENT_RUNS` | the plan keys `quarry.cap.agent_runs` and `quarry.cap.interactive_runs`; nothing by default (see below) |
 
 `0` disables a cap.
@@ -79,6 +80,19 @@ A body refused by its content kind (`QUARRY_EDGE__DOC_ROUTING`, `docs/RUNBOOKS.m
 | reason | other fields | meaning |
 |---|---|---|
 | `viewport_emulation_failed` | `error` (Chromium's message) | a new page could not be given its viewport, so the tab does not open. `QUARRY_BROWSER_PAGE_HYGIENE=off` does not skip this call (`docs/RUNBOOKS.md`, "Browser viewport and page hygiene") |
+
+## 502 `DRIVER_FAILED` from the fetch waterfall (E3.8.1)
+
+Only with `QUARRY_EDGE__FETCH_SUB_CODES` on (`1`, `true` or `on`; default off). With the flag off a fetch failure carries no waterfall reason, as before. The code stays `DRIVER_FAILED` (502), and `retryable` is the reason's own flag, not the code's (false). `details.fallback_attempts` lists each tier that was tried with its error. A typed reason a tier already gave (`action_failed`, `session_reaped`, ...) is kept with its own flag.
+
+The waterfall names the chain's reason: the sub-code every tried tier failed with, when they all agree on one, else `all_drivers_failed`. A tier that answered with a status or a body the chain moved on from, a tier that was not registered, and two tiers that disagree all give `all_drivers_failed`. A tier names its own `dns`, `tls` or `connect` only where its driver can tell them apart. Until the static and TLS tiers do, every chain reports `all_drivers_failed`.
+
+| reason | retryable | meaning | what a caller does |
+|---|---|---|---|
+| `dns` | true | the host name did not resolve on every tier tried. A resolver fault can clear on a repeat; a name that does not exist fails the same way | check the host name; one or two retries at most |
+| `tls` | false | the TLS handshake or the certificate check failed on every tier tried | the site's TLS setup is the cause; repeating the same call will not help |
+| `connect` | true | no TCP connection could be made (refused, reset, unreachable) on every tier tried | retry shortly |
+| `all_drivers_failed` | false | every tier in the chain was tried and none served the page, and they did not agree on one cause | read `details.fallback_attempts` for each tier's error, then choose another source or wait |
 
 ## 429 `RATE_LIMITED` from the browser driver (driver caps, WS3.F)
 
@@ -197,6 +211,98 @@ These reasons come from `POST /v1/scrape` (and the stream, where noted). The sta
 
 Field errors (400, in `errors[]`, not in `details.reason`): `feature_disabled`, `action_denied`, `unknown_action_type`, `invalid_action`, `too_many_actions`, `too_many_captures`, `too_many`, `unsupported_format`, `selector_too_long`, `text_too_long`. Each carries a path and never a value.
 
+## 501 `UNSUPPORTED` from `POST /v1/extract` (INNH-3)
+
+These come from `POST /v1/extract` when a `schema` or a `prompt` is sent and the Model Plane cannot be used. The body is `{error, code, hint, next_actions}` and has no `details`, so the three are told apart by the `error` text. All are decided before further pages are fetched. None is returned for a request with neither field, nor for a ZDR request. They are not the `model_plane_unavailable` and `model_lane_not_granted` reasons below, which belong to the AI formats of `POST /v1/scrape` and have `details.reason`. The set-up is in `docs/RUNBOOKS.md`, "Enable structured extract and AI formats".
+
+| `error` starts | meaning | what a caller does |
+|---|---|---|
+| `structured extraction needs the Model Plane, and QUARRY_EDGE__MODEL_PLANE_URL is not set` | no Model Plane URL on this deployment | retry without `schema` and `prompt` for cleaned markdown; the operator cannot unlock this on a deployed stack today |
+| `structured extraction needs a granted Model Plane lane, and this deployment holds no model credential` | a URL, but no service key and no development token | same |
+| `structured extraction needs a granted Model Plane lane, and the Model Plane refused this service` | the gateway refused the first model call (one page fetched, one call made, nothing metered) | same |
+
+## Scrape AI formats (INNH-1)
+
+These come from `POST /v1/scrape` (and the stream, where noted) when a request names `json`, `summary`, `question` or `highlights` in `formats`. The edge answers the first three before it fetches the page. Contract: `docs/CONTRACTS.md` section "Scrape AI formats". The request-level reasons are decided by the edge (INNH-1 U3); the field codes by the contract in `quarry-core` (INNH-1 U1).
+
+| reason | status and code | meaning | what a caller does |
+|---|---|---|---|
+| `extract_ai_scope_required` | 403 `FORBIDDEN` (`details.field` is `formats[i]`) | a service principal without the scope `extract:ai`, or a request labelled `initiated_by: "agent"`, asked for an AI format. A relayed agent request must not spend model money outside its run budget | send the request from the user's own token |
+| `model_plane_unavailable` | 501 `UNSUPPORTED` | AI formats are on but `QUARRY_EDGE__MODEL_PLANE_URL` is unset | the operator sets it; send no AI format meanwhile |
+| `model_lane_not_granted` | 501 `UNSUPPORTED` | AI formats are on and the URL is set but this deployment has no usable model credential (the Quarry to Model Plane grant, decision X-7, is not built) | send no AI format |
+| `unsupported_in_stream` | 400 `BAD_REQUEST` | an AI format on `POST /v1/scrape/stream` | use `POST /v1/scrape` |
+
+Field errors (400, in `details.fields[]`, not in `details.reason`; each carries a path and never a value): `feature_disabled` (at `formats[i]` while `QUARRY_EDGE__AI_FORMATS` is not on), `too_many` (two of one kind), `missing_field` (a bare `json`, `question` or `highlights`, or an absent `schema`, `question` or `query`), `empty`, `text_too_long` (a prompt or question over 10,000 characters, a query over 1,000), `out_of_range` (`max_chars`, `max_highlights`, `max_chars_each`), `invalid_value` (`language`), `invalid_type`, `unknown_field`, `schema_root_not_object`, `schema_too_large`, `schema_too_complex`, `schema_keyword_not_supported` (at the keyword's path). `reserved_format` no longer exists.
+
+Not errors: a model failure, a rate limit, a schema the output could not satisfy, a ZDR request and an empty page are `data.ai.<kind>` entries inside a 200 (`status`, `code`, `reason`): codes `MODEL_UNAVAILABLE`, `MODEL_RATE_LIMITED`, `SCHEMA_INVALID`, `ZDR_UNAVAILABLE`, `PRIVACY_POLICY` (the request's privacy classification forbids a model hop), `BUDGET_EXHAUSTED`, `EMPTY_SOURCE`; reasons `model_lane_denied`, `model_lane_unauthorized`, `model_rejected_request`, `upstream_unavailable`, `timeout`, `transport`, `bad_reply`, `not_json`, `too_large`, `deadline`.
+
+## Webhook subscriptions: 400, 403, 409 and 429 reasons (INNH-5)
+
+`POST /v1/webhook-subscriptions` and its sibling routes. `error.details` carries `field` and `reason`, both short lowercase tokens; nothing else of control's body is passed on.
+
+| status and code | `details.field` | `details.reason` | meaning | what a caller does |
+|---|---|---|---|---|
+| 400 `BAD_REQUEST` | `url` | `url_invalid` | empty, not an absolute URL, no host, or a port outside 1 to 65535 | fix the URL |
+| 400 | `url` | `url_too_long` | over 2048 characters | shorten it |
+| 400 | `url` | `url_not_https` | the scheme is not `https` | serve the endpoint over TLS |
+| 400 | `url` | `url_userinfo` | the URL carries `user:password@` | use a header-free endpoint; the signature is the authentication |
+| 400 | `url` | `url_fragment` | the URL carries `#...` | remove it |
+| 400 | `url` | `url_private_address` | the host is, or resolves to, a private, loopback, link-local, metadata or carrier-grade-NAT address (one bad address among good ones refuses it) | use a public address |
+| 400 | `url` | `url_unresolvable` | the host did not resolve | check the DNS name |
+| 400 | `events` | `events_empty` | no event named | name `change_detected` |
+| 400 | `events` | `events_unsupported` | an event outside the closed list (`*`, a run event, the dotted subject) | use `change_detected` |
+| 400 | `description` | `description_too_long` | over 200 characters | shorten it |
+| 400 | `body` | `body_invalid` | the body is not JSON of the documented shape, or has an unknown field | send only the documented fields |
+| 400 | `body` | `empty_patch` | a `PATCH` named no field | name `active`, `events` or `description` |
+| 400 | `status`, `limit`, `cursor` | `status_unsupported`, `limit_invalid`, `cursor_invalid` | a bad query value on a list | fix the query |
+| 403 `FORBIDDEN` | | `webhook_off_process` | the caller is under Zero Data Retention (create, patch, retry only) | none: a ZDR organization cannot subscribe |
+| 409 `CONFLICT` | | `subscription_exists` | the organization has a subscription with this URL and these events | use the existing one |
+| 409 | | `delivery_not_retryable` | the delivery is pending, in flight or delivered (`details.status` says which) | none |
+| 429 `RATE_LIMITED` | | `subscription_limit` (`details.limit` is 10) | the organization holds the maximum | delete one first |
+
+501 `UNSUPPORTED` means a switch is off: the message names `QUARRY_EDGE__WEBHOOK_SUBSCRIPTIONS` or, when control has it off, `QUARRY_CONTROL__WEBHOOK_SUBSCRIPTIONS`. 404 `NOT_FOUND` is one answer for an unknown, a foreign and a malformed id.
+
+## Answer synthesis (INNH-8a)
+
+These come from `POST /v1/answer`, `POST /v1/answer/stream` (as `reason` in the legacy error body, or in the `error` event) and `include_answer` on `POST /v1/search` (as `answer_reason`, inside a 200). Contract: `docs/CONTRACTS.md`, "Answer synthesis". Runbook: `docs/RUNBOOKS.md`, "Answer synthesis". The reason is a closed code and never carries provider text.
+
+| reason | status and code | meaning | what a caller does |
+|---|---|---|---|
+| `synthesis_disabled` | 501 `UNSUPPORTED` | `QUARRY_EDGE__ANSWER_SYNTHESIS` is not on (the default) | the operator sets it; use plain `/v1/search` meanwhile |
+| `model_path_refused` | 501 `UNSUPPORTED` | the switch is on but the QB-T17 boot gate refused it: the manifest row `model-invoke` is not granted (or there is no service identity); the feature stays off and no Model Plane call is made | the operator needs the cross-plane grant (owner decision INNH-8b); the boot log names the refusal |
+| `zdr_unavailable` | 403 `FORBIDDEN` | zero data retention (the body flag or the token's floor): the model hop carries no ZDR posture (ADR-4), so `/v1/answer` and `/v1/answer/stream` refuse the request before any search, fetch or model call | not retryable under ZDR; use `/v1/search` or `/v1/scrape`, which run under ZDR without a model |
+| `no_search_provider` | 501 `UNSUPPORTED` | no search provider is configured | the operator configures `SEARXNG_URL`, `BRAVE_SEARCH_KEY` or `SERPER_KEY` |
+| `no_model_plane_url` | 501 `UNSUPPORTED` | `QUARRY_EDGE__MODEL_PLANE_URL` is unset or blank | the operator sets it |
+| `model_client_init_failed` | 501 `UNSUPPORTED` | the URL is set but the Model Plane client could not be built from it | the operator fixes the URL; the edge boot log has the cause |
+| `model_plane_auth_refused` | 503 `UNAVAILABLE` | the pipeline is wired but Auth Core refused to mint the edge's Model Plane token, or the gateway answered 401 or 403 to it | not the caller's token and not retryable by the caller; the operator needs the cross-plane grant (owner decision INNH-8b) |
+| `model_plane_rate_limited` | 429 `RATE_LIMITED` | Auth Core rate limited the edge's service-token mint (the edge's call, not the caller's own quota) | retry later |
+| `model_plane_error` | 502 `DRIVER_FAILED` | the Model Plane call failed | retry later |
+| `answer_search_failed` | the status of the error | the search or page-fetch half failed before a model was asked | retry later |
+
+On `POST /v1/search` the status of an answer is `answer_status`: `ok`, `no_sources`, `skipped_zdr` (ZDR: nothing was sent to a model) or `unavailable` (with `answer_reason` from the table, never `zdr_unavailable`: ZDR is `skipped_zdr` there). A missing answer is never a failed search. The `code` in an error body is the wire name of the error code (`DRIVER_FAILED`, `RATE_LIMITED`, `FORBIDDEN`).
+
+## 403 `FORBIDDEN`: API-key agent runs (INNH-10, dark)
+
+These come from the routes under `/v1/agent/` when the caller's token is an `api_key` principal (`principal_type: "api_key"`, `sub: "apikey:<key_id>"`, minted by Auth Core for an API key). The status is always 403, the code is `FORBIDDEN`, and `details.reason` is one of the closed list below. Nothing is acquired and nothing is consumed. Contract: `docs/CONTRACTS.md`, "API-key agent runs". Runbook: `docs/RUNBOOKS.md`, "API-key agent runs". A user or service token never gets these. The 429 `per_key_run_cap` is in the run-cap table at the top.
+
+| reason | where | meaning | what a caller does |
+|---|---|---|---|
+| `api_key_agent_runs_disabled` | any route | `QUARRY_EDGE__API_KEY_AGENT_RUNS` is not on (the default); a key token is refused on EVERY route, the allowed ones included | the operator turns the switch on; nothing a caller can do |
+| `api_key_scope_missing` | any route | the key token does not carry the scope `browser:agent` | the key needs the permission; Auth Core mints the scope from it |
+| `api_key_route_refused` | any route off the allow-list | the method and path are not one of the nine routes of the allow-list (see CONTRACTS) | none: the route is not available to a key |
+| `api_key_grant_required` | `POST /v1/agent/runs` | no `grant_id`; a key run needs one in every environment, whatever `REQUIRE_BROWSER_GRANTS` says | acquire a key grant first |
+| `api_key_grant_kind_refused` | `POST /v1/agent/runs` | the grant is not a plain allow-list session grant: a run, sensitive-approval or derived attach grant, an unknown policy mode | acquire a key grant |
+| `api_key_open_web_refused` | `POST /v1/agent/runs` | the grant is a `human_browse` grant or an open-web policy; a key never gets the open web | acquire a key grant |
+| `api_key_grant_owner_mismatch` | `POST /v1/agent/runs` | the grant was not issued to this key and this key's owner (its `key_id` or `owner_id` differ, or it has no `key_id`); also what a person or a service gets for presenting a key grant | use the grant issued for this key |
+| `api_key_grant_budget_required` | `POST /v1/agent/runs` | the grant carries no budget claim that bounds anything | the broker issues key grants with a budget |
+| `api_key_grant_hosts_required` | `POST /v1/agent/runs` | the grant's host list is empty or not canonical | the broker issues key grants with a canonical host list |
+| `api_key_profile_refused` | `POST /v1/agent/runs` | `profile_id` or `persist_profile` was sent; a key run always gets a fresh, run-scoped profile | leave them out |
+| `api_key_resume_refused` | `POST /v1/agent/runs` | `resume_run_id` was sent; a key run cannot be resumed | start a new run |
+| `api_key_sensitive_action_refused` | `POST /v1/agent/runs/{run_id}/step` | a dialog reply, an upload or a download (the actions that need a person's approval); there is no person to sign an ask for a key | none in v1 |
+| `api_key_budget_not_enforced` | `POST /v1/agent/runs` | the edge runs with `QUARRY_EDGE__BUDGET_ENFORCEMENT` short of `on`, so the grant's budget would bound nothing | the operator sets `QUARRY_EDGE__BUDGET_ENFORCEMENT=on` |
+
+Two answers a key can also get, which are not key reasons: a grant the broker no longer vouches for (`browser grant is inactive or expired`, 403, on a start or the next step) and a grant that now answers for another key (`browser grant no longer belongs to this key`, 403 `SECURITY_BLOCKED`, on the next step). A key that is revoked stops within the token's life (two minutes at most) and the broker revokes its grants on the revocation event.
+
 ## 403 `FORBIDDEN`: an action an agent may not take (WS9.B, D2-012)
 
 The agent is the one the verified token gives (a service principal, or a person's token that says `agent`), on the step route, its `interact` alias, the browser socket's `action` message (an error frame with the same `code` and `details`) and the attached delegate lane. Nothing is consumed: no budget step, no approval, no receipt. Not retryable by the same caller.
@@ -204,3 +310,56 @@ The agent is the one the verified token gives (a service principal, or a person'
 | reason | `details.denied_action` | meaning | what a caller does |
 |---|---|---|---|
 | `agent_reload_denied` | `reload` | a page reload proposed by an agent; reload is a person's action | navigate to the URL instead, or leave it to the person |
+
+## Scrape `max_age` (INNH-7)
+
+Field errors (400, in `details.fields[]`, not in `details.reason`; each carries a path and never a value): `feature_disabled` (at `max_age` while `QUARRY_EDGE__SCRAPE_MAX_AGE` is not on), `out_of_range` (at `max_age`, above 2592000000 ms), `invalid_type` (at `max_age`, not a non-negative integer), `conflicting_aliases` (`max_age` and `maxAge` with different values). Not errors, and the scrape is a 200: the warnings `max_age_ignored_zdr` (ZDR never reads or writes the result cache), `max_age_ignored` (a capture, actions, an AI format, the browser, a custom web policy, ingest or a private privacy class is never cached) and `cache_unavailable` (no cache backend on this deployment), each with `field: "max_age"`.
+
+## 403 `FORBIDDEN`: job results under Zero Data Retention (INNH-12)
+
+`GET /v1/crawl/{id}/results`, `/v1/batch/{id}/results` and `/v1/jobs/{id}/results` return the URL and title of every page a job fetched, so a caller under the token's ZDR floor is refused before control is asked. Not retryable by the same caller.
+
+| reason | `details.reason` | meaning | what a caller does |
+|---|---|---|---|
+| `job_result_urls` | `job_result_urls` | the caller is under Zero Data Retention | read the job's counts on `GET /v1/crawl/{id}` or `/v1/batch/{id}`; there are no page rows for a ZDR caller |
+
+The same routes answer 501 `UNSUPPORTED` while `QUARRY_EDGE__JOB_RESULTS` is off (checked before the refusal), and 400 `BAD_REQUEST` with `details.field` `limit`, `after_seq` or `latest`. `GET /v1/artifacts` answers 400 with `details.field` `kind` or `run_id` for a value that is not an artifact kind or a run id.
+
+## `POST /v1/crawl`: `sitemap` and `scrape_options` field errors (INNH-6, 2026-10-31)
+
+400 `BAD_REQUEST`, `details.fields[] {path, code, message}`; the path is the spelling the caller sent, prefixed `scrape_options.` for the object's own fields; a message never echoes a value.
+
+| Path | Code | When |
+|---|---|---|
+| `sitemap` | `unsupported_option` | `include` or `only` (or any non-`skip` value) while `QUARRY_EDGE__CRAWL_SITEMAP` is off, or while the crawl scope switch is off (`QUARRY_EDGE__CRAWL_SCOPE_MODE=off`) |
+| `sitemap` | `invalid_option`, `invalid_type` | flag on: a string other than `skip`, `include`, `only`; not a string |
+| `scrape_options` | `unsupported_option` | `QUARRY_EDGE__CRAWL_SCRAPE_OPTIONS` is off (any value) |
+| `scrape_options` | `invalid_type` | flag on: not an object |
+| `scrape_options.<key>` | `unsupported_option` | `actions`, `actions_on_error`, `max_inline_bytes`, `screenshot`, `pdf`, `json`, `summary`, `question`, `highlights`: they cannot apply to every page |
+| `scrape_options.formats[i]` | `unsupported_option`, `unsupported_format` | a capture, object or AI format; an unknown name |
+| `scrape_options.<key>` | `reserved_field`, `unknown_field` | a key `/v1/scrape` refuses (`headers`, `proxy`, ...); an unknown key in strict mode (a warning in lenient) |
+| `scrape_options.include_tags[i]`, `.exclude_tags[i]` | `empty`, `too_long`, `too_many` | the `/v1/scrape` selector limits (32 selectors, 256 characters) |
+| `scrape_options.timeout_ms` | `out_of_range` | not between 1000 and 55000 |
+| `scrape_options.extractor` | `unsupported_extractor`, `conflicts_with_only_main_content` | the shared validator's codes |
+
+Terminal events of a crawl: `run_failed` with `code` `sitemap_unavailable` (a `sitemap: only` crawl whose discovery failed) or `edge_scrape_options_unsupported` (the edge did not echo `scrape_applied`). `POST /v1/internal/crawl/sitemap` answers 501 `UNSUPPORTED` while `QUARRY_EDGE__CRAWL_SITEMAP` is off; `run_page` answers 400 with `details.fields` under `scrape.` for options that do not pass the same checks.
+
+## `POST /v1/parse` (INNH-11, 2026-10-31)
+
+Standard envelope, `error.details.reason` as below. A message never echoes document text.
+
+| Status | Code | `details.reason` | When | What a caller does |
+|---|---|---|---|---|
+| 400 | `BAD_REQUEST` | `empty_body` | the body has no bytes | send the document |
+| 400 | `BAD_REQUEST` | `body_unreadable` | the body stream failed | retry |
+| 413 | `BAD_REQUEST` | `too_large` (`max_bytes`) | the body is over 25 MiB (or the lower `QUARRY_EDGE__PARSE_MAX_BYTES`), by its declared length or its bytes | send a smaller file |
+| 415 | `UNSUPPORTED_MEDIA` | `unsupported_media` (`detected`, `supported`) | the bytes are not a PDF or DOCX, or the `Content-Type` is not one the route takes (`supported_content_types`) | send a PDF or DOCX |
+| 415 | `UNSUPPORTED_MEDIA` | `content_type_mismatch` (`detected`, `declared`) | the declared PDF or DOCX type names the other document than the bytes | fix the header or send the bytes you meant |
+| 415 | `UNSUPPORTED_MEDIA` | `pdf_parse_failed`, `docx_parse_failed` (`kind`, maybe `limit: parser_stopped`) | the file is damaged, or the parser was stopped by its memory or CPU limit | the file cannot be read; do not retry as is |
+| 415 | `UNSUPPORTED_MEDIA` | `too_large` (`kind`) | the parser's own size or inflate limit | send a smaller file |
+| 429 | `RATE_LIMITED` | `org_parse_busy`, `parse_capacity`, `parser_busy` (`retry_after_seconds`) | the organisation, the process, or the parser slots are busy | wait `Retry-After` seconds |
+| 501 | `UNSUPPORTED` | `parse_route_disabled` (`env`) | `QUARRY_EDGE__PARSE_ROUTE` is off | ask the operator |
+| 501 | `UNSUPPORTED` | `isolation_required` (`env`, `hint`) | documents would be parsed inside the edge process | ask the operator |
+| 504 | `TIMEOUT` | none | the parse took more than 15 seconds | the file is too slow to read; do not retry as is |
+
+A 200 may carry `warnings[]` (`document_has_no_text_layer`, `some_pages_have_no_text_layer`, `document_has_no_text`, `truncated_at_8mib`): they are not errors.

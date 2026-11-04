@@ -1,9 +1,9 @@
 {
   "about": "Registry for check-doc-codes.mjs. 'built' codes must be in a listed source file; 'designed' codes are named by the documents as unbuilt and must carry a task id. Written for task Z-30 (2026-10-06). When a designed code lands in source the checker warns; the final documents task (X-DOCS-FINAL) moves it to 'built'.",
   "scan": [
-    "apps/master-ownership-matrix.md",
-    "apps/CODEBASE_INFORMATION_SYSTEM.md",
-    "apps/GDPR_SUMMARY.md",
+    "docs/master-ownership-matrix.md",
+    "docs/CODEBASE_INFORMATION_SYSTEM.md",
+    "docs/GDPR_SUMMARY.md",
     "apps/Model Plane/docs/ZDR.md",
     "apps/Control Plane/docs/core-research/auth-core.md",
     "apps/Control Plane/CONTROL_PLANE_OWNERSHIP.md",
@@ -23,16 +23,16 @@
     "zdr_gate_unavailable": ["apps/Frontend Plane/verevonv3/apps/gateway/src/domains/orgs/settings.rs"],
     "zdr_contractual": ["apps/Frontend Plane/verevonv3/apps/gateway/src/domains/orgs/settings.rs"],
     "retention_posture_unavailable": ["apps/Control Plane/auth-core/src/auth/interactive-retention-policy.ts"],
-    "zdr_feature_not_supported": ["apps/Model Plane/rust/services/model-gateway/src/sse.rs"],
+    "zdr_feature_not_supported": ["apps/Model Plane/rust/crates/mp-contracts/src/zdr_refusal.rs"],
     "zdr_direct_stream": ["apps/Model Plane/rust/services/model-gateway/src/sse.rs"],
-    "zdr_durable_mutation_forbidden": ["apps/Model Plane/rust/services/model-gateway/src/http_routes.rs"],
+    "zdr_durable_mutation_forbidden": ["apps/Model Plane/rust/crates/mp-contracts/src/zdr_refusal.rs"],
+    "zdr_connection_not_supported": ["apps/Model Plane/rust/crates/mp-contracts/src/zdr_refusal.rs"],
     "zdr_draft_persistence_forbidden": ["apps/Frontend Plane/verevonv3/apps/gateway/src/domains/inbox.rs"],
     "zdr_ai_proposal_forbidden": ["apps/Frontend Plane/verevonv3/apps/gateway/src/domains/inbox.rs"],
     "zdr_recurrence_forbidden": ["apps/Frontend Plane/verevonv3/apps/gateway/src/domains/tickets.rs"]
   },
   "designed": {
     "zdr_connection_not_acknowledged": { "task": "Z-13, Z-15, Z-19", "note": "refusal: org ZDR on, own connection cannot do ZDR, no valid acknowledgement" },
-    "zdr_connection_not_supported": { "task": "Z-14, Z-19", "note": "refusal: kill switch off or the provider has no waiver route; acknowledging cannot help (Z-10 posture matrix)" },
     "zdr_explicit_request_not_supported_by_connection": { "task": "Z-14", "note": "refusal: Temporary chat on a connection that cannot do ZDR; never waivable" },
     "zdr_decision_unavailable": { "task": "Z-14, Z-19", "note": "refusal: a retention decision could not be made; ZDR stays on" },
     "zdr_waiver_route_mismatch": { "task": "Z-15, Z-16", "note": "refusal: a waiver token used on any route but its one connection" },
@@ -44,20 +44,21 @@
     "retention:zdr-decide": { "task": "Z-14 with the Control Plane principal bundle", "note": "scope of the BFF's retention-decision principal on audience control-policy" }
   },
   "terms": [
-    "zdr_ephemeral"
+    "zdr_ephemeral",
+    "zdr_turn_registers_no_run_control_listener"
   ],
   "contracts": {
-    "file": "apps/master-ownership-matrix.md",
+    "file": "docs/master-ownership-matrix.md",
     "minimum": 17
   },
   "requirements": [
     {
-      "file": "apps/master-ownership-matrix.md",
+      "file": "docs/master-ownership-matrix.md",
       "mustContain": "It amends rule 4",
       "why": "rule 17 (per-connection waiver) is written and says what it amends"
     },
     {
-      "file": "apps/master-ownership-matrix.md",
+      "file": "docs/master-ownership-matrix.md",
       "mustContain": "Amended by rule 17",
       "why": "rule 4 points at its one exception"
     },
@@ -87,7 +88,7 @@
       "why": "the limit for a waived run is written"
     },
     {
-      "file": "apps/GDPR_SUMMARY.md",
+      "file": "docs/GDPR_SUMMARY.md",
       "mustContain": "Exception: a user's own AI connection",
       "why": "processor exception for user-owned connections"
     },
@@ -117,12 +118,12 @@
       "why": "the customer-facing policy says what a user's own connection does to zero retention"
     },
     {
-      "file": "apps/CODEBASE_INFORMATION_SYSTEM.md",
+      "file": "docs/CODEBASE_INFORMATION_SYSTEM.md",
       "mustContain": "matrix rule 17",
       "why": "the codebase index carries the new cross-plane rule"
     },
     {
-      "file": "apps/master-ownership-matrix.md",
+      "file": "docs/master-ownership-matrix.md",
       "mustContain": "**State: designed, not built.**",
       "why": "rule 17 states that the waiver is not in the tree (searched 2026-10-06); change this row only when it ships (X-DOCS-FINAL)"
     },
@@ -142,7 +143,7 @@
       "why": "the waiver paragraph of Retention Posture Authority says it is not built; change this row only when it ships (X-DOCS-FINAL)"
     },
     {
-      "file": "apps/GDPR_SUMMARY.md",
+      "file": "docs/GDPR_SUMMARY.md",
       "mustContain": "**Status (2026-10-06): designed, not built.**",
       "why": "the processor exception must not be read as in place; change this row only when it ships and counsel has reviewed it (X-DOCS-FINAL)"
     },
@@ -162,7 +163,7 @@
       "why": "edge E2 is the design's edge and is not in the code; change this row only when Z-14 ships (X-DOCS-FINAL)"
     },
     {
-      "file": "apps/CODEBASE_INFORMATION_SYSTEM.md",
+      "file": "docs/CODEBASE_INFORMATION_SYSTEM.md",
       "mustContain": "it is designed and not built",
       "why": "rule 11 of the index says the waiver is not built; change this row only when it ships (X-DOCS-FINAL)"
     }

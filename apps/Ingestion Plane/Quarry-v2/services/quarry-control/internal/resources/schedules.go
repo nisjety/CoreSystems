@@ -4,22 +4,21 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
-	"os"
 	"strconv"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/rs/zerolog/log"
 
 	"github.com/triodelab/quarry-v2/pkg/quarrycontracts"
 	"github.com/triodelab/quarry-v2/services/quarry-control/internal/httpx"
 	"github.com/triodelab/quarry-v2/services/quarry-control/internal/store"
 )
 
-// EnvSchedulesRequireOrg turns the transitional unscoped list off. Unset (the
-// first release), GET /v1/schedules without org_id still answers with every
-// org's rows in the orchestrator wire shape and logs a deprecation. Set to 1 it
-// answers 400. Remove the variable once the orchestrator reads
-// GET /v1/internal/schedules/desired.
+// EnvSchedulesRequireOrg is retired (D2-042). GET /v1/schedules used to answer
+// with every org's rows when no org_id was given, unless this variable was 1.
+// That branch is deleted: a request without org_id is always refused, so the
+// variable changes nothing. The name stays so compose can keep it at 1, which
+// also fences an older control image that still honours it. The orchestrator
+// reads GET /v1/internal/schedules/desired for the all-orgs set.
 const EnvSchedulesRequireOrg = "QUARRY_CONTROL_SCHEDULES_REQUIRE_ORG"
 
 // MountSchedules mounts the schedule routes (WS15.S1). Every tenant route takes
@@ -44,27 +43,16 @@ func MountSchedules(r chi.Router, db store.DB) {
 	r.Post("/v1/internal/schedules/{id}/runs", registerScheduledRun(db))
 }
 
-// listSchedulesHandler answers GET /v1/schedules. With org_id it is the tenant
-// list: a keyset page of the caller's own rows, in the view shape. Without it,
-// the transitional unscoped list (see EnvSchedulesRequireOrg).
+// listSchedulesHandler answers GET /v1/schedules: a keyset page of the caller's
+// own rows, in the view shape. org_id comes from the edge-verified query; a
+// request without it is refused and never falls back to an all-orgs list.
 func listSchedulesHandler(s store.SchedulesStore) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 		cursor := r.URL.Query().Get("cursor")
 		org := orgFromQuery(r)
 		if org == "" {
-			if os.Getenv(EnvSchedulesRequireOrg) == "1" {
-				httpx.WriteErr(w, r, quarrycontracts.CodeBadRequest, "org_id required", nil)
-				return
-			}
-			log.Warn().Str("route", "GET /v1/schedules").
-				Msg("unscoped schedule list is deprecated; pass org_id or read /v1/internal/schedules/desired")
-			items, _ := s.List(limit, cursor)
-			out := make([]scheduleWire, 0, len(items))
-			for _, it := range items {
-				out = append(out, toScheduleWire(it))
-			}
-			httpx.WriteJSON(w, r, http.StatusOK, out)
+			httpx.WriteErr(w, r, quarrycontracts.CodeBadRequest, "org_id required", nil)
 			return
 		}
 		items, next := s.ListByOrg(org, limit, cursor)

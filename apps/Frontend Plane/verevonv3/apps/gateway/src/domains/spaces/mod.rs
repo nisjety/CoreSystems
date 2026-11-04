@@ -50,6 +50,7 @@ pub(crate) mod run_live;
 pub(crate) mod sidebar;
 mod schedule_template;
 mod stream;
+mod memory;
 
 static THREAD_SCOPE_COUNTER: AtomicU64 = AtomicU64::new(1);
 
@@ -1063,6 +1064,7 @@ fn module_routes() -> Router<AppState> {
         .merge(run_live::routes())
         .merge(sidebar::routes())
         .merge(stream::routes())
+        .merge(memory::routes())
 }
 
 #[derive(Debug, Deserialize)]
@@ -4841,6 +4843,10 @@ pub(crate) async fn fetch_persona_instructions(
 /// is global to the user, not scoped to an organization or Space — so it can
 /// run independently of Space resolution. Call it from the same three
 /// injection sites as `inject_authored_instructions`.
+///
+/// The reply tone rides the same path (EP-8-S3): `persona_tone` is read from
+/// user-core's AI settings, never from the client, and it is sent only when the
+/// person has picked a named tone.
 pub(crate) async fn inject_persona_instructions(
     state: &AppState,
     user: &AuthenticatedUser,
@@ -4857,11 +4863,16 @@ pub(crate) async fn inject_persona_instructions(
     })?;
     object.remove("persona_instructions");
     object.remove("persona_enabled");
+    // Same trust class as the persona text: a client copy of the tone never survives (EP-8-S3).
+    object.remove("persona_tone");
 
     if let Some((instructions, enabled)) = fetch_persona_instructions(state, user).await {
         if enabled {
             object.insert("persona_instructions".to_owned(), json!(instructions));
         }
+    }
+    if let Some(tone) = crate::domains::persona::fetch_tone_preset(state, user).await {
+        object.insert("persona_tone".to_owned(), json!(tone));
     }
     Ok(())
 }
@@ -11335,6 +11346,64 @@ mod tests {
             "a forged value must not survive just because Convex had nothing authored"
         );
         assert!(body.get("persona_enabled").is_none());
+    }
+
+    /// The reply tone is read from user-core, so a tone the client sends is replaced by the stored one,
+    /// or dropped when nothing is stored.
+    #[tokio::test]
+    async fn client_supplied_persona_tone_is_discarded() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (mut state, _application) =
+            persona_instructions_test_state(json!({"instructions": null, "enabled": true})).await;
+        let user_core = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/settings/ai"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"tonePreset": "warm"})))
+            .mount(&user_core)
+            .await;
+        state.user_core_url = user_core.uri();
+        // A user id of its own: the tone cache is keyed by user-core URL and user id.
+        let user = AuthenticatedUser {
+            user_id: "user-tone-replaced".to_owned(),
+            ..authenticated_user()
+        };
+        let mut body = json!({"content": "hello", "persona_tone": "direct"});
+        let result = inject_persona_instructions(&state, &user, &mut body).await;
+
+        assert!(result.is_ok());
+        assert_eq!(
+            body["persona_tone"], "warm",
+            "the stored tone replaces the one the client sent"
+        );
+    }
+
+    #[tokio::test]
+    async fn client_supplied_persona_tone_is_dropped_when_nothing_is_stored() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (mut state, _application) =
+            persona_instructions_test_state(json!({"instructions": null, "enabled": true})).await;
+        let user_core = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/settings/ai"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({"tonePreset": "default"})),
+            )
+            .mount(&user_core)
+            .await;
+        state.user_core_url = user_core.uri();
+        // A user id of its own: the tone cache is keyed by user-core URL and user id.
+        let user = AuthenticatedUser {
+            user_id: "user-tone-dropped".to_owned(),
+            ..authenticated_user()
+        };
+        let mut body = json!({"content": "hello", "persona_tone": "direct"});
+        let result = inject_persona_instructions(&state, &user, &mut body).await;
+
+        assert!(result.is_ok());
+        assert!(
+            body.get("persona_tone").is_none(),
+            "a forged tone must not survive just because the person chose the default"
+        );
     }
 
     fn org_zdr_posture(zdr: bool) -> ResponseTemplate {

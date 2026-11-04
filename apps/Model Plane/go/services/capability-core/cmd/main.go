@@ -179,7 +179,11 @@ func main() {
 	toolPolicies := api.NewToolPoliciesHandler(pool)
 	toolPolicyEnforced := policy.ToolPolicyEnforcedFromLookup(os.Getenv)
 	slog.Info("tool policies", "enforced", toolPolicyEnforced)
-	pol := policy.New(reg).WithScopeResolver(scopeStore).WithToolPolicies(toolPolicies, toolPolicyEnforced)
+	// WS25-S9: the org's extension allow-list, read from the same agent policy the policy API serves. Inert unless
+	// ORG_EXTENSION_ALLOWLIST is the literal true.
+	orgExtensionsEnforced := policy.OrgExtensionAllowListFromLookup(os.Getenv)
+	pol := policy.New(reg).WithScopeResolver(scopeStore).WithToolPolicies(toolPolicies, toolPolicyEnforced).
+		WithOrgExtensionPolicy(api.NewOrgExtensionReader(pool), orgExtensionsEnforced)
 
 	// Letta's /v1/tools/search searches tool definitions, not memories. When
 	// explicitly configured it is only a discovery ranker; the server
@@ -298,10 +302,12 @@ func main() {
 	api.NewPluginsHandler(pool).WithPublisher(recPub).Register(protectedMux)
 	// Behind ORG_AGENT_POLICY_API (off by default): the handler answers 404 while it is off.
 	api.NewOrgAgentPolicyHandler(pool, api.OrgAgentPolicyAPIFromLookup(os.Getenv)).Register(protectedMux)
+	api.NewOrgHooksHandler(pool).Register(protectedMux)
 	// WS05-S5: writes need a person and capability:write; reads are the org's
 	// and the caller's own. Enforcement is the engine's, behind TOOL_POLICY_ENFORCED.
 	toolPolicies.Register(protectedMux)
-	mcpHandler := api.NewMCPHandler(pool).WithPublisher(recPub).WithVault(mcpVault).WithMCPServiceToken(mcpServiceToken)
+	mcpHandler := api.NewMCPHandler(pool).WithPublisher(recPub).WithVault(mcpVault).WithMCPServiceToken(mcpServiceToken).
+		WithOrgExtensionPolicy(api.NewOrgExtensionReader(pool), orgExtensionsEnforced)
 	mcpHandler.Register(protectedMux)
 	// Deliberately on publicMux, not protectedMux: see RegisterInternal's doc
 	// comment — these routes authenticate themselves (X-Mcp-Service-Token) and
@@ -330,7 +336,9 @@ func main() {
 		slog.Info("mcp dns revalidator started", "interval", interval)
 	}
 	api.NewRoutingHandler(pool).WithPublisher(recPub).Register(protectedMux)
-	api.NewSafetyHandler(pool).WithPublisher(recPub).Register(protectedMux)
+	// E3.6-8: the document_pii catalogue key is behind DOCUMENT_PII_POLICY (off by default).
+	api.NewSafetyHandler(pool).WithPublisher(recPub).
+		WithDocumentPIIPolicy(api.DocumentPIIPolicyFromLookup(os.Getenv)).Register(protectedMux)
 	api.NewMemoryHandler(pool, runClient).WithMemoryControls(memoryClient).Register(protectedMux)
 	api.NewTasksHandler(pool).Register(protectedMux)
 	// AUTO-2: lets a user register/inspect/cancel a watch on one run. The
@@ -340,6 +348,8 @@ func main() {
 	cronHandler := api.NewCronHandler(pool)
 	// WS20-S4: stored-consent schedule contracts. Strict literal true; off by default.
 	cronHandler.WithScheduleContract(os.Getenv("SCHEDULE_CONTRACT_ENABLED") == "true")
+	// WS20-S8: approval guards refuse a bare re-enable of a lapsed approval. Strict literal true; off by default.
+	cronHandler.WithContractGuards(os.Getenv("CRON_CONTRACT_GUARDS_ENABLED") == "true")
 	if cronVerifier, cronVerifierErr := cronDecisionVerifierFromEnv(os.Getenv); cronVerifierErr != nil {
 		slog.Warn("Space-scoped cron creation unavailable; Control decision verifier is required", "error", cronVerifierErr)
 	} else {
@@ -356,7 +366,13 @@ func main() {
 		if cronAuthErr != nil {
 			slog.Warn("cron sweeper not started; fresh Control authorization is required", "error", cronAuthErr)
 		} else {
-			go cron.NewSweeper(pool, cronAuthorizer).Start(ctx)
+			cronSweeper := cron.NewSweeper(pool, cronAuthorizer).WithContractGuards(os.Getenv("CRON_CONTRACT_GUARDS_ENABLED") == "true")
+			// WS20-S8 pause notices follow the WS20-S7 switch: without it a pause still happens, unnoticed.
+			// The ok guard matters: a nil *notifyclient.Client would be a typed nil inside the interface.
+			if notifier, ok := notifyclient.New(os.Getenv("NOTIFICATION_CORE_URL"), os.Getenv("NOTIFICATION_CAPABILITY_CORE_SERVICE_TOKEN"), nil); ok && os.Getenv("CAPABILITY_CORE_SCHEDULED_NOTIFY_ENABLED") == "true" {
+				cronSweeper.WithPauseNotifier(notifier)
+			}
+			go cronSweeper.Start(ctx)
 			slog.Info("cron sweeper started with fresh Control authorization")
 		}
 	}
@@ -640,7 +656,19 @@ func startRunWatchConsumer(ctx context.Context, nc *nats.Conn, pool *pgxpool.Poo
 		slog.Info("run-watch notify consumer disabled (NOTIFICATION_CORE_URL/NOTIFICATION_CAPABILITY_CORE_SERVICE_TOKEN not set)")
 		return
 	}
-	notifier, err := runwatch.NewNotifier(runwatch.NewPostgresSubscriptionStore(pool), notifyClient)
+	// WS16-S4: the RUN_ATTENTION path is off unless the switch is the literal "true".
+	var options []runwatch.NotifierOption
+	if os.Getenv("CAPABILITY_CORE_ATTENTION_NOTIFY_ENABLED") == "true" {
+		coalesce := runwatch.ParseAttentionCoalesce(os.Getenv("ATTENTION_NOTIFY_COALESCE_SECONDS"))
+		options = append(options, runwatch.WithAttentionNotify(coalesce))
+		slog.Info("run-watch attention notifications enabled", "coalesce", coalesce)
+	}
+	// WS20-S7: the scheduled-run outcome notice is off unless the switch is the literal "true".
+	if os.Getenv("CAPABILITY_CORE_SCHEDULED_NOTIFY_ENABLED") == "true" {
+		options = append(options, runwatch.WithScheduledOutcomeNotify())
+		slog.Info("run-watch scheduled-run outcome notices enabled")
+	}
+	notifier, err := runwatch.NewNotifier(runwatch.NewPostgresSubscriptionStore(pool), notifyClient, options...)
 	if err != nil {
 		slog.Error("run-watch notifier unavailable", "error", err)
 		return

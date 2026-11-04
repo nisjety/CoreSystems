@@ -41,10 +41,18 @@ const (
 // uniqueness constraint. A duplicate append returns the prior event rather
 // than creating a second row; `deduplicated=true` in the response.
 //
-// Ordering: within a run_id, events are ordered by (ts, event_id). Across runs,
-// ordering is per-org by (ts, event_id). step_ordinal is monotonic per-run for
-// STEP_COMPLETED / ACTION_COMPLETED and is assigned by the DB trigger in
-// migration 0002 — producers MUST NOT set it.
+// Ordering: for the `events` table, within a run_id events are ordered by
+// (ts, event_id) and across runs per-org by (ts, event_id). step_ordinal is
+// monotonic per-run for STEP_COMPLETED / ACTION_COMPLETED and is assigned by the
+// DB trigger in migration 0002 — producers MUST NOT set it.
+//
+// Run trace (WS10): QueryEvents with a filter.run_id is served from session-core's
+// `run_trace_events` table, which holds the browser trace events Quarry publishes
+// (Event fields producer_seq, agent, origin, run_id, request_id). That path is
+// ordered by the server-assigned `ingest_seq`, not by (ts, event_id): the cursor
+// is an opaque encoding of the last `ingest_seq`, the run is required, and only
+// the run's owner may read it. Per-producer order is `producer_seq`; a gap in it
+// is a dropped event, never a reordering.
 type EventLogClient interface {
 	// AppendEvent writes a single Event to the log.
 	AppendEvent(ctx context.Context, in *AppendEventRequest, opts ...grpc.CallOption) (*AppendEventResponse, error)
@@ -121,10 +129,18 @@ type EventLog_SubscribeEventsClient = grpc.ServerStreamingClient[Event]
 // uniqueness constraint. A duplicate append returns the prior event rather
 // than creating a second row; `deduplicated=true` in the response.
 //
-// Ordering: within a run_id, events are ordered by (ts, event_id). Across runs,
-// ordering is per-org by (ts, event_id). step_ordinal is monotonic per-run for
-// STEP_COMPLETED / ACTION_COMPLETED and is assigned by the DB trigger in
-// migration 0002 — producers MUST NOT set it.
+// Ordering: for the `events` table, within a run_id events are ordered by
+// (ts, event_id) and across runs per-org by (ts, event_id). step_ordinal is
+// monotonic per-run for STEP_COMPLETED / ACTION_COMPLETED and is assigned by the
+// DB trigger in migration 0002 — producers MUST NOT set it.
+//
+// Run trace (WS10): QueryEvents with a filter.run_id is served from session-core's
+// `run_trace_events` table, which holds the browser trace events Quarry publishes
+// (Event fields producer_seq, agent, origin, run_id, request_id). That path is
+// ordered by the server-assigned `ingest_seq`, not by (ts, event_id): the cursor
+// is an opaque encoding of the last `ingest_seq`, the run is required, and only
+// the run's owner may read it. Per-producer order is `producer_seq`; a gap in it
+// is a dropped event, never a reordering.
 type EventLogServer interface {
 	// AppendEvent writes a single Event to the log.
 	AppendEvent(context.Context, *AppendEventRequest) (*AppendEventResponse, error)

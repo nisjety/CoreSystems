@@ -31,6 +31,7 @@ import (
 	"github.com/triodelab/model-plane/pkg/publisher"
 	"github.com/triodelab/model-plane/services/capability-core/internal/authz"
 	"github.com/triodelab/model-plane/services/capability-core/internal/crypto"
+	"github.com/triodelab/model-plane/services/capability-core/internal/policy"
 	"github.com/triodelab/model-plane/services/capability-core/internal/reconcile"
 	"github.com/triodelab/model-plane/services/capability-core/internal/skillbundle"
 )
@@ -740,6 +741,10 @@ type MCPHandler struct {
 	// real stored (server_id, org_id) row, so this cannot widen access beyond
 	// servers that genuinely belong to the org it asserts.
 	mcpServiceToken string
+	// orgExtensions is the org's extension rule, read only when orgExtensionsEnforced (WS25-S9). With it off the
+	// listing shows every server the registry holds.
+	orgExtensions         policy.OrgExtensionSource
+	orgExtensionsEnforced bool
 }
 
 type mcpHostResolver interface {
@@ -938,6 +943,35 @@ func expectedInternalServiceToken(rootSecret, orgID string) string {
 // expectedInternalServiceToken. An unconfigured root secret (or an empty
 // orgID, which internalTokenTarget already rejects) keeps the route closed
 // rather than degrading into "any caller is trusted".
+// WithOrgExtensionPolicy attaches the org's extension rule to the server listing (WS25-S9). It applies only when
+// enabled is true, which main wires from ORG_EXTENSION_ALLOWLIST, so the listing is what it was while that is off.
+func (h *MCPHandler) WithOrgExtensionPolicy(source policy.OrgExtensionSource, enabled bool) *MCPHandler {
+	h.orgExtensions = source
+	h.orgExtensionsEnforced = enabled && source != nil
+	return h
+}
+
+// orgExtensionReader reads an org's extension rule from the agent policy the policy API serves (WS25-S9), through the
+// same loader, so the listing and the signed gate cannot disagree about what the org allows.
+type orgExtensionReader struct {
+	pool registryDatabase
+}
+
+// NewOrgExtensionReader returns the rule source the signed gate and the MCP listing share.
+func NewOrgExtensionReader(pool registryDatabase) policy.OrgExtensionSource {
+	return orgExtensionReader{pool: pool}
+}
+
+// OrgExtensionRule implements policy.OrgExtensionSource.
+func (r orgExtensionReader) OrgExtensionRule(ctx context.Context, orgID string) (policy.OrgExtensionRule, error) {
+	handler := &OrgAgentPolicyHandler{pool: r.pool}
+	row, err := handler.load(ctx, orgID)
+	if err != nil {
+		return policy.OrgExtensionRule{}, err
+	}
+	return policy.OrgExtensionRuleFromSettings(row.Settings), nil
+}
+
 func (h *MCPHandler) authorizedInternalServiceCall(r *http.Request, orgID string) bool {
 	received := r.Header.Get(mcpServiceTokenHeader)
 	if received == "" || h.mcpServiceToken == "" || orgID == "" {
@@ -1636,6 +1670,17 @@ func (h *MCPHandler) listOrCreate(w http.ResponseWriter, r *http.Request) {
 			jsonErr(w, "authentication required", http.StatusUnauthorized)
 			return
 		}
+		// With the org's extension allow-list on (WS25-S9), a server the org has not approved is not listed.
+		var rule policy.OrgExtensionRule
+		if h.orgExtensionsEnforced {
+			loaded, err := h.orgExtensions.OrgExtensionRule(r.Context(), orgID)
+			if err != nil {
+				slog.Error("load org extension rule failed", "error", err)
+				jsonErr(w, "database unavailable", http.StatusInternalServerError)
+				return
+			}
+			rule = loaded
+		}
 		rows, err := h.pool.Query(r.Context(), `
 			SELECT id, org_id, name, description, endpoint_url, transport, auth_kind,
 			       config_json, scope, enabled, rollout_state, risk_level, created_at, updated_at
@@ -1664,6 +1709,9 @@ func (h *MCPHandler) listOrCreate(w http.ResponseWriter, r *http.Request) {
 				slog.Error("scan MCP server failed", "error", err)
 				jsonErr(w, "database unavailable", http.StatusInternalServerError)
 				return
+			}
+			if h.orgExtensionsEnforced && !rule.AllowsServer(s.ID) {
+				continue
 			}
 			hydrateMCPServerView(&s)
 			servers = append(servers, s)
@@ -2101,6 +2149,9 @@ func (h *RoutingHandler) delete(w http.ResponseWriter, r *http.Request, id strin
 type SafetyHandler struct {
 	pool registryDatabase
 	pub  publisher.EventPublisher
+	// documentPII turns on the document_pii catalogue key (E3.6-8): creating a
+	// policy of that kind and reading the effective org default. Off by default.
+	documentPII bool
 }
 
 // NewSafetyHandler constructs the handler.
@@ -2114,11 +2165,27 @@ func (h *SafetyHandler) WithPublisher(pub publisher.EventPublisher) *SafetyHandl
 	return h
 }
 
+// WithDocumentPIIPolicy switches the document_pii catalogue key on (E3.6-8,
+// DOCUMENT_PII_POLICY). While it is off a document_pii policy cannot be created
+// and the effective-default route answers 404.
+func (h *SafetyHandler) WithDocumentPIIPolicy(enabled bool) *SafetyHandler {
+	h.documentPII = enabled
+	return h
+}
+
 // Register mounts routes.
 func (h *SafetyHandler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/safety", h.listOrCreate)
 	mux.HandleFunc("/api/v1/safety/", func(w http.ResponseWriter, r *http.Request) {
 		id := r.URL.Path[len("/api/v1/safety/"):]
+		if id == documentPIIEffectiveSuffix {
+			if r.Method != http.MethodGet {
+				http.NotFound(w, r)
+				return
+			}
+			h.documentPIIEffective(w, r)
+			return
+		}
 		switch r.Method {
 		case http.MethodGet:
 			h.get(w, r, id)
@@ -2197,6 +2264,16 @@ func (h *SafetyHandler) listOrCreate(w http.ResponseWriter, r *http.Request) {
 		}
 		now := time.Now().UTC()
 		cfgJSON, _ := json.Marshal(p.ConfigJSON)
+		isDocumentPII := isDocumentPIIKind(p.Kind)
+		if isDocumentPII {
+			// The E3.6-8 catalogue key has a closed schema and one row per org.
+			normalized, status, message := h.prepareDocumentPII(&p)
+			if status != 0 {
+				jsonErr(w, message, status)
+				return
+			}
+			cfgJSON = normalized
+		}
 		if p.AppliesTo == nil {
 			p.AppliesTo = []string{}
 		}
@@ -2207,6 +2284,10 @@ func (h *SafetyHandler) listOrCreate(w http.ResponseWriter, r *http.Request) {
 		`, p.ID, p.OrgID, p.Name, p.Description, p.Kind, cfgJSON, p.AppliesTo,
 			p.Priority, p.Enabled, now, now)
 		if err != nil {
+			if isDocumentPII && isUniqueViolation(err) {
+				jsonErr(w, "a document_pii policy already exists for this organization", http.StatusConflict)
+				return
+			}
 			jsonErr(w, err.Error(), http.StatusInternalServerError)
 			return
 		}

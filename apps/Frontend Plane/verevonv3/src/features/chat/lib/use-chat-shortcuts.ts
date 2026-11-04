@@ -4,6 +4,7 @@ import {
   readChatThreadHistory,
   selectChatThread,
 } from '@/features/chat/lib/chat-thread-history'
+import { isChatBrowserDockEnabled } from '@/features/browser/dock/browser-dock-state'
 
 /**
  * Chat keyboard shortcuts, t3.chat-flavored but re-picked against this app's
@@ -31,6 +32,11 @@ import {
  *     narrow: DashboardComposer and CoreNavbar already own Escape-driven
  *     menu/panel closing; this only adds the "get me out of the textarea"
  *     behavior neither of them provides.
+ *   - Cmd/Ctrl+Alt+B -> show or hide the browser dock beside a live run, and
+ *     Cmd/Ctrl+Alt+L -> cycle its layout (WS9.G). Matched by the physical key
+ *     (`event.code`), because Option changes `event.key` on macOS, and refused
+ *     for AltGr, which Windows reports as Ctrl+Alt. Acted on only while
+ *     VITE_CHAT_BROWSER_DOCK is on and the page passes the actions.
  */
 
 const CHAT_COMPOSER_SELECTOR = '.verevon-dashboard-textarea'
@@ -38,9 +44,13 @@ const CHAT_COMPOSER_SELECTOR = '.verevon-dashboard-textarea'
 export type ChatShortcutEventLike = {
   altKey: boolean
   ctrlKey: boolean
+  /** The physical key (`KeyB`), when the event carries one. */
+  code?: string
   key: string
   metaKey: boolean
   shiftKey: boolean
+  /** Reports AltGr on Windows, which arrives as Ctrl+Alt. */
+  getModifierState?: (key: string) => boolean
 }
 
 export type ChatShortcutTargetLike = {
@@ -52,10 +62,20 @@ export type ChatShortcutTargetLike = {
 export type ChatShortcutDirection = 'down' | 'up'
 
 export type ChatShortcutAction =
+  | { type: 'cycle-browser-dock' }
   | { type: 'dismiss' }
   | { type: 'focus-composer' }
   | { type: 'new-chat' }
   | { type: 'select-thread'; direction: ChatShortcutDirection }
+  | { type: 'toggle-browser-dock' }
+
+/**
+ * The physical key of the event, read from `code` when the event carries one. `key` is the fallback
+ * for an event without a code (a synthetic one): Option changes `key` on macOS, not `code`.
+ */
+function isPhysicalKey(event: ChatShortcutEventLike, code: string, key: string): boolean {
+  return event.code ? event.code === code : event.key.toLowerCase() === key
+}
 
 /**
  * Standard "am I typing somewhere" check, mirrored from CoreNavbar's own
@@ -96,6 +116,17 @@ export function matchChatShortcut(
 
   if (mod && !event.shiftKey && !event.altKey && key === 'i') {
     return typingElsewhere ? null : { type: 'focus-composer' }
+  }
+
+  // The browser-dock chords read the physical key (see isPhysicalKey). AltGr is refused: on Windows it
+  // arrives as Ctrl+Alt and types characters on several keyboard layouts.
+  if (mod && event.altKey && !event.shiftKey && !event.getModifierState?.('AltGraph')) {
+    if (isPhysicalKey(event, 'KeyB', 'b')) {
+      return typingElsewhere ? null : { type: 'toggle-browser-dock' }
+    }
+    if (isPhysicalKey(event, 'KeyL', 'l')) {
+      return typingElsewhere ? null : { type: 'cycle-browser-dock' }
+    }
   }
 
   if (mod && event.shiftKey && (key === 'arrowup' || key === 'arrowdown')) {
@@ -214,6 +245,13 @@ export interface UseChatShortcutsOptions {
    * only decides *when* to call it.
    */
   startNewChat: () => void
+  /**
+   * Shows or hides the browser dock beside a live run (WS9.G). Acted on only while
+   * VITE_CHAT_BROWSER_DOCK is on, so a page that does not pass it keeps today's keys.
+   */
+  toggleBrowserDock?: () => void
+  /** Moves the browser dock to its next layout (WS9.G). The same flag rule applies. */
+  cycleBrowserDock?: () => void
 }
 
 /**
@@ -250,6 +288,20 @@ export function useChatShortcuts(options: UseChatShortcutsOptions): void {
               event.preventDefault()
               selectChatThread(nextId)
             }
+            break
+          }
+          case 'toggle-browser-dock': {
+            const toggle = options.toggleBrowserDock
+            if (!toggle || !isChatBrowserDockEnabled()) break
+            event.preventDefault()
+            toggle()
+            break
+          }
+          case 'cycle-browser-dock': {
+            const cycle = options.cycleBrowserDock
+            if (!cycle || !isChatBrowserDockEnabled()) break
+            event.preventDefault()
+            cycle()
             break
           }
           case 'dismiss': {

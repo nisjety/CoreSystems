@@ -19,6 +19,20 @@ const (
 	Audience   = "browser-broker"
 	ScopeRead  = "browser:read"
 	ScopeWrite = "browser:write"
+
+	// ScopeAgent is the only scope an api_key principal uses here (INNH-10):
+	// it lets a key acquire an allow-list session grant and revoke its own.
+	ScopeAgent = "browser:agent"
+
+	// GrantKindOriginExtension is the AcquireGrant grant_kind of an origin
+	// extension (E3.2-e1).
+	GrantKindOriginExtension = "origin_extension"
+
+	// PrincipalUser, PrincipalService and PrincipalAPIKey are the authctx
+	// principal types this broker authorizes.
+	PrincipalUser    = "user"
+	PrincipalService = "service"
+	PrincipalAPIKey  = authctx.PrincipalTypeAPIKey
 )
 
 // NewVerifierFromEnv loads trust material eagerly. It rejects attempts to
@@ -31,6 +45,10 @@ func NewVerifierFromEnv() (*authctx.Verifier, error) {
 		Audiences: []string{Audience},
 		Issuer:    os.Getenv("AUTH_CORE_ISSUER"),
 		JWKSURL:   os.Getenv("AUTH_CORE_JWKS_URL"),
+		// INNH-10: the shape is verified here; Authorize and the server decide
+		// what a key may do (nothing while BROWSER_BROKER_KEY_GRANTS_ENABLED is
+		// off).
+		AcceptAPIKey: true,
 	})
 }
 
@@ -74,13 +92,82 @@ func Authorize(principal authctx.Principal, method string, request any) error {
 	default:
 		return errors.New("unknown browser-broker method")
 	}
-	if principal.PrincipalType == "user" {
+	switch principal.PrincipalType {
+	case PrincipalUser:
 		return nil
+	case PrincipalService:
+		if !principal.HasScope(required) {
+			return errors.New("required browser scope is missing")
+		}
+		// E3.2-e1: an origin extension records a person's consent; no workload
+		// issues one on its own authority (the handler refuses it too).
+		if req, ok := request.(*mpv1.AcquireGrantRequest); ok && req.GetGrantKind() == GrantKindOriginExtension {
+			return errors.New("an origin extension is issued to a signed-in user only")
+		}
+		return nil
+	case PrincipalAPIKey:
+		return authorizeAPIKey(principal, method, request)
+	default:
+		// A principal type this broker was not taught is refused outright. It
+		// used to fall through to the scoped-service branch, whose owner filter
+		// is the organization-wide empty one (fail open).
+		return errors.New("unsupported browser principal type")
 	}
-	if !principal.HasScope(required) {
+}
+
+// authorizeAPIKey is the whole of what an api_key principal may call (INNH-10
+// MP-1): AcquireGrant for an ordinary allow-list session grant (no grant_kind,
+// so never human_browse; no sensitive scopes and no parent, so never a
+// sensitive approval) and RevokeGrant (the handler limits it to the key's own
+// grants). Every other method, RenewGrant and DeriveRunGrant included, is
+// refused, and both need scope browser:agent. The broker switch
+// (BROWSER_BROKER_KEY_GRANTS_ENABLED) is checked by the handlers.
+func authorizeAPIKey(principal authctx.Principal, method string, request any) error {
+	if principal.KeyID == "" {
+		return errors.New("api key principal has no key id")
+	}
+	if !principal.HasScope(ScopeAgent) {
 		return errors.New("required browser scope is missing")
 	}
+	switch method {
+	case "/model_plane.v1.BrowserBroker/AcquireGrant":
+		req, ok := request.(*mpv1.AcquireGrantRequest)
+		if !ok || req == nil {
+			return errors.New("malformed api key grant request")
+		}
+		return APIKeyAcquireShape(req)
+	case "/model_plane.v1.BrowserBroker/RevokeGrant":
+		return nil
+	default:
+		return errors.New("method is not available to an api key")
+	}
+}
+
+// APIKeyAcquireShape refuses an AcquireGrant request an api_key may never make:
+// a grant kind (human_browse), a sensitive approval scope, or a parent grant.
+func APIKeyAcquireShape(req *mpv1.AcquireGrantRequest) error {
+	if req.GetGrantKind() != "" {
+		return errors.New("an api key acquires an ordinary session grant only")
+	}
+	if len(req.GetAllowedActions()) != 0 || len(req.GetAllowedFrameIds()) != 0 || len(req.GetAllowedDialogIds()) != 0 ||
+		len(req.GetAllowedArtifactIds()) != 0 || req.GetParentGrantId() != "" {
+		return errors.New("an api key cannot acquire a sensitive approval")
+	}
+	if req.GetConsentScope() != "" || len(req.GetConsentDeniedDomains()) != 0 {
+		return errors.New("an api key cannot carry a consent")
+	}
 	return nil
+}
+
+// KeyMatches reports whether a grant with keyID is visible to principal under
+// the key rule: an api_key principal sees only grants stamped with its own key
+// (OwnerFilter alone would show it every grant of its owner). Other principal
+// types are not narrowed here; the owner filter applies to them.
+func KeyMatches(principal authctx.Principal, keyID string) bool {
+	if principal.PrincipalType != PrincipalAPIKey {
+		return true
+	}
+	return principal.KeyID != "" && keyID == principal.KeyID
 }
 
 // Principal returns the cryptographically verified caller or fails closed.
@@ -92,11 +179,30 @@ func Principal(ctx context.Context) (authctx.Principal, error) {
 	return principal, nil
 }
 
+// noOwner is the owner filter of a principal type the broker does not know. It
+// can never equal a stored owner: the durable store answers NotFound for a NUL
+// byte without a query, and no verified identity carries one.
+const noOwner = "\x00unknown-principal"
+
 // OwnerFilter pins users to their own records. A service with an explicit
-// method scope may access any owner inside its verified organization.
+// method scope may access any owner inside its verified organization: the
+// empty filter is a service's alone. An api_key is pinned to its owning user
+// here, and every handler that reads or revokes a grant for it also applies
+// KeyMatches, so it reaches its own key's grants only. Every other principal
+// type gets a filter that matches no grant. It used to get "" for anything that
+// was not a user, i.e. any owner in the org: fail open.
 func OwnerFilter(principal authctx.Principal) string {
-	if principal.PrincipalType == "user" {
+	switch principal.PrincipalType {
+	case PrincipalUser:
 		return principal.ActorID
+	case PrincipalAPIKey:
+		if principal.ActorID == "" {
+			return noOwner
+		}
+		return principal.ActorID
+	case PrincipalService:
+		return ""
+	default:
+		return noOwner
 	}
-	return ""
 }

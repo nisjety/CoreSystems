@@ -3,7 +3,7 @@
 /* eslint-disable */
 // @ts-nocheck
 
-import { DeleteMemoryRequest, DeleteMemoryResponse, GetMemoryControlsRequest, GetMemoryControlsResponse, IndexMemoryRequest, IndexMemoryResponse, ListMemoryRequest, ListMemoryResponse, MemoryHealthRequest, MemoryHealthResponse, ResetMemoryRequest, ResetMemoryResponse, SearchMemoryRequest, SearchMemoryResponse, SetMemoryControlsRequest, SetMemoryControlsResponse } from "./memory_pbjs";
+import { DeleteMemoryRequest, DeleteMemoryResponse, GetMemoryControlsRequest, GetMemoryControlsResponse, GetUserProfileRequest, IndexMemoryRequest, IndexMemoryResponse, ListMemoryRequest, ListMemoryResponse, MemoryHealthRequest, MemoryHealthResponse, RebuildUserProfileRequest, ResetMemoryRequest, ResetMemoryResponse, SearchMemoryRequest, SearchMemoryResponse, SetMemoryControlsRequest, SetMemoryControlsResponse, SetUserProfileRequest, UserProfileResponse } from "./memory_pbjs";
 import { MethodKind } from "@bufbuild/protobuf";
 
 /**
@@ -110,6 +110,48 @@ export const MemoryService = {
       name: "ResetMemory",
       I: ResetMemoryRequest,
       O: ResetMemoryResponse,
+      kind: MethodKind.Unary,
+    },
+    /**
+     * The caller's standing profile (EP-8 S4): a short text built from their
+     * accepted personal memories, or as they last edited it. A ZDR caller gets
+     * an empty answer with skip_reason "zdr", never an error. Refused with
+     * failed_precondition "profile_not_enabled" while SESSION_USER_PROFILE_ENABLED
+     * is off.
+     *
+     * @generated from rpc model_plane.v1.MemoryService.GetUserProfile
+     */
+    getUserProfile: {
+      name: "GetUserProfile",
+      I: GetUserProfileRequest,
+      O: UserProfileResponse,
+      kind: MethodKind.Unary,
+    },
+    /**
+     * Replace the profile text with the person's own edit. User callers only, for
+     * themselves; a stale expected_revision is refused (failed_precondition
+     * "profile_revision_stale"); a ZDR or waived credential is refused
+     * zdr_feature_not_supported (feature "user_profile").
+     *
+     * @generated from rpc model_plane.v1.MemoryService.SetUserProfile
+     */
+    setUserProfile: {
+      name: "SetUserProfile",
+      I: SetUserProfileRequest,
+      O: UserProfileResponse,
+      kind: MethodKind.Unary,
+    },
+    /**
+     * Rebuild the profile from the person's accepted memories. Refused while
+     * memory is paused, off or disabled; an edited profile is kept unless force
+     * is set. Same caller and ZDR rules as SetUserProfile.
+     *
+     * @generated from rpc model_plane.v1.MemoryService.RebuildUserProfile
+     */
+    rebuildUserProfile: {
+      name: "RebuildUserProfile",
+      I: RebuildUserProfileRequest,
+      O: UserProfileResponse,
       kind: MethodKind.Unary,
     },
   }

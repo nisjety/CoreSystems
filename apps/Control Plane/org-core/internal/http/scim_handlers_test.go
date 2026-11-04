@@ -719,6 +719,53 @@ func TestSCIMCreateUserMapsEachFailureToAScimError(t *testing.T) {
 	}
 }
 
+// scimCountingProvisioner stands in for auth-core. A refused userName must never reach it.
+type scimCountingProvisioner struct{ calls int }
+
+func (p *scimCountingProvisioner) ProvisionMember(context.Context, orgcore.SCIMProvisionRequest) (*orgcore.SCIMProvisionResult, error) {
+	p.calls++
+	return nil, errors.New("auth-core was called")
+}
+
+func (p *scimCountingProvisioner) DeprovisionMember(context.Context, orgcore.SCIMDeprovisionRequest) (*orgcore.SCIMDeprovisionResult, error) {
+	p.calls++
+	return nil, errors.New("auth-core was called")
+}
+
+// scimValidatingFake answers like fakeSCIM, except CreateSCIMUser, which runs the real
+// org service so the userName validation is the one production runs.
+type scimValidatingFake struct {
+	*fakeSCIM
+	service *orgcore.Service
+}
+
+func (f scimValidatingFake) CreateSCIMUser(ctx context.Context, auth *orgcore.SCIMTokenAuth, in orgcore.SCIMUserInput) (*orgcore.SCIMUserRecord, error) {
+	return f.service.CreateSCIMUser(ctx, auth, in)
+}
+
+// A userName whose domain ends in a dot passed the SCIM edge, reached auth-core and came
+// back as 503. It is refused as a 400 invalidValue, and auth-core is never called.
+func TestSCIMCreateUserRefusesATrailingDotBeforeAuthCore(t *testing.T) {
+	h := newSCIMHarness(t, true, scimTestRoles)
+	provisioner := &scimCountingProvisioner{}
+	service := &orgcore.Service{}
+	service.SetScimProvisioner(provisioner)
+	h.server.scim = scimValidatingFake{fakeSCIM: h.fake, service: service}
+	for _, userName := range []string{"ada@corp.example.com.", "ada@corp.example.com.."} {
+		body := []byte(`{"userName":"` + userName + `"}`)
+		response := h.edge(http.MethodPost, scimTestUsersPath, body, scimTestBearer)
+		if response.Code != http.StatusBadRequest {
+			t.Fatalf("userName %q: status=%d body=%s; want 400", userName, response.Code, response.Body.String())
+		}
+		if got, _ := decodeBody(t, response)["scimType"].(string); got != "invalidValue" {
+			t.Fatalf("userName %q: scimType=%q; want invalidValue", userName, got)
+		}
+	}
+	if provisioner.calls != 0 {
+		t.Fatalf("auth-core was called %d times for refused userNames; want 0", provisioner.calls)
+	}
+}
+
 func TestSCIMPatchAndPutDriveActiveThroughTheService(t *testing.T) {
 	h := newSCIMHarness(t, true, scimTestRoles)
 	patchOpen := `{"schemas":["urn:ietf:params:scim:api:messages:2.0:PatchOp"],"Operations":[`

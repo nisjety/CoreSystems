@@ -8,6 +8,7 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
+  authorizePlaneServiceApiKeyExchange,
   authorizePlaneServicePrincipal,
   authorizePlaneServiceTokenExchange,
   loadPlaneServicePrincipalRegistry,
@@ -938,5 +939,112 @@ describe('plane service-principal organization binding', () => {
       expect(load(raw, 'development')).toBe(raw);
       expect(load(raw, 'test')).toBe(raw);
     });
+  });
+});
+
+describe('plane service-principal API-key exchange (EP-12 S2)', () => {
+  const registry = (override: Record<string, unknown> = {}) =>
+    JSON.stringify({
+      'verevon-gateway': {
+        credential: 'test-only-verevon-gateway-key',
+        audiences: ['model-gateway'],
+        tenancy: 'directory',
+        orgIds: [],
+        scopes: ['mail-task:prepare-thread'],
+        apiKeyExchange: ['model-gateway', 'session-core'],
+        ...override,
+      },
+      'graph-worker': {
+        credential: 'test-only-caller-key',
+        audiences: ['data-plane'],
+        orgIds: ['org-a'],
+        scopes: ['graph:read'],
+      },
+    });
+  const request = {
+    serviceId: 'verevon-gateway',
+    credential: 'test-only-verevon-gateway-key',
+    audience: 'session-core',
+    orgId: 'org-a',
+  };
+
+  it('authorizes an opted-in caller for a listed audience without granting it that audience otherwise', () => {
+    expect(authorizePlaneServiceApiKeyExchange(registry(), request)).toEqual({
+      serviceId: 'verevon-gateway',
+      subject: 'service:verevon-gateway',
+      orgId: 'org-a',
+      orgBinding: 'directory',
+    });
+    // The list is not an `audiences` entry: no internal token for session-core.
+    expect(() =>
+      authorizePlaneServicePrincipal(registry(), {
+        serviceId: 'verevon-gateway',
+        credential: 'test-only-verevon-gateway-key',
+        audience: 'session-core',
+        orgId: 'org-a',
+        requestedScopes: ['mail-task:prepare-thread'],
+        reason: 'api key exchange separation',
+      }),
+    ).toThrow();
+  });
+
+  it.each<[string, Partial<typeof request>]>([
+    ['a principal without the field', { serviceId: 'graph-worker', credential: 'test-only-caller-key' }],
+    ['an audience the list does not name', { audience: 'quarry' }],
+    ['a wrong credential', { credential: 'test-only-wrong-key-123' }],
+    ['an empty credential', { credential: '' }],
+    ['an unknown principal', { serviceId: 'nobody' }],
+    ['an empty organization', { orgId: ' ' }],
+  ])('refuses %s', (_case, override) => {
+    expect(() =>
+      authorizePlaneServiceApiKeyExchange(registry(), {
+        ...request,
+        ...override,
+      }),
+    ).toThrow(/API-key exchange is not authorized/);
+  });
+
+  it('keeps a fixed-list caller inside its list', () => {
+    const fixed = registry({ tenancy: undefined, orgIds: ['org-a'] });
+    expect(
+      authorizePlaneServiceApiKeyExchange(fixed, request).orgBinding,
+    ).toBe('fixed');
+    expect(() =>
+      authorizePlaneServiceApiKeyExchange(fixed, {
+        ...request,
+        orgId: 'org-b',
+      }),
+    ).toThrow(/not authorized/);
+  });
+
+  it.each<[string, unknown]>([
+    ['an audience outside the closed table', ['data-plane']],
+    ['an empty list', []],
+    ['a non-array', 'model-gateway'],
+    ['a blank entry', ['model-gateway', ' ']],
+  ])('refuses the whole registry for %s', (_case, apiKeyExchange) => {
+    expect(() =>
+      authorizePlaneServiceApiKeyExchange(
+        registry({ apiKeyExchange }),
+        request,
+      ),
+    ).toThrow(/invalid principal policy/);
+  });
+
+  it('is absent by default: a registry without the field still loads and grants nothing', () => {
+    const raw = registry({ apiKeyExchange: undefined });
+    expect(() =>
+      authorizePlaneServicePrincipal(raw, {
+        serviceId: 'graph-worker',
+        credential: 'test-only-caller-key',
+        audience: 'data-plane',
+        orgId: 'org-a',
+        requestedScopes: ['graph:read'],
+        reason: 'unchanged issuance',
+      }),
+    ).not.toThrow();
+    expect(() => authorizePlaneServiceApiKeyExchange(raw, request)).toThrow(
+      /not authorized/,
+    );
   });
 });

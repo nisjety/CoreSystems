@@ -49,10 +49,12 @@ use std::fmt::Write as _;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use mp_contracts::model_plane::v1::{ChatMessage, InferRequest, ToolCall};
+use mp_contracts::model_plane::v1::{ChatMessage, InferPurpose, InferRequest, ToolCall};
 use serde_json::Value;
 
-use crate::{artifacts::ArtifactKind, relevance, sse_events::ChatEvent, state::AppState};
+use crate::{
+    artifacts::ArtifactKind, relevance, role_routing, sse_events::ChatEvent, state::AppState,
+};
 
 // ---------------------------------------------------------------------------
 // Caps. Every one of these is a spend limit, not a tuning knob: deep research
@@ -3163,14 +3165,20 @@ async fn plan_once(
     limit: usize,
     model: &str,
 ) -> String {
+    // With role routing on the plan asks the role table, and the configured plan model is the fallback the
+    // table tries after its own candidates; with it off the plan names that model exactly as before.
+    let (request_model, role_fallback_model) =
+        role_routing::side_task_model(role_routing::role_routing_enabled(), model, model);
     let mut client = state.inference_client.clone();
     let response = tokio::time::timeout(
         PLAN_TIMEOUT,
         client.infer(authorized(
             InferRequest {
                 request_id: format!("{request_id}-research-plan"),
+                purpose: InferPurpose::ResearchPlan as i32,
                 org_id: org_id.to_owned(),
-                model: model.to_owned(),
+                model: request_model,
+                role_fallback_model,
                 messages: vec![ChatMessage {
                     compaction_summary: String::new(),
                     role: "user".to_owned(),
@@ -3391,6 +3399,7 @@ async fn synthesize_report(
         client.infer(authorized(
             InferRequest {
                 request_id: format!("{request_id}-research-report"),
+                purpose: InferPurpose::ResearchSynthesis as i32,
                 org_id: org_id.to_owned(),
                 model: model.to_owned(),
                 messages: vec![ChatMessage {

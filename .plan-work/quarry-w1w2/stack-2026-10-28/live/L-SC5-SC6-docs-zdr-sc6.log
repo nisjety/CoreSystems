@@ -1,0 +1,8 @@
+SC6 transcript, DOC_ROUTING=on, edge http://127.0.0.1:8082, helper docs.qlive.crawl.test (nginx:alpine, qlive-helper-docs, removed)
+-- shadow (default mode, before the flag): all four files answered 200 with an artifact reference and metadata.content_kind pdf/docx/image/archive; nothing refused, nothing extracted inline
+-- on pdf: HTTP/1.1 200 OK markdown=QLIVE PDF FIXTURE content_kind=pdf scrape_id=art_01M623XJKCP4G5S0DC168QPW12
+-- on docx: HTTP/1.1 200 OK markdown=QLIVE DOCX FIXTURE content_kind=docx scrape_id=art_01M623XJYSTJPKB8X4MTPRGZWS
+-- on png: HTTP/1.1 415 Unsupported Media Type code=UNSUPPORTED_MEDIA kind=image reason=unsupported_media
+-- on zip: HTTP/1.1 415 Unsupported Media Type code=UNSUPPORTED_MEDIA kind=archive reason=unsupported_media
+-- unknown key: HTTP/1.1 200 OK warnings=[{"code":"unknown_field","message":"`qliveMadeUpKey` is not a /v1/scrape field and was ignored","field":"qliveMadeUpKey"}] header: deprecation: true
+-- GET /v1/scrape/<pdf scrape_id>: HTTP 200, fingerprint blake3:301dce807cf13394045d90aaa2a0d3ca4d8344e4ec14b7dcf04b0cf39f507ec6

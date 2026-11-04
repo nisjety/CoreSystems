@@ -805,6 +805,11 @@ ensure_secret "$MODEL_ENV" MODEL_CAPABILITY_CORE_NATS_PASSWORD >/dev/null
 ensure_secret "$MODEL_ENV" MODEL_ORCHESTRATOR_CORE_NATS_PASSWORD >/dev/null
 ensure_secret "$MODEL_ENV" MODEL_TOOL_COMPLETION_NATS_PASSWORD >/dev/null
 ensure_secret "$MODEL_ENV" MODEL_COST_CORE_NATS_PASSWORD >/dev/null
+# WS10.S5: quarry-edge's publish-only trace principal on the Model Plane broker
+# (deploy/nats.conf `quarry-trace-producer`). The broker reads it from the Model
+# env; quarry-edge presents the same value, so it is synced to the Ingestion env.
+model_quarry_trace_nats="$(ensure_secret "$MODEL_ENV" MODEL_QUARRY_TRACE_NATS_PASSWORD)"
+sync_value MODEL_QUARRY_TRACE_NATS_PASSWORD "$model_quarry_trace_nats" "$INGESTION_ENV"
 # The two Application->Model cross-plane NATS identities. Held in the Model env
 # because that is where nats.conf authorizes them; synced to Application below.
 model_convex_nats="$(ensure_secret "$MODEL_ENV" APPLICATION_CONVEX_MODEL_NATS_PASSWORD)"

@@ -2007,6 +2007,7 @@ var SessionRetentionService_ServiceDesc = grpc.ServiceDesc{
 
 const (
 	ThreadAutonomy_GetThreadGrant_FullMethodName = "/model_plane.v1.ThreadAutonomy/GetThreadGrant"
+	ThreadAutonomy_BindGrantToRun_FullMethodName = "/model_plane.v1.ThreadAutonomy/BindGrantToRun"
 )
 
 // ThreadAutonomyClient is the client API for ThreadAutonomy service.
@@ -2025,6 +2026,15 @@ type ThreadAutonomyClient interface {
 	// "no grant" is an answer, not an error. Read-only; it spends nothing. Refused
 	// for a caller that does not own the thread, and never answers for another org.
 	GetThreadGrant(ctx context.Context, in *GetThreadGrantRequest, opts ...grpc.CallOption) (*GetThreadGrantResponse, error)
+	// Bind the thread's live grant to the run that executes the plan it was
+	// approved with (WS14 S2, approve then execute). One statement copies the
+	// rung, the justification and the plan id onto the run's record, and it
+	// matches only while the thread still holds exactly that plan and the grant
+	// has not lapsed, so the rung is never one the caller stated. Refused with
+	// FAILED_PRECONDITION `plan_grant_unavailable` otherwise, and for a
+	// zero-retention or waived credential. Session Core does not spend the plan:
+	// the gateway's APPROVED -> EXECUTING compare-and-swap is the single-use guard.
+	BindGrantToRun(ctx context.Context, in *BindGrantToRunRequest, opts ...grpc.CallOption) (*BindGrantToRunResponse, error)
 }
 
 type threadAutonomyClient struct {
@@ -2039,6 +2049,16 @@ func (c *threadAutonomyClient) GetThreadGrant(ctx context.Context, in *GetThread
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(GetThreadGrantResponse)
 	err := c.cc.Invoke(ctx, ThreadAutonomy_GetThreadGrant_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *threadAutonomyClient) BindGrantToRun(ctx context.Context, in *BindGrantToRunRequest, opts ...grpc.CallOption) (*BindGrantToRunResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(BindGrantToRunResponse)
+	err := c.cc.Invoke(ctx, ThreadAutonomy_BindGrantToRun_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -2061,6 +2081,15 @@ type ThreadAutonomyServer interface {
 	// "no grant" is an answer, not an error. Read-only; it spends nothing. Refused
 	// for a caller that does not own the thread, and never answers for another org.
 	GetThreadGrant(context.Context, *GetThreadGrantRequest) (*GetThreadGrantResponse, error)
+	// Bind the thread's live grant to the run that executes the plan it was
+	// approved with (WS14 S2, approve then execute). One statement copies the
+	// rung, the justification and the plan id onto the run's record, and it
+	// matches only while the thread still holds exactly that plan and the grant
+	// has not lapsed, so the rung is never one the caller stated. Refused with
+	// FAILED_PRECONDITION `plan_grant_unavailable` otherwise, and for a
+	// zero-retention or waived credential. Session Core does not spend the plan:
+	// the gateway's APPROVED -> EXECUTING compare-and-swap is the single-use guard.
+	BindGrantToRun(context.Context, *BindGrantToRunRequest) (*BindGrantToRunResponse, error)
 	mustEmbedUnimplementedThreadAutonomyServer()
 }
 
@@ -2073,6 +2102,9 @@ type UnimplementedThreadAutonomyServer struct{}
 
 func (UnimplementedThreadAutonomyServer) GetThreadGrant(context.Context, *GetThreadGrantRequest) (*GetThreadGrantResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetThreadGrant not implemented")
+}
+func (UnimplementedThreadAutonomyServer) BindGrantToRun(context.Context, *BindGrantToRunRequest) (*BindGrantToRunResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method BindGrantToRun not implemented")
 }
 func (UnimplementedThreadAutonomyServer) mustEmbedUnimplementedThreadAutonomyServer() {}
 func (UnimplementedThreadAutonomyServer) testEmbeddedByValue()                        {}
@@ -2113,6 +2145,24 @@ func _ThreadAutonomy_GetThreadGrant_Handler(srv interface{}, ctx context.Context
 	return interceptor(ctx, in, info, handler)
 }
 
+func _ThreadAutonomy_BindGrantToRun_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(BindGrantToRunRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ThreadAutonomyServer).BindGrantToRun(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ThreadAutonomy_BindGrantToRun_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ThreadAutonomyServer).BindGrantToRun(ctx, req.(*BindGrantToRunRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // ThreadAutonomy_ServiceDesc is the grpc.ServiceDesc for ThreadAutonomy service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -2123,6 +2173,10 @@ var ThreadAutonomy_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "GetThreadGrant",
 			Handler:    _ThreadAutonomy_GetThreadGrant_Handler,
+		},
+		{
+			MethodName: "BindGrantToRun",
+			Handler:    _ThreadAutonomy_BindGrantToRun_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},
@@ -2733,6 +2787,132 @@ var MessageRevisionService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ResolveMessageTarget",
 			Handler:    _MessageRevisionService_ResolveMessageTarget_Handler,
+		},
+	},
+	Streams:  []grpc.StreamDesc{},
+	Metadata: "model_plane/v1/sessions.proto",
+}
+
+const (
+	ThreadForkService_ForkThread_FullMethodName = "/model_plane.v1.ThreadForkService/ForkThread"
+)
+
+// ThreadForkServiceClient is the client API for ThreadForkService service.
+//
+// For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
+//
+// ThreadForkService: copies a conversation's active path into a new thread (build plan WS17 S6).
+// A separate service, as MessageTreeService is, so that SessionCore and every mock of it stay
+// source-compatible.
+type ThreadForkServiceClient interface {
+	// Copy the active path of an owned thread, from its first turn up to and including a chosen
+	// assistant message, into a new thread that names its source. The copy is one transaction and
+	// writes one THREAD_FORKED event. It writes no MESSAGE_APPENDED event and extracts no memory:
+	// Dreaming skips the copied turns. Owner only, with `session:write`; a zero-retention credential
+	// is refused. Refused with unavailable `thread_fork_disabled` while
+	// SESSION_CORE_THREAD_FORK_ENABLED is not `true`, with failed_precondition for a Space thread, a
+	// thread that holds a waived run, a point that is not on the active path and a path longer than
+	// 5,000 turns.
+	ForkThread(ctx context.Context, in *ForkThreadRequest, opts ...grpc.CallOption) (*ForkThreadResponse, error)
+}
+
+type threadForkServiceClient struct {
+	cc grpc.ClientConnInterface
+}
+
+func NewThreadForkServiceClient(cc grpc.ClientConnInterface) ThreadForkServiceClient {
+	return &threadForkServiceClient{cc}
+}
+
+func (c *threadForkServiceClient) ForkThread(ctx context.Context, in *ForkThreadRequest, opts ...grpc.CallOption) (*ForkThreadResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ForkThreadResponse)
+	err := c.cc.Invoke(ctx, ThreadForkService_ForkThread_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// ThreadForkServiceServer is the server API for ThreadForkService service.
+// All implementations must embed UnimplementedThreadForkServiceServer
+// for forward compatibility.
+//
+// ThreadForkService: copies a conversation's active path into a new thread (build plan WS17 S6).
+// A separate service, as MessageTreeService is, so that SessionCore and every mock of it stay
+// source-compatible.
+type ThreadForkServiceServer interface {
+	// Copy the active path of an owned thread, from its first turn up to and including a chosen
+	// assistant message, into a new thread that names its source. The copy is one transaction and
+	// writes one THREAD_FORKED event. It writes no MESSAGE_APPENDED event and extracts no memory:
+	// Dreaming skips the copied turns. Owner only, with `session:write`; a zero-retention credential
+	// is refused. Refused with unavailable `thread_fork_disabled` while
+	// SESSION_CORE_THREAD_FORK_ENABLED is not `true`, with failed_precondition for a Space thread, a
+	// thread that holds a waived run, a point that is not on the active path and a path longer than
+	// 5,000 turns.
+	ForkThread(context.Context, *ForkThreadRequest) (*ForkThreadResponse, error)
+	mustEmbedUnimplementedThreadForkServiceServer()
+}
+
+// UnimplementedThreadForkServiceServer must be embedded to have
+// forward compatible implementations.
+//
+// NOTE: this should be embedded by value instead of pointer to avoid a nil
+// pointer dereference when methods are called.
+type UnimplementedThreadForkServiceServer struct{}
+
+func (UnimplementedThreadForkServiceServer) ForkThread(context.Context, *ForkThreadRequest) (*ForkThreadResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ForkThread not implemented")
+}
+func (UnimplementedThreadForkServiceServer) mustEmbedUnimplementedThreadForkServiceServer() {}
+func (UnimplementedThreadForkServiceServer) testEmbeddedByValue()                           {}
+
+// UnsafeThreadForkServiceServer may be embedded to opt out of forward compatibility for this service.
+// Use of this interface is not recommended, as added methods to ThreadForkServiceServer will
+// result in compilation errors.
+type UnsafeThreadForkServiceServer interface {
+	mustEmbedUnimplementedThreadForkServiceServer()
+}
+
+func RegisterThreadForkServiceServer(s grpc.ServiceRegistrar, srv ThreadForkServiceServer) {
+	// If the following call panics, it indicates UnimplementedThreadForkServiceServer was
+	// embedded by pointer and is nil.  This will cause panics if an
+	// unimplemented method is ever invoked, so we test this at initialization
+	// time to prevent it from happening at runtime later due to I/O.
+	if t, ok := srv.(interface{ testEmbeddedByValue() }); ok {
+		t.testEmbeddedByValue()
+	}
+	s.RegisterService(&ThreadForkService_ServiceDesc, srv)
+}
+
+func _ThreadForkService_ForkThread_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ForkThreadRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ThreadForkServiceServer).ForkThread(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ThreadForkService_ForkThread_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ThreadForkServiceServer).ForkThread(ctx, req.(*ForkThreadRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+// ThreadForkService_ServiceDesc is the grpc.ServiceDesc for ThreadForkService service.
+// It's only intended for direct use with grpc.RegisterService,
+// and not to be introspected or modified (even as a copy)
+var ThreadForkService_ServiceDesc = grpc.ServiceDesc{
+	ServiceName: "model_plane.v1.ThreadForkService",
+	HandlerType: (*ThreadForkServiceServer)(nil),
+	Methods: []grpc.MethodDesc{
+		{
+			MethodName: "ForkThread",
+			Handler:    _ThreadForkService_ForkThread_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

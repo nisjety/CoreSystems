@@ -103,6 +103,27 @@ pub(crate) fn loop_resume_enabled() -> bool {
     mp_contracts::loop_fold::loop_resume_enabled()
 }
 
+/// The environment switch for a question that pauses its run for an answer in that same run (build
+/// plan WS14 S5). Read strictly: only the literal `true` enables it.
+pub(crate) const ASK_RESUME_ENV: &str = "AGENT_ASK_USER_RESUME_ENABLED";
+
+/// Whether a question may pause its run for a same-run answer: its own switch, and both switches of
+/// the approval continuation it resumes through (`AGENT_CONTINUE_AFTER_APPROVAL_ENABLED` and
+/// `EXECUTION_LOOP_RESUME_ENABLED`). All three must be on. Otherwise the answer is the next turn.
+#[must_use]
+pub(crate) fn ask_resume_on_when(own: Option<&str>, continue_on: bool, loop_resume_on: bool) -> bool {
+    own == Some("true") && continue_on && loop_resume_on
+}
+
+/// [`ask_resume_on_when`] read from this process's environment and the continuation switches.
+pub(crate) fn ask_resume_enabled() -> bool {
+    ask_resume_on_when(
+        std::env::var(ASK_RESUME_ENV).ok().as_deref(),
+        continue_enabled(),
+        loop_resume_enabled(),
+    )
+}
+
 /// Why a release could not be built.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ReleaseRefusal {
@@ -1689,6 +1710,18 @@ pub(crate) async fn restore_in_place(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The question resume switch is on only for the literal `true`, and only with both continuation
+    /// switches it rides on.
+    #[test]
+    fn the_ask_resume_switch_needs_its_literal_true_and_both_continuation_switches() {
+        assert!(ask_resume_on_when(Some("true"), true, true));
+        for own in [None, Some("TRUE"), Some("1"), Some("on"), Some(" true"), Some("false")] {
+            assert!(!ask_resume_on_when(own, true, true), "{own:?} must not enable the resume switch");
+        }
+        assert!(!ask_resume_on_when(Some("true"), false, true), "the approval continuation must be on");
+        assert!(!ask_resume_on_when(Some("true"), true, false), "the loop resume must be on");
+    }
 
     /// The gate a release test runs under: off, so the answer is the name's.
     fn gate_off() -> RunGate<'static> {

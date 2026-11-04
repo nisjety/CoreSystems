@@ -1,0 +1,591 @@
+openapi: 3.1.0
+info:
+  title: Verevon Agent API
+  version: 1.0.0
+  description: |
+    The public Agent API, version 1. A caller holds an API key that a member of the
+    organisation created, and sends it in the x-api-key header. The Verevon gateway
+    exchanges the key at Control for a short-lived token bound to the Model Plane; the
+    key itself goes no further than that exchange.
+
+    Version 1 is Ask only. A run answers with the model and is offered no tool, so a
+    request cannot ask for tools, attachments, skills, connectors, retrieval, browser
+    work or code execution (agent_api_feature_not_supported). A key whose organisation
+    has zero data retention on is refused on every route (zdr_feature_not_supported,
+    feature agent_api). Version 1 never removes or renames a field, a code or a route;
+    a breaking change is a new path prefix.
+
+    A success body is an object with a data member. A list adds meta and links for
+    cursor paging and is never unpaged. An error body is an object with an error member
+    holding code, message and details, where details is always an object.
+servers:
+  - url: /api/agent/v1
+    description: The Verevon gateway public ingress for the Agent API.
+security:
+  - apiKey: []
+tags:
+  - name: runs
+    description: Start a run, read it, follow its events and cancel it.
+  - name: threads
+    description: The runs and messages of a thread that the key owns.
+paths:
+  /runs:
+    post:
+      tags: [runs]
+      operationId: startRun
+      summary: Start an Ask run
+      description: |
+        Starts one Ask turn on a thread the key owns and returns at once with the run id.
+        Follow the run with getRun or streamRunEvents. Without thread_id a new thread is
+        opened for the key. A request that names a tool-shaped field is refused before any
+        model call.
+      x-gateway-path: /v1/agent/runs
+      x-scope: agent:runs
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/StartRunRequest'
+      responses:
+        '202':
+          description: The run is queued.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StartRunEnvelope'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '412':
+          $ref: '#/components/responses/PreconditionFailed'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+  /runs/{run_id}:
+    get:
+      tags: [runs]
+      operationId: getRun
+      summary: Read a run
+      description: |
+        Returns a run that the key started. A run that the key does not own is reported
+        as run_not_found.
+      x-gateway-path: /v1/agent/runs/{run_id}
+      x-scope: agent:runs
+      parameters:
+        - name: run_id
+          in: path
+          required: true
+          description: The run id that startRun returned.
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 128
+      responses:
+        '200':
+          description: The run.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RunEnvelope'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '412':
+          $ref: '#/components/responses/PreconditionFailed'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+  /runs/{run_id}/events:
+    get:
+      tags: [runs]
+      operationId: streamRunEvents
+      summary: Follow a run's events
+      description: |
+        The run's events as server-sent events, in order. Each event has an id. After a
+        dropped connection, send the last id received as Last-Event-ID to resume.
+      x-gateway-path: /v1/agent/runs/{run_id}/events
+      x-scope: agent:runs
+      parameters:
+        - name: run_id
+          in: path
+          required: true
+          description: The run id that startRun returned.
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 128
+        - name: Last-Event-ID
+          in: header
+          required: false
+          description: The id of the last event received.
+          schema:
+            type: string
+      responses:
+        '200':
+          description: An event stream. The event names are the run events the gateway serves.
+          content:
+            text/event-stream:
+              schema:
+                type: string
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '412':
+          $ref: '#/components/responses/PreconditionFailed'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+  /runs/{run_id}/cancel:
+    post:
+      tags: [runs]
+      operationId: cancelRun
+      summary: Cancel a run
+      description: |
+        Stops a run that the key owns. The status is cancelled when this call stopped the
+        run, and already_terminal when the run had finished first. The request has no body.
+      x-gateway-path: /v1/agent/runs/{run_id}/cancel
+      x-scope: agent:runs
+      parameters:
+        - name: run_id
+          in: path
+          required: true
+          description: The run id that startRun returned.
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 128
+      responses:
+        '200':
+          description: The cancellation.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CancelEnvelope'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '412':
+          $ref: '#/components/responses/PreconditionFailed'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+  /threads/{thread_id}/runs:
+    get:
+      tags: [threads]
+      operationId: listThreadRuns
+      summary: List the runs of a thread
+      description: |
+        The runs of a thread that the key owns, one page at a time. Pass next_cursor as
+        after to read the next page.
+      x-gateway-path: /v1/agent/threads/{thread_id}/runs
+      x-scope: agent:runs
+      parameters:
+        - name: thread_id
+          in: path
+          required: true
+          description: The thread id.
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 128
+        - name: after
+          in: query
+          required: false
+          description: The next_cursor of the previous page.
+          schema:
+            type: string
+        - name: limit
+          in: query
+          required: false
+          description: Runs per page. The default is 20 and the most is 100.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+      responses:
+        '200':
+          description: One page of runs.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RunPage'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '412':
+          $ref: '#/components/responses/PreconditionFailed'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+  /threads/{thread_id}/messages:
+    get:
+      tags: [threads]
+      operationId: listThreadMessages
+      summary: List the messages of a thread
+      description: |
+        The turns of a thread that the key owns on its active branch, one page at a time.
+        The newest page comes first. Pass next_cursor as before to read the older turns.
+        Only user and assistant turns are returned.
+      x-gateway-path: /v1/agent/threads/{thread_id}/messages
+      x-scope: agent:runs
+      parameters:
+        - name: thread_id
+          in: path
+          required: true
+          description: The thread id.
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 128
+        - name: before
+          in: query
+          required: false
+          description: The next_cursor of the previous page, which is the id of the oldest turn held.
+          schema:
+            type: string
+        - name: limit
+          in: query
+          required: false
+          description: Messages per page. The default is 20 and the most is 100.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+      responses:
+        '200':
+          description: One page of messages.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessagePage'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '412':
+          $ref: '#/components/responses/PreconditionFailed'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+components:
+  securitySchemes:
+    apiKey:
+      type: apiKey
+      in: header
+      name: x-api-key
+      description: |
+        An API key that a member of the organisation created. The gateway exchanges it for a
+        short-lived token on each call, and it is never accepted in a query string.
+  responses:
+    BadRequest:
+      description: 'invalid_request: a body or query value is malformed, unknown or out of range. details.field names the value.'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorBody'
+    Unauthorized:
+      description: 'api_key_invalid: the key is missing, unknown, disabled or expired, it is an organisation key, or its owner is no longer a member of the organisation.'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorBody'
+    Forbidden:
+      description: 'agent_api_scope_missing: the key does not hold the agent:runs permission, and details.scope names it. model_not_entitled: the requested model is not allowed for the key owner, and details.model and details.reason say which.'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorBody'
+    NotFound:
+      description: 'run_not_found or thread_not_found: the id is not one that the key owns. A run or thread that belongs to someone else reads the same way.'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorBody'
+    PreconditionFailed:
+      description: 'zdr_feature_not_supported: the organisation has zero data retention on, so the Agent API is not offered to this key. details.feature is agent_api.'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorBody'
+    UnprocessableEntity:
+      description: 'agent_api_feature_not_supported: the request names a feature that version 1 does not offer. details.feature names it.'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorBody'
+    TooManyRequests:
+      description: 'rate_limited: too many requests, or too many live runs for this key. details.retry_after_seconds says when to try again.'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorBody'
+    InternalError:
+      description: 'internal_error: the gateway failed unexpectedly.'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorBody'
+    ServiceUnavailable:
+      description: 'agent_api_disabled: the Agent API is not enabled on this deployment. upstream_unavailable: a dependency is unavailable, retry later. model_entitlement_unavailable: the entitlement check is unavailable, retry later.'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorBody'
+  schemas:
+    ErrorCode:
+      type: string
+      description: The closed error vocabulary. Branch on code, not on message.
+      enum:
+        - invalid_request
+        - api_key_invalid
+        - agent_api_scope_missing
+        - model_not_entitled
+        - run_not_found
+        - thread_not_found
+        - zdr_feature_not_supported
+        - agent_api_feature_not_supported
+        - rate_limited
+        - internal_error
+        - agent_api_disabled
+        - upstream_unavailable
+        - model_entitlement_unavailable
+    ErrorBody:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message, details]
+          properties:
+            code:
+              $ref: '#/components/schemas/ErrorCode'
+            message:
+              type: string
+              description: English text for logs. Clients show their own wording for each code.
+            details:
+              type: object
+              additionalProperties: true
+              description: Always an object. Named keys only, so a list is sent under a named key.
+    StartRunRequest:
+      type: object
+      additionalProperties: false
+      required: [input]
+      properties:
+        input:
+          type: string
+          minLength: 1
+          maxLength: 32000
+          description: The message for this turn as plain text, counted in characters.
+        thread_id:
+          type: string
+          minLength: 1
+          maxLength: 128
+          description: A thread that the key owns, to continue. Omit it to open a new thread.
+        model:
+          type: string
+          minLength: 1
+          maxLength: 128
+          description: An id from the models the organisation allows. Omit it for the organisation default.
+        metadata:
+          type: object
+          maxProperties: 16
+          propertyNames:
+            maxLength: 64
+          additionalProperties:
+            type: string
+            maxLength: 512
+          description: Up to 16 string pairs, stored with the run.
+    StartRunAccepted:
+      type: object
+      required: [run_id, thread_id, status]
+      properties:
+        run_id:
+          type: string
+        thread_id:
+          type: string
+        status:
+          type: string
+          enum: [queued]
+    StartRunEnvelope:
+      type: object
+      required: [data]
+      properties:
+        data:
+          $ref: '#/components/schemas/StartRunAccepted'
+    Run:
+      type: object
+      required: [run_id, thread_id, status]
+      properties:
+        run_id:
+          type: string
+        thread_id:
+          type: string
+        parent_run_id:
+          type: [string, 'null']
+          description: Always null in version 1, which starts no subagents.
+        status:
+          type: string
+          description: The run status word, as the gateway serves it.
+        error:
+          type: [string, 'null']
+          description: A short reason when the run failed, and null otherwise.
+        input_tokens:
+          type: integer
+          minimum: 0
+        output_tokens:
+          type: integer
+          minimum: 0
+        created_at:
+          type: [string, 'null']
+          format: date-time
+        updated_at:
+          type: [string, 'null']
+          format: date-time
+        metadata:
+          type: object
+          additionalProperties: false
+          description: Stamped by the platform. Version 1 shows origin and api_key_id only.
+          properties:
+            origin:
+              type: string
+              enum: [api]
+            api_key_id:
+              type: string
+    RunEnvelope:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: object
+          required: [run]
+          properties:
+            run:
+              $ref: '#/components/schemas/Run'
+    RunCancellation:
+      type: object
+      required: [run_id, status, cancelled]
+      properties:
+        run_id:
+          type: string
+        status:
+          type: string
+          enum: [cancelled, already_terminal]
+          description: cancelled when this call stopped the run, and already_terminal when the run had finished first.
+        cancelled:
+          type: boolean
+        receipt_id:
+          type: string
+          description: The durable record of this cancel request.
+    CancelEnvelope:
+      type: object
+      required: [data]
+      properties:
+        data:
+          $ref: '#/components/schemas/RunCancellation'
+    Message:
+      type: object
+      required: [message_id, role, content]
+      properties:
+        message_id:
+          type: string
+        role:
+          type: string
+          enum: [user, assistant]
+        content:
+          type: string
+        created_at:
+          type: [string, 'null']
+          format: date-time
+    PageMeta:
+      type: object
+      required: [has_more, next_cursor]
+      properties:
+        has_more:
+          type: boolean
+        next_cursor:
+          type: [string, 'null']
+          description: Pass it as after (runs) or before (messages) to read the next page. It is opaque.
+    PageLinks:
+      type: object
+      required: [next]
+      properties:
+        next:
+          type: [string, 'null']
+          format: uri-reference
+          description: The same request with the next cursor, relative to the API root.
+    RunPage:
+      type: object
+      required: [data, meta, links]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/Run'
+        meta:
+          $ref: '#/components/schemas/PageMeta'
+        links:
+          $ref: '#/components/schemas/PageLinks'
+    MessagePage:
+      type: object
+      required: [data, meta, links]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/Message'
+        meta:
+          $ref: '#/components/schemas/PageMeta'
+        links:
+          $ref: '#/components/schemas/PageLinks'

@@ -94,6 +94,14 @@ pub struct ArtifactSummary {
     /// single source URL (e.g. AI-generated extract artifacts).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_url: Option<String>,
+    /// The run that wrote the artifact (`run_...`), read from its storage key (INNH-12).
+    /// `GET /v1/artifacts?run_id=` filters on it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+    /// The page the artifact belongs to: the hash of the page's URL and content fingerprint,
+    /// so a changed page in a later run has a different one (INNH-12).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page_hash: Option<String>,
 }
 
 // =============================================================================
@@ -187,6 +195,32 @@ pub struct JobSummary {
     /// What a person reads: "queued" while waiting, otherwise the status.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub phase: Option<String>,
+    /// Derived credit estimate, sent by control only while its
+    /// `QUARRY_CONTROL__JOB_CREDITS` flag is on and only for page-priced kinds
+    /// (crawl, batch, scrape, extract). Absent otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credits: Option<JobCredits>,
+}
+
+/// The credits a job has used, derived by control at read time from the job's
+/// fetched-page count (INNH-9). It is a Quarry-side estimate (`estimated` is
+/// always true), not what billing-core invoices: a flat price per fetched page,
+/// failed and blocked pages free.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct JobCredits {
+    /// Credits used so far: fetched pages x `price_per_page`.
+    pub used: f64,
+    /// Always `credit`.
+    pub unit: String,
+    /// What `used` counts: `pages_fetched`.
+    pub basis: String,
+    pub price_per_page: f64,
+    /// True: this is an estimate, not the invoiced amount.
+    pub estimated: bool,
+    /// False while the job can still fetch pages; true once its status is
+    /// terminal. (`final` is a Rust keyword, hence the rename.)
+    #[serde(rename = "final")]
+    pub is_final: bool,
 }
 
 /// Who started a job and from which run. `origin_type` is one of `user`,
@@ -268,6 +302,10 @@ pub struct JobStatusView {
     /// reads by run id (`/v1/runs/:id/events`) use this, never `job_id`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run_id: Option<String>,
+    /// Derived credit estimate; absent for non-page-priced kinds and while
+    /// control's `QUARRY_CONTROL__JOB_CREDITS` flag is off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credits: Option<JobCredits>,
 }
 
 /// One failed page of a job (a final attempt only).
@@ -307,6 +345,131 @@ pub struct JobErrorsView {
     pub robots_blocked: Vec<JobBlockedView>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next_seq: Option<u64>,
+}
+
+/// One page a job fetched (INNH-12): a row of `GET /v1/jobs/{id}/results`, read from the
+/// job's `page_fetched` events. It carries the page URL and closed metadata plus the
+/// artifact ids; the content stays behind `GET /v1/artifacts/{id}`. Every field after
+/// `fetched_at` is absent when the event predates it or nothing was stored.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct JobResultView {
+    /// Event sequence number of the row; the cursor is the last row's `seq`.
+    pub seq: u64,
+    /// The URL the page was requested at.
+    pub url: String,
+    /// HTTP status of the fetch.
+    pub status: u16,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    pub fetched_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub word_count: Option<u64>,
+    /// `static` | `tls` | `browser`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub driver: Option<String>,
+    /// Stored markdown of the page: read it with `GET /v1/artifacts/{id}`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub markdown_artifact_id: Option<String>,
+    /// Stored source bytes (html, or the original document): same read route.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_artifact_id: Option<String>,
+    /// Size in bytes of the stored markdown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bytes: Option<u64>,
+}
+
+/// `GET /v1/jobs/{id}/results` (and the crawl and batch aliases). `next_seq` is set when
+/// the page was full: pass it back as `after_seq` to read the rest. A `latest=true` read
+/// whose scan reached its ceiling says so in `scan_capped`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct JobResultsView {
+    pub items: Vec<JobResultView>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_seq: Option<u64>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub scan_capped: bool,
+}
+
+// =============================================================================
+// Webhook subscriptions (INNH-5)
+// =============================================================================
+
+/// The last delivery attempt of a webhook subscription, as a summary.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct WebhookLastDelivery {
+    /// `pending` | `in_flight` | `success` | `failed` | `dlq`.
+    pub status: String,
+    pub at: DateTime<Utc>,
+    pub event_id: String,
+}
+
+/// A webhook subscription of the caller's organization. It has no secret field: the HMAC
+/// secret is shown once, by [`WebhookSubscriptionCreated`] and [`WebhookSecretRotated`], and
+/// never read back. `secret_hint` is the last four characters, enough to tell two apart.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct WebhookSubscription {
+    pub id: String,
+    pub url: String,
+    /// Stored event types, e.g. `change_detected`.
+    pub events: Vec<String>,
+    pub active: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub secret_hint: String,
+    pub created_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_delivery: Option<WebhookLastDelivery>,
+}
+
+/// `POST /v1/webhook-subscriptions` answer: the subscription and its secret, once.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct WebhookSubscriptionCreated {
+    #[serde(flatten)]
+    pub subscription: WebhookSubscription,
+    pub secret: String,
+}
+
+/// `POST /v1/webhook-subscriptions/{id}/rotate-secret` answer: the new secret, once.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct WebhookSecretRotated {
+    pub id: String,
+    pub secret: String,
+    pub secret_hint: String,
+}
+
+/// `GET /v1/webhook-subscriptions`. `next_cursor` is absent on the last page.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct WebhookSubscriptionList {
+    pub items: Vec<WebhookSubscription>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+}
+
+/// One delivery of an event to a subscription. No payload body: `last_error` is a closed
+/// token (`http_<code>`, `timeout`, `blocked_target`, `transport`, `inactive`, `error`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct WebhookDeliveryView {
+    pub id: String,
+    pub event_id: String,
+    pub event_type: String,
+    /// `pending` | `in_flight` | `success` | `failed` | `dlq`.
+    pub status: String,
+    pub attempt: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_attempt_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
+/// `GET /v1/webhook-subscriptions/{id}/deliveries`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct WebhookDeliveryList {
+    pub items: Vec<WebhookDeliveryView>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
 }
 
 // =============================================================================
@@ -566,6 +729,74 @@ mod tests {
         assert!(summary.completed_at.is_none());
     }
 
+    /// INNH-9: control's `credits` object rides on the list row and the status
+    /// document, and a row without it (flag off, or a non-page kind) still decodes.
+    #[test]
+    fn job_credits_round_trip_and_are_optional() {
+        let credits = serde_json::json!({
+            "used": 12.0, "unit": "credit", "basis": "pages_fetched",
+            "price_per_page": 1.0, "estimated": true, "final": false
+        });
+        let with = serde_json::json!({
+            "job_id": "job_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            "kind": "crawl",
+            "org_id": "org_a",
+            "status": "running",
+            "created_at": "2026-07-20T12:00:00Z",
+            "credits": credits
+        });
+        let summary: JobSummary = serde_json::from_value(with).unwrap();
+        let c = summary.credits.clone().expect("credits");
+        assert_eq!(c.used, 12.0);
+        assert_eq!(c.basis, "pages_fetched");
+        assert!(c.estimated);
+        assert!(!c.is_final);
+        // Serializes back under the wire name `final`, not `is_final`.
+        let out = serde_json::to_value(&summary).unwrap();
+        assert_eq!(out["credits"], credits);
+
+        let without = serde_json::json!({
+            "job_id": "job_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            "kind": "agent",
+            "org_id": "org_a",
+            "status": "running",
+            "created_at": "2026-07-20T12:00:00Z"
+        });
+        let summary: JobSummary = serde_json::from_value(without).unwrap();
+        assert!(summary.credits.is_none());
+        let out = serde_json::to_value(&summary).unwrap();
+        assert!(out.get("credits").is_none(), "absent, not null: {out}");
+    }
+
+    #[test]
+    fn job_status_view_credits_are_omitted_when_absent() {
+        let view = serde_json::json!({
+            "job_id": "job_1", "kind": "crawl", "status": "completed", "phase": "completed",
+            "terminal": true, "created_at": "2026-10-23T10:00:00Z",
+            "counts": { "completed": 4 },
+            "control": { "pending": false },
+            "credits": {
+                "used": 4.0, "unit": "credit", "basis": "pages_fetched",
+                "price_per_page": 1.0, "estimated": true, "final": true
+            }
+        });
+        let parsed: JobStatusView = serde_json::from_value(view.clone()).unwrap();
+        assert!(parsed.credits.as_ref().expect("credits").is_final);
+        assert_eq!(
+            serde_json::to_value(&parsed).unwrap()["credits"],
+            view["credits"]
+        );
+
+        let mut bare = view;
+        bare.as_object_mut().unwrap().remove("credits");
+        let parsed: JobStatusView = serde_json::from_value(bare).unwrap();
+        assert!(parsed.credits.is_none());
+        assert!(serde_json::to_value(&parsed)
+            .unwrap()
+            .get("credits")
+            .is_none());
+    }
+
     #[test]
     fn job_resource_kind_rejects_unknown_segment() {
         assert!(JobResourceKind::from_path_segment("unknown").is_none());
@@ -662,6 +893,8 @@ mod tests {
             sha256: Some("blake3:abc".into()),
             created_at: Utc::now(),
             source_url: Some("https://example.com".into()),
+            run_id: None,
+            page_hash: None,
         };
         let s = serde_json::to_string(&a).unwrap();
         // Field names MUST be snake_case to match the wire shape every

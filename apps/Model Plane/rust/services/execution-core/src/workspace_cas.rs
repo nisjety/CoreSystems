@@ -138,8 +138,23 @@ impl CasClient {
     /// Any transport failure or non-success response from either the
     /// existence check or the upload itself.
     pub async fn put(&self, content: &[u8]) -> Result<String, String> {
+        self.put_under(CAS_PREFIX, content).await
+    }
+
+    /// [`put`] under the key scope `scope` (the form [`thread_scope`] makes), so one
+    /// thread's blobs share a prefix and erasing the thread erases them by it
+    /// (WS22-S2).
+    ///
+    /// # Errors
+    /// As [`put`], or when `scope` is not a thread scope.
+    pub async fn put_scoped(&self, scope: &str, content: &[u8]) -> Result<String, String> {
+        let scope = validate_scope(scope)?;
+        self.put_under(&format!("{CAS_PREFIX}{scope}"), content).await
+    }
+
+    async fn put_under(&self, prefix: &str, content: &[u8]) -> Result<String, String> {
         let sha256_hex = hex_digest(content);
-        let key = format!("{CAS_PREFIX}{sha256_hex}");
+        let key = format!("{prefix}{sha256_hex}");
         let digest = format!("sha256:{sha256_hex}");
 
         if self.exists(&key).await? {
@@ -170,8 +185,21 @@ impl CasClient {
     /// derived from caller input beyond that fixed shape — or for any
     /// transport failure / non-success response.
     pub async fn get(&self, digest: &str) -> Result<Vec<u8>, String> {
+        self.get_under(CAS_PREFIX, digest).await
+    }
+
+    /// [`get`] under the key scope `scope` (see [`put_scoped`]).
+    ///
+    /// # Errors
+    /// As [`get`], or when `scope` is not a thread scope.
+    pub async fn get_scoped(&self, scope: &str, digest: &str) -> Result<Vec<u8>, String> {
+        let scope = validate_scope(scope)?;
+        self.get_under(&format!("{CAS_PREFIX}{scope}"), digest).await
+    }
+
+    async fn get_under(&self, prefix: &str, digest: &str) -> Result<Vec<u8>, String> {
         let sha256_hex = validate_digest(digest)?;
-        let key = format!("{CAS_PREFIX}{sha256_hex}");
+        let key = format!("{prefix}{sha256_hex}");
         let url = self.object_url(&key)?;
         let headers = self.sign_request(Method::GET, &url, EMPTY_BODY_SHA256, None)?;
         let mut request = self.http.get(url);
@@ -274,6 +302,41 @@ impl CasClient {
     }
 }
 
+/// The key scope of one thread's blobs, `thread/<org>/<thread>/` (WS22-S2). Every blob a
+/// thread's files reference lives under it, so erasing the thread erases them by prefix.
+///
+/// # Errors
+/// When either id is empty, longer than 128 characters, or holds a character outside
+/// `[A-Za-z0-9_-]`.
+pub fn thread_scope(org_id: &str, thread_id: &str) -> Result<String, String> {
+    if !is_key_segment(org_id) || !is_key_segment(thread_id) {
+        return Err("thread workspace ids must be plain key segments".to_owned());
+    }
+    Ok(format!("thread/{org_id}/{thread_id}/"))
+}
+
+/// Accepts only a scope [`thread_scope`] makes, so no caller names a key outside its thread.
+fn validate_scope(scope: &str) -> Result<&str, String> {
+    let mut parts = scope.split('/');
+    let well_formed = parts.next() == Some("thread")
+        && parts.next().is_some_and(is_key_segment)
+        && parts.next().is_some_and(is_key_segment)
+        && parts.next() == Some("")
+        && parts.next().is_none();
+    if well_formed {
+        Ok(scope)
+    } else {
+        Err("CAS scope must be thread/<org>/<thread>/".to_owned())
+    }
+}
+
+fn is_key_segment(segment: &str) -> bool {
+    (1..=128).contains(&segment.len())
+        && segment
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+}
+
 fn hex_digest(content: &[u8]) -> String {
     format!("{:x}", Sha256::digest(content))
 }
@@ -295,6 +358,20 @@ fn validate_digest(digest: &str) -> Result<&str, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn thread_scope_names_one_threads_prefix_and_nothing_else() {
+        assert_eq!(
+            thread_scope("org_01", "thread-01").expect("safe ids"),
+            "thread/org_01/thread-01/"
+        );
+        assert!(thread_scope("org/evil", "thread-01").is_err());
+        assert!(thread_scope("org_01", "../thread").is_err());
+        assert!(thread_scope("org_01", "").is_err());
+        assert!(validate_scope("thread/org_01/thread-01/").is_ok());
+        assert!(validate_scope("thread/org_01/thread-01/extra/").is_err());
+        assert!(validate_scope("cas/abc/").is_err());
+    }
 
     #[test]
     fn from_env_is_none_without_configuration() {

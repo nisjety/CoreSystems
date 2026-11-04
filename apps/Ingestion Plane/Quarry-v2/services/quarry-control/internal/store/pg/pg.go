@@ -90,14 +90,14 @@ func (d *postgresDB) Schedules() store.SchedulesStore                     { retu
 func (d *postgresDB) Sources() store.SourcesStore                         { return d.sources }
 func (d *postgresDB) Events() store.EventLog                              { return d.events }
 
-func (d *postgresDB) Webhooks() store.ResourceStore[store.Webhook] { return d.webhooks }
+func (d *postgresDB) Webhooks() store.WebhooksStore { return d.webhooks }
 func (d *postgresDB) WebhookDeliveries() store.WebhookDeliveryStore {
 	return d.webhookDeliveries
 }
 func (d *postgresDB) Blocklists() store.ResourceStore[store.BlocklistEntry] { return d.blocklists }
-func (d *postgresDB) TeamUsage() store.TeamUsageStore                     { return d.teamUsage }
-func (d *postgresDB) SnapshotsV2() store.SnapshotsV2Store                 { return d.snapshotsV2 }
-func (d *postgresDB) ZdrTombstones() store.ZdrTombstoneStore               { return d.zdrTombs }
+func (d *postgresDB) TeamUsage() store.TeamUsageStore                       { return d.teamUsage }
+func (d *postgresDB) SnapshotsV2() store.SnapshotsV2Store                   { return d.snapshotsV2 }
+func (d *postgresDB) ZdrTombstones() store.ZdrTombstoneStore                { return d.zdrTombs }
 
 // ListRequestQueues is a read-only projection over Quarry runtime's queue
 // tables. The control plane deliberately does not own these migrations or

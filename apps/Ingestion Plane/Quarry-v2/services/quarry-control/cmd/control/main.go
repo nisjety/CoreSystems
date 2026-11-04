@@ -20,11 +20,13 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/triodelab/quarry-v2/pkg/quarryotel"
+	"github.com/triodelab/quarry-v2/services/quarry-control/internal/audit"
 	"github.com/triodelab/quarry-v2/services/quarry-control/internal/dispatcher"
 	"github.com/triodelab/quarry-v2/services/quarry-control/internal/gdpr"
 	"github.com/triodelab/quarry-v2/services/quarry-control/internal/httpx"
 	"github.com/triodelab/quarry-v2/services/quarry-control/internal/janitor"
 	"github.com/triodelab/quarry-v2/services/quarry-control/internal/notify"
+	"github.com/triodelab/quarry-v2/services/quarry-control/internal/posture"
 	"github.com/triodelab/quarry-v2/services/quarry-control/internal/resources"
 	"github.com/triodelab/quarry-v2/services/quarry-control/internal/store"
 	"github.com/triodelab/quarry-v2/services/quarry-control/internal/store/pg"
@@ -117,6 +119,25 @@ func main() {
 		)
 	}
 	hmacVerifier := httpx.NewHMACVerifier(internalSecret, internalRequire)
+	// D2-050: the routes only the orchestrator calls (/v1/internal/jobs/*,
+	// /v1/internal/schedules/*) are verified with their own secret, so the edge's
+	// secret no longer reaches finalize. An unset QUARRY_CONTROL_INTERNAL_SECRET
+	// falls back to the edge secret (no outage during the soak) with one warning;
+	// remove the fallback after the soak.
+	controlSecret, controlSecretWarning := httpx.ControlInternalSecretPosture(
+		os.Getenv("QUARRY_CONTROL_INTERNAL_SECRET"), internalSecret)
+	orchestratorVerifier := hmacVerifier
+	if controlSecret != internalSecret {
+		orchestratorVerifier = httpx.NewHMACVerifier(controlSecret, internalRequire)
+	}
+	switch controlSecretWarning {
+	case "unset":
+		log.Warn().Msg("QUARRY_CONTROL_INTERNAL_SECRET unset: the orchestrator-only internal routes fall back to QUARRY_INTERNAL_SECRET (shared with the edge). Set it; this fallback is removed after the soak (D2-050)")
+	case "same":
+		log.Warn().Msg("QUARRY_CONTROL_INTERNAL_SECRET equals QUARRY_INTERNAL_SECRET: the orchestrator-only internal routes are not isolated from the edge. Use a distinct value (D2-050)")
+	default:
+		log.Info().Msg("orchestrator-only internal routes verify with QUARRY_CONTROL_INTERNAL_SECRET (split from the edge secret)")
+	}
 	switch {
 	case hmacVerifier.HasSecret() && internalRequire:
 		log.Info().Msg("HMAC cross-plane auth: ENFORCED (every internal request must sign)")
@@ -139,6 +160,24 @@ func main() {
 		Int("backlog_default", admission.BacklogDefault).
 		Dur("backlog_ttl", admission.BacklogTTL).
 		Msg("job admission")
+
+	// WS14.S7b: a job that ignores robots.txt is written to audit-core
+	// (crawl.robots_ignored, producer quarry-control, plane ingestion) before it
+	// is acknowledged. AUDIT_CORE_URL and AUDIT_CORE_SERVICE_TOKEN both unset is
+	// the default: the client is off and every such job answers 503. Exactly one
+	// set, or an invalid URL, is logged and treated as off (never fatal: nothing
+	// else depends on it). Jobs that respect robots.txt never touch it.
+	jobsOpts := []resources.JobsOption{resources.WithAdmission(admission)}
+	robotsAudit, err := audit.FromEnv(os.Getenv, nil)
+	switch {
+	case err != nil:
+		log.Warn().Err(err).Msg("audit-core client misconfigured: jobs that ignore robots.txt are refused")
+	case robotsAudit == nil:
+		log.Info().Msg("audit-core client off (AUDIT_CORE_URL unset): jobs that ignore robots.txt are refused")
+	default:
+		jobsOpts = append(jobsOpts, resources.WithRobotsAudit(robotsAudit))
+		log.Info().Msg("audit-core client on: robots.txt overrides are audited before the job is acknowledged")
+	}
 
 	var db store.DB
 	var dbPinger httpx.Pinger
@@ -163,6 +202,8 @@ func main() {
 
 	r := chi.NewRouter()
 	r.Use(httpx.RequestID, httpx.Logger, httpx.Recover)
+	// WS10.S8 (D2-021): one request span, so quarryotel.MarkZDR in the handlers has a span to flag.
+	r.Use(httpx.ZdrSpan)
 
 	r.Get("/health", httpx.Health)
 	r.Get("/version", httpx.Version("quarry-control"))
@@ -172,9 +213,9 @@ func main() {
 	// requests once the secret is set. /health and /ready stay
 	// outside the middleware so probes work without secrets.
 	r.Group(func(r chi.Router) {
-		r.Use(hmacVerifier.Middleware)
+		r.Use(httpx.SplitHMAC(orchestratorVerifier, hmacVerifier))
 
-		resources.MountJobs(r, db, resources.WithAdmission(admission))
+		resources.MountJobs(r, db, jobsOpts...)
 		resources.MountStores(r, db)
 		// Legacy snapshot CRUD was folded into MountSnapshotsV2 below — the
 		// enriched list is the only /v1/snapshots surface; restore reads the
@@ -184,7 +225,16 @@ func main() {
 		resources.MountSchedules(r, db)
 		resources.MountRestore(r, db)
 		resources.MountEvents(r, db, apiKey, notifySink)
-		resources.MountWebhooks(r, db)
+		// INNH-5: the unscoped webhook CRUD and delivery routes are retired (410).
+		resources.MountWebhooksGone(r)
+		// INNH-5: the org-scoped subscription API. OFF BY DEFAULT: with the flag unset
+		// the path is not mounted (404) and no delivery retention sweep runs.
+		if resources.WebhookSubscriptionsEnabled(os.Getenv) {
+			resources.MountWebhookSubscriptions(r, db, resources.WebhookSubscriptionOptions{})
+			log.Warn().Msg("webhook subscription API is ON (QUARRY_CONTROL__WEBHOOK_SUBSCRIPTIONS)")
+		} else {
+			log.Info().Msg("webhook subscription API is off (default): /v1/webhook-subscriptions is not mounted")
+		}
 		// Edge change-webhook receiver (docs/CHANGE_TRACKING.md §"Webhook
 		// emission"): signature + stale-ts + nonce replay are enforced by
 		// the hmacVerifier.Middleware above — mount here, not outside the
@@ -207,7 +257,6 @@ func main() {
 		// WS7.F: /v1/blocklists answers 410 Gone. The CRUD mount is
 		// resources.MountBlocklists(r, db); one-line rollback.
 		resources.MountBlocklistsGone(r)
-		resources.MountWebhookDeliveries(r, db)
 		resources.MountPresets(r)
 
 		// Cycle 23/24 additions — REST resource breadth part 2 +
@@ -235,6 +284,13 @@ func main() {
 	// past the TTL so their streams close.
 	go resources.RunBacklogJanitor(dCtx, db, admission, time.Minute, log.Logger)
 	go dispatcher.Run(dCtx, db, nil, dispatcher.Options{Workers: 4}, log.Logger)
+	if resources.WebhookSubscriptionsEnabled(os.Getenv) {
+		days, invalid := janitor.WebhookDeliveryRetentionDaysFromEnv(os.Getenv)
+		if invalid {
+			log.Warn().Int("retention_days", days).Msg("QUARRY_CONTROL__WEBHOOK_DELIVERY_RETENTION_DAYS is not an integer from 1 to 3650 - using the default")
+		}
+		go janitor.RunWebhookDeliveries(dCtx, db, days, time.Hour, log.Logger)
+	}
 	// Phase 7 retention sweep — INERT unless QUARRY_RETENTION_DAYS>0, and only
 	// deletes when QUARRY_RETENTION_DRY_RUN=false; otherwise a default-safe no-op.
 	go janitor.Run(dCtx, db, janitor.OptionsFromEnv(), log.Logger)
@@ -278,6 +334,30 @@ func main() {
 		}
 	} else {
 		log.Warn().Msg("NATS_SHARED_URL unset — GDPR org-erasure purge consumer disabled (org deletions will not auto-purge this service's crawl data for that org)")
+	}
+
+	// X-9: the ZDR-enabled consumer on controlplane.org.interactive_retention.enabled
+	// (org-core, CONTROLPLANE stream). OFF BY DEFAULT: with
+	// QUARRY_CONTROL__ZDR_EVENT_CONSUMER unset or off it is not started. observe
+	// logs would_pause per schedule; enforce pauses the org's schedules and
+	// change monitors and writes a skipped_zdr reason event. It shares the
+	// control-shared connection above and binds a consumer audit-core must have
+	// provisioned (quarry-control-interactive-retention).
+	zdrMode, zdrModeInvalid := posture.ModeFromEnv(os.Getenv)
+	if zdrModeInvalid {
+		log.Warn().Str("flag", posture.FlagEnv).Msg("ZDR-enabled consumer flag is not off, observe or enforce - consumer stays off")
+	}
+	switch {
+	case zdrMode == posture.ModeOff:
+		log.Info().Msg("ZDR-enabled consumer is off (default): schedules keep their create-time ZDR stamp (X-9)")
+	case gdprNC == nil:
+		log.Warn().Str("mode", string(zdrMode)).Msg("ZDR-enabled consumer requested but the control-shared NATS connection is not up - consumer disabled")
+	default:
+		if _, err := posture.StartSubscriber(gdprNC, posture.NewConsumer(db, zdrMode, log.Logger), log.Logger); err != nil {
+			log.Warn().Err(err).Str("mode", string(zdrMode)).Msg("ZDR-enabled consumer failed to start")
+		} else {
+			log.Warn().Str("mode", string(zdrMode)).Msg("ZDR-enabled consumer is ON (QUARRY_CONTROL__ZDR_EVENT_CONSUMER)")
+		}
 	}
 
 	srv := &http.Server{

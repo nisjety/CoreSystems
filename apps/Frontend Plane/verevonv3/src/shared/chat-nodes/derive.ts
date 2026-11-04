@@ -39,7 +39,7 @@ function answerState(turn: ChatTurn, displayContent: string): AnswerState {
     // Spread rather than `activity: … ?? undefined`: a turn that has reported
     // no activity derives a node with no such key at all, so "nothing known
     // yet" and "some activity" stay distinguishable by shape.
-    const activity = deriveStreamActivity(turn.toolCalls)
+    const activity = deriveStreamActivity(turn.toolCalls, turn.lifecycle)
     // `runId` is spread for the same reason: a turn the stream has not yet named
     // a run for derives the shape it always did.
     return {
@@ -167,15 +167,26 @@ export function deriveConversationNodes(
   // over the client-sent request (`retrievalScope`) — the server is what
   // actually enforced the filter, and a live turn may not have the frame yet
   // while still streaming, so the request value is the interim best guess.
-  // Absent for `auto`/unset either way: an ordinary turn gets no badge.
+  // Absent for `auto`/unset either way: an ordinary turn gets no badge. The one `auto` badge is a Space's
+  // knowledge receipt, which the server sends only for a turn a Space scoped (WS18-S3).
   if (!waiting) {
-    const applied = turn.scopeApplied
+    const applied: import('@/shared/api/chat-client').ChatSourceScopeAppliedEvent | undefined = turn.scopeApplied
       ?? (turn.retrievalScope === 'knowledge_only' || turn.retrievalScope === 'web_only'
         ? { scope: turn.retrievalScope, excludedTools: [] }
         : undefined)
     if (applied) {
-      nodes.push({ kind: 'source-scope', scope: applied.scope, excludedTools: applied.excludedTools })
+      nodes.push({
+        kind: 'source-scope',
+        scope: applied.scope,
+        excludedTools: applied.excludedTools,
+        ...(applied.knowledge ? { knowledge: applied.knowledge } : {}),
+      })
     }
+  }
+  // Shown while the turn waits too: a retry is most useful while the answer is still pending. A turn with no
+  // notice derives no node at all, so a plain stream's list is unchanged.
+  if (turn.lifecycle && turn.lifecycle.length > 0) {
+    nodes.push({ kind: 'lifecycle-notices', notices: turn.lifecycle })
   }
   if (!waiting && !errored && turn.stopReason) {
     nodes.push({ kind: 'truncated', stopReason: turn.stopReason })

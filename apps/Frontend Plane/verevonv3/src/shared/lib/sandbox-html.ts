@@ -32,3 +32,23 @@ export function sandboxHtmlDocument(html: string): string {
   // match could hit a comment or a script string and leave no CSP at all.
   return `<!doctype html><html><head>${CSP_META}</head><body>${source}</body></html>`
 }
+
+/**
+ * Margins off and the host's font and text colour as defaults; the body stays
+ * transparent so the widget sits on the transcript's own surface.
+ */
+const WIDGET_BASE_CSS =
+  ':root{color-scheme:var(--vv-color-scheme,normal)}' +
+  'html,body{margin:0;background:transparent}' +
+  'body{color:var(--vv-text,inherit);font-family:var(--vv-font-family,system-ui,sans-serif);font-size:var(--vv-font-size,15px)}'
+
+/**
+ * Wrap an inline chat widget (EP-4 S1): the same CSP first, then the host theme
+ * (`themeCss`, the `:root{--vv-*}` rule from `widgetThemeCss`) and a base reset,
+ * then the widget. `themeCss` is host-built from filtered token values; the
+ * widget's own markup only ever lands in the body.
+ */
+export function sandboxWidgetDocument(html: string, themeCss: string): string {
+  const source = html.trim()
+  return `<!doctype html><html><head>${CSP_META}<style>${themeCss}${WIDGET_BASE_CSS}</style></head><body>${source}</body></html>`
+}

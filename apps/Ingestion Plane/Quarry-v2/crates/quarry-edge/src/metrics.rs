@@ -345,6 +345,7 @@ pub fn record_cache(cache: &'static str, outcome: &'static str) {
     let cache = match cache {
         "page" => "page",
         "search" => "search",
+        "scrape" => "scrape",
         _ => "other",
     };
     let outcome = match outcome {
@@ -614,6 +615,33 @@ pub fn sample_robots() {
     metrics::gauge!("quarry_robots_cache_entries").set(gate.len() as f64);
 }
 
+/// The robots.txt refusals in a page's crawl report, as `(disallowed, unreachable)`.
+/// The report counts a link under a robots code only when the page ran with the gate in
+/// `enforce` mode (the link filter gets no robots lookup in `observe`), so these are the
+/// links a robots decision removed from the page.
+pub fn robots_link_refusals(report: &quarry_core::crawl_scope::CrawlReport) -> (u64, u64) {
+    let count = |code: &str| report.denials.counts.get(code).copied().map_or(0, u64::from);
+    (count("robots_disallowed"), count("robots_unreachable"))
+}
+
+/// Count the links a page's robots.txt decision refused in `enforce` mode (D2-091). The gate's
+/// own `quarry_robots_decisions_total` counts page fetches; links are removed by the discovery
+/// filter's cached peek, which never reaches the gate's counters, so they were not counted at
+/// all and the soak had no source for the links an `enforce` flip would drop. Content-free:
+/// the one label comes from a closed set. Call once per page, with the page's crawl report,
+/// only when the gate enforces.
+pub fn record_robots_link_refusals(report: &quarry_core::crawl_scope::CrawlReport) {
+    let (disallowed, unreachable) = robots_link_refusals(report);
+    if disallowed > 0 {
+        metrics::counter!("quarry_robots_link_refusals_total", "outcome" => "denied")
+            .increment(disallowed);
+    }
+    if unreachable > 0 {
+        metrics::counter!("quarry_robots_link_refusals_total", "outcome" => "unreachable")
+            .increment(unreachable);
+    }
+}
+
 /// Publish every sampled series once: the pools, the live runs, the drain flag.
 pub fn sample_all() {
     sample_pools();
@@ -793,6 +821,42 @@ mod tests {
         assert!(digests_equal(&a, &digest("token-one-aaaaaaaa")));
         assert!(!digests_equal(&a, &digest("token-one-aaaaaaab")));
         assert!(!digests_equal(&a, &digest("")));
+    }
+
+    fn report_with(counts: &[(&str, u32)]) -> quarry_core::crawl_scope::CrawlReport {
+        use quarry_core::crawl_scope::{CrawlReport, DenialCounts, ScopeMode};
+        let mut denials = DenialCounts::default();
+        for (code, n) in counts {
+            denials.counts.insert((*code).to_string(), *n);
+        }
+        CrawlReport {
+            v: 1,
+            scope_applied: true,
+            mode: ScopeMode::Enforce,
+            links_seen: 0,
+            links_allowed: 0,
+            links_denied: 0,
+            links_unevaluated: 0,
+            denials,
+            hosts_added: Vec::new(),
+            crawl_delay_ms: None,
+        }
+    }
+
+    #[test]
+    fn robots_link_refusals_read_only_the_two_robots_codes() {
+        let report = report_with(&[
+            ("robots_disallowed", 4),
+            ("robots_unreachable", 2),
+            ("out_of_scope", 9),
+            ("exclude_pattern_hit", 1),
+        ]);
+        assert_eq!(robots_link_refusals(&report), (4, 2));
+        assert_eq!(robots_link_refusals(&report_with(&[("out_of_scope", 3)])), (0, 0));
+        assert_eq!(robots_link_refusals(&report_with(&[])), (0, 0));
+        // With no recorder installed the counters are no-ops; recording must not panic.
+        record_robots_link_refusals(&report);
+        record_robots_link_refusals(&report_with(&[]));
     }
 
     #[test]

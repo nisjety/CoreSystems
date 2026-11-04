@@ -1,0 +1,21 @@
+start 2026-10-28T19:59:44Z
+evidence: C:/dev/CoresSystem/.claude/worktrees/vigorous-perlman-e7ae5b/.plan-work/quarry-w1w2/stack-2026-10-28/live/x10/redirect
+edge health: ok
+PASS crawl_accepted: HTTP 200
+job: job_01M621HQMZS925B6ZWC8E04WW5
+PASS crawl_finished: statistics present
+pages fetched per fixture host (robots.txt excluded):
+  crawl-fixture-a: 0
+  crawl-fixture-b: 0
+PASS redirect_robots_requested: 1
+PASS redirect_no_page_fetched: 0
+evidence files: C:/dev/CoresSystem/.claude/worktrees/vigorous-perlman-e7ae5b/.plan-work/quarry-w1w2/stack-2026-10-28/live/x10/redirect (fixture-a.log, fixture-b.log, job.json, crawl-response.json)
+SUMMARY expect=redirect pass=4 fail=0 not_run=0
+end 2026-10-28T19:59:53Z
+--- robots metrics after redirect
+quarry_robots_decisions_total{mode="observe",outcome="would_deny"} 0
+quarry_robots_decisions_total{mode="observe",outcome="would_unreachable"} 0
+quarry_robots_decisions_total{mode="any",outcome="allowed"} 3
+quarry_robots_decisions_total{mode="enforce",outcome="denied"} 0
+quarry_robots_decisions_total{mode="enforce",outcome="unreachable"} 2
+quarry_robots_cache_entries 3
