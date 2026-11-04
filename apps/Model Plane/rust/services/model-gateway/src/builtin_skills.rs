@@ -145,8 +145,38 @@ impl BuiltinSkill {
                 .collect(),
             source_path: id,
             min_score: 0.0,
+            // A builtin has no numbered versions: the binary is its version, and the
+            // embedded text's hash names it (EP-11 S3). Carried only with pins on, so
+            // a listing stays the one sent before while they are off.
+            version: 0,
+            digest: if crate::skills::skill_pins_enabled() {
+                text_digest(self.text)
+            } else {
+                String::new()
+            },
         }
     }
+}
+
+/// Lowercase hex sha256 of a SKILL.md with CRLF folded to LF, so the digest does
+/// not depend on the checkout's line endings (EP-11 S3).
+fn text_digest(text: &str) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(text.replace("\r\n", "\n").as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+/// The digest a run pins for the first-party skill with this catalogue id: the
+/// hash of its embedded SKILL.md. `None` for any other id.
+#[must_use]
+pub fn digest_of(id: &str) -> Option<String> {
+    let dir = id.strip_prefix(SOURCE_PREFIX)?;
+    OFFICE_SKILLS
+        .iter()
+        .find(|skill| skill.dir == dir)
+        .map(|skill| text_digest(skill.text))
 }
 
 /// The instruction the model reads: the file without its front matter, which is for
@@ -333,6 +363,8 @@ mod tests {
                 tags: Vec::new(),
                 source_path: String::new(),
                 min_score: 0.0,
+                version: 0,
+                digest: String::new(),
             },
         );
         assert_eq!(

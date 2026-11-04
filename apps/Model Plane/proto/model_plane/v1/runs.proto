@@ -513,4 +513,20 @@ message RunContextStatus {
   RunContextPart history = 2;
   // The prefetched memory block.
   RunContextPart memory = 3;
+  // EP-11 S3: the skill versions the run injected, one pin per skill. Ids,
+  // numbers and hashes only, so the pin is allowed wherever the run record is.
+  repeated SkillPin skills = 4;
+}
+
+// EP-11 S3: one skill version a run used. Recovery inside the run reads this
+// version even when the skill changed mid-run; feedback names it.
+message SkillPin {
+  // The skill id (session-core `agent_skills.id`, or the builtin skill's id).
+  string skill_id = 1;
+  // The immutable version number; 0 for a builtin skill.
+  int32 version = 2;
+  // sha256 hex digest of the version (of the embedded SKILL.md for a builtin).
+  string digest = 3;
+  // How the skill reached the run: "matched" | "requested" | "builtin".
+  string source = 4;
 }

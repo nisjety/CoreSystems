@@ -3761,6 +3761,7 @@ pub async fn invoke_stream_sse(
         skills_truncated,
         skills_dropped,
         skill_file_offered,
+        pins: skill_pins,
     } = if conversation_only || retrieval_scope == crate::normalize::RetrievalScope::WebOnly { SkillContext::default() } else { fetch_skill_context(
         &state,
         &model_bearer,
@@ -3786,7 +3787,21 @@ pub async fn invoke_stream_sse(
         &req.content,
         &requested_skill_ids,
         MAX_INJECTED_SKILLS,
+        &skill_pins,
     );
+    // EP-11 S3: stamp the versions this turn injected on its run record, spawned so
+    // the turn never waits on it. Never for a ZDR or waived turn: session-core
+    // refuses both, and their run record keeps nothing durable about the turn.
+    if !skill_pins.is_empty() && !turn_posture.zdr() && !turn_posture.is_waived() {
+        let pin_state = state.clone();
+        let pin_bearer = model_bearer.clone();
+        let (pin_org, pin_run) = (org_id.clone(), session_run.run_id.clone());
+        let pins = skill_pins.clone();
+        tokio::spawn(async move {
+            crate::run_context::record_skill_pins(&pin_state, &pin_org, &pin_run, &pin_bearer, pins)
+                .await;
+        });
+    }
     // Shared turn record (off by default): lets a rating on another replica
     // resolve this turn. A waived turn stays in this process, as it does for
     // every other shared store.
@@ -6961,6 +6976,9 @@ struct SkillContext {
     skills_dropped: usize,
     /// A skill this turn injected has a bundle, so `skill_file` is worth offering (WS19-S7).
     skill_file_offered: bool,
+    /// The versions this turn injected, one per skill (EP-11 S3). Empty while
+    /// `MODEL_GATEWAY_SKILL_PINS` is off.
+    pins: Vec<mp_contracts::model_plane::v1::SkillPin>,
 }
 const DEFAULT_CONTEXT_ASSEMBLY_TOKENS: u32 = 4096;
 const MIN_CONTEXT_ASSEMBLY_TOKENS: u32 = 512;
@@ -8228,6 +8246,8 @@ async fn fetch_skill_context(
                 org_id: org_id.to_owned(),
                 enabled_only: true,
                 for_user_id: String::new(),
+                // EP-11 S6: no kinds = skills only; a template or preset is never matched or injected.
+                kinds: Vec::new(),
             },
             bearer,
         ) {
@@ -8288,6 +8308,17 @@ async fn fetch_skill_context(
     }
     // A skill with a bundle says so in its block; the bundle's files are read on demand (WS19-S7).
     let skill_ids: Vec<String> = chosen.iter().map(|s| s.id.clone()).collect();
+    // EP-11 S3: pin every skill the turn set out to inject, a block the budget cut
+    // or dropped included: `reattach_skill` recovers exactly those, at this version.
+    let pins = if crate::skills::skill_pins_enabled() {
+        chosen
+            .iter()
+            .filter(|s| !s.body.trim().is_empty())
+            .map(|s| crate::skills::skill_pin(s, requested_ids.contains(&s.id)))
+            .collect()
+    } else {
+        Vec::new()
+    };
     let bundles = skill_bundle_summaries(state, capability_bearer, org_id, &skill_ids).await;
     // Bounded by SIZE as well as count — see `skills::fit_skill_blocks_with_footers`.
     let fitted = crate::skills::fit_skill_blocks_with_footers(
@@ -8321,6 +8352,7 @@ async fn fetch_skill_context(
         skills_truncated: fitted.truncated,
         skills_dropped: fitted.dropped,
         skill_file_offered: !bundles.is_empty(),
+        pins,
     }
 }
 
@@ -26324,5 +26356,23 @@ mod citation_passage_tests {
             Some(crate::sse_events::CitationLocator { document_id: "doc-1".to_owned(), chunk_index: 2 })
         );
         assert_eq!(passages[1], None, "a citation with no fact gets no invented passage");
+    }
+}
+
+#[cfg(test)]
+mod authored_kinds_tests {
+    /// EP-11 S6: the match cache lists skills only. A template or preset is text the person inserts
+    /// or defaults they see; injecting one into a turn would act on the person's behalf unseen.
+    #[test]
+    fn templates_never_injected_as_skills() {
+        let source = include_str!("sse.rs");
+        let start = source.find("async fn fetch_skill_context(").expect("fetch_skill_context is in sse.rs");
+        let body = &source[start..];
+        let literal_start = body.find("ListAgentSkillsRequest {").expect("the match cache lists agent skills");
+        let literal = &body[literal_start..];
+        let literal = &literal[..literal.find("bearer,").expect("the request literal ends before its bearer")];
+        assert!(literal.contains("kinds: Vec::new()"), "the match cache must ask for skills only: {literal}");
+        assert!(!literal.contains("\"template\""), "the match cache must never name templates: {literal}");
+        assert!(!literal.contains("\"preset\""), "the match cache must never name presets: {literal}");
     }
 }

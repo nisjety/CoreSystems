@@ -1116,6 +1116,14 @@ message Skill {
   string source_path = 5;
   // Relevance threshold (0.0-1.0) for auto-injection.
   float min_score = 6;
+  // EP-11 S3: the immutable version of an authored skill this body is
+  // (session-core `agent_skills.version`); 0 for a proposal or a builtin skill.
+  // A run pins it so recovery inside the run reads the same text.
+  int32 version = 7;
+  // EP-11 S3: sha256 hex digest of the skill version (session-core
+  // `agent_skills.digest`), or of the embedded SKILL.md for a builtin skill.
+  // Empty when the row predates versions.
+  string digest = 8;
 }
 
 message ListSkillsRequest {

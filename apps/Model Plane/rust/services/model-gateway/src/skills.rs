@@ -340,6 +340,20 @@ pub fn handle_get_skill(
 /// holds the substance used for matching).
 #[must_use]
 pub fn agent_skill_to_skill(a: AgentSkill) -> Skill {
+    agent_skill_to_skill_with(a, skill_pins_enabled())
+}
+
+/// [`agent_skill_to_skill`] with the pin switch passed in. With pins on the
+/// cached skill carries the row's immutable `version` and `digest` (EP-11 S3), so
+/// a turn can pin what it injected; off, both stay empty and every response that
+/// carries a cached skill is the one sent before.
+#[must_use]
+pub fn agent_skill_to_skill_with(a: AgentSkill, pins: bool) -> Skill {
+    let (version, digest) = if pins {
+        (a.version, a.digest)
+    } else {
+        (0, String::new())
+    };
     let source_path = match crate::ownership::Scope::from_wire(&a.scope) {
         crate::ownership::Scope::Org => format!("{LEARNED_SOURCE_PREFIX}org:{}", a.origin),
         crate::ownership::Scope::User => {
@@ -356,7 +370,76 @@ pub fn agent_skill_to_skill(a: AgentSkill) -> Skill {
         tags: a.trigger_keywords,
         source_path,
         min_score: 0.0,
+        version,
+        digest,
     }
+}
+
+/// Environment switch for skill pins (EP-11 S3): a run records the skill versions
+/// it injected, and recovery inside the run reads the pinned version.
+pub const SKILL_PINS_ENV: &str = "MODEL_GATEWAY_SKILL_PINS";
+
+/// Whether skill pins are on: only the literal `true` enables them, so an unset,
+/// empty or mistyped value records nothing and recovery reads the current row.
+#[must_use]
+pub fn skill_pins_from(raw: Option<&str>) -> bool {
+    raw == Some("true")
+}
+
+/// [`skill_pins_from`] for this process.
+#[must_use]
+pub fn skill_pins_enabled() -> bool {
+    skill_pins_from(std::env::var(SKILL_PINS_ENV).ok().as_deref())
+}
+
+/// The pin of one injected skill: ids, numbers and a hash, never its text. A
+/// first-party skill is pinned by the hash of its embedded SKILL.md, whatever the
+/// cache holds, because that text is what the binary injects.
+#[must_use]
+pub fn skill_pin(skill: &Skill, requested: bool) -> mp_contracts::model_plane::v1::SkillPin {
+    let (source, version, digest) = if builtin_skills::is_builtin(skill) {
+        (
+            "builtin",
+            0,
+            builtin_skills::digest_of(&skill.id).unwrap_or_default(),
+        )
+    } else if requested {
+        ("requested", skill.version, skill.digest.clone())
+    } else {
+        ("matched", skill.version, skill.digest.clone())
+    };
+    mp_contracts::model_plane::v1::SkillPin {
+        skill_id: skill.id.clone(),
+        version,
+        digest,
+        source: source.to_owned(),
+    }
+}
+
+/// Whether recovery must read the pinned version instead of the current row:
+/// the run pinned a numbered version and the row's text has moved since. A pin
+/// without a version (a builtin, or a row from before versions) has nothing to
+/// read back, so the current row stands.
+#[must_use]
+pub fn pin_needs_version_read(
+    pin: &mp_contracts::model_plane::v1::SkillPin,
+    current: &AgentSkill,
+) -> bool {
+    pin.version > 0 && pin.skill_id == current.id && pin.digest != current.digest
+}
+
+/// What `reattach_skill` says when the version this run pinned no longer exists
+/// (the skill was deleted or erased). The model must not follow the current text
+/// as if it were the one the run started with.
+#[must_use]
+pub fn render_pinned_skill_gone(name: &str) -> String {
+    serde_json::json!({
+        "status": "not_available",
+        "name": name,
+        "detail": "the version of this skill this run used is no longer available; do not \
+                   follow it, and do not guess at the missing instruction",
+    })
+    .to_string()
 }
 
 /// Whether a session-core skill may reach a matcher: its owner has accepted it.
@@ -592,6 +675,8 @@ mod tests {
             tags: tags.iter().map(std::string::ToString::to_string).collect(),
             source_path: String::new(),
             min_score: 0.0,
+            version: 0,
+            digest: String::new(),
         }
     }
 
@@ -1404,6 +1489,8 @@ mod skill_budget_tests {
             tags: Vec::new(),
             source_path: String::new(),
             min_score: 0.0,
+            version: 0,
+            digest: String::new(),
         }
     }
 
@@ -1509,6 +1596,8 @@ mod skill_file_tests {
             tags: Vec::new(),
             source_path: String::new(),
             min_score: 0.0,
+            version: 0,
+            digest: String::new(),
         }
     }
 
@@ -1607,5 +1696,89 @@ mod skill_file_tests {
         assert_eq!(listing["total_files"], 2);
         assert_eq!(listing["truncated"], false);
         assert_eq!(listing["files"].as_array().map(Vec::len), Some(2));
+    }
+}
+
+// EP-11 S3: what a turn pins, and when recovery must read the pinned version.
+#[cfg(test)]
+mod skill_pin_tests {
+    use super::*;
+
+    fn row(id: &str, version: i32, digest: &str) -> AgentSkill {
+        AgentSkill {
+            id: id.into(),
+            name: "House style".into(),
+            content: "Write short answers.".into(),
+            enabled: true,
+            scope: "org".into(),
+            review_state: "accepted".into(),
+            version,
+            digest: digest.into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn the_switch_reads_only_the_literal_true() {
+        assert!(skill_pins_from(Some("true")));
+        for off in [None, Some(""), Some("TRUE"), Some(" true"), Some("1"), Some("false")] {
+            assert!(!skill_pins_from(off), "{off:?} must leave pins off");
+        }
+    }
+
+    #[test]
+    fn switch_off_records_nothing() {
+        // Off, the cached skill carries no version or digest, so nothing can be pinned
+        // and every response carrying a cached skill is the one sent before.
+        let skill = agent_skill_to_skill_with(row("s1", 3, &"d".repeat(64)), false);
+        assert_eq!(skill.version, 0);
+        assert!(skill.digest.is_empty());
+    }
+
+    #[test]
+    fn pins_recorded_for_matched_and_requested_skills() {
+        let digest = "d".repeat(64);
+        let skill = agent_skill_to_skill_with(row("s1", 3, &digest), true);
+        let matched = skill_pin(&skill, false);
+        assert_eq!(matched.skill_id, "s1");
+        assert_eq!(matched.version, 3);
+        assert_eq!(matched.digest, digest);
+        assert_eq!(matched.source, "matched");
+        assert_eq!(skill_pin(&skill, true).source, "requested");
+    }
+
+    #[test]
+    fn builtin_skill_pin_uses_embedded_hash() {
+        let skill = builtin_skills::skill("builtin:office/xlsx").expect("builtin xlsx");
+        let pin = skill_pin(&skill, true);
+        assert_eq!(pin.source, "builtin");
+        assert_eq!(pin.version, 0);
+        let expected = builtin_skills::digest_of("builtin:office/xlsx").expect("embedded digest");
+        assert_eq!(pin.digest, expected);
+        assert_eq!(pin.digest.len(), 64);
+    }
+
+    #[test]
+    fn recovery_reads_the_pinned_version_only_after_the_text_moved() {
+        let pinned = skill_pin(
+            &agent_skill_to_skill_with(row("s1", 2, &"a".repeat(64)), true),
+            false,
+        );
+        assert!(!pin_needs_version_read(&pinned, &row("s1", 2, &"a".repeat(64))));
+        assert!(pin_needs_version_read(&pinned, &row("s1", 3, &"b".repeat(64))));
+        // Another skill's row is never read through this pin.
+        assert!(!pin_needs_version_read(&pinned, &row("s2", 3, &"b".repeat(64))));
+        // A pin without a version (a builtin, a row from before versions) has nothing to read.
+        let unversioned = skill_pin(&agent_skill_to_skill_with(row("s1", 0, ""), true), false);
+        assert!(!pin_needs_version_read(&unversioned, &row("s1", 3, &"b".repeat(64))));
+    }
+
+    #[test]
+    fn a_gone_version_is_reported_not_guessed() {
+        let rendered: serde_json::Value =
+            serde_json::from_str(&render_pinned_skill_gone("House style")).expect("valid JSON");
+        assert_eq!(rendered["status"], "not_available");
+        assert_eq!(rendered["name"], "House style");
+        assert!(rendered.get("instruction").is_none());
     }
 }

@@ -3041,6 +3041,8 @@ fn skill_lint_refusal(
         trigger_keywords: &req.trigger_keywords,
         tool_restrictions: &req.tool_restrictions,
         frontmatter_name: None,
+        // This RPC writes skills only: no kind rules and no settings apply.
+        ..SkillInput::default()
     });
     for rule in &findings {
         metrics::counter!(
@@ -9648,7 +9650,10 @@ impl SessionCore for SessionService {
             if let Some(token) = skill_lint_refusal(skill_lint_mode(), &req) {
                 return Ok(Response::new(skill_write_skipped(&token)));
             }
-            // The conflict key is (org, scope, owner, name). A learned skill
+            // The conflict key is (org, kind, scope, scope_id, owner, name), the
+            // unique index of migration 0109; this RPC writes only kind 'skill' with
+            // an empty scope_id (the column defaults), so a template or preset of the
+            // same name is never overwritten by a skill write. A learned skill
             // refreshes only a proposal it wrote itself and never touches
             // enabled, scope, owner or review_state; a human write keeps setting
             // `enabled` but cannot switch on a proposal nobody accepted.
@@ -9661,7 +9666,7 @@ impl SessionCore for SessionService {
                          scope, owner_user_id, review_state, source_run_id,
                          source_thread_id, proposal_reason, created_at, updated_at)
                      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16, now(), now())
-                     ON CONFLICT (org_id, scope, owner_user_id, name) DO UPDATE SET
+                     ON CONFLICT (org_id, kind, scope, scope_id, owner_user_id, name) DO UPDATE SET
                          description = EXCLUDED.description,
                          content = EXCLUDED.content,
                          trigger_keywords = EXCLUDED.trigger_keywords,
@@ -9683,7 +9688,7 @@ impl SessionCore for SessionService {
                          scope, owner_user_id, review_state, source_run_id,
                          source_thread_id, proposal_reason, created_at, updated_at)
                      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16, now(), now())
-                     ON CONFLICT (org_id, scope, owner_user_id, name) DO UPDATE SET
+                     ON CONFLICT (org_id, kind, scope, scope_id, owner_user_id, name) DO UPDATE SET
                          description = EXCLUDED.description,
                          content = EXCLUDED.content,
                          trigger_keywords = EXCLUDED.trigger_keywords,
@@ -9732,10 +9737,13 @@ impl SessionCore for SessionService {
                 }
                 None => {
                     // Only a learned write can lose a conflict. Say why: the row
-                    // is a human's, or its owner already decided on it.
+                    // is a human's, or its owner already decided on it. The row is
+                    // the one the conflict key named: a skill, never a template or
+                    // preset of the same name (EP-11 S6).
                     let existing: Option<(String, String)> = sqlx::query_as(
                         "SELECT origin, review_state FROM agent_skills
-                         WHERE org_id = $1 AND scope = $2 AND owner_user_id = $3 AND name = $4",
+                         WHERE org_id = $1 AND scope = $2 AND owner_user_id = $3 AND name = $4
+                           AND kind = 'skill' AND scope_id = ''",
                     )
                     .bind(&req.org_id)
                     .bind(scope)
@@ -9920,12 +9928,19 @@ impl SessionCore for SessionService {
             };
             caller.authorize_org(&req.org_id)?;
             authorize_run_owner(&self.pool, &caller, &req.run_id, OwnerIntent::Mutate).await?;
-            let patch = serde_json::json!({
-                "run_context": mp_contracts::run_context::status_json(status),
-            });
+            // Merged one level deeper than the other metadata keys (EP-11 S3): the
+            // Ask path stamps skill pins alone, after or before the parts, and
+            // neither stamp may erase the other. A status with the three parts
+            // writes the same keys it always did.
+            let patch = mp_contracts::run_context::status_json(status);
             let updated = sqlx::query(
                 "UPDATE runs
-                    SET metadata = COALESCE(metadata, '{}'::jsonb) || $3::jsonb,
+                    SET metadata = COALESCE(metadata, '{}'::jsonb)
+                          || jsonb_build_object(
+                               'run_context',
+                               CASE WHEN jsonb_typeof(metadata -> 'run_context') = 'object'
+                                    THEN metadata -> 'run_context'
+                                    ELSE '{}'::jsonb END || $3::jsonb),
                         updated_at = now()
                   WHERE id = $1 AND org_id = $2",
             )
@@ -10036,6 +10051,8 @@ impl SessionCore for SessionService {
             revision: i64,
             version: i32,
             digest: String,
+            kind: String,
+            settings: sqlx::types::Json<serde_json::Value>,
         }
 
         let started = Instant::now();
@@ -10047,6 +10064,7 @@ impl SessionCore for SessionService {
                 return Err(Status::invalid_argument("org_id is required"));
             }
             caller.authorize_org(&req.org_id)?;
+            let kinds = agent_skill_kinds(&req.kinds)?;
             // Ownership/sharing (SKILL-1): mirrors capability-core's
             // SkillsHandler.listOrCreate, the correct reference
             // implementation this table's scope/owner_user_id/shared_with
@@ -10078,16 +10096,18 @@ impl SessionCore for SessionService {
                         source_run_id, source_thread_id, proposal_reason, updated_at,
                         (SELECT COALESCE(MAX(r.revision), 0) FROM skill_revisions r
                          WHERE r.skill_id = agent_skills.id) AS revision,
-                        version, digest
+                        version, digest, kind, settings
                  FROM agent_skills
                  WHERE org_id = $1 AND (NOT $2 OR enabled)
                    AND (scope = 'org' OR owner_user_id = $3
                         OR (shared_with ? $3 AND review_state = 'accepted'))
+                   AND kind = ANY($4)
                  ORDER BY name, scope DESC",
             )
             .bind(&req.org_id)
             .bind(req.enabled_only)
             .bind(&caller_user_id)
+            .bind(&kinds)
             .fetch_all(&self.pool)
             .await
             .map_err(|e| {
@@ -10118,6 +10138,9 @@ impl SessionCore for SessionService {
                     // EP-11 S2: set by migration 0108's trigger, never by a writer.
                     version: row.version,
                     digest: row.digest,
+                    // EP-11 S6: only rows of a requested kind reach here.
+                    kind: row.kind,
+                    settings_json: row.settings.0.to_string(),
                 })
                 .collect();
             Ok(Response::new(pb::ListAgentSkillsResponse { skills }))
@@ -12998,20 +13021,27 @@ const LEDGER_MAX_LIMIT: i64 = 200;
 /// Writes a skill row back from a revision snapshot: the whole row, not only the
 /// fields a person could have edited, so an undo returns the skill to exactly the
 /// state the snapshot recorded. `org_id` in the conflict guard keeps the write
-/// inside the snapshot's own tenant.
+/// inside the snapshot's own tenant. A deleted template or preset comes back as
+/// its own kind (EP-11 S6: snapshots carry kind and settings from migration 0109
+/// on), never as a skill that would be injected; an older snapshot predates the
+/// other kinds and so is a skill. A row never changes kind, so the conflict arm
+/// leaves it alone; settings are restored like the text.
 const RESTORE_SKILL_SQL: &str = "INSERT INTO agent_skills
         (id, org_id, name, description, content, trigger_keywords, trigger_file_patterns,
          tool_restrictions, enabled, origin, scope, owner_user_id, shared_with, review_state,
-         source_run_id, source_thread_id, proposal_reason, created_at, updated_at)
+         source_run_id, source_thread_id, proposal_reason, created_at, updated_at,
+         kind, settings)
      SELECT r.id, r.org_id, r.name, r.description, r.content, r.trigger_keywords,
             r.trigger_file_patterns, r.tool_restrictions, r.enabled, r.origin, r.scope,
             r.owner_user_id, r.shared_with, r.review_state, r.source_run_id,
-            r.source_thread_id, r.proposal_reason, now(), now()
+            r.source_thread_id, r.proposal_reason, now(), now(),
+            COALESCE(r.kind, 'skill'), COALESCE(r.settings, '{}'::jsonb)
      FROM jsonb_to_record($1::jsonb) AS r(
             id text, org_id text, name text, description text, content text,
             trigger_keywords jsonb, trigger_file_patterns jsonb, tool_restrictions jsonb,
             enabled boolean, origin text, scope text, owner_user_id text, shared_with jsonb,
-            review_state text, source_run_id text, source_thread_id text, proposal_reason text)
+            review_state text, source_run_id text, source_thread_id text, proposal_reason text,
+            kind text, settings jsonb)
      ON CONFLICT (id) DO UPDATE SET
          name = EXCLUDED.name,
          description = EXCLUDED.description,
@@ -13028,6 +13058,7 @@ const RESTORE_SKILL_SQL: &str = "INSERT INTO agent_skills
          source_run_id = EXCLUDED.source_run_id,
          source_thread_id = EXCLUDED.source_thread_id,
          proposal_reason = EXCLUDED.proposal_reason,
+         settings = EXCLUDED.settings,
          updated_at = now()
      WHERE agent_skills.org_id = EXCLUDED.org_id";
 
@@ -13056,6 +13087,28 @@ fn ledger_kinds(kinds: &[String]) -> Result<(bool, bool), Status> {
         }
     }
     Ok((skills, memories))
+}
+
+/// The authored kinds a `ListAgentSkills` request asks for (EP-11 S6). Empty means
+/// skills only: every caller that predates templates and presets matches or injects
+/// what it lists, and a template or preset must never reach a turn as a skill.
+#[allow(clippy::result_large_err)]
+fn agent_skill_kinds(kinds: &[String]) -> Result<Vec<String>, Status> {
+    if kinds.is_empty() {
+        return Ok(vec!["skill".to_owned()]);
+    }
+    let mut wanted: Vec<String> = Vec::with_capacity(kinds.len());
+    for kind in kinds {
+        match kind.as_str() {
+            "skill" | "template" | "preset" => {
+                if !wanted.contains(kind) {
+                    wanted.push(kind.clone());
+                }
+            }
+            other => return Err(Status::invalid_argument(format!("invalid kind: {other}"))),
+        }
+    }
+    Ok(wanted)
 }
 
 fn encode_ledger_cursor(at: DateTime<Utc>, id: &str) -> String {
@@ -16642,6 +16695,7 @@ mod tests {
             instructions: Some(pb::RunContextPart { state: pb::RunContextState::Included as i32, included: 1, omitted: 0, reason: String::new() }),
             history: Some(pb::RunContextPart { state: pb::RunContextState::Truncated as i32, included: 24, omitted: 6, reason: "cap".into() }),
             memory: Some(pb::RunContextPart { state: pb::RunContextState::SkippedByPolicy as i32, included: 0, omitted: 0, reason: "memory_off".into() }),
+            skills: Vec::new(),
         };
         let request = |org: &str| pb::RecordRunContextRequest { run_id: run_id.clone(), org_id: org.to_owned(), status: Some(status.clone()) };
 
@@ -16675,6 +16729,65 @@ mod tests {
         let other = format!("rc-other-{sfx}");
         let foreign = svc.record_run_context(as_user(&other, "u1", request(&org))).await;
         assert!(foreign.is_err(), "a foreign org must not stamp this run");
+    }
+
+    // EP-11 S3: a pins-only stamp (the Ask path) lands beside the parts already
+    // recorded, and a later parts stamp keeps the pins; no other key is dropped.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a Postgres with session-core migrations"]
+    async fn record_run_context_merges_skills_without_dropping_other_keys() {
+        use super::SessionService;
+
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping: DATABASE_URL unset");
+            return;
+        };
+        let pool = sqlx::PgPool::connect(&url).await.expect("connect pg");
+        sqlx::migrate!("./migrations").run(&pool).await.expect("migrate");
+        let sfx = std::process::id();
+        let (thread_id, run_id, org) = (format!("rcs-t-{sfx}"), format!("rcs-r-{sfx}"), format!("rcs-org-{sfx}"));
+        sqlx::query("INSERT INTO threads (id,session_key,org_id,user_id) VALUES ($1,$1,$2,'u1')")
+            .bind(&thread_id).bind(&org).execute(&pool).await.expect("seed thread");
+        sqlx::query(
+            "INSERT INTO runs (id,thread_id,goal,org_id,user_id,metadata) VALUES ($1,$2,'g',$3,'u1','{\"autonomy_rung\":\"workspace_write\"}'::jsonb)",
+        )
+        .bind(&run_id).bind(&thread_id).bind(&org).execute(&pool).await.expect("seed run");
+        let svc = SessionService {
+            pool: pool.clone(),
+            retrieval_client: None,
+            graph_client: None,
+            knowledge_client: None,
+            letta_memory: None,
+            audit_publisher: None,
+            auth: None,
+            grant_columns: crate::grpc::ThreadGrantColumns::present(),
+        };
+        let digest = "c".repeat(64);
+        let pins = pb::RunContextStatus {
+            skills: vec![pb::SkillPin { skill_id: "01HSKILL".into(), version: 2, digest: digest.clone(), source: "matched".into() }],
+            ..Default::default()
+        };
+        let parts = pb::RunContextStatus {
+            memory: Some(pb::RunContextPart { state: pb::RunContextState::Empty as i32, included: 0, omitted: 0, reason: String::new() }),
+            ..Default::default()
+        };
+        let stamp = |status: &pb::RunContextStatus| pb::RecordRunContextRequest { run_id: run_id.clone(), org_id: org.clone(), status: Some(status.clone()) };
+
+        svc.record_run_context(as_user(&org, "u1", stamp(&pins))).await.expect("record pins");
+        let (metadata,): (serde_json::Value,) = sqlx::query_as("SELECT metadata FROM runs WHERE id = $1")
+            .bind(&run_id).fetch_one(&pool).await.expect("read metadata");
+        assert_eq!(metadata["autonomy_rung"], "workspace_write", "an unrelated key must survive the merge");
+        assert_eq!(metadata["run_context"]["skills"][0]["id"], "01HSKILL");
+        assert_eq!(metadata["run_context"]["skills"][0]["version"], 2);
+        assert_eq!(metadata["run_context"]["skills"][0]["digest"], digest.as_str());
+        assert_eq!(metadata["run_context"].get("memory"), None, "a pins-only stamp claims no part");
+
+        svc.record_run_context(as_user(&org, "u1", stamp(&parts))).await.expect("record parts");
+        let (after,): (serde_json::Value,) = sqlx::query_as("SELECT metadata FROM runs WHERE id = $1")
+            .bind(&run_id).fetch_one(&pool).await.expect("re-read metadata");
+        assert_eq!(after["run_context"]["memory"]["state"], "empty");
+        assert_eq!(after["run_context"]["skills"], metadata["run_context"]["skills"], "the parts stamp keeps the pins");
+        assert_eq!(after["autonomy_rung"], "workspace_write");
     }
 
     fn as_user<T>(org_id: &str, user_id: &str, message: T) -> Request<T> {
@@ -17673,6 +17786,7 @@ mod tests {
                     org_id: org.clone(),
                     enabled_only: true,
                     for_user_id: String::new(),
+                    kinds: Vec::new(),
                 },
             ))
             .await
@@ -17692,6 +17806,7 @@ mod tests {
                     org_id: org.clone(),
                     enabled_only: false,
                     for_user_id: String::new(),
+                    kinds: Vec::new(),
                 },
             ))
             .await
@@ -17716,6 +17831,7 @@ mod tests {
                     org_id: other_org.clone(),
                     enabled_only: true,
                     for_user_id: String::new(),
+                    kinds: Vec::new(),
                 },
             ))
             .await
@@ -20463,9 +20579,221 @@ mod tests {
             );
         }
         assert!(
-            source.contains("ON CONFLICT (org_id, scope, owner_user_id, name)"),
-            "the conflict key carries the owner"
+            source.contains("ON CONFLICT (org_id, kind, scope, scope_id, owner_user_id, name)"),
+            "the conflict key carries the kind and the owner"
         );
+    }
+
+    /// EP-11 S6: both upsert arms name exactly the unique index of migration 0109. A
+    /// conflict target that matches no unique index fails every write at run time.
+    #[test]
+    fn upsert_conflict_uses_new_index() {
+        let source = include_str!("grpc.rs");
+        let handler = &source[source
+            .find("async fn upsert_agent_skill(")
+            .expect("the handler")..];
+        let handler = &handler[..handler
+            .find("async fn list_agent_skills(")
+            .unwrap_or(handler.len())];
+        let new_key = "ON CONFLICT (org_id, kind, scope, scope_id, owner_user_id, name)";
+        assert_eq!(handler.matches(new_key).count(), 2, "both arms");
+        assert!(!handler.contains("ON CONFLICT (org_id, scope, owner_user_id, name)"));
+        let migration = include_str!("../migrations/0109_authored_behaviour_kind.sql");
+        assert!(migration.contains(
+            "ON agent_skills (org_id, kind, scope, scope_id, owner_user_id, name)"
+        ));
+    }
+
+    /// EP-11 S6: an empty `kinds` lists skills only, so no caller that predates
+    /// templates and presets can match or inject one; an unknown kind is refused.
+    #[test]
+    fn template_never_listed_for_matching() {
+        let kinds = |values: &[&str]| {
+            super::agent_skill_kinds(&values.iter().map(|v| (*v).to_owned()).collect::<Vec<_>>())
+        };
+        assert_eq!(kinds(&[]).expect("default"), ["skill"]);
+        assert_eq!(
+            kinds(&["template", "preset", "template"]).expect("both"),
+            ["template", "preset"]
+        );
+        assert_eq!(
+            kinds(&["skill", "agent"]).expect_err("closed").code(),
+            tonic::Code::InvalidArgument
+        );
+        let source = include_str!("grpc.rs");
+        let handler = &source[source
+            .find("async fn list_agent_skills(")
+            .expect("the handler")..];
+        let handler = &handler[..handler
+            .find("async fn list_conversation(")
+            .expect("the next handler")];
+        assert!(handler.contains("AND kind = ANY($4)"));
+        assert!(handler.contains("agent_skill_kinds(&req.kinds)?"));
+    }
+
+    /// EP-11 S6: migration 0109 replaces the version body with the same field list
+    /// as 0108, reading the real `kind` and `settings`. Their column defaults equal
+    /// 0108's constants, so no existing digest moves.
+    #[test]
+    fn kind_migration_keeps_the_digest_field_list() {
+        let migration = include_str!("../migrations/0109_authored_behaviour_kind.sql");
+        let start = migration
+            .find("CREATE OR REPLACE FUNCTION agent_skill_version_body(s agent_skills)")
+            .expect("the body function");
+        let end = start
+            + migration[start..]
+                .find("$$ LANGUAGE sql")
+                .expect("the body function's end");
+        let body = &migration[start..end];
+        let keys: Vec<&str> = body
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix('\''))
+            .filter_map(|line| line.split('\'').next())
+            .collect();
+        assert_eq!(
+            keys,
+            [
+                "name",
+                "description",
+                "content",
+                "trigger_keywords",
+                "trigger_file_patterns",
+                "tool_restrictions",
+                "kind",
+                "settings",
+                "bundle_sha256",
+            ]
+        );
+        assert!(body.contains("'kind', s.kind,"));
+        assert!(body.contains("'settings', s.settings,"));
+        assert!(migration.contains("kind TEXT NOT NULL DEFAULT 'skill'"));
+        assert!(migration.contains("settings JSONB NOT NULL DEFAULT '{}'"));
+    }
+
+    /// EP-11 S6: an undo that re-creates a deleted template or preset brings it back as its
+    /// own kind. Without the kind in the snapshot and in the restore, it came back as a skill
+    /// and its text was injected into the owner's turns.
+    #[test]
+    fn restore_keeps_the_kind_of_a_deleted_template() {
+        let migration = include_str!("../migrations/0109_authored_behaviour_kind.sql");
+        let snapshot = &migration[migration
+            .find("CREATE OR REPLACE FUNCTION agent_skill_revision_snapshot(s agent_skills)")
+            .expect("the snapshot function")..];
+        assert!(snapshot.contains("'kind', s.kind,"));
+        assert!(snapshot.contains("'settings', s.settings"));
+        assert!(super::RESTORE_SKILL_SQL.contains("COALESCE(r.kind, 'skill')"));
+        assert!(super::RESTORE_SKILL_SQL.contains("kind text, settings jsonb)"));
+        let conflict = &super::RESTORE_SKILL_SQL[super::RESTORE_SKILL_SQL
+            .find("ON CONFLICT (id) DO UPDATE SET")
+            .expect("the conflict arm")..];
+        assert!(!conflict.contains("kind ="), "a row never changes kind");
+    }
+
+    /// EP-11 S6: after 0109 a skill's digest is still the sha256 of 0108's body with the
+    /// constants 'skill' and '{}', so no version a run pinned before the migration moves.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a Postgres with session-core migrations"]
+    async fn existing_digests_unchanged_by_kind_migration() {
+        let Some((_svc, pool, org)) = skills_service().await else {
+            return;
+        };
+        let id = format!("sk-{}", mp_ids::new_ulid());
+        as_registry_writer(
+            &pool,
+            "admin-1",
+            "INSERT INTO agent_skills (id, org_id, name, content, scope, owner_user_id, created_at, updated_at)
+             VALUES ($1, $2, 'Digest', 'body', 'org', '', now(), now())",
+            &[&id, &org],
+        )
+        .await;
+        let (version, digest, expected): (i32, String, String) = sqlx::query_as(
+            "SELECT version, digest,
+                    encode(sha256(convert_to(jsonb_build_object(
+                        'name', name,
+                        'description', description,
+                        'content', content,
+                        'trigger_keywords', trigger_keywords,
+                        'trigger_file_patterns', trigger_file_patterns,
+                        'tool_restrictions', tool_restrictions,
+                        'kind', 'skill'::text,
+                        'settings', '{}'::jsonb,
+                        'bundle_sha256', bundle_sha256
+                    )::text, 'UTF8')), 'hex')
+             FROM agent_skills WHERE id = $1",
+        )
+        .bind(&id)
+        .fetch_one(&pool)
+        .await
+        .expect("digest");
+        assert_eq!(version, 1);
+        assert_eq!(digest, expected);
+
+        clear_skill_rows(&pool, &org).await;
+    }
+
+    /// EP-11 S6: a template may share a skill's name, the skill upsert refreshes only the
+    /// skill, and a list that names no kind never returns the template.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a Postgres with session-core migrations"]
+    async fn same_name_skill_and_template_coexist() {
+        use mp_contracts::model_plane::v1::session_core_server::SessionCore;
+        let Some((svc, pool, org)) = skills_service().await else {
+            return;
+        };
+        svc.upsert_agent_skill(as_user(
+            &org,
+            "user-a",
+            skill_request(&org, "Weekly", "skill v1", "user", "user", ""),
+        ))
+        .await
+        .expect("create skill");
+        let template_id = format!("sk-{}", mp_ids::new_ulid());
+        as_registry_writer(
+            &pool,
+            "user-a",
+            "INSERT INTO agent_skills (id, org_id, name, content, scope, owner_user_id, kind, created_at, updated_at)
+             VALUES ($1, $2, 'Weekly', 'Report for {{input}}', 'user', 'user-a', 'template', now(), now())",
+            &[&template_id, &org],
+        )
+        .await;
+        svc.upsert_agent_skill(as_user(
+            &org,
+            "user-a",
+            skill_request(&org, "Weekly", "skill v2", "user", "user", ""),
+        ))
+        .await
+        .expect("refresh skill");
+
+        let list = |kinds: Vec<String>| {
+            let svc = &svc;
+            let org = org.clone();
+            async move {
+                svc.list_agent_skills(as_user(
+                    &org,
+                    "user-a",
+                    pb::ListAgentSkillsRequest {
+                        org_id: org.clone(),
+                        enabled_only: false,
+                        for_user_id: String::new(),
+                        kinds,
+                    },
+                ))
+                .await
+                .expect("list")
+                .into_inner()
+                .skills
+            }
+        };
+        let skills = list(Vec::new()).await;
+        assert_eq!(skills.len(), 1);
+        assert_eq!((skills[0].kind.as_str(), skills[0].content.as_str()), ("skill", "skill v2"));
+        let templates = list(vec!["template".to_owned()]).await;
+        assert_eq!(templates.len(), 1);
+        assert_eq!(templates[0].id, template_id);
+        assert_eq!(templates[0].content, "Report for {{input}}", "the skill write left it alone");
+        assert_eq!(templates[0].settings_json, "{}");
+
+        clear_skill_rows(&pool, &org).await;
     }
 
     async fn skills_service() -> Option<(super::SessionService, sqlx::PgPool, String)> {
@@ -21701,6 +22029,7 @@ mod tests {
                     org_id: org_id.clone(),
                     enabled_only: false,
                     for_user_id: String::new(),
+                    kinds: Vec::new(),
                 });
                 request
                     .extensions_mut()
@@ -21765,6 +22094,7 @@ mod tests {
                     org_id,
                     enabled_only: false,
                     for_user_id,
+                    kinds: Vec::new(),
                 });
                 request.extensions_mut().insert(identity);
                 svc.list_agent_skills(request)

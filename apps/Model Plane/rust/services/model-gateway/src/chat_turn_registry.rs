@@ -327,6 +327,12 @@ pub fn global() -> &'static ChatTurnRegistry {
 /// just ran (same store, same query, same limit) and retains the ids of the
 /// blocks that were actually injected. Advisory and infallible: a failure here
 /// costs skill attribution on a later rating, never the turn.
+///
+/// `pins` are the versions the turn injected (EP-11 S3, empty while the switch is
+/// off). A pinned skill is retained as `id@version`, so a rating names the version
+/// that steered the answer; every reader that needs the bare id takes it with
+/// [`skill_id_of_ref`].
+#[allow(clippy::too_many_arguments)] // one turn's ids: each argument is request context
 pub fn record_chat_turn(
     state: &crate::state::AppState,
     request_id: &str,
@@ -336,21 +342,120 @@ pub fn record_chat_turn(
     turn_query: &str,
     requested_skill_ids: &[String],
     injected_limit: i32,
+    pins: &[mp_contracts::model_plane::v1::SkillPin],
 ) {
-    global().record(
-        request_id,
+    let ids = injected_skill_ids(
+        state,
         org_id,
         user_id,
-        run_id,
-        injected_skill_ids(
-            state,
-            org_id,
-            user_id,
-            turn_query,
-            requested_skill_ids,
-            injected_limit,
-        ),
+        turn_query,
+        requested_skill_ids,
+        injected_limit,
     );
+    global().record(request_id, org_id, user_id, run_id, skill_refs(ids, pins));
+    run_pins().record(org_id, run_id, pins);
+}
+
+/// The ids as references: `id@version` for a skill the turn pinned at a numbered
+/// version, the bare id otherwise (a builtin, a row from before versions, or pins
+/// off), so with the switch off the record holds exactly what it did before.
+#[must_use]
+pub fn skill_refs(ids: Vec<String>, pins: &[mp_contracts::model_plane::v1::SkillPin]) -> Vec<String> {
+    ids.into_iter()
+        .map(|id| {
+            match pins
+                .iter()
+                .find(|pin| pin.skill_id == id && pin.version > 0)
+            {
+                Some(pin) => format!("{id}@{}", pin.version),
+                None => id,
+            }
+        })
+        .collect()
+}
+
+/// The skill id inside a reference [`skill_refs`] made. Only a numeric suffix is
+/// a version, so an id that happens to hold `@` is left whole.
+#[must_use]
+pub fn skill_id_of_ref(reference: &str) -> &str {
+    match reference.rsplit_once('@') {
+        Some((id, version))
+            if !id.is_empty()
+                && !version.is_empty()
+                && version.bytes().all(|b| b.is_ascii_digit()) =>
+        {
+            id
+        }
+        _ => reference,
+    }
+}
+
+/// How long a run's pins stay readable for recovery inside the run. A run that
+/// outlives it recovers from the current row, as with the switch off.
+const RUN_PIN_TTL: Duration = Duration::from_secs(6 * 60 * 60);
+
+/// The skill versions each live run injected (EP-11 S3), keyed by
+/// `(org, run_id)`. In-process like the turn record: the durable copy is the
+/// run record's `run_context.skills`, and recovery inside a run happens on the
+/// replica streaming it. Ids, numbers and hashes only.
+#[derive(Clone, Default)]
+pub struct RunPinRegistry {
+    inner: Arc<DashMap<String, (Vec<mp_contracts::model_plane::v1::SkillPin>, Instant)>>,
+}
+
+impl RunPinRegistry {
+    fn key(org_id: &str, run_id: &str) -> Option<String> {
+        let (org, run) = (org_id.trim(), run_id.trim());
+        if org.is_empty() || run.is_empty() || org.contains('\u{1f}') {
+            return None;
+        }
+        Some(format!("{org}\u{1f}{run}"))
+    }
+
+    /// Keep a run's pins. No pins (the switch off) records nothing; a full map
+    /// drops the new run's pins rather than a live run's, like [`ChatTurnRegistry`].
+    pub fn record(
+        &self,
+        org_id: &str,
+        run_id: &str,
+        pins: &[mp_contracts::model_plane::v1::SkillPin],
+    ) {
+        if pins.is_empty() {
+            return;
+        }
+        let Some(key) = Self::key(org_id, run_id) else {
+            return;
+        };
+        let now = Instant::now();
+        self.inner
+            .retain(|_, (_, at)| now.duration_since(*at) < RUN_PIN_TTL);
+        if self.inner.len() >= MAX_ENTRIES && !self.inner.contains_key(&key) {
+            return;
+        }
+        self.inner.insert(key, (pins.to_vec(), now));
+    }
+
+    /// The pin this run holds for one skill, if any.
+    #[must_use]
+    pub fn pin(
+        &self,
+        org_id: &str,
+        run_id: &str,
+        skill_id: &str,
+    ) -> Option<mp_contracts::model_plane::v1::SkillPin> {
+        let entry = self.inner.get(&Self::key(org_id, run_id)?)?;
+        let (pins, at) = entry.value();
+        if Instant::now().duration_since(*at) >= RUN_PIN_TTL {
+            return None;
+        }
+        pins.iter().find(|pin| pin.skill_id == skill_id).cloned()
+    }
+}
+
+/// Process-wide run pin registry.
+pub fn run_pins() -> &'static RunPinRegistry {
+    static GLOBAL: OnceLock<RunPinRegistry> = OnceLock::new();
+    GLOBAL.get_or_init(RunPinRegistry::default)
 }
 
 /// The hook `sse.rs` calls right after [`record_chat_turn`]: mirror what that call
@@ -842,5 +947,65 @@ mod tests {
         assert!(lookup_shared_turn(&store, "org-1", "user-1", "req-1")
             .await
             .is_none());
+    }
+}
+
+// EP-11 S3: the turn record names the version a rating attaches to, and a run's
+// pins are readable for recovery inside that run only.
+#[cfg(test)]
+mod skill_pin_tests {
+    use super::*;
+    use mp_contracts::model_plane::v1::SkillPin;
+
+    fn pin(id: &str, version: i32) -> SkillPin {
+        SkillPin {
+            skill_id: id.into(),
+            version,
+            digest: "e".repeat(64),
+            source: "matched".into(),
+        }
+    }
+
+    #[test]
+    fn a_pinned_skill_is_recorded_as_id_at_version() {
+        let refs = skill_refs(
+            vec!["s1".into(), "builtin:office/pdf".into(), "s3".into()],
+            &[pin("s1", 4), pin("builtin:office/pdf", 0)],
+        );
+        assert_eq!(refs, vec!["s1@4", "builtin:office/pdf", "s3"]);
+    }
+
+    #[test]
+    fn switch_off_records_bare_ids() {
+        let ids = vec!["s1".to_owned(), "s2".to_owned()];
+        assert_eq!(skill_refs(ids.clone(), &[]), ids);
+    }
+
+    #[test]
+    fn a_reference_gives_back_its_id() {
+        assert_eq!(skill_id_of_ref("s1@4"), "s1");
+        assert_eq!(skill_id_of_ref("s1"), "s1");
+        // Only a numeric suffix is a version.
+        assert_eq!(skill_id_of_ref("team@home"), "team@home");
+        assert_eq!(skill_id_of_ref("@4"), "@4");
+        assert_eq!(skill_id_of_ref("s1@"), "s1@");
+    }
+
+    #[test]
+    fn a_run_reads_only_its_own_pins() {
+        let pins = RunPinRegistry::default();
+        pins.record("org-1", "run-1", &[pin("s1", 2)]);
+        assert_eq!(pins.pin("org-1", "run-1", "s1").map(|p| p.version), Some(2));
+        assert!(pins.pin("org-1", "run-1", "s2").is_none());
+        assert!(pins.pin("org-1", "run-2", "s1").is_none());
+        assert!(pins.pin("org-2", "run-1", "s1").is_none());
+    }
+
+    #[test]
+    fn no_pins_record_nothing() {
+        let pins = RunPinRegistry::default();
+        pins.record("org-1", "run-1", &[]);
+        pins.record("", "run-1", &[pin("s1", 2)]);
+        assert!(pins.inner.is_empty());
     }
 }

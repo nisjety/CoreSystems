@@ -673,3 +673,35 @@ fn the_web_reader_is_offered_only_where_a_fetched_page_can_be_parked() {
         "{offer}"
     );
 }
+
+/// EP-11 S3 (`zdr_turn_records_no_pins`, closes D2-557): a ZDR turn pins no skill version and
+/// offers no skill bundle file. It returns before skill injection, so it has no pins to stamp, and
+/// the stamp itself is guarded on the turn's posture. Read from the source, as the other
+/// turn-ordering checks in this file are.
+#[test]
+fn zdr_turn_records_no_pins() {
+    let sse = include_str!("../src/sse.rs");
+    let zdr_return = sse
+        .find("return zdr_direct_stream(")
+        .expect("the ZDR branch hands the turn to zdr_direct_stream");
+    let injection = sse
+        .find("pins: skill_pins,")
+        .expect("the ordinary path takes the pins from skill injection");
+    let stamp = sse
+        .find("crate::run_context::record_skill_pins(")
+        .expect("the ordinary path stamps the pins");
+    assert!(
+        zdr_return < injection && zdr_return < stamp,
+        "a ZDR turn returns before skill injection can pin a version"
+    );
+    assert!(
+        sse.contains("!skill_pins.is_empty() && !turn_posture.zdr() && !turn_posture.is_waived()"),
+        "the pin stamp is guarded on the turn's posture"
+    );
+    for signature in ["async fn zdr_direct_stream(", "fn zdr_answer_stream(", "async fn direct_infer_turn("] {
+        let body = function_body(sse, signature);
+        assert!(!body.contains("fetch_skill_context("), "{signature} injects no skill");
+        assert!(!body.contains("record_skill_pins("), "{signature} stamps no pin");
+        assert!(!body.contains("skill_file"), "{signature} offers no skill bundle file");
+    }
+}

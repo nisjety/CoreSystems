@@ -3200,6 +3200,72 @@ fn sha256_hex(bytes: &[u8]) -> String {
         })
 }
 
+/// `reattach_skill` at the version this run pinned (EP-11 S3). `None` leaves the
+/// recovery to the current row: pins off, no pin for this skill in this run, the
+/// row absent or disabled (recovery says so itself), or the row's text unchanged
+/// since the run pinned it. A version that no longer exists is reported, never
+/// replaced by the current text; a failed read is an error, for the same reason.
+async fn pinned_skill_recovery(
+    state: &AppState,
+    org_id: &str,
+    run_id: &str,
+    session_bearer: &str,
+    skills: &[mp_contracts::model_plane::v1::AgentSkill],
+    name: &str,
+) -> Option<Result<String, &'static str>> {
+    use mp_contracts::model_plane::v1::{AgentSkill, GetAgentSkillVersionRequest};
+
+    if !crate::skills::skill_pins_enabled() {
+        return None;
+    }
+    let wanted = name.trim().to_lowercase();
+    let current = skills
+        .iter()
+        .find(|skill| skill.enabled && skill.name.trim().to_lowercase() == wanted)?;
+    let pin = crate::chat_turn_registry::run_pins().pin(org_id, run_id, &current.id)?;
+    if !crate::skills::pin_needs_version_read(&pin, current) {
+        return None;
+    }
+    let request = with_authorization(
+        GetAgentSkillVersionRequest {
+            org_id: org_id.to_owned(),
+            skill_id: pin.skill_id.clone(),
+            version: pin.version,
+            for_user_id: String::new(),
+        },
+        session_bearer,
+    );
+    let response = match state
+        .skill_version_client
+        .clone()
+        .get_agent_skill_version(request)
+        .await
+    {
+        Ok(response) => response.into_inner(),
+        Err(error) => {
+            tracing::warn!(%error, %org_id, skill_id = %pin.skill_id, version = pin.version, "reattach_skill: pinned version read failed");
+            return Some(Err(
+                "reattach_skill could not read the version of this skill this run used right now",
+            ));
+        }
+    };
+    let Some(version) = response.version.filter(|_| !response.gone) else {
+        return Some(Ok(crate::skills::render_pinned_skill_gone(&current.name)));
+    };
+    // The pinned body through the same bounded rendering as the current row.
+    let pinned = AgentSkill {
+        id: version.skill_id,
+        name: version.name,
+        description: version.description,
+        content: version.content,
+        enabled: true,
+        ..Default::default()
+    };
+    Some(Ok(crate::skills::render_recovered_skill(
+        &mp_contracts::skill_recovery::recover_skill(std::slice::from_ref(&pinned), &pinned.name),
+    )))
+}
+
 /// `skill_file`: one bounded read of one file of a skill's bundle (WS19-S7).
 ///
 /// Every refusal that needs no I/O comes first (the switch, the name, the path,
@@ -3464,11 +3530,12 @@ async fn skill_mounts_for_turn(
         return Vec::new();
     }
     let mut matched: Vec<(String, String)> = Vec::new();
-    for skill_id in &record.skill_ids {
+    for skill_ref in &record.skill_ids {
         let request = GetSkillRequest {
             request_id: String::new(),
             org_id: org_id.to_owned(),
-            skill_id: skill_id.clone(),
+            // A pinned skill is recorded as `id@version` (EP-11 S3); the catalogue knows the id.
+            skill_id: crate::chat_turn_registry::skill_id_of_ref(skill_ref).to_owned(),
         };
         let found = crate::skills::handle_get_skill(&state.skills, request, &state.ownership, user_id)
             .ok()
@@ -4647,6 +4714,7 @@ async fn dispatch_tool_with_cost(
                     // distinction is only available if it comes back.
                     enabled_only: false,
                     for_user_id: String::new(),
+                    kinds: Vec::new(),
                 },
                 session_bearer,
             );
@@ -4673,9 +4741,24 @@ async fn dispatch_tool_with_cost(
                     );
                 }
             };
-            let output = crate::skills::render_recovered_skill(
-                &mp_contracts::skill_recovery::recover_skill(&skills, &name),
-            );
+            // EP-11 S3: a skill this run pinned is recovered at the pinned version, so an
+            // edit made mid-run does not change what the run reads back.
+            let output = match pinned_skill_recovery(
+                state,
+                org_id,
+                run_id,
+                session_bearer,
+                &skills,
+                &name,
+            )
+            .await
+            {
+                Some(Ok(output)) => output,
+                Some(Err(message)) => return err_outcome(call, message),
+                None => crate::skills::render_recovered_skill(
+                    &mp_contracts::skill_recovery::recover_skill(&skills, &name),
+                ),
+            };
             ToolOutcome {
                 call_id: call.id.clone(),
                 name: call.name.clone(),
