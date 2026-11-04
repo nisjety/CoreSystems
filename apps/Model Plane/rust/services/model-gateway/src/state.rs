@@ -454,6 +454,12 @@ fn lazy_static_channel(uri: &'static str) -> Channel {
         .connect_lazy()
 }
 
+/// The largest `ExecuteStep` response the gateway decodes. tonic's default is 4 MiB, which a `code_interpreter`
+/// result exceeds within its own caps: up to 16 MiB of delivered files, a preview PDF (8 MiB at most when
+/// configured) and up to 3 MiB of thumbnails, each carried as base64 (a third larger) in the one frame. 40 MiB holds
+/// the largest such frame with headroom for the JSON around it (EP-5 S9).
+const EXECUTE_STEP_DECODE_LIMIT_BYTES: usize = 40 * 1024 * 1024;
+
 impl AppState {
     /// Create a new `AppState` with an in-memory publisher.
     #[must_use]
@@ -511,7 +517,8 @@ impl AppState {
             run_client: RunServiceClient::new(run_channel),
             orchestration_client: OrchestrationCoreServiceClient::new(orchestration_channel),
             consume_client: OrchestrationCoreServiceClient::new(consume_channel),
-            execution_client: ExecutionCoreClient::new(execution_channel),
+            execution_client: ExecutionCoreClient::new(execution_channel)
+                .max_decoding_message_size(EXECUTE_STEP_DECODE_LIMIT_BYTES),
             sandbox_client: SandboxManagerClient::new(sandbox_channel),
             browser_client: BrowserBrokerClient::new(browser_channel),
             memory_client: MemoryServiceClient::new(memory_channel),
@@ -765,7 +772,8 @@ impl AppState {
             "EXECUTION_CORE_URL",
             "EXECUTION_CORE_ADDR",
             "http://localhost:9093",
-        )?);
+        )?)
+        .max_decoding_message_size(EXECUTE_STEP_DECODE_LIMIT_BYTES);
         let sandbox_client = SandboxManagerClient::new(Self::lazy_channel(
             "SANDBOX_MANAGER_URL",
             "SANDBOX_MANAGER_ADDR",

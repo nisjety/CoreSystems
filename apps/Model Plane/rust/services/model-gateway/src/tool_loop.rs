@@ -605,6 +605,9 @@ fn office_report_for(payload: &Value, name: &str) -> Option<OfficeVerification> 
 const PREVIEW_PDF_MAX_BASE64: usize = 2_796_204;
 /// The thumbnails a preview carries, the same cap the verifier applies.
 const PREVIEW_MAX_THUMBS: usize = 3;
+/// The thumbnails a deck's preview carries: one per slide, up to the verifier's page cap (EP-5 S9). The verifier keeps
+/// them in page order and never moves one onto another page, so index `i` is always slide `i + 1`.
+const PREVIEW_MAX_DECK_THUMBS: usize = 40;
 
 /// The render the verifier made of the delivered file `name`, when it made one. The PDF and the thumbnails are the
 /// verifier's copies; the download stays the sandbox's bytes. A preview with no report has no page count or font
@@ -620,13 +623,17 @@ fn office_preview_for(payload: &Value, name: &str) -> Option<AttachmentPreview> 
         return None;
     }
     let report = office_report_for(payload, name)?;
+    let cap = match OfficeKind::from_file_name(name) {
+        Some(OfficeKind::Pptx) => PREVIEW_MAX_DECK_THUMBS,
+        _ => PREVIEW_MAX_THUMBS,
+    };
     let thumbs = element
         .get("thumbs_b64")
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
         .filter_map(Value::as_str)
-        .take(PREVIEW_MAX_THUMBS)
+        .take(cap)
         .map(|thumb| format!("data:image/png;base64,{thumb}"))
         .collect();
     Some(AttachmentPreview {
@@ -3177,7 +3184,7 @@ pub async fn dispatch_tool(
         conversation, data_plane_bearer, execution_bearer, inference_bearer,
         session_bearer, capability_bearer, zdr, sovereign_required,
         allow_paid_providers, call, ingestion_bearer, sandbox_bearer, None,
-        data_plane_mode, &crate::turn_attachments::ValidatedAttachments::none(), &[], None, None, None,
+        data_plane_mode, &crate::turn_attachments::ValidatedAttachments::none(), &[], None, None, None, None,
     ).await
 }
 
@@ -3519,6 +3526,9 @@ async fn dispatch_tool_with_cost(
     // The turn's batched-search refs: `Some` only on a chat turn with batched web search on. `None` leaves
     // `web_search` single-query and `fetch_url` url-only, exactly as they were.
     turn_refs: Option<&TurnRefs>,
+    // The turn's web-search provenance record (EP-9 W1): `Some` only on a live chat stream with the line switched
+    // on. `None` leaves the `web_search` arm exactly as it was.
+    search_provenance: Option<&crate::search_provenance::SearchProvenanceTurn>,
 ) -> ToolOutcome {
     if !inline_tool_allowed(&call.name) {
         return err_outcome(
@@ -3965,6 +3975,18 @@ async fn dispatch_tool_with_cost(
                         );
                     }
                     Err(e) => return err_outcome(call, format!("web_search failed: {e}")),
+                }
+            }
+            // The line names every search the turn answered, so it is recorded only once the whole call has
+            // answered: a failed batch returned above, and its hits never reached the model.
+            if let Some(provenance) = search_provenance {
+                for reply in &replies {
+                    let sources: Vec<&str> = reply
+                        .results
+                        .iter()
+                        .map(|result| result.source.as_str())
+                        .collect();
+                    provenance.record(&reply.provider, &sources);
                 }
             }
             // Each hit carries the rerank report the edge sent for this search, so the
@@ -5758,6 +5780,9 @@ async fn dispatch_audited_tool(
     retry_sink: Option<&crate::sse_events::RichEventSink>,
     // The turn's batched-search refs (see `dispatch_tool_with_cost`). `None` for every caller but the chat loop.
     turn_refs: Option<&TurnRefs>,
+    // The turn's web-search provenance record (see `dispatch_tool_with_cost`). `None` for every caller but the
+    // chat loop and the forced pre-loop search.
+    search_provenance: Option<&crate::search_provenance::SearchProvenanceTurn>,
 ) -> Result<ToolOutcome, &'static str> {
     if session_bearer.is_empty() {
         return Err("tool audit credential unavailable");
@@ -5824,6 +5849,7 @@ async fn dispatch_audited_tool(
             classifier_budget,
             connector,
             turn_refs,
+            search_provenance,
         )
     });
     let outcome = until_read_deadline(call, read_deadline, attempts).await;
@@ -5957,6 +5983,8 @@ pub(crate) async fn dispatch_web_tool_audited(
         None,
         // Deep research's searches are single queries and issue no refs: batched search is a chat-turn feature.
         None,
+        // Deep research's searches are not on the chat turn's "Searched via" line: the line is the chat turn's own.
+        None,
     )
     .await
 }
@@ -6024,6 +6052,13 @@ const ORG_CLASS_TOOLS: &[&str] = &[
 /// The connected-account half: a connected account is read only under `RetrievalScope::Auto` (WS23-S5,
 /// DEC-26), so a source-filtered turn never sees the read.
 const CONNECTOR_CLASS_TOOLS: &[&str] = &[mp_contracts::provider_reads::READ_TOOL_NAME];
+
+/// Whether `name` is a public-web tool, which an org's `web.mode=off` withholds (Wave 3 EP-9 W2). It is the set the
+/// retrieval scope already calls web, so the two gates never disagree about what counts as the web.
+#[must_use]
+pub fn is_public_web_tool(name: &str) -> bool {
+    WEB_CLASS_TOOLS.contains(&name)
+}
 
 /// Whether `name` may be offered under a per-turn `RetrievalScope`
 /// (chat-wave2 scope spec §2.3), the same enforcement chokepoint
@@ -7250,7 +7285,9 @@ pub async fn run_forced_web_search_for_model(
         // A forced `web_search` and nothing else, so no Data Plane retrieval is
         // reachable from here — same reasoning as `dispatch_web_tool_audited`.
         mp_contracts::dataplane_posture::SOVEREIGN_REQUIRED_WITHOUT_SIGNAL,
-        paid_providers_allowed(requested_model, zdr),
+        // The org's `web.paid_providers` switch (Wave 3 EP-9 W2) can only take the grant away.
+        paid_providers_allowed(requested_model, zdr)
+            && crate::org_agent_policy::org_allows_paid_providers(org_id),
         &call,
         None,
         // web_search only: code_interpreter, the sole reader of the sandbox
@@ -7275,6 +7312,8 @@ pub async fn run_forced_web_search_for_model(
         None,
         // A forced search runs before the turn's tool loop and issues no refs: batched search is a loop feature.
         None,
+        // The forced search is one of the turn's searches, so the "Searched via" line counts it.
+        sink.and_then(crate::sse_events::RichEventSink::search_provenance),
     )
     .await?;
     // Gate BEFORE anything is emitted: the citations are built from the surviving
@@ -8566,7 +8605,9 @@ pub async fn run_tool_rounds_for_model_with_attachments(
     // Resolved ONCE for the whole turn rather than per call: the entitlement is a
     // property of the turn, and a value re-derived per round is a value that can
     // disagree with itself mid-turn.
-    let allow_paid_providers = paid_providers_allowed(requested_model, zdr);
+    // The org's `web.paid_providers` switch (Wave 3 EP-9 W2) is read with the entitlement, once per turn.
+    let allow_paid_providers =
+        paid_providers_allowed(requested_model, zdr) && crate::org_agent_policy::org_allows_paid_providers(org_id);
     // Batched web search is decided once for the turn, so every call of the turn agrees, and its refs live only in
     // this map, dropped with the turn. `None` (the switch off) leaves every web-search path as it was.
     let turn_refs = web_search_batch_enabled().then(TurnRefs::default);
@@ -8587,6 +8628,9 @@ pub async fn run_tool_rounds_for_model_with_attachments(
     // The connected-account read is offered on a turn the person selected accounts for (WS23-S5). The
     // selection rides on the live sink, as the turn's clock does, so a caller without a sink offers nothing.
     let connector_turn = sink.and_then(crate::sse_events::RichEventSink::connector_turn);
+    // The turn's web-search provenance record, read from the sink as the connected-account selection is. Every
+    // answered search records on it, so the one line after the tool phase names them all.
+    let search_provenance = sink.and_then(crate::sse_events::RichEventSink::search_provenance);
     // The org's connected-app policy may hold the read back to Do mode (EP-10-S7). It is read only on a turn
     // that already offers the read, so every other turn makes no extra call.
     let connector_offered = connector_reads::offered(
@@ -9539,6 +9583,7 @@ pub async fn run_tool_rounds_for_model_with_attachments(
                     connector_turn,
                     retry_sink,
                     turn_refs_ref,
+                    search_provenance,
                 )
                 .await
             },
@@ -14296,6 +14341,33 @@ mod tests {
         assert!(office_preview_for(&over_cap, "budget.xlsx").is_none());
     }
 
+    /// A deck's preview keeps one thumbnail per slide up to the page cap, in page order, so a deck arrives with
+    /// its pictures in slide order. Any other kind keeps three, however many the verifier sent.
+    #[test]
+    fn deck_thumbs_cap() {
+        let thumbs: Vec<String> = (1..=45).map(|index| format!("thumb{index}")).collect();
+        let preview_of = |name: &str, kind: &str| {
+            let payload = serde_json::json!({
+                "verification": [{
+                    "name": name,
+                    "kind": kind,
+                    "level": "passed",
+                    "checks": [],
+                    "stats": { "render_pages": 45 },
+                }],
+                "previews": [{ "name": name, "pdf_b64": "JVBERi0=", "thumbs_b64": thumbs }],
+            });
+            office_preview_for(&payload, name).expect("a preview with a report")
+        };
+        let deck = preview_of("kvartal.pptx", "pptx");
+        assert_eq!(deck.thumbs.len(), PREVIEW_MAX_DECK_THUMBS);
+        assert_eq!(deck.thumbs.first().map(String::as_str), Some("data:image/png;base64,thumb1"));
+        assert_eq!(deck.thumbs.last().map(String::as_str), Some("data:image/png;base64,thumb40"));
+        assert_eq!(deck.url, "data:application/pdf;base64,JVBERi0=");
+        let sheet = preview_of("budget.xlsx", "xlsx");
+        assert_eq!(sheet.thumbs.len(), PREVIEW_MAX_THUMBS);
+    }
+
     /// A `code_interpreter` result that delivers one Office file and the verifier's report on it.
     fn one_office_file(name: &str, level: &str, checks: Value) -> String {
         serde_json::json!({
@@ -16711,6 +16783,7 @@ mod tests {
             None,
             None,
             refs,
+            None,
         )
         .await
     }
@@ -16753,6 +16826,86 @@ mod tests {
             .map(|request| serde_json::from_slice(&request.body).expect("a JSON search body"))
             .collect();
         (outcome, bodies)
+    }
+
+    /// A `web_search` call records the provider behind each answered hit on the turn's record. A hit that names
+    /// no provider of its own takes the envelope's, so the line never loses a hit to a missing key (EP-9 W1).
+    #[tokio::test]
+    async fn a_search_records_each_hits_provider_on_the_turn_record() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/v1/search"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "provider": "smart_router",
+                "results": [
+                    {"url": "https://a.test/1", "title": "A", "snippet": "a", "source": "brave"},
+                    {"url": "https://b.test/2", "title": "B", "snippet": "b", "source": "searxng"},
+                    {"url": "https://c.test/3", "title": "C", "snippet": "c"}
+                ]
+            })))
+            .mount(&server)
+            .await;
+        let mut state = crate::state::AppState::new();
+        state.quarry = crate::quarry::Client::new(crate::quarry::Config {
+            base_url: server.uri(),
+            token: "test-token".to_owned(),
+            timeout: std::time::Duration::from_secs(5),
+        });
+        let turn = crate::search_provenance::SearchProvenanceTurn::new(
+            crate::search_provenance::Route::FreeChain,
+        );
+        let call = tool_call("web_search", r#"{"query":"alpha query"}"#);
+        let outcome = dispatch_tool_with_cost(
+            &state,
+            "run_test",
+            "org_test",
+            "user_test",
+            "thread_test",
+            "",
+            &[],
+            "",
+            None,
+            None,
+            "",
+            "",
+            None,
+            false,
+            false,
+            false,
+            &call,
+            None,
+            None,
+            None,
+            None,
+            &crate::turn_attachments::ValidatedAttachments::none(),
+            &[],
+            None,
+            None,
+            None,
+            Some(&turn),
+        )
+        .await;
+        assert!(outcome.error.is_none(), "{:?}", outcome.error);
+        assert_eq!(
+            turn.take_provenance().map(|provenance| provenance.providers),
+            Some(vec![
+                crate::search_provenance::ProviderUse {
+                    id: "brave",
+                    label: "Brave Search",
+                    hits: 1,
+                },
+                crate::search_provenance::ProviderUse {
+                    id: "searxng",
+                    label: "SearXNG metasearch",
+                    hits: 1,
+                },
+                crate::search_provenance::ProviderUse {
+                    id: "verevon",
+                    label: "Verevon search",
+                    hits: 1,
+                },
+            ])
+        );
     }
 
     /// Every query of a batched call is searched with the turn's own paid-provider entitlement, and no other.

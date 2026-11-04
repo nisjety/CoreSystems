@@ -8,8 +8,10 @@ fails is probably broken, which is why the caller reports the result as advisory
 
 With a second argument of `render` it also converts the file with LibreOffice
 into `render/` (a PDF, up to three PNG pages, and for xlsx a recalculated copy
-that is only read, never shipped). Every render failure is a warning: a missing
-or slow converter must not turn a clean file into a failed one.
+that is only read, never shipped). A third argument asks for that many PNG pages
+of a deck, one per slide, at most 40 (`OFFICE_PREVIEW_PAGES`, EP-5 S9). Every
+render failure is a warning: a missing or slow converter must not turn a clean
+file into a failed one.
 
 Exit status is 0 whenever a report was printed, including for a broken file. A
 non-zero exit means the checker itself could not run, and the caller reports
@@ -252,8 +254,14 @@ RENDER_BUDGET_SECS = 50
 POPPLER_TIMEOUT_SECS = 20
 RENDER_DIR = "render"
 PREVIEW_PDF = os.path.join(RENDER_DIR, "preview.pdf")
+# The pages a preview draws, unless the caller asks for more of a deck, up to
+# PREVIEW_PAGES_MAX (the deck slide cap, EP-5 D11).
 PREVIEW_PAGES = 3
+PREVIEW_PAGES_MAX = 40
 PREVIEW_DPI = 60
+# A deck with more thumbnails than PREVIEW_PAGES is drawn smaller, so the set
+# stays under the verifier's byte budget. The default keeps the old size.
+DECK_PREVIEW_DPI = 48
 # Built into the image by the Dockerfile. Copied per check, so a run never
 # changes the profile the next run starts from.
 PREWARMED_PROFILE = "/opt/verevon/lo-profile"
@@ -442,7 +450,14 @@ def font_rendered(family, rendered):
     return any(name.startswith(want) for name in rendered for want in wanted)
 
 
-def render_pdf_facts(pdf, declared, report):
+def page_number(path):
+    # pdftoppm pads a page number to a width of its own choosing, so the names
+    # sort as text only while every page has the same number of digits.
+    match = re.search(r"(\d+)\.png$", path)
+    return int(match.group(1)) if match else 0
+
+
+def render_pdf_facts(pdf, declared, preview_pages, dpi, report):
     info = poppler(["pdfinfo", pdf], report)
     pages = None
     if info is not None:
@@ -481,17 +496,17 @@ def render_pdf_facts(pdf, declared, report):
                     % ", ".join(missing[:3]),
                 )
 
-    if poppler(["pdftoppm", "-r", str(PREVIEW_DPI), "-png", "-f", "1", "-l", str(PREVIEW_PAGES), pdf,
+    if poppler(["pdftoppm", "-r", str(dpi), "-png", "-f", "1", "-l", str(preview_pages), pdf,
                 os.path.join(RENDER_DIR, "page")], report) is not None:
-        pages_png = sorted(glob.glob(os.path.join(RENDER_DIR, "page-*.png")))
+        pages_png = sorted(glob.glob(os.path.join(RENDER_DIR, "page-*.png")), key=page_number)
         for index, path in enumerate(pages_png, 1):
             os.replace(path, os.path.join(RENDER_DIR, "thumb-%d.png" % index))
 
-    text = poppler(["pdftotext", "-layout", "-f", "1", "-l", str(PREVIEW_PAGES), pdf, "-"], report)
+    text = poppler(["pdftotext", "-layout", "-f", "1", "-l", str(preview_pages), pdf, "-"], report)
     if text is not None:
         # pdftotext ends every page with a form feed, so the last piece is not a page.
         page_texts = text.split("\f")[:-1]
-        blank = [str(index) for index, page in enumerate(page_texts[:PREVIEW_PAGES], 1) if not page.strip()]
+        blank = [str(index) for index, page in enumerate(page_texts[:preview_pages], 1) if not page.strip()]
         if blank:
             report.warn("blank_pages", "page %s has no text; check that it is not blank" % ", ".join(blank))
 
@@ -528,7 +543,7 @@ def recalc_errors(original, recalculated, report):
         )
 
 
-def render_check(subject, kind, report):
+def render_check(subject, kind, pages, report):
     soffice = shutil.which("soffice")
     if soffice is None:
         report.warn("render", "LibreOffice is not installed in this image, so the render checks were skipped")
@@ -544,7 +559,8 @@ def render_check(subject, kind, report):
         if produced is None:
             return
         os.replace(produced, PREVIEW_PDF)
-    render_pdf_facts(PREVIEW_PDF, declared_fonts(subject, kind), report)
+    dpi = DECK_PREVIEW_DPI if kind == "pptx" and pages > PREVIEW_PAGES else PREVIEW_DPI
+    render_pdf_facts(PREVIEW_PDF, declared_fonts(subject, kind), pages, dpi, report)
     if kind == "xlsx":
         recalculated = soffice_convert(
             soffice, profile, subject, os.path.join(RENDER_DIR, "recalc"),
@@ -554,9 +570,19 @@ def render_check(subject, kind, report):
             recalc_errors(subject, recalculated, report)
 
 
-def main():
-    if len(sys.argv) not in (2, 3) or (len(sys.argv) == 3 and sys.argv[2] != "render"):
+def preview_pages_arg(raw):
+    # The caller clamps OFFICE_PREVIEW_PAGES, so a value it could not have sent is
+    # refused here, which the caller reports as a skipped check, not rendered.
+    if not (raw.isascii() and raw.isdigit()) or not 1 <= int(raw) <= PREVIEW_PAGES_MAX:
         sys.exit(2)
+    return int(raw)
+
+
+def main():
+    # The arguments are the file, then `render`, then for a deck the pages to draw.
+    if len(sys.argv) not in (2, 3, 4) or (len(sys.argv) > 2 and sys.argv[2] != "render"):
+        sys.exit(2)
+    pages = preview_pages_arg(sys.argv[3]) if len(sys.argv) == 4 else PREVIEW_PAGES
     subject = sys.argv[1]
     extension = subject.rsplit(".", 1)[-1].lower() if "." in subject else ""
     if extension not in ("docx", "xlsx", "pptx", "pdf"):
@@ -570,9 +596,9 @@ def main():
     except Exception as error:  # noqa: BLE001 - any parse failure is a finding about the file
         report.fail("structure", "the file structure could not be read (%s)" % type(error).__name__)
     # A file that already failed the structure check is not worth the render time.
-    if len(sys.argv) == 3 and report.level() != "failed":
+    if len(sys.argv) > 2 and report.level() != "failed":
         try:
-            render_check(subject, extension, report)
+            render_check(subject, extension, pages, report)
         except Exception as error:  # noqa: BLE001 - a render fault is advisory, never a file fault
             report.warn("render", "the render checks could not run (%s)" % type(error).__name__)
     report.emit()

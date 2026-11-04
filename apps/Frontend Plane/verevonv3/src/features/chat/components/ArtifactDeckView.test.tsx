@@ -43,6 +43,10 @@ function preview(): GeneratedFilePreview {
   }
 }
 
+function previewWith(pages: number, thumbs: string[]): GeneratedFilePreview {
+  return { ...preview(), pages, thumbs }
+}
+
 function renderDeck(
   options: { content?: string; file?: GeneratedFile; fallback?: ArtifactRendererProps['fallback'] } = {},
 ) {
@@ -60,6 +64,11 @@ function cards(container: HTMLElement): HTMLButtonElement[] {
 
 function titles(container: HTMLElement): Array<string | null | undefined> {
   return cards(container).map((card) => card.querySelector('.verevon-deck__title')?.textContent)
+}
+
+/** The picture each card draws, or null where it draws none. */
+function pictures(container: HTMLElement): Array<string | null> {
+  return cards(container).map((card) => card.querySelector('img.verevon-deck__thumb')?.getAttribute('src') ?? null)
 }
 
 describe('ArtifactDeckView', () => {
@@ -192,5 +201,30 @@ describe('ArtifactDeckView', () => {
     })
     expect(screen.getByText('No slides yet')).toBeTruthy()
     expect(container.querySelectorAll('.verevon-deck__card')).toHaveLength(0)
+  })
+
+  it('draws each slide render as its card picture when the render has one per slide, in order', () => {
+    const thumbs = [
+      'data:image/png;base64,AAAA',
+      'data:image/png;base64,BBBB',
+      'data:image/png;base64,CCCC',
+      'data:image/png;base64,DDDD',
+    ]
+    const { container } = renderDeck({ file: generatedFile({ preview: previewWith(4, thumbs) }) })
+    expect(pictures(container)).toEqual(thumbs)
+    expect(cards(container).every((card) => card.classList.contains('verevon-deck__card--picture'))).toBe(true)
+  })
+
+  it('draws no card picture when the render has a different page count from the slides', () => {
+    const thumbs = ['data:image/png;base64,AAAA', 'data:image/png;base64,BBBB', 'data:image/png;base64,CCCC']
+    const { container } = renderDeck({ file: generatedFile({ preview: previewWith(3, thumbs) }) })
+    expect(pictures(container)).toEqual([null, null, null, null])
+    expect(cards(container).some((card) => card.classList.contains('verevon-deck__card--picture'))).toBe(false)
+  })
+
+  it('draws no card picture when the render kept only some of its pages', () => {
+    const thumbs = ['data:image/png;base64,AAAA', 'data:image/png;base64,BBBB']
+    const { container } = renderDeck({ file: generatedFile({ preview: previewWith(4, thumbs) }) })
+    expect(pictures(container)).toEqual([null, null, null, null])
   })
 })
