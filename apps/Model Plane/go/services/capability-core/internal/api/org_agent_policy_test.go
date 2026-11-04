@@ -172,6 +172,10 @@ func TestOrgAgentPolicyValidationRefusesBeforeTheRegistryIsTouched(t *testing.T)
 		{name: "ids under a mode that names none", body: `{"settings":{"ext.mcp_servers":{"mode":"any","ids":["srv.one"]}}}`, status: http.StatusBadRequest, code: "invalid_value"},
 		{name: "an id that is not an identifier", body: `{"settings":{"ext.mcp_servers":{"mode":"approved_only","ids":["has space"]}}}`, status: http.StatusBadRequest, code: "invalid_value"},
 		{name: "an allow-list with an extra field", body: `{"settings":{"ext.mcp_servers":{"mode":"approved_only","ids":["srv.one"],"extra":1}}}`, status: http.StatusBadRequest, code: "invalid_value"},
+		{name: "a fan-out cap written as text", body: `{"settings":{"research.max_fan_out_items":"8"}}`, status: http.StatusBadRequest, code: "invalid_value"},
+		{name: "a fan-out cap that is a fraction", body: `{"settings":{"research.max_fan_out_items":8.5}}`, status: http.StatusBadRequest, code: "invalid_value"},
+		{name: "a negative fan-out cap", body: `{"settings":{"research.max_fan_out_items":-1}}`, status: http.StatusBadRequest, code: "invalid_value"},
+		{name: "a fan-out cap past sixteen", body: `{"settings":{"research.max_fan_out_items":17}}`, status: http.StatusBadRequest, code: "invalid_value"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -312,6 +316,34 @@ func TestOrgAgentPolicyDigestFollowsTheDocument(t *testing.T) {
 	changed, _, _ := orgAgentPolicyDigest(defaults)
 	if changed == first {
 		t.Fatal("a changed document kept its digest")
+	}
+}
+
+// The wide-research item cap (EP-2 S8) is a whole number: its default is 8, a stored value reads
+// back as the same token, 0 turns wide research off, and a value above the ceiling is refused.
+func TestOrgAgentPolicyFanOutItemsIsATightenOnlyCount(t *testing.T) {
+	const key = "research.max_fan_out_items"
+	if got := orgAgentPolicyDefaults()[key]; !reflect.DeepEqual(got, 8) {
+		t.Fatalf("default = %#v, want 8", got)
+	}
+	ceiling := loosestOrgAgentCeiling()
+	if ceiling[key] != "16" {
+		t.Fatalf("loosest = %q, want 16", ceiling[key])
+	}
+	// encoding/json hands the handler a float64, as a PUT body decodes.
+	settings, refusal := validateOrgAgentSettings(map[string]any{key: float64(0)}, ceiling)
+	if refusal != nil || !reflect.DeepEqual(settings[key], 0) {
+		t.Fatalf("0 = %#v %v, want the stored count 0", settings[key], refusal)
+	}
+	if token := orgAgentTokenOf(float64(5)); token != "5" {
+		t.Fatalf("a stored 5 reads back as %q", token)
+	}
+	ceiling[key] = "4"
+	if _, refusal := validateOrgAgentSettings(map[string]any{key: float64(10)}, ceiling); refusal == nil || refusal.code != "exceeds_platform_ceiling" {
+		t.Fatalf("10 under a ceiling of 4 = %v, want exceeds_platform_ceiling", refusal)
+	}
+	if _, refusal := validateOrgAgentSettings(map[string]any{key: float64(3)}, ceiling); refusal != nil {
+		t.Fatalf("3 under a ceiling of 4 refused: %s", refusal.code)
 	}
 }
 

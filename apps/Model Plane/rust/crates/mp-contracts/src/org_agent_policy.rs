@@ -38,6 +38,9 @@ pub enum Kind {
     Bool,
     /// `{"mode": <from strictness_order>, "ids": [...]}`. Only `approved_only` names ids.
     AllowList,
+    /// A JSON whole number whose decimal form is in `strictness_order`, smallest (strictest)
+    /// first, so a count is tighten-only by the same rank as every other kind.
+    Integer,
 }
 
 impl Kind {
@@ -46,8 +49,30 @@ impl Kind {
             Self::Enum => "enum",
             Self::Bool => "bool",
             Self::AllowList => "allow_list",
+            Self::Integer => "integer",
         }
     }
+}
+
+/// The org's wide-research item cap (Wave 3 EP-2 S8, D5): the most items one wide-research run
+/// may fan out. `0` turns wide research off for the org.
+pub const RESEARCH_MAX_FAN_OUT_ITEMS: &str = "research.max_fan_out_items";
+
+/// The value of [`RESEARCH_MAX_FAN_OUT_ITEMS`] an org with no row has: execution-core's default
+/// child ceiling, so an org that never sets the key fans out exactly as wide as a run did before.
+pub const DEFAULT_MAX_FAN_OUT_ITEMS: u32 = 8;
+
+/// The loosest value [`RESEARCH_MAX_FAN_OUT_ITEMS`] accepts: execution-core's fan-out ceiling.
+pub const MAX_FAN_OUT_ITEMS: u32 = 16;
+
+/// Reads a stored [`RESEARCH_MAX_FAN_OUT_ITEMS`] value: a whole number from 0 to
+/// [`MAX_FAN_OUT_ITEMS`]. Anything else is `None`, and the reader takes the fail-closed `0`.
+#[must_use]
+pub fn fan_out_items_of(value: &Value) -> Option<u32> {
+    value
+        .as_u64()
+        .and_then(|count| u32::try_from(count).ok())
+        .filter(|count| *count <= MAX_FAN_OUT_ITEMS)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -153,6 +178,20 @@ pub const SETTINGS: &[SettingDef] = &[
         fail_closed_value: "off",
         status: Status::Reserved,
     },
+    // Wave 3 EP-2 S8 (D5): the wide-research item cap. Enforced by the gateway when a run starts
+    // (behind WIDE_RESEARCH_ENTRY_ENABLED), which sends it to execution-core as the run's
+    // `WideResearchRequest.item_cap`; `0` turns wide research off.
+    SettingDef {
+        key: RESEARCH_MAX_FAN_OUT_ITEMS,
+        kind: Kind::Integer,
+        strictness_order: &[
+            "0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15",
+            "16",
+        ],
+        default: "8",
+        fail_closed_value: "0",
+        status: Status::Enforced,
+    },
 ];
 
 /// Why a document is refused. The codes are the closed vocabulary capability-core
@@ -252,6 +291,19 @@ fn parse(def: &SettingDef, written: &Value) -> Result<(String, Value), Refusal> 
             Ok((token.to_owned(), Value::Bool(flag)))
         }
         Kind::AllowList => parse_allow_list(def, written),
+        Kind::Integer => {
+            // `as_u64` refuses a fraction, a negative and a quoted number, so `8.5`, `-1` and `"8"`
+            // are invalid rather than rounded or read as text.
+            let token = written
+                .as_u64()
+                .map(|count| count.to_string())
+                .ok_or(Refusal::InvalidValue)?;
+            if !def.strictness_order.contains(&token.as_str()) {
+                return Err(Refusal::InvalidValue);
+            }
+            let value = value_of(def, &token);
+            Ok((token, value))
+        }
     }
 }
 
@@ -297,6 +349,9 @@ fn value_of(def: &SettingDef, token: &str) -> Value {
             canonical.insert("ids".to_owned(), Value::Array(Vec::new()));
             Value::Object(canonical)
         }
+        Kind::Integer => token
+            .parse::<u64>()
+            .map_or(Value::Null, |count| Value::Number(count.into())),
     }
 }
 
@@ -457,6 +512,58 @@ mod tests {
             ),
             Err(Refusal::InvalidValue)
         );
+    }
+
+    #[test]
+    fn org_agent_policy_fan_out_items_defaults_to_eight_and_is_a_number() {
+        let settings = defaults();
+        assert_eq!(settings[RESEARCH_MAX_FAN_OUT_ITEMS], json!(8));
+        assert_eq!(
+            fan_out_items_of(&settings[RESEARCH_MAX_FAN_OUT_ITEMS]),
+            Some(DEFAULT_MAX_FAN_OUT_ITEMS)
+        );
+        let accepted = validate(
+            &doc(&json!({"research.max_fan_out_items": 5})),
+            &loosest_ceiling(),
+        )
+        .expect("5 is inside the order");
+        assert_eq!(accepted[RESEARCH_MAX_FAN_OUT_ITEMS], json!(5));
+    }
+
+    #[test]
+    fn org_agent_policy_fan_out_items_refuses_text_fractions_and_values_past_sixteen() {
+        for written in [json!("8"), json!(8.5), json!(-1), json!(17), json!(true)] {
+            assert_eq!(
+                validate(
+                    &doc(&json!({"research.max_fan_out_items": written.clone()})),
+                    &loosest_ceiling()
+                ),
+                Err(Refusal::InvalidValue),
+                "{written}"
+            );
+        }
+        assert_eq!(fan_out_items_of(&json!(17)), None);
+        assert_eq!(fan_out_items_of(&json!("4")), None);
+    }
+
+    #[test]
+    fn org_agent_policy_fan_out_items_is_tighten_only_and_zero_turns_it_off() {
+        let mut ceiling = loosest_ceiling();
+        assert_eq!(ceiling[RESEARCH_MAX_FAN_OUT_ITEMS], "16");
+        ceiling.insert(RESEARCH_MAX_FAN_OUT_ITEMS, "4");
+        assert_eq!(
+            validate(&doc(&json!({"research.max_fan_out_items": 10})), &ceiling),
+            Err(Refusal::ExceedsPlatformCeiling)
+        );
+        let off = validate(&doc(&json!({"research.max_fan_out_items": 0})), &ceiling)
+            .expect("0 is the strictest value");
+        assert_eq!(fan_out_items_of(&off[RESEARCH_MAX_FAN_OUT_ITEMS]), Some(0));
+        let def = SETTINGS
+            .iter()
+            .find(|def| def.key == RESEARCH_MAX_FAN_OUT_ITEMS)
+            .expect("the key is in the schema");
+        assert_eq!(def.fail_closed_value, "0");
+        assert_eq!(def.status, Status::Enforced);
     }
 
     #[test]

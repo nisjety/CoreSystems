@@ -352,6 +352,14 @@ fn cases() -> Vec<(&'static str, Value, Expect)> {
             with("agent_roles", json!([{"agent_ref": "a", "version": 1}])),
             None,
         ),
+        // EP-2 S8 (e_zdr_token_wide_research_run_refused): a wide-research run is a Do run, so a
+        // ZDR turn asking for one is refused with the `agentic` feature, before any model call.
+        (
+            "wide_research",
+            with("wide_research", json!({"item_cap": 5, "items": ["a", "b"]})),
+            refused("agentic"),
+        ),
+        ("wide_research", with("wide_research", Value::Null), None),
     ]
 }
 

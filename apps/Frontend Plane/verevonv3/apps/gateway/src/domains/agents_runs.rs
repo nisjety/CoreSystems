@@ -51,6 +51,11 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
             "/api/v1/agents/runs/{run_id}/plan-approval",
             post(approve_plan),
         )
+        // Wave 3 EP-2 S8: what a wide-research run would look like before it starts.
+        .route(
+            "/api/v1/agents/wide-research/estimate",
+            post(wide_research_estimate),
+        )
         // Per-org/user rate limiting, ordered like `orchestration.rs`:
         // `require_session` (written last → outer) runs first and inserts
         // `AuthenticatedUser`, so `rate_limit_middleware` (written first → inner)
@@ -312,4 +317,73 @@ pub(crate) async fn approve_plan(
     )
     .await;
     (status, body).into_response()
+}
+
+/// The fields of a wide-research estimate the SPA may send. Anything else in the body is dropped
+/// here, so the browser cannot name an org, a cap or a price source.
+#[derive(Debug, Deserialize, serde::Serialize)]
+struct WideResearchEstimateBody {
+    item_count: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    subscription_connection_id: Option<String>,
+}
+
+/// `POST /api/v1/agents/wide-research/estimate` — what a wide-research run of `item_count` items
+/// would look like before it starts (Wave 3 EP-2 S8), passed through as model-gateway answers it.
+/// Model-gateway reads the org's item cap from its own policy registry, refuses a zero-retention
+/// caller with the typed `agentic` refusal and answers 404 while its switch is off, so this layer
+/// adds no rule of its own beyond the closed body.
+async fn wide_research_estimate(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Json(body): Json<WideResearchEstimateBody>,
+) -> impl IntoResponse {
+    let token = model_token(&state, &user, &headers).await;
+    let session_token = session_token(&state, &user, &headers).await;
+    let url = format!("{}/v1/research/wide/estimate", state.model_gateway_url);
+    let (status, body) = proxy_model_json_with_session(
+        &state,
+        Method::POST,
+        &url,
+        serde_json::to_value(&body).ok(),
+        token.as_deref(),
+        session_token.as_deref(),
+        &user,
+    )
+    .await;
+    (status, body).into_response()
+}
+
+#[cfg(test)]
+mod wide_research_tests {
+    use super::*;
+
+    #[test]
+    fn the_estimate_body_keeps_only_its_own_fields() {
+        let body: WideResearchEstimateBody = serde_json::from_value(serde_json::json!({
+            "item_count": 10,
+            "model": "verevon-balance",
+            "org_id": "someone-else",
+            "cap": 100,
+        }))
+        .expect("unknown fields are dropped, not refused");
+        let forwarded = serde_json::to_value(&body).expect("serialisable");
+        assert_eq!(
+            forwarded,
+            serde_json::json!({"item_count": 10, "model": "verevon-balance"})
+        );
+    }
+
+    #[test]
+    fn the_estimate_body_needs_a_count() {
+        assert!(serde_json::from_value::<WideResearchEstimateBody>(serde_json::json!({
+            "model": "verevon-balance"
+        }))
+        .is_err());
+    }
 }

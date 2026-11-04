@@ -269,6 +269,29 @@ message RunAgentRequest {
   // which the run's hook engine enforces on every tool call. Absent when HOOKS_DO_RUNS is off
   // or the org has no rules, so the run is exactly as it was before the field existed.
   OrgPolicyContext org_policy = 24;
+
+  // A wide-research run started from the composer (Wave 3 EP-2 S8/S9; additive). Absent = an ordinary Do
+  // run, exactly as before the field existed. The gateway sets it only while WIDE_RESEARCH_ENTRY_ENABLED
+  // is on and never for a zero-retention turn; execution-core then bounds the run's delegations to
+  // `item_cap` and seeds the run's goal with the items. Field 25 is reserved for this message by the
+  // Wave 3 integration round A.
+  WideResearchRequest wide_research = 25;
+}
+
+// WideResearchRequest is what a person asked a wide-research run to cover (Wave 3 EP-2 S8/S9). It only
+// narrows the run: it can never raise the run's delegation ceiling above the platform's.
+message WideResearchRequest {
+  // The most items the run may fan out: the gateway sets it to the smaller of the person's ask and the
+  // org's `research.max_fan_out_items` agent-policy key. Zero means the org has wide research off, and
+  // execution-core refuses the run.
+  uint32 item_cap = 1;
+  // The person's items, one research question each, in the order they were given. Items past
+  // `item_cap` are not researched; execution-core names them in the answer.
+  repeated string items = 2;
+  // The fan-out batch a retry belongs to (EP-2 S9). Empty for a fresh wide-research run.
+  string batch_id = 3;
+  // The child run whose item a one-item retry runs again (EP-2 S9). Empty for a fresh run.
+  string retry_of_child_run_id = 4;
 }
 
 // OrgPolicyContext is the org's policy for one Do run (build plan WS25 S3). Its rules can only

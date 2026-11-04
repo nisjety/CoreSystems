@@ -597,6 +597,134 @@ pub fn merge_within(results: &[FanOutItemResult], budget: usize) -> String {
     out
 }
 
+/// Longest item a wide-research run seeds into its goal (Wave 3 EP-2 S8). An item is the person's
+/// own question; a longer one is cut, never dropped.
+pub const MAX_WIDE_RESEARCH_ITEM_CHARS: usize = 500;
+
+/// Most items one `WideResearchRequest` is read for, kept and dropped together, so a pasted list
+/// cannot grow the run's goal without bound. Items past it are neither researched nor named.
+pub const MAX_WIDE_RESEARCH_REQUEST_ITEMS: usize = 64;
+
+/// A wide-research run's items once the org-clamped cap is applied (Wave 3 EP-2 S8).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WideResearchPlan {
+    /// The cap the run is held to: `WideResearchRequest.item_cap`, at most
+    /// [`super::MAX_WIDE_RESEARCH_ITEMS`].
+    pub cap: u32,
+    /// The items the run researches, in the order given. Empty when the person chose a count
+    /// and left the model to split the question.
+    pub kept: Vec<String>,
+    /// The items past the cap, in the order given. The run does not research them, and the
+    /// answer names them ([`dropped_items_note`]).
+    pub dropped: Vec<String>,
+}
+
+/// What a wide-research run is refused with when its org has wide research off (`item_cap` 0).
+#[must_use]
+pub fn wide_research_off_refusal() -> String {
+    "Wide research is turned off for this organisation (its research.max_fan_out_items policy is \
+     0), so this run was not started."
+        .to_owned()
+}
+
+/// One item as the run's goal carries it: trimmed, control characters as spaces, at most
+/// [`MAX_WIDE_RESEARCH_ITEM_CHARS`] characters. `None` for an item with nothing left.
+fn wide_research_item(raw: &str) -> Option<String> {
+    let cleaned: String = raw
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    let cut: String = cleaned
+        .trim()
+        .chars()
+        .take(MAX_WIDE_RESEARCH_ITEM_CHARS)
+        .collect();
+    let item = cut.trim_end();
+    (!item.is_empty()).then(|| item.to_owned())
+}
+
+/// Splits a wide-research request's items at its cap.
+///
+/// # Errors
+///
+/// [`wide_research_off_refusal`] when the cap is 0: the org has wide research off, and the run
+/// is refused before its first round rather than started with no delegation allowed.
+pub fn plan_wide_research(items: &[String], item_cap: u32) -> Result<WideResearchPlan, String> {
+    let cap = item_cap.min(super::MAX_WIDE_RESEARCH_ITEMS);
+    if cap == 0 {
+        return Err(wide_research_off_refusal());
+    }
+    let mut kept: Vec<String> = items
+        .iter()
+        .take(MAX_WIDE_RESEARCH_REQUEST_ITEMS)
+        .filter_map(|raw| wide_research_item(raw))
+        .collect();
+    let at = kept.len().min(usize::try_from(cap).unwrap_or(usize::MAX));
+    let dropped = kept.split_off(at);
+    Ok(WideResearchPlan { cap, kept, dropped })
+}
+
+/// The block appended to a wide-research run's goal: the items to fan out, or the cap the model
+/// splits the question within, and the items past the cap it must name. The items are the
+/// person's own text, as the goal above them is.
+#[must_use]
+pub fn wide_research_goal_context(plan: &WideResearchPlan) -> String {
+    use std::fmt::Write as _;
+
+    let mut out = String::new();
+    if plan.kept.is_empty() {
+        let _ = writeln!(
+            out,
+            "Wide research: split the question above into at most {} self-contained research \
+             items and research them with one {RESEARCH_TOOL_NAME} call, then answer from its \
+             merged results.",
+            plan.cap
+        );
+    } else {
+        let _ = writeln!(
+            out,
+            "Wide research: research exactly these {} item(s) with one {RESEARCH_TOOL_NAME} call, \
+             one item per entry and in this order, then answer from its merged results.",
+            plan.kept.len()
+        );
+        for (index, item) in plan.kept.iter().enumerate() {
+            let _ = writeln!(out, "{}. {item}", index + 1);
+        }
+    }
+    if !plan.dropped.is_empty() {
+        let _ = writeln!(
+            out,
+            "These {} item(s) are past this organisation's limit of {} and are not researched. \
+             Say so in the answer and name them:",
+            plan.dropped.len(),
+            plan.cap
+        );
+        for item in &plan.dropped {
+            let _ = writeln!(out, "- {item}");
+        }
+    }
+    out
+}
+
+/// The note a finished wide-research answer ends with when items were past the cap: added by the
+/// run itself, so the person learns what was left out even if the model did not say it.
+#[must_use]
+pub fn dropped_items_note(plan: &WideResearchPlan) -> Option<String> {
+    if plan.dropped.is_empty() {
+        return None;
+    }
+    let mut note = format!(
+        "Not researched ({} item(s) past this organisation's limit of {}):",
+        plan.dropped.len(),
+        plan.cap
+    );
+    for item in &plan.dropped {
+        note.push_str("\n- ");
+        note.push_str(item);
+    }
+    Some(note)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -606,6 +734,65 @@ mod tests {
             id: id.to_owned(),
             goal: goal.to_owned(),
         }
+    }
+
+    fn items(names: &[&str]) -> Vec<String> {
+        names.iter().map(|name| (*name).to_owned()).collect()
+    }
+
+    #[test]
+    fn plan_wide_research_keeps_the_cap_and_names_the_rest() {
+        let plan = plan_wide_research(&items(&["a", "b", "c", "d", "e"]), 3).expect("cap 3");
+        assert_eq!(plan.cap, 3);
+        assert_eq!(plan.kept, items(&["a", "b", "c"]));
+        assert_eq!(plan.dropped, items(&["d", "e"]));
+        let note = dropped_items_note(&plan).expect("two items were dropped");
+        assert!(note.contains("limit of 3"), "{note}");
+        assert!(note.contains("\n- d") && note.contains("\n- e"), "{note}");
+        let context = wide_research_goal_context(&plan);
+        assert!(context.contains(RESEARCH_TOOL_NAME), "{context}");
+        assert!(context.contains("1. a\n2. b\n3. c\n"), "{context}");
+        assert!(context.contains("- d\n- e\n"), "{context}");
+    }
+
+    #[test]
+    fn plan_wide_research_with_cap_zero_is_refused() {
+        let refused = plan_wide_research(&items(&["a"]), 0).expect_err("the org has it off");
+        assert_eq!(refused, wide_research_off_refusal());
+    }
+
+    #[test]
+    fn plan_wide_research_holds_an_unclamped_cap_to_sixteen() {
+        let many: Vec<String> = (0..20).map(|n| format!("item {n}")).collect();
+        let plan = plan_wide_research(&many, 40).expect("cap held to 16");
+        assert_eq!(plan.cap, crate::subagent::MAX_WIDE_RESEARCH_ITEMS);
+        assert_eq!(plan.kept.len(), 16);
+        assert_eq!(plan.dropped.len(), 4);
+    }
+
+    #[test]
+    fn plan_wide_research_cleans_cuts_and_bounds_the_items() {
+        let long = "x".repeat(MAX_WIDE_RESEARCH_ITEM_CHARS + 50);
+        let plan = plan_wide_research(&items(&["  a\u{0}b  ", "   ", &long]), 8).expect("cap 8");
+        assert_eq!(plan.kept[0], "a b");
+        assert_eq!(plan.kept.len(), 2, "a blank item is skipped");
+        assert_eq!(plan.kept[1].chars().count(), MAX_WIDE_RESEARCH_ITEM_CHARS);
+
+        let flood: Vec<String> = (0..100).map(|n| format!("q{n}")).collect();
+        let plan = plan_wide_research(&flood, 16).expect("cap 16");
+        assert_eq!(
+            plan.kept.len() + plan.dropped.len(),
+            MAX_WIDE_RESEARCH_REQUEST_ITEMS
+        );
+    }
+
+    #[test]
+    fn plan_wide_research_without_items_leaves_the_split_to_the_model() {
+        let plan = plan_wide_research(&[], 5).expect("a count preset");
+        assert!(plan.kept.is_empty() && plan.dropped.is_empty());
+        assert_eq!(dropped_items_note(&plan), None);
+        let context = wide_research_goal_context(&plan);
+        assert!(context.contains("at most 5"), "{context}");
     }
 
     #[test]

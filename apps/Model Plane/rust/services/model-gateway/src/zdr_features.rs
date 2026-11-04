@@ -176,6 +176,9 @@ pub const FIELD_TREATMENTS: &[(&str, Treatment)] = &[
     ("agent_digest", Treatment::Honored),
     ("agent_tool_capability_ids", Treatment::Honored),
     ("agent_autonomy_cap", Treatment::Honored),
+    // EP-2 S8: a wide-research run is a Do run, refused under ZDR through the `agentic` feature it
+    // rides on; the estimate route refuses a ZDR caller the same way.
+    ("wide_research", refused_feature("agentic")),
 ];
 
 /// The feature strings the gateway reads, each with its treatment. A feature
@@ -295,6 +298,7 @@ pub fn invoke_field_names(request: &InvokeRequest) -> Vec<&'static str> {
         agent_digest: _,
         agent_tool_capability_ids: _,
         agent_autonomy_cap: _,
+        wide_research: _,
     } = request;
     vec![
         "content",
@@ -351,6 +355,7 @@ pub fn invoke_field_names(request: &InvokeRequest) -> Vec<&'static str> {
         "agent_digest",
         "agent_tool_capability_ids",
         "agent_autonomy_cap",
+        "wide_research",
     ]
 }
 
@@ -387,6 +392,9 @@ pub fn refusal(request: &InvokeRequest) -> Option<Refusal> {
         return feature("agentic");
     }
     if request.approved_plan_id.as_deref().is_some_and(|id| !id.trim().is_empty()) {
+        return feature("agentic");
+    }
+    if request.wide_research.as_ref().is_some_and(|wide| !wide.is_null()) {
         return feature("agentic");
     }
     if request.regenerate_of_message_id.as_deref().is_some_and(|id| !id.trim().is_empty())

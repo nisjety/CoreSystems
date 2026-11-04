@@ -25,6 +25,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"net/http"
 	"slices"
 	"sort"
@@ -75,6 +76,19 @@ var orgAgentPolicySettings = []orgAgentSetting{
 	{key: "mcp_tool_approval", kind: "enum", order: []string{"approved_only", "trust_annotations"}, def: "trust_annotations", failClose: "approved_only"},
 	{key: "user_hooks", kind: "enum", order: []string{"denied", "allowed"}, def: "allowed", failClose: "denied", reserved: true},
 	{key: "reference_uploads", kind: "enum", order: []string{"off", "on"}, def: "off", failClose: "off", reserved: true},
+	// Wave 3 EP-2 S8 (D5): the wide-research item cap, a whole number from 0 (wide research off)
+	// to 16. The gateway enforces it when a wide-research run starts.
+	{key: "research.max_fan_out_items", kind: "integer", order: orgAgentCountOrder(16), def: "8", failClose: "0"},
+}
+
+// orgAgentCountOrder is the strictness order of an integer key: "0" to max, smallest first,
+// so a count is tighten-only by the same rank as every other kind.
+func orgAgentCountOrder(ceiling int) []string {
+	order := make([]string, 0, ceiling+1)
+	for count := 0; count <= ceiling; count++ {
+		order = append(order, strconv.Itoa(count))
+	}
+	return order
 }
 
 // orgAgentRefusal is one closed refusal code and the status it answers with.
@@ -118,6 +132,10 @@ func orgAgentDefaultValue(def orgAgentSetting, token string) any {
 		return token == "true"
 	case "allow_list":
 		return map[string]any{"mode": token, "ids": []string{}}
+	case "integer":
+		// A token in the order is always a decimal count, so the parse cannot fail.
+		count, _ := strconv.Atoi(token)
+		return count
 	default:
 		return token
 	}
@@ -187,6 +205,18 @@ func parseOrgAgentValue(def orgAgentSetting, raw any) (string, any, *orgAgentRef
 		return "false", false, nil
 	case "allow_list":
 		return parseOrgAgentAllowList(def, raw)
+	case "integer":
+		// encoding/json decodes every number as float64: a fraction, a negative or a quoted
+		// number is refused rather than rounded or read as text.
+		number, ok := raw.(float64)
+		if !ok || number != math.Trunc(number) || number < 0 || number > math.MaxInt32 {
+			return "", nil, &orgAgentRefuseInvalidValue
+		}
+		token := strconv.FormatInt(int64(number), 10)
+		if !slices.Contains(def.order, token) {
+			return "", nil, &orgAgentRefuseInvalidValue
+		}
+		return token, int(number), nil
 	}
 	return "", nil, &orgAgentRefuseInvalidValue
 }
@@ -522,7 +552,11 @@ func (h *OrgAgentPolicyHandler) effective(w http.ResponseWriter, r *http.Request
 	}
 	settings := make([]orgAgentEffectiveSetting, 0, len(orgAgentPolicySettings))
 	for _, def := range orgAgentPolicySettings {
-		value := row.Settings[def.key]
+		value, stored := row.Settings[def.key]
+		if !stored {
+			// A document written before the key existed holds the key's default.
+			value = orgAgentDefaultValue(def, def.def)
+		}
 		source := "platform_default"
 		if row.Revision > 0 && orgAgentTokenOf(value) != def.def {
 			source = "org_policy"
@@ -552,6 +586,12 @@ func orgAgentTokenOf(value any) string {
 	case map[string]any:
 		mode, _ := typed["mode"].(string)
 		return mode
+	case float64:
+		// A stored integer key, read back from the JSONB document.
+		return strconv.FormatInt(int64(typed), 10)
+	case int:
+		// An integer key's default, before it was ever stored.
+		return strconv.Itoa(typed)
 	}
 	return ""
 }

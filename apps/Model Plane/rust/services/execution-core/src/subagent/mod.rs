@@ -90,6 +90,25 @@ pub fn resolve_child_ceiling(requested: Option<u32>, org_ceiling: Option<u32>) -
     wanted.min(org).min(MAX_CHILDREN_CEILING)
 }
 
+/// The most items a wide-research run may fan out (Wave 3 EP-2 S8): the hard maximum of the org
+/// agent-policy key `research.max_fan_out_items`. An `item_cap` above it, from a gateway that clamped
+/// nothing, is held to it here.
+pub const MAX_WIDE_RESEARCH_ITEMS: u32 = 16;
+
+/// The per-run child ceiling of a wide-research run (Wave 3 EP-2 S8).
+///
+/// `item_cap` is `WideResearchRequest.item_cap`, which the gateway sets to the smaller of the
+/// person's ask and the org's item cap, so it is passed as the org ceiling and can only tighten.
+/// An unspecified `requested` takes the item cap instead of [`DEFAULT_MAX_CHILDREN`], so a cap of
+/// sixteen is not silently cut to eight; a stated `requested` still tightens. A cap of zero
+/// resolves to zero: the org has wide research off and no delegation is admitted.
+#[must_use]
+pub fn wide_research_child_ceiling(requested: Option<u32>, item_cap: u32) -> u32 {
+    let cap = item_cap.min(MAX_WIDE_RESEARCH_ITEMS);
+    let wanted = requested.filter(|&n| n != 0).unwrap_or(cap);
+    resolve_child_ceiling(Some(wanted), Some(cap)).min(cap)
+}
+
 /// Refuse a delegation that would exceed `ceiling` (the run's own resolved
 /// value from [`resolve_child_ceiling`] — no longer a single global constant).
 ///
@@ -325,6 +344,26 @@ mod tests {
         );
         assert_eq!(resolve_child_ceiling(Some(u32::MAX), None), MAX_CHILDREN_CEILING);
         assert_eq!(resolve_child_ceiling(None, Some(u32::MAX)), DEFAULT_MAX_CHILDREN);
+    }
+
+    #[test]
+    fn wide_research_child_ceiling_is_the_org_clamped_item_cap() {
+        // The person asked for 16, the org allows 8: the gateway sent 8, and 8 is the ceiling.
+        assert_eq!(wide_research_child_ceiling(None, 8), 8);
+        // A cap above the default is not cut back to the default of eight.
+        assert_eq!(wide_research_child_ceiling(None, 16), 16);
+        // A stated request still tightens; it never widens past the cap.
+        assert_eq!(wide_research_child_ceiling(Some(4), 10), 4);
+        assert_eq!(wide_research_child_ceiling(Some(50), 10), 10);
+        // A gateway that clamped nothing is held to the key's hard maximum.
+        assert_eq!(wide_research_child_ceiling(None, 40), MAX_WIDE_RESEARCH_ITEMS);
+    }
+
+    #[test]
+    fn wide_research_child_ceiling_of_zero_admits_no_delegation() {
+        assert_eq!(wide_research_child_ceiling(None, 0), 0);
+        assert_eq!(wide_research_child_ceiling(Some(8), 0), 0);
+        assert!(guard_child_ceiling(0, wide_research_child_ceiling(None, 0)).is_err());
     }
 
     #[test]

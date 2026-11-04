@@ -64,7 +64,13 @@ fn org_agent_policy_golden_defaults_are_the_documented_document() {
         let key = row["key"].as_str().expect("key is text");
         let default = row["default"].as_str().expect("default is text");
         let value = &settings[key];
+        // An integer key's default is a number; its token is the decimal form the golden holds.
+        let number;
         let in_force = match value {
+            Value::Number(count) => {
+                number = count.to_string();
+                number.as_str()
+            }
             Value::String(text) => text.as_str(),
             Value::Bool(flag) => {
                 if *flag {

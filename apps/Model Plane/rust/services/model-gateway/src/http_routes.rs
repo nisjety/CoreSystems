@@ -400,6 +400,12 @@ fn authed_routes() -> Router<AppState> {
         // Browser reasoning: Model Plane proposes one safe browser action from
         // Quarry evidence; Quarry remains the only executor/capture layer.
         .route("/v1/browser/suggest-action", post(browser_suggest_action))
+        // Wave 3 EP-2 S8: what a wide-research run would look like before it starts. Pure compute;
+        // 404 while WIDE_RESEARCH_ENTRY_ENABLED is off.
+        .route(
+            "/v1/research/wide/estimate",
+            post(wide_research_estimate_route),
+        )
         // Durable browser-agent run (Phase 2) — start/pause/resume/stop a
         // bounded multi-step browser-agent loop; progress streams over the
         // existing `/v1/runs/:run_id/events` route above.
@@ -474,6 +480,10 @@ fn orchestration_routes() -> Router<AppState> {
         .route(
             "/v1/orchestration/approvals/:approval_id/quarantine-preview",
             get(get_quarantine_preview),
+        )
+        .route(
+            "/v1/orchestration/approvals/:approval_id/preview",
+            get(get_approval_preview),
         )
         .route(
             "/v1/orchestration/threads/:thread_id/lineage",
@@ -1549,6 +1559,106 @@ async fn get_quarantine_preview(
             "format": "plain_text",
         }
     })))
+}
+
+/// The full-draft preview switch (EP-10-S1). Off: the route answers 404 `preview_unavailable` and
+/// nothing reaches Session Core. Only the literal `true` enables it.
+const APPROVAL_WRITE_PREVIEW_ENV: &str = "APPROVAL_WRITE_PREVIEW_ENABLED";
+
+fn approval_write_preview_enabled() -> bool {
+    mp_contracts::loop_fold::switch_from(std::env::var(APPROVAL_WRITE_PREVIEW_ENV).ok().as_deref())
+}
+
+/// `GET /v1/orchestration/approvals/{id}/preview` - see [`approval_preview`].
+async fn get_approval_preview(
+    state: State<AppState>,
+    claims: Extension<Claims>,
+    bearer: VerifiedModelBearer,
+    path: Path<String>,
+) -> Result<Json<Value>, HttpJsonError> {
+    approval_preview(state, claims, bearer, path, approval_write_preview_enabled()).await
+}
+
+/// The full draft a pending approval would release, `{data: {preview}}` (EP-10-S1, decision D4).
+/// Session Core decrypts the descriptor for the run's owner only and shapes it; the gateway adds
+/// nothing and logs nothing of it. A zero-retention bearer is refused before anything is read
+/// (`continuation_gate`, as for a decision), and Session Core refuses a waived one. The org is the
+/// verified JWT org. Every way of not seeing a draft reads as the same 404.
+async fn approval_preview(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    bearer: VerifiedModelBearer,
+    Path(approval_id): Path<String>,
+    enabled: bool,
+) -> Result<Json<Value>, HttpJsonError> {
+    if !enabled {
+        return Err(run_trace_error(
+            StatusCode::NOT_FOUND,
+            "preview_unavailable",
+            "the approval preview is not available",
+        ));
+    }
+    crate::zdr_posture::continuation_gate(&claims)?;
+    let response = state
+        .orchestration_client
+        .clone()
+        .get_approval_preview(authenticated_session_request(
+            mp_contracts::model_plane::v1::GetApprovalPreviewRequest {
+                approval_id,
+                org_id: claims.org_id.clone(),
+            },
+            &bearer,
+        )?)
+        .await
+        .map_err(|status| approval_preview_status_to_http(&status))?
+        .into_inner();
+    let preview = response
+        .preview
+        .as_ref()
+        .ok_or_else(|| approval_preview_status_to_http(&tonic::Status::not_found("no preview")))?;
+    Ok(Json(json!({ "data": { "preview": approval_preview_value(preview) } })))
+}
+
+/// Session Core's answer to a preview read. A typed ZDR refusal keeps its catalogue body; another
+/// owner's approval, a decided or expired one and an older Session Core all read as one 404.
+fn approval_preview_status_to_http(status: &tonic::Status) -> HttpJsonError {
+    if mp_contracts::zdr_refusal::Refusal::from_status(status).is_some() {
+        return grpc_status_to_http(status);
+    }
+    match status.code() {
+        tonic::Code::NotFound | tonic::Code::PermissionDenied | tonic::Code::Unimplemented => {
+            run_trace_error(
+                StatusCode::NOT_FOUND,
+                "approval_not_found",
+                "no such pending approval",
+            )
+        }
+        tonic::Code::InvalidArgument => run_trace_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_approval_preview",
+            "the approval id was refused",
+        ),
+        _ => grpc_status_to_http(status),
+    }
+}
+
+fn approval_preview_value(preview: &mp_contracts::model_plane::v1::ApprovalPreview) -> Value {
+    json!({
+        "kind": preview.kind,
+        "provider": preview.provider,
+        "operation": preview.operation,
+        "connection_id": preview.connection_id,
+        "to": preview.to,
+        "subject": preview.subject,
+        "body_text": preview.body_text,
+        "has_html": preview.has_html,
+        "is_reply": preview.is_reply,
+        "raw_only": preview.raw_only,
+        "editable_fields": preview.editable_fields,
+        "action_fingerprint": preview.action_fingerprint,
+        "revision": preview.revision,
+        "format": "plain_text",
+    })
 }
 
 async fn get_subagent_lineage(
@@ -8491,6 +8601,9 @@ fn approval_cause_value(cause: &ApprovalCause) -> Value {
         "effect_class": empty_to_null(&cause.effect_class),
         "risk_category": empty_to_null(&cause.risk_category),
         "rule_id": empty_to_null(&cause.rule_id),
+        "assist_kind": empty_to_null(&cause.assist_kind),
+        "assist_origin": empty_to_null(&cause.assist_origin),
+        "host": empty_to_null(&cause.host),
         "scope_options": offered_scope_options(cause),
         "step_up_required": step_up_projected(cause, ApprovalStepUpGate::from_env()),
     })
@@ -9869,6 +9982,491 @@ pub struct InvokeRequest {
     /// to the WS25-S6 strictest-wins mode resolve, so it can only lower the result.
     #[serde(default)]
     pub agent_autonomy_cap: Option<serde_json::Value>,
+    /// Wave 3 EP-2 S8 — a wide-research run from the composer's "Bred forskning" entry:
+    /// `{item_cap, items}`. Kept as raw JSON and read only on an agentic turn while
+    /// `WIDE_RESEARCH_ENTRY_ENABLED` is on ([`wide_research_request`]), so a body carrying it is
+    /// parsed exactly as before with the switch off. It only narrows a run: the gateway clamps
+    /// `item_cap` to the org's `research.max_fan_out_items`.
+    #[serde(default, alias = "wideResearch")]
+    pub wide_research: Option<serde_json::Value>,
+}
+
+/// The switch of the wide-research entry (Wave 3 EP-2 S8). Opt-in: only the literal `true` enables
+/// it. Off, `POST /v1/research/wide/estimate` answers 404 and `InvokeRequest.wide_research` is never
+/// read, so a run is exactly what it was before the switch existed.
+pub const WIDE_RESEARCH_ENTRY_ENV: &str = "WIDE_RESEARCH_ENTRY_ENABLED";
+
+/// Whether the wide-research entry is on in this process.
+#[must_use]
+pub fn wide_research_entry_enabled() -> bool {
+    wide_research_entry_enabled_with(&|key| std::env::var(key).ok())
+}
+
+fn wide_research_entry_enabled_with(get: &dyn Fn(&str) -> Option<String>) -> bool {
+    get(WIDE_RESEARCH_ENTRY_ENV).is_some_and(|value| value.trim() == "true")
+}
+
+/// The most items one wide-research run fans out: the hard maximum of the org policy key and of
+/// execution-core's `subagent::MAX_WIDE_RESEARCH_ITEMS`.
+pub const MAX_WIDE_RESEARCH_ITEMS: u32 = mp_contracts::org_agent_policy::MAX_FAN_OUT_ITEMS;
+
+/// Most items a wide-research request may carry, kept and dropped together (execution-core reads
+/// no more than this many either).
+const MAX_WIDE_RESEARCH_REQUEST_ITEMS: usize = 64;
+
+/// Longest item forwarded; execution-core cuts at the same length.
+const MAX_WIDE_RESEARCH_ITEM_CHARS: usize = 500;
+
+/// Items in flight at once in one fan-out: execution-core's `WIDE_RESEARCH_FAN_OUT_CONCURRENCY`
+/// default. The gateway cannot read that executor's environment, so the estimate states this.
+const WIDE_RESEARCH_CONCURRENCY: u32 = 4;
+
+/// The org's wide-research item cap and where it came from: the org's own policy, or the key's
+/// platform default when the policy switch does not enforce.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WideResearchCap {
+    pub items: u32,
+    pub source: &'static str,
+}
+
+impl WideResearchCap {
+    /// The cap a run is held to: the org's value when the policy is enforced (`Some`), else the
+    /// key's default, never above [`MAX_WIDE_RESEARCH_ITEMS`].
+    #[must_use]
+    pub fn of(org_cap: Option<u32>) -> Self {
+        match org_cap {
+            Some(items) => Self {
+                items: items.min(MAX_WIDE_RESEARCH_ITEMS),
+                source: "org_policy",
+            },
+            None => Self {
+                items: mp_contracts::org_agent_policy::DEFAULT_MAX_FAN_OUT_ITEMS,
+                source: "platform_default",
+            },
+        }
+    }
+}
+
+/// The wide-research request a Do run carries (Wave 3 EP-2 S8), from the turn's raw JSON.
+///
+/// `None` with the switch off, for a ZDR or waived turn, and for a body that is not
+/// `{item_cap?, items?}`. Items are trimmed, blank ones skipped, each cut to 500 characters and at
+/// most 64 kept; `item_cap` is the person's ask (the item count when absent) clamped to the org
+/// cap, so a request can only narrow. An org cap of 0 is sent as 0, and execution-core refuses the
+/// run: wide research is off for that org.
+#[must_use]
+pub fn wide_research_request(
+    enabled: bool,
+    raw: Option<&Value>,
+    zdr_or_waived: bool,
+    cap: WideResearchCap,
+) -> Option<mp_contracts::model_plane::v1::WideResearchRequest> {
+    #[derive(Deserialize)]
+    struct Input {
+        #[serde(default)]
+        item_cap: Option<u32>,
+        #[serde(default)]
+        items: Vec<String>,
+    }
+
+    if !enabled || zdr_or_waived {
+        return None;
+    }
+    let input = raw
+        .filter(|raw| raw.is_object())
+        .and_then(|raw| serde_json::from_value::<Input>(raw.clone()).ok())?;
+    let items: Vec<String> = input
+        .items
+        .iter()
+        .map(|item| item.trim())
+        .filter(|item| !item.is_empty())
+        .take(MAX_WIDE_RESEARCH_REQUEST_ITEMS)
+        .map(|item| item.chars().take(MAX_WIDE_RESEARCH_ITEM_CHARS).collect())
+        .collect();
+    let asked = input
+        .item_cap
+        .filter(|&count| count > 0)
+        .or_else(|| u32::try_from(items.len()).ok().filter(|&count| count > 0))
+        .unwrap_or(cap.items);
+    Some(mp_contracts::model_plane::v1::WideResearchRequest {
+        item_cap: asked.min(cap.items).min(MAX_WIDE_RESEARCH_ITEMS),
+        items,
+        ..Default::default()
+    })
+}
+
+/// `POST /v1/research/wide/estimate` body: how many items the person means to research, and on
+/// which model and route.
+#[derive(Debug, Deserialize)]
+pub struct WideResearchEstimateRequest {
+    pub item_count: u32,
+    #[serde(default)]
+    pub model: Option<String>,
+    /// The route the run would be pinned to, as the composer sends it on the turn; a subscription
+    /// route has no per-token price.
+    #[serde(default)]
+    pub provider: Option<String>,
+    #[serde(default)]
+    pub subscription_connection_id: Option<String>,
+}
+
+/// What one research round is assumed to read and write, for the USD range only: a researcher's
+/// round reads a page or a result list and writes a short note. A range, never a promise.
+const ESTIMATE_INPUT_TOKENS_PER_ROUND: (u32, u32) = (6_000, 18_000);
+const ESTIMATE_OUTPUT_TOKENS_PER_ROUND: (u32, u32) = (500, 1_500);
+
+/// Seconds one item round is assumed to take, low and high, for the wall-clock range.
+const ESTIMATE_SECONDS_PER_ROUND: (u64, u64) = (30, 90);
+
+/// What a wide-research run of some items would look like before it starts (Wave 3 EP-2 S8).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WideResearchEstimate {
+    pub items_requested: u32,
+    pub items_after_cap: u32,
+    pub concurrency: u32,
+    pub rounds_per_item: u32,
+    pub minutes_low: u64,
+    pub minutes_high: u64,
+    pub cap: WideResearchCap,
+}
+
+impl WideResearchEstimate {
+    /// The pure part of the estimate. `max_rounds` is the run's round budget and `deadline_secs`
+    /// its wall clock, resolved server-side exactly as a real run's are.
+    #[must_use]
+    pub fn compute(
+        item_count: u32,
+        cap: WideResearchCap,
+        max_rounds: u32,
+        deadline_secs: u64,
+    ) -> Self {
+        let items = item_count.min(cap.items).min(MAX_WIDE_RESEARCH_ITEMS);
+        let concurrency = WIDE_RESEARCH_CONCURRENCY.min(items.max(1));
+        // The parent spends its first round calling the fan-out and keeps one to answer with
+        // (execution-core's `PARENT_SYNTHESIS_RESERVE`); the rest is divided between the items.
+        let rounds_per_item = if items == 0 {
+            0
+        } else {
+            max_rounds.saturating_sub(2) / items
+        };
+        let waves = u64::from(items.div_ceil(concurrency));
+        let rounds = u64::from(rounds_per_item.max(1));
+        let deadline_minutes = deadline_secs.div_ceil(60);
+        Self {
+            items_requested: item_count,
+            items_after_cap: items,
+            concurrency,
+            rounds_per_item,
+            minutes_low: (waves * ESTIMATE_SECONDS_PER_ROUND.0)
+                .div_ceil(60)
+                .min(deadline_minutes),
+            minutes_high: (waves * rounds * ESTIMATE_SECONDS_PER_ROUND.1)
+                .div_ceil(60)
+                .min(deadline_minutes),
+            cap,
+        }
+    }
+
+    /// The USD range on a metered, priced route; `None` (null on the wire) on a subscription
+    /// route or for a model the catalogue does not name, never a borrowed figure.
+    #[must_use]
+    pub fn usd(&self, list: Option<&crate::pricing::ListPrice>) -> Option<(f64, f64)> {
+        let list = list?;
+        let rounds = f64::from(self.items_after_cap) * f64::from(self.rounds_per_item.max(1));
+        let cost = |input: u32, output: u32| {
+            rounds
+                * (f64::from(input) * list.input_per_million
+                    + f64::from(output) * list.output_per_million)
+                / 1_000_000.0
+        };
+        Some((
+            cost(
+                ESTIMATE_INPUT_TOKENS_PER_ROUND.0,
+                ESTIMATE_OUTPUT_TOKENS_PER_ROUND.0,
+            ),
+            cost(
+                ESTIMATE_INPUT_TOKENS_PER_ROUND.1,
+                ESTIMATE_OUTPUT_TOKENS_PER_ROUND.1,
+            ),
+        ))
+    }
+
+    /// The `data` of the estimate answer.
+    #[must_use]
+    pub fn json(&self, usd: Option<(f64, f64)>, basis: crate::pricing::CostBasis) -> Value {
+        json!({
+            "items_requested": self.items_requested,
+            "items_after_cap": self.items_after_cap,
+            "concurrency": self.concurrency,
+            "rounds_per_item": self.rounds_per_item,
+            "minutes_low": self.minutes_low,
+            "minutes_high": self.minutes_high,
+            "usd_low": usd.map(|(low, _)| low),
+            "usd_high": usd.map(|(_, high)| high),
+            "cost_basis": basis.as_str(),
+            "cap": self.cap.items,
+            "cap_source": self.cap.source,
+        })
+    }
+}
+
+/// A typed error of the estimate route; `details` is always an object.
+fn wide_research_error(status: StatusCode, code: &str, message: &str) -> HttpJsonError {
+    (
+        status,
+        Json(json!({ "error": { "code": code, "message": message, "details": {} } })),
+    )
+}
+
+/// `POST /v1/research/wide/estimate` (Wave 3 EP-2 S8): what a wide-research run of `item_count`
+/// items would look like, before it is started. Pure compute: nothing is stored and nothing is
+/// started. 404 while `WIDE_RESEARCH_ENTRY_ENABLED` is off. A zero-retention caller is refused with
+/// the typed `agentic` refusal, because the run it estimates is refused under ZDR. The org's cap is
+/// read as a Do run's is; a policy that is enforced and cannot be read answers
+/// `org_policy_unavailable`. USD is null unless the route is metered and the model priced.
+async fn wide_research_estimate_route(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    capability_bearer: Option<Extension<VerifiedCapabilityBearer>>,
+    Json(req): Json<WideResearchEstimateRequest>,
+) -> Result<Json<Value>, HttpJsonError> {
+    if !wide_research_entry_enabled() {
+        return Err(wide_research_error(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "not found",
+        ));
+    }
+    wide_research_estimate_posture(&claims)?;
+    let org_cap = wide_research_org_cap(&state, &claims.org_id, capability_bearer.as_deref())
+        .await
+        .map_err(|code| {
+            wide_research_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                code,
+                crate::org_agent_policy::POLICY_UNAVAILABLE_MESSAGE,
+            )
+        })?;
+    let basis = crate::pricing::CostBasis::of_route(
+        req.provider.as_deref().unwrap_or_default(),
+        req.subscription_connection_id.as_deref().unwrap_or_default(),
+    );
+    let pinned = basis == crate::pricing::CostBasis::Subscription;
+    let estimate = WideResearchEstimate::compute(
+        req.item_count,
+        WideResearchCap::of(org_cap),
+        crate::run_budget::run_budget_from_env(pinned).max_rounds,
+        crate::sse::agentic_run_deadline_secs(pinned),
+    );
+    let model = req.model.as_deref().map(str::trim).unwrap_or_default();
+    let list = if model.is_empty() {
+        None
+    } else {
+        state.pricing.snapshot().await.list_price(basis, model)
+    };
+    Ok(Json(json!({
+        "data": estimate.json(estimate.usd(list.as_ref()), basis)
+    })))
+}
+
+/// The estimate's ZDR gate: a zero-retention caller is refused with the `agentic` feature (the run
+/// it estimates is refused the same way); a waiver, which names one chat connection, is answered as
+/// a Do run of its org would be, since the estimate names no connection and stores nothing.
+///
+/// # Errors
+///
+/// The typed refusal as an HTTP answer.
+fn wide_research_estimate_posture(claims: &Claims) -> Result<(), HttpJsonError> {
+    match crate::zdr_posture::decide_for(claims, &crate::zdr_posture::Route::plain(false)) {
+        Ok(posture) if posture.zdr() => Err(crate::zdr_posture::http(
+            &mp_contracts::zdr_refusal::Refusal::feature_not_supported("agentic"),
+        )),
+        Ok(_) => Ok(()),
+        Err(refusal) if refusal.code() == mp_contracts::zdr_refusal::code::WAIVER_ROUTE_MISMATCH => {
+            Ok(())
+        }
+        Err(refusal) => Err(crate::zdr_posture::http(&refusal)),
+    }
+}
+
+/// The org's `research.max_fan_out_items` as the policy switch reads it: `None` when the switch
+/// does not enforce (the platform default applies), the org's value when it does.
+///
+/// # Errors
+///
+/// [`crate::org_agent_policy::POLICY_UNAVAILABLE_CODE`] when the policy is enforced and cannot be
+/// read inside its bound, as a Do run would be refused.
+pub(crate) async fn wide_research_org_cap(
+    state: &AppState,
+    org_id: &str,
+    capability_bearer: Option<&VerifiedCapabilityBearer>,
+) -> Result<Option<u32>, &'static str> {
+    use crate::org_agent_policy::{policy_mode, shared_cache, PolicyMode};
+
+    if policy_mode() != PolicyMode::Enforce {
+        return Ok(None);
+    }
+    crate::org_agent_policy::ensure(
+        shared_cache(),
+        &state.http_client,
+        &state.capability_core_base_url,
+        org_id,
+        capability_bearer.map_or("", VerifiedCapabilityBearer::as_str),
+    )
+    .await
+    .map(|policy| Some(policy.max_fan_out_items))
+    .map_err(|error| {
+        tracing::warn!(%org_id, %error, "org agent policy cannot be read for a wide-research estimate");
+        crate::org_agent_policy::POLICY_UNAVAILABLE_CODE
+    })
+}
+
+#[cfg(test)]
+mod wide_research_tests {
+    use super::*;
+
+    fn claims(zdr: bool) -> Claims {
+        serde_json::from_value(json!({
+            "sub": "user-1",
+            "iss": "https://auth.test/model",
+            "aud": "model-gateway",
+            "exp": 4_102_444_800_i64,
+            "nbf": 1_700_000_000_i64,
+            "org_id": "org-1",
+            "user_id": "user-1",
+            "principal_type": "user",
+            "zdr": zdr,
+            "org_zdr": zdr,
+        }))
+        .expect("a minted token's payload is valid Claims")
+    }
+
+    fn org(items: u32) -> WideResearchCap {
+        WideResearchCap::of(Some(items))
+    }
+
+    #[test]
+    fn wide_research_entry_switch_is_only_the_literal_true() {
+        for (value, on) in [
+            (None, false),
+            (Some("false"), false),
+            (Some("1"), false),
+            (Some("TRUE"), false),
+            (Some("true"), true),
+        ] {
+            let get = |_: &str| value.map(str::to_owned);
+            assert_eq!(wide_research_entry_enabled_with(&get), on, "{value:?}");
+        }
+    }
+
+    #[test]
+    fn wide_research_request_is_absent_with_the_switch_off_and_under_zdr() {
+        let body = json!({"item_cap": 5, "items": ["a"]});
+        assert_eq!(wide_research_request(false, Some(&body), false, org(8)), None);
+        assert_eq!(wide_research_request(true, Some(&body), true, org(8)), None);
+        assert_eq!(wide_research_request(true, None, false, org(8)), None);
+        assert_eq!(
+            wide_research_request(true, Some(&json!(["a"])), false, org(8)),
+            None
+        );
+    }
+
+    #[test]
+    fn wide_research_request_clamps_the_ask_to_the_org_cap() {
+        // Org cap 5, ten items asked: the run is held to 5 and carries all ten items, so
+        // execution-core can name the five it drops.
+        let items: Vec<String> = (0..10).map(|n| format!("item {n}")).collect();
+        let request = wide_research_request(true, Some(&json!({"items": items})), false, org(5))
+            .expect("the switch is on");
+        assert_eq!(request.item_cap, 5);
+        assert_eq!(request.items.len(), 10);
+        // A count preset with no list asks for that many, never more than the org allows.
+        let preset = wide_research_request(true, Some(&json!({"item_cap": 16})), false, org(8))
+            .expect("the switch is on");
+        assert_eq!(preset.item_cap, 8);
+        assert!(preset.items.is_empty());
+        // A narrower ask stays narrower.
+        let narrow =
+            wide_research_request(true, Some(&json!({"item_cap": 3})), false, org(8)).expect("on");
+        assert_eq!(narrow.item_cap, 3);
+        // An org with wide research off is sent 0, and execution-core refuses the run.
+        let off = wide_research_request(true, Some(&json!({"items": ["a"]})), false, org(0))
+            .expect("on");
+        assert_eq!(off.item_cap, 0);
+    }
+
+    #[test]
+    fn wide_research_request_bounds_and_cleans_items() {
+        let long = "y".repeat(MAX_WIDE_RESEARCH_ITEM_CHARS + 10);
+        let many: Vec<String> = (0..80).map(|n| format!("q{n}")).collect();
+        let request = wide_research_request(
+            true,
+            Some(&json!({"items": ["  a  ", "", "   ", long]})),
+            false,
+            org(16),
+        )
+        .expect("on");
+        assert_eq!(request.items[0], "a");
+        assert_eq!(request.items.len(), 2);
+        assert_eq!(request.items[1].chars().count(), MAX_WIDE_RESEARCH_ITEM_CHARS);
+        let flood = wide_research_request(true, Some(&json!({"items": many})), false, org(16))
+            .expect("on");
+        assert_eq!(flood.items.len(), MAX_WIDE_RESEARCH_REQUEST_ITEMS);
+    }
+
+    #[test]
+    fn wide_research_cap_without_an_enforced_policy_is_the_platform_default() {
+        let platform = WideResearchCap::of(None);
+        assert_eq!(platform.items, 8);
+        assert_eq!(platform.source, "platform_default");
+        let held = WideResearchCap::of(Some(40));
+        assert_eq!(held.items, MAX_WIDE_RESEARCH_ITEMS);
+        assert_eq!(held.source, "org_policy");
+    }
+
+    #[test]
+    fn wide_research_estimate_clamps_to_the_org_cap_and_bounds_minutes_by_the_deadline() {
+        let estimate = WideResearchEstimate::compute(10, org(5), 12, 600);
+        assert_eq!(estimate.items_requested, 10);
+        assert_eq!(estimate.items_after_cap, 5);
+        assert_eq!(estimate.concurrency, 4);
+        assert_eq!(estimate.rounds_per_item, 2, "(12 - 2) rounds over 5 items");
+        assert!(estimate.minutes_low <= estimate.minutes_high);
+        assert!(estimate.minutes_high <= 10, "never past the 600 s deadline");
+        let off = WideResearchEstimate::compute(10, org(0), 12, 600);
+        assert_eq!(off.items_after_cap, 0);
+        assert_eq!(off.rounds_per_item, 0);
+    }
+
+    #[test]
+    fn wide_research_estimate_usd_is_null_without_a_list_price() {
+        let estimate = WideResearchEstimate::compute(4, org(8), 12, 600);
+        assert_eq!(estimate.usd(None), None);
+        let body = estimate.json(None, crate::pricing::CostBasis::Subscription);
+        assert!(body["usd_low"].is_null() && body["usd_high"].is_null(), "{body}");
+        assert_eq!(body["cost_basis"], "subscription");
+        assert_eq!(body["cap_source"], "org_policy");
+
+        let list = crate::pricing::ListPrice {
+            input_per_million: 1.0,
+            output_per_million: 2.0,
+            currency: "USD".to_owned(),
+            source: crate::pricing::PriceSource::Exact,
+        };
+        let (low, high) = estimate.usd(Some(&list)).expect("a priced, metered route");
+        assert!(low > 0.0 && low < high, "{low} {high}");
+    }
+
+    /// The golden case `e_zdr_token_wide_research_estimate_refused` (EP-2 S8): a feature refusal,
+    /// so it lives here and in the ZDR feature table, not as a posture-matrix row.
+    #[test]
+    fn wide_research_estimate_refuses_a_zdr_caller_with_the_agentic_feature() {
+        let (status, Json(body)) =
+            wide_research_estimate_posture(&claims(true)).expect_err("a ZDR caller is refused");
+        assert_eq!(status, StatusCode::PRECONDITION_FAILED);
+        assert_eq!(body["error"]["feature"], "agentic", "{body}");
+        assert!(wide_research_estimate_posture(&claims(false)).is_ok());
+    }
 }
 
 /// A tool/function definition supplied by the client (chat-parity §2).
@@ -20993,5 +21591,145 @@ mod run_timing_route_tests {
         assert_eq!(body["error"]["code"], "zdr_feature_not_supported");
         assert_eq!(body["error"]["feature"], "run_inspection");
         assert!(fake.inspected.lock().unwrap().is_empty(), "nothing reaches Session Core");
+    }
+}
+
+#[cfg(test)]
+mod approval_preview_route_tests {
+    //! EP-10-S1: the full-draft preview route. Off and zero-retention answers are decided before
+    //! anything reaches Session Core, so these tests need no Session Core at all.
+    use super::*;
+
+    use axum::{body::Body, http::Request as HttpRequest};
+    use tower::ServiceExt;
+
+    fn claims(zdr: bool) -> Claims {
+        serde_json::from_value(json!({
+            "sub": "user-a", "iss": "auth-core", "exp": 4_102_444_800_i64, "org_id": "org-a",
+            "user_id": "user-a", "principal_type": "user", "zdr": zdr
+        }))
+        .expect("claims")
+    }
+
+    /// The route with its switch on and with it off; the env read stays out of parallel tests.
+    /// The orchestration client is the lazy default, which nothing here may reach.
+    fn app(zdr: bool) -> Router {
+        Router::new()
+            .route(
+                "/v1/orchestration/approvals/:approval_id/preview",
+                get(
+                    |state: State<AppState>,
+                     claims: Extension<Claims>,
+                     bearer: VerifiedModelBearer,
+                     path: Path<String>| approval_preview(state, claims, bearer, path, true),
+                ),
+            )
+            .route(
+                "/off/v1/orchestration/approvals/:approval_id/preview",
+                get(
+                    |state: State<AppState>,
+                     claims: Extension<Claims>,
+                     bearer: VerifiedModelBearer,
+                     path: Path<String>| approval_preview(state, claims, bearer, path, false),
+                ),
+            )
+            .with_state(AppState::new())
+            .layer(Extension(claims(zdr)))
+            .layer(Extension(crate::auth::VerifiedSessionBearer::for_test(
+                "session-core-bearer",
+            )))
+    }
+
+    async fn get_json(router: Router, uri: &str) -> (StatusCode, Value) {
+        let response = router
+            .oneshot(HttpRequest::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+    }
+
+    #[tokio::test]
+    async fn preview_route_off_by_default() {
+        for unset in [None, Some(""), Some("1"), Some("yes"), Some("on")] {
+            assert!(
+                !mp_contracts::loop_fold::switch_from(unset),
+                "{unset:?} must not enable the preview"
+            );
+        }
+        assert!(mp_contracts::loop_fold::switch_from(Some("true")));
+        let (status, body) =
+            get_json(app(false), "/off/v1/orchestration/approvals/appr_1/preview").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["error"]["code"], "preview_unavailable");
+        assert!(body["error"]["message"].is_string());
+    }
+
+    #[tokio::test]
+    async fn preview_route_refuses_zdr_token() {
+        let (status, body) =
+            get_json(app(true), "/v1/orchestration/approvals/appr_1/preview").await;
+        let (expected_status, Json(expected)) =
+            crate::zdr_posture::continuation_gate(&claims(true)).expect_err("a ZDR bearer is refused");
+        assert_eq!(status, expected_status);
+        assert_eq!(body, expected, "the typed refusal of a decision, before any lookup");
+        assert!(body["error"]["code"].is_string());
+    }
+
+    #[test]
+    fn preview_route_maps_not_found() {
+        for status in [
+            tonic::Status::not_found("approval not found"),
+            tonic::Status::permission_denied("user-bound approval credential required"),
+            tonic::Status::unimplemented("older session-core"),
+        ] {
+            let (code, Json(body)) = approval_preview_status_to_http(&status);
+            assert_eq!(code, StatusCode::NOT_FOUND, "{status:?}");
+            assert_eq!(body["error"]["code"], "approval_not_found");
+        }
+        let (code, Json(body)) =
+            approval_preview_status_to_http(&tonic::Status::invalid_argument("approval_id is required"));
+        assert_eq!(code, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"]["code"], "invalid_approval_preview");
+
+        // A waived caller's typed refusal from Session Core keeps its catalogue body.
+        let refused = mp_contracts::zdr_refusal::Refusal::WAIVER_ROUTE_MISMATCH
+            .grpc_status(tonic::Code::PermissionDenied);
+        let (code, Json(body)) = approval_preview_status_to_http(&refused);
+        assert_eq!(code, StatusCode::FORBIDDEN);
+        assert_eq!(
+            body,
+            mp_contracts::zdr_refusal::Refusal::WAIVER_ROUTE_MISMATCH.json_body(),
+            "not flattened into a 404"
+        );
+    }
+
+    #[test]
+    fn preview_value_is_the_shaped_draft_as_plain_text() {
+        let preview = mp_contracts::model_plane::v1::ApprovalPreview {
+            kind: "mail_send".to_owned(),
+            provider: "google".to_owned(),
+            operation: "gmail.send".to_owned(),
+            connection_id: "conn-1".to_owned(),
+            to: vec!["a@example.com".to_owned(), "b@example.com".to_owned()],
+            subject: "S".to_owned(),
+            body_text: "<b>not markup</b>".to_owned(),
+            has_html: true,
+            is_reply: false,
+            raw_only: false,
+            editable_fields: vec!["to".to_owned(), "subject".to_owned(), "body_text".to_owned()],
+            action_fingerprint: "f".repeat(64),
+            revision: 0,
+        };
+        let value = approval_preview_value(&preview);
+        assert_eq!(value["kind"], "mail_send");
+        assert_eq!(value["to"], json!(["a@example.com", "b@example.com"]));
+        assert_eq!(value["body_text"], "<b>not markup</b>");
+        assert_eq!(value["format"], "plain_text");
+        assert_eq!(value["editable_fields"], json!(["to", "subject", "body_text"]));
+        assert_eq!(value["revision"], 0);
     }
 }

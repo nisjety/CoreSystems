@@ -1856,6 +1856,31 @@ async fn run_agent_with_route(
     .await
 }
 
+/// Admits a wide-research run (Wave 3 EP-2 S8) or refuses it. The gateway never sends one for a
+/// zero-retention turn, so one that arrives is refused rather than run; a run while the fan-out
+/// tool is switched off is refused with that tool's own refusal; and an org cap of 0 is refused,
+/// because the org has wide research off.
+fn admit_wide_research(
+    req: &pb::RunAgentRequest,
+    wide: &pb::WideResearchRequest,
+) -> Result<crate::subagent::research_fan_out::WideResearchPlan, tonic::Status> {
+    use crate::subagent::research_fan_out;
+
+    if req.zdr {
+        return Err(
+            mp_contracts::zdr_refusal::Refusal::feature_not_supported("agentic")
+                .grpc_status(tonic::Code::FailedPrecondition),
+        );
+    }
+    if !research_fan_out::enabled() {
+        return Err(tonic::Status::failed_precondition(
+            research_fan_out::disabled_refusal(),
+        ));
+    }
+    research_fan_out::plan_wide_research(&wide.items, wide.item_cap)
+        .map_err(tonic::Status::failed_precondition)
+}
+
 /// [`run_agent_with_route`] with whether the offered tool set is derivable (WS03 S8-A): the
 /// body of the route-level driver. `derivable` is the offer's own claim; an approval
 /// continuation is never derivable whatever it says, because its tools are the snapshot's.
@@ -1981,8 +2006,27 @@ async fn run_agent_with_route_parkable(
     // pattern this would mirror). Until that lookup lands, a request is
     // resolved against the hard ceiling only — never silently unbounded, just
     // not yet org-tightenable.
-    let child_ceiling =
-        crate::subagent::resolve_child_ceiling(Some(req.max_subagents).filter(|&n| n != 0), None);
+    //
+    // A wide-research run started from the composer (Wave 3 EP-2 S8) is the exception: the
+    // gateway reads the org's `research.max_fan_out_items` and sends the smaller of it and the
+    // person's ask as `wide_research.item_cap`, which is the org ceiling here. Only a fresh run
+    // reads it; a continuation or a scheduled run keeps the shape it started with. A refusal
+    // returns before the run's first heartbeat, so nothing of the run is written.
+    let wide_research = match req.wide_research.as_ref() {
+        Some(wide) if resumed.is_none() && scheduled.is_none() => {
+            Some(admit_wide_research(&req, wide)?)
+        }
+        _ => None,
+    };
+    let child_ceiling = match wide_research.as_ref() {
+        Some(plan) => {
+            crate::subagent::wide_research_child_ceiling(Some(req.max_subagents), plan.cap)
+        }
+        None => crate::subagent::resolve_child_ceiling(
+            Some(req.max_subagents).filter(|&n| n != 0),
+            None,
+        ),
+    };
 
     // The run's model and provider are `route`'s (see `crate::agent_route`).
     // Autonomous, tool-using runs need a tool-following model, so an UNPINNED
@@ -2089,7 +2133,20 @@ async fn run_agent_with_route_parkable(
     // 2. The governed ReAct loop.
     let (loop_goal, seeded_round) = match resumed {
         Some(resumed) => (resumed.goal, Some(resumed.seed)),
-        None => (req.goal.clone(), None),
+        // A wide-research run's goal carries its items and the items past the cap (EP-2 S8).
+        None => (
+            wide_research.as_ref().map_or_else(
+                || req.goal.clone(),
+                |plan| {
+                    format!(
+                        "{}\n\n{}",
+                        req.goal,
+                        crate::subagent::research_fan_out::wide_research_goal_context(plan)
+                    )
+                },
+            ),
+            None,
+        ),
     };
     let rounds = run_rounds(&context, &loop_goal, max_rounds, seeded_round).await?;
     // Closed here, at the loop's end, so finalizing is not counted as the last round's dispatch.
@@ -2154,6 +2211,15 @@ async fn run_agent_with_route_parkable(
                 crate::subscription_refusal::SUBSCRIPTION_ROUTE_UNAVAILABLE,
             )),
         ),
+    };
+    // A finished wide-research answer names the items past the org's cap itself (EP-2 S8), so the
+    // person learns what was left out whatever the model wrote.
+    let final_answer = match wide_research
+        .as_ref()
+        .and_then(crate::subagent::research_fan_out::dropped_items_note)
+    {
+        Some(note) if success => format!("{final_answer}\n\n{note}"),
+        _ => final_answer,
     };
 
     let finalized = finalize(
@@ -4540,21 +4606,62 @@ async fn run_rounds(
                         });
                     // EP-1 S1: the browser call a takeover paused runs only once the person has given
                     // the browser back. While Quarry still says the person holds it, the call is not
-                    // dispatched and the model reads that the person is using the browser.
-                    let still_taken_over = match browser.as_ref() {
+                    // dispatched and the model reads that the person is using the browser. EP-1 S5:
+                    // after the give-back it also needs a grant that outlived the takeover, read back
+                    // under the person's click-time bearer; a run whose wait ran out is told so.
+                    let handback_refusal = if is_release
+                        && crate::browser_session::is_do_tool(&call.name)
+                        && crate::browser_session::takeover_pause_enabled()
+                    {
+                        match browser.as_ref() {
+                            Some(browser) => released_browser_call_refusal(ctx, browser).await,
+                            None if !zdr && ctx.depth == 0 && req.space_id.is_empty() => {
+                                crate::browser_session::handback_without_bearer(
+                                    ctx.state,
+                                    &req.run_id,
+                                )
+                            }
+                            None => None,
+                        }
+                    } else {
+                        None
+                    };
+                    // EP-1 S3: once the person has given the browser back, the run looks at the
+                    // page once, fresh, before the paused call runs again, and the model reads the
+                    // person's note with that look. A paused observe is answered by the look.
+                    let hand_back = match browser.as_ref() {
                         Some(browser)
                             if is_release
+                                && handback_refusal.is_none()
                                 && crate::browser_session::is_do_tool(&call.name)
                                 && crate::browser_session::takeover_pause_enabled() =>
                         {
-                            released_browser_call_still_held(ctx, browser).await
+                            match released_hand_back_note(ctx).await {
+                                Some(note) => {
+                                    let quarry =
+                                        crate::quarry_agent::QuarryAgentClient::from_env()
+                                            .ok()
+                                            .flatten();
+                                    let look = crate::browser_session::hand_back(
+                                        browser,
+                                        quarry.as_ref(),
+                                        &note,
+                                    )
+                                    .await;
+                                    Some((look, note))
+                                }
+                                None => None,
+                            }
                         }
-                        _ => false,
+                        _ => None,
                     };
-                    let outcome = if still_taken_over {
-                        Some(StepOutcome::failed(
-                            &crate::browser_session::TAKEN_OVER.text(),
-                        ))
+                    let outcome = if let Some(refusal) = handback_refusal {
+                        Some(StepOutcome::failed(&refusal.text()))
+                    } else if let Some((look, _)) = hand_back
+                        .as_ref()
+                        .filter(|_| crate::browser_session::hand_back_answers(&call.name))
+                    {
+                        Some(hand_back_observed(look))
                     } else {
                         Some(
                         runtime_loop::retry::run_attempts(
@@ -4636,6 +4743,10 @@ async fn run_rounds(
                         )
                         .await,
                     )
+                    .map(|dispatched| match hand_back.as_ref() {
+                        Some((look, note)) => after_hand_back(dispatched, look, note),
+                        None => dispatched,
+                    })
                     };
                     if let (Some(entry), Some(result)) = (&ledger_entry, &outcome) {
                         let closing = runtime_loop::effect::final_outcome_for(&result.status);
@@ -4740,6 +4851,67 @@ async fn run_rounds(
                     }
                 }
                 _ => outcome,
+            };
+
+            // EP-1 S2: a page that shows a sign-in, CAPTCHA, consent or WAF wall pauses the run for the
+            // person (switch on; only the switch makes the page refusal a help request), at most twice a
+            // run. The approval is the help, and the call runs again after it. A call that cannot pause
+            // tells the model the site blocked it, as before the switch: a released call (its approval
+            // is spent), a round another pause already holds, a delegated child, a run that keeps no
+            // state, or a run at its cap. A person who declined help with this call is not asked again:
+            // the session closes and the model reads that.
+            let outcome = match crate::browser_session::help_kind(&outcome.error) {
+                Some(kind) => {
+                    let can_pause = crate::browser_session::human_assist_enabled()
+                        && ctx.depth == 0
+                        && !zdr
+                        && !ctx.route.is_waived()
+                        && pending_pause.is_none()
+                        && !ctx.release.as_ref().is_some_and(|release| {
+                            release.covers(&step_id, &call.name, &call.arguments_json)
+                        });
+                    if can_pause
+                        && declined_earlier_in_run(ctx, &call.name, &call.arguments_json).await
+                    {
+                        let declined = match ctx.browser_bearer {
+                            Some(bearer) => {
+                                let quarry =
+                                    crate::quarry_agent::QuarryAgentClient::from_env().ok().flatten();
+                                crate::browser_session::decline_help(
+                                    &crate::browser_session::BrowserDispatch {
+                                        state: ctx.state,
+                                        broker: crate::browser_session::production_broker(),
+                                        bearer,
+                                        org_id: &req.org_id,
+                                        run_id: &req.run_id,
+                                    },
+                                    quarry.as_ref(),
+                                )
+                                .await
+                            }
+                            None => crate::browser_session::HELP_DECLINED,
+                        };
+                        runtime_loop::StepOutcome {
+                            error: declined.text(),
+                            ..outcome
+                        }
+                    } else if can_pause && crate::browser_session::raise_help(&req.run_id, kind) {
+                        paused_index = Some(index);
+                        pending_pause = Some(PendingPause {
+                            step_id,
+                            name: call.name.clone(),
+                            arguments_json: call.arguments_json.clone(),
+                            cause: CauseCode::BrowserHumanAssist,
+                        });
+                        continue;
+                    } else {
+                        runtime_loop::StepOutcome {
+                            error: crate::browser_session::BLOCKED.text(),
+                            ..outcome
+                        }
+                    }
+                }
+                None => outcome,
             };
 
             // A scheduled run is unattended: a gated call is withheld and recorded, and the model
@@ -4985,9 +5157,25 @@ async fn run_rounds(
             // EP-1 S1: the page the person holds outlives this request, so the give-back resumes the
             // run on it; and the run's events say the browser is with the person.
             if pending.cause == CauseCode::BrowserHumanAssist {
-                crate::browser_session::hold_for_person(&req.run_id);
-                let epoch = taken_over_epoch(ctx).await;
-                publish_browser_takeover(ctx, true, epoch).await;
+                let hold = crate::browser_session::hold_for_person(&req.run_id);
+                // EP-1 S5: a page the person never gives back is closed once the approval's wait
+                // runs out, so the takeover cannot hold a Quarry run and a grant without end.
+                if let Some(bearer) = ctx.browser_bearer {
+                    crate::browser_session::expire_hold_after(
+                        ctx.state,
+                        bearer,
+                        &req.org_id,
+                        &req.run_id,
+                        hold,
+                        approval_ttl_seconds(pending.cause),
+                    );
+                }
+                // A help request (EP-1 S2) waits for the person to take the browser: Quarry's control
+                // has not moved yet, so no takeover is published for it.
+                if crate::browser_session::pending_help_kind(&req.run_id).is_none() {
+                    let epoch = taken_over_epoch(ctx).await;
+                    publish_browser_takeover(ctx, true, epoch).await;
+                }
             }
             // Built outside the loop, which alone holds the tally: a pause is an
             // invocation that spent rounds, and the continuation starts its own tally.
@@ -8419,8 +8607,10 @@ async fn declined_earlier_in_run(
 
 /// The cause a pause is stored with (WS21-S5b). A browser act is stored under the risk category its
 /// own input reads as, so the approval shows that category for the call it is for. A takeover pause
-/// (EP-1 S1) names the host of the session the run holds, never one the page states.
-fn approval_cause_for_pause(
+/// (EP-1 S1) names the host of the session the run holds, never one the page states. A help request
+/// the agent raised (EP-1 S2) states the wall the page showed; any other browser pause is the person's
+/// takeover.
+pub(crate) fn approval_cause_for_pause(
     state: &crate::state::StateStore,
     cause: CauseCode,
     run_id: &str,
@@ -8432,12 +8622,20 @@ fn approval_cause_for_pause(
             .browser_session(run_id)
             .map(|session| session.host)
             .unwrap_or_default();
+        let (assist_kind, assist_origin) = crate::browser_session::pending_help_kind(run_id)
+            .map_or(
+                (
+                    approval_cause::ASSIST_KIND_USER_TAKEOVER,
+                    approval_cause::ASSIST_ORIGIN_PERSON,
+                ),
+                |kind| (kind, approval_cause::ASSIST_ORIGIN_AGENT),
+            );
         return approval_cause::for_browser_assist(
             run_id,
             tool_name,
             tool_input,
-            approval_cause::ASSIST_KIND_USER_TAKEOVER,
-            approval_cause::ASSIST_ORIGIN_PERSON,
+            assist_kind,
+            assist_origin,
             &host,
         );
     }
@@ -8448,6 +8646,19 @@ fn approval_cause_for_pause(
             .to_owned();
     }
     stored
+}
+
+/// How long an ordinary pause's approval waits for a decision.
+const APPROVAL_TTL_SECONDS: u32 = 3600;
+
+/// The TTL of a pause's approval. A takeover waits the configured assist wait (EP-1 S5), since the
+/// person holds a live page and its grant meanwhile; every other pause waits the hour.
+fn approval_ttl_seconds(cause: CauseCode) -> u32 {
+    if cause == CauseCode::BrowserHumanAssist {
+        crate::browser_session::assist_ttl_seconds()
+    } else {
+        APPROVAL_TTL_SECONDS
+    }
 }
 
 /// HITL pause: mint a durable approval for the gated tool (same shape as the
@@ -8550,7 +8761,7 @@ async fn pause_for_approval(
             org_id: req.org_id.clone(),
             user_id: req.user_id.clone(),
             reason: approval_reason_for_call(gate, tool_name, tool_input),
-            expires_in_seconds: 3600,
+            expires_in_seconds: approval_ttl_seconds(cause),
             // Let session-core mint the durable approval id (matrix §4.1).
             client_approval_id: String::new(),
             // Stable per-(run, step) idempotency key (D-1): a re-paused step
@@ -9499,6 +9710,23 @@ async fn taken_over_epoch(ctx: &LoopContext<'_>) -> u64 {
         .map_or(0, |control| control.control_epoch)
 }
 
+/// What stops a released Do browser call after a takeover, `None` to dispatch it: a wait that ran out
+/// (EP-1 S5), the person still holding the browser (S1), or a grant the give-back finds lapsed (S5).
+/// The timeout is read first, because ending the hold forgets it.
+async fn released_browser_call_refusal(
+    ctx: &LoopContext<'_>,
+    browser: &crate::browser_session::BrowserDispatch<'_>,
+) -> Option<crate::browser_session::Refusal> {
+    if let Some(timed_out) = crate::browser_session::take_help_timed_out(browser.run_id) {
+        return Some(timed_out);
+    }
+    if released_browser_call_still_held(ctx, browser).await {
+        return Some(crate::browser_session::TAKEN_OVER);
+    }
+    let quarry = crate::quarry_agent::QuarryAgentClient::from_env().ok().flatten();
+    crate::browser_session::revalidate_after_handback(browser, quarry.as_ref()).await
+}
+
 /// Whether the browser call a takeover paused must stay held: Quarry says the person still holds the
 /// browser (EP-1 S1). Once it is given back the hold ends and the give-back is published. A control
 /// that cannot be read releases the call: Quarry's own gate still refuses an agent step while the
@@ -9530,6 +9758,151 @@ async fn released_browser_call_still_held(
         publish_browser_takeover(ctx, false, control.control_epoch).await;
     }
     false
+}
+
+/// The person's hand-back note when this continuation released a browser call a takeover paused
+/// (EP-1 S3): the granted `browser_human_assist` approval's decision reason, empty when the person
+/// wrote none. `None` for any other approval, or when the approval cannot be read: the call then
+/// runs again as it did before S3, with no look and no note. The note is never logged.
+async fn released_hand_back_note(ctx: &LoopContext<'_>) -> Option<String> {
+    let resume = ctx.req.resume.as_ref()?;
+    if resume.approval_id.is_empty() {
+        return None;
+    }
+    let request = authenticated_session_request(
+        pb::GetApprovalRequest {
+            approval_id: resume.approval_id.clone(),
+            // The approval must belong to the run's own org; another org's reads as not found.
+            org_id: ctx.req.org_id.clone(),
+            ..Default::default()
+        },
+        ctx.session_bearer,
+    )
+    .ok()?;
+    let approval = match OrchestrationCoreServiceClient::new(ctx.session_channel.clone())
+        .get_approval(request)
+        .await
+    {
+        Ok(response) => response.into_inner().approval?,
+        Err(error) => {
+            warn!(
+                run_id = %ctx.req.run_id,
+                code = ?error.code(),
+                "run_agent: the hand-back approval could not be read; the call runs without a look"
+            );
+            return None;
+        }
+    };
+    hand_back_note_of(&approval, &ctx.req.run_id)
+}
+
+/// The note of a granted `browser_human_assist` approval of `run_id`, `None` for any other.
+fn hand_back_note_of(approval: &pb::Approval, run_id: &str) -> Option<String> {
+    let is_hand_back = approval.run_id == run_id
+        && approval.state == pb::ApprovalState::Granted as i32
+        && approval
+            .cause
+            .as_ref()
+            .is_some_and(|cause| cause.code == CauseCode::BrowserHumanAssist.as_str());
+    is_hand_back.then(|| approval.decision_reason.clone())
+}
+
+/// A paused observe answered by the hand-back's one look (EP-1 S3).
+fn hand_back_observed(
+    look: &Result<String, crate::browser_session::Refusal>,
+) -> runtime_loop::StepOutcome {
+    match look {
+        Ok(view) => StepOutcome::completed(view.clone()),
+        Err(refusal) => StepOutcome::failed(&refusal.text()),
+    }
+}
+
+/// The paused call's outcome after a hand-back (EP-1 S3): a call that completed is read after the
+/// fresh look and the note; a failed one keeps its refusal alone, so the closed refusal text the
+/// loop and the retry classifier read is unchanged. A look that failed still carries the note.
+fn after_hand_back(
+    dispatched: runtime_loop::StepOutcome,
+    look: &Result<String, crate::browser_session::Refusal>,
+    note: &str,
+) -> runtime_loop::StepOutcome {
+    if dispatched.status != "completed" {
+        return dispatched;
+    }
+    let output = match look {
+        Ok(view) => format!("{view}\n{}", dispatched.output),
+        Err(_) => crate::browser_session::with_person_note(dispatched.output.clone(), note),
+    };
+    runtime_loop::StepOutcome {
+        output,
+        ..dispatched
+    }
+}
+
+#[cfg(test)]
+mod browser_hand_back {
+    use super::*;
+
+    fn approval(code: &str, state: pb::ApprovalState, reason: &str) -> pb::Approval {
+        pb::Approval {
+            run_id: "run-1".to_owned(),
+            state: state as i32,
+            decision_reason: reason.to_owned(),
+            cause: Some(pb::ApprovalCause {
+                code: code.to_owned(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn only_a_granted_human_assist_approval_of_the_run_carries_a_note() {
+        let granted = approval("browser_human_assist", pb::ApprovalState::Granted, "Go on.");
+        assert_eq!(hand_back_note_of(&granted, "run-1").as_deref(), Some("Go on."));
+        let silent = approval("browser_human_assist", pb::ApprovalState::Granted, "");
+        assert_eq!(hand_back_note_of(&silent, "run-1").as_deref(), Some(""));
+
+        assert_eq!(hand_back_note_of(&granted, "run-2"), None, "another run's approval");
+        let denied = approval("browser_human_assist", pb::ApprovalState::Denied, "no");
+        assert_eq!(hand_back_note_of(&denied, "run-1"), None);
+        let other = approval("owner_effect_reserved", pb::ApprovalState::Granted, "fine");
+        assert_eq!(hand_back_note_of(&other, "run-1"), None, "not a hand-back");
+    }
+
+    #[test]
+    fn a_paused_observe_is_answered_by_the_look() {
+        let answered = hand_back_observed(&Ok("view\n<person_note>n</person_note>".to_owned()));
+        assert_eq!(answered.status, "completed");
+        assert_eq!(answered.output, "view\n<person_note>n</person_note>");
+
+        let lost = hand_back_observed(&Err(crate::browser_session::SESSION_LOST));
+        assert_eq!(lost.status, "failed");
+        assert_eq!(lost.error, crate::browser_session::SESSION_LOST.text());
+    }
+
+    #[test]
+    fn a_redispatched_call_is_read_after_the_look_and_the_note() {
+        let look = Ok("view\n<person_note>n</person_note>".to_owned());
+        let closed = after_hand_back(
+            StepOutcome::completed(r#"{"ok":true,"closed":true}"#.to_owned()),
+            &look,
+            "n",
+        );
+        assert_eq!(
+            closed.output,
+            "view\n<person_note>n</person_note>\n{\"ok\":true,\"closed\":true}"
+        );
+
+        let without_look = after_hand_back(
+            StepOutcome::completed("out".to_owned()),
+            &Err(crate::browser_session::SESSION_LOST),
+            "n",
+        );
+        assert_eq!(without_look.output, "out\n<person_note>n</person_note>");
+
+        let failed = StepOutcome::failed(&crate::browser_session::SESSION_FAILED.text());
+        assert_eq!(after_hand_back(failed.clone(), &look, "n"), failed);
+    }
 }
 
 /// The environment switch for a Do run's per-round usage progress (build plan WS27 S9). Off by
@@ -12626,6 +12999,13 @@ mod tests {
             Err(tonic::Status::unimplemented("get_quarantine_preview is not served by this double"))
         }
 
+        async fn get_approval_preview(
+            &self,
+            _: tonic::Request<mp_contracts::model_plane::v1::GetApprovalPreviewRequest>,
+        ) -> Result<tonic::Response<mp_contracts::model_plane::v1::GetApprovalPreviewResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("get_approval_preview is not served by this double"))
+        }
+
         type StreamRunEventsStream = RunEventStream;
 
         async fn get_run_proof_bundle(
@@ -13208,7 +13588,66 @@ mod tests {
             // No question tool, which is what every run that predates the field sends; the
             // `ask_user` tests set it explicitly.
             max_questions: 0,
+            // An ordinary Do run, which is what every run before wide research (EP-2 S8) sent.
+            wide_research: None,
         }
+    }
+
+    fn wide_research(item_cap: u32, items: &[&str]) -> pb::WideResearchRequest {
+        pb::WideResearchRequest {
+            item_cap,
+            items: items.iter().map(|item| (*item).to_owned()).collect(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_wide_research_run_is_admitted_with_its_items_split_at_the_cap() {
+        let _enabled = crate::subagent::research_fan_out::EnabledOverride::set(true);
+        let plan = admit_wide_research(&sample_request(), &wide_research(2, &["a", "b", "c"]))
+            .expect("a persistent run with fan-out on and a cap above zero");
+        assert_eq!(plan.kept, ["a", "b"]);
+        assert_eq!(plan.dropped, ["c"]);
+        assert_eq!(
+            crate::subagent::wide_research_child_ceiling(Some(0), plan.cap),
+            2,
+            "the org-clamped cap is the run's child ceiling"
+        );
+    }
+
+    #[test]
+    fn a_wide_research_run_is_refused_under_zdr_with_fan_out_off_and_at_cap_zero() {
+        let enabled = crate::subagent::research_fan_out::EnabledOverride::set(true);
+        let zdr = pb::RunAgentRequest {
+            zdr: true,
+            ..sample_request()
+        };
+        let refused = admit_wide_research(&zdr, &wide_research(4, &["a"])).expect_err("ZDR");
+        assert_eq!(refused.code(), tonic::Code::FailedPrecondition);
+        assert_eq!(
+            refused
+                .metadata()
+                .get(mp_contracts::zdr_refusal::FEATURE_TRAILER)
+                .and_then(|value| value.to_str().ok()),
+            Some("agentic"),
+            "the typed refusal names the feature the run rides on"
+        );
+
+        let off = admit_wide_research(&sample_request(), &wide_research(0, &["a"]))
+            .expect_err("the org has wide research off");
+        assert_eq!(
+            off.message(),
+            crate::subagent::research_fan_out::wide_research_off_refusal()
+        );
+
+        drop(enabled);
+        let _disabled = crate::subagent::research_fan_out::EnabledOverride::set(false);
+        let switched_off = admit_wide_research(&sample_request(), &wide_research(4, &["a"]))
+            .expect_err("the fan-out tool is switched off");
+        assert_eq!(
+            switched_off.message(),
+            crate::subagent::research_fan_out::disabled_refusal()
+        );
     }
 
     fn sample_agent_skill(name: &str, keywords: &[&str], content: &str) -> pb::AgentSkill {
@@ -16613,6 +17052,25 @@ mod tests {
         assert_eq!(cause.scope_options, vec!["once".to_owned()]);
         for id in ["grant-1", "run-q1", "lease-q1"] {
             assert!(!format!("{cause:?}").contains(id), "{id} is in the cause: {cause:?}");
+        }
+        assert_eq!(
+            rec.approval_requests[0].expires_in_seconds,
+            crate::browser_session::assist_ttl_seconds(),
+            "a takeover waits the assist wait, not the hour (EP-1 S5)"
+        );
+    }
+
+    /// EP-1 S5: only a takeover pause waits the configured assist wait; every other cause keeps the
+    /// hour, so the setting changes nothing while no takeover pauses.
+    #[test]
+    fn only_a_takeover_pause_waits_the_assist_ttl() {
+        let assist = crate::browser_session::assist_ttl_seconds();
+        assert!((300..=3600).contains(&assist), "{assist}");
+        assert_eq!(approval_ttl_seconds(CauseCode::BrowserHumanAssist), assist);
+        for cause in CauseCode::ALL {
+            if cause != CauseCode::BrowserHumanAssist {
+                assert_eq!(approval_ttl_seconds(cause), 3600, "{cause:?}");
+            }
         }
     }
 
