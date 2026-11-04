@@ -51,7 +51,7 @@ export function DownloadsDrawer(props: DownloadsDrawerProps): JSX.Element {
 
   const send = async (download: BrowserSessionDownload) => {
     const current = rows()[download.artifactId]
-    if (current && (current.state === 'sending' || ('outcome' in current && current.outcome === 'sent'))) return
+    if (current && (('state' in current && current.state === 'sending') || ('outcome' in current && current.outcome === 'sent'))) return
     setRow(download.artifactId, { state: 'sending' })
     const run = props.send ?? sendDownloadToKnowledge
     const outcome = await run({ sessionId: props.sessionId, download, zdr: zdr(), actor: props.actor() })
