@@ -1,7 +1,11 @@
 //! `POST /v1/internal/schedules/preflight` (WS15.S2).
 //!
 //! The orchestrator asks this route before every scheduled fire. S2 answers allow
-//! with the posture `unchecked` and the entitlement `floor`. The route needs the
+//! with the posture `unchecked` and the entitlement `floor`. Since WS15.S4a
+//! (W2-Q-S4a) that answer is mode `off`; the default mode `observe` reads the
+//! org-core posture (covered by the unit tests in `src/schedule_preflight.rs`).
+//! The mode is read once per process, so every test here pins `off` before the
+//! first request and none can see another mode. The route needs the
 //! shared runtime bearer token and the `X-Quarry-Run-Sig` binding over
 //! `org_id + "\n" + "schedule:<id>"`, so a token or a signature cannot be reused
 //! for another schedule or another tenant.
@@ -38,6 +42,8 @@ fn binding_sig(org: &str, target: &str) -> String {
 
 async fn spawn_edge() -> SocketAddr {
     std::env::set_var("QUARRY_EDGE__RUNTIME_AUTH_TOKEN", RUNTIME_TOKEN);
+    // The S2 answer is mode `off` since S4a; same value in every test (read once).
+    std::env::set_var(quarry_edge::schedule_preflight::ENV_SCHEDULE_POSTURE, "off");
     let (tx, mut rx) = mpsc::channel(64);
     tokio::spawn(async move { while rx.recv().await.is_some() {} });
     let driver = Arc::new(FixtureSiteDriver::standard_site());

@@ -37,6 +37,10 @@ pub const SCORE_SCHEMA: &str = "quarry.tier_b.score.v1";
 
 /// Routes served by `quarry_runtime::test_site::TestSite` (read-only mirror).
 pub const TEST_SITE_ROUTES: &[&str] = &["/", "/login", "/dashboard", "/search"];
+/// Paths the `TestSite` deliberately does not serve: it has no fallback route, so each is a
+/// 404. A case that tests how the agent handles a missing page starts on one of these, and
+/// none may ever be one of [`TEST_SITE_ROUTES`].
+pub const TEST_SITE_MISSING_PATHS: &[&str] = &["/no-such-page"];
 pub const SITE_TEST_SITE: &str = "test_site";
 pub const SITE_STATIC: &str = "static";
 pub const CATEGORIES: &[&str] = &["navigation", "auth", "extraction", "security"];
@@ -334,7 +338,7 @@ pub fn validate_corpus(corpus: &Corpus, dir: &Path) -> Vec<String> {
         }
         match case.site.as_str() {
             SITE_TEST_SITE => {
-                if !TEST_SITE_ROUTES.contains(&path) {
+                if !TEST_SITE_ROUTES.contains(&path) && !TEST_SITE_MISSING_PATHS.contains(&path) {
                     problems.push(format!("case {id:?} start_path is not a TestSite route"));
                 }
             }
@@ -739,6 +743,16 @@ mod tests {
         case.start_path = "/admin".to_owned();
         let problems = validate_corpus(&corpus, &default_corpus_dir());
         assert!(problems.iter().any(|p| p.contains("not a TestSite route")));
+    }
+
+    #[test]
+    fn a_missing_path_is_never_a_served_route() {
+        for path in TEST_SITE_MISSING_PATHS {
+            assert!(
+                !TEST_SITE_ROUTES.contains(path),
+                "{path} is both served and missing"
+            );
+        }
     }
 
     #[test]

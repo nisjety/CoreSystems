@@ -656,3 +656,49 @@ Open items:
 - E3.9.6-7: no producer for usage_meters.json; prices not ratified; Browserless token in URL (D-E3967-1, security high).
 - 53 lane c depth rows plus 1 integration row appended to W23-depth.md under "W3 finish lane c".
 - The four line-ending-only .sha256 artifacts were not staged.
+
+## W2/W3 host test gate (2026-11-04)
+
+Native Windows run on w23/integ (one cargo at a time, CARGO_INCREMENTAL=0, scratch Redis on 127.0.0.1:16399, REQUIRE_CONTRACT=1), after the test-fix round. Every failure below that is not marked fixed also failed at 9bea43473.
+
+| Crate | Passed | Failed | Ignored | Failures |
+|---|---|---|---|---|
+| quarry-core (--features jsonschema) | 416 | 0 | 1 | none |
+| quarry-security | 40 | 0 | 0 | none |
+| quarry-transform | 310 | 0 | 0 | none |
+| quarry-browser | 264 | 0 | 0 | none |
+| quarry-tls | 26 | 0 | 0 | none |
+| quarry-runtime | 1452 | 10 | 0 | platform only (artifact_store fs tests x9, artifact_org_stamp x1) |
+| quarry-edge | 2858 | 14 | 3 | platform only (artifacts_fs_list x6, scrape_records_durable x4, zdr_posture_stamp run_page x1, parse_route x1, profile_guard x1, zdr_tombstone x1) |
+| quarry-evals | 92 | 0 | 0 | none |
+
+Go (GOWORK=off go vet ./... and go test ./...): quarry-orchestrator and quarry-control green.
+
+Fixes (all on w23/integ):
+- 9cba74992 fix(quarry-edge): closed error labels for unreadable mode switches (log_field_discipline R2; W2-Q-S4a and the human-grant renewal switch).
+- 79b9ba1b1 test(quarry-edge): schedule_preflight pins QUARRY_EDGE__SCHEDULE_POSTURE=off for the S2 answer (W2-Q-S4a changed the default to observe on purpose).
+- 7194abbb5 fix(quarry-runtime): challenge gate test samples all 35 AgentAction variants (E3.1-a FillOtpRef; Reload was never sampled).
+- 779d73da4 fix(quarry-runtime): the org-core key provider refuses an org id with whitespace before calling (W2-CP-E2b).
+- 881085d57 fix(quarry): web_policy_routes and ZDR matrix rows for the W2-U49 user receipt purge and the E3.3-h hit-test route; catalogue pinned at 40 keys.
+- 21bc3019e fix(quarry-edge): an observed empty web_policy claim is no org layer, so the page and answer caches stay on (zdr_claim_floor; W2-CP-U35 x WS7.I).
+- 5da331172 fix(quarry-evals): Tier B corpus may start on a path the TestSite deliberately does not serve (E3.9.2).
+- ce93dcde3 docs(quarry): scrape option goldens regenerated (UPDATE_SCHEMAS=1) and redact_pii documented in openapi.yaml ScrapeRequest (W3-E3.6-5); openapi-scrape-parity 10/10.
+- 35a7b5b2d docs(quarry): ZDR feature matrix golden, .sha256, docs/ZDR_MATRIX.md (46 rows, 6 gaps) and the zdr-contract-sync pin regenerated.
+
+Platform failures (Windows only; they pass in the Linux container):
+- The fs artifact store writes `page=blake3:<hash>` directories; ":" is invalid in a Windows directory name (os error 267): artifact_store fs tests, artifact_org_stamp, artifacts_fs_list, scrape_records_durable, zdr_posture_stamp run_page_with_a_zdr_stamp_persists_no_artifact_event_or_index_write.
+- An early 413 closes the socket while the client is still uploading, so Windows answers ConnectionAborted 10053: parse_route a_body_over_the_limit_is_a_413_whether_or_not_it_declares_its_length, and profile_guard import_over_cap_is_413 (timing dependent: passed in the earlier head run, failed 3 of 3 re-runs now; no profile code changed since 9bea43473).
+- zdr_tombstone the_http_sink_maps_a_refusal_to_a_status_and_a_dead_peer_to_a_class: Transport("timeout") instead of ("connect") for a dead peer.
+
+Pre-existing (same failure set at 9bea43473, not fixed here):
+- scripts/tests/zdr-contract-sync.test.sh: 170 passed, 15 failed. Every failure is a working-copy CRLF row of a .sha256 pin or vendored copy that fails the same way in the w23-base checkout (base: 165 passed, 20 failed). The quarry-core web-policy-catalogue.v1.json.sha256 working copy had CRLF here only (index LF, no diff); it was rewritten to LF in the working tree.
+- node --test scripts/tests/*.test.mjs (Quarry-v2): 68 passed, 5 failed, identical to w23-base: openapi-internal guard (the /v1/internal/orgs/{}/users/{}/receipts route, W2-U49, is not in openapi-internal.yaml; the Go control service registers 10 internal routes, the test expects 8), tracked internal SDK files (InternalApi.ts, InternalRunPage*.ts), route coverage (/v1/agent/runs/{}/hit-test, /v1/audit/page and the user receipts route are undocumented) and the pinned route count.
+
+Not run: Chromium #[ignore] live tests (quarry-core 1, quarry-edge 3 ignored), stack proofs, the Linux container gate.
+
+Open from the fixers:
+- W2-Q-S4a defaults QUARRY_EDGE__SCHEDULE_POSTURE to observe, not off: the preflight answer changes (posture unknown, observed_reason) and every fire reads org-core. Owner decision whether the default should be off.
+- The org-core key provider refuses only whitespace in an org id; the stricter quarry-edge limits.rs valid_org_id (letters, digits, _ and -) was not adopted.
+- Under the enforce claim mode an org claim with an empty layer and a real rev still stamps org_rev into the digest, so the caches stay off for that org.
+- The agent_hit_test matrix row says 501 until the E3.3-h driver method lands; edit it then.
+- E3.6-5: a crawl does not refuse redact_pii yet (UNSUPPORTED_KEYS in crawl_scrape.rs).

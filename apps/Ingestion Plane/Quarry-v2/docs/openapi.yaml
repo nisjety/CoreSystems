@@ -8618,6 +8618,24 @@ components:
             thing: the TTL, in seconds, of the entry this request writes.
             A 2xx page the run flagged as a bot wall or a soft-404 is returned
             as usual but never written, so the next call fetches again.
+        redact_pii:
+          type: string
+          enum: ['off', 'on']
+          default: 'off'
+          description: >-
+            E3.6-5. on: the returned text goes through the PII scanner before it
+            is cached, recorded or answered (inline markdown, html, rawHtml, the
+            AI source, the page title, description, author and keywords, and the
+            extraction title, excerpt and summary); the text fingerprint is
+            cleared, and a field the redaction markers grow past
+            max_inline_bytes is cut again and named in truncated. Absent and off
+            are the same request. Alias redactPii. 400 requires_zdr (path
+            redact_pii) outside zero data retention; 400
+            not_supported_with_redact_pii with a screenshot or pdf format (path
+            formats) or with actions (path actions); 400 unsupported_redact_pii
+            for any other value. A redacted request never reads or writes the
+            page or result cache. Refused on /v1/scrape/stream
+            (unsupported_in_stream).
       description: >-
         Fields not listed here are unknown: ignored with an unknown_field warning
         (and Deprecation and Sunset headers) unless the edge runs strict, where they
@@ -9200,7 +9218,7 @@ components:
             description: Inline fields left out for exceeding max_inline_bytes (not ZDR); read the matching formats.* artifact.
           effective_options:
             type: object
-            description: The options the response was produced with, including ignored_fields, cache_state (hit, miss, bypass), doc_routing and strict. With max_age, `max_age` (echo, in ms) and, on a result served from the cache, `cached_at` (RFC 3339, the original fetch) and `cache_age_ms`. With actions, `actions` is a summary (count, types, total_wait_ms, capture_count, on_error), never a selector or a typed text.
+            description: The options the response was produced with, including ignored_fields, cache_state (hit, miss, bypass), doc_routing and strict. With max_age, `max_age` (echo, in ms) and, on a result served from the cache, `cached_at` (RFC 3339, the original fetch) and `cache_age_ms`. With actions, `actions` is a summary (count, types, total_wait_ms, capture_count, on_error), never a selector or a typed text. `redact_pii` (off or on, E3.6-5) is always reported.
           warnings:
             type: array
             items:

@@ -2446,6 +2446,7 @@ mod tests {
             AgentAction::Back,
             AgentAction::Forward,
             AgentAction::GetContent,
+            AgentAction::Reload { ignore_cache: false },
         ]
     }
 
@@ -2494,12 +2495,12 @@ mod tests {
     #[test]
     fn every_action_variant_is_refused_or_allowed_as_decided() {
         let actions = every_action();
-        assert_eq!(actions.len(), 33, "one sample per AgentAction variant");
+        assert_eq!(actions.len(), 35, "one sample per AgentAction variant");
         let kinds: std::collections::HashSet<String> = actions
             .iter()
             .map(|a| serde_json::to_value(a).unwrap()["type"].as_str().unwrap().to_owned())
             .collect();
-        assert_eq!(kinds.len(), 33, "the samples must be distinct variants");
+        assert_eq!(kinds.len(), 35, "the samples must be distinct variants");
 
         let e = exhausted();
         for action in &actions {

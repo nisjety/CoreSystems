@@ -447,7 +447,14 @@ fn every_code_and_feature_the_matrix_names_is_in_the_closed_catalogue_list() {
     let catalogue_codes = catalogue_codes();
     let catalogue_features = catalogue_features();
     assert_eq!(catalogue_codes.len(), 10, "the plan's closed list has 10 codes");
-    assert_eq!(catalogue_features.len(), 32, "the closed list has 32 feature keys (the plan's 30 plus connector_read and message_versions, Model Plane W2-25)");
+    assert_eq!(
+        catalogue_features.len(),
+        40,
+        "the closed list has 40 feature keys: the plan's 30, connector_read and message_versions \
+         (Model Plane W2-25), sandbox_workspace (W2-33), browser_tool (W2-35), user_profile (W3-08), \
+         agent_api, conversation_export, conversation_share and conversation_import (W3-10), and \
+         run_inspection (W3-11)"
+    );
     let (codes, features) = refusals_named_by_the_matrix();
     assert!(!codes.is_empty() && !features.is_empty(), "no refusal row names a code: the premise is gone");
 
