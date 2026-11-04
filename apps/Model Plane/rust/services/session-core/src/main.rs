@@ -61,6 +61,8 @@ mod space_stream_grpc;
 mod store;
 mod terminalization;
 mod thread_fork;
+mod thread_reference;
+mod thread_goals;
 mod tool_ledger;
 mod trace_nats;
 mod user_profile;

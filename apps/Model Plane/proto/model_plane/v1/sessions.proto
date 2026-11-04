@@ -2289,3 +2289,86 @@ message ForkThreadResponse {
   // How many turns were copied, the chosen message included.
   uint32 copied_message_count = 2;
 }
+
+// --- ThreadReference (EP-3 S7) ---
+
+// ThreadReferenceService: reads one of the owner's earlier chat threads that the person attached
+// to a turn as a reference, for the gateway's read-only thread reference tools (EP-3 S7). A
+// separate service, as ThreadForkService is, so that SessionCore and every mock of it stay
+// source-compatible.
+service ThreadReferenceService {
+  // Read an outline or a page of an attached thread's active path, newest first. Owner only, with
+  // `session:read`; a zero-retention credential and a service credential are refused. Refused with
+  // failed_precondition for the current thread (`thread_reference_current_thread`), a Space or
+  // non-chat thread (`thread_reference_not_chat`), an archived thread (`thread_reference_archived`)
+  // and a thread that holds a zero-retention or waived run (`thread_reference_retention`). A thread
+  // the caller does not own answers not_found, as a missing one does. Writes nothing.
+  rpc ReadThreadForReference(ReadThreadForReferenceRequest) returns (ReadThreadForReferenceResponse);
+}
+
+// What a thread reference read returns.
+enum ThreadReferenceMode {
+  // Refused: a caller must say which read it wants.
+  THREAD_REFERENCE_MODE_UNSPECIFIED = 0;
+  // The first line of each turn, for finding the part of the thread worth reading.
+  THREAD_REFERENCE_MODE_OUTLINE = 1;
+  // The turns themselves, each capped in length.
+  THREAD_REFERENCE_MODE_PAGE = 2;
+}
+
+// The parameters of one thread reference read.
+message ReadThreadForReferenceRequest {
+  // Required. The owning org.
+  string org_id = 1;
+  // Required. The caller, who must own the thread.
+  string user_id = 2;
+  // Required. The attached thread to read.
+  string thread_id = 3;
+  // Required. OUTLINE or PAGE.
+  ThreadReferenceMode mode = 4;
+  // Optional cursor: only turns older than this one, which must lie on the thread's active path.
+  // Empty starts from the newest turn.
+  string before_message_id = 5;
+  // Optional. 0 means the server default; clamped to at most 20 turns.
+  uint32 limit = 6;
+  // Required. The thread the reading turn runs in; reading it as a reference is refused.
+  string current_thread_id = 7;
+}
+
+// One page of a thread reference read. Exactly one of `messages` and `outline` is filled, by mode.
+message ReadThreadForReferenceResponse {
+  // The thread's title, as ListThreads shows it.
+  string thread_title = 1;
+  // PAGE: the turns of the page, oldest first.
+  repeated ThreadReferenceMessage messages = 2;
+  // Whether older turns exist before the oldest one returned.
+  bool has_more = 3;
+  // OUTLINE: one item per turn of the page, oldest first.
+  repeated ThreadReferenceOutlineItem outline = 4;
+}
+
+// One turn of a referenced thread, as the reference tools read it.
+message ThreadReferenceMessage {
+  // The turn's message id, usable as the next read's before_message_id.
+  string message_id = 1;
+  // "user" or "assistant".
+  string role = 2;
+  // The turn's text, cut to at most 4,000 characters.
+  string content = 3;
+  // When the turn was written.
+  google.protobuf.Timestamp created_at = 4;
+  // Whether `content` was cut to the cap.
+  bool truncated = 5;
+}
+
+// One line of a referenced thread's outline.
+message ThreadReferenceOutlineItem {
+  // The turn's message id, usable as a read's before_message_id.
+  string message_id = 1;
+  // "user" or "assistant".
+  string role = 2;
+  // The turn's first non-empty line, cut to at most 160 characters.
+  string first_line = 3;
+  // When the turn was written.
+  google.protobuf.Timestamp created_at = 4;
+}

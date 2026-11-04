@@ -21,6 +21,8 @@ use mp_contracts::model_plane::v1::{
     memory_service_client::MemoryServiceClient,
     message_tree_service_client::MessageTreeServiceClient,
     thread_fork_service_client::ThreadForkServiceClient,
+    thread_goal_service_client::ThreadGoalServiceClient,
+    thread_reference_service_client::ThreadReferenceServiceClient,
     attention_service_client::AttentionServiceClient,
     orchestration_core_service_client::OrchestrationCoreServiceClient,
     run_ledger_service_client::RunLedgerServiceClient,
@@ -131,6 +133,11 @@ pub struct AppState {
     pub message_tree_client: MessageTreeServiceClient<Channel>,
     /// Session Core's ThreadFork service on the session_client endpoint (WS17-S6).
     pub thread_fork_client: ThreadForkServiceClient<Channel>,
+    /// Session Core's ThreadGoalService on the session_client endpoint (EP-7 S1).
+    pub thread_goal_client: ThreadGoalServiceClient<Channel>,
+    /// Session Core's ThreadReference service on the session_client endpoint (EP-3 S7): the
+    /// read-only thread reference tools read the threads the person attached through it.
+    pub thread_reference_client: ThreadReferenceServiceClient<Channel>,
     /// Session Core's Attention service on the session_client endpoint (WS16-S1).
     pub attention_client: AttentionServiceClient<Channel>,
     /// Session Core's LearningGovernance service on the same endpoint as `session_client` (WS07-S9).
@@ -484,6 +491,8 @@ impl AppState {
             artifact_editing_enabled: false,
             message_tree_client: MessageTreeServiceClient::new(session_channel.clone()),
             thread_fork_client: ThreadForkServiceClient::new(session_channel.clone()),
+            thread_goal_client: ThreadGoalServiceClient::new(session_channel.clone()),
+            thread_reference_client: ThreadReferenceServiceClient::new(session_channel.clone()),
             attention_client: AttentionServiceClient::new(session_channel.clone()),
             learning_client: LearningGovernanceServiceClient::new(session_channel.clone()),
             space_events_client: SpaceEventsClient::new(session_channel.clone()),
@@ -687,6 +696,16 @@ impl AppState {
             "http://localhost:9091",
         )?);
         let thread_fork_client = ThreadForkServiceClient::new(Self::lazy_channel(
+            "SESSION_CORE_URL",
+            "SESSION_CORE_ADDR",
+            "http://localhost:9091",
+        )?);
+        let thread_goal_client = ThreadGoalServiceClient::new(Self::lazy_channel(
+            "SESSION_CORE_URL",
+            "SESSION_CORE_ADDR",
+            "http://localhost:9091",
+        )?);
+        let thread_reference_client = ThreadReferenceServiceClient::new(Self::lazy_channel(
             "SESSION_CORE_URL",
             "SESSION_CORE_ADDR",
             "http://localhost:9091",
@@ -929,6 +948,8 @@ impl AppState {
             state.artifact_editing_enabled = artifact_editing_enabled;
             state.message_tree_client = message_tree_client;
             state.thread_fork_client = thread_fork_client;
+            state.thread_goal_client = thread_goal_client;
+            state.thread_reference_client = thread_reference_client;
             state.attention_client = attention_client;
             state.learning_client = learning_client;
             state.space_events_client = space_events_client;
@@ -1000,6 +1021,8 @@ impl AppState {
             state.artifact_editing_enabled = artifact_editing_enabled;
             state.message_tree_client = message_tree_client;
             state.thread_fork_client = thread_fork_client;
+            state.thread_goal_client = thread_goal_client;
+            state.thread_reference_client = thread_reference_client;
             state.attention_client = attention_client;
             state.learning_client = learning_client;
             state.space_events_client = space_events_client;

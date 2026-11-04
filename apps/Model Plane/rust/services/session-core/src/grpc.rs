@@ -37,6 +37,8 @@ use mp_contracts::model_plane::v1::{
     space_room_read_service_server::SpaceRoomReadServiceServer,
     thread_autonomy_server::{ThreadAutonomy, ThreadAutonomyServer},
     thread_fork_service_server::ThreadForkServiceServer,
+    thread_reference_service_server::ThreadReferenceServiceServer,
+    thread_goal_service_server::ThreadGoalServiceServer,
 };
 use mp_contracts::run_origin::{RunOrigin, ORIGIN_METADATA_KEY};
 use mp_contracts::retention::{space_zdr_mode, SpaceZdrMode};
@@ -927,6 +929,8 @@ pub(crate) async fn delete_thread_rows(
         "DELETE FROM memory_index WHERE thread_id = $1",
         // EP-3 S2: also ON DELETE CASCADE from threads; named here so the erase list is complete.
         "DELETE FROM artifact_revisions WHERE thread_id = $1",
+        // EP-7 S1: also ON DELETE CASCADE from threads; named here so the erase list is complete.
+        "DELETE FROM thread_goals WHERE thread_id = $1",
     ] {
         sqlx::query(query)
             .bind(thread_id)
@@ -11719,6 +11723,8 @@ pub async fn serve(
     let message_tree = crate::message_tree::MessageTreeGrpc { pool: pool.clone() };
     let thread_fork = crate::thread_fork::ThreadForkGrpc { pool: pool.clone() };
     let artifact_revision_pool = pool.clone();
+    let thread_reference_pool = pool.clone();
+    let thread_goal_pool = pool.clone();
 
     // Space event stream (WS02-S3): its own small read pool, built before `pool` moves.
     let space_events = crate::space_stream_grpc::SpaceEventsGrpc::new(pool.clone(), space_wakes);
@@ -11794,9 +11800,19 @@ pub async fn serve(
             thread_fork,
             auth.clone(),
         ))
+        // EP-3 S7: read-only thread reference reads; only the gateway's switched-off tools call it.
+        .add_service(ThreadReferenceServiceServer::with_interceptor(
+            crate::thread_reference::ThreadReferenceGrpc { pool: thread_reference_pool },
+            auth.clone(),
+        ))
         // EP-3 S2: the artifact revision store; answers `unavailable` until its switch is on.
         .add_service(ArtifactRevisionServiceServer::with_interceptor(
             crate::artifact_revisions::ArtifactRevisionGrpc { pool: artifact_revision_pool },
+            auth.clone(),
+        ))
+        // EP-7 S1: the thread goal store; answers `unavailable` until its switch is on.
+        .add_service(ThreadGoalServiceServer::with_interceptor(
+            crate::thread_goals::ThreadGoalGrpc { pool: thread_goal_pool },
             auth.clone(),
         ))
         .add_service(LearningGovernanceServiceServer::with_interceptor(
