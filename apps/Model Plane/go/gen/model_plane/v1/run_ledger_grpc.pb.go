@@ -22,6 +22,7 @@ const (
 	RunLedgerService_RecordRequestSnapshot_FullMethodName = "/model_plane.v1.RunLedgerService/RecordRequestSnapshot"
 	RunLedgerService_RecordRunTiming_FullMethodName       = "/model_plane.v1.RunLedgerService/RecordRunTiming"
 	RunLedgerService_GetRunTiming_FullMethodName          = "/model_plane.v1.RunLedgerService/GetRunTiming"
+	RunLedgerService_GetRequestSnapshot_FullMethodName    = "/model_plane.v1.RunLedgerService/GetRequestSnapshot"
 )
 
 // RunLedgerServiceClient is the client API for RunLedgerService service.
@@ -56,6 +57,14 @@ type RunLedgerServiceClient interface {
 	// times (EP-14 S5). Owner only: a run of another user or org reads as not
 	// found. Answers UNIMPLEMENTED unless SESSION_CORE_RUN_LEDGER_READ is on.
 	GetRunTiming(ctx context.Context, in *GetRunTimingRequest, opts ...grpc.CallOption) (*GetRunTimingResponse, error)
+	// Read one model call's snapshot for the request inspector (EP-14 S7).
+	// Only the user who owns the run reads it: another user, an org admin, a
+	// service caller and a system-owned run all read as not found. The prompt
+	// comes back as sections; a platform-authored section, or one whose text
+	// cannot be matched to its digest, carries no text (decision D3). A ZDR
+	// caller is refused with `zdr_feature_not_supported` (`run_inspection`).
+	// Answers UNIMPLEMENTED unless SESSION_CORE_REQUEST_INSPECTOR_READ is on.
+	GetRequestSnapshot(ctx context.Context, in *GetRequestSnapshotRequest, opts ...grpc.CallOption) (*GetRequestSnapshotResponse, error)
 }
 
 type runLedgerServiceClient struct {
@@ -96,6 +105,16 @@ func (c *runLedgerServiceClient) GetRunTiming(ctx context.Context, in *GetRunTim
 	return out, nil
 }
 
+func (c *runLedgerServiceClient) GetRequestSnapshot(ctx context.Context, in *GetRequestSnapshotRequest, opts ...grpc.CallOption) (*GetRequestSnapshotResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetRequestSnapshotResponse)
+	err := c.cc.Invoke(ctx, RunLedgerService_GetRequestSnapshot_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // RunLedgerServiceServer is the server API for RunLedgerService service.
 // All implementations must embed UnimplementedRunLedgerServiceServer
 // for forward compatibility.
@@ -128,6 +147,14 @@ type RunLedgerServiceServer interface {
 	// times (EP-14 S5). Owner only: a run of another user or org reads as not
 	// found. Answers UNIMPLEMENTED unless SESSION_CORE_RUN_LEDGER_READ is on.
 	GetRunTiming(context.Context, *GetRunTimingRequest) (*GetRunTimingResponse, error)
+	// Read one model call's snapshot for the request inspector (EP-14 S7).
+	// Only the user who owns the run reads it: another user, an org admin, a
+	// service caller and a system-owned run all read as not found. The prompt
+	// comes back as sections; a platform-authored section, or one whose text
+	// cannot be matched to its digest, carries no text (decision D3). A ZDR
+	// caller is refused with `zdr_feature_not_supported` (`run_inspection`).
+	// Answers UNIMPLEMENTED unless SESSION_CORE_REQUEST_INSPECTOR_READ is on.
+	GetRequestSnapshot(context.Context, *GetRequestSnapshotRequest) (*GetRequestSnapshotResponse, error)
 	mustEmbedUnimplementedRunLedgerServiceServer()
 }
 
@@ -146,6 +173,9 @@ func (UnimplementedRunLedgerServiceServer) RecordRunTiming(context.Context, *Rec
 }
 func (UnimplementedRunLedgerServiceServer) GetRunTiming(context.Context, *GetRunTimingRequest) (*GetRunTimingResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetRunTiming not implemented")
+}
+func (UnimplementedRunLedgerServiceServer) GetRequestSnapshot(context.Context, *GetRequestSnapshotRequest) (*GetRequestSnapshotResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetRequestSnapshot not implemented")
 }
 func (UnimplementedRunLedgerServiceServer) mustEmbedUnimplementedRunLedgerServiceServer() {}
 func (UnimplementedRunLedgerServiceServer) testEmbeddedByValue()                          {}
@@ -222,6 +252,24 @@ func _RunLedgerService_GetRunTiming_Handler(srv interface{}, ctx context.Context
 	return interceptor(ctx, in, info, handler)
 }
 
+func _RunLedgerService_GetRequestSnapshot_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetRequestSnapshotRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RunLedgerServiceServer).GetRequestSnapshot(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RunLedgerService_GetRequestSnapshot_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RunLedgerServiceServer).GetRequestSnapshot(ctx, req.(*GetRequestSnapshotRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // RunLedgerService_ServiceDesc is the grpc.ServiceDesc for RunLedgerService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -240,6 +288,10 @@ var RunLedgerService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "GetRunTiming",
 			Handler:    _RunLedgerService_GetRunTiming_Handler,
+		},
+		{
+			MethodName: "GetRequestSnapshot",
+			Handler:    _RunLedgerService_GetRequestSnapshot_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

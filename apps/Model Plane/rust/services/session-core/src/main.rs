@@ -9,6 +9,7 @@ use std::{future::Future, time::Duration};
 use tracing::{info, warn};
 
 mod approval_delivery;
+mod artifact_revisions;
 mod attention;
 mod attention_events;
 mod attention_grpc;

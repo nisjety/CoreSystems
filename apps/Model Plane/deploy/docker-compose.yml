@@ -650,6 +650,8 @@ services:
       MODEL_GATEWAY_RUN_CONTEXT_HISTORY_TOKENS: ${MODEL_GATEWAY_RUN_CONTEXT_HISTORY_TOKENS:-}
       # EP-14 S5: write per-round run timing through session-core's RunLedgerService. Only the literal true.
       MODEL_GATEWAY_RUN_TIMING_PERSIST: ${MODEL_GATEWAY_RUN_TIMING_PERSIST:-false}
+      # EP-14 S7: the request inspector route GET /v1/runs/:run_id/requests/:call_seq. Only the literal true.
+      MODEL_GATEWAY_REQUEST_INSPECTOR: ${MODEL_GATEWAY_REQUEST_INSPECTOR:-false}
       # Source-check deadlines in seconds. The code default is 90 per artifact
       # and 150 for the shared tool phase, and the code treats an empty value as
       # unset. Here `:-120` fills in an empty value too, so the per-artifact
@@ -1143,6 +1145,8 @@ services:
       SESSION_CORE_REQUEST_SNAPSHOT_TTL_DAYS: ${SESSION_CORE_REQUEST_SNAPSHOT_TTL_DAYS:-7}
       # EP-14 S5: the GetRunTiming read. Only the literal true.
       SESSION_CORE_RUN_LEDGER_READ: ${SESSION_CORE_RUN_LEDGER_READ:-false}
+      # EP-14 S7: the request inspector read (GetRequestSnapshot). Only the literal true.
+      SESSION_CORE_REQUEST_INSPECTOR_READ: ${SESSION_CORE_REQUEST_INSPECTOR_READ:-false}
       # Dreaming's LLM memory extraction (dream_extractor.rs). Unset this
       # address, or set DREAMING_LLM_EXTRACTION=0, and Dreaming falls back to
       # the deterministic phrase matcher alone.

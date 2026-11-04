@@ -15,6 +15,7 @@ use mp_contracts::dataplane::retrieval_v2::{
 use mp_contracts::model_plane::v1::{
     self as pb,
     approval_scope_grant_service_server::ApprovalScopeGrantServiceServer,
+    artifact_revision_service_server::ArtifactRevisionServiceServer,
     attention_service_server::AttentionServiceServer,
     finetune_jobs_server::FinetuneJobsServer,
     learning_governance_service_server::{LearningGovernanceService, LearningGovernanceServiceServer},
@@ -924,6 +925,8 @@ pub(crate) async fn delete_thread_rows(
         "DELETE FROM dream_runs WHERE thread_id = $1
             OR run_id IN (SELECT id FROM runs WHERE thread_id = $1)",
         "DELETE FROM memory_index WHERE thread_id = $1",
+        // EP-3 S2: also ON DELETE CASCADE from threads; named here so the erase list is complete.
+        "DELETE FROM artifact_revisions WHERE thread_id = $1",
     ] {
         sqlx::query(query)
             .bind(thread_id)
@@ -11715,6 +11718,7 @@ pub async fn serve(
     };
     let message_tree = crate::message_tree::MessageTreeGrpc { pool: pool.clone() };
     let thread_fork = crate::thread_fork::ThreadForkGrpc { pool: pool.clone() };
+    let artifact_revision_pool = pool.clone();
 
     // Space event stream (WS02-S3): its own small read pool, built before `pool` moves.
     let space_events = crate::space_stream_grpc::SpaceEventsGrpc::new(pool.clone(), space_wakes);
@@ -11788,6 +11792,11 @@ pub async fn serve(
         ))
         .add_service(ThreadForkServiceServer::with_interceptor(
             thread_fork,
+            auth.clone(),
+        ))
+        // EP-3 S2: the artifact revision store; answers `unavailable` until its switch is on.
+        .add_service(ArtifactRevisionServiceServer::with_interceptor(
+            crate::artifact_revisions::ArtifactRevisionGrpc { pool: artifact_revision_pool },
             auth.clone(),
         ))
         .add_service(LearningGovernanceServiceServer::with_interceptor(

@@ -628,6 +628,251 @@ func (x *GetRunTimingResponse) GetTruncated() bool {
 	return false
 }
 
+// GetRequestSnapshotRequest: read one model call's snapshot (EP-14 S7).
+type GetRequestSnapshotRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The run the call belongs to. Must be the caller's own run.
+	RunId string `protobuf:"bytes,1,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
+	// The call's order within the run, from 1.
+	CallSeq       uint32 `protobuf:"varint,2,opt,name=call_seq,json=callSeq,proto3" json:"call_seq,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetRequestSnapshotRequest) Reset() {
+	*x = GetRequestSnapshotRequest{}
+	mi := &file_model_plane_v1_run_ledger_proto_msgTypes[8]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetRequestSnapshotRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetRequestSnapshotRequest) ProtoMessage() {}
+
+func (x *GetRequestSnapshotRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_run_ledger_proto_msgTypes[8]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetRequestSnapshotRequest.ProtoReflect.Descriptor instead.
+func (*GetRequestSnapshotRequest) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_run_ledger_proto_rawDescGZIP(), []int{8}
+}
+
+func (x *GetRequestSnapshotRequest) GetRunId() string {
+	if x != nil {
+		return x.RunId
+	}
+	return ""
+}
+
+func (x *GetRequestSnapshotRequest) GetCallSeq() uint32 {
+	if x != nil {
+		return x.CallSeq
+	}
+	return 0
+}
+
+// PromptSection: one system message of a call's prompt, in prompt order
+// (EP-14 S7). Decision D3: a platform section carries its label, digest and
+// length but never its text; org, user and memory sections carry their text.
+type PromptSection struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// What the section is: the label table's name for the message's source tag,
+	// or the prompt tier it was placed in when the caller gave it no tag.
+	Label string `protobuf:"bytes,1,opt,name=label,proto3" json:"label,omitempty"`
+	// Who authored the text: "platform", "org", "user" or "memory". A section
+	// the label table does not know is "platform", so unknown text stays hidden.
+	Source string `protobuf:"bytes,2,opt,name=source,proto3" json:"source,omitempty"`
+	// The sha256 of the section's text: its version, comparable across calls.
+	Digest string `protobuf:"bytes,3,opt,name=digest,proto3" json:"digest,omitempty"`
+	// The section's length in characters.
+	Chars uint32 `protobuf:"varint,4,opt,name=chars,proto3" json:"chars,omitempty"`
+	// The section's text. Empty for a platform section, and for any section
+	// whose stored text did not match its digest (a cut or reordered prompt).
+	Text          string `protobuf:"bytes,5,opt,name=text,proto3" json:"text,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PromptSection) Reset() {
+	*x = PromptSection{}
+	mi := &file_model_plane_v1_run_ledger_proto_msgTypes[9]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PromptSection) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PromptSection) ProtoMessage() {}
+
+func (x *PromptSection) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_run_ledger_proto_msgTypes[9]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PromptSection.ProtoReflect.Descriptor instead.
+func (*PromptSection) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_run_ledger_proto_rawDescGZIP(), []int{9}
+}
+
+func (x *PromptSection) GetLabel() string {
+	if x != nil {
+		return x.Label
+	}
+	return ""
+}
+
+func (x *PromptSection) GetSource() string {
+	if x != nil {
+		return x.Source
+	}
+	return ""
+}
+
+func (x *PromptSection) GetDigest() string {
+	if x != nil {
+		return x.Digest
+	}
+	return ""
+}
+
+func (x *PromptSection) GetChars() uint32 {
+	if x != nil {
+		return x.Chars
+	}
+	return 0
+}
+
+func (x *PromptSection) GetText() string {
+	if x != nil {
+		return x.Text
+	}
+	return ""
+}
+
+// GetRequestSnapshotResponse: one model call as the inspector shows it (EP-14 S7).
+type GetRequestSnapshotResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The `request-snapshot-v1` JSON: parameters, routed model, digests and the
+	// message manifest, never a message body.
+	SnapshotJson string `protobuf:"bytes,1,opt,name=snapshot_json,json=snapshotJson,proto3" json:"snapshot_json,omitempty"`
+	// The system prompt as sections, in prompt order, filtered by decision D3.
+	SystemSections []*PromptSection `protobuf:"bytes,2,rep,name=system_sections,json=systemSections,proto3" json:"system_sections,omitempty"`
+	// The tool catalogue JSON offered on the call; empty when none was offered.
+	ToolsJson string `protobuf:"bytes,3,opt,name=tools_json,json=toolsJson,proto3" json:"tools_json,omitempty"`
+	// Snapshots of this run that were never stored (inference-core's full
+	// queue), so the record is incomplete when this is above 0.
+	Dropped uint64 `protobuf:"varint,4,opt,name=dropped,proto3" json:"dropped,omitempty"`
+	// Whether `tools_json` was cut at its cap and may not parse.
+	ToolsTruncated bool `protobuf:"varint,5,opt,name=tools_truncated,json=toolsTruncated,proto3" json:"tools_truncated,omitempty"`
+	// Whether the stored system prompt was cut at its cap; sections past the
+	// cut carry no text.
+	SystemTruncated bool `protobuf:"varint,6,opt,name=system_truncated,json=systemTruncated,proto3" json:"system_truncated,omitempty"`
+	// What the call was for (EP-13's closed vocabulary), as stored.
+	CallPurpose   string `protobuf:"bytes,7,opt,name=call_purpose,json=callPurpose,proto3" json:"call_purpose,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetRequestSnapshotResponse) Reset() {
+	*x = GetRequestSnapshotResponse{}
+	mi := &file_model_plane_v1_run_ledger_proto_msgTypes[10]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetRequestSnapshotResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetRequestSnapshotResponse) ProtoMessage() {}
+
+func (x *GetRequestSnapshotResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_run_ledger_proto_msgTypes[10]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetRequestSnapshotResponse.ProtoReflect.Descriptor instead.
+func (*GetRequestSnapshotResponse) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_run_ledger_proto_rawDescGZIP(), []int{10}
+}
+
+func (x *GetRequestSnapshotResponse) GetSnapshotJson() string {
+	if x != nil {
+		return x.SnapshotJson
+	}
+	return ""
+}
+
+func (x *GetRequestSnapshotResponse) GetSystemSections() []*PromptSection {
+	if x != nil {
+		return x.SystemSections
+	}
+	return nil
+}
+
+func (x *GetRequestSnapshotResponse) GetToolsJson() string {
+	if x != nil {
+		return x.ToolsJson
+	}
+	return ""
+}
+
+func (x *GetRequestSnapshotResponse) GetDropped() uint64 {
+	if x != nil {
+		return x.Dropped
+	}
+	return 0
+}
+
+func (x *GetRequestSnapshotResponse) GetToolsTruncated() bool {
+	if x != nil {
+		return x.ToolsTruncated
+	}
+	return false
+}
+
+func (x *GetRequestSnapshotResponse) GetSystemTruncated() bool {
+	if x != nil {
+		return x.SystemTruncated
+	}
+	return false
+}
+
+func (x *GetRequestSnapshotResponse) GetCallPurpose() string {
+	if x != nil {
+		return x.CallPurpose
+	}
+	return ""
+}
+
 var File_model_plane_v1_run_ledger_proto protoreflect.FileDescriptor
 
 const file_model_plane_v1_run_ledger_proto_rawDesc = "" +
@@ -681,11 +926,30 @@ const file_model_plane_v1_run_ledger_proto_rawDesc = "" +
 	"\x14GetRunTimingResponse\x12;\n" +
 	"\atimings\x18\x01 \x03(\v2!.model_plane.v1.RunTimingRecordedR\atimings\x129\n" +
 	"\aactions\x18\x02 \x03(\v2\x1f.model_plane.v1.RunActionTimingR\aactions\x12\x1c\n" +
-	"\ttruncated\x18\x03 \x01(\bR\ttruncated2\xc7\x02\n" +
+	"\ttruncated\x18\x03 \x01(\bR\ttruncated\"M\n" +
+	"\x19GetRequestSnapshotRequest\x12\x15\n" +
+	"\x06run_id\x18\x01 \x01(\tR\x05runId\x12\x19\n" +
+	"\bcall_seq\x18\x02 \x01(\rR\acallSeq\"\x7f\n" +
+	"\rPromptSection\x12\x14\n" +
+	"\x05label\x18\x01 \x01(\tR\x05label\x12\x16\n" +
+	"\x06source\x18\x02 \x01(\tR\x06source\x12\x16\n" +
+	"\x06digest\x18\x03 \x01(\tR\x06digest\x12\x14\n" +
+	"\x05chars\x18\x04 \x01(\rR\x05chars\x12\x12\n" +
+	"\x04text\x18\x05 \x01(\tR\x04text\"\xb9\x02\n" +
+	"\x1aGetRequestSnapshotResponse\x12#\n" +
+	"\rsnapshot_json\x18\x01 \x01(\tR\fsnapshotJson\x12F\n" +
+	"\x0fsystem_sections\x18\x02 \x03(\v2\x1d.model_plane.v1.PromptSectionR\x0esystemSections\x12\x1d\n" +
+	"\n" +
+	"tools_json\x18\x03 \x01(\tR\ttoolsJson\x12\x18\n" +
+	"\adropped\x18\x04 \x01(\x04R\adropped\x12'\n" +
+	"\x0ftools_truncated\x18\x05 \x01(\bR\x0etoolsTruncated\x12)\n" +
+	"\x10system_truncated\x18\x06 \x01(\bR\x0fsystemTruncated\x12!\n" +
+	"\fcall_purpose\x18\a \x01(\tR\vcallPurpose2\xb4\x03\n" +
 	"\x10RunLedgerService\x12t\n" +
 	"\x15RecordRequestSnapshot\x12,.model_plane.v1.RecordRequestSnapshotRequest\x1a-.model_plane.v1.RecordRequestSnapshotResponse\x12b\n" +
 	"\x0fRecordRunTiming\x12&.model_plane.v1.RecordRunTimingRequest\x1a'.model_plane.v1.RecordRunTimingResponse\x12Y\n" +
-	"\fGetRunTiming\x12#.model_plane.v1.GetRunTimingRequest\x1a$.model_plane.v1.GetRunTimingResponseB\xb6\x01\n" +
+	"\fGetRunTiming\x12#.model_plane.v1.GetRunTimingRequest\x1a$.model_plane.v1.GetRunTimingResponse\x12k\n" +
+	"\x12GetRequestSnapshot\x12).model_plane.v1.GetRequestSnapshotRequest\x1a*.model_plane.v1.GetRequestSnapshotResponseB\xb6\x01\n" +
 	"\x12com.model_plane.v1B\x0eRunLedgerProtoP\x01Z;github.com/triodelab/model-plane/gen/go/model_plane/v1;mpv1\xa2\x02\x03MXX\xaa\x02\rModelPlane.V1\xca\x02\rModelPlane\\V1\xe2\x02\x19ModelPlane\\V1\\GPBMetadata\xea\x02\x0eModelPlane::V1b\x06proto3"
 
 var (
@@ -700,7 +964,7 @@ func file_model_plane_v1_run_ledger_proto_rawDescGZIP() []byte {
 	return file_model_plane_v1_run_ledger_proto_rawDescData
 }
 
-var file_model_plane_v1_run_ledger_proto_msgTypes = make([]protoimpl.MessageInfo, 8)
+var file_model_plane_v1_run_ledger_proto_msgTypes = make([]protoimpl.MessageInfo, 11)
 var file_model_plane_v1_run_ledger_proto_goTypes = []any{
 	(*RecordRequestSnapshotRequest)(nil),  // 0: model_plane.v1.RecordRequestSnapshotRequest
 	(*RecordRequestSnapshotResponse)(nil), // 1: model_plane.v1.RecordRequestSnapshotResponse
@@ -710,28 +974,34 @@ var file_model_plane_v1_run_ledger_proto_goTypes = []any{
 	(*RecordRunTimingResponse)(nil),       // 5: model_plane.v1.RecordRunTimingResponse
 	(*GetRunTimingRequest)(nil),           // 6: model_plane.v1.GetRunTimingRequest
 	(*GetRunTimingResponse)(nil),          // 7: model_plane.v1.GetRunTimingResponse
-	(InferPurpose)(0),                     // 8: model_plane.v1.InferPurpose
-	(*timestamppb.Timestamp)(nil),         // 9: google.protobuf.Timestamp
+	(*GetRequestSnapshotRequest)(nil),     // 8: model_plane.v1.GetRequestSnapshotRequest
+	(*PromptSection)(nil),                 // 9: model_plane.v1.PromptSection
+	(*GetRequestSnapshotResponse)(nil),    // 10: model_plane.v1.GetRequestSnapshotResponse
+	(InferPurpose)(0),                     // 11: model_plane.v1.InferPurpose
+	(*timestamppb.Timestamp)(nil),         // 12: google.protobuf.Timestamp
 }
 var file_model_plane_v1_run_ledger_proto_depIdxs = []int32{
-	8,  // 0: model_plane.v1.RecordRequestSnapshotRequest.purpose:type_name -> model_plane.v1.InferPurpose
-	9,  // 1: model_plane.v1.RunTimingRecorded.recorded_at:type_name -> google.protobuf.Timestamp
-	9,  // 2: model_plane.v1.RunActionTiming.reserved_at:type_name -> google.protobuf.Timestamp
-	9,  // 3: model_plane.v1.RunActionTiming.finalized_at:type_name -> google.protobuf.Timestamp
+	11, // 0: model_plane.v1.RecordRequestSnapshotRequest.purpose:type_name -> model_plane.v1.InferPurpose
+	12, // 1: model_plane.v1.RunTimingRecorded.recorded_at:type_name -> google.protobuf.Timestamp
+	12, // 2: model_plane.v1.RunActionTiming.reserved_at:type_name -> google.protobuf.Timestamp
+	12, // 3: model_plane.v1.RunActionTiming.finalized_at:type_name -> google.protobuf.Timestamp
 	2,  // 4: model_plane.v1.RecordRunTimingRequest.timing:type_name -> model_plane.v1.RunTimingRecorded
 	2,  // 5: model_plane.v1.GetRunTimingResponse.timings:type_name -> model_plane.v1.RunTimingRecorded
 	3,  // 6: model_plane.v1.GetRunTimingResponse.actions:type_name -> model_plane.v1.RunActionTiming
-	0,  // 7: model_plane.v1.RunLedgerService.RecordRequestSnapshot:input_type -> model_plane.v1.RecordRequestSnapshotRequest
-	4,  // 8: model_plane.v1.RunLedgerService.RecordRunTiming:input_type -> model_plane.v1.RecordRunTimingRequest
-	6,  // 9: model_plane.v1.RunLedgerService.GetRunTiming:input_type -> model_plane.v1.GetRunTimingRequest
-	1,  // 10: model_plane.v1.RunLedgerService.RecordRequestSnapshot:output_type -> model_plane.v1.RecordRequestSnapshotResponse
-	5,  // 11: model_plane.v1.RunLedgerService.RecordRunTiming:output_type -> model_plane.v1.RecordRunTimingResponse
-	7,  // 12: model_plane.v1.RunLedgerService.GetRunTiming:output_type -> model_plane.v1.GetRunTimingResponse
-	10, // [10:13] is the sub-list for method output_type
-	7,  // [7:10] is the sub-list for method input_type
-	7,  // [7:7] is the sub-list for extension type_name
-	7,  // [7:7] is the sub-list for extension extendee
-	0,  // [0:7] is the sub-list for field type_name
+	9,  // 7: model_plane.v1.GetRequestSnapshotResponse.system_sections:type_name -> model_plane.v1.PromptSection
+	0,  // 8: model_plane.v1.RunLedgerService.RecordRequestSnapshot:input_type -> model_plane.v1.RecordRequestSnapshotRequest
+	4,  // 9: model_plane.v1.RunLedgerService.RecordRunTiming:input_type -> model_plane.v1.RecordRunTimingRequest
+	6,  // 10: model_plane.v1.RunLedgerService.GetRunTiming:input_type -> model_plane.v1.GetRunTimingRequest
+	8,  // 11: model_plane.v1.RunLedgerService.GetRequestSnapshot:input_type -> model_plane.v1.GetRequestSnapshotRequest
+	1,  // 12: model_plane.v1.RunLedgerService.RecordRequestSnapshot:output_type -> model_plane.v1.RecordRequestSnapshotResponse
+	5,  // 13: model_plane.v1.RunLedgerService.RecordRunTiming:output_type -> model_plane.v1.RecordRunTimingResponse
+	7,  // 14: model_plane.v1.RunLedgerService.GetRunTiming:output_type -> model_plane.v1.GetRunTimingResponse
+	10, // 15: model_plane.v1.RunLedgerService.GetRequestSnapshot:output_type -> model_plane.v1.GetRequestSnapshotResponse
+	12, // [12:16] is the sub-list for method output_type
+	8,  // [8:12] is the sub-list for method input_type
+	8,  // [8:8] is the sub-list for extension type_name
+	8,  // [8:8] is the sub-list for extension extendee
+	0,  // [0:8] is the sub-list for field type_name
 }
 
 func init() { file_model_plane_v1_run_ledger_proto_init() }
@@ -746,7 +1016,7 @@ func file_model_plane_v1_run_ledger_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_model_plane_v1_run_ledger_proto_rawDesc), len(file_model_plane_v1_run_ledger_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   8,
+			NumMessages:   11,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

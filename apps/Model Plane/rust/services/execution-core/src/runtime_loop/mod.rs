@@ -2418,6 +2418,8 @@ async fn execute_governed_mcp(
     let Some(governed) = crate::mcp_gateway::GovernedMcp::shared() else {
         return tool_error("MCP gateway credential is not configured; the tool was not run".to_owned());
     };
+    // EP-4 S7: a server's form needs a run that can pause for its owner's answer (WS14-S5's
+    // executor input pause), which no run has yet, so no call allows one: the wire stays as it was.
     match governed
         .proxy(
             org_id,
@@ -2426,15 +2428,47 @@ async fn execute_governed_mcp(
             remote_tool,
             tool_input,
             view.digest(),
+            false,
         )
         .await
     {
-        Ok(output) => tool_bridge::ToolExecution {
+        Ok(crate::mcp_gateway::McpProxyOutcome::Output(output)) => tool_bridge::ToolExecution {
             output,
             error: None,
         },
+        Ok(crate::mcp_gateway::McpProxyOutcome::Elicitation(pending)) => {
+            cancel_unasked_form(governed, org_id, user_id, &pending).await
+        }
         Err(e) => tool_error(e),
     }
+}
+
+/// A form the gateway returned although the call did not allow one: a gateway fault. The held
+/// call is cancelled at once, so the server is not left waiting for an answer no one was asked
+/// for, and the model reads that the call did not complete.
+async fn cancel_unasked_form(
+    governed: &crate::mcp_gateway::GovernedMcp,
+    org_id: &str,
+    user_id: &str,
+    pending: &pb::McpElicitationPending,
+) -> tool_bridge::ToolExecution {
+    metrics::counter!("mcp_elicitation_unasked_total").increment(1);
+    let cancel = crate::mcp_gateway::ElicitationReply {
+        action: crate::mcp_gateway::ELICITATION_CANCEL,
+        answers: Vec::new(),
+    };
+    if let Err(error) = governed
+        .answer_elicitation(org_id, user_id, &pending.elicitation_id, cancel)
+        .await
+    {
+        // Ids and lengths only: the server's message and schema never reach a log.
+        tracing::warn!(
+            elicitation_id = %pending.elicitation_id,
+            error_len = error.len(),
+            "an unasked MCP form could not be cancelled; the gateway's hold expires it"
+        );
+    }
+    tool_error(crate::mcp_gateway::UNASKED_FORM.to_owned())
 }
 
 /// `web_fetch` tool — input JSON `{"url": String}`. Returns the page's cleaned

@@ -3206,6 +3206,11 @@ Built so far: WS13-S0, WS13-S1, WS13-S2; WS14-S1, WS14-S2 (partial), WS14-S3; WS
 | D3-547 | EP-14-S7 | live-proof | P1 | owner: add SESSION_CORE_REQUEST_INSPECTOR_READ, MODEL_GATEWAY_REQUEST_INSPECTOR and VITE_CHAT_REQUEST_INSPECTOR (all false) to .env.example | open |
 | D3-548 | EP-14-S7 | live-proof | P1 | reconcile the action-registry count (260) in action-registry.test.ts if other W3-12 slices also added actions | open |
 | D3-549 | EP-14-S7 | follow-up | P3 | 5 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W3-12.json | open |
+| D3-550 | W3-12 guard | follow-up | P2 | guard skipped: zdr_features.rs: FEATURE_TREATMENTS lists InvokeRequest feature strings, not routes, so nothing applies. The run_inspection feature is already in mp-contracts zdr_refusal.rs FEATURES | open |
+| D3-551 | W3-12 guard | follow-up | P2 | guard skipped: compose-contract assertions for the new switches: no assertion file covers the other EP-14 switches (they appear only in docker-compose.yml), so there was nothing to extend | open |
+| D3-552 | W3-12 guard | follow-up | P2 | guard skipped: prompt-tool manifest regeneration (step 4): no platform prompt file and no Do offer list or builtin tool definition changed. The mcp_gateway.rs changes are MCP and dynamic, which the manifest does not cover | open |
+| D3-553 | W3-12 guard | follow-up | P2 | guard skipped: catalog manifest: catalog-manifest.ts builds the manifest at runtime from the registry, so there is no golden to regenerate | open |
+| D3-554 | W3-12 guard | follow-up | P2 | guard skipped: action-registry count reconcile: only EP-14-S7 added an action in W3-12, so 260 stands (not run, by the no-tests rule) | open |
 
 ## Cross-wave
 

@@ -67,6 +67,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "model_plane/v1/space_attention.proto",
         // EP-4 S4: McpElicitationService (gateway.proto imports it too).
         "model_plane/v1/mcp_elicitation.proto",
+        // EP-3 S2: ArtifactRevisionService (session-core's artifact revision store).
+        "model_plane/v1/artifact_revisions.proto",
     ];
 
     let dp_protos = &[

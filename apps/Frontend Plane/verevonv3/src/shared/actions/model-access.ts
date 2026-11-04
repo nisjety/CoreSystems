@@ -314,6 +314,7 @@ export const MODEL_ACCESS: Readonly<Record<ActionId, ModelAccessEntry>> = {
   'chat.set_connector_scope': exempt('agent_cannot_self_govern', 'context_write'),
   'chat.set_agent_mode': exempt('agent_cannot_self_govern', 'context_write'),
   'chat.set_transcript_density': exempt('ui_state_only', 'external_write'),
+  'chat.inspect_run_request': exempt('no_owner_executor', 'read'),
   'audio.transcribe': exempt('no_owner_executor', 'external_write'),
   'audio.dictate': exempt('no_owner_executor', 'external_write'),
   'orchestration.decide_approval': exempt('approval_authority', 'destructive'),

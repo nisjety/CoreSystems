@@ -1,0 +1,165 @@
+syntax = "proto3";
+
+package model_plane.v1;
+
+option go_package = "github.com/triodelab/model-plane/gen/go/model_plane/v1;mpv1";
+
+import "google/protobuf/timestamp.proto";
+
+// Artifact revisions (Wave 3 EP-3 S2).
+//
+// Every published revision of a thread artifact (a document, code or html the
+// model authored, and later a user edit or a restore) as a durable row with its
+// own id, its editor and the message it came from. The table belongs to
+// session-core and to the thread: it is erased with the thread and with the
+// org, and a zero-retention credential or a thread holding a waived run never
+// writes to it. The message metadata (`metadata.artifacts`) is still written as
+// before; this store sits beside it. A separate file and service so that
+// SessionCore and every implementation or test double of it stay
+// source-compatible.
+
+// EP-3 S2. One stored revision of one artifact in one thread.
+message ArtifactRevision {
+  // The revision's own id (ULID), assigned by session-core.
+  string id = 1;
+  // The thread the artifact belongs to.
+  string thread_id = 2;
+  // The artifact's id within the thread, as the model chose it.
+  string artifact_id = 3;
+  // The revision number, 1 for the first. Numbers rise but may have gaps: the
+  // model's in-turn versions are stored once per turn, as message metadata is.
+  uint32 version = 4;
+  // The artifact kind as an open string (`document`, `code`, `html`, `deck`,
+  // ...); a reader treats an unknown kind as plain text.
+  string kind = 5;
+  // The title at this revision.
+  string title = 6;
+  // The full text at this revision. Empty in a listing that asked for no content.
+  string content = 7;
+  // Who made the revision: `model`, `user` or `restore`.
+  string editor_kind = 8;
+  // The subject that wrote it: the user, or the service acting for the model turn.
+  string editor_subject_id = 9;
+  // The run that produced a model revision; empty for a user edit.
+  string run_id = 10;
+  // The assistant message that published a model revision; empty when unknown.
+  string source_message_id = 11;
+  // For a restore, the version whose text was restored; 0 otherwise.
+  uint32 restored_from_version = 12;
+  // Lowercase hex SHA-256 of `content`, kept even when a listing omits the text.
+  string content_sha256 = 13;
+  // When the revision was stored.
+  google.protobuf.Timestamp created_at = 14;
+}
+
+// EP-3 S2. Whether an append wrote a new row.
+enum AppendOutcome {
+  // Never sent.
+  APPEND_OUTCOME_UNSPECIFIED = 0;
+  // A new revision was written.
+  APPEND_OUTCOME_APPENDED = 1;
+  // The idempotency key had already written this revision; it is returned unchanged.
+  APPEND_OUTCOME_DUPLICATE = 2;
+}
+
+// EP-3 S2. Append one revision under a compare-and-set on the artifact's head.
+message AppendArtifactRevisionRequest {
+  // The org the thread belongs to; must match the caller's org.
+  string org_id = 1;
+  // The thread the artifact belongs to.
+  string thread_id = 2;
+  // The artifact's id within the thread.
+  string artifact_id = 3;
+  // The head version the caller last saw; 0 means the artifact must not exist
+  // yet. A different head is refused as `aborted` `revision_mismatch`.
+  uint32 expected_version = 4;
+  // The artifact kind, an open string (lowercase letters, digits, `_` or `-`).
+  string kind = 5;
+  // The title at this revision.
+  string title = 6;
+  // The full text at this revision, at most 200,000 characters.
+  string content = 7;
+  // `model`, `user` or `restore`.
+  string editor_kind = 8;
+  // The run that produced a model revision. When set, the run must belong to
+  // the thread, and an empty source_message_id is resolved from the run's
+  // completed answer.
+  string run_id = 9;
+  // The assistant message that published a model revision, when the caller knows it.
+  string source_message_id = 10;
+  // For a restore, the version whose text is restored; it must exist, or the
+  // append is refused as `failed_precondition` `revision_missing`.
+  uint32 restored_from_version = 11;
+  // An opaque key that makes a retry return the first result as DUPLICATE.
+  string idempotency_key = 12;
+  // The version to store. 0 lets session-core assign head + 1; a model
+  // revision passes the version the gateway published, so the table and the
+  // message metadata name one revision with one number. When set it must be
+  // greater than expected_version.
+  uint32 version = 13;
+}
+
+// EP-3 S2. The stored revision and whether this call wrote it.
+message AppendArtifactRevisionResponse {
+  // The revision as stored, content included.
+  ArtifactRevision revision = 1;
+  // APPENDED for a new row, DUPLICATE for a replay of the same idempotency key.
+  AppendOutcome outcome = 2;
+}
+
+// EP-3 S2. List revisions of one artifact, or the heads of every artifact in a thread.
+message ListArtifactRevisionsRequest {
+  // The org the thread belongs to; must match the caller's org.
+  string org_id = 1;
+  // The thread to read.
+  string thread_id = 2;
+  // The artifact to list, newest first. Empty lists the head of every artifact.
+  string artifact_id = 3;
+  // Whether each revision carries its text.
+  bool include_content = 4;
+  // The most revisions to return; 0 means 20, and more than 50 is read as 50.
+  uint32 limit = 5;
+  // Return only versions below this one (paging); 0 starts at the head.
+  uint32 before_version = 6;
+}
+
+// EP-3 S2. One page of revisions.
+message ListArtifactRevisionsResponse {
+  // The revisions, newest version first (or one head per artifact).
+  repeated ArtifactRevision revisions = 1;
+  // Whether older revisions exist past this page.
+  bool has_more = 2;
+}
+
+// EP-3 S2. Read one revision.
+message GetArtifactRevisionRequest {
+  // The org the thread belongs to; must match the caller's org.
+  string org_id = 1;
+  // The thread to read.
+  string thread_id = 2;
+  // The artifact to read.
+  string artifact_id = 3;
+  // The version to read; 0 reads the head.
+  uint32 version = 4;
+}
+
+// EP-3 S2. The revision, content included.
+message GetArtifactRevisionResponse {
+  // The revision that was asked for.
+  ArtifactRevision revision = 1;
+}
+
+// EP-3 S2. The durable revision store of thread artifacts, hosted by session-core.
+// Off unless SESSION_CORE_ARTIFACT_REVISIONS_ENABLED is the literal `true`;
+// while off every RPC answers `unavailable` `artifact_revisions_disabled`.
+service ArtifactRevisionService {
+  // Append one revision under a compare-and-set on the head. Refuses a
+  // zero-retention credential, a thread holding a waived run, another
+  // person's thread, a non-model editor on a Space thread, and an append past
+  // the caps (`resource_exhausted` `artifact_revision_limit`).
+  rpc AppendArtifactRevision(AppendArtifactRevisionRequest) returns (AppendArtifactRevisionResponse);
+  // List revisions of one artifact, or the heads of a thread's artifacts.
+  rpc ListArtifactRevisions(ListArtifactRevisionsRequest) returns (ListArtifactRevisionsResponse);
+  // Read one revision, or the head.
+  rpc GetArtifactRevision(GetArtifactRevisionRequest) returns (GetArtifactRevisionResponse);
+}
