@@ -72,6 +72,10 @@ jest.mock('./sole-org-auto-activation', () => ({
 jest.mock('./microsoft-signin-handoff', () => ({
   pushMicrosoftSignInHandoff: jest.fn(),
 }));
+// The publisher reads `schema.apikey` when it loads, and this spec's schema mock is empty.
+jest.mock('../nats/api-key-revocation.publisher', () => ({
+  loadApiKeyRevocationRow: jest.fn(),
+}));
 jest.mock('../db', () => ({ db: {}, sqlClient: jest.fn() }));
 jest.mock('../db/schema', () => ({}));
 jest.mock('../db/redis', () => ({ redisSecondaryStorage: undefined }));
