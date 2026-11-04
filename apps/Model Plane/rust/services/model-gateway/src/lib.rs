@@ -119,6 +119,7 @@ pub mod state;
 pub mod stream_buffer;
 pub mod subscription_failure;
 pub mod thinking;
+pub mod thread_export_routes;
 pub mod thread_goal;
 pub mod thread_goal_routes;
 pub mod thread_reference_tools;

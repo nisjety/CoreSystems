@@ -352,6 +352,8 @@ fn authed_routes() -> Router<AppState> {
         .route("/v1/threads/:thread_id/fork", post(fork_thread))
         // The thread's goal (Wave 3 EP-7 S1); 404 `thread_goals_disabled` while its switch is off.
         .merge(crate::thread_goal_routes::router())
+        // The owner's export of one thread (Wave 3 EP-12 S10); 404 `thread_export_disabled` while its switch is off.
+        .merge(crate::thread_export_routes::router())
         // The person's edit and restore of a thread artifact (Wave 3 EP-3 S4); 404 while editing is off.
         .merge(crate::artifact_edit_routes::router())
         // Read-only replay of Session Core's canonical event log. The route
@@ -8367,16 +8369,26 @@ async fn delete_memory_proxy(
     proxy_to_capability_core(&s, &c, &bearer, &format!("memory/{id}"), "DELETE", None).await
 }
 
+/// EP-11 S6: the `&kind=` suffix for a skills read, forwarded only when it is exactly one of the
+/// authored kinds so nothing else from the caller's query string reaches capability-core.
+fn authored_kind_suffix(q: &std::collections::HashMap<String, String>) -> String {
+    match q.get("kind").map(String::as_str) {
+        Some(kind @ ("skill" | "template" | "preset")) => format!("&kind={kind}"),
+        _ => String::new(),
+    }
+}
+
 async fn list_skills_proxy(
     State(s): State<AppState>,
     Extension(c): Extension<Claims>,
     bearer: VerifiedCapabilityBearer,
+    Query(q): Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<Value>, HttpJsonError> {
     proxy_to_capability_core(
         &s,
         &c,
         &bearer,
-        &format!("skills?org_id={}", c.org_id),
+        &format!("skills?org_id={}{}", c.org_id, authored_kind_suffix(&q)),
         "GET",
         None,
     )
@@ -8396,8 +8408,11 @@ async fn get_skill_proxy(
     Extension(c): Extension<Claims>,
     bearer: VerifiedCapabilityBearer,
     Path(id): Path<String>,
+    Query(q): Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<Value>, HttpJsonError> {
-    proxy_to_capability_core(&s, &c, &bearer, &format!("skills/{id}"), "GET", None).await
+    // The single-row read takes the kind as its only query parameter, so the suffix's `&` becomes `?`.
+    let kind = authored_kind_suffix(&q).replacen('&', "?", 1);
+    proxy_to_capability_core(&s, &c, &bearer, &format!("skills/{id}{kind}"), "GET", None).await
 }
 async fn patch_skill_proxy(
     State(s): State<AppState>,
