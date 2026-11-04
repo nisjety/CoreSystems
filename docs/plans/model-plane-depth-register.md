@@ -3814,6 +3814,39 @@ Built so far: WS13-S0, WS13-S1, WS13-S2; WS14-S1, WS14-S2 (partial), WS14-S3; WS
 | D3-1107 | W3-20 guard | test-gap | P1 | still broken after the guard: EP-4-S7: the patch is empty (0 bytes). The slice is blocked on WS14-S5 and the builder asks for it to be re-queued. | open |
 | D3-1108 | W3-20 guard | test-gap | P1 | still broken after the guard: EP-11-S7 shared-edit for apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardComposer.tsx (register the /learn slash command, gated by learnCommandAvailable, plus the composer test learn_hidden_on_temporary_chat): NOT applied. This is UI feature work, not a shared line. The composer has no memory-controls source for learningAllowed, and it needs a run path with the typed refusal plus a new test. That needs a design decision from the owning slice. /learn still works through the BFF route and the new action dispatcher, but nothing in the UI reaches it yet. | open |
 
+
+### Wave-mode batch W3-21 (2026-11-04)
+
+| ID | Slice | Kind | P | Finding | Status |
+|---|---|---|---|---|---|
+| D3-1109 | EP-11-S3 | follow-up | P1 | Do runs are not pinned: execution-core runtime_loop/agent.rs injects skills itself and runtime_loop/mod.rs reattach_skill reads the current row, so a mid-run edit still changes Do recovery even with MODEL_GATEWAY_SKILL_PINS on. | open |
+| D3-1110 | EP-11-S3 | risk | P1 | With MODEL_GATEWAY_SKILL_PINS on and session-core SKILL_VERSIONS_API off, every pinned recovery after an edit returns the error 'could not read the version of this skill this run used', so both switches must flip together. | open |
+| D3-1111 | EP-11-S3 | live-proof | P1 | Unverified: whether the Ask-path session bearer holds session:write for RecordRunContext (design [verify live]); a refusal shows only as skill_pin_record_failed_total and a warn log. | open |
+| D3-1112 | EP-11-S3 | live-proof | P1 | Guard: regenerate proto bindings (gateway.proto Skill 7/8, runs.proto SkillPin + RunContextStatus.skills=4) for Rust/Go/Python, then run buf lint and buf breaking against proto/baseline.binpb. | open |
+| D3-1113 | EP-11-S3 | live-proof | P1 | Guard: compile and run cargo test for mp-contracts --lib, model-gateway --all-targets and session-core --all-targets (the new ignored database test is record_run_context_merges_skills_without_dropping_other_keys), plus go test ./... and go vet ./... in orchestrator-core. | open |
+| D3-1114 | EP-11-S3 | live-proof | P1 | Owner .env.example: add MODEL_GATEWAY_SKILL_PINS=false (the agent did not edit it). | open |
+| D3-1115 | EP-11-S3 | risk | P2 | Run pins for recovery live in an in-process RunPinRegistry (6 h TTL); after a gateway restart or on another replica, recovery reads the current row even though runs.metadata.run_context.skills holds the durable pin. | open |
+| D3-1116 | EP-11-S3 | decision | P2 | Pins cover every skill the turn set out to inject, including blocks the budget dropped, because reattach_skill recovers exactly those; the run record can therefore list a skill whose block was not in the prompt. | open |
+| D3-1117 | EP-11-S3 | follow-up | P3 | 4 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W3-21.json | open |
+| D3-1118 | EP-11-S6 | risk | P1 | If AUTHORED_KINDS_ENABLED is turned off after templates or presets exist, capability-core's list and get run the old kind-blind SQL, so those rows show as skills on the Skills page. session-core still never injects them, because ListAgentSkills defaults to kinds=['skill']. | open |
+| D3-1119 | EP-11-S6 | follow-up | P1 | The model-gateway skills proxy drops the query string, so ?kind=template never reaches capability-core. The authored lists stay empty until the http_routes.rs shared edit lands. | open |
+| D3-1120 | EP-11-S6 | risk | P1 | The BFF create_skill lets a member write only while SKILL_MEMBER_AUTHORING is on, so members cannot create their own templates or presets until that switch is flipped. | open |
+| D3-1121 | EP-11-S6 | live-proof | P1 | Not yet proven live: on a database with 0108 applied, run 0109 and confirm every agent_skills.digest equals agent_skill_digest(row) (ignored PG test existing_digests_unchanged_by_kind_migration). Also check the CREATE UNIQUE INDEX lock time against the live row count. | open |
+| D3-1122 | EP-11-S6 | live-proof | P1 | Regenerate: buf generate (sessions.proto ListAgentSkillsRequest.kinds=4, AgentSkill.kind=21/settings_json=22) and the agent-action-admission golden (4 new actions). | open |
+| D3-1123 | EP-11-S6 | live-proof | P1 | docs: record in docs/plans/wave3/00-integration-round-b.md that EP-11 S6 took session-core 0109 (0098 stays unused) so it applies after 0108. | open |
+| D3-1124 | EP-11-S6 | test-gap | P2 | Session-core PG tests existing_digests_unchanged_by_kind_migration and same_name_skill_and_template_coexist are written but #[ignore]. They need the session-core-db-tests.sh harness, and no PG test yet covers an undo that restores a deleted template. | open |
+| D3-1125 | EP-11-S6 | decision | P2 | The capability-core history route body (skillVersionBody) still omits kind and settings. A template's or preset's version history shows its text but not its kind or settings. | open |
+| D3-1126 | EP-11-S6 | follow-up | P3 | 4 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W3-21.json | open |
+| D3-1127 | EP-12-S10 | live-proof | P1 | On a non-ZDR proof thread, prove the JSON and Markdown downloads carry the same turns, redacted drops tool payloads, a thread holding a waived or zero-retention run answers 412 thread_not_exportable, and a ZDR org gets zdr_feature_not_supported with no new rows. | open |
+| D3-1128 | EP-12-S10 | live-proof | P1 | No regeneration for this slice: no proto, migration, prompt or tool definition, or golden changes. The openapi path is not checked by CI and api/sdk is not regenerated. | open |
+| D3-1129 | EP-12-S10 | live-proof | P1 | Owner only: MODEL_GATEWAY_THREAD_EXPORT=false may be added to apps/Model Plane/deploy/.env.example beside the other switches. This slice did not touch that file. | open |
+| D3-1130 | EP-12-S10 | decision | P2 | Switch-off answers a typed 404 thread_export_disabled on a registered route, not an unregistered one, because the route-policy coverage test in http_routes.rs requires every .route literal to be registered; the owner should accept that reading of the design's route absent. | open |
+| D3-1131 | EP-12-S10 | decision | P2 | A waived caller is refused at the gateway with zdr_waiver_route_mismatch (403) before any call, not with session-core's conversation_export; the S12 copy for waived exports must be written against that 403. | open |
+| D3-1132 | EP-12-S10 | risk | P2 | Each export holds up to 8 MiB of turn text plus its rendered copy in memory, and the route has no limit beyond the global limiter, so a per-principal limit is needed before the switch goes on. | open |
+| D3-1133 | EP-12-S10 | risk | P2 | The Markdown copy escapes only <, so a < inside a fenced code block of an assistant answer reads as &lt; in the raw file; a Markdown-aware escape would avoid that. | open |
+| D3-1134 | EP-12-S10 | test-gap | P2 | The renderers are unit-tested on hand-built fixtures, so the JSON shape against real session-core output is proven only by the live export in the depth phase. | open |
+| D3-1135 | EP-12-S10 | follow-up | P3 | 4 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W3-21.json | open |
+
 ## Cross-wave
 
 | ID | Kind | P | Finding | Status |

@@ -649,6 +649,12 @@ Open and logged in the depth register: with the switch off the gRPC `ExitPlanMod
 
 **EP-12-S1.** under the `## 2026-11-04 - Wave 3 owner decisions taken at their recommended options` entry, newest first, add: `Run origin is derived from the verified caller and inherited by child runs; never a request field (EP-12 D1, S1). A child run takes its parent's token behind SESSION_RUN_ORIGIN_INHERIT; the top-level origin projection is behind MODEL_GATEWAY_RUN_ORIGIN_FIELD. Both implemented dark.`
 
+## 2026-11-04 - Wave-mode batch W3-21: decisions recorded by its slices
+
+**Status: built in wave mode (unit tests only; depth in the register).**
+
+**EP-11-S6.** 'Authored behaviours are one table with a kind; skill_packages is retired (EP-11 D1)' and 'Templates are text, presets are visible composer defaults; agents are EP-6 (EP-11 D6)'.
+
 ## 2026-10-21 - The reasoning-effort ladder lives in inference-core (WS11-S1)
 
 **Status: implemented (code only, inert).** The canonical ladder (`Level` Minimal..Max, `Wire`, a `support(family, model)` table with a per-row `verified_on`, `resolve` clamping to the nearest weaker supported level, `from_legacy_budget`, `allowance`, deployment aliases from `INFERENCE_CORE_EFFORT_MODEL_ALIASES`) lives in `inference-core/src/provider/effort.rs`; model-gateway derives only the requested level (WS11-S5) and never a per-provider shape. One owner, so the three per-path budget derivations (normal, ZDR, source validation) stop being three decisions. `InferRequest.reasoning_effort` and `ModelInfo.effort_levels` exist but no adapter reads them yet; the response-cache key now hashes the level, so a quick and a deep turn of one prompt cannot share an entry. Default applied (DEC-36, Q3): the provider ceiling rises by the per-level allowance (Low 1024 to Max 16384), total cap 32768, pending per-model measurement. Every support row is `verified_on = None` until the P0 live probe runs; the Anthropic split (budget through 4.6, adaptive from 4.7, unknown claude names adaptive) comes from the plan's cached claude-api reference, not a live check. A model with no declared row is treated as having no effort control, because an unsupported parameter is a 400 and an omitted one is a no-op.
