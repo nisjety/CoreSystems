@@ -255,7 +255,7 @@ fn capabilities_for(mode: ArtifactRevisionsMode, zdr: bool) -> ComposerCapabilit
         artifact_editing: false,
         context_refs: false,
         thread_references: false,
-        selection_edit: false,
+        selection_edit: crate::selection_guard::enabled_for(mode) && !zdr,
     }
 }
 

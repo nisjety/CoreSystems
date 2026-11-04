@@ -1081,9 +1081,17 @@ type RunContext struct {
 	// agent definitions the caller may use, at most 8 entries. In flight only:
 	// never persisted, never built for a ZDR, waived or scheduled run, and
 	// ignored by execution-core with EXECUTION_CORE_SUBAGENT_ROLES off.
-	AgentRoles    []*AgentRoleSpec `protobuf:"bytes,8,rep,name=agent_roles,json=agentRoles,proto3" json:"agent_roles,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	AgentRoles []*AgentRoleSpec `protobuf:"bytes,8,rep,name=agent_roles,json=agentRoles,proto3" json:"agent_roles,omitempty"`
+	// The thread goal recited to the model as data (EP-7 S1; owner: session-core
+	// renders it, model-gateway carries it, execution-core places it in the
+	// Volatile tier of the root loop only). Finished text with a header that
+	// says to read it as data, never instructions. Empty when the thread has no
+	// active goal, with MODEL_GATEWAY_THREAD_GOALS_ENABLED off, and always for a
+	// ZDR, waived or Space-scoped run. In flight only: never persisted. Fields 5
+	// and 6 stay reserved for WS08 and WS20 (plan 4.3).
+	GoalRecitation string `protobuf:"bytes,9,opt,name=goal_recitation,json=goalRecitation,proto3" json:"goal_recitation,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *RunContext) Reset() {
@@ -1156,6 +1164,13 @@ func (x *RunContext) GetAgentRoles() []*AgentRoleSpec {
 		return x.AgentRoles
 	}
 	return nil
+}
+
+func (x *RunContext) GetGoalRecitation() string {
+	if x != nil {
+		return x.GoalRecitation
+	}
+	return ""
 }
 
 // AgentRoleSpec - one published agent definition a delegated subagent may take
@@ -2558,7 +2573,7 @@ const file_model_plane_v1_execution_proto_rawDesc = "" +
 	"questionId\x12\x1f\n" +
 	"\vanswer_json\x18\v \x01(\tR\n" +
 	"answerJsonJ\x04\b\t\x10\n" +
-	"\"\xb8\x02\n" +
+	"\"\xe1\x02\n" +
 	"\n" +
 	"RunContext\x123\n" +
 	"\x15authored_instructions\x18\x01 \x01(\tR\x14authoredInstructions\x125\n" +
@@ -2567,7 +2582,8 @@ const file_model_plane_v1_execution_proto_rawDesc = "" +
 	"\x06status\x18\x04 \x01(\v2 .model_plane.v1.RunContextStatusR\x06status\x12!\n" +
 	"\fuser_profile\x18\a \x01(\tR\vuserProfile\x12>\n" +
 	"\vagent_roles\x18\b \x03(\v2\x1d.model_plane.v1.AgentRoleSpecR\n" +
-	"agentRoles\"\xe9\x01\n" +
+	"agentRoles\x12'\n" +
+	"\x0fgoal_recitation\x18\t \x01(\tR\x0egoalRecitation\"\xe9\x01\n" +
 	"\rAgentRoleSpec\x12\x1b\n" +
 	"\tagent_ref\x18\x01 \x01(\tR\bagentRef\x12\x18\n" +
 	"\aversion\x18\x02 \x01(\rR\aversion\x12\x16\n" +

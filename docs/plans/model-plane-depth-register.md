@@ -3503,6 +3503,8 @@ Built so far: WS13-S0, WS13-S1, WS13-S2; WS14-S1, WS14-S2 (partial), WS14-S3; WS
 | D3-820 | EP-7-S1 | test-gap | P2 | The ignored DB tests (set_thread_goal_once_per_thread, set_with_replace_clears_old, update_cas_revision_conflict, foreign_user_not_found, space_thread_refused, zdr_and_waived_credentials_refused, thread_delete_cascades_goal, gdpr_erasure_deletes_goals) have never run against Postgres, and the migration's LIKE 'goal\_%' CHECK depends on standard_conforming_strings. | open |
 | D3-821 | EP-7-S1 | decision | P2 | A Continue turn whose goal read fails is refused as thread_goal_unavailable, while an ordinary Do turn whose goal read fails just runs without the recitation (fail-open for context only). | open |
 | D3-822 | EP-7-S1 | follow-up | P3 | 6 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W3-16.json | open |
+| D3-823 | W3-16 guard | follow-up | P2 | guard skipped: EP-7-S1 CSS for verevon-chat-goal-* (not requested as a shared edit, only noted) | open |
+| D3-824 | W3-16 guard | follow-up | P2 | guard skipped: EP-5-S7 needs_other_files: ArtifactDeckView mount, composer chip, sse.rs/deck_tool.rs deck_template wiring (belong to unbuilt EP-5-S4/S6) | open |
 
 ## Cross-wave
 

@@ -65,7 +65,7 @@
       "eligible": false,
       "executor": {},
       "hashBasis": "catalog_entry",
-      "schemaHash": "sha256:b7bb7f171a61f950b32fb159a8c4c1b635bede9a90c7d78edc95ccdf8e76b299",
+      "schemaHash": "sha256:11ef0bda1b1d9616e1f9220f57e88ccc33dc9ed01147e0631b322a473df2058f",
       "zdr_allowed": false
     },
     {
@@ -78,7 +78,7 @@
       "eligible": false,
       "executor": {},
       "hashBasis": "catalog_entry",
-      "schemaHash": "sha256:3756a9caaad80462dca3abeaef9c3786b439112d0af0f91f68dba20c458ab70d",
+      "schemaHash": "sha256:15e5362dec9f54340e05ddc200ed725b0a16cf60e0d1b642196640ee0cc0f43b",
       "zdr_allowed": false
     },
     {
@@ -488,6 +488,19 @@
       "zdr_allowed": false
     },
     {
+      "actionId": "chat.apply_deck_template",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "context_write",
+      "exemptReason": "no_owner_executor",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:c1712b81dcef725a2bd2faea056a8a64ee6418f01cd6028b94f68be6a3c08320",
+      "zdr_allowed": false
+    },
+    {
       "actionId": "chat.approve_plan",
       "registry": true,
       "access": "none",
@@ -514,6 +527,19 @@
       "zdr_allowed": false
     },
     {
+      "actionId": "chat.clear_goal",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "context_write",
+      "exemptReason": "agent_cannot_self_govern",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:17225ee012eb3afbf65422a13268ee033aa03367c48ce3371eddefcada45e871",
+      "zdr_allowed": false
+    },
+    {
       "actionId": "chat.clear_threads",
       "registry": true,
       "access": "none",
@@ -527,6 +553,19 @@
       "zdr_allowed": false
     },
     {
+      "actionId": "chat.continue_goal",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "external_write",
+      "exemptReason": "no_owner_executor",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:3d4679c3021fe84d15e4f7b09442ef003085cf771a1268e9157eb26679b5f869",
+      "zdr_allowed": false
+    },
+    {
       "actionId": "chat.delete_thread",
       "registry": true,
       "access": "none",
@@ -537,6 +576,19 @@
       "executor": {},
       "hashBasis": "catalog_entry",
       "schemaHash": "sha256:9ff097bc5d12d3fb612c288a9698b5274b57a7cc6618321a7fba9ef91657423b",
+      "zdr_allowed": false
+    },
+    {
+      "actionId": "chat.edit_artifact_selection",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "context_write",
+      "exemptReason": "agent_cannot_self_govern",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:ec366fc3b5838258a70e5ffff0346d2e6f3ff3aac21818448eead1d9419e7417",
       "zdr_allowed": false
     },
     {
@@ -589,6 +641,19 @@
       "executor": {},
       "hashBasis": "catalog_entry",
       "schemaHash": "sha256:4ad9d1e2e9984d7150585d2cee2038c8cfce54dbac196e8290a1d4ca4b91eb50",
+      "zdr_allowed": false
+    },
+    {
+      "actionId": "chat.list_deck_templates",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "read",
+      "exemptReason": "no_owner_executor",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:af90eb1c3aa3ed8f583d7ddd8fe79894d6c0276db8485868dd3751808a20cb9a",
       "zdr_allowed": false
     },
     {
@@ -709,6 +774,19 @@
       "zdr_allowed": false
     },
     {
+      "actionId": "chat.save_artifact_to_knowledge",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "external_write",
+      "exemptReason": "no_owner_executor",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:d88438b9c6a27d85b7c93574ccc244b9a74139d722b4af6bfe8f4044a00cde68",
+      "zdr_allowed": false
+    },
+    {
       "actionId": "chat.save_thread_snapshot",
       "registry": true,
       "access": "none",
@@ -761,6 +839,19 @@
       "zdr_allowed": false
     },
     {
+      "actionId": "chat.set_goal",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "context_write",
+      "exemptReason": "agent_cannot_self_govern",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:60390a0a15649a5de4822156ea6fdaa7314bafd19dc57e5963d5df6d3894e579",
+      "zdr_allowed": false
+    },
+    {
       "actionId": "chat.set_transcript_density",
       "registry": true,
       "access": "none",
@@ -784,6 +875,19 @@
       "executor": {},
       "hashBasis": "catalog_entry",
       "schemaHash": "sha256:1c7335cac5caf6943654596826a07e4a78f266a5c7b88954ced34863b7e18992",
+      "zdr_allowed": false
+    },
+    {
+      "actionId": "chat.update_goal",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "context_write",
+      "exemptReason": "agent_cannot_self_govern",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:3a54df51c8a7979ccc69660e2c9a507e0bdcf1747bafb685eb9883ce84c2d74c",
       "zdr_allowed": false
     },
     {
@@ -2111,7 +2215,7 @@
       "eligible": false,
       "executor": {},
       "hashBasis": "catalog_entry",
-      "schemaHash": "sha256:cf43226ed06d77aa16934b19d2686531bdf503d7c44181b6143239a53d4cc508",
+      "schemaHash": "sha256:54175225740f4ef6549d22aab6857cf85f3f6ae4ebdb6b41345285d39bbfafe1",
       "zdr_allowed": false
     },
     {

@@ -624,6 +624,8 @@ mod tests {
             agent_autonomy_cap: None,
             wide_research: None,
             context_refs: None,
+            deck_template: None,
+            goal_id: None,
         }
     }
 

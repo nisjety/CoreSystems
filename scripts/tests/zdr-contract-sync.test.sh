@@ -115,7 +115,7 @@ GOLDENS=(
   # (MP_UPDATE_GOLDEN=1 cargo test -p mp-contracts zdr_refusal), never written by hand.
   # Every refusal code the matrix can expect must be in it (check_schema passes it to
   # the loader with --refusals). The SPA's own copy is vendored by Z-05b.
-  "apps/Model Plane/api/contracts/zdr-refusals.json|2153c4f8801212893a42ad42328955a9e77d77ac17aede6e13cbabb526960915"
+  "apps/Model Plane/api/contracts/zdr-refusals.json|ae4473ce0a3ddd3d6d104aad3f90509014da63b60e2db27766983956708437d7"
 
   # WS25-S7: the org agent policy schema. AUTHORED (not generated), read by mp-contracts and by
   # capability-core's org agent policy API.
@@ -206,7 +206,7 @@ GOLDENS=(
   # (VEREVON_UPDATE_GOLDEN=1 pnpm vitest run src/shared/actions/admission-contract.test.ts) from the typed
   # side map (model-access.ts) and the registry, never written by hand. Each plane that admits an agent
   # action vendors it, with the pin beside it, in the VENDORED rows below.
-  "apps/Model Plane/api/contracts/agent-action-admission.json|6bf63685fa16883dffbe05991329a6af46d8f4d47fb4c181401cb102fabc8c47"
+  "apps/Model Plane/api/contracts/agent-action-admission.json|b4a8b23c6b1dced7a4d4a368e60e357536d863208b5c1512af0e4901e132c3de"
   # WS21-S0 and WS21-S3: the browser policy goldens, authored (not generated). org-core's validate and resolve tests
   # and execution-core's canonicaliser test read vendored copies (VENDORED); the other consumers are pending (CONSUMERS).
   "apps/Model Plane/api/contracts/browser-domain-canonical.json|ef6bfb8e63f3a1c34b90a0d26d0f27fb5ef224f138a652bf851dc179573ac45d"

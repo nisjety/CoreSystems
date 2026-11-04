@@ -1084,6 +1084,8 @@ fn consume_response(done: store::ConsumeOutcome, omit_call: bool) -> proto::Cons
         tool_name: String::new(),
         tool_input_json: String::new(),
         offered_json: String::new(),
+        revision: 0,
+        original_action_fingerprint: String::new(),
     });
     proto::ConsumeApprovalResponse {
         consumed: done.consumed,
@@ -1093,10 +1095,8 @@ fn consume_response(done: store::ConsumeOutcome, omit_call: bool) -> proto::Cons
         tool_input_json: call.tool_input_json,
         step_id: call.step_id,
         authority: approved_authority(&call.offered_json),
-        // EP-10-S5 reads the revision back from the descriptor row; until then a consume
-        // reports the call as drafted.
-        revision: 0,
-        original_action_fingerprint: String::new(),
+        revision: call.revision,
+        original_action_fingerprint: call.original_action_fingerprint,
     }
 }
 
@@ -5382,6 +5382,8 @@ mod tests {
                 tool_input_json: r#"{"table":"t"}"#.to_owned(),
                 offered_json: r#"{"tools":[{"name":"delete_records","description":"d","parameters_json":"{}"}],"authority":{"mode":"ask","plan_mode":false,"autonomy_rung":"","space_id":"","min_privacy_tier":0,"provider_hint":"","max_rounds":4,"tool_names":["delete_records"],"digest":"abc"}}"#
                     .to_owned(),
+                revision: 0,
+                original_action_fingerprint: String::new(),
             }),
         }
     }

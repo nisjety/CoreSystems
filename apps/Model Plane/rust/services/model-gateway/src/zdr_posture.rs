@@ -904,6 +904,9 @@ pub(crate) mod tests {
             ("space_routes/runs.rs", "room_run_stop"),
             // A member's approval decision keeps its free-text reason (WS10-S6).
             ("space_routes/approvals.rs", "decide_space_approval"),
+            // A thread goal is user content in a durable store (EP-7 S1).
+            ("thread_goal_routes.rs", "set_thread_goal"),
+            ("thread_goal_routes.rs", "update_thread_goal"),
         ];
         let mut missing = Vec::new();
         for (file, function) in DURABLE_MUTATIONS {

@@ -193,6 +193,10 @@ pub const FIELD_TREATMENTS: &[(&str, Treatment)] = &[
     // EP-3 S5: a reference is resolved against durable state (a document's ACL, a thread, a
     // revision), so a ZDR turn carrying any is refused, and none is silently dropped.
     ("context_refs", refused_feature("context_references")),
+    // EP-5 S7: a deck template is a skill bundle; a ZDR turn never mounts one, so a pick is refused like a skill.
+    ("deck_template", refused_feature("skills")),
+    // EP-7 S1: a goal is user content in a durable store, so a ZDR turn naming one is refused.
+    ("goal_id", refused_feature("thread_goal")),
 ];
 
 /// The feature strings the gateway reads, each with its treatment. A feature
@@ -316,6 +320,8 @@ pub fn invoke_field_names(request: &InvokeRequest) -> Vec<&'static str> {
         agent_autonomy_cap: _,
         wide_research: _,
         context_refs: _,
+        deck_template: _,
+        goal_id: _,
     } = request;
     vec![
         "content",
@@ -376,6 +382,8 @@ pub fn invoke_field_names(request: &InvokeRequest) -> Vec<&'static str> {
         "agent_autonomy_cap",
         "wide_research",
         "context_refs",
+        "deck_template",
+        "goal_id",
     ]
 }
 
@@ -448,6 +456,12 @@ pub fn refusal(request: &InvokeRequest) -> Option<Refusal> {
     }
     if crate::context_refs::requested(request.context_refs.as_ref()) {
         return feature(crate::context_refs::ZDR_FEATURE);
+    }
+    if crate::deck_templates::zdr_refused(crate::deck_templates::enabled(), request.deck_template.as_ref()) {
+        return feature(crate::deck_templates::ZDR_FEATURE);
+    }
+    if request.goal_id.as_deref().is_some_and(|id| !id.trim().is_empty()) {
+        return feature(crate::thread_goal_routes::ZDR_FEATURE);
     }
     if request.max_cost_usd.is_some() {
         return feature("spend_cap");

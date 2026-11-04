@@ -65,7 +65,8 @@ pub(super) async fn get_composer_capabilities(
     headers: HeaderMap,
 ) -> Response {
     let url = format!("{}/v1/chat/composer-capabilities", state.model_gateway_url);
-    relay(&state, &user, &headers, &url).await
+    let response = relay(&state, &user, &headers, &url).await;
+    super::documents::with_promote_capability(response, state.space_features.chat_artifact_promote).await
 }
 
 /// One GET to Model Gateway under the user's own tokens, relayed with `no-store`.

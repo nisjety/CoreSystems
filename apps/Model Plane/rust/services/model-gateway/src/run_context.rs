@@ -802,6 +802,8 @@ pub fn compose(input: Composition<'_>) -> RunContext {
         user_profile: input.user_profile.unwrap_or_default(),
         // Never composed here: the Do launch adds the role catalogue after `prepare` (EP-6 S10).
         agent_roles: Vec::new(),
+        // Never composed here: the Do launch adds the thread goal after `prepare` (EP-7 S1).
+        goal_recitation: String::new(),
     }
 }
 

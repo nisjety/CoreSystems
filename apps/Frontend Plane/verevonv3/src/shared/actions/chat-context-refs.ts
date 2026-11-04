@@ -18,17 +18,40 @@ export type ChatContextRefKind = 'document' | 'thread' | 'space' | 'skill' | 'ar
 
 export const CONTEXT_REF_KINDS: readonly ChatContextRefKind[] = ['document', 'thread', 'space', 'skill', 'artifact_selection']
 
+/** The range an artifact_selection names (EP-3 S6): the revision the person saw, character offsets, and the quote's hash. */
+export type ChatArtifactSelectionRef = {
+  artifactId: string
+  version: number
+  start: number
+  end: number
+  quoteSha256: string
+}
+
 /** One chip as the send carries it and as `metadata.context_refs` stores it after the turn. */
 export type ChatContextRef = {
   kind: ChatContextRefKind
   id: string
   label: string
+  /** Present for an artifact_selection the panel sends. Never stored: the gateway keeps only kind, id and label. */
+  selection?: ChatArtifactSelectionRef
 }
 
 const CONTEXT_REF_ID = /^[A-Za-z0-9_.:-]{1,128}$/
 
 function isKind(value: unknown): value is ChatContextRefKind {
   return typeof value === 'string' && (CONTEXT_REF_KINDS as readonly string[]).includes(value)
+}
+
+const SHA256_HEX = /^[0-9a-f]{64}$/
+
+function normalizeArtifactSelection(value: unknown, id: string): ChatArtifactSelectionRef | undefined {
+  if (!value || typeof value !== 'object') return undefined
+  const { artifactId, version, start, end, quoteSha256 } = value as Record<string, unknown>
+  const whole = (n: unknown): n is number => typeof n === 'number' && Number.isInteger(n)
+  if (artifactId !== id || !whole(version) || !whole(start) || !whole(end)) return undefined
+  if (typeof quoteSha256 !== 'string' || !SHA256_HEX.test(quoteSha256)) return undefined
+  if (version < 1 || start < 0 || end <= start) return undefined
+  return { artifactId: id, version, start, end, quoteSha256 }
 }
 
 /** The label as the gateway keeps it: trimmed, control characters dropped, cut to the cap. */
@@ -47,14 +70,19 @@ export function normalizeContextRefs(value: unknown): ChatContextRef[] {
   let threads = 0
   for (const item of value) {
     if (!item || typeof item !== 'object') continue
-    const { kind, id, label } = item as Record<string, unknown>
+    const { kind, id, label, selection } = item as Record<string, unknown>
     if (!isKind(kind) || typeof id !== 'string') continue
     const trimmed = id.trim()
     if (!CONTEXT_REF_ID.test(trimmed)) continue
     if (refs.some((ref) => ref.kind === kind && ref.id === trimmed)) continue
     if (kind === 'thread' && threads >= CONTEXT_REF_THREAD_LIMIT) continue
     if (kind === 'thread') threads += 1
-    refs.push({ kind, id: trimmed, label: capContextRefLabel(typeof label === 'string' ? label : '') })
+    const chip: ChatContextRef = { kind, id: trimmed, label: capContextRefLabel(typeof label === 'string' ? label : '') }
+    if (kind === 'artifact_selection') {
+      const range = normalizeArtifactSelection(selection, trimmed)
+      if (range) chip.selection = range
+    }
+    refs.push(chip)
     if (refs.length === CONTEXT_REFS_LIMIT) break
   }
   return refs

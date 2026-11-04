@@ -41,6 +41,7 @@ import {
 import {
   ArtifactsPanel,
 } from './ChatArtifactPanel'
+import type { ArtifactSelectionRequest } from './ArtifactSelection'
 import { ThreadWorkspacePanel } from './ThreadWorkspacePanel'
 import { EffectivePolicyPanel } from './EffectivePolicyPanel'
 import {
@@ -121,6 +122,7 @@ export default function ChatPage() {
     handleScroll,
     scrollToBottom,
     handleApprovalDecision,
+    handleEditedApprovalDecision,
     refreshApprovalsForRun,
     handleComposerSubmit,
     handleStop,
@@ -185,6 +187,14 @@ export default function ChatPage() {
     pendingResearchPlan,
     startResearchPlan,
     cancelResearchPlan,
+    threadGoal,
+    goalPending,
+    goalError,
+    goalEntryAvailable,
+    saveGoal,
+    setGoalPaused,
+    clearGoal,
+    continueGoal,
   } = useChatController()
 
   // The attachment chip that summoned the canvas stays selected when several
@@ -261,6 +271,25 @@ export default function ChatPage() {
     if (!confirmed) throw new Error(i18n.tr('Meldingen ble ikke sendt. Utkastet er beholdt.', 'The message was not sent. Your draft is kept.'))
     return handleComposerSubmit(submission)
   }
+  // The Output panel's "Ask for a change" (EP-3 S6) sends one composer turn that names the selected range. The panel has hashed the quote, so the selected text itself is not sent.
+  const askAboutArtifactSelection = (request: ArtifactSelectionRequest) => submitWithWorkPeriod({
+    actions: [],
+    attachments: [],
+    text: request.instruction,
+    tools: [],
+    contextRefs: [{
+      kind: 'artifact_selection',
+      id: request.artifactId,
+      label: i18n.tr(`Utvalg i ${request.title}`, `Selection in ${request.title}`),
+      selection: {
+        artifactId: request.artifactId,
+        version: request.version,
+        start: request.start,
+        end: request.end,
+        quoteSha256: request.quoteSha256,
+      },
+    }],
+  })
   // Temporary chat writes no thread, so it cannot be turned on for a project.
   const setTemporaryFromComposer = (value: boolean) => {
     if (value && projectRef()) {
@@ -556,6 +585,7 @@ export default function ChatPage() {
         pending: planApprovalPending() === turnId,
         error: planApprovalError()[turnId],
       }),
+      goal: threadGoal(),
     }),
   )
 
@@ -1049,7 +1079,7 @@ export default function ChatPage() {
             <ChatAttachmentCanvas attachments={conversationAttachments()} selectedId={selectedAttachmentId()} />
           </Show>
           <Show when={artifactItems().length > 0}>
-            <ArtifactsPanel items={artifactItems()} history={{ threadId: state.threadId ?? '', temporary: temporaryChat() || isActiveThreadTemporary() }} />
+            <ArtifactsPanel items={artifactItems()} history={{ threadId: state.threadId ?? '', temporary: temporaryChat() || isActiveThreadTemporary() }} onAskAboutSelection={askAboutArtifactSelection} />
           </Show>
         </Show>
       </Match>
@@ -1227,6 +1257,7 @@ export default function ChatPage() {
         onApprovalDecision={(approvalId, decision) =>
           void handleApprovalDecision(row().turn.id, approvalId, decision)
         }
+        onApprovalEditedDecision={(approvalId, edit) => handleEditedApprovalDecision(row().turn.id, approvalId, edit)}
         onApprovePlan={(rung, justification, steps) =>
           void approveTurnPlan(row().turn.id, rung, justification, steps)
         }
@@ -1481,6 +1512,7 @@ export default function ChatPage() {
                 onApprovalDecision={(turnId, approvalId, decision) =>
                   void handleApprovalDecision(turnId, approvalId, decision)
                 }
+                onApprovalEditedDecision={(turnId, approvalId, edit) => handleEditedApprovalDecision(turnId, approvalId, edit)}
                 onApprovePlan={(turnId, rung, justification, steps) =>
                   void approveTurnPlan(turnId, rung, justification, steps)
                 }
@@ -1493,6 +1525,14 @@ export default function ChatPage() {
                 researchPlan={pendingResearchPlan()}
                 onStartResearchPlan={(edit) => void startResearchPlan(edit)}
                 onCancelResearchPlan={cancelResearchPlan}
+                goalEntry={goalEntryAvailable()}
+                goalPending={goalPending()}
+                goalError={goalError()}
+                goalBusy={isStreaming()}
+                onSaveGoal={saveGoal}
+                onContinueGoal={() => void continueGoal()}
+                onPauseGoal={(paused) => void setGoalPaused(paused)}
+                onClearGoal={() => void clearGoal()}
               />
               <Show when={isStreaming()}>
                 <div class="verevon-chat-stop-wrap">

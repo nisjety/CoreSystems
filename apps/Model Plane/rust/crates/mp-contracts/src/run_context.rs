@@ -28,6 +28,9 @@ pub const MAX_HISTORY_BYTES: usize = 65_536;
 pub const MAX_MEMORY_BYTES: usize = 8_192;
 /// Largest standing-profile block, in bytes (EP-8 S5).
 pub const MAX_USER_PROFILE_BYTES: usize = 6_144;
+/// Largest thread-goal recitation, in bytes (EP-7 S1); the gateway composes it within the same
+/// bound (`thread_goal_routes::MAX_RECITATION_BYTES`).
+pub const MAX_GOAL_RECITATION_BYTES: usize = 8_192;
 
 /// Why a run context was refused at the boundary. The token is closed: it is
 /// the only text that leaves the refusing service.
@@ -49,6 +52,10 @@ pub enum RunContextRefusal {
     MemoryTooLarge,
     /// The profile block exceeds [`MAX_USER_PROFILE_BYTES`].
     UserProfileTooLarge,
+    /// A zero-retention run carried a thread-goal recitation (EP-7 S1).
+    ZdrGoalRecitation,
+    /// The goal recitation exceeds [`MAX_GOAL_RECITATION_BYTES`].
+    GoalRecitationTooLarge,
     /// A prior turn has a role other than `user` or `assistant`.
     HistoryRoleNotAllowed,
 }
@@ -66,6 +73,8 @@ impl RunContextRefusal {
             Self::HistoryTooLarge => "run_context_history_too_large",
             Self::MemoryTooLarge => "run_context_memory_too_large",
             Self::UserProfileTooLarge => "run_context_user_profile_too_large",
+            Self::ZdrGoalRecitation => "run_context_zdr_goal_recitation",
+            Self::GoalRecitationTooLarge => "run_context_goal_recitation_too_large",
             Self::HistoryRoleNotAllowed => "run_context_history_role_not_allowed",
         }
     }
@@ -91,6 +100,9 @@ pub fn validate(context: Option<&RunContext>, zdr: bool) -> Result<(), RunContex
         if !context.user_profile.is_empty() {
             return Err(RunContextRefusal::ZdrUserProfile);
         }
+        if !context.goal_recitation.is_empty() {
+            return Err(RunContextRefusal::ZdrGoalRecitation);
+        }
     }
     if context.authored_instructions.len() > MAX_AUTHORED_INSTRUCTION_BYTES {
         return Err(RunContextRefusal::InstructionsTooLarge);
@@ -113,6 +125,9 @@ pub fn validate(context: Option<&RunContext>, zdr: bool) -> Result<(), RunContex
     }
     if context.user_profile.len() > MAX_USER_PROFILE_BYTES {
         return Err(RunContextRefusal::UserProfileTooLarge);
+    }
+    if context.goal_recitation.len() > MAX_GOAL_RECITATION_BYTES {
+        return Err(RunContextRefusal::GoalRecitationTooLarge);
     }
     Ok(())
 }
@@ -339,6 +354,8 @@ mod tests {
             RunContextRefusal::MemoryTooLarge,
             RunContextRefusal::UserProfileTooLarge,
             RunContextRefusal::HistoryRoleNotAllowed,
+            RunContextRefusal::ZdrGoalRecitation,
+            RunContextRefusal::GoalRecitationTooLarge,
         ];
         let mut tokens: Vec<&str> = all.iter().map(|r| r.token()).collect();
         tokens.sort_unstable();

@@ -89,6 +89,7 @@ Plans / steps / todos / approvals / subagent-lineage' ownership row) this row: '
 | Knowledge: graph / wiki extraction | **Data Plane** (read) + session-core context | Data Plane | gateway `/v1/graph`,`/v1/wiki` relay | NATS | 🟡 extraction service is P7 gap |
 | Compact transport (TOON) | **model-gateway** (`/v1/toon`) + shared crate | — | — | — | ✅ (benchmark/reversibility = P8 finish) |
 | Run control across gateway replicas (cancel/queue/probe) | **model-gateway** (`run_control.rs`) | none | the receiving replica relays to the owner when the stream lives on another replica | core NATS request/reply, at-most-once, subjects `mp.v1.runctl.>` (ACL `deploy/nats.conf:34,:40`) | built, default off (`MODEL_GATEWAY_RUN_CONTROL_BUS`); not live-verified |
+| Thread references (read-only thread_outline / thread_search / thread_read, EP-3 S7) | **session-core** (ReadThreadForReference, SearchMessages RECALL) | Postgres (read only, no new store) | model-gateway offers the tools only for threads attached as context_refs on that run; thread_ref is a position, never an id | — | single owner; built dark behind MODEL_GATEWAY_THREAD_REFERENCES_ENABLED (off) |
 
 ---
 

@@ -386,6 +386,11 @@ pub const FEATURES: &[Feature] = &[
         key: "context_references",
         label: "references to documents, threads or selections",
     },
+    // EP-7 S1: a thread goal is user content in a new durable store (D7).
+    Feature {
+        key: "thread_goal",
+        label: "persistent goals",
+    },
 ];
 
 /// The catalogue entry for `code`, if it is a catalogue code.

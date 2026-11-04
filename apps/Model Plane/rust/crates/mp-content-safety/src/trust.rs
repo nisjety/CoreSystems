@@ -54,6 +54,10 @@ const TOOL_TRUST: &[(&str, TrustClass)] = &[
     ("read_provider_action", TrustClass::ConnectorContent),
     ("execute_provider_action", TrustClass::ConnectorContent),
     ("recall_conversations", TrustClass::PriorConversation),
+    // EP-3 S7: the thread reference tools read an earlier conversation the person attached.
+    ("thread_outline", TrustClass::PriorConversation),
+    ("thread_search", TrustClass::PriorConversation),
+    ("thread_read", TrustClass::PriorConversation),
 ];
 
 impl TrustClass {
@@ -205,6 +209,9 @@ mod tests {
             TrustClass::classify("recall_conversations"),
             TrustClass::PriorConversation
         );
+        for tool in ["thread_outline", "thread_search", "thread_read"] {
+            assert_eq!(TrustClass::classify(tool), TrustClass::PriorConversation, "{tool}");
+        }
         assert_eq!(TrustClass::classify("some_future_tool"), TrustClass::OrgInternal);
     }
 

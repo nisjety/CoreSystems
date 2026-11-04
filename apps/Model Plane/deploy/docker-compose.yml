@@ -352,6 +352,9 @@ services:
       # WS19-S8: name a turn's skill bundles to execution-core so code_interpreter sees them read-only at /skills. Off by
       # default; only the literal `true`.
       SKILL_BUNDLE_MOUNT_ENABLED: ${SKILL_BUNDLE_MOUNT_ENABLED:-false}
+      # EP-5 S2: the typed deck tool in the Ask loop (manifest owned by the gateway, server-authored build). Off by
+      # default; only the literal `true`.
+      MODEL_GATEWAY_DECK_TOOL: ${MODEL_GATEWAY_DECK_TOOL:-false}
       # WS04-S6: durable send receipts (client_message_id on a send, dedupe in session-core, ids on the queued_input
       # delivery event). On by default since the WS04-S9 proof; only the literal `true` turns it on. Deploy order:
       # session-core (migration 0052) first, then model-gateway, then the BFF and frontend. Roll back with false plus a
@@ -435,6 +438,14 @@ services:
       DEEP_RESEARCH_PLAN_TURN: ${DEEP_RESEARCH_PLAN_TURN:-false}
       # EP-3 S5: typed context references on the send (document, skill, own Space). Only the literal true.
       MODEL_GATEWAY_CONTEXT_REFS_ENABLED: ${MODEL_GATEWAY_CONTEXT_REFS_ENABLED:-false}
+      # EP-3 S6: ask for a change to a selected range of an artifact (needs CONTEXT_REFS and artifact revisions on).
+      # Only the literal true.
+      MODEL_GATEWAY_SELECTION_EDIT_ENABLED: ${MODEL_GATEWAY_SELECTION_EDIT_ENABLED:-false}
+      # EP-3 S7: read-only thread_outline/thread_search/thread_read over attached threads (needs CONTEXT_REFS too). Only the literal true.
+      MODEL_GATEWAY_THREAD_REFERENCES_ENABLED: ${MODEL_GATEWAY_THREAD_REFERENCES_ENABLED:-false}
+      # EP-7 S1: thread goals (goal routes and the goal recited on a Continue turn). Needs SESSION_CORE_THREAD_GOALS_ENABLED.
+      # Only the literal true.
+      MODEL_GATEWAY_THREAD_GOALS_ENABLED: ${MODEL_GATEWAY_THREAD_GOALS_ENABLED:-false}
       # EP-6 S9: a mention turn's agent tool allowlist and autonomy cap narrow the offered tools. Only the literal true.
       MODEL_GATEWAY_AGENT_TOOL_ALLOWLIST: ${MODEL_GATEWAY_AGENT_TOOL_ALLOWLIST:-false}
       # WS27-S2: a turn's usage frame and ledger rows count every tool round and the overhead calls, with run_id. Off by
@@ -1172,6 +1183,8 @@ services:
       SESSION_CORE_REQUEST_INSPECTOR_READ: ${SESSION_CORE_REQUEST_INSPECTOR_READ:-false}
       # EP-3 S2: the ArtifactRevisionService store. Only the literal true.
       SESSION_CORE_ARTIFACT_REVISIONS_ENABLED: ${SESSION_CORE_ARTIFACT_REVISIONS_ENABLED:-false}
+      # EP-7 S1: the ThreadGoalService store. Only the literal true.
+      SESSION_CORE_THREAD_GOALS_ENABLED: ${SESSION_CORE_THREAD_GOALS_ENABLED:-false}
       # Dreaming's LLM memory extraction (dream_extractor.rs). Unset this
       # address, or set DREAMING_LLM_EXTRACTION=0, and Dreaming falls back to
       # the deterministic phrase matcher alone.

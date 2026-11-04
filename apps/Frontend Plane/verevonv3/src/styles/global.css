@@ -28077,6 +28077,37 @@ body.verevon-chat-canvas-resizing * {
   color: var(--danger);
 }
 
+/* "Ask for a change" on a selected range (EP-3 S6): the quote, the instruction and its actions. */
+.verevon-chat-artifact-ask {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 8px 0;
+  border: 1px solid color-mix(in srgb, var(--verevon-e-subtle) 30%, transparent);
+  border-radius: 10px;
+  padding: 10px 12px;
+  background: var(--verevon-surface-soft);
+  font-size: 13px;
+  color: var(--verevon-j-text);
+}
+
+.verevon-chat-artifact-ask p {
+  margin: 0;
+}
+
+.verevon-chat-artifact-ask textarea {
+  box-sizing: border-box;
+  width: 100%;
+  resize: vertical;
+  font: inherit;
+}
+
+.verevon-chat-artifact-ask__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
 .verevon-chat-artifact-versions {
   display: inline-flex;
   align-items: center;
@@ -28275,6 +28306,62 @@ body.verevon-chat-canvas-resizing * {
   flex-direction: column;
   gap: 8px;
   min-height: 0;
+}
+
+/* The brand deck template picker (EP-5 S7): one radio per template, with its colours and fonts. */
+.verevon-deck-template-picker {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.verevon-deck-template-picker__option {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  border: 1px solid color-mix(in srgb, var(--verevon-e-subtle) 30%, transparent);
+  border-radius: 8px;
+  padding: 6px 10px;
+  background: var(--verevon-surface-soft);
+  color: var(--verevon-j-text);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.verevon-deck-template-picker__option[aria-checked='true'] {
+  border-color: var(--verevon-a-earth);
+}
+
+.verevon-deck-template-picker__option:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.verevon-deck-template-picker__name {
+  font-weight: 650;
+}
+
+.verevon-deck-template-picker__swatches {
+  display: inline-flex;
+  gap: 3px;
+}
+
+.verevon-deck-template-picker__swatch {
+  width: 12px;
+  height: 12px;
+  border: 1px solid color-mix(in srgb, var(--verevon-e-subtle) 40%, transparent);
+  border-radius: 3px;
+}
+
+.verevon-deck-template-picker__fonts {
+  color: var(--verevon-e-muted);
+}
+
+.verevon-deck-template-picker__error {
+  margin: 0;
+  font-size: 12px;
+  color: var(--danger);
 }
 
 .verevon-chat-artifact-office__notice {

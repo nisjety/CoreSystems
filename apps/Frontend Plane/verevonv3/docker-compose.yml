@@ -225,6 +225,8 @@ services:
       # WS10-S5: the model entitlement admin routes (policy read, write and explain). Only the literal `true`
       # enables them; do not enable before the matcher and the model-gateway admission are deployed.
       MODEL_ENTITLEMENT_ADMIN_ENABLED: ${MODEL_ENTITLEMENT_ADMIN_ENABLED:-false}
+      # EP-3 S8: save a document artifact version to knowledge from the Output panel. Only the literal `true`.
+      CHAT_ARTIFACT_PROMOTE_ENABLED: ${CHAT_ARTIFACT_PROMOTE_ENABLED:-false}
       # WS03-S5: map Control's typed Space denials to the browser envelope. Off restores pass-through.
       # A rollout control only; it never decides who may do anything.
       SPACE_DENIALS_TYPED: ${SPACE_DENIALS_TYPED:-true}

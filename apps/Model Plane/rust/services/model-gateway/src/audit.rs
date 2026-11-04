@@ -20,7 +20,10 @@ pub fn tool_data_category(tool: &str) -> &'static str {
         | "knowledge_list_documents"
         | "recall_memory"
         | "reattach_context"
-        | "recall_conversations" => "customer_private",
+        | "recall_conversations"
+        | "thread_outline"
+        | "thread_search"
+        | "thread_read" => "customer_private",
         // A connected account's records are the user's own personal data.
         "list_provider_actions" | "read_provider_action" | "execute_provider_action" => "personal",
         _ => "unclassified",
@@ -60,6 +63,9 @@ mod tests {
             "recall_memory",
             "reattach_context",
             "recall_conversations",
+            "thread_outline",
+            "thread_search",
+            "thread_read",
             "knowledge_search",
             "knowledge_list_documents",
         ] {

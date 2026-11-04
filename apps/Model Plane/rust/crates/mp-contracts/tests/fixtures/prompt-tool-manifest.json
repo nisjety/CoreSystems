@@ -162,7 +162,7 @@
     },
     {
       "id": "prompt/prompt_context.rs/CONDITIONAL_TOOLS",
-      "sha256": "31b93c6d366d11dbb8b676d6bd9927e1f4da8047cb9fe2ec016610b95295ada9",
+      "sha256": "8865e5d1d46be7b9431ad08baeeff65cd701f7db4ac530e5fb97b1441fa21a80",
       "source": "services/model-gateway/src/prompt_context.rs"
     },
     {
@@ -291,9 +291,19 @@
       "source": "services/execution-core/src/runtime_loop/agent.rs"
     },
     {
+      "id": "tool-builder/deck_tool.rs/tool_definition",
+      "sha256": "13f4b753ad29c2e797d23e40771035acbfdd7463c2e119ace245cb5b25faec5d",
+      "source": "services/model-gateway/src/deck_tool.rs"
+    },
+    {
       "id": "tool-builder/recall_conversations.rs/tool_definition",
       "sha256": "ca4242e642967e8a7f7f92059de70cd5fdf239378b0f7c02ab0de24781e344c2",
       "source": "services/model-gateway/src/recall_conversations.rs"
+    },
+    {
+      "id": "tool-builder/thread_reference_tools.rs/tool_definitions",
+      "sha256": "ec4e0de97dd6ada5adae9ae74b34b9787208f3da69f0eaa81a30fd5780c8dcbd",
+      "source": "services/model-gateway/src/thread_reference_tools.rs"
     },
     {
       "id": "tool-builder/tool_loop.rs/advertise_batched_search",
