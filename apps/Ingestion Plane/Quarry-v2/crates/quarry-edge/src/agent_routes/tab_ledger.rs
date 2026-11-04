@@ -79,6 +79,9 @@ pub enum TabAdmit {
 #[derive(Debug, Default, Clone)]
 pub struct TabLedger {
     tabs: BTreeMap<String, TabMeta>,
+    /// W3 E3.2-e2: the per-origin consent of tabs offered to attach mode, by tab id. Kept apart
+    /// from `TabMeta` so the holder rules and their callers do not change.
+    consents: BTreeMap<String, TabConsent>,
 }
 
 impl TabLedger {
@@ -120,12 +123,14 @@ impl TabLedger {
 
     /// Drop a tab that was closed. Returns what the ledger held for it.
     pub fn forget(&mut self, tab_id: &str) -> Option<TabMeta> {
+        self.consents.remove(tab_id);
         self.tabs.remove(tab_id)
     }
 
     /// Drop every tab the browser no longer has. `live` is the driver's list.
     pub fn retain_live(&mut self, live: &[&str]) {
         self.tabs.retain(|id, _| live.contains(&id.as_str()));
+        self.consents.retain(|id, _| live.contains(&id.as_str()));
     }
 
     pub fn len(&self) -> usize {
@@ -224,6 +229,193 @@ pub fn hand_to_agent(
             ledger.set_holder(tab_id, BrowserTabHolder::Agent, expected)
         }
         _ => Err(TabError::NoAttachedAgent),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// W3 E3.2-e2: per-origin consent for attach-mode tabs.
+//
+// Attach mode (WS8.G, the Model Plane attach driver) gives the agent the person's own visible
+// tab instead of a background tab the attachment opened. That tab is on an origin the person
+// chose, so before it is attached its origin must carry the person's consent: an
+// origin-extension grant that passes the E3.2-e1 gate and covers the tab's host (the route half
+// is `tabs::admit_attach_mode_tab`). The ledger keeps the result per tab id:
+// - a denial is sticky for the tab id: a later approval does not lift it (deny beats approval);
+// - an approval binds the host it was checked for, so a tab that navigated since needs a new check;
+// - a tab without an approval for its current host is never attached.
+// Consent records are dropped with the tab (`forget`, `retain_live`). Ids and closed labels
+// only: the approved host stays in process memory and is never logged or returned.
+// Dark: nothing outside the tests calls these until the attach driver's route does.
+// ---------------------------------------------------------------------------
+
+/// Why a tab's consent was denied, as a closed label (never a host).
+pub type TabConsentReason = &'static str;
+
+/// The consent state of one tab offered to attach mode.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
+pub enum TabConsent {
+    /// The person's consent covers `host` through the origin-extension grant `grant_id`.
+    Approved { host: String, grant_id: String },
+    /// Refused; the tab id is never attached while the ledger knows it.
+    Denied { reason: TabConsentReason },
+}
+
+/// Why an attach-mode tab could not be approved or attached.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
+pub enum TabConsentError {
+    /// No such tab on this run.
+    NotFound,
+    /// The tab's consent was denied (sticky for the tab id).
+    Denied { reason: TabConsentReason },
+    /// No approval for the tab's current host: none yet, or the tab navigated since.
+    ConsentRequired,
+    /// Only a tab the person holds can be offered to attach mode.
+    NotHumanHeld,
+    /// The tab already belongs to another attachment, or was opened by one.
+    AlreadyAttached,
+    /// The run has no live attachment pinned to this tab.
+    NoAttachedAgent,
+    /// The caller's expected epoch is not the tab's current epoch.
+    Stale { current: u64 },
+}
+
+#[allow(dead_code)]
+impl TabConsentError {
+    /// The closed label of the refusal (error details, counters).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::NotFound => "pinned_tab_closed",
+            Self::Denied { .. } => "attach_tab_consent_denied",
+            Self::ConsentRequired => "attach_tab_consent_required",
+            Self::NotHumanHeld => "attach_tab_not_human_held",
+            Self::AlreadyAttached => "attach_tab_already_attached",
+            Self::NoAttachedAgent => "no_attached_agent",
+            Self::Stale { .. } => "stale_tab_epoch",
+        }
+    }
+}
+
+#[allow(dead_code)]
+impl TabLedger {
+    /// The consent recorded for a tab, if any.
+    pub fn consent(&self, tab_id: &str) -> Option<&TabConsent> {
+        self.consents.get(tab_id)
+    }
+
+    /// Record a denial for a tab. Sticky: it replaces an approval and is never replaced by one;
+    /// the first denial's reason is kept.
+    pub fn deny_consent(
+        &mut self,
+        tab_id: &str,
+        reason: TabConsentReason,
+    ) -> Result<(), TabConsentError> {
+        if !self.tabs.contains_key(tab_id) {
+            return Err(TabConsentError::NotFound);
+        }
+        if !matches!(self.consents.get(tab_id), Some(TabConsent::Denied { .. })) {
+            self.consents
+                .insert(tab_id.to_owned(), TabConsent::Denied { reason });
+        }
+        Ok(())
+    }
+
+    /// Record an approval of `host` for a tab. Refused when the tab was denied (deny beats
+    /// approval). A new approval replaces an older one (the tab navigated and was re-checked).
+    pub fn approve_consent(
+        &mut self,
+        tab_id: &str,
+        host: &str,
+        grant_id: &str,
+    ) -> Result<(), TabConsentError> {
+        if !self.tabs.contains_key(tab_id) {
+            return Err(TabConsentError::NotFound);
+        }
+        if let Some(TabConsent::Denied { reason }) = self.consents.get(tab_id) {
+            return Err(TabConsentError::Denied { reason: *reason });
+        }
+        self.consents.insert(
+            tab_id.to_owned(),
+            TabConsent::Approved {
+                host: host.to_owned(),
+                grant_id: grant_id.to_owned(),
+            },
+        );
+        Ok(())
+    }
+
+    /// Whether the tab's recorded consent approves `current_host`. Returns the approving grant.
+    pub fn consent_covers(&self, tab_id: &str, current_host: &str) -> Result<&str, TabConsentError> {
+        if !self.tabs.contains_key(tab_id) {
+            return Err(TabConsentError::NotFound);
+        }
+        match self.consents.get(tab_id) {
+            Some(TabConsent::Denied { reason }) => Err(TabConsentError::Denied { reason: *reason }),
+            Some(TabConsent::Approved { host, grant_id }) if host == current_host => {
+                Ok(grant_id.as_str())
+            }
+            _ => Err(TabConsentError::ConsentRequired),
+        }
+    }
+
+    /// Attach the person's tab to the attachment `attach_id` (attach mode). Consent is checked
+    /// first, against the host the tab is on now: a denied tab, or one with no approval for
+    /// `current_host`, is never attached. Only a tab the person holds and no attachment owns can
+    /// be attached; the holder becomes the agent and the epoch moves once. Repeating the same
+    /// attach is `Unchanged`.
+    pub fn attach_visible_tab(
+        &mut self,
+        tab_id: &str,
+        attach_id: &str,
+        current_host: &str,
+        expected: Option<u64>,
+    ) -> Result<TabChange, TabConsentError> {
+        let (epoch, holder, owner) = {
+            let meta = self.tabs.get(tab_id).ok_or(TabConsentError::NotFound)?;
+            (meta.epoch, meta.holder, meta.attach_id.clone())
+        };
+        if let Some(expected) = expected {
+            if expected != epoch {
+                return Err(TabConsentError::Stale { current: epoch });
+            }
+        }
+        self.consent_covers(tab_id, current_host)?;
+        match owner.as_deref() {
+            Some(existing) if existing == attach_id && holder == BrowserTabHolder::Agent => {
+                return Ok(TabChange::Unchanged { epoch });
+            }
+            Some(_) => return Err(TabConsentError::AlreadyAttached),
+            None => {}
+        }
+        if holder != BrowserTabHolder::Human {
+            return Err(TabConsentError::NotHumanHeld);
+        }
+        let meta = self.tabs.get_mut(tab_id).ok_or(TabConsentError::NotFound)?;
+        meta.attach_id = Some(attach_id.to_owned());
+        meta.holder = BrowserTabHolder::Agent;
+        meta.epoch += 1;
+        Ok(TabChange::Changed { epoch: meta.epoch })
+    }
+}
+
+/// Attach-mode hand-over of the person's tab to the live attachment pinned to it. Needs a live
+/// attachment whose pin is this tab (`NoAttachedAgent` otherwise), then the consent and holder
+/// rules of [`TabLedger::attach_visible_tab`].
+#[allow(dead_code)]
+pub fn attach_consented_tab(
+    ledger: &mut TabLedger,
+    attaches: &AttachRegistry,
+    tab_id: &str,
+    current_host: &str,
+    expected: Option<u64>,
+) -> Result<TabChange, TabConsentError> {
+    match attaches.live() {
+        Some(live) if live.tab_id == tab_id => {
+            let attach_id = live.attach_id.clone();
+            ledger.attach_visible_tab(tab_id, &attach_id, current_host, expected)
+        }
+        _ => Err(TabConsentError::NoAttachedAgent),
     }
 }
 
@@ -603,6 +795,181 @@ mod tests {
         let state = attach("att_1", "t2", AttachBudget::new(20, 120));
         assert!(!state.idle_expired(179_999, 180));
         assert!(state.idle_expired(180_000, 180));
+    }
+
+    // W3 E3.2-e2: consent for attach-mode tabs.
+
+    #[test]
+    fn a_denied_tab_is_never_attached() {
+        let mut ledger = ledger_with("t1", OpenedBy::Human);
+        ledger
+            .deny_consent("t1", "origin_extension_denied")
+            .unwrap();
+        assert_eq!(
+            ledger.attach_visible_tab("t1", "att_1", "shop.example.com", None),
+            Err(TabConsentError::Denied {
+                reason: "origin_extension_denied"
+            })
+        );
+        let meta = ledger.get("t1").unwrap();
+        assert_eq!(meta.holder, BrowserTabHolder::Human);
+        assert_eq!(meta.attach_id, None);
+        assert_eq!(meta.epoch, 0);
+    }
+
+    #[test]
+    fn a_tab_without_consent_is_never_attached() {
+        let mut ledger = ledger_with("t1", OpenedBy::Human);
+        assert_eq!(
+            ledger.attach_visible_tab("t1", "att_1", "shop.example.com", None),
+            Err(TabConsentError::ConsentRequired)
+        );
+        assert_eq!(ledger.get("t1").unwrap().holder, BrowserTabHolder::Human);
+    }
+
+    #[test]
+    fn deny_beats_a_later_approval_and_keeps_the_first_reason() {
+        let mut ledger = ledger_with("t1", OpenedBy::Human);
+        ledger
+            .approve_consent("t1", "shop.example.com", "grant_ext_1")
+            .unwrap();
+        ledger.deny_consent("t1", "org_origin_consent_disabled").unwrap();
+        ledger.deny_consent("t1", "origin_extension_denied").unwrap();
+        assert_eq!(
+            ledger.approve_consent("t1", "shop.example.com", "grant_ext_2"),
+            Err(TabConsentError::Denied {
+                reason: "org_origin_consent_disabled"
+            })
+        );
+        assert_eq!(
+            ledger.consent("t1"),
+            Some(&TabConsent::Denied {
+                reason: "org_origin_consent_disabled"
+            })
+        );
+    }
+
+    #[test]
+    fn an_approval_binds_the_host_it_was_checked_for() {
+        let mut ledger = ledger_with("t1", OpenedBy::Human);
+        ledger
+            .approve_consent("t1", "shop.example.com", "grant_ext_1")
+            .unwrap();
+        assert_eq!(
+            ledger.consent_covers("t1", "shop.example.com"),
+            Ok("grant_ext_1")
+        );
+        // The tab navigated to another host since the check: no attach without a new check.
+        assert_eq!(
+            ledger.attach_visible_tab("t1", "att_1", "other.example.net", None),
+            Err(TabConsentError::ConsentRequired)
+        );
+        assert_eq!(ledger.get("t1").unwrap().holder, BrowserTabHolder::Human);
+    }
+
+    #[test]
+    fn a_consented_tab_is_attached_once_and_a_repeat_is_idempotent() {
+        let mut ledger = ledger_with("t1", OpenedBy::Human);
+        ledger
+            .approve_consent("t1", "shop.example.com", "grant_ext_1")
+            .unwrap();
+        assert_eq!(
+            ledger.attach_visible_tab("t1", "att_1", "shop.example.com", Some(0)),
+            Ok(TabChange::Changed { epoch: 1 })
+        );
+        let meta = ledger.get("t1").unwrap();
+        assert_eq!(meta.holder, BrowserTabHolder::Agent);
+        assert_eq!(meta.attach_id.as_deref(), Some("att_1"));
+        assert_eq!(meta.opened_by, OpenedBy::Human, "the opener never changes");
+        assert_eq!(
+            ledger.attach_visible_tab("t1", "att_1", "shop.example.com", None),
+            Ok(TabChange::Unchanged { epoch: 1 })
+        );
+        assert_eq!(
+            ledger.attach_visible_tab("t1", "att_2", "shop.example.com", None),
+            Err(TabConsentError::AlreadyAttached)
+        );
+    }
+
+    #[test]
+    fn a_stale_epoch_or_a_tab_the_person_does_not_hold_is_refused() {
+        let mut ledger = ledger_with("t1", OpenedBy::Human);
+        ledger
+            .approve_consent("t1", "shop.example.com", "grant_ext_1")
+            .unwrap();
+        ledger
+            .set_holder("t1", BrowserTabHolder::Agent, None)
+            .unwrap();
+        assert_eq!(
+            ledger.attach_visible_tab("t1", "att_1", "shop.example.com", Some(0)),
+            Err(TabConsentError::Stale { current: 1 })
+        );
+        assert_eq!(
+            ledger.attach_visible_tab("t1", "att_1", "shop.example.com", None),
+            Err(TabConsentError::NotHumanHeld)
+        );
+        // A tab an attachment opened is not the person's to offer.
+        ledger.open_agent_tab("t2", "att_0");
+        ledger
+            .approve_consent("t2", "shop.example.com", "grant_ext_1")
+            .unwrap();
+        assert_eq!(
+            ledger.attach_visible_tab("t2", "att_1", "shop.example.com", None),
+            Err(TabConsentError::AlreadyAttached)
+        );
+    }
+
+    #[test]
+    fn attach_mode_needs_a_live_attachment_pinned_to_the_tab() {
+        let mut ledger = ledger_with("t1", OpenedBy::Human);
+        ledger
+            .approve_consent("t1", "shop.example.com", "grant_ext_1")
+            .unwrap();
+        let none = AttachRegistry::default();
+        assert_eq!(
+            attach_consented_tab(&mut ledger, &none, "t1", "shop.example.com", None),
+            Err(TabConsentError::NoAttachedAgent)
+        );
+        let mut other_pin = AttachRegistry::default();
+        other_pin
+            .begin(attach("att_1", "t9", AttachBudget::new(20, 120)))
+            .unwrap();
+        assert_eq!(
+            attach_consented_tab(&mut ledger, &other_pin, "t1", "shop.example.com", None),
+            Err(TabConsentError::NoAttachedAgent)
+        );
+        let mut pinned = AttachRegistry::default();
+        pinned
+            .begin(attach("att_1", "t1", AttachBudget::new(20, 120)))
+            .unwrap();
+        assert_eq!(
+            attach_consented_tab(&mut ledger, &pinned, "t1", "shop.example.com", None),
+            Ok(TabChange::Changed { epoch: 1 })
+        );
+        assert_eq!(ledger.get("t1").unwrap().attach_id.as_deref(), Some("att_1"));
+    }
+
+    #[test]
+    fn consent_leaves_with_the_tab() {
+        let mut ledger = ledger_with("t1", OpenedBy::Human);
+        ledger.seed("t2", OpenedBy::Human);
+        ledger.deny_consent("t1", "origin_extension_denied").unwrap();
+        ledger
+            .approve_consent("t2", "shop.example.com", "grant_ext_1")
+            .unwrap();
+        ledger.forget("t1");
+        assert_eq!(ledger.consent("t1"), None);
+        ledger.retain_live(&[]);
+        assert_eq!(ledger.consent("t2"), None);
+        assert_eq!(
+            ledger.deny_consent("t1", "origin_extension_denied"),
+            Err(TabConsentError::NotFound),
+            "a closed tab cannot carry a record"
+        );
+        assert_eq!(
+            ledger.approve_consent("gone", "shop.example.com", "grant_ext_1"),
+            Err(TabConsentError::NotFound)
+        );
     }
 
     #[test]
