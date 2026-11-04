@@ -45,6 +45,12 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
             "/api/v1/skills/{skill_id}",
             post(update_skill).delete(delete_skill),
         )
+        // EP-11 S2: a skill's read-only history. capability-core answers 404 while
+        // SKILL_VERSIONS_API is off, and the Skills page asks only when a skill carries a version.
+        .route(
+            "/api/v1/skills/{skill_id}/versions",
+            get(list_skill_versions),
+        )
         .route("/api/v1/plugins", get(list_plugins).post(create_plugin))
         .route(
             "/api/v1/plugins/{plugin_id}",
@@ -161,6 +167,44 @@ async fn list_skills(
         "{}/v1/skills{}",
         state.model_gateway_url,
         build_query(&params)
+    );
+    shared::proxy_model_json_with_capability(
+        &state,
+        Method::GET,
+        &url,
+        None,
+        token.as_deref(),
+        Some(&capability),
+        &user,
+    )
+    .await
+}
+
+/// List one skill's immutable versions, newest first (EP-11 S2). Open to any member, as the skill
+/// list is: capability-core shows the history only to whoever may read the skill, and answers a
+/// skill the caller cannot see as not found. `limit` and `before_version` pass through; the org is
+/// never named here, it comes from the verified capability token.
+async fn list_skill_versions(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Path(skill_id): Path<String>,
+    Query(params): Query<HashMap<String, String>>,
+) -> impl IntoResponse {
+    let token = shared::model_token(&state, &user, &headers).await;
+    let capability = match shared::required_capability_token(&state, &user, &headers).await {
+        Ok(token) => token,
+        Err(error) => return shared::delegated_auth_unavailable(error),
+    };
+    let paging: HashMap<String, String> = params
+        .into_iter()
+        .filter(|(key, _)| key == "limit" || key == "before_version")
+        .collect();
+    let url = format!(
+        "{}/v1/skills/{}/versions{}",
+        state.model_gateway_url,
+        urlencoding::encode(&skill_id),
+        build_query(&paging)
     );
     shared::proxy_model_json_with_capability(
         &state,
@@ -2538,5 +2582,40 @@ mod tests {
         let off = skill_test_servers("member", "user", "user-1").await;
         let (status, _) = skill_request(&off, "GET", "/api/v1/skills/authoring", None, None).await;
         assert_ne!(status, axum::http::StatusCode::OK);
+    }
+
+    /// EP-11 S2: a member reads a skill's history through the gateway; only the paging parameters
+    /// pass, so a caller cannot name an org or a user upstream.
+    #[tokio::test]
+    async fn skill_versions_pass_through_with_paging_only() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let servers = skill_test_servers("member", "org", "").await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/v1/skills/skill_1/versions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "versions": [{"version": 2, "digest": "a".repeat(64)}], "has_more": false
+            })))
+            .mount(&servers.2)
+            .await;
+        let (status, body) = skill_request(
+            &servers,
+            "GET",
+            "/api/v1/skills/skill_1/versions?limit=5&org_id=org-forged&for_user_id=user-2",
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::OK);
+        assert_eq!(body["versions"][0]["version"], 2);
+        let forwarded: Vec<String> = servers
+            .2
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .filter(|request| request.url.path() == "/v1/skills/skill_1/versions")
+            .map(|request| request.url.query().unwrap_or_default().to_owned())
+            .collect();
+        assert_eq!(forwarded, ["limit=5"]);
     }
 }

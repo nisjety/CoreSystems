@@ -31,11 +31,13 @@ use mp_contracts::model_plane::v1::{
     run_service_server::RunServiceServer,
     session_core_server::{SessionCore, SessionCoreServer},
     session_retention_service_server::{SessionRetentionService, SessionRetentionServiceServer},
+    skill_version_service_server::SkillVersionServiceServer,
     space_attention_server::SpaceAttentionServer,
     space_events_server::SpaceEventsServer,
     space_history_service_server::SpaceHistoryServiceServer,
     space_room_read_service_server::SpaceRoomReadServiceServer,
     thread_autonomy_server::{ThreadAutonomy, ThreadAutonomyServer},
+    thread_export_service_server::ThreadExportServiceServer,
     thread_fork_service_server::ThreadForkServiceServer,
     thread_reference_service_server::ThreadReferenceServiceServer,
     thread_goal_service_server::ThreadGoalServiceServer,
@@ -7057,17 +7059,6 @@ mod persona_db_tests {
     }
 }
 
-/// The run metadata stamped at birth (WS20 S2). A person's run is a chat run. A
-/// system owner's run gets no stamp here: a scheduled run is stamped by its own
-/// binding, and an unstamped run reads as chat.
-fn run_origin_at_birth(user_id: &str) -> serde_json::Value {
-    if crate::auth::is_system_run_owner(user_id) {
-        serde_json::json!({})
-    } else {
-        serde_json::json!({ ORIGIN_METADATA_KEY: RunOrigin::Chat.as_str() })
-    }
-}
-
 /// Core of `SessionCore::start_run`, factored out to keep the trait method
 /// small. Inserts the run row and its `RUN_STARTED` event in one tx.
 pub(crate) async fn start_run_inner(
@@ -7109,6 +7100,21 @@ pub(crate) async fn start_run_inner(
         retention.inherit_from(Some(&parent))?
     };
 
+    // EP-12 S1: a child run inherits its parent's origin token behind
+    // SESSION_RUN_ORIGIN_INHERIT. The receipt above has just verified the parent as
+    // this owner's run in this org, so the parent is read here.
+    let inherited_origin = crate::run_origin_stamp::inherited_origin(
+        &mut tx,
+        &req.org_id,
+        &req.parent_run_id,
+        crate::run_origin_stamp::inherit_enabled(
+            std::env::var(crate::run_origin_stamp::INHERIT_ENV)
+                .ok()
+                .as_deref(),
+        ),
+    )
+    .await?;
+
     // P0.4 residency: stamp the configured Model-Plane region (EU default,
     // Sweden Central) onto the run so its processing region is auditable.
     let residency = configured_residency();
@@ -7137,7 +7143,7 @@ pub(crate) async fn start_run_inner(
     .bind(retention.class.as_str())
     .bind(retention.ack_id())
     .bind(retention.connection_id())
-    .bind(run_origin_at_birth(&req.user_id))
+    .bind(crate::run_origin_stamp::origin_at_birth(&req.user_id, inherited_origin))
     .fetch_optional(&mut *tx)
     .await
     .map_err(|e| Status::internal(e.to_string()))?;
@@ -10028,6 +10034,8 @@ impl SessionCore for SessionService {
             proposal_reason: String,
             updated_at: DateTime<Utc>,
             revision: i64,
+            version: i32,
+            digest: String,
         }
 
         let started = Instant::now();
@@ -10069,7 +10077,8 @@ impl SessionCore for SessionService {
                         scope, owner_user_id, shared_with, review_state,
                         source_run_id, source_thread_id, proposal_reason, updated_at,
                         (SELECT COALESCE(MAX(r.revision), 0) FROM skill_revisions r
-                         WHERE r.skill_id = agent_skills.id) AS revision
+                         WHERE r.skill_id = agent_skills.id) AS revision,
+                        version, digest
                  FROM agent_skills
                  WHERE org_id = $1 AND (NOT $2 OR enabled)
                    AND (scope = 'org' OR owner_user_id = $3
@@ -10106,6 +10115,9 @@ impl SessionCore for SessionService {
                     proposal_reason: row.proposal_reason,
                     updated_at: row.updated_at.to_rfc3339(),
                     revision: row.revision,
+                    // EP-11 S2: set by migration 0108's trigger, never by a writer.
+                    version: row.version,
+                    digest: row.digest,
                 })
                 .collect();
             Ok(Response::new(pb::ListAgentSkillsResponse { skills }))
@@ -12402,9 +12414,11 @@ pub async fn serve(
     };
     let message_tree = crate::message_tree::MessageTreeGrpc { pool: pool.clone() };
     let thread_fork = crate::thread_fork::ThreadForkGrpc { pool: pool.clone() };
+    let thread_export = crate::thread_export::ThreadExportGrpc { pool: pool.clone() };
     let artifact_revision_pool = pool.clone();
     let thread_reference_pool = pool.clone();
     let thread_goal_pool = pool.clone();
+    let skill_version_pool = pool.clone();
 
     // Space event stream (WS02-S3): its own small read pool, built before `pool` moves.
     let space_events = crate::space_stream_grpc::SpaceEventsGrpc::new(pool.clone(), space_wakes);
@@ -12480,6 +12494,11 @@ pub async fn serve(
             thread_fork,
             auth.clone(),
         ))
+        // EP-12 S9: the owner's thread export; answers `unavailable` until its switch is on.
+        .add_service(ThreadExportServiceServer::with_interceptor(
+            thread_export,
+            auth.clone(),
+        ))
         // EP-3 S7: read-only thread reference reads; only the gateway's switched-off tools call it.
         .add_service(ThreadReferenceServiceServer::with_interceptor(
             crate::thread_reference::ThreadReferenceGrpc { pool: thread_reference_pool },
@@ -12493,6 +12512,11 @@ pub async fn serve(
         // EP-7 S1: the thread goal store; answers `unavailable` until its switch is on.
         .add_service(ThreadGoalServiceServer::with_interceptor(
             crate::thread_goals::ThreadGoalGrpc { pool: thread_goal_pool },
+            auth.clone(),
+        ))
+        // EP-11 S2: reads of immutable skill versions; answers `unavailable` until its switch is on.
+        .add_service(SkillVersionServiceServer::with_interceptor(
+            crate::skill_versions::SkillVersionGrpc { pool: skill_version_pool },
             auth.clone(),
         ))
         .add_service(LearningGovernanceServiceServer::with_interceptor(
@@ -13509,7 +13533,7 @@ mod tests {
         normalize_thread_presentation_text, pb, persist_scheduled_run_bindings,
         record_scheduled_run_result_inner, thread_revise_payload_digest,
         record_scheduled_step_receipt_inner, reserve_tool_action_inner, resolve_dataplane_addr,
-        resolve_residency, resolve_thread_origin, run_origin_at_birth,
+        resolve_residency, resolve_thread_origin,
         scheduled_run_execution_payload_digest,
         semantic_context_search_status, support_thread_id, thread_append_payload_digest,
         thread_create_payload_digest, valid_scheduled_run_identifier,
@@ -13787,20 +13811,6 @@ mod tests {
         .execute(pool)
         .await
         .expect("seed fire");
-    }
-
-    /// Unit proof for WS20 S2: a person's run is stamped chat at birth, and a system
-    /// owner's run carries no stamp, so a scheduled run takes its origin from its binding.
-    #[test]
-    fn run_origin_is_stamped_at_birth_for_people_only() {
-        assert_eq!(
-            run_origin_at_birth("user-123"),
-            serde_json::json!({"origin": "chat"})
-        );
-        assert_eq!(
-            run_origin_at_birth("service:orchestrator-core"),
-            serde_json::json!({})
-        );
     }
 
     /// The immutable binding a scheduled run must carry, as `persist_scheduled_run_bindings`

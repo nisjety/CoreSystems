@@ -170,6 +170,9 @@ pub struct PurgeSummary {
     pub hook_configs: u64,
     pub agent_skills: u64,
     pub skill_revisions: u64,
+    /// Immutable skill versions and their bodies (EP-11 S2). A skill's delete also removes them;
+    /// they are purged before the skills so the erasure proof counts them.
+    pub agent_skill_versions: u64,
     pub agent_memory: u64,
     pub user_memory_controls: u64,
     /// Standing user profiles (EP-8 S4).
@@ -222,6 +225,7 @@ impl PurgeSummary {
             + self.hook_configs
             + self.agent_skills
             + self.skill_revisions
+            + self.agent_skill_versions
             + self.agent_memory
             + self.user_memory_controls
             + self.user_profiles
@@ -724,6 +728,22 @@ pub async fn purge_organization_data(
         .await?
         .rows_affected();
 
+    // Before the skills, so the count is the purge's own rather than the skill delete trigger's.
+    // A version row refuses any delete outside erasure (migration 0108); the setting is put back
+    // at once so nothing else in this transaction deletes a version through it.
+    sqlx::query("SELECT set_config('mp.version_erasure', 'on', true)")
+        .execute(&mut *tx)
+        .await?;
+    summary.agent_skill_versions =
+        sqlx::query("DELETE FROM agent_skill_versions WHERE org_id = $1")
+            .bind(org_id)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+    sqlx::query("SELECT set_config('mp.version_erasure', '', true)")
+        .execute(&mut *tx)
+        .await?;
+
     summary.agent_skills = sqlx::query("DELETE FROM agent_skills WHERE org_id = $1")
         .bind(org_id)
         .execute(&mut *tx)
@@ -1201,6 +1221,7 @@ mod tests {
             hook_configs: 1,
             agent_skills: 1,
             skill_revisions: 1,
+            agent_skill_versions: 1,
             agent_memory: 1,
             user_memory_controls: 1,
             user_profiles: 1,
@@ -1222,7 +1243,7 @@ mod tests {
         };
         assert_eq!(
             summary.total(),
-            35,
+            36,
             "total() must count only Postgres rows; semantic-tier counts belong \
              to erasure_is_complete(), not to this sum"
         );
@@ -1348,6 +1369,19 @@ mod tests {
             pos("DELETE FROM agent_skills WHERE org_id = $1")
                 < pos("DELETE FROM skill_revisions WHERE org_id = $1"),
             "deleting a skill writes a revision holding its text, so the revisions are purged after the skills"
+        );
+        // EP-11 S2: the versions are purged under the erasure setting, before the skills, and the
+        // setting is put back before anything else runs.
+        let erasure_on = pos("set_config('mp.version_erasure', 'on', true)");
+        let versions = pos("DELETE FROM agent_skill_versions WHERE org_id = $1");
+        let erasure_off = pos("set_config('mp.version_erasure', '', true)");
+        assert!(
+            erasure_on < versions && versions < erasure_off,
+            "the version delete runs inside the erasure setting"
+        );
+        assert!(
+            erasure_off < pos("DELETE FROM agent_skills WHERE org_id = $1"),
+            "skill versions are purged before the skills"
         );
     }
 

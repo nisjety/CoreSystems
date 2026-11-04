@@ -41,6 +41,31 @@ export interface Skill {
   proposal_reason?: string
   created_at?: string
   updated_at?: string
+  /**
+   * EP-11 S2: the skill's newest immutable version (0 for a proposal never accepted) and its
+   * digest. Present only while the server's version history is on; absent, the page shows no
+   * version and never asks for a history.
+   */
+  version?: number
+  digest?: string
+}
+
+/** One immutable version of a skill, as the history lists it (EP-11 S2). */
+export interface SkillVersion {
+  version: number
+  /** Lowercase hex sha256 of the versioned fields. */
+  digest: string
+  name: string
+  description: string
+  content: string
+  trigger_keywords: string[]
+  trigger_file_patterns: string[]
+  tool_restrictions: string[]
+  bundle_sha256?: string
+  /** Who cut the version: `user`, `service`, `system` or `unattributed`. */
+  actor_kind: string
+  actor_id?: string
+  created_at: string
 }
 
 /** Mirrors model-gateway `MAX_REQUESTED_SKILLS`; the server caps again. */
@@ -119,6 +144,28 @@ export function updateSkill(
     body: JSON.stringify(body),
     headers: { 'x-verevon-org-id': orgId },
   })
+}
+
+/**
+ * A skill's versions, newest first, with their text (EP-11 S2, action `skills.versions.list`).
+ * Read only; the server shows the history to whoever may read the skill and answers 404 for a
+ * skill the caller cannot see, or while the version history is off.
+ */
+export async function listSkillVersions(
+  orgId: string,
+  skillId: string,
+  options: { limit?: number; beforeVersion?: number } = {},
+): Promise<{ versions: SkillVersion[]; has_more: boolean }> {
+  const query = new URLSearchParams()
+  if (options.limit) query.set('limit', String(options.limit))
+  if (options.beforeVersion) query.set('before_version', String(options.beforeVersion))
+  const text = query.toString()
+  const suffix = text ? `?${text}` : ''
+  const payload = await requestJson<{ versions?: SkillVersion[]; has_more?: boolean } | null>(
+    `/api/v1/skills/${encodeURIComponent(skillId)}/versions${suffix}`,
+    { headers: { 'x-verevon-org-id': orgId } },
+  )
+  return { versions: payload?.versions ?? [], has_more: payload?.has_more === true }
 }
 
 export function deleteSkill(orgId: string, skillId: string): Promise<void> {

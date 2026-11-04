@@ -1,14 +1,18 @@
-import { BookOpen, Loader2, Sparkles, Trash2 } from '@/shared/icons'
+import { BookOpen, History, Loader2, Sparkles, Trash2, X } from '@/shared/icons'
 import { createMemo, createSignal, For, Show } from 'solid-js'
+import { Portal } from '@solidjs/web'
 import { createResource } from '@/shared/lib/create-resource-compat'
 import {
   createSkill,
   deleteSkill,
   listSkills,
+  listSkillVersions,
   memberSkillAuthoring,
   updateSkill,
   type Skill,
+  type SkillVersion,
 } from '@/shared/api/skills-client'
+import { ApiError } from '@/shared/api/api-error'
 import { translateApiError, useI18n } from '@/shared/i18n'
 import { SectionHeader, SettingsButton } from '@/features/settings/components/settings-ui'
 import { VerevonInput } from '@/shared/ui/verevon/VerevonInput'
@@ -40,6 +44,175 @@ function parseKeywords(raw: string): string[] {
     .filter((entry) => entry.length > 0)
 }
 
+/** One line of a version's text against the version before it. */
+export interface SkillDiffLine {
+  kind: 'added' | 'removed' | 'same'
+  text: string
+}
+
+/**
+ * A line diff of `current` against `previous` by longest common subsequence, in reading order. A
+ * skill is at most 32,000 characters, so the table stays small.
+ */
+export function diffSkillLines(previous: string, current: string): SkillDiffLine[] {
+  const before = previous.split('\n')
+  const after = current.split('\n')
+  // common[i][j] is the length of the longest common run of before[i..] and after[j..].
+  const common = Array.from({ length: before.length + 1 }, () => new Array<number>(after.length + 1).fill(0))
+  for (let i = before.length - 1; i >= 0; i -= 1) {
+    for (let j = after.length - 1; j >= 0; j -= 1) {
+      common[i]![j] =
+        before[i] === after[j] ? common[i + 1]![j + 1]! + 1 : Math.max(common[i + 1]![j]!, common[i]![j + 1]!)
+    }
+  }
+  const lines: SkillDiffLine[] = []
+  let i = 0
+  let j = 0
+  while (i < before.length && j < after.length) {
+    if (before[i] === after[j]) {
+      lines.push({ kind: 'same', text: before[i]! })
+      i += 1
+      j += 1
+    } else if (common[i + 1]![j]! >= common[i]![j + 1]!) {
+      lines.push({ kind: 'removed', text: before[i]! })
+      i += 1
+    } else {
+      lines.push({ kind: 'added', text: after[j]! })
+      j += 1
+    }
+  }
+  for (; i < before.length; i += 1) lines.push({ kind: 'removed', text: before[i]! })
+  for (; j < after.length; j += 1) lines.push({ kind: 'added', text: after[j]! })
+  return lines
+}
+
+/**
+ * The read-only history of one skill (EP-11 S2): every immutable version, newest first, with its
+ * date, who cut it, a short digest and what changed in its text since the version before. Nothing
+ * here edits or restores; a version is never changed.
+ */
+function SkillHistoryDrawer(props: { orgId: string; skill: Skill; onClose: () => void }) {
+  const i18n = useI18n()
+  const [history] = createResource(
+    () => props.skill.id,
+    (skillId) => listSkillVersions(props.orgId, skillId),
+  )
+  const versions = createMemo(() => history()?.versions ?? [])
+  const unavailable = () => history.error instanceof ApiError && history.error.status === 404
+
+  const actorLabel = (version: SkillVersion): string => {
+    if (version.actor_kind === 'system') return i18n.tr('Verevon (oppgradering)', 'Verevon (upgrade)')
+    if (version.actor_kind === 'service') return 'Verevon'
+    if (version.actor_kind === 'unattributed') return i18n.tr('Ukjent', 'Unknown')
+    return version.actor_id || i18n.tr('En person', 'A person')
+  }
+
+  const onKeyDown = (event: KeyboardEvent) => {
+    if (event.key === 'Escape') {
+      event.stopPropagation()
+      props.onClose()
+    }
+  }
+
+  return (
+    <Portal>
+      <div
+        class="verevon-schedule-dialog"
+        role="presentation"
+        onClick={(event) => {
+          if (event.target === event.currentTarget) props.onClose()
+        }}
+      >
+        <section
+          class="verevon-schedule-dialog__dialog"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="skill-history-title"
+          onKeyDown={onKeyDown}
+        >
+          <header>
+            <h3 id="skill-history-title">
+              <History size={16} aria-hidden="true" /> {i18n.tr('Historikk', 'History')}: {props.skill.name}
+            </h3>
+            <button
+              type="button"
+              ref={(element) => queueMicrotask(() => element.focus())}
+              onClick={() => props.onClose()}
+              aria-label={i18n.tr('Lukk', 'Close')}
+            >
+              <X size={16} />
+            </button>
+          </header>
+
+          <Show when={history.loading}>
+            <p class="verevon-schedule-dialog__note" role="status" aria-busy="true">
+              {i18n.tr('Laster historikk…', 'Loading history…')}
+            </p>
+          </Show>
+          <Show when={history.error}>
+            <p class="verevon-schedule-dialog__error" role="alert">
+              {unavailable()
+                ? i18n.tr('Historikken er ikke tilgjengelig.', 'The history is not available.')
+                : i18n.tr('Kunne ikke laste historikken.', 'Could not load the history.')}
+            </p>
+          </Show>
+
+          <ol class="verevon-settings-list-card" aria-label={i18n.tr('Versjoner', 'Versions')}>
+            <For each={versions()}>
+              {(version, index) => {
+                const older = () => versions()[index() + 1]
+                const changes = () => {
+                  const previous = older()
+                  return previous ? diffSkillLines(previous.content, version.content).filter((line) => line.kind !== 'same') : []
+                }
+                return (
+                  <li class="verevon-settings-integration-row">
+                    <div>
+                      <p>
+                        <span class="verevon-trust-chip">v{version.version}</span>{' '}
+                        {new Date(version.created_at).toLocaleString()} · {actorLabel(version)}{' '}
+                        <code title={version.digest}>{version.digest.slice(0, 12)}</code>
+                      </p>
+                      <Show
+                        when={older()}
+                        fallback={
+                          <span class="verevon-settings-help">
+                            {version.version === 1
+                              ? i18n.tr('Første versjon.', 'First version.')
+                              : i18n.tr('Eldre versjoner er ikke vist.', 'Older versions are not shown.')}
+                          </span>
+                        }
+                      >
+                        <Show
+                          when={changes().length > 0}
+                          fallback={
+                            <span class="verevon-settings-help">
+                              {i18n.tr(
+                                'Teksten er uendret; noe annet ved ferdigheten er endret.',
+                                'The text is unchanged; something else about the skill changed.',
+                              )}
+                            </span>
+                          }
+                        >
+                          <pre class="verevon-settings-help">
+                            <For each={changes()}>
+                              {(line) => <span>{`${line.kind === 'added' ? '+' : '-'} ${line.text}\n`}</span>}
+                            </For>
+                          </pre>
+                        </Show>
+                      </Show>
+                    </div>
+                  </li>
+                )
+              }}
+            </For>
+          </ol>
+        </section>
+      </div>
+    </Portal>
+  )
+}
+
 export function SkillsSection() {
   const i18n = useI18n()
   const session = getSession()
@@ -68,6 +241,10 @@ export function SkillsSection() {
 
   const [submitting, setSubmitting] = createSignal(false)
   const [busySkillId, setBusySkillId] = createSignal<string | null>(null)
+  // EP-11 S2: the skill whose history is open. A skill carries a version only while the server's
+  // version history is on, so with it off nothing here shows and nothing asks.
+  const [historySkill, setHistorySkill] = createSignal<Skill | null>(null)
+  const hasVersion = (skill: Skill): boolean => typeof skill.version === 'number' && skill.version > 0
   const [formError, setFormError] = createSignal<string | null>(null)
   const [actionError, setActionError] = createSignal<string | null>(null)
   // The skill lint (EP-11 S4): a refused create marks its fields; a create that went ahead with
@@ -310,6 +487,23 @@ export function SkillsSection() {
                               {' '}
                               <span class="verevon-trust-chip">{i18n.tr('Lært av Verevon', 'Learned by Verevon')}</span>
                             </Show>
+                            <Show when={hasVersion(skill)}>
+                              {' '}
+                              <span
+                                class="verevon-trust-chip"
+                                title={skill.digest}
+                                aria-label={i18n.tr(`Versjon ${skill.version}`, `Version ${skill.version}`)}
+                              >
+                                v{skill.version}
+                              </span>{' '}
+                              <SettingsButton
+                                settingsSize="sm"
+                                onClick={() => setHistorySkill(skill)}
+                                aria-label={i18n.tr(`Historikk for ${skill.name}`, `History of ${skill.name}`)}
+                              >
+                                <History size={14} aria-hidden="true" /> {i18n.tr('Historikk', 'History')}
+                              </SettingsButton>
+                            </Show>
                           </p>
                           <Show when={skill.description.trim().length > 0}>
                             <span>{skill.description}</span>
@@ -477,6 +671,12 @@ export function SkillsSection() {
             </SettingsButton>
           </div>
         </form>
+      </Show>
+
+      <Show when={historySkill()}>
+        {(skill) => (
+          <SkillHistoryDrawer orgId={orgId()} skill={skill()} onClose={() => setHistorySkill(null)} />
+        )}
       </Show>
 
       <p class="verevon-settings-subnote">

@@ -71,6 +71,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "model_plane/v1/artifact_revisions.proto",
         // EP-7 S1: ThreadGoalService (session-core's thread goal store).
         "model_plane/v1/thread_goals.proto",
+        // EP-11 S2: SkillVersionService (session-core's immutable skill versions).
+        "model_plane/v1/skill_versions.proto",
+        // EP-12 S9: ThreadExportService (session-core's owner-only thread export).
+        "model_plane/v1/thread_export.proto",
     ];
 
     let dp_protos = &[

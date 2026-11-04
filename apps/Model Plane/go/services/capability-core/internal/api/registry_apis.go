@@ -54,11 +54,14 @@ type SkillsHandler struct {
 	// lintMode is SKILL_LINT_MODE (EP-11 S4): off runs no lint and leaves every write and
 	// body as it was.
 	lintMode skilllint.Mode
+	// versionsAPI is SKILL_VERSIONS_API (EP-11 S2): on, skill reads carry version and digest and
+	// the history route is mounted; off, every body and route is as it was.
+	versionsAPI bool
 }
 
 // NewSkillsHandler constructs the handler.
 func NewSkillsHandler(pool registryDatabase) *SkillsHandler {
-	return &SkillsHandler{pool: pool, lintMode: skilllint.ModeFromLookup(os.Getenv)}
+	return &SkillsHandler{pool: pool, lintMode: skilllint.ModeFromLookup(os.Getenv), versionsAPI: SkillVersionsAPIFromLookup(os.Getenv)}
 }
 
 // WithPublisher wires reconcile-event emission (matrix §4.3). Optional, nil-safe.
@@ -83,6 +86,10 @@ func (h *SkillsHandler) Register(mux *http.ServeMux) {
 			http.NotFound(w, r)
 		}
 	})
+	// EP-11 S2: off, the path falls to the subtree above and answers 404 as before.
+	if h.versionsAPI {
+		mux.HandleFunc("/api/v1/skills/{id}/versions", h.versions)
+	}
 }
 
 type skillRow struct {
@@ -115,6 +122,33 @@ type skillRow struct {
 	// skill an admin is copying into an org skill. The copy is a new row; the
 	// source is untouched, and the revision log records where it came from.
 	PromotedFrom string `json:"promoted_from,omitempty"`
+	// Version and Digest (EP-11 S2) are the skill's newest immutable version: 0 and "" for a
+	// proposal never accepted. A trigger sets them; a write never does. Read only, and present
+	// only while SKILL_VERSIONS_API is on, so with it off a body is as it was.
+	Version *int32 `json:"version,omitempty"`
+	Digest  string `json:"digest,omitempty"`
+}
+
+// skillScanTargets are the destinations of a skill read, in the order of the SELECTs in list and
+// get, with version and digest last while the versions API is on.
+func (h *SkillsHandler) skillScanTargets(s *skillRow) []any {
+	targets := []any{&s.ID, &s.OrgID, &s.Name, &s.Description, &s.Content,
+		&s.TriggerKeywords, &s.TriggerFilePatterns, &s.ToolRestrictions,
+		&s.Enabled, &s.Scope, &s.OwnerUserID, &s.SharedWith,
+		&s.Origin, &s.ReviewState, &s.SourceRunID, &s.ProposalReason, &s.CreatedAt, &s.UpdatedAt}
+	if h.versionsAPI {
+		s.Version = new(int32)
+		targets = append(targets, s.Version, &s.Digest)
+	}
+	return targets
+}
+
+// skillVersionColumns are the columns a skill read adds while the versions API is on.
+func (h *SkillsHandler) skillVersionColumns() string {
+	if h.versionsAPI {
+		return ", version, digest"
+	}
+	return ""
 }
 
 func validSkillScope(value string) bool {
@@ -314,7 +348,7 @@ func (h *SkillsHandler) listOrCreate(w http.ResponseWriter, r *http.Request) {
 			SELECT id, org_id, name, description, content,
 			       trigger_keywords, trigger_file_patterns, tool_restrictions,
 			       enabled, scope, owner_user_id, shared_with,
-			       origin, review_state, source_run_id, proposal_reason, created_at, updated_at
+			       origin, review_state, source_run_id, proposal_reason, created_at, updated_at`+h.skillVersionColumns()+`
 			FROM agent_skills
 			WHERE org_id = $1
 			  AND (scope = 'org' OR owner_user_id = $2
@@ -331,11 +365,7 @@ func (h *SkillsHandler) listOrCreate(w http.ResponseWriter, r *http.Request) {
 		var skills []skillRow
 		for rows.Next() {
 			var s skillRow
-			if err := rows.Scan(&s.ID, &s.OrgID, &s.Name, &s.Description, &s.Content,
-				&s.TriggerKeywords, &s.TriggerFilePatterns, &s.ToolRestrictions,
-				&s.Enabled, &s.Scope, &s.OwnerUserID, &s.SharedWith,
-				&s.Origin, &s.ReviewState, &s.SourceRunID, &s.ProposalReason,
-				&s.CreatedAt, &s.UpdatedAt); err != nil {
+			if err := rows.Scan(h.skillScanTargets(&s)...); err != nil {
 				jsonErr(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
@@ -456,16 +486,13 @@ func (h *SkillsHandler) get(w http.ResponseWriter, r *http.Request, id string) {
 		SELECT id, org_id, name, description, content,
 		       trigger_keywords, trigger_file_patterns, tool_restrictions,
 		       enabled, scope, owner_user_id, shared_with,
-		       origin, review_state, source_run_id, proposal_reason, created_at, updated_at
+		       origin, review_state, source_run_id, proposal_reason, created_at, updated_at`+h.skillVersionColumns()+`
 		FROM agent_skills
 		WHERE id = $1 AND org_id = $2
 		  AND (scope = 'org' OR owner_user_id = $3
 		       OR (review_state = 'accepted' AND (shared_with ? $3
 		           OR ($4 AND jsonb_array_length(shared_with) > 0))))
-	`, id, verifiedOrganizationID(r), callerID, isAdmin).Scan(&s.ID, &s.OrgID, &s.Name, &s.Description, &s.Content,
-		&s.TriggerKeywords, &s.TriggerFilePatterns, &s.ToolRestrictions,
-		&s.Enabled, &s.Scope, &s.OwnerUserID, &s.SharedWith,
-		&s.Origin, &s.ReviewState, &s.SourceRunID, &s.ProposalReason, &s.CreatedAt, &s.UpdatedAt)
+	`, id, verifiedOrganizationID(r), callerID, isAdmin).Scan(h.skillScanTargets(&s)...)
 	if err != nil {
 		jsonErr(w, "not found", http.StatusNotFound)
 		return
@@ -617,6 +644,164 @@ func (h *SkillsHandler) delete(w http.ResponseWriter, r *http.Request, id string
 }
 
 // ---------------------------------------------------------------------------
+// Skill versions  GET /api/v1/skills/{id}/versions (EP-11 S2)
+// ---------------------------------------------------------------------------
+
+const skillVersionsAPIEnv = "SKILL_VERSIONS_API"
+
+// SkillVersionsAPIFromLookup reads SKILL_VERSIONS_API strictly: only the literal "true" turns the
+// version reads on (the history route, version and digest on skill reads, and the bundle digest
+// stamp), so a typo or a stray "1" leaves everything as it was. session-core reads the same name
+// for its SkillVersionService.
+func SkillVersionsAPIFromLookup(lookup func(string) string) bool {
+	return lookup(skillVersionsAPIEnv) == "true"
+}
+
+// A history page when the caller names none, and the most one page returns.
+const (
+	defaultSkillVersionsPage = 20
+	maxSkillVersionsPage     = 100
+)
+
+// skillVisibleSQL is get's visibility rule as a yes/no: org skills, the caller's own, accepted
+// skills shared with the caller, and for an admin any shared accepted skill. Pinned to get's
+// statement by TestSkillVersionsRouteUsesTheGetVisibility.
+const skillVisibleSQL = `
+	SELECT EXISTS (SELECT 1 FROM agent_skills
+		WHERE id = $1 AND org_id = $2
+		  AND (scope = 'org' OR owner_user_id = $3
+		       OR (review_state = 'accepted' AND (shared_with ? $3
+		           OR ($4 AND jsonb_array_length(shared_with) > 0)))))
+`
+
+// skillVersionBody is the body a version row holds (session-core migration 0108,
+// agent_skill_version_body). kind and settings are not shown until EP-11 S6 gives them meaning.
+type skillVersionBody struct {
+	Name                string   `json:"name"`
+	Description         string   `json:"description"`
+	Content             string   `json:"content"`
+	TriggerKeywords     []string `json:"trigger_keywords"`
+	TriggerFilePatterns []string `json:"trigger_file_patterns"`
+	ToolRestrictions    []string `json:"tool_restrictions"`
+}
+
+type skillVersionView struct {
+	Version             int32     `json:"version"`
+	Digest              string    `json:"digest"`
+	Name                string    `json:"name"`
+	Description         string    `json:"description"`
+	Content             string    `json:"content"`
+	TriggerKeywords     []string  `json:"trigger_keywords"`
+	TriggerFilePatterns []string  `json:"trigger_file_patterns"`
+	ToolRestrictions    []string  `json:"tool_restrictions"`
+	BundleSHA256        string    `json:"bundle_sha256,omitempty"`
+	ActorKind           string    `json:"actor_kind"`
+	ActorID             string    `json:"actor_id,omitempty"`
+	CreatedAt           time.Time `json:"created_at"`
+}
+
+// writeSkillVersionsError answers with the typed envelope; details is always an object.
+func writeSkillVersionsError(w http.ResponseWriter, status int, code, message string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{
+		"code": code, "message": message, "details": map[string]any{},
+	}})
+}
+
+// versions is GET /api/v1/skills/{id}/versions: the skill's immutable versions, newest first,
+// with their text, for the Skills page's history. Readable by whoever may read the skill (get's
+// rule); a skill the caller cannot see is a 404, as get answers. Versions are written only by
+// session-core's trigger (EP-11 D10), so this route never writes. Query: limit (default 20, at
+// most 100) and before_version (paging; 0 starts at the newest).
+func (h *SkillsHandler) versions(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeSkillVersionsError(w, http.StatusMethodNotAllowed, "method_not_allowed", "Only GET reads skill versions.")
+		return
+	}
+	id := r.PathValue("id")
+	if !mcpIdentifier.MatchString(id) {
+		writeSkillVersionsError(w, http.StatusBadRequest, "invalid_skill_id", "The skill id is not valid.")
+		return
+	}
+	limit, before := defaultSkillVersionsPage, 0
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed < 1 {
+			writeSkillVersionsError(w, http.StatusBadRequest, "invalid_limit", "limit must be a positive whole number.")
+			return
+		}
+		limit = min(parsed, maxSkillVersionsPage)
+	}
+	if raw := r.URL.Query().Get("before_version"); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed < 0 {
+			writeSkillVersionsError(w, http.StatusBadRequest, "invalid_before_version", "before_version must be a whole number, 0 or more.")
+			return
+		}
+		before = parsed
+	}
+	orgID := verifiedOrganizationID(r)
+	var visible bool
+	if err := h.pool.QueryRow(r.Context(), skillVisibleSQL, id, orgID, verifiedActorID(r), verifiedIsAdmin(r)).Scan(&visible); err != nil {
+		slog.Error("read skill visibility failed", "error", err)
+		writeSkillVersionsError(w, http.StatusInternalServerError, "database_unavailable", "Skill versions could not be read.")
+		return
+	}
+	if !visible {
+		writeSkillVersionsError(w, http.StatusNotFound, "skill_not_found", "The skill was not found.")
+		return
+	}
+	// One more than the page, to say whether older versions remain.
+	rows, err := h.pool.Query(r.Context(), `
+		SELECT version, digest, body, bundle_sha256, actor_kind, actor_id, created_at
+		FROM agent_skill_versions
+		WHERE org_id = $1 AND skill_id = $2 AND ($3::int = 0 OR version < $3::int)
+		ORDER BY version DESC
+		LIMIT $4
+	`, orgID, id, before, limit+1)
+	if err != nil {
+		slog.Error("list skill versions failed", "error", err)
+		writeSkillVersionsError(w, http.StatusInternalServerError, "database_unavailable", "Skill versions could not be read.")
+		return
+	}
+	defer rows.Close()
+	versions := []skillVersionView{}
+	for rows.Next() {
+		var view skillVersionView
+		var body skillVersionBody
+		if err := rows.Scan(&view.Version, &view.Digest, &body, &view.BundleSHA256,
+			&view.ActorKind, &view.ActorID, &view.CreatedAt); err != nil {
+			slog.Error("scan skill version failed", "error", err)
+			writeSkillVersionsError(w, http.StatusInternalServerError, "database_unavailable", "Skill versions could not be read.")
+			return
+		}
+		view.Name, view.Description, view.Content = body.Name, body.Description, body.Content
+		view.TriggerKeywords, view.TriggerFilePatterns, view.ToolRestrictions =
+			nonNilStrings(body.TriggerKeywords), nonNilStrings(body.TriggerFilePatterns), nonNilStrings(body.ToolRestrictions)
+		versions = append(versions, view)
+	}
+	if err := rows.Err(); err != nil {
+		slog.Error("list skill versions failed", "error", err)
+		writeSkillVersionsError(w, http.StatusInternalServerError, "database_unavailable", "Skill versions could not be read.")
+		return
+	}
+	hasMore := len(versions) > limit
+	if hasMore {
+		versions = versions[:limit]
+	}
+	writeJSON(w, map[string]any{"versions": versions, "has_more": hasMore})
+}
+
+// nonNilStrings keeps a list a JSON array, never null.
+func nonNilStrings(values []string) []string {
+	if values == nil {
+		return []string{}
+	}
+	return values
+}
+
+// ---------------------------------------------------------------------------
 // SkillBundlesHandler  /api/v1/skills/{id}/bundle (WS19-S6)
 // ---------------------------------------------------------------------------
 
@@ -647,7 +832,10 @@ type SkillBundlesHandler struct {
 
 // NewSkillBundlesHandler constructs the handler; enabled comes from SkillBundlesAPIFromLookup.
 func NewSkillBundlesHandler(db skillbundle.DB, enabled bool) *SkillBundlesHandler {
-	return &SkillBundlesHandler{store: skillbundle.NewStore(db), enabled: enabled, db: db, lintMode: skilllint.ModeFromLookup(os.Getenv)}
+	// EP-11 S2: with the versions API on, an upload or a delete also stamps the skill's bundle
+	// digest, which cuts a new skill version.
+	store := skillbundle.NewStore(db).WithSkillVersions(SkillVersionsAPIFromLookup(os.Getenv))
+	return &SkillBundlesHandler{store: store, enabled: enabled, db: db, lintMode: skilllint.ModeFromLookup(os.Getenv)}
 }
 
 // Register mounts the bundle route. Its more specific pattern takes precedence over the

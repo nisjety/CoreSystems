@@ -715,6 +715,14 @@ const learningUndoInput = z.object({
   entryId: z.string().min(1),
 })
 
+// /learn (EP-11 S7): one of the caller's own saved conversations and an optional note of at most
+// 500 characters, bounded as the server bounds them. Whose conversation it is comes from the
+// verified session, never from here.
+const learningLearnFromThreadInput = z.object({
+  threadId: z.string().trim().min(1).max(128),
+  note: z.string().trim().max(500).optional(),
+})
+
 // A skill the person saves from one of their own answers (EP-11 S1). The name, description and
 // content are bounded as the server bounds them, and the owner and the organisation come from the
 // verified session, never from here.
@@ -725,6 +733,34 @@ const skillsSaveFromMessageInput = z.object({
   description: z.string().trim().max(300).optional(),
   content: z.string().trim().min(1).max(32_000),
   enabled: z.boolean(),
+})
+
+// One skill's history (EP-11 S2), paged as the server pages it. Who may read it is the server's
+// rule for reading the skill; nothing here names an org or a user.
+const skillsVersionsListInput = z.object({
+  skillId: z.string().min(1).max(200),
+  limit: z.number().int().min(1).max(100).optional(),
+  beforeVersion: z.number().int().min(0).optional(),
+})
+
+const skillsVersionsListOutput = z.object({
+  versions: z.array(
+    z.object({
+      version: z.number().int().min(1),
+      digest: z.string().regex(/^[0-9a-f]{64}$/),
+      name: z.string(),
+      description: z.string(),
+      content: z.string(),
+      trigger_keywords: z.array(z.string()),
+      trigger_file_patterns: z.array(z.string()),
+      tool_restrictions: z.array(z.string()),
+      bundle_sha256: z.string().optional(),
+      actor_kind: z.string(),
+      actor_id: z.string().optional(),
+      created_at: z.string(),
+    }),
+  ),
+  has_more: z.boolean(),
 })
 
 const settingsUpdateMeInput = z.object({
@@ -3398,6 +3434,17 @@ export const actionRegistry = [
     outputSchema: envelopeStatusOutput,
   },
   {
+    id: 'learning.learn_from_thread',
+    label: 'Learn from this conversation',
+    description: 'Ask Verevon to distil one of the caller\'s own saved conversations into a skill proposal, with an optional note it reads as data. The proposal waits in the caller\'s learning inbox and is used only once they accept it. Hidden and refused in a temporary chat (zero data retention), and refused while memory is paused or off or the organization has not turned on learning. Never model-executable: a model does not decide what Verevon learns.',
+    ownerPlane: 'model',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: learningLearnFromThreadInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
     id: 'skills.save_from_message',
     label: 'Save an answer as a skill',
     description: 'Save one of the person\'s own answers as a private skill of theirs, used in their own matching chats. The name, description and content are the person\'s text, bounded here as the server bounds them. The owner is the verified session, and no organisation is named. Org-wide skills stay admin-only; a member needs the member authoring switch on. The button is hidden in a temporary chat (zero data retention) and in a conversation not yet saved. Never model-executable: a model does not write its own skills.',
@@ -3407,6 +3454,17 @@ export const actionRegistry = [
     reversible: true,
     inputSchema: skillsSaveFromMessageInput,
     outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'skills.versions.list',
+    label: 'List skill versions',
+    description: 'Read the immutable versions of one skill, newest first, with each version\'s text, digest, who cut it and when, for the Skills page\'s history. Read only: a version is never edited, and a restore would be a new version. Whoever may read the skill may read its history; another person\'s private skill reads as not found. Answers not found while the server\'s version history is off. Never model-executable.',
+    ownerPlane: 'model',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: skillsVersionsListInput,
+    outputSchema: skillsVersionsListOutput,
   },
   {
     id: 'settings.update_me',

@@ -1194,6 +1194,14 @@ message AgentSkill {
   string updated_at = 17;
   // The skill's newest revision number in the revision log.
   int64 revision = 18;
+  // EP-11 S2. The skill's newest immutable version: 0 for a proposal that was
+  // never accepted, then 1, 2, ... each time the digest of the accepted row
+  // changes. Set by a database trigger, never by a writer.
+  int32 version = 19;
+  // EP-11 S2. Lowercase hex sha256 of the versioned fields of `version`; empty
+  // while `version` is 0. SkillVersionService (skill_versions.proto) reads the
+  // body of any version.
+  string digest = 20;
 }
 
 message ListAgentSkillsResponse {

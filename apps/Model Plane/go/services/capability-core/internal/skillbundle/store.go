@@ -27,11 +27,44 @@ type DB interface {
 // addressed by org and digest, so one org never reads another org's bytes.
 type Store struct {
 	db DB
+	// skillVersions is SKILL_VERSIONS_API (EP-11 S2): on, Put and Delete also write the skill's
+	// bundle_sha256 in the same transaction, so a bundle change is a new skill version.
+	skillVersions bool
 }
 
 // NewStore wraps the pool.
 func NewStore(db DB) *Store {
 	return &Store{db: db}
+}
+
+// WithSkillVersions turns on the bundle digest stamp on agent_skills (EP-11 S2). Off, the store
+// writes only its own tables, as before.
+func (s *Store) WithSkillVersions(on bool) *Store {
+	s.skillVersions = on
+	return s
+}
+
+// stampSkillActorSQL names the uploader as the actor of the version the stamp cuts, with the
+// transaction-local settings session-core's skill triggers read (migration 0064 and 0108). An
+// upload or delete is always a person's (skillBundleWriter).
+const stampSkillActorSQL = `SELECT set_config('mp.actor_kind', 'user', true), set_config('mp.actor_id', $1, true)`
+
+// stampSkillBundleSQL writes the skill's bundle digest ('' when it has none). The column is
+// versioned, so session-core's trigger cuts a new version of an accepted skill whose digest moved.
+const stampSkillBundleSQL = `UPDATE agent_skills SET bundle_sha256 = $3 WHERE org_id = $1 AND id = $2 AND bundle_sha256 <> $3`
+
+// stampSkill records manifest as the skill's bundle digest inside tx, when the stamp is on.
+func (s *Store) stampSkill(ctx context.Context, tx pgx.Tx, orgID, skillID, actor, manifest string) error {
+	if !s.skillVersions {
+		return nil
+	}
+	if _, err := tx.Exec(ctx, stampSkillActorSQL, actor); err != nil {
+		return fmt.Errorf("name skill bundle actor: %w", err)
+	}
+	if _, err := tx.Exec(ctx, stampSkillBundleSQL, orgID, skillID, manifest); err != nil {
+		return fmt.Errorf("stamp skill bundle digest: %w", err)
+	}
+	return nil
 }
 
 // Summary describes one stored bundle without its files.
@@ -134,6 +167,9 @@ func (s *Store) Put(ctx context.Context, orgID, skillID, actor string, bundle Bu
 		len(bundle.Files), bundle.TotalBytes); err != nil {
 		return PutResult{}, err
 	}
+	if err := s.stampSkill(ctx, tx, orgID, skillID, actor, bundle.ManifestSHA256); err != nil {
+		return PutResult{}, err
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return PutResult{}, fmt.Errorf("commit skill bundle write: %w", err)
 	}
@@ -175,6 +211,9 @@ func (s *Store) Delete(ctx context.Context, orgID, skillID, actor string) error 
 		return fmt.Errorf("collect skill bundle blobs: %w", err)
 	}
 	if err := appendAudit(ctx, tx, "skill_bundle.deleted", orgID, skillID, actor, manifest, fileCount, totalBytes); err != nil {
+		return err
+	}
+	if err := s.stampSkill(ctx, tx, orgID, skillID, actor, ""); err != nil {
 		return err
 	}
 	if err := tx.Commit(ctx); err != nil {
