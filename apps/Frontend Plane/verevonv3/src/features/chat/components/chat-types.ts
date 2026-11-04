@@ -3,6 +3,7 @@ import {
 } from '@/features/dashboard/home/DashboardComposer'
 import {
   type AgentModeId,
+  type ArtifactEditorKind,
   type AutonomyRung,
   type ChatAction,
   type ChatCostBasis,
@@ -59,11 +60,15 @@ export type ChatCancelFailure = {
 }
 export type IconComponent = (props: LucideProps) => JSX.Element
 
-/** One revision of an artifact, as emitted by a single `artifact` SSE event. */
+/** One revision of an artifact, as emitted by a single `artifact` SSE event or read from the server's history. */
 export type ChatArtifactVersion = {
   content: string
   title: string
   version: number
+  /** Absent for a revision the server has not attributed (history off, or an older frame). */
+  editorKind?: ArtifactEditorKind
+  /** For a restore, the version whose text it brought back. */
+  restoredFromVersion?: number
 }
 
 export type ChatArtifact = {
@@ -86,6 +91,8 @@ export type ChatArtifact = {
   history?: ChatArtifactVersion[]
   /** A research report's provenance stamp (EP-2-S4), in the wire shape. */
   provenance?: ResearchProvenance
+  /** Who made the newest revision, when the frame named it (EP-3 S3). */
+  editor?: ArtifactEditorKind
 }
 
 export type ChatToolCall = {
@@ -578,6 +585,8 @@ export type ChatTurn = {
    * read back on history playback (`ChatMessage.retrievalScope`).
    */
   retrievalScope?: import('@/shared/actions/chat-source-scope').RetrievalScope
+  /** The context chips this turn was sent with (EP-3 S5): kind, id and label only. */
+  contextRefs?: import('@/shared/actions/chat-context-refs').ChatContextRef[]
   /**
    * The server's own confirmation of `retrievalScope` (`source_scope_applied`
    * SSE event) — the concrete "shown in the receipt" surface. Absent until
@@ -713,6 +722,8 @@ export type SendOptions = {
   retrievalScope?: import('@/shared/actions/chat-source-scope').RetrievalScope
   /** See `ChatInvokeRequest.connectorScope`. Per-turn, like `retrievalScope`. */
   connectorScope?: string[]
+  /** See `ChatInvokeRequest.contextRefs`. Per-turn, like `connectorScope`. */
+  contextRefs?: import('@/shared/actions/chat-context-refs').ChatContextRef[]
   /** See `ChatInvokeRequest.agentMode`. Per-turn, like `connectorScope`. */
   agentMode?: AgentModeId
   actions?: ChatAction[]

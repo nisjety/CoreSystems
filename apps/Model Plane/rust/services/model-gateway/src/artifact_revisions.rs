@@ -18,9 +18,16 @@
 //! Ask already persists. The write carries the user's session bearer, so session-core checks the
 //! thread's owner and attributes the revision to the user's turn. Content is never logged.
 //!
-//! `on` is S3's third state (the read routes); for this writer it behaves as `shadow`.
+//! `on` is S3's third state. The read routes answer (`artifact_revision_routes`), a turn's start
+//! raises the process-local counters to the table's heads ([`seed_from_table_heads`]), and the
+//! append moves from after the save to the commit lock ([`commit_turn_revisions`]): the table's
+//! compare-and-set then decides a race between replicas, and a moved head ends the turn with the
+//! same `artifact_revision_conflict` a race inside one replica gets. Each published frame names
+//! its editor (`model`).
 
-use mp_contracts::model_plane::v1::{AppendArtifactRevisionRequest, AppendOutcome};
+use mp_contracts::model_plane::v1::{
+    AppendArtifactRevisionRequest, AppendOutcome, ListArtifactRevisionsRequest,
+};
 use sha2::{Digest as _, Sha256};
 
 use crate::artifacts::ArtifactVersionStore;
@@ -76,13 +83,49 @@ impl ArtifactRevisionsMode {
     pub const fn writes(self) -> bool {
         !matches!(self, Self::Off)
     }
+
+    /// Whether the turn's revisions are written best effort after the assistant message is
+    /// durable (`shadow`). In `on` they are written earlier, under the commit lock.
+    #[must_use]
+    pub const fn writes_after_save(self) -> bool {
+        matches!(self, Self::Shadow)
+    }
+
+    /// Whether the table is the compare-and-set at the commit lock, the turn starts from its
+    /// heads and the published frames name their editor (`on`).
+    #[must_use]
+    pub const fn table_is_authority(self) -> bool {
+        matches!(self, Self::On)
+    }
 }
+
+/// The editor every frame a model turn publishes names in `on` mode.
+pub const MODEL_EDITOR: &str = "model";
+
+/// Most heads one turn start reads. Session Core reads more than 50 as 50; a thread with more
+/// artifacts keeps the rest from its message metadata, as before.
+const MAX_SEEDED_HEADS: u32 = 50;
 
 /// Whether a turn of this posture writes revisions: the mode writes, and the turn is neither
 /// ZDR nor waived.
 #[must_use]
 pub const fn permits(mode: ArtifactRevisionsMode, zdr: bool, waived: bool) -> bool {
     mode.writes() && !zdr && !waived
+}
+
+/// The editor a published frame names: `model` in `on` for a turn whose revisions are stored,
+/// otherwise none, so the frame stays byte-identical to before.
+#[must_use]
+pub const fn frame_editor(
+    mode: ArtifactRevisionsMode,
+    zdr: bool,
+    waived: bool,
+) -> Option<&'static str> {
+    if mode.table_is_authority() && permits(mode, zdr, waived) {
+        Some(MODEL_EDITOR)
+    } else {
+        None
+    }
 }
 
 /// One revision to append: what the turn published, and the head it moved from.
@@ -142,7 +185,10 @@ pub fn record_turn_revisions(
     zdr: bool,
     waived: bool,
 ) -> bool {
-    if !permits(state.artifact_revisions_mode, zdr, waived) || artifacts.is_empty() {
+    if !state.artifact_revisions_mode.writes_after_save()
+        || !permits(state.artifact_revisions_mode, zdr, waived)
+        || artifacts.is_empty()
+    {
         return false;
     }
     let planned = plan_turn_revisions(committed, &target.thread_id, artifacts);
@@ -171,6 +217,116 @@ pub async fn write_turn(
     target: &RevisionTarget,
     planned: Vec<PlannedRevision>,
 ) -> WriteTally {
+    write_planned(state, bearer, target, planned, false).await
+}
+
+/// The table refused a moved head under the commit lock: another replica (or another run this
+/// replica no longer knows of) published a revision of the same artifact first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RevisionConflict;
+
+/// `on` mode: append the turn's model revisions under the commit lock, before the assistant
+/// message is saved, so the table's compare-and-set decides between replicas. The caller ends
+/// the turn with `artifact_revision_conflict` on `Err`, as it does for a race inside one replica.
+/// Stops at the first conflict. Any other refusal is counted and the turn goes on: the message
+/// metadata stays the record the panel and the Space aggregate read, so a store outage must not
+/// fail a turn. Nothing is sent outside `on`, for a ZDR or waived turn, or without artifacts.
+///
+/// # Errors
+///
+/// [`RevisionConflict`] when session-core answers `revision_mismatch`.
+pub async fn commit_turn_revisions(
+    state: &AppState,
+    bearer: &VerifiedSessionBearer,
+    target: &RevisionTarget,
+    committed: &ArtifactVersionStore,
+    artifacts: &[RecordedArtifact],
+    zdr: bool,
+    waived: bool,
+) -> Result<(), RevisionConflict> {
+    if !state.artifact_revisions_mode.table_is_authority()
+        || !permits(state.artifact_revisions_mode, zdr, waived)
+        || artifacts.is_empty()
+    {
+        return Ok(());
+    }
+    let planned = plan_turn_revisions(committed, &target.thread_id, artifacts);
+    let tally = write_planned(state, bearer, target, planned, true).await;
+    if tally.conflict > 0 {
+        return Err(RevisionConflict);
+    }
+    Ok(())
+}
+
+/// `on` mode, at a turn's start: raise this replica's counters (and text) to the table's heads,
+/// so a revision another replica committed is the base this turn revises. Seeding never lowers
+/// a version, so the message metadata the turn also rehydrates from cannot undo it. Best effort:
+/// on any refusal the turn starts from the metadata alone, as before. Returns how many heads
+/// were seeded.
+pub async fn seed_from_table_heads(
+    state: &AppState,
+    bearer: &VerifiedSessionBearer,
+    org_id: &str,
+    thread_id: &str,
+    zdr: bool,
+    waived: bool,
+) -> usize {
+    if !state.artifact_revisions_mode.table_is_authority() || zdr || waived {
+        return 0;
+    }
+    let request = ListArtifactRevisionsRequest {
+        org_id: org_id.to_owned(),
+        thread_id: thread_id.to_owned(),
+        artifact_id: String::new(),
+        // The text is the base an update_artifact revises; a head without it would let the
+        // model rewrite an older copy under a newer number.
+        include_content: true,
+        limit: MAX_SEEDED_HEADS,
+        before_version: 0,
+    };
+    let Ok(request) = crate::http_routes::authenticated_session_request(request, bearer) else {
+        return 0;
+    };
+    let heads = match state
+        .artifact_revision_client
+        .clone()
+        .list_artifact_revisions(request)
+        .await
+    {
+        Ok(response) => response.into_inner().revisions,
+        Err(status) => {
+            tracing::debug!(code = ?status.code(), "artifact revision heads not read");
+            metrics::counter!("mp_gateway_artifact_revision_seed_total", "outcome" => "failed")
+                .increment(1);
+            return 0;
+        }
+    };
+    for head in &heads {
+        state.artifact_versions.seed_persisted(
+            thread_id,
+            &head.artifact_id,
+            &head.title,
+            &head.content,
+            head.version,
+        );
+        if let Some(kind) = crate::artifacts::ArtifactKind::parse(&head.kind) {
+            state
+                .artifact_versions
+                .remember_kind(thread_id, &head.artifact_id, kind);
+        }
+    }
+    metrics::counter!("mp_gateway_artifact_revision_seed_total", "outcome" => "seeded")
+        .increment(1);
+    heads.len()
+}
+
+async fn write_planned(
+    state: &AppState,
+    bearer: &VerifiedSessionBearer,
+    target: &RevisionTarget,
+    planned: Vec<PlannedRevision>,
+    stop_on_conflict: bool,
+) -> WriteTally {
     let mut tally = WriteTally::default();
     for revision in planned {
         let outcome = match append(state, bearer, target, revision).await {
@@ -184,11 +340,12 @@ pub async fn write_turn(
             }
             Err(status) if is_conflict(&status) => {
                 tally.conflict += 1;
-                // Ids only: the shadow comparison is what this line is for.
+                // Ids only: the cross-replica comparison is what this line is for.
                 tracing::info!(
                     thread_id = %target.thread_id,
                     run_id = %target.run_id,
-                    "artifact revision shadow conflict"
+                    authoritative = stop_on_conflict,
+                    "artifact revision conflict"
                 );
                 "conflict"
             }
@@ -201,6 +358,9 @@ pub async fn write_turn(
         };
         metrics::counter!("mp_gateway_artifact_revision_writes_total", "outcome" => outcome)
             .increment(1);
+        if stop_on_conflict && tally.conflict > 0 {
+            break;
+        }
     }
     tally
 }
@@ -266,19 +426,24 @@ mod tests {
         artifact_revision_service_server::{
             ArtifactRevisionService, ArtifactRevisionServiceServer,
         },
-        AppendArtifactRevisionResponse, GetArtifactRevisionRequest, GetArtifactRevisionResponse,
-        ListArtifactRevisionsRequest, ListArtifactRevisionsResponse,
+        AppendArtifactRevisionResponse, ArtifactRevision, GetArtifactRevisionRequest,
+        GetArtifactRevisionResponse, ListArtifactRevisionsResponse,
     };
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
     /// A revision store double: counts appends, keeps the requests, and answers each with a
-    /// conflict or an append.
+    /// conflict or an append. With `cas` it keeps one head per artifact and refuses a stale
+    /// expected version as session-core does; `heads` is what a heads listing returns.
     #[derive(Clone, Default)]
     struct FakeStore {
         calls: Arc<AtomicUsize>,
         requests: Arc<Mutex<Vec<AppendArtifactRevisionRequest>>>,
         conflict: bool,
+        cas: bool,
+        table: Arc<Mutex<std::collections::HashMap<String, u32>>>,
+        heads: Vec<ArtifactRevision>,
+        lists: Arc<Mutex<Vec<ListArtifactRevisionsRequest>>>,
     }
 
     #[tonic::async_trait]
@@ -288,9 +453,18 @@ mod tests {
             request: tonic::Request<AppendArtifactRevisionRequest>,
         ) -> Result<tonic::Response<AppendArtifactRevisionResponse>, tonic::Status> {
             self.calls.fetch_add(1, Ordering::SeqCst);
-            self.requests.lock().unwrap().push(request.into_inner());
+            let request = request.into_inner();
+            self.requests.lock().unwrap().push(request.clone());
             if self.conflict {
                 return Err(tonic::Status::aborted(REVISION_MISMATCH));
+            }
+            if self.cas {
+                let mut table = self.table.lock().unwrap();
+                let head = table.entry(request.artifact_id.clone()).or_insert(0);
+                if *head != request.expected_version {
+                    return Err(tonic::Status::aborted(REVISION_MISMATCH));
+                }
+                *head = request.version;
             }
             Ok(tonic::Response::new(AppendArtifactRevisionResponse {
                 revision: None,
@@ -300,9 +474,13 @@ mod tests {
 
         async fn list_artifact_revisions(
             &self,
-            _request: tonic::Request<ListArtifactRevisionsRequest>,
+            request: tonic::Request<ListArtifactRevisionsRequest>,
         ) -> Result<tonic::Response<ListArtifactRevisionsResponse>, tonic::Status> {
-            Err(tonic::Status::unimplemented("not used"))
+            self.lists.lock().unwrap().push(request.into_inner());
+            Ok(tonic::Response::new(ListArtifactRevisionsResponse {
+                revisions: self.heads.clone(),
+                has_more: false,
+            }))
         }
 
         async fn get_artifact_revision(
@@ -614,5 +792,259 @@ mod tests {
         assert!(!is_conflict(&tonic::Status::resource_exhausted(
             "artifact_revision_limit"
         )));
+    }
+
+    #[test]
+    fn only_a_stored_on_mode_frame_names_its_editor() {
+        assert_eq!(
+            frame_editor(ArtifactRevisionsMode::On, false, false),
+            Some("model")
+        );
+        assert_eq!(frame_editor(ArtifactRevisionsMode::Off, false, false), None);
+        assert_eq!(frame_editor(ArtifactRevisionsMode::Shadow, false, false), None);
+        assert_eq!(frame_editor(ArtifactRevisionsMode::On, true, false), None);
+        assert_eq!(frame_editor(ArtifactRevisionsMode::On, false, true), None);
+    }
+
+    #[test]
+    fn only_on_makes_the_table_the_authority() {
+        assert!(!ArtifactRevisionsMode::Off.table_is_authority());
+        assert!(!ArtifactRevisionsMode::Shadow.table_is_authority());
+        assert!(ArtifactRevisionsMode::On.table_is_authority());
+        assert!(ArtifactRevisionsMode::Shadow.writes_after_save());
+        assert!(!ArtifactRevisionsMode::On.writes_after_save());
+        assert!(!ArtifactRevisionsMode::Off.writes_after_save());
+    }
+
+    #[tokio::test]
+    async fn on_mode_writes_at_the_commit_lock_not_after_save() {
+        let fake = FakeStore::default();
+        let state = state_with(fake.clone(), ArtifactRevisionsMode::On).await;
+        let committed = ArtifactVersionStore::new();
+        assert!(
+            !record_turn_revisions(
+                &state,
+                &bearer(),
+                target(),
+                &committed,
+                &[published("report", 1)],
+                false,
+                false,
+            ),
+            "the after-save write is shadow's"
+        );
+        settle().await;
+        assert_eq!(fake.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            commit_turn_revisions(
+                &state,
+                &bearer(),
+                &target(),
+                &committed,
+                &[published("report", 1)],
+                false,
+                false,
+            )
+            .await,
+            Ok(())
+        );
+        assert_eq!(fake.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn the_commit_append_is_off_outside_on_and_for_zdr_or_waived_turns() {
+        for (mode, zdr, waived) in [
+            (ArtifactRevisionsMode::Off, false, false),
+            (ArtifactRevisionsMode::Shadow, false, false),
+            (ArtifactRevisionsMode::On, true, false),
+            (ArtifactRevisionsMode::On, false, true),
+        ] {
+            let fake = FakeStore {
+                conflict: true,
+                ..FakeStore::default()
+            };
+            let state = state_with(fake.clone(), mode).await;
+            let outcome = commit_turn_revisions(
+                &state,
+                &bearer(),
+                &target(),
+                &ArtifactVersionStore::new(),
+                &[published("report", 1)],
+                zdr,
+                waived,
+            )
+            .await;
+            assert_eq!(outcome, Ok(()), "{mode:?} zdr={zdr} waived={waived}");
+            assert_eq!(fake.calls.load(Ordering::SeqCst), 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn cross_replica_conflict_is_artifact_revision_conflict() {
+        // One session-core, two gateway replicas: each has its own process-local store and
+        // commit lock, and both revise version 1 of the same report.
+        let fake = FakeStore {
+            cas: true,
+            ..FakeStore::default()
+        };
+        fake.table.lock().unwrap().insert("report".to_owned(), 1);
+        let replica_a = state_with(fake.clone(), ArtifactRevisionsMode::On).await;
+        let replica_b = state_with(fake.clone(), ArtifactRevisionsMode::On).await;
+        for replica in [&replica_a, &replica_b] {
+            replica
+                .artifact_versions
+                .seed_persisted("thread-a", "report", "Report", "text 1", 1);
+        }
+        let first = commit_turn_revisions(
+            &replica_a,
+            &bearer(),
+            &target(),
+            &replica_a.artifact_versions,
+            &[published("report", 2)],
+            false,
+            false,
+        )
+        .await;
+        let second = commit_turn_revisions(
+            &replica_b,
+            &bearer(),
+            &target(),
+            &replica_b.artifact_versions,
+            &[published("report", 2)],
+            false,
+            false,
+        )
+        .await;
+        assert_eq!(first, Ok(()));
+        assert_eq!(
+            second,
+            Err(RevisionConflict),
+            "the second replica's turn ends as a revision conflict, not a lost write"
+        );
+        assert_eq!(fake.table.lock().unwrap()["report"], 2);
+    }
+
+    #[tokio::test]
+    async fn the_commit_stops_at_the_first_conflict() {
+        let fake = FakeStore {
+            conflict: true,
+            ..FakeStore::default()
+        };
+        let state = state_with(fake.clone(), ArtifactRevisionsMode::On).await;
+        let outcome = commit_turn_revisions(
+            &state,
+            &bearer(),
+            &target(),
+            &ArtifactVersionStore::new(),
+            &[published("report", 1), published("notes", 1)],
+            false,
+            false,
+        )
+        .await;
+        assert_eq!(outcome, Err(RevisionConflict));
+        assert_eq!(fake.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn an_unreachable_store_does_not_fail_the_commit() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        drop(listener);
+        let mut state = AppState::new();
+        state.artifact_revision_client = ArtifactRevisionServiceClient::new(
+            tonic::transport::Endpoint::from_shared(format!("http://{address}"))
+                .unwrap()
+                .connect_lazy(),
+        );
+        state.artifact_revisions_mode = ArtifactRevisionsMode::On;
+        let outcome = commit_turn_revisions(
+            &state,
+            &bearer(),
+            &target(),
+            &ArtifactVersionStore::new(),
+            &[published("report", 1)],
+            false,
+            false,
+        )
+        .await;
+        assert_eq!(outcome, Ok(()));
+    }
+
+    fn head(id: &str, version: u32) -> ArtifactRevision {
+        ArtifactRevision {
+            artifact_id: id.to_owned(),
+            version,
+            kind: "document".to_owned(),
+            title: "Report".to_owned(),
+            content: format!("table text {version}"),
+            editor_kind: "model".to_owned(),
+            ..ArtifactRevision::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn turn_start_seeds_from_table_heads() {
+        let fake = FakeStore {
+            heads: vec![head("report", 4)],
+            ..FakeStore::default()
+        };
+        let state = state_with(fake.clone(), ArtifactRevisionsMode::On).await;
+        // This replica last saw version 2 from the message metadata.
+        state
+            .artifact_versions
+            .seed_persisted("thread-a", "report", "Report", "metadata text 2", 2);
+        let seeded =
+            seed_from_table_heads(&state, &bearer(), "org-a", "thread-a", false, false).await;
+        assert_eq!(seeded, 1);
+        assert_eq!(
+            state.artifact_versions.current_version("thread-a", "report"),
+            Some(4)
+        );
+        assert_eq!(
+            state
+                .artifact_versions
+                .content_of("thread-a", "report")
+                .as_deref(),
+            Some("table text 4"),
+            "the base the next update revises is the table's text"
+        );
+        // The metadata rehydration that follows cannot lower it.
+        state
+            .artifact_versions
+            .seed_persisted("thread-a", "report", "Report", "metadata text 2", 2);
+        assert_eq!(
+            state.artifact_versions.current_version("thread-a", "report"),
+            Some(4)
+        );
+        let lists = fake.lists.lock().unwrap().clone();
+        assert_eq!(lists.len(), 1);
+        assert!(lists[0].artifact_id.is_empty(), "one heads read");
+        assert!(lists[0].include_content);
+        assert_eq!(lists[0].org_id, "org-a");
+    }
+
+    #[tokio::test]
+    async fn seeding_reads_nothing_outside_on_or_for_zdr_or_waived_turns() {
+        for (mode, zdr, waived) in [
+            (ArtifactRevisionsMode::Off, false, false),
+            (ArtifactRevisionsMode::Shadow, false, false),
+            (ArtifactRevisionsMode::On, true, false),
+            (ArtifactRevisionsMode::On, false, true),
+        ] {
+            let fake = FakeStore {
+                heads: vec![head("report", 4)],
+                ..FakeStore::default()
+            };
+            let state = state_with(fake.clone(), mode).await;
+            assert_eq!(
+                seed_from_table_heads(&state, &bearer(), "org-a", "thread-a", zdr, waived).await,
+                0
+            );
+            assert!(fake.lists.lock().unwrap().is_empty());
+            assert_eq!(
+                state.artifact_versions.current_version("thread-a", "report"),
+                None
+            );
+        }
     }
 }

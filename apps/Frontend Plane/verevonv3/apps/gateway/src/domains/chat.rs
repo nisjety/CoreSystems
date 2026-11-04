@@ -1,3 +1,4 @@
+mod artifacts;
 pub(crate) mod documents;
 pub(crate) mod history;
 pub(crate) mod json_handlers;
@@ -54,6 +55,19 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
         .route(
             "/api/v1/chat/threads/{thread_id}/rewind",
             post(json_handlers::rewind_thread),
+        )
+        // Artifact revision history and the composer's capability read (Wave 3 EP-3 S3).
+        .route(
+            "/api/v1/chat/threads/{thread_id}/artifacts",
+            get(artifacts::list_artifact_heads),
+        )
+        .route(
+            "/api/v1/chat/threads/{thread_id}/artifacts/{artifact_id}/revisions",
+            get(artifacts::list_artifact_revisions),
+        )
+        .route(
+            "/api/v1/chat/composer-capabilities",
+            get(artifacts::get_composer_capabilities),
         )
         // Start a new thread from a copy of this one, up to an assistant turn (build plan WS17 S6).
         .route(

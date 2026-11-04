@@ -669,6 +669,33 @@ describe('action registry', () => {
     expect(schema?.safeParse({ connectionIds: [], userId: 'user_x' }).success).toBe(false)
   })
 
+  it('registers the context chips as model-plane actions the model cannot execute, and bounds them like the gateway', () => {
+    const set = getActionDescriptor('chat.set_context_refs')
+    expect(set).toMatchObject({ ownerPlane: 'model', risk: 'low', requiresApproval: false, reversible: true })
+    expect(isModelExecutableAction('chat.set_context_refs')).toBe(false)
+    expect(set?.description ?? '').toContain('Never model-executable')
+
+    const schema = set?.inputSchema
+    const doc = { kind: 'document', id: 'doc-1', label: 'Budsjett' }
+    expect(schema?.safeParse({ contextRefs: [] }).success).toBe(true)
+    expect(schema?.safeParse({ contextRefs: [doc, { kind: 'skill', id: 'skill.a', label: 'Skriv' }] }).success).toBe(true)
+    expect(schema?.safeParse({ contextRefs: Array.from({ length: 20 }, (_, i) => ({ ...doc, id: `d${i}` })) }).success).toBe(true)
+    expect(schema?.safeParse({ contextRefs: Array.from({ length: 21 }, (_, i) => ({ ...doc, id: `d${i}` })) }).success).toBe(false)
+    expect(schema?.safeParse({ contextRefs: [doc, doc] }).success).toBe(false)
+    expect(schema?.safeParse({ contextRefs: [{ ...doc, id: 'a b' }] }).success).toBe(false)
+    expect(schema?.safeParse({ contextRefs: [{ ...doc, label: 'x'.repeat(121) }] }).success).toBe(false)
+    // A conversation and a selection are not chips yet (EP-3 S6/S7), and a reference carries no content.
+    expect(schema?.safeParse({ contextRefs: [{ ...doc, kind: 'thread' }] }).success).toBe(false)
+    expect(schema?.safeParse({ contextRefs: [{ ...doc, kind: 'artifact_selection' }] }).success).toBe(false)
+    expect(schema?.safeParse({ contextRefs: [{ ...doc, content: 'text' }] }).success).toBe(false)
+
+    const pick = getActionDescriptor('chat.pick_context_ref')
+    expect(pick).toMatchObject({ ownerPlane: 'model', risk: 'low', requiresApproval: false })
+    expect(isModelExecutableAction('chat.pick_context_ref')).toBe(false)
+    expect(pick?.inputSchema.safeParse({ tab: 'documents' }).success).toBe(true)
+    expect(pick?.inputSchema.safeParse({ tab: 'threads' }).success).toBe(false)
+  })
+
   it('registers the agent-mode choice as a model-plane action the model cannot execute, and accepts only the four mode ids', () => {
     const mode = getActionDescriptor('chat.set_agent_mode')
 
@@ -726,6 +753,42 @@ describe('action registry', () => {
     expect(schema?.safeParse({ runId: 'run_1', callSeq: 1, userId: 'user_x' }).success).toBe(false)
   })
 
+  it('registers artifact edit and restore as reversible person-only writes (EP-3-S4)', () => {
+    const save = getActionDescriptor('chat.save_artifact_revision')
+    const restore = getActionDescriptor('chat.restore_artifact_revision')
+
+    expect(save).toMatchObject({ ownerPlane: 'model', risk: 'medium', requiresApproval: false, reversible: true })
+    expect(restore).toMatchObject({ ownerPlane: 'model', risk: 'low', requiresApproval: false, reversible: true })
+    expect(isModelExecutableAction('chat.save_artifact_revision')).toBe(false)
+    expect(isModelExecutableAction('chat.restore_artifact_revision')).toBe(false)
+    expect(MODEL_ACCESS['chat.save_artifact_revision']).toMatchObject({ access: 'none' })
+    expect(MODEL_ACCESS['chat.restore_artifact_revision']).toMatchObject({ access: 'none' })
+
+    const saveSchema = save?.inputSchema
+    expect(saveSchema?.safeParse({ threadId: 't1', artifactId: 'report', content: 'text', expectedVersion: 2 }).success).toBe(true)
+    for (const input of [
+      { threadId: 't1', artifactId: 'report', content: '', expectedVersion: 2 },
+      { threadId: 't1', artifactId: 'report', content: 'x'.repeat(200_001), expectedVersion: 2 },
+      { threadId: 't1', artifactId: 'report', content: 'text', expectedVersion: 0 },
+      { threadId: 't1', artifactId: 'report', content: 'text' },
+      { threadId: '', artifactId: 'report', content: 'text', expectedVersion: 2 },
+      // The owner is read from the session, never named by a client.
+      { threadId: 't1', artifactId: 'report', content: 'text', expectedVersion: 2, userId: 'user_x' },
+    ]) {
+      expect(saveSchema?.safeParse(input).success).toBe(false)
+    }
+
+    const restoreSchema = restore?.inputSchema
+    expect(restoreSchema?.safeParse({ threadId: 't1', artifactId: 'report', version: 1, expectedVersion: 3 }).success).toBe(true)
+    for (const input of [
+      { threadId: 't1', artifactId: 'report', version: 0, expectedVersion: 3 },
+      { threadId: 't1', artifactId: 'report', version: 1 },
+      { threadId: 't1', artifactId: 'report', version: 1, expectedVersion: 3, content: 'x' },
+    ]) {
+      expect(restoreSchema?.safeParse(input).success).toBe(false)
+    }
+  })
+
   it('registers the cited-passage viewer as a low-risk read the model cannot execute (EP-2-S4)', () => {
     const open = getActionDescriptor('chat.open_cited_passage')
 
@@ -745,6 +808,29 @@ describe('action registry', () => {
     }
     // Data Plane reads the viewer from the session; a client never names whose grants apply.
     expect(schema?.safeParse({ citationId: 'doc-1', orgId: 'org_x' }).success).toBe(false)
+  })
+
+  it('registers the artifact revision history as a low-risk read the model cannot execute (EP-3-S3)', () => {
+    const history = getActionDescriptor('chat.list_artifact_revisions')
+
+    expect(history).toMatchObject({ ownerPlane: 'model', risk: 'low', requiresApproval: false, reversible: true })
+    expect(isModelExecutableAction('chat.list_artifact_revisions')).toBe(false)
+    expect(MODEL_ACCESS['chat.list_artifact_revisions']).toMatchObject({ access: 'none', sideEffectClass: 'read' })
+
+    const schema = history?.inputSchema
+    expect(schema?.safeParse({ threadId: 'thread-1', artifactId: 'report' }).success).toBe(true)
+    expect(schema?.safeParse({ threadId: 'thread-1', artifactId: 'report', beforeVersion: 3, limit: 20 }).success).toBe(true)
+    for (const input of [
+      { threadId: '', artifactId: 'report' },
+      { threadId: 'thread-1', artifactId: '' },
+      { threadId: 'thread-1', artifactId: 'report', beforeVersion: 0 },
+      { threadId: 'thread-1', artifactId: 'report', limit: 21 },
+      { threadId: 'thread-1', artifactId: 'report', limit: 1.5 },
+    ]) {
+      expect(schema?.safeParse(input).success).toBe(false)
+    }
+    // The owner is read from the session, never named by a client.
+    expect(schema?.safeParse({ threadId: 'thread-1', artifactId: 'report', userId: 'user_x' }).success).toBe(false)
   })
 
   function registered(id: string) {
@@ -1160,7 +1246,12 @@ describe('action registry', () => {
     // 275 after EP-2-S4 registered chat.open_cited_passage, the cited-passage viewer read.
     // +1 after EP-2-S8 registered chat.wide_research_start, the composer's wide-research entry.
     // +1 after EP-10-S1 registered approvals.preview, the owner's write-approval preview.
-    expect(ids).toHaveLength(277)
+    // +1 after EP-3-S3 registered chat.list_artifact_revisions, the Output panel's stored history read.
+    // +2 after EP-3-S4 registered chat.save_artifact_revision and chat.restore_artifact_revision.
+    // +2 after EP-3-S5 registered chat.set_context_refs and chat.pick_context_ref, the composer's context chips.
+    // +2 after EP-2-S5 registered chat.research_plan_start and chat.research_plan_cancel, the deep-research plan card.
+    // +1 after EP-2-S9 registered chat.wide_research_retry_item, the wide-research grid's per-item retry.
+    expect(ids).toHaveLength(285)
 
     // The fragments also carry ids outside the `spaces.` prefix (`space.files.*`), so the Space
     // entries are the ones the fragments declare.

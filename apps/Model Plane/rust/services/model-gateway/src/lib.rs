@@ -2,6 +2,8 @@
 
 pub mod approvals;
 pub mod attachment_policy;
+pub mod artifact_edit_routes;
+pub mod artifact_revision_routes;
 pub mod artifact_revisions;
 pub mod artifacts;
 pub mod audit;
@@ -20,6 +22,7 @@ pub mod citation_anchors;
 pub mod compaction;
 pub mod confidence;
 pub mod context_reattach;
+pub mod context_refs;
 pub mod conversation_delegation;
 pub mod coordinator;
 pub mod dataplane;
