@@ -32587,6 +32587,7 @@ mod org_web_switch_tests {
                     mode: mode.to_owned(),
                     paid_providers: true,
                     revision: 3,
+                    site_policy_revision: 0,
                 }),
                 ..Default::default()
             }),

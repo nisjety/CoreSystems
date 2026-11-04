@@ -270,6 +270,8 @@ export type ChatEventPayloads = {
     delivery: string
     expires_at: string | null
     items: unknown[]
+    origin?: string
+    origin_label?: string
     question_id: string
     request_id: string
   }

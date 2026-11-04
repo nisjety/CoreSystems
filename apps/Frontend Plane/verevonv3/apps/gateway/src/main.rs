@@ -129,6 +129,7 @@ fn build_router(state: config::AppState) -> Router {
         .merge(domains::marketing::router(state.clone()))
         .merge(domains::mcp::router(state.clone()))
         .merge(domains::agent_policy::router(state.clone()))
+        .merge(domains::policy_effective::router(state.clone()))
         .merge(domains::memory::router(state.clone()))
         .merge(domains::monitoring::router(state.clone()))
         .merge(domains::navbar::router(state.clone()))

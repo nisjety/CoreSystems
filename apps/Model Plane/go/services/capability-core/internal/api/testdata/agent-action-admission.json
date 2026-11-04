@@ -709,6 +709,19 @@
       "zdr_allowed": false
     },
     {
+      "actionId": "chat.open_widget_link",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "read",
+      "exemptReason": "ui_state_only",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:616373a34fc31f29a7d24ab369e3ef21f7fa9c249e0bf6d06dfcb9aea6402984",
+      "zdr_allowed": false
+    },
+    {
       "actionId": "chat.pick_context_ref",
       "registry": true,
       "access": "none",
@@ -901,6 +914,19 @@
       "executor": {},
       "hashBasis": "catalog_entry",
       "schemaHash": "sha256:99e70a79698568f447a3b61916fbad61d12e7c8a360cff76befa052c4ce4832d",
+      "zdr_allowed": false
+    },
+    {
+      "actionId": "chat.stage_widget_followup",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "read",
+      "exemptReason": "ui_state_only",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:160ff6e4afc5641c553e9d0107a2bee5409759d1931372caf9a174b77cf2b5b6",
       "zdr_allowed": false
     },
     {
@@ -2658,6 +2684,19 @@
       "executor": {},
       "hashBasis": "catalog_entry",
       "schemaHash": "sha256:95125958b7befddaf4047da0faad8f48b05663b228f05bc710038bb151d24e68",
+      "zdr_allowed": false
+    },
+    {
+      "actionId": "policy.read_effective",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "read",
+      "exemptReason": "ui_state_only",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:949b46e82df3ccbc6d06048c00ac11dddb1f1747407a6ccaecc8b2c1841b6869",
       "zdr_allowed": false
     },
     {

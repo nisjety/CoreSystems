@@ -1308,6 +1308,18 @@
           ],
           "presence": "always"
         },
+        "origin": {
+          "types": [
+            "string"
+          ],
+          "presence": "optional"
+        },
+        "origin_label": {
+          "types": [
+            "string"
+          ],
+          "presence": "optional"
+        },
         "question_id": {
           "types": [
             "string"

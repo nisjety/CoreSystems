@@ -123,7 +123,7 @@ import {
   highlightCode,
 } from './chat-code-highlight'
 import { ChartFenceBlock } from './ChatChart'
-import { InlineWidget, InlineWidgetSurface, inlineWidgetsEnabled, useInlineWidgetsLive } from './InlineWidget'
+import { InlineWidget, InlineWidgetAnswer, InlineWidgetSurface, inlineWidgetsEnabled, useInlineWidgetsLive } from './InlineWidget'
 import { ChatTableTools, TableChart, createTableChartState } from './ChatTableTools'
 import { SettledTurnContent } from './SettledTurnFold'
 import { StepStrip, stepStripEnabled } from './StepStrip'
@@ -865,7 +865,9 @@ export function AssistantMessage(props: {
         <div class="verevon-chat-message__content" ref={(el) => { contentRef = el }}>
           {/* The one surface where a ```widget fence may run (EP-4 S1): `InlineWidgetSurface`. */}
           <InlineWidgetSurface value={inlineWidgetsEnabled() ? 'live' : 'inert'}>
-            <SettledTurnContent fold={props.settledFold} entries={nodeEntries()} renderEntries={renderNodeEntries} />
+            <InlineWidgetAnswer onSelectFollowUp={props.onSelectFollowUp}>
+              <SettledTurnContent fold={props.settledFold} entries={nodeEntries()} renderEntries={renderNodeEntries} />
+            </InlineWidgetAnswer>
           </InlineWidgetSurface>
           <Show when={stepStripEnabled && props.message.streaming}>
             <StepStrip

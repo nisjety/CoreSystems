@@ -570,6 +570,7 @@ pub fn stamp_web_policy(
         mode: if caps.live { "live" } else { "off" }.to_owned(),
         paid_providers: caps.paid,
         revision,
+        site_policy_revision: 0,
     });
 }
 

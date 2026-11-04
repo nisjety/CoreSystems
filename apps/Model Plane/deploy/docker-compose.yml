@@ -248,6 +248,10 @@ services:
       # Side-task models from the platform role table (EP-13 S4). Roll out inference-core first:
       # an older inference-core refuses the verevon-role model id.
       MODEL_GATEWAY_ROLE_ROUTING: ${MODEL_GATEWAY_ROLE_ROUTING:-false}
+      # EP-4 S2: widget prompt notice, literal true only. VITE_CHAT_INLINE_WIDGETS must also be on in the frontend.
+      MODEL_GATEWAY_WIDGET_GUIDANCE: ${MODEL_GATEWAY_WIDGET_GUIDANCE:-false}
+      # EP-9 T2: the thread's effective-policy read (GET only). Off by default (404); only the literal `true`.
+      MODEL_GATEWAY_POLICY_EFFECTIVE: ${MODEL_GATEWAY_POLICY_EFFECTIVE:-false}
       RATE_LIMIT_RPM: "100"
       # Resume buffer for chat streams (chat gap closure I3). With it the frames
       # a turn has already sent are kept in the model plane's Dragonfly, so a
@@ -423,6 +427,9 @@ services:
       # an unknown value reads as enforce. Off by default: resumed runs and the browser and code-interpreter entry points
       # do not read the policy yet, and every Do caller must carry a capability bearer before enforce.
       ORG_AGENT_POLICY_MODE: ${ORG_AGENT_POLICY_MODE:-off}
+      # EP-9 W3: org browser-site allow/block lists on web tools. off, shadow (logs only) or enforce; an unknown value
+      # reads as enforce.
+      WEB_DOMAIN_POLICY_MODE: ${WEB_DOMAIN_POLICY_MODE:-off}
       # WS11-S5: derive the reasoning level once in the gateway and send it to inference-core. Off by default; only the
       # literal `true` turns it on. Roll out in this order: inference-core adapter flags on first, then this switch. With
       # this on and the adapter flags off, a deep request sends budget 0 and a level nothing renders (no thinking).
@@ -1218,6 +1225,12 @@ services:
       ORG_POLICY_MAX_STALE: ${ORG_POLICY_MAX_STALE:-900}
       ORG_POLICY_FAIL_CLOSED: ${ORG_POLICY_FAIL_CLOSED:-false}
       ORG_LEARNING_DEFAULT: ${ORG_LEARNING_DEFAULT:-disabled}
+      # EP-9 C2 retention sweeper: off|dry_run|enforce, default off; any other value is dry_run, never enforce.
+      # This build only counts (enforce runs dry). Needs SESSION_ORG_CORE_SERVICE_TOKEN with org:retention-policy:read:any.
+      SESSION_RETENTION_SWEEP: ${SESSION_RETENTION_SWEEP:-off}
+      SESSION_RETENTION_SWEEP_INTERVAL_SECS: ${SESSION_RETENTION_SWEEP_INTERVAL_SECS:-21600}
+      # EP-11 S4 skill lint: off | report | enforce.
+      SKILL_LINT_MODE: ${SKILL_LINT_MODE:-off}
       DREAMING_LLM_MODEL: ${DREAMING_LLM_MODEL:-claude-haiku-4-5}
       # Write-time memory grounding (memory_grounding.rs). Off by default --
       # set MEMORY_GROUNDING_ENABLED=1 to let Dreaming classify a candidate as
@@ -1939,6 +1952,9 @@ services:
       # reconciled to the same value manually until the credential-rollout
       # ritual (verevon-roadmap.md) runs — not a gap unique to this token.
       EXECUTION_ORG_CORE_SERVICE_TOKEN: ${EXECUTION_ORG_CORE_SERVICE_TOKEN:-}
+      # EP-9 W3: org browser-site allow/block lists on web fetches. off, shadow (logs only) or enforce; an unknown
+      # value reads as enforce.
+      WEB_DOMAIN_POLICY_MODE: ${WEB_DOMAIN_POLICY_MODE:-off}
       EXECUTION_CORE_APPROVAL_DELIVERY_ORG_IDS: ${EXECUTION_CORE_APPROVAL_DELIVERY_ORG_IDS:-}
       EXECUTION_CORE_APPROVAL_DELIVERY_POLL_SECONDS: ${EXECUTION_CORE_APPROVAL_DELIVERY_POLL_SECONDS:-15}
     depends_on:
@@ -2142,6 +2158,8 @@ services:
       # and the bundle read rule. Off by default; only the literal `true`.
       SKILL_DECK_TEMPLATES_ENABLED: ${SKILL_DECK_TEMPLATES_ENABLED:-false}
       SKILL_BUNDLE_READ_RULE_ENABLED: ${SKILL_BUNDLE_READ_RULE_ENABLED:-false}
+      # EP-11 S4 skill lint: off | report | enforce.
+      SKILL_LINT_MODE: ${SKILL_LINT_MODE:-off}
       # Cost controls for the learning review (WS07-S10). Off unless the switch is
       # exactly true; the bounds apply only then. With no counter store wired the
       # day caps skip every review (budget_unavailable), so keep the switch false.

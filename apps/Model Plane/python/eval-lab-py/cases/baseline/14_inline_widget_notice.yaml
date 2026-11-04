@@ -1,0 +1,15 @@
+id: "14-inline-widget-notice"
+name: "A request for a calculator answers with one fenced widget block"
+# EP-4-S2. With MODEL_GATEWAY_WIDGET_GUIDANCE=true and a client that declares the inline_widgets
+# feature, a turn that asks for something interactive gets the widget notice (format_guidance.rs
+# WIDGET_NOTICE): one fenced code block whose language is `widget`, self-contained, no network.
+# With the switch off, or without the feature, the prompt is unchanged. The case skips (does not
+# fail) until a deployment with the switch on exists: set EVAL_CAPABILITIES=inline-widgets for that
+# run. The notice text is pinned by the prompt-tool manifest.
+prompt: "Lag en enkel kalkulator for boliglån: lånebeløp, rente og antall år, og vis månedlig terminbeløp."
+features: [usage, tools, citations, inline_widgets]
+checks:
+  regex: ["```widget"]
+requires: [inline-widgets]
+tags: [widgets, format, inline-widgets]
+timeout_s: 120.0

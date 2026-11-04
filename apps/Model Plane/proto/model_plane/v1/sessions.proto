@@ -1126,8 +1126,10 @@ message UpsertAgentSkillResponse {
   bool skipped_protected = 3;
   // Why nothing was written, as a closed token: "memory_state",
   // "org_policy", "zdr", "protected", "accepted_exists", "rejected_exists",
-  // "owner_required", or "skill_policy:<rule>" when the content policy refused
-  // the text (WS26 S5). Empty when the write happened.
+  // "owner_required", "origin_requires_person" (origin "user" from a caller
+  // that is not a person, D2-509), "skill_lint:<code>" when the skill lint
+  // refused the text under enforce (EP-11 S4), or "skill_policy:<rule>" when
+  // the content policy refused the text (WS26 S5). Empty when the write happened.
   string skip_reason = 4;
   // The row's revision number after the write, from the revision log; 0 when
   // nothing was written.

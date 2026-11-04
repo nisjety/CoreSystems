@@ -3741,6 +3741,13 @@ Built so far: WS13-S0, WS13-S1, WS13-S2; WS14-S1, WS14-S2 (partial), WS14-S3; WS
 | D3-1040 | EP-4-S6 | live-proof | P1 | Until the regeneration steps above run, sse_event_payload_golden and gen-chat-event-types --check fail by design because the golden now lists origin and origin_label. No zdr-posture-matrix row is added (S6 refuses nothing), and no flag exists to flip. | open |
 | D3-1041 | EP-4-S6 | risk | P2 | chat-client.ts questionOrigin drops a server-origin frame whose label is blank or over 80 code points, so the card shows it as the model's question; producers cannot send one today (session-core validate_origin requires a label and elicitation_server_label falls back to the server id), and the defensible fix is a generic 'an MCP server' label rather than dropping the origin. | open |
 | D3-1042 | EP-4-S6 | follow-up | P3 | 6 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W3-19.json | open |
+| D3-1043 | W3-19 guard | follow-up | P2 | guard skipped: ERASURE_HOLD_CHECK in compose: the report gives it as a deploy note, not a shared edit, so it is not wired in session-core or org-core compose. | open |
+| D3-1044 | W3-19 guard | follow-up | P2 | guard skipped: EP-9-C2 needs_other_files item, gdpr.rs org purge adding DELETE FROM retention_sweep_runs WHERE org_id=$1: not a shared edit, so not applied; the lead decides. | open |
+| D3-1045 | W3-19 guard | follow-up | P2 | guard skipped: EP-9-W3 needs_other_files items: Control Plane docker-compose scopes, org-core service_auth.go and browser_sites_contract_test.go need an owner ruling. | open |
+| D3-1046 | W3-19 guard | follow-up | P2 | guard skipped: EP-9-C4 needs_other_files item: org-core service_enhanced.go PurgeDeletedOrganizations should skip held orgs. Not applied. | open |
+| D3-1047 | W3-19 guard | follow-up | P2 | guard skipped: EP-9-W3 lead-only step to apply EP-9-W3.patch: already applied in step 0. | open |
+| D3-1048 | W3-19 guard | follow-up | P2 | guard skipped: EP-9-C2 THREAD_BOUND_TABLES: nothing to add; the batch's only new table, retention_sweep_runs, has no thread_id column. | open |
+| D3-1049 | W3-19 guard | test-gap | P1 | still broken after the guard: EP-4-S2 scenario-touch gate: the prompt-tool-manifest changed, so scripts/gates/scenario-touch.py will fail until someone adds a widget_notice eval case under apps/Model Plane/python/eval-lab-py/cases/ or a replay cassette. That is a new scenario file, not a shared edit; the lead or a builder writes it. | open |
 
 ## Cross-wave
 

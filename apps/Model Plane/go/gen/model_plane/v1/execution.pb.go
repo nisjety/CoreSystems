@@ -897,9 +897,12 @@ type WebPolicyContext struct {
 	PaidProviders bool `protobuf:"varint,2,opt,name=paid_providers,json=paidProviders,proto3" json:"paid_providers,omitempty"`
 	// The org policy revision the switches were read at. Zero when the policy was not held and the fail-closed
 	// switches apply (an enforced org the gateway could not read takes "off").
-	Revision      int64 `protobuf:"varint,3,opt,name=revision,proto3" json:"revision,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	Revision int64 `protobuf:"varint,3,opt,name=revision,proto3" json:"revision,omitempty"`
+	// The org browser-site policy revision the run was admitted under (Wave 3 EP-9 W3; additive). Carried for attribution
+	// only: zero when no revision was read for the run (WEB_DOMAIN_POLICY_MODE off), and execution-core never gates on it.
+	SitePolicyRevision int64 `protobuf:"varint,4,opt,name=site_policy_revision,json=sitePolicyRevision,proto3" json:"site_policy_revision,omitempty"`
+	unknownFields      protoimpl.UnknownFields
+	sizeCache          protoimpl.SizeCache
 }
 
 func (x *WebPolicyContext) Reset() {
@@ -949,6 +952,13 @@ func (x *WebPolicyContext) GetPaidProviders() bool {
 func (x *WebPolicyContext) GetRevision() int64 {
 	if x != nil {
 		return x.Revision
+	}
+	return 0
+}
+
+func (x *WebPolicyContext) GetSitePolicyRevision() int64 {
+	if x != nil {
+		return x.SitePolicyRevision
 	}
 	return 0
 }
@@ -2633,11 +2643,12 @@ const file_model_plane_v1_execution_proto_rawDesc = "" +
 	"\fhook_context\x18\x01 \x01(\tR\vhookContext\x12'\n" +
 	"\x0fpolicy_revision\x18\x02 \x01(\x03R\x0epolicyRevision\x12#\n" +
 	"\rpolicy_digest\x18\x03 \x01(\tR\fpolicyDigest\x122\n" +
-	"\x03web\x18\x04 \x01(\v2 .model_plane.v1.WebPolicyContextR\x03web\"i\n" +
+	"\x03web\x18\x04 \x01(\v2 .model_plane.v1.WebPolicyContextR\x03web\"\x9b\x01\n" +
 	"\x10WebPolicyContext\x12\x12\n" +
 	"\x04mode\x18\x01 \x01(\tR\x04mode\x12%\n" +
 	"\x0epaid_providers\x18\x02 \x01(\bR\rpaidProviders\x12\x1a\n" +
-	"\brevision\x18\x03 \x01(\x03R\brevision\"7\n" +
+	"\brevision\x18\x03 \x01(\x03R\brevision\x120\n" +
+	"\x14site_policy_revision\x18\x04 \x01(\x03R\x12sitePolicyRevision\"7\n" +
 	"\x0eConnectorScope\x12%\n" +
 	"\x0econnection_ids\x18\x01 \x03(\tR\rconnectionIds\"\xc5\x02\n" +
 	"\vAgentResume\x12\x12\n" +
