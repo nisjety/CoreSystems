@@ -9,6 +9,7 @@ import type { QueuedInput } from '@/features/chat/components/chat-types'
 import { queueInvocationInput, type QueuedInputResult } from '@/shared/api/chat-client'
 import type { Skill } from '@/shared/api/skills-client'
 import type { AddressedAgent, MentionedPerson } from './mention-model'
+import { translateApiError } from '@/shared/i18n/errors'
 
 /**
  * Owner mid-run steer in the room composer (WS09-S2).
@@ -150,6 +151,10 @@ const RUN_ENDED_NOTE = {
   en: 'The run finished – sending it as a new message.',
 } as const
 
+const SEND_FAILED_NOTE = {
+  no: 'Meldingen kunne ikke sendes.',
+  en: 'The message could not be sent.',
+}
 const NOT_STARTED_NOTE = {
   no: 'Kjøringen har ikke startet ennå. Prøv igjen om et øyeblikk.',
   en: 'The run has not started yet. Try again in a moment.',
@@ -204,7 +209,11 @@ export function createSpaceMidRun(options: {
       })
     } catch (error) {
       // A request that fails before the gateway answers is a refusal: nothing was accepted.
-      return { outcome: 'refused', reason: 'other', message: error instanceof Error ? error.message : String(error) }
+      return {
+        outcome: 'refused',
+        reason: 'other',
+        message: translateApiError(error, options.tr, SEND_FAILED_NOTE),
+      }
     } finally {
       setDelivering((count) => count - 1)
     }

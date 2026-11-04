@@ -81,6 +81,7 @@ export const ERROR_COPY: Record<string, ErrorCopy> = {
   upstream_unavailable: { no: 'Tjenesten er utilgjengelig akkurat nå. Prøv igjen om litt.', en: 'The service is unavailable right now. Try again shortly.' },
   fork_unavailable: { no: 'Kunne ikke lage en kopi av tråden akkurat nå.', en: 'Could not copy the thread right now.' },
   upstream_shape_error: { no: 'Fikk et uventet svar fra tjenesten. Prøv igjen.', en: 'Got an unexpected response from the service. Try again.' },
+  internal_error: { no: 'Forespørselen kunne ikke fullføres. Prøv igjen, eller kontakt support hvis problemet vedvarer.', en: 'The request could not be completed. Try again, or contact support if the problem persists.' },
   upload_requires_multipart: { no: 'Opplasting krever filvedlegg, ikke bare tekst.', en: 'Upload requires a file attachment, not just text.' },
 
   // Organization / membership (onboarding-adjacent)
@@ -125,6 +126,8 @@ export const ERROR_COPY: Record<string, ErrorCopy> = {
   // Knowledge base / crawl / documents
   crawl_backlog_full: { no: 'Det venter for mange gjennomganger på organisasjonen din. Prøv igjen om litt.', en: 'Too many crawls are waiting for your organization. Try again shortly.' },
   crawl_allowance_exhausted: { no: 'Organisasjonen din har brukt opp kvoten for gjennomgang av nettsteder. Kontakt en administrator eller prøv igjen når kvoten fornyes.', en: 'Your organization has used up its crawl allowance. Contact an administrator, or try again when the allowance renews.' },
+  approval_required: { no: 'Gjennomgangen er for stor til å starte uten godkjenning. Bekreft antall sider og start den på nytt.', en: 'The crawl is too large to start without approval. Confirm the number of pages and start it again.' },
+  crawl_approval_required: { no: 'Agenten kan ikke starte en stor gjennomgang, eller en uten sidegrense, uten at du godkjenner den først.', en: 'The agent cannot start a large crawl, or one without a page limit, until you approve it.' },
   scrape_failed: { no: 'Kunne ikke hente innhold fra siden. Prøv igjen.', en: 'Could not fetch content from the page. Try again.' },
   scrape_artifact_not_found: { no: 'Bildet eller PDF-filen er ikke lenger tilgjengelig.', en: 'The image or PDF is no longer available.' },
   scrape_artifact_unsupported: { no: 'Denne filtypen kan ikke vises eller lastes ned her.', en: 'This file type cannot be shown or downloaded here.' },
@@ -137,6 +140,7 @@ export const ERROR_COPY: Record<string, ErrorCopy> = {
     no: 'Denne kjøringen går til den er ferdig, og kan ikke settes på pause, gjenopptas eller avbrytes.',
     en: 'This run goes to completion and cannot be paused, resumed or cancelled.',
   },
+  invalid_job_id: { no: 'Oppgaven er ikke gyldig. Last inn siden på nytt.', en: 'The task is not valid. Reload the page.' },
   upstream_invalid: { no: 'Nettleserøkten mangler id. Start den på nytt.', en: 'The browser session has no id. Start it again.' },
   extract_ai_formats_off: {
     no: 'Strukturert uttrekk er slått av på Quarry-edge (QUARRY_EDGE__AI_FORMATS).',
@@ -258,6 +262,11 @@ export const ERROR_COPY: Record<string, ErrorCopy> = {
   browser_session_cap: { no: 'Alle nettleserplassene er i bruk akkurat nå.', en: 'All browser slots are in use right now.', retryable: true },
   browser_tab_limit_reached: { no: 'Nettleseren har for mange faner åpne. Lukk en fane du ikke trenger.', en: 'The browser has too many tabs open. Close a tab you do not need.', retryable: true },
   browser_page_cap: { no: 'Nettleseren har for mange faner åpne. Lukk en fane du ikke trenger.', en: 'The browser has too many tabs open. Close a tab you do not need.', retryable: true },
+  browser_attachment_refused_zdr: { no: 'Deler av en side kan ikke legges ved fra en nettleserøkt med Zero Data Retention.', en: 'Parts of a page cannot be attached from a browser session with Zero Data Retention.' },
+  browser_attachment_region_unresolved: { no: 'Det valgte området kan ikke brukes ennå, fordi nettleservisningen ikke er klar.', en: 'The selected area cannot be used yet, because the browser view is not ready.' },
+  browser_attachment_tab_unresolved: { no: 'Fanen kunne ikke knyttes til den åpne fanen som vises, så ingenting ble lagt ved.', en: 'The tab could not be matched to the open tab that is shown, so nothing was attached.' },
+  browser_tab_context_refused_zdr: { no: 'Innhold fra en nettleserfane legges ikke ved i en økt med Zero Data Retention.', en: 'Content from a browser tab is not attached in a session with Zero Data Retention.' },
+  browser_tab_mention_unresolved: { no: 'Fanen du nevnte, kunne ikke knyttes til nøyaktig én åpen fane, så ingenting ble lagt ved.', en: 'The tab you mentioned could not be matched to exactly one open tab, so nothing was attached.' },
   browser_session_grant_inactive: {
     no: 'Tilgangen til denne nettleserøkten har utløpt eller er trukket tilbake, så AI-kjøringen kunne ikke starte. Åpne økten på nytt og prøv igjen.',
     en: 'Access for this browser session has expired or been withdrawn, so the AI run could not start. Reopen the session and try again.',
@@ -506,6 +515,9 @@ export const ERROR_COPY: Record<string, ErrorCopy> = {
     en: 'We could not check which providers have a recorded ZDR attestation, so Zero Data Retention cannot be turned on right now. Try again shortly, or carry on without it and turn it on later.',
   },
 
+  model_entitlement_unavailable: { no: 'Hvilke modeller du kan bruke, kunne ikke kontrolleres akkurat nå.', en: 'Which models you can use could not be checked right now.', retryable: true },
+  model_not_entitled: { no: 'Denne modellen er ikke tilgjengelig for deg. Velg en annen modell.', en: 'This model is not available to you. Choose another model.' },
+
   // Rooms (Spaces), agents, schedules and instructions (gateway `spaces.rs`, `agent_actions.rs`,
 
   // `orgs/instructions.rs`, `persona.rs`). Written for the person at the screen: what happened and
@@ -619,6 +631,18 @@ export const ERROR_COPY: Record<string, ErrorCopy> = {
     no: 'Fikk et uventet svar fra AI-tjenesten. Prøv igjen.',
     en: 'Got an unexpected answer from the AI service. Try again.',
   },
+  agent_api_disabled: { no: 'Agent API er ikke slått på her ennå.', en: 'The Agent API is not turned on here yet.' },
+  agent_api_feature_not_supported: { no: 'Denne funksjonen støttes ikke av Agent API ennå.', en: 'This feature is not supported by the Agent API yet.' },
+  agent_api_scope_missing: { no: 'API-nøkkelen mangler tillatelsen som trengs for denne handlingen.', en: 'The API key lacks the permission this action needs.' },
+  agent_builder_forbidden: { no: 'Bare en administrator i organisasjonen, den som laget agenten, eller en leder i rommet den ble laget i, kan endre den.', en: 'Only an organization admin, the agent creator, or a manager of the room it was made in can edit it.' },
+  agent_definition_unavailable: { no: 'Agenten kunne ikke hentes akkurat nå. Prøv igjen om litt.', en: 'The agent could not be fetched right now. Try again shortly.' },
+  agent_draft_missing: { no: 'Lagre et utkast før du publiserer eller forhåndsviser agenten.', en: 'Save a draft before you publish or preview the agent.' },
+  agent_draft_unavailable: { no: 'Utkastet kunne ikke lagres. Ingenting ble endret. Prøv igjen om litt.', en: 'The draft could not be saved. Nothing was changed. Try again shortly.' },
+  agent_not_found: { no: 'Fant ikke agenten, eller du har ikke tilgang til den.', en: 'The agent was not found, or you do not have access to it.' },
+  agent_preview_not_in_thread: { no: 'En forhåndsvisning kjøres i en midlertidig chat, og den kan ikke knyttes til en samtale eller et rom.', en: 'A preview runs in a temporary chat, and it cannot be linked to a conversation or a room.' },
+  agent_publish_unavailable: { no: 'Agenten kunne ikke publiseres, og den nåværende versjonen er uendret. Prøv igjen om litt.', en: 'The agent could not be published, and the current version is unchanged. Try again shortly.' },
+  agent_run_invalid: { no: 'Kjøringen kunne ikke startes. Prøv igjen om litt.', en: 'The run could not be started. Try again shortly.' },
+  agent_versions_unavailable: { no: 'Versjonshistorikken kunne ikke hentes akkurat nå. Prøv igjen om litt.', en: 'The version history could not be fetched right now. Try again shortly.' },
   agent_binding_state_unavailable: {
     no: 'Agentens status i dette rommet kunne ikke endres, og ingenting ble endret. Prøv igjen.',
     en: 'The status of the agent in this room could not be changed, and nothing was altered. Try again.',
@@ -671,6 +695,8 @@ export const ERROR_COPY: Record<string, ErrorCopy> = {
     no: 'Navnet på agenten må være mellom 2 og 60 tegn.',
     en: 'The agent name must be between 2 and 60 characters.',
   },
+  invalid_agent_preview: { no: 'Forhåndsvisningen mangler agenten den skal vise.', en: 'The preview is missing the agent it should show.' },
+  invalid_agent_ref: { no: 'Agenten er ikke gyldig. Gå tilbake og velg den på nytt.', en: 'The agent is not valid. Go back and choose it again.' },
   instructions_too_long: {
     no: 'Instruksjonene er for lange. De kan ha opptil 4000 tegn.',
     en: 'The instructions are too long. They can have up to 4000 characters.',
@@ -930,6 +956,9 @@ export const ERROR_COPY: Record<string, ErrorCopy> = {
     no: 'API-nøkkelen kunne ikke endres. Prøv igjen.',
     en: 'The API key could not be changed. Try again.',
   },
+  api_key_grant_invalid: { no: 'Nettlesertilgangen kunne ikke settes opp. Prøv igjen om litt.', en: 'Browser access could not be set up. Try again shortly.' },
+  api_key_invalid: { no: 'API-nøkkelen mangler, er ukjent, deaktivert eller utløpt.', en: 'The API key is missing, unknown, disabled or expired.' },
+  api_key_missing: { no: 'Du må oppgi en API-nøkkel.', en: 'You need to provide an API key.' },
   invalid_api_key_name: {
     no: 'API-nøkkelen trenger et navn. Skriv inn et navn og prøv igjen.',
     en: 'The API key needs a name. Enter a name and try again.',
@@ -1093,6 +1122,10 @@ export const ERROR_COPY: Record<string, ErrorCopy> = {
   space_stream_unavailable: { no: 'Live-oppdateringer er midlertidig utilgjengelige. Rommet oppdateres hvert par sekunder.', en: 'Live updates are temporarily unavailable. The room is refreshing every few seconds.' },
 
   // WS03 policy and denials
+  invalid_memory: { no: 'Minnet er ikke gyldig, så ingenting ble endret. Last inn siden på nytt.', en: 'The memory is not valid, so nothing was changed. Reload the page.' },
+  memory_not_found: { no: 'Fant ikke minnet, eller du har ikke tilgang til det. Ingenting ble endret.', en: 'The memory was not found, or you do not have access to it. Nothing was changed.' },
+  space_memory_not_authorized: { no: 'Du har ikke tilgang til å administrere minnet i dette rommet.', en: 'You do not have access to manage the memory in this room.' },
+  space_memory_unavailable: { no: 'Minnet i rommet er midlertidig utilgjengelig. Prøv igjen om litt.', en: 'The memory in this room is temporarily unavailable. Try again shortly.' },
 
   // WS14 document sharing (documents-api share routes)
   shares_disabled: { no: 'Deling er ikke slått på ennå.', en: 'Sharing is not turned on yet.' },
@@ -1234,6 +1267,7 @@ export const ERROR_COPY: Record<string, ErrorCopy> = {
   room_pins_limit: { no: 'Rommet har nådd grensen for festede innlegg. Løsne ett innlegg først.', en: 'This room has reached its pin limit. Unpin a post first.' },
   room_pins_unavailable: { no: 'Festingen kunne ikke endres. Ingenting er endret.', en: 'The pin could not be changed. Nothing was changed.', retryable: true },
   run_control_unavailable: { no: 'Kontrollen av kjøringen er midlertidig utilgjengelig.', en: 'Run control is temporarily unavailable.', retryable: true },
+  run_not_found: { no: 'Fant ikke kjøringen, eller du har ikke tilgang til den.', en: 'The run was not found, or you do not have access to it.' },
   sidebar_too_large: { no: 'Sidepanelets oppsett er for stort til å lagres.', en: 'The sidebar layout is too large to save.' },
   space_reminders_disabled: { no: 'Påminnelser i rom er ikke slått på.', en: 'Space reminders are not turned on.' },
   space_run_control_not_authorized: { no: 'Du kan ikke stoppe denne kjøringen.', en: 'Stopping this run is not authorized.' },

@@ -8,6 +8,7 @@ import {
 } from '@/shared/api/ingestions-client'
 import { ApiError } from '@/shared/api/api-error'
 import { useI18n } from '@/shared/i18n'
+import { translateApiError } from '@/shared/i18n/errors'
 import { Button } from '@/shared/ui/Button'
 
 /**
@@ -51,9 +52,10 @@ export function RunJobControls(props: { run: RunItem; onChanged: () => void | Pr
         'Job control is not enabled on this installation.',
       )
     }
-    return failure instanceof Error && failure.message
-      ? failure.message
-      : i18n.tr('Handlingen mislyktes.', 'The action failed.')
+    return translateApiError(failure, i18n.tr, {
+      no: 'Handlingen mislyktes.',
+      en: 'The action failed.',
+    })
   }
 
   async function run(action: Exclude<Pending, null>) {

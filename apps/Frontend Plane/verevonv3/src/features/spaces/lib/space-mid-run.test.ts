@@ -159,7 +159,9 @@ describe('createSpaceMidRun: a steered message (WS09-S2)', () => {
     flush()
 
     expect(outcome).toBe('refused')
-    expect(midRun.entries()[0]).toEqual(expect.objectContaining({ state: 'refused', note: 'offline' }))
+    expect(midRun.entries()[0]).toEqual(
+      expect.objectContaining({ state: 'refused', note: 'The message could not be sent.' }),
+    )
   })
 })
 
