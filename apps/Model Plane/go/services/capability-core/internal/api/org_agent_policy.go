@@ -58,12 +58,13 @@ func OrgAgentPolicyAPIFromLookup(lookup func(string) string) bool {
 // orgAgentSetting is one row of the closed key schema. It mirrors the SETTINGS table of
 // mp-contracts/src/org_agent_policy.rs; the golden test below holds the two together.
 type orgAgentSetting struct {
-	key       string
-	kind      string
-	order     []string
-	def       string
-	failClose string
-	reserved  bool
+	key            string
+	kind           string
+	order          []string
+	def            string
+	failClose      string
+	reserved       bool
+	reservedValues []string
 }
 
 var orgAgentPolicySettings = []orgAgentSetting{
@@ -79,6 +80,11 @@ var orgAgentPolicySettings = []orgAgentSetting{
 	// Wave 3 EP-2 S8 (D5): the wide-research item cap, a whole number from 0 (wide research off)
 	// to 16. The gateway enforces it when a wide-research run starts.
 	{key: "research.max_fan_out_items", kind: "integer", order: orgAgentCountOrder(16), def: "8", failClose: "0"},
+	// Wave 3 EP-9 W2: the org's web switch. `off` withholds public web access from both agent loops;
+	// `cached_only` is reserved (refused not_enforced) until Quarry can answer from its cache alone.
+	{key: "web.mode", kind: "enum", order: []string{"off", "cached_only", "live"}, def: "live", failClose: "off", reservedValues: []string{"cached_only"}},
+	// Wave 3 EP-9 W2: whether a paid search provider may serve the org's agents.
+	{key: "web.paid_providers", kind: "enum", order: []string{"off", "on"}, def: "on", failClose: "off"},
 }
 
 // orgAgentCountOrder is the strictness order of an integer key: "0" to max, smallest first,
@@ -170,6 +176,9 @@ func validateOrgAgentSettings(written map[string]any, ceiling map[string]string)
 			}
 		}
 		if def.reserved && token != def.def {
+			return nil, &orgAgentRefuseNotEnforced
+		}
+		if slices.Contains(def.reservedValues, token) {
 			return nil, &orgAgentRefuseNotEnforced
 		}
 		bound, ok := ceiling[def.key]

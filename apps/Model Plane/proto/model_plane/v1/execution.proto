@@ -304,6 +304,24 @@ message OrgPolicyContext {
   int64 policy_revision = 2;
   // Digest of the policy document the rules came from. Empty until WS25 S7.
   string policy_digest = 3;
+  // The org's web switches for this run (Wave 3 EP-9 W2; additive). Absent while the org policy does not bind
+  // web access (ORG_AGENT_POLICY_MODE is off or shadow, or the org has no policy held), so the run is exactly as
+  // it was before the field existed. execution-core withholds the public web tools when it says "off".
+  WebPolicyContext web = 4;
+}
+
+// WebPolicyContext is the org's web switches for one Do run (Wave 3 EP-9 W2; additive). Execution-core reads
+// `mode` to withhold the public web tools and to refuse a call to one; the other fields are attribution.
+message WebPolicyContext {
+  // The org's web mode the run was admitted under: "live" offers the web tools, "off" withholds them. Any
+  // other value is read as "off", so a mode this build does not know can only narrow the run.
+  string mode = 1;
+  // Whether a paid search provider may serve the org's agents. Execution-core's web search names no paid
+  // provider, so this is carried for attribution and is not enforced in the Do loop.
+  bool paid_providers = 2;
+  // The org policy revision the switches were read at. Zero when the policy was not held and the fail-closed
+  // switches apply (an enforced org the gateway could not read takes "off").
+  int64 revision = 3;
 }
 
 // ConnectorScope names the Integration Core connections one run may read (build plan WS23 S4).

@@ -8,6 +8,7 @@ import { PluginsSection } from '@/features/settings/components/PluginsSection'
 import { SkillsSection } from '@/features/settings/components/SkillsSection'
 import { AgentModesSection, orgAgentPolicyAvailable } from '@/features/customize/AgentModesSection'
 import { HooksSection } from '@/features/customize/HooksSection'
+import { OrgWebAccessSection } from '@/features/customize/OrgWebAccessSection'
 
 /**
  * The Customize hub (WS25-S11): where an organisation shapes what its agents may do. It composes the existing
@@ -50,6 +51,7 @@ export default function CustomizeHub() {
         </Match>
         <Match when={available() === true}>
           <AgentModesSection />
+          <OrgWebAccessSection />
           <HooksSection />
           <McpServersSection />
           <SkillsSection />

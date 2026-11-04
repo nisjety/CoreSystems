@@ -5,8 +5,8 @@
 use std::time::Instant;
 
 use model_gateway::org_agent_policy::{
-    clamp_rung, dispatch_rung_cap, held_revision, held_rung_cap, resolve_turn, OrgPolicy,
-    OrgPolicyCache, PolicyMode,
+    clamp_rung, dispatch_rung_cap, held_revision, held_rung_cap, held_web_caps, resolve_turn,
+    stamp_web_policy, OrgPolicy, OrgPolicyCache, PolicyMode, WebCaps,
 };
 use model_gateway::profile::ApprovalPosture;
 use mp_contracts::agent_mode::AgentMode;
@@ -134,6 +134,51 @@ fn a_run_is_attributed_to_the_held_revision_only_under_enforcement() {
     );
 }
 
+#[test]
+fn an_org_that_turns_web_access_off_is_held_to_it_and_an_unread_one_is_not() {
+    let cache = held(
+        "org-policy-it-web",
+        json!({"web.mode": "off", "web.paid_providers": "off"}),
+    );
+    // The inline loop reads the switches the admission left warm; they bind only under enforcement.
+    assert_eq!(
+        held_web_caps(PolicyMode::Enforce, &cache, "org-policy-it-web"),
+        Some(WebCaps {
+            live: false,
+            paid: false
+        })
+    );
+    assert_eq!(
+        held_web_caps(PolicyMode::Shadow, &cache, "org-policy-it-web"),
+        None
+    );
+    // A Do run is stamped with the switches it was admitted under.
+    let mut stamped = None;
+    stamp_web_policy(PolicyMode::Enforce, &cache, "org-policy-it-web", &mut stamped);
+    let web = stamped
+        .as_ref()
+        .and_then(|context| context.web.as_ref())
+        .expect("the run carries its web switches");
+    assert_eq!(web.mode, "off");
+    assert!(!web.paid_providers);
+    // An enforced org the cache does not hold: the Do run is held to the fail-closed switches, and an inline
+    // turn keeps its web access, because an outage on Ask must not silently break an answer.
+    let empty = OrgPolicyCache::new();
+    let mut unread = None;
+    stamp_web_policy(PolicyMode::Enforce, &empty, "org-policy-it-unread", &mut unread);
+    assert_eq!(
+        unread
+            .as_ref()
+            .and_then(|context| context.web.as_ref())
+            .map(|web| web.mode.as_str()),
+        Some("off")
+    );
+    assert_eq!(
+        held_web_caps(PolicyMode::Enforce, &empty, "org-policy-it-unread"),
+        None
+    );
+}
+
 /// The decisions above reach the request only through the call sites that make it. These guards read the
 /// gateway source for each call, in the same style as the other contract tests of this crate.
 #[test]
@@ -155,5 +200,27 @@ fn the_admission_the_dispatch_and_the_grant_all_call_the_policy() {
     assert!(
         coordinator.contains("org_agent_policy::held_rung_cap("),
         "record_grant must hold the grant to the org's rung cap"
+    );
+}
+
+/// The org's web switches (Wave 3 EP-9 W2) reach both loops: the inline turn withholds the public web tools and the
+/// paid grant, and a Do run is stamped for execution-core. Each is a call site this crate makes, so the guard reads
+/// the source for it.
+#[test]
+fn the_web_switches_reach_both_loops() {
+    let sse = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/sse.rs"))
+        .expect("sse.rs is readable");
+    for call in [
+        "org_agent_policy::held_web_caps(",
+        "org_agent_policy::stamp_web_policy(",
+        "tool_loop::is_public_web_tool",
+    ] {
+        assert!(sse.contains(call), "sse.rs must make the call {call}");
+    }
+    let tool_loop = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/tool_loop.rs"))
+        .expect("tool_loop.rs is readable");
+    assert!(
+        tool_loop.contains("org_agent_policy::org_allows_paid_providers("),
+        "the paid search grant must be read with the org's web.paid_providers switch"
     );
 }

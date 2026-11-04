@@ -259,6 +259,41 @@ fn offered_among<'a>(offered: &'a BTreeSet<String>, names: &[&'static str]) -> V
         .collect()
 }
 
+/// The public-web tools an org's `web.mode=off` withholds from a Do run (Wave 3 EP-9 W2): web search and fetch with
+/// their aliases, and the crawl tools, which read public sites through Quarry as well.
+const ORG_WEB_TOOLS: &[&str] = &[
+    "web_search",
+    "web_fetch",
+    "web.search",
+    "web.read",
+    crate::web_tools::CRAWL_SITE_TOOL,
+    crate::web_tools::MAP_TOOL,
+    crate::web_tools::BATCH_TOOL,
+];
+
+/// Whether the run's org turned web access off. A run the gateway did not stamp with a web switch keeps its web access,
+/// as it did before the switch existed. A stamped run is withheld unless its mode is `live`, so a mode this build does
+/// not know narrows the run rather than widening it.
+fn org_web_off(req: &pb::RunAgentRequest) -> bool {
+    req.org_policy
+        .as_ref()
+        .and_then(|policy| policy.web.as_ref())
+        .is_some_and(|web| web.mode != "live")
+}
+
+/// Takes the public-web tools out of an offered set, for a run whose org turned web access off.
+fn withhold_org_web_tools(defs: &mut Vec<pb::ToolDefinition>) {
+    defs.retain(|tool| !ORG_WEB_TOOLS.contains(&tool.name.as_str()));
+}
+
+/// The refusal of a call to a public-web tool that the org's web switch takes away, or `None` when the call may run.
+/// It is answered before the purpose lock, so the person is told why rather than that the tool is out of scope.
+fn org_web_refusal(req: &pb::RunAgentRequest, tool_name: &str) -> Option<String> {
+    (org_web_off(req) && ORG_WEB_TOOLS.contains(&tool_name)).then(|| {
+        format!("org_web_off: the organisation has turned web access off, so '{tool_name}' is not run")
+    })
+}
+
 /// Whether this offered set holds both a connected-account tool and a web or browser tool: the
 /// only case in which the routing question exists.
 #[must_use]
@@ -1205,6 +1240,12 @@ async fn offered_tools(
         governance,
     )
     .await;
+    // The org turned web access off (Wave 3 EP-9 W2): the public web tools are not shown to the model. A set with them
+    // withheld is not one a park resume derives again, so it is kept as the snapshot the pause retains.
+    if org_web_off(req) {
+        withhold_org_web_tools(&mut defs);
+        derivable = false;
+    }
     // `ask_user` (WS14 S4) is named by the deployment and never by a caller: a caller's or an MCP
     // tool of that name is dropped, and the built-in is offered only where `ask::budget` allows it.
     // Appended after the base set, so the run is not derivable, as the browser tools are.
@@ -3904,6 +3945,16 @@ async fn run_rounds(
                          complete arguments — ideally as the only call in the next round.",
                         call.name
                     )),
+                }));
+                continue;
+            }
+            // The org turned web access off (Wave 3 EP-9 W2): a web call gets its own typed refusal, ahead of the
+            // purpose lock, so the person is told why and no request leaves the run.
+            if let Some(refusal) = org_web_refusal(req, &call.name) {
+                slots.push(CallSlot::Rejected(ToolStepResult {
+                    name: call.name.clone(),
+                    output: String::new(),
+                    error: Some(refusal),
                 }));
                 continue;
             }
@@ -8823,6 +8874,125 @@ pub(crate) fn approval_cause_for_pause(
     stored
 }
 
+#[cfg(test)]
+thread_local! {
+    /// A test's override of the shell-rule proposal switch (see [`ShellRuleSwitch`]).
+    static TEST_SHELL_RULES: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
+/// Holds the shell-rule proposal switch at a fixed value for the current test thread, then restores it.
+#[cfg(test)]
+struct ShellRuleSwitch;
+
+#[cfg(test)]
+impl ShellRuleSwitch {
+    fn set(on: bool) -> Self {
+        TEST_SHELL_RULES.with(|cell| cell.set(Some(on)));
+        Self
+    }
+}
+
+#[cfg(test)]
+impl Drop for ShellRuleSwitch {
+    fn drop(&mut self) {
+        TEST_SHELL_RULES.with(|cell| cell.set(None));
+    }
+}
+
+/// Whether shell-rule proposals are on in this process (EP-9 E4). Default off: the one strict
+/// parser is `mp_contracts::shell_rule::shell_rule_proposals_enabled`, which also reads it as off
+/// without WS13-S7's rule switch.
+fn shell_rule_proposals_on() -> bool {
+    #[cfg(test)]
+    if let Some(forced) = TEST_SHELL_RULES.with(std::cell::Cell::get) {
+        return forced;
+    }
+    mp_contracts::shell_rule::shell_rule_proposals_enabled()
+}
+
+/// The WS13-S7 proposal producer's shell hook (EP-9 E4): a shell pause's `action_key` names the
+/// narrow rule an "Always" would propose, for example `shell:git status`, instead of `shell`. The
+/// rule is a program and subcommand from mp-contracts' closed tables, never a word of the command's
+/// arguments; a command with no rule (compound, redirected, substituted, unknown) keeps `shell` and
+/// is offered once, as before. A zero-retention run keeps `shell` too: its approval row states
+/// nothing read from the command.
+fn propose_shell_rule(
+    stored: &mut mp_contracts::model_plane::v1::ApprovalCause,
+    zdr: bool,
+    tool_name: &str,
+    tool_input: &str,
+) {
+    if zdr || tool_name != mp_contracts::shell_rule::SHELL_TOOL || !shell_rule_proposals_on() {
+        return;
+    }
+    if let Some(rule) = mp_contracts::shell_rule::rule_for_shell_input(tool_input) {
+        stored.action_key = rule.action_key();
+    }
+}
+
+#[cfg(test)]
+mod shell_rule_proposals {
+    use super::*;
+
+    fn shell_cause(command: &str, zdr: bool) -> mp_contracts::model_plane::v1::ApprovalCause {
+        let input = json!({ "command": command, "cwd": "/workspace" }).to_string();
+        let mut cause =
+            approval_cause::for_call(CauseCode::RiskyEffectUnderAsk, "run_test", "shell", &input);
+        propose_shell_rule(&mut cause, zdr, "shell", &input);
+        cause
+    }
+
+    #[test]
+    fn shell_rule_switch_off_keeps_the_tool_key() {
+        let _switch = ShellRuleSwitch::set(false);
+        let cause = shell_cause("git status", false);
+        assert_eq!(cause.action_key, "shell");
+        assert_eq!(cause.scope_options, ["once"]);
+    }
+
+    #[test]
+    fn shell_rule_names_program_and_subcommand_only() {
+        let _switch = ShellRuleSwitch::set(true);
+        let command = "git commit -m 'Rettet særs viktig feil'";
+        let cause = shell_cause(command, false);
+        assert_eq!(cause.action_key, "shell:git commit");
+        assert!(!cause.action_key.contains("Rettet"));
+        // The rule changes what an "Always" would name, never which scopes the pause offers or
+        // which call the digest identifies.
+        assert_eq!(cause.scope_options, ["once"]);
+        let input = json!({ "command": command, "cwd": "/workspace" }).to_string();
+        assert_eq!(cause.call_digest, approval_cause::call_digest("run_test", "shell", &input));
+    }
+
+    #[test]
+    fn shell_rule_no_rule_for_compound_or_unknown_commands() {
+        let _switch = ShellRuleSwitch::set(true);
+        for command in ["git status && git push", "git log | head", "rm -rf build", "FOO=1 ls"] {
+            assert_eq!(shell_cause(command, false).action_key, "shell", "{command}");
+        }
+    }
+
+    #[test]
+    fn shell_rule_not_proposed_for_a_zero_retention_run() {
+        let _switch = ShellRuleSwitch::set(true);
+        assert_eq!(shell_cause("git status", true).action_key, "shell");
+    }
+
+    #[test]
+    fn shell_rule_leaves_other_tools_alone() {
+        let _switch = ShellRuleSwitch::set(true);
+        let input = r#"{"command":"git status"}"#;
+        let mut cause = approval_cause::for_call(
+            CauseCode::RiskyEffectUnderAsk,
+            "run_test",
+            "code_interpreter",
+            input,
+        );
+        propose_shell_rule(&mut cause, false, "code_interpreter", input);
+        assert_eq!(cause.action_key, "code_interpreter");
+    }
+}
+
 /// How long an ordinary pause's approval waits for a decision.
 const APPROVAL_TTL_SECONDS: u32 = 3600;
 
@@ -8970,7 +9140,10 @@ async fn pause_for_approval(
         },
         bearer,
     );
-    let request = request?;
+    let mut request = request?;
+    if let Some(stored) = request.get_mut().cause.as_mut() {
+        propose_shell_rule(stored, req.zdr, tool_name, tool_input);
+    }
     // The fold of this pause is durable BEFORE the approval is visible, so a fast
     // approve-and-continue can always claim it. It is named by the approval's own
     // idempotency key (`{run_id}:{step_id}`, set below), which exists before
@@ -32399,6 +32572,73 @@ mod tests {
         let seed = vec![seed_message("system", "p".to_owned()), seed_message("user", "g".to_owned())];
         assert_eq!(with_attachment_note(seed.clone(), &req, 1), seed);
         assert_eq!(with_attachment_note(seed, &req, 0).len(), 3);
+    }
+}
+
+#[cfg(test)]
+mod org_web_switch_tests {
+    use super::*;
+
+    /// A request under the org web mode `mode`, or with no org web switch at all when `mode` is `None`.
+    fn request_under_web_mode(mode: Option<&str>) -> pb::RunAgentRequest {
+        pb::RunAgentRequest {
+            org_policy: mode.map(|mode| pb::OrgPolicyContext {
+                web: Some(pb::WebPolicyContext {
+                    mode: mode.to_owned(),
+                    paid_providers: true,
+                    revision: 3,
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn org_web_off_offers_no_web_tools() {
+        // The base set offers the public web tools, so withholding them is a change this test can see.
+        let mut defs = offered_tool_defs();
+        assert!(defs.iter().any(|tool| tool.name == "web_search"));
+        assert!(defs.iter().any(|tool| tool.name == "web.read"));
+        assert!(org_web_off(&request_under_web_mode(Some("off"))));
+        withhold_org_web_tools(&mut defs);
+        for name in ORG_WEB_TOOLS {
+            assert!(defs.iter().all(|tool| tool.name != *name), "{name} is still offered");
+        }
+        // Only the web tools go: every other offered tool stays.
+        assert_eq!(
+            defs.len(),
+            offered_tool_defs()
+                .iter()
+                .filter(|tool| !ORG_WEB_TOOLS.contains(&tool.name.as_str()))
+                .count()
+        );
+        // A live run, and a run the gateway did not stamp, keep the web tools as they were. A mode this build does
+        // not know narrows the run.
+        assert!(!org_web_off(&request_under_web_mode(Some("live"))));
+        assert!(!org_web_off(&request_under_web_mode(None)));
+        assert!(org_web_off(&request_under_web_mode(Some("cached_only"))));
+    }
+
+    #[test]
+    fn org_web_off_refuses_a_forged_call() {
+        let off = request_under_web_mode(Some("off"));
+        for name in [
+            "web_search",
+            "web.search",
+            "web_fetch",
+            "web.read",
+            "knowledge.crawl_site",
+            "knowledge.map",
+            "knowledge.batch",
+        ] {
+            let refusal = org_web_refusal(&off, name).expect("a web call under web off is refused");
+            assert!(refusal.starts_with("org_web_off: "), "{refusal}");
+        }
+        // Calls the switch does not touch reach the purpose lock and the gates as before.
+        assert_eq!(org_web_refusal(&off, "knowledge_search"), None);
+        assert_eq!(org_web_refusal(&request_under_web_mode(Some("live")), "web_search"), None);
+        assert_eq!(org_web_refusal(&request_under_web_mode(None), "web_search"), None);
     }
 }
 

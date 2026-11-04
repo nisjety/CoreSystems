@@ -6,7 +6,8 @@
 //! written, the value enforcement falls back to when a stored value cannot be read, and
 //! whether the key is enforced yet or reserved for a later stream. A reserved key takes
 //! only its default; anything else is refused as `not_enforced` rather than stored and
-//! silently ignored. capability-core validates writes against this table and
+//! silently ignored. A key that is enforced may still reserve single values
+//! (`reserved_values`), refused the same way. capability-core validates writes against this table and
 //! `api/contracts/org-agent-policy-schema.json` pins it, so a key added on one side and
 //! not the other fails a test.
 //!
@@ -100,6 +101,10 @@ pub struct SettingDef {
     pub default: &'static str,
     pub fail_closed_value: &'static str,
     pub status: Status,
+    /// Tokens of `strictness_order` this build does not enforce yet. A write of one is refused
+    /// `not_enforced` while the key itself is enforced, so a value is never stored and then
+    /// silently ignored. Empty for a key whose every token is enforced.
+    pub reserved_values: &'static [&'static str],
 }
 
 pub const SETTINGS: &[SettingDef] = &[
@@ -110,6 +115,7 @@ pub const SETTINGS: &[SettingDef] = &[
         default: "auto",
         fail_closed_value: "lockdown",
         status: Status::Enforced,
+        reserved_values: &[],
     },
     SettingDef {
         key: "rung_cap",
@@ -118,6 +124,7 @@ pub const SETTINGS: &[SettingDef] = &[
         default: "danger_full_access",
         fail_closed_value: "read_only",
         status: Status::Enforced,
+        reserved_values: &[],
     },
     SettingDef {
         key: "lockdown",
@@ -126,6 +133,7 @@ pub const SETTINGS: &[SettingDef] = &[
         default: "false",
         fail_closed_value: "true",
         status: Status::Enforced,
+        reserved_values: &[],
     },
     SettingDef {
         key: "ext.mcp_servers",
@@ -134,6 +142,7 @@ pub const SETTINGS: &[SettingDef] = &[
         default: "any",
         fail_closed_value: "none",
         status: Status::Enforced,
+        reserved_values: &[],
     },
     SettingDef {
         key: "ext.skills",
@@ -142,6 +151,7 @@ pub const SETTINGS: &[SettingDef] = &[
         default: "any",
         fail_closed_value: "none",
         status: Status::Reserved,
+        reserved_values: &[],
     },
     SettingDef {
         key: "ext.plugins",
@@ -150,6 +160,7 @@ pub const SETTINGS: &[SettingDef] = &[
         default: "any",
         fail_closed_value: "none",
         status: Status::Reserved,
+        reserved_values: &[],
     },
     SettingDef {
         key: "mcp_tool_approval",
@@ -158,6 +169,7 @@ pub const SETTINGS: &[SettingDef] = &[
         default: "trust_annotations",
         fail_closed_value: "approved_only",
         status: Status::Enforced,
+        reserved_values: &[],
     },
     SettingDef {
         key: "user_hooks",
@@ -166,6 +178,7 @@ pub const SETTINGS: &[SettingDef] = &[
         default: "allowed",
         fail_closed_value: "denied",
         status: Status::Reserved,
+        reserved_values: &[],
     },
     // WS08-S8 / DEC-37: the per-org opt-in for durable reference uploads. Reserved until a
     // consumer enforces it (the WS25-S9 policy client, behind a CHAT_REFERENCE_UPLOADS_ENABLED
@@ -177,6 +190,7 @@ pub const SETTINGS: &[SettingDef] = &[
         default: "off",
         fail_closed_value: "off",
         status: Status::Reserved,
+        reserved_values: &[],
     },
     // Wave 3 EP-2 S8 (D5): the wide-research item cap. Enforced by the gateway when a run starts
     // (behind WIDE_RESEARCH_ENTRY_ENABLED), which sends it to execution-core as the run's
@@ -191,6 +205,29 @@ pub const SETTINGS: &[SettingDef] = &[
         default: "8",
         fail_closed_value: "0",
         status: Status::Enforced,
+        reserved_values: &[],
+    },
+    // Wave 3 EP-9 W2: the org's web switch. `off` withholds public web access from every agent path
+    // (the inline loop and the Do loop); `cached_only` is reserved until Quarry can answer from its
+    // cache alone, so a write of it is refused rather than stored. Fail-closed is `off`.
+    SettingDef {
+        key: "web.mode",
+        kind: Kind::Enum,
+        strictness_order: &["off", "cached_only", "live"],
+        default: "live",
+        fail_closed_value: "off",
+        status: Status::Enforced,
+        reserved_values: &["cached_only"],
+    },
+    // Wave 3 EP-9 W2: whether a paid search provider may serve the org's agents. Fail-closed is `off`.
+    SettingDef {
+        key: "web.paid_providers",
+        kind: Kind::Enum,
+        strictness_order: &["off", "on"],
+        default: "on",
+        fail_closed_value: "off",
+        status: Status::Enforced,
+        reserved_values: &[],
     },
 ];
 
@@ -263,6 +300,9 @@ pub fn validate(input: &Map<String, Value>, ceiling: &Ceiling) -> Result<Setting
             None => (def.default.to_owned(), value_of(def, def.default)),
         };
         if def.status == Status::Reserved && token != def.default {
+            return Err(Refusal::NotEnforced);
+        }
+        if def.reserved_values.contains(&token.as_str()) {
             return Err(Refusal::NotEnforced);
         }
         let loosest = def.strictness_order.last().copied().unwrap_or(def.default);
@@ -564,6 +604,60 @@ mod tests {
             .expect("the key is in the schema");
         assert_eq!(def.fail_closed_value, "0");
         assert_eq!(def.status, Status::Enforced);
+    }
+
+    #[test]
+    fn org_agent_policy_web_mode_defaults_to_live_and_refuses_cached_only() {
+        let settings = defaults();
+        assert_eq!(settings["web.mode"], json!("live"));
+        assert_eq!(settings["web.paid_providers"], json!("on"));
+        assert_eq!(
+            validate(&doc(&json!({"web.mode": "cached_only"})), &loosest_ceiling()),
+            Err(Refusal::NotEnforced),
+            "cached_only is reserved until Quarry ships it"
+        );
+        for mode in ["off", "live"] {
+            assert!(
+                validate(&doc(&json!({"web.mode": mode})), &loosest_ceiling()).is_ok(),
+                "{mode} is enforced"
+            );
+        }
+        assert_eq!(
+            validate(&doc(&json!({"web.mode": "full"})), &loosest_ceiling()),
+            Err(Refusal::InvalidValue)
+        );
+    }
+
+    #[test]
+    fn org_agent_policy_web_mode_off_is_stricter_than_live_under_a_ceiling() {
+        let mut ceiling = loosest_ceiling();
+        ceiling.insert("web.mode", "off");
+        assert_eq!(
+            validate(&doc(&json!({"web.mode": "live"})), &ceiling),
+            Err(Refusal::ExceedsPlatformCeiling)
+        );
+        assert!(validate(&doc(&json!({"web.mode": "off"})), &ceiling).is_ok());
+    }
+
+    #[test]
+    fn org_agent_policy_web_paid_providers_takes_off_or_on_and_nothing_else() {
+        for token in ["off", "on"] {
+            assert!(
+                validate(
+                    &doc(&json!({"web.paid_providers": token})),
+                    &loosest_ceiling()
+                )
+                .is_ok(),
+                "{token}"
+            );
+        }
+        assert_eq!(
+            validate(
+                &doc(&json!({"web.paid_providers": true})),
+                &loosest_ceiling()
+            ),
+            Err(Refusal::InvalidValue)
+        );
     }
 
     #[test]
