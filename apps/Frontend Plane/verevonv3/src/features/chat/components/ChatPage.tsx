@@ -195,6 +195,7 @@ export default function ChatPage() {
     setGoalPaused,
     clearGoal,
     continueGoal,
+    goalAutoContinue,
   } = useChatController()
 
   // The attachment chip that summoned the canvas stays selected when several
@@ -1531,6 +1532,7 @@ export default function ChatPage() {
                 goalBusy={isStreaming()}
                 onSaveGoal={saveGoal}
                 onContinueGoal={() => void continueGoal()}
+                goalAutoContinue={goalAutoContinue}
                 onPauseGoal={(paused) => void setGoalPaused(paused)}
                 onClearGoal={() => void clearGoal()}
               />

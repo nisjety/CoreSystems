@@ -618,6 +618,19 @@
       "zdr_allowed": false
     },
     {
+      "actionId": "chat.goal_auto_toggle",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "context_write",
+      "exemptReason": "agent_cannot_self_govern",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:be4bb4d91fa6653c595646f18d04a4fd450f291e654ab3bca0536505244cf39e",
+      "zdr_allowed": false
+    },
+    {
       "actionId": "chat.inspect_run_request",
       "registry": true,
       "access": "none",
@@ -680,6 +693,19 @@
       "executor": {},
       "hashBasis": "catalog_entry",
       "schemaHash": "sha256:07f6e47cc2208433c3e8b7b4c83b08a589d18463d25c22a2bd7b557c04dda700",
+      "zdr_allowed": false
+    },
+    {
+      "actionId": "chat.open_deck_slide",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "read",
+      "exemptReason": "ui_state_only",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:10696af22d7f40b6998b1cc74c67e30bc446a6837d683f824a12b7d3b16b7cb1",
       "zdr_allowed": false
     },
     {

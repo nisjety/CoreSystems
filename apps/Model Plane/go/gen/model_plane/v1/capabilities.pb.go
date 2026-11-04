@@ -1357,7 +1357,11 @@ type SkillBundleSummary struct {
 	TotalBytes     int64                  `protobuf:"varint,4,opt,name=total_bytes,json=totalBytes,proto3" json:"total_bytes,omitempty"`
 	CreatedBy      string                 `protobuf:"bytes,5,opt,name=created_by,json=createdBy,proto3" json:"created_by,omitempty"`
 	// RFC3339 timestamp of the upload that holds this bundle.
-	CreatedAt     string `protobuf:"bytes,6,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`
+	CreatedAt string `protobuf:"bytes,6,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`
+	// True when the bundle carries templates/deck-theme.json, so it is an org brand template
+	// for decks (EP-5 S6). Derived at read time from the bundle's files, never stored. Reported
+	// only while capability-core's SKILL_DECK_TEMPLATES_ENABLED is on; false otherwise. Additive.
+	DeckTemplate  bool `protobuf:"varint,7,opt,name=deck_template,json=deckTemplate,proto3" json:"deck_template,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1432,6 +1436,13 @@ func (x *SkillBundleSummary) GetCreatedAt() string {
 		return x.CreatedAt
 	}
 	return ""
+}
+
+func (x *SkillBundleSummary) GetDeckTemplate() bool {
+	if x != nil {
+		return x.DeckTemplate
+	}
+	return false
 }
 
 type GetSkillBundleManifestRequest struct {
@@ -1825,7 +1836,7 @@ const file_model_plane_v1_capabilities_proto_rawDesc = "" +
 	"\x17ListSkillBundlesRequest\x12\x1b\n" +
 	"\tskill_ids\x18\x01 \x03(\tR\bskillIds\"X\n" +
 	"\x18ListSkillBundlesResponse\x12<\n" +
-	"\abundles\x18\x01 \x03(\v2\".model_plane.v1.SkillBundleSummaryR\abundles\"\xd6\x01\n" +
+	"\abundles\x18\x01 \x03(\v2\".model_plane.v1.SkillBundleSummaryR\abundles\"\xfb\x01\n" +
 	"\x12SkillBundleSummary\x12\x19\n" +
 	"\bskill_id\x18\x01 \x01(\tR\askillId\x12'\n" +
 	"\x0fmanifest_sha256\x18\x02 \x01(\tR\x0emanifestSha256\x12\x1d\n" +
@@ -1836,7 +1847,8 @@ const file_model_plane_v1_capabilities_proto_rawDesc = "" +
 	"\n" +
 	"created_by\x18\x05 \x01(\tR\tcreatedBy\x12\x1d\n" +
 	"\n" +
-	"created_at\x18\x06 \x01(\tR\tcreatedAt\":\n" +
+	"created_at\x18\x06 \x01(\tR\tcreatedAt\x12#\n" +
+	"\rdeck_template\x18\a \x01(\bR\fdeckTemplate\":\n" +
 	"\x1dGetSkillBundleManifestRequest\x12\x19\n" +
 	"\bskill_id\x18\x01 \x01(\tR\askillId\"\x90\x01\n" +
 	"\x13SkillBundleManifest\x12\x19\n" +

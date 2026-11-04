@@ -292,7 +292,7 @@
     },
     {
       "id": "tool-builder/deck_tool.rs/tool_definition",
-      "sha256": "13f4b753ad29c2e797d23e40771035acbfdd7463c2e119ace245cb5b25faec5d",
+      "sha256": "e2362d3c227ac83bcb4d9099092d546f3d1088b442d4e62e147084c7c83739cd",
       "source": "services/model-gateway/src/deck_tool.rs"
     },
     {

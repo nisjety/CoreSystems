@@ -367,6 +367,82 @@
         }
       }
     },
+    "goal_progress": {
+      "family": null,
+      "variants": [
+        "GoalProgress"
+      ],
+      "keys": {
+        "cost_budget_usd_micros": {
+          "types": [
+            "integer",
+            "null"
+          ],
+          "presence": "always"
+        },
+        "cost_used_usd_micros": {
+          "types": [
+            "integer"
+          ],
+          "presence": "always"
+        },
+        "goal_id": {
+          "types": [
+            "string"
+          ],
+          "presence": "always"
+        },
+        "max_turns": {
+          "types": [
+            "integer"
+          ],
+          "presence": "always"
+        },
+        "request_id": {
+          "types": [
+            "string"
+          ],
+          "presence": "always"
+        },
+        "status": {
+          "types": [
+            "string"
+          ],
+          "presence": "always"
+        },
+        "status_reason": {
+          "types": [
+            "string"
+          ],
+          "presence": "always"
+        },
+        "token_budget": {
+          "types": [
+            "integer",
+            "null"
+          ],
+          "presence": "always"
+        },
+        "tokens_used": {
+          "types": [
+            "integer"
+          ],
+          "presence": "always"
+        },
+        "turn_no": {
+          "types": [
+            "integer"
+          ],
+          "presence": "always"
+        },
+        "turns_used": {
+          "types": [
+            "integer"
+          ],
+          "presence": "always"
+        }
+      }
+    },
     "grounding": {
       "family": "citations",
       "variants": [

@@ -434,6 +434,7 @@ mod tests {
             total_bytes: 512,
             created_by: "admin-1".to_owned(),
             created_at: "2026-11-04T10:00:00Z".to_owned(),
+            deck_template: false,
         }
     }
 

@@ -1308,6 +1308,13 @@ async fn execute_step_inner(
     // `result_query` reads a result this run held, so it is answered from the run's own
     // store and never reaches a tool. It passed the capability, hook and permission
     // gates above like any other read. Without a store the name falls through as it did.
+    // The long-page reader (EP-2-S10) answers read_page and find_in_page from the pages this run holds, as result_query answers from its own store. Off, the names fall through as before.
+    if let Some(read) = result_handles::execute_reader_tool(tool_name, tool_input, org_id, run_id, result_store) {
+        return match read {
+            Ok(output) => StepOutcome::completed(output),
+            Err(error) => StepOutcome::failed(&error),
+        };
+    }
     if tool_name == result_handles::RESULT_QUERY_TOOL && result_store.is_some() {
         return match result_handles::execute_result_query(tool_input, org_id, run_id, result_store) {
             Ok(output) => StepOutcome::completed(output),
@@ -1693,7 +1700,10 @@ async fn execute_step_inner(
             screened.output = content;
         }
     }
-    let rendered = crate::provenance::render(&screened.output, &screened.provenance);
+    let rendered = crate::provenance::render(
+        &result_handles::inline_text(tool_name, &screened.output),
+        &screened.provenance,
+    );
     // An oversized read-class result is held by the run and the model gets its handle
     // (WS25-S5). The label is the render prefix alone, so the held body is exactly the
     // tool's output, and every read repeats the same verdict.
@@ -1702,12 +1712,7 @@ async fn execute_step_inner(
         .and_then(|store| {
             let prefix = crate::provenance::render("", &screened.provenance);
             let label = prefix.strip_suffix('\n').unwrap_or(&prefix);
-            store
-                .park(org_id, run_id, label, &screened.output)
-                .ok()
-                .map(|handle_id| {
-                    result_handles::handle_envelope(&handle_id, label, &screened.output)
-                })
+            result_handles::hold_for_model(store, org_id, run_id, tool_name, label, &screened.output)
         });
     let mut outcome = StepOutcome::completed(with_edit_note(
         parked.unwrap_or(rendered),

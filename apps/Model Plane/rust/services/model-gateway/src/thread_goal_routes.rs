@@ -130,7 +130,7 @@ fn goal_body(response: ThreadGoalResponse) -> Json<Value> {
         .goal
         .filter(|_| response.found)
         .map(GoalJson::from_proto);
-    Json(json!({ "data": { "found": goal.is_some(), "goal": goal } }))
+    Json(json!({ "data": { "found": goal.is_some(), "goal": goal, "autoContinueAvailable": crate::goal_auto::available() } }))
 }
 
 /// The body of `PUT .../goal`.
@@ -268,6 +268,16 @@ pub(crate) fn goal_error(error: &tonic::Status) -> HttpJsonError {
             message
                 .strip_prefix("invalid_thread_goal: ")
                 .unwrap_or(message),
+        ),
+        tonic::Code::FailedPrecondition if message == "thread_goal_pending_decision" => typed(
+            StatusCode::CONFLICT,
+            "thread_goal_pending_decision",
+            "a decision waits on you in this conversation",
+        ),
+        tonic::Code::ResourceExhausted if message == "thread_goal_rate_limited" => typed(
+            StatusCode::TOO_MANY_REQUESTS,
+            "thread_goal_rate_limited",
+            "this goal continued too often in the last hour",
         ),
         tonic::Code::NotFound | tonic::Code::PermissionDenied => typed(
             StatusCode::NOT_FOUND,
@@ -845,6 +855,7 @@ mod tests {
             found: true,
         });
         assert_eq!(body["data"]["found"], true);
+        assert_eq!(body["data"]["autoContinueAvailable"], false);
         assert_eq!(body["data"]["goal"]["id"], "goal_1");
         assert_eq!(body["data"]["goal"]["successCriteria"][0], "Numbers\r\nreconciled");
         assert!(body["data"]["goal"].get("orgId").is_none());

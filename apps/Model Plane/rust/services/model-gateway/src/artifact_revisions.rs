@@ -309,7 +309,7 @@ pub async fn seed_from_table_heads(
             &head.content,
             head.version,
         );
-        if let Some(kind) = crate::artifacts::ArtifactKind::parse(&head.kind) {
+        if let Some(kind) = crate::deck_tool::stored_kind(&head.kind) {
             state
                 .artifact_versions
                 .remember_kind(thread_id, &head.artifact_id, kind);

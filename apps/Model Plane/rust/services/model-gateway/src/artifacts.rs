@@ -115,6 +115,10 @@ struct StoredArtifact {
     /// read while it is still the current version, so a later model revision clears it without
     /// a write.
     user_version: Option<u32>,
+    /// The research provenance stamp the durable thread kept beside this artifact (EP-2 S4) and the
+    /// version it was stamped on. Read only by research-to-deck (EP-5 S8), and only while that
+    /// version is current, so a later revision never inherits an older report's stamp.
+    provenance: Option<(u32, serde_json::Value)>,
 }
 
 /// Per-`(thread, artifact)` version counter, plus the title index that stops a
@@ -199,6 +203,9 @@ impl ArtifactVersionStore {
                 fork.seed_persisted(thread_id, &artifact.id, &artifact.title, &content, version);
                 if let Some(kind) = self.kind_of(thread_id, &artifact.id) {
                     fork.remember_kind(thread_id, &artifact.id, kind);
+                }
+                if let Some(provenance) = self.provenance_of(thread_id, &artifact.id) {
+                    fork.remember_provenance(thread_id, &artifact.id, version, provenance);
                 }
                 if let Some(review) = self.prior_review(thread_id, &artifact.id) {
                     fork.reviews.insert((thread_id.to_owned(), artifact.id.clone()), review);
@@ -335,6 +342,23 @@ impl ArtifactVersionStore {
         self.known
             .get(&(thread_id.to_owned(), artifact_id.to_owned()))
             .and_then(|entry| entry.kind)
+    }
+
+    /// Keep the provenance stamp a durable artifact carried at `version` (EP-5 S8).
+    pub fn remember_provenance(&self, thread_id: &str, artifact_id: &str, version: u32, provenance: serde_json::Value) {
+        if self.current_version(thread_id, artifact_id).is_some() {
+            self.known.entry((thread_id.to_owned(), artifact_id.to_owned())).or_default().provenance = Some((version, provenance));
+        }
+    }
+
+    /// The provenance stamp of the artifact's current version, if it had one.
+    pub fn provenance_of(&self, thread_id: &str, artifact_id: &str) -> Option<serde_json::Value> {
+        let current = self.current_version(thread_id, artifact_id)?;
+        self.known
+            .get(&(thread_id.to_owned(), artifact_id.to_owned()))
+            .and_then(|entry| entry.provenance.clone())
+            .filter(|(version, _)| *version == current)
+            .map(|(_, provenance)| provenance)
     }
 
     /// Records the accepted source review that produced `version`'s content,

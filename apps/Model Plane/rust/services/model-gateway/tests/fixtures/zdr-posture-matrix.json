@@ -860,6 +860,19 @@
         "route": {"provider": "openai-codex-subscription", "connection": "conn-3", "explicit_zdr": false}
       },
       "expect": {"decision": "waived", "code": "connection_not_zdr_capable"}
+    },
+    {
+      "id": "e_waived_deck_manifest_not_persisted",
+      "title": "A waiver on exactly the connection it names, on a turn that builds a slide deck: waived, with the deck manifest streamed but not stored.",
+      "tags": [],
+      "note": "EP-5 S3 (D6, DEC-32): a deck manifest is kept in message metadata like a document, but session_flow::persistable_artifacts drops every deck artifact of a ZDR or waived turn before turn_evidence_metadata, and the revision store refuses a waived turn, so only the live stream carried it and a reload shows no deck. The pptx is never stored on any turn. A ZDR turn has no tool loop, so the deck tool is never reached there. The deck connection makes the row differ from the other waived rows.",
+      "inputs": {
+        "bearers": [
+          {"zdr": false, "org_zdr": true, "waiver": {"version": 1, "provider": "openai-codex-subscription", "connection": "conn-deck"}}
+        ],
+        "route": {"provider": "openai-codex-subscription", "connection": "conn-deck", "explicit_zdr": false}
+      },
+      "expect": {"decision": "waived", "code": "connection_not_zdr_capable"}
     }
   ]
 }

@@ -22,6 +22,9 @@ const (
 	ThreadGoalService_SetThreadGoal_FullMethodName    = "/model_plane.v1.ThreadGoalService/SetThreadGoal"
 	ThreadGoalService_GetThreadGoal_FullMethodName    = "/model_plane.v1.ThreadGoalService/GetThreadGoal"
 	ThreadGoalService_UpdateThreadGoal_FullMethodName = "/model_plane.v1.ThreadGoalService/UpdateThreadGoal"
+	ThreadGoalService_ClaimGoalTurn_FullMethodName    = "/model_plane.v1.ThreadGoalService/ClaimGoalTurn"
+	ThreadGoalService_BindGoalTurnRun_FullMethodName  = "/model_plane.v1.ThreadGoalService/BindGoalTurnRun"
+	ThreadGoalService_SettleGoalTurn_FullMethodName   = "/model_plane.v1.ThreadGoalService/SettleGoalTurn"
 )
 
 // ThreadGoalServiceClient is the client API for ThreadGoalService service.
@@ -41,6 +44,12 @@ type ThreadGoalServiceClient interface {
 	GetThreadGoal(ctx context.Context, in *GetThreadGoalRequest, opts ...grpc.CallOption) (*ThreadGoalResponse, error)
 	// Change an open goal under a compare-and-set on its revision.
 	UpdateThreadGoal(ctx context.Context, in *UpdateThreadGoalRequest, opts ...grpc.CallOption) (*ThreadGoalResponse, error)
+	// EP-7 S2. Admit one continuation turn (one in flight per goal).
+	ClaimGoalTurn(ctx context.Context, in *ClaimGoalTurnRequest, opts ...grpc.CallOption) (*ClaimGoalTurnResponse, error)
+	// EP-7 S2. Name the run a claimed turn started.
+	BindGoalTurnRun(ctx context.Context, in *BindGoalTurnRunRequest, opts ...grpc.CallOption) (*BindGoalTurnRunResponse, error)
+	// EP-7 S2. Settle a turn from its run's usage and apply the stop rules.
+	SettleGoalTurn(ctx context.Context, in *SettleGoalTurnRequest, opts ...grpc.CallOption) (*ThreadGoalResponse, error)
 }
 
 type threadGoalServiceClient struct {
@@ -81,6 +90,36 @@ func (c *threadGoalServiceClient) UpdateThreadGoal(ctx context.Context, in *Upda
 	return out, nil
 }
 
+func (c *threadGoalServiceClient) ClaimGoalTurn(ctx context.Context, in *ClaimGoalTurnRequest, opts ...grpc.CallOption) (*ClaimGoalTurnResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ClaimGoalTurnResponse)
+	err := c.cc.Invoke(ctx, ThreadGoalService_ClaimGoalTurn_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *threadGoalServiceClient) BindGoalTurnRun(ctx context.Context, in *BindGoalTurnRunRequest, opts ...grpc.CallOption) (*BindGoalTurnRunResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(BindGoalTurnRunResponse)
+	err := c.cc.Invoke(ctx, ThreadGoalService_BindGoalTurnRun_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *threadGoalServiceClient) SettleGoalTurn(ctx context.Context, in *SettleGoalTurnRequest, opts ...grpc.CallOption) (*ThreadGoalResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ThreadGoalResponse)
+	err := c.cc.Invoke(ctx, ThreadGoalService_SettleGoalTurn_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // ThreadGoalServiceServer is the server API for ThreadGoalService service.
 // All implementations must embed UnimplementedThreadGoalServiceServer
 // for forward compatibility.
@@ -98,6 +137,12 @@ type ThreadGoalServiceServer interface {
 	GetThreadGoal(context.Context, *GetThreadGoalRequest) (*ThreadGoalResponse, error)
 	// Change an open goal under a compare-and-set on its revision.
 	UpdateThreadGoal(context.Context, *UpdateThreadGoalRequest) (*ThreadGoalResponse, error)
+	// EP-7 S2. Admit one continuation turn (one in flight per goal).
+	ClaimGoalTurn(context.Context, *ClaimGoalTurnRequest) (*ClaimGoalTurnResponse, error)
+	// EP-7 S2. Name the run a claimed turn started.
+	BindGoalTurnRun(context.Context, *BindGoalTurnRunRequest) (*BindGoalTurnRunResponse, error)
+	// EP-7 S2. Settle a turn from its run's usage and apply the stop rules.
+	SettleGoalTurn(context.Context, *SettleGoalTurnRequest) (*ThreadGoalResponse, error)
 	mustEmbedUnimplementedThreadGoalServiceServer()
 }
 
@@ -116,6 +161,15 @@ func (UnimplementedThreadGoalServiceServer) GetThreadGoal(context.Context, *GetT
 }
 func (UnimplementedThreadGoalServiceServer) UpdateThreadGoal(context.Context, *UpdateThreadGoalRequest) (*ThreadGoalResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method UpdateThreadGoal not implemented")
+}
+func (UnimplementedThreadGoalServiceServer) ClaimGoalTurn(context.Context, *ClaimGoalTurnRequest) (*ClaimGoalTurnResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ClaimGoalTurn not implemented")
+}
+func (UnimplementedThreadGoalServiceServer) BindGoalTurnRun(context.Context, *BindGoalTurnRunRequest) (*BindGoalTurnRunResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method BindGoalTurnRun not implemented")
+}
+func (UnimplementedThreadGoalServiceServer) SettleGoalTurn(context.Context, *SettleGoalTurnRequest) (*ThreadGoalResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method SettleGoalTurn not implemented")
 }
 func (UnimplementedThreadGoalServiceServer) mustEmbedUnimplementedThreadGoalServiceServer() {}
 func (UnimplementedThreadGoalServiceServer) testEmbeddedByValue()                           {}
@@ -192,6 +246,60 @@ func _ThreadGoalService_UpdateThreadGoal_Handler(srv interface{}, ctx context.Co
 	return interceptor(ctx, in, info, handler)
 }
 
+func _ThreadGoalService_ClaimGoalTurn_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ClaimGoalTurnRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ThreadGoalServiceServer).ClaimGoalTurn(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ThreadGoalService_ClaimGoalTurn_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ThreadGoalServiceServer).ClaimGoalTurn(ctx, req.(*ClaimGoalTurnRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ThreadGoalService_BindGoalTurnRun_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(BindGoalTurnRunRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ThreadGoalServiceServer).BindGoalTurnRun(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ThreadGoalService_BindGoalTurnRun_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ThreadGoalServiceServer).BindGoalTurnRun(ctx, req.(*BindGoalTurnRunRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ThreadGoalService_SettleGoalTurn_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SettleGoalTurnRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ThreadGoalServiceServer).SettleGoalTurn(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ThreadGoalService_SettleGoalTurn_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ThreadGoalServiceServer).SettleGoalTurn(ctx, req.(*SettleGoalTurnRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // ThreadGoalService_ServiceDesc is the grpc.ServiceDesc for ThreadGoalService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -210,6 +318,18 @@ var ThreadGoalService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "UpdateThreadGoal",
 			Handler:    _ThreadGoalService_UpdateThreadGoal_Handler,
+		},
+		{
+			MethodName: "ClaimGoalTurn",
+			Handler:    _ThreadGoalService_ClaimGoalTurn_Handler,
+		},
+		{
+			MethodName: "BindGoalTurnRun",
+			Handler:    _ThreadGoalService_BindGoalTurnRun_Handler,
+		},
+		{
+			MethodName: "SettleGoalTurn",
+			Handler:    _ThreadGoalService_SettleGoalTurn_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

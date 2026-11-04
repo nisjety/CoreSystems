@@ -24,6 +24,8 @@ export type ThreadGoal = {
   turnsUsed: number
   lastVerdict?: string
   revision?: number
+  /** The gateway offers Keep going on this deployment (EP-7 S4, `autoContinueAvailable` on the read). */
+  autoContinueAvailable?: boolean
 }
 
 /** The D11 limits the server holds; the dialog checks them first so a refusal is rare. */
@@ -88,6 +90,7 @@ export type SetThreadGoalInput = {
   objective: string
   successCriteria?: string[]
   maxTurns?: number
+  tokenBudget?: number
   /** Close the thread's open goal as cleared and set this one. */
   replace?: boolean
 }
@@ -103,6 +106,7 @@ export async function setThreadGoal(threadId: string, input: SetThreadGoalInput)
       objective: input.objective.trim(),
       successCriteria: cleanCriteria(input.successCriteria),
       ...(input.maxTurns ? { maxTurns: input.maxTurns } : {}),
+      ...(input.tokenBudget ? { tokenBudget: input.tokenBudget } : {}),
       ...(input.replace ? { replace: true } : {}),
     }),
   })
@@ -114,6 +118,7 @@ export type UpdateThreadGoalInput = {
   objective?: string
   successCriteria?: string[]
   maxTurns?: number
+  tokenBudget?: number
   status?: 'active' | 'paused' | 'cleared'
 }
 
@@ -134,6 +139,7 @@ export async function updateThreadGoal(
       ...(input.objective !== undefined ? { objective: input.objective.trim() } : {}),
       ...(input.successCriteria !== undefined ? { successCriteria: cleanCriteria(input.successCriteria) } : {}),
       ...(input.maxTurns !== undefined ? { maxTurns: input.maxTurns } : {}),
+      ...(input.tokenBudget !== undefined ? { tokenBudget: input.tokenBudget } : {}),
       ...(input.status !== undefined ? { status: input.status } : {}),
     }),
   })
@@ -148,7 +154,8 @@ function cleanCriteria(lines: string[] | undefined): string[] {
 export function normalizeGoalResponse(value: unknown): ThreadGoal | null {
   const record = objectValue(value)
   if (!record || record.found === false) return null
-  return normalizeGoal(record.goal)
+  const goal = normalizeGoal(record.goal)
+  return goal && record.autoContinueAvailable === true ? { ...goal, autoContinueAvailable: true } : goal
 }
 
 function normalizeGoal(value: unknown): ThreadGoal | null {

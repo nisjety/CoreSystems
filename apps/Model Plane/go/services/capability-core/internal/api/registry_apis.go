@@ -670,6 +670,10 @@ func (h *SkillBundlesHandler) put(w http.ResponseWriter, r *http.Request, princi
 		return
 	}
 	bundle, err := skillbundle.Parse(body)
+	if err == nil && skillbundle.DeckTemplatesFromLookup(os.Getenv) {
+		// EP-5 S6: a deck template's theme, master and logo are checked before anything is stored.
+		err = skillbundle.ValidateDeckTemplate(bundle)
+	}
 	if err != nil {
 		var refusal *skillbundle.RefusalError
 		if errors.As(err, &refusal) {

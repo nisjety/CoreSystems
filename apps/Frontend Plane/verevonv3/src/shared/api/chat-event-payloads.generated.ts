@@ -77,6 +77,20 @@ export type ChatEventPayloads = {
     request_id: string
     suggestions: unknown[]
   }
+  /** Rust variants: GoalProgress. */
+  goal_progress: {
+    cost_budget_usd_micros: number | null
+    cost_used_usd_micros: number
+    goal_id: string
+    max_turns: number
+    request_id: string
+    status: string
+    status_reason: string
+    token_budget: number | null
+    tokens_used: number
+    turn_no: number
+    turns_used: number
+  }
   /** Rust variants: Grounding. */
   grounding: {
     factCount: number

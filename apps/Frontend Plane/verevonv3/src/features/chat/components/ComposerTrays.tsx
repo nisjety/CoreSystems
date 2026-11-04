@@ -10,6 +10,7 @@ import type { ApprovalDecision, ApprovalEdit, PlanStepEdit } from '@/shared/api/
 import { QuestionCard } from '@/shared/chat-nodes/QuestionCard'
 import { useI18n } from '@/shared/i18n'
 import type { DockedTray, DockedTrayKind } from '../lib/composer-trays'
+import type { GoalAutoContinueView } from '../lib/goal-pump'
 import { ApprovalRequests, PlanApprovalControl, QueuedInputStrip } from './ChatMessages'
 import { GoalBar } from './GoalBar'
 import { GoalDialog, type GoalDraft } from './GoalDialog'
@@ -64,6 +65,8 @@ export function ComposerTrays(props: {
   onContinueGoal?: () => void
   onPauseGoal?: (paused: boolean) => void
   onClearGoal?: () => void
+  /** "Keep going" on the goal bar (EP-7 S4). */
+  goalAutoContinue?: GoalAutoContinueView
 }) {
   const i18n = useI18n()
   const active = () => props.trays[0]
@@ -203,6 +206,7 @@ export function ComposerTrays(props: {
               onPause={() => props.onPauseGoal?.(true)}
               onResume={() => props.onPauseGoal?.(false)}
               onClear={() => props.onClearGoal?.()}
+              autoContinue={props.goalAutoContinue}
             />
           )}
         </Match>

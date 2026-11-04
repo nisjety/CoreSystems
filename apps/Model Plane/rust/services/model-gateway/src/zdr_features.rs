@@ -197,6 +197,8 @@ pub const FIELD_TREATMENTS: &[(&str, Treatment)] = &[
     ("deck_template", refused_feature("skills")),
     // EP-7 S1: a goal is user content in a durable store, so a ZDR turn naming one is refused.
     ("goal_id", refused_feature("thread_goal")),
+    // EP-7 S4: a pump-sent goal turn continues a goal, so a ZDR turn carrying the mark is refused like the goal.
+    ("goal_auto", refused_feature("thread_goal")),
 ];
 
 /// The feature strings the gateway reads, each with its treatment. A feature
@@ -322,6 +324,7 @@ pub fn invoke_field_names(request: &InvokeRequest) -> Vec<&'static str> {
         context_refs: _,
         deck_template: _,
         goal_id: _,
+        goal_auto: _,
     } = request;
     vec![
         "content",
@@ -384,6 +387,7 @@ pub fn invoke_field_names(request: &InvokeRequest) -> Vec<&'static str> {
         "context_refs",
         "deck_template",
         "goal_id",
+        "goal_auto",
     ]
 }
 
@@ -461,6 +465,9 @@ pub fn refusal(request: &InvokeRequest) -> Option<Refusal> {
         return feature(crate::deck_templates::ZDR_FEATURE);
     }
     if request.goal_id.as_deref().is_some_and(|id| !id.trim().is_empty()) {
+        return feature(crate::thread_goal_routes::ZDR_FEATURE);
+    }
+    if request.goal_auto {
         return feature(crate::thread_goal_routes::ZDR_FEATURE);
     }
     if request.max_cost_usd.is_some() {

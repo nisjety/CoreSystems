@@ -384,6 +384,11 @@ fn cases() -> Vec<(&'static str, Value, Expect)> {
         // EP-3 S5: a ZDR turn carrying context references is refused before any network call.
         ("context_refs", with("context_refs", json!([{"kind": "document", "id": "doc-1"}])), refused("context_references")),
         ("context_refs", with("context_refs", json!([])), None),
+        // EP-7 S1 and S4: a goal is user content in a durable store, and a pump-sent turn continues one.
+        ("goal_id", with("goal_id", json!("goal_1")), refused("thread_goal")),
+        ("goal_id", with("goal_id", Value::Null), None),
+        ("goal_auto", with("goal_auto", json!(true)), refused("thread_goal")),
+        ("goal_auto", with("goal_auto", json!(false)), None),
     ]
 }
 

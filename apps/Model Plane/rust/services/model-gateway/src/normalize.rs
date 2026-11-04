@@ -626,6 +626,7 @@ mod tests {
             context_refs: None,
             deck_template: None,
             goal_id: None,
+            goal_auto: false,
         }
     }
 

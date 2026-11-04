@@ -3574,6 +3574,11 @@ Built so far: WS13-S0, WS13-S1, WS13-S2; WS14-S1, WS14-S2 (partial), WS14-S3; WS
 | D3-885 | EP-7-S4 | live-proof | P1 | S2 wiring in model-gateway sse.rs: on the request S2 builds for BindGoalTurnRun, call `crate::goal_auto::mark(&mut request, req.goal_auto);` before sending (req is the InvokeRequest in scope). | open |
 | D3-886 | EP-7-S4 | live-proof | P1 | Regenerate the agent-action-admission golden (FE src/shared/api/contracts and MP api/contracts copies) for chat.goal_auto_toggle. | open |
 | D3-887 | EP-7-S4 | follow-up | P3 | 6 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W3-17.json | open |
+| D3-888 | W3-17 guard | follow-up | P2 | guard skipped: Ledger and depth-register entries (the lead books them) | open |
+| D3-889 | W3-17 guard | follow-up | P2 | guard skipped: The seed-test migration lists (capability_tools_seed_test.go readSeedRows, execution-core tool_class_registry_parity.rs seeded_rows) do not include 0036. read_page and find_in_page are bound only while EXECUTION_WEB_READER is on, so I did not decide how the parity test should treat them. | open |
+| D3-890 | W3-17 guard | follow-up | P2 | guard skipped: Slice test runs the builders listed (cargo test deck_tool/deck_manifest/recorded_artifact, session-core-db-tests.sh, the pptx python unittest, vitest specs): skipped, because this step allows no tests | open |
+| D3-891 | W3-17 guard | test-gap | P1 | still broken after the guard: apps/Model Plane/docs/sse-event-taxonomy.md was not regenerated. scripts/gen-sse-event-taxonomy.py fails on a #[cfg(test)] item in model-gateway/src/mcp_http.rs:142. That file predates this batch, and fixing it means changing the generator. goal_progress is missing from the doc until then. | open |
+| D3-892 | W3-17 guard | test-gap | P1 | still broken after the guard: model-gateway/tests/zdr_feature_table.rs has no row for deck_template (EP-5 S7, in HEAD before this batch). every_field_has_a_row_that_matches_its_treatment will fail on deck_template. The refusal depends on SKILL_DECK_TEMPLATES_ENABLED, so a row needs a design choice; I did not add one. | open |
 
 ## Cross-wave
 
