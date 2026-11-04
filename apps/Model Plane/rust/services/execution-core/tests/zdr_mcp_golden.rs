@@ -40,7 +40,7 @@ const MATRIX: &str = include_str!("fixtures/zdr-posture-matrix.json");
 const ENFORCEMENT_ROWS: usize = 33;
 const ZDR: usize = 7;
 const PERSISTENT: usize = 3;
-const WAIVED: usize = 4;
+const WAIVED: usize = 5;
 const REFUSE: usize = 18;
 
 /// The tool every row is driven with: a registry tool, which the gate refuses by its `mcp__` prefix.

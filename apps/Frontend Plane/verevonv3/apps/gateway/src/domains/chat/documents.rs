@@ -163,7 +163,7 @@ pub(super) async fn with_promote_capability(response: Response, enabled: bool) -
 /// POST /api/v1/chat/documents — persist a chat text attachment as a durable
 /// Data Plane v2 document so retrieval can ground later turns on it.
 ///
-/// With `CHAT_ARTIFACT_PROMOTE_ENABLED` on (EP-3 S8) it also saves one artifact
+/// With the artifact-promote switch on (EP-3 S8, `space_features.chat_artifact_promote`) it also saves one artifact
 /// revision to knowledge (`origin: chat-artifact` plus `source_ref`). That copy
 /// is independent of the thread: it follows Data Plane retention and erase, so
 /// deleting the chat leaves it. With the switch on the BFF refuses a Zero Data

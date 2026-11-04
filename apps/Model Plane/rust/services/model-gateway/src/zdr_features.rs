@@ -400,6 +400,13 @@ pub fn invoke_field_names(request: &InvokeRequest) -> Vec<&'static str> {
 /// connection route is not decided here: the turn's posture decision answers it first.
 #[must_use]
 pub fn refusal(request: &InvokeRequest) -> Option<Refusal> {
+    refusal_with(request, crate::deck_templates::enabled())
+}
+
+/// [`refusal`] with the deck-template switch (`SKILL_DECK_TEMPLATES_ENABLED`, EP-5 S7) passed in, so
+/// a test decides a `deck_template` row under either setting without writing the process environment.
+#[must_use]
+pub fn refusal_with(request: &InvokeRequest, deck_templates_enabled: bool) -> Option<Refusal> {
     if request.wake_context.is_some() {
         return Some(Refusal::DURABLE_MUTATION_FORBIDDEN);
     }
@@ -461,7 +468,7 @@ pub fn refusal(request: &InvokeRequest) -> Option<Refusal> {
     if crate::context_refs::requested(request.context_refs.as_ref()) {
         return feature(crate::context_refs::ZDR_FEATURE);
     }
-    if crate::deck_templates::zdr_refused(crate::deck_templates::enabled(), request.deck_template.as_ref()) {
+    if crate::deck_templates::zdr_refused(deck_templates_enabled, request.deck_template.as_ref()) {
         return feature(crate::deck_templates::ZDR_FEATURE);
     }
     if request.goal_id.as_deref().is_some_and(|id| !id.trim().is_empty()) {

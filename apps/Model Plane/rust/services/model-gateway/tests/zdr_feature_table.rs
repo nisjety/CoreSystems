@@ -49,7 +49,9 @@ fn decided(body: &Value) -> Expect {
     );
     match zdr_posture::decide_for(&zdr_token(), &route) {
         Err(refusal) => Some((refusal.code(), refusal.feature())),
-        Ok(_) => zdr_features::refusal(&request)
+        // Every row is decided with the deck-template switch on, the setting in which the field is
+        // read (EP-5 S7); `deck_template_is_refused_only_while_its_switch_is_on` covers it off.
+        Ok(_) => zdr_features::refusal_with(&request, true)
             .map(|refusal: Refusal| (refusal.code(), refusal.feature())),
     }
 }
@@ -389,7 +391,30 @@ fn cases() -> Vec<(&'static str, Value, Expect)> {
         ("goal_id", with("goal_id", Value::Null), None),
         ("goal_auto", with("goal_auto", json!(true)), refused("thread_goal")),
         ("goal_auto", with("goal_auto", json!(false)), None),
+        // EP-5 S7 (e_zdr_token_deck_template_refused): picking a template mounts a bundle, refused like
+        // naming a skill.
+        ("deck_template", with("deck_template", json!("skill-brand")), refused("skills")),
+        ("deck_template", with("deck_template", json!("")), None),
+        // EP-6 S9: the pinned agent version only narrows a turn (allowlist, autonomy cap); a ZDR turn
+        // carrying it is not refused.
+        ("agent_ref", with("agent_ref", json!("agent-1")), None),
+        ("agent_version", with("agent_version", json!(1)), None),
+        ("agent_digest", with("agent_digest", json!("sha256:abc")), None),
+        ("agent_tool_capability_ids", with("agent_tool_capability_ids", json!(["web.search"])), None),
+        ("agent_autonomy_cap", with("agent_autonomy_cap", json!("ask_first")), None),
     ]
+}
+
+/// EP-5 S7: with its switch off the gateway does not read `deck_template` at all, so a ZDR turn that
+/// carries one is decided as if the field did not exist; with it on the turn is refused as `skills`.
+#[test]
+fn deck_template_is_refused_only_while_its_switch_is_on() {
+    let request = request(&json!({"content": "hello", "deck_template": "skill-brand"}));
+    assert!(zdr_features::refusal_with(&request, false).is_none());
+    assert_eq!(
+        zdr_features::refusal_with(&request, true).map(|refusal| (refusal.code(), refusal.feature())),
+        refused("skills")
+    );
 }
 
 #[test]
@@ -581,8 +606,12 @@ fn function_body<'a>(source: &'a str, signature: &str) -> &'a str {
     let start = source
         .find(signature)
         .unwrap_or_else(|| panic!("{signature} is in sse.rs"));
-    let end = source[start..]
-        .find("\n}\n")
+    // The closing brace at column zero, under either line ending (a CRLF checkout has no "\n}\n").
+    let rest = &source[start..];
+    let end = [rest.find("\n}\n"), rest.find("\n}\r\n")]
+        .into_iter()
+        .flatten()
+        .min()
         .map_or(source.len(), |offset| start + offset);
     &source[start..end]
 }

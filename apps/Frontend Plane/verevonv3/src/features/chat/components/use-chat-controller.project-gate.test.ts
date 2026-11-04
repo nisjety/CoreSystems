@@ -66,8 +66,10 @@ function mount(): () => void {
   createRoot((disposeRoot) => {
     dispose = disposeRoot
     useChatController()
-    flush()
   })
+  // Flushed outside the root, as a rendered page runs its effects: the controller's mount effects
+  // write signals, which Solid refuses inside an owned scope.
+  flush()
   return () => dispose()
 }
 

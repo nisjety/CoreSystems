@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 
 import { cleanup, fireEvent, render } from '@solidjs/testing-library'
+import { flush } from 'solid-js'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { buildChatWireBody, type ChatResearchPlanEvent } from '@/shared/api/chat-client'
 import { ResearchPlanCard, researchPlanEdit, researchPlanTurnEnabled } from './ResearchPlanCard'
@@ -86,14 +87,19 @@ describe('ResearchPlanCard', () => {
     const { container } = render(() => <ResearchPlanCard plan={plan()} onStart={onStart} onCancel={vi.fn()} />)
     const [first] = queryInputs(container)
     fireEvent.input(first as HTMLInputElement, { target: { value: 'lakselus Nordland' } })
+    flush()
     fireEvent.click(one(container, '.verevon-research-plan__remove'))
+    flush()
     // The first row went; the second is now the only one. Re-read after the removal.
     expect(queryInputs(container).map((input) => input.value)).toEqual(['havbruk Vestland'])
     fireEvent.click(one(container, '.verevon-research-plan__add'))
+    flush()
     const added = queryInputs(container)[1] as HTMLInputElement
     fireEvent.input(added, { target: { value: 'rensefisk' } })
+    flush()
     const answer = one<HTMLInputElement>(container, '.verevon-research-plan__question input')
     fireEvent.input(answer, { target: { value: '2025–2026' } })
+    flush()
     fireEvent.click(one(container, '.verevon-research-plan__start'))
     expect(onStart).toHaveBeenCalledWith({
       subQueries: ['havbruk Vestland', 'rensefisk'],
@@ -107,9 +113,11 @@ describe('ResearchPlanCard', () => {
     ))
     const add = one<HTMLButtonElement>(container, '.verevon-research-plan__add')
     fireEvent.click(add)
+    flush()
     expect(queryInputs(container)).toHaveLength(3)
     expect(add.disabled).toBe(true)
     fireEvent.click(add)
+    flush()
     expect(queryInputs(container)).toHaveLength(3)
   })
 

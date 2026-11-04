@@ -291,6 +291,7 @@ describe('WritePreviewDisclosure edit mode (EP-10-S6)', () => {
 
     const add = screen.getByLabelText('Add a recipient')
     fireEvent.input(add, { target: { value: 'not-an-address' } })
+    flush()
     fireEvent.keyDown(add, { key: 'Enter' })
     flush()
     expect(lastDraft(drafts)?.problem).toBe('invalid_recipient')
@@ -301,6 +302,7 @@ describe('WritePreviewDisclosure edit mode (EP-10-S6)', () => {
     expect(lastDraft(drafts)).toBeNull()
 
     fireEvent.input(add, { target: { value: 'b@example.com' } })
+    flush()
     fireEvent.keyDown(add, { key: 'Enter' })
     flush()
     expect(lastDraft(drafts)?.edit.patch).toEqual({ to: ['a@example.com', 'b@example.com'] })

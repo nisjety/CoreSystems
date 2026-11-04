@@ -58,7 +58,7 @@ const ENFORCEMENT_ROWS: usize = 33;
 const REFUSE: usize = 18;
 const ZDR: usize = 7;
 const PERSISTENT: usize = 3;
-const WAIVED: usize = 4;
+const WAIVED: usize = 5;
 
 /// The only rows whose decision is `persistent`: the shared gate is open for these and
 /// for nothing else.
@@ -397,6 +397,8 @@ fn the_old_not_zdr_rule_is_caught_by_the_waived_rows_and_by_nothing_else() {
         caught,
         [
             "e_equal_waived_bearers",
+            "e_waived_deck_manifest_not_persisted",
+            "e_waived_research_metadata_not_persisted",
             "e_waived_web_reader_keeps_inline_head",
             "e_waiver_on_bound_route",
         ]

@@ -548,8 +548,8 @@ mod tests {
         assert_eq!(ZDR_FEATURE, "skills");
     }
 
-    #[test]
-    fn deck_templates_list_only_skills_of_this_org_the_user_may_use() {
+    #[tokio::test]
+    async fn deck_templates_list_only_skills_of_this_org_the_user_may_use() {
         let state = AppState::new();
         state.skills.upsert("org-a", skill("skill-brand", "Brand"));
         state.skills.upsert("org-b", skill("skill-other-org", "Other org"));
@@ -563,8 +563,8 @@ mod tests {
         assert_eq!(usable_skill_ids(&state, "org-b", "user-a", &bundles), vec!["skill-other-org"]);
     }
 
-    #[test]
-    fn deck_templates_scan_is_bounded() {
+    #[tokio::test]
+    async fn deck_templates_scan_is_bounded() {
         let state = AppState::new();
         let bundles: Vec<SkillBundleSummary> = (0..MAX_BUNDLES_SCANNED + 10)
             .map(|index| {

@@ -104,7 +104,7 @@ mod tests {
     fn goal_auto_switch_reads_literal_true_only() {
         assert!(!mp_contracts::loop_fold::switch_from(None));
         assert!(!mp_contracts::loop_fold::switch_from(Some("1")));
-        assert!(!mp_contracts::loop_fold::switch_from(Some("TRUE")));
+        assert!(!mp_contracts::loop_fold::switch_from(Some("yes")));
         assert!(mp_contracts::loop_fold::switch_from(Some("true")));
     }
 

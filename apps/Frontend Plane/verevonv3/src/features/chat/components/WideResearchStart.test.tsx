@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 
 import { cleanup, fireEvent, render } from '@solidjs/testing-library'
+import { flush } from 'solid-js'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ApiError } from '@/shared/api/api-error'
 import type { WideResearchEstimate } from '@/shared/api/chat-client'
@@ -65,6 +66,7 @@ describe('WideResearchStart', () => {
     ))
     const list = Array.from({ length: 10 }, (_, n) => `question ${n}`).join('\n')
     fireEvent.input(container.querySelector('textarea') as HTMLTextAreaElement, { target: { value: list } })
+    flush()
     fireEvent.click(button(container, '.verevon-wide-research__estimate'))
     expect(load).toHaveBeenCalledWith({ itemCount: 10, model: 'verevon-balance' })
     expect((await findByTestId('wide-research-items')).textContent).toContain('5 spørsmål')
@@ -129,6 +131,7 @@ describe('WideResearchStart', () => {
     fireEvent.click(button(container, '.verevon-wide-research__estimate'))
     await findByTestId('wide-research-items')
     fireEvent.click(container.querySelectorAll<HTMLButtonElement>('.verevon-wide-research__preset')[2] as HTMLButtonElement)
+    flush()
     expect(container.querySelector('[data-testid="wide-research-items"]')).toBeNull()
     expect(button(container, '.verevon-wide-research__start').disabled).toBe(true)
   })

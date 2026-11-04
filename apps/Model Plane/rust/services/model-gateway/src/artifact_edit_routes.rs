@@ -889,8 +889,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn the_default_state_cannot_edit() {
+    #[tokio::test]
+    async fn the_default_state_cannot_edit() {
         assert!(!AppState::new().artifact_editing_enabled);
     }
 

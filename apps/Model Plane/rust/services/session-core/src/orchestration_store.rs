@@ -4120,7 +4120,7 @@ mod tests {
     fn a_missing_descriptor_reads_as_no_call() {
         let source = production_source();
         let reader = function_text(&source, "async fn read_consumed_call(");
-        assert!(reader.contains("let Some((ciphertext,)) = row else {\n        return Ok(None);\n    };"));
+        assert!(reader.contains("let Some((ciphertext, revision, original)) = row else {\n        return Ok(None);\n    };"));
     }
 }
 
@@ -7179,7 +7179,8 @@ mod approval_edit_tests {
         let reason = edited_approval_reason(
             "The agent would send an email to alice@example.com.",
             "gmail.send",
-            &serde_json::json!({ "operation": "gmail.send" }),
+            // No `operation`: the input has no summary (a mail send always has one).
+            &serde_json::json!({ "body": { "to": "bob@example.com" } }),
         );
         assert_eq!(reason, "provider write 'gmail.send' requires approval");
     }

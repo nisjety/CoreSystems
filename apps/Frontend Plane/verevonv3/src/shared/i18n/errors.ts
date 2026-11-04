@@ -1105,6 +1105,8 @@ export const ERROR_COPY: Record<string, ErrorCopy> = {
   agent_version_unavailable: { no: 'Agentens versjon kunne ikke leses akkurat nå. Prøv igjen snart.', en: 'This agent\'s version could not be read right now. Try again shortly.' },
   agent_pin_invalid: { no: 'Agentversjonen for denne meldingen kunne ikke leses.', en: 'The agent version for this turn could not be read.' },
   agent_tool_allowlist_do_unsupported: { no: 'Denne agentens verktøyliste kan ikke håndheves i en Gjør-kjøring ennå. Spør den i stedet.', en: 'This agent\'s tool list cannot be enforced on a Do run yet. Ask it instead.' },
+  // EP-6 S2 Run now: the BFF refuses a schedule someone else created
+  run_now_not_creator: { no: 'Bare den som opprettet planen kan kjøre den nå.', en: 'Only the person who created this schedule can run it now.' },
   space_addressed_wake_disabled: { no: 'Å tilkalle agenter fra en melding er ikke slått på ennå.', en: 'Calling agents from a message is not turned on yet.' },
   wake_not_authorized: { no: 'Du kan ikke tilkalle denne agenten her. Meldingen er sendt, men agenten svarer ikke.', en: 'You cannot call this agent here. Your message was sent, but the agent will not answer.' },
   wake_owner_required: { no: 'Bare den som startet denne samtalen kan tilkalle en agent i den. Meldingen er sendt uten svar fra agenten.', en: 'Only the person who started this conversation can call an agent in it. Your message was sent without an answer from the agent.' },

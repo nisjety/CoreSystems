@@ -57,7 +57,8 @@ export function ConnectedAppsPolicyView(props: {
         )}
       />
       <Show when={!props.policies.enforced}>
-        <p class="verevon-settings-status-message" role="status">
+        {/* A standing notice, not a live update: the page's own status line stays the one status region. */}
+        <p class="verevon-settings-status-message" role="note">
           <span class="verevon-trust-chip">{i18n.tr('Ikke håndhevet ennå', 'Not enforced yet')}</span>{' '}
           {i18n.tr(
             'Valgene lagres, men agenten følger dem ikke før håndheving av verktøyregler er slått på.',

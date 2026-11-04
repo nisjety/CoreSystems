@@ -31,4 +31,4 @@ For several slides, write a manifest and let the builder lay them out and check 
 - Fix each error slide, run the builder again and read the new report. Shorten or split a warn slide whose text does not fit.
 - Limits: 40 slides, 5 bullets per slide (the builder warns above 6), 90 characters per bullet, 120 per title, 2,000 characters of notes per slide. A number in a bullet needs its source in notes. Picture paths are relative: no `..` and no leading slash.
 - Use python-pptx by hand only for a layout the builder does not have.
-- To make a deck from a document in this conversation, such as a research report, use the `deck` tool's `create_from_artifact` when it is offered: it returns the outline, and each `[n]` you keep in a bullet becomes a source line in that slide's notes.
+- For a deck from a report in this chat, use `deck` `create_from_artifact` when offered.

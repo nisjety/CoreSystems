@@ -2,6 +2,7 @@
 
 import { webcrypto } from 'node:crypto'
 import { cleanup, fireEvent, render, screen, waitFor } from '@solidjs/testing-library'
+import { flush } from 'solid-js'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import * as chatClient from '@/shared/api/chat-client'
 import { quoteSha256 } from './ArtifactSelection'
@@ -113,6 +114,7 @@ describe('ArtifactsPanel selection edit (EP-3 S6)', () => {
     fireEvent.input(screen.getByRole('textbox', { name: 'Hva skal endres i det valgte?' }), {
       target: { value: 'Gjør dette formelt' },
     })
+    flush()
     fireEvent.click(screen.getByRole('button', { name: 'Be om endring' }))
     await waitFor(() => expect(onAsk).toHaveBeenCalledTimes(1))
     expect(onAsk).toHaveBeenCalledWith(expect.objectContaining({
@@ -146,6 +148,7 @@ describe('ArtifactsPanel selection edit (EP-3 S6)', () => {
 
     // The source view shows the Markdown exactly, so "fet" is characters 15 to 18 of the artifact.
     fireEvent.click(screen.getByRole('button', { name: 'Vis kilde' }))
+    flush()
     const source = textNodes(container.querySelector('pre') as HTMLElement)[0] as Text
     expect(source.data).toBe(content)
     selectOnPage(source, 15, source, 18)
@@ -156,6 +159,7 @@ describe('ArtifactsPanel selection edit (EP-3 S6)', () => {
     fireEvent.input(screen.getByRole('textbox', { name: 'Hva skal endres i det valgte?' }), {
       target: { value: 'Gjør dette tydeligere' },
     })
+    flush()
     fireEvent.click(screen.getByRole('button', { name: 'Be om endring' }))
     await waitFor(() => expect(onAsk).toHaveBeenCalledTimes(1))
     expect(onAsk).toHaveBeenCalledWith(expect.objectContaining({

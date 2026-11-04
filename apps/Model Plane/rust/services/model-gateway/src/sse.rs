@@ -25167,8 +25167,9 @@ mod execute_turn_tests {
         let invoke = code_of("pub async fn invoke_stream_sse(", "\n}\n");
         assert_eq!(
             invoke.matches("req.execute_granted").count(),
-            // the waiver refusal, the approve-then-execute shape check (WS14 S2), and the one stream call
-            3,
+            // the agent allowlist narrowing (EP-6 S9), the waiver refusal, the approve-then-execute
+            // shape check (WS14 S2), and the one stream call
+            4,
             "{invoke}"
         );
         let stream_call = &invoke[invoke.find("agentic_run_stream(").expect("the stream call")..];

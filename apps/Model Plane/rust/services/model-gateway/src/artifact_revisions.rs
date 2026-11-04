@@ -574,8 +574,8 @@ mod tests {
         assert!(ArtifactRevisionsMode::On.writes());
     }
 
-    #[test]
-    fn the_default_state_writes_nothing() {
+    #[tokio::test]
+    async fn the_default_state_writes_nothing() {
         assert_eq!(
             AppState::new().artifact_revisions_mode,
             ArtifactRevisionsMode::Off

@@ -1022,6 +1022,11 @@ pub(crate) mod tests {
                 "synthesize_report",
                 "refused on a waived turn at the stream entry",
             ),
+            (
+                "deep_research.rs",
+                "ledger_inference",
+                "refused on a waived turn at the stream entry; copies the turn's zdr and privacy floor",
+            ),
             // The gRPC surface, each decided by zdr_for before its call.
             ("grpc.rs", "invoke", "the request's route (zdr_for)"),
             ("grpc.rs", "invoke_stream", "the request's route (zdr_for)"),

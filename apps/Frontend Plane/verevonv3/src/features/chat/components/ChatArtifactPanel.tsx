@@ -517,9 +517,12 @@ export function ArtifactViewer(props: {
   // when the panel switches to a different artifact — a new selection must open
   // on the newest revision in preview mode. Keyed on the id alone so a version
   // streaming in for the artifact the user is already reading does NOT yank
-  // their revision cursor forward.
+  // their revision cursor forward. The key is a memo: a Solid 2 effect runs
+  // whenever its compute re-runs, equal value or not, and `artifact()` re-runs
+  // on every saved or server revision, which this effect itself clears.
+  const artifactId = createMemo(() => artifact().id)
   createEffect(
-    () => artifact().id,
+    artifactId,
     () => {
       setVersionCursor(null)
       setShowSource(false)
@@ -554,12 +557,14 @@ export function ArtifactViewer(props: {
         if (generation === historyGeneration) setLoadingOlder(false)
       })
   }
+  // A memo, so a new item object for the same artifact (a streamed revision) does not re-run the effect.
+  const historyKey = createMemo(() => {
+    const threadId = props.historyThreadId ?? ''
+    const item = props.item.artifact
+    return threadId && STORED_REVISION_KINDS.has(item.kind) ? `${threadId}\n${item.id}` : ''
+  })
   createEffect(
-    () => {
-      const threadId = props.historyThreadId ?? ''
-      const item = props.item.artifact
-      return threadId && STORED_REVISION_KINDS.has(item.kind) ? `${threadId}\n${item.id}` : ''
-    },
+    historyKey,
     (key) => {
       historyGeneration += 1
       setServerRevisions([])
@@ -661,8 +666,10 @@ export function ArtifactViewer(props: {
     setPendingSelection(range ? { ...range, version: revision().version } : null)
   }
   // A selection belongs to the text on screen: moving to another revision, or leaving the source view, drops it.
+  // A memo, so a re-read of the same revision (a server page, a saved revision) keeps the selection.
+  const selectionKey = createMemo(() => `${revision().version}:${selectionAllowed()}`)
   createEffect(
-    () => `${revision().version}:${selectionAllowed()}`,
+    selectionKey,
     () => {
       setPendingSelection(null)
     },

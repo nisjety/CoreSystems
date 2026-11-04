@@ -1821,21 +1821,21 @@ function emitCitation(value: unknown, handlers: ChatStreamHandlers): void {
 }
 
 /** The `quote` and `locator` of a citation frame or stored citation (EP-2-S4), each only when well formed. */
-export function citationPassage(value: Record<string, unknown>): Pick<ChatCitationEvent, 'quote' | 'locator'> {
-  const quote = str(value.quote)?.trim()
-  const locator = parseCitationLocator(value.locator)
+export function citationPassage(payload: Record<string, unknown>): Pick<ChatCitationEvent, 'quote' | 'locator'> {
+  const quote = str(payload.quote)?.trim()
+  const locator = parseCitationLocator(payload.locator)
   return { ...(quote ? { quote } : {}), ...(locator ? { locator } : {}) }
 }
 
 /** A report's provenance stamp, as an artifact frame's optional key. */
-function artifactProvenance(value: Record<string, unknown>): Pick<ChatArtifactEvent, 'provenance'> {
-  const provenance = parseResearchProvenance(value.provenance)
+function artifactProvenance(payload: Record<string, unknown>): Pick<ChatArtifactEvent, 'provenance'> {
+  const provenance = parseResearchProvenance(payload.provenance)
   return provenance ? { provenance } : {}
 }
 
 /** The frame's editor, when it names one of the three the server writes; anything else is dropped. */
-function artifactEditor(value: Record<string, unknown>): Pick<ChatArtifactEvent, 'editor'> {
-  return isArtifactEditorKind(value.editor) ? { editor: value.editor } : {}
+function artifactEditor(payload: Record<string, unknown>): Pick<ChatArtifactEvent, 'editor'> {
+  return isArtifactEditorKind(payload.editor) ? { editor: payload.editor } : {}
 }
 
 /**
