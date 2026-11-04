@@ -8,6 +8,7 @@ import {
   browserApprovalToCardModel,
   buildDecisionRequest,
   checkRedirectText,
+  runApprovalFitsCard,
   runApprovalToCardModel,
   type ApprovalCardModel,
 } from './approval-model'
@@ -141,5 +142,26 @@ describe('approvalRiskCopy', () => {
 
   it('returns null when there is no category (run approvals)', () => {
     expect(approvalRiskCopy('')).toBeNull()
+  })
+})
+
+describe('runApprovalFitsCard', () => {
+  const pending = (cause?: Approval['cause']): Approval => ({ id: 'appr_9', status: 'PENDING', cause })
+
+  it('takes a pending approval with no step-up and no standing scope', () => {
+    expect(runApprovalFitsCard(pending())).toBe(true)
+    expect(
+      runApprovalFitsCard(pending({ code: 'unclassified_gate', scopeOptions: ['once'], stepUpRequired: false })),
+    ).toBe(true)
+  })
+
+  it('leaves a step-up, a standing scope or a decided approval to the deck card', () => {
+    expect(
+      runApprovalFitsCard(pending({ code: 'unclassified_gate', scopeOptions: [], stepUpRequired: true })),
+    ).toBe(false)
+    expect(
+      runApprovalFitsCard(pending({ code: 'unclassified_gate', scopeOptions: ['once', 'thread'], stepUpRequired: false })),
+    ).toBe(false)
+    expect(runApprovalFitsCard({ id: 'appr_9', status: 'GRANTED' })).toBe(false)
   })
 })

@@ -102,6 +102,12 @@ import { ConsoleFilterBar, emptyConsoleFilter, filterConsoleEntries, type Consol
 import { EgressReceiptsPanel } from '@/features/browser/evidence/EgressReceiptsPanel'
 import { ProcedurePanel } from '@/features/browser/evidence/ProcedurePanel'
 import { BrowserControlStrip } from '@/features/browser/dock/BrowserControlStrip'
+import { BrowserApprovalDecisionCard } from '@/features/browser/approval/BrowserApprovalDecisionCard'
+import {
+  APPROVAL_REDIRECT_ENABLED,
+  browserApprovalCardEnabled,
+  browserApprovalToCardModel,
+} from '@/features/browser/approval/approval-model'
 import {
   sessionHasHumanBrowsing,
   startSessionKeepAlive,
@@ -415,6 +421,35 @@ function BrowserApprovalCard(props: {
         </div>
       </Show>
     </div>
+  )
+}
+
+/**
+ * E3.2-b swap: a pending browser-action gate on the shared keyboard-first card
+ * (W3-B1-06), mounted only with VITE_BROWSER_APPROVAL_CARD. The parent still
+ * owns the decision: the card's `decide` hands the gate's key to `onDecide`,
+ * so the in-flight keys and the refresh stay where they were. The redirect box
+ * stays off (APPROVAL_REDIRECT_ENABLED) until execution-core reads redirect
+ * text. Renders nothing for a gate that is no longer pending.
+ */
+function BrowserGateDecisionCard(props: {
+  approval: BrowserApprovalEntry
+  onDecide?: (approvalKey: string, decision: ApprovalDecision) => void
+}) {
+  const model = () => browserApprovalToCardModel(props.approval)
+  return (
+    <Show when={model()}>
+      {(card) => (
+        <BrowserApprovalDecisionCard
+          approval={card()}
+          allowRedirect={APPROVAL_REDIRECT_ENABLED}
+          decide={(request) => {
+            props.onDecide?.(props.approval.key, request.decision)
+            return Promise.resolve()
+          }}
+        />
+      )}
+    </Show>
   )
 }
 
@@ -1987,6 +2022,9 @@ export function BrowserChrome(props: {
             </Show>
             <Show when={pendingApproval()}>
               {(approval) => (
+                <Show
+                  when={browserApprovalCardEnabled() && browserApprovalToCardModel(approval())}
+                  fallback={
                 <div
                   class="knowledge-browser-ai-bubble knowledge-browser-ai-bubble--approval"
                   role="alert"
@@ -2031,6 +2069,16 @@ export function BrowserChrome(props: {
                     </div>
                   </div>
                 </div>
+                  }
+                >
+                  {/* E3.2-b swap: the shared card, inline over the live page (D9). */}
+                  <div
+                    class="knowledge-browser-ai-bubble knowledge-browser-ai-bubble--approval"
+                    aria-label={i18n.tr('Venter på godkjenning', 'Waiting for approval')}
+                  >
+                    <BrowserGateDecisionCard approval={approval()} onDecide={props.onDecideBrowserApproval} />
+                  </div>
+                </Show>
               )}
             </Show>
             <Show when={!pendingApproval() && !suggestionDismissed() && (props.browserLoopRationale?.reason ?? lastSuggestion()?.suggestion.reason)}>
@@ -2268,11 +2316,18 @@ export function BrowserChrome(props: {
               <div class="verevon-run-approvals" role="group" aria-label="Nettleserhandlinger som krever godkjenning">
                 <For each={props.browserApprovals}>
                   {(approval) => (
-                    <BrowserApprovalCard
-                      approval={approval}
-                      deciding={decidingBrowserApprovalKeys().includes(approval.key)}
-                      onDecide={props.onDecideBrowserApproval}
-                    />
+                    <Show
+                      when={browserApprovalCardEnabled() && approval.status === 'pending'}
+                      fallback={
+                        <BrowserApprovalCard
+                          approval={approval}
+                          deciding={decidingBrowserApprovalKeys().includes(approval.key)}
+                          onDecide={props.onDecideBrowserApproval}
+                        />
+                      }
+                    >
+                      <BrowserGateDecisionCard approval={approval} onDecide={props.onDecideBrowserApproval} />
+                    </Show>
                   )}
                 </For>
               </div>
