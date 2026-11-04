@@ -1570,6 +1570,10 @@ pub fn trusted_capability_id(tool_name: &str) -> Option<String> {
         "browser.open" | "browser.observe" | "browser.close" => "cap.browser.observe",
         "browser.act" => "cap.browser.act",
         "web_search" | "web_fetch" | "web.search" | "web.read" => "cap.tool.http",
+        // The long-page reader's two tools (EP-2-S10) read pages a fetch already held for this run, so they
+        // carry the fetch's own class. They are named only while the reader is on: with it off they stay
+        // unbound and fail closed, as they did before the reader existed.
+        "read_page" | "find_in_page" if crate::web_tools::reader_enabled() => "cap.tool.http",
         // E3.7.10: the bulk-acquisition tools. A crawl or a batch multiplies pages, spend and
         // egress by a count the model picks, so each family has its own capability instead of
         // widening `cap.tool.http` (capability-core migration 0031 seeds the three ids and the

@@ -38,6 +38,13 @@ const MAX_SEARCH_RESULTS: usize = 8;
 // window, not to summarize. Keep it well clear of real snippet lengths.
 const MAX_SNIPPET_CHARS: usize = 900;
 const MAX_FETCH_CHARS: usize = 8000;
+/// The deployment switch for the long-page reader (EP-2-S10): a fetched page is held for reading rather
+/// than cut to its head, and `read_page` and `find_in_page` are offered. Default OFF. Only the literal
+/// `true` enables it, and it takes effect only in a run that holds results (`EXECUTION_RESULT_HANDLES`).
+pub const WEB_READER_ENV: &str = "EXECUTION_WEB_READER";
+/// The reader's two model-facing tools, answered from the pages the run holds.
+pub const READ_PAGE_TOOL: &str = "read_page";
+pub const FIND_IN_PAGE_TOOL: &str = "find_in_page";
 const SEARCH_SCOPES: &[&str] = &["search:read"];
 const EXTRACT_SCOPES: &[&str] = &["extract:read"];
 /// E3.7.10: the scopes of Quarry's site map and its durable crawl/batch jobs. The
@@ -157,7 +164,10 @@ impl WebToolsClient {
         let value = self
             .post("/v1/extract", &body, org_id, EXTRACT_SCOPES)
             .await?;
-        extract_markdown(url, &value)
+        let markdown = extract_markdown(url, &value)?;
+        // With the reader on, the complete page comes back so the loop can hold it for reading. The loop
+        // cuts it to the head itself when it holds nothing (`result_handles::inline_text`).
+        Ok(if reader_enabled() { markdown } else { fetch_head(&markdown) })
     }
 
     /// `knowledge.map` -> POST `/v1/map`: the URLs of a site (sitemaps and robots), optionally
@@ -580,7 +590,59 @@ fn extract_markdown(url: &str, value: &Value) -> Result<String, String> {
             "fetched {url} (status={status}) but no extractable content"
         ));
     }
-    Ok(truncate_chars(markdown, MAX_FETCH_CHARS))
+    Ok(markdown.to_owned())
+}
+
+/// Whether the long-page reader is switched on in this process.
+#[must_use]
+pub fn reader_enabled() -> bool {
+    reader_enabled_from(std::env::var(WEB_READER_ENV).ok().as_deref())
+}
+
+/// Only the literal `true` enables; `1`, `on` and anything else stay off.
+#[must_use]
+pub fn reader_enabled_from(value: Option<&str>) -> bool {
+    value.map(str::trim) == Some("true")
+}
+
+/// Whether a tool is a page fetch: the one result kind the reader holds for reading.
+#[must_use]
+pub fn is_page_fetch(tool_name: &str) -> bool {
+    matches!(tool_name, "web_fetch" | "web.read")
+}
+
+/// The head of a fetched page the loop shows when it does not hold the page: the cut every fetch has
+/// always made, so a page the reader cannot hold reads exactly as it did before the reader existed.
+#[must_use]
+pub fn fetch_head(markdown: &str) -> String {
+    truncate_chars(markdown, MAX_FETCH_CHARS)
+}
+
+/// The model-facing definitions of `read_page` and `find_in_page`, offered only while the reader is on.
+#[must_use]
+pub fn reader_tool_definitions() -> Vec<pb::ToolDefinition> {
+    if reader_enabled() {
+        reader_definitions()
+    } else {
+        Vec::new()
+    }
+}
+
+/// The two definitions as the chat reader offers them (model-gateway's `web_reader_tool_definitions`),
+/// so the model meets the same names and arguments in either loop.
+fn reader_definitions() -> Vec<pb::ToolDefinition> {
+    vec![
+        pb::ToolDefinition {
+            name: READ_PAGE_TOOL.to_owned(),
+            description: "Read one section of a long web page that web_fetch held for reading. The section ids come from the page's outline. Each read returns up to 4000 characters, and the result says whether the section continues and the offset to continue from. Read a section you have not read yet rather than fetching the page again. Only pages fetched in this run can be read, and only while their ref is live.".to_owned(),
+            parameters_json: r#"{"type":"object","properties":{"ref":{"type":"string","description":"The ref from a web_fetch result"},"section":{"type":"string","description":"A section id from the outline, such as s3. Omit to read the outline and the start of the page."},"offset":{"type":"integer","minimum":0,"description":"Characters into the section to start from: the next_offset of the previous read. Defaults to 0."}},"required":["ref"]}"#.to_owned(),
+        },
+        pb::ToolDefinition {
+            name: FIND_IN_PAGE_TOOL.to_owned(),
+            description: "Search a long web page that web_fetch held for reading. Returns the passages that best match the query, each with the section it is in, most relevant first (at most two). Use it when the outline does not show where the answer is, or to check one specific fact on the page. Read the surrounding section with read_page when a passage is not enough.".to_owned(),
+            parameters_json: r#"{"type":"object","properties":{"ref":{"type":"string","description":"The ref from a web_fetch result"},"query":{"type":"string","description":"The words to look for on the page"}},"required":["ref","query"]}"#.to_owned(),
+        },
+    ]
 }
 
 /// Char-boundary-safe truncation (never panics on multibyte input).
@@ -1099,5 +1161,57 @@ mod crawl_tool_tests {
         assert!(text.contains("max_pages"), "{text}");
         assert!(text.contains("1 URL(s) were refused"), "{text}");
         assert!(format_handoff("batch", &serde_json::json!({"data": {}})).contains("not accepted"));
+    }
+}
+
+#[cfg(test)]
+mod reader_tests {
+    use super::*;
+
+    #[test]
+    fn the_reader_switch_is_read_only_from_the_literal_true() {
+        assert!(reader_enabled_from(Some("true")));
+        assert!(reader_enabled_from(Some(" true ")));
+        for raw in [None, Some(""), Some("TRUE"), Some("1"), Some("on"), Some("yes")] {
+            assert!(!reader_enabled_from(raw), "{raw:?}");
+        }
+    }
+
+    #[test]
+    fn the_definitions_name_the_ref_they_read_by_and_match_the_chat_reader() {
+        let defs = reader_definitions();
+        let names: Vec<&str> = defs.iter().map(|def| def.name.as_str()).collect();
+        assert_eq!(names, ["read_page", "find_in_page"]);
+        let read: Value = serde_json::from_str(&defs[0].parameters_json).expect("json schema");
+        assert_eq!(read["required"], json!(["ref"]));
+        assert!(read["properties"]["section"].is_object());
+        let find: Value = serde_json::from_str(&defs[1].parameters_json).expect("json schema");
+        assert_eq!(find["required"], json!(["ref", "query"]));
+    }
+
+    #[test]
+    fn the_head_of_a_page_is_the_cut_every_fetch_has_always_made() {
+        let long = "x".repeat(MAX_FETCH_CHARS + 25);
+        assert_eq!(fetch_head(&long), truncate_chars(&long, MAX_FETCH_CHARS));
+        assert!(fetch_head(&long).ends_with("[truncated 25 chars]"));
+        assert_eq!(fetch_head("short page"), "short page");
+    }
+
+    #[test]
+    fn only_a_page_fetch_is_held_for_reading() {
+        assert!(is_page_fetch("web_fetch"));
+        assert!(is_page_fetch("web.read"));
+        assert!(!is_page_fetch("web_search"));
+        assert!(!is_page_fetch(READ_PAGE_TOOL));
+    }
+
+    #[test]
+    fn an_extracted_page_comes_back_whole_for_the_loop_to_cut_or_hold() {
+        let markdown = "y".repeat(MAX_FETCH_CHARS + 10);
+        let value = json!({
+            "results": [{"url": "https://x", "status": "fetched", "markdown": markdown}]
+        });
+        let whole = extract_markdown("https://x", &value).expect("markdown");
+        assert_eq!(whole.chars().count(), MAX_FETCH_CHARS + 10);
     }
 }

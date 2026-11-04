@@ -2042,6 +2042,9 @@ async fn run_agent_with_route_parkable(
     };
     if result_store.is_some() {
         tools.push(super::result_handles::tool_definition());
+        // The long-page reader's two tools (EP-2-S10) are offered beside `result_query`: only where the run
+        // holds results, and only while the reader is switched on.
+        tools.extend(crate::web_tools::reader_tool_definitions());
     }
 
     // Posture: deployed agents default to `ask` (risky tools gated behind a

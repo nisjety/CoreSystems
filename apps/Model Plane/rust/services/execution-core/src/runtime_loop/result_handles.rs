@@ -19,12 +19,18 @@
 //! caller never gets a store, and the result falls back to inline truncation,
 //! as it does today. The switch is `EXECUTION_RESULT_HANDLES`, read as the
 //! literal `true` only; off keeps every run byte-identical.
+//!
+//! With the long-page reader on (`EXECUTION_WEB_READER`, EP-2-S10) a fetched page is held as a page
+//! rather than cut to its head: `read_page` reads it by outline and section, `find_in_page` searches it,
+//! and `result_query` still reads it in windows. Only a page from `web_fetch` is held as one.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use mp_contracts::model_plane::v1 as pb;
+use mp_contracts::page_reader;
 use mp_contracts::result_query::{
     apply_text_query, describe_text, HandleQuery, TextRange, MAX_TEXT_READ_CHARS,
 };
@@ -45,6 +51,10 @@ pub const MAX_RUN_BYTES: usize = 4 * 1024 * 1024;
 
 /// How long a held result resolves after it was parked.
 pub const HANDLE_TTL: Duration = Duration::from_secs(900);
+
+/// Most characters one reader result may carry. It is the cap a loop keeps of one tool result, so the
+/// ref an envelope names survives the cut and the outline gives way first.
+const READER_RESULT_CHARS: usize = 8_000;
 
 /// Whether run-scoped handles are switched on in this process.
 #[must_use]
@@ -119,6 +129,8 @@ struct Held {
     stored_at: Instant,
     label: String,
     body: String,
+    /// Whether this is a fetched page the reader may read by section and by search.
+    page: bool,
 }
 
 impl Held {
@@ -182,6 +194,32 @@ impl ResultHandles {
         label: &str,
         body: &str,
     ) -> Result<String, ParkRefused> {
+        self.hold(org_id, run_id, label, body, false)
+    }
+
+    /// Hold a fetched page for the reader (EP-2-S10). The rules are [`Self::park`]'s; the page is also
+    /// read by section and by search, and only a page is.
+    ///
+    /// # Errors
+    /// As [`Self::park`].
+    pub fn park_page(
+        &self,
+        org_id: &str,
+        run_id: &str,
+        label: &str,
+        body: &str,
+    ) -> Result<String, ParkRefused> {
+        self.hold(org_id, run_id, label, body, true)
+    }
+
+    fn hold(
+        &self,
+        org_id: &str,
+        run_id: &str,
+        label: &str,
+        body: &str,
+        page: bool,
+    ) -> Result<String, ParkRefused> {
         if body.chars().count() <= self.park_over_chars {
             return Err(ParkRefused::BelowThreshold);
         }
@@ -216,6 +254,7 @@ impl ResultHandles {
                 stored_at: now,
                 label: label.to_owned(),
                 body: body.to_owned(),
+                page,
             },
         );
         Ok(handle_id)
@@ -255,6 +294,128 @@ impl ResultHandles {
         Ok(value)
     }
 
+    /// Read one section of a page held for reading, from a character offset into it, or the outline and
+    /// the opening of the page when no section is named. The label is repeated with every read.
+    ///
+    /// # Errors
+    /// Returns a model-facing message when the ref is not a page held for this run, has expired, or names
+    /// a section the outline does not list.
+    pub fn read_page(
+        &self,
+        org_id: &str,
+        run_id: &str,
+        page_ref: &str,
+        section_id: &str,
+        offset: usize,
+    ) -> Result<String, String> {
+        let (label, body) = self.held_page(org_id, run_id, page_ref)?;
+        if section_id.is_empty() {
+            return Ok(page_envelope(page_ref, &label, &body));
+        }
+        let sections = page_reader::outline(&body);
+        let Some(section) = sections.iter().find(|candidate| candidate.id == section_id) else {
+            return Err(format!(
+                "this page has no section '{section_id}'. Use a section id from its outline."
+            ));
+        };
+        let read = page_reader::read_section(&body, section, offset);
+        let note = match read.next_offset {
+            Some(next) => format!(
+                "This section continues: read it again with section '{}' and offset {next} for the rest.",
+                section.id
+            ),
+            None => format!("This is the end of section '{}'.", section.id),
+        };
+        Ok(json!({
+            "ref": page_ref,
+            "source": label,
+            "section": {"id": section.id, "heading": section.heading, "chars": section.chars},
+            "offset": read.offset,
+            "text": read.text,
+            "returned_chars": read.returned_chars,
+            "next_offset": read.next_offset,
+            "note": note,
+        })
+        .to_string())
+    }
+
+    /// Search a page held for reading: the passages that best match `query`, each with the section it is in.
+    ///
+    /// # Errors
+    /// As [`Self::read_page`] for the ref.
+    pub fn find_in_page(
+        &self,
+        org_id: &str,
+        run_id: &str,
+        page_ref: &str,
+        query: &str,
+    ) -> Result<String, String> {
+        let (label, body) = self.held_page(org_id, run_id, page_ref)?;
+        let sections = page_reader::outline(&body);
+        let passages: Vec<Value> = page_reader::find(
+            &body,
+            &sections,
+            query,
+            page_reader::FIND_CHARS,
+            page_reader::select_chunks,
+        )
+        .into_iter()
+        .map(|passage| {
+            json!({
+                "section": passage.section_id,
+                "heading": passage.heading,
+                "offset": passage.offset,
+                "text": passage.text,
+            })
+        })
+        .collect();
+        let note = if passages.is_empty() {
+            "No passage of this page shares a word with the query. Read a section from the outline with read_page, or search again with other words."
+        } else {
+            "The passages are the closest matches, most relevant first. Read a passage's section with read_page for the text around it."
+        };
+        Ok(json!({
+            "ref": page_ref,
+            "source": label,
+            "query": query,
+            "passages": passages,
+            "note": note,
+        })
+        .to_string())
+    }
+
+    /// The label and the text of a page held for reading. Only a page parked by [`Self::park_page`] reads
+    /// this way; every other held result is read by `result_query` alone.
+    fn held_page(
+        &self,
+        org_id: &str,
+        run_id: &str,
+        page_ref: &str,
+    ) -> Result<(String, String), String> {
+        let now = Instant::now();
+        let state = self.lock();
+        let key = Key {
+            org_id: org_id.to_owned(),
+            run_id: run_id.to_owned(),
+            handle_id: page_ref.to_owned(),
+        };
+        let held = state
+            .entries
+            .get(&key)
+            .filter(|held| now.duration_since(held.stored_at) < self.ttl)
+            .ok_or_else(|| {
+                format!(
+                    "no page reference '{page_ref}' in this run; it may have expired, or belong to another run. Fetch the page again with web_fetch."
+                )
+            })?;
+        if !held.page {
+            return Err(format!(
+                "'{page_ref}' is not a fetched page. Only a page from web_fetch can be read this way; use {RESULT_QUERY_TOOL} for any other result."
+            ));
+        }
+        Ok((held.label.clone(), held.body.clone()))
+    }
+
     /// Drop every result the run holds. Called when the run finalizes.
     pub fn release_run(&self, org_id: &str, run_id: &str) {
         self.lock()
@@ -284,6 +445,197 @@ pub fn handle_envelope(handle_id: &str, label: &str, body: &str) -> String {
         ),
     })
     .to_string()
+}
+
+/// Whether the reader holds this tool's result as a page: the switch is on and the tool is a page fetch.
+#[must_use]
+pub fn reader_applies(tool_name: &str) -> bool {
+    crate::web_tools::reader_enabled() && crate::web_tools::is_page_fetch(tool_name)
+}
+
+/// The text a read-class result shows the model inline before anything is held. With the reader on, a
+/// fetched page arrives whole, so it is cut to the head the loop has always shown.
+#[must_use]
+pub fn inline_text<'a>(tool_name: &str, output: &'a str) -> Cow<'a, str> {
+    if reader_applies(tool_name) {
+        Cow::Owned(crate::web_tools::fetch_head(output))
+    } else {
+        Cow::Borrowed(output)
+    }
+}
+
+/// Hold a read-class result for the model and return what the model reads in its place, or `None` when
+/// it stays inline. A page the reader holds is parked as a page; any other result is parked as WS25-S5
+/// parks it.
+#[must_use]
+pub fn hold_for_model(
+    store: &ResultHandles,
+    org_id: &str,
+    run_id: &str,
+    tool_name: &str,
+    label: &str,
+    body: &str,
+) -> Option<String> {
+    hold_as(reader_applies(tool_name), store, org_id, run_id, label, body)
+}
+
+fn hold_as(
+    page: bool,
+    store: &ResultHandles,
+    org_id: &str,
+    run_id: &str,
+    label: &str,
+    body: &str,
+) -> Option<String> {
+    if page {
+        let page_ref = store.park_page(org_id, run_id, label, body).ok()?;
+        return Some(page_envelope(&page_ref, label, body));
+    }
+    let handle_id = store.park(org_id, run_id, label, body).ok()?;
+    Some(handle_envelope(&handle_id, label, body))
+}
+
+/// What the model reads in place of a page the reader holds: its ref, the outline of the whole page and
+/// its opening.
+#[must_use]
+pub fn page_envelope(page_ref: &str, label: &str, body: &str) -> String {
+    page_envelope_within(page_ref, label, body, READER_RESULT_CHARS)
+}
+
+/// [`page_envelope`] within `budget` characters. The outline gives way one row at a time, from its last
+/// section, because the keys serialise alphabetically: a cut at the end would lose `ref` first.
+fn page_envelope_within(page_ref: &str, label: &str, body: &str, budget: usize) -> String {
+    let sections = page_reader::outline(body);
+    let opening = sections
+        .first()
+        .map_or("", |section| page_reader::read_section(body, section, 0).text);
+    let total = body.chars().count();
+    let mut shown = sections.len();
+    loop {
+        let envelope = json!({
+            "ref": page_ref,
+            "source": label,
+            "size_chars": total,
+            "outline": outline_rows(&sections[..shown]),
+            "content": opening,
+            "note": page_note(total, shown, sections.len()),
+        })
+        .to_string();
+        if envelope.chars().count() <= budget || shown == 0 {
+            return envelope;
+        }
+        shown -= 1;
+    }
+}
+
+/// The note that tells the model how to read a held page and how long its ref lasts.
+fn page_note(total_chars: usize, shown: usize, sections: usize) -> String {
+    let listing = if shown < sections {
+        format!(
+            " The outline lists the first {shown} of {sections} sections; find_in_page searches all of them."
+        )
+    } else {
+        String::new()
+    };
+    format!(
+        "The COMPLETE page ({total_chars} characters) is held under this ref, and only its opening is shown \
+         above. Read a section from the outline with read_page, or search the page with find_in_page.{listing} \
+         The ref stops resolving after about {} minutes.",
+        HANDLE_TTL.as_secs() / 60
+    )
+}
+
+/// The outline a reader shows: one row per section, with the id that reads it.
+fn outline_rows(sections: &[page_reader::Section]) -> Vec<Value> {
+    sections
+        .iter()
+        .map(|section| {
+            json!({
+                "id": section.id,
+                "heading": section.heading,
+                "chars": section.chars,
+            })
+        })
+        .collect()
+}
+
+/// Run one reader call (`read_page` or `find_in_page`) against the run's held pages. `None` when the name
+/// is not a reader tool or the reader is off, so the call falls through as it did before. With the reader
+/// on and no store (a zero-retention or waived run) the call is refused, as `result_query` refuses one.
+#[must_use]
+pub fn execute_reader_tool(
+    tool_name: &str,
+    tool_input: &str,
+    org_id: &str,
+    run_id: &str,
+    handles: Option<&ResultHandles>,
+) -> Option<Result<String, String>> {
+    let is_reader = matches!(
+        tool_name,
+        crate::web_tools::READ_PAGE_TOOL | crate::web_tools::FIND_IN_PAGE_TOOL
+    );
+    if !is_reader || !crate::web_tools::reader_enabled() {
+        return None;
+    }
+    let Some(handles) = handles else {
+        return Some(Err(format!(
+            "{tool_name} is not available on this run: no page is held for reading on it"
+        )));
+    };
+    Some(match tool_name {
+        crate::web_tools::READ_PAGE_TOOL => read_page_call(tool_input, org_id, run_id, handles),
+        _ => find_in_page_call(tool_input, org_id, run_id, handles),
+    })
+}
+
+/// The JSON arguments of one reader call, or the refusal that names the tool.
+fn reader_input(tool_input: &str, tool_name: &str) -> Result<Value, String> {
+    serde_json::from_str::<Value>(tool_input)
+        .map_err(|error| format!("invalid {tool_name} input: {error}"))
+}
+
+/// The ref a reader call names, trimmed. A call without one is refused.
+fn page_ref_of<'a>(input: &'a Value, tool_name: &str) -> Result<&'a str, String> {
+    input
+        .get("ref")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|page_ref| !page_ref.is_empty())
+        .ok_or_else(|| format!("{tool_name} requires a 'ref' from a web_fetch result"))
+}
+
+fn read_page_call(
+    tool_input: &str,
+    org_id: &str,
+    run_id: &str,
+    handles: &ResultHandles,
+) -> Result<String, String> {
+    let input = reader_input(tool_input, crate::web_tools::READ_PAGE_TOOL)?;
+    let page_ref = page_ref_of(&input, crate::web_tools::READ_PAGE_TOOL)?;
+    let section_id = input
+        .get("section")
+        .and_then(Value::as_str)
+        .map_or("", str::trim);
+    let offset = input.get("offset").and_then(Value::as_i64).unwrap_or(0).max(0);
+    let offset = usize::try_from(offset).unwrap_or(0);
+    handles.read_page(org_id, run_id, page_ref, section_id, offset)
+}
+
+fn find_in_page_call(
+    tool_input: &str,
+    org_id: &str,
+    run_id: &str,
+    handles: &ResultHandles,
+) -> Result<String, String> {
+    let input = reader_input(tool_input, crate::web_tools::FIND_IN_PAGE_TOOL)?;
+    let page_ref = page_ref_of(&input, crate::web_tools::FIND_IN_PAGE_TOOL)?;
+    let query = input
+        .get("query")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|query| !query.is_empty())
+        .ok_or_else(|| "find_in_page requires a 'query' of the words to look for".to_owned())?;
+    handles.find_in_page(org_id, run_id, page_ref, query)
 }
 
 /// Run one `result_query` call against the run's store.
@@ -496,5 +848,137 @@ mod tests {
         assert_eq!(envelope["handle_id"], json!("res_1"));
         assert_eq!(envelope["source"], json!(LABEL));
         assert_eq!(envelope["size_chars"], json!(40));
+    }
+
+    /// A page with a preamble, a short section and a section that carries the query's words.
+    fn page() -> String {
+        "Intro words.\n# Costs\nThe levy rose in 2024.\n# Lice\nSea lice treatment with warm water cut the lice count in every pen.\n".to_owned()
+    }
+
+    #[test]
+    fn a_held_page_reads_back_by_outline_section_and_search() {
+        let store = ResultHandles::new(10);
+        let text = page();
+        let page_ref = store.park_page("org", "run", LABEL, &text).expect("parked");
+        let envelope: Value =
+            serde_json::from_str(&page_envelope(&page_ref, LABEL, &text)).expect("json");
+        assert_eq!(envelope["ref"], json!(page_ref));
+        assert_eq!(envelope["outline"].as_array().map(Vec::len), Some(3));
+        let section: Value = serde_json::from_str(
+            &store
+                .read_page("org", "run", &page_ref, "s3", 0)
+                .expect("section"),
+        )
+        .expect("json");
+        assert_eq!(section["section"]["heading"], json!("Lice"));
+        assert!(section["text"].as_str().expect("text").starts_with("# Lice"));
+        assert_eq!(section["source"], json!(LABEL));
+        let found: Value = serde_json::from_str(
+            &store
+                .find_in_page("org", "run", &page_ref, "lice treatment")
+                .expect("found"),
+        )
+        .expect("json");
+        assert_eq!(found["passages"][0]["section"], json!("s3"));
+        assert_eq!(found["source"], json!(LABEL));
+    }
+
+    #[test]
+    fn a_reader_refuses_a_result_that_is_not_a_page_and_an_unknown_section() {
+        let store = ResultHandles::new(10);
+        let text = page();
+        let other = store.park("org", "run", LABEL, &text).expect("parked");
+        let refused = store
+            .read_page("org", "run", &other, "", 0)
+            .expect_err("not a page");
+        assert!(refused.contains("not a fetched page"), "{refused}");
+        let page_ref = store.park_page("org", "run", LABEL, &text).expect("parked");
+        let unknown = store
+            .read_page("org", "run", &page_ref, "s9", 0)
+            .expect_err("no such section");
+        assert!(unknown.contains("no section 's9'"), "{unknown}");
+    }
+
+    #[test]
+    fn a_page_ref_is_unreadable_from_another_run_or_org_and_once_expired() {
+        let store = ResultHandles::new(10);
+        let text = page();
+        let page_ref = store
+            .park_page("org", "run_a", LABEL, &text)
+            .expect("parked");
+        assert!(store.read_page("org", "run_b", &page_ref, "", 0).is_err());
+        assert!(store
+            .find_in_page("other-org", "run_a", &page_ref, "lice")
+            .is_err());
+        assert!(store.read_page("org", "run_a", &page_ref, "", 0).is_ok());
+        let expired =
+            ResultHandles::with_limits(10, MAX_HANDLE_BYTES, MAX_RUN_BYTES, Duration::ZERO);
+        let gone = expired.park_page("org", "run", LABEL, &text).expect("parked");
+        assert!(expired.read_page("org", "run", &gone, "", 0).is_err());
+    }
+
+    #[test]
+    fn find_in_page_says_so_when_no_passage_shares_a_word_with_the_query() {
+        let store = ResultHandles::new(10);
+        let page_ref = store
+            .park_page("org", "run", LABEL, &page())
+            .expect("parked");
+        let none: Value = serde_json::from_str(
+            &store
+                .find_in_page("org", "run", &page_ref, "zebra crossing")
+                .expect("answer"),
+        )
+        .expect("json");
+        assert_eq!(none["passages"], json!([]));
+        assert!(none["note"].as_str().expect("note").starts_with("No passage"));
+    }
+
+    #[test]
+    fn the_page_envelope_keeps_its_ref_when_the_outline_must_shrink() {
+        let mut text = String::new();
+        for part in 0..30 {
+            text.push_str(&format!(
+                "## Part {part} of the report\nWords about part {part}.\n"
+            ));
+        }
+        let envelope = page_envelope_within("res_9", LABEL, &text, 1_500);
+        assert!(
+            envelope.chars().count() <= 1_500,
+            "{}",
+            envelope.chars().count()
+        );
+        let value: Value = serde_json::from_str(&envelope).expect("json");
+        assert_eq!(value["ref"], json!("res_9"));
+        assert!(value["outline"].as_array().expect("outline").len() < 30);
+        assert!(value["note"]
+            .as_str()
+            .expect("note")
+            .contains("outline lists the first"));
+    }
+
+    #[test]
+    fn a_page_is_held_for_reading_only_above_the_threshold_and_only_as_a_page() {
+        let large = ResultHandles::new(10_000);
+        assert!(large.park_page("org", "run", LABEL, &page()).is_err());
+        let small = ResultHandles::new(10);
+        let held = hold_as(true, &small, "org", "run", LABEL, &page()).expect("held");
+        let reader: Value = serde_json::from_str(&held).expect("json");
+        assert!(reader["outline"].is_array());
+        let plain_text = hold_as(false, &small, "org", "run", LABEL, &page()).expect("held");
+        let plain: Value = serde_json::from_str(&plain_text).expect("json");
+        let handle = plain["handle_id"].as_str().expect("handle").to_owned();
+        assert!(small.read_page("org", "run", &handle, "", 0).is_err());
+    }
+
+    #[test]
+    fn a_reader_call_without_its_ref_or_query_is_refused_by_name() {
+        let store = ResultHandles::new(10);
+        let no_ref = read_page_call("{}", "org", "run", &store).expect_err("no ref");
+        assert!(no_ref.contains("read_page requires a 'ref'"), "{no_ref}");
+        let no_query = find_in_page_call(r#"{"ref":"res_1"}"#, "org", "run", &store)
+            .expect_err("no query");
+        assert!(no_query.contains("'query'"), "{no_query}");
+        let malformed = read_page_call("not json", "org", "run", &store).expect_err("malformed");
+        assert!(malformed.starts_with("invalid read_page input"), "{malformed}");
     }
 }
