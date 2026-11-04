@@ -271,6 +271,196 @@ fn within_bytes(text: &str, max_bytes: usize) -> &str {
     &text[..end]
 }
 
+/// The switch that lets a mentioned agent's pinned version narrow its turn (EP-6 S9): its tool
+/// allowlist and its autonomy cap. Opt-in: only the literal `true` enables it. Off, the five
+/// `agent_*` pin fields of `InvokeRequest` are never read, so a turn is exactly what it was. The BFF
+/// gateway sends them only under its own switch, `AGENT_VERSION_PINNING`.
+const AGENT_TOOL_ALLOWLIST_VAR: &str = "MODEL_GATEWAY_AGENT_TOOL_ALLOWLIST";
+
+fn agent_tool_allowlist_enabled() -> bool {
+    agent_tool_allowlist_enabled_with(&|key| std::env::var(key).ok())
+}
+
+fn agent_tool_allowlist_enabled_with(get: &dyn Fn(&str) -> Option<String>) -> bool {
+    get(AGENT_TOOL_ALLOWLIST_VAR).is_some_and(|value| value == "true")
+}
+
+/// The typed refusal for agent pin fields that are not the shape the BFF gateway sends. A pin that
+/// cannot be read is refused rather than dropped, because dropping it would drop its allowlist and cap.
+const AGENT_PIN_INVALID_CODE: &str = "agent_pin_invalid";
+
+/// The typed refusal for a Do or execute turn whose agent states a tool allowlist. execution-core
+/// owns the binding from a tool to its governed capability (`trusted_capability_id`) and does not
+/// receive the allowlist yet, so such a run could reach tools outside it.
+const AGENT_ALLOWLIST_DO_CODE: &str = "agent_tool_allowlist_do_unsupported";
+
+/// The bound Convex puts on a version's allowlist (`MAX_TOOL_CAPABILITY_IDS`).
+const MAX_AGENT_TOOL_CAPABILITY_IDS: usize = 64;
+
+/// The pinned agent version a mention turn runs (EP-6 S9), as the BFF gateway resolved it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AgentPin {
+    agent_ref: String,
+    version: u32,
+    digest: String,
+    /// `None` when the version states no allowlist; `Some(empty)` allows no tool at all.
+    tool_capability_ids: Option<Vec<String>>,
+    autonomy_cap: Option<mp_contracts::agent_mode::AgentMode>,
+}
+
+/// Reads the agent pin of a turn. `Ok(None)` with the switch off and for a turn that carries no
+/// pin (every turn not addressed to a versioned agent). Every present field must be well formed, and
+/// an allowlist or cap without the agent it belongs to is malformed: the refusal never falls back to
+/// an unpinned turn, which would be the widest one.
+fn agent_pin(
+    enabled: bool,
+    agent_ref: Option<&Value>,
+    version: Option<&Value>,
+    digest: Option<&Value>,
+    tool_capability_ids: Option<&Value>,
+    autonomy_cap: Option<&Value>,
+) -> Result<Option<AgentPin>, &'static str> {
+    if !enabled {
+        return Ok(None);
+    }
+    // A function, not a closure: a closure cannot tie its returned borrow to its argument's lifetime.
+    fn present(value: Option<&Value>) -> Option<&Value> {
+        value.filter(|value| !value.is_null())
+    }
+    let (agent_ref, version, digest, tool_capability_ids, autonomy_cap) = (
+        present(agent_ref),
+        present(version),
+        present(digest),
+        present(tool_capability_ids),
+        present(autonomy_cap),
+    );
+    let Some(agent_ref) = agent_ref else {
+        return if version.is_none()
+            && digest.is_none()
+            && tool_capability_ids.is_none()
+            && autonomy_cap.is_none()
+        {
+            Ok(None)
+        } else {
+            Err(AGENT_PIN_INVALID_CODE)
+        };
+    };
+    let agent_ref = agent_ref
+        .as_str()
+        .filter(|agent_ref| {
+            !agent_ref.is_empty()
+                && agent_ref.len() <= MAX_AGENT_REF_BYTES
+                && agent_ref
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b':'))
+        })
+        .ok_or(AGENT_PIN_INVALID_CODE)?;
+    let version = version
+        .and_then(Value::as_u64)
+        .filter(|version| *version >= 1)
+        .and_then(|version| u32::try_from(version).ok())
+        .ok_or(AGENT_PIN_INVALID_CODE)?;
+    let digest = digest
+        .and_then(Value::as_str)
+        .filter(|digest| {
+            digest.strip_prefix("sha256:").is_some_and(|hex| {
+                hex.len() == 64 && hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+            })
+        })
+        .ok_or(AGENT_PIN_INVALID_CODE)?;
+    let tool_capability_ids = match tool_capability_ids {
+        None => None,
+        Some(ids) => {
+            let ids = ids.as_array().ok_or(AGENT_PIN_INVALID_CODE)?;
+            if ids.len() > MAX_AGENT_TOOL_CAPABILITY_IDS {
+                return Err(AGENT_PIN_INVALID_CODE);
+            }
+            // The capability id shape Convex validates on publish.
+            let ids = ids
+                .iter()
+                .map(|id| {
+                    id.as_str()
+                        .filter(|id| {
+                            id.len() <= 128
+                                && id.as_bytes().first().is_some_and(u8::is_ascii_lowercase)
+                                && id.bytes().all(|b| {
+                                    b.is_ascii_lowercase()
+                                        || b.is_ascii_digit()
+                                        || matches!(b, b'_' | b'.' | b'-')
+                                })
+                        })
+                        .map(str::to_owned)
+                })
+                .collect::<Option<Vec<String>>>()
+                .ok_or(AGENT_PIN_INVALID_CODE)?;
+            Some(ids)
+        }
+    };
+    let autonomy_cap = match autonomy_cap {
+        None => None,
+        Some(cap) => Some(
+            cap.as_str()
+                .and_then(|cap| mp_contracts::agent_mode::AgentMode::parse(cap).ok())
+                .ok_or(AGENT_PIN_INVALID_CODE)?,
+        ),
+    };
+    Ok(Some(AgentPin {
+        agent_ref: agent_ref.to_owned(),
+        version,
+        digest: digest.to_owned(),
+        tool_capability_ids,
+        autonomy_cap,
+    }))
+}
+
+/// Narrows a turn to its agent's tool allowlist: one more intersection beside the binding policy
+/// (BFF), the org policy and the WS05 bindings, so it only ever removes. The gateway holds no binding
+/// from a client-declared or built-in tool name to its governed capability (execution-core does), so
+/// no tool of an Ask turn can be shown to be on the list: the tool loop, the client tools and the web
+/// toggle are all withdrawn. A Do or execute turn is refused (see [`AGENT_ALLOWLIST_DO_CODE`]). A
+/// version without an allowlist changes nothing.
+fn narrow_to_agent_allowlist(
+    pin: Option<&AgentPin>,
+    execute_granted: bool,
+    features: &mut Vec<String>,
+    tools: &mut Vec<crate::http_routes::ToolSpec>,
+    browse_web: &mut bool,
+) -> Result<(), &'static str> {
+    if pin.and_then(|pin| pin.tool_capability_ids.as_ref()).is_none() {
+        return Ok(());
+    }
+    if execute_granted || features.iter().any(|feature| feature == "agentic") {
+        return Err(AGENT_ALLOWLIST_DO_CODE);
+    }
+    features.retain(|feature| feature != "tools");
+    tools.clear();
+    *browse_web = false;
+    Ok(())
+}
+
+/// The mode a turn runs under with its agent's autonomy cap as one more WS25-S6 input: a ceiling,
+/// so it can only make the result stricter. An `auto` cap or none leaves the resolve exactly as it
+/// was, including `None` for a turn that asked for no mode.
+fn resolve_turn_with_agent_cap(
+    posture: crate::profile::ApprovalPosture,
+    chosen: Option<mp_contracts::agent_mode::AgentMode>,
+    org_cap: Option<mp_contracts::agent_mode::AgentMode>,
+    agent_cap: Option<mp_contracts::agent_mode::AgentMode>,
+) -> Option<mp_contracts::agent_mode::Resolved> {
+    match agent_cap.filter(|cap| *cap != mp_contracts::agent_mode::AgentMode::Auto) {
+        None => crate::org_agent_policy::resolve_turn(posture, chosen, org_cap),
+        Some(cap) => Some(mp_contracts::agent_mode::resolve(
+            crate::profile::mode_floor_from(posture),
+            org_cap,
+            chosen,
+            &[mp_contracts::agent_mode::Ceiling {
+                source: "agent",
+                mode: cap,
+            }],
+        )),
+    }
+}
+
 /// The Space retrieval decision a turn's grounding is scoped by. A scoped thread's first message
 /// carries `space_context`; a later one carries `space_append_context`, which is read only while the
 /// switch is on. An empty token is the BFF's FORBIDDEN answer, which `retrieval::scoped_retrieval_token`
@@ -1812,6 +2002,44 @@ pub async fn invoke_stream_sse(
     let ingestion_bearer = ingestion_bearer.map(|Extension(bearer)| bearer);
     let sandbox_bearer = sandbox_bearer.map(|Extension(bearer)| bearer);
     let browser_bearer = browser_bearer.map(|Extension(bearer)| bearer);
+    // EP-6 S9: the mentioned agent's pinned version, read only with the switch on. Its allowlist
+    // narrows the turn before anything reads the features or tools; its cap joins the mode resolve.
+    let agent_pin = match agent_pin(
+        agent_tool_allowlist_enabled(),
+        req.agent_ref.as_ref(),
+        req.agent_version.as_ref(),
+        req.agent_digest.as_ref(),
+        req.agent_tool_capability_ids.as_ref(),
+        req.agent_autonomy_cap.as_ref(),
+    ) {
+        Ok(pin) => pin,
+        Err(code) => {
+            return error_stream(&request_id, code, "The agent version for this turn could not be read.", false);
+        }
+    };
+    if let Some(pin) = agent_pin.as_ref() {
+        // Ids and a digest only, never the agent's instructions.
+        info!(
+            agent_ref = %pin.agent_ref,
+            agent_version = pin.version,
+            agent_digest = %pin.digest,
+            "agent version pinned for the turn"
+        );
+    }
+    if let Err(code) = narrow_to_agent_allowlist(
+        agent_pin.as_ref(),
+        req.execute_granted,
+        &mut req.features,
+        &mut req.tools,
+        &mut req.browse_web,
+    ) {
+        return error_stream(
+            &request_id,
+            code,
+            "This agent's tool list cannot be enforced on a Do run yet. Ask it instead.",
+            false,
+        );
+    }
     let features = req.features.clone();
     let conversation_only = features.iter().any(|f| f == "conversation_only");
     if conversation_only && (req.deep_research || req.generate_image
@@ -1995,7 +2223,12 @@ pub async fn invoke_stream_sse(
             );
         }
     };
-    let turn_mode = crate::org_agent_policy::resolve_turn(requested_posture, chosen_mode, org_mode_cap);
+    let turn_mode = resolve_turn_with_agent_cap(
+        requested_posture,
+        chosen_mode,
+        org_mode_cap,
+        agent_pin.as_ref().and_then(|pin| pin.autonomy_cap),
+    );
     if let Some(turn) = turn_mode {
         req.plan_mode |= turn.preset.plan_gate;
         tracing::info!(
@@ -5701,6 +5934,26 @@ pub async fn invoke_stream_sse(
                     terminal_assigned = true;
                     timing.mark(crate::turn_timing::Mark::Durable);
                     let publish_started = timing.now_ms();
+
+                    // EP-3 S2: with the revision switch on, the same revisions also go to
+                    // session-core's store, best effort on their own task. It reads the heads
+                    // committed before this turn, so it runs before the seeding below.
+                    if session_state.artifact_revisions_mode.writes() {
+                        crate::artifact_revisions::record_turn_revisions(
+                            &session_state,
+                            &session_bearer,
+                            crate::artifact_revisions::RevisionTarget {
+                                org_id: org_clone.clone(),
+                                thread_id: session_thread_id.clone(),
+                                run_id: session_run_for_terminal.run_id.clone(),
+                            },
+                            &committed_artifacts,
+                            &sink.recorded_artifacts(),
+                            effective_zdr,
+                            // Only a ZDR or waived (DEC-32) turn states a retention class; OD-11 keeps waived out.
+                            retention_class.is_some(),
+                        );
+                    }
 
                     // The exact text and its receipt are now in the durable
                     // assistant message. Publish only the last selected version
@@ -23303,6 +23556,7 @@ mod continue_run_tests {
                     run_id: "run-42".to_owned(),
                     plan_id: "plan-1".to_owned(),
                     reason: reason.to_owned(),
+                    control_epoch: 0,
                 },
             )),
             ..Default::default()
@@ -23320,6 +23574,7 @@ mod continue_run_tests {
                     run_id: "run-42".to_owned(),
                     plan_id: "plan-1".to_owned(),
                     reason: "control_returned".to_owned(),
+                    control_epoch: 0,
                 },
             )),
             ..Default::default()
@@ -25173,5 +25428,228 @@ mod agent_role_catalogue_tests {
         );
         let refs: Vec<&str> = roles.iter().map(|r| r.agent_ref.as_str()).collect();
         assert_eq!(refs, ["ok"], "invalid entries and duplicates are left out");
+    }
+}
+
+/// EP-6 S9: a mentioned agent's pinned version narrows its turn and never widens it.
+#[cfg(test)]
+mod agent_pin_tests {
+    use super::*;
+    use mp_contracts::agent_mode::{AgentMode, Source};
+
+    const DIGEST: &str = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    fn pin_from(body: &Value) -> Result<Option<AgentPin>, &'static str> {
+        agent_pin(
+            true,
+            body.get("agent_ref"),
+            body.get("agent_version"),
+            body.get("agent_digest"),
+            body.get("agent_tool_capability_ids"),
+            body.get("agent_autonomy_cap"),
+        )
+    }
+
+    fn pinned(extra: Value) -> Value {
+        let mut body = json!({
+            "agent_ref": "agent_1",
+            "agent_version": 2,
+            "agent_digest": DIGEST,
+        });
+        body.as_object_mut()
+            .expect("object")
+            .extend(extra.as_object().expect("object").clone());
+        body
+    }
+
+    fn tool(name: &str) -> crate::http_routes::ToolSpec {
+        crate::http_routes::ToolSpec {
+            name: name.to_owned(),
+            description: String::new(),
+            parameters_json: String::new(),
+        }
+    }
+
+    #[test]
+    fn the_switch_reads_only_the_literal_true() {
+        for value in [None, Some(""), Some("1"), Some("TRUE"), Some(" true"), Some("on")] {
+            let get = |_: &str| value.map(str::to_owned);
+            assert!(!agent_tool_allowlist_enabled_with(&get), "{value:?} must leave it off");
+        }
+        assert!(agent_tool_allowlist_enabled_with(&|_| Some("true".to_owned())));
+    }
+
+    #[test]
+    fn switch_off_never_reads_the_pin() {
+        let body = pinned(json!({"agent_autonomy_cap": "nonsense"}));
+        assert_eq!(
+            agent_pin(
+                false,
+                body.get("agent_ref"),
+                body.get("agent_version"),
+                body.get("agent_digest"),
+                body.get("agent_tool_capability_ids"),
+                body.get("agent_autonomy_cap"),
+            ),
+            Ok(None)
+        );
+    }
+
+    #[test]
+    fn a_turn_without_a_pin_is_unchanged() {
+        assert_eq!(pin_from(&json!({})), Ok(None));
+        assert_eq!(pin_from(&json!({"agent_ref": null})), Ok(None));
+    }
+
+    #[test]
+    fn a_well_formed_pin_is_read() {
+        let pin = pin_from(&pinned(json!({
+            "agent_tool_capability_ids": ["cap.retrieval.query"],
+            "agent_autonomy_cap": "read_only",
+        })))
+        .expect("well formed")
+        .expect("pinned");
+        assert_eq!(pin.agent_ref, "agent_1");
+        assert_eq!(pin.version, 2);
+        assert_eq!(pin.digest, DIGEST);
+        assert_eq!(
+            pin.tool_capability_ids,
+            Some(vec!["cap.retrieval.query".to_owned()])
+        );
+        assert_eq!(pin.autonomy_cap, Some(AgentMode::ReadOnly));
+
+        let bare = pin_from(&pinned(json!({})))
+            .expect("well formed")
+            .expect("pinned");
+        assert_eq!(bare.tool_capability_ids, None, "no allowlist stated");
+        assert_eq!(bare.autonomy_cap, None);
+    }
+
+    #[test]
+    fn a_malformed_pin_is_refused_never_dropped() {
+        for body in [
+            json!({"agent_tool_capability_ids": []}),
+            json!({"agent_autonomy_cap": "read_only"}),
+            pinned(json!({"agent_ref": "bad ref"})),
+            pinned(json!({"agent_version": 0})),
+            pinned(json!({"agent_version": "2"})),
+            pinned(json!({"agent_digest": "sha256:abc"})),
+            pinned(json!({"agent_digest": null})),
+            pinned(json!({"agent_tool_capability_ids": "cap.retrieval.query"})),
+            pinned(json!({"agent_tool_capability_ids": ["Cap.Upper"]})),
+            pinned(json!({"agent_autonomy_cap": "unrestricted"})),
+            pinned(json!({"agent_autonomy_cap": "Auto"})),
+        ] {
+            assert_eq!(pin_from(&body), Err(AGENT_PIN_INVALID_CODE), "{body}");
+        }
+        let many: Vec<String> = (0..=MAX_AGENT_TOOL_CAPABILITY_IDS)
+            .map(|n| format!("cap.n{n}"))
+            .collect();
+        assert_eq!(
+            pin_from(&pinned(json!({"agent_tool_capability_ids": many}))),
+            Err(AGENT_PIN_INVALID_CODE)
+        );
+    }
+
+    /// The allowlist intersects, it never grants: a list naming a tool the org policy blocks, or any
+    /// other tool, leaves the Ask turn with no tool at all, because the gateway cannot bind a tool
+    /// name to its capability.
+    #[test]
+    fn an_allowlist_never_offers_a_tool() {
+        let pin = pin_from(&pinned(json!({"agent_tool_capability_ids": ["cap.command.shell"]})))
+            .expect("well formed");
+        let mut features = vec!["tools".to_owned(), "rag".to_owned()];
+        let mut tools = vec![tool("shell"), tool("web_search")];
+        let mut browse_web = true;
+        narrow_to_agent_allowlist(pin.as_ref(), false, &mut features, &mut tools, &mut browse_web)
+            .expect("an Ask turn is narrowed");
+        assert_eq!(features, ["rag"]);
+        assert!(tools.is_empty());
+        assert!(!browse_web);
+    }
+
+    #[test]
+    fn a_pin_without_an_allowlist_leaves_the_tools() {
+        let pin = pin_from(&pinned(json!({}))).expect("well formed");
+        let mut features = vec!["tools".to_owned(), "agentic".to_owned()];
+        let mut tools = vec![tool("shell")];
+        let mut browse_web = true;
+        narrow_to_agent_allowlist(pin.as_ref(), true, &mut features, &mut tools, &mut browse_web)
+            .expect("nothing to narrow");
+        assert_eq!(features, ["tools", "agentic"]);
+        assert_eq!(tools.len(), 1);
+        assert!(browse_web);
+        narrow_to_agent_allowlist(None, true, &mut features, &mut tools, &mut browse_web)
+            .expect("no pin");
+        assert_eq!(tools.len(), 1);
+    }
+
+    #[test]
+    fn a_do_or_execute_turn_with_an_allowlist_is_refused() {
+        let pin = pin_from(&pinned(json!({"agent_tool_capability_ids": []}))).expect("well formed");
+        let mut browse_web = false;
+        let mut agentic = vec!["agentic".to_owned()];
+        assert_eq!(
+            narrow_to_agent_allowlist(
+                pin.as_ref(),
+                false,
+                &mut agentic,
+                &mut Vec::new(),
+                &mut browse_web
+            ),
+            Err(AGENT_ALLOWLIST_DO_CODE)
+        );
+        assert_eq!(
+            narrow_to_agent_allowlist(
+                pin.as_ref(),
+                true,
+                &mut Vec::new(),
+                &mut Vec::new(),
+                &mut browse_web
+            ),
+            Err(AGENT_ALLOWLIST_DO_CODE)
+        );
+    }
+
+    #[test]
+    fn a_read_only_cap_wins_over_a_user_auto_choice() {
+        let turn = resolve_turn_with_agent_cap(
+            crate::profile::ApprovalPosture::Auto,
+            Some(AgentMode::Auto),
+            None,
+            Some(AgentMode::ReadOnly),
+        )
+        .expect("a cap resolves a mode");
+        assert_eq!(turn.mode, AgentMode::ReadOnly);
+        assert_eq!(turn.source, Source::Ceiling("agent"));
+        assert!(turn.preset.plan_gate);
+    }
+
+    #[test]
+    fn a_cap_never_loosens_a_stricter_input() {
+        let turn = resolve_turn_with_agent_cap(
+            crate::profile::ApprovalPosture::Ask,
+            Some(AgentMode::ReadOnly),
+            Some(AgentMode::Lockdown),
+            Some(AgentMode::AskFirst),
+        )
+        .expect("resolved");
+        assert_eq!(turn.mode, AgentMode::Lockdown);
+        assert_eq!(turn.source, Source::Org);
+    }
+
+    #[test]
+    fn an_auto_cap_or_none_resolves_as_before() {
+        let posture = crate::profile::ApprovalPosture::Auto;
+        for chosen in [None, Some(AgentMode::AskFirst)] {
+            for org_cap in [None, Some(AgentMode::ReadOnly)] {
+                let before = crate::org_agent_policy::resolve_turn(posture, chosen, org_cap);
+                assert_eq!(resolve_turn_with_agent_cap(posture, chosen, org_cap, None), before);
+                assert_eq!(
+                    resolve_turn_with_agent_cap(posture, chosen, org_cap, Some(AgentMode::Auto)),
+                    before
+                );
+            }
+        }
     }
 }
