@@ -80,6 +80,12 @@ LITERAL_PRODUCERS = {
     "derived `step_update` exists",
 }
 
+# model-gateway files that serve a different SSE stream with its own vocabulary and its own
+# golden; their `.event("...")` literals are not run-event producers.
+OTHER_STREAMS = {
+    "space_sse.rs": "Space room event stream, pinned by apps/Model Plane/api/contracts/space-events.json",
+}
+
 VARIANT_ARM = re.compile(
     r"((?:ChatEvent::\w+\s*\{\s*\.\.\s*\}\s*\|?\s*)+)=>\s*(?:Some\(\"(\w+)\"\)|None|\"(\w+)\")"
 )
@@ -287,6 +293,14 @@ def without_test_items(source: str) -> str:
             # A one-line item such as `mod controls;` or `use x;`: all of it is test-only.
             index += 1
             continue
+        generics = header.replace("=>", "").replace("->", "")
+        if one_line and header.endswith(",") and header.count("(") == header.count(")") \
+                and generics.count("<") == generics.count(">"):
+            # A one-line enum variant, struct field or match arm such as `Scripted(VecDeque<Vec<u8>>),`
+            # or `Self::Scripted(c) => Ok(c.pop_front()),`: its brackets close on the line, so the
+            # trailing comma ends the whole item.
+            index += 1
+            continue
         if not (TEST_ITEM.match(header) or "{" in header):
             raise TaxonomyError(
                 f"unsupported #[cfg(test)] item {header.strip()!r}: expected a mod, fn or "
@@ -303,9 +317,11 @@ def without_test_items(source: str) -> str:
 
 
 def literal_writers(rust: dict[str, str]) -> set[str]:
-    """Names written by a literal `.event("...")` outside test modules."""
+    """Names written by a literal `.event("...")` outside test modules and other streams."""
     found: set[str] = set()
-    for text in rust.values():
+    for key, text in rust.items():
+        if key in OTHER_STREAMS:
+            continue
         production = WHOLE_LINE_COMMENT.sub("", without_test_items(text))
         found.update(EVENT_LITERAL.findall(production))
     return found
@@ -509,7 +525,7 @@ def main() -> int:
 
     if not args.check:
         DOC.parent.mkdir(parents=True, exist_ok=True)
-        DOC.write_text(rendered, encoding="utf-8")
+        DOC.write_text(rendered, encoding="utf-8", newline="\n")  # LF on every platform, like the committed doc
         print(f"wrote {DOC.relative_to(REPO_ROOT)} ({count} events)")
         return 0
 
