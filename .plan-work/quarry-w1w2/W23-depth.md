@@ -922,3 +922,77 @@ W3-E3.3-g rows from W23-depth-lane-b.md (id | where | finding | severity | sugge
 - W3-E3.7.10-CP | integration | E3.7.9a (crawl approval) is not on main. The gateway `web.crawl_site` arm now fails closed (403 crawl_approval_required without a bound or above 50 pages) instead of inheriting an approval that does not exist. Replace with the E3.7.9 approval path when it lands. | apps/Frontend Plane/verevonv3/apps/gateway/src/domains/actions/handlers.rs | med
 - W3-E3.7.10-CP | config | The toolset flag is read with std::env::var per request in the handler; the gateway convention (memory: AppState not env) is config on AppState, because env reads raced under parallel tests. No test sets the variable today, so no race, but a test that does will. | apps/Frontend Plane/verevonv3/apps/gateway/src/domains/actions/handlers.rs | low
 - lane d finish | tooling | The WIP cherry-pick of 397e84a64 onto main 9bea43473 conflicted only in MP-ASKS.md (lane b E3.3-g/E3.3-l sections vs lane d E3.1-i/E3.7.10-CP sections, both appended); kept both, main's first. No code conflict. | .plan-work/quarry-w1w2/MP-ASKS.md | low
+
+## W3 finish, lane b depth rows (28: E3.4-5 5, E3.4-7 5, E3.6-7 7, E3.8.5 7, E3.7.9b 4)
+
+Copied from .plan-work/quarry-w1w2/W23-depth-lane-b.md on w23f/lane-b (cce283a7f). Integration note: W23-b-E347-3 (admission golden) is done in 2e465238a.
+
+## W3-E3.6-7 (lane b)
+
+| id | where | finding | severity | suggested fix |
+|---|---|---|---|---|
+| W23-b-E367-1 | quarry-runtime pipeline.rs / content_route.rs | No caller: scanned PDF pages are not classified and routed to `ocr_pages_for_org`, and the PII stage does not call `pii_model_for_org`. The lanes are client-only. | medium | The E3.6 routing slice: classify pages with WS5's `document_has_no_text_layer`, call OCR for those pages only, map every `DocumentLaneError` to a failed page counted in `pages_failed`. |
+| W23-b-E367-2 | quarry-edge config.rs, compose, RUNBOOKS | `QUARRY_EDGE__OCR` and `QUARRY_EDGE__PII_MODEL` are read only by `DocumentLaneSettings::from_env`; no edge config field, compose default `0`, or runbook row. | low | Add both to the edge config and the Ingestion compose with default `0`, plus a runbook line, when a caller is wired. |
+| W23-b-E367-3 | quarry-runtime mp_client.rs `pii_model_for_org` | Input over 5120 chars is refused, not chunked; a page's markdown is usually longer, so the caller must split (on paragraph boundaries) and rejoin. | medium | A chunker beside the PII stage; keep the fail-closed rule per chunk. |
+| W23-b-E367-4 | quarry-runtime mp_client.rs OCR bounds | Per-org OCR page caps and metering (WS6) are absent; only a per-call cap of 20 pages / 16 MiB exists, and no usage envelope is published. | medium | WS6 per-org caps and an OCR page meter before the flag is turned on beyond dev. |
+| W23-b-E367-5 | quarry-runtime mp_client.rs auth | `post_document_lane` duplicates `chat_for_org`'s credential pick and retry loop. | low | Fold both into one `post_lane(route, timeout, body)` when the Dynamic path is built (WS16.S3). |
+| W23-b-E367-6 | quarry-transform pii.rs vs OCR text | OCR text with line breaks or noise inside a number defeats the deterministic candidate patterns (W3-B1-02 row); OCR output feeds the PII stage. | medium | Measure on the Norwegian scanned fixture set (E3.6-10) before enabling OCR with redaction on. |
+
+## W3-E3.8.5 (lane b)
+
+| id | where | finding | severity | suggested fix |
+|---|---|---|---|---|
+| W23-b-E385-1 | knowledge/quarry.rs `classify_scrape_failure` | No caller. The gateway sends `scrape_host_not_found`, `scrape_unreachable` or `scrape_tls_failed` only after the call site lands (status ask 1). That file is outside this unit, so until then the new copy is dormant. | medium | Put the call first in `classify_scrape_failure` in the same change that turns `QUARRY_EDGE__FETCH_SUB_CODES` on, and remove the `#[allow(dead_code)]` in shared.rs. |
+| W23-b-E385-2 | knowledge/quarry.rs `retry_worthwhile` | Any fast 5xx (under 12 s, not 403 or 429) is retried as a static fetch. A DRIVER_FAILED `dns` or `tls` is therefore asked twice in one request: a second chain against the same dead host or the same handshake failure. | medium | Once the reason is known, skip this extra static fetch for `dns` and `tls`, and let the E3.8.3 retry rule decide the rest. |
+| W23-b-E385-3 | knowledge/quarry.rs `classify_scrape_failure`, elapsed rule | A 502 that took 20 s or more reads `scrape_timeout` ahead of `scrape_failed`. So an `all_drivers_failed` after a slow chain reads "took too long", while the sub-code says the cause is not time. The three new codes are not affected: the reader runs first once wired. | low | Owner decision: for `all_drivers_failed`, read the reason before the elapsed rule too, or leave it on the elapsed rule. |
+| W23-b-E385-4 | src/shared/i18n/browser-errors.test.ts `BROWSER_ERROR_CODES`; src/shared/i18n/gateway-error-codes.test.ts `ADDED_CODES` | Neither list names the three codes, so their copy is checked only by the "has copy" scan, not by the copy-rule tests. Both files are outside this unit. | low | Add the three codes to both lists in the wiring change. |
+| W23-b-E385-5 | shared.rs `fetch_sub_code_refusal` against quarry-core `driver_failed_reason` and quarry-runtime `fetch_deadline_reason` | The gateway copies the reason strings by hand. A rename in Quarry would silently stop the classifier: the three codes would fall back to `scrape_failed`. The TIMEOUT reasons still live only in quarry-runtime. E3.8.2 asks to move them to quarry-core and to the Go errs package, with an ERROR_REASONS section, and that has not happened. | medium | Name the gateway mirror in the DRIVER_FAILED section of ERROR_REASONS.md, and move the TIMEOUT reasons to quarry-core as E3.8.2 asks. |
+| W23-b-E385-6 | src/shared/i18n/errors.ts `scrape_host_not_found` | The copy says "check the link", but a resolver fault gives the same `dns` reason as a name that does not exist (E3.8.1 assumed decision 2). A person with a good link is told to check it. | low | Keep for now. When E3.8.1 can tell a resolver fault from NXDOMAIN, give that case a "try again shortly" sentence. |
+
+
+## Finish run 2026-11-04 (branch w23f/lane-b, base main 9bea43473): W3-E3.4-5, W3-E3.4-7, W3-E3.6-7, W3-E3.8.5, W3-E3.7.9b
+
+WIP commit de99d84eb cherry-picked onto main with no conflicts (main carried no newer version of these hunks). Code only; nothing compiled or run.
+
+Status of earlier rows after the finish run: W23-b-E385-1 done (reader wired in `classify_scrape_failure`, allow removed); W23-b-E385-3 answered for dns/connect/tls (the reader runs before the elapsed rule; `all_drivers_failed` keeps the elapsed rule, still an owner decision); W23-b-E385-4 done (codes pinned in both copy-rule tests). W23-b-E385-2 (retry of a fast dns/tls) stays open.
+
+### W3-E3.4-5 (lane b)
+
+| id | where | finding | severity | suggested fix |
+|---|---|---|---|---|
+| W23-b-E345-1 | gateway browser.rs SSE routes (`frames/stream`, `events/stream`) | `proxy_sse_stream` has no extra-header parameter, so the gateway offers no view-only SSE route; the edge filters the SSE `live_view` event by scope only when a caller sends the header. A view-only watcher on SSE would today get the full stream (including an interactive iframe/provider URL). | medium | Thread an optional extra header through `proxy_sse_stream_with_browser` (or a scope arg) and add `/view/frames/stream`; until then only the socket route exists. |
+| W23-b-E345-2 | quarry-edge live.rs `live_view_only_enabled` | The edge flag is read per call with `std::env::var` (pattern of `QUARRY_EDGE__DOWNLOADS`); parallel tests that set it can race (same trap as the gateway AppState lesson). The tests use `live_scope_from(.., enabled)` and do not set the env, so they are safe today. | low | Move the flag onto edge config when a second reader appears. |
+| W23-b-E345-3 | gateway + edge | "Owner-only share" is a second, watch-only socket for the same owner; there is no share to another person (that needs a Control Plane share grant and an owner check that accepts a grantee). | note | Product decision before any cross-user share. |
+| W23-b-E345-4 | quarry-edge step.rs / attach.rs | The scope is enforced on the live socket only. The REST `/step` route and the attach/delegate paths take no scope header, so a view-only holder with the same bearer can still act through REST. The gateway route set is the real boundary today. | medium | When a view-only bearer exists (share grant), make `/step` and attach refuse it too. |
+| W23-b-E345-5 | flags | `QUARRY_EDGE__LIVE_VIEW_ONLY` and `BROWSER_LIVE_VIEW_ONLY` are in no compose file, RUNBOOK or OpenAPI; the new gateway route and the `x-quarry-live-scope` header are not in OpenAPI or the ZDR route matrix. | low | Add with default off/false when an SPA consumer lands. |
+
+### W3-E3.4-7 (lane b)
+
+| id | where | finding | severity | suggested fix |
+|---|---|---|---|---|
+| W23-b-E347-1 | gateway dispatchers / quarry-edge | No gateway arm and no Ingestion owner route for `browser_download.send_to_knowledge`; the source-level registry-to-dispatcher parity test may flag the row (as for `browser_run.steer`). | high | Gateway arm -> quarry-edge route that loads the admitted artifact, parses PDF/text/Markdown/CSV and calls E3.4-8 `DownloadHandoff` with the request key for dedupe; refuse under ZDR. |
+| W23-b-E347-2 | session projection (gateway browser.rs, quarry-edge run projection) | No projection reports `downloads`; the drawer reads a guessed shape (`artifactId`/`artifact_id`, `filename`, `mimeType`, `sizeBytes`). | medium | Define the projection field in quarry-edge + OpenAPI and map it in the gateway; align the drawer's reader. |
+| W23-b-E347-3 | src/shared/api/contracts/agent-action-admission.json | The new registry row changes the admission golden and every vendored copy; not regenerated (integration step). | medium | `VEREVON_UPDATE_GOLDEN=1` admission-contract test, refresh the sha256 pin, re-vendor to Model Plane (already in MP-ASKS with E3.3-g). |
+| W23-b-E347-4 | DownloadsDrawer.tsx | Not mounted anywhere (no dock or page renders it). | low | Mount in the browser dock next to the evidence panels once the projection carries downloads. |
+| W23-b-E347-5 | downloads-model.ts `refusalOf` | 415/422 are assumed to mean "type not admitted" and 404 "artifact not held"; the owner's real codes are unknown. | low | Map the owner's typed codes when the route exists. |
+
+### W3-E3.6-7 (lane b), finish run
+
+| id | where | finding | severity | suggested fix |
+|---|---|---|---|---|
+| W23-b-E367-7 | quarry-runtime mp_client.rs `post_document_lane` | The `x-inference-authorization` bearer falls back to the ingress token when no inference token is set; the chat lane does the same, but a dev setup with one token sends it on both headers. | low | Keep for dev; the Dynamic path must mint both audiences separately. |
+
+### W3-E3.8.5 (lane b), finish run
+
+| id | where | finding | severity | suggested fix |
+|---|---|---|---|---|
+| W23-b-E385-7 | knowledge/quarry.rs `classify_scrape_failure` | The fetch reason is now read before the 403/429/415 and elapsed checks; a DRIVER_FAILED only ever comes on a 502, so nothing else changes, but a future Quarry change that sends DRIVER_FAILED on another status would now be classified by reason. | low | Keep; the reader matches the code and the exact reason only. |
+
+### W3-E3.7.9b (lane b)
+
+| id | where | finding | severity | suggested fix |
+|---|---|---|---|---|
+| W23-b-E379b-1 | KnowledgeComposer.tsx `crawlApproval` | Nothing sets the signal: the gateway half (W3-E3.7.9a, lane a) is not built, so the crawl start never answers a pending approval. The answer shape is assumed (approval id, seed URL, pages, clamped, threshold, price band). | high | Land E3.7.9a; its error/answer for a pending crawl must carry these fields; set the signal in `crawlSelected`/`startCrawlJob` from it. |
+| W23-b-E379b-2 | KnowledgeComposer.tsx | Only `crawlSelected` (the page picker flow) is covered; `startCrawlJob` (a plain crawl from the URL field) has no prompt path. | medium | Route both starts through one approval-aware helper. |
+| W23-b-E379b-3 | CrawlApprovalPrompt.tsx | Approve re-runs the same request; whether the gateway admits it needs the approval id on the second call (or a resume endpoint) is undecided. | medium | Decide in E3.7.9a: pass the approval id on the retried start, or have the owner start the crawl on approval. |
+| W23-b-E379b-4 | styles/global.css | `crawl-page-picker__stat--over` and `crawl-approval-prompt` have no styles of their own. | low | Add a warning colour for the over-threshold stat. |

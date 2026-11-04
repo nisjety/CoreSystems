@@ -562,3 +562,34 @@ Open items:
 - Gateway toolset flag is read with std::env::var per request (convention is AppState).
 - 38 depth rows appended to W23-depth.md (E3.1-i 10, E3.1-j 14, E3.2-e2 4, E3.7.10-CP 9, lane d finish 1).
 - The four line-ending-only .sha256 artifacts were not staged.
+
+## W3 finish, lane b, integrated 2026-11-04
+
+Units: W3-E3.4-5 (1c1c0e754, fix ed25081ad), W3-E3.4-7 (db3a3c566), W3-E3.6-7 (47ff80b0f), W3-E3.8.5 (f087c9d15), W3-E3.7.9b (6b6bf9981), plus lane b depth rows (cce283a7f). Flags (all default off): QUARRY_EDGE__LIVE_VIEW_ONLY and BROWSER_LIVE_VIEW_ONLY (E3.4-5), VITE_BROWSER_DOWNLOADS_DRAWER (E3.4-7), QUARRY_EDGE__OCR and QUARRY_EDGE__PII_MODEL (E3.6-7), VITE_KNOWLEDGE_CRAWL_APPROVAL_ENABLED (E3.7.9b). E3.8.5 has no flag of its own; its codes only arrive with QUARRY_EDGE__FETCH_SUB_CODES on.
+
+Merge commit on w23/integ (after lane d, 55d960f74):
+- e1226bffe merge: w23f/lane-b (W3 finish: W3-E3.4-5, W3-E3.4-7, W3-E3.6-7, W3-E3.8.5, W3-E3.7.9b) into w23/integ. No conflicts.
+
+Follow-up commits:
+- 2e465238a chore(contracts): admission golden regenerated (VEREVON_UPDATE_GOLDEN=1 admission-contract test, 5 passed); copied byte-identically to apps/Model Plane/api/contracts and the capability-core testdata, execution-core and model-gateway fixtures; sha pin and zdr-contract-sync.test.sh line moved 0df146d9... -> 091abfa2....
+- aa68cecbb fix(verevonv3): DownloadsDrawer.tsx read `current.state` on the union RowState (TS2339); narrowed with `'state' in current`.
+
+New action ids: browser_download.send_to_knowledge (admission row access: none, exemptReason no_owner_executor, zdr_allowed false).
+
+Compile guard (no test runs, except the golden writer):
+- Quarry Rust (cargo check --workspace --tests, CARGO_INCREMENTAL=0): exit 0 on the first run; 33 warnings, all pre-existing (none in live.rs, ws.rs or mp_client.rs).
+- Go: no Go code touched (only the vendored capability-core testdata JSON).
+- TS verevonv3 (tsc6 -p tsconfig.app.json --noEmit): first run 2 errors (1 new in DownloadsDrawer.tsx, fixed in aa68cecbb); after the fix 1, the pre-existing baseline (schedule-contract.test.ts TS2352).
+- verevonv3 gateway (cargo check --tests): exit 0; 1 warning, pre-existing (unused import ResponseTemplate in src/domains/browser.rs, not a lane b line).
+- auth-core TS: not changed, not checked.
+- No Quarry ZDR/schema/route-baseline regeneration done: no test run here shows a need (the new gateway route /api/v1/browser/sessions/{id}/view/frames/ws is not yet in the ZDR route matrix, depth W23-b-E345-5).
+
+Open items:
+- E3.4-7: no gateway arm or Ingestion owner route serves browser_download.send_to_knowledge; the registry-to-dispatcher parity test may flag it (as browser_run.steer); no projection reports downloads; nothing mounts the drawer.
+- E3.7.9b: nothing sets the crawlApproval signal until W3-E3.7.9a (lane a) lands; startCrawlJob has no prompt path.
+- E3.4-5: no view-only SSE route (proxy_sse_stream has no extra-header parameter); REST /step still takes no scope.
+- E3.6-7: OCR/PII lanes are client-only, no caller in the pipeline.
+- E3.8.5: fast dns/tls static retry (ask 4) open.
+- None of the new flags are in compose or the runbooks.
+- 28 depth rows appended to W23-depth.md (E3.4-5 5, E3.4-7 5, E3.6-7 7, E3.8.5 7, E3.7.9b 4); W23-b-E347-3 (golden) is done by 2e465238a.
+- The four line-ending-only .sha256 artifacts were not staged.
