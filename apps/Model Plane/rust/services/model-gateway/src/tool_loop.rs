@@ -4611,8 +4611,11 @@ async fn dispatch_tool_with_cost(
             let top_k = i32::try_from(arg_i64(&call.arguments_json, "top_k").unwrap_or(5))
                 .unwrap_or(5)
                 .clamp(1, 20);
-            let request =
+            let mut request =
                 knowledge_search_request(org_id, &query, top_k, data_plane_mode.clone(), sovereign_required);
+            // The documents the person attached to this turn narrow the search (EP-3 S5). Only the
+            // ids travel; the Data Plane applies the viewer's own ACL. `None` for every other turn.
+            request.filters = crate::context_refs::knowledge_filters(run_id);
             let request = match crate::retrieval::authorize(tonic::Request::new(request), bearer) {
                 Ok(request) => request,
                 Err(error) => {

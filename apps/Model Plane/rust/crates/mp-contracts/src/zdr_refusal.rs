@@ -380,6 +380,12 @@ pub const FEATURES: &[Feature] = &[
         key: "run_inspection",
         label: "run timing and request inspection",
     },
+    // EP-3 S5: a send's typed context references (documents, threads, selections) are refused on a
+    // ZDR turn before any network call, so no reference is resolved and none is silently dropped.
+    Feature {
+        key: "context_references",
+        label: "references to documents, threads or selections",
+    },
 ];
 
 /// The catalogue entry for `code`, if it is a catalogue code.

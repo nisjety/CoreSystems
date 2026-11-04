@@ -61,3 +61,15 @@ fn every_zdr_refusal_in_the_gateway_carries_a_catalogue_kind() {
          so the status carries the catalogue kind): {untyped:#?}"
     );
 }
+
+/// EP-3 S5: the context-references refusal names a catalogue feature, so the typed body a ZDR turn
+/// with references gets carries a key every client can name.
+#[test]
+fn the_context_references_refusal_is_a_catalogue_feature() {
+    let key = model_gateway::context_refs::ZDR_FEATURE;
+    assert_eq!(key, "context_references");
+    assert!(mp_contracts::zdr_refusal::feature(key).is_some());
+    let body = model_gateway::context_refs::ContextRefRefusal::zdr_refusal().json_body();
+    assert_eq!(body["error"]["code"], mp_contracts::zdr_refusal::code::FEATURE_NOT_SUPPORTED);
+    assert_eq!(body["error"]["feature"], key);
+}

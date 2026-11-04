@@ -5,6 +5,7 @@ pub mod approval_descriptor;
 pub mod approval_edit;
 pub mod attachments;
 pub mod autonomy;
+pub mod context_refs;
 pub mod dataplane_posture;
 pub mod durable_gate;
 pub mod effect_ledger;

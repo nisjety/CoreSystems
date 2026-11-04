@@ -160,6 +160,14 @@ import {
 	toggleConnectorScope,
 	type ConnectorScopeBlock,
 } from "@/shared/actions/chat-connector-scope";
+import {
+	catalogueAdvertisesContextRefs,
+	contextRefsBlocked,
+	normalizeContextRefs,
+	type ChatContextRef,
+} from "@/shared/actions/chat-context-refs";
+import { ComposerContextChips } from "./ComposerContextChips";
+import { createSlashCommandRegistry, type RegisteredSlashCommand } from "./composer-slash-registry";
 import { zdrRefusalPresentation } from "@/shared/api/zdr-refusals";
 import type { BrowserTab } from "@/shared/api/browser-client";
 import {
@@ -325,6 +333,8 @@ export type ComposerCommand = {
 	label: string;
 	/** Canonical token after "/", lowercase and space-free. */
 	name: string;
+	/** A command a composer piece registered (`composer-slash-registry`); picking it runs its own `run`. */
+	registered?: RegisteredSlashCommand;
 	specialized?: SpecializedAction;
 };
 
@@ -444,6 +454,11 @@ export type DashboardComposerSubmitPayload = {
      * without connected apps is unchanged on the wire.
      */
     connectorScope?: string[];
+    /**
+     * The context chips attached to this send (EP-3 S5). Omitted when none were attached, so a turn
+     * without references is unchanged on the wire.
+     */
+    contextRefs?: ChatContextRef[];
     /**
      * The agent mode the person picked for this send (WS25-S11). Omitted unless they picked one, so an
      * unchanged send is byte-identical. The server resolves it strictest-wins against the org cap.
@@ -1403,6 +1418,17 @@ export function DashboardComposer(props: {
 	createEffect(() => connectorScopeBlockReason(), (reason) => {
 		if (reason) setConnectorScope([]);
 	});
+	// This composer's slash-command registry (C-B10): pieces that bring their own `/` command register it here.
+	const slashRegistry = createSlashCommandRegistry();
+	// Context chips for this turn (EP-3 S5). They exist only where the catalogue says the gateway resolves
+	// references and the turn may carry them; like connected apps, they are cleared once the turn is sent.
+	const [contextRefs, setContextRefs] = createSignal<ChatContextRef[]>([]);
+	const contextRefsAvailable = createMemo(() =>
+		catalogueAdvertisesContextRefs(models() ?? [])
+		&& !contextRefsBlocked({ zeroRetention: zeroRetentionTurn(), subscriptionBacked: subscriptionBacked() }));
+	createEffect(() => contextRefsAvailable(), (available) => {
+		if (!available) setContextRefs([]);
+	});
 	const selectedModelLabel = () => {
 		const id = selectedModel();
 		// Empty id → backend treats it as Verevon Balance (resilient fallback).
@@ -1560,6 +1586,15 @@ export function DashboardComposer(props: {
 					name: slugifyCommandName(action.name),
 					specialized: action,
 				})),
+			...slashRegistry.commands().map((command) => ({
+				aliases: command.aliases,
+				description: command.description,
+				icon: command.icon,
+				id: command.id,
+				label: command.label,
+				name: command.name,
+				registered: command,
+			})),
 		];
 	});
 	// The draft's leading `/name`, when it resolves to a real command. Null for
@@ -1838,6 +1873,10 @@ export function DashboardComposer(props: {
 	};
 
 	const runCommand = (command: ComposerCommand) => {
+		if (command.registered) {
+			command.registered.run();
+			return;
+		}
 		if (command.builtin === "file") {
 			openFileDialog();
 			return;
@@ -2842,6 +2881,7 @@ export function DashboardComposer(props: {
 		const submittedConnectorScope = connectorScopeBlockReason() === null && connectorScopeAdvertised()
 			? normalizeConnectorScope(connectorScope())
 			: [];
+		const submittedContextRefs = contextRefsAvailable() ? normalizeContextRefs(contextRefs()) : [];
 
 		// The mode chosen for this send, read before the tier lookup may wait. Not sent in a conversation-only
 		// turn, which runs no agent.
@@ -2866,6 +2906,8 @@ export function DashboardComposer(props: {
 			}
 			// Omitted when nothing was picked, like `retrievalScope` above.
 			if (submittedConnectorScope.length > 0) payload.connectorScope = submittedConnectorScope;
+			// Omitted when no chip was attached, like `connectorScope` above.
+			if (submittedContextRefs.length > 0) payload.contextRefs = submittedContextRefs;
 			// Omitted when nothing was picked, like `connectorScope` above.
 			if (submittedAgentMode !== undefined) payload.agentMode = submittedAgentMode;
 			// Omitted unless the text has a mention; a conversation-only turn reads no page.
@@ -2879,6 +2921,7 @@ export function DashboardComposer(props: {
 			else await writePendingChatLaunch(payload);
 			// The picks were consent for this turn, so they go with it. A failed send keeps them for a retry.
 			if (submittedConnectorScope.length > 0) setConnectorScope([]);
+			if (submittedContextRefs.length > 0) setContextRefs([]);
 		} catch (error) {
 			const message = error instanceof PendingChatLaunchError
 				? error.reason === 'unreadable'
@@ -3916,6 +3959,8 @@ export function DashboardComposer(props: {
 							</button>
 						</Show>
 					</div>
+
+					<ComposerContextChips available={contextRefsAvailable()} refs={contextRefs()} onChange={setContextRefs} registry={slashRegistry} orgId={activeOrgId() || undefined} disabled={props.submitting} />
 
 					<Show when={tabMentionResolutions().length > 0}>
 						<div

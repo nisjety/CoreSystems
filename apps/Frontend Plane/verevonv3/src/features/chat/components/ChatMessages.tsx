@@ -63,6 +63,7 @@ import {
   type ToolIntent,
 } from '@/shared/chat-nodes'
 import type { DockedNodes } from '@/shared/chat-nodes/types'
+import type { ChatContextRef } from '@/shared/actions/chat-context-refs'
 // The barrel does not re-export it yet; one more line there when it next changes.
 import { nodeKey } from '@/shared/chat-nodes/derive'
 import type { AutonomyRung, ChatKnowledgeReceipt, ChatPlanStep, MemoryOrigin, RecalledMemory } from '@/shared/api/chat-client'
@@ -1220,6 +1221,7 @@ export function UserMessage(props: {
             <UserMessageContent content={props.message.content} />
             <ToolChips tools={props.message.tools} />
             <AttachmentChips attachments={props.message.attachments} tone="user" onOpen={props.onViewAttachments} />
+            <ContextRefChips refs={props.message.contextRefs ?? []} />
           </div>
           <div class="verevon-chat-message-actions verevon-chat-message-actions--user">
             <Show
@@ -3332,6 +3334,27 @@ export function AttachmentChips(props: {
       <div class="verevon-chat-attachments">
         <For each={props.attachments}>
           {(attachment) => <AttachmentItem attachment={attachment} tone={props.tone} onOpen={props.onOpen} />}
+        </For>
+      </div>
+    </Show>
+  )
+}
+
+/**
+ * The context chips a user turn was sent with (EP-3 S5), read back from `metadata.context_refs`. Labels
+ * only: a chip is a reference the gateway resolved, never content, so nothing here opens or fetches it.
+ */
+function ContextRefChips(props: { refs: readonly ChatContextRef[] }) {
+  const i18n = useI18n()
+  return (
+    <Show when={props.refs.length > 0}>
+      <div class="verevon-chat-context-refs" role="list" aria-label={i18n.tr('Kontekst', 'Context')}>
+        <For each={props.refs}>
+          {(ref) => (
+            <span role="listitem" class="verevon-chat-context-ref" data-kind={ref.kind}>
+              {ref.label || ref.id}
+            </span>
+          )}
         </For>
       </div>
     </Show>
