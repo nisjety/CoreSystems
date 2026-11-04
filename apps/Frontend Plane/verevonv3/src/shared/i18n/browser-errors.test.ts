@@ -42,6 +42,8 @@ const BROWSER_ERROR_CODES = [
   'scrape_host_not_found',
   'scrape_unreachable',
   'scrape_tls_failed',
+  // W3-E3.4-5: an input frame on the view-only live socket.
+  'browser_live_view_only',
   'rate_limited',
   'unauthorized',
   // The refusals of a keyed AI-run start (the SPA sends an Idempotency-Key now).

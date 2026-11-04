@@ -2614,7 +2614,10 @@ async fn proxy_live_frames_view_only_ws(
     if !state.browser_live_view_only {
         return (
             StatusCode::NOT_FOUND,
-            Json(error("not_found", "The requested route does not exist.")),
+            Json(error(
+                "browser_session_not_found",
+                "The requested browser session view is not available.",
+            )),
         )
             .into_response();
     }
