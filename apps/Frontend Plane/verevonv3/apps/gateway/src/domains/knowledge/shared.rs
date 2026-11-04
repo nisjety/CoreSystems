@@ -249,3 +249,106 @@ pub(super) async fn request_ok(
     }
     matches!(req.send().await, Ok(resp) if resp.status().is_success())
 }
+
+/// The gateway's typed refusal for a failed scrape whose upstream error is a
+/// `DRIVER_FAILED` naming one of the fetch reasons Quarry adds to its waterfall
+/// (E3.8.1, with `QUARRY_EDGE__FETCH_SUB_CODES` on): `dns`, `connect` or `tls`.
+/// Returns the gateway code and a fixed sentence, both static, never upstream text.
+///
+/// Any other body returns `None`, so the status-based classification in
+/// `knowledge/quarry.rs` still applies: `all_drivers_failed` stays `scrape_failed`,
+/// and the E3.8.2 `TIMEOUT` reasons (`tier_stalled`, `fetch_deadline_exceeded`)
+/// stay `scrape_timeout` on their 504.
+///
+/// `classify_scrape_failure` in `knowledge/quarry.rs` calls this first.
+pub(super) fn fetch_sub_code_refusal(upstream: &Value) -> Option<(&'static str, &'static str)> {
+    if upstream.pointer("/error/code").and_then(Value::as_str) != Some("DRIVER_FAILED") {
+        return None;
+    }
+    match upstream.pointer("/error/details/reason")?.as_str()? {
+        "dns" => Some((
+            "scrape_host_not_found",
+            "Vi fant ikke adressen til nettstedet. Sjekk lenken og prøv igjen.",
+        )),
+        "connect" => Some((
+            "scrape_unreachable",
+            "Nettstedet svarer ikke akkurat nå. Prøv igjen om litt, eller en annen kilde.",
+        )),
+        "tls" => Some((
+            "scrape_tls_failed",
+            "Det var ikke mulig å opprette en sikker forbindelse til nettstedet. Prøv en annen kilde.",
+        )),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn upstream(code: &str, reason: &str) -> Value {
+        json!({
+            "error": {
+                "code": code,
+                "message": "upstream text that is never shown",
+                "details": { "reason": reason }
+            }
+        })
+    }
+
+    fn refusal(code: &str, reason: &str) -> Option<(&'static str, &'static str)> {
+        fetch_sub_code_refusal(&upstream(code, reason))
+    }
+
+    fn gateway_code(code: &str, reason: &str) -> Option<&'static str> {
+        refusal(code, reason).map(|(gateway, _)| gateway)
+    }
+
+    #[test]
+    fn the_three_reasons_with_no_code_of_their_own_get_one() {
+        assert_eq!(
+            gateway_code("DRIVER_FAILED", "dns"),
+            Some("scrape_host_not_found")
+        );
+        assert_eq!(
+            gateway_code("DRIVER_FAILED", "connect"),
+            Some("scrape_unreachable")
+        );
+        assert_eq!(
+            gateway_code("DRIVER_FAILED", "tls"),
+            Some("scrape_tls_failed")
+        );
+    }
+
+    #[test]
+    fn each_refusal_is_one_sentence_with_no_id_and_no_upstream_text() {
+        for reason in ["dns", "connect", "tls"] {
+            let (gateway, message) = refusal("DRIVER_FAILED", reason).expect(reason);
+            assert!(message.ends_with('.'), "{gateway}");
+            assert!(!message.contains('_'), "{gateway}: no internal id");
+            assert!(!message.contains("upstream"), "{gateway}: no upstream text");
+            assert!(!message.contains("http"), "{gateway}: no address");
+        }
+    }
+
+    #[test]
+    fn the_other_fetch_reasons_keep_the_status_classification() {
+        // all_drivers_failed is scrape_failed on its 502, or scrape_timeout after 20 s, as before.
+        assert_eq!(gateway_code("DRIVER_FAILED", "all_drivers_failed"), None);
+        // The E3.8.2 reasons come on a 504 TIMEOUT, which is scrape_timeout already.
+        assert_eq!(gateway_code("TIMEOUT", "tier_stalled"), None);
+        assert_eq!(gateway_code("TIMEOUT", "fetch_deadline_exceeded"), None);
+    }
+
+    #[test]
+    fn a_reason_is_read_only_on_a_driver_failed_and_only_as_an_exact_match() {
+        assert_eq!(gateway_code("DRIVER_FAILED", "session_reaped"), None);
+        assert_eq!(gateway_code("DRIVER_FAILED", "DNS"), None);
+        assert_eq!(gateway_code("DRIVER_FAILED", " dns"), None);
+        assert_eq!(gateway_code("CHALLENGE_DETECTED", "dns"), None);
+        let bare = json!({ "error": { "code": "DRIVER_FAILED" } });
+        assert_eq!(fetch_sub_code_refusal(&bare), None);
+        assert_eq!(fetch_sub_code_refusal(&Value::Null), None);
+    }
+}

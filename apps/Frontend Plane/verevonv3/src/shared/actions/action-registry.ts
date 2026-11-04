@@ -1647,6 +1647,21 @@ const browserBlockedTryOtherSourceInput = z.object({
   runId: z.string().min(1).optional(),
 })
 
+// The downloads drawer (E3.4-7) sends one file the browser downloaded in a session. Both ids are
+// opaque handles the session reported: the owner checks that the artifact belongs to this session
+// and to the caller's org, and refuses an artifact it does not hold.
+export const browserDownloadSendToKnowledgeInput = z.object({
+  sessionId: z.string().trim().min(1).max(64),
+  artifactId: z.string().trim().min(1).max(64),
+}).strict()
+
+// The Data Plane document the owner created and how far its indexing has got. Indexing runs after
+// the write, so a fresh document reports `pending`.
+export const browserDownloadSendToKnowledgeOutput = z.object({
+  documentId: z.string().min(1),
+  indexStatus: z.enum(['pending', 'indexed', 'failed', 'skipped']),
+})
+
 const routerPolicyModeTableInput = z.object({
   simple: z.string().min(1),
   moderate: z.string().min(1),
@@ -4215,6 +4230,17 @@ export const actionRegistry = [
     reversible: false,
     inputSchema: browserBlockedTryOtherSourceInput,
     outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'browser_download.send_to_knowledge',
+    label: 'Send download to knowledge',
+    description: 'Send one file the browser downloaded in this session to the knowledge base. Human-only, from the downloads drawer. Only PDF, plain text, Markdown and CSV are admitted: their parsed text goes to Data Plane through Ingestion Plane under the caller\'s org, and the file itself is not sent. Refused under zero data retention, for other file types and for an artifact the session does not hold. The owner dedupes on the request key, so a retry cannot add the document twice.',
+    ownerPlane: 'ingestion',
+    risk: 'medium',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: browserDownloadSendToKnowledgeInput,
+    outputSchema: browserDownloadSendToKnowledgeOutput,
   },
   {
     id: 'router_policy.update',

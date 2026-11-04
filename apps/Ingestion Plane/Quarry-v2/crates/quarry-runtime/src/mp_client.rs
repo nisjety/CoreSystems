@@ -58,6 +58,9 @@ pub struct ModelPlaneClient {
     inference_token: Option<String>,
     chat_timeout: Duration,
     retry_backoff: Duration,
+    /// W3-E3.6-7: the OCR and PII model lanes (both off by default).
+    document_lanes: DocumentLaneSettings,
+    document_timeout: Duration,
 }
 
 #[derive(Clone)]
@@ -87,6 +90,8 @@ impl ModelPlaneClient {
             inference_token: None,
             chat_timeout: Duration::from_secs(CHAT_TIMEOUT_SECS),
             retry_backoff: Duration::from_millis(CHAT_RETRY_BACKOFF_MS),
+            document_lanes: DocumentLaneSettings::default(),
+            document_timeout: Duration::from_secs(DOCUMENT_LANE_TIMEOUT_SECS),
         })
     }
 
@@ -547,21 +552,7 @@ impl ModelPlaneClient {
     async fn decode_chat(resp: reqwest::Response) -> Result<AiChatResponse, ModelHopError> {
         let status = resp.status();
         if !status.is_success() {
-            let code = status.as_u16();
-            return Err(match code {
-                401 => ModelHopError::Unauthorized,
-                403 => ModelHopError::RouteDenied,
-                412 => ModelHopError::ZdrRefused,
-                429 => ModelHopError::RateLimited {
-                    retry_after_s: resp
-                        .headers()
-                        .get(reqwest::header::RETRY_AFTER)
-                        .and_then(|value| value.to_str().ok())
-                        .and_then(|value| value.trim().parse::<u32>().ok()),
-                },
-                400..=499 => ModelHopError::Rejected,
-                _ => ModelHopError::Upstream { status: code },
-            });
+            return Err(hop_status_error(status.as_u16(), resp.headers()));
         }
         let bytes = match resp.bytes().await {
             Ok(bytes) => bytes,
@@ -572,6 +563,544 @@ impl ModelPlaneClient {
             return Err(ModelHopError::Decode);
         }
         serde_json::from_slice::<AiChatResponse>(&bytes).map_err(|_| ModelHopError::Decode)
+    }
+}
+
+// ---- OCR route and PII model tier (W3-E3.6-7) -------------------------------
+//
+// Two document lanes on the WS16 service lane, both dark:
+//
+// - OCR: only the scanned pages of a PDF (the caller classifies them; WS5's
+//   `document_has_no_text_layer` is the signal) go to
+//   `POST /v1/ai/documents/layout` (prebuilt-layout). Behind
+//   `QUARRY_EDGE__OCR`, default off.
+// - PII model tier: an optional second pass after the deterministic
+//   `quarry-transform` `pii.rs` stage, on text that stage already redacted.
+//   `POST /v1/ai/language/pii` takes no entity parameters and its offsets are
+//   unverified, so Quarry reads only `redacted_text`, never offsets. Behind
+//   `QUARRY_EDGE__PII_MODEL`, default off.
+//
+// Both are refused under ZDR before anything is sent (OCR and the PII model
+// are third-party processing; plan E3.6 "OCR and the PII model never run
+// under ZDR"). Both fail closed: a disabled lane, a missing grant, an error
+// status, a short or unreadable answer is a typed error, never the input text
+// passed through and never empty text. The caller turns the error into a
+// failed page (`pages_failed`), as the approved fail-closed PII decision says.
+//
+// Credentials follow `chat_for_org`: only the static development pair works
+// today. The production grant (two service-route rows on model-gateway and the
+// Auth Core manifest rows) is a Control Plane and Model Plane item (DR-15.1),
+// so the Dynamic path answers `LaneNotGranted` without minting anything.
+
+/// The switch for the OCR lane. Off unless set to 1, true, on or yes.
+pub const OCR_FLAG_ENV: &str = "QUARRY_EDGE__OCR";
+/// The switch for the PII model tier. Off unless set to 1, true, on or yes.
+pub const PII_MODEL_FLAG_ENV: &str = "QUARRY_EDGE__PII_MODEL";
+/// The Model Plane route the OCR lane calls.
+pub const OCR_ROUTE: &str = "/v1/ai/documents/layout";
+/// The Model Plane route the PII model tier calls.
+pub const PII_MODEL_ROUTE: &str = "/v1/ai/language/pii";
+/// The most scanned pages one OCR call carries. Per-org page caps are WS6.
+pub const MAX_OCR_PAGES_PER_CALL: usize = 20;
+/// The largest PDF one OCR call carries (before base64).
+pub const MAX_OCR_DOCUMENT_BYTES: usize = 16 * 1024 * 1024;
+/// The most texts one PII model call carries.
+pub const MAX_PII_MODEL_TEXTS: usize = 25;
+/// The longest text one PII model item carries, in characters (the provider's
+/// per-document limit for synchronous PII calls).
+pub const MAX_PII_MODEL_TEXT_CHARS: usize = 5_120;
+const DOCUMENT_LANE_TIMEOUT_SECS: u64 = 120;
+
+/// Which document lanes this process may use. Both default off.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DocumentLaneSettings {
+    pub ocr: bool,
+    pub pii_model: bool,
+}
+
+impl DocumentLaneSettings {
+    /// Both lanes from their raw flag values (absent = off).
+    pub fn from_values(ocr: Option<&str>, pii_model: Option<&str>) -> Self {
+        Self {
+            ocr: crate::org_erasure::flag_on(ocr),
+            pii_model: crate::org_erasure::flag_on(pii_model),
+        }
+    }
+
+    /// Both lanes from `QUARRY_EDGE__OCR` and `QUARRY_EDGE__PII_MODEL`.
+    pub fn from_env() -> Self {
+        let ocr = std::env::var(OCR_FLAG_ENV).ok();
+        let pii_model = std::env::var(PII_MODEL_FLAG_ENV).ok();
+        Self::from_values(ocr.as_deref(), pii_model.as_deref())
+    }
+}
+
+/// Which document lane a refusal or result belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DocumentLane {
+    Ocr,
+    PiiModel,
+}
+
+impl DocumentLane {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            DocumentLane::Ocr => "ocr",
+            DocumentLane::PiiModel => "pii_model",
+        }
+    }
+
+    fn route(self) -> &'static str {
+        match self {
+            DocumentLane::Ocr => OCR_ROUTE,
+            DocumentLane::PiiModel => PII_MODEL_ROUTE,
+        }
+    }
+}
+
+impl std::fmt::Display for DocumentLane {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Why a document lane call did not produce usable text. Every variant is a
+/// failed page for the caller: none carries text and none means "use the
+/// input as it is".
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum DocumentLaneError {
+    /// The lane's flag is off. Nothing was sent.
+    #[error("the {0} lane is switched off")]
+    Disabled(DocumentLane),
+    /// The run is under zero data retention. Nothing was sent.
+    #[error("the {0} lane never runs under zero data retention")]
+    ZdrRefused(DocumentLane),
+    /// The input is outside the lane's bounds (no pages, a page number of 0,
+    /// too many pages, too many bytes, an empty or too long text). Nothing
+    /// was sent.
+    #[error("the {lane} input is outside its bounds: {reason}")]
+    InvalidInput {
+        lane: DocumentLane,
+        reason: &'static str,
+    },
+    /// The hop failed (grant, status, transport, timeout or body).
+    #[error("the {lane} lane hop failed: {hop}")]
+    Hop {
+        lane: DocumentLane,
+        hop: ModelHopError,
+    },
+    /// A 2xx whose content cannot be trusted as the whole answer (a status
+    /// other than succeeded, fewer pages than asked, empty text, a missing or
+    /// duplicated item).
+    #[error("the {lane} answer is not usable: {reason}")]
+    Unusable {
+        lane: DocumentLane,
+        reason: &'static str,
+    },
+}
+
+/// The body of `POST /v1/ai/documents/layout` for the scanned pages of one
+/// PDF. Built only through [`OcrPagesRequest::for_scanned_pages`].
+#[derive(Clone, Serialize)]
+pub struct OcrPagesRequest {
+    content_base64: String,
+    content_type: String,
+    /// 1-based, ascending, comma separated (`"2,5,7"`).
+    pages: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    locale: Option<String>,
+    #[serde(skip)]
+    page_count: usize,
+}
+
+// The document rides in `content_base64`, so Debug names the size only.
+impl std::fmt::Debug for OcrPagesRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OcrPagesRequest")
+            .field("base64_len", &self.content_base64.len())
+            .field("content_type", &self.content_type)
+            .field("pages", &self.pages)
+            .field("locale", &self.locale)
+            .finish()
+    }
+}
+
+impl OcrPagesRequest {
+    /// The request for `pages` (1-based) of `pdf`. Duplicates are dropped and
+    /// the pages sorted; an empty list, a page 0, more than
+    /// [`MAX_OCR_PAGES_PER_CALL`] pages or a PDF over
+    /// [`MAX_OCR_DOCUMENT_BYTES`] is refused.
+    pub fn for_scanned_pages(
+        pdf: &[u8],
+        pages: &[u32],
+        locale: Option<&str>,
+    ) -> Result<Self, DocumentLaneError> {
+        let invalid = |reason| DocumentLaneError::InvalidInput {
+            lane: DocumentLane::Ocr,
+            reason,
+        };
+        if pdf.is_empty() {
+            return Err(invalid("empty document"));
+        }
+        if pdf.len() > MAX_OCR_DOCUMENT_BYTES {
+            return Err(invalid("document too large"));
+        }
+        let mut sorted: Vec<u32> = pages.to_vec();
+        sorted.sort_unstable();
+        sorted.dedup();
+        if sorted.is_empty() {
+            return Err(invalid("no pages"));
+        }
+        if sorted[0] == 0 {
+            return Err(invalid("page numbers are 1-based"));
+        }
+        if sorted.len() > MAX_OCR_PAGES_PER_CALL {
+            return Err(invalid("too many pages"));
+        }
+        use base64::Engine as _;
+        let locale = locale
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned);
+        Ok(Self {
+            content_base64: base64::engine::general_purpose::STANDARD.encode(pdf),
+            content_type: "application/pdf".to_owned(),
+            pages: sorted
+                .iter()
+                .map(u32::to_string)
+                .collect::<Vec<_>>()
+                .join(","),
+            locale,
+            page_count: sorted.len(),
+        })
+    }
+
+    /// How many distinct pages the request asks for.
+    pub fn page_count(&self) -> usize {
+        self.page_count
+    }
+
+    /// The pages field as sent.
+    pub fn pages(&self) -> &str {
+        &self.pages
+    }
+}
+
+#[derive(Deserialize)]
+struct OcrLayoutAnswer {
+    #[serde(default)]
+    status: String,
+    #[serde(default)]
+    content: String,
+    #[serde(default)]
+    pages_processed: u32,
+    #[serde(default)]
+    model_used: String,
+    #[serde(default)]
+    provider_used: String,
+}
+
+/// The text the OCR lane read from the scanned pages.
+#[derive(Clone, PartialEq)]
+pub struct OcrPagesResult {
+    pub text: String,
+    pub pages_processed: u32,
+    pub model_used: String,
+    pub provider_used: String,
+}
+
+impl std::fmt::Debug for OcrPagesResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OcrPagesResult")
+            .field("chars", &self.text.chars().count())
+            .field("pages_processed", &self.pages_processed)
+            .field("model_used", &self.model_used)
+            .field("provider_used", &self.provider_used)
+            .finish()
+    }
+}
+
+#[derive(Serialize)]
+struct PiiModelBody<'a> {
+    texts: &'a [String],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    language: Option<&'a str>,
+}
+
+#[derive(Deserialize)]
+struct PiiModelAnswer {
+    #[serde(default)]
+    results: Vec<PiiModelItem>,
+    #[serde(default)]
+    model_used: String,
+    #[serde(default)]
+    provider_used: String,
+}
+
+#[derive(Deserialize)]
+struct PiiModelItem {
+    #[serde(default)]
+    id: String,
+    #[serde(default)]
+    redacted_text: Option<String>,
+}
+
+/// The PII model tier's redacted texts, in the order they were sent.
+#[derive(Clone, PartialEq)]
+pub struct PiiModelResult {
+    pub redacted: Vec<String>,
+    pub model_used: String,
+    pub provider_used: String,
+}
+
+impl std::fmt::Debug for PiiModelResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PiiModelResult")
+            .field("items", &self.redacted.len())
+            .field("model_used", &self.model_used)
+            .field("provider_used", &self.provider_used)
+            .finish()
+    }
+}
+
+/// The HTTP status of a failed hop as a [`ModelHopError`]. Shared by the chat
+/// lane and the document lanes so one table maps every status.
+fn hop_status_error(status: u16, headers: &reqwest::header::HeaderMap) -> ModelHopError {
+    match status {
+        401 => ModelHopError::Unauthorized,
+        403 => ModelHopError::RouteDenied,
+        412 => ModelHopError::ZdrRefused,
+        429 => ModelHopError::RateLimited {
+            retry_after_s: headers
+                .get(reqwest::header::RETRY_AFTER)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.trim().parse::<u32>().ok()),
+        },
+        400..=499 => ModelHopError::Rejected,
+        _ => ModelHopError::Upstream { status },
+    }
+}
+
+impl ModelPlaneClient {
+    /// Which document lanes this client may use (default: none).
+    pub fn with_document_lanes(mut self, settings: DocumentLaneSettings) -> Self {
+        self.document_lanes = settings;
+        self
+    }
+
+    /// The bound on one document lane call (default 120 s). Never retried
+    /// after it fires.
+    pub fn with_document_timeout(mut self, timeout: Duration) -> Self {
+        self.document_timeout = timeout;
+        self
+    }
+
+    pub fn document_lanes(&self) -> DocumentLaneSettings {
+        self.document_lanes
+    }
+
+    /// OCR of the scanned pages of one PDF on behalf of `org_id`.
+    ///
+    /// Refused before anything is sent when `QUARRY_EDGE__OCR` is off or the
+    /// run is under ZDR. The answer must say `succeeded` (or nothing), cover
+    /// at least the pages asked for and carry text; anything else is
+    /// [`DocumentLaneError::Unusable`].
+    pub async fn ocr_pages_for_org(
+        &self,
+        org_id: &str,
+        zdr: ZdrMode,
+        req: &OcrPagesRequest,
+    ) -> Result<OcrPagesResult, DocumentLaneError> {
+        let lane = DocumentLane::Ocr;
+        self.admit_document_lane(lane, zdr)?;
+        let bytes = self
+            .post_document_lane(org_id, lane, req)
+            .await
+            .map_err(|hop| DocumentLaneError::Hop { lane, hop })?;
+        let answer: OcrLayoutAnswer =
+            serde_json::from_slice(&bytes).map_err(|_| DocumentLaneError::Hop {
+                lane,
+                hop: ModelHopError::Decode,
+            })?;
+        let unusable = |reason| DocumentLaneError::Unusable { lane, reason };
+        let status = answer.status.trim();
+        if !status.is_empty() && !status.eq_ignore_ascii_case("succeeded") {
+            return Err(unusable("status is not succeeded"));
+        }
+        if (answer.pages_processed as usize) < req.page_count() {
+            return Err(unusable("fewer pages processed than asked"));
+        }
+        if answer.content.trim().is_empty() {
+            return Err(unusable("no text"));
+        }
+        Ok(OcrPagesResult {
+            text: answer.content,
+            pages_processed: answer.pages_processed,
+            model_used: answer.model_used,
+            provider_used: answer.provider_used,
+        })
+    }
+
+    /// The PII model tier over `texts` (already through the deterministic
+    /// stage) on behalf of `org_id`. Returns one redacted text per input, in
+    /// order.
+    ///
+    /// Refused before anything is sent when `QUARRY_EDGE__PII_MODEL` is off,
+    /// the run is under ZDR, `texts` is empty or over
+    /// [`MAX_PII_MODEL_TEXTS`], or a text is empty or over
+    /// [`MAX_PII_MODEL_TEXT_CHARS`]. The gateway numbers items `"1"`..`"n"`;
+    /// a missing, duplicated, unknown or empty item is
+    /// [`DocumentLaneError::Unusable`], never the input passed through.
+    pub async fn pii_model_for_org(
+        &self,
+        org_id: &str,
+        zdr: ZdrMode,
+        texts: &[String],
+        language: Option<&str>,
+    ) -> Result<PiiModelResult, DocumentLaneError> {
+        let lane = DocumentLane::PiiModel;
+        self.admit_document_lane(lane, zdr)?;
+        let invalid = |reason| DocumentLaneError::InvalidInput { lane, reason };
+        if texts.is_empty() {
+            return Err(invalid("no texts"));
+        }
+        if texts.len() > MAX_PII_MODEL_TEXTS {
+            return Err(invalid("too many texts"));
+        }
+        for text in texts {
+            if text.trim().is_empty() {
+                return Err(invalid("empty text"));
+            }
+            if text.chars().count() > MAX_PII_MODEL_TEXT_CHARS {
+                return Err(invalid("text too long"));
+            }
+        }
+        let body = PiiModelBody {
+            texts,
+            language: language.map(str::trim).filter(|value| !value.is_empty()),
+        };
+        let bytes = self
+            .post_document_lane(org_id, lane, &body)
+            .await
+            .map_err(|hop| DocumentLaneError::Hop { lane, hop })?;
+        let answer: PiiModelAnswer =
+            serde_json::from_slice(&bytes).map_err(|_| DocumentLaneError::Hop {
+                lane,
+                hop: ModelHopError::Decode,
+            })?;
+        let unusable = |reason| DocumentLaneError::Unusable { lane, reason };
+        if answer.results.len() != texts.len() {
+            return Err(unusable("item count differs from the texts sent"));
+        }
+        let mut redacted: Vec<Option<String>> = vec![None; texts.len()];
+        for item in answer.results {
+            let index = item
+                .id
+                .trim()
+                .parse::<usize>()
+                .ok()
+                .filter(|n| (1..=texts.len()).contains(n))
+                .ok_or_else(|| unusable("unknown item id"))?;
+            let slot = &mut redacted[index - 1];
+            if slot.is_some() {
+                return Err(unusable("duplicated item id"));
+            }
+            let text = item
+                .redacted_text
+                .filter(|text| !text.trim().is_empty())
+                .ok_or_else(|| unusable("item has no redacted text"))?;
+            *slot = Some(text);
+        }
+        let redacted = redacted
+            .into_iter()
+            .collect::<Option<Vec<String>>>()
+            .ok_or_else(|| unusable("missing item"))?;
+        Ok(PiiModelResult {
+            redacted,
+            model_used: answer.model_used,
+            provider_used: answer.provider_used,
+        })
+    }
+
+    /// The local refusals, in order: the flag, then ZDR. Nothing is sent and
+    /// nothing is minted when either refuses.
+    fn admit_document_lane(
+        &self,
+        lane: DocumentLane,
+        zdr: ZdrMode,
+    ) -> Result<(), DocumentLaneError> {
+        let enabled = match lane {
+            DocumentLane::Ocr => self.document_lanes.ocr,
+            DocumentLane::PiiModel => self.document_lanes.pii_model,
+        };
+        if !enabled {
+            return Err(DocumentLaneError::Disabled(lane));
+        }
+        if zdr.is_active() {
+            return Err(DocumentLaneError::ZdrRefused(lane));
+        }
+        Ok(())
+    }
+
+    /// One POST on a document lane with the chat lane's retry rule: a connect
+    /// error, 502 or 503 once; a timeout never (the provider may have charged).
+    async fn post_document_lane<B: Serialize + ?Sized>(
+        &self,
+        org_id: &str,
+        lane: DocumentLane,
+        body: &B,
+    ) -> Result<bytes::Bytes, ModelHopError> {
+        // The org will pick the minted token once the Dynamic path exists.
+        let _ = org_id;
+        let (bearer, inference) = match &self.auth {
+            ModelPlaneAuth::StaticDev(token) => (
+                token.clone(),
+                self.inference_token.clone().unwrap_or_else(|| token.clone()),
+            ),
+            ModelPlaneAuth::Dynamic(_) | ModelPlaneAuth::None => {
+                return Err(ModelHopError::LaneNotGranted)
+            }
+        };
+        let url = format!("{}{}", self.base_url.trim_end_matches('/'), lane.route());
+        let mut attempt = 0u8;
+        loop {
+            attempt += 1;
+            let sent = self
+                .http
+                .post(&url)
+                .timeout(self.document_timeout)
+                .bearer_auth(&bearer)
+                .header("x-inference-authorization", format!("Bearer {inference}"))
+                .json(body)
+                .send()
+                .await;
+            let resp = match sent {
+                Ok(resp) => resp,
+                Err(e) if e.is_timeout() => return Err(ModelHopError::Timeout),
+                Err(e) if e.is_connect() && attempt == 1 => {
+                    tokio::time::sleep(self.retry_backoff).await;
+                    continue;
+                }
+                Err(_) => return Err(ModelHopError::Transport),
+            };
+            let status = resp.status().as_u16();
+            if matches!(status, 502 | 503) && attempt == 1 {
+                tokio::time::sleep(self.retry_backoff).await;
+                continue;
+            }
+            if !resp.status().is_success() {
+                return Err(hop_status_error(status, resp.headers()));
+            }
+            let bytes = match resp.bytes().await {
+                Ok(bytes) => bytes,
+                Err(e) if e.is_timeout() => return Err(ModelHopError::Timeout),
+                Err(_) => return Err(ModelHopError::Decode),
+            };
+            if bytes.len() > MAX_CHAT_BODY_BYTES {
+                return Err(ModelHopError::Decode);
+            }
+            return Ok(bytes);
+        }
     }
 }
 
@@ -978,5 +1507,449 @@ mod tests {
 
         let result = planner.next_actions(&obs).await;
         assert!(result.is_err());
+    }
+
+    // ---- W3-E3.6-7: OCR route and PII model tier on a fake gateway ---------
+
+    const BOTH_LANES: DocumentLaneSettings = DocumentLaneSettings {
+        ocr: true,
+        pii_model: true,
+    };
+    const FAKE_PDF: &[u8] = b"%PDF-1.7 scanned fixture";
+
+    fn lane_client(uri: String, settings: DocumentLaneSettings) -> ModelPlaneClient {
+        ModelPlaneClient::new(uri)
+            .unwrap()
+            .with_bearer_token("dev-ingress")
+            .with_inference_bearer_token("dev-inference")
+            .with_document_lanes(settings)
+            .with_retry_backoff(Duration::from_millis(1))
+            .with_document_timeout(Duration::from_secs(5))
+    }
+
+    fn ocr_request(pages: &[u32]) -> OcrPagesRequest {
+        OcrPagesRequest::for_scanned_pages(FAKE_PDF, pages, Some("nb-NO")).unwrap()
+    }
+
+    fn texts(items: &[&str]) -> Vec<String> {
+        items.iter().map(|item| (*item).to_owned()).collect()
+    }
+
+    /// A gateway that must not be called: `expect(0)` is checked on drop.
+    async fn silent_gateway() -> MockServer {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(500))
+            .expect(0)
+            .mount(&server)
+            .await;
+        server
+    }
+
+    #[test]
+    fn document_lane_flags_default_off() {
+        assert_eq!(DocumentLaneSettings::default(), DocumentLaneSettings {
+            ocr: false,
+            pii_model: false,
+        });
+        assert_eq!(
+            DocumentLaneSettings::from_values(None, None),
+            DocumentLaneSettings::default()
+        );
+        assert_eq!(
+            DocumentLaneSettings::from_values(Some("0"), Some("off")),
+            DocumentLaneSettings::default()
+        );
+        assert_eq!(
+            DocumentLaneSettings::from_values(Some("1"), None),
+            DocumentLaneSettings {
+                ocr: true,
+                pii_model: false,
+            }
+        );
+        assert_eq!(
+            DocumentLaneSettings::from_values(Some("off"), Some("true")),
+            DocumentLaneSettings {
+                ocr: false,
+                pii_model: true,
+            }
+        );
+        assert_eq!(OCR_FLAG_ENV, "QUARRY_EDGE__OCR");
+        assert_eq!(PII_MODEL_FLAG_ENV, "QUARRY_EDGE__PII_MODEL");
+        let client = ModelPlaneClient::new("http://127.0.0.1:9").unwrap();
+        assert_eq!(client.document_lanes(), DocumentLaneSettings::default());
+    }
+
+    #[test]
+    fn ocr_request_sorts_pages_and_refuses_out_of_bounds_input() {
+        let req = OcrPagesRequest::for_scanned_pages(FAKE_PDF, &[7, 2, 5, 2], None).unwrap();
+        assert_eq!(req.pages(), "2,5,7");
+        assert_eq!(req.page_count(), 3);
+        let body = serde_json::to_value(&req).unwrap();
+        assert_eq!(body["content_type"], "application/pdf");
+        assert_eq!(body["pages"], "2,5,7");
+        assert!(body.get("locale").is_none());
+        assert!(body.get("page_count").is_none());
+        let debug = format!("{req:?}");
+        assert!(!debug.contains(body["content_base64"].as_str().unwrap()));
+
+        let invalid = |pdf: &[u8], pages: &[u32]| {
+            match OcrPagesRequest::for_scanned_pages(pdf, pages, None) {
+                Err(DocumentLaneError::InvalidInput { lane, reason }) => {
+                    assert_eq!(lane, DocumentLane::Ocr);
+                    reason
+                }
+                other => panic!("expected InvalidInput, got {other:?}"),
+            }
+        };
+        assert_eq!(invalid(b"", &[1]), "empty document");
+        assert_eq!(invalid(FAKE_PDF, &[]), "no pages");
+        assert_eq!(invalid(FAKE_PDF, &[0, 1]), "page numbers are 1-based");
+        let many: Vec<u32> = (1..=(MAX_OCR_PAGES_PER_CALL as u32 + 1)).collect();
+        assert_eq!(invalid(FAKE_PDF, &many), "too many pages");
+        let big = vec![0u8; MAX_OCR_DOCUMENT_BYTES + 1];
+        assert_eq!(invalid(&big, &[1]), "document too large");
+    }
+
+    #[tokio::test]
+    async fn ocr_lane_off_by_default_sends_nothing() {
+        let server = silent_gateway().await;
+        let client = lane_client(server.uri(), DocumentLaneSettings::default());
+        let err = client
+            .ocr_pages_for_org("org-1", ZdrMode::Off, &ocr_request(&[1]))
+            .await
+            .unwrap_err();
+        assert_eq!(err, DocumentLaneError::Disabled(DocumentLane::Ocr));
+    }
+
+    #[tokio::test]
+    async fn ocr_lane_refused_under_zdr_sends_nothing() {
+        let server = silent_gateway().await;
+        let client = lane_client(server.uri(), BOTH_LANES);
+        let err = client
+            .ocr_pages_for_org("org-1", ZdrMode::On, &ocr_request(&[1]))
+            .await
+            .unwrap_err();
+        assert_eq!(err, DocumentLaneError::ZdrRefused(DocumentLane::Ocr));
+    }
+
+    #[tokio::test]
+    async fn ocr_lane_without_a_credential_is_not_granted() {
+        let server = silent_gateway().await;
+        let client = ModelPlaneClient::new(server.uri())
+            .unwrap()
+            .with_document_lanes(BOTH_LANES);
+        let err = client
+            .ocr_pages_for_org("org-1", ZdrMode::Off, &ocr_request(&[1]))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err,
+            DocumentLaneError::Hop {
+                lane: DocumentLane::Ocr,
+                hop: ModelHopError::LaneNotGranted,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn ocr_lane_sends_only_the_scanned_pages_and_reads_the_text() {
+        use wiremock::matchers::{body_partial_json, header};
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(OCR_ROUTE))
+            .and(header("authorization", "Bearer dev-ingress"))
+            .and(header("x-inference-authorization", "Bearer dev-inference"))
+            .and(body_partial_json(json!({
+                "content_type": "application/pdf",
+                "pages": "2,5",
+                "locale": "nb-NO",
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "01J",
+                "object": "document.analysis",
+                "status": "succeeded",
+                "content": "Skannet side to\nSkannet side fem",
+                "pages_processed": 2,
+                "model_used": "prebuilt-layout",
+                "provider_used": "azure",
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = lane_client(server.uri(), BOTH_LANES);
+        let result = client
+            .ocr_pages_for_org("org-1", ZdrMode::Off, &ocr_request(&[5, 2]))
+            .await
+            .unwrap();
+        assert_eq!(result.text, "Skannet side to\nSkannet side fem");
+        assert_eq!(result.pages_processed, 2);
+        assert_eq!(result.model_used, "prebuilt-layout");
+        assert_eq!(result.provider_used, "azure");
+        assert!(!format!("{result:?}").contains("Skannet"));
+    }
+
+    #[tokio::test]
+    async fn ocr_lane_fails_closed_on_an_incomplete_answer() {
+        let cases = [
+            (
+                json!({ "status": "succeeded", "content": "one page", "pages_processed": 1 }),
+                "fewer pages processed than asked",
+            ),
+            (
+                json!({ "status": "succeeded", "content": "  ", "pages_processed": 2 }),
+                "no text",
+            ),
+            (
+                json!({ "status": "failed", "content": "partial", "pages_processed": 2 }),
+                "status is not succeeded",
+            ),
+        ];
+        for (body, want) in cases {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path(OCR_ROUTE))
+                .respond_with(ResponseTemplate::new(200).set_body_json(body))
+                .mount(&server)
+                .await;
+            let client = lane_client(server.uri(), BOTH_LANES);
+            let err = client
+                .ocr_pages_for_org("org-1", ZdrMode::Off, &ocr_request(&[1, 2]))
+                .await
+                .unwrap_err();
+            assert_eq!(
+                err,
+                DocumentLaneError::Unusable {
+                    lane: DocumentLane::Ocr,
+                    reason: want,
+                }
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn ocr_lane_maps_statuses_and_retries_a_503_once() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(OCR_ROUTE))
+            .respond_with(ResponseTemplate::new(403))
+            .mount(&server)
+            .await;
+        let client = lane_client(server.uri(), BOTH_LANES);
+        let err = client
+            .ocr_pages_for_org("org-1", ZdrMode::Off, &ocr_request(&[1]))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err,
+            DocumentLaneError::Hop {
+                lane: DocumentLane::Ocr,
+                hop: ModelHopError::RouteDenied,
+            }
+        );
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(OCR_ROUTE))
+            .respond_with(ResponseTemplate::new(503))
+            .expect(2)
+            .mount(&server)
+            .await;
+        let client = lane_client(server.uri(), BOTH_LANES);
+        let err = client
+            .ocr_pages_for_org("org-1", ZdrMode::Off, &ocr_request(&[1]))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err,
+            DocumentLaneError::Hop {
+                lane: DocumentLane::Ocr,
+                hop: ModelHopError::Upstream { status: 503 },
+            }
+        );
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(OCR_ROUTE))
+            .respond_with(ResponseTemplate::new(200).set_body_string("not json"))
+            .mount(&server)
+            .await;
+        let client = lane_client(server.uri(), BOTH_LANES);
+        let err = client
+            .ocr_pages_for_org("org-1", ZdrMode::Off, &ocr_request(&[1]))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err,
+            DocumentLaneError::Hop {
+                lane: DocumentLane::Ocr,
+                hop: ModelHopError::Decode,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn pii_model_lane_off_or_zdr_or_bad_input_sends_nothing() {
+        let server = silent_gateway().await;
+        let off = lane_client(server.uri(), DocumentLaneSettings::default());
+        let on = lane_client(server.uri(), BOTH_LANES);
+        let lane = DocumentLane::PiiModel;
+        assert_eq!(
+            off.pii_model_for_org("org-1", ZdrMode::Off, &texts(&["a"]), None)
+                .await
+                .unwrap_err(),
+            DocumentLaneError::Disabled(lane)
+        );
+        assert_eq!(
+            on.pii_model_for_org("org-1", ZdrMode::On, &texts(&["a"]), None)
+                .await
+                .unwrap_err(),
+            DocumentLaneError::ZdrRefused(lane)
+        );
+        let invalid = |reason| DocumentLaneError::InvalidInput { lane, reason };
+        assert_eq!(
+            on.pii_model_for_org("org-1", ZdrMode::Off, &[], None)
+                .await
+                .unwrap_err(),
+            invalid("no texts")
+        );
+        assert_eq!(
+            on.pii_model_for_org("org-1", ZdrMode::Off, &texts(&["ok", " "]), None)
+                .await
+                .unwrap_err(),
+            invalid("empty text")
+        );
+        let long = vec!["x".repeat(MAX_PII_MODEL_TEXT_CHARS + 1)];
+        assert_eq!(
+            on.pii_model_for_org("org-1", ZdrMode::Off, &long, None)
+                .await
+                .unwrap_err(),
+            invalid("text too long")
+        );
+        let many = vec!["x".to_owned(); MAX_PII_MODEL_TEXTS + 1];
+        assert_eq!(
+            on.pii_model_for_org("org-1", ZdrMode::Off, &many, None)
+                .await
+                .unwrap_err(),
+            invalid("too many texts")
+        );
+    }
+
+    #[tokio::test]
+    async fn pii_model_lane_returns_redacted_texts_in_input_order() {
+        use wiremock::matchers::body_partial_json;
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(PII_MODEL_ROUTE))
+            .and(body_partial_json(json!({
+                "texts": ["Ring Kari", "Mail Ola"],
+                "language": "no",
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "01J",
+                "object": "language.pii",
+                "results": [
+                    { "id": "2", "redacted_text": "Mail ***", "entities": [] },
+                    { "id": "1", "redacted_text": "Ring ****", "entities": [] },
+                ],
+                "model_used": "pii-2025",
+                "provider_used": "azure",
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = lane_client(server.uri(), BOTH_LANES);
+        let result = client
+            .pii_model_for_org(
+                "org-1",
+                ZdrMode::Off,
+                &texts(&["Ring Kari", "Mail Ola"]),
+                Some("no"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.redacted, texts(&["Ring ****", "Mail ***"]));
+        assert_eq!(result.model_used, "pii-2025");
+        assert_eq!(result.provider_used, "azure");
+    }
+
+    #[tokio::test]
+    async fn pii_model_lane_fails_closed_on_a_partial_answer() {
+        let cases = [
+            (
+                json!({ "results": [ { "id": "1", "redacted_text": "a" } ] }),
+                "item count differs from the texts sent",
+            ),
+            (
+                json!({ "results": [
+                    { "id": "1", "redacted_text": "a" },
+                    { "id": "3", "redacted_text": "b" },
+                ] }),
+                "unknown item id",
+            ),
+            (
+                json!({ "results": [
+                    { "id": "1", "redacted_text": "a" },
+                    { "id": "1", "redacted_text": "b" },
+                ] }),
+                "duplicated item id",
+            ),
+            (
+                json!({ "results": [
+                    { "id": "1", "redacted_text": "a" },
+                    { "id": "2", "redacted_text": "" },
+                ] }),
+                "item has no redacted text",
+            ),
+            (
+                json!({ "results": [
+                    { "id": "1", "redacted_text": "a" },
+                    { "id": "2" },
+                ] }),
+                "item has no redacted text",
+            ),
+        ];
+        for (body, want) in cases {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path(PII_MODEL_ROUTE))
+                .respond_with(ResponseTemplate::new(200).set_body_json(body))
+                .mount(&server)
+                .await;
+            let client = lane_client(server.uri(), BOTH_LANES);
+            let err = client
+                .pii_model_for_org("org-1", ZdrMode::Off, &texts(&["one", "two"]), None)
+                .await
+                .unwrap_err();
+            assert_eq!(
+                err,
+                DocumentLaneError::Unusable {
+                    lane: DocumentLane::PiiModel,
+                    reason: want,
+                }
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn pii_model_lane_maps_a_gateway_zdr_refusal() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(PII_MODEL_ROUTE))
+            .respond_with(ResponseTemplate::new(412))
+            .mount(&server)
+            .await;
+        let client = lane_client(server.uri(), BOTH_LANES);
+        let err = client
+            .pii_model_for_org("org-1", ZdrMode::Off, &texts(&["one"]), None)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err,
+            DocumentLaneError::Hop {
+                lane: DocumentLane::PiiModel,
+                hop: ModelHopError::ZdrRefused,
+            }
+        );
     }
 }
