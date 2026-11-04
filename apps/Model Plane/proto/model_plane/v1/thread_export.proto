@@ -1,0 +1,115 @@
+syntax = "proto3";
+
+package model_plane.v1;
+
+option go_package = "github.com/triodelab/model-plane/gen/go/model_plane/v1;mpv1";
+
+import "google/protobuf/timestamp.proto";
+
+// Thread export (Wave 3 EP-12 S9).
+//
+// The owner of a thread reads one bounded copy of it to take off the platform:
+// the turns of its active branch, the persisted text of their artifacts, their
+// citations and a summary of each run. session-core decides whether the thread
+// may leave at all, in the same REPEATABLE READ transaction as the read: a
+// zero-retention or waived caller is refused (`zdr_feature_not_supported`,
+// feature `conversation_export`), and so is a thread that holds any run whose
+// retention class is not `persistent` or that belongs to a Space
+// (`failed_precondition` `thread_not_exportable`, the reason in the
+// `x-mp-error-reason` trailer: `non_persistent_run` or `space_thread`). A
+// partial transcript is never exported as if it were whole. Binaries are never
+// part of an export. Another person's thread reads as not found, and a service
+// principal is refused: an export is the owner's own act. A separate file and
+// service (integration round B, C-B6) so that SessionCore and every
+// implementation or test double of it stay source-compatible. Switch
+// `SESSION_THREAD_EXPORT_ENABLED`, default off; while it is off the RPC answers
+// `unavailable` `thread_export_disabled`.
+
+// EP-12 S9. Which copy of the thread an export carries.
+enum ExportProfile {
+  // Not set: refused as an invalid argument, so a caller always chooses.
+  EXPORT_PROFILE_UNSPECIFIED = 0;
+  // Everything the owner's own transcript read shows, binaries excepted.
+  EXPORT_PROFILE_FULL = 1;
+  // The turn text, artifacts and citation titles only: tool arguments and
+  // results, connector payloads and citation query strings are dropped and
+  // attachment names are replaced by `attachment-N`. The replay view's input.
+  EXPORT_PROFILE_REDACTED = 2;
+}
+
+// EP-12 S9. Ask for an export of one thread the caller owns.
+message ExportThreadRequest {
+  // The thread to export, in the caller's own org.
+  string thread_id = 1;
+  // The copy to return; EXPORT_PROFILE_UNSPECIFIED is refused.
+  ExportProfile profile = 2;
+}
+
+// EP-12 S9. One thread's export, oldest turn first.
+message ExportThreadResponse {
+  // The exported thread.
+  string thread_id = 1;
+  // The thread's title as the owner set or accepted it; empty when it has none.
+  string title = 2;
+  // When the thread was created.
+  google.protobuf.Timestamp created_at = 3;
+  // The turns of the active branch, oldest first, at most 2,000.
+  repeated ExportedMessage messages = 4;
+  // A summary of each run on the thread, oldest first, at most 2,000.
+  repeated ExportedRun runs = 5;
+  // True when a cap (2,000 turns, 2,000 runs or 8 MiB of text) cut the export
+  // short: the turns returned are the oldest ones, and later turns are missing.
+  bool truncated = 6;
+}
+
+// EP-12 S9. One turn of an exported thread.
+message ExportedMessage {
+  // The turn's id.
+  string message_id = 1;
+  // "user", "assistant" or "system".
+  string role = 2;
+  // The turn's text, with the latest edit or deletion folded in.
+  string content = 3;
+  // When the turn was stored.
+  google.protobuf.Timestamp created_at = 4;
+  // A JSON array of the turn's text artifacts (id, kind, title, content,
+  // version); an artifact without persisted text is left out. Empty when none.
+  string artifacts_json = 5;
+  // A JSON array of the turn's citations; under the redacted profile without
+  // snippets, passages or URL query strings, and a connector citation keeps
+  // its title and source label only. Empty when none.
+  string citations_json = 6;
+  // A JSON object of the turn's other persisted metadata (tool steps, evidence,
+  // attachments without their bodies). Under the redacted profile only the
+  // attachments remain, renamed `attachment-N`. Empty when none.
+  string metadata_json = 7;
+}
+
+// EP-12 S9. The summary of one run of an exported thread.
+message ExportedRun {
+  // The run's id.
+  string run_id = 1;
+  // The run's stored status: "queued", "running", "completed", "failed",
+  // "cancelled" or "awaiting_approval".
+  string status = 2;
+  // Who started the run, one closed token: "chat", "schedule", "trigger" or
+  // "api" (a run stamped before origins existed reads as "chat"; a stamp
+  // outside the vocabulary reads as empty).
+  string origin = 3;
+  // The model named in the run's metadata (`model`); empty when none is named.
+  string model = 4;
+  // Input tokens; 0 today, because token usage lives on the inference path and
+  // not in session-core (as RunDetail.input_tokens).
+  uint64 input_tokens = 5;
+  // Output tokens; 0 today, for the same reason as `input_tokens`.
+  uint64 output_tokens = 6;
+  // When the run was created.
+  google.protobuf.Timestamp created_at = 7;
+}
+
+// EP-12 S9. The owner's export of one thread, decided and read in one
+// transaction. See the file comment for every refusal.
+service ThreadExportService {
+  // Read one bounded export of a thread the caller owns.
+  rpc ExportThread(ExportThreadRequest) returns (ExportThreadResponse);
+}
