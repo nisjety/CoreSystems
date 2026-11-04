@@ -542,8 +542,8 @@ async fn get_lineage(
 /// browser-action decision surface (a granted decision lets execution-core's
 /// in-loop poller in `browser_agent.rs` proceed with the exact action that
 /// was gated; a denial/timeout aborts the run without dispatching it).
-/// Body: `{"decision": "approve" | "reject", "reason"?: string, "scope"?: "once"}`; see
-/// [`DecideBody`].
+/// Body: `{"decision": "approve" | "reject", "reason"?: string, "scope"?: "once",
+/// "edit"?: {"patch": {...}, "baseFingerprint": string}}`; see [`DecideBody`].
 pub(crate) async fn decide_approval(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -583,6 +583,69 @@ struct DecideBody {
     scope: Option<String>,
     #[serde(default)]
     promote: bool,
+    /// "Send with my edits" (EP-10-S4): the person's changes to a pending mail send. Forwarded
+    /// as `edit {patch, base_fingerprint}`; model-gateway and Session Core decide whether it is
+    /// allowed (both refuse it while APPROVAL_EDIT_ENABLED is off).
+    #[serde(default)]
+    edit: Option<DecideEditBody>,
+}
+
+/// The edit a decision may carry, in the SPA's camelCase. `patch` holds the mail fields the
+/// person changed (`to`, `subject`, `bodyText`); Session Core refuses any other key.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct DecideEditBody {
+    patch: Value,
+    base_fingerprint: String,
+}
+
+/// The largest edit patch forwarded: the 48 KiB body cap plus room for recipients and subject.
+const DECIDE_EDIT_PATCH_MAX_BYTES: usize = 64 * 1024;
+
+fn edit_refusal(code: &'static str, message: &'static str) -> (StatusCode, Json<Value>) {
+    (StatusCode::UNPROCESSABLE_ENTITY, Json(error(code, message)))
+}
+
+/// The upstream form of a decision's edit (EP-10-S4): an approval for this one call only, a JSON
+/// object patch within the cap and a 64-hex base fingerprint.
+fn decide_upstream_edit(
+    edit: DecideEditBody,
+    decision: &str,
+    scope: Option<&str>,
+    promote: bool,
+) -> Result<Value, (StatusCode, Json<Value>)> {
+    if decision != "approve" {
+        return Err(edit_refusal(
+            "edit_requires_grant",
+            "An edit is sent with an approval only.",
+        ));
+    }
+    if !matches!(scope, None | Some("once")) || promote {
+        return Err(edit_refusal(
+            "edit_requires_once",
+            "An edited action is approved for this one time only.",
+        ));
+    }
+    if !edit.patch.is_object() {
+        return Err(edit_refusal(
+            "invalid_patch",
+            "The edit is not in the expected shape.",
+        ));
+    }
+    if edit.patch.to_string().len() > DECIDE_EDIT_PATCH_MAX_BYTES {
+        return Err(edit_refusal(
+            "edit_too_large",
+            "The edited message is too long.",
+        ));
+    }
+    let base = edit.base_fingerprint.trim();
+    if base.len() != 64 || !base.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(edit_refusal(
+            "invalid_base_fingerprint",
+            "The edit does not say which draft it changes.",
+        ));
+    }
+    Ok(serde_json::json!({ "patch": edit.patch, "base_fingerprint": base }))
 }
 
 /// The upstream body, rebuilt from the accepted fields alone, or the refusal to send. An
@@ -623,6 +686,11 @@ fn decide_upstream_body(raw: Value) -> Result<Value, (StatusCode, Json<Value>)> 
             ));
         }
         upstream["promote"] = Value::Bool(true);
+    }
+    if let Some(edit) = body.edit {
+        let scope = upstream["scope"].as_str().map(str::to_owned);
+        let edit = decide_upstream_edit(edit, &body.decision, scope.as_deref(), body.promote)?;
+        upstream["edit"] = edit;
     }
     Ok(upstream)
 }
@@ -952,6 +1020,68 @@ mod tests {
                 .expect("accepted"),
             json!({"decision": "reject", "reason": "no", "scope": "once"})
         );
+    }
+
+    /// EP-10-S4: an edit crosses as `{patch, base_fingerprint}` for a once-approval only; an
+    /// unknown key inside the edit is refused like one beside it.
+    #[test]
+    fn decide_body_accepts_edit_and_refuses_unknown_keys() {
+        let base = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let forwarded = decide_upstream_body(json!({
+            "decision": "approve",
+            "scope": "once",
+            "edit": { "patch": { "subject": "New", "bodyText": "Hei" }, "baseFingerprint": base },
+        }))
+        .expect("an edited approval");
+        assert_eq!(
+            forwarded,
+            json!({
+                "decision": "approve",
+                "reason": "",
+                "scope": "once",
+                "edit": { "patch": { "subject": "New", "bodyText": "Hei" }, "base_fingerprint": base },
+            })
+        );
+        let plain = decide_upstream_body(json!({"decision": "approve"})).expect("no edit");
+        assert!(plain.get("edit").is_none(), "an edit is sent only when made");
+
+        for edit in [
+            json!({ "patch": {}, "baseFingerprint": base, "connectionId": "conn-2" }),
+            json!({ "patch": {}, "base_fingerprint": base }),
+            json!({ "patch": {} }),
+        ] {
+            let (status, Json(refusal)) =
+                decide_upstream_body(json!({"decision": "approve", "edit": edit}))
+                    .expect_err("an unknown or missing edit key is refused");
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert_eq!(refusal["error"]["code"], "invalid_request");
+        }
+
+        let cases = [
+            (json!({"decision": "reject"}), "edit_requires_grant"),
+            (json!({"decision": "approve", "scope": "thread"}), "edit_requires_once"),
+            (json!({"decision": "approve", "scope": "thread", "promote": true}), "edit_requires_once"),
+        ];
+        for (mut body, code) in cases {
+            body["edit"] = json!({ "patch": { "subject": "New" }, "baseFingerprint": base });
+            let (status, Json(refusal)) = decide_upstream_body(body.clone()).expect_err("refused");
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+            assert_eq!(refusal["error"]["code"], code, "{body}");
+        }
+        for (edit, code) in [
+            (json!({ "patch": ["subject"], "baseFingerprint": base }), "invalid_patch"),
+            (json!({ "patch": { "subject": "New" }, "baseFingerprint": "abc" }), "invalid_base_fingerprint"),
+            (
+                json!({ "patch": { "bodyText": "x".repeat(64 * 1024) }, "baseFingerprint": base }),
+                "edit_too_large",
+            ),
+        ] {
+            let (status, Json(refusal)) =
+                decide_upstream_body(json!({"decision": "approve", "edit": edit}))
+                    .expect_err("refused");
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+            assert_eq!(refusal["error"]["code"], code);
+        }
     }
 
     #[test]
