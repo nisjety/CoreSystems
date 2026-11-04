@@ -248,6 +248,47 @@ func TestWorkflowDispatchConsumesDecisionBeforeTemporalHandoff(t *testing.T) {
 	}
 }
 
+// A Run now fire (EP-6-S2) is a task like any slot fire, so the dispatcher asks Control
+// for a fresh fire decision and a scheduled-run decision before the Temporal handoff,
+// and the run's system thread is keyed on the manual fire key.
+func TestDispatcherReauthorizesManualFire(t *testing.T) {
+	manualKey := cron.ManualFireKeyPrefix + "6f1c2a9e-0b7d-4c55-9a1e-3d2f8b7c6a10"
+	intent := cron.FireIntent{
+		OrgID: "org-1", SpaceRef: "space-1", SubjectID: "user-1", ScheduleID: "schedule-1",
+		FireKey:        manualKey,
+		IdempotencyKey: "schedule-1:" + manualKey,
+	}
+	config, intent := scheduledTaskConfig(t, map[string]any{
+		"workflow_input": map[string]any{"goal": "scheduled work", "policy": "execute"},
+	}, intent)
+	threadKey := "schedule/schedule-1/" + manualKey
+	authorizer := &recordingScheduledRunAuthorizer{preparation: cron.ScheduledRunPreparation{
+		Token: "one-fire-control-bearer", SystemThreadKey: threadKey,
+	}}
+	session := &recordingScheduledRunSession{response: &mpv1.PrepareScheduledRunThreadResponse{
+		ThreadId: "thread-manual-1", RunId: "task-1", OwnerId: "service:orchestrator-core",
+	}}
+	dispatcher := &WorkflowDispatcher{fireAuthorizer: authorizer, scheduledRunSession: session}
+	prepared, err := dispatcher.reauthorizeScheduleFire(context.Background(), TaskRef{ID: "task-1", OrgID: "org-1"}, taskDetail{
+		config: config, scheduleID: "schedule-1",
+	})
+	if err != nil {
+		t.Fatalf("reauthorizeScheduleFire: %v", err)
+	}
+	if authorizer.calls != 1 || authorizer.intent != intent {
+		t.Fatalf("fresh fire decision asked for %+v (%d calls), want %+v", authorizer.intent, authorizer.calls, intent)
+	}
+	if authorizer.taskID != "task-1" {
+		t.Fatalf("scheduled-run decision was not asked for the task: %q", authorizer.taskID)
+	}
+	if session.request.GetFireKey() != manualKey || session.request.GetSystemThreadKey() != threadKey {
+		t.Fatalf("Session Core was asked for fire %q thread %q", session.request.GetFireKey(), session.request.GetSystemThreadKey())
+	}
+	if prepared == nil || prepared.fireKey != manualKey || prepared.threadID != "thread-manual-1" {
+		t.Fatalf("prepared handoff = %#v", prepared)
+	}
+}
+
 func TestAttachScheduledRunInputCarriesOnlyNonSecretPreparationFacts(t *testing.T) {
 	req, err := dispatchPlan(
 		TaskRef{ID: "task-1", OrgID: "org-1"},

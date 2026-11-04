@@ -1049,6 +1049,28 @@ export const integrationsFetchConnectionContentInput = z
   })
   .strict()
 
+// How the agent may use the person's connected apps (EP-10 S7). The levels only tighten: a read is used
+// without asking, asked about first, or off; a write is always asked about, or off. The client maps a
+// level onto the person's own tool policy on cap.tool.provider.read or cap.tool.provider.execute and
+// never names an org, a user or an allow.
+export const CONNECTOR_READ_LEVELS = ['use_without_asking', 'ask_first', 'off'] as const
+export const CONNECTOR_WRITE_LEVELS = ['always_ask', 'off'] as const
+
+export const integrationsSetConnectorPolicyInput = z.discriminatedUnion('kind', [
+  z.object({ kind: z.literal('read'), level: z.enum(CONNECTOR_READ_LEVELS) }).strict(),
+  z.object({ kind: z.literal('write'), level: z.enum(CONNECTOR_WRITE_LEVELS) }).strict(),
+])
+
+export const integrationsConnectorPoliciesOutput = z.object({
+  // False while the deployment does not enforce tool policies: the levels are stored and not yet honoured.
+  enforced: z.boolean(),
+  read: z.enum(CONNECTOR_READ_LEVELS),
+  write: z.enum(CONNECTOR_WRITE_LEVELS),
+  // The org's own level, which wins whenever it is the stricter one.
+  orgRead: z.enum(CONNECTOR_READ_LEVELS),
+  orgWrite: z.enum(CONNECTOR_WRITE_LEVELS),
+})
+
 const integrationsConnectorActionOutput = z.object({
   providerKey: z.string(),
   operation: z.string(),
@@ -1863,6 +1885,15 @@ const scheduleFiresListInput = z
   .object({
     scheduleId: z.string().trim().min(1).max(200),
     limit: z.number().int().min(1).max(100).optional(),
+  })
+  .strict()
+
+// Run now (EP-6-S2). The request id is generated once per press and reused on retry, so a retry
+// finds the first fire; capability-core accepts 16 to 64 letters, digits or hyphens.
+const scheduleRunNowInput = z
+  .object({
+    scheduleId: z.string().trim().min(1).max(200),
+    requestId: z.string().regex(/^[A-Za-z0-9-]{16,64}$/),
   })
   .strict()
 
@@ -3521,6 +3552,28 @@ export const actionRegistry = [
     outputSchema: integrationsConnectorActionOutput,
   },
   {
+    id: 'integrations.list_connector_policies',
+    label: 'Show connected app levels',
+    description: 'Read how the agent may use the person\'s connected apps: reads used without asking, asked about first or off, and writes always asked about or off, for the person and for their org, with whether the deployment enforces the levels yet. Read-only. Never model-executable: a model does not read the rules it runs under to plan around them.',
+    ownerPlane: 'model',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: z.object({}).strict(),
+    outputSchema: integrationsConnectorPoliciesOutput,
+  },
+  {
+    id: 'integrations.set_connector_policy',
+    label: 'Set connected app level',
+    description: 'Set the person\'s own level for every connected app at once: reads used without asking, asked about first or off; writes always asked about or off. Only tightens: a write is never released from asking, and nothing is relaxed past what the org set, because the strictest level in force wins. Stored as the person\'s tool policy on the provider capabilities and honoured once the deployment enforces tool policies. Refused typed under zero data retention. Never model-executable: a model does not set the rules it runs under.',
+    ownerPlane: 'model',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: integrationsSetConnectorPolicyInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
     id: 'org.soft_delete',
     label: 'Soft-delete organization',
     description: 'Open the organization\'s 30-day GDPR deletion grace window. Reversible via org.restore only inside that window.',
@@ -4162,7 +4215,7 @@ export const actionRegistry = [
   {
     id: 'browser_action.set_control_mode',
     label: 'Set browser control mode',
-    description: 'Hand browser-session control between agent and human. Control authority lives in Quarry; this is a thin proxy to it.',
+    description: 'Hand browser-session control between agent and human, compare-and-set on the control epoch. Also the Take over and Give back of a chat run\'s browser in the live panel (EP-1), on the Quarry run the turn is bound to. Control authority lives in Quarry; this is a thin proxy to it.',
     ownerPlane: 'model',
     risk: 'medium',
     requiresApproval: false,
@@ -4377,6 +4430,17 @@ export const actionRegistry = [
     requiresApproval: false,
     reversible: true,
     inputSchema: scheduleFiresListInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'schedule.run_now',
+    label: 'Run schedule now',
+    description: 'Run one of your schedules once, now, under the approval it already holds. It goes through the same fresh authorization as a scheduled run, counts against the schedule\'s manual-run limits (one at a time, six an hour) and leaves the next scheduled run where it is. Schedule creator only.',
+    ownerPlane: 'model',
+    risk: 'high',
+    requiresApproval: false,
+    reversible: false,
+    inputSchema: scheduleRunNowInput,
     outputSchema: envelopeStatusOutput,
   },
   {

@@ -580,6 +580,7 @@ fn proxy_routes() -> Router<AppState> {
                 .delete(delete_cron_proxy),
         )
         .route("/v1/cron/:id/fires", get(list_cron_fires_proxy))
+        .route("/v1/cron/:id/run", post(run_cron_now_proxy))
         // Memory
         .route(
             "/v1/memory",
@@ -7250,6 +7251,9 @@ async fn delete_org_hook_proxy(
 #[derive(Debug, Default, Deserialize)]
 struct CronListQuery {
     space_ref: Option<String>,
+    /// `self` narrows the list to the caller's own schedules (EP-6-S2). Any
+    /// other value is dropped, never forwarded.
+    creator: Option<String>,
 }
 
 /// Query for both process routes. `space_ref` and the two decision fields
@@ -7613,12 +7617,22 @@ async fn list_cron_proxy(
             Json(json!({ "error": "space_ref must be URL-safe" })),
         ));
     }
-    let path = if space_ref.is_empty() {
-        format!("cron?org_id={}", c.org_id)
-    } else {
-        format!("cron?org_id={}&space_ref={space_ref}", c.org_id)
-    };
+    let path = cron_list_path(&c.org_id, space_ref, query.creator.as_deref());
     proxy_to_capability_core(&s, &c, &bearer, &path, "GET", None).await
+}
+
+/// The upstream list path. Only the literal `creator=self` is forwarded:
+/// capability-core compares it to the verified actor, so it can only narrow.
+fn cron_list_path(org_id: &str, space_ref: &str, creator: Option<&str>) -> String {
+    let mut path = if space_ref.is_empty() {
+        format!("cron?org_id={org_id}")
+    } else {
+        format!("cron?org_id={org_id}&space_ref={space_ref}")
+    };
+    if creator == Some("self") {
+        path.push_str("&creator=self");
+    }
+    path
 }
 async fn create_cron_proxy(
     State(s): State<AppState>,
@@ -7698,6 +7712,76 @@ mod cron_fires_path_tests {
             "cron/cron_1/fires?limit=5"
         );
         assert_eq!(cron_fires_path("cron_1", None), "cron/cron_1/fires");
+    }
+}
+
+/// Run now (EP-6-S2): one manual fire of a schedule. Only the caller's
+/// `request_id` is forwarded; capability-core checks the creator, asks Control
+/// for a fresh fire decision and answers 404 while `CRON_RUN_NOW_ENABLED` is off.
+async fn run_cron_now_proxy(
+    State(s): State<AppState>,
+    Extension(c): Extension<Claims>,
+    bearer: VerifiedCapabilityBearer,
+    Path(id): Path<String>,
+    Json(b): Json<Value>,
+) -> Result<Json<Value>, HttpJsonError> {
+    let path = cron_run_path(&id)?;
+    let body = json!({ "request_id": b.get("request_id").cloned().unwrap_or(Value::Null) });
+    proxy_to_capability_core(&s, &c, &bearer, &path, "POST", Some(&body)).await
+}
+
+/// The upstream run path. The id is decoded from the request path, so an
+/// encoded `/` or `?` would otherwise address a different upstream route.
+fn cron_run_path(id: &str) -> Result<String, HttpJsonError> {
+    let url_safe = !id.is_empty()
+        && id != "."
+        && id != ".."
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '~'));
+    if !url_safe {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": {
+                "code": "invalid_cron_id",
+                "message": "cron id must be URL-safe",
+                "details": {}
+            }})),
+        ));
+    }
+    Ok(format!("cron/{id}/run"))
+}
+
+#[cfg(test)]
+mod cron_run_now_path_tests {
+    use super::{cron_list_path, cron_run_path};
+
+    #[test]
+    fn cron_run_path_forwards_only_the_id() {
+        assert_eq!(cron_run_path("cron_1").unwrap(), "cron/cron_1/run");
+        for bad in ["", ".", "..", "cron_1/fires", "cron_1?creator=x", "cron 1", "cron_1#x"] {
+            let (status, _) = cron_run_path(bad).unwrap_err();
+            assert_eq!(status, axum::http::StatusCode::BAD_REQUEST, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn cron_list_forwards_only_creator_self() {
+        assert_eq!(cron_list_path("org-1", "", None), "cron?org_id=org-1");
+        assert_eq!(
+            cron_list_path("org-1", "", Some("self")),
+            "cron?org_id=org-1&creator=self"
+        );
+        assert_eq!(
+            cron_list_path("org-1", "space-1", Some("self")),
+            "cron?org_id=org-1&space_ref=space-1&creator=self"
+        );
+        for other in ["someone-else", "SELF", "self&org_id=org-2", ""] {
+            assert_eq!(
+                cron_list_path("org-1", "space-1", Some(other)),
+                "cron?org_id=org-1&space_ref=space-1"
+            );
+        }
     }
 }
 
@@ -9762,6 +9846,29 @@ pub struct InvokeRequest {
     /// only narrows a delegated child's tools.
     #[serde(default)]
     pub agent_roles: Option<serde_json::Value>,
+    /// EP-6 S9 — the mentioned agent's definition id (Convex), stamped by the BFF gateway with
+    /// `AGENT_VERSION_PINNING` on, from the binding it re-resolved; any client copy is stripped
+    /// there first. The five `agent_*` pin fields below are kept as raw JSON for the same reason
+    /// as `agent_roles`: they are read and typed only while `MODEL_GATEWAY_AGENT_TOOL_ALLOWLIST`
+    /// is on (`sse::agent_pin`), so a body carrying them parses exactly as before with it off.
+    #[serde(default)]
+    pub agent_ref: Option<serde_json::Value>,
+    /// EP-6 S9 — the definition version this turn runs (the binding's pin, else the published
+    /// one), from 1.
+    #[serde(default)]
+    pub agent_version: Option<serde_json::Value>,
+    /// EP-6 S9 — `sha256:` digest of that version's canonical body, so a log line names exactly
+    /// what answered.
+    #[serde(default)]
+    pub agent_digest: Option<serde_json::Value>,
+    /// EP-6 S9 — the version's tool allowlist (WS05 capability ids). Only ever narrows the turn's
+    /// tools; absent means the definition states none.
+    #[serde(default)]
+    pub agent_tool_capability_ids: Option<serde_json::Value>,
+    /// EP-6 S9 — the version's autonomy cap (`read_only`, `ask_first` or `auto`), one more input
+    /// to the WS25-S6 strictest-wins mode resolve, so it can only lower the result.
+    #[serde(default)]
+    pub agent_autonomy_cap: Option<serde_json::Value>,
 }
 
 /// A tool/function definition supplied by the client (chat-parity §2).

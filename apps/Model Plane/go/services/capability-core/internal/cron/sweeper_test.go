@@ -436,3 +436,57 @@ func TestLegacyPendingFiresBecomeUnknownAfterAnHour(t *testing.T) {
 		t.Fatalf("sweep cutoff = %v, want one hour before the batch", tx.execs[0].args[1])
 	}
 }
+
+// A slot fire writes exactly what it wrote before InsertFire was extracted for Run now
+// (EP-6-S2): a created task carrying the slot's fire intent, then a pending fire under
+// the slot key, with the same arguments in the same order. Only the generated ids vary.
+func TestFireOneUnchangedAfterInsertFireExtract(t *testing.T) {
+	slot := time.Date(2026, 11, 4, 9, 0, 0, 0, time.UTC)
+	now := slot.Add(2 * time.Second)
+	slotKey := slot.Format(time.RFC3339Nano)
+	template := json.RawMessage(`{"kind":"report","title":"Nightly","description":"summarise","assignee":"ops","priority":2}`)
+	tx := &guardBatchTx{}
+	if err := (&Sweeper{}).fireOne(context.Background(), tx, guardDue(template, slot), now); err != nil {
+		t.Fatalf("fireOne: %v", err)
+	}
+	if len(tx.execs) != 2 {
+		t.Fatalf("fireOne issued %d statements, want 2: %+v", len(tx.execs), tx.execs)
+	}
+	task, fire := tx.execs[0], tx.execs[1]
+	if !strings.Contains(task.sql, "INSERT INTO tasks") || !strings.Contains(task.sql, "VALUES ($1,$2,$3,$4,$5,$6,'created',$7,$8,$9,$9,$9)") {
+		t.Fatalf("task statement changed: %s", task.sql)
+	}
+	taskID, _ := task.args[0].(string)
+	if !strings.HasPrefix(taskID, "task_") || len(task.args) != 9 {
+		t.Fatalf("task arguments = %+v", task.args)
+	}
+	for i, want := range []any{"org-1", "report", "Nightly", "summarise", "ops", 2} {
+		if task.args[i+1] != want {
+			t.Fatalf("task argument %d = %v, want %v", i+1, task.args[i+1], want)
+		}
+	}
+	var config struct {
+		Intent FireIntent `json:"schedule_fire_intent"`
+	}
+	if err := json.Unmarshal(task.args[7].([]byte), &config); err != nil {
+		t.Fatal(err)
+	}
+	wantIntent := FireIntent{
+		OrgID: "org-1", SpaceRef: "space-1", SubjectID: "user-1", ScheduleID: "sched-1",
+		FireKey: slotKey, TemplateDigest: "sha256:" + strings.Repeat("a", 64), IdempotencyKey: "sched-1:" + slotKey,
+	}
+	if config.Intent != wantIntent {
+		t.Fatalf("task intent = %+v, want %+v", config.Intent, wantIntent)
+	}
+	if task.args[8] != now {
+		t.Fatalf("task time = %v, want %v", task.args[8], now)
+	}
+	if fire.sql != `INSERT INTO cron_fires (id, schedule_id, task_id, fired_at, status, fire_key) VALUES ($1,$2,$3,$4,'pending',$5)` {
+		t.Fatalf("fire statement changed: %s", fire.sql)
+	}
+	fireID, _ := fire.args[0].(string)
+	if !strings.HasPrefix(fireID, "cronfire_") || fire.args[1] != "sched-1" || fire.args[2] != taskID ||
+		fire.args[3] != now || fire.args[4] != slotKey {
+		t.Fatalf("fire arguments = %+v", fire.args)
+	}
+}

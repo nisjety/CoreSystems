@@ -3,7 +3,9 @@ import {
   actionRegistry,
   getActionDescriptor,
   integrationsBrowseConnectionInput,
+  integrationsConnectorPoliciesOutput,
   integrationsFetchConnectionContentInput,
+  integrationsSetConnectorPolicyInput,
 } from '@/shared/actions/action-registry'
 import { chatProjectSchema } from '@/shared/actions/chat-project'
 import { MODEL_ACCESS } from '@/shared/actions/model-access'
@@ -559,6 +561,55 @@ describe('action registry', () => {
     expect(content?.safeParse({ connectionId: 'conn-1', operation: 'mail.send', params: {} }).success).toBe(false)
   })
 
+  it('registers the connected-app levels as low-risk model-plane contracts the model cannot execute (EP-10 S7)', () => {
+    for (const id of ['integrations.set_connector_policy', 'integrations.list_connector_policies'] as const) {
+      const action = getActionDescriptor(id)
+
+      expect(action).toMatchObject({ ownerPlane: 'model', risk: 'low', requiresApproval: false, reversible: true })
+      expect(isModelExecutableAction(id)).toBe(false)
+      expect(buildModelContextPack({ route: '/chat', visibleItems: [] }).availableActions).not.toContain(id)
+      expect(action?.description ?? '').toContain('Never model-executable')
+    }
+  })
+
+  it('takes only tightening levels, never an allow, and nothing a client does not own', () => {
+    const set = integrationsSetConnectorPolicyInput
+    for (const level of ['use_without_asking', 'ask_first', 'off']) {
+      expect(set.safeParse({ kind: 'read', level }).success).toBe(true)
+    }
+    for (const level of ['always_ask', 'off']) {
+      expect(set.safeParse({ kind: 'write', level }).success).toBe(true)
+    }
+    // A write is never released from asking, and an ask is not a separate level for it.
+    expect(set.safeParse({ kind: 'write', level: 'use_without_asking' }).success).toBe(false)
+    expect(set.safeParse({ kind: 'write', level: 'ask_first' }).success).toBe(false)
+    expect(set.safeParse({ kind: 'read', level: 'always_ask' }).success).toBe(false)
+    expect(set.safeParse({ kind: 'read', level: 'allow' }).success).toBe(false)
+    expect(set.safeParse({ kind: 'delete', level: 'off' }).success).toBe(false)
+    for (const forged of [{ scope: 'org' }, { orgId: 'org_x' }, { userId: 'user_x' }, { capabilityId: 'cap.x' }]) {
+      expect(set.safeParse({ kind: 'read', level: 'off', ...forged }).success).toBe(false)
+    }
+
+    expect(
+      integrationsConnectorPoliciesOutput.safeParse({
+        enforced: false,
+        read: 'ask_first',
+        write: 'always_ask',
+        orgRead: 'use_without_asking',
+        orgWrite: 'off',
+      }).success,
+    ).toBe(true)
+    expect(
+      integrationsConnectorPoliciesOutput.safeParse({
+        enforced: true,
+        read: 'ask_first',
+        write: 'ask_first',
+        orgRead: 'use_without_asking',
+        orgWrite: 'always_ask',
+      }).success,
+    ).toBe(false)
+  })
+
   it('registers the connected-app choice as a model-plane action the model cannot execute, and bounds it like the gateway', () => {
     const scope = getActionDescriptor('chat.set_connector_scope')
 
@@ -859,6 +910,25 @@ describe('action registry', () => {
     })
   })
 
+  it('registers Run now as a high-risk model-plane action the model can never press (EP-6-S2)', () => {
+    const action = getActionDescriptor('schedule.run_now')
+    expect(action).toMatchObject({ ownerPlane: 'model', risk: 'high', requiresApproval: false, reversible: false })
+    expect(isModelExecutableAction('schedule.run_now')).toBe(false)
+    // A model that could fire its own schedule on demand would spend the creator's stored authority.
+    expect(MODEL_ACCESS['schedule.run_now']).toMatchObject({ access: 'none', exemptReason: 'agent_cannot_self_govern' })
+
+    // The schedule and a client request id, nothing else: the creator and the org come from the session.
+    const requestId = '6f1c2a9e-0b7d-4c55-9a1e-3d2f8b7c6a10'
+    expect(action?.inputSchema.safeParse({ scheduleId: 'cron_1', requestId }).success).toBe(true)
+    expect(action?.inputSchema.safeParse({ scheduleId: 'cron_1' }).success).toBe(false)
+    for (const bad of ['short', 'has/slash-0123456789', 'x'.repeat(65)]) {
+      expect(action?.inputSchema.safeParse({ scheduleId: 'cron_1', requestId: bad }).success, bad).toBe(false)
+    }
+    for (const extra of ['creator_subject_id', 'orgId', 'task_template']) {
+      expect(action?.inputSchema.safeParse({ scheduleId: 'cron_1', requestId, [extra]: 'x' }).success, extra).toBe(false)
+    }
+  })
+
   it('registers the agent installations read as a low-risk, ungated application contract the model cannot execute', () => {
     const action = getActionDescriptor('agents.installations.list')
     expect(action).toMatchObject({ ownerPlane: 'application', risk: 'low', requiresApproval: false, reversible: true })
@@ -937,7 +1007,9 @@ describe('action registry', () => {
     // the six ingestions run and schedule controls (get_run_status, pause_run, resume_run, cancel_run,
     // pause_schedule, change_schedule_state) that replace run_schedule_action, and browser_run.steer.
     // 270 after EP-14-S7 registered chat.inspect_run_request, the request inspector read.
-    expect(ids).toHaveLength(270)
+    // 271 after EP-6-S2 registered schedule.run_now.
+    // 273 after EP-10-S7 registered integrations.list_connector_policies and integrations.set_connector_policy.
+    expect(ids).toHaveLength(273)
 
     const spaceIds = ids.filter((id) => id.startsWith('spaces.'))
     const first = ids.indexOf(spaceIds[0] as string)

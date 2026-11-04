@@ -56,6 +56,7 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
             post(update_cron).delete(delete_cron),
         )
         .route("/api/v1/cron/{cron_id}/fires", get(list_cron_fires))
+        .route("/api/v1/cron/{cron_id}/run", post(run_cron_now))
         .route("/api/v1/capabilities", get(list_capabilities));
     // EP-6 S8: with the switch off the builder routes do not exist, so the gateway answers
     // exactly as it did before (the fallback 404).
@@ -91,6 +92,15 @@ async fn can_author_skills(state: &AppState, user: &AuthenticatedUser) -> bool {
 fn can_author_own_schedule(user: &AuthenticatedUser, schedule_creator_subject_id: Option<&str>) -> bool {
     has_authorized_org_role(user, &["owner", "admin"])
         || schedule_creator_subject_id.is_some_and(|id| id == user.user_id)
+}
+
+/// Whether the caller may press Run now on THIS schedule (EP-6 S2, OD-1): its
+/// own creator only, with no admin short-circuit. Every fire runs under the
+/// creator's subject, so an admin pressing it would spend someone else's
+/// authority at a moment that person did not choose. Admins keep pause and
+/// delete, which only reduce authority. capability-core checks the same.
+fn can_run_schedule_now(user: &AuthenticatedUser, schedule_creator_subject_id: Option<&str>) -> bool {
+    schedule_creator_subject_id.is_some_and(|id| !id.is_empty() && id == user.user_id)
 }
 
 /// A cron-create body naming an explicit `space_ref` — a Space Room, since
@@ -494,6 +504,71 @@ async fn list_cron_fires(
         Method::GET,
         &url,
         None,
+        token.as_deref(),
+        Some(&capability),
+        &user,
+    )
+    .await
+    .into_response()
+}
+
+/// Run now (EP-6 S2): one manual fire of the caller's own schedule. The
+/// schedule is read first so a non-creator, an org admin included, is refused
+/// here; only the client's `request_id` is forwarded, and capability-core
+/// re-checks the creator and asks Control before any task exists. While
+/// `CRON_RUN_NOW_ENABLED` is off upstream, the forwarded call answers 404.
+async fn run_cron_now(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Path(cron_id): Path<String>,
+    Json(body): Json<Value>,
+) -> impl IntoResponse {
+    let token = shared::model_token(&state, &user, &headers).await;
+    let capability = match shared::required_capability_token(&state, &user, &headers).await {
+        Ok(token) => token,
+        Err(err) => return shared::delegated_auth_unavailable(err).into_response(),
+    };
+    let schedule_url = format!(
+        "{}/v1/cron/{}",
+        state.model_gateway_url,
+        urlencoding::encode(&cron_id)
+    );
+    let (status, Json(schedule)) = shared::proxy_model_json_with_capability(
+        &state,
+        Method::GET,
+        &schedule_url,
+        None,
+        token.as_deref(),
+        Some(&capability),
+        &user,
+    )
+    .await;
+    if !status.is_success() {
+        return (status, Json(schedule)).into_response();
+    }
+    let creator = schedule.get("creator_subject_id").and_then(Value::as_str);
+    if !can_run_schedule_now(&user, creator) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(error(
+                "run_now_not_creator",
+                "Only this schedule's creator can run it now.",
+            )),
+        )
+            .into_response();
+    }
+    let request_id = body.get("request_id").cloned().unwrap_or(Value::Null);
+    let url = format!(
+        "{}/v1/cron/{}/run",
+        state.model_gateway_url,
+        urlencoding::encode(&cron_id)
+    );
+    shared::proxy_model_json_with_capability(
+        &state,
+        Method::POST,
+        &url,
+        Some(json!({ "request_id": request_id })),
         token.as_deref(),
         Some(&capability),
         &user,
@@ -1406,8 +1481,8 @@ async fn apply_agent_draft_preview(
 mod tests {
     use super::{
         apply_agent_draft_preview, apply_preview_persona, builder_session_authority,
-        can_author_own_schedule, cron_create_names_explicit_space, draft_from_request,
-        parse_builder_definition, version_to_api, BuilderDefinition,
+        can_author_own_schedule, can_run_schedule_now, cron_create_names_explicit_space,
+        draft_from_request, parse_builder_definition, version_to_api, BuilderDefinition,
     };
     use crate::middleware::AuthenticatedUser;
     use axum::{body::Body, http::Request};
@@ -1594,6 +1669,96 @@ mod tests {
         assert!(model_requests
             .iter()
             .all(|request| request.url.path() != "/v1/cron/cron_1/fires"));
+    }
+
+    // run_cron_now (EP-6 S2) — the creator only, never an admin on someone
+    // else's schedule; only the request id travels on.
+
+    #[test]
+    fn run_cron_now_refuses_admin_who_is_not_creator() {
+        assert!(!can_run_schedule_now(&owner("admin-1"), Some("someone-else")));
+        assert!(!can_run_schedule_now(&owner("admin-1"), None));
+        assert!(!can_run_schedule_now(&member("user-1"), Some("user-2")));
+        assert!(!can_run_schedule_now(&member("user-1"), Some("")));
+        assert!(can_run_schedule_now(&member("user-1"), Some("user-1")));
+        assert!(can_run_schedule_now(&owner("admin-1"), Some("admin-1")));
+    }
+
+    async fn run_through_router(creator: &str) -> (axum::http::StatusCode, Value, MockServer) {
+        let (auth, user_core, model) = fires_test_servers(creator).await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/v1/cron/cron_1/run"))
+            .respond_with(ResponseTemplate::new(202).set_body_json(json!({"data": {
+                "fire_id": "cronfire_1", "fire_key": "manual:req-0123456789abcdef",
+                "task_id": "task_1", "status": "pending", "deduplicated": false
+            }})))
+            .mount(&model)
+            .await;
+        let state = fires_test_state(&auth, &user_core, &model);
+        let response = crate::build_router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/cron/cron_1/run")
+                    .header("cookie", "better-auth.session_token=session-1")
+                    .header("content-type", "application/json")
+                    .header("x-verevon-org-id", "org-forged")
+                    .body(Body::from(
+                        json!({
+                            "request_id": "req-0123456789abcdef",
+                            "creator_subject_id": "user-2",
+                            "org_id": "org-forged"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let body: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        (status, body, model)
+    }
+
+    fn run_requests(requests: &[wiremock::Request]) -> Vec<&wiremock::Request> {
+        requests
+            .iter()
+            .filter(|request| request.url.path() == "/v1/cron/cron_1/run")
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn run_cron_now_forwards_for_creator() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (status, body, model) = run_through_router("user-1").await;
+        assert!(status.is_success(), "{status}: {body}");
+        assert_eq!(body["data"]["fire_key"], "manual:req-0123456789abcdef");
+        let requests = model.received_requests().await.unwrap();
+        let runs = run_requests(&requests);
+        assert_eq!(runs.len(), 1);
+        // Only the request id travels on: a creator or org in the body is dropped.
+        let forwarded: Value = serde_json::from_slice(&runs[0].body).unwrap();
+        assert_eq!(forwarded, json!({"request_id": "req-0123456789abcdef"}));
+    }
+
+    #[tokio::test]
+    async fn run_cron_now_strips_forged_scope_headers() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (_, _, model) = run_through_router("user-1").await;
+        let requests = model.received_requests().await.unwrap();
+        let runs = run_requests(&requests);
+        assert_eq!(runs.len(), 1);
+        assert!(runs[0].headers.get("x-verevon-org-id").is_none());
+    }
+
+    #[tokio::test]
+    async fn run_cron_now_refuses_a_member_who_did_not_create_the_schedule() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (status, body, model) = run_through_router("user-2").await;
+        assert_eq!(status, axum::http::StatusCode::FORBIDDEN);
+        assert_eq!(body["error"]["code"], "run_now_not_creator");
+        assert!(run_requests(&model.received_requests().await.unwrap()).is_empty());
     }
 
     // EP-6 S8 — the agent builder gate, the draft shape, and the preview persona.

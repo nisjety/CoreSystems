@@ -176,8 +176,8 @@ func main() {
 	// TOOL_POLICY_ENFORCED is the literal "true"; off, they are stored and ignored.
 	// The handler is built here because the engine takes it; its routes are mounted
 	// with the other policy APIs below.
-	toolPolicies := api.NewToolPoliciesHandler(pool)
 	toolPolicyEnforced := policy.ToolPolicyEnforcedFromLookup(os.Getenv)
+	toolPolicies := api.NewToolPoliciesHandler(pool).WithEnforced(toolPolicyEnforced)
 	slog.Info("tool policies", "enforced", toolPolicyEnforced)
 	// WS25-S9: the org's extension allow-list, read from the same agent policy the policy API serves. Inert unless
 	// ORG_EXTENSION_ALLOWLIST is the literal true.
@@ -345,11 +345,18 @@ func main() {
 	// consumer that actually fires the notification is wired below,
 	// independently, once NATS is available (see startRunWatchConsumer).
 	api.NewRunWatchersHandler(pool).Register(protectedMux)
+	// Built before the handler: Run now and the sweeper below share one Control fire authorizer.
+	cronAuthorizer, cronAuthErr := cronFireAuthorizerFromEnv(os.Getenv)
 	cronHandler := api.NewCronHandler(pool)
 	// WS20-S4: stored-consent schedule contracts. Strict literal true; off by default.
 	cronHandler.WithScheduleContract(os.Getenv("SCHEDULE_CONTRACT_ENABLED") == "true")
 	// WS20-S8: approval guards refuse a bare re-enable of a lapsed approval. Strict literal true; off by default.
 	cronHandler.WithContractGuards(os.Getenv("CRON_CONTRACT_GUARDS_ENABLED") == "true")
+	// EP-6-S2: Run now, a manual fire through the same fresh Control fire authorization.
+	// Strict literal true; off by default. Without the authorizer the route never exists.
+	if cronAuthErr == nil {
+		cronHandler.WithRunNow(pool, cronAuthorizer, os.Getenv("CRON_RUN_NOW_ENABLED") == "true")
+	}
 	if cronVerifier, cronVerifierErr := cronDecisionVerifierFromEnv(os.Getenv); cronVerifierErr != nil {
 		slog.Warn("Space-scoped cron creation unavailable; Control decision verifier is required", "error", cronVerifierErr)
 	} else {
@@ -361,7 +368,6 @@ func main() {
 	// Cron sweeper: fires due cron_schedules — creates a task per fire, records
 	// cron_fires, and advances next_fire_at, single-flight across replicas via
 	// FOR UPDATE SKIP LOCKED. Opt out with CRON_SWEEPER_ENABLED=false.
-	cronAuthorizer, cronAuthErr := cronFireAuthorizerFromEnv(os.Getenv)
 	if os.Getenv("CRON_SWEEPER_ENABLED") != "false" {
 		if cronAuthErr != nil {
 			slog.Warn("cron sweeper not started; fresh Control authorization is required", "error", cronAuthErr)
