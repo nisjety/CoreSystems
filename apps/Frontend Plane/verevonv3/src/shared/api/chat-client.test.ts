@@ -1259,6 +1259,36 @@ describe('chat-client tool wiring', () => {
     })
   })
 
+  /** EP-4 S6: a server's question names the server only with a known origin and a label of 1 to 80 characters. */
+  it('reads an origin only for a known server origin with a label of 1 to 80 characters', async () => {
+    const item = { id: 'name', kind: 'text', prompt: 'Your name?' }
+    const frame = (index: number, fields: Record<string, string>) =>
+      `event: user_question\ndata: ${JSON.stringify({ question_id: `q_${index}`, items: [item], ...fields })}\n\n`
+    const fetchMock = vi.fn().mockResolvedValue(
+      sseResponse([
+        frame(0, { origin: 'mcp_elicitation', origin_label: 'Fixture server' }),
+        frame(1, { origin: 'model', origin_label: 'Fixture server' }),
+        frame(2, { origin: 'mcp_elicitation' }),
+        frame(3, { origin: 'mcp_elicitation', origin_label: '   ' }),
+        frame(4, { origin: 'mcp_elicitation', origin_label: 'x'.repeat(81) }),
+        frame(5, { origin: 'mcp_elicitation', origin_label: 'x'.repeat(80) }),
+      ]),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const onUserQuestion = vi.fn()
+    await streamChat({ content: 'hi' }, { onUserQuestion })
+
+    expect(onUserQuestion.mock.calls.map(([event]) => [event.origin, event.originLabel])).toEqual([
+      ['mcp_elicitation', 'Fixture server'],
+      [undefined, undefined],
+      [undefined, undefined],
+      [undefined, undefined],
+      [undefined, undefined],
+      ['mcp_elicitation', 'x'.repeat(80)],
+    ])
+  })
+
   /** plan-gate §2.1: the model's structured plan-mode plan. */
   it('maps a plan_proposed event into onPlanProposed with its steps', async () => {
     const fetchMock = vi.fn().mockResolvedValue(
@@ -3131,5 +3161,24 @@ describe('deck templates (EP-5 S7)', () => {
   it('rejects any other failure with the typed error', async () => {
     vi.stubGlobal('fetch', json({ error: { code: 'upstream_unavailable', message: 'down' } }, 502))
     await expect(listDeckTemplates()).rejects.toBeInstanceOf(ApiError)
+  })
+})
+
+describe('EP-4 S2 inline widget feature family', () => {
+  afterEach(() => {
+    vi.unstubAllEnvs()
+  })
+
+  it('inline_widgets_feature_only_with_the_switch', () => {
+    // Off, the body is what it was before the switch existed. On, the client offers widgets, and the
+    // gateway may then add the widget notice to the prompt. Only the literal true turns it on.
+    expect(buildChatWireBody({ content: 'hi' }).features).not.toContain('inline_widgets')
+    vi.stubEnv('VITE_CHAT_INLINE_WIDGETS', 'TRUE')
+    expect(buildChatWireBody({ content: 'hi' }).features).not.toContain('inline_widgets')
+    vi.stubEnv('VITE_CHAT_INLINE_WIDGETS', '1')
+    expect(buildChatWireBody({ content: 'hi' }).features).not.toContain('inline_widgets')
+    vi.stubEnv('VITE_CHAT_INLINE_WIDGETS', 'true')
+    expect(buildChatWireBody({ content: 'hi' }).features).toContain('inline_widgets')
+    expect(buildChatWireBody({ content: 'hi' }).features).toContain('usage')
   })
 })

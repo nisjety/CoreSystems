@@ -3849,10 +3849,15 @@ pub async fn invoke_stream_sse(
     if crate::tool_loop::asks_about_conversation_state(&req.content) {
         prompt.generated_image_state = generated_image_state_message(&prompt.history);
     }
-    // Formatting guidance for what this turn asks for (today: the chart fence
-    // the web app draws natively). `None` on every ordinary turn, so the prompt
-    // is then exactly what it was without the slot. See `format_guidance`.
-    prompt.format_guidance = crate::format_guidance::message_for_turn(&req.content);
+    // Formatting guidance for what this turn asks for: the chart fence the web app
+    // draws natively, and the widget fence when the client can draw one (the
+    // `inline_widgets` feature, with the gateway switch on). `None` on every
+    // ordinary turn, so the prompt is then exactly what it was without the slot.
+    // See `format_guidance`.
+    let widgets_offered = crate::format_guidance::widget_guidance_enabled()
+        && features.iter().any(|feature| feature == "inline_widgets");
+    prompt.format_guidance =
+        crate::format_guidance::message_for_turn_with(&req.content, widgets_offered);
 
     // chat-parity §2 — function-calling tool loop. When the client supplies
     // tools AND opts into the `tools` family, resolve tool calls first (unary
@@ -11650,7 +11655,7 @@ fn zdr_answer_stream(
 ///     identity (default `agent:autonomous,agent:deployed,deployed_agent`).
 ///   - `HARNESS_POSTURE_FLOOR` — base floor for non-autonomous principals:
 ///     `ask` to fail safe fleet-wide, anything else → `auto` (default).
-fn posture_floor(claims: &crate::auth::Claims) -> crate::profile::ApprovalPosture {
+pub(crate) fn posture_floor(claims: &crate::auth::Claims) -> crate::profile::ApprovalPosture {
     use crate::profile::ApprovalPosture;
     let base_floor = match std::env::var("HARNESS_POSTURE_FLOOR")
         .ok()
@@ -14479,6 +14484,8 @@ fn agentic_run_stream(
                     delivery: question.delivery,
                     expires_at: fields["expires_at"].as_str().map(str::to_owned),
                     items: fields["items"].clone(),
+                    origin: fields["origin"].as_str().map(str::to_owned),
+                    origin_label: fields["origin_label"].as_str().map(str::to_owned),
                 };
                 let _ = tx.send(Ok(event.to_sse(&request_id))).await;
             }

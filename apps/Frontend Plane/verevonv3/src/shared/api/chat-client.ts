@@ -1213,6 +1213,13 @@ export type ChatUserQuestionEvent = {
   expiresAt?: string
   items: ChatQuestionItem[]
   requestId?: string
+  /**
+   * Who asked, when an MCP server did (EP-4 S6). Only a server's question carries it, and the card then names
+   * that server; a model question leaves both this and `originLabel` unset.
+   */
+  origin?: 'mcp_elicitation'
+  /** The asking server's display name, 1 to 80 characters. Set exactly with `origin`. */
+  originLabel?: string
 }
 
 /** The owner's answer to a question, one entry per item, or a skip (WS14 S4). */
@@ -1708,6 +1715,16 @@ function normalizeQuestionItems(value: unknown): ChatQuestionItem[] {
     .filter((item): item is ChatQuestionItem => item !== null)
 }
 
+/**
+ * Who asked a `user_question` frame (EP-4 S6). The card names a server only for a known server origin with a
+ * label of 1 to 80 characters; any other frame reads as the model's question, as it did before.
+ */
+function questionOrigin(payload: Record<string, unknown>): Pick<ChatUserQuestionEvent, 'origin' | 'originLabel'> {
+  const label = str(payload.origin_label)?.trim()
+  if (payload.origin !== 'mcp_elicitation' || !label || [...label].length > 80) return {}
+  return { origin: 'mcp_elicitation', originLabel: label }
+}
+
 function strOrJson(value: unknown): string | undefined {
   if (typeof value === 'string') return value
   if (value == null) return undefined
@@ -2088,6 +2105,11 @@ export function buildChatWireBody(request: ChatInvokeRequest): Record<string, un
     Boolean(threadId)
   if ((request.planMode || executeGranted) && !conversationOnly && !supportReadOnly) features.add('agentic')
   else features.delete('agentic')
+  // EP-4 S2: the gateway writes the widget notice into the prompt only for a client that can draw a
+  // widget, so the family is sent only with the frontend switch on: the same literal `true` the widget
+  // component reads (`inlineWidgetsEnabled`).
+  if (import.meta.env.VITE_CHAT_INLINE_WIDGETS === 'true') features.add('inline_widgets')
+  else features.delete('inline_widgets')
 
   const supportContextQuery = !conversationOnly && !supportReadOnly && shouldRequestSupportContext(request.content)
     ? request.content.trim().slice(0, 240)
@@ -2826,6 +2848,7 @@ function dispatchEvent(event: SseEvent, handlers: ChatStreamHandlers): void {
           expiresAt: str(payload.expires_at) || undefined,
           items,
           requestId: str(payload.request_id),
+          ...questionOrigin(payload),
         })
       }
       break
