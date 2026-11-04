@@ -1988,7 +1988,9 @@ export const actionRegistry = [
   {
     id: 'knowledge.crawl_site',
     label: 'Crawl site',
-    description: 'Crawl a website with Quarry v2 and ingest discovered pages into Data Plane v2.',
+    // E3.7.9a: approval depends on the page count, so the flag stays false; use
+    // actionRequiresApproval(id, input) to decide. The description states the rule.
+    description: 'Crawl a website with Quarry v2 and ingest discovered pages into Data Plane v2. Up to 50 pages run under the run budget; a larger crawl needs its page count approved before it starts.',
     ownerPlane: 'ingestion',
     risk: 'medium',
     requiresApproval: false,
@@ -4435,4 +4437,47 @@ export type ActionId = (typeof actionRegistry)[number]['id']
 
 export function getActionDescriptor(actionId: ActionId) {
   return actionRegistry.find((action) => action.id === actionId)
+}
+
+/**
+ * E3.7.9a: a whole-site crawl above this many pages needs approval before it starts (owner
+ * decision 2, 2026-10-23). The gateway's CRAWL_APPROVAL_PAGES may only lower it, so the
+ * threshold the server applied (the 409 `approval_required` details carry it) is the one to
+ * show a person.
+ */
+export const CRAWL_SITE_APPROVAL_PAGES = 50
+
+/** The page ceiling the gateway applies to a crawl. A crawl with no bound is estimated at it. */
+export const CRAWL_SITE_MAX_PAGES = 5000
+
+/**
+ * The page count a crawl is estimated to fetch: its bound, held to the ceiling. This is the
+ * `pages` unit the E3.7.8 job price estimate takes for a crawl.
+ */
+export function crawlSiteEstimatedPages(maxPages: number | undefined): number {
+  if (maxPages === undefined) return CRAWL_SITE_MAX_PAGES
+  return Math.min(maxPages, CRAWL_SITE_MAX_PAGES)
+}
+
+/** Whether a knowledge.crawl_site request needs approval before it starts. */
+export function crawlSiteRequiresApproval(input: unknown): boolean {
+  const parsed = crawlSiteInput.safeParse(input)
+  const maxPages = parsed.success ? parsed.data.maxPages : undefined
+  return crawlSiteEstimatedPages(maxPages) > CRAWL_SITE_APPROVAL_PAGES
+}
+
+/**
+ * Actions whose approval depends on their input rather than on the static flag. The flag is a
+ * boolean and cannot carry the page threshold, so callers that decide approval ask
+ * actionRequiresApproval, which consults this table.
+ */
+const conditionalApproval: Partial<Record<ActionId, (input: unknown) => boolean>> = {
+  'knowledge.crawl_site': crawlSiteRequiresApproval,
+}
+
+export function actionRequiresApproval(actionId: ActionId, input: unknown): boolean {
+  const descriptor = getActionDescriptor(actionId)
+  if (!descriptor) throw new Error(`Unknown action: ${actionId}`)
+  if (descriptor.requiresApproval) return true
+  return conditionalApproval[actionId]?.(input) ?? false
 }

@@ -59,6 +59,7 @@ use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use quarry_core::error::{ErrorCode, QuarryError, QuarryResult};
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 /// What the driver is asking Chromium to do.
@@ -69,6 +70,12 @@ pub(crate) enum Op {
     Navigate,
     Content,
     AxSnapshot,
+    /// One frame's accessibility tree in the per-frame projection (E3.3-k, behind
+    /// `QUARRY_BROWSER_AX_PER_FRAME`). A frame gets this bound, cut to what is left of the
+    /// snapshot's `AxSnapshot` budget, so a frame that does not answer leaves only itself out.
+    /// Effect-less.
+    #[cfg_attr(not(feature = "chromiumoxide"), allow(dead_code))]
+    AxFrame,
     Screenshot,
     Pdf,
     Evaluate,
@@ -116,12 +123,13 @@ pub(crate) enum Op {
 
 impl Op {
     #[cfg(test)]
-    pub(crate) const ALL: [Op; 25] = [
+    pub(crate) const ALL: [Op; 26] = [
         Op::Launch,
         Op::TabAttach,
         Op::Navigate,
         Op::Content,
         Op::AxSnapshot,
+        Op::AxFrame,
         Op::Screenshot,
         Op::Pdf,
         Op::Evaluate,
@@ -151,6 +159,7 @@ impl Op {
             Op::Navigate => "navigate",
             Op::Content => "content",
             Op::AxSnapshot => "ax_snapshot",
+            Op::AxFrame => "ax_frame",
             Op::Screenshot => "screenshot",
             Op::Pdf => "pdf",
             Op::Evaluate => "evaluate",
@@ -205,6 +214,7 @@ impl Op {
             Op::Navigate => 25_000,
             Op::Content => 15_000,
             Op::AxSnapshot => 10_000,
+            Op::AxFrame => 2_000,
             Op::Screenshot => 10_000,
             Op::Pdf => 25_000,
             Op::Evaluate => 15_000,
@@ -311,6 +321,46 @@ pub(crate) fn timeout_error(op: Op, limit: Duration) -> QuarryError {
     // A read can be repeated. A click that timed out may have landed.
     error.retryable = !effectful;
     error
+}
+
+/// How long one per-frame read may run: its own bound, cut to what is left of the overall `budget`
+/// after `elapsed`. Zero once the budget is spent, so the caller reads no more frames (E3.3-k).
+#[cfg_attr(not(feature = "chromiumoxide"), allow(dead_code))]
+pub(crate) fn slice_within(limit: Duration, budget: Duration, elapsed: Duration) -> Duration {
+    limit.min(budget.saturating_sub(elapsed))
+}
+
+/// Something a read gave up on, reported beside the partial result it left (E3.3-k). It carries a
+/// closed code, the frame (an opaque browser id, which the observation already lists in `frames`)
+/// and the bound that expired: never a URL, selector or page text. Every field but `code` defaults
+/// when absent on the wire, so a reader that does not know one still reads the rest.
+#[cfg_attr(not(feature = "chromiumoxide"), allow(dead_code))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeadlineWarning {
+    pub code: DeadlineWarningCode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frame_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deadline_ms: Option<u64>,
+}
+
+/// The closed vocabulary of [`DeadlineWarning`].
+#[cfg_attr(not(feature = "chromiumoxide"), allow(dead_code))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DeadlineWarningCode {
+    /// A frame's accessibility tree did not answer within `deadline_ms`.
+    #[serde(rename = "ax_frame_timeout")]
+    AxFrameTimeout,
+    /// A frame's accessibility tree could not be read for another reason. The reason keeps no text.
+    #[serde(rename = "ax_frame_unavailable")]
+    AxFrameUnavailable,
+    /// The snapshot's accessibility budget (`deadline_ms`) ran out, so the frames after this point
+    /// were not read.
+    #[serde(rename = "ax_budget_exhausted")]
+    AxBudgetExhausted,
+    /// The page has more frames than the projection reads; the rest were not read.
+    #[serde(rename = "ax_frame_limit")]
+    AxFrameLimit,
 }
 
 /// Run `fut` under `op`'s deadline. On expiry the future is dropped and the
@@ -724,5 +774,75 @@ mod tests {
         })
         .await;
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn ax_frame_is_effect_less_and_sits_under_the_snapshot_budget() {
+        assert!(!Op::AxFrame.effectful());
+        assert!(deadline_scaled(Op::AxFrame, 1.0) < deadline_scaled(Op::AxSnapshot, 1.0));
+        let error = timeout_error(Op::AxFrame, Duration::from_millis(2000));
+        assert!(error.retryable);
+        assert_eq!(error.details.unwrap()["effect"], "none");
+    }
+
+    #[test]
+    fn a_frame_read_is_cut_to_what_the_budget_has_left() {
+        let budget = Duration::from_secs(10);
+        let frame = Duration::from_secs(2);
+        assert_eq!(slice_within(frame, budget, Duration::from_secs(3)), frame);
+        assert_eq!(
+            slice_within(frame, budget, Duration::from_millis(9_500)),
+            Duration::from_millis(500)
+        );
+        assert_eq!(slice_within(frame, budget, budget), Duration::ZERO);
+        assert_eq!(
+            slice_within(frame, budget, Duration::from_secs(12)),
+            Duration::ZERO
+        );
+    }
+
+    #[test]
+    fn a_deadline_warning_reads_back_with_its_optional_fields_defaulted() {
+        let bare: DeadlineWarning =
+            serde_json::from_str(r#"{"code":"ax_budget_exhausted"}"#).unwrap();
+        assert_eq!(
+            bare,
+            DeadlineWarning {
+                code: DeadlineWarningCode::AxBudgetExhausted,
+                frame_id: None,
+                deadline_ms: None,
+            }
+        );
+        assert_eq!(
+            serde_json::to_value(&bare).unwrap(),
+            json!({ "code": "ax_budget_exhausted" })
+        );
+        let full = DeadlineWarning {
+            code: DeadlineWarningCode::AxFrameTimeout,
+            frame_id: Some("F1".to_owned()),
+            deadline_ms: Some(2000),
+        };
+        assert_eq!(
+            serde_json::to_value(&full).unwrap(),
+            json!({ "code": "ax_frame_timeout", "frame_id": "F1", "deadline_ms": 2000 })
+        );
+    }
+
+    #[test]
+    fn every_warning_code_has_its_wire_name() {
+        for (code, name) in [
+            (DeadlineWarningCode::AxFrameTimeout, "ax_frame_timeout"),
+            (
+                DeadlineWarningCode::AxFrameUnavailable,
+                "ax_frame_unavailable",
+            ),
+            (
+                DeadlineWarningCode::AxBudgetExhausted,
+                "ax_budget_exhausted",
+            ),
+            (DeadlineWarningCode::AxFrameLimit, "ax_frame_limit"),
+        ] {
+            assert_eq!(serde_json::to_value(code).unwrap(), name);
+        }
     }
 }
