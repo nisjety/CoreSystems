@@ -83,6 +83,16 @@ describe('the copy for every cause code', () => {
     // No category stated: a generic browser line, not the empty label.
     expect(approvalHeadline({ cause: cause('browser_action_risk') }, en)).toBe('A browser action')
   })
+
+  it('tells the person who took the browser how to give it back, in both languages', () => {
+    const takeover = { cause: cause('browser_human_assist') }
+    expect(approvalHeadline(takeover, en)).toBe('The browser is with you')
+    expect(approvalHeadline(takeover, no)).toBe('Nettleseren er hos deg')
+    expect(approvalReason(takeover, en)).toBe(
+      'You have control of the browser. Press Give back when you are done.',
+    )
+    expect(approvalReason(takeover, no)).toBe('Du styrer nettleseren. Trykk Gi tilbake når du er ferdig.')
+  })
 })
 
 describe('an approval with no cause', () => {

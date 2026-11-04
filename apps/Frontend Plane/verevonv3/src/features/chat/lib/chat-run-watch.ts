@@ -36,6 +36,7 @@ import {
   readClientValue,
   writeClientValue,
 } from '@/shared/session/client-storage'
+import type { BrowserControlMode } from '@/shared/api/browser-client'
 import type {
   BrowserSessionViewModel,
   BrowserTimelineViewEntry,
@@ -114,6 +115,33 @@ export type ChatRunWatchState = {
   error: string | null
   steps: ChatRunBrowserStep[]
   activity: ChatRunActivityEntry[]
+  /** The Quarry run the turn's browser runs on and who holds it (EP-1 S1); absent until bound. */
+  browserControl?: ChatRunBrowserControl
+}
+
+/**
+ * The browser a chat Do run holds, as the person may address it (EP-1 S1). The id is the Quarry run
+ * the owner-only `browser_session_opened` binding names (WS21-S6, D3), and the mode and epoch are
+ * Quarry's, from the binding or from the answer to the person's own control change. The id is not a
+ * credential: Quarry still checks that the caller is the run's owner of record.
+ */
+export type ChatRunBrowserControl = {
+  sessionId: string
+  controlMode: BrowserControlMode
+  controlEpoch: number | null
+}
+
+/**
+ * Records who holds the turn's browser. A zero-retention turn is never bound: its Do run is not
+ * offered the browser, so a binding for one is ignored rather than turned into a control.
+ */
+export function applyBrowserControl(
+  state: ChatRunWatchState,
+  control: ChatRunBrowserControl,
+): ChatRunWatchState {
+  const sessionId = control.sessionId.trim()
+  if (state.zdr || !sessionId) return state
+  return { ...state, browserControl: { ...control, sessionId } }
 }
 
 const MAX_ACTIVITY_ENTRIES = 60
@@ -409,8 +437,18 @@ function chatRunSessionStatus(state: ChatRunWatchState): BrowserSessionViewModel
  * `BrowserChrome`'s `frameUrl`/`timeline` candidates render. Because every url
  * here is null/absent, none of `BrowserChrome`'s WebSocket → SSE → polling
  * fallback tiers ever arm.
+ *
+ * With `takeover` on (EP-1 S1, `VITE_CHAT_BROWSER_TAKEOVER`) and the turn's
+ * browser bound, the model names that Quarry run as its session, carries
+ * Quarry's control mode and epoch, and streams its live frames, so
+ * `BrowserChrome` can offer Take over and Give back. A zero-retention turn is
+ * never bound, and with `takeover` off the model is exactly as above.
  */
-export function browserSessionFromChatRun(state: ChatRunWatchState): BrowserSessionViewModel {
+export function browserSessionFromChatRun(
+  state: ChatRunWatchState,
+  options: { takeover?: boolean } = {},
+): BrowserSessionViewModel {
+  const control = options.takeover && !state.zdr ? state.browserControl : undefined
   const latest = latestBrowserStep(state)
   const framed = [...state.steps].reverse().find((step) => step.screenshotUrl && !step.screenshotFailed)
   const timeline: BrowserTimelineViewEntry[] = state.steps.map((step) => ({
@@ -426,7 +464,8 @@ export function browserSessionFromChatRun(state: ChatRunWatchState): BrowserSess
     capabilities: [],
     commentAnchors: [],
     consoleEntries: [],
-    controlMode: 'agent_control',
+    controlMode: control?.controlMode ?? 'agent_control',
+    ...(control && control.controlEpoch !== null ? { controlEpoch: control.controlEpoch } : {}),
     degradedReason: state.error,
     devtoolsEvents: [],
     devtoolsUrl: null,
@@ -435,7 +474,9 @@ export function browserSessionFromChatRun(state: ChatRunWatchState): BrowserSess
     frameMediaType: 'image/png',
     frameUrl: framed?.screenshotUrl ?? null,
     host: chatRunHostname(latest?.url),
-    liveFrameStreamUrl: null,
+    liveFrameStreamUrl: control
+      ? `${gatewayBaseUrl()}/api/v1/browser/sessions/${encodeURIComponent(control.sessionId)}/frames/stream`
+      : null,
     liveFrameUrl: null,
     liveFrameWsUrl: null,
     networkEntries: [],
@@ -449,10 +490,11 @@ export function browserSessionFromChatRun(state: ChatRunWatchState): BrowserSess
     renderMode: 'chromium',
     replayEvents: [],
     screenshotArtifactId: framed?.screenshotRef ?? null,
-    // Deliberately absent: no gateway-created browser session backs a chat run,
-    // so every manual control in `BrowserChrome` stays disabled instead of
-    // pretending the user can drive the agent's browser from here.
-    sessionId: undefined,
+    // Absent unless the turn's browser is bound and takeover is on: no
+    // gateway-created browser session backs a chat run, so every manual control
+    // in `BrowserChrome` stays disabled instead of pretending the user can
+    // drive the agent's browser from here.
+    sessionId: control?.sessionId,
     sourceLabel: 'Agent-nettleser',
     status: chatRunSessionStatus(state),
     tabs: [],

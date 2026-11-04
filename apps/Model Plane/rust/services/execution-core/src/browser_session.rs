@@ -12,12 +12,13 @@
 //! org-core itself: org-core's resolve scope is held by the browser-broker principal alone, so the
 //! refusal the broker returns is the only site answer this loop sees.
 
-use std::sync::OnceLock;
+use std::collections::HashSet;
+use std::sync::{Mutex, OnceLock, PoisonError};
 use std::time::Duration;
 
 use mp_contracts::model_plane::v1::{
-    browser_broker_client::BrowserBrokerClient, AcquireGrantRequest, BrowserHealthRequest,
-    RevokeGrantRequest, ValidateGrantRequest, ValidateGrantResponse,
+    browser_broker_client::BrowserBrokerClient, orchestration_event, AcquireGrantRequest,
+    BrowserHealthRequest, RevokeGrantRequest, ValidateGrantRequest, ValidateGrantResponse,
 };
 use serde::Serialize;
 use tonic::transport::{Channel, Endpoint};
@@ -25,8 +26,8 @@ use tonic::{Code, Request, Status};
 use tracing::warn;
 
 use crate::quarry_agent::{
-    AgentAction, AgentClientError, AgentConstraints, QuarryAgentClient, StartRunParams, StepParams,
-    WireObservation, WireSnapshotTarget,
+    AgentAction, AgentClientError, AgentConstraints, QuarryAgentClient, RunControl, StartRunParams,
+    StepParams, WireObservation, WireSnapshotTarget,
 };
 use crate::state::StateStore;
 use crate::tool_bridge::ValidatedBrowserGrant;
@@ -137,6 +138,130 @@ pub(crate) const INVALID_INPUT: Refusal = Refusal {
     code: "browser_invalid_input",
     message: "The browser tool input does not match its schema.",
 };
+/// Quarry refused the step because the person holds the browser (`USER_TOOK_OVER`, EP-1). A state,
+/// not a fault: with the takeover pause on, the loop pauses on the call instead of telling the model.
+pub(crate) const TAKEN_OVER: Refusal = Refusal {
+    code: "browser_user_has_control",
+    message: "The person is using the browser. Wait for them to give it back.",
+};
+
+/// The switch that pauses a Do run on a browser call the person's takeover refused (EP-1 S1).
+/// Default off: the model then reads the [`TAKEN_OVER`] refusal, as it does with the switch on for
+/// every call the run cannot pause on.
+const TAKEOVER_PAUSE_ENV: &str = "EXECUTION_BROWSER_TAKEOVER_PAUSE";
+
+/// The zero-retention feature a takeover pause is refused under: a run that keeps no state holds no
+/// approval, so it cannot wait for the browser to be given back.
+pub(crate) const HUMAN_ASSIST_FEATURE: &str = "browser_human_assist";
+
+/// Whether a takeover pauses the Do run, read once per process through the strict parser.
+#[must_use]
+pub(crate) fn takeover_pause_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        mp_contracts::loop_fold::switch_from(std::env::var(TAKEOVER_PAUSE_ENV).ok().as_deref())
+    })
+}
+
+/// What the Do loop does with a browser call Quarry refused because the person holds the browser.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TakeoverStep {
+    /// Pause the run on the call: the approval is the give-back, and the call runs again after it.
+    Pause,
+    /// A run that keeps no state cannot pause, so the model reads that the browser is unavailable.
+    Refuse(mp_contracts::zdr_refusal::Refusal),
+}
+
+/// The takeover pause of one failed call (switch on), `None` when the call is not a Do browser call
+/// the person's takeover refused. `retained` is false for a zero-retention or waived run.
+#[must_use]
+pub(crate) fn takeover_step(tool_name: &str, error: &str, retained: bool) -> Option<TakeoverStep> {
+    if !is_do_tool(tool_name) || error != TAKEN_OVER.text() {
+        return None;
+    }
+    Some(if retained {
+        TakeoverStep::Pause
+    } else {
+        TakeoverStep::Refuse(mp_contracts::zdr_refusal::Refusal::feature_not_supported(
+            HUMAN_ASSIST_FEATURE,
+        ))
+    })
+}
+
+/// Who holds the browser of the session `run_id` keeps, `None` when it keeps none or Quarry did not
+/// answer. Read with the service token: the service principal owns the Quarry run.
+pub(crate) async fn session_control(
+    state: &StateStore,
+    quarry: &QuarryAgentClient,
+    org_id: &str,
+    run_id: &str,
+) -> Option<RunControl> {
+    let session = state.browser_session(run_id)?;
+    match quarry.run_control(&session.quarry_run_id, org_id).await {
+        Ok(control) => Some(control),
+        Err(_) => {
+            warn!("browser session: the Quarry run's control could not be read");
+            None
+        }
+    }
+}
+
+/// `BrowserRunPaused` or `BrowserRunResumed` for a takeover of the Do run's browser (EP-1), with the
+/// reasons WS8.G gave the attached-tab takeover. A Do run has no plan, so the plan id is empty.
+#[must_use]
+pub(crate) fn takeover_event(
+    run_id: &str,
+    paused: bool,
+    control_epoch: u64,
+) -> orchestration_event::Event {
+    if paused {
+        orchestration_event::Event::BrowserRunPaused(orchestration_event::BrowserRunPaused {
+            run_id: run_id.to_owned(),
+            plan_id: String::new(),
+            reason: crate::browser_events::PAUSED_REASON_USER_TOOK_OVER.to_owned(),
+            control_epoch,
+        })
+    } else {
+        orchestration_event::Event::BrowserRunResumed(orchestration_event::BrowserRunResumed {
+            run_id: run_id.to_owned(),
+            plan_id: String::new(),
+            reason: crate::browser_events::RESUMED_REASON_CONTROL_RETURNED.to_owned(),
+            control_epoch,
+        })
+    }
+}
+
+/// The runs paused on a takeover whose page the person holds (EP-1 S1). A paused request returns
+/// and drops its [`RunRelease`] guard, which would end the page the person is using; a held run's
+/// guard leaves it. The hold ends when the run releases the paused call or finishes. Empty while the
+/// takeover pause is off.
+fn held_runs() -> &'static Mutex<HashSet<String>> {
+    static HELD: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    HELD.get_or_init(Mutex::default)
+}
+
+/// Keep `run_id`'s page past the end of this request: the run paused while the person holds it.
+pub(crate) fn hold_for_person(run_id: &str) {
+    held_runs()
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .insert(run_id.to_owned());
+}
+
+/// End `run_id`'s hold, if it has one.
+pub(crate) fn end_hold(run_id: &str) {
+    held_runs()
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .remove(run_id);
+}
+
+fn is_held_for_person(run_id: &str) -> bool {
+    held_runs()
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .contains(run_id)
+}
 
 /// The ids of one open page, held in [`StateStore`] for its run. None of them reaches the model.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -426,9 +551,11 @@ fn session_constraints(fence: &[String]) -> AgentConstraints {
 }
 
 /// The refusal for a Quarry failure. A 404 or 410 means the run or lease is gone, which is what a
-/// Quarry restart or an expiry looks like; a challenge is the site refusing automation.
+/// Quarry restart or an expiry looks like; a challenge is the site refusing automation; a takeover
+/// is the person holding the browser, not a failed step.
 fn quarry_refusal(error: &AgentClientError) -> Refusal {
     match error {
+        _ if crate::quarry_agent::is_user_took_over(error) => TAKEN_OVER,
         AgentClientError::Challenge(_) => BLOCKED,
         AgentClientError::Status {
             status: 404 | 410, ..
@@ -612,7 +739,26 @@ pub(crate) async fn open(
     quarry: &QuarryAgentClient,
     raw_url: &str,
 ) -> Result<String, Refusal> {
+    open_with(dispatch, quarry, raw_url, takeover_pause_enabled()).await
+}
+
+/// [`open`] with the takeover pause given. With it on, an open while the person holds the run's
+/// browser is refused and the held session is kept: a new Quarry run would get around the takeover.
+/// A control that cannot be read does not refuse the open; Quarry's own gate still holds the run.
+async fn open_with(
+    dispatch: &BrowserDispatch<'_>,
+    quarry: &QuarryAgentClient,
+    raw_url: &str,
+    takeover_pause: bool,
+) -> Result<String, Refusal> {
     let target = parse_target(raw_url)?;
+    if takeover_pause
+        && session_control(dispatch.state, quarry, dispatch.org_id, dispatch.run_id)
+            .await
+            .is_some_and(|control| control.person_holds())
+    {
+        return Err(TAKEN_OVER);
+    }
     if let Some(previous) = dispatch.state.take_browser_session(dispatch.run_id) {
         end_session(&previous, dispatch, Some(quarry), "replaced by a new page").await;
     }
@@ -794,6 +940,7 @@ pub(crate) async fn release_run(
     org_id: &str,
     run_id: &str,
 ) {
+    end_hold(run_id);
     let Some(session) = state.take_browser_session(run_id) else {
         return;
     };
@@ -843,7 +990,8 @@ impl RunRelease {
 
 impl Drop for RunRelease {
     fn drop(&mut self) {
-        if self.state.browser_session(&self.run_id).is_none() {
+        // A run paused on a takeover keeps the page the person is using (EP-1 S1).
+        if self.state.browser_session(&self.run_id).is_none() || is_held_for_person(&self.run_id) {
             return;
         }
         let Ok(handle) = tokio::runtime::Handle::try_current() else {
@@ -1333,5 +1481,288 @@ mod tests {
         assert!(!within_fence("https://badexample.com/", &fence));
         assert!(!within_fence("https://example.com.evil.net/", &fence));
         assert!(!within_fence("about:blank", &fence));
+    }
+
+    // ---- EP-1 S1: the person takes the browser and gives it back ----
+
+    /// Quarry's whole-run takeover refusal (`admission.rs user_took_over`).
+    fn took_over(epoch: u64) -> ResponseTemplate {
+        ResponseTemplate::new(409).set_body_json(json!({
+            "data": null,
+            "meta": { "request_id": "req_1" },
+            "error": {
+                "code": "USER_TOOK_OVER",
+                "message": "the person using the browser has taken control; this action was not run",
+                "retryable": false,
+                "details": { "control_mode": "human_takeover", "control_epoch": epoch }
+            }
+        }))
+    }
+
+    /// Quarry's owner projection of the run, with its control state.
+    fn control(mode: &str, epoch: u64) -> ResponseTemplate {
+        envelope(json!({
+            "run_id": "run-q1",
+            "live": true,
+            "control_mode": mode,
+            "control_epoch": epoch,
+            "tabs": []
+        }))
+    }
+
+    /// Mounts a run whose navigation succeeds and whose next `refused` steps meet the takeover,
+    /// then every later step reads the page again.
+    async fn mount_taken_over_run(server: &MockServer, refused: u64) {
+        Mock::given(method("POST"))
+            .and(path("/v1/agent/runs"))
+            .respond_with(envelope(
+                json!({ "run_id": "run-q1", "lease_id": "lease-q1" }),
+            ))
+            .mount(server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/agent/runs/run-q1/step"))
+            .respond_with(envelope(observation("https://example.com/")))
+            .up_to_n_times(1)
+            .mount(server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/agent/runs/run-q1/step"))
+            .respond_with(took_over(1))
+            .up_to_n_times(refused)
+            .mount(server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/agent/runs/run-q1/step"))
+            .respond_with(envelope(observation("https://example.com/")))
+            .mount(server)
+            .await;
+    }
+
+    async fn step_count(server: &MockServer) -> usize {
+        server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .iter()
+            .filter(|request| request.url.path() == "/v1/agent/runs/run-q1/step")
+            .count()
+    }
+
+    #[tokio::test]
+    async fn user_took_over_maps_to_taken_over_not_session_failed() {
+        let typed = crate::quarry_agent::parse_typed_error(
+            409,
+            r#"{"error":{"code":"USER_TOOK_OVER","message":"m","details":{"control_epoch":1}}}"#,
+        )
+        .expect("an envelope");
+        assert_eq!(quarry_refusal(&AgentClientError::Typed(typed)), TAKEN_OVER);
+
+        let server = MockServer::start().await;
+        mount_taken_over_run(&server, 1).await;
+        let state = StateStore::new();
+        let broker = FakeBroker::default();
+        open(
+            &dispatch(&state, &broker),
+            &quarry(&server),
+            "https://example.com/",
+        )
+        .await
+        .expect("the page opens");
+
+        let refusal = observe(&dispatch(&state, &broker), &quarry(&server))
+            .await
+            .expect_err("the person holds the browser");
+
+        assert_eq!(refusal, TAKEN_OVER);
+        assert_ne!(refusal, SESSION_FAILED);
+        assert!(
+            state.browser_session("run-1").is_some(),
+            "a takeover does not end the session the person is using"
+        );
+        assert!(revoked(&broker).is_empty());
+    }
+
+    #[test]
+    fn takeover_pauses_with_human_assist_cause_when_switch_on() {
+        let refused = TAKEN_OVER.text();
+        for tool in [OPEN_TOOL, OBSERVE_TOOL, CLOSE_TOOL] {
+            assert_eq!(
+                takeover_step(tool, &refused, true),
+                Some(TakeoverStep::Pause),
+                "{tool}"
+            );
+        }
+        let Some(TakeoverStep::Refuse(zdr)) = takeover_step(OBSERVE_TOOL, &refused, false) else {
+            panic!("a run that keeps no state cannot wait for the give-back");
+        };
+        assert_eq!(zdr.feature(), Some(HUMAN_ASSIST_FEATURE));
+        assert_eq!(takeover_step(OBSERVE_TOOL, &SESSION_FAILED.text(), true), None);
+        assert_eq!(takeover_step(ACT_TOOL, &refused, true), None, "act is not a Do tool yet");
+        assert_eq!(takeover_step("web_search", &refused, true), None);
+    }
+
+    #[tokio::test]
+    async fn open_is_refused_while_person_holds_control() {
+        let server = MockServer::start().await;
+        mount_quarry(&server, "https://example.com/", "https://example.com/").await;
+        Mock::given(method("GET"))
+            .and(path("/v1/agent/runs/run-q1/browser-session"))
+            .respond_with(control("human_takeover", 1))
+            .mount(&server)
+            .await;
+        let state = StateStore::new();
+        let broker = FakeBroker::default();
+        open(
+            &dispatch(&state, &broker),
+            &quarry(&server),
+            "https://example.com/",
+        )
+        .await
+        .expect("the first page opens");
+
+        let refusal = open_with(
+            &dispatch(&state, &broker),
+            &quarry(&server),
+            "https://example.com/second",
+            true,
+        )
+        .await
+        .expect_err("no new run is started around a takeover");
+
+        assert_eq!(refusal, TAKEN_OVER);
+        assert_eq!(
+            state.browser_session("run-1").map(|session| session.grant_id),
+            Some("grant-1".to_owned()),
+            "the session the person holds is kept"
+        );
+        assert!(revoked(&broker).is_empty());
+        assert_eq!(*broker.minted.lock().unwrap(), 1, "no second grant was minted");
+
+        open_with(
+            &dispatch(&state, &broker),
+            &quarry(&server),
+            "https://example.com/second",
+            false,
+        )
+        .await
+        .expect("with the switch off an open replaces the page as before");
+        assert_eq!(revoked(&broker), ["grant-1"]);
+    }
+
+    #[tokio::test]
+    async fn resume_rechecks_control_and_repauses_when_still_human() {
+        let server = MockServer::start().await;
+        mount_quarry(&server, "https://example.com/", "https://example.com/").await;
+        Mock::given(method("GET"))
+            .and(path("/v1/agent/runs/run-q1/browser-session"))
+            .respond_with(control("human_takeover", 1))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v1/agent/runs/run-q1/browser-session"))
+            .respond_with(control("agent_control", 2))
+            .mount(&server)
+            .await;
+        let state = StateStore::new();
+        let broker = FakeBroker::default();
+        open(
+            &dispatch(&state, &broker),
+            &quarry(&server),
+            "https://example.com/",
+        )
+        .await
+        .expect("the page opens");
+
+        let still_held = session_control(&state, &quarry(&server), "org-1", "run-1")
+            .await
+            .expect("the control is read");
+        let given_back = session_control(&state, &quarry(&server), "org-1", "run-1")
+            .await
+            .expect("the control is read");
+
+        assert!(still_held.person_holds(), "the release is held again");
+        assert!(!given_back.person_holds());
+        assert_eq!(given_back.control_epoch, 2);
+        assert!(
+            session_control(&state, &quarry(&server), "org-1", "run-without-page")
+                .await
+                .is_none(),
+            "a run with no page has no control to read"
+        );
+    }
+
+    #[tokio::test]
+    async fn resume_after_give_back_redispatches_the_refused_call_once() {
+        let server = MockServer::start().await;
+        mount_taken_over_run(&server, 1).await;
+        let state = StateStore::new();
+        let broker = FakeBroker::default();
+        open(
+            &dispatch(&state, &broker),
+            &quarry(&server),
+            "https://example.com/",
+        )
+        .await
+        .expect("the page opens");
+
+        let refused = observe(&dispatch(&state, &broker), &quarry(&server))
+            .await
+            .expect_err("the person holds the browser");
+        let after_give_back = observe(&dispatch(&state, &broker), &quarry(&server))
+            .await
+            .expect("the released call reads the page");
+
+        assert_eq!(refused, TAKEN_OVER);
+        assert!(after_give_back.contains("\"snapshot_id\":\"snap-1\""), "{after_give_back}");
+        assert_eq!(
+            step_count(&server).await,
+            3,
+            "the navigation, the refused observe and its one release"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_run_paused_on_a_takeover_keeps_its_page_when_its_guard_drops() {
+        let state = StateStore::new();
+        let session = BrowserSession {
+            grant_id: "grant-held".to_owned(),
+            quarry_run_id: "run-q-held".to_owned(),
+            lease_id: "lease-held".to_owned(),
+            host: "example.com".to_owned(),
+            fence: vec!["example.com".to_owned()],
+        };
+        state.replace_browser_session("run-held", session.clone());
+        hold_for_person("run-held");
+
+        drop(RunRelease::new(&state, "bearer-1", "org-1", "run-held"));
+        for _ in 0..50 {
+            tokio::task::yield_now().await;
+        }
+
+        assert_eq!(state.browser_session("run-held"), Some(session));
+        end_hold("run-held");
+        assert!(!is_held_for_person("run-held"));
+    }
+
+    #[test]
+    fn pause_and_resume_emit_browser_run_paused_and_resumed_with_epoch() {
+        let orchestration_event::Event::BrowserRunPaused(paused) = takeover_event("run-1", true, 1)
+        else {
+            panic!("a takeover pause is a BrowserRunPaused");
+        };
+        assert_eq!(
+            (paused.run_id.as_str(), paused.plan_id.as_str(), paused.reason.as_str()),
+            ("run-1", "", "user_took_over")
+        );
+        assert_eq!(paused.control_epoch, 1);
+        let orchestration_event::Event::BrowserRunResumed(resumed) =
+            takeover_event("run-1", false, 2)
+        else {
+            panic!("a give-back is a BrowserRunResumed");
+        };
+        assert_eq!(resumed.reason, "control_returned");
+        assert_eq!(resumed.control_epoch, 2);
     }
 }

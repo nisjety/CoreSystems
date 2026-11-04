@@ -28,6 +28,7 @@ export const APPROVAL_CAUSE_CODES = [
   'hook_ask',
   'browser_action_risk',
   'auto_posture_provider_write',
+  'browser_human_assist',
   'unclassified_gate',
 ] as const
 
@@ -168,6 +169,14 @@ const CAUSE_COPY: Record<CauseCode, (i18n: ApprovalCopyI18n, cause: ApprovalCaus
     reason: i18n.tr(
       'Chat-modus godkjenner skriving til tilkoblede tjenester automatisk. Dette er en registrering, ikke et valg du må ta.',
       'Chat mode approves writes to connected services automatically. This is a record, not a choice you have to make.',
+    ),
+  }),
+  // EP-1: the person took the agent's browser. The approval is the give-back, not a risk decision.
+  browser_human_assist: (i18n) => ({
+    headline: i18n.tr('Nettleseren er hos deg', 'The browser is with you'),
+    reason: i18n.tr(
+      'Du styrer nettleseren. Trykk Gi tilbake når du er ferdig.',
+      'You have control of the browser. Press Give back when you are done.',
     ),
   }),
   unclassified_gate: (i18n) => ({

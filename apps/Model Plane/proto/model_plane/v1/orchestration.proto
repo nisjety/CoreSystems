@@ -603,6 +603,24 @@ message ApprovalCause {
   // zero-retention caller), and a read-back cause leaves it empty. Field 11: 10 is
   // WS13 S7's tool_digest on model-plane, merged with mp-w2w3 on 2026-11-03.
   string host_class = 11;
+
+  // Field 12 is held for WS21-S6's `max_level` (browser site consent).
+
+  // What a `browser_human_assist` pause hands to the person (EP-1): `user_takeover`
+  // when the person took the browser, or the challenge the agent asks help with
+  // (`login`, `captcha`, `consent`, `waf`). Closed; empty for every other code.
+  string assist_kind = 13;
+
+  // Who started a `browser_human_assist` pause (EP-1): `person` (a takeover) or
+  // `agent` (a help request). Closed; empty for every other code.
+  string assist_origin = 14;
+
+  // The host of the browser session a `browser_human_assist` pause is about (EP-1),
+  // shown on the card from the approval record, never from the page. Stored in the
+  // cause, so it is never kept for a zero-retention caller. Field 15, not the 11 the
+  // EP-1 design reserved: `host_class` took 11 in the mp-w2w3 merge. WS21-S6's
+  // site-consent cause reuses this field.
+  string host = 15;
 }
 
 // A durable todo record.
@@ -1705,8 +1723,12 @@ message OrchestrationEvent {
     string run_id = 1;
     string plan_id = 2;
     // Why the run paused (WS8.G, additive). Empty for a user-initiated pause;
-    // `user_took_over` when the person took control of an attached tab.
+    // `user_took_over` when the person took control of an attached tab, or of
+    // the browser a chat Do run holds (EP-1).
     string reason = 3;
+    // Quarry's control epoch the pause was seen in (EP-1, additive). Zero when
+    // the pause is not a takeover, or the epoch could not be read.
+    uint64 control_epoch = 4;
   }
 
   // User-initiated run resume (Phase 2 B5), mirrors `BrowserRunPaused`.
@@ -1714,8 +1736,12 @@ message OrchestrationEvent {
     string run_id = 1;
     string plan_id = 2;
     // Why the run resumed (WS8.G, additive). Empty for a user-initiated resume;
-    // `control_returned` when the person gave control of an attached tab back.
+    // `control_returned` when the person gave control of an attached tab, or of
+    // a chat Do run's browser (EP-1), back.
     string reason = 3;
+    // Quarry's control epoch the give-back was seen in (EP-1, additive). Zero
+    // when the resume is not a give-back, or the epoch could not be read.
+    uint64 control_epoch = 4;
   }
 
   // A delegate agent attached to the owner's browser session with the shared

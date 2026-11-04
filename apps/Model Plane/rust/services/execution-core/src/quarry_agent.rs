@@ -828,6 +828,29 @@ pub fn is_user_took_over(error: &AgentClientError) -> bool {
     matches!(attach_refusal(error), Some(AttachRefusal::UserTookOver { .. }))
 }
 
+/// Quarry's word for a run whose browser a person holds (`BrowserControlMode::HumanTakeover`).
+pub const HUMAN_TAKEOVER_MODE: &str = "human_takeover";
+
+/// Who holds a whole Quarry run's browser, read from its owner projection (EP-1). Only the two
+/// fields the Do loop decides on are read; the projection's page and tab fields are not.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+pub struct RunControl {
+    /// `agent_control` or `human_takeover`.
+    #[serde(default)]
+    pub control_mode: String,
+    /// Bumped by Quarry on every flip; a give-back is a later epoch than its takeover.
+    #[serde(default)]
+    pub control_epoch: u64,
+}
+
+impl RunControl {
+    /// Whether a person holds the browser now.
+    #[must_use]
+    pub fn person_holds(&self) -> bool {
+        self.control_mode == HUMAN_TAKEOVER_MODE
+    }
+}
+
 /// Observation returned by a step. Mirrors quarry-core `BrowserObservation`.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct WireObservation {
@@ -2334,6 +2357,22 @@ impl QuarryAgentClient {
             .await?;
         let tabs: WireTabs = Self::decode(resp).await?;
         Ok(tabs.tabs)
+    }
+
+    /// EP-1: who holds a run's browser (`GET /v1/agent/runs/{run_id}/browser-session`), read with
+    /// the service token, because the service principal owns the runs the Do loop starts. The Do
+    /// loop reads it before it releases a call a takeover paused, so it never acts while a person
+    /// still holds the browser.
+    pub async fn run_control(
+        &self,
+        run_id: &str,
+        org_id: &str,
+    ) -> Result<RunControl, AgentClientError> {
+        let endpoint = self.url(&format!("/v1/agent/runs/{run_id}/browser-session"));
+        let resp = self
+            .send_with_auth_retry(org_id, None, || self.http.get(&endpoint))
+            .await?;
+        Self::decode(resp).await
     }
 
     /// E3.2-e2: open a tab on a run the service principal owns
@@ -4575,5 +4614,70 @@ mod tests {
             .await
             .expect_err("refused");
         assert!(is_user_took_over(&error));
+    }
+
+    /// EP-1: the whole-run takeover gate (`admission.rs user_took_over`) answers 409 with the run's
+    /// control state in `details`. A step refused by it is typed, recognised, and keeps the epoch.
+    #[tokio::test]
+    async fn user_took_over_is_typed() {
+        let error = step_against(
+            409,
+            serde_json::json!({
+                "data": null,
+                "meta": {"request_id": "req_1"},
+                "error": {
+                    "code": "USER_TOOK_OVER",
+                    "message": "the person using the browser has taken control; this action was not run",
+                    "retryable": false,
+                    "details": {"control_mode": "human_takeover", "control_epoch": 3}
+                }
+            }),
+        )
+        .await;
+        let AgentClientError::Typed(typed) = &error else {
+            panic!("a takeover refusal is typed: {error:?}");
+        };
+        assert_eq!((typed.status, typed.code.as_str()), (409, USER_TOOK_OVER_CODE));
+        assert_eq!(typed.details["control_epoch"], 3);
+        assert!(is_user_took_over(&error));
+        assert_eq!(classify_quarry_error(&error), StepFailureClass::Terminal);
+    }
+
+    #[tokio::test]
+    async fn run_control_reads_the_owner_projection() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/agent/runs/run_abc/browser-session"))
+            .and(header("authorization", "Bearer svc"))
+            .and(header("x-quarry-org", "org_1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {
+                    "run_id": "run_abc",
+                    "current_url": "https://example.com/",
+                    "live": true,
+                    "control_mode": "human_takeover",
+                    "control_epoch": 1,
+                    "tabs": []
+                },
+                "meta": {"request_id": "req_1"},
+                "error": null
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = QuarryAgentClient::new(server.uri(), "svc").unwrap();
+
+        let control = client
+            .run_control("run_abc", "org_1")
+            .await
+            .expect("the owner reads its run's control");
+
+        assert!(control.person_holds());
+        assert_eq!(control.control_epoch, 1);
+        assert!(!RunControl {
+            control_mode: "agent_control".to_owned(),
+            control_epoch: 2,
+        }
+        .person_holds());
     }
 }

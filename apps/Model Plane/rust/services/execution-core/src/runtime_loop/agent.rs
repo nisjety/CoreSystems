@@ -4538,7 +4538,25 @@ async fn run_rounds(
                             org_id: &req.org_id,
                             run_id: &req.run_id,
                         });
-                    let outcome = Some(
+                    // EP-1 S1: the browser call a takeover paused runs only once the person has given
+                    // the browser back. While Quarry still says the person holds it, the call is not
+                    // dispatched and the model reads that the person is using the browser.
+                    let still_taken_over = match browser.as_ref() {
+                        Some(browser)
+                            if is_release
+                                && crate::browser_session::is_do_tool(&call.name)
+                                && crate::browser_session::takeover_pause_enabled() =>
+                        {
+                            released_browser_call_still_held(ctx, browser).await
+                        }
+                        _ => false,
+                    };
+                    let outcome = if still_taken_over {
+                        Some(StepOutcome::failed(
+                            &crate::browser_session::TAKEN_OVER.text(),
+                        ))
+                    } else {
+                        Some(
                         runtime_loop::retry::run_attempts(
                             || {
                                 runtime_loop::execute_step_with_result_handles(
@@ -4617,7 +4635,8 @@ async fn run_rounds(
                             },
                         )
                         .await,
-                    );
+                    )
+                    };
                     if let (Some(entry), Some(result)) = (&ledger_entry, &outcome) {
                         let closing = runtime_loop::effect::final_outcome_for(&result.status);
                         if let Err(reason) = runtime_loop::effect::finalize(
@@ -4677,6 +4696,50 @@ async fn run_rounds(
                 (CallSlot::ToDispatch { .. }, None) => {
                     unreachable!("every ToDispatch slot produced an outcome in phase 2")
                 }
+            };
+
+            // EP-1 S1: a Do browser call refused because the person holds the browser pauses the run
+            // on that call (switch on). The approval is the give-back: once it is consumed, the call
+            // runs again. A released call that meets the takeover again is not paused a second time,
+            // since its approval is spent and the pause would collapse onto it; the model reads the
+            // refusal and may ask again. A run that keeps no state holds no approval: it is refused.
+            let human_assist = if crate::browser_session::takeover_pause_enabled()
+                && ctx.depth == 0
+                && !ctx.release.as_ref().is_some_and(|release| {
+                    release.covers(&step_id, &call.name, &call.arguments_json)
+                }) {
+                crate::browser_session::takeover_step(
+                    &call.name,
+                    &outcome.error,
+                    !zdr && !ctx.route.is_waived(),
+                )
+            } else {
+                None
+            };
+            let outcome = match human_assist {
+                Some(crate::browser_session::TakeoverStep::Pause) if pending_pause.is_none() => {
+                    paused_index = Some(index);
+                    pending_pause = Some(PendingPause {
+                        step_id,
+                        name: call.name.clone(),
+                        arguments_json: call.arguments_json.clone(),
+                        cause: CauseCode::BrowserHumanAssist,
+                    });
+                    continue;
+                }
+                Some(crate::browser_session::TakeoverStep::Refuse(refusal)) => {
+                    warn!(
+                        run_id = %req.run_id,
+                        code = refusal.code(),
+                        feature = refusal.feature().unwrap_or_default(),
+                        "run_agent: a takeover pause is refused for a run that keeps no state"
+                    );
+                    runtime_loop::StepOutcome {
+                        error: crate::browser_session::UNAVAILABLE.text(),
+                        ..outcome
+                    }
+                }
+                _ => outcome,
             };
 
             // A scheduled run is unattended: a gated call is withheld and recorded, and the model
@@ -4919,6 +4982,13 @@ async fn run_rounds(
                 pause_fold,
             )
             .await?;
+            // EP-1 S1: the page the person holds outlives this request, so the give-back resumes the
+            // run on it; and the run's events say the browser is with the person.
+            if pending.cause == CauseCode::BrowserHumanAssist {
+                crate::browser_session::hold_for_person(&req.run_id);
+                let epoch = taken_over_epoch(ctx).await;
+                publish_browser_takeover(ctx, true, epoch).await;
+            }
             // Built outside the loop, which alone holds the tally: a pause is an
             // invocation that spent rounds, and the continuation starts its own tally.
             paused.usage = Some(ctx.usage.snapshot());
@@ -8348,13 +8418,29 @@ async fn declined_earlier_in_run(
 }
 
 /// The cause a pause is stored with (WS21-S5b). A browser act is stored under the risk category its
-/// own input reads as, so the approval shows that category for the call it is for.
+/// own input reads as, so the approval shows that category for the call it is for. A takeover pause
+/// (EP-1 S1) names the host of the session the run holds, never one the page states.
 fn approval_cause_for_pause(
+    state: &crate::state::StateStore,
     cause: CauseCode,
     run_id: &str,
     tool_name: &str,
     tool_input: &str,
 ) -> mp_contracts::model_plane::v1::ApprovalCause {
+    if cause == CauseCode::BrowserHumanAssist {
+        let host = state
+            .browser_session(run_id)
+            .map(|session| session.host)
+            .unwrap_or_default();
+        return approval_cause::for_browser_assist(
+            run_id,
+            tool_name,
+            tool_input,
+            approval_cause::ASSIST_KIND_USER_TAKEOVER,
+            approval_cause::ASSIST_ORIGIN_PERSON,
+            &host,
+        );
+    }
     let mut stored = approval_cause::for_call(cause, run_id, tool_name, tool_input);
     if tool_name == crate::browser_session::ACT_TOOL {
         stored.risk_category = crate::tool_bridge::browser_act_risk_category(tool_input)
@@ -8488,6 +8574,7 @@ async fn pause_for_approval(
             ),
             continuation_descriptor_json,
             cause: Some(approval_cause_for_pause(
+                state,
                 cause,
                 &req.run_id,
                 tool_name,
@@ -9363,6 +9450,86 @@ async fn publish_plan_transition(
             "run_agent: failed to publish PlanTransitioned (best-effort)"
         );
     }
+}
+
+/// Publish a takeover's `BrowserRunPaused` or the give-back's `BrowserRunResumed` on session-core's
+/// broadcast (EP-1 S1), the same path as [`publish_plan_transition`]. Best-effort. A run that keeps
+/// no state never pauses for a takeover, and publishes nothing here either.
+async fn publish_browser_takeover(ctx: &LoopContext<'_>, paused: bool, control_epoch: u64) {
+    if ctx.req.zdr || ctx.route.is_waived() {
+        return;
+    }
+    let request = pb::RecordOrchestrationEventRequest {
+        event: Some(pb::OrchestrationEvent {
+            // session-core assigns event_id + at.
+            event_id: String::new(),
+            at: None,
+            event: Some(crate::browser_session::takeover_event(
+                &ctx.req.run_id,
+                paused,
+                control_epoch,
+            )),
+        }),
+    };
+    let result = match authenticated_session_request(request, ctx.session_bearer) {
+        Ok(request) => OrchestrationCoreServiceClient::new(ctx.session_channel.clone())
+            .record_orchestration_event(request)
+            .await
+            .map(|_| ()),
+        Err(error) => Err(error),
+    };
+    if let Err(error) = result {
+        warn!(
+            run_id = %ctx.req.run_id,
+            code = ?error.code(),
+            paused,
+            "run_agent: browser takeover event not published (best-effort)"
+        );
+    }
+}
+
+/// The control epoch of the run's browser at a takeover pause (EP-1 S1). Zero when Quarry is not
+/// configured or did not answer: the epoch only labels the event.
+async fn taken_over_epoch(ctx: &LoopContext<'_>) -> u64 {
+    let Some(quarry) = crate::quarry_agent::QuarryAgentClient::from_env().ok().flatten() else {
+        return 0;
+    };
+    crate::browser_session::session_control(ctx.state, &quarry, &ctx.req.org_id, &ctx.req.run_id)
+        .await
+        .map_or(0, |control| control.control_epoch)
+}
+
+/// Whether the browser call a takeover paused must stay held: Quarry says the person still holds the
+/// browser (EP-1 S1). Once it is given back the hold ends and the give-back is published. A control
+/// that cannot be read releases the call: Quarry's own gate still refuses an agent step while the
+/// person holds the browser.
+async fn released_browser_call_still_held(
+    ctx: &LoopContext<'_>,
+    browser: &crate::browser_session::BrowserDispatch<'_>,
+) -> bool {
+    let control = match crate::quarry_agent::QuarryAgentClient::from_env().ok().flatten() {
+        Some(quarry) => {
+            crate::browser_session::session_control(
+                browser.state,
+                &quarry,
+                browser.org_id,
+                browser.run_id,
+            )
+            .await
+        }
+        None => None,
+    };
+    if control
+        .as_ref()
+        .is_some_and(crate::quarry_agent::RunControl::person_holds)
+    {
+        return true;
+    }
+    crate::browser_session::end_hold(browser.run_id);
+    if let Some(control) = control {
+        publish_browser_takeover(ctx, false, control.control_epoch).await;
+    }
+    false
 }
 
 /// The environment switch for a Do run's per-round usage progress (build plan WS27 S9). Off by
@@ -16395,6 +16562,58 @@ mod tests {
             !format!("{cause:?}").contains("snap-1"),
             "the act's input is not in the cause: {cause:?}"
         );
+    }
+
+    /// EP-1 S1: a takeover pause is stored under `browser_human_assist`, says the person took the
+    /// browser, and names the host of the session the run holds: never an id of the session.
+    #[tokio::test]
+    async fn a_browser_takeover_pause_is_stored_under_browser_human_assist() {
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        let session_channel = spawn_session_channel(rec.clone()).await;
+        let state = crate::state::StateStore::new();
+        state.replace_browser_session(
+            "run_test",
+            crate::browser_session::BrowserSession {
+                grant_id: "grant-1".to_owned(),
+                quarry_run_id: "run-q1".to_owned(),
+                lease_id: "lease-q1".to_owned(),
+                host: "example.com".to_owned(),
+                fence: vec!["example.com".to_owned()],
+            },
+        );
+
+        let resp = pause_for_approval(
+            &state,
+            &session_channel,
+            &sample_request(),
+            "step-1",
+            crate::browser_session::OBSERVE_TOOL,
+            "{}",
+            CauseCode::BrowserHumanAssist,
+            "ask",
+            0,
+            Some("session-token"),
+            None,
+            None,
+        )
+        .await
+        .expect("a takeover pauses the run");
+
+        assert_eq!(resp.status, "awaiting_approval");
+        let rec = rec.lock().unwrap();
+        let cause = rec.approval_requests[0]
+            .cause
+            .clone()
+            .expect("the pause carries its cause");
+        assert_eq!(cause.code, "browser_human_assist");
+        assert_eq!(
+            (cause.assist_kind.as_str(), cause.assist_origin.as_str(), cause.host.as_str()),
+            ("user_takeover", "person", "example.com")
+        );
+        assert_eq!(cause.scope_options, vec!["once".to_owned()]);
+        for id in ["grant-1", "run-q1", "lease-q1"] {
+            assert!(!format!("{cause:?}").contains(id), "{id} is in the cause: {cause:?}");
+        }
     }
 
     #[tokio::test]
