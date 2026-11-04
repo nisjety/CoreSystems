@@ -96,3 +96,77 @@ pub(in crate::domains::actions) async fn dispatch_space_files_delete(
         };
     owner_json_response_to_envelope("space.files.delete", user, status, resp)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::middleware::AuthorizedMembership;
+    use axum::http::StatusCode;
+    use http_body_util::BodyExt;
+    use serde_json::json;
+
+    fn user() -> AuthenticatedUser {
+        AuthenticatedUser {
+            user_id: "ws14-user".to_owned(),
+            user_email: "ws14@example.com".to_owned(),
+            user_name: "Ws14".to_owned(),
+            user_image: None,
+            email_verified: true,
+            auth_role: Some("member".to_owned()),
+            active_org_id: Some("org-1".to_owned()),
+            authorized_membership: Some(AuthorizedMembership {
+                organization_id: "org-1".to_owned(),
+                role: "member".to_owned(),
+            }),
+        }
+    }
+
+    async fn read(response: Response) -> (StatusCode, Value) {
+        let status = response.status();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+    }
+
+    /// The default state has `room_files_api` off and every upstream unreachable.
+    fn state() -> AppState {
+        crate::tests::test_state(false)
+    }
+
+    #[tokio::test]
+    async fn attach_is_human_only_multipart_422() {
+        let (status, body) = read(dispatch_space_files_attach().await).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(body["error"]["code"], "upload_requires_multipart");
+    }
+
+    #[tokio::test]
+    async fn list_read_text_and_delete_require_their_ids() {
+        let state = state();
+        let headers = HeaderMap::new();
+        let response = dispatch_space_files_list(&state, &user(), &headers, &json!({})).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        for input in [json!({ "spaceRef": "space-1" }), json!({ "documentId": "doc-1" })] {
+            let response = dispatch_space_files_read_text(&state, &user(), &headers, &input).await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{input}");
+            let response = dispatch_space_files_delete(&state, &user(), &headers, &input).await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{input}");
+        }
+    }
+
+    #[tokio::test]
+    async fn with_the_flag_off_every_dispatch_is_404_room_files_disabled() {
+        let state = state();
+        let headers = HeaderMap::new();
+        let both = json!({ "spaceRef": "space-1", "documentId": "doc-1" });
+        let list =
+            dispatch_space_files_list(&state, &user(), &headers, &json!({ "spaceRef": "space-1" }))
+                .await;
+        let text = dispatch_space_files_read_text(&state, &user(), &headers, &both).await;
+        let delete = dispatch_space_files_delete(&state, &user(), &headers, &both).await;
+        for response in [list, text, delete] {
+            let (status, body) = read(response).await;
+            assert_eq!(status, StatusCode::NOT_FOUND);
+            assert_eq!(body["error"]["code"], "room_files_disabled");
+        }
+    }
+}

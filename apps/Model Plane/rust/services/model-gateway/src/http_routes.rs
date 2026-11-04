@@ -19388,10 +19388,12 @@ mod thread_messages_page_tests {
     #[test]
     fn a_versioned_turn_says_where_it_sits_among_its_versions() {
         let body = serde_json::to_value(ThreadMessage {
-            entry: None, mentions: Vec::new(), revision: None,
             message_id: "m2".to_owned(),
             role: "assistant".to_owned(),
             content: "answer".to_owned(),
+            entry: None,
+            mentions: Vec::new(),
+            revision: None,
             agent_name: String::new(),
             author_subject_id: String::new(),
             post_kind: String::new(),

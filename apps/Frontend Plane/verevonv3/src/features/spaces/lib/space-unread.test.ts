@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { unreadThreadIds } from './space-unread'
+import { firstUnreadIndex, markUnreadBeforeMs, unreadThreadIds } from './space-unread'
 
 const thread = (id: string, updated_at?: string, extra: Record<string, unknown> = {}) => ({
   thread_id: id,
@@ -119,5 +119,40 @@ describe('unreadThreadIds', () => {
       )
       expect([...ids]).toEqual(['theirs'])
     })
+  })
+})
+
+// WS11-S4: where the "N new" divider goes, and the read position a "Mark unread" sets.
+describe('firstUnreadIndex', () => {
+  it('points at the first new post in the order the room draws them, oldest first', () => {
+    const ordered = [thread('old'), thread('n1'), thread('n2')]
+    expect(firstUnreadIndex(ordered, new Set(['n2', 'n1']))).toBe(1)
+  })
+
+  it('is -1 when nothing is new, when the list is empty, or when the new post is not in the list', () => {
+    const ordered = [thread('old'), thread('n1')]
+    expect(firstUnreadIndex(ordered, new Set<string>())).toBe(-1)
+    expect(firstUnreadIndex([], new Set(['n1']))).toBe(-1)
+    expect(firstUnreadIndex(ordered, new Set(['gone']))).toBe(-1)
+  })
+})
+
+describe('markUnreadBeforeMs', () => {
+  it('lands one millisecond before the post’s latest activity, so the post reads as new again', () => {
+    expect(markUnreadBeforeMs(thread('t1', '2026-09-07T11:00:00Z'))).toBe(Date.parse('2026-09-07T11:00:00Z') - 1)
+  })
+
+  it('uses the later of the post and its latest run', () => {
+    const post = thread('t1', '2026-09-07T11:00:00Z', { latest_run_updated_at: '2026-09-07T12:00:00Z' })
+    expect(markUnreadBeforeMs(post)).toBe(Date.parse('2026-09-07T12:00:00Z') - 1)
+  })
+
+  it('is undefined for a post with no readable time, rather than a guess', () => {
+    expect(markUnreadBeforeMs(thread('t1'))).toBeUndefined()
+    expect(markUnreadBeforeMs(thread('t2', 'yesterday-ish'))).toBeUndefined()
+  })
+
+  it('never goes below zero', () => {
+    expect(markUnreadBeforeMs(thread('t3', '1970-01-01T00:00:00Z'))).toBe(0)
   })
 })

@@ -1,4 +1,4 @@
-import { Show, createSignal, onCleanup } from 'solid-js'
+import { Show, createSignal, onSettled } from 'solid-js'
 
 import { announce } from '@/shared/a11y/announcer'
 import { markAllSpacesRead } from '@/shared/api/spaces-attention-client'
@@ -6,6 +6,7 @@ import { translateApiError, useI18n } from '@/shared/i18n'
 import {
   refreshSpaceAttention,
   retainSpaceAttention,
+  spaceAttentionAvailable,
   spaceAttentionRoom,
   spaceAttentionStale,
   spaceAttentionTotals,
@@ -19,7 +20,10 @@ import './space-attention-badge.css'
  */
 export function useSpaceAttentionPoller(): void {
   const i18n = useI18n()
-  onCleanup(retainSpaceAttention(i18n.tr))
+  // Joined once settled, not in the component body: starting the poller writes signals (its clock and
+  // its first state), and Solid 2 refuses a write inside a component body (REACTIVE_WRITE_IN_OWNED_SCOPE).
+  // The returned release is the cleanup.
+  onSettled(() => retainSpaceAttention(i18n.tr))
 }
 
 function Mark(props: { badge: AttentionBadge; strong: boolean; stale: boolean; label: string }) {
@@ -78,7 +82,9 @@ export function SpaceRoomAttentionBadge(props: { spaceRef: string }) {
 export function SpaceTotalAttentionBadge() {
   const i18n = useI18n()
   useSpaceAttentionPoller()
-  const total = () => spaceAttentionTotals()?.badge ?? 0
+  // The flag gate lives in the store (it never asks when `attention` is off); this keeps the mark
+  // away even if an answer from before the switch is still held.
+  const total = () => (spaceAttentionAvailable() ? spaceAttentionTotals()?.badge ?? 0 : 0)
   return (
     <Show when={total() > 0}>
       <Mark
@@ -102,6 +108,7 @@ export function SpaceAttentionReadAll() {
   const [busy, setBusy] = createSignal(false)
   const [failure, setFailure] = createSignal('')
   const anything = () => {
+    if (!spaceAttentionAvailable()) return false
     const totals = spaceAttentionTotals()
     return totals !== undefined && (totals.unreadRooms > 0 || totals.badge > 0)
   }
@@ -120,7 +127,7 @@ export function SpaceAttentionReadAll() {
     }
   }
   return (
-    <Show when={anything() || failure() || spaceAttentionStale()}>
+    <Show when={spaceAttentionAvailable() && (anything() || failure() || spaceAttentionStale())}>
       <div class="space-attention-readall">
         <Show when={anything()}>
           <button type="button" disabled={busy()} onClick={() => { void markAll() }}>

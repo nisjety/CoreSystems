@@ -1204,4 +1204,713 @@ mod tests {
         let (status, _, _) = run(&state, member("dir-other-user"), q("ann")).await;
         assert_eq!(status, 200);
     }
+
+    // -----------------------------------------------------------------------------------------
+    // WS04-S9: composed search (`kinds=`) and the resolver.
+    // -----------------------------------------------------------------------------------------
+
+    use super::resolve_route;
+    use axum::Json;
+    use wiremock::matchers::{body_partial_json, query_param};
+
+    const SPACES_PATH: &str = "/api/v1/internal/spaces";
+
+    struct Fx {
+        state: AppState,
+        control: MockServer,
+        app: MockServer,
+    }
+
+    fn person_row(id: &str, name: &str, email: &str) -> Value {
+        json!({"subject_id": id, "display_name": name, "email": email, "is_self": false})
+    }
+
+    fn binding(agent_ref: &str, name: &str, description: &str, def: &str, status: &str, space: &str) -> Value {
+        json!({
+            "agentRef": agent_ref, "name": name, "description": description,
+            "definitionStatus": def, "status": status, "spaceRef": space
+        })
+    }
+
+    /// Control answers `people` for every directory read, `outside` (when given) for reads that
+    /// carry `exclude_member_of`, and `rooms` as the caller's Space index; Application answers the
+    /// agent registry with `bindings`. Both flags are on.
+    async fn fixture(people: Value, outside: Option<Value>, rooms: &[&str], bindings: Vec<Value>) -> Fx {
+        let control = MockServer::start().await;
+        if let Some(outside) = outside {
+            Mock::given(wm_method("GET"))
+                .and(wm_path(CONTROL_PATH))
+                .and(query_param("exclude_member_of", "space-room"))
+                .respond_with(people_ok(json!({"people": outside})))
+                .mount(&control)
+                .await;
+        }
+        Mock::given(wm_method("GET"))
+            .and(wm_path(CONTROL_PATH))
+            .respond_with(people_ok(json!({"people": people, "next_cursor": "next-1"})))
+            .mount(&control)
+            .await;
+        let spaces: Vec<Value> = rooms.iter().map(|room| json!({"space_ref": room})).collect();
+        Mock::given(wm_method("GET"))
+            .and(wm_path(SPACES_PATH))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": {"spaces": spaces}})))
+            .mount(&control)
+            .await;
+        let app = MockServer::start().await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/query"))
+            .and(body_partial_json(json!({"path": "spaceAgents:agentInstallationsForOrgForGateway"})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"value": bindings})))
+            .mount(&app)
+            .await;
+        let mut state = state_with(&control, true);
+        state.space_features.directory_resolver_api = true;
+        state.application_convex_url = app.uri();
+        state.application_convex_service_key = "application-test-key".into();
+        Fx { state, control, app }
+    }
+
+    async fn app_requests(fx: &Fx) -> usize {
+        fx.app.received_requests().await.expect("requests").len()
+    }
+
+    fn kinds(raw: &str) -> PeopleParams {
+        PeopleParams { kinds: Some(raw.to_owned()), ..PeopleParams::default() }
+    }
+
+    async fn resolve(state: &AppState, user: &str, body: Value) -> (u16, Value) {
+        let response = resolve_route(State(state.clone()), Extension(member(user)), Json(body)).await;
+        let status = response.status().as_u16();
+        let body: Value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap_or(Value::Null);
+        (status, body)
+    }
+
+    #[tokio::test]
+    async fn resolver_flag_off_is_404_feature_disabled_on_both_routes_with_zero_upstream_requests() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let mut fx = fixture(json!([]), None, &[], vec![]).await;
+        fx.state.space_features.directory_resolver_api = false;
+        let (status, body) = resolve(&fx.state, "res-off-a", json!({"query": "ann"})).await;
+        assert_eq!(status, 404);
+        assert_eq!(body["error"]["code"], "feature_disabled");
+        let (status, _, body) = run(&fx.state, member("res-off-b"), kinds("person,agent")).await;
+        assert_eq!(status, 404);
+        assert_eq!(body["error"]["code"], "feature_disabled");
+        assert_eq!(control_requests(&fx.control).await, 0);
+        assert_eq!(app_requests(&fx).await, 0);
+        // Without `kinds` the S3 people search keeps working with the resolver flag off.
+        let (status, _, body) = run(&fx.state, member("res-off-c"), q("a")).await;
+        assert_eq!(status, 200);
+        assert!(body["data"]["people"].is_array());
+    }
+
+    #[tokio::test]
+    async fn an_unknown_kind_is_a_400_and_kinds_is_never_forwarded_to_control() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = fixture(json!([person_row("u-1", "Ann", "ann@example.com")]), None, &[], vec![]).await;
+        for (index, raw) in ["bot", "person,bot", "person,,agent", ""].into_iter().enumerate() {
+            let (status, _, body) = run(&fx.state, member(&format!("res-kind-{index}")), kinds(raw)).await;
+            assert_eq!(status, 400, "{raw:?}");
+            assert_eq!(body["error"]["code"], "invalid_request");
+            assert_eq!(body["error"]["details"], json!({"field": "kinds", "reason": "unknown_kind"}));
+        }
+        assert_eq!(control_requests(&fx.control).await, 0);
+        // A valid composed read (case-insensitive kinds) reaches Control without `kinds`.
+        let (status, _, _) = run(
+            &fx.state,
+            member("res-kind-ok"),
+            PeopleParams { q: Some("ann".into()), kinds: Some(" Person , AGENT ".into()), ..Default::default() },
+        )
+        .await;
+        assert_eq!(status, 200);
+        let requests = fx.control.received_requests().await.unwrap();
+        let sent = requests.iter().find(|r| r.url.path() == CONTROL_PATH).expect("Control request");
+        assert!(sent.url.query_pairs().all(|(key, _)| key != "kinds"));
+    }
+
+    #[tokio::test]
+    async fn composed_search_returns_people_then_published_agents_with_presence_only_meta() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = fixture(
+            json!([person_row("u-2", "Ann", "ann@example.com")]),
+            None,
+            &["space-room", "space-mine"],
+            vec![
+                binding("agent-b", "Budget Helper", "Watches budgets", "active", "active", "space-room"),
+                // The same definition in a room the caller is NOT in, and a removed binding.
+                binding("agent-b", "Budget Helper", "Watches budgets", "active", "active", "space-secret"),
+                binding("agent-b", "Budget Helper", "Watches budgets", "active", "removed", "space-mine"),
+                binding("agent-c", "Calendar Bot", "Plans days", "active", "paused", "space-mine"),
+                binding("agent-d", "Draft Agent", "Unpublished", "draft", "active", "space-room"),
+                binding("agent-e", "Old Agent", "Retired", "inactive", "active", "space-room"),
+            ],
+        )
+        .await;
+        let (status, headers, body) = run(&fx.state, member("res-composed"), kinds("person,agent")).await;
+        assert_eq!(status, 200);
+        assert_eq!(headers.get("cache-control").and_then(|v| v.to_str().ok()), Some("no-store"));
+        assert_eq!(body["meta"], json!({"presence_only": true}));
+        assert_eq!(body["data"]["next_cursor"], "next-1");
+        let results = body["data"]["results"].as_array().unwrap();
+        assert_eq!(
+            results[0],
+            json!({"kind": "person", "subject_id": "u-2", "display_name": "Ann",
+                   "email": "ann@example.com", "is_self": false})
+        );
+        assert_eq!(results.len(), 3, "one person then two published agents: {results:?}");
+        assert_eq!(
+            results[1],
+            json!({"kind": "agent", "agent_ref": "agent-b", "display_name": "Budget Helper",
+                   "description": "Watches budgets", "installed_in": ["space-room"]})
+        );
+        assert_eq!(results[2]["agent_ref"], "agent-c");
+        assert_eq!(results[2]["installed_in"], json!(["space-mine"]));
+        let text = body.to_string();
+        assert!(!text.contains("space-secret"), "a room the caller is not in never appears");
+        assert!(!text.contains("space_name") && !text.contains("Draft Agent") && !text.contains("Old Agent"));
+    }
+
+    #[tokio::test]
+    async fn composed_search_agents_are_first_page_only_capped_at_ten_and_filtered_by_q() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let bindings: Vec<Value> = (0..12)
+            .map(|i| binding(&format!("agent-{i:02}"), &format!("Helper {i:02}"), "desc", "active", "active", "space-room"))
+            .collect();
+        let fx = fixture(json!([]), None, &["space-room"], bindings).await;
+        let (_, _, body) = run(&fx.state, member("res-cap-a"), kinds("agent")).await;
+        assert_eq!(body["data"]["results"].as_array().unwrap().len(), 10);
+        // kinds=agent alone never asks Control for people.
+        assert_eq!(control_requests(&fx.control).await, 1, "only the Space index read");
+        // A cursor means a later page: people continue, agents are not repeated.
+        let (_, _, body) = run(
+            &fx.state,
+            member("res-cap-b"),
+            PeopleParams { cursor: Some("page-2".into()), kinds: Some("person,agent".into()), ..Default::default() },
+        )
+        .await;
+        assert!(body["data"]["results"].as_array().unwrap().iter().all(|r| r["kind"] == "person"));
+        // `q` filters agents by name or description, case-insensitively.
+        let (_, _, body) = run(
+            &fx.state,
+            member("res-cap-c"),
+            PeopleParams { q: Some("HELPER 07".into()), kinds: Some("agent".into()), ..Default::default() },
+        )
+        .await;
+        let results = body["data"]["results"].as_array().unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0]["agent_ref"], "agent-07");
+    }
+
+    #[tokio::test]
+    async fn composed_search_control_4xx_passes_through_and_5xx_or_registry_outage_is_503() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = fixture(json!([]), None, &[], vec![]).await;
+        let forbidden = json!({"error": {"code": "member_not_in_organization", "message": "Not a member."}});
+        let control = control(ResponseTemplate::new(403).set_body_json(forbidden.clone())).await;
+        let mut state = fx.state.clone();
+        state.user_core_url = control.uri();
+        let (status, _, body) = run(&state, member("res-4xx"), kinds("person")).await;
+        assert_eq!((status, body), (403, forbidden));
+        let down = self::control(ResponseTemplate::new(500).set_body_json(json!({"error": "boom"}))).await;
+        state.user_core_url = down.uri();
+        let (status, _, body) = run(&state, member("res-5xx"), kinds("person,agent")).await;
+        assert_eq!(status, 503);
+        assert_eq!(body["error"]["code"], "directory_unavailable");
+        // The agent registry failing is a 503 as well, never agents silently missing.
+        let mut no_convex = fx.state.clone();
+        no_convex.application_convex_url = String::new();
+        let (status, _, body) = run(&no_convex, member("res-registry"), kinds("agent")).await;
+        assert_eq!(status, 503);
+        assert_eq!(body["error"]["code"], "directory_unavailable");
+    }
+
+    fn match_of(body: &Value) -> &Value {
+        assert_eq!(body["data"]["status"], "ok", "{body}");
+        &body["data"]["match"]
+    }
+
+    #[tokio::test]
+    async fn resolve_exact_email_exact_full_name_and_a_unique_prefix_are_ok_with_presence_only() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = fixture(
+            json!([
+                person_row("u-1", "Annika Berg", "annika@example.com"),
+                person_row("u-2", "Bjorn Hansen", "bjorn@example.com")
+            ]),
+            None,
+            &[],
+            vec![],
+        )
+        .await;
+        let (status, body) = resolve(&fx.state, "res-ok-email", json!({"query": "BJORN@example.com", "kind": "person"})).await;
+        assert_eq!(status, 200);
+        assert_eq!(body["meta"], json!({"presence_only": true}));
+        assert_eq!(match_of(&body)["subject_id"], "u-2");
+        let (_, body) = resolve(&fx.state, "res-ok-name", json!({"query": "annika berg"})).await;
+        assert_eq!(match_of(&body)["subject_id"], "u-1");
+        assert_eq!(match_of(&body)["kind"], "person");
+        let (_, body) = resolve(&fx.state, "res-ok-prefix", json!({"query": "bjo", "kind": "any"})).await;
+        assert_eq!(match_of(&body)["subject_id"], "u-2");
+    }
+
+    #[tokio::test]
+    async fn resolve_two_prefix_matches_are_ambiguous_with_at_most_five_candidates_and_exact_beats_prefix() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let many: Vec<Value> = (0..7)
+            .map(|i| person_row(&format!("u-{i}"), &format!("Sam {i}"), &format!("sam{i}@example.com")))
+            .collect();
+        let fx = fixture(json!(many), None, &[], vec![]).await;
+        let (status, body) = resolve(&fx.state, "res-amb", json!({"query": "sam", "kind": "person"})).await;
+        assert_eq!(status, 200);
+        assert_eq!(body["data"]["status"], "ambiguous");
+        assert_eq!(body["data"]["candidates"].as_array().unwrap().len(), 5);
+        assert_eq!(body["meta"]["presence_only"], true);
+
+        let fx = fixture(
+            json!([person_row("u-a", "Sam", "sam@example.com"), person_row("u-b", "Samantha", "samantha@example.com")]),
+            None,
+            &[],
+            vec![],
+        )
+        .await;
+        let (_, body) = resolve(&fx.state, "res-exact", json!({"query": "Sam", "kind": "person"})).await;
+        assert_eq!(match_of(&body)["subject_id"], "u-a", "the exact tier wins over the prefix tier");
+    }
+
+    #[tokio::test]
+    async fn resolve_no_match_blank_overlong_and_bad_kind() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = fixture(json!([person_row("u-1", "Ann", "ann@example.com")]), None, &[], vec![]).await;
+        let (status, body) = resolve(&fx.state, "res-none", json!({"query": "zed"})).await;
+        assert_eq!(status, 200);
+        assert_eq!(body["data"], json!({"status": "none", "reason": "no_match"}));
+        let cases = [
+            (json!({"query": "   "}), "query", "required"),
+            (json!({}), "query", "required"),
+            (json!({"query": "a".repeat(101)}), "query", "too_long"),
+            (json!({"query": "ann", "kind": "robot"}), "kind", "unknown_kind"),
+            (json!({"query": "ann", "space_ref": "s".repeat(201)}), "space_ref", "too_long"),
+        ];
+        let before = control_requests(&fx.control).await;
+        for (index, (request, field, reason)) in cases.into_iter().enumerate() {
+            let (status, body) = resolve(&fx.state, &format!("res-bad-{index}"), request).await;
+            assert_eq!(status, 400, "{field}");
+            assert_eq!(body["error"]["code"], "invalid_request");
+            assert_eq!(body["error"]["details"], json!({"field": field, "reason": reason}));
+        }
+        assert_eq!(control_requests(&fx.control).await, before, "no upstream call on a bad body");
+    }
+
+    #[tokio::test]
+    async fn resolve_control_or_convex_outage_is_200_none_directory_unavailable() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = fixture(json!([]), None, &[], vec![]).await;
+        let down = control(ResponseTemplate::new(503).set_body_json(json!({"error": "down"}))).await;
+        let mut state = fx.state.clone();
+        state.user_core_url = down.uri();
+        let (status, body) = resolve(&state, "res-out-a", json!({"query": "ann", "kind": "person"})).await;
+        assert_eq!(status, 200);
+        assert_eq!(body["data"], json!({"status": "none", "reason": "directory_unavailable"}));
+        let mut no_convex = fx.state.clone();
+        no_convex.application_convex_url = String::new();
+        let (status, body) = resolve(&no_convex, "res-out-b", json!({"query": "ann", "kind": "agent"})).await;
+        assert_eq!(status, 200);
+        assert_eq!(body["data"], json!({"status": "none", "reason": "directory_unavailable"}));
+    }
+
+    #[tokio::test]
+    async fn resolve_with_space_ref_scopes_to_members_when_the_caller_is_in_the_room() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        // Control's "outside the room" list holds u-b only, so u-a is a member.
+        let people = json!([person_row("u-a", "Alice", "alice@example.com"), person_row("u-b", "Alicia", "alicia@example.com")]);
+        let fx = fixture(people.clone(), Some(json!([person_row("u-b", "Alicia", "alicia@example.com")])), &["space-room"], vec![]).await;
+        let (_, body) = resolve(&fx.state, "res-scope-a", json!({"query": "ali", "kind": "person", "space_ref": "space-room"})).await;
+        assert_eq!(match_of(&body)["subject_id"], "u-a", "the org member outside the room is not a candidate");
+        let (_, body) = resolve(&fx.state, "res-scope-b", json!({"query": "alicia", "kind": "person", "space_ref": "space-room"})).await;
+        assert_eq!(body["data"], json!({"status": "none", "reason": "not_in_room"}));
+        let (_, body) = resolve(&fx.state, "res-scope-c", json!({"query": "zed", "kind": "person", "space_ref": "space-room"})).await;
+        assert_eq!(body["data"]["reason"], "no_match");
+
+        // The caller is not in the room: space_ref is ignored and nothing says the room exists.
+        let fx = fixture(people, Some(json!([person_row("u-b", "Alicia", "alicia@example.com")])), &["space-other"], vec![]).await;
+        let (_, body) = resolve(&fx.state, "res-scope-d", json!({"query": "alicia", "kind": "person", "space_ref": "space-room"})).await;
+        assert_eq!(match_of(&body)["subject_id"], "u-b");
+        let requests = fx.control.received_requests().await.unwrap();
+        assert!(
+            requests.iter().filter(|r| r.url.path() == CONTROL_PATH).all(|r| r.url.query_pairs().all(|(k, _)| k != "exclude_member_of")),
+            "no roster probe for a room the caller is not in"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_agents_are_scoped_by_installed_in() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = fixture(
+            json!([]),
+            None,
+            &["space-room", "space-mine"],
+            vec![
+                binding("agent-in", "Helper In", "x", "active", "active", "space-room"),
+                binding("agent-out", "Helper Out", "x", "active", "active", "space-mine"),
+            ],
+        )
+        .await;
+        let scoped = |query: &str| json!({"query": query, "kind": "agent", "space_ref": "space-room"});
+        let (_, body) = resolve(&fx.state, "res-agent-a", scoped("helper in")).await;
+        assert_eq!(match_of(&body)["agent_ref"], "agent-in");
+        assert_eq!(match_of(&body)["kind"], "agent");
+        let (_, body) = resolve(&fx.state, "res-agent-b", scoped("helper out")).await;
+        assert_eq!(body["data"], json!({"status": "none", "reason": "not_in_room"}));
+        let (_, body) = resolve(&fx.state, "res-agent-c", json!({"query": "helper", "kind": "agent"})).await;
+        assert_eq!(body["data"]["status"], "ambiguous");
+    }
+
+    #[tokio::test]
+    async fn the_resolver_and_the_search_share_one_60_per_minute_limiter() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = fixture(json!([]), None, &[], vec![]).await;
+        // A blank query is refused AFTER the limiter, so each call spends a token and no upstream.
+        for index in 0..60 {
+            let (status, _) = resolve(&fx.state, "res-limited", json!({"query": ""})).await;
+            assert_eq!(status, 400, "request {index} is inside the limit");
+        }
+        let (status, headers, body) = run(&fx.state, member("res-limited"), kinds("person")).await;
+        assert_eq!(status, 429);
+        assert_eq!(body["error"]["code"], "rate_limited");
+        assert!(headers.get("retry-after").is_some());
+        let (status, body) = resolve(&fx.state, "res-limited", json!({"query": "ann"})).await;
+        assert_eq!(status, 429);
+        assert_eq!(body["error"]["code"], "rate_limited");
+        assert_eq!(control_requests(&fx.control).await, 0);
+    }
+
+    /// `GET /spaces/{ref}/context` reports `features.directory_resolver` as the flag says, and
+    /// off by default.
+    #[tokio::test]
+    async fn space_context_features_directory_resolver_mirrors_the_flag() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        for flag in [false, true] {
+            let auth = MockServer::start().await;
+            Mock::given(wm_method("GET"))
+                .and(wm_path("/api/auth/get-session"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                    "user": {"id": "user-1", "email": "user@example.com", "emailVerified": true},
+                    "session": {"activeOrganizationId": "org-1"}
+                })))
+                .mount(&auth)
+                .await;
+            let user_core = MockServer::start().await;
+            Mock::given(wm_method("GET"))
+                .and(wm_path("/api/v1/me/session-context"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                    "userId":"user-1", "orgId":"org-1", "role":"member", "onboardingStatus":"COMPLETED"
+                })))
+                .mount(&user_core)
+                .await;
+            Mock::given(wm_method("GET"))
+                .and(wm_path("/api/v1/internal/spaces/space-room/membership"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                    "data": {"space_ref": "space-room", "role": "editor"}
+                })))
+                .mount(&user_core)
+                .await;
+            let app = MockServer::start().await;
+            Mock::given(wm_method("POST"))
+                .and(wm_path("/api/query"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({"value": [
+                    {"spaceRef":"space-room","name":"Leveranse","kind":"room","lifecycle":"active"}
+                ]})))
+                .mount(&app)
+                .await;
+            let mut state = crate::tests::test_state(false);
+            state.application_convex_url = app.uri();
+            state.application_convex_service_key = "application-test-key".into();
+            state.auth_core_url = auth.uri();
+            state.user_core_url = user_core.uri();
+            state.space_features.directory_resolver_api = flag;
+            let response = crate::build_router(state)
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/v1/spaces/space-room/context")
+                        .header("cookie", "better-auth.session_token=session-1")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status().as_u16(), 200);
+            let body: Value =
+                serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                    .unwrap();
+            assert_eq!(body["data"]["features"]["directory_resolver"], flag);
+        }
+        assert!(!crate::config::SpaceFeatureFlags::default().directory_resolver_api);
+    }
+}
+
+#[cfg(test)]
+mod rooms_tests {
+    //! WS04-S8.gw: the room directory route. Control lists the browsable rooms, Application only
+    //! supplies labels; both are mocks.
+    use super::{decode_rooms_cursor, encode_rooms_cursor, rooms_route, RoomsParams};
+    use crate::config::AppState;
+    use crate::middleware::{AuthenticatedUser, AuthorizedMembership};
+    use axum::extract::{Extension, Query, State};
+    use http_body_util::BodyExt;
+    use serde_json::{json, Value};
+    use wiremock::matchers::{method as wm_method, path as wm_path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    const ROOMS_PATH: &str = "/api/v1/internal/directory/rooms";
+
+    /// Each test uses its own user id: the limiter is process-wide and keyed by org and user.
+    fn member(user_id: &str) -> AuthenticatedUser {
+        AuthenticatedUser {
+            user_id: user_id.to_owned(),
+            user_email: format!("{user_id}@example.com"),
+            user_name: "Caller".to_owned(),
+            user_image: None,
+            email_verified: true,
+            auth_role: Some("member".to_owned()),
+            active_org_id: Some("org-1".to_owned()),
+            authorized_membership: Some(AuthorizedMembership {
+                organization_id: "org-1".to_owned(),
+                role: "member".to_owned(),
+            }),
+        }
+    }
+
+    struct Fx {
+        state: AppState,
+        control: MockServer,
+        application: MockServer,
+    }
+
+    async fn fixture(control: ResponseTemplate, labels: ResponseTemplate, flag: bool) -> Fx {
+        let control_server = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path(ROOMS_PATH))
+            .respond_with(control)
+            .mount(&control_server)
+            .await;
+        let application = MockServer::start().await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/query"))
+            .respond_with(labels)
+            .mount(&application)
+            .await;
+        let mut state = crate::tests::test_state(false);
+        state.user_core_url = control_server.uri();
+        state.application_convex_url = application.uri();
+        state.application_convex_service_key = "application-test-key".into();
+        state.space_features.room_directory_api = flag;
+        Fx { state, control: control_server, application }
+    }
+
+    fn rooms_ok(rooms: Value) -> ResponseTemplate {
+        ResponseTemplate::new(200).set_body_json(json!({"data": {"enabled": true, "rooms": rooms, "truncated": false}}))
+    }
+
+    fn labels(rows: Value) -> ResponseTemplate {
+        ResponseTemplate::new(200).set_body_json(json!({"value": rows}))
+    }
+
+    fn listed(space_ref: &str) -> Value {
+        json!({"space_ref": space_ref, "member_count": 3, "join_role": "editor"})
+    }
+
+    fn label(space_ref: &str, name: &str, topic: Option<&str>) -> Value {
+        json!({"spaceRef": space_ref, "name": name, "topic": topic, "kind": "room", "lifecycle": "active"})
+    }
+
+    async fn run(fx: &Fx, user_id: &str, q: Option<&str>, cursor: Option<&str>) -> (u16, Value) {
+        let params = RoomsParams { q: q.map(str::to_owned), cursor: cursor.map(str::to_owned) };
+        let response = rooms_route(State(fx.state.clone()), Extension(member(user_id)), Query(params)).await;
+        let status = response.status().as_u16();
+        let body: Value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap_or(Value::Null);
+        (status, body)
+    }
+
+    fn names(body: &Value) -> Vec<String> {
+        body["data"]["rooms"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|room| room["name"].as_str().unwrap().to_owned())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn flag_off_is_404_feature_disabled_with_zero_control_requests() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = fixture(rooms_ok(json!([listed("r1")])), labels(json!([])), false).await;
+        let (status, body) = run(&fx, "rooms-flag-off", None, None).await;
+        assert_eq!(status, 404);
+        assert_eq!(body["error"]["code"], "feature_disabled");
+        assert!(fx.control.received_requests().await.unwrap().is_empty());
+        assert!(fx.application.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn policy_off_answers_enabled_false_and_no_rooms_without_a_convex_call() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = fixture(
+            ResponseTemplate::new(200).set_body_json(json!({"data": {"enabled": false, "rooms": [listed("r1")]}})),
+            labels(json!([label("r1", "Alpha", None)])),
+            true,
+        )
+        .await;
+        let (status, body) = run(&fx, "rooms-policy-off", None, None).await;
+        assert_eq!(status, 200);
+        assert_eq!(body["data"]["enabled"], false);
+        assert_eq!(body["data"]["rooms"], json!([]));
+        assert!(body["data"]["next_cursor"].is_null());
+        assert!(fx.application.received_requests().await.unwrap().is_empty(), "no label read when the policy is off");
+    }
+
+    #[tokio::test]
+    async fn rooms_without_an_active_label_are_dropped_and_the_rest_sorted_by_name() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = fixture(
+            rooms_ok(json!([listed("r-zulu"), listed("r-alpha"), listed("r-archived"), listed("r-nolabel"), listed("r-blank"), listed("")])),
+            labels(json!([
+                label("r-zulu", "Zulu", Some("last")),
+                label("r-alpha", "alpha", None),
+                {"spaceRef": "r-archived", "name": "Gone", "lifecycle": "archived"},
+                {"spaceRef": "r-blank", "name": "   ", "lifecycle": "active"},
+                label("r-unlisted", "Secret", None),
+            ])),
+            true,
+        )
+        .await;
+        let (status, body) = run(&fx, "rooms-labels", None, None).await;
+        assert_eq!(status, 200);
+        assert_eq!(names(&body), ["alpha", "Zulu"], "case-insensitive sort; unlabelled, archived, blank and unlisted rooms never appear");
+        let first = &body["data"]["rooms"][0];
+        assert_eq!(first["space_ref"], "r-alpha");
+        assert_eq!(first["member_count"], 3);
+        assert_eq!(first["join_role"], "editor");
+        assert!(first["topic"].is_null());
+        assert_eq!(body["meta"]["truncated"], false);
+        // the label read is scoped to the caller and the organization
+        let query = &fx.application.received_requests().await.unwrap()[0];
+        let sent: Value = serde_json::from_slice(&query.body).unwrap();
+        assert_eq!(sent["path"], "spaces:spacesForOrgForGateway");
+        assert_eq!(sent["args"]["externalOrgId"], "org-1");
+    }
+
+    #[tokio::test]
+    async fn q_filters_on_name_and_topic_case_insensitively() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = fixture(
+            rooms_ok(json!([listed("r1"), listed("r2"), listed("r3")])),
+            labels(json!([
+                label("r1", "Leveranse", None),
+                label("r2", "Salg", Some("Ukens LEVERING")),
+                label("r3", "Okonomi", Some("budsjett")),
+            ])),
+            true,
+        )
+        .await;
+        let (_, body) = run(&fx, "rooms-q-1", Some("  lever "), None).await;
+        assert_eq!(names(&body), ["Leveranse", "Salg"]);
+        let (_, body) = run(&fx, "rooms-q-2", Some("BUDSJ"), None).await;
+        assert_eq!(names(&body), ["Okonomi"]);
+        let (_, body) = run(&fx, "rooms-q-3", Some("nothing"), None).await;
+        assert_eq!(names(&body), Vec::<String>::new());
+        let (status, body) = run(&fx, "rooms-q-4", Some(&"a".repeat(101)), None).await;
+        assert_eq!(status, 400);
+        assert_eq!(body["error"]["details"], json!({"field": "q", "reason": "too_long"}));
+    }
+
+    #[tokio::test]
+    async fn pages_hold_25_rooms_with_an_opaque_cursor_that_resumes_after_the_last_room() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let refs: Vec<String> = (0..30).map(|i| format!("r{i:02}")).collect();
+        let fx = fixture(
+            rooms_ok(Value::Array(refs.iter().map(|r| listed(r)).collect())),
+            labels(Value::Array(refs.iter().map(|r| label(r, &format!("Room {r}"), None)).collect())),
+            true,
+        )
+        .await;
+        let (status, first) = run(&fx, "rooms-page", None, None).await;
+        assert_eq!(status, 200);
+        assert_eq!(names(&first).len(), 25);
+        assert_eq!(names(&first)[0], "Room r00");
+        let cursor = first["data"]["next_cursor"].as_str().expect("a next cursor").to_owned();
+        assert_eq!(decode_rooms_cursor(&cursor), Some(("room r24".to_owned(), "r24".to_owned())));
+        let (_, second) = run(&fx, "rooms-page", None, Some(&cursor)).await;
+        assert_eq!(names(&second), ["Room r25", "Room r26", "Room r27", "Room r28", "Room r29"]);
+        assert!(second["data"]["next_cursor"].is_null(), "the last page has no cursor");
+    }
+
+    #[tokio::test]
+    async fn a_malformed_or_oversized_cursor_is_a_400_before_control() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = fixture(rooms_ok(json!([listed("r1")])), labels(json!([label("r1", "A", None)])), true).await;
+        for (index, cursor) in ["***not-base64***", "bm90LWpzb24", &encode_rooms_cursor("a", "b").replace('=', "")[..3]]
+            .into_iter()
+            .enumerate()
+        {
+            let (status, body) = run(&fx, &format!("rooms-cursor-{index}"), None, Some(cursor)).await;
+            assert_eq!(status, 400, "{cursor}");
+            assert_eq!(body["error"]["details"], json!({"field": "cursor", "reason": "malformed"}));
+        }
+        let (status, body) = run(&fx, "rooms-cursor-long", None, Some(&"c".repeat(513))).await;
+        assert_eq!(status, 400);
+        assert_eq!(body["error"]["details"], json!({"field": "cursor", "reason": "too_long"}));
+        assert!(fx.control.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_control_5xx_or_a_failed_label_read_is_a_503_never_an_empty_directory() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let down = fixture(ResponseTemplate::new(503), labels(json!([])), true).await;
+        let (status, body) = run(&down, "rooms-503-control", None, None).await;
+        assert_eq!(status, 503);
+        assert_eq!(body["error"]["code"], "directory_unavailable");
+
+        let no_labels = fixture(rooms_ok(json!([listed("r1")])), ResponseTemplate::new(500), true).await;
+        let (status, body) = run(&no_labels, "rooms-503-labels", None, None).await;
+        assert_eq!(status, 503);
+        assert_eq!(body["error"]["code"], "directory_unavailable");
+    }
+
+    #[tokio::test]
+    async fn a_control_4xx_passes_through_with_its_status_and_body() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = fixture(
+            ResponseTemplate::new(403).set_body_json(json!({"error": {"code": "member_not_in_organization", "message": "no"}})),
+            labels(json!([])),
+            true,
+        )
+        .await;
+        let (status, body) = run(&fx, "rooms-403", None, None).await;
+        assert_eq!(status, 403);
+        assert_eq!(body["error"]["code"], "member_not_in_organization");
+        assert!(fx.application.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn truncated_is_relayed_in_meta() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = fixture(
+            ResponseTemplate::new(200).set_body_json(json!({"data": {"enabled": true, "rooms": [listed("r1")], "truncated": true}})),
+            labels(json!([label("r1", "A", None)])),
+            true,
+        )
+        .await;
+        let (_, body) = run(&fx, "rooms-truncated", None, None).await;
+        assert_eq!(body["meta"]["truncated"], true);
+    }
+
+    #[test]
+    fn the_cursor_round_trips_name_and_ref() {
+        let cursor = encode_rooms_cursor("room a", "ref-1");
+        assert_eq!(decode_rooms_cursor(&cursor), Some(("room a".to_owned(), "ref-1".to_owned())));
+        assert_eq!(decode_rooms_cursor(""), None);
+    }
 }

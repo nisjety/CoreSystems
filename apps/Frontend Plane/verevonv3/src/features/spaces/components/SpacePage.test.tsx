@@ -5,6 +5,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import SpacePage from './SpacePage'
 
+const spaceApprovals = vi.hoisted(() => ({ decideSpaceApproval: vi.fn() }))
+
 const spacesClient = vi.hoisted(() => ({
   createSpaceAgent: vi.fn(),
   bindSpaceAgent: vi.fn(),
@@ -41,7 +43,13 @@ const spacesClient = vi.hoisted(() => ({
   unarchiveSpaceRoom: vi.fn(),
 }))
 
-vi.mock('@/shared/api/spaces-client', () => ({
+vi.mock('@/shared/api/space-approvals-client', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/shared/api/space-approvals-client')>()),
+  decideSpaceApproval: spaceApprovals.decideSpaceApproval,
+}))
+vi.mock('@/shared/api/spaces-client', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/shared/api/spaces-client')>()),
+  searchSpaceMessages: () => new Promise(() => {}),
   createSpaceAgent: spacesClient.createSpaceAgent,
   bindSpaceAgent: spacesClient.bindSpaceAgent,
   getInstallableSpaceAgents: spacesClient.getInstallableSpaceAgents,
@@ -101,7 +109,10 @@ const orchestration = vi.hoisted(() => ({
   cancelRun: vi.fn(),
 }))
 
-vi.mock('@/shared/api/orchestration-client', () => orchestration)
+vi.mock('@/shared/api/orchestration-client', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/shared/api/orchestration-client')>()),
+  ...orchestration,
+}))
 
 const chatClient = vi.hoisted(() => ({
   streamChat: vi.fn(),
@@ -313,7 +324,7 @@ describe('SpacePage', () => {
     expect(await screen.findByRole('heading', { name: 'Personlig rom' })).toBeTruthy()
     expect(screen.getByRole('tab', { name: 'Samtaler' })).toBeTruthy()
     expect(screen.getByRole('heading', { name: 'Rompuls' })).toBeTruthy()
-    expect(screen.getByText('Verevon jobber')).toBeTruthy()
+    expect(await screen.findByText('Verevon jobber')).toBeTruthy()
     // The card draws the agent with the same avatar as the timeline, not a separate icon tile.
     const card = document.querySelector('.verevon-space-pulse-card--active') as HTMLElement
     expect(card.querySelector('.verevon-agent-avatar[data-kind="agent"]')).toBeTruthy()
@@ -339,7 +350,9 @@ describe('SpacePage', () => {
     })
     renderSpacePage()
     await screen.findByRole('heading', { name: 'Rompuls' })
-    expect(document.querySelector('.verevon-space-pulse')?.getAttribute('data-attention')).toBe('true')
+    await waitFor(() =>
+      expect(document.querySelector('.verevon-space-pulse')?.getAttribute('data-attention')).toBe('true'),
+    )
   })
 
   it('does not flag the pulse for attention in a room with nothing waiting', async () => {
@@ -375,10 +388,12 @@ describe('SpacePage', () => {
     const pulse = document.querySelector('.verevon-space-pulse') as HTMLElement
     // Nothing waits on a person, so "Oppmerksomhet 0" is not drawn; the conversation count is.
     expect(within(pulse).queryByText('Oppmerksomhet')).toBeNull()
-    expect(within(pulse).getByText('Samtaler')).toBeTruthy()
+    expect(await within(pulse).findByText('Samtaler')).toBeTruthy()
     // The live conversation is the card; the others follow newest first, never the live one twice.
-    const titles = [...pulse.querySelectorAll('.verevon-space-pulse-recent__title')].map((node) => node.textContent)
-    expect(titles).toEqual(['Nyere samtale', 'Eldre samtale'])
+    await waitFor(() => {
+      const titles = [...pulse.querySelectorAll('.verevon-space-pulse-recent__title')].map((node) => node.textContent)
+      expect(titles).toEqual(['Nyere samtale', 'Eldre samtale'])
+    })
   })
 
   it('keeps the Space composer link encoded without rendering a duplicate Space overview rail', async () => {
@@ -757,6 +772,7 @@ describe('SpacePage', () => {
     orchestration.listApprovals.mockResolvedValue([
       { id: 'ap-1', status: 'PENDING', detail: 'Send oppsummeringen til kunden' },
     ])
+    spaceApprovals.decideSpaceApproval.mockResolvedValue({ approval: null, grant: { status: 'none' } })
     renderSpacePage()
 
     const timeline = within(await screen.findByRole('list', { name: 'Samtaler i rommet' }))
@@ -765,11 +781,18 @@ describe('SpacePage', () => {
     const approve = timeline.getByRole('button', { name: 'Godkjenn' })
     approve.click()
 
-    await waitFor(() => expect(orchestration.decideApproval).toHaveBeenCalled())
-    expect(orchestration.decideApproval).toHaveBeenCalledWith('ap-1', 'approve', undefined, undefined)
-    // Approving continues the run; the room then re-reads so the post stops
-    // claiming it is waiting.
-    await waitFor(() => expect(orchestration.resumeRun).toHaveBeenCalledWith('run_gate', undefined))
+    // In a room the decision goes through the Space route, which carries the scope.
+    await waitFor(() => expect(spaceApprovals.decideSpaceApproval).toHaveBeenCalled())
+    expect(spaceApprovals.decideSpaceApproval).toHaveBeenCalledWith(
+      'space_personal_1',
+      'ap-1',
+      expect.objectContaining({ decision: 'approve' }),
+      undefined,
+    )
+    expect(orchestration.decideApproval).not.toHaveBeenCalled()
+    // A granted approval never resumes the run from the client (WS10 S1); the room re-reads so the post
+    // stops claiming it is waiting.
+    expect(orchestration.resumeRun).not.toHaveBeenCalled()
     await waitFor(() => expect(spacesClient.getSpaceThreads.mock.calls.length).toBeGreaterThan(1))
   })
 
@@ -1423,7 +1446,7 @@ describe('SpacePage', () => {
     const badged = [...document.querySelectorAll('.verevon-room-post[data-unread]')].map((n) => n.textContent ?? '')
     expect(badged.length).toBe(1)
     expect(badged[0]).toContain('Ny sak fra kollega')
-    await waitFor(() => expect(spacesClient.markSpaceRead).toHaveBeenCalledWith('space_personal_1'))
+    await waitFor(() => expect(spacesClient.markSpaceRead).toHaveBeenCalledWith('space_personal_1', 'enter'))
   })
 
   // A first visit has no last visit to be new since — nothing is badged, and

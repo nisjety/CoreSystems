@@ -434,4 +434,69 @@ mod tests {
             ]
         );
     }
+
+    // WS05-S4: plane / outcome / subject / resource_id / cursor pass-through.
+
+    #[tokio::test]
+    async fn an_admin_read_forwards_plane_outcome_subject_resource_id_and_cursor() {
+        let harness = Harness::start("admin").await;
+        harness.mount_audit("admin").await;
+        let (status, body) = harness
+            .get(
+                "/api/v1/audit?plane=model&outcome=denied&subject=agent%3Aalpha&resource_id=res%201&cursor=abc-_DEF&limit=50",
+            )
+            .await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(
+            harness.upstream_query().await,
+            vec![
+                "org_id=org-1&limit=50&plane=model&outcome=denied&subject=agent%3Aalpha&resource_id=res%201&cursor=abc-_DEF"
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn blank_and_over_512_filter_values_are_dropped() {
+        let harness = Harness::start("admin").await;
+        harness.mount_audit("admin").await;
+        let too_long = "x".repeat(MAX_FILTER_LEN + 1);
+        let just_fits = "y".repeat(MAX_FILTER_LEN);
+        let uri = format!(
+            "/api/v1/audit?plane=%20%20&outcome=&subject={too_long}&resource_id={just_fits}&cursor={too_long}"
+        );
+        let (status, body) = harness.get(&uri).await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(
+            harness.upstream_query().await,
+            vec![format!("org_id=org-1&resource_id={just_fits}")],
+            "blank values, an oversize subject and an oversize cursor must not be forwarded"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_member_s4_filters_do_not_widen_the_user_pin() {
+        let harness = Harness::start("member").await;
+        harness.mount_audit("member").await;
+        let (status, body) = harness
+            .get("/api/v1/audit?plane=control&outcome=ok&subject=other&resource_id=r1&cursor=c1")
+            .await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(
+            harness.upstream_query().await,
+            vec!["org_id=org-1&user_id=user-1&plane=control&outcome=ok&subject=other&resource_id=r1&cursor=c1"],
+            "filters ride along but the member stays pinned to their own user id"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_foreign_user_id_is_still_403_with_the_new_filters_and_no_upstream_call() {
+        let harness = Harness::start("member").await;
+        harness.mount_audit("member").await;
+        let (status, body) = harness
+            .get("/api/v1/audit?user_id=user-2&plane=model&outcome=denied&cursor=c1")
+            .await;
+        assert_eq!(status, 403, "{body}");
+        assert_eq!(body["error"]["code"], "audit_scope_denied");
+        assert!(harness.upstream_query().await.is_empty());
+    }
 }

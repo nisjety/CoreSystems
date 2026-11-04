@@ -129,6 +129,24 @@ export async function getSpacesAttention(refs?: readonly string[]): Promise<Spac
   return attentionFromWire(data, stale)
 }
 
+/**
+ * The shell rollout flag `attention` from `GET /api/v1/spaces/features` (the gateway sets it to
+ * `attention_api && attention_ui`). `true` or `false` as the gateway stated it; `undefined` when the
+ * route did not answer or names no `attention` key (an older gateway), which callers treat as
+ * "unknown" and leave to the aggregate's own 404 `space_attention_disabled`. Presentation only,
+ * never an authorization input: the gateway re-checks the flag on every attention route.
+ */
+export async function getSpacesAttentionFeature(): Promise<boolean | undefined> {
+  try {
+    const response = await requestJson<{ features?: unknown }>('/api/v1/spaces/features')
+    const features = isRecord(response) ? response.features : undefined
+    if (!isRecord(features) || !('attention' in features)) return undefined
+    return features.attention === true
+  } catch {
+    return undefined
+  }
+}
+
 export type MarkAllReadResult = {
   readonly roomsMarked: number
   readonly itemsResolved: number

@@ -5644,6 +5644,344 @@ mod tests {
         let agreed = call(SignedToolClass::new("read", "none"), "run-stale-view").await;
         assert!(agreed.contains("credential"), "{agreed}");
     }
+
+    // -- WS06-S9 postponed tests -------------------------------------------
+
+    /// Invariant `space_scoped_spawn_tools_always_receive_a_sandbox_context`:
+    /// the predicate that decides which tools get a `SandboxLeaseContext` in
+    /// the agent loop names every spawn tool. A new spawn tool that is left out
+    /// of it would run Space-scoped work without a lease, so the predicate's
+    /// text is pinned here (the repo's cross-file mutation-guard pattern).
+    #[test]
+    fn space_scoped_spawn_tools_always_receive_a_sandbox_context() {
+        let source = include_str!("agent.rs").replace("\r\n", "\n");
+        let start = source
+            .find("let reads_sandbox =")
+            .expect("agent.rs decides which tools read the sandbox context");
+        let predicate = &source[start..start + source[start..].find(';').expect("statement end")];
+        assert!(
+            predicate.contains("\"code_interpreter\""),
+            "code_interpreter must get the context: {predicate}"
+        );
+        assert!(
+            predicate.contains("\"shell\""),
+            "shell must get the context: {predicate}"
+        );
+        assert!(
+            predicate.contains("is_process_tool"),
+            "the process_* family must get the context: {predicate}"
+        );
+        // The context is withheld only for a run without a Space.
+        let after = &source[start..start + 1500.min(source.len() - start)];
+        assert!(
+            after.contains("reads_sandbox && !ctx.req.space_id.is_empty()"),
+            "the context must be built exactly for Space-scoped runs: {after}"
+        );
+        // And the spawn tools named are the ones the loop dispatches.
+        assert!(crate::process_tools::is_process_tool("process_start"));
+        assert_eq!(SHELL_TOOL, "shell");
+        assert_eq!(CODE_INTERPRETER_TOOL, "code_interpreter");
+    }
+
+    fn unroutable_lease_context_parts() -> (
+        crate::sandbox_manager_client::SandboxManagerClient,
+        crate::sandbox_lease::SandboxManagerTokenProvider,
+    ) {
+        (
+            crate::sandbox_manager_client::SandboxManagerClient::new(
+                tonic::transport::Endpoint::from_shared("http://127.0.0.1:1")
+                    .expect("valid endpoint")
+                    .connect_lazy(),
+            ),
+            crate::sandbox_lease::SandboxManagerTokenProvider::new_for_test(
+                "http://127.0.0.1:1",
+                "execution-core",
+                "test-service-secret-at-least-32-bytes",
+            ),
+        )
+    }
+
+    fn unleased_count() -> u64 {
+        crate::executor::limit_hit_metrics()
+            .lines()
+            .find_map(|line| line.strip_prefix("space_shell_unleased_total "))
+            .and_then(|n| n.parse().ok())
+            .expect("space_shell_unleased_total is always rendered")
+    }
+
+    /// Observe mode (the default): a Space-scoped shell call that cannot get a
+    /// lease is counted and still goes on to the unscoped spawn, so the result
+    /// is never the lease refusal.
+    #[tokio::test]
+    async fn observe_mode_counts_an_unleased_space_shell_call_and_still_runs_it() {
+        if crate::policy::ShellLeaseMode::current() != crate::policy::ShellLeaseMode::Observe {
+            eprintln!("skipping: EXECUTION_CORE_SPACE_SHELL_LEASE is not observe in this process");
+            return;
+        }
+        let (client, tokens) = unroutable_lease_context_parts();
+        let ctx = crate::sandbox_lease::SandboxLeaseContext {
+            space_id: "space-1",
+            sandbox_bearer: "bearer",
+            capability_client: None,
+            sandbox_manager_client: &client,
+            backend_id: "backend-1",
+            cas_client: None,
+            sandbox_tokens: &tokens,
+            process_host: None,
+        };
+        let before = unleased_count();
+        // No run state: the lease cannot be taken.
+        let exec = execute_shell(
+            r#"{"program":"true"}"#,
+            "org-a",
+            "user-a",
+            "run-unleased",
+            None,
+            Some(&ctx),
+        )
+        .await;
+        assert!(unleased_count() > before, "the unleased call must be counted");
+        if let Some(error) = &exec.error {
+            assert!(
+                !error.contains("requires a sandbox lease"),
+                "observe mode must not refuse on the lease: {error}"
+            );
+        }
+    }
+
+    /// Enforce mode needs the process-wide `OnceLock`, which tests cannot flip
+    /// (env mutation is forbidden in this crate). Run with
+    /// `EXECUTION_CORE_SPACE_SHELL_LEASE=enforce cargo test ... -- --ignored`.
+    #[tokio::test]
+    #[ignore = "needs EXECUTION_CORE_SPACE_SHELL_LEASE=enforce in the process environment"]
+    async fn enforce_mode_refuses_a_space_shell_call_without_a_lease() {
+        assert_eq!(
+            crate::policy::ShellLeaseMode::current(),
+            crate::policy::ShellLeaseMode::Enforce,
+            "run this test with EXECUTION_CORE_SPACE_SHELL_LEASE=enforce"
+        );
+        let (client, tokens) = unroutable_lease_context_parts();
+        let ctx = crate::sandbox_lease::SandboxLeaseContext {
+            space_id: "space-1",
+            sandbox_bearer: "bearer",
+            capability_client: None,
+            sandbox_manager_client: &client,
+            backend_id: "backend-1",
+            cas_client: None,
+            sandbox_tokens: &tokens,
+            process_host: None,
+        };
+        let before = unleased_count();
+        // No run state tracking at all.
+        let exec = execute_shell(
+            r#"{"program":"true"}"#,
+            "org-a",
+            "user-a",
+            "run-enforce",
+            None,
+            Some(&ctx),
+        )
+        .await;
+        let error = exec.error.expect("enforce refuses");
+        assert!(error.contains("requires a sandbox lease"), "{error}");
+        assert!(exec.output.is_empty());
+        // Refused, not run: nothing is counted as "ran unleased".
+        assert_eq!(unleased_count(), before);
+
+        // A state store with no cached lease and no capability client: the
+        // acquire fails closed, which enforce turns into a refusal.
+        let state = crate::state::StateStore::new();
+        let exec = execute_shell(
+            r#"{"program":"true"}"#,
+            "org-a",
+            "user-a",
+            "run-enforce-2",
+            Some(&state),
+            Some(&ctx),
+        )
+        .await;
+        assert!(exec.error.is_some(), "lease failure must refuse under enforce");
+    }
+
+    /// Linux with bwrap only: the shell command starts in `/` with `PATH` as its
+    /// whole environment, so no service credential reaches it.
+    #[tokio::test]
+    async fn the_shell_environment_is_path_only_and_the_cwd_is_root() {
+        if !crate::sandbox::is_supported() {
+            eprintln!("skipping: bwrap is not usable on this host");
+            return;
+        }
+        let exec = execute_shell(
+            r#"{"program":"sh","args":["-c","env; echo CWD=$(pwd)"]}"#,
+            "org-a",
+            "user-a",
+            "run-env",
+            None,
+            None,
+        )
+        .await;
+        assert!(exec.error.is_none(), "shell failed: {:?}", exec.error);
+        let lines: Vec<&str> = exec.output.lines().collect();
+        assert!(
+            lines.contains(&"CWD=/"),
+            "the command must start in /: {lines:?}"
+        );
+        // `sh` itself may add PWD/SHLVL/_ ; nothing else may appear.
+        let unexpected: Vec<&&str> = lines
+            .iter()
+            .filter(|line| !line.starts_with("CWD="))
+            .filter(|line| {
+                let name = line.split('=').next().unwrap_or("");
+                !matches!(name, "PATH" | "PWD" | "SHLVL" | "_" | "OLDPWD")
+            })
+            .collect();
+        assert!(unexpected.is_empty(), "leaked environment: {unexpected:?}");
+        assert!(lines.iter().any(|l| l.starts_with("PATH=")), "{lines:?}");
+    }
+
+    // -- WS10-S3 postponed tests: the three early awaiting_approval returns --------------
+
+    struct AllowAllPolicy;
+
+    #[tonic::async_trait]
+    impl crate::capability_policy::CapabilityPolicy for AllowAllPolicy {
+        async fn evaluate(
+            &self,
+            _tool_name: &str,
+            _run_id: &str,
+            _org_id: &str,
+        ) -> Result<crate::capability_policy::CapabilityDecision, tonic::Status> {
+            Ok(crate::capability_policy::CapabilityDecision::Allow)
+        }
+    }
+
+    /// A risky tool under the `ask` posture, optionally as a Space step (a sandbox context).
+    async fn ask_posture_step(
+        tool: &str,
+        sandbox: Option<&crate::sandbox_lease::SandboxLeaseContext<'_>>,
+    ) -> StepOutcome {
+        execute_step(
+            tool,
+            "{}",
+            "ask",
+            "",
+            "org-1",
+            "user-1",
+            "run-gate-fold",
+            "step-gate-fold",
+            "",
+            None,
+            None,
+            None,
+            false,
+            0,
+            None,
+            None,
+            None,
+            &AllowAllPolicy,
+            sandbox,
+        )
+        .await
+    }
+
+    fn space_step_context<'a>(
+        client: &'a crate::sandbox_manager_client::SandboxManagerClient,
+        tokens: &'a crate::sandbox_lease::SandboxManagerTokenProvider,
+    ) -> crate::sandbox_lease::SandboxLeaseContext<'a> {
+        crate::sandbox_lease::SandboxLeaseContext {
+            space_id: "space-1",
+            sandbox_bearer: "bearer",
+            capability_client: None,
+            sandbox_manager_client: client,
+            backend_id: "backend-1",
+            cas_client: None,
+            sandbox_tokens: tokens,
+            process_host: None,
+        }
+    }
+
+    /// Gate off (the default) and every non-Space step keep today's early return: the ask pauses
+    /// the step at once, with no fold and no Control read.
+    #[tokio::test]
+    async fn gate_off_and_non_space_steps_keep_the_early_awaiting_approval_return() {
+        let non_space = ask_posture_step("delete_account", None).await;
+        assert_eq!(non_space.status, "awaiting_approval");
+        assert_eq!(non_space.cause, Some(CauseCode::RiskyEffectUnderAsk));
+
+        if crate::space_gate::GateMode::from_env() == crate::space_gate::GateMode::Enforce {
+            eprintln!("skipping the Space half: the gate is enforcing in this process");
+            return;
+        }
+        let (client, tokens) = unroutable_lease_context_parts();
+        let ctx = space_step_context(&client, &tokens);
+        let space = ask_posture_step("delete_account", Some(&ctx)).await;
+        assert_eq!(space.status, "awaiting_approval");
+        assert_eq!(space.cause, Some(CauseCode::RiskyEffectUnderAsk));
+    }
+
+    async fn block_row_control() -> wiremock::MockServer {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/internal/spaces/tool-gate-view"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {"tools": {"delete_account": {"level": "block", "source": "org_policy"}}}
+            })))
+            .mount(&server)
+            .await;
+        server
+    }
+
+    /// Enforce folds the ask with Control's level, so a `block` row refuses the call that the
+    /// early return would have paused. Needs `EXECUTION_CORE_SPACE_APPROVAL_GATE=enforce` in the
+    /// process environment (the mode is read from it per call and the crate forbids env mutation).
+    #[tokio::test]
+    #[ignore = "needs EXECUTION_CORE_SPACE_APPROVAL_GATE=enforce in the process environment"]
+    async fn enforce_defers_the_ask_into_one_fold_with_control() {
+        assert_eq!(
+            crate::space_gate::GateMode::from_env(),
+            crate::space_gate::GateMode::Enforce,
+            "run with EXECUTION_CORE_SPACE_APPROVAL_GATE=enforce"
+        );
+        let server = block_row_control().await;
+        crate::space_gate::tests_support::install(
+            crate::space_gate::tests_support::client_for(&server.uri()),
+        );
+        let (client, tokens) = unroutable_lease_context_parts();
+        let ctx = space_step_context(&client, &tokens);
+        let outcome = ask_posture_step("delete_account", Some(&ctx)).await;
+        crate::space_gate::tests_support::uninstall();
+        assert_ne!(outcome.status, "awaiting_approval", "the block row must win over the ask");
+        assert!(
+            outcome.error.contains("space_tool_policy: org_policy"),
+            "error: {}",
+            outcome.error
+        );
+        // A non-Space step is never folded: it still pauses.
+        assert_eq!(ask_posture_step("delete_account", None).await.status, "awaiting_approval");
+    }
+
+    /// Shadow reads the view and counts; it changes nothing, so the early return stands.
+    #[tokio::test]
+    #[ignore = "needs EXECUTION_CORE_SPACE_APPROVAL_GATE=shadow in the process environment"]
+    async fn shadow_changes_nothing() {
+        assert_eq!(
+            crate::space_gate::GateMode::from_env(),
+            crate::space_gate::GateMode::Shadow,
+            "run with EXECUTION_CORE_SPACE_APPROVAL_GATE=shadow"
+        );
+        let server = block_row_control().await;
+        crate::space_gate::tests_support::install(
+            crate::space_gate::tests_support::client_for(&server.uri()),
+        );
+        let (client, tokens) = unroutable_lease_context_parts();
+        let ctx = space_step_context(&client, &tokens);
+        let outcome = ask_posture_step("delete_account", Some(&ctx)).await;
+        crate::space_gate::tests_support::uninstall();
+        assert_eq!(outcome.status, "awaiting_approval");
+        assert_eq!(outcome.cause, Some(CauseCode::RiskyEffectUnderAsk));
+    }
 }
 
 #[cfg(test)]

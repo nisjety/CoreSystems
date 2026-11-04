@@ -207,6 +207,7 @@ func TestComposeAuthCoreCredentialScopesAreExactlyTheReviewedSet(t *testing.T) {
 		}
 		got := append([]string(nil), credential.Scopes...)
 		sort.Strings(got)
+		// org:domain:read:any (WS05-S6) is the by-domain read auth-core makes for the SSO enforcement hook.
 		want := []string{"org:domain:read:any", "org:projection:delete:any", "org:projection:write:any", "org:retention:read:any", "org:web-policy:read:any"}
 		if strings.Join(got, ",") != strings.Join(want, ",") {
 			t.Fatalf("auth-core org-core scopes=%v want exactly %v", got, want)

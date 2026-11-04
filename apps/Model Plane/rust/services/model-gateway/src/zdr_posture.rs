@@ -244,6 +244,18 @@ pub fn zdr_or_refuse(
         .map_err(|refusal| http(&refusal))
 }
 
+/// Whether a live view of a run is refused before Session Core is asked. A ZDR credential is refused
+/// here, and so is any posture refusal but the waiver's route mismatch, which is not a verdict yet: a
+/// waiver binds one connection, and the run's own route is decided once Session Core has verdicted the
+/// run (see [`decide_for`] on that route). A posture that cannot be decided is refused, fail closed.
+#[must_use]
+pub fn live_view_refused_before_verdict(claims: &Claims) -> bool {
+    match decide_for(claims, &Route::plain(false)) {
+        Ok(posture) => posture.zdr(),
+        Err(refusal) => refusal.code() != code::WAIVER_ROUTE_MISMATCH,
+    }
+}
+
 /// The gate in front of a durable continuation: a stored run, plan, todo or approval is started or
 /// advanced (an approval or rejection, a todo update, a plan approval, a resume, a cancel, a plan-mode
 /// change). A ZDR credential is refused as a durable mutation before any lookup, because a ZDR run keeps
@@ -384,6 +396,36 @@ pub(crate) mod tests {
         ))
         .expect_err("a waiver of an unknown version is not read as the current one");
         assert_eq!(body.0["error"]["code"], code::POSTURE_MISMATCH);
+    }
+
+    /// A room live view is decided on the route the run names (WS09-S4, owner answer 2026-11-03). A
+    /// waiver is honoured only for a run bound to the waived connection, as for an ordinary chat turn.
+    /// A waived credential on a run that names no connection, or another one, is refused by the
+    /// resolver. A ZDR credential stays ZDR.
+    #[test]
+    fn a_live_view_honours_a_waiver_only_for_the_connection_its_run_is_bound_to() {
+        let waived = token(false, Some(true), Some(waiver(1, PROVIDER_ID, "conn-1")));
+        let bound_posture = decide_for(&waived, &bound()).expect("a waiver bound to the run is honoured");
+        assert!(matches!(bound_posture, TurnPosture::Waived { .. }));
+        assert!(!bound_posture.zdr(), "a waived run is persistent for its connection, never ZDR");
+        assert!(
+            !live_view_refused_before_verdict(&waived),
+            "a waiver waits for the run's route rather than being refused before the verdict"
+        );
+
+        let unbound = decide_for(&waived, &Route::plain(false))
+            .expect_err("a run that names no connection is refused for a waiver");
+        assert_eq!(unbound.code(), code::WAIVER_ROUTE_MISMATCH);
+
+        let other = Route::named(Some(PROVIDER_ID), Some("conn-2"), false);
+        let other_connection = decide_for(&waived, &other)
+            .expect_err("a run bound to another connection is refused for a waiver");
+        assert_eq!(other_connection.code(), code::WAIVER_ROUTE_MISMATCH);
+
+        let zdr = token(true, Some(true), None);
+        let zdr_posture = decide_for(&zdr, &Route::plain(false)).expect("a ZDR credential is decided");
+        assert!(zdr_posture.zdr(), "a plain ZDR credential stays ZDR");
+        assert!(live_view_refused_before_verdict(&zdr));
     }
 
     #[test]
@@ -860,6 +902,8 @@ pub(crate) mod tests {
             ("space_routes/posts.rs", "append_space_post"),
             // A manager's Stop writes a RUN_CANCELLED receipt on someone else's run (WS09-S8).
             ("space_routes/runs.rs", "room_run_stop"),
+            // A member's approval decision keeps its free-text reason (WS10-S6).
+            ("space_routes/approvals.rs", "decide_space_approval"),
         ];
         let mut missing = Vec::new();
         for (file, function) in DURABLE_MUTATIONS {

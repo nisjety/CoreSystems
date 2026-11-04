@@ -167,6 +167,11 @@ message AuthorizeRoomRunAttachResponse {
   // The verdict holds until here (Unix seconds): the lesser of the decision's expiry and ten
   // minutes from now. The caller asks again before this and closes the stream at it.
   int64 valid_until_unix = 7;
+  // The provider and connection of the route the run names, for the posture the gateway decides on
+  // that route. Set only for a zero-retention-waived run bound to the caller's own waiver (the same
+  // connection and acknowledgement); empty for a persistent run, which names no connection.
+  string provider = 8;
+  string connection = 9;
 }
 
 message GetRunRequest {

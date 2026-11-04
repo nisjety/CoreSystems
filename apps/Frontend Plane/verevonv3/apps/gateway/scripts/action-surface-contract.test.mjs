@@ -84,6 +84,14 @@ for (const [fragment, ids] of [
   ['ws01.ts', ['spaces.create_post', 'spaces.reply_in_thread']],
   ['ws03.ts', ['spaces.set_effect_entitlements', 'spaces.apply_effect_preset']],
   ['ws04.ts', ['spaces.update_room_details', 'spaces.change_member_role', 'spaces.leave_room']],
+  ['ws08.ts', ['spaces.set_agent_wake_policy']],
+  ['ws10.ts', ['spaces.decide_approval', 'spaces.revoke_approval_grant']],
+  ['ws12.ts', ['spaces.open_dm', 'spaces.hide_space', 'spaces.toggle_reaction']],
+  [
+    'ws14.ts',
+    ['space.files.attach', 'space.files.list', 'space.files.read_text', 'space.files.delete'],
+  ],
+  ['ws16.ts', ['spaces.update_sidebar']],
 ]) {
   test(`${fragment} action ids are in the registry set and reach a gateway dispatcher`, () => {
     const fragmentSource = fs.readFileSync(path.join(spaceFragmentsDirectory, fragment), 'utf8');
@@ -120,5 +128,71 @@ test('the WS04 room admin actions are not model executable', () => {
     assert.ok(row, `${actionId} has a model-access row`);
     assert.match(row[1], /^exempt\(/, `${actionId} is a closed (access none) row`);
     assert.doesNotMatch(row[1], /eligible:\s*true/, `${actionId} must not be eligible`);
+  }
+});
+
+// WS16-S8 and WS12-S3: the sidebar layout and the direct message actions are human-only as well.
+test('the WS16-S8, WS12-S3, WS08-S5 and WS12-S8 actions are not model executable', () => {
+  const modelAccessSource = fs.readFileSync(
+    path.join(verevonDirectory, 'src/shared/actions/model-access.ts'),
+    'utf8',
+  );
+  for (const actionId of [
+    'spaces.update_sidebar',
+    'spaces.open_dm',
+    'spaces.hide_space',
+    // WS08-S5: who may wake an agent is a human decision; an agent cannot govern itself.
+    'spaces.set_agent_wake_policy',
+    // WS12-S8: a reaction is a person's own mark; an agent cannot react as someone.
+    'spaces.toggle_reaction',
+  ]) {
+    const row = modelAccessSource.match(new RegExp(`'${actionId.replace('.', '\\.')}':\\s*([^\\n]+)`));
+    assert.ok(row, `${actionId} has a model-access row`);
+    assert.match(row[1], /^exempt\(/, `${actionId} is a closed (access none) row`);
+    assert.doesNotMatch(row[1], /eligible:\s*true/, `${actionId} must not be eligible`);
+  }
+});
+
+// WS10-S4 and WS14-S7: deciding an approval, revoking a standing rule and the room file actions are
+// human-only. An agent must not decide its own approval, revoke the rule that limits it, or reach a
+// room's files through the action surface.
+test('the WS10-S4 approval actions and the WS14-S7 room file actions are not model executable', () => {
+  const modelAccessSource = fs.readFileSync(
+    path.join(verevonDirectory, 'src/shared/actions/model-access.ts'),
+    'utf8',
+  );
+  for (const actionId of [
+    'spaces.decide_approval',
+    'spaces.revoke_approval_grant',
+    'space.files.attach',
+    'space.files.list',
+    'space.files.read_text',
+    'space.files.delete',
+  ]) {
+    const row = modelAccessSource.match(new RegExp(`'${actionId.replaceAll('.', '\\.')}':\\s*([^\\n]+)`));
+    assert.ok(row, `${actionId} has a model-access row`);
+    assert.match(row[1], /^exempt\(/, `${actionId} is a closed (access none) row`);
+    assert.doesNotMatch(row[1], /eligible:\s*true/, `${actionId} must not be eligible`);
+  }
+});
+
+// The dispatchers the two WS10-S4 ids reach are the Space route functions, so the scope rules, the
+// role gate and the typed errors exist once.
+test('the WS10-S4 and WS14-S7 handler arms reach the Space dispatchers', () => {
+  const handlerSource = fs.readFileSync(handlerPath, 'utf8');
+  for (const [actionId, dispatcher] of [
+    ['spaces.decide_approval', 'dispatch_spaces_decide_approval'],
+    ['spaces.revoke_approval_grant', 'dispatch_spaces_revoke_approval_grant'],
+    ['space.files.attach', 'dispatch_space_files_attach'],
+    ['space.files.list', 'dispatch_space_files_list'],
+    ['space.files.read_text', 'dispatch_space_files_read_text'],
+    ['space.files.delete', 'dispatch_space_files_delete'],
+  ]) {
+    const quotedId = actionId.replaceAll('.', '\\.');
+    assert.match(
+      handlerSource,
+      new RegExp(`"${quotedId}"[\\s\\S]{0,320}?=>[\\s\\S]{0,160}?${dispatcher}`),
+      `${actionId} must reach ${dispatcher}`,
+    );
   }
 });

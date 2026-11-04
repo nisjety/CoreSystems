@@ -728,4 +728,68 @@ mod tests {
         // Never panics or overflows on an absurd attempt number.
         assert!(backoff_before_attempt(u32::MAX) <= Duration::from_millis(100 * 1024));
     }
+
+    // -- WS06-S8 / WS06-S9 postponed tests ---------------------------------
+
+    #[test]
+    fn the_sandbox_markers_are_not_substrings_of_any_transient_marker() {
+        for marker in [
+            "resource limit exceeded",
+            "refusing unlimited execution",
+            "requires a sandbox lease",
+            "sandbox egress is not available",
+        ] {
+            assert!(NOT_TRANSIENT_MARKERS.contains(&marker), "{marker} must be an exclusion");
+            for transient in TRANSIENT_MARKERS {
+                assert!(
+                    !transient.contains(marker),
+                    "{marker:?} is inside transient marker {transient:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_resource_limit_is_not_transient_but_a_busy_sandbox_is() {
+        for hit in [
+            crate::executor::LimitHit::Cpu { limit_secs: 3 },
+            crate::executor::LimitHit::FileSize { limit_bytes: 9 },
+            crate::executor::LimitHit::Killed,
+            crate::executor::LimitHit::Output {
+                stream: crate::executor::OutputStream::Stdout,
+                limit_bytes: 9,
+            },
+        ] {
+            assert!(
+                !is_transient_tool_failure(&hit.describe()),
+                "{} must not be retried",
+                hit.kind()
+            );
+        }
+        assert!(!is_transient_tool_failure(
+            "resource limit exceeded: more than 60s of CPU time (timeout)"
+        ));
+    }
+
+    /// WS06-S8 intends a saturated spawn gate to be retried: the exclusion list's
+    /// own comment says "sandbox is busy" is deliberately not excluded because it
+    /// is transient. But no TRANSIENT marker matches "sandbox is busy, retry
+    /// later", so today it is NOT retried. Skipped under DEPTH-WS06S8-1 until a
+    /// marker (for example "sandbox is busy") is added to TRANSIENT_MARKERS.
+    #[test]
+    #[ignore = "DEPTH-WS06S8-1: no TRANSIENT_MARKERS entry matches 'sandbox is busy, retry later'"]
+    fn a_busy_sandbox_is_transient() {
+        assert!(is_transient_tool_failure("sandbox is busy, retry later"));
+    }
+
+    #[test]
+    fn the_new_admission_refusals_are_never_retried() {
+        for refusal in [
+            "a Space-scoped sandbox spawn requires a sandbox lease",
+            "sandbox egress is not available; refusing a spawn with network access",
+            "per-spawn resource limits are required but prlimit is unavailable; refusing unlimited execution",
+        ] {
+            assert!(!is_transient_tool_failure(refusal), "{refusal}");
+        }
+    }
 }

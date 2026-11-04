@@ -1053,3 +1053,96 @@ None.
 - D1-681 P3 test-gap: SpaceIdentityHoverCard positioning (flip above, viewport clamp): jsdom has no layout, so placement is not asserted; covered by a later browser tier.
 - D1-682 P3 test-gap: hover card blocking line (agent awaiting_approval): exercised only as a model/unit case, because the server does not yet derive awaiting_approval into the thread projection (WS09/WS10).
 - D1-683 P3 test-gap: Convex createSpaceAgentForGateway: driven through a mocked ctx (handler._handler); no real Convex deployment test.
+
+
+## Gateway surface review (2026-11-03): the 46 bff rows, the approval guard, the live-view posture
+
+Reviewed against the handlers by reading each one and checking its guard calls, following same-file
+delegation (the checker is `.plan-work` scratch, not committed). 36 rows match their handler with no finding;
+the other 10 are noted in the table. The three decision types the classification pass invented
+were checked against each handler's Control path: the first mapping of each to an existing value was
+wrong, and the classification's own value is restored.
+
+| # | Route | Route class | zdr_class | basis | decision_type | Handler | Review |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 | `DELETE /api/v1/spaces/{space_ref}/approval-grants/{grant_id}` | Config | n/a | `path-rule` | `membership` | `domains/spaces/approvals.rs::revoke_approval_grant_route` | checked: guard matches the handler body (or no ZDR call for n/a) |
+| 2 | `GET /api/v1/spaces/{space_ref}/approval-grants` | ReadMetadata | n/a | `path-rule` | `membership` | `domains/spaces/approvals.rs::list_approval_grants_route` | checked: guard matches the handler body (or no ZDR call for n/a) |
+| 3 | `GET /api/v1/spaces/{space_ref}/approval-policy` | ReadMetadata | n/a | `path-rule` | `membership` | `domains/spaces/approvals.rs::get_approval_policy_route` | checked: guard matches the handler body (or no ZDR call for n/a) |
+| 4 | `POST /api/v1/spaces/{space_ref}/approvals/{approval_id}/decide` | DurableWrite | refuse | `guard:durable_write_refusal` | `membership` | `domains/spaces/approvals.rs::decide_space_approval` | fixed: guard added to the shared decide body (durable_write_refusal); basis now guard; decision_type not named in the bff code, so membership is UNVERIFIED |
+| 5 | `GET /api/v1/spaces/attention` | ModelRead | n/a | `posture-decided` | `thread-read-decision` | `domains/spaces/attention.rs::get_attention` | checked: ZDR decided per call, answers zdr_empty with no upstream call; nothing stored, so n/a stands |
+| 6 | `GET /api/v1/spaces/attention/items` | ModelRead | refs_only | `posture-decided` | `thread-read-decision` | `domains/spaces/attention.rs::list_items` | checked: ZDR answers zdr_refs_only; refs_only stands |
+| 7 | `GET /api/v1/spaces/{space_ref}/notify` | ReadMetadata | n/a | `path-rule` | `membership` | `domains/spaces/attention.rs::get_notify` | checked: guard matches the handler body (or no ZDR call for n/a) |
+| 8 | `GET /api/v1/spaces/{space_ref}/threads/{thread_id}/follow` | ReadMetadata | n/a | `path-rule` | `membership` | `domains/spaces/attention.rs::get_follow` | checked: guard matches the handler body (or no ZDR call for n/a) |
+| 9 | `POST /api/v1/spaces/attention/items/{item_id}/state` | Config | refs_only | `path-rule` | `none` | `domains/spaces/attention.rs::set_item_state` | checked: guard matches the handler body (or no ZDR call for n/a) |
+| 10 | `POST /api/v1/spaces/attention/read-all` | Config | refs_only | `path-rule` | `membership` | `domains/spaces/attention.rs::read_all` | checked: guard matches the handler body (or no ZDR call for n/a) |
+| 11 | `POST /api/v1/spaces/{space_ref}/unread` | Config | refs_only | `path-rule` | `membership` | `domains/spaces/attention.rs::post_unread` | checked: guard matches the handler body (or no ZDR call for n/a) |
+| 12 | `PUT /api/v1/spaces/{space_ref}/notify` | Config | n/a | `path-rule` | `membership` | `domains/spaces/attention.rs::put_notify` | checked: guard matches the handler body (or no ZDR call for n/a) |
+| 13 | `PUT /api/v1/spaces/{space_ref}/threads/{thread_id}/follow` | DurableWrite | refuse | `guard:durable_write_refusal` | `membership` | `domains/spaces/attention.rs::put_follow` | checked: guard matches the handler body (or no ZDR call for n/a) |
+| 14 | `DELETE /api/v1/spaces/{space_ref}/hide` | Config | n/a | `path-rule` | `membership` | `domains/spaces/dm.rs::unhide_space` | checked: guard matches the handler body (or no ZDR call for n/a) |
+| 15 | `POST /api/v1/spaces/dm` | DurableWrite | refuse | `guard:durable_write_refusal` | `membership` | `domains/spaces/dm.rs::open_dm` | checked: guard matches the handler body (or no ZDR call for n/a) |
+| 16 | `POST /api/v1/spaces/{space_ref}/hide` | Config | refs_only | `path-rule` | `membership` | `domains/spaces/dm.rs::hide_space` | checked: guard matches the handler body (or no ZDR call for n/a) |
+| 17 | `DELETE /api/v1/spaces/{space_ref}/files/{document_id}` | Config | n/a | `path-rule` | `retrieval-decision` | `domains/spaces/files.rs::delete_file` | checked: guard matches the handler body (or no ZDR call for n/a) |
+| 18 | `GET /api/v1/spaces/{space_ref}/files` | ModelRead | n/a | `path-rule` | `retrieval-decision` | `domains/spaces/files.rs::list_files` | checked: guard matches the handler body (or no ZDR call for n/a) |
+| 19 | `GET /api/v1/spaces/{space_ref}/files/uploads/{upload_id}` | ReadMetadata | n/a | `path-rule` | `none` | `domains/spaces/files.rs::get_upload` | checked: guard matches the handler body (or no ZDR call for n/a) |
+| 20 | `GET /api/v1/spaces/{space_ref}/files/{document_id}/text` | ModelRead | n/a | `path-rule` | `retrieval-decision` | `domains/spaces/files.rs::read_file_text` | checked: guard matches the handler body (or no ZDR call for n/a) |
+| 21 | `POST /api/v1/spaces/{space_ref}/files` | DurableWrite | refuse | `guard:durable_write_refusal` | `import-decision` | `domains/spaces/files.rs::upload_files` | corrected: decision_type is import-decision (Control path in files.rs); my earlier retrieval-decision was wrong |
+| 22 | `DELETE /api/v1/spaces/{space_ref}/threads/{thread_id}/messages/{message_id}` | DurableWrite | refuse | `guard:durable_write_refusal` | `thread-revise-decision` | `domains/spaces/message_lifecycle.rs::delete_route` | corrected: decision_type is thread-revise-decision (Control path in message_lifecycle.rs); my earlier thread-decision was wrong |
+| 23 | `DELETE /api/v1/spaces/{space_ref}/threads/{thread_id}/messages/{message_id}/reactions/{emoji}` | Config | n/a | `path-rule` | `membership` | `domains/spaces/message_lifecycle.rs::remove_reaction_route` | checked: set_reaction refuses only the add path; removal is not refused by design, n/a stands |
+| 24 | `PATCH /api/v1/spaces/{space_ref}/threads/{thread_id}/messages/{message_id}` | DurableWrite | refuse | `guard:durable_write_refusal` | `thread-revise-decision` | `domains/spaces/message_lifecycle.rs::edit_route` | corrected: decision_type is thread-revise-decision (Control path in message_lifecycle.rs); my earlier thread-decision was wrong |
+| 25 | `PUT /api/v1/spaces/{space_ref}/threads/{thread_id}/messages/{message_id}/reactions/{emoji}` | DurableWrite | refuse | `guard:durable_write_refusal` | `membership` | `domains/spaces/message_lifecycle.rs::add_reaction_route` | checked: guard matches the handler body (or no ZDR call for n/a) |
+| 26 | `GET /api/v1/spaces/features` | ReadMetadata | n/a | `path-rule` | `none` | `domains/spaces/message_search.rs::space_features` | checked: guard matches the handler body (or no ZDR call for n/a) |
+| 27 | `GET /api/v1/spaces/{space_ref}/entries/{message_id}` | ModelRead | n/a | `path-rule` | `thread-read-decision` | `domains/spaces/message_search.rs::resolve_space_entry` | checked: guard matches the handler body (or no ZDR call for n/a) |
+| 28 | `POST /api/v1/spaces/{space_ref}/search` | ModelRead | n/a | `path-rule` | `thread-read-decision` | `domains/spaces/message_search.rs::search_space_messages` | checked: guard matches the handler body (or no ZDR call for n/a) |
+| 29 | `PATCH /api/v1/spaces/{space_ref}/agents/{binding_ref}/policy` | Config | n/a | `path-rule` | `membership` | `domains/spaces/agent_policy.rs::set_space_agent_wake_policy_route` | checked: guard matches the handler body (or no ZDR call for n/a) |
+| 30 | `PATCH /api/v1/spaces/{space_ref}/settings` | Config | n/a | `path-rule` | `membership` | `domains/spaces/room_admin.rs::update_room_settings_route` | checked: guard matches the handler body (or no ZDR call for n/a) |
+| 31 | `POST /api/v1/spaces/{space_ref}/join` | Config | n/a | `path-rule` | `membership` | `domains/spaces/room_admin.rs::join_room_route` | checked: guard matches the handler body (or no ZDR call for n/a) |
+| 32 | `DELETE /api/v1/spaces/{space_ref}/pins/{thread_id}` | Config | n/a | `path-rule` | `membership` | `domains/spaces/pins.rs::unpin_thread` | checked: guard matches the handler body (or no ZDR call for n/a) |
+| 33 | `PUT /api/v1/spaces/{space_ref}/pins/{thread_id}` | Config | refs_only | `path-rule` | `membership` | `domains/spaces/pins.rs::pin_thread` | checked: guard matches the handler body (or no ZDR call for n/a) |
+| 34 | `DELETE /api/v1/spaces/reminders/{reminder_id}` | Config | n/a | `path-rule` | `none` | `domains/spaces/reminders.rs::cancel_reminder` | checked: guard matches the handler body (or no ZDR call for n/a) |
+| 35 | `GET /api/v1/spaces/reminders` | ReadMetadata | n/a | `path-rule` | `none` | `domains/spaces/reminders.rs::list_reminders` | checked: guard matches the handler body (or no ZDR call for n/a) |
+| 36 | `POST /api/v1/spaces/{space_ref}/reminders` | DurableWrite | refuse | `guard:durable_write_refusal` | `membership` | `domains/spaces/reminders.rs::create_reminder` | checked: guard matches the handler body (or no ZDR call for n/a) |
+| 37 | `GET /api/v1/spaces/{space_ref}/runs/{run_id}/live` | ModelRead | refuse | `posture-decided` | `thread-read-decision` | `domains/spaces/run_live.rs::space_run_live` | checked: ZDR org refused before any Control call (org-level, not per token); see open item RV-03 |
+| 38 | `POST /api/v1/spaces/{space_ref}/runs/{run_id}/stop` | DurableWrite | refuse | `guard:durable_write_refusal` | `run-control-decision` | `domains/spaces/run_live.rs::space_run_stop` | corrected: decision_type is run-control-decision (Control path in run_live.rs); my earlier token_posture was wrong |
+| 39 | `GET /api/v1/spaces/sidebar` | ReadMetadata | local_only | `posture-decided` | `none` | `domains/spaces/sidebar.rs::get_sidebar` | checked: guard matches the handler body (or no ZDR call for n/a) |
+| 40 | `PUT /api/v1/spaces/sidebar` | DurableWrite | refuse | `guard:durable_write_refusal` | `none` | `domains/spaces/sidebar.rs::put_sidebar` | checked: guard matches the handler body (or no ZDR call for n/a) |
+| 41 | `GET /api/v1/spaces/status` | ReadMetadata | refs_only | `posture-decided` | `none` | `domains/spaces/status.rs::get_status` | checked: ZDR withholds text (text_allowed); ids and expiry only, refs_only stands |
+| 42 | `PUT /api/v1/spaces/status` | DurableWrite | refuse | `guard:durable_write_refusal` | `none` | `domains/spaces/status.rs::put_status` | checked: guard matches the handler body (or no ZDR call for n/a) |
+| 43 | `GET /api/v1/spaces/{space_ref}/timeline` | ModelRead | n/a | `path-rule` | `thread-read-decision` | `domains/spaces/timeline.rs::space_timeline` | checked: guard matches the handler body (or no ZDR call for n/a) |
+| 44 | `GET /api/v1/spaces/{space_ref}/tool-policy` | ReadMetadata | n/a | `path-rule` | `membership` | `domains/spaces/tool_policy.rs::get_tool_policy_route` | checked: guard matches the handler body (or no ZDR call for n/a) |
+| 45 | `PUT /api/v1/spaces/{space_ref}/agents/{binding_ref}/tool-policy` | Config | n/a | `path-rule` | `membership` | `domains/spaces/tool_policy.rs::put_agent_tool_policy_route` | checked: guard matches the handler body (or no ZDR call for n/a) |
+| 46 | `PUT /api/v1/spaces/{space_ref}/tool-policy` | Config | n/a | `path-rule` | `membership` | `domains/spaces/tool_policy.rs::put_space_tool_policy_route` | checked: guard matches the handler body (or no ZDR call for n/a) |
+
+### Open items from this pass
+
+- RV-01 (decided by the owner, enforced now): approval decide routes refuse a zero-retention caller before any Session Core call, through require_non_zdr_durable_mutation (model-gateway, DURABLE_MUTATIONS) and durable_write_refusal (frontend gateway, shared decide body). The ZDR catalogue already has copy for zdr_durable_mutation_forbidden (shared/api/zdr-refusals.ts), so errors.ts needed no new entry. Both are tested: the frontend by a handler test; the model-gateway side by the DURABLE_MUTATIONS lint only.
+- RV-02 (decided by the owner): model-gateway run_live allows a waiver for a run bound to the waived connection, decided with zdr_posture::decide_for on the run's route; a waiver on a run that names no connection, or another, is refused, and a plain ZDR credential stays ZDR. The three cases are unit-tested in zdr_posture. OPEN: Session Core's AuthorizeRoomRunAttach response names no provider or connection, and Session Core refuses every zdr_waived run (room_run_attach.rs: retention_class != persistent). Until both change, the handler decides on the default route and a waived viewer is refused end to end. The change is a proto field, a Session Core read of the run's provider and waiver connection, and relaxing that refusal for zdr_waived runs, with DB tests. It is cross-plane and was not made here.
+- RV-03: the frontend run_live refuses every zero-retention org member before any Control call, by org posture, not per token. Under the owner's waiver rule that is stricter than model-gateway; left as it is pending the owner's answer.
+- RV-04 (accepted by the owner): members. Control's CanAdd is the single authority (room_role_forbidden for a viewer); the gateway applies no owner/manager floor since WS04-S12, and its tests assert the relayed refusal.
+- RV-05 (UNVERIFIED): decision_type of the two approval decide rows. Neither handler names the Control decision it mints, so the values are not confirmed.
+- RV-06: the golden's diff in git shows deletions because the new rows are sorted into the array; every HEAD row is unchanged, in order (checked by comparing the rows by id).
+
+## Live-view waiver through the attach verdict (owner-approved 2026-11-03)
+
+- Proto: `AuthorizeRoomRunAttachResponse` gains `provider` (field 8) and `connection` (field 9). They are set only for a
+  zero-retention-waived run bound to the caller's own waiver (same connection and acknowledgement). A persistent run leaves
+  both empty. Additive, so `buf breaking` against the baseline sees no break.
+- Go bindings regenerated for `runs.proto` with the local `protoc-gen-go` and `protoc-gen-go-grpc`. The checked-in `go/gen`
+  was stale: it lacked `CancelRunAsRoomManager`, which the proto already declared, so the regeneration also brings those
+  messages in. Rust bindings come from `mp-contracts/build.rs` at build time. Python (`mp-events-py/_gen`) and the Verevon TS
+  output were not regenerated; run the full `buf generate` in the test phase.
+- Session Core (`room_run_attach.rs`): the attach query now reads `waiver_connection_id` and `waiver_ack_id`
+  (`fetch_attach_row`). `live_route` admits a `zdr_waived` run only when the caller's waiver names the same connection and
+  acknowledgement the run rests on; the verdict then names that waiver's provider and connection. The run row stores the
+  connection and the ack but not the provider, so the provider is taken from the matching waiver: the matching ack is what
+  makes it the same waiver. A persistent run names no route. A zero-retention run, a waived run with no receipt, and a
+  waived run for another connection or ack are refused.
+- Gateway (`model-gateway` `space_routes/runs.rs`): after the verdict, the posture is decided on `Route::named(provider,
+  connection)` when the verdict names a route, and on the default route otherwise. A bound waiver is persistent for its
+  connection; anything else is refused.
+- Tests: `live_route` unit tests (five cases) are runnable. Two DB tests are `#[ignore]`d and were not run:
+  `a_bound_waived_live_run_reads_its_receipt_and_is_admitted_on_its_connection` and
+  `a_persistent_run_reads_with_no_route`. Both run in the test phase after the merge.
+- Merge note: Model Plane is also editing `session-core` on `model-plane` (the `ApprovalCause` field moves to 10 and 11).
+  Those numbers are on a different message, so they do not collide with fields 8 and 9 here, but check them at the merge.
+- Still open: the frontend `run_live` (`domains/spaces/run_live.rs`) refuses every zero-retention org member by org
+  posture, not per token. Owner decision (2026-11-03): keep org posture.

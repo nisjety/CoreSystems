@@ -734,6 +734,18 @@ describe('mid-run queued input', () => {
   })
 })
 
+describe('chat-client viewer locale (WS16-S6)', () => {
+  it('emits locale only for the two known codes', () => {
+    expect(buildChatWireBody({ content: 'hi', locale: 'no' }).locale).toBe('no')
+    expect(buildChatWireBody({ content: 'hi', locale: 'en' }).locale).toBe('en')
+    for (const other of ['fr', 'nb-NO', 'NO', '', undefined]) {
+      expect(buildChatWireBody({ content: 'hi', locale: other as never }).locale).toBeUndefined()
+    }
+    // JSON drops an undefined value, so a turn without a locale stays byte-identical.
+    expect('locale' in JSON.parse(JSON.stringify(buildChatWireBody({ content: 'hi' })))).toBe(false)
+  })
+})
+
 describe('chat-client tool wiring', () => {
   it('carries conversation isolation and suppresses automatic support/web/agent context', () => {
     const body = buildChatWireBody({ content: 'Finn oppfølging i innboksen', sourceScope: 'conversation', browseWeb: true, deepResearch: true, generateImage: true, planMode: true })

@@ -5,9 +5,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ApiError } from '@/shared/api/http'
 
 const spacesClient = vi.hoisted(() => ({
+  searchSpaceMessages: vi.fn(() => new Promise(() => {})),
   getSpaceThreadTranscript: vi.fn(),
 }))
-vi.mock('@/shared/api/spaces-client', () => spacesClient)
+vi.mock('@/shared/api/spaces-client', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/shared/api/spaces-client')>()),
+  ...spacesClient,
+}))
 vi.mock('@/features/chat/components/ChatMessages', () => ({
   ChatMarkdown: (props: { content: string }) => <p>{props.content}</p>,
 }))

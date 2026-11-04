@@ -73,7 +73,7 @@ var (
 	// ErrSCIMInvalidFilter is a filter other than userName eq / externalId eq.
 	ErrSCIMInvalidFilter = errors.New("scim filter is not supported")
 
-	scimEmailPattern = regexp.MustCompile(`^[^\s@]{1,64}@[^\s@]{1,255}$`)
+	scimEmailPattern = regexp.MustCompile(`^[^\s@]{1,64}@[^\s@]{1,255}\.[^\s@.]{2,63}$`) // the last label is 2-63 characters with no dot, so a trailing dot is refused here, not dropped by NormalizeIdentityDomain
 )
 
 // SCIMRequestError is a 400 invalidValue with a closed reason.

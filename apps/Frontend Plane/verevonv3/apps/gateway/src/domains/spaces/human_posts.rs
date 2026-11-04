@@ -877,7 +877,7 @@ pub(crate) async fn space_scope_for_thread(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     //! WS01-S5 tests: the real router with wiremock for auth-core, user-core (Control), org-core,
     //! Application (Convex) and model-gateway. No model is called: model-gateway is a mock.
     use super::*;
@@ -890,22 +890,22 @@ mod tests {
     const SEND_ID: &str = "send_id_0123456789ab";
     const TOKEN_SECRET: &str = "decision-token-secret-xyzxyz";
 
-    struct Fx {
-        state: AppState,
+    pub(crate) struct Fx {
+        pub(crate) state: AppState,
         _auth: MockServer,
-        user_core: MockServer,
+        pub(crate) user_core: MockServer,
         _org_core: MockServer,
         _application: MockServer,
-        model_gateway: MockServer,
+        pub(crate) model_gateway: MockServer,
     }
 
-    fn active_space() -> ResponseTemplate {
+    pub(crate) fn active_space() -> ResponseTemplate {
         ResponseTemplate::new(200).set_body_json(json!({"value": [
             {"spaceRef": "space-room", "name": "Room", "kind": "room", "lifecycle": "active"}
         ]}))
     }
 
-    fn org_posture(zdr: bool) -> ResponseTemplate {
+    pub(crate) fn org_posture(zdr: bool) -> ResponseTemplate {
         ResponseTemplate::new(200).set_body_json(
             json!({"data": {"metadata": {"interactiveRetention": {"zdr": zdr}}}}),
         )
@@ -913,7 +913,7 @@ mod tests {
 
     /// `org_core`: org-core's answer to the ZDR posture read; `application`: the Convex answer to
     /// the Space lifecycle lookup. Flags: human posts on, everything else off.
-    async fn fixture(org_core: ResponseTemplate, application: ResponseTemplate) -> Fx {
+    pub(crate) async fn fixture(org_core: ResponseTemplate, application: ResponseTemplate) -> Fx {
         let auth = MockServer::start().await;
         Mock::given(wm_method("GET"))
             .and(wm_path("/api/auth/get-session"))
@@ -1028,7 +1028,7 @@ mod tests {
             .await;
     }
 
-    async fn send(
+    pub(crate) async fn send(
         state: &AppState,
         uri: &str,
         extra_header: Option<(&str, &str)>,
@@ -1067,7 +1067,7 @@ mod tests {
     }
 
     /// Control (user-core) requests to the Space decision namespace: (path, JSON body).
-    async fn control_calls(fx: &Fx) -> Vec<(String, Value)> {
+    pub(crate) async fn control_calls(fx: &Fx) -> Vec<(String, Value)> {
         fx.user_core
             .received_requests()
             .await
@@ -1083,7 +1083,7 @@ mod tests {
             .collect()
     }
 
-    async fn model_calls(fx: &Fx) -> Vec<(String, Value)> {
+    pub(crate) async fn model_calls(fx: &Fx) -> Vec<(String, Value)> {
         fx.model_gateway
             .received_requests()
             .await
@@ -2036,5 +2036,192 @@ mod tests {
         assert!(!valid_send_id(&"a".repeat(65)));
         assert!(!valid_send_id("aaaaaaaaaaaaaaa."));
         assert!(!valid_send_id("aaaaaaaaaaaaaaaé"));
+    }
+
+    // ---- WS08-S4: mentions on the two post routes -----------------------------------------------
+
+    const ROSTER_PATH: &str = "/api/v1/internal/spaces/space-room/roster";
+
+    async fn mount_roster(fx: &Fx, template: ResponseTemplate) {
+        Mock::given(wm_method("GET"))
+            .and(wm_path(ROSTER_PATH))
+            .respond_with(template)
+            .mount(&fx.user_core)
+            .await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/internal/spaces/space-room/membership"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {"space_ref": "space-room", "kind": "room", "role": "editor"}
+            })))
+            .mount(&fx.user_core)
+            .await;
+    }
+
+    fn roster_with(ids: &[&str]) -> ResponseTemplate {
+        let members: Vec<Value> = ids
+            .iter()
+            .map(|id| json!({"subject_type": "user", "subject_id": id, "role": "editor", "status": "active"}))
+            .collect();
+        ResponseTemplate::new(200).set_body_json(json!({"data": {"members": members, "count": members.len()}}))
+    }
+
+    fn stored_with_mentions(mentions: Value) -> ResponseTemplate {
+        ResponseTemplate::new(201).set_body_json(json!({
+            "thread_id": "thread-1",
+            "message_id": format!("space-post-{SEND_ID}"),
+            "sequence": 1,
+            "deduplicated": false,
+            "mentions": mentions,
+        }))
+    }
+
+    fn post_with_mentions(content: &str, mentions: Value) -> Value {
+        json!({"content": content, "client_send_id": SEND_ID, "mentions": mentions})
+    }
+
+    async fn roster_calls(fx: &Fx) -> usize {
+        fx.user_core
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .iter()
+            .filter(|request| request.url.path() == ROSTER_PATH)
+            .count()
+    }
+
+    #[tokio::test]
+    async fn a_post_with_mentions_forwards_the_entries_and_returns_recorded_and_rejected() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let mut fx = default_fixture().await;
+        fx.state.space_features.mention_records_api = true;
+        mount_roster(&fx, roster_with(&["u-ada"])).await;
+        mount_decision(&fx, "thread-decision").await;
+        mount_model(
+            &fx,
+            "/v1/threads",
+            stored_with_mentions(json!([{"subject_id": "u-ada", "kind": "user", "ordinal": 0}])),
+        )
+        .await;
+        let mentions = json!({"people": [
+            {"subject_id": "u-ada", "label": "Ada"},
+            {"subject_id": "u-gone", "label": "Gone"}
+        ]});
+        let (status, body, raw) =
+            send(&fx.state, create_uri(), None, post_with_mentions("hello @Ada and @Gone", mentions)).await;
+        assert_eq!(status, 201, "{raw}");
+        assert_eq!(
+            body["data"]["mentions"],
+            json!({
+                "recorded": [{"subject_id": "u-ada", "kind": "user", "ordinal": 0}],
+                "rejected": [{"subject_id": "u-gone", "code": "person_not_in_room"}]
+            })
+        );
+        assert_no_secret(&raw);
+        let model = model_calls(&fx).await;
+        assert_eq!(model.len(), 1);
+        assert_eq!(
+            model[0].1["first_message"]["mentions"],
+            json!([{"subject_id": "u-ada", "kind": "user", "source": "typed", "ordinal": 0}]),
+            "ids and closed words only"
+        );
+        assert!(model[0].1["first_message"]["content"].as_str().unwrap().contains("@Ada"));
+    }
+
+    #[tokio::test]
+    async fn a_reply_forwards_the_mentions_at_the_top_level_of_the_append() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let mut fx = default_fixture().await;
+        fx.state.space_features.mention_records_api = true;
+        mount_roster(&fx, roster_with(&["u-ada"])).await;
+        mount_decision(&fx, "thread-append-decision").await;
+        mount_model(&fx, "/v1/threads/thread-1/messages", stored_with_mentions(json!([]))).await;
+        let mentions = json!({"people": [{"subject_id": "u-ada", "label": "ada"}]});
+        let (status, body, raw) =
+            send(&fx.state, reply_uri(), None, post_with_mentions("thanks @ADA", mentions)).await;
+        assert_eq!(status, 201, "{raw}");
+        let model = model_calls(&fx).await;
+        assert_eq!(model[0].1["mentions"][0]["subject_id"], "u-ada");
+        // the receipt, not the plan, says what was recorded: a receipt with none reports none
+        assert_eq!(body["data"]["mentions"]["recorded"], json!([]));
+    }
+
+    #[tokio::test]
+    async fn with_the_flag_off_mentions_are_ignored_and_nothing_is_read() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = default_fixture().await;
+        mount_roster(&fx, roster_with(&["u-ada"])).await;
+        mount_decision(&fx, "thread-decision").await;
+        mount_model(&fx, "/v1/threads", stored(false)).await;
+        let mentions = json!({"people": [{"subject_id": "u-ada", "label": "Ada"}]});
+        let (status, body, raw) = send(&fx.state, create_uri(), None, post_with_mentions("hi @Ada", mentions)).await;
+        assert_eq!(status, 201, "{raw}");
+        assert!(body["data"].get("mentions").is_none());
+        assert_eq!(roster_calls(&fx).await, 0, "no roster read");
+        assert!(model_calls(&fx).await[0].1["first_message"].get("mentions").is_none());
+        // even a malformed object is ignored while the switch is off
+        let (status, _, raw) = send(&fx.state, create_uri(), None, post_with_mentions("hi", json!("junk"))).await;
+        assert_eq!(status, 201, "{raw}");
+    }
+
+    #[tokio::test]
+    async fn a_malformed_mentions_object_is_a_400_invalid_mentions_before_control_and_model() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let mut fx = default_fixture().await;
+        fx.state.space_features.mention_records_api = true;
+        mount_roster(&fx, roster_with(&["u-ada"])).await;
+        mount_decision(&fx, "thread-decision").await;
+        mount_model(&fx, "/v1/threads", stored(false)).await;
+        for (mentions, reason) in [
+            (json!("junk"), "malformed"),
+            (json!({"people": [], "email": "x"}), "malformed"),
+            (json!({"people": [{"subject_id": "u-ada", "label": "Ada"}, {"subject_id": "u-ada", "label": "Ada"}]}), "duplicate"),
+            (json!({"people": [{"subject_id": "bad id", "label": "Ada"}]}), "bad_subject_id"),
+            (json!({"agents": [{"subject_id": "a1"}, {"subject_id": "a2"}, {"subject_id": "a3"}, {"subject_id": "a4"}]}), "too_many_agents"),
+        ] {
+            let (status, body, _) = send(&fx.state, create_uri(), None, post_with_mentions("hi @Ada", mentions.clone())).await;
+            assert_eq!(status, 400, "{mentions}");
+            assert_eq!(body["error"]["code"], "invalid_mentions");
+            assert_eq!(body["error"]["details"]["reason"], reason, "{mentions}");
+        }
+        assert!(
+            control_calls(&fx).await.iter().all(|(path, _)| !path.contains("decision")),
+            "no decision was minted"
+        );
+        assert!(model_calls(&fx).await.is_empty(), "the post never reached model-gateway");
+    }
+
+    #[tokio::test]
+    async fn a_roster_outage_reports_mention_unavailable_and_the_post_stands() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let mut fx = default_fixture().await;
+        fx.state.space_features.mention_records_api = true;
+        mount_roster(&fx, ResponseTemplate::new(503)).await;
+        mount_decision(&fx, "thread-decision").await;
+        mount_model(&fx, "/v1/threads", stored(false)).await;
+        let mentions = json!({"people": [{"subject_id": "u-ada", "label": "Ada"}]});
+        let (status, body, raw) = send(&fx.state, create_uri(), None, post_with_mentions("hi @Ada", mentions)).await;
+        assert_eq!(status, 201, "the post stands: {raw}");
+        assert_eq!(
+            body["data"]["mentions"],
+            json!({"recorded": [], "rejected": [{"subject_id": "u-ada", "code": "mention_unavailable"}]})
+        );
+        assert!(model_calls(&fx).await[0].1["first_message"].get("mentions").is_none(), "no unplanned entries are sent");
+    }
+
+    #[tokio::test]
+    async fn a_zdr_post_with_mentions_is_412_before_the_roster_or_control() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let mut fx = fixture(org_posture(true), active_space()).await;
+        fx.state.space_features.mention_records_api = true;
+        mount_roster(&fx, roster_with(&["u-ada"])).await;
+        mount_decision(&fx, "thread-decision").await;
+        mount_model(&fx, "/v1/threads", stored(false)).await;
+        let mentions = json!({"people": [{"subject_id": "u-ada", "label": "Ada"}]});
+        let (status, body, _) = send(&fx.state, create_uri(), None, post_with_mentions("hi @Ada", mentions)).await;
+        assert_eq!(status, 412);
+        assert_eq!(body["error"]["code"], "zdr_durable_mutation_forbidden");
+        assert_eq!(roster_calls(&fx).await, 0);
+        assert!(control_calls(&fx).await.is_empty());
+        assert!(model_calls(&fx).await.is_empty());
     }
 }

@@ -5,9 +5,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ApiError } from '@/shared/api/http'
 
 const spacesClient = vi.hoisted(() => ({
+  searchSpaceMessages: vi.fn(() => new Promise(() => {})),
   updateSpaceRoomDetails: vi.fn(),
 }))
-vi.mock('@/shared/api/spaces-client', () => spacesClient)
+vi.mock('@/shared/api/spaces-client', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/shared/api/spaces-client')>()),
+  ...spacesClient,
+}))
 
 const { SpaceRoomSettings, canEditRoomDetails } = await import('./SpaceRoomSettings')
 

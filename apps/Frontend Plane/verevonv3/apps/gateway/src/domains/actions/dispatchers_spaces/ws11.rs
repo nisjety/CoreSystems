@@ -201,3 +201,179 @@ pub(in crate::domains::actions) async fn dispatch_spaces_cancel_reminder(
     let (status, axum::Json(resp)) = cancel_reminder_core(state, user, reminder_id).await;
     owner_json_response_to_envelope("spaces.cancel_reminder", user, status, resp)
 }
+
+#[cfg(test)]
+mod tests {
+    //! WS11-S3.gw: the three attention action dispatchers map their input onto the route bodies.
+    use super::*;
+    use axum::http::StatusCode;
+    use http_body_util::BodyExt;
+    use serde_json::json;
+    use wiremock::matchers::{method as wm_method, path as wm_path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn user() -> AuthenticatedUser {
+        AuthenticatedUser {
+            user_id: "user-1".to_owned(),
+            user_email: "user@example.com".to_owned(),
+            user_name: "User One".to_owned(),
+            user_image: None,
+            email_verified: true,
+            auth_role: Some("member".to_owned()),
+            active_org_id: Some("org-1".to_owned()),
+            authorized_membership: Some(crate::middleware::AuthorizedMembership {
+                organization_id: "org-1".to_owned(),
+                role: "member".to_owned(),
+            }),
+        }
+    }
+
+    async fn read(response: Response) -> (StatusCode, Value) {
+        let status = response.status();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+    }
+
+    /// Control lists `room-a` and `room-b` and says the caller is a viewer of `room-a`;
+    /// Application answers every mutation with `{}`-shaped values. The attention flag is `flag`.
+    async fn stack(flag: bool) -> (AppState, MockServer, MockServer) {
+        let control = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/internal/spaces"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": {"spaces": [
+                {"space_ref": "room-a", "kind": "room"}, {"space_ref": "room-b", "kind": "room"}
+            ]}})))
+            .mount(&control)
+            .await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/internal/spaces/room-a/membership"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {"space_ref": "room-a", "kind": "room", "role": "viewer"}
+            })))
+            .mount(&control)
+            .await;
+        let application = MockServer::start().await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/mutation"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"value": {
+                "roomsMarked": 2, "itemsResolved": 1, "markedAt": 9,
+                "lastReadAt": 5, "manualUnread": true, "level": "off", "hidePreview": true
+            }})))
+            .mount(&application)
+            .await;
+        let mut state = crate::tests::test_state(false);
+        state.user_core_url = control.uri();
+        state.application_convex_url = application.uri();
+        state.application_convex_service_key = "application-test-key".into();
+        state.space_features.attention_api = flag;
+        (state, control, application)
+    }
+
+    async fn mutations(application: &MockServer) -> Vec<Value> {
+        application
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .map(|request| serde_json::from_slice(&request.body).unwrap())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn dispatch_spaces_mark_all_read_maps_space_refs_and_kinds_to_the_route_body() {
+        let (state, _control, application) = stack(true).await;
+        let input = json!({"spaceRefs": ["room-a", "zz"], "kinds": ["mention", "reply"], "orgId": "forged", "externalAuthId": "forged"});
+        let (status, body) = read(dispatch_spaces_mark_all_read(&state, &user(), &input).await).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["data"]["actionId"], "spaces.mark_all_read");
+        assert_eq!(body["data"]["status"], "completed");
+        assert_eq!(body["data"]["result"], json!({"rooms_marked": 2, "items_resolved": 1, "marked_at": 9}));
+        let sent = mutations(&application).await;
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0]["path"], "spaceAttention:markAllReadForGateway");
+        assert_eq!(sent[0]["args"]["spaceRefs"], json!(["room-a"]), "intersected with Control's index");
+        assert_eq!(sent[0]["args"]["kinds"], json!(["mention", "reply"]));
+        assert_eq!(sent[0]["args"]["externalAuthId"], "user-1", "the input never names the user");
+
+        // no input at all is every room, default kinds
+        let (status, _) = read(dispatch_spaces_mark_all_read(&state, &user(), &json!({})).await).await;
+        assert_eq!(status, StatusCode::OK);
+        let sent = mutations(&application).await;
+        assert_eq!(sent[1]["args"]["spaceRefs"], json!(["room-a", "room-b"]));
+        assert!(sent[1]["args"].get("kinds").is_none());
+        // a kind outside mention|reply is the route's 400
+        let (status, body) = read(dispatch_spaces_mark_all_read(&state, &user(), &json!({"kinds": ["invite"]})).await).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"]["code"], "invalid_kind");
+    }
+
+    #[tokio::test]
+    async fn dispatch_spaces_mark_unread_requires_space_ref_and_maps_before_ms() {
+        let (state, control, application) = stack(true).await;
+        for input in [json!({"beforeMs": 5}), json!({"spaceRef": "  ", "beforeMs": 5})] {
+            let (status, body) = read(dispatch_spaces_mark_unread(&state, &user(), &input).await).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{input}");
+            assert_eq!(body["error"]["code"], "invalid_input");
+        }
+        assert!(control.received_requests().await.unwrap().is_empty());
+        let input = json!({"spaceRef": "room-a", "beforeMs": 1_700_000_000_000_i64});
+        let (status, body) = read(dispatch_spaces_mark_unread(&state, &user(), &input).await).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["data"]["actionId"], "spaces.mark_unread");
+        assert_eq!(body["data"]["result"], json!({"last_read_at": 5, "manual_unread": true}));
+        let sent = mutations(&application).await;
+        assert_eq!(sent[0]["path"], "spaceReadMarkers:markUnreadForGateway");
+        assert_eq!(sent[0]["args"]["spaceRef"], "room-a");
+        assert_eq!(sent[0]["args"]["beforeMs"], 1_700_000_000_000_i64);
+        // a missing or non-positive time is the route's 400
+        let (status, body) = read(dispatch_spaces_mark_unread(&state, &user(), &json!({"spaceRef": "room-a", "beforeMs": 0})).await).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"]["code"], "invalid_before_ms");
+        let (status, body) = read(dispatch_spaces_mark_unread(&state, &user(), &json!({"spaceRef": "room-a"})).await).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"]["code"], "invalid_request");
+    }
+
+    #[tokio::test]
+    async fn dispatch_spaces_set_notify_level_requires_space_ref_and_maps_level_and_hide_preview() {
+        let (state, control, application) = stack(true).await;
+        let (status, body) = read(dispatch_spaces_set_notify_level(&state, &user(), &json!({"level": "off"})).await).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"]["code"], "invalid_input");
+        assert!(control.received_requests().await.unwrap().is_empty());
+        let input = json!({"spaceRef": "room-a", "level": "off", "hidePreview": true});
+        let (status, body) = read(dispatch_spaces_set_notify_level(&state, &user(), &input).await).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["data"]["actionId"], "spaces.set_notify_level");
+        assert_eq!(body["data"]["result"], json!({"level": "off", "hide_preview": true}));
+        let sent = mutations(&application).await;
+        assert_eq!(sent[0]["path"], "spaceAttention:setRoomLevelForGateway");
+        assert_eq!(sent[0]["args"]["spaceRef"], "room-a");
+        assert_eq!(sent[0]["args"]["level"], "off");
+        assert_eq!(sent[0]["args"]["hidePreview"], true);
+        // a level outside the closed set, and an input with neither field, are the route's 400s
+        let (status, body) = read(dispatch_spaces_set_notify_level(&state, &user(), &json!({"spaceRef": "room-a", "level": "loud"})).await).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"]["code"], "invalid_level");
+        let (status, body) = read(dispatch_spaces_set_notify_level(&state, &user(), &json!({"spaceRef": "room-a"})).await).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"]["code"], "invalid_request");
+    }
+
+    #[tokio::test]
+    async fn the_attention_dispatchers_answer_404_with_the_flag_off_and_call_nothing() {
+        let (state, control, application) = stack(false).await;
+        let input = json!({"spaceRef": "room-a", "beforeMs": 5, "level": "all"});
+        for response in [
+            dispatch_spaces_mark_all_read(&state, &user(), &json!({})).await,
+            dispatch_spaces_mark_unread(&state, &user(), &input).await,
+            dispatch_spaces_set_notify_level(&state, &user(), &input).await,
+        ] {
+            let (status, body) = read(response).await;
+            assert_eq!(status, StatusCode::NOT_FOUND);
+            assert_eq!(body["error"]["code"], "space_attention_disabled");
+        }
+        assert!(control.received_requests().await.unwrap().is_empty());
+        assert!(application.received_requests().await.unwrap().is_empty());
+    }
+}

@@ -10,7 +10,9 @@ const spacesClient = vi.hoisted(() => ({
   getAgentInstallations: vi.fn(),
 }))
 
-vi.mock('@/shared/api/spaces-client', () => ({
+vi.mock('@/shared/api/spaces-client', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/shared/api/spaces-client')>()),
+  searchSpaceMessages: () => new Promise(() => {}),
   getAgentInstallations: spacesClient.getAgentInstallations,
 }))
 

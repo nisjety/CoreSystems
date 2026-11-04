@@ -1,8 +1,12 @@
 import { cleanup, render, screen } from '@solidjs/testing-library'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-const spacesClient = vi.hoisted(() => ({ getSpaceActivity: vi.fn() }))
-vi.mock('@/shared/api/spaces-client', () => spacesClient)
+const spacesClient = vi.hoisted(() => ({
+  searchSpaceMessages: vi.fn(() => new Promise(() => {})), getSpaceActivity: vi.fn() }))
+vi.mock('@/shared/api/spaces-client', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/shared/api/spaces-client')>()),
+  ...spacesClient,
+}))
 
 const { SpaceActivityPanel } = await import('./SpaceActivityPanel')
 

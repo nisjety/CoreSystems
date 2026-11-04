@@ -157,3 +157,160 @@ pub(in crate::domains::actions) async fn dispatch_spaces_toggle_reaction(
     .await;
     owner_json_response_to_envelope("spaces.toggle_reaction", user, status, resp)
 }
+
+#[cfg(test)]
+mod dm_tests {
+    use super::*;
+    use crate::middleware::AuthorizedMembership;
+    use axum::http::StatusCode;
+    use http_body_util::BodyExt;
+    use wiremock::matchers::{body_partial_json, method as wm_method, path as wm_path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn user() -> AuthenticatedUser {
+        AuthenticatedUser {
+            user_id: "user-1".to_owned(),
+            user_email: "user@example.com".to_owned(),
+            user_name: "User One".to_owned(),
+            user_image: None,
+            email_verified: true,
+            auth_role: Some("member".to_owned()),
+            active_org_id: Some("org-1".to_owned()),
+            authorized_membership: Some(AuthorizedMembership {
+                organization_id: "org-1".to_owned(),
+                role: "member".to_owned(),
+            }),
+        }
+    }
+
+    async fn read(response: Response) -> (StatusCode, Value) {
+        let status = response.status();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+    }
+
+    struct Fx {
+        state: AppState,
+        control: MockServer,
+        app: MockServer,
+        _org: MockServer,
+    }
+
+    async fn fixture(flag: bool, zdr: bool) -> Fx {
+        let org = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/organizations/org-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                json!({"data": {"metadata": {"interactiveRetention": {"zdr": zdr}}}}),
+            ))
+            .mount(&org)
+            .await;
+        let control = MockServer::start().await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/v1/internal/spaces/dm-eligibility"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": {
+                "eligible": true, "participant_hash": "hash-1", "participant_ids": ["user-1", "user-2"]
+            }})))
+            .mount(&control)
+            .await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/internal/spaces"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": {"spaces": [
+                {"space_ref": "space-dm-1", "kind": "dm", "role": "member"}
+            ]}})))
+            .mount(&control)
+            .await;
+        let app = MockServer::start().await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/mutation"))
+            .and(body_partial_json(json!({"path": "spaces:openDmForGateway"})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"status": "success", "value": {
+                "created": true,
+                "space": {"spaceRef": "space-dm-1", "name": "Ann", "kind": "dm",
+                          "lifecycle": "pending_registration",
+                          "participantExternalAuthIds": ["user-1", "user-2"]}
+            }})))
+            .mount(&app)
+            .await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/mutation"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                json!({"status": "success", "value": {"hiddenAt": 1_700_000_000_000_u64}}),
+            ))
+            .mount(&app)
+            .await;
+        let mut state = crate::tests::test_state(false);
+        state.space_features.dm_api = flag;
+        state.user_core_url = control.uri();
+        state.org_core_url = org.uri();
+        state.application_convex_url = app.uri();
+        state.application_convex_service_key = "application-test-key".into();
+        Fx { state, control, app, _org: org }
+    }
+
+    #[tokio::test]
+    async fn open_dm_validates_input_and_reaches_the_same_flow() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = fixture(true, false).await;
+        for input in [
+            json!({"clientRequestId": "r"}),
+            json!({"participants": "user-2", "clientRequestId": "r"}),
+            json!({"participants": ["user-2"]}),
+            json!({"participants": ["user-2"], "clientRequestId": ""}),
+        ] {
+            let (status, body) = read(dispatch_spaces_open_dm(&fx.state, &user(), &HeaderMap::new(), &input).await).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{input}");
+            assert_eq!(body["error"]["code"], "invalid_input");
+        }
+        assert!(fx.app.received_requests().await.unwrap().is_empty());
+        let input = json!({"participants": ["user-2"], "clientRequestId": "r"});
+        let (status, body) = read(dispatch_spaces_open_dm(&fx.state, &user(), &HeaderMap::new(), &input).await).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["data"]["actionId"], "spaces.open_dm");
+        assert_eq!(body["data"]["result"]["space"]["space_ref"], "space-dm-1");
+        assert_eq!(body["data"]["result"]["created"], true);
+    }
+
+    #[tokio::test]
+    async fn open_dm_flag_off_is_404_and_zdr_is_412_with_no_upstream_call() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let input = json!({"participants": ["user-2"], "clientRequestId": "r"});
+        let off = fixture(false, false).await;
+        let (status, body) = read(dispatch_spaces_open_dm(&off.state, &user(), &HeaderMap::new(), &input).await).await;
+        assert_eq!((status, body["error"]["code"].as_str().unwrap()), (StatusCode::NOT_FOUND, "dm_disabled"));
+        let zdr = fixture(true, true).await;
+        let (status, body) = read(dispatch_spaces_open_dm(&zdr.state, &user(), &HeaderMap::new(), &input).await).await;
+        assert_eq!(status, StatusCode::PRECONDITION_FAILED);
+        assert_eq!(body["error"]["code"], "zdr_durable_mutation_forbidden");
+        for fx in [&off, &zdr] {
+            assert!(fx.control.received_requests().await.unwrap().is_empty());
+            assert!(fx.app.received_requests().await.unwrap().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn hide_space_validates_input_defaults_to_hide_and_reaches_the_same_flow() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = fixture(true, false).await;
+        let (status, body) = read(dispatch_spaces_hide_space(&fx.state, &user(), &json!({"spaceRef": " "})).await).await;
+        assert_eq!((status, body["error"]["code"].as_str().unwrap()), (StatusCode::BAD_REQUEST, "invalid_input"));
+        let (status, body) = read(dispatch_spaces_hide_space(&fx.state, &user(), &json!({"spaceRef": "space-dm-1"})).await).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["data"]["actionId"], "spaces.hide_space");
+        assert_eq!(body["data"]["result"]["hidden"], true);
+        let (_, body) = read(dispatch_spaces_hide_space(&fx.state, &user(), &json!({"spaceRef": "space-dm-1", "hidden": false})).await).await;
+        assert_eq!(body["data"]["result"]["hidden"], false);
+        let paths: Vec<String> = fx
+            .app
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .map(|r| serde_json::from_slice::<Value>(&r.body).unwrap()["path"].as_str().unwrap().to_owned())
+            .collect();
+        assert_eq!(paths, ["spaceDmHides:hideForGateway", "spaceDmHides:unhideForGateway"]);
+        let off = fixture(false, false).await;
+        let (status, body) = read(dispatch_spaces_hide_space(&off.state, &user(), &json!({"spaceRef": "space-dm-1"})).await).await;
+        assert_eq!((status, body["error"]["code"].as_str().unwrap()), (StatusCode::NOT_FOUND, "dm_disabled"));
+    }
+}

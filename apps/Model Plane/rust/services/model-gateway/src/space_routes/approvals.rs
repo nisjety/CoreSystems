@@ -34,7 +34,9 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::auth::{Claims, VerifiedSessionBearer};
-use crate::http_routes::{approval_value, authenticated_session_request};
+use crate::http_routes::{
+    approval_value, authenticated_session_request, require_non_zdr_durable_mutation,
+};
 use crate::state::AppState;
 
 const MAX_ID_BYTES: usize = 128;
@@ -238,6 +240,11 @@ async fn decide_space_approval(
     let (space_id, approval_id) = (space_id.trim().to_owned(), approval_id.trim().to_owned());
     if !bounded_id(&space_id) || !bounded_id(&approval_id) {
         return invalid("space_id or approval_id is invalid");
+    }
+    // The decision's reason is free text that the approval keeps: a zero-retention or waived caller is
+    // refused first, typed, before any Session Core call.
+    if let Err(refusal) = require_non_zdr_durable_mutation(&claims) {
+        return refusal.into_response();
     }
     let decision = match body.decision.trim() {
         "granted" | "approved" => ApprovalState::Granted,

@@ -931,3 +931,627 @@ pub(super) async fn attach_reactions(
     }
     false
 }
+
+#[cfg(test)]
+mod tests {
+    //! WS12-S8: the reaction routes' refusal order, error mapping and the transcript merge, driven
+    //! through the real router against mock Auth, Control, org-core, Application (Convex) and
+    //! Model Gateway. Message edit and delete share the module; the delete test here pins only that
+    //! a landed delete clears the message's reactions.
+    use super::attach_reactions;
+    use crate::config::AppState;
+    use crate::middleware::{AuthenticatedUser, AuthorizedMembership};
+    use axum::{body::Body, http::Request};
+    use http_body_util::BodyExt;
+    use serde_json::{json, Value};
+    use tower::ServiceExt;
+    use wiremock::matchers::{body_partial_json, method as wm_method, path as wm_path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    const THUMBS: &str = "%F0%9F%91%8D"; // percent-encoded U+1F44D
+    const REACTION: &str = "/api/v1/spaces/space-room/threads/thread-1/messages/msg-1/reactions/%F0%9F%91%8D";
+    const MESSAGE: &str = "/api/v1/spaces/space-room/threads/thread-1/messages/msg-1";
+
+    struct Fx {
+        state: AppState,
+        user_core: MockServer,
+        application: MockServer,
+        model_gateway: MockServer,
+        org_core: MockServer,
+        _auth: MockServer,
+    }
+
+    struct Opts {
+        role: &'static str,
+        read_decision: u16,
+        /// `(status, body)` of model-gateway's `/target` route.
+        target: (u16, Value),
+        mutation: ResponseTemplate,
+        org_zdr: Option<bool>,
+        reactions_on: bool,
+        revise_on: bool,
+    }
+
+    impl Opts {
+        fn new(role: &'static str) -> Self {
+            Self {
+                role,
+                read_decision: 200,
+                target: (200, json!({"role": "user", "revision_state": "live"})),
+                mutation: ResponseTemplate::new(200).set_body_json(json!({"status": "success", "value": {
+                    "messageId": "msg-1",
+                    "reactions": [
+                        {"emoji": "\u{1F44D}", "count": 2, "reactedByMe": true},
+                        {"emoji": "bad", "count": "x"}
+                    ]
+                }})),
+                org_zdr: Some(false),
+                reactions_on: true,
+                revise_on: false,
+            }
+        }
+    }
+
+    async fn fx(opts: Opts) -> Fx {
+        let auth = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/auth/get-session"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "user": {"id": "user-1", "email": "user@example.com", "emailVerified": true},
+                "session": {"activeOrganizationId": "org-1"}
+            })))
+            .mount(&auth)
+            .await;
+        for slug in ["session-core", "model-gateway", "capability-core"] {
+            Mock::given(wm_method("GET"))
+                .and(wm_path(format!("/api/{slug}/token")))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({"token": "plane-token"})))
+                .mount(&auth)
+                .await;
+        }
+        let user_core = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/me/session-context"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "userId":"user-1", "orgId":"org-1", "role":"member", "onboardingStatus":"COMPLETED"
+            })))
+            .mount(&user_core)
+            .await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/internal/spaces/space-room/membership"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {"space_ref": "space-room", "kind": "room", "role": opts.role, "subject_id": "user-1"}
+            })))
+            .mount(&user_core)
+            .await;
+        let decision = if opts.read_decision == 200 {
+            ResponseTemplate::new(200).set_body_json(json!({
+                "data": {"decision": {"decision_ref": "decision-1"}, "token": "decision-token"}
+            }))
+        } else {
+            ResponseTemplate::new(opts.read_decision).set_body_json(json!({"error": {"code": "forbidden"}}))
+        };
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/v1/internal/spaces/thread-read-decision"))
+            .respond_with(decision)
+            .mount(&user_core)
+            .await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/v1/internal/spaces/thread-revise-decision"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": {
+                "decision": {
+                    "space_ref": "space-room", "decision_ref": "decision-2",
+                    "recipient_audience_ref": "aud-1", "recipient_audience_revision": 1,
+                    "recipient_audience_hash": "hash-1", "privacy_policy_ref": "policy-1",
+                    "authority_revision": 1, "resource_authorization_ref": "res-1",
+                    "action_schema_hash": "schema-1", "payload_digest": "digest-1",
+                    "idempotency_key": "msg-rev-key-0000000000000001"
+                },
+                "token": "revise-token"
+            }})))
+            .mount(&user_core)
+            .await;
+
+        let org_core = MockServer::start().await;
+        match opts.org_zdr {
+            Some(zdr) => {
+                Mock::given(wm_method("GET"))
+                    .and(wm_path("/api/v1/organizations/org-1"))
+                    .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                        "metadata": {"interactiveRetention": {"zdr": zdr}}
+                    })))
+                    .mount(&org_core)
+                    .await;
+            }
+            None => {
+                Mock::given(wm_method("GET"))
+                    .and(wm_path("/api/v1/organizations/org-1"))
+                    .respond_with(ResponseTemplate::new(500))
+                    .mount(&org_core)
+                    .await;
+            }
+        }
+
+        let application = MockServer::start().await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/query"))
+            .and(body_partial_json(json!({"path": "spaces:spacesForOrgForGateway"})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"value": [
+                {"spaceRef":"space-room","name":"Room","kind":"room","lifecycle":"active"}
+            ]})))
+            .mount(&application)
+            .await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/mutation"))
+            .respond_with(opts.mutation)
+            .mount(&application)
+            .await;
+
+        let model_gateway = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/v1/threads/thread-1/messages/msg-1/target"))
+            .respond_with(ResponseTemplate::new(opts.target.0).set_body_json(opts.target.1))
+            .mount(&model_gateway)
+            .await;
+        Mock::given(wm_method("DELETE"))
+            .and(wm_path("/v1/threads/thread-1/messages/msg-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "message_id": "msg-1", "revision_state": "deleted", "revision_no": 1,
+                "revised_at": "2026-11-02T10:00:00Z", "deduplicated": false
+            })))
+            .mount(&model_gateway)
+            .await;
+
+        let mut state = crate::tests::test_state(false);
+        state.application_convex_url = application.uri();
+        state.application_convex_service_key = "application-test-key".into();
+        state.auth_core_url = auth.uri();
+        state.user_core_url = user_core.uri();
+        state.model_gateway_url = model_gateway.uri();
+        state.org_core_url = org_core.uri();
+        state.space_features.reactions_api = opts.reactions_on;
+        state.space_features.message_revise_api = opts.revise_on;
+        Fx { state, user_core, application, model_gateway, org_core, _auth: auth }
+    }
+
+    async fn call(fx: &Fx, method: &str, uri: &str, extra_header: Option<(&str, &str)>) -> (u16, Value) {
+        let mut request = Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("cookie", "better-auth.session_token=session-1");
+        if let Some((name, value)) = extra_header {
+            request = request.header(name, value);
+        }
+        let response = crate::build_router(fx.state.clone())
+            .oneshot(request.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = response.status().as_u16();
+        let body: Value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap_or(Value::Null);
+        (status, body)
+    }
+
+    fn code(body: &Value) -> &str {
+        body["error"]["code"].as_str().unwrap_or_default()
+    }
+
+    async fn paths_seen(server: &MockServer) -> Vec<String> {
+        server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .map(|request| request.url.path().to_owned())
+            .collect()
+    }
+
+    async fn mutations(fx: &Fx) -> Vec<Value> {
+        fx.application
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .filter(|request| request.url.path() == "/api/mutation")
+            .map(|request| serde_json::from_slice(&request.body).unwrap_or(Value::Null))
+            .collect()
+    }
+
+    /// Nothing but the session middleware's own calls reached Control, Application and
+    /// Model Gateway.
+    async fn assert_no_domain_calls(fx: &Fx) {
+        let control = paths_seen(&fx.user_core).await;
+        assert!(
+            control.iter().all(|path| path == "/api/v1/me/session-context"),
+            "Control was called: {control:?}"
+        );
+        assert!(paths_seen(&fx.application).await.is_empty(), "Application was called");
+        assert!(paths_seen(&fx.model_gateway).await.is_empty(), "Model Gateway was called");
+    }
+
+    // ----- the happy path ---------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn an_editor_adds_a_reaction_and_gets_the_chips() {
+        let fx = fx(Opts::new("editor")).await;
+        let (status, body) = call(&fx, "PUT", REACTION, None).await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(body["data"]["message_id"], "msg-1");
+        // Application's reactedByMe becomes reacted; a malformed row is dropped.
+        assert_eq!(
+            body["data"]["reactions"],
+            json!([{"emoji": "\u{1F44D}", "count": 2, "reacted": true}])
+        );
+        let sent = mutations(&fx).await;
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0]["path"], "spaceReactions:setForGateway");
+        assert_eq!(sent[0]["args"]["present"], true);
+        assert_eq!(sent[0]["args"]["emoji"], "\u{1F44D}");
+        assert_eq!(sent[0]["args"]["externalAuthId"], "user-1");
+        assert_eq!(sent[0]["args"]["externalOrgId"], "org-1");
+        assert_eq!(sent[0]["args"]["spaceRef"], "space-room");
+        assert_eq!(sent[0]["args"]["threadId"], "thread-1");
+        assert_eq!(sent[0]["args"]["messageId"], "msg-1");
+        assert!(paths_seen(&fx.model_gateway).await.iter().any(|p| p.ends_with("/msg-1/target")));
+    }
+
+    #[tokio::test]
+    async fn managers_and_owners_may_react_too() {
+        for role in ["manager", "owner"] {
+            let fx = fx(Opts::new(role)).await;
+            let (status, body) = call(&fx, "PUT", REACTION, None).await;
+            assert_eq!(status, 200, "{role}: {body}");
+        }
+    }
+
+    // ----- who may react ----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn a_viewer_cannot_react_and_nothing_reaches_application() {
+        let fx = fx(Opts::new("viewer")).await;
+        let (status, body) = call(&fx, "PUT", REACTION, None).await;
+        assert_eq!((status, code(&body)), (403, "space_role_cannot_react"));
+        assert!(mutations(&fx).await.is_empty());
+        assert!(paths_seen(&fx.model_gateway).await.is_empty(), "no message proof for a refused role");
+        let control = paths_seen(&fx.user_core).await;
+        assert!(!control.iter().any(|path| path.ends_with("thread-read-decision")), "{control:?}");
+    }
+
+    #[tokio::test]
+    async fn a_declined_shared_read_decision_is_403_and_nothing_is_written() {
+        let mut opts = Opts::new("editor");
+        opts.read_decision = 403;
+        let fx = fx(opts).await;
+        let (status, body) = call(&fx, "PUT", REACTION, None).await;
+        assert_eq!(status, 403, "{body}");
+        assert!(mutations(&fx).await.is_empty());
+        assert!(paths_seen(&fx.model_gateway).await.is_empty());
+    }
+
+    // ----- the message must be a live, readable message of that thread ------------------------
+
+    #[tokio::test]
+    async fn a_missing_deleted_or_system_message_is_404_message_not_found() {
+        let targets = [
+            (404, json!({"error": {"code": "not_found"}})),
+            (200, json!({"role": "user", "revision_state": "deleted"})),
+            (200, json!({"role": "system", "revision_state": "live"})),
+            (200, json!({"role": "tool", "revision_state": "live"})),
+            (200, json!({})),
+        ];
+        for target in targets {
+            let mut opts = Opts::new("editor");
+            opts.target = target.clone();
+            let fx = fx(opts).await;
+            let (status, body) = call(&fx, "PUT", REACTION, None).await;
+            assert_eq!((status, code(&body)), (404, "message_not_found"), "{target:?}");
+            assert!(mutations(&fx).await.is_empty(), "{target:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn an_assistant_message_can_be_reacted_to() {
+        let mut opts = Opts::new("editor");
+        opts.target = (200, json!({"role": "assistant", "revision_state": "live"}));
+        let fx = fx(opts).await;
+        assert_eq!(call(&fx, "PUT", REACTION, None).await.0, 200);
+    }
+
+    #[tokio::test]
+    async fn a_forbidden_or_failing_target_route_is_403_or_503() {
+        let mut opts = Opts::new("editor");
+        opts.target = (403, json!({"error": {"code": "forbidden"}}));
+        let forbidden = fx(opts).await;
+        let (status, body) = call(&forbidden, "PUT", REACTION, None).await;
+        assert_eq!((status, code(&body)), (403, "space_read_not_authorized"));
+
+        let mut opts = Opts::new("editor");
+        opts.target = (500, json!({}));
+        let broken = fx(opts).await;
+        let (status, body) = call(&broken, "PUT", REACTION, None).await;
+        assert_eq!((status, code(&body)), (503, "session_unavailable"));
+        assert!(mutations(&broken).await.is_empty());
+    }
+
+    // ----- Zero Data Retention ----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn a_zdr_org_gets_the_typed_412_for_adding_and_no_upstream_call_is_made() {
+        let mut opts = Opts::new("editor");
+        opts.org_zdr = Some(true);
+        let fx = fx(opts).await;
+        let (status, body) = call(&fx, "PUT", REACTION, None).await;
+        assert_eq!((status, code(&body)), (412, "zdr_durable_mutation_forbidden"));
+        assert_no_domain_calls(&fx).await;
+    }
+
+    #[tokio::test]
+    async fn a_zdr_header_alone_refuses_adding_before_any_lookup() {
+        let fx = fx(Opts::new("editor")).await;
+        let (status, body) = call(&fx, "PUT", REACTION, Some(("x-zdr", "true"))).await;
+        assert_eq!((status, code(&body)), (412, "zdr_durable_mutation_forbidden"));
+        assert_no_domain_calls(&fx).await;
+    }
+
+    #[tokio::test]
+    async fn an_unknown_zdr_posture_is_503_zdr_decision_unavailable_for_adding() {
+        let mut opts = Opts::new("editor");
+        opts.org_zdr = None;
+        let fx = fx(opts).await;
+        let (status, body) = call(&fx, "PUT", REACTION, None).await;
+        assert_eq!((status, code(&body)), (503, "zdr_decision_unavailable"));
+        assert_no_domain_calls(&fx).await;
+    }
+
+    #[tokio::test]
+    async fn a_zdr_org_may_still_remove_a_reaction() {
+        let mut opts = Opts::new("viewer");
+        opts.org_zdr = Some(true);
+        opts.mutation = ResponseTemplate::new(200).set_body_json(json!({"status": "success", "value": {
+            "messageId": "msg-1", "reactions": []
+        }}));
+        let fx = fx(opts).await;
+        let (status, body) = call(&fx, "DELETE", REACTION, None).await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(body["data"]["reactions"], json!([]));
+        let sent = mutations(&fx).await;
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0]["args"]["present"], false);
+        // Erasing is not a durable write: the org posture was never even asked.
+        assert!(paths_seen(&fx.org_core).await.is_empty());
+    }
+
+    // ----- flags ------------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn with_the_flag_off_both_routes_are_404_and_nothing_is_called() {
+        let mut opts = Opts::new("editor");
+        opts.reactions_on = false;
+        let fx = fx(opts).await;
+        for method in ["PUT", "DELETE"] {
+            let (status, body) = call(&fx, method, REACTION, None).await;
+            assert_eq!((status, code(&body)), (404, "space_reactions_disabled"), "{method}");
+        }
+        assert_no_domain_calls(&fx).await;
+        assert!(paths_seen(&fx.org_core).await.is_empty());
+    }
+
+    // ----- removing ---------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn removing_needs_no_message_proof_and_works_on_a_since_deleted_message() {
+        let mut opts = Opts::new("viewer");
+        opts.target = (200, json!({"role": "user", "revision_state": "deleted"}));
+        opts.mutation = ResponseTemplate::new(200).set_body_json(json!({"status": "success", "value": {
+            "messageId": "msg-1", "reactions": [{"emoji": "\u{1F389}", "count": 1, "reactedByMe": false}]
+        }}));
+        let fx = fx(opts).await;
+        let (status, body) = call(&fx, "DELETE", REACTION, None).await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(
+            body["data"]["reactions"],
+            json!([{"emoji": "\u{1F389}", "count": 1, "reacted": false}])
+        );
+        assert!(paths_seen(&fx.model_gateway).await.is_empty(), "the message proof is skipped");
+        let control = paths_seen(&fx.user_core).await;
+        assert!(!control.iter().any(|path| path.ends_with("thread-read-decision")), "{control:?}");
+        assert_eq!(mutations(&fx).await[0]["args"]["present"], false);
+    }
+
+    // ----- Application's errors ---------------------------------------------------------------
+
+    fn convex_error(message: &str) -> ResponseTemplate {
+        ResponseTemplate::new(200).set_body_json(json!({"status": "error", "errorMessage": message}))
+    }
+
+    #[tokio::test]
+    async fn application_errors_map_to_typed_answers() {
+        let cases: [(ResponseTemplate, u16, &str); 6] = [
+            (convex_error("Uncaught Error: reaction_limit"), 409, "reaction_limit"),
+            (convex_error("Uncaught Error: invalid_emoji"), 400, "invalid_emoji"),
+            (convex_error("Uncaught Error: reaction_invalid:thread_id"), 400, "invalid_reaction"),
+            (convex_error("Uncaught Error: reactions_disabled"), 404, "space_reactions_disabled"),
+            (convex_error("Uncaught Error: Unauthorized"), 503, "application_unavailable"),
+            (ResponseTemplate::new(500).set_body_string("boom"), 503, "application_unavailable"),
+        ];
+        for (template, want_status, want_code) in cases {
+            let mut opts = Opts::new("editor");
+            opts.mutation = template;
+            let fx = fx(opts).await;
+            let (status, body) = call(&fx, "PUT", REACTION, None).await;
+            assert_eq!((status, code(&body)), (want_status, want_code));
+        }
+    }
+
+    #[tokio::test]
+    async fn application_not_configured_stops_at_the_lifecycle_check_and_names_no_internals() {
+        let mut fx = fx(Opts::new("editor")).await;
+        fx.state.application_convex_url = String::new();
+        let (status, body) = call(&fx, "PUT", REACTION, None).await;
+        // The Space lifecycle is read from Application before anything is written.
+        assert_eq!((status, code(&body)), (503, "space_lifecycle_unavailable"));
+        assert!(!body.to_string().contains("application-test-key"));
+        assert!(mutations(&fx).await.is_empty());
+    }
+
+    // ----- request shape ----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn a_bad_emoji_is_400_before_any_upstream_call() {
+        for emoji in ["a%20b", "%09", "%0A", &"%F0%9F%91%8D".repeat(9)] {
+            let fx = fx(Opts::new("editor")).await;
+            let uri = format!("/api/v1/spaces/space-room/threads/thread-1/messages/msg-1/reactions/{emoji}");
+            let (status, body) = call(&fx, "PUT", &uri, None).await;
+            assert_eq!((status, code(&body)), (400, "invalid_emoji"), "{emoji}");
+            assert_no_domain_calls(&fx).await;
+        }
+        assert_eq!(THUMBS.len(), 12);
+    }
+
+    // ----- the transcript merge ---------------------------------------------------------------
+
+    fn turns() -> Value {
+        json!([
+            {"message_id": "m1", "role": "user", "text": "hello"},
+            {"message_id": "m2", "role": "user", "revision_state": "deleted"},
+            {"message_id": "m3", "role": "assistant", "text": "hi"},
+            {"role": "user", "text": "no id"}
+        ])
+    }
+
+    async fn reaction_read(template: ResponseTemplate, on: bool) -> (AppState, MockServer) {
+        let application = MockServer::start().await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/query"))
+            .and(body_partial_json(json!({"path": "spaceReactions:reactionsForThreadForGateway"})))
+            .respond_with(template)
+            .mount(&application)
+            .await;
+        let mut state = crate::tests::test_state(false);
+        state.application_convex_url = application.uri();
+        state.application_convex_service_key = "application-test-key".into();
+        state.space_features.reactions_api = on;
+        (state, application)
+    }
+
+    fn member() -> AuthenticatedUser {
+        AuthenticatedUser {
+            user_id: "user-1".to_owned(),
+            user_email: "user@example.com".to_owned(),
+            user_name: "User".to_owned(),
+            user_image: None,
+            email_verified: true,
+            auth_role: Some("member".to_owned()),
+            active_org_id: Some("org-1".to_owned()),
+            authorized_membership: Some(AuthorizedMembership {
+                organization_id: "org-1".to_owned(),
+                role: "member".to_owned(),
+            }),
+        }
+    }
+
+    #[tokio::test]
+    async fn attach_reactions_merges_chips_by_message_id_and_skips_deleted_turns() {
+        let (state, _application) = reaction_read(
+            ResponseTemplate::new(200).set_body_json(json!({"value": {"enabled": true, "truncated": false, "reactions": [
+                {"messageId": "m1", "emoji": "\u{1F44D}", "count": 2, "reactedByMe": true},
+                {"messageId": "m1", "emoji": "\u{1F389}", "count": 1, "reactedByMe": false},
+                {"messageId": "m2", "emoji": "\u{1F44D}", "count": 1, "reactedByMe": false},
+                {"messageId": "other", "emoji": "\u{1F44D}", "count": 1, "reactedByMe": false}
+            ]}})),
+            true,
+        )
+        .await;
+        let mut value = turns();
+        let unavailable = attach_reactions(&state, &member(), "org-1", "space-room", "thread-1", &mut value).await;
+        assert!(!unavailable);
+        assert_eq!(
+            value[0]["reactions"],
+            json!([
+                {"emoji": "\u{1F44D}", "count": 2, "reacted": true},
+                {"emoji": "\u{1F389}", "count": 1, "reacted": false}
+            ])
+        );
+        assert!(value[1].get("reactions").is_none(), "a deleted turn carries no reactions");
+        assert!(value[2].get("reactions").is_none(), "a turn nobody reacted to is left alone");
+        assert!(value[3].get("reactions").is_none(), "a turn without an id is left alone");
+        assert_eq!(value[0]["text"], "hello", "the turn itself is intact");
+    }
+
+    #[tokio::test]
+    async fn the_transcript_survives_a_reactions_outage() {
+        for template in [
+            ResponseTemplate::new(500),
+            ResponseTemplate::new(200).set_body_json(json!({"value": {"enabled": true}})),
+        ] {
+            let (state, _application) = reaction_read(template, true).await;
+            let mut value = turns();
+            let before = value.clone();
+            let unavailable =
+                attach_reactions(&state, &member(), "org-1", "space-room", "thread-1", &mut value).await;
+            assert!(unavailable, "the caller reports reactions_unavailable");
+            assert_eq!(value, before, "the turns are exactly as Session Core sent them");
+        }
+    }
+
+    #[tokio::test]
+    async fn attach_reactions_is_silent_when_the_flag_is_off_or_application_has_them_off() {
+        let (state, application) = reaction_read(ResponseTemplate::new(500), false).await;
+        let mut value = turns();
+        let before = value.clone();
+        assert!(!attach_reactions(&state, &member(), "org-1", "space-room", "thread-1", &mut value).await);
+        assert_eq!(value, before);
+        assert!(paths_seen(&application).await.is_empty(), "flag off: Application is not asked");
+
+        let (state, _application) = reaction_read(
+            ResponseTemplate::new(200).set_body_json(json!({"value": {"enabled": false, "truncated": false, "reactions": []}})),
+            true,
+        )
+        .await;
+        let mut value = turns();
+        assert!(!attach_reactions(&state, &member(), "org-1", "space-room", "thread-1", &mut value).await);
+        assert_eq!(value, before);
+    }
+
+    // ----- delete clears reactions ------------------------------------------------------------
+
+    #[tokio::test]
+    async fn a_landed_delete_clears_the_messages_reactions_best_effort() {
+        let mut opts = Opts::new("editor");
+        opts.revise_on = true;
+        opts.mutation = ResponseTemplate::new(200).set_body_json(json!({"status": "success", "value": {"cleared": 2, "more": false}}));
+        let fx = fx(opts).await;
+        let (status, body) = call(&fx, "DELETE", MESSAGE, Some(("idempotency-key", "key-0000000000000001"))).await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(body["data"]["revision_state"], "deleted");
+        let sent = mutations(&fx).await;
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0]["path"], "spaceReactions:clearForMessageForGateway");
+        assert_eq!(sent[0]["args"]["messageId"], "msg-1");
+        assert_eq!(sent[0]["args"]["threadId"], "thread-1");
+        assert_eq!(sent[0]["args"]["spaceRef"], "space-room");
+    }
+
+    #[tokio::test]
+    async fn a_delete_still_succeeds_when_clearing_the_reactions_fails() {
+        let mut opts = Opts::new("editor");
+        opts.revise_on = true;
+        opts.mutation = ResponseTemplate::new(500);
+        let fx = fx(opts).await;
+        let (status, body) = call(&fx, "DELETE", MESSAGE, Some(("idempotency-key", "key-0000000000000001"))).await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(body["data"]["revision_state"], "deleted");
+    }
+
+    #[tokio::test]
+    async fn a_delete_with_reactions_off_does_not_touch_application() {
+        let mut opts = Opts::new("editor");
+        opts.revise_on = true;
+        opts.reactions_on = false;
+        let fx = fx(opts).await;
+        let (status, _) = call(&fx, "DELETE", MESSAGE, Some(("idempotency-key", "key-0000000000000001"))).await;
+        assert_eq!(status, 200);
+        assert!(mutations(&fx).await.is_empty());
+    }
+}

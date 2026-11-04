@@ -20,6 +20,22 @@ func allEntitlements(value bool) map[string]bool {
 	return out
 }
 
+// explicitOnlyEntitlements are the catalogue bits no preset turns on: each is a
+// standing deny-by-default power an org admin enables on its own (WS09-S7 run
+// control, WS11 approval grants, WS12 DMs and message revision), so agent_computer
+// is "every bit the presets cover", not "every bit".
+var explicitOnlyEntitlements = []string{
+	"run_control", "approval_grant", "dm_create", "message_revise", "message_moderate",
+}
+
+func presetCoveredEntitlements() map[string]bool {
+	out := allEntitlements(true)
+	for _, key := range explicitOnlyEntitlements {
+		out[key] = false
+	}
+	return out
+}
+
 func withKeys(keys ...string) map[string]bool {
 	out := allEntitlements(false)
 	for _, key := range keys {
@@ -153,8 +169,8 @@ func TestPresetsAreCumulativeSubsetsOfTheCatalogue(t *testing.T) {
 	if locked, _ := PresetEntitlements(PresetLocked); !reflect.DeepEqual(locked, allEntitlements(false)) {
 		t.Fatalf("locked is not all off: %v", locked)
 	}
-	if full, _ := PresetEntitlements(PresetAgentComputer); !reflect.DeepEqual(full, allEntitlements(true)) {
-		t.Fatalf("agent_computer is not every bit on: %v", full)
+	if full, _ := PresetEntitlements(PresetAgentComputer); !reflect.DeepEqual(full, presetCoveredEntitlements()) {
+		t.Fatalf("agent_computer is not every preset-covered bit on: %v", full)
 	}
 	if _, ok := PresetEntitlements("nope"); ok {
 		t.Fatal("an unknown preset expanded")
@@ -279,8 +295,9 @@ func TestBuildOrgPolicyViewMatchesPreset(t *testing.T) {
 	check("conversation_knowledge", knowledge, PresetConversationKnowledge)
 
 	full := provisionedPolicy()
-	for _, spec := range EntitlementCatalog() {
-		spec.Set(&full, true)
+	for key, on := range presetCoveredEntitlements() {
+		spec, _ := EntitlementSpecByKey(key)
+		spec.Set(&full, on)
 	}
 	check("agent_computer", full, PresetAgentComputer)
 

@@ -2,7 +2,7 @@
   "contract": "space-room-run-frames",
   "version": 1,
   "owner": "model-gateway (src/room_run.rs)",
-  "notes": "Room-safe frames of a live room turn. Authored with WS09-S3; a generated check under MP_UPDATE_GOLDEN=1 is owed to the test phase. Every payload is rebuilt field by field from an allowlist; free text (tool arguments and output, step titles, steer text, error messages, reasoning) never appears. Text offsets are UTF-16 code units. The SSE id of a frame is the source buffer seq.",
+  "notes": "Room-safe frames of a live room turn. Authored with WS09-S3; the model-gateway tests room_run::tests::the_golden_vocabulary_matches_the_code and the_golden_frames_are_what_the_projector_builds fail when the code and this file disagree. Every payload is rebuilt field by field from an allowlist; free text (tool arguments and output, step titles, steer text, error messages, reasoning) never appears. Text offsets are UTF-16 code units. The SSE id of a frame is the source buffer seq.",
   "limits": { "max_steps": 64, "max_text_units": 32768, "max_artifacts": 16 },
   "classes": ["search_knowledge", "web", "code", "artifact", "lookup", "effect", "memory", "delegate", "plan", "check", "tool"],
   "reserved_classes": ["browser"],
@@ -16,7 +16,11 @@
     "reasoning_delta", "memory_recall", "grounding", "citation", "citations", "search_results",
     "source_scope_applied", "verification", "attachment", "retrieval_notice", "usage", "usage_progress",
     "turn_timing", "result_receipt", "title", "follow_ups", "retry_scheduled", "compaction",
-    "context_change", "run_parked", "run_resumed", "awaiting_approval", "user_question", "connected", "done"
+    "context_change", "run_parked", "run_resumed", "awaiting_approval", "user_question", "connected", "done",
+    "plan_transitioned", "todo_transitioned", "approval_state_changed", "subagent_attached", "subagent_stopped",
+    "run_paused_for_approval", "run_resumed_after_approval", "approval_continuation_verified",
+    "browser_action_dispatched", "browser_observation_received", "browser_run_paused", "browser_run_resumed",
+    "browser_action_approval_required", "browser_action_decided", "question_asked", "question_answered"
   ],
   "default_for_unnamed_source_event": "drop",
   "builtin_tool_classes": {

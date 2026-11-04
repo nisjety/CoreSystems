@@ -565,3 +565,382 @@ pub(crate) async fn load_recorded_mentions<'e>(
         })
         .collect())
 }
+
+// ---------------------------------------------------------------------------------------------
+// Pure tier (no database, no environment). The verifier and DB tiers live in
+// `grpc_space_mentions_tests.rs`, which can reach the private verifiers of `grpc.rs`.
+// ---------------------------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn person(id: &str) -> pb::MentionInput {
+        pb::MentionInput {
+            subject_id: id.to_owned(),
+            kind: "user".to_owned(),
+            ..Default::default()
+        }
+    }
+
+    fn agent(id: &str, expectation: &str, refusal: &str) -> pb::MentionInput {
+        pb::MentionInput {
+            subject_id: id.to_owned(),
+            kind: "agent".to_owned(),
+            wake_expectation: expectation.to_owned(),
+            refusal_code: refusal.to_owned(),
+            ..Default::default()
+        }
+    }
+
+    fn message(id: &str, post_kind: &str) -> pb::SessionMessage {
+        pb::SessionMessage {
+            message_id: id.to_owned(),
+            post_kind: post_kind.to_owned(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn reply_slot_table() {
+        // (last_role, newest user row is a post, assistants since, expected agent mentions) -> open
+        let cases: [(Option<&str>, bool, i64, i64, bool); 14] = [
+            // The old rule: directly after a user row the slot is open, whatever the rest.
+            (Some("user"), false, 0, 0, true),
+            (Some("user"), true, 0, 3, true),
+            (Some(" user "), false, 5, 0, true),
+            // An empty thread or a system/tool tail never opens it.
+            (None, true, 0, 3, false),
+            (Some("system"), true, 0, 3, false),
+            (Some("tool"), true, 0, 3, false),
+            // After an assistant: only a post with more expected agents than answers so far.
+            (Some("assistant"), true, 1, 2, true),
+            (Some("assistant"), true, 2, 3, true),
+            (Some("assistant"), true, 2, 2, false),
+            (Some("assistant"), true, 3, 3, false),
+            (Some("assistant"), true, 1, 1, false),
+            // A turn (not a post) never opens a second answer.
+            (Some("assistant"), false, 1, 3, false),
+            // The cap is three even when more rows claim to be expected.
+            (Some("assistant"), true, 3, 9, false),
+            (Some("assistant"), true, 0, 0, false),
+        ];
+        for (last_role, is_post, since, expected, open) in cases {
+            assert_eq!(
+                reply_slot_is_open(last_role, is_post, since, expected),
+                open,
+                "{last_role:?} post={is_post} since={since} expected={expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn mention_input_validation() {
+        // An owner's post: agents keep their expectation, ordinals are the agents' order.
+        let valid = validate_mentions(
+            &[
+                person("user-2"),
+                agent("agent-x", "expected", ""),
+                person("user-3"),
+                agent("agent-y", "refused", "respond_to_denied"),
+                agent("agent-z", "expected", ""),
+            ],
+            true,
+        )
+        .expect("valid mentions");
+        assert_eq!(valid.len(), 5);
+        assert_eq!(valid[0].kind, "user");
+        assert_eq!(valid[0].wake_expectation, None);
+        assert_eq!(valid[0].source, "typed");
+        assert_eq!(
+            (valid[1].wake_expectation, valid[1].refusal_code, valid[1].ordinal),
+            (Some("expected"), None, 0)
+        );
+        assert_eq!(
+            (valid[3].wake_expectation, valid[3].refusal_code, valid[3].ordinal),
+            (Some("refused"), Some("respond_to_denied"), 1)
+        );
+        assert_eq!(valid[4].ordinal, 2);
+        let wire = valid[4].to_ref();
+        assert_eq!((wire.kind.as_str(), wire.wake_state.as_str(), wire.ordinal), ("agent", "expected", 2));
+
+        // A locked source survives; an unknown one is refused.
+        let locked = pb::MentionInput {
+            source: "locked".to_owned(),
+            ..agent("agent-x", "expected", "")
+        };
+        assert_eq!(validate_mentions(&[locked], true).expect("locked")[0].source, "locked");
+        let bad_source = pb::MentionInput {
+            source: "forged".to_owned(),
+            ..person("user-2")
+        };
+        assert!(validate_mentions(&[bad_source], true).is_err());
+
+        // Not the thread owner: an expected agent is downgraded, a refused one keeps its code.
+        let downgraded = validate_mentions(
+            &[agent("agent-x", "expected", ""), agent("agent-y", "refused", "invocation_blocked")],
+            false,
+        )
+        .expect("downgraded");
+        assert_eq!(
+            (downgraded[0].wake_expectation, downgraded[0].refusal_code),
+            (Some("refused"), Some("owner_only_thread"))
+        );
+        assert_eq!(downgraded[1].refusal_code, Some("invocation_blocked"));
+
+        // Refusals: every one is InvalidArgument and nothing partial comes back.
+        let twenty_one: Vec<pb::MentionInput> = (0..21).map(|n| person(&format!("user-{n}"))).collect();
+        let four_agents: Vec<pb::MentionInput> =
+            (0..4).map(|n| agent(&format!("agent-{n}"), "expected", "")).collect();
+        let twenty: Vec<pb::MentionInput> = (0..20).map(|n| person(&format!("user-{n}"))).collect();
+        assert_eq!(validate_mentions(&twenty, true).expect("twenty people").len(), 20);
+        let three: Vec<pb::MentionInput> = (0..3).map(|n| agent(&format!("agent-{n}"), "expected", "")).collect();
+        assert_eq!(validate_mentions(&three, true).expect("three agents").len(), 3);
+        for (name, inputs) in [
+            ("too many people", twenty_one),
+            ("too many agents", four_agents),
+            ("duplicate", vec![person("user-2"), agent("user-2", "expected", "")]),
+            ("bad id", vec![person("has space")]),
+            ("empty id", vec![person("")]),
+            ("unknown kind", vec![pb::MentionInput { kind: "group".to_owned(), ..person("g-1") }]),
+            ("person with expectation", vec![pb::MentionInput { wake_expectation: "expected".to_owned(), ..person("user-2") }]),
+            ("person with refusal", vec![pb::MentionInput { refusal_code: "owner_only_thread".to_owned(), ..person("user-2") }]),
+            ("agent without expectation", vec![agent("agent-x", "", "")]),
+            ("agent with unknown expectation", vec![agent("agent-x", "maybe", "")]),
+            ("expected with a refusal code", vec![agent("agent-x", "expected", "respond_to_denied")]),
+            ("refused without a code", vec![agent("agent-x", "refused", "")]),
+            ("refused with an unknown code", vec![agent("agent-x", "refused", "because")]),
+        ] {
+            let status = validate_mentions(&inputs, true).expect_err(name);
+            assert_eq!(status.code(), tonic::Code::InvalidArgument, "{name}");
+        }
+        assert!(validate_mentions(&[], false).expect("no mentions").is_empty());
+    }
+
+    #[test]
+    fn wake_state_table() {
+        for (expectation, phase, state) in [
+            (Some("refused"), None, "refused"),
+            (Some("refused"), Some("running"), "refused"),
+            (Some("expected"), None, "expected"),
+            (Some("expected"), Some("queued"), "running"),
+            (Some("expected"), Some("running"), "running"),
+            (Some("expected"), Some("awaiting_approval"), "awaiting_approval"),
+            (Some("expected"), Some("completed"), "completed"),
+            (Some("expected"), Some("cancelled"), "cancelled"),
+            (Some("expected"), Some("failed"), "failed"),
+            (Some("expected"), Some("anything_else"), "failed"),
+            (None, None, ""),
+        ] {
+            assert_eq!(wake_state(expectation, phase), state, "{expectation:?} {phase:?}");
+        }
+    }
+
+    #[test]
+    fn post_context_cap_keeps_the_newest_posts_and_every_turn() {
+        let page = || {
+            vec![
+                message("p1", "post"),
+                message("t1", "turn"),
+                message("p2", "post"),
+                message("p3", "post"),
+                message("t2", "turn"),
+                message("p4", "post"),
+            ]
+        };
+        let ids = |messages: &[pb::SessionMessage]| {
+            messages.iter().map(|m| m.message_id.clone()).collect::<Vec<_>>()
+        };
+        let mut uncapped = page();
+        apply_post_context_cap(&mut uncapped, 0);
+        assert_eq!(ids(&uncapped), ["p1", "t1", "p2", "p3", "t2", "p4"]);
+        let mut capped = page();
+        apply_post_context_cap(&mut capped, 2);
+        assert_eq!(ids(&capped), ["t1", "p3", "t2", "p4"]);
+        let mut wide = page();
+        apply_post_context_cap(&mut wide, 10);
+        assert_eq!(wide.len(), 6);
+    }
+
+    #[test]
+    fn mention_counts_are_counts_only() {
+        let base = serde_json::json!({ "message_id": "m-1" });
+        assert_eq!(with_mention_counts(base.clone(), &[]), base, "no mentions, no new keys");
+        let recorded = validate_mentions(
+            &[person("person-secret-1"), agent("agent-secret-1", "expected", ""), person("person-secret-2")],
+            true,
+        )
+        .expect("valid")
+        .iter()
+        .map(ValidMention::to_ref)
+        .collect::<Vec<_>>();
+        let payload = with_mention_counts(base, &recorded);
+        assert_eq!(payload["mention_count"], 3);
+        assert_eq!(payload["agent_mention_count"], 1);
+        let text = payload.to_string();
+        for id in ["person-secret-1", "agent-secret-1", "person-secret-2"] {
+            assert!(!text.contains(id), "the event carries no mentioned id: {text}");
+        }
+    }
+
+    fn complete_wake() -> pb::RunWakeContext {
+        pb::RunWakeContext {
+            space_id: "space-1".to_owned(),
+            space_decision_ref: "decision-1".to_owned(),
+            recipient_audience_ref: "audience-1".to_owned(),
+            recipient_audience_revision: 4,
+            recipient_audience_hash: "sha256:audience".to_owned(),
+            privacy_policy_ref: "privacy-1".to_owned(),
+            authority_revision: 7,
+            resource_authorization_ref: "resource-1".to_owned(),
+            space_decision_token: "v1.k.p.s".to_owned(),
+            action_schema_hash: sm::DECISION_SCHEMA.to_owned(),
+            payload_digest: "sha256:digest".to_owned(),
+            idempotency_key: "wake-1".to_owned(),
+            trigger_message_id: "message-1".to_owned(),
+            trigger_content_digest: "sha256:content".to_owned(),
+            agent_subject_id: "agent-1".to_owned(),
+            turn_origin: "direct".to_owned(),
+        }
+    }
+
+    #[test]
+    fn a_wake_has_no_partial_form() {
+        assert!(wake_context_is_complete(&complete_wake()));
+        assert!(!wake_context_is_complete(&pb::RunWakeContext::default()));
+        let edits: [fn(&mut pb::RunWakeContext); 16] = [
+            |w| w.space_id.clear(),
+            |w| w.space_decision_ref.clear(),
+            |w| w.recipient_audience_ref.clear(),
+            |w| w.recipient_audience_revision = 0,
+            |w| w.recipient_audience_hash = "  ".to_owned(),
+            |w| w.privacy_policy_ref.clear(),
+            |w| w.authority_revision = 0,
+            |w| w.resource_authorization_ref.clear(),
+            |w| w.space_decision_token.clear(),
+            |w| w.action_schema_hash.clear(),
+            |w| w.payload_digest.clear(),
+            |w| w.idempotency_key.clear(),
+            |w| w.trigger_message_id.clear(),
+            |w| w.trigger_content_digest.clear(),
+            |w| w.agent_subject_id.clear(),
+            |w| w.turn_origin.clear(),
+        ];
+        for (index, edit) in edits.iter().enumerate() {
+            let mut wake = complete_wake();
+            edit(&mut wake);
+            assert!(!wake_context_is_complete(&wake), "field edit {index}");
+        }
+        for origin in ["direct", "ambient", "automation"] {
+            assert!(known_turn_origin(origin), "{origin}");
+        }
+        for origin in ["", "chat", "Direct", "api"] {
+            assert!(!known_turn_origin(origin), "{origin}");
+        }
+    }
+
+    #[test]
+    fn coded_status_carries_the_trailer() {
+        let status = coded_status(Status::failed_precondition("x"), "wake_trigger_mismatch");
+        assert_eq!(status.code(), tonic::Code::FailedPrecondition);
+        assert_eq!(
+            status
+                .metadata()
+                .get(ERROR_CODE_TRAILER)
+                .and_then(|value| value.to_str().ok()),
+            Some("wake_trigger_mismatch")
+        );
+    }
+
+    /// The digest Control's `runWakePayloadDigest` produces for the shared vector (WS08-S1).
+    /// Change the fixture only on an intended wire change, on both sides.
+    #[test]
+    fn run_wake_digest_matches_the_shared_golden() {
+        let golden: serde_json::Value =
+            serde_json::from_str(include_str!("../../tests/fixtures/run-wake-v1.golden.json"))
+                .expect("golden fixture");
+        let input = &golden["input"];
+        let expected = &golden["expected"];
+        let text = |key: &str| input[key].as_str().expect(key).to_owned();
+        assert_eq!(expected["action"], sm::DECISION_ACTION_ID);
+        assert_eq!(expected["schema"], sm::DECISION_SCHEMA);
+        assert_eq!(expected["permissions"], serde_json::json!([sm::PERMISSION_WAKE]));
+
+        let content_digest_hex = content_digest(&text("content"));
+        assert_eq!(content_digest_hex, expected["content_digest"].as_str().expect("content digest"));
+
+        let wake = pb::RunWakeContext {
+            space_id: text("space_id"),
+            space_decision_ref: text("space_decision_ref"),
+            recipient_audience_ref: text("recipient_audience_ref"),
+            recipient_audience_revision: input["recipient_audience_revision"].as_u64().expect("audience revision"),
+            recipient_audience_hash: text("recipient_audience_hash"),
+            privacy_policy_ref: text("privacy_policy_ref"),
+            authority_revision: input["authority_revision"].as_u64().expect("authority revision"),
+            resource_authorization_ref: text("resource_authorization_ref"),
+            action_schema_hash: sm::DECISION_SCHEMA.to_owned(),
+            idempotency_key: text("idempotency_key"),
+            trigger_message_id: text("trigger_message_id"),
+            trigger_content_digest: content_digest_hex,
+            agent_subject_id: text("agent_subject_id"),
+            turn_origin: text("turn_origin"),
+            ..Default::default()
+        };
+        assert_eq!(
+            run_wake_payload_digest(&wake, &text("org_id"), &text("user_id"), &text("thread_id")),
+            expected["digest"].as_str().expect("digest"),
+            "the Rust digest drifted from Control's; update both together"
+        );
+
+        // The token and the caller's digest field are not part of the commitment.
+        let mut unbound = wake.clone();
+        unbound.space_decision_token = "anything".to_owned();
+        unbound.payload_digest = "anything".to_owned();
+        assert_eq!(
+            run_wake_payload_digest(&unbound, &text("org_id"), &text("user_id"), &text("thread_id")),
+            expected["digest"].as_str().expect("digest")
+        );
+
+        // The mapping table the golden carries is the contract's.
+        for row in golden["turn_origin_mapping"].as_array().expect("mapping") {
+            assert_eq!(
+                sm::run_origin_for_turn_origin(row["turn_origin"].as_str().expect("origin")),
+                row["run_origin"].as_str(),
+                "{row}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_bound_field_moves_the_wake_digest() {
+        let base = complete_wake();
+        let digest = |w: &pb::RunWakeContext, org: &str, user: &str, thread: &str| {
+            run_wake_payload_digest(w, org, user, thread)
+        };
+        let reference = digest(&base, "org-1", "user-1", "thread-1");
+        assert_ne!(reference, digest(&base, "org-2", "user-1", "thread-1"));
+        assert_ne!(reference, digest(&base, "org-1", "user-2", "thread-1"));
+        assert_ne!(reference, digest(&base, "org-1", "user-1", "thread-2"));
+        let edits: [fn(&mut pb::RunWakeContext); 14] = [
+            |w| w.space_id.push('x'),
+            |w| w.space_decision_ref.push('x'),
+            |w| w.recipient_audience_ref.push('x'),
+            |w| w.recipient_audience_revision += 1,
+            |w| w.recipient_audience_hash.push('x'),
+            |w| w.privacy_policy_ref.push('x'),
+            |w| w.authority_revision += 1,
+            |w| w.resource_authorization_ref.push('x'),
+            |w| w.action_schema_hash.push('x'),
+            |w| w.idempotency_key.push('x'),
+            |w| w.trigger_message_id.push('x'),
+            |w| w.trigger_content_digest.push('x'),
+            |w| w.agent_subject_id.push('x'),
+            |w| w.turn_origin = "ambient".to_owned(),
+        ];
+        for (index, edit) in edits.iter().enumerate() {
+            let mut wake = base.clone();
+            edit(&mut wake);
+            assert_ne!(reference, digest(&wake, "org-1", "user-1", "thread-1"), "field edit {index}");
+        }
+    }
+}

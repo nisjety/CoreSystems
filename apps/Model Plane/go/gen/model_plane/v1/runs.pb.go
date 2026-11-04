@@ -404,8 +404,13 @@ type AuthorizeRoomRunAttachResponse struct {
 	// The verdict holds until here (Unix seconds): the lesser of the decision's expiry and ten
 	// minutes from now. The caller asks again before this and closes the stream at it.
 	ValidUntilUnix int64 `protobuf:"varint,7,opt,name=valid_until_unix,json=validUntilUnix,proto3" json:"valid_until_unix,omitempty"`
-	unknownFields  protoimpl.UnknownFields
-	sizeCache      protoimpl.SizeCache
+	// The provider and connection of the route the run names, for the posture the gateway decides on
+	// that route. Set only for a zero-retention-waived run bound to the caller's own waiver (the same
+	// connection and acknowledgement); empty for a persistent run, which names no connection.
+	Provider      string `protobuf:"bytes,8,opt,name=provider,proto3" json:"provider,omitempty"`
+	Connection    string `protobuf:"bytes,9,opt,name=connection,proto3" json:"connection,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *AuthorizeRoomRunAttachResponse) Reset() {
@@ -485,6 +490,20 @@ func (x *AuthorizeRoomRunAttachResponse) GetValidUntilUnix() int64 {
 		return x.ValidUntilUnix
 	}
 	return 0
+}
+
+func (x *AuthorizeRoomRunAttachResponse) GetProvider() string {
+	if x != nil {
+		return x.Provider
+	}
+	return ""
+}
+
+func (x *AuthorizeRoomRunAttachResponse) GetConnection() string {
+	if x != nil {
+		return x.Connection
+	}
+	return ""
 }
 
 type GetRunRequest struct {
@@ -2357,7 +2376,7 @@ const file_model_plane_v1_runs_proto_rawDesc = "" +
 	"\x06run_id\x18\x01 \x01(\tR\x05runId\x12\x19\n" +
 	"\bspace_id\x18\x02 \x01(\tR\aspaceId\x125\n" +
 	"\x17space_read_decision_ref\x18\x03 \x01(\tR\x14spaceReadDecisionRef\x129\n" +
-	"\x19space_read_decision_token\x18\x04 \x01(\tR\x16spaceReadDecisionToken\"\x84\x02\n" +
+	"\x19space_read_decision_token\x18\x04 \x01(\tR\x16spaceReadDecisionToken\"\xc0\x02\n" +
 	"\x1eAuthorizeRoomRunAttachResponse\x12\x15\n" +
 	"\x06run_id\x18\x01 \x01(\tR\x05runId\x12\x1b\n" +
 	"\tthread_id\x18\x02 \x01(\tR\bthreadId\x12\x15\n" +
@@ -2365,7 +2384,11 @@ const file_model_plane_v1_runs_proto_rawDesc = "" +
 	"\x10owner_subject_id\x18\x04 \x01(\tR\x0eownerSubjectId\x12\x1b\n" +
 	"\trun_phase\x18\x05 \x01(\tR\brunPhase\x12&\n" +
 	"\x0fstarted_at_unix\x18\x06 \x01(\x03R\rstartedAtUnix\x12(\n" +
-	"\x10valid_until_unix\x18\a \x01(\x03R\x0evalidUntilUnix\"&\n" +
+	"\x10valid_until_unix\x18\a \x01(\x03R\x0evalidUntilUnix\x12\x1a\n" +
+	"\bprovider\x18\b \x01(\tR\bprovider\x12\x1e\n" +
+	"\n" +
+	"connection\x18\t \x01(\tR\n" +
+	"connection\"&\n" +
 	"\rGetRunRequest\x12\x15\n" +
 	"\x06run_id\x18\x01 \x01(\tR\x05runId\"k\n" +
 	"\x1eGetScheduledStepContextRequest\x12\x15\n" +

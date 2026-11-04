@@ -38,7 +38,9 @@ const spacesClient = vi.hoisted(() => ({
   replyInSpaceThread: vi.fn(),
 }))
 
-vi.mock('@/shared/api/spaces-client', () => ({
+vi.mock('@/shared/api/spaces-client', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/shared/api/spaces-client')>()),
+  searchSpaceMessages: () => new Promise(() => {}),
   createSpaceAgent: spacesClient.createSpaceAgent,
   bindSpaceAgent: spacesClient.bindSpaceAgent,
   getInstallableSpaceAgents: spacesClient.getInstallableSpaceAgents,
@@ -96,7 +98,10 @@ const orchestration = vi.hoisted(() => ({
   cancelRun: vi.fn(),
 }))
 
-vi.mock('@/shared/api/orchestration-client', () => orchestration)
+vi.mock('@/shared/api/orchestration-client', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/shared/api/orchestration-client')>()),
+  ...orchestration,
+}))
 
 const chatClient = vi.hoisted(() => ({
   streamChat: vi.fn(),
