@@ -38,6 +38,10 @@ const BROWSER_ERROR_CODES = [
   'scrape_refused',
   'scrape_rate_limited',
   'scrape_timeout',
+  // W3-E3.8.5: the fetch reasons of a failed scrape (gateway knowledge/shared.rs).
+  'scrape_host_not_found',
+  'scrape_unreachable',
+  'scrape_tls_failed',
   'rate_limited',
   'unauthorized',
   // The refusals of a keyed AI-run start (the SPA sends an Idempotency-Key now).

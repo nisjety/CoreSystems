@@ -503,6 +503,11 @@ fn classify_scrape_failure(
     elapsed: Duration,
     upstream: &Value,
 ) -> (&'static str, String) {
+    // W3-E3.8.5: a DRIVER_FAILED naming dns, connect or tls (sent only with
+    // QUARRY_EDGE__FETCH_SUB_CODES on) has a code of its own, ahead of the elapsed rule.
+    if let Some((code, message)) = shared::fetch_sub_code_refusal(upstream) {
+        return (code, message.to_owned());
+    }
     if status == StatusCode::FORBIDDEN && scrape_block_reason(upstream).is_some() {
         return (
             "site_blocked",
@@ -2089,6 +2094,33 @@ mod tests {
         assert_eq!(
             classify_scrape_failure(StatusCode::BAD_GATEWAY, Duration::ZERO, &Value::Null).0,
             "scrape_failed"
+        );
+    }
+
+    /// W3-E3.8.5: the fetch reasons Quarry names on a DRIVER_FAILED get their own code, also
+    /// after a slow chain; any other reason keeps the status classification.
+    #[test]
+    fn a_driver_failed_fetch_reason_has_its_own_scrape_code() {
+        let body = |reason: &str| {
+            json!({ "error": { "code": "DRIVER_FAILED", "message": "dns error for secret.example", "details": { "reason": reason } } })
+        };
+        for (reason, want) in [
+            ("dns", "scrape_host_not_found"),
+            ("connect", "scrape_unreachable"),
+            ("tls", "scrape_tls_failed"),
+        ] {
+            let (code, message) =
+                classify_scrape_failure(StatusCode::BAD_GATEWAY, Duration::from_secs(25), &body(reason));
+            assert_eq!(code, want, "{reason}");
+            assert!(!message.contains("secret.example"), "{reason}: no upstream text");
+        }
+        assert_eq!(
+            classify_scrape_failure(StatusCode::BAD_GATEWAY, Duration::ZERO, &body("all_drivers_failed")).0,
+            "scrape_failed"
+        );
+        assert_eq!(
+            classify_scrape_failure(StatusCode::BAD_GATEWAY, Duration::from_secs(25), &body("all_drivers_failed")).0,
+            "scrape_timeout"
         );
     }
 
