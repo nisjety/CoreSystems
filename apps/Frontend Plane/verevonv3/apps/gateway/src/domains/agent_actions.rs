@@ -65,6 +65,13 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
     } else {
         router
     };
+    // EP-11 S1: the answer the Skills page reads to show a member's own skills. Routed only while
+    // SKILL_MEMBER_AUTHORING is on; off, the path answers as it did before (a GET there is a 405).
+    let router = if skill_member_authoring_enabled() {
+        router.route("/api/v1/skills/authoring", get(skill_authoring))
+    } else {
+        router
+    };
     router.route_layer(axum::middleware::from_fn_with_state(state, require_session))
 }
 
@@ -167,26 +174,132 @@ async fn list_skills(
     .await
 }
 
-/// Create a durable org skill. Body (`name`, `description`, `content`,
+/// Whether the `SKILL_MEMBER_AUTHORING` switch (EP-11 S1) lets a member author private skills. Read
+/// strictly: only the literal `true` enables it. Read per request, like `schedule_contract_enabled`.
+fn skill_member_authoring_enabled() -> bool {
+    std::env::var("SKILL_MEMBER_AUTHORING").is_ok_and(|value| value == "true")
+}
+
+/// The fields a private skill is created with. Anything else a member sends in a create is dropped.
+const PRIVATE_SKILL_FIELDS: [&str; 7] = [
+    "name",
+    "description",
+    "content",
+    "trigger_keywords",
+    "trigger_file_patterns",
+    "tool_restrictions",
+    "enabled",
+];
+
+/// The body a member's private skill is created from, or `None` when the member may not create it.
+/// Only `scope = user` passes, with the switch on and no promotion source named: an org-wide skill
+/// stays admin-only. The body is rebuilt from the fields a private skill carries, so an org id, an
+/// owner or a review state sent by the client never reaches capability-core, which binds the owner
+/// to the verified caller anyway.
+fn member_private_skill_body(body: &Value, switch_on: bool) -> Option<Value> {
+    if !switch_on
+        || body.get("scope").and_then(Value::as_str) != Some("user")
+        || names_promotion_source(body)
+    {
+        return None;
+    }
+    let mut own = Map::new();
+    for key in PRIVATE_SKILL_FIELDS {
+        if let Some(value) = body.get(key) {
+            own.insert(key.to_owned(), value.clone());
+        }
+    }
+    own.insert("scope".to_owned(), json!("user"));
+    Some(Value::Object(own))
+}
+
+/// Whether a create names a skill to copy into the organization. Only an admin may do that.
+fn names_promotion_source(body: &Value) -> bool {
+    match body.get("promoted_from") {
+        None | Some(Value::Null) => false,
+        Some(Value::String(source)) => !source.trim().is_empty(),
+        Some(_) => true,
+    }
+}
+
+/// Whether a member may change or delete one skill: only a private skill they own. capability-core
+/// treats an org-scoped skill as open to any caller (`ensureSkillCallerMayChange`), so the owner
+/// check that keeps an org skill admin-only is made here, on the skill as model-gateway reads it.
+/// A skill the member cannot see passes through as the gateway answered it (a 404).
+async fn member_owns_skill(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    token: Option<&str>,
+    capability: &str,
+    skill_id: &str,
+) -> Result<(), (StatusCode, Json<Value>)> {
+    let url = format!(
+        "{}/v1/skills/{}",
+        state.model_gateway_url,
+        urlencoding::encode(skill_id)
+    );
+    let (status, Json(skill)) = shared::proxy_model_json_with_capability(
+        state,
+        Method::GET,
+        &url,
+        None,
+        token,
+        Some(capability),
+        user,
+    )
+    .await;
+    if status != StatusCode::OK {
+        return Err((status, Json(skill)));
+    }
+    let owned = skill.get("scope").and_then(Value::as_str) == Some("user")
+        && skill.get("owner_user_id").and_then(Value::as_str) == Some(user.user_id.as_str());
+    if owned {
+        Ok(())
+    } else {
+        Err((
+            StatusCode::FORBIDDEN,
+            Json(error(
+                "forbidden",
+                "Only the skill's owner or an organization admin can change or delete it.",
+            )),
+        ))
+    }
+}
+
+/// The answer the Skills page reads to show a member's own skills and the editor (EP-11 S1). It is
+/// routed only while the member switch is on, so the answer is the switch itself.
+async fn skill_authoring() -> Json<Value> {
+    Json(json!({"data": {"member_authoring": true}}))
+}
+
+/// Create a durable skill. Body (`name`, `description`, `content`,
 /// `trigger_keywords`, ...) is forwarded to model-gateway `/v1/skills`
-/// (→ capability-core `agent_skills`). Admin-gated; org id is never injected —
-/// it is derived from the verified capability token's claims.
+/// (→ capability-core `agent_skills`). An admin creates any scope; a member creates one private
+/// skill of their own only while `SKILL_MEMBER_AUTHORING` is on (EP-11 S1). Org id is never
+/// injected — it is derived from the verified capability token's claims.
 async fn create_skill(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> impl IntoResponse {
-    if !can_author_skills(&state, &user).await {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(error(
-                "forbidden",
-                "Only organization admins can author skills.",
-            )),
-        )
-            .into_response();
-    }
+    let forwarded = if can_author_skills(&state, &user).await {
+        body
+    } else {
+        match member_private_skill_body(&body, skill_member_authoring_enabled()) {
+            Some(own) => own,
+            None => {
+                return (
+                    StatusCode::FORBIDDEN,
+                    Json(error(
+                        "forbidden",
+                        "Only organization admins can author skills.",
+                    )),
+                )
+                    .into_response();
+            }
+        }
+    };
     let token = shared::model_token(&state, &user, &headers).await;
     let capability = match shared::required_capability_token(&state, &user, &headers).await {
         Ok(token) => token,
@@ -197,7 +310,7 @@ async fn create_skill(
         &state,
         Method::POST,
         &url,
-        Some(body),
+        Some(forwarded),
         token.as_deref(),
         Some(&capability),
         &user,
@@ -206,8 +319,9 @@ async fn create_skill(
     .into_response()
 }
 
-/// Update a durable org skill (enable/disable, edit content/description).
-/// Admin-gated; proxied to model-gateway `/v1/skills/{id}` (PATCH).
+/// Update a durable skill (enable/disable, edit content/description). Proxied to model-gateway
+/// `/v1/skills/{id}` (PATCH). An admin may change any skill; a member only a private skill of their
+/// own, and only while `SKILL_MEMBER_AUTHORING` is on (EP-11 S1).
 async fn update_skill(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -215,7 +329,8 @@ async fn update_skill(
     Path(skill_id): Path<String>,
     Json(body): Json<Value>,
 ) -> impl IntoResponse {
-    if !can_author_skills(&state, &user).await {
+    let admin = can_author_skills(&state, &user).await;
+    if !admin && !skill_member_authoring_enabled() {
         return (
             StatusCode::FORBIDDEN,
             Json(error(
@@ -230,6 +345,13 @@ async fn update_skill(
         Ok(token) => token,
         Err(err) => return shared::delegated_auth_unavailable(err).into_response(),
     };
+    if !admin {
+        if let Err(refusal) =
+            member_owns_skill(&state, &user, token.as_deref(), &capability, &skill_id).await
+        {
+            return refusal.into_response();
+        }
+    }
     let url = format!(
         "{}/v1/skills/{}",
         state.model_gateway_url,
@@ -248,15 +370,17 @@ async fn update_skill(
     .into_response()
 }
 
-/// Delete a durable org skill. Admin-gated; proxied to model-gateway
-/// `/v1/skills/{id}` (DELETE).
+/// Delete a durable skill. Proxied to model-gateway `/v1/skills/{id}` (DELETE). An admin may delete
+/// any skill; a member only a private skill of their own, and only while `SKILL_MEMBER_AUTHORING` is
+/// on (EP-11 S1).
 async fn delete_skill(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     headers: HeaderMap,
     Path(skill_id): Path<String>,
 ) -> impl IntoResponse {
-    if !can_author_skills(&state, &user).await {
+    let admin = can_author_skills(&state, &user).await;
+    if !admin && !skill_member_authoring_enabled() {
         return (
             StatusCode::FORBIDDEN,
             Json(error(
@@ -271,6 +395,13 @@ async fn delete_skill(
         Ok(token) => token,
         Err(err) => return shared::delegated_auth_unavailable(err).into_response(),
     };
+    if !admin {
+        if let Err(refusal) =
+            member_owns_skill(&state, &user, token.as_deref(), &capability, &skill_id).await
+        {
+            return refusal.into_response();
+        }
+    }
     let url = format!(
         "{}/v1/skills/{}",
         state.model_gateway_url,
@@ -599,6 +730,21 @@ async fn create_cron(
     headers: HeaderMap,
     Json(mut body): Json<Value>,
 ) -> impl IntoResponse {
+    // A goal-bound schedule (EP-7 S6) runs in the personal Space, never in a room thread.
+    let names_goal = body
+        .get("task_template")
+        .and_then(Value::as_object)
+        .is_some_and(|template| template.contains_key("goal_id"));
+    if names_goal && cron_create_names_explicit_space(&body) {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(error(
+                "goal_schedule_personal_only",
+                "A schedule that keeps working on a goal runs in your personal Space only.",
+            )),
+        )
+            .into_response();
+    }
     if cron_create_names_explicit_space(&body) && !can_author_skills(&state, &user).await {
         return (
             StatusCode::FORBIDDEN,
@@ -1482,7 +1628,8 @@ mod tests {
     use super::{
         apply_agent_draft_preview, apply_preview_persona, builder_session_authority,
         can_author_own_schedule, can_run_schedule_now, cron_create_names_explicit_space,
-        draft_from_request, parse_builder_definition, version_to_api, BuilderDefinition,
+        draft_from_request, member_private_skill_body, parse_builder_definition, version_to_api,
+        BuilderDefinition,
     };
     use crate::middleware::AuthenticatedUser;
     use axum::{body::Body, http::Request};
@@ -2080,5 +2227,316 @@ mod tests {
         assert_eq!(status, axum::http::StatusCode::FORBIDDEN);
         assert_eq!(body["error"]["code"], "agent_builder_forbidden");
         assert_eq!(publish_calls(&convex.received_requests().await.unwrap()), 0);
+    }
+
+    // Skill authoring (EP-11 S1). The member switch is read per request, so each test sets it, keeps it set
+    // for its whole request, and holds the env lock like the other switch tests.
+
+    /// The skill routes through the whole router. The session's org role (`role`) decides admin or member;
+    /// model-gateway answers the skill calls, and `skill_1` is the one skill it knows, with the scope and
+    /// owner the test gives it.
+    async fn skill_test_servers(role: &str, scope: &str, owner: &str) -> (MockServer, MockServer, MockServer) {
+        let auth = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/auth/get-session"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "user": {"id": "user-1", "email": "user@example.com", "emailVerified": true},
+                "session": {"activeOrganizationId": "org-1"}
+            })))
+            .mount(&auth)
+            .await;
+        for path in ["/api/model-plane/token", "/api/capability-core/token"] {
+            Mock::given(wm_method("GET"))
+                .and(wm_path(path))
+                .respond_with(
+                    ResponseTemplate::new(200).set_body_json(json!({"token": "delegated-token"})),
+                )
+                .mount(&auth)
+                .await;
+        }
+        let user_core = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/me/session-context"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "userId": "user-1", "orgId": "org-1", "role": role, "onboardingStatus": "COMPLETED"
+            })))
+            .mount(&user_core)
+            .await;
+        let model = MockServer::start().await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/v1/skills"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(json!({"id": "skill_new"})))
+            .mount(&model)
+            .await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/v1/skills/skill_1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "skill_1", "scope": scope, "owner_user_id": owner
+            })))
+            .mount(&model)
+            .await;
+        Mock::given(wm_method("PATCH"))
+            .and(wm_path("/v1/skills/skill_1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "skill_1"})))
+            .mount(&model)
+            .await;
+        Mock::given(wm_method("DELETE"))
+            .and(wm_path("/v1/skills/skill_1"))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&model)
+            .await;
+        (auth, user_core, model)
+    }
+
+    /// One request through the router with `SKILL_MEMBER_AUTHORING` set to `switch`, or unset for `None`.
+    async fn skill_request(
+        servers: &(MockServer, MockServer, MockServer),
+        method: &str,
+        uri: &str,
+        body: Option<Value>,
+        switch: Option<&str>,
+    ) -> (axum::http::StatusCode, Value) {
+        let (auth, user_core, model) = servers;
+        let state = fires_test_state(auth, user_core, model);
+        match switch {
+            Some(value) => std::env::set_var("SKILL_MEMBER_AUTHORING", value),
+            None => std::env::remove_var("SKILL_MEMBER_AUTHORING"),
+        }
+        let builder = Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("cookie", "better-auth.session_token=session-1");
+        let request = match body {
+            Some(payload) => builder
+                .header("content-type", "application/json")
+                .body(Body::from(payload.to_string())),
+            None => builder.body(Body::empty()),
+        }
+        .unwrap();
+        let response = crate::build_router(state).oneshot(request).await.unwrap();
+        std::env::remove_var("SKILL_MEMBER_AUTHORING");
+        let status = response.status();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+    }
+
+    /// The JSON bodies of the model-gateway calls with this method and path, in order.
+    async fn skill_calls(model: &MockServer, method: &str, path: &str) -> Vec<Value> {
+        model
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .filter(|request| request.method.as_str() == method && request.url.path() == path)
+            .map(|request| serde_json::from_slice(&request.body).unwrap_or(Value::Null))
+            .collect()
+    }
+
+    #[test]
+    fn member_private_skill_body_keeps_only_the_private_fields() {
+        let body = json!({
+            "name": "Utrulling", "description": "Kort", "content": "1. Kjør testene",
+            "trigger_keywords": ["deploy"], "enabled": false, "scope": "user",
+            "org_id": "org-forged", "owner_user_id": "user-2", "promoted_from": ""
+        });
+        assert_eq!(
+            member_private_skill_body(&body, true),
+            Some(json!({
+                "name": "Utrulling", "description": "Kort", "content": "1. Kjør testene",
+                "trigger_keywords": ["deploy"], "enabled": false, "scope": "user"
+            }))
+        );
+    }
+
+    #[test]
+    fn member_private_skill_body_refuses_org_scope_promotion_and_a_switch_off() {
+        // No scope is refused too: capability-core would default it to org.
+        assert_eq!(member_private_skill_body(&json!({"name": "A", "content": "C", "scope": "org"}), true), None);
+        assert_eq!(member_private_skill_body(&json!({"name": "A", "content": "C"}), true), None);
+        assert_eq!(
+            member_private_skill_body(
+                &json!({"name": "A", "content": "C", "scope": "user", "promoted_from": "skill_2"}),
+                true
+            ),
+            None
+        );
+        assert_eq!(member_private_skill_body(&json!({"name": "A", "content": "C", "scope": "user"}), false), None);
+    }
+
+    #[tokio::test]
+    async fn member_can_create_user_skill_when_switch_on() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let servers = skill_test_servers("member", "user", "user-1").await;
+        let (status, _) = skill_request(
+            &servers,
+            "POST",
+            "/api/v1/skills",
+            Some(json!({"name": "Utrulling", "content": "1. Kjør testene", "enabled": true, "scope": "user"})),
+            Some("true"),
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::CREATED);
+        let posts = skill_calls(&servers.2, "POST", "/v1/skills").await;
+        assert_eq!(posts.len(), 1);
+        assert_eq!(posts[0]["scope"], "user");
+    }
+
+    #[tokio::test]
+    async fn member_cannot_create_org_skill() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let servers = skill_test_servers("member", "user", "user-1").await;
+        let (status, body) = skill_request(
+            &servers,
+            "POST",
+            "/api/v1/skills",
+            Some(json!({"name": "Brand", "content": "Svar kort.", "scope": "org"})),
+            Some("true"),
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::FORBIDDEN);
+        assert_eq!(body["error"]["code"], "forbidden");
+        assert!(skill_calls(&servers.2, "POST", "/v1/skills").await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn switch_off_keeps_admin_only() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let member = skill_test_servers("member", "user", "user-1").await;
+        let (status, body) = skill_request(
+            &member,
+            "POST",
+            "/api/v1/skills",
+            Some(json!({"name": "Mine", "content": "x", "scope": "user"})),
+            None,
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::FORBIDDEN);
+        assert_eq!(body["error"]["message"], "Only organization admins can author skills.");
+        assert!(skill_calls(&member.2, "POST", "/v1/skills").await.is_empty());
+
+        // An admin still creates an org skill with the switch off, as before.
+        let admin = skill_test_servers("owner", "user", "user-1").await;
+        let (status, _) = skill_request(
+            &admin,
+            "POST",
+            "/api/v1/skills",
+            Some(json!({"name": "Brand", "content": "Svar kort.", "scope": "org"})),
+            None,
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::CREATED);
+    }
+
+    #[tokio::test]
+    async fn org_id_in_body_is_ignored() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let servers = skill_test_servers("member", "user", "user-1").await;
+        let (status, _) = skill_request(
+            &servers,
+            "POST",
+            "/api/v1/skills",
+            Some(json!({
+                "name": "Utrulling", "content": "1. Kjør testene", "enabled": true, "scope": "user",
+                "org_id": "org-forged", "owner_user_id": "user-2",
+                "review_state": "accepted", "origin": "background_review"
+            })),
+            Some("true"),
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::CREATED);
+        let posts = skill_calls(&servers.2, "POST", "/v1/skills").await;
+        assert_eq!(
+            posts,
+            vec![json!({"name": "Utrulling", "content": "1. Kjør testene", "enabled": true, "scope": "user"})]
+        );
+    }
+
+    #[tokio::test]
+    async fn member_changes_own_private_skill_when_switch_on() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let servers = skill_test_servers("member", "user", "user-1").await;
+        let (status, _) = skill_request(
+            &servers,
+            "POST",
+            "/api/v1/skills/skill_1",
+            Some(json!({"enabled": false})),
+            Some("true"),
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::OK);
+        assert_eq!(skill_calls(&servers.2, "PATCH", "/v1/skills/skill_1").await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn member_cannot_change_an_org_skill() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let servers = skill_test_servers("member", "org", "").await;
+        let (status, body) = skill_request(
+            &servers,
+            "POST",
+            "/api/v1/skills/skill_1",
+            Some(json!({"enabled": false})),
+            Some("true"),
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::FORBIDDEN);
+        assert_eq!(body["error"]["code"], "forbidden");
+        assert!(skill_calls(&servers.2, "PATCH", "/v1/skills/skill_1").await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn member_cannot_delete_another_members_skill() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let servers = skill_test_servers("member", "user", "user-2").await;
+        let (status, _) = skill_request(&servers, "DELETE", "/api/v1/skills/skill_1", None, Some("true")).await;
+        assert_eq!(status, axum::http::StatusCode::FORBIDDEN);
+        assert!(skill_calls(&servers.2, "DELETE", "/v1/skills/skill_1").await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn switch_off_refuses_member_changes_before_any_lookup() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let servers = skill_test_servers("member", "user", "user-1").await;
+        let (status, body) = skill_request(
+            &servers,
+            "POST",
+            "/api/v1/skills/skill_1",
+            Some(json!({"enabled": false})),
+            None,
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::FORBIDDEN);
+        assert_eq!(body["error"]["message"], "Only organization admins can edit skills.");
+        assert!(skill_calls(&servers.2, "GET", "/v1/skills/skill_1").await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn admin_changes_any_skill_without_an_ownership_lookup() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let servers = skill_test_servers("owner", "org", "").await;
+        let (status, _) = skill_request(
+            &servers,
+            "POST",
+            "/api/v1/skills/skill_1",
+            Some(json!({"enabled": false})),
+            Some("true"),
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::OK);
+        assert!(skill_calls(&servers.2, "GET", "/v1/skills/skill_1").await.is_empty());
+        assert_eq!(skill_calls(&servers.2, "PATCH", "/v1/skills/skill_1").await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn skill_authoring_answers_only_with_the_switch_on() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let on = skill_test_servers("member", "user", "user-1").await;
+        let (status, body) = skill_request(&on, "GET", "/api/v1/skills/authoring", None, Some("true")).await;
+        assert_eq!(status, axum::http::StatusCode::OK);
+        assert_eq!(body["data"]["member_authoring"], true);
+
+        let off = skill_test_servers("member", "user", "user-1").await;
+        let (status, _) = skill_request(&off, "GET", "/api/v1/skills/authoring", None, None).await;
+        assert_ne!(status, axum::http::StatusCode::OK);
     }
 }

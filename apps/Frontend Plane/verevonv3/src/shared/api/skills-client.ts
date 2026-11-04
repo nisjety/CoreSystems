@@ -77,9 +77,11 @@ export function createSkill(
     /**
      * `org` with `promoted_from` copies a skill an admin was shared (accepted, from a
      * member) into the organization. The server checks that the source is visible to
-     * the caller; the copy is a new skill and the source is left as it was.
+     * the caller; the copy is a new skill and the source is left as it was. `user` makes
+     * a private skill of the caller's own (EP-11 S1); a member may do so only while the
+     * gateway's member switch is on, see `memberSkillAuthoring`.
      */
-    scope?: 'org'
+    scope?: 'org' | 'user'
     promoted_from?: string
   },
 ): Promise<{ id: string }> {
@@ -88,6 +90,22 @@ export function createSkill(
     body: JSON.stringify(body),
     headers: { 'x-verevon-org-id': orgId },
   })
+}
+
+let memberSkillAuthoringAnswer: Promise<boolean> | undefined
+
+/**
+ * Whether this person may author private skills here (EP-11 S1). The gateway answers only while
+ * `SKILL_MEMBER_AUTHORING` is on, so a refusal, a failure or a missing route all read as no, and
+ * members see the page they saw before. One answer serves every caller in the page.
+ */
+export function memberSkillAuthoring(): Promise<boolean> {
+  memberSkillAuthoringAnswer ??= requestJson<{ member_authoring?: boolean } | null>(
+    '/api/v1/skills/authoring',
+  )
+    .then((payload) => payload?.member_authoring === true)
+    .catch(() => false)
+  return memberSkillAuthoringAnswer
 }
 
 /** Update a skill's enabled flag, description, or content. */
