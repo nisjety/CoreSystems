@@ -845,6 +845,30 @@ describe('action registry', () => {
     expect(go?.safeParse({ threadId: 't1' }).success).toBe(false)
   })
 
+  it('registers Keep going as a person-only switch that grants nothing (EP-7-S4)', () => {
+    expect(getActionDescriptor('chat.goal_auto_toggle')).toMatchObject({
+      ownerPlane: 'model',
+      risk: 'medium',
+      requiresApproval: false,
+      reversible: true,
+    })
+    // A goal never continues itself: the model can neither run the pump nor turn it on.
+    expect(isModelExecutableAction('chat.goal_auto_toggle')).toBe(false)
+
+    const toggle = getActionDescriptor('chat.goal_auto_toggle')?.inputSchema
+    expect(toggle?.safeParse({ threadId: 't1', goalId: 'goal_1', on: true }).success).toBe(true)
+    expect(toggle?.safeParse({ threadId: 't1', goalId: 'goal_1', on: false }).success).toBe(true)
+    for (const input of [
+      { threadId: 't1', goalId: 'goal_1' },
+      { threadId: 't1', on: true },
+      { threadId: 't1', goalId: 'goal_1', on: 'true' },
+      // A switch carries no approval: the pump never decides anything for the person.
+      { threadId: 't1', goalId: 'goal_1', on: true, approve: true },
+    ]) {
+      expect(toggle?.safeParse(input).success).toBe(false)
+    }
+  })
+
   it('registers artifact edit and restore as reversible person-only writes (EP-3-S4)', () => {
     const save = getActionDescriptor('chat.save_artifact_revision')
     const restore = getActionDescriptor('chat.restore_artifact_revision')
@@ -977,6 +1001,29 @@ describe('action registry', () => {
       { skillId: 'x'.repeat(129) },
       { skillId: 'skill-brand', name: 'Aquatiq brand' },
       { skillId: 'skill-brand', orgId: 'org_x' },
+    ]) {
+      expect(schema?.safeParse(input).success).toBe(false)
+    }
+  })
+
+  it('registers the deck slide open as a low-risk read the model cannot execute (EP-5-S4)', () => {
+    const open = getActionDescriptor('chat.open_deck_slide')
+
+    expect(open).toMatchObject({ ownerPlane: 'model', risk: 'low', requiresApproval: false, reversible: true })
+    expect(isModelExecutableAction('chat.open_deck_slide')).toBe(false)
+    expect(MODEL_ACCESS['chat.open_deck_slide']).toMatchObject({ access: 'none', sideEffectClass: 'read' })
+
+    const schema = open?.inputSchema
+    expect(schema?.safeParse({ artifactId: 'artifact-deck', slideId: 's3' }).success).toBe(true)
+    for (const input of [
+      { artifactId: '', slideId: 's3' },
+      { artifactId: 'artifact-deck', slideId: '' },
+      { artifactId: 'artifact-deck', slideId: 's 3' },
+      { artifactId: 'artifact-deck', slideId: '../s3' },
+      { artifactId: 'artifact-deck', slideId: 'x'.repeat(65) },
+      // The deck is read from the panel's manifest: a client never names a thread, an owner or an index.
+      { artifactId: 'artifact-deck', slideId: 's3', threadId: 'thread-1' },
+      { artifactId: 'artifact-deck', slideId: 's3', index: 2 },
     ]) {
       expect(schema?.safeParse(input).success).toBe(false)
     }
@@ -1404,7 +1451,9 @@ describe('action registry', () => {
     // +2 after EP-5-S7 registered chat.list_deck_templates and chat.apply_deck_template, the template picker.
     // +4 after EP-7-S1 registered chat.set_goal, chat.update_goal, chat.clear_goal and chat.continue_goal.
     // +1 after EP-3-S6 registered chat.edit_artifact_selection, the Output panel's ask about a selection.
-    expect(ids).toHaveLength(293)
+    // +1 after EP-5-S4 registered chat.open_deck_slide, the slide strip's open-a-slide action.
+    // +1 after EP-7-S4 registered chat.goal_auto_toggle, the goal bar's Keep going switch.
+    expect(ids).toHaveLength(295)
 
     // The fragments also carry ids outside the `spaces.` prefix (`space.files.*`), so the Space
     // entries are the ones the fragments declare.

@@ -1221,6 +1221,15 @@ const chatApplyDeckTemplateInput = z
   })
   .strict()
 
+// The slide a person opens in a deck's strip (EP-5 S4): the artifact the panel holds and the slide's id in its
+// manifest. Strict, so nothing else reaches the strip; the slide itself is read from the manifest the panel has.
+const chatOpenDeckSlideInput = z
+  .object({
+    artifactId: z.string().min(1).max(128),
+    slideId: z.string().min(1).max(64).regex(/^[A-Za-z0-9_-]+$/),
+  })
+  .strict()
+
 // The person's own edit or restore of a thread artifact (EP-3 S4). `expectedVersion` is the head the panel
 // showed, the server's compare-and-set; no org or user field, because the server reads the owner from the
 // session. The text bound is the gateway's text-artifact limit.
@@ -1312,6 +1321,17 @@ const chatContinueGoalInput = z
   .object({
     threadId: z.string().min(1).max(128),
     goalId: z.string().min(1).max(128),
+  })
+  .strict()
+
+// "Keep going" on the goal bar (EP-7 S4): the person's own switch for the goal pump on one thread. It
+// is held in the open tab only and grants nothing: each turn the pump sends is claimed by the server,
+// which refuses while a decision waits on the person.
+const chatGoalAutoToggleInput = z
+  .object({
+    threadId: z.string().min(1).max(128),
+    goalId: z.string().min(1).max(128),
+    on: z.boolean(),
   })
   .strict()
 
@@ -4466,6 +4486,17 @@ export const actionRegistry = [
     outputSchema: envelopeStatusOutput,
   },
   {
+    id: 'chat.open_deck_slide',
+    label: 'Open a slide of a deck',
+    description: 'Open one slide of a deck in the chat\'s artifact panel: the strip shows the slide\'s lines, its state, its findings and its speaker notes. Read only, and nothing is sent to the server: the panel reads the manifest it already holds. Never model-executable: a model does not choose what the person looks at.',
+    ownerPlane: 'model',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: chatOpenDeckSlideInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
     id: 'chat.set_goal',
     label: 'Set a goal on the conversation',
     description: 'Set a standing goal on one of the person\'s own conversations: an objective and up to 8 success criteria. Every later Do turn in the conversation is told the goal as data, never as instructions. One open goal per conversation; replacing it closes the old one as cleared. Owner only. Refused under zero data retention, in a conversation that holds a waived run and in a Space conversation. Off until thread goals are switched on. Never model-executable: the model reads its goal and never sets it.',
@@ -4507,6 +4538,17 @@ export const actionRegistry = [
     requiresApproval: false,
     reversible: false,
     inputSchema: chatContinueGoalInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'chat.goal_auto_toggle',
+    label: 'Keep going toward the goal',
+    description: 'Turn the goal bar\'s "Keep going" on or off for the open conversation. While it is on, after a goal turn completes and the judge did not find the goal met, the bar counts down five seconds, with Stop, and sends the next Continue; a hidden tab never sends. It stops on any pending approval, question, proposed plan or parked run, on a failed turn, on a cap, and on a met or blocked goal, and it never approves anything. The server refuses a pump-sent turn with goal_auto_disabled while the feature is off and refuses every goal turn with thread_goal_pending_decision while a decision waits. Never model-executable: a goal never continues itself.',
+    ownerPlane: 'model',
+    risk: 'medium',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: chatGoalAutoToggleInput,
     outputSchema: envelopeStatusOutput,
   },
   {

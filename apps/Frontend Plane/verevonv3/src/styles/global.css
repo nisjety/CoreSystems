@@ -28412,6 +28412,159 @@ body.verevon-chat-canvas-resizing * {
   border: 0;
 }
 
+/* The slide strip of a deck artifact (EP-5 S4): one 16:9 card per slide, drawn from the manifest. Only the
+   strip scrolls sideways; the panel never does. Colours are tokens, so light and dark both hold. */
+.verevon-deck {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+
+.verevon-deck__draft,
+.verevon-deck__notice,
+.verevon-deck__none {
+  margin: 0;
+  font-size: 12px;
+  color: var(--verevon-e-muted);
+}
+
+.verevon-deck__strip {
+  display: flex;
+  gap: 10px;
+  margin: 0;
+  padding: 2px 2px 6px;
+  overflow-x: auto;
+  list-style: none;
+  scroll-snap-type: x proximity;
+}
+
+.verevon-deck__strip > li {
+  flex: 0 0 auto;
+  scroll-snap-align: start;
+}
+
+.verevon-deck__card {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  width: min(220px, 70vw);
+  aspect-ratio: 16 / 9;
+  padding: 8px 10px;
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--verevon-e-subtle) 30%, transparent);
+  border-radius: 8px;
+  background: var(--verevon-surface-soft);
+  color: var(--verevon-j-text);
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.verevon-deck__card[aria-current='true'] {
+  border-color: var(--accent);
+}
+
+.verevon-deck__head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--verevon-e-muted);
+}
+
+.verevon-deck__number {
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+}
+
+.verevon-deck__chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  margin-left: auto;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--verevon-e-muted) 12%, transparent);
+  color: var(--verevon-e-muted);
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.verevon-deck__chip--ok {
+  background: color-mix(in srgb, var(--success) 14%, transparent);
+  color: var(--success);
+}
+
+.verevon-deck__chip--warn {
+  background: color-mix(in srgb, var(--warning) 16%, transparent);
+  color: var(--warning-ink);
+}
+
+.verevon-deck__chip--error {
+  background: color-mix(in srgb, var(--danger) 14%, transparent);
+  color: var(--danger);
+}
+
+.verevon-deck__title {
+  display: -webkit-box;
+  overflow: hidden;
+  font-weight: 650;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+
+.verevon-deck__line {
+  display: block;
+  overflow: hidden;
+  color: var(--verevon-e-muted);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.verevon-deck__detail {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font-size: 13px;
+}
+
+.verevon-deck__lines,
+.verevon-deck__findings {
+  margin: 0;
+  padding-left: 18px;
+}
+
+.verevon-deck__toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  align-self: flex-start;
+  min-height: var(--verevon-touch-target, 44px);
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.verevon-deck__notes {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.verevon-deck__raw {
+  margin: 0;
+  overflow-x: auto;
+  font-size: 12px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 .verevon-chat-artifact-file {
   display: flex;
   flex-wrap: wrap;

@@ -55,6 +55,7 @@ import {
   restoreArtifactRevision,
   type SavedArtifactRevision,
 } from '@/shared/api/chat-client'
+import { deckManifestRenderer } from './ArtifactDeckView'
 import { ArtifactEditor } from './ArtifactEditor'
 import {
   type ArtifactSelectionRange,
@@ -123,6 +124,7 @@ import { type ViewerSurface, viewerActivationKey, viewerFor } from '@/shared/art
 const [activatedPreviews, setActivatedPreviews] = createSignal<ReadonlySet<string>>(new Set())
 
 extraArtifactRenderers.register(officePdfRenderer)
+extraArtifactRenderers.register(deckManifestRenderer)
 
 const KIND_ICONS: Record<ArtifactRenderKind, IconComponent> = {
   binary: FileSpreadsheet,
