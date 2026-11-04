@@ -14,6 +14,11 @@
 //! request, got a smaller deletion than the one they asked for and than the
 //! summary reported.
 //!
+//! The retention sweeper's delete mode (`retention_sweeper`, EP-9 C3) is a third
+//! bulk path: it reuses `grpc::delete_thread_rows` per thread and propagates
+//! through [`erase_semantic_copies`] after each thread's commit, counting the
+//! outcome in its pass row's audit event.
+//!
 //! # Confirmation standard — deliberately the strict one
 //!
 //! `SessionCore::delete_space_threads` already erases semantic twins for the
@@ -307,6 +312,35 @@ mod caller_contract_tests {
              (delete_thread, delete_threads). A new one appeared or one stopped \
              propagating — if a new path reconciles durably instead, like \
              delete_space_threads does, update this count and say so here."
+        );
+    }
+
+    /// The retention sweeper deletes without a caller watching, so the same two
+    /// rules hold there: it keeps the erased ids `delete_thread_rows` returns, and
+    /// it propagates them only after its own transaction committed.
+    #[test]
+    fn the_retention_sweeper_propagates_after_its_commit() {
+        let sweeper = src("retention_sweeper.rs");
+        let mut checked = 0;
+        for (index, _) in sweeper.match_indices("crate::memory_erasure::erase_semantic_copies(") {
+            let preceding = &sweeper[..index];
+            let commit = preceding
+                .rfind("tx.commit().await")
+                .expect("a sweeper propagation call with no preceding commit");
+            let delete = preceding
+                .rfind("crate::grpc::delete_thread_rows(&mut tx, thread_id)")
+                .expect("a sweeper propagation call with no delete before it");
+            let function_start = preceding.rfind("\nasync fn ").expect("propagation call outside any function");
+            assert!(
+                function_start < delete && delete < commit,
+                "the sweeper must delete, then commit, then propagate, inside one function"
+            );
+            checked += 1;
+        }
+        assert_eq!(
+            checked, 1,
+            "expected the sweeper's one per-thread delete to propagate; a new delete path \
+             there must propagate after its commit too"
         );
     }
 
