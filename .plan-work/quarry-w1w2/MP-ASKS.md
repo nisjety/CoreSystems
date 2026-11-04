@@ -197,6 +197,41 @@ Quarry consumer: `apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_po
 - **Tests on your side:** derive refuses a parent that is not a live run grant, an owner mismatch, nine listed hosts, a non-canonical host, `conversation`/`always` under ZDR, and any issuance when the claim says `browser.consent.origin: disabled`.
 - **When:** before `QUARRY_EDGE__ORIGIN_CONSENT` is switched on anywhere (OD13: also not before counsel signs off the consent wording). Until then Quarry refuses every extension with 403 before any broker call, so nothing breaks without it.
 
+## W3-E3.6-7 (lane b, w23): OCR route and PII model tier on the WS16 service lane
+
+Quarry consumer: `apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/mp_client.rs` (`ocr_pages_for_org`, `pii_model_for_org`), lane b, code only, dark behind `QUARRY_EDGE__OCR` and `QUARRY_EDGE__PII_MODEL` (both default off), refused locally under ZDR. Built against the contract below; please confirm or say what differs.
+
+- **Service-route rows (model-gateway `auth.rs` / WS16.S1 `SERVICE_ROUTE_GRANTS` and its golden):** allow the Quarry service principal on `POST /v1/ai/documents/layout` and `POST /v1/ai/language/pii` (today services are allowed only on `/v1/ai/chat` and `/v1/ai/embeddings`). One reviewed row per route (plan E3.6 / WS16 "one reviewed PR per route"). Both need the `x-inference-authorization` bearer (`aud=inference-core`) as today.
+- **OCR request Quarry sends:** `{ content_base64, content_type: "application/pdf", pages: "2,5,7" (1-based, ascending), locale? }`, at most 20 pages and 16 MiB of PDF per call. Confirm `pages` is honoured by prebuilt-layout so only those pages are processed and billed.
+- **OCR answer Quarry reads:** `status` (`succeeded`), `content`, `pages_processed`, `model_used`, `provider_used`. Quarry fails closed when `pages_processed` is below the pages asked. Confirm `pages_processed` counts the pages processed in this call (not the document's page total), and that a provider partial failure is not reported as `succeeded`.
+- **PII request Quarry sends:** `{ texts: [..] (1..=25, each 1..=5120 chars), language? }`; no `operation` (the route fixes `pii`).
+- **PII answer Quarry reads:** `results[].id` and `results[].redacted_text` only (never entity offsets). Quarry expects exactly one result per text with ids `"1".."n"` (inference-core `provider/language.rs` numbers them so); a provider per-document error must surface as a non-2xx or a missing item, never as an item with `redacted_text: ""` that looks like a redaction of an empty text (Quarry treats an empty `redacted_text` as a failure either way).
+- **ZDR:** Quarry never calls either route under ZDR. Please keep both routes refusing a ZDR principal with 412 (`zdr_posture::decide_content_route`), which Quarry maps to `ZdrRefused`.
+- **Grant (Control Plane, DR-15.1 / OD-1):** Auth Core manifest rows for the two lanes (audiences model-gateway and inference-core, retention `tenant`), so the Dynamic token path can replace `LaneNotGranted`. Quarry adds its `ServiceTokenRequest` rows when the grant lands; none are added now.
+- **When:** before `QUARRY_EDGE__OCR` or `QUARRY_EDGE__PII_MODEL` is switched on anywhere. Until then both lanes refuse before any send, so nothing breaks without it.
+
+## W3-E3.3-d (lane c, w23): user-attached browser region is BrowserScraped server-side
+
+The verevonv3 gateway half is built on `w23/lane-c` (code only, not compiled), dark behind `BROWSER_REGION_ATTACH` (default off): `POST /api/v1/browser/sessions/{id}/attachments/region` returns an ephemeral `{ attachment: { kind: "browser-region", trustClass: "browser-scraped", grant: "none", retention: "ephemeral", tabId, target, region, image { mimeType, dataBase64, width, height }, selection { text, length } | null } }`. Nothing is persisted by the gateway.
+
+- **Classification:** when a chat turn carries an attachment of kind `browser-region`, model-gateway (and execution-core provenance) must classify its image and selection text as `TrustClass::BrowserScraped` server-side, from the kind, never from the client-sent `trustClass` field. The owner of the classify arms is WS11.S0 (`provenance.rs` and `moderation.rs`); add a case such as `("browser_region_attachment", TrustClass::BrowserScraped)` with a test beside `trust_class_browser_mcp_tools_are_browser_scraped`.
+- **ZDR:** refuse a `browser-region` attachment on a ZDR turn (the gateway already refuses ZDR sessions; this is the second floor), and never persist its image or selection beyond the turn under the ordinary retention rules.
+- **Grant:** the attachment grants nothing; it must not be read as consent for any browser action.
+- **When:** before `BROWSER_REGION_ATTACH` is switched on anywhere and before the composer carries the attachment into a turn.
+
+## W3-E3.3-c (lane c, w23): @tab browser-tab refs are gateway-resolved, browser-scraped context only
+
+- The verevonv3 gateway re-resolves composer `@tab` mentions against Quarry's live tabs (`browser_context::resolve_turn_tab_mentions`) and yields refs `{ kind: "browser-tab", sessionId, tabId, label, labelSource, title, target, trustClass: "browser-scraped", grant: "none" }`.
+- Ask (model-gateway / execution-core): accept only these gateway-resolved refs, never a client-sent `browserContext`; classify any page content read for a ref as `TrustClass::BrowserScraped`; refuse refs on a ZDR turn; treat a ref as context only (no browser grant, no action authority); treat `label`/`title` as untrusted page text in prompts.
+
+## W3-E3.2-b swap (lane c, w23f): redirect text on a rejected browser gate (execution-core)
+
+The shared approval card (W3-B1-06) is mounted in BrowserChrome and the chat approval deck behind `VITE_BROWSER_APPROVAL_CARD` (default off), with the redirect box OFF (`APPROVAL_REDIRECT_ENABLED = false` in `apps/Frontend Plane/verevonv3/src/features/browser/approval/approval-model.ts`). The card sends a redirect as a reject whose `reason` is the trimmed text (`orchestration.decide_approval`, cap `ORCHESTRATION_APPROVAL_REASON_MAX` = 1000 characters).
+
+- **Ask (execution-core, `browser_agent.rs` `gate_risky_action` / `browser_risk.rs`):** when a browser gate is rejected with a non-empty `reason`, hand the text to the planner as the person's instruction for the next step instead of aborting the run; refuse a reason over 1000 characters (the same cap) and treat it as untrusted user text (never as a grant, never widening the run's hosts or budget). A reject with no reason keeps today's behaviour (the run aborts).
+- **ZDR:** the text is turn content: hold it in memory for the run only, never in a durable event or log line on a ZDR run.
+- **Signal back:** say when it ships (a capability flag or a contract note), so the Frontend can flip `APPROVAL_REDIRECT_ENABLED`. Until then the box is not offered and nothing breaks.
+
 ## W3-E3.3-g (lane b, w23): steer inbox on the browser-agent run (Model Plane)
 
 Frontend consumer: `apps/Frontend Plane/verevonv3/src/features/browser/dock/steer-input.ts` and `SteerInput.tsx` (lane b, code only, dark behind `VITE_CHAT_BROWSER_STEER`, default off). The action contract is `browser_run.steer` in `apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts`. Built against the contract below; please confirm or say what differs.
@@ -316,3 +351,35 @@ One section per slice. Each ask names the plane, the file, the exact change and 
 - **Quarry (E3.2-e2, no change required):** execution-core calls `POST /v1/agent/runs/{run}/tabs`, `POST .../tabs/{tab}/select` and `DELETE .../tabs/{tab}` as the service principal with `initiatedBy=agent`, `aiRunId` = the Model run id and `agentLabel` = `model-plane`, plus the existing list. These are owner-only on Quarry, so they work on leased runs the service principal started, not on an attached run's delegate.
 - **Control audit-core (E3.2-a):** the `authz_decision` row's `host_class` word now has a writer: execution-core stamps `none|general|sensitive|internal|unknown` for browser approvals (not under ZDR).
 - **Model Plane lead:** after landing the compose lines, the three browser switches (`QUARRY_BROWSER_AGENT_APPROVAL_REDIRECT`, `QUARRY_BROWSER_AGENT_STEER`, `QUARRY_BROWSER_AGENT_OBSERVATION_QUALITY`) and the session-core pair (`SESSION_CORE_AUTHZ_DECISION_AUDIT`) are independent; all default off.
+
+## W3-E3.1-i (lane d, w23): fill_otp approval record fields for the OTP card
+
+Frontend consumer: `apps/Frontend Plane/verevonv3/src/features/browser/approval/otp-approval.ts` (`OtpApprovalSource`, `otpApprovalToCardModel`) and `OtpApprovalNotice.tsx`, on `w23/lane-d` (code only, not compiled), dark behind `VITE_BROWSER_OTP_APPROVAL_CARD` (default off; nothing mounts the card yet). Built against the contract below; please confirm the names or say what you use instead.
+
+- **Fields the approval record (or the `BrowserActionApprovalRequired` event) must carry for a `fill_otp` or `fill_otp_ref` approval:** `approvalId` (already there); `topOrigin` (the top page as a URL or an origin; the card keeps scheme, host and port only); `frameOrigin` (the URL or origin of the frame that holds the field); `mailProviderKey` (integration-core's key, `google` or `microsoft`; the card names them Gmail and Outlook); `mailAccountLabel` (the label the person gave the connection, never the mailbox address; a label that contains `@` is dropped by the card).
+- Today the event carries `url`, `selector`, `reason`, `riskCategory` and `approvalId` only, so the card cannot be built from it. These are the same binding values (top origin, frame origin, mail connection id) that the W3-E3.1-ab ask above asks the broker to carry. Please use the same names there.
+- **Approve is withheld by the card** when the top origin is not https, when the frame origin is missing or differs from the top origin, or when the provider key is not one the card names. Reject stays available. The executor's https and frame-equality checks remain the authority.
+- **"I will type it myself"** is a takeover (the chrome's `toggleBrowserControlMode`, control mode `human_takeover`), not a decision. The card calls `onTakeOver` and sends nothing. Please confirm that a takeover leaves the run paused rather than aborted, so the person can type the code and the run can resume, and say whether the pending approval stays open or is rejected on takeover.
+- **When:** before `VITE_BROWSER_OTP_APPROVAL_CARD` is switched on anywhere, and together with `QUARRY_EDGE__FILL_OTP`.
+
+## W3-E3.7.10-CP (lane d, w23): execution-core Model-facing job tools (E3.7 R2)
+
+Control rows built on `w23/lane-d` (code only, not compiled): `apps/Control Plane/config/plane-service-principals.json` gives the `execution-core` principal two new scopes on the `quarry` audience alone: `jobs:read` (job status) and `jobs:control` (pause, cancel). The quarry lane stays `retention: zdr` with `webPolicyByAudience: tenant`. Built against the contract below; please confirm the names or say what you use instead.
+
+- **Tools (execution-core):** a job status tool, a pause tool and a cancel tool for a crawl or batch the run started. No resume tool. Proposed ids `web_job_status`, `web_pause_job`, `web_cancel_job`, capability ids `cap.web.crawl` (crawl_site) and a job-control capability in capability-core (migration number from the arbiter, next free after 0018).
+- **Token:** mint with `orgId` = the run's organization (never `global`), `audience: quarry`, scopes `["jobs:read"]` for status and `["jobs:control"]` (or both) for pause/cancel. Auth Core binds the org through the directory.
+- **Routes (Quarry, after its half lands):** `GET /v1/jobs/:id` (or `/v1/crawl/:id`, `/v1/batch/:id`) with jobs:read; `POST /v1/crawl/:id/pause|cancel` and `/v1/batch/:id/pause|cancel` with jobs:control. Today quarry-edge answers 403 to every service principal on these routes, so nothing works until the Quarry half exists and its flag is on.
+- **Ids:** only job ids the run itself received from a crawl/batch start (never an id the model proposes freely); a foreign id is 404.
+- **crawl_site:** a Model-started crawl above 50 estimated pages needs the E3.7.9 approval (`APPROVAL_KIND_COST` has no producer yet); at or below 50 it runs under the run budget. On the user-session path the gateway's `web.crawl_site` arm (flag `VEREVON_GATEWAY_AGENT_WEB_TOOLSET`, default off) runs `knowledge.crawl_site`. Until the E3.7.9 approval exists that arm fails closed: a `web.crawl_site` call without `max_pages`, or with more than 50, is 403 `crawl_approval_required` (added 2026-11-04 at the lane d finish).
+- **When:** not before the Quarry service-route rows and their flag exist; until then the rows are inert.
+- **Control registry (added 2026-11-04, lane d finish):** execution-core now also holds `map:read` and `crawl:write` on the quarry audience (the E3.7.10 asks above for `knowledge.map`, `knowledge.crawl_site` and `knowledge.batch`). The quarry lane stays ZDR, and quarry-edge refuses durable jobs under ZDR, so a crawl or batch on this token is refused at the edge until the Quarry half decides how a ZDR service token may start a job (see the lane d depth file).
+
+## W3-E3.2-e2 (lane d, w23): attach mode needs a per-tab consent check (Model Plane attach driver)
+
+Quarry side: `apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes/tabs.rs` (`admit_attach_mode_tab`) and `tab_ledger.rs` (`attach_consented_tab`), on `w23f/lane-d`, code only, dark behind `QUARRY_EDGE__ORIGIN_CONSENT` (default off). No route calls them yet.
+
+- **Attach-mode request (WS8.G driver):** when the driver attaches to the person's own visible tab (not a background tab the attachment opens), the request must name that tab id and the origin-extension grant id the person approved for the tab's site. Quarry checks the grant with the E3.2-e1 gate and records the consent on the tab before any attach.
+- **Order:** consent check first, then the attach. A tab whose consent was denied is never attached (the deny is sticky for the tab id); a tab that navigated to another host since the check needs a new check.
+- **Refusals the driver must handle:** 403 `origin_consent_disabled` (flag off), 403 `attach_tab_consent_required` (no approval for the tab's current host), 403 `attach_tab_consent_denied`, 409 `attach_tab_not_visible`, `attach_tab_not_human_held`, `attach_tab_already_attached`, `no_attached_agent`, `stale_tab_epoch`; 403 `attach_zdr_refused` for a ZDR run.
+- **Open:** ending an attach-mode attachment must hand the tab back to the person, not close it (today `finish_attach` closes the attachment's tab).
+- **When:** not before counsel signs off the consent wording (OD13), like E3.2-e1.

@@ -39,13 +39,15 @@
       "treatment": "honored"
     },
     {
-      "basis": "same route as scrape: INNH-7 max_age reads and writes quarry:scrape:{org}:{hash} (the output and warnings, no inline text; the text is rebuilt from artifacts), dark behind QUARRY_EDGE__SCRAPE_MAX_AGE. Under ZDR (body flag or the token's floor) the cache is neither read nor written and no key is computed, not even a hashed URL (a hash of a known URL is a membership oracle); the scrape runs as a fresh fetch and the response carries the warning max_age_ignored_zdr with cache_state bypass. The decision is made in scrape_cache::eligibility before any key exists",
+      "basis": "same route as scrape: INNH-7 max_age reads and writes quarry:scrape:{org}:{hash} (the output and warnings, no inline text; the text is rebuilt from artifacts), dark behind QUARRY_EDGE__SCRAPE_MAX_AGE. Under ZDR (body flag or the token's floor) the cache is neither read nor written and no key is computed, not even a hashed URL (a hash of a known URL is a membership oracle); the scrape runs as a fresh fetch and the response carries the warning max_age_ignored_zdr with cache_state bypass, no cached_at and no cache_age_ms, and a fetched_at that is the time of that fetch. The decision is made in scrape_cache::eligibility before any key exists. A hit carries the original fetched_at, cached_at (the same instant) and cache_age_ms. An entry lives for cache.max_age_s (default 3600 s), so a max_age longer than that behaves as the TTL, and the response does not say so yet. Monitors never reach the cache: a change monitor fetches through /v1/internal/run_page and records through /v1/internal/change/record, and only scrape_with calls result_key, get_result or put_result",
       "detail": {
         "warning": "max_age_ignored_zdr"
       },
       "enforced_by": [
         "scrape_max_age::zdr_never_reads_or_writes_the_url_cache_and_says_so",
-        "scrape_cache::tests::zdr_wins_over_everything_else"
+        "scrape_cache::tests::zdr_wins_over_everything_else",
+        "scrape_cache::tests::a_zdr_response_carries_no_cache_freshness_fields",
+        "scrape_cache::tests::monitor_paths_never_reach_the_url_cache"
       ],
       "id": "scrape_max_age",
       "issue": null,

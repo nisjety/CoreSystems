@@ -11,6 +11,12 @@
 //! - `GET /otp-login` — E3.1-d one-time-code step: exactly one visible required
 //!   non-password input; `POST /otp-login` accepts [`FIXTURE_OTP_CODE`]
 //! - `GET /otp-login/ambiguous` — two code inputs, so the E3.1-c preconditions refuse it
+//! - `GET /downloads` — W3-E3.4-6: one `download` link ("Get report") to `report.txt`
+//! - `GET /downloads/unsolicited` — the same link, clicked by the page itself on load
+//!   (an unsolicited download a governed browser must deny)
+//! - `GET /downloads/report.txt` — [`FIXTURE_DOWNLOAD_TEXT`] as an attachment
+//! - `GET /downloads/report.docx` — an Office (OOXML zip) attachment the download
+//!   admission policy refuses
 //!
 //! Used by integration tests to drive an `AgentLoop` against a deterministic
 //! local site (avoiding the live-network flakiness of using example.com).
@@ -61,6 +67,14 @@ struct OtpForm {
 /// E3.1-d: the one-time code the `/otp-login` fixture accepts. Pair it with
 /// `otp_source::StubOtpSource` in tests; it is a fixture value, not a secret.
 pub const FIXTURE_OTP_CODE: &str = "482915";
+
+/// W3-E3.4-6: the bytes of `/downloads/report.txt`. The Chromium proof in
+/// quarry-browser (`governed_download_*`) serves the same bytes from a `data:`
+/// link, since the driver's egress guard refuses loopback navigation.
+pub const FIXTURE_DOWNLOAD_TEXT: &[u8] = b"quarry download fixture\n";
+
+/// W3-E3.4-6: the accessible name of the fixture's download link.
+pub const FIXTURE_DOWNLOAD_LINK: &str = "Get report";
 
 #[derive(Debug, Deserialize)]
 struct SearchQuery {
@@ -121,6 +135,21 @@ impl TestSite {
         format!("http://{}/otp-login", self.addr)
     }
 
+    /// W3-E3.4-6: the page with one governed download link.
+    pub fn downloads_url(&self) -> String {
+        format!("http://{}/downloads", self.addr)
+    }
+
+    /// W3-E3.4-6: the page that starts a download by itself on load.
+    pub fn unsolicited_download_url(&self) -> String {
+        format!("http://{}/downloads/unsolicited", self.addr)
+    }
+
+    /// W3-E3.4-6: one of the fixture files (`report.txt`, `report.docx`).
+    pub fn download_file_url(&self, name: &str) -> String {
+        format!("http://{}/downloads/{}", self.addr, name)
+    }
+
     pub fn search_url(&self, q: &str) -> String {
         format!("http://{}/search?q={}", self.addr, urlencoding_simple(q))
     }
@@ -149,6 +178,10 @@ impl TestSite {
             .route("/secrets-lab/scrolled", get(secrets_lab_scrolled))
             .route("/otp-login", get(otp_login_page).post(otp_login_submit))
             .route("/otp-login/ambiguous", get(otp_login_ambiguous))
+            .route("/downloads", get(downloads_page))
+            .route("/downloads/unsolicited", get(downloads_unsolicited))
+            .route("/downloads/report.txt", get(download_report_text))
+            .route("/downloads/report.docx", get(download_report_docx))
             .with_state(state)
     }
 }
@@ -353,6 +386,64 @@ async fn otp_login_submit(
     }
 }
 
+/// W3-E3.4-6: one download link. A governed browser saves it only for a verified
+/// `download_ref` on this link, once.
+async fn downloads_page(State(state): State<SiteState>) -> Html<String> {
+    record(&state, "GET /downloads").await;
+    Html(format!(
+        r#"<!doctype html><html lang="en"><head><title>Downloads</title></head>
+<body><h1>Downloads</h1>
+<p><a id="report" href="/downloads/report.txt" download="report.txt">{FIXTURE_DOWNLOAD_LINK}</a></p>
+</body></html>"#
+    ))
+}
+
+/// W3-E3.4-6: the same link, clicked by the page on load: a download no action
+/// asked for, which a governed browser must deny.
+async fn downloads_unsolicited(State(state): State<SiteState>) -> Html<String> {
+    record(&state, "GET /downloads/unsolicited").await;
+    Html(format!(
+        r#"<!doctype html><html lang="en"><head><title>Unsolicited download</title></head>
+<body><h1>Unsolicited download</h1>
+<p><a id="report" href="/downloads/report.txt" download="report.txt">{FIXTURE_DOWNLOAD_LINK}</a></p>
+<script>window.addEventListener('load', () => document.getElementById('report').click());</script>
+</body></html>"#
+    ))
+}
+
+async fn download_report_text(State(state): State<SiteState>) -> impl IntoResponse {
+    record(&state, "GET /downloads/report.txt").await;
+    (
+        [
+            (header::CONTENT_TYPE, "text/plain; charset=utf-8"),
+            (
+                header::CONTENT_DISPOSITION,
+                "attachment; filename=\"report.txt\"",
+            ),
+        ],
+        FIXTURE_DOWNLOAD_TEXT,
+    )
+}
+
+/// An OOXML file is a zip: the local-file-header magic is enough for the type
+/// check, which refuses Office documents by bytes as well as by name.
+async fn download_report_docx(State(state): State<SiteState>) -> impl IntoResponse {
+    record(&state, "GET /downloads/report.docx").await;
+    (
+        [
+            (
+                header::CONTENT_TYPE,
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            ),
+            (
+                header::CONTENT_DISPOSITION,
+                "attachment; filename=\"report.docx\"",
+            ),
+        ],
+        &b"PK\x03\x04fixture"[..],
+    )
+}
+
 fn html_escape(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
@@ -552,6 +643,89 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(body.matches("autocomplete=\"one-time-code\"").count(), 2);
+        site.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn the_downloads_page_has_one_download_link_to_the_report() {
+        let site = TestSite::start().await;
+        let body = reqwest::get(site.downloads_url())
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        assert_eq!(body.matches(" download=").count(), 1);
+        assert!(body.contains("href=\"/downloads/report.txt\""));
+        assert!(body.contains(FIXTURE_DOWNLOAD_LINK));
+        assert!(
+            !body.contains("<script"),
+            "the governed page starts nothing by itself"
+        );
+        site.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn the_unsolicited_page_clicks_its_own_download_link() {
+        let site = TestSite::start().await;
+        let body = reqwest::get(site.unsolicited_download_url())
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        assert!(body.contains("getElementById('report').click()"));
+        assert!(body.contains("href=\"/downloads/report.txt\""));
+        site.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn the_report_is_served_as_an_attachment_with_the_fixture_bytes() {
+        let site = TestSite::start().await;
+        let resp = reqwest::get(site.download_file_url("report.txt"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let disposition = resp
+            .headers()
+            .get(header::CONTENT_DISPOSITION)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_owned();
+        assert!(disposition.starts_with("attachment"));
+        assert!(disposition.contains("report.txt"));
+        assert_eq!(&resp.bytes().await.unwrap()[..], FIXTURE_DOWNLOAD_TEXT);
+        let log = site.request_log().await;
+        assert!(log.contains(&"GET /downloads/report.txt".to_string()));
+        site.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn the_office_report_is_a_zip_attachment() {
+        let site = TestSite::start().await;
+        let resp = reqwest::get(site.download_file_url("report.docx"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        assert!(resp
+            .headers()
+            .get(header::CONTENT_DISPOSITION)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .contains("report.docx"));
+        assert!(resp.bytes().await.unwrap().starts_with(b"PK\x03\x04"));
+        site.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn an_unknown_download_is_not_found() {
+        let site = TestSite::start().await;
+        let resp = reqwest::get(site.download_file_url("other.pdf"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 404);
         site.shutdown().await;
     }
 

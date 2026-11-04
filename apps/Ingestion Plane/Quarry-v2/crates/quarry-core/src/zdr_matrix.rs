@@ -112,8 +112,10 @@ pub const ROWS: &[Row] = &[
         enforced_by: &[
             "scrape_max_age::zdr_never_reads_or_writes_the_url_cache_and_says_so",
             "scrape_cache::tests::zdr_wins_over_everything_else",
+            "scrape_cache::tests::a_zdr_response_carries_no_cache_freshness_fields",
+            "scrape_cache::tests::monitor_paths_never_reach_the_url_cache",
         ],
-        basis: "same route as scrape: INNH-7 max_age reads and writes quarry:scrape:{org}:{hash} (the output and warnings, no inline text; the text is rebuilt from artifacts), dark behind QUARRY_EDGE__SCRAPE_MAX_AGE. Under ZDR (body flag or the token's floor) the cache is neither read nor written and no key is computed, not even a hashed URL (a hash of a known URL is a membership oracle); the scrape runs as a fresh fetch and the response carries the warning max_age_ignored_zdr with cache_state bypass. The decision is made in scrape_cache::eligibility before any key exists",
+        basis: "same route as scrape: INNH-7 max_age reads and writes quarry:scrape:{org}:{hash} (the output and warnings, no inline text; the text is rebuilt from artifacts), dark behind QUARRY_EDGE__SCRAPE_MAX_AGE. Under ZDR (body flag or the token's floor) the cache is neither read nor written and no key is computed, not even a hashed URL (a hash of a known URL is a membership oracle); the scrape runs as a fresh fetch and the response carries the warning max_age_ignored_zdr with cache_state bypass, no cached_at and no cache_age_ms, and a fetched_at that is the time of that fetch. The decision is made in scrape_cache::eligibility before any key exists. A hit carries the original fetched_at, cached_at (the same instant) and cache_age_ms. An entry lives for cache.max_age_s (default 3600 s), so a max_age longer than that behaves as the TTL, and the response does not say so yet. Monitors never reach the cache: a change monitor fetches through /v1/internal/run_page and records through /v1/internal/change/record, and only scrape_with calls result_key, get_result or put_result",
         log: Log::Unverified,
     },
     Row {
@@ -977,5 +979,30 @@ mod tests {
     fn normalize_makes_both_spellings_equal() {
         assert_eq!(normalize_route("/v1/agent/runs/:run_id/tabs/:tab_id"), normalize_route("/v1/agent/runs/{x}/tabs/{y}"));
         assert_eq!(normalize_route("/v1/:kind/jobs"), "/v1/{}/jobs");
+    }
+
+    /// The `scrape_max_age` row keeps the monitor bypass and the freshness fields in its
+    /// text: the row and its basis are what a support or security reader sees first.
+    #[test]
+    fn the_scrape_max_age_row_names_the_monitor_bypass_and_the_freshness_fields() {
+        let row = ROWS.iter().find(|row| row.id == "scrape_max_age").expect("a scrape_max_age row");
+        for needle in [
+            "/v1/internal/run_page",
+            "/v1/internal/change/record",
+            "only scrape_with",
+            "cached_at",
+            "cache_age_ms",
+            "fetched_at",
+            "bypass",
+            "max_age_ignored_zdr",
+        ] {
+            assert!(row.basis.contains(needle), "the scrape_max_age basis no longer says `{needle}`");
+        }
+        for test in [
+            "scrape_cache::tests::monitor_paths_never_reach_the_url_cache",
+            "scrape_cache::tests::a_zdr_response_carries_no_cache_freshness_fields",
+        ] {
+            assert!(row.enforced_by.contains(&test), "the scrape_max_age row does not cite {test}");
+        }
     }
 }

@@ -534,3 +534,125 @@ Open items:
 - E3.7.11: SDKs not regenerated (needs the openapi-generator 7.22.0 Docker image); openapi parse and node parity tests not run; E3.7.3 408 envelope, E3.7.4 /v1/map gzip and E3.7.7b answer reuse documented as not served.
 - 14 depth rows appended to W23-depth.md (lane a 6, lane c 8).
 - The four line-ending-only .sha256 artifacts were not staged.
+
+## W3 finish, lane d, integrated 2026-11-04
+
+Units: W3-E3.2-e2 (339edcf36), W3-E3.1-i (9291e09de), W3-E3.1-j (d2a069911), W3-E3.7.10-CP (f75a24382), plus lane d finish depth rows (a461698ae). Flags (all default off): QUARRY_EDGE__ORIGIN_CONSENT (E3.2-e2), VITE_BROWSER_OTP_APPROVAL_CARD (E3.1-i), VEREVON_GATEWAY_AGENT_WEB_TOOLSET (E3.7.10-CP). E3.1-j has no flag of its own; a real run needs QUARRY_EDGE__FILL_OTP and INTEGRATION_OTP_READ.
+
+Merge commit on w23/integ (base 9bea43473):
+- e762de7c5 merge: w23f/lane-d (W3 finish: W3-E3.2-e2, W3-E3.1-i, W3-E3.1-j, W3-E3.7.10-CP) into w23/integ. No conflicts (the lane had already resolved the MP-ASKS.md append clash against 9bea43473: main's E3.3-g/E3.3-l sections first, then lane d's E3.1-i/E3.7.10-CP sections).
+
+Follow-up commits: none for code (the guard was green on the first run).
+
+Compile guard (no test runs):
+- Quarry Rust (cargo check --workspace --tests, CARGO_INCREMENTAL=0): exit 0 on the first run; 33 warnings, all pre-existing (the one in tab_ledger.rs, unused import LaneState at line 21, is on the base already).
+- Go: no Go module touched.
+- TS verevonv3 (tsc6 -p tsconfig.app.json --noEmit): 1 error, the pre-existing baseline (src/shared/api/schedule-contract.test.ts TS2352); no new errors from OtpApprovalNotice.tsx or otp-approval.ts.
+- verevonv3 gateway (cargo check --tests): exit 0; 1 warning, pre-existing (unused import ResponseTemplate in src/domains/browser.rs), none in actions/handlers.rs.
+- auth-core TS: not checked (no node_modules in the integ worktree); prettier not run on plane-service-principals-policy.contract.spec.ts.
+- action-registry.ts unchanged: no admission golden regeneration, no new action ids. No ZDR/schema/route-count regeneration needed.
+- otp-login-fixture.sh: only bash -n and node --check in the lane; not run.
+
+Open items:
+- Decision needed: execution-core's quarry token is ZDR and quarry-edge refuses durable jobs under ZDR, so crawl:write can never start a job on that token even once the edge routes service principals.
+- quarry-edge still refuses service principals on the job routes and on /v1/crawl and /v1/batch; the Control rows (jobs:read/jobs:control, crawl:write, map:read) are inert there except map:read.
+- The four web.* ids have no action-registry entries (owned by W3-E3.7.9a); web.crawl_site fails closed with 403 crawl_approval_required until E3.7.9a lands.
+- E3.2-e2: no route calls the consent check (Model Plane attach driver missing, ask in MP-ASKS.md); finish_attach would close the person's own tab in attach mode.
+- E3.1-i: nothing mounts the OTP card until the E3.2-b swap. E3.1-j: blockers B1 to B4 keep the OTP chain inert; script written, not run.
+- Gateway toolset flag is read with std::env::var per request (convention is AppState).
+- 38 depth rows appended to W23-depth.md (E3.1-i 10, E3.1-j 14, E3.2-e2 4, E3.7.10-CP 9, lane d finish 1).
+- The four line-ending-only .sha256 artifacts were not staged.
+
+## W3 finish, lane b, integrated 2026-11-04
+
+Units: W3-E3.4-5 (1c1c0e754, fix ed25081ad), W3-E3.4-7 (db3a3c566), W3-E3.6-7 (47ff80b0f), W3-E3.8.5 (f087c9d15), W3-E3.7.9b (6b6bf9981), plus lane b depth rows (cce283a7f). Flags (all default off): QUARRY_EDGE__LIVE_VIEW_ONLY and BROWSER_LIVE_VIEW_ONLY (E3.4-5), VITE_BROWSER_DOWNLOADS_DRAWER (E3.4-7), QUARRY_EDGE__OCR and QUARRY_EDGE__PII_MODEL (E3.6-7), VITE_KNOWLEDGE_CRAWL_APPROVAL_ENABLED (E3.7.9b). E3.8.5 has no flag of its own; its codes only arrive with QUARRY_EDGE__FETCH_SUB_CODES on.
+
+Merge commit on w23/integ (after lane d, 55d960f74):
+- e1226bffe merge: w23f/lane-b (W3 finish: W3-E3.4-5, W3-E3.4-7, W3-E3.6-7, W3-E3.8.5, W3-E3.7.9b) into w23/integ. No conflicts.
+
+Follow-up commits:
+- 2e465238a chore(contracts): admission golden regenerated (VEREVON_UPDATE_GOLDEN=1 admission-contract test, 5 passed); copied byte-identically to apps/Model Plane/api/contracts and the capability-core testdata, execution-core and model-gateway fixtures; sha pin and zdr-contract-sync.test.sh line moved 0df146d9... -> 091abfa2....
+- aa68cecbb fix(verevonv3): DownloadsDrawer.tsx read `current.state` on the union RowState (TS2339); narrowed with `'state' in current`.
+
+New action ids: browser_download.send_to_knowledge (admission row access: none, exemptReason no_owner_executor, zdr_allowed false).
+
+Compile guard (no test runs, except the golden writer):
+- Quarry Rust (cargo check --workspace --tests, CARGO_INCREMENTAL=0): exit 0 on the first run; 33 warnings, all pre-existing (none in live.rs, ws.rs or mp_client.rs).
+- Go: no Go code touched (only the vendored capability-core testdata JSON).
+- TS verevonv3 (tsc6 -p tsconfig.app.json --noEmit): first run 2 errors (1 new in DownloadsDrawer.tsx, fixed in aa68cecbb); after the fix 1, the pre-existing baseline (schedule-contract.test.ts TS2352).
+- verevonv3 gateway (cargo check --tests): exit 0; 1 warning, pre-existing (unused import ResponseTemplate in src/domains/browser.rs, not a lane b line).
+- auth-core TS: not changed, not checked.
+- No Quarry ZDR/schema/route-baseline regeneration done: no test run here shows a need (the new gateway route /api/v1/browser/sessions/{id}/view/frames/ws is not yet in the ZDR route matrix, depth W23-b-E345-5).
+
+Open items:
+- E3.4-7: no gateway arm or Ingestion owner route serves browser_download.send_to_knowledge; the registry-to-dispatcher parity test may flag it (as browser_run.steer); no projection reports downloads; nothing mounts the drawer.
+- E3.7.9b: nothing sets the crawlApproval signal until W3-E3.7.9a (lane a) lands; startCrawlJob has no prompt path.
+- E3.4-5: no view-only SSE route (proxy_sse_stream has no extra-header parameter); REST /step still takes no scope.
+- E3.6-7: OCR/PII lanes are client-only, no caller in the pipeline.
+- E3.8.5: fast dns/tls static retry (ask 4) open.
+- None of the new flags are in compose or the runbooks.
+- 28 depth rows appended to W23-depth.md (E3.4-5 5, E3.4-7 5, E3.6-7 7, E3.8.5 7, E3.7.9b 4); W23-b-E347-3 (golden) is done by 2e465238a.
+- The four line-ending-only .sha256 artifacts were not staged.
+
+## Step: W3 finish, lane a
+
+Units (branch w23f/lane-a, base 9bea43473): W3-E3.3-k (7486b7eb3, docs 7bc5d63af), W3-E3.7.2 (5c7fa4b91, docs 482fd103e), W3-E3.8.7 (a37837d12, docs 16e5e6c5e), W3-E3.7.9a (507daffcd, docs bbaebd09d), W3-E3.4-6 (121903141, docs ff66fd481), W3-E3.7.4-6w (f865de101, docs e1095a0f1), W2-FE-WS9H (b804dec7d, docs 4a693694e), plus lane a depth rows (e6338ec42). Flags (all default off or observe): QUARRY_BROWSER_AX_PER_FRAME (E3.3-k), QUARRY_BATCH_PARALLEL (E3.7.2), QUARRY_EDGE__REPUTATION_MODE (E3.8.7), CRAWL_APPROVAL_MODE=observe and CRAWL_APPROVAL_PAGES=50, lower only (E3.7.9a), QUARRY_EDGE__DOWNLOADS (E3.4-6), QUARRY_ORCHESTRATOR__CANONICAL_FRONTIER and QUARRY_EDGE__MAP_GZIP_SITEMAP (E3.7.4-6w), VITE_CHAT_BROWSER_DOCK (WS9H).
+
+Merge commit on w23/integ (after lane b, b27dde3c5):
+- 9a78e1ba4 merge: w23f/lane-a (W3 finish: W3-E3.3-k, W3-E3.7.2, W3-E3.8.7, W3-E3.7.9a, W3-E3.4-6, W3-E3.7.4-6w, W2-FE-WS9H) into w23/integ. No conflicts.
+
+Follow-up commits: none needed (no compile errors).
+
+New action ids: none. action-registry.ts changed (knowledge.crawl_site description, new helpers actionRequiresApproval / crawlSiteRequiresApproval); the admission golden was regenerated (VEREVON_UPDATE_GOLDEN=1 admission-contract test, 5 passed) and came out byte-identical (sha stays 091abfa2...), so no Model Plane copies, sha pin or zdr-contract-sync line moved. D-FIN-a-4 answered: no knowledge.crawl_site row change.
+
+Compile guard (no test runs, except the golden writer):
+- Quarry Rust (cargo check --workspace --tests, CARGO_INCREMENTAL=0): exit 0 on the first run; 0 errors; warnings all in quarry-edge files lane a did not touch (pre-existing set; none in map_routes.rs).
+- Quarry Rust, feature build (cargo check -p quarry-browser --features chromiumoxide --tests, per D-FIN-a-1; the workspace check does not enable chromiumoxide, so chromiumoxide.rs and the include!d trusted_input_live.rs are only compiled here): exit 0, 0 errors, 0 warnings.
+- Go quarry-orchestrator (GOWORK=off go build ./... and go vet ./...): both exit 0, no output.
+- TS verevonv3 (tsc6 -p tsconfig.app.json --noEmit): 1 error, the pre-existing baseline (schedule-contract.test.ts TS2352); ChatPage.tsx, ChatPanels.tsx, the dock files and crawl-site-approval.test.ts typecheck clean.
+- verevonv3 gateway (cargo check --tests): exit 0; 1 warning, pre-existing (unused import ResponseTemplate in src/domains/browser.rs, not a lane a line).
+- auth-core TS: not changed, not checked.
+- No Quarry ZDR/schema/route-baseline regeneration done: no route was added by lane a.
+
+Open items:
+- E3.3-k: asks 1 to 3 (warnings field and wire to quarry-core, docs); warnings are dropped at the trait boundary.
+- E3.7.2: nothing sets max_parallel on a batch job.
+- E3.8.7: no caller of with_reputation at the edge; no per-org reputation setting.
+- E3.7.9a: settings read from env (OnceLock), not AppState; SPA prompt wiring with E3.7.9b's crawlApproval signal; price band has no source; keep CRAWL_APPROVAL_MODE at observe (D-FIN-a-3).
+- E3.7.4-6w: ask B (edge seen route, final_url, mark_seen) not built; redirect seen-marking open.
+- WS9H: step-budget row and FloatingComposer not built.
+- None of the new flags are in compose or the runbooks.
+- 64 depth rows appended to W23-depth.md under "W3 finish lane a" (E3.3-k 8, E3.7.2 5, E3.8.7 6, E3.7.9a 12, E3.4-6 6, E3.7.4-6w 8, WS9H 10 plus 2 security review rows, D-FIN-a 7). D-FIN-a-1, D-FIN-a-2 and D-FIN-a-4 are answered by this guard.
+- The four line-ending-only .sha256 artifacts were not staged.
+
+## Step: W3 finish, lane c
+
+Units (branch w23f/lane-c, base 9bea43473): W3-E3.7.7b (5dc363192), W3-E3.6-6a (74f27fe33), W3-E3.3-d (bf2986a30), W3-E3.8.4d (b68c1b4d2, partial), W3-E3.9.6-7 (a35e7b155), W3-E3.3-c (e70ad477e), W3-E3.3-a (284d5cd27), W3-E3.2-b-swap (acd24e3c2); depth rows 6664a3dba.
+
+Merge commit on w23/integ (after lane a, 739e0549e):
+- 245148e33 merge: w23f/lane-c (W3 finish: W3-E3.7.7b, W3-E3.6-6a, W3-E3.3-d, W3-E3.8.4d, W3-E3.9.6-7, W3-E3.3-c, W3-E3.3-a, W3-E3.2-b-swap) into w23/integ. One conflict: .plan-work/quarry-w1w2/MP-ASKS.md (lane b's W3-E3.6-7 ask vs lane c's E3.3-d, E3.3-c and E3.2-b swap asks); kept both, lane b first.
+
+Follow-up commits: none needed (no compile errors).
+
+New action ids: none. action-registry.ts not changed by lane c, so the admission golden was not regenerated. The ZDR matrix golden (zdr-feature-matrix.json), its .sha256 and the zdr-contract-sync.test.sh pin agree after the merge (842bc936...); no other Quarry golden regeneration needed.
+
+Flags (all default off): QUARRY_EDGE__OFFICE_VIA_IMPORTS, BROWSER_REGION_ATTACH, BROWSER_TAB_MENTIONS, VITE_BROWSER_TAB_MENTIONS, VITE_BROWSER_APPROVAL_CARD (APPROVAL_REDIRECT_ENABLED = false), QUARRY_EVAL_SPEND_CAP_USD (unset = no gate), repo variable QUARRY_TIER_C_ENABLED.
+
+Compile guard (no test runs):
+- Quarry Rust (cargo check --workspace --tests, CARGO_INCREMENTAL=0): exit 0 on the first run; 0 errors; 33 warning lines, all in quarry-edge files lane c did not touch (pre-existing set); none in content_route.rs, pipeline.rs, answer.rs, release_matrix.rs, scrape_cache.rs or zdr_matrix.rs.
+- Go: lane c touched no Go module; not run.
+- TS verevonv3 (tsc6 -p tsconfig.app.json --noEmit): 1 error, the pre-existing baseline (schedule-contract.test.ts TS2352); DashboardComposer.tsx, BrowserChrome.tsx, ChatMessages.tsx, the approval and region-attach files and the new tests typecheck clean.
+- verevonv3 gateway (cargo check --tests): exit 0; 1 warning, pre-existing (unused import ResponseTemplate in src/domains/browser.rs, not a lane c line); browser_context.rs and browser_evidence.rs clean.
+- auth-core TS: not changed, not checked.
+- .github/workflows/quarry-v2-eval-tier-c.yml: not linted (no YAML parser).
+
+Open items:
+- E3.6-6a: nothing calls install_office_extract_client and there is no office-extract manifest row, so with the flags on an Office file still gets the typed 415; ODF/EPUB need imports-core support.
+- E3.3-c: the chat turn path does not call resolve_turn_tab_mentions; no action contract.
+- E3.3-d: no drag overlay, composer chip or browser-client export.
+- E3.7.7b: search_routes.rs does not pass the prefetched pages yet.
+- E3.8.4d: log canary, Redis behavioural tests and the crawl max_age key not built.
+- E3.2-b swap: no component tests with the flag on; parent must dedupe a double press; redirect waits on the execution-core MP ask.
+- E3.9.6-7: no producer for usage_meters.json; prices not ratified; Browserless token in URL (D-E3967-1, security high).
+- 53 lane c depth rows plus 1 integration row appended to W23-depth.md under "W3 finish lane c".
+- The four line-ending-only .sha256 artifacts were not staged.

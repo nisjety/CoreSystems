@@ -32,6 +32,11 @@ pub(crate) struct AppState {
     /// `BROWSER_HUMAN_BROWSE` (WS8.D): whether a session asks for a person's open-web
     /// `human_browse` grant. Off unless set to a truthy value, in every environment.
     pub(crate) browser_human_browse: bool,
+    /// `BROWSER_LIVE_VIEW_ONLY` (W3-E3.4-5): whether the owner's view-only live route
+    /// (`/api/v1/browser/sessions/{id}/view/frames/ws`) is served. Off unless set to a truthy
+    /// value; while off that route answers 404. Quarry honours the scope only with
+    /// `QUARRY_EDGE__LIVE_VIEW_ONLY` on, so the gateway also drops input frames itself.
+    pub(crate) browser_live_view_only: bool,
     pub(crate) auth_core_url: String,
     pub(crate) verevon_public_origin: String,
     pub(crate) session_core_url: String,
@@ -630,6 +635,9 @@ pub(crate) async fn build_state() -> Result<AppState> {
             &env::var("APP_ENV").unwrap_or_default(),
         ),
         browser_human_browse: human_browse_enabled(env::var("BROWSER_HUMAN_BROWSE").ok().as_deref()),
+        browser_live_view_only: human_browse_enabled(
+            env::var("BROWSER_LIVE_VIEW_ONLY").ok().as_deref(),
+        ),
         auth_core_url: env_url("AUTH_CORE_URL", "http://auth-core:3011"),
         verevon_public_origin: canonical_public_origin(
             &env::var("VEREVON_PUBLIC_ORIGIN")

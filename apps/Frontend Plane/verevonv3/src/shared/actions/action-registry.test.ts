@@ -1009,7 +1009,8 @@ describe('action registry', () => {
     // 270 after EP-14-S7 registered chat.inspect_run_request, the request inspector read.
     // 271 after EP-6-S2 registered schedule.run_now.
     // 273 after EP-10-S7 registered integrations.list_connector_policies and integrations.set_connector_policy.
-    expect(ids).toHaveLength(273)
+    // 274 after main's W3-E3.4-7 registered browser_download.send_to_knowledge (downloads drawer).
+    expect(ids).toHaveLength(274)
 
     const spaceIds = ids.filter((id) => id.startsWith('spaces.'))
     const first = ids.indexOf(spaceIds[0] as string)

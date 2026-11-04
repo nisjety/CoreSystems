@@ -217,6 +217,11 @@ export const ERROR_COPY: Record<string, ErrorCopy> = {
   browser_control_epoch_stale: { no: 'Styringen av nettleseren ble endret et annet sted. Oppdatert; prøv igjen.', en: 'Browser control changed elsewhere. It has been refreshed; try again.' },
   browser_capacity_reached: { no: 'Det er for mange nettleserøkter i gang akkurat nå.', en: 'There are too many browser sessions running right now.', retryable: true },
   browser_session_not_found: { no: 'Fant ikke nettleserøkten.', en: 'Browser session not found.' },
+  // W3-E3.4-5: an input frame on the owner's view-only live socket (gateway browser.rs).
+  browser_live_view_only: {
+    no: 'Denne visningen er bare for å se på. Bruk den vanlige nettleservisningen for å styre siden.',
+    en: 'This view is for watching only. Use the regular browser view to control the page.',
+  },
   browser_procedure_not_compilable: { no: 'Prosedyren kan ikke kompileres ennå. Fullfør flere handlinger og prøv igjen.', en: 'The procedure cannot be compiled yet. Complete more actions and try again.' },
   browser_receipts_unavailable_zdr: { no: 'Handlingsloggen er ikke tilgjengelig for økter uten lagring.', en: 'The action log is not available for sessions without retention.' },
   invalid_browser_evidence_query: { no: 'Filteret for nettleserloggen er ugyldig.', en: 'The browser log filter is not valid.' },
@@ -360,6 +365,22 @@ export const ERROR_COPY: Record<string, ErrorCopy> = {
   scrape_timeout: {
     no: 'Siden brukte for lang tid på å svare. Prøv en mer spesifikk underside, eller en annen kilde.',
     en: 'The page took too long to respond. Try a more specific sub-page, or another source.',
+  },
+
+  // Fetch failures Quarry names on a failed scrape (gateway `knowledge/shared.rs`, `fetch_sub_code_refusal`).
+  // They arrive only with the fetch sub-codes switched on in quarry-edge. Other failures keep scrape_failed and scrape_timeout.
+  scrape_host_not_found: {
+    no: 'Vi fant ikke adressen til nettstedet. Sjekk lenken og prøv igjen.',
+    en: 'We could not find the address of the site. Check the link and try again.',
+  },
+  scrape_unreachable: {
+    no: 'Nettstedet svarer ikke akkurat nå.',
+    en: 'The site is not responding right now.',
+    retryable: true,
+  },
+  scrape_tls_failed: {
+    no: 'Det var ikke mulig å opprette en sikker forbindelse til nettstedet. Prøv en annen kilde.',
+    en: 'A secure connection to the site could not be made. Try another source.',
   },
 
   // Refusals the gateway answers before any upstream call: the address or the

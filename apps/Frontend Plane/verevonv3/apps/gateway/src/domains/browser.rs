@@ -527,6 +527,12 @@ fn classed_routes(limiter: &crate::rate_limit::RateLimiter) -> Router<AppState> 
             "/api/v1/browser/sessions/{session_id}/frames/ws",
             get(proxy_live_frames_ws),
         )
+        // W3-E3.4-5: the owner's watch-only socket (no input frames); 404 unless
+        // BROWSER_LIVE_VIEW_ONLY is on.
+        .route(
+            "/api/v1/browser/sessions/{session_id}/view/frames/ws",
+            get(proxy_live_frames_view_only_ws),
+        )
         .route(
             "/api/v1/browser/sessions/{session_id}/devtools",
             get(get_devtools_events),
@@ -2587,6 +2593,69 @@ async fn proxy_live_frames_ws(
     uri: Uri,
     ws: WebSocketUpgrade,
 ) -> Response {
+    proxy_live_frames_ws_scoped(state, user, headers, session_id, uri, ws, false).await
+}
+
+/// W3-E3.4-5: `GET /api/v1/browser/sessions/{session_id}/view/frames/ws`, the owner's
+/// view-only live socket. The scope comes from this route, never from the client: the
+/// gateway sets `x-quarry-live-scope: view_only` upstream and drops every client frame but
+/// the keep-alive itself, so the socket cannot drive the browser even on an edge that does
+/// not yet honour the scope (`QUARRY_EDGE__LIVE_VIEW_ONLY` off). The share is owner-only:
+/// the same owner projection check as the full socket runs first, and Quarry refuses a
+/// view-only share of a ZDR run (403). 404 while `BROWSER_LIVE_VIEW_ONLY` is off.
+async fn proxy_live_frames_view_only_ws(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Path(session_id): Path<String>,
+    uri: Uri,
+    ws: WebSocketUpgrade,
+) -> Response {
+    if !state.browser_live_view_only {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(error(
+                "browser_session_not_found",
+                "The requested browser session view is not available.",
+            )),
+        )
+            .into_response();
+    }
+    proxy_live_frames_ws_scoped(state, user, headers, session_id, uri, ws, true).await
+}
+
+/// The header Quarry reads for the connection's live scope (quarry-edge `LIVE_SCOPE_HEADER`).
+const QUARRY_LIVE_SCOPE_HEADER: &str = "x-quarry-live-scope";
+
+/// W3-E3.4-5: whether a client frame may go upstream on a view-only socket. Only the JSON
+/// keep-alive (`{"type":"ping"}`) and the transport's own ping/pong/close pass; an action,
+/// a control frame, anything unparsable and any binary frame are dropped.
+fn view_only_client_frame_allowed(message: &AxumWsMessage) -> bool {
+    match message {
+        AxumWsMessage::Text(text) => serde_json::from_str::<Value>(text.as_str())
+            .ok()
+            .and_then(|value| {
+                value
+                    .get("type")
+                    .and_then(Value::as_str)
+                    .map(|kind| kind == "ping")
+            })
+            .unwrap_or(false),
+        AxumWsMessage::Binary(_) => false,
+        AxumWsMessage::Ping(_) | AxumWsMessage::Pong(_) | AxumWsMessage::Close(_) => true,
+    }
+}
+
+#[allow(clippy::too_many_arguments)] // the extracted request parts of the two socket routes
+async fn proxy_live_frames_ws_scoped(
+    state: AppState,
+    user: AuthenticatedUser,
+    headers: HeaderMap,
+    session_id: String,
+    uri: Uri,
+    ws: WebSocketUpgrade,
+    view_only: bool,
+) -> Response {
     if !is_valid_path_segment(&session_id) {
         return (
             StatusCode::BAD_REQUEST,
@@ -2627,7 +2696,7 @@ async fn proxy_live_frames_ws(
     };
 
     ws.on_upgrade(move |socket| {
-        browser_ws_proxy_loop(socket, state, session_id, upstream_url, token)
+        browser_ws_proxy_loop(socket, state, session_id, upstream_url, token, view_only)
     })
     .into_response()
 }
@@ -2638,6 +2707,7 @@ async fn browser_ws_proxy_loop(
     _session_id: String,
     upstream_url: String,
     bearer_token: Option<String>,
+    view_only: bool,
 ) {
     let mut request = match upstream_url.as_str().into_client_request() {
         Ok(request) => request,
@@ -2666,6 +2736,13 @@ async fn browser_ws_proxy_loop(
         }
     }
 
+    if view_only {
+        request.headers_mut().insert(
+            QUARRY_LIVE_SCOPE_HEADER,
+            tokio_tungstenite::tungstenite::http::HeaderValue::from_static("view_only"),
+        );
+    }
+
     let upstream = match connect_async(request).await {
         Ok((socket, _response)) => socket,
         Err(_) => {
@@ -2685,6 +2762,21 @@ async fn browser_ws_proxy_loop(
             client_msg = client_rx.next() => {
                 match client_msg {
                     Some(Ok(message)) => {
+                        // W3-E3.4-5: a view-only socket never forwards input upstream.
+                        if view_only && !view_only_client_frame_allowed(&message) {
+                            if client_tx
+                                .send(AxumWsMessage::Text(json!({
+                                    "type": "error",
+                                    "code": "browser_live_view_only",
+                                    "message": "This live view is view-only and does not accept input."
+                                }).to_string().into()))
+                                .await
+                                .is_err()
+                            {
+                                break;
+                            }
+                            continue;
+                        }
                         let close = matches!(message, AxumWsMessage::Close(_));
                         if let Some(upstream_message) = axum_to_tungstenite_message(message) {
                             if upstream_tx.send(upstream_message).await.is_err() {
@@ -3298,7 +3390,7 @@ fn browser_response(
                 "eventCount": metadata.replay_events.len()
             },
             "zdr": metadata.zdr,
-            "capabilities": ["navigate", "back", "forward", "reload", "hard_reload", "click", "click_point", "type", "press", "scroll", "mouse_wheel", "wait_for", "select", "inspect_dom", "control_state", "human_takeover", "agent_control", "tabs", "live_frame", "live_frame_stream", "live_frame_ws", "devtools_events", "devtools_stream", "replay_timeline", "screenshot_artifact", "visual_observation", "visual_change", "annotate", "persistent_profile", "evidence"]
+            "capabilities": ["navigate", "back", "forward", "reload", "hard_reload", "click", "click_point", "type", "press", "scroll", "mouse_wheel", "wait_for", "select", "control_state", "human_takeover", "agent_control", "tabs", "live_frame", "live_frame_stream", "live_frame_ws", "devtools_events", "devtools_stream", "replay_timeline", "screenshot_artifact", "visual_observation", "visual_change", "persistent_profile", "evidence"]
         },
         "observation": observation
     })
@@ -3434,12 +3526,16 @@ fn browser_response_from_owner_projection(projection: &Value, observation: Optio
     })
 }
 
-/// The capabilities the SPA may act on for a session. The three WS8.D additions are read
-/// from Quarry's projection, so none is advertised until Quarry reports it: `human_browsing`
-/// needs `grantKind == "human_browse"`, `tab_control` the boolean `tabControl`, and `attach`
-/// the boolean `attachAvailable` (false until WS8.F).
+/// The capabilities the SPA may act on for a session. Each names an action or surface that Quarry
+/// honours for it. The three WS8.D additions are read from Quarry's projection, so none is
+/// advertised until Quarry reports it: `human_browsing` needs `grantKind == "human_browse"`,
+/// `tab_control` the boolean `tabControl`, and `attach` the boolean `attachAvailable` (false until
+/// WS8.F). A ZDR run cannot take a persistent profile or an attach (`reject_zdr_persistent_profile`
+/// here, and the `agent_persistent_profile` and `agent_attach` rows of Quarry's `zdr_matrix`), so
+/// `persistent_profile` and `attach` are offered only when the projection says `zdr: false`.
 fn browser_session_capabilities(projection: &Value) -> Vec<&'static str> {
     let flag = |key: &str| projection.get(key).and_then(Value::as_bool).unwrap_or(false);
+    let zdr_off = projection.get("zdr").and_then(Value::as_bool) == Some(false);
     let mut capabilities = vec![
         "navigate",
         "back",
@@ -3454,7 +3550,6 @@ fn browser_session_capabilities(projection: &Value) -> Vec<&'static str> {
         "mouse_wheel",
         "wait_for",
         "select",
-        "inspect_dom",
         "control_state",
         "human_takeover",
         "agent_control",
@@ -3465,17 +3560,18 @@ fn browser_session_capabilities(projection: &Value) -> Vec<&'static str> {
         "screenshot_artifact",
         "visual_observation",
         "visual_change",
-        "annotate",
-        "persistent_profile",
         "evidence",
     ];
+    if zdr_off {
+        capabilities.push("persistent_profile");
+    }
     if projection.get("grantKind").and_then(Value::as_str) == Some("human_browse") {
         capabilities.push("human_browsing");
     }
     if flag("tabControl") {
         capabilities.push("tab_control");
     }
-    if flag("attachAvailable") {
+    if zdr_off && flag("attachAvailable") {
         capabilities.push("attach");
     }
     capabilities
@@ -8237,6 +8333,7 @@ pub(crate) mod tests {
             enforcement_mode: "off".to_string(),
             browser_grant_mode: BrowserGrantMode::Permissive,
             browser_human_browse: false,
+            browser_live_view_only: false,
             auth_core_url: "http://127.0.0.1:1".into(),
             verevon_public_origin: "http://localhost:5173".into(),
             session_core_url: "http://127.0.0.1:1".into(),
@@ -10411,6 +10508,35 @@ mod human_browse_session_tests {
         assert!(!caps.contains(&"tab_control"));
         assert!(!caps.contains(&"attach"));
     }
+
+    #[test]
+    fn advertised_capabilities_name_only_what_quarry_honours() {
+        let open = browser_session_capabilities(&json!({
+            "runId": "run-1",
+            "zdr": false,
+            "grantKind": "human_browse",
+            "tabControl": true,
+            "attachAvailable": true
+        }));
+        assert!(!open.contains(&"annotate"), "{open:?}");
+        assert!(!open.contains(&"inspect_dom"), "{open:?}");
+        assert!(open.contains(&"persistent_profile"), "{open:?}");
+        assert!(open.contains(&"human_browsing"), "{open:?}");
+        assert!(open.contains(&"tab_control"), "{open:?}");
+        assert!(open.contains(&"attach"), "{open:?}");
+
+        let zdr = browser_session_capabilities(&json!({
+            "runId": "run-1",
+            "zdr": true,
+            "attachAvailable": true
+        }));
+        assert!(!zdr.contains(&"persistent_profile"), "{zdr:?}");
+        assert!(!zdr.contains(&"attach"), "{zdr:?}");
+        assert!(zdr.contains(&"navigate"), "{zdr:?}");
+
+        let unstated = browser_session_capabilities(&json!({ "runId": "run-1" }));
+        assert!(!unstated.contains(&"persistent_profile"), "{unstated:?}");
+    }
 }
 
 #[cfg(test)]
@@ -10507,5 +10633,36 @@ mod tab_opened_by_tests {
         assert_eq!(tabs[1]["openedBy"], "agent", "{response}");
         assert_eq!(tabs[2]["openedBy"], "human", "{response}");
         assert!(!response.to_string().contains("run_01J9"), "{response}");
+    }
+}
+
+#[cfg(test)]
+mod live_view_only_tests {
+    use super::*;
+
+    fn text(value: &str) -> AxumWsMessage {
+        AxumWsMessage::Text(value.to_owned().into())
+    }
+
+    #[test]
+    fn a_view_only_socket_forwards_only_the_keep_alive() {
+        assert!(view_only_client_frame_allowed(&text(r#"{"type":"ping"}"#)));
+        assert!(!view_only_client_frame_allowed(&text(
+            r#"{"type":"action","action":{"type":"navigate","url":"https://example.test/"}}"#
+        )));
+        assert!(!view_only_client_frame_allowed(&text(
+            r#"{"type":"control","mode":"human_takeover"}"#
+        )));
+        assert!(!view_only_client_frame_allowed(&text("not json")));
+        assert!(!view_only_client_frame_allowed(&text(r#"{"kind":"ping"}"#)));
+        assert!(!view_only_client_frame_allowed(&AxumWsMessage::Binary(
+            vec![1_u8, 2, 3].into()
+        )));
+        assert!(view_only_client_frame_allowed(&AxumWsMessage::Close(None)));
+    }
+
+    #[test]
+    fn the_scope_header_matches_the_edge() {
+        assert_eq!(QUARRY_LIVE_SCOPE_HEADER, "x-quarry-live-scope");
     }
 }

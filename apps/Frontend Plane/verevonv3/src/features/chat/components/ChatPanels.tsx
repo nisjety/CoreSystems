@@ -106,6 +106,8 @@ export function ChatHeader(props: {
   onChange: (tab: ChatTab) => void
   onNewChat: () => void
   onRegenerate: () => void
+  /** The chat browser's header control (WS9.H). Absent while the dock is off in this build. */
+  browserSlot?: JSX.Element
 }) {
   const i18n = useI18n()
   const [openMenu, setOpenMenu] = createSignal<'workspace' | 'more' | null>(null)
@@ -161,6 +163,7 @@ export function ChatHeader(props: {
         </p>
       </div>
       <div class="verevon-chat-header__actions">
+        {props.browserSlot}
         <Show when={workSurfaces().length > 0}>
           <div class="verevon-chat-header-menu" onFocusOut={closeOnFocusOut}>
             <button
