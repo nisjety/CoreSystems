@@ -806,6 +806,58 @@ export async function getLineage(threadId: string, signal?: AbortSignal): Promis
   )
 }
 
+/**
+ * One lineage edge as the wide-research grid reads it back after a reload (EP-2 S9). `goalSummary`
+ * and `batchId` are what the fan-out stored when the item started; `status` is the edge's own
+ * (`attached`/`detached`), not how the item ended, which is the child run's status.
+ */
+export type LineageEdgeSummary = {
+  parentRunId: string
+  childRunId: string
+  goalSummary: string
+  batchId: string
+  status: string
+}
+
+function lineageText(value: unknown): string {
+  return typeof value === 'string' ? value : ''
+}
+
+/**
+ * The edges of a lineage payload (`{ lineage: { edges } }`, or the inner object). An edge without a
+ * child run id is dropped; a missing goal, batch or status reads as empty, as an edge stored before
+ * those fields existed comes back.
+ */
+export function normalizeLineageEdges(payload: unknown): LineageEdgeSummary[] {
+  if (!payload || typeof payload !== 'object') return []
+  const root = payload as Record<string, unknown>
+  const lineage = root.lineage && typeof root.lineage === 'object'
+    ? root.lineage as Record<string, unknown>
+    : root
+  if (!Array.isArray(lineage.edges)) return []
+  return lineage.edges.flatMap((edge): LineageEdgeSummary[] => {
+    if (!edge || typeof edge !== 'object' || Array.isArray(edge)) return []
+    const raw = edge as Record<string, unknown>
+    const childRunId = lineageText(raw.child_run_id)
+    if (!childRunId) return []
+    return [{
+      parentRunId: lineageText(raw.parent_run_id),
+      childRunId,
+      goalSummary: lineageText(raw.goal_summary),
+      batchId: lineageText(raw.batch_id),
+      status: lineageText(raw.status),
+    }]
+  })
+}
+
+/** A thread's lineage edges, parsed ({@link normalizeLineageEdges}). */
+export async function getLineageEdges(
+  threadId: string,
+  signal?: AbortSignal,
+): Promise<LineageEdgeSummary[]> {
+  return normalizeLineageEdges(await getLineage(threadId, signal))
+}
+
 // ── Run questions (build plan WS14 S3) ───────────────────────────────────────
 // A question a run put to the person. It is its own store (`run_questions`), never an
 // approval: an answer is information and grants nothing. Dark until a later slice creates

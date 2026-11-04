@@ -13,11 +13,18 @@
  * sibling of the chat page's flex row) gives the card grid the rail's width
  * and lets the rail's own hide/collapse rules apply to it.
  *
- * It only knows what it watched: sub-agent lifecycle events are not part of
- * the durable replay projection (which carries browser evidence only), so a
- * panel mounted after the fact — a reload mid- or post-run — starts empty
- * rather than reconstructing cards it never saw. (Carrying these events into
- * the durable replay is a session-core change, not attempted here.)
+ * Sub-agent lifecycle events are not part of the durable replay projection
+ * (which carries browser evidence only), so a panel mounted after the fact — a
+ * reload mid- or post-run — seeds its cards from the thread's lineage instead
+ * (EP-2 S9, when it is given the `threadId`): every edge in a batch this run
+ * started, titled by the goal the edge stored, its status read from the child
+ * run. Live events then join as before. Without a `threadId` it starts empty,
+ * as it always did. An item the child token budget stopped never started, so
+ * it has no edge and no card; the run's answer names it.
+ *
+ * A failed, refused or unfinished card offers "Prøv igjen" when the host passes
+ * `onRetryItem` (action `chat.wide_research_retry_item`): a one-item retry in
+ * the same batch, whose item execution-core reads back from that child run.
  *
  * Honest-state contract, mirroring `chat-run-watch.ts`'s
  * `screenshotStateFor`: a card never spins forever. It is `running` once its
@@ -30,9 +37,14 @@
 
 import { For, Show, createEffect, createSignal } from 'solid-js'
 import { CircleCheck, CircleX, Loader2, Slash } from '@/shared/icons'
+import { getLineageEdges } from '@/shared/api/orchestration-client'
 import { streamRunEvents } from '@/shared/api/run-console-client'
 import { getRun } from '@/shared/api/runs-client'
 import { useI18n } from '@/shared/i18n'
+
+/** Most cards seeded from the lineage, each one a run read: twice the largest fan-out (16), so a
+ * batch with retries still fits. */
+const MAX_SEEDED_ITEMS = 32
 
 /** Mirrors `ChatLiveRunPanel`'s own copy (module-local there, not exported) —
  * both independently decide "this run cannot emit more work" from the same
@@ -75,6 +87,24 @@ function stoppedEventStatusToItemStatus(status: string | undefined): WideResearc
   return 'failed'
 }
 
+/** A seeded card's status from its child run's durable status: still running until the run
+ * reaches a terminal status, then the same mapping a stop event gets. */
+function runStatusToItemStatus(status: string | undefined): WideResearchItemStatus {
+  return isTerminalRunStatus(status) ? stoppedEventStatusToItemStatus(status) : 'running'
+}
+
+/** The card states a person may retry: an item that did not produce an answer. */
+function isRetryable(status: WideResearchItemStatus): boolean {
+  return status === 'failed' || status === 'refused' || status === 'unknown'
+}
+
+/** What a retry needs: the child run whose item runs again, and the batch it joins. */
+export type WideResearchRetryRequest = {
+  childRunId: string
+  batchId: string
+  goalSummary: string
+}
+
 function statusPillClass(status: WideResearchItemStatus): string {
   switch (status) {
     case 'done':
@@ -92,10 +122,36 @@ function statusPillClass(status: WideResearchItemStatus): string {
 export function ChatWideResearchPanel(props: {
   /** Orchestration run id for the turn being watched; null hides the panel. */
   runId: string | null
+  /** The run's thread: with it, a panel mounted after the fact seeds its cards from the lineage. */
+  threadId?: string | null
+  /** Starts a one-item retry (`chat.wide_research_retry_item`); without it no card offers one. */
+  onRetryItem?: (request: WideResearchRetryRequest) => Promise<void> | void
 }) {
   const i18n = useI18n()
   const [items, setItems] = createSignal<WideResearchItem[]>([])
+  const [retrying, setRetrying] = createSignal<ReadonlySet<string>>(new Set())
   let activeGeneration = 0
+
+  const retry = async (item: WideResearchItem) => {
+    const onRetryItem = props.onRetryItem
+    if (!onRetryItem || retrying().has(item.childRunId)) return
+    setRetrying((current) => new Set([...current, item.childRunId]))
+    try {
+      await onRetryItem({
+        childRunId: item.childRunId,
+        batchId: item.batchId,
+        goalSummary: item.goalSummary,
+      })
+    } catch {
+      // The host reports a failed send where it reports any other; the card stays retryable.
+    } finally {
+      setRetrying((current) => {
+        const next = new Set(current)
+        next.delete(item.childRunId)
+        return next
+      })
+    }
+  }
 
   const statusLabel = (status: WideResearchItemStatus): string => {
     switch (status) {
@@ -113,8 +169,8 @@ export function ChatWideResearchPanel(props: {
   }
 
   createEffect(
-    () => props.runId,
-    (runId) => {
+    () => [props.runId, props.threadId ?? null] as const,
+    ([runId, threadId]) => {
       const generation = ++activeGeneration
       setItems([])
       if (!runId) return
@@ -124,9 +180,13 @@ export function ChatWideResearchPanel(props: {
         if (generation !== activeGeneration) return
         setItems(apply)
       }
+      // Set once the run is known to have ended, so cards seeded after that
+      // are resolved the same way as the ones already shown.
+      let runEnded = false
       // Any item still `running` when the run ends did not finish — never
       // left as a perpetual spinner.
       const markUnresolved = () => {
+        runEnded = true
         update((current) => current.map((item) => (
           item.status === 'running' ? { ...item, status: 'unknown' } : item
         )))
@@ -147,6 +207,47 @@ export function ChatWideResearchPanel(props: {
           // The live stream remains the source of truth when the read model
           // is temporarily unavailable — same posture as `ChatLiveRunPanel`.
         })
+
+      // Replay after a reload (EP-2 S9): every edge in a batch this run
+      // started, retries in that batch included, each card's status read from
+      // its child run. A card the live stream already shows keeps its live
+      // state. A failed read leaves the panel to the live stream, as before.
+      if (threadId) {
+        void getLineageEdges(threadId, controller.signal)
+          .then(async (edges) => {
+            const batches = new Set(
+              edges
+                .filter((edge) => edge.parentRunId === runId && edge.batchId)
+                .map((edge) => edge.batchId),
+            )
+            const replayed = edges
+              .filter((edge) => batches.has(edge.batchId))
+              .slice(0, MAX_SEEDED_ITEMS)
+            const seeded = await Promise.all(replayed.map(async (edge): Promise<WideResearchItem> => {
+              let status: WideResearchItemStatus = 'unknown'
+              try {
+                status = runStatusToItemStatus((await getRun(edge.childRunId, controller.signal))?.status)
+              } catch {
+                // Unreadable: "did not finish" rather than a spinner nothing will stop.
+              }
+              return {
+                childRunId: edge.childRunId,
+                batchId: edge.batchId,
+                goalSummary: edge.goalSummary,
+                status,
+              }
+            }))
+            if (controller.signal.aborted) return
+            update((current) => [
+              ...seeded.filter((item) => !current.some((live) => live.childRunId === item.childRunId)),
+              ...current,
+            ])
+            if (runEnded) markUnresolved()
+          })
+          .catch(() => {
+            // The live stream remains the source of truth.
+          })
+      }
 
       void streamRunEvents(
         runId,
@@ -250,6 +351,17 @@ export function ChatWideResearchPanel(props: {
                         </Show>
                         {statusLabel(item.status)}
                       </span>
+                      <Show when={props.onRetryItem && isRetryable(item.status)}>
+                        <button
+                          type="button"
+                          class="verevon-wide-research__retry"
+                          data-action-id="chat.wide_research_retry_item"
+                          disabled={retrying().has(item.childRunId)}
+                          onClick={() => void retry(item)}
+                        >
+                          {i18n.tr('Prøv igjen', 'Try again')}
+                        </button>
+                      </Show>
                     </article>
                   )}
                 </For>

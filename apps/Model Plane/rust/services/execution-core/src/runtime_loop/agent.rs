@@ -740,13 +740,36 @@ struct UsageTally {
     legs: std::sync::Arc<
         std::sync::Mutex<std::collections::BTreeMap<(String, String), pb::RunUsageLeg>>,
     >,
+    /// The metered tokens of ONE wide-research item's child loop (EP-2 S9), when this tally is
+    /// that child's: its rounds still go into the shared `legs`, and their metered tokens also
+    /// here, so the fan-out can sum what its finished children spent. `None` everywhere else.
+    item_metered: Option<std::sync::Arc<std::sync::atomic::AtomicU64>>,
 }
 
 impl UsageTally {
+    /// This tally, also counting each round's metered tokens into `meter` (EP-2 S9): the tally a
+    /// wide-research item's child loop records into.
+    fn metering_into(&self, meter: std::sync::Arc<std::sync::atomic::AtomicU64>) -> Self {
+        Self {
+            legs: std::sync::Arc::clone(&self.legs),
+            item_metered: Some(meter),
+        }
+    }
+
     /// Count one round that returned a provider response, under the provider and
     /// model that served it. Called only for a round the route guard accepted, and
     /// never for a continuation's seeded round, which no provider answered.
     fn record(&self, response: &pb::InferResponse) {
+        if let Some(meter) = &self.item_metered {
+            meter.fetch_add(
+                crate::subagent::research_fan_out::metered_tokens(
+                    &response.provider_used,
+                    response.input_tokens,
+                    response.output_tokens,
+                ),
+                std::sync::atomic::Ordering::Relaxed,
+            );
+        }
         // A negative count is a provider bug; it must not subtract from the run.
         let count = |tokens: i32| u64::try_from(tokens).unwrap_or(0);
         let mut legs = self
@@ -1881,6 +1904,60 @@ fn admit_wide_research(
         .map_err(tonic::Status::failed_precondition)
 }
 
+/// The one-item plan of a wide-research retry (Wave 3 EP-2 S9). The item is the goal the retried
+/// child run recorded, read back from session-core under the person's own session credential, so
+/// session-core's run-owner check decides whether this person may read it; the run must also be a
+/// fan-out item of this thread ([`research_fan_out::retry_item_goal`]). Every failure is the same
+/// refusal, returned before the run's first heartbeat, so nothing of the run is written and the
+/// refusal does not say whether the run exists.
+///
+/// [`research_fan_out::retry_item_goal`]: crate::subagent::research_fan_out::retry_item_goal
+async fn retry_wide_research_plan(
+    session_channel: &Channel,
+    session_bearer: Option<&str>,
+    req: &pb::RunAgentRequest,
+    child_run_id: &str,
+    cap: u32,
+) -> Result<crate::subagent::research_fan_out::WideResearchPlan, tonic::Status> {
+    use crate::subagent::research_fan_out;
+    use mp_contracts::model_plane::v1::run_service_client::RunServiceClient;
+
+    let refused =
+        || tonic::Status::failed_precondition(research_fan_out::retry_unavailable_refusal());
+    let request = authenticated_session_request(
+        pb::GetRunRequest {
+            run_id: child_run_id.to_owned(),
+        },
+        session_bearer,
+    )
+    .map_err(|_| refused())?;
+    let detail = match RunServiceClient::new(session_channel.clone())
+        .get_run(request)
+        .await
+    {
+        Ok(response) => response.into_inner(),
+        Err(error) => {
+            warn!(
+                run_id = %req.run_id,
+                code = ?error.code(),
+                reason = %status_reason(&error),
+                "run_agent: the wide-research item to retry could not be read back"
+            );
+            return Err(refused());
+        }
+    };
+    let goal = research_fan_out::retry_item_goal(
+        &req.thread_id,
+        &detail.thread_id,
+        &detail.parent_run_id,
+        &detail.agent_id,
+        &detail.goal,
+    )
+    .map_err(tonic::Status::failed_precondition)?;
+    research_fan_out::plan_wide_research(&[goal], cap.min(1))
+        .map_err(tonic::Status::failed_precondition)
+}
+
 /// [`run_agent_with_route`] with whether the offered tool set is derivable (WS03 S8-A): the
 /// body of the route-level driver. `derivable` is the offer's own claim; an approval
 /// continuation is never derivable whatever it says, because its tools are the snapshot's.
@@ -2012,9 +2089,24 @@ async fn run_agent_with_route_parkable(
     // person's ask as `wide_research.item_cap`, which is the org ceiling here. Only a fresh run
     // reads it; a continuation or a scheduled run keeps the shape it started with. A refusal
     // returns before the run's first heartbeat, so nothing of the run is written.
+    //
+    // A one-item retry (EP-2 S9) is admitted the same way first, so a ZDR turn, the switch off
+    // or an org cap of 0 refuses it before session-core is asked for anything.
     let wide_research = match req.wide_research.as_ref() {
         Some(wide) if resumed.is_none() && scheduled.is_none() => {
-            Some(admit_wide_research(&req, wide)?)
+            let plan = admit_wide_research(&req, wide)?;
+            Some(if wide.retry_of_child_run_id.is_empty() {
+                plan
+            } else {
+                retry_wide_research_plan(
+                    &session_channel,
+                    session_bearer.as_deref(),
+                    &req,
+                    &wide.retry_of_child_run_id,
+                    plan.cap,
+                )
+                .await?
+            })
         }
         _ => None,
     };
@@ -5508,23 +5600,75 @@ impl LoopSubagentDispatch<'_, '_> {
         // the model-supplied item id: that is free text, and a lineage row is
         // not the place to store it.
         let label = crate::subagent::label(research_fan_out::RESEARCH_TOOL_NAME);
-        let batch_id = self.parent_step_id.to_owned();
+        // A one-item retry joins the batch it retries (EP-2 S9), so the person's grid groups the
+        // new attempt with its siblings; every other call is its own batch.
+        let batch_id = self
+            .parent
+            .req
+            .wide_research
+            .as_ref()
+            .and_then(|wide| {
+                research_fan_out::retry_batch_id(&wide.retry_of_child_run_id, &wide.batch_id)
+            })
+            .unwrap_or(self.parent_step_id)
+            .to_owned();
         let semaphore =
             std::sync::Arc::new(tokio::sync::Semaphore::new(research_fan_out::concurrency()));
         let consumed = std::sync::atomic::AtomicU32::new(0);
         let max_rounds_per_item = request.max_rounds_per_item;
         let result_schema_hint = request.result_schema_hint.as_deref();
+        // The children's token budget (EP-2 S9, decision D4): what the call's FINISHED children
+        // spent, checked before each item starts. Off (`WIDE_RESEARCH_CHILD_BUDGET_ENFORCED`), a
+        // spent budget is logged once and every item still starts.
+        let child_budget = research_fan_out::ChildBudget::from_env();
+        let finished_spent = std::sync::atomic::AtomicU64::new(0);
+        let spent_logged = std::sync::atomic::AtomicBool::new(false);
 
         let results: Vec<FanOutItemResult> = futures::future::join_all(
             request.items.iter().enumerate().map(|(index, item)| {
                 let semaphore = std::sync::Arc::clone(&semaphore);
                 let batch_id = batch_id.as_str();
                 let consumed = &consumed;
+                let finished_spent = &finished_spent;
+                let spent_logged = &spent_logged;
                 async move {
                     let _permit = semaphore
                         .acquire()
                         .await
                         .expect("fan-out semaphore is never closed");
+                    // Checked once this item holds its permit, so a sibling that finished while
+                    // it waited is counted; before the ceiling claim, so an item the budget stops
+                    // spends no child slot.
+                    let spent = finished_spent.load(std::sync::atomic::Ordering::Relaxed);
+                    match child_budget.check(spent) {
+                        research_fan_out::BudgetCheck::Within => {}
+                        research_fan_out::BudgetCheck::SpentNotEnforced => {
+                            if !spent_logged.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                                warn!(
+                                    run_id = %self.parent.req.run_id,
+                                    spent,
+                                    budget = child_budget.tokens,
+                                    "run_agent: research_fan_out children spent their token \
+                                     budget; not enforced, so the remaining items still start"
+                                );
+                            }
+                        }
+                        research_fan_out::BudgetCheck::Reached => {
+                            info!(
+                                run_id = %self.parent.req.run_id,
+                                spent,
+                                budget = child_budget.tokens,
+                                item_index = index,
+                                "run_agent: research_fan_out item not started; the children's \
+                                 token budget is spent"
+                            );
+                            return FanOutItemResult::budget_reached(
+                                item,
+                                spent,
+                                child_budget.tokens,
+                            );
+                        }
+                    }
                     // Resolve this item's share of the pool BEFORE claiming a
                     // child-ceiling slot. It depends only on the item's index, so
                     // no item's outcome depends on another's — but it matters
@@ -5564,6 +5708,7 @@ impl LoopSubagentDispatch<'_, '_> {
                     }
                     let item_step_id = format!("{}.{index}", self.parent_step_id);
                     let prompt = research_fan_out::compose_item_prompt(item, result_schema_hint);
+                    let item_meter = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
                     let (result, rounds) = run_delegated_child(
                         self.parent,
                         &item_step_id,
@@ -5574,9 +5719,16 @@ impl LoopSubagentDispatch<'_, '_> {
                         pb::SubagentRole::Researcher,
                         Some(batch_id),
                         None,
+                        Some(&item_meter),
                     )
                     .await;
                     consumed.fetch_add(rounds, std::sync::atomic::Ordering::Relaxed);
+                    // Added while this item still holds its permit, so the next item to start
+                    // sees what this one spent.
+                    finished_spent.fetch_add(
+                        item_meter.load(std::sync::atomic::Ordering::Relaxed),
+                        std::sync::atomic::Ordering::Relaxed,
+                    );
                     match result {
                         Ok(answer) => FanOutItemResult::ok(item, answer),
                         Err(error) => FanOutItemResult::failed(item, error),
@@ -6474,6 +6626,7 @@ async fn run_subagent(
         SUBAGENT_LINEAGE_ROLE,
         None,
         role,
+        None,
     )
     .await
 }
@@ -6497,6 +6650,9 @@ async fn run_subagent(
 /// the child then holds only the parent's tools that role allows and its run is
 /// recorded as `agent_ref@version`. `None` for every other delegation.
 ///
+/// `item_meter` is where a wide-research item's child counts its metered tokens (EP-2 S9), so
+/// its fan-out can hold its children to their token budget. `None` for every other delegation.
+///
 /// Returns the rounds consumed alongside the result — including on failure —
 /// because the caller must charge them either way.
 #[allow(clippy::too_many_arguments)] // a cohesive description of one delegation
@@ -6510,6 +6666,7 @@ async fn run_delegated_child(
     role: pb::SubagentRole,
     batch_id: Option<&str>,
     agent_role: Option<&pb::AgentRoleSpec>,
+    item_meter: Option<&std::sync::Arc<std::sync::atomic::AtomicU64>>,
 ) -> (Result<String, String>, u32) {
     // A run-wide refusal (a spent usage limit, an expired sign-in) that another
     // loop of the run already met ends the run: this delegation is not started,
@@ -6629,8 +6786,12 @@ async fn run_delegated_child(
         subagent_roles: None,
         // The parent's deadline, copied: one limit for the whole run.
         deadline: parent.deadline,
-        // The parent's tally, shared: the delegate's rounds are the run's.
-        usage: parent.usage.clone(),
+        // The parent's tally, shared: the delegate's rounds are the run's. A wide-research
+        // item's also counts its metered tokens for its fan-out's child budget (EP-2 S9).
+        usage: item_meter.map_or_else(
+            || parent.usage.clone(),
+            |meter| parent.usage.metering_into(std::sync::Arc::clone(meter)),
+        ),
         // A delegated loop's rounds are not listed: they fall inside the parent round's dispatch.
         round_timing: None,
         result_store: parent.result_store.clone(),
@@ -11443,6 +11604,9 @@ mod tests {
         /// Status `MockRunService` reports for a child run. `completed` unless a
         /// replay test needs to prove the still-in-flight refusal.
         replayed_run_status: Option<String>,
+        /// Agent id `MockRunService` reports for a run. `task` unless a wide-research
+        /// retry test needs a fan-out item (EP-2 S9).
+        run_agent_id: Option<String>,
         plan_transitions: Vec<(i32, i32)>, // (from, to)
         approvals: Vec<(String, String)>,  // (step_id, reason)
         /// The `continuation_mode` of every `CreateApproval` the mock accepted, in
@@ -12632,7 +12796,10 @@ mod tests {
                 run_id: run_id.to_owned(),
                 thread_id: sample_request().thread_id,
                 parent_run_id: sample_request().run_id,
-                agent_id: "task".to_owned(),
+                agent_id: rec
+                    .run_agent_id
+                    .clone()
+                    .unwrap_or_else(|| "task".to_owned()),
                 status: rec
                     .replayed_run_status
                     .clone()
@@ -13237,6 +13404,7 @@ mod tests {
                 tool_input_json: "{}".to_owned(),
                 step_id: "tool_1_del-1".to_owned(),
                 authority: Some(mock_snapshot()),
+                ..Default::default()
             }))
         }
 
@@ -13648,6 +13816,64 @@ mod tests {
             switched_off.message(),
             crate::subagent::research_fan_out::disabled_refusal()
         );
+    }
+
+    /// A one-item retry (EP-2 S9) reads its item back from the child run under the person's own
+    /// session credential (session-core's run-owner check), and only from a fan-out item of the
+    /// same thread; every other case is the one refusal.
+    #[tokio::test]
+    async fn a_research_fan_out_retry_reads_its_item_back_only_from_a_fan_out_child_of_the_thread()
+    {
+        use crate::subagent::research_fan_out::{retry_unavailable_refusal, RESEARCH_TOOL_NAME};
+
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder {
+            run_agent_id: Some(crate::subagent::label(RESEARCH_TOOL_NAME).to_owned()),
+            ..Recorder::default()
+        }));
+        let session_channel = spawn_session_channel(rec.clone()).await;
+        let req = sample_request();
+
+        let plan =
+            retry_wide_research_plan(&session_channel, Some("session-token"), &req, "run-child", 4)
+                .await
+                .expect("a fan-out item of this thread");
+        assert_eq!(plan.kept, ["the delegated goal"]);
+        assert_eq!(plan.cap, 1, "a retry is one item, whatever the org allows");
+        assert!(plan.dropped.is_empty());
+
+        // An org with wide research off still refuses the retry.
+        let off = retry_wide_research_plan(&session_channel, Some("session-token"), &req, "c", 0)
+            .await
+            .expect_err("cap 0");
+        assert_eq!(
+            off.message(),
+            crate::subagent::research_fan_out::wide_research_off_refusal()
+        );
+
+        // No forwardable credential: session-core is never asked.
+        let anonymous = retry_wide_research_plan(&session_channel, None, &req, "run-child", 4)
+            .await
+            .expect_err("no credential");
+        assert_eq!(anonymous.code(), tonic::Code::FailedPrecondition);
+        assert_eq!(anonymous.message(), retry_unavailable_refusal());
+
+        // A run of another conversation.
+        let elsewhere = pb::RunAgentRequest {
+            thread_id: "thread-other".to_owned(),
+            ..sample_request()
+        };
+        let refused =
+            retry_wide_research_plan(&session_channel, Some("session-token"), &elsewhere, "c", 4)
+                .await
+                .expect_err("another thread");
+        assert_eq!(refused.message(), retry_unavailable_refusal());
+
+        // A child that is not a fan-out item.
+        rec.lock().unwrap().run_agent_id = None;
+        let task = retry_wide_research_plan(&session_channel, Some("session-token"), &req, "c", 4)
+            .await
+            .expect_err("a subagent.task child");
+        assert_eq!(task.message(), retry_unavailable_refusal());
     }
 
     fn sample_agent_skill(name: &str, keywords: &[&str], content: &str) -> pb::AgentSkill {
@@ -17563,6 +17789,7 @@ mod tests {
             tool_input_json: "{}".to_owned(),
             step_id: step_id.to_owned(),
             authority: Some(authority),
+            ..Default::default()
         }
     }
 
@@ -23887,6 +24114,68 @@ mod tests {
         );
     }
 
+    /// Six items, four in flight at once, and every mock round spends two metered tokens: the
+    /// first four start before any child finished, and the last two wait for a permit until one
+    /// has. With the child budget enforced at one token they end `budget_reached` and never
+    /// start; with it only logged (the default) all six run (EP-2 S9).
+    async fn research_fan_out_with_child_budget(enforced: bool) -> (usize, ObservedMessages) {
+        let _budget = crate::subagent::research_fan_out::BudgetOverride::set(enforced, 1);
+        let items: Vec<String> = (0..6)
+            .map(|i| format!(r#"{{"id":"q{i}","goal":"look up {i}"}}"#))
+            .collect();
+        let input = format!(r#"{{"items":[{}]}}"#, items.join(","));
+        let mut script = vec![Scripted::ToolCalls {
+            content: String::new(),
+            calls: vec![research_fan_out_call("fan-1", &input)],
+        }];
+        let started = if enforced { 4 } else { 6 };
+        for i in 0..started {
+            script.push(Scripted::Answer(format!("finding {i}")));
+        }
+        script.push(Scripted::Answer("Collected the findings.".to_owned()));
+
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        let session_channel = spawn_session_channel(rec.clone()).await;
+        let observed: ObservedMessages = Arc::new(Mutex::new(Vec::new()));
+        let inference_channel =
+            spawn_inference_channel_with_messages(script, observed.clone()).await;
+
+        let mut req = sample_request();
+        req.max_rounds = 10;
+        let resp = run_fan_out_agent(session_channel, inference_channel, req).await;
+        assert_eq!(resp.status, "completed");
+        assert_eq!(resp.final_output, "Collected the findings.");
+        let edges = rec.lock().unwrap().lineage_edges.len();
+        (edges, observed)
+    }
+
+    #[tokio::test]
+    async fn research_fan_out_stops_starting_items_once_the_enforced_child_budget_is_spent() {
+        if crate::subagent::research_fan_out::concurrency() != 4 {
+            return; // the arithmetic below assumes the default of four in flight
+        }
+        let (edges, observed) = research_fan_out_with_child_budget(true).await;
+        assert_eq!(
+            edges, 4,
+            "an item the budget stops registers no child run, and a started one is never stopped"
+        );
+        assert!(
+            observed_text_contains(&observed, "budget: 2 of 6 item(s) were not started"),
+            "the parent reads how many items the budget stopped"
+        );
+        assert!(observed_text_contains(&observed, "Reason: budget_reached"));
+    }
+
+    #[tokio::test]
+    async fn research_fan_out_only_logs_a_spent_child_budget_when_not_enforced() {
+        if crate::subagent::research_fan_out::concurrency() != 4 {
+            return;
+        }
+        let (edges, observed) = research_fan_out_with_child_budget(false).await;
+        assert_eq!(edges, 6, "with the switch off every item starts, as before the budget");
+        assert!(!observed_text_contains(&observed, "budget_reached"));
+    }
+
     /// A per-run ceiling hit PARTWAY through a fan-out degrades to "some ran,
     /// the rest were refused" — and the parent is told, per item, with the real
     /// reason. The ceiling is shared with `subagent.task`: one delegation
@@ -26486,6 +26775,7 @@ mod tests {
                     .collect(),
                 digest: authority.digest(),
             }),
+            ..Default::default()
         }
     }
 

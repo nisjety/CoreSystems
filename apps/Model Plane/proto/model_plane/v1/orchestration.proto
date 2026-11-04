@@ -530,6 +530,10 @@ message Approval {
 
   // Where the turn came from (`direct`, `ambient`, `automation`); empty reads as `direct`.
   string turn_origin = 23;
+
+  // EP-10 S4: how many times the person edited the approved call before granting it; 0 = never
+  // edited. Read from `approval_continuation_descriptors.revision` (at most 3).
+  uint32 revision = 25;
 }
 
 // Who recorded an approval decision (build plan WS13 S3). Stored as
@@ -683,6 +687,21 @@ message LineageEdge {
 
   // When the edge was recorded.
   google.protobuf.Timestamp spawned_at = 4;
+
+  // The delegated goal `AttachSubagentRequest.goal_summary` stored on the edge (Wave 3 EP-2 S9;
+  // additive readback of a value session-core already keeps). Empty for an edge stored without
+  // one: a ZDR run, or a caller that predates the field.
+  string goal_summary = 5;
+
+  // The fan-out batch `AttachSubagentRequest.batch_id` stored on the edge (Wave 3 EP-2 S9;
+  // additive). Empty for a standalone `subagent.task` delegation. A reloaded wide-research
+  // panel groups its cards by it.
+  string batch_id = 6;
+
+  // The edge's own `subagent_edges.status` value ("attached" or "detached") (Wave 3 EP-2 S9;
+  // additive). It says whether the child is still linked, not how the child run ended: that is
+  // the child run's own status.
+  string status = 7;
 }
 
 // Aggregated subagent lineage for a thread.
@@ -1149,6 +1168,12 @@ message ConsumeApprovalResponse {
   // S3). A continuation runs under this snapshot only: nothing a client sends
   // replaces it. Absent for an approval raised cold (no snapshot was taken).
   ApprovedAuthority authority = 7;
+  // EP-10 S4: how many times the person edited the call before granting it; 0 = the call is
+  // the one the model drafted.
+  uint32 revision = 8;
+  // EP-10 S4: the fingerprint of the call as first drafted, set only when revision > 0. A digest,
+  // never the original content: the loop matches its own pending fingerprint against it.
+  string original_action_fingerprint = 9;
 }
 
 // The authority an approval was raised under, snapshotted at pause time.
@@ -1306,6 +1331,21 @@ message DecideApprovalRequest {
   // rule is not in force until the person confirms it.
   // Field 8 was renumbered to 12 when main was merged: main already used 8-11 for the Space member decide.
   bool rule_proposed = 12;
+
+  // EP-10 S4: "Send with my edits". Set only with a GRANTED, ONCE-scoped decision: session-core
+  // replaces the approved call with the edited one and grants it in one transaction. Refused while
+  // APPROVAL_EDIT_ENABLED is off. Tag 9 in the design was taken by the Space member decide.
+  ApprovalEdit edit = 13;
+}
+
+// EP-10 S4: the person's edit of a pending approval's call.
+message ApprovalEdit {
+  // EP-10 S4: a JSON object with only `to`, `subject` and `body_text`
+  // (mp_contracts::approval_edit::MailSendPatch); any other key is refused.
+  string patch_json = 1;
+  // EP-10 S4: the action fingerprint the person saw in the preview. A mismatch with the stored
+  // descriptor is refused as `approval_changed`.
+  string base_fingerprint = 2;
 }
 
 message DecideApprovalResponse {
@@ -1688,6 +1728,12 @@ message OrchestrationEvent {
 
     // True when a recent re-authentication was verified for the decision (WS13 S5).
     bool step_up_verified = 10;
+
+    // EP-10 S4: the descriptor revision after this decision; 0 when the call was not edited.
+    uint32 revision = 11;
+
+    // EP-10 S4: names of the fields the person edited ("to", "subject", "body_text"), never values.
+    repeated string edited_fields = 12;
   }
 
   message SubagentAttached {

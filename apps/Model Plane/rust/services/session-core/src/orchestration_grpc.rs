@@ -410,10 +410,76 @@ pub(crate) fn check_scope_grant_startup() -> Result<(), &'static str> {
 /// A refused standing scope reaches the caller as its typed token; any other store failure is
 /// internal (build plan WS13 S6).
 fn decision_error_status(error: anyhow::Error) -> Status {
+    if let Some(refusal) = error.downcast_ref::<store::EditRefusal>() {
+        return edit_refusal_status(*refusal);
+    }
     match error.downcast_ref::<store::ScopeGrantRefusal>() {
         Some(refusal) => Status::failed_precondition(refusal.code()),
         None => Status::internal(error.to_string()),
     }
+}
+
+/// The gRPC form of a refused edit (EP-10-S4), the closed code as the message. The gateway maps
+/// ABORTED to 409, INVALID_ARGUMENT to 422 and FAILED_PRECONDITION to 409 or 403 by code.
+fn edit_refusal_status(refusal: store::EditRefusal) -> Status {
+    match refusal {
+        store::EditRefusal::NotFound => Status::not_found("approval not found"),
+        store::EditRefusal::ApprovalChanged => Status::aborted(refusal.code()),
+        store::EditRefusal::Invalid(_) | store::EditRefusal::OnceOnly => {
+            Status::invalid_argument(refusal.code())
+        }
+        store::EditRefusal::NotEditable | store::EditRefusal::RevisionLimit => {
+            Status::failed_precondition(refusal.code())
+        }
+    }
+}
+
+/// Approve with edits (EP-10-S4). Off by default: only the literal `true` enables it, and with it
+/// off a decide that carries an edit is refused, so every decision behaves exactly as before.
+const APPROVAL_EDIT_ENV: &str = "APPROVAL_EDIT_ENABLED";
+
+fn approval_edit_enabled() -> bool {
+    mp_contracts::loop_fold::switch_from(std::env::var(APPROVAL_EDIT_ENV).ok().as_deref())
+}
+
+/// The largest `patch_json` an edit may carry: the body cap plus room for the recipients and the
+/// subject. A larger patch could never pass the edit contract.
+const MAX_EDIT_PATCH_BYTES: usize = 64 * 1024;
+
+/// Parse and bound a decide's edit before any lookup (EP-10-S4). `Ok(None)` when the request
+/// carries none. Refused when the switch is off, when the decision is not a `once` grant, or when
+/// the patch is not a mail-send patch. Unspecified scope reads as `once`, as everywhere else.
+#[allow(clippy::result_large_err)]
+fn decide_edit_from_request(
+    req: &proto::DecideApprovalRequest,
+    enabled: bool,
+) -> Result<Option<(mp_contracts::approval_edit::MailSendPatch, String)>, Status> {
+    let Some(edit) = req.edit.as_ref() else {
+        return Ok(None);
+    };
+    if !enabled {
+        return Err(Status::failed_precondition("approval_edit_disabled"));
+    }
+    if req.decision != proto::ApprovalState::Granted as i32 {
+        return Err(Status::invalid_argument("edit_requires_grant"));
+    }
+    let once = matches!(approval_scope_to_str(req.scope), Some("once"));
+    if !once || req.rule_proposed {
+        return Err(Status::invalid_argument(store::EditRefusal::OnceOnly.code()));
+    }
+    let base = edit.base_fingerprint.trim();
+    if base.len() != 64 || !base.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(Status::invalid_argument("base_fingerprint is invalid"));
+    }
+    if edit.patch_json.len() > MAX_EDIT_PATCH_BYTES {
+        return Err(Status::invalid_argument(
+            mp_contracts::approval_edit::EditError::EditTooLarge.code(),
+        ));
+    }
+    let patch: mp_contracts::approval_edit::MailSendPatch =
+        serde_json::from_str(&edit.patch_json)
+            .map_err(|_| Status::invalid_argument("invalid_patch"))?;
+    Ok(Some((patch, base.to_owned())))
 }
 
 /// The verified caller's own user, after its org is checked. Every grant call binds to this owner.
@@ -928,18 +994,9 @@ fn validate_approval_decision_context(org_id: &str, decided_by: &str) -> Result<
     Ok(())
 }
 
-/// The largest plaintext descriptor a continuation may retain. The mirror value in
-/// execution-core (`runtime_loop::resume::MAX_SNAPSHOT_BYTES`) must match it.
-///
-/// The ceiling is the encrypted row, not the plaintext: `approval_continuation_descriptors`
-/// CHECKs `length(ciphertext) <= 131072`, and the ciphertext is `v1:` plus base64 of
-/// nonce + plaintext + tag. 64 KiB leaves headroom under that CHECK (about 87 KB of
-/// ciphertext); the const assertion below fails the build if the cap ever outgrows it.
-const MAX_CONTINUATION_DESCRIPTOR_BYTES: usize = 64 * 1024;
-const _: () = assert!(
-    3 + (MAX_CONTINUATION_DESCRIPTOR_BYTES + 28) * 4 / 3 + 4 <= 131_072,
-    "descriptor cap must fit the approval_continuation_descriptors ciphertext CHECK"
-);
+/// The largest plaintext descriptor a continuation may retain. Defined beside the store, which
+/// applies the same cap to an edited descriptor (EP-10-S4).
+const MAX_CONTINUATION_DESCRIPTOR_BYTES: usize = store::MAX_CONTINUATION_DESCRIPTOR_BYTES;
 
 /// Validate a retained continuation as an exact, approval-scoped action
 /// description. It cannot carry reusable credentials; execution remains
@@ -1036,6 +1093,10 @@ fn consume_response(done: store::ConsumeOutcome, omit_call: bool) -> proto::Cons
         tool_input_json: call.tool_input_json,
         step_id: call.step_id,
         authority: approved_authority(&call.offered_json),
+        // EP-10-S5 reads the revision back from the descriptor row; until then a consume
+        // reports the call as drafted.
+        revision: 0,
+        original_action_fingerprint: String::new(),
     }
 }
 
@@ -1216,6 +1277,16 @@ fn subagent_edge_metadata(goal_summary: &str, batch_id: &str) -> JsonValue {
         );
     }
     JsonValue::Object(metadata)
+}
+
+/// One text field [`subagent_edge_metadata`] stored, read back (Wave 3 EP-2 S9). Empty when the
+/// edge was stored without it, or when the stored value is not a string.
+fn subagent_edge_metadata_text(metadata: &JsonValue, key: &str) -> String {
+    metadata
+        .get(key)
+        .and_then(JsonValue::as_str)
+        .unwrap_or_default()
+        .to_owned()
 }
 
 // ---------------------------------------------------------------------------
@@ -1440,6 +1511,7 @@ pub(crate) fn approval_from_row(row: &store::ApprovalRow) -> proto::Approval {
         addressee: None,
         grant_ref: String::new(),
         turn_origin: String::new(),
+        revision: store::approval_revision(&row.metadata).0,
     }
 }
 
@@ -1838,6 +1910,9 @@ fn lineage_edge_from_row(row: &store::SubagentEdgeRow) -> proto::LineageEdge {
         child_run_id: row.child_run_id.clone(),
         role: subagent_role_from_str(&row.role),
         spawned_at: Some(ts(row.attached_at)),
+        goal_summary: subagent_edge_metadata_text(&row.metadata, "goal_summary"),
+        batch_id: subagent_edge_metadata_text(&row.metadata, "batch_id"),
+        status: row.status.clone(),
     }
 }
 
@@ -1918,7 +1993,7 @@ async fn fetch_lineage_for_thread(
              FROM subagent_edges e \
              JOIN lineage l ON l.child_run_id = e.parent_run_id \
          ) \
-         SELECT parent_run_id, child_run_id, role, attached_at \
+         SELECT parent_run_id, child_run_id, role, status, metadata, attached_at \
          FROM lineage \
          ORDER BY attached_at ASC",
     )
@@ -1926,13 +2001,23 @@ async fn fetch_lineage_for_thread(
     .fetch_all(pool)
     .await?;
 
+    // The edge's goal and batch ride its `metadata` JSONB ([`subagent_edge_metadata`]); they and
+    // the edge status are read back so a reloaded wide-research panel can rebuild its grid
+    // (Wave 3 EP-2 S9). An edge stored without them reads back with empty strings, so the proto
+    // an older edge yields differs only by the edge status.
     let edges: Vec<proto::LineageEdge> = rows
         .iter()
-        .map(|r| proto::LineageEdge {
-            parent_run_id: r.get::<String, _>("parent_run_id"),
-            child_run_id: r.get::<String, _>("child_run_id"),
-            role: subagent_role_from_str(r.get::<&str, _>("role")),
-            spawned_at: Some(ts(r.get::<DateTime<Utc>, _>("attached_at"))),
+        .map(|r| {
+            let metadata = r.get::<JsonValue, _>("metadata");
+            proto::LineageEdge {
+                parent_run_id: r.get::<String, _>("parent_run_id"),
+                child_run_id: r.get::<String, _>("child_run_id"),
+                role: subagent_role_from_str(r.get::<&str, _>("role")),
+                spawned_at: Some(ts(r.get::<DateTime<Utc>, _>("attached_at"))),
+                goal_summary: subagent_edge_metadata_text(&metadata, "goal_summary"),
+                batch_id: subagent_edge_metadata_text(&metadata, "batch_id"),
+                status: r.get::<String, _>("status"),
+            }
         })
         .collect();
 
@@ -2272,6 +2357,8 @@ fn broadcast_approval_decision_events(
         return;
     }
     let fields = decision_fields(approval);
+    // Field names only: the edited values stay in the encrypted descriptor (EP-10-S4).
+    let (revision, edited_fields) = store::approval_revision(&approval.metadata);
 
     broadcast_event(
         tx,
@@ -2291,6 +2378,8 @@ fn broadcast_approval_decision_events(
                     scope: fields.scope,
                     decision_source: fields.decision_source,
                     step_up_verified: fields.step_up_verified,
+                    revision,
+                    edited_fields,
                 },
             )),
         },
@@ -2393,8 +2482,8 @@ fn refuse_zdr_or_waived_question_caller(caller: &VerifiedIdentity) -> Result<(),
     Ok(())
 }
 
-/// The wire form of an approval preview (EP-10-S1). The revision stays 0 until edited descriptors
-/// exist (EP-10-S4).
+/// The wire form of an approval preview (EP-10-S1). The revision is always 0: an edit grants in
+/// its own transaction (EP-10-S4), so a pending approval, the only kind previewed, is never revised.
 fn approval_preview_to_proto(
     view: mp_contracts::write_preview::ApprovalPreviewView,
     action_fingerprint: String,
@@ -4444,6 +4533,12 @@ impl OrchestrationCoreService for OrchestrationGrpc {
             }
             pin_approval_decision_identity(&caller, &mut req)?;
             validate_approval_decision_context(&req.org_id, &req.decided_by)?;
+            // Approve with edits (EP-10-S4, D1, D9): checked before any lookup. A waived caller
+            // counts as ZDR for the revision columns, so it is refused like a ZDR one (above).
+            let edit = decide_edit_from_request(&req, approval_edit_enabled())?;
+            if edit.is_some() {
+                refuse_zdr_or_waived_question_caller(&caller)?;
+            }
             // Member decide (build plan WS10 S6): a Space member other than the run owner decides
             // with a Control-signed decision. `Some(space)` once it verified; the owner path below
             // is unchanged when the request carries no Space fields.
@@ -4453,6 +4548,10 @@ impl OrchestrationCoreService for OrchestrationGrpc {
                 &req,
             )
             .await?;
+            // The person who sees the draft is its owner; a Space member approves it as drafted.
+            if edit.is_some() && member_space.is_some() {
+                return Err(Status::permission_denied("edit_owner_only"));
+            }
             let owner_filter = if member_space.is_some() {
                 None
             } else {
@@ -4509,8 +4608,27 @@ impl OrchestrationCoreService for OrchestrationGrpc {
                 rule_proposed: req.rule_proposed,
                 authz_audit: crate::audit_publisher::authz_decision_audit_enabled(),
             };
-            let decision_write = match member_space.as_deref() {
-                Some(space_id) => {
+            let decision_write = match (member_space.as_deref(), edit.as_ref()) {
+                (None, Some((patch, base_fingerprint))) => {
+                    let owner = caller.user_id().ok_or_else(|| {
+                        Status::permission_denied("user-bound approval credential required")
+                    })?;
+                    store::decide_approval_with_edit(
+                        &self.pool,
+                        &req.approval_id,
+                        &req.org_id,
+                        owner,
+                        &req.decided_by,
+                        &req.decision_reason,
+                        &record,
+                        &store::ApprovalEdit {
+                            patch,
+                            base_fingerprint,
+                        },
+                    )
+                    .await
+                }
+                (Some(space_id), _) => {
                     store::decide_approval_as_member(
                         &self.pool,
                         &req.approval_id,
@@ -4523,7 +4641,7 @@ impl OrchestrationCoreService for OrchestrationGrpc {
                     )
                     .await
                 }
-                None => {
+                (None, None) => {
                     store::decide_approval_recorded(
                         &self.pool,
                         &req.approval_id,
@@ -5067,9 +5185,9 @@ impl OrchestrationCoreService for OrchestrationGrpc {
             // dedicated columns yet — reusing the existing `metadata` JSONB
             // column `attach_subagent` already accepted (previously always
             // an empty object) avoids a migration for two additive, optional
-            // fields. `LineageEdge`/`ListChildren` readback is unchanged in
-            // this pass (not needed by the live run panel, which reads the
-            // broadcast event below); only the live SSE path carries them.
+            // fields. The lineage read returns them on `LineageEdge` since
+            // Wave 3 EP-2 S9 (`fetch_lineage_for_thread`), so a reloaded
+            // wide-research panel rebuilds its grid.
             store::attach_subagent(
                 &self.pool,
                 &req.parent_run_id,
@@ -5080,11 +5198,14 @@ impl OrchestrationCoreService for OrchestrationGrpc {
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
 
+            // The live event's edge stays as it was: the goal and batch already travel on the
+            // event itself, and the readback fields are for the lineage read (EP-2 S9).
             let edge = proto::LineageEdge {
                 parent_run_id: req.parent_run_id.clone(),
                 child_run_id: req.child_run_id.clone(),
                 role: req.role,
                 spawned_at: Some(now_ts()),
+                ..Default::default()
             };
             let lineage = fetch_lineage_for_thread(&self.pool, &req.thread_id)
                 .await
@@ -6176,6 +6297,26 @@ mod tests {
     }
 
     #[test]
+    fn a_lineage_edge_reads_back_the_goal_and_batch_it_stored() {
+        let stored = subagent_edge_metadata("look up carrier docs", "run-1:tool_1_fan-1");
+        assert_eq!(
+            subagent_edge_metadata_text(&stored, "goal_summary"),
+            "look up carrier docs"
+        );
+        assert_eq!(
+            subagent_edge_metadata_text(&stored, "batch_id"),
+            "run-1:tool_1_fan-1"
+        );
+        // An edge stored before the fields existed reads back empty, as the proto did.
+        let old = serde_json::json!({});
+        assert_eq!(subagent_edge_metadata_text(&old, "goal_summary"), "");
+        assert_eq!(subagent_edge_metadata_text(&old, "batch_id"), "");
+        // A value that is not text is not passed through as one.
+        let odd = serde_json::json!({ "batch_id": 7 });
+        assert_eq!(subagent_edge_metadata_text(&odd, "batch_id"), "");
+    }
+
+    #[test]
     fn subagent_role_unknown_falls_back_to_generic() {
         assert_eq!(
             subagent_role_from_str("nonsense"),
@@ -6241,6 +6382,7 @@ mod tests {
             child_run_id: "b".into(),
             role: 0,
             spawned_at: None,
+            ..Default::default()
         }];
         assert_eq!(compute_max_depth(&edges), 1);
     }
@@ -6253,18 +6395,21 @@ mod tests {
                 child_run_id: "b".into(),
                 role: 0,
                 spawned_at: None,
+                ..Default::default()
             },
             proto::LineageEdge {
                 parent_run_id: "b".into(),
                 child_run_id: "c".into(),
                 role: 0,
                 spawned_at: None,
+                ..Default::default()
             },
             proto::LineageEdge {
                 parent_run_id: "c".into(),
                 child_run_id: "d".into(),
                 role: 0,
                 spawned_at: None,
+                ..Default::default()
             },
         ];
         assert_eq!(compute_max_depth(&edges), 3);
@@ -8941,6 +9086,68 @@ mod tests {
         }
 
         // -----------------------------------------------------------------
+        // lineage readback (Wave 3 EP-2 S9)
+        // -----------------------------------------------------------------
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        #[ignore = "requires DATABASE_URL to a SCRATCH Postgres (name contains \"test\")"]
+        async fn lineage_reads_back_goal_batch_and_status_and_leaves_old_edges_empty() {
+            let db = PlanGateDb::connect().await;
+            let parent = db.new_run(&db.thread).await;
+            let fan_out_child = db.new_run(&db.thread).await;
+            let old_child = db.new_run(&db.thread).await;
+            store::attach_subagent(
+                &db.pool,
+                &parent,
+                &fan_out_child,
+                "researcher",
+                &subagent_edge_metadata("look up carrier docs", "run-1:tool_1_fan-1"),
+            )
+            .await
+            .expect("attach fan-out child");
+            // An edge stored before the fields existed: the empty object.
+            store::attach_subagent(
+                &db.pool,
+                &parent,
+                &old_child,
+                "generic",
+                &serde_json::json!({}),
+            )
+            .await
+            .expect("attach old child");
+            store::detach_subagent(&db.pool, &parent, &old_child)
+                .await
+                .expect("detach old child");
+
+            let lineage = fetch_lineage_for_thread(&db.pool, &db.thread)
+                .await
+                .expect("lineage");
+            let edge = |child: &str| {
+                lineage
+                    .edges
+                    .iter()
+                    .find(|edge| edge.child_run_id == child)
+                    .cloned()
+                    .expect("edge present")
+            };
+            let fan_out = edge(&fan_out_child);
+            assert_eq!(fan_out.goal_summary, "look up carrier docs");
+            assert_eq!(fan_out.batch_id, "run-1:tool_1_fan-1");
+            assert_eq!(fan_out.status, "attached");
+            let old = edge(&old_child);
+            assert_eq!(old.goal_summary, "");
+            assert_eq!(old.batch_id, "");
+            assert_eq!(old.status, "detached");
+
+            sqlx::query("DELETE FROM subagent_edges WHERE parent_run_id = $1")
+                .bind(&parent)
+                .execute(&db.pool)
+                .await
+                .expect("cleanup edges");
+            db.cleanup().await;
+        }
+
+        // -----------------------------------------------------------------
         // approve with edits: rewrite, reorder, remove, add
         // -----------------------------------------------------------------
 
@@ -9956,5 +10163,225 @@ mod approval_scope_grant_tests {
         assert_eq!(status.message(), "scope_not_offered");
         let other = decision_error_status(anyhow::anyhow!("database unavailable"));
         assert_eq!(other.code(), tonic::Code::Internal);
+    }
+}
+
+#[cfg(test)]
+mod approval_edit_tests {
+    //! EP-10-S4: the decide checks an edit passes before any lookup, the gRPC form of every refusal,
+    //! and the audit event of an edited grant.
+    use super::*;
+    use mp_contracts::approval_edit::EditError;
+
+    const BASE: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    fn edited_grant() -> proto::DecideApprovalRequest {
+        proto::DecideApprovalRequest {
+            approval_id: "appr_1".to_owned(),
+            decision: proto::ApprovalState::Granted as i32,
+            org_id: "org-1".to_owned(),
+            scope: proto::ApprovalScope::Once as i32,
+            edit: Some(proto::ApprovalEdit {
+                patch_json: r#"{"subject":"New subject"}"#.to_owned(),
+                base_fingerprint: BASE.to_owned(),
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn approval_edit_switch_is_strict_and_off_by_default() {
+        assert!(!mp_contracts::loop_fold::switch_from(None));
+        for value in ["1", "yes", "on", ""] {
+            assert!(!mp_contracts::loop_fold::switch_from(Some(value)), "{value}");
+        }
+        assert!(mp_contracts::loop_fold::switch_from(Some("true")));
+        assert_eq!(APPROVAL_EDIT_ENV, "APPROVAL_EDIT_ENABLED");
+    }
+
+    #[test]
+    fn a_decide_without_an_edit_is_unchanged_whatever_the_switch() {
+        let mut plain = edited_grant();
+        plain.edit = None;
+        assert_eq!(decide_edit_from_request(&plain, false).expect("no edit"), None);
+        assert_eq!(decide_edit_from_request(&plain, true).expect("no edit"), None);
+    }
+
+    #[test]
+    fn edit_off_by_default_is_refused() {
+        let status = decide_edit_from_request(&edited_grant(), false).expect_err("off");
+        assert_eq!(status.code(), tonic::Code::FailedPrecondition);
+        assert_eq!(status.message(), "approval_edit_disabled");
+    }
+
+    #[test]
+    fn edit_with_the_switch_on_parses_the_patch_and_the_base() {
+        let (patch, base) = decide_edit_from_request(&edited_grant(), true)
+            .expect("accepted")
+            .expect("an edit");
+        assert_eq!(patch.subject.as_deref(), Some("New subject"));
+        assert_eq!(patch.to, None);
+        assert_eq!(base, BASE);
+    }
+
+    #[test]
+    fn denial_with_edit_is_invalid() {
+        let mut denial = edited_grant();
+        denial.decision = proto::ApprovalState::Denied as i32;
+        let status = decide_edit_from_request(&denial, true).expect_err("denial");
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+        assert_eq!(status.message(), "edit_requires_grant");
+    }
+
+    #[test]
+    fn edit_refused_for_thread_scope_and_rule_proposal() {
+        for scope in [proto::ApprovalScope::Thread, proto::ApprovalScope::Run] {
+            let mut wide = edited_grant();
+            wide.scope = scope as i32;
+            let status = decide_edit_from_request(&wide, true).expect_err("wide scope");
+            assert_eq!(status.code(), tonic::Code::InvalidArgument);
+            assert_eq!(status.message(), "edit_requires_once");
+        }
+        let mut proposal = edited_grant();
+        proposal.rule_proposed = true;
+        let status = decide_edit_from_request(&proposal, true).expect_err("rule proposal");
+        assert_eq!(status.message(), "edit_requires_once");
+        let mut unspecified = edited_grant();
+        unspecified.scope = proto::ApprovalScope::Unspecified as i32;
+        assert!(decide_edit_from_request(&unspecified, true).is_ok(), "unspecified is once");
+    }
+
+    #[test]
+    fn edit_patch_with_another_key_or_a_bad_base_is_refused() {
+        let mut extra = edited_grant();
+        extra.edit.as_mut().expect("edit").patch_json =
+            r#"{"subject":"S","connection_id":"conn-2"}"#.to_owned();
+        let status = decide_edit_from_request(&extra, true).expect_err("unknown key");
+        assert_eq!(status.message(), "invalid_patch", "an edit may not retarget a connection");
+
+        let mut secret = edited_grant();
+        secret.edit.as_mut().expect("edit").patch_json = r#"{"access_token":"x"}"#.to_owned();
+        assert!(
+            decide_edit_from_request(&secret, true).is_err(),
+            "only three fields are writable, so no credential key can enter a descriptor"
+        );
+
+        let mut base = edited_grant();
+        base.edit.as_mut().expect("edit").base_fingerprint = "abc".to_owned();
+        let status = decide_edit_from_request(&base, true).expect_err("short base");
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+
+        let mut large = edited_grant();
+        large.edit.as_mut().expect("edit").patch_json =
+            format!(r#"{{"bodyText":"{}"}}"#, "x".repeat(MAX_EDIT_PATCH_BYTES));
+        let status = decide_edit_from_request(&large, true).expect_err("large");
+        assert_eq!(status.message(), "edit_too_large");
+    }
+
+    #[test]
+    fn edit_error_codes_map_to_invalid_argument() {
+        for error in EditError::ALL {
+            let status =
+                decision_error_status(anyhow::Error::from(store::EditRefusal::Invalid(error)));
+            assert_eq!(status.code(), tonic::Code::InvalidArgument, "{error}");
+            assert_eq!(status.message(), error.code());
+        }
+    }
+
+    #[test]
+    fn edit_refusals_reach_the_caller_as_their_typed_codes() {
+        let cases = [
+            (store::EditRefusal::ApprovalChanged, tonic::Code::Aborted, "approval_changed"),
+            (store::EditRefusal::NotEditable, tonic::Code::FailedPrecondition, "not_editable"),
+            (store::EditRefusal::RevisionLimit, tonic::Code::FailedPrecondition, "revision_limit"),
+            (store::EditRefusal::OnceOnly, tonic::Code::InvalidArgument, "edit_requires_once"),
+            (store::EditRefusal::NotFound, tonic::Code::NotFound, "approval not found"),
+        ];
+        for (refusal, code, message) in cases {
+            let status = decision_error_status(anyhow::Error::from(refusal));
+            assert_eq!(status.code(), code, "{refusal}");
+            assert_eq!(status.message(), message);
+        }
+    }
+
+    #[test]
+    fn edit_refused_for_zdr_and_waived_callers() {
+        use crate::auth::VerifiedIdentity as Id;
+        let zdr =
+            refuse_zdr_or_waived_question_caller(&Id::user_for_test_with_zdr("org-1", "user-1", true))
+                .expect_err("zdr");
+        assert_eq!(zdr.code(), tonic::Code::FailedPrecondition);
+        assert!(Refusal::from_status(&zdr).is_some(), "a typed refusal");
+        let waived = refuse_zdr_or_waived_question_caller(&Id::user_for_test_with_waiver(
+            "org-1", "user-1", "conn-1", "ack-1",
+        ))
+        .expect_err("a waived run counts as ZDR for the revision columns (D9)");
+        assert_eq!(waived.code(), tonic::Code::PermissionDenied);
+    }
+
+    /// The handler refuses ZDR at its top and a waived caller as soon as it sees an edit, both
+    /// before the member lookup or any decision read.
+    #[test]
+    fn the_decide_handler_refuses_a_waived_edit_before_any_lookup() {
+        let source = include_str!("orchestration_grpc.rs");
+        let start = source.find("    async fn decide_approval(").expect("the handler");
+        let body = &source[start..];
+        let edit_gate = body.find("refuse_zdr_or_waived_question_caller(&caller)?;").expect("gate");
+        let member = body.find("authorize_member_decide(").expect("member lookup");
+        assert!(edit_gate < member, "the waived refusal comes before the member lookup");
+        let zdr = body.find("refuse_zdr_continuation(&caller)?;").expect("zdr gate");
+        assert!(zdr < edit_gate);
+    }
+
+    #[tokio::test]
+    async fn audit_event_carries_field_names_only() {
+        let row = store::ApprovalRow {
+            id: "appr_1".to_owned(),
+            run_id: "run-1".to_owned(),
+            plan_id: None,
+            kind: "tool_call".to_owned(),
+            status: "granted".to_owned(),
+            requested_by: "user-1".to_owned(),
+            decided_by: "user-1".to_owned(),
+            decision_reason: String::new(),
+            org_id: "org-1".to_owned(),
+            user_id: "user-1".to_owned(),
+            idempotency_key: String::new(),
+            metadata: serde_json::json!({
+                "reason": "The agent would send an email to bob@example.com with the subject \"Secret plan\".",
+                "revision": { "n": 1, "edited_fields": ["to", "subject"], "at": "2026-11-04T00:00:00Z" },
+            }),
+            requested_at: Utc::now(),
+            decided_at: Some(Utc::now()),
+            expires_at: None,
+            continuation_mode: String::new(),
+            consumed_at: None,
+        };
+        let (events_tx, mut events_rx) = broadcast::channel(8);
+        broadcast_approval_decision_events(
+            &events_tx,
+            &ReplayBuffer::default(),
+            &row,
+            proto::ApprovalState::Granted as i32,
+            true,
+        );
+        let event = events_rx.try_recv().expect("state-change event");
+        let Some(orchestration_event::Event::ApprovalStateChanged(changed)) = event.event else {
+            panic!("an approval state change");
+        };
+        assert_eq!(changed.revision, 1);
+        assert_eq!(changed.edited_fields, ["to", "subject"]);
+        let wire = format!("{changed:?}");
+        for value in ["bob@example.com", "Secret plan", "The agent would"] {
+            assert!(!wire.contains(value), "the event carries no edited value: {value}");
+        }
+        assert_eq!(approval_from_row(&row).revision, 1);
+    }
+
+    #[test]
+    fn an_unedited_approval_reads_revision_zero() {
+        let (revision, fields) = store::approval_revision(&serde_json::json!({}));
+        assert_eq!(revision, 0);
+        assert!(fields.is_empty());
     }
 }

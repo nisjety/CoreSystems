@@ -207,6 +207,8 @@ struct CaptureState {
     list_approvals: Arc<Mutex<Option<(String, String)>>>,
     get_approval_id: Arc<Mutex<Option<String>>>,
     decide_approval: CapturedTransition,
+    /// EP-10-S4: `(patch_json, base_fingerprint)` of the last decide that carried an edit.
+    decide_edit: Arc<Mutex<Option<(String, String)>>>,
     lineage_thread_id: Arc<Mutex<Option<String>>>,
     stream_run_id: Arc<Mutex<Option<String>>>,
     /// `(run_id, org_id)` of the last `ListRunQuestions` call.
@@ -578,6 +580,14 @@ impl OrchestrationCoreService for MockOrchestration {
     ) -> Result<Response<GetApprovalResponse>, Status> {
         let request = request.into_inner();
         *self.state.get_approval_id.lock().unwrap() = Some(request.approval_id.clone());
+        // An id that starts with `appr-stepup` stands for a cause that needs a fresh step-up.
+        let cause = request.approval_id.starts_with("appr-stepup").then(|| {
+            mp_contracts::model_plane::v1::ApprovalCause {
+                code: "provider_write".into(),
+                step_up_required: true,
+                ..Default::default()
+            }
+        });
         Ok(Response::new(GetApprovalResponse {
             approval: Some(Approval {
                 consumed_at: None,
@@ -585,7 +595,7 @@ impl OrchestrationCoreService for MockOrchestration {
                 action_label: String::new(),
                 continuation: None,
                 continuation_mode: String::new(),
-                cause: None,
+                cause,
                 id: request.approval_id,
                 run_id: "run-1".into(),
                 step_id: "step-1".into(),
@@ -659,6 +669,14 @@ impl OrchestrationCoreService for MockOrchestration {
             request.decided_by.clone(),
             request.decision_reason.clone(),
         ));
+        if let Some(edit) = request.edit.as_ref() {
+            *self.state.decide_edit.lock().unwrap() =
+                Some((edit.patch_json.clone(), edit.base_fingerprint.clone()));
+            // Session Core answers a base it no longer holds with its closed code.
+            if edit.base_fingerprint == "f".repeat(64) {
+                return Err(Status::aborted("approval_changed"));
+            }
+        }
         Ok(Response::new(DecideApprovalResponse {
             approval: Some(Approval {
                 consumed_at: None,
@@ -762,6 +780,7 @@ impl OrchestrationCoreService for MockOrchestration {
                     child_run_id: "run-child".into(),
                     role: 1,
                     spawned_at: None,
+                    ..Default::default()
                 }],
             }),
         }))
@@ -1321,6 +1340,164 @@ async fn decide_approval_grant_of_a_loop_owned_approval_reports_awaiting_continu
         json["continuation_delivery"], "awaiting_continue",
         "a loop-owned approval is consumed by the loop, not delivered by the worker, body={json}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// EP-10-S4: approve with edits. The switch is off by default; on, the edit reaches Session Core
+// with the grant and its closed refusals come back typed.
+// ---------------------------------------------------------------------------
+
+const EDIT_BASE: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+fn edited_decide_request(tokens: &UserTokens, approval_id: &str, body: &str) -> Request<Body> {
+    Request::builder()
+        .method("POST")
+        .uri(format!("/v1/orchestration/approvals/{approval_id}/decide"))
+        .header(AUTHORIZATION, format!("Bearer {}", tokens.model))
+        .header(
+            "x-session-authorization",
+            format!("Bearer {}", tokens.session),
+        )
+        .header(
+            "x-execution-authorization",
+            format!("Bearer {}", tokens.execution),
+        )
+        .header("content-type", "application/json")
+        .body(Body::from(body.to_owned()))
+        .unwrap()
+}
+
+fn edit_body(base: &str, scope: &str) -> String {
+    serde_json::json!({
+        "decision": "approve",
+        "scope": scope,
+        "edit": { "patch": { "subject": "New subject" }, "base_fingerprint": base },
+    })
+    .to_string()
+}
+
+async fn json_of(resp: axum::response::Response) -> (StatusCode, serde_json::Value) {
+    let status = resp.status();
+    let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    (status, serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null))
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn edit_off_by_default_is_forbidden() {
+    let _auth = AuthFixture::start().await;
+    std::env::remove_var("APPROVAL_EDIT_ENABLED");
+    let tokens = AuthFixture::user_tokens("org-1", "user-1");
+    let (mock, capture) = MockOrchestration::new();
+    let app = build_router(make_state(spawn_orchestration_mock(mock).await), None);
+
+    let resp = app
+        .oneshot(edited_decide_request(&tokens, "appr-42", &edit_body(EDIT_BASE, "once")))
+        .await
+        .unwrap();
+    let (status, json) = json_of(resp).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "body={json}");
+    assert_eq!(json["error"]["code"], "approval_edit_disabled");
+    assert!(json["error"]["details"].is_object());
+    assert!(
+        capture.decide_approval.lock().unwrap().is_none()
+            && capture.get_approval_id.lock().unwrap().is_none(),
+        "nothing reaches Session Core while the switch is off"
+    );
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn edit_is_forwarded_with_the_grant_when_the_switch_is_on() {
+    let _auth = AuthFixture::start().await;
+    std::env::set_var("APPROVAL_EDIT_ENABLED", "true");
+    let tokens = AuthFixture::user_tokens("org-1", "user-1");
+    let (mock, capture) = MockOrchestration::new();
+    let app = build_router(make_state(spawn_orchestration_mock(mock).await), None);
+
+    let resp = app
+        .oneshot(edited_decide_request(&tokens, "appr-42", &edit_body(EDIT_BASE, "once")))
+        .await
+        .unwrap();
+    std::env::remove_var("APPROVAL_EDIT_ENABLED");
+    let (status, json) = json_of(resp).await;
+    assert_eq!(status, StatusCode::OK, "body={json}");
+    let (patch, base) = capture.decide_edit.lock().unwrap().clone().expect("the edit reached it");
+    assert_eq!(base, EDIT_BASE);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&patch).unwrap(),
+        serde_json::json!({ "subject": "New subject" })
+    );
+    assert_eq!(
+        capture.decide_approval.lock().unwrap().as_ref().map(|d| d.1),
+        Some(ApprovalState::Granted as i32)
+    );
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn edit_with_scope_thread_is_refused() {
+    let _auth = AuthFixture::start().await;
+    std::env::set_var("APPROVAL_EDIT_ENABLED", "true");
+    let tokens = AuthFixture::user_tokens("org-1", "user-1");
+    let (mock, capture) = MockOrchestration::new();
+    let app = build_router(make_state(spawn_orchestration_mock(mock).await), None);
+
+    let resp = app
+        .oneshot(edited_decide_request(&tokens, "appr-42", &edit_body(EDIT_BASE, "thread")))
+        .await
+        .unwrap();
+    std::env::remove_var("APPROVAL_EDIT_ENABLED");
+    let (status, json) = json_of(resp).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "body={json}");
+    assert_eq!(json["error"]["code"], "edit_requires_once");
+    assert!(capture.decide_approval.lock().unwrap().is_none());
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn approval_changed_is_409() {
+    let _auth = AuthFixture::start().await;
+    std::env::set_var("APPROVAL_EDIT_ENABLED", "true");
+    let tokens = AuthFixture::user_tokens("org-1", "user-1");
+    let (mock, _capture) = MockOrchestration::new();
+    let app = build_router(make_state(spawn_orchestration_mock(mock).await), None);
+
+    let stale = "f".repeat(64);
+    let resp = app
+        .oneshot(edited_decide_request(&tokens, "appr-42", &edit_body(&stale, "")))
+        .await
+        .unwrap();
+    std::env::remove_var("APPROVAL_EDIT_ENABLED");
+    let (status, json) = json_of(resp).await;
+    assert_eq!(status, StatusCode::CONFLICT, "body={json}");
+    assert_eq!(json["error"]["code"], "approval_changed");
+    assert!(json["error"]["details"].is_object());
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn edit_passes_step_up_like_a_grant() {
+    let _auth = AuthFixture::start().await;
+    std::env::set_var("APPROVAL_EDIT_ENABLED", "true");
+    std::env::set_var("APPROVAL_STEP_UP_ENFORCED", "enforce");
+    let tokens = AuthFixture::user_tokens("org-1", "user-1");
+    let (mock, capture) = MockOrchestration::new();
+    let app = build_router(make_state(spawn_orchestration_mock(mock).await), None);
+
+    let resp = app
+        .oneshot(edited_decide_request(&tokens, "appr-stepup-1", &edit_body(EDIT_BASE, "once")))
+        .await
+        .unwrap();
+    std::env::remove_var("APPROVAL_EDIT_ENABLED");
+    std::env::remove_var("APPROVAL_STEP_UP_ENFORCED");
+    let (status, json) = json_of(resp).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "body={json}");
+    assert_eq!(
+        json["error"]["code"], "step_up_required",
+        "an edited grant needs the same fresh re-authentication as any grant"
+    );
+    assert!(capture.decide_edit.lock().unwrap().is_none());
 }
 
 #[tokio::test]
