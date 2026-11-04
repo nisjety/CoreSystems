@@ -255,6 +255,8 @@ export type ChatInvokeRequest = {
    * subscription route: the gateway refuses those, so this client never sends what it would refuse.
    */
   contextRefs?: import('@/shared/actions/chat-context-refs').ChatContextRef[]
+  /** The thread goal a Continue turn works toward (EP-7 S1). Sent as `goal_id` only when set, never on a zero-retention turn. */
+  goalId?: string
   content: string
   model?: string
   /** Explicit provider route for a user-owned model subscription. */
@@ -309,6 +311,13 @@ export type ChatInvokeRequest = {
    * WIDE_RESEARCH_ENTRY_ENABLED is off and clamps the count to the org's item cap.
    */
   wideResearch?: WideResearchStart
+  /**
+   * The brand deck template picked in `DeckTemplatePicker` (EP-5 S7): a skill id from
+   * `listDeckTemplates`, never a name. Sent as `deck_template` only when set and the turn keeps data
+   * (never zero-retention, a subscription route, support or conversation-only); model-gateway ignores
+   * it while SKILL_DECK_TEMPLATES_ENABLED is off and checks it against the org's templates otherwise.
+   */
+  deckTemplate?: string
   /**
    * Durable ids of earlier messages the user pinned into context.
    *
@@ -1980,6 +1989,11 @@ export function buildChatWireBody(request: ChatInvokeRequest): Record<string, un
   const contextRefs = request.zdr || subscriptionBacked
     ? []
     : normalizeContextRefs(request.contextRefs)
+  // Deck template (EP-5 S7): present only when the person picked one. A zero-retention turn never applies a
+  // template, and the server refuses one there, so this client never sends it on the turns it would refuse.
+  const deckTemplate = request.zdr || subscriptionBacked || supportReadOnly || conversationOnly
+    ? null
+    : deckTemplateId(request.deckTemplate)
 
   const uiLocale = request.locale ?? storedUiLocale()
   return {
@@ -2082,6 +2096,10 @@ export function buildChatWireBody(request: ChatInvokeRequest): Record<string, un
     ...(connectorScope.length > 0 ? { connector_scope: connectorScope } : {}),
     // Omitted entirely when no chip was attached, like `connector_scope`: an ordinary turn is unchanged.
     ...(contextRefs.length > 0 ? { context_refs: contextRefs } : {}),
+    // Omitted entirely when no template was picked, like `context_refs`: an ordinary turn is unchanged.
+    ...(deckTemplate ? { deck_template: deckTemplate } : {}),
+    // The goal of a Continue turn (EP-7 S1): omitted on every other turn, so an ordinary body is unchanged.
+    ...(request.goalId && !request.zdr ? { goal_id: request.goalId } : {}),
     attachments: request.attachments ?? [],
     // Opt-in only, like `min_privacy_tier` below: omitted entirely when
     // nothing is pinned, so an ordinary turn's body is byte-identical to
@@ -3256,6 +3274,16 @@ export type ChatDocumentUpload = {
   status: string
 }
 
+/** Where a chat document came from; the server refuses any other origin (EP-3 S8). */
+export type ChatDocumentOrigin = 'chat-attachment' | 'chat-artifact'
+
+/** The artifact revision a `chat-artifact` copy was made from, kept in the document's source trace. */
+export type ChatDocumentSourceRef = {
+  threadId: string
+  artifactId: string
+  version: number
+}
+
 /**
  * Ingest an attached TEXT document so the conversation can retrieve it.
  *
@@ -3272,16 +3300,32 @@ export type ChatDocumentUpload = {
  *
  * Refused server-side under ZDR (412) — a temporary chat must not leave a
  * durable document behind. Callers should skip it rather than rely on that.
+ *
+ * `options.origin` `chat-artifact` with `sourceRef` saves one artifact
+ * revision to knowledge (EP-3 S8, action `chat.save_artifact_to_knowledge`):
+ * the copy is the text sent here, independent of the thread, and the server
+ * honours it only while its promote switch is on. Without options the body is
+ * exactly the attachment body it always was.
  */
 export async function uploadChatDocument(
   title: string,
   content: string,
+  options: { origin?: ChatDocumentOrigin; sourceRef?: ChatDocumentSourceRef } = {},
 ): Promise<ChatDocumentUpload> {
+  const body: Record<string, unknown> = { title, content, source: 'chat-upload', type: 'text' }
+  if (options.origin) body.origin = options.origin
+  if (options.sourceRef) {
+    body.source_ref = {
+      thread_id: options.sourceRef.threadId,
+      artifact_id: options.sourceRef.artifactId,
+      version: options.sourceRef.version,
+    }
+  }
   const raw = await requestJson<Record<string, unknown>>(
     '/api/v1/chat/documents',
     {
       method: 'POST',
-      body: JSON.stringify({ title, content, source: 'chat-upload', type: 'text' }),
+      body: JSON.stringify(body),
     },
   )
   return {
@@ -3841,6 +3885,8 @@ export type ComposerCapabilities = {
   contextRefs: boolean
   threadReferences: boolean
   selectionEdit: boolean
+  /** Save an artifact revision to knowledge (EP-3 S8): the BFF's own switch, added to the gateway's answer. */
+  artifactPromote: boolean
 }
 
 export const NO_COMPOSER_CAPABILITIES: ComposerCapabilities = {
@@ -3849,6 +3895,7 @@ export const NO_COMPOSER_CAPABILITIES: ComposerCapabilities = {
   contextRefs: false,
   threadReferences: false,
   selectionEdit: false,
+  artifactPromote: false,
 }
 
 /**
@@ -3869,7 +3916,80 @@ export async function getComposerCapabilities(): Promise<ComposerCapabilities> {
     contextRefs: record?.context_refs === true,
     threadReferences: record?.thread_references === true,
     selectionEdit: record?.selection_edit === true,
+    artifactPromote: record?.artifact_promote === true,
   }
+}
+
+/** A brand deck template as the picker shows it (EP-5 S7): display fields only, never a file. */
+export type DeckTemplate = {
+  skillId: string
+  name: string
+  description: string
+  colors: { primary: string; secondary: string; text: string; background: string; accent: string[] }
+  fonts: { heading: string; body: string }
+}
+
+/** The skill-id shape model-gateway accepts as a template id; anything else is never sent. */
+const DECK_TEMPLATE_ID = /^[A-Za-z0-9_.:-]{1,128}$/
+const HEX_COLOUR = /^#[0-9a-f]{6}$/i
+
+function deckTemplateId(value: unknown): string | null {
+  const id = typeof value === 'string' ? value.trim() : ''
+  return DECK_TEMPLATE_ID.test(id) ? id : null
+}
+
+function deckTemplateColour(value: unknown): string | null {
+  return typeof value === 'string' && HEX_COLOUR.test(value) ? value.toLowerCase() : null
+}
+
+function deckTemplateText(value: unknown, max: number): string {
+  return typeof value === 'string' ? value.trim().slice(0, max) : ''
+}
+
+/** One listed template, or null when the entry is not one: the picker never shows a guessed colour or font. */
+function normalizeDeckTemplate(raw: unknown): DeckTemplate | null {
+  const record = objectValue(raw)
+  const colors = objectValue(record?.colors)
+  const fonts = objectValue(record?.fonts)
+  const skillId = deckTemplateId(record?.skill_id)
+  const name = deckTemplateText(record?.name, 80)
+  const primary = deckTemplateColour(colors?.primary)
+  const secondary = deckTemplateColour(colors?.secondary)
+  const text = deckTemplateColour(colors?.text)
+  const background = deckTemplateColour(colors?.background)
+  const heading = deckTemplateText(fonts?.heading, 64)
+  const body = deckTemplateText(fonts?.body, 64)
+  if (!skillId || !name || !primary || !secondary || !text || !background || !heading || !body) return null
+  const accents = colors?.accent
+  const accent = Array.isArray(accents)
+    ? accents.map(deckTemplateColour).filter((colour): colour is string => colour !== null).slice(0, 4)
+    : []
+  return {
+    skillId,
+    name,
+    description: deckTemplateText(record?.description, 200),
+    colors: { primary, secondary, text, background, accent },
+    fonts: { heading, body },
+  }
+}
+
+/**
+ * The org's brand deck templates the person may pick (EP-5 S7), in the gateway's order. `null` when the
+ * picker must not show: the route answers 404 while the gateway's switch is off, and a zero-retention
+ * session is refused (403). Any other failure rejects with the typed `ApiError`.
+ */
+export async function listDeckTemplates(): Promise<DeckTemplate[] | null> {
+  let raw: unknown
+  try {
+    raw = await requestJson<unknown>('/api/v1/deck-templates')
+  } catch (error) {
+    if (error instanceof ApiError && (error.status === 404 || error.status === 403)) return null
+    throw error
+  }
+  const templates = objectValue(raw)?.templates
+  return Array.isArray(templates)
+    ? templates.map(normalizeDeckTemplate).filter((template): template is DeckTemplate => template !== null)
+    : []
 }
 
 /**

@@ -60,6 +60,7 @@ const ON: ComposerCapabilities = {
   contextRefs: false,
   threadReferences: false,
   selectionEdit: false,
+  artifactPromote: false,
 }
 
 beforeEach(() => {

@@ -222,6 +222,13 @@ pub(crate) struct SpaceFeatureFlags {
     /// the browser sent. A rollout control, never an authorization input: the field is a framing
     /// hint, is never stored, and grants nothing.
     pub(crate) chat_locale_hint: bool,
+    /// `CHAT_ARTIFACT_PROMOTE_ENABLED` (EP-3 S8): `POST /api/v1/chat/documents` accepts
+    /// `origin: chat-artifact` with a `source_ref`, refuses a Zero Data Retention caller with the
+    /// typed 412 itself, and the composer capabilities report `artifact_promote`. Only the literal
+    /// `true` turns it on, never by default in development. Off, the route is what it was: `origin`
+    /// and `source_ref` are ignored and every copy is a `chat-attachment`. A rollout control, never
+    /// an authorization input: documents-api decides under the user's own scoped token.
+    pub(crate) chat_artifact_promote: bool,
     /// `SPACE_DENIALS_TYPED` (WS03-S5): map Control's typed Space denials to the browser envelope.
     /// Off restores pass-through. A rollout control, never an authorization input.
     pub(crate) denials_typed: bool,
@@ -489,6 +496,9 @@ impl SpaceFeatureFlags {
             memory_ui: env::var("GATEWAY_SPACE_MEMORY_UI").is_ok_and(|value| value == "true"),
             agent_version_pinning: env::var("AGENT_VERSION_PINNING").is_ok_and(|value| value == "true"),
             chat_locale_hint: space_flag("CHAT_LOCALE_HINT"),
+            chat_artifact_promote: chat_artifact_promote_from(
+                env::var("CHAT_ARTIFACT_PROMOTE_ENABLED").ok().as_deref(),
+            ),
             denials_typed: space_flag("SPACE_DENIALS_TYPED"),
             dm_api: space_flag("SPACE_DM_API"),
             message_revise_api: space_flag("SPACE_MESSAGE_REVISE_API"),
@@ -945,6 +955,12 @@ fn model_entitlement_admin_from(value: Option<&str>) -> bool {
     value == Some("true")
 }
 
+/// Exactly the word `true` (EP-3 S8): a promote switch that a stray `1` turned on would start
+/// copying thread work product into the knowledge base before anyone chose to.
+fn chat_artifact_promote_from(value: Option<&str>) -> bool {
+    value == Some("true")
+}
+
 fn dev_flags_allowed(app_env: &str) -> bool {
     !matches!(app_env.to_ascii_lowercase().as_str(), "production" | "prod")
 }
@@ -1057,9 +1073,9 @@ fn canonical_public_origin(value: &str, production_like: bool) -> Result<String>
 #[cfg(test)]
 mod tests {
     use super::{
-        canonical_public_origin, continue_park_form_from, dev_flags_allowed,
-        model_entitlement_admin_from, service_token_is_secure, standard_http_client,
-        validate_service_token_distinctness,
+        canonical_public_origin, chat_artifact_promote_from, continue_park_form_from,
+        dev_flags_allowed, model_entitlement_admin_from, service_token_is_secure,
+        standard_http_client, validate_service_token_distinctness, SpaceFeatureFlags,
     };
 
     #[tokio::test]
@@ -1238,6 +1254,31 @@ mod tests {
         ] {
             assert!(!model_entitlement_admin_from(value), "{value:?}");
         }
+    }
+
+    /// EP-3 S8: the artifact promote switch is on only for the exact word `true`, read once in
+    /// `SpaceFeatureFlags::from_env`, and the documents handler sees it only through `AppState`.
+    #[test]
+    fn the_chat_artifact_promote_flag_is_on_only_for_the_exact_word_true() {
+        assert!(chat_artifact_promote_from(Some("true")));
+        for value in [
+            None,
+            Some(""),
+            Some("false"),
+            Some("TRUE"),
+            Some(" true"),
+            Some("true "),
+            Some("1"),
+            Some("yes"),
+            Some("on"),
+        ] {
+            assert!(!chat_artifact_promote_from(value), "{value:?}");
+        }
+        assert!(!SpaceFeatureFlags::default().chat_artifact_promote);
+        let documents = include_str!("domains/chat/documents.rs").replace("\r\n", "\n");
+        let handlers = documents.split("#[cfg(test)]\nmod tests").next().unwrap_or(&documents);
+        assert!(!handlers.contains("CHAT_ARTIFACT_PROMOTE_ENABLED"), "a handler reads the env");
+        assert!(!handlers.contains("env::var"), "a handler reads the env");
         let config = include_str!("config.rs").replace("\r\n", "\n");
         let production = config.split("#[cfg(test)]\nmod tests").next().unwrap_or(&config);
         assert_eq!(production.matches("\"MODEL_ENTITLEMENT_ADMIN_ENABLED\"").count(), 1);
