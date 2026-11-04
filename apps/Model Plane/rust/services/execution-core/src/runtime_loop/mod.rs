@@ -1709,12 +1709,45 @@ async fn execute_step_inner(
                     result_handles::handle_envelope(&handle_id, label, &screened.output)
                 })
         });
-    let mut outcome = StepOutcome::completed(parked.unwrap_or(rendered));
+    let mut outcome = StepOutcome::completed(with_edit_note(
+        parked.unwrap_or(rendered),
+        tool_name,
+        release.filter(|_| released),
+    ));
     outcome.compaction_triggered = compaction_triggered;
     outcome.screening_taint = (tool_name == READ_PROVIDER_ACTION_TOOL
         && screened.provenance.is_audit_worthy())
         || screened.taint;
     outcome
+}
+
+/// The result of a provider write the person edited before approving it (EP-10-S5, D8), with the
+/// note that says so first: the field names only, from the release the resume boundary built,
+/// never from the model's own arguments. The note sits outside the provenance-labelled result, as
+/// the executor's own words. Every other result is returned as it is.
+fn with_edit_note(
+    output: String,
+    tool_name: &str,
+    release: Option<&resume::ApprovedRelease>,
+) -> String {
+    match release.and_then(resume::ApprovedRelease::edit) {
+        Some(edit) if tool_name == EXECUTE_PROVIDER_ACTION_TOOL => {
+            format!("{}\n{output}", edit.sentence())
+        }
+        _ => output,
+    }
+}
+
+/// What a provider write's step record adds for an edited call (EP-10-S5): ` edited=<names>`
+/// when the result opens with the edit note [`with_edit_note`] wrote, else nothing. Field names
+/// only; the persisted record keeps no value of the edit.
+pub(crate) fn edit_step_note(output: &str) -> String {
+    output
+        .lines()
+        .next()
+        .and_then(resume::EditNote::from_sentence)
+        .map(|edit| edit.step_note())
+        .unwrap_or_default()
 }
 
 /// Run a `subagent.*` call as a REAL nested agent loop through the dispatch
@@ -6160,5 +6193,71 @@ mod space_overlay_tests {
             record_space_overlay(&sandbox, &state, "run-1", "org-1", false, execution.clone()).await;
 
         assert_eq!(recorded, execution);
+    }
+}
+
+#[cfg(test)]
+mod edit_note_tests {
+    //! EP-10-S5: the released result of a provider write the person edited says so, by field
+    //! name, and its step record keeps the names and nothing of the values.
+    use super::*;
+
+    const SEND: &str = r#"{"connection_id":"conn-1","operation":"gmail.send","body":{"to":["a@example.com"],"subject":"New","bodyText":"edited"}}"#;
+    const RESULT: &str = "Executed gmail.send. Result:\n{\"id\":\"msg-1\"}";
+
+    fn release(edit: Option<resume::EditNote>) -> resume::ApprovedRelease {
+        let gate = crate::permission::RunGate::with_gate(
+            crate::capability_policy::ToolClassGate::Off,
+            "org-1",
+            "run-1",
+        );
+        resume::ApprovedRelease::new(gate, "s2.tool_1_approved", EXECUTE_PROVIDER_ACTION_TOOL, SEND)
+            .expect("a provider write is releasable")
+            .with_edit(edit)
+    }
+
+    fn subject_and_body() -> resume::EditNote {
+        let sentence = "The person edited subject, body before approving; the sent version differs \
+                        from your draft. Do not quote your draft as what was sent.";
+        resume::EditNote::from_sentence(sentence).expect("a sentence the note builds")
+    }
+
+    #[test]
+    fn an_edited_release_opens_its_result_with_the_field_names() {
+        let noted = release(Some(subject_and_body()));
+        let output = with_edit_note(RESULT.to_owned(), EXECUTE_PROVIDER_ACTION_TOOL, Some(&noted));
+        let (first, rest) = output.split_once('\n').expect("the note is a line of its own");
+        assert_eq!(first, subject_and_body().sentence());
+        assert_eq!(rest, RESULT, "the provider's result follows unchanged");
+        assert!(!output.contains("New") && !output.contains("edited\""), "names only, never values");
+        // The verdict line a write's step record keeps stays the last line.
+        assert_eq!(output.lines().last(), RESULT.lines().last());
+    }
+
+    #[test]
+    fn an_unedited_release_and_every_other_call_keep_their_result() {
+        let plain = release(None);
+        let noted = release(Some(subject_and_body()));
+        assert_eq!(
+            with_edit_note(RESULT.to_owned(), EXECUTE_PROVIDER_ACTION_TOOL, Some(&plain)),
+            RESULT
+        );
+        assert_eq!(with_edit_note(RESULT.to_owned(), EXECUTE_PROVIDER_ACTION_TOOL, None), RESULT);
+        assert_eq!(with_edit_note(RESULT.to_owned(), "shell", Some(&noted)), RESULT);
+    }
+
+    #[test]
+    fn the_step_record_keeps_the_edited_names_and_nothing_else() {
+        let noted = release(Some(subject_and_body()));
+        let output = with_edit_note(RESULT.to_owned(), EXECUTE_PROVIDER_ACTION_TOOL, Some(&noted));
+        assert_eq!(edit_step_note(&output), " edited=subject,body_text");
+        let unnamed = release(Some(resume::EditNote::unnamed()));
+        let output = with_edit_note(RESULT.to_owned(), EXECUTE_PROVIDER_ACTION_TOOL, Some(&unnamed));
+        assert_eq!(edit_step_note(&output), " edited=unnamed");
+        // A result with no note adds nothing, so a write's record is byte-identical to before.
+        assert_eq!(edit_step_note(RESULT), "");
+        assert_eq!(edit_step_note(""), "");
+        // A line that only resembles the note is not taken for one.
+        assert_eq!(edit_step_note("The person edited subject before approving.\nx"), "");
     }
 }

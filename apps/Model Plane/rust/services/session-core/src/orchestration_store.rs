@@ -2054,6 +2054,12 @@ pub struct ConsumedCall {
     /// The offered tools and authority the approval was raised under, as the
     /// retained snapshot's JSON (empty when none was retained).
     pub offered_json: String,
+    /// How many times the person edited the call before granting it (EP-10-S5); 0 when the
+    /// call is the one the model drafted.
+    pub revision: u32,
+    /// The fingerprint of the call as first drafted, set only when `revision > 0`. A digest:
+    /// the loop matches its fold's pending fingerprint against it.
+    pub original_action_fingerprint: String,
 }
 
 /// The outcome of [`consume_approval`].
@@ -2298,6 +2304,10 @@ async fn consume_approval_with(
 // side of `mp_contracts::durable_gate::refuse_unless_persistent_class`; the caller's
 // token is checked before this runs, but the stored class is what the run actually
 // is, and a waived token has `zdr = false`.
+//
+// An edited approval (EP-10-S5, `revision > 0`) also matches the fingerprint of the call as
+// first drafted: the paused loop only knows the draft's, and the grant that replaced it was the
+// person's own act. An unedited row has no original, so it matches its own fingerprint only.
 const CONSUME_APPROVAL_SQL: &str = "UPDATE approvals AS a \
      SET consumed_at = now(), consumed_claim_hash = $6 \
      FROM runs AS r \
@@ -2309,7 +2319,8 @@ const CONSUME_APPROVAL_SQL: &str = "UPDATE approvals AS a \
        AND (a.expires_at IS NULL OR a.expires_at > now()) \
        AND EXISTS (SELECT 1 FROM approval_continuation_descriptors d \
                    WHERE d.approval_id = a.id \
-                     AND ($5 = '' OR d.action_fingerprint = $5)) \
+                     AND ($5 = '' OR d.action_fingerprint = $5 \
+                          OR (d.revision > 0 AND d.original_action_fingerprint = $5))) \
      RETURNING a.id";
 
 /// Renew the managed terminalization obligation of the run whose approval a
@@ -2352,6 +2363,8 @@ async fn renew_recovery_deadline(
 /// Read and decrypt the retained descriptor of an approval the caller holds the
 /// claim on, and return the call it authorised. The descriptor is the only
 /// source of what an approval authorised; nothing a client sends names the call.
+/// The revision columns (EP-10-S5) come back with it, so the loop can tell an edited
+/// call from the model's draft without being sent the draft.
 async fn read_consumed_call(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     id: &str,
@@ -2359,8 +2372,9 @@ async fn read_consumed_call(
     run_id: &str,
     user_id: &str,
 ) -> Result<Option<ConsumedCall>> {
-    let row: Option<(String,)> = sqlx::query_as(
-        "SELECT ciphertext FROM approval_continuation_descriptors \
+    let row: Option<(String, i16, Option<String>)> = sqlx::query_as(
+        "SELECT ciphertext, revision, original_action_fingerprint \
+         FROM approval_continuation_descriptors \
          WHERE approval_id = $1 AND org_id = $2 AND run_id = $3 AND user_id = $4",
     )
     .bind(id)
@@ -2369,9 +2383,10 @@ async fn read_consumed_call(
     .bind(user_id)
     .fetch_optional(&mut **transaction)
     .await?;
-    let Some((ciphertext,)) = row else {
+    let Some((ciphertext, revision, original)) = row else {
         return Ok(None);
     };
+    let (revision, original_action_fingerprint) = consumed_revision(revision, original);
     let plaintext = DescriptorCipher::from_env()?.decrypt(id, org_id, user_id, &ciphertext)?;
     let descriptor: JsonValue = serde_json::from_str(&plaintext)
         .map_err(|error| anyhow::anyhow!("stored continuation descriptor is invalid: {error}"))?;
@@ -2389,7 +2404,22 @@ async fn read_consumed_call(
         tool_name,
         tool_input_json: serde_json::to_string(&input)?,
         offered_json,
+        revision,
+        original_action_fingerprint,
     }))
+}
+
+/// The revision a consume reports. A row the column CHECK should have kept out (a negative
+/// revision) reads as unedited, and an original fingerprint is reported only with a revision:
+/// a loop that is told "edited" always has the draft's fingerprint to match, and one that is
+/// not told so never matches against an original.
+fn consumed_revision(revision: i16, original: Option<String>) -> (u32, String) {
+    match (u32::try_from(revision), original) {
+        (Ok(revision), Some(original)) if revision > 0 && !original.is_empty() => {
+            (revision, original)
+        }
+        _ => (0, String::new()),
+    }
 }
 
 const DECIDE_APPROVAL_SQL: &str =
@@ -7184,6 +7214,30 @@ mod approval_edit_tests {
         }
         assert_eq!(MAX_APPROVAL_REVISIONS, 3, "the column CHECK and the code agree");
     }
+
+    // EP-10-S5: a consume says "edited" only with the draft's fingerprint to match.
+    #[test]
+    fn consume_reports_a_revision_only_together_with_its_original_fingerprint() {
+        let original = "a".repeat(64);
+        assert_eq!(consumed_revision(1, Some(original.clone())), (1, original.clone()));
+        assert_eq!(consumed_revision(3, Some(original.clone())), (3, original.clone()));
+        assert_eq!(consumed_revision(0, None), (0, String::new()), "an unedited call");
+        assert_eq!(consumed_revision(0, Some(original.clone())), (0, String::new()));
+        assert_eq!(consumed_revision(1, None), (0, String::new()), "no original, no revision");
+        assert_eq!(consumed_revision(1, Some(String::new())), (0, String::new()));
+        assert_eq!(consumed_revision(-1, Some(original)), (0, String::new()));
+    }
+
+    #[test]
+    fn consume_accepts_the_drafted_fingerprint_only_for_a_revised_descriptor() {
+        let sql = CONSUME_APPROVAL_SQL;
+        assert!(sql.contains("$5 = '' OR d.action_fingerprint = $5"));
+        assert!(
+            sql.contains("OR (d.revision > 0 AND d.original_action_fingerprint = $5)"),
+            "the original matches only a revised descriptor"
+        );
+        assert_eq!(sql.matches("original_action_fingerprint").count(), 1);
+    }
 }
 
 #[cfg(test)]
@@ -7269,6 +7323,16 @@ mod approval_edit_db_tests {
     }
 
     async fn pending(pool: &Pool, seed: &Seed, descriptor: Option<&JsonValue>) -> String {
+        pending_in_mode(pool, seed, descriptor, "").await
+    }
+
+    /// A pending approval in `mode` (`""` cold, `"loop"` loop-owned).
+    async fn pending_in_mode(
+        pool: &Pool,
+        seed: &Seed,
+        descriptor: Option<&JsonValue>,
+        mode: &str,
+    ) -> String {
         let id = format!("appr_{}", mp_ids::new_ulid());
         let input = descriptor.map_or_else(String::new, |d| d["input"].to_string());
         let metadata = serde_json::json!({
@@ -7294,7 +7358,7 @@ mod approval_edit_db_tests {
             &metadata,
             descriptor,
             Some(Utc::now() + chrono::Duration::minutes(5)),
-            "",
+            mode,
         )
         .await
         .expect("request approval")
@@ -7760,5 +7824,89 @@ mod approval_edit_db_tests {
         .await
         .expect("count");
         assert_eq!(left, 0, "the edited descriptor goes with its approval and run");
+    }
+
+    // EP-10-S5: the loop that paused knows the draft's fingerprint only. A consume of an edited,
+    // loop-owned approval matches it as well as the edited one, and hands back the edited call
+    // with its revision and the draft's fingerprint.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+    async fn consume_an_edited_approval_returns_the_edited_call_its_revision_and_the_original() {
+        let Some(pool) = scratch_pool().await else { return };
+        let seed = seed_run(&pool, "consume-edit", "persistent").await;
+        let (descriptor, original) =
+            descriptor_for(&seed, "execute_provider_action", &mail_input("gmail.send"));
+        let id = pending_in_mode(&pool, &seed, Some(&descriptor), "loop").await;
+        let write = edit(&pool, &seed, &id, &subject_patch("New subject"), &original)
+            .await
+            .expect("edited grant");
+        assert!(write.loop_owned && write.delivery_id.is_none());
+        let (edited, _, _, _) = stored(&pool, &id).await;
+
+        let won = consume_approval(&pool, &id, &seed.org, &seed.run_id, &seed.user, &original, "a")
+            .await
+            .unwrap()
+            .expect("the draft's fingerprint matches an edited approval");
+        assert!(won.consumed);
+        let call = won.call.expect("the claim holder gets the call");
+        assert_eq!(call.revision, 1);
+        assert_eq!(call.original_action_fingerprint, original);
+        let input: JsonValue = serde_json::from_str(&call.tool_input_json).expect("json");
+        assert_eq!(input["body"]["subject"], "New subject", "the edited call, never the draft");
+        assert_eq!(input["connection_id"], "conn-1");
+        assert_ne!(edited, original);
+
+        // The same claim replaying gets the same revision back.
+        let replay = consume_approval(&pool, &id, &seed.org, &seed.run_id, &seed.user, "", "a")
+            .await
+            .unwrap()
+            .unwrap();
+        let again = replay.call.expect("a same-claim replay gets the call");
+        assert_eq!((again.revision, again.original_action_fingerprint), (1, original));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+    async fn consume_an_edited_approval_accepts_the_current_fingerprint_and_refuses_another() {
+        let Some(pool) = scratch_pool().await else { return };
+        let seed = seed_run(&pool, "consume-fp", "persistent").await;
+        let (descriptor, original) =
+            descriptor_for(&seed, "execute_provider_action", &mail_input("gmail.send"));
+        let id = pending_in_mode(&pool, &seed, Some(&descriptor), "loop").await;
+        edit(&pool, &seed, &id, &subject_patch("New subject"), &original)
+            .await
+            .expect("edited grant");
+        let (edited, _, _, _) = stored(&pool, &id).await;
+        assert_eq!(
+            consume_approval(&pool, &id, &seed.org, &seed.run_id, &seed.user, &"b".repeat(64), "a")
+                .await
+                .unwrap(),
+            Err(ConsumeRefusal::FingerprintMismatch),
+            "a third call's fingerprint is refused and leaves the approval unconsumed"
+        );
+        let won = consume_approval(&pool, &id, &seed.org, &seed.run_id, &seed.user, &edited, "a")
+            .await
+            .unwrap()
+            .expect("the edited fingerprint matches too");
+        assert!(won.consumed);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+    async fn consume_an_unedited_approval_reports_revision_zero() {
+        let Some(pool) = scratch_pool().await else { return };
+        let seed = seed_run(&pool, "consume-plain", "persistent").await;
+        let (descriptor, original) =
+            descriptor_for(&seed, "execute_provider_action", &mail_input("gmail.send"));
+        let id = pending_in_mode(&pool, &seed, Some(&descriptor), "loop").await;
+        decide_approval(&pool, &id, &seed.org, Some(&seed.user), "granted", &seed.user, "ok")
+            .await
+            .expect("plain grant");
+        let won = consume_approval(&pool, &id, &seed.org, &seed.run_id, &seed.user, &original, "a")
+            .await
+            .unwrap()
+            .unwrap();
+        let call = won.call.expect("the call");
+        assert_eq!((call.revision, call.original_action_fingerprint.as_str()), (0, ""));
     }
 }

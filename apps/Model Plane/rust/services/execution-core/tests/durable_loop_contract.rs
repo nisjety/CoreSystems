@@ -879,6 +879,11 @@ fn switch_table() -> Vec<(&'static str, String, &'static str)> {
             "the park form of /continue (WS03 S8-A S8-7; read once in sse.rs continue_run through loop_parking_enabled; the gateway accepts the shape, it writes nothing)",
         ),
         (
+            "execution-core",
+            const_str(&read(EXECUTOR_RESUME), "APPROVAL_EDIT_ENV"),
+            "the in-place restore of an approval the person edited, and the edit note (EP-10-S5; execution-core deploys before session-core takes edits)",
+        ),
+        (
             "session-core",
             const_str(&read(SESSION_CHECKPOINT), "ENABLED_ENV"),
             "the fold store",
@@ -7678,5 +7683,223 @@ fn every_guard_goes_red_when_the_code_it_guards_regresses() {
             &subscription_src,
         ),
         "subscription_run_end_event does not withdraw the retry",
+    );
+}
+
+// ---- an approval the person edited (EP-10-S5) ------------------------------------------
+//
+// session-core keeps the draft's fingerprint when a person edits a paused call, and the
+// executor restores the paused loop with the edited call. The relaxation is one digest
+// equality for one call, so these guards hold its edges: it is reached only through the switch,
+// only for a revision session-core reported, against the draft's own pause, and the edited call
+// keeps the draft's tool, connection and operation.
+
+/// The restore relaxes the pending call's digest only for an edited approval, and holds the
+/// pause against the draft's fingerprint; the released call is the consumed one; session-core
+/// matches the draft's fingerprint only for a revised descriptor.
+fn edited_restore_violations(executor_resume: &str, session_approvals: &str) -> Vec<String> {
+    let mut violations = Vec::new();
+    let code = Code::new(executor_resume).without_tests();
+    match code.fn_body("check_fold") {
+        None => violations.push("resume.rs has no check_fold".into()),
+        Some(body) => {
+            if !body.contains("let edited = consumed.edited();") {
+                violations.push("check_fold does not decide `edited` from Consumed::edited alone".into());
+            }
+            if !body.contains("(edited && pending.action_fingerprint != consumed.original_action_fingerprint)") {
+                violations.push("check_fold does not hold an edited approval to the draft's own pause fingerprint".into());
+            }
+            if !body.contains("if fold_digest != consumed_digest {") {
+                violations.push("check_fold no longer compares the digests of an unedited call".into());
+            }
+            let relaxed = Regex::new(r"(?s)let edit = if edited \{.*?edited_mail_fields\(.*?\} else if fold_digest != consumed_digest \{")
+                .expect("pattern");
+            if !relaxed.is_match(&body) {
+                violations.push("check_fold skips the digest equality outside `if edited`, or without edited_mail_fields".into());
+            }
+        }
+    }
+    match code.fn_body("reconcile") {
+        Some(body) if body.contains("consumed.tool_input_json.clone()") && body.contains("edit: checked.edit.clone()") => {}
+        _ => violations.push("reconcile does not release the consumed (edited) call with the checked edit".into()),
+    }
+    let approvals = Code::new(session_approvals).without_tests();
+    let consume_sql = Regex::new(r#"const CONSUME_APPROVAL_SQL: &str = (?s)"(.*?)";"#)
+        .expect("pattern")
+        .captures(&approvals.text)
+        .map(|captured| captured[1].to_owned())
+        .unwrap_or_default();
+    let original = Regex::new(r"(?s)OR \(d\.revision > 0 AND d\.original_action_fingerprint = \$5\)")
+        .expect("pattern");
+    if !original.is_match(&consume_sql) || consume_sql.matches("original_action_fingerprint").count() != 1 {
+        violations.push("the consume SQL matches the draft's fingerprint other than only for a revised descriptor".into());
+    }
+    violations
+}
+
+/// The edited call keeps the draft's tool, connection and operation, and changes only the mail
+/// fields an edit may change.
+fn edit_retarget_violations(executor_resume: &str) -> Vec<String> {
+    let mut violations = Vec::new();
+    let code = Code::new(executor_resume).without_tests();
+    let Some(body) = code.fn_body("edited_mail_fields") else {
+        return vec!["resume.rs has no edited_mail_fields".into()];
+    };
+    for (needle, what) in [
+        ("tool_name.trim() != super::EXECUTE_PROVIDER_ACTION_TOOL", "the tool"),
+        ("text(edited, \"connection_id\")? != connection", "the connection"),
+        ("text(edited, \"operation\")? != operation", "the operation"),
+        ("!is_mail_send(&operation)", "the mail send"),
+        ("key != \"body\" && edited.get(key) != Some(value)", "every key but the body"),
+        ("EDITABLE_BODY_KEYS.contains(", "the editable body keys"),
+    ] {
+        if !body.contains(needle) {
+            violations.push(format!("edited_mail_fields no longer pins {what} (`{needle}`)"));
+        }
+    }
+    // The mail body's own keys are camelCase, which `quoted` does not read.
+    let keys = |list: &str| -> BTreeSet<String> {
+        Regex::new(r#""([A-Za-z]+)""#)
+            .expect("pattern")
+            .captures_iter(list)
+            .map(|captured| captured[1].to_owned())
+            .collect()
+    };
+    match Regex::new(r#"const EDITABLE_BODY_KEYS: \[&str; \d+\] = \[([^\]]*)\];"#)
+        .expect("pattern")
+        .captures(&code.text)
+    {
+        Some(found) if keys(&found[1]) == keys(r#""to", "subject", "bodyText", "bodyHtml""#) => {}
+        _ => violations.push("EDITABLE_BODY_KEYS is not exactly the edit contract's to, subject, bodyText, bodyHtml".into()),
+    }
+    violations
+}
+
+/// The edit relaxation is reached through `APPROVAL_EDIT_ENABLED`, read by the strict parser in
+/// one place, and only for a revision session-core reported with the draft's fingerprint.
+fn edit_switch_violations(executor_resume: &str) -> Vec<String> {
+    let mut violations = Vec::new();
+    let code = Code::new(executor_resume).without_tests();
+    if const_str(executor_resume, "APPROVAL_EDIT_ENV") != "APPROVAL_EDIT_ENABLED" {
+        violations.push("APPROVAL_EDIT_ENV is not APPROVAL_EDIT_ENABLED".into());
+    }
+    match code.fn_body("approval_edit_enabled") {
+        Some(body)
+            if body.contains("mp_contracts::loop_fold::switch_from(std::env::var(APPROVAL_EDIT_ENV)") => {}
+        _ => violations.push("approval_edit_enabled does not read APPROVAL_EDIT_ENV through switch_from".into()),
+    }
+    if code.text.matches("APPROVAL_EDIT_ENV").count() != 2 {
+        violations.push("APPROVAL_EDIT_ENV is named outside its const and approval_edit_enabled".into());
+    }
+    match code.fn_body("edited") {
+        Some(body)
+            if body.contains("self.revision > 0")
+                && body.contains("!self.original_action_fingerprint.is_empty()")
+                && body.contains("&& approval_edit_enabled()") => {}
+        _ => violations.push("Consumed::edited is not revision, original fingerprint and the switch together".into()),
+    }
+    // Every call of the reader, not counting its own declaration.
+    let readers = Regex::new(r"(\bfn\s+)?\bapproval_edit_enabled\s*\(\)")
+        .expect("pattern")
+        .captures_iter(&code.text)
+        .filter(|captured| captured.get(1).is_none())
+        .count();
+    if readers != 1 {
+        violations.push(format!(
+            "resume.rs calls approval_edit_enabled() {readers} times: only Consumed::edited reads it"
+        ));
+    }
+    violations
+}
+
+#[test]
+fn edited_approval_restores_in_place_with_the_edited_call() {
+    let resume = read(EXECUTOR_RESUME);
+    let approvals = read(SESSION_APPROVALS);
+    assert_green(&edited_restore_violations(&resume, &approvals));
+    // The relaxation spread to an unedited call.
+    must_flag(
+        edited_restore_violations(
+            &mutate_in(&resume, "fn check_fold(", "if fold_digest != consumed_digest {", "if false {"),
+            &approvals,
+        ),
+        "no longer compares the digests",
+    );
+    // The edited approval no longer answers the draft's own pause.
+    must_flag(
+        edited_restore_violations(
+            &mutate_in(
+                &resume,
+                "fn check_fold(",
+                "|| (edited && pending.action_fingerprint != consumed.original_action_fingerprint)",
+                "",
+            ),
+            &approvals,
+        ),
+        "draft's own pause fingerprint",
+    );
+    // session-core matches the draft's fingerprint for any descriptor.
+    must_flag(
+        edited_restore_violations(
+            &resume,
+            &mutate_in(
+                &approvals,
+                "const CONSUME_APPROVAL_SQL",
+                "(d.revision > 0 AND d.original_action_fingerprint = $5)",
+                "d.original_action_fingerprint = $5",
+            ),
+        ),
+        "only for a revised descriptor",
+    );
+}
+
+#[test]
+fn edited_approval_cannot_change_connection_or_operation() {
+    let resume = read(EXECUTOR_RESUME);
+    assert_green(&edit_retarget_violations(&resume));
+    for (from, what) in [
+        ("text(edited, \"connection_id\")? != connection", "the connection"),
+        ("text(edited, \"operation\")? != operation", "the operation"),
+        ("tool_name.trim() != super::EXECUTE_PROVIDER_ACTION_TOOL", "the tool"),
+    ] {
+        must_flag(
+            edit_retarget_violations(&mutate_in(&resume, "fn edited_mail_fields(", from, "false")),
+            what,
+        );
+    }
+    must_flag(
+        edit_retarget_violations(&mutate_in(
+            &resume,
+            "const EDITABLE_BODY_KEYS",
+            "\"bodyHtml\"]",
+            "\"bodyHtml\", \"threadId\"]",
+        )),
+        "EDITABLE_BODY_KEYS",
+    );
+}
+
+#[test]
+fn edited_approval_falls_back_when_the_switch_is_off() {
+    let resume = read(EXECUTOR_RESUME);
+    assert_green(&edit_switch_violations(&resume));
+    // The switch dropped from the decision: an edit would be run with it off.
+    must_flag(
+        edit_switch_violations(&mutate_in(&resume, "fn edited(", "approval_edit_enabled()", "true")),
+        "Consumed::edited is not",
+    );
+    // A lenient read of the switch.
+    must_flag(
+        edit_switch_violations(&mutate_in(
+            &resume,
+            "fn approval_edit_enabled(",
+            "mp_contracts::loop_fold::switch_from(std::env::var(APPROVAL_EDIT_ENV).ok().as_deref())",
+            "std::env::var(APPROVAL_EDIT_ENV).is_ok()",
+        )),
+        "through switch_from",
+    );
+    // A second reader of the switch beside Consumed::edited.
+    must_flag(
+        edit_switch_violations(&format!("{resume}\nfn rogue() -> bool {{ approval_edit_enabled() }}\n")),
+        "only Consumed::edited reads it",
     );
 }
