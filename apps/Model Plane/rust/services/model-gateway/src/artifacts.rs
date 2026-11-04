@@ -43,6 +43,10 @@ pub enum ArtifactKind {
     File,
     /// A raster image, delivered as a `data:` URI or an https URL.
     Image,
+    /// A slide deck's manifest JSON (EP-5 S2). Written only by the `deck` tool,
+    /// which owns the manifest: [`Self::parse`] does not accept it and it is not
+    /// text-authored, so `create_artifact` cannot forge one.
+    Deck,
 }
 
 impl ArtifactKind {
@@ -56,6 +60,7 @@ impl ArtifactKind {
             Self::Spreadsheet => "spreadsheet",
             Self::File => "file",
             Self::Image => "image",
+            Self::Deck => "deck",
         }
     }
 

@@ -7,6 +7,7 @@ pub mod attachments;
 pub mod autonomy;
 pub mod context_refs;
 pub mod dataplane_posture;
+pub mod deck_manifest;
 pub mod durable_gate;
 pub mod effect_ledger;
 pub mod lifecycle_notice;
