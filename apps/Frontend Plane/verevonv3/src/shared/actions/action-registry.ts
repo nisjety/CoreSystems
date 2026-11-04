@@ -715,6 +715,18 @@ const learningUndoInput = z.object({
   entryId: z.string().min(1),
 })
 
+// A skill the person saves from one of their own answers (EP-11 S1). The name, description and
+// content are bounded as the server bounds them, and the owner and the organisation come from the
+// verified session, never from here.
+const skillsSaveFromMessageInput = z.object({
+  threadId: z.string().min(1).max(128),
+  messageId: z.string().min(1).max(128),
+  name: z.string().trim().min(1).max(64),
+  description: z.string().trim().max(300).optional(),
+  content: z.string().trim().min(1).max(32_000),
+  enabled: z.boolean(),
+})
+
 const settingsUpdateMeInput = z.object({
   name: z.string().trim().optional(),
   displayName: z.string().trim().optional(),
@@ -1230,6 +1242,14 @@ const chatOpenDeckSlideInput = z
   })
   .strict()
 
+// The deck a person presents full screen (EP-5 S5): the artifact the panel holds. Strict, so nothing else reaches the
+// presentation; its slides, its pages and the present gate are read from the manifest the panel has.
+const chatPresentDeckInput = z
+  .object({
+    artifactId: z.string().min(1).max(128),
+  })
+  .strict()
+
 // The person's own edit or restore of a thread artifact (EP-3 S4). `expectedVersion` is the head the panel
 // showed, the server's compare-and-set; no org or user field, because the server reads the owner from the
 // session. The text bound is the gateway's text-artifact limit.
@@ -1387,6 +1407,33 @@ const orgSetModelEntitlementInput = z.object({
   roles: z.record(z.string().min(1), modelPolicyLayer).optional(),
 }).strict()
 
+// Retention window and legal holds (EP-9 C1). org-core owns every rule; these mirror its bounds so a
+// draft is refused before it is sent. A null window means keep, the default.
+const orgSetRetentionInput = z.object({
+  orgId: z.string().min(1),
+  expected_revision: z.number().int().nonnegative(),
+  thread_days: z.number().int().min(30).max(3650).nullable(),
+}).strict()
+
+const orgPlaceLegalHoldInput = z.discriminatedUnion('scope', [
+  z.object({
+    orgId: z.string().min(1),
+    scope: z.literal('org'),
+    hold_ref: z.string().trim().min(1).max(200),
+  }).strict(),
+  z.object({
+    orgId: z.string().min(1),
+    scope: z.literal('thread'),
+    thread_id: z.string().min(1).max(128).regex(/^[A-Za-z0-9][A-Za-z0-9._:-]*$/),
+    hold_ref: z.string().trim().min(1).max(200),
+  }).strict(),
+])
+
+const orgReleaseLegalHoldInput = z.object({
+  orgId: z.string().min(1),
+  holdId: z.string().regex(/^lh_[0-9a-f]{32}$/),
+}).strict()
+
 // Domain verification (WS05-S6). The domain is a hostname; org-core normalizes it, refuses IP
 // literals, public suffixes and free-mail providers, and owns every other rule.
 const orgDomainInput = z.object({
@@ -1477,6 +1524,16 @@ const orgSetAgentPolicyInput = z
         mcp_tool_approval: z.enum(['approved_only', 'trust_annotations']).optional(),
       })
       .strict(),
+  })
+  .strict()
+
+// The organization's web switches (Wave 3 EP-9 W2): public web access for its agents, and whether a paid search
+// provider may serve them. Both are written together. `cached_only` is reserved on the server and so is not offered.
+const orgSetWebPolicyInput = z
+  .object({
+    revision: z.number().int().min(0),
+    webMode: z.enum(['off', 'live']),
+    paidProviders: z.enum(['off', 'on']),
   })
   .strict()
 
@@ -3308,6 +3365,17 @@ export const actionRegistry = [
     outputSchema: envelopeStatusOutput,
   },
   {
+    id: 'skills.save_from_message',
+    label: 'Save an answer as a skill',
+    description: 'Save one of the person\'s own answers as a private skill of theirs, used in their own matching chats. The name, description and content are the person\'s text, bounded here as the server bounds them. The owner is the verified session, and no organisation is named. Org-wide skills stay admin-only; a member needs the member authoring switch on. The button is hidden in a temporary chat (zero data retention) and in a conversation not yet saved. Never model-executable: a model does not write its own skills.',
+    ownerPlane: 'model',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: skillsSaveFromMessageInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
     id: 'settings.update_me',
     label: 'Update profile',
     description: 'Update the caller\'s own profile fields (name, avatar, timezone, and similar).',
@@ -3448,6 +3516,17 @@ export const actionRegistry = [
     requiresApproval: false,
     reversible: true,
     inputSchema: orgSetAgentPolicyInput,
+    outputSchema: orgAgentPolicyOutput,
+  },
+  {
+    id: 'org.set_web_policy',
+    label: 'Set organization web access',
+    description: 'Turn public web access for the organization\'s agents off or on, and allow or forbid paid search providers for them. Takes the revision it was read at and is refused if the policy has changed since, and keeps every other agent-policy setting as it is stored. With web access off, agents are offered no web search, page fetch or crawl, and a chat turn says why. Takes effect only where the deployment has switched policy enforcement on. An org admin only. Refused typed under zero data retention. Never model-executable: a model does not set the rules it runs under.',
+    ownerPlane: 'model',
+    risk: 'high',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: orgSetWebPolicyInput,
     outputSchema: orgAgentPolicyOutput,
   },
   {
@@ -3943,6 +4022,39 @@ export const actionRegistry = [
     requiresApproval: true,
     reversible: true,
     inputSchema: orgSetModelEntitlementInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'org.set_retention',
+    label: 'Set organization retention window',
+    description: 'Set how many days of inactivity a personal thread is kept before the retention sweep may delete it (30 to 3650), or keep threads indefinitely. Held threads are never deleted. Owner or admin only.',
+    ownerPlane: 'control',
+    risk: 'high',
+    requiresApproval: true,
+    reversible: true,
+    inputSchema: orgSetRetentionInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'org.place_legal_hold',
+    label: 'Place legal hold',
+    description: 'Hold the whole organization or one thread so the retention sweep deletes nothing it covers until the hold is released. A thread kept under zero data retention has nothing to hold and is refused. Owner or compliance only.',
+    ownerPlane: 'control',
+    risk: 'high',
+    requiresApproval: true,
+    reversible: true,
+    inputSchema: orgPlaceLegalHoldInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'org.release_legal_hold',
+    label: 'Release legal hold',
+    description: 'Release a legal hold, after which the held content follows the retention window again. Owner or compliance only.',
+    ownerPlane: 'control',
+    risk: 'high',
+    requiresApproval: true,
+    reversible: false,
+    inputSchema: orgReleaseLegalHoldInput,
     outputSchema: envelopeStatusOutput,
   },
   {
@@ -4494,6 +4606,17 @@ export const actionRegistry = [
     requiresApproval: false,
     reversible: true,
     inputSchema: chatOpenDeckSlideInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'chat.present_deck',
+    label: 'Present a deck',
+    description: 'Present a deck in the chat\'s artifact panel full screen, one slide at a time: from the rendered pages when the render has one page per slide, and from the slides otherwise. Read only, and nothing is sent to the server: the panel shows the manifest and the render it already holds. Refused, with the reason shown, while the deck has no slide, a slide with an error or a slide that was never built; a warning never holds it back. Never model-executable: a model does not choose what the person presents.',
+    ownerPlane: 'model',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: chatPresentDeckInput,
     outputSchema: envelopeStatusOutput,
   },
   {

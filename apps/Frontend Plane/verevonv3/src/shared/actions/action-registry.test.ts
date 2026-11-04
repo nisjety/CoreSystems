@@ -497,6 +497,44 @@ describe('action registry', () => {
     }).success).toBe(false)
   })
 
+  it('keeps the retention window and legal holds approval-gated, high risk and out of reach of the model', () => {
+    for (const id of ['org.set_retention', 'org.place_legal_hold', 'org.release_legal_hold'] as const) {
+      const action = getActionDescriptor(id)
+      expect(action?.ownerPlane).toBe('control')
+      expect(action?.risk).toBe('high')
+      expect(action?.requiresApproval).toBe(true)
+      // A model must not shorten what its org keeps, nor lift a hold on evidence.
+      expect(isModelExecutableAction(id)).toBe(false)
+    }
+    expect(getActionDescriptor('org.release_legal_hold')?.reversible).toBe(false)
+
+    const setRetention = getActionDescriptor('org.set_retention')
+    const base = { orgId: 'org_1', expected_revision: 0, thread_days: 90 }
+    expect(setRetention?.inputSchema.safeParse(base).success).toBe(true)
+    // Null is keep; the bounds are org-core's 30..3650 days.
+    expect(setRetention?.inputSchema.safeParse({ ...base, thread_days: null }).success).toBe(true)
+    expect(setRetention?.inputSchema.safeParse({ ...base, thread_days: 29 }).success).toBe(false)
+    expect(setRetention?.inputSchema.safeParse({ ...base, thread_days: 3651 }).success).toBe(false)
+    expect(setRetention?.inputSchema.safeParse({ ...base, thread_days: 90.5 }).success).toBe(false)
+    expect(setRetention?.inputSchema.safeParse({ orgId: 'org_1', thread_days: 90 }).success).toBe(false)
+    expect(setRetention?.inputSchema.safeParse({ ...base, days: 90 }).success).toBe(false)
+
+    const place = getActionDescriptor('org.place_legal_hold')
+    expect(place?.inputSchema.safeParse({ orgId: 'org_1', scope: 'org', hold_ref: 'Matter 17' }).success).toBe(true)
+    expect(place?.inputSchema.safeParse({ orgId: 'org_1', scope: 'thread', thread_id: 'thr_1', hold_ref: 'Matter 17' }).success).toBe(true)
+    // An org hold names no thread; a thread hold must name one; the reference is required.
+    expect(place?.inputSchema.safeParse({ orgId: 'org_1', scope: 'org', thread_id: 'thr_1', hold_ref: 'M' }).success).toBe(false)
+    expect(place?.inputSchema.safeParse({ orgId: 'org_1', scope: 'thread', hold_ref: 'M' }).success).toBe(false)
+    expect(place?.inputSchema.safeParse({ orgId: 'org_1', scope: 'org', hold_ref: '  ' }).success).toBe(false)
+    expect(place?.inputSchema.safeParse({ orgId: 'org_1', scope: 'org', hold_ref: 'r'.repeat(201) }).success).toBe(false)
+    expect(place?.inputSchema.safeParse({ orgId: 'org_1', scope: 'space', hold_ref: 'M' }).success).toBe(false)
+
+    const release = getActionDescriptor('org.release_legal_hold')
+    expect(release?.inputSchema.safeParse({ orgId: 'org_1', holdId: `lh_${'a'.repeat(32)}` }).success).toBe(true)
+    expect(release?.inputSchema.safeParse({ orgId: 'org_1', holdId: 'lh_short' }).success).toBe(false)
+    expect(release?.inputSchema.safeParse({ orgId: 'org_1', holdId: `lh_${'A'.repeat(32)}` }).success).toBe(false)
+  })
+
   it('takes the whole router policy, the ladder and the role table included, so a save through the action resets neither', () => {
     const action = getActionDescriptor('router_policy.update')
     const row = { simple: 'gpt-4o-mini', moderate: 'gpt-4o-mini', complex: 'claude-sonnet-5-5' }
@@ -1029,6 +1067,26 @@ describe('action registry', () => {
     }
   })
 
+  it('registers the deck presentation as a low-risk read the model cannot execute (EP-5-S5)', () => {
+    const present = getActionDescriptor('chat.present_deck')
+
+    expect(present).toMatchObject({ ownerPlane: 'model', risk: 'low', requiresApproval: false, reversible: true })
+    expect(isModelExecutableAction('chat.present_deck')).toBe(false)
+    expect(MODEL_ACCESS['chat.present_deck']).toMatchObject({ access: 'none', sideEffectClass: 'read' })
+
+    const schema = present?.inputSchema
+    expect(schema?.safeParse({ artifactId: 'artifact-deck' }).success).toBe(true)
+    for (const input of [
+      { artifactId: '' },
+      // The slides, the pages and the gate come from the panel's manifest: a client never names a slide, an index or a thread.
+      { artifactId: 'artifact-deck', slideId: 's3' },
+      { artifactId: 'artifact-deck', index: 2 },
+      { artifactId: 'artifact-deck', threadId: 'thread-1' },
+    ]) {
+      expect(schema?.safeParse(input).success).toBe(false)
+    }
+  })
+
   function registered(id: string) {
     return actionRegistry.find((action) => action.id === id)
   }
@@ -1045,10 +1103,32 @@ describe('action registry', () => {
       expect(isModelExecutableAction(id), id).toBe(false)
       expect(registered(id)?.description ?? '', id).toContain('model-executable')
     }
-    for (const id of ['org.set_agent_policy', 'org.create_hook', 'org.update_hook', 'org.delete_hook']) {
+    for (const id of ['org.set_agent_policy', 'org.set_web_policy', 'org.create_hook', 'org.update_hook', 'org.delete_hook']) {
       expect(registered(id), id).toMatchObject({ risk: 'high' })
     }
     expect(registered('org.preview_effective_policy')).toMatchObject({ risk: 'low' })
+  })
+
+  it('registers the organization web access switch as a model-plane action the model cannot execute', () => {
+    expect(registered('org.set_web_policy'), 'org.set_web_policy').toMatchObject({
+      ownerPlane: 'model',
+      requiresApproval: false,
+      reversible: true,
+    })
+    expect(isModelExecutableAction('org.set_web_policy')).toBe(false)
+    expect(registered('org.set_web_policy')?.description ?? '').toContain('model-executable')
+  })
+
+  it('takes the two web switches from the client, never cached_only, and no organization', () => {
+    const setWeb = registered('org.set_web_policy')?.inputSchema
+
+    expect(setWeb?.safeParse({ revision: 0, webMode: 'off', paidProviders: 'on' }).success).toBe(true)
+    expect(setWeb?.safeParse({ revision: 4, webMode: 'live', paidProviders: 'off' }).success).toBe(true)
+    // cached_only is reserved on the server until Quarry ships it, so the client does not offer it.
+    expect(setWeb?.safeParse({ revision: 0, webMode: 'cached_only', paidProviders: 'on' }).success).toBe(false)
+    // The revision is required, and the organization is the session's, never the body's.
+    expect(setWeb?.safeParse({ webMode: 'off', paidProviders: 'on' }).success).toBe(false)
+    expect(setWeb?.safeParse({ revision: 0, webMode: 'off', paidProviders: 'on', orgId: 'org_1' }).success).toBe(false)
   })
 
   it('takes the closed policy settings and no organization from the client, and never a reserved key', () => {
@@ -1417,6 +1497,35 @@ describe('action registry', () => {
     expect(publish?.inputSchema.safeParse({ agentRef: '' }).success).toBe(false)
   })
 
+  it('registers save-as-skill as a low-risk person-only write the model cannot execute, bounded like the server (EP-11-S1)', () => {
+    const save = getActionDescriptor('skills.save_from_message')
+    expect(save?.ownerPlane).toBe('model')
+    expect(save?.risk).toBe('low')
+    expect(save?.requiresApproval).toBe(false)
+    expect(MODEL_ACCESS['skills.save_from_message'].access).toBe('none')
+    expect(MODEL_ACCESS['skills.save_from_message'].eligible).toBe(false)
+
+    const valid = {
+      threadId: 'thread-1',
+      messageId: 'msg-1',
+      name: 'Utrulling',
+      description: 'Kort',
+      content: '1. Kjør testene',
+      enabled: true,
+    }
+    expect(save?.inputSchema.safeParse(valid).success).toBe(true)
+    expect(save?.inputSchema.safeParse({ ...valid, name: ' Utrulling ' }).success).toBe(true)
+    expect(save?.inputSchema.safeParse({ ...valid, name: 'x'.repeat(65) }).success).toBe(false)
+    expect(save?.inputSchema.safeParse({ ...valid, content: '   ' }).success).toBe(false)
+    expect(save?.inputSchema.safeParse({ ...valid, content: 'x'.repeat(32_001) }).success).toBe(false)
+    expect(save?.inputSchema.safeParse({ ...valid, description: 'x'.repeat(301) }).success).toBe(false)
+    expect(save?.inputSchema.safeParse({ ...valid, messageId: '' }).success).toBe(false)
+    // The owner and the organisation come from the session, never from the body.
+    const parsed = save?.inputSchema.parse({ ...valid, orgId: 'org-forged', owner_user_id: 'user-2' }) as Record<string, unknown>
+    expect(parsed).not.toHaveProperty('orgId')
+    expect(parsed).not.toHaveProperty('owner_user_id')
+  })
+
   it('keeps every action id unique and the spaces.* entries contiguous and in their pre-fragment order (P-SPA1)', () => {
     const ids: string[] = actionRegistry.map((action) => action.id)
     expect(new Set(ids).size).toBe(ids.length)
@@ -1453,7 +1562,11 @@ describe('action registry', () => {
     // +1 after EP-3-S6 registered chat.edit_artifact_selection, the Output panel's ask about a selection.
     // +1 after EP-5-S4 registered chat.open_deck_slide, the slide strip's open-a-slide action.
     // +1 after EP-7-S4 registered chat.goal_auto_toggle, the goal bar's Keep going switch.
-    expect(ids).toHaveLength(295)
+    // +1 after EP-5-S5 registered chat.present_deck, the deck's present mode.
+    // +1 after EP-9-W2 registered org.set_web_policy, the organization's web access switch.
+    // +3 after EP-9-C1 registered org.set_retention, org.place_legal_hold and org.release_legal_hold.
+    // +1 after EP-11-S1 registered skills.save_from_message, the Save-as-skill message action.
+    expect(ids).toHaveLength(301)
 
     // The fragments also carry ids outside the `spaces.` prefix (`space.files.*`), so the Space
     // entries are the ones the fragments declare.

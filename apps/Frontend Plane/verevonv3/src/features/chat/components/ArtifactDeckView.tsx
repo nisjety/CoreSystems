@@ -9,7 +9,7 @@
  */
 import type { JSX } from '@solidjs/web'
 import { Dynamic } from '@solidjs/web'
-import { For, Show, createMemo, createSignal } from 'solid-js'
+import { For, Show, createMemo, createSignal, createUniqueId } from 'solid-js'
 import {
   AlertTriangle,
   ChevronDown,
@@ -21,6 +21,7 @@ import {
   Image as ImageIcon,
   LayoutTemplate,
   List,
+  Maximize2,
   Presentation,
   Type,
 } from '@/shared/icons'
@@ -35,6 +36,7 @@ import {
   parseDeckManifest,
   slideLines,
 } from './deck-manifest'
+import { DeckPresentMode, presentGate } from './DeckPresentMode'
 
 type Translate = (noText: string, enText: string) => string
 
@@ -73,9 +75,52 @@ export function ArtifactDeckView(props: ArtifactRendererProps): JSX.Element {
   const manifest = createMemo(() => parseDeckManifest(props.artifact.content))
   const [pickedIndex, setPickedIndex] = createSignal(0)
   const [notesOpen, setNotesOpen] = createSignal(false)
+  const [presenting, setPresenting] = createSignal(false)
+  let presenterRef: HTMLButtonElement | undefined
+  const reasonId = `verevon-deck-present-reason-${createUniqueId()}`
   // A newer revision can have fewer slides than the pick, so the pick stays on a slide that exists.
   const current = createMemo(() => Math.min(pickedIndex(), Math.max(0, (manifest()?.slides.length ?? 0) - 1)))
   const selected = createMemo(() => manifest()?.slides[current()])
+  const gate = createMemo(() => presentGate(manifest()?.slides ?? []))
+
+  // Why Presenter is off: the blockers by count, then what to do about them. Slides are changed in the chat.
+  const blockReason = () => {
+    const counts = gate()
+    if (counts.slides === 0) {
+      return i18n.tr('En presentasjon trenger minst ett lysbilde.', 'A presentation needs at least one slide.')
+    }
+    const lines: string[] = []
+    if (counts.errors > 0) {
+      lines.push(counts.errors === 1
+        ? i18n.tr('1 lysbilde har feil.', '1 slide has an error.')
+        : i18n.tr(`${counts.errors} lysbilder har feil.`, `${counts.errors} slides have errors.`))
+    }
+    if (counts.drafts > 0) {
+      lines.push(counts.drafts === 1
+        ? i18n.tr('1 lysbilde er ikke bygget.', '1 slide is not built.')
+        : i18n.tr(`${counts.drafts} lysbilder er ikke bygget.`, `${counts.drafts} slides are not built.`))
+    }
+    lines.push(i18n.tr(
+      'Be om å rette og bygge lysbildene i chatten før du presenterer.',
+      'Ask in the chat to fix and build the slides before you present.',
+    ))
+    return lines.join(' ')
+  }
+  // A warning never holds presenting back, so it is counted here and not refused.
+  const warningLine = () => {
+    const warnings = gate().warnings
+    return warnings === 1
+      ? i18n.tr('1 lysbilde har advarsler', '1 slide has warnings')
+      : i18n.tr(`${warnings} lysbilder har advarsler`, `${warnings} slides have warnings`)
+  }
+  // A picture goes on a card only when the render made one per slide, in slide order. A render whose page count
+  // differs from the slides, or that kept only some of its pages, would put a picture on the wrong card or on none.
+  const pictures = createMemo<string[]>(() => {
+    const preview = props.file?.preview
+    const slides = manifest()?.slides.length ?? 0
+    return preview && preview.pages === slides && preview.thumbs.length >= slides ? preview.thumbs : []
+  })
+  const cardClass = () => `verevon-deck__card${pictures().length > 0 ? ' verevon-deck__card--picture' : ''}`
 
   return (
     <Show
@@ -104,13 +149,16 @@ export function ArtifactDeckView(props: ArtifactRendererProps): JSX.Element {
                   <li>
                     <button
                       type="button"
-                      class="verevon-deck__card"
+                      class={cardClass()}
                       aria-current={index() === current() ? 'true' : undefined}
                       onClick={() => {
                         setPickedIndex(index())
                         setNotesOpen(false)
                       }}
                     >
+                      <Show when={pictures()[index()]}>
+                        {(picture) => <img class="verevon-deck__thumb" src={picture()} alt="" loading="lazy" />}
+                      </Show>
                       <span class="verevon-deck__head">
                         <span class="verevon-deck__number">{index() + 1}</span>
                         <Dynamic component={LAYOUT_ICONS[slide.layout]} size={14} />
@@ -129,6 +177,29 @@ export function ArtifactDeckView(props: ArtifactRendererProps): JSX.Element {
               </For>
             </ol>
           </Show>
+          <div class="verevon-deck__present">
+            <Show when={gate().warnings > 0}>
+              <p class="verevon-deck__warned" role="status">{warningLine()}</p>
+            </Show>
+            <button
+              ref={presenterRef}
+              type="button"
+              class="verevon-deck__present-button"
+              disabled={!gate().allowed}
+              aria-describedby={gate().allowed ? undefined : reasonId}
+              onClick={() => {
+                // Focused first, so the presentation can give the focus back to this button when it closes.
+                presenterRef?.focus()
+                setPresenting(true)
+              }}
+            >
+              <Maximize2 size={14} />
+              {i18n.tr('Presenter', 'Present')}
+            </button>
+            <Show when={!gate().allowed}>
+              <p id={reasonId} class="verevon-deck__reason">{blockReason()}</p>
+            </Show>
+          </div>
           <Show when={selected()}>
             {(slide) => (
               <div class="verevon-deck__detail">
@@ -169,6 +240,15 @@ export function ArtifactDeckView(props: ArtifactRendererProps): JSX.Element {
           {props.fallback?.()}
           <Show when={props.file?.preview}>
             {(preview) => <ArtifactOfficePreview title={props.artifact.title} preview={preview()} />}
+          </Show>
+          <Show when={presenting()}>
+            <DeckPresentMode
+              slides={deck().slides}
+              title={props.artifact.title}
+              preview={props.file?.preview}
+              startIndex={current()}
+              onClose={() => setPresenting(false)}
+            />
           </Show>
         </div>
       )}

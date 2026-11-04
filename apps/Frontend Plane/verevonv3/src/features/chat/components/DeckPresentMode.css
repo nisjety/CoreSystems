@@ -1,0 +1,190 @@
+/* The Presenter row under a deck's strip, and the present mode itself (EP-5 S5). Colours are tokens, so light and dark
+   both hold. The overlay is portalled to the body, so its fixed box is not moved by the artifact panel. */
+
+.verevon-deck__present {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+}
+
+.verevon-deck__present-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: var(--verevon-touch-target, 44px);
+  padding: 0 14px;
+  border: 1px solid color-mix(in srgb, var(--verevon-e-subtle) 30%, transparent);
+  border-radius: 8px;
+  background: var(--verevon-surface-soft);
+  color: var(--verevon-j-text);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.verevon-deck__present-button:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.verevon-deck__warned,
+.verevon-deck__reason {
+  margin: 0;
+  font-size: 12px;
+}
+
+.verevon-deck__warned {
+  color: var(--warning-ink);
+}
+
+.verevon-deck__reason {
+  flex-basis: 100%;
+  color: var(--verevon-e-muted);
+}
+
+.verevon-deck-present {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 16px;
+  background: var(--verevon-surface-muted);
+  color: var(--verevon-j-text);
+  animation: verevon-deck-present-in 160ms ease-out;
+}
+
+@keyframes verevon-deck-present-in {
+  from {
+    opacity: 0;
+  }
+}
+
+.verevon-deck-present__bar,
+.verevon-deck-present__controls {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.verevon-deck-present__counter {
+  margin: 0;
+  color: var(--verevon-e-muted);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* A size container, so a slide fits the space the bars leave at any window size: 16:9, as wide as the stage allows. */
+.verevon-deck-present__stage {
+  display: grid;
+  flex: 1 1 auto;
+  min-height: 0;
+  place-items: center;
+  container-type: size;
+}
+
+.verevon-deck-present__slide,
+.verevon-deck-present__page {
+  width: min(100cqw, calc(100cqh * 16 / 9));
+  aspect-ratio: 16 / 9;
+  border: 0;
+  border-radius: 10px;
+  background: var(--verevon-surface);
+  box-shadow: var(--verevon-chat-shadow-raised);
+}
+
+/* The rendered frame takes no pointer or key presses, so the dialog keeps the keys and the focus. */
+.verevon-deck-present__page {
+  pointer-events: none;
+}
+
+.verevon-deck-present__slide {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: clamp(14px, 3.5cqw, 48px);
+  overflow: hidden;
+  color: var(--verevon-j-text);
+}
+
+.verevon-deck-present__draft,
+.verevon-deck-present__empty {
+  margin: 0;
+  color: var(--verevon-e-muted);
+  font-size: 12px;
+}
+
+.verevon-deck-present__title {
+  margin: 0;
+  font-size: clamp(20px, 4.2cqw, 44px);
+  font-weight: 650;
+  line-height: 1.15;
+  overflow-wrap: anywhere;
+}
+
+.verevon-deck-present__lines {
+  margin: 0;
+  padding-left: 1.2em;
+  font-size: clamp(14px, 2.4cqw, 26px);
+  line-height: 1.35;
+  overflow: hidden;
+}
+
+.verevon-deck-present__icon,
+.verevon-deck-present__step,
+.verevon-deck-present__notes-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: var(--verevon-touch-target, 44px);
+  min-height: var(--verevon-touch-target, 44px);
+  padding: 0 12px;
+  border: 1px solid color-mix(in srgb, var(--verevon-e-subtle) 30%, transparent);
+  border-radius: 8px;
+  background: var(--verevon-surface-soft);
+  color: var(--verevon-j-text);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.verevon-deck-present__step:disabled {
+  cursor: default;
+  opacity: 0.4;
+}
+
+.verevon-deck-present__notes-toggle[aria-expanded='true'] {
+  border-color: var(--accent);
+}
+
+.verevon-deck-present__notes {
+  max-height: 22vh;
+  overflow: auto;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: var(--verevon-surface);
+  font-size: 14px;
+}
+
+.verevon-deck-present__notes p {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.verevon-deck-present__hint {
+  margin: 0;
+  color: var(--verevon-e-muted);
+  font-size: 12px;
+  text-align: center;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .verevon-deck-present {
+    animation: none;
+  }
+}
