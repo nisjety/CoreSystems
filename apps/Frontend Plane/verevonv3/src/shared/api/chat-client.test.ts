@@ -14,6 +14,7 @@ import {
   getThreadMessages,
   listChatThreads,
   listChatThreadsPage,
+  listDeckTemplates,
   modelEffortLevels,
   modelSupportsAgentic,
   pagedTranscriptEnabled,
@@ -3013,5 +3014,78 @@ describe('chat-client approve then execute (WS14 S2)', () => {
 
       expect(result.continuation, `answer ${String(answer)}`).toBe(expected)
     }
+  })
+})
+
+describe('deck templates (EP-5 S7)', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  const json = (body: unknown, status = 200) => vi.fn().mockResolvedValue(new Response(
+    JSON.stringify(body),
+    { status, headers: { 'Content-Type': 'application/json' } },
+  ))
+
+  const listed = {
+    skill_id: 'skill-brand',
+    name: 'Aquatiq brand',
+    description: 'Blue on white.',
+    colors: { primary: '#0A3D62', secondary: '#3c6382', text: '#1e272e', background: '#ffffff', accent: ['#e58e26', 'red'] },
+    fonts: { heading: 'Carlito', body: 'Liberation Sans' },
+  }
+
+  it('sends the picked template as deck_template on a turn that keeps data', () => {
+    const body = buildChatWireBody({ content: 'Lag en presentasjon', deckTemplate: '  skill-brand ' })
+    expect(body.deck_template).toBe('skill-brand')
+  })
+
+  it('leaves the body unchanged when no template, a blank one or a malformed one is picked', () => {
+    const plain = buildChatWireBody({ content: 'hi' })
+    expect(plain).not.toHaveProperty('deck_template')
+    for (const deckTemplate of [undefined, '', '   ', '../blob', 'a b']) {
+      expect(buildChatWireBody({ content: 'hi', deckTemplate })).not.toHaveProperty('deck_template')
+    }
+  })
+
+  it('never sends a template on the turns the server would refuse it', () => {
+    for (const request of [
+      { content: 'hi', deckTemplate: 'skill-brand', zdr: true },
+      { content: 'hi', deckTemplate: 'skill-brand', provider: 'openai-codex-subscription' },
+      { content: 'hi', deckTemplate: 'skill-brand', sourceScope: 'conversation' as const },
+    ]) {
+      expect(buildChatWireBody(request)).not.toHaveProperty('deck_template')
+    }
+  })
+
+  it('lists templates with display fields only and drops an entry that is not one', async () => {
+    vi.stubGlobal('fetch', json({ data: { templates: [
+      listed,
+      { ...listed, skill_id: 'skill-bad', colors: { ...listed.colors, primary: 'blue' } },
+      { ...listed, skill_id: '../escape' },
+      { ...listed, skill_id: 'skill-nofont', fonts: { heading: 'Carlito' } },
+    ] } }))
+    const templates = await listDeckTemplates()
+    expect(templates).toEqual([{
+      skillId: 'skill-brand',
+      name: 'Aquatiq brand',
+      description: 'Blue on white.',
+      colors: { primary: '#0a3d62', secondary: '#3c6382', text: '#1e272e', background: '#ffffff', accent: ['#e58e26'] },
+      fonts: { heading: 'Carlito', body: 'Liberation Sans' },
+    }])
+    const fetchMock = vi.mocked(fetch)
+    expect(String(fetchMock.mock.calls[0]?.[0])).toContain('/api/v1/deck-templates')
+  })
+
+  it('reads a 404 (switch off) and a 403 (zero retention) as no picker', async () => {
+    vi.stubGlobal('fetch', json({ error: { code: 'not_found', message: 'no such route' } }, 404))
+    expect(await listDeckTemplates()).toBeNull()
+    vi.stubGlobal('fetch', json({ error: { code: 'zdr_feature_not_supported', message: 'no', feature: 'skills' } }, 403))
+    expect(await listDeckTemplates()).toBeNull()
+  })
+
+  it('rejects any other failure with the typed error', async () => {
+    vi.stubGlobal('fetch', json({ error: { code: 'upstream_unavailable', message: 'down' } }, 502))
+    await expect(listDeckTemplates()).rejects.toBeInstanceOf(ApiError)
   })
 })

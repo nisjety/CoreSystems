@@ -314,6 +314,8 @@ fn authed_routes() -> Router<AppState> {
         .route("/v1/threads/:thread_id/branch", post(branch_thread))
         // Start a new thread from a copy of this one, up to an assistant turn (build plan WS17 S6).
         .route("/v1/threads/:thread_id/fork", post(fork_thread))
+        // The thread's goal (Wave 3 EP-7 S1); 404 `thread_goals_disabled` while its switch is off.
+        .merge(crate::thread_goal_routes::router())
         // The person's edit and restore of a thread artifact (Wave 3 EP-3 S4); 404 while editing is off.
         .merge(crate::artifact_edit_routes::router())
         // Read-only replay of Session Core's canonical event log. The route
@@ -517,6 +519,9 @@ fn orchestration_routes() -> Router<AppState> {
             "/v1/orchestration/runs/:run_id/continue",
             post(crate::sse::continue_run),
         )
+        // The org's brand deck templates for the picker (Wave 3 EP-5 S7); 404 while
+        // SKILL_DECK_TEMPLATES_ENABLED is off.
+        .route("/v1/deck-templates", get(list_deck_templates))
 }
 
 /// App-Plane proxy routes (`/v1/capabilities`, `/v1/tasks`, `/v1/cron`,
@@ -638,6 +643,68 @@ fn proxy_routes() -> Router<AppState> {
                 .post(create_run_watcher_proxy)
                 .delete(delete_run_watcher_proxy),
         )
+}
+
+// ---------------------------------------------------------------------------
+// Wave 3 EP-5 S7: `GET /v1/deck-templates` - the org's brand deck templates for the picker.
+// ---------------------------------------------------------------------------
+
+/// `GET /v1/deck-templates` - see [`deck_templates_listing`].
+async fn list_deck_templates(
+    state: State<AppState>,
+    claims: Extension<Claims>,
+    bearer: Option<Extension<VerifiedCapabilityBearer>>,
+) -> Result<Json<Value>, HttpJsonError> {
+    deck_templates_listing(state, claims, bearer, crate::deck_templates::enabled()).await
+}
+
+/// The deck templates the caller may pick, `{data: {templates: [{skill_id, name, description, colors,
+/// fonts}]}}`, display fields only (`crate::deck_templates`). With the switch off the route is a 404 as if
+/// it did not exist, decided before the bearer is looked at. A zero-retention bearer is refused before
+/// anything is read, with feature `skills`: a ZDR turn never mounts or applies a template, so there is
+/// nothing to pick. capability-core takes the org from the caller's verified capability bearer; no org
+/// from a header, query or body is read here.
+async fn deck_templates_listing(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    bearer: Option<Extension<VerifiedCapabilityBearer>>,
+    enabled: bool,
+) -> Result<Json<Value>, HttpJsonError> {
+    if !enabled {
+        return Err(run_trace_error(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "no such route",
+        ));
+    }
+    if claims.zdr {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(
+                mp_contracts::zdr_refusal::Refusal::feature_not_supported(
+                    crate::deck_templates::ZDR_FEATURE,
+                )
+                .json_body(),
+            ),
+        ));
+    }
+    let Some(Extension(bearer)) = bearer.filter(|Extension(bearer)| !bearer.as_str().trim().is_empty())
+    else {
+        return Err(run_trace_error(
+            StatusCode::UNAUTHORIZED,
+            "capability_credential_required",
+            "listing deck templates needs a verified capability credential",
+        ));
+    };
+    let templates = crate::deck_templates::list_for_caller(
+        &state,
+        &claims.org_id,
+        &claims.user_id,
+        bearer.as_str(),
+    )
+    .await
+    .map_err(|status| grpc_status_to_http(&status))?;
+    Ok(Json(json!({ "data": { "templates": templates } })))
 }
 
 /// Request body cap for the two audio routes, `/v1/ai/dictate` and
@@ -1620,7 +1687,22 @@ async fn approval_preview(
         .preview
         .as_ref()
         .ok_or_else(|| approval_preview_status_to_http(&tonic::Status::not_found("no preview")))?;
-    Ok(Json(json!({ "data": { "preview": approval_preview_value(preview) } })))
+    let mut value = approval_preview_value(preview);
+    value["can_edit"] = json!(preview_can_edit(preview, approval_edit_enabled()));
+    Ok(Json(json!({ "data": { "preview": value } })))
+}
+
+/// Whether the card may offer edit mode (EP-10-S6): the edit switch is on and the draft is a mail
+/// send that Session Core shaped with fields a person may change. A decision with an edit is
+/// refused while the switch is off, so the card never offers one then.
+fn preview_can_edit(
+    preview: &mp_contracts::model_plane::v1::ApprovalPreview,
+    edit_enabled: bool,
+) -> bool {
+    edit_enabled
+        && !preview.editable_fields.is_empty()
+        && !preview.raw_only
+        && preview.kind == "mail_send"
 }
 
 /// Session Core's answer to a preview read. A typed ZDR refusal keeps its catalogue body; another
@@ -10350,6 +10432,20 @@ pub struct InvokeRequest {
     /// with the `context_references` feature whatever the switch says.
     #[serde(default, alias = "contextRefs")]
     pub context_refs: Option<serde_json::Value>,
+    /// Wave 3 EP-5 S7 — the brand deck template the person picked: a skill id, never a name the
+    /// model chose (decision D5). Kept as raw JSON and read only while `SKILL_DECK_TEMPLATES_ENABLED`
+    /// is on ([`crate::deck_templates::requested`]), so a body carrying it parses exactly as before
+    /// with the switch off. The turn checks it with [`crate::deck_templates::resolve`] before use; a
+    /// ZDR turn carrying one is refused with the `skills` feature.
+    #[serde(default, alias = "deckTemplate")]
+    pub deck_template: Option<serde_json::Value>,
+    /// Wave 3 EP-7 S1 — the thread goal a Continue turn works toward (`goal_...`). Read only on a
+    /// Do turn while `MODEL_GATEWAY_THREAD_GOALS_ENABLED` is on
+    /// ([`crate::thread_goal_routes::turn_goal_recitation`]): a goal that is not the thread's
+    /// active goal is refused `thread_goal_mismatch` before any run exists. A ZDR turn carrying one
+    /// is refused with the `thread_goal` feature whatever the switch says.
+    #[serde(default, alias = "goalId")]
+    pub goal_id: Option<String>,
 }
 
 /// The switch of the wide-research entry (Wave 3 EP-2 S8). Opt-in: only the literal `true` enables
@@ -22201,5 +22297,132 @@ mod approval_preview_route_tests {
         assert_eq!(value["format"], "plain_text");
         assert_eq!(value["editable_fields"], json!(["to", "subject", "body_text"]));
         assert_eq!(value["revision"], 0);
+    }
+
+    #[test]
+    fn preview_can_edit_follows_the_edit_switch() {
+        let mut preview = mp_contracts::model_plane::v1::ApprovalPreview {
+            kind: "mail_send".to_owned(),
+            editable_fields: vec!["to".to_owned(), "subject".to_owned(), "body_text".to_owned()],
+            ..Default::default()
+        };
+        assert!(!preview_can_edit(&preview, false), "the switch off never offers an edit");
+        assert!(preview_can_edit(&preview, true));
+        preview.raw_only = true;
+        assert!(!preview_can_edit(&preview, true), "a raw-only draft is not editable");
+        preview.raw_only = false;
+        preview.editable_fields.clear();
+        assert!(!preview_can_edit(&preview, true), "no editable fields, no edit mode");
+        preview.editable_fields = vec!["to".to_owned()];
+        preview.kind = "calendar_create".to_owned();
+        assert!(!preview_can_edit(&preview, true), "only a mail send is editable");
+    }
+}
+
+#[cfg(test)]
+mod deck_templates_route_tests {
+    //! Wave 3 EP-5 S7: the deck template list route. The switch, the zero-retention refusal and the
+    //! missing credential are all decided before capability-core is asked, so these tests need none;
+    //! which bundles are listed is covered by `deck_templates::tests`.
+    use super::*;
+
+    use axum::{body::Body, http::Request as HttpRequest};
+    use tower::ServiceExt;
+
+    fn claims(zdr: bool) -> Claims {
+        serde_json::from_value(json!({
+            "sub": "user-a", "iss": "auth-core", "exp": 4_102_444_800_i64, "org_id": "org-a",
+            "user_id": "user-a", "principal_type": "user", "zdr": zdr
+        }))
+        .expect("claims")
+    }
+
+    /// The route with its switch on and with it off; the env read stays out of parallel tests. The
+    /// capability client is the lazy default, which nothing here may reach.
+    fn app(zdr: bool, with_bearer: bool) -> Router {
+        let router = Router::new()
+            .route(
+                "/v1/deck-templates",
+                get(
+                    |state: State<AppState>,
+                     claims: Extension<Claims>,
+                     bearer: Option<Extension<VerifiedCapabilityBearer>>| {
+                        deck_templates_listing(state, claims, bearer, true)
+                    },
+                ),
+            )
+            .route(
+                "/off/v1/deck-templates",
+                get(
+                    |state: State<AppState>,
+                     claims: Extension<Claims>,
+                     bearer: Option<Extension<VerifiedCapabilityBearer>>| {
+                        deck_templates_listing(state, claims, bearer, false)
+                    },
+                ),
+            )
+            .with_state(AppState::new())
+            .layer(Extension(claims(zdr)));
+        if with_bearer {
+            router.layer(Extension(VerifiedCapabilityBearer::for_test("capability-bearer")))
+        } else {
+            router
+        }
+    }
+
+    async fn get_json(router: Router, uri: &str) -> (StatusCode, Value) {
+        let response = router
+            .oneshot(HttpRequest::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+    }
+
+    #[tokio::test]
+    async fn deck_templates_route_404_when_switch_off() {
+        // Off reads as no route at all, for a ZDR caller and a caller with no credential too.
+        for (zdr, with_bearer) in [(false, true), (true, true), (false, false)] {
+            let (status, body) = get_json(app(zdr, with_bearer), "/off/v1/deck-templates").await;
+            assert_eq!(status, StatusCode::NOT_FOUND, "zdr={zdr} bearer={with_bearer}");
+            assert_eq!(body["error"]["code"], "not_found");
+        }
+    }
+
+    #[tokio::test]
+    async fn deck_templates_route_zdr_token_is_refused() {
+        let (status, body) = get_json(app(true, true), "/v1/deck-templates").await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["error"]["code"], "zdr_feature_not_supported");
+        assert_eq!(body["error"]["feature"], "skills");
+    }
+
+    #[tokio::test]
+    async fn deck_templates_route_needs_a_capability_credential() {
+        let (status, body) = get_json(app(false, false), "/v1/deck-templates").await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body["error"]["code"], "capability_credential_required");
+    }
+
+    #[test]
+    fn deck_templates_invoke_field_parses_as_before_and_takes_the_spa_spelling() {
+        let base = json!({ "content": "Lag en presentasjon", "zdr": false });
+        let plain: InvokeRequest = serde_json::from_value(base.clone()).unwrap();
+        assert!(plain.deck_template.is_none());
+        let mut picked = base.clone();
+        picked["deckTemplate"] = json!("skill-brand");
+        let picked: InvokeRequest = serde_json::from_value(picked).unwrap();
+        assert_eq!(
+            crate::deck_templates::requested(picked.deck_template.as_ref()),
+            Some("skill-brand")
+        );
+        // A value of the wrong type still parses, as the field did not exist before: it is never a pick.
+        let mut odd = base;
+        odd["deck_template"] = json!({ "id": "skill-brand" });
+        let odd: InvokeRequest = serde_json::from_value(odd).unwrap();
+        assert_eq!(crate::deck_templates::requested(odd.deck_template.as_ref()), None);
     }
 }

@@ -1,4 +1,5 @@
 mod artifacts;
+mod deck_templates;
 pub(crate) mod documents;
 pub(crate) mod history;
 pub(crate) mod json_handlers;
@@ -74,6 +75,14 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
             "/api/v1/chat/threads/{thread_id}/fork",
             post(history::fork_thread),
         )
+        // The thread's goal (Wave 3 EP-7 S1): read, set, and edit/pause/clear. 404
+        // `thread_goals_disabled` from Model Gateway while its switch is off.
+        .route(
+            "/api/v1/chat/threads/{thread_id}/goal",
+            get(history::get_thread_goal)
+                .put(history::set_thread_goal)
+                .patch(history::update_thread_goal),
+        )
         .route(
             "/api/v1/chat/stream/resume/{request_id}",
             get(streams::resume_stream),
@@ -112,6 +121,9 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
             get(json_handlers::get_browser_artifact),
         )
         .route("/api/v1/models", get(json_handlers::list_models))
+        // The org's brand deck templates for the picker (Wave 3 EP-5 S7); the gateway answers 404
+        // while its switch is off.
+        .route("/api/v1/deck-templates", get(deck_templates::list_deck_templates))
         .route(
             "/api/v1/chat/documents",
             post(documents::upload_chat_document),
