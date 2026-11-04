@@ -2809,8 +2809,9 @@ fn seed_message(role: &str, content: String) -> pb::ChatMessage {
 /// 2. the authored instructions (Context), which a delegated child inherits;
 /// 3. the prior turns of the thread (Conversation), root loop only;
 /// 4. the memory block (Volatile), root loop only;
-/// 5. the matched skills (Volatile);
-/// 6. this loop's goal (Current), which carries the approved plan when there is one.
+/// 5. the thread goal recitation (Volatile), root loop only (EP-7 S1);
+/// 6. the matched skills (Volatile);
+/// 7. this loop's goal (Current), which carries the approved plan when there is one.
 ///
 /// Without a run context the skills stay where they always were, right after the preamble, so
 /// a run that carries none seeds byte-identically to before. Pure: the skills are fetched by
@@ -2853,6 +2854,12 @@ fn seed_order(
         );
         if !run_context.memory_block.is_empty() {
             messages.push(seed_message("system", run_context.memory_block.clone()));
+        }
+        // The thread goal (EP-7 S1): the owner's standing aim, recited as data under its own
+        // header. Volatile, never cached: it changes whenever the owner edits the goal. A child
+        // has its own sub-goal and never sees the thread's.
+        if !run_context.goal_recitation.is_empty() {
+            messages.push(seed_message("system", run_context.goal_recitation.clone()));
         }
     }
     messages.extend(skills);
@@ -3028,6 +3035,7 @@ async fn seed_messages(ctx: &LoopContext<'_>, goal: &str) -> Vec<pb::ChatMessage
             history_messages = if root { run_context.history.len() } else { 0 },
             memory_bytes = if root { run_context.memory_block.len() } else { 0 },
             profile_bytes = if root { run_context.user_profile.len() } else { 0 },
+            goal_recitation_bytes = if root { run_context.goal_recitation.len() } else { 0 },
             skills = skills.is_some(),
             "run_agent: seeded run context"
         );
@@ -8477,7 +8485,10 @@ fn connector_step_note(tool_input: &str, outcome: &StepOutcome) -> String {
         );
     }
     let operation = connector_operation(tool_input).unwrap_or_else(|| "invalid".to_owned());
-    let note = format!("[connector_write op={operation} content_redacted=true]");
+    let note = format!(
+        "[connector_write op={operation}{} content_redacted=true]",
+        super::edit_step_note(&outcome.output)
+    );
     match outcome.output.lines().last() {
         Some(line) if is_postcondition_verdict(line) => format!("{note} {line}"),
         _ => note,
@@ -9538,6 +9549,8 @@ async fn consume_for_resume(
         snapshot_digest: snapshot.digest.clone(),
         effective,
         segment,
+        revision: consumed.revision,
+        original_action_fingerprint: consumed.original_action_fingerprint,
     })
 }
 
@@ -9561,7 +9574,8 @@ fn released_call(
     let step_id = tool_step_id(&format!("s{}.", consumed.segment), 1, &call);
     let release =
         super::resume::ApprovedRelease::new(gate, &step_id, &call.name, &call.arguments_json)
-            .map_err(|_| tonic::Status::failed_precondition("not_releasable"))?;
+            .map_err(|_| tonic::Status::failed_precondition("not_releasable"))?
+            .with_edit(consumed.edit_note());
     Ok((call, step_id, release))
 }
 
@@ -9652,7 +9666,7 @@ async fn restore_continuation(
     .await
     {
         Ok(restored) => Ok(Ok(Continuation {
-            release: Some(release),
+            release: Some(release.with_edit(restored.edit.clone())),
             step_prefix: format!("s{}.", consumed.segment),
             goal: req.goal.clone(),
             seed: RoundSeed::InPlace(Box::new(restored)),
@@ -18095,6 +18109,7 @@ mod tests {
             attempted_retrievals: BTreeSet::new(),
             claimed_seq: 0,
             segment: 2,
+            edit: None,
         };
         let in_place = RoundSeed::InPlace(Box::new(restored));
         assert!(matches!(&in_place, RoundSeed::InPlace(restored) if restored.segment == 2));
@@ -20788,6 +20803,7 @@ mod tests {
             user_profile: String::new(),
             status: None,
             agent_roles: Vec::new(),
+            goal_recitation: String::new(),
         }
     }
 
@@ -20912,6 +20928,47 @@ mod tests {
                 ("user", "SUB-GOAL"),
             ]
         );
+    }
+
+    #[test]
+    fn goal_recitation_sits_in_volatile_tier() {
+        let context = pb::RunContext {
+            goal_recitation: "GOAL-RECITATION".to_owned(),
+            ..full_run_context()
+        };
+        let root = seed_order(
+            "PREAMBLE".to_owned(),
+            Some(&context),
+            true,
+            Some("SKILLS".to_owned()),
+            "GOAL",
+        );
+        // After the memory block and before the skills and the turn: Volatile, behind every byte
+        // a provider may cache.
+        assert_eq!(
+            roles_and_contents(&root),
+            vec![
+                ("system", "PREAMBLE"),
+                ("system", CONTEXT_INSTRUCTIONS),
+                ("user", CONTEXT_FIRST_TURN),
+                ("assistant", CONTEXT_FIRST_REPLY),
+                ("system", CONTEXT_MEMORY),
+                ("system", "GOAL-RECITATION"),
+                ("system", "SKILLS"),
+                ("user", "GOAL"),
+            ]
+        );
+        // The cache plan still names only the preamble and the instructions.
+        assert_eq!(
+            prompt_tier_plan(Some(&context), &root)
+                .map(|plan| (plan.stable_messages, plan.context_messages)),
+            Some((1, 1))
+        );
+        // A delegated child never sees the thread's goal.
+        let child = seed_order("PREAMBLE".to_owned(), Some(&context), false, None, "SUB-GOAL");
+        assert!(child
+            .iter()
+            .all(|message| message.content != "GOAL-RECITATION"));
     }
 
     #[test]
@@ -21135,6 +21192,7 @@ mod tests {
             user_profile: String::new(),
             status: None,
             agent_roles: Vec::new(),
+            goal_recitation: String::new(),
         };
         let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
         let session_channel = spawn_session_channel(rec.clone()).await;
@@ -26589,6 +26647,8 @@ mod tests {
             snapshot_digest: snapshot.digest(),
             snapshot_authority: snapshot.clone(),
             effective: snapshot,
+            revision: 0,
+            original_action_fingerprint: String::new(),
         };
         let (_, release_step_id, _) = released_call(
             crate::permission::RunGate::for_run("org-release", "run-release"),

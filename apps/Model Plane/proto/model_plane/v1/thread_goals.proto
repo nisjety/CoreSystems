@@ -1,0 +1,143 @@
+syntax = "proto3";
+
+package model_plane.v1;
+
+option go_package = "github.com/triodelab/model-plane/gen/go/model_plane/v1;mpv1";
+
+import "google/protobuf/timestamp.proto";
+
+// Thread goals (Wave 3 EP-7 S1).
+//
+// A thread goal is a standing objective the owner sets on one of their threads,
+// with optional success criteria. Every agentic turn on the thread recites it
+// to the model as data (`RunContext.goal_recitation`), and the goal bar lets
+// the owner send one continuation turn toward it. The record is user content
+// in session-core: refused for a zero-retention or waived credential and for a
+// Space thread, erased with its thread and with its org. The model reads the
+// goal and never writes it. Named "thread goal" and "objective" so it is never
+// confused with a run's goal (the user message a run starts from). A separate
+// file and service (integration round B, C-B6) so that SessionCore and every
+// implementation or test double of it stay source-compatible.
+
+// EP-7 S1. One goal on one thread.
+message ThreadGoal {
+  // The goal's own id, `goal_` followed by a ULID, assigned by session-core.
+  string id = 1;
+  // The thread the goal belongs to.
+  string thread_id = 2;
+  // The org the thread belongs to.
+  string org_id = 3;
+  // The thread's owner, the only person who may read or change the goal.
+  string user_id = 4;
+  // What the owner wants done, 1 to 2,000 characters.
+  string objective = 5;
+  // How the owner will know it is done: at most 8 lines of at most 500 characters.
+  repeated string success_criteria = 6;
+  // The metered-token budget (EP-7 S2); 0 means none was set.
+  uint64 token_budget = 7;
+  // The cost budget in micro-USD (EP-7 S2); 0 means none was set.
+  uint64 cost_budget_usd_micros = 8;
+  // The most continuation turns the goal may take, 1 to 50 (default 10).
+  uint32 max_turns = 9;
+  // One closed token: "active", "paused", "met", "budget_reached",
+  // "turns_reached", "blocked" or "cleared". This service writes only
+  // "active", "paused" and "cleared"; the other states come from EP-7 S2/S3.
+  string status = 10;
+  // A closed token saying why the status was last written; empty when none.
+  string status_reason = 11;
+  // The compare-and-set revision, 1 for a new goal, raised by every update.
+  uint64 revision = 12;
+  // When the goal was set.
+  google.protobuf.Timestamp created_at = 13;
+  // When the goal was last changed.
+  google.protobuf.Timestamp updated_at = 14;
+  // Metered tokens spent toward the goal (EP-7 S2); 0 until the budget ledger exists.
+  uint64 tokens_used = 15;
+  // Cost spent toward the goal in micro-USD (EP-7 S2); 0 until the budget ledger exists.
+  uint64 cost_used_usd_micros = 16;
+  // Continuation turns taken (EP-7 S2); 0 until the budget ledger exists.
+  uint32 turns_used = 17;
+  // The completion judge's last verdict token (EP-7 S3); empty until the judge exists.
+  string last_verdict = 18;
+}
+
+// EP-7 S1. Set a goal on a thread.
+message SetThreadGoalRequest {
+  // The thread to set the goal on.
+  string thread_id = 1;
+  // The org the thread belongs to; must match the caller's org.
+  string org_id = 2;
+  // What the owner wants done, 1 to 2,000 characters after trimming.
+  string objective = 3;
+  // At most 8 lines of at most 500 characters; blank lines are dropped.
+  repeated string success_criteria = 4;
+  // The metered-token budget, at most 5,000,000; 0 sets none (enforced from EP-7 S2).
+  uint64 token_budget = 5;
+  // The cost budget in micro-USD; 0 sets none (enforced from EP-7 S2).
+  uint64 cost_budget_usd_micros = 6;
+  // The turn cap, 1 to 50; 0 takes the default of 10.
+  uint32 max_turns = 7;
+  // When the thread already has an open goal: false refuses with
+  // `already_exists` `thread_goal_exists`; true closes the open one as
+  // "cleared" and sets this one, in one transaction.
+  bool replace = 8;
+}
+
+// EP-7 S1. Read the goal of a thread.
+message GetThreadGoalRequest {
+  // The thread to read.
+  string thread_id = 1;
+  // The org the thread belongs to; must match the caller's org.
+  string org_id = 2;
+}
+
+// EP-7 S1. Change a goal under a compare-and-set on its revision. Only the
+// fields named in `update_paths` are written; the others are ignored.
+message UpdateThreadGoalRequest {
+  // The goal to change.
+  string goal_id = 1;
+  // The org the goal belongs to; must match the caller's org.
+  string org_id = 2;
+  // The revision the caller last saw. A different revision is refused as
+  // `aborted` `thread_goal_revision_conflict`.
+  uint64 expected_revision = 3;
+  // The new objective (path "objective").
+  string objective = 4;
+  // The new success criteria, replacing the old list (path "success_criteria").
+  repeated string success_criteria = 5;
+  // The new token budget, 0 for none (path "token_budget").
+  uint64 token_budget = 6;
+  // The new cost budget in micro-USD, 0 for none (path "cost_budget_usd_micros").
+  uint64 cost_budget_usd_micros = 7;
+  // The new turn cap, 1 to 50 (path "max_turns").
+  uint32 max_turns = 8;
+  // The new status (path "status"): only "active", "paused" or "cleared".
+  // A closed goal ("met", a stop state or "cleared") cannot be changed.
+  string status = 9;
+  // The fields this update writes, by the names above. Empty is refused.
+  repeated string update_paths = 10;
+}
+
+// EP-7 S1. The goal as stored, or none.
+message ThreadGoalResponse {
+  // The goal; absent when `found` is false.
+  ThreadGoal goal = 1;
+  // Whether the thread has a goal to show. A read answers the latest goal that
+  // was not cleared; a thread with none answers false rather than not_found.
+  bool found = 2;
+}
+
+// EP-7 S1. The thread goal store, hosted by session-core. Off unless
+// SESSION_CORE_THREAD_GOALS_ENABLED is the literal `true`; while off every RPC
+// answers `unavailable` `thread_goals_disabled`. Every RPC refuses a
+// zero-retention or waived credential and another person's thread; a write
+// also refuses a Space thread (`failed_precondition`
+// `thread_goal_space_unsupported`) and a thread holding a waived run.
+service ThreadGoalService {
+  // Set a goal on a thread (one open goal per thread).
+  rpc SetThreadGoal(SetThreadGoalRequest) returns (ThreadGoalResponse);
+  // Read the thread's latest goal that was not cleared.
+  rpc GetThreadGoal(GetThreadGoalRequest) returns (ThreadGoalResponse);
+  // Change an open goal under a compare-and-set on its revision.
+  rpc UpdateThreadGoal(UpdateThreadGoalRequest) returns (ThreadGoalResponse);
+}

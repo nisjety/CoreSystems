@@ -1,4 +1,4 @@
-import { For, Match, Show, Switch } from 'solid-js'
+import { For, Match, Show, Switch, createSignal } from 'solid-js'
 import type {
   AutonomyRung,
   ChatQuestionAnswer,
@@ -6,16 +6,19 @@ import type {
   ChatUserQuestionEvent,
   ResearchPlanEdit,
 } from '@/shared/api/chat-client'
-import type { ApprovalDecision, PlanStepEdit } from '@/shared/api/orchestration-client'
+import type { ApprovalDecision, ApprovalEdit, PlanStepEdit } from '@/shared/api/orchestration-client'
 import { QuestionCard } from '@/shared/chat-nodes/QuestionCard'
 import { useI18n } from '@/shared/i18n'
 import type { DockedTray, DockedTrayKind } from '../lib/composer-trays'
 import { ApprovalRequests, PlanApprovalControl, QueuedInputStrip } from './ChatMessages'
+import { GoalBar } from './GoalBar'
+import { GoalDialog, type GoalDraft } from './GoalDialog'
 import { ResearchPlanCard } from './ResearchPlanCard'
 
 const TRAY_NAME: Record<DockedTrayKind, { no: string; en: string }> = {
   approval: { no: 'godkjenning', en: 'approval' },
   plan: { no: 'plan', en: 'plan' },
+  goal: { no: 'mål', en: 'goal' },
   queue: { no: 'meldinger', en: 'messages' },
 }
 
@@ -35,6 +38,7 @@ const TRAY_NAME: Record<DockedTrayKind, { no: string; en: string }> = {
 export function ComposerTrays(props: {
   trays: readonly DockedTray[]
   onApprovalDecision: (turnId: string, approvalId: string, decision: ApprovalDecision) => void
+  onApprovalEditedDecision?: (turnId: string, approvalId: string, edit: ApprovalEdit) => Promise<void>
   onApprovePlan: (turnId: string, rung: AutonomyRung, justification: string, steps?: PlanStepEdit[]) => void
   onRejectPlan: (turnId: string, reason: string) => void
   /** The question a run put to its owner (WS14 S4). It waits behind an approval and ahead of a plan or the queue. */
@@ -47,6 +51,19 @@ export function ComposerTrays(props: {
   researchPlan?: ChatResearchPlanEvent
   onStartResearchPlan?: (edit: ResearchPlanEdit) => void
   onCancelResearchPlan?: () => void
+  /**
+   * The thread goal's controls (EP-7 S1). The goal itself rides in `trays`; `goalEntry` offers "Set a
+   * goal" when nothing else is docked and the thread may hold one. `goalBusy` holds Continue while a
+   * turn is running. `onSaveGoal` resolves true when the server took the goal, which closes the dialog.
+   */
+  goalEntry?: boolean
+  goalPending?: boolean
+  goalError?: string | null
+  goalBusy?: boolean
+  onSaveGoal?: (draft: GoalDraft) => Promise<boolean>
+  onContinueGoal?: () => void
+  onPauseGoal?: (paused: boolean) => void
+  onClearGoal?: () => void
 }) {
   const i18n = useI18n()
   const active = () => props.trays[0]
@@ -65,17 +82,46 @@ export function ComposerTrays(props: {
     const tray = active()
     return tray?.kind === 'queue' ? tray : undefined
   }
-  const others = () => (questionShown() || researchPlanShown() ? props.trays : props.trays.slice(1))
+  const goalTray = () => {
+    const tray = active()
+    return tray?.kind === 'goal' ? tray : undefined
+  }
+  // The goal dialog is the person's own click, so it takes the dock until it is saved or cancelled.
+  const [goalDialogOpen, setGoalDialogOpen] = createSignal(false)
+  const dockedGoal = () => {
+    for (const tray of props.trays) if (tray.kind === 'goal') return tray.goal
+    return null
+  }
+  const goalEntryShown = () =>
+    props.goalEntry === true && !dockedGoal() && props.trays.length === 0 && !props.question && !props.researchPlan
+  const saveGoal = async (draft: GoalDraft) => {
+    if (await props.onSaveGoal?.(draft)) setGoalDialogOpen(false)
+  }
+  const others = () =>
+    questionShown() || researchPlanShown() || goalDialogOpen() ? props.trays : props.trays.slice(1)
 
   return (
     <div
       class="verevon-chat-composer-trays"
-      data-empty={props.trays.length === 0 && !props.question && !props.researchPlan ? '' : undefined}
+      data-empty={
+        props.trays.length === 0 && !props.question && !props.researchPlan && !goalEntryShown() && !goalDialogOpen()
+          ? ''
+          : undefined
+      }
       role="region"
       aria-live="polite"
       aria-label={i18n.tr('Venter på deg', 'Waiting for you')}
     >
       <Switch>
+        <Match when={goalDialogOpen()}>
+          <GoalDialog
+            goal={dockedGoal()}
+            pending={props.goalPending}
+            error={props.goalError}
+            onSave={(draft) => void saveGoal(draft)}
+            onCancel={() => setGoalDialogOpen(false)}
+          />
+        </Match>
         <Match when={approval()}>
           {(tray) => (
             <ApprovalRequests
@@ -84,6 +130,14 @@ export function ComposerTrays(props: {
                 const entry = tray().approvals.find((candidate) => candidate.approval.id === approvalId)
                 if (entry) props.onApprovalDecision(entry.turnId, approvalId, decision)
               }}
+              onDecideEdited={props.onApprovalEditedDecision
+                ? (approvalId, edit) => {
+                    const entry = tray().approvals.find((candidate) => candidate.approval.id === approvalId)
+                    return entry && props.onApprovalEditedDecision
+                      ? props.onApprovalEditedDecision(entry.turnId, approvalId, edit)
+                      : Promise.resolve()
+                  }
+                : undefined}
             />
           )}
         </Match>
@@ -137,7 +191,27 @@ export function ComposerTrays(props: {
             </Show>
           )}
         </Match>
+        <Match when={goalTray()}>
+          {(tray) => (
+            <GoalBar
+              goal={tray().goal}
+              pending={props.goalPending}
+              error={props.goalError}
+              busy={props.goalBusy}
+              onContinue={() => props.onContinueGoal?.()}
+              onEdit={() => setGoalDialogOpen(true)}
+              onPause={() => props.onPauseGoal?.(true)}
+              onResume={() => props.onPauseGoal?.(false)}
+              onClear={() => props.onClearGoal?.()}
+            />
+          )}
+        </Match>
         <Match when={queue()}>{(tray) => <QueuedInputStrip entries={tray().entries} />}</Match>
+        <Match when={goalEntryShown()}>
+          <button type="button" class="verevon-chat-goal-entry" onClick={() => setGoalDialogOpen(true)}>
+            {i18n.tr('Sett et mål for samtalen', 'Set a goal for this conversation')}
+          </button>
+        </Match>
       </Switch>
       <Show when={others().length > 0}>
         <p class="verevon-chat-composer-trays__more">

@@ -593,6 +593,171 @@ pub(super) async fn fork_thread(
     }
 }
 
+/// The body of `PUT /api/v1/chat/threads/{id}/goal` (Wave 3 EP-7 S1). Only these fields are
+/// relayed; the owner, org and thread come from the session and the path, never from the body.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(super) struct SetThreadGoalBody {
+    objective: String,
+    #[serde(default)]
+    success_criteria: Vec<String>,
+    #[serde(default)]
+    max_turns: Option<u32>,
+    #[serde(default)]
+    token_budget: Option<u64>,
+    #[serde(default)]
+    replace: bool,
+}
+
+/// The body of `PATCH /api/v1/chat/threads/{id}/goal`: the goal and the revision it was read at,
+/// then only the fields to change (a field left out keeps its value).
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(super) struct UpdateThreadGoalBody {
+    goal_id: String,
+    expected_revision: u64,
+    #[serde(default)]
+    objective: Option<String>,
+    #[serde(default)]
+    success_criteria: Option<Vec<String>>,
+    #[serde(default)]
+    max_turns: Option<u32>,
+    #[serde(default)]
+    token_budget: Option<u64>,
+    #[serde(default)]
+    status: Option<String>,
+}
+
+impl SetThreadGoalBody {
+    fn upstream(self) -> Value {
+        let mut body = json!({
+            "objective": self.objective,
+            "successCriteria": self.success_criteria,
+            "replace": self.replace,
+        });
+        if let Some(turns) = self.max_turns {
+            body["maxTurns"] = json!(turns);
+        }
+        if let Some(budget) = self.token_budget {
+            body["tokenBudget"] = json!(budget);
+        }
+        body
+    }
+}
+
+impl UpdateThreadGoalBody {
+    /// The gateway writes exactly the fields this body carries, so absent stays absent.
+    fn upstream(self) -> Value {
+        let mut body = json!({
+            "goalId": self.goal_id.trim(),
+            "expectedRevision": self.expected_revision,
+        });
+        if let Some(objective) = self.objective {
+            body["objective"] = json!(objective);
+        }
+        if let Some(criteria) = self.success_criteria {
+            body["successCriteria"] = json!(criteria);
+        }
+        if let Some(turns) = self.max_turns {
+            body["maxTurns"] = json!(turns);
+        }
+        if let Some(budget) = self.token_budget {
+            body["tokenBudget"] = json!(budget);
+        }
+        if let Some(status) = self.status {
+            body["status"] = json!(status);
+        }
+        body
+    }
+}
+
+fn thread_goal_url(base: &str, thread_id: &str) -> String {
+    format!("{base}/v1/threads/{}/goal", urlencoding::encode(thread_id))
+}
+
+/// Read the thread's goal (Wave 3 EP-7 S1). Model Gateway and Session Core decide who may read
+/// it; the answer `{ found, goal }` and every typed refusal are relayed unchanged.
+pub(super) async fn get_thread_goal(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Path(thread_id): Path<String>,
+) -> Response {
+    relay_thread_goal(&state, &user, &headers, &thread_id, Method::GET, None, false).await
+}
+
+/// Set a goal on one of the caller's own chat threads (Wave 3 EP-7 S1).
+pub(super) async fn set_thread_goal(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Path(thread_id): Path<String>,
+    Json(body): Json<SetThreadGoalBody>,
+) -> Response {
+    let body = body.upstream();
+    relay_thread_goal(&state, &user, &headers, &thread_id, Method::PUT, Some(body), true).await
+}
+
+/// Edit, pause, resume or clear the goal of one of the caller's own chat threads (EP-7 S1).
+pub(super) async fn update_thread_goal(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Path(thread_id): Path<String>,
+    Json(body): Json<UpdateThreadGoalBody>,
+) -> Response {
+    if body.goal_id.trim().is_empty() {
+        return bad_request("goalId is required.");
+    }
+    let body = body.upstream();
+    relay_thread_goal(&state, &user, &headers, &thread_id, Method::PATCH, Some(body), true).await
+}
+
+/// One call to Model Gateway's goal route under the user's own model and session tokens. A write
+/// first checks the thread is the caller's own chat thread, as the fork does, so a Space or Support
+/// thread never reaches the store through this route. No scoping header is forwarded.
+async fn relay_thread_goal(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    thread_id: &str,
+    method: Method,
+    body: Option<Value>,
+    write: bool,
+) -> Response {
+    if let Err(response) = scope_for(state, user).await {
+        return response;
+    }
+    let thread_id = normalize_id(thread_id);
+    if thread_id.is_empty() {
+        return bad_request("thread_id is required.");
+    }
+    if write {
+        match read_durable_thread(state, user, headers, &thread_id).await {
+            Ok(Some(_)) => {}
+            Ok(None) => return thread_not_found(),
+            Err(response) => return response,
+        }
+    }
+    let url = thread_goal_url(&state.model_gateway_url, &thread_id);
+    let token = shared::model_token(state, user, headers).await;
+    let session_token = match shared::required_session_token(state, user, headers).await {
+        Ok(token) => token,
+        Err(error) => return shared::delegated_auth_unavailable(error).into_response(),
+    };
+    let (status, Json(payload)) = shared::proxy_model_json_with_session(
+        state,
+        method,
+        &url,
+        body,
+        token.as_deref(),
+        Some(&session_token),
+        user,
+    )
+    .await;
+    (status, Json(payload)).into_response()
+}
+
 /// Hide one chat thread from the ordinary list. Its transcript and audit
 /// evidence stay; `unarchive_thread` brings it back.
 pub(super) async fn archive_thread(
@@ -2124,6 +2289,58 @@ mod thread_paging_tests {
         let (url, body) = archive_state_call("http://model-gateway", "thread-9", false);
         assert_eq!(url, "http://model-gateway/v1/threads/thread-9/presentation");
         assert_eq!(body, Some(json!({ "archived": false })));
+    }
+}
+
+#[cfg(test)]
+mod thread_goal_handler_tests {
+    use super::*;
+
+    #[test]
+    fn set_goal_body_relays_only_its_own_fields() {
+        let body: SetThreadGoalBody = serde_json::from_value(json!({
+            "objective": "Ship the report",
+            "successCriteria": ["Numbers reconciled"],
+        }))
+        .unwrap();
+        assert_eq!(
+            body.upstream(),
+            json!({
+                "objective": "Ship the report",
+                "successCriteria": ["Numbers reconciled"],
+                "replace": false,
+            })
+        );
+        // An owner, org or Space field from the browser is refused, never relayed.
+        for smuggled in ["userId", "orgId", "spaceId", "threadId"] {
+            let mut raw = json!({"objective": "x"});
+            raw[smuggled] = json!("forged");
+            assert!(serde_json::from_value::<SetThreadGoalBody>(raw).is_err(), "{smuggled}");
+        }
+    }
+
+    #[test]
+    fn update_goal_body_keeps_absent_fields_absent() {
+        let body: UpdateThreadGoalBody = serde_json::from_value(json!({
+            "goalId": " goal_1 ",
+            "expectedRevision": 2,
+            "status": "paused",
+        }))
+        .unwrap();
+        assert_eq!(
+            body.upstream(),
+            json!({"goalId": "goal_1", "expectedRevision": 2, "status": "paused"})
+        );
+        let without_goal = json!({"status": "paused"});
+        assert!(serde_json::from_value::<UpdateThreadGoalBody>(without_goal).is_err());
+    }
+
+    #[test]
+    fn goal_url_names_the_thread_once_encoded() {
+        assert_eq!(
+            thread_goal_url("http://model-gateway", "thread/9"),
+            "http://model-gateway/v1/threads/thread%2F9/goal"
+        );
     }
 }
 

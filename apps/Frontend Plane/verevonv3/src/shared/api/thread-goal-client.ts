@@ -9,6 +9,7 @@ export type ThreadGoalStatus = 'active' | 'paused' | 'met' | 'budget_reached' | 
 /**
  * A thread goal as the read surfaces show it. The objective and criteria are the owner's own text;
  * the counters stay zero until the budget ledger (EP-7 S2) and the judge (EP-7 S3) fill them.
+ * `revision` is the compare-and-set token an edit sends back (EP-7 S1); absent when the server sent none.
  */
 export type ThreadGoal = {
   id: string
@@ -22,7 +23,16 @@ export type ThreadGoal = {
   maxTurns?: number
   turnsUsed: number
   lastVerdict?: string
+  revision?: number
 }
+
+/** The D11 limits the server holds; the dialog checks them first so a refusal is rare. */
+export const THREAD_GOAL_LIMITS = {
+  objectiveChars: 2000,
+  criteria: 8,
+  criterionChars: 500,
+  maxTurns: 50,
+} as const
 
 const STATUSES: readonly ThreadGoalStatus[] = ['active', 'paused', 'met', 'budget_reached', 'turns_reached', 'blocked']
 
@@ -30,7 +40,8 @@ const STATUSES: readonly ThreadGoalStatus[] = ['active', 'paused', 'met', 'budge
 export const THREAD_GOALS_DISABLED_CODE = 'thread_goals_disabled'
 
 // Once the server says goals are off (or the route does not exist yet), this tab stops asking: the
-// switch is server-controlled and does not flip under a running page, so one 404 answers for the session.
+// switch is server-controlled and does not flip under a running page, so one answer is enough for
+// the session. A 404 that names another code (a thread that is gone) says nothing about the switch.
 let goalsUnavailable = false
 
 /** Test seam: forget that the server answered goals-off. */
@@ -38,23 +49,99 @@ export function resetThreadGoalAvailability(): void {
   goalsUnavailable = false
 }
 
+/** Whether the server has said it serves no goals; the goal bar then offers no goal entry. */
+export function threadGoalsUnavailable(): boolean {
+  return goalsUnavailable
+}
+
+function goalsOff(error: unknown): boolean {
+  return (
+    error instanceof ApiError &&
+    (error.code === THREAD_GOALS_DISABLED_CODE || (error.status === 404 && !error.code))
+  )
+}
+
+function goalPath(threadId: string): string {
+  return `/api/v1/chat/threads/${encodeURIComponent(threadId)}/goal`
+}
+
 /**
  * The open or latest goal of a thread, or `null` when the thread has none, the goal was cleared, or
- * the server serves no goals. Read-only (EP-7 S5); setting and editing a goal belong to the chat
- * thread's goal bar (EP-7 S1, decision D1).
+ * the server serves no goals.
  */
 export async function getThreadGoal(threadId: string): Promise<ThreadGoal | null> {
   if (goalsUnavailable || !threadId) return null
   try {
-    const body = await requestJson<unknown>(`/api/v1/chat/threads/${encodeURIComponent(threadId)}/goal`)
+    const body = await requestJson<unknown>(goalPath(threadId))
     return normalizeGoalResponse(body)
   } catch (error) {
-    if (error instanceof ApiError && (error.status === 404 || error.code === THREAD_GOALS_DISABLED_CODE)) {
+    if (goalsOff(error)) {
       goalsUnavailable = true
       return null
     }
     throw error
   }
+}
+
+/** What the goal dialog sends to set a goal (EP-7 S1). The owner comes from the session. */
+export type SetThreadGoalInput = {
+  objective: string
+  successCriteria?: string[]
+  maxTurns?: number
+  /** Close the thread's open goal as cleared and set this one. */
+  replace?: boolean
+}
+
+/**
+ * Set a goal on one of the person's own threads. Typed refusals reach the caller as `ApiError`
+ * (`thread_goal_exists`, `thread_goal_space_unsupported`, `invalid_thread_goal`, a ZDR refusal).
+ */
+export async function setThreadGoal(threadId: string, input: SetThreadGoalInput): Promise<ThreadGoal | null> {
+  const body = await requestJson<unknown>(goalPath(threadId), {
+    method: 'PUT',
+    body: JSON.stringify({
+      objective: input.objective.trim(),
+      successCriteria: cleanCriteria(input.successCriteria),
+      ...(input.maxTurns ? { maxTurns: input.maxTurns } : {}),
+      ...(input.replace ? { replace: true } : {}),
+    }),
+  })
+  return normalizeGoalResponse(body)
+}
+
+/** The fields an edit may change; a field left out keeps its value on the server. */
+export type UpdateThreadGoalInput = {
+  objective?: string
+  successCriteria?: string[]
+  maxTurns?: number
+  status?: 'active' | 'paused' | 'cleared'
+}
+
+/**
+ * Edit, pause, resume or clear a goal under a compare-and-set on the revision the bar showed. A
+ * goal changed elsewhere is refused as `thread_goal_revision_conflict`. Answers `null` once the
+ * goal is cleared.
+ */
+export async function updateThreadGoal(
+  goal: Pick<ThreadGoal, 'id' | 'threadId' | 'revision'>,
+  input: UpdateThreadGoalInput,
+): Promise<ThreadGoal | null> {
+  const body = await requestJson<unknown>(goalPath(goal.threadId), {
+    method: 'PATCH',
+    body: JSON.stringify({
+      goalId: goal.id,
+      expectedRevision: goal.revision ?? 0,
+      ...(input.objective !== undefined ? { objective: input.objective.trim() } : {}),
+      ...(input.successCriteria !== undefined ? { successCriteria: cleanCriteria(input.successCriteria) } : {}),
+      ...(input.maxTurns !== undefined ? { maxTurns: input.maxTurns } : {}),
+      ...(input.status !== undefined ? { status: input.status } : {}),
+    }),
+  })
+  return normalizeGoalResponse(body)
+}
+
+function cleanCriteria(lines: string[] | undefined): string[] {
+  return (lines ?? []).map((line) => line.trim()).filter((line) => line.length > 0)
 }
 
 /** Reads `{ goal, found }` (the `ThreadGoalResponse` shape); anything without a usable goal is `null`. */
@@ -77,6 +164,7 @@ function normalizeGoal(value: unknown): ThreadGoal | null {
   const tokenBudget = count(record.tokenBudget)
   const maxTurns = count(record.maxTurns)
   const lastVerdict = text(record.lastVerdict)
+  const revision = count(record.revision)
   return {
     id,
     threadId: text(record.threadId),
@@ -89,6 +177,7 @@ function normalizeGoal(value: unknown): ThreadGoal | null {
     ...(maxTurns > 0 ? { maxTurns } : {}),
     turnsUsed: count(record.turnsUsed),
     ...(lastVerdict ? { lastVerdict } : {}),
+    ...(revision > 0 ? { revision } : {}),
   }
 }
 

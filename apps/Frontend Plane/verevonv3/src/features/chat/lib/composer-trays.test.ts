@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { Approval } from '@/shared/api/orchestration-client'
+import type { ThreadGoal } from '@/shared/api/thread-goal-client'
 import type { ChatTurn, QueuedInput } from '../components/chat-types'
 import { dockedNodesFor, selectDockedTrays } from './composer-trays'
 
@@ -91,6 +92,27 @@ describe('selectDockedTrays', () => {
       turnId === 'asst-1' ? { pending: true, error: undefined } : undefined,
     )
     expect(tray?.kind === 'plan' && tray.plan.pending).toBe(true)
+  })
+
+  it('docks the thread goal after the plan and before the queue (EP-7 S1)', () => {
+    const goal: ThreadGoal = {
+      id: 'goal_1',
+      threadId: 'thread-1',
+      objective: 'Ship the report',
+      successCriteria: [],
+      status: 'active',
+      tokensUsed: 0,
+      turnsUsed: 0,
+    }
+    const trays = selectDockedTrays({
+      turns: [planTurn({ pendingApprovals: [approval('a1')] })],
+      queuedInputs: [queued()],
+      goal,
+    })
+    expect(trays.map((tray) => tray.kind)).toEqual(['approval', 'plan', 'goal', 'queue'])
+    expect(selectDockedTrays({ turns: [turn()], queuedInputs: [], goal: null })).toEqual([])
+    // The goal holds no control of any turn, so the transcript keeps everything it had.
+    expect(dockedNodesFor(trays, 'asst-1')).toEqual({ approvals: true, plan: true })
   })
 
   it('keeps the queue in every state the strip shows', () => {

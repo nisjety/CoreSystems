@@ -915,6 +915,10 @@ fn tool_phase_explanation(reason: &str, subscription: bool) -> (&'static str, &'
             crate::result_validation::VALIDATION_UNAVAILABLE,
             "Modelltjenesten svarte ikke mens utkastet ble kontrollert mot kildene. Dette utkastet er ikke publisert. Prøv igjen om litt.",
         ),
+        crate::selection_guard::REJECTED_REASON => (
+            crate::selection_guard::REJECTED_REASON,
+            "Endringen ble ikke lagret: den skrev om tekst utenfor det valgte avsnittet to ganger. Dette utkastet er ikke publisert. Prøv igjen og be bare om endring i det valgte.",
+        ),
         _ => ("audit_persistence_failed", "Tool action could not be durably audited"),
     }
 }
@@ -2178,8 +2182,10 @@ pub async fn invoke_stream_sse(
         &crate::context_refs::TurnFacts {
             zdr: turn_posture.zdr(),
             waived: turn_posture.is_waived(),
+            thread_references: crate::thread_reference_tools::enabled(),
             agentic: features.iter().any(|feature| feature == "agentic"),
             knowledge: !conversation_only && retrieval_scope != crate::normalize::RetrievalScope::WebOnly,
+            selection_edit: crate::selection_guard::enabled_for(state.artifact_revisions_mode),
             space_id: req
                 .space_context
                 .as_ref()
@@ -2740,6 +2746,41 @@ pub async fn invoke_stream_sse(
             return error_stream(&request_id, PLAN_GRANT_UNAVAILABLE, PLAN_GRANT_UNAVAILABLE_MESSAGE, false);
         }
     }
+    // The thread goal (Wave 3 EP-7 S1), decided before any run exists: a Do turn recites the
+    // thread's active goal as data, and a Continue turn whose `goal_id` is not that goal is refused.
+    // With MODEL_GATEWAY_THREAD_GOALS_ENABLED off nothing is read and the run is what it was.
+    let goal_recitation = match crate::thread_goal_routes::turn_goal_recitation(
+        &state,
+        &crate::thread_goal_routes::GoalTurn {
+            enabled: crate::thread_goal_routes::enabled(),
+            agentic: agentic_requested,
+            zdr_or_waived: effective_zdr || turn_posture.is_waived(),
+            space_scoped: req
+                .space_context
+                .as_ref()
+                .or(req.space_append_context.as_ref())
+                .is_some_and(|context| !context.space_id.is_empty()),
+            thread_id: req.thread_id.as_deref(),
+            goal_id: req.goal_id.as_deref(),
+        },
+        &org_id,
+        &model_bearer,
+    )
+    .await
+    {
+        Ok(recitation) => recitation,
+        Err(crate::thread_goal_routes::TurnGoalRefusal::Zdr) => {
+            return zdr_refusal_stream(
+                &request_id,
+                mp_contracts::zdr_refusal::Refusal::feature_not_supported(
+                    crate::thread_goal_routes::ZDR_FEATURE,
+                ),
+            );
+        }
+        Err(crate::thread_goal_routes::TurnGoalRefusal::Typed { code, message }) => {
+            return error_stream(&request_id, code, message, false);
+        }
+    };
     // Images as parts of the turn (WS08-S4), decided before any run exists. With the switch off
     // this is empty and the vision diversion below decides, as it always did. A Do turn with an
     // image is refused here rather than silently losing its tools to that diversion.
@@ -3191,6 +3232,7 @@ pub async fn invoke_stream_sse(
             ),
             agent_roles,
             wide_research,
+            goal_recitation,
         );
     }
 
@@ -3286,6 +3328,28 @@ pub async fn invoke_stream_sse(
         wake_history.as_ref(),
     )
     .await;
+    // EP-3 S6: a selection edit names the version it revises. It is admitted against the heads this turn has just seeded, refused before any model call when the head moved, and held for this run's tool rounds (see the spawn below).
+    let selection_hold = match crate::selection_guard::admit(
+        &session_run.run_id,
+        context_refs.as_ref(),
+        &state.artifact_versions,
+        &session_run.thread_id,
+    ) {
+        Ok(hold) => hold,
+        Err(refusal) => {
+            timing.fail();
+            return prepared_direct_failure_stream(
+                &state,
+                &session_run,
+                &model_bearer,
+                &request_id,
+                refusal.code,
+                refusal.message,
+                refusal.retryable,
+            )
+            .await;
+        }
+    };
     // A summary written this turn, persisted with the answer so later turns
     // send the same bytes instead of summarising the same head again.
     let head_summary = recent_thread.head_summary;
@@ -3992,6 +4056,7 @@ pub async fn invoke_stream_sse(
     let title_user_content = user_content.clone();
 
     let context_ref_documents = crate::context_refs::register_turn_documents(&session_run.run_id, context_refs.as_ref());
+    let context_ref_threads = crate::thread_reference_tools::register_turn_threads(&session_run.run_id, context_refs.as_ref());
     // The tool phase and the first inference call run INSIDE this task, after
     // `connected` is already on the wire. Axum begins the HTTP response only
     // once this handler returns, so doing that work here held the whole response
@@ -4003,6 +4068,8 @@ pub async fn invoke_stream_sse(
         // client disconnect or a panic cannot leave the stream counted.
         let _active_stream = active_stream;
         let _context_ref_documents = context_ref_documents;
+        let _context_ref_threads = context_ref_threads;
+        let _selection_hold = selection_hold;
         // Keep tool writes private until the assistant message is durable.
         let committed_artifacts = session_state.artifact_versions.clone();
         let artifact_base = committed_artifacts.fork_thread(&session_thread_id);
@@ -13343,6 +13410,10 @@ fn agentic_run_stream(
     // The wide-research request of a turn from the composer's entry (EP-2 S8), item cap already
     // clamped to the org's. `None` with WIDE_RESEARCH_ENTRY_ENABLED off and for a continuation.
     wide_research: Option<mp_contracts::model_plane::v1::WideResearchRequest>,
+    // The thread goal recited to the run as data (EP-7 S1, `thread_goal_routes::turn_goal_recitation`),
+    // carried in the run context. Empty with MODEL_GATEWAY_THREAD_GOALS_ENABLED off, for a thread
+    // without an active goal and for a continuation.
+    goal_recitation: String,
 ) -> Sse<ReceiverStream<Result<Event, Infallible>>> {
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(32);
     tokio::spawn(async move {
@@ -13418,6 +13489,8 @@ fn agentic_run_stream(
         // of the run record. A run whose context is not composed carries none.
         let run_context = run_context.map(|mut context| {
             context.agent_roles = agent_roles;
+            // The thread goal rides the same way (EP-7 S1): in flight only, Volatile tier.
+            context.goal_recitation = goal_recitation;
             context
         });
 
@@ -20736,6 +20809,8 @@ pub(crate) async fn continue_run(
             Vec::new(),
             // Nor a wide-research request: the run it continues already carried its items (EP-2 S8).
             None,
+            // Nor a goal recitation: it carries no run context (EP-7 S1).
+            String::new(),
         )
     };
     if !resume_enabled {
@@ -22631,6 +22706,7 @@ mod continue_run_tests {
             0,
             Vec::new(),
             None,
+            String::new(),
         );
         let frames = frames_of_stream(stream).await;
         let names: Vec<&str> = frames.iter().map(|(name, _)| name.as_str()).collect();
@@ -24124,6 +24200,7 @@ mod continue_run_tests {
             0,
             Vec::new(),
             None,
+            String::new(),
         );
         let frames = frames_of_stream(stream).await;
         let names: Vec<&str> = frames.iter().map(|(name, _)| name.as_str()).collect();

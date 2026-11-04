@@ -68,6 +68,7 @@ export type ZdrFeatureKey =
   | 'conversation_import'
   | 'run_inspection'
   | 'context_references'
+  | 'thread_goal'
 
 /** The reader's-language chooser, the same shape the rest of the SPA passes around. */
 export type Translate = (noText: string, enText: string) => string
@@ -204,6 +205,7 @@ export const FEATURE_LABELS: Record<ZdrFeatureKey, Copy> = {
   conversation_import: { no: 'import av samtaler', en: 'conversation import' },
   run_inspection: { no: 'tidslinje og innsyn i kjøringer', en: 'run timing and request inspection' },
   context_references: { no: 'referanser til dokumenter, samtaler eller utvalg', en: 'references to documents, threads or selections' },
+  thread_goal: { no: 'varige mål', en: 'persistent goals' },
 }
 
 /** A refusal whose feature the SPA does not know names it this way. */

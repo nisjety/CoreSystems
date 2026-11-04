@@ -148,6 +148,9 @@ pub struct PurgeSummary {
     /// Artifact revision texts (EP-3 S2). They also cascade from `threads`; counted here so the
     /// erasure proof names the content table.
     pub artifact_revisions: u64,
+    /// Thread goals, the owner's objectives and criteria (EP-7 S1). They also cascade from
+    /// `threads`; counted here so the erasure proof names the content table.
+    pub thread_goals: u64,
     pub messages: u64,
     pub task_events: u64,
     pub task_assignments: u64,
@@ -200,6 +203,7 @@ impl PurgeSummary {
             + self.plans
             + self.memory_index
             + self.artifact_revisions
+            + self.thread_goals
             + self.messages
             + self.task_events
             + self.task_assignments
@@ -333,6 +337,13 @@ pub async fn purge_organization_data(
     // Artifact revisions (EP-3 S2) go before their messages and threads. The thread FK cascades
     // too; the explicit statement keeps the count and survives a dropped cascade.
     summary.artifact_revisions = sqlx::query("DELETE FROM artifact_revisions WHERE org_id = $1")
+        .bind(org_id)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+
+    // Thread goals (EP-7 S1) go before their threads, for the same reasons.
+    summary.thread_goals = sqlx::query("DELETE FROM thread_goals WHERE org_id = $1")
         .bind(org_id)
         .execute(&mut *tx)
         .await?
@@ -924,6 +935,7 @@ mod tests {
             plans: 1,
             memory_index: 1,
             artifact_revisions: 1,
+            thread_goals: 1,
             messages: 1,
             task_events: 1,
             task_assignments: 1,
@@ -961,7 +973,7 @@ mod tests {
         };
         assert_eq!(
             summary.total(),
-            34,
+            35,
             "total() must count only Postgres rows; semantic-tier counts belong \
              to erasure_is_complete(), not to this sum"
         );
@@ -1002,6 +1014,7 @@ mod tests {
         let approvals = pos("DELETE FROM approvals WHERE org_id = $1");
         let plans = pos("DELETE FROM plans WHERE org_id = $1");
         let artifact_revisions = pos("DELETE FROM artifact_revisions WHERE org_id = $1");
+        let thread_goals = pos("DELETE FROM thread_goals WHERE org_id = $1");
         let messages = pos("DELETE FROM messages");
         let task_events = pos("DELETE FROM task_events");
         let task_assignments = pos("DELETE FROM task_assignments");
@@ -1040,6 +1053,10 @@ mod tests {
         assert!(
             artifact_revisions < messages && artifact_revisions < threads,
             "artifact revisions (EP-3 S2) must be purged before their messages and threads"
+        );
+        assert!(
+            thread_goals < threads,
+            "thread goals (EP-7 S1) must be purged before their threads"
         );
         assert!(
             task_events < tasks,

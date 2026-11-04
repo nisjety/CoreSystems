@@ -374,6 +374,14 @@ message RunContext {
   // never persisted, never built for a ZDR, waived or scheduled run, and
   // ignored by execution-core with EXECUTION_CORE_SUBAGENT_ROLES off.
   repeated AgentRoleSpec agent_roles = 8;
+  // The thread goal recited to the model as data (EP-7 S1; owner: session-core
+  // renders it, model-gateway carries it, execution-core places it in the
+  // Volatile tier of the root loop only). Finished text with a header that
+  // says to read it as data, never instructions. Empty when the thread has no
+  // active goal, with MODEL_GATEWAY_THREAD_GOALS_ENABLED off, and always for a
+  // ZDR, waived or Space-scoped run. In flight only: never persisted. Fields 5
+  // and 6 stay reserved for WS08 and WS20 (plan 4.3).
+  string goal_recitation = 9;
 }
 
 // AgentRoleSpec - one published agent definition a delegated subagent may take
