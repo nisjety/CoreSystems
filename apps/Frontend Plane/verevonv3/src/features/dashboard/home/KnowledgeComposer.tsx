@@ -76,6 +76,11 @@ import { cn } from '@/shared/lib/cn'
 import { useI18n, translateApiError, LocalizedError } from '@/shared/i18n'
 import { readClientJson, removeClientValue, writeClientJson } from '@/shared/session/client-storage'
 import { CrawlPagePicker } from './CrawlPagePicker'
+import {
+  CrawlApprovalPrompt,
+  type CrawlApprovalEstimate,
+  type CrawlApprovalRequest,
+} from '@/features/knowledge/components/CrawlApprovalPrompt'
 import { DashboardPlanBadge } from './DashboardPlanBadge'
 import { ProductPicker } from './ProductPicker'
 import { ScrapePreviewPanel } from './KnowledgeScrapePreview'
@@ -209,6 +214,14 @@ export function KnowledgeComposer(props: {
   const [crawlIncludeText, setCrawlIncludeText] = createSignal('')
   const [crawlExcludeText, setCrawlExcludeText] = createSignal('')
   const [crawlAllowSubdomains, setCrawlAllowSubdomains] = createSignal(false)
+  // W3-E3.7.9b: a crawl over the approval threshold waits here for the person. Set when the gateway
+  // answers a crawl start with a pending approval (W3-E3.7.9a, not built yet), so nothing sets it today;
+  // the prompt itself also renders nothing unless VITE_KNOWLEDGE_CRAWL_APPROVAL_ENABLED is "true".
+  const [crawlApproval, setCrawlApproval] = createSignal<{
+    request: CrawlApprovalRequest
+    estimate: CrawlApprovalEstimate
+    urls: string[]
+  } | null>(null)
   const [captureScreenshot, setCaptureScreenshot] = createSignal(false)
   const [capturePdf, setCapturePdf] = createSignal(false)
   const [submitting, setSubmitting] = createSignal(false)
@@ -1808,6 +1821,21 @@ export function KnowledgeComposer(props: {
             submitting={submitting()}
             onCrawl={(urls) => void crawlSelected(urls)}
             onDiscard={() => setDiscovery(null)}
+          />
+        )}
+      </Show>
+
+      <Show when={props.previewCollapsed ? null : crawlApproval()} keyed>
+        {(pending) => (
+          <CrawlApprovalPrompt
+            request={pending.request}
+            estimate={pending.estimate}
+            onDecided={(decision) => {
+              // Approve starts the crawl the approval was asked for; reject drops it. Either way the
+              // prompt goes away.
+              setCrawlApproval(null)
+              if (decision.decision === 'approve') void crawlSelected(pending.urls)
+            }}
           />
         )}
       </Show>
