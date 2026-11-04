@@ -17,6 +17,14 @@
 // TOOL_POLICY_ENFORCED is "true" on capability-core; the API itself is not gated,
 // so a person can set policies before the switch is turned on.
 //
+// The list carries an "enforced" bit beside the policies, so a settings page can
+// tell a person whether the level they set is honoured yet (EP-10 S7).
+//
+// The two connected-app capabilities are tighten-only levels a person sees in
+// settings: the read takes ask or never, and the provider write takes never. An
+// ask on the write is refused as already_always_ask, because every provider
+// write already pauses for the person.
+//
 // Who may write: a person (never a workload), carrying capability:write, with an
 // explicit non-ZDR posture; an org-scope write also needs an admin scope from the
 // signed principal. A ZDR principal can read and be evaluated but never writes:
@@ -66,17 +74,39 @@ const (
 	// pgUniqueViolation is the SQLSTATE of the active-key index refusing a second
 	// concurrent first write.
 	pgUniqueViolation = "23505"
+
+	// The provider write (EP-10 S7), whose every call already asks the person.
+	providerExecuteCapability = "cap.tool.provider.execute"
+	errAlreadyAlwaysAsk       = "already_always_ask"
 )
 
 // ToolPoliciesHandler serves /api/v1/tool-policies and is the policy engine's
 // source of stored policies.
 type ToolPoliciesHandler struct {
 	pool registryDatabase
+	// enforced is TOOL_POLICY_ENFORCED as main read it. It only reports whether
+	// the engine honours the stored policies; the handler never decides with it.
+	enforced bool
 }
 
 // NewToolPoliciesHandler constructs the handler.
 func NewToolPoliciesHandler(pool registryDatabase) *ToolPoliciesHandler {
 	return &ToolPoliciesHandler{pool: pool}
+}
+
+// WithEnforced records whether the policy engine honours the stored policies, so
+// the list can say so. Left unset, the list reports false: a level is never shown
+// as honoured on a guess.
+func (h *ToolPoliciesHandler) WithEnforced(enforced bool) *ToolPoliciesHandler {
+	h.enforced = enforced
+	return h
+}
+
+// toolPolicyListResponse is the list body: the policies and whether the engine
+// honours them.
+type toolPolicyListResponse struct {
+	Policies []toolPolicyView `json:"policies"`
+	Enforced bool             `json:"enforced"`
 }
 
 // Register mounts the routes on the mux behind the blanket JWT middleware.
@@ -151,7 +181,8 @@ type toolPolicyView struct {
 }
 
 // list is GET /api/v1/tool-policies?capability_id=: the org's active policies and
-// the caller's own. Another person's policy is never returned.
+// the caller's own, with whether the engine honours them. Another person's policy
+// is never returned.
 func (h *ToolPoliciesHandler) list(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := mcpVerifiedOrganization(r, false)
 	if !ok {
@@ -194,7 +225,7 @@ func (h *ToolPoliciesHandler) list(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, "database unavailable", http.StatusInternalServerError)
 		return
 	}
-	writeJSON(w, views)
+	writeJSON(w, toolPolicyListResponse{Policies: views, Enforced: h.enforced})
 }
 
 type setToolPolicyRequest struct {
@@ -312,6 +343,12 @@ func (h *ToolPoliciesHandler) set(w http.ResponseWriter, r *http.Request, capabi
 		}
 	default:
 		jsonErr(w, "decision must be allow, ask or never", http.StatusBadRequest)
+		return
+	}
+	// Every provider write already asks the person, so an ask on it changes
+	// nothing and is refused rather than stored as a level that looks chosen.
+	if capabilityID == providerExecuteCapability && request.Decision == policy.ToolPolicyAsk {
+		jsonErr(w, errAlreadyAlwaysAsk, http.StatusUnprocessableEntity)
 		return
 	}
 	var expiresAt *time.Time

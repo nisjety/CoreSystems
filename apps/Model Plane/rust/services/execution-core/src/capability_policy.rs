@@ -2686,6 +2686,8 @@ mod tests {
         signed_policy_source: Mutex<Option<String>>,
         /// When set, the evidence carries this claim-set version instead of "2".
         signed_version: Mutex<Option<String>>,
+        /// The policy source the stand-in answers; `risk_level` when unset.
+        policy_source: Mutex<Option<String>>,
     }
 
     struct MockCapabilityCore {
@@ -2750,7 +2752,13 @@ mod tests {
                 decision_evidence: String::new(),
                 side_effect_class: class,
                 approval_floor: floor,
-                policy_source: "risk_level".to_owned(),
+                policy_source: self
+                    .state
+                    .policy_source
+                    .lock()
+                    .expect("policy source lock")
+                    .clone()
+                    .unwrap_or_else(|| "risk_level".to_owned()),
                 tool_digest: digest,
             };
             let signed_tool = self
@@ -3074,6 +3082,81 @@ mod tests {
         assert_eq!(deny.decision, CapabilityDecision::Deny);
         assert!(!deny.ask_evidence_verified);
         assert_eq!(deny.capability_id, "cap.browser.open");
+    }
+
+    // The connected-app levels (EP-10 S7) need no Do-loop code: capability-core's engine answers a stored
+    // `ask` or `never` on the provider capabilities, and the loop pauses or refuses on that answer. These pin
+    // that the provider tools are evaluated against their own capabilities with the person named, so the
+    // person's own row can apply. With the class gate off the person is not named (see
+    // `the_tool_and_the_user_are_named_to_capability_core_only_once_the_gate_is_on`).
+    const NAMING_GATES: [ToolClassGate; 2] = [ToolClassGate::Shadow, ToolClassGate::Enforce];
+
+    #[tokio::test]
+    async fn user_ask_on_provider_read_pauses() {
+        for gate in NAMING_GATES {
+            let (policy, state) = harness(gate).await;
+            ask_from(&state);
+            *state.policy_source.lock().unwrap() = Some("tool_policy_ask".to_owned());
+            let evaluation = policy
+                .evaluate_tool_call("read_provider_action", "run-a", "org-a", "user-a")
+                .await
+                .expect("an ask is an evaluation, not an error");
+            assert_eq!(evaluation.decision, CapabilityDecision::Ask, "{gate:?}");
+            assert_eq!(evaluation.policy_source, "tool_policy_ask", "{gate:?}");
+            assert_eq!(
+                evaluation.capability_id, "cap.tool.provider.read",
+                "{gate:?}"
+            );
+            let sent = state.evaluated.lock().unwrap();
+            assert_eq!(sent[0].capability_id, "cap.tool.provider.read", "{gate:?}");
+            assert_eq!(sent[0].user_id, "user-a", "{gate:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn user_never_on_provider_read_denies() {
+        for gate in NAMING_GATES {
+            for tool in ["read_provider_action", "list_provider_actions"] {
+                let (policy, state) = harness(gate).await;
+                *state.decision.lock().unwrap() = Some("deny".to_owned());
+                *state.policy_source.lock().unwrap() = Some("tool_policy_never".to_owned());
+                let case = format!("{gate:?} {tool}");
+                let evaluation = policy
+                    .evaluate_tool_call(tool, "run-a", "org-a", "user-a")
+                    .await
+                    .expect("a deny is an evaluation");
+                assert_eq!(evaluation.decision, CapabilityDecision::Deny, "{case}");
+                assert_eq!(evaluation.policy_source, "tool_policy_never", "{case}");
+                assert_eq!(evaluation.capability_id, "cap.tool.provider.read", "{case}");
+                assert!(!evaluation.ask_evidence_verified, "{case}");
+                let sent = state.evaluated.lock().unwrap();
+                assert_eq!(sent[0].user_id, "user-a", "{case}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn user_never_on_provider_execute_denies() {
+        for gate in NAMING_GATES {
+            let (policy, state) = harness(gate).await;
+            *state.decision.lock().unwrap() = Some("deny".to_owned());
+            *state.policy_source.lock().unwrap() = Some("tool_policy_never".to_owned());
+            let evaluation = policy
+                .evaluate_tool_call("execute_provider_action", "run-a", "org-a", "user-a")
+                .await
+                .expect("a deny is an evaluation");
+            assert_eq!(evaluation.decision, CapabilityDecision::Deny, "{gate:?}");
+            assert_eq!(
+                evaluation.capability_id, "cap.tool.provider.execute",
+                "{gate:?}"
+            );
+            let sent = state.evaluated.lock().unwrap();
+            assert_eq!(
+                sent[0].capability_id, "cap.tool.provider.execute",
+                "{gate:?}"
+            );
+            assert_eq!(sent[0].user_id, "user-a", "{gate:?}");
+        }
     }
 
     #[test]

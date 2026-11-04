@@ -22,6 +22,7 @@ import { OrgSpacePolicySection } from '@/features/settings/components/OrgSpacePo
 import { MemorySection } from '@/features/settings/components/MemorySection'
 import { LearningSection } from '@/features/settings/components/LearningSection'
 import { ChatGptSubscriptionPanel } from '@/features/integrations/components/ChatGptSubscriptionPanel'
+import { ConnectedAppsPolicy } from '@/features/settings/components/ConnectedAppsPolicy'
 import { HyperswitchCheckout } from '@/features/billing/components/HyperswitchCheckout'
 import { NexiCheckout } from '@/features/billing/components/NexiCheckout'
 import { reserveDirectOauthWindow, runDirectOauthWindow } from '@/shared/integrations/provider-auth-window'
@@ -2050,6 +2051,7 @@ function IntegrationsSection() {
         )}
         {loadFailed() ? ` ${i18n.tr('Integrasjonstilstanden kunne ikke oppdateres fra de lokale tjenestene.', 'Integration state could not be refreshed from the local services.')}` : ''}
       </p>
+      <ConnectedAppsPolicy />
       <Show when={notice()}>
         {(message) => <p class="verevon-settings-status-message" role="status">{message()}</p>}
       </Show>

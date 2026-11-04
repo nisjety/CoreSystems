@@ -1,4 +1,9 @@
-import { orchestrationDecideApprovalInput } from '@/shared/actions/action-registry'
+import type { z } from 'zod'
+import {
+  type integrationsConnectorPoliciesOutput,
+  integrationsSetConnectorPolicyInput,
+  orchestrationDecideApprovalInput,
+} from '@/shared/actions/action-registry'
 import { causeCodeOf, type ApprovalCause } from '../approvals/approval-copy'
 import { ApiError, requestJson } from './http'
 import { readSseStream, type SseEvent } from './sse'
@@ -295,6 +300,95 @@ export async function confirmApprovalRule(
     body: JSON.stringify(body),
     signal,
   })
+}
+
+/** The capabilities whose tool policies are the connected-app levels (EP-10 S7). */
+export const PROVIDER_READ_CAPABILITY = 'cap.tool.provider.read'
+export const PROVIDER_EXECUTE_CAPABILITY = 'cap.tool.provider.execute'
+
+export type ConnectorPolicyInput = z.infer<typeof integrationsSetConnectorPolicyInput>
+export type ConnectorPolicies = z.infer<typeof integrationsConnectorPoliciesOutput>
+export type ConnectorReadLevel = ConnectorPolicies['read']
+export type ConnectorWriteLevel = ConnectorPolicies['write']
+
+/** The level a stored decision is: no row is the default level, `ask` is ask first, `never` is off. */
+function readLevelOf(decision: string | undefined): ConnectorReadLevel {
+  if (decision === 'never') return 'off'
+  if (decision === 'ask') return 'ask_first'
+  return 'use_without_asking'
+}
+
+function writeLevelOf(decision: string | undefined): ConnectorWriteLevel {
+  return decision === 'never' ? 'off' : 'always_ask'
+}
+
+/**
+ * The connected-app levels in a tool-policy list. The list holds the org's rows and the caller's own,
+ * never another person's. A list without the `enforced` bit is read as not enforced, so a level is never
+ * shown as honoured on a guess.
+ */
+export function connectorPoliciesOf(body: unknown): ConnectorPolicies {
+  const record = body && typeof body === 'object' ? (body as Record<string, unknown>) : {}
+  const rows = Array.isArray(record.policies) ? record.policies : []
+  const decisionOf = (capabilityId: string, scopeKind: 'user' | 'org') => {
+    for (const row of rows) {
+      if (!row || typeof row !== 'object') continue
+      const policy = row as Record<string, unknown>
+      if (policy.capability_id === capabilityId && policy.scope_kind === scopeKind && typeof policy.decision === 'string') {
+        return policy.decision
+      }
+    }
+    return undefined
+  }
+  return {
+    enforced: record.enforced === true,
+    read: readLevelOf(decisionOf(PROVIDER_READ_CAPABILITY, 'user')),
+    write: writeLevelOf(decisionOf(PROVIDER_EXECUTE_CAPABILITY, 'user')),
+    orgRead: readLevelOf(decisionOf(PROVIDER_READ_CAPABILITY, 'org')),
+    orgWrite: writeLevelOf(decisionOf(PROVIDER_EXECUTE_CAPABILITY, 'org')),
+  }
+}
+
+/** The connected-app levels of the caller and their org, and whether they are enforced yet. */
+export async function listConnectorPolicies(signal?: AbortSignal): Promise<ConnectorPolicies> {
+  const body = await requestJson<unknown>('/api/v1/tool-policies', { signal })
+  return connectorPoliciesOf(body)
+}
+
+/**
+ * The request a connected-app level is: the default level revokes the person's own row, any other writes
+ * `ask` or `never` on it. Never an allow and never the org's scope.
+ */
+export function connectorPolicyRequest(input: ConnectorPolicyInput): {
+  capabilityId: string
+  method: 'PUT' | 'DELETE'
+  body?: Record<string, unknown>
+} {
+  const capabilityId = input.kind === 'read' ? PROVIDER_READ_CAPABILITY : PROVIDER_EXECUTE_CAPABILITY
+  if (input.level === 'use_without_asking' || input.level === 'always_ask') {
+    return { capabilityId, method: 'DELETE' }
+  }
+  return {
+    capabilityId,
+    method: 'PUT',
+    body: { scope: 'user', decision: input.level === 'ask_first' ? 'ask' : 'never', reason: '' },
+  }
+}
+
+/** Set the person's own connected-app level. Returning to the default when no row exists is already done. */
+export async function setConnectorPolicy(input: ConnectorPolicyInput, signal?: AbortSignal): Promise<void> {
+  const { capabilityId, method, body } = connectorPolicyRequest(integrationsSetConnectorPolicyInput.parse(input))
+  const path = `/api/v1/tool-policies/${encodeURIComponent(capabilityId)}`
+  if (method === 'DELETE') {
+    try {
+      await requestJson<unknown>(`${path}?scope=user`, { method, signal })
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 404) return
+      throw error
+    }
+    return
+  }
+  await requestJson<unknown>(path, { method, body: JSON.stringify(body), signal })
 }
 
 /** The kind token of an approval that holds tool output back for review (build plan WS10 S8). */

@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -11,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/triodelab/model-plane/pkg/authctx"
 	"github.com/triodelab/model-plane/services/capability-core/internal/authz"
+	"github.com/triodelab/model-plane/services/capability-core/internal/models"
 )
 
 // untouchedDB fails the test on any use: every request below must be refused
@@ -103,6 +105,8 @@ func TestToolPolicyWritesAreRefusedBeforeTheRegistryIsTouched(t *testing.T) {
 		{name: "the collection is read only", method: http.MethodPut, target: "/api/v1/tool-policies", principal: ptr(person(authz.WriteScope)), want: http.StatusMethodNotAllowed},
 		{name: "an item cannot be POSTed", method: http.MethodPost, target: "/api/v1/tool-policies/cap.x", principal: ptr(person(authz.WriteScope)), want: http.StatusMethodNotAllowed},
 		{name: "a nested path is not a capability id", method: http.MethodPut, target: "/api/v1/tool-policies/cap.x/y", principal: ptr(person(authz.WriteScope)), want: http.StatusNotFound},
+		{name: "an ask on the provider write is already always ask", method: http.MethodPut, target: "/api/v1/tool-policies/cap.tool.provider.execute", body: `{"decision":"ask"}`, principal: ptr(person(authz.WriteScope)), want: http.StatusUnprocessableEntity, wantBody: "already_always_ask"},
+		{name: "an org ask on the provider write is already always ask", method: http.MethodPut, target: "/api/v1/tool-policies/cap.tool.provider.execute", body: `{"decision":"ask","scope":"org"}`, principal: &admin, want: http.StatusUnprocessableEntity, wantBody: "already_always_ask"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -118,6 +122,106 @@ func TestToolPolicyWritesAreRefusedBeforeTheRegistryIsTouched(t *testing.T) {
 }
 
 func ptr[T any](v T) *T { return &v }
+
+// builtinToolDB answers the capability read as a built-in tool, so the connected-app
+// capabilities are written against the kind they have in the registry.
+type builtinToolDB struct{ *toolPolicyRecordingDB }
+
+func (d builtinToolDB) QueryRow(ctx context.Context, sql string, args ...any) pgx.Row {
+	if strings.Contains(sql, "FROM capabilities") {
+		d.statements = append(d.statements, recordedStatement{sql: sql, args: args})
+		return toolPolicyScanRow{values: []string{models.KindTool}}
+	}
+	return d.toolPolicyRecordingDB.QueryRow(ctx, sql, args...)
+}
+
+// putConnectedAppLevel sends one person's PUT for a connected-app capability and
+// returns the response and what the database was asked to do.
+func putConnectedAppLevel(t *testing.T, capabilityID, body string) (*httptest.ResponseRecorder, *toolPolicyRecordingDB) {
+	t.Helper()
+	db := &toolPolicyRecordingDB{t: t}
+	mux := http.NewServeMux()
+	NewToolPoliciesHandler(builtinToolDB{db}).Register(mux)
+	principal := person(authz.WriteScope)
+	response := httptest.NewRecorder()
+	mux.ServeHTTP(response, toolPolicyRequest(http.MethodPut, "/api/v1/tool-policies/"+capabilityID, body, &principal))
+	return response, db
+}
+
+// The connected-app levels a person may pick are tightenings (EP-10 S7): ask first
+// or off for the read, off for the write. Each is stored as the person's own row.
+func TestConnectedAppLevelsAreTighteningsAPersonMaySet(t *testing.T) {
+	levels := []struct{ capabilityID, decision string }{
+		{"cap.tool.provider.read", "ask"},
+		{"cap.tool.provider.read", "never"},
+		{"cap.tool.provider.execute", "never"},
+	}
+	for _, level := range levels {
+		t.Run(level.capabilityID+" "+level.decision, func(t *testing.T) {
+			response, db := putConnectedAppLevel(t, level.capabilityID, `{"decision":"`+level.decision+`"}`)
+			if response.Code != http.StatusOK {
+				t.Fatalf("status = %d, want %d, body=%s", response.Code, http.StatusOK, response.Body.String())
+			}
+			args := policyWriteArgs(t, db)
+			if args[1] != "user" || args[2] != "user-a" || args[3] != level.capabilityID || args[4] != level.decision {
+				t.Fatalf("stored scope=%v value=%v capability=%v decision=%v", args[1], args[2], args[3], args[4])
+			}
+		})
+	}
+}
+
+// A connected-app capability is built in, so it is never relaxed to allow.
+func TestAConnectedAppCapabilityIsNeverAllowed(t *testing.T) {
+	for _, capabilityID := range []string{"cap.tool.provider.read", "cap.tool.provider.execute"} {
+		response, db := putConnectedAppLevel(t, capabilityID, allowBody)
+		if response.Code != http.StatusUnprocessableEntity {
+			t.Fatalf("%s: status = %d, want %d, body=%s", capabilityID, response.Code, http.StatusUnprocessableEntity, response.Body.String())
+		}
+		for _, statement := range db.statements {
+			if statement.sql == setToolPolicySQL {
+				t.Fatalf("%s: an allow on a built-in tool was written", capabilityID)
+			}
+		}
+	}
+}
+
+// listRowsDB answers the list read with no rows; nothing else may be asked.
+type listRowsDB struct{ untouchedDB }
+
+func (listRowsDB) Query(context.Context, string, ...any) (pgx.Rows, error) {
+	return emptyRows{}, nil
+}
+
+// The list says whether the engine honours the policies, and says false unless
+// main recorded otherwise, so a level is never shown as honoured on a guess.
+func TestTheListSaysWhetherThePoliciesAreEnforced(t *testing.T) {
+	for _, enforced := range []bool{false, true} {
+		mux := http.NewServeMux()
+		handler := NewToolPoliciesHandler(listRowsDB{untouchedDB{t}})
+		if enforced {
+			handler = handler.WithEnforced(true)
+		}
+		handler.Register(mux)
+		response := httptest.NewRecorder()
+		mux.ServeHTTP(response, toolPolicyRequest(http.MethodGet, "/api/v1/tool-policies?capability_id=cap.tool.provider.read", "", ptr(person())))
+		if response.Code != http.StatusOK {
+			t.Fatalf("status = %d, body=%s", response.Code, response.Body.String())
+		}
+		var body struct {
+			Policies []toolPolicyView `json:"policies"`
+			Enforced *bool            `json:"enforced"`
+		}
+		if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+			t.Fatalf("the list is not JSON: %v", err)
+		}
+		if body.Enforced == nil || *body.Enforced != enforced {
+			t.Fatalf("enforced = %v, want %v: %s", body.Enforced, enforced, response.Body.String())
+		}
+		if body.Policies == nil || !strings.Contains(response.Body.String(), `"policies":[]`) {
+			t.Fatalf("an empty list must marshal as []: %s", response.Body.String())
+		}
+	}
+}
 
 // The admin test used for an org-scope write is the same one the model-gateway
 // applies (ownership.rs is_admin_claim): these are the vectors both sides must
