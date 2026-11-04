@@ -541,7 +541,9 @@ message ExtractStructuredResponse {
 // offsets into the text the model was shown, end-exclusive.
 message ExtractStructuredHighlight {
   string text = 1;
+  // Character offset where the passage starts, in the text the model was shown.
   uint64 start = 2;
+  // Character offset just past the passage's last character (end-exclusive).
   uint64 end = 3;
 }
 
@@ -550,8 +552,10 @@ message ExtractStructuredHighlight {
 message ExtractStructuredResult {
   // The page as requested, and after redirects.
   string url = 1;
+  // URL the page was served from, after redirects.
   string final_url = 2;
   string title = 3;
+  // Fingerprint of the page source that was extracted.
   string source_fingerprint = 4;
 
   // mode "json": the validated JSON object. Empty when the model could not
@@ -560,6 +564,7 @@ message ExtractStructuredResult {
 
   // mode "question": the answer ("" when `found` is false).
   string answer = 6;
+  // Question mode: true when the answer was found on the page.
   bool found = 7;
   // True when the supporting quote was found verbatim on the page.
   bool grounded = 8;
@@ -569,7 +574,9 @@ message ExtractStructuredResult {
   // Quotes the model gave that are not on the page (dropped).
   uint32 highlights_dropped = 10;
 
+  // Model that served this page's extraction.
   string model_used = 11;
+  // Input tokens used for this page.
   int32 input_tokens = 12;
   int32 output_tokens = 13;
 
@@ -1642,6 +1649,7 @@ message ListTasksResponse {
 message ScreenContentRequest {
   string request_id = 1;
   string org_id = 2;
+  // Acting user identifier.
   string user_id = 3;
   string run_id = 4;
   // The tool that produced the result, named as the shared trust table names it.

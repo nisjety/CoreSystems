@@ -73,9 +73,13 @@ message ExecuteScheduledStepResponse {
   // Counts of the scheduled Do lane (WS20 S6). Zero on the single-inference lane.
   // They carry no content: the withheld effects are named only in the transcript.
   uint32 rounds_executed = 7;
+  // Number of effects withheld; their names appear only in the transcript.
   uint32 withheld_effects = 8;
+  // Number of tool calls made by the scheduled step.
   uint32 tool_calls = 9;
+  // Input tokens used by the scheduled step.
   uint32 input_tokens = 10;
+  // Output tokens produced by the scheduled step.
   uint32 output_tokens = 11;
 }
 
@@ -659,6 +663,7 @@ message ExecuteStepRequest {
 
 // RunAttachmentKind — what a staged run input is.
 enum RunAttachmentKind {
+  // Kind not set.
   RUN_ATTACHMENT_KIND_UNSPECIFIED = 0;
   // A document or data file the sandbox program reads (xlsx, csv, pdf, ...).
   RUN_ATTACHMENT_KIND_FILE = 1;
@@ -684,6 +689,7 @@ message RunAttachment {
   string sha256 = 5;
   // The file bytes.
   bytes content = 6;
+  // What the input is: a document or data file, or an image.
   RunAttachmentKind kind = 7;
 }
 

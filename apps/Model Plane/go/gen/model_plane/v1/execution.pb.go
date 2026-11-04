@@ -25,6 +25,7 @@ const (
 type RunAttachmentKind int32
 
 const (
+	// Kind not set.
 	RunAttachmentKind_RUN_ATTACHMENT_KIND_UNSPECIFIED RunAttachmentKind = 0
 	// A document or data file the sandbox program reads (xlsx, csv, pdf, ...).
 	RunAttachmentKind_RUN_ATTACHMENT_KIND_FILE RunAttachmentKind = 1
@@ -230,13 +231,17 @@ type ExecuteScheduledStepResponse struct {
 	UnknownOutcome bool                   `protobuf:"varint,6,opt,name=unknown_outcome,json=unknownOutcome,proto3" json:"unknown_outcome,omitempty"`
 	// Counts of the scheduled Do lane (WS20 S6). Zero on the single-inference lane.
 	// They carry no content: the withheld effects are named only in the transcript.
-	RoundsExecuted  uint32 `protobuf:"varint,7,opt,name=rounds_executed,json=roundsExecuted,proto3" json:"rounds_executed,omitempty"`
+	RoundsExecuted uint32 `protobuf:"varint,7,opt,name=rounds_executed,json=roundsExecuted,proto3" json:"rounds_executed,omitempty"`
+	// Number of effects withheld; their names appear only in the transcript.
 	WithheldEffects uint32 `protobuf:"varint,8,opt,name=withheld_effects,json=withheldEffects,proto3" json:"withheld_effects,omitempty"`
-	ToolCalls       uint32 `protobuf:"varint,9,opt,name=tool_calls,json=toolCalls,proto3" json:"tool_calls,omitempty"`
-	InputTokens     uint32 `protobuf:"varint,10,opt,name=input_tokens,json=inputTokens,proto3" json:"input_tokens,omitempty"`
-	OutputTokens    uint32 `protobuf:"varint,11,opt,name=output_tokens,json=outputTokens,proto3" json:"output_tokens,omitempty"`
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
+	// Number of tool calls made by the scheduled step.
+	ToolCalls uint32 `protobuf:"varint,9,opt,name=tool_calls,json=toolCalls,proto3" json:"tool_calls,omitempty"`
+	// Input tokens used by the scheduled step.
+	InputTokens uint32 `protobuf:"varint,10,opt,name=input_tokens,json=inputTokens,proto3" json:"input_tokens,omitempty"`
+	// Output tokens produced by the scheduled step.
+	OutputTokens  uint32 `protobuf:"varint,11,opt,name=output_tokens,json=outputTokens,proto3" json:"output_tokens,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *ExecuteScheduledStepResponse) Reset() {
@@ -2077,7 +2082,8 @@ type RunAttachment struct {
 	// mismatch. The scanner extension point of WS26.
 	Sha256 string `protobuf:"bytes,5,opt,name=sha256,proto3" json:"sha256,omitempty"`
 	// The file bytes.
-	Content       []byte            `protobuf:"bytes,6,opt,name=content,proto3" json:"content,omitempty"`
+	Content []byte `protobuf:"bytes,6,opt,name=content,proto3" json:"content,omitempty"`
+	// What the input is: a document or data file, or an image.
 	Kind          RunAttachmentKind `protobuf:"varint,7,opt,name=kind,proto3,enum=model_plane.v1.RunAttachmentKind" json:"kind,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache

@@ -21,15 +21,20 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
+// Request for one page of the Space's artifacts.
 type ListSpaceArtifactsRequest struct {
-	state   protoimpl.MessageState `protogen:"open.v1"`
-	OrgId   string                 `protobuf:"bytes,1,opt,name=org_id,json=orgId,proto3" json:"org_id,omitempty"`
-	SpaceId string                 `protobuf:"bytes,2,opt,name=space_id,json=spaceId,proto3" json:"space_id,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Id of the org the request runs in.
+	OrgId string `protobuf:"bytes,1,opt,name=org_id,json=orgId,proto3" json:"org_id,omitempty"`
+	// Id of the Space whose artifacts are listed.
+	SpaceId string `protobuf:"bytes,2,opt,name=space_id,json=spaceId,proto3" json:"space_id,omitempty"`
 	// 0 means the default of 50; clamped to 1..200.
 	Limit uint32 `protobuf:"varint,3,opt,name=limit,proto3" json:"limit,omitempty"`
 	// Opaque keyset cursor from a previous response; empty for the first page.
-	Cursor                 string `protobuf:"bytes,4,opt,name=cursor,proto3" json:"cursor,omitempty"`
-	SpaceReadDecisionRef   string `protobuf:"bytes,5,opt,name=space_read_decision_ref,json=spaceReadDecisionRef,proto3" json:"space_read_decision_ref,omitempty"`
+	Cursor string `protobuf:"bytes,4,opt,name=cursor,proto3" json:"cursor,omitempty"`
+	// Control `model.thread.read` decision reference for this Space.
+	SpaceReadDecisionRef string `protobuf:"bytes,5,opt,name=space_read_decision_ref,json=spaceReadDecisionRef,proto3" json:"space_read_decision_ref,omitempty"`
+	// Token for the decision named by space_read_decision_ref.
 	SpaceReadDecisionToken string `protobuf:"bytes,6,opt,name=space_read_decision_token,json=spaceReadDecisionToken,proto3" json:"space_read_decision_token,omitempty"`
 	unknownFields          protoimpl.UnknownFields
 	sizeCache              protoimpl.SizeCache
@@ -110,18 +115,29 @@ func (x *ListSpaceArtifactsRequest) GetSpaceReadDecisionToken() string {
 // One artifact of the room at its latest version. No content: the viewer reads
 // the thread through the existing transcript route and its own authority.
 type SpaceArtifactSummary struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	ThreadId      string                 `protobuf:"bytes,1,opt,name=thread_id,json=threadId,proto3" json:"thread_id,omitempty"`
-	MessageId     string                 `protobuf:"bytes,2,opt,name=message_id,json=messageId,proto3" json:"message_id,omitempty"`
-	ArtifactId    string                 `protobuf:"bytes,3,opt,name=artifact_id,json=artifactId,proto3" json:"artifact_id,omitempty"`
-	Kind          string                 `protobuf:"bytes,4,opt,name=kind,proto3" json:"kind,omitempty"`
-	Title         string                 `protobuf:"bytes,5,opt,name=title,proto3" json:"title,omitempty"`
-	Version       int64                  `protobuf:"varint,6,opt,name=version,proto3" json:"version,omitempty"`
-	VersionCount  int64                  `protobuf:"varint,7,opt,name=version_count,json=versionCount,proto3" json:"version_count,omitempty"`
-	SizeChars     int64                  `protobuf:"varint,8,opt,name=size_chars,json=sizeChars,proto3" json:"size_chars,omitempty"`
-	AgentName     string                 `protobuf:"bytes,9,opt,name=agent_name,json=agentName,proto3" json:"agent_name,omitempty"`
-	CreatedAt     string                 `protobuf:"bytes,10,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`
-	SpaceId       string                 `protobuf:"bytes,11,opt,name=space_id,json=spaceId,proto3" json:"space_id,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Id of the thread the artifact is in.
+	ThreadId string `protobuf:"bytes,1,opt,name=thread_id,json=threadId,proto3" json:"thread_id,omitempty"`
+	// Id of the message the artifact belongs to.
+	MessageId string `protobuf:"bytes,2,opt,name=message_id,json=messageId,proto3" json:"message_id,omitempty"`
+	// Id of the artifact.
+	ArtifactId string `protobuf:"bytes,3,opt,name=artifact_id,json=artifactId,proto3" json:"artifact_id,omitempty"`
+	// Kind of artifact.
+	Kind string `protobuf:"bytes,4,opt,name=kind,proto3" json:"kind,omitempty"`
+	// Title of the artifact.
+	Title string `protobuf:"bytes,5,opt,name=title,proto3" json:"title,omitempty"`
+	// Latest version number of the artifact.
+	Version int64 `protobuf:"varint,6,opt,name=version,proto3" json:"version,omitempty"`
+	// Number of versions the artifact has.
+	VersionCount int64 `protobuf:"varint,7,opt,name=version_count,json=versionCount,proto3" json:"version_count,omitempty"`
+	// Size of the artifact content, in characters.
+	SizeChars int64 `protobuf:"varint,8,opt,name=size_chars,json=sizeChars,proto3" json:"size_chars,omitempty"`
+	// Name of the agent that made the artifact.
+	AgentName string `protobuf:"bytes,9,opt,name=agent_name,json=agentName,proto3" json:"agent_name,omitempty"`
+	// When the artifact was created.
+	CreatedAt string `protobuf:"bytes,10,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`
+	// Id of the Space the artifact is in.
+	SpaceId       string `protobuf:"bytes,11,opt,name=space_id,json=spaceId,proto3" json:"space_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -233,8 +249,10 @@ func (x *SpaceArtifactSummary) GetSpaceId() string {
 	return ""
 }
 
+// One page of artifact summaries.
 type ListSpaceArtifactsResponse struct {
-	state     protoimpl.MessageState  `protogen:"open.v1"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Artifact summaries on this page.
 	Artifacts []*SpaceArtifactSummary `protobuf:"bytes,1,rep,name=artifacts,proto3" json:"artifacts,omitempty"`
 	// Empty when there is no further page.
 	NextCursor    string `protobuf:"bytes,2,opt,name=next_cursor,json=nextCursor,proto3" json:"next_cursor,omitempty"`
@@ -286,12 +304,17 @@ func (x *ListSpaceArtifactsResponse) GetNextCursor() string {
 	return ""
 }
 
+// Request for one window of the Space's posts.
 type ListSpaceTimelineRequest struct {
-	state                  protoimpl.MessageState `protogen:"open.v1"`
-	OrgId                  string                 `protobuf:"bytes,1,opt,name=org_id,json=orgId,proto3" json:"org_id,omitempty"`
-	SpaceId                string                 `protobuf:"bytes,2,opt,name=space_id,json=spaceId,proto3" json:"space_id,omitempty"`
-	SpaceReadDecisionRef   string                 `protobuf:"bytes,3,opt,name=space_read_decision_ref,json=spaceReadDecisionRef,proto3" json:"space_read_decision_ref,omitempty"`
-	SpaceReadDecisionToken string                 `protobuf:"bytes,4,opt,name=space_read_decision_token,json=spaceReadDecisionToken,proto3" json:"space_read_decision_token,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Id of the org the request runs in.
+	OrgId string `protobuf:"bytes,1,opt,name=org_id,json=orgId,proto3" json:"org_id,omitempty"`
+	// Id of the Space whose timeline is read.
+	SpaceId string `protobuf:"bytes,2,opt,name=space_id,json=spaceId,proto3" json:"space_id,omitempty"`
+	// Control `model.thread.read` decision reference for this Space.
+	SpaceReadDecisionRef string `protobuf:"bytes,3,opt,name=space_read_decision_ref,json=spaceReadDecisionRef,proto3" json:"space_read_decision_ref,omitempty"`
+	// Token for the decision named by space_read_decision_ref.
+	SpaceReadDecisionToken string `protobuf:"bytes,4,opt,name=space_read_decision_token,json=spaceReadDecisionToken,proto3" json:"space_read_decision_token,omitempty"`
 	// 0 means the default of 50; clamped to 1..100.
 	Limit uint32 `protobuf:"varint,5,opt,name=limit,proto3" json:"limit,omitempty"`
 	// Page of posts whose newest message sequence is below this (older). 0 = newest page.
@@ -401,16 +424,20 @@ func (x *ListSpaceTimelineRequest) GetIncludePinned() bool {
 	return false
 }
 
+// One window of the Space's posts, with pinned and refreshed posts.
 type ListSpaceTimelineResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// The window, newest activity first.
-	Posts     []*ThreadSummary `protobuf:"bytes,1,rep,name=posts,proto3" json:"posts,omitempty"`
-	Pinned    []*ThreadSummary `protobuf:"bytes,2,rep,name=pinned,proto3" json:"pinned,omitempty"`
+	Posts []*ThreadSummary `protobuf:"bytes,1,rep,name=posts,proto3" json:"posts,omitempty"`
+	// Pinned posts; filled on the first page only.
+	Pinned []*ThreadSummary `protobuf:"bytes,2,rep,name=pinned,proto3" json:"pinned,omitempty"`
+	// Summaries of the threads named in refresh_thread_ids.
 	Refreshed []*ThreadSummary `protobuf:"bytes,3,rep,name=refreshed,proto3" json:"refreshed,omitempty"`
 	// True when more posts exist beyond the window in the direction asked.
 	HasMore bool `protobuf:"varint,4,opt,name=has_more,json=hasMore,proto3" json:"has_more,omitempty"`
 	// Smallest and largest `last_message_seq` in `posts`; 0 when the window is empty.
 	OldestSeq uint64 `protobuf:"varint,5,opt,name=oldest_seq,json=oldestSeq,proto3" json:"oldest_seq,omitempty"`
+	// Largest last_message_seq in posts; 0 when the window is empty.
 	NewestSeq uint64 `protobuf:"varint,6,opt,name=newest_seq,json=newestSeq,proto3" json:"newest_seq,omitempty"`
 	// Posts the reader may see, counted on the first page (no cursor) only; 0 otherwise.
 	TotalPosts    uint32 `protobuf:"varint,7,opt,name=total_posts,json=totalPosts,proto3" json:"total_posts,omitempty"`

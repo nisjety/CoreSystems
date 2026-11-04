@@ -1260,6 +1260,7 @@ func (x *PromoteSkillResponse) GetCapability() *CapabilityDetail {
 	return nil
 }
 
+// Request to list the org's skill bundles, optionally narrowed by skill ID.
 type ListSkillBundlesRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Empty lists every skill bundle of the caller's organization.
@@ -1305,9 +1306,11 @@ func (x *ListSkillBundlesRequest) GetSkillIds() []string {
 	return nil
 }
 
+// Result of ListSkillBundles.
 type ListSkillBundlesResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Bundles       []*SkillBundleSummary  `protobuf:"bytes,1,rep,name=bundles,proto3" json:"bundles,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// One summary per matching skill bundle.
+	Bundles       []*SkillBundleSummary `protobuf:"bytes,1,rep,name=bundles,proto3" json:"bundles,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1349,13 +1352,18 @@ func (x *ListSkillBundlesResponse) GetBundles() []*SkillBundleSummary {
 	return nil
 }
 
+// Summary of one skill bundle: its digest, size and creator.
 type SkillBundleSummary struct {
-	state          protoimpl.MessageState `protogen:"open.v1"`
-	SkillId        string                 `protobuf:"bytes,1,opt,name=skill_id,json=skillId,proto3" json:"skill_id,omitempty"`
-	ManifestSha256 string                 `protobuf:"bytes,2,opt,name=manifest_sha256,json=manifestSha256,proto3" json:"manifest_sha256,omitempty"`
-	FileCount      int32                  `protobuf:"varint,3,opt,name=file_count,json=fileCount,proto3" json:"file_count,omitempty"`
-	TotalBytes     int64                  `protobuf:"varint,4,opt,name=total_bytes,json=totalBytes,proto3" json:"total_bytes,omitempty"`
-	CreatedBy      string                 `protobuf:"bytes,5,opt,name=created_by,json=createdBy,proto3" json:"created_by,omitempty"`
+	state   protoimpl.MessageState `protogen:"open.v1"`
+	SkillId string                 `protobuf:"bytes,1,opt,name=skill_id,json=skillId,proto3" json:"skill_id,omitempty"`
+	// SHA-256 digest of the bundle manifest.
+	ManifestSha256 string `protobuf:"bytes,2,opt,name=manifest_sha256,json=manifestSha256,proto3" json:"manifest_sha256,omitempty"`
+	// Number of files in the bundle.
+	FileCount int32 `protobuf:"varint,3,opt,name=file_count,json=fileCount,proto3" json:"file_count,omitempty"`
+	// Total size of the bundle's files, in bytes.
+	TotalBytes int64 `protobuf:"varint,4,opt,name=total_bytes,json=totalBytes,proto3" json:"total_bytes,omitempty"`
+	// Identifier of who created the bundle.
+	CreatedBy string `protobuf:"bytes,5,opt,name=created_by,json=createdBy,proto3" json:"created_by,omitempty"`
 	// RFC3339 timestamp of the upload that holds this bundle.
 	CreatedAt string `protobuf:"bytes,6,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`
 	// True when the bundle carries templates/deck-theme.json, so it is an org brand template
@@ -1445,6 +1453,7 @@ func (x *SkillBundleSummary) GetDeckTemplate() bool {
 	return false
 }
 
+// Request to read one skill bundle manifest, by skill ID.
 type GetSkillBundleManifestRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	SkillId       string                 `protobuf:"bytes,1,opt,name=skill_id,json=skillId,proto3" json:"skill_id,omitempty"`
@@ -1489,13 +1498,16 @@ func (x *GetSkillBundleManifestRequest) GetSkillId() string {
 	return ""
 }
 
+// Manifest of one skill bundle: its files with their digests and sizes.
 type SkillBundleManifest struct {
-	state          protoimpl.MessageState `protogen:"open.v1"`
-	SkillId        string                 `protobuf:"bytes,1,opt,name=skill_id,json=skillId,proto3" json:"skill_id,omitempty"`
-	ManifestSha256 string                 `protobuf:"bytes,2,opt,name=manifest_sha256,json=manifestSha256,proto3" json:"manifest_sha256,omitempty"`
-	Files          []*SkillBundleFile     `protobuf:"bytes,3,rep,name=files,proto3" json:"files,omitempty"`
-	unknownFields  protoimpl.UnknownFields
-	sizeCache      protoimpl.SizeCache
+	state   protoimpl.MessageState `protogen:"open.v1"`
+	SkillId string                 `protobuf:"bytes,1,opt,name=skill_id,json=skillId,proto3" json:"skill_id,omitempty"`
+	// SHA-256 digest of this manifest.
+	ManifestSha256 string `protobuf:"bytes,2,opt,name=manifest_sha256,json=manifestSha256,proto3" json:"manifest_sha256,omitempty"`
+	// Every file in the bundle, with its digest and size.
+	Files         []*SkillBundleFile `protobuf:"bytes,3,rep,name=files,proto3" json:"files,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *SkillBundleManifest) Reset() {
@@ -1549,13 +1561,17 @@ func (x *SkillBundleManifest) GetFiles() []*SkillBundleFile {
 	return nil
 }
 
+// One file of a skill bundle.
 type SkillBundleFile struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Relative path inside the bundle, always with forward slashes.
-	Path       string `protobuf:"bytes,1,opt,name=path,proto3" json:"path,omitempty"`
-	Sha256     string `protobuf:"bytes,2,opt,name=sha256,proto3" json:"sha256,omitempty"`
-	SizeBytes  int64  `protobuf:"varint,3,opt,name=size_bytes,json=sizeBytes,proto3" json:"size_bytes,omitempty"`
-	Executable bool   `protobuf:"varint,4,opt,name=executable,proto3" json:"executable,omitempty"`
+	Path string `protobuf:"bytes,1,opt,name=path,proto3" json:"path,omitempty"`
+	// SHA-256 digest of the file contents.
+	Sha256 string `protobuf:"bytes,2,opt,name=sha256,proto3" json:"sha256,omitempty"`
+	// File size, in bytes.
+	SizeBytes int64 `protobuf:"varint,3,opt,name=size_bytes,json=sizeBytes,proto3" json:"size_bytes,omitempty"`
+	// True when the file is executable.
+	Executable bool `protobuf:"varint,4,opt,name=executable,proto3" json:"executable,omitempty"`
 	// True when the file is not UTF-8 text, so a reader returns metadata only.
 	Binary        bool `protobuf:"varint,5,opt,name=binary,proto3" json:"binary,omitempty"`
 	unknownFields protoimpl.UnknownFields
@@ -1627,10 +1643,12 @@ func (x *SkillBundleFile) GetBinary() bool {
 	return false
 }
 
+// Request to read one blob of a skill bundle, by its digest.
 type GetSkillBlobRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	SkillId       string                 `protobuf:"bytes,1,opt,name=skill_id,json=skillId,proto3" json:"skill_id,omitempty"`
-	Sha256        string                 `protobuf:"bytes,2,opt,name=sha256,proto3" json:"sha256,omitempty"`
+	state   protoimpl.MessageState `protogen:"open.v1"`
+	SkillId string                 `protobuf:"bytes,1,opt,name=skill_id,json=skillId,proto3" json:"skill_id,omitempty"`
+	// SHA-256 digest of the blob to read.
+	Sha256        string `protobuf:"bytes,2,opt,name=sha256,proto3" json:"sha256,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1679,9 +1697,11 @@ func (x *GetSkillBlobRequest) GetSha256() string {
 	return ""
 }
 
+// The content of one skill bundle blob.
 type GetSkillBlobResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Content       []byte                 `protobuf:"bytes,1,opt,name=content,proto3" json:"content,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Raw bytes of the blob.
+	Content       []byte `protobuf:"bytes,1,opt,name=content,proto3" json:"content,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }

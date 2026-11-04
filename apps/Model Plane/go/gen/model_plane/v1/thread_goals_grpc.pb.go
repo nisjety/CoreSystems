@@ -39,16 +39,28 @@ const (
 // `thread_goal_space_unsupported`) and a thread holding a waived run.
 type ThreadGoalServiceClient interface {
 	// Set a goal on a thread (one open goal per thread).
+	// Response type is shared by several goal RPCs; renaming it would break generated code.
+	// buf:lint:ignore RPC_REQUEST_RESPONSE_UNIQUE
+	// buf:lint:ignore RPC_RESPONSE_STANDARD_NAME
 	SetThreadGoal(ctx context.Context, in *SetThreadGoalRequest, opts ...grpc.CallOption) (*ThreadGoalResponse, error)
 	// Read the thread's latest goal that was not cleared.
+	// Response type is shared by several goal RPCs; renaming it would break generated code.
+	// buf:lint:ignore RPC_REQUEST_RESPONSE_UNIQUE
+	// buf:lint:ignore RPC_RESPONSE_STANDARD_NAME
 	GetThreadGoal(ctx context.Context, in *GetThreadGoalRequest, opts ...grpc.CallOption) (*ThreadGoalResponse, error)
 	// Change an open goal under a compare-and-set on its revision.
+	// Response type is shared by several goal RPCs; renaming it would break generated code.
+	// buf:lint:ignore RPC_REQUEST_RESPONSE_UNIQUE
+	// buf:lint:ignore RPC_RESPONSE_STANDARD_NAME
 	UpdateThreadGoal(ctx context.Context, in *UpdateThreadGoalRequest, opts ...grpc.CallOption) (*ThreadGoalResponse, error)
 	// EP-7 S2. Admit one continuation turn (one in flight per goal).
 	ClaimGoalTurn(ctx context.Context, in *ClaimGoalTurnRequest, opts ...grpc.CallOption) (*ClaimGoalTurnResponse, error)
 	// EP-7 S2. Name the run a claimed turn started.
 	BindGoalTurnRun(ctx context.Context, in *BindGoalTurnRunRequest, opts ...grpc.CallOption) (*BindGoalTurnRunResponse, error)
 	// EP-7 S2. Settle a turn from its run's usage and apply the stop rules.
+	// Response type is shared by several goal RPCs; renaming it would break generated code.
+	// buf:lint:ignore RPC_REQUEST_RESPONSE_UNIQUE
+	// buf:lint:ignore RPC_RESPONSE_STANDARD_NAME
 	SettleGoalTurn(ctx context.Context, in *SettleGoalTurnRequest, opts ...grpc.CallOption) (*ThreadGoalResponse, error)
 }
 
@@ -132,16 +144,28 @@ func (c *threadGoalServiceClient) SettleGoalTurn(ctx context.Context, in *Settle
 // `thread_goal_space_unsupported`) and a thread holding a waived run.
 type ThreadGoalServiceServer interface {
 	// Set a goal on a thread (one open goal per thread).
+	// Response type is shared by several goal RPCs; renaming it would break generated code.
+	// buf:lint:ignore RPC_REQUEST_RESPONSE_UNIQUE
+	// buf:lint:ignore RPC_RESPONSE_STANDARD_NAME
 	SetThreadGoal(context.Context, *SetThreadGoalRequest) (*ThreadGoalResponse, error)
 	// Read the thread's latest goal that was not cleared.
+	// Response type is shared by several goal RPCs; renaming it would break generated code.
+	// buf:lint:ignore RPC_REQUEST_RESPONSE_UNIQUE
+	// buf:lint:ignore RPC_RESPONSE_STANDARD_NAME
 	GetThreadGoal(context.Context, *GetThreadGoalRequest) (*ThreadGoalResponse, error)
 	// Change an open goal under a compare-and-set on its revision.
+	// Response type is shared by several goal RPCs; renaming it would break generated code.
+	// buf:lint:ignore RPC_REQUEST_RESPONSE_UNIQUE
+	// buf:lint:ignore RPC_RESPONSE_STANDARD_NAME
 	UpdateThreadGoal(context.Context, *UpdateThreadGoalRequest) (*ThreadGoalResponse, error)
 	// EP-7 S2. Admit one continuation turn (one in flight per goal).
 	ClaimGoalTurn(context.Context, *ClaimGoalTurnRequest) (*ClaimGoalTurnResponse, error)
 	// EP-7 S2. Name the run a claimed turn started.
 	BindGoalTurnRun(context.Context, *BindGoalTurnRunRequest) (*BindGoalTurnRunResponse, error)
 	// EP-7 S2. Settle a turn from its run's usage and apply the stop rules.
+	// Response type is shared by several goal RPCs; renaming it would break generated code.
+	// buf:lint:ignore RPC_REQUEST_RESPONSE_UNIQUE
+	// buf:lint:ignore RPC_RESPONSE_STANDARD_NAME
 	SettleGoalTurn(context.Context, *SettleGoalTurnRequest) (*ThreadGoalResponse, error)
 	mustEmbedUnimplementedThreadGoalServiceServer()
 }

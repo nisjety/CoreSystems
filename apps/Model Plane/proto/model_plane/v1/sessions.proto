@@ -251,6 +251,8 @@ service SessionRetentionService {
 // is, so that SessionCore and every mock of it stay source-compatible. The
 // grant is WRITTEN by SessionCore.SetRunMode (with `approved_plan_id` set), in
 // the same transaction as the run update.
+// Service name is used by generated code and deployed callers; renaming it would break them.
+// buf:lint:ignore SERVICE_SUFFIX
 service ThreadAutonomy {
   // The live grant of one thread: the rung, the reason it was granted, the plan
   // it was approved with and when it lapses. A thread with no grant, or one
@@ -273,6 +275,8 @@ service ThreadAutonomy {
 // MessageSearch: full-text search over the durable conversation record. A
 // separate service, as ThreadAutonomy and SessionRetentionService are, so that
 // SessionCore and every mock of it stay source-compatible. Read-only.
+// Service name is used by generated code and deployed callers; renaming it would break them.
+// buf:lint:ignore SERVICE_SUFFIX
 service MessageSearch {
   // Search the messages of threads the caller may list, with the same owner and
   // Space-audience rules as ListThreads. Refused with unavailable
@@ -433,12 +437,16 @@ message MentionInput {
 // refused, expected, running, awaiting_approval, completed, failed or cancelled; empty for a
 // person.
 message MentionRef {
+  // The subject that was mentioned.
   string subject_id = 1;
+  // What kind of subject was mentioned.
   string kind = 2;
+  // Wake state of the mention, derived at read; empty for a person.
   string wake_state = 3;
   // The refusal code when wake_state is refused.
   string reason = 4;
   string source = 5;
+  // Wake order among the agents of this post (0-based). Persons carry 0.
   uint32 ordinal = 6;
 }
 
@@ -636,7 +644,9 @@ message StartScheduledRunRequest {
   // without one. contract_digest and contract_expires_at are the values Control
   // signed; Session Core re-checks them on the direct hop before binding.
   string contract_json = 14;
+  // Digest of the contract, as Control signed it.
   string contract_digest = 15;
+  // Expiry of the contract, as Control signed it.
   string contract_expires_at = 16;
 }
 
@@ -1108,11 +1118,14 @@ message UpsertAgentSkillRequest {
   // "accepted").
   string scope = 10;
   string owner_user_id = 11;
+  // Review state of the skill. Ignored for a human write, which is accepted.
   string review_state = 12;
   // The run and thread the proposal was distilled from, and the reviewer's
   // reason for proposing it (at most 300 characters). Provenance only.
   string source_run_id = 13;
+  // The thread the proposal was distilled from.
   string source_thread_id = 14;
+  // The reviewer's reason for proposing it.
   string proposal_reason = 15;
 }
 
@@ -1171,8 +1184,11 @@ message AgentSkill {
   // decision), "accepted" or "rejected". Only an accepted skill is ever
   // injected or matched.
   string review_state = 13;
+  // The run the skill was distilled from.
   string source_run_id = 14;
+  // The thread the skill was distilled from.
   string source_thread_id = 15;
+  // The reviewer's reason for proposing the skill.
   string proposal_reason = 16;
   // RFC 3339, UTC.
   string updated_at = 17;
@@ -1325,24 +1341,33 @@ message ListConversationResponse {
 // A typed room entry carried by a human post (WS15). `kind` is a closed word; a reader that
 // does not know a kind shows `{kind, version}` neutrally. Today's only kind is "link_previews".
 message MessageEntry {
+  // Closed word naming the entry, such as link_previews.
   string kind = 1;
+  // Version of the entry kind.
   uint32 version = 2;
+  // The link previews captured when the post was sent.
   repeated LinkPreview link_previews = 3;
 }
 
 // One captured link preview, text only (no image), snapshotted when the post was sent.
 message LinkPreview {
+  // The link URL.
   string url = 1;
+  // The final URL of the link.
   string final_url = 2;
+  // The host of the link.
   string host = 3;
   string title = 4;
   string description = 5;
+  // The name of the site the link is on.
   string site_name = 6;
+  // When the preview was fetched.
   google.protobuf.Timestamp fetched_at = 7;
 }
 
 // --- ReviseMessage / ResolveMessageTarget (WS12-S4) ---
 
+// Request to edit or delete one message in a thread.
 message ReviseMessageRequest {
   // Required. The owning org; must equal the caller's org and the thread's org.
   string org_id = 1;
@@ -1377,6 +1402,7 @@ message ReviseMessageRequest {
   string idempotency_key = 18;
 }
 
+// The recorded revision of one message: its number, state and time.
 message ReviseMessageResponse {
   // The message that was revised.
   string message_id = 1;
@@ -1384,6 +1410,7 @@ message ReviseMessageResponse {
   uint32 revision_no = 2;
   // "edited" or "deleted".
   string revision_state = 3;
+  // When the revision was recorded.
   google.protobuf.Timestamp revised_at = 4;
   // True when the idempotency key had already recorded this exact revision.
   bool deduplicated = 5;
@@ -1391,6 +1418,7 @@ message ReviseMessageResponse {
   string actor_class = 6;
 }
 
+// Request to look up a message's role and revision state, with a Space read decision.
 message ResolveMessageTargetRequest {
   // Required. The owning org.
   string org_id = 1;
@@ -1405,6 +1433,7 @@ message ResolveMessageTargetRequest {
   string space_read_decision_token = 6;
 }
 
+// The role of a message, and whether and how it was revised.
 message ResolveMessageTargetResponse {
   // "user" | "assistant" | "system" | "tool".
   string role = 1;
@@ -1811,13 +1840,19 @@ message RecordScheduledRunResultRequest {
   string idempotency_key = 4;
   string receipt_id = 5;
   string status = 6;
+  // The output of the step.
   string output = 7;
   string error_code = 8;
   bool unknown_outcome = 9;
+  // Number of rounds the step executed.
   uint32 rounds_executed = 10;
+  // Number of effects withheld during the step.
   uint32 withheld_effects = 11;
+  // Number of tool calls made by the step.
   uint32 tool_calls = 12;
+  // Input tokens used by the step.
   uint32 input_tokens = 13;
+  // Output tokens used by the step.
   uint32 output_tokens = 14;
 }
 
@@ -1826,6 +1861,7 @@ message RecordScheduledRunResultRequest {
 message RecordScheduledRunResultResponse {
   string receipt_id = 1;
   string status = 2;
+  // Id of the appended answer; empty when no answer was appended.
   string message_id = 3;
 }
 
@@ -1862,6 +1898,7 @@ message WaivedRunCount {
 
 // --- ThreadAutonomy.GetThreadGrant (build plan WS04 S4) ---
 
+// Request to read the live grant of one thread.
 message GetThreadGrantRequest {
   string thread_id = 1;
   // Server-authoritative org scope, forwarded from the gateway's authenticated
@@ -1869,6 +1906,7 @@ message GetThreadGrantRequest {
   string org_id = 2;
 }
 
+// The live grant of one thread: its rung, reason, plan and expiry.
 message GetThreadGrantResponse {
   // The rung the thread's approved plan granted. UNSPECIFIED when the thread
   // holds no live grant (none made, or it has lapsed).
@@ -1885,6 +1923,7 @@ message GetThreadGrantResponse {
 
 // --- ThreadAutonomy.BindGrantToRun (build plan WS14 S2) ---
 
+// Request to bind a thread's live grant to the run that executes its plan.
 message BindGrantToRunRequest {
   string run_id = 1;
   string thread_id = 2;
@@ -1895,6 +1934,7 @@ message BindGrantToRunRequest {
   string approved_plan_id = 4;
 }
 
+// The grant copied onto the run: its rung, reason and plan.
 message BindGrantToRunResponse {
   // The rung the run was bound with, copied from the thread's grant.
   AutonomyRung granted_rung = 1;
@@ -2059,6 +2099,8 @@ message ListToolActionsResponse {
 // that holds a zero-retention or waived run.
 enum SearchPurpose {
   // The person at the keyboard. The zero value, so a caller that sets nothing searches as UI.
+  // Zero value is the UI purpose, not an unset marker; renaming it would break generated code.
+  // buf:lint:ignore ENUM_ZERO_VALUE_SUFFIX
   SEARCH_PURPOSE_UI = 0;
   // The read-only recall tool. Excludes zero-retention and waived threads.
   SEARCH_PURPOSE_RECALL = 1;
@@ -2132,8 +2174,11 @@ message SearchMessagesResponse {
 // The owner's decision on a proposal. Values are prefixed because proto enum
 // values share the package scope.
 enum SkillDecision {
+  // Unset decision, the zero value.
   SKILL_DECISION_UNSPECIFIED = 0;
+  // Accept the proposal.
   SKILL_DECISION_ACCEPT = 1;
+  // Reject the proposal.
   SKILL_DECISION_REJECT = 2;
 }
 
@@ -2143,6 +2188,7 @@ message DecideSkillProposalRequest {
   string org_id = 1;
   // The proposal, by id.
   string skill_id = 2;
+  // The owner's decision on the proposal.
   SkillDecision decision = 3;
 }
 
@@ -2169,6 +2215,7 @@ message UndoLearningEntryResponse {
   // What the undo did to the skill: "restored" (its before-snapshot is back) or
   // "deleted" (the entry had created the skill).
   string action = 1;
+  // The skill the undo acted on.
   string skill_id = 2;
   // The skill's revision after the undo.
   int64 revision = 3;
@@ -2198,19 +2245,24 @@ message LearningLedgerEntry {
   // Skill: created, proposed, updated, accepted, rejected, enabled, disabled,
   // edited, deleted, restored or promoted. Memory: learned.
   string action = 3;
+  // The skill the entry is about.
   string skill_id = 4;
+  // The skill's name.
   string skill_name = 5;
   // The skill's revision number; 0 for a memory.
   int64 revision = 6;
   // Who made the change: user, service, system or unattributed.
   string actor_kind = 7;
+  // Id of the actor who made the change.
   string actor_id = 8;
   string run_id = 9;
   string thread_id = 10;
+  // The reason recorded for the change.
   string reason = 11;
   // The skill snapshots before and after the change, as JSON; empty on the side
   // that does not exist. For a memory, `after_json` is {"content": ...}.
   string before_json = 12;
+  // Skill snapshot after the change, as JSON; empty when it does not exist after it.
   string after_json = 13;
   // Whether the entry has been undone by a later entry.
   bool undone = 14;

@@ -40,7 +40,11 @@ const (
 // call. A ZDR caller gets ZDR for every Space and no query runs. Counts, ids, timestamps and
 // closed words cross this surface; message text never does. Titles are returned only for the
 // thread ids the caller asked for and only when the thread passes the ceiling.
+//
+// Service name kept; generated code and deployed services depend on it.
+// buf:lint:ignore SERVICE_SUFFIX
 type SpaceAttentionClient interface {
+	// Attention counts for up to 60 Spaces: unread threads, working runs, approvals, headlines.
 	GetSpaceAttention(ctx context.Context, in *GetSpaceAttentionRequest, opts ...grpc.CallOption) (*GetSpaceAttentionResponse, error)
 }
 
@@ -80,7 +84,11 @@ func (c *spaceAttentionClient) GetSpaceAttention(ctx context.Context, in *GetSpa
 // call. A ZDR caller gets ZDR for every Space and no query runs. Counts, ids, timestamps and
 // closed words cross this surface; message text never does. Titles are returned only for the
 // thread ids the caller asked for and only when the thread passes the ceiling.
+//
+// Service name kept; generated code and deployed services depend on it.
+// buf:lint:ignore SERVICE_SUFFIX
 type SpaceAttentionServer interface {
+	// Attention counts for up to 60 Spaces: unread threads, working runs, approvals, headlines.
 	GetSpaceAttention(context.Context, *GetSpaceAttentionRequest) (*GetSpaceAttentionResponse, error)
 	mustEmbedUnimplementedSpaceAttentionServer()
 }

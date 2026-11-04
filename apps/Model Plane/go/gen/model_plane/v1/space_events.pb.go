@@ -21,18 +21,25 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
+// Request to open the event tail for one Space.
 type StreamSpaceEventsRequest struct {
-	state   protoimpl.MessageState `protogen:"open.v1"`
-	OrgId   string                 `protobuf:"bytes,1,opt,name=org_id,json=orgId,proto3" json:"org_id,omitempty"`
-	UserId  string                 `protobuf:"bytes,2,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
-	SpaceId string                 `protobuf:"bytes,3,opt,name=space_id,json=spaceId,proto3" json:"space_id,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Id of the org the stream runs in.
+	OrgId string `protobuf:"bytes,1,opt,name=org_id,json=orgId,proto3" json:"org_id,omitempty"`
+	// Id of the calling user; must equal the caller's principal id.
+	UserId string `protobuf:"bytes,2,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
+	// Id of the Space to tail.
+	SpaceId string `protobuf:"bytes,3,opt,name=space_id,json=spaceId,proto3" json:"space_id,omitempty"`
 	// Control decision, minted for service_audience "model-plane-space-stream".
-	DecisionRef   string `protobuf:"bytes,4,opt,name=decision_ref,json=decisionRef,proto3" json:"decision_ref,omitempty"`
+	DecisionRef string `protobuf:"bytes,4,opt,name=decision_ref,json=decisionRef,proto3" json:"decision_ref,omitempty"`
+	// Token for the decision named by decision_ref.
 	DecisionToken string `protobuf:"bytes,5,opt,name=decision_token,json=decisionToken,proto3" json:"decision_token,omitempty"`
 	// false: live tail from the current head. true: continue after `after_seq` of
 	// `generation`; a cursor that cannot be honoured answers `cursor_too_old`.
-	Resume        bool  `protobuf:"varint,6,opt,name=resume,proto3" json:"resume,omitempty"`
-	Generation    int64 `protobuf:"varint,7,opt,name=generation,proto3" json:"generation,omitempty"`
+	Resume bool `protobuf:"varint,6,opt,name=resume,proto3" json:"resume,omitempty"`
+	// Log generation that after_seq refers to.
+	Generation int64 `protobuf:"varint,7,opt,name=generation,proto3" json:"generation,omitempty"`
+	// Last seq already seen; a resume continues after it.
 	AfterSeq      int64 `protobuf:"varint,8,opt,name=after_seq,json=afterSeq,proto3" json:"after_seq,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -124,8 +131,11 @@ func (x *StreamSpaceEventsRequest) GetAfterSeq() int64 {
 	return 0
 }
 
+// One frame of the Space event stream.
 type SpaceEventFrame struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
+	// Which kind of frame this is.
+	//
 	// Types that are valid to be assigned to Frame:
 	//
 	//	*SpaceEventFrame_Connected
@@ -225,22 +235,27 @@ type isSpaceEventFrame_Frame interface {
 }
 
 type SpaceEventFrame_Connected struct {
+	// Sent first when the stream opens.
 	Connected *SpaceStreamConnected `protobuf:"bytes,1,opt,name=connected,proto3,oneof"`
 }
 
 type SpaceEventFrame_Event struct {
+	// One event row from the Space log.
 	Event *SpaceEventRecord `protobuf:"bytes,2,opt,name=event,proto3,oneof"`
 }
 
 type SpaceEventFrame_Heartbeat struct {
+	// Keep-alive carrying the current head, generation and cursor.
 	Heartbeat *SpaceStreamHeartbeat `protobuf:"bytes,3,opt,name=heartbeat,proto3,oneof"`
 }
 
 type SpaceEventFrame_CursorTooOld struct {
+	// The cursor cannot be honoured; the stream ends after this frame.
 	CursorTooOld *SpaceStreamCursorTooOld `protobuf:"bytes,4,opt,name=cursor_too_old,json=cursorTooOld,proto3,oneof"`
 }
 
 type SpaceEventFrame_Closing struct {
+	// Notice that the stream is ending; the frame says whether to reconnect.
 	Closing *SpaceStreamClosing `protobuf:"bytes,5,opt,name=closing,proto3,oneof"`
 }
 
@@ -254,13 +269,19 @@ func (*SpaceEventFrame_CursorTooOld) isSpaceEventFrame_Frame() {}
 
 func (*SpaceEventFrame_Closing) isSpaceEventFrame_Frame() {}
 
+// Details sent when the stream opens.
 type SpaceStreamConnected struct {
-	state            protoimpl.MessageState `protogen:"open.v1"`
-	Generation       int64                  `protobuf:"varint,1,opt,name=generation,proto3" json:"generation,omitempty"`
-	Head             int64                  `protobuf:"varint,2,opt,name=head,proto3" json:"head,omitempty"`
-	Resumed          bool                   `protobuf:"varint,3,opt,name=resumed,proto3" json:"resumed,omitempty"`
-	LeaseSeconds     int32                  `protobuf:"varint,4,opt,name=lease_seconds,json=leaseSeconds,proto3" json:"lease_seconds,omitempty"`
-	HeartbeatSeconds int32                  `protobuf:"varint,5,opt,name=heartbeat_seconds,json=heartbeatSeconds,proto3" json:"heartbeat_seconds,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Log generation the stream reads.
+	Generation int64 `protobuf:"varint,1,opt,name=generation,proto3" json:"generation,omitempty"`
+	// Newest seq in the log.
+	Head int64 `protobuf:"varint,2,opt,name=head,proto3" json:"head,omitempty"`
+	// True when the stream resumed from the caller's cursor.
+	Resumed bool `protobuf:"varint,3,opt,name=resumed,proto3" json:"resumed,omitempty"`
+	// Length of the stream lease, in seconds.
+	LeaseSeconds int32 `protobuf:"varint,4,opt,name=lease_seconds,json=leaseSeconds,proto3" json:"lease_seconds,omitempty"`
+	// Interval between heartbeat frames, in seconds.
+	HeartbeatSeconds int32 `protobuf:"varint,5,opt,name=heartbeat_seconds,json=heartbeatSeconds,proto3" json:"heartbeat_seconds,omitempty"`
 	// "live" or "poll_only" (a ZDR caller or decision: no rows follow).
 	Mode string `protobuf:"bytes,6,opt,name=mode,proto3" json:"mode,omitempty"`
 	// Highest seq the stream has fully processed; the stream starts after it.
@@ -348,10 +369,13 @@ func (x *SpaceStreamConnected) GetCursor() int64 {
 	return 0
 }
 
+// Keep-alive frame on the event stream.
 type SpaceStreamHeartbeat struct {
-	state      protoimpl.MessageState `protogen:"open.v1"`
-	Head       int64                  `protobuf:"varint,1,opt,name=head,proto3" json:"head,omitempty"`
-	Generation int64                  `protobuf:"varint,2,opt,name=generation,proto3" json:"generation,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Newest seq in the log.
+	Head int64 `protobuf:"varint,1,opt,name=head,proto3" json:"head,omitempty"`
+	// Log generation the stream reads.
+	Generation int64 `protobuf:"varint,2,opt,name=generation,proto3" json:"generation,omitempty"`
 	// Highest seq fully processed. Not `head` while rows are still queued.
 	Cursor        int64 `protobuf:"varint,3,opt,name=cursor,proto3" json:"cursor,omitempty"`
 	unknownFields protoimpl.UnknownFields
@@ -409,12 +433,15 @@ func (x *SpaceStreamHeartbeat) GetCursor() int64 {
 	return 0
 }
 
+// Notice that the caller's cursor cannot be honoured.
 type SpaceStreamCursorTooOld struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// "retention", "generation_changed" or "ahead_of_head".
-	Reason        string `protobuf:"bytes,1,opt,name=reason,proto3" json:"reason,omitempty"`
-	Head          int64  `protobuf:"varint,2,opt,name=head,proto3" json:"head,omitempty"`
-	Generation    int64  `protobuf:"varint,3,opt,name=generation,proto3" json:"generation,omitempty"`
+	Reason string `protobuf:"bytes,1,opt,name=reason,proto3" json:"reason,omitempty"`
+	// Newest seq in the log.
+	Head int64 `protobuf:"varint,2,opt,name=head,proto3" json:"head,omitempty"`
+	// Current log generation.
+	Generation    int64 `protobuf:"varint,3,opt,name=generation,proto3" json:"generation,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -470,14 +497,19 @@ func (x *SpaceStreamCursorTooOld) GetGeneration() int64 {
 	return 0
 }
 
+// Notice that the stream is ending.
 type SpaceStreamClosing struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// lease_expired, reauthorize, slow_consumer, membership_revoked, zdr_poll_only.
-	Code          string `protobuf:"bytes,1,opt,name=code,proto3" json:"code,omitempty"`
-	Reconnect     bool   `protobuf:"varint,2,opt,name=reconnect,proto3" json:"reconnect,omitempty"`
-	RetryAfterMs  int64  `protobuf:"varint,3,opt,name=retry_after_ms,json=retryAfterMs,proto3" json:"retry_after_ms,omitempty"`
-	Generation    int64  `protobuf:"varint,4,opt,name=generation,proto3" json:"generation,omitempty"`
-	Cursor        int64  `protobuf:"varint,5,opt,name=cursor,proto3" json:"cursor,omitempty"`
+	Code string `protobuf:"bytes,1,opt,name=code,proto3" json:"code,omitempty"`
+	// True when the client should open a new stream.
+	Reconnect bool `protobuf:"varint,2,opt,name=reconnect,proto3" json:"reconnect,omitempty"`
+	// Milliseconds to wait before reconnecting.
+	RetryAfterMs int64 `protobuf:"varint,3,opt,name=retry_after_ms,json=retryAfterMs,proto3" json:"retry_after_ms,omitempty"`
+	// Log generation the stream was reading.
+	Generation int64 `protobuf:"varint,4,opt,name=generation,proto3" json:"generation,omitempty"`
+	// Highest seq fully processed before the stream closed.
+	Cursor        int64 `protobuf:"varint,5,opt,name=cursor,proto3" json:"cursor,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -552,28 +584,41 @@ func (x *SpaceStreamClosing) GetCursor() int64 {
 // stubs `hidden` (a row this subscriber may not see) and `redacted` (an erased row). A stub
 // carries only seq, generation, kind and at, so the client's seq stays contiguous.
 type SpaceEventRecord struct {
-	state      protoimpl.MessageState `protogen:"open.v1"`
-	Seq        int64                  `protobuf:"varint,1,opt,name=seq,proto3" json:"seq,omitempty"`
-	Generation int64                  `protobuf:"varint,2,opt,name=generation,proto3" json:"generation,omitempty"`
-	Kind       string                 `protobuf:"bytes,3,opt,name=kind,proto3" json:"kind,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Sequence number of this row in the log.
+	Seq int64 `protobuf:"varint,1,opt,name=seq,proto3" json:"seq,omitempty"`
+	// Log generation the row belongs to.
+	Generation int64 `protobuf:"varint,2,opt,name=generation,proto3" json:"generation,omitempty"`
+	// Row kind; one of the kinds listed above.
+	Kind string `protobuf:"bytes,3,opt,name=kind,proto3" json:"kind,omitempty"`
 	// RFC 3339.
 	At string `protobuf:"bytes,4,opt,name=at,proto3" json:"at,omitempty"`
 	// user, agent or system.
-	ActorType       string `protobuf:"bytes,5,opt,name=actor_type,json=actorType,proto3" json:"actor_type,omitempty"`
-	ActorId         string `protobuf:"bytes,6,opt,name=actor_id,json=actorId,proto3" json:"actor_id,omitempty"`
-	ThreadId        string `protobuf:"bytes,7,opt,name=thread_id,json=threadId,proto3" json:"thread_id,omitempty"`
-	RunId           string `protobuf:"bytes,8,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
-	MessageId       string `protobuf:"bytes,9,opt,name=message_id,json=messageId,proto3" json:"message_id,omitempty"`
-	MessageSequence int64  `protobuf:"varint,10,opt,name=message_sequence,json=messageSequence,proto3" json:"message_sequence,omitempty"`
-	Role            string `protobuf:"bytes,11,opt,name=role,proto3" json:"role,omitempty"`
-	AgentId         string `protobuf:"bytes,12,opt,name=agent_id,json=agentId,proto3" json:"agent_id,omitempty"`
+	ActorType string `protobuf:"bytes,5,opt,name=actor_type,json=actorType,proto3" json:"actor_type,omitempty"`
+	// Id of the actor, of the type given by actor_type.
+	ActorId string `protobuf:"bytes,6,opt,name=actor_id,json=actorId,proto3" json:"actor_id,omitempty"`
+	// Thread the row is about.
+	ThreadId string `protobuf:"bytes,7,opt,name=thread_id,json=threadId,proto3" json:"thread_id,omitempty"`
+	// Run the row is about.
+	RunId string `protobuf:"bytes,8,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
+	// Message the row is about.
+	MessageId string `protobuf:"bytes,9,opt,name=message_id,json=messageId,proto3" json:"message_id,omitempty"`
+	// Sequence number of the message.
+	MessageSequence int64 `protobuf:"varint,10,opt,name=message_sequence,json=messageSequence,proto3" json:"message_sequence,omitempty"`
+	// Role of the message author, such as user or assistant.
+	Role string `protobuf:"bytes,11,opt,name=role,proto3" json:"role,omitempty"`
+	// Id of the agent involved.
+	AgentId string `protobuf:"bytes,12,opt,name=agent_id,json=agentId,proto3" json:"agent_id,omitempty"`
 	// Closed run-state word (space::events::run_state).
-	State     string `protobuf:"bytes,13,opt,name=state,proto3" json:"state,omitempty"`
+	State string `protobuf:"bytes,13,opt,name=state,proto3" json:"state,omitempty"`
+	// Run state before this change.
 	PrevState string `protobuf:"bytes,14,opt,name=prev_state,json=prevState,proto3" json:"prev_state,omitempty"`
-	Origin    string `protobuf:"bytes,15,opt,name=origin,proto3" json:"origin,omitempty"`
+	// Where the change came from.
+	Origin string `protobuf:"bytes,15,opt,name=origin,proto3" json:"origin,omitempty"`
 	// Closed words: title, preview, pinned, persona.
-	Fields        []string `protobuf:"bytes,16,rep,name=fields,proto3" json:"fields,omitempty"`
-	ParentRunId   string   `protobuf:"bytes,17,opt,name=parent_run_id,json=parentRunId,proto3" json:"parent_run_id,omitempty"`
+	Fields []string `protobuf:"bytes,16,rep,name=fields,proto3" json:"fields,omitempty"`
+	// Id of the parent run, if this run has one.
+	ParentRunId   string `protobuf:"bytes,17,opt,name=parent_run_id,json=parentRunId,proto3" json:"parent_run_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }

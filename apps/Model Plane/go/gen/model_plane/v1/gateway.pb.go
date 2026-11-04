@@ -1454,10 +1454,12 @@ func (x *ExtractStructuredResponse) GetResults() []*ExtractStructuredResult {
 // One verbatim passage found on the page. Offsets are Unicode scalar (char)
 // offsets into the text the model was shown, end-exclusive.
 type ExtractStructuredHighlight struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Text          string                 `protobuf:"bytes,1,opt,name=text,proto3" json:"text,omitempty"`
-	Start         uint64                 `protobuf:"varint,2,opt,name=start,proto3" json:"start,omitempty"`
-	End           uint64                 `protobuf:"varint,3,opt,name=end,proto3" json:"end,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	Text  string                 `protobuf:"bytes,1,opt,name=text,proto3" json:"text,omitempty"`
+	// Character offset where the passage starts, in the text the model was shown.
+	Start uint64 `protobuf:"varint,2,opt,name=start,proto3" json:"start,omitempty"`
+	// Character offset just past the passage's last character (end-exclusive).
+	End           uint64 `protobuf:"varint,3,opt,name=end,proto3" json:"end,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1518,25 +1520,30 @@ func (x *ExtractStructuredHighlight) GetEnd() uint64 {
 type ExtractStructuredResult struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// The page as requested, and after redirects.
-	Url               string `protobuf:"bytes,1,opt,name=url,proto3" json:"url,omitempty"`
-	FinalUrl          string `protobuf:"bytes,2,opt,name=final_url,json=finalUrl,proto3" json:"final_url,omitempty"`
-	Title             string `protobuf:"bytes,3,opt,name=title,proto3" json:"title,omitempty"`
+	Url string `protobuf:"bytes,1,opt,name=url,proto3" json:"url,omitempty"`
+	// URL the page was served from, after redirects.
+	FinalUrl string `protobuf:"bytes,2,opt,name=final_url,json=finalUrl,proto3" json:"final_url,omitempty"`
+	Title    string `protobuf:"bytes,3,opt,name=title,proto3" json:"title,omitempty"`
+	// Fingerprint of the page source that was extracted.
 	SourceFingerprint string `protobuf:"bytes,4,opt,name=source_fingerprint,json=sourceFingerprint,proto3" json:"source_fingerprint,omitempty"`
 	// mode "json": the validated JSON object. Empty when the model could not
 	// produce one that conforms to the schema (see `error_message`).
 	ExtractedJson string `protobuf:"bytes,5,opt,name=extracted_json,json=extractedJson,proto3" json:"extracted_json,omitempty"`
 	// mode "question": the answer ("" when `found` is false).
 	Answer string `protobuf:"bytes,6,opt,name=answer,proto3" json:"answer,omitempty"`
-	Found  bool   `protobuf:"varint,7,opt,name=found,proto3" json:"found,omitempty"`
+	// Question mode: true when the answer was found on the page.
+	Found bool `protobuf:"varint,7,opt,name=found,proto3" json:"found,omitempty"`
 	// True when the supporting quote was found verbatim on the page.
 	Grounded bool `protobuf:"varint,8,opt,name=grounded,proto3" json:"grounded,omitempty"`
 	// mode "highlights": the passages that are verbatim on the page.
 	Highlights []*ExtractStructuredHighlight `protobuf:"bytes,9,rep,name=highlights,proto3" json:"highlights,omitempty"`
 	// Quotes the model gave that are not on the page (dropped).
 	HighlightsDropped uint32 `protobuf:"varint,10,opt,name=highlights_dropped,json=highlightsDropped,proto3" json:"highlights_dropped,omitempty"`
-	ModelUsed         string `protobuf:"bytes,11,opt,name=model_used,json=modelUsed,proto3" json:"model_used,omitempty"`
-	InputTokens       int32  `protobuf:"varint,12,opt,name=input_tokens,json=inputTokens,proto3" json:"input_tokens,omitempty"`
-	OutputTokens      int32  `protobuf:"varint,13,opt,name=output_tokens,json=outputTokens,proto3" json:"output_tokens,omitempty"`
+	// Model that served this page's extraction.
+	ModelUsed string `protobuf:"bytes,11,opt,name=model_used,json=modelUsed,proto3" json:"model_used,omitempty"`
+	// Input tokens used for this page.
+	InputTokens  int32 `protobuf:"varint,12,opt,name=input_tokens,json=inputTokens,proto3" json:"input_tokens,omitempty"`
+	OutputTokens int32 `protobuf:"varint,13,opt,name=output_tokens,json=outputTokens,proto3" json:"output_tokens,omitempty"`
 	// mode "json": true when `extracted_json` validated against the schema.
 	SchemaValid bool `protobuf:"varint,14,opt,name=schema_valid,json=schemaValid,proto3" json:"schema_valid,omitempty"`
 	// True when one repair call was needed to get there.
@@ -9217,8 +9224,9 @@ type ScreenContentRequest struct {
 	state     protoimpl.MessageState `protogen:"open.v1"`
 	RequestId string                 `protobuf:"bytes,1,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
 	OrgId     string                 `protobuf:"bytes,2,opt,name=org_id,json=orgId,proto3" json:"org_id,omitempty"`
-	UserId    string                 `protobuf:"bytes,3,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
-	RunId     string                 `protobuf:"bytes,4,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
+	// Acting user identifier.
+	UserId string `protobuf:"bytes,3,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
+	RunId  string `protobuf:"bytes,4,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
 	// The tool that produced the result, named as the shared trust table names it.
 	ToolName string `protobuf:"bytes,5,opt,name=tool_name,json=toolName,proto3" json:"tool_name,omitempty"`
 	// The complete, untruncated tool output.

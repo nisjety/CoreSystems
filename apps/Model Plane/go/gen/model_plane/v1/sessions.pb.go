@@ -205,6 +205,8 @@ type SearchPurpose int32
 
 const (
 	// The person at the keyboard. The zero value, so a caller that sets nothing searches as UI.
+	// Zero value is the UI purpose, not an unset marker; renaming it would break generated code.
+	// buf:lint:ignore ENUM_ZERO_VALUE_SUFFIX
 	SearchPurpose_SEARCH_PURPOSE_UI SearchPurpose = 0
 	// The read-only recall tool. Excludes zero-retention and waived threads.
 	SearchPurpose_SEARCH_PURPOSE_RECALL SearchPurpose = 1
@@ -254,9 +256,12 @@ func (SearchPurpose) EnumDescriptor() ([]byte, []int) {
 type SkillDecision int32
 
 const (
+	// Unset decision, the zero value.
 	SkillDecision_SKILL_DECISION_UNSPECIFIED SkillDecision = 0
-	SkillDecision_SKILL_DECISION_ACCEPT      SkillDecision = 1
-	SkillDecision_SKILL_DECISION_REJECT      SkillDecision = 2
+	// Accept the proposal.
+	SkillDecision_SKILL_DECISION_ACCEPT SkillDecision = 1
+	// Reject the proposal.
+	SkillDecision_SKILL_DECISION_REJECT SkillDecision = 2
 )
 
 // Enum value maps for SkillDecision.
@@ -710,13 +715,17 @@ func (x *MentionInput) GetOrdinal() uint32 {
 // refused, expected, running, awaiting_approval, completed, failed or cancelled; empty for a
 // person.
 type MentionRef struct {
-	state     protoimpl.MessageState `protogen:"open.v1"`
-	SubjectId string                 `protobuf:"bytes,1,opt,name=subject_id,json=subjectId,proto3" json:"subject_id,omitempty"`
-	Kind      string                 `protobuf:"bytes,2,opt,name=kind,proto3" json:"kind,omitempty"`
-	WakeState string                 `protobuf:"bytes,3,opt,name=wake_state,json=wakeState,proto3" json:"wake_state,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The subject that was mentioned.
+	SubjectId string `protobuf:"bytes,1,opt,name=subject_id,json=subjectId,proto3" json:"subject_id,omitempty"`
+	// What kind of subject was mentioned.
+	Kind string `protobuf:"bytes,2,opt,name=kind,proto3" json:"kind,omitempty"`
+	// Wake state of the mention, derived at read; empty for a person.
+	WakeState string `protobuf:"bytes,3,opt,name=wake_state,json=wakeState,proto3" json:"wake_state,omitempty"`
 	// The refusal code when wake_state is refused.
-	Reason        string `protobuf:"bytes,4,opt,name=reason,proto3" json:"reason,omitempty"`
-	Source        string `protobuf:"bytes,5,opt,name=source,proto3" json:"source,omitempty"`
+	Reason string `protobuf:"bytes,4,opt,name=reason,proto3" json:"reason,omitempty"`
+	Source string `protobuf:"bytes,5,opt,name=source,proto3" json:"source,omitempty"`
+	// Wake order among the agents of this post (0-based). Persons carry 0.
 	Ordinal       uint32 `protobuf:"varint,6,opt,name=ordinal,proto3" json:"ordinal,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -1483,8 +1492,10 @@ type StartScheduledRunRequest struct {
 	// Stored-consent contract of the schedule (WS20 S5), absent for a schedule
 	// without one. contract_digest and contract_expires_at are the values Control
 	// signed; Session Core re-checks them on the direct hop before binding.
-	ContractJson      string `protobuf:"bytes,14,opt,name=contract_json,json=contractJson,proto3" json:"contract_json,omitempty"`
-	ContractDigest    string `protobuf:"bytes,15,opt,name=contract_digest,json=contractDigest,proto3" json:"contract_digest,omitempty"`
+	ContractJson string `protobuf:"bytes,14,opt,name=contract_json,json=contractJson,proto3" json:"contract_json,omitempty"`
+	// Digest of the contract, as Control signed it.
+	ContractDigest string `protobuf:"bytes,15,opt,name=contract_digest,json=contractDigest,proto3" json:"contract_digest,omitempty"`
+	// Expiry of the contract, as Control signed it.
 	ContractExpiresAt string `protobuf:"bytes,16,opt,name=contract_expires_at,json=contractExpiresAt,proto3" json:"contract_expires_at,omitempty"`
 	unknownFields     protoimpl.UnknownFields
 	sizeCache         protoimpl.SizeCache
@@ -3874,11 +3885,14 @@ type UpsertAgentSkillRequest struct {
 	// "accepted").
 	Scope       string `protobuf:"bytes,10,opt,name=scope,proto3" json:"scope,omitempty"`
 	OwnerUserId string `protobuf:"bytes,11,opt,name=owner_user_id,json=ownerUserId,proto3" json:"owner_user_id,omitempty"`
+	// Review state of the skill. Ignored for a human write, which is accepted.
 	ReviewState string `protobuf:"bytes,12,opt,name=review_state,json=reviewState,proto3" json:"review_state,omitempty"`
 	// The run and thread the proposal was distilled from, and the reviewer's
 	// reason for proposing it (at most 300 characters). Provenance only.
-	SourceRunId    string `protobuf:"bytes,13,opt,name=source_run_id,json=sourceRunId,proto3" json:"source_run_id,omitempty"`
+	SourceRunId string `protobuf:"bytes,13,opt,name=source_run_id,json=sourceRunId,proto3" json:"source_run_id,omitempty"`
+	// The thread the proposal was distilled from.
 	SourceThreadId string `protobuf:"bytes,14,opt,name=source_thread_id,json=sourceThreadId,proto3" json:"source_thread_id,omitempty"`
+	// The reviewer's reason for proposing it.
 	ProposalReason string `protobuf:"bytes,15,opt,name=proposal_reason,json=proposalReason,proto3" json:"proposal_reason,omitempty"`
 	unknownFields  protoimpl.UnknownFields
 	sizeCache      protoimpl.SizeCache
@@ -4194,9 +4208,12 @@ type AgentSkill struct {
 	// Review (WS07 S7): "proposed" (a learned skill awaiting its owner's
 	// decision), "accepted" or "rejected". Only an accepted skill is ever
 	// injected or matched.
-	ReviewState    string `protobuf:"bytes,13,opt,name=review_state,json=reviewState,proto3" json:"review_state,omitempty"`
-	SourceRunId    string `protobuf:"bytes,14,opt,name=source_run_id,json=sourceRunId,proto3" json:"source_run_id,omitempty"`
+	ReviewState string `protobuf:"bytes,13,opt,name=review_state,json=reviewState,proto3" json:"review_state,omitempty"`
+	// The run the skill was distilled from.
+	SourceRunId string `protobuf:"bytes,14,opt,name=source_run_id,json=sourceRunId,proto3" json:"source_run_id,omitempty"`
+	// The thread the skill was distilled from.
 	SourceThreadId string `protobuf:"bytes,15,opt,name=source_thread_id,json=sourceThreadId,proto3" json:"source_thread_id,omitempty"`
+	// The reviewer's reason for proposing the skill.
 	ProposalReason string `protobuf:"bytes,16,opt,name=proposal_reason,json=proposalReason,proto3" json:"proposal_reason,omitempty"`
 	// RFC 3339, UTC.
 	UpdatedAt string `protobuf:"bytes,17,opt,name=updated_at,json=updatedAt,proto3" json:"updated_at,omitempty"`
@@ -4868,10 +4885,13 @@ func (x *ListConversationResponse) GetOmittedBefore() uint32 {
 // A typed room entry carried by a human post (WS15). `kind` is a closed word; a reader that
 // does not know a kind shows `{kind, version}` neutrally. Today's only kind is "link_previews".
 type MessageEntry struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Kind          string                 `protobuf:"bytes,1,opt,name=kind,proto3" json:"kind,omitempty"`
-	Version       uint32                 `protobuf:"varint,2,opt,name=version,proto3" json:"version,omitempty"`
-	LinkPreviews  []*LinkPreview         `protobuf:"bytes,3,rep,name=link_previews,json=linkPreviews,proto3" json:"link_previews,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Closed word naming the entry, such as link_previews.
+	Kind string `protobuf:"bytes,1,opt,name=kind,proto3" json:"kind,omitempty"`
+	// Version of the entry kind.
+	Version uint32 `protobuf:"varint,2,opt,name=version,proto3" json:"version,omitempty"`
+	// The link previews captured when the post was sent.
+	LinkPreviews  []*LinkPreview `protobuf:"bytes,3,rep,name=link_previews,json=linkPreviews,proto3" json:"link_previews,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -4929,13 +4949,18 @@ func (x *MessageEntry) GetLinkPreviews() []*LinkPreview {
 
 // One captured link preview, text only (no image), snapshotted when the post was sent.
 type LinkPreview struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Url           string                 `protobuf:"bytes,1,opt,name=url,proto3" json:"url,omitempty"`
-	FinalUrl      string                 `protobuf:"bytes,2,opt,name=final_url,json=finalUrl,proto3" json:"final_url,omitempty"`
-	Host          string                 `protobuf:"bytes,3,opt,name=host,proto3" json:"host,omitempty"`
-	Title         string                 `protobuf:"bytes,4,opt,name=title,proto3" json:"title,omitempty"`
-	Description   string                 `protobuf:"bytes,5,opt,name=description,proto3" json:"description,omitempty"`
-	SiteName      string                 `protobuf:"bytes,6,opt,name=site_name,json=siteName,proto3" json:"site_name,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The link URL.
+	Url string `protobuf:"bytes,1,opt,name=url,proto3" json:"url,omitempty"`
+	// The final URL of the link.
+	FinalUrl string `protobuf:"bytes,2,opt,name=final_url,json=finalUrl,proto3" json:"final_url,omitempty"`
+	// The host of the link.
+	Host        string `protobuf:"bytes,3,opt,name=host,proto3" json:"host,omitempty"`
+	Title       string `protobuf:"bytes,4,opt,name=title,proto3" json:"title,omitempty"`
+	Description string `protobuf:"bytes,5,opt,name=description,proto3" json:"description,omitempty"`
+	// The name of the site the link is on.
+	SiteName string `protobuf:"bytes,6,opt,name=site_name,json=siteName,proto3" json:"site_name,omitempty"`
+	// When the preview was fetched.
 	FetchedAt     *timestamppb.Timestamp `protobuf:"bytes,7,opt,name=fetched_at,json=fetchedAt,proto3" json:"fetched_at,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -5020,6 +5045,7 @@ func (x *LinkPreview) GetFetchedAt() *timestamppb.Timestamp {
 	return nil
 }
 
+// Request to edit or delete one message in a thread.
 type ReviseMessageRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Required. The owning org; must equal the caller's org and the thread's org.
@@ -5212,6 +5238,7 @@ func (x *ReviseMessageRequest) GetIdempotencyKey() string {
 	return ""
 }
 
+// The recorded revision of one message: its number, state and time.
 type ReviseMessageResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// The message that was revised.
@@ -5219,8 +5246,9 @@ type ReviseMessageResponse struct {
 	// 1-based number of the revision that was recorded (or replayed).
 	RevisionNo uint32 `protobuf:"varint,2,opt,name=revision_no,json=revisionNo,proto3" json:"revision_no,omitempty"`
 	// "edited" or "deleted".
-	RevisionState string                 `protobuf:"bytes,3,opt,name=revision_state,json=revisionState,proto3" json:"revision_state,omitempty"`
-	RevisedAt     *timestamppb.Timestamp `protobuf:"bytes,4,opt,name=revised_at,json=revisedAt,proto3" json:"revised_at,omitempty"`
+	RevisionState string `protobuf:"bytes,3,opt,name=revision_state,json=revisionState,proto3" json:"revision_state,omitempty"`
+	// When the revision was recorded.
+	RevisedAt *timestamppb.Timestamp `protobuf:"bytes,4,opt,name=revised_at,json=revisedAt,proto3" json:"revised_at,omitempty"`
 	// True when the idempotency key had already recorded this exact revision.
 	Deduplicated bool `protobuf:"varint,5,opt,name=deduplicated,proto3" json:"deduplicated,omitempty"`
 	// "author", "agent_owner" or "moderator": the class the caller was revised under.
@@ -5301,6 +5329,7 @@ func (x *ReviseMessageResponse) GetActorClass() string {
 	return ""
 }
 
+// Request to look up a message's role and revision state, with a Space read decision.
 type ResolveMessageTargetRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Required. The owning org.
@@ -5390,6 +5419,7 @@ func (x *ResolveMessageTargetRequest) GetSpaceReadDecisionToken() string {
 	return ""
 }
 
+// The role of a message, and whether and how it was revised.
 type ResolveMessageTargetResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// "user" | "assistant" | "system" | "tool".
@@ -7254,23 +7284,29 @@ func (x *RecordScheduledStepReceiptResponse) GetRecorded() bool {
 // closed token or a count. The counts after `withheld_effects` are carried for
 // the scheduled Do lane and are not persisted by the receipt-only path.
 type RecordScheduledRunResultRequest struct {
-	state           protoimpl.MessageState `protogen:"open.v1"`
-	RunId           string                 `protobuf:"bytes,1,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
-	StepId          string                 `protobuf:"bytes,2,opt,name=step_id,json=stepId,proto3" json:"step_id,omitempty"`
-	OrgId           string                 `protobuf:"bytes,3,opt,name=org_id,json=orgId,proto3" json:"org_id,omitempty"`
-	IdempotencyKey  string                 `protobuf:"bytes,4,opt,name=idempotency_key,json=idempotencyKey,proto3" json:"idempotency_key,omitempty"`
-	ReceiptId       string                 `protobuf:"bytes,5,opt,name=receipt_id,json=receiptId,proto3" json:"receipt_id,omitempty"`
-	Status          string                 `protobuf:"bytes,6,opt,name=status,proto3" json:"status,omitempty"`
-	Output          string                 `protobuf:"bytes,7,opt,name=output,proto3" json:"output,omitempty"`
-	ErrorCode       string                 `protobuf:"bytes,8,opt,name=error_code,json=errorCode,proto3" json:"error_code,omitempty"`
-	UnknownOutcome  bool                   `protobuf:"varint,9,opt,name=unknown_outcome,json=unknownOutcome,proto3" json:"unknown_outcome,omitempty"`
-	RoundsExecuted  uint32                 `protobuf:"varint,10,opt,name=rounds_executed,json=roundsExecuted,proto3" json:"rounds_executed,omitempty"`
-	WithheldEffects uint32                 `protobuf:"varint,11,opt,name=withheld_effects,json=withheldEffects,proto3" json:"withheld_effects,omitempty"`
-	ToolCalls       uint32                 `protobuf:"varint,12,opt,name=tool_calls,json=toolCalls,proto3" json:"tool_calls,omitempty"`
-	InputTokens     uint32                 `protobuf:"varint,13,opt,name=input_tokens,json=inputTokens,proto3" json:"input_tokens,omitempty"`
-	OutputTokens    uint32                 `protobuf:"varint,14,opt,name=output_tokens,json=outputTokens,proto3" json:"output_tokens,omitempty"`
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
+	state          protoimpl.MessageState `protogen:"open.v1"`
+	RunId          string                 `protobuf:"bytes,1,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
+	StepId         string                 `protobuf:"bytes,2,opt,name=step_id,json=stepId,proto3" json:"step_id,omitempty"`
+	OrgId          string                 `protobuf:"bytes,3,opt,name=org_id,json=orgId,proto3" json:"org_id,omitempty"`
+	IdempotencyKey string                 `protobuf:"bytes,4,opt,name=idempotency_key,json=idempotencyKey,proto3" json:"idempotency_key,omitempty"`
+	ReceiptId      string                 `protobuf:"bytes,5,opt,name=receipt_id,json=receiptId,proto3" json:"receipt_id,omitempty"`
+	Status         string                 `protobuf:"bytes,6,opt,name=status,proto3" json:"status,omitempty"`
+	// The output of the step.
+	Output         string `protobuf:"bytes,7,opt,name=output,proto3" json:"output,omitempty"`
+	ErrorCode      string `protobuf:"bytes,8,opt,name=error_code,json=errorCode,proto3" json:"error_code,omitempty"`
+	UnknownOutcome bool   `protobuf:"varint,9,opt,name=unknown_outcome,json=unknownOutcome,proto3" json:"unknown_outcome,omitempty"`
+	// Number of rounds the step executed.
+	RoundsExecuted uint32 `protobuf:"varint,10,opt,name=rounds_executed,json=roundsExecuted,proto3" json:"rounds_executed,omitempty"`
+	// Number of effects withheld during the step.
+	WithheldEffects uint32 `protobuf:"varint,11,opt,name=withheld_effects,json=withheldEffects,proto3" json:"withheld_effects,omitempty"`
+	// Number of tool calls made by the step.
+	ToolCalls uint32 `protobuf:"varint,12,opt,name=tool_calls,json=toolCalls,proto3" json:"tool_calls,omitempty"`
+	// Input tokens used by the step.
+	InputTokens uint32 `protobuf:"varint,13,opt,name=input_tokens,json=inputTokens,proto3" json:"input_tokens,omitempty"`
+	// Output tokens used by the step.
+	OutputTokens  uint32 `protobuf:"varint,14,opt,name=output_tokens,json=outputTokens,proto3" json:"output_tokens,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *RecordScheduledRunResultRequest) Reset() {
@@ -7404,10 +7440,11 @@ func (x *RecordScheduledRunResultRequest) GetOutputTokens() uint32 {
 // message_id is empty when no answer was appended (a failed or unknown step,
 // or an empty answer). A replay returns the message the first call appended.
 type RecordScheduledRunResultResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	ReceiptId     string                 `protobuf:"bytes,1,opt,name=receipt_id,json=receiptId,proto3" json:"receipt_id,omitempty"`
-	Status        string                 `protobuf:"bytes,2,opt,name=status,proto3" json:"status,omitempty"`
-	MessageId     string                 `protobuf:"bytes,3,opt,name=message_id,json=messageId,proto3" json:"message_id,omitempty"`
+	state     protoimpl.MessageState `protogen:"open.v1"`
+	ReceiptId string                 `protobuf:"bytes,1,opt,name=receipt_id,json=receiptId,proto3" json:"receipt_id,omitempty"`
+	Status    string                 `protobuf:"bytes,2,opt,name=status,proto3" json:"status,omitempty"`
+	// Id of the appended answer; empty when no answer was appended.
+	MessageId     string `protobuf:"bytes,3,opt,name=message_id,json=messageId,proto3" json:"message_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -7630,6 +7667,7 @@ func (x *WaivedRunCount) GetLastUsedAt() *timestamppb.Timestamp {
 	return nil
 }
 
+// Request to read the live grant of one thread.
 type GetThreadGrantRequest struct {
 	state    protoimpl.MessageState `protogen:"open.v1"`
 	ThreadId string                 `protobuf:"bytes,1,opt,name=thread_id,json=threadId,proto3" json:"thread_id,omitempty"`
@@ -7684,6 +7722,7 @@ func (x *GetThreadGrantRequest) GetOrgId() string {
 	return ""
 }
 
+// The live grant of one thread: its rung, reason, plan and expiry.
 type GetThreadGrantResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// The rung the thread's approved plan granted. UNSPECIFIED when the thread
@@ -7759,6 +7798,7 @@ func (x *GetThreadGrantResponse) GetExpiresAt() *timestamppb.Timestamp {
 	return nil
 }
 
+// Request to bind a thread's live grant to the run that executes its plan.
 type BindGrantToRunRequest struct {
 	state    protoimpl.MessageState `protogen:"open.v1"`
 	RunId    string                 `protobuf:"bytes,1,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
@@ -7830,6 +7870,7 @@ func (x *BindGrantToRunRequest) GetApprovedPlanId() string {
 	return ""
 }
 
+// The grant copied onto the run: its rung, reason and plan.
 type BindGrantToRunResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// The rung the run was bound with, copied from the thread's grant.
@@ -8937,7 +8978,8 @@ type DecideSkillProposalRequest struct {
 	// Tenant. Must equal the verified caller's organization.
 	OrgId string `protobuf:"bytes,1,opt,name=org_id,json=orgId,proto3" json:"org_id,omitempty"`
 	// The proposal, by id.
-	SkillId       string        `protobuf:"bytes,2,opt,name=skill_id,json=skillId,proto3" json:"skill_id,omitempty"`
+	SkillId string `protobuf:"bytes,2,opt,name=skill_id,json=skillId,proto3" json:"skill_id,omitempty"`
+	// The owner's decision on the proposal.
 	Decision      SkillDecision `protobuf:"varint,3,opt,name=decision,proto3,enum=model_plane.v1.SkillDecision" json:"decision,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -9118,7 +9160,8 @@ type UndoLearningEntryResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// What the undo did to the skill: "restored" (its before-snapshot is back) or
 	// "deleted" (the entry had created the skill).
-	Action  string `protobuf:"bytes,1,opt,name=action,proto3" json:"action,omitempty"`
+	Action string `protobuf:"bytes,1,opt,name=action,proto3" json:"action,omitempty"`
+	// The skill the undo acted on.
 	SkillId string `protobuf:"bytes,2,opt,name=skill_id,json=skillId,proto3" json:"skill_id,omitempty"`
 	// The skill's revision after the undo.
 	Revision      int64 `protobuf:"varint,3,opt,name=revision,proto3" json:"revision,omitempty"`
@@ -9269,21 +9312,26 @@ type LearningLedgerEntry struct {
 	Kind string `protobuf:"bytes,2,opt,name=kind,proto3" json:"kind,omitempty"`
 	// Skill: created, proposed, updated, accepted, rejected, enabled, disabled,
 	// edited, deleted, restored or promoted. Memory: learned.
-	Action    string `protobuf:"bytes,3,opt,name=action,proto3" json:"action,omitempty"`
-	SkillId   string `protobuf:"bytes,4,opt,name=skill_id,json=skillId,proto3" json:"skill_id,omitempty"`
+	Action string `protobuf:"bytes,3,opt,name=action,proto3" json:"action,omitempty"`
+	// The skill the entry is about.
+	SkillId string `protobuf:"bytes,4,opt,name=skill_id,json=skillId,proto3" json:"skill_id,omitempty"`
+	// The skill's name.
 	SkillName string `protobuf:"bytes,5,opt,name=skill_name,json=skillName,proto3" json:"skill_name,omitempty"`
 	// The skill's revision number; 0 for a memory.
 	Revision int64 `protobuf:"varint,6,opt,name=revision,proto3" json:"revision,omitempty"`
 	// Who made the change: user, service, system or unattributed.
 	ActorKind string `protobuf:"bytes,7,opt,name=actor_kind,json=actorKind,proto3" json:"actor_kind,omitempty"`
-	ActorId   string `protobuf:"bytes,8,opt,name=actor_id,json=actorId,proto3" json:"actor_id,omitempty"`
-	RunId     string `protobuf:"bytes,9,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
-	ThreadId  string `protobuf:"bytes,10,opt,name=thread_id,json=threadId,proto3" json:"thread_id,omitempty"`
-	Reason    string `protobuf:"bytes,11,opt,name=reason,proto3" json:"reason,omitempty"`
+	// Id of the actor who made the change.
+	ActorId  string `protobuf:"bytes,8,opt,name=actor_id,json=actorId,proto3" json:"actor_id,omitempty"`
+	RunId    string `protobuf:"bytes,9,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
+	ThreadId string `protobuf:"bytes,10,opt,name=thread_id,json=threadId,proto3" json:"thread_id,omitempty"`
+	// The reason recorded for the change.
+	Reason string `protobuf:"bytes,11,opt,name=reason,proto3" json:"reason,omitempty"`
 	// The skill snapshots before and after the change, as JSON; empty on the side
 	// that does not exist. For a memory, `after_json` is {"content": ...}.
 	BeforeJson string `protobuf:"bytes,12,opt,name=before_json,json=beforeJson,proto3" json:"before_json,omitempty"`
-	AfterJson  string `protobuf:"bytes,13,opt,name=after_json,json=afterJson,proto3" json:"after_json,omitempty"`
+	// Skill snapshot after the change, as JSON; empty when it does not exist after it.
+	AfterJson string `protobuf:"bytes,13,opt,name=after_json,json=afterJson,proto3" json:"after_json,omitempty"`
 	// Whether the entry has been undone by a later entry.
 	Undone bool `protobuf:"varint,14,opt,name=undone,proto3" json:"undone,omitempty"`
 	// Whether UndoLearningEntry would be accepted now.

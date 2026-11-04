@@ -120,6 +120,7 @@ service RunService {
   rpc CancelRunAsRoomManager(CancelRunAsRoomManagerRequest) returns (CancelRunAsRoomManagerResponse);
 }
 
+// Request to cancel a run through its Space, with the Control decision for it.
 message CancelRunAsRoomManagerRequest {
   // The run to stop.
   string run_id = 1;
@@ -127,6 +128,7 @@ message CancelRunAsRoomManagerRequest {
   string space_id = 2;
   // Control `model.run.control` decision reference and token (audience model-plane).
   string space_control_decision_ref = 3;
+  // Token for the Control decision reference above.
   string space_control_decision_token = 4;
   // Must equal the idempotency key the decision was issued for.
   string idempotency_key = 5;
@@ -134,6 +136,7 @@ message CancelRunAsRoomManagerRequest {
   string reason = 6;
 }
 
+// Result of a room-manager cancel: whether this call cancelled the run, and its receipt.
 message CancelRunAsRoomManagerResponse {
   // True if this call cancelled the run; false if it was already terminal (idempotent).
   bool cancelled = 1;
@@ -141,9 +144,11 @@ message CancelRunAsRoomManagerResponse {
   string receipt_id = 2;
   // The run owner's org and user, for stopping that owner's live producer. Never shown to members.
   string owner_org_id = 3;
+  // The run owner's user id, for stopping that owner's live producer.
   string owner_user_id = 4;
 }
 
+// Request for a member to watch a run in a Space, with the Space read decision for it.
 message AuthorizeRoomRunAttachRequest {
   // The run the member wants to watch.
   string run_id = 1;
@@ -154,6 +159,7 @@ message AuthorizeRoomRunAttachRequest {
   string space_read_decision_token = 4;
 }
 
+// Verdict on a member's attach to a run, with the run's details and how long it holds.
 message AuthorizeRoomRunAttachResponse {
   string run_id = 1;
   string thread_id = 2;
@@ -171,6 +177,7 @@ message AuthorizeRoomRunAttachResponse {
   // that route. Set only for a zero-retention-waived run bound to the caller's own waiver (the same
   // connection and acknowledgement); empty for a persistent run, which names no connection.
   string provider = 8;
+  // Connection of the run's route; empty for a persistent run.
   string connection = 9;
 }
 
@@ -194,7 +201,9 @@ message ScheduledStepContext {
   // Stored-consent contract for this scheduled step (WS20 S5). Empty when the
   // schedule has no contract; the digest and expiry are re-verified per step.
   string contract_json = 6;
+  // Digest of the stored-consent contract, re-verified per step.
   string contract_digest = 7;
+  // Expiry of the stored-consent contract, re-verified per step.
   string contract_expires_at = 8;
 }
 
@@ -324,6 +333,7 @@ message ResolveRunActionAuthorityResponse {
 // ResolveApprovalAuthorityRequest names the approval and tenant only; everything else is read
 // from the durable rows.
 message ResolveApprovalAuthorityRequest {
+  // The approval to resolve.
   string approval_id = 1;
   string org_id = 2;
 }
@@ -332,6 +342,7 @@ message ResolveApprovalAuthorityRequest {
 // has no authority and every other field is empty/default. A zero-retention run never resolves.
 message ResolveApprovalAuthorityResponse {
   bool resolved = 1;
+  // The approval this authority answer is for.
   string approval_id = 2;
   string run_id = 3;
   string org_id = 4;
@@ -355,6 +366,7 @@ message ResolveApprovalAuthorityResponse {
   uint64 recipient_audience_revision = 15;
   string recipient_audience_hash = 16;
   string privacy_policy_ref = 17;
+  // Reference to the thread resource authorization.
   string thread_resource_authorization_ref = 18;
   uint64 authority_revision = 19;
 }
@@ -390,6 +402,7 @@ message ResolveScheduledStepAuthorityResponse {
   // Control-signed contract digest and expiry for this scheduled step (WS20 S5).
   // Empty for a schedule without a contract.
   string contract_digest = 15;
+  // Expiry of the Control-signed contract for this step; empty without a contract.
   string contract_expires_at = 16;
 }
 

@@ -129,7 +129,8 @@ type SessionCoreClient interface {
 	ReplayThread(ctx context.Context, in *ReplayThreadRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[Event], error)
 	// Assemble the full context window for a model call.
 	// Order: policy -> workspace -> agent -> user -> thread recent -> episodic
-	//        -> skill index -> skill expansion -> retrieval snippets -> current prompt/tool output.
+	//
+	//	-> skill index -> skill expansion -> retrieval snippets -> current prompt/tool output.
 	GetContextAssembly(ctx context.Context, in *GetContextAssemblyRequest, opts ...grpc.CallOption) (*GetContextAssemblyResponse, error)
 	// Trigger on-demand checkpoint compaction for all runs with pending events.
 	CompactNow(ctx context.Context, in *CompactNowRequest, opts ...grpc.CallOption) (*CompactNowResponse, error)
@@ -631,7 +632,8 @@ type SessionCoreServer interface {
 	ReplayThread(*ReplayThreadRequest, grpc.ServerStreamingServer[Event]) error
 	// Assemble the full context window for a model call.
 	// Order: policy -> workspace -> agent -> user -> thread recent -> episodic
-	//        -> skill index -> skill expansion -> retrieval snippets -> current prompt/tool output.
+	//
+	//	-> skill index -> skill expansion -> retrieval snippets -> current prompt/tool output.
 	GetContextAssembly(context.Context, *GetContextAssemblyRequest) (*GetContextAssemblyResponse, error)
 	// Trigger on-demand checkpoint compaction for all runs with pending events.
 	CompactNow(context.Context, *CompactNowRequest) (*CompactNowResponse, error)
@@ -2019,6 +2021,8 @@ const (
 // is, so that SessionCore and every mock of it stay source-compatible. The
 // grant is WRITTEN by SessionCore.SetRunMode (with `approved_plan_id` set), in
 // the same transaction as the run update.
+// Service name is used by generated code and deployed callers; renaming it would break them.
+// buf:lint:ignore SERVICE_SUFFIX
 type ThreadAutonomyClient interface {
 	// The live grant of one thread: the rung, the reason it was granted, the plan
 	// it was approved with and when it lapses. A thread with no grant, or one
@@ -2074,6 +2078,8 @@ func (c *threadAutonomyClient) BindGrantToRun(ctx context.Context, in *BindGrant
 // is, so that SessionCore and every mock of it stay source-compatible. The
 // grant is WRITTEN by SessionCore.SetRunMode (with `approved_plan_id` set), in
 // the same transaction as the run update.
+// Service name is used by generated code and deployed callers; renaming it would break them.
+// buf:lint:ignore SERVICE_SUFFIX
 type ThreadAutonomyServer interface {
 	// The live grant of one thread: the rung, the reason it was granted, the plan
 	// it was approved with and when it lapses. A thread with no grant, or one
@@ -2194,6 +2200,8 @@ const (
 // MessageSearch: full-text search over the durable conversation record. A
 // separate service, as ThreadAutonomy and SessionRetentionService are, so that
 // SessionCore and every mock of it stay source-compatible. Read-only.
+// Service name is used by generated code and deployed callers; renaming it would break them.
+// buf:lint:ignore SERVICE_SUFFIX
 type MessageSearchClient interface {
 	// Search the messages of threads the caller may list, with the same owner and
 	// Space-audience rules as ListThreads. Refused with unavailable
@@ -2227,6 +2235,8 @@ func (c *messageSearchClient) SearchMessages(ctx context.Context, in *SearchMess
 // MessageSearch: full-text search over the durable conversation record. A
 // separate service, as ThreadAutonomy and SessionRetentionService are, so that
 // SessionCore and every mock of it stay source-compatible. Read-only.
+// Service name is used by generated code and deployed callers; renaming it would break them.
+// buf:lint:ignore SERVICE_SUFFIX
 type MessageSearchServer interface {
 	// Search the messages of threads the caller may list, with the same owner and
 	// Space-audience rules as ListThreads. Refused with unavailable

@@ -3748,6 +3748,7 @@ Built so far: WS13-S0, WS13-S1, WS13-S2; WS14-S1, WS14-S2 (partial), WS14-S3; WS
 | D3-1047 | W3-19 guard | follow-up | P2 | guard skipped: EP-9-W3 lead-only step to apply EP-9-W3.patch: already applied in step 0. | open |
 | D3-1048 | W3-19 guard | follow-up | P2 | guard skipped: EP-9-C2 THREAD_BOUND_TABLES: nothing to add; the batch's only new table, retention_sweep_runs, has no thread_id column. | open |
 | D3-1049 | W3-19 guard | test-gap | P1 | still broken after the guard: EP-4-S2 scenario-touch gate: the prompt-tool-manifest changed, so scripts/gates/scenario-touch.py will fail until someone adds a widget_notice eval case under apps/Model Plane/python/eval-lab-py/cases/ or a replay cassette. That is a new scenario file, not a shared edit; the lead or a builder writes it. | open |
+| D3-1050 | lead | test-gap | P1 | buf lint ratchet (.github/workflows/buf.yml) was red on main and model-plane: 258 keys / 300 findings not in apps/Model Plane/proto/buf-lint-baseline.json (Space protos from the space branch, W2/W3 additions, 5 naming findings on the shared ThreadGoalResponse). On Windows buf prints backslash paths, which must be normalised before the ratchet or every finding looks new. | done 2026-11-04 (lead): comment-only doc lines plus reasoned buf:lint:ignore lines for the naming rules (no renames) in 13 protos; ratchet ok (1013, none new), buf breaking clean, Go bindings regenerated (doc comments and gofmt alignment only) and go build of go/gen clean |
 
 ## Cross-wave
 

@@ -395,6 +395,7 @@ message Plan {
 // never stored on the approval and never claimed by a client. UNSPECIFIED
 // means the approval is not granted yet (or the state cannot be told).
 enum ContinuationState {
+  // Approval not granted yet, or the state cannot be told.
   CONTINUATION_STATE_UNSPECIFIED = 0;
   // Granted, and the action is not one a worker can run: the approval only lets
   // the agent retry this exact action once. The run does not continue by itself.
@@ -417,6 +418,7 @@ enum ContinuationState {
 
 // Read projection of an approval's continuation (build plan WS10 S1).
 message ApprovalContinuation {
+  // Where the approved action stands; see ContinuationState.
   ContinuationState state = 1;
   // Closed failure code when `state` is FAILED; empty otherwise.
   string failure_code = 2;
@@ -428,6 +430,7 @@ message ApprovalContinuation {
 
 // Who is asked to decide an approval (build plan WS10; used from S6).
 enum AddresseeKind {
+  // Addressee kind not set.
   ADDRESSEE_KIND_UNSPECIFIED = 0;
   // The member whose request raised the approval.
   ADDRESSEE_KIND_REQUESTER = 1;
@@ -441,6 +444,7 @@ enum AddresseeKind {
 
 // An approval addressee (build plan WS10; used from S6).
 message Addressee {
+  // Who the approval is addressed to; see AddresseeKind.
   AddresseeKind kind = 1;
   // Subject id when `kind` is NAMED; empty otherwise.
   string subject_id = 2;
@@ -540,6 +544,7 @@ message Approval {
 // `metadata.decision.source`. UNSPECIFIED is recorded as `unattributed` and
 // counted, never guessed from the caller.
 enum ApprovalDecisionSource {
+  // Not recorded; stored as `unattributed`.
   APPROVAL_DECISION_SOURCE_UNSPECIFIED = 0;
   // A person decided it.
   APPROVAL_DECISION_SOURCE_USER = 1;
@@ -556,6 +561,7 @@ enum ApprovalDecisionSource {
 // How far an approval decision reaches (build plan WS13 S3). Space's
 // "conversation" is THREAD. UNSPECIFIED is read as ONCE.
 enum ApprovalScope {
+  // Not set; read as ONCE.
   APPROVAL_SCOPE_UNSPECIFIED = 0;
   // This one call only.
   APPROVAL_SCOPE_ONCE = 1;
@@ -1235,7 +1241,9 @@ message ListApprovalsRequest {
   // room view (no context, no decision reason). With no `run_id`, lists the Space's approvals
   // (newest first, at most 100). A partial triple is refused.
   string space_id = 4;
+  // Reference of the Control `model.thread.read` decision for the room read.
   string space_read_decision_ref = 5;
+  // Token of the same Control `model.thread.read` decision.
   string space_read_decision_token = 6;
 
   // Space-wide list only: keep one state (REQUESTED, GRANTED, DENIED, TIMED_OUT). Unspecified
@@ -1278,7 +1286,9 @@ message GetApprovalRequest {
   // Room read (build plan WS10 S6): as on ListApprovalsRequest, the redacted room view of one
   // approval of a run in this Space.
   string space_id = 3;
+  // Reference of the Control `model.thread.read` decision for the room read.
   string space_read_decision_ref = 4;
+  // Token of the same Control `model.thread.read` decision.
   string space_read_decision_token = 5;
 }
 
@@ -1321,7 +1331,9 @@ message DecideApprovalRequest {
   // scope. All three or none; a partial set is refused. The decision's subject must be the
   // caller. Refused while SESSION_CORE_APPROVAL_MEMBER_DECIDE is off.
   string space_id = 8;
+  // Reference of the Control `model.approval.decide` decision for a member decide.
   string space_decision_ref = 9;
+  // Token of the same `model.approval.decide` decision.
   string space_decision_token = 10;
 
   // Reserved for a Control standing-rule proof on a decision (WS10 S4); not read by S6.
@@ -1353,6 +1365,7 @@ message DecideApprovalResponse {
   Approval approval = 1;
 }
 
+// Request to move an approval to a new addressee.
 message RerouteApprovalRequest {
   // Approval to move.
   string approval_id = 1;
@@ -1365,10 +1378,13 @@ message RerouteApprovalRequest {
 
   // Control `model.approval.reroute` decision for this approval and this addressee.
   string space_id = 4;
+  // Reference of the Control `model.approval.reroute` decision.
   string space_decision_ref = 5;
+  // Token of the same `model.approval.reroute` decision.
   string space_decision_token = 6;
 }
 
+// Result of RerouteApprovalRequest: the updated approval record.
 message RerouteApprovalResponse {
   // Updated approval record.
   Approval approval = 1;
@@ -1722,8 +1738,10 @@ message OrchestrationEvent {
     // Standing rule that decided it (WS13 S7). Empty until rules exist.
     string rule_id = 7;
 
+    // How far the decision reaches; see ApprovalScope.
     ApprovalScope scope = 8;
 
+    // Who recorded the decision; see ApprovalDecisionSource.
     ApprovalDecisionSource decision_source = 9;
 
     // True when a recent re-authentication was verified for the decision (WS13 S5).
@@ -1848,9 +1866,11 @@ message OrchestrationEvent {
   message BrowserAttachSharedJar {
     string run_id = 1;
     string plan_id = 2;
+    // Identifier of this delegate attach.
     string attach_id = 3;
     // The user's own browser run the delegate attached to.
     string session_run_id = 4;
+    // Identifier of the browser tab the delegate attached to.
     string tab_id = 5;
   }
 
@@ -2317,6 +2337,7 @@ message ApprovalScopeGrant {
   google.protobuf.Timestamp last_used_at = 14;
 }
 
+// Request to check whether a live approval scope grant releases a call.
 message UseApprovalScopeGrantRequest {
   // Server-authoritative org scope of the run.
   string org_id = 1;
@@ -2340,11 +2361,13 @@ message UseApprovalScopeGrantRequest {
   string effect_class = 7;
 }
 
+// Result of UseApprovalScopeGrantRequest: the grant that released the call, if any.
 message UseApprovalScopeGrantResponse {
   // The grant that released the call. Empty when no live grant matches.
   string grant_id = 1;
 }
 
+// Request to list the approval scope grants of one thread.
 message ListApprovalScopeGrantsRequest {
   // Server-authoritative org scope.
   string org_id = 1;
@@ -2353,10 +2376,13 @@ message ListApprovalScopeGrantsRequest {
   string thread_id = 2;
 }
 
+// Result of ListApprovalScopeGrantsRequest.
 message ListApprovalScopeGrantsResponse {
+  // The approval scope grants of the thread.
   repeated ApprovalScopeGrant grants = 1;
 }
 
+// Request to revoke one approval scope grant.
 message RevokeApprovalScopeGrantRequest {
   // Server-authoritative org scope.
   string org_id = 1;
@@ -2365,6 +2391,7 @@ message RevokeApprovalScopeGrantRequest {
   string grant_id = 2;
 }
 
+// Result of RevokeApprovalScopeGrantRequest.
 message RevokeApprovalScopeGrantResponse {
   // The grant as it stands after the revocation.
   ApprovalScopeGrant grant = 1;

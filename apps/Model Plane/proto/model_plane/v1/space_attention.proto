@@ -18,13 +18,18 @@ option go_package = "github.com/triodelab/model-plane/gen/go/model_plane/v1;mpv1
 // call. A ZDR caller gets ZDR for every Space and no query runs. Counts, ids, timestamps and
 // closed words cross this surface; message text never does. Titles are returned only for the
 // thread ids the caller asked for and only when the thread passes the ceiling.
+//
+// Service name kept; generated code and deployed services depend on it.
+// buf:lint:ignore SERVICE_SUFFIX
 service SpaceAttention {
+  // Attention counts for up to 60 Spaces: unread threads, working runs, approvals, headlines.
   rpc GetSpaceAttention(GetSpaceAttentionRequest) returns (GetSpaceAttentionResponse);
 }
 
 // Which messages count as "new for the viewer". The caller names the rule; Session Core
 // applies it unchanged.
 enum UnreadRule {
+  // Default value; the caller named no rule.
   UNREAD_RULE_UNSPECIFIED = 0;
   // A thread is unread when its latest user or assistant message is newer than `since_ms` and
   // the thread is not owned by the viewer (the rule the SPA applied before shared rooms).
@@ -34,7 +39,11 @@ enum UnreadRule {
   UNREAD_RULE_LAST_AUTHOR = 2;
 }
 
+// Outcome of the attention query for one Space.
 enum AttentionStatus {
+  // The Space was read; its counts are set.
+  // Zero value name kept; renaming it would break generated code.
+  // buf:lint:ignore ENUM_ZERO_VALUE_SUFFIX
   ATTENTION_STATUS_OK = 0;
   // The Space's decision did not verify, or the Space is not one the caller may read.
   ATTENTION_STATUS_DENIED = 1;
@@ -44,9 +53,13 @@ enum AttentionStatus {
   ATTENTION_STATUS_ERROR = 3;
 }
 
+// One Space in an attention request, with its read decision and read marker.
 message SpaceAttentionQuery {
+  // Id of the Space to count.
   string space_id = 1;
+  // Control `model.thread.read` decision reference for this Space.
   string decision_ref = 2;
+  // Token for the decision named by decision_ref.
   string decision_token = 3;
   // The effective read marker, epoch milliseconds. Zero or negative means the caller has no
   // marker for this Space: nothing is unread.
@@ -55,41 +68,61 @@ message SpaceAttentionQuery {
   repeated string headline_thread_ids = 5;
 }
 
+// Request for attention counts across the Spaces listed, for one user.
 message GetSpaceAttentionRequest {
+  // Id of the org the request runs in.
   string org_id = 1;
+  // Id of the calling user; must equal the caller's principal id.
   string user_id = 2;
+  // Which rule decides what counts as unread.
   UnreadRule rule = 3;
   // At most 60.
   repeated SpaceAttentionQuery spaces = 4;
 }
 
+// An approval addressed to the caller that is still waiting.
 message PendingApproval {
+  // Id of the approval.
   string approval_id = 1;
+  // Id of the run the approval belongs to.
   string run_id = 2;
+  // Id of the thread the approval belongs to.
   string thread_id = 3;
+  // When the approval was requested, in epoch milliseconds.
   int64 requested_at_ms = 4;
+  // Kind of approval requested.
   string kind = 5;
 }
 
+// Display title of one thread the caller asked for.
 message ThreadHeadline {
+  // Id of the thread.
   string thread_id = 1;
+  // Display title of the thread.
   string title = 2;
 }
 
+// Attention counts and outcome for one Space.
 message SpaceAttentionResult {
+  // Id of the Space this result is for.
   string space_id = 1;
+  // Outcome of the query for this Space.
   AttentionStatus status = 2;
+  // Threads unread for the caller; at most 100.
   uint32 unread_threads = 3;
   // True when more than 100 threads matched; `unread_threads` is then 100.
   bool unread_capped = 4;
   // Epoch milliseconds of the newest user or assistant message the caller may see; 0 = none.
   int64 latest_activity_ms = 5;
+  // Agent runs currently working in the Space.
   uint32 working_runs = 6;
   // Approvals addressed to the caller, oldest first, at most 20.
   repeated PendingApproval pending = 7;
+  // Display titles for the threads the caller asked for.
   repeated ThreadHeadline headlines = 8;
 }
 
+// Attention results, one per requested Space.
 message GetSpaceAttentionResponse {
   // One result per requested Space, in request order.
   repeated SpaceAttentionResult results = 1;

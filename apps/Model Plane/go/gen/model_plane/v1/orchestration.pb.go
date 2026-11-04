@@ -499,6 +499,7 @@ func (SubagentRole) EnumDescriptor() ([]byte, []int) {
 type ContinuationState int32
 
 const (
+	// Approval not granted yet, or the state cannot be told.
 	ContinuationState_CONTINUATION_STATE_UNSPECIFIED ContinuationState = 0
 	// Granted, and the action is not one a worker can run: the approval only lets
 	// the agent retry this exact action once. The run does not continue by itself.
@@ -574,6 +575,7 @@ func (ContinuationState) EnumDescriptor() ([]byte, []int) {
 type AddresseeKind int32
 
 const (
+	// Addressee kind not set.
 	AddresseeKind_ADDRESSEE_KIND_UNSPECIFIED AddresseeKind = 0
 	// The member whose request raised the approval.
 	AddresseeKind_ADDRESSEE_KIND_REQUESTER AddresseeKind = 1
@@ -636,6 +638,7 @@ func (AddresseeKind) EnumDescriptor() ([]byte, []int) {
 type ApprovalDecisionSource int32
 
 const (
+	// Not recorded; stored as `unattributed`.
 	ApprovalDecisionSource_APPROVAL_DECISION_SOURCE_UNSPECIFIED ApprovalDecisionSource = 0
 	// A person decided it.
 	ApprovalDecisionSource_APPROVAL_DECISION_SOURCE_USER ApprovalDecisionSource = 1
@@ -701,6 +704,7 @@ func (ApprovalDecisionSource) EnumDescriptor() ([]byte, []int) {
 type ApprovalScope int32
 
 const (
+	// Not set; read as ONCE.
 	ApprovalScope_APPROVAL_SCOPE_UNSPECIFIED ApprovalScope = 0
 	// This one call only.
 	ApprovalScope_APPROVAL_SCOPE_ONCE ApprovalScope = 1
@@ -1177,7 +1181,8 @@ func (x *Plan) GetUpdatedAt() *timestamppb.Timestamp {
 // Read projection of an approval's continuation (build plan WS10 S1).
 type ApprovalContinuation struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	State ContinuationState      `protobuf:"varint,1,opt,name=state,proto3,enum=model_plane.v1.ContinuationState" json:"state,omitempty"`
+	// Where the approved action stands; see ContinuationState.
+	State ContinuationState `protobuf:"varint,1,opt,name=state,proto3,enum=model_plane.v1.ContinuationState" json:"state,omitempty"`
 	// Closed failure code when `state` is FAILED; empty otherwise.
 	FailureCode string `protobuf:"bytes,2,opt,name=failure_code,json=failureCode,proto3" json:"failure_code,omitempty"`
 	// Independent read-back of the outcome; UNSPECIFIED until one exists.
@@ -1249,7 +1254,8 @@ func (x *ApprovalContinuation) GetProviderReceiptId() string {
 // An approval addressee (build plan WS10; used from S6).
 type Addressee struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	Kind  AddresseeKind          `protobuf:"varint,1,opt,name=kind,proto3,enum=model_plane.v1.AddresseeKind" json:"kind,omitempty"`
+	// Who the approval is addressed to; see AddresseeKind.
+	Kind AddresseeKind `protobuf:"varint,1,opt,name=kind,proto3,enum=model_plane.v1.AddresseeKind" json:"kind,omitempty"`
 	// Subject id when `kind` is NAMED; empty otherwise.
 	SubjectId     string `protobuf:"bytes,2,opt,name=subject_id,json=subjectId,proto3" json:"subject_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
@@ -4534,8 +4540,10 @@ type ListApprovalsRequest struct {
 	// decision pair, a Space member who does not own the run reads its approvals as a redacted
 	// room view (no context, no decision reason). With no `run_id`, lists the Space's approvals
 	// (newest first, at most 100). A partial triple is refused.
-	SpaceId                string `protobuf:"bytes,4,opt,name=space_id,json=spaceId,proto3" json:"space_id,omitempty"`
-	SpaceReadDecisionRef   string `protobuf:"bytes,5,opt,name=space_read_decision_ref,json=spaceReadDecisionRef,proto3" json:"space_read_decision_ref,omitempty"`
+	SpaceId string `protobuf:"bytes,4,opt,name=space_id,json=spaceId,proto3" json:"space_id,omitempty"`
+	// Reference of the Control `model.thread.read` decision for the room read.
+	SpaceReadDecisionRef string `protobuf:"bytes,5,opt,name=space_read_decision_ref,json=spaceReadDecisionRef,proto3" json:"space_read_decision_ref,omitempty"`
+	// Token of the same Control `model.thread.read` decision.
 	SpaceReadDecisionToken string `protobuf:"bytes,6,opt,name=space_read_decision_token,json=spaceReadDecisionToken,proto3" json:"space_read_decision_token,omitempty"`
 	// Space-wide list only: keep one state (REQUESTED, GRANTED, DENIED, TIMED_OUT). Unspecified
 	// keeps all.
@@ -4772,8 +4780,10 @@ type GetApprovalRequest struct {
 	OrgId string `protobuf:"bytes,2,opt,name=org_id,json=orgId,proto3" json:"org_id,omitempty"`
 	// Room read (build plan WS10 S6): as on ListApprovalsRequest, the redacted room view of one
 	// approval of a run in this Space.
-	SpaceId                string `protobuf:"bytes,3,opt,name=space_id,json=spaceId,proto3" json:"space_id,omitempty"`
-	SpaceReadDecisionRef   string `protobuf:"bytes,4,opt,name=space_read_decision_ref,json=spaceReadDecisionRef,proto3" json:"space_read_decision_ref,omitempty"`
+	SpaceId string `protobuf:"bytes,3,opt,name=space_id,json=spaceId,proto3" json:"space_id,omitempty"`
+	// Reference of the Control `model.thread.read` decision for the room read.
+	SpaceReadDecisionRef string `protobuf:"bytes,4,opt,name=space_read_decision_ref,json=spaceReadDecisionRef,proto3" json:"space_read_decision_ref,omitempty"`
+	// Token of the same Control `model.thread.read` decision.
 	SpaceReadDecisionToken string `protobuf:"bytes,5,opt,name=space_read_decision_token,json=spaceReadDecisionToken,proto3" json:"space_read_decision_token,omitempty"`
 	unknownFields          protoimpl.UnknownFields
 	sizeCache              protoimpl.SizeCache
@@ -4914,8 +4924,10 @@ type DecideApprovalRequest struct {
 	// Control-signed `model.approval.decide` decision for this approval, this decision and this
 	// scope. All three or none; a partial set is refused. The decision's subject must be the
 	// caller. Refused while SESSION_CORE_APPROVAL_MEMBER_DECIDE is off.
-	SpaceId            string `protobuf:"bytes,8,opt,name=space_id,json=spaceId,proto3" json:"space_id,omitempty"`
-	SpaceDecisionRef   string `protobuf:"bytes,9,opt,name=space_decision_ref,json=spaceDecisionRef,proto3" json:"space_decision_ref,omitempty"`
+	SpaceId string `protobuf:"bytes,8,opt,name=space_id,json=spaceId,proto3" json:"space_id,omitempty"`
+	// Reference of the Control `model.approval.decide` decision for a member decide.
+	SpaceDecisionRef string `protobuf:"bytes,9,opt,name=space_decision_ref,json=spaceDecisionRef,proto3" json:"space_decision_ref,omitempty"`
+	// Token of the same `model.approval.decide` decision.
 	SpaceDecisionToken string `protobuf:"bytes,10,opt,name=space_decision_token,json=spaceDecisionToken,proto3" json:"space_decision_token,omitempty"`
 	// Reserved for a Control standing-rule proof on a decision (WS10 S4); not read by S6.
 	GrantUseToken string `protobuf:"bytes,11,opt,name=grant_use_token,json=grantUseToken,proto3" json:"grant_use_token,omitempty"`
@@ -5155,6 +5167,7 @@ func (x *DecideApprovalResponse) GetApproval() *Approval {
 	return nil
 }
 
+// Request to move an approval to a new addressee.
 type RerouteApprovalRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Approval to move.
@@ -5164,8 +5177,10 @@ type RerouteApprovalRequest struct {
 	// New addressee. Never UNSPECIFIED; NAMED needs `subject_id`.
 	Addressee *Addressee `protobuf:"bytes,3,opt,name=addressee,proto3" json:"addressee,omitempty"`
 	// Control `model.approval.reroute` decision for this approval and this addressee.
-	SpaceId            string `protobuf:"bytes,4,opt,name=space_id,json=spaceId,proto3" json:"space_id,omitempty"`
-	SpaceDecisionRef   string `protobuf:"bytes,5,opt,name=space_decision_ref,json=spaceDecisionRef,proto3" json:"space_decision_ref,omitempty"`
+	SpaceId string `protobuf:"bytes,4,opt,name=space_id,json=spaceId,proto3" json:"space_id,omitempty"`
+	// Reference of the Control `model.approval.reroute` decision.
+	SpaceDecisionRef string `protobuf:"bytes,5,opt,name=space_decision_ref,json=spaceDecisionRef,proto3" json:"space_decision_ref,omitempty"`
+	// Token of the same `model.approval.reroute` decision.
 	SpaceDecisionToken string `protobuf:"bytes,6,opt,name=space_decision_token,json=spaceDecisionToken,proto3" json:"space_decision_token,omitempty"`
 	unknownFields      protoimpl.UnknownFields
 	sizeCache          protoimpl.SizeCache
@@ -5243,6 +5258,7 @@ func (x *RerouteApprovalRequest) GetSpaceDecisionToken() string {
 	return ""
 }
 
+// Result of RerouteApprovalRequest: the updated approval record.
 type RerouteApprovalResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Updated approval record.
@@ -8206,6 +8222,7 @@ func (x *ApprovalScopeGrant) GetLastUsedAt() *timestamppb.Timestamp {
 	return nil
 }
 
+// Request to check whether a live approval scope grant releases a call.
 type UseApprovalScopeGrantRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Server-authoritative org scope of the run.
@@ -8305,6 +8322,7 @@ func (x *UseApprovalScopeGrantRequest) GetEffectClass() string {
 	return ""
 }
 
+// Result of UseApprovalScopeGrantRequest: the grant that released the call, if any.
 type UseApprovalScopeGrantResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// The grant that released the call. Empty when no live grant matches.
@@ -8350,6 +8368,7 @@ func (x *UseApprovalScopeGrantResponse) GetGrantId() string {
 	return ""
 }
 
+// Request to list the approval scope grants of one thread.
 type ListApprovalScopeGrantsRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Server-authoritative org scope.
@@ -8404,9 +8423,11 @@ func (x *ListApprovalScopeGrantsRequest) GetThreadId() string {
 	return ""
 }
 
+// Result of ListApprovalScopeGrantsRequest.
 type ListApprovalScopeGrantsResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Grants        []*ApprovalScopeGrant  `protobuf:"bytes,1,rep,name=grants,proto3" json:"grants,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The approval scope grants of the thread.
+	Grants        []*ApprovalScopeGrant `protobuf:"bytes,1,rep,name=grants,proto3" json:"grants,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -8448,6 +8469,7 @@ func (x *ListApprovalScopeGrantsResponse) GetGrants() []*ApprovalScopeGrant {
 	return nil
 }
 
+// Request to revoke one approval scope grant.
 type RevokeApprovalScopeGrantRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Server-authoritative org scope.
@@ -8502,6 +8524,7 @@ func (x *RevokeApprovalScopeGrantRequest) GetGrantId() string {
 	return ""
 }
 
+// Result of RevokeApprovalScopeGrantRequest.
 type RevokeApprovalScopeGrantResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// The grant as it stands after the revocation.
@@ -8693,8 +8716,10 @@ type OrchestrationEvent_ApprovalStateChanged struct {
 	// Why the approval was asked for, from `approvals.metadata.cause.code` (WS13 S3).
 	CauseCode string `protobuf:"bytes,6,opt,name=cause_code,json=causeCode,proto3" json:"cause_code,omitempty"`
 	// Standing rule that decided it (WS13 S7). Empty until rules exist.
-	RuleId         string                 `protobuf:"bytes,7,opt,name=rule_id,json=ruleId,proto3" json:"rule_id,omitempty"`
-	Scope          ApprovalScope          `protobuf:"varint,8,opt,name=scope,proto3,enum=model_plane.v1.ApprovalScope" json:"scope,omitempty"`
+	RuleId string `protobuf:"bytes,7,opt,name=rule_id,json=ruleId,proto3" json:"rule_id,omitempty"`
+	// How far the decision reaches; see ApprovalScope.
+	Scope ApprovalScope `protobuf:"varint,8,opt,name=scope,proto3,enum=model_plane.v1.ApprovalScope" json:"scope,omitempty"`
+	// Who recorded the decision; see ApprovalDecisionSource.
 	DecisionSource ApprovalDecisionSource `protobuf:"varint,9,opt,name=decision_source,json=decisionSource,proto3,enum=model_plane.v1.ApprovalDecisionSource" json:"decision_source,omitempty"`
 	// True when a recent re-authentication was verified for the decision (WS13 S5).
 	StepUpVerified bool `protobuf:"varint,10,opt,name=step_up_verified,json=stepUpVerified,proto3" json:"step_up_verified,omitempty"`
@@ -9432,12 +9457,14 @@ func (x *OrchestrationEvent_BrowserRunResumed) GetControlEpoch() uint64 {
 // cookie jar (WS8.G, tag 30). Emitted once per attach as an audit event.
 // Ids only: no URL and no page title ever ride this event.
 type OrchestrationEvent_BrowserAttachSharedJar struct {
-	state    protoimpl.MessageState `protogen:"open.v1"`
-	RunId    string                 `protobuf:"bytes,1,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
-	PlanId   string                 `protobuf:"bytes,2,opt,name=plan_id,json=planId,proto3" json:"plan_id,omitempty"`
-	AttachId string                 `protobuf:"bytes,3,opt,name=attach_id,json=attachId,proto3" json:"attach_id,omitempty"`
+	state  protoimpl.MessageState `protogen:"open.v1"`
+	RunId  string                 `protobuf:"bytes,1,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
+	PlanId string                 `protobuf:"bytes,2,opt,name=plan_id,json=planId,proto3" json:"plan_id,omitempty"`
+	// Identifier of this delegate attach.
+	AttachId string `protobuf:"bytes,3,opt,name=attach_id,json=attachId,proto3" json:"attach_id,omitempty"`
 	// The user's own browser run the delegate attached to.
-	SessionRunId  string `protobuf:"bytes,4,opt,name=session_run_id,json=sessionRunId,proto3" json:"session_run_id,omitempty"`
+	SessionRunId string `protobuf:"bytes,4,opt,name=session_run_id,json=sessionRunId,proto3" json:"session_run_id,omitempty"`
+	// Identifier of the browser tab the delegate attached to.
 	TabId         string `protobuf:"bytes,5,opt,name=tab_id,json=tabId,proto3" json:"tab_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache

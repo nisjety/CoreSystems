@@ -22,41 +22,66 @@ option go_package = "github.com/triodelab/model-plane/gen/go/model_plane/v1;mpv1
 // Separate file and service so that SessionCore and every mock of it stay
 // source-compatible. The SSE form of these frames is pinned by the golden
 // apps/Model Plane/api/contracts/space-events.json.
+//
+// Service name kept; generated code and deployed services depend on it.
+// buf:lint:ignore SERVICE_SUFFIX
 service SpaceEvents {
   // Opens the tail. The first frame is `connected` (or `cursor_too_old`); the stream ends
   // after a `closing` frame, after `cursor_too_old`, or when the caller goes away.
+  // Frame type name kept; renaming it would break generated code.
+  // buf:lint:ignore RPC_RESPONSE_STANDARD_NAME
   rpc StreamSpaceEvents(StreamSpaceEventsRequest) returns (stream SpaceEventFrame);
 }
 
+// Request to open the event tail for one Space.
 message StreamSpaceEventsRequest {
+  // Id of the org the stream runs in.
   string org_id = 1;
+  // Id of the calling user; must equal the caller's principal id.
   string user_id = 2;
+  // Id of the Space to tail.
   string space_id = 3;
   // Control decision, minted for service_audience "model-plane-space-stream".
   string decision_ref = 4;
+  // Token for the decision named by decision_ref.
   string decision_token = 5;
   // false: live tail from the current head. true: continue after `after_seq` of
   // `generation`; a cursor that cannot be honoured answers `cursor_too_old`.
   bool resume = 6;
+  // Log generation that after_seq refers to.
   int64 generation = 7;
+  // Last seq already seen; a resume continues after it.
   int64 after_seq = 8;
 }
 
+// One frame of the Space event stream.
 message SpaceEventFrame {
+  // Which kind of frame this is.
   oneof frame {
+    // Sent first when the stream opens.
     SpaceStreamConnected connected = 1;
+    // One event row from the Space log.
     SpaceEventRecord event = 2;
+    // Keep-alive carrying the current head, generation and cursor.
     SpaceStreamHeartbeat heartbeat = 3;
+    // The cursor cannot be honoured; the stream ends after this frame.
     SpaceStreamCursorTooOld cursor_too_old = 4;
+    // Notice that the stream is ending; the frame says whether to reconnect.
     SpaceStreamClosing closing = 5;
   }
 }
 
+// Details sent when the stream opens.
 message SpaceStreamConnected {
+  // Log generation the stream reads.
   int64 generation = 1;
+  // Newest seq in the log.
   int64 head = 2;
+  // True when the stream resumed from the caller's cursor.
   bool resumed = 3;
+  // Length of the stream lease, in seconds.
   int32 lease_seconds = 4;
+  // Interval between heartbeat frames, in seconds.
   int32 heartbeat_seconds = 5;
   // "live" or "poll_only" (a ZDR caller or decision: no rows follow).
   string mode = 6;
@@ -64,26 +89,37 @@ message SpaceStreamConnected {
   int64 cursor = 7;
 }
 
+// Keep-alive frame on the event stream.
 message SpaceStreamHeartbeat {
+  // Newest seq in the log.
   int64 head = 1;
+  // Log generation the stream reads.
   int64 generation = 2;
   // Highest seq fully processed. Not `head` while rows are still queued.
   int64 cursor = 3;
 }
 
+// Notice that the caller's cursor cannot be honoured.
 message SpaceStreamCursorTooOld {
   // "retention", "generation_changed" or "ahead_of_head".
   string reason = 1;
+  // Newest seq in the log.
   int64 head = 2;
+  // Current log generation.
   int64 generation = 3;
 }
 
+// Notice that the stream is ending.
 message SpaceStreamClosing {
   // lease_expired, reauthorize, slow_consumer, membership_revoked, zdr_poll_only.
   string code = 1;
+  // True when the client should open a new stream.
   bool reconnect = 2;
+  // Milliseconds to wait before reconnecting.
   int64 retry_after_ms = 3;
+  // Log generation the stream was reading.
   int64 generation = 4;
+  // Highest seq fully processed before the stream closed.
   int64 cursor = 5;
 }
 
@@ -92,25 +128,38 @@ message SpaceStreamClosing {
 // stubs `hidden` (a row this subscriber may not see) and `redacted` (an erased row). A stub
 // carries only seq, generation, kind and at, so the client's seq stays contiguous.
 message SpaceEventRecord {
+  // Sequence number of this row in the log.
   int64 seq = 1;
+  // Log generation the row belongs to.
   int64 generation = 2;
+  // Row kind; one of the kinds listed above.
   string kind = 3;
   // RFC 3339.
   string at = 4;
   // user, agent or system.
   string actor_type = 5;
+  // Id of the actor, of the type given by actor_type.
   string actor_id = 6;
+  // Thread the row is about.
   string thread_id = 7;
+  // Run the row is about.
   string run_id = 8;
+  // Message the row is about.
   string message_id = 9;
+  // Sequence number of the message.
   int64 message_sequence = 10;
+  // Role of the message author, such as user or assistant.
   string role = 11;
+  // Id of the agent involved.
   string agent_id = 12;
   // Closed run-state word (space::events::run_state).
   string state = 13;
+  // Run state before this change.
   string prev_state = 14;
+  // Where the change came from.
   string origin = 15;
   // Closed words: title, preview, pinned, persona.
   repeated string fields = 16;
+  // Id of the parent run, if this run has one.
   string parent_run_id = 17;
 }

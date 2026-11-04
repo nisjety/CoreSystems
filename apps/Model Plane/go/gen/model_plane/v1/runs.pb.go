@@ -159,6 +159,7 @@ func (RunContextState) EnumDescriptor() ([]byte, []int) {
 	return file_model_plane_v1_runs_proto_rawDescGZIP(), []int{1}
 }
 
+// Request to cancel a run through its Space, with the Control decision for it.
 type CancelRunAsRoomManagerRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// The run to stop.
@@ -166,7 +167,8 @@ type CancelRunAsRoomManagerRequest struct {
 	// The Space the run's thread belongs to.
 	SpaceId string `protobuf:"bytes,2,opt,name=space_id,json=spaceId,proto3" json:"space_id,omitempty"`
 	// Control `model.run.control` decision reference and token (audience model-plane).
-	SpaceControlDecisionRef   string `protobuf:"bytes,3,opt,name=space_control_decision_ref,json=spaceControlDecisionRef,proto3" json:"space_control_decision_ref,omitempty"`
+	SpaceControlDecisionRef string `protobuf:"bytes,3,opt,name=space_control_decision_ref,json=spaceControlDecisionRef,proto3" json:"space_control_decision_ref,omitempty"`
+	// Token for the Control decision reference above.
 	SpaceControlDecisionToken string `protobuf:"bytes,4,opt,name=space_control_decision_token,json=spaceControlDecisionToken,proto3" json:"space_control_decision_token,omitempty"`
 	// Must equal the idempotency key the decision was issued for.
 	IdempotencyKey string `protobuf:"bytes,5,opt,name=idempotency_key,json=idempotencyKey,proto3" json:"idempotency_key,omitempty"`
@@ -248,6 +250,7 @@ func (x *CancelRunAsRoomManagerRequest) GetReason() string {
 	return ""
 }
 
+// Result of a room-manager cancel: whether this call cancelled the run, and its receipt.
 type CancelRunAsRoomManagerResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// True if this call cancelled the run; false if it was already terminal (idempotent).
@@ -255,7 +258,8 @@ type CancelRunAsRoomManagerResponse struct {
 	// The durable RUN_CANCELLED event id (the existing one when already terminal).
 	ReceiptId string `protobuf:"bytes,2,opt,name=receipt_id,json=receiptId,proto3" json:"receipt_id,omitempty"`
 	// The run owner's org and user, for stopping that owner's live producer. Never shown to members.
-	OwnerOrgId    string `protobuf:"bytes,3,opt,name=owner_org_id,json=ownerOrgId,proto3" json:"owner_org_id,omitempty"`
+	OwnerOrgId string `protobuf:"bytes,3,opt,name=owner_org_id,json=ownerOrgId,proto3" json:"owner_org_id,omitempty"`
+	// The run owner's user id, for stopping that owner's live producer.
 	OwnerUserId   string `protobuf:"bytes,4,opt,name=owner_user_id,json=ownerUserId,proto3" json:"owner_user_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -319,6 +323,7 @@ func (x *CancelRunAsRoomManagerResponse) GetOwnerUserId() string {
 	return ""
 }
 
+// Request for a member to watch a run in a Space, with the Space read decision for it.
 type AuthorizeRoomRunAttachRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// The run the member wants to watch.
@@ -390,6 +395,7 @@ func (x *AuthorizeRoomRunAttachRequest) GetSpaceReadDecisionToken() string {
 	return ""
 }
 
+// Verdict on a member's attach to a run, with the run's details and how long it holds.
 type AuthorizeRoomRunAttachResponse struct {
 	state    protoimpl.MessageState `protogen:"open.v1"`
 	RunId    string                 `protobuf:"bytes,1,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
@@ -407,7 +413,8 @@ type AuthorizeRoomRunAttachResponse struct {
 	// The provider and connection of the route the run names, for the posture the gateway decides on
 	// that route. Set only for a zero-retention-waived run bound to the caller's own waiver (the same
 	// connection and acknowledgement); empty for a persistent run, which names no connection.
-	Provider      string `protobuf:"bytes,8,opt,name=provider,proto3" json:"provider,omitempty"`
+	Provider string `protobuf:"bytes,8,opt,name=provider,proto3" json:"provider,omitempty"`
+	// Connection of the run's route; empty for a persistent run.
 	Connection    string `protobuf:"bytes,9,opt,name=connection,proto3" json:"connection,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -620,8 +627,10 @@ type ScheduledStepContext struct {
 	Status   string                 `protobuf:"bytes,5,opt,name=status,proto3" json:"status,omitempty"`
 	// Stored-consent contract for this scheduled step (WS20 S5). Empty when the
 	// schedule has no contract; the digest and expiry are re-verified per step.
-	ContractJson      string `protobuf:"bytes,6,opt,name=contract_json,json=contractJson,proto3" json:"contract_json,omitempty"`
-	ContractDigest    string `protobuf:"bytes,7,opt,name=contract_digest,json=contractDigest,proto3" json:"contract_digest,omitempty"`
+	ContractJson string `protobuf:"bytes,6,opt,name=contract_json,json=contractJson,proto3" json:"contract_json,omitempty"`
+	// Digest of the stored-consent contract, re-verified per step.
+	ContractDigest string `protobuf:"bytes,7,opt,name=contract_digest,json=contractDigest,proto3" json:"contract_digest,omitempty"`
+	// Expiry of the stored-consent contract, re-verified per step.
 	ContractExpiresAt string `protobuf:"bytes,8,opt,name=contract_expires_at,json=contractExpiresAt,proto3" json:"contract_expires_at,omitempty"`
 	unknownFields     protoimpl.UnknownFields
 	sizeCache         protoimpl.SizeCache
@@ -1472,9 +1481,10 @@ func (x *ResolveRunActionAuthorityResponse) GetRunStatus() string {
 // ResolveApprovalAuthorityRequest names the approval and tenant only; everything else is read
 // from the durable rows.
 type ResolveApprovalAuthorityRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	ApprovalId    string                 `protobuf:"bytes,1,opt,name=approval_id,json=approvalId,proto3" json:"approval_id,omitempty"`
-	OrgId         string                 `protobuf:"bytes,2,opt,name=org_id,json=orgId,proto3" json:"org_id,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The approval to resolve.
+	ApprovalId    string `protobuf:"bytes,1,opt,name=approval_id,json=approvalId,proto3" json:"approval_id,omitempty"`
+	OrgId         string `protobuf:"bytes,2,opt,name=org_id,json=orgId,proto3" json:"org_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1526,11 +1536,12 @@ func (x *ResolveApprovalAuthorityRequest) GetOrgId() string {
 // ResolveApprovalAuthorityResponse carries identifiers, kinds and revisions only. `resolved=false`
 // has no authority and every other field is empty/default. A zero-retention run never resolves.
 type ResolveApprovalAuthorityResponse struct {
-	state      protoimpl.MessageState `protogen:"open.v1"`
-	Resolved   bool                   `protobuf:"varint,1,opt,name=resolved,proto3" json:"resolved,omitempty"`
-	ApprovalId string                 `protobuf:"bytes,2,opt,name=approval_id,json=approvalId,proto3" json:"approval_id,omitempty"`
-	RunId      string                 `protobuf:"bytes,3,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
-	OrgId      string                 `protobuf:"bytes,4,opt,name=org_id,json=orgId,proto3" json:"org_id,omitempty"`
+	state    protoimpl.MessageState `protogen:"open.v1"`
+	Resolved bool                   `protobuf:"varint,1,opt,name=resolved,proto3" json:"resolved,omitempty"`
+	// The approval this authority answer is for.
+	ApprovalId string `protobuf:"bytes,2,opt,name=approval_id,json=approvalId,proto3" json:"approval_id,omitempty"`
+	RunId      string `protobuf:"bytes,3,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
+	OrgId      string `protobuf:"bytes,4,opt,name=org_id,json=orgId,proto3" json:"org_id,omitempty"`
 	// The run owner: the subject the approved action runs as.
 	RequesterSubjectId string `protobuf:"bytes,5,opt,name=requester_subject_id,json=requesterSubjectId,proto3" json:"requester_subject_id,omitempty"`
 	ThreadId           string `protobuf:"bytes,6,opt,name=thread_id,json=threadId,proto3" json:"thread_id,omitempty"`
@@ -1546,11 +1557,12 @@ type ResolveApprovalAuthorityResponse struct {
 	// `direct`, `ambient` or `automation`; empty reads as `direct`.
 	TurnOrigin string `protobuf:"bytes,12,opt,name=turn_origin,json=turnOrigin,proto3" json:"turn_origin,omitempty"`
 	// Approval expiry; empty when none.
-	ExpiresAt                      string `protobuf:"bytes,13,opt,name=expires_at,json=expiresAt,proto3" json:"expires_at,omitempty"`
-	RecipientAudienceRef           string `protobuf:"bytes,14,opt,name=recipient_audience_ref,json=recipientAudienceRef,proto3" json:"recipient_audience_ref,omitempty"`
-	RecipientAudienceRevision      uint64 `protobuf:"varint,15,opt,name=recipient_audience_revision,json=recipientAudienceRevision,proto3" json:"recipient_audience_revision,omitempty"`
-	RecipientAudienceHash          string `protobuf:"bytes,16,opt,name=recipient_audience_hash,json=recipientAudienceHash,proto3" json:"recipient_audience_hash,omitempty"`
-	PrivacyPolicyRef               string `protobuf:"bytes,17,opt,name=privacy_policy_ref,json=privacyPolicyRef,proto3" json:"privacy_policy_ref,omitempty"`
+	ExpiresAt                 string `protobuf:"bytes,13,opt,name=expires_at,json=expiresAt,proto3" json:"expires_at,omitempty"`
+	RecipientAudienceRef      string `protobuf:"bytes,14,opt,name=recipient_audience_ref,json=recipientAudienceRef,proto3" json:"recipient_audience_ref,omitempty"`
+	RecipientAudienceRevision uint64 `protobuf:"varint,15,opt,name=recipient_audience_revision,json=recipientAudienceRevision,proto3" json:"recipient_audience_revision,omitempty"`
+	RecipientAudienceHash     string `protobuf:"bytes,16,opt,name=recipient_audience_hash,json=recipientAudienceHash,proto3" json:"recipient_audience_hash,omitempty"`
+	PrivacyPolicyRef          string `protobuf:"bytes,17,opt,name=privacy_policy_ref,json=privacyPolicyRef,proto3" json:"privacy_policy_ref,omitempty"`
+	// Reference to the thread resource authorization.
 	ThreadResourceAuthorizationRef string `protobuf:"bytes,18,opt,name=thread_resource_authorization_ref,json=threadResourceAuthorizationRef,proto3" json:"thread_resource_authorization_ref,omitempty"`
 	AuthorityRevision              uint64 `protobuf:"varint,19,opt,name=authority_revision,json=authorityRevision,proto3" json:"authority_revision,omitempty"`
 	unknownFields                  protoimpl.UnknownFields
@@ -1854,7 +1866,8 @@ type ResolveScheduledStepAuthorityResponse struct {
 	RunStatus      string                 `protobuf:"bytes,14,opt,name=run_status,json=runStatus,proto3" json:"run_status,omitempty"`
 	// Control-signed contract digest and expiry for this scheduled step (WS20 S5).
 	// Empty for a schedule without a contract.
-	ContractDigest    string `protobuf:"bytes,15,opt,name=contract_digest,json=contractDigest,proto3" json:"contract_digest,omitempty"`
+	ContractDigest string `protobuf:"bytes,15,opt,name=contract_digest,json=contractDigest,proto3" json:"contract_digest,omitempty"`
+	// Expiry of the Control-signed contract for this step; empty without a contract.
 	ContractExpiresAt string `protobuf:"bytes,16,opt,name=contract_expires_at,json=contractExpiresAt,proto3" json:"contract_expires_at,omitempty"`
 	unknownFields     protoimpl.UnknownFields
 	sizeCache         protoimpl.SizeCache
