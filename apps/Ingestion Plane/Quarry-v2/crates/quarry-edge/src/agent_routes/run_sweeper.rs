@@ -151,8 +151,13 @@ pub fn parse_human_grant_renew(raw: Option<&str>) -> Result<bool, String> {
 pub fn human_grant_renew_enabled() -> bool {
     match parse_human_grant_renew(std::env::var(ENV_HUMAN_GRANT_RENEW).ok().as_deref()) {
         Ok(on) => on,
-        Err(error) => {
-            tracing::warn!(error = %error, "human grant renewal switch unreadable; off");
+        Err(_) => {
+            // The parse error echoes the operator's raw value; log a closed label.
+            tracing::warn!(
+                error_class = "invalid_switch",
+                switch = ENV_HUMAN_GRANT_RENEW,
+                "human grant renewal switch unreadable; off"
+            );
             false
         }
     }

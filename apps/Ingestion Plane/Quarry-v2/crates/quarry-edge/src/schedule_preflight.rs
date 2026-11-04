@@ -106,8 +106,13 @@ static CONFIG: OnceLock<PreflightConfig> = OnceLock::new();
 fn config() -> &'static PreflightConfig {
     CONFIG.get_or_init(|| {
         let raw = std::env::var(ENV_SCHEDULE_POSTURE).unwrap_or_default();
-        let mode = PostureMode::parse(&raw).unwrap_or_else(|e| {
-            tracing::warn!(error = %e, "schedule preflight: invalid mode; using observe");
+        let mode = PostureMode::parse(&raw).unwrap_or_else(|_| {
+            // The parse error echoes the raw value; log a closed label instead.
+            tracing::warn!(
+                error_class = "invalid_mode",
+                switch = ENV_SCHEDULE_POSTURE,
+                "schedule preflight: invalid mode; using observe"
+            );
             PostureMode::Observe
         });
         let url = std::env::var(ENV_ORG_CORE_URL).unwrap_or_default();
