@@ -5,6 +5,14 @@ import { getActionDescriptor } from '@/shared/actions/action-registry'
 import { createSkill } from '@/shared/api/skills-client'
 import { getSession } from '@/shared/session/session-store'
 import { translateApiError, useI18n } from '@/shared/i18n'
+import {
+  findingsFor,
+  skillLintMessage,
+  skillLintRefusal,
+  skillLintWarnings,
+  type SkillLintFinding,
+} from '@/features/skills/skill-lint'
+import { SkillLintNotes } from './SkillLintNotes'
 
 /**
  * Save as skill (EP-11 S1): one of the person's own answers, saved as a private skill of theirs.
@@ -44,6 +52,17 @@ export function SaveAsSkillDialog(props: {
   const [enabled, setEnabled] = createSignal(true)
   const [submitting, setSubmitting] = createSignal(false)
   const [errorMessage, setErrorMessage] = createSignal<string | null>(null)
+  // The skill lint's findings (EP-11 S4): a refusal's errors sit next to their fields; the
+  // warnings of a save that went ahead keep the dialog open as a soft note until it is closed.
+  const [lintFindings, setLintFindings] = createSignal<SkillLintFinding[]>([])
+  const [savedWarnings, setSavedWarnings] = createSignal<SkillLintFinding[] | null>(null)
+  const lintNotes = (field: string) => (
+    <SkillLintNotes
+      findings={findingsFor(lintFindings(), field)}
+      errorClass="verevon-schedule-dialog__error"
+      noteClass="verevon-schedule-dialog__note"
+    />
+  )
 
   const close = () => {
     if (!submitting()) props.onClose()
@@ -86,6 +105,7 @@ export function SaveAsSkillDialog(props: {
     }
     setSubmitting(true)
     setErrorMessage(null)
+    setLintFindings([])
     try {
       const created = await createSkill(orgId, {
         name: input.name,
@@ -95,8 +115,26 @@ export function SaveAsSkillDialog(props: {
         scope: 'user',
       })
       props.onSaved?.(created.id)
+      const warnings = skillLintWarnings(created)
+      if (warnings.length > 0) {
+        setSavedWarnings(warnings)
+        return
+      }
       props.onClose()
     } catch (err) {
+      const refused = skillLintRefusal(err)
+      if (refused.length > 0) {
+        setLintFindings(refused)
+        // A rule about a field this dialog does not show is named in the summary instead.
+        const unshown = refused.filter((finding) => !['name', 'description', 'content'].includes(finding.field))
+        setErrorMessage(
+          [
+            i18n.tr('Ferdigheten ble ikke lagret. Rett det som er merket.', 'The skill was not saved. Fix what is marked.'),
+            ...unshown.map((finding) => skillLintMessage(finding.code, i18n.tr)),
+          ].join(' '),
+        )
+        return
+      }
       setErrorMessage(
         translateApiError(err, i18n.tr, {
           no: 'Kunne ikke lagre ferdigheten.',
@@ -146,6 +184,7 @@ export function SaveAsSkillDialog(props: {
                 onInput={(event) => setName(event.currentTarget.value)}
               />
             </label>
+            {lintNotes('name')}
 
             <label class="verevon-schedule-dialog__field">
               <span>{i18n.tr('Beskrivelse (valgfritt)', 'Description (optional)')}</span>
@@ -156,6 +195,7 @@ export function SaveAsSkillDialog(props: {
                 onInput={(event) => setDescription(event.currentTarget.value)}
               />
             </label>
+            {lintNotes('description')}
 
             <label class="verevon-schedule-dialog__field">
               <span>{i18n.tr('Innhold', 'Content')}</span>
@@ -168,6 +208,7 @@ export function SaveAsSkillDialog(props: {
                 onInput={(event) => setBody(event.currentTarget.value)}
               />
             </label>
+            {lintNotes('content')}
 
             <p class="verevon-schedule-dialog__note">
               {i18n.tr(
@@ -195,10 +236,30 @@ export function SaveAsSkillDialog(props: {
               )}
             </Show>
 
+            <Show when={savedWarnings()}>
+              {(warnings) => (
+                <p class="verevon-schedule-dialog__note" role="status">
+                  {i18n.tr('Ferdigheten er lagret.', 'The skill is saved.')}{' '}
+                  {warnings()
+                    .map((finding) => skillLintMessage(finding.code, i18n.tr))
+                    .join(' ')}
+                </p>
+              )}
+            </Show>
+
             <footer>
-              <button type="submit" class="verevon-schedule-dialog__submit" disabled={submitting()}>
-                {submitting() ? i18n.tr('Lagrer…', 'Saving…') : i18n.tr('Lagre ferdighet', 'Save skill')}
-              </button>
+              <Show
+                when={savedWarnings() === null}
+                fallback={
+                  <button type="button" class="verevon-schedule-dialog__submit" onClick={() => props.onClose()}>
+                    {i18n.tr('Ferdig', 'Done')}
+                  </button>
+                }
+              >
+                <button type="submit" class="verevon-schedule-dialog__submit" disabled={submitting()}>
+                  {submitting() ? i18n.tr('Lagrer…', 'Saving…') : i18n.tr('Lagre ferdighet', 'Save skill')}
+                </button>
+              </Show>
             </footer>
           </form>
         </div>

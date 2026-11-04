@@ -14,6 +14,14 @@ import { SectionHeader, SettingsButton } from '@/features/settings/components/se
 import { VerevonInput } from '@/shared/ui/verevon/VerevonInput'
 import { getSession } from '@/shared/session/session-store'
 import { hasWorkspaceAdminAccess } from '@/shared/session/access'
+import {
+  findingsFor,
+  skillLintMessage,
+  skillLintRefusal,
+  skillLintWarnings,
+  type SkillLintFinding,
+} from '@/features/skills/skill-lint'
+import { SkillLintNotes } from '@/features/skills/components/SkillLintNotes'
 
 /**
  * Ferdigheter (skills) — org-dekkende ferdigheter agenten kan bruke i chat.
@@ -62,6 +70,24 @@ export function SkillsSection() {
   const [busySkillId, setBusySkillId] = createSignal<string | null>(null)
   const [formError, setFormError] = createSignal<string | null>(null)
   const [actionError, setActionError] = createSignal<string | null>(null)
+  // The skill lint (EP-11 S4): a refused create marks its fields; a create that went ahead with
+  // warnings says so in a soft note under the form.
+  const [formFindings, setFormFindings] = createSignal<SkillLintFinding[]>([])
+  const [formNote, setFormNote] = createSignal<string | null>(null)
+  const lintNotes = (field: string) => (
+    <SkillLintNotes
+      findings={findingsFor(formFindings(), field)}
+      errorClass="verevon-settings-status-message verevon-settings-status-message--error"
+      noteClass="verevon-settings-help"
+    />
+  )
+  const lintSummary = (findings: SkillLintFinding[]) =>
+    findings.map((finding) => skillLintMessage(finding.code, i18n.tr)).join(' ')
+  // A toggle or a promotion the lint refused names the rules it broke; any other failure reads as before.
+  const describeActionError = (err: unknown, fallback: { no: string; en: string }) => {
+    const refused = skillLintRefusal(err)
+    return refused.length > 0 ? lintSummary(refused) : translateApiError(err, i18n.tr, fallback)
+  }
 
   // Proposals and declined learned skills are decided in the Læring inbox, never here.
   const list = createMemo(() =>
@@ -104,8 +130,10 @@ export function SkillsSection() {
 
     setSubmitting(true)
     setFormError(null)
+    setFormFindings([])
+    setFormNote(null)
     try {
-      await createSkill(id, {
+      const created = await createSkill(id, {
         name: trimmedName,
         description: description().trim() || undefined,
         content: trimmedContent,
@@ -114,9 +142,30 @@ export function SkillsSection() {
         // A member with the member switch on creates a private skill of their own (EP-11 S1).
         scope: isAdmin() ? undefined : 'user',
       })
+      const warnings = skillLintWarnings(created)
+      if (warnings.length > 0) {
+        setFormNote(`${i18n.tr('Ferdigheten er opprettet.', 'The skill is created.')} ${lintSummary(warnings)}`)
+      }
       resetForm()
       await refetch()
     } catch (err) {
+      const refused = skillLintRefusal(err)
+      if (refused.length > 0) {
+        setFormFindings(refused)
+        // A rule about a field this form does not show is named in the summary instead.
+        const unshown = refused.filter(
+          (finding) => !['name', 'description', 'content', 'trigger_keywords'].includes(finding.field),
+        )
+        setFormError(
+          [
+            i18n.tr('Ferdigheten ble ikke opprettet. Rett det som er merket.', 'The skill was not created. Fix what is marked.'),
+            lintSummary(unshown),
+          ]
+            .filter(Boolean)
+            .join(' '),
+        )
+        return
+      }
       setFormError(
         translateApiError(err, i18n.tr, { no: 'Kunne ikke opprette ferdigheten.', en: 'Could not create the skill.' }),
       )
@@ -152,7 +201,7 @@ export function SkillsSection() {
       await refetch()
     } catch (err) {
       setActionError(
-        translateApiError(err, i18n.tr, {
+        describeActionError(err, {
           no: 'Kunne ikke kopiere ferdigheten til organisasjonen.',
           en: 'Could not copy the skill to the organization.',
         }),
@@ -172,7 +221,7 @@ export function SkillsSection() {
       await refetch()
     } catch (err) {
       setActionError(
-        translateApiError(err, i18n.tr, { no: 'Kunne ikke oppdatere ferdigheten.', en: 'Could not update the skill.' }),
+        describeActionError(err, { no: 'Kunne ikke oppdatere ferdigheten.', en: 'Could not update the skill.' }),
       )
     } finally {
       setBusySkillId(null)
@@ -345,6 +394,7 @@ export function SkillsSection() {
               />
             </span>
           </label>
+          {lintNotes('name')}
 
           <label for="skill-description" class="verevon-settings-field">
             <span class="verevon-settings-label">Beskrivelse (valgfritt)</span>
@@ -358,6 +408,7 @@ export function SkillsSection() {
               />
             </span>
           </label>
+          {lintNotes('description')}
 
           <label for="skill-keywords" class="verevon-settings-field">
             <span class="verevon-settings-label">Utløser-nøkkelord</span>
@@ -374,6 +425,7 @@ export function SkillsSection() {
               Ferdigheten injiseres i chat når en samtale treffer disse ordene.
             </span>
           </label>
+          {lintNotes('trigger_keywords')}
 
           <label for="skill-content" class="verevon-settings-field">
             <span class="verevon-settings-label">Innhold (markdown)</span>
@@ -389,6 +441,7 @@ export function SkillsSection() {
               />
             </span>
           </label>
+          {lintNotes('content')}
 
           <p class="verevon-settings-help">
             {i18n.tr(
@@ -401,6 +454,14 @@ export function SkillsSection() {
             {(message) => (
               <p class="verevon-settings-status-message verevon-settings-status-message--error" role="alert">
                 {message()}
+              </p>
+            )}
+          </Show>
+
+          <Show when={formNote()}>
+            {(note) => (
+              <p class="verevon-settings-help" role="status">
+                {note()}
               </p>
             )}
           </Show>

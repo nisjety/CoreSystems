@@ -1,0 +1,39 @@
+{
+  "contract": "authored-behaviour-lint",
+  "version": 1,
+  "description": "The one lint every skill write passes (EP-11 S4). session-core UpsertAgentSkill, capability-core POST/PATCH /api/v1/skills and the bundle SKILL.md check all run these rules. mp-contracts skill_lint and capability-core internal/skilllint implement them; both test against this file, its .sha256 pin and authored-behaviour-lint-golden.json.",
+  "mode": {
+    "env": "SKILL_LINT_MODE",
+    "values": ["off", "report", "enforce"],
+    "default": "off",
+    "unknown": "off",
+    "note": "off runs nothing; report counts findings (skill_lint_findings_total{code}) and writes; enforce refuses a write with any error-severity finding. Warnings never refuse."
+  },
+  "refusal": {
+    "http_status": 422,
+    "http_code": "skill_lint_failed",
+    "http_details_key": "findings",
+    "grpc_skip_reason_prefix": "skill_lint:",
+    "note": "HTTP answers {error:{code:skill_lint_failed,message,details:{findings:[{code,field,severity}]}}}; a report-mode 2xx body adds warnings:[{code,field,severity}]. The gRPC write answers skip_reason skill_lint:<code> of the first error. A finding names a rule and a field, never the text."
+  },
+  "length_unit": "unicode_scalar_values",
+  "whitespace": "unicode_white_space",
+  "transcript_prefixes": ["User:", "Assistant:", "Bruker:"],
+  "transcript_min_lines": 3,
+  "tool_name_pattern": "^[A-Za-z0-9_.-]+$",
+  "rules": [
+    {"code": "name_empty", "field": "name", "severity": "error", "limit": null, "rule": "the name is empty after trimming whitespace; the other name rules are then skipped"},
+    {"code": "name_too_long", "field": "name", "severity": "error", "limit": 64, "rule": "the name has more than limit characters"},
+    {"code": "name_charset", "field": "name", "severity": "error", "limit": null, "rule": "the name holds a control character or starts or ends with whitespace"},
+    {"code": "description_missing", "field": "description", "severity": "warn", "limit": null, "rule": "the description is empty after trimming whitespace"},
+    {"code": "description_too_long", "field": "description", "severity": "error", "limit": 300, "rule": "the description has more than limit characters"},
+    {"code": "content_empty", "field": "content", "severity": "error", "limit": null, "rule": "the content is empty after trimming whitespace"},
+    {"code": "content_too_long", "field": "content", "severity": "error", "limit": 32000, "rule": "the content has more than limit characters"},
+    {"code": "content_exceeds_budget", "field": "content", "severity": "warn", "limit": 8000, "rule": "the content has more than limit characters (SKILL_CONTEXT_BUDGET_CHARS) and at most the content_too_long limit: injection will cut it"},
+    {"code": "transcript_shape", "field": "content", "severity": "warn", "limit": 3, "rule": "at least limit lines start, after leading whitespace, with one of transcript_prefixes: a skill holds lessons, not logs"},
+    {"code": "trigger_keyword_count", "field": "trigger_keywords", "severity": "error", "limit": 20, "rule": "more than limit trigger keywords"},
+    {"code": "trigger_keyword_too_long", "field": "trigger_keywords", "severity": "error", "limit": 40, "rule": "a trigger keyword has more than limit characters; reported once"},
+    {"code": "tool_restriction_invalid", "field": "tool_restrictions", "severity": "error", "limit": null, "rule": "a tool restriction is not one plain tool name matching tool_name_pattern (D2-512); reported once"},
+    {"code": "frontmatter_name_mismatch", "field": "frontmatter", "severity": "error", "limit": null, "rule": "a bundle SKILL.md front matter name, trimmed, differs from the skill name, trimmed; only checked on a bundle upload"}
+  ]
+}

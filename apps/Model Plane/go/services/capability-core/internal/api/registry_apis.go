@@ -34,6 +34,7 @@ import (
 	"github.com/triodelab/model-plane/services/capability-core/internal/policy"
 	"github.com/triodelab/model-plane/services/capability-core/internal/reconcile"
 	"github.com/triodelab/model-plane/services/capability-core/internal/skillbundle"
+	"github.com/triodelab/model-plane/services/capability-core/internal/skilllint"
 )
 
 type registryDatabase interface {
@@ -50,11 +51,14 @@ type registryDatabase interface {
 type SkillsHandler struct {
 	pool registryDatabase
 	pub  publisher.EventPublisher
+	// lintMode is SKILL_LINT_MODE (EP-11 S4): off runs no lint and leaves every write and
+	// body as it was.
+	lintMode skilllint.Mode
 }
 
 // NewSkillsHandler constructs the handler.
 func NewSkillsHandler(pool registryDatabase) *SkillsHandler {
-	return &SkillsHandler{pool: pool}
+	return &SkillsHandler{pool: pool, lintMode: skilllint.ModeFromLookup(os.Getenv)}
 }
 
 // WithPublisher wires reconcile-event emission (matrix §4.3). Optional, nil-safe.
@@ -134,6 +138,67 @@ type skillTxBeginner interface {
 }
 
 var errSkillTransactionUnavailable = errors.New("skill mutations need a transactional database")
+
+// errSkillLintRefused ends a mutation whose text failed the skill lint under enforce, so the
+// transaction rolls back before its statement runs.
+var errSkillLintRefused = errors.New(skilllint.ErrorCode)
+
+// lintSkill runs the shared skill lint (EP-11 S4) under mode and counts what it finds. It
+// returns the findings and whether enforce refuses the write; off runs nothing.
+func lintSkill(ctx context.Context, mode skilllint.Mode, input skilllint.Input) ([]skilllint.Finding, bool) {
+	if mode == skilllint.ModeOff {
+		return nil, false
+	}
+	findings := skilllint.Lint(input)
+	skilllint.Count(ctx, mode, findings)
+	return findings, mode == skilllint.ModeEnforce && skilllint.HasError(findings)
+}
+
+// writeSkillLintRefusal answers a refused write with the typed envelope. The findings name
+// rules and fields, never the text; they sit under a named key because details is an object.
+func writeSkillLintRefusal(w http.ResponseWriter, findings []skilllint.Finding) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusUnprocessableEntity)
+	_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{
+		"code":    skilllint.ErrorCode,
+		"message": "The skill does not pass the skill lint.",
+		"details": map[string]any{"findings": findings},
+	}})
+}
+
+// withLintWarnings adds the findings of a write that went ahead to its body. With no
+// findings, which is always the case while the lint is off, the body is unchanged.
+func withLintWarnings(body map[string]any, findings []skilllint.Finding) map[string]any {
+	if len(findings) > 0 {
+		body["warnings"] = findings
+	}
+	return body
+}
+
+// lintStoredSkill lints the row a PATCH is about to change, with the patch's description
+// and content laid over it the way the UPDATE lays them. A row that is not there passes:
+// the UPDATE then changes nothing and the caller gets 404.
+func lintStoredSkill(ctx context.Context, tx registryDatabase, mode skilllint.Mode, id, orgID, description, content string) ([]skilllint.Finding, bool, error) {
+	var input skilllint.Input
+	err := tx.QueryRow(ctx, `
+		SELECT name, description, content, trigger_keywords, tool_restrictions
+		FROM agent_skills WHERE id=$1 AND org_id=$2
+	`, id, orgID).Scan(&input.Name, &input.Description, &input.Content, &input.TriggerKeywords, &input.ToolRestrictions)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	if description != "" {
+		input.Description = description
+	}
+	if content != "" {
+		input.Content = content
+	}
+	findings, refused := lintSkill(ctx, mode, input)
+	return findings, refused, nil
+}
 
 // skillActor is the verified caller as the revision log names it: "user" or
 // "service" and the principal id, never anything the request body claims.
@@ -315,6 +380,14 @@ func (h *SkillsHandler) listOrCreate(w http.ResponseWriter, r *http.Request) {
 			s.OwnerUserID = ""
 		}
 		s.SharedWith = []string{}
+		lintFindings, lintRefused := lintSkill(r.Context(), h.lintMode, skilllint.Input{
+			Name: s.Name, Description: s.Description, Content: s.Content,
+			TriggerKeywords: s.TriggerKeywords, ToolRestrictions: s.ToolRestrictions,
+		})
+		if lintRefused {
+			writeSkillLintRefusal(w, lintFindings)
+			return
+		}
 		kw, _ := json.Marshal(s.TriggerKeywords)
 		fp, _ := json.Marshal(s.TriggerFilePatterns)
 		tr, _ := json.Marshal(s.ToolRestrictions)
@@ -369,7 +442,7 @@ func (h *SkillsHandler) listOrCreate(w http.ResponseWriter, r *http.Request) {
 			slog.Warn("reconcile emit failed", "kind", reconcile.KindSkill, "id", s.ID, "error", eerr)
 		}
 		w.WriteHeader(http.StatusCreated)
-		writeJSON(w, map[string]any{"id": s.ID})
+		writeJSON(w, withLintWarnings(map[string]any{"id": s.ID}, lintFindings))
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
@@ -464,11 +537,27 @@ func (h *SkillsHandler) update(w http.ResponseWriter, r *http.Request, id string
 	// the caller, so its revision carries the actor.
 	var result pgconn.CommandTag
 	proposalUndecided := false
+	// An edit of the text, or switching a skill on, is linted on the row as it will be, so a
+	// person who edits or re-enables learned text is held to the same rules as a new skill.
+	// A sharing change or a switch-off writes no text and is not linted.
+	lintPatch := h.lintMode != skilllint.ModeOff &&
+		(update.Description != "" || update.Content != "" || (update.Enabled != nil && *update.Enabled))
+	var lintFindings []skilllint.Finding
 	err := h.mutateSkill(r, "", "", func(tx registryDatabase) error {
 		// A user-owned skill changes only for its owner or an admin. The check takes the row
 		// lock before the statement below, so the check and the write see the same skill.
 		if err := ensureSkillCallerMayChange(r.Context(), tx, id, orgID, callerID, isAdmin); err != nil {
 			return err
+		}
+		if lintPatch {
+			findings, refused, err := lintStoredSkill(r.Context(), tx, h.lintMode, id, orgID, update.Description, update.Content)
+			if err != nil {
+				return err
+			}
+			lintFindings = findings
+			if refused {
+				return errSkillLintRefused
+			}
 		}
 		var err error
 		result, err = tx.Exec(r.Context(), `
@@ -492,6 +581,10 @@ func (h *SkillsHandler) update(w http.ResponseWriter, r *http.Request, id string
 		jsonErr(w, err.Error(), http.StatusForbidden)
 		return
 	}
+	if errors.Is(err, errSkillLintRefused) {
+		writeSkillLintRefusal(w, lintFindings)
+		return
+	}
 	if proposalUndecided {
 		jsonErr(w, "proposal_requires_decision", http.StatusConflict)
 		return
@@ -499,7 +592,7 @@ func (h *SkillsHandler) update(w http.ResponseWriter, r *http.Request, id string
 	if !writeSingleScopedMutation(w, "agent skill", result, err) {
 		return
 	}
-	writeJSON(w, map[string]any{"id": id, "updated_at": now})
+	writeJSON(w, withLintWarnings(map[string]any{"id": id, "updated_at": now}, lintFindings))
 }
 
 func (h *SkillsHandler) delete(w http.ResponseWriter, r *http.Request, id string) {
@@ -546,11 +639,15 @@ func SkillBundlesAPIFromLookup(lookup func(string) string) bool {
 type SkillBundlesHandler struct {
 	store   *skillbundle.Store
 	enabled bool
+	// db and lintMode check a bundle's SKILL.md name against its skill (EP-11 S4); while the
+	// lint is off the skill is not read.
+	db       skillbundle.DB
+	lintMode skilllint.Mode
 }
 
 // NewSkillBundlesHandler constructs the handler; enabled comes from SkillBundlesAPIFromLookup.
 func NewSkillBundlesHandler(db skillbundle.DB, enabled bool) *SkillBundlesHandler {
-	return &SkillBundlesHandler{store: skillbundle.NewStore(db), enabled: enabled}
+	return &SkillBundlesHandler{store: skillbundle.NewStore(db), enabled: enabled, db: db, lintMode: skilllint.ModeFromLookup(os.Getenv)}
 }
 
 // Register mounts the bundle route. Its more specific pattern takes precedence over the
@@ -581,6 +678,9 @@ type skillBundleSummaryView struct {
 	CreatedBy      string    `json:"created_by"`
 	CreatedAt      time.Time `json:"created_at"`
 	Replaced       bool      `json:"replaced"`
+	// Warnings are the skill lint findings of an upload that went ahead; absent while the
+	// lint is off.
+	Warnings []skilllint.Finding `json:"warnings,omitempty"`
 }
 
 func (h *SkillBundlesHandler) serve(w http.ResponseWriter, r *http.Request) {
@@ -683,6 +783,16 @@ func (h *SkillBundlesHandler) put(w http.ResponseWriter, r *http.Request, princi
 		jsonErr(w, "invalid skill bundle", http.StatusUnprocessableEntity)
 		return
 	}
+	lintFindings, lintRefused, err := h.lintFrontMatter(r.Context(), principal.OrganizationID, skillID, bundle)
+	if err != nil {
+		slog.Error("read skill for bundle lint failed", "error", err)
+		jsonErr(w, "database unavailable", http.StatusInternalServerError)
+		return
+	}
+	if lintRefused {
+		writeSkillLintRefusal(w, lintFindings)
+		return
+	}
 	result, err := h.store.Put(r.Context(), principal.OrganizationID, skillID, principal.ActorID, bundle)
 	if err != nil {
 		slog.Error("write skill bundle failed", "error", err)
@@ -699,7 +809,35 @@ func (h *SkillBundlesHandler) put(w http.ResponseWriter, r *http.Request, princi
 	_ = json.NewEncoder(w).Encode(skillBundleSummaryView{
 		SkillID: summary.SkillID, ManifestSHA256: summary.ManifestSHA256, FileCount: summary.FileCount,
 		TotalBytes: summary.TotalBytes, CreatedBy: summary.CreatedBy, CreatedAt: summary.CreatedAt, Replaced: result.Replaced,
+		Warnings: lintFindings,
 	})
+}
+
+// lintFrontMatter checks that the bundle's SKILL.md names the skill it is uploaded to. Only
+// the front matter rule applies here: the skill's own text was linted when it was written,
+// and an upload must not be refused for a row it does not change. A skill that is not there
+// is not checked.
+func (h *SkillBundlesHandler) lintFrontMatter(ctx context.Context, orgID, skillID string, bundle skillbundle.Bundle) ([]skilllint.Finding, bool, error) {
+	if h.lintMode == skilllint.ModeOff {
+		return nil, false, nil
+	}
+	var name string
+	err := h.db.QueryRow(ctx, `SELECT name FROM agent_skills WHERE id=$1 AND org_id=$2`, skillID, orgID).Scan(&name)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	frontMatterName := skillbundle.FrontMatterName(bundle)
+	var findings []skilllint.Finding
+	for _, finding := range skilllint.Lint(skilllint.Input{Name: name, FrontmatterName: &frontMatterName}) {
+		if finding.Code == skilllint.CodeFrontmatterNameMismatch {
+			findings = append(findings, finding)
+		}
+	}
+	skilllint.Count(ctx, h.lintMode, findings)
+	return findings, h.lintMode == skilllint.ModeEnforce && skilllint.HasError(findings), nil
 }
 
 // delete is DELETE /api/v1/skills/{id}/bundle: removes the org's bundle; its files cascade and

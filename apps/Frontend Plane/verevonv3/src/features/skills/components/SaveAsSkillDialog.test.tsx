@@ -16,6 +16,7 @@ vi.mock('@/shared/api/skills-client', async (importOriginal) => {
 })
 
 import { createSkill } from '@/shared/api/skills-client'
+import { ApiError } from '@/shared/api/api-error'
 import { SaveAsSkillDialog, suggestSkillName } from './SaveAsSkillDialog'
 
 const mockedCreate = vi.mocked(createSkill)
@@ -71,6 +72,40 @@ describe('SaveAsSkillDialog', () => {
       scope: 'user',
     })
     await waitFor(() => expect(onSaved).toHaveBeenCalledWith('skill_new'))
+    expect(onClose).toHaveBeenCalled()
+    unmount()
+  })
+
+  // EP-11 S4: a lint refusal is shown next to the field it is about, and nothing closes.
+  it('shows_lint_refusal_next_to_the_field', async () => {
+    mockedCreate.mockRejectedValue(
+      new ApiError('The skill does not pass the skill lint.', 422, 'skill_lint_failed', {
+        details: { findings: [{ code: 'content_too_long', field: 'content', severity: 'error' }] },
+      }),
+    )
+    const { getByRole, getByLabelText, onClose, unmount } = renderDialog()
+    fireEvent.submit(getByRole('dialog'))
+    await waitFor(() => expect(getByRole('alert').textContent).toContain('Ferdigheten ble ikke lagret'))
+    const note = document.querySelector('[data-lint-code="content_too_long"]')
+    expect(note?.textContent).toContain('32 000')
+    // The note follows the content field, not another one.
+    expect(getByLabelText('Innhold').closest('label')?.nextElementSibling).toBe(note)
+    expect(onClose).not.toHaveBeenCalled()
+    unmount()
+  })
+
+  // A save that went ahead with warnings says so before the dialog closes.
+  it('keeps_open_with_lint_warnings_after_save', async () => {
+    mockedCreate.mockResolvedValue({
+      id: 'skill_new',
+      warnings: [{ code: 'transcript_shape', field: 'content', severity: 'warn' }],
+    } as unknown as { id: string })
+    const { getByRole, getByText, onSaved, onClose, unmount } = renderDialog()
+    fireEvent.submit(getByRole('dialog'))
+    await waitFor(() => expect(onSaved).toHaveBeenCalledWith('skill_new'))
+    expect(getByRole('status').textContent).toContain('samtalelogg')
+    expect(onClose).not.toHaveBeenCalled()
+    fireEvent.click(getByText('Ferdig'))
     expect(onClose).toHaveBeenCalled()
     unmount()
   })

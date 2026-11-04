@@ -148,17 +148,22 @@ func validPath(name string) bool {
 // non-empty name and description. Keys are read at column zero only, so an indented line in
 // a body cannot satisfy the check.
 func validFrontMatter(body []byte) bool {
+	fields, closed := frontMatter(body)
+	return closed && fields["name"] != "" && fields["description"] != ""
+}
+
+// frontMatter reads the column-zero keys of the front matter block at the top of SKILL.md
+// and whether the block is closed.
+func frontMatter(body []byte) (map[string]string, bool) {
 	lines := strings.Split(string(body), "\n")
 	if len(lines) == 0 || strings.TrimRight(lines[0], "\r") != "---" {
-		return false
+		return nil, false
 	}
 	fields := make(map[string]string, 2)
-	closed := false
 	for _, raw := range lines[1:] {
 		line := strings.TrimRight(raw, "\r")
 		if line == "---" {
-			closed = true
-			break
+			return fields, true
 		}
 		key, value, found := strings.Cut(line, ":")
 		if !found || key == "" || key != strings.TrimSpace(key) {
@@ -166,7 +171,20 @@ func validFrontMatter(body []byte) bool {
 		}
 		fields[key] = strings.TrimSpace(value)
 	}
-	return closed && fields["name"] != "" && fields["description"] != ""
+	return fields, false
+}
+
+// FrontMatterName is the name in the bundle's SKILL.md front matter, read by the same rules
+// Parse checked it with. The skill lint compares it with the name of the skill the bundle is
+// uploaded to (EP-11 S4).
+func FrontMatterName(bundle Bundle) string {
+	for _, file := range bundle.Files {
+		if file.Path == SkillFileName {
+			fields, _ := frontMatter(file.Body)
+			return fields["name"]
+		}
+	}
+	return ""
 }
 
 // DeckTemplatesEnv is the switch for deck brand templates (EP-5 S6). Only the literal "true"
