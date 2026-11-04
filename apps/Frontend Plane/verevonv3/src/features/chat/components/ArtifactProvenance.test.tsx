@@ -2,7 +2,7 @@
 
 import { cleanup, render } from '@solidjs/testing-library'
 import { afterEach, describe, expect, it } from 'vitest'
-import { ArtifactProvenance } from './ArtifactProvenance'
+import { ArtifactProvenance, researchPassFacts } from './ArtifactProvenance'
 
 afterEach(cleanup)
 
@@ -51,5 +51,44 @@ describe('ArtifactProvenance', () => {
       expect(container.innerHTML).toBe('')
       unmount()
     }
+  })
+})
+
+describe('ArtifactProvenance second pass (EP-2-S6)', () => {
+  const twoPass = () => stamp({
+    passes: 2,
+    claims_by_status: { supported: 3, single_source: 1, conflict: 1, unsupported: 2 },
+    sources: [
+      { number: 1, url: 'https://example.no/a', title: 'Fôrpriser', pass: 1 },
+      { number: 2, url: 'https://example.no/b', title: 'Gap', pass: 2 },
+    ],
+  })
+
+  it('shows the passes and the claim counts by status', () => {
+    const { container } = render(() => <ArtifactProvenance provenance={twoPass()} />)
+    expect(container.querySelector('.verevon-chat-artifact-provenance__passes')?.textContent).toContain('To runder')
+    const claims = container.querySelector('.verevon-chat-artifact-provenance__claims')?.textContent ?? ''
+    expect(claims).toContain('3 støttet')
+    expect(claims).toContain('1 fra én kilde')
+    expect(claims).toContain('1 motstridende')
+    expect(claims).toContain('2 ikke verifisert')
+  })
+
+  it('shows no pass or claim line on a stamp without them', () => {
+    const { container } = render(() => <ArtifactProvenance provenance={stamp()} />)
+    expect(container.querySelector('.verevon-chat-artifact-provenance__passes')).toBeNull()
+    expect(container.querySelector('.verevon-chat-artifact-provenance__claims')).toBeNull()
+  })
+
+  it('reads the second pass numbers and drops a partial tally', () => {
+    expect(researchPassFacts(twoPass())).toEqual({
+      passes: 2,
+      claims: { supported: 3, single_source: 1, conflict: 1, unsupported: 2 },
+      secondPassNumbers: [2],
+    })
+    expect(researchPassFacts(stamp())).toBeUndefined()
+    expect(researchPassFacts(null)).toBeUndefined()
+    const partial = researchPassFacts(stamp({ passes: 1, claims_by_status: { supported: 1 } }))
+    expect(partial).toEqual({ passes: 1, claims: undefined, secondPassNumbers: [] })
   })
 })

@@ -1425,6 +1425,41 @@ describe('SourcesPanel cited passages (EP-2-S4)', () => {
   })
 })
 
+describe('SourcesPanel research passes (EP-2-S6)', () => {
+  const numbered = () => [
+    read({ id: 'dr-1', number: 1, url: 'https://one.no/a' }),
+    read({ id: 'dr-2', number: 2, url: 'https://two.no/a' }),
+    read({ id: 'dr-3', number: 3, url: 'https://three.no/a' }),
+    unread(),
+  ]
+
+  it('groups the read sources by the pass that read them, keeping the leads apart', () => {
+    const { container, unmount } = render(() => <SourcesPanel sources={numbered()} secondPassNumbers={[3]} />)
+    const passes = Array.from(container.querySelectorAll('.verevon-chat-source-pass'))
+    expect(passes.map((section) => section.getAttribute('data-pass'))).toEqual(['1', '2'])
+    expect(passes[0]?.querySelectorAll('.verevon-chat-source-card')).toHaveLength(2)
+    expect(passes[1]?.querySelectorAll('.verevon-chat-source-card')).toHaveLength(1)
+    expect(passes[1]?.textContent).toContain('Andre runde')
+    expect(passes[1]?.textContent).toContain('three.no')
+    // The running index carries on across the passes, and the unread lead stays in its own group.
+    expect(passes[1]?.querySelector('.verevon-chat-source-card__meta span')?.textContent).toBe('3')
+    expect(container.querySelectorAll('.verevon-chat-source-group--unread .verevon-chat-source-card')).toHaveLength(1)
+    unmount()
+  })
+
+  it('renders the flat list as before without a second pass', () => {
+    for (const secondPassNumbers of [undefined, [], [9]]) {
+      const { container, unmount } = render(() => (
+        <SourcesPanel sources={numbered()} secondPassNumbers={secondPassNumbers} />
+      ))
+      expect(container.querySelector('.verevon-chat-source-pass')).toBeNull()
+      expect(container.textContent).not.toContain('Første runde')
+      expect(container.querySelectorAll('.verevon-chat-source-card')).toHaveLength(4)
+      unmount()
+    }
+  })
+})
+
 describe('ChatTabs Kilder badge', () => {
   it('counts the sources that were read, not the leads that were only found', () => {
     const { container, unmount } = render(() => (

@@ -365,7 +365,15 @@ export function EmptyPanel(props: { icon: JSX.Element; title: string; subtitle: 
  * for a web-search or knowledge turn — the headings and the tally disappear and
  * this renders exactly the flat list it always did.
  */
-export function SourcesPanel(props: { grounding?: ChatKnowledgeGrounding | null; sources: EvidenceSource[] }) {
+export function SourcesPanel(props: {
+  grounding?: ChatKnowledgeGrounding | null
+  sources: EvidenceSource[]
+  /**
+   * The `[n]` a gap-driven second research pass read (EP-2-S6), from the report's provenance stamp. When any
+   * read source carries one of them the read list is grouped by pass; otherwise it renders as before.
+   */
+  secondPassNumbers?: readonly number[]
+}) {
   const i18n = useI18n()
   // Connected-app items (WS23 S6) are the person's own mail, files and events, not web or knowledge
   // evidence: they sit under their own heading, grouped by account, and stay out of the read tally.
@@ -403,6 +411,39 @@ export function SourcesPanel(props: { grounding?: ChatKnowledgeGrounding | null;
     (entry) => evidenceSourceGroupKey(entry.source),
     (entry) => evidenceSourceGroupLabel(entry.source),
   ))
+  // Pass grouping (EP-2-S6) sits inside the read section, above the domain grouping: a pass is the
+  // coarser fact (what the first search found versus what the gap search added), and each pass keeps
+  // its own domain groups and the running index computed above.
+  const secondPass = createMemo(() => new Set(props.secondPassNumbers ?? []))
+  const inSecondPass = (source: EvidenceSource) =>
+    source.kind === 'web' && source.number !== undefined && secondPass().has(source.number)
+  const passSplit = createMemo(() => readEntries().some((entry) => inSecondPass(entry.source)))
+  const readPassGroups = createMemo(() => [1, 2].map((pass) => ({
+    pass,
+    groups: groupBySourceGroupId<SourceEntry>(
+      readEntries().filter((entry) => inSecondPass(entry.source) === (pass === 2)),
+      (entry) => evidenceSourceGroupKey(entry.source),
+      (entry) => evidenceSourceGroupLabel(entry.source),
+    ),
+  })).filter((section) => section.groups.length > 0))
+  const renderReadGroups = (groups: () => ReturnType<typeof readGroups>) => (
+    <For each={groups()}>
+      {(group) => (
+        <section class="verevon-chat-source-domain-group">
+          <Show when={groups().length > 1}>
+            <h3 class="verevon-chat-source-domain-group__heading">{group.label}</h3>
+          </Show>
+          <For each={group.items}>
+            {(entry) => (
+              entry.source.kind === 'knowledge'
+                ? <KnowledgeSourceCard source={entry.source} index={entry.index} />
+                : <WebSourceCard source={entry.source} index={entry.index} />
+            )}
+          </For>
+        </section>
+      )}
+    </For>
+  )
   return (
     <Show
       when={props.sources.length > 0 || props.grounding}
@@ -451,22 +492,20 @@ export function SourcesPanel(props: { grounding?: ChatKnowledgeGrounding | null;
           <Show when={hasUnread() && groups().read.length > 0}>
             <h2 class="verevon-chat-source-group__heading">{i18n.tr('Lest og brukt', 'Read and used')}</h2>
           </Show>
-          <For each={readGroups()}>
-            {(group) => (
-              <section class="verevon-chat-source-domain-group">
-                <Show when={readGroups().length > 1}>
-                  <h3 class="verevon-chat-source-domain-group__heading">{group.label}</h3>
-                </Show>
-                <For each={group.items}>
-                  {(entry) => (
-                    entry.source.kind === 'knowledge'
-                      ? <KnowledgeSourceCard source={entry.source} index={entry.index} />
-                      : <WebSourceCard source={entry.source} index={entry.index} />
-                  )}
-                </For>
-              </section>
-            )}
-          </For>
+          <Show when={passSplit()} fallback={renderReadGroups(readGroups)}>
+            <For each={readPassGroups()}>
+              {(section) => (
+                <section class="verevon-chat-source-pass" data-pass={section.pass}>
+                  <h2 class="verevon-chat-source-group__heading">
+                    {section.pass === 1
+                      ? i18n.tr('Første runde', 'First pass')
+                      : i18n.tr('Andre runde: hull i kildene', 'Second pass: gaps in the sources')}
+                  </h2>
+                  {renderReadGroups(() => section.groups)}
+                </section>
+              )}
+            </For>
+          </Show>
           <Show when={hasUnread()}>
             <section class="verevon-chat-source-group verevon-chat-source-group--unread">
               <h2 class="verevon-chat-source-group__heading">{i18n.tr('Ikke lest', 'Not read')}</h2>
