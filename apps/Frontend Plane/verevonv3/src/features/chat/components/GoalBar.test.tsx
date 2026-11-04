@@ -10,7 +10,16 @@ import { flush } from 'solid-js'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { ThreadGoal } from '@/shared/api/thread-goal-client'
 import type { GoalAutoContinueView } from '../lib/goal-pump'
-import { GoalBar, applyGoalProgress, compactTokens, goalUsageLine } from './GoalBar'
+import {
+  GoalBar,
+  applyGoalProgress,
+  compactTokens,
+  goalAwayCron,
+  goalAwayRuns,
+  goalScheduleTemplate,
+  goalUsageLine,
+  type GoalAwayView,
+} from './GoalBar'
 import { readGoalDraft } from './GoalDialog'
 
 function goal(overrides: Partial<ThreadGoal> = {}): ThreadGoal {
@@ -261,5 +270,118 @@ describe('readGoalDraft', () => {
     expect(readGoalDraft('x'.repeat(2001), '').valid).toBe(false)
     expect(readGoalDraft('aim', Array.from({ length: 9 }, (_, i) => `c${i}`).join('\n')).valid).toBe(false)
     expect(readGoalDraft('aim', 'x'.repeat(501)).valid).toBe(false)
+  })
+})
+
+describe('Keep working while away (EP-7 S6)', () => {
+  const tool = { tool: 'web_search', capability: 'cap.tool.web_search' }
+  const now = new Date('2026-11-04T10:00:00.000Z')
+
+  function awayView(overrides: Partial<GoalAwayView> = {}): GoalAwayView {
+    return {
+      available: () => true,
+      tools: () => [tool],
+      scheduled: () => false,
+      runs: () => [],
+      threadHref: (threadId) => `/chat/${threadId}`,
+      onStart: vi.fn(),
+      ...overrides,
+    }
+  }
+
+  function mountAway(current: ThreadGoal, away: GoalAwayView) {
+    const view = render(() => (
+      <GoalBar
+        goal={current}
+        away={away}
+        onContinue={vi.fn()}
+        onEdit={vi.fn()}
+        onPause={vi.fn()}
+        onResume={vi.fn()}
+        onClear={vi.fn()}
+      />
+    ))
+    flush()
+    const toggle = () => view.container.querySelector<HTMLButtonElement>('.verevon-chat-goal-bar__away-toggle')
+    const start = () => view.container.querySelector<HTMLButtonElement>('.verevon-chat-goal-bar__away-start')
+    return { view, toggle, start }
+  }
+
+  it('builds a read-only goal-bound template within the limits, or none', () => {
+    const form = { tools: [tool], maxRuns: 3, everyMinutes: 60, days: 7 }
+    const template = goalScheduleTemplate(goal(), form, now)
+    expect(template).toMatchObject({
+      kind: 'cron',
+      description: 'Ship the quarterly report',
+      purpose: 'goal',
+      goal_id: 'goal_1',
+      goal_max_runs: 3,
+    })
+    const contract = JSON.parse(template!.approval_contract)
+    expect(contract.tools).toEqual([{ ...tool, class: 'read', approved_at: '2026-11-04T10:00:00Z' }])
+    expect(contract.expires_at).toBe('2026-11-11T10:00:00Z')
+    expect(goalScheduleTemplate(goal(), { ...form, tools: [] }, now)).toBeNull()
+    expect(goalScheduleTemplate(goal(), { ...form, maxRuns: 21 }, now)).toBeNull()
+    expect(goalScheduleTemplate(goal(), { ...form, maxRuns: 0 }, now)).toBeNull()
+    expect(goalScheduleTemplate(goal(), { ...form, everyMinutes: 5 }, now)).toBeNull()
+    expect(goalScheduleTemplate(goal(), { ...form, days: 91 }, now)).toBeNull()
+    expect(goalScheduleTemplate(goal({ status: 'paused' }), form, now)).toBeNull()
+    expect(goalAwayCron(30)).toBe('*/30 * * * *')
+    expect(goalAwayCron(15)).toBeNull()
+  })
+
+  it('reads only finished fires that reached a scheduled thread', () => {
+    expect(
+      goalAwayRuns([
+        {
+          id: 'f1',
+          fired_at: '2026-11-04T08:00:00Z',
+          completed_at: '2026-11-04T08:01:00Z',
+          status: 'completed',
+          outcome: 'completed',
+          run_id: 'run-1',
+          thread_id: 'sched-1',
+          withheld_effects: 2,
+        },
+        { id: 'f2', fired_at: '2026-11-04T09:00:00Z', status: 'running', withheld_effects: 0 },
+      ]),
+    ).toEqual([{ runId: 'run-1', threadId: 'sched-1', outcome: 'completed', withheldEffects: 2 }])
+  })
+
+  it('stays hidden unless available, and offers no new schedule while one is set', () => {
+    expect(mountAway(goal(), awayView({ available: () => false })).toggle()).toBeNull()
+    cleanup()
+    expect(mountAway(goal(), awayView({ scheduled: () => true })).toggle()).toBeNull()
+    cleanup()
+    expect(mountAway(goal({ status: 'paused' }), awayView()).toggle()).toBeNull()
+  })
+
+  it('starts only once a read tool is picked, and says it runs read only', () => {
+    const away = awayView()
+    const { view, toggle, start } = mountAway(goal(), away)
+    fireEvent.click(toggle()!)
+    expect(view.container.textContent).toMatch(/Kun lesing|Read only/)
+    expect(start()!.disabled).toBe(true)
+    fireEvent.change(view.container.querySelector<HTMLInputElement>('input[type="checkbox"]')!)
+    expect(start()!.disabled).toBe(false)
+    fireEvent.click(start()!)
+    expect(away.onStart).toHaveBeenCalledWith({ tools: [tool], maxRuns: 3, everyMinutes: 60, days: 7 })
+  })
+
+  it('cannot start without a delegable tool', () => {
+    const { view, toggle, start } = mountAway(goal(), awayView({ tools: () => [] }))
+    fireEvent.click(toggle()!)
+    expect(view.container.querySelector('.verevon-chat-goal-bar__away-none')).not.toBeNull()
+    expect(start()!.disabled).toBe(true)
+  })
+
+  it('lists the runs made while away with links to their scheduled threads', () => {
+    const { view } = mountAway(
+      goal({ status: 'met' }),
+      awayView({ runs: () => [{ runId: 'run-1', threadId: 'sched-1', outcome: 'completed', withheldEffects: 1 }] }),
+    )
+    expect(view.container.textContent).toMatch(/1 (kjøring mens du var borte|run while you were away)/)
+    expect(view.container.querySelector('a')?.getAttribute('href')).toBe('/chat/sched-1')
+    expect(view.container.querySelector('.verevon-chat-goal-bar__away-drafts')).not.toBeNull()
   })
 })

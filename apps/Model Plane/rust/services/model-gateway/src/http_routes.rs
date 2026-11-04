@@ -7994,6 +7994,11 @@ async fn create_cron_proxy(
     bearer: VerifiedCapabilityBearer,
     Json(mut b): Json<Value>,
 ) -> Result<Json<Value>, HttpJsonError> {
+    // A template naming a thread goal is a goal-bound schedule (EP-7 S6): admitted first, since
+    // session-core binds it to the goal at insert.
+    if crate::goal_unattended::names_goal(&b) {
+        crate::goal_unattended::admit(&c, &b)?;
+    }
     b["org_id"] = json!(c.org_id);
     proxy_to_capability_core(&s, &c, &bearer, "cron", "POST", Some(&b)).await
 }

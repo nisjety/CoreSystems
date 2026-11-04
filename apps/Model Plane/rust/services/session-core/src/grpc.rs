@@ -2102,10 +2102,22 @@ fn validate_scheduled_run_result_request(
 /// row learns its outcome, in one transaction. Locks run and thread, then the
 /// receipt, the order the other run writes use. A replay of the same terminal
 /// outcome returns the message the first call appended.
-#[allow(clippy::result_large_err, clippy::too_many_lines)]
+#[allow(clippy::result_large_err)]
 async fn record_scheduled_run_result_inner(
     pool: &PgPool,
     req: pb::RecordScheduledRunResultRequest,
+) -> Result<Response<pb::RecordScheduledRunResultResponse>, Status> {
+    record_scheduled_run_result_with(pool, req, crate::thread_goals::thread_goals_enabled()).await
+}
+
+/// [`record_scheduled_run_result_inner`] with the goal ledger switch passed in. With `goal_ledger`
+/// (`SESSION_CORE_THREAD_GOALS_ENABLED`) a fire of a goal-bound schedule also writes its
+/// unattended goal turn in the same transaction (EP-7 S6); off, nothing here reads a goal.
+#[allow(clippy::result_large_err, clippy::too_many_lines)]
+async fn record_scheduled_run_result_with(
+    pool: &PgPool,
+    req: pb::RecordScheduledRunResultRequest,
+    goal_ledger: bool,
 ) -> Result<Response<pb::RecordScheduledRunResultResponse>, Status> {
     let withheld_effects = validate_scheduled_run_result_request(&req)?;
 
@@ -2255,6 +2267,21 @@ async fn record_scheduled_run_result_inner(
     .execute(&mut *tx)
     .await
     .map_err(|error| Status::internal(error.to_string()))?;
+    if goal_ledger {
+        record_unattended_goal_turn(
+            &mut tx,
+            &UnattendedFire {
+                schedule_id: &schedule_id,
+                org_id: &req.org_id,
+                run_id: &req.run_id,
+                scheduled_thread_id: &thread_id,
+                outcome: unattended_turn_outcome(&req.status),
+                input_tokens: i64::from(req.input_tokens),
+                output_tokens: i64::from(req.output_tokens),
+            },
+        )
+        .await?;
+    }
     tx.commit()
         .await
         .map_err(|error| Status::internal(error.to_string()))?;
@@ -2263,6 +2290,600 @@ async fn record_scheduled_run_result_inner(
         status: req.status,
         message_id: message_id.unwrap_or_default(),
     }))
+}
+
+/// The most unattended runs one goal-bound schedule may make (EP-7 S6), and what a template that
+/// names none gets. The gateway refuses a larger cap at create; this bound holds whatever reached
+/// the table.
+const MAX_UNATTENDED_GOAL_RUNS: i32 = 20;
+
+/// One finished fire of a goal-bound schedule, as its goal turn records it: ids, a closed outcome
+/// and counts, never the answer.
+struct UnattendedFire<'a> {
+    schedule_id: &'a str,
+    org_id: &'a str,
+    run_id: &'a str,
+    scheduled_thread_id: &'a str,
+    outcome: &'static str,
+    input_tokens: i64,
+    output_tokens: i64,
+}
+
+/// The goal-turn outcome of a scheduled step status (the `thread_goal_turns` CHECK).
+fn unattended_turn_outcome(step_status: &str) -> &'static str {
+    match step_status {
+        "completed" => "completed",
+        "failed" => "failed",
+        _ => "unknown",
+    }
+}
+
+/// The counters of a goal an unattended turn was added to.
+#[derive(sqlx::FromRow)]
+struct UnattendedGoalCounters {
+    status: String,
+    token_budget: Option<i64>,
+    tokens_used: i64,
+    cost_budget_usd_micros: Option<i64>,
+    cost_used_usd_micros: i64,
+    max_turns: i32,
+    turns_used: i32,
+}
+
+/// The stop state of a goal after an unattended turn: the rule of `thread_goals::stop_state`
+/// (a spent budget is named before the turn cap; a cap not set never stops the goal), so an
+/// unattended fire closes a goal exactly as an attended settle does.
+fn unattended_stop_state(goal: &UnattendedGoalCounters) -> Option<(&'static str, &'static str)> {
+    if goal
+        .token_budget
+        .is_some_and(|budget| goal.tokens_used >= budget)
+    {
+        return Some(("budget_reached", "token_budget"));
+    }
+    if goal
+        .cost_budget_usd_micros
+        .is_some_and(|budget| goal.cost_used_usd_micros >= budget)
+    {
+        return Some(("budget_reached", "cost_budget"));
+    }
+    if goal.turns_used >= goal.max_turns {
+        return Some(("turns_reached", "max_turns"));
+    }
+    None
+}
+
+/// Ledger one fire of a goal-bound schedule on its goal (EP-7 S6), inside the scheduled result's
+/// transaction. The turn is written settled and counted, with the step's tokens as metered usage
+/// and the scheduled thread its answer went to (D9). A cap the turn reaches closes the goal, and
+/// the 0094 trigger pauses the schedule with it in this transaction; a schedule that made the runs
+/// its template allows is paused here (`goal_runs_reached`). A schedule without a goal, or whose
+/// goal is gone, writes nothing. A fire that lands after its goal closed is still ledgered: what a
+/// run spent is spent.
+#[allow(clippy::result_large_err)]
+async fn record_unattended_goal_turn(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    fire: &UnattendedFire<'_>,
+) -> Result<(), Status> {
+    let internal = |error: sqlx::Error| Status::internal(error.to_string());
+    // Read without a row lock: the link and the digest-bound template never change (0094 guard),
+    // and locking the schedule before the goal would invert the goal-then-schedule order a goal
+    // close takes through the pause trigger.
+    let link: Option<(String, Option<i64>)> = sqlx::query_as(
+        "SELECT goal_id,
+                CASE WHEN jsonb_typeof(task_template -> 'goal_max_runs') = 'number'
+                     THEN LEAST((task_template ->> 'goal_max_runs')::numeric, 1000)::bigint END
+         FROM cron_schedules
+         WHERE id = $1 AND org_id = $2 AND goal_id IS NOT NULL",
+    )
+    .bind(fire.schedule_id)
+    .bind(fire.org_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(internal)?;
+    let Some((goal_id, max_runs)) = link else {
+        return Ok(());
+    };
+    // The goal's row lock orders this write with an attended claim or settle of the same goal.
+    let locked: Option<(String,)> =
+        sqlx::query_as("SELECT id FROM thread_goals WHERE id = $1 AND org_id = $2 FOR UPDATE")
+            .bind(&goal_id)
+            .bind(fire.org_id)
+            .fetch_optional(&mut **tx)
+            .await
+            .map_err(internal)?;
+    if locked.is_none() {
+        return Ok(());
+    }
+    let inserted = sqlx::query(
+        "INSERT INTO thread_goal_turns
+             (goal_id, turn_no, run_id, org_id, claim_expires_at, settled_at, outcome,
+              metered_input_tokens, metered_output_tokens, usage_source, counted,
+              unattended, scheduled_thread_id)
+         SELECT $1, COALESCE(MAX(turn_no), 0) + 1, $2, $3, now(), now(), $4, $5, $6,
+                'run_response', true, true, $7
+         FROM thread_goal_turns WHERE goal_id = $1
+         ON CONFLICT (goal_id, run_id) WHERE run_id IS NOT NULL DO NOTHING",
+    )
+    .bind(&goal_id)
+    .bind(fire.run_id)
+    .bind(fire.org_id)
+    .bind(fire.outcome)
+    .bind(fire.input_tokens)
+    .bind(fire.output_tokens)
+    .bind(fire.scheduled_thread_id)
+    .execute(&mut **tx)
+    .await
+    .map_err(internal)?
+    .rows_affected();
+    if inserted == 0 {
+        // This run's turn is ledgered already.
+        return Ok(());
+    }
+    let goal: UnattendedGoalCounters = sqlx::query_as(
+        "UPDATE thread_goals
+         SET tokens_used = tokens_used + $2, turns_used = turns_used + 1, updated_at = now()
+         WHERE id = $1
+         RETURNING status, token_budget, tokens_used, cost_budget_usd_micros,
+                   cost_used_usd_micros, max_turns, turns_used",
+    )
+    .bind(&goal_id)
+    .bind(fire.input_tokens.saturating_add(fire.output_tokens))
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(internal)?;
+    if matches!(goal.status.as_str(), "active" | "paused") {
+        if let Some((stop, reason)) = unattended_stop_state(&goal) {
+            sqlx::query(
+                "UPDATE thread_goals
+                 SET status = $2, status_reason = $3, revision = revision + 1,
+                     updated_at = now(), closed_at = now()
+                 WHERE id = $1 AND status IN ('active', 'paused')",
+            )
+            .bind(&goal_id)
+            .bind(stop)
+            .bind(reason)
+            .execute(&mut **tx)
+            .await
+            .map_err(internal)?;
+        }
+    }
+    let cap = max_runs
+        .and_then(|runs| i32::try_from(runs).ok())
+        .filter(|runs| (1..=MAX_UNATTENDED_GOAL_RUNS).contains(runs))
+        .unwrap_or(MAX_UNATTENDED_GOAL_RUNS);
+    let runs: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM thread_goal_turns
+         WHERE goal_id = $1 AND unattended
+           AND run_id IN (SELECT run_id FROM cron_fires
+                          WHERE schedule_id = $2 AND run_id IS NOT NULL)",
+    )
+    .bind(&goal_id)
+    .bind(fire.schedule_id)
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(internal)?;
+    if runs >= i64::from(cap) {
+        sqlx::query(
+            "UPDATE cron_schedules
+             SET enabled = false, goal_paused_reason = 'goal_runs_reached', updated_at = now()
+             WHERE id = $1 AND enabled",
+        )
+        .bind(fire.schedule_id)
+        .execute(&mut **tx)
+        .await
+        .map_err(internal)?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod unattended_goal_tests {
+    use super::{
+        claim_scheduled_step_inner, pb, record_scheduled_run_result_with, unattended_stop_state,
+        unattended_turn_outcome, UnattendedGoalCounters,
+    };
+
+    fn counters(tokens: (Option<i64>, i64), turns: (i32, i32)) -> UnattendedGoalCounters {
+        UnattendedGoalCounters {
+            status: "active".to_owned(),
+            token_budget: tokens.0,
+            tokens_used: tokens.1,
+            cost_budget_usd_micros: None,
+            cost_used_usd_micros: 0,
+            max_turns: turns.0,
+            turns_used: turns.1,
+        }
+    }
+
+    #[test]
+    fn unattended_turn_outcome_is_a_closed_token() {
+        assert_eq!(unattended_turn_outcome("completed"), "completed");
+        assert_eq!(unattended_turn_outcome("failed"), "failed");
+        assert_eq!(unattended_turn_outcome("unknown_outcome"), "unknown");
+        assert_eq!(unattended_turn_outcome("anything else"), "unknown");
+    }
+
+    #[test]
+    fn unattended_stop_names_budget_before_turns() {
+        assert_eq!(unattended_stop_state(&counters((None, 9_000), (10, 3))), None);
+        assert_eq!(
+            unattended_stop_state(&counters((Some(1_000), 1_000), (10, 10))),
+            Some(("budget_reached", "token_budget"))
+        );
+        assert_eq!(
+            unattended_stop_state(&counters((Some(1_000), 10), (3, 3))),
+            Some(("turns_reached", "max_turns"))
+        );
+    }
+
+    // The database tests below run with `--ignored` against a disposable Postgres, as the other
+    // session-core database tests do. They pass the goal ledger switch in, so no env is needed.
+
+    const OWNER: &str = "user-unattended-owner";
+
+    struct Seeded {
+        org_id: String,
+        goal_id: String,
+        schedule_id: String,
+    }
+
+    async fn connect() -> Option<sqlx::PgPool> {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping: DATABASE_URL unset");
+            return None;
+        };
+        let pool = sqlx::PgPool::connect(&url).await.expect("connect pg");
+        sqlx::migrate!("./migrations")
+            .run(&pool)
+            .await
+            .expect("migrate");
+        Some(pool)
+    }
+
+    /// A personal thread with an active goal, and a schedule bound to it through the 0094 trigger.
+    async fn seed_goal_schedule(pool: &sqlx::PgPool, suffix: &str, max_runs: i64) -> Seeded {
+        let org_id = format!("unattended-org-{suffix}");
+        let thread_id = format!("unattended-thread-{suffix}");
+        let goal_id = format!("goal_{suffix}");
+        let schedule_id = format!("unattended-schedule-{suffix}");
+        sqlx::query(
+            "INSERT INTO threads (id, session_key, org_id, user_id) VALUES ($1, $1, $2, $3)",
+        )
+        .bind(&thread_id)
+        .bind(&org_id)
+        .bind(OWNER)
+        .execute(pool)
+        .await
+        .expect("seed thread");
+        sqlx::query(
+            "INSERT INTO thread_goals (id, thread_id, org_id, user_id, objective, max_turns, status)
+             VALUES ($1, $2, $3, $4, 'collect the release notes', 10, 'active')",
+        )
+        .bind(&goal_id)
+        .bind(&thread_id)
+        .bind(&org_id)
+        .bind(OWNER)
+        .execute(pool)
+        .await
+        .expect("seed goal");
+        sqlx::query(
+            "INSERT INTO cron_schedules
+                 (id, org_id, name, schedule_expr, created_by, creator_subject_id, task_template)
+             VALUES ($1, $2, $1, '0 * * * *', $3, $3, $4)",
+        )
+        .bind(&schedule_id)
+        .bind(&org_id)
+        .bind(OWNER)
+        .bind(serde_json::json!({
+            "kind": "cron",
+            "title": "collect the release notes",
+            "purpose": "goal",
+            "goal_id": goal_id,
+            "goal_max_runs": max_runs,
+        }))
+        .execute(pool)
+        .await
+        .expect("seed goal-bound schedule");
+        Seeded {
+            org_id,
+            goal_id,
+            schedule_id,
+        }
+    }
+
+    /// One claimed scheduled step of `seeded`'s schedule, with its fire, ready for a result.
+    async fn claimed_fire(
+        pool: &sqlx::PgPool,
+        seeded: &Seeded,
+        fire: &str,
+    ) -> pb::RecordScheduledRunResultRequest {
+        let run_id = format!("unattended-run-{fire}");
+        let thread_id = format!("unattended-scheduled-thread-{fire}");
+        let space_id = format!("unattended-space-{fire}");
+        let fire_key = format!("fire-{fire}");
+        let step_id = format!("{run_id}:step:0");
+        let idempotency_key = format!("{fire_key}:step:0");
+        let template_digest = format!("sha256:{}", "a".repeat(64));
+        let audience_hash = format!("sha256:{}", "c".repeat(64));
+        sqlx::query(
+            "INSERT INTO threads
+             (id, session_key, org_id, user_id, space_id, space_decision_ref,
+              recipient_audience_ref, recipient_audience_revision,
+              recipient_audience_hash, privacy_policy_ref,
+              resource_authorization_ref, authority_revision, origin)
+             VALUES ($1,$1,$2,'service:orchestrator-core',$3,$4,$5,1,$6,$7,$8,1,'space')",
+        )
+        .bind(&thread_id)
+        .bind(&seeded.org_id)
+        .bind(&space_id)
+        .bind(format!("decision-{fire}"))
+        .bind(format!("audience-{fire}"))
+        .bind(&audience_hash)
+        .bind(format!("privacy-{fire}"))
+        .bind(format!("resource-{fire}"))
+        .execute(pool)
+        .await
+        .expect("seed scheduled thread");
+        sqlx::query(
+            "INSERT INTO runs
+             (id, thread_id, goal, org_id, user_id, status, metadata,
+              space_id, space_decision_ref, recipient_audience_ref,
+              recipient_audience_revision, recipient_audience_hash,
+              privacy_policy_ref, resource_authorization_ref, authority_revision,
+              retention_class)
+             VALUES ($1,$2,'collect the release notes',$3,'service:orchestrator-core',
+                     'queued',$4,$5,$6,$7,1,$8,$9,$10,1,'persistent')",
+        )
+        .bind(&run_id)
+        .bind(&thread_id)
+        .bind(&seeded.org_id)
+        .bind(serde_json::json!({
+            "source": "scheduled_run",
+            "schedule_id": seeded.schedule_id,
+            "fire_key": fire_key,
+            "template_digest": template_digest,
+            "space_id": space_id,
+        }))
+        .bind(&space_id)
+        .bind(format!("decision-{fire}"))
+        .bind(format!("audience-{fire}"))
+        .bind(&audience_hash)
+        .bind(format!("privacy-{fire}"))
+        .bind(format!("resource-{fire}"))
+        .execute(pool)
+        .await
+        .expect("seed scheduled run");
+        sqlx::query(
+            "INSERT INTO cron_fires (id, schedule_id, status, fire_key)
+             VALUES ($1, $2, 'pending', $3)",
+        )
+        .bind(format!("fire-row-{fire}"))
+        .bind(&seeded.schedule_id)
+        .bind(&fire_key)
+        .execute(pool)
+        .await
+        .expect("seed fire");
+        let claimed = claim_scheduled_step_inner(
+            pool,
+            pb::ClaimScheduledStepRequest {
+                run_id: run_id.clone(),
+                thread_id,
+                org_id: seeded.org_id.clone(),
+                space_id,
+                schedule_id: seeded.schedule_id.clone(),
+                fire_key,
+                template_digest,
+                step_id: step_id.clone(),
+                step_index: 0,
+                policy_digest: format!("sha256:{}", "b".repeat(64)),
+                idempotency_key: idempotency_key.clone(),
+            },
+        )
+        .await
+        .expect("claim scheduled step")
+        .into_inner();
+        pb::RecordScheduledRunResultRequest {
+            run_id,
+            step_id,
+            org_id: seeded.org_id.clone(),
+            idempotency_key,
+            receipt_id: claimed.receipt_id,
+            status: "completed".to_owned(),
+            output: "the release notes so far".to_owned(),
+            input_tokens: 1_200,
+            output_tokens: 300,
+            ..Default::default()
+        }
+    }
+
+    async fn schedule_state(pool: &sqlx::PgPool, schedule_id: &str) -> (bool, Option<String>) {
+        sqlx::query_as("SELECT enabled, goal_paused_reason FROM cron_schedules WHERE id = $1")
+            .bind(schedule_id)
+            .fetch_one(pool)
+            .await
+            .expect("read schedule")
+    }
+
+    /// EP-7 S6: a fire of a goal-bound schedule writes one settled, counted, unattended turn with
+    /// the step's tokens and the scheduled thread, once; a replay adds nothing, and the switch off
+    /// writes nothing.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres with session-core migrations"]
+    async fn scheduled_result_with_goal_writes_unattended_turn() {
+        let Some(pool) = connect().await else {
+            return;
+        };
+        let seeded = seed_goal_schedule(&pool, &mp_ids::new_ulid().to_lowercase(), 3).await;
+        let bound: Option<String> =
+            sqlx::query_scalar("SELECT goal_id FROM cron_schedules WHERE id = $1")
+                .bind(&seeded.schedule_id)
+                .fetch_one(&pool)
+                .await
+                .expect("read link");
+        assert_eq!(bound.as_deref(), Some(seeded.goal_id.as_str()));
+
+        let off = claimed_fire(&pool, &seeded, &mp_ids::new_ulid()).await;
+        record_scheduled_run_result_with(&pool, off, false)
+            .await
+            .expect("result with the switch off");
+        let turns: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM thread_goal_turns WHERE goal_id = $1")
+                .bind(&seeded.goal_id)
+                .fetch_one(&pool)
+                .await
+                .expect("count turns");
+        assert_eq!(turns, 0, "the switch off writes no goal turn");
+
+        let request = claimed_fire(&pool, &seeded, &mp_ids::new_ulid()).await;
+        record_scheduled_run_result_with(&pool, request.clone(), true)
+            .await
+            .expect("first result");
+        record_scheduled_run_result_with(&pool, request.clone(), true)
+            .await
+            .expect("replayed result");
+        let (outcome, unattended, counted, input, output, scheduled_thread): (
+            String,
+            bool,
+            bool,
+            i64,
+            i64,
+            Option<String>,
+        ) = sqlx::query_as(
+            "SELECT outcome, unattended, counted, metered_input_tokens, metered_output_tokens,
+                    scheduled_thread_id
+             FROM thread_goal_turns WHERE goal_id = $1 AND run_id = $2",
+        )
+        .bind(&seeded.goal_id)
+        .bind(&request.run_id)
+        .fetch_one(&pool)
+        .await
+        .expect("one unattended turn");
+        assert_eq!(outcome, "completed");
+        assert!(unattended && counted);
+        assert_eq!((input, output), (1_200, 300));
+        let scheduled_thread = scheduled_thread.unwrap_or_default();
+        assert!(scheduled_thread.starts_with("unattended-scheduled-thread-"));
+        let (tokens, turns): (i64, i32) =
+            sqlx::query_as("SELECT tokens_used, turns_used FROM thread_goals WHERE id = $1")
+                .bind(&seeded.goal_id)
+                .fetch_one(&pool)
+                .await
+                .expect("read counters");
+        assert_eq!((tokens, turns), (1_500, 1), "a replay adds nothing");
+        assert_eq!(schedule_state(&pool, &seeded.schedule_id).await, (true, None));
+    }
+
+    /// EP-7 S6: a goal that leaves `active` pauses its schedule in the same transaction, and the
+    /// schedule is re-enabled only while the goal is active; a schedule that ran its runs stays off.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres with session-core migrations"]
+    async fn goal_close_pauses_schedule() {
+        let Some(pool) = connect().await else {
+            return;
+        };
+        let seeded = seed_goal_schedule(&pool, &mp_ids::new_ulid().to_lowercase(), 1).await;
+
+        sqlx::query("UPDATE thread_goals SET status = 'paused' WHERE id = $1")
+            .bind(&seeded.goal_id)
+            .execute(&pool)
+            .await
+            .expect("pause goal");
+        assert_eq!(
+            schedule_state(&pool, &seeded.schedule_id).await,
+            (false, Some("goal_paused".to_owned()))
+        );
+        sqlx::query("UPDATE cron_schedules SET enabled = true WHERE id = $1")
+            .bind(&seeded.schedule_id)
+            .execute(&pool)
+            .await
+            .expect_err("a paused goal's schedule stays off");
+        sqlx::query("UPDATE thread_goals SET status = 'active' WHERE id = $1")
+            .bind(&seeded.goal_id)
+            .execute(&pool)
+            .await
+            .expect("resume goal");
+        sqlx::query("UPDATE cron_schedules SET enabled = true WHERE id = $1")
+            .bind(&seeded.schedule_id)
+            .execute(&pool)
+            .await
+            .expect("re-enable under an active goal");
+        assert_eq!(schedule_state(&pool, &seeded.schedule_id).await, (true, None));
+
+        // goal_max_runs = 1: the first fire pauses the schedule for good.
+        let request = claimed_fire(&pool, &seeded, &mp_ids::new_ulid()).await;
+        record_scheduled_run_result_with(&pool, request, true)
+            .await
+            .expect("result");
+        assert_eq!(
+            schedule_state(&pool, &seeded.schedule_id).await,
+            (false, Some("goal_runs_reached".to_owned()))
+        );
+        sqlx::query("UPDATE cron_schedules SET enabled = true WHERE id = $1")
+            .bind(&seeded.schedule_id)
+            .execute(&pool)
+            .await
+            .expect_err("a schedule that ran its runs stays off");
+
+        // A goal closed on a cap is a close: a second schedule's goal shows it.
+        let other = seed_goal_schedule(&pool, &mp_ids::new_ulid().to_lowercase(), 5).await;
+        sqlx::query(
+            "UPDATE thread_goals SET status = 'met', status_reason = '', closed_at = now()
+             WHERE id = $1",
+        )
+        .bind(&other.goal_id)
+        .execute(&pool)
+        .await
+        .expect("close goal");
+        assert_eq!(
+            schedule_state(&pool, &other.schedule_id).await,
+            (false, Some("goal_closed".to_owned()))
+        );
+    }
+
+    /// EP-7 S6: deleting a goal unbinds and disables its schedule, which never runs on as an
+    /// ordinary schedule; a template naming a goal the creator does not own is refused.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres with session-core migrations"]
+    async fn goal_link_set_null_on_goal_delete() {
+        let Some(pool) = connect().await else {
+            return;
+        };
+        let seeded = seed_goal_schedule(&pool, &mp_ids::new_ulid().to_lowercase(), 3).await;
+        sqlx::query("DELETE FROM thread_goals WHERE id = $1")
+            .bind(&seeded.goal_id)
+            .execute(&pool)
+            .await
+            .expect("delete goal");
+        let (goal_id, enabled, reason): (Option<String>, bool, Option<String>) = sqlx::query_as(
+            "SELECT goal_id, enabled, goal_paused_reason FROM cron_schedules WHERE id = $1",
+        )
+        .bind(&seeded.schedule_id)
+        .fetch_one(&pool)
+        .await
+        .expect("read schedule");
+        assert_eq!(goal_id, None);
+        assert!(!enabled);
+        assert_eq!(reason.as_deref(), Some("goal_deleted"));
+        sqlx::query("UPDATE cron_schedules SET enabled = true WHERE id = $1")
+            .bind(&seeded.schedule_id)
+            .execute(&pool)
+            .await
+            .expect_err("a schedule whose goal is gone stays off");
+
+        let other = seed_goal_schedule(&pool, &mp_ids::new_ulid().to_lowercase(), 3).await;
+        let refused = sqlx::query(
+            "INSERT INTO cron_schedules
+                 (id, org_id, name, schedule_expr, created_by, creator_subject_id, task_template)
+             VALUES ($1, $2, $1, '0 * * * *', 'someone-else', 'someone-else', $3)",
+        )
+        .bind(format!("foreign-{}", other.schedule_id))
+        .bind(&other.org_id)
+        .bind(serde_json::json!({ "goal_id": other.goal_id }))
+        .execute(&pool)
+        .await
+        .expect_err("a goal another person owns is never bound");
+        assert!(refused.to_string().contains("thread_goal_schedule_binding_refused"));
+    }
 }
 
 /// Append a scheduled run's answer to its thread inside the caller's transaction
