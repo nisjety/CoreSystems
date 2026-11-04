@@ -1,0 +1,1157 @@
+//! Retention sweeper, dry run (Wave 3 EP-9 C2).
+//!
+//! Finds the personal threads that have been idle past their org's retention window
+//! and records, per org and pass, how many it would delete. It deletes nothing: the
+//! delete mode is EP-9 C3, which turns on only after the owner reviewed a week of
+//! these counts.
+//!
+//! # Where the policy comes from
+//!
+//! Control owns the window and the legal holds (org-core, EP-9 C1). Session-core asks
+//! `POST /internal/orgs/:orgId/retention/check` with its own principal (scope
+//! `org:retention-policy:read:any`, held by session-core alone) and never stores the
+//! answer. The orgs asked are the ones that own personal threads here; an org
+//! org-core does not know (404) or with no window set keeps everything.
+//!
+//! # Fail closed
+//!
+//! Any answer that is not a clean 200 for the right org at one policy revision means
+//! "unknown", and an unknown policy yields no candidates: the pass writes its row
+//! with an `error_code` and zero counts. A window outside 30..3650 days (D-C2) is
+//! refused the same way rather than clamped, because a clamped window is a window
+//! nobody set.
+//!
+//! # What counts as a candidate (D-C2)
+//!
+//! A thread with no Space id and no Space kind (Space threads are out of scope in
+//! W3), whose last activity (its newest message, or the latest change of one of its
+//! runs, whichever is later) is older than the window, and with no run still open.
+//! Held threads, and every thread while the org is held, are counted as `held`.
+//! Threads whose every run was zero-retention hold no content and are counted as
+//! `skipped_zdr` without asking org-core about them.
+//!
+//! # The switch
+//!
+//! `SESSION_RETENTION_SWEEP` is `off`, `dry_run` or `enforce`; unset or empty is
+//! `off`. Any other value is `dry_run`, never `enforce`, because this switch is the
+//! one that will delete data: a typo must not widen it (a deliberate deviation from
+//! the strict "unknown means off" rule, stated in the ledger entry). `enforce` runs
+//! dry in this build, since the delete path does not exist yet.
+//!
+//! # ZDR
+//!
+//! The run table holds ids, numbers and closed words only, and the audit event
+//! carries the same counts. No content is read beyond row counts.
+use anyhow::{anyhow, Context, Result};
+use chrono::{DateTime, Utc};
+use serde::Deserialize;
+use sqlx::PgPool;
+use std::collections::{BTreeMap, HashSet};
+use std::time::Duration;
+use tracing::{error, info, warn};
+
+pub(crate) const SWITCH_ENV: &str = "SESSION_RETENTION_SWEEP";
+pub(crate) const INTERVAL_SECS_ENV: &str = "SESSION_RETENTION_SWEEP_INTERVAL_SECS";
+
+/// Six hours: four passes a day is enough for a window measured in days.
+const DEFAULT_INTERVAL_SECS: u64 = 6 * 60 * 60;
+/// A floor so a misconfigured interval cannot turn the sweep into a hot loop
+/// against org-core.
+const MIN_INTERVAL_SECS: u64 = 300;
+
+/// The window bounds of D-C2, the same CHECK org-core's table holds.
+pub(crate) const MIN_WINDOW_DAYS: i64 = 30;
+pub(crate) const MAX_WINDOW_DAYS: i64 = 3650;
+
+/// org-core's `MaxCheckThreadIDs`: the most thread ids one check may name. The
+/// candidates are paged at this size, so a page is also one check call.
+const CHECK_PAGE: i64 = 500;
+
+/// The principal org-core's credential registry knows this service by.
+const SERVICE_ID: &str = "session-core";
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+/// A check answer names at most 500 ids of at most 128 bytes each.
+const MAX_BODY_BYTES: usize = 96 * 1024;
+
+/// Session-level advisory lock key, so two replicas do not sweep at the same time.
+/// The value is arbitrary; it only has to differ from every other lock key in the
+/// database ("retention" in ASCII).
+const SWEEP_LOCK_KEY: i64 = 0x7265_7465_6e74_696f;
+
+/// Audit event name; also the last token of the wire subject.
+pub(crate) const EVENT_RETENTION_SWEEP: &str = "retention_sweep";
+
+/// The closed vocabulary of `retention_sweep_runs.error_code`.
+pub(crate) const ERROR_POLICY_UNAVAILABLE: &str = "policy_unavailable";
+pub(crate) const ERROR_POLICY_WINDOW_INVALID: &str = "policy_window_invalid";
+pub(crate) const ERROR_POLICY_CHANGED: &str = "policy_changed";
+
+/// Every session-core table with a `thread_id` column (integration round B, C-B9).
+/// The delete mode (EP-9 C3) must erase each of these with its thread, and the dry
+/// run counts their rows per would-delete thread so the owner sees what a pass
+/// would remove. A migration that adds a `thread_id` column without adding its
+/// table here fails `thread_bound_tables_cover_every_migration`.
+pub(crate) const THREAD_BOUND_TABLES: &[&str] = &[
+    "messages",
+    "runs",
+    "memory_index",
+    "plans",
+    "todos",
+    "dream_runs",
+    "scheduled_step_receipts",
+    "run_questions",
+    "cron_fires",
+    "approval_scope_grants",
+    "skill_revisions",
+    "space_event_log",
+    "message_mentions",
+    "message_revisions",
+    "artifact_revisions",
+    "thread_goals",
+];
+
+/// What the switch asks for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Mode {
+    Off,
+    DryRun,
+    Enforce,
+}
+
+/// The value every pass writes to `retention_sweep_runs.mode`. `enforce` runs dry
+/// until C3 builds the delete path, and the row says what happened, not what was
+/// asked.
+const RECORDED_MODE: &str = "dry_run";
+
+/// Reads the switch. Unset, empty or `off` is off; `dry_run` and `enforce` are
+/// themselves; anything else is `dry_run`, never `enforce` (see the module docs).
+pub(crate) fn mode_from(raw: Option<&str>) -> Mode {
+    match raw.map(str::trim) {
+        None | Some("" | "off") => Mode::Off,
+        Some("enforce") => Mode::Enforce,
+        Some(_) => Mode::DryRun,
+    }
+}
+
+pub(crate) fn mode() -> Mode {
+    mode_from(std::env::var(SWITCH_ENV).ok().as_deref())
+}
+
+/// The pass interval: the default when unset or unreadable, never below the floor.
+pub(crate) fn interval_from(raw: Option<&str>) -> Duration {
+    let secs = raw
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .unwrap_or(DEFAULT_INTERVAL_SECS)
+        .max(MIN_INTERVAL_SECS);
+    Duration::from_secs(secs)
+}
+
+/// org-core's answer for one org at one policy revision.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PolicyAnswer {
+    /// `None` means keep: no window is set.
+    pub(crate) window_days: Option<i64>,
+    pub(crate) revision: i64,
+    pub(crate) org_held: bool,
+    pub(crate) held_thread_ids: HashSet<String>,
+}
+
+#[derive(Deserialize)]
+struct CheckWire {
+    organization_id: String,
+    window_days: Option<i64>,
+    revision: i64,
+    org_held: bool,
+    #[serde(default)]
+    held_thread_ids: Vec<String>,
+}
+
+/// Strict reading of a check answer: it must name the org it was asked about, and a
+/// negative revision is not a revision.
+fn parse_check(org_id: &str, body: &[u8]) -> Result<PolicyAnswer> {
+    let wire: CheckWire = serde_json::from_slice(body).context("retention check body is not a check answer")?;
+    if wire.organization_id != org_id {
+        return Err(anyhow!("retention check answered for another organization"));
+    }
+    if wire.revision < 0 {
+        return Err(anyhow!("retention check revision is negative"));
+    }
+    Ok(PolicyAnswer {
+        window_days: wire.window_days,
+        revision: wire.revision,
+        org_held: wire.org_held,
+        held_thread_ids: wire.held_thread_ids.into_iter().collect(),
+    })
+}
+
+/// Asks org-core the sweeper's question. Holds a service credential, so it has no
+/// `Debug`.
+pub(crate) struct CheckClient {
+    base_url: String,
+    token: String,
+    client: reqwest::Client,
+}
+
+impl CheckClient {
+    /// `None` when the credentials are unset. Shares org-core's address and the
+    /// session-core credential with the org policy mirror (`org_policy.rs`); the
+    /// credential must also hold `org:retention-policy:read:any`.
+    pub(crate) fn from_lookup(get: &impl Fn(&str) -> Option<String>) -> Option<Self> {
+        let base_url = get(crate::org_policy::ORG_CORE_URL_ENV)?.trim().to_owned();
+        let token = get(crate::org_policy::SERVICE_TOKEN_ENV)?.trim().to_owned();
+        if base_url.is_empty() || token.is_empty() {
+            return None;
+        }
+        let client = reqwest::Client::builder()
+            .connect_timeout(CONNECT_TIMEOUT)
+            .timeout(REQUEST_TIMEOUT)
+            .build()
+            .ok()?;
+        Some(Self {
+            base_url,
+            token,
+            client,
+        })
+    }
+
+    fn check_url(&self, org_id: &str) -> Result<reqwest::Url> {
+        let mut url = reqwest::Url::parse(&self.base_url).context("ORG_CORE_URL is not a URL")?;
+        url.path_segments_mut()
+            .map_err(|()| anyhow!("ORG_CORE_URL cannot carry a path"))?
+            .pop_if_empty()
+            .extend(["internal", "orgs", org_id, "retention", "check"]);
+        Ok(url)
+    }
+
+    /// One check. `Ok(None)` is org-core's definitive 404: it does not know the org,
+    /// so there is no policy and nothing is swept. Every other failure is an error,
+    /// which the pass reads as "unknown".
+    pub(crate) async fn check(&self, org_id: &str, thread_ids: &[String]) -> Result<Option<PolicyAnswer>> {
+        let response = self
+            .client
+            .post(self.check_url(org_id)?)
+            .header("x-service-id", SERVICE_ID)
+            .header("x-service-token", &self.token)
+            .json(&serde_json::json!({ "thread_ids": thread_ids }))
+            .send()
+            .await
+            .context("retention check request failed")?;
+        let status = response.status();
+        if status == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        if !status.is_success() {
+            return Err(anyhow!("retention check answered {status}"));
+        }
+        let body = response.bytes().await.context("retention check body unreadable")?;
+        if body.len() > MAX_BODY_BYTES {
+            return Err(anyhow!("retention check body too large"));
+        }
+        parse_check(org_id, &body).map(Some)
+    }
+}
+
+/// One candidate thread of a page.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Candidate {
+    pub(crate) thread_id: String,
+    /// Every run of the thread was zero-retention, so it holds no content.
+    pub(crate) zdr_only: bool,
+}
+
+/// The counts of one pass over one org.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct SweepCounts {
+    pub(crate) candidates: i64,
+    pub(crate) held: i64,
+    pub(crate) skipped_zdr: i64,
+    pub(crate) would_delete: i64,
+    /// Rows of each [`THREAD_BOUND_TABLES`] table bound to the would-delete threads.
+    pub(crate) rows_by_table: BTreeMap<&'static str, i64>,
+}
+
+/// One `retention_sweep_runs` row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SweepRun {
+    pub(crate) id: String,
+    pub(crate) org_id: String,
+    pub(crate) mode: &'static str,
+    pub(crate) policy_revision: i64,
+    pub(crate) window_days: Option<i64>,
+    pub(crate) started_at: DateTime<Utc>,
+    pub(crate) finished_at: DateTime<Utc>,
+    pub(crate) counts: SweepCounts,
+    pub(crate) error_code: Option<&'static str>,
+}
+
+/// Splits one page by the check answer: what is zero-retention, what is held, what
+/// would be deleted. Pure. A held id the page did not name is ignored, so org-core
+/// cannot add a thread to the counts.
+pub(crate) fn split_page<'a>(page: &'a [Candidate], answer: &PolicyAnswer) -> (i64, i64, Vec<&'a str>) {
+    let mut skipped_zdr = 0;
+    let mut held = 0;
+    let mut would_delete = Vec::new();
+    for candidate in page {
+        if candidate.zdr_only {
+            skipped_zdr += 1;
+        } else if answer.org_held || answer.held_thread_ids.contains(&candidate.thread_id) {
+            held += 1;
+        } else {
+            would_delete.push(candidate.thread_id.as_str());
+        }
+    }
+    (skipped_zdr, held, would_delete)
+}
+
+pub(crate) fn window_in_bounds(days: i64) -> bool {
+    (MIN_WINDOW_DAYS..=MAX_WINDOW_DAYS).contains(&days)
+}
+
+/// One page of candidates after `cursor`, in id order. Last activity is the later of
+/// the thread's own activity time and the latest change of any of its runs; a thread
+/// with a run that has not ended is never a candidate.
+async fn candidate_page(
+    pool: &PgPool,
+    org_id: &str,
+    cutoff: DateTime<Utc>,
+    cursor: &str,
+) -> Result<Vec<Candidate>, sqlx::Error> {
+    let rows: Vec<(String, bool)> = sqlx::query_as(
+        "SELECT t.id,
+                (EXISTS (SELECT 1 FROM runs r WHERE r.thread_id = t.id)
+                 AND NOT EXISTS (SELECT 1 FROM runs r
+                                  WHERE r.thread_id = t.id AND r.retention_class <> 'zdr')) AS zdr_only
+           FROM threads t
+          WHERE t.org_id = $1
+            AND t.space_id IS NULL
+            AND t.space_kind IS NULL
+            AND t.id > $3
+            AND GREATEST(t.last_activity_at,
+                         COALESCE((SELECT max(GREATEST(r.updated_at, COALESCE(r.ended_at, r.updated_at)))
+                                     FROM runs r WHERE r.thread_id = t.id),
+                                  t.last_activity_at)) < $2
+            AND NOT EXISTS (SELECT 1 FROM runs r
+                             WHERE r.thread_id = t.id
+                               AND r.status NOT IN ('completed', 'failed', 'cancelled'))
+          ORDER BY t.id
+          LIMIT $4",
+    )
+    .bind(org_id)
+    .bind(cutoff)
+    .bind(cursor)
+    .bind(CHECK_PAGE)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|(thread_id, zdr_only)| Candidate { thread_id, zdr_only })
+        .collect())
+}
+
+/// Adds the rows each thread-bound table holds for `thread_ids` to `rows_by_table`.
+async fn count_bound_rows(
+    pool: &PgPool,
+    thread_ids: &[&str],
+    rows_by_table: &mut BTreeMap<&'static str, i64>,
+) -> Result<(), sqlx::Error> {
+    if thread_ids.is_empty() {
+        return Ok(());
+    }
+    for table in THREAD_BOUND_TABLES {
+        // `table` is one of the constants above, never input.
+        let rows: i64 = sqlx::query_scalar(&format!("SELECT count(*) FROM {table} WHERE thread_id = ANY($1)"))
+            .bind(thread_ids)
+            .fetch_one(pool)
+            .await?;
+        *rows_by_table.entry(table).or_insert(0) += rows;
+    }
+    Ok(())
+}
+
+/// One dry pass over one org. `Ok(None)` when the org has no policy to apply (org-core
+/// does not know it, or no window is set): nothing is recorded. A database error is
+/// returned; every org-core failure is recorded as the row's `error_code` with zero
+/// counts, so an unknown policy never yields a candidate.
+pub(crate) async fn sweep_org(
+    pool: &PgPool,
+    client: &CheckClient,
+    org_id: &str,
+) -> Result<Option<SweepRun>, sqlx::Error> {
+    let started_at = Utc::now();
+    let mut run = SweepRun {
+        id: format!("rsw_{}", mp_ids::new_ulid()),
+        org_id: org_id.to_owned(),
+        mode: RECORDED_MODE,
+        policy_revision: 0,
+        window_days: None,
+        started_at,
+        finished_at: started_at,
+        counts: SweepCounts::default(),
+        error_code: None,
+    };
+    let fail = |mut run: SweepRun, code: &'static str| {
+        run.counts = SweepCounts::default();
+        run.error_code = Some(code);
+        run.finished_at = Utc::now();
+        Some(run)
+    };
+
+    // The empty question reads the window, the revision and the org hold.
+    let policy = match client.check(org_id, &[]).await {
+        Ok(Some(policy)) => policy,
+        Ok(None) => return Ok(None),
+        Err(error) => {
+            warn!(%org_id, %error, "retention check failed; no candidates for this org");
+            return Ok(fail(run, ERROR_POLICY_UNAVAILABLE));
+        }
+    };
+    let Some(window_days) = policy.window_days else {
+        return Ok(None);
+    };
+    run.policy_revision = policy.revision;
+    if !window_in_bounds(window_days) {
+        warn!(%org_id, window_days, "retention window outside 30..3650 days; refused");
+        return Ok(fail(run, ERROR_POLICY_WINDOW_INVALID));
+    }
+    run.window_days = Some(window_days);
+
+    // One cutoff for the whole pass, from the database clock the activity times use.
+    let window = i32::try_from(window_days).unwrap_or(i32::MAX);
+    let cutoff: DateTime<Utc> = sqlx::query_scalar("SELECT now() - make_interval(days => $1)")
+        .bind(window)
+        .fetch_one(pool)
+        .await?;
+
+    let mut cursor = String::new();
+    loop {
+        let page = candidate_page(pool, org_id, cutoff, &cursor).await?;
+        let Some(last) = page.last() else {
+            break;
+        };
+        cursor.clone_from(&last.thread_id);
+        let asked: Vec<String> = page
+            .iter()
+            .filter(|candidate| !candidate.zdr_only)
+            .map(|candidate| candidate.thread_id.clone())
+            .collect();
+        let answer = if asked.is_empty() {
+            policy.clone()
+        } else {
+            match client.check(org_id, &asked).await {
+                Ok(Some(answer)) => answer,
+                // A 404 mid-pass means the org went away; nothing it held is known.
+                Ok(None) | Err(_) => return Ok(fail(run, ERROR_POLICY_UNAVAILABLE)),
+            }
+        };
+        // Counts taken under two revisions describe no single policy.
+        if answer.revision != policy.revision || answer.window_days != policy.window_days {
+            return Ok(fail(run, ERROR_POLICY_CHANGED));
+        }
+        let (skipped_zdr, held, would_delete) = split_page(&page, &answer);
+        run.counts.candidates += i64::try_from(page.len()).unwrap_or(i64::MAX);
+        run.counts.skipped_zdr += skipped_zdr;
+        run.counts.held += held;
+        run.counts.would_delete += i64::try_from(would_delete.len()).unwrap_or(i64::MAX);
+        count_bound_rows(pool, &would_delete, &mut run.counts.rows_by_table).await?;
+        if i64::try_from(page.len()).unwrap_or(i64::MAX) < CHECK_PAGE {
+            break;
+        }
+    }
+    run.finished_at = Utc::now();
+    Ok(Some(run))
+}
+
+/// The audit body of one pass: audit-core's flat shape, counts only.
+pub(crate) fn build_sweep_audit_body(run: &SweepRun) -> serde_json::Value {
+    serde_json::json!({
+        "event_id": format!("retention_sweep:session-core:{}", run.id),
+        "occurred_at": run.finished_at.to_rfc3339(),
+        "org_id": run.org_id,
+        "user_id": "system",
+        "plane": "model",
+        "producer": "session-core",
+        "event": EVENT_RETENTION_SWEEP,
+        "subject": run.id,
+        "resource_id": run.org_id,
+        "outcome": if run.error_code.is_some() { "failed" } else { "completed" },
+        "details": {
+            "mode": run.mode,
+            "policy_revision": run.policy_revision,
+            "window_days": run.window_days,
+            "candidates": run.counts.candidates,
+            "held": run.counts.held,
+            "skipped_zdr": run.counts.skipped_zdr,
+            "would_delete": run.counts.would_delete,
+            "deleted": 0,
+            "rows_by_table": run.counts.rows_by_table,
+            "error_code": run.error_code,
+        },
+    })
+}
+
+/// Writes the run row and its audit event in one transaction, so the audit trail
+/// never names a pass the table does not hold, or the reverse.
+pub(crate) async fn record(pool: &PgPool, run: &SweepRun) -> Result<(), sqlx::Error> {
+    let body = build_sweep_audit_body(run);
+    let subject = crate::audit_publisher::audit_subject_for_event(EVENT_RETENTION_SWEEP)
+        .ok_or_else(|| sqlx::Error::Protocol("retention sweep event is not a subject token".to_owned()))?;
+    let rows_by_table =
+        serde_json::to_value(&run.counts.rows_by_table).map_err(|error| sqlx::Error::Encode(error.into()))?;
+    let mut tx = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO retention_sweep_runs
+             (id, org_id, mode, policy_revision, window_days, started_at, finished_at,
+              candidates, held, skipped_zdr, would_delete, deleted, rows_by_table, error_code)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 0, $12, $13)",
+    )
+    .bind(&run.id)
+    .bind(&run.org_id)
+    .bind(run.mode)
+    .bind(run.policy_revision)
+    .bind(run.window_days.and_then(|days| i32::try_from(days).ok()))
+    .bind(run.started_at)
+    .bind(run.finished_at)
+    .bind(run.counts.candidates)
+    .bind(run.counts.held)
+    .bind(run.counts.skipped_zdr)
+    .bind(run.counts.would_delete)
+    .bind(&rows_by_table)
+    .bind(run.error_code)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query("INSERT INTO session_audit_outbox (event_id, subject, payload) VALUES ($1, $2, $3)")
+        .bind(body["event_id"].as_str().unwrap_or_default())
+        .bind(&subject)
+        .bind(&body)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await
+}
+
+/// One pass over every org that owns personal threads here. Returns how many rows
+/// it wrote, or `None` when another replica holds the sweep.
+pub(crate) async fn sweep_once(pool: &PgPool, client: &CheckClient) -> Result<Option<usize>> {
+    let mut lock = pool.acquire().await?;
+    let locked: bool = sqlx::query_scalar("SELECT pg_try_advisory_lock($1)")
+        .bind(SWEEP_LOCK_KEY)
+        .fetch_one(&mut *lock)
+        .await?;
+    if !locked {
+        return Ok(None);
+    }
+    let result = sweep_orgs(pool, client).await;
+    let unlocked = sqlx::query("SELECT pg_advisory_unlock($1)")
+        .bind(SWEEP_LOCK_KEY)
+        .execute(&mut *lock)
+        .await;
+    if unlocked.is_err() {
+        // A session lock lives as long as its connection: close it rather than hand
+        // a connection still holding the lock back to the pool.
+        drop(lock.detach());
+    }
+    result.map(Some)
+}
+
+async fn sweep_orgs(pool: &PgPool, client: &CheckClient) -> Result<usize> {
+    let orgs: Vec<String> =
+        sqlx::query_scalar("SELECT DISTINCT org_id FROM threads WHERE space_id IS NULL ORDER BY org_id")
+            .fetch_all(pool)
+            .await?;
+    let mut written = 0usize;
+    for org_id in &orgs {
+        let Some(run) = sweep_org(pool, client, org_id).await? else {
+            continue;
+        };
+        record(pool, &run).await?;
+        written += 1;
+        let outcome = if run.error_code.is_some() { "error" } else { "ok" };
+        metrics::counter!("mp_session_retention_sweep_runs_total", "outcome" => outcome).increment(1);
+        metrics::counter!("mp_session_retention_sweep_would_delete_total")
+            .increment(u64::try_from(run.counts.would_delete).unwrap_or(0));
+    }
+    Ok(written)
+}
+
+/// The sweep loop: one pass now, then one per interval. It runs under
+/// `supervise_background`; a failed pass is logged and the next one runs on time.
+pub(crate) async fn run(pool: PgPool, mode: Mode) -> Result<()> {
+    let lookup = |name: &str| std::env::var(name).ok();
+    let Some(client) = CheckClient::from_lookup(&lookup) else {
+        error!(
+            "{SWITCH_ENV} is on but {} is unset: no org is swept",
+            crate::org_policy::SERVICE_TOKEN_ENV
+        );
+        std::future::pending::<()>().await;
+        return Ok(());
+    };
+    if mode == Mode::Enforce {
+        warn!("{SWITCH_ENV}=enforce: the delete path is not built in this release; passes run dry");
+    }
+    let interval = interval_from(std::env::var(INTERVAL_SECS_ENV).ok().as_deref());
+    info!(interval_secs = interval.as_secs(), "retention sweeper started (dry run)");
+    loop {
+        match sweep_once(&pool, &client).await {
+            Ok(Some(written)) => info!(written, "retention sweep pass recorded"),
+            Ok(None) => info!("retention sweep held by another replica; skipped"),
+            Err(error) => warn!(%error, "retention sweep pass failed"),
+        }
+        tokio::time::sleep(interval).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+    use wiremock::{
+        matchers::{body_json, header, method, path},
+        Mock, MockServer, ResponseTemplate,
+    };
+
+    fn env(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
+        let map: HashMap<String, String> = pairs
+            .iter()
+            .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
+            .collect();
+        move |name| map.get(name).cloned()
+    }
+
+    fn client_for(base_url: &str) -> CheckClient {
+        CheckClient::from_lookup(&env(&[
+            (crate::org_policy::ORG_CORE_URL_ENV, base_url),
+            (crate::org_policy::SERVICE_TOKEN_ENV, "test-token"),
+        ]))
+        .expect("client")
+    }
+
+    fn answer(org_held: bool, held: &[&str]) -> PolicyAnswer {
+        PolicyAnswer {
+            window_days: Some(30),
+            revision: 3,
+            org_held,
+            held_thread_ids: held.iter().map(|id| (*id).to_owned()).collect(),
+        }
+    }
+
+    fn candidate(id: &str, zdr_only: bool) -> Candidate {
+        Candidate {
+            thread_id: id.to_owned(),
+            zdr_only,
+        }
+    }
+
+    #[test]
+    fn retention_sweep_switch_unknown_is_dry_run_never_enforce() {
+        for raw in [None, Some(""), Some("  "), Some("off"), Some(" off ")] {
+            assert_eq!(mode_from(raw), Mode::Off, "{raw:?}");
+        }
+        assert_eq!(mode_from(Some("dry_run")), Mode::DryRun);
+        assert_eq!(mode_from(Some("enforce")), Mode::Enforce);
+        assert_eq!(mode_from(Some(" enforce ")), Mode::Enforce);
+        // A typo, another casing or a boolean must never become enforce.
+        for raw in ["Enforce", "ENFORCE", "enforced", "true", "1", "on", "dry-run", "Off", "false"] {
+            assert_eq!(mode_from(Some(raw)), Mode::DryRun, "{raw}");
+        }
+    }
+
+    #[test]
+    fn retention_sweep_interval_defaults_to_six_hours_with_a_floor() {
+        assert_eq!(interval_from(None), Duration::from_secs(21_600));
+        assert_eq!(interval_from(Some("nonsense")), Duration::from_secs(21_600));
+        assert_eq!(interval_from(Some("0")), Duration::from_secs(300));
+        assert_eq!(interval_from(Some("60")), Duration::from_secs(300));
+        assert_eq!(interval_from(Some("3600")), Duration::from_secs(3600));
+    }
+
+    #[test]
+    fn retention_sweep_window_bounds_are_thirty_to_3650_days() {
+        assert!(!window_in_bounds(0));
+        assert!(!window_in_bounds(29));
+        assert!(window_in_bounds(30));
+        assert!(window_in_bounds(3650));
+        assert!(!window_in_bounds(3651));
+        assert!(!window_in_bounds(-30));
+    }
+
+    #[test]
+    fn retention_sweep_check_answer_is_read_strictly() {
+        let body = br#"{"organization_id":"org-a","window_days":90,"revision":4,"org_held":false,"held_thread_ids":["t1"]}"#;
+        let parsed = parse_check("org-a", body).expect("answer");
+        assert_eq!(parsed.window_days, Some(90));
+        assert_eq!(parsed.revision, 4);
+        assert!(parsed.held_thread_ids.contains("t1"));
+        let keep = br#"{"organization_id":"org-a","window_days":null,"revision":0,"org_held":false,"held_thread_ids":[]}"#;
+        assert_eq!(parse_check("org-a", keep).expect("keep").window_days, None);
+        // An answer about another org, a negative revision or a wrong shape is unknown.
+        assert!(parse_check("org-b", body).is_err());
+        let negative = br#"{"organization_id":"org-a","window_days":90,"revision":-1,"org_held":false}"#;
+        assert!(parse_check("org-a", negative).is_err());
+        assert!(parse_check("org-a", br#"{"window_days":90}"#).is_err());
+        assert!(parse_check("org-a", b"not json").is_err());
+    }
+
+    #[test]
+    fn retention_sweep_page_split_keeps_held_and_zdr_out_of_would_delete() {
+        let page = [candidate("t1", false), candidate("t2", false), candidate("t3", true)];
+        let (zdr, held, would) = split_page(&page, &answer(false, &["t2", "not-asked"]));
+        assert_eq!((zdr, held), (1, 1));
+        assert_eq!(would, vec!["t1"]);
+        // An org hold keeps every thread that holds content.
+        let (zdr, held, would) = split_page(&page, &answer(true, &[]));
+        assert_eq!((zdr, held), (1, 2));
+        assert!(would.is_empty());
+    }
+
+    #[test]
+    fn retention_sweep_audit_body_carries_counts_only() {
+        let now = Utc::now();
+        let mut counts = SweepCounts {
+            candidates: 5,
+            held: 1,
+            skipped_zdr: 1,
+            would_delete: 3,
+            ..SweepCounts::default()
+        };
+        counts.rows_by_table.insert("messages", 12);
+        let run = SweepRun {
+            id: "rsw_1".to_owned(),
+            org_id: "org-a".to_owned(),
+            mode: "dry_run",
+            policy_revision: 2,
+            window_days: Some(30),
+            started_at: now,
+            finished_at: now,
+            counts,
+            error_code: None,
+        };
+        let body = build_sweep_audit_body(&run);
+        assert_eq!(body["event"], EVENT_RETENTION_SWEEP);
+        assert_eq!(body["plane"], "model");
+        assert_eq!(body["producer"], "session-core");
+        assert_eq!(body["event_id"], "retention_sweep:session-core:rsw_1");
+        assert_eq!(body["outcome"], "completed");
+        assert_eq!(body["details"]["would_delete"], 3);
+        assert_eq!(body["details"]["deleted"], 0);
+        assert_eq!(body["details"]["rows_by_table"]["messages"], 12);
+        assert!(body["details"]["error_code"].is_null());
+        // The event name is a subject token, so the outbox accepts the row.
+        assert!(crate::audit_publisher::audit_subject_for_event(EVENT_RETENTION_SWEEP).is_some());
+    }
+
+    /// Every table a migration gives a `thread_id` column, read from the migration
+    /// files themselves: a `thread_id TEXT` line inside a CREATE TABLE, or an ALTER
+    /// TABLE that adds the column.
+    fn thread_id_tables_in_migrations() -> HashSet<String> {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");
+        let mut tables = HashSet::new();
+        for entry in std::fs::read_dir(&dir).expect("migrations dir") {
+            let path = entry.expect("entry").path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("sql") {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).expect("migration");
+            let mut current: Option<String> = None;
+            for line in text.lines() {
+                let words: Vec<&str> = line.split_whitespace().collect();
+                if let Some(at) = words.windows(2).position(|pair| *pair == ["CREATE", "TABLE"]) {
+                    let rest = &words[at + 2..];
+                    let name = if rest.starts_with(&["IF", "NOT", "EXISTS"]) { rest.get(3) } else { rest.first() };
+                    current = name.map(|name| name.trim_end_matches('(').to_owned());
+                }
+                if let Some(at) = words.windows(2).position(|pair| *pair == ["ALTER", "TABLE"]) {
+                    let added = line.contains("ADD COLUMN IF NOT EXISTS thread_id ") || line.contains("ADD COLUMN thread_id ");
+                    if added {
+                        if let Some(name) = words.get(at + 2) {
+                            tables.insert((*name).to_owned());
+                        }
+                    }
+                }
+                let column = line.starts_with(char::is_whitespace)
+                    && words.first() == Some(&"thread_id")
+                    && words.get(1).is_some_and(|kind| kind.starts_with("TEXT"));
+                if column {
+                    if let Some(table) = &current {
+                        tables.insert(table.clone());
+                    }
+                }
+            }
+        }
+        tables
+    }
+
+    #[test]
+    fn thread_bound_tables_cover_every_migration() {
+        let registered: HashSet<String> = THREAD_BOUND_TABLES.iter().map(|table| (*table).to_owned()).collect();
+        let found = thread_id_tables_in_migrations();
+        let missing: Vec<&String> = found.difference(&registered).collect();
+        assert!(
+            missing.is_empty(),
+            "tables with a thread_id column missing from THREAD_BOUND_TABLES (C3 would leave them behind): {missing:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn retention_sweep_check_sends_the_service_credential_and_reads_404_as_no_policy() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/internal/orgs/org-a/retention/check"))
+            .and(header("x-service-id", "session-core"))
+            .and(header("x-service-token", "test-token"))
+            .and(body_json(serde_json::json!({ "thread_ids": ["t1"] })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "organization_id": "org-a", "window_days": 30, "revision": 1,
+                "org_held": false, "held_thread_ids": ["t1"],
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/internal/orgs/org-gone/retention/check"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/internal/orgs/org-down/retention/check"))
+            .respond_with(ResponseTemplate::new(503))
+            .mount(&server)
+            .await;
+        let client = client_for(&server.uri());
+        let held = client.check("org-a", &["t1".to_owned()]).await.expect("answer").expect("policy");
+        assert!(held.held_thread_ids.contains("t1"));
+        assert!(client.check("org-gone", &[]).await.expect("404").is_none());
+        assert!(client.check("org-down", &[]).await.is_err());
+    }
+
+    #[test]
+    fn retention_sweep_client_needs_both_credentials() {
+        assert!(CheckClient::from_lookup(&env(&[])).is_none());
+        assert!(CheckClient::from_lookup(&env(&[(crate::org_policy::ORG_CORE_URL_ENV, "http://org-core:8080")])).is_none());
+        assert!(CheckClient::from_lookup(&env(&[
+            (crate::org_policy::ORG_CORE_URL_ENV, "http://org-core:8080"),
+            (crate::org_policy::SERVICE_TOKEN_ENV, "  "),
+        ]))
+        .is_none());
+    }
+
+    mod db {
+        use super::*;
+        use crate::loop_checkpoint::test_support::scratch_pool;
+
+        struct Org {
+            id: String,
+        }
+
+        impl Org {
+            fn new() -> Self {
+                Self {
+                    id: format!("rsw-org-{}", mp_ids::new_ulid()),
+                }
+            }
+
+            fn thread(&self, name: &str) -> String {
+                format!("{}-{name}", self.id)
+            }
+        }
+
+        /// A personal thread idle for `idle_hours`, with one ended run of `retention`
+        /// whose last change is as old as the thread's activity.
+        async fn seed_thread(pool: &PgPool, org: &Org, name: &str, idle_hours: i32, retention: &str) -> String {
+            let thread_id = org.thread(name);
+            sqlx::query(
+                "INSERT INTO threads (id, session_key, org_id, user_id, last_activity_at)
+                 VALUES ($1, $1, $2, 'u1', now() - make_interval(hours => $3))",
+            )
+            .bind(&thread_id)
+            .bind(&org.id)
+            .bind(idle_hours)
+            .execute(pool)
+            .await
+            .expect("seed thread");
+            let (waiver_ack, waiver_connection) = if retention == "zdr_waived" {
+                (Some("ack-1"), Some("conn-1"))
+            } else {
+                (None, None)
+            };
+            sqlx::query(
+                "INSERT INTO runs (id, thread_id, goal, org_id, user_id, status, retention_class,
+                                   waiver_ack_id, waiver_connection_id, created_at, updated_at, ended_at)
+                 VALUES ($1, $2, 'g', $3, 'u1', 'completed', $4, $5, $6,
+                         now() - make_interval(hours => $7), now() - make_interval(hours => $7),
+                         now() - make_interval(hours => $7))",
+            )
+            .bind(format!("{thread_id}-run"))
+            .bind(&thread_id)
+            .bind(&org.id)
+            .bind(retention)
+            .bind(waiver_ack)
+            .bind(waiver_connection)
+            .bind(idle_hours)
+            .execute(pool)
+            .await
+            .expect("seed run");
+            thread_id
+        }
+
+        async fn seed_space_thread(pool: &PgPool, org: &Org, name: &str, idle_hours: i32) -> String {
+            let thread_id = org.thread(name);
+            sqlx::query(
+                "INSERT INTO threads (id, session_key, org_id, user_id, last_activity_at, space_id,
+                                      space_decision_ref, recipient_audience_ref, privacy_policy_ref,
+                                      resource_authorization_ref, authority_revision)
+                 VALUES ($1, $1, $2, 'u1', now() - make_interval(hours => $3), 'space-1',
+                         'dec-1', 'aud-1', 'priv-1', 'res-1', 1)",
+            )
+            .bind(&thread_id)
+            .bind(&org.id)
+            .bind(idle_hours)
+            .execute(pool)
+            .await
+            .expect("seed space thread");
+            thread_id
+        }
+
+        /// org-core answering this org with a 30-day window at revision 7.
+        async fn org_core(org: &Org, org_held: bool, held: &[&str]) -> MockServer {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path(format!("/internal/orgs/{}/retention/check", org.id)))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "organization_id": org.id, "window_days": 30, "revision": 7,
+                    "org_held": org_held, "held_thread_ids": held,
+                })))
+                .mount(&server)
+                .await;
+            server
+        }
+
+        async fn org_count(pool: &PgPool, table: &str, org: &Org) -> i64 {
+            // `table` is a constant named by the tests below, never input.
+            sqlx::query_scalar(&format!("SELECT count(*) FROM {table} WHERE org_id = $1"))
+                .bind(&org.id)
+                .fetch_one(pool)
+                .await
+                .expect("count")
+        }
+
+        const DAY: i32 = 24;
+
+        #[tokio::test]
+        #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+        async fn retention_sweep_window_boundary() {
+            let Some(pool) = scratch_pool().await else {
+                return;
+            };
+            let org = Org::new();
+            seed_thread(&pool, &org, "inside", 30 * DAY - 1, "persistent").await;
+            let old = seed_thread(&pool, &org, "past", 30 * DAY + 1, "persistent").await;
+            let server = org_core(&org, false, &[]).await;
+            let run = sweep_org(&pool, &client_for(&server.uri()), &org.id)
+                .await
+                .expect("pass")
+                .expect("a row");
+            assert_eq!(run.counts.candidates, 1, "only the thread past the window is a candidate");
+            assert_eq!(run.counts.would_delete, 1);
+            assert_eq!(run.counts.rows_by_table.get("runs"), Some(&1), "{old}'s run is counted");
+            assert_eq!(run.window_days, Some(30));
+            assert_eq!(run.policy_revision, 7);
+        }
+
+        #[tokio::test]
+        #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+        async fn retention_sweep_recent_run_keeps_an_old_thread() {
+            let Some(pool) = scratch_pool().await else {
+                return;
+            };
+            let org = Org::new();
+            let thread_id = seed_thread(&pool, &org, "busy", 60 * DAY, "persistent").await;
+            // A run that ended yesterday is activity, though no message was written.
+            sqlx::query("UPDATE runs SET updated_at = now() - interval '1 day', ended_at = now() - interval '1 day' WHERE thread_id = $1")
+                .bind(&thread_id)
+                .execute(&pool)
+                .await
+                .expect("touch run");
+            let server = org_core(&org, false, &[]).await;
+            let run = sweep_org(&pool, &client_for(&server.uri()), &org.id)
+                .await
+                .expect("pass")
+                .expect("a row");
+            assert_eq!(run.counts.candidates, 0);
+        }
+
+        #[tokio::test]
+        #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+        async fn retention_sweep_held_thread_kept() {
+            let Some(pool) = scratch_pool().await else {
+                return;
+            };
+            let org = Org::new();
+            let held = seed_thread(&pool, &org, "held", 40 * DAY, "persistent").await;
+            seed_thread(&pool, &org, "free", 40 * DAY, "persistent").await;
+            let server = org_core(&org, false, &[held.as_str()]).await;
+            let run = sweep_org(&pool, &client_for(&server.uri()), &org.id)
+                .await
+                .expect("pass")
+                .expect("a row");
+            assert_eq!((run.counts.candidates, run.counts.held, run.counts.would_delete), (2, 1, 1));
+
+            let org_held = Org::new();
+            seed_thread(&pool, &org_held, "a", 40 * DAY, "persistent").await;
+            seed_thread(&pool, &org_held, "b", 40 * DAY, "persistent").await;
+            let server = org_core(&org_held, true, &[]).await;
+            let run = sweep_org(&pool, &client_for(&server.uri()), &org_held.id)
+                .await
+                .expect("pass")
+                .expect("a row");
+            assert_eq!((run.counts.held, run.counts.would_delete), (2, 0), "an org hold keeps every thread");
+        }
+
+        #[tokio::test]
+        #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+        async fn retention_sweep_space_thread_kept_and_zdr_skipped() {
+            let Some(pool) = scratch_pool().await else {
+                return;
+            };
+            let org = Org::new();
+            seed_space_thread(&pool, &org, "room", 90 * DAY).await;
+            seed_thread(&pool, &org, "zdr", 90 * DAY, "zdr").await;
+            seed_thread(&pool, &org, "waived", 90 * DAY, "zdr_waived").await;
+            let server = org_core(&org, false, &[]).await;
+            let run = sweep_org(&pool, &client_for(&server.uri()), &org.id)
+                .await
+                .expect("pass")
+                .expect("a row");
+            // The Space thread is never a candidate; the zero-retention one holds no
+            // content; a waived run's content was kept, so its thread is swept.
+            assert_eq!(run.counts.candidates, 2);
+            assert_eq!(run.counts.skipped_zdr, 1);
+            assert_eq!(run.counts.would_delete, 1);
+        }
+
+        #[tokio::test]
+        #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+        async fn retention_sweep_org_core_unreachable_means_no_candidates() {
+            let Some(pool) = scratch_pool().await else {
+                return;
+            };
+            let org = Org::new();
+            seed_thread(&pool, &org, "old", 90 * DAY, "persistent").await;
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .respond_with(ResponseTemplate::new(503))
+                .mount(&server)
+                .await;
+            let run = sweep_org(&pool, &client_for(&server.uri()), &org.id)
+                .await
+                .expect("pass")
+                .expect("an error row");
+            assert_eq!(run.error_code, Some(ERROR_POLICY_UNAVAILABLE));
+            assert_eq!(run.counts, SweepCounts::default());
+
+            // Nothing listens at all: the same answer.
+            let closed = client_for("http://127.0.0.1:9");
+            let run = sweep_org(&pool, &closed, &org.id)
+                .await
+                .expect("pass")
+                .expect("an error row");
+            assert_eq!(run.error_code, Some(ERROR_POLICY_UNAVAILABLE));
+            assert_eq!(run.counts.candidates, 0);
+        }
+
+        #[tokio::test]
+        #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+        async fn retention_sweep_no_window_and_unknown_org_write_nothing() {
+            let Some(pool) = scratch_pool().await else {
+                return;
+            };
+            let org = Org::new();
+            seed_thread(&pool, &org, "old", 90 * DAY, "persistent").await;
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path(format!("/internal/orgs/{}/retention/check", org.id)))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "organization_id": org.id, "window_days": null, "revision": 0,
+                    "org_held": false, "held_thread_ids": [],
+                })))
+                .mount(&server)
+                .await;
+            let client = client_for(&server.uri());
+            assert!(sweep_org(&pool, &client, &org.id).await.expect("pass").is_none());
+            let unknown = Org::new();
+            seed_thread(&pool, &unknown, "old", 90 * DAY, "persistent").await;
+            // No mock for this org: wiremock answers 404, org-core's "unknown org".
+            assert!(sweep_org(&pool, &client, &unknown.id).await.expect("pass").is_none());
+        }
+
+        #[tokio::test]
+        #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+        async fn retention_sweep_counts_row_written_and_nothing_deleted() {
+            let Some(pool) = scratch_pool().await else {
+                return;
+            };
+            let org = Org::new();
+            let held = seed_thread(&pool, &org, "held", 40 * DAY, "persistent").await;
+            seed_thread(&pool, &org, "free", 40 * DAY, "persistent").await;
+            seed_thread(&pool, &org, "zdr", 40 * DAY, "zdr").await;
+            let threads_before = org_count(&pool, "threads", &org).await;
+            let runs_before = org_count(&pool, "runs", &org).await;
+            let server = org_core(&org, false, &[held.as_str()]).await;
+            let run = sweep_org(&pool, &client_for(&server.uri()), &org.id)
+                .await
+                .expect("pass")
+                .expect("a row");
+            record(&pool, &run).await.expect("record");
+
+            let row: (String, i64, Option<i32>, i64, i64, i64, i64, i64, Option<String>) = sqlx::query_as(
+                "SELECT mode, policy_revision, window_days, candidates, held, skipped_zdr, would_delete,
+                        deleted, error_code
+                   FROM retention_sweep_runs WHERE id = $1",
+            )
+            .bind(&run.id)
+            .fetch_one(&pool)
+            .await
+            .expect("row");
+            assert_eq!(row, ("dry_run".to_owned(), 7, Some(30), 3, 1, 1, 1, 0, None));
+
+            let payload: serde_json::Value = sqlx::query_scalar(
+                "SELECT payload FROM session_audit_outbox WHERE event_id = $1",
+            )
+            .bind(format!("retention_sweep:session-core:{}", run.id))
+            .fetch_one(&pool)
+            .await
+            .expect("audit row");
+            assert_eq!(payload["org_id"], org.id.as_str());
+            assert_eq!(payload["details"]["would_delete"], 1);
+            assert_eq!(payload["details"]["held"], 1);
+
+            // A dry pass, even one asked to enforce, deletes nothing.
+            assert_eq!(org_count(&pool, "threads", &org).await, threads_before);
+            assert_eq!(org_count(&pool, "runs", &org).await, runs_before);
+        }
+
+        #[tokio::test]
+        #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+        async fn retention_sweep_thread_bound_tables_match_the_schema() {
+            let Some(pool) = scratch_pool().await else {
+                return;
+            };
+            let in_schema: Vec<String> = sqlx::query_scalar(
+                "SELECT c.table_name::text
+                   FROM information_schema.columns c
+                   JOIN information_schema.tables t
+                     ON t.table_schema = c.table_schema AND t.table_name = c.table_name
+                  WHERE c.table_schema = current_schema()
+                    AND c.column_name = 'thread_id'
+                    AND t.table_type = 'BASE TABLE'",
+            )
+            .fetch_all(&pool)
+            .await
+            .expect("schema");
+            let in_schema: HashSet<String> = in_schema.into_iter().collect();
+            let registered: HashSet<String> = THREAD_BOUND_TABLES.iter().map(|table| (*table).to_owned()).collect();
+            let missing: Vec<&String> = in_schema.difference(&registered).collect();
+            let stale: Vec<&String> = registered.difference(&in_schema).collect();
+            assert!(missing.is_empty(), "thread_id tables missing from THREAD_BOUND_TABLES: {missing:?}");
+            assert!(stale.is_empty(), "THREAD_BOUND_TABLES names tables without thread_id: {stale:?}");
+        }
+    }
+}

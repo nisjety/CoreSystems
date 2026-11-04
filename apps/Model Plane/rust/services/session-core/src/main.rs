@@ -47,6 +47,7 @@ mod orchestration_store;
 mod org_policy;
 mod request_snapshots;
 mod retention_receipt;
+mod retention_sweeper;
 mod routing_policy_grpc;
 mod room_run_attach;
 mod run_ledger_grpc;
@@ -343,6 +344,21 @@ async fn main() -> Result<()> {
         .await
     });
 
+    // EP-9 C2: the retention sweeper is off unless SESSION_RETENTION_SWEEP names a mode; off, the task
+    // parks and makes no database read and no org-core call. It counts, it never deletes.
+    let retention_sweep_pool = pool.clone();
+    let retention_sweep_handle = tokio::spawn(async move {
+        let mode = retention_sweeper::mode();
+        if mode == retention_sweeper::Mode::Off {
+            std::future::pending::<()>().await;
+        }
+        supervise_background("session-core retention sweeper", move || {
+            let pool = retention_sweep_pool.clone();
+            async move { retention_sweeper::run(pool, mode).await }
+        })
+        .await
+    });
+
     let shutdown = shutdown_signal();
 
     tokio::select! {
@@ -364,6 +380,7 @@ async fn main() -> Result<()> {
         result = trace_handle => result??,
         result = trace_sweeper_handle => result??,
         result = snapshot_sweep_handle => result??,
+        result = retention_sweep_handle => result??,
         () = shutdown => {},
     }
 
