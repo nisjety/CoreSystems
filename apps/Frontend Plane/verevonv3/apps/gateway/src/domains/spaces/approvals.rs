@@ -424,12 +424,7 @@ pub(crate) async fn decide_space_approval(
     approval_id: &str,
     body: Value,
 ) -> Reply {
-    // The decision's reason is free text that the approval keeps: a zero-retention caller is refused
-    // first, before any Session Core call. The route and the action share this body, so both are covered.
-    if let Some(refusal) = crate::zdr::durable_write_refusal(state, user, Some(headers), Some(&body)).await {
-        return refusal;
-    }
-    let decision = match parse_decision(body) {
+    let decision = match parse_decision(body.clone()) {
         Ok(decision) => decision,
         Err(reply) => return reply,
     };
@@ -450,6 +445,13 @@ pub(crate) async fn decide_space_approval(
         Ok(scope) => scope,
         Err(reply) => return reply,
     };
+    // The decision's reason is free text that the approval keeps: a zero-retention caller is refused
+    // here, typed, before any Control or Session Core call. The local checks above answer first, so a
+    // bad request keeps its own 400 or 403 whatever the org's posture. The route and the action share
+    // this body, so both are covered.
+    if let Some(refusal) = crate::zdr::durable_write_refusal(state, user, Some(headers), Some(&body)).await {
+        return refusal;
+    }
     // The caller must be a member of THIS Space; a viewer never decides. Who owns the approval is
     // then Session Core's call (only the run's owner can record it).
     match super::resolve_space_role(state, user, &org_id, &space_ref).await {
@@ -663,10 +665,12 @@ mod tests {
         state.auth_core_url = server.uri();
         state.model_gateway_url = server.uri();
         state.user_core_url = server.uri();
+        state.org_core_url = server.uri();
         state.space_features.approval_scopes = approval_scopes;
         state
     }
 
+    /// The token mounts every decision reaches, and the org record the ZDR guard reads first.
     async fn mount_tokens(server: &MockServer) {
         for (token_path, token) in [
             ("/api/session-core/token", "session-test-token"),
@@ -678,6 +682,13 @@ mod tests {
                 .mount(server)
                 .await;
         }
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/organizations/org-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": { "id": "org-1", "metadata": { "interactiveRetention": { "zdr": false } } }
+            })))
+            .mount(server)
+            .await;
     }
 
     async fn mount_membership(server: &MockServer, role: &str) {

@@ -8527,8 +8527,21 @@ mod tests {
     }
 
     /// Drive a room-membership request with a given Control-resolved room
-    /// role and a given Convex outcome for the sync action.
+    /// role and a given Convex outcome for the sync action, with the Control
+    /// member writer on.
     async fn room_membership_response(
+        role: &str,
+        method: &str,
+        body: Option<Value>,
+        sync: Value,
+    ) -> (u16, Value, MockServer) {
+        room_membership_response_with_writer(true, role, method, body, sync).await
+    }
+
+    /// As `room_membership_response`, with the Control member writer flag
+    /// (`membership_writer_api`) set by the caller.
+    async fn room_membership_response_with_writer(
+        writer_on: bool,
         role: &str,
         method: &str,
         body: Option<Value>,
@@ -8603,7 +8616,7 @@ mod tests {
         state.auth_core_url = auth.uri();
         state.user_core_url = user_core.uri();
         // The Control member writer is the path under test; off, every call is a 404 feature_disabled.
-        state.space_features.membership_writer_api = true;
+        state.space_features.membership_writer_api = writer_on;
         let uri = if method == "DELETE" {
             "/api/v1/spaces/space-room/members/user-2"
         } else {
@@ -8646,7 +8659,8 @@ mod tests {
                 ("POST", Some(json!({"member_id": "user-2"}))),
                 ("DELETE", None),
             ] {
-                let (status, payload, application) = room_membership_response(
+                let (status, payload, application) = room_membership_response_with_writer(
+                    false,
                     role,
                     method,
                     body,

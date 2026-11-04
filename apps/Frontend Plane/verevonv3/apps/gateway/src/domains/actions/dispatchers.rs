@@ -8324,7 +8324,9 @@ mod ownership_share_tests {
         (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
     }
 
-    async fn stack() -> (AppState, MockServer, MockServer) {
+    /// The state and the three mock servers it points at. The auth-core server is returned too: a
+    /// server dropped here shuts down on its own schedule, so a token mint could race it.
+    async fn stack() -> (AppState, MockServer, MockServer, MockServer) {
         let auth_core = MockServer::start().await;
         Mock::given(wm_method("GET"))
             .and(wm_path("/api/data-plane/token"))
@@ -8337,12 +8339,12 @@ mod ownership_share_tests {
         state.auth_core_url = auth_core.uri();
         state.documents_api_url = documents.uri();
         state.user_core_url = user_core.uri();
-        (state, documents, user_core)
+        (state, documents, user_core, auth_core)
     }
 
     #[tokio::test]
     async fn share_document_dispatches_through_documents_api_and_wraps_the_envelope() {
-        let (state, documents, user_core) = stack().await;
+        let (state, documents, user_core, _auth_core) = stack().await;
         Mock::given(wm_method("POST"))
             .and(wm_path("/v1/documents/doc-1/shares"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
@@ -8371,7 +8373,7 @@ mod ownership_share_tests {
 
     #[tokio::test]
     async fn revoke_document_share_dispatches_through_documents_api_and_wraps_the_envelope() {
-        let (state, documents, user_core) = stack().await;
+        let (state, documents, user_core, _auth_core) = stack().await;
         Mock::given(wm_method("DELETE"))
             .and(wm_path("/v1/documents/doc-1/shares/user-2"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "success": true })))
@@ -8390,7 +8392,7 @@ mod ownership_share_tests {
 
     #[tokio::test]
     async fn both_actions_refuse_missing_ids_without_calling_anything() {
-        let (state, documents, user_core) = stack().await;
+        let (state, documents, user_core, _auth_core) = stack().await;
         for input in [json!({}), json!({ "docId": "doc-1" }), json!({ "subjectId": "u" }), json!({ "docId": "  ", "subjectId": "u" })] {
             let (status, body) =
                 read(dispatch_ownership_share_document(&state, &user(), &HeaderMap::new(), &input).await).await;
@@ -8406,7 +8408,7 @@ mod ownership_share_tests {
 
     #[tokio::test]
     async fn an_upstream_refusal_is_returned_as_the_browser_error_not_wrapped_as_success() {
-        let (state, documents, _user_core) = stack().await;
+        let (state, documents, _user_core, _auth_core) = stack().await;
         Mock::given(wm_method("POST"))
             .and(wm_path("/v1/documents/doc-1/shares"))
             .respond_with(ResponseTemplate::new(400).set_body_json(

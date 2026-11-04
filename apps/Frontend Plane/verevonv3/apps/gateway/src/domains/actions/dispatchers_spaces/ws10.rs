@@ -111,6 +111,7 @@ mod tests {
         let uri = server.uri();
         state.auth_core_url = uri.clone();
         state.user_core_url = uri.clone();
+        state.org_core_url = uri.clone();
         state.model_gateway_url = uri;
         state.space_features.approval_scopes = flag;
         state
@@ -209,6 +210,14 @@ mod tests {
             .and(wm_path("/v1/orchestration/approvals/apr-1/decide"))
             .respond_with(ResponseTemplate::new(200).set_body_json(
                 json!({ "approval": { "id": "apr-1", "status": "GRANTED" } }),
+            ))
+            .mount(&server)
+            .await;
+        // The org record the ZDR guard reads before a durable decision: not Zero Data Retention.
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/organizations/org-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                json!({ "data": { "id": "org-1", "metadata": { "interactiveRetention": { "zdr": false } } } }),
             ))
             .mount(&server)
             .await;

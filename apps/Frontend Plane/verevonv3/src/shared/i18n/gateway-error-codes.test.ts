@@ -1,6 +1,7 @@
 import { readdirSync, readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
+import { isModelEntitlementCode } from '@/shared/api/model-entitlement-refusals'
 import { BLOCK_REASON_COPY, ERROR_COPY, describeApiError, translateApiError } from './errors'
 
 // Every error code the Verevon gateway can send to the SPA has end-user copy in
@@ -224,8 +225,10 @@ const INTERNAL_ONLY: Record<string, string> = {
   mail_task_pipeline_not_configured: 'the mail-task ingest endpoint is called service to service; no SPA code calls it',
 }
 
+// A model-entitlement refusal reads its copy from the model-entitlement catalogue, which
+// `translateApiError` checks before ERROR_COPY, so that catalogue counts as copy here.
 function hasCopy(code: string): boolean {
-  return Boolean(ERROR_COPY[code] ?? BLOCK_REASON_COPY[code])
+  return Boolean(ERROR_COPY[code] ?? BLOCK_REASON_COPY[code] ?? isModelEntitlementCode(code))
 }
 
 describe('every code the gateway emits', () => {
