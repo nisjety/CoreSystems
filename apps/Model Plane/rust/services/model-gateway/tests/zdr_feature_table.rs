@@ -138,6 +138,27 @@ fn cases() -> Vec<(&'static str, Value, Expect)> {
             with("deep_research", json!(true)),
             refused("deep_research"),
         ),
+        // EP-2 S5: the phase and plan fields alone change nothing on a ZDR turn; a plan turn rides on
+        // `deep_research`, which is refused before either phase runs.
+        ("research_phase", with("research_phase", json!("plan")), None),
+        ("research_plan", with("research_plan", json!({"sub_queries": ["a"]})), None),
+        // e_zdr_token_deep_research_plan_turn_refused: the plan turn itself, refused for
+        // `deep_research` before any plan inference.
+        (
+            "research_phase",
+            json!({"content": "hello", "deep_research": true, "research_phase": "plan"}),
+            refused("deep_research"),
+        ),
+        (
+            "research_plan",
+            json!({
+                "content": "hello",
+                "deep_research": true,
+                "research_phase": "run",
+                "research_plan": {"sub_queries": ["a"], "answers": []},
+            }),
+            refused("deep_research"),
+        ),
         (
             "retrieval_scope",
             with("retrieval_scope", json!("web_only")),
@@ -360,6 +381,9 @@ fn cases() -> Vec<(&'static str, Value, Expect)> {
             refused("agentic"),
         ),
         ("wide_research", with("wide_research", Value::Null), None),
+        // EP-3 S5: a ZDR turn carrying context references is refused before any network call.
+        ("context_refs", with("context_refs", json!([{"kind": "document", "id": "doc-1"}])), refused("context_references")),
+        ("context_refs", with("context_refs", json!([])), None),
     ]
 }
 

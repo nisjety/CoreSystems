@@ -164,7 +164,9 @@ pub struct AttachmentPreview {
 
 /// Environment switch for cited passages and the research provenance stamp (EP-2-S4). Off, no
 /// citation or artifact frame carries `quote`, `locator` or `provenance`, and nothing new is
-/// persisted with the message.
+/// persisted with the message. The one exception is a deep-research report from a run with
+/// `deep_research::SECOND_PASS_ENV` on (EP-2-S6): its stamp carries the claim ledger, so it is
+/// stamped whichever way this switch is set.
 pub const CITATION_PASSAGES_ENV: &str = "MODEL_GATEWAY_CITATION_PASSAGES";
 
 /// Whether cited passages are switched on in this process.
@@ -355,6 +357,10 @@ pub enum ChatEvent {
         /// What a research report was built from (EP-2-S4), set only on a deep-research report
         /// behind [`CITATION_PASSAGES_ENV`]. `None` writes no `provenance` key.
         provenance: Option<Box<crate::deep_research::ResearchProvenance>>,
+        /// Who made this revision, `model`, `user` or `restore` (EP-3 S3). Set only on a stored
+        /// revision's frame while `MODEL_GATEWAY_ARTIFACT_REVISIONS` is `on`; `None` writes no
+        /// `editor` key, so older clients see the frame unchanged.
+        editor: Option<String>,
     },
     /// A generated file/image attachment.
     Attachment {
@@ -448,6 +454,18 @@ pub enum ChatEvent {
         delivery: String,
         expires_at: Option<String>,
         items: Value,
+    },
+    /// The editable deep-research plan a plan turn ends with (Wave 3 EP-2 S5), sent only while
+    /// `DEEP_RESEARCH_PLAN_TURN` is on. Control event, ungated: the plan card is the turn's whole
+    /// point, so a client that opted into nothing still has to see it. The run turn sends the edited
+    /// plan back and the gateway re-clamps it, so nothing here is trusted on the way back.
+    ResearchPlan {
+        /// The planned search phrases, already normalized and capped.
+        sub_queries: Vec<String>,
+        /// Up to three clarifying questions the plan inference asked; answers travel in the run turn.
+        questions: Vec<String>,
+        /// The most sub-queries a run turn keeps, so the card can stop the user adding past it.
+        max_sub_queries: usize,
     },
     /// Deterministic "memory was used" indicator (harness-adoption §7.9,
     /// hermes-agent's `RecallStatus`, MIT): emitted once per turn, before the
@@ -615,6 +633,18 @@ pub enum ChatEvent {
 }
 
 impl ChatEvent {
+    /// An `artifact` frame naming who made the revision (EP-3 S3); `None`, and every other
+    /// variant, is returned unchanged.
+    #[must_use]
+    pub fn with_editor(self, editor: Option<&str>) -> Self {
+        match (self, editor) {
+            (ChatEvent::Artifact { id, kind, title, content, version, provenance, .. }, Some(editor)) => {
+                ChatEvent::Artifact { id, kind, title, content, version, provenance, editor: Some(editor.to_owned()) }
+            }
+            (event, _) => event,
+        }
+    }
+
     /// The `sandbox_state` frame for a workspace result a tool call produced (WS22-S6). Each token must be a
     /// member of its closed list, so a result that carries free text or a path yields `None` rather than a
     /// frame that could show it.
@@ -681,7 +711,9 @@ impl ChatEvent {
             | ChatEvent::ContextChange { .. }
             | ChatEvent::RunParked { .. }
             // The question a run waits on (WS14 S4): the card needs it whatever the client opted into.
-            | ChatEvent::UserQuestion { .. } => None,
+            | ChatEvent::UserQuestion { .. }
+            // The deep-research plan card (EP-2 S5): the plan turn shows nothing else.
+            | ChatEvent::ResearchPlan { .. } => None,
         }
     }
 
@@ -725,6 +757,7 @@ impl ChatEvent {
             ChatEvent::FollowUps { .. } => "follow_ups",
             ChatEvent::PlanProposed { .. } => "plan_proposed",
             ChatEvent::UserQuestion { .. } => "user_question",
+            ChatEvent::ResearchPlan { .. } => "research_plan",
             ChatEvent::QueuedInput { .. } | ChatEvent::QueuedInputReceipted { .. } => "queued_input",
             ChatEvent::RetrievalNotice { .. } => "retrieval_notice",
             // ---- usage progress (WS27) ----
@@ -831,10 +864,14 @@ impl ChatEvent {
                 content,
                 version,
                 provenance,
+                editor,
             } => {
                 let mut payload = json!({ "id": id, "kind": kind, "title": title, "content": content, "version": version });
                 if let Some(provenance) = provenance {
                     payload["provenance"] = serde_json::to_value(provenance).unwrap_or_else(|_| json!({}));
+                }
+                if let Some(editor) = editor {
+                    payload["editor"] = json!(editor);
                 }
                 payload
             }
@@ -985,6 +1022,16 @@ impl ChatEvent {
                 "delivery": delivery,
                 "expires_at": expires_at,
                 "items": items,
+                "request_id": request_id,
+            }),
+            ChatEvent::ResearchPlan {
+                sub_queries,
+                questions,
+                max_sub_queries,
+            } => json!({
+                "sub_queries": sub_queries,
+                "questions": questions,
+                "caps": { "max_sub_queries": max_sub_queries },
                 "request_id": request_id,
             }),
             ChatEvent::QueuedInput { messages } => {
@@ -1392,6 +1439,8 @@ impl RecordedArtifact {
             content,
             version,
             provenance,
+            // The editor is a property of the stored revision, not of the message metadata.
+            editor: _,
         } = event
         else {
             return None;
@@ -1428,6 +1477,7 @@ impl RecordedArtifact {
             content: self.content,
             version: self.version,
             provenance: self.provenance,
+            editor: None,
         }
     }
 }
@@ -1820,7 +1870,7 @@ mod tests {
         let sink = RichEventSink::staging_artifacts(tx, families(&["artifacts", "steps"]), "r".into());
         for version in [3, 4] {
             sink.emit(ChatEvent::Artifact { id: "doc".into(), kind: "document".into(),
-                title: "Draft".into(), content: format!("private {version}"), version, provenance: None }).await;
+                title: "Draft".into(), content: format!("private {version}"), version, provenance: None, editor: None }).await;
         }
         assert!(rx.try_recv().is_err());
         assert_eq!(sink.recorded_artifacts()[0].version, 4);
@@ -1958,6 +2008,7 @@ mod tests {
             content: content.into(),
             version: 1,
             provenance: None,
+            editor: None,
         };
         sink.emit(artifact("doc", "document", "private draft"))
             .await;
@@ -2116,6 +2167,7 @@ mod tests {
             content: content.into(),
             version,
             provenance: None,
+            editor: None,
         };
         sink.emit(artifact("rapport", "document", "v1 body", 1)).await;
         sink.emit(artifact("notat", "document", "memo", 1)).await;
@@ -3407,6 +3459,7 @@ mod payload_contract {
         "FollowUps",
         "PlanProposed",
         "UserQuestion",
+        "ResearchPlan",
         "Verification",
         "MemoryRecall",
         "QueuedInput",
@@ -3443,6 +3496,7 @@ mod payload_contract {
             ChatEvent::FollowUps { .. } => "FollowUps",
             ChatEvent::PlanProposed { .. } => "PlanProposed",
             ChatEvent::UserQuestion { .. } => "UserQuestion",
+            ChatEvent::ResearchPlan { .. } => "ResearchPlan",
             ChatEvent::Verification { .. } => "Verification",
             ChatEvent::MemoryRecall { .. } => "MemoryRecall",
             ChatEvent::QueuedInput { .. } => "QueuedInput",
@@ -3740,7 +3794,7 @@ mod payload_contract {
             },
             grounding(false),
             grounding(true),
-            ChatEvent::Artifact { id: s("a1"), kind: s("document"), title: s(""), content: s(""), version: 1, provenance: None },
+            ChatEvent::Artifact { id: s("a1"), kind: s("document"), title: s(""), content: s(""), version: 1, provenance: None, editor: None },
             ChatEvent::Artifact {
                 id: s("a1"),
                 kind: s("code"),
@@ -3748,6 +3802,7 @@ mod payload_contract {
                 content: s("body"),
                 version: 2,
                 provenance: Some(Box::new(crate::deep_research::ResearchProvenance::sample())),
+                editor: Some(s("model")),
             },
             ChatEvent::Attachment {
                 id: s("f1"),
@@ -3824,6 +3879,12 @@ mod payload_contract {
                     "options": [{ "id": "bring", "label": "Bring", "description": null }],
                     "allow_other": true,
                 }]),
+            },
+            ChatEvent::ResearchPlan { sub_queries: Vec::new(), questions: Vec::new(), max_sub_queries: 1 },
+            ChatEvent::ResearchPlan {
+                sub_queries: vec![s("norsk havbruk 2026"), s("lakselus tiltak")],
+                questions: vec![s("Hvilken region?")],
+                max_sub_queries: 9,
             },
             ChatEvent::Verification { verdict: "unrelated", kb_citations: 0, web_citations: 0, web_allowed: false },
             ChatEvent::Verification { verdict: "supports", kb_citations: 2, web_citations: 1, web_allowed: true },
@@ -4041,6 +4102,26 @@ mod payload_contract {
         assert_eq!(payload["expires_at"], "2026-11-02T10:00:00Z");
         assert_eq!(payload["items"][0]["id"], "carrier");
         assert_eq!(payload["request_id"], "req-4");
+    }
+
+    /// `research_plan` is a control event carrying the plan, the questions and the cap the card
+    /// enforces, and nothing else (EP-2 S5).
+    #[test]
+    fn research_plan_is_a_control_event_with_the_card_keys() {
+        let event = ChatEvent::ResearchPlan {
+            sub_queries: vec!["a".into(), "b".into()],
+            questions: vec!["Which year?".into()],
+            max_sub_queries: 9,
+        };
+        assert_eq!(event.name(), "research_plan");
+        assert!(event.family().is_none(), "the plan card is never feature-gated");
+        assert!(event.should_emit(&[]));
+        let payload = event.payload("req-5");
+        assert_eq!(payload["sub_queries"], json!(["a", "b"]));
+        assert_eq!(payload["questions"], json!(["Which year?"]));
+        assert_eq!(payload["caps"], json!({ "max_sub_queries": 9 }));
+        assert_eq!(payload["request_id"], "req-5");
+        assert_eq!(payload.as_object().map(serde_json::Map::len), Some(4));
     }
 
     #[test]
@@ -4270,6 +4351,7 @@ mod citation_passage_tests {
             content: "# Rapport".to_owned(),
             version: 1,
             provenance: Some(Box::new(crate::deep_research::ResearchProvenance::sample())),
+            editor: None,
         };
         let payload = event.payload("r");
         assert_eq!(payload["provenance"]["pipeline"], "deep_research_v1");
@@ -4288,7 +4370,61 @@ mod citation_passage_tests {
             content: "c".to_owned(),
             version: 1,
             provenance: None,
+            editor: None,
         };
         assert!(plain.payload("r").get("provenance").is_none());
+    }
+
+    /// EP-2-S6: the claim ledger streams on the report's stamp and leaves with it (D12).
+    #[test]
+    fn research_ledger_streams_on_the_stamp_and_is_stripped_with_it() {
+        let event = ChatEvent::Artifact {
+            id: "research-r".to_owned(),
+            kind: "document".to_owned(),
+            title: "Dyp research".to_owned(),
+            content: "# Rapport".to_owned(),
+            version: 1,
+            provenance: Some(Box::new(crate::deep_research::ResearchProvenance::sample_with_ledger())),
+            editor: None,
+        };
+        let payload = event.payload("r");
+        assert_eq!(payload["provenance"]["passes"], 2);
+        assert_eq!(payload["provenance"]["research_ledger"]["version"], 1);
+        assert_eq!(payload["provenance"]["research_ledger"]["claims"][0]["status"], "single_source");
+        assert_eq!(payload["provenance"]["claims_by_status"]["single_source"], 1);
+        assert!(payload["provenance"]["ledger_digest"].is_string());
+
+        let recorded = RecordedArtifact::from_event(&event).expect("a text artifact");
+        let stored = serde_json::to_value(&recorded).expect("serializable");
+        assert_eq!(stored["provenance"]["research_ledger"]["pass_count"], 2);
+        let stripped = serde_json::to_value(recorded.without_provenance()).expect("serializable");
+        assert!(stripped.get("provenance").is_none(), "no ledger without its stamp");
+    }
+
+    #[test]
+    fn artifact_event_omits_editor_when_none() {
+        let plain = ChatEvent::Artifact {
+            id: "a".to_owned(),
+            kind: "document".to_owned(),
+            title: "T".to_owned(),
+            content: "c".to_owned(),
+            version: 3,
+            provenance: None,
+            editor: None,
+        };
+        assert!(plain.payload("r").get("editor").is_none(), "older clients see the frame unchanged");
+        assert_eq!(plain.clone().with_editor(None), plain);
+
+        let attributed = plain.clone().with_editor(Some("model"));
+        assert_eq!(attributed.payload("r")["editor"], "model");
+        assert_eq!(attributed.payload("r")["version"], 3);
+        let recorded = RecordedArtifact::from_event(&attributed).expect("a text artifact");
+        assert!(
+            serde_json::to_value(&recorded).expect("serializable").get("editor").is_none(),
+            "the message metadata never carries the editor"
+        );
+
+        let other = ChatEvent::Error { code: "x".into(), message: "y".into(), retryable: false };
+        assert!(other.clone().with_editor(Some("model")).payload("r").get("editor").is_none());
     }
 }

@@ -2170,6 +2170,32 @@ pub async fn invoke_stream_sse(
             );
         }
     };
+    // Typed context references (Wave 3 EP-3 S5), checked before any run or model call. With the switch off the
+    // field is never read, so the turn is the one it was before.
+    let context_refs = match crate::context_refs::resolve(
+        crate::context_refs::enabled(),
+        req.context_refs.as_ref(),
+        &crate::context_refs::TurnFacts {
+            zdr: turn_posture.zdr(),
+            waived: turn_posture.is_waived(),
+            agentic: features.iter().any(|feature| feature == "agentic"),
+            knowledge: !conversation_only && retrieval_scope != crate::normalize::RetrievalScope::WebOnly,
+            space_id: req
+                .space_context
+                .as_ref()
+                .or(req.space_append_context.as_ref())
+                .map(|context| context.space_id.as_str())
+                .filter(|id| !id.is_empty()),
+        },
+    ) {
+        Ok(resolved) => resolved,
+        Err(crate::context_refs::ContextRefRefusal::Zdr) => {
+            return zdr_refusal_stream(&request_id, crate::context_refs::ContextRefRefusal::zdr_refusal());
+        }
+        Err(crate::context_refs::ContextRefRefusal::Typed { code, message, .. }) => {
+            return error_stream(&request_id, code, message, false);
+        }
+    };
     let attachment_policy = crate::attachment_policy::AttachmentPolicy::from_env();
     // A waiver names one connection. Deep research, image generation and a vision turn (AnalyzeImage)
     // call the platform chain, which a waived turn must never reach, so they are refused before any run.
@@ -2843,7 +2869,9 @@ pub async fn invoke_stream_sse(
         mp_contracts::model_plane::v1::ManagedRunSource::GatewayDirect
     };
     let admitted_ms = timing.close(crate::turn_timing::Phase::Admission, 0);
-    let session_run = match crate::session_flow::prepare_managed_run_authenticated_with_receipt(
+    let session_run = match crate::session_flow::with_user_context_refs(
+        context_refs.as_ref(),
+        crate::session_flow::prepare_managed_run_authenticated_with_receipt(
         &state,
         req.thread_id.as_deref(),
         req.session_key.as_deref(),
@@ -2876,7 +2904,7 @@ pub async fn invoke_stream_sse(
             req.idempotency_key.as_deref(),
         ),
         req.wake_context.as_ref(),
-    )
+    ))
     .await
     {
         Ok(run) => run,
@@ -3225,6 +3253,18 @@ pub async fn invoke_stream_sse(
         room_context: mp_contracts::space_mentions::wake_room_context_enabled(),
         participants: &wake.participants,
     });
+    // EP-3 S3: with the revision switch `on`, the table's heads are this turn's base, so a
+    // revision another replica committed is what this turn revises. Runs before the metadata
+    // rehydration below; seeding never lowers a version, so the order only saves a write.
+    crate::artifact_revisions::seed_from_table_heads(
+        &state,
+        &model_bearer,
+        &org_id,
+        &session_run.thread_id,
+        effective_zdr,
+        retention_class.is_some(),
+    )
+    .await;
     let recent_thread = load_recent_thread_messages(
         &state,
         &org_id,
@@ -3588,7 +3628,7 @@ pub async fn invoke_stream_sse(
         &org_id,
         &user_id,
         &req.content,
-        &req.skill_ids,
+        &crate::context_refs::merged_skill_ids(&req.skill_ids, context_refs.as_ref()),
     )
     .await };
     // Counts only: the skill guidance that was cut to its budget, sent after the compaction frame.
@@ -3702,6 +3742,16 @@ pub async fn invoke_stream_sse(
     // searches, and the loop afterwards must be able to close a named gap the
     // report could not fill.
     let deep_research_requested = req.deep_research;
+    // Which turn of a two-turn deep research this is (EP-2 S5). With `DEEP_RESEARCH_PLAN_TURN` off
+    // both fields are ignored and the turn is the one-shot it always was.
+    let research_phase = crate::deep_research::research_phase(
+        crate::deep_research::plan_turn_enabled(),
+        deep_research_requested,
+        req.research_phase.as_ref(),
+        req.research_plan.as_ref(),
+        crate::deep_research::max_sub_queries(),
+        pii_redaction_required,
+    );
     let web_search_available = !conversation_only
         && retrieval_scope != crate::normalize::RetrievalScope::KnowledgeOnly
         && (retrieval_scope == crate::normalize::RetrievalScope::WebOnly
@@ -3941,6 +3991,7 @@ pub async fn invoke_stream_sse(
     // external provider the answer did.
     let title_user_content = user_content.clone();
 
+    let context_ref_documents = crate::context_refs::register_turn_documents(&session_run.run_id, context_refs.as_ref());
     // The tool phase and the first inference call run INSIDE this task, after
     // `connected` is already on the wire. Axum begins the HTTP response only
     // once this handler returns, so doing that work here held the whole response
@@ -3951,6 +4002,7 @@ pub async fn invoke_stream_sse(
         // Owns the gauge unit: it drops when this task ends on any path, so a stop, a cancel, a
         // client disconnect or a panic cannot leave the stream counted.
         let _active_stream = active_stream;
+        let _context_ref_documents = context_ref_documents;
         // Keep tool writes private until the assistant message is durable.
         let committed_artifacts = session_state.artifact_versions.clone();
         let artifact_base = committed_artifacts.fork_thread(&session_thread_id);
@@ -4196,7 +4248,35 @@ pub async fn invoke_stream_sse(
         // failure inside it degrades into a stated fact in the context rather
         // than failing the turn.
         let mut deep_research_ran = false;
-        if deep_research_requested {
+        // The plan a plan turn stores with its answer (EP-2 S5); `None` on every other turn.
+        let mut research_plan_record: Option<serde_json::Value> = None;
+        if deep_research_requested
+            && matches!(research_phase, crate::deep_research::ResearchPhase::Plan)
+        {
+            // The plan turn: one plan inference, the editable plan, and a short answer pointing at
+            // it. It searches nothing, so the forced search below is skipped and the tool rounds
+            // get no tools; the run turn sends the edited plan back.
+            seq = sink.sync_cursor(seq).await;
+            let max_sub_queries = crate::deep_research::max_sub_queries();
+            let plan = crate::deep_research::plan_only(
+                &session_state,
+                &req_id,
+                &org_clone,
+                inference_bearer.as_str(),
+                effective_zdr,
+                min_privacy_tier_wire,
+                &model_clone,
+                &tool_phase_query,
+                &sink,
+            )
+            .await;
+            sink.emit(plan.event(max_sub_queries)).await;
+            seq = sink.sync_cursor(seq).await;
+            research_plan_record = Some(plan.record(max_sub_queries));
+            messages.push(plan.context_message());
+            tool_defs.clear();
+            deep_research_ran = true;
+        } else if deep_research_requested {
             seq = sink.sync_cursor(seq).await;
             let research = crate::deep_research::run_deep_research(
                 &session_state,
@@ -4212,6 +4292,7 @@ pub async fn invoke_stream_sse(
                 &model_clone,
                 messages,
                 &tool_phase_query,
+                research_phase.client_plan(),
                 cancel_flag.as_ref(),
                 Some(&sink),
             )
@@ -5687,8 +5768,25 @@ pub async fn invoke_stream_sse(
                     let lock_started = timing.now_ms();
                     let _artifact_commit_guard = committed_artifacts.lock_commit(&session_thread_id).await;
                     timing.close(crate::turn_timing::Phase::CommitLock, lock_started);
+                    // EP-3 S3: with the revision switch `on`, the table's compare-and-set
+                    // also decides, so a head another replica moved fails the same way.
                     if sink.recorded_artifacts().iter().any(|artifact|
-                        !committed_artifacts.unchanged_from(&artifact_base, &session_thread_id, &artifact.id)) {
+                        !committed_artifacts.unchanged_from(&artifact_base, &session_thread_id, &artifact.id))
+                        || crate::artifact_revisions::commit_turn_revisions(
+                            &session_state,
+                            &session_bearer,
+                            &crate::artifact_revisions::RevisionTarget {
+                                org_id: org_clone.clone(),
+                                thread_id: session_thread_id.clone(),
+                                run_id: session_run_for_terminal.run_id.clone(),
+                            },
+                            &committed_artifacts,
+                            &sink.recorded_artifacts(),
+                            effective_zdr,
+                            retention_class.is_some(),
+                        )
+                        .await
+                        .is_err() {
                         failure_code = "artifact_revision_conflict";
                         emit_turn_timing(
                             &tx,
@@ -5811,6 +5909,9 @@ pub async fn invoke_stream_sse(
                                                     // Why Control declined retrieval for this turn (D1-242) is
                                                     // stored as its typed code beside the evidence, so a thread
                                                     // reopened later says what the live stream said.
+                                                    // A plan turn's plan rides beside it, except on a ZDR
+                                                    // or waived turn (EP-2 S5, D12).
+                                                    crate::session_flow::with_research_plan(
                                                     crate::session_flow::with_retrieval_decline(
                                                     // A ZDR or waived turn streamed its passages and
                                                     // stamps but stores neither (D12).
@@ -5844,6 +5945,9 @@ pub async fn invoke_stream_sse(
                                                         },
                                                     ),
                                                     retrieval_decline,
+                                                    ),
+                                                    research_plan_record.as_ref(),
+                                                    effective_zdr || retention_class.is_some(),
                                                     ),
                                                     result_receipt
                                                         .lock()
@@ -6008,8 +6112,9 @@ pub async fn invoke_stream_sse(
 
                     // EP-3 S2: with the revision switch on, the same revisions also go to
                     // session-core's store, best effort on their own task. It reads the heads
-                    // committed before this turn, so it runs before the seeding below.
-                    if session_state.artifact_revisions_mode.writes() {
+                    // committed before this turn, so it runs before the seeding below. In `on`
+                    // the same revisions were appended at the commit lock instead (S3).
+                    if session_state.artifact_revisions_mode.writes_after_save() {
                         crate::artifact_revisions::record_turn_revisions(
                             &session_state,
                             &session_bearer,
@@ -6026,6 +6131,13 @@ pub async fn invoke_stream_sse(
                         );
                     }
 
+                    // EP-3 S3: in `on` a stored revision's frame names its editor; in every other
+                    // mode the frame carries no `editor` key, as before.
+                    let artifact_editor = crate::artifact_revisions::frame_editor(
+                        session_state.artifact_revisions_mode,
+                        effective_zdr,
+                        retention_class.is_some(),
+                    );
                     // The exact text and its receipt are now in the durable
                     // assistant message. Publish only the last selected version
                     // of each artifact, through the normal resumable stream.
@@ -6042,7 +6154,7 @@ pub async fn invoke_stream_sse(
                         }
                         // The live frame keeps a report's provenance stamp even when the turn may not store it.
                         emit_and_buffer(&tx, &stream_buffers, &buffer_key, &mut seq, &features, &req_id,
-                            artifact.into_event()).await;
+                            artifact.into_event().with_editor(artifact_editor)).await;
                     }
                     if hold_artifact_answer {
                         let data = serde_json::to_string(&SseChunk { request_id: req_id.clone(),
@@ -8293,6 +8405,7 @@ fn image_gen_stream(
                     content: content.clone(),
                     version: 1,
                     provenance: None,
+                    editor: None,
                 };
                 if artifact.should_emit(&features) {
                     let _ = tx.send(Ok(artifact.to_sse(&request_id))).await;
@@ -22819,6 +22932,7 @@ mod continue_run_tests {
                     },
                     step_id: if with_call { "s1.tool_1".to_owned() } else { String::new() },
                     authority: None,
+                    ..Default::default()
                 }
             }
         }
@@ -22961,6 +23075,7 @@ mod continue_run_tests {
                 tool_input_json: "{\"command\":\"echo\"}".to_owned(),
                 step_id: "s1.tool_1".to_owned(),
                 authority: Some(mp_contracts::model_plane::v1::ApprovedAuthority::default()),
+                ..Default::default()
             }),
             Err(tonic::Status::not_found("approval not found")),
         ])

@@ -314,6 +314,8 @@ fn authed_routes() -> Router<AppState> {
         .route("/v1/threads/:thread_id/branch", post(branch_thread))
         // Start a new thread from a copy of this one, up to an assistant turn (build plan WS17 S6).
         .route("/v1/threads/:thread_id/fork", post(fork_thread))
+        // The person's edit and restore of a thread artifact (Wave 3 EP-3 S4); 404 while editing is off.
+        .merge(crate::artifact_edit_routes::router())
         // Read-only replay of Session Core's canonical event log. The route
         // exposes envelope metadata only; Any payload bytes remain inside the
         // owning plane and cannot become an accidental browser data channel.
@@ -444,6 +446,8 @@ fn authed_routes() -> Router<AppState> {
             "/v1/finetune/jobs/:job_id/deploy",
             post(crate::finetune_routes::deploy_job),
         )
+        // Wave 3 EP-3 S3: artifact revision history and the composer's capability read.
+        .merge(crate::artifact_revision_routes::router())
 }
 
 /// `/v1/orchestration/*` read + mutation routes. Merged into the auth-gated router.
@@ -2574,6 +2578,149 @@ struct DecideApprovalBody {
     /// carries one reads exactly as it did before the switch existed.
     #[serde(default)]
     promote: Value,
+    /// "Send with my edits" (EP-10-S4): the person's changes to a pending mail send, granted with
+    /// the approval in one act. Refused while APPROVAL_EDIT_ENABLED is off; absent, the decision is
+    /// exactly what it was before edits existed.
+    #[serde(default)]
+    edit: Option<DecideEditBody>,
+}
+
+/// The edit a decision may carry (EP-10-S4). `patch` holds only `to`, `subject` and `bodyText`;
+/// Session Core refuses any other key, so this gateway forwards it as the person wrote it.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DecideEditBody {
+    patch: Value,
+    base_fingerprint: String,
+}
+
+/// The approve-with-edits switch (EP-10-S4). Off: a decision carrying an edit is refused with 403
+/// `approval_edit_disabled` before anything reaches Session Core. Only the literal `true` enables
+/// it.
+const APPROVAL_EDIT_ENV: &str = "APPROVAL_EDIT_ENABLED";
+
+fn approval_edit_enabled() -> bool {
+    mp_contracts::loop_fold::switch_from(env::var(APPROVAL_EDIT_ENV).ok().as_deref())
+}
+
+/// The largest patch an edit may carry: the 48 KiB body cap plus room for recipients and subject.
+const MAX_EDIT_PATCH_BYTES: usize = 64 * 1024;
+
+fn edit_refusal(status: StatusCode, code: &str, message: &str) -> HttpJsonError {
+    (
+        status,
+        Json(json!({ "error": { "code": code, "message": message, "details": {} } })),
+    )
+}
+
+/// Check a decision's edit before any upstream call (EP-10-S4, decision D1): the switch, a grant,
+/// the `once` scope with no "Always", a JSON object patch and a 64-hex base fingerprint. `None`
+/// when the body carries no edit, whatever the switch says.
+fn checked_decision_edit(
+    edit: Option<&DecideEditBody>,
+    body_scope: &str,
+    promote: bool,
+    target: ApprovalState,
+    enabled: bool,
+) -> Result<Option<mp_contracts::model_plane::v1::ApprovalEdit>, HttpJsonError> {
+    let Some(edit) = edit else {
+        return Ok(None);
+    };
+    if !enabled {
+        return Err(edit_refusal(
+            StatusCode::FORBIDDEN,
+            "approval_edit_disabled",
+            "Editing before approving is not enabled on this deployment.",
+        ));
+    }
+    if !matches!(target, ApprovalState::Granted) {
+        return Err(edit_refusal(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "edit_requires_grant",
+            "An edit is sent with an approval only.",
+        ));
+    }
+    if !matches!(body_scope, "" | SCOPE_ONCE) || promote {
+        return Err(edit_refusal(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "edit_requires_once",
+            "An edited action is approved for this one time only.",
+        ));
+    }
+    if !edit.patch.is_object() {
+        return Err(edit_refusal(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid_patch",
+            "The edit is not in the expected shape.",
+        ));
+    }
+    let base = edit.base_fingerprint.trim();
+    if base.len() != 64 || !base.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(edit_refusal(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid_base_fingerprint",
+            "The edit does not say which draft it changes.",
+        ));
+    }
+    let patch_json = edit.patch.to_string();
+    if patch_json.len() > MAX_EDIT_PATCH_BYTES {
+        return Err(edit_refusal(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "edit_too_large",
+            "The edited message is too long.",
+        ));
+    }
+    Ok(Some(mp_contracts::model_plane::v1::ApprovalEdit {
+        patch_json,
+        base_fingerprint: base.to_owned(),
+    }))
+}
+
+/// The HTTP form of a decision that carried an edit (EP-10-S4). Session Core sends the closed code
+/// as the status message: a changed approval is 409, a refused patch 422, a switch or owner refusal
+/// 403. A typed ZDR refusal and every other status keep the shared mapping.
+fn edit_decision_status_to_http(error: &tonic::Status) -> HttpJsonError {
+    if mp_contracts::zdr_refusal::Refusal::from_status(error).is_some() {
+        return grpc_status_to_http(error);
+    }
+    let code = error.message();
+    let contract_code = mp_contracts::approval_edit::EditError::ALL
+        .iter()
+        .any(|known| known.code() == code);
+    match (error.code(), code) {
+        (tonic::Code::Aborted, "approval_changed") => edit_refusal(
+            StatusCode::CONFLICT,
+            "approval_changed",
+            "This approval changed since you opened it. Review it again.",
+        ),
+        (tonic::Code::FailedPrecondition, "revision_limit") => edit_refusal(
+            StatusCode::CONFLICT,
+            "revision_limit",
+            "This action was edited too many times.",
+        ),
+        (tonic::Code::FailedPrecondition, "not_editable") => edit_refusal(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "not_editable",
+            "This action cannot be edited; approve or reject it as drafted.",
+        ),
+        (tonic::Code::InvalidArgument, code)
+            if contract_code
+                || matches!(code, "invalid_patch" | "edit_requires_once" | "edit_requires_grant") =>
+        {
+            edit_refusal(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                code,
+                "The edit was not accepted.",
+            )
+        }
+        (tonic::Code::FailedPrecondition, "approval_edit_disabled")
+        | (tonic::Code::PermissionDenied, "edit_owner_only") => edit_refusal(
+            StatusCode::FORBIDDEN,
+            code,
+            "Editing this approval is not available.",
+        ),
+        _ => grpc_status_to_http(error),
+    }
 }
 
 /// The scope a decision may carry (build plan WS13 S6). `once` is always available. A standing
@@ -2821,6 +2968,15 @@ async fn decide_approval(
             ))
         }
     };
+    // Approve with edits (EP-10-S4): refused before any upstream call unless it is a `once` grant
+    // under the switch. A body without `edit` takes exactly the path it always did.
+    let edit = checked_decision_edit(
+        body.edit.as_ref(),
+        &body.scope,
+        body.promote == Value::Bool(true),
+        target_state,
+        approval_edit_enabled(),
+    )?;
     let prior_approval = if matches!(target_state, ApprovalState::Granted) {
         state
             .orchestration_client
@@ -2879,23 +3035,29 @@ async fn decide_approval(
             }
         }
     }
+    let edited = edit.is_some();
+    let mut decision = user_decision_request(
+        approval_id,
+        target_state,
+        &claims.user_id,
+        &claims.org_id,
+        body.reason,
+        scope,
+        asks_rule,
+    );
+    decision.edit = edit;
     let resp = state
         .orchestration_client
         .clone()
-        .decide_approval(authenticated_session_request(
-            user_decision_request(
-                approval_id,
-                target_state,
-                &claims.user_id,
-                &claims.org_id,
-                body.reason,
-                scope,
-                asks_rule,
-            ),
-            &session_bearer,
-        )?)
+        .decide_approval(authenticated_session_request(decision, &session_bearer)?)
         .await
-        .map_err(|e| grpc_status_to_http(&e))?
+        .map_err(|e| {
+            if edited {
+                edit_decision_status_to_http(&e)
+            } else {
+                grpc_status_to_http(&e)
+            }
+        })?
         .into_inner();
     let approval = resp
         .approval
@@ -8546,7 +8708,7 @@ fn todo_value(todo: &Todo) -> Value {
 }
 
 pub(crate) fn approval_value(approval: &Approval) -> Value {
-    json!({
+    let mut value = json!({
         "id": approval.id,
         "run_id": approval.run_id,
         "step_id": empty_to_null(&approval.step_id),
@@ -8576,7 +8738,13 @@ pub(crate) fn approval_value(approval: &Approval) -> Value {
         })),
         "grant_ref": empty_to_null(&approval.grant_ref),
         "turn_origin": empty_to_null(&approval.turn_origin),
-    })
+    });
+    // EP-10-S4: present only for an approval the person edited before granting, so every other
+    // approval projects exactly as before.
+    if approval.revision > 0 {
+        value["revision"] = json!(approval.revision);
+    }
+    value
 }
 
 /// The scopes this process offers a person (build plan WS13 S6): `once` alone while standing scopes
@@ -8981,6 +9149,162 @@ mod approval_rule_tests {
 }
 
 #[cfg(test)]
+mod approval_edit_route_tests {
+    //! EP-10-S4: the gateway half of approve-with-edits. Every check runs before an upstream call;
+    //! the switch is off by default and a body without `edit` is untouched by it.
+    use super::*;
+
+    const BASE: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    fn edit_body() -> DecideEditBody {
+        DecideEditBody {
+            patch: json!({ "subject": "New subject" }),
+            base_fingerprint: BASE.to_owned(),
+        }
+    }
+
+    fn code_of(error: &HttpJsonError) -> (StatusCode, String) {
+        (error.0, error.1 .0["error"]["code"].as_str().unwrap_or_default().to_owned())
+    }
+
+    #[test]
+    fn approval_edit_switch_is_off_by_default_and_strict() {
+        assert_eq!(APPROVAL_EDIT_ENV, "APPROVAL_EDIT_ENABLED");
+        for value in [None, Some("1"), Some("yes"), Some("on"), Some("")] {
+            assert!(!mp_contracts::loop_fold::switch_from(value), "{value:?}");
+        }
+    }
+
+    #[test]
+    fn edit_off_by_default_is_forbidden() {
+        let refused =
+            checked_decision_edit(Some(&edit_body()), "", false, ApprovalState::Granted, false)
+                .expect_err("off");
+        assert_eq!(code_of(&refused), (StatusCode::FORBIDDEN, "approval_edit_disabled".to_owned()));
+        assert!(refused.1 .0["error"]["details"].is_object(), "details is an object");
+    }
+
+    #[test]
+    fn a_decision_without_an_edit_is_unchanged_by_the_switch() {
+        for enabled in [false, true] {
+            assert!(checked_decision_edit(None, "thread", true, ApprovalState::Denied, enabled)
+                .expect("no edit")
+                .is_none());
+        }
+    }
+
+    #[test]
+    fn edit_with_scope_thread_is_refused() {
+        for (scope, promote) in [("thread", false), ("run", false), ("", true)] {
+            let refused =
+                checked_decision_edit(Some(&edit_body()), scope, promote, ApprovalState::Granted, true)
+                    .expect_err("wide scope");
+            assert_eq!(
+                code_of(&refused),
+                (StatusCode::UNPROCESSABLE_ENTITY, "edit_requires_once".to_owned()),
+                "{scope} {promote}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_rejection_with_an_edit_is_refused() {
+        let refused =
+            checked_decision_edit(Some(&edit_body()), "", false, ApprovalState::Denied, true)
+                .expect_err("rejection");
+        assert_eq!(code_of(&refused).1, "edit_requires_grant");
+    }
+
+    #[test]
+    fn an_edit_is_forwarded_as_its_patch_and_base() {
+        let edit = checked_decision_edit(Some(&edit_body()), "once", false, ApprovalState::Granted, true)
+            .expect("accepted")
+            .expect("an edit");
+        assert_eq!(edit.base_fingerprint, BASE);
+        let patch: Value = serde_json::from_str(&edit.patch_json).expect("json");
+        assert_eq!(patch, json!({ "subject": "New subject" }));
+    }
+
+    #[test]
+    fn a_malformed_edit_is_refused_before_the_upstream() {
+        let mut not_object = edit_body();
+        not_object.patch = json!(["subject"]);
+        let refused = checked_decision_edit(Some(&not_object), "", false, ApprovalState::Granted, true)
+            .expect_err("array patch");
+        assert_eq!(code_of(&refused).1, "invalid_patch");
+
+        let mut short = edit_body();
+        short.base_fingerprint = "abc".to_owned();
+        let refused = checked_decision_edit(Some(&short), "", false, ApprovalState::Granted, true)
+            .expect_err("short base");
+        assert_eq!(code_of(&refused).1, "invalid_base_fingerprint");
+
+        let mut large = edit_body();
+        large.patch = json!({ "bodyText": "x".repeat(MAX_EDIT_PATCH_BYTES) });
+        let refused = checked_decision_edit(Some(&large), "", false, ApprovalState::Granted, true)
+            .expect_err("large");
+        assert_eq!(code_of(&refused), (StatusCode::UNPROCESSABLE_ENTITY, "edit_too_large".to_owned()));
+    }
+
+    #[test]
+    fn decide_body_parses_an_edit_and_refuses_unknown_edit_keys() {
+        let body: DecideApprovalBody = serde_json::from_value(json!({
+            "decision": "approve",
+            "edit": { "patch": { "to": ["a@example.com"] }, "base_fingerprint": BASE },
+        }))
+        .expect("an edit parses");
+        assert!(body.edit.is_some());
+        let plain: DecideApprovalBody =
+            serde_json::from_value(json!({ "decision": "approve" })).expect("no edit");
+        assert!(plain.edit.is_none());
+        assert!(serde_json::from_value::<DecideApprovalBody>(json!({
+            "decision": "approve",
+            "edit": { "patch": {}, "base_fingerprint": BASE, "connection_id": "conn-2" },
+        }))
+        .is_err());
+    }
+
+    #[test]
+    fn approval_changed_is_409() {
+        let refused = edit_decision_status_to_http(&tonic::Status::aborted("approval_changed"));
+        assert_eq!(code_of(&refused), (StatusCode::CONFLICT, "approval_changed".to_owned()));
+        assert!(refused.1 .0["error"]["details"].is_object());
+    }
+
+    #[test]
+    fn edit_refusals_map_to_typed_statuses() {
+        for error in mp_contracts::approval_edit::EditError::ALL {
+            let refused =
+                edit_decision_status_to_http(&tonic::Status::invalid_argument(error.code()));
+            assert_eq!(code_of(&refused), (StatusCode::UNPROCESSABLE_ENTITY, error.code().to_owned()));
+        }
+        let cases = [
+            (tonic::Status::failed_precondition("not_editable"), StatusCode::UNPROCESSABLE_ENTITY),
+            (tonic::Status::failed_precondition("revision_limit"), StatusCode::CONFLICT),
+            (tonic::Status::failed_precondition("approval_edit_disabled"), StatusCode::FORBIDDEN),
+            (tonic::Status::permission_denied("edit_owner_only"), StatusCode::FORBIDDEN),
+        ];
+        for (status, http) in cases {
+            let refused = edit_decision_status_to_http(&status);
+            assert_eq!(code_of(&refused), (http, status.message().to_owned()));
+        }
+        let other = edit_decision_status_to_http(&tonic::Status::not_found("approval not found"));
+        assert_eq!(other.0, StatusCode::NOT_FOUND, "everything else keeps the shared mapping");
+    }
+
+    #[test]
+    fn an_edited_approval_projects_its_revision_and_an_unedited_one_does_not() {
+        let mut approval = Approval {
+            id: "appr_1".to_owned(),
+            ..Approval::default()
+        };
+        assert!(approval_value(&approval).get("revision").is_none());
+        approval.revision = 1;
+        assert_eq!(approval_value(&approval)["revision"], 1);
+    }
+}
+
+#[cfg(test)]
 mod approval_value_tests {
     use super::*;
 
@@ -9301,14 +9625,31 @@ fn lineage_value(lineage: &SubagentLineage) -> Value {
     json!({
         "thread_id": lineage.thread_id,
         "max_depth": lineage.max_depth,
-        "edges": lineage.edges.iter().map(|edge| {
-            json!({
-                "parent_run_id": edge.parent_run_id,
-                "child_run_id": edge.child_run_id,
-                "role": enum_name(SubagentRole::try_from(edge.role).ok().as_ref()),
-            })
-        }).collect::<Vec<_>>(),
+        "edges": lineage.edges.iter().map(lineage_edge_value).collect::<Vec<_>>(),
     })
+}
+
+/// One lineage edge. The goal, batch and edge status (Wave 3 EP-2 S9) are added only when
+/// session-core returned them, so an edge without them serialises exactly as it did before: a
+/// reloaded wide-research panel groups its cards by `batch_id` and titles them by `goal_summary`.
+fn lineage_edge_value(edge: &mp_contracts::model_plane::v1::LineageEdge) -> Value {
+    let mut value = json!({
+        "parent_run_id": edge.parent_run_id,
+        "child_run_id": edge.child_run_id,
+        "role": enum_name(SubagentRole::try_from(edge.role).ok().as_ref()),
+    });
+    if let Some(object) = value.as_object_mut() {
+        for (key, field) in [
+            ("goal_summary", &edge.goal_summary),
+            ("batch_id", &edge.batch_id),
+            ("status", &edge.status),
+        ] {
+            if !field.is_empty() {
+                object.insert(key.to_owned(), Value::String(field.clone()));
+            }
+        }
+    }
+    value
 }
 
 fn empty_to_null(value: &str) -> Value {
@@ -9745,6 +10086,18 @@ pub struct InvokeRequest {
     /// its tool set, whether or not the Search toggle is also on.
     #[serde(default, alias = "deepResearch")]
     pub deep_research: bool,
+    /// Wave 3 EP-2 S5 — which turn of a two-turn deep research this is: `"plan"` ends with an
+    /// editable plan and searches nothing, `"run"` runs the plan in `research_plan`. Absent is
+    /// today's one-shot. Kept as raw JSON and read only on a deep-research turn while
+    /// `DEEP_RESEARCH_PLAN_TURN` is on (`deep_research::research_phase`), so a body carrying it is
+    /// parsed exactly as before with the switch off.
+    #[serde(default, alias = "researchPhase")]
+    pub research_phase: Option<serde_json::Value>,
+    /// Wave 3 EP-2 S5 — the edited plan a run turn carries:
+    /// `{sub_queries: [string], answers: [{question, answer}]}`. Untrusted: the gateway re-clamps
+    /// every sub-query and bounds the answers before anything is searched.
+    #[serde(default, alias = "researchPlan")]
+    pub research_plan: Option<serde_json::Value>,
     /// Per-turn retrieval-source filter (Perplexity-Focus style). Absent/unknown
     /// → "auto" (today's behavior, byte-identical). Meaningless and ignored
     /// when `conversation_only` is in effect — that mode already excludes both
@@ -9983,12 +10336,20 @@ pub struct InvokeRequest {
     #[serde(default)]
     pub agent_autonomy_cap: Option<serde_json::Value>,
     /// Wave 3 EP-2 S8 — a wide-research run from the composer's "Bred forskning" entry:
-    /// `{item_cap, items}`. Kept as raw JSON and read only on an agentic turn while
+    /// `{item_cap, items}`, or a one-item retry `{retry_of_child_run_id, batch_id}` (EP-2 S9).
+    /// Kept as raw JSON and read only on an agentic turn while
     /// `WIDE_RESEARCH_ENTRY_ENABLED` is on ([`wide_research_request`]), so a body carrying it is
     /// parsed exactly as before with the switch off. It only narrows a run: the gateway clamps
     /// `item_cap` to the org's `research.max_fan_out_items`.
     #[serde(default, alias = "wideResearch")]
     pub wide_research: Option<serde_json::Value>,
+    /// Wave 3 EP-3 S5 — the typed context references the composer attached: `[{kind, id, label,
+    /// selection?}]`, selectors only, never content. Kept as raw JSON and read only while
+    /// `MODEL_GATEWAY_CONTEXT_REFS_ENABLED` is on ([`crate::context_refs::resolve`]), so a body
+    /// carrying it parses exactly as before with the switch off. A ZDR turn carrying any is refused
+    /// with the `context_references` feature whatever the switch says.
+    #[serde(default, alias = "contextRefs")]
+    pub context_refs: Option<serde_json::Value>,
 }
 
 /// The switch of the wide-research entry (Wave 3 EP-2 S8). Opt-in: only the literal `true` enables
@@ -10016,6 +10377,18 @@ const MAX_WIDE_RESEARCH_REQUEST_ITEMS: usize = 64;
 
 /// Longest item forwarded; execution-core cuts at the same length.
 const MAX_WIDE_RESEARCH_ITEM_CHARS: usize = 500;
+
+/// Longest child run id a retry may name (EP-2 S9); run ids are ULID-based and far shorter.
+const MAX_WIDE_RESEARCH_RUN_ID_CHARS: usize = 128;
+
+/// Longest batch id a retry may name (EP-2 S9): a batch id is the fan-out call's step id.
+const MAX_WIDE_RESEARCH_BATCH_ID_CHARS: usize = 256;
+
+/// Whether a retry's run or batch id is one execution-core may look up: non-empty, at most `max`
+/// characters, printable ASCII with no whitespace. Anything else is not an id this platform minted.
+fn wide_research_retry_id_ok(id: &str, max: usize) -> bool {
+    !id.is_empty() && id.len() <= max && id.bytes().all(|byte| byte.is_ascii_graphic())
+}
 
 /// Items in flight at once in one fan-out: execution-core's `WIDE_RESEARCH_FAN_OUT_CONCURRENCY`
 /// default. The gateway cannot read that executor's environment, so the estimate states this.
@@ -10050,7 +10423,7 @@ impl WideResearchCap {
 /// The wide-research request a Do run carries (Wave 3 EP-2 S8), from the turn's raw JSON.
 ///
 /// `None` with the switch off, for a ZDR or waived turn, and for a body that is not
-/// `{item_cap?, items?}`. Items are trimmed, blank ones skipped, each cut to 500 characters and at
+/// `{item_cap?, items?}` or a retry `{retry_of_child_run_id, batch_id?}` (EP-2 S9). Items are trimmed, blank ones skipped, each cut to 500 characters and at
 /// most 64 kept; `item_cap` is the person's ask (the item count when absent) clamped to the org
 /// cap, so a request can only narrow. An org cap of 0 is sent as 0, and execution-core refuses the
 /// run: wide research is off for that org.
@@ -10067,6 +10440,10 @@ pub fn wide_research_request(
         item_cap: Option<u32>,
         #[serde(default)]
         items: Vec<String>,
+        #[serde(default)]
+        retry_of_child_run_id: Option<String>,
+        #[serde(default)]
+        batch_id: Option<String>,
     }
 
     if !enabled || zdr_or_waived {
@@ -10075,6 +10452,24 @@ pub fn wide_research_request(
     let input = raw
         .filter(|raw| raw.is_object())
         .and_then(|raw| serde_json::from_value::<Input>(raw.clone()).ok())?;
+    // A one-item retry (EP-2 S9): execution-core reads the item back from the child run, owner
+    // checked, so the body's items are not forwarded; the cap is one item, and an org with wide
+    // research off is still sent 0. A malformed id is no request at all, never a fresh fan-out.
+    if let Some(child_run_id) = input.retry_of_child_run_id.as_deref() {
+        let batch_id = input.batch_id.as_deref().unwrap_or_default();
+        if !wide_research_retry_id_ok(child_run_id, MAX_WIDE_RESEARCH_RUN_ID_CHARS)
+            || !(batch_id.is_empty()
+                || wide_research_retry_id_ok(batch_id, MAX_WIDE_RESEARCH_BATCH_ID_CHARS))
+        {
+            return None;
+        }
+        return Some(mp_contracts::model_plane::v1::WideResearchRequest {
+            item_cap: cap.items.min(1),
+            items: Vec::new(),
+            batch_id: batch_id.to_owned(),
+            retry_of_child_run_id: child_run_id.to_owned(),
+        });
+    }
     let items: Vec<String> = input
         .items
         .iter()
@@ -10412,6 +10807,81 @@ mod wide_research_tests {
         let flood = wide_research_request(true, Some(&json!({"items": many})), false, org(16))
             .expect("on");
         assert_eq!(flood.items.len(), MAX_WIDE_RESEARCH_REQUEST_ITEMS);
+    }
+
+    #[test]
+    fn a_wide_research_retry_is_one_item_named_by_its_child_run() {
+        let body = json!({
+            "retry_of_child_run_id": "run-01jchild",
+            "batch_id": "run-1:tool_1_fan-1",
+            "items": ["ignored"],
+            "item_cap": 9,
+        });
+        let retry = wide_research_request(true, Some(&body), false, org(8)).expect("on");
+        assert_eq!(retry.item_cap, 1);
+        assert!(retry.items.is_empty(), "execution-core reads the item back itself");
+        assert_eq!(retry.retry_of_child_run_id, "run-01jchild");
+        assert_eq!(retry.batch_id, "run-1:tool_1_fan-1");
+        // An org with wide research off is still refused by execution-core.
+        let off = wide_research_request(true, Some(&body), false, org(0)).expect("on");
+        assert_eq!(off.item_cap, 0);
+        // A retry is a non-ZDR, switched-on request like any other.
+        assert_eq!(wide_research_request(false, Some(&body), false, org(8)), None);
+        assert_eq!(wide_research_request(true, Some(&body), true, org(8)), None);
+    }
+
+    #[test]
+    fn a_wide_research_retry_with_a_malformed_id_is_no_request() {
+        for body in [
+            json!({"retry_of_child_run_id": ""}),
+            json!({"retry_of_child_run_id": "run 1"}),
+            json!({"retry_of_child_run_id": "r".repeat(MAX_WIDE_RESEARCH_RUN_ID_CHARS + 1)}),
+            json!({"retry_of_child_run_id": "run-1", "batch_id": "a\nb"}),
+        ] {
+            assert_eq!(
+                wide_research_request(true, Some(&body), false, org(8)),
+                None,
+                "{body}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_lineage_edge_adds_goal_batch_and_status_only_when_stored() {
+        let lineage = SubagentLineage {
+            thread_id: "thread-1".to_owned(),
+            max_depth: 1,
+            edges: vec![
+                mp_contracts::model_plane::v1::LineageEdge {
+                    parent_run_id: "run-p".to_owned(),
+                    child_run_id: "run-old".to_owned(),
+                    role: SubagentRole::Generic as i32,
+                    ..Default::default()
+                },
+                mp_contracts::model_plane::v1::LineageEdge {
+                    parent_run_id: "run-p".to_owned(),
+                    child_run_id: "run-item".to_owned(),
+                    role: SubagentRole::Researcher as i32,
+                    goal_summary: "look up carrier docs".to_owned(),
+                    batch_id: "run-p:tool_1_fan-1".to_owned(),
+                    status: "attached".to_owned(),
+                    ..Default::default()
+                },
+            ],
+        };
+        let value = lineage_value(&lineage);
+        // An edge without the readback fields serialises exactly as before them.
+        assert_eq!(
+            value["edges"][0],
+            json!({
+                "parent_run_id": "run-p",
+                "child_run_id": "run-old",
+                "role": SubagentRole::Generic.as_str_name(),
+            })
+        );
+        assert_eq!(value["edges"][1]["goal_summary"], "look up carrier docs");
+        assert_eq!(value["edges"][1]["batch_id"], "run-p:tool_1_fan-1");
+        assert_eq!(value["edges"][1]["status"], "attached");
     }
 
     #[test]

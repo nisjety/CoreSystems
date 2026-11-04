@@ -107,6 +107,17 @@ pub const FIELD_TREATMENTS: &[(&str, Treatment)] = &[
     ("browse_web", refused_feature("web_search")),
     ("skill_ids", refused_feature("skills")),
     ("deep_research", refused_feature("deep_research")),
+    // EP-2 S5: the plan and run turns of a two-turn deep research. Both only shape a deep-research
+    // turn, which `deep_research` refuses before either phase, so a plan turn under ZDR gets the
+    // same refusal and neither field has anything to do on its own.
+    (
+        "research_phase",
+        Treatment::Inert("read only on a deep-research turn, which a ZDR turn refuses through `deep_research`"),
+    ),
+    (
+        "research_plan",
+        Treatment::Inert("read only on a deep-research turn, which a ZDR turn refuses through `deep_research`"),
+    ),
     // `web_only` is refused. `auto` and `knowledge_only` are honored: grounding
     // then reads org knowledge only, and no web source was asked for.
     ("retrieval_scope", refused_feature("web_search")),
@@ -179,6 +190,9 @@ pub const FIELD_TREATMENTS: &[(&str, Treatment)] = &[
     // EP-2 S8: a wide-research run is a Do run, refused under ZDR through the `agentic` feature it
     // rides on; the estimate route refuses a ZDR caller the same way.
     ("wide_research", refused_feature("agentic")),
+    // EP-3 S5: a reference is resolved against durable state (a document's ACL, a thread, a
+    // revision), so a ZDR turn carrying any is refused, and none is silently dropped.
+    ("context_refs", refused_feature("context_references")),
 ];
 
 /// The feature strings the gateway reads, each with its treatment. A feature
@@ -259,6 +273,8 @@ pub fn invoke_field_names(request: &InvokeRequest) -> Vec<&'static str> {
         browse_web: _,
         skill_ids: _,
         deep_research: _,
+        research_phase: _,
+        research_plan: _,
         retrieval_scope: _,
         connector_scope: _,
         regenerated: _,
@@ -299,6 +315,7 @@ pub fn invoke_field_names(request: &InvokeRequest) -> Vec<&'static str> {
         agent_tool_capability_ids: _,
         agent_autonomy_cap: _,
         wide_research: _,
+        context_refs: _,
     } = request;
     vec![
         "content",
@@ -316,6 +333,8 @@ pub fn invoke_field_names(request: &InvokeRequest) -> Vec<&'static str> {
         "browse_web",
         "skill_ids",
         "deep_research",
+        "research_phase",
+        "research_plan",
         "retrieval_scope",
         "connector_scope",
         "regenerated",
@@ -356,6 +375,7 @@ pub fn invoke_field_names(request: &InvokeRequest) -> Vec<&'static str> {
         "agent_tool_capability_ids",
         "agent_autonomy_cap",
         "wide_research",
+        "context_refs",
     ]
 }
 
@@ -425,6 +445,9 @@ pub fn refusal(request: &InvokeRequest) -> Option<Refusal> {
     }
     if !request.pinned_message_ids.is_empty() {
         return feature("pinned_messages");
+    }
+    if crate::context_refs::requested(request.context_refs.as_ref()) {
+        return feature(crate::context_refs::ZDR_FEATURE);
     }
     if request.max_cost_usd.is_some() {
         return feature("spend_cap");

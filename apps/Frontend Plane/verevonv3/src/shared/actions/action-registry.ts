@@ -1089,6 +1089,37 @@ const chatSetConnectorScopeInput = z
   })
   .strict()
 
+// The context chips one chat turn carries (EP-3 S5), sent as `context_refs`. The bounds are the gateway's own
+// (mp-contracts `context_refs`): at most 20 references, ids of 1-128 characters from [A-Za-z0-9_.:-], labels
+// of at most 120 characters, no repeated kind and id. A selection is EP-3 S6's and is not a chip, and a
+// conversation joins the list with the thread tools (EP-3 S7), which the gateway refuses until then.
+const chatContextRefInput = z
+  .object({
+    kind: z.enum(['document', 'space', 'skill']),
+    id: z.string().regex(/^[A-Za-z0-9_.:-]{1,128}$/),
+    label: z.string().max(120),
+  })
+  .strict()
+
+const chatSetContextRefsInput = z
+  .object({
+    contextRefs: z
+      .array(chatContextRefInput)
+      .max(20)
+      .refine((refs) => new Set(refs.map((ref) => `${ref.kind}:${ref.id}`)).size === refs.length, {
+        message: 'context references must be distinct',
+      }),
+  })
+  .strict()
+
+// Opening the context picker reads what the person can already open: one tab, and an optional filter.
+const chatPickContextRefInput = z
+  .object({
+    tab: z.enum(['documents', 'skills', 'space']),
+    query: z.string().max(200).optional(),
+  })
+  .strict()
+
 // The agent mode one chat turn runs under (WS25-S6): the four ids of `api/contracts/agent-modes.json`,
 // read by the gateway as `agent_mode`. A closed list, so an id outside it is refused.
 const chatSetAgentModeInput = z
@@ -1124,12 +1155,77 @@ const chatOpenCitedPassageInput = z
   })
   .strict()
 
+// One page of an artifact's stored revisions (EP-3 S3): the thread and artifact it belongs to and an
+// optional page position. No user or org field: Session Core reads the owner from the session.
+const chatListArtifactRevisionsInput = z
+  .object({
+    threadId: z.string().min(1).max(128),
+    artifactId: z.string().min(1).max(128),
+    beforeVersion: z.number().int().min(1).optional(),
+    limit: z.number().int().min(1).max(20).optional(),
+  })
+  .strict()
+
 // A wide-research start (EP-2 S8) names a count preset or the person's own items. The server clamps
 // the count to the org's item cap, so nothing here can widen a run.
 const chatWideResearchStartInput = z
   .object({
     itemCap: z.number().int().min(1).max(16).optional(),
     items: z.array(z.string().min(1).max(500)).max(64).optional(),
+  })
+  .strict()
+
+// The Start of a deep-research plan card (EP-2 S5): the edited sub-queries and the answers to the
+// plan's questions, sent back as the run turn. The bounds are the card's; model-gateway re-clamps
+// every entry to its own cap and length, so nothing here can widen a run.
+const chatResearchPlanStartInput = z
+  .object({
+    subQueries: z.array(z.string().trim().min(1).max(200)).max(10),
+    answers: z
+      .array(
+        z
+          .object({
+            question: z.string().max(300),
+            answer: z.string().max(1000),
+          })
+          .strict(),
+      )
+      .max(3)
+      .optional(),
+  })
+  .strict()
+
+// Dismissing a plan card sends nothing: no research state waits on the server between the turns.
+const chatResearchPlanCancelInput = z.object({}).strict()
+
+// The same bounds model-gateway applies before it forwards a retry (EP-2 S9): printable ASCII ids,
+// a child run id of at most 128 characters and a batch id of at most 256.
+const chatWideResearchRetryItemInput = z
+  .object({
+    childRunId: z.string().min(1).max(128).regex(/^[\x21-\x7e]+$/),
+    batchId: z.string().min(1).max(256).regex(/^[\x21-\x7e]+$/),
+  })
+  .strict()
+
+// The person's own edit or restore of a thread artifact (EP-3 S4). `expectedVersion` is the head the panel
+// showed, the server's compare-and-set; no org or user field, because the server reads the owner from the
+// session. The text bound is the gateway's text-artifact limit.
+const chatSaveArtifactRevisionInput = z
+  .object({
+    threadId: z.string().min(1).max(128),
+    artifactId: z.string().min(1).max(256),
+    content: z.string().min(1).max(200_000),
+    title: z.string().max(256).optional(),
+    expectedVersion: z.number().int().min(1),
+  })
+  .strict()
+
+const chatRestoreArtifactRevisionInput = z
+  .object({
+    threadId: z.string().min(1).max(128),
+    artifactId: z.string().min(1).max(256),
+    version: z.number().int().min(1),
+    expectedVersion: z.number().int().min(1),
   })
   .strict()
 
@@ -4012,6 +4108,28 @@ export const actionRegistry = [
     outputSchema: envelopeStatusOutput,
   },
   {
+    id: 'chat.save_artifact_revision',
+    label: 'Save an edit of an artifact',
+    description: 'Save the person\'s own text of a document, code or HTML artifact in the Output panel as its newest version, under a compare-and-set on the version the panel showed: a moved head is refused with revision_mismatch and the head now stored, and nothing is overwritten unless the person chooses to. Owner only. Refused under zero data retention, in a thread that holds a waived run, in a Space thread, while a run in the thread is still working, and for any other kind (a deck is never edited as text). Off until artifact editing is switched on. Reversible: every earlier version stays and can be restored. Never model-executable: the model revises artifacts through its own tools.',
+    ownerPlane: 'model',
+    risk: 'medium',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: chatSaveArtifactRevisionInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'chat.restore_artifact_revision',
+    label: 'Restore an earlier version of an artifact',
+    description: 'Copy an earlier version of a document, code or HTML artifact into a new newest version, under the same compare-and-set and the same refusals as saving an edit. Nothing is deleted: the versions after the restored one stay in the history. Owner only, off until artifact editing is switched on. Never model-executable.',
+    ownerPlane: 'model',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: chatRestoreArtifactRevisionInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
     id: 'chat.submit_feedback',
     label: 'Submit chat feedback',
     description: 'Submit a positive or negative rating on a chat response.',
@@ -4053,6 +4171,28 @@ export const actionRegistry = [
     requiresApproval: false,
     reversible: true,
     inputSchema: chatSetConnectorScopeInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'chat.set_context_refs',
+    label: 'Attach context to a chat turn',
+    description: 'Name the context one chat turn carries: the composer\'s context chips (knowledge documents, skills, the conversation\'s own Space), sent as context_refs on that turn only. At most 20 distinct references, each a kind, an id and a display label; an empty list clears the choice. The gateway resolves every reference again under the person\'s own access, a document only narrows the knowledge search, and a Space can only name the conversation\'s own. A zero-retention or temporary turn never carries references. Never model-executable: a model does not choose what the person attaches.',
+    ownerPlane: 'model',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: chatSetContextRefsInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'chat.pick_context_ref',
+    label: 'Open the context picker',
+    description: 'Open the composer\'s context picker (the "+ Kontekst" button or /kontekst) on one tab: knowledge documents, skills, or the conversation\'s own Space. Read only: it lists what the person can already open through the existing document and skill reads, and nothing is attached until they pick. Never model-executable.',
+    ownerPlane: 'model',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: chatPickContextRefInput,
     outputSchema: envelopeStatusOutput,
   },
   {
@@ -4100,6 +4240,17 @@ export const actionRegistry = [
     outputSchema: envelopeStatusOutput,
   },
   {
+    id: 'chat.list_artifact_revisions',
+    label: 'List an artifact\'s revisions',
+    description: 'Read the stored revisions of one artifact in the person\'s own chat thread, newest first, with who made each (the model, the person, or a restore) and when, so the Output panel\'s version stepper survives a reload and another device. Read only and owner only: another person\'s thread reads as not found, a zero-retention session is refused, and a temporary or Space room thread is never asked. Answers not found while the gateway\'s revision history is off. Never model-executable.',
+    ownerPlane: 'model',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: chatListArtifactRevisionsInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
     id: 'chat.wide_research_start',
     label: 'Start wide research',
     description: 'Start a wide-research run from the composer: one Do turn that researches up to the organisation\'s item cap of separate questions in parallel and merges the answers. The person gives a pasted list (one question per line) or a count preset, and sees an estimate of the items, time and cost first. The server clamps the count to the organisation\'s research.max_fan_out_items policy and names any items past it in the answer; a zero-retention session is refused. Never model-executable: a model does not start a fan-out that spends on the person\'s behalf.',
@@ -4108,6 +4259,39 @@ export const actionRegistry = [
     requiresApproval: false,
     reversible: false,
     inputSchema: chatWideResearchStartInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'chat.research_plan_start',
+    label: 'Start deep research from the plan',
+    description: 'Run a deep research exactly as the person edited its plan: the plan card\'s sub-queries (edited, removed or added up to the cap) and the answers to its clarifying questions are sent as the run turn. Model-gateway re-clamps the plan (length, count, duplicates) before anything is searched; a zero-retention session never gets a plan card. Never model-executable: a model does not start research that searches and spends on the person\'s behalf.',
+    ownerPlane: 'model',
+    risk: 'medium',
+    requiresApproval: false,
+    reversible: false,
+    inputSchema: chatResearchPlanStartInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'chat.research_plan_cancel',
+    label: 'Dismiss a deep research plan',
+    description: 'Close a deep research plan card without running it. Nothing is sent: no research state waits on the server between the plan turn and the run turn, so a dismissed plan leaves nothing behind.',
+    ownerPlane: 'model',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: chatResearchPlanCancelInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'chat.wide_research_retry_item',
+    label: 'Retry a wide-research item',
+    description: 'Run one item of a wide-research fan-out again as its own one-item wide-research turn in the same conversation. The item is not sent from the browser: execution-core reads it back from the child run that failed, under the person\'s own credential, and only from a fan-out item of this conversation; the new attempt joins the same batch, so the grid shows it beside its siblings. Counts against the organisation\'s item cap like any wide-research run; a zero-retention session is refused. Never model-executable: a model does not spend on the person\'s behalf.',
+    ownerPlane: 'model',
+    risk: 'medium',
+    requiresApproval: false,
+    reversible: false,
+    inputSchema: chatWideResearchRetryItemInput,
     outputSchema: envelopeStatusOutput,
   },
   {

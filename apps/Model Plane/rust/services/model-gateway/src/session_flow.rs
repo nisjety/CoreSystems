@@ -322,6 +322,29 @@ fn missing_thread_append_error(error: &tonic::Status) -> bool {
     error.code() == Code::Internal && error.message().to_ascii_lowercase().contains("foreign key")
 }
 
+tokio::task_local! {
+    /// The validated context references of the chat send whose run is being prepared (EP-3 S5).
+    /// Scoped by [`with_user_context_refs`] around that one preparation, so the user message it
+    /// appends records them, and every other append in the process sees none.
+    static USER_TURN_CONTEXT_REFS: Vec<mp_contracts::context_refs::ContextRef>;
+}
+
+/// Runs `preparation` (the chat send's run preparation) so the user message it appends records
+/// `refs` in `metadata.context_refs`. With no references the future runs exactly as it would alone.
+pub async fn with_user_context_refs<F: std::future::Future>(
+    refs: Option<&crate::context_refs::ResolvedContextRefs>,
+    preparation: F,
+) -> F::Output {
+    match refs.filter(|resolved| !resolved.refs.is_empty()) {
+        Some(resolved) => {
+            USER_TURN_CONTEXT_REFS
+                .scope(resolved.refs.clone(), preparation)
+                .await
+        }
+        None => preparation.await,
+    }
+}
+
 /// Builds the durable `messages.metadata` Struct for the first-persisted user
 /// turn (chat-wave2 scope spec §2.4): `source_scope` when the thread is
 /// conversation-only, plus `retrieval_scope` when this turn's per-turn filter
@@ -334,11 +357,30 @@ fn user_message_metadata(
     conversation_only: bool,
     retrieval_scope: Option<&str>,
 ) -> Option<prost_types::Struct> {
+    // Outside [`with_user_context_refs`] (every caller but the chat send, and every send with the
+    // context-refs switch off) there is nothing to read, and the metadata is what it was.
+    let context_refs = USER_TURN_CONTEXT_REFS.try_with(Clone::clone).unwrap_or_default();
+    user_message_metadata_with(conversation_only, retrieval_scope, &context_refs)
+}
+
+fn user_message_metadata_with(
+    conversation_only: bool,
+    retrieval_scope: Option<&str>,
+    context_refs: &[mp_contracts::context_refs::ContextRef],
+) -> Option<prost_types::Struct> {
     let mut fields = std::collections::BTreeMap::new();
     if conversation_only {
         fields.insert("source_scope".to_owned(), json_to_prost_value(&serde_json::json!("conversation")));
     } else if let Some(scope) = retrieval_scope.filter(|s| !s.is_empty()) {
         fields.insert("retrieval_scope".to_owned(), json_to_prost_value(&serde_json::json!(scope)));
+    }
+    // The chips of the send (EP-3 S5): `{kind, id, label}` only, so they render after a reload. A ZDR
+    // turn appends no user message, so nothing is written for one.
+    if !context_refs.is_empty() {
+        fields.insert(
+            "context_refs".to_owned(),
+            json_to_prost_value(&crate::context_refs::metadata_value(context_refs)),
+        );
     }
     if fields.is_empty() {
         None
@@ -2393,6 +2435,27 @@ pub(crate) fn with_work_summary(
     Some(metadata)
 }
 
+/// The metadata key a deep-research plan turn's plan is stored under (Wave 3 EP-2 S5).
+pub(crate) const RESEARCH_PLAN_KEY: &str = "research_plan";
+
+/// Save a plan turn's plan (`deep_research::ResearchPlan::record`) with its answer, so a reopened
+/// thread shows the plan card. A field of the message that already exists: no table, no column,
+/// and the message's GDPR erase removes it. Nothing is written for a ZDR or waived turn (D12),
+/// which streamed the plan, or when there is no plan; the metadata is then returned exactly as it
+/// was.
+pub(crate) fn with_research_plan(
+    metadata: Option<prost_types::Struct>,
+    plan: Option<&serde_json::Value>,
+    zdr_or_waived: bool,
+) -> Option<prost_types::Struct> {
+    let Some(plan) = plan.filter(|_| !zdr_or_waived) else {
+        return metadata;
+    };
+    let mut metadata = metadata.unwrap_or_default();
+    metadata.fields.insert(RESEARCH_PLAN_KEY.to_owned(), json_to_prost_value(plan));
+    Some(metadata)
+}
+
 /// The metadata key a declined retrieval's notice code is stored under (D1-242).
 pub(crate) const RETRIEVAL_DECLINED_KEY: &str = "retrievalDeclined";
 
@@ -2594,6 +2657,90 @@ impl StringExt for String {
 
 #[cfg(test)]
 mod tests {
+    /// EP-2 S5 (D12): a plan turn stores its plan beside the answer, except on a ZDR or waived turn,
+    /// and a turn with no plan leaves the metadata exactly as it was.
+    #[test]
+    fn a_research_plan_is_stored_only_on_a_retained_turn() {
+        let plan = serde_json::json!({ "version": 1, "sub_queries": ["a"], "questions": [] });
+        let stored = super::with_research_plan(None, Some(&plan), false).expect("stored");
+        assert!(stored.fields.contains_key(super::RESEARCH_PLAN_KEY));
+        assert_eq!(super::with_research_plan(None, Some(&plan), true), None);
+        assert_eq!(super::with_research_plan(None, None, false), None);
+        let existing = super::with_research_plan(Some(stored.clone()), None, false);
+        assert_eq!(existing, Some(stored.clone()));
+        assert_eq!(super::with_research_plan(Some(stored.clone()), Some(&plan), true), Some(stored));
+    }
+
+    /// EP-3 S5: a send's references are stored on its user message as `{kind, id, label}` only, and a
+    /// send without any keeps the metadata it had before (absent when there is nothing else).
+    #[test]
+    fn metadata_stores_kind_id_label_only() {
+        use mp_contracts::context_refs::{ArtifactSelection, ContextRef, ContextRefKind};
+        assert!(super::user_message_metadata_with(false, None, &[]).is_none(), "byte-identical");
+        let refs = vec![
+            ContextRef {
+                kind: ContextRefKind::Document,
+                id: "doc-1".to_owned(),
+                label: "Budsjett".to_owned(),
+                selection: None,
+            },
+            ContextRef {
+                kind: ContextRefKind::ArtifactSelection,
+                id: "art-1".to_owned(),
+                label: "Avsnitt".to_owned(),
+                selection: Some(ArtifactSelection {
+                    artifact_id: "art-1".to_owned(),
+                    version: 2,
+                    start: 0,
+                    end: 4,
+                    quote_sha256: "c".repeat(64),
+                }),
+            },
+        ];
+        let metadata = super::user_message_metadata_with(false, Some("knowledge_only"), &refs)
+            .expect("metadata");
+        assert!(metadata.fields.contains_key("retrieval_scope"));
+        let Some(prost_types::value::Kind::ListValue(list)) =
+            metadata.fields.get("context_refs").and_then(|value| value.kind.clone())
+        else {
+            panic!("context_refs is a list");
+        };
+        assert_eq!(list.values.len(), 2);
+        for item in &list.values {
+            let Some(prost_types::value::Kind::StructValue(entry)) = &item.kind else {
+                panic!("each reference is an object");
+            };
+            let mut keys: Vec<&str> = entry.fields.keys().map(String::as_str).collect();
+            keys.sort_unstable();
+            assert_eq!(keys, vec!["id", "kind", "label"], "no selection, quote or hash is kept");
+        }
+    }
+
+    /// Outside the chat send's scope no references are read, so every other append is unchanged.
+    #[tokio::test]
+    async fn only_the_scoped_preparation_sees_the_references() {
+        assert!(super::user_message_metadata(false, None).is_none());
+        let resolved = crate::context_refs::ResolvedContextRefs {
+            refs: vec![mp_contracts::context_refs::ContextRef {
+                kind: mp_contracts::context_refs::ContextRefKind::Skill,
+                id: "skill.a".to_owned(),
+                label: "Skriv".to_owned(),
+                selection: None,
+            }],
+            ..Default::default()
+        };
+        let scoped = super::with_user_context_refs(Some(&resolved), async {
+            super::user_message_metadata(false, None)
+        })
+        .await;
+        assert!(scoped.is_some_and(|metadata| metadata.fields.contains_key("context_refs")));
+        let unscoped = super::with_user_context_refs(None, async {
+            super::user_message_metadata(false, None)
+        })
+        .await;
+        assert!(unscoped.is_none());
+    }
+
     /// A send names itself to the transcript only with the switch on, only when the turn keeps a
     /// transcript at all, and never when it restates the previous question on purpose.
     #[test]
@@ -3468,6 +3615,59 @@ mod tests {
         assert!(!citation.iter().any(|key| key == "quote" || key == "locator"), "{citation:?}");
         let artifact = first_entry_keys(&stored, "artifacts");
         assert!(artifact.iter().any(|key| key == "content"), "the artifact itself stays");
+        assert!(!artifact.iter().any(|key| key == "provenance"), "{artifact:?}");
+    }
+
+    /// The keys of the stored `research_ledger` on the first artifact's stamp, or nothing.
+    fn stored_ledger_keys(metadata: &Option<prost_types::Struct>) -> Vec<String> {
+        use prost_types::value::Kind;
+        let Some(Kind::ListValue(artifacts)) = metadata
+            .as_ref()
+            .and_then(|metadata| metadata.fields.get("artifacts"))
+            .and_then(|value| value.kind.as_ref())
+        else {
+            return Vec::new();
+        };
+        let Some(Kind::StructValue(artifact)) = artifacts.values.first().and_then(|value| value.kind.as_ref()) else {
+            return Vec::new();
+        };
+        let Some(Kind::StructValue(stamp)) = artifact.fields.get("provenance").and_then(|value| value.kind.as_ref())
+        else {
+            return Vec::new();
+        };
+        match stamp.fields.get("research_ledger").and_then(|value| value.kind.as_ref()) {
+            Some(Kind::StructValue(ledger)) => ledger.fields.keys().cloned().collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    fn ledger_evidence(zdr_or_waived: bool) -> Option<prost_types::Struct> {
+        let mut report = stamped_report();
+        report.provenance = Some(Box::new(crate::deep_research::ResearchProvenance::sample_with_ledger()));
+        crate::session_flow::turn_evidence_metadata(
+            None,
+            &[],
+            &crate::session_flow::persistable_artifacts(vec![report], zdr_or_waived),
+            crate::session_flow::TurnQuality::default(),
+        )
+    }
+
+    /// EP-2-S6 (D2): a persistent turn stores the closed ledger beside the report it was built
+    /// for, and only its v1 keys.
+    #[test]
+    fn a_persistent_turn_stores_the_research_ledger_on_the_report_stamp() {
+        let mut keys = stored_ledger_keys(&ledger_evidence(false));
+        keys.sort_unstable();
+        assert_eq!(keys, vec!["claims", "gaps", "pass_count", "version"]);
+    }
+
+    /// EP-2-S6 (D12): a ZDR or waived turn streamed the ledger and stores none of it.
+    #[test]
+    fn a_zdr_or_waived_turn_stores_no_research_ledger() {
+        let stored = ledger_evidence(true);
+        assert!(stored_ledger_keys(&stored).is_empty());
+        let artifact = first_entry_keys(&stored, "artifacts");
+        assert!(artifact.iter().any(|key| key == "content"), "the report itself stays");
         assert!(!artifact.iter().any(|key| key == "provenance"), "{artifact:?}");
     }
 }

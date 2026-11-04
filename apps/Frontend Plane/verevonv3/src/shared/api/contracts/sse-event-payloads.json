@@ -15,6 +15,12 @@
           ],
           "presence": "always"
         },
+        "editor": {
+          "types": [
+            "string"
+          ],
+          "presence": "optional"
+        },
         "id": {
           "types": [
             "string"
@@ -541,6 +547,38 @@
         "request_id": {
           "types": [
             "string"
+          ],
+          "presence": "always"
+        }
+      }
+    },
+    "research_plan": {
+      "family": null,
+      "variants": [
+        "ResearchPlan"
+      ],
+      "keys": {
+        "caps": {
+          "types": [
+            "object"
+          ],
+          "presence": "always"
+        },
+        "questions": {
+          "types": [
+            "array"
+          ],
+          "presence": "always"
+        },
+        "request_id": {
+          "types": [
+            "string"
+          ],
+          "presence": "always"
+        },
+        "sub_queries": {
+          "types": [
+            "array"
           ],
           "presence": "always"
         }

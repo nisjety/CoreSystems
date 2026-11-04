@@ -8,6 +8,7 @@ export type ChatEventPayloads = {
   /** Rust variants: Artifact. */
   artifact: {
     content: string
+    editor?: string
     id: string
     kind: string
     provenance?: Record<string, unknown>
@@ -114,6 +115,13 @@ export type ChatEventPayloads = {
   reasoning_delta: {
     delta: string
     request_id: string
+  }
+  /** Rust variants: ResearchPlan. */
+  research_plan: {
+    caps: Record<string, unknown>
+    questions: unknown[]
+    request_id: string
+    sub_queries: unknown[]
   }
   /** Rust variants: ResultReceipt. */
   result_receipt: {

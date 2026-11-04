@@ -115,7 +115,13 @@ import { OPENAI_CODEX_SUBSCRIPTION_PROVIDER } from '@/shared/api/chatgpt-subscri
 import { resolveReplaySubscriptionConnectionId } from '@/shared/ai/model-selection'
 import { getSession } from '@/shared/session/session-store'
 import { blobToDataUrl } from '@/shared/lib/blob-data'
-import type { ChatQuestionAnswer, ChatUserQuestionEvent } from '@/shared/api/chat-client'
+import type {
+  ChatQuestionAnswer,
+  ChatResearchPlanEvent,
+  ChatUserQuestionEvent,
+  ResearchPlanEdit,
+} from '@/shared/api/chat-client'
+import { researchPlanTurnEnabled } from './ResearchPlanCard'
 import { useI18n } from '@/shared/i18n'
 import type { VerevonUiEvent } from '@/shared/chat/verevon-ui-events'
 import {
@@ -1363,6 +1369,8 @@ export function useChatController() {
     // card over. This thread's own question, if it still waits, comes back with its run (`hydrateRunQuestions`).
     setPendingQuestion(null)
     setQuestionError(null)
+    // A research plan waiting for Start is that thread's too, and nothing on the server keeps it (EP-2 S5).
+    setPendingResearchPlan(null)
     // A project thread's scope is recorded before `threadId` moves into state, so the
     // project chip reads it from the first render of the thread. With the switch off the
     // branch is never taken: `scopedThreadRefs` can already hold the Space of an origin=space
@@ -2276,6 +2284,7 @@ export function useChatController() {
     // A waiting question, and a refusal left on its card, belong to the thread that asked: a fresh chat has neither.
     setPendingQuestion(null)
     setQuestionError(null)
+    setPendingResearchPlan(null)
     // Each fresh chat starts with Temporary Chat off — a user re-enables it
     // deliberately per conversation rather than it silently staying on.
     setTemporaryChat(false)
@@ -2546,6 +2555,32 @@ export function useChatController() {
   const [pendingQuestion, setPendingQuestion] = createSignal<ChatUserQuestionEvent | null>(null)
   const [questionPending, setQuestionPending] = createSignal(false)
   const [questionError, setQuestionError] = createSignal<string | null>(null)
+  // A deep-research plan waiting for Start (EP-2 S5), with the question and model of the send that asked for
+  // it. Session-only: no research state waits on the server between the plan turn and the run turn, so a
+  // plan that is never started leaves nothing behind.
+  const [pendingResearchPlan, setPendingResearchPlan] = createSignal<
+    { plan: ChatResearchPlanEvent; question: string; model: string } | null
+  >(null)
+
+  /**
+   * Starts the waiting research plan (`chat.research_plan_start`): the run turn of the same question,
+   * carrying the edited plan. The card goes at once; the run's own steps show its progress.
+   */
+  const startResearchPlan = async (edit: ResearchPlanEdit) => {
+    const waiting = pendingResearchPlan()
+    if (!waiting) return
+    setPendingResearchPlan(null)
+    await sendContent(waiting.question, waiting.model, {
+      browseWeb: true,
+      deepResearch: true,
+      tools: ['research'],
+      researchPhase: 'run',
+      researchPlan: edit,
+    })
+  }
+
+  /** Dismisses the waiting research plan (`chat.research_plan_cancel`). Nothing is sent. */
+  const cancelResearchPlan = () => setPendingResearchPlan(null)
 
   /**
    * Answers the waiting question. The answer is recorded first and then sent as the person's next message, so
@@ -2928,7 +2963,10 @@ export function useChatController() {
     rawContent: string,
     modelOverride?: string,
     // `approvedPlanId` is the WS14 S2 approve-then-execute plan; only `sendApprovedPlanNow` sets it.
-    options: SendOptions & ServerVersionTarget & { approvedPlanId?: string } = {},
+    // `researchPhase`/`researchPlan` are the deep-research plan and run turns (EP-2 S5).
+    options: SendOptions &
+      ServerVersionTarget &
+      Pick<ChatInvokeRequest, 'researchPhase' | 'researchPlan'> & { approvedPlanId?: string } = {},
   ) => {
     const content = rawContent.trim()
     if (!content) return
@@ -3056,6 +3094,7 @@ export function useChatController() {
           role: 'user',
           sourceScope: options.sourceScope ?? sourceScope(),
           retrievalScope: options.retrievalScope ?? retrievalScope(),
+          contextRefs: options.contextRefs,
           content,
           createdAt: submittedAt,
           streaming: false,
@@ -3305,8 +3344,11 @@ export function useChatController() {
           sourceScope: options.sourceScope ?? sourceScope(),
           retrievalScope: options.retrievalScope ?? retrievalScope(),
           connectorScope: options.connectorScope,
+          contextRefs: options.contextRefs,
           agentMode: options.agentMode,
           deepResearch: options.deepResearch,
+          researchPhase: options.researchPhase,
+          researchPlan: options.researchPlan,
           generateImage: options.generateImage,
           attachments: options.attachments,
           actions: options.actions,
@@ -3462,6 +3504,11 @@ export function useChatController() {
             // WS14 S4. A temporary chat keeps no question, as it keeps no follow-up chips.
             if (isTemporaryThread(state.threadId ?? activeThreadId)) return
             setPendingQuestion(question)
+          },
+          onResearchPlan: (plan) => {
+            // EP-2 S5. Only a plan this build asked for gets a card; a temporary chat never has one.
+            if (!researchPlanTurnEnabled() || isTemporaryThread(state.threadId ?? activeThreadId)) return
+            setPendingResearchPlan({ plan, question: content, model })
           },
           onDone: ({ requestId, modelUsed, outputTokens, stopReason }) => {
             settleDraft?.('accepted')
@@ -3681,8 +3728,13 @@ export function useChatController() {
       sourceScope: payload.sourceScope,
       retrievalScope: payload.retrievalScope,
       connectorScope: payload.connectorScope,
+      contextRefs: payload.contextRefs,
       agentMode: payload.agentMode,
       deepResearch: payload.tools.includes('research'),
+      // EP-2 S5: with the plan turn on, a composer deep research first asks for the editable plan.
+      ...(payload.tools.includes('research') && researchPlanTurnEnabled() && !payload.zdr
+        ? { researchPhase: 'plan' as const }
+        : {}),
       displayAttachments,
       generateImage: payload.tools.includes('image'),
       tools: payload.tools,
@@ -4837,6 +4889,9 @@ export function useChatController() {
     questionError,
     answerPendingQuestion,
     skipPendingQuestion,
+    pendingResearchPlan: () => pendingResearchPlan()?.plan,
+    startResearchPlan,
+    cancelResearchPlan,
     rejectTurnPlan,
     planApprovalPending,
     planApprovalError,

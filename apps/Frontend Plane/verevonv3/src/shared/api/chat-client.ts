@@ -12,6 +12,7 @@ import type { ChatEventPayloads } from './chat-event-payloads.generated'
 import { isSpaceDenial } from './space-denials'
 import { isZdrCode } from './zdr-refusals'
 import { normalizeConnectorScope } from '@/shared/actions/chat-connector-scope'
+import { normalizeContextRefs } from '@/shared/actions/chat-context-refs'
 import {
   isSelectablePrivacyTier,
   normalizeAnswerServedBy,
@@ -49,6 +50,10 @@ export type WideResearchStart = {
   itemCap?: number
   /** One research question per entry, in the order given. */
   items?: string[]
+  /** A one-item retry (EP-2 S9): the child run whose item runs again; execution-core reads the item back. */
+  retryOfChildRunId?: string
+  /** The fan-out batch the retry joins. */
+  batchId?: string
 }
 
 /**
@@ -64,7 +69,56 @@ export function parseWideResearchItems(text: string): string[] {
     .map((line) => line.slice(0, WIDE_RESEARCH_MAX_ITEM_CHARS))
 }
 
-function wideResearchWire(start: WideResearchStart): { item_cap?: number; items?: string[] } {
+/** One answer the person gave to a deep-research plan question (EP-2 S5). */
+export type ResearchPlanAnswer = { question: string; answer: string }
+
+/** The plan a deep-research run turn sends back (EP-2 S5): the edited sub-queries and the answers. */
+export type ResearchPlanEdit = { subQueries: string[]; answers: ResearchPlanAnswer[] }
+
+/** The editable plan a deep-research plan turn ends with (`research_plan`, EP-2 S5). */
+export type ChatResearchPlanEvent = {
+  subQueries: string[]
+  questions: string[]
+  /** The most sub-queries a run turn keeps; the card stops adding at it. */
+  maxSubQueries: number
+  requestId?: string
+}
+
+/** The cap the gateway ships by default, for a frame that names none. */
+export const RESEARCH_PLAN_DEFAULT_MAX_SUB_QUERIES = 9
+
+function researchPhaseWire(
+  phase: 'plan' | 'run',
+  plan: ResearchPlanEdit | undefined,
+): { research_phase: 'plan' | 'run'; research_plan?: { sub_queries: string[]; answers: ResearchPlanAnswer[] } } {
+  if (phase === 'plan') return { research_phase: 'plan' }
+  return {
+    research_phase: 'run',
+    research_plan: {
+      sub_queries: (plan?.subQueries ?? []).map((query) => query.trim()).filter((query) => query.length > 0),
+      answers: (plan?.answers ?? [])
+        .map(({ question, answer }) => ({ question: question.trim(), answer: answer.trim() }))
+        .filter((entry) => entry.answer.length > 0),
+    },
+  }
+}
+
+function stringList(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
+    : []
+}
+
+function wideResearchWire(
+  start: WideResearchStart,
+): { item_cap?: number; items?: string[] } | { retry_of_child_run_id: string; batch_id?: string } {
+  // A retry names the failed child run only: the item itself never leaves the browser again.
+  if (start.retryOfChildRunId) {
+    return {
+      retry_of_child_run_id: start.retryOfChildRunId,
+      ...(start.batchId ? { batch_id: start.batchId } : {}),
+    }
+  }
   const items = (start.items ?? []).slice(0, WIDE_RESEARCH_MAX_ITEMS)
   const itemCap =
     typeof start.itemCap === 'number' && Number.isInteger(start.itemCap) && start.itemCap > 0
@@ -195,6 +249,12 @@ export type ChatInvokeRequest = {
    * can take it: `buildChatWireBody` withholds it on the turns the composer blocks.
    */
   connectorScope?: string[]
+  /**
+   * The typed context references attached with the composer's chips (EP-3 S5). Sent as
+   * `context_refs` only when non-empty, and never on a zero-retention or temporary turn or a
+   * subscription route: the gateway refuses those, so this client never sends what it would refuse.
+   */
+  contextRefs?: import('@/shared/actions/chat-context-refs').ChatContextRef[]
   content: string
   model?: string
   /** Explicit provider route for a user-owned model subscription. */
@@ -234,6 +294,14 @@ export type ChatInvokeRequest = {
   browseWeb?: boolean
   /** Deep research mode: gateway runs plan -> concurrent searches -> page reads -> a cited report. */
   deepResearch?: boolean
+  /**
+   * Which turn of a two-turn deep research this is (EP-2 S5): `plan` ends with an editable plan and
+   * searches nothing, `run` runs `researchPlan`. Sent only with `deepResearch` on a turn that keeps
+   * data; model-gateway ignores both while DEEP_RESEARCH_PLAN_TURN is off and re-clamps the plan.
+   */
+  researchPhase?: 'plan' | 'run'
+  /** The edited plan a `run` turn carries. */
+  researchPlan?: ResearchPlanEdit
   /**
    * Wide research from the composer's "Bred forskning" entry (EP-2 S8): the items to research, or
    * only a count when the model should split the question itself. Sent as `wide_research` only on
@@ -537,6 +605,15 @@ export type ChatArtifactEvent = {
   version?: number
   /** What a research report was built from (EP-2-S4); only on a deep-research report, and only when the server sends it. */
   provenance?: ResearchProvenance
+  /** Who made this revision (EP-3 S3); only while the server's revision history is on. */
+  editor?: ArtifactEditorKind
+}
+
+/** Who made a stored artifact revision (EP-3 S3): the model, the person, or a restore of an older one. */
+export type ArtifactEditorKind = 'model' | 'user' | 'restore'
+
+function isArtifactEditorKind(value: unknown): value is ArtifactEditorKind {
+  return value === 'model' || value === 'user' || value === 'restore'
 }
 
 /**
@@ -549,11 +626,19 @@ export type CitationLocator = { document_id: string; chunk_index: number }
 export type ResearchProvenance = {
   question: string
   sub_queries: string[]
-  sources: { number: number; url: string; title: string }[]
+  sources: { number: number; url: string; title: string; pass?: number }[]
   model: string
   coverage: { found: number; read: number; unread: number; deadline_hit: boolean }
   generated_at: string
   pipeline: string
+  /** EP-2-S6: how many research passes ran (2 when the gap-driven second pass ran). */
+  passes?: number
+  /** EP-2-S6: the digest of the claim ledger below. */
+  ledger_digest?: string
+  /** EP-2-S6: the ledger's claims counted by status. */
+  claims_by_status?: Record<string, number>
+  /** EP-2-S6: the closed claim ledger, kept as the gateway sent it. */
+  research_ledger?: unknown
 }
 
 /** A locator only when both halves have the right type; anything else is dropped, never guessed. */
@@ -585,7 +670,7 @@ export function parseResearchProvenance(value: unknown): ResearchProvenance | un
     const number = source?.number
     const url = str(source?.url)
     if (typeof number !== 'number' || url === undefined) return []
-    return [{ number, url, title: str(source?.title) ?? '' }]
+    return [{ number, url, title: str(source?.title) ?? '', ...(typeof source?.pass === 'number' ? { pass: source.pass } : {}) }]
   })
   return {
     question,
@@ -600,6 +685,12 @@ export function parseResearchProvenance(value: unknown): ResearchProvenance | un
     },
     generated_at: generatedAt,
     pipeline,
+    ...(typeof record.passes === 'number' ? { passes: record.passes } : {}),
+    ...(str(record.ledger_digest) ? { ledger_digest: str(record.ledger_digest) } : {}),
+    ...(objectValue(record.claims_by_status)
+      ? { claims_by_status: objectValue(record.claims_by_status) as Record<string, number> }
+      : {}),
+    ...(record.research_ledger !== undefined ? { research_ledger: record.research_ledger } : {}),
   }
 }
 export type ChatReasoningEvent = { delta: string }
@@ -1136,6 +1227,8 @@ export type ChatStreamHandlers = {
   onPlanProposed?: (event: ChatPlanProposedEvent) => void
   /** See `ChatUserQuestionEvent`. Ungated: the card is the only way to answer the question. */
   onUserQuestion?: (event: ChatUserQuestionEvent) => void
+  /** See `ChatResearchPlanEvent`. Ungated: the plan card is the plan turn's whole answer. */
+  onResearchPlan?: (event: ChatResearchPlanEvent) => void
   onStopped?: (event: ChatStoppedEvent) => void
   onMemoryRecall?: (event: ChatMemoryRecallEvent) => void
   onVerification?: (event: ChatVerificationEvent) => void
@@ -1207,6 +1300,8 @@ export type ChatMessage = {
   /** See `ChatInvokeRequest.retrievalScope`. Read back on history playback
    * so a reopened thread's past turns can show their own receipt badge. */
   retrievalScope?: import('@/shared/actions/chat-source-scope').RetrievalScope
+  /** The context chips a user turn was sent with (EP-3 S5), from `metadata.context_refs`: kind, id and label only. */
+  contextRefs?: import('@/shared/actions/chat-context-refs').ChatContextRef[]
   id: string
   role: 'user' | 'assistant'
   content: string
@@ -1656,6 +1751,11 @@ function artifactProvenance(value: Record<string, unknown>): Pick<ChatArtifactEv
   return provenance ? { provenance } : {}
 }
 
+/** The frame's editor, when it names one of the three the server writes; anything else is dropped. */
+function artifactEditor(value: Record<string, unknown>): Pick<ChatArtifactEvent, 'editor'> {
+  return isArtifactEditorKind(value.editor) ? { editor: value.editor } : {}
+}
+
 /**
  * A knowledge citation's chunk, read again through the BFF's Data Plane chunk read (EP-2-S4). Data Plane resolves
  * the viewer's own grants before it fetches any text, so a document this person may not read comes back empty and
@@ -1875,6 +1975,11 @@ export function buildChatWireBody(request: ChatInvokeRequest): Record<string, un
     || executeGranted || request.spaceRef?.trim() || retrievalScope !== 'auto'
     ? []
     : normalizeConnectorScope(request.connectorScope)
+  // Context references (EP-3 S5): present only when the person attached a chip. A zero-retention or
+  // temporary turn and a subscription route carry none; the server refuses them there regardless.
+  const contextRefs = request.zdr || subscriptionBacked
+    ? []
+    : normalizeContextRefs(request.contextRefs)
 
   const uiLocale = request.locale ?? storedUiLocale()
   return {
@@ -1938,6 +2043,16 @@ export function buildChatWireBody(request: ChatInvokeRequest): Record<string, un
     // Search turn — the same failure planMode had. The gateway keys the
     // multi-round research pipeline off this flag.
     deep_research: conversationOnly || supportReadOnly || subscriptionBacked ? false : (request.deepResearch ?? false),
+    // Present only on a deep-research turn that keeps data (EP-2 S5), so every other body is
+    // byte-identical to what it was before the plan turn existed.
+    ...(request.researchPhase &&
+    request.deepResearch &&
+    !conversationOnly &&
+    !supportReadOnly &&
+    !subscriptionBacked &&
+    !request.zdr
+      ? researchPhaseWire(request.researchPhase, request.researchPlan)
+      : {}),
     // Present only on an agentic turn that keeps data (EP-2 S8), so every other body is
     // byte-identical to what it was before wide research had an entry.
     ...(request.wideResearch && features.has('agentic') && !request.zdr
@@ -1965,6 +2080,8 @@ export function buildChatWireBody(request: ChatInvokeRequest): Record<string, un
     ...(retrievalScope !== 'auto' && !executeGranted ? { retrieval_scope: retrievalScope } : {}),
     // Omitted entirely when nothing was picked, like `retrieval_scope`: an ordinary turn is unchanged.
     ...(connectorScope.length > 0 ? { connector_scope: connectorScope } : {}),
+    // Omitted entirely when no chip was attached, like `connector_scope`: an ordinary turn is unchanged.
+    ...(contextRefs.length > 0 ? { context_refs: contextRefs } : {}),
     attachments: request.attachments ?? [],
     // Opt-in only, like `min_privacy_tier` below: omitted entirely when
     // nothing is pinned, so an ordinary turn's body is byte-identical to
@@ -2154,6 +2271,7 @@ function dispatchAgUiEvent(
             content: str(value.content),
             version: num(value.version),
             ...artifactProvenance(value),
+            ...artifactEditor(value),
           })
           break
         case 'attachment':
@@ -2392,6 +2510,7 @@ function dispatchEvent(event: SseEvent, handlers: ChatStreamHandlers): void {
         content: str(payload.content),
         version: num(payload.version),
         ...artifactProvenance(payload),
+        ...artifactEditor(payload),
       })
       break
     case 'attachment':
@@ -2560,6 +2679,21 @@ function dispatchEvent(event: SseEvent, handlers: ChatStreamHandlers): void {
           requestId: str(payload.request_id),
         })
       }
+      break
+    }
+    case 'research_plan': {
+      // The plan card of a deep-research plan turn (EP-2 S5). An empty plan still shows the card,
+      // where the person can add a sub-query; a cap the frame does not state is the gateway default.
+      const capValue = num(objectValue(payload.caps)?.max_sub_queries)
+      handlers.onResearchPlan?.({
+        subQueries: stringList(payload.sub_queries),
+        questions: stringList(payload.questions),
+        maxSubQueries:
+          capValue !== undefined && Number.isInteger(capValue) && capValue > 0
+            ? capValue
+            : RESEARCH_PLAN_DEFAULT_MAX_SUB_QUERIES,
+        requestId: str(payload.request_id),
+      })
       break
     }
     case 'verification': {
@@ -3482,6 +3616,91 @@ async function postChatBranchMove(
 }
 
 /**
+ * A revision the person wrote in the Output panel (EP-3 S4), as the edit and restore routes return it.
+ * `editorKind` is `user` for an edit and `restore` for a restore; `restoredFromVersion` names the copied version.
+ */
+export type SavedArtifactRevision = {
+  id: string
+  artifactId: string
+  version: number
+  kind: string
+  title: string
+  content: string
+  editorKind: string
+  restoredFromVersion?: number
+  createdAt: string
+}
+
+/**
+ * Save the person's text as the artifact's newest revision (EP-3 S4). `expectedVersion` is the head the editor
+ * opened; a moved head rejects with an {@link ApiError} coded `revision_mismatch` whose details name
+ * `head_version` (read it with {@link artifactConflictHeadVersion}). Off, ZDR, waived, Space and running-run
+ * refusals reject with their own typed codes.
+ */
+export async function saveArtifactRevision(input: {
+  threadId: string
+  artifactId: string
+  content: string
+  title?: string
+  expectedVersion: number
+}): Promise<SavedArtifactRevision> {
+  const raw = await requestJson<unknown>(artifactRevisionPath(input.threadId, input.artifactId), {
+    method: 'PUT',
+    body: JSON.stringify({
+      content: input.content,
+      ...(input.title?.trim() ? { title: input.title.trim() } : {}),
+      expected_version: input.expectedVersion,
+    }),
+  })
+  return normalizeSavedArtifactRevision(raw)
+}
+
+/** Make an older revision the newest one (EP-3 S4), under the same compare-and-set as {@link saveArtifactRevision}. */
+export async function restoreArtifactRevision(input: {
+  threadId: string
+  artifactId: string
+  version: number
+  expectedVersion: number
+}): Promise<SavedArtifactRevision> {
+  const raw = await requestJson<unknown>(`${artifactRevisionPath(input.threadId, input.artifactId)}/restore`, {
+    method: 'POST',
+    body: JSON.stringify({ version: input.version, expected_version: input.expectedVersion }),
+  })
+  return normalizeSavedArtifactRevision(raw)
+}
+
+/** The head another tab or turn moved the artifact to, when `error` is the edit routes' `revision_mismatch`. */
+export function artifactConflictHeadVersion(error: unknown): number | null {
+  if (!(error instanceof ApiError) || error.status !== 409 || error.code !== 'revision_mismatch') return null
+  const head = error.details?.head_version
+  return typeof head === 'number' && Number.isInteger(head) && head > 0 ? head : null
+}
+
+function artifactRevisionPath(threadId: string, artifactId: string): string {
+  return `/api/v1/chat/threads/${encodeURIComponent(threadId)}/artifacts/${encodeURIComponent(artifactId)}`
+}
+
+function normalizeSavedArtifactRevision(raw: unknown): SavedArtifactRevision {
+  const record = objectValue(objectValue(objectValue(raw)?.data)?.revision)
+  const version = num(record?.version)
+  if (!record || version == null || version < 1) {
+    throw new ApiError('The saved revision could not be read.', 502, 'artifact_edit_failed')
+  }
+  const restored = num(record.restored_from_version)
+  return {
+    id: str(record.id) ?? '',
+    artifactId: str(record.artifact_id) ?? '',
+    version,
+    kind: str(record.kind) ?? '',
+    title: typeof record.title === 'string' ? record.title : '',
+    content: typeof record.content === 'string' ? record.content : '',
+    editorKind: str(record.editor_kind) ?? 'user',
+    ...(restored != null && restored > 0 ? { restoredFromVersion: restored } : {}),
+    createdAt: str(record.created_at) ?? '',
+  }
+}
+
+/**
  * Star or unstar a thread, or mark it read or unread. Each call writes only the
  * flag it names, so the server leaves the title, preview and pin alone. Null when
  * the server no longer has the thread as one the caller owns.
@@ -3595,6 +3814,119 @@ function normalizeChatSearchHits(raw: unknown): ChatSearchHit[] {
   })
 }
 
+/** One stored revision of a thread artifact (EP-3 S3), newest first in a page. */
+export type ArtifactRevision = {
+  id: string
+  artifactId: string
+  version: number
+  kind: string
+  title: string
+  content: string
+  editorKind: ArtifactEditorKind
+  /** For a restore, the version whose text it brought back. */
+  restoredFromVersion?: number
+  createdAt: string
+}
+
+export type ArtifactRevisionPage = {
+  revisions: ArtifactRevision[]
+  /** Older revisions exist below the last one in this page. */
+  hasMore: boolean
+}
+
+/** What the composer and the Output panel may offer, from the gateway's own switches (EP-3). */
+export type ComposerCapabilities = {
+  artifactHistory: boolean
+  artifactEditing: boolean
+  contextRefs: boolean
+  threadReferences: boolean
+  selectionEdit: boolean
+}
+
+export const NO_COMPOSER_CAPABILITIES: ComposerCapabilities = {
+  artifactHistory: false,
+  artifactEditing: false,
+  contextRefs: false,
+  threadReferences: false,
+  selectionEdit: false,
+}
+
+/**
+ * The gateway's composer capabilities. Any failure (an older gateway has no
+ * such route) reads as nothing offered, so a feature never appears on a guess.
+ */
+export async function getComposerCapabilities(): Promise<ComposerCapabilities> {
+  let raw: unknown
+  try {
+    raw = await requestJson<unknown>('/api/v1/chat/composer-capabilities')
+  } catch {
+    return NO_COMPOSER_CAPABILITIES
+  }
+  const record = objectValue(raw)
+  return {
+    artifactHistory: record?.artifact_history === true,
+    artifactEditing: record?.artifact_editing === true,
+    contextRefs: record?.context_refs === true,
+    threadReferences: record?.thread_references === true,
+    selectionEdit: record?.selection_edit === true,
+  }
+}
+
+/**
+ * One page of an artifact's stored revisions, newest first, text included.
+ * `beforeVersion` pages to older revisions. Rejects with the typed `ApiError`
+ * (404 `artifact_history_unavailable` while the server's history is off).
+ */
+export async function listArtifactRevisions(
+  threadId: string,
+  artifactId: string,
+  options: { beforeVersion?: number; limit?: number } = {},
+): Promise<ArtifactRevisionPage> {
+  const params = new URLSearchParams()
+  if (options.beforeVersion != null && Number.isInteger(options.beforeVersion) && options.beforeVersion > 0) {
+    params.set('before_version', String(options.beforeVersion))
+  }
+  if (options.limit != null && Number.isInteger(options.limit) && options.limit > 0) {
+    params.set('limit', String(options.limit))
+  }
+  const query = params.toString()
+  const raw = await requestJson<unknown>(
+    `/api/v1/chat/threads/${encodeURIComponent(threadId)}/artifacts/${encodeURIComponent(artifactId)}/revisions${query ? `?${query}` : ''}`,
+  )
+  const record = objectValue(raw)
+  return {
+    revisions: normalizeArtifactRevisions(record?.revisions),
+    hasMore: record?.has_more === true,
+  }
+}
+
+function normalizeArtifactRevisions(source: unknown): ArtifactRevision[] {
+  if (!Array.isArray(source)) return []
+  return source.flatMap((item): ArtifactRevision[] => {
+    const record = objectValue(item)
+    const id = str(record?.id)
+    const artifactId = str(record?.artifact_id)
+    const version = num(record?.version)
+    const content = str(record?.content)
+    const editorKind = record?.editor_kind
+    // A revision without its text, its number or a known editor cannot stand in the stepper.
+    if (!id || !artifactId || version == null || version < 1 || content == null) return []
+    if (!isArtifactEditorKind(editorKind)) return []
+    const restored = num(record?.restored_from_version)
+    return [{
+      id,
+      artifactId,
+      version,
+      kind: str(record?.kind) ?? '',
+      title: str(record?.title) ?? '',
+      content,
+      editorKind,
+      ...(restored != null && restored > 0 ? { restoredFromVersion: restored } : {}),
+      createdAt: str(record?.created_at) ?? '',
+    }]
+  })
+}
+
 export async function saveChatThreadSnapshot(
   threadId: string,
   snapshot: SaveChatThreadSnapshotRequest,
@@ -3693,6 +4025,9 @@ function normalizeThreadMessages(raw: unknown): ChatMessage[] {
         const raw = item.retrieval_scope ?? objectValue(item.metadata)?.retrieval_scope
         return raw === 'knowledge_only' ? 'knowledge_only' : raw === 'web_only' ? 'web_only' : undefined
       })(),
+      // The chips the turn was sent with (EP-3 S5), read by name and normalized like the wire: a turn
+      // recorded before references existed has no key at all.
+      ...contextRefsField(objectValue(item.metadata)?.context_refs),
       // Turn metadata the backend flattens onto the message. Present only for
       // assistant turns recorded since the score became durable, so a missing
       // field means "not recorded" — never a score of zero.
@@ -3700,6 +4035,12 @@ function normalizeThreadMessages(raw: unknown): ChatMessage[] {
       verification: normalizeVerification(item.verification),
       ...messageVersionField(item.version),
     }))
+}
+
+/** The `contextRefs` key for a turn that stored chips, and no key at all for one that did not. */
+function contextRefsField(value: unknown): { contextRefs?: import('@/shared/actions/chat-context-refs').ChatContextRef[] } {
+  const refs = normalizeContextRefs(value)
+  return refs.length > 0 ? { contextRefs: refs } : {}
 }
 
 /** A turn's place in a versioned thread, read by name. A malformed place is dropped, never guessed. */
