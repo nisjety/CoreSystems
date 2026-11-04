@@ -614,6 +614,27 @@ describe('action registry', () => {
     expect(schema?.safeParse({ transcriptDensity: 'minimal', userId: 'user_x' }).success).toBe(false)
   })
 
+  it('registers the request inspector as a low-risk, read-only model action the model cannot execute (EP-14-S7)', () => {
+    const inspect = getActionDescriptor('chat.inspect_run_request')
+
+    expect(inspect).toMatchObject({ ownerPlane: 'model', risk: 'low', requiresApproval: false, reversible: true })
+    expect(isModelExecutableAction('chat.inspect_run_request')).toBe(false)
+    expect(MODEL_ACCESS['chat.inspect_run_request']).toMatchObject({ access: 'none', sideEffectClass: 'read' })
+
+    const schema = inspect?.inputSchema
+    expect(schema?.safeParse({ runId: 'run_01H', callSeq: 1 }).success).toBe(true)
+    for (const input of [
+      { runId: 'run.1', callSeq: 1 },
+      { runId: '', callSeq: 1 },
+      { runId: 'run_1', callSeq: 0 },
+      { runId: 'run_1', callSeq: 1.5 },
+    ]) {
+      expect(schema?.safeParse(input).success).toBe(false)
+    }
+    // The owner is read from the session, never named by a client.
+    expect(schema?.safeParse({ runId: 'run_1', callSeq: 1, userId: 'user_x' }).success).toBe(false)
+  })
+
   function registered(id: string) {
     return actionRegistry.find((action) => action.id === id)
   }
@@ -911,7 +932,8 @@ describe('action registry', () => {
     // 255 after EP-8-S8 registered settings.complete_personal_setup and settings.skip_personal_setup, the first-run step.
     // 256 after EP-14-S2 registered chat.set_transcript_density, the person's transcript level.
     // 259 after EP-6-S8 registered agents.draft.save, agents.publish and agents.versions.list.
-    expect(ids).toHaveLength(259)
+    // 260 after EP-14-S7 registered chat.inspect_run_request, the request inspector read.
+    expect(ids).toHaveLength(260)
 
     const spaceIds = ids.filter((id) => id.startsWith('spaces.'))
     const first = ids.indexOf(spaceIds[0] as string)

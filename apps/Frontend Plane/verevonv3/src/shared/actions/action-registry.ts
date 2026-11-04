@@ -1036,6 +1036,15 @@ const chatSetTranscriptDensityInput = z
   })
   .strict()
 
+// One model call of the person's own run (EP-14 S7). The run id has the shape model-gateway accepts and the call
+// number starts at 1; no user or org field exists, because the server reads the owner from the session.
+const chatInspectRunRequestInput = z
+  .object({
+    runId: z.string().regex(/^[A-Za-z0-9_-]{1,64}$/),
+    callSeq: z.number().int().min(1),
+  })
+  .strict()
+
 // The org-admin schemas below all describe operations whose owner requires
 // require_org_admin (or, for the two self-service deletion checkpoints,
 // require_active_org) — enforced server-side, not by this schema. Getting the
@@ -3773,6 +3782,17 @@ export const actionRegistry = [
     requiresApproval: false,
     reversible: true,
     inputSchema: chatSetTranscriptDensityInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'chat.inspect_run_request',
+    label: 'Inspect what a model call was sent',
+    description: 'Read what one model call of the person\'s own run was sent and offered: the parameters, the routed model, the prompt sections in order (platform sections as label, version digest and length only; organisation, user and memory sections with their text), the tool catalogue and the message manifest without message bodies. Read only and owner only: anyone else, an organisation admin included, gets not found, and a zero-retention session is refused. Never model-executable.',
+    ownerPlane: 'model',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: chatInspectRunRequestInput,
     outputSchema: envelopeStatusOutput,
   },
   {

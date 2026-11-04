@@ -393,6 +393,8 @@ fn authed_routes() -> Router<AppState> {
         .route("/v1/runs/:run_id/trace", get(get_run_trace))
         // EP-14 S5: the run's durable, content-free timing and tool-call times, owner only.
         .route("/v1/runs/:run_id/timing", get(get_run_timing))
+        // EP-14 S7: one model call's request snapshot, owner only, D3-filtered by Session Core.
+        .route("/v1/runs/:run_id/requests/:call_seq", get(get_run_request))
         // Run event SSE
         .route("/v1/runs/:run_id/events", get(sse::run_events_sse))
         // Browser reasoning: Model Plane proposes one safe browser action from
@@ -2106,6 +2108,127 @@ async fn get_run_timing(
     let actions: Vec<Value> = response.actions.iter().map(run_action_timing_json).collect();
     Ok(Json(json!({
         "data": { "timings": timings, "actions": actions, "truncated": response.truncated },
+    })))
+}
+
+// ---------------------------------------------------------------------------
+// EP-14 S7: `GET /v1/runs/:run_id/requests/:call_seq` - the request inspector.
+// ---------------------------------------------------------------------------
+
+/// The inspector switch. Off: the route answers 404 as if it did not exist. Only the literal `true` enables it.
+const REQUEST_INSPECTOR_ENV: &str = "MODEL_GATEWAY_REQUEST_INSPECTOR";
+
+fn request_inspector_enabled() -> bool {
+    mp_contracts::loop_fold::switch_from(std::env::var(REQUEST_INSPECTOR_ENV).ok().as_deref())
+}
+
+/// A stored JSON text as the value it holds; text that does not parse is reported as absent, never raw.
+fn stored_json(raw: &str) -> Option<Value> {
+    serde_json::from_str::<Value>(raw).ok()
+}
+
+/// Session Core's answer to an inspector read. Every way of not seeing a call (another user's run, an org
+/// admin, no such call, the read switched off) reads as 404, so the route confirms nothing.
+fn run_request_status_to_http(status: &tonic::Status) -> HttpJsonError {
+    match status.code() {
+        tonic::Code::NotFound | tonic::Code::PermissionDenied | tonic::Code::Unimplemented => {
+            run_trace_error(
+                StatusCode::NOT_FOUND,
+                "run_request_not_found",
+                "no such request",
+            )
+        }
+        tonic::Code::InvalidArgument => run_trace_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_run_request",
+            "the run id or call number was refused",
+        ),
+        _ => grpc_status_to_http(status),
+    }
+}
+
+/// `GET /v1/runs/:run_id/requests/:call_seq` - see [`run_request_inspection`].
+async fn get_run_request(
+    state: State<AppState>,
+    claims: Extension<Claims>,
+    bearer: VerifiedModelBearer,
+    path: Path<(String, String)>,
+) -> Result<Json<Value>, HttpJsonError> {
+    run_request_inspection(state, claims, bearer, path, request_inspector_enabled()).await
+}
+
+/// One model call as the inspector shows it: `{data: {call_seq, call_purpose, snapshot, system_sections,
+/// tools, tools_truncated, system_truncated, dropped}}`. Session Core checks that the caller is the user who
+/// owns the run and applies decision D3 (platform sections carry no text); the gateway adds nothing to it. With
+/// the switch off the route is a 404; a zero-retention bearer is refused before anything is read, with
+/// feature `run_inspection`.
+async fn run_request_inspection(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    bearer: VerifiedModelBearer,
+    Path((run_id, call_seq)): Path<(String, String)>,
+    enabled: bool,
+) -> Result<Json<Value>, HttpJsonError> {
+    if !enabled {
+        return Err(run_trace_error(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "no such route",
+        ));
+    }
+    if claims.zdr {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(mp_contracts::zdr_refusal::Refusal::feature_not_supported("run_inspection").json_body()),
+        ));
+    }
+    let run_id = run_id.trim();
+    let call_seq = call_seq.trim().parse::<u32>().ok().filter(|seq| *seq > 0);
+    let (true, Some(call_seq)) = (valid_trace_run_id(run_id), call_seq) else {
+        return Err(run_trace_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_run_request",
+            "run_id must be 1 to 64 characters of [A-Za-z0-9_-] and call_seq a number from 1",
+        ));
+    };
+    let response = state
+        .run_ledger_client
+        .clone()
+        .get_request_snapshot(authenticated_session_request(
+            mp_contracts::model_plane::v1::GetRequestSnapshotRequest {
+                run_id: run_id.to_owned(),
+                call_seq,
+            },
+            &bearer,
+        )?)
+        .await
+        .map_err(|status| run_request_status_to_http(&status))?
+        .into_inner();
+    let sections: Vec<Value> = response
+        .system_sections
+        .iter()
+        .map(|section| {
+            json!({
+                "label": section.label,
+                "source": section.source,
+                "digest": section.digest,
+                "chars": section.chars,
+                "text": (!section.text.is_empty()).then_some(section.text.as_str()),
+            })
+        })
+        .collect();
+    Ok(Json(json!({
+        "data": {
+            "run_id": run_id,
+            "call_seq": call_seq,
+            "call_purpose": response.call_purpose,
+            "snapshot": stored_json(&response.snapshot_json),
+            "system_sections": sections,
+            "tools": (!response.tools_json.is_empty()).then(|| stored_json(&response.tools_json)).flatten(),
+            "tools_truncated": response.tools_truncated,
+            "system_truncated": response.system_truncated,
+            "dropped": response.dropped,
+        },
     })))
 }
 
@@ -20475,7 +20598,8 @@ mod run_timing_route_tests {
     use mp_contracts::model_plane::v1::{
         run_ledger_service_client::RunLedgerServiceClient,
         run_ledger_service_server::{RunLedgerService, RunLedgerServiceServer},
-        GetRunTimingRequest, GetRunTimingResponse, RecordRequestSnapshotRequest,
+        GetRequestSnapshotRequest, GetRequestSnapshotResponse, GetRunTimingRequest,
+        GetRunTimingResponse, PromptSection, RecordRequestSnapshotRequest,
         RecordRequestSnapshotResponse, RecordRunTimingRequest, RecordRunTimingResponse,
         RunActionTiming, RunTimingRecorded,
     };
@@ -20485,6 +20609,7 @@ mod run_timing_route_tests {
     #[derive(Clone, Default)]
     struct FakeRunLedger {
         seen: Arc<Mutex<Vec<(GetRunTimingRequest, Option<String>)>>>,
+        inspected: Arc<Mutex<Vec<GetRequestSnapshotRequest>>>,
         failure: Option<tonic::Code>,
     }
 
@@ -20550,6 +20675,45 @@ mod run_timing_route_tests {
                 truncated: false,
             }))
         }
+
+        /// Call 1 of `run_1` is user-a's; Session Core has already dropped the platform section's text.
+        async fn get_request_snapshot(
+            &self,
+            request: tonic::Request<GetRequestSnapshotRequest>,
+        ) -> Result<tonic::Response<GetRequestSnapshotResponse>, tonic::Status> {
+            let request = request.into_inner();
+            self.inspected.lock().unwrap().push(request.clone());
+            if let Some(code) = self.failure {
+                return Err(tonic::Status::new(code, "session-core says no"));
+            }
+            if request.run_id != "run_1" || request.call_seq != 1 {
+                return Err(tonic::Status::not_found("request snapshot not found"));
+            }
+            Ok(tonic::Response::new(GetRequestSnapshotResponse {
+                snapshot_json: r#"{"schema":"request-snapshot-v1","model":"gpt-5.1"}"#.to_owned(),
+                system_sections: vec![
+                    PromptSection {
+                        label: "stable".to_owned(),
+                        source: "platform".to_owned(),
+                        digest: "a".repeat(64),
+                        chars: 40,
+                        text: String::new(),
+                    },
+                    PromptSection {
+                        label: "Memory".to_owned(),
+                        source: "memory".to_owned(),
+                        digest: "b".repeat(64),
+                        chars: 30,
+                        text: "The user prefers metric units.".to_owned(),
+                    },
+                ],
+                tools_json: r#"[{"name":"web_search"}]"#.to_owned(),
+                dropped: 2,
+                tools_truncated: false,
+                system_truncated: false,
+                call_purpose: "answer".to_owned(),
+            }))
+        }
     }
 
     fn claims(zdr: bool) -> Claims {
@@ -20575,6 +20739,29 @@ mod run_timing_route_tests {
             .unwrap();
         Router::new()
             .route("/v1/runs/:run_id/timing", get(get_run_timing))
+            // The inspector with its switch on, and with it off; the env read stays out of parallel tests.
+            .route(
+                "/v1/runs/:run_id/requests/:call_seq",
+                get(
+                    |state: State<AppState>,
+                     claims: Extension<Claims>,
+                     bearer: VerifiedModelBearer,
+                     path: Path<(String, String)>| {
+                        run_request_inspection(state, claims, bearer, path, true)
+                    },
+                ),
+            )
+            .route(
+                "/off/v1/runs/:run_id/requests/:call_seq",
+                get(
+                    |state: State<AppState>,
+                     claims: Extension<Claims>,
+                     bearer: VerifiedModelBearer,
+                     path: Path<(String, String)>| {
+                        run_request_inspection(state, claims, bearer, path, false)
+                    },
+                ),
+            )
             .with_state(state)
             .layer(Extension(claims(zdr)))
             .layer(Extension(crate::auth::VerifiedSessionBearer::for_test(
@@ -20645,5 +20832,57 @@ mod run_timing_route_tests {
         assert_eq!(body["error"]["code"], "zdr_feature_not_supported");
         assert_eq!(body["error"]["feature"], "run_inspection");
         assert!(fake.seen.lock().unwrap().is_empty(), "nothing reaches Session Core");
+    }
+
+    #[tokio::test]
+    async fn inspector_route_serves_the_owner_the_filtered_call() {
+        let fake = FakeRunLedger::default();
+        let (status, body) = get_json(app(fake.clone(), false).await, "/v1/runs/run_1/requests/1").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let data = &body["data"];
+        assert_eq!(data["call_seq"], 1);
+        assert_eq!(data["call_purpose"], "answer");
+        assert_eq!(data["snapshot"]["model"], "gpt-5.1");
+        assert_eq!(data["system_sections"][0]["source"], "platform");
+        assert_eq!(data["system_sections"][0]["text"], Value::Null, "no platform text");
+        assert_eq!(data["system_sections"][1]["text"], "The user prefers metric units.");
+        assert_eq!(data["tools"][0]["name"], "web_search");
+        assert_eq!(data["dropped"], 2);
+
+        // Another user's run, an org admin and an unknown call all read as one 404.
+        let (status, body) = get_json(app(fake.clone(), false).await, "/v1/runs/run_2/requests/1").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["error"]["code"], "run_request_not_found");
+        let off = FakeRunLedger {
+            failure: Some(tonic::Code::Unimplemented),
+            ..FakeRunLedger::default()
+        };
+        let (status, body) = get_json(app(off, false).await, "/v1/runs/run_1/requests/1").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["error"]["code"], "run_request_not_found");
+
+        for bad in ["/v1/runs/run.1/requests/1", "/v1/runs/run_1/requests/0", "/v1/runs/run_1/requests/x"] {
+            let (status, _) = get_json(app(fake.clone(), false).await, bad).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{bad}");
+        }
+    }
+
+    #[tokio::test]
+    async fn inspector_route_off_is_a_404() {
+        let fake = FakeRunLedger::default();
+        let (status, body) = get_json(app(fake.clone(), false).await, "/off/v1/runs/run_1/requests/1").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["error"]["code"], "not_found");
+        assert!(fake.inspected.lock().unwrap().is_empty(), "nothing reaches Session Core");
+    }
+
+    #[tokio::test]
+    async fn inspector_refuses_zdr_bearer() {
+        let fake = FakeRunLedger::default();
+        let (status, body) = get_json(app(fake.clone(), true).await, "/v1/runs/run_1/requests/1").await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["error"]["code"], "zdr_feature_not_supported");
+        assert_eq!(body["error"]["feature"], "run_inspection");
+        assert!(fake.inspected.lock().unwrap().is_empty(), "nothing reaches Session Core");
     }
 }

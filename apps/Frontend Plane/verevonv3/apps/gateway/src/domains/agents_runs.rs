@@ -40,6 +40,11 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
         .route("/api/v1/agents/runs/{run_id}", get(get_run))
         // EP-14 S5: the run's durable, content-free timing (owner only; the Model Plane checks).
         .route("/api/v1/agents/runs/{run_id}/timing", get(get_run_timing))
+        // EP-14 S7: one model call's request snapshot (owner only, D3-filtered; the Model Plane checks).
+        .route(
+            "/api/v1/agents/runs/{run_id}/requests/{call_seq}",
+            get(get_run_request),
+        )
         // Approving a plan IS the autonomy grant — the browser names the rung
         // and the reason, and the Model Plane validates both.
         .route(
@@ -228,6 +233,38 @@ async fn get_run_timing(
         "{}/v1/runs/{}/timing",
         state.model_gateway_url,
         urlencoding::encode(&run_id)
+    );
+    let (status, body) = proxy_model_json_with_session(
+        &state,
+        Method::GET,
+        &url,
+        None,
+        token.as_deref(),
+        session_token.as_deref(),
+        &user,
+    )
+    .await;
+    (status, body).into_response()
+}
+
+/// `GET /api/v1/agents/runs/{run_id}/requests/{call_seq}` — what one model call of the run was sent and
+/// offered (EP-14 S7), passed through as model-gateway answers it. Session Core applies decision D3
+/// (platform prompt sections carry no text) and the owner-only check; model-gateway refuses a
+/// zero-retention caller and answers 404 while its inspector switch is off. Filtering here instead would
+/// leave platform text on the wire, so this layer adds no rule of its own.
+async fn get_run_request(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Path((run_id, call_seq)): Path<(String, String)>,
+) -> impl IntoResponse {
+    let token = model_token(&state, &user, &headers).await;
+    let session_token = session_token(&state, &user, &headers).await;
+    let url = format!(
+        "{}/v1/runs/{}/requests/{}",
+        state.model_gateway_url,
+        urlencoding::encode(&run_id),
+        urlencoding::encode(&call_seq)
     );
     let (status, body) = proxy_model_json_with_session(
         &state,
