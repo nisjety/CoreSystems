@@ -2746,6 +2746,17 @@ pub async fn invoke_stream_sse(
             return error_stream(&request_id, PLAN_GRANT_UNAVAILABLE, PLAN_GRANT_UNAVAILABLE_MESSAGE, false);
         }
     }
+    // A turn the goal pump sent (Wave 3 EP-7 S4) is refused here, before any run exists, unless
+    // auto-continue is available and the turn is a Do turn naming its goal. A turn without the mark
+    // is never refused here: with MODEL_GATEWAY_GOAL_AUTO_CONTINUE off every other turn is as it was.
+    if let Some((code, message)) = crate::goal_auto::refusal(
+        req.goal_auto,
+        crate::goal_auto::available(),
+        agentic_requested,
+        req.goal_id.as_deref(),
+    ) {
+        return error_stream(&request_id, code, message, false);
+    }
     // The thread goal (Wave 3 EP-7 S1), decided before any run exists: a Do turn recites the
     // thread's active goal as data, and a Continue turn whose `goal_id` is not that goal is refused.
     // With MODEL_GATEWAY_THREAD_GOALS_ENABLED off nothing is read and the run is what it was.
@@ -2780,6 +2791,47 @@ pub async fn invoke_stream_sse(
         Err(crate::thread_goal_routes::TurnGoalRefusal::Typed { code, message }) => {
             return error_stream(&request_id, code, message, false);
         }
+    };
+    // The goal turn ledger (EP-7 S2): a Continue turn that names its goal, and passed the check
+    // above, is admitted by session-core before any run exists. A refusal (a spent budget, the turn
+    // cap, a turn still in flight) is a typed stream error and no run is prepared. The claim settles
+    // itself on every exit of this turn ([`crate::thread_goal::GoalTurnLedger`]). Off with the goal
+    // switch, for an Ask turn and for a turn that names no goal, so those turns are unchanged.
+    let goal_turn_id = req
+        .goal_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty() && agentic_requested && crate::thread_goal_routes::enabled());
+    let mut goal_turn = match goal_turn_id {
+        Some(goal_id) => match crate::thread_goal::GoalTurnLedger::claim(
+            state.thread_goal_client.clone(),
+            &model_bearer,
+            &org_id,
+            goal_id,
+        )
+        .await
+        {
+            Ok(ledger) => {
+                // D10: what the goal has left, clamped to the org's per-run ceiling and never above
+                // it. A Do run carries no token cap of its own yet (register D2-705), so the cap is
+                // stated here and the goal stops at its next claim.
+                let cap = crate::thread_goal::goal_turn_cap(
+                    ledger.allowance(),
+                    crate::sse_events::run_ceiling::RunCeiling::resolve(
+                        None,
+                        None,
+                        org_limits.max_cost_usd,
+                        org_limits.max_tokens,
+                    ),
+                );
+                tracing::info!(request_id = %request_id, cap_tokens = ?cap.tokens, cap_usd = ?cap.usd, "goal turn claimed");
+                Some(ledger)
+            }
+            Err(refusal) => {
+                return error_stream(&request_id, refusal.code, refusal.message, refusal.retryable);
+            }
+        },
+        None => None,
     };
     // Images as parts of the turn (WS08-S4), decided before any run exists. With the switch off
     // this is empty and the vision diversion below decides, as it always did. A Do turn with an
@@ -2993,6 +3045,11 @@ pub async fn invoke_stream_sse(
                 true,
             );
         }
+    }
+    // The claimed goal turn names its run as soon as the run exists (EP-7 S2), so every later exit
+    // settles it against that run and counts it.
+    if let Some(ledger) = goal_turn.as_mut() {
+        ledger.bind(&session_run.run_id, req.goal_auto).await;
     }
     let thread_scope = session_run.thread_id.clone();
     let prepared_ms = timing.close(crate::turn_timing::Phase::SessionPrepare, admitted_ms);
@@ -3233,6 +3290,7 @@ pub async fn invoke_stream_sse(
             agent_roles,
             wide_research,
             goal_recitation,
+            goal_turn,
         );
     }
 
@@ -4539,6 +4597,17 @@ pub async fn invoke_stream_sse(
             // so the plan goes to the tool rounds only while it still describes that head.
             let rounds_tiers =
                 crate::prompt_context::plan_for(prompt_tiers.as_ref(), &composed_head, &messages);
+            // The turn's brand deck template (EP-5 S6): resolved once from the request's own pick and held while the tool rounds run; the model never names one. Holds nothing while a switch is off or under ZDR.
+            let _deck_template = crate::deck_tool::hold_turn_template(
+                &session_state,
+                &session_run_for_terminal.run_id,
+                &org_clone,
+                &user_clone,
+                capability_bearer.as_ref().map(VerifiedCapabilityBearer::as_str),
+                effective_zdr,
+                req.deck_template.as_ref(),
+            )
+            .await;
             let rounds = crate::tool_loop::run_tool_rounds_for_model_with_attachments(
                 &session_state,
                 &req_id,
@@ -6212,7 +6281,7 @@ pub async fn invoke_stream_sse(
                         if !effective_zdr {
                         committed_artifacts.seed_persisted(&session_thread_id, &artifact.id,
                             &artifact.title, &artifact.content, artifact.version);
-                        if let Some(kind) = crate::artifacts::ArtifactKind::parse(&artifact.kind) {
+                        if let Some(kind) = crate::deck_tool::stored_kind(&artifact.kind) {
                             committed_artifacts.remember_kind(&session_thread_id, &artifact.id, kind);
                         }
                         // The accepted review travels with its text, for a
@@ -7679,8 +7748,16 @@ fn rehydrate_persisted_artifacts(
             &text("content"),
             version,
         );
-        if let Some(kind) = crate::artifacts::ArtifactKind::parse(&text("kind")) {
+        // The gateway wrote this record, so a kept deck (EP-5 S3) is restored as a deck and a
+        // later turn's `deck` ops continue it at the next version.
+        if let Some(kind) = crate::deck_tool::stored_kind(&text("kind")) {
             state.artifact_versions.remember_kind(thread_id, &id, kind);
+        }
+        // Research-to-deck reads a report's stamp back from the store (EP-5 S8).
+        if crate::deck_tool::from_artifact_enabled() {
+            if let Some(Kind::StructValue(stamp)) = fields.fields.get("provenance").and_then(|value| value.kind.as_ref()) {
+                state.artifact_versions.remember_provenance(thread_id, &id, version, crate::deck_tool::stamp_json(stamp));
+            }
         }
     }
 }
@@ -12908,8 +12985,10 @@ fn hooks_do_runs_mode() -> crate::runtime_registries::HooksDoRunsMode {
     })
 }
 
+/// How a Do run ended, as the gateway reads its status. Crate-visible so the goal ledger
+/// (`thread_goal::settle_outcome`, EP-7 S2) names a settled turn by the same reading.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum AgenticRunOutcome {
+pub(crate) enum AgenticRunOutcome {
     Completed,
     Failed,
     AwaitingApproval,
@@ -13414,10 +13493,15 @@ fn agentic_run_stream(
     // carried in the run context. Empty with MODEL_GATEWAY_THREAD_GOALS_ENABLED off, for a thread
     // without an active goal and for a continuation.
     goal_recitation: String,
+    // The claimed goal turn of a Continue turn (EP-7 S2), settled from this run's answer and
+    // answered with a `goal_progress` frame. `None` for every other turn and every continuation.
+    goal_turn: Option<crate::thread_goal::GoalTurnLedger>,
 ) -> Sse<ReceiverStream<Result<Event, Infallible>>> {
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(32);
     tokio::spawn(async move {
         let _idem_guard = idem_guard;
+        // Held for the whole task: an exit before the run's answer settles the turn on drop.
+        let mut goal_turn = goal_turn;
         let start = std::time::Instant::now();
         let run_id = run.run_id.clone();
         let thread_id = run.thread_id.clone();
@@ -13833,6 +13917,11 @@ fn agentic_run_stream(
                     run_id = %run.run_id,
                     "the client stopped an agentic run; its dispatch was aborted"
                 );
+                // A stopped goal turn is settled as cancelled when this task ends (EP-7 S2); its
+                // run started, so it still counts as a turn.
+                if let Some(ledger) = goal_turn.as_mut() {
+                    ledger.end_as("cancelled");
+                }
                 let stopped = crate::sse_events::ChatEvent::Stopped {
                     reason: "client cancelled".to_owned(),
                 };
@@ -14082,6 +14171,41 @@ fn agentic_run_stream(
             retention_class.is_some(),
             &response.round_timing,
         );
+
+        // The goal turn is settled from the run's answer, whatever the run's status (EP-7 S2): the
+        // run's metered usage, else the round tally a run that ended without usage left (register
+        // D2-005), else none; the turn counts either way. The `goal_progress` frame goes out before
+        // the run's own end frame, so the bar and the answer agree.
+        if let Some(ledger) = goal_turn.take() {
+            let progress = agent_usage.as_ref().and_then(AgentRunUsage::reported_metered);
+            let cost_usd = match (response.usage.as_ref(), agent_usage.as_ref()) {
+                (Some(usage), Some(meter)) => frame_cost_usd(&meter.total(usage).0),
+                // Without a meter the run is priced once here, so a cost budget can be enforced
+                // whether or not the progress frames are on. A goal turn is never ZDR or waived.
+                (Some(usage), None) => frame_cost_usd(
+                    &AgentRunUsage::start(&state.pricing, &model, &route)
+                        .await
+                        .total(usage)
+                        .0,
+                ),
+                (None, _) => None,
+            };
+            let settlement = crate::thread_goal::TurnSettlement::of_run(
+                crate::thread_goal::settle_outcome(classify_agentic_run_outcome(&response.status)),
+                response.usage.as_ref(),
+                progress,
+                cost_usd,
+                crate::pricing::CostBasis::of_route(
+                    &route.provider_hint,
+                    &route.subscription_connection_id,
+                ),
+                &route.provider_hint,
+                &route.subscription_connection_id,
+            );
+            if let Some(frame) = ledger.settle(&settlement).await {
+                let _ = tx.send(Ok(frame.to_sse(&request_id))).await;
+            }
+        }
 
         // Compaction is LOSSY and otherwise invisible: an answer built on a
         // prompt whose earlier tool results were cleared can be worse for a
@@ -14935,6 +15059,27 @@ impl AgentRunUsage {
             ceiling: None,
             routing: None,
         }
+    }
+
+    /// The metered tokens the run's progress reports add up to, for a goal turn whose run ended
+    /// without its usage (EP-7 S2, register D2-005); `None` when no round was reported. A report
+    /// names no leg, so the route decides: a run pinned to the subscription spends no metered token.
+    fn reported_metered(&self) -> Option<crate::thread_goal::MeteredTokens> {
+        if self.reported == RunTokens::default() {
+            return None;
+        }
+        let metered = crate::pricing::CostBasis::of_route(
+            &self.route.provider_hint,
+            &self.route.subscription_connection_id,
+        ) == crate::pricing::CostBasis::Metered;
+        Some(if metered {
+            crate::thread_goal::MeteredTokens {
+                input: self.reported.input,
+                output: self.reported.output,
+            }
+        } else {
+            crate::thread_goal::MeteredTokens::default()
+        })
     }
 
     /// The run's total as its final frame states it, and the rounds whose price is unknown. The
@@ -15989,6 +16134,43 @@ mod tests {
         super::rehydrate_persisted_artifacts(&state, "thread", Some(&metadata));
         assert_eq!(state.artifact_versions.content_of("thread", "campaign").as_deref(), Some("Newer plain prose"));
         assert_eq!(state.artifact_versions.kind_of("thread", "campaign"), Some(crate::artifacts::ArtifactKind::Document));
+    }
+
+    /// EP-5 S3: a deck kept in a turn's metadata is restored as a deck, with its manifest, so the
+    /// next `deck` op of a later turn continues it at the next version.
+    #[tokio::test]
+    async fn rehydrated_deck_continues_at_next_version() {
+        use mp_contracts::deck_manifest::{DeckManifest, DeckOp, SlideInput, SlideLayout};
+        use prost_types::{value::Kind, ListValue, Struct, Value};
+        let mut deck = DeckManifest::empty("deck-01test");
+        deck.apply(DeckOp::Create {
+            title: "Kvartalstall".to_owned(),
+            locale: "nb-NO".to_owned(),
+            slides: vec![SlideInput {
+                layout: SlideLayout::TitleOnly,
+                title: "Risiko".to_owned(),
+                bullets: Vec::new(),
+                left: Vec::new(),
+                right: Vec::new(),
+                image: None,
+                notes: None,
+            }],
+        })
+        .expect("a valid create");
+        let manifest = deck.canonical_json();
+        let text = |value: &str| Value { kind: Some(Kind::StringValue(value.into())) };
+        let metadata = Struct { fields: [("artifacts".into(), Value { kind: Some(Kind::ListValue(ListValue { values: vec![Value { kind: Some(Kind::StructValue(Struct { fields: [
+            ("id".into(), text("deck-01test")), ("kind".into(), text("deck")),
+            ("title".into(), text("Kvartalstall")), ("content".into(), text(&manifest)),
+            ("version".into(), Value { kind: Some(Kind::NumberValue(2.0)) }),
+        ].into_iter().collect() })) }] })) })].into_iter().collect() };
+        let state = AppState::new();
+        super::rehydrate_persisted_artifacts(&state, "thread", Some(&metadata));
+        assert_eq!(state.artifact_versions.kind_of("thread", "deck-01test"), Some(crate::artifacts::ArtifactKind::Deck));
+        assert_eq!(state.artifact_versions.current_version("thread", "deck-01test"), Some(2));
+        let stored = state.artifact_versions.content_of("thread", "deck-01test").expect("the manifest is kept");
+        assert_eq!(DeckManifest::from_untrusted_json(&stored).expect("it reads back"), deck);
+        assert_eq!(state.artifact_versions.next_version("thread", "deck-01test"), 3);
     }
 
     // ── F-01: a failed provider stream must be reported, never silently
@@ -20811,6 +20993,8 @@ pub(crate) async fn continue_run(
             None,
             // Nor a goal recitation: it carries no run context (EP-7 S1).
             String::new(),
+            // Nor a goal turn: a continuation resumes a run, it claims no new turn (EP-7 S2).
+            None,
         )
     };
     if !resume_enabled {
@@ -22707,6 +22891,7 @@ mod continue_run_tests {
             Vec::new(),
             None,
             String::new(),
+            None,
         );
         let frames = frames_of_stream(stream).await;
         let names: Vec<&str> = frames.iter().map(|(name, _)| name.as_str()).collect();
@@ -24201,6 +24386,7 @@ mod continue_run_tests {
             Vec::new(),
             None,
             String::new(),
+            None,
         );
         let frames = frames_of_stream(stream).await;
         let names: Vec<&str> = frames.iter().map(|(name, _)| name.as_str()).collect();

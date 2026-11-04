@@ -2374,7 +2374,9 @@ pub(crate) fn persistable_citations(
 }
 
 /// The artifacts a turn may store: a ZDR or waived turn drops a report's provenance stamp, which
-/// streamed live (EP-2-S4, D12). The artifact itself is stored as before.
+/// streamed live (EP-2-S4, D12). The artifact itself is stored as before, except a deck manifest
+/// (EP-5 S3, D6): a deck is a store DEC-32 counts a waived run out of, so it streamed and is
+/// not kept, and the thread reopens without it.
 pub(crate) fn persistable_artifacts(
     artifacts: Vec<crate::sse_events::RecordedArtifact>,
     zdr_or_waived: bool,
@@ -2384,6 +2386,7 @@ pub(crate) fn persistable_artifacts(
     }
     artifacts
         .into_iter()
+        .filter(|artifact| artifact.kind != crate::artifacts::ArtifactKind::Deck.as_str())
         .map(crate::sse_events::RecordedArtifact::without_provenance)
         .collect()
 }
@@ -3669,5 +3672,62 @@ mod tests {
         let artifact = first_entry_keys(&stored, "artifacts");
         assert!(artifact.iter().any(|key| key == "content"), "the report itself stays");
         assert!(!artifact.iter().any(|key| key == "provenance"), "{artifact:?}");
+    }
+
+    fn deck_manifest() -> crate::sse_events::RecordedArtifact {
+        crate::sse_events::RecordedArtifact {
+            id: "deck-01test".to_owned(),
+            kind: "deck".to_owned(),
+            title: "Kvartalstall".to_owned(),
+            content: "{\"version\":1}".to_owned(),
+            version: 2,
+            provenance: None,
+        }
+    }
+
+    /// The ids of the stored `artifacts` list, in order.
+    fn stored_artifact_ids(metadata: &Option<prost_types::Struct>) -> Vec<String> {
+        use prost_types::value::Kind;
+        let Some(Kind::ListValue(artifacts)) = metadata
+            .as_ref()
+            .and_then(|metadata| metadata.fields.get("artifacts"))
+            .and_then(|value| value.kind.as_ref())
+        else {
+            return Vec::new();
+        };
+        artifacts
+            .values
+            .iter()
+            .filter_map(|value| match value.kind.as_ref() {
+                Some(Kind::StructValue(entry)) => match entry.fields.get("id").and_then(|id| id.kind.as_ref()) {
+                    Some(Kind::StringValue(id)) => Some(id.clone()),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// EP-5 S3 (D6, DEC-32): a waived turn streamed its deck and stores none of it; the other
+    /// artifacts of the turn are stored as before, and a persistent turn keeps the deck.
+    #[test]
+    fn waived_turn_does_not_persist_deck() {
+        let deck_evidence = |zdr_or_waived: bool| {
+            crate::session_flow::turn_evidence_metadata(
+                None,
+                &[],
+                &crate::session_flow::persistable_artifacts(vec![stamped_report(), deck_manifest()], zdr_or_waived),
+                crate::session_flow::TurnQuality::default(),
+            )
+        };
+        assert_eq!(stored_artifact_ids(&deck_evidence(true)), vec!["research-r"]);
+        assert_eq!(stored_artifact_ids(&deck_evidence(false)), vec!["research-r", "deck-01test"]);
+        let only_deck = crate::session_flow::turn_evidence_metadata(
+            None,
+            &[],
+            &crate::session_flow::persistable_artifacts(vec![deck_manifest()], true),
+            crate::session_flow::TurnQuality::default(),
+        );
+        assert!(only_deck.is_none(), "a waived turn with only a deck stores no artifacts key");
     }
 }

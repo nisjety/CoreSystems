@@ -27,7 +27,7 @@ const MATRIX: &str = include_str!("fixtures/zdr-posture-matrix.json");
 
 /// The number of enforcement rows the canonical matrix carries when this test was written. A row
 /// added or removed without this test being updated is a change nobody reviewed here.
-const ENFORCEMENT_ROWS: usize = 32;
+const ENFORCEMENT_ROWS: usize = 33;
 
 fn matrix() -> Value {
     serde_json::from_str(MATRIX).expect("the vendored matrix is JSON")
@@ -462,4 +462,22 @@ fn the_cited_passage_goldens_are_rows_decided_as_named() {
         assert_eq!(row["expect"]["decision"], decision, "{id}");
         assert_eq!(decided(row).0, decision, "{id}");
     }
+}
+
+/// EP-5 S3: the deck golden names the waived turn whose deck manifest streams but is not stored.
+/// What a waived turn keeps out of the message metadata is checked in `session_flow`
+/// (`waived_turn_does_not_persist_deck`); this pins that the row decides as its name says.
+#[test]
+fn the_deck_manifest_golden_is_a_row_decided_as_named() {
+    let matrix = matrix();
+    let rows = matrix["enforcement_rows"]
+        .as_array()
+        .expect("rows are an array");
+    let id = "e_waived_deck_manifest_not_persisted";
+    let row = rows
+        .iter()
+        .find(|row| row["id"] == id)
+        .unwrap_or_else(|| panic!("the matrix has no row {id}"));
+    assert_eq!(row["expect"]["decision"], "waived", "{id}");
+    assert_eq!(decided(row).0, "waived", "{id}");
 }

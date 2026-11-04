@@ -893,7 +893,7 @@ export function transcriptTurnToChatTurn(turn: ChatThreadTranscriptTurn): ChatTu
     reasoning: turn.reasoning,
     citations: (turn.citations ?? []).filter(isCitation),
     toolCalls: (turn.toolCalls ?? []).filter(isChatToolCall),
-    artifacts: (turn.artifacts ?? []).filter(isChatArtifact),
+    artifacts: (turn.artifacts ?? []).filter(isChatArtifact).map(deckArtifactForDisplay),
     files: (turn.files ?? []).filter(isGeneratedFile),
     grounding: isChatKnowledgeGrounding(turn.grounding) ? turn.grounding : undefined,
     memoryRecallCount: turn.memoryRecallCount,
@@ -1265,8 +1265,44 @@ export function isChatArtifact(value: unknown): value is ChatArtifact {
     // `history` rides along in the thread snapshot as untyped JSON; a snapshot
     // written by an older build simply has none.
     (record.history === undefined ||
-      (Array.isArray(record.history) && record.history.every(isChatArtifactVersion)))
+      (Array.isArray(record.history) && record.history.every(isChatArtifactVersion))) &&
+    // A deck's content is its manifest. One that is not a JSON object is
+    // refused rather than shown as a deck.
+    (record.kind !== 'deck' ||
+      (typeof record.content === 'string' && deckManifestVersion(record.content) !== null))
   )
+}
+
+/** The deck manifest version this client reads (EP-5 S2/S3). */
+export const DECK_MANIFEST_VERSION = 1
+
+/**
+ * The `version` a deck manifest states: `null` when the content is not a JSON
+ * object, `undefined` when the object states none. Never throws.
+ */
+export function deckManifestVersion(content: string): number | undefined | null {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(content)
+  } catch {
+    return null
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null
+  const version = (parsed as Record<string, unknown>).version
+  return typeof version === 'number' ? version : undefined
+}
+
+/**
+ * A deck this client cannot read (a manifest version other than
+ * {@link DECK_MANIFEST_VERSION}) is shown as its JSON in a plain code block
+ * rather than handed to a deck view that would misread it. Any other artifact
+ * is returned as it is.
+ */
+export function deckArtifactForDisplay(artifact: ChatArtifact): ChatArtifact {
+  if (artifact.kind !== 'deck' || deckManifestVersion(artifact.content) === DECK_MANIFEST_VERSION) {
+    return artifact
+  }
+  return { ...artifact, kind: 'code' }
 }
 
 export function isGeneratedFile(value: unknown): value is GeneratedFile {

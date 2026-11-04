@@ -587,6 +587,25 @@ pub enum ChatEvent {
         /// When the run can be resumed (RFC 3339, UTC), or `None` when that time is unreadable.
         resume_after: Option<String>,
     },
+    /// A goal turn was settled (EP-7 S2): the goal's spend against its caps and its status after
+    /// the turn. A control event, ungated: the goal bar needs it whatever the client opted into.
+    /// Ids, counts and closed tokens only; the objective never rides it.
+    GoalProgress {
+        goal_id: String,
+        turn_no: u32,
+        tokens_used: u64,
+        /// The metered-token budget; `None` when the goal sets none.
+        token_budget: Option<u64>,
+        cost_used_usd_micros: u64,
+        /// The cost budget in micro-USD; `None` when the goal sets none.
+        cost_budget_usd_micros: Option<u64>,
+        turns_used: u32,
+        max_turns: u32,
+        /// A goal status token (`active`, `budget_reached`, `turns_reached`, ...).
+        status: &'static str,
+        /// The closed reason beside the status; empty when none.
+        status_reason: &'static str,
+    },
     /// The workspace of the sandboxed computer a tool call used: where its files are kept, and whether they
     /// were (WS22-S6). `scope` is the workspace, `state` its outcome, and `cause` the closed reason when the
     /// lease recorded one. A `steps` family frame, so only a client that asked for step detail sees it.
@@ -710,6 +729,8 @@ impl ChatEvent {
             | ChatEvent::Compaction { .. }
             | ChatEvent::ContextChange { .. }
             | ChatEvent::RunParked { .. }
+            // A goal's spend after a turn (EP-7 S2): the goal bar shows it on every client.
+            | ChatEvent::GoalProgress { .. }
             // The question a run waits on (WS14 S4): the card needs it whatever the client opted into.
             | ChatEvent::UserQuestion { .. }
             // The deep-research plan card (EP-2 S5): the plan turn shows nothing else.
@@ -753,6 +774,7 @@ impl ChatEvent {
             ChatEvent::Compaction { .. } => "compaction",
             ChatEvent::ContextChange { .. } => "context_change",
             ChatEvent::RunParked { .. } => "run_parked",
+            ChatEvent::GoalProgress { .. } => "goal_progress",
             ChatEvent::Title { .. } => "title",
             ChatEvent::FollowUps { .. } => "follow_ups",
             ChatEvent::PlanProposed { .. } => "plan_proposed",
@@ -1176,6 +1198,31 @@ impl ChatEvent {
                 "reason": reason.as_str(),
                 "resume_after": resume_after,
             }),
+            // A budget the goal does not set is `null`, so a client reads "none" without a guess.
+            ChatEvent::GoalProgress {
+                goal_id,
+                turn_no,
+                tokens_used,
+                token_budget,
+                cost_used_usd_micros,
+                cost_budget_usd_micros,
+                turns_used,
+                max_turns,
+                status,
+                status_reason,
+            } => json!({
+                "goal_id": goal_id,
+                "turn_no": turn_no,
+                "tokens_used": tokens_used,
+                "token_budget": token_budget,
+                "cost_used_usd_micros": cost_used_usd_micros,
+                "cost_budget_usd_micros": cost_budget_usd_micros,
+                "turns_used": turns_used,
+                "max_turns": max_turns,
+                "status": status,
+                "status_reason": status_reason,
+                "request_id": request_id,
+            }),
             ChatEvent::Stopped { reason } => json!({ "reason": reason, "request_id": request_id }),
             ChatEvent::Error {
                 code,
@@ -1426,10 +1473,15 @@ impl RecordedArtifact {
     /// write is ever too big to keep.
     pub const MAX_PERSISTED_CHARS: usize = 200_000;
 
-    /// `Some` for a model-authored text artifact (document/code/html);
-    /// `None` for generated files and images, whose `content` is a base64
-    /// `data:` URI far too large for a metadata column and already
-    /// downloadable from the message's attachment.
+    /// `Some` for a model-authored text artifact (document/code/html) and for a
+    /// deck manifest (EP-5 S3); `None` for generated files and images, whose
+    /// `content` is a base64 `data:` URI far too large for a metadata column and
+    /// already downloadable from the message's attachment.
+    ///
+    /// A deck is kept only as a manifest that reads back under the deck's own
+    /// cap and names the id it is kept under: its pptx is never stored, it is
+    /// rebuilt from this manifest. A `deck` frame only the `deck` tool emits,
+    /// and only while `MODEL_GATEWAY_DECK_TOOL` is on.
     #[must_use]
     pub fn from_event(event: &ChatEvent) -> Option<Self> {
         let ChatEvent::Artifact {
@@ -1445,8 +1497,10 @@ impl RecordedArtifact {
         else {
             return None;
         };
-        if !matches!(kind.as_str(), "document" | "code" | "html") {
-            return None;
+        match kind.as_str() {
+            "document" | "code" | "html" => {}
+            "deck" if is_storable_deck(id, content) => {}
+            _ => return None,
         }
         if content.starts_with("data:") || content.chars().count() > Self::MAX_PERSISTED_CHARS {
             return None;
@@ -1480,6 +1534,14 @@ impl RecordedArtifact {
             editor: None,
         }
     }
+}
+
+/// Whether `content` is a deck manifest fit to keep under `id`: JSON that reads as a manifest
+/// (which also holds it to `MAX_MANIFEST_CHARS`) and names the same deck. A frame that does not is
+/// streamed but never stored, so a reload cannot hand the `deck` tool a manifest it would refuse.
+fn is_storable_deck(id: &str, content: &str) -> bool {
+    mp_contracts::deck_manifest::DeckManifest::from_untrusted_json(content)
+        .is_ok_and(|manifest| manifest.deck_id == id)
 }
 
 impl RichEventSink {
@@ -3473,6 +3535,7 @@ mod payload_contract {
         "Compaction",
         "ContextChange",
         "RunParked",
+        "GoalProgress",
         "SandboxState",
     ];
 
@@ -3510,6 +3573,7 @@ mod payload_contract {
             ChatEvent::Compaction { .. } => "Compaction",
             ChatEvent::ContextChange { .. } => "ContextChange",
             ChatEvent::RunParked { .. } => "RunParked",
+            ChatEvent::GoalProgress { .. } => "GoalProgress",
             ChatEvent::SandboxState { .. } => "SandboxState",
         }
     }
@@ -3963,6 +4027,30 @@ mod payload_contract {
                 run_id: s("run-1"),
                 reason: mp_contracts::loop_fold::ParkReason::ProviderExhausted,
                 resume_after: Some(s("2026-10-20T12:00:00Z")),
+            },
+            ChatEvent::GoalProgress {
+                goal_id: s("goal_1"),
+                turn_no: 1,
+                tokens_used: 0,
+                token_budget: None,
+                cost_used_usd_micros: 0,
+                cost_budget_usd_micros: None,
+                turns_used: 1,
+                max_turns: 10,
+                status: "active",
+                status_reason: "",
+            },
+            ChatEvent::GoalProgress {
+                goal_id: s("goal_1"),
+                turn_no: 3,
+                tokens_used: 31_000,
+                token_budget: Some(30_000),
+                cost_used_usd_micros: 120_000,
+                cost_budget_usd_micros: Some(500_000),
+                turns_used: 3,
+                max_turns: 10,
+                status: "budget_reached",
+                status_reason: "token_budget",
             },
             ChatEvent::SandboxState {
                 scope: "thread",
@@ -4426,5 +4514,78 @@ mod citation_passage_tests {
 
         let other = ChatEvent::Error { code: "x".into(), message: "y".into(), retryable: false };
         assert!(other.clone().with_editor(Some("model")).payload("r").get("editor").is_none());
+    }
+
+    /// A deck as the `deck` tool keeps it: created, one slide, canonical JSON.
+    fn deck_manifest_json(deck_id: &str) -> String {
+        use mp_contracts::deck_manifest::{DeckManifest, DeckOp, SlideInput, SlideLayout};
+        let mut deck = DeckManifest::empty(deck_id);
+        deck.apply(DeckOp::Create {
+            title: "Kvartalstall".to_owned(),
+            locale: "nb-NO".to_owned(),
+            slides: vec![SlideInput {
+                layout: SlideLayout::TitleBullets,
+                title: "Salg".to_owned(),
+                bullets: vec!["Opp 8 %".to_owned()],
+                left: Vec::new(),
+                right: Vec::new(),
+                image: None,
+                notes: Some("Kilde: Q3-rapporten".to_owned()),
+            }],
+        })
+        .expect("a valid create");
+        deck.canonical_json()
+    }
+
+    fn deck_event(id: &str, content: String, version: u32) -> ChatEvent {
+        ChatEvent::Artifact {
+            id: id.to_owned(),
+            kind: "deck".to_owned(),
+            title: "Kvartalstall".to_owned(),
+            content,
+            version,
+            provenance: None,
+            editor: None,
+        }
+    }
+
+    /// EP-5 S3: a deck's manifest is kept with the message, with its version, so a reload and a
+    /// later turn can continue it.
+    #[test]
+    fn recorded_artifact_keeps_a_deck_manifest() {
+        let manifest = deck_manifest_json("deck-01test");
+        let recorded = RecordedArtifact::from_event(&deck_event("deck-01test", manifest.clone(), 3))
+            .expect("a deck manifest is kept");
+        assert_eq!(recorded.kind, "deck");
+        assert_eq!(recorded.version, 3);
+        assert_eq!(recorded.content, manifest);
+        let stored = serde_json::to_value(&recorded).expect("serializable");
+        assert_eq!(stored["kind"], "deck");
+        assert_eq!(stored["version"], 3);
+    }
+
+    /// A deck that would not read back is never kept: over the manifest cap, not a manifest, a
+    /// `data:` URI, or a manifest of another deck.
+    #[test]
+    fn recorded_artifact_drops_a_deck_over_the_cap() {
+        let manifest = deck_manifest_json("deck-01test");
+        let padded = format!(
+            "{manifest}{}",
+            " ".repeat(mp_contracts::deck_manifest::MAX_MANIFEST_CHARS)
+        );
+        assert!(padded.chars().count() < RecordedArtifact::MAX_PERSISTED_CHARS, "the deck's own cap decides");
+        assert!(RecordedArtifact::from_event(&deck_event("deck-01test", padded, 1)).is_none());
+        assert!(RecordedArtifact::from_event(&deck_event("deck-01test", "# not json".to_owned(), 1)).is_none());
+        assert!(RecordedArtifact::from_event(&deck_event("deck-01test", "{\"version\":1}".to_owned(), 1)).is_none());
+        assert!(RecordedArtifact::from_event(&deck_event(
+            "deck-01test",
+            "data:application/json;base64,e30=".to_owned(),
+            1
+        ))
+        .is_none());
+        assert!(
+            RecordedArtifact::from_event(&deck_event("deck-other", manifest, 1)).is_none(),
+            "a manifest is kept only under its own deck id"
+        );
     }
 }
