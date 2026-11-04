@@ -32,6 +32,7 @@ import {
   reconcileLocalThreads,
 } from '@/features/chat/lib/chat-retention'
 import { runParkedFrameOf, type RunParkedFrame } from '@/features/chat/lib/run-park'
+import type { ThreadGoalStatus } from './thread-goal-client'
 
 // ── Wide research (EP-2 S8) ─────────────────────────────────────────────────
 
@@ -257,6 +258,12 @@ export type ChatInvokeRequest = {
   contextRefs?: import('@/shared/actions/chat-context-refs').ChatContextRef[]
   /** The thread goal a Continue turn works toward (EP-7 S1). Sent as `goal_id` only when set, never on a zero-retention turn. */
   goalId?: string
+  /**
+   * The goal pump sent this Continue turn after its countdown, not the person (EP-7 S4). Sent as
+   * `goal_auto` only beside a `goal_id`; it grants nothing and the gateway refuses it while
+   * auto-continue is off.
+   */
+  goalAuto?: boolean
   content: string
   model?: string
   /** Explicit provider route for a user-owned model subscription. */
@@ -572,6 +579,34 @@ export type ChatSandboxStateEvent = {
   scope: string
   state: string
   cause?: string
+  requestId?: string
+}
+/** The statuses a `goal_progress` frame may state: a goal's, or `cleared`. */
+export type ChatGoalProgressStatus = ThreadGoalStatus | 'cleared'
+const GOAL_PROGRESS_STATUSES: readonly ChatGoalProgressStatus[] = [
+  'active',
+  'paused',
+  'met',
+  'budget_reached',
+  'turns_reached',
+  'blocked',
+  'cleared',
+]
+/**
+ * A settled goal turn (`goal_progress`, EP-7 S2, ungated): the goal's spend against its caps and its
+ * status after the turn. Ids, counts and closed tokens only; a budget the goal does not set is absent.
+ */
+export type ChatGoalProgressEvent = {
+  goalId: string
+  turnNo: number
+  tokensUsed: number
+  tokenBudget?: number
+  costUsedUsdMicros: number
+  costBudgetUsdMicros?: number
+  turnsUsed: number
+  maxTurns: number
+  status: ChatGoalProgressStatus
+  statusReason?: string
   requestId?: string
 }
 export type ChatErrorEvent = {
@@ -1273,6 +1308,12 @@ export type ChatStreamHandlers = {
    */
   onRunParked?: (event: RunParkedFrame) => void
   /**
+   * A goal turn was settled (EP-7 S2): the goal bar's counts and status after the turn. Read with
+   * `goalProgressEventOf`; a frame without a goal id or with a status this build does not know goes
+   * to `onUnknownEvent` instead.
+   */
+  onGoalProgress?: (event: ChatGoalProgressEvent) => void
+  /**
    * Any SSE event this client has no case for. The gateway relays upstream
    * events verbatim with no allowlist, so a new backend event reaches the
    * browser and — before this hook — died here silently. Log, never drop.
@@ -1669,6 +1710,38 @@ function num(value: unknown): number | undefined {
 
 function objectValue(value: unknown): Record<string, unknown> | undefined {
   return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : undefined
+}
+
+/** A count from a frame: a finite number, never below zero; anything else is 0. */
+function frameCount(value: unknown): number {
+  return typeof value === 'number' && Number.isFinite(value) ? Math.max(0, Math.trunc(value)) : 0
+}
+
+/**
+ * A `goal_progress` frame (EP-7 S2) as the SPA reads it, or `undefined` when it names no goal or a
+ * status this build does not know. A budget that is absent, `null` or not positive is "none".
+ */
+export function goalProgressEventOf(payload: Record<string, unknown>): ChatGoalProgressEvent | undefined {
+  const goalId = str(payload.goal_id)
+  const status = GOAL_PROGRESS_STATUSES.find((candidate) => candidate === payload.status)
+  if (!goalId || !status) return undefined
+  const tokenBudget = frameCount(payload.token_budget)
+  const costBudgetUsdMicros = frameCount(payload.cost_budget_usd_micros)
+  const statusReason = str(payload.status_reason)
+  const requestId = str(payload.request_id)
+  return {
+    goalId,
+    turnNo: frameCount(payload.turn_no),
+    tokensUsed: frameCount(payload.tokens_used),
+    ...(tokenBudget > 0 ? { tokenBudget } : {}),
+    costUsedUsdMicros: frameCount(payload.cost_used_usd_micros),
+    ...(costBudgetUsdMicros > 0 ? { costBudgetUsdMicros } : {}),
+    turnsUsed: frameCount(payload.turns_used),
+    maxTurns: frameCount(payload.max_turns),
+    status,
+    ...(statusReason ? { statusReason } : {}),
+    ...(requestId ? { requestId } : {}),
+  }
 }
 
 /**
@@ -2100,6 +2173,8 @@ export function buildChatWireBody(request: ChatInvokeRequest): Record<string, un
     ...(deckTemplate ? { deck_template: deckTemplate } : {}),
     // The goal of a Continue turn (EP-7 S1): omitted on every other turn, so an ordinary body is unchanged.
     ...(request.goalId && !request.zdr ? { goal_id: request.goalId } : {}),
+    // A pump-sent Continue turn (EP-7 S4) says so, and only beside its goal; every other body is unchanged.
+    ...(request.goalId && request.goalAuto && !request.zdr ? { goal_auto: true } : {}),
     attachments: request.attachments ?? [],
     // Opt-in only, like `min_privacy_tier` below: omitted entirely when
     // nothing is pinned, so an ordinary turn's body is byte-identical to
@@ -2597,6 +2672,14 @@ function dispatchEvent(event: SseEvent, handlers: ChatStreamHandlers): void {
       const parked = runParkedFrameOf(payload)
       if (parked) handlers.onRunParked?.(parked)
       else handlers.onUnknownEvent?.({ name: 'run_parked', payload })
+      break
+    }
+    case 'goal_progress': {
+      // A settled goal turn (EP-7 S2): the bar's counts. Unknown keys are ignored; a frame the
+      // client cannot read is reported, never guessed at.
+      const progress = goalProgressEventOf(payload)
+      if (progress) handlers.onGoalProgress?.(progress)
+      else handlers.onUnknownEvent?.({ name: 'goal_progress', payload })
       break
     }
     case 'awaiting_approval':

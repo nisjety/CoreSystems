@@ -20,6 +20,16 @@
 //! `paused` and `cleared`; `met` and the stop states belong to the EP-7 S2/S3 code paths. The
 //! switch is `SESSION_CORE_THREAD_GOALS_ENABLED`, default off; while it is off every RPC answers
 //! `unavailable` `thread_goals_disabled`.
+//!
+//! The budget ledger (EP-7 S2) rides the same switch: `ClaimGoalTurn` admits one continuation turn
+//! before its run is prepared (one in flight per goal, under the goal's row lock),
+//! `BindGoalTurnRun` names the run once it exists, and `SettleGoalTurn` debits the run's metered
+//! usage, idempotent on the run, and moves the goal to `budget_reached` or `turns_reached` when a
+//! cap is hit. Owner decision D2 taken by its recommendation: only metered tokens count (a
+//! subscription turn spends none), so every goal also has its turn cap; the judge's tokens count;
+//! at 100% no new turn is claimed. A claim not settled within [`CLAIM_LEASE_MINUTES`] (a crashed
+//! replica) is settled `lease_expired` by the next claim and still counts as a turn, so a turn
+//! that keeps dying can never loop past the cap.
 
 use chrono::{DateTime, Utc};
 use mp_contracts::model_plane::v1::{self as pb, thread_goal_service_server::ThreadGoalService};
@@ -55,9 +65,37 @@ pub(crate) const WAIVED_THREAD: &str = "thread_goal_waived_thread";
 pub(crate) const GOAL_CLOSED: &str = "thread_goal_closed";
 pub(crate) const INVALID_GOAL: &str = "invalid_thread_goal";
 const DISABLED: &str = "thread_goals_disabled";
+/// The budget ledger's refusals (EP-7 S2), each a `failed_precondition` message.
+pub(crate) const NOT_ACTIVE: &str = "thread_goal_not_active";
+pub(crate) const TURN_IN_FLIGHT: &str = "thread_goal_turn_in_flight";
+pub(crate) const BUDGET_REACHED: &str = "thread_goal_budget_reached";
+pub(crate) const TURNS_REACHED: &str = "thread_goal_turns_reached";
+pub(crate) const TURN_MISMATCH: &str = "thread_goal_turn_mismatch";
 
 /// The statuses of a goal that is still open: at most one per thread (the partial unique index).
 const OPEN_STATUSES: [&str; 2] = ["active", "paused"];
+
+/// D11: how long a claimed turn holds its goal before the next claim may settle it as
+/// `lease_expired`.
+pub(crate) const CLAIM_LEASE_MINUTES: i32 = 30;
+
+/// The outcomes a settle may name; `lease_expired` is written only by a claim.
+const SETTLE_OUTCOMES: [&str; 7] = [
+    "completed",
+    "failed",
+    "awaiting_approval",
+    "parked",
+    "awaiting_input",
+    "cancelled",
+    "unknown",
+];
+
+/// Where a settled turn's usage came from (the table's CHECK).
+const USAGE_SOURCES: [&str; 4] = ["run_response", "progress", "ledger", "none"];
+
+/// The most tokens one settle may add per count. Far above any real run, it keeps the cached
+/// counters far from a BIGINT overflow whatever a caller sends.
+const MAX_TURN_TOKENS: u64 = 1_000_000_000_000;
 
 /// One switch for the store and for the goal facts attention reads (EP-7 S5 named it first), read
 /// where it is used with the strict parser, so only the literal `true` turns it on.
@@ -135,6 +173,70 @@ impl ThreadGoalService for ThreadGoalGrpc {
         record_metrics("update_thread_goal", started, result.is_ok());
         result
     }
+
+    async fn claim_goal_turn(
+        &self,
+        request: Request<pb::ClaimGoalTurnRequest>,
+    ) -> Result<Response<pb::ClaimGoalTurnResponse>, Status> {
+        let started = Instant::now();
+        let result = async {
+            let caller = identity(&request)?;
+            authorize_operation(&caller, "session:write")?;
+            refuse_retention_exempt(&caller)?;
+            if !thread_goals_enabled() {
+                return Err(Status::unavailable(DISABLED));
+            }
+            claim_goal_turn(&self.pool, &caller, request.into_inner())
+                .await
+                .map(Response::new)
+        }
+        .await;
+        record_metrics("claim_goal_turn", started, result.is_ok());
+        result
+    }
+
+    async fn bind_goal_turn_run(
+        &self,
+        request: Request<pb::BindGoalTurnRunRequest>,
+    ) -> Result<Response<pb::BindGoalTurnRunResponse>, Status> {
+        let started = Instant::now();
+        let result = async {
+            let caller = identity(&request)?;
+            authorize_operation(&caller, "session:write")?;
+            refuse_retention_exempt(&caller)?;
+            if !thread_goals_enabled() {
+                return Err(Status::unavailable(DISABLED));
+            }
+            let goal_auto = claim_guard::goal_auto_requested(request.metadata());
+            bind_goal_turn_run(&self.pool, &caller, request.into_inner(), goal_auto)
+                .await
+                .map(Response::new)
+        }
+        .await;
+        record_metrics("bind_goal_turn_run", started, result.is_ok());
+        result
+    }
+
+    async fn settle_goal_turn(
+        &self,
+        request: Request<pb::SettleGoalTurnRequest>,
+    ) -> Result<Response<pb::ThreadGoalResponse>, Status> {
+        let started = Instant::now();
+        let result = async {
+            let caller = identity(&request)?;
+            authorize_operation(&caller, "session:write")?;
+            refuse_retention_exempt(&caller)?;
+            if !thread_goals_enabled() {
+                return Err(Status::unavailable(DISABLED));
+            }
+            settle_goal_turn(&self.pool, &caller, request.into_inner())
+                .await
+                .map(Response::new)
+        }
+        .await;
+        record_metrics("settle_goal_turn", started, result.is_ok());
+        result
+    }
 }
 
 /// A zero-retention or waived credential never reaches the store (defence in depth: the gateway
@@ -157,6 +259,9 @@ fn refuse_service_writer(caller: &VerifiedIdentity) -> Result<(), Status> {
     }
     Ok(())
 }
+
+/// The pump guard every goal turn claim runs, and the audit mark of a pump-sent turn (EP-7 S4).
+mod claim_guard;
 
 fn invalid(detail: &str) -> Status {
     Status::invalid_argument(format!("{INVALID_GOAL}: {detail}"))
@@ -565,6 +670,416 @@ pub(crate) async fn update_thread_goal(
     })
 }
 
+/// What a goal's counters say about its caps: the stop state and its closed reason, or `None`
+/// while the goal may take another turn. A spent budget is named before the turn cap, so a goal
+/// that hit both reads as out of budget. A cap that is not set never stops the goal.
+fn stop_state(goal: &GoalRow) -> Option<(&'static str, &'static str)> {
+    if goal
+        .token_budget
+        .is_some_and(|budget| goal.tokens_used >= budget)
+    {
+        return Some(("budget_reached", "token_budget"));
+    }
+    if goal
+        .cost_budget_usd_micros
+        .is_some_and(|budget| goal.cost_used_usd_micros >= budget)
+    {
+        return Some(("budget_reached", "cost_budget"));
+    }
+    if goal.turns_used >= goal.max_turns {
+        return Some(("turns_reached", "max_turns"));
+    }
+    None
+}
+
+/// The refusal a claim answers for a goal in `stop` state.
+fn stop_refusal(stop: &str) -> Status {
+    Status::failed_precondition(if stop == "turns_reached" {
+        TURNS_REACHED
+    } else {
+        BUDGET_REACHED
+    })
+}
+
+/// Whether a settled turn counts toward `max_turns`. Every turn that started a run counts, however
+/// it ended, so a run that keeps failing still exhausts the cap; a turn cancelled before any run
+/// existed (a refused or abandoned start) spent nothing and does not.
+fn turn_counts(run_bound: bool, outcome: &str) -> bool {
+    run_bound || outcome != "cancelled"
+}
+
+/// What a goal has left of a budget, never below zero.
+fn remaining(budget: Option<i64>, used: i64) -> u64 {
+    budget.map_or(0, |budget| {
+        u64::try_from(budget.saturating_sub(used)).unwrap_or(0)
+    })
+}
+
+fn check_outcome(raw: &str) -> Result<&'static str, Status> {
+    let outcome = raw.trim();
+    SETTLE_OUTCOMES
+        .iter()
+        .copied()
+        .find(|known| *known == outcome)
+        .ok_or_else(|| invalid("outcome is not a known run outcome"))
+}
+
+fn check_usage_source(raw: &str) -> Result<&'static str, Status> {
+    let source = raw.trim();
+    if source.is_empty() {
+        return Ok("run_response");
+    }
+    USAGE_SOURCES
+        .iter()
+        .copied()
+        .find(|known| *known == source)
+        .ok_or_else(|| invalid("usage_source is not a known source"))
+}
+
+/// The cost basis as the table holds it: a closed lower-case token, or empty.
+fn check_cost_basis(raw: &str) -> Result<String, Status> {
+    let basis = raw.trim();
+    if basis.len() > 32 || !basis.chars().all(|c| c.is_ascii_lowercase() || c == '_') {
+        return Err(invalid("cost_basis is not a closed token"));
+    }
+    Ok(basis.to_owned())
+}
+
+/// A token count bounded by [`MAX_TURN_TOKENS`], as the counters' signed type.
+fn bounded_tokens(raw: u64) -> i64 {
+    i64::try_from(raw.min(MAX_TURN_TOKENS)).unwrap_or(i64::MAX)
+}
+
+/// The goal, locked, for one of its own turn writes: the caller must own its thread. A bind or a
+/// settle does not repeat the claim's Space and waiver checks, so the accounting of a turn the
+/// claim admitted is never refused afterwards.
+async fn lock_owned_goal(
+    tx: &mut Transaction<'_, Postgres>,
+    caller: &VerifiedIdentity,
+    org_id: &str,
+    goal_id: &str,
+) -> Result<GoalRow, Status> {
+    let goal: GoalRow = sqlx::query_as(&format!(
+        "SELECT {GOAL_COLUMNS} FROM thread_goals WHERE id = $1 AND org_id = $2 FOR UPDATE"
+    ))
+    .bind(goal_id)
+    .bind(org_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(internal)?
+    .ok_or_else(|| Status::not_found("thread goal not found"))?;
+    let thread = read_thread(&mut **tx, &goal.thread_id).await?;
+    if thread.org_id != org_id {
+        return Err(Status::not_found("thread goal not found"));
+    }
+    authorize_thread_owner_row(
+        caller,
+        &thread.org_id,
+        &thread.user_id,
+        thread.space(),
+        OwnerIntent::Mutate,
+    )?;
+    Ok(goal)
+}
+
+/// Move an open goal to a stop state; a goal already closed is left as it is.
+async fn close_goal(
+    tx: &mut Transaction<'_, Postgres>,
+    goal_id: &str,
+    status: &str,
+    reason: &str,
+) -> Result<Option<GoalRow>, Status> {
+    sqlx::query_as(&format!(
+        "UPDATE thread_goals
+         SET status = $2, status_reason = $3, revision = revision + 1,
+             updated_at = now(), closed_at = now()
+         WHERE id = $1 AND status IN ('active', 'paused')
+         RETURNING {GOAL_COLUMNS}"
+    ))
+    .bind(goal_id)
+    .bind(status)
+    .bind(reason)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(internal)
+}
+
+/// Admit one continuation turn toward an active goal (EP-7 S2). Refused while another turn of the
+/// goal is in flight and once a cap is reached; reaching a cap here (a budget lowered below what was
+/// spent, or a lease that expired into the cap) also closes the goal, so the bar shows why.
+pub(crate) async fn claim_goal_turn(
+    pool: &PgPool,
+    caller: &VerifiedIdentity,
+    req: pb::ClaimGoalTurnRequest,
+) -> Result<pb::ClaimGoalTurnResponse, Status> {
+    refuse_service_writer(caller)?;
+    let org_id = req.org_id.trim();
+    let goal_id = req.goal_id.trim();
+    if org_id.is_empty() || goal_id.is_empty() {
+        return Err(Status::invalid_argument("org_id and goal_id are required"));
+    }
+    caller.authorize_org(org_id)?;
+
+    let mut tx = pool.begin().await.map_err(internal)?;
+    let mut goal: GoalRow = sqlx::query_as(&format!(
+        "SELECT {GOAL_COLUMNS} FROM thread_goals WHERE id = $1 AND org_id = $2 FOR UPDATE"
+    ))
+    .bind(goal_id)
+    .bind(org_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(internal)?
+    .ok_or_else(|| Status::not_found("thread goal not found"))?;
+    // The full write checks of a set: a claim starts new spending on the thread.
+    authorize_thread_write(&mut tx, caller, org_id, &goal.thread_id).await?;
+    if req.expected_revision != 0 {
+        check_revision(goal.revision, req.expected_revision)?;
+    }
+    if goal.status != "active" {
+        return Err(Status::failed_precondition(NOT_ACTIVE));
+    }
+    // EP-7 S4: no goal turn starts while a decision waits on the owner, nor past the hourly rate.
+    claim_guard::refuse_unsettled_claim(&mut tx, &goal.thread_id, &goal.id).await?;
+
+    // A claim whose lease ran out belongs to a turn nobody will settle (a crashed replica). It is
+    // settled here, with no usage, and counts as a turn.
+    let expired = sqlx::query(
+        "UPDATE thread_goal_turns
+         SET settled_at = now(), outcome = 'lease_expired', usage_source = 'none', counted = true
+         WHERE goal_id = $1 AND settled_at IS NULL AND claim_expires_at <= now()",
+    )
+    .bind(&goal.id)
+    .execute(&mut *tx)
+    .await
+    .map_err(internal)?
+    .rows_affected();
+    if expired > 0 {
+        let expired = i32::try_from(expired).unwrap_or(i32::MAX);
+        sqlx::query(
+            "UPDATE thread_goals SET turns_used = turns_used + $2, updated_at = now() WHERE id = $1",
+        )
+        .bind(&goal.id)
+        .bind(expired)
+        .execute(&mut *tx)
+        .await
+        .map_err(internal)?;
+        goal.turns_used = goal.turns_used.saturating_add(expired);
+    }
+
+    let in_flight: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM thread_goal_turns WHERE goal_id = $1 AND settled_at IS NULL)",
+    )
+    .bind(&goal.id)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(internal)?;
+    if in_flight {
+        // The expiry above is kept: it is true whatever this claim answers.
+        tx.commit().await.map_err(internal)?;
+        return Err(Status::failed_precondition(TURN_IN_FLIGHT));
+    }
+    if let Some((stop, reason)) = stop_state(&goal) {
+        close_goal(&mut tx, &goal.id, stop, reason).await?;
+        tx.commit().await.map_err(internal)?;
+        return Err(stop_refusal(stop));
+    }
+
+    let turn_no: i32 = sqlx::query_scalar(
+        "INSERT INTO thread_goal_turns (goal_id, turn_no, org_id, claim_expires_at)
+         SELECT $1, COALESCE(MAX(turn_no), 0) + 1, $2, now() + make_interval(mins => $3)
+         FROM thread_goal_turns WHERE goal_id = $1
+         RETURNING turn_no",
+    )
+    .bind(&goal.id)
+    .bind(&goal.org_id)
+    .bind(CLAIM_LEASE_MINUTES)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(internal)?;
+    tx.commit().await.map_err(internal)?;
+    Ok(pb::ClaimGoalTurnResponse {
+        turn_no: u32::try_from(turn_no).unwrap_or_default(),
+        tokens_remaining: remaining(goal.token_budget, goal.tokens_used),
+        cost_remaining_usd_micros: remaining(
+            goal.cost_budget_usd_micros,
+            goal.cost_used_usd_micros,
+        ),
+        token_budget_set: goal.token_budget.is_some(),
+        cost_budget_set: goal.cost_budget_usd_micros.is_some(),
+    })
+}
+
+/// Name the run a claimed, unsettled turn started. A turn binds one run, and a run one turn. A
+/// pump-sent turn (`goal_auto`, EP-7 S4) also stamps its run for audit.
+pub(crate) async fn bind_goal_turn_run(
+    pool: &PgPool,
+    caller: &VerifiedIdentity,
+    req: pb::BindGoalTurnRunRequest,
+    goal_auto: bool,
+) -> Result<pb::BindGoalTurnRunResponse, Status> {
+    refuse_service_writer(caller)?;
+    let org_id = req.org_id.trim();
+    let goal_id = req.goal_id.trim();
+    let run_id = req.run_id.trim();
+    if org_id.is_empty() || goal_id.is_empty() || run_id.is_empty() || req.turn_no == 0 {
+        return Err(Status::invalid_argument(
+            "org_id, goal_id, turn_no and run_id are required",
+        ));
+    }
+    let turn_no = i32::try_from(req.turn_no).map_err(|_| invalid("turn_no out of range"))?;
+    caller.authorize_org(org_id)?;
+
+    let mut tx = pool.begin().await.map_err(internal)?;
+    let goal = lock_owned_goal(&mut tx, caller, org_id, goal_id).await?;
+    let bound = sqlx::query(
+        "UPDATE thread_goal_turns SET run_id = $3
+         WHERE goal_id = $1 AND turn_no = $2 AND settled_at IS NULL
+           AND (run_id IS NULL OR run_id = $3)",
+    )
+    .bind(&goal.id)
+    .bind(turn_no)
+    .bind(run_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(|error| match &error {
+        // The run already settles another turn of this goal.
+        sqlx::Error::Database(db) if db.code().as_deref() == Some("23505") => {
+            Status::failed_precondition(TURN_MISMATCH)
+        }
+        _ => internal(error),
+    })?
+    .rows_affected();
+    if bound == 0 {
+        return Err(Status::failed_precondition(TURN_MISMATCH));
+    }
+    if goal_auto {
+        claim_guard::stamp_goal_auto(&mut tx, run_id, org_id).await?;
+    }
+    tx.commit().await.map_err(internal)?;
+    Ok(pb::BindGoalTurnRunResponse {})
+}
+
+/// The turn row a settle reads.
+#[derive(Debug, sqlx::FromRow)]
+struct TurnRow {
+    run_id: Option<String>,
+    outcome: Option<String>,
+    usage_source: String,
+}
+
+/// Settle a claimed turn from its run's usage, then apply the stop rules. Idempotent: a settled
+/// turn is answered as it stands, except a turn the next claim settled `lease_expired` with no
+/// usage, whose late settle adds the run's usage once (the turn was already counted).
+pub(crate) async fn settle_goal_turn(
+    pool: &PgPool,
+    caller: &VerifiedIdentity,
+    req: pb::SettleGoalTurnRequest,
+) -> Result<pb::ThreadGoalResponse, Status> {
+    refuse_service_writer(caller)?;
+    let org_id = req.org_id.trim();
+    let goal_id = req.goal_id.trim();
+    if org_id.is_empty() || goal_id.is_empty() || req.turn_no == 0 {
+        return Err(Status::invalid_argument(
+            "org_id, goal_id and turn_no are required",
+        ));
+    }
+    let turn_no = i32::try_from(req.turn_no).map_err(|_| invalid("turn_no out of range"))?;
+    let outcome = check_outcome(&req.outcome)?;
+    let usage_source = check_usage_source(&req.usage_source)?;
+    let cost_basis = check_cost_basis(&req.cost_basis)?;
+    let input = bounded_tokens(req.metered_input_tokens);
+    let output = bounded_tokens(req.metered_output_tokens);
+    let judge = bounded_tokens(req.judge_tokens);
+    // -1 (any negative) is "could not be priced": stored as NULL and adding nothing.
+    let cost = (req.cost_usd_micros >= 0)
+        .then(|| req.cost_usd_micros.min(bounded_tokens(MAX_TURN_TOKENS)));
+    let run_id = req.run_id.trim();
+    caller.authorize_org(org_id)?;
+
+    let mut tx = pool.begin().await.map_err(internal)?;
+    let goal = lock_owned_goal(&mut tx, caller, org_id, goal_id).await?;
+    let turn: TurnRow = sqlx::query_as(
+        "SELECT run_id, outcome, usage_source FROM thread_goal_turns
+         WHERE goal_id = $1 AND turn_no = $2 FOR UPDATE",
+    )
+    .bind(&goal.id)
+    .bind(turn_no)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(internal)?
+    .ok_or_else(|| Status::not_found("thread goal turn not found"))?;
+    if let Some(bound) = turn.run_id.as_deref() {
+        if !run_id.is_empty() && bound != run_id {
+            return Err(Status::failed_precondition(TURN_MISMATCH));
+        }
+    }
+    let run_bound = turn.run_id.is_some() || !run_id.is_empty();
+    let late = turn.outcome.as_deref() == Some("lease_expired") && turn.usage_source == "none";
+    if turn.outcome.is_some() && !late {
+        // Settled already: a retried settle changes nothing.
+        tx.commit().await.map_err(internal)?;
+        return Ok(found(goal));
+    }
+    // A late settle keeps the turn counted once (the claim counted it); a first settle counts it
+    // by the rule of [`turn_counts`].
+    let counts = !late && turn_counts(run_bound, outcome);
+    sqlx::query(
+        "UPDATE thread_goal_turns
+         SET settled_at = COALESCE(settled_at, now()), outcome = $3,
+             run_id = COALESCE(run_id, NULLIF($4, '')),
+             metered_input_tokens = $5, metered_output_tokens = $6, cost_usd_micros = $7,
+             cost_basis = $8, judge_tokens = $9, usage_source = $10,
+             counted = counted OR $11
+         WHERE goal_id = $1 AND turn_no = $2",
+    )
+    .bind(&goal.id)
+    .bind(turn_no)
+    .bind(outcome)
+    .bind(run_id)
+    .bind(input)
+    .bind(output)
+    .bind(cost)
+    .bind(&cost_basis)
+    .bind(judge)
+    .bind(usage_source)
+    .bind(counts)
+    .execute(&mut *tx)
+    .await
+    .map_err(|error| match &error {
+        sqlx::Error::Database(db) if db.code().as_deref() == Some("23505") => {
+            Status::failed_precondition(TURN_MISMATCH)
+        }
+        _ => internal(error),
+    })?;
+
+    let tokens = input.saturating_add(output).saturating_add(judge);
+    let mut row: GoalRow = sqlx::query_as(&format!(
+        "UPDATE thread_goals
+         SET tokens_used = tokens_used + $2,
+             cost_used_usd_micros = cost_used_usd_micros + COALESCE($3, 0),
+             turns_used = turns_used + $4, updated_at = now()
+         WHERE id = $1
+         RETURNING {GOAL_COLUMNS}"
+    ))
+    .bind(&goal.id)
+    .bind(tokens)
+    .bind(cost)
+    .bind(i32::from(counts))
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(internal)?;
+    // A goal paused while its turn ran still stops on a spent cap: what was spent is spent.
+    if OPEN_STATUSES.contains(&row.status.as_str()) {
+        if let Some((stop, reason)) = stop_state(&row) {
+            if let Some(closed) = close_goal(&mut tx, &row.id, stop, reason).await? {
+                row = closed;
+            }
+        }
+    }
+    tx.commit().await.map_err(internal)?;
+    Ok(found(row))
+}
+
 fn found(row: GoalRow) -> pb::ThreadGoalResponse {
     pb::ThreadGoalResponse {
         goal: Some(row.into_proto()),
@@ -575,7 +1090,7 @@ fn found(row: GoalRow) -> pb::ThreadGoalResponse {
 /// The columns a goal is read with, in [`GoalRow`]'s order.
 const GOAL_COLUMNS: &str = "id, thread_id, org_id, user_id, objective, success_criteria, \
      token_budget, cost_budget_usd_micros, max_turns, status, status_reason, revision, \
-     created_at, updated_at";
+     created_at, updated_at, tokens_used, cost_used_usd_micros, turns_used";
 
 #[derive(Debug, sqlx::FromRow)]
 struct GoalRow {
@@ -593,6 +1108,10 @@ struct GoalRow {
     revision: i64,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
+    // The budget ledger's cached counters (EP-7 S2, migration 0092).
+    tokens_used: i64,
+    cost_used_usd_micros: i64,
+    turns_used: i32,
 }
 
 impl GoalRow {
@@ -613,10 +1132,10 @@ impl GoalRow {
             revision: u64::try_from(self.revision).unwrap_or_default(),
             created_at: Some(to_proto_timestamp(self.created_at)),
             updated_at: Some(to_proto_timestamp(self.updated_at)),
-            // The budget ledger (EP-7 S2) and the judge (EP-7 S3) fill these; zero until then.
-            tokens_used: 0,
-            cost_used_usd_micros: 0,
-            turns_used: 0,
+            tokens_used: u64::try_from(self.tokens_used).unwrap_or_default(),
+            cost_used_usd_micros: u64::try_from(self.cost_used_usd_micros).unwrap_or_default(),
+            turns_used: u32::try_from(self.turns_used).unwrap_or_default(),
+            // The judge (EP-7 S3) fills this; empty until it exists.
             last_verdict: String::new(),
         }
     }
@@ -722,6 +1241,89 @@ mod tests {
         assert!(!mp_contracts::loop_fold::switch_from(Some("1")));
         assert!(!mp_contracts::loop_fold::switch_from(Some("TRUE")));
         assert!(mp_contracts::loop_fold::switch_from(Some("true")));
+    }
+
+    fn counters(
+        token_budget: Option<i64>,
+        cost_budget: Option<i64>,
+        max_turns: i32,
+        used: (i64, i64, i32),
+    ) -> GoalRow {
+        GoalRow {
+            id: "goal_test".to_owned(),
+            thread_id: "thread".to_owned(),
+            org_id: ORG.to_owned(),
+            user_id: OWNER.to_owned(),
+            objective: "aim".to_owned(),
+            success_criteria: sqlx::types::Json(Vec::new()),
+            token_budget,
+            cost_budget_usd_micros: cost_budget,
+            max_turns,
+            status: "active".to_owned(),
+            status_reason: String::new(),
+            revision: 1,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            tokens_used: used.0,
+            cost_used_usd_micros: used.1,
+            turns_used: used.2,
+        }
+    }
+
+    #[test]
+    fn thread_goal_stop_state_names_budget_before_turns() {
+        assert_eq!(stop_state(&counters(Some(100), None, 10, (99, 0, 9))), None);
+        assert_eq!(
+            stop_state(&counters(Some(100), None, 10, (100, 0, 1))),
+            Some(("budget_reached", "token_budget"))
+        );
+        assert_eq!(
+            stop_state(&counters(None, Some(5_000), 10, (0, 5_001, 1))),
+            Some(("budget_reached", "cost_budget"))
+        );
+        assert_eq!(
+            stop_state(&counters(None, None, 3, (10_000_000, 0, 3))),
+            Some(("turns_reached", "max_turns")),
+            "no budget set: only the turn cap applies (the subscription route)"
+        );
+        assert_eq!(
+            stop_state(&counters(Some(10), None, 3, (10, 0, 3))),
+            Some(("budget_reached", "token_budget")),
+            "a goal that hit both caps reads as out of budget"
+        );
+        assert_eq!(stop_refusal("turns_reached").message(), TURNS_REACHED);
+        assert_eq!(stop_refusal("budget_reached").message(), BUDGET_REACHED);
+    }
+
+    #[test]
+    fn thread_goal_turn_counts_every_started_run() {
+        for outcome in SETTLE_OUTCOMES {
+            assert!(turn_counts(true, outcome), "{outcome} with a run counts");
+        }
+        assert!(!turn_counts(false, "cancelled"), "a start that never ran is free");
+        assert!(turn_counts(false, "failed"));
+        assert!(turn_counts(false, "unknown"));
+    }
+
+    #[test]
+    fn thread_goal_remaining_never_negative() {
+        assert_eq!(remaining(None, 10), 0);
+        assert_eq!(remaining(Some(100), 40), 60);
+        assert_eq!(remaining(Some(100), 140), 0);
+    }
+
+    #[test]
+    fn thread_goal_settle_inputs_are_closed() {
+        assert_eq!(check_outcome(" completed ").unwrap(), "completed");
+        assert!(check_outcome("lease_expired").is_err(), "only a claim writes it");
+        assert!(check_outcome("done").is_err());
+        assert_eq!(check_usage_source("").unwrap(), "run_response");
+        assert_eq!(check_usage_source("progress").unwrap(), "progress");
+        assert!(check_usage_source("guess").is_err());
+        assert_eq!(check_cost_basis("metered").unwrap(), "metered");
+        assert_eq!(check_cost_basis("").unwrap(), "");
+        assert!(check_cost_basis("Metered; drop").is_err());
+        assert_eq!(bounded_tokens(u64::MAX), bounded_tokens(MAX_TURN_TOKENS));
     }
 
     // The database tests below run with `--ignored` against a disposable Postgres, as the other
@@ -1000,5 +1602,232 @@ mod tests {
             .unwrap_err();
         assert_eq!(refused.code(), tonic::Code::Unavailable);
         assert_eq!(refused.message(), DISABLED);
+    }
+
+    async fn goal_with(pool: &PgPool, token_budget: u64, max_turns: u32) -> pb::ThreadGoal {
+        let thread = seed_thread(pool).await;
+        let mut request = set_request(&thread);
+        request.token_budget = token_budget;
+        request.max_turns = max_turns;
+        set_thread_goal(pool, &owner(), request)
+            .await
+            .unwrap()
+            .goal
+            .unwrap()
+    }
+
+    fn claim(goal: &pb::ThreadGoal) -> pb::ClaimGoalTurnRequest {
+        pb::ClaimGoalTurnRequest {
+            goal_id: goal.id.clone(),
+            org_id: ORG.to_owned(),
+            expected_revision: 0,
+        }
+    }
+
+    fn settle(
+        goal: &pb::ThreadGoal,
+        turn_no: u32,
+        run_id: &str,
+        tokens: u64,
+    ) -> pb::SettleGoalTurnRequest {
+        pb::SettleGoalTurnRequest {
+            goal_id: goal.id.clone(),
+            org_id: ORG.to_owned(),
+            turn_no,
+            run_id: run_id.to_owned(),
+            outcome: "completed".to_owned(),
+            metered_input_tokens: tokens,
+            metered_output_tokens: 0,
+            cost_usd_micros: -1,
+            cost_basis: "metered".to_owned(),
+            judge_tokens: 0,
+            usage_source: "run_response".to_owned(),
+        }
+    }
+
+    async fn bind(pool: &PgPool, goal: &pb::ThreadGoal, turn_no: u32, run_id: &str) {
+        bind_goal_turn_run(
+            pool,
+            &owner(),
+            pb::BindGoalTurnRunRequest {
+                goal_id: goal.id.clone(),
+                org_id: ORG.to_owned(),
+                turn_no,
+                run_id: run_id.to_owned(),
+            },
+            false,
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres with session-core migrations"]
+    async fn claim_is_single_in_flight() {
+        let pool = connect().await;
+        let goal = goal_with(&pool, 0, 10).await;
+        let first = claim_goal_turn(&pool, &owner(), claim(&goal)).await.unwrap();
+        assert_eq!(first.turn_no, 1);
+        assert!(!first.token_budget_set);
+        let second = claim_goal_turn(&pool, &owner(), claim(&goal))
+            .await
+            .unwrap_err();
+        assert_eq!(second.code(), tonic::Code::FailedPrecondition);
+        assert_eq!(second.message(), TURN_IN_FLIGHT);
+        bind(&pool, &goal, 1, "run-a").await;
+        settle_goal_turn(&pool, &owner(), settle(&goal, 1, "run-a", 10))
+            .await
+            .unwrap();
+        let next = claim_goal_turn(&pool, &owner(), claim(&goal)).await.unwrap();
+        assert_eq!(next.turn_no, 2);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres with session-core migrations"]
+    async fn expired_claim_settles_lease_expired_then_reclaims() {
+        let pool = connect().await;
+        let goal = goal_with(&pool, 0, 10).await;
+        claim_goal_turn(&pool, &owner(), claim(&goal)).await.unwrap();
+        sqlx::query(
+            "UPDATE thread_goal_turns SET claim_expires_at = now() - interval '1 minute'
+             WHERE goal_id = $1",
+        )
+        .bind(&goal.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let again = claim_goal_turn(&pool, &owner(), claim(&goal)).await.unwrap();
+        assert_eq!(again.turn_no, 2);
+        let (outcome, counted): (String, bool) = sqlx::query_as(
+            "SELECT outcome, counted FROM thread_goal_turns WHERE goal_id = $1 AND turn_no = 1",
+        )
+        .bind(&goal.id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(outcome, "lease_expired");
+        assert!(counted, "an expired turn still counts toward the cap");
+        // The late settle of the expired turn adds its usage once, and no second turn.
+        let late = settle_goal_turn(&pool, &owner(), settle(&goal, 1, "run-late", 500))
+            .await
+            .unwrap()
+            .goal
+            .unwrap();
+        assert_eq!(late.tokens_used, 500);
+        assert_eq!(late.turns_used, 1);
+        let replay = settle_goal_turn(&pool, &owner(), settle(&goal, 1, "run-late", 500))
+            .await
+            .unwrap()
+            .goal
+            .unwrap();
+        assert_eq!(replay.tokens_used, 500);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres with session-core migrations"]
+    async fn settle_idempotent_on_run_id() {
+        let pool = connect().await;
+        let goal = goal_with(&pool, 0, 10).await;
+        claim_goal_turn(&pool, &owner(), claim(&goal)).await.unwrap();
+        bind(&pool, &goal, 1, "run-x").await;
+        let once = settle_goal_turn(&pool, &owner(), settle(&goal, 1, "run-x", 1_000))
+            .await
+            .unwrap()
+            .goal
+            .unwrap();
+        let twice = settle_goal_turn(&pool, &owner(), settle(&goal, 1, "run-x", 1_000))
+            .await
+            .unwrap()
+            .goal
+            .unwrap();
+        assert_eq!(once.tokens_used, 1_000);
+        assert_eq!(twice.tokens_used, 1_000);
+        assert_eq!(twice.turns_used, 1);
+        let other_run = settle_goal_turn(&pool, &owner(), settle(&goal, 1, "run-y", 1))
+            .await
+            .unwrap_err();
+        assert_eq!(other_run.message(), TURN_MISMATCH);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres with session-core migrations"]
+    async fn budget_reached_moves_status() {
+        let pool = connect().await;
+        let goal = goal_with(&pool, 30_000, 10).await;
+        let admitted = claim_goal_turn(&pool, &owner(), claim(&goal)).await.unwrap();
+        assert!(admitted.token_budget_set);
+        assert_eq!(admitted.tokens_remaining, 30_000);
+        bind(&pool, &goal, 1, "run-big").await;
+        let settled = settle_goal_turn(&pool, &owner(), settle(&goal, 1, "run-big", 31_000))
+            .await
+            .unwrap()
+            .goal
+            .unwrap();
+        assert_eq!(settled.status, "budget_reached");
+        assert_eq!(settled.status_reason, "token_budget");
+        assert_eq!(settled.revision, goal.revision + 1);
+        let refused = claim_goal_turn(&pool, &owner(), claim(&goal))
+            .await
+            .unwrap_err();
+        assert_eq!(refused.message(), NOT_ACTIVE);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres with session-core migrations"]
+    async fn turns_reached_moves_status() {
+        let pool = connect().await;
+        let goal = goal_with(&pool, 0, 1).await;
+        claim_goal_turn(&pool, &owner(), claim(&goal)).await.unwrap();
+        bind(&pool, &goal, 1, "run-one").await;
+        let mut failed = settle(&goal, 1, "run-one", 0);
+        // A failed run without usage still counts (register D2-005).
+        failed.outcome = "failed".to_owned();
+        failed.usage_source = "none".to_owned();
+        let settled = settle_goal_turn(&pool, &owner(), failed)
+            .await
+            .unwrap()
+            .goal
+            .unwrap();
+        assert_eq!(settled.status, "turns_reached");
+        assert_eq!(settled.turns_used, 1);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres with session-core migrations"]
+    async fn cancelled_start_without_run_is_not_a_turn() {
+        let pool = connect().await;
+        let goal = goal_with(&pool, 0, 1).await;
+        claim_goal_turn(&pool, &owner(), claim(&goal)).await.unwrap();
+        let mut cancelled = settle(&goal, 1, "", 0);
+        cancelled.outcome = "cancelled".to_owned();
+        cancelled.usage_source = "none".to_owned();
+        let settled = settle_goal_turn(&pool, &owner(), cancelled)
+            .await
+            .unwrap()
+            .goal
+            .unwrap();
+        assert_eq!(settled.status, "active");
+        assert_eq!(settled.turns_used, 0);
+        assert_eq!(
+            claim_goal_turn(&pool, &owner(), claim(&goal)).await.unwrap().turn_no,
+            2
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres with session-core migrations"]
+    async fn paused_goal_refuses_claim() {
+        let pool = connect().await;
+        let goal = goal_with(&pool, 0, 10).await;
+        let mut pause = update(&goal, &["status"]);
+        pause.status = "paused".to_owned();
+        update_thread_goal(&pool, &owner(), pause).await.unwrap();
+        let refused = claim_goal_turn(&pool, &owner(), claim(&goal))
+            .await
+            .unwrap_err();
+        assert_eq!(refused.code(), tonic::Code::FailedPrecondition);
+        assert_eq!(refused.message(), NOT_ACTIVE);
+        let other = VerifiedIdentity::user_for_test(ORG, "user-goal-other");
+        assert!(claim_goal_turn(&pool, &other, claim(&goal)).await.is_err());
     }
 }

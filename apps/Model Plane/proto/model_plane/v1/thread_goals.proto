@@ -51,11 +51,11 @@ message ThreadGoal {
   google.protobuf.Timestamp created_at = 13;
   // When the goal was last changed.
   google.protobuf.Timestamp updated_at = 14;
-  // Metered tokens spent toward the goal (EP-7 S2); 0 until the budget ledger exists.
+  // Metered tokens spent toward the goal, the judge's included (EP-7 S2).
   uint64 tokens_used = 15;
-  // Cost spent toward the goal in micro-USD (EP-7 S2); 0 until the budget ledger exists.
+  // Cost spent toward the goal in micro-USD, priced turns only (EP-7 S2).
   uint64 cost_used_usd_micros = 16;
-  // Continuation turns taken (EP-7 S2); 0 until the budget ledger exists.
+  // Continuation turns settled against `max_turns` (EP-7 S2).
   uint32 turns_used = 17;
   // The completion judge's last verdict token (EP-7 S3); empty until the judge exists.
   string last_verdict = 18;
@@ -127,6 +127,84 @@ message ThreadGoalResponse {
   bool found = 2;
 }
 
+// EP-7 S2. Admit one continuation turn toward a goal, before its run is
+// prepared. Refused (`failed_precondition`, the message a closed code) when the
+// goal is not active (`thread_goal_not_active`), a turn is already in flight
+// (`thread_goal_turn_in_flight`), the metered-token or cost budget is spent
+// (`thread_goal_budget_reached`) or the turn cap is reached
+// (`thread_goal_turns_reached`); the last two also move the goal to its stop state.
+message ClaimGoalTurnRequest {
+  // The goal to take a turn toward.
+  string goal_id = 1;
+  // The org the goal belongs to; must match the caller's org.
+  string org_id = 2;
+  // The revision the caller last saw; a different revision is refused as
+  // `aborted` `thread_goal_revision_conflict`. 0 claims at any revision (a
+  // Continue click names the goal, not the revision it was read at).
+  uint64 expected_revision = 3;
+}
+
+// EP-7 S2. The admitted turn and what the goal still allows it.
+message ClaimGoalTurnResponse {
+  // The turn's number within the goal, 1 for the first.
+  uint32 turn_no = 1;
+  // Metered tokens the goal has left; meaningful only when `token_budget_set`.
+  uint64 tokens_remaining = 2;
+  // Micro-USD the goal has left; meaningful only when `cost_budget_set`.
+  uint64 cost_remaining_usd_micros = 3;
+  // Whether the goal has a metered-token budget.
+  bool token_budget_set = 4;
+  // Whether the goal has a cost budget.
+  bool cost_budget_set = 5;
+}
+
+// EP-7 S2. Name the run a claimed turn started, once the run exists.
+message BindGoalTurnRunRequest {
+  // The goal the turn belongs to.
+  string goal_id = 1;
+  // The org the goal belongs to; must match the caller's org.
+  string org_id = 2;
+  // The claimed turn.
+  uint32 turn_no = 3;
+  // The run the turn started. A turn binds one run; another is refused as
+  // `failed_precondition` `thread_goal_turn_mismatch`.
+  string run_id = 4;
+}
+
+// EP-7 S2. Nothing: the bind either held or was refused.
+message BindGoalTurnRunResponse {}
+
+// EP-7 S2. Settle a claimed turn from its run's usage. Idempotent on the run: a
+// second settle of a settled turn changes nothing (a late settle of a turn whose
+// lease expired adds its usage once). Counts and closed tokens only, no content.
+message SettleGoalTurnRequest {
+  // The goal the turn belongs to.
+  string goal_id = 1;
+  // The org the goal belongs to; must match the caller's org.
+  string org_id = 2;
+  // The claimed turn.
+  uint32 turn_no = 3;
+  // The run the turn started; empty for a turn that never started one.
+  string run_id = 4;
+  // One closed token: "completed", "failed", "awaiting_approval", "parked",
+  // "awaiting_input", "cancelled" or "unknown".
+  string outcome = 5;
+  // Input tokens of the run's metered calls (a subscription call counts none).
+  uint64 metered_input_tokens = 6;
+  // Output tokens of the run's metered calls.
+  uint64 metered_output_tokens = 7;
+  // The run's spend in micro-USD, or -1 when it could not be priced.
+  int64 cost_usd_micros = 8;
+  // A closed token naming how the spend was priced ("metered", "subscription");
+  // empty when unknown.
+  string cost_basis = 9;
+  // Metered tokens the completion judge spent on this turn (EP-7 S3).
+  uint64 judge_tokens = 10;
+  // Where the usage came from: "run_response", "progress" (the round tally of
+  // a run that ended without its usage), "ledger" or "none".
+  string usage_source = 11;
+}
+
 // EP-7 S1. The thread goal store, hosted by session-core. Off unless
 // SESSION_CORE_THREAD_GOALS_ENABLED is the literal `true`; while off every RPC
 // answers `unavailable` `thread_goals_disabled`. Every RPC refuses a
@@ -140,4 +218,10 @@ service ThreadGoalService {
   rpc GetThreadGoal(GetThreadGoalRequest) returns (ThreadGoalResponse);
   // Change an open goal under a compare-and-set on its revision.
   rpc UpdateThreadGoal(UpdateThreadGoalRequest) returns (ThreadGoalResponse);
+  // EP-7 S2. Admit one continuation turn (one in flight per goal).
+  rpc ClaimGoalTurn(ClaimGoalTurnRequest) returns (ClaimGoalTurnResponse);
+  // EP-7 S2. Name the run a claimed turn started.
+  rpc BindGoalTurnRun(BindGoalTurnRunRequest) returns (BindGoalTurnRunResponse);
+  // EP-7 S2. Settle a turn from its run's usage and apply the stop rules.
+  rpc SettleGoalTurn(SettleGoalTurnRequest) returns (ThreadGoalResponse);
 }
