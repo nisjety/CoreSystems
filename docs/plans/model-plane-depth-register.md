@@ -3192,6 +3192,21 @@ Built so far: WS13-S0, WS13-S1, WS13-S2; WS14-S1, WS14-S2 (partial), WS14-S3; WS
 | D3-539 | W3-11 guard | follow-up | P2 | guard skipped: verevonv3 src/shared/api/chat-client.ts agentPreview field (EP-6-S8 needs_other_files, 'not built'): design work, not a mechanical edit | open |
 | D3-540 | W3-11 guard | follow-up | P2 | guard skipped: Agent API spec x-agent-org-id header in agent-api.v1.yaml / agent-api-v1.json (EP-12-S8 needs_other_files): S3 owner decision | open |
 
+
+### Wave-mode batch W3-12 (2026-11-04)
+
+| ID | Slice | Kind | P | Finding | Status |
+|---|---|---|---|---|---|
+| D3-541 | EP-14-S7 | decision | P1 | Assumed D3 = (b) (platform sections label + digest + length, org/user/memory text, owner only, server-side filter); PROD + OWN must ratify before SESSION_CORE_REQUEST_INSPECTOR_READ or MODEL_GATEWAY_REQUEST_INSPECTOR is switched on. | open |
+| D3-542 | EP-14-S7 | follow-up | P1 | Gateway and execution-core system messages carry no `name`, so the snapshot manifest's source_tag is empty and every section is classified platform (no text shown). Org, user and memory text appear only after the prompt builders name their slots with the SECTION_LABELS tags. authored_instructions mixes platform and org text and must be split before any part is tagged org. | open |
+| D3-543 | EP-14-S7 | risk | P1 | Section classification trusts the system message `name` from the snapshot manifest. Before switch-on, verify that no user-controlled input (hoisted pins, imported history, client-sent messages) can produce a system message whose name is a label-table tag, or platform text could be shown as user text. | open |
+| D3-544 | EP-14-S7 | live-proof | P1 | DoD not run: inspect an S6-captured Do run through :8080 with both inspector switches on. Platform sections must show digest only and memory text must show; a second user, an org admin and a service token must get 404; a ZDR-TEST org bearer must get 403 run_inspection. | open |
+| D3-545 | EP-14-S7 | live-proof | P1 | regenerate proto bindings for run_ledger.proto (Go/Python generated code), then run buf lint, buf breaking --against proto/baseline.binpb and the buf-lint ratchet | open |
+| D3-546 | EP-14-S7 | live-proof | P1 | regenerate the agent-action-admission golden, the catalog manifest and the prompt-tool manifest for the new action chat.inspect_run_request | open |
+| D3-547 | EP-14-S7 | live-proof | P1 | owner: add SESSION_CORE_REQUEST_INSPECTOR_READ, MODEL_GATEWAY_REQUEST_INSPECTOR and VITE_CHAT_REQUEST_INSPECTOR (all false) to .env.example | open |
+| D3-548 | EP-14-S7 | live-proof | P1 | reconcile the action-registry count (260) in action-registry.test.ts if other W3-12 slices also added actions | open |
+| D3-549 | EP-14-S7 | follow-up | P3 | 5 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W3-12.json | open |
+
 ## Cross-wave
 
 | ID | Kind | P | Finding | Status |
