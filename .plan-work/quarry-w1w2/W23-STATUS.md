@@ -534,3 +534,31 @@ Open items:
 - E3.7.11: SDKs not regenerated (needs the openapi-generator 7.22.0 Docker image); openapi parse and node parity tests not run; E3.7.3 408 envelope, E3.7.4 /v1/map gzip and E3.7.7b answer reuse documented as not served.
 - 14 depth rows appended to W23-depth.md (lane a 6, lane c 8).
 - The four line-ending-only .sha256 artifacts were not staged.
+
+## W3 finish, lane d, integrated 2026-11-04
+
+Units: W3-E3.2-e2 (339edcf36), W3-E3.1-i (9291e09de), W3-E3.1-j (d2a069911), W3-E3.7.10-CP (f75a24382), plus lane d finish depth rows (a461698ae). Flags (all default off): QUARRY_EDGE__ORIGIN_CONSENT (E3.2-e2), VITE_BROWSER_OTP_APPROVAL_CARD (E3.1-i), VEREVON_GATEWAY_AGENT_WEB_TOOLSET (E3.7.10-CP). E3.1-j has no flag of its own; a real run needs QUARRY_EDGE__FILL_OTP and INTEGRATION_OTP_READ.
+
+Merge commit on w23/integ (base 9bea43473):
+- e762de7c5 merge: w23f/lane-d (W3 finish: W3-E3.2-e2, W3-E3.1-i, W3-E3.1-j, W3-E3.7.10-CP) into w23/integ. No conflicts (the lane had already resolved the MP-ASKS.md append clash against 9bea43473: main's E3.3-g/E3.3-l sections first, then lane d's E3.1-i/E3.7.10-CP sections).
+
+Follow-up commits: none for code (the guard was green on the first run).
+
+Compile guard (no test runs):
+- Quarry Rust (cargo check --workspace --tests, CARGO_INCREMENTAL=0): exit 0 on the first run; 33 warnings, all pre-existing (the one in tab_ledger.rs, unused import LaneState at line 21, is on the base already).
+- Go: no Go module touched.
+- TS verevonv3 (tsc6 -p tsconfig.app.json --noEmit): 1 error, the pre-existing baseline (src/shared/api/schedule-contract.test.ts TS2352); no new errors from OtpApprovalNotice.tsx or otp-approval.ts.
+- verevonv3 gateway (cargo check --tests): exit 0; 1 warning, pre-existing (unused import ResponseTemplate in src/domains/browser.rs), none in actions/handlers.rs.
+- auth-core TS: not checked (no node_modules in the integ worktree); prettier not run on plane-service-principals-policy.contract.spec.ts.
+- action-registry.ts unchanged: no admission golden regeneration, no new action ids. No ZDR/schema/route-count regeneration needed.
+- otp-login-fixture.sh: only bash -n and node --check in the lane; not run.
+
+Open items:
+- Decision needed: execution-core's quarry token is ZDR and quarry-edge refuses durable jobs under ZDR, so crawl:write can never start a job on that token even once the edge routes service principals.
+- quarry-edge still refuses service principals on the job routes and on /v1/crawl and /v1/batch; the Control rows (jobs:read/jobs:control, crawl:write, map:read) are inert there except map:read.
+- The four web.* ids have no action-registry entries (owned by W3-E3.7.9a); web.crawl_site fails closed with 403 crawl_approval_required until E3.7.9a lands.
+- E3.2-e2: no route calls the consent check (Model Plane attach driver missing, ask in MP-ASKS.md); finish_attach would close the person's own tab in attach mode.
+- E3.1-i: nothing mounts the OTP card until the E3.2-b swap. E3.1-j: blockers B1 to B4 keep the OTP chain inert; script written, not run.
+- Gateway toolset flag is read with std::env::var per request (convention is AppState).
+- 38 depth rows appended to W23-depth.md (E3.1-i 10, E3.1-j 14, E3.2-e2 4, E3.7.10-CP 9, lane d finish 1).
+- The four line-ending-only .sha256 artifacts were not staged.
