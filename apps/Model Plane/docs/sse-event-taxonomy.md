@@ -40,6 +40,7 @@ asserted, not just reported.
 | `retry_scheduled` | `steps` | `ChatEvent::RetryScheduled` | ✅ |
 | `run_parked` | — (control) | `ChatEvent::RunParked` | ✅ |
 | `sandbox_state` | `steps` | `ChatEvent::SandboxState` | ✅ |
+| `search_provenance` | `citations` | `ChatEvent::SearchProvenance` | ✅ |
 | `source_scope_applied` | `citations` | `ChatEvent::SourceScopeApplied` | ✅ |
 | `step_update` | `steps` | `ChatEvent::StepUpdate` | ✅ |
 | `stopped` | — (control) | `ChatEvent::Stopped` | ✅ |

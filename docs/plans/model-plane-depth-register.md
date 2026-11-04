@@ -3657,6 +3657,12 @@ Built so far: WS13-S0, WS13-S1, WS13-S2; WS14-S1, WS14-S2 (partial), WS14-S3; WS
 | D3-962 | EP-11-S1 | live-proof | P1 | ChatMessages.save-as-skill.test.tsx is a new test beside ChatMessages.tsx (the design's ChatMessages test); it is not in the batch's new_files list. No live stack, no docker, no deploy: live proofs stay in the depth phase. | open |
 | D3-963 | EP-11-S1 | risk | P2 | ZDR: the server never sees the source thread (threadId is validated, not sent), so the temporary-chat gate is SPA state only. A person can copy the text by hand, so this adds no new capability, but the ZDR clause rests on the UI. | open |
 | D3-964 | EP-11-S1 | follow-up | P3 | 7 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W3-18.json | open |
+| D3-965 | W3-18 guard | follow-up | P2 | guard skipped: C1 FE section mount (settings-sections.ts, CoreSidebarSettingsPanels.tsx, WorkspaceSettingsPage.tsx): not marked shared-edit and needs section/route typing. OrgRetentionSection compiles but is not mounted yet | open |
+| D3-966 | W3-18 guard | follow-up | P2 | guard skipped: W1 optional derive.test.ts case: not added | open |
+| D3-967 | W3-18 guard | follow-up | P2 | guard skipped: W1 flag registration in .plan-work/common/flags-and-config.md and the optional compose passthrough for MODEL_GATEWAY_SEARCH_PROVENANCE: left for the lead | open |
+| D3-968 | W3-18 guard | follow-up | P2 | guard skipped: S6 non-shared follow-ups: JudgeGoalTurnActivity and its registration, the internal judge route, the session-core verdict write, and the SPA wiring for thread-goal-client and ComposerTrays. EP-7-S6 stays partial; ORCHESTRATOR_GOAL_JUDGE_ACTIVITY_ENABLED must stay off | open |
+| D3-969 | W3-18 guard | follow-up | P2 | guard skipped: E4 needs_other_files: approval_cause.rs, http_routes checked_rule_proposal, the session-core rule key migration, and orchestration-client ruleText. EP-9-E4 stays partial | open |
+| D3-970 | W3-18 guard | follow-up | P2 | guard skipped: W2 lead-run proto gates (buf-lint-ratchet.py, buf breaking against baseline.binpb): not run, since they are outside the guard steps | open |
 
 ## Cross-wave
 

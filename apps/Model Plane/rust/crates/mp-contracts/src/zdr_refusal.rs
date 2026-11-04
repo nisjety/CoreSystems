@@ -391,6 +391,12 @@ pub const FEATURES: &[Feature] = &[
         key: "thread_goal",
         label: "persistent goals",
     },
+    // EP-9 C1: org-core refuses a thread legal hold on a ZDR or waived thread with
+    // legal_hold_nothing_retained: nothing is retained, so there is nothing to hold.
+    Feature {
+        key: "legal_hold",
+        label: "a legal hold on a thread",
+    },
 ];
 
 /// The catalogue entry for `code`, if it is a catalogue code.

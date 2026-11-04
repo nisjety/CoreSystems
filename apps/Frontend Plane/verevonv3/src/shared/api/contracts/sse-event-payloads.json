@@ -827,6 +827,32 @@
         }
       }
     },
+    "search_provenance": {
+      "family": "citations",
+      "variants": [
+        "SearchProvenance"
+      ],
+      "keys": {
+        "providers": {
+          "types": [
+            "array"
+          ],
+          "presence": "always"
+        },
+        "request_id": {
+          "types": [
+            "string"
+          ],
+          "presence": "always"
+        },
+        "route": {
+          "types": [
+            "string"
+          ],
+          "presence": "always"
+        }
+      }
+    },
     "source_scope_applied": {
       "family": "citations",
       "variants": [

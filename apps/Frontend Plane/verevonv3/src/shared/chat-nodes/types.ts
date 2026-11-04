@@ -125,6 +125,8 @@ export type ConversationNode =
       excludedTools: string[];
       knowledge?: import('@/shared/api/chat-client').ChatKnowledgeReceipt;
     }
+  /** Which search service answered the turn's web searches (EP-9 W1); absent when the turn searched nothing. */
+  | { kind: 'search-provenance'; provenance: import('@/shared/api/chat-client').ChatSearchProvenanceEvent }
   /**
    * What the gateway did to this turn while it ran (retries, compaction, context changes, a reduced answer).
    * One node per turn, holding every notice in arrival order, so the transcript keys it once.

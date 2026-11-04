@@ -1536,6 +1536,11 @@ services:
       EXECUTION_SANDBOX_MAX_FILE_MB: ${EXECUTION_SANDBOX_MAX_FILE_MB:-64}
       EXECUTION_SANDBOX_MAX_OPEN_FILES: ${EXECUTION_SANDBOX_MAX_OPEN_FILES:-1024}
       CODE_INTERPRETER_ENFORCEMENT_REPORT: ${CODE_INTERPRETER_ENFORCEMENT_REPORT:-false}
+      OFFICE_PREVIEW_PAGES: ${OFFICE_PREVIEW_PAGES:-3}
+      # EP-9 E4: shell-rule proposals narrow WS13-S7's rule proposals, so execution-core reads
+      # both switches and refuses to start with the child on and the parent off.
+      APPROVAL_SHELL_RULE_PROPOSALS_ENABLED: ${APPROVAL_SHELL_RULE_PROPOSALS_ENABLED:-false}
+      APPROVAL_RULE_PROPOSALS_ENABLED: ${APPROVAL_RULE_PROPOSALS_ENABLED:-false}
       # WS06-S9 Space `shell` lease rule: `observe` (default) leases when it can and counts
       # the unleased calls; `enforce` refuses a Space shell call without a sandbox lease.
       EXECUTION_CORE_SPACE_SHELL_LEASE: ${EXECUTION_CORE_SPACE_SHELL_LEASE:-observe}

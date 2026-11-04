@@ -4331,6 +4331,12 @@ export function useChatController() {
           if (turn) turn.scopeApplied = event
         })
       },
+      onSearchProvenance: (event: Parameters<NonNullable<ChatStreamHandlers['onSearchProvenance']>>[0]) => {
+        setState((s) => {
+          const turn = s.turns.find((t) => t.id === assistantId)
+          if (turn) turn.searchProvenance = event
+        })
+      },
       onGrounding: ({ value }: Parameters<NonNullable<ChatStreamHandlers['onGrounding']>>[0]) => {
         const grounding = normalizeGrounding(value)
         if (!grounding) return

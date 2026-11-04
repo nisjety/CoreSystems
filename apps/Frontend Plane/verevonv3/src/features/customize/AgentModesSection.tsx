@@ -235,7 +235,7 @@ function getEffectiveOrgAgentPolicy(): Promise<EffectiveOrgAgentPolicy> {
 }
 
 /** Replaces the whole document at `revision`. The server takes a missing key as its default, so send all of them. */
-function saveOrgAgentPolicy(revision: number, settings: OrgAgentPolicySettings): Promise<OrgAgentPolicyDocument> {
+function saveOrgAgentPolicy(revision: number, settings: Record<string, unknown>): Promise<OrgAgentPolicyDocument> {
   return requestJson<OrgAgentPolicyDocument>(POLICY_PATH, {
     method: 'PUT',
     body: JSON.stringify({ revision, settings }),
@@ -284,6 +284,10 @@ function settingLabel(key: string, i18n: I18nText): string {
       return i18n.tr('MCP-servere agenten kan bruke', 'MCP servers the agent may use')
     case 'mcp_tool_approval':
       return i18n.tr('Godkjenning av MCP-verktøy', 'Approval of MCP tools')
+    case 'web.mode':
+      return i18n.tr('Nettilgang for agentene', 'Web access for agents')
+    case 'web.paid_providers':
+      return i18n.tr('Betalte søketjenester', 'Paid search services')
     default:
       return key
   }
@@ -388,7 +392,8 @@ export function AgentModesSection() {
     setProblem(null)
     setSaved(false)
     try {
-      await saveOrgAgentPolicy(doc.revision, settings)
+      // Keys this section does not edit (the web switches) ride along, so a save here never resets them.
+      await saveOrgAgentPolicy(doc.revision, { ...doc.settings, ...settings })
       setDraft(undefined)
       setSaved(true)
     } catch (error) {

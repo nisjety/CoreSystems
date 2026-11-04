@@ -290,6 +290,8 @@ services:
       SPACE_ENTRY_LINKS_UI: ${SPACE_ENTRY_LINKS_UI:-true}
       SPACE_COMMAND_PALETTE_UI: ${SPACE_COMMAND_PALETTE_UI:-true}
       SPACE_THREAD_FORK_API: ${SPACE_THREAD_FORK_API:-false}
+      # EP-11 S1: members may author private skills (BFF). Only the literal true enables it; off, the admin-only answer stands.
+      SKILL_MEMBER_AUTHORING: ${SKILL_MEMBER_AUTHORING:-false}
       # WS11-S7: the attention inbox (/attention) and the thread follow control. Rollout controls only; the
       # caller's own Application rows, Control's index and its read decisions decide what is shown.
       SPACE_ATTENTION_API: ${SPACE_ATTENTION_API:-true}

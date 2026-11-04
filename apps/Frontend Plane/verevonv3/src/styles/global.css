@@ -28466,6 +28466,22 @@ body.verevon-chat-canvas-resizing * {
   border-color: var(--accent);
 }
 
+/* A card with its slide's picture (EP-5 S9): the picture sets the height and the bullet lines give way to it. */
+.verevon-deck__card--picture {
+  aspect-ratio: auto;
+}
+
+.verevon-deck__card--picture .verevon-deck__line {
+  display: none;
+}
+
+.verevon-deck__thumb {
+  display: block;
+  width: 100%;
+  height: auto;
+  border-radius: 4px;
+}
+
 .verevon-deck__head {
   display: flex;
   align-items: center;

@@ -56,6 +56,7 @@ const FOLDED_KINDS: Record<ConversationNodeKind, boolean> = {
   confidence: false,
   'memory-recall': false,
   'source-scope': false,
+  'search-provenance': false,
   // A lifecycle notice (a retry, a reduced answer) can matter after the turn settles,
   // and the notice type carries no error marker that would tell the two kinds apart.
   'lifecycle-notices': false,

@@ -173,6 +173,12 @@ export type ChatEventPayloads = {
     scope: string
     state: string
   }
+  /** Rust variants: SearchProvenance. */
+  search_provenance: {
+    providers: unknown[]
+    request_id: string
+    route: string
+  }
   /** Rust variants: SourceScopeApplied. */
   source_scope_applied: {
     excluded_tools: unknown[]

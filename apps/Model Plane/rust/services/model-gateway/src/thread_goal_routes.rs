@@ -130,7 +130,7 @@ fn goal_body(response: ThreadGoalResponse) -> Json<Value> {
         .goal
         .filter(|_| response.found)
         .map(GoalJson::from_proto);
-    Json(json!({ "data": { "found": goal.is_some(), "goal": goal, "autoContinueAvailable": crate::goal_auto::available() } }))
+    Json(json!({ "data": { "found": goal.is_some(), "goal": goal, "autoContinueAvailable": crate::goal_auto::available(), "unattendedAvailable": crate::goal_unattended::available() } }))
 }
 
 /// The body of `PUT .../goal`.
