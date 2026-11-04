@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ApiError } from './http'
 import {
   answerQuestion,
+  approvalEditRefusalOf,
   chatRunContinueFrameRefusalOf,
   chatRunContinueHttpRefusalOf,
   chatRunContinueParkFailureOf,
@@ -189,6 +190,89 @@ describe('decideApproval', () => {
     expect(init.method).toBe('POST')
     expect(JSON.parse(init.body as string)).toEqual({ decision: 'approve', reason: '' })
     expect(result?.status).toBe('GRANTED')
+  })
+
+  const edit = { patch: { subject: 'Revised', to: ['a@example.com'] }, baseFingerprint: 'f'.repeat(64) }
+
+  it('sends an edit as {patch, baseFingerprint} with a once approval and nothing else (EP-10-S6)', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      jsonResponse({ approval: { id: 'appr_1', run_id: 'run_1', state: 'APPROVAL_STATE_GRANTED' } }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    await decideApproval('appr_1', 'approve', undefined, undefined, 'once', false, edit)
+
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit]
+    expect(JSON.parse(init.body as string)).toEqual({ decision: 'approve', reason: '', edit })
+  })
+
+  it('refuses an edit with a reject, a standing scope, Always or a broken limit before sending', async () => {
+    const fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+
+    const refusals = [
+      decideApproval('appr_1', 'reject', undefined, undefined, 'once', false, edit),
+      decideApproval('appr_1', 'approve', undefined, undefined, 'thread', false, edit),
+      decideApproval('appr_1', 'approve', undefined, undefined, 'thread', true, edit),
+      decideApproval('appr_1', 'approve', undefined, undefined, 'once', false, {
+        ...edit,
+        patch: { subject: 'a\r\nBcc: x@example.com' },
+      }),
+      decideApproval('appr_1', 'approve', undefined, undefined, 'once', false, { ...edit, baseFingerprint: 'abc' }),
+      decideApproval('appr_1', 'approve', undefined, undefined, 'once', false, { ...edit, patch: {} }),
+    ]
+    for (const refusal of refusals) {
+      await expect(refusal).rejects.toMatchObject({ status: 400, code: 'invalid_approval_decision' })
+    }
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('surfaces a changed draft and a refused patch as typed edit refusals', async () => {
+    for (const [status, code] of [
+      [409, 'approval_changed'],
+      [422, 'invalid_recipient'],
+      [403, 'approval_edit_disabled'],
+    ] as const) {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn().mockResolvedValue(
+          new Response(JSON.stringify({ error: { code, message: code, details: {} } }), {
+            status,
+            headers: { 'Content-Type': 'application/json' },
+          }),
+        ),
+      )
+      const error = await decideApproval('appr_1', 'approve', undefined, undefined, 'once', false, edit).catch(
+        (failure: unknown) => failure,
+      )
+      expect(error).toBeInstanceOf(ApiError)
+      expect(approvalEditRefusalOf(error)).toBe(code)
+    }
+    expect(approvalEditRefusalOf(new ApiError('x', 500, 'internal'))).toBeNull()
+    expect(approvalEditRefusalOf(new Error('x'))).toBeNull()
+  })
+})
+
+describe('getApprovalPreview can_edit (EP-10-S6)', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('reads can_edit only as the literal true', async () => {
+    for (const [value, expected] of [
+      [true, true],
+      [false, false],
+      ['true', false],
+      [undefined, false],
+    ] as const) {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn().mockResolvedValue(
+          jsonResponse({ preview: { kind: 'mail_send', to: ['a@example.com'], can_edit: value } }),
+        ),
+      )
+      expect((await getApprovalPreview('appr_1'))?.canEdit).toBe(expected)
+    }
   })
 })
 
@@ -884,6 +968,7 @@ describe('getApprovalPreview (EP-10-S1)', () => {
       editableFields: ['to', 'subject', 'body_text'],
       actionFingerprint: 'f'.repeat(64),
       revision: 0,
+      canEdit: false,
     })
   })
 

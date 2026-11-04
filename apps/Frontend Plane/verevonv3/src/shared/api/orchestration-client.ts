@@ -5,6 +5,7 @@ import {
   orchestrationDecideApprovalInput,
 } from '@/shared/actions/action-registry'
 import { causeCodeOf, type ApprovalCause } from '../approvals/approval-copy'
+import { APPROVAL_EDIT_CODES, type MailSendPatch } from '../approvals/approval-edit-limits'
 import { ApiError, requestJson } from './http'
 import { readSseStream, type SseEvent } from './sse'
 
@@ -228,13 +229,22 @@ export async function decideApproval(
   signal?: AbortSignal,
   scope: ApprovalScope = 'once',
   promote = false,
+  edit?: ApprovalEdit,
 ): Promise<Approval | null> {
-  const checked = orchestrationDecideApprovalInput.safeParse({ approvalId, decision, reason: reason ?? '' })
-  // "Always" (build plan WS13 S7) is an approval of a thread grant and nothing else.
+  const checked = orchestrationDecideApprovalInput.safeParse({
+    approvalId,
+    decision,
+    reason: reason ?? '',
+    ...(edit ? { edit } : {}),
+  })
+  // "Always" (build plan WS13 S7) is an approval of a thread grant and nothing else. An edit
+  // (EP-10-S6, decision D1) is approved for this one call only: never with a standing scope or
+  // "Always". The server refuses both too; refusing here keeps the person from believing it went.
   if (
     !checked.success ||
     !APPROVAL_SCOPES.includes(scope) ||
-    (promote && (decision !== 'approve' || scope !== 'thread'))
+    (promote && (decision !== 'approve' || scope !== 'thread')) ||
+    (edit !== undefined && (scope !== 'once' || promote))
   ) {
     throw new ApiError('Ugyldig godkjenningsavgjørelse.', 400, 'invalid_approval_decision')
   }
@@ -242,17 +252,57 @@ export async function decideApproval(
     `/api/v1/orchestration/approvals/${encodeURIComponent(approvalId)}/decide`,
     {
       method: 'POST',
-      // The scope and "Always" are sent only when asked for: the one decision carries neither field.
+      // The scope, "Always" and an edit are sent only when asked for: the one plain decision
+      // carries none of them, so an unedited approval is byte-identical to before EP-10-S6.
       body: JSON.stringify({
         decision,
         reason: checked.data.reason ?? '',
         ...(scope === 'once' ? {} : { scope }),
         ...(promote ? { promote: true } : {}),
+        ...(checked.data.edit
+          ? { edit: { patch: checked.data.edit.patch, baseFingerprint: checked.data.edit.baseFingerprint } }
+          : {}),
       }),
       signal,
     },
   )
   return payload.approval ? normalizeApproval(payload.approval) : null
+}
+
+/**
+ * "Send with my edits" (EP-10-S6): the person's changes to a drafted mail send and the fingerprint
+ * of the draft they saw (`ApprovalPreview.actionFingerprint`).
+ */
+export type ApprovalEdit = {
+  patch: MailSendPatch
+  baseFingerprint: string
+}
+
+/**
+ * The typed refusals of an edited approval (EP-10-S4 gateway and BFF): the draft changed since it
+ * was read (409 `approval_changed`), it was edited too often (409 `revision_limit`), edits are
+ * switched off or not the caller's (403), or the patch broke a limit (422, the EP-10-S3 codes).
+ */
+export const APPROVAL_EDIT_REFUSALS = [
+  'approval_changed',
+  'revision_limit',
+  'approval_edit_disabled',
+  'edit_owner_only',
+  'edit_requires_grant',
+  'edit_requires_once',
+  'invalid_patch',
+  'invalid_base_fingerprint',
+  ...APPROVAL_EDIT_CODES,
+] as const
+
+export type ApprovalEditRefusal = (typeof APPROVAL_EDIT_REFUSALS)[number]
+
+/** The edit refusal an error carries, or null when it is some other failure. */
+export function approvalEditRefusalOf(error: unknown): ApprovalEditRefusal | null {
+  if (!(error instanceof ApiError) || error.code === null) return null
+  return (APPROVAL_EDIT_REFUSALS as readonly string[]).includes(error.code)
+    ? (error.code as ApprovalEditRefusal)
+    : null
 }
 
 /**
@@ -447,6 +497,11 @@ export type ApprovalPreview = {
   editableFields: string[]
   actionFingerprint: string
   revision: number
+  /**
+   * The gateway takes "Send with my edits" for this draft (EP-10-S6): its edit switch is on and the
+   * draft has editable fields. Server-stated, never guessed; absent reads as false.
+   */
+  canEdit?: boolean
 }
 
 const APPROVAL_PREVIEW_KINDS: ReadonlySet<string> = new Set(['mail_send', 'other', 'none'])
@@ -491,6 +546,7 @@ export async function getApprovalPreview(
     editableFields: textList(raw.editable_fields),
     actionFingerprint: str(raw.action_fingerprint) ?? '',
     revision: Number.isInteger(raw.revision) && (raw.revision as number) >= 0 ? (raw.revision as number) : 0,
+    canEdit: raw.can_edit === true,
   }
 }
 

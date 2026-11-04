@@ -6,13 +6,23 @@
  */
 
 import { cleanup, fireEvent, render, screen, waitFor } from '@solidjs/testing-library'
-import { flush } from 'solid-js'
+import { createSignal, flush } from 'solid-js'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ApiError } from '@/shared/api/http'
 import type { Approval, ApprovalPreview } from '@/shared/api/orchestration-client'
 import { I18nProvider } from '@/shared/i18n'
 import { localeStorageKey } from '@/shared/i18n/locales'
-import { WritePreview, WritePreviewDisclosure, isMailSendApproval, type WritePreviewState } from './WritePreview'
+import {
+  WritePreview,
+  WritePreviewDisclosure,
+  isMailSendApproval,
+  mailEditDraft,
+  mailEditFieldsOf,
+  previewIsEditable,
+  recipientLooksValid,
+  type MailEditDraft,
+  type WritePreviewState,
+} from './WritePreview'
 
 const MAIL: ApprovalPreview = {
   kind: 'mail_send',
@@ -163,5 +173,185 @@ describe('isMailSendApproval', () => {
     }
     expect(isMailSendApproval(otherTool)).toBe(false)
     expect(isMailSendApproval({ ...base, cause: undefined })).toBe(false)
+  })
+})
+
+describe('the edit contract on the card (EP-10-S6)', () => {
+  const EDITABLE: ApprovalPreview = { ...MAIL, to: ['a@example.com'], canEdit: true }
+
+  it('is editable only when the gateway says so, for a normalised mail send with editable fields', () => {
+    expect(previewIsEditable(EDITABLE)).toBe(true)
+    expect(previewIsEditable({ ...EDITABLE, canEdit: undefined })).toBe(false)
+    expect(previewIsEditable({ ...EDITABLE, canEdit: false })).toBe(false)
+    expect(previewIsEditable({ ...EDITABLE, rawOnly: true })).toBe(false)
+    expect(previewIsEditable({ ...EDITABLE, kind: 'other' })).toBe(false)
+    expect(previewIsEditable({ ...EDITABLE, editableFields: [] })).toBe(false)
+  })
+
+  it('checks a recipient as one mailbox', () => {
+    for (const ok of ['a@example.com', 'Ola Nordmann <ola@example.no>', '  b@example.org ']) {
+      expect(recipientLooksValid(ok)).toBe(true)
+    }
+    for (const bad of ['', 'not-an-address', 'a@b', 'a@example.com, b@example.com', 'x <a@example.com', 'a@exa mple.com']) {
+      expect(recipientLooksValid(bad)).toBe(false)
+    }
+    expect(recipientLooksValid(`${'a'.repeat(320)}@example.com`)).toBe(false)
+  })
+
+  it('patches only the changed, editable fields, and an unchanged form is no edit', () => {
+    const fields = mailEditFieldsOf(EDITABLE)
+    expect(mailEditDraft(EDITABLE, fields)).toBeNull()
+
+    expect(mailEditDraft(EDITABLE, { ...fields, subject: 'New' })).toEqual({
+      edit: { patch: { subject: 'New' }, baseFingerprint: EDITABLE.actionFingerprint },
+      problem: null,
+    })
+    // A field the server does not offer for editing never enters the patch.
+    expect(mailEditDraft({ ...EDITABLE, editableFields: ['to'] }, { ...fields, subject: 'New' })).toBeNull()
+  })
+
+  it('names the first limit an edit breaks, in the server order', () => {
+    const fields = mailEditFieldsOf(EDITABLE)
+    expect(mailEditDraft(EDITABLE, { ...fields, to: ['nope'] })?.problem).toBe('invalid_recipient')
+    expect(mailEditDraft(EDITABLE, { ...fields, to: [] })?.problem).toBe('invalid_recipient')
+    expect(
+      mailEditDraft(EDITABLE, { ...fields, to: Array.from({ length: 51 }, (_, i) => `r${i}@example.com`) })?.problem,
+    ).toBe('too_many_recipients')
+    expect(mailEditDraft(EDITABLE, { ...fields, subject: 'a\nBcc: x@example.com' })?.problem).toBe('invalid_subject')
+    expect(mailEditDraft(EDITABLE, { ...fields, bodyText: 'x'.repeat(48 * 1024 + 1) })?.problem).toBe('edit_too_large')
+    expect(mailEditDraft(EDITABLE, { ...fields, to: ['nope'], subject: 'a\nb' })?.problem).toBe('invalid_recipient')
+  })
+})
+
+describe('WritePreviewDisclosure edit mode (EP-10-S6)', () => {
+  const EDITABLE: ApprovalPreview = { ...MAIL, to: ['a@example.com'], canEdit: true }
+
+  function showEditable(options: {
+    load: (approvalId: string) => Promise<ApprovalPreview | null>
+    editable?: boolean
+    conflict?: () => number
+  }) {
+    const drafts: (MailEditDraft | null)[] = []
+    render(() => (
+      <I18nProvider>
+        <WritePreviewDisclosure
+          approvalId="appr_1"
+          load={options.load}
+          editable={options.editable ?? true}
+          onDraftChange={(draft) => drafts.push(draft)}
+          conflict={options.conflict?.() ?? 0}
+        />
+      </I18nProvider>
+    ))
+    fireEvent.click(screen.getByRole('button', { name: 'Show the full email' }))
+    flush()
+    return drafts
+  }
+
+  const lastDraft = (drafts: (MailEditDraft | null)[]) => drafts[drafts.length - 1] ?? null
+
+  const startEditing = async () => {
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Edit before sending' })).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'Edit before sending' }))
+    flush()
+  }
+
+  it('offers no edit without can_edit or without a card that can send edits', async () => {
+    showEditable({ load: vi.fn().mockResolvedValue(MAIL) })
+    await waitFor(() => expect(screen.getByText('Quarterly status')).toBeTruthy())
+    expect(screen.queryByRole('button', { name: 'Edit before sending' })).toBeNull()
+    cleanup()
+
+    showEditable({ load: vi.fn().mockResolvedValue(EDITABLE), editable: false })
+    await waitFor(() => expect(screen.getByText('Quarterly status')).toBeTruthy())
+    expect(screen.queryByRole('button', { name: 'Edit before sending' })).toBeNull()
+  })
+
+  it('reports the edit as the person types and nothing for an unchanged form', async () => {
+    const drafts = showEditable({ load: vi.fn().mockResolvedValue(EDITABLE) })
+    await startEditing()
+    expect(lastDraft(drafts)).toBeNull()
+
+    fireEvent.input(screen.getByLabelText(/Subject/), { target: { value: 'Revised status' } })
+    flush()
+    expect(lastDraft(drafts)?.edit).toEqual({
+      patch: { subject: 'Revised status' },
+      baseFingerprint: EDITABLE.actionFingerprint,
+    })
+    expect(screen.getByText('14 / 998', { exact: false })).toBeTruthy()
+
+    fireEvent.input(screen.getByLabelText(/Subject/), { target: { value: EDITABLE.subject } })
+    flush()
+    expect(lastDraft(drafts)).toBeNull()
+  })
+
+  it('adds and removes recipient chips from the keyboard and flags an invalid one', async () => {
+    const drafts = showEditable({ load: vi.fn().mockResolvedValue(EDITABLE) })
+    await startEditing()
+
+    const add = screen.getByLabelText('Add a recipient')
+    fireEvent.input(add, { target: { value: 'not-an-address' } })
+    fireEvent.keyDown(add, { key: 'Enter' })
+    flush()
+    expect(lastDraft(drafts)?.problem).toBe('invalid_recipient')
+    expect(screen.getByRole('alert').textContent).toContain('not a valid email address')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Remove not-an-address' }))
+    flush()
+    expect(lastDraft(drafts)).toBeNull()
+
+    fireEvent.input(add, { target: { value: 'b@example.com' } })
+    fireEvent.keyDown(add, { key: 'Enter' })
+    flush()
+    expect(lastDraft(drafts)?.edit.patch).toEqual({ to: ['a@example.com', 'b@example.com'] })
+    expect(lastDraft(drafts)?.problem).toBeNull()
+  })
+
+  it('says the formatting goes only once the body of a formatted mail changes', async () => {
+    showEditable({ load: vi.fn().mockResolvedValue({ ...EDITABLE, hasHtml: true }) })
+    await startEditing()
+    expect(screen.queryByText(/Formatting will be removed/)).toBeNull()
+
+    fireEvent.input(screen.getByLabelText(/Subject/), { target: { value: 'Only the subject' } })
+    flush()
+    expect(screen.queryByText(/Formatting will be removed/)).toBeNull()
+
+    fireEvent.input(screen.getByLabelText(/Message/), { target: { value: 'A new body' } })
+    flush()
+    expect(screen.getByText(/Formatting will be removed/)).toBeTruthy()
+  })
+
+  it('discards the edits back to the draft', async () => {
+    const drafts = showEditable({ load: vi.fn().mockResolvedValue(EDITABLE) })
+    await startEditing()
+    fireEvent.input(screen.getByLabelText(/Subject/), { target: { value: 'Changed' } })
+    flush()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Discard edits' }))
+    flush()
+    expect(lastDraft(drafts)).toBeNull()
+    expect(screen.getByText('Quarterly status')).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Edit before sending' })).toBeTruthy()
+  })
+
+  it("refetches the draft on a conflict and keeps the person's text as their version", async () => {
+    const changed: ApprovalPreview = { ...EDITABLE, subject: 'Server subject', actionFingerprint: 'e'.repeat(64) }
+    const load = vi.fn().mockResolvedValueOnce(EDITABLE).mockResolvedValueOnce(changed)
+    const [conflict, setConflict] = createSignal(0)
+    const drafts = showEditable({ load, conflict })
+    await startEditing()
+    fireEvent.input(screen.getByLabelText(/Subject/), { target: { value: 'My own subject' } })
+    flush()
+
+    setConflict(1)
+    flush()
+    await waitFor(() => expect(load).toHaveBeenCalledTimes(2))
+    await waitFor(() => expect(screen.getByText('Your version')).toBeTruthy())
+    expect(screen.getByText('My own subject')).toBeTruthy()
+    await waitFor(() =>
+      expect((screen.getByLabelText(/Subject/) as HTMLInputElement).value).toBe('Server subject'),
+    )
+    // The form starts again from the new draft, so nothing is pending until the person edits it.
+    expect(lastDraft(drafts)).toBeNull()
   })
 })

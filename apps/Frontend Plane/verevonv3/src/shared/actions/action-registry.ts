@@ -1,6 +1,7 @@
 import { z } from 'zod'
 import type { ActionDescriptor } from '@/shared/actions/types'
 import { spaceActions } from '@/shared/actions/domains/spaces'
+import { checkMailEditLimits } from '@/shared/approvals/approval-edit-limits'
 
 const sourceInput = z.object({
   sourceId: z.string().min(1),
@@ -1207,6 +1208,19 @@ const chatWideResearchRetryItemInput = z
   })
   .strict()
 
+// The template picker's read (EP-5 S7): the org comes from the session, so it takes no input at all.
+const chatListDeckTemplatesInput = z.object({}).strict()
+
+// A template pick (EP-5 S7) names one listed template by its skill id, in the shape model-gateway
+// accepts; the server checks it against the org's templates again, so nothing here can name another
+// org's bundle. `threadId` is the deck's thread, absent before the first turn.
+const chatApplyDeckTemplateInput = z
+  .object({
+    skillId: z.string().min(1).max(128).regex(/^[A-Za-z0-9_.:-]+$/),
+    threadId: z.string().min(1).max(128).optional(),
+  })
+  .strict()
+
 // The person's own edit or restore of a thread artifact (EP-3 S4). `expectedVersion` is the head the panel
 // showed, the server's compare-and-set; no org or user field, because the server reads the owner from the
 // session. The text bound is the gateway's text-artifact limit.
@@ -1226,6 +1240,78 @@ const chatRestoreArtifactRevisionInput = z
     artifactId: z.string().min(1).max(256),
     version: z.number().int().min(1),
     expectedVersion: z.number().int().min(1),
+  })
+  .strict()
+
+// A selection edit names a range of one revision by character offsets and the hash of its text, never the text itself
+// (EP-3 S6). The gateway checks the version is still the head and the range still holds that text.
+const chatEditArtifactSelectionInput = z
+  .object({
+    artifactId: z.string().regex(/^[A-Za-z0-9_.:-]{1,128}$/),
+    version: z.number().int().min(1),
+    start: z.number().int().min(0),
+    end: z.number().int().min(1),
+    quoteSha256: z.string().regex(/^[0-9a-f]{64}$/),
+    instruction: z.string().min(1).max(20_000),
+  })
+  .strict()
+
+// Save one artifact revision to knowledge (EP-3 S8): the text on screen becomes a Data Plane document owned
+// by the person. The ids name the source revision for the document's trace only; the BFF bounds them to 256
+// characters and copies nothing from the thread. No org or user field: documents-api reads the owner from
+// the person's own scoped token.
+const chatSaveArtifactToKnowledgeInput = z
+  .object({
+    threadId: z.string().min(1).max(256),
+    artifactId: z.string().min(1).max(256),
+    version: z.number().int().min(1),
+    title: z.string().trim().min(1).max(256),
+    content: z.string().trim().min(1).max(200_000),
+  })
+  .strict()
+
+// A thread goal (EP-7 S1): the person's standing objective on one of their own threads, recited to the
+// model as data on every Do turn. The bounds are session-core's (D11): an objective of 1 to 2,000
+// characters, at most 8 criteria of 500, a turn cap of 1 to 50. No org or user field: the server reads
+// the owner from the session.
+const threadGoalCriteria = z.array(z.string().trim().min(1).max(500)).max(8)
+
+const chatSetGoalInput = z
+  .object({
+    threadId: z.string().min(1).max(128),
+    objective: z.string().trim().min(1).max(2000),
+    successCriteria: threadGoalCriteria.optional(),
+    maxTurns: z.number().int().min(1).max(50).optional(),
+    replace: z.boolean().optional(),
+  })
+  .strict()
+
+// `expectedRevision` is the revision the goal bar showed, the server's compare-and-set. The status a
+// person may write is `active` or `paused` here; `met` and the stop states come only from the server.
+const chatUpdateGoalInput = z
+  .object({
+    threadId: z.string().min(1).max(128),
+    goalId: z.string().min(1).max(128),
+    expectedRevision: z.number().int().min(1),
+    objective: z.string().trim().min(1).max(2000).optional(),
+    successCriteria: threadGoalCriteria.optional(),
+    maxTurns: z.number().int().min(1).max(50).optional(),
+    status: z.enum(['active', 'paused']).optional(),
+  })
+  .strict()
+
+const chatClearGoalInput = z
+  .object({
+    threadId: z.string().min(1).max(128),
+    goalId: z.string().min(1).max(128),
+    expectedRevision: z.number().int().min(1),
+  })
+  .strict()
+
+const chatContinueGoalInput = z
+  .object({
+    threadId: z.string().min(1).max(128),
+    goalId: z.string().min(1).max(128),
   })
   .strict()
 
@@ -1570,17 +1656,50 @@ const chatAnswerQuestionInput = z
     message: 'A skip carries no answers, and an answer carries at least one.',
   })
 
+// The person's changes to a drafted mail send (EP-10-S6, decision D2): recipients, subject and the
+// plain-text body, nothing else. At least one field; the limits are the server's (EP-10-S3), checked
+// here only so a form never sends what the server will refuse.
+const approvalEditPatch = z
+  .object({
+    to: z.array(z.string().trim().min(1)).optional(),
+    subject: z.string().optional(),
+    bodyText: z.string().optional(),
+  })
+  .strict()
+  .superRefine((patch, ctx) => {
+    if (patch.to === undefined && patch.subject === undefined && patch.bodyText === undefined) {
+      ctx.addIssue({ code: 'custom', message: 'no_change' })
+      return
+    }
+    const code = checkMailEditLimits(patch)
+    if (code) ctx.addIssue({ code: 'custom', message: code })
+  })
+
+// "Send with my edits" (EP-10-S6, decision D1): the patch and the fingerprint of the draft the
+// person saw. A draft that changed since is a 409 approval_changed, never a silent overwrite.
+export const approvalEditInput = z
+  .object({
+    patch: approvalEditPatch,
+    baseFingerprint: z.string().regex(/^[0-9a-fA-F]{64}$/),
+  })
+  .strict()
+
 // The decision on a pending approval (build plan WS13 S2). The decider is the verified credential's,
 // never an input, so a field naming one, a decision source or a grant is refused rather than ignored.
-// `scope` is how far the decision reaches; only `once` exists until standing grants do.
+// `scope` is how far the decision reaches; only `once` exists until standing grants do. An `edit`
+// rides an approval only (EP-10-S6): a rejection has nothing to send.
 const approvalsDecideInput = z
   .object({
     approvalId: z.string().min(1),
     decision: z.enum(['approve', 'reject']),
     reason: z.string().max(500).optional(),
     scope: z.literal('once').optional(),
+    edit: approvalEditInput.optional(),
   })
   .strict()
+  .refine((input) => input.edit === undefined || input.decision === 'approve', {
+    message: 'edit_requires_grant',
+  })
 
 // The full draft behind a pending write approval (EP-10-S1). Only the approval id is an input: the
 // org and the owner are the verified credential's.
@@ -1607,6 +1726,8 @@ const approvalsPreviewOutput = z.object({
   editableFields: z.array(z.string()),
   actionFingerprint: z.string(),
   revision: z.number().int().nonnegative(),
+  // The gateway takes "Send with my edits" for this draft (EP-10-S6); server-controlled.
+  canEdit: z.boolean().optional(),
 })
 
 const chatClearThreadsInput = z.object({})
@@ -1659,11 +1780,17 @@ const audioDictateInput = z.object({
  */
 export const ORCHESTRATION_APPROVAL_REASON_MAX = 1000
 
-export const orchestrationDecideApprovalInput = z.object({
-  approvalId: z.string().min(1),
-  decision: z.enum(['approve', 'reject']),
-  reason: z.string().trim().max(ORCHESTRATION_APPROVAL_REASON_MAX).optional(),
-})
+export const orchestrationDecideApprovalInput = z
+  .object({
+    approvalId: z.string().min(1),
+    decision: z.enum(['approve', 'reject']),
+    reason: z.string().trim().max(ORCHESTRATION_APPROVAL_REASON_MAX).optional(),
+    // "Send with my edits" (EP-10-S6): approved for this one call only, never with a reject.
+    edit: approvalEditInput.optional(),
+  })
+  .refine((input) => input.edit === undefined || input.decision === 'approve', {
+    message: 'edit_requires_grant',
+  })
 
 const orchestrationResumeRunInput = z.object({
   runId: z.string().min(1),
@@ -4043,7 +4170,7 @@ export const actionRegistry = [
   {
     id: 'approvals.decide',
     label: 'Decide an approval',
-    description: 'Approve or reject one pending approval of a run, for this one call. Only the person the approval is requested of can decide it; the decider is the verified credential, never an input, and a client field naming a decider, a decision source or a grant is refused 400. A scope other than once is refused 422 scope_not_enabled until standing grants exist, so a caller never believes it granted more than it did. A decision is idempotent, and a different second decision is a 412 conflict. Refused typed under zero data retention and for a waived credential, since such a run holds no approval. Never model-executable: an approval is the person\'s own authority, and a model deciding its own approval would void the gate.',
+    description: 'Approve or reject one pending approval of a run, for this one call. Only the person the approval is requested of can decide it; the decider is the verified credential, never an input, and a client field naming a decider, a decision source or a grant is refused 400. A scope other than once is refused 422 scope_not_enabled until standing grants exist, so a caller never believes it granted more than it did. A decision is idempotent, and a different second decision is a 412 conflict. Refused typed under zero data retention and for a waived credential, since such a run holds no approval. An approval may carry edit {patch, baseFingerprint}: the person\'s changes to a drafted mail send (to, subject, bodyText only), approved for this one call; an edit with a reject is refused edit_requires_grant, a draft that changed since the person saw it is a 409 approval_changed, and while edits are switched off the server refuses it 403 approval_edit_disabled. Never model-executable: an approval is the person\'s own authority, and a model deciding its own approval would void the gate.',
     ownerPlane: 'model',
     risk: 'high',
     requiresApproval: false,
@@ -4127,6 +4254,28 @@ export const actionRegistry = [
     requiresApproval: false,
     reversible: true,
     inputSchema: chatRestoreArtifactRevisionInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'chat.edit_artifact_selection',
+    label: 'Revise a selected part of an artifact',
+    description: 'Ask for a change to one selected range of a document, code or HTML artifact in the Output panel, as a normal chat turn that names the range: the artifact, the version the person saw, the character offsets and the SHA-256 of the selected text (the text itself is not sent). The gateway refuses a version that is no longer the head with artifact_selection_stale, refuses a quote that does not match the range with artifact_selection_mismatch, and refuses any rewrite that changes text outside the range. Off until selection editing is switched on. Refused under zero data retention, in a temporary or Space conversation, and for any other kind. Never model-executable: a model does not choose which part of the person\'s document it rewrites.',
+    ownerPlane: 'model',
+    risk: 'medium',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: chatEditArtifactSelectionInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'chat.save_artifact_to_knowledge',
+    label: 'Save an artifact version to knowledge',
+    description: 'Copy the document artifact version shown in the Output panel into the person\'s knowledge base as a new Data Plane document (origin chat-artifact), with the thread, artifact and version kept in its source trace. The copy is independent: later edits of the artifact do not sync, and it stays when the chat is deleted, under Data Plane retention and erase. Refused under zero data retention and in a temporary chat. Off until the gateway\'s artifact promote switch is on. Not reversible from the chat: the copy is removed from the knowledge page. Never model-executable: a model does not decide what enters the knowledge base.',
+    ownerPlane: 'data',
+    risk: 'medium',
+    requiresApproval: false,
+    reversible: false,
+    inputSchema: chatSaveArtifactToKnowledgeInput,
     outputSchema: envelopeStatusOutput,
   },
   {
@@ -4295,6 +4444,72 @@ export const actionRegistry = [
     outputSchema: envelopeStatusOutput,
   },
   {
+    id: 'chat.list_deck_templates',
+    label: 'List deck templates',
+    description: 'Read the organisation\'s brand deck templates for the template picker: each one\'s name, description, colours and font names, never a file. The templates are skill bundles in capability-core, read under the person\'s own credential, so only the person\'s own organisation and the skills they may use are listed. Read only. Hidden while the gateway\'s deck templates are switched off; a zero-retention session is refused. Never model-executable.',
+    ownerPlane: 'model',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: chatListDeckTemplatesInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'chat.apply_deck_template',
+    label: 'Apply a deck template',
+    description: 'Use one of the organisation\'s brand deck templates for a deck: the picker sends a chat turn that carries the template\'s skill id, and model-gateway checks it against the organisation\'s templates before the deck is built with it. The model is only told which template was applied and never picks one itself. Reversible: picking another template, or Standard, builds the deck again. Refused under zero data retention; off until deck templates are switched on. Never model-executable.',
+    ownerPlane: 'model',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: chatApplyDeckTemplateInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'chat.set_goal',
+    label: 'Set a goal on the conversation',
+    description: 'Set a standing goal on one of the person\'s own conversations: an objective and up to 8 success criteria. Every later Do turn in the conversation is told the goal as data, never as instructions. One open goal per conversation; replacing it closes the old one as cleared. Owner only. Refused under zero data retention, in a conversation that holds a waived run and in a Space conversation. Off until thread goals are switched on. Never model-executable: the model reads its goal and never sets it.',
+    ownerPlane: 'model',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: chatSetGoalInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'chat.update_goal',
+    label: 'Edit or pause the conversation goal',
+    description: 'Change the objective, the success criteria or the turn cap of the conversation\'s open goal, or pause and resume it, under a compare-and-set on the revision the goal bar showed: a goal changed elsewhere is refused with thread_goal_revision_conflict. A goal that is met or stopped cannot be changed. Owner only, with the same refusals as setting a goal. Never model-executable.',
+    ownerPlane: 'model',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: chatUpdateGoalInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'chat.clear_goal',
+    label: 'Clear the conversation goal',
+    description: 'Close the conversation\'s open goal as cleared, so no later turn is told it. The record stays until the conversation is deleted. Owner only, under the same compare-and-set as editing it. Never model-executable.',
+    ownerPlane: 'model',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: false,
+    inputSchema: chatClearGoalInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'chat.continue_goal',
+    label: 'Continue toward the goal',
+    description: 'Send one turn toward the conversation\'s active goal, through the ordinary send path and in the conversation\'s own mode: a plan turn, or an execute turn only while the conversation holds a live plan grant. The server refuses a goal that is not the conversation\'s active goal with thread_goal_mismatch before any run exists, and every approval the run needs still waits for the person. Never model-executable: a goal never continues itself.',
+    ownerPlane: 'model',
+    risk: 'medium',
+    requiresApproval: false,
+    reversible: false,
+    inputSchema: chatContinueGoalInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
     id: 'audio.transcribe',
     label: 'Transcribe audio',
     description: 'Transcribe a base64-encoded audio recording to text.',
@@ -4319,7 +4534,7 @@ export const actionRegistry = [
   {
     id: 'orchestration.decide_approval',
     label: 'Decide orchestration approval',
-    description: 'Approve or reject a pending orchestration-run approval. This is the human checkpoint the run is waiting on. On a reject, reason may carry redirect text (what the person wants the agent to do instead); it is capped at 1000 characters. A reject with reason aborts the run today unless the owner accepts the redirect.',
+    description: 'Approve or reject a pending orchestration-run approval. This is the human checkpoint the run is waiting on. On a reject, reason may carry redirect text (what the person wants the agent to do instead); it is capped at 1000 characters. A reject with reason aborts the run today unless the owner accepts the redirect. An approve may carry edit {patch, baseFingerprint} (to, subject, bodyText of a drafted mail send), for this one call only: never with a reject, a standing scope or Always; a changed draft is a 409 approval_changed.',
     ownerPlane: 'model',
     risk: 'high',
     requiresApproval: false,

@@ -1,10 +1,18 @@
 import { ForkAction, threadForkEnabled } from './ForkAction'
 import { formatResetTime, humanizeToolName, refreshResetTimeWording, workStepLabel } from './chat-normalizers'
 import { RunNotifyButton } from './RunNotifyButton'
-import { WritePreviewDisclosure, approvalWritePreviewEnabled, isMailSendApproval } from './WritePreview'
 import {
+  WritePreviewDisclosure,
+  approvalWritePreviewEnabled,
+  isMailSendApproval,
+  mailEditProblemText,
+  type MailEditDraft,
+} from './WritePreview'
+import {
+  approvalEditRefusalOf,
   type Approval,
   type ApprovalDecision,
+  type ApprovalEdit,
   type ApprovalScope,
   type PlanStepEdit,
 } from '@/shared/api/orchestration-client'
@@ -204,6 +212,8 @@ export function MessageBlock(props: {
    */
   onScheduleThis?: () => void
   onApprovalDecision: (approvalId: string, decision: ApprovalDecision) => void
+  /** Sends an approval with the person's edits (EP-10-S6); see `ApprovalRequests`. */
+  onApprovalEditedDecision?: (approvalId: string, edit: ApprovalEdit) => Promise<void>
   onApprovePlan: (rung: AutonomyRung, justification: string, steps?: PlanStepEdit[]) => void
   onRejectPlan?: (planId: string, reason: string) => void
   planApproval?: PlanApprovalStatus
@@ -338,6 +348,7 @@ const CHAT_NODE_REGISTRY = createConversationNodeRegistry({
           <ApprovalRequests
             approvals={node.approvals}
             onDecide={ctx.onApprovalDecision}
+            onDecideEdited={ctx.onApprovalEditedDecision}
           />
         }
       >
@@ -517,6 +528,8 @@ export function AssistantMessage(props: {
   /** See `MessageBlock`'s doc — same "Planlegg dette" affordance, forwarded through. */
   onScheduleThis?: () => void
   onApprovalDecision: (approvalId: string, decision: ApprovalDecision) => void
+  /** Sends an approval with the person's edits (EP-10-S6); see `ApprovalRequests`. */
+  onApprovalEditedDecision?: (approvalId: string, edit: ApprovalEdit) => Promise<void>
   onApprovePlan: (rung: AutonomyRung, justification: string, steps?: PlanStepEdit[]) => void
   onRejectPlan?: (planId: string, reason: string) => void
   planApproval?: PlanApprovalStatus
@@ -678,6 +691,7 @@ export function AssistantMessage(props: {
       onViewSteps: props.onViewSteps,
       onViewAttachments: props.onViewAttachments,
       onApprovalDecision: props.onApprovalDecision,
+      onApprovalEditedDecision: props.onApprovalEditedDecision,
       onApprovePlan: props.onApprovePlan,
       onRejectPlan: props.onRejectPlan,
       onSelectFollowUp: props.onSelectFollowUp,
@@ -2325,8 +2339,67 @@ export function ApprovalRequests(props: {
   browserControl?: ChatRunBrowserControl
   /** Takes the turn's browser for a help request (EP-1 S2). Absent while takeover is not offered. */
   onBrowserTakeOver?: (sessionId: string, expectedEpoch: number | null) => void
+  /**
+   * Sends an approval with the person's edits to a drafted mail send (EP-10-S6), for this one call.
+   * It rejects with the typed `ApiError`, so a 409 `approval_changed` keeps the card and the
+   * person's text. Absent: the card offers no edit mode.
+   */
+  onDecideEdited?: (approvalId: string, edit: ApprovalEdit) => Promise<void>
 }) {
   const i18n = useI18n()
+  // The person's pending edits by approval id (EP-10-S6). Present only while the form differs from
+  // the draft; an edited approval is ONCE only (decision D1), so a standing scope hides meanwhile.
+  const [drafts, setDrafts] = createSignal<Record<string, MailEditDraft>>({})
+  // Bumped on a 409 approval_changed: the disclosure refetches the draft and keeps the person's text.
+  const [conflicts, setConflicts] = createSignal<Record<string, number>>({})
+  const [editErrors, setEditErrors] = createSignal<Record<string, string>>({})
+  const [editBusy, setEditBusy] = createSignal<string | null>(null)
+
+  const noteDraft = (approvalId: string, draft: MailEditDraft | null) => {
+    setDrafts((current) => {
+      const next = { ...current }
+      if (draft) next[approvalId] = draft
+      else delete next[approvalId]
+      return next
+    })
+  }
+
+  const noteEditError = (approvalId: string, message: string | null) => {
+    setEditErrors((current) => {
+      const next = { ...current }
+      if (message) next[approvalId] = message
+      else delete next[approvalId]
+      return next
+    })
+  }
+
+  const sendEdited = async (approvalId: string, edit: ApprovalEdit) => {
+    const send = props.onDecideEdited
+    if (!send || editBusy() !== null) return
+    setEditBusy(approvalId)
+    noteEditError(approvalId, null)
+    try {
+      await send(approvalId, edit)
+      noteDraft(approvalId, null)
+    } catch (error) {
+      const refusal = approvalEditRefusalOf(error)
+      if (refusal === 'approval_changed') {
+        setConflicts((current) => ({ ...current, [approvalId]: (current[approvalId] ?? 0) + 1 }))
+      }
+      noteEditError(
+        approvalId,
+        refusal
+          ? mailEditProblemText(refusal, i18n.tr)
+          : translateApiError(error, i18n.tr, {
+              no: 'Godkjenningen med endringene gikk ikke gjennom.',
+              en: 'The approval with your edits did not go through.',
+            }),
+      )
+    } finally {
+      setEditBusy(null)
+    }
+  }
+
   // An approval whose cause asks for a fresh password confirmation before it is granted (build
   // plan WS13 S5). Only the grant asks; a denial never does.
   const [confirming, setConfirming] = createSignal<string | null>(null)
@@ -2353,10 +2426,16 @@ export function ApprovalRequests(props: {
   }
 
   const approve = (approval: Approval, scope?: ApprovalScope) => {
+    const draft = scope === undefined ? drafts()[approval.id] : undefined
+    if (draft?.problem) return
     if (approval.cause?.stepUpRequired) {
       setConfirmError(null)
       setConfirmingScope(scope)
       setConfirming(approval.id)
+      return
+    }
+    if (draft) {
+      void sendEdited(approval.id, draft.edit)
       return
     }
     decide(approval.id, 'approve', scope)
@@ -2392,6 +2471,12 @@ export function ApprovalRequests(props: {
     }
     const scope = confirmingScope()
     cancelConfirmation()
+    // The step-up runs first for an edited grant exactly as for a plain one (WS13-S5).
+    const draft = scope === undefined ? drafts()[approval.id] : undefined
+    if (draft && !draft.problem) {
+      void sendEdited(approval.id, draft.edit)
+      return
+    }
     decide(approval.id, 'approve', scope)
   }
 
@@ -2437,7 +2522,19 @@ export function ApprovalRequests(props: {
               {(reason) => <p class="verevon-chat-approval__detail">{reason()}</p>}
             </Show>
             <Show when={approvalWritePreviewEnabled() && isMailSendApproval(approval)}>
-              <WritePreviewDisclosure approvalId={approval.id} />
+              <WritePreviewDisclosure
+                approvalId={approval.id}
+                editable={props.onDecideEdited !== undefined}
+                onDraftChange={(draft) => noteDraft(approval.id, draft)}
+                conflict={conflicts()[approval.id] ?? 0}
+              />
+            </Show>
+            <Show when={editErrors()[approval.id]}>
+              {(message) => (
+                <p class="verevon-chat-approval__error" role="alert">
+                  {message()}
+                </p>
+              )}
             </Show>
             <Show
               when={confirming() === approval.id}
@@ -2446,11 +2543,14 @@ export function ApprovalRequests(props: {
                   <button
                     type="button"
                     class="verevon-chat-approval__approve"
+                    disabled={Boolean(drafts()[approval.id]?.problem) || editBusy() === approval.id}
                     onClick={() => approve(approval)}
                   >
-                    {i18n.tr('Godkjenn', 'Approve')}
+                    {drafts()[approval.id]
+                      ? i18n.tr('Send med mine endringer', 'Send with my edits')
+                      : i18n.tr('Godkjenn', 'Approve')}
                   </button>
-                  <Show when={offersStandingScope(approval, 'thread')}>
+                  <Show when={!drafts()[approval.id] && offersStandingScope(approval, 'thread')}>
                     <button
                       type="button"
                       class="verevon-chat-approval__approve"
@@ -2459,7 +2559,7 @@ export function ApprovalRequests(props: {
                       {i18n.tr('Godkjenn for denne tråden', 'Approve for this thread')}
                     </button>
                   </Show>
-                  <Show when={offersStandingScope(approval, 'run')}>
+                  <Show when={!drafts()[approval.id] && offersStandingScope(approval, 'run')}>
                     <button
                       type="button"
                       class="verevon-chat-approval__approve"
@@ -2511,7 +2611,9 @@ export function ApprovalRequests(props: {
                   >
                     {confirmBusy()
                       ? i18n.tr('Bekrefter…', 'Confirming…')
-                      : i18n.tr('Bekreft og godkjenn', 'Confirm and approve')}
+                      : drafts()[approval.id] && confirmingScope() === undefined
+                        ? i18n.tr('Bekreft og send med mine endringer', 'Confirm and send with my edits')
+                        : i18n.tr('Bekreft og godkjenn', 'Confirm and approve')}
                   </button>
                   <button
                     type="button"

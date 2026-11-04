@@ -340,6 +340,43 @@ describe('action registry', () => {
     }
   })
 
+  it('takes an edit with an approval only, within the mail limits (EP-10-S6)', () => {
+    const fingerprint = 'a'.repeat(64)
+    const edit = { patch: { subject: 'New subject' }, baseFingerprint: fingerprint }
+    for (const id of ['approvals.decide', 'orchestration.decide_approval'] as const) {
+      const schema = getActionDescriptor(id)?.inputSchema
+      const base = { approvalId: 'appr_1', decision: 'approve' as const }
+
+      expect(schema?.safeParse({ ...base, edit }).success).toBe(true)
+      expect(
+        schema?.safeParse({
+          ...base,
+          edit: { patch: { to: ['a@example.com'], bodyText: 'Hei' }, baseFingerprint: fingerprint },
+        }).success,
+      ).toBe(true)
+
+      // A rejection sends nothing, so it carries no edit.
+      expect(schema?.safeParse({ ...base, decision: 'reject', edit }).success).toBe(false)
+      // The draft the person saw is named by its 64-hex fingerprint.
+      expect(schema?.safeParse({ ...base, edit: { ...edit, baseFingerprint: 'abc' } }).success).toBe(false)
+      // Only recipients, subject and body: the connection, operation and threading are frozen.
+      for (const forged of [{ connectionId: 'conn-2' }, { operation: 'gmail.delete' }, { threadId: 't' }, { bodyHtml: '<b>x</b>' }]) {
+        expect(schema?.safeParse({ ...base, edit: { ...edit, patch: { ...edit.patch, ...forged } } }).success).toBe(false)
+      }
+      expect(schema?.safeParse({ ...base, edit: { ...edit, extra: true } }).success).toBe(false)
+      // An empty patch, a header-breaking subject, no recipients and too many are refused.
+      for (const patch of [
+        {},
+        { subject: 'a\r\nBcc: x@example.com' },
+        { to: [] },
+        { to: Array.from({ length: 51 }, (_, i) => `r${i}@example.com`) },
+        { bodyText: 'x'.repeat(48 * 1024 + 1) },
+      ]) {
+        expect(schema?.safeParse({ ...base, edit: { patch, baseFingerprint: fingerprint } }).success).toBe(false)
+      }
+    }
+  })
+
   it('registers the approval preview as a low-risk read the model cannot execute (EP-10-S1)', () => {
     const preview = getActionDescriptor('approvals.preview')
 
@@ -696,6 +733,24 @@ describe('action registry', () => {
     expect(pick?.inputSchema.safeParse({ tab: 'threads' }).success).toBe(false)
   })
 
+  it('registers the selection edit as a model-plane action the model cannot execute, and bounds its range like the gateway', () => {
+    const edit = getActionDescriptor('chat.edit_artifact_selection')
+    expect(edit).toMatchObject({ ownerPlane: 'model', risk: 'medium', requiresApproval: false, reversible: true })
+    expect(isModelExecutableAction('chat.edit_artifact_selection')).toBe(false)
+    expect(edit?.description ?? '').toContain('Never model-executable')
+
+    const schema = edit?.inputSchema
+    const valid = { artifactId: 'art-1', version: 2, start: 0, end: 5, quoteSha256: 'a'.repeat(64), instruction: 'Gjør formelt' }
+    expect(schema?.safeParse(valid).success).toBe(true)
+    expect(schema?.safeParse({ ...valid, quoteSha256: 'A'.repeat(64) }).success).toBe(false)
+    expect(schema?.safeParse({ ...valid, quoteSha256: 'a'.repeat(63) }).success).toBe(false)
+    expect(schema?.safeParse({ ...valid, start: -1 }).success).toBe(false)
+    expect(schema?.safeParse({ ...valid, version: 0 }).success).toBe(false)
+    expect(schema?.safeParse({ ...valid, instruction: '' }).success).toBe(false)
+    // The text of the selection is never an input: only its hash rides in the request.
+    expect(schema?.safeParse({ ...valid, text: 'Første avsnitt' }).success).toBe(false)
+  })
+
   it('registers the agent-mode choice as a model-plane action the model cannot execute, and accepts only the four mode ids', () => {
     const mode = getActionDescriptor('chat.set_agent_mode')
 
@@ -753,6 +808,43 @@ describe('action registry', () => {
     expect(schema?.safeParse({ runId: 'run_1', callSeq: 1, userId: 'user_x' }).success).toBe(false)
   })
 
+  it('registers the thread goal actions as person-only writes with the server bounds (EP-7-S1)', () => {
+    for (const id of ['chat.set_goal', 'chat.update_goal', 'chat.clear_goal'] as const) {
+      expect(getActionDescriptor(id)).toMatchObject({ ownerPlane: 'model', risk: 'low', requiresApproval: false })
+      expect(isModelExecutableAction(id)).toBe(false)
+    }
+    expect(getActionDescriptor('chat.continue_goal')).toMatchObject({
+      ownerPlane: 'model',
+      risk: 'medium',
+      requiresApproval: false,
+    })
+    expect(isModelExecutableAction('chat.continue_goal')).toBe(false)
+
+    const set = getActionDescriptor('chat.set_goal')?.inputSchema
+    expect(set?.safeParse({ threadId: 't1', objective: 'Ship the report', successCriteria: ['Reconciled'] }).success).toBe(true)
+    for (const input of [
+      { threadId: 't1', objective: '' },
+      { threadId: 't1', objective: 'x'.repeat(2001) },
+      { threadId: 't1', objective: 'aim', successCriteria: Array.from({ length: 9 }, (_, i) => `c${i}`) },
+      { threadId: 't1', objective: 'aim', successCriteria: ['x'.repeat(501)] },
+      { threadId: 't1', objective: 'aim', maxTurns: 51 },
+      // The owner is read from the session, never named by a client.
+      { threadId: 't1', objective: 'aim', userId: 'user_x' },
+    ]) {
+      expect(set?.safeParse(input).success).toBe(false)
+    }
+
+    const update = getActionDescriptor('chat.update_goal')?.inputSchema
+    expect(update?.safeParse({ threadId: 't1', goalId: 'goal_1', expectedRevision: 2, status: 'paused' }).success).toBe(true)
+    // A person never writes `met` or a stop state; the server does.
+    expect(update?.safeParse({ threadId: 't1', goalId: 'goal_1', expectedRevision: 2, status: 'met' }).success).toBe(false)
+    expect(update?.safeParse({ threadId: 't1', goalId: 'goal_1', status: 'paused' }).success).toBe(false)
+
+    const go = getActionDescriptor('chat.continue_goal')?.inputSchema
+    expect(go?.safeParse({ threadId: 't1', goalId: 'goal_1' }).success).toBe(true)
+    expect(go?.safeParse({ threadId: 't1' }).success).toBe(false)
+  })
+
   it('registers artifact edit and restore as reversible person-only writes (EP-3-S4)', () => {
     const save = getActionDescriptor('chat.save_artifact_revision')
     const restore = getActionDescriptor('chat.restore_artifact_revision')
@@ -786,6 +878,31 @@ describe('action registry', () => {
       { threadId: 't1', artifactId: 'report', version: 1, expectedVersion: 3, content: 'x' },
     ]) {
       expect(restoreSchema?.safeParse(input).success).toBe(false)
+    }
+  })
+
+  it('registers saving an artifact version to knowledge as an irreversible person-only Data write (EP-3-S8)', () => {
+    const promote = getActionDescriptor('chat.save_artifact_to_knowledge')
+
+    expect(promote).toMatchObject({ ownerPlane: 'data', risk: 'medium', requiresApproval: false, reversible: false })
+    expect(isModelExecutableAction('chat.save_artifact_to_knowledge')).toBe(false)
+    expect(MODEL_ACCESS['chat.save_artifact_to_knowledge']).toMatchObject({ access: 'none' })
+
+    const schema = promote?.inputSchema
+    const valid = { threadId: 't1', artifactId: 'report', version: 2, title: 'Rapport', content: 'tekst' }
+    expect(schema?.safeParse(valid).success).toBe(true)
+    for (const input of [
+      { ...valid, version: 0 },
+      { ...valid, version: 1.5 },
+      { ...valid, threadId: '' },
+      { ...valid, artifactId: 'x'.repeat(257) },
+      { ...valid, content: '   ' },
+      { ...valid, content: 'x'.repeat(200_001) },
+      { threadId: 't1', artifactId: 'report', title: 'Rapport', content: 'tekst' },
+      // The owner is read from the person's token, never named by a client.
+      { ...valid, orgId: 'org_x' },
+    ]) {
+      expect(schema?.safeParse(input).success).toBe(false)
     }
   })
 
@@ -831,6 +948,38 @@ describe('action registry', () => {
     }
     // The owner is read from the session, never named by a client.
     expect(schema?.safeParse({ threadId: 'thread-1', artifactId: 'report', userId: 'user_x' }).success).toBe(false)
+  })
+
+  it('registers the deck template picker as low-risk actions the model cannot execute (EP-5-S7)', () => {
+    const list = getActionDescriptor('chat.list_deck_templates')
+    const apply = getActionDescriptor('chat.apply_deck_template')
+
+    expect(list).toMatchObject({ ownerPlane: 'model', risk: 'low', requiresApproval: false, reversible: true })
+    expect(apply).toMatchObject({ ownerPlane: 'model', risk: 'low', requiresApproval: false, reversible: true })
+    expect(isModelExecutableAction('chat.list_deck_templates')).toBe(false)
+    expect(isModelExecutableAction('chat.apply_deck_template')).toBe(false)
+    expect(MODEL_ACCESS['chat.list_deck_templates']).toMatchObject({ access: 'none', sideEffectClass: 'read' })
+    expect(MODEL_ACCESS['chat.apply_deck_template']).toMatchObject({ access: 'none' })
+
+    // The org comes from the session: the list takes nothing a client could name.
+    const listSchema = list?.inputSchema
+    expect(listSchema?.safeParse({}).success).toBe(true)
+    expect(listSchema?.safeParse({ orgId: 'org_x' }).success).toBe(false)
+
+    const schema = apply?.inputSchema
+    expect(schema?.safeParse({ skillId: 'skill-brand' }).success).toBe(true)
+    expect(schema?.safeParse({ skillId: 'org:brand.v2_1', threadId: 'thread-1' }).success).toBe(true)
+    for (const input of [
+      {},
+      { skillId: '' },
+      { skillId: '../blob' },
+      { skillId: 'a b' },
+      { skillId: 'x'.repeat(129) },
+      { skillId: 'skill-brand', name: 'Aquatiq brand' },
+      { skillId: 'skill-brand', orgId: 'org_x' },
+    ]) {
+      expect(schema?.safeParse(input).success).toBe(false)
+    }
   })
 
   function registered(id: string) {
@@ -1251,7 +1400,11 @@ describe('action registry', () => {
     // +2 after EP-3-S5 registered chat.set_context_refs and chat.pick_context_ref, the composer's context chips.
     // +2 after EP-2-S5 registered chat.research_plan_start and chat.research_plan_cancel, the deep-research plan card.
     // +1 after EP-2-S9 registered chat.wide_research_retry_item, the wide-research grid's per-item retry.
-    expect(ids).toHaveLength(285)
+    // +1 after EP-3-S8 registered chat.save_artifact_to_knowledge, the Output panel's copy to knowledge.
+    // +2 after EP-5-S7 registered chat.list_deck_templates and chat.apply_deck_template, the template picker.
+    // +4 after EP-7-S1 registered chat.set_goal, chat.update_goal, chat.clear_goal and chat.continue_goal.
+    // +1 after EP-3-S6 registered chat.edit_artifact_selection, the Output panel's ask about a selection.
+    expect(ids).toHaveLength(293)
 
     // The fragments also carry ids outside the `spaces.` prefix (`space.files.*`), so the Space
     // entries are the ones the fragments declare.

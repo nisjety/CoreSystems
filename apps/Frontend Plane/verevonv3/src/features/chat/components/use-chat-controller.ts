@@ -78,6 +78,7 @@ import {
   runQuestionErrorCodeOf,
   resumeRun,
   type ApprovalDecision,
+  type ApprovalEdit,
   type PlanStepEdit,
 } from '@/shared/api/orchestration-client'
 import { getRun, listRuns } from '@/shared/api/runs-client'
@@ -127,6 +128,13 @@ import type { VerevonUiEvent } from '@/shared/chat/verevon-ui-events'
 import {
   ApiError,
 } from '@/shared/api/http'
+import {
+  getThreadGoal,
+  setThreadGoal as putThreadGoal,
+  threadGoalsUnavailable,
+  updateThreadGoal,
+  type ThreadGoal,
+} from '@/shared/api/thread-goal-client'
 import {
   findArtifactById,
 } from './chat-artifacts'
@@ -307,6 +315,26 @@ export function questionAnswerSummary(question: ChatUserQuestionEvent, answer: C
     })
     .filter((line) => line.length > 0)
     .join('\n')
+}
+
+/**
+ * The mode a goal's Continue turn is sent in (EP-7 S1): an execute turn only when the thread holds a
+ * live plan grant and the latest Do turn of the thread was itself an execute turn, else a plan turn.
+ * The composer's own Do toggle is never read or changed, so a Continue cannot leak it; the gateway
+ * re-checks everything an execute turn needs.
+ */
+export function goalContinuationMode(input: {
+  liveGrant: boolean
+  turns: readonly Pick<ChatTurn, 'role' | 'planMode' | 'executeGranted'>[]
+}): 'execute' | 'plan' {
+  if (!input.liveGrant) return 'plan'
+  for (let index = input.turns.length - 1; index >= 0; index -= 1) {
+    const turn = input.turns[index]
+    if (turn?.role !== 'assistant') continue
+    if (turn.executeGranted === true) return 'execute'
+    if (turn.planMode === true) return 'plan'
+  }
+  return 'plan'
 }
 
 export function useChatController() {
@@ -2582,6 +2610,152 @@ export function useChatController() {
   /** Dismisses the waiting research plan (`chat.research_plan_cancel`). Nothing is sent. */
   const cancelResearchPlan = () => setPendingResearchPlan(null)
 
+  // The thread goal (EP-7 S1): the person's standing objective on the open thread, shown in the goal
+  // tray above the composer. Read for a durable thread the person may set one on: never a temporary,
+  // foreign, Support or project thread (the server refuses each anyway). The read is repeated whenever
+  // a turn ends, so the tray follows the server; once the server says goals are off, the client asks
+  // no more and offers no goal entry.
+  const [threadGoal, setThreadGoalState] = createSignal<ThreadGoal | null>(null)
+  const [goalPending, setGoalPending] = createSignal(false)
+  const [goalError, setGoalError] = createSignal<string | null>(null)
+  // Whether the server serves goals, learned from the last read; no entry is offered before one.
+  const [goalsServed, setGoalsServed] = createSignal(false)
+  const goalThreadAllowed = (threadId: string | null | undefined): threadId is string =>
+    typeof threadId === 'string' && threadId.length > 0
+    && !isTemporaryThread(threadId)
+    && !isForeignOriginThread(threadId)
+    && !isSupportChatThread(threadId)
+    && !scopedThreadRefs.get(threadId ?? '')
+  let goalReadSequence = 0
+  const refreshThreadGoal = async (threadId: string) => {
+    const sequence = ++goalReadSequence
+    try {
+      const goal = await getThreadGoal(threadId)
+      setGoalsServed(!threadGoalsUnavailable())
+      if (sequence === goalReadSequence && state.threadId === threadId) setThreadGoalState(goal)
+    } catch {
+      // A thread the server does not know yet (a first turn still in flight) or a failed read: no tray.
+      if (sequence === goalReadSequence) setThreadGoalState(null)
+    }
+  }
+  createEffect(
+    () => ({
+      threadId: state.threadId,
+      allowed: goalThreadAllowed(state.threadId),
+      idle: state.status !== 'streaming',
+    }),
+    ({ threadId, allowed, idle }) => {
+      if (!allowed) {
+        goalReadSequence += 1
+        setThreadGoalState(null)
+        setGoalError(null)
+        return
+      }
+      if (idle) void refreshThreadGoal(threadId as string)
+    },
+  )
+
+  const goalErrorText = (error: unknown): string => {
+    const code = error instanceof ApiError ? error.code : null
+    switch (code) {
+      case 'thread_goal_exists':
+        return i18n.tr('Samtalen har allerede et mål.', 'This conversation already has a goal.')
+      case 'thread_goal_revision_conflict':
+        return i18n.tr('Målet ble endret et annet sted. Se over og prøv igjen.', 'The goal changed elsewhere. Check it and try again.')
+      case 'thread_goal_closed':
+        return i18n.tr('Dette målet er avsluttet og kan ikke endres.', 'This goal is closed and cannot be changed.')
+      case 'thread_goal_space_unsupported':
+        return i18n.tr('Mål er ikke tilgjengelig i et delt rom ennå.', 'Goals are not available in a shared Space yet.')
+      case 'invalid_thread_goal':
+        return i18n.tr('Målet er for langt eller har for mange kriterier.', 'The goal is too long or has too many criteria.')
+      default:
+        return i18n.tr('Målet kunne ikke lagres. Prøv igjen.', 'The goal could not be saved. Try again.')
+    }
+  }
+
+  /** One goal write at a time; the tray takes the server's answer, or keeps the goal with the refusal. */
+  const runGoalWrite = async (threadId: string, write: () => Promise<ThreadGoal | null>): Promise<boolean> => {
+    if (goalPending()) return false
+    setGoalPending(true)
+    setGoalError(null)
+    try {
+      const goal = await write()
+      if (state.threadId === threadId) setThreadGoalState(goal)
+      return true
+    } catch (error) {
+      setGoalError(goalErrorText(error))
+      if (error instanceof ApiError && error.code === 'thread_goal_revision_conflict') void refreshThreadGoal(threadId)
+      return false
+    } finally {
+      setGoalPending(false)
+    }
+  }
+
+  const openGoal = (): ThreadGoal | null => {
+    const goal = threadGoal()
+    return goal && (goal.status === 'active' || goal.status === 'paused') ? goal : null
+  }
+
+  /**
+   * Sets the thread's goal (`chat.set_goal`), or edits the open one (`chat.update_goal`). A goal that is
+   * met or stopped is closed, so saving starts a new goal beside it.
+   */
+  const saveGoal = (input: { objective: string; successCriteria: string[] }): Promise<boolean> => {
+    const threadId = state.threadId
+    if (!goalThreadAllowed(threadId)) return Promise.resolve(false)
+    const current = openGoal()
+    return runGoalWrite(threadId, () =>
+      current
+        ? updateThreadGoal(current, { objective: input.objective, successCriteria: input.successCriteria })
+        : putThreadGoal(threadId, { objective: input.objective, successCriteria: input.successCriteria }),
+    )
+  }
+
+  /** Pauses or resumes the open goal (`chat.update_goal`). A paused goal is not recited to the model. */
+  const setGoalPaused = (paused: boolean): Promise<boolean> => {
+    const threadId = state.threadId
+    const current = openGoal()
+    if (!goalThreadAllowed(threadId) || !current) return Promise.resolve(false)
+    return runGoalWrite(threadId, () => updateThreadGoal(current, { status: paused ? 'paused' : 'active' }))
+  }
+
+  /** Clears the goal (`chat.clear_goal`); a met or stopped goal is cleared the same way. */
+  const clearGoal = (): Promise<boolean> => {
+    const threadId = state.threadId
+    const current = threadGoal()
+    if (!goalThreadAllowed(threadId) || !current) return Promise.resolve(false)
+    if (!openGoal()) {
+      // A closed goal cannot be changed on the server; it only leaves the tray, and the next goal
+      // set on the thread replaces it as the one the tray reads.
+      setThreadGoalState(null)
+      return Promise.resolve(true)
+    }
+    return runGoalWrite(threadId, () => updateThreadGoal(current, { status: 'cleared' }))
+  }
+
+  /**
+   * Sends one turn toward the active goal (`chat.continue_goal`) through the ordinary send path, so
+   * the transcript shows it as the person's message. It names the goal, and its mode follows
+   * `goalContinuationMode`; the composer's Do toggle is left as it was. The client decides nothing the
+   * server does not check again.
+   */
+  const continueGoal = async () => {
+    const goal = threadGoal()
+    const threadId = state.threadId
+    if (!goal || goal.status !== 'active' || !goalThreadAllowed(threadId) || goal.threadId !== threadId) return
+    if (state.status === 'streaming' || goalPending()) return
+    const grant = untrack(usableThreadGrant)
+    const mode = goalContinuationMode({
+      liveGrant: Boolean(grant && !grantHasLapsed(grant)),
+      turns: state.turns,
+    })
+    await sendContent(i18n.tr('Fortsett mot målet', 'Continue toward the goal'), undefined, {
+      goalId: goal.id,
+      planModeOverride: mode === 'plan',
+      ...(mode === 'execute' ? { executeGranted: true } : {}),
+    })
+  }
+
   /**
    * Answers the waiting question. The answer is recorded first and then sent as the person's next message, so
    * the run that follows works from an answered question. A refused answer sends nothing: a question that can
@@ -2834,6 +3008,32 @@ export function useChatController() {
   }
 
   /**
+   * "Send with my edits" (EP-10-S6): approve once with the person's changes to a drafted mail send.
+   * Unlike a plain decision the card stays until the server accepts the edit, and a refused edit
+   * rejects with the typed `ApiError`, so a 409 approval_changed keeps the person's text on the card.
+   * Only the resume after an accepted edit falls back to the plain re-sync.
+   */
+  const handleEditedApprovalDecision = async (
+    turnId: string,
+    approvalId: string,
+    edit: ApprovalEdit,
+  ): Promise<void> => {
+    if (isForeignOriginThread(state.threadId)) return
+    const runId = state.turns.find((turn) => turn.id === turnId)?.runId
+    invalidateApprovalRefresh(turnId)
+    await decideApproval(approvalId, 'approve', undefined, undefined, 'once', false, edit)
+    setState((s) => {
+      const turn = s.turns.find((t) => t.id === turnId)
+      if (turn) turn.pendingApprovals = (turn.pendingApprovals ?? []).filter((approval) => approval.id !== approvalId)
+    })
+    try {
+      if (runId) await resumeRun(runId)
+    } catch {
+      void refreshTurnApprovals(turnId)
+    }
+  }
+
+  /**
    * A mid-run message the run ended before receiving.
    *
    * Held rather than dropped: the 404 that produces this arrives BEFORE the SPA
@@ -2966,10 +3166,17 @@ export function useChatController() {
     // `researchPhase`/`researchPlan` are the deep-research plan and run turns (EP-2 S5).
     options: SendOptions &
       ServerVersionTarget &
-      Pick<ChatInvokeRequest, 'researchPhase' | 'researchPlan'> & { approvedPlanId?: string } = {},
+      Pick<ChatInvokeRequest, 'researchPhase' | 'researchPlan'> & {
+        approvedPlanId?: string
+        // EP-7 S1: a goal's Continue turn names its goal and its own mode; no other send sets either,
+        // so every other turn keeps the composer's plan mode exactly as before.
+        goalId?: string
+        planModeOverride?: boolean
+      } = {},
   ) => {
     const content = rawContent.trim()
     if (!content) return
+    const turnPlanMode = () => options.planModeOverride ?? planMode()
     // A deep-linked transcript from Spaces, Support, or another agent surface
     // can be displayed here for continuity, but Chat must never append a turn
     // to it or queue input into its run. The banner/composer guard is UX; this
@@ -3016,7 +3223,7 @@ export function useChatController() {
         || options.provider === OPENAI_CODEX_SUBSCRIPTION_PROVIDER
         || (options.sourceScope ?? sourceScope()) === 'conversation'
         || (options.retrievalScope ?? retrievalScope()) !== 'auto'
-        || planMode()
+        || turnPlanMode()
       if (grant && !blocked && grantHasLapsed(grant)) {
         // Past the time the gateway said the grant lapses: nothing is sent, the
         // draft stays where it is, and the plan card says what to do instead.
@@ -3116,7 +3323,7 @@ export function useChatController() {
       streaming: true,
       // Captured at SEND time so a toggle flipped later cannot retroactively
       // change what a finished turn was.
-      planMode: planMode(),
+      planMode: turnPlanMode(),
       // An execute turn is an executing run, not a plan: `planMode` stays false
       // on it. Session-only, like the armed state it came from.
       ...(executeGrant ? { executeGranted: true } : {}),
@@ -3352,7 +3559,9 @@ export function useChatController() {
           generateImage: options.generateImage,
           attachments: options.attachments,
           actions: options.actions,
-          planMode: planMode(),
+          planMode: turnPlanMode(),
+          // The goal a Continue turn works toward (EP-7 S1); absent on every other turn.
+          ...(options.goalId ? { goalId: options.goalId } : {}),
           // Only the turn `sendContent` validated above; the wire builder drops it
           // again on any turn that cannot execute. It carries no rung.
           ...(executeGrant ? { executeGranted: true } : {}),
@@ -4854,6 +5063,7 @@ export function useChatController() {
     handleScroll,
     scrollToBottom,
     handleApprovalDecision,
+    handleEditedApprovalDecision,
     refreshApprovalsForRun,
     handleComposerSubmit,
     handleStop,
@@ -4892,6 +5102,16 @@ export function useChatController() {
     pendingResearchPlan: () => pendingResearchPlan()?.plan,
     startResearchPlan,
     cancelResearchPlan,
+    // EP-7 S1: the thread goal tray and its actions. `goalEntryAvailable` offers "Set a goal" only on a
+    // thread that may hold one, while the server serves goals.
+    threadGoal,
+    goalPending,
+    goalError,
+    goalEntryAvailable: () => goalsServed() && goalThreadAllowed(state.threadId),
+    saveGoal,
+    setGoalPaused,
+    clearGoal,
+    continueGoal,
     rejectTurnPlan,
     planApprovalPending,
     planApprovalError,
