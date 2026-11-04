@@ -3977,6 +3977,16 @@ async fn dispatch_tool_with_cost(
                     Err(e) => return err_outcome(call, format!("web_search failed: {e}")),
                 }
             }
+            // The org's domain rules drop a hit on a host the org does not allow, before any hit is recorded or shown (EP-9
+            // W3). Under `off` nothing is read and nothing is dropped.
+            crate::site_policy_client::drop_denied_replies(
+                crate::site_policy_client::policy_mode(),
+                crate::site_policy_client::shared_checker(),
+                &crate::site_policy_client::SiteOwner::of(state),
+                org_id,
+                &mut replies,
+            )
+            .await;
             // The line names every search the turn answered, so it is recorded only once the whole call has
             // answered: a failed batch returned above, and its hits never reached the model.
             if let Some(provenance) = search_provenance {
@@ -4126,6 +4136,20 @@ async fn dispatch_tool_with_cost(
                 Ok(url) => url,
                 Err(message) => return err_outcome(call, message),
             };
+            // The org's domain rules come before the fetch: a host the org does not allow is refused by name, and no page
+            // is read (EP-9 W3). Under `off` nothing is read.
+            if let Some(refusal) = crate::site_policy_client::fetch_refusal(
+                crate::site_policy_client::policy_mode(),
+                crate::site_policy_client::shared_checker(),
+                &crate::site_policy_client::SiteOwner::of(state),
+                org_id,
+                &[url.as_str()],
+                &call.name,
+            )
+            .await
+            {
+                return err_outcome(call, refusal);
+            }
             // `scrape_readable`, not `scrape`: it resolves Quarry's
             // artifact-referenced page text and escalates once to the
             // browser driver when a plain fetch yields nothing. Deep
@@ -4235,6 +4259,22 @@ async fn dispatch_tool_with_cost(
                 Ok(args) => args,
                 Err(message) => return err_outcome(call, format!("extract_structured: {message}")),
             };
+            // The org's domain rules come before any page is read, for every URL the call names (EP-9 W3).
+            let refusal = {
+                let urls: Vec<&str> = args.urls.iter().map(String::as_str).collect();
+                crate::site_policy_client::fetch_refusal(
+                    crate::site_policy_client::policy_mode(),
+                    crate::site_policy_client::shared_checker(),
+                    &crate::site_policy_client::SiteOwner::of(state),
+                    org_id,
+                    &urls,
+                    &call.name,
+                )
+                .await
+            };
+            if let Some(refusal) = refusal {
+                return err_outcome(call, refusal);
+            }
             if !state.quarry.available() {
                 return err_outcome(call, "extract_structured: the page reader is not configured");
             }

@@ -27,6 +27,7 @@ use serde_json::{json, Value};
 use mp_contracts::model_plane::v1 as pb;
 
 use crate::quarry_auth::TokenSource;
+use crate::site_policy_client::SitePolicy;
 
 const MAX_SEARCH_RESULTS: usize = 8;
 // Second-stage snippet cap. The SERP providers already hand back ~150-char
@@ -47,6 +48,8 @@ pub const READ_PAGE_TOOL: &str = "read_page";
 pub const FIND_IN_PAGE_TOOL: &str = "find_in_page";
 const SEARCH_SCOPES: &[&str] = &["search:read"];
 const EXTRACT_SCOPES: &[&str] = &["extract:read"];
+/// The tool name a page fetch is refused under: the org's domain rules name it in the refusal (EP-9 W3).
+const WEB_FETCH_TOOL: &str = "web_fetch";
 /// E3.7.10: the scopes of Quarry's site map and its durable crawl/batch jobs. The
 /// service principal's grant of these is a Control Plane registry row (MP-ASKS).
 const MAP_SCOPES: &[&str] = &["map:read"];
@@ -61,6 +64,8 @@ pub struct WebToolsClient {
     base_url: String,
     auth: TokenSource,
     http: reqwest::Client,
+    /// The org's domain rules, checked before a host is reached (EP-9 W3). Off reads nothing and changes nothing.
+    site: SitePolicy,
 }
 
 impl WebToolsClient {
@@ -85,6 +90,7 @@ impl WebToolsClient {
             base_url: base_url.trim_end_matches('/').to_owned(),
             auth,
             http,
+            site: SitePolicy::from_env(),
         }))
     }
 
@@ -150,16 +156,22 @@ impl WebToolsClient {
         // so this IS the edge's contract. The `data: {...}` envelope some
         // callers expect is added by the BFF in front of the chat path, not by
         // the edge — do not "harmonise" this reader toward `data.results`.
-        let results = value
+        let mut results = value
             .get("results")
             .and_then(Value::as_array)
             .cloned()
             .unwrap_or_default();
+        // The org's domain rules drop a hit on a host the org does not allow, before any hit is shown (EP-9 W3).
+        self.site.drop_denied_results(org_id, &mut results).await;
         Ok(format_search_results(query, &value, &results))
     }
 
     /// `web_fetch` → POST `/v1/extract` (no schema ⇒ cleaned markdown per URL).
     pub async fn fetch(&self, url: &str, org_id: &str, zdr: bool) -> Result<String, String> {
+        // The org's domain rules come before the call: a host the org does not allow is refused by name, and nothing is read.
+        if let Some(refusal) = self.site.fetch_refusal(org_id, &[url], WEB_FETCH_TOOL).await {
+            return Err(refusal);
+        }
         let body = extract_body(url, zdr);
         let value = self
             .post("/v1/extract", &body, org_id, EXTRACT_SCOPES)
@@ -180,6 +192,9 @@ impl WebToolsClient {
         include_subdomains: bool,
         org_id: &str,
     ) -> Result<String, String> {
+        if let Some(refusal) = self.site.fetch_refusal(org_id, &[url], MAP_TOOL).await {
+            return Err(refusal);
+        }
         let body = map_body(url, search, limit, include_subdomains);
         let value = self.post("/v1/map", &body, org_id, MAP_SCOPES).await?;
         Ok(format_map_result(url, &value))
@@ -195,6 +210,9 @@ impl WebToolsClient {
         ingest: bool,
         org_id: &str,
     ) -> Result<String, String> {
+        if let Some(refusal) = self.site.fetch_refusal(org_id, &[url], CRAWL_SITE_TOOL).await {
+            return Err(refusal);
+        }
         let body = crawl_body(url, max_pages, max_depth, ingest);
         let value = self.post("/v1/crawl", &body, org_id, CRAWL_SCOPES).await?;
         Ok(format_handoff("crawl", &value))
@@ -207,6 +225,10 @@ impl WebToolsClient {
         ingest: bool,
         org_id: &str,
     ) -> Result<String, String> {
+        let every_url: Vec<&str> = urls.iter().map(String::as_str).collect();
+        if let Some(refusal) = self.site.fetch_refusal(org_id, &every_url, BATCH_TOOL).await {
+            return Err(refusal);
+        }
         let body = batch_body(urls, ingest);
         let value = self.post("/v1/batch", &body, org_id, CRAWL_SCOPES).await?;
         Ok(format_handoff("batch", &value))
@@ -292,6 +314,7 @@ impl WebToolsClient {
                 .timeout(Duration::from_secs(5))
                 .build()
                 .expect("test HTTP client"),
+            site: SitePolicy::disabled(),
         }
     }
 }
@@ -1213,5 +1236,143 @@ mod reader_tests {
         });
         let whole = extract_markdown("https://x", &value).expect("markdown");
         assert_eq!(whole.chars().count(), MAX_FETCH_CHARS + 10);
+    }
+}
+
+// ---- EP-9 W3: the org's domain rules before a web call (see `site_policy_client`) ---------------------------
+
+#[cfg(test)]
+mod site_policy_tests {
+    use std::sync::Arc;
+
+    use mp_contracts::site_policy::WebDomainPolicyMode;
+    use serde_json::{json, Value};
+    use wiremock::matchers::{header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    use super::tests::{mint_mock, minted, quarry_client};
+    use crate::site_policy_client::{SiteChecker, SiteOwner, SitePolicy};
+
+    const ORG: &str = "org-a";
+
+    /// org-core's resolve route for `ORG`, answering with `decisions`.
+    async fn org_core(decisions: Value) -> MockServer {
+        let org = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/internal/orgs/org-a/browser-sites/resolve"))
+            .and(header("x-service-id", "execution-core"))
+            .and(header("x-service-token", "org-core-test-token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "organization_id": ORG,
+                "revision": 3,
+                "decisions": decisions,
+            })))
+            .mount(&org)
+            .await;
+        org
+    }
+
+    /// The policy in enforcement against `org`, with a fresh cache.
+    fn enforcing(org: &MockServer) -> SitePolicy {
+        SitePolicy::new(
+            WebDomainPolicyMode::Enforce,
+            SiteOwner::new(&org.uri(), "execution-core", "org-core-test-token"),
+            Arc::new(SiteChecker::default()),
+        )
+    }
+
+    fn blocked_and_open() -> Value {
+        json!([
+            {"host": "example.org", "effective": "deny", "cap": "none", "source": "org_block"},
+            {"host": "example.com", "effective": "ask", "cap": "act", "source": "default"}
+        ])
+    }
+
+    #[tokio::test]
+    async fn a_fetch_of_a_blocked_host_is_refused_before_quarry_is_called() {
+        let org = org_core(blocked_and_open()).await;
+        let edge = MockServer::start().await;
+        // The extract route must never be reached: the refusal comes before any call to the edge.
+        Mock::given(method("POST"))
+            .and(path("/v1/extract"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&edge)
+            .await;
+        let mut client = quarry_client(&edge.uri(), "http://auth.invalid");
+        client.site = enforcing(&org);
+
+        let refusal = client
+            .fetch("https://example.org/page", ORG, false)
+            .await
+            .expect_err("a blocked host is refused");
+        assert!(refusal.starts_with("org_site_blocked: "), "{refusal}");
+        assert!(refusal.contains("'example.org'"), "{refusal}");
+        assert!(refusal.contains("'web_fetch'"), "{refusal}");
+    }
+
+    #[tokio::test]
+    async fn a_search_shows_no_hit_on_a_host_the_org_does_not_allow() {
+        let org = org_core(blocked_and_open()).await;
+        let edge = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/search"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "query": "norge",
+                "provider": "brave",
+                "results": [
+                    {"url": "https://example.org/a", "title": "Blocked hit", "snippet": "s", "rank": 1},
+                    {"url": "https://example.com/b", "title": "Open hit", "snippet": "t", "rank": 2}
+                ],
+                "count": 2
+            })))
+            .mount(&edge)
+            .await;
+        let auth = MockServer::start().await;
+        mint_mock(ORG, "search:read", minted("search-token"))
+            .mount(&auth)
+            .await;
+        let mut client = quarry_client(&edge.uri(), &auth.uri());
+        client.site = enforcing(&org);
+
+        let shown = client
+            .search("norge", 5, ORG, false)
+            .await
+            .expect("the search answers");
+        assert!(shown.contains("https://example.com/b"), "{shown}");
+        assert!(!shown.contains("example.org"), "{shown}");
+    }
+
+    #[tokio::test]
+    async fn a_map_or_a_crawl_of_a_blocked_start_host_is_refused_before_quarry_is_called() {
+        let org = org_core(blocked_and_open()).await;
+        let edge = MockServer::start().await;
+        for route in ["/v1/map", "/v1/crawl", "/v1/batch"] {
+            Mock::given(method("POST"))
+                .and(path(route))
+                .respond_with(ResponseTemplate::new(200))
+                .expect(0)
+                .mount(&edge)
+                .await;
+        }
+        let mut client = quarry_client(&edge.uri(), "http://auth.invalid");
+        client.site = enforcing(&org);
+
+        assert!(client
+            .map_site("https://example.org/", None, 10, false, ORG)
+            .await
+            .is_err_and(|refusal| refusal.starts_with("org_site_blocked: ")));
+        assert!(client
+            .start_crawl("https://example.org/", 10, None, false, ORG)
+            .await
+            .is_err_and(|refusal| refusal.starts_with("org_site_blocked: ")));
+        assert!(client
+            .start_batch(
+                &["https://example.com/a".to_owned(), "https://example.org/b".to_owned()],
+                false,
+                ORG,
+            )
+            .await
+            .is_err_and(|refusal| refusal.contains("'example.org'")));
     }
 }

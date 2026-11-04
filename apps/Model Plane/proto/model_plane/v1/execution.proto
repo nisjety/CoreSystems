@@ -322,6 +322,9 @@ message WebPolicyContext {
   // The org policy revision the switches were read at. Zero when the policy was not held and the fail-closed
   // switches apply (an enforced org the gateway could not read takes "off").
   int64 revision = 3;
+  // The org browser-site policy revision the run was admitted under (Wave 3 EP-9 W3; additive). Carried for attribution
+  // only: zero when no revision was read for the run (WEB_DOMAIN_POLICY_MODE off), and execution-core never gates on it.
+  int64 site_policy_revision = 4;
 }
 
 // ConnectorScope names the Integration Core connections one run may read (build plan WS23 S4).
