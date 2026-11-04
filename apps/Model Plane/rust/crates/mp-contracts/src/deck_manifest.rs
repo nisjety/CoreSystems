@@ -58,6 +58,27 @@ pub const MAX_FINDINGS: usize = 8;
 /// Longest finding message kept, in characters.
 pub const MAX_FINDING_MESSAGE_CHARS: usize = 200;
 
+/// Most sources a deck carries from the document it was made from (EP-5 S8).
+pub const MAX_SOURCES: usize = 40;
+
+/// Highest `[n]` a source may be cited as.
+pub const MAX_CITATION_NUMBER: u32 = 999;
+
+/// Longest source title kept, in characters.
+pub const MAX_SOURCE_TITLE_CHARS: usize = 160;
+
+/// Longest source link or document id kept, in characters.
+pub const MAX_SOURCE_URL_CHARS: usize = 400;
+
+/// Most unverified research claims a deck carries.
+pub const MAX_UNSUPPORTED_CLAIMS: usize = 32;
+
+/// Longest unverified claim kept, in characters.
+pub const MAX_CLAIM_CHARS: usize = 300;
+
+/// Longest artifact id a deck's source names, in characters.
+pub const MAX_SOURCE_ARTIFACT_ID_CHARS: usize = 128;
+
 /// How one slide is laid out. Each maps to one layout of the builder's default
 /// template, which places only some of the content fields.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -274,6 +295,114 @@ pub struct DeckManifest {
     /// The number the next minted slide id takes. It only grows, so the id of a
     /// deleted slide is never given to another one.
     pub next_slide: u32,
+    /// The brand template the deck was last built with (EP-5 S6), set by the gateway from the turn's resolved pick, never by an operation. Absent for a deck in the default theme, so its canonical text is unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub template: Option<crate::deck_theme::DeckTemplateRef>,
+    /// The document the deck was made from (EP-5 S8). Absent writes no key, so a
+    /// deck made without one keeps exactly the manifest text it had before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<DeckSource>,
+}
+
+/// One source the deck's document cites, by the `[n]` it cites it as. The
+/// builder names it in the notes of each slide whose bullets cite it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeckCitation {
+    pub number: u32,
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub document_id: Option<String>,
+}
+
+/// The document a deck was made from (EP-5 S8). The gateway sets it from the
+/// thread's own artifact store when the deck is created; no operation carries
+/// it, so the model cannot name a source the thread does not hold.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeckSource {
+    pub artifact_id: String,
+    /// The document's version when the deck was made from it.
+    pub version: u32,
+    /// sha256 (hex) of the document's provenance stamp, when it had one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provenance_digest: Option<String>,
+    /// The stamp's `ledger_digest`, when the research kept a claim ledger.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ledger_digest: Option<String>,
+    /// The stamp's read sources, by number.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sources: Vec<DeckCitation>,
+    /// Claims the ledger marked unsupported. A bullet that states one without
+    /// "(ikke verifisert)" is a builder `warn`, never silently kept.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unsupported_claims: Vec<String>,
+}
+
+impl DeckSource {
+    fn validate(&self) -> Result<(), DeckOpError> {
+        let id = &self.artifact_id;
+        if id.trim().is_empty() || id.chars().count() > MAX_SOURCE_ARTIFACT_ID_CHARS || id.chars().any(char::is_control) {
+            return Err(invalid(
+                "source.artifact_id",
+                format!("a source artifact id is 1 to {MAX_SOURCE_ARTIFACT_ID_CHARS} printable characters"),
+            ));
+        }
+        if self.version == 0 {
+            return Err(invalid("source.version", "a source version starts at 1"));
+        }
+        for (field, digest) in [("provenance_digest", &self.provenance_digest), ("ledger_digest", &self.ledger_digest)] {
+            if digest.as_deref().is_some_and(|digest| !is_sha256_hex(digest)) {
+                return Err(invalid(format!("source.{field}"), "a digest is 64 lowercase hex characters"));
+            }
+        }
+        if self.sources.len() > MAX_SOURCES {
+            return Err(invalid("source.sources", format!("at most {MAX_SOURCES} sources")));
+        }
+        for (index, citation) in self.sources.iter().enumerate() {
+            let path = format!("source.sources[{index}]");
+            if citation.number == 0 || citation.number > MAX_CITATION_NUMBER {
+                return Err(invalid(format!("{path}.number"), format!("a source number is 1 to {MAX_CITATION_NUMBER}")));
+            }
+            if self.sources[..index].iter().any(|earlier| earlier.number == citation.number) {
+                return Err(invalid(format!("{path}.number"), "each source number is listed once"));
+            }
+            if !is_one_line(&citation.title, MAX_SOURCE_TITLE_CHARS) {
+                return Err(invalid(format!("{path}.title"), format!("one line of at most {MAX_SOURCE_TITLE_CHARS} characters")));
+            }
+            for (field, value) in [("url", &citation.url), ("document_id", &citation.document_id)] {
+                if value.as_deref().is_some_and(|value| value.is_empty() || !is_one_line(value, MAX_SOURCE_URL_CHARS)) {
+                    return Err(invalid(format!("{path}.{field}"), format!("one line of 1 to {MAX_SOURCE_URL_CHARS} characters")));
+                }
+            }
+        }
+        if self.unsupported_claims.len() > MAX_UNSUPPORTED_CLAIMS {
+            return Err(invalid("source.unsupported_claims", format!("at most {MAX_UNSUPPORTED_CLAIMS} claims")));
+        }
+        for (index, claim) in self.unsupported_claims.iter().enumerate() {
+            if claim.trim().is_empty() || !is_one_line(claim, MAX_CLAIM_CHARS) {
+                return Err(invalid(
+                    format!("source.unsupported_claims[{index}]"),
+                    format!("one line of 1 to {MAX_CLAIM_CHARS} characters"),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// The keys the builder reads from the source: the sources it writes into
+    /// notes and the claims it warns on. The digests stay out; they are the
+    /// thread's record, not layout input.
+    fn add_to_builder_view(&self, view: &mut Value) {
+        if !self.sources.is_empty() {
+            view["sources"] = json!(self.sources);
+        }
+        if !self.unsupported_claims.is_empty() {
+            view["unsupported_claims"] = json!(self.unsupported_claims);
+        }
+    }
 }
 
 impl DeckManifest {
@@ -288,6 +417,8 @@ impl DeckManifest {
             slides: Vec::new(),
             revision: 0,
             next_slide: 1,
+            template: None,
+            source: None,
         }
     }
 
@@ -418,6 +549,9 @@ impl DeckManifest {
             }
             slide.validate(&path)?;
         }
+        if let Some(source) = &self.source {
+            source.validate()?;
+        }
         let chars = self.canonical_json().chars().count();
         if chars > MAX_MANIFEST_CHARS {
             return Err(invalid(
@@ -453,17 +587,20 @@ impl DeckManifest {
 
     /// The manifest v1 document the builder reads: content only. The state,
     /// findings and counters stay out, because the builder reports an unknown
-    /// slide field as a finding.
+    /// slide field as a finding. A deck made from a document adds its sources.
     #[must_use]
     pub fn builder_json(&self) -> String {
         let slides: Vec<Value> = self.slides.iter().map(Slide::builder_value).collect();
-        json!({
+        let mut view = json!({
             "version": self.version,
             "title": self.title,
             "locale": self.locale,
             "slides": slides,
-        })
-        .to_string()
+        });
+        if let Some(source) = &self.source {
+            source.add_to_builder_view(&mut view);
+        }
+        view.to_string()
     }
 
     /// Write a build's outcome onto the slides. A refused build marks every
@@ -607,6 +744,15 @@ fn is_plain_id(id: &str) -> bool {
     !id.is_empty()
         && id.chars().count() <= MAX_ID_CHARS
         && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+fn is_sha256_hex(digest: &str) -> bool {
+    digest.len() == 64 && digest.chars().all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c))
+}
+
+/// One line of printable text no longer than `max` characters.
+fn is_one_line(text: &str, max: usize) -> bool {
+    text.chars().count() <= max && !text.chars().any(char::is_control)
 }
 
 /// Whether `id` is a minted slide id (`s` and a number) below the next one to mint.
@@ -1023,6 +1169,79 @@ mod tests {
         assert!(deck.slides[0].findings.is_empty());
     }
 
+    fn source() -> DeckSource {
+        DeckSource {
+            artifact_id: "research-01req".to_owned(),
+            version: 2,
+            provenance_digest: Some("a".repeat(64)),
+            ledger_digest: Some("0123456789abcdef".repeat(4)),
+            sources: vec![DeckCitation {
+                number: 1,
+                title: "SSB: Konsumprisindeksen".to_owned(),
+                url: Some("https://www.ssb.no/kpi".to_owned()),
+                document_id: None,
+            }],
+            unsupported_claims: vec!["Prisene faller neste år".to_owned()],
+        }
+    }
+
+    #[test]
+    fn a_deck_without_a_source_writes_no_source_key() {
+        let deck = DeckManifest::from_untrusted_json(include_str!("../tests/fixtures/deck_manifest_v1.json")).unwrap();
+        assert!(deck.source.is_none());
+        assert!(!deck.canonical_json().contains("\"source\""));
+        let view: Value = serde_json::from_str(&deck.builder_json()).unwrap();
+        assert!(view.get("sources").is_none() && view.get("unsupported_claims").is_none());
+    }
+
+    #[test]
+    fn a_source_survives_storage_and_reaches_the_builder() {
+        let mut deck = DeckManifest::empty("deck-q3");
+        deck.source = Some(source());
+        deck.apply(DeckOp::Create {
+            title: "Priser".to_owned(),
+            locale: "nb-NO".to_owned(),
+            slides: vec![slide(SlideLayout::TitleBullets, "KPI", &["Opp 3 % [1]"])],
+        })
+        .unwrap();
+        let stored = deck.canonical_json();
+        let reread = DeckManifest::from_untrusted_json(&stored).unwrap();
+        assert_eq!(reread.source, Some(source()));
+        assert_eq!(reread.canonical_json(), stored);
+        // The marker stays in the manifest; the builder moves it into the notes.
+        assert_eq!(reread.slides[0].bullets, ["Opp 3 % [1]"]);
+        let view: Value = serde_json::from_str(&reread.builder_json()).unwrap();
+        assert_eq!(view["sources"][0]["number"], 1);
+        assert_eq!(view["unsupported_claims"][0], "Prisene faller neste år");
+        assert!(view.get("source").is_none(), "the digests are not layout input");
+    }
+
+    #[test]
+    fn a_bad_source_is_refused_with_its_field_path() {
+        let cases: [(fn(&mut DeckSource), &str); 6] = [
+            (|s| s.version = 0, "source.version"),
+            (|s| s.provenance_digest = Some("ABC".to_owned()), "source.provenance_digest"),
+            (|s| s.sources[0].number = 0, "source.sources[0].number"),
+            (|s| s.sources.push(s.sources[0].clone()), "source.sources[1].number"),
+            (|s| s.sources[0].title = "line\nbreak".to_owned(), "source.sources[0].title"),
+            (|s| s.unsupported_claims.push(String::new()), "source.unsupported_claims[1]"),
+        ];
+        for (spoil, field) in cases {
+            let mut bad = source();
+            spoil(&mut bad);
+            let mut deck = DeckManifest::empty("deck-q3");
+            deck.source = Some(bad);
+            let error = deck
+                .apply(DeckOp::Create {
+                    title: "Priser".to_owned(),
+                    locale: "nb-NO".to_owned(),
+                    slides: Vec::new(),
+                })
+                .unwrap_err();
+            assert!(matches!(&error, DeckOpError::Invalid { path, .. } if path == field), "{field}: {error}");
+        }
+    }
+
     /// The builder holds the same caps in Python. Read as text, because the two
     /// live in different languages and the compiler cannot see the script.
     #[test]
@@ -1040,6 +1259,9 @@ mod tests {
             ("MAX_TITLE_CHARS", MAX_TITLE_CHARS),
             ("MAX_NOTES_CHARS", MAX_NOTES_CHARS),
             ("MAX_ID_CHARS", MAX_ID_CHARS),
+            ("MAX_SOURCES", MAX_SOURCES),
+            ("MAX_CITATION_NUMBER", MAX_CITATION_NUMBER as usize),
+            ("MAX_UNSUPPORTED_CLAIMS", MAX_UNSUPPORTED_CLAIMS),
         ] {
             let prefix = format!("{name} = ");
             let held = script
