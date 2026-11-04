@@ -225,6 +225,19 @@
       "zdr_allowed": false
     },
     {
+      "actionId": "browser_download.send_to_knowledge",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "external_write",
+      "exemptReason": "no_owner_executor",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:38c7e33963c0f3f1dbac4fbdae17badfad64654d5ab136517f918ff1c2c06e8c",
+      "zdr_allowed": false
+    },
+    {
       "actionId": "browser_evidence.compile_procedure",
       "registry": true,
       "access": "none",
