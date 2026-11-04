@@ -46,6 +46,7 @@ import {
   type PresetAgentId,
   type ResolvedPresetAgent,
 } from '@/shared/actions/preset-agents'
+import { listAuthored, type AuthoredBehaviour } from '@/shared/api/authored-kinds-client'
 import {
   streamChat,
   VEREVON_BALANCE_MODE_ID,
@@ -246,6 +247,20 @@ export default function AgentRunConsole() {
       ])
       return { plans, todos }
     },
+  )
+
+  // The person's authored presets (EP-11 S6), listed under the curated ones. Empty while the
+  // server's authored kinds are off and on any failure: the curated presets never depend on them.
+  const [authoredPresets] = createResource(async () => {
+    try {
+      const { items, kindsEnabled } = await listAuthored('preset')
+      return kindsEnabled ? items : []
+    } catch {
+      return [] as AuthoredBehaviour[]
+    }
+  })
+  const authoredPresetList = createMemo<AuthoredBehaviour[]>(() =>
+    authoredPresets.error != null ? [] : authoredPresets() ?? [],
   )
 
   const [runs] = createResource(
@@ -866,6 +881,19 @@ export default function AgentRunConsole() {
     setBrowseWeb(preset.defaults.browseWeb)
   }
 
+  // An authored preset fills the console's visible controls and nothing else: it carries no
+  // action subset (that stays with the curated presets, EP-6 S11), plan mode stays on, and the run
+  // starts only on the person's click. A control the preset does not name is left as it was, and a
+  // mode the console does not offer is ignored rather than sent.
+  const applyAuthoredPreset = (preset: AuthoredBehaviour) => {
+    if (isActive()) return
+    setPresetId(null)
+    if (preset.content.trim()) setGoal(preset.content)
+    const modeId = preset.settings.modeId
+    if (modeId && VEREVON_MODES.some((mode) => mode.id === modeId)) setModeId(modeId)
+    if (preset.settings.browseWeb !== undefined) setBrowseWeb(preset.settings.browseWeb)
+  }
+
   const working = () => state.status === 'running'
   const awaiting = () => pendingApprovals().length > 0
   const deciding = (id: string) => state.decidingIds.includes(id)
@@ -915,6 +943,8 @@ export default function AgentRunConsole() {
               isActive={isActive()}
               modeId={modeId()}
               presetId={presetId()}
+              authoredPresets={authoredPresetList()}
+              onAuthoredPreset={applyAuthoredPreset}
               onBlueprint={setBlueprintId}
               onBrowseWeb={setBrowseWeb}
               onCancel={cancel}
@@ -1103,6 +1133,8 @@ function Launcher(props: {
   isActive: boolean
   modeId: string
   presetId: PresetAgentId | null
+  authoredPresets: AuthoredBehaviour[]
+  onAuthoredPreset: (preset: AuthoredBehaviour) => void
   onBlueprint: (id: AgentBlueprint['id']) => void
   onBrowseWeb: (value: boolean) => void
   onCancel: () => void
@@ -1123,6 +1155,11 @@ function Launcher(props: {
         activeId={props.presetId}
         disabled={props.isActive}
         onSelect={props.onPreset}
+      />
+      <AuthoredPresetPicker
+        presets={props.authoredPresets}
+        disabled={props.isActive}
+        onSelect={props.onAuthoredPreset}
       />
 
       <div class="verevon-run-launcher__field">
@@ -1326,6 +1363,41 @@ function PresetPicker(props: {
         </For>
       </div>
     </div>
+  )
+}
+
+// Authored presets (EP-11 S6): the person's own, listed under the curated ones. Picking one only
+// fills the console's controls; nothing runs until Run is pressed. Hidden when there are none.
+function AuthoredPresetPicker(props: {
+  presets: AuthoredBehaviour[]
+  disabled: boolean
+  onSelect: (preset: AuthoredBehaviour) => void
+}) {
+  const i18n = useI18n()
+  return (
+    <Show when={props.presets.length > 0}>
+      <div class="verevon-run-launcher__field">
+        <p class="verevon-run-launcher__label">{i18n.tr('Dine forhåndsinnstillinger', 'Your presets')}</p>
+        <div class="verevon-run-launcher__presets" role="group" aria-label={i18n.tr('Dine forhåndsinnstillinger', 'Your presets')}>
+          <For each={props.presets}>
+            {(preset) => (
+              <button
+                type="button"
+                disabled={props.disabled}
+                onClick={() => props.onSelect(preset)}
+                class={cn('verevon-run-preset', controlFocusClass)}
+                data-authored-preset={preset.id}
+              >
+                <span class="verevon-run-preset__label">{preset.name}</span>
+                <Show when={preset.description}>
+                  <span class="verevon-run-preset__desc">{preset.description}</span>
+                </Show>
+              </button>
+            )}
+          </For>
+        </div>
+      </div>
+    </Show>
   )
 }
 

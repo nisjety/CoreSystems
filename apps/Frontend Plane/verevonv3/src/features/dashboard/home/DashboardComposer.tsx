@@ -81,10 +81,12 @@ import { dictateAudioBlob } from "@/shared/api/audio-client";
 import {
 	actionKey,
 	BUILTIN_ACTIONS,
+	loadSlashTemplates,
 	loadSpecializedActions,
 	type SpecializedAction,
 	type SpecializedActionKind,
 } from "@/shared/api/chat-actions-client";
+import { fillTemplate, type AuthoredBehaviour } from "@/shared/api/authored-kinds-client";
 import {
 	loadComposerSettingsItems,
 	type ComposerSettingsItem,
@@ -1420,6 +1422,32 @@ export function DashboardComposer(props: {
 	});
 	// This composer's slash-command registry (C-B10): pieces that bring their own `/` command register it here.
 	const slashRegistry = createSlashCommandRegistry();
+	// The person's `/` templates (EP-11 S6), by registered command id. A template only fills the
+	// draft: picking it from the menu, or sending a typed `/name rest`, puts the text in the draft
+	// with `{{input}}` taken from the rest of the line, and the person sends it themselves.
+	const slashTemplates = new Map<string, AuthoredBehaviour>();
+	const applySlashTemplate = (template: AuthoredBehaviour, input: string) => {
+		const text = fillTemplate(template.content, input);
+		props.onMessageChange(text);
+		focusTextareaAtNextFrame(text.length);
+	};
+	// Registered once, after the first `/`; the registry lives and dies with this composer.
+	const registerSlashTemplates = (templates: AuthoredBehaviour[]) => {
+		for (const template of templates) {
+			const id = `template:${template.id}`;
+			slashTemplates.set(id, template);
+			slashRegistry.register({
+				id,
+				name: slugifyCommandName(template.name),
+				aliases: [],
+				label: template.name,
+				description: { no: template.description || "Mal", en: template.description || "Template" },
+				icon: FileText,
+				// The menu has already cleared the typed `/name`; what is left is the input.
+				run: () => applySlashTemplate(template, props.message),
+			});
+		}
+	};
 	// Context chips for this turn (EP-3 S5). They exist only where the catalogue says the gateway resolves
 	// references and the turn may carry them; like connected apps, they are cleared once the turn is sent.
 	const [contextRefs, setContextRefs] = createSignal<ChatContextRef[]>([]);
@@ -1787,6 +1815,7 @@ export function DashboardComposer(props: {
 	const ensureActionsLoaded = () => {
 		if (actionsLoadStarted) return;
 		actionsLoadStarted = true;
+		void loadSlashTemplates().then(registerSlashTemplates);
 		void loadSpecializedActions()
 			.then((items) => {
 				setSpecializedActions(
@@ -2786,6 +2815,15 @@ export function DashboardComposer(props: {
 		const pendingCommand = draftCommand();
 		if (pendingCommand?.command.argument?.required && !pendingCommand.argument)
 			return { ok: false };
+		// A typed `/template rest` is never sent as typed: it becomes the template's text in the
+		// draft, `{{input}}` filled from the rest, and the person reads it and sends it (EP-11 S6).
+		const pendingTemplate = pendingCommand?.command.registered
+			? slashTemplates.get(pendingCommand.command.registered.id)
+			: undefined;
+		if (pendingTemplate) {
+			applySlashTemplate(pendingTemplate, pendingCommand?.argument ?? "");
+			return { ok: false };
+		}
 		// Typed commands apply even when the menu was never opened: "/image en
 		// rød katt" straight off the keyboard must carry the image tool, and
 		// "/kvalitet rapport uke 12" must carry the skill.

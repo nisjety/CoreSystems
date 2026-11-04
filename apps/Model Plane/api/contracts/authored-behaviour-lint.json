@@ -21,6 +21,10 @@
   "transcript_prefixes": ["User:", "Assistant:", "Bruker:"],
   "transcript_min_lines": 3,
   "tool_name_pattern": "^[A-Za-z0-9_.-]+$",
+  "kinds": ["skill", "template", "preset"],
+  "kinds_note": "EP-11 S6: an empty kind reads as skill. The template and preset rules apply only to their kind; capability-core runs them on every template or preset write while AUTHORED_KINDS_ENABLED is true, whatever SKILL_LINT_MODE says, because no stored row predates them.",
+  "template_placeholder": "{{input}}",
+  "preset_settings_keys": ["modeId", "browseWeb", "planMode", "skillIds", "templateId"],
   "rules": [
     {"code": "name_empty", "field": "name", "severity": "error", "limit": null, "rule": "the name is empty after trimming whitespace; the other name rules are then skipped"},
     {"code": "name_too_long", "field": "name", "severity": "error", "limit": 64, "rule": "the name has more than limit characters"},
@@ -34,6 +38,9 @@
     {"code": "trigger_keyword_count", "field": "trigger_keywords", "severity": "error", "limit": 20, "rule": "more than limit trigger keywords"},
     {"code": "trigger_keyword_too_long", "field": "trigger_keywords", "severity": "error", "limit": 40, "rule": "a trigger keyword has more than limit characters; reported once"},
     {"code": "tool_restriction_invalid", "field": "tool_restrictions", "severity": "error", "limit": null, "rule": "a tool restriction is not one plain tool name matching tool_name_pattern (D2-512); reported once"},
-    {"code": "frontmatter_name_mismatch", "field": "frontmatter", "severity": "error", "limit": null, "rule": "a bundle SKILL.md front matter name, trimmed, differs from the skill name, trimmed; only checked on a bundle upload"}
+    {"code": "frontmatter_name_mismatch", "field": "frontmatter", "severity": "error", "limit": null, "rule": "a bundle SKILL.md front matter name, trimmed, differs from the skill name, trimmed; only checked on a bundle upload"},
+    {"code": "template_placeholder_invalid", "field": "content", "severity": "error", "limit": null, "rule": "kind template only: a position where {{ occurs (overlapping ones included) does not start template_placeholder"},
+    {"code": "preset_settings_invalid", "field": "settings", "severity": "error", "limit": 4, "rule": "kind preset only: settings is not an object, or a known key has the wrong type: modeId and templateId text, browseWeb a boolean, planMode exactly true, skillIds a list of at most limit texts; reported once"},
+    {"code": "preset_unknown_key", "field": "settings", "severity": "error", "limit": null, "rule": "kind preset only: settings holds a key outside preset_settings_keys; reported once"}
   ]
 }

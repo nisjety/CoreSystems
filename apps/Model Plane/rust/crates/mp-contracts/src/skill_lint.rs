@@ -13,6 +13,10 @@
 //!
 //! A finding names a rule and a field, never the text, so it can be logged,
 //! counted and returned to a caller without echoing the skill back.
+//!
+//! EP-11 S6 adds the authored kinds `template` and `preset` to the same table
+//! and the same lint: a template may hold no placeholder but `{{input}}`, and a
+//! preset's settings are a closed object of visible composer controls.
 
 /// The switch both writers read. Only `report` and `enforce` turn the lint on.
 pub const MODE_ENV: &str = "SKILL_LINT_MODE";
@@ -41,6 +45,20 @@ pub const MAX_TRIGGER_KEYWORD_CHARS: usize = 40;
 /// the speaker labels chat exports write are capitalised.
 pub const TRANSCRIPT_PREFIXES: &[&str] = &["User:", "Assistant:", "Bruker:"];
 
+/// The authored kinds (EP-11 S6). An empty kind reads as `skill`.
+pub const KINDS: &[&str] = &["skill", "template", "preset"];
+/// The one placeholder a template may hold: the composer fills it with the rest
+/// of the `/` line. Every `{{` in a template must start it.
+pub const TEMPLATE_PLACEHOLDER: &str = "{{input}}";
+/// The keys a preset's settings may hold, each one a control the person could
+/// set by hand: `modeId` (text), `browseWeb` (bool), `planMode` (must be `true`:
+/// a console preset never turns planning off), `skillIds` (at most
+/// `MAX_PRESET_SKILLS` texts) and `templateId` (text).
+pub const PRESET_SETTINGS_KEYS: &[&str] =
+    &["modeId", "browseWeb", "planMode", "skillIds", "templateId"];
+/// Most skills one preset may pick (`MAX_PICKED_SKILLS` in the composer).
+pub const MAX_PRESET_SKILLS: usize = 4;
+
 /// The closed rule codes, in the order findings are reported.
 pub mod code {
     pub const NAME_EMPTY: &str = "name_empty";
@@ -56,6 +74,9 @@ pub mod code {
     pub const TRIGGER_KEYWORD_TOO_LONG: &str = "trigger_keyword_too_long";
     pub const TOOL_RESTRICTION_INVALID: &str = "tool_restriction_invalid";
     pub const FRONTMATTER_NAME_MISMATCH: &str = "frontmatter_name_mismatch";
+    pub const TEMPLATE_PLACEHOLDER_INVALID: &str = "template_placeholder_invalid";
+    pub const PRESET_SETTINGS_INVALID: &str = "preset_settings_invalid";
+    pub const PRESET_UNKNOWN_KEY: &str = "preset_unknown_key";
 }
 
 /// Whether a finding refuses a write under `enforce` or only informs.
@@ -124,10 +145,15 @@ pub const RULES: &[Rule] = &[
     ),
     rule(code::TOOL_RESTRICTION_INVALID, "tool_restrictions", Severity::Error, None),
     rule(code::FRONTMATTER_NAME_MISMATCH, "frontmatter", Severity::Error, None),
+    rule(code::TEMPLATE_PLACEHOLDER_INVALID, "content", Severity::Error, None),
+    rule(code::PRESET_SETTINGS_INVALID, "settings", Severity::Error, Some(MAX_PRESET_SKILLS)),
+    rule(code::PRESET_UNKNOWN_KEY, "settings", Severity::Error, None),
 ];
 
 /// The skill text a write would store. `frontmatter_name` is the `name` of a
 /// bundle's `SKILL.md` front matter, present only when a bundle is checked.
+/// `kind` is the authored kind (empty reads as `skill`); `settings` is a
+/// preset's settings, absent for the other kinds.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SkillInput<'a> {
     pub name: &'a str,
@@ -136,6 +162,8 @@ pub struct SkillInput<'a> {
     pub trigger_keywords: &'a [String],
     pub tool_restrictions: &'a [String],
     pub frontmatter_name: Option<&'a str>,
+    pub kind: &'a str,
+    pub settings: Option<&'a serde_json::Value>,
 }
 
 /// The lint mode a writer runs in.
@@ -231,6 +259,19 @@ pub fn lint(input: &SkillInput<'_>) -> Vec<&'static Rule> {
         }
     }
 
+    if input.kind == "template" && !template_placeholders_valid(input.content) {
+        broken.push(code::TEMPLATE_PLACEHOLDER_INVALID);
+    }
+    if input.kind == "preset" {
+        let (invalid, unknown_key) = preset_settings_findings(input.settings);
+        if invalid {
+            broken.push(code::PRESET_SETTINGS_INVALID);
+        }
+        if unknown_key {
+            broken.push(code::PRESET_UNKNOWN_KEY);
+        }
+    }
+
     broken.into_iter().filter_map(rule_for).collect()
 }
 
@@ -261,6 +302,44 @@ fn transcript_lines(content: &str) -> usize {
         .map(str::trim_start)
         .filter(|line| TRANSCRIPT_PREFIXES.iter().any(|prefix| line.starts_with(prefix)))
         .count()
+}
+
+/// Every position where `{{` occurs, overlapping ones included, starts
+/// `{{input}}`, so `{{ input }}`, `{{name}}` and `{{{input}}}` are refused.
+fn template_placeholders_valid(content: &str) -> bool {
+    let bytes = content.as_bytes();
+    (0..bytes.len().saturating_sub(1))
+        .filter(|&at| bytes[at] == b'{' && bytes[at + 1] == b'{')
+        .all(|at| content[at..].starts_with(TEMPLATE_PLACEHOLDER))
+}
+
+/// A preset's settings against the closed schema: (a known key has the wrong
+/// type or value, a key is outside `PRESET_SETTINGS_KEYS`). Absent or JSON
+/// `null` settings are an empty object (Go decodes `null` to nil); settings that
+/// are not an object are invalid.
+fn preset_settings_findings(settings: Option<&serde_json::Value>) -> (bool, bool) {
+    use serde_json::Value;
+    let Some(settings) = settings.filter(|value| !value.is_null()) else {
+        return (false, false);
+    };
+    let Some(object) = settings.as_object() else {
+        return (true, false);
+    };
+    let (mut invalid, mut unknown_key) = (false, false);
+    for (key, value) in object {
+        match key.as_str() {
+            "modeId" | "templateId" => invalid |= !value.is_string(),
+            "browseWeb" => invalid |= !value.is_boolean(),
+            "planMode" => invalid |= *value != Value::Bool(true),
+            "skillIds" => {
+                invalid |= !value.as_array().is_some_and(|ids| {
+                    ids.len() <= MAX_PRESET_SKILLS && ids.iter().all(Value::is_string)
+                });
+            }
+            _ => unknown_key = true,
+        }
+    }
+    (invalid, unknown_key)
 }
 
 /// One plain tool name (`[A-Za-z0-9_.-]+`): no wildcard, no space, not empty.
@@ -333,6 +412,9 @@ mod tests {
         assert_eq!(strings(&contract["transcript_prefixes"]), TRANSCRIPT_PREFIXES);
         assert_eq!(contract["transcript_min_lines"], TRANSCRIPT_MIN_LINES);
         assert_eq!(contract["tool_name_pattern"], "^[A-Za-z0-9_.-]+$");
+        assert_eq!(strings(&contract["kinds"]), KINDS);
+        assert_eq!(contract["template_placeholder"], TEMPLATE_PLACEHOLDER);
+        assert_eq!(strings(&contract["preset_settings_keys"]), PRESET_SETTINGS_KEYS);
     }
 
     #[test]
@@ -362,6 +444,8 @@ mod tests {
                 trigger_keywords: &keywords,
                 tool_restrictions: &tools,
                 frontmatter_name: input["frontmatter_name"].as_str(),
+                kind: input["kind"].as_str().unwrap_or_default(),
+                settings: input.get("settings"),
             });
             let got: Vec<&str> = findings.iter().map(|rule| rule.code).collect();
             assert_eq!(got, strings(&case["expect"]), "case {id}");
@@ -400,5 +484,20 @@ mod tests {
             ..SkillInput::default()
         });
         assert!(first_error(&warnings_only).is_none(), "a warning never refuses");
+    }
+
+    /// EP-11 S6: the kind rules read nothing on a skill, so a skill whose text
+    /// happens to hold `{{name}}` or a stray settings object is linted as before.
+    #[test]
+    fn skill_lint_kind_rules_skip_skills() {
+        let settings = serde_json::json!({"planMode": false, "persona": "x"});
+        let findings = lint(&SkillInput {
+            name: "Report",
+            description: "d",
+            content: "Hello {{name}}",
+            settings: Some(&settings),
+            ..SkillInput::default()
+        });
+        assert!(findings.is_empty(), "{findings:?}");
     }
 }

@@ -51,6 +51,9 @@ func TestLintRulesAreTheContractRulesInOrder(t *testing.T) {
 		TranscriptPrefixes []string `json:"transcript_prefixes"`
 		TranscriptMinLines int      `json:"transcript_min_lines"`
 		ToolNamePattern    string   `json:"tool_name_pattern"`
+		Kinds              []string `json:"kinds"`
+		Placeholder        string   `json:"template_placeholder"`
+		PresetSettingsKeys []string `json:"preset_settings_keys"`
 		Rules              []struct {
 			Code     string `json:"code"`
 			Field    string `json:"field"`
@@ -83,6 +86,10 @@ func TestLintRulesAreTheContractRulesInOrder(t *testing.T) {
 	if contract.ToolNamePattern != "^[A-Za-z0-9_.-]+$" {
 		t.Errorf("tool name pattern drifted: %s", contract.ToolNamePattern)
 	}
+	if !reflect.DeepEqual(contract.Kinds, Kinds) || contract.Placeholder != TemplatePlaceholder ||
+		!reflect.DeepEqual(contract.PresetSettingsKeys, PresetSettingsKeys) {
+		t.Errorf("kind rules drifted: %v %q %v", contract.Kinds, contract.Placeholder, contract.PresetSettingsKeys)
+	}
 }
 
 func TestLintGoldenParity(t *testing.T) {
@@ -96,6 +103,8 @@ func TestLintGoldenParity(t *testing.T) {
 				TriggerKeywords  []string `json:"trigger_keywords"`
 				ToolRestrictions []string `json:"tool_restrictions"`
 				FrontmatterName  *string  `json:"frontmatter_name"`
+				Kind             string   `json:"kind"`
+				Settings         any      `json:"settings"`
 			} `json:"input"`
 			Repeat *struct {
 				Field string `json:"field"`
@@ -116,6 +125,7 @@ func TestLintGoldenParity(t *testing.T) {
 			Name: c.Input.Name, Description: c.Input.Description, Content: c.Input.Content,
 			TriggerKeywords: c.Input.TriggerKeywords, ToolRestrictions: c.Input.ToolRestrictions,
 			FrontmatterName: c.Input.FrontmatterName,
+			Kind: c.Input.Kind, Settings: c.Input.Settings,
 		}
 		if c.Repeat != nil {
 			text := strings.Repeat(c.Repeat.Text, c.Repeat.Count)
@@ -170,5 +180,27 @@ func TestLintFindingsCarrySeverityAndNoText(t *testing.T) {
 	encoded, _ := json.Marshal(findings)
 	if strings.Contains(string(encoded), "secret") {
 		t.Fatalf("a finding must not carry the text: %s", encoded)
+	}
+}
+
+// EP-11 S6: the kind rules read nothing on a skill, so a skill whose text happens to hold
+// {{name}} or a stray settings object is linted as before; KindRuleFindings keeps only them.
+func TestLintKindRulesSkipSkillsAndFilter(t *testing.T) {
+	settings := map[string]any{"planMode": false, "persona": "x"}
+	if findings := Lint(Input{Name: "Report", Description: "d", Content: "Hello {{name}}", Settings: settings}); len(findings) != 0 {
+		t.Fatalf("a skill got kind findings: %+v", findings)
+	}
+	findings := Lint(Input{Name: "Report", Content: "c", Kind: KindPreset, Settings: settings})
+	got := []string{}
+	for _, finding := range KindRuleFindings(findings) {
+		got = append(got, finding.Code)
+	}
+	if want := []string{CodePresetSettingsInvalid, CodePresetUnknownKey}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("kind findings = %v, want %v (description_missing is not a kind rule)", got, want)
+	}
+	for kind, want := range map[string]bool{"skill": true, "template": true, "preset": true, "": false, "agent": false, "Skill": false} {
+		if ValidKind(kind) != want {
+			t.Errorf("ValidKind(%q) = %v", kind, !want)
+		}
 	}
 }

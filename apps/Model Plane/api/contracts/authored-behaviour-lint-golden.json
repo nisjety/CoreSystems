@@ -1,7 +1,7 @@
 {
   "contract": "authored-behaviour-lint",
   "version": 1,
-  "note": "Inputs and the codes each must produce, in rule order. A missing field is empty; frontmatter_name absent means no bundle. repeat replaces one text field (name, description or content) with text repeated count times.",
+  "note": "Inputs and the codes each must produce, in rule order. A missing field is empty; frontmatter_name absent means no bundle; kind absent reads as skill and settings absent means none. repeat replaces one text field (name, description or content) with text repeated count times.",
   "cases": [
     {"id": "clean", "input": {"name": "Weekly report", "description": "How to write the weekly report.", "content": "1. Pull the numbers.\n2. Write three bullets."}, "expect": []},
     {"id": "everything_empty", "input": {}, "expect": ["name_empty", "description_missing", "content_empty"]},
@@ -30,6 +30,20 @@
     {"id": "tool_with_space_and_empty", "input": {"name": "Report", "description": "d", "content": "c", "tool_restrictions": ["read file", ""]}, "expect": ["tool_restriction_invalid"]},
     {"id": "frontmatter_matches_after_trim", "input": {"name": "Weekly report", "description": "d", "content": "c", "frontmatter_name": " Weekly report "}, "expect": []},
     {"id": "frontmatter_mismatch", "input": {"name": "Weekly report", "description": "d", "content": "c", "frontmatter_name": "weekly-report"}, "expect": ["frontmatter_name_mismatch"]},
+    {"id": "template_input_placeholder", "input": {"name": "Weekly", "description": "d", "content": "Write the weekly report for {{input}}.", "kind": "template"}, "expect": []},
+    {"id": "template_without_placeholder", "input": {"name": "Weekly", "description": "d", "content": "Write the weekly report.", "kind": "template"}, "expect": []},
+    {"id": "template_unknown_placeholder", "input": {"name": "Weekly", "description": "d", "content": "Dear {{name}}, {{input}}", "kind": "template"}, "expect": ["template_placeholder_invalid"]},
+    {"id": "template_spaced_placeholder", "input": {"name": "Weekly", "description": "d", "content": "{{ input }}", "kind": "template"}, "expect": ["template_placeholder_invalid"]},
+    {"id": "template_triple_brace", "input": {"name": "Weekly", "description": "d", "content": "{{{input}}}", "kind": "template"}, "expect": ["template_placeholder_invalid"]},
+    {"id": "skill_placeholder_not_checked", "input": {"name": "Weekly", "description": "d", "content": "Dear {{name}}"}, "expect": []},
+    {"id": "preset_full_settings", "input": {"name": "Research", "description": "d", "content": "c", "kind": "preset", "settings": {"modeId": "research", "browseWeb": true, "planMode": true, "skillIds": ["s1", "s2", "s3", "s4"], "templateId": "t1"}}, "expect": []},
+    {"id": "preset_empty_settings", "input": {"name": "Research", "description": "d", "content": "c", "kind": "preset", "settings": {}}, "expect": []},
+    {"id": "preset_plan_mode_false", "input": {"name": "Research", "description": "d", "content": "c", "kind": "preset", "settings": {"planMode": false}}, "expect": ["preset_settings_invalid"]},
+    {"id": "preset_too_many_skills", "input": {"name": "Research", "description": "d", "content": "c", "kind": "preset", "settings": {"skillIds": ["s1", "s2", "s3", "s4", "s5"]}}, "expect": ["preset_settings_invalid"]},
+    {"id": "preset_wrong_types", "input": {"name": "Research", "description": "d", "content": "c", "kind": "preset", "settings": {"modeId": 3, "browseWeb": "yes"}}, "expect": ["preset_settings_invalid"]},
+    {"id": "preset_settings_not_an_object", "input": {"name": "Research", "description": "d", "content": "c", "kind": "preset", "settings": ["planMode"]}, "expect": ["preset_settings_invalid"]},
+    {"id": "preset_unknown_key", "input": {"name": "Research", "description": "d", "content": "c", "kind": "preset", "settings": {"persona": "pirate", "toolAllowList": ["*"]}}, "expect": ["preset_unknown_key"]},
+    {"id": "preset_invalid_and_unknown", "input": {"name": "Research", "description": "d", "content": "c", "kind": "preset", "settings": {"planMode": false, "autonomy": "full"}}, "expect": ["preset_settings_invalid", "preset_unknown_key"]},
     {"id": "errors_and_warnings_in_rule_order", "input": {"name": "Report ", "description": "", "content": "User: a\nAssistant: b\nUser: c", "trigger_keywords": ["k"], "tool_restrictions": ["a b"], "frontmatter_name": "Other"}, "expect": ["name_charset", "description_missing", "transcript_shape", "tool_restriction_invalid", "frontmatter_name_mismatch"]}
   ]
 }

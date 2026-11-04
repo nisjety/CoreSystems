@@ -1542,6 +1542,24 @@ describe('action registry', () => {
     expect(publish?.inputSchema.safeParse({ agentRef: '' }).success).toBe(false)
   })
 
+  it('registers templates and presets as person-only writes whose preset settings are the closed schema (EP-11-S6)', () => {
+    for (const id of ['templates.create', 'templates.update', 'presets.create', 'presets.update'] as const) {
+      const descriptor = getActionDescriptor(id)
+      expect(descriptor?.ownerPlane).toBe('model')
+      expect(descriptor?.risk).toBe('low')
+      expect(MODEL_ACCESS[id].eligible).toBe(false)
+    }
+    const create = getActionDescriptor('presets.create')
+    const preset = { name: 'Research', content: 'Research {{input}}', settings: { modeId: 'research', browseWeb: true, planMode: true } }
+    expect(create?.inputSchema.safeParse(preset).success).toBe(true)
+    expect(create?.inputSchema.safeParse({ ...preset, settings: { planMode: false } }).success).toBe(false)
+    expect(create?.inputSchema.safeParse({ ...preset, settings: { persona: 'pirate' } }).success).toBe(false)
+    expect(create?.inputSchema.safeParse({ ...preset, settings: { skillIds: ['a', 'b', 'c', 'd', 'e'] } }).success).toBe(false)
+    const template = getActionDescriptor('templates.create')
+    expect(template?.inputSchema.safeParse({ name: 'Ukesrapport', content: 'Rapport for {{input}}' }).success).toBe(true)
+    expect(template?.inputSchema.safeParse({ name: '', content: 'x' }).success).toBe(false)
+  })
+
   it('registers save-as-skill as a low-risk person-only write the model cannot execute, bounded like the server (EP-11-S1)', () => {
     const save = getActionDescriptor('skills.save_from_message')
     expect(save?.ownerPlane).toBe('model')
@@ -1615,7 +1633,8 @@ describe('action registry', () => {
     // +2 after EP-4-S3 registered chat.stage_widget_followup and chat.open_widget_link, the widget bridge.
     // +1 after EP-11-S2 registered skills.versions.list, the Skills page's history read.
     // +1 after EP-11-S7 registered learning.learn_from_thread, the /learn command.
-    expect(ids).toHaveLength(306)
+    // +4 after EP-11-S6 registered templates.create, templates.update, presets.create and presets.update.
+    expect(ids).toHaveLength(310)
 
     // The fragments also carry ids outside the `spaces.` prefix (`space.files.*`), so the Space
     // entries are the ones the fragments declare.

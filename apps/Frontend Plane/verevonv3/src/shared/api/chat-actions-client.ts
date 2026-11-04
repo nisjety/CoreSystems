@@ -1,3 +1,4 @@
+import { listAuthored, type AuthoredBehaviour } from './authored-kinds-client'
 import { loadComposerSettingsItems } from './composer-settings-client'
 import { requestJson } from './http'
 
@@ -116,6 +117,21 @@ export async function loadSpecializedActions(signal?: AbortSignal): Promise<Spec
     fetchActions('/api/v1/integrations/providers', 'providers', 'connector', signal),
   ])
   return [...BUILTIN_ACTIONS, ...skills, ...capabilities, ...connectors]
+}
+
+/**
+ * The person's `/` templates (EP-11 S6). Kept apart from `loadSpecializedActions` on purpose: a
+ * specialized action rides the invoke `tools` array, while a template only fills the draft and
+ * never reaches the model as anything but the text the person sends. Empty while the server's
+ * authored kinds are off, and on any failure, so the menu keeps working.
+ */
+export async function loadSlashTemplates(signal?: AbortSignal): Promise<AuthoredBehaviour[]> {
+  try {
+    const { items, kindsEnabled } = await listAuthored('template', signal)
+    return kindsEnabled ? items : []
+  } catch {
+    return []
+  }
 }
 
 async function fetchActions(

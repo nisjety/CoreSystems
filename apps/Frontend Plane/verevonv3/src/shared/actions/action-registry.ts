@@ -763,6 +763,39 @@ const skillsVersionsListOutput = z.object({
   has_more: z.boolean(),
 })
 
+// Authored templates and presets (EP-11 S6): rows of the skills registry with a kind. A template
+// is text the composer inserts before the person sends, with `{{input}}` as its only placeholder;
+// a preset is a closed set of visible controls. The server lints both and binds the owner to the
+// session; nothing here names an org or a user.
+const authoredTemplateInput = z.object({
+  name: z.string().trim().min(1).max(64),
+  description: z.string().trim().max(300).optional(),
+  content: z.string().trim().min(1).max(32_000),
+})
+
+const authoredPresetSettings = z
+  .object({
+    modeId: z.string().min(1).max(128).optional(),
+    browseWeb: z.boolean().optional(),
+    planMode: z.literal(true).optional(),
+    skillIds: z.array(z.string().min(1).max(200)).max(4).optional(),
+    templateId: z.string().min(1).max(200).optional(),
+  })
+  .strict()
+
+const authoredPresetInput = z.object({
+  name: z.string().trim().min(1).max(64),
+  description: z.string().trim().max(300).optional(),
+  content: z.string().trim().min(1).max(32_000),
+  settings: authoredPresetSettings,
+})
+
+const authoredUpdateInput = z.object({
+  id: z.string().min(1).max(200),
+  description: z.string().trim().max(300).optional(),
+  content: z.string().trim().min(1).max(32_000).optional(),
+})
+
 const settingsUpdateMeInput = z.object({
   name: z.string().trim().optional(),
   displayName: z.string().trim().optional(),
@@ -3465,6 +3498,50 @@ export const actionRegistry = [
     reversible: true,
     inputSchema: skillsVersionsListInput,
     outputSchema: skillsVersionsListOutput,
+  },
+  {
+    id: 'templates.create',
+    label: 'Create a slash template',
+    description: 'Save a private `/` template of the person\'s own: text the composer puts in the draft when the template is picked, with `{{input}}` filled from the rest of the line. Nothing is sent until the person sends. A template is never injected into a turn as a skill. Answers kind_not_enabled while the server\'s authored kinds are off. Never model-executable.',
+    ownerPlane: 'model',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: authoredTemplateInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'templates.update',
+    label: 'Update a slash template',
+    description: 'Change the description or text of one of the person\'s templates. The owner or an org admin may change it; the server lints the text again. Never model-executable.',
+    ownerPlane: 'model',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: authoredUpdateInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'presets.create',
+    label: 'Create a run preset',
+    description: 'Save a private preset of the person\'s own: a goal text and the visible run console controls it sets (mode, web search, up to four skills, a template). Plan mode stays on and a preset carries no persona, tool list or autonomy. Applying it only fills the console\'s controls; the run still starts with the person\'s click. Answers kind_not_enabled while the server\'s authored kinds are off. Never model-executable.',
+    ownerPlane: 'model',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: authoredPresetInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'presets.update',
+    label: 'Update a run preset',
+    description: 'Change the description, goal text or settings of one of the person\'s presets, under the same closed settings as on create. The owner or an org admin may change it. Never model-executable.',
+    ownerPlane: 'model',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: authoredUpdateInput.extend({ settings: authoredPresetSettings.optional() }),
+    outputSchema: envelopeStatusOutput,
   },
   {
     id: 'settings.update_me',

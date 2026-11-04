@@ -1161,6 +1161,11 @@ message ListAgentSkillsRequest {
   // caller (a user caller is always listed as itself), so the learning review
   // can see the existing skills of the user whose run it is reviewing.
   string for_user_id = 3;
+  // EP-11 S6. Which authored kinds to list: "skill", "template", "preset".
+  // Empty lists skills only, so every caller that predates templates and
+  // presets (the gateway's match cache, recovery, the learning review) can
+  // never see one. An unknown kind is refused as invalid_argument.
+  repeated string kinds = 4;
 }
 
 message AgentSkill {
@@ -1202,6 +1207,13 @@ message AgentSkill {
   // while `version` is 0. SkillVersionService (skill_versions.proto) reads the
   // body of any version.
   string digest = 20;
+  // EP-11 S6. The authored kind: "skill" (injected into turns), "template"
+  // (text the composer inserts before the person sends) or "preset" (visible
+  // composer/console defaults). Only "skill" is ever matched or injected.
+  string kind = 21;
+  // EP-11 S6. The preset's settings as a JSON object text ("{}" for a skill
+  // or a template). Closed schema, linted by the authored-behaviour lint.
+  string settings_json = 22;
 }
 
 message ListAgentSkillsResponse {

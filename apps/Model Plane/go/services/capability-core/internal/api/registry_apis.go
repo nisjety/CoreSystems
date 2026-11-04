@@ -57,11 +57,24 @@ type SkillsHandler struct {
 	// versionsAPI is SKILL_VERSIONS_API (EP-11 S2): on, skill reads carry version and digest and
 	// the history route is mounted; off, every body and route is as it was.
 	versionsAPI bool
+	// authoredKinds is AUTHORED_KINDS_ENABLED (EP-11 S6): on, the routes read and write
+	// templates and presets beside skills (?kind=, kind and settings in bodies); off, every
+	// statement and body is as it was and a template or preset write answers 422.
+	authoredKinds bool
 }
 
 // NewSkillsHandler constructs the handler.
 func NewSkillsHandler(pool registryDatabase) *SkillsHandler {
-	return &SkillsHandler{pool: pool, lintMode: skilllint.ModeFromLookup(os.Getenv), versionsAPI: SkillVersionsAPIFromLookup(os.Getenv)}
+	return &SkillsHandler{pool: pool, lintMode: skilllint.ModeFromLookup(os.Getenv), versionsAPI: SkillVersionsAPIFromLookup(os.Getenv),
+		authoredKinds: AuthoredKindsFromLookup(os.Getenv)}
+}
+
+const authoredKindsEnv = "AUTHORED_KINDS_ENABLED"
+
+// AuthoredKindsFromLookup reads AUTHORED_KINDS_ENABLED strictly: only the literal "true" lets the
+// routes carry templates and presets, so a typo or a stray "1" leaves them as they were.
+func AuthoredKindsFromLookup(lookup func(string) string) bool {
+	return lookup(authoredKindsEnv) == "true"
 }
 
 // WithPublisher wires reconcile-event emission (matrix §4.3). Optional, nil-safe.
@@ -127,6 +140,12 @@ type skillRow struct {
 	// only while SKILL_VERSIONS_API is on, so with it off a body is as it was.
 	Version *int32 `json:"version,omitempty"`
 	Digest  string `json:"digest,omitempty"`
+
+	// Kind and Settings (EP-11 S6) are the authored kind ("skill", "template" or "preset") and a
+	// preset's closed settings object. Read and written only while AUTHORED_KINDS_ENABLED is on,
+	// so with it off a body is as it was.
+	Kind     string          `json:"kind,omitempty"`
+	Settings json.RawMessage `json:"settings,omitempty"`
 }
 
 // skillScanTargets are the destinations of a skill read, in the order of the SELECTs in list and
@@ -140,15 +159,59 @@ func (h *SkillsHandler) skillScanTargets(s *skillRow) []any {
 		s.Version = new(int32)
 		targets = append(targets, s.Version, &s.Digest)
 	}
+	if h.authoredKinds {
+		targets = append(targets, &s.Kind, &s.Settings)
+	}
 	return targets
 }
 
-// skillVersionColumns are the columns a skill read adds while the versions API is on.
+// skillVersionColumns are the columns a skill read adds while the versions API is on, then
+// kind and settings while authored kinds are on (the order of skillScanTargets).
 func (h *SkillsHandler) skillVersionColumns() string {
+	columns := ""
 	if h.versionsAPI {
-		return ", version, digest"
+		columns += ", version, digest"
 	}
-	return ""
+	if h.authoredKinds {
+		columns += ", kind, settings"
+	}
+	return columns
+}
+
+// requestedSkillKind is the ?kind= of a read: "skill" when absent. ok is false for a kind
+// outside the contract's list.
+func requestedSkillKind(r *http.Request) (kind string, ok bool) {
+	kind = strings.TrimSpace(r.URL.Query().Get("kind"))
+	if kind == "" {
+		return skilllint.KindSkill, true
+	}
+	return kind, skilllint.ValidKind(kind)
+}
+
+// emptySettings reports whether raw carries no settings: absent, JSON null or {}.
+func emptySettings(raw json.RawMessage) bool {
+	trimmed := strings.TrimSpace(string(raw))
+	return trimmed == "" || trimmed == "null" || trimmed == "{}"
+}
+
+// decodeSettings decodes a settings body for the lint; nil when there is none. A body that is
+// not JSON cannot reach here: the request decoder already refused it.
+func decodeSettings(raw json.RawMessage) any {
+	if emptySettings(raw) {
+		return nil
+	}
+	var settings any
+	_ = json.Unmarshal(raw, &settings)
+	return settings
+}
+
+// kindRuleRefusal runs the template and preset rules on a write of kind. They run whatever
+// SKILL_LINT_MODE says, because no stored row predates them; a skill has none.
+func kindRuleRefusal(input skilllint.Input) []skilllint.Finding {
+	if input.Kind == skilllint.KindSkill || input.Kind == "" {
+		return nil
+	}
+	return skilllint.KindRuleFindings(skilllint.Lint(input))
 }
 
 func validSkillScope(value string) bool {
@@ -232,6 +295,36 @@ func lintStoredSkill(ctx context.Context, tx registryDatabase, mode skilllint.Mo
 	}
 	findings, refused := lintSkill(ctx, mode, input)
 	return findings, refused, nil
+}
+
+// errSkillSettingsNotAllowed ends a PATCH that sends settings for a row that is not a preset.
+var errSkillSettingsNotAllowed = errors.New("only a preset carries settings")
+
+// kindRulesForPatch runs the template and preset rules (EP-11 S6) on the row a PATCH is about to
+// change, with the patch's content and settings laid over it the way the UPDATE lays them. A row
+// that is not there passes: the UPDATE then changes nothing and the caller gets 404.
+func kindRulesForPatch(ctx context.Context, tx registryDatabase, id, orgID, content string, settings json.RawMessage) ([]skilllint.Finding, error) {
+	var kind, storedContent string
+	var storedSettings json.RawMessage
+	err := tx.QueryRow(ctx, `
+		SELECT kind, content, settings FROM agent_skills WHERE id=$1 AND org_id=$2
+	`, id, orgID).Scan(&kind, &storedContent, &storedSettings)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if settings != nil && kind != skilllint.KindPreset {
+		return nil, errSkillSettingsNotAllowed
+	}
+	if content == "" {
+		content = storedContent
+	}
+	if settings == nil {
+		settings = storedSettings
+	}
+	return kindRuleRefusal(skilllint.Input{Content: content, Kind: kind, Settings: decodeSettings(settings)}), nil
 }
 
 // skillActor is the verified caller as the revision log names it: "user" or
@@ -339,6 +432,25 @@ func (h *SkillsHandler) listOrCreate(w http.ResponseWriter, r *http.Request) {
 		orgID := verifiedOrganizationID(r)
 		callerID := verifiedActorID(r)
 		isAdmin := verifiedIsAdmin(r)
+		// EP-11 S6: ?kind= picks the authored kind, skills when absent. Off, a skills read is
+		// as it was and any other kind answers an empty list that says why, so the SPA learns
+		// availability from the route rather than from a build flag.
+		kind, validKind := requestedSkillKind(r)
+		if !h.authoredKinds && kind != skilllint.KindSkill {
+			writeJSON(w, map[string]any{"skills": []skillRow{}, "kinds_enabled": false})
+			return
+		}
+		if !validKind {
+			writeTypedError(w, http.StatusUnprocessableEntity, "invalid_kind", "kind must be skill, template or preset")
+			return
+		}
+		kindFilter := ""
+		args := []any{orgID, callerID, isAdmin}
+		if h.authoredKinds {
+			kindFilter = `
+			  AND kind = $4`
+			args = append(args, kind)
+		}
 		// Visibility (SKILL-1): org-scoped skills, the caller's own, ones
 		// explicitly shared with the caller, and — for governance — any
 		// shared (never private) skill an admin didn't create themselves. A
@@ -353,9 +465,9 @@ func (h *SkillsHandler) listOrCreate(w http.ResponseWriter, r *http.Request) {
 			WHERE org_id = $1
 			  AND (scope = 'org' OR owner_user_id = $2
 			       OR (review_state = 'accepted' AND (shared_with ? $2
-			           OR ($3 AND jsonb_array_length(shared_with) > 0))))
+			           OR ($3 AND jsonb_array_length(shared_with) > 0))))`+kindFilter+`
 			ORDER BY name
-		`, orgID, callerID, isAdmin)
+		`, args...)
 		if err != nil {
 			slog.Error("list skills failed", "error", err)
 			jsonErr(w, "database unavailable", http.StatusInternalServerError)
@@ -370,6 +482,10 @@ func (h *SkillsHandler) listOrCreate(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			skills = append(skills, s)
+		}
+		if h.authoredKinds {
+			writeJSON(w, map[string]any{"skills": skills, "kinds_enabled": true})
+			return
 		}
 		writeJSON(w, map[string]any{"skills": skills})
 	case http.MethodPost:
@@ -410,13 +526,41 @@ func (h *SkillsHandler) listOrCreate(w http.ResponseWriter, r *http.Request) {
 			s.OwnerUserID = ""
 		}
 		s.SharedWith = []string{}
-		lintFindings, lintRefused := lintSkill(r.Context(), h.lintMode, skilllint.Input{
+		// EP-11 S6: a template or preset is written only while authored kinds are on; off, a
+		// body naming one is refused rather than silently stored as a skill.
+		s.Kind = strings.TrimSpace(s.Kind)
+		if s.Kind == "" {
+			s.Kind = skilllint.KindSkill
+		}
+		if !h.authoredKinds && (s.Kind != skilllint.KindSkill || !emptySettings(s.Settings)) {
+			writeTypedError(w, http.StatusUnprocessableEntity, "kind_not_enabled", "templates and presets are not enabled")
+			return
+		}
+		if !skilllint.ValidKind(s.Kind) {
+			writeTypedError(w, http.StatusUnprocessableEntity, "invalid_kind", "kind must be skill, template or preset")
+			return
+		}
+		if s.Kind != skilllint.KindPreset && !emptySettings(s.Settings) {
+			writeTypedError(w, http.StatusUnprocessableEntity, "settings_not_allowed", "only a preset carries settings")
+			return
+		}
+		lintInput := skilllint.Input{
 			Name: s.Name, Description: s.Description, Content: s.Content,
 			TriggerKeywords: s.TriggerKeywords, ToolRestrictions: s.ToolRestrictions,
-		})
+			Kind: s.Kind, Settings: decodeSettings(s.Settings),
+		}
+		if findings := kindRuleRefusal(lintInput); len(findings) > 0 {
+			writeSkillLintRefusal(w, findings)
+			return
+		}
+		lintFindings, lintRefused := lintSkill(r.Context(), h.lintMode, lintInput)
 		if lintRefused {
 			writeSkillLintRefusal(w, lintFindings)
 			return
+		}
+		settings := []byte("{}")
+		if !emptySettings(s.Settings) {
+			settings = s.Settings
 		}
 		kw, _ := json.Marshal(s.TriggerKeywords)
 		fp, _ := json.Marshal(s.TriggerFilePatterns)
@@ -450,6 +594,19 @@ func (h *SkillsHandler) listOrCreate(w http.ResponseWriter, r *http.Request) {
 					return nil
 				}
 			}
+			if h.authoredKinds {
+				// The unique key (session-core 0109) carries the kind, so a template may
+				// share a skill's name.
+				_, err := tx.Exec(r.Context(), `
+					INSERT INTO agent_skills (id, org_id, name, description, content,
+					    trigger_keywords, trigger_file_patterns, tool_restrictions,
+					    enabled, scope, owner_user_id, shared_with, created_at, updated_at,
+					    kind, settings)
+					VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
+				`, s.ID, s.OrgID, s.Name, s.Description, s.Content, kw, fp, tr, s.Enabled,
+					s.Scope, s.OwnerUserID, sw, now, now, s.Kind, settings)
+				return err
+			}
 			_, err := tx.Exec(r.Context(), `
 				INSERT INTO agent_skills (id, org_id, name, description, content,
 				    trigger_keywords, trigger_file_patterns, tool_restrictions,
@@ -482,6 +639,20 @@ func (h *SkillsHandler) get(w http.ResponseWriter, r *http.Request, id string) {
 	callerID := verifiedActorID(r)
 	isAdmin := verifiedIsAdmin(r)
 	var s skillRow
+	// EP-11 S6: a read by id answers only for the ?kind= it names (skills when absent), so a
+	// template or preset never reads as a skill. Off, the statement is as it was.
+	kindFilter := ""
+	args := []any{id, verifiedOrganizationID(r), callerID, isAdmin}
+	if h.authoredKinds {
+		kind, ok := requestedSkillKind(r)
+		if !ok {
+			writeTypedError(w, http.StatusUnprocessableEntity, "invalid_kind", "kind must be skill, template or preset")
+			return
+		}
+		kindFilter = `
+		  AND kind = $5`
+		args = append(args, kind)
+	}
 	err := h.pool.QueryRow(r.Context(), `
 		SELECT id, org_id, name, description, content,
 		       trigger_keywords, trigger_file_patterns, tool_restrictions,
@@ -491,8 +662,8 @@ func (h *SkillsHandler) get(w http.ResponseWriter, r *http.Request, id string) {
 		WHERE id = $1 AND org_id = $2
 		  AND (scope = 'org' OR owner_user_id = $3
 		       OR (review_state = 'accepted' AND (shared_with ? $3
-		           OR ($4 AND jsonb_array_length(shared_with) > 0))))
-	`, id, verifiedOrganizationID(r), callerID, isAdmin).Scan(h.skillScanTargets(&s)...)
+		           OR ($4 AND jsonb_array_length(shared_with) > 0))))`+kindFilter+`
+	`, args...).Scan(h.skillScanTargets(&s)...)
 	if err != nil {
 		jsonErr(w, "not found", http.StatusNotFound)
 		return
@@ -506,12 +677,18 @@ func (h *SkillsHandler) update(w http.ResponseWriter, r *http.Request, id string
 		Description string    `json:"description"`
 		Content     string    `json:"content"`
 		SharedWith  *[]string `json:"shared_with"`
+		// Settings (EP-11 S6) replaces a preset's settings; read only while authored kinds
+		// are on, so with them off a PATCH is as it was.
+		Settings json.RawMessage `json:"settings"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&update); err != nil {
 		jsonErr(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	if update.Enabled == nil && update.Description == "" && update.Content == "" && update.SharedWith == nil {
+	if !h.authoredKinds || strings.TrimSpace(string(update.Settings)) == "null" {
+		update.Settings = nil
+	}
+	if update.Enabled == nil && update.Description == "" && update.Content == "" && update.SharedWith == nil && update.Settings == nil {
 		jsonErr(w, "at least one skill field is required", http.StatusBadRequest)
 		return
 	}
@@ -586,14 +763,39 @@ func (h *SkillsHandler) update(w http.ResponseWriter, r *http.Request, id string
 				return errSkillLintRefused
 			}
 		}
+		if h.authoredKinds && (update.Content != "" || update.Settings != nil) {
+			findings, err := kindRulesForPatch(r.Context(), tx, id, orgID, update.Content, update.Settings)
+			if err != nil {
+				return err
+			}
+			if len(findings) > 0 {
+				lintFindings = findings
+				return errSkillLintRefused
+			}
+		}
 		var err error
-		result, err = tx.Exec(r.Context(), `
+		if h.authoredKinds {
+			// Settings change only on a preset: kindRulesForPatch refused any other kind.
+			var settings any
+			if update.Settings != nil {
+				settings = []byte(update.Settings)
+			}
+			result, err = tx.Exec(r.Context(), `
+				UPDATE agent_skills
+				SET enabled=COALESCE($1, enabled), description=COALESCE(NULLIF($2, ''), description),
+					content=COALESCE(NULLIF($3, ''), content), shared_with=COALESCE($4, shared_with),
+					updated_at=$5, settings=COALESCE($8::jsonb, settings)
+				WHERE id=$6 AND org_id=$7 AND ($1::boolean IS NOT TRUE OR review_state = 'accepted')
+			`, enabled, update.Description, update.Content, sharedJSON, now, id, orgID, settings)
+		} else {
+			result, err = tx.Exec(r.Context(), `
 			UPDATE agent_skills
 			SET enabled=COALESCE($1, enabled), description=COALESCE(NULLIF($2, ''), description),
 				content=COALESCE(NULLIF($3, ''), content), shared_with=COALESCE($4, shared_with),
 				updated_at=$5
 			WHERE id=$6 AND org_id=$7 AND ($1::boolean IS NOT TRUE OR review_state = 'accepted')
 		`, enabled, update.Description, update.Content, sharedJSON, now, id, orgID)
+		}
 		if err == nil && result.RowsAffected() == 0 && update.Enabled != nil && *update.Enabled {
 			var reviewState string
 			if tx.QueryRow(r.Context(), `
@@ -610,6 +812,10 @@ func (h *SkillsHandler) update(w http.ResponseWriter, r *http.Request, id string
 	}
 	if errors.Is(err, errSkillLintRefused) {
 		writeSkillLintRefusal(w, lintFindings)
+		return
+	}
+	if errors.Is(err, errSkillSettingsNotAllowed) {
+		writeTypedError(w, http.StatusUnprocessableEntity, "settings_not_allowed", err.Error())
 		return
 	}
 	if proposalUndecided {
