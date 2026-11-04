@@ -2486,6 +2486,7 @@ async fn fetch_skill_context(
         org_id: org_id.to_owned(),
         enabled_only: true,
         for_user_id: String::new(),
+        kinds: Vec::new(),
     });
     let Ok(header) = format!("Bearer {bearer}").parse() else {
         return Vec::new();

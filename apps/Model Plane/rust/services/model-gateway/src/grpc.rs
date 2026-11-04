@@ -2073,6 +2073,7 @@ impl ModelGateway for GatewayService {
                         org_id: req.org_id.clone(),
                         enabled_only: true,
                         for_user_id: String::new(),
+                        kinds: Vec::new(),
                     },
                 )?)
                 .await

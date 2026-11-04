@@ -446,6 +446,8 @@ mod tests {
             tags: Vec::new(),
             source_path: String::new(),
             min_score: 0.0,
+            version: 0,
+            digest: String::new(),
         }
     }
 

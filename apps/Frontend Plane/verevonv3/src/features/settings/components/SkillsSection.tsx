@@ -26,6 +26,9 @@ import {
   type SkillLintFinding,
 } from '@/features/skills/skill-lint'
 import { SkillLintNotes } from '@/features/skills/components/SkillLintNotes'
+import { TemplateEditor } from '@/features/skills/components/TemplateEditor'
+import { PresetEditor } from '@/features/skills/components/PresetEditor'
+import { listAuthored, type AuthoredKind } from '@/shared/api/authored-kinds-client'
 
 /**
  * Ferdigheter (skills) — org-dekkende ferdigheter agenten kan bruke i chat.
@@ -228,6 +231,12 @@ export function SkillsSection() {
   const ownsSkill = (skill: Skill): boolean =>
     skill.scope === 'user' && viewerId !== '' && skill.owner_user_id === viewerId
   const canChange = (skill: Skill): boolean => isAdmin() || (authorsPrivate() && ownsSkill(skill))
+  // EP-11 S6: templates and presets are offered only while the server says its authored kinds are on;
+  // a failed read keeps them hidden rather than offering an editor whose save would be refused.
+  const [kindsEnabled] = createResource(() =>
+    listAuthored('template').then((result) => result.kindsEnabled, () => false),
+  )
+  const [authoredEditor, setAuthoredEditor] = createSignal<AuthoredKind | null>(null)
 
   const [skills, { refetch }] = createResource(
     () => orgId() || undefined,
@@ -671,6 +680,31 @@ export function SkillsSection() {
             </SettingsButton>
           </div>
         </form>
+      </Show>
+
+      <Show when={canAuthor() && kindsEnabled() === true}>
+        <Show
+          when={authoredEditor()}
+          fallback={
+            <div>
+              <SettingsButton settingsSize="sm" onClick={() => setAuthoredEditor('template')}>
+                {i18n.tr('Ny mal', 'New template')}
+              </SettingsButton>{' '}
+              <SettingsButton settingsSize="sm" onClick={() => setAuthoredEditor('preset')}>
+                {i18n.tr('Nytt oppsett', 'New preset')}
+              </SettingsButton>
+            </div>
+          }
+        >
+          {(kind) => (
+            <Show
+              when={kind() === 'template'}
+              fallback={<PresetEditor onSaved={() => setAuthoredEditor(null)} onCancel={() => setAuthoredEditor(null)} />}
+            >
+              <TemplateEditor onSaved={() => setAuthoredEditor(null)} onCancel={() => setAuthoredEditor(null)} />
+            </Show>
+          )}
+        </Show>
       </Show>
 
       <Show when={historySkill()}>

@@ -3796,6 +3796,7 @@ async fn execute_reattach_skill(
             // if the row comes back.
             enabled_only: false,
             for_user_id: String::new(),
+            kinds: Vec::new(),
         },
         bearer,
     ) {

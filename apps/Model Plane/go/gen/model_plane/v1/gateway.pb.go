@@ -5157,7 +5157,15 @@ type Skill struct {
 	// Source path on the bridge's filesystem. Empty for bundled skills.
 	SourcePath string `protobuf:"bytes,5,opt,name=source_path,json=sourcePath,proto3" json:"source_path,omitempty"`
 	// Relevance threshold (0.0-1.0) for auto-injection.
-	MinScore      float32 `protobuf:"fixed32,6,opt,name=min_score,json=minScore,proto3" json:"min_score,omitempty"`
+	MinScore float32 `protobuf:"fixed32,6,opt,name=min_score,json=minScore,proto3" json:"min_score,omitempty"`
+	// EP-11 S3: the immutable version of an authored skill this body is
+	// (session-core `agent_skills.version`); 0 for a proposal or a builtin skill.
+	// A run pins it so recovery inside the run reads the same text.
+	Version int32 `protobuf:"varint,7,opt,name=version,proto3" json:"version,omitempty"`
+	// EP-11 S3: sha256 hex digest of the skill version (session-core
+	// `agent_skills.digest`), or of the embedded SKILL.md for a builtin skill.
+	// Empty when the row predates versions.
+	Digest        string `protobuf:"bytes,8,opt,name=digest,proto3" json:"digest,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -5232,6 +5240,20 @@ func (x *Skill) GetMinScore() float32 {
 		return x.MinScore
 	}
 	return 0
+}
+
+func (x *Skill) GetVersion() int32 {
+	if x != nil {
+		return x.Version
+	}
+	return 0
+}
+
+func (x *Skill) GetDigest() string {
+	if x != nil {
+		return x.Digest
+	}
+	return ""
 }
 
 type ListSkillsRequest struct {
@@ -9910,7 +9932,7 @@ const file_model_plane_v1_gateway_proto_rawDesc = "" +
 	"\n" +
 	"request_id\x18\x01 \x01(\tR\trequestId\x12\x14\n" +
 	"\x05jsonl\x18\x02 \x01(\fR\x05jsonl\x12\x14\n" +
-	"\x05count\x18\x03 \x01(\x05R\x05count\"\x91\x01\n" +
+	"\x05count\x18\x03 \x01(\x05R\x05count\"\xc3\x01\n" +
 	"\x05Skill\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x12\n" +
 	"\x04name\x18\x02 \x01(\tR\x04name\x12\x12\n" +
@@ -9918,7 +9940,9 @@ const file_model_plane_v1_gateway_proto_rawDesc = "" +
 	"\x04tags\x18\x04 \x03(\tR\x04tags\x12\x1f\n" +
 	"\vsource_path\x18\x05 \x01(\tR\n" +
 	"sourcePath\x12\x1b\n" +
-	"\tmin_score\x18\x06 \x01(\x02R\bminScore\"I\n" +
+	"\tmin_score\x18\x06 \x01(\x02R\bminScore\x12\x18\n" +
+	"\aversion\x18\a \x01(\x05R\aversion\x12\x16\n" +
+	"\x06digest\x18\b \x01(\tR\x06digest\"I\n" +
 	"\x11ListSkillsRequest\x12\x1d\n" +
 	"\n" +
 	"request_id\x18\x01 \x01(\tR\trequestId\x12\x15\n" +

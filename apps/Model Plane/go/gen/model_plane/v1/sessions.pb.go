@@ -4131,7 +4131,12 @@ type ListAgentSkillsRequest struct {
 	// List as this user instead of as the caller. Honoured only for a service
 	// caller (a user caller is always listed as itself), so the learning review
 	// can see the existing skills of the user whose run it is reviewing.
-	ForUserId     string `protobuf:"bytes,3,opt,name=for_user_id,json=forUserId,proto3" json:"for_user_id,omitempty"`
+	ForUserId string `protobuf:"bytes,3,opt,name=for_user_id,json=forUserId,proto3" json:"for_user_id,omitempty"`
+	// EP-11 S6. Which authored kinds to list: "skill", "template", "preset".
+	// Empty lists skills only, so every caller that predates templates and
+	// presets (the gateway's match cache, recovery, the learning review) can
+	// never see one. An unknown kind is refused as invalid_argument.
+	Kinds         []string `protobuf:"bytes,4,rep,name=kinds,proto3" json:"kinds,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -4187,6 +4192,13 @@ func (x *ListAgentSkillsRequest) GetForUserId() string {
 	return ""
 }
 
+func (x *ListAgentSkillsRequest) GetKinds() []string {
+	if x != nil {
+		return x.Kinds
+	}
+	return nil
+}
+
 type AgentSkill struct {
 	state               protoimpl.MessageState `protogen:"open.v1"`
 	Id                  string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
@@ -4226,7 +4238,14 @@ type AgentSkill struct {
 	// EP-11 S2. Lowercase hex sha256 of the versioned fields of `version`; empty
 	// while `version` is 0. SkillVersionService (skill_versions.proto) reads the
 	// body of any version.
-	Digest        string `protobuf:"bytes,20,opt,name=digest,proto3" json:"digest,omitempty"`
+	Digest string `protobuf:"bytes,20,opt,name=digest,proto3" json:"digest,omitempty"`
+	// EP-11 S6. The authored kind: "skill" (injected into turns), "template"
+	// (text the composer inserts before the person sends) or "preset" (visible
+	// composer/console defaults). Only "skill" is ever matched or injected.
+	Kind string `protobuf:"bytes,21,opt,name=kind,proto3" json:"kind,omitempty"`
+	// EP-11 S6. The preset's settings as a JSON object text ("{}" for a skill
+	// or a template). Closed schema, linted by the authored-behaviour lint.
+	SettingsJson  string `protobuf:"bytes,22,opt,name=settings_json,json=settingsJson,proto3" json:"settings_json,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -4397,6 +4416,20 @@ func (x *AgentSkill) GetVersion() int32 {
 func (x *AgentSkill) GetDigest() string {
 	if x != nil {
 		return x.Digest
+	}
+	return ""
+}
+
+func (x *AgentSkill) GetKind() string {
+	if x != nil {
+		return x.Kind
+	}
+	return ""
+}
+
+func (x *AgentSkill) GetSettingsJson() string {
+	if x != nil {
+		return x.SettingsJson
 	}
 	return ""
 }
@@ -10477,11 +10510,12 @@ const file_model_plane_v1_sessions_proto_rawDesc = "" +
 	"\x11skipped_protected\x18\x03 \x01(\bR\x10skippedProtected\x12\x1f\n" +
 	"\vskip_reason\x18\x04 \x01(\tR\n" +
 	"skipReason\x12\x1a\n" +
-	"\brevision\x18\x05 \x01(\x03R\brevision\"r\n" +
+	"\brevision\x18\x05 \x01(\x03R\brevision\"\x88\x01\n" +
 	"\x16ListAgentSkillsRequest\x12\x15\n" +
 	"\x06org_id\x18\x01 \x01(\tR\x05orgId\x12!\n" +
 	"\fenabled_only\x18\x02 \x01(\bR\venabledOnly\x12\x1e\n" +
-	"\vfor_user_id\x18\x03 \x01(\tR\tforUserId\"\x8c\x05\n" +
+	"\vfor_user_id\x18\x03 \x01(\tR\tforUserId\x12\x14\n" +
+	"\x05kinds\x18\x04 \x03(\tR\x05kinds\"\xc5\x05\n" +
 	"\n" +
 	"AgentSkill\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x12\n" +
@@ -10506,7 +10540,9 @@ const file_model_plane_v1_sessions_proto_rawDesc = "" +
 	"updated_at\x18\x11 \x01(\tR\tupdatedAt\x12\x1a\n" +
 	"\brevision\x18\x12 \x01(\x03R\brevision\x12\x18\n" +
 	"\aversion\x18\x13 \x01(\x05R\aversion\x12\x16\n" +
-	"\x06digest\x18\x14 \x01(\tR\x06digest\"M\n" +
+	"\x06digest\x18\x14 \x01(\tR\x06digest\x12\x12\n" +
+	"\x04kind\x18\x15 \x01(\tR\x04kind\x12#\n" +
+	"\rsettings_json\x18\x16 \x01(\tR\fsettingsJson\"M\n" +
 	"\x17ListAgentSkillsResponse\x122\n" +
 	"\x06skills\x18\x01 \x03(\v2\x1a.model_plane.v1.AgentSkillR\x06skills\"\xc6\x03\n" +
 	"\x17ListConversationRequest\x12\x15\n" +

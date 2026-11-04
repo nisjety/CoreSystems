@@ -2713,6 +2713,32 @@
       "zdr_allowed": false
     },
     {
+      "actionId": "presets.create",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "context_write",
+      "exemptReason": "agent_cannot_self_govern",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:ee1378f4950f5e5f2ee1dba72ea39db38fe9af07aabc320f43d3ae594ea6f154",
+      "zdr_allowed": false
+    },
+    {
+      "actionId": "presets.update",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "context_write",
+      "exemptReason": "agent_cannot_self_govern",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:efe514f287d70c21ca4c0e89a0eb9381cf1fc39cd24a37d65d58d892b16020c5",
+      "zdr_allowed": false
+    },
+    {
       "actionId": "privacy.erase_my_account",
       "registry": true,
       "access": "none",
@@ -3733,6 +3759,32 @@
       "executor": {},
       "hashBasis": "catalog_entry",
       "schemaHash": "sha256:8e566fc16b74fb66876d710f296b52c592dbaace4cd57119247931ffb066ae1b",
+      "zdr_allowed": false
+    },
+    {
+      "actionId": "templates.create",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "context_write",
+      "exemptReason": "agent_cannot_self_govern",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:7fe0eea79955f66eed574cdae72e76d6b447eb6d59f551515f5fd2e0b62c6161",
+      "zdr_allowed": false
+    },
+    {
+      "actionId": "templates.update",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "context_write",
+      "exemptReason": "agent_cannot_self_govern",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:9572d77d466596a3b6641b17d69097483084cf8b50349857e046900022937ef6",
       "zdr_allowed": false
     },
     {

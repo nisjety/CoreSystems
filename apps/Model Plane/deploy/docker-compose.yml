@@ -353,6 +353,9 @@ services:
       # WS19-S9: first-party Office skills (docx, xlsx, pptx, pdf) listed for every org. Off by default; only the literal
       # `true` turns it on.
       BUILTIN_OFFICE_SKILLS_ENABLED: ${BUILTIN_OFFICE_SKILLS_ENABLED:-false}
+      # EP-11 S3: a run records the skill versions it injected and recovery inside the run reads the pinned version. Off
+      # by default; only the literal `true` turns it on. Needs SKILL_VERSIONS_API on in session-core for recovery reads.
+      MODEL_GATEWAY_SKILL_PINS: ${MODEL_GATEWAY_SKILL_PINS:-false}
       # WS19-S8: name a turn's skill bundles to execution-core so code_interpreter sees them read-only at /skills. Off by
       # default; only the literal `true`.
       SKILL_BUNDLE_MOUNT_ENABLED: ${SKILL_BUNDLE_MOUNT_ENABLED:-false}
@@ -462,6 +465,8 @@ services:
       # EP-7 S1: thread goals (goal routes and the goal recited on a Continue turn). Needs SESSION_CORE_THREAD_GOALS_ENABLED.
       # Only the literal true.
       MODEL_GATEWAY_THREAD_GOALS_ENABLED: ${MODEL_GATEWAY_THREAD_GOALS_ENABLED:-false}
+      # EP-12 S10: the owner's conversation export route (JSON and Markdown). Only the literal true.
+      MODEL_GATEWAY_THREAD_EXPORT: ${MODEL_GATEWAY_THREAD_EXPORT:-false}
       # EP-7 S4: Keep going on the goal bar (pump-sent goal turns). Needs MODEL_GATEWAY_THREAD_GOALS_ENABLED. Only the
       # literal true.
       MODEL_GATEWAY_GOAL_AUTO_CONTINUE: ${MODEL_GATEWAY_GOAL_AUTO_CONTINUE:-false}
@@ -2185,6 +2190,8 @@ services:
       # EP-11 S2: GET /api/v1/skills/{id}/versions (404 while off). Only the literal true; set it
       # together with SKILL_VERSIONS_API on session-core.
       SKILL_VERSIONS_API: ${SKILL_VERSIONS_API:-false}
+      # EP-11 S6: skill routes read and write templates and presets (authored-behaviour kinds). Only the literal true.
+      AUTHORED_KINDS_ENABLED: ${AUTHORED_KINDS_ENABLED:-false}
       # Capability Core reauthorizes every due scheduled fire directly with
       # Control before it can prepare a service-owned Session Core thread.
       # The credential must be registered only as capability-core with

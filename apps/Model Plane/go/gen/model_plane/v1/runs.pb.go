@@ -2310,7 +2310,10 @@ type RunContextStatus struct {
 	// The bounded prior turns of the thread.
 	History *RunContextPart `protobuf:"bytes,2,opt,name=history,proto3" json:"history,omitempty"`
 	// The prefetched memory block.
-	Memory        *RunContextPart `protobuf:"bytes,3,opt,name=memory,proto3" json:"memory,omitempty"`
+	Memory *RunContextPart `protobuf:"bytes,3,opt,name=memory,proto3" json:"memory,omitempty"`
+	// EP-11 S3: the skill versions the run injected, one pin per skill. Ids,
+	// numbers and hashes only, so the pin is allowed wherever the run record is.
+	Skills        []*SkillPin `protobuf:"bytes,4,rep,name=skills,proto3" json:"skills,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -2364,6 +2367,87 @@ func (x *RunContextStatus) GetMemory() *RunContextPart {
 		return x.Memory
 	}
 	return nil
+}
+
+func (x *RunContextStatus) GetSkills() []*SkillPin {
+	if x != nil {
+		return x.Skills
+	}
+	return nil
+}
+
+// EP-11 S3: one skill version a run used. Recovery inside the run reads this
+// version even when the skill changed mid-run; feedback names it.
+type SkillPin struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The skill id (session-core `agent_skills.id`, or the builtin skill's id).
+	SkillId string `protobuf:"bytes,1,opt,name=skill_id,json=skillId,proto3" json:"skill_id,omitempty"`
+	// The immutable version number; 0 for a builtin skill.
+	Version int32 `protobuf:"varint,2,opt,name=version,proto3" json:"version,omitempty"`
+	// sha256 hex digest of the version (of the embedded SKILL.md for a builtin).
+	Digest string `protobuf:"bytes,3,opt,name=digest,proto3" json:"digest,omitempty"`
+	// How the skill reached the run: "matched" | "requested" | "builtin".
+	Source        string `protobuf:"bytes,4,opt,name=source,proto3" json:"source,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SkillPin) Reset() {
+	*x = SkillPin{}
+	mi := &file_model_plane_v1_runs_proto_msgTypes[25]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SkillPin) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SkillPin) ProtoMessage() {}
+
+func (x *SkillPin) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_runs_proto_msgTypes[25]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SkillPin.ProtoReflect.Descriptor instead.
+func (*SkillPin) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_runs_proto_rawDescGZIP(), []int{25}
+}
+
+func (x *SkillPin) GetSkillId() string {
+	if x != nil {
+		return x.SkillId
+	}
+	return ""
+}
+
+func (x *SkillPin) GetVersion() int32 {
+	if x != nil {
+		return x.Version
+	}
+	return 0
+}
+
+func (x *SkillPin) GetDigest() string {
+	if x != nil {
+		return x.Digest
+	}
+	return ""
+}
+
+func (x *SkillPin) GetSource() string {
+	if x != nil {
+		return x.Source
+	}
+	return ""
 }
 
 var File_model_plane_v1_runs_proto protoreflect.FileDescriptor
@@ -2570,11 +2654,17 @@ const file_model_plane_v1_runs_proto_rawDesc = "" +
 	"\x05state\x18\x01 \x01(\x0e2\x1f.model_plane.v1.RunContextStateR\x05state\x12\x1a\n" +
 	"\bincluded\x18\x02 \x01(\rR\bincluded\x12\x18\n" +
 	"\aomitted\x18\x03 \x01(\rR\aomitted\x12\x16\n" +
-	"\x06reason\x18\x04 \x01(\tR\x06reason\"\xc8\x01\n" +
+	"\x06reason\x18\x04 \x01(\tR\x06reason\"\xfa\x01\n" +
 	"\x10RunContextStatus\x12B\n" +
 	"\finstructions\x18\x01 \x01(\v2\x1e.model_plane.v1.RunContextPartR\finstructions\x128\n" +
 	"\ahistory\x18\x02 \x01(\v2\x1e.model_plane.v1.RunContextPartR\ahistory\x126\n" +
-	"\x06memory\x18\x03 \x01(\v2\x1e.model_plane.v1.RunContextPartR\x06memory*\x93\x01\n" +
+	"\x06memory\x18\x03 \x01(\v2\x1e.model_plane.v1.RunContextPartR\x06memory\x120\n" +
+	"\x06skills\x18\x04 \x03(\v2\x18.model_plane.v1.SkillPinR\x06skills\"o\n" +
+	"\bSkillPin\x12\x19\n" +
+	"\bskill_id\x18\x01 \x01(\tR\askillId\x12\x18\n" +
+	"\aversion\x18\x02 \x01(\x05R\aversion\x12\x16\n" +
+	"\x06digest\x18\x03 \x01(\tR\x06digest\x12\x16\n" +
+	"\x06source\x18\x04 \x01(\tR\x06source*\x93\x01\n" +
 	"\fAutonomyRung\x12\x1d\n" +
 	"\x19AUTONOMY_RUNG_UNSPECIFIED\x10\x00\x12\x1b\n" +
 	"\x17AUTONOMY_RUNG_READ_ONLY\x10\x01\x12!\n" +
@@ -2617,7 +2707,7 @@ func file_model_plane_v1_runs_proto_rawDescGZIP() []byte {
 }
 
 var file_model_plane_v1_runs_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
-var file_model_plane_v1_runs_proto_msgTypes = make([]protoimpl.MessageInfo, 25)
+var file_model_plane_v1_runs_proto_msgTypes = make([]protoimpl.MessageInfo, 26)
 var file_model_plane_v1_runs_proto_goTypes = []any{
 	(AutonomyRung)(0),                             // 0: model_plane.v1.AutonomyRung
 	(RunContextState)(0),                          // 1: model_plane.v1.RunContextState
@@ -2646,47 +2736,49 @@ var file_model_plane_v1_runs_proto_goTypes = []any{
 	(*RunDetail)(nil),                             // 24: model_plane.v1.RunDetail
 	(*RunContextPart)(nil),                        // 25: model_plane.v1.RunContextPart
 	(*RunContextStatus)(nil),                      // 26: model_plane.v1.RunContextStatus
-	(*timestamppb.Timestamp)(nil),                 // 27: google.protobuf.Timestamp
-	(*structpb.Struct)(nil),                       // 28: google.protobuf.Struct
+	(*SkillPin)(nil),                              // 27: model_plane.v1.SkillPin
+	(*timestamppb.Timestamp)(nil),                 // 28: google.protobuf.Timestamp
+	(*structpb.Struct)(nil),                       // 29: google.protobuf.Struct
 }
 var file_model_plane_v1_runs_proto_depIdxs = []int32{
 	24, // 0: model_plane.v1.ListRunsResponse.runs:type_name -> model_plane.v1.RunDetail
-	27, // 1: model_plane.v1.RunDetail.created_at:type_name -> google.protobuf.Timestamp
-	27, // 2: model_plane.v1.RunDetail.updated_at:type_name -> google.protobuf.Timestamp
-	28, // 3: model_plane.v1.RunDetail.metadata:type_name -> google.protobuf.Struct
+	28, // 1: model_plane.v1.RunDetail.created_at:type_name -> google.protobuf.Timestamp
+	28, // 2: model_plane.v1.RunDetail.updated_at:type_name -> google.protobuf.Timestamp
+	29, // 3: model_plane.v1.RunDetail.metadata:type_name -> google.protobuf.Struct
 	1,  // 4: model_plane.v1.RunContextPart.state:type_name -> model_plane.v1.RunContextState
 	25, // 5: model_plane.v1.RunContextStatus.instructions:type_name -> model_plane.v1.RunContextPart
 	25, // 6: model_plane.v1.RunContextStatus.history:type_name -> model_plane.v1.RunContextPart
 	25, // 7: model_plane.v1.RunContextStatus.memory:type_name -> model_plane.v1.RunContextPart
-	6,  // 8: model_plane.v1.RunService.GetRun:input_type -> model_plane.v1.GetRunRequest
-	7,  // 9: model_plane.v1.RunService.GetScheduledStepContext:input_type -> model_plane.v1.GetScheduledStepContextRequest
-	9,  // 10: model_plane.v1.RunService.ListRuns:input_type -> model_plane.v1.ListRunsRequest
-	12, // 11: model_plane.v1.RunService.CancelRun:input_type -> model_plane.v1.CancelRunRequest
-	11, // 12: model_plane.v1.RunService.ListSystemRuns:input_type -> model_plane.v1.ListSystemRunsRequest
-	14, // 13: model_plane.v1.RunService.ResolveRunOwner:input_type -> model_plane.v1.ResolveRunOwnerRequest
-	16, // 14: model_plane.v1.RunService.ResolveThreadOwner:input_type -> model_plane.v1.ResolveThreadOwnerRequest
-	18, // 15: model_plane.v1.RunService.ResolveRunActionAuthority:input_type -> model_plane.v1.ResolveRunActionAuthorityRequest
-	20, // 16: model_plane.v1.RunService.ResolveApprovalAuthority:input_type -> model_plane.v1.ResolveApprovalAuthorityRequest
-	22, // 17: model_plane.v1.RunService.ResolveScheduledStepAuthority:input_type -> model_plane.v1.ResolveScheduledStepAuthorityRequest
-	4,  // 18: model_plane.v1.RunService.AuthorizeRoomRunAttach:input_type -> model_plane.v1.AuthorizeRoomRunAttachRequest
-	2,  // 19: model_plane.v1.RunService.CancelRunAsRoomManager:input_type -> model_plane.v1.CancelRunAsRoomManagerRequest
-	24, // 20: model_plane.v1.RunService.GetRun:output_type -> model_plane.v1.RunDetail
-	8,  // 21: model_plane.v1.RunService.GetScheduledStepContext:output_type -> model_plane.v1.ScheduledStepContext
-	10, // 22: model_plane.v1.RunService.ListRuns:output_type -> model_plane.v1.ListRunsResponse
-	13, // 23: model_plane.v1.RunService.CancelRun:output_type -> model_plane.v1.CancelRunResponse
-	10, // 24: model_plane.v1.RunService.ListSystemRuns:output_type -> model_plane.v1.ListRunsResponse
-	15, // 25: model_plane.v1.RunService.ResolveRunOwner:output_type -> model_plane.v1.ResolveRunOwnerResponse
-	17, // 26: model_plane.v1.RunService.ResolveThreadOwner:output_type -> model_plane.v1.ResolveThreadOwnerResponse
-	19, // 27: model_plane.v1.RunService.ResolveRunActionAuthority:output_type -> model_plane.v1.ResolveRunActionAuthorityResponse
-	21, // 28: model_plane.v1.RunService.ResolveApprovalAuthority:output_type -> model_plane.v1.ResolveApprovalAuthorityResponse
-	23, // 29: model_plane.v1.RunService.ResolveScheduledStepAuthority:output_type -> model_plane.v1.ResolveScheduledStepAuthorityResponse
-	5,  // 30: model_plane.v1.RunService.AuthorizeRoomRunAttach:output_type -> model_plane.v1.AuthorizeRoomRunAttachResponse
-	3,  // 31: model_plane.v1.RunService.CancelRunAsRoomManager:output_type -> model_plane.v1.CancelRunAsRoomManagerResponse
-	20, // [20:32] is the sub-list for method output_type
-	8,  // [8:20] is the sub-list for method input_type
-	8,  // [8:8] is the sub-list for extension type_name
-	8,  // [8:8] is the sub-list for extension extendee
-	0,  // [0:8] is the sub-list for field type_name
+	27, // 8: model_plane.v1.RunContextStatus.skills:type_name -> model_plane.v1.SkillPin
+	6,  // 9: model_plane.v1.RunService.GetRun:input_type -> model_plane.v1.GetRunRequest
+	7,  // 10: model_plane.v1.RunService.GetScheduledStepContext:input_type -> model_plane.v1.GetScheduledStepContextRequest
+	9,  // 11: model_plane.v1.RunService.ListRuns:input_type -> model_plane.v1.ListRunsRequest
+	12, // 12: model_plane.v1.RunService.CancelRun:input_type -> model_plane.v1.CancelRunRequest
+	11, // 13: model_plane.v1.RunService.ListSystemRuns:input_type -> model_plane.v1.ListSystemRunsRequest
+	14, // 14: model_plane.v1.RunService.ResolveRunOwner:input_type -> model_plane.v1.ResolveRunOwnerRequest
+	16, // 15: model_plane.v1.RunService.ResolveThreadOwner:input_type -> model_plane.v1.ResolveThreadOwnerRequest
+	18, // 16: model_plane.v1.RunService.ResolveRunActionAuthority:input_type -> model_plane.v1.ResolveRunActionAuthorityRequest
+	20, // 17: model_plane.v1.RunService.ResolveApprovalAuthority:input_type -> model_plane.v1.ResolveApprovalAuthorityRequest
+	22, // 18: model_plane.v1.RunService.ResolveScheduledStepAuthority:input_type -> model_plane.v1.ResolveScheduledStepAuthorityRequest
+	4,  // 19: model_plane.v1.RunService.AuthorizeRoomRunAttach:input_type -> model_plane.v1.AuthorizeRoomRunAttachRequest
+	2,  // 20: model_plane.v1.RunService.CancelRunAsRoomManager:input_type -> model_plane.v1.CancelRunAsRoomManagerRequest
+	24, // 21: model_plane.v1.RunService.GetRun:output_type -> model_plane.v1.RunDetail
+	8,  // 22: model_plane.v1.RunService.GetScheduledStepContext:output_type -> model_plane.v1.ScheduledStepContext
+	10, // 23: model_plane.v1.RunService.ListRuns:output_type -> model_plane.v1.ListRunsResponse
+	13, // 24: model_plane.v1.RunService.CancelRun:output_type -> model_plane.v1.CancelRunResponse
+	10, // 25: model_plane.v1.RunService.ListSystemRuns:output_type -> model_plane.v1.ListRunsResponse
+	15, // 26: model_plane.v1.RunService.ResolveRunOwner:output_type -> model_plane.v1.ResolveRunOwnerResponse
+	17, // 27: model_plane.v1.RunService.ResolveThreadOwner:output_type -> model_plane.v1.ResolveThreadOwnerResponse
+	19, // 28: model_plane.v1.RunService.ResolveRunActionAuthority:output_type -> model_plane.v1.ResolveRunActionAuthorityResponse
+	21, // 29: model_plane.v1.RunService.ResolveApprovalAuthority:output_type -> model_plane.v1.ResolveApprovalAuthorityResponse
+	23, // 30: model_plane.v1.RunService.ResolveScheduledStepAuthority:output_type -> model_plane.v1.ResolveScheduledStepAuthorityResponse
+	5,  // 31: model_plane.v1.RunService.AuthorizeRoomRunAttach:output_type -> model_plane.v1.AuthorizeRoomRunAttachResponse
+	3,  // 32: model_plane.v1.RunService.CancelRunAsRoomManager:output_type -> model_plane.v1.CancelRunAsRoomManagerResponse
+	21, // [21:33] is the sub-list for method output_type
+	9,  // [9:21] is the sub-list for method input_type
+	9,  // [9:9] is the sub-list for extension type_name
+	9,  // [9:9] is the sub-list for extension extendee
+	0,  // [0:9] is the sub-list for field type_name
 }
 
 func init() { file_model_plane_v1_runs_proto_init() }
@@ -2700,7 +2792,7 @@ func file_model_plane_v1_runs_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_model_plane_v1_runs_proto_rawDesc), len(file_model_plane_v1_runs_proto_rawDesc)),
 			NumEnums:      2,
-			NumMessages:   25,
+			NumMessages:   26,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

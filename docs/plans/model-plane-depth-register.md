@@ -3846,6 +3846,8 @@ Built so far: WS13-S0, WS13-S1, WS13-S2; WS14-S1, WS14-S2 (partial), WS14-S3; WS
 | D3-1133 | EP-12-S10 | risk | P2 | The Markdown copy escapes only <, so a < inside a fenced code block of an assistant answer reads as &lt; in the raw file; a Markdown-aware escape would avoid that. | open |
 | D3-1134 | EP-12-S10 | test-gap | P2 | The renderers are unit-tested on hand-built fixtures, so the JSON shape against real session-core output is proven only by the live export in the depth phase. | open |
 | D3-1135 | EP-12-S10 | follow-up | P3 | 4 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W3-21.json | open |
+| D3-1136 | W3-21 guard | follow-up | P2 | guard skipped: docs/plans/wave3/00-integration-round-b.md: the note that EP-11 S6 took session-core migration 0109 (a doc item, not a shared-edit; left for the lead) | open |
+| D3-1137 | W3-21 guard | follow-up | P2 | guard skipped: execution-core runtime_loop agent.rs/mod.rs: EP-11-S3's Do-path skill pinning through RunContextStatus.skills. This was listed under needs_other_files with no exact edit, so it is new design work and is not applied | open |
 
 ## Cross-wave
 

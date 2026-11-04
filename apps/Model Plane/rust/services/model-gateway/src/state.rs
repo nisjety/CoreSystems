@@ -20,6 +20,7 @@ use mp_contracts::model_plane::v1::{
     message_search_client::MessageSearchClient,
     memory_service_client::MemoryServiceClient,
     message_tree_service_client::MessageTreeServiceClient,
+    thread_export_service_client::ThreadExportServiceClient,
     thread_fork_service_client::ThreadForkServiceClient,
     thread_goal_service_client::ThreadGoalServiceClient,
     thread_reference_service_client::ThreadReferenceServiceClient,
@@ -28,6 +29,7 @@ use mp_contracts::model_plane::v1::{
     run_ledger_service_client::RunLedgerServiceClient,
     run_service_client::RunServiceClient, sandbox_manager_client::SandboxManagerClient,
     session_core_client::SessionCoreClient, space_attention_client::SpaceAttentionClient,
+    skill_version_service_client::SkillVersionServiceClient,
     space_events_client::SpaceEventsClient,
     space_history_service_client::SpaceHistoryServiceClient,
     space_room_read_service_client::SpaceRoomReadServiceClient,
@@ -125,6 +127,8 @@ pub struct AppState {
     pub run_ledger_client: RunLedgerServiceClient<Channel>,
     /// Session Core's ArtifactRevisionService (EP-3 S2 revision store) on the session_client endpoint.
     pub artifact_revision_client: ArtifactRevisionServiceClient<Channel>,
+    /// Session Core's SkillVersionService (EP-11 S3: recovery reads a run's pinned skill version) on the session_client endpoint.
+    pub skill_version_client: SkillVersionServiceClient<Channel>,
     /// `MODEL_GATEWAY_ARTIFACT_REVISIONS`, read once at startup (EP-3 S2). Off writes nothing.
     pub artifact_revisions_mode: crate::artifact_revisions::ArtifactRevisionsMode,
     /// `MODEL_GATEWAY_ARTIFACT_EDITING`, read once at startup after the revision mode (EP-3 S4). Off answers the edit routes 404.
@@ -135,6 +139,8 @@ pub struct AppState {
     pub thread_fork_client: ThreadForkServiceClient<Channel>,
     /// Session Core's ThreadGoalService on the session_client endpoint (EP-7 S1).
     pub thread_goal_client: ThreadGoalServiceClient<Channel>,
+    /// Session Core's ThreadExportService on the session_client endpoint (EP-12 S10).
+    pub thread_export_client: ThreadExportServiceClient<Channel>,
     /// Session Core's ThreadReference service on the session_client endpoint (EP-3 S7): the
     /// read-only thread reference tools read the threads the person attached through it.
     pub thread_reference_client: ThreadReferenceServiceClient<Channel>,
@@ -493,11 +499,13 @@ impl AppState {
             event_log_client: EventLogClient::new(session_channel.clone()),
             run_ledger_client: RunLedgerServiceClient::new(session_channel.clone()),
             artifact_revision_client: ArtifactRevisionServiceClient::new(session_channel.clone()),
+            skill_version_client: SkillVersionServiceClient::new(session_channel.clone()),
             artifact_revisions_mode: crate::artifact_revisions::ArtifactRevisionsMode::Off,
             artifact_editing_enabled: false,
             message_tree_client: MessageTreeServiceClient::new(session_channel.clone()),
             thread_fork_client: ThreadForkServiceClient::new(session_channel.clone()),
             thread_goal_client: ThreadGoalServiceClient::new(session_channel.clone()),
+            thread_export_client: ThreadExportServiceClient::new(session_channel.clone()),
             thread_reference_client: ThreadReferenceServiceClient::new(session_channel.clone()),
             attention_client: AttentionServiceClient::new(session_channel.clone()),
             learning_client: LearningGovernanceServiceClient::new(session_channel.clone()),
@@ -693,6 +701,11 @@ impl AppState {
             "SESSION_CORE_ADDR",
             "http://localhost:9091",
         )?);
+        let skill_version_client = SkillVersionServiceClient::new(Self::lazy_channel(
+            "SESSION_CORE_URL",
+            "SESSION_CORE_ADDR",
+            "http://localhost:9091",
+        )?);
         // A typo in the revision switch fails the boot rather than silently writing nothing.
         let artifact_revisions_mode = crate::artifact_revisions::ArtifactRevisionsMode::from_env()?;
         // Editing over a shadow or absent revision table would save text no turn reads: refuse the boot.
@@ -708,6 +721,11 @@ impl AppState {
             "http://localhost:9091",
         )?);
         let thread_goal_client = ThreadGoalServiceClient::new(Self::lazy_channel(
+            "SESSION_CORE_URL",
+            "SESSION_CORE_ADDR",
+            "http://localhost:9091",
+        )?);
+        let thread_export_client = ThreadExportServiceClient::new(Self::lazy_channel(
             "SESSION_CORE_URL",
             "SESSION_CORE_ADDR",
             "http://localhost:9091",
@@ -952,11 +970,13 @@ impl AppState {
             state.event_log_client = event_log_client;
             state.run_ledger_client = run_ledger_client;
             state.artifact_revision_client = artifact_revision_client;
+            state.skill_version_client = skill_version_client;
             state.artifact_revisions_mode = artifact_revisions_mode;
             state.artifact_editing_enabled = artifact_editing_enabled;
             state.message_tree_client = message_tree_client;
             state.thread_fork_client = thread_fork_client;
             state.thread_goal_client = thread_goal_client;
+            state.thread_export_client = thread_export_client;
             state.thread_reference_client = thread_reference_client;
             state.attention_client = attention_client;
             state.learning_client = learning_client;
@@ -1025,11 +1045,13 @@ impl AppState {
             state.event_log_client = event_log_client;
             state.run_ledger_client = run_ledger_client;
             state.artifact_revision_client = artifact_revision_client;
+            state.skill_version_client = skill_version_client;
             state.artifact_revisions_mode = artifact_revisions_mode;
             state.artifact_editing_enabled = artifact_editing_enabled;
             state.message_tree_client = message_tree_client;
             state.thread_fork_client = thread_fork_client;
             state.thread_goal_client = thread_goal_client;
+            state.thread_export_client = thread_export_client;
             state.thread_reference_client = thread_reference_client;
             state.attention_client = attention_client;
             state.learning_client = learning_client;
