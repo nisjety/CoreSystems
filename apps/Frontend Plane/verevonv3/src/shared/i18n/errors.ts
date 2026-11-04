@@ -515,8 +515,6 @@ export const ERROR_COPY: Record<string, ErrorCopy> = {
     en: 'We could not check which providers have a recorded ZDR attestation, so Zero Data Retention cannot be turned on right now. Try again shortly, or carry on without it and turn it on later.',
   },
 
-  model_entitlement_unavailable: { no: 'Hvilke modeller du kan bruke, kunne ikke kontrolleres akkurat nå.', en: 'Which models you can use could not be checked right now.', retryable: true },
-  model_not_entitled: { no: 'Denne modellen er ikke tilgjengelig for deg. Velg en annen modell.', en: 'This model is not available to you. Choose another model.' },
 
   // Rooms (Spaces), agents, schedules and instructions (gateway `spaces.rs`, `agent_actions.rs`,
 
