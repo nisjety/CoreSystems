@@ -398,6 +398,14 @@ fn valid_id(value: &str, max: usize) -> bool {
         && !value.chars().any(char::is_control)
 }
 
+/// An org id the provider puts in an org-core path. On top of `valid_id` it
+/// may hold no whitespace at all: no real org id has one, and a malformed id
+/// is refused here (`Invalid`) rather than sent to org-core, whose 404 would
+/// read as `Denied`.
+fn valid_org_id(value: &str) -> bool {
+    valid_id(value, ORG_ID_MAX_LEN) && !value.chars().any(char::is_whitespace)
+}
+
 /// The final outcome of one call (after the retry). Never carries a body
 /// except a successful one, and that one is zeroized on drop.
 enum Attempt {
@@ -652,7 +660,7 @@ impl OrgCoreKeyProvider {
     }
 
     fn url_for(&self, org: &str, tail: &[&str]) -> Result<reqwest::Url, KeyError> {
-        if !valid_id(org, ORG_ID_MAX_LEN) {
+        if !valid_org_id(org) {
             return Err(KeyError::Invalid);
         }
         let mut url = self.base.clone();
