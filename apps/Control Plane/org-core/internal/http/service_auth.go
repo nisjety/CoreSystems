@@ -24,8 +24,10 @@ const (
 	gatewayServicePrincipal   = "verevon-gateway"
 	siemExporterPrincipal     = "audit-core"
 	browserBrokerPrincipal    = "browser-broker"
+	authCorePrincipal         = "auth-core"
 	domainReaderPrincipal     = "auth-core"
 	scimEdgePrincipal         = "verevon-scim-edge"
+	quarryEdgePrincipal       = "quarry-edge"
 	serviceDelegationMaxAge   = 30 * time.Second
 	serviceDelegationSkew     = 5 * time.Second
 	serviceDelegationMaxBody  = 1 << 20
@@ -74,13 +76,26 @@ var orgServiceScopeAllowlist = map[string]struct{}{
 	"org:identity:admin:self": {},
 	// The SCIM surface (WS05-S8), held by the gateway's stateless SCIM edge alone
 	// (validateServiceCredential); the IdP's own bearer token still names the org.
-	"org:scim:any": {},
-	"org:domain:read:any":     {},
+	"org:scim:any":        {},
+	"org:domain:read:any": {},
 	// Read-only access to one org's agent-browser site decision, through
 	// GET /internal/orgs/:orgId/browser-sites/resolve and nothing else (WS21-S3).
 	// Held by the browser broker alone (validateServiceCredential); the decision
 	// is the broker's input at grant mint, never a member's list.
 	"org:browser-site:read:any": {},
+	// Quarry's per-org browser-profile key custody (WS17.E2): generate a data key
+	// under the org's KEK (wrap) and unwrap/rewrap it, through
+	// /internal/orgs/:orgId/keys/... and nothing else. Held by quarry-edge alone in
+	// the compose registry. The routes exist only when ORG_CORE_KEYS_ENABLED=1, so
+	// until then these scopes reach nothing; they are allowlisted now so the
+	// static credential (R-13 PR 2) and the org-core image can ship together.
+	"org:keys:wrap:any":   {},
+	"org:keys:unwrap:any": {},
+	// Read-only access to one org's web policy, through
+	// GET /internal/orgs/:orgId/web-policy and nothing else (WS7.H). Held by
+	// auth-core alone, which folds it into the web_policy token claim (WS7.I,
+	// WEB_POLICY_CLAIM_ENABLED). Unread until WS7.H registers the route.
+	"org:web-policy:read:any": {},
 }
 
 type serviceCredential struct {
@@ -191,6 +206,16 @@ func validateServiceCredential(credential serviceCredential, principals map[stri
 		if scope == "org:browser-site:read:any" && credential.Principal != browserBrokerPrincipal {
 			return fmt.Errorf("scope %s is not valid for principal %s", scope, credential.Principal)
 		}
+		// The web policy read feeds a token claim that bounds what agents may do, so
+		// it is pinned to the one principal that mints it (WS7.H, WS7.I).
+		if scope == "org:web-policy:read:any" && credential.Principal != authCorePrincipal {
+			return fmt.Errorf("scope %s is not valid for principal %s", scope, credential.Principal)
+		}
+		// The key scopes hand out plaintext data keys of ANY org, so they are
+		// pinned to the one principal that seals Quarry profiles (WS17.E2).
+		if (scope == "org:keys:wrap:any" || scope == "org:keys:unwrap:any") && credential.Principal != quarryEdgePrincipal {
+			return fmt.Errorf("scope %s is not valid for principal %s", scope, credential.Principal)
+		}
 		scopes[scope] = struct{}{}
 	}
 	principals[credential.Principal] = struct{}{}
@@ -258,7 +283,7 @@ func ValidateRequiredServiceCredentialRegistry(raw string) error {
 					required[scope] = true
 				}
 			}
-		case "auth-core":
+		case authCorePrincipal:
 			authCount++
 			for _, scope := range credential.Scopes {
 				if _, exists := authRequired[scope]; exists {
@@ -356,6 +381,14 @@ func organizationAPIScopes(method string, rest []string) []string {
 		return []string{"org:read:self"}
 	case len(rest) == 2 && method == http.MethodPut && rest[1] == "browser-sites":
 		return []string{"org:settings:write:self"}
+	// The org web policy (WS7.H): read and written only on behalf of a signed user
+	// (:self); org:read:any holders never see it. The history is an admin read.
+	case len(rest) == 2 && method == http.MethodGet && rest[1] == "web-policy":
+		return []string{"org:read:self"}
+	case len(rest) == 2 && method == http.MethodPut && rest[1] == "web-policy":
+		return []string{"org:settings:write:self"}
+	case len(rest) == 3 && method == http.MethodGet && rest[1] == "web-policy" && rest[2] == "history":
+		return []string{"org:read:self"}
 	case len(rest) == 3 && method == http.MethodGet && rest[1] == "browser-sites" && (rest[2] == "explain" || rest[2] == "me"):
 		return []string{"org:read:self"}
 	case len(rest) == 4 && rest[1] == "browser-sites" && rest[2] == "me" && (method == http.MethodPut || method == http.MethodDelete):
@@ -398,6 +431,13 @@ func organizationProxyScopes(method string, rest []string) []string {
 	case len(rest) == 2 && method == http.MethodPut && rest[1] == "model-entitlement":
 		return []string{"org:settings:write:self"}
 	case len(rest) == 3 && method == http.MethodGet && rest[1] == "model-entitlement" && rest[2] == "explain":
+		return []string{"org:read:self"}
+	// The org web policy (WS7.H), on behalf of a signed user only (:self).
+	case len(rest) == 2 && method == http.MethodGet && rest[1] == "web-policy":
+		return []string{"org:read:self"}
+	case len(rest) == 2 && method == http.MethodPut && rest[1] == "web-policy":
+		return []string{"org:settings:write:self"}
+	case len(rest) == 3 && method == http.MethodGet && rest[1] == "web-policy" && rest[2] == "history":
 		return []string{"org:read:self"}
 	// SIEM destinations are administered on behalf of a signed owner or admin
 	// only (:self); no :any holder reaches them through this path.
@@ -479,6 +519,23 @@ func internalOrganizationScopes(method string, rest []string) []string {
 		return []string{"org:model-entitlement:read:any"}
 	case len(rest) == 3 && rest[1] == "browser-sites" && rest[2] == "resolve" && method == http.MethodGet:
 		return []string{"org:browser-site:read:any"}
+	case len(rest) == 2 && rest[1] == "web-policy" && method == http.MethodGet:
+		return []string{"org:web-policy:read:any"}
+	// Key custody (WS17.E2). The admin and destroy scopes are deliberately not in
+	// orgServiceScopeAllowlist yet, so no credential holds them and rotate,
+	// metadata and crypto-shred answer 403 until a reviewed registry change.
+	case len(rest) == 3 && rest[1] == "keys" && rest[2] == "data-keys" && method == http.MethodPost:
+		return []string{"org:keys:wrap:any"}
+	case len(rest) == 4 && rest[1] == "keys" && rest[2] == "data-keys" && rest[3] == "unwrap" && method == http.MethodPost:
+		return []string{"org:keys:unwrap:any"}
+	case len(rest) == 4 && rest[1] == "keys" && rest[2] == "data-keys" && rest[3] == "rewrap" && method == http.MethodPost:
+		return []string{"org:keys:wrap:any"}
+	case len(rest) == 3 && rest[1] == "keys" && rest[2] == "rotate" && method == http.MethodPost:
+		return []string{"org:keys:admin:any"}
+	case len(rest) == 2 && rest[1] == "keys" && method == http.MethodGet:
+		return []string{"org:keys:admin:any"}
+	case len(rest) == 2 && rest[1] == "keys" && method == http.MethodDelete:
+		return []string{"org:keys:destroy:any"}
 	case len(rest) == 2 && rest[1] == "reconcile" && method == http.MethodPost:
 		return []string{"org:projection:write:any"}
 	case len(rest) == 3 && rest[1] == "members" && rest[2] == "reconcile" && method == http.MethodPost:

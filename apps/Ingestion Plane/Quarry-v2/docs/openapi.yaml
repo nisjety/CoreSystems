@@ -360,6 +360,8 @@ paths:
           application/json:
             schema:
               $ref: '#/components/schemas/CrawlRequest'
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
       responses:
         '200':
           description: Crawl job accepted
@@ -402,9 +404,13 @@ paths:
           application/json:
             schema:
               $ref: '#/components/schemas/BatchRequest'
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
       responses:
         '200':
-          description: Batch job accepted
+          description: >-
+            Batch job accepted. A repeated Idempotency-Key answers 200 too, with the job the first request created;
+            that repeat is not billed.
           content:
             application/json:
               schema:
@@ -417,6 +423,15 @@ paths:
                 $ref: '#/components/schemas/Envelope_Error'
         '402':
           description: "The organization's configured batch URL (quarry.batch.url) allowance is spent (WS6.D-s; only a source that reports an allowance produces this, the default static source never does). Body is BUDGET_EXHAUSTED with details dimension org_allowance, metric, limit_source entitlement and resumable false. No job is created."
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Envelope_Error'
+        '409':
+          description: >-
+            A repeated Idempotency-Key that reuses the key for a different URL list or ingest flag, with
+            QUARRY_EDGE__BATCH_IDEMPOTENCY on. The body is CONFLICT with details.reason idempotency_key_reused and
+            details.job_id, the job the key already holds. Nothing is created and nothing is billed.
           content:
             application/json:
               schema:
@@ -466,7 +481,10 @@ paths:
         '400':
           description: >-
             Refused before any search runs. ZDR_REQUIRED: a service caller did not send zdr. SCORE_KIND_UNSUPPORTED:
-            score_kinds names a score kind this edge does not produce.
+            score_kinds names a score kind this edge does not produce. BAD_REQUEST: a scrape limit (1 to 10),
+            max_chars (1 to 50000) or timeout_ms (1000 to 55000) is out of range. UNSUPPORTED_OPTION: a scrape
+            formats entry other than markdown. These checks run only with QUARRY_EDGE__SEARCH_SCRAPE on; off, the
+            scrape block is ignored.
           content:
             application/json:
               schema:
@@ -1802,6 +1820,8 @@ paths:
         job (crawl, batch, scrape, extract) it also carries `credits`, an estimate derived
         from the fetched-page count, once the control service has `QUARRY_CONTROL__JOB_CREDITS`
         on (default off).
+        To cancel, use DELETE /v1/crawl/{job_id} or DELETE /v1/batch/{job_id} (WS15.L2). Crawl and batch jobs are
+        refused under zero data retention, so there is no such job to read here under ZDR.
       parameters:
         - name: job_id
           in: path
@@ -1821,6 +1841,10 @@ paths:
                     $ref: '#/components/schemas/JobStatusView'
         '404':
           description: Not found for this organization, or not a job id.
+        '408':
+          description: >-
+            The route deadline (60 s by default) passed before the status was read. The body is empty, with no
+            error envelope. The x-request-id header is still echoed.
   /v1/crawl/ongoing:
     get:
       operationId: list_ongoing_crawls
@@ -4172,6 +4196,20 @@ paths:
                 $ref: '#/components/schemas/ParseError'
 components:
   parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      description: >-
+        A caller-chosen key for POST /v1/batch and POST /v1/crawl. At most 128 bytes after trimming. An empty,
+        longer or not visible ASCII value is ignored, as if no key were sent. Keys are unique per organization
+        (control migration 028). A repeated key answers 200 with the job the first request created (the same
+        job_id), and that repeat is not billed again. With QUARRY_EDGE__BATCH_IDEMPOTENCY on, a batch that reuses
+        a key for a different URL list or ingest flag is a 409 CONFLICT with details.reason idempotency_key_reused.
+        With the flag off, or on a crawl, a reused key re-attaches to the held job whatever the body says.
+      schema:
+        type: string
+        maxLength: 128
     WebhookSubscriptionId:
       name: subscription_id
       in: path
@@ -7711,6 +7749,8 @@ components:
             type: string
             enum:
             - cross_encoder.v1
+        scrape:
+          $ref: '#/components/schemas/SearchScrapeBlock'
     SearchResultItem:
       type: object
       required:
@@ -7828,6 +7868,129 @@ components:
           - cross_encoder.v1
         rerank:
           $ref: '#/components/schemas/RerankReport'
+        scrape:
+          $ref: '#/components/schemas/SearchScrapeReport'
+    SearchScrapeBlock:
+      type: object
+      description: >-
+        E3.7.7a. Hydrates the top results of this search through the edge's markdown fetch path, with the
+        request's web policy and the security preflight applied to every URL before its fetch. Read only when
+        QUARRY_EDGE__SEARCH_SCRAPE is on. Out-of-range values are refused with 400 BAD_REQUEST, not clamped.
+        Hydrated text travels inline in this response only: it is never cached, never evented and never logged,
+        under zero data retention too.
+      properties:
+        limit:
+          type: integer
+          minimum: 1
+          maximum: 10
+          default: 5
+          description: How many of the top results to hydrate.
+        max_chars:
+          type: integer
+          minimum: 1
+          maximum: 50000
+          default: 8000
+          description: Characters of markdown kept per result. The camelCase alias maxChars is accepted.
+        timeout_ms:
+          type: integer
+          minimum: 1000
+          maximum: 55000
+          default: 15000
+          description: One time budget for the whole block, in milliseconds. The camelCase alias timeoutMs is accepted.
+        formats:
+          type: array
+          description: Only markdown is supported, and it is the default. Any other entry is a 400 UNSUPPORTED_OPTION.
+          items:
+            type: string
+            enum:
+            - markdown
+    SearchScrapeReport:
+      type: object
+      description: >-
+        The scrape block's result. It is present only when the request sent a scrape block. With the flag off
+        the status is disabled and nothing was fetched.
+      required:
+      - status
+      - requested
+      - hydrated
+      - failed
+      properties:
+        status:
+          type: string
+          enum:
+          - ok
+          - disabled
+        requested:
+          type: integer
+          minimum: 0
+          description: Results the block tried to hydrate.
+        hydrated:
+          type: integer
+          minimum: 0
+          description: Results that came back with markdown.
+        failed:
+          type: integer
+          minimum: 0
+          description: Results that came back with a failure code.
+        items:
+          type: array
+          description: One entry per result the block tried, in result order. Absent when there are none.
+          items:
+            $ref: '#/components/schemas/SearchScrapeItem'
+    SearchScrapeItem:
+      type: object
+      description: >-
+        One hydrated result. Status ok carries markdown, chars and truncated. Status failed carries a closed
+        code, and http_status when the code is http_status. A failure never carries page text, host or provider
+        text.
+      required:
+      - url
+      - position
+      - status
+      properties:
+        url:
+          type: string
+          description: The result's URL, as the search returned it.
+        position:
+          type: integer
+          minimum: 1
+          description: 1-based position in results.
+        status:
+          type: string
+          enum:
+          - ok
+          - failed
+        markdown:
+          type: string
+          description: Present when status is ok. The page as markdown, cut at max_chars.
+        chars:
+          type: integer
+          minimum: 0
+          description: Present when status is ok. Characters in markdown after the cap.
+        truncated:
+          type: boolean
+          description: Present when status is ok. True when the page had more than max_chars characters.
+        code:
+          type: string
+          description: >-
+            Present when status is failed. policy_denied, blocked and invalid_url are refused before the fetch and
+            are not billed. The others happen after it.
+          enum:
+          - policy_denied
+          - blocked
+          - invalid_url
+          - deadline_exceeded
+          - http_status
+          - too_large
+          - decode
+          - extract
+          - timeout
+          - transport
+          - empty
+          - too_short
+        http_status:
+          type: integer
+          description: Present when code is http_status. The status the origin answered with.
     RerankReport:
       type: object
       description: >-

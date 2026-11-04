@@ -56,20 +56,36 @@ func CrawlInputFromParams(params map[string]any, runID, jobID string, maxDepth, 
 		return CrawlJobInput{}, err
 	}
 	return CrawlJobInput{
-		UserID:        UserFromParams(params),
-		Ingest:        IngestFromParams(params),
-		RunID:         runID,
-		JobID:         jobID,
-		OrgID:         OrgFromParams(params),
-		Seeds:         seeds,
-		MaxDepth:      maxDepth,
-		MaxPages:      maxPages,
-		Scope:         scope,
-		ScopeMode:     stringFromParam(params["scope_mode"]),
-		Robots:        stringFromParam(params["robots"]),
-		Sitemap:       sitemapFromParams(params),
-		ScrapeOptions: scrapeOptionsFromParams(params),
+		UserID:         UserFromParams(params),
+		Ingest:         IngestFromParams(params),
+		RunID:          runID,
+		JobID:          jobID,
+		OrgID:          OrgFromParams(params),
+		Seeds:          seeds,
+		MaxDepth:       maxDepth,
+		MaxPages:       maxPages,
+		Scope:          scope,
+		ScopeMode:      stringFromParam(params["scope_mode"]),
+		Robots:         stringFromParam(params["robots"]),
+		Sitemap:        sitemapFromParams(params),
+		ScrapeOptions:  scrapeOptionsFromParams(params),
+		PolicySnapshot: policySnapshotFromParams(params),
 	}, nil
+}
+
+// policySnapshotFromParams reads the web policy the edge resolved at the handoff and stamped
+// on the job (WS7.G 6b), as JSON. Absent, null or empty is nil: a workflow input byte-identical
+// to one built before the snapshot existed.
+func policySnapshotFromParams(params map[string]any) json.RawMessage {
+	snapshot, ok := params["policy_snapshot"].(map[string]any)
+	if !ok || len(snapshot) == 0 {
+		return nil
+	}
+	encoded, err := json.Marshal(snapshot)
+	if err != nil {
+		return nil
+	}
+	return encoded
 }
 
 // sitemapFromParams reads the sitemap mode the edge stamped on a crawl (INNH-6a): "include" or
@@ -106,13 +122,14 @@ func BatchInputFromParams(params map[string]any, runID, jobID string) (BatchJobI
 		return BatchJobInput{}, errors.New("batch job missing params.urls")
 	}
 	return BatchJobInput{
-		UserID: UserFromParams(params),
-		Ingest: IngestFromParams(params),
-		RunID:  runID,
-		JobID:  jobID,
-		OrgID:  OrgFromParams(params),
-		URLs:   urls,
-		Robots: stringFromParam(params["robots"]),
+		UserID:         UserFromParams(params),
+		Ingest:         IngestFromParams(params),
+		RunID:          runID,
+		JobID:          jobID,
+		OrgID:          OrgFromParams(params),
+		URLs:           urls,
+		Robots:         stringFromParam(params["robots"]),
+		PolicySnapshot: policySnapshotFromParams(params),
 	}, nil
 }
 

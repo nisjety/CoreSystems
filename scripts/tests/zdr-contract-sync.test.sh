@@ -83,7 +83,7 @@ GOLDENS=(
   # The claims of aud=quarry tokens as Auth Core really mints them. Written with
   #   UPDATE_GOLDENS=1 npx jest src/auth/quarry-token-zdr-claims.golden.spec.ts
   # in "apps/Control Plane/auth-core", which also vendors it into Quarry.
-  "apps/Control Plane/auth-core/src/auth/fixtures/quarry-token-claims.golden.json|ec0ae10c182493fd61f369b7a63ee6dd3156039e5230918933e5413af8beeffa"
+  "apps/Control Plane/auth-core/src/auth/fixtures/quarry-token-claims.golden.json|6c3044d5004a36f2cab3187a31847d23a6d471e1902337e0c71c9e5f34770682"
 
   # What Auth Core emits to the Data Plane for a service caller, and what it
   # answers when the Data Plane asks whether that caller is a member. Written with
@@ -128,7 +128,7 @@ GOLDENS=(
   # row: edit it, refresh the .sha256 pin beside it (the Rust tests in
   # src/token_request_contract.rs compare it), update the digest here, then re-vendor
   # every copy listed in VENDORED (Auth Core's, CR-T17) and refresh its pin.
-  "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/contracts/cross-plane-token-requests.json|f73f86a2bf1e4d6e891a791ad18b9f062105f24de59c0887920d56892f4954df"
+  "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/contracts/cross-plane-token-requests.json|6e5f14b36cff96b33991f20b49d7eff87151f1d91dac92fe6afa50c8400e7f04"
 
   # WS4.G: the ZDR feature matrix, what Zero Data Retention does to each route. Generated
   # from quarry_core::zdr_matrix::ROWS by the owner's test, never written by hand:
@@ -139,7 +139,7 @@ GOLDENS=(
   # the_golden_and_markdown_are_what_the_table_generates (crates/quarry-core/src/zdr_matrix.rs),
   # which quarry-v2-ci.yml runs through cargo test --workspace. A regenerated golden needs
   # its digest here updated in the same change.
-  "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/contracts/zdr-feature-matrix.json|8b5c4fd472c680a356523a3c4a64375f9daf6c777dcb6787d203386b2a178292"
+  "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/contracts/zdr-feature-matrix.json|fbcb6d3c8d81ce5a3ba6de43983a49c6ba6b19fde6f7a7f31c1b9cb14533e8bf"
 
   # WS4.J: the allowlist of the ZDR run tombstone, the ONLY fields that egress path may carry.
   # AUTHORED data owned by Quarry. quarry-edge's serializer (src/zdr_tombstone.rs, tests/
@@ -206,7 +206,7 @@ GOLDENS=(
   # (VEREVON_UPDATE_GOLDEN=1 pnpm vitest run src/shared/actions/admission-contract.test.ts) from the typed
   # side map (model-access.ts) and the registry, never written by hand. Each plane that admits an agent
   # action vendors it, with the pin beside it, in the VENDORED rows below.
-  "apps/Model Plane/api/contracts/agent-action-admission.json|d766811d7d584347367b90f71a8e1116535196c9f1b35fd36ab367e18b367f02"
+  "apps/Model Plane/api/contracts/agent-action-admission.json|04798a51742c11aa8f9ae5414d49dba62a961e7606aa6c059af036d12a9a54a9"
   # WS21-S0 and WS21-S3: the browser policy goldens, authored (not generated). org-core's validate and resolve tests
   # and execution-core's canonicaliser test read vendored copies (VENDORED); the other consumers are pending (CONSUMERS).
   "apps/Model Plane/api/contracts/browser-domain-canonical.json|ef6bfb8e63f3a1c34b90a0d26d0f27fb5ef224f138a652bf851dc179573ac45d"
@@ -279,6 +279,11 @@ VENDORED=(
   # Quarry's token-claims contract test (crates/quarry-edge/tests/zdr_claim_floor.rs).
   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/tests/fixtures/auth-core/quarry-token-claims.golden.json|apps/Control Plane/auth-core/src/auth/fixtures/quarry-token-claims.golden.json"
   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/tests/fixtures/auth-core/quarry-token-claims.golden.sha256|apps/Control Plane/auth-core/src/auth/fixtures/quarry-token-claims.golden.sha256"
+
+  # WS7.I: Auth Core's copy of the web-policy catalogue and its pin
+  # (src/auth/web-policy.spec.ts checks the copy against the pin and Quarry's source).
+  "apps/Control Plane/auth-core/src/auth/fixtures/web-policy-catalogue.v1.json|apps/Ingestion Plane/Quarry-v2/crates/quarry-core/contracts/web-policy-catalogue.v1.json"
+  "apps/Control Plane/auth-core/src/auth/fixtures/web-policy-catalogue.v1.json.sha256|apps/Ingestion Plane/Quarry-v2/crates/quarry-core/contracts/web-policy-catalogue.v1.json.sha256"
 
   # The retrieval engine's service-principal tests (tests/service_principal_auth.rs).
   "apps/Data Plane v2/services/retrieval-engine-rs/tests/fixtures/auth-core/data-plane-authorization-decision.golden.json|apps/Control Plane/auth-core/src/auth/fixtures/data-plane-authorization-decision.golden.json"

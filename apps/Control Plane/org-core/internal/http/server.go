@@ -11,6 +11,7 @@ import (
 
 	"github.com/I-Dacosta/AquatiqCMS/apps/org-core/internal/brreg"
 	orgcore "github.com/I-Dacosta/AquatiqCMS/apps/org-core/internal/org"
+	"github.com/I-Dacosta/AquatiqCMS/apps/org-core/internal/orgkeys"
 	"github.com/I-Dacosta/AquatiqCMS/apps/org-core/internal/rbac"
 	"github.com/gin-gonic/gin"
 )
@@ -42,6 +43,11 @@ type Server struct {
 	siemEnabled bool
 	siem        siemDestinationService
 
+	// webPolicy is the org web policy of record (WS7.H): administered through
+	// /orgs/:id/web-policy and read by Auth Core through
+	// /internal/orgs/:orgId/web-policy. Additive and unread until WS7.I.
+	webPolicy webPolicyService
+
 	// identityEnabled mounts the domain verification routes (WS05-S6,
 	// ORG_DOMAIN_VERIFICATION_ENABLED); identity is the service behind them.
 	identityEnabled bool
@@ -53,6 +59,12 @@ type Server struct {
 	scimOn      bool
 	scim        scimService
 	scimLimiter *scimRateLimiter
+
+	// keysOn mounts the key custody routes (WS17.E2, ORG_CORE_KEYS_ENABLED,
+	// default off); orgKeys is set by SetOrgKeys. With the routes on and no
+	// service they answer 503 keys_unavailable.
+	keysOn  bool
+	orgKeys orgKeyService
 }
 
 func NewServer(port int, orgService *orgcore.Service, rbacRepo *rbac.Repository, authServiceURL, userServiceURL string) *Server {
@@ -85,6 +97,7 @@ func NewServer(port int, orgService *orgcore.Service, rbacRepo *rbac.Repository,
 		s.retentionPosture = orgService
 		s.agentPolicy = orgService
 		s.callerRoles = orgService
+		s.webPolicy = orgService
 	}
 	if siemDestinationsEnabled(os.Getenv) {
 		s.siemEnabled = true
@@ -130,6 +143,10 @@ func NewServer(port int, orgService *orgcore.Service, rbacRepo *rbac.Repository,
 			}
 		}
 	}
+	// The key routes exist only when ORG_CORE_KEYS_ENABLED=1; cmd/server wires
+	// the service (SetOrgKeys) and refuses to boot without usable master keys
+	// (ValidateOrgKeysConfig).
+	s.keysOn = orgkeys.Enabled(os.Getenv)
 	s.setupRoutes()
 	s.httpServer = &http.Server{
 		Addr:              ":" + strconv.Itoa(port),
@@ -186,6 +203,13 @@ func (s *Server) setupRoutes() {
 	v1.PUT("/organizations/:id/browser-sites", guard, s.putBrowserSites)
 	v1.GET("/organizations/:id/browser-sites/explain", s.explainBrowserSite)
 	v1.GET("/organizations/:id/browser-sites/me", s.listBrowserSitePrefs)
+	// Org web policy (WS7.H). An owner or admin reads and writes the stored
+	// document and its history; any other active member reads only the effective
+	// document and the entitlements. The handlers check the role against the
+	// membership table; the guard is the same second layer the other mutations use.
+	v1.GET("/organizations/:id/web-policy", s.getWebPolicy)
+	v1.PUT("/organizations/:id/web-policy", guard, s.putWebPolicy)
+	v1.GET("/organizations/:id/web-policy/history", s.listWebPolicyHistory)
 	v1.PUT("/organizations/:id/browser-sites/me/:host", guard, s.putBrowserSitePref)
 	v1.DELETE("/organizations/:id/browser-sites/me/:host", guard, s.deleteBrowserSitePref)
 	// createOrganization is intentionally NOT guarded: there is no :id to check
@@ -215,6 +239,9 @@ func (s *Server) setupRoutes() {
 	s.router.GET("/orgs/:id/model-entitlement", s.getModelEntitlement)
 	s.router.PUT("/orgs/:id/model-entitlement", guard, s.putModelEntitlement)
 	s.router.GET("/orgs/:id/model-entitlement/explain", s.explainModelEntitlement)
+	s.router.GET("/orgs/:id/web-policy", s.getWebPolicy)
+	s.router.PUT("/orgs/:id/web-policy", guard, s.putWebPolicy)
+	s.router.GET("/orgs/:id/web-policy/history", s.listWebPolicyHistory)
 
 	// SIEM destination config (WS06-S7): owner/admin CRUD. Every path answers 404
 	// until ORG_SIEM_DESTINATIONS_ENABLED is on. The handlers check the caller's
@@ -307,6 +334,10 @@ func (s *Server) setupRoutes() {
 	// (WS21-S3). Own scope org:browser-site:read:any, held by browser-broker alone;
 	// no-store.
 	internal.GET("/orgs/:orgId/browser-sites/resolve", s.getBrowserSitesInternal)
+	// The org's effective web policy for Auth Core's web_policy token claim
+	// (WS7.H, read by WS7.I). Own scope org:web-policy:read:any, held by auth-core
+	// alone; no-store.
+	internal.GET("/orgs/:orgId/web-policy", s.getWebPolicyInternal)
 	// The exporter's read of every enabled SIEM destination, secret unsealed
 	// (WS06-S7). Own scope org:siem:read:any, held by audit-core only; no-store.
 	// Registered even while the feature is off so the path cannot fall through to
@@ -345,4 +376,8 @@ func (s *Server) setupRoutes() {
 	// (EnsureSuccession) before a sole owner/admin's erasure saga starts. See
 	// succession_handlers.go.
 	internal.POST("/orgs/:orgId/members/:userId/succession", s.promoteMemberSuccession)
+	// Key custody (WS17.E2): DEK wrap, unwrap, rewrap, KEK rotation, metadata and
+	// crypto-shred. Registered only when ORG_CORE_KEYS_ENABLED=1; see
+	// keys_handlers.go for the scope of each route.
+	s.registerOrgKeyRoutes(internal)
 }

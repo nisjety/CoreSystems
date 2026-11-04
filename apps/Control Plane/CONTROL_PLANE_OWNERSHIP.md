@@ -345,6 +345,8 @@ const usersTable = defineTable({
 | Model entitlements: which models a member may use for chat (ADR-0005; designed, not built) | org-core (stores, resolves, explains); inference-core enforces by pull | Not synced | Control Plane |
 | Connection ZDR capability and acknowledgement ledger (designed, not built) | integration-corev2 (Ingestion Plane); auth-core only reads | Not synced | integration-corev2 |
 | Per-run ZDR waiver claim (designed, not built) | auth-core (the only issuer) | Not synced | Control Plane |
+| Org web policy and its `web_policy` claim (built, dark) | org-core stores; auth-core is the only issuer of the claim | Not synced | Control Plane |
+| Org encryption keys: per-org KEK and the wrapped per-profile data keys (built, dark) | org-core (`internal/orgkeys`); quarry-edge calls wrap and unwrap only | Not synced | Control Plane |
 | **Conversations**          | **Convex**         | **Read-write**    | **Convex**       |
 | **Messages**               | **Convex**         | **Read-write**    | **Convex**       |
 | **Jobs (RAG, etc.)**       | **Convex**         | **Read-write**    | **Convex**       |
@@ -353,7 +355,7 @@ const usersTable = defineTable({
 
 ## Retention Posture Authority
 
-Whether an organisation's content may be retained (zero data retention, ZDR) is decided in the Control Plane and nowhere else. Plane-level rules: [`../master-ownership-matrix.md`](../master-ownership-matrix.md), rules 16 and 17.
+Whether an organisation's content may be retained (zero data retention, ZDR) is decided in the Control Plane and nowhere else. Plane-level rules: [`../../docs/master-ownership-matrix.md`](../../docs/master-ownership-matrix.md), rules 16 and 17 (and rule 19 for web policy).
 
 **Built (read on 2026-10-06).**
 
@@ -369,6 +371,33 @@ Whether an organisation's content may be retained (zero data retention, ZDR) is 
 - org-core stores each organisation's chat model policy per organisation and per role, with append-only revisions and history, and answers inference-core alone (`GET /internal/orgs/:orgId/model-entitlement`, scope `org:model-entitlement:read:any`, a principal of its own).
 - inference-core enforces the answer, caches it for 30 s and fails closed past its stale bound (`model_entitlement_unavailable`). model-gateway asks through `GetModelAccess` and decides nothing.
 - Metadata holds model ids and actor ids only, never content. The BFF refuses a write that would leave a ZDR organisation with no attested model (`model_policy_leaves_no_zdr_model`).
+
+---
+
+## Web Policy Posture
+
+An organisation's web policy (its capability switches, its robots and proxy ceilings, and its domain allow and deny lists) is decided in the Control Plane and nowhere else. Plane-level rule: [`../../docs/master-ownership-matrix.md`](../../docs/master-ownership-matrix.md), rule 19. The claim edges are listed in [`../../docs/CROSS_PLANE_CONTRACT_MATRIX.md`](../../docs/CROSS_PLANE_CONTRACT_MATRIX.md) under "Claim Edges".
+
+**Built, dark (build plan WS7.H and WS7.I; code only, not deployed).**
+
+- org-core stores the policy with append-only revisions (`organization_web_policy`, its history, and a content-free audit outbox), validates it against the vendored catalogue, computes the plan's web entitlements, and serves it to auth-core alone at `GET /internal/orgs/:orgId/web-policy` (scope `org:web-policy:read:any`). An organisation admin changes it with `PUT /orgs/:id/web-policy` under an `If-Match` revision.
+- auth-core is the only issuer. At mint it resolves the policy with a 45-second fresh cache, and serves the last good answer for up to 15 minutes when org-core cannot answer. With nothing usable, the mint returns 503 `web_policy_unavailable` and no token. It signs `web_policy` beside `zdr` on user tokens and on tenant-row service tokens for the `quarry` and `browser-broker` audiences.
+- `WEB_POLICY_CLAIM_ENABLED` is off by default. While it is off, every such token carries `{"v":1,"rev":"0"}` and org-core is not asked. Staleness is about 345 seconds by default (the 300-second audience TTL plus the 45-second cache). `WEB_POLICY_TOKEN_TTL_CAP_SECONDS` can tighten it to 105 seconds; it is unset.
+- Quarry, the browser broker and the gateway enforce the claim. None of them mints, re-signs or widens it, and a grant's snapshot never overrides a tighter claim.
+
+**Decision.** ADR-1, outcome C, in the browser build plan: org-core owns the policy, the claim rides on user tokens and org-resolved service tokens, and the grant carries a snapshot. This is the recommended default that the built units implement. The Control Plane and Model Plane owners have not signed it off yet. The plan's fail-mode wording and the built behaviour differ (the plan says fail to a static floor after 15 minutes; the built behaviour is a refused mint), so the owner has to settle that before the flag is turned on.
+
+**Not in this section.** Quarry's enforcement state, the broker's snapshot read (WS7.J and WS7.K), and the optional revocation push (WS7.M) are tracked in the build plan.
+
+---
+
+## Organisation Key Custody
+
+org-core owns each organisation's encryption keys. It creates a key-encryption key (KEK) for each organisation on first use and stores it wrapped under a master key. It wraps, unwraps, rewraps and destroys the per-profile data keys (DEKs) that quarry-edge uses for encrypted browser profile material. A plaintext DEK goes back only to quarry-edge, on generate and on unwrap; a rewrap never returns one. quarry-edge is the only caller allowed to wrap or unwrap (scopes `org:keys:wrap:any` and `org:keys:unwrap:any`, pinned to that principal). Destruction is a crypto-shred: the organisation's KEK rows are removed, and no new KEK can be created for it afterwards.
+
+- **Built, dark (build plan WS17.E2a; code only, not deployed).** The routes exist only when `ORG_CORE_KEYS_ENABLED` is set. The master keys come from the environment for now (`ORG_CORE_KEY_MASTER_KEYS`, `ORG_CORE_KEY_MASTER_ACTIVE`), behind a provider interface so that a KMS can replace them. A boot check refuses master keys that do not parse, and a canary per master key is checked before the service answers. Outside the two responses that return a DEK to quarry-edge, no key material appears in logs, metadata reads or audit payloads.
+- **Not done.** The admin scopes (rotate and metadata) and the destroy scope are not granted to any principal, so those routes answer 403 to everyone. The master-key escrow runbook, master-key minting and the restore drill are not done; all three are required before any production use.
+- **Decision.** X-8 in the browser build plan: org-core behind an interface, with the environment master key as a logged interim.
 
 ---
 

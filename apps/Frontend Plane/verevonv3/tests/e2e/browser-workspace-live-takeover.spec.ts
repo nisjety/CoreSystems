@@ -128,4 +128,45 @@ test.describe('browser workspace: live frame streaming and human takeover', () =
     expect(staleBody.error.code).toBe('browser_control_epoch_stale')
     expect((await readSession()).control?.mode).toBe('agent_control')
   })
+
+  /**
+   * WS8.F (U62-66): a tab an agent opened is marked in the tab strip and can be revealed. Quarry
+   * reports the opener on its owner projection, and the gateway passes it to the SPA as
+   * `openedBy: 'agent' | 'human'` on the session's tabs and on every tab response. The agent's tab
+   * is opened over the API as an agent's call; the person then opens a tab from the strip, whose
+   * response carries the whole tab list. Written for the stack with the gateway change deployed;
+   * it is not run in the build.
+   */
+  test('a tab the agent opened is marked in the tab strip and can be revealed', async ({ page, request }) => {
+    test.setTimeout(90_000)
+    const origin = new URL(test.info().project.use.baseURL ?? 'http://localhost:5173').origin
+
+    await resetHome(page)
+    sessionId = await submitBrowserUrl(page, EXAMPLE_URL)
+    const sessionPath = `/api/v1/browser/sessions/${encodeURIComponent(sessionId ?? '')}`
+
+    const agentTab = await request.post(`${sessionPath}/tabs`, {
+      headers: { 'content-type': 'application/json', origin },
+      data: { actor: 'agent' },
+    })
+    expect(agentTab.status(), await agentTab.text()).toBe(200)
+
+    // The person opens a tab from the strip; its response's tab list is what the strip shows next.
+    const [personTab] = await Promise.all([
+      page.waitForResponse((res) => res.url().includes(`${sessionPath}/tabs`) && res.request().method() === 'POST'),
+      page.getByRole('button', { name: 'Ny fane', exact: true }).click(),
+    ])
+    expect(personTab.status(), await personTab.text()).toBe(200)
+
+    await expect(page.getByRole('img', { name: 'Åpnet av agenten' })).toBeVisible({ timeout: 15_000 })
+    await expect(page.getByRole('button', { name: 'Vis agentens fane' })).toBeVisible()
+
+    // The same marker on the wire, as strings: one tab the agent opened, one the person opened.
+    const session = await request.get(sessionPath)
+    expect(session.status()).toBe(200)
+    const body = (await session.json()) as { data: { session: { tabs: { tabId: string; openedBy?: string }[] } } }
+    const tabs = body.data.session.tabs
+    expect(tabs.filter((tab) => tab.openedBy === 'agent')).toHaveLength(1)
+    expect(tabs.filter((tab) => tab.openedBy === 'human')).toHaveLength(1)
+  })
 })

@@ -195,6 +195,12 @@ type RunPageInput struct {
 	// Scrape is the crawl's per-page scrape options (INNH-6b), the canonical JSON the edge
 	// stamped on the job. Nil for every other page: the body is then byte-identical to before.
 	Scrape json.RawMessage `json:"scrape,omitempty"`
+	// PolicySnapshot is the web policy the handoff resolved for the job (WS7.G 6b), the
+	// JSON the edge stamped on the job's params. It travels in the run_page body and its
+	// sha256 is part of the signed run-binding string, so it cannot be dropped or swapped on
+	// the way. Nil for every job that was admitted without one: the body and the signature
+	// are then byte-identical to before.
+	PolicySnapshot json.RawMessage `json:"policy_snapshot,omitempty"`
 }
 
 // RunPageResult is returned by the runtime after a successful page execution.
@@ -237,6 +243,9 @@ type RunPageResult struct {
 	// ScrapeApplied is the edge's proof that it applied the request's scrape options
 	// (INNH-6b). Nil when the request carried none, or the edge predates the option.
 	ScrapeApplied *bool `json:"scrape_applied,omitempty"`
+	// TextFP is the page's normalised text fingerprint (W3-E3.5-4). Fingerprint stays the
+	// raw-byte hash. Empty from an edge that predates the field.
+	TextFP string `json:"text_fp,omitempty"`
 }
 
 // RunPage executes a single page via Quarry Runtime.
@@ -254,6 +263,10 @@ func (a *Activities) RunPage(ctx context.Context, in RunPageInput) (RunPageResul
 	}
 	if len(in.Scrape) > 0 {
 		payload["scrape"] = in.Scrape
+	}
+	snapshot := policySnapshotOrNil(in.PolicySnapshot)
+	if snapshot != nil {
+		payload["policy_snapshot"] = snapshot
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
@@ -273,7 +286,10 @@ func (a *Activities) RunPage(ctx context.Context, in RunPageInput) (RunPageResul
 	// verify_run_binding byte-for-byte). Skipped when no shared secret is
 	// configured — the edge then falls back to runtime-token-only.
 	if a.cfg.EdgeRunSecret != "" {
-		sig := runBindingSig(a.cfg.EdgeRunSecret, in.OrgID, in.URL)
+		sig, sigErr := runBindingSigPage(a.cfg.EdgeRunSecret, in.OrgID, in.URL, snapshot, in.Crawl)
+		if sigErr != nil {
+			return RunPageResult{}, errs.New(errs.CategoryValidation, op, sigErr).Temporal()
+		}
 		req.Header.Set("X-Quarry-Run-Sig", sig)
 	}
 
@@ -408,6 +424,10 @@ type CheckChangeInput struct {
 	// on /v1/internal/change/record, where the edge refuses (flag on) or logs
 	// would-refuse (flag off) for a true value.
 	Zdr *bool `json:"zdr,omitempty"`
+	// TextFingerprint asks the activity to forward run_page's text fingerprint to the edge
+	// (W3-E3.5-4). Set by ChangeMonitorWF from change-text-fp-v1; false for a history that
+	// predates it, so its activity input and edge request are what they were.
+	TextFingerprint bool `json:"text_fingerprint,omitempty"`
 }
 
 // CheckChangeResult is the outcome of comparing a fresh fetch against the
@@ -425,6 +445,12 @@ type CheckChangeResult struct {
 	// non-retryable outcome of the job, not an error: Status is "zdr_refused"
 	// and no other field is set.
 	ZDRRefused bool `json:"zdr_refused,omitempty"`
+	// RawFingerprint is the raw-byte fingerprint when Fingerprint is the text one
+	// (W3-E3.5-4, the edge's text:blake3:... form). Empty when the raw one was compared.
+	RawFingerprint string `json:"raw_fingerprint,omitempty"`
+	// Rebaselined is true on the first probe after the fingerprint scheme flipped: the edge
+	// saved a new baseline silently, Status is unchanged and Changed is false.
+	Rebaselined bool `json:"rebaselined,omitempty"`
 }
 
 // ZDRRefusalCode is the catalogue code the edge puts in
@@ -475,6 +501,10 @@ type changeRecordRequest struct {
 	// (INNH-4). Omitted when run_page returned none (ZDR, an older runtime), so the body is
 	// byte-identical to before. The edge verifies it belongs to OrgID before it keeps it.
 	MarkdownArtifactID string `json:"markdown_artifact_id,omitempty"`
+	// FreshTextFingerprint is run_page's text_fp (W3-E3.5-4), sent only when the workflow
+	// asked for it (CheckChangeInput.TextFingerprint). The edge compares it instead of the raw
+	// bytes with QUARRY_EDGE__CHANGE_TEXT_FP on, and ignores it with the flag off.
+	FreshTextFingerprint string `json:"fresh_text_fingerprint,omitempty"`
 }
 
 // CheckChange fetches the URL fresh (via the runtime), then asks the edge to
@@ -503,7 +533,7 @@ func (a *Activities) CheckChange(ctx context.Context, in CheckChangeInput) (Chec
 	}
 
 	// 2) Compare + persist via the edge's Rust-owned baseline store.
-	body, err := json.Marshal(changeRecordRequest{
+	rec := changeRecordRequest{
 		OrgID:            in.OrgID,
 		URL:              in.URL,
 		FreshFingerprint: page.Fingerprint,
@@ -511,7 +541,12 @@ func (a *Activities) CheckChange(ctx context.Context, in CheckChangeInput) (Chec
 		Zdr:              in.Zdr,
 
 		MarkdownArtifactID: page.MarkdownArtifactID,
-	})
+	}
+	// W3-E3.5-4: the text fingerprint rides along only when the workflow asked for it.
+	if in.TextFingerprint {
+		rec.FreshTextFingerprint = page.TextFP
+	}
+	body, err := json.Marshal(rec)
 	if err != nil {
 		return CheckChangeResult{}, errs.New(errs.CategoryValidation, op, err).Temporal()
 	}
@@ -581,4 +616,107 @@ func runBindingSig(secret, orgID, url string) string {
 	mac := hmac.New(sha256.New, []byte(secret))
 	mac.Write([]byte(orgID + "\n" + url))
 	return hex.EncodeToString(mac.Sum(nil))
+}
+
+// runBindingSigExtras is runBindingSig over the canonical string with the page's extras
+// appended (WS7.G 6b): the policy snapshot adds one line "\npolicy=<sha256 hex of the
+// snapshot's canonical JSON>" after the url. With no snapshot the string is exactly the
+// two-field one, so an edge that predates the extras still verifies. The Rust side is
+// InternalSigner::run_binding_sig / RunBindingExtras; the golden constants in both test
+// suites pin the two together. WS14.S7a adds "\nrobots=<sha256 hex>" after the policy line
+// (runBindingSigPage); this form signs a page without a crawl context.
+func runBindingSigExtras(secret, orgID, url string, policySnapshot json.RawMessage) (string, error) {
+	return runBindingSigPage(secret, orgID, url, policySnapshot, nil)
+}
+
+// runBindingSigPage is the run-binding signature of one page body (WS14.S7a): the policy
+// snapshot line, then "\nrobots=<sha256 hex of the canonical JSON of crawl.robots>" when the
+// page has a crawl context whose robots mode is not respect. A page that respects robots.txt
+// (every page before the override) signs exactly what it signed before, so a captured
+// respecting signature cannot be replayed with robots "ignore". The rule and the bytes match
+// the edge's RunBindingExtras::for_page; TestCrawlRobotsBindingGolden pins them.
+func runBindingSigPage(secret, orgID, url string, policySnapshot json.RawMessage, crawl *CrawlContext) (string, error) {
+	canonical := orgID + "\n" + url
+	if policySnapshot = policySnapshotOrNil(policySnapshot); policySnapshot != nil {
+		sum, err := policySnapshotSHA256(policySnapshot)
+		if err != nil {
+			return "", err
+		}
+		canonical += "\npolicy=" + sum
+	}
+	if crawl != nil && crawl.Robots != RobotsRespect {
+		sum, err := crawlRobotsSHA256(crawl.Robots)
+		if err != nil {
+			return "", err
+		}
+		canonical += "\nrobots=" + sum
+	}
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write([]byte(canonical))
+	return hex.EncodeToString(mac.Sum(nil)), nil
+}
+
+// crawlRobotsSHA256 is the lowercase-hex sha256 of the canonical JSON of a crawl.robots value
+// (a JSON string, HTML characters not escaped, as the edge's canonical_json writes it).
+func crawlRobotsSHA256(robots string) (string, error) {
+	raw, err := json.Marshal(robots)
+	if err != nil {
+		return "", fmt.Errorf("crawl robots cannot be encoded: %w", err)
+	}
+	return policySnapshotSHA256(raw)
+}
+
+// RobotsModeFromParam reads a job's params.robots (WS14.S7a). Most jobs carry the mode string
+// ("respect"); an ignore-robots override job carries the object {mode, authority, rev} the edge
+// stamps and quarry-control audits. Anything else is "", which the crawl reads as respect.
+func RobotsModeFromParam(v any) string {
+	switch value := v.(type) {
+	case string:
+		return value
+	case map[string]any:
+		mode, _ := value["mode"].(string)
+		return mode
+	default:
+		return ""
+	}
+}
+
+// policySnapshotOrNil is the snapshot when there is one: nil for an absent, empty or JSON null
+// value, so none of them reaches the body or the signature.
+func policySnapshotOrNil(raw json.RawMessage) json.RawMessage {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return nil
+	}
+	return raw
+}
+
+// canonicalPolicySnapshot is the JSON the snapshot is hashed in: object keys sorted at every
+// level, no whitespace, arrays in order. The edge writes the same bytes (internal_auth.rs
+// canonical_json). A snapshot only holds integers, ASCII host names and closed labels, so no
+// number or escape form can differ between the two writers.
+func canonicalPolicySnapshot(raw json.RawMessage) (string, error) {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	var value any
+	if err := decoder.Decode(&value); err != nil {
+		return "", fmt.Errorf("policy snapshot is not JSON: %w", err)
+	}
+	var out bytes.Buffer
+	encoder := json.NewEncoder(&out)
+	encoder.SetEscapeHTML(false)
+	if err := encoder.Encode(value); err != nil {
+		return "", fmt.Errorf("policy snapshot cannot be re-encoded: %w", err)
+	}
+	return strings.TrimSuffix(out.String(), "\n"), nil
+}
+
+// policySnapshotSHA256 is the lowercase-hex sha256 of canonicalPolicySnapshot.
+func policySnapshotSHA256(raw json.RawMessage) (string, error) {
+	canonical, err := canonicalPolicySnapshot(raw)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256([]byte(canonical))
+	return hex.EncodeToString(sum[:]), nil
 }

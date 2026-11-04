@@ -63,6 +63,9 @@ pub fn agent_router() -> Router<AppState> {
             get(live_frame_stream),
         )
         .route("/v1/agent/runs/:run_id/frame", get(live_frame))
+        // E3.3-h: the read-only point hit test. A query, not an action; dark behind
+        // QUARRY_EDGE__HIT_TEST (default off).
+        .route("/v1/agent/runs/:run_id/hit-test", get(hit_test_point))
         // W2 — single-shot live-view reference (no SSE). The
         // App Shell calls this on connect and again whenever
         // the `live_view` SSE event's `expires_at` elapses.

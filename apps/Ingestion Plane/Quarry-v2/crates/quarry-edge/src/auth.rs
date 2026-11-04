@@ -700,9 +700,10 @@ fn dev_bypass_stub_claims() -> Claims {
         service_id: None,
         nbf: None,
         aud: None,
-        // WS17.P0: the dev stub carries the profile import scope so a local run and the edge
-        // tests can save a profile. The bypass is refused in production, so no real token does.
-        scopes: vec![crate::profile_guard::IMPORT_SCOPE.to_owned()],
+        // D2-055: the dev stub carries NO scopes. It used to hold the profile import scope, which
+        // let a failed-verification bearer import browser state wherever the bypass was on. A
+        // local run or a test that must save a profile uses a token that holds the scope.
+        scopes: Vec::new(),
         // The dev stub asserts no posture: it can only ever run on the body flag.
         zdr: None,
         key_id: None,
@@ -881,6 +882,19 @@ mod tests {
         Router::new()
             .route("/", get(ok_handler))
             .layer(middleware::from_fn(require_auth))
+    }
+
+    /// D2-055: the dev-bypass stub holds no scope, so it cannot import a profile (or use any
+    /// other scoped capability) whatever the bypass is set to.
+    #[test]
+    fn the_dev_bypass_stub_holds_no_scope_and_cannot_import_profiles() {
+        let stub = dev_bypass_stub_claims();
+        assert!(stub.scopes.is_empty(), "{:?}", stub.scopes);
+        assert!(!stub.has_scope(crate::profile_guard::IMPORT_SCOPE));
+        assert_eq!(
+            crate::profile_guard::principal_refusal(&stub, crate::profile_guard::ProfileOp::Import),
+            Some(crate::profile_guard::PrincipalRefusal::MissingImportScope)
+        );
     }
 
     #[test]

@@ -1,5 +1,9 @@
 import { betterAuth, type BetterAuthOptions } from 'better-auth';
-import { APIError, createAuthMiddleware } from 'better-auth/api';
+import {
+  APIError,
+  createAuthMiddleware,
+  getSessionFromCtx,
+} from 'better-auth/api';
 import { drizzleAdapter } from 'better-auth/adapters/drizzle';
 import {
   emailOTP,
@@ -33,7 +37,20 @@ import {
   generateAccountDeletionTemplate,
 } from '../email/templates';
 import { TwilioVerifyService } from '../sms/twilio-verify.service';
-import { auditPlugin } from './audit-plugin';
+import { auditPlugin, publishVerevonAuditDurable } from './audit-plugin';
+import {
+  API_KEY_AGENT_MAX_EXPIRY_SECONDS,
+  API_KEY_USER_CONFIG_ID,
+  apiKeyHoldsBrowserAgent,
+  apiKeyRevocationTarget,
+  publishApiKeyRevoked,
+  readApiKeyAgentMetadata,
+  revocationForUpdate,
+  touchesReservedAgentMetadata,
+  type ApiKeyRevocationReason,
+  type ApiKeyRevocationTarget,
+} from './api-key-metadata';
+import { loadApiKeyRevocationRow } from '../nats/api-key-revocation.publisher';
 import { userServiceIntegrationPlugin } from './user-service-integration.plugin';
 import { organizationEventsPlugin } from './organization-events.plugin';
 import { normalizeIdentityEmail } from './account-linking.policy';
@@ -402,6 +419,156 @@ async function appleSocialProviderConfig() {
   };
 }
 
+// INNH-10 CP-2 / CP-3: browser:agent key guard and the fail-closed
+// api_key_revoked event for delete and disable. Runs for Better Auth's own
+// /api-key/* routes AND for auth.api.* calls from the oRPC key procedures.
+type ApiKeyHookContext = Parameters<typeof getSessionFromCtx>[0];
+
+const API_KEY_MUTATION_PATHS = new Set([
+  '/api-key/create',
+  '/api-key/update',
+  '/api-key/delete',
+]);
+
+function apiKeyRefusal(code: string, message: string): APIError {
+  return new APIError('BAD_REQUEST', { code, message });
+}
+
+async function publishApiKeyRevokedOrFail(
+  target: ApiKeyRevocationTarget,
+  reason: ApiKeyRevocationReason,
+  actorUserId: string,
+  discriminator: Date | string | null,
+): Promise<void> {
+  try {
+    await publishApiKeyRevoked(
+      (_subject, payload) =>
+        publishVerevonAuditDurable(
+          payload as unknown as Parameters<typeof publishVerevonAuditDurable>[0],
+        ),
+      {
+        target,
+        reason,
+        occurredAt: new Date(),
+        actorUserId,
+        discriminator,
+      },
+    );
+  } catch {
+    // Fail closed BEFORE the mutation: the key stays as it was. A publish
+    // whose mutation then fails only kills grants early (the safe direction).
+    throw new APIError('SERVICE_UNAVAILABLE', {
+      code: 'api_key_revocation_audit_unavailable',
+      message: 'API key revocation could not be recorded; nothing was changed',
+    });
+  }
+}
+
+async function enforceApiKeyAgentMutation(
+  ctx: ApiKeyHookContext,
+): Promise<void> {
+  const path = ctx.path ?? '';
+  if (!API_KEY_MUTATION_PATHS.has(path)) return;
+  const rawBody: unknown = ctx.body as unknown;
+  const body: Record<string, unknown> =
+    rawBody && typeof rawBody === 'object' && !Array.isArray(rawBody)
+      ? (rawBody as Record<string, unknown>)
+      : {};
+  // Better Auth's own definition of a client call (server-only properties).
+  const clientRequest = Boolean(ctx.request || ctx.headers);
+
+  if (path === '/api-key/create') {
+    if (clientRequest && touchesReservedAgentMetadata(body.metadata)) {
+      throw apiKeyRefusal(
+        'api_key_reserved_metadata',
+        'browser:agent key metadata is set through the API key procedures only',
+      );
+    }
+    if (
+      apiKeyHoldsBrowserAgent(body.permissions) &&
+      (body.configId !== API_KEY_USER_CONFIG_ID ||
+        !readApiKeyAgentMetadata(body.metadata) ||
+        typeof body.expiresIn !== 'number' ||
+        body.expiresIn > API_KEY_AGENT_MAX_EXPIRY_SECONDS)
+    ) {
+      throw apiKeyRefusal(
+        'api_key_browser_agent_requires_metadata',
+        'browser:agent needs a user key with org, host ceiling, budget and an expiry of at most 90 days',
+      );
+    }
+    return;
+  }
+
+  const keyId = typeof body.keyId === 'string' ? body.keyId : '';
+  const row = keyId ? await loadApiKeyRevocationRow(keyId) : null;
+  if (!row) return; // the endpoint answers NOT_FOUND itself
+
+  const target = apiKeyRevocationTarget(row);
+  const agentKey = target !== null || apiKeyHoldsBrowserAgent(row.permissions);
+  const session = await getSessionFromCtx(ctx).catch(() => null);
+  const actorUserId =
+    session?.user?.id ??
+    (!clientRequest && typeof body.userId === 'string'
+      ? body.userId
+      : undefined);
+
+  if (path === '/api-key/update') {
+    if (
+      clientRequest &&
+      body.metadata !== undefined &&
+      (agentKey || touchesReservedAgentMetadata(body.metadata))
+    ) {
+      // Better Auth replaces metadata wholesale, which would drop the
+      // ceiling; browser:agent keys are edited through oRPC only.
+      throw apiKeyRefusal(
+        'api_key_reserved_metadata',
+        'browser:agent key metadata is set through the API key procedures only',
+      );
+    }
+    if (
+      agentKey &&
+      body.expiresIn !== undefined &&
+      (typeof body.expiresIn !== 'number' ||
+        body.expiresIn > API_KEY_AGENT_MAX_EXPIRY_SECONDS)
+    ) {
+      throw apiKeyRefusal(
+        'api_key_expiry_too_long',
+        'A browser:agent key expires after at most 90 days',
+      );
+    }
+    const grantsAgent =
+      body.permissions !== undefined
+        ? apiKeyHoldsBrowserAgent(body.permissions)
+        : apiKeyHoldsBrowserAgent(row.permissions);
+    if (
+      grantsAgent &&
+      (row.configId !== API_KEY_USER_CONFIG_ID ||
+        !readApiKeyAgentMetadata(
+          body.metadata !== undefined ? body.metadata : row.metadata,
+        ))
+    ) {
+      throw apiKeyRefusal(
+        'api_key_browser_agent_requires_metadata',
+        'browser:agent needs a user key with org, host ceiling and budget',
+      );
+    }
+    const reason = target ? revocationForUpdate(row, body) : null;
+    if (!target || !reason || !actorUserId) return;
+    if (actorUserId !== row.referenceId) return; // endpoint refuses it
+    await publishApiKeyRevokedOrFail(
+      target,
+      reason,
+      actorUserId,
+      row.updatedAt,
+    );
+    return;
+  }
+
+  // /api-key/delete
+  if (!target || !actorUserId || actorUserId !== row.referenceId) return;
+  await publishApiKeyRevokedOrFail(target, 'deleted', actorUserId, null);
+}
+
 const authOptions: BetterAuthOptions = {
   database: drizzleAdapter(db, {
     provider: 'pg',
@@ -417,7 +584,7 @@ const authOptions: BetterAuthOptions = {
   trustedOrigins,
   hooks: {
     before: createAuthMiddleware(async (ctx) => {
-      await Promise.resolve();
+      await enforceApiKeyAgentMutation(ctx);
       if (ctx.path !== '/organization/accept-invitation') return;
       const requestBody: unknown = ctx.body as unknown;
       const invitationId =

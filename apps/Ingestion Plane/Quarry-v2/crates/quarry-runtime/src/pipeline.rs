@@ -160,7 +160,8 @@ pub fn offer_inline(
 /// - `Skip`: also refuse bodies Quarry has no extractor for (images, archives,
 ///   spreadsheets, ...) with a typed `UNSUPPORTED_MEDIA` (415) instead of
 ///   running readability over binary data.
-/// - `On`: also route PDF and DOCX to their text extractors.
+/// - `On`: also route PDF and DOCX to their text extractors, and Office files
+///   to imports-core when `QUARRY_EDGE__OFFICE_VIA_IMPORTS` is on (E3.6-6b).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum DocRouting {
     Off,
@@ -209,6 +210,393 @@ impl DocRouting {
     fn rejects_unsupported(self) -> bool {
         matches!(self, Self::Skip | Self::On)
     }
+}
+
+/// E3.6-6b: the environment variable that sends Office documents (XLSX, PPTX,
+/// OpenDocument and EPUB) to the imports-core extract client (E3.6-6a). Off by
+/// default; it takes effect only under `QUARRY_EDGE__DOC_ROUTING=on`.
+pub const OFFICE_VIA_IMPORTS_ENV: &str = "QUARRY_EDGE__OFFICE_VIA_IMPORTS";
+
+/// E3.6-6b: whether Office documents take the imports-core extract client.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum OfficeViaImports {
+    /// Office documents keep their existing path: a typed 415 where routing
+    /// refuses unsupported bodies, the HTML path otherwise.
+    #[default]
+    Off,
+    /// XLSX, PPTX, OpenDocument and EPUB go to the extract client, in the
+    /// document lane (`DocRouting::On`).
+    On,
+}
+
+impl OfficeViaImports {
+    /// `off` / `false` / `0` / empty, or `on` / `true` / `1`, any case.
+    pub fn parse(raw: &str) -> Result<Self, String> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "" | "off" | "false" | "0" => Ok(Self::Off),
+            "on" | "true" | "1" => Ok(Self::On),
+            other => Err(format!(
+                "{OFFICE_VIA_IMPORTS_ENV}: unknown value {other:?} (expected off or on)"
+            )),
+        }
+    }
+
+    /// Read once per process. Unset is `Off`. An unreadable value is `Off` as
+    /// well (and logged): this route sends document bytes to another service,
+    /// so a bad value must not switch it on.
+    pub fn cached() -> Self {
+        static MODE: std::sync::OnceLock<OfficeViaImports> = std::sync::OnceLock::new();
+        *MODE.get_or_init(|| match std::env::var(OFFICE_VIA_IMPORTS_ENV) {
+            Err(_) => Self::Off,
+            Ok(raw) => Self::parse(&raw).unwrap_or_else(|message| {
+                tracing::warn!(%message, "unreadable Office route flag; the route stays off");
+                Self::Off
+            }),
+        })
+    }
+}
+
+/// E3.6-6b: the Office kinds the imports-core extract client serves. PDF and
+/// DOCX keep their Rust extractors.
+fn is_imports_office_kind(kind: quarry_transform::sniff::ContentKind) -> bool {
+    use quarry_transform::sniff::ContentKind;
+    matches!(
+        kind,
+        ContentKind::Xlsx | ContentKind::Pptx | ContentKind::Odf | ContentKind::Epub
+    )
+}
+
+/// E3.6-6b: whether a body takes the imports-core extract client. It needs the
+/// document lane (`DocRouting::On`, as PDF and DOCX do), the flag on, and an
+/// Office kind. Every other body keeps its existing path.
+fn takes_imports_route(
+    doc_routing: DocRouting,
+    flag: OfficeViaImports,
+    kind: quarry_transform::sniff::ContentKind,
+) -> bool {
+    doc_routing == DocRouting::On && flag == OfficeViaImports::On && is_imports_office_kind(kind)
+}
+
+/// The Office flag a run reads. A test installs its own for the thread it runs
+/// on, as for the PII stage.
+fn office_via_imports_mode() -> OfficeViaImports {
+    #[cfg(test)]
+    if let Some(mode) = TEST_OFFICE_VIA_IMPORTS.with(|slot| *slot.borrow()) {
+        return mode;
+    }
+    OfficeViaImports::cached()
+}
+
+#[cfg(test)]
+thread_local! {
+    // Per-thread test override for the flag.
+    static TEST_OFFICE_VIA_IMPORTS: std::cell::RefCell<Option<OfficeViaImports>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// The reply a test gives the extract client on its thread: what the client
+/// would have returned.
+#[cfg(test)]
+type TestOfficeReply = QuarryResult<crate::content_route::ParsedDocument>;
+
+#[cfg(test)]
+thread_local! {
+    // Per-thread test override: a canned reply for the next extract call, which
+    // then does not call the client.
+    static TEST_OFFICE_REPLY: std::cell::RefCell<Option<TestOfficeReply>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// E3.6-6b: the one call into the E3.6-6a client (imports-core, ephemeral). If
+/// the client is named differently there, this is the single line to correct.
+async fn extract_office(
+    kind: quarry_transform::sniff::ContentKind,
+    body: Vec<u8>,
+) -> QuarryResult<crate::content_route::ParsedDocument> {
+    #[cfg(test)]
+    if let Some(reply) = TEST_OFFICE_REPLY.with(|slot| slot.borrow_mut().take()) {
+        return reply;
+    }
+    crate::content_route::extract_office_via_imports(kind, body).await
+}
+
+/// E3.6-4a: the environment variable that turns the fail-closed PII redaction
+/// stage on (`off`, the default, or `on`).
+pub const PII_REDACTION_ENV: &str = "QUARRY_EDGE__PII_REDACTION";
+/// E3.6-4a: the org default. A comma list of org ids whose runs redact without
+/// asking, or `*` for every org. It matters only while the stage is on.
+pub const PII_REDACTION_DEFAULT_ORGS_ENV: &str = "QUARRY_EDGE__PII_REDACTION_DEFAULT_ORGS";
+
+/// E3.6-4a: whether the pipeline's redaction stage can run at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PiiRedactionMode {
+    /// The stage never runs: every run is byte-identical to before.
+    #[default]
+    Off,
+    /// The stage runs for a run that asks (`redact_pii`) and for a run whose
+    /// org default is on.
+    On,
+}
+
+impl PiiRedactionMode {
+    /// `off` / `false` / `0` / empty, or `on` / `true` / `1`, any case.
+    pub fn parse(raw: &str) -> Result<Self, String> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "" | "off" | "false" | "0" => Ok(Self::Off),
+            "on" | "true" | "1" => Ok(Self::On),
+            other => Err(format!(
+                "{PII_REDACTION_ENV}: unknown value {other:?} (expected off or on)"
+            )),
+        }
+    }
+}
+
+/// E3.6-4a: which orgs redact by default, without asking per request. Quarry
+/// has no per-org setting store yet, so the deployment names them.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum PiiOrgDefault {
+    /// No org redacts unless the run asks.
+    #[default]
+    None,
+    /// Every org redacts.
+    All,
+    /// These orgs redact.
+    Orgs(Vec<String>),
+}
+
+impl PiiOrgDefault {
+    /// A comma list of org ids; `*` anywhere in it means every org.
+    pub fn parse(raw: &str) -> Self {
+        let orgs: Vec<String> = raw
+            .split(',')
+            .map(str::trim)
+            .filter(|org| !org.is_empty())
+            .map(str::to_owned)
+            .collect();
+        if orgs.iter().any(|org| org == "*") {
+            Self::All
+        } else if orgs.is_empty() {
+            Self::None
+        } else {
+            Self::Orgs(orgs)
+        }
+    }
+
+    fn covers(&self, org_id: Option<&str>) -> bool {
+        match self {
+            Self::None => false,
+            Self::All => true,
+            Self::Orgs(orgs) => org_id
+                .filter(|org| !org.is_empty())
+                .is_some_and(|org| orgs.iter().any(|listed| listed == org)),
+        }
+    }
+}
+
+/// E3.6-4a: the redaction stage's settings, from [`PII_REDACTION_ENV`] and
+/// [`PII_REDACTION_DEFAULT_ORGS_ENV`].
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct PiiRedactionSettings {
+    pub mode: PiiRedactionMode,
+    pub org_default: PiiOrgDefault,
+}
+
+impl PiiRedactionSettings {
+    /// An unset mode is `Off`. A mode that cannot be read turns the stage on
+    /// (fail closed: redaction only ever removes text).
+    pub fn parse(mode: Option<&str>, default_orgs: Option<&str>) -> Self {
+        let mode = match mode.map(PiiRedactionMode::parse) {
+            None => PiiRedactionMode::Off,
+            Some(Ok(mode)) => mode,
+            Some(Err(message)) => {
+                tracing::warn!(%message, "unreadable PII redaction mode; the stage is on (fail closed)");
+                PiiRedactionMode::On
+            }
+        };
+        Self {
+            mode,
+            org_default: default_orgs.map(PiiOrgDefault::parse).unwrap_or_default(),
+        }
+    }
+
+    pub fn from_env() -> Self {
+        Self::parse(
+            std::env::var(PII_REDACTION_ENV).ok().as_deref(),
+            std::env::var(PII_REDACTION_DEFAULT_ORGS_ENV).ok().as_deref(),
+        )
+    }
+
+    /// Read once per process, like [`DocRouting::cached`].
+    pub fn cached() -> &'static Self {
+        static SETTINGS: std::sync::OnceLock<PiiRedactionSettings> = std::sync::OnceLock::new();
+        SETTINGS.get_or_init(Self::from_env)
+    }
+
+    /// Whether a run redacts: the stage is on, and the run asked or its org's
+    /// default is on.
+    pub fn applies(&self, requested: bool, org_id: Option<&str>) -> bool {
+        self.mode == PiiRedactionMode::On && (requested || self.org_default.covers(org_id))
+    }
+}
+
+/// The settings a run reads. A test installs its own for the thread it runs on
+/// instead of touching the process environment (as for the challenge config).
+fn pii_redaction_settings() -> PiiRedactionSettings {
+    #[cfg(test)]
+    if let Some(settings) = TEST_PII_REDACTION.with(|slot| slot.borrow().clone()) {
+        return settings;
+    }
+    PiiRedactionSettings::cached().clone()
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_PII_REDACTION: std::cell::RefCell<Option<PiiRedactionSettings>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// The `details.reason` of a page the redaction stage refused.
+pub const PII_REDACTION_FAILED: &str = "pii_redaction_failed";
+
+/// The most text the stage scans in one piece: the in-memory parse cap, so a
+/// page the pipeline accepts is not refused for size alone, while a text past
+/// it fails closed rather than going unscanned.
+const PII_REDACT_MAX_BYTES: usize = 16 * 1024 * 1024;
+
+/// How many scan-and-replace passes a text gets before a finding that is still
+/// there fails the page. One pass covers every case the scanner knows; the
+/// later ones catch a candidate an overlap rule dropped on the first.
+const PII_REDACT_MAX_PASSES: usize = 3;
+
+/// Why the stage refused a page. Each is a typed `details.cause`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PiiRedactionFailure {
+    /// The text is over [`PII_REDACT_MAX_BYTES`].
+    TooLarge,
+    /// The scanner panicked.
+    ScannerPanicked,
+    /// Findings were still there after [`PII_REDACT_MAX_PASSES`] passes.
+    ResidualPii,
+    /// A structured field (metadata, links, branding) did not survive the
+    /// round trip through its JSON form.
+    ReencodeFailed,
+    /// The run carries a capture (screenshot, PDF, action output) that text
+    /// redaction cannot reach.
+    CaptureNotRedactable,
+}
+
+impl PiiRedactionFailure {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::TooLarge => "too_large",
+            Self::ScannerPanicked => "scanner_panicked",
+            Self::ResidualPii => "residual_pii",
+            Self::ReencodeFailed => "reencode_failed",
+            Self::CaptureNotRedactable => "capture_not_redactable",
+        }
+    }
+}
+
+/// The typed per-page failure. Not retryable (the same page fails the same
+/// way), and nothing of the page in it: the field name and the cause only.
+fn pii_redaction_error(failure: PiiRedactionFailure, field: &'static str) -> QuarryError {
+    QuarryError::new(
+        ErrorCode::Forbidden,
+        "the page could not be redacted for personal data, so nothing of it was kept or returned",
+    )
+    .with_details(json!({
+        "reason": PII_REDACTION_FAILED,
+        "cause": failure.label(),
+        "field": field,
+    }))
+}
+
+/// An error the redaction stage raised. Its `PageFailed` names the reason.
+fn is_pii_redaction_failure(e: &QuarryError) -> bool {
+    e.details
+        .as_ref()
+        .and_then(|d| d.get("reason"))
+        .and_then(|r| r.as_str())
+        == Some(PII_REDACTION_FAILED)
+}
+
+/// `text` with every finding replaced, or an error. Never a partial result:
+/// the text comes back only when a scan of it finds nothing.
+fn redact_text_fail_closed(text: &str) -> Result<String, PiiRedactionFailure> {
+    if text.len() > PII_REDACT_MAX_BYTES {
+        return Err(PiiRedactionFailure::TooLarge);
+    }
+    let scan_is_clean = |candidate: &str| {
+        std::panic::catch_unwind(|| quarry_transform::pii::scan(candidate).is_empty())
+            .map_err(|_| PiiRedactionFailure::ScannerPanicked)
+    };
+    let mut current = text.to_owned();
+    for _ in 0..PII_REDACT_MAX_PASSES {
+        if scan_is_clean(&current)? {
+            return Ok(current);
+        }
+        let redacted = std::panic::catch_unwind(|| quarry_transform::pii::redact(&current))
+            .map_err(|_| PiiRedactionFailure::ScannerPanicked)?;
+        current = redacted;
+    }
+    if scan_is_clean(&current)? {
+        Ok(current)
+    } else {
+        Err(PiiRedactionFailure::ResidualPii)
+    }
+}
+
+/// A structured value redacted through its JSON text, so every string in it
+/// (titles, descriptions, link text, URLs) is scanned. A marker that broke the
+/// JSON fails the page rather than dropping the field.
+fn redact_serde<T>(value: &T) -> Result<T, PiiRedactionFailure>
+where
+    T: serde::Serialize + serde::de::DeserializeOwned,
+{
+    let text = serde_json::to_string(value).map_err(|_| PiiRedactionFailure::ReencodeFailed)?;
+    let redacted = redact_text_fail_closed(&text)?;
+    serde_json::from_str(&redacted).map_err(|_| PiiRedactionFailure::ReencodeFailed)
+}
+
+/// The capture a redacting run cannot keep, if it carries one. An image or a
+/// PDF cannot be scanned, and an action's output may be either.
+fn unredactable_capture(captures: Option<&crate::capture::PageCaptures>) -> Option<&'static str> {
+    let captures = captures?;
+    if captures.screenshot.is_some() {
+        Some("screenshot")
+    } else if captures.pdf.is_some() {
+        Some("pdf")
+    } else if !captures.actions.is_empty() || captures.action_outputs.iter().any(Option::is_some) {
+        Some("actions")
+    } else {
+        None
+    }
+}
+
+/// The page's text as the pipeline holds it before anything is kept.
+struct PageText {
+    markdown: String,
+    body_text: String,
+    cleaned_html: Option<String>,
+    links: Vec<quarry_core::output::Link>,
+    metadata: quarry_core::output::PageMetadata,
+}
+
+/// E3.6-4a: every text representation of the page redacted, or the typed
+/// failure. All or nothing: one field that fails fails the page.
+fn redact_page_text(page: PageText) -> QuarryResult<PageText> {
+    let fail = |field: &'static str| move |failure: PiiRedactionFailure| pii_redaction_error(failure, field);
+    let cleaned_html = match page.cleaned_html.as_deref() {
+        Some(html) => Some(redact_text_fail_closed(html).map_err(fail("html"))?),
+        None => None,
+    };
+    Ok(PageText {
+        markdown: redact_text_fail_closed(&page.markdown).map_err(fail("markdown"))?,
+        body_text: redact_text_fail_closed(&page.body_text).map_err(fail("html"))?,
+        cleaned_html,
+        links: redact_serde(&page.links).map_err(fail("links"))?,
+        metadata: redact_serde(&page.metadata).map_err(fail("metadata"))?,
+    })
 }
 
 pub struct PageRunner {
@@ -601,20 +989,60 @@ impl PageRunner {
         prev_fingerprint: Option<String>,
         inline_request: &InlineRequest,
     ) -> QuarryResult<(NormalizedOutput, InlineParts)> {
+        self.run_with_inline_request_redacting(
+            run_id,
+            requested_url,
+            prev_fingerprint,
+            inline_request,
+            false,
+        )
+        .await
+    }
+
+    /// E3.6-4a: [`Self::run_with_inline_request`] for a run that asked for PII
+    /// redaction (`redact_pii: on`). The stage runs only while
+    /// `QUARRY_EDGE__PII_REDACTION` is on; then a run also redacts without
+    /// asking when its org's default is on. A redacting run keeps, emits and
+    /// returns only redacted text; a page that cannot be redacted fails with a
+    /// typed `pii_redaction_failed` and leaves nothing behind.
+    pub async fn run_with_inline_request_redacting(
+        &self,
+        run_id: &RunKind,
+        requested_url: &Url,
+        prev_fingerprint: Option<String>,
+        inline_request: &InlineRequest,
+        redact_pii: bool,
+    ) -> QuarryResult<(NormalizedOutput, InlineParts)> {
         match self
-            .run_inner(run_id, requested_url, prev_fingerprint, inline_request)
+            .run_inner(
+                run_id,
+                requested_url,
+                prev_fingerprint,
+                inline_request,
+                redact_pii,
+            )
             .await
         {
             Ok(parts) => Ok(parts),
             Err(e) if is_robots_denial(&e) => Err(e),
             Err(e) => {
+                let mut payload = json!({
+                    "url": requested_url.to_string(),
+                    "error": e.to_string(),
+                });
+                // E3.6-4a: the typed per-page reason a crawl or batch counts
+                // under `pages_failed`. The cause and field name only.
+                if is_pii_redaction_failure(&e) {
+                    if let Some(details) = e.details.as_ref() {
+                        payload["reason"] = json!(PII_REDACTION_FAILED);
+                        payload["cause"] = details["cause"].clone();
+                        payload["field"] = details["field"].clone();
+                    }
+                }
                 self.emit_page_event(
                     run_id.clone(),
                     EventType::PageFailed,
-                    json!({
-                        "url": requested_url.to_string(),
-                        "error": e.to_string(),
-                    }),
+                    payload,
                     format!("{}:{}:failed", run_id, requested_url),
                 )
                 .await;
@@ -837,6 +1265,7 @@ impl PageRunner {
         requested_url: &Url,
         prev_fingerprint: Option<String>,
         inline_request: &InlineRequest,
+        redact_requested: bool,
     ) -> QuarryResult<(NormalizedOutput, InlineParts)> {
         // Preflight
         let verdict = self.security.preflight(requested_url).await;
@@ -882,16 +1311,27 @@ impl PageRunner {
         // and drops eagerly (`drop(_slot)` before any other work) so
         // we don't hold scarce per-host concurrency during DOM cleanup
         // / markdown conversion / artifact storage.
+        let host_for_scheduler = requested_url.host_str().unwrap_or("unknown").to_string();
+        // WS14.S4, D2-161: a Crawl-delay wait is spent before the process-wide permit is taken,
+        // so a request that waits for its start time holds no global permit and other hosts keep
+        // theirs. The per-host slot is still taken after the global permit.
+        let start_ticket = match self.scheduler.as_ref() {
+            Some(s) => {
+                let ticket = s.reserve_start(&host_for_scheduler).await;
+                ticket.wait().await;
+                Some(ticket)
+            }
+            None => None,
+        };
         // 2C — global concurrency permit, acquired before the per-host slot
         // and held for the fetch duration (drops with `_slot`).
         let _global_slot = match self.autoscale.as_ref() {
             Some(p) => Some(p.acquire().await),
             None => None,
         };
-        let host_for_scheduler = requested_url.host_str().unwrap_or("unknown").to_string();
-        let _slot = match self.scheduler.as_ref() {
-            Some(s) => Some(s.acquire(&host_for_scheduler).await),
-            None => None,
+        let _slot = match (self.scheduler.as_ref(), start_ticket) {
+            (Some(s), Some(ticket)) => Some(s.acquire_reserved(ticket).await),
+            _ => None,
         };
         // Use `fetch_conditional` so render-hint plumbing (waitFor) and
         // future ETag/IMS validators flow through a single path. The
@@ -1054,7 +1494,10 @@ impl PageRunner {
         // rather than decoded as text: an image or an archive run through
         // readability yields mojibake that then gets ingested.
         if let Some(found) = detected {
-            let supported = found.kind.is_text_pipeline() || found.kind.is_parseable_document();
+            // E3.6-6b: an Office body the flag routes to imports-core is supported.
+            let supported = found.kind.is_text_pipeline()
+                || found.kind.is_parseable_document()
+                || takes_imports_route(self.doc_routing, office_via_imports_mode(), found.kind);
             if self.doc_routing.rejects_unsupported() && !supported {
                 let details = json!({
                     "reason": "unsupported_media",
@@ -1095,7 +1538,8 @@ impl PageRunner {
         // Falls through to UTF-8 lossy when no signal is available
         // (preserves previous behaviour for well-behaved servers).
         // PDF and DOCX go to their text extractors (bounded, off-thread) when
-        // routing is `on`; everything else takes the HTML path below. A file
+        // routing is `on`; Office files go to the imports-core client when the
+        // E3.6-6b flag is on; everything else takes the HTML path below. A file
         // the parser cannot read is a typed 415 with a reason, not mojibake.
         let document = match detected {
             Some(found)
@@ -1115,6 +1559,36 @@ impl PageRunner {
                                 "bytes": resp.body.len(),
                             }),
                             format!("{}:{}:document_parse_failed", run_id, resp.final_url),
+                        )
+                        .await;
+                        return Err(error);
+                    }
+                }
+            }
+            // E3.6-6b: an Office body the flag sends to imports-core. The extract
+            // is ephemeral; its text takes the document path below, as PDF and
+            // DOCX text does.
+            Some(found)
+                if takes_imports_route(self.doc_routing, office_via_imports_mode(), found.kind) =>
+            {
+                match extract_office(found.kind, resp.body.clone()).await {
+                    Ok(parsed) => Some(parsed),
+                    Err(error) => {
+                        self.emit_page_event(
+                            run_id.clone(),
+                            EventType::PageBlocked,
+                            json!({
+                                "url": resp.final_url.to_string(),
+                                "reason": "document_parse_failed",
+                                "route": "imports",
+                                "kind": found.kind.label(),
+                                "code": format!("{:?}", error.code),
+                                "bytes": resp.body.len(),
+                            }),
+                            format!(
+                                "{}:{}:document_parse_failed:imports",
+                                run_id, resp.final_url
+                            ),
                         )
                         .await;
                         return Err(error);
@@ -1243,6 +1717,42 @@ impl PageRunner {
             }
         }
 
+        // E3.6-4a: the fail-closed PII redaction stage, before anything of the
+        // page is kept, emitted or returned (the fingerprint and change events,
+        // branding, artifacts, the corpus, ingest, page_extracted, the inline
+        // parts). It runs under ZDR too. With the stage on, every text form of
+        // the page is redacted or the page fails with a typed
+        // `pii_redaction_failed`: nothing has been written by then, so a failed
+        // page leaves nothing behind, and a partial or unredacted text is never
+        // used. A capture (screenshot, PDF, action output) cannot be redacted, so
+        // a redacting run that carries one fails the same way. The wall check
+        // above reads the raw text and keeps nothing of it.
+        let redacting = pii_redaction_settings().applies(redact_requested, self.org_id.as_deref());
+        let (md, body_text, cleaned_html, link_list, mut meta) = if redacting {
+            if let Some(field) = unredactable_capture(resp.captures.as_deref()) {
+                return Err(pii_redaction_error(
+                    PiiRedactionFailure::CaptureNotRedactable,
+                    field,
+                ));
+            }
+            let page = redact_page_text(PageText {
+                markdown: md,
+                body_text,
+                cleaned_html,
+                links: link_list,
+                metadata: meta,
+            })?;
+            (
+                page.markdown,
+                page.body_text,
+                page.cleaned_html,
+                page.links,
+                page.metadata,
+            )
+        } else {
+            (md, body_text, cleaned_html, link_list, meta)
+        };
+
         // Body-content language detection when the HTML lang
         // attribute is missing or generic. Helps downstream LLM
         // prompts pick the right language and consumers filter by
@@ -1297,6 +1807,27 @@ impl PageRunner {
         } else {
             std::str::from_utf8(&resp.body).map_err(|_| ())
         } {
+            // E3.6-4a: a redacting run emits and keeps the branding only after
+            // every string in it has been through the stage.
+            Ok(html_str) if redacting => {
+                let branding =
+                    quarry_transform::branding_rendered::extract(html_str, &resp.final_url);
+                let value = serde_json::to_value(&branding)
+                    .map_err(|_| PiiRedactionFailure::ReencodeFailed)
+                    .and_then(|value| redact_serde(&value))
+                    .map_err(|failure| pii_redaction_error(failure, "branding"))?;
+                self.emit_page_event(
+                    run_id.clone(),
+                    EventType::BrandingExtracted,
+                    json!({
+                        "url": resp.final_url.to_string(),
+                        "branding": value.clone(),
+                    }),
+                    format!("{}:{}:branding", run_id, resp.final_url),
+                )
+                .await;
+                Some(value)
+            }
             Ok(html_str) => {
                 let branding =
                     quarry_transform::branding_rendered::extract(html_str, &resp.final_url);
@@ -1344,16 +1875,24 @@ impl PageRunner {
         // A document's original bytes are stored as `raw`, never as `html`.
         let source_label = if is_doc { "raw" } else { "html" };
         let (html_fmt, md_fmt) = if zdr::guard(self.zdr, WriteKind::Artifact).is_ok() {
-            let html_art = self
-                .artifacts
-                .put(
-                    artifact_org,
-                    run_id,
-                    &page_hash,
-                    source_label,
-                    resp.body.clone(),
-                )
-                .await?;
+            // E3.6-4a: a redacting run keeps the redacted text of a page as its
+            // source, and no source at all for a document (its bytes cannot be
+            // redacted; its redacted text is the markdown artifact).
+            let source_bytes = if !redacting {
+                Some(resp.body.clone())
+            } else if is_doc {
+                None
+            } else {
+                Some(body_text.as_bytes().to_vec())
+            };
+            let html_art = match source_bytes {
+                Some(bytes) => Some(
+                    self.artifacts
+                        .put(artifact_org, run_id, &page_hash, source_label, bytes)
+                        .await?,
+                ),
+                None => None,
+            };
             let md_art = self
                 .artifacts
                 .put(
@@ -1364,19 +1903,21 @@ impl PageRunner {
                     md.as_bytes().to_vec(),
                 )
                 .await?;
-            self.event_sink
-                .emit(
-                    run_id.clone(),
-                    EventType::ArtifactWritten,
-                    json!({
-                        "url": resp.final_url.to_string(),
-                        "format": source_label,
-                        "artifact_id": html_art.artifact_id.to_string(),
-                        "bytes": html_art.bytes,
-                    }),
-                    format!("{}:{}:artifact:{source_label}", run_id, resp.final_url),
-                )
-                .await;
+            if let Some(html_art) = html_art.as_ref() {
+                self.event_sink
+                    .emit(
+                        run_id.clone(),
+                        EventType::ArtifactWritten,
+                        json!({
+                            "url": resp.final_url.to_string(),
+                            "format": source_label,
+                            "artifact_id": html_art.artifact_id.to_string(),
+                            "bytes": html_art.bytes,
+                        }),
+                        format!("{}:{}:artifact:{source_label}", run_id, resp.final_url),
+                    )
+                    .await;
+            }
             self.event_sink
                 .emit(
                     run_id.clone(),
@@ -1420,7 +1961,7 @@ impl PageRunner {
                 .await;
 
             (
-                Some(FormatRef {
+                html_art.map(|html_art| FormatRef {
                     artifact_id: html_art.artifact_id,
                     bytes: html_art.bytes,
                 }),
@@ -1445,6 +1986,8 @@ impl PageRunner {
             status: resp.status,
             fetched_at,
             fingerprint: fp.0.clone(),
+            // E3.5-4: the normalised text fingerprint rides next to the raw one.
+            text_fp: Some(text_fp.0.clone()),
             formats: OutputFormats {
                 html: if is_doc { None } else { html_fmt.clone() },
                 markdown: md_fmt.clone(),
@@ -2897,6 +3440,245 @@ mod content_routing_tests {
         assert!(error.contains("QUARRY_EDGE__DOC_ROUTING"), "{error}");
         assert_eq!(DocRouting::default(), DocRouting::Shadow);
     }
+    // ---- E3.6-6b: Office bodies through the imports-core client
+
+    /// Installs the Office flag and, optionally, a canned client reply for this
+    /// thread. Both are removed when the guard is dropped.
+    struct OfficeGuard;
+
+    impl Drop for OfficeGuard {
+        fn drop(&mut self) {
+            TEST_OFFICE_VIA_IMPORTS.with(|slot| *slot.borrow_mut() = None);
+            TEST_OFFICE_REPLY.with(|slot| *slot.borrow_mut() = None);
+        }
+    }
+
+    fn office_flag(mode: OfficeViaImports, reply: Option<TestOfficeReply>) -> OfficeGuard {
+        TEST_OFFICE_VIA_IMPORTS.with(|slot| *slot.borrow_mut() = Some(mode));
+        TEST_OFFICE_REPLY.with(|slot| *slot.borrow_mut() = reply);
+        OfficeGuard
+    }
+
+    /// True while the canned reply is still waiting, that is, the client was not
+    /// called.
+    fn reply_pending() -> bool {
+        TEST_OFFICE_REPLY.with(|slot| slot.borrow().is_some())
+    }
+
+    fn text_reply(text: &str) -> TestOfficeReply {
+        Ok(crate::content_route::ParsedDocument {
+            text: text.to_owned(),
+            truncated: false,
+        })
+    }
+
+    fn xlsx_body() -> Vec<u8> {
+        zip_bytes(&[(
+            "[Content_Types].xml",
+            b"<Types>spreadsheetml.sheet.main</Types>",
+        )])
+    }
+
+    #[test]
+    fn the_office_flag_is_off_unless_it_says_on() {
+        assert_eq!(OfficeViaImports::default(), OfficeViaImports::Off);
+        assert_eq!(OfficeViaImports::parse(""), Ok(OfficeViaImports::Off));
+        assert_eq!(OfficeViaImports::parse(" off "), Ok(OfficeViaImports::Off));
+        assert_eq!(OfficeViaImports::parse("0"), Ok(OfficeViaImports::Off));
+        assert_eq!(OfficeViaImports::parse("On"), Ok(OfficeViaImports::On));
+        assert_eq!(OfficeViaImports::parse(" TRUE "), Ok(OfficeViaImports::On));
+        let error = OfficeViaImports::parse("maybe").unwrap_err();
+        assert!(error.contains("QUARRY_EDGE__OFFICE_VIA_IMPORTS"), "{error}");
+    }
+
+    #[test]
+    fn the_office_route_needs_the_document_lane_the_flag_and_an_office_kind() {
+        use quarry_transform::sniff::ContentKind as Kind;
+        for kind in [Kind::Xlsx, Kind::Pptx, Kind::Odf, Kind::Epub] {
+            assert!(
+                takes_imports_route(DocRouting::On, OfficeViaImports::On, kind),
+                "{kind:?}"
+            );
+            assert!(
+                !takes_imports_route(DocRouting::On, OfficeViaImports::Off, kind),
+                "{kind:?}"
+            );
+            for mode in [DocRouting::Off, DocRouting::Shadow, DocRouting::Skip] {
+                assert!(
+                    !takes_imports_route(mode, OfficeViaImports::On, kind),
+                    "{mode:?} {kind:?}"
+                );
+            }
+        }
+        // PDF and DOCX keep their Rust extractors; nothing else is an Office kind.
+        let others = [
+            Kind::Pdf,
+            Kind::Docx,
+            Kind::Archive,
+            Kind::Image,
+            Kind::Html,
+            Kind::OleCompound,
+        ];
+        for kind in others {
+            assert!(
+                !takes_imports_route(DocRouting::On, OfficeViaImports::On, kind),
+                "{kind:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn an_xlsx_takes_the_imports_client_when_the_flag_is_on() {
+        let _flag = office_flag(
+            OfficeViaImports::On,
+            Some(text_reply("Kostnader per kvartal")),
+        );
+        let (runner, _rx) = runner_for(
+            DocRouting::On,
+            200,
+            Some("application/octet-stream"),
+            &xlsx_body(),
+        );
+        let run_id: RunKind = quarry_core::ids::Id::new();
+        let out = runner
+            .run(&run_id, &url(), None)
+            .await
+            .expect("xlsx extracted by imports");
+        assert_eq!(out.metadata.content_kind.as_deref(), Some("xlsx"));
+        assert!(stored_text(&runner, &out)
+            .await
+            .contains("Kostnader per kvartal"));
+        // The original bytes are the raw format, never html, as for a PDF.
+        assert!(out.formats.html.is_none());
+        assert!(!reply_pending(), "the client must have been called");
+    }
+
+    #[tokio::test]
+    async fn with_the_flag_off_an_xlsx_is_still_a_typed_415() {
+        let _flag = office_flag(OfficeViaImports::Off, Some(text_reply("unused")));
+        let (runner, _rx) = runner_for(
+            DocRouting::On,
+            200,
+            Some("application/octet-stream"),
+            &xlsx_body(),
+        );
+        let run_id: RunKind = quarry_core::ids::Id::new();
+        let error = runner.run(&run_id, &url(), None).await.unwrap_err();
+        assert_eq!(error.code, ErrorCode::UnsupportedMedia);
+        assert_eq!(error.details.unwrap()["kind"], "xlsx");
+        assert!(
+            reply_pending(),
+            "the client must not be called with the flag off"
+        );
+    }
+
+    #[tokio::test]
+    async fn skip_refuses_and_shadow_leaves_an_xlsx_alone_with_the_flag_on() {
+        let _flag = office_flag(OfficeViaImports::On, Some(text_reply("unused")));
+        let run_id: RunKind = quarry_core::ids::Id::new();
+        let (skip, _skip_rx) = runner_for(
+            DocRouting::Skip,
+            200,
+            Some("application/octet-stream"),
+            &xlsx_body(),
+        );
+        let error = skip.run(&run_id, &url(), None).await.unwrap_err();
+        assert_eq!(error.code, ErrorCode::UnsupportedMedia);
+        let (shadow, _shadow_rx) = runner_for(
+            DocRouting::Shadow,
+            200,
+            Some("application/octet-stream"),
+            &xlsx_body(),
+        );
+        let _ = shadow.run(&run_id, &url(), None).await;
+        assert!(reply_pending(), "neither mode routes an Office body");
+    }
+
+    #[tokio::test]
+    async fn an_imports_refusal_is_the_pages_typed_error_on_the_imports_route() {
+        let refusal =
+            QuarryError::new(ErrorCode::UnsupportedMedia, "imports-core refused the file");
+        let _flag = office_flag(OfficeViaImports::On, Some(Err(refusal)));
+        let (runner, mut rx) = runner_for(
+            DocRouting::On,
+            200,
+            Some("application/octet-stream"),
+            &xlsx_body(),
+        );
+        let run_id: RunKind = quarry_core::ids::Id::new();
+        let error = runner.run(&run_id, &url(), None).await.unwrap_err();
+        assert_eq!(error.code, ErrorCode::UnsupportedMedia);
+        let blocked = drain(&mut rx)
+            .into_iter()
+            .find(|e| e.event_type == EventType::PageBlocked)
+            .expect("page_blocked for the refusal");
+        assert_eq!(blocked.payload["reason"], "document_parse_failed");
+        assert_eq!(blocked.payload["route"], "imports");
+        assert_eq!(blocked.payload["kind"], "xlsx");
+    }
+
+    #[tokio::test]
+    async fn a_pdf_keeps_the_rust_extractor_with_the_flag_on() {
+        let _flag = office_flag(OfficeViaImports::On, Some(text_reply("unused")));
+        let pdf = minimal_pdf("Hallo dokument fra Verevon");
+        let (runner, _rx) = runner_for(DocRouting::On, 200, Some("application/pdf"), &pdf);
+        let run_id: RunKind = quarry_core::ids::Id::new();
+        let out = runner.run(&run_id, &url(), None).await.expect("pdf parsed");
+        assert_eq!(out.metadata.content_kind.as_deref(), Some("pdf"));
+        assert!(stored_text(&runner, &out)
+            .await
+            .contains("Hallo dokument fra Verevon"));
+        assert!(reply_pending(), "a PDF never reaches the imports client");
+    }
+
+    #[tokio::test]
+    async fn a_plain_zip_stays_a_typed_415_with_the_flag_on() {
+        let _flag = office_flag(OfficeViaImports::On, Some(text_reply("unused")));
+        let plain = zip_bytes(&[("a.txt", b"hello"), ("b.txt", b"world")]);
+        let (runner, _rx) = runner_for(
+            DocRouting::On,
+            200,
+            Some("application/octet-stream"),
+            &plain,
+        );
+        let run_id: RunKind = quarry_core::ids::Id::new();
+        let error = runner.run(&run_id, &url(), None).await.unwrap_err();
+        assert_eq!(error.code, ErrorCode::UnsupportedMedia);
+        assert_eq!(error.details.unwrap()["kind"], "archive");
+        assert!(reply_pending(), "an archive is not an Office kind");
+    }
+
+    #[tokio::test]
+    async fn zdr_office_text_is_returned_inline_and_nothing_is_stored() {
+        let _flag = office_flag(OfficeViaImports::On, Some(text_reply("Hemmelig ark")));
+        let (mut runner, _rx) = runner_for(
+            DocRouting::On,
+            200,
+            Some("application/octet-stream"),
+            &xlsx_body(),
+        );
+        runner.zdr = ZdrMode::On;
+        let store = Arc::new(InMemoryStore::new());
+        runner.artifacts = store.clone();
+        let run_id: RunKind = quarry_core::ids::Id::new();
+        let (out, inline) = runner
+            .run_with_inline(&run_id, &url(), None)
+            .await
+            .expect("zdr xlsx extracted");
+        assert!(
+            out.formats.markdown.is_none()
+                && out.formats.raw.is_none()
+                && out.formats.html.is_none()
+        );
+        let listed = store
+            .list("org_test", &quarry_core::pagination::ListFilter::default())
+            .await
+            .unwrap();
+        assert!(listed.items.is_empty(), "ZDR must write no artifact");
+        let text = inline.markdown.expect("inline text under ZDR");
+        assert!(text.contains("Hemmelig ark"), "{text}");
+    }
+
     // ---- WS5.D: what a caller can ask to get inline -------------------------
 
     fn want(markdown: bool, html: bool, raw_html: bool, max_bytes: usize) -> InlineRequest {
@@ -4458,5 +5240,481 @@ mod robots_gate_tests {
         assert_eq!(denial["host"], "example.test");
         assert_eq!(h.gate.stats().denied_unreachable, 1);
         assert_eq!(h.calls.load(Ordering::SeqCst), 0);
+    }
+
+    /// Records each fetch: the host, the time since the test began and the global permits still
+    /// free. A request holds its global permit from its fetch onwards.
+    struct ProbeDriver {
+        pool: Arc<AutoscaledPool>,
+        started: tokio::time::Instant,
+        fetches: Arc<std::sync::Mutex<Vec<(String, std::time::Duration, usize)>>>,
+    }
+
+    #[async_trait]
+    impl Driver for ProbeDriver {
+        fn kind(&self) -> DriverKind {
+            DriverKind::Static
+        }
+
+        async fn fetch(&self, url: &Url) -> QuarryResult<FetchResponse> {
+            self.fetches.lock().unwrap().push((
+                url.host_str().unwrap_or_default().to_owned(),
+                self.started.elapsed(),
+                self.pool.available(),
+            ));
+            Ok(FetchResponse::new(
+                200,
+                url.clone(),
+                vec![("content-type".into(), "text/html; charset=utf-8".into())],
+                PAGE.as_bytes().to_vec(),
+                2,
+                DriverKind::Static,
+            ))
+        }
+    }
+
+    /// D2-161: a request waiting out its host's Crawl-delay holds no global autoscale permit, so
+    /// another host is fetched meanwhile, and the delayed request is fetched at its start time.
+    #[tokio::test(start_paused = true)]
+    async fn a_crawl_delay_wait_holds_no_global_permit() {
+        let pool = Arc::new(AutoscaledPool::new(1, 1, 1));
+        let scheduler = Arc::new(HostScheduler::with_defaults());
+        scheduler
+            .set_min_interval("example.test", std::time::Duration::from_secs(30))
+            .await;
+        // The host's first start is reserved now, so its next request may start 30 s from now.
+        let _first_start = scheduler.reserve_start("example.test").await;
+        let fetches = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut h = harness(
+            gate(&[(ORIGIN, PRIVATE)]),
+            None,
+            Some(scheduler.clone()),
+            None,
+        );
+        let probe: Arc<dyn Driver> = Arc::new(ProbeDriver {
+            pool: pool.clone(),
+            started: tokio::time::Instant::now(),
+            fetches: fetches.clone(),
+        });
+        h.runner.driver = probe;
+        h.runner.autoscale = Some(pool.clone());
+        let runner = h.runner;
+        let run_id: RunKind = quarry_core::ids::Id::new();
+        let delayed_url: Url = "https://example.test/docs/a".parse().unwrap();
+        let other_url: Url = "https://other.test/docs/a".parse().unwrap();
+        let delayed = runner.run(&run_id, &delayed_url, None);
+        let other = runner.run(&run_id, &other_url, None);
+        let check = async {
+            // Ten seconds in, the delayed request is still waiting and holds no global permit.
+            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+            assert_eq!(
+                pool.available(),
+                1,
+                "the waiting request holds no global permit"
+            );
+            assert!(
+                fetches
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .all(|(host, _, _)| host != "example.test"),
+                "the delayed request is not fetched before its start time"
+            );
+        };
+        let (delayed, other, ()) = tokio::join!(delayed, other, check);
+        other.expect("the other host is fetched while the delayed request waits");
+        delayed.expect("the delayed host is fetched at its start time");
+
+        let fetches = fetches.lock().unwrap().clone();
+        let fetch_of = |host: &str| {
+            fetches
+                .iter()
+                .find(|(seen, _, _)| seen == host)
+                .cloned()
+                .unwrap_or_else(|| panic!("no fetch of {host}"))
+        };
+        let (_, other_at, other_free) = fetch_of("other.test");
+        assert!(
+            other_at < std::time::Duration::from_secs(30),
+            "the other host is not held up"
+        );
+        assert_eq!(other_free, 0, "the fetch holds the one global permit");
+        let (_, delayed_at, delayed_free) = fetch_of("example.test");
+        assert!(
+            delayed_at >= std::time::Duration::from_secs(30),
+            "the delay is honoured"
+        );
+        assert_eq!(delayed_free, 0, "the fetch holds the one global permit");
+        assert_eq!(pool.available(), 1, "every global permit is back");
+    }
+}
+
+#[cfg(test)]
+mod pii_redaction_tests {
+    //! E3.6-4a: the fail-closed PII redaction stage.
+    use super::*;
+    use crate::artifact_store::InMemoryStore;
+    use crate::driver::Driver;
+    use crate::fetch::FetchResponse;
+    use async_trait::async_trait;
+    use quarry_core::capture::{CapturedImage, ImageFormat};
+    use quarry_core::output::DriverKind;
+    use tokio::sync::mpsc;
+
+    const EMAIL: &str = "ola.nordmann@example.no";
+    const MARKER: &str = "[redacted:pii.email]";
+    const ORG: &str = "org_test";
+
+    const PAGE: &str = "<html lang=\"no\"><head><title>Kontakt ola.nordmann@example.no</title><meta name=\"description\" content=\"Skriv til ola.nordmann@example.no\"></head><body><main><h1>Kontakt oss</h1><p>Vi leverer rengjøringsløsninger, kjemikalier og kompetanse til næringsmiddelindustrien i hele Norden. Skriv til ola.nordmann@example.no for et tilbud, så svarer vi innen en arbeidsdag.</p><p><a href=\"mailto:ola.nordmann@example.no\">ola.nordmann@example.no</a></p></main></body></html>";
+
+    /// Serves [`PAGE`], with the captures it is given.
+    struct PageDriver {
+        captures: Option<crate::capture::PageCaptures>,
+    }
+
+    #[async_trait]
+    impl Driver for PageDriver {
+        fn kind(&self) -> DriverKind {
+            DriverKind::Browser
+        }
+        async fn fetch(&self, url: &Url) -> QuarryResult<FetchResponse> {
+            Ok(FetchResponse {
+                status: 200,
+                final_url: url.clone(),
+                headers: vec![("content-type".into(), "text/html; charset=utf-8".into())],
+                body: PAGE.as_bytes().to_vec(),
+                duration_ms: 3,
+                served_by: DriverKind::Browser,
+                captures: self.captures.clone().map(Box::new),
+            })
+        }
+    }
+
+    /// Installs settings for this thread and removes them when dropped.
+    struct SettingsGuard;
+
+    impl Drop for SettingsGuard {
+        fn drop(&mut self) {
+            TEST_PII_REDACTION.with(|slot| *slot.borrow_mut() = None);
+        }
+    }
+
+    fn install(settings: PiiRedactionSettings) -> SettingsGuard {
+        TEST_PII_REDACTION.with(|slot| *slot.borrow_mut() = Some(settings));
+        SettingsGuard
+    }
+
+    fn on(org_default: PiiOrgDefault) -> PiiRedactionSettings {
+        PiiRedactionSettings {
+            mode: PiiRedactionMode::On,
+            org_default,
+        }
+    }
+
+    fn runner(
+        tx: mpsc::Sender<quarry_core::event::Event>,
+        zdr: ZdrMode,
+        captures: Option<crate::capture::PageCaptures>,
+    ) -> PageRunner {
+        PageRunner {
+            driver: Arc::new(PageDriver { captures }),
+            security: Arc::new(
+                quarry_security::preflight::DefaultEngine::new().with_allow_private_hosts(true),
+            ),
+            artifacts: Arc::new(InMemoryStore::new()),
+            event_sink: EventSink::new(tx),
+            zdr,
+            ingest: None,
+            org_id: Some(ORG.into()),
+            user_id: None,
+            privacy: PrivacyPolicy::default(),
+            cancel_token: None,
+            local_index: None,
+            policy: RunPolicy::default(),
+            scheduler: None,
+            autoscale: None,
+            render: RenderHints::default(),
+            page_renderer: None,
+            source_registrar: None,
+            title_enricher: None,
+            doc_routing: DocRouting::Off,
+            robots: None,
+        }
+    }
+
+    fn url() -> Url {
+        "https://www.example.com/kontakt".parse().unwrap()
+    }
+
+    fn drain(rx: &mut mpsc::Receiver<quarry_core::event::Event>) -> Vec<quarry_core::event::Event> {
+        let mut events = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            events.push(event);
+        }
+        events
+    }
+
+    fn all_text_inline() -> InlineRequest {
+        InlineRequest {
+            markdown: true,
+            html: true,
+            raw_html: true,
+            ..InlineRequest::default_for(ZdrMode::Off)
+        }
+    }
+
+    async fn stored(runner: &PageRunner, format: Option<&FormatRef>) -> String {
+        let id = format.expect("an artifact").artifact_id.clone();
+        String::from_utf8(runner.artifacts.get(ORG, &id).await.unwrap()).unwrap()
+    }
+
+    fn png() -> CapturedImage {
+        CapturedImage {
+            bytes: vec![0x89; 64],
+            format: ImageFormat::Png,
+            width_px: 1280,
+            height_px: 720,
+            tiles: 1,
+            stitched: false,
+            truncated: false,
+        }
+    }
+
+    // ---- settings
+
+    #[test]
+    fn the_stage_is_off_unless_the_flag_says_on() {
+        assert_eq!(PiiRedactionSettings::parse(None, None), PiiRedactionSettings::default());
+        assert_eq!(PiiRedactionSettings::parse(None, None).mode, PiiRedactionMode::Off);
+        assert_eq!(PiiRedactionSettings::parse(Some("off"), None).mode, PiiRedactionMode::Off);
+        assert_eq!(PiiRedactionSettings::parse(Some(""), None).mode, PiiRedactionMode::Off);
+        assert_eq!(PiiRedactionSettings::parse(Some("on"), None).mode, PiiRedactionMode::On);
+        assert_eq!(PiiRedactionSettings::parse(Some(" TRUE "), None).mode, PiiRedactionMode::On);
+        assert!(PiiRedactionMode::parse("maybe").unwrap_err().contains(PII_REDACTION_ENV));
+        assert_eq!(
+            PiiRedactionSettings::parse(Some("maybe"), None).mode,
+            PiiRedactionMode::On,
+            "an unreadable mode fails closed"
+        );
+    }
+
+    #[test]
+    fn the_org_default_is_a_comma_list_or_every_org() {
+        assert_eq!(PiiOrgDefault::parse(" , "), PiiOrgDefault::None);
+        assert_eq!(
+            PiiOrgDefault::parse("org_a, org_b"),
+            PiiOrgDefault::Orgs(vec!["org_a".into(), "org_b".into()])
+        );
+        assert_eq!(PiiOrgDefault::parse("org_a,*"), PiiOrgDefault::All);
+        assert_eq!(
+            PiiRedactionSettings::parse(Some("on"), Some("org_a")).org_default,
+            PiiOrgDefault::Orgs(vec!["org_a".into()])
+        );
+    }
+
+    #[test]
+    fn a_run_redacts_when_the_stage_is_on_and_it_asks_or_its_org_default_is_on() {
+        let off = PiiRedactionSettings {
+            mode: PiiRedactionMode::Off,
+            org_default: PiiOrgDefault::All,
+        };
+        assert!(!off.applies(true, Some("org_a")), "off never redacts");
+
+        let asked_only = on(PiiOrgDefault::None);
+        assert!(asked_only.applies(true, Some("org_a")));
+        assert!(!asked_only.applies(false, Some("org_a")));
+
+        let listed = on(PiiOrgDefault::Orgs(vec!["org_a".into()]));
+        assert!(listed.applies(false, Some("org_a")));
+        assert!(!listed.applies(false, Some("org_b")));
+        assert!(!listed.applies(false, None), "no org is not a listed org");
+        assert!(!listed.applies(false, Some("")));
+
+        assert!(on(PiiOrgDefault::All).applies(false, None));
+    }
+
+    // ---- the redactor
+
+    #[test]
+    fn text_is_redacted_whole_or_refused() {
+        assert_eq!(
+            redact_text_fail_closed(&format!("Skriv til {EMAIL} i dag")).unwrap(),
+            format!("Skriv til {MARKER} i dag")
+        );
+        assert_eq!(redact_text_fail_closed("ingenting her").unwrap(), "ingenting her");
+        let over = "a".repeat(PII_REDACT_MAX_BYTES + 1);
+        assert_eq!(redact_text_fail_closed(&over), Err(PiiRedactionFailure::TooLarge));
+    }
+
+    #[test]
+    fn every_string_of_a_structured_field_is_redacted() {
+        let meta = quarry_core::output::PageMetadata {
+            title: Some(format!("Kontakt {EMAIL}")),
+            description: Some(format!("Skriv til {EMAIL}")),
+            ..Default::default()
+        };
+        let redacted = redact_serde(&meta).unwrap();
+        assert_eq!(redacted.title.as_deref(), Some("Kontakt [redacted:pii.email]"));
+        assert_eq!(redacted.description.as_deref(), Some("Skriv til [redacted:pii.email]"));
+    }
+
+    #[test]
+    fn the_failure_is_typed_final_and_carries_nothing_of_the_page() {
+        let error = pii_redaction_error(PiiRedactionFailure::ResidualPii, "markdown");
+        assert_eq!(error.code, ErrorCode::Forbidden);
+        assert!(!error.retryable);
+        assert!(is_pii_redaction_failure(&error));
+        let details = error.details.clone().unwrap();
+        assert_eq!(details["reason"], PII_REDACTION_FAILED);
+        assert_eq!(details["cause"], "residual_pii");
+        assert_eq!(details["field"], "markdown");
+        assert!(!is_pii_redaction_failure(&QuarryError::new(ErrorCode::Forbidden, "x")));
+    }
+
+    #[test]
+    fn a_capture_is_not_redactable() {
+        assert_eq!(unredactable_capture(None), None);
+        let empty = crate::capture::PageCaptures::default();
+        assert_eq!(unredactable_capture(Some(&empty)), None);
+        let shot = crate::capture::PageCaptures {
+            screenshot: Some(png()),
+            ..Default::default()
+        };
+        assert_eq!(unredactable_capture(Some(&shot)), Some("screenshot"));
+    }
+
+    // ---- the pipeline
+
+    #[tokio::test]
+    async fn with_the_flag_off_a_run_that_asks_is_unchanged() {
+        let _settings = install(PiiRedactionSettings::default());
+        let (tx, _rx) = mpsc::channel(64);
+        let runner = runner(tx, ZdrMode::Off, None);
+        let run_id: RunKind = quarry_core::ids::Id::new();
+        let (out, inline) = runner
+            .run_with_inline_request_redacting(&run_id, &url(), None, &all_text_inline(), true)
+            .await
+            .expect("run ok");
+        assert!(stored(&runner, out.formats.markdown.as_ref()).await.contains(EMAIL));
+        assert!(inline.markdown.unwrap().contains(EMAIL));
+    }
+
+    #[tokio::test]
+    async fn a_redacting_run_keeps_emits_and_returns_no_email() {
+        let _settings = install(on(PiiOrgDefault::None));
+        let (tx, mut rx) = mpsc::channel(64);
+        let runner = runner(tx, ZdrMode::Off, None);
+        let run_id: RunKind = quarry_core::ids::Id::new();
+        let (out, inline) = runner
+            .run_with_inline_request_redacting(&run_id, &url(), None, &all_text_inline(), true)
+            .await
+            .expect("run ok");
+
+        let markdown = stored(&runner, out.formats.markdown.as_ref()).await;
+        assert!(!markdown.contains(EMAIL), "markdown artifact: {markdown}");
+        assert!(markdown.contains(MARKER));
+        let html = stored(&runner, out.formats.html.as_ref()).await;
+        assert!(!html.contains(EMAIL), "the source artifact is the redacted page");
+
+        let output_json = serde_json::to_string(&out).unwrap();
+        assert!(!output_json.contains(EMAIL), "output: {output_json}");
+        for (field, text) in [
+            ("markdown", inline.markdown.as_deref()),
+            ("html", inline.html.as_deref()),
+            ("raw_html", inline.raw_html.as_deref()),
+        ] {
+            let text = text.unwrap_or_else(|| panic!("{field} inline"));
+            assert!(!text.contains(EMAIL), "{field}: {text}");
+        }
+        for event in drain(&mut rx) {
+            let event_json = serde_json::to_string(&event).unwrap();
+            assert!(!event_json.contains(EMAIL), "event: {event_json}");
+        }
+    }
+
+    #[tokio::test]
+    async fn the_org_default_redacts_a_run_that_did_not_ask() {
+        let _settings = install(on(PiiOrgDefault::Orgs(vec![ORG.into()])));
+        let (tx, _rx) = mpsc::channel(64);
+        let runner = runner(tx, ZdrMode::Off, None);
+        let run_id: RunKind = quarry_core::ids::Id::new();
+        let out = runner.run(&run_id, &url(), None).await.expect("run ok");
+        let markdown = stored(&runner, out.formats.markdown.as_ref()).await;
+        assert!(!markdown.contains(EMAIL));
+        assert!(markdown.contains(MARKER));
+    }
+
+    #[tokio::test]
+    async fn an_org_outside_the_default_is_not_redacted_unless_it_asks() {
+        let _settings = install(on(PiiOrgDefault::Orgs(vec!["org_other".into()])));
+        let (tx, _rx) = mpsc::channel(64);
+        let runner = runner(tx, ZdrMode::Off, None);
+        let run_id: RunKind = quarry_core::ids::Id::new();
+        let out = runner.run(&run_id, &url(), None).await.expect("run ok");
+        assert!(stored(&runner, out.formats.markdown.as_ref()).await.contains(EMAIL));
+    }
+
+    #[tokio::test]
+    async fn under_zdr_the_stage_runs_and_nothing_is_written() {
+        let _settings = install(on(PiiOrgDefault::All));
+        let (tx, mut rx) = mpsc::channel(64);
+        let runner = runner(tx, ZdrMode::On, None);
+        let run_id: RunKind = quarry_core::ids::Id::new();
+        let (out, inline) = runner
+            .run_with_inline_request(&run_id, &url(), None, &InlineRequest::default_for(ZdrMode::On))
+            .await
+            .expect("run ok");
+        assert!(out.formats.markdown.is_none() && out.formats.html.is_none());
+        let markdown = inline.markdown.expect("inline markdown under ZDR");
+        assert!(!markdown.contains(EMAIL));
+        assert!(markdown.contains(MARKER));
+        for event in drain(&mut rx) {
+            assert!(!matches!(event.event_type, EventType::ArtifactWritten));
+            assert!(!serde_json::to_string(&event).unwrap().contains(EMAIL));
+        }
+    }
+
+    #[tokio::test]
+    async fn a_page_that_cannot_be_redacted_fails_typed_and_leaves_nothing() {
+        for zdr in [ZdrMode::Off, ZdrMode::On] {
+            let _settings = install(on(PiiOrgDefault::All));
+            let (tx, mut rx) = mpsc::channel(64);
+            let captures = crate::capture::PageCaptures {
+                screenshot: Some(png()),
+                ..Default::default()
+            };
+            let runner = runner(tx, zdr, Some(captures));
+            let run_id: RunKind = quarry_core::ids::Id::new();
+            let error = runner
+                .run_with_inline_request(&run_id, &url(), None, &InlineRequest::default_for(zdr))
+                .await
+                .expect_err("a capture cannot be redacted");
+            assert!(is_pii_redaction_failure(&error), "{zdr:?}: {error}");
+            let details = error.details.clone().unwrap();
+            assert_eq!(details["cause"], "capture_not_redactable");
+            assert_eq!(details["field"], "screenshot");
+            assert!(!error.to_string().contains(EMAIL));
+
+            let events = drain(&mut rx);
+            assert!(
+                events.iter().all(|e| !matches!(e.event_type, EventType::ArtifactWritten)),
+                "{zdr:?}: nothing is stored for a failed page"
+            );
+            assert!(events.iter().all(|e| !matches!(
+                e.event_type,
+                EventType::PageExtracted | EventType::BrandingExtracted
+            )));
+            for event in &events {
+                assert!(!serde_json::to_string(event).unwrap().contains(EMAIL));
+            }
+            if zdr == ZdrMode::Off {
+                let failed = events
+                    .iter()
+                    .find(|e| matches!(e.event_type, EventType::PageFailed))
+                    .expect("a page_failed event");
+                assert_eq!(failed.payload["reason"], PII_REDACTION_FAILED);
+                assert_eq!(failed.payload["cause"], "capture_not_redactable");
+            }
+        }
     }
 }

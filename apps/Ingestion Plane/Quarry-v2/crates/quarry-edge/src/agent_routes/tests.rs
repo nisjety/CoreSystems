@@ -2147,6 +2147,8 @@ fn gone_checkpoint(run_id: &RunKind, actor: &str, zdr: ZdrMode, status: AgentRun
         budget: None,
         policy_mode: None,
         next_step: 2,
+        trace_seq: 0,
+        policy_ask: None,
     }
 }
 
@@ -2328,6 +2330,7 @@ fn broker_grant(owner: &str, domains: &[&str], zdr: bool) -> quarry_runtime::Gra
         absolute_expires_at: None,
         resource_id: String::new(),
         key_id: String::new(),
+        web_policy: None,
     }
 }
 

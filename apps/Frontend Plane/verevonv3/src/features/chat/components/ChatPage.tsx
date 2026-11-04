@@ -82,6 +82,13 @@ import { audienceConfirmed, chatProjectsEnabled, readProjectAudience, readProjec
 import { loadEffectiveAgentModeCap } from '@/features/customize/AgentModesSection'
 import { audienceConfirmRequired, chatProjectRefusal, sandboxToolsRefusedNotice, type ChatProjectRefusal } from './use-chat-project'
 import { planTranscriptWindow, resolveTurnHeights, virtualizeTranscript } from '../lib/transcript-window'
+import { BrowserDockControls } from '@/features/browser/dock/BrowserDockControls'
+import {
+  browserDockSizeCss,
+  isChatBrowserDockEnabled,
+  nextBrowserDockPosition,
+  type BrowserDockVisiblePosition,
+} from '@/features/browser/dock/browser-dock-state'
 import { foldPlan, settledFoldEnabled } from '../lib/settled-fold'
 import { createTranscriptDensity, transcriptDensityEnabled } from '../lib/transcript-density'
 import { DensityMenu } from './DensityMenu'
@@ -100,6 +107,8 @@ export default function ChatPage() {
     liveRunId,
     runPanelCollapsed,
     toggleRunPanel,
+    browserDock,
+    setBrowserDockPosition,
     pinnedMessages,
     togglePin,
     title,
@@ -286,7 +295,24 @@ export default function ChatPage() {
     return undefined
   }
 
-  useChatShortcuts({ startNewChat })
+  // Browser dock (WS9.G): where the live panel sits beside the transcript. Off unless the build turns
+  // VITE_CHAT_BROWSER_DOCK on, and nothing docks without a live run to show.
+  const dockLayout = createMemo<BrowserDockVisiblePosition | null>(() => {
+    const position = browserDock().position
+    if (!isChatBrowserDockEnabled() || !liveRunId() || position === 'hidden') return null
+    return position
+  })
+
+  useChatShortcuts({
+    startNewChat,
+    // The hook acts on these only while the dock is on; here they also need a live run to show.
+    toggleBrowserDock: () => {
+      if (liveRunId()) toggleRunPanel()
+    },
+    cycleBrowserDock: () => {
+      if (liveRunId()) setBrowserDockPosition(nextBrowserDockPosition(browserDock().position))
+    },
+  })
 
   // Knowledge import is an explicit, durable action — separate from sending a
   // chat turn. The composer keeps object URLs alive for the current turn; we
@@ -991,6 +1017,13 @@ export default function ChatPage() {
   // each read of an inline JSX prop would build a fresh tree with its own
   // event-stream subscription.
   const liveRailWideResearch = createMemo(() => <ChatWideResearchPanel runId={liveRunId()} />)
+  // The layout picker for the live panel's header (WS9.G). A memo, as the panel's other slots are, so
+  // the panel reads one element however often it asks. The position is read inside the component.
+  const liveRailDockControls = createMemo(() => (
+    isChatBrowserDockEnabled() && liveRunId()
+      ? <BrowserDockControls position={browserDock().position} onPositionChange={setBrowserDockPosition} />
+      : undefined
+  ))
 
   /**
    * Arrow keys move between messages (audit item 26 / plan item 14).
@@ -1140,8 +1173,12 @@ export default function ChatPage() {
           'verevon-chat-page--split': Boolean(liveRunId()) && !runPanelCollapsed(),
           'verevon-chat-page--railed': Boolean(liveRunId()) && runPanelCollapsed(),
           'verevon-chat-page--canvas': activeTab() !== 'chat',
+          'verevon-chat-page--dock-right': dockLayout() === 'right',
+          'verevon-chat-page--dock-bottom': dockLayout() === 'bottom',
+          'verevon-chat-page--dock-maximised': dockLayout() === 'maximised',
         },
       ]}
+      style={dockLayout() ? { '--browser-dock-size': browserDockSizeCss(browserDock()) } : undefined}
     >
       {/* Streaming is silent to a screen reader: tokens append into the
           transcript, which is not a live region, so nothing is announced and a
@@ -1404,6 +1441,7 @@ export default function ChatPage() {
         onCloseWork={() => setActiveTab('chat')}
         workContent={liveRailWorkContent()}
         wideResearch={liveRailWideResearch()}
+        dockControls={liveRailDockControls()}
       />
       <Show when={scheduleDialogOpen()}>
         <Portal>

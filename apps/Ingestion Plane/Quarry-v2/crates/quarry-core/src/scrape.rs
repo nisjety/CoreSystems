@@ -481,6 +481,18 @@ impl Extractor {
     }
 }
 
+/// E3.6-5: whether the text a scrape returns goes through the PII scanner
+/// (`quarry_transform::pii`). `Off` is the default. `On` is served under zero data
+/// retention only, and never with a capture or an action (see `ScrapeOptions::resolve`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "jsonschema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum PiiRedaction {
+    #[default]
+    Off,
+    On,
+}
+
 /// The options a caller may put at the root of a `/v1/scrape` body, as sent.
 /// Every field is optional; `resolve` turns this into what the run uses.
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
@@ -503,6 +515,10 @@ pub struct ScrapeOptions {
     /// instead of fetching. Absent: no read of the URL result cache. `0`: never
     /// read it (but still write). Accepted only while `ScrapeLimits::max_age_enabled`.
     pub max_age: Option<u64>,
+    /// E3.6-5: `off` (the default) or `on`: pass the returned text through the PII scanner.
+    /// `on` is served under zero data retention only, and never with a capture or an action.
+    /// Absent and `off` are the same request.
+    pub redact_pii: Option<PiiRedaction>,
 }
 
 /// The longest `max_age` a request may ask for: 30 days, in milliseconds.
@@ -511,7 +527,7 @@ pub const MAX_AGE_CEILING_MS: u64 = 2_592_000_000;
 /// Request keys the options own: each field in snake_case and its camelCase
 /// alias. A body key that is neither one of these nor a key of the request
 /// itself is unknown. A unit test pins this against a fully populated value.
-const OPTION_KEYS: [(&str, &str); 11] = [
+const OPTION_KEYS: [(&str, &str); 12] = [
     ("formats", "formats"),
     ("only_main_content", "onlyMainContent"),
     ("include_tags", "includeTags"),
@@ -523,6 +539,7 @@ const OPTION_KEYS: [(&str, &str); 11] = [
     ("actions", "actions"),
     ("actions_on_error", "actionsOnError"),
     ("max_age", "maxAge"),
+    ("redact_pii", "redactPii"),
 ];
 
 /// Keys a body may carry that are never a scrape option and never lenient: they
@@ -613,6 +630,15 @@ impl ScrapeOptions {
                 },
                 "timeout_ms" => read_u64(snake, value, &mut options.timeout_ms, &mut errors),
                 "max_age" => read_u64(snake, value, &mut options.max_age, &mut errors),
+                "redact_pii" => match value.as_str() {
+                    Some("off") => options.redact_pii = Some(PiiRedaction::Off),
+                    Some("on") => options.redact_pii = Some(PiiRedaction::On),
+                    _ => errors.push(FieldError::new(
+                        snake,
+                        "unsupported_redact_pii",
+                        "redact_pii must be off or on",
+                    )),
+                },
                 "max_inline_bytes" => {
                     read_u64(snake, value, &mut options.max_inline_bytes, &mut errors)
                 }
@@ -802,6 +828,35 @@ impl ScrapeOptions {
                 "actions are not enabled on this endpoint",
             ));
         }
+        // E3.6-5: a redacted scrape returns text only. An image or a PDF cannot be
+        // redacted and an action can take one, so neither is served with redaction.
+        // Outside ZDR a stored artifact, the local index and ingest would hold the text
+        // unredacted (the pipeline stage is E3.6-4a/4b), so the request is refused there
+        // instead of stored.
+        let redact_pii = self.redact_pii.unwrap_or_default();
+        if redact_pii == PiiRedaction::On {
+            if !zdr {
+                errors.push(FieldError::new(
+                    "redact_pii",
+                    "requires_zdr",
+                    "redact_pii is served under zero data retention only, until stored artifacts are redacted",
+                ));
+            }
+            if wants_capture {
+                errors.push(FieldError::new(
+                    "formats",
+                    "not_supported_with_redact_pii",
+                    "screenshot and pdf cannot be redacted, so they are not served with redact_pii",
+                ));
+            }
+            if self.actions.is_some() {
+                errors.push(FieldError::new(
+                    "actions",
+                    "not_supported_with_redact_pii",
+                    "actions are not served with redact_pii",
+                ));
+            }
+        }
         // Captures: at most one screenshot and one PDF among the formats.
         let mut capture = CapturePlan::default();
         for format in &formats {
@@ -895,6 +950,7 @@ impl ScrapeOptions {
             capture,
             actions,
             max_age_ms,
+            redact_pii,
         })
     }
 }
@@ -1140,6 +1196,9 @@ pub struct ResolvedScrapeOptions {
     /// not be read. It is never part of [`Self::canonical_options_key`]: the key names
     /// what a result IS, `max_age` only says how stale a reader tolerates.
     pub max_age_ms: Option<u64>,
+    /// E3.6-5: `On` when the returned text goes through the PII scanner. A redacted result
+    /// is not the page's text, so it neither reads nor writes a cache (see [`Self::is_default`]).
+    pub redact_pii: PiiRedaction,
 }
 
 impl ResolvedScrapeOptions {
@@ -1168,6 +1227,7 @@ impl ResolvedScrapeOptions {
             && self.extractor == Extractor::Readability
             && self.capture.is_empty()
             && self.actions.is_none()
+            && self.redact_pii == PiiRedaction::Off
     }
 
     /// Whether the page cache may serve or store this request. Only a default
@@ -1184,7 +1244,10 @@ impl ResolvedScrapeOptions {
     /// answers from a model: none of those is ever cached. The caller adds what the
     /// options cannot see: ZDR, the driver plan, the web policy and the privacy block.
     pub fn result_cache_admissible(&self) -> bool {
-        self.capture.is_empty() && self.actions.is_none() && self.ai_specs().is_empty()
+        self.capture.is_empty()
+            && self.actions.is_none()
+            && self.ai_specs().is_empty()
+            && self.redact_pii == PiiRedaction::Off
     }
 
     /// A stable key for the options that change the result, independent of the
@@ -1230,6 +1293,11 @@ impl ResolvedScrapeOptions {
             .collect();
         if !ai.is_empty() {
             canonical["ai"] = serde_json::json!(ai);
+        }
+        // E3.6-5: a redacted result is another result. Absent for the default request, so
+        // the key of every existing request is unchanged.
+        if self.redact_pii == PiiRedaction::On {
+            canonical["redact_pii"] = serde_json::json!("on");
         }
         blake3::hash(canonical.to_string().as_bytes())
             .to_hex()
@@ -1281,6 +1349,10 @@ pub struct EffectiveScrapeOptions {
     /// INNH-7: on a `max_age` hit, how old the served result was, in milliseconds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_age_ms: Option<u64>,
+    /// E3.6-5: `on` when the returned text went through the PII scanner, `off` (the default)
+    /// when it did not. Always reported, so a caller can see what was applied.
+    #[serde(default)]
+    pub redact_pii: PiiRedaction,
 }
 
 impl EffectiveScrapeOptions {
@@ -1320,6 +1392,7 @@ impl EffectiveScrapeOptions {
             max_age: resolved.max_age_ms,
             cached_at: None,
             cache_age_ms: None,
+            redact_pii: resolved.redact_pii,
         }
     }
 }
@@ -1527,6 +1600,7 @@ mod tests {
             actions: Some(vec![]),
             actions_on_error: Some(ActionOnError::Continue),
             max_age: Some(1),
+            redact_pii: Some(PiiRedaction::On),
         };
         let value = serde_json::to_value(&full).unwrap();
         let mut keys: Vec<String> = value.as_object().unwrap().keys().cloned().collect();
@@ -1546,7 +1620,100 @@ mod tests {
         assert!(names.contains(&"onlyMainContent") && names.contains(&"maxInlineBytes"));
         assert!(names.contains(&"actionsOnError") && names.contains(&"actions"));
         assert!(names.contains(&"maxAge") && names.contains(&"max_age"));
-        assert_eq!(OPTION_KEYS.len(), 11);
+        assert!(names.contains(&"redactPii") && names.contains(&"redact_pii"));
+        assert_eq!(OPTION_KEYS.len(), 12);
+    }
+
+    // ---- E3.6-5: redact_pii
+
+    #[test]
+    fn redact_pii_parses_off_and_on_in_both_spellings() {
+        let option = |body: serde_json::Value| ScrapeOptions::from_value(&body).unwrap().redact_pii;
+        assert_eq!(option(json!({ "redact_pii": "on" })), Some(PiiRedaction::On));
+        assert_eq!(option(json!({ "redactPii": "off" })), Some(PiiRedaction::Off));
+        assert_eq!(option(json!({ "redact_pii": "on", "redactPii": "on" })), Some(PiiRedaction::On));
+        // Absent and null are both "not asked".
+        assert_eq!(option(json!({})), None);
+        assert_eq!(option(json!({ "redact_pii": null })), None);
+        let errors =
+            ScrapeOptions::from_value(&json!({ "redact_pii": "on", "redactPii": "off" })).unwrap_err();
+        assert_eq!(errors[0].code, "conflicting_aliases");
+        assert_eq!(errors[0].path, "redact_pii");
+    }
+
+    #[test]
+    fn redact_pii_accepts_only_the_words_off_and_on() {
+        for bad in [json!(true), json!("yes"), json!("ON"), json!(1), json!(["on"])] {
+            let errors = ScrapeOptions::from_value(&json!({ "redact_pii": bad })).unwrap_err();
+            assert_eq!(errors[0].code, "unsupported_redact_pii", "{bad}");
+            assert_eq!(errors[0].path, "redact_pii", "{bad}");
+        }
+    }
+
+    #[test]
+    fn redact_pii_defaults_to_off_and_an_explicit_off_is_the_same_request() {
+        let plain = resolve(json!({}), false).unwrap();
+        assert_eq!(plain.redact_pii, PiiRedaction::Off);
+        assert!(plain.is_default());
+        let named = resolve(json!({ "formats": ["markdown"], "redact_pii": "off" }), false).unwrap();
+        assert_eq!(named.redact_pii, PiiRedaction::Off);
+        let without = resolve(json!({ "formats": ["markdown"] }), false).unwrap();
+        assert_eq!(named.canonical_options_key(), without.canonical_options_key());
+    }
+
+    #[test]
+    fn redact_pii_outside_zdr_is_refused_because_stored_copies_are_not_redacted() {
+        let errors = resolve(json!({ "redact_pii": "on" }), false).unwrap_err();
+        assert_eq!(errors[0].path, "redact_pii");
+        assert_eq!(errors[0].code, "requires_zdr");
+    }
+
+    #[test]
+    fn redact_pii_under_zdr_bypasses_both_caches_and_keys_apart() {
+        let redacted = resolve(json!({ "redact_pii": "on" }), true).unwrap();
+        assert_eq!(redacted.redact_pii, PiiRedaction::On);
+        assert!(!redacted.is_default());
+        assert!(!redacted.cache_admissible());
+        assert!(!redacted.result_cache_admissible());
+        let plain = resolve(json!({}), true).unwrap();
+        assert_ne!(redacted.canonical_options_key(), plain.canonical_options_key());
+    }
+
+    #[test]
+    fn redact_pii_is_not_served_with_a_capture_or_an_action() {
+        let errors = resolve(json!({ "redact_pii": "on", "formats": ["screenshot"] }), true).unwrap_err();
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.path == "formats" && e.code == "not_supported_with_redact_pii"),
+            "{errors:?}"
+        );
+        let errors = resolve(
+            json!({ "redact_pii": "on", "actions": [{ "type": "press", "key": "Enter" }] }),
+            true,
+        )
+        .unwrap_err();
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.path == "actions" && e.code == "not_supported_with_redact_pii"),
+            "{errors:?}"
+        );
+        // Text formats are served.
+        assert!(resolve(json!({ "redact_pii": "on", "formats": ["markdown", "html"] }), true).is_ok());
+    }
+
+    #[test]
+    fn effective_options_report_redact_pii_on_and_off() {
+        let reported = |body: serde_json::Value, zdr: bool| {
+            let resolved = resolve(body, zdr).unwrap();
+            let effective =
+                EffectiveScrapeOptions::new(&resolved, zdr, CacheState::Bypass, "shadow", false, &[]);
+            serde_json::to_value(&effective).unwrap()["redact_pii"].clone()
+        };
+        assert_eq!(reported(json!({ "redact_pii": "on" }), true), json!("on"));
+        assert_eq!(reported(json!({}), true), json!("off"));
+        assert_eq!(reported(json!({}), false), json!("off"));
     }
 
     // ---- INNH-7: max_age
@@ -2116,6 +2283,7 @@ mod tests {
             etag: None,
             last_modified: None,
             extraction: None,
+            text_fp: None,
         }
     }
 

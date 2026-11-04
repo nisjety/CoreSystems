@@ -168,6 +168,15 @@ impl EventSink {
         );
     }
 
+    /// The `seq` the run's trace mints next (WS10.S4, D2-061), or `None` when the run has
+    /// no open trace. A checkpoint stores it so a resume opens the trace past every seq the
+    /// run already used.
+    pub fn next_seq(&self, run_id: &RunKind) -> Option<u64> {
+        let trace = self.runs.get(run_id).map(|entry| entry.value().clone())?;
+        let run = trace.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        Some(run.next_seq)
+    }
+
     /// Close a run's trace (WS10.S3): the replay ring and the broadcast sender are
     /// dropped, so live subscribers see `Closed` after the events already sent.
     pub fn close_run(&self, run_id: &RunKind) {

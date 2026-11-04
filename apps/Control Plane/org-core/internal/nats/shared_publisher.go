@@ -27,6 +27,10 @@ type SharedPublisher struct {
 	conn       *nats.Conn
 	js         jetstream.JetStream
 	sourceName string
+	// postureReader, when set (SetRetentionPostureReader), lets
+	// PublishPlanChanged also emit the ZDR-enabled event for a plan change
+	// that turns effective ZDR on (X-9). Nil keeps the old behaviour.
+	postureReader RetentionPostureReader
 }
 
 type SharedCredentials struct {
@@ -160,7 +164,25 @@ func (sp *SharedPublisher) PublishOrgDeleted(ctx context.Context, orgID, name st
 
 // PublishPlanChanged publishes controlplane.org.plan_changed.
 // Reasoning Plane subscribes to this to adjust feature availability.
+//
+// X-9: after the plan event is acknowledged it also emits
+// controlplane.org.interactive_retention.enabled when this change turns the
+// org's effective ZDR on (see emitZDREnabledOnPlanChange). A failure of that
+// second publish is returned, so the plan-change outbox row stays pending and
+// is retried; both message ids are stable per revision, so a retry inside the
+// JetStream duplicate window is deduplicated, and every consumer of the
+// ZDR-enabled event is idempotent per org.
 func (sp *SharedPublisher) PublishPlanChanged(ctx context.Context, orgID, orgName, previousPlan, newPlan, changedBy, reason string, revision int64) error {
+	if err := sp.publishPlanChangedEvent(ctx, orgID, orgName, previousPlan, newPlan, changedBy, reason, revision); err != nil {
+		return err
+	}
+	if _, err := emitZDREnabledOnPlanChange(ctx, sp.postureReader, sp.publishWithMsgID, orgID, previousPlan, newPlan, revision); err != nil {
+		return fmt.Errorf("plan change %s revision %d: ZDR-enabled signal: %w", orgID, revision, err)
+	}
+	return nil
+}
+
+func (sp *SharedPublisher) publishPlanChangedEvent(ctx context.Context, orgID, orgName, previousPlan, newPlan, changedBy, reason string, revision int64) error {
 	return sp.Publish(ctx, "controlplane.org.plan_changed", map[string]any{
 		"org_id":        orgID,
 		"org_name":      orgName,

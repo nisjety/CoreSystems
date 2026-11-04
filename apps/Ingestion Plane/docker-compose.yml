@@ -111,11 +111,36 @@ services:
       QUARRY_EDGE__PROFILE_KEY_PROVIDER: ${QUARRY_EDGE__PROFILE_KEY_PROVIDER:-env}
       QUARRY_PROFILE_MASTER_KEYS: ${QUARRY_PROFILE_MASTER_KEYS:-}
       QUARRY_PROFILE_MASTER_KEY_ACTIVE: ${QUARRY_PROFILE_MASTER_KEY_ACTIVE:-}
+      # WS17.E2b: org-core key provider, used only with QUARRY_EDGE__PROFILE_KEY_PROVIDER=org_core
+      # (which also needs ORG_CORE_KEYS_ENABLED=1 on org-core). The token is the quarry-edge
+      # org-core credential minted in Control's secrets ledger as QUARRY_ORG_CORE_SERVICE_TOKEN
+      # and MIRRORED into this stack's ledger; empty keeps the edge on the env provider, and
+      # the boot check refuses org_core without it.
+      QUARRY_EDGE__ORG_CORE_KEYS_URL: ${QUARRY_EDGE__ORG_CORE_KEYS_URL:-http://org-core:8080}
+      QUARRY_EDGE__ORG_CORE_KEYS_TOKEN: ${QUARRY_ORG_CORE_SERVICE_TOKEN:-}
+      # W2-CP-L2: billing-core quota/entitlement reads (empty = not wired). The token is the
+      # quarry-edge billing-core credential (QUARRY_BILLING_CORE_SERVICE_TOKEN, mirrored).
+      QUARRY_EDGE__BILLING_CORE_URL: ${QUARRY_EDGE__BILLING_CORE_URL:-}
+      QUARRY_EDGE__BILLING_CORE_TOKEN: ${QUARRY_BILLING_CORE_SERVICE_TOKEN:-}
+      # WS15.S4a: fire-time schedule preflight (ZDR posture + entitlement). off | observe | enforce;
+      # observe (default) runs every check and logs it, allows the fire and pauses nothing. The
+      # posture read is org-core GET /internal/orgs/:org/retention-posture with the quarry-edge
+      # credential QUARRY_ORG_CORE_SERVICE_TOKEN (minted in Control's ledger, MIRRORED here).
+      # Empty token = posture unknown (enforce then skips every fire as skipped_posture_unknown).
+      QUARRY_EDGE__SCHEDULE_POSTURE: ${QUARRY_EDGE__SCHEDULE_POSTURE:-observe}
+      QUARRY_EDGE__ORG_CORE_URL: ${QUARRY_EDGE__ORG_CORE_URL:-http://org-core:8080}
+      QUARRY_EDGE__ORG_CORE_SERVICE_TOKEN: ${QUARRY_ORG_CORE_SERVICE_TOKEN:-}
       QUARRY_EDGE__RUNTIME_AUTH_TOKEN: ${QUARRY_RUNTIME_AUTH_TOKEN:?QUARRY_RUNTIME_AUTH_TOKEN is required}
       QUARRY_EDGE__INTERNAL_SECRET: ${QUARRY_INTERNAL_SECRET:?QUARRY_INTERNAL_SECRET must be set (no insecure default)}
       QUARRY_EDGE__NATS_URL: nats://nats:4222
       QUARRY_EDGE__NATS_TOKEN: ${INGESTION_NATS_TOKEN:?INGESTION_NATS_TOKEN is required}
       QUARRY_EDGE__NATS_SUBJECT_PREFIX: ${QUARRY_EDGE_NATS_SUBJECT_PREFIX:-quarry}
+      # U37: the Control NATS billing-core subscribes (usage.>). Unset = usage stays on the
+      # Quarry bus (today). The user and password come from the secrets ledger, never this file.
+      # QUARRY_EDGE__USAGE_BROWSER_METRICS stays unset here (off) until Lago has the codes.
+      QUARRY_EDGE__USAGE_BUS_URL: ${QUARRY_EDGE__USAGE_BUS_URL:-}
+      QUARRY_EDGE__USAGE_BUS_USER: ${QUARRY_EDGE__USAGE_BUS_USER:-}
+      QUARRY_EDGE__USAGE_BUS_PASSWORD: ${QUARRY_EDGE__USAGE_BUS_PASSWORD:-}
       # Web search providers (SmartRouter): SearXNG free primary + Brave paid fallback.
       # SearXNG is owned by this Ingestion Plane stack so Quarry-v2 is
       # self-contained and does not depend on a root mega-stack service.
@@ -370,6 +395,16 @@ services:
       QUARRY_CONTROL_API_KEY: ${QUARRY_CONTROL_API_KEY:?QUARRY_CONTROL_API_KEY is required}
       QUARRY_INTERNAL_SECRET: ${QUARRY_INTERNAL_SECRET:?QUARRY_INTERNAL_SECRET must be set (no insecure default)}
       QUARRY_INTERNAL_HMAC_REQUIRED: ${QUARRY_INTERNAL_HMAC_REQUIRED:-0}
+      # D2-050: the routes only the orchestrator calls (/v1/internal/jobs/*,
+      # /v1/internal/schedules/*) verify with their own secret, so the edge's
+      # QUARRY_INTERNAL_SECRET no longer opens them. Unset falls back to the old
+      # secret (no outage; control logs one warning that the two are equal). Set a
+      # distinct value on control AND the orchestrator together, then remove the
+      # fallback after the soak. Never put it on the edge.
+      QUARRY_CONTROL_INTERNAL_SECRET: ${QUARRY_CONTROL_INTERNAL_SECRET:-${QUARRY_INTERNAL_SECRET}}
+      # Off by default: when 1, a finalize with no org_id is refused (400). Turn on
+      # once the orchestrator sends org_id on every finalize (it does since D2-050).
+      QUARRY_CONTROL__FINALIZE_ORG_REQUIRED: ${QUARRY_CONTROL__FINALIZE_ORG_REQUIRED:-0}
       # Job admission (off by default): per-organization caps on running jobs, a
       # bounded backlog of waiting ones, and the claim endpoint the orchestrator
       # uses instead of reading the newest 50 jobs. See docs/RUNBOOKS.md, "Job
@@ -381,6 +416,11 @@ services:
       # deployed and WS6.A is live. Turning it off pauses the Temporal schedules on the
       # next reconcile pass (30 s); it does not delete them.
       QUARRY_SCHEDULED_JOBS_ENABLED: ${QUARRY_SCHEDULED_JOBS_ENABLED:-0}
+      # D2-042: GET /v1/schedules without org_id is always refused now (the all-orgs
+      # branch is deleted). Control ignores this variable; it stays at 1 so an older
+      # control image rolled back onto this stack is fenced too. The orchestrator
+      # reads GET /v1/internal/schedules/desired.
+      QUARRY_CONTROL_SCHEDULES_REQUIRE_ORG: ${QUARRY_CONTROL_SCHEDULES_REQUIRE_ORG:-1}
       QUARRY_JOB_CAP_DEFAULT: ${QUARRY_JOB_CAP_DEFAULT:-3}
       QUARRY_JOB_BACKLOG_DEFAULT: ${QUARRY_JOB_BACKLOG_DEFAULT:-200}
       QUARRY_JOB_BACKLOG_TTL: ${QUARRY_JOB_BACKLOG_TTL:-24h}
@@ -388,7 +428,7 @@ services:
       # W2: deliver the one in-product change notification to notification-core
       # (Application Plane) over the shared inter-plane-bus network.
       NOTIFICATION_CORE_URL: ${NOTIFICATION_CORE_URL:-http://notification-core:3140}
-      NOTIFICATION_CORE_INTERNAL_KEY: ${NOTIFICATION_CORE_INTERNAL_KEY:-}
+      NOTIFICATION_QUARRY_CONTROL_SERVICE_TOKEN: ${NOTIFICATION_QUARRY_CONTROL_SERVICE_TOKEN:-}
       # G33: dispatch newly-created jobs onto the orchestrator's task queue.
       TEMPORAL_ADDR: temporal:7233
       TEMPORAL_NAMESPACE: default
@@ -464,6 +504,9 @@ services:
       # /v1/internal/run_page call so a leaked runtime bearer can't forge
       # another tenant's org.
       QUARRY_INTERNAL_SECRET: ${QUARRY_INTERNAL_SECRET:?QUARRY_INTERNAL_SECRET must be set (no insecure default)}
+      # D2-050: signs the calls to control's orchestrator-only routes. Must equal
+      # control's QUARRY_CONTROL_INTERNAL_SECRET; unset falls back to the old secret.
+      QUARRY_CONTROL_INTERNAL_SECRET: ${QUARRY_CONTROL_INTERNAL_SECRET:-${QUARRY_INTERNAL_SECRET}}
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
       ENVIRONMENT: ${ENVIRONMENT:-dev}
     depends_on:

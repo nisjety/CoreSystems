@@ -389,9 +389,9 @@ services:
         condition: service_healthy
     volumes:
       # Mount entire app directory for hot reload
-      - .:/app
+      - .:/workspace/verevonv3
       # Exclude node_modules from bind mount to avoid permission issues
-      - /app/node_modules
+      - /workspace/verevonv3/node_modules
       # The workspace packages have their OWN node_modules (pnpm's isolated
       # linker), and the entry above does not cover them. Without these two,
       # every `pnpm install` the container runs (its `pnpm dev` verifies and
@@ -403,12 +403,12 @@ services:
       # Bash (MSYS) reads them fine, which is what makes the breakage look
       # random. Measured 2026-09-08 (frontend log: `pnpm install` at 03:34Z,
       # identical mtime on the unreadable links). Applies on `up -d` recreate.
-      - /app/packages/remote-core/node_modules
-      - /app/apps/remote-dev/node_modules
+      - /workspace/verevonv3/packages/remote-core/node_modules
+      - /workspace/verevonv3/apps/remote-dev/node_modules
       # Exclude .next cache
-      - /app/.next
+      - /workspace/verevonv3/.next
       # Exclude dist build output
-      - /app/dist
+      - /workspace/verevonv3/dist
       # .claude/worktrees holds full extra monorepo checkouts (one per
       # background Claude Code session cut from this branch; 10+ observed in
       # a single long-running session). vite.config.ts already documents that
@@ -421,7 +421,7 @@ services:
       # chokidar/esbuild never see it exist and there is nothing to filter.
       # (A bare `du -sh` against this path from the host took >120s to even
       # finish, which is the same class of cost a cold file-watcher init pays.)
-      - /app/.claude/worktrees
+      - /workspace/verevonv3/.claude/worktrees
       # apps/gateway/target is the gateway's Rust build directory: measured at
       # 6.6 GB, i.e. the same order as all nine worktrees combined (also 6.6 GB),
       # and it churns on every `cargo build`. The frontend container never reads
@@ -430,7 +430,7 @@ services:
       # in place, which is why the dev server stayed slow to settle after a cold
       # start; vite.config.ts's comment records this path defeating an earlier
       # chokidar `ignored` attempt for the same scan-then-filter reason.
-      - /app/apps/gateway/target
+      - /workspace/verevonv3/apps/gateway/target
     environment:
       # Node otherwise derives a ~256 MiB heap from the container cgroup and
       # Vite enters a GC/OOM loop while transforming this large workspace.

@@ -218,6 +218,11 @@ export function ChatLiveRunPanel(props: {
   wideResearch?: JSX.Element
   /** Local workspace tabs shown when Work owns the contextual canvas. */
   navigation?: JSX.Element
+  /**
+   * The browser dock's layout picker (WS9.G). Shown in the header while the panel is open and the
+   * Work tab does not own the rail. Absent while the dock is off, so the header is unchanged.
+   */
+  dockControls?: JSX.Element
   /** Close Work without collapsing the background run watcher. */
   onCloseWork?: () => void
   /**
@@ -527,6 +532,7 @@ export function ChatLiveRunPanel(props: {
                       <span>{statusLabel()}</span>
                     </div>
                     <code class="verevon-chat-run-panel__runid" title={runId()}>{runId()}</code>
+                    {props.dockControls}
                   </>
                 )}
               >

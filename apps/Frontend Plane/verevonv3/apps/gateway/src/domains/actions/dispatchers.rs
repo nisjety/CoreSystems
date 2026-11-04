@@ -36,6 +36,7 @@ use crate::domains::chat::json_handlers::{
     queue_invocation_input as queue_chat_invocation_input, submit_feedback as submit_chat_feedback,
 };
 use crate::domains::inbox::{create_ai_text_proposal, require_support_ai_review};
+use crate::domains::ingestions::jobs::control_job as control_ingestion_job;
 use crate::domains::ingestions::runs::create_run as create_ingestion_run;
 use crate::domains::ingestions::schedules::{
     create_schedule as create_ingestion_schedule, schedule_actions as run_ingestion_schedule_action,
@@ -53,6 +54,9 @@ use crate::domains::integrations::model_subscriptions::{
 };
 use crate::domains::integrations::providers::start_connect_session as start_integration_connect_session;
 use crate::domains::knowledge::documents::create_document;
+use crate::domains::knowledge::quarry::{
+    crawl_cancel, crawl_pause, crawl_resume, crawl_status,
+};
 use crate::domains::knowledge::products::{extract_products, summarize_products};
 use crate::domains::knowledge::sync::register_sharepoint;
 use crate::domains::learning::{decide_proposal, undo_entry, LearningDecisionBody};
@@ -61,7 +65,9 @@ use crate::domains::memory::{
     delete_memory, remember_memory, reset_memory, set_memory_controls, RememberBody, ResetBody,
     SetControlsBody,
 };
-use crate::domains::monitoring::{check_now, CheckRequest};
+use crate::domains::monitoring::{
+    check_now, create_monitor, delete_monitor, CheckRequest, CreateMonitorRequest,
+};
 use crate::domains::orchestration::{
     cancel_run as cancel_orchestration_run, decide_approval as decide_orchestration_approval,
     resume_run as resume_orchestration_run,
@@ -3992,6 +3998,54 @@ pub(super) async fn dispatch_monitoring_check_now(
     owner_json_response_to_envelope("monitoring.check_now", user, status, payload)
 }
 
+// Reuses the real create_monitor so the SSRF guard and the hourly/daily/weekly
+// preset check stay in one place.
+pub(super) async fn dispatch_monitoring_create_monitor(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    input: &Value,
+) -> Response {
+    let url = ticket_string(input, "url");
+    if url.is_empty() {
+        return ticket_bad_request("monitoring.create_monitor requires a non-empty 'url'");
+    }
+    let preset = ticket_string(input, "preset");
+    let response = create_monitor(
+        StateExtractor(state.clone()),
+        ExtensionExtractor(user.clone()),
+        headers.clone(),
+        Json(CreateMonitorRequest {
+            url: Some(url.to_owned()),
+            preset: (!preset.is_empty()).then(|| preset.to_owned()),
+        }),
+    )
+    .await;
+    let (status, payload) = response_to_status_and_json(response).await;
+    owner_json_response_to_envelope("monitoring.create_monitor", user, status, payload)
+}
+
+pub(super) async fn dispatch_monitoring_delete_monitor(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    input: &Value,
+) -> Response {
+    let monitor_id = ticket_string(input, "monitorId");
+    if monitor_id.is_empty() {
+        return ticket_bad_request("monitoring.delete_monitor requires a non-empty 'monitorId'");
+    }
+    let response = delete_monitor(
+        StateExtractor(state.clone()),
+        ExtensionExtractor(user.clone()),
+        headers.clone(),
+        PathExtractor(monitor_id.to_owned()),
+    )
+    .await;
+    let (status, payload) = response_to_status_and_json(response).await;
+    owner_json_response_to_envelope("monitoring.delete_monitor", user, status, payload)
+}
+
 // Reuses the real erase handler rather than reconstructing its URL and
 // confirm-check by hand — this is the highest-stakes action in the registry
 // (irreversible account erasure), and a hand-rolled copy is exactly where a
@@ -4260,7 +4314,7 @@ pub(super) async fn dispatch_studio_export_social_draft(
     owner_json_response_to_envelope("studio.export_social_draft", user, status, payload)
 }
 
-// The five ingestions dispatchers below all reuse the real handlers directly.
+// The ingestions dispatchers below all reuse the real handlers directly.
 // create_source alone has confirmed, tested logic worth not re-deriving
 // (SSRF guards on the target URL, cross-tenant org stripping — see
 // domains::ingestions::sources::tests); create_run/create_schedule/
@@ -4287,6 +4341,88 @@ pub(super) async fn dispatch_ingestions_create_run(
     owner_json_response_to_envelope("ingestions.create_run", user, status, payload)
 }
 
+/// `ingestions.job_control` → pause, resume or cancel a crawl or batch job. The
+/// same function the REST route calls, so the action and the page cannot disagree.
+pub(super) async fn dispatch_ingestions_job_control(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    input: &Value,
+) -> Response {
+    let job_id = ticket_string(input, "jobId");
+    if job_id.is_empty() {
+        return ticket_bad_request("ingestions.job_control requires a non-empty 'jobId'");
+    }
+    let action = ticket_string(input, "action");
+    let response = control_ingestion_job(state, user, headers, job_id, action).await;
+    let (status, payload) = response_to_status_and_json(response).await;
+    owner_json_response_to_envelope("ingestions.job_control", user, status, payload)
+}
+
+/// `ingestions.start_agent_run` → open a browser session on `url` and start a
+/// durable browser-agent run with `goal`. Both steps are the handlers the browser
+/// workspace uses, so an agent run started here is the same run the browser shows.
+pub(super) async fn dispatch_ingestions_start_agent_run(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    input: &Value,
+) -> Response {
+    let url = ticket_string(input, "url");
+    let goal = ticket_string(input, "goal");
+    if url.is_empty() || goal.is_empty() {
+        return ticket_bad_request("ingestions.start_agent_run requires a non-empty 'url' and 'goal'");
+    }
+    let Ok(session_body) = serde_json::from_value::<CreateSessionBody>(json!({ "url": url })) else {
+        return ticket_bad_request("ingestions.start_agent_run requires a valid 'url'");
+    };
+    let session = create_browser_session(
+        StateExtractor(state.clone()),
+        ExtensionExtractor(user.clone()),
+        headers.clone(),
+        Json(session_body),
+    )
+    .await;
+    let (status, session_payload) = response_to_status_and_json(session).await;
+    if !status.is_success() {
+        return owner_json_response_to_envelope("ingestions.start_agent_run", user, status, session_payload);
+    }
+    let session_id = session_payload
+        .pointer("/data/session/id")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    if session_id.is_empty() {
+        return (
+            StatusCode::BAD_GATEWAY,
+            Json(error("upstream_invalid", "The browser session had no id.")),
+        )
+            .into_response();
+    }
+    let Ok(run_body) = serde_json::from_value::<StartAiRunBody>(json!({
+        "goal": goal,
+        "maxSteps": input.get("maxSteps").cloned().unwrap_or(Value::Null),
+        "allowedDomains": input.get("allowedDomains").cloned().unwrap_or(Value::Null),
+    })) else {
+        return ticket_bad_request("ingestions.start_agent_run requires a valid 'maxSteps'");
+    };
+    let run = start_browser_ai_run(
+        StateExtractor(state.clone()),
+        ExtensionExtractor(user.clone()),
+        headers.clone(),
+        PathExtractor(session_id.clone()),
+        Json(run_body),
+    )
+    .await;
+    let (status, mut payload) = response_to_status_and_json(run).await;
+    if status.is_success() {
+        if let Some(data) = payload.get_mut("data").and_then(Value::as_object_mut) {
+            data.insert("session_id".into(), json!(session_id));
+        }
+    }
+    owner_json_response_to_envelope("ingestions.start_agent_run", user, status, payload)
+}
+
 pub(super) async fn dispatch_ingestions_create_schedule(
     state: &AppState,
     user: &AuthenticatedUser,
@@ -4295,7 +4431,15 @@ pub(super) async fn dispatch_ingestions_create_schedule(
 ) -> Response {
     let name = ticket_string(input, "name");
     let kind = ticket_string(input, "kind");
-    let target_url = ticket_string(input, "targetUrl");
+    // A batch schedule names its pages in 'urls'; every other kind names one 'targetUrl'.
+    let has_target = if kind == "batch" {
+        input
+            .get("urls")
+            .and_then(Value::as_array)
+            .is_some_and(|urls| !urls.is_empty())
+    } else {
+        !ticket_string(input, "targetUrl").is_empty()
+    };
     let has_timing = input
         .get("cron")
         .and_then(Value::as_str)
@@ -4304,23 +4448,182 @@ pub(super) async fn dispatch_ingestions_create_schedule(
             .get("scheduleAt")
             .and_then(Value::as_str)
             .is_some_and(|v| !v.trim().is_empty());
-    if name.is_empty() || kind.is_empty() || target_url.is_empty() || !has_timing {
+    if name.is_empty() || kind.is_empty() || !has_target || !has_timing {
         return ticket_bad_request(
-            "ingestions.create_schedule requires 'name', 'kind', 'targetUrl', and either 'cron' or 'scheduleAt'",
+            "ingestions.create_schedule requires 'name', 'kind', either 'cron' or 'scheduleAt', and 'targetUrl' (or 'urls' for kind 'batch')",
         );
+    }
+    // A schedule is created inactive and this action never activates it, whatever
+    // the input says.
+    let mut body = input.clone();
+    if let Some(object) = body.as_object_mut() {
+        object.remove("activate");
     }
     let response = create_ingestion_schedule(
         StateExtractor(state.clone()),
         ExtensionExtractor(user.clone()),
         headers.clone(),
-        Json(input.clone()),
+        Json(body),
     )
     .await;
     let (status, payload) = response_to_status_and_json(response).await;
     owner_json_response_to_envelope("ingestions.create_schedule", user, status, payload)
 }
 
-pub(super) async fn dispatch_ingestions_run_schedule_action(
+/// What a run-control action does to one crawl (WS15.L5).
+#[derive(Clone, Copy)]
+enum IngestionRunVerb {
+    Status,
+    Pause,
+    Resume,
+    Cancel,
+}
+
+/// The crawl a run-control action addresses. 'kind' may be left out or be 'crawl';
+/// crawl is the only job family the gateway proxies, so any other kind is refused
+/// here instead of reaching a route that does not exist.
+fn ingestions_run_target<'a>(action_id: &str, input: &'a Value) -> Result<&'a str, Response> {
+    let run_id = ticket_string(input, "runId");
+    if run_id.is_empty() {
+        return Err(ticket_bad_request(&format!(
+            "{action_id} requires a non-empty 'runId'"
+        )));
+    }
+    match input.get("kind") {
+        None | Some(Value::Null) => {}
+        Some(Value::String(kind)) if kind == "crawl" => {}
+        Some(_) => {
+            return Err(ticket_bad_request(&format!(
+                "{action_id} controls a 'crawl' run only"
+            )));
+        }
+    }
+    Ok(run_id)
+}
+
+async fn dispatch_ingestions_run_control(
+    action_id: &'static str,
+    verb: IngestionRunVerb,
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    input: &Value,
+) -> Response {
+    let run_id = match ingestions_run_target(action_id, input) {
+        Ok(run_id) => run_id.to_owned(),
+        Err(response) => return response,
+    };
+    let (state_arg, user_arg, path_arg) = (
+        StateExtractor(state.clone()),
+        ExtensionExtractor(user.clone()),
+        PathExtractor(run_id),
+    );
+    let response = match verb {
+        IngestionRunVerb::Status => crawl_status(state_arg, user_arg, headers.clone(), path_arg).await,
+        IngestionRunVerb::Pause => crawl_pause(state_arg, user_arg, headers.clone(), path_arg).await,
+        IngestionRunVerb::Resume => crawl_resume(state_arg, user_arg, headers.clone(), path_arg).await,
+        IngestionRunVerb::Cancel => crawl_cancel(state_arg, user_arg, headers.clone(), path_arg).await,
+    };
+    let (status, payload) = response_to_status_and_json(response).await;
+    owner_json_response_to_envelope(action_id, user, status, payload)
+}
+
+pub(super) async fn dispatch_ingestions_get_run_status(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    input: &Value,
+) -> Response {
+    dispatch_ingestions_run_control(
+        "ingestions.get_run_status",
+        IngestionRunVerb::Status,
+        state,
+        user,
+        headers,
+        input,
+    )
+    .await
+}
+
+pub(super) async fn dispatch_ingestions_pause_run(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    input: &Value,
+) -> Response {
+    dispatch_ingestions_run_control(
+        "ingestions.pause_run",
+        IngestionRunVerb::Pause,
+        state,
+        user,
+        headers,
+        input,
+    )
+    .await
+}
+
+pub(super) async fn dispatch_ingestions_resume_run(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    input: &Value,
+) -> Response {
+    dispatch_ingestions_run_control(
+        "ingestions.resume_run",
+        IngestionRunVerb::Resume,
+        state,
+        user,
+        headers,
+        input,
+    )
+    .await
+}
+
+pub(super) async fn dispatch_ingestions_cancel_run(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    input: &Value,
+) -> Response {
+    dispatch_ingestions_run_control(
+        "ingestions.cancel_run",
+        IngestionRunVerb::Cancel,
+        state,
+        user,
+        headers,
+        input,
+    )
+    .await
+}
+
+/// Pausing a schedule is reversible and needs no approval. It is its own action so
+/// the approval-gated `ingestions.change_schedule_state` cannot be reached with it.
+pub(super) async fn dispatch_ingestions_pause_schedule(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    input: &Value,
+) -> Response {
+    let schedule_id = ticket_string(input, "scheduleId");
+    if schedule_id.is_empty() {
+        return ticket_bad_request("ingestions.pause_schedule requires a non-empty 'scheduleId'");
+    }
+    let body = json!({ "action": "pause_schedule", "scheduleId": schedule_id });
+    let response = run_ingestion_schedule_action(
+        StateExtractor(state.clone()),
+        ExtensionExtractor(user.clone()),
+        headers.clone(),
+        Json(body),
+    )
+    .await;
+    let (status, payload) = response_to_status_and_json(response).await;
+    owner_json_response_to_envelope("ingestions.pause_schedule", user, status, payload)
+}
+
+/// Unpause, trigger, backfill and delete: every schedule state change except a pause.
+/// The caller's own 'pause_schedule' verb is refused here (it has its own action),
+/// and only the four fields the verbs read are forwarded.
+pub(super) async fn dispatch_ingestions_change_schedule_state(
     state: &AppState,
     user: &AuthenticatedUser,
     headers: &HeaderMap,
@@ -4330,26 +4633,33 @@ pub(super) async fn dispatch_ingestions_run_schedule_action(
     let schedule_id = ticket_string(input, "scheduleId");
     if !matches!(
         action,
-        "pause_schedule"
-            | "unpause_schedule"
-            | "trigger_schedule"
-            | "backfill_schedule"
-            | "delete_schedule"
+        "unpause_schedule" | "trigger_schedule" | "backfill_schedule" | "delete_schedule"
     ) || schedule_id.is_empty()
     {
         return ticket_bad_request(
-            "ingestions.run_schedule_action requires a non-empty 'scheduleId' and a known 'action'",
+            "ingestions.change_schedule_state requires a non-empty 'scheduleId' and an 'action' of unpause_schedule, trigger_schedule, backfill_schedule or delete_schedule",
         );
+    }
+    let mut body = json!({ "action": action, "scheduleId": schedule_id });
+    if action == "backfill_schedule" {
+        let (start_at, end_at) = (ticket_string(input, "startAt"), ticket_string(input, "endAt"));
+        if start_at.is_empty() || end_at.is_empty() {
+            return ticket_bad_request(
+                "ingestions.change_schedule_state backfill_schedule requires 'startAt' and 'endAt'",
+            );
+        }
+        body["startAt"] = json!(start_at);
+        body["endAt"] = json!(end_at);
     }
     let response = run_ingestion_schedule_action(
         StateExtractor(state.clone()),
         ExtensionExtractor(user.clone()),
         headers.clone(),
-        Json(input.clone()),
+        Json(body),
     )
     .await;
     let (status, payload) = response_to_status_and_json(response).await;
-    owner_json_response_to_envelope("ingestions.run_schedule_action", user, status, payload)
+    owner_json_response_to_envelope("ingestions.change_schedule_state", user, status, payload)
 }
 
 pub(super) async fn dispatch_ingestions_create_source(
@@ -7702,5 +8012,253 @@ mod tests {
         assert!(outbound.get("payloadDigest").is_none());
         assert!(outbound.get("space_ref").is_none());
         assert!(outbound.get("decision").is_none());
+    }
+}
+
+/// WS15.L5: the run-control and schedule-state dispatchers. They reach the same
+/// gateway handlers the SPA routes do, with the session user only.
+#[cfg(test)]
+mod ingestions_job_control_tests {
+    use super::*;
+    use wiremock::matchers::{header as wm_header, method as wm_method, path as wm_path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    const JOB: &str = "job_01J9SSSSSSSSSSSSSSSSSSSSSS";
+
+    fn caller() -> AuthenticatedUser {
+        AuthenticatedUser {
+            user_id: "user-1".to_owned(),
+            user_email: "user@example.invalid".to_owned(),
+            user_name: "User".to_owned(),
+            user_image: None,
+            email_verified: true,
+            auth_role: Some("member".to_owned()),
+            active_org_id: Some("org-1".to_owned()),
+            authorized_membership: None,
+        }
+    }
+
+    fn state_for(quarry: &MockServer) -> AppState {
+        let mut state = crate::tests::test_state(false);
+        state.quarry_edge_url = quarry.uri();
+        state
+    }
+
+    async fn body_json(response: Response) -> (StatusCode, Value) {
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+    }
+
+    async fn mount(quarry: &MockServer, verb: &str, route: &str, status: u16, body: Value) {
+        Mock::given(wm_method(verb))
+            .and(wm_path(route))
+            .and(wm_header("x-user-id", "user-1"))
+            .respond_with(ResponseTemplate::new(status).set_body_json(body))
+            .expect(1)
+            .mount(quarry)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn the_four_run_actions_reach_the_crawl_routes_and_wrap_the_answer() {
+        let quarry = MockServer::start().await;
+        let accepted = json!({ "data": { "job_id": JOB, "phase": "pausing", "control": { "desired": "pause", "pending": true } } });
+        mount(&quarry, "GET", &format!("/v1/crawl/{JOB}"), 200, json!({ "data": { "job_id": JOB, "status": "running" } })).await;
+        mount(&quarry, "POST", &format!("/v1/crawl/{JOB}/pause"), 200, accepted.clone()).await;
+        mount(&quarry, "POST", &format!("/v1/crawl/{JOB}/resume"), 200, accepted.clone()).await;
+        mount(&quarry, "DELETE", &format!("/v1/crawl/{JOB}"), 200, accepted).await;
+        let state = state_for(&quarry);
+        let headers = HeaderMap::new();
+        let input = json!({ "runId": JOB, "kind": "crawl" });
+
+        let responses = [
+            ("ingestions.get_run_status", dispatch_ingestions_get_run_status(&state, &caller(), &headers, &input).await),
+            ("ingestions.pause_run", dispatch_ingestions_pause_run(&state, &caller(), &headers, &input).await),
+            ("ingestions.resume_run", dispatch_ingestions_resume_run(&state, &caller(), &headers, &input).await),
+            ("ingestions.cancel_run", dispatch_ingestions_cancel_run(&state, &caller(), &headers, &json!({ "runId": JOB })).await),
+        ];
+        for (id, response) in responses {
+            let (status, body) = body_json(response).await;
+            assert_eq!(status, StatusCode::OK, "{id}");
+            assert_eq!(body["data"]["actionId"], id);
+            assert_eq!(body["data"]["status"], "completed");
+            assert!(body["data"]["result"].is_object(), "{id}");
+        }
+    }
+
+    #[tokio::test]
+    async fn while_the_edge_flag_is_off_a_control_action_returns_the_typed_501() {
+        let quarry = MockServer::start().await;
+        let off = json!({ "ok": false, "error": { "code": "UNSUPPORTED", "message": "job control is not enabled" } });
+        mount(&quarry, "POST", &format!("/v1/crawl/{JOB}/pause"), 501, off.clone()).await;
+        mount(&quarry, "DELETE", &format!("/v1/crawl/{JOB}"), 501, off).await;
+        let state = state_for(&quarry);
+        let input = json!({ "runId": JOB });
+
+        for response in [
+            dispatch_ingestions_pause_run(&state, &caller(), &HeaderMap::new(), &input).await,
+            dispatch_ingestions_cancel_run(&state, &caller(), &HeaderMap::new(), &input).await,
+        ] {
+            let (status, body) = body_json(response).await;
+            assert_eq!(status, StatusCode::NOT_IMPLEMENTED);
+            assert_eq!(body["error"]["code"], "UNSUPPORTED");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_run_action_without_a_run_or_for_another_kind_is_refused_before_upstream() {
+        let quarry = MockServer::start().await;
+        let state = state_for(&quarry);
+        for input in [
+            json!({}),
+            json!({ "runId": "" }),
+            json!({ "runId": "  " }),
+            json!({ "runId": 7 }),
+            json!({ "runId": JOB, "kind": "batch" }),
+            json!({ "runId": JOB, "kind": 1 }),
+            json!({ "runId": "../x" }),
+        ] {
+            for response in [
+                dispatch_ingestions_get_run_status(&state, &caller(), &HeaderMap::new(), &input).await,
+                dispatch_ingestions_pause_run(&state, &caller(), &HeaderMap::new(), &input).await,
+                dispatch_ingestions_resume_run(&state, &caller(), &HeaderMap::new(), &input).await,
+                dispatch_ingestions_cancel_run(&state, &caller(), &HeaderMap::new(), &input).await,
+            ] {
+                assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{input}");
+            }
+        }
+        assert!(quarry.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn pause_schedule_posts_the_pause_verb_and_nothing_else() {
+        let quarry = MockServer::start().await;
+        mount(&quarry, "POST", "/v1/schedules/sch_1/pause", 200, json!({ "data": { "schedule_id": "sch_1", "status": "paused" } })).await;
+        let state = state_for(&quarry);
+        let response = dispatch_ingestions_pause_schedule(
+            &state,
+            &caller(),
+            &HeaderMap::new(),
+            &json!({ "scheduleId": "sch_1", "action": "delete_schedule" }),
+        )
+        .await;
+        let (status, body) = body_json(response).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["data"]["actionId"], "ingestions.pause_schedule");
+        // The extra 'action' in the input did not turn the pause into a delete.
+        let seen = quarry.received_requests().await.unwrap();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].method.as_str(), "POST");
+
+        let refused = dispatch_ingestions_pause_schedule(&state, &caller(), &HeaderMap::new(), &json!({})).await;
+        assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn change_schedule_state_routes_the_four_verbs_and_refuses_a_pause() {
+        let quarry = MockServer::start().await;
+        mount(&quarry, "POST", "/v1/schedules/sch_1/unpause", 200, json!({ "data": { "schedule_id": "sch_1", "status": "active" } })).await;
+        mount(&quarry, "DELETE", "/v1/schedules/sch_1", 200, json!({ "data": {} })).await;
+        let state = state_for(&quarry);
+        let headers = HeaderMap::new();
+
+        for (action, expected) in [("unpause_schedule", "ingestions.change_schedule_state"), ("delete_schedule", "ingestions.change_schedule_state")] {
+            let response = dispatch_ingestions_change_schedule_state(
+                &state,
+                &caller(),
+                &headers,
+                &json!({ "action": action, "scheduleId": "sch_1", "orgId": "org-2" }),
+            )
+            .await;
+            let (status, body) = body_json(response).await;
+            assert_eq!(status, StatusCode::OK, "{action}");
+            assert_eq!(body["data"]["actionId"], expected);
+        }
+
+        for input in [
+            json!({ "action": "pause_schedule", "scheduleId": "sch_1" }),
+            json!({ "action": "run_everything", "scheduleId": "sch_1" }),
+            json!({ "action": "delete_schedule" }),
+            json!({ "scheduleId": "sch_1" }),
+            json!({ "action": "backfill_schedule", "scheduleId": "sch_1", "startAt": "2026-11-01T00:00:00Z" }),
+        ] {
+            let response = dispatch_ingestions_change_schedule_state(&state, &caller(), &headers, &input).await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{input}");
+        }
+        assert_eq!(quarry.received_requests().await.unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_gated_schedule_verb_stays_a_typed_501_until_its_capability_is_on() {
+        let quarry = MockServer::start().await;
+        let state = state_for(&quarry);
+        let response = dispatch_ingestions_change_schedule_state(
+            &state,
+            &caller(),
+            &HeaderMap::new(),
+            &json!({ "action": "trigger_schedule", "scheduleId": "sch_1" }),
+        )
+        .await;
+        let (status, body) = body_json(response).await;
+        assert_eq!(status, StatusCode::NOT_IMPLEMENTED);
+        assert_eq!(body["error"]["code"], "schedule_action_unavailable");
+        assert!(quarry.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_batch_schedule_needs_urls_not_a_target_and_never_carries_activate() {
+        let quarry = MockServer::start().await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/v1/schedules"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": { "schedule_id": "sch_9", "name": "Nightly", "kind": "batch", "status": "paused" }
+            })))
+            .expect(1)
+            .mount(&quarry)
+            .await;
+        let mut state = state_for(&quarry);
+        state.schedule_capabilities.kinds = vec!["batch".to_owned()];
+        let headers = HeaderMap::new();
+
+        let no_target = dispatch_ingestions_create_schedule(
+            &state,
+            &caller(),
+            &headers,
+            &json!({ "name": "Nightly", "kind": "batch", "cron": "0 3 * * *" }),
+        )
+        .await;
+        assert_eq!(no_target.status(), StatusCode::BAD_REQUEST);
+        let crawl_without_target = dispatch_ingestions_create_schedule(
+            &state,
+            &caller(),
+            &headers,
+            &json!({ "name": "Nightly", "kind": "crawl", "cron": "0 3 * * *", "urls": ["https://example.com/"] }),
+        )
+        .await;
+        assert_eq!(crawl_without_target.status(), StatusCode::BAD_REQUEST);
+
+        let response = dispatch_ingestions_create_schedule(
+            &state,
+            &caller(),
+            &headers,
+            &json!({
+                "name": "Nightly", "kind": "batch", "cron": "0 3 * * *",
+                "urls": ["https://example.com/a", "https://example.com/b"],
+                "activate": true
+            }),
+        )
+        .await;
+        let (status, body) = body_json(response).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+
+        let seen = quarry.received_requests().await.unwrap();
+        assert_eq!(seen.len(), 1);
+        let sent: Value = serde_json::from_slice(&seen[0].body).unwrap();
+        assert!(sent.get("activate").is_none(), "{sent}");
+        assert_eq!(sent["kind"], "batch");
+        assert_eq!(sent["config"]["urls"].as_array().map(Vec::len), Some(2));
     }
 }

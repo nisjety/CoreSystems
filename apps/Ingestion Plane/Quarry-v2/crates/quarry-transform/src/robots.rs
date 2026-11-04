@@ -35,7 +35,11 @@ impl RobotsTxt {
         // user-agent lines share the rules that follow them; only a rule line ends that list,
         // so the next user-agent line after a rule starts a new group. Other records, such as
         // Crawl-delay, do not end the list (RFC 9309 section 2.2.4).
-        for raw in input.lines() {
+        // `str::lines` splits on `\n` and `\r\n` only. A file with old-Mac `\r` line ends would
+        // read as one long line: its first `:` split would turn the whole file into a single
+        // unknown key and every rule would be lost, which fails open. Split on both bytes;
+        // the empty piece between `\r` and `\n` is skipped like any blank line.
+        for raw in input.split(['\r', '\n']) {
             let line = strip_comment(raw).trim();
             if line.is_empty() {
                 continue;
@@ -85,9 +89,12 @@ impl RobotsTxt {
                 }
                 "crawl-delay" => {
                     // An other record (RFC 9309 2.2.4) does not end the user-agent list.
+                    // A repeated Crawl-delay in one group, or in two groups of the same agent that
+                    // merge, keeps the largest usable value rather than whichever came last.
                     if let Ok(n) = value.parse::<f64>() {
                         for ua in &current_agents {
-                            out.groups.entry(ua.clone()).or_default().crawl_delay_s = Some(n);
+                            let group = out.groups.entry(ua.clone()).or_default();
+                            group.crawl_delay_s = Some(merge_crawl_delay(group.crawl_delay_s, n));
                         }
                     }
                 }
@@ -162,6 +169,23 @@ pub fn path_and_query(url: &url::Url) -> String {
     match url.query() {
         Some(q) => format!("{}?{}", url.path(), q),
         None => url.path().to_string(),
+    }
+}
+
+/// A delay a crawler can honour: finite and not negative.
+fn usable_delay(d: f64) -> bool {
+    d.is_finite() && d >= 0.0
+}
+
+/// Merge a repeated `Crawl-delay`: the largest usable value wins, so the result does not depend
+/// on line order. A value that cannot be honoured (negative, NaN, infinite) never displaces a
+/// usable one; a lone unusable value is kept as written, as before.
+fn merge_crawl_delay(old: Option<f64>, new: f64) -> f64 {
+    match old {
+        None => new,
+        Some(o) if !usable_delay(o) => new,
+        Some(o) if usable_delay(new) && new > o => new,
+        Some(o) => o,
     }
 }
 
@@ -459,6 +483,78 @@ mod tests {
         let r = RobotsTxt::parse("User-agent: quarrybot\nAllow:\nUser-agent: *\nDisallow: /x\n");
         assert!(r.is_allowed("quarrybot", "/x"));
         assert!(!r.is_allowed("other", "/x"));
+    }
+
+    #[test]
+    fn cr_only_line_endings_do_not_fail_open() {
+        // `str::lines` does not split on a lone CR, so a classic-Mac file used to read as a single
+        // line and a `Disallow: /` was lost.
+        let r = RobotsTxt::parse("User-agent: *\rDisallow: /private\rAllow: /private/ok\rCrawl-delay: 3\r");
+        assert!(!r.is_allowed("quarrybot", "/private/x"));
+        assert!(r.is_allowed("quarrybot", "/private/ok/x"));
+        assert!(r.is_allowed("quarrybot", "/public"));
+        assert_eq!(r.crawl_delay_any(&["quarrybot"]), Some(3.0));
+        // Same bytes with the three line-end styles give one parse.
+        let lf = RobotsTxt::parse("User-agent: *\nDisallow: /private\nSitemap: https://e.test/s.xml\n");
+        let crlf = RobotsTxt::parse("User-agent: *\r\nDisallow: /private\r\nSitemap: https://e.test/s.xml\r\n");
+        let cr = RobotsTxt::parse("User-agent: *\rDisallow: /private\rSitemap: https://e.test/s.xml\r");
+        assert_eq!(lf, crlf);
+        assert_eq!(lf, cr);
+        // Mixed endings in one file, and a CR-only file that starts with a BOM.
+        let mixed = RobotsTxt::parse("\u{feff}User-agent: *\rDisallow: /a\r\nDisallow: /b\nDisallow: /c\r");
+        for p in ["/a/x", "/b/x", "/c/x"] {
+            assert!(!mixed.is_allowed("quarrybot", p), "{p}");
+        }
+        // A comment ends at the line end, whichever it is.
+        let commented = RobotsTxt::parse("User-agent: * # all\rDisallow: /x # no\rDisallow: /y\r");
+        assert!(!commented.is_allowed("quarrybot", "/x"));
+        assert!(!commented.is_allowed("quarrybot", "/y"));
+    }
+
+    #[test]
+    fn a_duplicate_crawl_delay_keeps_the_largest_whatever_the_order() {
+        let up = RobotsTxt::parse("User-agent: *\nCrawl-delay: 2\nCrawl-delay: 10\n");
+        let down = RobotsTxt::parse("User-agent: *\nCrawl-delay: 10\nCrawl-delay: 2\n");
+        assert_eq!(up.rules_for("quarry").unwrap().crawl_delay_s, Some(10.0));
+        assert_eq!(down.rules_for("quarry").unwrap().crawl_delay_s, Some(10.0));
+        // Two groups of one agent merge, and so do their delays.
+        let merged = RobotsTxt::parse(
+            "User-agent: quarry\nCrawl-delay: 7\nDisallow: /a\n\nUser-agent: other\nCrawl-delay: 1\n\nUser-agent: quarry\nCrawl-delay: 3\n",
+        );
+        assert_eq!(merged.crawl_delay_any(&["quarry"]), Some(7.0));
+        // An agent line shared by several names gives each of them the same delay.
+        let shared = RobotsTxt::parse("User-agent: quarry\nUser-agent: quarrybot\nCrawl-delay: 4\nCrawl-delay: 6\n");
+        assert_eq!(shared.crawl_delay_any(&["quarry"]), Some(6.0));
+        assert_eq!(shared.crawl_delay_any(&["quarrybot"]), Some(6.0));
+    }
+
+    #[test]
+    fn an_unusable_crawl_delay_never_displaces_a_usable_one() {
+        for body in [
+            "User-agent: *\nCrawl-delay: 5\nCrawl-delay: -3\n",
+            "User-agent: *\nCrawl-delay: -3\nCrawl-delay: 5\n",
+            "User-agent: *\nCrawl-delay: 5\nCrawl-delay: NaN\n",
+            "User-agent: *\nCrawl-delay: NaN\nCrawl-delay: 5\n",
+            "User-agent: *\nCrawl-delay: 5\nCrawl-delay: inf\n",
+            "User-agent: *\nCrawl-delay: 5\nCrawl-delay: soon\n",
+        ] {
+            let r = RobotsTxt::parse(body);
+            assert_eq!(r.crawl_delay_any(&["quarry"]), Some(5.0), "{body:?}");
+        }
+        // A lone unusable value is still stored as written and still reads as no delay.
+        let lone = RobotsTxt::parse("User-agent: *\nCrawl-delay: -3\n");
+        assert_eq!(lone.rules_for("quarry").unwrap().crawl_delay_s, Some(-3.0));
+        assert_eq!(lone.crawl_delay_any(&["quarry"]), None);
+    }
+
+    #[test]
+    fn a_bom_and_an_empty_allow_are_handled_together_in_a_cr_only_file() {
+        // The BOM is stripped once at the start; the empty Allow ends the agent list and adds no
+        // pattern, so the second group is `*` alone.
+        let r = RobotsTxt::parse("\u{feff}User-agent: quarrybot\rAllow:\rUser-agent: *\rDisallow: /x\r");
+        assert!(r.is_allowed("quarrybot", "/x"));
+        assert!(!r.is_allowed("other", "/x"));
+        assert!(r.rules_for("quarrybot").unwrap().allow.is_empty());
     }
 
     #[test]

@@ -9,7 +9,10 @@
  *   - `listForOrg` (query) — reactive subscription for verevon's
  *     `useQuery(api.agentRuns.listForOrg, { externalOrgId, limit })`.
  *     Returns runs newest-first, capped at the supplied limit.
- *   - `getByRunId` (query) — single-run lookup for drilldowns.
+ *   - `getByRunId` (query) — single-run lookup for drilldowns; returns
+ *     `browserActivity` to the run owner only (WS10.S7a).
+ *   - `upsertBrowserActivity` (internalMutation) — WS10.S7a browser trace
+ *     projection; patches an existing row only (see its comment).
  *
  * The mutation accepts `payload` as `v.any()` so we don't have to evolve
  * the schema each time orchestrator-core adds a field. The mirror is a
@@ -124,17 +127,193 @@ export const listForOrg = query({
   },
 });
 
+/**
+ * Single-run lookup. Any member of the run's org gets the row; the
+ * `browserActivity` projection is owner-only in v1 (WS10.S7a, ADR-8 part 2,
+ * "projections only narrow"): it is returned only when the viewer resolved
+ * by `requireViewerMembership` is the run's `externalUserId`.
+ */
+export async function getByRunIdHandler(ctx: any, args: { runId: string }) {
+  const run = await ctx.db
+    .query("agentRuns")
+    .withIndex("by_run", (q: any) => q.eq("runId", args.runId))
+    .unique();
+  if (!run) return null;
+  const { externalAuthId } = await requireViewerMembership(
+    ctx,
+    run.externalOrgId,
+  );
+  return projectRunForViewer(run, externalAuthId);
+}
+
 export const getByRunId = query({
   args: { runId: v.string() },
-  handler: async (ctx, args) => {
-    const run = await ctx.db
-      .query("agentRuns")
-      .withIndex("by_run", (q) => q.eq("runId", args.runId))
-      .unique();
-    if (!run) return null;
-    await requireViewerMembership(ctx, run.externalOrgId);
-    return run;
+  handler: getByRunIdHandler,
+});
+
+/**
+ * WS10.S7a (ADR-8 part 2): browser activity projection on `agentRuns`.
+ *
+ * `upsertBrowserActivity` is called by the trace consumer (WS10.S7b, not
+ * built here) with a debounced, reduced view of `mp.v1.trace.run.{runId}`
+ * events. Rules:
+ *   - patch an existing run row only: a trace event for an unknown run
+ *     creates nothing (the run lifecycle mirror owns row creation);
+ *   - the caller's `externalOrgId` (taken by the consumer from the verified
+ *     subject mapping, never from the payload) must equal the row's;
+ *   - `lastProducerSeq` is monotonic: a stale or duplicate seq is ignored;
+ *   - labels are short identifiers and counters are non-negative integers,
+ *     so no payload text (URLs, selectors, page content) can land here.
+ * There is no flag: nothing calls this until the consumer and a producer
+ * exist.
+ */
+export type BrowserActivity = {
+  lastProducerSeq: number;
+  lastEventType: string;
+  lastEventAt: number;
+  sessionState?: string;
+  control?: string;
+  blockedEgress?: number;
+  steps?: number;
+  artifacts?: number;
+};
+
+export type BrowserActivityUpdate = {
+  runId: string;
+  externalOrgId: string;
+  producerSeq: number;
+  eventType: string;
+  eventAt: number;
+  sessionState?: string;
+  control?: string;
+  blockedEgress?: number;
+  steps?: number;
+  artifacts?: number;
+};
+
+export type BrowserActivityDecision =
+  | { kind: "apply"; browserActivity: BrowserActivity }
+  | {
+      kind: "skip";
+      reason: "unknown_run" | "org_mismatch" | "stale_seq" | "invalid";
+    };
+
+/** A label (event type, session state, control holder), never free text. */
+const BROWSER_ACTIVITY_LABEL = /^[A-Za-z0-9_.:-]{1,64}$/;
+
+function isLabel(value: unknown): value is string {
+  return typeof value === "string" && BROWSER_ACTIVITY_LABEL.test(value);
+}
+
+function isCount(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+
+/**
+ * The pure decision behind `upsertBrowserActivity`. Optional fields the
+ * update omits keep their previous value (counters are approximate totals
+ * from the consumer's reducer, not deltas).
+ */
+export function decideBrowserActivityUpdate(
+  run: { externalOrgId: string; browserActivity?: BrowserActivity } | null,
+  update: BrowserActivityUpdate,
+): BrowserActivityDecision {
+  if (!run) return { kind: "skip", reason: "unknown_run" };
+  if (run.externalOrgId !== update.externalOrgId) {
+    return { kind: "skip", reason: "org_mismatch" };
+  }
+  if (
+    !Number.isSafeInteger(update.producerSeq) ||
+    update.producerSeq < 1 ||
+    !isLabel(update.eventType) ||
+    typeof update.eventAt !== "number" ||
+    !Number.isFinite(update.eventAt) ||
+    (update.sessionState !== undefined && !isLabel(update.sessionState)) ||
+    (update.control !== undefined && !isLabel(update.control)) ||
+    (update.blockedEgress !== undefined && !isCount(update.blockedEgress)) ||
+    (update.steps !== undefined && !isCount(update.steps)) ||
+    (update.artifacts !== undefined && !isCount(update.artifacts))
+  ) {
+    return { kind: "skip", reason: "invalid" };
+  }
+
+  const previous = run.browserActivity;
+  if (previous && update.producerSeq <= previous.lastProducerSeq) {
+    return { kind: "skip", reason: "stale_seq" };
+  }
+
+  const next: BrowserActivity = {
+    lastProducerSeq: update.producerSeq,
+    lastEventType: update.eventType,
+    lastEventAt: update.eventAt,
+  };
+  const sessionState = update.sessionState ?? previous?.sessionState;
+  if (sessionState !== undefined) next.sessionState = sessionState;
+  const control = update.control ?? previous?.control;
+  if (control !== undefined) next.control = control;
+  const blockedEgress = update.blockedEgress ?? previous?.blockedEgress;
+  if (blockedEgress !== undefined) next.blockedEgress = blockedEgress;
+  const steps = update.steps ?? previous?.steps;
+  if (steps !== undefined) next.steps = steps;
+  const artifacts = update.artifacts ?? previous?.artifacts;
+  if (artifacts !== undefined) next.artifacts = artifacts;
+
+  return { kind: "apply", browserActivity: next };
+}
+
+/**
+ * Owner-only read (v1): the row without `browserActivity` unless the viewer
+ * is the run's `externalUserId`. A run with no `externalUserId` shows the
+ * projection to nobody.
+ */
+export function projectRunForViewer<T extends { externalUserId?: string; browserActivity?: unknown }>(
+  run: T,
+  viewerExternalAuthId: string,
+): T {
+  if (run.browserActivity === undefined) return run;
+  const isOwner =
+    typeof run.externalUserId === "string" &&
+    run.externalUserId.length > 0 &&
+    run.externalUserId === viewerExternalAuthId;
+  if (isOwner) return run;
+  const narrowed = { ...run };
+  delete narrowed.browserActivity;
+  return narrowed;
+}
+
+export async function upsertBrowserActivityHandler(
+  ctx: any,
+  args: BrowserActivityUpdate,
+): Promise<{ applied: boolean; reason?: string }> {
+  const run = await ctx.db
+    .query("agentRuns")
+    .withIndex("by_run", (q: any) => q.eq("runId", args.runId))
+    .unique();
+  const decision = decideBrowserActivityUpdate(run, args);
+  if (decision.kind === "skip") {
+    return { applied: false, reason: decision.reason };
+  }
+  await ctx.db.patch(run._id, {
+    browserActivity: decision.browserActivity,
+    updatedAt: Date.now(),
+  });
+  return { applied: true };
+}
+
+export const upsertBrowserActivity = internalMutation({
+  args: {
+    runId: v.string(),
+    externalOrgId: v.string(),
+    producerSeq: v.number(),
+    eventType: v.string(),
+    eventAt: v.number(),
+    sessionState: v.optional(v.string()),
+    control: v.optional(v.string()),
+    blockedEgress: v.optional(v.number()),
+    steps: v.optional(v.number()),
+    artifacts: v.optional(v.number()),
   },
+  handler: upsertBrowserActivityHandler,
 });
 
 /**

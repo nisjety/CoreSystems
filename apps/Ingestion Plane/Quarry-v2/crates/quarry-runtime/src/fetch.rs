@@ -797,6 +797,164 @@ fn build_client(
         .map_err(|e| QuarryError::new(ErrorCode::Internal, format!("http client: {}", e.without_url())))
 }
 
+// -- E3.8.8: no_egress mode ---------------------------------------------------------------------
+//
+// A no_egress scrape never touches the network beyond the platform: it reads the org's stored
+// artifact for the URL from the Data Plane, through its API only (`crate::data_plane_http`), and
+// answers a typed miss when there is none. The URL is never logged and never written into an error
+// message or its details. A ZDR caller is refused before any lookup: stored artifacts are durable
+// content, and ADR topic 4 refuses URL-keyed reads for ZDR runs. Dark until the edge builds the
+// driver behind `QUARRY_EDGE__NO_EGRESS` (default off).
+
+use std::sync::OnceLock;
+
+use quarry_core::privacy::PrivacyClassification;
+
+use crate::data_plane_http::{ArtifactLookup, ArtifactReader};
+
+/// The environment variable that turns the no_egress mode on (E3.8.8). Default off.
+pub const NO_EGRESS_ENV: &str = "QUARRY_EDGE__NO_EGRESS";
+
+/// The `details.reason` values a no_egress fetch refuses or misses with.
+pub mod no_egress_reason {
+    /// The Data Plane holds no artifact of the org for the URL.
+    pub const MISS: &str = "no_egress_miss";
+    /// The caller runs under ZDR: stored artifacts are not read for it.
+    pub const ZDR_REFUSED: &str = "no_egress_zdr_refused";
+    /// The fetch carries no org, so there is no org's store to read.
+    pub const NO_ORG: &str = "no_egress_no_org";
+}
+
+/// The pure half of [`no_egress_enabled`]. `1`, `true` and `on` (any case, surrounding blanks
+/// ignored) turn it on. Unset, blank or any other value is off.
+pub fn no_egress_from_value(value: Option<&str>) -> bool {
+    matches!(
+        value.map(|raw| raw.trim().to_ascii_lowercase()).as_deref(),
+        Some("1" | "true" | "on")
+    )
+}
+
+/// The process-wide default, read from the environment once.
+pub fn no_egress_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        let raw = std::env::var(NO_EGRESS_ENV).ok();
+        let enabled = no_egress_from_value(raw.as_deref());
+        tracing::info!(enabled = enabled, "quarry.no_egress");
+        enabled
+    })
+}
+
+fn no_egress_error(code: ErrorCode, reason: &'static str, message: &'static str) -> QuarryError {
+    QuarryError::new(code, message).with_details(json!({ "reason": reason, "no_egress": true }))
+}
+
+/// The typed miss: NOT_FOUND, not retryable, and no URL in the message or the details.
+pub fn no_egress_miss() -> QuarryError {
+    no_egress_error(
+        ErrorCode::NotFound,
+        no_egress_reason::MISS,
+        "no_egress: no stored artifact for the requested page",
+    )
+}
+
+/// A driver that serves pages only from the org's stored Data Plane artifacts. It opens no socket
+/// to the page's host, follows no redirect and uses no proxy.
+pub struct NoEgressDriver {
+    reader: Arc<dyn ArtifactReader>,
+}
+
+impl NoEgressDriver {
+    pub fn new(reader: Arc<dyn ArtifactReader>) -> Self {
+        Self { reader }
+    }
+
+    /// The driver when `QUARRY_EDGE__NO_EGRESS` is on, `None` otherwise.
+    pub fn from_env(reader: Arc<dyn ArtifactReader>) -> Option<Self> {
+        Self::when_enabled(no_egress_enabled(), reader)
+    }
+
+    /// The pure half of [`Self::from_env`].
+    pub fn when_enabled(enabled: bool, reader: Arc<dyn ArtifactReader>) -> Option<Self> {
+        enabled.then(|| Self::new(reader))
+    }
+
+    async fn read(&self, url: &Url, hints: &FetchHints) -> QuarryResult<FetchResponse> {
+        if hints.privacy.zdr.is_active()
+            || hints.privacy.privacy_classification == PrivacyClassification::ZdrEphemeral
+        {
+            return Err(no_egress_error(
+                ErrorCode::Forbidden,
+                no_egress_reason::ZDR_REFUSED,
+                "no_egress: stored artifacts are not read under ZDR",
+            ));
+        }
+        if hints.org_id.trim().is_empty() {
+            return Err(no_egress_error(
+                ErrorCode::BadRequest,
+                no_egress_reason::NO_ORG,
+                "no_egress: the fetch names no org",
+            ));
+        }
+        let started = std::time::Instant::now();
+        let artifact = match self
+            .reader
+            .lookup(&hints.org_id, url.as_str(), hints.max_body_bytes)
+            .await?
+        {
+            ArtifactLookup::Hit(artifact) => artifact,
+            ArtifactLookup::Miss => return Err(no_egress_miss()),
+        };
+        let mut body = artifact.body;
+        if let Some(cap) = hints.max_body_bytes {
+            if body.len() > cap {
+                if !hints.truncate_at_cap {
+                    return Err(QuarryError::new(
+                        ErrorCode::DriverFailed,
+                        "no_egress: the stored body is larger than the read cap",
+                    ));
+                }
+                body.truncate(cap);
+            }
+        }
+        // A stored final URL that does not parse is the Data Plane's fault, not the page's: the
+        // requested URL stands in for it.
+        let final_url = Url::parse(&artifact.final_url).unwrap_or_else(|_| url.clone());
+        Ok(FetchResponse::new(
+            artifact.status,
+            final_url,
+            artifact.headers,
+            body,
+            started.elapsed().as_millis() as u64,
+            // No driver kind names a stored read yet (quarry-core); the stored page was a static capture.
+            DriverKind::Static,
+        ))
+    }
+}
+
+#[async_trait]
+impl Driver for NoEgressDriver {
+    fn kind(&self) -> DriverKind {
+        DriverKind::Static
+    }
+
+    /// A bare fetch names no org, so it is refused: no_egress never reads without one.
+    async fn fetch(&self, url: &Url) -> QuarryResult<FetchResponse> {
+        self.read(url, &FetchHints::default()).await
+    }
+
+    async fn fetch_conditional(
+        &self,
+        url: &Url,
+        hints: &FetchHints,
+    ) -> QuarryResult<FetchResponse> {
+        self.read(url, hints).await
+    }
+
+    // `fetch_bounded` and `fetch_discovery_hop` keep the trait's fail-closed defaults: discovery
+    // (robots, sitemaps) is live egress and has no stored form yet.
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1572,5 +1730,267 @@ mod tests {
                 .get("socks5h://proxy.example:1080")
                 .unwrap()
         ));
+    }
+}
+
+#[cfg(test)]
+mod no_egress_tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    use quarry_core::privacy::PrivacyPolicy;
+    use quarry_core::zdr::ZdrMode;
+
+    use crate::data_plane_http::StoredArtifact;
+
+    const PAGE: &str = "https://shop.example/private/basket?session=abc";
+
+    /// The Data Plane artifacts contract, faked: one stored page per (org, url).
+    #[derive(Default)]
+    struct FakeArtifacts {
+        stored: HashMap<(String, String), StoredArtifact>,
+        calls: Mutex<Vec<(String, String, Option<usize>)>>,
+        fail_with: Option<ErrorCode>,
+    }
+
+    impl FakeArtifacts {
+        fn with_page(org: &str, url: &str, body: &[u8]) -> Self {
+            let mut stored = HashMap::new();
+            stored.insert(
+                (org.to_string(), url.to_string()),
+                StoredArtifact {
+                    status: 200,
+                    final_url: "https://shop.example/private/basket".into(),
+                    headers: vec![("content-type".into(), "text/html".into())],
+                    body: body.to_vec(),
+                    captured_at: Some("2026-11-01T10:00:00Z".into()),
+                },
+            );
+            Self {
+                stored,
+                ..Self::default()
+            }
+        }
+
+        fn calls(&self) -> usize {
+            self.calls.lock().expect("calls").len()
+        }
+    }
+
+    #[async_trait]
+    impl ArtifactReader for FakeArtifacts {
+        async fn lookup(
+            &self,
+            org_id: &str,
+            url: &str,
+            max_bytes: Option<usize>,
+        ) -> QuarryResult<ArtifactLookup> {
+            self.calls
+                .lock()
+                .expect("calls")
+                .push((org_id.to_string(), url.to_string(), max_bytes));
+            if let Some(code) = self.fail_with {
+                return Err(QuarryError::new(code, "fake failure"));
+            }
+            Ok(self
+                .stored
+                .get(&(org_id.to_string(), url.to_string()))
+                .cloned()
+                .map(ArtifactLookup::Hit)
+                .unwrap_or(ArtifactLookup::Miss))
+        }
+    }
+
+    fn hints(org: &str) -> FetchHints {
+        FetchHints {
+            org_id: org.to_string(),
+            ..FetchHints::default()
+        }
+    }
+
+    fn page() -> Url {
+        Url::parse(PAGE).expect("static url")
+    }
+
+    fn assert_names_no_url(error: &QuarryError) {
+        let details = error
+            .details
+            .as_ref()
+            .map(|value| value.to_string())
+            .unwrap_or_default();
+        for fragment in ["shop.example", "basket", "session=abc"] {
+            assert!(!error.message.contains(fragment), "message: {}", error.message);
+            assert!(!details.contains(fragment), "details: {details}");
+        }
+    }
+
+    #[test]
+    fn the_flag_is_off_unless_set_on() {
+        assert_eq!(NO_EGRESS_ENV, "QUARRY_EDGE__NO_EGRESS");
+        assert!(!no_egress_from_value(None));
+        assert!(!no_egress_from_value(Some("")));
+        assert!(!no_egress_from_value(Some("yes")));
+        assert!(!no_egress_from_value(Some("0")));
+        assert!(no_egress_from_value(Some("1")));
+        assert!(no_egress_from_value(Some(" TRUE ")));
+        assert!(no_egress_from_value(Some("on")));
+    }
+
+    #[test]
+    fn the_driver_exists_only_when_the_flag_is_on() {
+        let reader: Arc<dyn ArtifactReader> = Arc::new(FakeArtifacts::default());
+        assert!(NoEgressDriver::when_enabled(false, Arc::clone(&reader)).is_none());
+        assert!(NoEgressDriver::when_enabled(true, reader).is_some());
+    }
+
+    #[tokio::test]
+    async fn a_stored_page_is_served_from_the_data_plane() {
+        let fake = Arc::new(FakeArtifacts::with_page("org-a", PAGE, b"<p>stored</p>"));
+        let driver = NoEgressDriver::new(fake.clone());
+
+        let response = driver
+            .fetch_conditional(&page(), &hints("org-a"))
+            .await
+            .expect("a hit");
+
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body, b"<p>stored</p>".to_vec());
+        assert_eq!(
+            response.final_url.as_str(),
+            "https://shop.example/private/basket"
+        );
+        assert_eq!(response.served_by, DriverKind::Static);
+        assert!(response.captures.is_none());
+        assert_eq!(fake.calls(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_miss_is_typed_not_retryable_and_names_no_url() {
+        let fake = Arc::new(FakeArtifacts::default());
+        let driver = NoEgressDriver::new(fake.clone());
+
+        let error = driver
+            .fetch_conditional(&page(), &hints("org-a"))
+            .await
+            .expect_err("a miss");
+
+        assert_eq!(error.code, ErrorCode::NotFound);
+        assert!(!error.retryable);
+        assert_eq!(
+            error.details.as_ref().and_then(|d| d["reason"].as_str()),
+            Some(no_egress_reason::MISS)
+        );
+        assert_names_no_url(&error);
+    }
+
+    #[tokio::test]
+    async fn another_orgs_artifact_is_a_miss() {
+        let fake = Arc::new(FakeArtifacts::with_page("org-a", PAGE, b"secret"));
+        let driver = NoEgressDriver::new(fake);
+
+        let error = driver
+            .fetch_conditional(&page(), &hints("org-b"))
+            .await
+            .expect_err("org-b holds nothing");
+        assert_eq!(error.code, ErrorCode::NotFound);
+    }
+
+    #[tokio::test]
+    async fn zdr_is_refused_before_any_lookup() {
+        let fake = Arc::new(FakeArtifacts::with_page("org-a", PAGE, b"stored"));
+        let driver = NoEgressDriver::new(fake.clone());
+
+        let mut zdr = hints("org-a");
+        zdr.privacy = PrivacyPolicy::default().with_zdr(ZdrMode::On);
+        let error = driver
+            .fetch_conditional(&page(), &zdr)
+            .await
+            .expect_err("refused under ZDR");
+        assert_eq!(error.code, ErrorCode::Forbidden);
+        assert_eq!(
+            error.details.as_ref().and_then(|d| d["reason"].as_str()),
+            Some(no_egress_reason::ZDR_REFUSED)
+        );
+        assert_names_no_url(&error);
+
+        let mut ephemeral = hints("org-a");
+        ephemeral.privacy.privacy_classification = PrivacyClassification::ZdrEphemeral;
+        let error = driver
+            .fetch_conditional(&page(), &ephemeral)
+            .await
+            .expect_err("refused for ZDR-ephemeral content");
+        assert_eq!(error.code, ErrorCode::Forbidden);
+
+        assert_eq!(fake.calls(), 0, "no lookup ever reaches the Data Plane");
+    }
+
+    #[tokio::test]
+    async fn a_fetch_without_an_org_is_refused_before_any_lookup() {
+        let fake = Arc::new(FakeArtifacts::with_page("", PAGE, b"stored"));
+        let driver = NoEgressDriver::new(fake.clone());
+
+        let error = driver.fetch(&page()).await.expect_err("no org");
+        assert_eq!(error.code, ErrorCode::BadRequest);
+        assert_eq!(
+            error.details.as_ref().and_then(|d| d["reason"].as_str()),
+            Some(no_egress_reason::NO_ORG)
+        );
+        assert_eq!(fake.calls(), 0);
+    }
+
+    #[tokio::test]
+    async fn the_read_cap_is_passed_on_and_enforced() {
+        let fake = Arc::new(FakeArtifacts::with_page("org-a", PAGE, b"0123456789"));
+        let driver = NoEgressDriver::new(fake.clone());
+
+        let mut refuse = hints("org-a");
+        refuse.max_body_bytes = Some(4);
+        let error = driver
+            .fetch_conditional(&page(), &refuse)
+            .await
+            .expect_err("over the cap");
+        assert_eq!(error.code, ErrorCode::DriverFailed);
+        assert_names_no_url(&error);
+
+        let mut cut = refuse.clone();
+        cut.truncate_at_cap = true;
+        let response = driver
+            .fetch_conditional(&page(), &cut)
+            .await
+            .expect("cut at the cap");
+        assert_eq!(response.body, b"0123".to_vec());
+
+        let calls = fake.calls.lock().expect("calls");
+        assert!(calls.iter().all(|(_, _, max)| *max == Some(4)));
+    }
+
+    #[tokio::test]
+    async fn a_reader_failure_passes_through_unchanged() {
+        let fake = Arc::new(FakeArtifacts {
+            fail_with: Some(ErrorCode::Timeout),
+            ..FakeArtifacts::default()
+        });
+        let driver = NoEgressDriver::new(fake);
+
+        let error = driver
+            .fetch_conditional(&page(), &hints("org-a"))
+            .await
+            .expect_err("the reader failed");
+        assert_eq!(error.code, ErrorCode::Timeout);
+    }
+
+    #[tokio::test]
+    async fn discovery_stays_fail_closed() {
+        let driver = NoEgressDriver::new(Arc::new(FakeArtifacts::default()));
+        let bounded = driver
+            .fetch_bounded(&page(), 1024)
+            .await
+            .expect_err("no bounded fetch");
+        assert_eq!(bounded.code, ErrorCode::Unsupported);
+        let hop = driver
+            .fetch_discovery_hop(&page(), 1024)
+            .await
+            .expect_err("no discovery hop");
+        assert_eq!(hop.code, ErrorCode::Unsupported);
     }
 }

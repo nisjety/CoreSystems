@@ -24,7 +24,7 @@
 use std::time::Duration;
 
 use axum::{
-    http::{HeaderMap, StatusCode},
+    http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     Json,
 };
@@ -180,6 +180,17 @@ pub(super) fn validation(message: &str) -> Response {
         .into_response()
 }
 
+/// 400 with the standard `{error:{code,message}}` envelope, for a value that is present
+/// but malformed, such as a schema that is not a JSON object (WS16.S7). A missing field
+/// keeps [`validation`]'s 422.
+pub(super) fn bad_request(code: &'static str, message: &str) -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(error(code, message.to_owned())),
+    )
+        .into_response()
+}
+
 /// Forward an upstream `(status, body)` failure verbatim.
 pub(super) fn forward(status: StatusCode, body: Value) -> Response {
     (status, Json(body)).into_response()
@@ -193,6 +204,12 @@ pub(super) fn created(data: Value) -> Response {
 /// 200 OK with `data` wrapped in the `{data}` success envelope.
 pub(super) fn okay(data: Value) -> Response {
     (StatusCode::OK, Json(ok(data))).into_response()
+}
+
+/// Adds `Cache-Control: no-store` to an answer that must not be kept: a signing secret,
+/// or a document read.
+pub(super) fn no_store(response: impl IntoResponse) -> Response {
+    ([(header::CACHE_CONTROL, "no-store")], response).into_response()
 }
 
 // ── URL normalization (SSRF guard for user-supplied targets) ────────────────

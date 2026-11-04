@@ -8,7 +8,10 @@
 //!    cookies and session cookies older than the policy are skipped and counted. A host-only
 //!    cookie (captured domain without a leading dot) is restored with `url: https://<host>/`
 //!    and no `domain`, so `__Host-` and host-only semantics survive. A cookie Chromium
-//!    rejects is counted, never fatal (a rejected chunk is retried cookie by cookie);
+//!    rejects is counted, never fatal (a rejected chunk is retried cookie by cookie). The
+//!    acceptance is then CHECKED (D2-117): a refused chunk and a systematic refusal (every
+//!    cookie refused) are counted, and the jar is read back so a cookie Chromium accepted
+//!    and then dropped is moved from applied to rejected;
 //! 2. web storage and IndexedDB come back through one `Page.addScriptToEvaluateOnNewDocument`
 //!    script that holds an origin-keyed map and acts only when `location.origin` is in it and
 //!    the sentinel `__quarry_profile_seeded_v1` is absent from that origin's localStorage;
@@ -73,6 +76,28 @@ impl ProfileLoadError {
             return Self::KeyUnavailable(error);
         }
         Self::Corrupt(error)
+    }
+
+    /// Whether a release must NOT save over the stored profile after this load failure.
+    /// An unreadable profile and an unreachable key both mean "the stored profile is not
+    /// known to be empty": starting fresh and saving would replace it (D2-028). A destroyed
+    /// key is the same as no profile, so there is nothing to protect.
+    #[must_use]
+    pub fn blocks_save(&self) -> bool {
+        !matches!(self, Self::KeyDestroyed)
+    }
+
+    /// The restore report for a session whose profile could not be loaded (D2-028): a
+    /// typed, visible signal instead of a silent fresh start. `failed` is set when the
+    /// stored profile must not be overwritten; the class is the same label the log carries.
+    /// Counts and a class only, never the store's error text.
+    #[must_use]
+    pub fn restore_report(&self) -> RestoreReport {
+        RestoreReport {
+            failed: self.blocks_save(),
+            load_failure: Some(self.class()),
+            ..RestoreReport::default()
+        }
     }
 
     /// A short class for logs. Never the error text (it can carry store detail).
@@ -141,6 +166,19 @@ pub struct RestoreReport {
     /// The restore itself did not finish (a timeout or a CDP failure): the session runs
     /// with what was applied, and its release does not overwrite the stored profile.
     pub failed: bool,
+    /// The profile could not even be loaded (D2-028): `corrupt`, `key_unavailable` or
+    /// `key_destroyed`. A closed label (see [`ProfileLoadError::class`]), never error text.
+    /// Not part of the wire summary yet.
+    pub load_failure: Option<&'static str>,
+    /// `Storage.setCookies` calls that Chromium refused as a whole chunk (each is then
+    /// retried cookie by cookie). A nonzero count with `cookies_applied == 0` is a
+    /// systematic refusal, not a few bad cookies.
+    pub cookie_chunks_refused: u32,
+    /// Cookies Chromium accepted that the read-back did not find (counted in
+    /// `cookies_rejected` too, and removed from `cookies_applied`).
+    pub cookies_dropped_after_accept: u32,
+    /// The jar could not be read back, so acceptance is as reported by `setCookies` only.
+    pub cookie_readback_unavailable: bool,
 }
 
 impl RestoreReport {
@@ -265,6 +303,132 @@ pub fn plan_cookie(
             .filter(|scheme| *scheme != SourceScheme::Unset),
         partition_key: cookie.partition_key.clone(),
     })
+}
+
+// ---------------------------------------------------------------------------------------
+// Applying the cookies, and checking they were taken (D2-117)
+// ---------------------------------------------------------------------------------------
+
+/// Where cookies go: the CDP half implements it over `Storage.setCookies` /
+/// `Storage.getCookies`, the tests over a mock jar.
+#[async_trait::async_trait]
+pub trait CookieSink: Send + Sync {
+    /// Hand `cookies` to the jar in one call. `true` only when Chromium accepted the call
+    /// (it refuses the whole call when one cookie is invalid).
+    async fn set(&self, cookies: &[CookiePlan]) -> bool;
+    /// The jar's cookies as (name, domain, path), or `None` when it cannot be read.
+    async fn read_back(&self) -> Option<Vec<CookieKey>>;
+}
+
+/// What identifies a cookie in the jar: name, host and path. Compared in lower case without
+/// a leading dot or IPv6 brackets, because Chromium reports a host-only cookie's domain
+/// bare and a domain cookie's with a dot.
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub struct CookieKey {
+    name: String,
+    host: String,
+    path: String,
+}
+
+impl CookieKey {
+    #[must_use]
+    pub fn new(name: &str, domain: &str, path: &str) -> Self {
+        Self {
+            name: name.to_owned(),
+            host: normalise_host(domain),
+            path: path.to_owned(),
+        }
+    }
+
+    /// The key a planned cookie has once it is in the jar.
+    #[must_use]
+    pub fn of_plan(plan: &CookiePlan) -> Self {
+        let host = match (plan.domain.as_deref(), plan.url.as_deref()) {
+            (Some(domain), _) => domain.to_owned(),
+            (None, Some(url)) => url
+                .strip_prefix("https://")
+                .unwrap_or(url)
+                .split('/')
+                .next()
+                .unwrap_or_default()
+                .to_owned(),
+            (None, None) => String::new(),
+        };
+        Self::new(&plan.name, &host, &plan.path)
+    }
+}
+
+/// Never prints a name or a host.
+impl std::fmt::Debug for CookieKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CookieKey").finish_non_exhaustive()
+    }
+}
+
+fn normalise_host(domain: &str) -> String {
+    domain
+        .trim()
+        .trim_start_matches('.')
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .to_ascii_lowercase()
+}
+
+fn count(n: usize) -> u32 {
+    u32::try_from(n).unwrap_or(u32::MAX)
+}
+
+/// Apply `plans` to `sink`, in chunks of [`COOKIE_CHUNK`], and check the outcome. Fills the
+/// cookie counts of `report` (it adds to them; the planner's skips stay).
+///
+/// 1. A chunk the jar accepts counts as applied. A chunk it refuses is counted in
+///    `cookie_chunks_refused` and retried cookie by cookie, so one bad cookie costs one
+///    cookie.
+/// 2. When two or more cookies were planned and NONE was applied, the refusal is systematic
+///    (the call itself is wrong, not a cookie): `failed` is set, so the release does not
+///    save the cookie-less session over the stored profile.
+/// 3. The jar is read back. An accepted cookie it does not hold was dropped after the
+///    acceptance: it moves from applied to rejected and into `cookies_dropped_after_accept`.
+///    An unreadable jar sets `cookie_readback_unavailable` and changes no count.
+pub async fn apply_cookies(sink: &dyn CookieSink, plans: &[CookiePlan], report: &mut RestoreReport) {
+    let mut accepted: Vec<&CookiePlan> = Vec::with_capacity(plans.len());
+    for chunk in plans.chunks(COOKIE_CHUNK) {
+        if sink.set(chunk).await {
+            report.cookies_applied = report.cookies_applied.saturating_add(count(chunk.len()));
+            accepted.extend(chunk.iter());
+            continue;
+        }
+        report.cookie_chunks_refused += 1;
+        for plan in chunk {
+            if sink.set(std::slice::from_ref(plan)).await {
+                report.cookies_applied += 1;
+                accepted.push(plan);
+            } else {
+                report.cookies_rejected += 1;
+            }
+        }
+    }
+    if plans.len() >= 2 && accepted.is_empty() {
+        report.failed = true;
+    }
+    if accepted.is_empty() {
+        return;
+    }
+    match sink.read_back().await {
+        None => report.cookie_readback_unavailable = true,
+        Some(present) => {
+            let present: std::collections::HashSet<CookieKey> = present.into_iter().collect();
+            let dropped = accepted
+                .iter()
+                .filter(|plan| !present.contains(&CookieKey::of_plan(plan)))
+                .count();
+            let dropped = count(dropped);
+            report.cookies_applied = report.cookies_applied.saturating_sub(dropped);
+            report.cookies_rejected = report.cookies_rejected.saturating_add(dropped);
+            report.cookies_dropped_after_accept =
+                report.cookies_dropped_after_accept.saturating_add(dropped);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------------------
@@ -571,12 +735,13 @@ mod cdp {
     };
     use ::chromiumoxide::cdp::browser_protocol::network as net;
     use ::chromiumoxide::cdp::browser_protocol::page::AddScriptToEvaluateOnNewDocumentParams;
-    use ::chromiumoxide::cdp::browser_protocol::storage::SetCookiesParams;
+    use ::chromiumoxide::cdp::browser_protocol::storage::{GetCookiesParams, SetCookiesParams};
     use ::chromiumoxide::{Browser, Page};
     use chrono::{DateTime, Utc};
 
     use super::{
-        plan_restore, CookiePlan, ProfileEmulation, RestorePolicy, RestoreReport, COOKIE_CHUNK,
+        apply_cookies, plan_restore, CookieKey, CookiePlan, CookieSink, ProfileEmulation,
+        RestorePolicy, RestoreReport,
     };
     use crate::profile_snapshot::{CookiePriority, SameSite, SourceScheme};
     use crate::session::SessionSnapshot;
@@ -611,14 +776,34 @@ mod cdp {
         param
     }
 
-    async fn set_cookies(
-        browser: &Browser,
-        context: &BrowserContextId,
-        cookies: Vec<net::CookieParam>,
-    ) -> bool {
-        let mut params = SetCookiesParams::new(cookies);
-        params.browser_context_id = Some(context.clone());
-        browser.execute(params).await.is_ok()
+    /// The context's cookie jar over `Storage.setCookies` / `Storage.getCookies`.
+    struct ContextJar<'a> {
+        browser: &'a Browser,
+        context: &'a BrowserContextId,
+    }
+
+    #[async_trait::async_trait]
+    impl CookieSink for ContextJar<'_> {
+        async fn set(&self, cookies: &[CookiePlan]) -> bool {
+            let mut params = SetCookiesParams::new(cookies.iter().map(cookie_param).collect());
+            params.browser_context_id = Some(self.context.clone());
+            self.browser.execute(params).await.is_ok()
+        }
+
+        async fn read_back(&self) -> Option<Vec<CookieKey>> {
+            let params = GetCookiesParams {
+                browser_context_id: Some(self.context.clone()),
+            };
+            let response = self.browser.execute(params).await.ok()?;
+            Some(
+                response
+                    .result
+                    .cookies
+                    .iter()
+                    .map(|cookie| CookieKey::new(&cookie.name, &cookie.domain, &cookie.path))
+                    .collect(),
+            )
+        }
     }
 
     /// Restore `snapshot` into `context` through `page` (the context's first tab, still on
@@ -639,22 +824,10 @@ mod cdp {
         let plan = plan_restore(snapshot, initial_url, now, policy);
         let mut report = plan.report.clone();
 
-        // 1. Cookies, 100 at a time. A rejected chunk is retried one by one so one bad
-        // cookie costs one cookie.
-        for chunk in plan.cookies.chunks(COOKIE_CHUNK) {
-            let params: Vec<net::CookieParam> = chunk.iter().map(cookie_param).collect();
-            if set_cookies(browser, context, params.clone()).await {
-                report.cookies_applied += u32::try_from(chunk.len()).unwrap_or(u32::MAX);
-                continue;
-            }
-            for param in params {
-                if set_cookies(browser, context, vec![param]).await {
-                    report.cookies_applied += 1;
-                } else {
-                    report.cookies_rejected += 1;
-                }
-            }
-        }
+        // 1. Cookies, 100 at a time; a refused chunk is retried one by one; the acceptance
+        // is checked against the jar (D2-117).
+        let jar = ContextJar { browser, context };
+        apply_cookies(&jar, &plan.cookies, &mut report).await;
 
         // 2. Web storage and IndexedDB, seeded by the page itself at document start.
         if let Some(script) = plan.seeding_script {
@@ -968,5 +1141,229 @@ mod tests {
             ..Default::default()
         };
         assert!(ProfileEmulation::from_snapshot(&bad).is_empty());
+    }
+
+    // ---- D2-028: a failed load is a visible, typed report that blocks the save ----
+
+    #[test]
+    fn corrupt_load_is_a_typed_failed_report_that_blocks_the_save() {
+        let failure = ProfileLoadError::classify(QuarryError::new(
+            ErrorCode::Internal,
+            "decode failed for org-SECRET-ORG",
+        ));
+        assert!(failure.blocks_save());
+        let report = failure.restore_report();
+        assert!(report.failed);
+        assert_eq!(report.load_failure, Some("corrupt"));
+        assert!(report.summary().failed);
+        // A class and counts, never the store's error text.
+        assert!(!format!("{report:?}").contains("SECRET-ORG"));
+    }
+
+    #[test]
+    fn unreachable_key_also_blocks_the_save_and_names_its_class() {
+        let failure = ProfileLoadError::classify(QuarryError::new(
+            ErrorCode::RuntimeNotReady,
+            "profile key unavailable",
+        ));
+        assert!(failure.blocks_save());
+        let report = failure.restore_report();
+        assert!(report.failed);
+        assert_eq!(report.load_failure, Some("key_unavailable"));
+    }
+
+    #[test]
+    fn destroyed_key_is_signalled_but_does_not_block_the_save() {
+        let failure = ProfileLoadError::KeyDestroyed;
+        assert!(!failure.blocks_save());
+        let report = failure.restore_report();
+        assert!(!report.failed);
+        assert_eq!(report.load_failure, Some("key_destroyed"));
+    }
+
+    #[test]
+    fn a_normal_restore_report_carries_no_load_failure() {
+        let snapshot = SessionSnapshot::default();
+        let plan = plan_restore(&snapshot, "about:blank", now(), &RestorePolicy::default());
+        assert_eq!(plan.report.load_failure, None);
+        assert!(!plan.report.failed);
+    }
+
+    // ---- D2-117: setCookies acceptance is checked, not assumed ----
+
+    /// A mock jar: refuses a call that holds a cookie named in `invalid`, or every call when
+    /// `refuse_all`; drops the cookies named in `drop_after_accept` from what it holds.
+    #[derive(Default)]
+    struct MockJar {
+        invalid: Vec<String>,
+        refuse_all: bool,
+        drop_after_accept: Vec<String>,
+        readback_down: bool,
+        held: std::sync::Mutex<Vec<CookieKey>>,
+        calls: std::sync::Mutex<Vec<usize>>,
+    }
+
+    #[async_trait::async_trait]
+    impl CookieSink for MockJar {
+        async fn set(&self, cookies: &[CookiePlan]) -> bool {
+            self.calls.lock().unwrap().push(cookies.len());
+            if self.refuse_all || cookies.iter().any(|c| self.invalid.contains(&c.name)) {
+                return false;
+            }
+            let mut held = self.held.lock().unwrap();
+            for plan in cookies {
+                if !self.drop_after_accept.contains(&plan.name) {
+                    held.push(CookieKey::of_plan(plan));
+                }
+            }
+            true
+        }
+
+        async fn read_back(&self) -> Option<Vec<CookieKey>> {
+            if self.readback_down {
+                None
+            } else {
+                Some(self.held.lock().unwrap().clone())
+            }
+        }
+    }
+
+    fn plans(names: &[&str], domain: &str) -> Vec<CookiePlan> {
+        names
+            .iter()
+            .map(|name| {
+                plan_cookie(&cookie(name, domain), now(), None, &RestorePolicy::default())
+                    .expect("plan")
+            })
+            .collect()
+    }
+
+    fn numbered(n: usize, domain: &str) -> Vec<CookiePlan> {
+        let names: Vec<String> = (0..n).map(|i| format!("c{i}")).collect();
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        plans(&refs, domain)
+    }
+
+    #[tokio::test]
+    async fn accepted_chunks_count_as_applied_and_are_sent_in_hundreds() {
+        let jar = MockJar::default();
+        let mut report = RestoreReport::default();
+        apply_cookies(&jar, &numbered(250, ".example.com"), &mut report).await;
+        assert_eq!(*jar.calls.lock().unwrap(), vec![100, 100, 50]);
+        assert_eq!(report.cookies_applied, 250);
+        assert_eq!(report.cookies_rejected, 0);
+        assert_eq!(report.cookie_chunks_refused, 0);
+        assert!(!report.failed);
+        assert!(!report.cookie_readback_unavailable);
+    }
+
+    #[tokio::test]
+    async fn one_bad_cookie_costs_one_cookie() {
+        let jar = MockJar {
+            invalid: vec!["bad".to_owned()],
+            ..MockJar::default()
+        };
+        let mut report = RestoreReport::default();
+        apply_cookies(&jar, &plans(&["a", "bad", "b"], ".example.com"), &mut report).await;
+        assert_eq!(report.cookies_applied, 2);
+        assert_eq!(report.cookies_rejected, 1);
+        assert_eq!(report.cookie_chunks_refused, 1);
+        assert!(!report.failed, "a single bad cookie is not a systematic refusal");
+    }
+
+    #[tokio::test]
+    async fn a_refusal_of_everything_is_systematic_and_marks_the_restore_failed() {
+        let jar = MockJar {
+            refuse_all: true,
+            ..MockJar::default()
+        };
+        let mut report = RestoreReport::default();
+        apply_cookies(&jar, &plans(&["a", "b", "c"], ".example.com"), &mut report).await;
+        assert_eq!(report.cookies_applied, 0);
+        assert_eq!(report.cookies_rejected, 3);
+        assert_eq!(report.cookie_chunks_refused, 1);
+        assert!(report.failed, "the release must not save a cookie-less session over the profile");
+    }
+
+    #[tokio::test]
+    async fn a_lone_refused_cookie_is_not_called_systematic() {
+        let jar = MockJar {
+            refuse_all: true,
+            ..MockJar::default()
+        };
+        let mut report = RestoreReport::default();
+        apply_cookies(&jar, &plans(&["a"], ".example.com"), &mut report).await;
+        assert_eq!(report.cookies_rejected, 1);
+        assert!(!report.failed);
+    }
+
+    #[tokio::test]
+    async fn no_cookies_means_no_calls_and_no_failure() {
+        let jar = MockJar::default();
+        let mut report = RestoreReport::default();
+        apply_cookies(&jar, &[], &mut report).await;
+        assert!(jar.calls.lock().unwrap().is_empty());
+        assert!(!report.failed);
+        assert_eq!(report, RestoreReport::default());
+    }
+
+    #[tokio::test]
+    async fn a_cookie_accepted_then_dropped_is_moved_to_rejected() {
+        let jar = MockJar {
+            drop_after_accept: vec!["gone".to_owned()],
+            ..MockJar::default()
+        };
+        let mut report = RestoreReport::default();
+        apply_cookies(&jar, &plans(&["kept", "gone"], ".example.com"), &mut report).await;
+        assert_eq!(report.cookies_applied, 1);
+        assert_eq!(report.cookies_rejected, 1);
+        assert_eq!(report.cookies_dropped_after_accept, 1);
+        assert!(!report.failed);
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_jar_changes_no_count_and_says_so() {
+        let jar = MockJar {
+            readback_down: true,
+            drop_after_accept: vec!["gone".to_owned()],
+            ..MockJar::default()
+        };
+        let mut report = RestoreReport::default();
+        apply_cookies(&jar, &plans(&["kept", "gone"], ".example.com"), &mut report).await;
+        assert_eq!(report.cookies_applied, 2);
+        assert_eq!(report.cookies_rejected, 0);
+        assert!(report.cookie_readback_unavailable);
+    }
+
+    #[tokio::test]
+    async fn host_only_and_domain_cookies_match_the_jars_spelling() {
+        // Chromium reports a host-only cookie's domain bare and a domain cookie's with a dot.
+        let host_only = plans(&["h"], "App.Example.com");
+        let domain = plans(&["d"], ".example.com");
+        assert_eq!(
+            CookieKey::of_plan(&host_only[0]),
+            CookieKey::new("h", "app.example.com", "/")
+        );
+        assert_eq!(
+            CookieKey::of_plan(&domain[0]),
+            CookieKey::new("d", ".example.com", "/")
+        );
+        let v6 = plans(&["v"], "::1");
+        assert_eq!(CookieKey::of_plan(&v6[0]), CookieKey::new("v", "::1", "/"));
+        let mut all = host_only;
+        all.extend(domain);
+        all.extend(v6);
+        let jar = MockJar::default();
+        let mut report = RestoreReport::default();
+        apply_cookies(&jar, &all, &mut report).await;
+        assert_eq!(report.cookies_applied, 3);
+        assert_eq!(report.cookies_dropped_after_accept, 0);
+    }
+
+    #[test]
+    fn cookie_keys_never_print_names_or_hosts() {
+        let key = CookieKey::new("session-SECRET", "secret.example.com", "/");
+        let text = format!("{key:?}");
+        assert!(!text.contains("SECRET") && !text.contains("secret"));
     }
 }

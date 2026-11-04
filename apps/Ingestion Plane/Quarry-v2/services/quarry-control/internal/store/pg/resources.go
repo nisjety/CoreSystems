@@ -130,9 +130,12 @@ func (s *jobsStore) Create(j store.Job) error {
 }
 
 // FindByIdempotencyKey returns the existing job for an Idempotency-Key
-// scoped to orgID, if any. Uses the partial unique index for an O(log n)
-// lookup; the org_id predicate means a key collision with another
-// tenant's job is reported as a miss, never returned across tenants.
+// scoped to orgID, if any. Uses the partial unique index on
+// (org_id, idempotency_key) for an O(log n) lookup (migration 028, which
+// replaced 007's global index); the org_id predicate means a key collision
+// with another tenant's job is reported as a miss, never returned across
+// tenants, and since 028 the other tenant's key no longer blocks the insert
+// either: the same key is unique per org, not across orgs.
 func (s *jobsStore) FindByIdempotencyKey(orgID, key string) (store.Job, bool) {
 	if key == "" {
 		return store.Job{}, false
@@ -826,7 +829,7 @@ type schedulesStore struct{ pool *pgxpool.Pool }
 // reads it back in the same order (WS15.S1, migration 017).
 const scheduleCols = `id, org_id, name, config, cron, target_kind, target_ref, timezone, overlap_policy,
 	catchup_window_s, pause_on_failure, jitter_s, enabled, created_at, updated_at, created_by, zdr,
-	last_run_at, next_run_at, skipped_overlap_count`
+	last_run_at, next_run_at, skipped_overlap_count, tag`
 
 // rowScanner is the part of pgx.Row and pgx.Rows that scanSchedule needs.
 type rowScanner interface {
@@ -841,7 +844,7 @@ func scanSchedule(row rowScanner) (store.Schedule, error) {
 	if err := row.Scan(&v.ID, &v.OrgID, &v.Name, &config, &v.Cron, &v.TargetKind, &v.TargetRef,
 		&v.Timezone, &v.OverlapPolicy, &v.CatchupWindowS, &v.PauseOnFailure, &v.JitterS, &v.Enabled,
 		&v.CreatedAt, &v.UpdatedAt, &v.CreatedBy, &v.Zdr,
-		&v.LastRunAt, &v.NextRunAt, &v.SkippedOverlapCount); err != nil {
+		&v.LastRunAt, &v.NextRunAt, &v.SkippedOverlapCount, &v.Tag); err != nil {
 		return store.Schedule{}, err
 	}
 	if len(config) > 0 {
@@ -853,6 +856,11 @@ func scanSchedule(row rowScanner) (store.Schedule, error) {
 }
 
 func (s *schedulesStore) Create(v store.Schedule) error {
+	tag, err := store.NormalizeTag(v.Tag)
+	if err != nil {
+		return err
+	}
+	v.Tag = tag
 	v.ApplyDefaults(time.Now().Unix())
 	config, err := json.Marshal(v.Config)
 	if err != nil {
@@ -860,11 +868,11 @@ func (s *schedulesStore) Create(v store.Schedule) error {
 	}
 	_, err = s.pool.Exec(context.Background(),
 		`INSERT INTO schedules(id, org_id, name, config, cron, target_kind, target_ref, timezone, overlap_policy,
-		   catchup_window_s, pause_on_failure, jitter_s, enabled, created_at, updated_at, created_by, zdr)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)`,
+		   catchup_window_s, pause_on_failure, jitter_s, enabled, created_at, updated_at, created_by, zdr, tag)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)`,
 		string(v.ID), v.OrgID, v.Name, string(config), v.Cron, v.TargetKind, v.TargetRef, v.Timezone,
 		v.OverlapPolicy, v.CatchupWindowS, v.PauseOnFailure, v.JitterS, v.Enabled, v.CreatedAt,
-		v.UpdatedAt, v.CreatedBy, v.Zdr)
+		v.UpdatedAt, v.CreatedBy, v.Zdr, v.Tag)
 	return mapPgErr(err)
 }
 
@@ -891,21 +899,33 @@ func (s *schedulesStore) GetByOrg(id quarrycontracts.ID, orgID string) (store.Sc
 // List is unscoped (the legacy GET /v1/schedules without org_id, and the
 // orchestrator's reconcile read).
 func (s *schedulesStore) List(limit int, cur string) ([]store.Schedule, string) {
-	return s.page(false, "", limit, cur)
+	return s.page(false, "", nil, limit, cur)
 }
 
 func (s *schedulesStore) ListByOrg(orgID string, limit int, cur string) ([]store.Schedule, string) {
-	return s.page(true, orgID, limit, cur)
+	return s.page(true, orgID, nil, limit, cur)
+}
+
+// ListByOrgTag is ListByOrg restricted to the schedules of orgID whose tag is
+// tag. The tag is normalised first (store.NormalizeTag), so the filter and the
+// stored value agree. An empty orgID, or a tag that does not normalise, matches
+// nothing.
+func (s *schedulesStore) ListByOrgTag(orgID string, tag string, limit int, cur string) ([]store.Schedule, string) {
+	norm, err := store.NormalizeTag(tag)
+	if err != nil || orgID == "" {
+		return nil, ""
+	}
+	return s.page(true, orgID, &norm, limit, cur)
 }
 
 func (s *schedulesStore) ListDesired(limit int, cur string) ([]store.Schedule, string) {
-	return s.page(false, "", limit, cur)
+	return s.page(false, "", nil, limit, cur)
 }
 
 // page is the keyset page over (created_at, id), newest first. When scoped,
 // the query carries org_id in the WHERE clause, so no row of another org can
-// be returned.
-func (s *schedulesStore) page(scoped bool, orgID string, limit int, cur string) ([]store.Schedule, string) {
+// be returned. A non-nil tag adds tag = $n to the same clause.
+func (s *schedulesStore) page(scoped bool, orgID string, tag *string, limit int, cur string) ([]store.Schedule, string) {
 	limit = pageLimit(limit, defaultMaxPage)
 	c, _ := decodeCursor(cur)
 	var (
@@ -915,6 +935,10 @@ func (s *schedulesStore) page(scoped bool, orgID string, limit int, cur string) 
 	if scoped {
 		args = append(args, orgID)
 		where = append(where, fmt.Sprintf("org_id = $%d", len(args)))
+	}
+	if tag != nil {
+		args = append(args, *tag)
+		where = append(where, fmt.Sprintf("tag = $%d", len(args)))
 	}
 	if c != nil {
 		args = append(args, c.CreatedAt, c.ID)
@@ -998,6 +1022,29 @@ func (s *schedulesStore) UpdateEnabledByOrg(id quarrycontracts.ID, orgID string,
 	return nil
 }
 
+// UpdateTagByOrg sets the tag of a schedule the org owns ("" clears it). A row of
+// another org answers ErrNotFound, as a missing one does. updated_at is not moved:
+// it stays the create or enable/disable stamp (Schedule.UpdatedAt).
+func (s *schedulesStore) UpdateTagByOrg(id quarrycontracts.ID, orgID string, tag string) error {
+	norm, err := store.NormalizeTag(tag)
+	if err != nil {
+		return err
+	}
+	if orgID == "" {
+		return store.ErrNotFound
+	}
+	ct, err := s.pool.Exec(context.Background(),
+		`UPDATE schedules SET tag=$3 WHERE id=$1 AND org_id=$2`,
+		string(id), orgID, norm)
+	if err != nil {
+		return mapPgErr(err)
+	}
+	if ct.RowsAffected() == 0 {
+		return store.ErrNotFound
+	}
+	return nil
+}
+
 func (s *schedulesStore) UpdateRuntime(id quarrycontracts.ID, lastRunAt, nextRunAt *int64, skippedOverlap int64) error {
 	ct, err := s.pool.Exec(context.Background(),
 		`UPDATE schedules SET last_run_at=$2, next_run_at=$3, skipped_overlap_count=$4 WHERE id=$1`,
@@ -1020,7 +1067,18 @@ func (s *schedulesStore) UpdateRuntime(id quarrycontracts.ID, lastRunAt, nextRun
 // convert to/from the store's unix-millis convention at the SQL boundary.
 type sourcesStore struct{ pool *pgxpool.Pool }
 
+// sourceCols is the one column list every source SELECT uses. The Scan calls read
+// it back in this order; tag is the last column (E3.5-6, migration 027).
+const sourceCols = `source_id, org_id, name, url, kind, status, config,
+	(extract(epoch from created_at) * 1000)::bigint,
+	(extract(epoch from updated_at) * 1000)::bigint, tag`
+
 func (s *sourcesStore) Create(v store.Source) error {
+	tag, err := store.NormalizeTag(v.Tag)
+	if err != nil {
+		return err
+	}
+	v.Tag = tag
 	config := v.Config
 	if config == nil {
 		config = map[string]any{}
@@ -1034,9 +1092,9 @@ func (s *sourcesStore) Create(v store.Source) error {
 		status = "active"
 	}
 	_, err = s.pool.Exec(context.Background(),
-		`INSERT INTO quarry_sources(source_id, org_id, name, url, kind, status, config, created_at, updated_at)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7, to_timestamp($8::double precision / 1000.0), to_timestamp($9::double precision / 1000.0))`,
-		string(v.ID), v.OrgID, v.Name, v.URL, v.Kind, status, configJSON, v.CreatedAt, v.UpdatedAt)
+		`INSERT INTO quarry_sources(source_id, org_id, name, url, kind, status, config, created_at, updated_at, tag)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7, to_timestamp($8::double precision / 1000.0), to_timestamp($9::double precision / 1000.0), $10)`,
+		string(v.ID), v.OrgID, v.Name, v.URL, v.Kind, status, configJSON, v.CreatedAt, v.UpdatedAt, v.Tag)
 	return mapPgErr(err)
 }
 
@@ -1047,8 +1105,14 @@ func (s *sourcesStore) Create(v store.Source) error {
 // never duplicate. The `quarry_sources_org_url_uniq` partial unique index
 // (migration 011) backs the ON CONFLICT target; `xmax = 0` is the standard
 // Postgres trick for telling an upsert's INSERT branch apart from its
-// UPDATE branch within a single round trip.
+// UPDATE branch within a single round trip. A repeat registration keeps the tag
+// the row already has: tag is written on insert only.
 func (s *sourcesStore) UpsertByOrgAndURL(v store.Source) (store.Source, bool, error) {
+	tag, err := store.NormalizeTag(v.Tag)
+	if err != nil {
+		return store.Source{}, false, err
+	}
+	v.Tag = tag
 	config := v.Config
 	if config == nil {
 		config = map[string]any{}
@@ -1067,17 +1131,17 @@ func (s *sourcesStore) UpsertByOrgAndURL(v store.Source) (store.Source, bool, er
 		inserted  bool
 	)
 	err = s.pool.QueryRow(context.Background(),
-		`INSERT INTO quarry_sources(source_id, org_id, name, url, kind, status, config, created_at, updated_at)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7, to_timestamp($8::double precision / 1000.0), to_timestamp($9::double precision / 1000.0))
+		`INSERT INTO quarry_sources(source_id, org_id, name, url, kind, status, config, created_at, updated_at, tag)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7, to_timestamp($8::double precision / 1000.0), to_timestamp($9::double precision / 1000.0), $10)
 		 ON CONFLICT (org_id, url) WHERE deleted_at IS NULL
 		 DO UPDATE SET updated_at = to_timestamp($9::double precision / 1000.0)
 		 RETURNING source_id, org_id, name, url, kind, status, config,
 		           (extract(epoch from created_at) * 1000)::bigint,
 		           (extract(epoch from updated_at) * 1000)::bigint,
-		           (xmax = 0)`,
-		string(v.ID), v.OrgID, v.Name, v.URL, v.Kind, status, configJSON, v.CreatedAt, v.UpdatedAt,
+		           tag, (xmax = 0)`,
+		string(v.ID), v.OrgID, v.Name, v.URL, v.Kind, status, configJSON, v.CreatedAt, v.UpdatedAt, v.Tag,
 	).Scan(&out.ID, &out.OrgID, &out.Name, &out.URL, &out.Kind, &out.Status, &outConfig,
-		&out.CreatedAt, &out.UpdatedAt, &inserted)
+		&out.CreatedAt, &out.UpdatedAt, &out.Tag, &inserted)
 	if err != nil {
 		return store.Source{}, false, mapPgErr(err)
 	}
@@ -1091,13 +1155,11 @@ func (s *sourcesStore) GetByOrg(orgID string, id quarrycontracts.ID) (store.Sour
 		configJSON []byte
 	)
 	err := s.pool.QueryRow(context.Background(),
-		`SELECT source_id, org_id, name, url, kind, status, config,
-		        (extract(epoch from created_at) * 1000)::bigint,
-		        (extract(epoch from updated_at) * 1000)::bigint
+		`SELECT `+sourceCols+`
 		   FROM quarry_sources
 		  WHERE source_id = $1 AND org_id = $2 AND deleted_at IS NULL`,
 		string(id), orgID,
-	).Scan(&v.ID, &v.OrgID, &v.Name, &v.URL, &v.Kind, &v.Status, &configJSON, &v.CreatedAt, &v.UpdatedAt)
+	).Scan(&v.ID, &v.OrgID, &v.Name, &v.URL, &v.Kind, &v.Status, &configJSON, &v.CreatedAt, &v.UpdatedAt, &v.Tag)
 	if err != nil {
 		return store.Source{}, false
 	}
@@ -1106,17 +1168,36 @@ func (s *sourcesStore) GetByOrg(orgID string, id quarrycontracts.ID) (store.Sour
 }
 
 func (s *sourcesStore) ListByOrg(orgID string, limit int, cur string) ([]store.Source, string) {
+	return s.listByOrg(orgID, nil, limit, cur)
+}
+
+// ListByOrgTag is ListByOrg restricted to the org's live sources whose tag is
+// tag, after store.NormalizeTag. An empty orgID, or a tag that does not normalise,
+// matches nothing.
+func (s *sourcesStore) ListByOrgTag(orgID, tag string, limit int, cur string) ([]store.Source, string) {
+	norm, err := store.NormalizeTag(tag)
+	if err != nil || orgID == "" {
+		return nil, ""
+	}
+	return s.listByOrg(orgID, &norm, limit, cur)
+}
+
+// listByOrg is the keyset page over (created_at, source_id), newest first, for one
+// org. A non-nil tag adds tag = $n to the same org-scoped WHERE clause.
+func (s *sourcesStore) listByOrg(orgID string, tag *string, limit int, cur string) ([]store.Source, string) {
 	limit = pageLimit(limit, defaultMaxPage)
 	c, _ := decodeCursor(cur)
-	q := `SELECT source_id, org_id, name, url, kind, status, config,
-	             (extract(epoch from created_at) * 1000)::bigint,
-	             (extract(epoch from updated_at) * 1000)::bigint
+	q := `SELECT ` + sourceCols + `
 	        FROM quarry_sources
 	       WHERE org_id = $1 AND deleted_at IS NULL`
 	args := []any{orgID}
+	if tag != nil {
+		args = append(args, *tag)
+		q += fmt.Sprintf(` AND tag = $%d`, len(args))
+	}
 	if c != nil {
-		q += ` AND (extract(epoch from created_at) * 1000, source_id) < ($2, $3)`
 		args = append(args, c.CreatedAt, c.ID)
+		q += fmt.Sprintf(` AND (extract(epoch from created_at) * 1000, source_id) < ($%d, $%d)`, len(args)-1, len(args))
 	}
 	q += fmt.Sprintf(` ORDER BY created_at DESC, source_id DESC LIMIT %d`, limit+1)
 	rows, err := s.pool.Query(context.Background(), q, args...)
@@ -1130,7 +1211,7 @@ func (s *sourcesStore) ListByOrg(orgID string, limit int, cur string) ([]store.S
 			v          store.Source
 			configJSON []byte
 		)
-		if err := rows.Scan(&v.ID, &v.OrgID, &v.Name, &v.URL, &v.Kind, &v.Status, &configJSON, &v.CreatedAt, &v.UpdatedAt); err != nil {
+		if err := rows.Scan(&v.ID, &v.OrgID, &v.Name, &v.URL, &v.Kind, &v.Status, &configJSON, &v.CreatedAt, &v.UpdatedAt, &v.Tag); err != nil {
 			return nil, ""
 		}
 		_ = json.Unmarshal(configJSON, &v.Config)
@@ -1151,6 +1232,30 @@ func (s *sourcesStore) SoftDeleteByOrg(orgID string, id quarrycontracts.ID) erro
 		    SET deleted_at = NOW(), status = 'deleted', updated_at = NOW()
 		  WHERE source_id = $1 AND org_id = $2 AND deleted_at IS NULL`,
 		string(id), orgID)
+	if err != nil {
+		return mapPgErr(err)
+	}
+	if ct.RowsAffected() == 0 {
+		return store.ErrNotFound
+	}
+	return nil
+}
+
+// UpdateTagByOrg sets the tag of a live source the org owns ("" clears it) and
+// bumps updated_at. A cross-tenant or soft-deleted id answers ErrNotFound.
+func (s *sourcesStore) UpdateTagByOrg(orgID string, id quarrycontracts.ID, tag string) error {
+	norm, err := store.NormalizeTag(tag)
+	if err != nil {
+		return err
+	}
+	if orgID == "" {
+		return store.ErrNotFound
+	}
+	ct, err := s.pool.Exec(context.Background(),
+		`UPDATE quarry_sources
+		    SET tag = $3, updated_at = NOW()
+		  WHERE source_id = $1 AND org_id = $2 AND deleted_at IS NULL`,
+		string(id), orgID, norm)
 	if err != nil {
 		return mapPgErr(err)
 	}
@@ -1441,4 +1546,218 @@ func (l *eventLog) forField(col, val string, afterSeq uint64, limit int) []quarr
 		out = append(out, evt)
 	}
 	return out
+}
+
+// ---- schedule requests (WS15.S3, migration 026) ----------------------------
+
+// scheduleRequestsStore is the pull-model request table. It needs no state of
+// its own beyond the pool, so the DB hands out a fresh value per call and the
+// postgresDB struct does not change.
+type scheduleRequestsStore struct{ pool *pgxpool.Pool }
+
+// ScheduleRequests implements store.ScheduleRequestsProvider.
+func (d *postgresDB) ScheduleRequests() store.ScheduleRequestsStore {
+	return &scheduleRequestsStore{pool: d.pool}
+}
+
+const scheduleRequestCols = `id, schedule_id, org_id, action, params, status, claimed_by, lease_until,
+	attempts, result, error, requested_by, COALESCE(idempotency_key, ''), created_at, finished_at`
+
+func scanScheduleRequest(row interface{ Scan(dest ...any) error }) (store.ScheduleRequest, error) {
+	var v store.ScheduleRequest
+	var id, scheduleID string
+	var params, result []byte
+	if err := row.Scan(&id, &scheduleID, &v.OrgID, &v.Action, &params, &v.Status, &v.ClaimedBy,
+		&v.LeaseUntil, &v.Attempts, &result, &v.Error, &v.RequestedBy, &v.IdempotencyKey,
+		&v.CreatedAt, &v.FinishedAt); err != nil {
+		return store.ScheduleRequest{}, mapPgErr(err)
+	}
+	v.ID = quarrycontracts.ID(id)
+	v.ScheduleID = quarrycontracts.ID(scheduleID)
+	if len(params) > 0 {
+		if err := json.Unmarshal(params, &v.Params); err != nil {
+			return store.ScheduleRequest{}, err
+		}
+		if len(v.Params) == 0 {
+			v.Params = nil
+		}
+	}
+	if len(result) > 0 {
+		if err := json.Unmarshal(result, &v.Result); err != nil {
+			return store.ScheduleRequest{}, err
+		}
+	}
+	return v, nil
+}
+
+// Create inserts a pending row. The partial unique index on open rows of one
+// schedule and the (org, idempotency key) index both surface as ErrConflict.
+func (s *scheduleRequestsStore) Create(v store.ScheduleRequest) error {
+	params := v.Params
+	if params == nil {
+		params = map[string]any{}
+	}
+	paramsJSON, err := json.Marshal(params)
+	if err != nil {
+		return err
+	}
+	status := v.Status
+	if status == "" {
+		status = store.ScheduleRequestPending
+	}
+	var idem any
+	if v.IdempotencyKey != "" {
+		idem = v.IdempotencyKey
+	}
+	_, err = s.pool.Exec(context.Background(),
+		`INSERT INTO schedule_requests(id, schedule_id, org_id, action, params, status, requested_by,
+		   idempotency_key, created_at)
+		 VALUES ($1,$2,$3,$4,$5::jsonb,$6,$7,$8,$9)`,
+		string(v.ID), string(v.ScheduleID), v.OrgID, v.Action, string(paramsJSON), status,
+		v.RequestedBy, idem, v.CreatedAt)
+	return mapPgErr(err)
+}
+
+func (s *scheduleRequestsStore) GetByOrg(id quarrycontracts.ID, orgID string) (store.ScheduleRequest, bool) {
+	if orgID == "" {
+		return store.ScheduleRequest{}, false
+	}
+	v, err := scanScheduleRequest(s.pool.QueryRow(context.Background(),
+		`SELECT `+scheduleRequestCols+` FROM schedule_requests WHERE id=$1 AND org_id=$2`,
+		string(id), orgID))
+	if err != nil {
+		return store.ScheduleRequest{}, false
+	}
+	return v, true
+}
+
+func (s *scheduleRequestsStore) HasPending(scheduleID quarrycontracts.ID, action string) bool {
+	var exists bool
+	err := s.pool.QueryRow(context.Background(),
+		`SELECT EXISTS(SELECT 1 FROM schedule_requests
+		   WHERE schedule_id=$1 AND status IN ('pending','claimed') AND ($2 = '' OR action = $2))`,
+		string(scheduleID), action).Scan(&exists)
+	if err != nil {
+		// Fail closed: an unreadable table must not let a second request in. The
+		// unique index refuses it anyway; this keeps the friendly 409.
+		return true
+	}
+	return exists
+}
+
+// Claim hands each claimable row to exactly one worker: SKIP LOCKED makes two
+// concurrent claims take disjoint rows, and a claimed row whose lease ran out
+// (its worker died) is claimable again.
+func (s *scheduleRequestsStore) Claim(worker string, limit int, lease time.Duration, now time.Time) ([]store.ScheduleRequest, error) {
+	if worker == "" {
+		return nil, errors.New("claim: worker required")
+	}
+	if limit <= 0 {
+		limit = 1
+	}
+	nowMs := now.UnixMilli()
+	rows, err := s.pool.Query(context.Background(),
+		`UPDATE schedule_requests
+		    SET status='claimed', claimed_by=$1, lease_until=$2, attempts=attempts+1
+		  WHERE id IN (
+		    SELECT id FROM schedule_requests
+		     WHERE status='pending' OR (status='claimed' AND lease_until < $3)
+		     ORDER BY created_at ASC, id ASC
+		     LIMIT $4
+		     FOR UPDATE SKIP LOCKED)
+		 RETURNING `+scheduleRequestCols,
+		worker, now.Add(lease).UnixMilli(), nowMs, limit)
+	if err != nil {
+		return nil, mapPgErr(err)
+	}
+	defer rows.Close()
+	var out []store.ScheduleRequest
+	for rows.Next() {
+		v, err := scanScheduleRequest(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, v)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	// RETURNING order is not the subquery order.
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].CreatedAt != out[j].CreatedAt {
+			return out[i].CreatedAt < out[j].CreatedAt
+		}
+		return out[i].ID < out[j].ID
+	})
+	return out, nil
+}
+
+// heldErr tells a missing row (ErrNotFound) from one the worker no longer holds
+// (ErrConflict) after an update matched nothing.
+func (s *scheduleRequestsStore) heldErr(id quarrycontracts.ID) error {
+	var exists bool
+	if err := s.pool.QueryRow(context.Background(),
+		`SELECT EXISTS(SELECT 1 FROM schedule_requests WHERE id=$1)`, string(id)).Scan(&exists); err != nil {
+		return mapPgErr(err)
+	}
+	if !exists {
+		return store.ErrNotFound
+	}
+	return store.ErrConflict
+}
+
+func (s *scheduleRequestsStore) Complete(id quarrycontracts.ID, worker string, result map[string]any, now time.Time) error {
+	var resultJSON any
+	if result != nil {
+		b, err := json.Marshal(result)
+		if err != nil {
+			return err
+		}
+		resultJSON = string(b)
+	}
+	ct, err := s.pool.Exec(context.Background(),
+		`UPDATE schedule_requests
+		    SET status='done', result=$3::jsonb, error='', lease_until=0, finished_at=$4
+		  WHERE id=$1 AND status='claimed' AND claimed_by=$2`,
+		string(id), worker, resultJSON, now.UnixMilli())
+	if err != nil {
+		return mapPgErr(err)
+	}
+	if ct.RowsAffected() == 0 {
+		return s.heldErr(id)
+	}
+	return nil
+}
+
+func (s *scheduleRequestsStore) Fail(id quarrycontracts.ID, worker, status, reason string, now time.Time) error {
+	if status != store.ScheduleRequestFailed && status != store.ScheduleRequestRejected {
+		return errors.New("fail: status must be failed or rejected")
+	}
+	ct, err := s.pool.Exec(context.Background(),
+		`UPDATE schedule_requests
+		    SET status=$3, error=$4, lease_until=0, finished_at=$5
+		  WHERE id=$1 AND status='claimed' AND claimed_by=$2`,
+		string(id), worker, status, store.ClipScheduleRequestReason(reason), now.UnixMilli())
+	if err != nil {
+		return mapPgErr(err)
+	}
+	if ct.RowsAffected() == 0 {
+		return s.heldErr(id)
+	}
+	return nil
+}
+
+func (s *scheduleRequestsStore) Release(id quarrycontracts.ID, worker, reason string) error {
+	ct, err := s.pool.Exec(context.Background(),
+		`UPDATE schedule_requests
+		    SET status='pending', claimed_by='', lease_until=0, error=$3
+		  WHERE id=$1 AND status='claimed' AND claimed_by=$2`,
+		string(id), worker, store.ClipScheduleRequestReason(reason))
+	if err != nil {
+		return mapPgErr(err)
+	}
+	if ct.RowsAffected() == 0 {
+		return s.heldErr(id)
+	}
+	return nil
 }

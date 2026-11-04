@@ -425,9 +425,11 @@ async fn import_over_cap_is_413() {
             .send()
     };
 
-    // Past the 1 MB surface cap, under the 4 MiB import cap: served.
+    // Past the 1 MB surface cap, under the 4 MiB import cap: the cap layer lets it through. The
+    // dev-bypass stub has no import scope (D2-055), so the handler's own scope check answers 403,
+    // which is how a body that passed the cap shows here (a refused body would be 413).
     let inside = post(1_500_000).await.unwrap();
-    assert!(inside.status().is_success(), "{}", inside.status());
+    assert_eq!(inside.status().as_u16(), 403, "passed the cap, refused for the scope");
 
     // Past 4 MiB: 413.
     let over = post(5 * 1024 * 1024).await.unwrap();

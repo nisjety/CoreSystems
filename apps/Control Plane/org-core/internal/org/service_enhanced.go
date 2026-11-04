@@ -685,6 +685,85 @@ func (s *Service) FlushInteractiveRetentionOutbox(ctx context.Context, limit int
 	return published, publishErrors
 }
 
+// GetWebPolicyPosture returns the organization's web policy: the stored document,
+// the document folded with the plan's computed entitlements, the revision and rev
+// digest, and the entitlements themselves (WS7.H).
+//
+// It reads the database directly, uncached, like GetRetentionPosture: the answer
+// bounds what an agent may do, and the issuer keeps its own short cache. A missing
+// or soft-deleted organization is ErrNotFound. An organization that never wrote a
+// policy is revision 0, the empty document and rev "0"; its effective document is
+// still folded with its entitlements.
+func (s *Service) GetWebPolicyPosture(ctx context.Context, orgID string) (*WebPolicyView, error) {
+	orgID = strings.TrimSpace(orgID)
+	if orgID == "" {
+		return nil, fmt.Errorf("organization id is required")
+	}
+	row, err := s.repo.GetWebPolicy(ctx, orgID)
+	if err != nil {
+		return nil, err
+	}
+	entitlements := WebEntitlementsForPlan(row.Plan)
+	view := &WebPolicyView{
+		Exists:       row.Exists,
+		Policy:       row.Policy.Normalize(),
+		Effective:    row.Policy.Effective(entitlements),
+		Revision:     row.Revision,
+		Rev:          webPolicyAbsentRev,
+		Entitlements: entitlements.Map(),
+	}
+	if row.Exists {
+		view.Rev = row.RevDigest
+		updatedBy := row.UpdatedBy
+		updatedAt := row.UpdatedAt.UTC().Format(time.RFC3339)
+		view.UpdatedBy = &updatedBy
+		view.UpdatedAt = &updatedAt
+	}
+	return view, nil
+}
+
+// SetWebPolicy replaces the organization's web policy (WS7.H). The document is
+// normalised and validated against the vendored catalogue first (a refusal is a
+// *WebPolicyError); the write then runs in one transaction that checks the If-Match
+// revision (*RevisionConflictError), the plan's entitlements (ErrNotEntitled),
+// appends the history row and queues the audit event. Once committed it flushes the
+// audit outbox once as best effort; a failed publish stays pending for a later
+// flush and never fails the write.
+func (s *Service) SetWebPolicy(ctx context.Context, orgID, changedBy, actorRole string, doc WebPolicyDoc, ifMatch int64) (*WebPolicyPutResult, error) {
+	orgID = strings.TrimSpace(orgID)
+	if orgID == "" {
+		return nil, fmt.Errorf("organization id is required")
+	}
+	if ifMatch < 0 {
+		return nil, &WebPolicyError{Kind: ErrRevisionConflict, Message: "If-Match must be a revision of 0 or more"}
+	}
+	doc = doc.Normalize()
+	if err := doc.Validate(DefaultWebPolicyCatalogue()); err != nil {
+		return nil, err
+	}
+	result, err := s.repo.PutWebPolicy(ctx, orgID, doc, ifMatch, changedBy, actorRole)
+	if err != nil {
+		return nil, err
+	}
+	if s.auditPublisher != nil {
+		if _, err := s.FlushWebPolicyAuditOutbox(ctx, 100); err != nil {
+			log.Printf("org-core: web policy %s: inline audit flush failed, left pending: %v", orgID, err)
+		}
+	}
+	return result, nil
+}
+
+// ListWebPolicyHistory returns the append-only history, newest first. cursor is the
+// revision to continue below (0 starts at the newest); the second result is the
+// cursor for the next page, or 0 at the end.
+func (s *Service) ListWebPolicyHistory(ctx context.Context, orgID string, limit int, cursor int64) ([]WebPolicyHistoryEntry, int64, error) {
+	orgID = strings.TrimSpace(orgID)
+	if orgID == "" {
+		return nil, 0, fmt.Errorf("organization id is required")
+	}
+	return s.repo.ListWebPolicyHistory(ctx, orgID, limit, cursor)
+}
+
 func (s *Service) SetSupportAIMode(ctx context.Context, orgID, mode, changedBy string) (*Organization, error) {
 	if strings.TrimSpace(orgID) == "" {
 		return nil, fmt.Errorf("organization id is required")

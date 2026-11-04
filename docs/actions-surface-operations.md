@@ -136,6 +136,47 @@ Param notation: `name*` = required; `(d=X, max=Y)` = default/clamp applied serve
 | `calendar.events` / `google.calendar.events` | GET `/calendar/v3/calendars/primary/events?maxResults=` | `maxResults` (d=10, max=100) | ignored | `calendar.read` | yes | no | 167 |
 | `drive.files` / `google.drive.files` | GET `/drive/v3/files?pageSize=&fields=files(id,name,mimeType,webViewLink,modifiedTime)` | `maxResults` (d=10, max=100) | ignored | `drive.read` | no | no | 170 |
 
+### executor-only: `mail.otp.read` (microsoft and google mail connections) — E3.1-g, ADR-2a
+
+Added 2026-11-03 (W3 E3.1-g). Code: `internal/actions/mail_otp.go`, dispatched at the top of
+`Execute` in `service.go` before the provider switches. **Ships dark**: flag
+`INTEGRATION_OTP_READ`, default off (only an explicit true value turns it on).
+
+| Operation (aliases) | Method + Endpoint | Params (all optional) | Body semantics | Capability | Sensitive | Approval |
+|---|---|---|---|---|---|---|
+| `mail.otp.read` / `microsoft.mail.otp.read` / `google.mail.otp.read` | microsoft: GET `/me/mailFolders/inbox/messages?$top=5&$orderby=receivedDateTime desc&$filter=receivedDateTime ge <since>[ and from/emailAddress/address eq '<from>']&$select=receivedDateTime,subject,body` with `Prefer: outlook.body-content-type="text"`. google: GET `/gmail/v1/users/me/messages?maxResults=5&q=after:<epoch> -in:sent -in:drafts[ from:<from>]`, then GET `/gmail/v1/users/me/messages/{id}?format=full` per listed message (at most 5) | `windowSeconds` (d=600, min 30, max 1800), `from` (one email address), `codeLength` (4-10), `approvalId` (audit only). Any other param is refused | ignored | not mapped yet (see below) | — | no (the per-use approval is Quarry's single-use `fill_otp` grant) |
+
+Rules (callers must not rely on anything else):
+
+- **Returns only the code**: `{"found": true, "code": "123456"}` or `{"found": false}`. Never a
+  subject, sender, message id, snippet or body. Extraction prefers a 4-10 digit run (or
+  `123 456` / `123-456`) shortly after an OTP keyword; otherwise the only distinct six-digit
+  run; anything more ambiguous is `found: false`.
+- **Executor-only caller**: `ExecuteInput.Caller` must be a verified service principal
+  (auth-core plane token, audience `ingestion`, R-13 PR 1 registry row `quarry-edge`) holding
+  scope `integration:otp:read`, minted for the connection's own organization. The shared IC
+  internal key, a user session, a missing caller or a token without that scope gets
+  `ErrOTPCallerNotAllowed`. Quarry is **not** in `INTEGRATION_TOKEN_LEASE_CONSUMERS` (that
+  list hands out raw provider tokens).
+- **Narrow scope stays narrow**: a caller holding `integration:otp:read` without
+  `integration:read` / `integration:write` is refused on every other operation
+  (`ErrOTPScopeOperationRefused`), independent of the HTTP layer.
+- **Audited, fail closed**: every attempt past the flag is published through the events
+  publisher as `integration.mail.otp.read` (data: operation, outcome
+  `found`/`not_found`/`refused`/`provider_error`, caller service id and type, window,
+  approvalId, messages scanned, whether a sender filter was used). Never the code or mail
+  content. No publisher wired (`Service.SetOTPAuditPublisher`) refuses the read before the
+  mailbox is touched; a failed publish withholds the code (`ErrOTPAuditFailed`).
+
+**Not wired in the HTTP layer yet** (follow-up, outside E3.1-g's files): `executeConnectionAction`
+does not yet fill `ExecuteInput.Caller` or call `SetOTPAuditPublisher(cfg.Events)`;
+`requiredCapabilityForOperation` has no mapping (so the route answers
+`errActionOperationUnsupported` today; the intended mapping is `mail.read` for microsoft and
+`gmail.read` for google, sensitive); and `internal/auth` refuses a service principal holding
+only `integration:otp:read` (`integration_scope_required`). That admission must become an
+explicit exception for `mail.otp.read` only, never a widening of the middleware. Until all
+of these land, the operation is inert.
+
 ### github (15 ops) — `GitHubAPIBaseURL`, Bearer token, headers `Accept: application/vnd.github+json`, `X-GitHub-Api-Version: 2022-11-28`
 
 | Operation (aliases) | Method + Endpoint | Required params | Body semantics | Capability | Sensitive | Approval | service.go |

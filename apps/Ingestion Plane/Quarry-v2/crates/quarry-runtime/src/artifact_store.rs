@@ -3,6 +3,7 @@
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::warn;
 
@@ -10,6 +11,8 @@ use quarry_core::artifact as artifact_meta;
 use quarry_core::ids::kinds::{ArtifactKind, RunKind};
 use quarry_core::ids::Id;
 use quarry_core::{error::ErrorCode, error::QuarryError, QuarryResult};
+
+use crate::pipeline::{PiiRedactionSettings, PII_REDACTION_FAILED};
 
 /// Map kind string -> enum used to compute object_key.
 fn kind_from_str(kind: &str) -> QuarryResult<artifact_meta::ArtifactKind> {
@@ -159,6 +162,242 @@ pub trait ArtifactStore: Send + Sync {
     }
 }
 
+// ---------------------------------------------------------------------------
+// E3.6-4b: the sink-side PII gate.
+//
+// The pipeline's redaction stage (E3.6-4a, `pipeline.rs`) redacts every text
+// form of a page before anything is kept. This gate is the second line: a sink
+// that is about to persist content for an org whose content must be redacted
+// checks it itself with the same scanner (`quarry_transform::pii`) and refuses
+// anything that is not clean. It never redacts or repairs: content that is not
+// already clean is refused with the typed `pii_redaction_failed` failure, so a
+// caller that skipped the stage (or a path that has no stage, such as the
+// search and answer write-backs) cannot persist unredacted text.
+//
+// Which orgs: the gate reads the same settings as the stage
+// (`QUARRY_EDGE__PII_REDACTION`, default off, and
+// `QUARRY_EDGE__PII_REDACTION_DEFAULT_ORGS`). With the flag off it does
+// nothing. A sink cannot see a per-request `redact_pii`; a caller that runs a
+// redacting request wraps its store in [`PiiEnforcingStore`], which checks
+// every write whatever the settings say.
+// ---------------------------------------------------------------------------
+
+/// E3.6-4b: the most text one sink check scans. The same cap as the pipeline
+/// stage, so a text the stage accepted is never refused for size alone.
+pub const SINK_PII_MAX_BYTES: usize = 16 * 1024 * 1024;
+
+/// E3.6-4b: why a sink refused a write. Each is a typed `details.cause`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SinkPiiRefusal {
+    /// The text is over [`SINK_PII_MAX_BYTES`], so it was not scanned.
+    TooLarge,
+    /// The scanner panicked.
+    ScannerPanicked,
+    /// The scanner found personal data: the content was not redacted.
+    ResidualPii,
+    /// A text kind whose bytes are not UTF-8, so they cannot be scanned.
+    NotText,
+    /// An image, PDF, trace or raw body: text redaction cannot reach it.
+    CaptureNotRedactable,
+}
+
+impl SinkPiiRefusal {
+    /// The wire name of the cause. The stage's causes use the same names.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::TooLarge => "too_large",
+            Self::ScannerPanicked => "scanner_panicked",
+            Self::ResidualPii => "residual_pii",
+            Self::NotText => "not_text",
+            Self::CaptureNotRedactable => "capture_not_redactable",
+        }
+    }
+}
+
+/// E3.6-4b: the typed failure a sink returns. The same `details.reason` as the
+/// pipeline stage, so a page whose write was refused fails as a
+/// `pii_redaction_failed` page. Not retryable, and nothing of the content in
+/// it: the sink, the field (an artifact kind or a document field) and the cause.
+pub fn sink_pii_error(refusal: SinkPiiRefusal, sink: &'static str, field: &str) -> QuarryError {
+    QuarryError::new(
+        ErrorCode::Forbidden,
+        "a store refused content that was not redacted for personal data, so nothing of it was kept",
+    )
+    .with_details(serde_json::json!({
+        "reason": PII_REDACTION_FAILED,
+        "cause": refusal.label(),
+        "sink": sink,
+        "field": field,
+    }))
+}
+
+/// E3.6-4b: `Ok` only when a scan of `text` finds nothing. A scanner panic is
+/// caught and refused, never passed through.
+pub fn check_text_redacted(text: &str) -> Result<(), SinkPiiRefusal> {
+    if text.len() > SINK_PII_MAX_BYTES {
+        return Err(SinkPiiRefusal::TooLarge);
+    }
+    let clean = std::panic::catch_unwind(|| quarry_transform::pii::scan(text).is_empty())
+        .map_err(|_| SinkPiiRefusal::ScannerPanicked)?;
+    if clean {
+        Ok(())
+    } else {
+        Err(SinkPiiRefusal::ResidualPii)
+    }
+}
+
+/// The artifact kinds that hold text (HTML, markdown or JSON) and can be
+/// scanned. Every other kind is an image, a PDF, a trace or raw bytes.
+fn is_text_artifact(kind: artifact_meta::ArtifactKind) -> bool {
+    use artifact_meta::ArtifactKind as K;
+    matches!(
+        kind,
+        K::Html
+            | K::Markdown
+            | K::Links
+            | K::Extract
+            | K::VisualChange
+            | K::VisualObservation
+            | K::EvidenceDelta
+            | K::Tiles
+            | K::RenderedPalette
+            | K::Meta
+            | K::ScrapeRecord
+            | K::ChangeDiff
+    )
+}
+
+/// E3.6-4b: whether an artifact body may be kept for an org whose content must
+/// be redacted. A text kind must be UTF-8 and scan clean. Any other kind, and an
+/// unknown kind, is refused: it cannot be scanned (fail closed).
+pub fn check_artifact_redacted(kind: &str, body: &[u8]) -> Result<(), SinkPiiRefusal> {
+    match kind_from_str(kind) {
+        Ok(k) if is_text_artifact(k) => {
+            let text = std::str::from_utf8(body).map_err(|_| SinkPiiRefusal::NotText)?;
+            check_text_redacted(text)
+        }
+        _ => Err(SinkPiiRefusal::CaptureNotRedactable),
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_SINK_PII: std::cell::RefCell<Option<PiiRedactionSettings>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// The settings the sinks read. A test installs its own for its thread
+/// ([`SinkPiiTestOverride`]) instead of touching the process environment.
+fn sink_pii_settings() -> PiiRedactionSettings {
+    #[cfg(test)]
+    if let Some(settings) = TEST_SINK_PII.with(|slot| slot.borrow().clone()) {
+        return settings;
+    }
+    PiiRedactionSettings::cached().clone()
+}
+
+/// Test-only: the sink settings for the current thread until dropped.
+#[cfg(test)]
+pub(crate) struct SinkPiiTestOverride;
+
+#[cfg(test)]
+impl SinkPiiTestOverride {
+    pub(crate) fn install(settings: PiiRedactionSettings) -> Self {
+        TEST_SINK_PII.with(|slot| *slot.borrow_mut() = Some(settings));
+        Self
+    }
+}
+
+#[cfg(test)]
+impl Drop for SinkPiiTestOverride {
+    fn drop(&mut self) {
+        TEST_SINK_PII.with(|slot| *slot.borrow_mut() = None);
+    }
+}
+
+/// E3.6-4b: whether content this org persists must already be redacted: the
+/// stage is on and the org's default covers it. Off by default (the flag).
+pub fn sink_redaction_required(org_id: &str) -> bool {
+    let org = org_id.trim();
+    sink_pii_settings().applies(false, if org.is_empty() { None } else { Some(org) })
+}
+
+/// The gate every backend's `put` runs before it writes anything.
+fn gate_artifact_put(org_id: &str, kind: &str, body: &[u8]) -> QuarryResult<()> {
+    if sink_redaction_required(org_id) {
+        check_artifact_redacted(kind, body).map_err(|refusal| {
+            warn!(
+                kind,
+                cause = refusal.label(),
+                "artifact write refused: content not redacted for personal data"
+            );
+            sink_pii_error(refusal, "artifact", kind)
+        })?;
+    }
+    Ok(())
+}
+
+/// E3.6-4b: an [`ArtifactStore`] that refuses every write that is not clean,
+/// whatever the settings say. A caller running a request that asked for
+/// redaction (`redact_pii: on`) wraps its store in this for that run, because
+/// the backends can only see the org default. Reads, lists and counts pass
+/// through unchanged.
+pub struct PiiEnforcingStore {
+    inner: Arc<dyn ArtifactStore>,
+}
+
+impl PiiEnforcingStore {
+    pub fn new(inner: Arc<dyn ArtifactStore>) -> Self {
+        Self { inner }
+    }
+}
+
+#[async_trait]
+impl ArtifactStore for PiiEnforcingStore {
+    async fn put(
+        &self,
+        org_id: &str,
+        run_id: &RunKind,
+        page_hash: &str,
+        kind: &str,
+        body: Vec<u8>,
+    ) -> QuarryResult<ArtifactHandle> {
+        check_artifact_redacted(kind, &body).map_err(|refusal| {
+            warn!(
+                kind,
+                cause = refusal.label(),
+                "artifact write refused: content not redacted for personal data"
+            );
+            sink_pii_error(refusal, "artifact", kind)
+        })?;
+        self.inner.put(org_id, run_id, page_hash, kind, body).await
+    }
+
+    async fn get(&self, org_id: &str, id: &ArtifactKind) -> QuarryResult<Vec<u8>> {
+        self.inner.get(org_id, id).await
+    }
+
+    async fn get_with_key(
+        &self,
+        org_id: &str,
+        id: &ArtifactKind,
+    ) -> QuarryResult<(Vec<u8>, String)> {
+        self.inner.get_with_key(org_id, id).await
+    }
+
+    async fn list(
+        &self,
+        org_id: &str,
+        filter: &quarry_core::pagination::ListFilter,
+    ) -> QuarryResult<quarry_core::pagination::Page<quarry_core::resources::ArtifactSummary>> {
+        self.inner.list(org_id, filter).await
+    }
+
+    async fn count(&self, org_id: &str) -> QuarryResult<Option<u64>> {
+        self.inner.count(org_id).await
+    }
+}
+
 /// The listing rules every in-process backend shares, so the memory store and the
 /// filesystem store cannot drift apart: the `status` filter, the `created_*`
 /// bounds, the sort, the cursor and the page size.
@@ -282,6 +521,8 @@ impl ArtifactStore for InMemoryStore {
         body: Vec<u8>,
     ) -> QuarryResult<ArtifactHandle> {
         validate_org(org_id)?;
+        // E3.6-4b: nothing unredacted is kept for an org that must redact.
+        gate_artifact_put(org_id, kind, &body)?;
         let id: ArtifactKind = Id::new();
         // Same `org=` leading segment as the durable backends so
         // `org_from_key` is the single tenant parser across all three.
@@ -511,6 +752,8 @@ impl ArtifactStore for FilesystemStore {
     ) -> QuarryResult<ArtifactHandle> {
         validate_org(org_id)?;
         let kind_enum = kind_from_str(kind)?;
+        // E3.6-4b: nothing unredacted is kept for an org that must redact.
+        gate_artifact_put(org_id, kind, &body)?;
         let key = artifact_meta::object_key(org_id, &run_id.to_string(), page_hash, kind_enum);
         let dest = self.abs_path(&key);
         let parent = dest
@@ -663,6 +906,8 @@ impl ArtifactStore for S3Store {
     ) -> QuarryResult<ArtifactHandle> {
         validate_org(org_id)?;
         let kind_enum = kind_from_str(kind)?;
+        // E3.6-4b: nothing unredacted is kept for an org that must redact.
+        gate_artifact_put(org_id, kind, &body)?;
         let key = artifact_meta::object_key(org_id, &run_id.to_string(), page_hash, kind_enum);
         let bytes = body.len() as u64;
 
@@ -1367,5 +1612,229 @@ mod tests {
             .unwrap();
         assert!(p.items.is_empty());
         assert!(p.next_cursor.is_none());
+    }
+}
+
+
+/// E3.6-4b: the sink-side PII gate.
+#[cfg(test)]
+mod pii_sink_tests {
+    use super::*;
+    use quarry_core::pagination::ListFilter;
+
+    const EMAIL: &str = "ola.nordmann@example.no";
+
+    fn org_default(orgs: &str) -> PiiRedactionSettings {
+        PiiRedactionSettings::parse(Some("on"), Some(orgs))
+    }
+
+    fn assert_refused(err: &QuarryError, cause: &str, field: &str) {
+        assert_eq!(err.code, ErrorCode::Forbidden);
+        let details = err.details.as_ref().expect("typed details");
+        assert_eq!(details["reason"], PII_REDACTION_FAILED);
+        assert_eq!(details["cause"], cause);
+        assert_eq!(details["sink"], "artifact");
+        assert_eq!(details["field"], field);
+        // Nothing of the content in the failure.
+        assert!(!err.to_string().contains(EMAIL));
+        assert!(!details.to_string().contains(EMAIL));
+    }
+
+    #[test]
+    fn text_check_passes_clean_and_redacted_text_and_refuses_pii() {
+        assert_eq!(check_text_redacted("Kontakt oss for et tilbud."), Ok(()));
+        assert_eq!(
+            check_text_redacted("Skriv til [redacted:pii.email] for et tilbud."),
+            Ok(())
+        );
+        assert_eq!(
+            check_text_redacted(&format!("Skriv til {EMAIL}.")),
+            Err(SinkPiiRefusal::ResidualPii)
+        );
+    }
+
+    #[test]
+    fn text_over_the_cap_is_refused_unscanned() {
+        let big = "a".repeat(SINK_PII_MAX_BYTES + 1);
+        assert_eq!(check_text_redacted(&big), Err(SinkPiiRefusal::TooLarge));
+    }
+
+    #[test]
+    fn artifact_check_scans_text_kinds_and_refuses_the_rest() {
+        assert_eq!(check_artifact_redacted("markdown", b"# Kontakt"), Ok(()));
+        assert_eq!(check_artifact_redacted("meta.json", b"{\"driver\":\"static\"}"), Ok(()));
+        assert_eq!(
+            check_artifact_redacted("markdown", format!("mail {EMAIL}").as_bytes()),
+            Err(SinkPiiRefusal::ResidualPii)
+        );
+        assert_eq!(
+            check_artifact_redacted("html", &[0xff, 0xfe, 0x00]),
+            Err(SinkPiiRefusal::NotText)
+        );
+        for kind in ["screenshot", "pdf", "raw", "trace", "thumbnail.png", "not_a_kind"] {
+            assert_eq!(
+                check_artifact_redacted(kind, b"anything"),
+                Err(SinkPiiRefusal::CaptureNotRedactable),
+                "{kind}"
+            );
+        }
+    }
+
+    #[test]
+    fn sinks_require_redaction_only_with_the_flag_on_and_the_org_covered() {
+        {
+            let _o = SinkPiiTestOverride::install(PiiRedactionSettings::default());
+            assert!(!sink_redaction_required("org_a"));
+        }
+        {
+            let _o = SinkPiiTestOverride::install(PiiRedactionSettings::parse(
+                Some("off"),
+                Some("*"),
+            ));
+            assert!(!sink_redaction_required("org_a"));
+        }
+        {
+            let _o = SinkPiiTestOverride::install(org_default("org_a, org_b"));
+            assert!(sink_redaction_required("org_a"));
+            assert!(sink_redaction_required("org_b"));
+            assert!(!sink_redaction_required("org_c"));
+            assert!(!sink_redaction_required(""));
+        }
+        {
+            let _o = SinkPiiTestOverride::install(org_default("*"));
+            assert!(sink_redaction_required("org_c"));
+        }
+    }
+
+    #[tokio::test]
+    async fn memory_store_refuses_unredacted_text_for_a_covered_org_and_keeps_nothing() {
+        let _o = SinkPiiTestOverride::install(org_default("org_a"));
+        let store = InMemoryStore::new();
+        let run_id: RunKind = Id::new();
+        let err = store
+            .put(
+                "org_a",
+                &run_id,
+                "blake3:p",
+                "markdown",
+                format!("Skriv til {EMAIL}").into_bytes(),
+            )
+            .await
+            .unwrap_err();
+        assert_refused(&err, "residual_pii", "markdown");
+        let page = store.list("org_a", &ListFilter::default()).await.unwrap();
+        assert!(page.items.is_empty());
+
+        let err = store
+            .put("org_a", &run_id, "blake3:p", "screenshot", vec![0x89, b'P', b'N', b'G'])
+            .await
+            .unwrap_err();
+        assert_refused(&err, "capture_not_redactable", "screenshot");
+
+        // Clean text is kept.
+        store
+            .put(
+                "org_a",
+                &run_id,
+                "blake3:p",
+                "markdown",
+                b"Skriv til [redacted:pii.email]".to_vec(),
+            )
+            .await
+            .unwrap();
+        // An org the default does not cover is not gated.
+        store
+            .put(
+                "org_b",
+                &run_id,
+                "blake3:p",
+                "markdown",
+                format!("Skriv til {EMAIL}").into_bytes(),
+            )
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn memory_store_is_unchanged_with_the_flag_off() {
+        let _o = SinkPiiTestOverride::install(PiiRedactionSettings::default());
+        let store = InMemoryStore::new();
+        let run_id: RunKind = Id::new();
+        store
+            .put(
+                "org_a",
+                &run_id,
+                "blake3:p",
+                "markdown",
+                format!("Skriv til {EMAIL}").into_bytes(),
+            )
+            .await
+            .unwrap();
+        store
+            .put("org_a", &run_id, "blake3:p", "screenshot", vec![1, 2, 3])
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn filesystem_store_refuses_before_writing_a_file() {
+        let _o = SinkPiiTestOverride::install(org_default("org_a"));
+        let tmp = tempfile::tempdir().unwrap();
+        let store = FilesystemStore::new(tmp.path()).unwrap();
+        let run_id: RunKind = Id::new();
+        let err = store
+            .put(
+                "org_a",
+                &run_id,
+                "blake3:p",
+                "html",
+                format!("<p>{EMAIL}</p>").into_bytes(),
+            )
+            .await
+            .unwrap_err();
+        assert_refused(&err, "residual_pii", "html");
+        assert!(
+            !tmp.path().join("org=org_a").exists(),
+            "a refused write leaves no file behind"
+        );
+        let page = store.list("org_a", &ListFilter::default()).await.unwrap();
+        assert!(page.items.is_empty());
+    }
+
+    #[tokio::test]
+    async fn enforcing_store_checks_every_write_whatever_the_settings() {
+        let _o = SinkPiiTestOverride::install(PiiRedactionSettings::default());
+        let inner: Arc<dyn ArtifactStore> = Arc::new(InMemoryStore::new());
+        let store = PiiEnforcingStore::new(inner.clone());
+        let run_id: RunKind = Id::new();
+        let err = store
+            .put(
+                "org_a",
+                &run_id,
+                "blake3:p",
+                "markdown",
+                format!("Skriv til {EMAIL}").into_bytes(),
+            )
+            .await
+            .unwrap_err();
+        assert_refused(&err, "residual_pii", "markdown");
+        let err = store
+            .put("org_a", &run_id, "blake3:p", "pdf", b"%PDF-1.7".to_vec())
+            .await
+            .unwrap_err();
+        assert_refused(&err, "capture_not_redactable", "pdf");
+        assert!(inner
+            .list("org_a", &ListFilter::default())
+            .await
+            .unwrap()
+            .items
+            .is_empty());
+
+        let body = b"Skriv til [redacted:pii.email]".to_vec();
+        let handle = store
+            .put("org_a", &run_id, "blake3:p", "markdown", body.clone())
+            .await
+            .unwrap();
+        assert_eq!(store.get("org_a", &handle.artifact_id).await.unwrap(), body);
     }
 }

@@ -208,7 +208,8 @@ func (l *controlLoop) escalate(ctx context.Context, j controlJob) {
 			}
 		}
 	}
-	body := map[string]any{"status": "cancelled", "forced": true, "finished_at": time.Now().UnixMilli()}
+	// org_id: control refuses a finalize that names an org other than the job's (D2-050).
+	body := map[string]any{"status": "cancelled", "forced": true, "finished_at": time.Now().UnixMilli(), "org_id": j.OrgID}
 	if err := l.m.controlCall(ctx, http.MethodPost,
 		fmt.Sprintf("/v1/internal/jobs/%s/finalize", j.ID), body, nil); err != nil {
 		log.Warn().Err(err).Str("job_id", j.ID).Msg("job control: forced finalize failed")
@@ -242,7 +243,7 @@ func (l *controlLoop) sweep(ctx context.Context) {
 			continue
 		}
 		info := desc.GetWorkflowExecutionInfo()
-		body := map[string]any{"finished_at": time.Now().UnixMilli()}
+		body := map[string]any{"finished_at": time.Now().UnixMilli(), "org_id": j.OrgID}
 		if ct := info.GetCloseTime(); ct != nil {
 			body["finished_at"] = ct.AsTime().UnixMilli()
 		}

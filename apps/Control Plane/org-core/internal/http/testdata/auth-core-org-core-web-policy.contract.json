@@ -1,0 +1,47 @@
+{
+  "contract": "auth-core -> org-core web policy",
+  "version": 1,
+  "organizationId": "org-contract-fixture",
+  "tokenPlaceholder": "<ORG_CORE_SERVICE_TOKEN>",
+  "requests": [
+    {
+      "method": "GET",
+      "path": "/internal/orgs/org-contract-fixture/web-policy",
+      "headers": {
+        "accept": "application/json",
+        "x-service-id": "auth-core",
+        "x-service-token": "<ORG_CORE_SERVICE_TOKEN>"
+      }
+    }
+  ],
+  "response": {
+    "status": 200,
+    "body": {
+      "data": {
+        "revision": 2,
+        "rev": "0123456789ab",
+        "policy": {
+          "caps": {
+            "browser.act.upload": "disabled"
+          },
+          "robots_max": "respect"
+        },
+        "entitlements": {
+          "web.paid_search": true,
+          "web.proxy_pool": true,
+          "web.robots_override": false
+        }
+      }
+    }
+  },
+  "notFound": {
+    "status": 404,
+    "body": {
+      "error": {
+        "code": "not_found",
+        "message": "organization not found",
+        "details": {}
+      }
+    }
+  }
+}

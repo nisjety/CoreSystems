@@ -61,6 +61,44 @@ Dockerfile text eol=lf
 # the general rule is ever narrowed.
 apps/**/contracts/*.json text eol=lf
 apps/**/contracts/*.sha256 text eol=lf
+apps/**/src/auth/fixtures/*.sha256 text eol=lf
+
+# session-core migrations 0001-0031, 0033 and 0034 were likewise applied to the
+# live database with CRLF line endings (sqlx checksums the raw bytes), so they
+# keep those bytes too. A clean LF checkout made session-core refuse at 0001.
+"apps/Model Plane/rust/services/session-core/migrations/0001_init.sql" -text
+"apps/Model Plane/rust/services/session-core/migrations/0002_events_and_ordinals.sql" -text
+"apps/Model Plane/rust/services/session-core/migrations/0003_orchestration_tables.sql" -text
+"apps/Model Plane/rust/services/session-core/migrations/0004_tasks_cron_hooks_skills_memory.sql" -text
+"apps/Model Plane/rust/services/session-core/migrations/0005_finetune_jobs.sql" -text
+"apps/Model Plane/rust/services/session-core/migrations/0006_agent_skills_origin.sql" -text
+"apps/Model Plane/rust/services/session-core/migrations/0007_dream_memory.sql" -text
+"apps/Model Plane/rust/services/session-core/migrations/0008_routing_policy.sql" -text
+"apps/Model Plane/rust/services/session-core/migrations/0009_finetune_deployment_tier.sql" -text
+"apps/Model Plane/rust/services/session-core/migrations/0010_runs_residency.sql" -text
+"apps/Model Plane/rust/services/session-core/migrations/0011_identity_scoping.sql" -text
+"apps/Model Plane/rust/services/session-core/migrations/0012_audit_outbox.sql" -text
+"apps/Model Plane/rust/services/session-core/migrations/0013_tool_audit_intents.sql" -text
+"apps/Model Plane/rust/services/session-core/migrations/0014_approval_delivery_outbox.sql" -text
+"apps/Model Plane/rust/services/session-core/migrations/0015_managed_run_terminalization.sql" -text
+"apps/Model Plane/rust/services/session-core/migrations/0016_outbox_run_lifecycle_subjects.sql" -text
+"apps/Model Plane/rust/services/session-core/migrations/0017_system_run_owner.sql" -text
+"apps/Model Plane/rust/services/session-core/migrations/0018_approval_continuation_receipts.sql" -text
+"apps/Model Plane/rust/services/session-core/migrations/0019_approval_delivery_settlement.sql" -text
+"apps/Model Plane/rust/services/session-core/migrations/0020_verification_result.sql" -text
+"apps/Model Plane/rust/services/session-core/migrations/0021_thread_presentation.sql" -text
+"apps/Model Plane/rust/services/session-core/migrations/0022_encrypted_approval_continuation_descriptors.sql" -text
+"apps/Model Plane/rust/services/session-core/migrations/0023_thread_space_context.sql" -text
+"apps/Model Plane/rust/services/session-core/migrations/0024_thread_recipient_audience_revision.sql" -text
+"apps/Model Plane/rust/services/session-core/migrations/0025_message_space_audience_context.sql" -text
+"apps/Model Plane/rust/services/session-core/migrations/0026_space_deletion_semantic_memory_receipts.sql" -text
+"apps/Model Plane/rust/services/session-core/migrations/0027_space_deletion_semantic_memory_leases.sql" -text
+"apps/Model Plane/rust/services/session-core/migrations/0028_space_scoped_cron.sql" -text
+"apps/Model Plane/rust/services/session-core/migrations/0029_scheduled_step_receipts.sql" -text
+"apps/Model Plane/rust/services/session-core/migrations/0030_message_agent_attribution.sql" -text
+"apps/Model Plane/rust/services/session-core/migrations/0031_agent_skills_ownership.sql" -text
+"apps/Model Plane/rust/services/session-core/migrations/0033_dispatch_unreachable_failure_code.sql" -text
+"apps/Model Plane/rust/services/session-core/migrations/0034_thread_origin.sql" -text
 
 # WS16.S1: the ai-chat-v1 fixtures are pinned by SHA256SUMS and vendored by Quarry byte for byte.
 apps/**/contracts/ai-chat-v1/SHA256SUMS text eol=lf

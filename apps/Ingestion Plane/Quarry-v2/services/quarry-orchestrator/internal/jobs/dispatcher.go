@@ -542,6 +542,13 @@ func scrapeInputFromJob(j job, runID string) (workflows.ScrapeJobInput, error) {
 // The shared builder (workflows.CrawlInputFromParams, also used by the
 // scheduled-job wrapper) receives the resolved values.
 func crawlInputFromJob(j job, runID string, limits CrawlLimits) (workflows.CrawlJobInput, error) {
+	// W2-U64 (D2-073): a crawl with no scope object runs as a legacy-unscoped crawl in observe
+	// mode (a job accepted before scope existed, or one from an older edge during a rolling
+	// deploy). One that names scope_mode enforce but carries no scope is refused: enforce
+	// promises a scope, and running it unscoped would break that promise silently.
+	if _, hasScope := j.Params["scope"]; (!hasScope || j.Params["scope"] == nil) && j.Params["scope_mode"] == "enforce" {
+		return workflows.CrawlJobInput{}, errors.New("crawl job names scope_mode enforce but carries no scope")
+	}
 	resolved := limits.Resolve(workflows.UintFromParam(j.Params["max_pages"]), workflows.UintFromParam(j.Params["max_depth"]))
 	return workflows.CrawlInputFromParams(j.Params, runID, string(j.ID), resolved.Depth, resolved.Pages)
 }

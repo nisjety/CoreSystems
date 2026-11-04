@@ -116,6 +116,9 @@ func changeWebhookHandler(db store.DB, sink notify.Sink) http.HandlerFunc {
 			return
 		}
 
+		// E3.5-7: the change type and paragraph delta the edge's body names filter its fan-out.
+		change := classifyChangeNotice(rec.Status, probe)
+
 		// Idempotency — fast path. A retry whose key was already recorded
 		// resolves to the original event without touching the writer.
 		if key := r.Header.Get("Idempotency-Key"); key != "" {
@@ -165,7 +168,7 @@ func changeWebhookHandler(db store.DB, sink notify.Sink) http.HandlerFunc {
 		// downstream: external webhook subscribers get delivery rows and
 		// the schedule creator gets their in-product notification.
 		// The org is the signed query value the body's org_id was just checked against.
-		fanoutWebhooks(db, evt, org)
+		fanoutChangeWebhooks(db, evt, org, change, changeNotifyFilterOf)
 		notifyOnChange(sink, evt)
 
 		writeChangeAck(w, r, http.StatusOK, evt.EventID, false)
@@ -197,6 +200,80 @@ func changeEventPayload(rec quarrycontracts.ChangeWebhook) (map[string]any, erro
 		return nil, err
 	}
 	return m, nil
+}
+
+// classifyChangeNotice reads the change a webhook carries. The type is the edge's change_type when
+// it names a known type; an older edge sends none, and the record's status says it instead. The
+// paragraph delta is paragraph_delta, or -1 when it is absent, null or negative. probe is the body
+// decoded as a map.
+func classifyChangeNotice(status quarrycontracts.ChangeStatus, probe map[string]any) changeNotice {
+	n := changeNotice{Type: changeTypeOfStatus(status), ParagraphDelta: -1}
+	if s, ok := probe["change_type"].(string); ok && changeTypes[s] {
+		n.Type = s
+	}
+	if d, ok := probe["paragraph_delta"].(float64); ok && d >= 0 {
+		n.ParagraphDelta = int(d)
+	}
+	return n
+}
+
+// changeTypeOfStatus is the change type a record's status classifies as, or "" when it is no change.
+func changeTypeOfStatus(status quarrycontracts.ChangeStatus) string {
+	switch status {
+	case quarrycontracts.ChangeNew:
+		return ChangeTypeNew
+	case quarrycontracts.ChangeChanged:
+		return ChangeTypeChanged
+	default:
+		return ""
+	}
+}
+
+// changeNotifyFilterOf is the notifyOnChange filter of a subscription. The filter is not persisted
+// yet (store.Webhook has no field for it; see W23-W3-E3.5-7-status.md), so every subscription reads
+// as unfiltered, which is the behaviour before this unit.
+func changeNotifyFilterOf(_ store.Webhook) *ChangeNotifyFilter {
+	return nil
+}
+
+// fanoutChangeWebhooks is fanoutWebhooks for a classified change (E3.5-7): the same org scope, event
+// match and dedupe key, with each subscription's notifyOnChange filter applied before its delivery
+// row is written. The run-event batch path still calls fanoutWebhooks, so the filter does not cover
+// the orchestrator's copy of a change yet (see the status file).
+func fanoutChangeWebhooks(db store.DB, ev quarrycontracts.Event, orgID string, change changeNotice,
+	filterOf func(store.Webhook) *ChangeNotifyFilter) {
+	if orgID == "" {
+		return
+	}
+	payloadBytes, err := json.Marshal(ev)
+	if err != nil {
+		return
+	}
+	now := time.Now().Unix()
+	evType := string(ev.Type)
+	dedupe := changeDedupeKey(ev, orgID)
+	for _, wh := range db.Webhooks().ListActiveByOrg(orgID, fanoutMaxSubscriptions) {
+		if wh.OrgID != orgID || !subscriptionMatches(wh.Events, evType) {
+			continue
+		}
+		if f := filterOf(wh); f != nil && !f.matches(change) {
+			continue
+		}
+		// A duplicate (ErrConflict) is the same change reached by another path: dropped silently.
+		_ = db.WebhookDeliveries().Create(store.WebhookDelivery{
+			ID:            quarrycontracts.NewID(quarrycontracts.KindWebhookDelivery),
+			WebhookID:     wh.ID,
+			OrgID:         orgID,
+			EventID:       ev.EventID,
+			EventType:     evType,
+			DedupeKey:     dedupe,
+			Payload:       string(payloadBytes),
+			Status:        "pending",
+			Attempt:       0,
+			NextAttemptAt: now,
+			CreatedAt:     now,
+		})
+	}
 }
 
 // bodyAssertsZDR reports whether the decoded body carries a truthy "zdr"

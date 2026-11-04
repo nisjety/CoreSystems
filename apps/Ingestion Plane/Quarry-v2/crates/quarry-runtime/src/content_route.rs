@@ -80,6 +80,29 @@ pub async fn parse_document(kind: ContentKind, body: Vec<u8>) -> QuarryResult<Pa
     }
 }
 
+/// E3.6-6b integration placeholder for the E3.6-6a imports-core extract client
+/// (`POST /api/v1/import/extract`), which is not on any branch yet. Until 6a
+/// lands it refuses every body with the typed 415 the Office kinds already get,
+/// so `QUARRY_EDGE__OFFICE_VIA_IMPORTS=on` changes nothing visible. E3.6-6a
+/// replaces this body (same name and signature).
+pub async fn extract_office_via_imports(
+    kind: ContentKind,
+    body: Vec<u8>,
+) -> QuarryResult<ParsedDocument> {
+    let _ = body;
+    Err(QuarryError::new(
+        ErrorCode::UnsupportedMedia,
+        format!(
+            "the {} could not be read: the imports extract client is not available",
+            kind.label()
+        ),
+    )
+    .with_details(serde_json::json!({
+        "reason": "imports_client_unavailable",
+        "route": "imports",
+    })))
+}
+
 /// Parse with an explicit backend and deadline: what [`parse_document`] does,
 /// for callers (and tests) that bring their own.
 pub async fn parse_document_with(

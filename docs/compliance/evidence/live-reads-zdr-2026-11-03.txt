@@ -1,0 +1,247 @@
+Machine output of apps/Model Plane/scripts/tests/zdr-live-proof.sh on the developer stack, 2026-11-03 (UTC): the Wave 1 ZDR re-proof on main 12534c248.
+The live stack runs main (wave services at 91b9b8ddf). ZDR_WAVE_COMMIT=ae4f8b936. Lines starting with ######## or "# " are the operator's run headers; the rest is the script's output.
+Narrative and verdicts: live-proof-wave1-zdr-2026-11-03.txt (this folder).
+
+######## RUN A: preflight on the live stack as found (read-only; nothing restarted).
+# ZDR live proof, phase preflight. Read-only: SELECT (read-only transaction), docker inspect, one redis-cli --scan.
+# Counts, names, revisions, timestamps. No content, no tenant identifier, no credential.
+# Read at 2026-11-03T01:09:21Z
+
+## BLOCK 1: what is deployed, in the order of the wave
+## command: docker inspect (started, image id, revision label) for session-core execution-core model-gateway inference-core
+session-core: started=2026-11-01T23:23:41.327673853Z image=sha256:ee944c6c87c4 revision=91b9b8ddfd682d24432e96a46bb5ebebfc520849
+execution-core: started=2026-11-01T23:23:52.184096477Z image=sha256:adc2ce1abaf6 revision=91b9b8ddfd682d24432e96a46bb5ebebfc520849
+model-gateway: started=2026-11-01T23:23:46.688388435Z image=sha256:a25a2ce79b4e revision=91b9b8ddfd682d24432e96a46bb5ebebfc520849
+  ORDER: model-gateway started before execution-core
+inference-core: started=2026-11-01T23:23:56.42640247Z image=sha256:fa3e6674659b revision=91b9b8ddfd682d24432e96a46bb5ebebfc520849
+CHECK deploy-order FAIL a service is missing or started before an earlier one of the wave: redeploy in order
+CHECK wave-revision PASS all four contain ae4f8b936
+
+## BLOCK 2: migrations 0044 and 0045 and the retention receipt column
+## command: select count(*) from _sqlx_migrations where version in (44, 45) and success; select count(*) from information_schema.columns where table_name = 'runs' and column_name = 'retention_class'
+migrations applied: 2   retention_class column: 1
+CHECK migrations-0044-0045 PASS both applied, column present
+
+## BLOCK 3: waiver minting is off (ZDR_WAIVER_ENABLED, one word per service)
+## command: docker inspect --format env of each wave service, reduced to unset, set-not-true or ON for that one name
+session-core: unset
+execution-core: unset
+model-gateway: unset
+inference-core: unset
+CHECK waiver-minting-off PASS no wave service has ZDR_WAIVER_ENABLED=true
+
+## BLOCK 4: waived runs and ZDR rows (both must be 0)
+## command: select count(*) from runs where retention_class = 'zdr_waived'; select count(*) from session_audit_outbox where payload->'details'->>'zdr' = 'true'
+waived runs: 0   ZDR rows in the outbox: 0
+CHECK no-waived-run PASS 0 rows
+CHECK no-zdr-row-in-outbox PASS 0 rows
+
+## phase=preflight checks=6 failures=1
+
+######## RUN B: zdr-org-switch-gate.spec.ts with ZDR_GATE_LIVE_PATCH=1 against the LIVE SPA on :5173 (main checkout), as the ZDR-TEST owner with ZDR off.
+# run B first attempt: tests 1-2 failed on a cold :5173 dev server (settings route not compiled since the 11-01 redeploy; one "socket hang up" on /api/v1/models through its proxy); test 3 passed (409 zdr_no_attested_provider). Routes warmed headless (nothing sent), then re-run:
+# run B re-run: zdr-org-switch-gate.spec.ts exit=0 (see playwright/gate-zdr-off-2.log in the backup folder)
+
+######## RUN C: Z-60 pass 1 on the live stack (preflight order check still failing, see run A). zdr-seed-test-org.mjs --apply at 01:17:21 UTC: ZDR is now ON. Then counters before, two turns from the ZDR-TEST owner on the live SPA :5173 (the spec with ZDR_LIVE_TURN=1 ZDR_LIVE_TURN_MODEL=claude-sonnet-5-5, and one turn with the web-search preference at its default, D1-815), counters after.
+# ZDR live proof, phase before. Read-only: SELECT (read-only transaction), docker inspect, one redis-cli --scan.
+# Counts, names, revisions, timestamps. No content, no tenant identifier, no credential.
+# Read at 2026-11-03T01:18:21Z
+
+## COUNTERS
+## command: select count(*) from threads, messages, runs, feedback_ratings, session_audit_outbox; count of ZDR rows in the outbox; redis-cli --scan --pattern 'mp:gw:cache:*' (count only, key names are not printed)
+threads=1199
+messages=3899
+runs=2013
+feedback_ratings=20
+session_audit_outbox=5043
+outbox_zdr_rows=0
+cache_keys=0
+# recorded in C:/dev/backups/zdr-live-proof-2026-11-03/c.state
+
+## phase=before checks=0 failures=0
+# spec tests/e2e/zdr-live-turn.spec.ts on :5173 (ZDR_LIVE_TURN=1, ZDR_LIVE_TURN_MODEL=claude-sonnet-5-5): exit=0
+# default-web turn: Search button: disabled=true aria-pressed=false title="Web search is not available with zero data retention yet"
+# default-web turn: request: model=claude-sonnet-5-5 browse_web=false tools=[] features=["usage","citations","reasoning","steps","artifacts","memory","tools"]
+# default-web turn: frame: HTTP 200 event=error type=- code=zdr_unavailable feature=- message="Zero data retention applies to this request, but no model deployment is attested to provide it. The request was not sent to a model."
+# default-web turn: page shows: "not sent to a model"
+# ZDR live proof, phase after. Read-only: SELECT (read-only transaction), docker inspect, one redis-cli --scan.
+# Counts, names, revisions, timestamps. No content, no tenant identifier, no credential.
+# Read at 2026-11-03T01:18:39Z
+
+## COUNTERS
+## command: select count(*) from threads, messages, runs, feedback_ratings, session_audit_outbox; count of ZDR rows in the outbox; redis-cli --scan --pattern 'mp:gw:cache:*' (count only, key names are not printed)
+threads=1199
+messages=3899
+runs=2013
+feedback_ratings=20
+session_audit_outbox=5043
+outbox_zdr_rows=0
+cache_keys=0
+
+## DELTA
+## command: after minus before, from C:/dev/backups/zdr-live-proof-2026-11-03/c.state
+threads: before=1199 after=1199 delta=0
+CHECK unchanged-threads PASS 1199
+messages: before=3899 after=3899 delta=0
+CHECK unchanged-messages PASS 3899
+runs: before=2013 after=2013 delta=0
+CHECK unchanged-runs PASS 2013
+feedback_ratings: before=20 after=20 delta=0
+CHECK unchanged-feedback_ratings PASS 20
+session_audit_outbox: before=5043 after=5043 delta=0
+CHECK unchanged-session_audit_outbox PASS 5043
+outbox_zdr_rows: before=0 after=0 delta=0
+CHECK unchanged-outbox_zdr_rows PASS 0
+cache_keys: before=0 after=0 delta=0
+CHECK unchanged-cache_keys PASS 0
+CHECK no-zdr-row-in-outbox PASS 0 rows
+
+## MANUAL (needs a user session, not read here): the Playwright spec tests/e2e/zdr-live-turn.spec.ts saw the typed refusal and no streamed content; the PATCH of the org switch was refused 409 zdr_no_attested_provider (tests/e2e/zdr-org-switch-gate.spec.ts with ZDR_GATE_LIVE_PATCH=1); the ZDR-TEST org was switched back off with zdr-seed-test-org.mjs --zdr false --apply.
+## phase=after checks=8 failures=0
+# switched back off at 01:18:58 UTC: ZDR is now OFF
+
+######## RUN D (D1-222): non-ZDR dry run on the live SPA :5173. Counters before, zdr-live-turn.spec.ts with ZDR_LIVE_TURN=1 as the e2e fixture account (org "Verevon E2E Test", non-ZDR) and as the ZDR-TEST owner with ZDR off, counters after.
+# ZDR live proof, phase before. Read-only: SELECT (read-only transaction), docker inspect, one redis-cli --scan.
+# Counts, names, revisions, timestamps. No content, no tenant identifier, no credential.
+# Read at 2026-11-03T01:19:16Z
+
+## COUNTERS
+## command: select count(*) from threads, messages, runs, feedback_ratings, session_audit_outbox; count of ZDR rows in the outbox; redis-cli --scan --pattern 'mp:gw:cache:*' (count only, key names are not printed)
+threads=1199
+messages=3899
+runs=2013
+feedback_ratings=20
+session_audit_outbox=5043
+outbox_zdr_rows=0
+cache_keys=0
+# recorded in C:/dev/backups/zdr-live-proof-2026-11-03/d.state
+
+## phase=before checks=0 failures=0
+# spec as the e2e fixture account: exit=1 (pass 1 refused at the org guard, no chat opened); spec as the ZDR-TEST owner with ZDR off: exit=1 (refused at the ZDR-on guard)
+# ZDR live proof, phase after. Read-only: SELECT (read-only transaction), docker inspect, one redis-cli --scan.
+# Counts, names, revisions, timestamps. No content, no tenant identifier, no credential.
+# Read at 2026-11-03T01:19:40Z
+
+## COUNTERS
+## command: select count(*) from threads, messages, runs, feedback_ratings, session_audit_outbox; count of ZDR rows in the outbox; redis-cli --scan --pattern 'mp:gw:cache:*' (count only, key names are not printed)
+threads=1199
+messages=3899
+runs=2013
+feedback_ratings=20
+session_audit_outbox=5043
+outbox_zdr_rows=0
+cache_keys=0
+
+## DELTA
+## command: after minus before, from C:/dev/backups/zdr-live-proof-2026-11-03/d.state
+threads: before=1199 after=1199 delta=0
+CHECK unchanged-threads PASS 1199
+messages: before=3899 after=3899 delta=0
+CHECK unchanged-messages PASS 3899
+runs: before=2013 after=2013 delta=0
+CHECK unchanged-runs PASS 2013
+feedback_ratings: before=20 after=20 delta=0
+CHECK unchanged-feedback_ratings PASS 20
+session_audit_outbox: before=5043 after=5043 delta=0
+CHECK unchanged-session_audit_outbox PASS 5043
+outbox_zdr_rows: before=0 after=0 delta=0
+CHECK unchanged-outbox_zdr_rows PASS 0
+cache_keys: before=0 after=0 delta=0
+CHECK unchanged-cache_keys PASS 0
+CHECK no-zdr-row-in-outbox PASS 0 rows
+
+## MANUAL (needs a user session, not read here): the Playwright spec tests/e2e/zdr-live-turn.spec.ts saw the typed refusal and no streamed content; the PATCH of the org switch was refused 409 zdr_no_attested_provider (tests/e2e/zdr-org-switch-gate.spec.ts with ZDR_GATE_LIVE_PATCH=1); the ZDR-TEST org was switched back off with zdr-seed-test-org.mjs --zdr false --apply.
+## phase=after checks=8 failures=0
+
+######## RUN E (D1-221): preflight after the ordered restart approved by the coordinating session: docker restart model-plane-model-gateway-1 at 01:22:05 UTC (healthy 01:22:14), then model-plane-inference-core-1 at 01:22:28 (healthy 01:22:37). No rebuild, no recreate, no other container touched.
+# ZDR live proof, phase preflight. Read-only: SELECT (read-only transaction), docker inspect, one redis-cli --scan.
+# Counts, names, revisions, timestamps. No content, no tenant identifier, no credential.
+# Read at 2026-11-03T01:22:51Z
+
+## BLOCK 1: what is deployed, in the order of the wave
+## command: docker inspect (started, image id, revision label) for session-core execution-core model-gateway inference-core
+session-core: started=2026-11-01T23:23:41.327673853Z image=sha256:ee944c6c87c4 revision=91b9b8ddfd682d24432e96a46bb5ebebfc520849
+execution-core: started=2026-11-01T23:23:52.184096477Z image=sha256:adc2ce1abaf6 revision=91b9b8ddfd682d24432e96a46bb5ebebfc520849
+model-gateway: started=2026-11-03T01:22:05.336042421Z image=sha256:a25a2ce79b4e revision=91b9b8ddfd682d24432e96a46bb5ebebfc520849
+inference-core: started=2026-11-03T01:22:28.912470307Z image=sha256:fa3e6674659b revision=91b9b8ddfd682d24432e96a46bb5ebebfc520849
+CHECK deploy-order PASS session-core, execution-core, model-gateway, inference-core started in that order
+CHECK wave-revision PASS all four contain ae4f8b936
+
+## BLOCK 2: migrations 0044 and 0045 and the retention receipt column
+## command: select count(*) from _sqlx_migrations where version in (44, 45) and success; select count(*) from information_schema.columns where table_name = 'runs' and column_name = 'retention_class'
+migrations applied: 2   retention_class column: 1
+CHECK migrations-0044-0045 PASS both applied, column present
+
+## BLOCK 3: waiver minting is off (ZDR_WAIVER_ENABLED, one word per service)
+## command: docker inspect --format env of each wave service, reduced to unset, set-not-true or ON for that one name
+session-core: unset
+execution-core: unset
+model-gateway: unset
+inference-core: unset
+CHECK waiver-minting-off PASS no wave service has ZDR_WAIVER_ENABLED=true
+
+## BLOCK 4: waived runs and ZDR rows (both must be 0)
+## command: select count(*) from runs where retention_class = 'zdr_waived'; select count(*) from session_audit_outbox where payload->'details'->>'zdr' = 'true'
+waived runs: 0   ZDR rows in the outbox: 0
+CHECK no-waived-run PASS 0 rows
+CHECK no-zdr-row-in-outbox PASS 0 rows
+
+## phase=preflight checks=6 failures=0
+
+######## RUN F (D1-221): Z-60 pass 1 again, right after the 6/6 preflight of run E. zdr-seed-test-org.mjs --apply at 01:23:24 UTC: ZDR is now ON. Counters before, the spec turn and the default-web turn on :5173, counters after.
+# ZDR live proof, phase before. Read-only: SELECT (read-only transaction), docker inspect, one redis-cli --scan.
+# Counts, names, revisions, timestamps. No content, no tenant identifier, no credential.
+# Read at 2026-11-03T01:24:19Z
+
+## COUNTERS
+## command: select count(*) from threads, messages, runs, feedback_ratings, session_audit_outbox; count of ZDR rows in the outbox; redis-cli --scan --pattern 'mp:gw:cache:*' (count only, key names are not printed)
+threads=1199
+messages=3899
+runs=2013
+feedback_ratings=20
+session_audit_outbox=5043
+outbox_zdr_rows=0
+cache_keys=0
+# recorded in C:/dev/backups/zdr-live-proof-2026-11-03/f.state
+
+## phase=before checks=0 failures=0
+# spec tests/e2e/zdr-live-turn.spec.ts on :5173 (ZDR_LIVE_TURN=1, ZDR_LIVE_TURN_MODEL=claude-sonnet-5-5): exit=0
+# default-web turn: Search button: disabled=true aria-pressed=false title="Web search is not available with zero data retention yet"
+# default-web turn: request: model=claude-sonnet-5-5 browse_web=false tools=[] features=["usage","citations","reasoning","steps","artifacts","memory","tools"]
+# default-web turn: frame: HTTP 200 event=error type=- code=zdr_unavailable feature=- message="Zero data retention applies to this request, but no model deployment is attested to provide it. The request was not sent to a model."
+# default-web turn: page shows: "not sent to a model"
+# ZDR live proof, phase after. Read-only: SELECT (read-only transaction), docker inspect, one redis-cli --scan.
+# Counts, names, revisions, timestamps. No content, no tenant identifier, no credential.
+# Read at 2026-11-03T01:25:45Z
+
+## COUNTERS
+## command: select count(*) from threads, messages, runs, feedback_ratings, session_audit_outbox; count of ZDR rows in the outbox; redis-cli --scan --pattern 'mp:gw:cache:*' (count only, key names are not printed)
+threads=1199
+messages=3899
+runs=2013
+feedback_ratings=20
+session_audit_outbox=5043
+outbox_zdr_rows=0
+cache_keys=0
+
+## DELTA
+## command: after minus before, from C:/dev/backups/zdr-live-proof-2026-11-03/f.state
+threads: before=1199 after=1199 delta=0
+CHECK unchanged-threads PASS 1199
+messages: before=3899 after=3899 delta=0
+CHECK unchanged-messages PASS 3899
+runs: before=2013 after=2013 delta=0
+CHECK unchanged-runs PASS 2013
+feedback_ratings: before=20 after=20 delta=0
+CHECK unchanged-feedback_ratings PASS 20
+session_audit_outbox: before=5043 after=5043 delta=0
+CHECK unchanged-session_audit_outbox PASS 5043
+outbox_zdr_rows: before=0 after=0 delta=0
+CHECK unchanged-outbox_zdr_rows PASS 0
+cache_keys: before=0 after=0 delta=0
+CHECK unchanged-cache_keys PASS 0
+CHECK no-zdr-row-in-outbox PASS 0 rows
+
+## MANUAL (needs a user session, not read here): the Playwright spec tests/e2e/zdr-live-turn.spec.ts saw the typed refusal and no streamed content; the PATCH of the org switch was refused 409 zdr_no_attested_provider (tests/e2e/zdr-org-switch-gate.spec.ts with ZDR_GATE_LIVE_PATCH=1); the ZDR-TEST org was switched back off with zdr-seed-test-org.mjs --zdr false --apply.
+## phase=after checks=8 failures=0
+# switched back off at 01:25:50 UTC: ZDR is now OFF

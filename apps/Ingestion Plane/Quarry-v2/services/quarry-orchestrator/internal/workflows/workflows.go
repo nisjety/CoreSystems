@@ -79,6 +79,9 @@ type BatchJobInput struct {
 	Policy Policy   `json:"policy,omitempty"`
 	// Robots is the robots mode the batch runs with (WS14.S5). Absent or unknown is respect.
 	Robots string `json:"robots,omitempty"`
+	// PolicySnapshot is the web policy the edge resolved at the handoff (WS7.G 6b), carried to
+	// every page of the batch. Empty means the job was admitted without one.
+	PolicySnapshot json.RawMessage `json:"policy_snapshot,omitempty"`
 }
 
 // CrawlJobInput drives a bounded BFS crawl.
@@ -107,6 +110,11 @@ type CrawlJobInput struct {
 	// ScrapeOptions is the crawl's per-page scrape options (INNH-6b), the canonical JSON the
 	// edge stamped on the job. Empty means the default cleaning.
 	ScrapeOptions json.RawMessage `json:"scrape_options,omitempty"`
+	// PolicySnapshot is the web policy the edge resolved at the handoff (WS7.G 6b), carried to
+	// every page of the crawl. Empty means the job was admitted without one. Adding it changes
+	// no command of the workflow (it only rides in the page activity's input), so histories
+	// recorded before it replay unchanged and need no GetVersion marker.
+	PolicySnapshot json.RawMessage `json:"policy_snapshot,omitempty"`
 }
 
 type frontierEntry struct {
@@ -236,16 +244,36 @@ func runPageScrape(
 	crawl *activities.CrawlContext,
 	scrape json.RawMessage,
 ) (activities.RunPageResult, error) {
+	return runPageSnapshot(ctx, a, ids, org, userID, ingest, kind, url, crawl, scrape, nil)
+}
+
+// runPageSnapshot is runPageScrape for a page of a job that carries the policy the edge
+// resolved at the handoff (WS7.G 6b). A nil snapshot leaves the page call exactly what
+// runPageScrape made.
+func runPageSnapshot(
+	ctx workflow.Context,
+	a *activities.Activities,
+	ids runIDs,
+	org string,
+	userID string,
+	ingest bool,
+	kind string,
+	url string,
+	crawl *activities.CrawlContext,
+	scrape json.RawMessage,
+	policySnapshot json.RawMessage,
+) (activities.RunPageResult, error) {
 	var res activities.RunPageResult
 	err := workflow.ExecuteActivity(ctx, a.RunPage, activities.RunPageInput{
-		RunID:  ids.RunID,
-		URL:    url,
-		OrgID:  org,
-		UserID: userID,
-		Ingest: ingest,
-		Kind:   kind,
-		Crawl:  crawl,
-		Scrape: scrape,
+		RunID:          ids.RunID,
+		URL:            url,
+		OrgID:          org,
+		UserID:         userID,
+		Ingest:         ingest,
+		Kind:           kind,
+		Crawl:          crawl,
+		Scrape:         scrape,
+		PolicySnapshot: policySnapshot,
 	}).Get(ctx, &res)
 	if err != nil {
 		cat := errs.CategoryUnknown
@@ -401,6 +429,10 @@ func ScrapeJobWF(ctx workflow.Context, in ScrapeJobInput, a *activities.Activiti
 	}, in.RunID, string(quarrycontracts.EvtRunCompleted))
 }
 
+// changeTextFPVersion guards the W3-E3.5-4 change to ChangeMonitorWF: the CheckChange input
+// asks for the text fingerprint.
+const changeTextFPVersion = "change-text-fp-v1"
+
 // ChangeMonitorWF fetches a URL, compares it to the org's stored baseline,
 // and emits change_detected / change_unchanged. It is the workflow a
 // change_monitor schedule fires on each cron tick.
@@ -428,12 +460,20 @@ func ChangeMonitorWF(ctx workflow.Context, in ChangeMonitorInput, a *activities.
 		return err
 	}
 
+	// W3-E3.5-4: from change-text-fp-v1 the probe forwards run_page's text fingerprint, which
+	// the edge compares instead of the raw bytes when QUARRY_EDGE__CHANGE_TEXT_FP is on (off by
+	// default, and then the edge ignores it). Histories recorded before the marker replay with
+	// the activity input they recorded.
+	textFP := workflow.GetVersion(ctx, changeTextFPVersion, workflow.DefaultVersion, 1) >= 1
+
 	var res activities.CheckChangeResult
 	err := workflow.ExecuteActivity(ctx, a.CheckChange, activities.CheckChangeInput{
 		RunID: runID,
 		OrgID: in.OrgID,
 		URL:   in.URL,
 		Zdr:   in.Zdr,
+
+		TextFingerprint: textFP,
 	}).Get(ctx, &res)
 	if err != nil {
 		_ = emitEvent(ctx, a, ids, quarrycontracts.EvtRunFailed, map[string]any{
@@ -460,7 +500,7 @@ func ChangeMonitorWF(ctx workflow.Context, in ChangeMonitorInput, a *activities.
 	if res.Changed {
 		evt = quarrycontracts.EvtChangeDetected
 	}
-	_ = emitEvent(ctx, a, ids, evt, map[string]any{
+	payload := map[string]any{
 		"url":         in.URL,
 		"org_id":      in.OrgID,
 		"created_by":  in.CreatedBy,
@@ -468,7 +508,13 @@ func ChangeMonitorWF(ctx workflow.Context, in ChangeMonitorInput, a *activities.
 		"fingerprint": res.Fingerprint,
 		"diff_id":     res.DiffID,
 		"baseline_id": res.BaselineID,
-	}, runID, in.URL, string(evt))
+	}
+	// A silent re-baseline (the first probe after the fingerprint scheme flipped) is an
+	// unchanged event that says so; nothing else about the payload moves.
+	if textFP && res.Rebaselined {
+		payload["rebaselined"] = true
+	}
+	_ = emitEvent(ctx, a, ids, evt, payload, runID, in.URL, string(evt))
 
 	return emitEvent(ctx, a, ids, quarrycontracts.EvtRunCompleted, map[string]any{
 		"pages_visited": 1,
@@ -522,7 +568,7 @@ func BatchJobWF(ctx workflow.Context, in BatchJobInput, a *activities.Activities
 		if checked {
 			crawl = batchCrawlContext(in.Robots)
 		}
-		res, err := runPageWith(ctx, a, ids, in.OrgID, in.UserID, in.Ingest, "batch", url, crawl)
+		res, err := runPageSnapshot(ctx, a, ids, in.OrgID, in.UserID, in.Ingest, "batch", url, crawl, nil, in.PolicySnapshot)
 		if err != nil {
 			if checked && errs.CategoryOf(err) == errs.CategoryBlocklist {
 				// WS14.S5: a page the edge refused (a denial) is also counted as blocked. It stays
@@ -631,6 +677,12 @@ func CrawlJobWF(ctx workflow.Context, in CrawlJobInput, a *activities.Activities
 	var scope *crawlScopeRun
 	if workflow.GetVersion(ctx, "crawl-scope-v1", workflow.DefaultVersion, 1) >= 1 {
 		scope = newCrawlScopeRun(in)
+		// W2-U64: a missing scope_applied (an edge older than this orchestrator) no longer
+		// ends an observe-mode crawl after its first page. Histories recorded before the
+		// marker keep the strict behaviour.
+		if scope != nil && workflow.GetVersion(ctx, crawlScopeTolerantVersion, workflow.DefaultVersion, 1) >= 1 {
+			scope.tolerateUnapplied = true
+		}
 	}
 
 	ctrl, err := installControlHandlers(ctx)
@@ -732,7 +784,7 @@ func CrawlJobWF(ctx workflow.Context, in CrawlJobInput, a *activities.Activities
 		if scope != nil {
 			crawl = scope.contextFor(cur.Depth)
 		}
-		res, err := runPageScrape(ctx, a, ids, in.OrgID, in.UserID, in.Ingest, "crawl", cur.URL, crawl, in.ScrapeOptions)
+		res, err := runPageSnapshot(ctx, a, ids, in.OrgID, in.UserID, in.Ingest, "crawl", cur.URL, crawl, in.ScrapeOptions, in.PolicySnapshot)
 		if err != nil && scope != nil && errs.CategoryOf(err) == errs.CategoryBlocklist {
 			// The edge refused the page (scope or robots). It is counted as blocked.
 			pagesBlocked++
@@ -759,12 +811,18 @@ func CrawlJobWF(ctx workflow.Context, in CrawlJobInput, a *activities.Activities
 		}
 		if scope != nil {
 			// An edge that did not apply the scope ends the run: nothing of this page is followed.
-			if !appliedBy(res.Crawl) {
+			switch scope.verdict(res.Crawl) {
+			case verdictRefused:
 				stopReason = edgeScopeUnsupported
+			case verdictLegacyUnscoped:
+				workflow.GetLogger(ctx).Warn("edge did not report scope_applied; crawl continues unscoped (observe)")
+			default:
+				scope.absorb(res.Crawl)
+				ctrl.progress.Denied = scope.linksDenied
+			}
+			if stopReason == edgeScopeUnsupported {
 				break
 			}
-			scope.absorb(res.Crawl)
-			ctrl.progress.Denied = scope.linksDenied
 		}
 		// INNH-6b: an edge that did not apply the scrape options ends the run.
 		if !scrapeAppliedBy(in, res) {
@@ -928,7 +986,7 @@ func crawlJobDurableFrontier(
 		if scope != nil {
 			crawl = scope.contextFor(depth)
 		}
-		res, pageErr := runPageScrape(ctx, a, ids, in.OrgID, in.UserID, in.Ingest, "crawl", item.URL, crawl, in.ScrapeOptions)
+		res, pageErr := runPageSnapshot(ctx, a, ids, in.OrgID, in.UserID, in.Ingest, "crawl", item.URL, crawl, in.ScrapeOptions, in.PolicySnapshot)
 		if pageErr != nil && scope != nil && errs.CategoryOf(pageErr) == errs.CategoryBlocklist {
 			pagesBlocked++
 			if robotsRefused(pageErr) {
@@ -940,12 +998,12 @@ func crawlJobDurableFrontier(
 			if bounded && pagesFailed >= in.MaxPages {
 				stopReason = crawlStopMaxFailures
 			}
-		} else if scope != nil && !appliedBy(res.Crawl) {
+		} else if scope != nil && scope.verdict(res.Crawl) == verdictRefused {
 			stopReason = edgeScopeUnsupported
 		} else if !scrapeAppliedBy(in, res) {
 			stopReason = edgeScrapeUnsupported
 		} else {
-			if scope != nil {
+			if scope != nil && appliedBy(res.Crawl) {
 				scope.absorb(res.Crawl)
 			}
 			pagesVisited++

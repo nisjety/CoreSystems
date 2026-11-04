@@ -255,14 +255,53 @@ test("the CROSS_PLANE_AUTH data-plane row names every scope the granted data-pla
   }
 });
 
-test("the CROSS_PLANE_AUTH model-plane row says the mint is refused, not that it is implemented", () => {
+test("the CROSS_PLANE_AUTH model-plane row says model-extract* are granted and model-invoke, model-stream and model-audio are not", () => {
   const row = rowLine(read(paths.crossPlaneAuth), "quarry-edge → model-plane");
-  assert.match(row, /not granted/i, "the row says the model-gateway grant is absent");
+  assert.match(row, /not granted/i, "the row says the three invoke rows are not granted");
   assert.doesNotMatch(row, /\|\s*implemented\s*\|/i, "the row does not claim the path is implemented");
-  const modelRows = tokenRows.filter((r) => r.audience === "model-gateway");
-  assert.ok(modelRows.length > 0 && modelRows.every((r) => r.granted === false), "the manifest refuses every model row");
-  const audiences = registry["quarry-edge"].audiences ?? [];
-  assert.ok(!audiences.includes("model-gateway"), "the committed registry gives quarry-edge no model-gateway audience");
+  const modelRows = tokenRows.filter((r) => r.audience === "model-gateway" || r.audience === "inference-core");
+  const granted = modelRows.filter((r) => r.granted === true).map((r) => r.name);
+  const closed = modelRows.filter((r) => r.granted === false).map((r) => r.name);
+  assert.deepEqual(granted, ["model-extract", "model-extract-inference"], "WS16.S2 grants the two extract rows and nothing else");
+  assert.deepEqual(closed, ["model-invoke", "model-stream", "model-audio"], "the three invoke and audio rows stay closed");
+  for (const name of [...granted, ...closed]) {
+    assert.ok(row.includes("`" + name + "`"), `the model-plane row names ${name}`);
+  }
+  assert.match(row, /model-extract[^|]*granted/i, "the row says the extract rows are granted");
+  const quarry = registry["quarry-edge"];
+  assert.ok(quarry.audiences.includes("model-gateway") && quarry.audiences.includes("inference-core"), "the committed registry gives quarry-edge both model audiences");
+  assert.deepEqual(quarry.scopesByAudience["model-gateway"], ["models:invoke"], "model-gateway carries models:invoke alone");
+  assert.deepEqual(quarry.scopesByAudience["inference-core"], ["inference:invoke", "models:invoke"], "inference-core carries both scopes");
+  assert.equal(quarry.retentionByAudience["model-gateway"], "tenant", "model-gateway is a tenant lane");
+  assert.equal(quarry.retentionByAudience["inference-core"], "tenant", "inference-core is a tenant lane");
+});
+
+test("every granted manifest row is allowed by the committed registry for quarry-edge, and the extract rows say they have no call site yet", () => {
+  const quarry = registry["quarry-edge"];
+  for (const requested of tokenRows.filter((r) => r.granted === true)) {
+    const allowed = quarry.scopesByAudience?.[requested.audience] ?? [];
+    assert.ok(quarry.audiences.includes(requested.audience), `${requested.name}: the registry names the audience ${requested.audience}`);
+    for (const scope of requested.scopes) {
+      assert.ok(allowed.includes(scope), `${requested.name}: the registry grants quarry-edge ${scope} on ${requested.audience}`);
+    }
+  }
+  for (const name of ["model-extract", "model-extract-inference"]) {
+    const row = tokenRows.find((r) => r.name === name);
+    assert.ok(row && typeof row.pending === "string" && row.used_by.length === 0, `${name} is pending its call site (WS16.S3)`);
+  }
+});
+
+test("the ingestion lane of quarry-edge is the one-time-code read alone, ZDR, requested by the mail-otp-read row only", () => {
+  const quarry = registry["quarry-edge"];
+  assert.deepEqual(quarry.scopesByAudience.ingestion, ["integration:otp:read"], "ingestion carries the code-read scope alone");
+  assert.equal(quarry.retentionByAudience.ingestion, "zdr", "the ingestion lane is ZDR");
+  const ingestionRows = tokenRows.filter((r) => r.audience === "ingestion");
+  assert.deepEqual(ingestionRows.map((r) => r.name), ["mail-otp-read"], "E3.1-h is the one row on the ingestion lane");
+  const [otp] = ingestionRows;
+  assert.deepEqual(otp.scopes, ["integration:otp:read"], "the row asks for the code-read scope alone");
+  assert.equal(otp.granted, true, "R-13 PR 1 granted the row");
+  assert.deepEqual(otp.used_by, ["crates/quarry-runtime/src/otp_ic_client.rs"], "the integration-core OTP client is the call site");
+  assert.ok(!tokenRows.some((r) => r.audience !== "ingestion" && r.scopes.includes("integration:otp:read")), "no other row carries the code-read scope");
 });
 
 test("every granted data-plane scope is in the committed registry for quarry-edge", () => {
@@ -285,7 +324,7 @@ test("each token-request row is named in the cross-plane integration table", () 
 test("the integration table does not list the semantic reranker among the Model Plane callers", () => {
   const line = read(paths.crossPlaneIntegration)
     .split(/\r?\n/)
-    .find((candidate) => candidate.includes("refuses the three Model Plane rows"));
+    .find((candidate) => candidate.includes("the three Model Plane rows"));
   assert.ok(line, "the Model Plane refusal sentence is present");
   assert.doesNotMatch(line, /semantic reranker/i, "the reranker no longer calls the Model Plane");
 });

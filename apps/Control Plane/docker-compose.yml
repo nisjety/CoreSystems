@@ -286,6 +286,17 @@ services:
             MODEL_PLANE_AUTH_ISSUER: ${AUTH_CORE_ISSUER:?AUTH_CORE_ISSUER is required}
             PLANE_TOKEN_ISSUER: ${AUTH_CORE_ISSUER:?AUTH_CORE_ISSUER is required}
             PLANE_SERVICE_PRINCIPALS_JSON: ${PLANE_SERVICE_PRINCIPALS_JSON:?PLANE_SERVICE_PRINCIPALS_JSON is required}
+            # Default-off switches for units that ship dark (R-13 PR 2). Compose passes
+            # them so an owner flip is one env line and a recreate, not a compose edit.
+            #   WEB_POLICY_CLAIM_ENABLED          WS7.I: put the org web_policy claim on
+            #                                     quarry / browser-broker tokens. Stays 0
+            #                                     until WS7.H (org-core) and WS7.I are
+            #                                     both deployed; 0 mints {"v":1,"rev":"0"}.
+            #   API_KEY_AGENT_EXCHANGE_ENABLED    INNH-10 CP-1: POST
+            #                                     /api/:audience/api-key-exchange. 0 answers
+            #                                     as if the route did not exist.
+            WEB_POLICY_CLAIM_ENABLED: ${WEB_POLICY_CLAIM_ENABLED:-0}
+            API_KEY_AGENT_EXCHANGE_ENABLED: ${API_KEY_AGENT_EXCHANGE_ENABLED:-0}
             USER_CORE_SERVICE_TOKEN: ${USER_CORE_AUTH_TOKEN:?USER_CORE_AUTH_TOKEN is required}
             # Dedicated read-only credential for user-core's exact Better Auth
             # membership decision. It must not be reused as a general internal key.
@@ -563,14 +574,26 @@ services:
             # exactly ONE place. No per-service .env.docker copy to drift out of sync.
             DATABASE_URL: postgres://${DB_USER:-coresystem}:${DB_PASSWORD:?DB_PASSWORD must be set in Control Plane .env}@controlplane-postgres:5432/org_core?sslmode=disable
             USER_CORE_SERVICE_TOKEN: ${USER_CORE_ORG_TOKEN:?USER_CORE_ORG_TOKEN is required}
-            # auth-core holds `org:retention:read:any`, the one scope that lets its
-            # token issuer read an org's ZDR posture ({zdrIntent, entitled}) from
-            # GET /internal/orgs/:orgId/retention-posture. It is deliberately not
-            # org:read:any (whole organization record) and nobody else holds it.
-            # org-core refuses to start without it on auth-core, and an org-core
-            # image that predates the scope refuses this whole registry, so this
-            # block and the org-core image ship together (org-core internal/http
+            # `org:retention:read:any` lets a caller read one org's ZDR posture
+            # ({zdrIntent, entitled}) from GET /internal/orgs/:orgId/retention-posture.
+            # It is deliberately not org:read:any (whole organization record). Exactly
+            # TWO principals hold it: auth-core (its token issuer) and quarry-edge (the
+            # fire-time schedule preflight, WS15.S4a). Nobody else may; the contract test
+            # TestOnlyAuthCoreAndQuarryEdgeMayReadRetentionPosture pins the pair. org-core
+            # refuses to start without it on auth-core, and an org-core image that
+            # predates a scope below refuses this whole registry, so this block and the
+            # org-core image ship together (org-core internal/http
             # retention_posture_contract_test.go reads this block as written).
+            #
+            # quarry-edge (R-13 PR 2, static credential; the token is minted once into the
+            # secrets store as QUARRY_ORG_CORE_SERVICE_TOKEN by scripts/run-control-plane.sh
+            # and MIRRORED, never re-minted, into Ingestion's .env.generated-secrets):
+            #   org:retention:read:any   the posture GET above, nothing else
+            #   org:keys:wrap:any        data-key generation under an org KEK (WS17.E2)
+            #   org:keys:unwrap:any      unwrap/rewrap (WS17.E2)
+            # The two org:keys scopes route to nothing until ORG_CORE_KEYS_ENABLED=1.
+            # auth-core additionally holds org:web-policy:read:any (WS7.H internal read,
+            # consumed by WS7.I behind WEB_POLICY_CLAIM_ENABLED=0).
             ORG_SIEM_DESTINATIONS_ENABLED: ${ORG_SIEM_DESTINATIONS_ENABLED:-0}
             # WS05-S6: DNS domain verification routes. Off (404) unless 1 or true; never an authorization input.
             ORG_DOMAIN_VERIFICATION_ENABLED: ${ORG_DOMAIN_VERIFICATION_ENABLED:-0}
@@ -584,8 +607,17 @@ services:
             ORG_CORE_SCIM_EDGE_TOKEN: ${ORG_CORE_SCIM_EDGE_TOKEN:-}
             ORG_CORE_SIEM_SEAL_KEY: ${ORG_CORE_SIEM_SEAL_KEY:-}
             ORG_CORE_SIEM_SEAL_KEY_ID: ${ORG_CORE_SIEM_SEAL_KEY_ID:-v1}
+            # Org key API (WS17.E2): per-org KEK/DEK wrap, unwrap and crypto-shred for
+            # Quarry browser profiles. Dark: with 0 the /internal/orgs/:orgId/keys routes
+            # are not registered and the quarry-edge key scopes above reach nothing. The
+            # master keys are NOT minted by the local runner: losing them destroys every
+            # wrapped KEK, so the owner generates them once (custody runbook) before
+            # flipping ORG_CORE_KEYS_ENABLED=1. Empty here means "unset".
+            ORG_CORE_KEYS_ENABLED: ${ORG_CORE_KEYS_ENABLED:-0}
+            ORG_CORE_KEY_MASTER_KEYS: ${ORG_CORE_KEY_MASTER_KEYS:-}
+            ORG_CORE_KEY_MASTER_ACTIVE: ${ORG_CORE_KEY_MASTER_ACTIVE:-}
             ORG_CORE_SERVICE_CREDENTIALS: >-
-                [{"principal":"anbud-core","audience":"org-core","token":"${ANBUD_ORG_CORE_SERVICE_TOKEN:?ANBUD_ORG_CORE_SERVICE_TOKEN is required}","scopes":["org:brreg:read"]},{"principal":"visibility-core","audience":"org-core","token":"${VISIBILITY_ORG_CORE_SERVICE_TOKEN:?VISIBILITY_ORG_CORE_SERVICE_TOKEN is required}","scopes":["org:website:read"]},{"principal":"verevon-gateway","audience":"org-core","token":"${GATEWAY_ORG_CORE_SERVICE_TOKEN:?GATEWAY_ORG_CORE_SERVICE_TOKEN is required}","scopes":["org:read:self","org:provision:self","org:settings:write:self","org:onboarding:write:self","org:brreg:read","org:erase:self","org:deletion:self","org:siem:manage:self","org:identity:admin:self"]},{"principal":"auth-core","audience":"org-core","token":"${AUTH_ORG_CORE_SERVICE_TOKEN:?AUTH_ORG_CORE_SERVICE_TOKEN is required}","scopes":["org:projection:write:any","org:projection:delete:any","org:retention:read:any","org:domain:read:any"]},{"principal":"billing-core","audience":"org-core","token":"${BILLING_ORG_CORE_SERVICE_TOKEN:?BILLING_ORG_CORE_SERVICE_TOKEN is required}","scopes":["org:read:any"]},{"principal":"session-core","audience":"org-core","token":"${SESSION_ORG_CORE_SERVICE_TOKEN:?SESSION_ORG_CORE_SERVICE_TOKEN is required}","scopes":["org:read:any","org:agent-policy:read:any"]},{"principal":"integration-corev2","audience":"org-core","token":"${INTEGRATION_ORG_CORE_SERVICE_TOKEN:?INTEGRATION_ORG_CORE_SERVICE_TOKEN is required}","scopes":["org:read:any"]},{"principal":"execution-core","audience":"org-core","token":"${EXECUTION_ORG_CORE_SERVICE_TOKEN:?EXECUTION_ORG_CORE_SERVICE_TOKEN is required}","scopes":["org:read:any"]},{"principal":"model-gateway","audience":"org-core","token":"${MODEL_GATEWAY_ORG_CORE_SERVICE_TOKEN:?MODEL_GATEWAY_ORG_CORE_SERVICE_TOKEN is required}","scopes":["org:read:any","org:model-entitlement:read:any"]},{"principal":"application-space-lifecycle","audience":"org-core","token":"${APPLICATION_ORG_CORE_SERVICE_TOKEN:?APPLICATION_ORG_CORE_SERVICE_TOKEN is required}","scopes":["org:read:any"]},{"principal":"inference-core","audience":"org-core","token":"${INFERENCE_ORG_CORE_SERVICE_TOKEN:?INFERENCE_ORG_CORE_SERVICE_TOKEN is required}","scopes":["org:model-entitlement:read:any"]},{"principal":"audit-core","audience":"org-core","token":"${AUDIT_ORG_CORE_SERVICE_TOKEN:?AUDIT_ORG_CORE_SERVICE_TOKEN is required}","scopes":["org:siem:read:any"]},{"principal":"browser-broker","audience":"org-core","token":"${BROWSER_BROKER_ORG_CORE_SERVICE_TOKEN:?BROWSER_BROKER_ORG_CORE_SERVICE_TOKEN is required}","scopes":["org:browser-site:read:any"]}]
+                [{"principal":"anbud-core","audience":"org-core","token":"${ANBUD_ORG_CORE_SERVICE_TOKEN:?ANBUD_ORG_CORE_SERVICE_TOKEN is required}","scopes":["org:brreg:read"]},{"principal":"visibility-core","audience":"org-core","token":"${VISIBILITY_ORG_CORE_SERVICE_TOKEN:?VISIBILITY_ORG_CORE_SERVICE_TOKEN is required}","scopes":["org:website:read"]},{"principal":"verevon-gateway","audience":"org-core","token":"${GATEWAY_ORG_CORE_SERVICE_TOKEN:?GATEWAY_ORG_CORE_SERVICE_TOKEN is required}","scopes":["org:read:self","org:provision:self","org:settings:write:self","org:onboarding:write:self","org:brreg:read","org:erase:self","org:deletion:self","org:siem:manage:self","org:identity:admin:self"]},{"principal":"auth-core","audience":"org-core","token":"${AUTH_ORG_CORE_SERVICE_TOKEN:?AUTH_ORG_CORE_SERVICE_TOKEN is required}","scopes":["org:projection:write:any","org:projection:delete:any","org:retention:read:any","org:web-policy:read:any","org:domain:read:any"]},{"principal":"billing-core","audience":"org-core","token":"${BILLING_ORG_CORE_SERVICE_TOKEN:?BILLING_ORG_CORE_SERVICE_TOKEN is required}","scopes":["org:read:any"]},{"principal":"session-core","audience":"org-core","token":"${SESSION_ORG_CORE_SERVICE_TOKEN:?SESSION_ORG_CORE_SERVICE_TOKEN is required}","scopes":["org:read:any","org:agent-policy:read:any"]},{"principal":"integration-corev2","audience":"org-core","token":"${INTEGRATION_ORG_CORE_SERVICE_TOKEN:?INTEGRATION_ORG_CORE_SERVICE_TOKEN is required}","scopes":["org:read:any"]},{"principal":"execution-core","audience":"org-core","token":"${EXECUTION_ORG_CORE_SERVICE_TOKEN:?EXECUTION_ORG_CORE_SERVICE_TOKEN is required}","scopes":["org:read:any"]},{"principal":"model-gateway","audience":"org-core","token":"${MODEL_GATEWAY_ORG_CORE_SERVICE_TOKEN:?MODEL_GATEWAY_ORG_CORE_SERVICE_TOKEN is required}","scopes":["org:read:any","org:model-entitlement:read:any"]},{"principal":"application-space-lifecycle","audience":"org-core","token":"${APPLICATION_ORG_CORE_SERVICE_TOKEN:?APPLICATION_ORG_CORE_SERVICE_TOKEN is required}","scopes":["org:read:any"]},{"principal":"inference-core","audience":"org-core","token":"${INFERENCE_ORG_CORE_SERVICE_TOKEN:?INFERENCE_ORG_CORE_SERVICE_TOKEN is required}","scopes":["org:model-entitlement:read:any"]},{"principal":"audit-core","audience":"org-core","token":"${AUDIT_ORG_CORE_SERVICE_TOKEN:?AUDIT_ORG_CORE_SERVICE_TOKEN is required}","scopes":["org:siem:read:any"]},{"principal":"browser-broker","audience":"org-core","token":"${BROWSER_BROKER_ORG_CORE_SERVICE_TOKEN:?BROWSER_BROKER_ORG_CORE_SERVICE_TOKEN is required}","scopes":["org:browser-site:read:any"]},{"principal":"quarry-edge","audience":"org-core","token":"${QUARRY_ORG_CORE_SERVICE_TOKEN:?QUARRY_ORG_CORE_SERVICE_TOKEN is required}","scopes":["org:retention:read:any","org:keys:wrap:any","org:keys:unwrap:any"]}]
         ports:
             - "127.0.0.1:${ORG_CORE_HTTP_HOST_PORT:-18080}:8080"
             - "127.0.0.1:${ORG_CORE_GRPC_HOST_PORT:-19090}:9090"
@@ -667,7 +699,7 @@ services:
             DATABASE_URL: postgres://${DB_USER:-coresystem}:${DB_PASSWORD:?DB_PASSWORD must be set in Control Plane .env}@controlplane-postgres:5432/billing_service?sslmode=disable
             ORG_CORE_SERVICE_TOKEN: ${BILLING_ORG_CORE_SERVICE_TOKEN:?BILLING_ORG_CORE_SERVICE_TOKEN is required}
             BILLING_CORE_SERVICE_CREDENTIALS: >-
-                [{"principal":"verevon-gateway","audience":"billing-core","token":"${GATEWAY_BILLING_CORE_SERVICE_TOKEN:?GATEWAY_BILLING_CORE_SERVICE_TOKEN is required}","scopes":["billing:account:read:self","billing:entitlement:read:self","billing:quota:read:self","billing:checkout:create:self","billing:checkout:confirm:self"]},{"principal":"auth-core","audience":"billing-core","token":"${AUTH_BILLING_CORE_SERVICE_TOKEN:?AUTH_BILLING_CORE_SERVICE_TOKEN is required}","scopes":["billing:organization:deactivate:any"]},{"principal":"session-core","audience":"billing-core","token":"${SESSION_BILLING_CORE_SERVICE_TOKEN:?SESSION_BILLING_CORE_SERVICE_TOKEN is required}","scopes":["billing:account:read:any"]},{"principal":"cost-core","audience":"billing-core","token":"${COST_BILLING_CORE_SERVICE_TOKEN:?COST_BILLING_CORE_SERVICE_TOKEN is required}","scopes":["billing:usage:write:any"]},{"principal":"integration-corev2","audience":"billing-core","token":"${INTEGRATION_BILLING_CORE_SERVICE_TOKEN:?INTEGRATION_BILLING_CORE_SERVICE_TOKEN is required}","scopes":["billing:usage:write:any"]}]
+                [{"principal":"verevon-gateway","audience":"billing-core","token":"${GATEWAY_BILLING_CORE_SERVICE_TOKEN:?GATEWAY_BILLING_CORE_SERVICE_TOKEN is required}","scopes":["billing:account:read:self","billing:entitlement:read:self","billing:quota:read:self","billing:checkout:create:self","billing:checkout:confirm:self"]},{"principal":"auth-core","audience":"billing-core","token":"${AUTH_BILLING_CORE_SERVICE_TOKEN:?AUTH_BILLING_CORE_SERVICE_TOKEN is required}","scopes":["billing:organization:deactivate:any"]},{"principal":"session-core","audience":"billing-core","token":"${SESSION_BILLING_CORE_SERVICE_TOKEN:?SESSION_BILLING_CORE_SERVICE_TOKEN is required}","scopes":["billing:account:read:any"]},{"principal":"cost-core","audience":"billing-core","token":"${COST_BILLING_CORE_SERVICE_TOKEN:?COST_BILLING_CORE_SERVICE_TOKEN is required}","scopes":["billing:usage:write:any"]},{"principal":"integration-corev2","audience":"billing-core","token":"${INTEGRATION_BILLING_CORE_SERVICE_TOKEN:?INTEGRATION_BILLING_CORE_SERVICE_TOKEN is required}","scopes":["billing:usage:write:any"]},{"principal":"quarry-edge","audience":"billing-core","token":"${QUARRY_BILLING_CORE_SERVICE_TOKEN:?QUARRY_BILLING_CORE_SERVICE_TOKEN is required}","scopes":["billing:quota:read:any","billing:entitlement:read:any"]}]
         ports:
             - "127.0.0.1:${BILLING_CORE_HTTP_HOST_PORT:-3014}:3014"
             - "127.0.0.1:${BILLING_CORE_GRPC_HOST_PORT:-50013}:50013"
@@ -897,7 +929,7 @@ services:
             ENVIRONMENT: ${ENVIRONMENT:-development}
             AUDIT_READ_ROLE_ENFORCEMENT: ${AUDIT_READ_ROLE_ENFORCEMENT:-enforce}
             AUDIT_CORE_SERVICE_CREDENTIALS: >-
-                [{"principal":"verevon-gateway","audience":"audit-core","token":"${GATEWAY_AUDIT_CORE_SERVICE_TOKEN:?GATEWAY_AUDIT_CORE_SERVICE_TOKEN is required}","scopes":["audit:read:self","audit:compliance:read:self"]},{"principal":"integration-corev2","audience":"audit-core","token":"${INTEGRATION_AUDIT_CORE_SERVICE_TOKEN:?INTEGRATION_AUDIT_CORE_SERVICE_TOKEN is required}","scopes":["audit:write"],"planes":["ingestion"]}]
+                [{"principal":"verevon-gateway","audience":"audit-core","token":"${GATEWAY_AUDIT_CORE_SERVICE_TOKEN:?GATEWAY_AUDIT_CORE_SERVICE_TOKEN is required}","scopes":["audit:read:self","audit:compliance:read:self"]},{"principal":"integration-corev2","audience":"audit-core","token":"${INTEGRATION_AUDIT_CORE_SERVICE_TOKEN:?INTEGRATION_AUDIT_CORE_SERVICE_TOKEN is required}","scopes":["audit:write"],"planes":["ingestion"]},{"principal":"quarry-control","audience":"audit-core","token":"${QUARRY_CONTROL_AUDIT_CORE_SERVICE_TOKEN:?QUARRY_CONTROL_AUDIT_CORE_SERVICE_TOKEN is required}","scopes":["audit:write"],"planes":["ingestion"]}]
         ports:
             # Native HTTP port 8187 (host and container). Kept clear of Model
             # Plane's browser-broker so the two never collide on the host.
@@ -1187,6 +1219,15 @@ services:
         volumes:
             - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
             - ./observability/rules:/etc/prometheus/rules:ro
+            # Bearer token for the quarry-edge job (authorization.credentials_file in
+            # prometheus.yml). The file must EXIST or Prometheus refuses its whole
+            # configuration, so the default is a tracked EMPTY placeholder; the local
+            # runner (scripts/run-control-plane.sh) points QUARRY_METRICS_TOKEN_FILE at a
+            # 0644 file under the gitignored observability/.secrets/ holding the value of
+            # QUARRY_EDGE_METRICS_TOKEN, and a release points it at the secret manager's
+            # file. The edge only serves /metrics when QUARRY_EDGE_METRICS_ENABLED=1
+            # (default 0, the owner flip), so with the placeholder the job reads as down.
+            - ${QUARRY_METRICS_TOKEN_FILE:-./observability/quarry-metrics-token.placeholder}:/etc/prometheus/secrets/quarry_metrics_token:ro
             - prometheus-data:/prometheus
         ports:
             - "127.0.0.1:${CONTROL_PROMETHEUS_HOST_PORT:-19095}:9090"

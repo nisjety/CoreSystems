@@ -23,6 +23,55 @@ const (
 var usageEventIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]*$`)
 var usageDimensionPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:/-]*$`)
 
+// Usage transport contract (W2-CP-U37). Producers publish one event per subject
+// `usage.<metric>` on the Control NATS; billing-core subscribes the whole tree. The
+// stream CONTROL_PLANE_EVENTS covers `usage.>`, so a producer that awaits the
+// JetStream ack (quarry-edge with QUARRY_EDGE__USAGE_BUS_URL set) gets
+// at-least-once delivery, and RecordUsage dedupes on event_id.
+const (
+	UsageSubjectFilter = "usage.>"
+	UsageSubjectPrefix = "usage."
+	QuarryUsageSource  = "quarry-edge"
+)
+
+// UsageSubjectForMetric is the subject a producer publishes a metric on.
+func UsageSubjectForMetric(metric string) string {
+	return UsageSubjectPrefix + metric
+}
+
+// QuarryBrowserMetrics are the seven quarry-edge metrics gated by
+// QUARRY_EDGE__USAGE_BROWSER_METRICS (quarry-runtime usage.rs metrics::BROWSER_METRICS).
+// The order matches the Rust list; usage_test.go pins both.
+var QuarryBrowserMetrics = []string{
+	"quarry.browser.second.agent",
+	"quarry.browser.second.interactive",
+	"quarry.agent.run",
+	"quarry.agent.step",
+	"quarry.crawl.page",
+	"quarry.extract.url",
+	"quarry.map.call",
+}
+
+// quarryLagoBillableMetricCodes maps each Quarry metric to its Lago billable-metric
+// code. The Lago adapter sends usage.Metric as the event code, so the code is the
+// metric name itself (Quarry BILLING.md: "codes must match exactly"); the map is the
+// one place that says which Quarry metrics Lago must have registered before
+// QUARRY_EDGE__USAGE_BROWSER_METRICS=on reaches invoices.
+var quarryLagoBillableMetricCodes = func() map[string]string {
+	codes := make(map[string]string, len(QuarryBrowserMetrics))
+	for _, metric := range QuarryBrowserMetrics {
+		codes[metric] = metric
+	}
+	return codes
+}()
+
+// LagoBillableMetricCode returns the Lago billable-metric code of a Quarry metric,
+// and false for a metric billing-core has no Quarry mapping for.
+func LagoBillableMetricCode(metric string) (string, bool) {
+	code, ok := quarryLagoBillableMetricCodes[metric]
+	return code, ok
+}
+
 func ValidateUsageEventID(eventID string) error {
 	if eventID == "" || eventID != strings.TrimSpace(eventID) {
 		return fmt.Errorf("event_id is required and must not contain surrounding whitespace")

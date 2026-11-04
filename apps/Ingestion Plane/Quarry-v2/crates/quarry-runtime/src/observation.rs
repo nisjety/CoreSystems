@@ -23,7 +23,7 @@ use quarry_core::contracts::{
     SnapshotTarget,
 };
 use quarry_core::error::{ErrorCode, QuarryError, QuarryResult};
-use quarry_core::event::EventType;
+use quarry_core::event::{ActionStartedPayload, EventType};
 use quarry_core::ids::kinds::ArtifactKind;
 use quarry_core::redaction::{self, FieldKind, Tally, RULE_VERSION};
 use quarry_core::zdr::{self, WriteKind, ZdrMode};
@@ -229,6 +229,10 @@ impl ObservationRunner {
                 "the file was attached to the exact input, but the page has not confirmed submission",
             ),
             AgentAction::DownloadRef { .. } | AgentAction::FrameDownloadRef { .. } => ActionOutcome::verified("download_captured_as_artifact"),
+            AgentAction::FillOtpRef { .. } => ActionOutcome::unknown(
+                "postcondition_required",
+                "the one-time code was inserted, but the page has not confirmed sign-in",
+            ),
             AgentAction::Click { .. }
             | AgentAction::ClickRef { .. }
             | AgentAction::FrameClickRef { .. }
@@ -276,7 +280,8 @@ impl ObservationRunner {
             | AgentAction::UploadRef { .. }
             | AgentAction::FrameUploadRef { .. }
             | AgentAction::DownloadRef { .. }
-            | AgentAction::FrameDownloadRef { .. } => {
+            | AgentAction::FrameDownloadRef { .. }
+            | AgentAction::FillOtpRef { .. } => {
                 return Err(QuarryError::new(
                     ErrorCode::TargetRepairRequired,
                     "snapshot actions require ObservationContext target resolution",
@@ -405,22 +410,27 @@ impl ObservationRunner {
             .await?;
 
         if let Some(events) = &self.events {
+            // E3.3-e1: `rect` is the target's box, for presentation only. No driver method
+            // reads a box yet (the CDP box-model call is not on BrowserDriver), so it stays
+            // None and the event keeps its shape.
+            let started = ActionStartedPayload {
+                step: ctx.step,
+                action: observation_redaction::action_for_event(
+                    &request.action,
+                    typed_kind,
+                    // X-19: the event keeps what the stored receipt keeps.
+                    quarry_core::redaction::action::record_policy(),
+                    redaction::mode(),
+                    &mut Tally::new(),
+                ),
+                rect: None,
+            };
             events
                 .emit_for_zdr(
                     request.zdr,
                     run_id.clone(),
                     EventType::ActionStarted,
-                    json!({
-                        "step": ctx.step,
-                        "action": observation_redaction::action_for_event(
-                            &request.action,
-                            typed_kind,
-                            // X-19: the event keeps what the stored receipt keeps.
-                            quarry_core::redaction::action::record_policy(),
-                            redaction::mode(),
-                            &mut Tally::new(),
-                        ),
-                    }),
+                    started.to_value(),
                     format!("{}:action:{}:started", run_id, ctx.step),
                 )
                 .await;
@@ -589,6 +599,15 @@ impl ObservationRunner {
                         )
                         .await?;
                 }
+                AgentAction::FillOtpRef { .. } => {
+                    // E3.1-a: the contract exists, the executor does not yet (E3.1-c
+                    // preconditions, E3.1-d OtpSource). Fail closed before any driver
+                    // call; the edge already refuses it while QUARRY_EDGE__FILL_OTP is off.
+                    return Err(QuarryError::new(
+                        ErrorCode::Unsupported,
+                        "fill_otp_ref has no executor on this runtime",
+                    ));
+                }
                 AgentAction::Evaluate { .. } => {
                     // Raw script is refused before any driver call. The edge
                     // gates it first; this keeps library callers (agent loop,
@@ -630,6 +649,17 @@ impl ObservationRunner {
         }
 
         ctx.key_focus = focus_after;
+
+        // E3.3-j: how long the page took to go quiet after this action, when the settle is on.
+        // A read-only action is not settled. A failed action returned above, so only an action
+        // that ran is settled. Nothing is retried.
+        let settle_ms = match crate::browser_driver::action_settle_bound() {
+            Some(bound) if !action_only_observes(&effective_action) => Some(
+                crate::browser_driver::settle_after_action(self.browser.as_ref(), session, bound)
+                    .await,
+            ),
+            _ => None,
+        };
 
         // SC4 T3: a page that did not answer one of the reads below in time does not
         // answer the next one either (a load that still holds it, a renderer in a
@@ -1069,6 +1099,7 @@ impl ObservationRunner {
             observed_action_count: ctx.observed_action_count,
             challenge_observation_count: ctx.challenge_observation_count,
             challenge_rate_per_mille,
+            settle_ms,
             ..driver_telemetry
         };
         let mut artifact_ids = Vec::new();
@@ -3284,6 +3315,7 @@ mod tests {
         assert!(!signal.requires_escalation);
         assert_eq!(observation.telemetry.challenge_observation_count, 0);
         assert_eq!(observation.telemetry.challenge_rate_per_mille, 0);
+        assert_eq!(observation.telemetry.settle_ms, None, "the settle is off unless its flag is set");
         // Repeated visits never exhaust anything: it is not a block.
         for _ in 0..4 {
             runner.execute(&request, &session, &mut ctx).await.expect("login stays reachable");

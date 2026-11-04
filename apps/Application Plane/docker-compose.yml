@@ -820,6 +820,9 @@ services:
             NOTIFICATION_DELIVERY_WORKER_LEASE: ${NOTIFICATION_DELIVERY_WORKER_LEASE:-30s}
             NOTIFICATION_GATEWAY_SERVICE_TOKEN: ${NOTIFICATION_GATEWAY_SERVICE_TOKEN:?NOTIFICATION_GATEWAY_SERVICE_TOKEN must be set for signed gateway delegation}
             NOTIFICATION_SUPPORT_WORKER_SERVICE_TOKEN: ${NOTIFICATION_SUPPORT_WORKER_SERVICE_TOKEN:-}
+            # Quarry's change monitor (quarry-control) may send change_detected notifications.
+            # Empty disables that caller, so no change alert is sent.
+            NOTIFICATION_QUARRY_CONTROL_SERVICE_TOKEN: ${NOTIFICATION_QUARRY_CONTROL_SERVICE_TOKEN:-}
             # Optional third authorized caller: Model Plane's capability-core,
             # for run-watch notifications (AUTO-2). Empty disables this
             # principal entirely, matching support-worker's optional pattern.

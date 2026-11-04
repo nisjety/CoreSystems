@@ -86,6 +86,7 @@ func delegatedPrincipal(tokenID string) Principal {
 		UserID:          "service:model-execution",
 		OrganizationID:  "org-test",
 		PrincipalType:   "service",
+		Scopes:          []string{IntegrationReadScope},
 		DelegatedUserID: "user-1",
 		TokenID:         tokenID,
 		TokenExpiresAt:  time.Now().Add(90 * time.Second),
@@ -122,13 +123,48 @@ func TestInternalOrBearerAcceptsDistinctDelegatedTokensIndependently(t *testing.
 func TestInternalOrBearerDoesNotLimitTokensThatNameNoActingUser(t *testing.T) {
 	for name, principal := range map[string]Principal{
 		"interactive user":    {UserID: "user-1", OrganizationID: "org-test", PrincipalType: "user"},
-		"plain service token": {UserID: "service:model-execution", OrganizationID: "org-test", PrincipalType: "service"},
+		"plain service token": {UserID: "service:model-execution", OrganizationID: "org-test", PrincipalType: "service", Scopes: []string{IntegrationReadScope, IntegrationWriteScope}},
 	} {
 		app := delegatedTenantApp(principal)
 		for call := 0; call < 3; call++ {
 			if got := tenantStatus(t, app); got != fiber.StatusNoContent {
 				t.Fatalf("%s call %d status = %d, want %d", name, call, got, fiber.StatusNoContent)
 			}
+		}
+	}
+}
+
+// W2-CP-R13-1 security review: quarry-edge holds the ingestion audience with
+// integration:otp:read alone. Read routes check no scope of their own, so the
+// bearer path itself must refuse a service principal that holds neither
+// general integration scope, before the single-use guard consumes the token.
+func TestInternalOrBearerRefusesAServicePrincipalWithoutAnIntegrationScope(t *testing.T) {
+	for name, scopes := range map[string][]string{
+		"otp read only": {"integration:otp:read"},
+		"no scope":      nil,
+		"other plane":   {"shipping:read", "imports:read"},
+	} {
+		principal := Principal{UserID: "service:quarry-edge", OrganizationID: "org-test", PrincipalType: "service", Scopes: scopes}
+		if got := tenantStatus(t, delegatedTenantApp(principal)); got != fiber.StatusForbidden {
+			t.Fatalf("%s: status = %d, want %d", name, got, fiber.StatusForbidden)
+		}
+	}
+	delegated := delegatedPrincipal("jti-refused-scope")
+	delegated.Scopes = []string{"integration:otp:read"}
+	if got := tenantStatus(t, delegatedTenantApp(delegated)); got != fiber.StatusForbidden {
+		t.Fatalf("delegated otp-only: status = %d, want %d", got, fiber.StatusForbidden)
+	}
+	delegated.Scopes = []string{IntegrationReadScope}
+	if got := tenantStatus(t, delegatedTenantApp(delegated)); got != fiber.StatusNoContent {
+		t.Fatalf("refused attempt consumed the single-use token: status = %d, want %d", got, fiber.StatusNoContent)
+	}
+	for name, scopes := range map[string][]string{
+		"read":  {IntegrationReadScope},
+		"write": {IntegrationWriteScope},
+	} {
+		principal := Principal{UserID: "service:conversation-core", OrganizationID: "org-test", PrincipalType: "service", Scopes: scopes}
+		if got := tenantStatus(t, delegatedTenantApp(principal)); got != fiber.StatusNoContent {
+			t.Fatalf("%s: status = %d, want %d", name, got, fiber.StatusNoContent)
 		}
 	}
 }

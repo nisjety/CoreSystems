@@ -173,6 +173,13 @@ func main() {
 		CrawlLimits:       crawlLimits,
 	})
 	go schedMgr.Run(rootCtx)
+	// Schedule request loop (WS15.S3): applies the trigger and backfill rows
+	// control records, every 2 s. Off by default; it finds rows only when
+	// control's QUARRY_CONTROL__SCHEDULE_REQUESTS is on too.
+	if schedules.RequestsEnabled() {
+		go func() { _ = schedMgr.RunRequests(rootCtx) }()
+		log.Info().Msg("schedule request loop is ON (QUARRY_SCHEDULE_REQUESTS)")
+	}
 
 	jobsMgr := jobs.New(c, jobs.Config{
 		ControlBaseURL:    controlURL,

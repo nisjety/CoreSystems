@@ -822,6 +822,16 @@ const monitoringCheckNowInput = z.object({
   url: z.string().url(),
 })
 
+// The gateway accepts only the fixed cadences; Quarry derives the cron from them.
+const monitoringCreateMonitorInput = z.object({
+  url: z.string().url(),
+  preset: z.enum(['hourly', 'daily', 'weekly']).optional(),
+})
+
+const monitoringDeleteMonitorInput = z.object({
+  monitorId: z.string().min(1),
+})
+
 // The client always sends confirm: true itself and never lets the caller
 // override it (see eraseMyAccount); no input fields are meaningful here.
 const privacyEraseMyAccountInput = z.object({})
@@ -901,33 +911,61 @@ const ingestionsCreateRunInput = z
     kind: z.string().min(1),
     urls: z.array(z.string().url()).optional(),
     url: z.string().url().optional(),
-    prompt: z.string().trim().optional(),
+    // Extract only: a JSON Schema object (or the same document as text).
+    schema: z.union([z.record(z.string(), z.unknown()), z.string()]).optional(),
+    // Extract only: instructions for the model (1 to 10,000 characters after trimming).
+    prompt: z.string().trim().max(10_000).optional(),
   })
   .refine((value) => (value.kind === 'batch' ? (value.urls?.length ?? 0) > 0 : !!value.url), {
     message: "kind 'batch' requires a non-empty 'urls' array; any other kind requires 'url'",
   })
 
+const ingestionsJobControlInput = z.object({
+  jobId: z.string().min(1),
+  action: z.enum(['pause', 'resume', 'cancel']),
+})
+
+const ingestionsStartAgentRunInput = z.object({
+  url: z.string().url(),
+  goal: z.string().trim().min(1).max(2000),
+  maxSteps: z.number().int().min(1).max(100).optional(),
+  allowedDomains: z.array(z.string().min(1)).max(50).optional(),
+})
+
+// WS15.L5: a schedule is created paused-by-default upstream and activated by a
+// separate step, so this input has no 'activate' member and the client never
+// sends one. 'batch' schedules carry 'urls' (the owner rejects a batch with no
+// valid URL); every other kind carries 'targetUrl'.
 const ingestionsCreateScheduleInput = z
   .object({
     name: z.string().trim().min(1),
     kind: z.string().min(1),
-    targetUrl: z.string().url(),
+    targetUrl: z.string().url().optional(),
+    urls: z.array(z.string().url()).min(1).optional(),
+    maxPages: z.number().int().positive().optional(),
+    overlapPolicy: z.enum(['skip', 'cancel', 'allow']).optional(),
     cron: z.string().trim().optional(),
     scheduleAt: z.string().datetime().optional(),
   })
+  .strict()
   .refine((value) => !!value.cron || !!value.scheduleAt, {
     message: "Provide either 'cron' or 'scheduleAt'",
   })
+  .refine((value) => (value.kind === 'batch' ? (value.urls?.length ?? 0) > 0 : !!value.targetUrl), {
+    message: "kind 'batch' requires a non-empty 'urls' array; any other kind requires 'targetUrl'",
+  })
 
-const ingestionsRunScheduleActionInput = z
+// Pausing a schedule is reversible and loses nothing, so it needs no approval.
+const ingestionsPauseScheduleInput = z.object({
+  scheduleId: z.string().min(1),
+})
+
+// Every other schedule state change goes through one approval-gated action.
+// The 'action' values are the wire verbs POST /api/ingestions/actions already
+// takes, so the gateway split is routing only.
+const ingestionsChangeScheduleStateInput = z
   .object({
-    action: z.enum([
-      'pause_schedule',
-      'unpause_schedule',
-      'trigger_schedule',
-      'backfill_schedule',
-      'delete_schedule',
-    ]),
+    action: z.enum(['unpause_schedule', 'trigger_schedule', 'backfill_schedule', 'delete_schedule']),
     scheduleId: z.string().min(1),
     startAt: z.string().datetime().optional(),
     endAt: z.string().datetime().optional(),
@@ -935,6 +973,15 @@ const ingestionsRunScheduleActionInput = z
   .refine((value) => value.action !== 'backfill_schedule' || (!!value.startAt && !!value.endAt), {
     message: "backfill_schedule requires 'startAt' and 'endAt'",
   })
+
+// Run control (WS15.L5). 'kind' picks the Quarry job family; crawl is the only one the
+// gateway proxies today, so it is also the default when 'kind' is omitted.
+const ingestionsRunControlKind = z.enum(['crawl'])
+
+const ingestionsRunRefInput = z.object({
+  runId: z.string().trim().min(1),
+  kind: ingestionsRunControlKind.optional(),
+})
 
 const ingestionsCreateSourceInput = z.object({
   name: z.string().trim().min(1),
@@ -1479,6 +1526,26 @@ const browserRunStartInput = z.object({
 const browserRunControlInput = z.object({
   runId: z.string().min(1),
   action: z.enum(['pause', 'resume', 'stop']),
+})
+
+// A person's steer into a live browser-agent run (E3.3-g): one message typed in the dock while the
+// run works, which the run takes at its next step. `clientMessageId` names the message, so a repeated
+// send of the same id is one message. The owner holds the text in memory until a step takes it, and
+// never writes it to the run's event log or to the transcript.
+const browserRunSteerInput = z.object({
+  runId: z.string().min(1).max(128),
+  content: z.string().trim().min(1).max(2000),
+  clientMessageId: z
+    .string()
+    .regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/)
+    .optional(),
+}).strict()
+
+// `queued`: the run has the message and takes it at its next step. `run_ended`: the run ended first, so
+// nothing was taken and nothing was started, and the person decides what happens to the text.
+export const browserRunSteerOutput = z.object({
+  outcome: z.enum(['queued', 'run_ended']),
+  clientMessageId: z.string().min(1).max(128).optional(),
 })
 
 const browserOmniboxSearchInput = z.object({
@@ -3102,6 +3169,28 @@ export const actionRegistry = [
     outputSchema: envelopeStatusOutput,
   },
   {
+    id: 'monitoring.create_monitor',
+    label: 'Create change monitor',
+    description: 'Re-check a URL hourly, daily or weekly and record a baseline whenever its content changes.',
+    ownerPlane: 'ingestion',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: monitoringCreateMonitorInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'monitoring.delete_monitor',
+    label: 'Delete change monitor',
+    description: 'Stop and remove a recurring change monitor. Baselines already captured are kept.',
+    ownerPlane: 'ingestion',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: false,
+    inputSchema: monitoringDeleteMonitorInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
     id: 'privacy.erase_my_account',
     label: 'Erase my account',
     description: 'Irreversibly erase the caller\'s own account (GDPR Art. 17). Requires a client-side typed-confirm and step-up re-authentication that this contract cannot itself enforce.',
@@ -3212,9 +3301,31 @@ export const actionRegistry = [
     outputSchema: envelopeStatusOutput,
   },
   {
+    id: 'ingestions.job_control',
+    label: 'Pause, resume or cancel job',
+    description: 'Pause, resume or cancel a running crawl or batch job. Scrape, search, extract and agent runs finish in one request and cannot be controlled.',
+    ownerPlane: 'ingestion',
+    risk: 'medium',
+    requiresApproval: false,
+    reversible: false,
+    inputSchema: ingestionsJobControlInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'ingestions.start_agent_run',
+    label: 'Start browser agent run',
+    description: 'Open a browser session on a URL and start a durable browser-agent run that works toward a goal within a step budget.',
+    ownerPlane: 'model',
+    risk: 'medium',
+    requiresApproval: false,
+    reversible: false,
+    inputSchema: ingestionsStartAgentRunInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
     id: 'ingestions.create_schedule',
     label: 'Create ingestion schedule',
-    description: 'Create a recurring or one-time-scheduled ingestion job for a target URL.',
+    description: 'Create a recurring or one-time-scheduled ingestion job (crawl, scrape, extract, search, or a batch of URLs). The schedule is created inactive and is never activated by this action.',
     ownerPlane: 'ingestion',
     risk: 'medium',
     requiresApproval: false,
@@ -3223,14 +3334,69 @@ export const actionRegistry = [
     outputSchema: envelopeStatusOutput,
   },
   {
-    id: 'ingestions.run_schedule_action',
-    label: 'Run schedule action',
-    description: 'Pause, unpause, trigger, backfill, or delete an existing ingestion schedule.',
+    id: 'ingestions.get_run_status',
+    label: 'Get ingestion run status',
+    description: 'Read the status, phase, desired state and progress of one crawl job. Read only.',
+    ownerPlane: 'ingestion',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: ingestionsRunRefInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'ingestions.pause_run',
+    label: 'Pause ingestion run',
+    description: 'Ask a running crawl to pause. Work already fetched is kept; resume continues it.',
     ownerPlane: 'ingestion',
     risk: 'medium',
     requiresApproval: false,
     reversible: true,
-    inputSchema: ingestionsRunScheduleActionInput,
+    inputSchema: ingestionsRunRefInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'ingestions.resume_run',
+    label: 'Resume ingestion run',
+    description: 'Ask a paused crawl to continue from where it stopped.',
+    ownerPlane: 'ingestion',
+    risk: 'medium',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: ingestionsRunRefInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'ingestions.cancel_run',
+    label: 'Cancel ingestion run',
+    description: 'Stop a crawl for good. A cancelled run cannot be resumed; pages already stored are kept.',
+    ownerPlane: 'ingestion',
+    risk: 'medium',
+    requiresApproval: true,
+    reversible: false,
+    inputSchema: ingestionsRunRefInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'ingestions.pause_schedule',
+    label: 'Pause ingestion schedule',
+    description: 'Pause an ingestion schedule so it stops firing. Unpausing is a separate state change.',
+    ownerPlane: 'ingestion',
+    risk: 'medium',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: ingestionsPauseScheduleInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'ingestions.change_schedule_state',
+    label: 'Change schedule state',
+    description: 'Unpause, trigger, backfill, or delete an existing ingestion schedule. Deleting a schedule cannot be undone.',
+    ownerPlane: 'ingestion',
+    risk: 'medium',
+    requiresApproval: true,
+    reversible: false,
+    inputSchema: ingestionsChangeScheduleStateInput,
     outputSchema: envelopeStatusOutput,
   },
   {
@@ -3871,6 +4037,17 @@ export const actionRegistry = [
     reversible: true,
     inputSchema: browserRunControlInput,
     outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'browser_run.steer',
+    label: 'Steer browser agent run',
+    description: 'Send one message from the person into a running browser-agent run. The run takes it at its next step. If the run ends first it answers run_ended and nothing starts. Human-only, from the browser dock: a model cannot send it. Ephemeral: the owner holds the text in memory until a step takes it and never writes it to the run event log or the transcript. Refused under zero data retention. Not reversible once taken.',
+    ownerPlane: 'model',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: false,
+    inputSchema: browserRunSteerInput,
+    outputSchema: browserRunSteerOutput,
   },
   {
     id: 'browser_omnibox.search',

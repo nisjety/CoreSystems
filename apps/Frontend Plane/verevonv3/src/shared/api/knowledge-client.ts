@@ -97,15 +97,29 @@ export interface ScrapeRequest {
   signals?: Record<string, unknown>
   /** Output formats quarry-edge should return. The gateway adds `['markdown']` when absent so the
    * text comes back inline in `data.markdown` instead of as an artifact reference. */
-  formats?: string[]
+  /** Plain format names, or objects: `{type:'json',schema}`, `{type:'summary'}`, `{type:'question',question}`, `{type:'highlights',query}` (INNH-1). */
+  formats?: Array<string | Record<string, unknown>>
   only_main_content?: boolean
   include_tags?: string[]
   exclude_tags?: string[]
+  /** Upper bound for the whole fetch; quarry-edge applies its own default when absent. */
+  timeout_ms?: number
+  /** Content extractor: main content (default), the whole body without scripts, or the raw document. */
+  extractor?: 'readability' | 'clean_full' | 'raw'
+  /** Drop inline base64 images from the markdown. */
+  remove_base64_images?: boolean
+  /** Browser steps before the capture (`wait`, `click`, `write`, `press`, `scroll`, `select`). Needs the edge's scrape-actions switch. */
+  actions?: Array<Record<string, unknown>>
+  /** What a failed step does: stop (`abort`, the edge's default) or go on (`continue`). */
+  actions_on_error?: 'abort' | 'continue'
   /** When true, quarry-edge persists the fetched page into the knowledge base
    * (not just returns it). Omit/false for preview-only scrapes. */
   ingest?: boolean
   /** WS13.7: screenshot and PDF captures. Sent as `formats` entries on `/scrape` only; the cached preview never sends them. */
   capture?: ScrapeCaptureRequest
+  /** Freshness in milliseconds: a stored result this old or newer is served without a fetch. 0 never reads the cache.
+   * Quarry answers 400 `feature_disabled` while `QUARRY_EDGE__SCRAPE_MAX_AGE` is off. */
+  max_age?: number
 }
 
 export interface CrawlRequest {
@@ -123,6 +137,21 @@ export interface CrawlRequest {
   allowSubdomains?: boolean
   /** WS14.S3: follow links to unrelated hosts. UI only; the gateway drops it for a Model proposal. */
   allowExternalLinks?: boolean
+  /** Sitemap discovery: `skip` (default), `include` (sitemap URLs join the links) or `only` (sitemap URLs alone). */
+  sitemap?: 'skip' | 'include' | 'only'
+  /** Cleaning for every page of the crawl, as on `/scrape`. The inner keys are snake_case. */
+  scrapeOptions?: CrawlPageScrapeOptions
+}
+
+/** The per-page subset of `/scrape` options a crawl accepts (INNH-6). */
+export interface CrawlPageScrapeOptions {
+  formats?: Array<'markdown' | 'html' | 'rawHtml' | 'links' | 'metadata'>
+  only_main_content?: boolean
+  include_tags?: string[]
+  exclude_tags?: string[]
+  remove_base64_images?: boolean
+  extractor?: 'readability' | 'clean_full' | 'raw'
+  timeout_ms?: number
 }
 
 /** WS14.S6: the scope a crawl runs with, echoed by the handoff (`effective`). */
@@ -550,6 +579,79 @@ export async function deleteDocument(orgId: string, id: string, signal?: AbortSi
   })
 }
 
+/** W2-U65-51: the edge caps the crawl scope options; the action schema and these helpers agree. */
+export const CRAWL_PATTERN_MAX_LENGTH = 512
+export const CRAWL_PATTERN_MAX_COUNT = 100
+export const CRAWL_MAX_DEPTH = 10
+
+/** W2-U65-51: build flag for the crawl scope options and the scrape captures in the composer.
+ * Off unless `VITE_KNOWLEDGE_SCRAPE_OPTIONS_ENABLED=true`; off, the composer sends what it sent before. */
+export function knowledgeScrapeOptionsEnabled(): boolean {
+  return (import.meta.env as Record<string, string | undefined>).VITE_KNOWLEDGE_SCRAPE_OPTIONS_ENABLED === 'true'
+}
+
+/** Split a pattern box into patterns: one per line, or comma separated (a comma inside
+ * `{a,b}` braces stays part of its glob). Blank, over-long and repeated entries are dropped
+ * and the list is capped, the same bounds the edge enforces. */
+export function parseCrawlPatterns(text: string): string[] {
+  const parts: string[] = []
+  for (const line of text.split(/\r?\n/)) {
+    let depth = 0
+    let current = ''
+    for (const char of line) {
+      if (char === '{') depth += 1
+      else if (char === '}') depth = Math.max(0, depth - 1)
+      if (char === ',' && depth === 0) {
+        parts.push(current)
+        current = ''
+      } else {
+        current += char
+      }
+    }
+    parts.push(current)
+  }
+  const seen = new Set<string>()
+  for (const part of parts) {
+    const pattern = part.trim()
+    if (pattern.length === 0 || pattern.length > CRAWL_PATTERN_MAX_LENGTH) continue
+    seen.add(pattern)
+    if (seen.size >= CRAWL_PATTERN_MAX_COUNT) break
+  }
+  return [...seen]
+}
+
+/** The crawl scope options the user chose. A field the user left alone is absent, so the
+ * edge applies its own default; `allowSubdomains` is sent only when ticked. */
+export type CrawlScopeOptions = Pick<CrawlRequest, 'maxDepth' | 'includePaths' | 'excludePaths' | 'allowSubdomains'>
+
+export function buildCrawlScopeOptions(input: {
+  maxDepth?: number
+  includeText?: string
+  excludeText?: string
+  allowSubdomains?: boolean
+}): CrawlScopeOptions {
+  const include = parseCrawlPatterns(input.includeText ?? '')
+  const exclude = parseCrawlPatterns(input.excludeText ?? '')
+  const depth = input.maxDepth
+  return {
+    ...(depth !== undefined && Number.isFinite(depth) && depth >= 1
+      ? { maxDepth: Math.min(CRAWL_MAX_DEPTH, Math.round(depth)) }
+      : {}),
+    ...(include.length > 0 ? { includePaths: include } : {}),
+    ...(exclude.length > 0 ? { excludePaths: exclude } : {}),
+    ...(input.allowSubdomains === true ? { allowSubdomains: true } : {}),
+  }
+}
+
+/** The captures the user ticked. `undefined` when none: a capture is never sent as `false`. */
+export function buildCaptureRequest(input: { screenshot?: boolean; pdf?: boolean }): ScrapeCaptureRequest | undefined {
+  const capture: ScrapeCaptureRequest = {
+    ...(input.screenshot === true ? { screenshot: true } : {}),
+    ...(input.pdf === true ? { pdf: true } : {}),
+  }
+  return capture.screenshot || capture.pdf ? capture : undefined
+}
+
 export async function startCrawl(
   orgId: string,
   body: CrawlRequest,
@@ -569,6 +671,8 @@ export async function startCrawl(
       ...(body.excludePaths?.length ? { excludePaths: body.excludePaths } : {}),
       ...(body.allowSubdomains === undefined ? {} : { allowSubdomains: body.allowSubdomains }),
       ...(body.allowExternalLinks === undefined ? {} : { allowExternalLinks: body.allowExternalLinks }),
+      ...(body.sitemap ? { sitemap: body.sitemap } : {}),
+      ...(body.scrapeOptions && Object.keys(body.scrapeOptions).length ? { scrapeOptions: body.scrapeOptions } : {}),
     }),
     headers: orgHeaders(orgId),
     signal,

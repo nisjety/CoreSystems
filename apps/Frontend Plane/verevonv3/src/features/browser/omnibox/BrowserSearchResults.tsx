@@ -51,6 +51,8 @@ export function BrowserSearchResults(props: {
   zdr: boolean
   /** The host this session is limited to, when a result on another host was refused. */
   limitedToHost?: string | null
+  /** The host of the result that was refused, named in the notice when known. */
+  refusedHost?: string | null
   /** Opens a result: the same navigation the address bar performs. */
   onOpen: (url: string) => void
   onClose: () => void
@@ -100,8 +102,12 @@ export function BrowserSearchResults(props: {
       </Show>
       <Show when={props.limitedToHost}>
         {(host) => (
-          <p class="browser-search-results__note" role="alert">
-            Denne økten er begrenset til {host()}.
+          <p class="browser-search-results__note" role="alert" data-reason="outside_scope">
+            Denne økten er begrenset til {host()}
+            <Show when={props.refusedHost && props.refusedHost !== host()}>
+              {' '}og kan ikke åpne {props.refusedHost}
+            </Show>
+            . Åpne resultatet i en ny økt, eller ta over nettleseren selv.
           </p>
         )}
       </Show>

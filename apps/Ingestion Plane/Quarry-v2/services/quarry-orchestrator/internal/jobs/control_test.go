@@ -159,6 +159,7 @@ func TestEscalate_TerminatesAfterGrace(t *testing.T) {
 	require.Len(t, api.finals, 1)
 	require.Equal(t, "cancelled", api.finals[0]["status"])
 	require.Equal(t, true, api.finals[0]["forced"])
+	require.Equal(t, "org_a", api.finals[0]["org_id"], "a finalize names the job's org (D2-050)")
 }
 
 // TestSweep_TimedOutBecomesTypedTerminal: a workflow that closed TIMED_OUT ends the
@@ -183,6 +184,7 @@ func TestSweep_TimedOutBecomesTypedTerminal(t *testing.T) {
 	require.Equal(t, []string{"job_d"}, api.finalIDs)
 	require.Equal(t, "timed_out", api.finals[0]["status"])
 	require.Equal(t, "execution", api.finals[0]["timeout_type"])
+	require.Equal(t, "org_a", api.finals[0]["org_id"], "a finalize names the job's org (D2-050)")
 }
 
 // TestSweep_RepeatedPassIsNoop: once finalized the job leaves the running list, so

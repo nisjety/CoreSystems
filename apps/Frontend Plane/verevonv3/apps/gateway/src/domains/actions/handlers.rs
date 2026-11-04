@@ -31,9 +31,13 @@ use super::dispatchers::{
     dispatch_inbox_release_draft_lease, dispatch_inbox_remove_tag, dispatch_inbox_review_ai_action,
     dispatch_inbox_save_draft, dispatch_inbox_send_reply, dispatch_inbox_set_assignment,
     dispatch_inbox_set_status, dispatch_inbox_submit_feedback, dispatch_inbox_workspace_set_pinned,
-    dispatch_inbox_workspace_set_read, dispatch_ingestions_create_run,
+    dispatch_inbox_workspace_set_read, dispatch_ingestions_cancel_run,
+    dispatch_ingestions_change_schedule_state, dispatch_ingestions_create_run,
+    dispatch_ingestions_job_control, dispatch_ingestions_start_agent_run,
     dispatch_ingestions_create_schedule, dispatch_ingestions_create_source,
-    dispatch_ingestions_delete_source, dispatch_ingestions_run_schedule_action,
+    dispatch_ingestions_delete_source, dispatch_ingestions_get_run_status,
+    dispatch_ingestions_pause_run, dispatch_ingestions_pause_schedule,
+    dispatch_ingestions_resume_run,
     dispatch_integrations_disconnect, dispatch_integrations_disconnect_chatgpt_subscription,
     dispatch_integrations_extend_inbox_history, dispatch_integrations_start_chatgpt_subscription,
     dispatch_integrations_start_connect_session, dispatch_integrations_trigger_inbox_sync,
@@ -46,7 +50,9 @@ use super::dispatchers::{
     dispatch_mcp_share_server, dispatch_membership_invite_member,
     dispatch_membership_remove_member, dispatch_membership_update_member_role,
     dispatch_memory_delete, dispatch_memory_remember, dispatch_memory_reset,
-    dispatch_memory_set_state, dispatch_monitoring_check_now, dispatch_navbar_create_calendar_event,
+    dispatch_memory_set_state, dispatch_monitoring_check_now,
+    dispatch_monitoring_create_monitor, dispatch_monitoring_delete_monitor,
+    dispatch_navbar_create_calendar_event,
     dispatch_navbar_create_calendar_note, dispatch_navbar_mark_notification_read,
     dispatch_navbar_save_theme, dispatch_navbar_submit_support_request,
     dispatch_notification_delete, dispatch_notification_mark_all_read,
@@ -293,8 +299,20 @@ pub(super) async fn execute_action(
             dispatch_mcp_delete_server(&state, &user, &headers, &body.input).await
         }
         "mcp.share_server" => dispatch_mcp_share_server(&state, &user, &headers, &body.input).await,
+        "ingestions.job_control" => {
+            dispatch_ingestions_job_control(&state, &user, &headers, &body.input).await
+        }
+        "ingestions.start_agent_run" => {
+            dispatch_ingestions_start_agent_run(&state, &user, &headers, &body.input).await
+        }
         "monitoring.check_now" => {
             dispatch_monitoring_check_now(&state, &user, &headers, &body.input).await
+        }
+        "monitoring.create_monitor" => {
+            dispatch_monitoring_create_monitor(&state, &user, &headers, &body.input).await
+        }
+        "monitoring.delete_monitor" => {
+            dispatch_monitoring_delete_monitor(&state, &user, &headers, &body.input).await
         }
         "privacy.erase_my_account" => {
             dispatch_privacy_erase_my_account(&state, &user, &body.input).await
@@ -315,8 +333,23 @@ pub(super) async fn execute_action(
         "ingestions.create_schedule" => {
             dispatch_ingestions_create_schedule(&state, &user, &headers, &body.input).await
         }
-        "ingestions.run_schedule_action" => {
-            dispatch_ingestions_run_schedule_action(&state, &user, &headers, &body.input).await
+        "ingestions.pause_schedule" => {
+            dispatch_ingestions_pause_schedule(&state, &user, &headers, &body.input).await
+        }
+        "ingestions.change_schedule_state" => {
+            dispatch_ingestions_change_schedule_state(&state, &user, &headers, &body.input).await
+        }
+        "ingestions.get_run_status" => {
+            dispatch_ingestions_get_run_status(&state, &user, &headers, &body.input).await
+        }
+        "ingestions.pause_run" => {
+            dispatch_ingestions_pause_run(&state, &user, &headers, &body.input).await
+        }
+        "ingestions.resume_run" => {
+            dispatch_ingestions_resume_run(&state, &user, &headers, &body.input).await
+        }
+        "ingestions.cancel_run" => {
+            dispatch_ingestions_cancel_run(&state, &user, &headers, &body.input).await
         }
         "ingestions.create_source" => {
             dispatch_ingestions_create_source(&state, &user, &headers, &body.input).await
@@ -721,4 +754,59 @@ pub(super) async fn reconcile_ticket_create(
     Path(idempotency_key): Path<String>,
 ) -> Response {
     reconcile_ticket_create_dispatch(&state, &user, &idempotency_key).await
+}
+
+#[cfg(test)]
+mod ingestions_dispatch_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn caller() -> AuthenticatedUser {
+        AuthenticatedUser {
+            user_id: "user-1".to_owned(),
+            user_email: "user@example.invalid".to_owned(),
+            user_name: "User".to_owned(),
+            user_image: None,
+            email_verified: true,
+            auth_role: Some("member".to_owned()),
+            active_org_id: Some("org-1".to_owned()),
+            authorized_membership: None,
+        }
+    }
+
+    async fn run(action_id: &str, input: Value) -> StatusCode {
+        execute_action(
+            State(crate::tests::test_state(false)),
+            Extension(caller()),
+            HeaderMap::new(),
+            Json(ExecuteActionRequest {
+                action_id: action_id.to_owned(),
+                idempotency_key: String::new(),
+                input,
+            }),
+        )
+        .await
+        .status()
+    }
+
+    /// The registry (WS15.L5) split `run_schedule_action` into two actions and added
+    /// four run-control ones. Each new id has a live dispatch (an empty input is a
+    /// 400 from its own validation, not the 501 of an unknown id); the old id has none.
+    #[tokio::test]
+    async fn the_new_ids_dispatch_and_the_removed_id_does_not() {
+        for id in [
+            "ingestions.get_run_status",
+            "ingestions.pause_run",
+            "ingestions.resume_run",
+            "ingestions.cancel_run",
+            "ingestions.pause_schedule",
+            "ingestions.change_schedule_state",
+        ] {
+            assert_eq!(run(id, json!({})).await, StatusCode::BAD_REQUEST, "{id}");
+        }
+        assert_eq!(
+            run("ingestions.run_schedule_action", json!({ "action": "delete_schedule", "scheduleId": "sch_1" })).await,
+            StatusCode::NOT_IMPLEMENTED
+        );
+    }
 }

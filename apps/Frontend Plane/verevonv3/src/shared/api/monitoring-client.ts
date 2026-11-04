@@ -7,7 +7,8 @@ import { requestJson } from './http'
  * proxies quarry-edge's `/v1/change/*` routes. Every value here traces to a
  * live edge response: a `check` runs a real fetch + baseline comparison, and
  * `latest` / `history` read whatever baselines the org has actually accrued.
- * There is no scheduling — this is on-demand only.
+ * Recurring monitors (`/schedules`) are Quarry `change_monitor` schedules with a
+ * fixed hourly/daily/weekly cadence.
  */
 
 /** A captured version of a URL (quarry `BaselineSnapshot`, camelCased shape). */
@@ -58,10 +59,131 @@ export function getLatestBaseline(url: string, signal?: AbortSignal): Promise<Ba
   )
 }
 
+/** Fixed cadences a recurring monitor accepts; Quarry derives the cron from them. */
+export type MonitorPreset = 'hourly' | 'daily' | 'weekly'
+
+/** A recurring change monitor (a Quarry `change_monitor` schedule), camelCased. */
+export interface ChangeMonitor {
+  id: string
+  url: string
+  cron: string
+  enabled: boolean
+  createdAt: string | null
+  lastRunAt: string | null
+  nextRunAt: string | null
+}
+
+/** Quarry stamps schedule times as unix seconds; tolerate ISO strings too. */
+function monitorTime(value: unknown): string | null {
+  if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
+    return new Date(value < 1e12 ? value * 1000 : value).toISOString()
+  }
+  return typeof value === 'string' && value.trim() ? value : null
+}
+
+function toChangeMonitor(row: Record<string, unknown>): ChangeMonitor {
+  const text = (...keys: string[]) => {
+    for (const key of keys) {
+      const value = row[key]
+      if (typeof value === 'string' && value.trim()) return value
+    }
+    return ''
+  }
+  return {
+    id: text('id', 'schedule_id'),
+    url: text('target_ref', 'targetRef', 'url'),
+    cron: text('cron'),
+    enabled: row.enabled !== false,
+    createdAt: monitorTime(row.created_at ?? row.createdAt),
+    lastRunAt: monitorTime(row.last_run_at ?? row.lastRunAt),
+    nextRunAt: monitorTime(row.next_run_at ?? row.nextRunAt),
+  }
+}
+
+/** The org's recurring change monitors. Empty until one is created. */
+export async function listMonitors(signal?: AbortSignal): Promise<ChangeMonitor[]> {
+  const rows = await requestJson<unknown>('/api/v1/monitoring/schedules', { signal })
+  if (!Array.isArray(rows)) return []
+  return rows
+    .filter((row): row is Record<string, unknown> => typeof row === 'object' && row !== null)
+    .map(toChangeMonitor)
+    .filter((monitor) => monitor.id.length > 0)
+}
+
+/** Create a recurring monitor for `url` (contract: `monitoring.create_monitor`). */
+export async function createMonitor(
+  url: string,
+  preset: MonitorPreset,
+  signal?: AbortSignal,
+): Promise<ChangeMonitor | null> {
+  const row = await requestJson<unknown>('/api/v1/monitoring/schedules', {
+    method: 'POST',
+    body: JSON.stringify({ url, preset }),
+    signal,
+  })
+  return typeof row === 'object' && row !== null ? toChangeMonitor(row as Record<string, unknown>) : null
+}
+
+/** Stop and remove a recurring monitor (contract: `monitoring.delete_monitor`). */
+export async function deleteMonitor(id: string, signal?: AbortSignal): Promise<void> {
+  await requestJson<unknown>(`/api/v1/monitoring/schedules/${encodeURIComponent(id)}`, {
+    method: 'DELETE',
+    signal,
+  })
+}
+
 /**
  * Newest-first baseline chain for `url`. Empty until baselines accrue — never a
  * synthesized entry.
  */
+/** One paragraph-level operation. `added` and `removed` carry `index` and `text`; `moved` carries `from` and `to`. */
+export interface ChangeDiffOp {
+  op: 'added' | 'removed' | 'moved'
+  index: number | null
+  from: number | null
+  to: number | null
+  text: string | null
+}
+
+export interface ChangeTextDiff {
+  format: 'paragraph'
+  /** False when the page bytes changed but its text did not. */
+  realDelta: boolean
+  added: number
+  removed: number
+  moved: number
+  unchanged: number
+  ops: ChangeDiffOp[]
+  truncated: boolean
+}
+
+export type ChangeDiffReason = 'no_previous_version' | 'no_previous_text' | 'no_text' | 'artifact_gone'
+
+/** A diff between two stored versions of a page. `available` is false with a `reason` when there is nothing to compare. */
+export interface ChangeDiff {
+  sourceUrl: string
+  from: BaselineSnapshot | null
+  to: BaselineSnapshot | null
+  diffId: string | null
+  available: boolean
+  reason: ChangeDiffReason | null
+  diff: ChangeTextDiff | null
+  markdown: { from: string | null; to: string | null; truncated: boolean } | null
+}
+
+/** Compare two stored versions of `url` (the latest two by default), or read a stored diff by `diffId`. */
+export function getChangeDiff(
+  input: { url: string; from?: string; to?: string; diffId?: string; includeMarkdown?: boolean },
+  signal?: AbortSignal,
+): Promise<ChangeDiff> {
+  const query = new URLSearchParams({ url: input.url })
+  if (input.from) query.set('from', input.from)
+  if (input.to) query.set('to', input.to)
+  if (input.diffId) query.set('diffId', input.diffId)
+  if (input.includeMarkdown) query.set('include', 'markdown')
+  return requestJson<ChangeDiff>(`/api/v1/monitoring/diff?${query.toString()}`, { signal })
+}
+
 export function getChangeHistory(
   url: string,
   limit = 50,

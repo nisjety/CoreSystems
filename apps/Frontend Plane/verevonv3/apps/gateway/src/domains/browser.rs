@@ -1092,7 +1092,10 @@ async fn get_tabs(
     let response = browser_response_from_owner_projection(&projection, None);
     (
         StatusCode::OK,
-        Json(ok(json!({ "tabs": tabs, "session": response["session"] }))),
+        Json(ok(json!({
+            "tabs": tabs_with_opened_by(tabs, &projection),
+            "session": response["session"]
+        }))),
     )
         .into_response()
 }
@@ -1164,8 +1167,11 @@ pub(crate) async fn new_tab(
     (
         StatusCode::OK,
         Json(ok(json!({
-            "tab": data.get("tab").cloned().unwrap_or(Value::Null),
-            "tabs": tabs,
+            "tab": data
+                .get("tab")
+                .cloned()
+                .map_or(Value::Null, |tab| tab_with_opened_by(tab, &projection)),
+            "tabs": tabs_with_opened_by(tabs, &projection),
             "session": response["session"]
         }))),
     )
@@ -1427,7 +1433,10 @@ async fn tab_mutation(
     let response = browser_response_from_owner_projection(&projection, None);
     (
         StatusCode::OK,
-        Json(ok(json!({ "tabs": tabs, "session": response["session"] }))),
+        Json(ok(json!({
+            "tabs": tabs_with_opened_by(tabs, &projection),
+            "session": response["session"]
+        }))),
     )
         .into_response()
 }
@@ -3405,7 +3414,14 @@ fn browser_response_from_owner_projection(projection: &Value, observation: Optio
             // compositor is intentionally not advertised to new sessions.
             "liveFrameWsUrl": Value::Null,
             "tabsUrl": browser_tabs_url(run_id),
-            "tabs": projection.get("tabs").cloned().unwrap_or_else(|| json!([])),
+            "tabs": Value::Array(tabs_with_opened_by(
+                projection
+                    .get("tabs")
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .unwrap_or_default(),
+                projection,
+            )),
             "devtoolsUrl": live.then(|| browser_devtools_url(run_id)),
             "devtools": { "events": [], "eventCount": 0, "lastSequence": Value::Null },
             "visual": visual,
@@ -3463,6 +3479,48 @@ fn browser_session_capabilities(projection: &Value) -> Vec<&'static str> {
         capabilities.push("attach");
     }
     capabilities
+}
+
+/// The SPA's `openedBy` marker for a tab (WS8.F): `"agent"` or `"human"`, read from Quarry's
+/// opener object (`{ initiatedBy, agent?, unattributed? }`, the owner projection's shape).
+/// Absent for a tab the browser opened itself, and for an opener class the SPA does not act on
+/// (a system opener is neither).
+fn opened_by_marker(opened_by: Option<&Value>) -> Option<&'static str> {
+    match opened_by?.get("initiatedBy").and_then(Value::as_str)? {
+        "agent" => Some("agent"),
+        "human" => Some("human"),
+        _ => None,
+    }
+}
+
+/// One tab of a tab response, with the SPA's `openedBy` marker (WS8.F). Quarry's tab list does
+/// not carry the opener and the owner projection does, so a tab without one takes the marker of
+/// the projection's tab with the same id. Every other field is kept as Quarry sent it; an opener
+/// that is not a known class is removed rather than passed on.
+fn tab_with_opened_by(mut tab: Value, projection: &Value) -> Value {
+    let marker = opened_by_marker(tab.get("openedBy")).or_else(|| {
+        let tab_id = tab.get("tabId").and_then(Value::as_str)?;
+        projection
+            .get("tabs")
+            .and_then(Value::as_array)?
+            .iter()
+            .find(|candidate| candidate.get("tabId").and_then(Value::as_str) == Some(tab_id))
+            .and_then(|candidate| opened_by_marker(candidate.get("openedBy")))
+    });
+    if let Some(object) = tab.as_object_mut() {
+        object.remove("openedBy");
+        if let Some(marker) = marker {
+            object.insert("openedBy".to_owned(), Value::String(marker.to_owned()));
+        }
+    }
+    tab
+}
+
+/// Every tab of a tab response, each with its `openedBy` marker (see [`tab_with_opened_by`]).
+fn tabs_with_opened_by(tabs: Vec<Value>, projection: &Value) -> Vec<Value> {
+    tabs.into_iter()
+        .map(|tab| tab_with_opened_by(tab, projection))
+        .collect()
 }
 
 /// Temporary typed view for BFF request normalization. It is reconstructed
@@ -5832,6 +5890,85 @@ pub(crate) mod tests {
             quarry_mutations(&quarry).await.is_empty(),
             "a refused tab call never reaches Quarry"
         );
+    }
+
+    /// WS8.F (U62-66): an agent's tab carries the SPA's `openedBy` marker in the tab list and on
+    /// the session's tabs. Quarry's tab list has no opener; the gateway reads it from the owner
+    /// projection by tab id. A tab the person opened reads `human`; the browser's own tab carries
+    /// no marker.
+    #[tokio::test]
+    async fn the_tab_list_and_the_session_name_each_tabs_opener_as_the_spa_reads_it() {
+        use wiremock::{
+            matchers::{method as wm_method, path as wm_path},
+            Mock, ResponseTemplate,
+        };
+
+        let quarry = wiremock::MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/v1/agent/runs/run-1/tabs"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {
+                    "tabs": [
+                        { "tabId": "tab_home", "title": null, "url": null, "active": false },
+                        { "tabId": "tab_agent", "title": "Plan", "url": "https://example.com/", "active": true },
+                        { "tabId": "tab_person", "title": null, "url": null, "active": false }
+                    ]
+                }
+            })))
+            .mount(&quarry)
+            .await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/v1/agent/runs/run-1/browser-session"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {
+                    "runId": "run-1",
+                    "controlMode": "agent_control",
+                    "tabs": [
+                        { "tabId": "tab_home", "title": null, "url": null, "active": false },
+                        {
+                            "tabId": "tab_agent",
+                            "title": "Plan",
+                            "url": "https://example.com/",
+                            "active": true,
+                            "openedBy": {
+                                "initiatedBy": "agent",
+                                "agent": { "basis": "user_session", "aiRunId": "run_01J9", "label": "planner" }
+                            }
+                        },
+                        {
+                            "tabId": "tab_person",
+                            "title": null,
+                            "url": null,
+                            "active": false,
+                            "openedBy": { "initiatedBy": "human" }
+                        }
+                    ]
+                }
+            })))
+            .mount(&quarry)
+            .await;
+        let mut state = test_app_state();
+        state.quarry_edge_url = quarry.uri();
+
+        let response = get_tabs(
+            State(state.clone()),
+            Extension(test_user("user-owner", "org-owner")),
+            HeaderMap::new(),
+            Path("run-1".to_owned()),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .expect("the body is read");
+        let body: Value = serde_json::from_slice(&bytes).expect("a JSON body");
+
+        for tabs in [&body["data"]["tabs"], &body["data"]["session"]["tabs"]] {
+            assert!(tabs[0].get("openedBy").is_none(), "{body}");
+            assert_eq!(tabs[1]["openedBy"], "agent", "{body}");
+            assert_eq!(tabs[2]["openedBy"], "human", "{body}");
+        }
+        assert_eq!(body["data"]["tabs"][1]["title"], "Plan", "{body}");
     }
 
     #[tokio::test]
@@ -10273,5 +10410,102 @@ mod human_browse_session_tests {
         assert!(!caps.contains(&"human_browsing"));
         assert!(!caps.contains(&"tab_control"));
         assert!(!caps.contains(&"attach"));
+    }
+}
+
+#[cfg(test)]
+mod tab_opened_by_tests {
+    use super::*;
+
+    fn agent_opener() -> Value {
+        json!({
+            "initiatedBy": "agent",
+            "agent": { "basis": "user_session", "aiRunId": "run_01J9", "label": "planner" }
+        })
+    }
+
+    #[test]
+    fn the_marker_is_the_agent_or_the_person_and_nothing_else() {
+        assert_eq!(opened_by_marker(Some(&agent_opener())), Some("agent"));
+        assert_eq!(
+            opened_by_marker(Some(&json!({ "initiatedBy": "agent", "unattributed": true }))),
+            Some("agent")
+        );
+        assert_eq!(
+            opened_by_marker(Some(&json!({ "initiatedBy": "human" }))),
+            Some("human")
+        );
+        assert_eq!(
+            opened_by_marker(Some(&json!({ "initiatedBy": "system" }))),
+            None
+        );
+        assert_eq!(opened_by_marker(Some(&json!("agent"))), None);
+        assert_eq!(opened_by_marker(Some(&Value::Null)), None);
+        assert_eq!(opened_by_marker(None), None);
+    }
+
+    #[test]
+    fn a_listed_tab_takes_its_opener_from_the_projection_and_keeps_its_own_fields() {
+        let projection = json!({
+            "tabs": [
+                { "tabId": "tab-1", "active": false, "openedBy": agent_opener() }
+            ]
+        });
+        let listed = json!({
+            "tabId": "tab-1",
+            "title": "Plan",
+            "url": "https://example.com/",
+            "active": true
+        });
+        assert_eq!(
+            tab_with_opened_by(listed, &projection),
+            json!({
+                "tabId": "tab-1",
+                "title": "Plan",
+                "url": "https://example.com/",
+                "active": true,
+                "openedBy": "agent"
+            })
+        );
+    }
+
+    #[test]
+    fn a_tab_with_no_known_opener_has_no_marker() {
+        let projection = json!({
+            "tabs": [
+                { "tabId": "tab-1", "active": false, "openedBy": { "initiatedBy": "system" } }
+            ]
+        });
+        let system = tab_with_opened_by(
+            json!({ "tabId": "tab-1", "active": false, "openedBy": { "initiatedBy": "system" } }),
+            &projection,
+        );
+        assert!(system.get("openedBy").is_none(), "{system}");
+        let browser = tab_with_opened_by(json!({ "tabId": "tab-9", "active": false }), &projection);
+        assert!(browser.get("openedBy").is_none(), "{browser}");
+        let unprojected = tabs_with_opened_by(
+            vec![json!({ "tabId": "tab-1", "active": false })],
+            &json!({}),
+        );
+        assert!(unprojected[0].get("openedBy").is_none(), "{unprojected:?}");
+    }
+
+    #[test]
+    fn the_session_tabs_carry_the_marker_the_spa_reads_and_no_agent_ids() {
+        let projection = json!({
+            "runId": "run-1",
+            "controlMode": "agent_control",
+            "tabs": [
+                { "tabId": "tab-1", "title": null, "url": null, "active": true },
+                { "tabId": "tab-2", "title": null, "url": null, "active": false, "openedBy": agent_opener() },
+                { "tabId": "tab-3", "title": null, "url": null, "active": false, "openedBy": { "initiatedBy": "human" } }
+            ]
+        });
+        let response = browser_response_from_owner_projection(&projection, None);
+        let tabs = &response["session"]["tabs"];
+        assert!(tabs[0].get("openedBy").is_none(), "{response}");
+        assert_eq!(tabs[1]["openedBy"], "agent", "{response}");
+        assert_eq!(tabs[2]["openedBy"], "human", "{response}");
+        assert!(!response.to_string().contains("run_01J9"), "{response}");
     }
 }

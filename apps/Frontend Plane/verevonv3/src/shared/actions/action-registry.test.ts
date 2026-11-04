@@ -932,8 +932,12 @@ describe('action registry', () => {
     // 255 after EP-8-S8 registered settings.complete_personal_setup and settings.skip_personal_setup, the first-run step.
     // 256 after EP-14-S2 registered chat.set_transcript_density, the person's transcript level.
     // 259 after EP-6-S8 registered agents.draft.save, agents.publish and agents.versions.list.
-    // 260 after EP-14-S7 registered chat.inspect_run_request, the request inspector read.
-    expect(ids).toHaveLength(260)
+    // 269 after w23/integ (Quarry W2/W3) was merged with model-plane: the four Innhenting actions of the
+    // ingestions and monitoring domains (job_control, start_agent_run, create_monitor, delete_monitor),
+    // the six ingestions run and schedule controls (get_run_status, pause_run, resume_run, cancel_run,
+    // pause_schedule, change_schedule_state) that replace run_schedule_action, and browser_run.steer.
+    // 270 after EP-14-S7 registered chat.inspect_run_request, the request inspector read.
+    expect(ids).toHaveLength(270)
 
     const spaceIds = ids.filter((id) => id.startsWith('spaces.'))
     const first = ids.indexOf(spaceIds[0] as string)

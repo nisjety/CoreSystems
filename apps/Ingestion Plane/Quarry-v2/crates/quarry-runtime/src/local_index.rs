@@ -80,6 +80,7 @@ use tokio::sync::Mutex;
 
 use quarry_core::error::{ErrorCode, QuarryError, QuarryResult};
 
+use crate::artifact_store::{check_text_redacted, sink_pii_error, sink_redaction_required};
 use crate::serp::{SearchOptions, SearchProvider, SearchResult};
 
 /// Tantivy writer heap budget (50 MB). Plenty for batch ingestion at our
@@ -291,6 +292,13 @@ impl TantivyLocalIndex {
     /// is readable by any query that also fails to name a tenant, so there
     /// is no safe way to store one. Callers are fire-and-forget and log the
     /// error, so a mis-wired caller is loud without being fatal.
+    ///
+    /// E3.6-4b: for an org whose content must be redacted
+    /// (`QUARRY_EDGE__PII_REDACTION` on and the org default covers it), the
+    /// title and the body must scan clean, or the document is refused with the
+    /// typed `pii_redaction_failed` failure before anything is written. The
+    /// index never redacts: the pipeline stage does, and a write-back path
+    /// without a stage (search, answer) is refused rather than indexed raw.
     pub async fn add_document(&self, doc: LocalDocument) -> QuarryResult<()> {
         if doc.org_id.trim().is_empty() {
             return Err(QuarryError::new(
@@ -300,6 +308,18 @@ impl TantivyLocalIndex {
                     doc.url
                 ),
             ));
+        }
+        if sink_redaction_required(&doc.org_id) {
+            for (field, text) in [("title", doc.title.as_str()), ("body", doc.body.as_str())] {
+                if let Err(refusal) = check_text_redacted(text) {
+                    tracing::warn!(
+                        field,
+                        cause = refusal.label(),
+                        "local_index: refusing a document not redacted for personal data"
+                    );
+                    return Err(sink_pii_error(refusal, "local_index", field));
+                }
+            }
         }
         let writer = self.writer.lock().await;
         // Delete prior copies of the same URL.
@@ -1199,5 +1219,79 @@ mod tests {
     async fn provider_name_is_tantivy_local() {
         let idx = TantivyLocalIndex::in_memory().unwrap();
         assert_eq!(idx.name(), "tantivy_local");
+    }
+}
+
+/// E3.6-4b: the index refuses unredacted text for an org whose content must
+/// be redacted, and writes nothing of it.
+#[cfg(test)]
+mod pii_sink_tests {
+    use super::*;
+    use crate::artifact_store::SinkPiiTestOverride;
+    use crate::pipeline::{PiiRedactionSettings, PII_REDACTION_FAILED};
+
+    const EMAIL: &str = "ola.nordmann@example.no";
+
+    fn page(title: &str, body: &str, org: &str) -> LocalDocument {
+        LocalDocument {
+            url: "https://example.no/kontakt".into(),
+            title: title.into(),
+            body: body.into(),
+            host: "example.no".into(),
+            org_id: org.into(),
+            fingerprint: "blake3:kontakt".into(),
+            fetched_at: Utc::now(),
+        }
+    }
+
+    fn assert_refused(err: &QuarryError, field: &str) {
+        assert_eq!(err.code, ErrorCode::Forbidden);
+        let details = err.details.as_ref().expect("typed details");
+        assert_eq!(details["reason"], PII_REDACTION_FAILED);
+        assert_eq!(details["cause"], "residual_pii");
+        assert_eq!(details["sink"], "local_index");
+        assert_eq!(details["field"], field);
+        assert!(!err.to_string().contains(EMAIL));
+    }
+
+    #[tokio::test]
+    async fn unredacted_body_or_title_is_refused_for_a_covered_org() {
+        let _o = SinkPiiTestOverride::install(PiiRedactionSettings::parse(
+            Some("on"),
+            Some("org_a"),
+        ));
+        let idx = TantivyLocalIndex::in_memory().unwrap();
+
+        let err = idx
+            .add_document(page("Kontakt", &format!("Skriv til {EMAIL}"), "org_a"))
+            .await
+            .unwrap_err();
+        assert_refused(&err, "body");
+        let err = idx
+            .add_document(page(&format!("Kontakt {EMAIL}"), "Skriv til oss", "org_a"))
+            .await
+            .unwrap_err();
+        assert_refused(&err, "title");
+        assert_eq!(idx.pending_writes(), 0, "a refused document is not written");
+
+        // Redacted text is indexed.
+        idx.add_document(page("Kontakt", "Skriv til [redacted:pii.email]", "org_a"))
+            .await
+            .unwrap();
+        // An org the default does not cover is not gated.
+        idx.add_document(page("Kontakt", &format!("Skriv til {EMAIL}"), "org_b"))
+            .await
+            .unwrap();
+        assert_eq!(idx.pending_writes(), 2);
+    }
+
+    #[tokio::test]
+    async fn the_index_is_unchanged_with_the_flag_off() {
+        let _o = SinkPiiTestOverride::install(PiiRedactionSettings::default());
+        let idx = TantivyLocalIndex::in_memory().unwrap();
+        idx.add_document(page("Kontakt", &format!("Skriv til {EMAIL}"), "org_a"))
+            .await
+            .unwrap();
+        assert_eq!(idx.pending_writes(), 1);
     }
 }
