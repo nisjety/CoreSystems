@@ -10446,6 +10446,13 @@ pub struct InvokeRequest {
     /// is refused with the `thread_goal` feature whatever the switch says.
     #[serde(default, alias = "goalId")]
     pub goal_id: Option<String>,
+    /// Wave 3 EP-7 S4 — the turn was sent by the goal bar's "Keep going" pump after its countdown,
+    /// not typed. It grants nothing: it marks the run for audit (`runs.metadata.goal_auto`, through
+    /// [`crate::goal_auto::mark`]) and is refused `goal_auto_disabled` before any run exists unless
+    /// `MODEL_GATEWAY_GOAL_AUTO_CONTINUE` is on ([`crate::goal_auto::refusal`]). Every goal turn is
+    /// still claimed by session-core, which refuses while a decision waits on the owner.
+    #[serde(default, alias = "goalAuto")]
+    pub goal_auto: bool,
 }
 
 /// The switch of the wide-research entry (Wave 3 EP-2 S8). Opt-in: only the literal `true` enables

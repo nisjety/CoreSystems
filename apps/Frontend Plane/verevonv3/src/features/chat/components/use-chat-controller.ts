@@ -216,6 +216,8 @@ import type {
 } from './chat-types'
 import { addLifecycleNotice } from './chat-types'
 import { applyUsageProgress, applyUsageTotal } from './RunCostMeter'
+import { applyGoalProgress } from './GoalBar'
+import type { GoalDraft } from './GoalDialog'
 import type { ChatEffectClass } from '@/shared/chat/effect-class'
 import { isEffectfulChatTurn } from '@/shared/chat/effect-class'
 import { planExecuteEnabled } from '@/shared/chat/plan-execute'
@@ -225,6 +227,15 @@ import { useChatThreadDraft, type ChatDraftOutcome } from '../lib/chat-thread-dr
 import { createSnapshotWriter, flushOnPageLifecycle, parseSnapshotThrottleMs } from '../lib/snapshot-throttle'
 import { nextFollowState, virtualizeTranscript } from '../lib/transcript-window'
 import { isToolCallRunning } from '../lib/stream-activity'
+import { selectDockedTrays } from '../lib/composer-trays'
+import {
+  nextGoalAction,
+  settledGoalOutcome,
+  type GoalAutoContinueView,
+  type GoalPumpAction,
+  type GoalPumpStopReason,
+  type SettledGoalTurn,
+} from '../lib/goal-pump'
 
 /**
  * WS09 S3. `VITE_CHAT_SNAPSHOT_THROTTLE_MS` is the cadence of the local transcript
@@ -2700,14 +2711,18 @@ export function useChatController() {
    * Sets the thread's goal (`chat.set_goal`), or edits the open one (`chat.update_goal`). A goal that is
    * met or stopped is closed, so saving starts a new goal beside it.
    */
-  const saveGoal = (input: { objective: string; successCriteria: string[] }): Promise<boolean> => {
+  const saveGoal = (input: GoalDraft): Promise<boolean> => {
     const threadId = state.threadId
     if (!goalThreadAllowed(threadId)) return Promise.resolve(false)
     const current = openGoal()
+    const caps = {
+      ...(input.maxTurns !== undefined ? { maxTurns: input.maxTurns } : {}),
+      ...(input.tokenBudget !== undefined ? { tokenBudget: input.tokenBudget } : {}),
+    }
     return runGoalWrite(threadId, () =>
       current
-        ? updateThreadGoal(current, { objective: input.objective, successCriteria: input.successCriteria })
-        : putThreadGoal(threadId, { objective: input.objective, successCriteria: input.successCriteria }),
+        ? updateThreadGoal(current, { objective: input.objective, successCriteria: input.successCriteria, ...caps })
+        : putThreadGoal(threadId, { objective: input.objective, successCriteria: input.successCriteria, ...caps }),
     )
   }
 
@@ -2737,9 +2752,10 @@ export function useChatController() {
    * Sends one turn toward the active goal (`chat.continue_goal`) through the ordinary send path, so
    * the transcript shows it as the person's message. It names the goal, and its mode follows
    * `goalContinuationMode`; the composer's Do toggle is left as it was. The client decides nothing the
-   * server does not check again.
+   * server does not check again. `auto` marks a turn the goal pump sent after its countdown (EP-7 S4,
+   * `goal_auto`); it grants nothing.
    */
-  const continueGoal = async () => {
+  const continueGoal = async (options: { auto?: boolean } = {}) => {
     const goal = threadGoal()
     const threadId = state.threadId
     if (!goal || goal.status !== 'active' || !goalThreadAllowed(threadId) || goal.threadId !== threadId) return
@@ -2749,11 +2765,154 @@ export function useChatController() {
       liveGrant: Boolean(grant && !grantHasLapsed(grant)),
       turns: state.turns,
     })
+    const turnsBefore = state.turns.length
     await sendContent(i18n.tr('Fortsett mot målet', 'Continue toward the goal'), undefined, {
       goalId: goal.id,
+      ...(options.auto ? { goalAuto: true } : {}),
       planModeOverride: mode === 'plan',
       ...(mode === 'execute' ? { executeGranted: true } : {}),
     })
+    // The send awaits the run's stream, so the goal turn has ended here.
+    recordSettledGoalTurn(threadId, turnsBefore, goal.turnsUsed)
+  }
+
+  // The goal pump (EP-7 S4, owner decisions D4 and D5): with "Keep going" on, a goal turn that
+  // completed and that the judge did not find met is followed, after a visible five-second countdown,
+  // by the next Continue. `nextGoalAction` decides; this only runs the countdown and sends. Every
+  // decision that waits on the person stops it, a hidden tab holds it, and leaving the thread or
+  // closing the tab ends it. The server's claim refuses the same cases on its own.
+  const [goalAutoOn, setGoalAutoOn] = createSignal(false)
+  const [goalUserStopped, setGoalUserStopped] = createSignal(false)
+  const [goalSettled, setGoalSettled] = createSignal<SettledGoalTurn | null>(null)
+  const [goalSentFor, setGoalSentFor] = createSignal<string | null>(null)
+  const [goalCountdownDoneFor, setGoalCountdownDoneFor] = createSignal<string | null>(null)
+  const [goalCountdown, setGoalCountdown] = createSignal<number | null>(null)
+  const [goalStopReason, setGoalStopReason] = createSignal<GoalPumpStopReason | null>(null)
+  const [parkedTurnId, setParkedTurnId] = createSignal<string | null>(null)
+  const [pageVisible, setPageVisible] = createSignal(document.visibilityState !== 'hidden')
+  let goalCountdownTimer: number | undefined
+
+  /** Records how the goal turn the last Continue sent ended, then reads the goal for its verdict. */
+  const recordSettledGoalTurn = (threadId: string, turnsBefore: number, turnsUsedAtSend: number) => {
+    if (state.threadId !== threadId) return
+    // Only a turn this send added: a send that was delivered into a live run adds none.
+    const turn = state.turns.slice(turnsBefore).filter((candidate) => candidate.role === 'assistant').at(-1)
+    if (!turn || turn.streaming) return
+    setGoalSettled({
+      turnId: turn.id,
+      outcome: settledGoalOutcome({
+        status: turn.status,
+        pendingApprovals: turn.pendingApprovals,
+        questionPending: pendingQuestion() !== null,
+        parked: parkedTurnId() === turn.id,
+      }),
+      turnsUsedAtSend,
+    })
+    setGoalStopReason(null)
+    void refreshThreadGoal(threadId)
+  }
+
+  const stopGoalCountdown = () => {
+    if (goalCountdownTimer !== undefined) window.clearInterval(goalCountdownTimer)
+    goalCountdownTimer = undefined
+    setGoalCountdown(null)
+  }
+
+  const startGoalCountdown = (seconds: number) => {
+    setGoalStopReason(null)
+    setGoalCountdown(seconds)
+    let left = seconds
+    goalCountdownTimer = window.setInterval(() => {
+      left -= 1
+      if (left > 0) {
+        setGoalCountdown(left)
+        return
+      }
+      stopGoalCountdown()
+      const settled = untrack(goalSettled)
+      if (settled) setGoalCountdownDoneFor(settled.turnId)
+    }, 1000)
+  }
+
+  const goalPumpAction = createMemo<GoalPumpAction>(() => {
+    const goal = threadGoal()
+    const settled = goalSettled()
+    const trays = selectDockedTrays({ turns: state.turns, queuedInputs: [] })
+    const approvals = trays.find((tray) => tray.kind === 'approval')
+    const latest = state.turns.filter((turn) => turn.role === 'assistant').at(-1)
+    return nextGoalAction({
+      goal: goal && goal.threadId === state.threadId ? goal : null,
+      settled,
+      pending: {
+        approvals: approvals?.kind === 'approval' ? approvals.approvals.length : 0,
+        questions: pendingQuestion() ? 1 : 0,
+        plan: trays.some((tray) => tray.kind === 'plan'),
+        parked: latest !== undefined && parkedTurnId() === latest.id,
+      },
+      autoOn: goalAutoOn(),
+      userStopped: goalUserStopped(),
+      visible: pageVisible(),
+      busy: state.status === 'streaming' || goalPending(),
+      sentForSettled: settled !== null && goalSentFor() === settled.turnId,
+      countdownElapsed: settled !== null && goalCountdownDoneFor() === settled.turnId,
+    })
+  })
+
+  createEffect(goalPumpAction, (action) => {
+    if (action.kind === 'countdown') {
+      if (goalCountdownTimer === undefined) startGoalCountdown(action.seconds)
+      return
+    }
+    stopGoalCountdown()
+    if (action.kind === 'stop') setGoalStopReason(action.reason)
+    if (action.kind === 'send') {
+      const settled = untrack(goalSettled)
+      if (!settled) return
+      // Marked before the send, so one settled turn is followed by one turn at most.
+      setGoalSentFor(settled.turnId)
+      void continueGoal({ auto: true })
+    }
+  })
+
+  // A pump belongs to the thread it was started on.
+  createEffect(
+    () => state.threadId,
+    () => {
+      stopGoalCountdown()
+      setGoalAutoOn(false)
+      setGoalUserStopped(false)
+      setGoalSettled(null)
+      setGoalSentFor(null)
+      setGoalCountdownDoneFor(null)
+      setGoalStopReason(null)
+      setParkedTurnId(null)
+    },
+  )
+
+  const onGoalPageVisibility = () => setPageVisible(document.visibilityState !== 'hidden')
+  document.addEventListener('visibilitychange', onGoalPageVisibility)
+  onCleanup(() => {
+    document.removeEventListener('visibilitychange', onGoalPageVisibility)
+    stopGoalCountdown()
+  })
+
+  /** "Keep going" on the goal bar (`chat.goal_auto_toggle`), offered only when the server says so. */
+  const goalAutoContinue: GoalAutoContinueView = {
+    available: () => threadGoal()?.autoContinueAvailable === true,
+    on: goalAutoOn,
+    countdown: goalCountdown,
+    stopReason: goalStopReason,
+    setOn: (on) => {
+      setGoalUserStopped(false)
+      setGoalStopReason(null)
+      if (!on) stopGoalCountdown()
+      setGoalAutoOn(on)
+    },
+    stop: () => {
+      stopGoalCountdown()
+      setGoalAutoOn(false)
+      setGoalUserStopped(true)
+    },
   }
 
   /**
@@ -3171,6 +3330,8 @@ export function useChatController() {
         // EP-7 S1: a goal's Continue turn names its goal and its own mode; no other send sets either,
         // so every other turn keeps the composer's plan mode exactly as before.
         goalId?: string
+        // EP-7 S4: the goal pump sent this Continue turn; only `continueGoal({ auto: true })` sets it.
+        goalAuto?: boolean
         planModeOverride?: boolean
       } = {},
   ) => {
@@ -3562,6 +3723,7 @@ export function useChatController() {
           planMode: turnPlanMode(),
           // The goal a Continue turn works toward (EP-7 S1); absent on every other turn.
           ...(options.goalId ? { goalId: options.goalId } : {}),
+          ...(options.goalId && options.goalAuto ? { goalAuto: true } : {}),
           // Only the turn `sendContent` validated above; the wire builder drops it
           // again on any turn that cannot execute. It carries no rung.
           ...(executeGrant ? { executeGranted: true } : {}),
@@ -3713,6 +3875,10 @@ export function useChatController() {
             // WS14 S4. A temporary chat keeps no question, as it keeps no follow-up chips.
             if (isTemporaryThread(state.threadId ?? activeThreadId)) return
             setPendingQuestion(question)
+          },
+          onRunParked: () => {
+            // EP-7 S4: a parked run stops the goal pump; the pump never resumes a park.
+            setParkedTurnId(assistantId)
           },
           onResearchPlan: (plan) => {
             // EP-2 S5. Only a plan this build asked for gets a card; a temporary chat never has one.
@@ -4383,6 +4549,9 @@ export function useChatController() {
           const turn = s.turns.find((t) => t.id === assistantId)
           if (turn) turn.lifecycle = addLifecycleNotice(turn.lifecycle, { kind: 'retrieval', wordingKey: event.wordingKey })
         })
+      },
+      onGoalProgress: (event: Parameters<NonNullable<ChatStreamHandlers['onGoalProgress']>>[0]) => {
+        setThreadGoalState((current) => applyGoalProgress(current, event))
       },
     } satisfies Partial<ChatStreamHandlers>
   }
@@ -5112,6 +5281,8 @@ export function useChatController() {
     setGoalPaused,
     clearGoal,
     continueGoal,
+    // EP-7 S4: "Keep going" on the goal bar, its countdown and Stop.
+    goalAutoContinue,
     rejectTurnPlan,
     planApprovalPending,
     planApprovalError,
