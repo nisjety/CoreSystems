@@ -3,9 +3,12 @@ package skillbundle
 import (
 	"archive/zip"
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -254,5 +257,211 @@ func TestParseMarksNonTextFilesBinary(t *testing.T) {
 				t.Errorf("%s marked binary", file.Path)
 			}
 		}
+	}
+}
+
+// pngLogo and minimalMaster are the smallest bodies the deck template checks accept.
+var pngLogo = []byte("\x89PNG\r\n\x1a\nrest-of-image")
+
+func minimalMaster(t *testing.T) []byte {
+	t.Helper()
+	return buildZip(t,
+		zipEntry{name: "[Content_Types].xml", body: []byte("<Types/>")},
+		zipEntry{name: "ppt/presentation.xml", body: []byte("<p:presentation/>")},
+	)
+}
+
+func themeFixture(t *testing.T) []byte {
+	t.Helper()
+	body, err := os.ReadFile(filepath.Join("testdata", "deck_theme_v1.json"))
+	if err != nil {
+		t.Fatalf("read theme fixture: %v", err)
+	}
+	return body
+}
+
+// themeWith is the fixture with one top-level key set (or removed when value is nil).
+func themeWith(t *testing.T, key string, value any) []byte {
+	t.Helper()
+	var theme map[string]any
+	if err := json.Unmarshal(themeFixture(t), &theme); err != nil {
+		t.Fatalf("decode theme fixture: %v", err)
+	}
+	if value == nil {
+		delete(theme, key)
+	} else {
+		theme[key] = value
+	}
+	body, err := json.Marshal(theme)
+	if err != nil {
+		t.Fatalf("encode theme: %v", err)
+	}
+	return body
+}
+
+func templateBundle(t *testing.T, theme []byte, extra ...zipEntry) Bundle {
+	t.Helper()
+	entries := append([]zipEntry{
+		{name: "SKILL.md", body: []byte(validSkillMD)},
+		{name: ThemePath, body: theme},
+		{name: "templates/master.pptx", body: minimalMaster(t)},
+		{name: "templates/logo.png", body: pngLogo},
+	}, extra...)
+	bundle, err := Parse(buildZip(t, entries...))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	return bundle
+}
+
+func TestDeckTemplatesSwitchIsTheLiteralTrueOnly(t *testing.T) {
+	for _, raw := range []string{"", "1", "TRUE", " true", "yes", "on"} {
+		if DeckTemplatesFromLookup(func(string) string { return raw }) {
+			t.Errorf("%q enabled deck templates", raw)
+		}
+	}
+	if !DeckTemplatesFromLookup(func(key string) string {
+		if key == DeckTemplatesEnv {
+			return "true"
+		}
+		return ""
+	}) {
+		t.Fatal(`"true" did not enable deck templates`)
+	}
+}
+
+func TestDeckThemeFixtureMatchesTheRustContract(t *testing.T) {
+	rust, err := os.ReadFile(filepath.Join("..", "..", "..", "..", "..", "rust", "crates", "mp-contracts", "tests", "fixtures", "deck_theme_v1.json"))
+	if err != nil {
+		t.Skipf("the Rust fixture is not in this checkout: %v", err)
+	}
+	if !bytes.Equal(bytes.ReplaceAll(rust, []byte("\r\n"), []byte("\n")), bytes.ReplaceAll(themeFixture(t), []byte("\r\n"), []byte("\n"))) {
+		t.Fatal("testdata/deck_theme_v1.json differs from mp-contracts' fixture; copy it across")
+	}
+}
+
+func TestABundleWithAValidThemeIsADeckTemplate(t *testing.T) {
+	bundle := templateBundle(t, themeFixture(t))
+	if err := ValidateDeckTemplate(bundle); err != nil {
+		t.Fatalf("ValidateDeckTemplate: %v", err)
+	}
+	var paths []string
+	for _, file := range bundle.Files {
+		paths = append(paths, file.Path)
+	}
+	if !strings.Contains(strings.Join(paths, ","), ThemePath) {
+		t.Fatalf("paths = %v, want the theme listed", paths)
+	}
+	plain, err := Parse(buildZip(t, zipEntry{name: "SKILL.md", body: []byte(validSkillMD)}))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if err := ValidateDeckTemplate(plain); err != nil {
+		t.Fatalf("a bundle without a theme must pass unchanged: %v", err)
+	}
+}
+
+func TestAThemeWithABadColourIsRefused(t *testing.T) {
+	for _, colors := range []map[string]any{
+		{"primary": "red", "secondary": "#000000", "text": "#000000", "background": "#ffffff"},
+		{"primary": "#12345", "secondary": "#000000", "text": "#000000", "background": "#ffffff"},
+		{"primary": "#000000", "secondary": "#000000", "text": "#000000", "background": "#ffffff",
+			"accent": []string{"#000000", "#111111", "#222222", "#333333", "#444444"}},
+		{"primary": "#000000", "secondary": "#000000", "text": "#000000", "background": "#ffffff", "accent": []string{"blue"}},
+	} {
+		err := ValidateDeckTemplate(templateBundle(t, themeWith(t, "colors", colors)))
+		if code := refusalCode(t, err); code != "deck_theme_colour" {
+			t.Errorf("colors %v: code = %q, want deck_theme_colour", colors, code)
+		}
+	}
+}
+
+func TestAThemeOutsideTheContractIsRefused(t *testing.T) {
+	cases := map[string][]byte{
+		"unknown key":      themeWith(t, "script", "run.sh"),
+		"other version":    themeWith(t, "version", 2),
+		"no name":          themeWith(t, "name", nil),
+		"master elsewhere": themeWith(t, "master", "templates/other.pptx"),
+		"logo outside":     themeWith(t, "logo", "assets/logo.png"),
+		"long footer":      themeWith(t, "footer_text", strings.Repeat("x", maxThemeFooterChars+1)),
+		"case-folded key":  bytes.Replace(themeFixture(t), []byte(`"name"`), []byte(`"Name"`), 1),
+		"not json":         []byte("{"),
+	}
+	for name, theme := range cases {
+		err := ValidateDeckTemplate(templateBundle(t, theme))
+		if code := refusalCode(t, err); code != "deck_theme_invalid" {
+			t.Errorf("%s: code = %q, want deck_theme_invalid", name, code)
+		}
+	}
+}
+
+func TestAMasterThatIsNotAPresentationIsRefused(t *testing.T) {
+	notDeck := buildZip(t, zipEntry{name: "word/document.xml", body: []byte("<w:document/>")})
+	for name, master := range map[string][]byte{"a docx": notDeck, "not a zip": []byte("plain text")} {
+		bundle, err := Parse(buildZip(t,
+			zipEntry{name: "SKILL.md", body: []byte(validSkillMD)},
+			zipEntry{name: ThemePath, body: themeFixture(t)},
+			zipEntry{name: "templates/master.pptx", body: master},
+			zipEntry{name: "templates/logo.png", body: pngLogo},
+		))
+		if err != nil {
+			t.Fatalf("Parse: %v", err)
+		}
+		if code := refusalCode(t, ValidateDeckTemplate(bundle)); code != "deck_master_not_presentation" {
+			t.Errorf("%s: code = %q, want deck_master_not_presentation", name, code)
+		}
+	}
+	missing, err := Parse(buildZip(t,
+		zipEntry{name: "SKILL.md", body: []byte(validSkillMD)},
+		zipEntry{name: ThemePath, body: themeFixture(t)},
+		zipEntry{name: "templates/logo.png", body: pngLogo},
+	))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if code := refusalCode(t, ValidateDeckTemplate(missing)); code != "deck_master_missing" {
+		t.Errorf("code = %q, want deck_master_missing", code)
+	}
+}
+
+func TestALogoThatIsNotAnImageIsRefused(t *testing.T) {
+	bundle, err := Parse(buildZip(t,
+		zipEntry{name: "SKILL.md", body: []byte(validSkillMD)},
+		zipEntry{name: ThemePath, body: themeFixture(t)},
+		zipEntry{name: "templates/master.pptx", body: minimalMaster(t)},
+		zipEntry{name: "templates/logo.png", body: []byte("<svg onload=alert(1)/>")},
+	))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if code := refusalCode(t, ValidateDeckTemplate(bundle)); code != "deck_logo_not_image" {
+		t.Errorf("code = %q, want deck_logo_not_image", code)
+	}
+	jpeg := templateBundle(t, themeWith(t, "logo", "templates/logo.jpg"),
+		zipEntry{name: "templates/logo.jpg", body: []byte{0xff, 0xd8, 0xff, 0xe0, 0x00}})
+	if err := ValidateDeckTemplate(jpeg); err != nil {
+		t.Fatalf("a JPEG logo must pass: %v", err)
+	}
+	gone := templateBundle(t, themeWith(t, "logo", "templates/missing.png"))
+	if code := refusalCode(t, ValidateDeckTemplate(gone)); code != "deck_logo_missing" {
+		t.Errorf("code = %q, want deck_logo_missing", code)
+	}
+}
+
+func TestAProgramUnderTemplatesIsRefused(t *testing.T) {
+	for name, body := range map[string][]byte{
+		"elf":    []byte("\x7fELF\x02\x01\x01"),
+		"pe":     []byte("MZ\x90\x00"),
+		"script": []byte("#!/bin/sh\necho hi\n"),
+	} {
+		bundle := templateBundle(t, themeFixture(t), zipEntry{name: "templates/helper", body: body})
+		if code := refusalCode(t, ValidateDeckTemplate(bundle)); code != "template_executable" {
+			t.Errorf("%s: code = %q, want template_executable", name, code)
+		}
+	}
+	// The same program under scripts/ is a skill's business, not a template's.
+	scripted := templateBundle(t, themeFixture(t), zipEntry{name: "scripts/helper.sh", body: []byte("#!/bin/sh\n"), mode: 0o755})
+	if err := ValidateDeckTemplate(scripted); err != nil {
+		t.Fatalf("scripts/ must stay allowed: %v", err)
 	}
 }

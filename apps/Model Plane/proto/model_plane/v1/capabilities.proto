@@ -335,6 +335,10 @@ message SkillBundleSummary {
   string created_by = 5;
   // RFC3339 timestamp of the upload that holds this bundle.
   string created_at = 6;
+  // True when the bundle carries templates/deck-theme.json, so it is an org brand template
+  // for decks (EP-5 S6). Derived at read time from the bundle's files, never stored. Reported
+  // only while capability-core's SKILL_DECK_TEMPLATES_ENABLED is on; false otherwise. Additive.
+  bool deck_template = 7;
 }
 
 message GetSkillBundleManifestRequest {

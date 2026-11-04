@@ -42,6 +42,9 @@ type Summary struct {
 	TotalBytes     int64
 	CreatedBy      string
 	CreatedAt      time.Time
+	// DeckTemplate is true when the bundle holds ThemePath (EP-5 S6). Derived from the bundle's
+	// files on every read rather than stored, so no migration carries it and it cannot go stale.
+	DeckTemplate bool
 }
 
 // Manifest is one stored bundle's files, in path order, with bodies left out.
@@ -212,11 +215,12 @@ func (s *Store) List(ctx context.Context, orgID string, skillIDs []string) ([]Su
 		filter = skillIDs
 	}
 	rows, err := s.db.Query(ctx, `
-		SELECT skill_id, manifest_sha256, file_count, total_bytes, created_by, created_at
-		FROM skill_bundles
-		WHERE org_id = $1 AND ($2::text[] IS NULL OR skill_id = ANY($2::text[]))
-		ORDER BY skill_id
-	`, orgID, filter)
+		SELECT b.skill_id, b.manifest_sha256, b.file_count, b.total_bytes, b.created_by, b.created_at,
+		       EXISTS (SELECT 1 FROM skill_bundle_files f WHERE f.bundle_id = b.id AND f.path = $3)
+		FROM skill_bundles b
+		WHERE b.org_id = $1 AND ($2::text[] IS NULL OR b.skill_id = ANY($2::text[]))
+		ORDER BY b.skill_id
+	`, orgID, filter, ThemePath)
 	if err != nil {
 		return nil, fmt.Errorf("list skill bundles: %w", err)
 	}
@@ -225,7 +229,7 @@ func (s *Store) List(ctx context.Context, orgID string, skillIDs []string) ([]Su
 	for rows.Next() {
 		var summary Summary
 		if err := rows.Scan(&summary.SkillID, &summary.ManifestSHA256, &summary.FileCount,
-			&summary.TotalBytes, &summary.CreatedBy, &summary.CreatedAt); err != nil {
+			&summary.TotalBytes, &summary.CreatedBy, &summary.CreatedAt, &summary.DeckTemplate); err != nil {
 			return nil, fmt.Errorf("scan skill bundle: %w", err)
 		}
 		summaries = append(summaries, summary)

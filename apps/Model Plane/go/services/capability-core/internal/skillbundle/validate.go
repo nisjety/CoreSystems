@@ -3,9 +3,13 @@ package skillbundle
 import (
 	"archive/zip"
 	"bytes"
+	"encoding/json"
+	"errors"
 	"io"
 	"io/fs"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 )
 
 // RefusalError names why an upload was refused. Code is a closed, content-free word that
@@ -163,4 +167,300 @@ func validFrontMatter(body []byte) bool {
 		fields[key] = strings.TrimSpace(value)
 	}
 	return closed && fields["name"] != "" && fields["description"] != ""
+}
+
+// DeckTemplatesEnv is the switch for deck brand templates (EP-5 S6). Only the literal "true"
+// turns it on; off, an upload is checked exactly as before and no listing reports a template.
+const DeckTemplatesEnv = "SKILL_DECK_TEMPLATES_ENABLED"
+
+// DeckTemplatesFromLookup reads SKILL_DECK_TEMPLATES_ENABLED strictly.
+func DeckTemplatesFromLookup(lookup func(string) string) bool {
+	return lookup(DeckTemplatesEnv) == "true"
+}
+
+// The deck theme contract. It mirrors mp_contracts::deck_theme in the Rust workspace; both read
+// the same fixture (testdata/deck_theme_v1.json here), so a rule changed on one side fails the
+// other's test.
+const (
+	// ThemePath is the file that makes a bundle a deck template.
+	ThemePath    = "templates/deck-theme.json"
+	masterPath   = "templates/master.pptx"
+	templatesDir = "templates/"
+
+	themeVersion          = 1
+	maxThemeBytes         = 32 << 10
+	maxThemeNameChars     = 80
+	maxThemeDescChars     = 200
+	maxThemeAccents       = 4
+	maxThemeFontChars     = 64
+	maxThemeFooterChars   = 80
+	maxThemeLogoPathBytes = 255
+)
+
+// deckTheme is a decoded theme file. Pointers mark the optional keys.
+type deckTheme struct {
+	Version     int
+	Name        string
+	Description *string
+	Colors      struct {
+		Primary, Secondary, Text, Background string
+		Accent                               []string
+	}
+	Fonts struct {
+		Heading, Body string
+	}
+	Logo       *string
+	Master     *string
+	FooterText *string
+}
+
+// ValidateDeckTemplate checks the templates/ half of a parsed bundle while deck templates are on.
+// Nothing under templates/ may be a program: templates need no scripts, so one there is a
+// supply-chain risk, not a feature. A master must be a presentation. When the theme is present it
+// must hold the contract, and the master and logo it names must be in the bundle, the logo a PNG
+// or JPEG by its signature.
+func ValidateDeckTemplate(bundle Bundle) error {
+	files := make(map[string]File, len(bundle.Files))
+	for _, file := range bundle.Files {
+		files[file.Path] = file
+		if strings.HasPrefix(file.Path, templatesDir) && (file.Executable || looksExecutable(file.Body)) {
+			return refuse("template_executable")
+		}
+	}
+	if master, ok := files[masterPath]; ok && !isPresentation(master.Body) {
+		return refuse("deck_master_not_presentation")
+	}
+	themeFile, ok := files[ThemePath]
+	if !ok {
+		return nil
+	}
+	if themeFile.Binary || len(themeFile.Body) == 0 || len(themeFile.Body) > maxThemeBytes {
+		return refuse("deck_theme_invalid")
+	}
+	theme, ok := decodeDeckTheme(themeFile.Body)
+	if !ok {
+		return refuse("deck_theme_invalid")
+	}
+	if code := theme.problem(); code != "" {
+		return refuse(code)
+	}
+	if theme.Master != nil {
+		if _, present := files[masterPath]; !present {
+			return refuse("deck_master_missing")
+		}
+	}
+	if theme.Logo != nil {
+		logo, present := files[*theme.Logo]
+		if !present {
+			return refuse("deck_logo_missing")
+		}
+		if !isPNGOrJPEG(logo.Body) {
+			return refuse("deck_logo_not_image")
+		}
+	}
+	return nil
+}
+
+// decodeDeckTheme reads the theme with exact, case-sensitive keys at every level. Go's decoder
+// matches keys case-insensitively and skips unknown ones; the contract does neither.
+func decodeDeckTheme(body []byte) (deckTheme, bool) {
+	var theme deckTheme
+	top, ok := exactKeys(body, []string{"version", "name", "colors", "fonts"},
+		[]string{"description", "logo", "master", "footer_text"})
+	if !ok {
+		return theme, false
+	}
+	colors, ok := exactKeys(top["colors"], []string{"primary", "secondary", "text", "background"}, []string{"accent"})
+	if !ok {
+		return theme, false
+	}
+	fonts, ok := exactKeys(top["fonts"], []string{"heading", "body"}, nil)
+	if !ok {
+		return theme, false
+	}
+	required := []struct {
+		raw    json.RawMessage
+		target any
+	}{
+		{top["version"], &theme.Version},
+		{top["name"], &theme.Name},
+		{colors["primary"], &theme.Colors.Primary},
+		{colors["secondary"], &theme.Colors.Secondary},
+		{colors["text"], &theme.Colors.Text},
+		{colors["background"], &theme.Colors.Background},
+		{fonts["heading"], &theme.Fonts.Heading},
+		{fonts["body"], &theme.Fonts.Body},
+	}
+	for _, field := range required {
+		if !decodeStrict(field.raw, field.target) {
+			return theme, false
+		}
+	}
+	optional := []struct {
+		raw    json.RawMessage
+		target **string
+	}{
+		{top["description"], &theme.Description},
+		{top["logo"], &theme.Logo},
+		{top["master"], &theme.Master},
+		{top["footer_text"], &theme.FooterText},
+	}
+	for _, field := range optional {
+		if isAbsent(field.raw) {
+			continue
+		}
+		var value string
+		if !decodeStrict(field.raw, &value) {
+			return theme, false
+		}
+		*field.target = &value
+	}
+	if raw := colors["accent"]; !isAbsent(raw) && !decodeStrict(raw, &theme.Colors.Accent) {
+		return theme, false
+	}
+	return theme, true
+}
+
+// isAbsent treats a missing optional key and an explicit null alike, as the Rust contract does.
+func isAbsent(raw json.RawMessage) bool {
+	return raw == nil || string(raw) == "null"
+}
+
+// exactKeys decodes one JSON object and refuses it unless every required key is present and no
+// key outside required and optional is.
+func exactKeys(raw json.RawMessage, required, optional []string) (map[string]json.RawMessage, bool) {
+	var object map[string]json.RawMessage
+	if raw == nil || !decodeStrict(raw, &object) || object == nil {
+		return nil, false
+	}
+	allowed := make(map[string]bool, len(required)+len(optional))
+	for _, key := range required {
+		if _, ok := object[key]; !ok {
+			return nil, false
+		}
+		allowed[key] = true
+	}
+	for _, key := range optional {
+		allowed[key] = true
+	}
+	for key := range object {
+		if !allowed[key] {
+			return nil, false
+		}
+	}
+	return object, true
+}
+
+// decodeStrict decodes exactly one JSON value into target. A null for a required key leaves the
+// target empty, which the rules then refuse.
+func decodeStrict(raw json.RawMessage, target any) bool {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	if err := decoder.Decode(target); err != nil {
+		return false
+	}
+	_, err := decoder.Token()
+	return errors.Is(err, io.EOF)
+}
+
+// problem returns the refusal code of the first rule the theme breaks, or "" when it holds them all.
+func (t deckTheme) problem() string {
+	if t.Version != themeVersion || !themeText(t.Name, maxThemeNameChars) {
+		return "deck_theme_invalid"
+	}
+	if t.Description != nil && utf8.RuneCountInString(*t.Description) > maxThemeDescChars {
+		return "deck_theme_invalid"
+	}
+	for _, colour := range []string{t.Colors.Primary, t.Colors.Secondary, t.Colors.Text, t.Colors.Background} {
+		if !isHexColour(colour) {
+			return "deck_theme_colour"
+		}
+	}
+	if len(t.Colors.Accent) > maxThemeAccents {
+		return "deck_theme_colour"
+	}
+	for _, colour := range t.Colors.Accent {
+		if !isHexColour(colour) {
+			return "deck_theme_colour"
+		}
+	}
+	if !themeText(t.Fonts.Heading, maxThemeFontChars) || !themeText(t.Fonts.Body, maxThemeFontChars) {
+		return "deck_theme_invalid"
+	}
+	if t.Logo != nil && !validLogoPath(*t.Logo) {
+		return "deck_theme_invalid"
+	}
+	if t.Master != nil && *t.Master != masterPath {
+		return "deck_theme_invalid"
+	}
+	if t.FooterText != nil && !themeText(*t.FooterText, maxThemeFooterChars) {
+		return "deck_theme_invalid"
+	}
+	return ""
+}
+
+// themeText is one line of display text: not blank, at most limit characters, no control character.
+func themeText(value string, limit int) bool {
+	if strings.TrimSpace(value) == "" || utf8.RuneCountInString(value) > limit {
+		return false
+	}
+	for _, r := range value {
+		if unicode.IsControl(r) {
+			return false
+		}
+	}
+	return true
+}
+
+// isHexColour accepts "#" and six hex digits, either case.
+func isHexColour(value string) bool {
+	if len(value) != 7 || value[0] != '#' {
+		return false
+	}
+	for _, r := range value[1:] {
+		if !strings.ContainsRune("0123456789abcdefABCDEF", r) {
+			return false
+		}
+	}
+	return true
+}
+
+// validLogoPath is a clean bundle path under templates/ naming a .png, .jpg or .jpeg file.
+func validLogoPath(path string) bool {
+	lower := strings.ToLower(path)
+	return len(path) <= maxThemeLogoPathBytes && strings.HasPrefix(path, templatesDir) && validPath(path) &&
+		(strings.HasSuffix(lower, ".png") || strings.HasSuffix(lower, ".jpg") || strings.HasSuffix(lower, ".jpeg"))
+}
+
+// isPresentation reports whether body is a zip that holds ppt/presentation.xml, the part every
+// PresentationML package has. It reads the central directory only, never a part's body.
+func isPresentation(body []byte) bool {
+	reader, err := zip.NewReader(bytes.NewReader(body), int64(len(body)))
+	if err != nil {
+		return false
+	}
+	for _, entry := range reader.File {
+		if entry.Name == "ppt/presentation.xml" {
+			return true
+		}
+	}
+	return false
+}
+
+// isPNGOrJPEG checks the file signature, not the name.
+func isPNGOrJPEG(body []byte) bool {
+	return bytes.HasPrefix(body, []byte("\x89PNG\r\n\x1a\n")) || bytes.HasPrefix(body, []byte{0xff, 0xd8, 0xff})
+}
+
+// looksExecutable reports a native program or an interpreter script by its first bytes: ELF,
+// PE ("MZ"), Mach-O and "#!".
+func looksExecutable(body []byte) bool {
+	for _, magic := range [][]byte{
+		[]byte("\x7fELF"), []byte("MZ"), []byte("#!"),
+		{0xfe, 0xed, 0xfa, 0xce}, {0xfe, 0xed, 0xfa, 0xcf}, {0xce, 0xfa, 0xed, 0xfe}, {0xcf, 0xfa, 0xed, 0xfe},
+	} {
+		if bytes.HasPrefix(body, magic) {
+			return true
+		}
+	}
+	return false
 }

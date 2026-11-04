@@ -44,6 +44,9 @@ type Server struct {
 	toolDB              toolBindingDatabase // optional: enables tool-level binding
 	skillBundles        skillBundleReader
 	skillBundlesEnabled bool
+
+	// deckTemplatesEnabled reports which bundles are deck templates (SKILL_DECK_TEMPLATES_ENABLED).
+	deckTemplatesEnabled bool
 }
 
 // modelCapabilitySource is the narrow slice of the models registry the
@@ -180,6 +183,13 @@ func (s *Server) WithToolBindingDatabase(db toolBindingDatabase) *Server {
 func (s *Server) WithSkillBundles(store skillBundleReader, enabled bool) *Server {
 	s.skillBundles = store
 	s.skillBundlesEnabled = enabled && store != nil
+	return s
+}
+
+// WithDeckTemplates turns on the deck_template flag of ListSkillBundles (EP-5 S6). The switch
+// arrives already parsed by skillbundle.DeckTemplatesFromLookup; off, every summary reports false.
+func (s *Server) WithDeckTemplates(enabled bool) *Server {
+	s.deckTemplatesEnabled = enabled
 	return s
 }
 
@@ -943,6 +953,8 @@ func (s *Server) ListSkillBundles(ctx context.Context, req *mpv1.ListSkillBundle
 	if err != nil {
 		return nil, skillBundleErr(err)
 	}
+	// DeckTemplate stays false while SKILL_DECK_TEMPLATES_ENABLED is off, so the response is the
+	// same bytes as before the field existed.
 	bundles := make([]*mpv1.SkillBundleSummary, 0, len(summaries))
 	for _, summary := range summaries {
 		bundles = append(bundles, &mpv1.SkillBundleSummary{
@@ -952,6 +964,7 @@ func (s *Server) ListSkillBundles(ctx context.Context, req *mpv1.ListSkillBundle
 			TotalBytes:     summary.TotalBytes,
 			CreatedBy:      summary.CreatedBy,
 			CreatedAt:      summary.CreatedAt.UTC().Format(time.RFC3339),
+			DeckTemplate:   s.deckTemplatesEnabled && summary.DeckTemplate,
 		})
 	}
 	return &mpv1.ListSkillBundlesResponse{Bundles: bundles}, nil

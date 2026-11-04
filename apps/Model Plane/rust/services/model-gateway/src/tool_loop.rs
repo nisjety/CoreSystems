@@ -3360,7 +3360,8 @@ fn skill_bundle_mounts_enabled_from(raw: Option<&str>) -> bool {
     raw == Some("true")
 }
 
-fn skill_bundle_mounts_enabled() -> bool {
+/// Whether the `/skills` mount is switched on; the `deck` tool's template mount needs it too.
+pub(crate) fn skill_bundle_mounts_enabled() -> bool {
     skill_bundle_mounts_enabled_from(std::env::var(SKILL_BUNDLE_MOUNT_ENV).ok().as_deref())
 }
 
@@ -17864,6 +17865,7 @@ mod skill_mount_tests {
             total_bytes: 10,
             created_by: "admin".to_owned(),
             created_at: "2026-10-01T00:00:00Z".to_owned(),
+            deck_template: false,
         }
     }
 
