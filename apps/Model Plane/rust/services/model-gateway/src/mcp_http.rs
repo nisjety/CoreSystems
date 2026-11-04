@@ -54,6 +54,8 @@ const MCP_PROTOCOL_HEADER: &str = "mcp-protocol-version";
 const INITIALIZE_ID: i64 = 1;
 const LIST_TOOLS_ID: i64 = 2;
 const CALL_TOOL_ID: i64 = 3;
+/// `resources/read` of an MCP App's `ui://` resource (EP-4 S8).
+const READ_RESOURCE_ID: i64 = 4;
 
 /// Pull the JSON-RPC response for `expected_id` out of a response body,
 /// accepting either shape the spec permits: a bare JSON object, or SSE frames
@@ -86,6 +88,22 @@ pub fn extract_jsonrpc_response(body: &str, expected_id: i64) -> Option<String> 
             let value = serde_json::from_str::<Value>(data).ok()?;
             is_response_for(&value, expected_id).then(|| data.to_owned())
         })
+}
+
+/// The `result` of one JSON-RPC response, or its error's message.
+fn jsonrpc_result(response: &str, method: &str) -> Result<Value, String> {
+    let mut value: Value = serde_json::from_str(response.trim())
+        .map_err(|error| format!("{method} response is not valid json: {error}"))?;
+    if let Some(error) = value.get("error") {
+        return Err(error
+            .get("message")
+            .and_then(Value::as_str)
+            .map_or_else(|| error.to_string(), ToOwned::to_owned));
+    }
+    value
+        .get_mut("result")
+        .map(Value::take)
+        .ok_or_else(|| format!("{method} returned no result"))
 }
 
 /// Accumulates SSE bytes and yields the `data:` payload of every complete
@@ -446,6 +464,55 @@ impl McpHttpSession {
         Ok(tools)
     }
 
+    /// Every tool entry the server advertises, as the raw JSON objects of the
+    /// `tools/list` result, paged like [`Self::list_tools`] (EP-4 S8). The MCP
+    /// Apps resource read needs an entry's `_meta`, which [`McpToolDef`]
+    /// deliberately leaves out so the tool digest stays as it is (D11).
+    ///
+    /// # Errors
+    /// As [`Self::list_tools`].
+    pub async fn list_tools_raw(&self) -> Result<Vec<Value>, String> {
+        let mut tools = Vec::new();
+        let mut cursor: Option<String> = None;
+        for _ in 0..MAX_TOOLS_LIST_PAGES {
+            let (body, _) = self
+                .post(&build_list_tools_request(LIST_TOOLS_ID, cursor.as_deref()))
+                .await?;
+            let response = extract_jsonrpc_response(&body, LIST_TOOLS_ID)
+                .ok_or_else(|| "tools/list returned no JSON-RPC response".to_owned())?;
+            let result = jsonrpc_result(&response, "tools/list")?;
+            let page = result
+                .get("tools")
+                .and_then(Value::as_array)
+                .ok_or_else(|| "tools/list result missing tools array".to_owned())?;
+            tools.extend(page.iter().cloned());
+            match result.get("nextCursor").and_then(Value::as_str) {
+                Some(next) => cursor = Some(next.to_owned()),
+                None => return Ok(tools),
+            }
+        }
+        Ok(tools)
+    }
+
+    /// `resources/read` of one resource uri, returning the JSON-RPC `result`
+    /// (its `contents` array) for the caller to check (EP-4 S8). The body is
+    /// bounded like every other response of this session.
+    ///
+    /// # Errors
+    /// Transport failure, a non-success status, no response, or a JSON-RPC error.
+    pub async fn read_resource(&self, uri: &str) -> Result<Value, String> {
+        let payload = serde_json::json!({
+            "jsonrpc": crate::mcp_jsonrpc::JSONRPC_VERSION,
+            "id": READ_RESOURCE_ID,
+            "method": "resources/read",
+            "params": { "uri": uri }
+        });
+        let (body, _) = self.post(&payload).await?;
+        let response = extract_jsonrpc_response(&body, READ_RESOURCE_ID)
+            .ok_or_else(|| "resources/read returned no JSON-RPC response".to_owned())?;
+        jsonrpc_result(&response, "resources/read")
+    }
+
     /// Invoke one tool. Transport and protocol failures both surface as
     /// [`McpCallOutcome::Err`] so callers have a single failure shape.
     pub async fn call_tool(&self, tool_name: &str, arguments: &Value) -> McpCallOutcome {
@@ -597,6 +664,22 @@ mod tests {
         assert_eq!(page.tools.len(), 1);
         assert_eq!(page.tools[0].name, "execute_query");
         assert_eq!(page.next_cursor, None);
+    }
+
+    #[test]
+    fn jsonrpc_result_takes_the_result_or_the_error_message() {
+        let ok = r#"{"jsonrpc":"2.0","id":4,"result":{"contents":[]}}"#;
+        assert_eq!(
+            jsonrpc_result(ok, "resources/read"),
+            Ok(serde_json::json!({ "contents": [] }))
+        );
+        let refused =
+            r#"{"jsonrpc":"2.0","id":4,"error":{"code":-32002,"message":"Resource not found"}}"#;
+        assert_eq!(
+            jsonrpc_result(refused, "resources/read"),
+            Err("Resource not found".to_owned())
+        );
+        assert!(jsonrpc_result(r#"{"jsonrpc":"2.0","id":4}"#, "resources/read").is_err());
     }
 
     fn scripted(chunks: &[&str], sse: bool, limit: usize) -> McpMessageStream {

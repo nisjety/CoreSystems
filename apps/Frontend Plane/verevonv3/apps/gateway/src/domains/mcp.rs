@@ -71,6 +71,9 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
             "/api/v1/tool-policies/{capability_id}",
             put(set_tool_policy).delete(revoke_tool_policy),
         )
+        // The HTML app an MCP tool declares (Wave 3 EP-4 S8). model-gateway checks the viewer,
+        // re-discovers the tool and answers 404 while its switch is off.
+        .route("/api/v1/mcp-apps/resource", get(get_mcp_app_resource))
         // Per-org/user rate limiting, ordered like `agents_runs.rs`:
         // `require_session` (written last → outer) runs first and inserts
         // `AuthenticatedUser`, so `rate_limit_middleware` (written first → inner)
@@ -452,6 +455,38 @@ async fn org_policy_forbidden(
     None
 }
 
+/// `?server_id=&tool=` of an MCP app read. Only these two are forwarded; any
+/// other query parameter (an org or user id among them) is dropped here.
+#[derive(Debug, Default, Deserialize)]
+struct McpAppResourceQuery {
+    #[serde(default)]
+    server_id: String,
+    #[serde(default)]
+    tool: String,
+}
+
+/// The model-gateway url of an MCP app read, built from the two names alone.
+fn mcp_app_resource_url(model_gateway_url: &str, query: &McpAppResourceQuery) -> String {
+    format!(
+        "{model_gateway_url}/v1/mcp-apps/resource?server_id={}&tool={}",
+        urlencoding::encode(&query.server_id),
+        urlencoding::encode(&query.tool)
+    )
+}
+
+/// Pass-through of an MCP app read (EP-4 S8). The org and viewer come from the
+/// minted model-gateway and capability-core tokens, never from the browser, and
+/// no scoping header is added: model-gateway decides everything.
+async fn get_mcp_app_resource(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Query(query): Query<McpAppResourceQuery>,
+) -> Response {
+    let url = mcp_app_resource_url(&state.model_gateway_url, &query);
+    proxy_tool_surface(&state, &user, &headers, Method::GET, &url, None).await
+}
+
 /// Forward one request of the per-tool surface with the caller's model-gateway
 /// and capability-core credentials, exactly as the server routes above do.
 async fn proxy_tool_surface(
@@ -680,9 +715,44 @@ mod tests {
             "/api/v1/mcp/servers/{server_id}/tools/{tool}/approve",
             "/api/v1/tool-policies\"",
             "/api/v1/tool-policies/{capability_id}",
+            "/api/v1/mcp-apps/resource",
             "from_fn_with_state(state, require_session)",
         ] {
             assert!(router.contains(route), "{route}");
+        }
+    }
+
+    #[test]
+    fn the_mcp_app_read_forwards_only_the_two_names() {
+        // A browser that adds scoping parameters gets them dropped by the
+        // extractor; the two names are encoded, so neither can smuggle one in.
+        let uri: axum::http::Uri =
+            "/api/v1/mcp-apps/resource?server_id=srv-1&tool=show%26org_id%3Dorg-2&org_id=org-2&user_id=user-2"
+                .parse()
+                .expect("a valid uri");
+        let Query(query) =
+            Query::<McpAppResourceQuery>::try_from_uri(&uri).expect("the query parses");
+        let url = mcp_app_resource_url("http://model-gateway:8080", &query);
+        assert_eq!(
+            url,
+            "http://model-gateway:8080/v1/mcp-apps/resource?server_id=srv-1&tool=show%26org_id%3Dorg-2"
+        );
+        assert!(!url.contains("user_id"));
+    }
+
+    #[test]
+    fn the_mcp_app_read_sends_no_scoping_header_of_its_own() {
+        // Source-text pin: the handler goes through the shared per-tool proxy,
+        // which carries the minted credentials only, and sets no header itself.
+        let source = include_str!("mcp.rs");
+        let handler = source
+            .split("async fn get_mcp_app_resource")
+            .nth(1)
+            .and_then(|rest| rest.split("\n}").next())
+            .expect("the handler");
+        assert!(handler.contains("proxy_tool_surface("));
+        for forbidden in [".header(", "x-org", "x-user", "x-capability"] {
+            assert!(!handler.contains(forbidden), "{forbidden}");
         }
     }
 }
