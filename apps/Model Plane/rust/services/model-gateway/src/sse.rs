@@ -210,6 +210,24 @@ struct AgentRoleInput {
     autonomy_cap: String,
 }
 
+/// The passage of each knowledge citation of `grounding`, in citation order (EP-2-S4): one entry
+/// per citation, all `None` with the cited-passage switch off so every frame is unchanged. A ZDR
+/// turn streams these too; what may be stored is decided at persistence, not here.
+fn knowledge_passages(
+    grounding: &crate::retrieval::Grounding,
+    enabled: bool,
+) -> Vec<Option<crate::sse_events::CitationPassage>> {
+    grounding
+        .citations
+        .iter()
+        .map(|citation| {
+            enabled
+                .then(|| crate::sse_events::CitationPassage::knowledge(&grounding.facts, &citation.id))
+                .flatten()
+        })
+        .collect()
+}
+
 /// The bounded role catalogue a Do run carries in `RunContext.agent_roles` (EP-6 S10).
 ///
 /// Empty with the switch off, for a ZDR or waived turn (Do and delegation are refused there, so the
@@ -3041,6 +3059,34 @@ pub async fn invoke_stream_sse(
                     Some(crate::sse_events::RetentionClass::ZdrWaived { .. })
                 ),
         );
+        // A wide-research run from the composer's entry (EP-2 S8): absent with
+        // WIDE_RESEARCH_ENTRY_ENABLED off, for a turn that does not ask for one and for a ZDR or
+        // waived turn. Its item cap is clamped to the org's `research.max_fan_out_items`; the
+        // admission above already refused a Do turn whose enforced policy cannot be read, so a
+        // read that fails here holds the run to 0, which execution-core refuses.
+        let wide_research_enabled =
+            crate::http_routes::wide_research_entry_enabled() && req.wide_research.is_some();
+        let wide_research = if wide_research_enabled {
+            let org_cap = crate::http_routes::wide_research_org_cap(
+                &state,
+                &org_id,
+                capability_bearer.as_ref(),
+            )
+            .await
+            .unwrap_or(Some(0));
+            crate::http_routes::wide_research_request(
+                true,
+                req.wide_research.as_ref(),
+                effective_zdr
+                    || matches!(
+                        retention_class,
+                        Some(crate::sse_events::RetentionClass::ZdrWaived { .. })
+                    ),
+                crate::http_routes::WideResearchCap::of(org_cap),
+            )
+        } else {
+            None
+        };
         timing.hand_off("agentic");
         return agentic_run_stream(
             state.clone(),
@@ -3116,6 +3162,7 @@ pub async fn invoke_stream_sse(
                 crate::thinking::ladder_enabled(),
             ),
             agent_roles,
+            wide_research,
         );
     }
 
@@ -4020,10 +4067,20 @@ pub async fn invoke_stream_sse(
         // chat-parity §8: emit retrieved sources up front (gated on the
         // `citations` family) so the UI can render the Sources panel before
         // the answer streams in.
-        for c in grounding
+        //
+        // Behind the cited-passage switch (EP-2-S4) each one also carries the fact it was numbered
+        // from and that fact's locator, so the viewer can show the passage and ask Data Plane for
+        // more under the viewer's own grants. The same passages are seeded into the sink below.
+        let kb_passages: Vec<Option<crate::sse_events::CitationPassage>> = grounding
+            .as_ref()
+            .map(|payload| knowledge_passages(payload, crate::sse_events::citation_passages_enabled()))
+            .unwrap_or_default();
+        for (c, passage) in grounding
             .as_ref()
             .map(|payload| payload.citations.clone())
             .unwrap_or_default()
+            .into_iter()
+            .zip(kb_passages.iter().cloned())
         {
             let cite = crate::sse_events::ChatEvent::Citation {
                 id: c.id,
@@ -4037,6 +4094,7 @@ pub async fn invoke_stream_sse(
                 start: None,
                 end: None,
                 origin: c.origin,
+                passage,
             };
             emit_and_buffer(
                 &tx,
@@ -4084,7 +4142,7 @@ pub async fn invoke_stream_sse(
         // citations instead of only whatever web_search/deep-research/
         // verification-retry adds later via `sink.emit()`.
         if let Some(payload) = grounding.as_ref() {
-            sink.seed_recorded_citations(payload.citations.iter().map(|c| {
+            sink.seed_recorded_citations(payload.citations.iter().zip(kb_passages).map(|(c, passage)| {
                 crate::sse_events::RecordedCitation {
                     id: c.id.clone(),
                     title: c.title.clone(),
@@ -4094,6 +4152,7 @@ pub async fn invoke_stream_sse(
                     source_group_label: Some(c.source_group_label.clone()),
                     number: Some(c.number),
                     origin: c.origin.clone(),
+                    passage,
                 }
             }));
         }
@@ -5397,7 +5456,11 @@ pub async fn invoke_stream_sse(
                                     // reader needs to see. Only the score
                                     // treats the two differently.
                                     if verdict != crate::verification::SourceVerdict::Unrelated {
-                                        for citation in &found.citations {
+                                        let passages = knowledge_passages(
+                                            &found,
+                                            crate::sse_events::citation_passages_enabled(),
+                                        );
+                                        for (citation, passage) in found.citations.iter().zip(passages) {
                                             sink.emit(crate::sse_events::ChatEvent::Citation {
                                                 id: citation.id.clone(),
                                                 title: citation.title.clone(),
@@ -5412,6 +5475,7 @@ pub async fn invoke_stream_sse(
                                                 start: None,
                                                 end: None,
                                                 origin: citation.origin.clone(),
+                                                passage,
                                             })
                                             .await;
                                         }
@@ -5748,10 +5812,18 @@ pub async fn invoke_stream_sse(
                                                     // stored as its typed code beside the evidence, so a thread
                                                     // reopened later says what the live stream said.
                                                     crate::session_flow::with_retrieval_decline(
+                                                    // A ZDR or waived turn streamed its passages and
+                                                    // stamps but stores neither (D12).
                                                     crate::session_flow::turn_evidence_metadata(
                                                         session_grounding.as_ref(),
-                                                        &sink.recorded_citations(),
-                                                        &sink.recorded_artifacts(),
+                                                        &crate::session_flow::persistable_citations(
+                                                            sink.recorded_citations(),
+                                                            effective_zdr || retention_class.is_some(),
+                                                        ),
+                                                        &crate::session_flow::persistable_artifacts(
+                                                            sink.recorded_artifacts(),
+                                                            effective_zdr || retention_class.is_some(),
+                                                        ),
                                                         // Scored, and where applicable verified, just
                                                         // above — so the durable turn carries the same
                                                         // number the stream reported, and a reader who
@@ -5968,9 +6040,9 @@ pub async fn invoke_stream_sse(
                         // later revision turn's receipt-bound reuse.
                         committed_artifacts.adopt_review(&session_state.artifact_versions, &session_thread_id, &artifact.id);
                         }
+                        // The live frame keeps a report's provenance stamp even when the turn may not store it.
                         emit_and_buffer(&tx, &stream_buffers, &buffer_key, &mut seq, &features, &req_id,
-                            crate::sse_events::ChatEvent::Artifact { id: artifact.id, kind: artifact.kind,
-                                title: artifact.title, content: artifact.content, version: artifact.version }).await;
+                            artifact.into_event()).await;
                     }
                     if hold_artifact_answer {
                         let data = serde_json::to_string(&SseChunk { request_id: req_id.clone(),
@@ -8220,6 +8292,7 @@ fn image_gen_stream(
                     title,
                     content: content.clone(),
                     version: 1,
+                    provenance: None,
                 };
                 if artifact.should_emit(&features) {
                     let _ = tx.send(Ok(artifact.to_sse(&request_id))).await;
@@ -11179,7 +11252,11 @@ fn zdr_answer_stream(
             if event.should_emit(&features) {
                 let _ = tx.send(Ok(event.to_sse(&request_id))).await;
             }
-            for citation in payload.citations {
+            // A ZDR turn streams its knowledge passages live and writes no thread, so nothing of
+            // them is stored (EP-2-S4).
+            let passages =
+                knowledge_passages(&payload, crate::sse_events::citation_passages_enabled());
+            for (citation, passage) in payload.citations.into_iter().zip(passages) {
                 let event = crate::sse_events::ChatEvent::Citation {
                     id: citation.id,
                     title: citation.title,
@@ -11192,6 +11269,7 @@ fn zdr_answer_stream(
                     start: None,
                     end: None,
                     origin: citation.origin,
+                    passage,
                 };
                 if event.should_emit(&features) {
                     let _ = tx.send(Ok(event.to_sse(&request_id))).await;
@@ -12228,6 +12306,8 @@ fn spawn_run_dispatch(
     // The most questions the run's `ask_user` tool may put to its owner (build plan WS14 S4); zero offers
     // none. Decided by the caller, which knows the turn's posture and whether it is a continuation.
     max_questions: u32,
+    // The wide-research request (EP-2 S8), item cap clamped to the org's; `None` for every other run.
+    wide_research: Option<mp_contracts::model_plane::v1::WideResearchRequest>,
 ) -> Result<tokio::task::JoinHandle<Result<RunAgentResponse, tonic::Status>>, tonic::Status> {
     let mut execution_client = state.execution_client.clone();
     // The graded authority execution-core enforces PER CALL.
@@ -12348,6 +12428,13 @@ fn spawn_run_dispatch(
     );
     // The question tool's cap for this run (build plan WS14 S4), set by the caller as the org policy is.
     run_agent_req.max_questions = max_questions;
+    // A wide-research run (EP-2 S8) delegates no wider than its org-clamped item cap: the narrower
+    // of that cap and the server's own subagent budget, never wider than either.
+    if let Some(wide) = wide_research {
+        run_agent_req.max_subagents =
+            wide_research_max_subagents(run_agent_req.max_subagents, wide.item_cap);
+        run_agent_req.wide_research = Some(wide);
+    }
     let run_agent_req = authenticated_run_agent_request(
         run_agent_req,
         execution_bearer,
@@ -12605,7 +12692,29 @@ fn build_run_agent_request(
         org_policy: None,
         // The question tool's cap is decided by the caller (`spawn_run_dispatch`), as the org policy is; none here.
         max_questions: 0,
+        // A wide-research request is set by the caller (`spawn_run_dispatch`) once the org's cap is
+        // read (EP-2 S8); none here, so every other run is the bytes it was.
+        wide_research: None,
     }
+}
+
+/// The delegation budget of a wide-research run (EP-2 S8): its org-clamped item cap, or the server's
+/// own subagent budget when that is set and narrower. `0` in the budget means unspecified
+/// (execution-core's default), so it never widens the cap; a cap of 0 stays 0 and execution-core
+/// refuses the run.
+fn wide_research_max_subagents(budget: u32, item_cap: u32) -> u32 {
+    if budget == 0 {
+        item_cap
+    } else {
+        budget.min(item_cap)
+    }
+}
+
+/// The wall clock a fresh Do run gets, in seconds: the deadline [`resolve_agentic_run_deadline`]
+/// gives it from this process's environment. The wide-research estimate (EP-2 S8) states its minutes
+/// within it.
+pub(crate) fn agentic_run_deadline_secs(pinned_to_subscription: bool) -> u64 {
+    resolve_agentic_run_deadline(pinned_to_subscription, &|key| std::env::var(key).ok()).as_secs()
 }
 
 /// `HOOKS_DO_RUNS` (WS25-S3), read once per process so the mode cannot change under a run.
@@ -13118,6 +13227,9 @@ fn agentic_run_stream(
     // The run's agent role catalogue (EP-6 S10, `compose_agent_roles`), carried in the run
     // context. Empty with `MODEL_GATEWAY_SUBAGENT_ROLE_CATALOGUE` off and for a continuation.
     agent_roles: Vec<mp_contracts::model_plane::v1::AgentRoleSpec>,
+    // The wide-research request of a turn from the composer's entry (EP-2 S8), item cap already
+    // clamped to the org's. `None` with WIDE_RESEARCH_ENTRY_ENABLED off and for a continuation.
+    wide_research: Option<mp_contracts::model_plane::v1::WideResearchRequest>,
 ) -> Sse<ReceiverStream<Result<Event, Infallible>>> {
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(32);
     tokio::spawn(async move {
@@ -13316,6 +13428,7 @@ fn agentic_run_stream(
             durable_grant.as_ref(),
             run_effort,
             max_questions,
+            wide_research,
         ) {
             Ok(dispatch) => dispatch,
             Err(error) => {
@@ -20508,6 +20621,8 @@ pub(crate) async fn continue_run(
             0,
             // Nor a role catalogue: it carries no run context (EP-6 S10).
             Vec::new(),
+            // Nor a wide-research request: the run it continues already carried its items (EP-2 S8).
+            None,
         )
     };
     if !resume_enabled {
@@ -22402,6 +22517,7 @@ mod continue_run_tests {
             Vec::new(),
             0,
             Vec::new(),
+            None,
         );
         let frames = frames_of_stream(stream).await;
         let names: Vec<&str> = frames.iter().map(|(name, _)| name.as_str()).collect();
@@ -23892,6 +24008,7 @@ mod continue_run_tests {
             Vec::new(),
             0,
             Vec::new(),
+            None,
         );
         let frames = frames_of_stream(stream).await;
         let names: Vec<&str> = frames.iter().map(|(name, _)| name.as_str()).collect();
@@ -25403,6 +25520,43 @@ mod agent_role_catalogue_tests {
         }
     }
 
+    /// EP-2 S8: a wide-research run delegates no wider than its org-clamped item cap, and the
+    /// server's own subagent budget can only narrow it further.
+    #[test]
+    fn a_wide_research_run_delegates_no_wider_than_its_item_cap() {
+        assert_eq!(wide_research_max_subagents(0, 10), 10, "an unset budget takes the cap");
+        assert_eq!(wide_research_max_subagents(4, 10), 4, "a narrower budget wins");
+        assert_eq!(wide_research_max_subagents(20, 10), 10, "a wider budget never widens");
+        assert_eq!(wide_research_max_subagents(8, 0), 0, "an org with wide research off stays off");
+    }
+
+    /// EP-2 S8: the wide-research request is built only behind its switch, so with the switch off
+    /// the run request carries no such field and its bytes are what they were before it existed.
+    #[test]
+    fn the_wide_research_request_is_built_only_behind_its_switch() {
+        let source = include_str!("sse.rs").replace("\r\n", "\n");
+        let start = source
+            .find("fn agentic_run_stream(")
+            .expect("the stream launch");
+        let launch = &source[start..];
+        let launch = &launch[..launch.find("\n}\n").expect("the end of the launch")];
+        assert!(
+            launch.contains("wide_research,"),
+            "the launch forwards what the invoke handler decided"
+        );
+        let handler = &source[source
+            .find("pub async fn invoke_stream_sse(")
+            .expect("the invoke handler")..];
+        let handler = &handler[..handler.find("\n}\n").expect("the end of the handler")];
+        let gate = handler
+            .find("crate::http_routes::wide_research_entry_enabled()")
+            .expect("the switch gates the request");
+        let read = handler
+            .find("crate::http_routes::wide_research_request(")
+            .expect("the request is built");
+        assert!(gate < read, "the switch is read before the request is built");
+    }
+
     #[test]
     fn no_catalogue_with_the_switch_off_or_on_a_zdr_or_waived_turn() {
         let body = json!([role("analyst")]);
@@ -25666,5 +25820,56 @@ mod agent_pin_tests {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod citation_passage_tests {
+    use super::knowledge_passages;
+
+    fn grounding() -> crate::retrieval::Grounding {
+        let citation = |id: &str, number: u32| crate::retrieval::GroundingCitation {
+            id: id.to_owned(),
+            title: format!("Title {id}"),
+            url: "notion".to_owned(),
+            snippet: "snippet".to_owned(),
+            source_group_id: "kb:notion".to_owned(),
+            source_group_label: "Notion".to_owned(),
+            number,
+            origin: crate::retrieval::KNOWLEDGE_ORIGIN.to_owned(),
+        };
+        let fact = |document_id: &str, chunk_index: i32, text: &str| crate::retrieval::GroundingFact {
+            knowledge_id: "kid-1".to_owned(),
+            document_id: document_id.to_owned(),
+            text: text.to_owned(),
+            score: 0.9,
+            source_title: "Title".to_owned(),
+            source_type: "policy".to_owned(),
+            provider: "Notion".to_owned(),
+            chunk_index,
+        };
+        crate::retrieval::Grounding {
+            facts: vec![fact("doc-1", 2, "Refunds within 30 days.")],
+            citations: vec![citation("doc-1", 1), citation("doc-9", 2)],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn citation_passages_off_give_one_empty_entry_per_citation() {
+        assert_eq!(knowledge_passages(&grounding(), false), vec![None, None]);
+    }
+
+    #[test]
+    fn citation_passages_on_carry_the_fact_and_its_locator_in_citation_order() {
+        let passages = knowledge_passages(&grounding(), true);
+        assert_eq!(passages.len(), 2, "one entry per citation, so the zip never drops a source");
+        let first = passages[0].as_ref().expect("doc-1 has a fact");
+        assert_eq!(first.quote.as_deref(), Some("Refunds within 30 days."));
+        assert_eq!(
+            first.locator,
+            Some(crate::sse_events::CitationLocator { document_id: "doc-1".to_owned(), chunk_index: 2 })
+        );
+        assert_eq!(passages[1], None, "a citation with no fact gets no invented passage");
     }
 }

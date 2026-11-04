@@ -10,6 +10,7 @@ export type ChatEventPayloads = {
     content: string
     id: string
     kind: string
+    provenance?: Record<string, unknown>
     title: string
     version: number
   }
@@ -28,8 +29,10 @@ export type ChatEventPayloads = {
     claim_id?: string
     end?: number
     id: string
+    locator?: Record<string, unknown>
     number?: number
     origin: string
+    quote?: string
     snippet: string
     source_group_id: string
     source_group_label?: string

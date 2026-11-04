@@ -162,6 +162,71 @@ pub struct AttachmentPreview {
     pub thumbs: Vec<String>,
 }
 
+/// Environment switch for cited passages and the research provenance stamp (EP-2-S4). Off, no
+/// citation or artifact frame carries `quote`, `locator` or `provenance`, and nothing new is
+/// persisted with the message.
+pub const CITATION_PASSAGES_ENV: &str = "MODEL_GATEWAY_CITATION_PASSAGES";
+
+/// Whether cited passages are switched on in this process.
+#[must_use]
+pub fn citation_passages_enabled() -> bool {
+    parse_citation_passages(std::env::var(CITATION_PASSAGES_ENV).ok().as_deref())
+}
+
+/// Only the literal `true` enables; `1`, `on` and anything else stay off.
+#[must_use]
+pub fn parse_citation_passages(raw: Option<&str>) -> bool {
+    raw.map(str::trim) == Some("true")
+}
+
+/// Longest quote a citation carries. A quote is the passage the source contributed, not the
+/// source: the viewer reads more through Data Plane's own ACL'd chunk read.
+pub const MAX_QUOTE_CHARS: usize = 400;
+
+/// Where a knowledge source's passage sits in Data Plane, so the viewer can ask Data Plane for it
+/// again under the viewer's own grants. Ids only: no text, no score.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct CitationLocator {
+    pub document_id: String,
+    pub chunk_index: i32,
+}
+
+/// The passage a citation points at (EP-2-S4): the quoted text and, for a knowledge source, its
+/// locator. Each half is written only when set, so a frame without one is unchanged.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
+pub struct CitationPassage {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub quote: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub locator: Option<CitationLocator>,
+}
+
+impl CitationPassage {
+    /// A passage from a quote and an optional locator, the quote whitespace-collapsed and bounded
+    /// to [`MAX_QUOTE_CHARS`]. `None` when there is neither, so an empty object is never sent.
+    #[must_use]
+    pub fn new(quote: &str, locator: Option<CitationLocator>) -> Option<Self> {
+        let collapsed = quote.split_whitespace().collect::<Vec<_>>().join(" ");
+        let quote: String = collapsed.chars().take(MAX_QUOTE_CHARS).collect();
+        let quote = Some(quote.trim_end().to_owned()).filter(|text| !text.is_empty());
+        (quote.is_some() || locator.is_some()).then_some(Self { quote, locator })
+    }
+
+    /// The passage of a knowledge citation: the first grounding fact of its document, which is the
+    /// chunk the context block numbered it from. `None` when no fact names the document.
+    #[must_use]
+    pub fn knowledge(facts: &[crate::retrieval::GroundingFact], document_id: &str) -> Option<Self> {
+        let fact = facts.iter().find(|fact| fact.document_id == document_id)?;
+        Self::new(
+            &fact.text,
+            Some(CitationLocator {
+                document_id: fact.document_id.clone(),
+                chunk_index: fact.chunk_index,
+            }),
+        )
+    }
+}
+
 /// A rich chat-stream event beyond the plain text delta.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ChatEvent {
@@ -251,6 +316,10 @@ pub enum ChatEvent {
         /// turn's active retrieval scope. `"connector"` marks a connected account's read (WS23-S5): listed
         /// as a source, never numbered, and carrying metadata only.
         origin: String,
+        /// The passage this source contributed and, for knowledge, where it sits (EP-2-S4). Set
+        /// only behind [`CITATION_PASSAGES_ENV`]; `None` writes neither `quote` nor `locator`, so
+        /// a frame is byte-identical to before.
+        passage: Option<CitationPassage>,
     },
     /// Per-turn retrieval-source filter transparency frame (chat-wave2 scope
     /// spec §2.2/§2.3's "shown in the receipt" requirement). Emitted at most
@@ -283,6 +352,9 @@ pub enum ChatEvent {
         title: String,
         content: String,
         version: u32,
+        /// What a research report was built from (EP-2-S4), set only on a deep-research report
+        /// behind [`CITATION_PASSAGES_ENV`]. `None` writes no `provenance` key.
+        provenance: Option<Box<crate::deep_research::ResearchProvenance>>,
     },
     /// A generated file/image attachment.
     Attachment {
@@ -704,6 +776,7 @@ impl ChatEvent {
                 start,
                 end,
                 origin,
+                passage,
             } => {
                 let mut payload = json!({
                     "id": id,
@@ -713,6 +786,14 @@ impl ChatEvent {
                     "source_group_id": source_group_id,
                     "origin": origin,
                 });
+                if let Some(passage) = passage {
+                    if let Some(quote) = &passage.quote {
+                        payload["quote"] = json!(quote);
+                    }
+                    if let Some(locator) = &passage.locator {
+                        payload["locator"] = json!(locator);
+                    }
+                }
                 // Kept out of the object entirely (not even `null`) when
                 // absent, so the common "no anchor yet" frame stays small —
                 // see the field docs on `ChatEvent::Citation`.
@@ -749,8 +830,13 @@ impl ChatEvent {
                 title,
                 content,
                 version,
+                provenance,
             } => {
-                json!({ "id": id, "kind": kind, "title": title, "content": content, "version": version })
+                let mut payload = json!({ "id": id, "kind": kind, "title": title, "content": content, "version": version });
+                if let Some(provenance) = provenance {
+                    payload["provenance"] = serde_json::to_value(provenance).unwrap_or_else(|_| json!({}));
+                }
+                payload
             }
             ChatEvent::Attachment {
                 id,
@@ -1258,6 +1344,19 @@ pub struct RecordedCitation {
     pub number: Option<u32>,
     /// See `ChatEvent::Citation::origin`.
     pub origin: String,
+    /// See `ChatEvent::Citation::passage`. Flattened, so history carries `quote` and `locator`
+    /// under the same keys the stream does, and nothing when it is `None`.
+    #[serde(flatten)]
+    pub passage: Option<CitationPassage>,
+}
+
+impl RecordedCitation {
+    /// The citation without its passage, for a turn that may not persist one (D12: a ZDR or
+    /// waived turn streams the passage but never stores it).
+    #[must_use]
+    pub fn without_passage(self) -> Self {
+        Self { passage: None, ..self }
+    }
 }
 
 /// An authored artifact observed on the wire, in the shape the SPA's
@@ -1269,6 +1368,9 @@ pub struct RecordedArtifact {
     pub title: String,
     pub content: String,
     pub version: u32,
+    /// See `ChatEvent::Artifact::provenance`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provenance: Option<Box<crate::deep_research::ResearchProvenance>>,
 }
 
 impl RecordedArtifact {
@@ -1289,6 +1391,7 @@ impl RecordedArtifact {
             title,
             content,
             version,
+            provenance,
         } = event
         else {
             return None;
@@ -1305,7 +1408,27 @@ impl RecordedArtifact {
             title: title.clone(),
             content: content.clone(),
             version: *version,
+            provenance: provenance.clone(),
         })
+    }
+
+    /// The artifact without its provenance stamp, for a turn that may not persist one (D12).
+    #[must_use]
+    pub fn without_provenance(self) -> Self {
+        Self { provenance: None, ..self }
+    }
+
+    /// The live frame for this artifact, as the staged publish re-emits it after persisting.
+    #[must_use]
+    pub fn into_event(self) -> ChatEvent {
+        ChatEvent::Artifact {
+            id: self.id,
+            kind: self.kind,
+            title: self.title,
+            content: self.content,
+            version: self.version,
+            provenance: self.provenance,
+        }
     }
 }
 
@@ -1474,6 +1597,7 @@ impl RichEventSink {
             source_group_label,
             number,
             origin,
+            passage,
             ..
         } = &event
         {
@@ -1487,6 +1611,7 @@ impl RichEventSink {
                     source_group_label: source_group_label.clone(),
                     number: *number,
                     origin: origin.clone(),
+                    passage: passage.clone(),
                 });
             }
         }
@@ -1695,7 +1820,7 @@ mod tests {
         let sink = RichEventSink::staging_artifacts(tx, families(&["artifacts", "steps"]), "r".into());
         for version in [3, 4] {
             sink.emit(ChatEvent::Artifact { id: "doc".into(), kind: "document".into(),
-                title: "Draft".into(), content: format!("private {version}"), version }).await;
+                title: "Draft".into(), content: format!("private {version}"), version, provenance: None }).await;
         }
         assert!(rx.try_recv().is_err());
         assert_eq!(sink.recorded_artifacts()[0].version, 4);
@@ -1832,6 +1957,7 @@ mod tests {
             title: "T".into(),
             content: content.into(),
             version: 1,
+            provenance: None,
         };
         sink.emit(artifact("doc", "document", "private draft"))
             .await;
@@ -1891,6 +2017,7 @@ mod tests {
             start: None,
             end: None,
             origin: "knowledge".into(),
+            passage: None,
         };
         let anchored = ChatEvent::Citation {
             id: "c1".into(),
@@ -1904,6 +2031,7 @@ mod tests {
             start: Some(4),
             end: Some(7),
             origin: "knowledge".into(),
+            passage: None,
         };
         sink.emit(first).await;
         sink.emit(anchored).await;
@@ -1949,6 +2077,7 @@ mod tests {
             source_group_label: Some("Microsoft 365".into()),
             number: Some(1),
             origin: "knowledge".into(),
+            passage: None,
         }]);
         let recorded = sink.recorded_citations();
         assert_eq!(recorded.len(), 1, "the seeded citation must be visible to recorded_citations()");
@@ -1986,6 +2115,7 @@ mod tests {
             title: format!("T {id}"),
             content: content.into(),
             version,
+            provenance: None,
         };
         sink.emit(artifact("rapport", "document", "v1 body", 1)).await;
         sink.emit(artifact("notat", "document", "memo", 1)).await;
@@ -2213,6 +2343,7 @@ mod tests {
             start: None,
             end: None,
             origin: "web".into(),
+            passage: None,
         }
         .should_emit(&feats));
         assert!(!ChatEvent::StepUpdate {
@@ -2572,6 +2703,7 @@ mod tests {
             start: None,
             end: None,
             origin: "knowledge".into(),
+            passage: None,
         };
         assert_eq!(cite.name(), "citation");
         let cite_payload = cite.payload("r");
@@ -2585,6 +2717,9 @@ mod tests {
         assert!(cite_payload.get("claim_id").is_none());
         assert!(cite_payload.get("start").is_none());
         assert!(cite_payload.get("end").is_none());
+        // No passage, no keys: the frame is the one sent before EP-2-S4.
+        assert!(cite_payload.get("quote").is_none());
+        assert!(cite_payload.get("locator").is_none());
 
         let anchored = ChatEvent::Citation {
             id: "c1".into(),
@@ -2598,6 +2733,7 @@ mod tests {
             start: Some(12),
             end: Some(15),
             origin: "knowledge".into(),
+            passage: None,
         };
         let anchored_payload = anchored.payload("r");
         assert_eq!(anchored_payload["claim_id"], "turn-1:claim-0");
@@ -3362,6 +3498,10 @@ mod payload_contract {
             start: full.then_some(12),
             end: full.then_some(15),
             origin: s("knowledge"),
+            passage: full.then(|| super::CitationPassage {
+                quote: Some(s("quote")),
+                locator: Some(super::CitationLocator { document_id: s("doc-1"), chunk_index: 0 }),
+            }),
         }
     }
 
@@ -3600,8 +3740,15 @@ mod payload_contract {
             },
             grounding(false),
             grounding(true),
-            ChatEvent::Artifact { id: s("a1"), kind: s("document"), title: s(""), content: s(""), version: 1 },
-            ChatEvent::Artifact { id: s("a1"), kind: s("code"), title: s("T"), content: s("body"), version: 2 },
+            ChatEvent::Artifact { id: s("a1"), kind: s("document"), title: s(""), content: s(""), version: 1, provenance: None },
+            ChatEvent::Artifact {
+                id: s("a1"),
+                kind: s("code"),
+                title: s("T"),
+                content: s("body"),
+                version: 2,
+                provenance: Some(Box::new(crate::deep_research::ResearchProvenance::sample())),
+            },
             ChatEvent::Attachment {
                 id: s("f1"),
                 name: s("f.png"),
@@ -3995,11 +4142,153 @@ mod connector_turn_tests {
             start: None,
             end: None,
             origin: "connector".to_owned(),
+            passage: None,
         })
         .await;
         let recorded = sink.recorded_citations();
         assert_eq!(recorded.len(), 1);
         assert_eq!(recorded[0].origin, "connector");
         assert_eq!(recorded[0].number, None);
+    }
+}
+
+#[cfg(test)]
+mod citation_passage_tests {
+    use super::*;
+
+    fn fact(document_id: &str, chunk_index: i32, text: &str) -> crate::retrieval::GroundingFact {
+        crate::retrieval::GroundingFact {
+            knowledge_id: "kid-1".to_owned(),
+            document_id: document_id.to_owned(),
+            text: text.to_owned(),
+            score: 0.9,
+            source_title: "Policy".to_owned(),
+            source_type: "policy".to_owned(),
+            provider: "Notion".to_owned(),
+            chunk_index,
+        }
+    }
+
+    fn citation(passage: Option<CitationPassage>) -> ChatEvent {
+        ChatEvent::Citation {
+            id: "doc-1".to_owned(),
+            title: "Policy".to_owned(),
+            url: "notion".to_owned(),
+            snippet: "Refunds within 30 days.".to_owned(),
+            source_group_id: "kb:notion".to_owned(),
+            source_group_label: Some("Notion".to_owned()),
+            number: Some(1),
+            claim_id: None,
+            start: None,
+            end: None,
+            origin: "knowledge".to_owned(),
+            passage,
+        }
+    }
+
+    #[test]
+    fn citation_passages_switch_reads_only_the_literal_true() {
+        assert!(parse_citation_passages(Some("true")));
+        assert!(parse_citation_passages(Some(" true ")));
+        for raw in [None, Some(""), Some("1"), Some("on"), Some("TRUE"), Some("yes")] {
+            assert!(!parse_citation_passages(raw), "{raw:?} must stay off");
+        }
+    }
+
+    #[test]
+    fn citation_passage_quote_is_collapsed_bounded_and_never_empty() {
+        let long = format!("  {}  ", "ord ".repeat(300));
+        let passage = CitationPassage::new(&long, None).expect("a quote");
+        let quote = passage.quote.expect("quote set");
+        assert!(quote.chars().count() <= MAX_QUOTE_CHARS);
+        assert!(!quote.contains("  ") && !quote.ends_with(' '));
+        assert_eq!(CitationPassage::new("   ", None), None, "neither half: no passage at all");
+        let locator = CitationLocator { document_id: "doc-1".to_owned(), chunk_index: 2 };
+        let only_locator = CitationPassage::new("", Some(locator.clone())).expect("locator alone");
+        assert_eq!(only_locator.quote, None);
+        assert_eq!(only_locator.locator, Some(locator));
+    }
+
+    #[test]
+    fn citation_passage_for_knowledge_takes_the_first_fact_of_the_document() {
+        let facts = vec![
+            fact("doc-2", 0, "Other document."),
+            fact("doc-1", 4, "Refunds are accepted within 30 days."),
+            fact("doc-1", 9, "A later chunk of the same document."),
+        ];
+        let passage = CitationPassage::knowledge(&facts, "doc-1").expect("doc-1 has a fact");
+        assert_eq!(passage.quote.as_deref(), Some("Refunds are accepted within 30 days."));
+        assert_eq!(
+            passage.locator,
+            Some(CitationLocator { document_id: "doc-1".to_owned(), chunk_index: 4 })
+        );
+        assert_eq!(CitationPassage::knowledge(&facts, "doc-3"), None);
+    }
+
+    #[test]
+    fn citation_frame_without_a_passage_is_byte_identical_and_with_one_carries_both_keys() {
+        let plain = citation(None).payload("r");
+        assert!(plain.get("quote").is_none());
+        assert!(plain.get("locator").is_none());
+
+        let passage = CitationPassage::knowledge(&[fact("doc-1", 3, "Refunds within 30 days.")], "doc-1");
+        let rich = citation(passage).payload("r");
+        assert_eq!(rich["quote"], "Refunds within 30 days.");
+        assert_eq!(rich["locator"]["document_id"], "doc-1");
+        assert_eq!(rich["locator"]["chunk_index"], 3);
+        // Every other key is the plain frame's, unchanged.
+        let mut stripped = rich.clone();
+        let object = stripped.as_object_mut().expect("an object");
+        object.remove("quote");
+        object.remove("locator");
+        assert_eq!(stripped, plain);
+    }
+
+    #[tokio::test]
+    async fn citation_passage_is_recorded_under_the_stream_keys_and_strippable() {
+        let (tx, _rx) = tokio::sync::mpsc::channel(4);
+        let sink = RichEventSink::new(tx, Vec::new(), "r".to_owned());
+        let passage = CitationPassage::new("Refunds within 30 days.", None);
+        sink.emit(citation(passage)).await;
+        let recorded = sink.recorded_citations();
+        let value = serde_json::to_value(&recorded[0]).expect("serializable");
+        assert_eq!(value["quote"], "Refunds within 30 days.");
+        assert!(value.get("passage").is_none(), "flattened, never nested");
+        assert!(value.get("locator").is_none());
+
+        let stripped = serde_json::to_value(recorded[0].clone().without_passage()).expect("serializable");
+        assert!(stripped.get("quote").is_none());
+        assert_eq!(stripped["number"], 1);
+    }
+
+    #[test]
+    fn citation_artifact_provenance_streams_records_and_strips() {
+        let event = ChatEvent::Artifact {
+            id: "research-r".to_owned(),
+            kind: "document".to_owned(),
+            title: "Dyp research".to_owned(),
+            content: "# Rapport".to_owned(),
+            version: 1,
+            provenance: Some(Box::new(crate::deep_research::ResearchProvenance::sample())),
+        };
+        let payload = event.payload("r");
+        assert_eq!(payload["provenance"]["pipeline"], "deep_research_v1");
+
+        let recorded = RecordedArtifact::from_event(&event).expect("a text artifact");
+        assert!(recorded.provenance.is_some());
+        assert_eq!(recorded.clone().into_event(), event, "the staged publish streams the same frame");
+        let stripped = recorded.without_provenance();
+        let value = serde_json::to_value(&stripped).expect("serializable");
+        assert!(value.get("provenance").is_none());
+
+        let plain = ChatEvent::Artifact {
+            id: "a".to_owned(),
+            kind: "document".to_owned(),
+            title: "T".to_owned(),
+            content: "c".to_owned(),
+            version: 1,
+            provenance: None,
+        };
+        assert!(plain.payload("r").get("provenance").is_none());
     }
 }

@@ -1392,6 +1392,39 @@ describe('SourcesPanel read/unread grouping', () => {
   })
 })
 
+describe('SourcesPanel cited passages (EP-2-S4)', () => {
+  /** A knowledge citation as the gateway streams it with the cited-passage switch on. */
+  const withPassage = () => read({
+    id: 'doc-1',
+    url: 'notion',
+    origin: 'knowledge',
+    quote: 'Refusjon gis innen 30 dager etter levering.',
+    locator: { document_id: 'doc-1', chunk_index: 2 },
+  } as Partial<Citation>)
+
+  it('shows the passage on the row and opens the viewer beside the card, never inside its link', () => {
+    const { container, getByText, unmount } = render(() => <SourcesPanel sources={[withPassage()]} />)
+    expect(container.querySelector('.verevon-chat-source-card__quote')?.textContent).toBe(
+      'Refusjon gis innen 30 dager etter levering.',
+    )
+    const button = getByText('Vis passasjen')
+    expect(button.closest('a')).toBeNull()
+    fireEvent.click(button)
+    flush()
+    expect(container.querySelector('.verevon-chat-cited-passage')).not.toBeNull()
+    expect(container.textContent).toContain('Vis mer')
+    unmount()
+  })
+
+  it('renders the row exactly as before when the server sent no passage', () => {
+    const { container, unmount } = render(() => <SourcesPanel sources={[read()]} />)
+    expect(container.querySelector('.verevon-chat-source-card__quote')).toBeNull()
+    expect(container.querySelector('.verevon-chat-source-card__passage')).toBeNull()
+    expect(container.querySelector('.verevon-chat-source-card-passage')).toBeNull()
+    unmount()
+  })
+})
+
 describe('ChatTabs Kilder badge', () => {
   it('counts the sources that were read, not the leads that were only found', () => {
     const { container, unmount } = render(() => (

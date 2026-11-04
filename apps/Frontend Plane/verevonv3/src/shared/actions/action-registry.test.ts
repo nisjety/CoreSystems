@@ -340,6 +340,45 @@ describe('action registry', () => {
     }
   })
 
+  it('registers the approval preview as a low-risk read the model cannot execute (EP-10-S1)', () => {
+    const preview = getActionDescriptor('approvals.preview')
+
+    expect(preview?.ownerPlane).toBe('model')
+    expect(preview?.risk).toBe('low')
+    expect(preview?.requiresApproval).toBe(false)
+    expect(isModelExecutableAction('approvals.preview')).toBe(false)
+    expect(buildModelContextPack({ route: '/chat', visibleItems: [] }).availableActions).not.toContain(
+      'approvals.preview',
+    )
+    const description = preview?.description ?? ''
+    expect(description).toContain('approval_not_found')
+    expect(description).toContain('preview_unavailable')
+    expect(description).toContain('Never model-executable')
+
+    // The approval id is the one input: the org and the owner are the credential's.
+    expect(preview?.inputSchema.safeParse({ approvalId: 'appr_1' }).success).toBe(true)
+    expect(preview?.inputSchema.safeParse({ approvalId: '' }).success).toBe(false)
+    expect(preview?.inputSchema.safeParse({ approvalId: 'appr_1', orgId: 'org_x' }).success).toBe(false)
+
+    const shaped = {
+      kind: 'mail_send',
+      provider: 'google',
+      operation: 'gmail.send',
+      connectionId: 'conn-1',
+      to: ['a@example.com'],
+      subject: 'S',
+      bodyText: 'Hei',
+      hasHtml: false,
+      isReply: false,
+      rawOnly: false,
+      editableFields: ['to', 'subject', 'body_text'],
+      actionFingerprint: 'f'.repeat(64),
+      revision: 0,
+    }
+    expect(preview?.outputSchema.safeParse(shaped).success).toBe(true)
+    expect(preview?.outputSchema.safeParse({ ...shaped, kind: 'calendar_event' }).success).toBe(false)
+  })
+
   it('registers the tool policy and the tool approval as high-risk, owner-only actions the model cannot execute', () => {
     for (const id of ['tools.set_policy', 'mcp.approve_tool'] as const) {
       const action = getActionDescriptor(id)
@@ -685,6 +724,27 @@ describe('action registry', () => {
     }
     // The owner is read from the session, never named by a client.
     expect(schema?.safeParse({ runId: 'run_1', callSeq: 1, userId: 'user_x' }).success).toBe(false)
+  })
+
+  it('registers the cited-passage viewer as a low-risk read the model cannot execute (EP-2-S4)', () => {
+    const open = getActionDescriptor('chat.open_cited_passage')
+
+    expect(open).toMatchObject({ ownerPlane: 'data', risk: 'low', requiresApproval: false, reversible: true })
+    expect(isModelExecutableAction('chat.open_cited_passage')).toBe(false)
+    expect(MODEL_ACCESS['chat.open_cited_passage']).toMatchObject({ access: 'none', sideEffectClass: 'read' })
+
+    const schema = open?.inputSchema
+    expect(schema?.safeParse({ citationId: 'dr-1' }).success).toBe(true)
+    expect(schema?.safeParse({ citationId: 'doc-1', documentId: 'doc-1', chunkIndex: 2 }).success).toBe(true)
+    for (const input of [
+      { citationId: '' },
+      { citationId: 'doc-1', chunkIndex: -1 },
+      { citationId: 'doc-1', chunkIndex: 1.5 },
+    ]) {
+      expect(schema?.safeParse(input).success).toBe(false)
+    }
+    // Data Plane reads the viewer from the session; a client never names whose grants apply.
+    expect(schema?.safeParse({ citationId: 'doc-1', orgId: 'org_x' }).success).toBe(false)
   })
 
   function registered(id: string) {
@@ -1097,7 +1157,10 @@ describe('action registry', () => {
     // 271 after EP-6-S2 registered schedule.run_now.
     // 273 after EP-10-S7 registered integrations.list_connector_policies and integrations.set_connector_policy.
     // 274 after main's W3-E3.4-7 registered browser_download.send_to_knowledge (downloads drawer).
-    expect(ids).toHaveLength(274)
+    // 275 after EP-2-S4 registered chat.open_cited_passage, the cited-passage viewer read.
+    // +1 after EP-2-S8 registered chat.wide_research_start, the composer's wide-research entry.
+    // +1 after EP-10-S1 registered approvals.preview, the owner's write-approval preview.
+    expect(ids).toHaveLength(277)
 
     // The fragments also carry ids outside the `spaces.` prefix (`space.files.*`), so the Space
     // entries are the ones the fragments declare.

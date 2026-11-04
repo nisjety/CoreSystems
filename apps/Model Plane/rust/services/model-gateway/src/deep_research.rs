@@ -1956,6 +1956,15 @@ pub fn synthesis_prompt(question: &str, sources: &[ResearchSource], coverage: &C
 /// correctly — it just cannot say why.
 #[must_use]
 pub fn citation_events(sources: &[ResearchSource]) -> Vec<ChatEvent> {
+    citation_events_quoting(sources, None)
+}
+
+/// [`citation_events`], with each read source's best passage for `question` as its quote
+/// (EP-2-S4). `None` for `question` is exactly [`citation_events`]: the caller passes the question
+/// only behind [`crate::sse_events::CITATION_PASSAGES_ENV`]. An unread source never carries a
+/// quote, because nothing of its text was read.
+#[must_use]
+pub fn citation_events_quoting(sources: &[ResearchSource], question: Option<&str>) -> Vec<ChatEvent> {
     let mut read: Vec<&ResearchSource> = sources.iter().filter(|s| s.is_read()).collect();
     read.sort_by_key(|source| source.number.unwrap_or(usize::MAX));
 
@@ -1973,6 +1982,7 @@ pub fn citation_events(sources: &[ResearchSource]) -> Vec<ChatEvent> {
             start: None,
             end: None,
             origin: "web".to_owned(),
+            passage: question.and_then(|question| source_passage(question, source)),
         })
         .collect();
 
@@ -1996,9 +2006,130 @@ pub fn citation_events(sources: &[ResearchSource]) -> Vec<ChatEvent> {
             start: None,
             end: None,
             origin: "web".to_owned(),
+            passage: None,
         });
     }
     events
+}
+
+/// The passage of a read source that best answers `question`, picked by the same selector the
+/// web grounding uses over the extract the report was written from. A web passage has no
+/// locator: the viewer opens the live page at the quote (D8). `None` when no passage matches,
+/// rather than a quote the selector did not choose.
+fn source_passage(question: &str, source: &ResearchSource) -> Option<crate::sse_events::CitationPassage> {
+    let extract = source.extract.as_deref()?;
+    let best = crate::grounding::select_passages(question, extract, crate::sse_events::MAX_QUOTE_CHARS)
+        .into_iter()
+        .next()?;
+    crate::sse_events::CitationPassage::new(&best, None)
+}
+
+/// Longest question a provenance stamp repeats. The question is the user's own message, so the
+/// stamp needs only enough of it to say which question the report answers.
+const PROVENANCE_QUESTION_CHARS: usize = 500;
+
+/// The provenance stamp's pipeline token. A later pipeline names itself, so a stored stamp always
+/// says which pipeline wrote it.
+pub const PROVENANCE_PIPELINE: &str = "deep_research_v1";
+
+/// What a deep-research report was built from (EP-2-S4): the question, the plan, the sources it
+/// read, the model that wrote it and the coverage it reached. Rides the report artifact's frame
+/// and, on a turn that may persist it, the message metadata beside the artifact (D1); erased with
+/// the message. Never on a ZDR or waived turn's stored message (D12).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ResearchProvenance {
+    pub question: String,
+    pub sub_queries: Vec<String>,
+    /// The read, numbered sources only: an unread lead is not something the report was built from.
+    pub sources: Vec<ProvenanceSource>,
+    pub model: String,
+    pub coverage: ProvenanceCoverage,
+    /// RFC 3339, UTC, to the second.
+    pub generated_at: String,
+    pub pipeline: &'static str,
+}
+
+/// One source a report was built from, by the `[n]` the report cites it as.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ProvenanceSource {
+    pub number: u32,
+    pub url: String,
+    pub title: String,
+}
+
+/// The coverage a report reached, the same counts its coverage line states.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub struct ProvenanceCoverage {
+    pub found: usize,
+    pub read: usize,
+    pub unread: usize,
+    pub deadline_hit: bool,
+}
+
+impl ResearchProvenance {
+    /// The stamp for a finished report. Pure apart from the clock reading the caller passes.
+    #[must_use]
+    pub fn build(
+        question: &str,
+        plan: &[String],
+        sources: &[ResearchSource],
+        model: &str,
+        coverage: &Coverage,
+        generated_at: chrono::DateTime<chrono::Utc>,
+    ) -> Self {
+        let mut read: Vec<&ResearchSource> = sources.iter().filter(|s| s.is_read()).collect();
+        read.sort_by_key(|source| source.number.unwrap_or(usize::MAX));
+        let collapsed = question.split_whitespace().collect::<Vec<_>>().join(" ");
+        Self {
+            question: collapsed.chars().take(PROVENANCE_QUESTION_CHARS).collect(),
+            sub_queries: plan.to_vec(),
+            sources: read
+                .into_iter()
+                .filter_map(|source| {
+                    Some(ProvenanceSource {
+                        number: u32::try_from(source.number?).ok()?,
+                        url: source.url.clone(),
+                        title: source.title.clone(),
+                    })
+                })
+                .collect(),
+            model: model.to_owned(),
+            coverage: ProvenanceCoverage {
+                found: coverage.found,
+                read: coverage.read,
+                unread: coverage.unread,
+                deadline_hit: coverage.deadline_hit,
+            },
+            generated_at: generated_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            pipeline: PROVENANCE_PIPELINE,
+        }
+    }
+
+    /// A filled stamp for shape tests (the payload golden's full artifact sample).
+    #[cfg(test)]
+    #[must_use]
+    pub fn sample() -> Self {
+        Self {
+            question: "question".to_owned(),
+            sub_queries: vec!["sub query".to_owned()],
+            sources: vec![ProvenanceSource {
+                number: 1,
+                url: "https://example.test/a".to_owned(),
+                title: "A".to_owned(),
+            }],
+            model: "model".to_owned(),
+            coverage: ProvenanceCoverage { found: 2, read: 1, unread: 1, deadline_hit: false },
+            generated_at: "2026-11-04T00:00:00Z".to_owned(),
+            pipeline: PROVENANCE_PIPELINE,
+        }
+    }
+}
+
+/// Attach a provenance stamp to a report's artifact frame. Any other event is left as it is.
+fn stamp_provenance(event: &mut ChatEvent, stamp: ResearchProvenance) {
+    if let ChatEvent::Artifact { provenance, .. } = event {
+        *provenance = Some(Box::new(stamp));
+    }
 }
 
 /// The citation id for an unread source: `dr-unread-{status}-{k}`.
@@ -2810,7 +2941,9 @@ pub async fn run_deep_research(
     // ---- Phase 4: citations ---------------------------------------------
     // Emitted before synthesis so the Kilder tab fills while the report is
     // still being written, rather than everything landing at once at the end.
-    let citations = citation_events(&sources);
+    // Read once for the run, so the quotes and the report's stamp agree on whether passages are on.
+    let passages = crate::sse_events::citation_passages_enabled();
+    let citations = citation_events_quoting(&sources, passages.then_some(question));
     let web_citations = u32::try_from(citations.len()).unwrap_or(u32::MAX);
     for citation in citations {
         events.push(citation).await;
@@ -2906,15 +3039,27 @@ pub async fn run_deep_research(
             let version = state
                 .artifact_versions
                 .next_version(thread_id, &artifact_id);
-            events
-                .push(crate::artifacts::artifact_event(
-                    &artifact_id,
-                    ArtifactKind::Document,
-                    &title,
-                    text,
-                    version,
-                ))
-                .await;
+            let mut artifact = crate::artifacts::artifact_event(
+                &artifact_id,
+                ArtifactKind::Document,
+                &title,
+                text,
+                version,
+            );
+            if passages {
+                stamp_provenance(
+                    &mut artifact,
+                    ResearchProvenance::build(
+                        question,
+                        &plan,
+                        &sources,
+                        resolved_model.as_deref().unwrap_or(model),
+                        &coverage,
+                        chrono::Utc::now(),
+                    ),
+                );
+            }
+            events.push(artifact).await;
             events
                 .step(
                     STEP_SYNTHESIZE,
@@ -4745,6 +4890,7 @@ mod tests {
             title,
             content,
             version,
+            ..
         } = event
         else {
             panic!("expected an artifact event");
@@ -5254,5 +5400,114 @@ mod tests {
         let gate = apply_relevance_gate("hva er været i Oslo", &mut sources);
         assert_eq!(gate, GateReport::default());
         assert!(!gate.fallback_used);
+    }
+
+    /// Two read sources and one unread lead, numbered the way the pipeline numbers them.
+    fn quoted_sources() -> Vec<ResearchSource> {
+        let mut sources = vec![
+            read_source(
+                "https://one.no",
+                "Weather filler about something else entirely. The refund deadline for online \
+                 orders is thirty days from delivery. More filler about shipping boxes.",
+            ),
+            read_source("https://two.no", "Nothing here matches the question words at all."),
+            source("https://lead.no", vec![0], 3),
+        ];
+        let order = read_order(&sources);
+        number_and_bound(&mut sources, &order, 10_000);
+        sources
+    }
+
+    #[test]
+    fn deep_research_citations_without_a_question_carry_no_passage() {
+        let sources = quoted_sources();
+        assert_eq!(citation_events_quoting(&sources, None), citation_events(&sources));
+        for event in citation_events(&sources) {
+            let ChatEvent::Citation { passage, .. } = &event else {
+                panic!("expected a citation, got {event:?}");
+            };
+            assert_eq!(passage, &None, "switch off: the frame is the one sent before");
+        }
+    }
+
+    #[test]
+    fn deep_research_quote_is_the_selected_passage_and_never_on_an_unread_lead() {
+        let sources = quoted_sources();
+        let events = citation_events_quoting(&sources, Some("refund deadline online orders"));
+        let quote_of = |url: &str| {
+            events.iter().find_map(|event| match event {
+                ChatEvent::Citation { url: cited, passage, .. } if cited == url => Some(passage.clone()),
+                _ => None,
+            })
+        };
+        let one = quote_of("https://one.no").flatten().expect("the matching source is quoted");
+        let quote = one.quote.expect("a quote");
+        assert!(quote.contains("refund deadline"), "{quote}");
+        assert!(quote.chars().count() <= crate::sse_events::MAX_QUOTE_CHARS);
+        assert_eq!(one.locator, None, "a web passage has no Data Plane locator (D8)");
+        assert_eq!(quote_of("https://two.no").flatten(), None, "no match, no invented quote");
+        assert_eq!(quote_of("https://lead.no").flatten(), None, "an unread lead is never quoted");
+    }
+
+    #[test]
+    fn deep_research_provenance_lists_only_read_sources_with_their_numbers() {
+        let sources = quoted_sources();
+        let coverage = Coverage { found: 3, read: 2, unread: 1, deadline_hit: true, ..Coverage::default() };
+        let at = chrono::DateTime::parse_from_rfc3339("2026-11-04T10:20:30Z")
+            .expect("a timestamp")
+            .with_timezone(&chrono::Utc);
+        let question = format!("  hva   er {}", "x".repeat(900));
+        let stamp = ResearchProvenance::build(
+            &question,
+            &["sub one".to_owned(), "sub two".to_owned()],
+            &sources,
+            "verevon-research",
+            &coverage,
+            at,
+        );
+        assert_eq!(stamp.pipeline, "deep_research_v1");
+        assert_eq!(stamp.generated_at, "2026-11-04T10:20:30Z");
+        assert!(stamp.question.starts_with("hva er x"));
+        assert!(stamp.question.chars().count() <= PROVENANCE_QUESTION_CHARS);
+        assert_eq!(stamp.sub_queries, vec!["sub one", "sub two"]);
+        assert_eq!(stamp.model, "verevon-research");
+        let numbers: Vec<u32> = stamp.sources.iter().map(|source| source.number).collect();
+        assert_eq!(numbers, vec![1, 2]);
+        assert!(stamp.sources.iter().all(|source| source.url != "https://lead.no"));
+        assert_eq!(
+            stamp.coverage,
+            ProvenanceCoverage { found: 3, read: 2, unread: 1, deadline_hit: true }
+        );
+
+        let value = serde_json::to_value(&stamp).expect("serializable");
+        let mut keys: Vec<&str> = value.as_object().expect("an object").keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            vec!["coverage", "generated_at", "model", "pipeline", "question", "sources", "sub_queries"]
+        );
+    }
+
+    #[test]
+    fn deep_research_provenance_stamps_only_an_artifact_frame() {
+        let mut artifact = crate::artifacts::artifact_event(
+            "research-r",
+            ArtifactKind::Document,
+            "Dyp research",
+            "# Rapport",
+            1,
+        );
+        stamp_provenance(&mut artifact, ResearchProvenance::sample());
+        assert!(matches!(&artifact, ChatEvent::Artifact { provenance: Some(_), .. }));
+
+        let mut step = ChatEvent::StepUpdate {
+            id: "s".to_owned(),
+            title: "t".to_owned(),
+            detail: "d".to_owned(),
+            status: "done".to_owned(),
+        };
+        let before = step.clone();
+        stamp_provenance(&mut step, ResearchProvenance::sample());
+        assert_eq!(step, before);
     }
 }

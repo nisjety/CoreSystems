@@ -2315,6 +2315,37 @@ pub(crate) fn turn_evidence_metadata(
     Some(prost_types::Struct { fields })
 }
 
+/// The citations a turn may store: a ZDR or waived turn (DEC-32) keeps every citation but drops
+/// its `quote` and `locator`, which streamed live (EP-2-S4, D12). Any other turn stores them
+/// beside the citation, erased with the message.
+pub(crate) fn persistable_citations(
+    citations: Vec<crate::sse_events::RecordedCitation>,
+    zdr_or_waived: bool,
+) -> Vec<crate::sse_events::RecordedCitation> {
+    if !zdr_or_waived {
+        return citations;
+    }
+    citations
+        .into_iter()
+        .map(crate::sse_events::RecordedCitation::without_passage)
+        .collect()
+}
+
+/// The artifacts a turn may store: a ZDR or waived turn drops a report's provenance stamp, which
+/// streamed live (EP-2-S4, D12). The artifact itself is stored as before.
+pub(crate) fn persistable_artifacts(
+    artifacts: Vec<crate::sse_events::RecordedArtifact>,
+    zdr_or_waived: bool,
+) -> Vec<crate::sse_events::RecordedArtifact> {
+    if !zdr_or_waived {
+        return artifacts;
+    }
+    artifacts
+        .into_iter()
+        .map(crate::sse_events::RecordedArtifact::without_provenance)
+        .collect()
+}
+
 /// The turn's answer-quality assessment, for persistence alongside its
 /// evidence. Both halves are optional: a turn may be unscored, and only a
 /// low-scoring one is ever verified.
@@ -3363,5 +3394,80 @@ mod tests {
         let alone = crate::session_flow::with_retrieval_decline(None, Some(RetrievalDeclineReason::NotAuthorized));
         assert_eq!(stored(&alone).as_deref(), Some("retrieval_declined_not_authorized"));
         assert_eq!(alone.expect("metadata").fields.len(), 1, "the code is the only thing stored");
+    }
+
+    fn passage_citation() -> crate::sse_events::RecordedCitation {
+        crate::sse_events::RecordedCitation {
+            id: "doc-1".to_owned(),
+            title: "Policy".to_owned(),
+            url: "notion".to_owned(),
+            snippet: "Refunds within 30 days.".to_owned(),
+            source_group_id: "kb:notion".to_owned(),
+            source_group_label: Some("Notion".to_owned()),
+            number: Some(1),
+            origin: "knowledge".to_owned(),
+            passage: crate::sse_events::CitationPassage::new(
+                "Refunds within 30 days.",
+                Some(crate::sse_events::CitationLocator { document_id: "doc-1".to_owned(), chunk_index: 2 }),
+            ),
+        }
+    }
+
+    fn stamped_report() -> crate::sse_events::RecordedArtifact {
+        crate::sse_events::RecordedArtifact {
+            id: "research-r".to_owned(),
+            kind: "document".to_owned(),
+            title: "Dyp research".to_owned(),
+            content: "# Rapport".to_owned(),
+            version: 1,
+            provenance: Some(Box::new(crate::deep_research::ResearchProvenance::sample())),
+        }
+    }
+
+    /// The keys of the first entry of a stored list, or nothing when the list is absent.
+    fn first_entry_keys(metadata: &Option<prost_types::Struct>, list: &str) -> Vec<String> {
+        use prost_types::value::Kind;
+        let Some(Kind::ListValue(values)) = metadata
+            .as_ref()
+            .and_then(|metadata| metadata.fields.get(list))
+            .and_then(|value| value.kind.as_ref())
+        else {
+            return Vec::new();
+        };
+        match values.values.first().and_then(|value| value.kind.as_ref()) {
+            Some(Kind::StructValue(entry)) => entry.fields.keys().cloned().collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    fn evidence(zdr_or_waived: bool) -> Option<prost_types::Struct> {
+        crate::session_flow::turn_evidence_metadata(
+            None,
+            &crate::session_flow::persistable_citations(vec![passage_citation()], zdr_or_waived),
+            &crate::session_flow::persistable_artifacts(vec![stamped_report()], zdr_or_waived),
+            crate::session_flow::TurnQuality::default(),
+        )
+    }
+
+    #[test]
+    fn a_persistent_turn_stores_the_citation_passage_and_the_report_stamp() {
+        let stored = evidence(false);
+        let citation = first_entry_keys(&stored, "citations");
+        assert!(citation.iter().any(|key| key == "quote"), "{citation:?}");
+        assert!(citation.iter().any(|key| key == "locator"), "{citation:?}");
+        let artifact = first_entry_keys(&stored, "artifacts");
+        assert!(artifact.iter().any(|key| key == "provenance"), "{artifact:?}");
+    }
+
+    /// D12: a ZDR or waived turn stores the citation and the artifact, never the passage or stamp.
+    #[test]
+    fn a_zdr_or_waived_turn_stores_no_citation_passage_or_report_stamp() {
+        let stored = evidence(true);
+        let citation = first_entry_keys(&stored, "citations");
+        assert!(citation.iter().any(|key| key == "number"), "the citation itself stays");
+        assert!(!citation.iter().any(|key| key == "quote" || key == "locator"), "{citation:?}");
+        let artifact = first_entry_keys(&stored, "artifacts");
+        assert!(artifact.iter().any(|key| key == "content"), "the artifact itself stays");
+        assert!(!artifact.iter().any(|key| key == "provenance"), "{artifact:?}");
     }
 }

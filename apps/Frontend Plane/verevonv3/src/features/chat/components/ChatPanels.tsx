@@ -64,6 +64,7 @@ import {
   type IconComponent,
   type RunMeter,
 } from './chat-types'
+import { CitedPassageViewer, citedPassageOf } from './CitedPassageViewer'
 import { RunCostMeter } from './RunCostMeter'
 import { RunLedger } from './RunLedger'
 import { runLedgerEnabled } from '../lib/run-ledger'
@@ -611,6 +612,9 @@ export function WebSourceCard(props: { source: Citation & { kind: 'web' }; index
   // paragraph at all rather than an empty one.
   const i18n = useI18n()
   const snippet = createMemo(() => evidenceSourceSnippet(props.source))
+  // The passage the server sent for this source (EP-2-S4); none while the gateway switch is off.
+  const passage = createMemo(() => citedPassageOf(props.source))
+  const [passageOpen, setPassageOpen] = createSignal(false)
   const body = () => (
     <>
       <div class="verevon-chat-source-card__meta">
@@ -619,15 +623,32 @@ export function WebSourceCard(props: { source: Citation & { kind: 'web' }; index
       </div>
       <h2>{props.source.title || props.source.url}</h2>
       <Show when={snippet()}><p>{snippet()}</p></Show>
+      <Show when={passage()?.quote}>
+        {(quote) => <blockquote class="verevon-chat-source-card__quote">{quote()}</blockquote>}
+      </Show>
     </>
   )
   // The URL comes from the model's search results: an unsafe one keeps the card's text but is not a link.
-  return (
+  const card = () => (
     <Show
       when={isSafeLinkHref(props.source.url)}
       fallback={<span class="verevon-chat-source-card verevon-chat-link-blocked" title={i18n.tr('Lenke blokkert: ukjent adresse', 'Link blocked: unsupported address')}>{body()}</span>}
     >
       <a class="verevon-chat-source-card" href={props.source.url} target="_blank" rel="noopener noreferrer">{body()}</a>
+    </Show>
+  )
+  // The passage control sits beside the card, never inside its link.
+  return (
+    <Show when={passage()} fallback={card()}>
+      <div class="verevon-chat-source-card-passage">
+        {card()}
+        <button type="button" class="verevon-chat-source-card__passage" onClick={() => setPassageOpen(true)}>
+          {i18n.tr('Vis passasjen', 'Show the passage')}
+        </button>
+        <Show when={passageOpen()}>
+          <CitedPassageViewer citation={props.source} onClose={() => setPassageOpen(false)} />
+        </Show>
+      </div>
     </Show>
   )
 }

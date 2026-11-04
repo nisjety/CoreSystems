@@ -32,6 +32,117 @@ import {
 } from '@/features/chat/lib/chat-retention'
 import { runParkedFrameOf, type RunParkedFrame } from '@/features/chat/lib/run-park'
 
+// ── Wide research (EP-2 S8) ─────────────────────────────────────────────────
+
+/** The count presets of the "Bred forskning" entry; 16 is the platform's hard maximum. */
+export const WIDE_RESEARCH_PRESETS = [5, 10, 16] as const
+
+/** The most items the entry sends; model-gateway reads no more than this many either. */
+export const WIDE_RESEARCH_MAX_ITEMS = 64
+
+/** The longest item the entry sends; model-gateway cuts at the same length. */
+export const WIDE_RESEARCH_MAX_ITEM_CHARS = 500
+
+/** What the person asked a wide-research run to cover: a pasted list, or a count preset. */
+export type WideResearchStart = {
+  /** The person's ask: a preset count, or the number of listed items when omitted. */
+  itemCap?: number
+  /** One research question per entry, in the order given. */
+  items?: string[]
+}
+
+/**
+ * The items of a pasted list: one per line, trimmed, blank lines skipped, each cut to
+ * {@link WIDE_RESEARCH_MAX_ITEM_CHARS} characters and at most {@link WIDE_RESEARCH_MAX_ITEMS} kept.
+ */
+export function parseWideResearchItems(text: string): string[] {
+  return text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0)
+    .slice(0, WIDE_RESEARCH_MAX_ITEMS)
+    .map((line) => line.slice(0, WIDE_RESEARCH_MAX_ITEM_CHARS))
+}
+
+function wideResearchWire(start: WideResearchStart): { item_cap?: number; items?: string[] } {
+  const items = (start.items ?? []).slice(0, WIDE_RESEARCH_MAX_ITEMS)
+  const itemCap =
+    typeof start.itemCap === 'number' && Number.isInteger(start.itemCap) && start.itemCap > 0
+      ? start.itemCap
+      : undefined
+  return {
+    ...(itemCap !== undefined ? { item_cap: itemCap } : {}),
+    ...(items.length > 0 ? { items } : {}),
+  }
+}
+
+/** Model-gateway's estimate of a wide-research run, before it starts. A range, never a promise. */
+export type WideResearchEstimate = {
+  itemsRequested: number
+  itemsAfterCap: number
+  concurrency: number
+  roundsPerItem: number
+  minutesLow: number
+  minutesHigh: number
+  /** Null on a subscription route or for a model the price catalogue does not name. */
+  usdLow: number | null
+  usdHigh: number | null
+  costBasis: 'metered' | 'subscription'
+  cap: number
+  capSource: 'org_policy' | 'platform_default'
+}
+
+function wideResearchUsd(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null
+}
+
+function wideResearchCount(value: unknown): number {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? Math.floor(value) : 0
+}
+
+/** Reads the estimate answer; a field of the wrong type reads as zero or null, never as a guess. */
+export function normalizeWideResearchEstimate(raw: unknown): WideResearchEstimate {
+  const value = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>
+  return {
+    itemsRequested: wideResearchCount(value.items_requested),
+    itemsAfterCap: wideResearchCount(value.items_after_cap),
+    concurrency: wideResearchCount(value.concurrency),
+    roundsPerItem: wideResearchCount(value.rounds_per_item),
+    minutesLow: wideResearchCount(value.minutes_low),
+    minutesHigh: wideResearchCount(value.minutes_high),
+    usdLow: wideResearchUsd(value.usd_low),
+    usdHigh: wideResearchUsd(value.usd_high),
+    costBasis: value.cost_basis === 'subscription' ? 'subscription' : 'metered',
+    cap: wideResearchCount(value.cap),
+    capSource: value.cap_source === 'org_policy' ? 'org_policy' : 'platform_default',
+  }
+}
+
+/**
+ * `POST /api/v1/agents/wide-research/estimate`: what a wide-research run of `itemCount` items
+ * would look like. Nothing is stored or started. The gateway answers 404 while the entry is off and
+ * a typed `agentic` refusal for a zero-retention caller.
+ */
+export async function estimateWideResearch(input: {
+  itemCount: number
+  model?: string
+  provider?: string
+  subscriptionConnectionId?: string
+}): Promise<WideResearchEstimate> {
+  const raw = await requestJson<unknown>('/api/v1/agents/wide-research/estimate', {
+    method: 'POST',
+    body: JSON.stringify({
+      item_count: Math.max(0, Math.floor(input.itemCount)),
+      ...(input.model ? { model: input.model } : {}),
+      ...(input.provider ? { provider: input.provider } : {}),
+      ...(input.subscriptionConnectionId
+        ? { subscription_connection_id: input.subscriptionConnectionId }
+        : {}),
+    }),
+  })
+  return normalizeWideResearchEstimate(raw)
+}
+
 // ── Wire contract ───────────────────────────────────────────────────────────
 // `truncated` is set when a workbook was cut on a row boundary to fit one turn;
 // the cut is also marked inside `content`, where the model reads it.
@@ -123,6 +234,13 @@ export type ChatInvokeRequest = {
   browseWeb?: boolean
   /** Deep research mode: gateway runs plan -> concurrent searches -> page reads -> a cited report. */
   deepResearch?: boolean
+  /**
+   * Wide research from the composer's "Bred forskning" entry (EP-2 S8): the items to research, or
+   * only a count when the model should split the question itself. Sent as `wide_research` only on
+   * an agentic turn that keeps data (never zero-retention); model-gateway ignores it while
+   * WIDE_RESEARCH_ENTRY_ENABLED is off and clamps the count to the org's item cap.
+   */
+  wideResearch?: WideResearchStart
   /**
    * Durable ids of earlier messages the user pinned into context.
    *
@@ -417,6 +535,72 @@ export type ChatArtifactEvent = {
   title?: string
   content?: string
   version?: number
+  /** What a research report was built from (EP-2-S4); only on a deep-research report, and only when the server sends it. */
+  provenance?: ResearchProvenance
+}
+
+/**
+ * Where a knowledge citation's passage sits in Data Plane (EP-2-S4), in the wire shape, so a live frame and a
+ * stored turn read the same. Ids only: the text is read again through Data Plane's own ACL'd chunk read.
+ */
+export type CitationLocator = { document_id: string; chunk_index: number }
+
+/** The provenance stamp of a deep-research report (EP-2-S4), in the wire shape the gateway writes and stores. */
+export type ResearchProvenance = {
+  question: string
+  sub_queries: string[]
+  sources: { number: number; url: string; title: string }[]
+  model: string
+  coverage: { found: number; read: number; unread: number; deadline_hit: boolean }
+  generated_at: string
+  pipeline: string
+}
+
+/** A locator only when both halves have the right type; anything else is dropped, never guessed. */
+export function parseCitationLocator(value: unknown): CitationLocator | undefined {
+  const record = objectValue(value)
+  const documentId = str(record?.document_id)
+  const chunkIndex = record?.chunk_index
+  if (!documentId || typeof chunkIndex !== 'number' || !Number.isInteger(chunkIndex) || chunkIndex < 0) return undefined
+  return { document_id: documentId, chunk_index: chunkIndex }
+}
+
+/** A provenance stamp only when its shape is complete; a partial one is dropped rather than shown half-filled. */
+export function parseResearchProvenance(value: unknown): ResearchProvenance | undefined {
+  const record = objectValue(value)
+  const coverage = objectValue(record?.coverage)
+  if (!record || !coverage) return undefined
+  const question = str(record.question)
+  const model = str(record.model)
+  const generatedAt = str(record.generated_at)
+  const pipeline = str(record.pipeline)
+  const counts = [coverage.found, coverage.read, coverage.unread]
+  if (question === undefined || model === undefined || !generatedAt || !pipeline) return undefined
+  if (!counts.every((count) => typeof count === 'number') || typeof coverage.deadline_hit !== 'boolean') return undefined
+  const subQueries = Array.isArray(record.sub_queries)
+    ? record.sub_queries.filter((entry): entry is string => typeof entry === 'string')
+    : []
+  const sources = (Array.isArray(record.sources) ? record.sources : []).flatMap((entry) => {
+    const source = objectValue(entry)
+    const number = source?.number
+    const url = str(source?.url)
+    if (typeof number !== 'number' || url === undefined) return []
+    return [{ number, url, title: str(source?.title) ?? '' }]
+  })
+  return {
+    question,
+    sub_queries: subQueries,
+    sources,
+    model,
+    coverage: {
+      found: coverage.found as number,
+      read: coverage.read as number,
+      unread: coverage.unread as number,
+      deadline_hit: coverage.deadline_hit as boolean,
+    },
+    generated_at: generatedAt,
+    pipeline,
+  }
 }
 export type ChatReasoningEvent = { delta: string }
 export type ChatToolCallEvent = { id?: string; name?: string; args?: unknown }
@@ -440,6 +624,10 @@ export type ChatCitationEvent = {
   number?: number
   /** See `Citation.origin` (chat-wave2 scope spec §2.2). */
   origin?: string
+  /** The passage this source contributed (EP-2-S4), when the server sends one. */
+  quote?: string
+  /** Where a knowledge source's passage sits in Data Plane (EP-2-S4), when the server sends one. */
+  locator?: CitationLocator
 }
 export type ChatGroundingEvent = { value: unknown }
 export type ChatStepEvent = {
@@ -1450,7 +1638,51 @@ function emitCitation(value: unknown, handlers: ChatStreamHandlers): void {
     end: num(payload.end) ?? num(payload.end_offset) ?? num(payload.endOffset),
     number: num(payload.number),
     origin: str(payload.origin),
+    // Absent keys stay absent, so a frame without a passage hands on exactly the event it did before.
+    ...citationPassage(payload),
   })
+}
+
+/** The `quote` and `locator` of a citation frame or stored citation (EP-2-S4), each only when well formed. */
+export function citationPassage(value: Record<string, unknown>): Pick<ChatCitationEvent, 'quote' | 'locator'> {
+  const quote = str(value.quote)?.trim()
+  const locator = parseCitationLocator(value.locator)
+  return { ...(quote ? { quote } : {}), ...(locator ? { locator } : {}) }
+}
+
+/** A report's provenance stamp, as an artifact frame's optional key. */
+function artifactProvenance(value: Record<string, unknown>): Pick<ChatArtifactEvent, 'provenance'> {
+  const provenance = parseResearchProvenance(value.provenance)
+  return provenance ? { provenance } : {}
+}
+
+/**
+ * A knowledge citation's chunk, read again through the BFF's Data Plane chunk read (EP-2-S4). Data Plane resolves
+ * the viewer's own grants before it fetches any text, so a document this person may not read comes back empty and
+ * reads as `denied`, the same as a 403. The read returns every chunk of the document, so the one the citation
+ * names is picked here.
+ */
+export type CitedChunk =
+  | { status: 'ok'; text: string }
+  | { status: 'denied' }
+  | { status: 'missing' }
+
+export async function fetchCitedChunk(locator: CitationLocator): Promise<CitedChunk> {
+  const payload = await requestJson<{ chunks?: unknown } | null>('/api/v1/knowledge/retrieve/chunks', {
+    method: 'POST',
+    body: JSON.stringify({ document_id: locator.document_id }),
+  }).catch((error: unknown) => {
+    if (error instanceof ApiError && (error.status === 403 || error.status === 404)) return null
+    throw error
+  })
+  if (payload === null) return { status: 'denied' }
+  const chunks = Array.isArray(payload?.chunks) ? payload.chunks : []
+  if (chunks.length === 0) return { status: 'denied' }
+  const chunk = chunks
+    .map(objectValue)
+    .find((entry) => entry?.chunk_index === locator.chunk_index && entry?.document_id === locator.document_id)
+  const text = str(chunk?.text)
+  return text ? { status: 'ok', text } : { status: 'missing' }
 }
 
 type WireToolSpec = { name: string; description: string; parameters_json: string }
@@ -1706,6 +1938,11 @@ export function buildChatWireBody(request: ChatInvokeRequest): Record<string, un
     // Search turn — the same failure planMode had. The gateway keys the
     // multi-round research pipeline off this flag.
     deep_research: conversationOnly || supportReadOnly || subscriptionBacked ? false : (request.deepResearch ?? false),
+    // Present only on an agentic turn that keeps data (EP-2 S8), so every other body is
+    // byte-identical to what it was before wide research had an entry.
+    ...(request.wideResearch && features.has('agentic') && !request.zdr
+      ? { wide_research: wideResearchWire(request.wideResearch) }
+      : {}),
     // Omitted entirely when unset or `standard`: the gateway treats an absent
     // effort as "no thinking", and sending `standard` explicitly would be a
     // no-op field on every ordinary turn.
@@ -1916,6 +2153,7 @@ function dispatchAgUiEvent(
             title: str(value.title),
             content: str(value.content),
             version: num(value.version),
+            ...artifactProvenance(value),
           })
           break
         case 'attachment':
@@ -2153,6 +2391,7 @@ function dispatchEvent(event: SseEvent, handlers: ChatStreamHandlers): void {
         title: str(payload.title),
         content: str(payload.content),
         version: num(payload.version),
+        ...artifactProvenance(payload),
       })
       break
     case 'attachment':

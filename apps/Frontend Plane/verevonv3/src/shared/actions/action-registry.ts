@@ -1114,6 +1114,25 @@ const chatInspectRunRequestInput = z
   })
   .strict()
 
+// One cited source's passage (EP-2-S4): the citation it opens and, for a knowledge source, the chunk the gateway
+// located. Ids only; no org or user field, because Data Plane reads the viewer's grants from the session.
+const chatOpenCitedPassageInput = z
+  .object({
+    citationId: z.string().min(1).max(512),
+    documentId: z.string().min(1).max(512).optional(),
+    chunkIndex: z.number().int().min(0).optional(),
+  })
+  .strict()
+
+// A wide-research start (EP-2 S8) names a count preset or the person's own items. The server clamps
+// the count to the org's item cap, so nothing here can widen a run.
+const chatWideResearchStartInput = z
+  .object({
+    itemCap: z.number().int().min(1).max(16).optional(),
+    items: z.array(z.string().min(1).max(500)).max(64).optional(),
+  })
+  .strict()
+
 // The org-admin schemas below all describe operations whose owner requires
 // require_org_admin (or, for the two self-service deletion checkpoints,
 // require_active_org) — enforced server-side, not by this schema. Getting the
@@ -1466,6 +1485,33 @@ const approvalsDecideInput = z
     scope: z.literal('once').optional(),
   })
   .strict()
+
+// The full draft behind a pending write approval (EP-10-S1). Only the approval id is an input: the
+// org and the owner are the verified credential's.
+const approvalsPreviewInput = z
+  .object({
+    approvalId: z.string().min(1),
+  })
+  .strict()
+
+// What the card shows. `mail_send` carries every recipient, the full subject and the full body as
+// plain text; `other` names only the provider, operation and connection; `none` is an approval
+// with no retained call (a browser takeover).
+const approvalsPreviewOutput = z.object({
+  kind: z.enum(['mail_send', 'other', 'none']),
+  provider: z.string(),
+  operation: z.string(),
+  connectionId: z.string(),
+  to: z.array(z.string()),
+  subject: z.string(),
+  bodyText: z.string(),
+  hasHtml: z.boolean(),
+  isReply: z.boolean(),
+  rawOnly: z.boolean(),
+  editableFields: z.array(z.string()),
+  actionFingerprint: z.string(),
+  revision: z.number().int().nonnegative(),
+})
 
 const chatClearThreadsInput = z.object({})
 
@@ -3910,6 +3956,17 @@ export const actionRegistry = [
     outputSchema: envelopeStatusOutput,
   },
   {
+    id: 'approvals.preview',
+    label: 'Preview an approval draft',
+    description: 'Read the full draft a pending write approval would send, before deciding it: every recipient, the full subject and the full plain-text body of a mail send. Read-only; it changes nothing and grants nothing. Only the run\'s owner sees it, and only while the approval is pending: another person, another org, a decided or expired approval and an unknown id all answer the same 404 approval_not_found. A call other than a mail send shows only its provider and operation. Refused typed under zero data retention and for a waived credential, since such a run keeps no draft. Off until the preview is switched on, when it answers 404 preview_unavailable. The body is text and is never rendered as markup. Never model-executable: the draft is shown to the person deciding it.',
+    ownerPlane: 'model',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: approvalsPreviewInput,
+    outputSchema: approvalsPreviewOutput,
+  },
+  {
     id: 'chat.clear_threads',
     label: 'Clear all chat threads',
     description: 'Delete every chat thread for the caller. Irreversible bulk deletion.',
@@ -4029,6 +4086,28 @@ export const actionRegistry = [
     requiresApproval: false,
     reversible: true,
     inputSchema: chatInspectRunRequestInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'chat.open_cited_passage',
+    label: 'Open the passage a source contributed',
+    description: 'Open the passage one cited source contributed to an answer: the quote the gateway sent with the citation, for a knowledge source the chunk it names read again through Data Plane\'s chunk read (Data Plane resolves the viewer\'s own grants first, so a document the person may not read shows a refusal and no text), and for a web source the live page opened at the quote. Read only; nothing is stored. Never model-executable.',
+    ownerPlane: 'data',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: chatOpenCitedPassageInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'chat.wide_research_start',
+    label: 'Start wide research',
+    description: 'Start a wide-research run from the composer: one Do turn that researches up to the organisation\'s item cap of separate questions in parallel and merges the answers. The person gives a pasted list (one question per line) or a count preset, and sees an estimate of the items, time and cost first. The server clamps the count to the organisation\'s research.max_fan_out_items policy and names any items past it in the answer; a zero-retention session is refused. Never model-executable: a model does not start a fan-out that spends on the person\'s behalf.',
+    ownerPlane: 'model',
+    risk: 'medium',
+    requiresApproval: false,
+    reversible: false,
+    inputSchema: chatWideResearchStartInput,
     outputSchema: envelopeStatusOutput,
   },
   {
