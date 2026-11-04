@@ -45,6 +45,7 @@ pub mod org_identity;
 pub mod orgs;
 pub mod ownership;
 pub mod persona;
+pub mod policy_effective;
 pub mod privacy;
 pub mod remote_support;
 pub mod router_policy;

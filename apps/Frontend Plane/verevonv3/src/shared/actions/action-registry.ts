@@ -1355,6 +1355,25 @@ const chatGoalAutoToggleInput = z
   })
   .strict()
 
+// A follow-up an inline widget proposed (EP-4 S3), staged as a chip the person clicks. Only the text: the widget,
+// the answer and the thread are the host's, and the bridge's own limit is 500 characters.
+const chatStageWidgetFollowupInput = z
+  .object({
+    text: z.string().min(1).max(500),
+  })
+  .strict()
+
+// A link an inline widget asked to open (EP-4 S3). Web and mail only, as `isSafeLinkHref` in the chat feature
+// decides, and never longer than the bridge's 8 KiB message; the person opens it from the host's confirmation.
+const chatOpenWidgetLinkInput = z
+  .object({
+    url: z
+      .string()
+      .max(8 * 1024)
+      .regex(/^(?:https?:|mailto:)[^\u0000-\u001f\u007f]*$/i),
+  })
+  .strict()
+
 // The org-admin schemas below all describe operations whose owner requires
 // require_org_admin (or, for the two self-service deletion checkpoints,
 // require_active_org) — enforced server-side, not by this schema. Getting the
@@ -1538,6 +1557,20 @@ const orgSetWebPolicyInput = z
   .strict()
 
 const orgPreviewEffectivePolicyInput = z.object({}).strict()
+
+// The effective policy of one thread (Wave 3 EP-9 T2): each value the gateway enforces for it, with the layer that set
+// it and a lock where a higher layer fixes it. The organization is the session's, so the input names the thread only.
+const policyReadEffectiveInput = z.object({ threadId: z.string().trim().min(1).max(200) }).strict()
+const policyEffectiveItem = z.object({
+  key: z.string(),
+  value: z.unknown(),
+  origin: z.enum(['platform', 'org', 'space', 'user', 'request']).nullable(),
+  revision: z.number().int().nonnegative().optional(),
+  locked: z.boolean(),
+  unavailable: z.boolean().optional(),
+})
+// The items as the client reads them: requestJson unwraps the route's `{ data }` envelope.
+const policyReadEffectiveOutput = z.object({ items: z.array(policyEffectiveItem) })
 
 // A tool matcher is empty or "*" for any tool, a tool name, or a name ending in one "*" (hook/mod.rs).
 const orgHookRuleFields = z.object({
@@ -3541,6 +3574,17 @@ export const actionRegistry = [
     outputSchema: orgEffectivePolicyOutput,
   },
   {
+    id: 'policy.read_effective',
+    label: 'Read effective policy',
+    description: 'Read the effective policy of one thread: each value the gateway enforces for it, the layer that set it, and a lock where a higher layer fixes it. Any member of the organization may read it, and the organization comes from the session. Never model-executable.',
+    ownerPlane: 'model',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: policyReadEffectiveInput,
+    outputSchema: policyReadEffectiveOutput,
+  },
+  {
     id: 'org.create_hook',
     label: 'Add organization hook rule',
     description: 'Add a rule that denies, or asks first about, a tool call in the agent runs of the organization. A rule only narrows a run, and a post-tool rule may only deny, because the tool has already acted by then. Takes effect only where the deployment has switched durable hook rules on. An org admin only. Refused typed under zero data retention. Never model-executable: a model does not set the rules it runs under.',
@@ -4672,6 +4716,28 @@ export const actionRegistry = [
     requiresApproval: false,
     reversible: true,
     inputSchema: chatGoalAutoToggleInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'chat.stage_widget_followup',
+    label: 'Stage a follow-up an inline widget proposed',
+    description: 'Show a follow-up question an inline widget in a chat answer proposed as a chip under that widget, labelled as coming from the widget. Nothing is sent: only the person\'s click on the chip puts it through the answer\'s ordinary follow-up handler, the same one the answer\'s suggested follow-ups use. At most one chip per widget at a time, five per answer per minute, and 500 characters; anything over is dropped. Never model-executable: a widget is model output, and the person decides every turn it proposes.',
+    ownerPlane: 'model',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: chatStageWidgetFollowupInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'chat.open_widget_link',
+    label: 'Open a link an inline widget asked for',
+    description: 'Show a link an inline widget in a chat answer asked to open, with its full address, under that widget; the person opens it in a new tab with no referrer, or cancels. Web and mail addresses only: any other scheme is refused with a note and nothing is opened. Nothing is sent to the server. Never model-executable: a widget is model output, and the person decides where they go.',
+    ownerPlane: 'model',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: chatOpenWidgetLinkInput,
     outputSchema: envelopeStatusOutput,
   },
   {

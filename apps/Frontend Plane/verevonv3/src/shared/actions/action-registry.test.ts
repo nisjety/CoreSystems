@@ -1087,6 +1087,35 @@ describe('action registry', () => {
     }
   })
 
+  it('registers the widget bridge as low-risk actions the model cannot execute (EP-4-S3)', () => {
+    const stage = getActionDescriptor('chat.stage_widget_followup')
+    expect(stage).toMatchObject({ ownerPlane: 'model', risk: 'low', requiresApproval: false, reversible: true })
+    expect(isModelExecutableAction('chat.stage_widget_followup')).toBe(false)
+    expect(stage?.description ?? '').toContain('Never model-executable')
+    expect(stage?.inputSchema.safeParse({ text: 'Vis for 25 år' }).success).toBe(true)
+    expect(stage?.inputSchema.safeParse({ text: 'x'.repeat(500) }).success).toBe(true)
+    for (const input of [
+      { text: '' },
+      { text: 'x'.repeat(501) },
+      // The widget, the answer and the thread are the host's: a caller names only the text.
+      { text: 'Neste', threadId: 'thread-1' },
+      { text: 'Neste', send: true },
+    ]) {
+      expect(stage?.inputSchema.safeParse(input).success).toBe(false)
+    }
+
+    const link = getActionDescriptor('chat.open_widget_link')
+    expect(link).toMatchObject({ ownerPlane: 'model', risk: 'low', requiresApproval: false, reversible: true })
+    expect(isModelExecutableAction('chat.open_widget_link')).toBe(false)
+    expect(link?.description ?? '').toContain('Never model-executable')
+    for (const url of ['https://example.com/rente', 'http://example.com', 'mailto:ola@example.com']) {
+      expect(link?.inputSchema.safeParse({ url }).success).toBe(true)
+    }
+    for (const url of ['javascript:alert(1)', 'data:text/html,x', '/api/v1/me', '//evil.example', 'https://a.example/\nx', `https://a.example/${'x'.repeat(8 * 1024)}`]) {
+      expect(link?.inputSchema.safeParse({ url }).success).toBe(false)
+    }
+  })
+
   function registered(id: string) {
     return actionRegistry.find((action) => action.id === id)
   }
@@ -1129,6 +1158,22 @@ describe('action registry', () => {
     // The revision is required, and the organization is the session's, never the body's.
     expect(setWeb?.safeParse({ webMode: 'off', paidProviders: 'on' }).success).toBe(false)
     expect(setWeb?.safeParse({ revision: 0, webMode: 'off', paidProviders: 'on', orgId: 'org_1' }).success).toBe(false)
+  })
+
+  it('registers the effective-policy read as a model-plane action the model cannot execute, taking only a thread', () => {
+    expect(registered('policy.read_effective'), 'policy.read_effective').toMatchObject({
+      ownerPlane: 'model',
+      risk: 'low',
+      requiresApproval: false,
+      reversible: true,
+    })
+    expect(isModelExecutableAction('policy.read_effective')).toBe(false)
+    const input = registered('policy.read_effective')?.inputSchema
+
+    expect(input?.safeParse({ threadId: 'thread_1' }).success).toBe(true)
+    // The organization is the session's: a body that names one, or no thread at all, is refused.
+    expect(input?.safeParse({ threadId: 'thread_1', orgId: 'org_1' }).success).toBe(false)
+    expect(input?.safeParse({}).success).toBe(false)
   })
 
   it('takes the closed policy settings and no organization from the client, and never a reserved key', () => {
@@ -1566,7 +1611,9 @@ describe('action registry', () => {
     // +1 after EP-9-W2 registered org.set_web_policy, the organization's web access switch.
     // +3 after EP-9-C1 registered org.set_retention, org.place_legal_hold and org.release_legal_hold.
     // +1 after EP-11-S1 registered skills.save_from_message, the Save-as-skill message action.
-    expect(ids).toHaveLength(301)
+    // +1 after EP-9-T2 registered policy.read_effective, the thread's effective-policy read.
+    // +2 after EP-4-S3 registered chat.stage_widget_followup and chat.open_widget_link, the widget bridge.
+    expect(ids).toHaveLength(304)
 
     // The fragments also carry ids outside the `spaces.` prefix (`space.files.*`), so the Space
     // entries are the ones the fragments declare.

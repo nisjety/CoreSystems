@@ -196,6 +196,42 @@ mod stream_body_limit_tests {
     }
 }
 
+#[cfg(test)]
+mod run_question_origin_tests {
+    use super::run_question_value;
+    use mp_contracts::model_plane::v1::RunQuestion;
+
+    /// A model question reads as it always has: no origin keys, whether its origin is `model` or unset
+    /// (empty, as a session-core older than the column leaves it) (EP-4 S6).
+    #[test]
+    fn run_question_value_omits_model_origin() {
+        for origin in ["", "model"] {
+            let question = RunQuestion {
+                id: "q_model".into(),
+                origin: origin.into(),
+                ..Default::default()
+            };
+            let value = run_question_value(&question);
+            assert!(value.get("origin").is_none(), "origin {origin:?} must not reach the card");
+            assert!(value.get("origin_label").is_none());
+        }
+    }
+
+    /// A server's question names the server that asked, for the card's origin line and its notice.
+    #[test]
+    fn run_question_value_names_a_server_origin() {
+        let question = RunQuestion {
+            id: "q_server".into(),
+            origin: "mcp_elicitation".into(),
+            origin_label: "Fixture".into(),
+            ..Default::default()
+        };
+        let value = run_question_value(&question);
+        assert_eq!(value["origin"], "mcp_elicitation");
+        assert_eq!(value["origin_label"], "Fixture");
+    }
+}
+
 /// Build the axum router without binding a socket. Useful for tests.
 pub fn build_router(state: AppState, prom_handle: Option<PrometheusHandle>) -> Router {
     let grpc_readiness = GrpcReadiness::new();
@@ -575,6 +611,12 @@ fn proxy_routes() -> Router<AppState> {
         .route(
             "/v1/org/agent-policy/effective",
             get(get_org_agent_policy_effective_proxy),
+        )
+        // The effective policy of one thread (Wave 3 EP-9 T2). Mounted always: the handler answers 404 while its switch
+        // is off, so the route fence below still reaches it.
+        .route(
+            "/v1/policy/effective",
+            get(crate::policy_effective::get_policy_effective),
         )
         .route(
             "/v1/org/hooks",
@@ -1450,7 +1492,7 @@ fn question_state_token(state: i32) -> &'static str {
 
 /// The question as the browser reads it. The owner's own org and user ids stay off the wire.
 pub(crate) fn run_question_value(question: &RunQuestion) -> Value {
-    json!({
+    let mut value = json!({
         "id": question.id,
         "run_id": question.run_id,
         "thread_id": question.thread_id,
@@ -1477,7 +1519,15 @@ pub(crate) fn run_question_value(question: &RunQuestion) -> Value {
             "text": answer.text,
         })).collect::<Vec<_>>(),
         "answered_message_id": empty_to_null(&question.answered_message_id),
-    })
+    });
+    // A question the run's model asked keeps the shape the card has always read. Only a server's question
+    // names its origin, so the card can say who asked it (EP-4 S6).
+    let origin = question.origin.as_str();
+    if !origin.is_empty() && origin != mp_contracts::user_question::ORIGIN_MODEL {
+        value["origin"] = json!(origin);
+        value["origin_label"] = json!(question.origin_label);
+    }
+    value
 }
 
 /// The Verevon Proof Bundle for one run (roadmap P1.2). Read-only; the org is
@@ -8460,6 +8510,35 @@ fn not_found(message: &str) -> HttpJsonError {
 /// semantics. Every other code — including transport failures (`Unavailable`,
 /// `Internal`, …) — stays `502`, preserving the prior "upstream is unhappy"
 /// default for these routes.
+/// EP-9 C4: an erase refused by a legal hold, or by a hold check that could not be made, keeps
+/// its typed code from the `x-mp-error-code` trailer; without it `FailedPrecondition` would read
+/// as `thread_persistence_not_permitted` and the SPA would never see the hold.
+fn thread_erase_error(context: &str, error: &tonic::Status) -> HttpJsonError {
+    match error.metadata().get("x-mp-error-code").and_then(|value| value.to_str().ok()) {
+        Some("erasure_blocked_legal_hold") => (
+            StatusCode::CONFLICT,
+            Json(json!({
+                "error": {
+                    "code": "erasure_blocked_legal_hold",
+                    "message": error.message(),
+                    "details": {"retryable": false},
+                }
+            })),
+        ),
+        Some("erasure_hold_check_unavailable") => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({
+                "error": {
+                    "code": "erasure_hold_check_unavailable",
+                    "message": "Legal holds could not be checked, so nothing was deleted.",
+                    "details": {"retryable": true},
+                }
+            })),
+        ),
+        _ => session_thread_error(context, error),
+    }
+}
+
 pub(crate) fn session_thread_error(context: &str, error: &tonic::Status) -> HttpJsonError {
     match error.code() {
         tonic::Code::InvalidArgument => (
@@ -13508,7 +13587,7 @@ async fn delete_thread(
             &bearer,
         )?)
         .await
-        .map_err(|error| session_thread_error("session-core delete_thread failed", &error))?
+        .map_err(|error| thread_erase_error("session-core delete_thread failed", &error))?
         .into_inner();
 
     Ok(Json(DeleteThreadResponse {
@@ -13538,7 +13617,7 @@ async fn delete_threads(
             &bearer,
         )?)
         .await
-        .map_err(|error| session_thread_error("session-core delete_threads failed", &error))?
+        .map_err(|error| thread_erase_error("session-core delete_threads failed", &error))?
         .into_inner();
 
     Ok(Json(DeleteThreadsResponse {
