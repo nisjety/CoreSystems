@@ -1235,10 +1235,11 @@ mod tests {
         append_revision(&pool, &owner(), append_request(&thread, 0))
             .await
             .unwrap();
-        // The rows go with their threads (ON DELETE CASCADE); the purge summary has no count for them.
-        crate::gdpr::purge_organization_data(&pool, ORG, None)
+        // The purge names the table (the thread cascade is the second line of defence).
+        let summary = crate::gdpr::purge_organization_data(&pool, ORG, None)
             .await
             .unwrap();
+        assert!(summary.artifact_revisions >= 1);
         assert_eq!(rows(&pool, &thread).await, 0);
     }
 

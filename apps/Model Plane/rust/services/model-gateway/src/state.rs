@@ -9,6 +9,7 @@ use mp_contracts::dataplane::{
     wiki_v1::wiki_service_client::WikiServiceClient,
 };
 use mp_contracts::model_plane::v1::{
+    artifact_revision_service_client::ArtifactRevisionServiceClient,
     browser_broker_client::BrowserBrokerClient, capability_core_client::CapabilityCoreClient,
     event_log_client::EventLogClient,
     execution_core_client::ExecutionCoreClient, finetune_jobs_client::FinetuneJobsClient,
@@ -120,6 +121,10 @@ pub struct AppState {
     pub event_log_client: EventLogClient<Channel>,
     /// Session Core's RunLedgerService (EP-14 S5 run timing write and read) on the session_client endpoint.
     pub run_ledger_client: RunLedgerServiceClient<Channel>,
+    /// Session Core's ArtifactRevisionService (EP-3 S2 revision store) on the session_client endpoint.
+    pub artifact_revision_client: ArtifactRevisionServiceClient<Channel>,
+    /// `MODEL_GATEWAY_ARTIFACT_REVISIONS`, read once at startup (EP-3 S2). Off writes nothing.
+    pub artifact_revisions_mode: crate::artifact_revisions::ArtifactRevisionsMode,
     /// Session Core's MessageTree service on the session_client endpoint (WS17-S8).
     pub message_tree_client: MessageTreeServiceClient<Channel>,
     /// Session Core's ThreadFork service on the session_client endpoint (WS17-S6).
@@ -472,6 +477,8 @@ impl AppState {
             message_revision_client: MessageRevisionServiceClient::new(session_channel.clone()),
             event_log_client: EventLogClient::new(session_channel.clone()),
             run_ledger_client: RunLedgerServiceClient::new(session_channel.clone()),
+            artifact_revision_client: ArtifactRevisionServiceClient::new(session_channel.clone()),
+            artifact_revisions_mode: crate::artifact_revisions::ArtifactRevisionsMode::Off,
             message_tree_client: MessageTreeServiceClient::new(session_channel.clone()),
             thread_fork_client: ThreadForkServiceClient::new(session_channel.clone()),
             attention_client: AttentionServiceClient::new(session_channel.clone()),
@@ -662,6 +669,13 @@ impl AppState {
             "SESSION_CORE_ADDR",
             "http://localhost:9091",
         )?);
+        let artifact_revision_client = ArtifactRevisionServiceClient::new(Self::lazy_channel(
+            "SESSION_CORE_URL",
+            "SESSION_CORE_ADDR",
+            "http://localhost:9091",
+        )?);
+        // A typo in the revision switch fails the boot rather than silently writing nothing.
+        let artifact_revisions_mode = crate::artifact_revisions::ArtifactRevisionsMode::from_env()?;
         let message_tree_client = MessageTreeServiceClient::new(Self::lazy_channel(
             "SESSION_CORE_URL",
             "SESSION_CORE_ADDR",
@@ -905,6 +919,8 @@ impl AppState {
             state.message_revision_client = message_revision_client;
             state.event_log_client = event_log_client;
             state.run_ledger_client = run_ledger_client;
+            state.artifact_revision_client = artifact_revision_client;
+            state.artifact_revisions_mode = artifact_revisions_mode;
             state.message_tree_client = message_tree_client;
             state.thread_fork_client = thread_fork_client;
             state.attention_client = attention_client;
@@ -973,6 +989,8 @@ impl AppState {
             state.message_revision_client = message_revision_client;
             state.event_log_client = event_log_client;
             state.run_ledger_client = run_ledger_client;
+            state.artifact_revision_client = artifact_revision_client;
+            state.artifact_revisions_mode = artifact_revisions_mode;
             state.message_tree_client = message_tree_client;
             state.thread_fork_client = thread_fork_client;
             state.attention_client = attention_client;

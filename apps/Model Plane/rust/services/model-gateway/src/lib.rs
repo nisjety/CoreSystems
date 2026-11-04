@@ -2,6 +2,7 @@
 
 pub mod approvals;
 pub mod attachment_policy;
+pub mod artifact_revisions;
 pub mod artifacts;
 pub mod audit;
 pub mod auth;
