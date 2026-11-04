@@ -23,7 +23,7 @@ func TestSkillStampIsInertWhileTheSwitchIsOff(t *testing.T) {
 // The stamp names the uploader with the settings session-core's version trigger reads, and writes
 // only the bundle digest column, so the trigger stays the single writer of version and digest.
 func TestSkillStampNamesTheActorTheVersionTriggerReads(t *testing.T) {
-	migration, err := os.ReadFile(filepath.Join("..", "..", "..", "..", "..", "rust", "services", "session-core", "migrations", "0096_agent_skill_versions.sql"))
+	migration, err := os.ReadFile(filepath.Join("..", "..", "..", "..", "..", "rust", "services", "session-core", "migrations", "0108_agent_skill_versions.sql"))
 	if err != nil {
 		t.Skipf("the session-core migration is not beside this module: %v", err)
 	}
