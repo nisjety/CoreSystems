@@ -87,6 +87,7 @@ export function messageToTurn(msg: ChatMessage): ChatTurn {
     role: msg.role,
     sourceScope: msg.sourceScope,
     retrievalScope: msg.retrievalScope,
+    contextRefs: msg.contextRefs,
     content: visibleTurnContent(msg.role, msg.content),
     // Keep an absent server timestamp EMPTY instead of fabricating "now":
     // session-core messages carry no timestamps, so stamping the fetch time

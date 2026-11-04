@@ -125,6 +125,8 @@ pub struct AppState {
     pub artifact_revision_client: ArtifactRevisionServiceClient<Channel>,
     /// `MODEL_GATEWAY_ARTIFACT_REVISIONS`, read once at startup (EP-3 S2). Off writes nothing.
     pub artifact_revisions_mode: crate::artifact_revisions::ArtifactRevisionsMode,
+    /// `MODEL_GATEWAY_ARTIFACT_EDITING`, read once at startup after the revision mode (EP-3 S4). Off answers the edit routes 404.
+    pub artifact_editing_enabled: bool,
     /// Session Core's MessageTree service on the session_client endpoint (WS17-S8).
     pub message_tree_client: MessageTreeServiceClient<Channel>,
     /// Session Core's ThreadFork service on the session_client endpoint (WS17-S6).
@@ -479,6 +481,7 @@ impl AppState {
             run_ledger_client: RunLedgerServiceClient::new(session_channel.clone()),
             artifact_revision_client: ArtifactRevisionServiceClient::new(session_channel.clone()),
             artifact_revisions_mode: crate::artifact_revisions::ArtifactRevisionsMode::Off,
+            artifact_editing_enabled: false,
             message_tree_client: MessageTreeServiceClient::new(session_channel.clone()),
             thread_fork_client: ThreadForkServiceClient::new(session_channel.clone()),
             attention_client: AttentionServiceClient::new(session_channel.clone()),
@@ -676,6 +679,8 @@ impl AppState {
         )?);
         // A typo in the revision switch fails the boot rather than silently writing nothing.
         let artifact_revisions_mode = crate::artifact_revisions::ArtifactRevisionsMode::from_env()?;
+        // Editing over a shadow or absent revision table would save text no turn reads: refuse the boot.
+        let artifact_editing_enabled = crate::artifact_edit_routes::editing_from_env(artifact_revisions_mode)?;
         let message_tree_client = MessageTreeServiceClient::new(Self::lazy_channel(
             "SESSION_CORE_URL",
             "SESSION_CORE_ADDR",
@@ -921,6 +926,7 @@ impl AppState {
             state.run_ledger_client = run_ledger_client;
             state.artifact_revision_client = artifact_revision_client;
             state.artifact_revisions_mode = artifact_revisions_mode;
+            state.artifact_editing_enabled = artifact_editing_enabled;
             state.message_tree_client = message_tree_client;
             state.thread_fork_client = thread_fork_client;
             state.attention_client = attention_client;
@@ -991,6 +997,7 @@ impl AppState {
             state.run_ledger_client = run_ledger_client;
             state.artifact_revision_client = artifact_revision_client;
             state.artifact_revisions_mode = artifact_revisions_mode;
+            state.artifact_editing_enabled = artifact_editing_enabled;
             state.message_tree_client = message_tree_client;
             state.thread_fork_client = thread_fork_client;
             state.attention_client = attention_client;

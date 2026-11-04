@@ -236,6 +236,10 @@
     {
       "key": "run_inspection",
       "label_en": "run timing and request inspection"
+    },
+    {
+      "key": "context_references",
+      "label_en": "references to documents, threads or selections"
     }
   ],
   "generated_by": "mp-contracts zdr_refusal tests (MP_UPDATE_GOLDEN=1)",

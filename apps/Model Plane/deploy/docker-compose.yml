@@ -431,6 +431,10 @@ services:
       MODEL_GATEWAY_SUBAGENT_ROLE_CATALOGUE: ${MODEL_GATEWAY_SUBAGENT_ROLE_CATALOGUE:-false}
       # EP-2 S8: the composer's wide-research entry (estimate route + wide_research on a Do run). Only the literal true.
       WIDE_RESEARCH_ENTRY_ENABLED: ${WIDE_RESEARCH_ENTRY_ENABLED:-false}
+      # EP-2 S5: deep research shows an editable plan first (research_phase plan|run). Only the literal true.
+      DEEP_RESEARCH_PLAN_TURN: ${DEEP_RESEARCH_PLAN_TURN:-false}
+      # EP-3 S5: typed context references on the send (document, skill, own Space). Only the literal true.
+      MODEL_GATEWAY_CONTEXT_REFS_ENABLED: ${MODEL_GATEWAY_CONTEXT_REFS_ENABLED:-false}
       # EP-6 S9: a mention turn's agent tool allowlist and autonomy cap narrow the offered tools. Only the literal true.
       MODEL_GATEWAY_AGENT_TOOL_ALLOWLIST: ${MODEL_GATEWAY_AGENT_TOOL_ALLOWLIST:-false}
       # WS27-S2: a turn's usage frame and ledger rows count every tool round and the overhead calls, with run_id. Off by
@@ -660,6 +664,8 @@ services:
       MODEL_GATEWAY_REQUEST_INSPECTOR: ${MODEL_GATEWAY_REQUEST_INSPECTOR:-false}
       # EP-3 S2: shadow dual-write of artifact revisions into session-core (off|shadow|on; any other value fails startup).
       MODEL_GATEWAY_ARTIFACT_REVISIONS: ${MODEL_GATEWAY_ARTIFACT_REVISIONS:-off}
+      # EP-3 S4: the person's own edit and restore of a thread artifact (needs MODEL_GATEWAY_ARTIFACT_REVISIONS=on). Only the literal true.
+      MODEL_GATEWAY_ARTIFACT_EDITING: ${MODEL_GATEWAY_ARTIFACT_EDITING:-false}
       # Source-check deadlines in seconds. The code default is 90 per artifact
       # and 150 for the shared tool phase, and the code treats an empty value as
       # unset. Here `:-120` fills in an empty value too, so the per-artifact
@@ -859,6 +865,8 @@ services:
       #   the intent layer's cheapest mode; the REPORT is written by the turn's
       #   own model, never this one.
       DEEP_RESEARCH_PLAN_MODEL: ${DEEP_RESEARCH_PLAN_MODEL:-verevon-budget}
+      # EP-2 S6: the claim ledger and the gap-driven second pass of deep research. Only the literal true.
+      DEEP_RESEARCH_SECOND_PASS: ${DEEP_RESEARCH_SECOND_PASS:-false}
       # SEMANTIC_CACHE_URL/SEMANTIC_CACHE_TTL_SECS/SEMANTIC_CACHE_DATAPLANE_ENABLED
       # were removed 2026-09-17 — the code that read them (model-gateway's
       # langcache module) was already reduced to a documentation tombstone on
@@ -970,6 +978,8 @@ services:
       # EP-10-S1: the owner-only decrypted preview of a pending write approval, never stored. Only the literal true;
       # the SPA's VITE_APPROVAL_WRITE_PREVIEW must be on too for the disclosure to show.
       APPROVAL_WRITE_PREVIEW_ENABLED: ${APPROVAL_WRITE_PREVIEW_ENABLED:-false}
+      # EP-10 S4: the owner's edit of a pending approval before it is decided. Only the literal true.
+      APPROVAL_EDIT_ENABLED: ${APPROVAL_EDIT_ENABLED:-false}
       # ADR-0003 — the platform layer of the authored-instruction hierarchy
       # (`apps/AUTHORED_INSTRUCTIONS_ADR_2026-08-19.md`): deployment-level
       # configuration, deliberately not a database row (no "platform
@@ -1140,6 +1150,8 @@ services:
       SESSION_CORE_MESSAGE_VERSIONS_ENABLED: ${SESSION_CORE_MESSAGE_VERSIONS_ENABLED:-false}
       # WS13-S3: the approval decision audit event and its provenance record. Off by default.
       APPROVAL_AUDIT_EVENTS_ENABLED: ${APPROVAL_AUDIT_EVENTS_ENABLED:-false}
+      # EP-10 S4: the owner's edit of a pending approval before it is decided. Only the literal true.
+      APPROVAL_EDIT_ENABLED: ${APPROVAL_EDIT_ENABLED:-false}
       # WS03-S8: park a crashed run instead of ending it (needs park recovery and the fold store on). Off by
       # default and owner-gated: the executor half is not built, so the worker parks nothing yet.
       SESSION_CORE_CRASH_PARK_ENABLED: ${SESSION_CORE_CRASH_PARK_ENABLED:-false}
@@ -1601,6 +1613,8 @@ services:
       # WS13-S4: within one run, a call the user already declined (same tool, same arguments) is refused from the
       # run's approvals instead of being asked again. Off by default; only the literal `true` turns it on.
       APPROVAL_DENIAL_MEMORY_ENABLED: ${APPROVAL_DENIAL_MEMORY_ENABLED:-false}
+      # EP-10 S4: the owner's edit of a pending approval before it is decided. Only the literal true.
+      APPROVAL_EDIT_ENABLED: ${APPROVAL_EDIT_ENABLED:-false}
       # Autonomous tool-using runs route through Azure's model-router deployment,
       # which selects the best model per turn (tool-calling model selection is
       # handled by the router, cost-aware). Overridable per deployment; empty →
@@ -1650,6 +1664,9 @@ services:
       # a first proof on the subscription sets this to 2.
       WIDE_RESEARCH_FAN_OUT_ENABLED: ${WIDE_RESEARCH_FAN_OUT_ENABLED:-true}
       WIDE_RESEARCH_FAN_OUT_CONCURRENCY: ${WIDE_RESEARCH_FAN_OUT_CONCURRENCY:-4}
+      # Wave 3 EP-2 S9: the token budget all children of one fan-out call may spend (metered tokens; subscription rounds count 0). Only the literal true enforces it; off, a spent budget is logged and every item still starts.
+      WIDE_RESEARCH_CHILD_BUDGET_ENFORCED: ${WIDE_RESEARCH_CHILD_BUDGET_ENFORCED:-false}
+      WIDE_RESEARCH_CHILD_TOKEN_BUDGET: ${WIDE_RESEARCH_CHILD_TOKEN_BUDGET:-400000}
       DATABASE_URL: postgresql://postgres:${MODEL_POSTGRES_PASSWORD:?MODEL_POSTGRES_PASSWORD is required}@postgres:5432/session_core
       MINIO_ENDPOINT: http://minio:9000
       MINIO_ACCESS_KEY: ${MODEL_MINIO_ROOT_USER:?MODEL_MINIO_ROOT_USER is required}

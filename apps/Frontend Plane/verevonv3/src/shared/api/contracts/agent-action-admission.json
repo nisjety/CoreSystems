@@ -579,6 +579,19 @@
       "zdr_allowed": false
     },
     {
+      "actionId": "chat.list_artifact_revisions",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "read",
+      "exemptReason": "no_owner_executor",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:4ad9d1e2e9984d7150585d2cee2038c8cfce54dbac196e8290a1d4ca4b91eb50",
+      "zdr_allowed": false
+    },
+    {
       "actionId": "chat.mark_thread_seen",
       "registry": true,
       "access": "none",
@@ -605,6 +618,19 @@
       "zdr_allowed": false
     },
     {
+      "actionId": "chat.pick_context_ref",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "read",
+      "exemptReason": "no_owner_executor",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:29a6d182bebd304797ac70b17c9030e30ce7c511f99dbfb878dff5ca634f7820",
+      "zdr_allowed": false
+    },
+    {
       "actionId": "chat.queue_invocation_input",
       "registry": true,
       "access": "none",
@@ -618,6 +644,45 @@
       "zdr_allowed": false
     },
     {
+      "actionId": "chat.research_plan_cancel",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "context_write",
+      "exemptReason": "ui_state_only",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:3ce293bcf51652e7a101b9d2e59d5b76cc8127a08e1a8ac620b924b71835708d",
+      "zdr_allowed": false
+    },
+    {
+      "actionId": "chat.research_plan_start",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "external_write",
+      "exemptReason": "no_owner_executor",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:ba249ff1ef13a511613a1355d28ce525754375b3cc7350e7999f8537db3906f4",
+      "zdr_allowed": false
+    },
+    {
+      "actionId": "chat.restore_artifact_revision",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "context_write",
+      "exemptReason": "no_owner_executor",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:a711faa6a3795312f7b8f97043c1cbac991b3ca86cbbd906b7416f06a589bfa9",
+      "zdr_allowed": false
+    },
+    {
       "actionId": "chat.run.continue",
       "registry": true,
       "access": "none",
@@ -628,6 +693,19 @@
       "executor": {},
       "hashBasis": "catalog_entry",
       "schemaHash": "sha256:596d28219f66054cca2b168abfc1516ce35baf7c1390eaf9548a48d068b4aead",
+      "zdr_allowed": false
+    },
+    {
+      "actionId": "chat.save_artifact_revision",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "context_write",
+      "exemptReason": "no_owner_executor",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:6dfe0821c34c1204cfa49aeb67a2901b9de67b5a31a85d5734a4772b302774a3",
       "zdr_allowed": false
     },
     {
@@ -670,6 +748,19 @@
       "zdr_allowed": false
     },
     {
+      "actionId": "chat.set_context_refs",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "context_write",
+      "exemptReason": "agent_cannot_self_govern",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:03941b748341dfc4393f686333884629766e1997961a4a633c1b94214a0244e7",
+      "zdr_allowed": false
+    },
+    {
       "actionId": "chat.set_transcript_density",
       "registry": true,
       "access": "none",
@@ -706,6 +797,19 @@
       "executor": {},
       "hashBasis": "catalog_entry",
       "schemaHash": "sha256:70eb9abb3c1db046fe35386232efca65e1d9fbf128b3336347e52facede094a4",
+      "zdr_allowed": false
+    },
+    {
+      "actionId": "chat.wide_research_retry_item",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "external_write",
+      "exemptReason": "no_owner_executor",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:ab9026b844b0c068bf88860d711467edae170514f21fb0cfae4a1a3278ef951b",
       "zdr_allowed": false
     },
     {

@@ -3413,6 +3413,19 @@ Built so far: WS13-S0, WS13-S1, WS13-S2; WS14-S1, WS14-S2 (partial), WS14-S3; WS
 | D3-736 | EP-3-S5 | live-proof | P1 | Guard: regenerate the agent-action-admission golden and the prompt-tool manifest (action-registry gained chat.set_context_refs and chat.pick_context_ref); run bash scripts/tests/zdr-contract-sync.test.sh (both zdr-refusals.json copies and .sha256 were hand-edited to the generator's shape) | open |
 | D3-737 | EP-3-S5 | risk | P2 | Document narrowing reaches only the model-called knowledge_search tool; the pre-answer grounding retrieval (`retrieval::retrieve_checked`) is not narrowed. | open |
 | D3-738 | EP-3-S5 | follow-up | P3 | 5 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W3-15.json | open |
+| D3-739 | W3-15 guard | follow-up | P2 | guard skipped: EP-3-S4 BFF pass-through routes in apps/gateway domains chat.rs/chat/artifacts.rs: needs design, not an exact edit | open |
+| D3-740 | W3-15 guard | follow-up | P2 | guard skipped: EP-3-S4 ChatPage editing prop wiring and S3 capability/mark_user_edited follow-ups: needs design | open |
+| D3-741 | W3-15 guard | follow-up | P2 | guard skipped: EP-2-S9 onRetryItem in ChatPage: builder deferred it | open |
+| D3-742 | W3-15 guard | follow-up | P2 | guard skipped: EP-2-S9 optional CSS in styles/global.css | open |
+| D3-743 | W3-15 guard | follow-up | P2 | guard skipped: EP-2-S5/EP-3-S3 chat-normalizers/ChatMessages reload rendering (needs_other_files, no exact lines) | open |
+| D3-744 | W3-15 guard | follow-up | P2 | guard skipped: gen-sse-event-taxonomy.py rewrite: script fails on existing mcp_http.rs shape | open |
+| D3-745 | W3-15 guard | test-gap | P1 | still broken after the guard: apps/Model Plane/docs/sse-event-taxonomy.md was not regenerated for the new research_plan event (EP-2-S5). gen-sse-event-taxonomy.py fails on an existing #[cfg(test)] enum variant in model-gateway/src/mcp_http.rs:142, which this batch did not touch. The script needs to learn that shape first. | open |
+| D3-746 | W3-15 guard | test-gap | P1 | still broken after the guard: The SSE golden was merged by hand and not regenerated. The task forbids cargo test apart from the manifest step, so MP_UPDATE_GOLDEN=1 cargo test -p model-gateway --lib sse_event_payload_golden was not run. The lead should run it and confirm that digest 37a19708... does not change. | open |
+| D3-747 | W3-15 guard | test-gap | P1 | still broken after the guard: EP-3-S4 BFF pass-through is not built: PUT and POST .../restore in apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat.rs and chat/artifacts.rs are missing. That is design work, not a shared edit. | open |
+| D3-748 | W3-15 guard | test-gap | P1 | still broken after the guard: EP-3-S4 editing wiring in ChatPage.tsx is not built: `editing={{ enabled, threadId, temporary, spaceThread, onSaved }}` needs capability plumbing (artifact_editing in getComposerCapabilities) and a mergeArtifactVersion fold. The two EP-3-S3 follow-ups are also not done: report artifact_editing from the composer-capabilities route, and call mark_user_edited at turn start. | open |
+| D3-749 | W3-15 guard | test-gap | P1 | still broken after the guard: EP-2-S9: onRetryItem on ChatWideResearchPanel is not wired. The builder said to wait until the composer send path carries wideResearch. | open |
+| D3-750 | W3-15 guard | test-gap | P1 | still broken after the guard: EP-2-S5 needs_other_files is not done: chat-normalizers.ts and ChatMessages.tsx should render the stored research_plan as a read-only ResearchPlanCard on reload. EP-3-S3 also needs chat-normalizers.ts normalizeArtifact to keep `editor`. Neither has exact lines. | open |
+| D3-751 | W3-15 guard | test-gap | P1 | still broken after the guard: Optional CSS .verevon-wide-research__retry (EP-2-S9) is not added. | open |
 
 ## Cross-wave
 

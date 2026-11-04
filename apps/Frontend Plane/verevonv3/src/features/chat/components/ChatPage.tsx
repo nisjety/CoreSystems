@@ -55,6 +55,7 @@ import {
   ChatLiveRunPanel,
 } from './ChatLiveRunPanel'
 import { ComposerTrays } from './ComposerTrays'
+import { researchPassFacts } from './ArtifactProvenance'
 import { ChatWideResearchPanel } from './ChatWideResearchPanel'
 import { ChatWorkspaceCanvas } from './ChatWorkspaceCanvas'
 import { ChatAttachmentCanvas } from './ChatAttachmentCanvas'
@@ -181,6 +182,9 @@ export default function ChatPage() {
     questionError,
     answerPendingQuestion,
     skipPendingQuestion,
+    pendingResearchPlan,
+    startResearchPlan,
+    cancelResearchPlan,
   } = useChatController()
 
   // The attachment chip that summoned the canvas stays selected when several
@@ -730,6 +734,14 @@ export default function ChatPage() {
   // copies of the expression is how those drift apart.
   const sourceBadgeTotal = createMemo(() => evidenceSources().length + (latestGrounding() ? 1 : 0))
   const sourceBadgeRead = createMemo(() => readSourceCount() + (latestGrounding() ? 1 : 0))
+  /** The `[n]` the newest research report read in its second pass (EP-2-S6), for the Sources tab's grouping. */
+  const secondPassNumbers = createMemo(() => {
+    for (const item of [...artifactItems()].reverse()) {
+      const facts = researchPassFacts((item.artifact as { provenance?: unknown }).provenance)
+      if (facts) return facts.secondPassNumbers
+    }
+    return [] as number[]
+  })
   const toolCallCount = createMemo(
     () => state.turns.reduce((total, turn) => total + (turn.toolCalls?.length ?? 0), 0),
   )
@@ -1026,7 +1038,7 @@ export default function ChatPage() {
             )}
           </p>
         </Show>
-        <SourcesPanel grounding={latestGrounding()} sources={evidenceSources()} />
+        <SourcesPanel grounding={latestGrounding()} sources={evidenceSources()} secondPassNumbers={secondPassNumbers()} />
       </Match>
       <Match when={activeTab() === 'artifacts'}>
         <Show
@@ -1037,7 +1049,7 @@ export default function ChatPage() {
             <ChatAttachmentCanvas attachments={conversationAttachments()} selectedId={selectedAttachmentId()} />
           </Show>
           <Show when={artifactItems().length > 0}>
-            <ArtifactsPanel items={artifactItems()} />
+            <ArtifactsPanel items={artifactItems()} history={{ threadId: state.threadId ?? '', temporary: temporaryChat() || isActiveThreadTemporary() }} />
           </Show>
         </Show>
       </Match>
@@ -1089,7 +1101,7 @@ export default function ChatPage() {
   // the same reason as `liveRailWorkContent`: the rail reads its prop slot, and
   // each read of an inline JSX prop would build a fresh tree with its own
   // event-stream subscription.
-  const liveRailWideResearch = createMemo(() => <ChatWideResearchPanel runId={liveRunId()} />)
+  const liveRailWideResearch = createMemo(() => <ChatWideResearchPanel runId={liveRunId()} threadId={state.threadId ?? null} />)
   // The layout picker for the live panel's header (WS9.G). A memo, as the panel's other slots are, so
   // the panel reads one element however often it asks. The position is read inside the component.
   const liveRailDockControls = createMemo(() => (
@@ -1478,6 +1490,9 @@ export default function ChatPage() {
                 questionError={questionError()}
                 onAnswerQuestion={(answer) => void answerPendingQuestion(answer)}
                 onSkipQuestion={() => void skipPendingQuestion()}
+                researchPlan={pendingResearchPlan()}
+                onStartResearchPlan={(edit) => void startResearchPlan(edit)}
+                onCancelResearchPlan={cancelResearchPlan}
               />
               <Show when={isStreaming()}>
                 <div class="verevon-chat-stop-wrap">

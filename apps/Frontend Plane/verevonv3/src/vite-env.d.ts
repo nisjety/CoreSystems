@@ -15,6 +15,7 @@ interface ImportMetaEnv {
 	/** "1" compiles in the product-scene runtime (src/demo). Never set in production. */
 	readonly VITE_SCENE_MODE?: string;
 	readonly VITE_PLAN_EXECUTE_ENABLED?: string;
+	readonly VITE_DEEP_RESEARCH_PLAN_TURN?: string;
 	readonly VITE_CHAT_PROJECTS_ENABLED?: string;
 	readonly VITE_CHAT_VISION_AS_PARTS_ENABLED?: string;
 	readonly VITE_QUOTA_READOUT?: string;

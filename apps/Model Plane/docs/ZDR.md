@@ -100,6 +100,7 @@ the boundaries and their current state.
 | **NATS / audit envelopes** | ZDR-derived content not published to durable subjects | Built. `zdr: true` envelopes are suppressed by natsx. |
 | **Chat stream path** | One persistence-free path: no run, thread, message, event, buffer, idempotency record, memory, cache or feedback; one user message (plus optional grounding) goes to inference-core | Built, read in source (`zdr_direct_stream` in model-gateway). No ZDR request has ever been served by the running stack (0 ZDR log lines in model-gateway and inference-core, 0 ZDR rows in session-core, read 2026-10-03), so this is proven by source and unit tests only. |
 | **Features refused with a typed code** | Attachments, image generation, deep research and agentic runs: `zdr_feature_not_supported` (English text only today). Durable gateway mutations: `zdr_durable_mutation_forbidden`. Inbox draft persistence: `zdr_draft_persistence_forbidden`; inbox AI proposals: `zdr_ai_proposal_forbidden`. Support recurrence: `zdr_recurrence_forbidden`. Scheduled and unattended runs, browser runs and speech and other modalities are refused too. Run now (a manual schedule fire, EP-6-S2) is refused at three layers: the model-gateway durable-mutation guard, the capability-core router (non-read request from a ZDR principal, authz.go) and Control's fire and scheduled-run decisions (and the dispatcher's re-check). Browser help requests (EP-1-S1): a ZDR or waived run is refused with `zdr_feature_not_supported` (feature `browser_human_assist`) and no approval row is written. A wide-research run (`InvokeRequest.wide_research`) and `POST /v1/research/wide/estimate` are refused with `zdr_feature_not_supported`, feature `agentic` (EP-2-S8); the estimate stores nothing. The write-approval preview (EP-10-S1, owner-only, decrypted on read and never stored) adds no store and no feature key: a ZDR bearer is refused by the continuation gate with `zdr_durable_mutation_forbidden`, and a waived credential by session-core (waiver route mismatch). | Built, read in source. |
+| **Context references on the send (EP-3 S5)** | No reference resolved on a ZDR or temporary turn | Built dark behind MODEL_GATEWAY_CONTEXT_REFS_ENABLED (off). A ZDR turn carrying any context_refs is refused before any network call with zdr_feature_not_supported, feature context_references (whatever the switch says). metadata.context_refs stores {kind,id,label} only, never on a ZDR turn (no message is written). |
 | **Do mode and delegation children** | Refused under ZDR (the gateway and execution-core both refuse an agent run). A ZDR child cannot be registered as a metadata-only run: session-core forces an empty parent run id and a fresh thread for any ZDR start and refuses ZDR orchestration writes. | Built, by refusal. Decision: they stay refused with a typed reason. A waived run (section 5) is a normal run, so it is not affected. |
 **Do mode and delegation children**' row) this row: '| **ask_user questions (`run_questions`)** | No question is offered or stored for a zero-retention or waived run: the tool is not offered (`max_questions` 0), and the list and answer routes refuse a ZDR caller with `zdr_durable_mutation_forbidden` (412) before they read anything. A question prompt and the owner answer are stored with their run and erased with it (`ON DELETE CASCADE`). | Built behind `AGENT_ASK_USER_ENABLED` (off). The ZDR matrix row `ask_user_zdr_not_offered` is not authored yet, so this is checked by code path, not by a golden. |
 | **The model provider itself** | The provider must contractually not retain the request | **NOT satisfied. No provider is attested. See section 3.** |
@@ -384,6 +385,21 @@ persistent turn, erased with the message by the GDPR path. A ZDR or waived turn 
 (session_flow::persistable_citations / persistable_artifacts; goldens
 e_zdr_turn_kb_citation_passage_streams_not_persisted, e_waived_research_metadata_not_persisted).
 The viewer's "more" read is Data Plane's ACL'd chunk read and stores nothing.
+
+The deep-research plan turn (EP-2-S5, behind DEEP_RESEARCH_PLAN_TURN): the plan turn streams a
+research_plan event (sub-queries, up to three clarifying questions, the sub-query cap) and
+searches nothing; the assistant message metadata keeps the same plan under research_plan only
+on a persistent turn, erased with the message by the GDPR path. A ZDR turn is refused before
+either phase through deep_research (no new refusal key); a waived turn is refused deep research
+at the route, and session_flow::with_research_plan would store nothing for it anyway (D12). The
+run turn's answers are user text: redacted like the message when the turn redacts, bounded to
+1,000 characters, and sent only to the synthesis inference.
+
+The claim ledger (EP-2-S6, second pass behind DEEP_RESEARCH_SECOND_PASS): research_ledger rides
+artifacts[].provenance.research_ledger of the assistant message metadata. Deep research is
+refused under ZDR; a waived turn streams it on the report frame and
+session_flow::persistable_artifacts strips it with the stamp (D12). It is erased by the message
+GDPR path and never indexed or fed to memory.
 
 ### 5.6 What the waiver can never do
 Never org-wide (no write to org-core), never for another member (the decision requires
