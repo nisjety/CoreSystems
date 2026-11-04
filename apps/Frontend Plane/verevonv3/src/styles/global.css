@@ -24108,6 +24108,19 @@ body.verevon-chat-canvas-resizing * {
   font-size: 11px;
 }
 
+.verevon-chat-run-panel__give-back-note {
+  display: grid;
+  gap: 4px;
+  margin-top: 8px;
+  font-size: 12px;
+}
+
+.verevon-chat-run-panel__give-back-note textarea {
+  width: 100%;
+  resize: vertical;
+  font: inherit;
+}
+
 .verevon-chat-run-panel__body {
   display: flex;
   min-height: 0;
@@ -26394,6 +26407,37 @@ body.verevon-chat-canvas-resizing * {
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.03em;
+}
+
+/* EP-2-S4: the passage a cited source contributed, in a side sheet and on the source card. */
+.verevon-chat-cited-passage {
+  position: fixed;
+  inset: 0 0 0 auto;
+  width: min(420px, 100vw);
+  z-index: 60;
+  overflow: auto;
+  padding: 16px;
+  background: var(--surface, #fff);
+  box-shadow: -8px 0 24px rgb(0 0 0 / 0.12);
+}
+
+.verevon-chat-cited-passage__header {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.verevon-chat-cited-passage__quote,
+.verevon-chat-source-card__quote {
+  margin: 8px 0;
+  padding-left: 10px;
+  border-left: 3px solid currentColor;
+  opacity: 0.85;
+}
+
+.verevon-chat-citation-chip__passage,
+.verevon-chat-source-card__passage {
+  font-size: 12px;
 }
 
 /* The chat transcript surface stays light in both themes today (see the

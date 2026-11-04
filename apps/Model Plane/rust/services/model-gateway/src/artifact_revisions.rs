@@ -350,6 +350,7 @@ mod tests {
             title: "Report".to_owned(),
             content: format!("text {version}"),
             version,
+            provenance: None,
         }
     }
 

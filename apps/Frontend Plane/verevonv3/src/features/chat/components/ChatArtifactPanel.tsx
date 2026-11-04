@@ -38,6 +38,7 @@ import {
 } from 'solid-js'
 import { extraArtifactRenderers } from './artifact-renderers'
 import { officePdfRenderer } from './ArtifactOfficePreview'
+import { ArtifactProvenance } from './ArtifactProvenance'
 import {
   ChatMarkdown,
   DiffView,
@@ -513,6 +514,7 @@ export function ArtifactViewer(props: { item: ArtifactPanelItem; surface?: Viewe
         </Show>
         </Show>
       </div>
+      <ArtifactProvenance provenance={(artifact() as { provenance?: unknown }).provenance} />
     </section>
   )
 }

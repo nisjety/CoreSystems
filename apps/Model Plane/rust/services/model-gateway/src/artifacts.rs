@@ -472,6 +472,7 @@ pub fn artifact_event(
         title: title.to_owned(),
         content: content.to_owned(),
         version,
+        provenance: None,
     }
 }
 
@@ -793,6 +794,7 @@ mod tests {
                 title,
                 content,
                 version,
+                ..
             } => {
                 assert_eq!(id, "a1");
                 assert_eq!(kind, "document");

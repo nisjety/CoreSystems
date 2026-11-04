@@ -153,6 +153,8 @@ export interface CronScheduleFire {
   run_id?: string | null
   thread_id?: string | null
   withheld_effects: number
+  /** The fire's key: the schedule slot's time, or manual:<request id> for a Run now (EP-6-S3). */
+  fire_key?: string
 }
 
 /** The most recent fires of one schedule, newest first. */

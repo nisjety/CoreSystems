@@ -613,6 +613,7 @@ fn citation(
         start: None,
         end: None,
         origin: "connector".to_owned(),
+        passage: None,
     }
 }
 

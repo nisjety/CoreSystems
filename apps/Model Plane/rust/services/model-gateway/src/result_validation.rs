@@ -864,6 +864,7 @@ mod tests {
             kind: "document".into(),
             title: "Campaign".into(),
             version: 3,
+            provenance: None,
             content: "## Overview\nShared offices".into(),
         }];
         let (summary, receipt) = revision_completion(

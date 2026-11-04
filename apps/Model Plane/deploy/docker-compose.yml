@@ -243,6 +243,8 @@ services:
       MODEL_GATEWAY_CATALOGUE_PRICES: ${MODEL_GATEWAY_CATALOGUE_PRICES:-false}
       MODEL_GATEWAY_WEB_READER: ${MODEL_GATEWAY_WEB_READER:-false}
       MODEL_GATEWAY_WEB_SEARCH_BATCH: ${MODEL_GATEWAY_WEB_SEARCH_BATCH:-false}
+      # EP-2-S4: cited passages on citations and the research report's provenance stamp. Only the literal true.
+      MODEL_GATEWAY_CITATION_PASSAGES: ${MODEL_GATEWAY_CITATION_PASSAGES:-false}
       # Side-task models from the platform role table (EP-13 S4). Roll out inference-core first:
       # an older inference-core refuses the verevon-role model id.
       MODEL_GATEWAY_ROLE_ROUTING: ${MODEL_GATEWAY_ROLE_ROUTING:-false}
@@ -427,6 +429,8 @@ services:
       MODEL_GATEWAY_USER_PROFILE_PREFIX: ${MODEL_GATEWAY_USER_PROFILE_PREFIX:-false}
       # EP-6 S10: the Space's agent role catalogue on a Do launch. Only the literal true.
       MODEL_GATEWAY_SUBAGENT_ROLE_CATALOGUE: ${MODEL_GATEWAY_SUBAGENT_ROLE_CATALOGUE:-false}
+      # EP-2 S8: the composer's wide-research entry (estimate route + wide_research on a Do run). Only the literal true.
+      WIDE_RESEARCH_ENTRY_ENABLED: ${WIDE_RESEARCH_ENTRY_ENABLED:-false}
       # EP-6 S9: a mention turn's agent tool allowlist and autonomy cap narrow the offered tools. Only the literal true.
       MODEL_GATEWAY_AGENT_TOOL_ALLOWLIST: ${MODEL_GATEWAY_AGENT_TOOL_ALLOWLIST:-false}
       # WS27-S2: a turn's usage frame and ledger rows count every tool round and the overhead calls, with run_id. Off by
@@ -963,6 +967,9 @@ services:
       # token, minted after auth-core's POST /api/v2/auth/step-up). Only the literal `shadow` (log, let through) or
       # `enforce` (refuse) turns it on; anything else is off. A denial never needs it.
       APPROVAL_STEP_UP_ENFORCED: ${APPROVAL_STEP_UP_ENFORCED:-off}
+      # EP-10-S1: the owner-only decrypted preview of a pending write approval, never stored. Only the literal true;
+      # the SPA's VITE_APPROVAL_WRITE_PREVIEW must be on too for the disclosure to show.
+      APPROVAL_WRITE_PREVIEW_ENABLED: ${APPROVAL_WRITE_PREVIEW_ENABLED:-false}
       # ADR-0003 — the platform layer of the authored-instruction hierarchy
       # (`apps/AUTHORED_INSTRUCTIONS_ADR_2026-08-19.md`): deployment-level
       # configuration, deliberately not a database row (no "platform
@@ -1779,6 +1786,11 @@ services:
       # ZDR. Off by default; only the value `1` turns it on (unlike the `true` switches). The Verevon gateway's
       # BROWSER_DO_ENABLED decides whether a bearer is minted at all.
       EXECUTION_DO_BROWSER_ENABLED: ${EXECUTION_DO_BROWSER_ENABLED:-0}
+      # EP-1 S2: a wall the person may clear (sign-in, challenge) pauses the run for them. Only the literal true.
+      EXECUTION_BROWSER_HUMAN_ASSIST: ${EXECUTION_BROWSER_HUMAN_ASSIST:-false}
+      # EP-1 S5: how long a takeover pause waits for the browser back, whole seconds clamped to 300-3600. A setting,
+      # not a switch: only a takeover pause reads it.
+      EXECUTION_BROWSER_ASSIST_TTL_SECONDS: ${EXECUTION_BROWSER_ASSIST_TTL_SECONDS:-1800}
       # WS21-S5b: browser.act. Never on until Quarry's read_only contract test (K3-6) passes.
       EXECUTION_DO_BROWSER_ACT_ENABLED: ${EXECUTION_DO_BROWSER_ACT_ENABLED:-false}
       # WS14-S4: the Do loop's ask_user tool. Off by default; the gateway's max_questions bounds it as well.

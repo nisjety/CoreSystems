@@ -9,8 +9,10 @@ import {
 import {
   type ChatAction,
   type ChatMessage,
+  type CitationLocator,
   getAttachmentPolicy,
   type RecalledMemory,
+  type ResearchProvenance,
 } from '@/shared/api/chat-client'
 import {
   isModelEntitlementCode,
@@ -1614,7 +1616,7 @@ export function createTurnStep(
   }
 }
 
-export function normalizeArtifact(event: { id?: string; kind?: string; title?: string; content?: string; version?: number }): ChatArtifact | null {
+export function normalizeArtifact(event: { id?: string; kind?: string; title?: string; content?: string; version?: number; provenance?: ResearchProvenance }): ChatArtifact | null {
   const content = event.content ?? ''
   // An artifact with no content AND no id carries nothing to show or update —
   // drop it. One WITH an id was genuinely announced by the backend, so it is
@@ -1628,6 +1630,7 @@ export function normalizeArtifact(event: { id?: string; kind?: string; title?: s
     title: event.title ?? artifactTitle(kind),
     content,
     version: event.version ?? 0,
+    ...(event.provenance ? { provenance: event.provenance } : {}),
   }
 }
 
@@ -1704,7 +1707,7 @@ function citationOrigin(value: unknown): Citation['origin'] {
   return CITATION_ORIGINS.find((origin) => origin === value)
 }
 
-export function normalizeCitation(event: { id?: string; title?: string; url?: string; snippet?: string; number?: number; claimId?: string; sourceGroupId?: string; sourceGroupLabel?: string; start?: number; end?: number; origin?: string }): Citation | null {
+export function normalizeCitation(event: { id?: string; title?: string; url?: string; snippet?: string; number?: number; claimId?: string; sourceGroupId?: string; sourceGroupLabel?: string; start?: number; end?: number; origin?: string; quote?: string; locator?: CitationLocator }): Citation | null {
   if (!event.url) return null
   const origin = citationOrigin(event.origin)
   return {
@@ -1719,6 +1722,8 @@ export function normalizeCitation(event: { id?: string; title?: string; url?: st
     ...(event.start !== undefined ? { start: event.start } : {}),
     ...(event.end !== undefined ? { end: event.end } : {}),
     ...(origin ? { origin } : {}),
+    ...(event.quote ? { quote: event.quote } : {}),
+    ...(event.locator ? { locator: event.locator } : {}),
   }
 }
 

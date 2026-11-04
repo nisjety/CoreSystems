@@ -27,6 +27,12 @@
           ],
           "presence": "always"
         },
+        "provenance": {
+          "types": [
+            "object"
+          ],
+          "presence": "optional"
+        },
         "title": {
           "types": [
             "string"
@@ -115,6 +121,12 @@
           ],
           "presence": "always"
         },
+        "locator": {
+          "types": [
+            "object"
+          ],
+          "presence": "optional"
+        },
         "number": {
           "types": [
             "integer"
@@ -126,6 +138,12 @@
             "string"
           ],
           "presence": "always"
+        },
+        "quote": {
+          "types": [
+            "string"
+          ],
+          "presence": "optional"
         },
         "snippet": {
           "types": [

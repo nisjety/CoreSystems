@@ -620,6 +620,7 @@ mod tests {
             agent_digest: None,
             agent_tool_capability_ids: None,
             agent_autonomy_cap: None,
+            wide_research: None,
         }
     }
 

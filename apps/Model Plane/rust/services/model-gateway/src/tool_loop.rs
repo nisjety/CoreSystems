@@ -7609,6 +7609,7 @@ fn web_search_citations(
                 start: None,
                 end: None,
                 origin: "web".to_owned(),
+                passage: None,
             })
         })
         .collect()
@@ -8099,6 +8100,7 @@ fn finish_web_search_gate(
                     start: None,
                     end: None,
                     origin: "web".to_owned(),
+                    passage: None,
                 }],
                 short_circuit: Some(answer),
             };
@@ -13855,6 +13857,7 @@ mod tests {
                 title,
                 content,
                 version,
+                ..
             } => {
                 assert_eq!(id, "q3-rapport");
                 assert_eq!(kind, "document");

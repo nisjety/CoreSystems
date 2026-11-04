@@ -11,9 +11,11 @@ import {
   type ChatUsagePhase,
   type ChatUsageProgressEvent,
   type ChatVerificationEvent,
+  type CitationLocator,
   type EffortLevel,
   type EffortProfile,
   type RecalledMemory,
+  type ResearchProvenance,
 } from '@/shared/api/chat-client'
 import {
   type AnswerServedBy,
@@ -82,6 +84,8 @@ export type ChatArtifact = {
    * then treats the current fields as a single revision.
    */
   history?: ChatArtifactVersion[]
+  /** A research report's provenance stamp (EP-2-S4), in the wire shape. */
+  provenance?: ResearchProvenance
 }
 
 export type ChatToolCall = {
@@ -151,6 +155,10 @@ export type Citation = {
    * metadata line only, never body text, so the card shows those and nothing more.
    */
   origin?: 'web' | 'knowledge' | 'connector'
+  /** The passage this source contributed (EP-2-S4), when the server sent one. */
+  quote?: string
+  /** Where a knowledge source's passage sits in Data Plane, in the wire shape. */
+  locator?: CitationLocator
 }
 
 export type GeneratedFileCheckLevel = 'passed' | 'warnings' | 'failed' | 'skipped'

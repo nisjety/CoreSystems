@@ -156,7 +156,7 @@ function AutomationsCard(props: { schedules: ResourceAccessor<CronSchedule[]> })
   const localeTag = () => (i18n.locale() === 'no' ? 'nb-NO' : 'en-US')
   const rows = createMemo((): AutomationRow[] => {
     const now = Date.now()
-    return (props.schedules() ?? []).map((schedule) => ({ schedule, state: automationStateOf(schedule, null, now) }))
+    return (props.schedules() ?? []).map((schedule) => ({ schedule, state: automationStateOf(schedule, now) }))
   })
   const counts = createMemo(() => countAutomations(rows()))
   const nextRun = createMemo(() => nextRunOf(rows()))

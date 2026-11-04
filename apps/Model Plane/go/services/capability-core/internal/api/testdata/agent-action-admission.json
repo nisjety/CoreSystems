@@ -69,6 +69,19 @@
       "zdr_allowed": false
     },
     {
+      "actionId": "approvals.preview",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "read",
+      "exemptReason": "approval_authority",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:3756a9caaad80462dca3abeaef9c3786b439112d0af0f91f68dba20c458ab70d",
+      "zdr_allowed": false
+    },
+    {
       "actionId": "audio.dictate",
       "registry": true,
       "access": "none",
@@ -579,6 +592,19 @@
       "zdr_allowed": false
     },
     {
+      "actionId": "chat.open_cited_passage",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "read",
+      "exemptReason": "no_owner_executor",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:07f6e47cc2208433c3e8b7b4c83b08a589d18463d25c22a2bd7b557c04dda700",
+      "zdr_allowed": false
+    },
+    {
       "actionId": "chat.queue_invocation_input",
       "registry": true,
       "access": "none",
@@ -680,6 +706,19 @@
       "executor": {},
       "hashBasis": "catalog_entry",
       "schemaHash": "sha256:70eb9abb3c1db046fe35386232efca65e1d9fbf128b3336347e52facede094a4",
+      "zdr_allowed": false
+    },
+    {
+      "actionId": "chat.wide_research_start",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "external_write",
+      "exemptReason": "no_owner_executor",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:f7f0730fd20240bb9ffca92f8020fce3551be2319dc394f3c2852e42fedeaa41",
       "zdr_allowed": false
     },
     {

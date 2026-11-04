@@ -3341,6 +3341,9 @@ Built so far: WS13-S0, WS13-S1, WS13-S2; WS14-S1, WS14-S2 (partial), WS14-S3; WS
 | D3-670 | EP-1-S5 | risk | P2 | expire_hold revokes the grant with the bearer from pause time, which may have lapsed after 30-60 minutes; the revoke then fails (it is logged) and the grant ends only at its own TTL of up to 30 minutes. | open |
 | D3-671 | EP-1-S5 | decision | P2 | The assist TTL may be up to 3600 s while the run grant asks for 1800 s (GRANT_TTL_SECONDS), so any takeover longer than the grant ends in browser_session_lost at give-back; the owner should consider capping the assist TTL at the grant TTL. | open |
 | D3-672 | EP-1-S5 | cleanup | P3 | A Hold::TimedOut entry for a run that is never resumed stays in the process-wide held_runs map; it is cleared only by release_run or take_help_timed_out. | open |
+| D3-673 | W3-14 guard | follow-up | P2 | guard skipped: EP-10-S1: documenting VITE_APPROVAL_WRITE_PREVIEW wherever verevonv3 VITE switches are listed (owner/lead) | open |
+| D3-674 | W3-14 guard | follow-up | P2 | guard skipped: EP-1-S2 / EP-1-S3 / EP-2-S8 follow-ups that need design or other owners: wiring browserControl/onBrowserTakeOver into use-chat-controller and ChatMessages; the onBrowserGiveBack(runId, note) caller for ChatLiveRunPanel; the notification-core Web Push line and the WS16 attention rail label; the composer mount for WideResearchStart | open |
+| D3-675 | W3-14 guard | follow-up | P2 | guard skipped: All 'guard: run tests' items (cargo test, go test, vitest suites): not run under the no-tests rule | open |
 
 ## Cross-wave
 
