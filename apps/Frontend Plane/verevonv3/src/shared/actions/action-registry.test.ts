@@ -1116,6 +1116,32 @@ describe('action registry', () => {
     }
   })
 
+  it('registers the MCP App host as low-risk actions the model cannot execute (EP-4-S9)', () => {
+    const open = getActionDescriptor('chat.open_mcp_app')
+    expect(open).toMatchObject({ ownerPlane: 'model', risk: 'low', requiresApproval: false, reversible: true })
+    expect(isModelExecutableAction('chat.open_mcp_app')).toBe(false)
+    expect(open?.description ?? '').toContain('Never model-executable')
+    expect(open?.inputSchema.safeParse({ serverId: 'srv-1', tool: 'show_chart' }).success).toBe(true)
+    for (const input of [
+      { serverId: '', tool: 'show_chart' },
+      { serverId: 'srv-1', tool: '' },
+      // The org and viewer are the session's: a caller names only the server and the tool.
+      { serverId: 'srv-1', tool: 'show_chart', orgId: 'org-2' },
+      { serverId: 'srv-1', tool: 'show_chart', uri: 'ui://other/app' },
+    ]) {
+      expect(open?.inputSchema.safeParse(input).success).toBe(false)
+    }
+
+    const stage = getActionDescriptor('chat.stage_mcp_app_message')
+    expect(stage).toMatchObject({ ownerPlane: 'model', risk: 'low', requiresApproval: false, reversible: true })
+    expect(isModelExecutableAction('chat.stage_mcp_app_message')).toBe(false)
+    expect(stage?.description ?? '').toContain('Never model-executable')
+    expect(stage?.inputSchema.safeParse({ text: 'Vis som tabell' }).success).toBe(true)
+    for (const input of [{ text: '' }, { text: 'x'.repeat(501) }, { text: 'Neste', send: true }]) {
+      expect(stage?.inputSchema.safeParse(input).success).toBe(false)
+    }
+  })
+
   function registered(id: string) {
     return actionRegistry.find((action) => action.id === id)
   }
@@ -1560,6 +1586,23 @@ describe('action registry', () => {
     expect(template?.inputSchema.safeParse({ name: '', content: 'x' }).success).toBe(false)
   })
 
+  it('registers the skill draft lifecycle as person-only writes the model cannot execute (EP-11-S5)', () => {
+    for (const id of ['skills.draft.save', 'skills.publish', 'skills.draft.discard', 'skills.version.restore'] as const) {
+      const action = getActionDescriptor(id)
+      expect(action?.ownerPlane).toBe('model')
+      expect(action?.requiresApproval).toBe(false)
+      expect(MODEL_ACCESS[id].access).toBe('none')
+    }
+    const restore = getActionDescriptor('skills.version.restore')
+    expect(restore?.inputSchema.safeParse({ skillId: 'sk-1', version: 2 }).success).toBe(true)
+    expect(restore?.inputSchema.safeParse({ skillId: 'sk-1', version: 0 }).success).toBe(false)
+    expect(restore?.inputSchema.safeParse({ skillId: 'sk-1', version: 1.5 }).success).toBe(false)
+    const save = getActionDescriptor('skills.draft.save')
+    expect(save?.inputSchema.safeParse({ skillId: 'sk-1', content: 'Nye steg' }).success).toBe(true)
+    expect(save?.inputSchema.safeParse({ skillId: 'sk-1', content: 'x'.repeat(32_001) }).success).toBe(false)
+    expect(getActionDescriptor('skills.publish')?.outputSchema.safeParse({ id: 'sk-1', version: 3, published: true }).success).toBe(true)
+  })
+
   it('registers save-as-skill as a low-risk person-only write the model cannot execute, bounded like the server (EP-11-S1)', () => {
     const save = getActionDescriptor('skills.save_from_message')
     expect(save?.ownerPlane).toBe('model')
@@ -1634,7 +1677,9 @@ describe('action registry', () => {
     // +1 after EP-11-S2 registered skills.versions.list, the Skills page's history read.
     // +1 after EP-11-S7 registered learning.learn_from_thread, the /learn command.
     // +4 after EP-11-S6 registered templates.create, templates.update, presets.create and presets.update.
-    expect(ids).toHaveLength(310)
+    // +4 after EP-11-S5 registered skills.draft.save, skills.publish, skills.draft.discard and skills.version.restore.
+    // +2 after EP-4-S9 registered chat.open_mcp_app and chat.stage_mcp_app_message, the MCP App host.
+    expect(ids).toHaveLength(316)
 
     // The fragments also carry ids outside the `spaces.` prefix (`space.files.*`), so the Space
     // entries are the ones the fragments declare.

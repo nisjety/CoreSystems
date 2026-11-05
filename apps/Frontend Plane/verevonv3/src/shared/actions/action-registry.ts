@@ -763,6 +763,37 @@ const skillsVersionsListOutput = z.object({
   has_more: z.boolean(),
 })
 
+// A skill's draft (EP-11 S5): saved over the live text without changing it, then published as a
+// new version, discarded, or filled from an old version. Owner-or-admin is the server's rule; nothing
+// here names an org or a user.
+const skillsDraftSaveInput = z.object({
+  skillId: z.string().min(1).max(200),
+  description: z.string().trim().max(300).optional(),
+  content: z.string().trim().min(1).max(32_000).optional(),
+})
+
+const skillIdInput = z.object({
+  skillId: z.string().min(1).max(200),
+})
+
+const skillsPublishOutput = z.object({
+  id: z.string(),
+  version: z.number().int().min(0),
+  published: z.literal(true),
+})
+
+const skillsVersionRestoreInput = z.object({
+  skillId: z.string().min(1).max(200),
+  version: z.number().int().min(1),
+})
+
+const skillsVersionRestoreOutput = z.object({
+  id: z.string(),
+  draft: z.literal(true),
+  restored_from: z.number().int().min(1),
+  bundle_restored: z.boolean(),
+})
+
 // Authored templates and presets (EP-11 S6): rows of the skills registry with a kind. A template
 // is text the composer inserts before the person sends, with `{{input}}` as its only placeholder;
 // a preset is a closed set of visible controls. The server lints both and binds the owner to the
@@ -1440,6 +1471,22 @@ const chatOpenWidgetLinkInput = z
       .string()
       .max(8 * 1024)
       .regex(/^(?:https?:|mailto:)[^\u0000-\u001f\u007f]*$/i),
+  })
+  .strict()
+
+// The app an MCP tool call in a chat answer declares (EP-4 S9). Named by the call's server and tool only; the
+// gateway re-checks that the viewer may use the server and re-discovers which `ui://` document the tool names.
+const chatOpenMcpAppInput = z
+  .object({
+    serverId: z.string().trim().min(1).max(256),
+    tool: z.string().trim().min(1).max(256),
+  })
+  .strict()
+
+// A message an MCP App staged (EP-4 S9): the same bounds as a widget's follow-up, the person sends it.
+const chatStageMcpAppMessageInput = z
+  .object({
+    text: z.string().min(1).max(500),
   })
   .strict()
 
@@ -3500,6 +3547,50 @@ export const actionRegistry = [
     outputSchema: skillsVersionsListOutput,
   },
   {
+    id: 'skills.draft.save',
+    label: 'Save a skill draft',
+    description: 'Save an edit of a published skill\'s description or text as its draft. Turns keep using the published text until the draft is published, so an edit never changes a running conversation silently. The owner or an org admin may save it; a proposal is still edited directly, because accepting it is its publish. Only while the server\'s drafts are on; off, an edit is live at once as before. Never model-executable.',
+    ownerPlane: 'model',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: skillsDraftSaveInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'skills.publish',
+    label: 'Publish a skill draft',
+    description: 'Make a skill\'s draft its live text. The server cuts a new immutable version, which every new turn uses; a run already under way keeps the version it started with. The draft is linted as the text it makes live. The owner or an org admin may publish. Never model-executable.',
+    ownerPlane: 'model',
+    risk: 'medium',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: skillIdInput,
+    outputSchema: skillsPublishOutput,
+  },
+  {
+    id: 'skills.draft.discard',
+    label: 'Discard a skill draft',
+    description: 'Throw away a skill\'s unpublished draft. The published text and every version stay as they are. The owner or an org admin may discard it. Never model-executable.',
+    ownerPlane: 'model',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: false,
+    inputSchema: skillIdInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'skills.version.restore',
+    label: 'Restore a skill version as a draft',
+    description: 'Fill a skill\'s draft with the text of one of its earlier versions. Nothing is live until the draft is published, which cuts a new version: a restore never points the skill back at an old version. The old bundle comes back only while the server still keeps it. The owner or an org admin may restore. Never model-executable.',
+    ownerPlane: 'model',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: skillsVersionRestoreInput,
+    outputSchema: skillsVersionRestoreOutput,
+  },
+  {
     id: 'templates.create',
     label: 'Create a slash template',
     description: 'Save a private `/` template of the person\'s own: text the composer puts in the draft when the template is picked, with `{{input}}` filled from the rest of the line. Nothing is sent until the person sends. A template is never injected into a turn as a skill. Answers kind_not_enabled while the server\'s authored kinds are off. Never model-executable.',
@@ -4873,6 +4964,28 @@ export const actionRegistry = [
     requiresApproval: false,
     reversible: true,
     inputSchema: chatOpenWidgetLinkInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'chat.open_mcp_app',
+    label: 'Show the app of an MCP tool call',
+    description: 'Draw the app an MCP tool call in a chat answer declares, under that answer, labelled with its server, in the same isolated frame as an inline widget: no network, no storage and no host data. The gateway reads the app with the viewer\'s own access to the server, and nothing is stored. The app is told the call\'s input and result once; it may size itself, stage a message and ask to open a link, and the person decides each. At most two apps per answer open on their own; the others wait for a click. Hidden in a temporary chat (zero data retention). Never model-executable: what a tool draws is not the model\'s to open.',
+    ownerPlane: 'model',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: chatOpenMcpAppInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'chat.stage_mcp_app_message',
+    label: 'Stage a message an MCP App proposed',
+    description: 'Show a message an MCP App in a chat answer asked to send as a chip under that app, labelled as coming from the app. Nothing is sent: only the person\'s click on the chip puts it through the answer\'s ordinary follow-up handler. At most one chip per app at a time, five per answer per minute, and 500 characters; anything over is refused to the app. Never model-executable: an app is a server\'s content, and the person decides every turn it proposes.',
+    ownerPlane: 'model',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: chatStageMcpAppMessageInput,
     outputSchema: envelopeStatusOutput,
   },
   {

@@ -51,6 +51,18 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
             "/api/v1/skills/{skill_id}/versions",
             get(list_skill_versions),
         )
+        // EP-11 S5: a skill's draft, published, discarded or restored from an old version.
+        // capability-core mounts these only while SKILL_DRAFT_PUBLISH is on and answers 404
+        // otherwise; the authority here is update_skill's.
+        .route("/api/v1/skills/{skill_id}/publish", post(publish_skill))
+        .route(
+            "/api/v1/skills/{skill_id}/draft",
+            axum::routing::delete(discard_skill_draft),
+        )
+        .route(
+            "/api/v1/skills/{skill_id}/versions/{version}/restore",
+            post(restore_skill_version),
+        )
         .route("/api/v1/plugins", get(list_plugins).post(create_plugin))
         .route(
             "/api/v1/plugins/{plugin_id}",
@@ -462,6 +474,92 @@ async fn delete_skill(
     )
     .await
     .into_response()
+}
+
+/// One draft call on one skill (EP-11 S5), proxied to model-gateway `/v1/skills/{id}/{action}` with
+/// `update_skill`'s authority: an admin on any skill; a member only on a private skill of their own,
+/// and only while `SKILL_MEMBER_AUTHORING` is on. capability-core checks owner-or-admin again and
+/// takes the org from the verified capability token; no body is forwarded.
+async fn proxy_skill_draft_call(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    skill_id: &str,
+    action: &str,
+    method: Method,
+) -> axum::response::Response {
+    let admin = can_author_skills(state, user).await;
+    if !admin && !skill_member_authoring_enabled() {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(error(
+                "forbidden",
+                "Only organization admins can edit skills.",
+            )),
+        )
+            .into_response();
+    }
+    let token = shared::model_token(state, user, headers).await;
+    let capability = match shared::required_capability_token(state, user, headers).await {
+        Ok(token) => token,
+        Err(err) => return shared::delegated_auth_unavailable(err).into_response(),
+    };
+    if !admin {
+        if let Err(refusal) =
+            member_owns_skill(state, user, token.as_deref(), &capability, skill_id).await
+        {
+            return refusal.into_response();
+        }
+    }
+    let url = format!(
+        "{}/v1/skills/{}/{}",
+        state.model_gateway_url,
+        urlencoding::encode(skill_id),
+        action
+    );
+    shared::proxy_model_json_with_capability(
+        state,
+        method,
+        &url,
+        None,
+        token.as_deref(),
+        Some(&capability),
+        user,
+    )
+    .await
+    .into_response()
+}
+
+/// Publish a skill's draft: it becomes the live text and a new version (EP-11 S5).
+async fn publish_skill(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Path(skill_id): Path<String>,
+) -> impl IntoResponse {
+    proxy_skill_draft_call(&state, &user, &headers, &skill_id, "publish", Method::POST).await
+}
+
+/// Discard a skill's draft; the live text stays (EP-11 S5).
+async fn discard_skill_draft(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Path(skill_id): Path<String>,
+) -> impl IntoResponse {
+    proxy_skill_draft_call(&state, &user, &headers, &skill_id, "draft", Method::DELETE).await
+}
+
+/// Restore an old version of a skill as its draft (EP-11 S5). The version is a number by the
+/// route's own type, so nothing but digits reaches the upstream path.
+async fn restore_skill_version(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Path((skill_id, version)): Path<(String, u32)>,
+) -> impl IntoResponse {
+    let action = format!("versions/{version}/restore");
+    proxy_skill_draft_call(&state, &user, &headers, &skill_id, &action, Method::POST).await
 }
 
 /// List the org's plugin packages (open to members so the UI can show them).
@@ -2582,6 +2680,73 @@ mod tests {
         let off = skill_test_servers("member", "user", "user-1").await;
         let (status, _) = skill_request(&off, "GET", "/api/v1/skills/authoring", None, None).await;
         assert_ne!(status, axum::http::StatusCode::OK);
+    }
+
+    /// EP-11 S5: a member publishes a draft of their own private skill while the member switch is on.
+    #[tokio::test]
+    async fn member_publishes_own_private_skill_when_switch_on() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let servers = skill_test_servers("member", "user", "user-1").await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/v1/skills/skill_1/publish"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "skill_1", "version": 3})))
+            .mount(&servers.2)
+            .await;
+        let (status, body) =
+            skill_request(&servers, "POST", "/api/v1/skills/skill_1/publish", None, Some("true")).await;
+        assert_eq!(status, axum::http::StatusCode::OK);
+        assert_eq!(body["version"], 3);
+        assert_eq!(skill_calls(&servers.2, "POST", "/v1/skills/skill_1/publish").await.len(), 1);
+    }
+
+    /// EP-11 S5: an org skill's draft stays an admin's to publish, discard or restore.
+    #[tokio::test]
+    async fn member_cannot_publish_discard_or_restore_an_org_skill() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let servers = skill_test_servers("member", "org", "").await;
+        for (method, uri, upstream) in [
+            ("POST", "/api/v1/skills/skill_1/publish", "/v1/skills/skill_1/publish"),
+            ("DELETE", "/api/v1/skills/skill_1/draft", "/v1/skills/skill_1/draft"),
+            (
+                "POST",
+                "/api/v1/skills/skill_1/versions/2/restore",
+                "/v1/skills/skill_1/versions/2/restore",
+            ),
+        ] {
+            let (status, body) = skill_request(&servers, method, uri, None, Some("true")).await;
+            assert_eq!(status, axum::http::StatusCode::FORBIDDEN, "{method} {uri}");
+            assert_eq!(body["error"]["code"], "forbidden");
+            assert!(skill_calls(&servers.2, method, upstream).await.is_empty());
+        }
+    }
+
+    /// EP-11 S5: an admin restores a version as a draft and discards a draft; the version number
+    /// is the only thing the path carries upstream.
+    #[tokio::test]
+    async fn admin_restores_and_discards_a_skill_draft() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let servers = skill_test_servers("owner", "org", "").await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/v1/skills/skill_1/versions/2/restore"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "skill_1", "draft": true})))
+            .mount(&servers.2)
+            .await;
+        Mock::given(wm_method("DELETE"))
+            .and(wm_path("/v1/skills/skill_1/draft"))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&servers.2)
+            .await;
+        let (status, body) =
+            skill_request(&servers, "POST", "/api/v1/skills/skill_1/versions/2/restore", None, None).await;
+        assert_eq!(status, axum::http::StatusCode::OK);
+        assert_eq!(body["draft"], true);
+        let (status, _) = skill_request(&servers, "DELETE", "/api/v1/skills/skill_1/draft", None, None).await;
+        assert!(status.is_success(), "{status}");
+        assert_eq!(skill_calls(&servers.2, "DELETE", "/v1/skills/skill_1/draft").await.len(), 1);
+        let (status, _) =
+            skill_request(&servers, "POST", "/api/v1/skills/skill_1/versions/latest/restore", None, None).await;
+        assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
+        assert!(skill_calls(&servers.2, "GET", "/v1/skills/skill_1").await.is_empty());
     }
 
     /// EP-11 S2: a member reads a skill's history through the gateway; only the paging parameters

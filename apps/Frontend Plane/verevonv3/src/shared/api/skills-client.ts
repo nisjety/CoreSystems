@@ -48,6 +48,24 @@ export interface Skill {
    */
   version?: number
   digest?: string
+  /**
+   * EP-11 S5: the skill's unpublished edit, when it has one. Turns keep using the live text until
+   * the draft is published. Present only while the server's draft switch is on.
+   */
+  draft?: SkillDraft | null
+  draft_updated_at?: string
+  draft_by?: string
+}
+
+/** A skill's unpublished edit (EP-11 S5): the same fields as a version body. */
+export interface SkillDraft {
+  name?: string
+  description?: string
+  content?: string
+  trigger_keywords?: string[]
+  trigger_file_patterns?: string[]
+  tool_restrictions?: string[]
+  bundle_sha256?: string
 }
 
 /** One immutable version of a skill, as the history lists it (EP-11 S2). */
@@ -81,8 +99,12 @@ export async function listAvailableSkills(signal?: AbortSignal): Promise<Skill[]
   return (payload?.skills ?? []).filter((skill) => skill && skill.enabled !== false && skill.id?.trim())
 }
 
-export function listSkills(orgId: string): Promise<{ skills: Skill[] }> {
-  return requestJson<{ skills: Skill[] }>('/api/v1/skills', {
+/**
+ * The org's skills as the Skills page lists them. `drafts_enabled` (EP-11 S5) is true only while
+ * the server saves edits of published skills as drafts; absent, the page offers no draft controls.
+ */
+export function listSkills(orgId: string): Promise<{ skills: Skill[]; drafts_enabled?: boolean }> {
+  return requestJson<{ skills: Skill[]; drafts_enabled?: boolean }>('/api/v1/skills', {
     headers: { 'x-verevon-org-id': orgId },
   })
 }
@@ -133,7 +155,11 @@ export function memberSkillAuthoring(): Promise<boolean> {
   return memberSkillAuthoringAnswer
 }
 
-/** Update a skill's enabled flag, description, or content. */
+/**
+ * Update a skill's enabled flag, description, or content. While the server's draft switch is on,
+ * a description or content change of an accepted skill is saved as its draft (action
+ * `skills.draft.save`) and the answer carries `draft: true`.
+ */
 export function updateSkill(
   orgId: string,
   skillId: string,
@@ -166,6 +192,43 @@ export async function listSkillVersions(
     { headers: { 'x-verevon-org-id': orgId } },
   )
   return { versions: payload?.versions ?? [], has_more: payload?.has_more === true }
+}
+
+/**
+ * Publish a skill's draft: it becomes the live text and a new version (EP-11 S5, action
+ * `skills.publish`). The server answers 404 while drafts are off or when there is no draft.
+ */
+export function publishSkillDraft(
+  orgId: string,
+  skillId: string,
+): Promise<{ id: string; version?: number; published?: boolean }> {
+  return requestJson<{ id: string; version?: number; published?: boolean }>(
+    `/api/v1/skills/${encodeURIComponent(skillId)}/publish`,
+    { method: 'POST', headers: { 'x-verevon-org-id': orgId } },
+  )
+}
+
+/** Discard a skill's draft; the live text stays (EP-11 S5, action `skills.draft.discard`). */
+export function discardSkillDraft(orgId: string, skillId: string): Promise<void> {
+  return requestJson<void>(`/api/v1/skills/${encodeURIComponent(skillId)}/draft`, {
+    method: 'DELETE',
+    headers: { 'x-verevon-org-id': orgId },
+  })
+}
+
+/**
+ * Restore an old version of a skill as its draft (EP-11 S5, action `skills.version.restore`). It
+ * is not live until the draft is published, which cuts a new version.
+ */
+export function restoreSkillVersion(
+  orgId: string,
+  skillId: string,
+  version: number,
+): Promise<{ id: string; draft?: boolean; restored_from?: number; bundle_restored?: boolean }> {
+  return requestJson<{ id: string; draft?: boolean; restored_from?: number; bundle_restored?: boolean }>(
+    `/api/v1/skills/${encodeURIComponent(skillId)}/versions/${encodeURIComponent(String(version))}/restore`,
+    { method: 'POST', headers: { 'x-verevon-org-id': orgId } },
+  )
 }
 
 export function deleteSkill(orgId: string, skillId: string): Promise<void> {

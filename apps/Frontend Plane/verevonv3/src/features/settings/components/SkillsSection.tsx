@@ -5,9 +5,12 @@ import { createResource } from '@/shared/lib/create-resource-compat'
 import {
   createSkill,
   deleteSkill,
+  discardSkillDraft,
   listSkills,
   listSkillVersions,
   memberSkillAuthoring,
+  publishSkillDraft,
+  restoreSkillVersion,
   updateSkill,
   type Skill,
   type SkillVersion,
@@ -90,12 +93,28 @@ export function diffSkillLines(previous: string, current: string): SkillDiffLine
 }
 
 /**
- * The read-only history of one skill (EP-11 S2): every immutable version, newest first, with its
- * date, who cut it, a short digest and what changed in its text since the version before. Nothing
- * here edits or restores; a version is never changed.
+ * The history of one skill (EP-11 S2): every immutable version, newest first, with its date, who
+ * cut it, a short digest and what changed in its text since the version before. A version is never
+ * changed. With `onRestore` (EP-11 S5, drafts on and the viewer may change the skill) each older
+ * version offers "Restore as draft": its text fills the draft, and nothing is live until published.
  */
-function SkillHistoryDrawer(props: { orgId: string; skill: Skill; onClose: () => void }) {
+function SkillHistoryDrawer(props: {
+  orgId: string
+  skill: Skill
+  onClose: () => void
+  onRestore?: (version: number) => Promise<void>
+}) {
   const i18n = useI18n()
+  const [restoring, setRestoring] = createSignal<number | null>(null)
+  const restore = async (version: number) => {
+    if (!props.onRestore || restoring() !== null) return
+    setRestoring(version)
+    try {
+      await props.onRestore(version)
+    } finally {
+      setRestoring(null)
+    }
+  }
   const [history] = createResource(
     () => props.skill.id,
     (skillId) => listSkillVersions(props.orgId, skillId),
@@ -175,6 +194,20 @@ function SkillHistoryDrawer(props: { orgId: string; skill: Skill; onClose: () =>
                         <span class="verevon-trust-chip">v{version.version}</span>{' '}
                         {new Date(version.created_at).toLocaleString()} · {actorLabel(version)}{' '}
                         <code title={version.digest}>{version.digest.slice(0, 12)}</code>
+                        <Show when={props.onRestore && version.version !== props.skill.version}>
+                          {' '}
+                          <SettingsButton
+                            settingsSize="sm"
+                            disabled={restoring() !== null}
+                            onClick={() => void restore(version.version)}
+                            aria-label={i18n.tr(
+                              `Gjenopprett v${version.version} som utkast`,
+                              `Restore v${version.version} as a draft`,
+                            )}
+                          >
+                            {i18n.tr('Gjenopprett som utkast', 'Restore as draft')}
+                          </SettingsButton>
+                        </Show>
                       </p>
                       <Show
                         when={older()}
@@ -238,9 +271,16 @@ export function SkillsSection() {
   )
   const [authoredEditor, setAuthoredEditor] = createSignal<AuthoredKind | null>(null)
 
+  // EP-11 S5: the server says in the listing whether edits go through a draft; off, nothing here
+  // shows a draft, a publish or a restore.
+  const [draftsEnabled, setDraftsEnabled] = createSignal(false)
   const [skills, { refetch }] = createResource(
     () => orgId() || undefined,
-    (id) => listSkills(id).then((result) => result.skills),
+    (id) =>
+      listSkills(id).then((result) => {
+        setDraftsEnabled(result.drafts_enabled === true)
+        return result.skills
+      }),
   )
 
   const [name, setName] = createSignal('')
@@ -254,6 +294,7 @@ export function SkillsSection() {
   // version history is on, so with it off nothing here shows and nothing asks.
   const [historySkill, setHistorySkill] = createSignal<Skill | null>(null)
   const hasVersion = (skill: Skill): boolean => typeof skill.version === 'number' && skill.version > 0
+  const hasDraft = (skill: Skill): boolean => draftsEnabled() && skill.draft != null
   const [formError, setFormError] = createSignal<string | null>(null)
   const [actionError, setActionError] = createSignal<string | null>(null)
   // The skill lint (EP-11 S4): a refused create marks its fields; a create that went ahead with
@@ -414,6 +455,66 @@ export function SkillsSection() {
     }
   }
 
+  // EP-11 S5: publishing makes the draft the live text and a new version; the server lints it first.
+  const handlePublish = async (skill: Skill) => {
+    const id = orgId()
+    if (!id || busySkillId()) return
+    setBusySkillId(skill.id)
+    setActionError(null)
+    try {
+      await publishSkillDraft(id, skill.id)
+      await refetch()
+    } catch (err) {
+      setActionError(
+        describeActionError(err, { no: 'Kunne ikke publisere utkastet.', en: 'Could not publish the draft.' }),
+      )
+    } finally {
+      setBusySkillId(null)
+    }
+  }
+
+  const handleDiscardDraft = async (skill: Skill) => {
+    const id = orgId()
+    if (!id || busySkillId()) return
+    if (
+      typeof window !== 'undefined' &&
+      !window.confirm(i18n.tr(`Forkaste utkastet til «${skill.name}»?`, `Discard the draft of “${skill.name}”?`))
+    ) {
+      return
+    }
+    setBusySkillId(skill.id)
+    setActionError(null)
+    try {
+      await discardSkillDraft(id, skill.id)
+      await refetch()
+    } catch (err) {
+      setActionError(
+        translateApiError(err, i18n.tr, { no: 'Kunne ikke forkaste utkastet.', en: 'Could not discard the draft.' }),
+      )
+    } finally {
+      setBusySkillId(null)
+    }
+  }
+
+  // A restore fills the draft only; the history closes so the row shows the draft to publish.
+  const handleRestore = async (skill: Skill, version: number) => {
+    const id = orgId()
+    if (!id) return
+    setActionError(null)
+    try {
+      await restoreSkillVersion(id, skill.id, version)
+      setHistorySkill(null)
+      await refetch()
+    } catch (err) {
+      setActionError(
+        translateApiError(err, i18n.tr, {
+          no: 'Kunne ikke gjenopprette versjonen.',
+          en: 'Could not restore the version.',
+        }),
+      )
+    }
+  }
+
   const handleDelete = async (skill: Skill) => {
     const id = orgId()
     if (!id || busySkillId()) return
@@ -496,6 +597,18 @@ export function SkillsSection() {
                               {' '}
                               <span class="verevon-trust-chip">{i18n.tr('Lært av Verevon', 'Learned by Verevon')}</span>
                             </Show>
+                            <Show when={hasDraft(skill)}>
+                              {' '}
+                              <span
+                                class="verevon-trust-chip"
+                                title={i18n.tr(
+                                  'Endringer som ikke er publisert. Samtaler bruker fortsatt den publiserte teksten.',
+                                  'Unpublished changes. Conversations still use the published text.',
+                                )}
+                              >
+                                {i18n.tr('Utkast', 'Draft')}
+                              </span>
+                            </Show>
                             <Show when={hasVersion(skill)}>
                               {' '}
                               <span
@@ -527,6 +640,25 @@ export function SkillsSection() {
                         </div>
                         <Show when={canChange(skill)}>
                           <div>
+                            <Show when={hasDraft(skill)}>
+                              <SettingsButton
+                                settingsSize="sm"
+                                variant="primary"
+                                disabled={busySkillId() === skill.id}
+                                onClick={() => void handlePublish(skill)}
+                                aria-label={i18n.tr(`Publiser utkastet til ${skill.name}`, `Publish the draft of ${skill.name}`)}
+                              >
+                                {i18n.tr('Publiser', 'Publish')}
+                              </SettingsButton>{' '}
+                              <SettingsButton
+                                settingsSize="sm"
+                                disabled={busySkillId() === skill.id}
+                                onClick={() => void handleDiscardDraft(skill)}
+                                aria-label={i18n.tr(`Forkast utkastet til ${skill.name}`, `Discard the draft of ${skill.name}`)}
+                              >
+                                {i18n.tr('Forkast utkast', 'Discard draft')}
+                              </SettingsButton>{' '}
+                            </Show>
                             <Show when={canPromote(skill)}>
                               <SettingsButton
                                 settingsSize="sm"
@@ -709,7 +841,16 @@ export function SkillsSection() {
 
       <Show when={historySkill()}>
         {(skill) => (
-          <SkillHistoryDrawer orgId={orgId()} skill={skill()} onClose={() => setHistorySkill(null)} />
+          <SkillHistoryDrawer
+            orgId={orgId()}
+            skill={skill()}
+            onClose={() => setHistorySkill(null)}
+            onRestore={
+              draftsEnabled() && canChange(skill()) && skill().review_state !== 'proposed'
+                ? (version) => handleRestore(skill(), version)
+                : undefined
+            }
+          />
         )}
       </Show>
 

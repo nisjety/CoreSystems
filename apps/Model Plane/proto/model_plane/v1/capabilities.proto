@@ -354,6 +354,11 @@ message SkillBundleSummary {
 // Request to read one skill bundle manifest, by skill ID.
 message GetSkillBundleManifestRequest {
   string skill_id = 1;
+  // SHA-256 manifest digest of the bundle to read (EP-11 S5): a run pinned to an older skill
+  // version names that version's bundle_sha256 and reads its own files. Empty reads the live
+  // bundle, as before. Honoured only while capability-core's SKILL_BUNDLE_RETENTION is on;
+  // otherwise ignored and the live bundle is read. Additive.
+  string manifest_sha256 = 2;
 }
 
 // Manifest of one skill bundle: its files with their digests and sizes.

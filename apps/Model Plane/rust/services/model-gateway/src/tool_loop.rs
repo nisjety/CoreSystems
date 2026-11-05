@@ -3266,17 +3266,111 @@ async fn pinned_skill_recovery(
     )))
 }
 
+/// Which bundle `skill_file` reads for a skill in this run (EP-11 S5).
+#[derive(Debug, PartialEq, Eq)]
+enum PinnedBundle {
+    /// The live bundle: pins off, no pin for this skill in this run, or the skill
+    /// unchanged since the run pinned it.
+    Live,
+    /// The bundle the pinned version named, by its manifest digest.
+    At(String),
+    /// The pinned version had no bundle.
+    NoBundle,
+    /// The pinned version no longer exists (the skill was deleted or erased).
+    Gone,
+}
+
+/// Whether the skill moved since the run pinned it, so the pinned version's
+/// bundle must be looked up. A pin without a version (a builtin, or a row from
+/// before versions) has nothing to look up.
+fn pin_moved(
+    pin: &mp_contracts::model_plane::v1::SkillPin,
+    skill: &mp_contracts::model_plane::v1::Skill,
+) -> bool {
+    pin.version > 0 && pin.skill_id == skill.id && pin.digest != skill.digest
+}
+
+/// The bundle a pinned version names, from session-core's answer.
+fn bundle_of_version(
+    gone: bool,
+    version: Option<&mp_contracts::model_plane::v1::AgentSkillVersion>,
+) -> PinnedBundle {
+    match version.filter(|_| !gone) {
+        None => PinnedBundle::Gone,
+        Some(version) if version.bundle_sha256.is_empty() => PinnedBundle::NoBundle,
+        Some(version) => PinnedBundle::At(version.bundle_sha256.clone()),
+    }
+}
+
+/// The bundle `skill_file` reads for `skill` in this run (EP-11 S5): the live one
+/// unless the run pinned a version of the skill that has since changed, in which
+/// case the bundle that version named. Off (`MODEL_GATEWAY_SKILL_PINS` unset) it is
+/// always the live one, with no read. A failed version read is an error, never the
+/// live bundle, because the live files may not be the ones the run started with.
+async fn pinned_bundle(
+    state: &AppState,
+    org_id: &str,
+    run_id: &str,
+    session_bearer: &str,
+    skill: &mp_contracts::model_plane::v1::Skill,
+) -> Result<PinnedBundle, &'static str> {
+    use mp_contracts::model_plane::v1::GetAgentSkillVersionRequest;
+
+    if !crate::skills::skill_pins_enabled() {
+        return Ok(PinnedBundle::Live);
+    }
+    let Some(pin) = crate::chat_turn_registry::run_pins().pin(org_id, run_id, &skill.id) else {
+        return Ok(PinnedBundle::Live);
+    };
+    if !pin_moved(&pin, skill) {
+        return Ok(PinnedBundle::Live);
+    }
+    let request = with_authorization(
+        GetAgentSkillVersionRequest {
+            org_id: org_id.to_owned(),
+            skill_id: pin.skill_id.clone(),
+            version: pin.version,
+            for_user_id: String::new(),
+        },
+        session_bearer,
+    );
+    match state
+        .skill_version_client
+        .clone()
+        .get_agent_skill_version(request)
+        .await
+    {
+        Ok(response) => {
+            let response = response.into_inner();
+            Ok(bundle_of_version(response.gone, response.version.as_ref()))
+        }
+        Err(error) => {
+            tracing::warn!(%error, %org_id, skill_id = %pin.skill_id, version = pin.version, "skill_file: pinned version read failed");
+            Err("skill_file could not read the version of this skill this run used right now")
+        }
+    }
+}
+
+/// What `skill_file` says when the bundle of the version this run pinned is not
+/// kept any more. The model must not read the current files as if they were it.
+const PINNED_BUNDLE_GONE: &str = "the bundle of the version of this skill this run used is no \
+     longer available; do not guess at its files";
+
 /// `skill_file`: one bounded read of one file of a skill's bundle (WS19-S7).
 ///
 /// Every refusal that needs no I/O comes first (the switch, the name, the path,
 /// the credential), so a bad call costs no capability-core read. The path is
 /// checked against the bundle's own manifest, so only a file the bundle holds can
-/// be read, and bytes whose digest differs from the manifest are refused.
+/// be read, and bytes whose digest differs from the manifest are refused. A run
+/// that pinned an older version of the skill reads that version's bundle (EP-11 S5).
+#[allow(clippy::too_many_arguments)]
 async fn skill_file_outcome(
     state: &AppState,
     enabled: bool,
     org_id: &str,
     user_id: &str,
+    run_id: &str,
+    session_bearer: &str,
     capability_bearer: Option<&str>,
     call: &ToolCall,
 ) -> ToolOutcome {
@@ -3325,24 +3419,50 @@ async fn skill_file_outcome(
             "no skill by that name is available to this user; use a skill name exactly as its block shows it",
         ));
     };
+    let no_bundle = || {
+        answer(crate::skills::render_bundle_status(
+            "no_bundle",
+            &skill.name,
+            "this skill has no bundle; its instructions are all there is",
+        ))
+    };
+    let pinned_gone = || {
+        answer(crate::skills::render_bundle_status(
+            "not_available",
+            &skill.name,
+            PINNED_BUNDLE_GONE,
+        ))
+    };
+    let pinned = match pinned_bundle(state, org_id, run_id, session_bearer, &skill).await {
+        Ok(PinnedBundle::Live) => String::new(),
+        Ok(PinnedBundle::At(digest)) => digest,
+        Ok(PinnedBundle::NoBundle) => return no_bundle(),
+        Ok(PinnedBundle::Gone) => return pinned_gone(),
+        Err(message) => return err_outcome(call, message),
+    };
     let manifest = match state
         .capability_client
         .clone()
         .get_skill_bundle_manifest(with_authorization(
             GetSkillBundleManifestRequest {
                 skill_id: skill.id.clone(),
+                manifest_sha256: pinned.clone(),
             },
             bearer,
         ))
         .await
     {
+        // A capability-core that does not keep bundles answers with the live one: that is
+        // not the pinned version's, so it is not read.
+        Ok(response) if !pinned.is_empty() && response.get_ref().manifest_sha256 != pinned => {
+            return pinned_gone();
+        }
         Ok(response) => response.into_inner(),
+        Err(status) if status.code() == tonic::Code::NotFound && !pinned.is_empty() => {
+            return pinned_gone();
+        }
         Err(status) if status.code() == tonic::Code::NotFound => {
-            return answer(crate::skills::render_bundle_status(
-                "no_bundle",
-                &skill.name,
-                "this skill has no bundle; its instructions are all there is",
-            ));
+            return no_bundle();
         }
         Err(status) => {
             tracing::warn!(code = ?status.code(), %org_id, "skill_file: bundle manifest read failed");
@@ -4715,6 +4835,7 @@ async fn dispatch_tool_with_cost(
                     enabled_only: false,
                     for_user_id: String::new(),
                     kinds: Vec::new(),
+                    thread_id: String::new(),
                 },
                 session_bearer,
             );
@@ -4778,6 +4899,8 @@ async fn dispatch_tool_with_cost(
                 mp_contracts::skill_bundle::enabled(),
                 org_id,
                 user_id,
+                run_id,
+                session_bearer,
                 capability_bearer,
                 call,
             )
@@ -16132,6 +16255,8 @@ mod tests {
             true,
             "org_test",
             "user_test",
+            "run_test",
+            "session-bearer",
             Some("capability-bearer"),
             &tool_call(
                 "skill_file",
@@ -16155,6 +16280,8 @@ mod tests {
             false,
             "org_test",
             "user_test",
+            "run_test",
+            "session-bearer",
             Some("capability-bearer"),
             &tool_call("skill_file", r#"{"skill":"Deploy Runbook"}"#),
         )
@@ -16173,6 +16300,8 @@ mod tests {
             true,
             "org_test",
             "user_test",
+            "run_test",
+            "session-bearer",
             None,
             &tool_call("skill_file", r#"{"skill":"Deploy Runbook"}"#),
         )
@@ -16193,6 +16322,8 @@ mod tests {
             true,
             "org_test",
             "user_test",
+            "run_test",
+            "session-bearer",
             Some("capability-bearer"),
             &tool_call("skill_file", r#"{"skill":"Deploy Runbook"}"#),
         )
@@ -16200,6 +16331,65 @@ mod tests {
         assert!(outcome.error.is_none(), "{:?}", outcome.error);
         let output: serde_json::Value = serde_json::from_str(&outcome.output).expect("valid JSON");
         assert_eq!(output["status"], "not_found");
+    }
+
+    /// EP-11 S5: a run that pinned a version of a skill that has since changed
+    /// reads the bundle that version named; an unchanged skill, a builtin pin and
+    /// another skill's pin read the live bundle.
+    #[test]
+    fn skill_file_reads_pinned_bundle() {
+        use mp_contracts::model_plane::v1::{AgentSkillVersion, Skill, SkillPin};
+
+        let skill = Skill {
+            id: "sk-1".into(),
+            name: "Deploy Runbook".into(),
+            version: 3,
+            digest: "c".repeat(64),
+            ..Default::default()
+        };
+        let pin = |skill_id: &str, version: i32, digest: String| SkillPin {
+            skill_id: skill_id.into(),
+            version,
+            digest,
+            source: "matched".into(),
+        };
+        assert!(pin_moved(&pin("sk-1", 2, "b".repeat(64)), &skill));
+        assert!(!pin_moved(&pin("sk-1", 3, "c".repeat(64)), &skill));
+        assert!(!pin_moved(&pin("sk-1", 0, "b".repeat(64)), &skill));
+        assert!(!pin_moved(&pin("sk-2", 2, "b".repeat(64)), &skill));
+
+        let version = |bundle: &str| AgentSkillVersion {
+            skill_id: "sk-1".into(),
+            version: 2,
+            bundle_sha256: bundle.into(),
+            ..Default::default()
+        };
+        let kept_bundle = "a".repeat(64);
+        assert_eq!(
+            bundle_of_version(false, Some(&version(&kept_bundle))),
+            PinnedBundle::At(kept_bundle.clone())
+        );
+        assert_eq!(bundle_of_version(false, Some(&version(""))), PinnedBundle::NoBundle);
+        assert_eq!(bundle_of_version(true, Some(&version(&kept_bundle))), PinnedBundle::Gone);
+        assert_eq!(bundle_of_version(false, None), PinnedBundle::Gone);
+    }
+
+    /// With pins off the live bundle is read and no version is looked up, so a
+    /// deployment without `MODEL_GATEWAY_SKILL_PINS` reads bundles as before.
+    #[tokio::test]
+    async fn skill_file_reads_the_live_bundle_while_pins_are_off() {
+        if crate::skills::skill_pins_enabled() {
+            return;
+        }
+        let state = crate::state::AppState::new();
+        let skill = mp_contracts::model_plane::v1::Skill {
+            id: "sk-1".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            pinned_bundle(&state, "org_test", "run_test", "session-bearer", &skill).await,
+            Ok(PinnedBundle::Live)
+        );
     }
 
     #[test]
