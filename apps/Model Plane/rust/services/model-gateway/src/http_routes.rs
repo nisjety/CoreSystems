@@ -461,6 +461,10 @@ fn authed_routes_with(agent_api: bool) -> Router<AppState> {
         // bounded multi-step browser-agent loop; progress streams over the
         // existing `/v1/runs/:run_id/events` route above.
         .merge(crate::browser_run::router())
+        // A durable navigation run for the Verevon assistant (behind its flag).
+        .merge(crate::assistant_navigation::router(
+            crate::assistant_navigation::enabled(),
+        ))
         // A signed-in user's browser grant (issue / release); the broker mints it.
         .merge(crate::browser_grants::router())
         // Space room routes /v1/spaces/* (one file per feature under space_routes/).

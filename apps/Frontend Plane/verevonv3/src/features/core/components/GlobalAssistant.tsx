@@ -38,6 +38,9 @@ export type AssistantAgentView = {
 export type AssistantNavigationAgentView = {
   status: 'idle' | 'thinking' | 'guiding' | 'stopped' | 'error'
   error: string | null
+  /** The durable navigation run (and its thread) from model-gateway, when known. */
+  runId?: string | null
+  threadId?: string | null
 }
 
 /** The shared Home composer, presented as a non-modal dock across the app. */
@@ -292,6 +295,9 @@ export function GlobalAssistant(props: {
                 <button type="button" onClick={() => props.onStopNavigation?.()}>{i18n.tr('Stopp', 'Stop')}</button>
               </Show>
             </div>
+            <Show when={props.navigationAgent?.runId}>
+              <p role="status">{i18n.tr(`Kjøring ${props.navigationAgent?.runId}.`, `Run ${props.navigationAgent?.runId}.`)}</p>
+            </Show>
             <Show when={props.navigationAgent?.error}><p class="global-assistant__task-error" role="alert">{props.navigationAgent?.error}</p></Show>
           </div>
         </Show>

@@ -6,6 +6,9 @@ import { assistantBrowserTarget } from './assistant-browser-agent'
 export type AssistantNavigationAgentState = {
   status: 'idle' | 'thinking' | 'stopped' | 'error'
   error: string | null
+  /** The durable navigation run (and its thread) from model-gateway, when known. */
+  runId?: string | null
+  threadId?: string | null
 }
 
 /** The model proposes only. Public URLs must come from a trusted data source. */
@@ -41,7 +44,7 @@ const siteHost = (url: URL) => url.hostname.replace(/^www\./, '')
 const hasDestination = (url: URL) => url.pathname !== '/' || Boolean(url.search)
 
 type Dependencies = {
-  infer: (prompt: string, signal: AbortSignal) => Promise<{ content: string }>
+  infer: (prompt: string, signal: AbortSignal) => Promise<{ content: string; runId?: string | null; threadId?: string | null }>
   search?: (query: string, signal: AbortSignal) => Promise<WebSearchPayload>
 }
 type Active = { abort: AbortController; scope: string; cancelled: boolean }
@@ -97,11 +100,16 @@ export function createAssistantNavigationAgent(options: {
       if (!current() || run.cancelled) throw new Error(tr('Oppgaven ble stoppet.', 'The task was stopped.'))
     }
     let handedOff = false
-    publish({ status: 'thinking', error: null })
+    publish({ status: 'thinking', error: null, runId: null, threadId: null })
     try {
       const result = await api.infer(input, run.abort.signal)
       requireCurrent()
       if (!result || typeof result.content !== 'string') throw new Error(tr('Modellen returnerte et ugyldig svar.', 'The model returned an invalid response.'))
+      // The navigation classification is a durable run: surface its ids so the
+      // task can be followed in the Model Plane trace and audit.
+      if (result.runId || result.threadId) {
+        publish({ runId: result.runId ?? null, threadId: result.threadId ?? null })
+      }
       const action = parseAssistantTaskProposal(result.content)
       if (!action || action.type === 'unsupported') throw new Error(tr('Hvilken side eller nettside vil du at jeg skal jobbe med?', 'Which app page or website should I work with?'))
       if (action.type === 'assistant.navigation.guide') {

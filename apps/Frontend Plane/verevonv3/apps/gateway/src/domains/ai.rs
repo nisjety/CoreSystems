@@ -153,19 +153,10 @@ pub(crate) async fn assistant_navigation_with_switch(
         }
         Err(detail) => return shared::delegated_auth_unavailable(detail),
     };
-    let mut body = shared::normalized_model_body(
-        serde_json::json!({
-            "messages": [
-                { "role": "system", "content": ASSISTANT_NAVIGATION_INSTRUCTIONS },
-                { "role": "user", "content": prompt }
-            ],
-            "temperature": 0.0,
-            "max_tokens": 200
-        }),
-        &headers,
-    );
-    shared::apply_org_zdr_posture(&state, &user, &mut body).await;
-    let url = format!("{}/v1/ai/chat", state.model_gateway_url);
+    // The durable route owns the system instructions, sampling and ZDR
+    // posture; the gateway sends the prompt only and forwards the run ids.
+    let body = serde_json::json!({ "prompt": prompt });
+    let url = format!("{}/v1/ai/assistant-navigation", state.model_gateway_url);
     let (status, Json(response)) = shared::proxy_model_json_with_inference(
         &state,
         Method::POST,
@@ -192,10 +183,16 @@ pub(crate) async fn assistant_navigation_with_switch(
             )),
         );
     }
-    match response.get("content").and_then(Value::as_str) {
+    match response.pointer("/data/content").and_then(Value::as_str) {
         Some(content) if !content.is_empty() && content.len() <= 16 * 1024 => (
             status,
-            Json(serde_json::json!({"data": {"content": content}})),
+            Json(serde_json::json!({
+                "data": {
+                    "content": content,
+                    "run_id": response.pointer("/data/run_id"),
+                    "thread_id": response.pointer("/data/thread_id"),
+                }
+            })),
         ),
         _ => (
             StatusCode::BAD_GATEWAY,
@@ -410,11 +407,10 @@ mod tests {
                 .await;
         }
         Mock::given(method("POST"))
-            .and(path("/v1/ai/chat"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_json(json!({ "content": "{\"type\":\"unsupported\"}" })),
-            )
+            .and(path("/v1/ai/assistant-navigation"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": { "content": "{\"type\":\"unsupported\"}", "run_id": "run-nav-1", "thread_id": "thread-nav-1" }
+            })))
             .mount(&model_gateway)
             .await;
         (auth_core, org_core, model_gateway)
@@ -708,7 +704,7 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(body["error"]["code"], "assistant_navigation_unavailable");
-        assert!(forwarded_bodies(&model, "/v1/ai/chat").await.is_empty());
+        assert!(forwarded_bodies(&model, "/v1/ai/assistant-navigation").await.is_empty());
     }
 
     #[tokio::test]
@@ -737,7 +733,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-        assert!(forwarded_bodies(&model, "/v1/ai/chat").await.is_empty());
+        assert!(forwarded_bodies(&model, "/v1/ai/assistant-navigation").await.is_empty());
     }
 
     #[tokio::test]
@@ -760,19 +756,23 @@ mod tests {
                 .unwrap();
             let response: Value = serde_json::from_slice(&bytes).unwrap();
             assert_eq!(response["data"]["content"], "{\"type\":\"unsupported\"}");
+            assert_eq!(response["data"]["run_id"], "run-nav-1");
+            assert_eq!(response["data"]["thread_id"], "thread-nav-1");
         }
         let requests = model.received_requests().await.unwrap();
         let requests: Vec<_> = requests
             .iter()
-            .filter(|r| r.url.path() == "/v1/ai/chat")
+            .filter(|r| r.url.path() == "/v1/ai/assistant-navigation")
             .collect();
         assert_eq!(requests.len(), 2);
+        // The durable route owns the system prompt, sampling and ZDR posture:
+        // the gateway forwards the prompt only (ZDR is decided from the
+        // verified claims downstream, never from a gateway body flag).
         for request in requests {
             let body: Value = serde_json::from_slice(&request.body).unwrap();
-            assert_eq!(body["zdr"], true);
-            assert_eq!(body["messages"][0]["role"], "system");
-            assert_eq!(body["messages"][1]["content"], "Åpne kunnskap");
+            assert_eq!(body["prompt"], "Åpne kunnskap");
             assert!(body.get("tools").is_none());
+            assert!(body.get("zdr").is_none());
             assert_eq!(
                 request
                     .headers
@@ -814,7 +814,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
-        assert!(forwarded_bodies(&model, "/v1/ai/chat").await.is_empty());
+        assert!(forwarded_bodies(&model, "/v1/ai/assistant-navigation").await.is_empty());
     }
 
     #[tokio::test]
