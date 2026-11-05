@@ -16,6 +16,8 @@ interface ImportMetaEnv {
 	readonly VITE_ASSISTANT_DOCK_POSITION?: string;
 	/** "true" shows the browser tab context menu (select/new/close/open-outside). Default off. */
 	readonly VITE_BROWSER_TAB_MENU?: string;
+	/** "true" shows the bookmarks star and bar in BrowserChrome. Default off. */
+	readonly VITE_BROWSER_BOOKMARKS?: string;
 	/** "1" compiles in the product-scene runtime (src/demo). Never set in production. */
 	readonly VITE_SCENE_MODE?: string;
 	readonly VITE_PLAN_EXECUTE_ENABLED?: string;

@@ -28,6 +28,7 @@ import {
   Sparkles,
   Square,
   SquareMousePointer,
+  Star,
   Terminal,
   TextCursorInput,
   Timer,
@@ -95,6 +96,11 @@ import { BrowserNavigationError } from '@/features/browser/omnibox/BrowserNaviga
 import type { BrowserNavigationFailure } from '@/features/browser/session/browser-navigation-error'
 import { BrowserSearchResults } from '@/features/browser/omnibox/BrowserSearchResults'
 import { currentOmniboxHistoryKey, recordOmniboxVisit } from '@/features/browser/omnibox/omnibox-history'
+import {
+  isBookmarked,
+  toggleBrowserBookmark,
+  useBrowserBookmarks,
+} from '@/features/browser/bookmarks/browser-bookmarks'
 import {
   browserOmniboxSearchEnabled,
   resolveOmniboxIntent,
@@ -567,6 +573,9 @@ export function BrowserChrome(props: {
   // Tab context menu (WS9 tab strip, behind VITE_BROWSER_TAB_MENU=true).
   const [tabMenu, setTabMenu] = createSignal<{ tabId: string } | null>(null)
   const tabMenuEnabled = () => import.meta.env.VITE_BROWSER_TAB_MENU === 'true'
+  // Bookmarks (F-t2-068 local slice, behind VITE_BROWSER_BOOKMARKS=true).
+  const bookmarks = useBrowserBookmarks()
+  const bookmarksEnabled = () => import.meta.env.VITE_BROWSER_BOOKMARKS === 'true'
   const tabMenuTab = () => {
     const menu = tabMenu()
     return menu ? session().tabs.find((tab) => tab.tabId === menu.tabId) ?? null : null
@@ -583,6 +592,13 @@ export function BrowserChrome(props: {
     }
   }
   const closeTabMenu = () => setTabMenu(null)
+  const currentPageUrl = () => session().url ?? ''
+  const toggleBookmark = () => {
+    if (!bookmarksEnabled()) return
+    const url = tabOutsideUrl({ tabId: '', active: true, url: currentPageUrl() })
+    if (!url) return
+    toggleBrowserBookmark({ url, label: session().title ?? '' })
+  }
   let addressInputRef: HTMLInputElement | undefined
   let pendingObservedAddress: string | null = null
   let lastWheelDispatchMs = 0
@@ -1481,6 +1497,23 @@ export function BrowserChrome(props: {
         </div>
         {props.frameControls}
       </div>
+      <Show when={bookmarksEnabled() && bookmarks().length > 0}>
+        <div class="knowledge-browser-bookmarks" aria-label="Bokmerker">
+          <For each={bookmarks()}>
+            {(bookmark) => (
+              <button
+                type="button"
+                class="knowledge-browser-bookmarks__item"
+                title={bookmark.url}
+                disabled={controlsDisabled()}
+                onClick={() => runAction({ type: 'navigate', url: bookmark.url })}
+              >
+                <Star class="size-3" aria-hidden="true" /> {bookmark.label}
+              </button>
+            )}
+          </For>
+        </div>
+      </Show>
 
       <Show when={props.browserNavigationError}>
         <BrowserNavigationError
@@ -1528,6 +1561,18 @@ export function BrowserChrome(props: {
               onClick={() => reloadFromChrome(true)}
             >
               <RefreshCw class="size-3.5" />
+            </button>
+          </Show>
+          <Show when={bookmarksEnabled()}>
+            <button
+              type="button"
+              aria-label={isBookmarked(currentPageUrl()) ? 'Fjern bokmerke' : 'Legg til bokmerke'}
+              aria-pressed={isBookmarked(currentPageUrl()) ? 'true' : 'false'}
+              title={isBookmarked(currentPageUrl()) ? 'Fjern bokmerke' : 'Legg til bokmerke'}
+              disabled={controlsDisabled() || !currentPageUrl()}
+              onClick={toggleBookmark}
+            >
+              <Star class="size-3.5" />
             </button>
           </Show>
         </div>
