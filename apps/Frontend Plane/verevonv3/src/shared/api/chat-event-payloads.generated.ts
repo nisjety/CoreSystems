@@ -50,6 +50,13 @@ export type ChatEventPayloads = {
     request_id: string
     scope: string
   }
+  /** Rust variants: ConnectorSuggestion. */
+  connector_suggestion: {
+    provider: string
+    reason: string
+    request_id: string
+    suggestion_id: string
+  }
   /** Rust variants: ContextChange. */
   context_change: {
     change: string

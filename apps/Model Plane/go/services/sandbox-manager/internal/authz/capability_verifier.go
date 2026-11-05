@@ -140,6 +140,8 @@ type CapabilityExpectation struct {
 	SpaceRef  string
 	SubjectID string
 	Now       time.Time
+	// GrantEgressAtOff is SANDBOX_MANAGER_EGRESS_TIERS (EP-9 E3, D-E2): an egress-capable claim the decision does not grant verifies at off instead of being refused, as an ungranted process claim does.
+	GrantEgressAtOff bool
 }
 
 // ProcessesBackgroundRegistry is the substrate profile value a backend
@@ -222,7 +224,7 @@ func (v *SpaceCapabilityVerifier) Verify(token, claimsJSON string, expect Capabi
 	if decision.PayloadDigest != expectedCapabilityPayloadDigest(decision, claims) {
 		return VerifiedCapability{}, fmt.Errorf("Space capability decision payload does not bind this claim")
 	}
-	egressTier, err := verifiedEgressTier(decision, claims)
+	egressTier, err := verifiedEgressTier(decision, claims, expect.GrantEgressAtOff)
 	if err != nil {
 		return VerifiedCapability{}, err
 	}
@@ -245,10 +247,9 @@ func (v *SpaceCapabilityVerifier) Verify(token, claimsJSON string, expect Capabi
 // v2 refuses an unknown claim, an unknown or repeated tier permission, the
 // bare permission (Control never signs it in v2), a grant above the claim, any
 // grant under zero data retention, and an allow-list that does not match the
-// grant. An egress-capable claim with no tier granted is still refused
-// outright, as in v1; granting such a lease at off is decision D-E2, which
-// lands with E3 behind its own switch.
-func verifiedEgressTier(decision spaceCapabilityDecision, claims SpaceCapabilityClaims) (string, error) {
+// grant. An egress-capable claim with no tier granted is refused outright, as
+// in v1, unless grantAtOff (D-E2): then it verifies at off.
+func verifiedEgressTier(decision spaceCapabilityDecision, claims SpaceCapabilityClaims, grantAtOff bool) (string, error) {
 	granted := EgressTierOff
 	for _, permission := range decision.Permissions {
 		tier, isTier := strings.CutPrefix(permission, "space:egress:")
@@ -267,7 +268,7 @@ func verifiedEgressTier(decision spaceCapabilityDecision, claims SpaceCapability
 		if granted != EgressTierOff || len(claims.EgressAllowlist) > 0 {
 			return "", fmt.Errorf("Space capability decision carries egress fields its schema does not bind")
 		}
-		if claims.Egress != egressDisabledByDefault && !hasPermission(decision.Permissions, "space:egress") {
+		if claims.Egress != egressDisabledByDefault && !hasPermission(decision.Permissions, "space:egress") && !grantAtOff {
 			return "", fmt.Errorf("Space capability decision does not grant egress for the claimed profile")
 		}
 		return EgressTierOff, nil
@@ -292,7 +293,7 @@ func verifiedEgressTier(decision spaceCapabilityDecision, claims SpaceCapability
 	if (granted == EgressTierAllowlist) != (len(claims.EgressAllowlist) > 0) {
 		return "", fmt.Errorf("Space capability decision allow-list does not match the granted egress tier")
 	}
-	if claimRank > 0 && granted == EgressTierOff {
+	if claimRank > 0 && granted == EgressTierOff && !grantAtOff {
 		return "", fmt.Errorf("Space capability decision does not grant egress for the claimed profile")
 	}
 	return granted, nil

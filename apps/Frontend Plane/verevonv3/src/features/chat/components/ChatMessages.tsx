@@ -1,3 +1,5 @@
+import { ConnectorSuggestionCard } from './ConnectorSuggestionCard'
+import type { ConnectIntent } from '@/shared/integrations/connect-intent'
 import { ForkAction, threadForkEnabled } from './ForkAction'
 import { ExportConversationAction, threadExportEnabled } from './ExportConversationAction'
 import { formatResetTime, humanizeToolName, refreshResetTimeWording, workStepLabel } from './chat-normalizers'
@@ -195,6 +197,20 @@ import { confirmStepUp } from '@/shared/approvals/step-up'
 import { createPlayingSpeechId, speechPlayer } from '@/features/voice/speech-playback'
 import { readAloudBlockedMessage, readAloudUnavailableMessage } from '@/features/voice/voice-mode-state'
 
+/**
+ * What an assistant turn's connected-app suggestion card needs from the page (EP-10 S8, S9). Absent where the
+ * surface offers no card.
+ */
+export type ConnectorSuggestionWiring = {
+  orgId?: string
+  /** "Use it for this question": select the account for the turn and send the question again. */
+  onUse: (suggestion: { suggestionId: string; provider: string }, connectionId: string) => void
+  connectTurn?: () => { threadId: string; prompt: string } | null
+  pendingConnectIntent?: () => ConnectIntent | null
+  resumeConnectIntent?: (intent: ConnectIntent, connectionId: string, providerLabel: string) => boolean
+  dismissConnectIntent?: () => void
+}
+
 export function MessageBlock(props: {
   copied: boolean
   message: ChatTurn
@@ -263,6 +279,8 @@ export function MessageBlock(props: {
   docked?: DockedNodes
   /** This turn's settled-turn fold (EP-14 S1), from the page. Absent when the switch is off or nothing folds. */
   settledFold?: SettledFold
+  /** The connected-app suggestion card's wiring (EP-10 S8); see `ConnectorSuggestionWiring`. */
+  connectorSuggestion?: ConnectorSuggestionWiring
 }) {
   // `<For>` invokes its mapper untracked in Solid 2. Read the store-backed
   // role through a memo so the conditional branch is established in a tracked
@@ -585,6 +603,8 @@ export function AssistantMessage(props: {
   docked?: DockedNodes
   /** See `MessageBlock`'s doc. */
   settledFold?: SettledFold
+  /** See `MessageBlock`'s doc. */
+  connectorSuggestion?: ConnectorSuggestionWiring
 }) {
   const i18n = useI18n()
   const [reaction, setReaction] = createSignal<'up' | 'down' | null>(null)
@@ -896,6 +916,22 @@ export function AssistantMessage(props: {
             />
           </Show>
         </div>
+        {/* EP-10 S8: at most one connected-app suggestion per turn; the card hides itself in a Space or temporary chat. */}
+        <Show when={props.connectorSuggestion ? props.message.connectorSuggestion : undefined}>
+          {(suggestion) => (
+            <ConnectorSuggestionCard
+              suggestion={suggestion()}
+              orgId={props.connectorSuggestion?.orgId ?? ''}
+              spaceScoped={props.spaceScoped}
+              temporary={props.temporaryChat}
+              onUse={(connectionId) => props.connectorSuggestion?.onUse(suggestion(), connectionId)}
+              connectTurn={props.connectorSuggestion?.connectTurn}
+              pendingConnectIntent={props.connectorSuggestion?.pendingConnectIntent}
+              resumeConnectIntent={props.connectorSuggestion?.resumeConnectIntent}
+              dismissConnectIntent={props.connectorSuggestion?.dismissConnectIntent}
+            />
+          )}
+        </Show>
         <Show when={!waiting() && !errored()}>
           <div class="verevon-chat-message-actions">
             <Show when={props.pinned}>

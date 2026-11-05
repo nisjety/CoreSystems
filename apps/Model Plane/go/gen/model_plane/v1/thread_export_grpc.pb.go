@@ -20,6 +20,7 @@ const _ = grpc.SupportPackageIsVersion9
 
 const (
 	ThreadExportService_ExportThread_FullMethodName = "/model_plane.v1.ThreadExportService/ExportThread"
+	ThreadExportService_ImportThread_FullMethodName = "/model_plane.v1.ThreadExportService/ImportThread"
 )
 
 // ThreadExportServiceClient is the client API for ThreadExportService service.
@@ -31,6 +32,8 @@ const (
 type ThreadExportServiceClient interface {
 	// Read one bounded export of a thread the caller owns.
 	ExportThread(ctx context.Context, in *ExportThreadRequest, opts ...grpc.CallOption) (*ExportThreadResponse, error)
+	// EP-12 S15. Import an export file into a new thread the caller owns.
+	ImportThread(ctx context.Context, in *ImportThreadRequest, opts ...grpc.CallOption) (*ImportThreadResponse, error)
 }
 
 type threadExportServiceClient struct {
@@ -51,6 +54,16 @@ func (c *threadExportServiceClient) ExportThread(ctx context.Context, in *Export
 	return out, nil
 }
 
+func (c *threadExportServiceClient) ImportThread(ctx context.Context, in *ImportThreadRequest, opts ...grpc.CallOption) (*ImportThreadResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ImportThreadResponse)
+	err := c.cc.Invoke(ctx, ThreadExportService_ImportThread_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // ThreadExportServiceServer is the server API for ThreadExportService service.
 // All implementations must embed UnimplementedThreadExportServiceServer
 // for forward compatibility.
@@ -60,6 +73,8 @@ func (c *threadExportServiceClient) ExportThread(ctx context.Context, in *Export
 type ThreadExportServiceServer interface {
 	// Read one bounded export of a thread the caller owns.
 	ExportThread(context.Context, *ExportThreadRequest) (*ExportThreadResponse, error)
+	// EP-12 S15. Import an export file into a new thread the caller owns.
+	ImportThread(context.Context, *ImportThreadRequest) (*ImportThreadResponse, error)
 	mustEmbedUnimplementedThreadExportServiceServer()
 }
 
@@ -72,6 +87,9 @@ type UnimplementedThreadExportServiceServer struct{}
 
 func (UnimplementedThreadExportServiceServer) ExportThread(context.Context, *ExportThreadRequest) (*ExportThreadResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ExportThread not implemented")
+}
+func (UnimplementedThreadExportServiceServer) ImportThread(context.Context, *ImportThreadRequest) (*ImportThreadResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ImportThread not implemented")
 }
 func (UnimplementedThreadExportServiceServer) mustEmbedUnimplementedThreadExportServiceServer() {}
 func (UnimplementedThreadExportServiceServer) testEmbeddedByValue()                             {}
@@ -112,6 +130,24 @@ func _ThreadExportService_ExportThread_Handler(srv interface{}, ctx context.Cont
 	return interceptor(ctx, in, info, handler)
 }
 
+func _ThreadExportService_ImportThread_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ImportThreadRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ThreadExportServiceServer).ImportThread(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ThreadExportService_ImportThread_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ThreadExportServiceServer).ImportThread(ctx, req.(*ImportThreadRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // ThreadExportService_ServiceDesc is the grpc.ServiceDesc for ThreadExportService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -122,6 +158,10 @@ var ThreadExportService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ExportThread",
 			Handler:    _ThreadExportService_ExportThread_Handler,
+		},
+		{
+			MethodName: "ImportThread",
+			Handler:    _ThreadExportService_ImportThread_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

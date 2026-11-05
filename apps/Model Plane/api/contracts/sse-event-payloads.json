@@ -233,6 +233,38 @@
         }
       }
     },
+    "connector_suggestion": {
+      "family": null,
+      "variants": [
+        "ConnectorSuggestion"
+      ],
+      "keys": {
+        "provider": {
+          "types": [
+            "string"
+          ],
+          "presence": "always"
+        },
+        "reason": {
+          "types": [
+            "string"
+          ],
+          "presence": "always"
+        },
+        "request_id": {
+          "types": [
+            "string"
+          ],
+          "presence": "always"
+        },
+        "suggestion_id": {
+          "types": [
+            "string"
+          ],
+          "presence": "always"
+        }
+      }
+    },
     "context_change": {
       "family": null,
       "variants": [

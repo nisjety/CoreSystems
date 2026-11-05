@@ -433,6 +433,141 @@ func (x *ExportedRun) GetCreatedAt() *timestamppb.Timestamp {
 	return nil
 }
 
+// EP-12 S15. Import one `verevon.thread-export.v1` file into a new thread the
+// caller owns. The file is untrusted input: only its user and assistant turn
+// text is kept, and every kept turn is stored as a user-role message that
+// quotes the original text under a fixed header, so imported text reaches a
+// model as quoted data and never as the model's own earlier output. Each
+// stored message carries `metadata.imported{digest, exported_at,
+// source_org_match, original_role}`. Refusals: a zero-retention or waived
+// caller (`zdr_feature_not_supported`, feature `conversation_import`); a
+// service principal (`permission_denied`); a file that is not a v1 export or
+// breaks a cap (`invalid_argument` `thread_import_invalid`, the reason in the
+// `x-mp-error-reason` trailer). Caps: 2 MiB file, 400 turns, 64 KiB per turn.
+// Switch `SESSION_THREAD_IMPORT_ENABLED`, default off; while it is off the RPC
+// answers `unavailable` `thread_import_disabled`.
+type ImportThreadRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The export file's text, exactly as downloaded: a JSON
+	// `verevon.thread-export.v1` document of at most 2 MiB.
+	ExportJson string `protobuf:"bytes,1,opt,name=export_json,json=exportJson,proto3" json:"export_json,omitempty"`
+	// The new thread's title; empty takes the title the file names. Either is
+	// stored as "Importert: <title>".
+	Title         string `protobuf:"bytes,2,opt,name=title,proto3" json:"title,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ImportThreadRequest) Reset() {
+	*x = ImportThreadRequest{}
+	mi := &file_model_plane_v1_thread_export_proto_msgTypes[4]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ImportThreadRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ImportThreadRequest) ProtoMessage() {}
+
+func (x *ImportThreadRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_thread_export_proto_msgTypes[4]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ImportThreadRequest.ProtoReflect.Descriptor instead.
+func (*ImportThreadRequest) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_thread_export_proto_rawDescGZIP(), []int{4}
+}
+
+func (x *ImportThreadRequest) GetExportJson() string {
+	if x != nil {
+		return x.ExportJson
+	}
+	return ""
+}
+
+func (x *ImportThreadRequest) GetTitle() string {
+	if x != nil {
+		return x.Title
+	}
+	return ""
+}
+
+// EP-12 S15. The thread an import created.
+type ImportThreadResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The new thread, owned by the caller.
+	ThreadId string `protobuf:"bytes,1,opt,name=thread_id,json=threadId,proto3" json:"thread_id,omitempty"`
+	// How many turns were stored in the new thread.
+	ImportedMessages uint32 `protobuf:"varint,2,opt,name=imported_messages,json=importedMessages,proto3" json:"imported_messages,omitempty"`
+	// How many things in the file were left out: each turn whose role is not
+	// user or assistant, each turn without text, and each non-empty artifacts,
+	// citations or metadata field of a kept turn.
+	Dropped       uint32 `protobuf:"varint,3,opt,name=dropped,proto3" json:"dropped,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ImportThreadResponse) Reset() {
+	*x = ImportThreadResponse{}
+	mi := &file_model_plane_v1_thread_export_proto_msgTypes[5]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ImportThreadResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ImportThreadResponse) ProtoMessage() {}
+
+func (x *ImportThreadResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_thread_export_proto_msgTypes[5]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ImportThreadResponse.ProtoReflect.Descriptor instead.
+func (*ImportThreadResponse) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_thread_export_proto_rawDescGZIP(), []int{5}
+}
+
+func (x *ImportThreadResponse) GetThreadId() string {
+	if x != nil {
+		return x.ThreadId
+	}
+	return ""
+}
+
+func (x *ImportThreadResponse) GetImportedMessages() uint32 {
+	if x != nil {
+		return x.ImportedMessages
+	}
+	return 0
+}
+
+func (x *ImportThreadResponse) GetDropped() uint32 {
+	if x != nil {
+		return x.Dropped
+	}
+	return 0
+}
+
 var File_model_plane_v1_thread_export_proto protoreflect.FileDescriptor
 
 const file_model_plane_v1_thread_export_proto_rawDesc = "" +
@@ -467,13 +602,22 @@ const file_model_plane_v1_thread_export_proto_rawDesc = "" +
 	"\finput_tokens\x18\x05 \x01(\x04R\vinputTokens\x12#\n" +
 	"\routput_tokens\x18\x06 \x01(\x04R\foutputTokens\x129\n" +
 	"\n" +
-	"created_at\x18\a \x01(\v2\x1a.google.protobuf.TimestampR\tcreatedAt*e\n" +
+	"created_at\x18\a \x01(\v2\x1a.google.protobuf.TimestampR\tcreatedAt\"L\n" +
+	"\x13ImportThreadRequest\x12\x1f\n" +
+	"\vexport_json\x18\x01 \x01(\tR\n" +
+	"exportJson\x12\x14\n" +
+	"\x05title\x18\x02 \x01(\tR\x05title\"z\n" +
+	"\x14ImportThreadResponse\x12\x1b\n" +
+	"\tthread_id\x18\x01 \x01(\tR\bthreadId\x12+\n" +
+	"\x11imported_messages\x18\x02 \x01(\rR\x10importedMessages\x12\x18\n" +
+	"\adropped\x18\x03 \x01(\rR\adropped*e\n" +
 	"\rExportProfile\x12\x1e\n" +
 	"\x1aEXPORT_PROFILE_UNSPECIFIED\x10\x00\x12\x17\n" +
 	"\x13EXPORT_PROFILE_FULL\x10\x01\x12\x1b\n" +
-	"\x17EXPORT_PROFILE_REDACTED\x10\x022p\n" +
+	"\x17EXPORT_PROFILE_REDACTED\x10\x022\xcb\x01\n" +
 	"\x13ThreadExportService\x12Y\n" +
-	"\fExportThread\x12#.model_plane.v1.ExportThreadRequest\x1a$.model_plane.v1.ExportThreadResponseB\xb9\x01\n" +
+	"\fExportThread\x12#.model_plane.v1.ExportThreadRequest\x1a$.model_plane.v1.ExportThreadResponse\x12Y\n" +
+	"\fImportThread\x12#.model_plane.v1.ImportThreadRequest\x1a$.model_plane.v1.ImportThreadResponseB\xb9\x01\n" +
 	"\x12com.model_plane.v1B\x11ThreadExportProtoP\x01Z;github.com/triodelab/model-plane/gen/go/model_plane/v1;mpv1\xa2\x02\x03MXX\xaa\x02\rModelPlane.V1\xca\x02\rModelPlane\\V1\xe2\x02\x19ModelPlane\\V1\\GPBMetadata\xea\x02\x0eModelPlane::V1b\x06proto3"
 
 var (
@@ -489,26 +633,30 @@ func file_model_plane_v1_thread_export_proto_rawDescGZIP() []byte {
 }
 
 var file_model_plane_v1_thread_export_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_model_plane_v1_thread_export_proto_msgTypes = make([]protoimpl.MessageInfo, 4)
+var file_model_plane_v1_thread_export_proto_msgTypes = make([]protoimpl.MessageInfo, 6)
 var file_model_plane_v1_thread_export_proto_goTypes = []any{
 	(ExportProfile)(0),            // 0: model_plane.v1.ExportProfile
 	(*ExportThreadRequest)(nil),   // 1: model_plane.v1.ExportThreadRequest
 	(*ExportThreadResponse)(nil),  // 2: model_plane.v1.ExportThreadResponse
 	(*ExportedMessage)(nil),       // 3: model_plane.v1.ExportedMessage
 	(*ExportedRun)(nil),           // 4: model_plane.v1.ExportedRun
-	(*timestamppb.Timestamp)(nil), // 5: google.protobuf.Timestamp
+	(*ImportThreadRequest)(nil),   // 5: model_plane.v1.ImportThreadRequest
+	(*ImportThreadResponse)(nil),  // 6: model_plane.v1.ImportThreadResponse
+	(*timestamppb.Timestamp)(nil), // 7: google.protobuf.Timestamp
 }
 var file_model_plane_v1_thread_export_proto_depIdxs = []int32{
 	0, // 0: model_plane.v1.ExportThreadRequest.profile:type_name -> model_plane.v1.ExportProfile
-	5, // 1: model_plane.v1.ExportThreadResponse.created_at:type_name -> google.protobuf.Timestamp
+	7, // 1: model_plane.v1.ExportThreadResponse.created_at:type_name -> google.protobuf.Timestamp
 	3, // 2: model_plane.v1.ExportThreadResponse.messages:type_name -> model_plane.v1.ExportedMessage
 	4, // 3: model_plane.v1.ExportThreadResponse.runs:type_name -> model_plane.v1.ExportedRun
-	5, // 4: model_plane.v1.ExportedMessage.created_at:type_name -> google.protobuf.Timestamp
-	5, // 5: model_plane.v1.ExportedRun.created_at:type_name -> google.protobuf.Timestamp
+	7, // 4: model_plane.v1.ExportedMessage.created_at:type_name -> google.protobuf.Timestamp
+	7, // 5: model_plane.v1.ExportedRun.created_at:type_name -> google.protobuf.Timestamp
 	1, // 6: model_plane.v1.ThreadExportService.ExportThread:input_type -> model_plane.v1.ExportThreadRequest
-	2, // 7: model_plane.v1.ThreadExportService.ExportThread:output_type -> model_plane.v1.ExportThreadResponse
-	7, // [7:8] is the sub-list for method output_type
-	6, // [6:7] is the sub-list for method input_type
+	5, // 7: model_plane.v1.ThreadExportService.ImportThread:input_type -> model_plane.v1.ImportThreadRequest
+	2, // 8: model_plane.v1.ThreadExportService.ExportThread:output_type -> model_plane.v1.ExportThreadResponse
+	6, // 9: model_plane.v1.ThreadExportService.ImportThread:output_type -> model_plane.v1.ImportThreadResponse
+	8, // [8:10] is the sub-list for method output_type
+	6, // [6:8] is the sub-list for method input_type
 	6, // [6:6] is the sub-list for extension type_name
 	6, // [6:6] is the sub-list for extension extendee
 	0, // [0:6] is the sub-list for field type_name
@@ -525,7 +673,7 @@ func file_model_plane_v1_thread_export_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_model_plane_v1_thread_export_proto_rawDesc), len(file_model_plane_v1_thread_export_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   4,
+			NumMessages:   6,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

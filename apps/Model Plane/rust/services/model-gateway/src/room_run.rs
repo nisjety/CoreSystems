@@ -207,6 +207,7 @@ pub const ROOM_EVENT_POLICY: &[(&str, Disposition)] = &[
     ("result_receipt", Disposition::Drop),
     ("title", Disposition::Drop),
     ("follow_ups", Disposition::Drop),
+    ("connector_suggestion", Disposition::Drop),
     // Lifecycle and transport frames the room does not need.
     ("retry_scheduled", Disposition::Drop),
     ("compaction", Disposition::Drop),

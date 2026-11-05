@@ -1291,6 +1291,8 @@ export type ChatStreamHandlers = {
   onPlanProposed?: (event: ChatPlanProposedEvent) => void
   /** See `ChatUserQuestionEvent`. Ungated: the card is the only way to answer the question. */
   onUserQuestion?: (event: ChatUserQuestionEvent) => void
+  /** The connected-app suggestion card (EP-10 S8). Ungated control event. */
+  onConnectorSuggestion?: (event: { suggestionId?: string; provider?: string; reason?: string; requestId?: string }) => void
   /** See `ChatResearchPlanEvent`. Ungated: the plan card is the plan turn's whole answer. */
   onResearchPlan?: (event: ChatResearchPlanEvent) => void
   onStopped?: (event: ChatStoppedEvent) => void
@@ -2852,6 +2854,15 @@ function dispatchEvent(event: SseEvent, handlers: ChatStreamHandlers): void {
           ...questionOrigin(payload),
         })
       }
+      break
+    }
+    case 'connector_suggestion': {
+      handlers.onConnectorSuggestion?.({
+        suggestionId: str(payload.suggestion_id),
+        provider: str(payload.provider),
+        reason: str(payload.reason),
+        requestId: str(payload.request_id),
+      })
       break
     }
     case 'research_plan': {

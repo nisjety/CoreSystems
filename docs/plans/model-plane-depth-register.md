@@ -4017,6 +4017,9 @@ Built so far: WS13-S0, WS13-S1, WS13-S2; WS14-S1, WS14-S2 (partial), WS14-S3; WS
 | D3-1280 | EP-12-S15 | risk | P2 | POST /v1/threads/import has no per-user rate limit, so a person can create unbounded threads of up to 400 x 64 KiB rows each. | open |
 | D3-1281 | EP-12-S15 | test-gap | P2 | No cross-crate round-trip test proves that the gateway's render_json output is accepted by session-core plan_import (deny_unknown_fields); the importer's fixture mirrors the exporter's key set by hand. | open |
 | D3-1282 | EP-12-S15 | follow-up | P3 | apps/Model Plane/api/openapi.yaml lacks a path block for POST /v1/threads/import. | open |
+| D3-1283 | W3-25 guard | follow-up | P2 | guard skipped: EP-2-S7 DashboardComposer knowledge_only deep-research button (needs a capability flag; design, see still_broken) | open |
+| D3-1284 | W3-25 guard | follow-up | P2 | guard skipped: Builder-requested vitest/cargo test runs (task forbids tests except the generation steps) | open |
+| D3-1285 | W3-25 guard | test-gap | P1 | still broken after the guard: apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardComposer.tsx:~4111 (EP-2-S7): the deep-research button stays disabled for knowledge_only. Enabling it needs a server capability flag the SPA can read; that is a design call, so it is left as is | open |
 
 ## Cross-wave
 

@@ -176,6 +176,19 @@ fn cases() -> Vec<(&'static str, Value, Expect)> {
             with("retrieval_scope", json!("auto")),
             None,
         ),
+        // e_zdr_token_knowledge_only_deep_research_refused (EP-2 S7): refused for `deep_research`
+        // before any retrieval, whatever DEEP_RESEARCH_KNOWLEDGE_SOURCES says.
+        (
+            "retrieval_scope",
+            json!({"content": "hello", "deep_research": true, "retrieval_scope": "knowledge_only"}),
+            refused("deep_research"),
+        ),
+        // e_zdr_token_deep_research_connector_sources_refused (EP-2 S7)
+        (
+            "connector_scope",
+            json!({"content": "hello", "deep_research": true, "connector_scope": ["conn_1"]}),
+            refused("deep_research"),
+        ),
         (
             "connector_scope",
             with("connector_scope", json!(["conn-1"])),

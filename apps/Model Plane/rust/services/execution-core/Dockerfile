@@ -35,8 +35,9 @@ WORKDIR /app/rust
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,target=/app/rust/target,sharing=locked \
-    cargo build --release --bin execution-core \
-    && cp target/release/execution-core /usr/local/bin/execution-core
+    cargo build --release --bin execution-core --bin mp-netbridge \
+    && cp target/release/execution-core /usr/local/bin/execution-core \
+    && cp target/release/mp-netbridge /usr/local/bin/mp-netbridge
 
 FROM debian:bookworm-slim AS runtime
 ARG SOURCE_REVISION=unverified
@@ -133,6 +134,8 @@ ENV MPLBACKEND=Agg
 COPY skills/office/ /opt/verevon/skills/office/
 RUN useradd --system --uid 10001 --create-home --shell /usr/sbin/nologin modelplane
 COPY --from=builder /usr/local/bin/execution-core /usr/local/bin/execution-core
+# EP-9 E3: the sandbox's egress bridge (egress_proxy::NETBRIDGE_BIN); without it the host claims off.
+COPY --from=builder /usr/local/bin/mp-netbridge /usr/local/bin/mp-netbridge
 USER modelplane
 EXPOSE 8083 9093
 HEALTHCHECK --interval=15s --timeout=5s --start-period=10s --retries=5 \

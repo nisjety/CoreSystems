@@ -237,6 +237,8 @@ func main() {
 		// other is not.
 		server = server.WithSpaceReadVerifier(capabilityVerifier.VerifySpaceRead)
 	}
+	// EP-9 E3 (D-E2): grant an egress-capable lease at off and record the tier instead of refusing it.
+	server = server.WithEgressTiers(egressTiersEnabled(os.Getenv("SANDBOX_MANAGER_EGRESS_TIERS")))
 	grpcServer := grpc.NewServer(grpc.ChainUnaryInterceptor(authz.UnaryInterceptor(verifier), authz.ZDRGate()))
 	sbxserver.Register(grpcServer, server)
 	healthServerGRPC := health.NewServer()
@@ -264,5 +266,10 @@ func ephemeralDevelopmentEnabled(value string) bool {
 // strict rule as the ephemeral-development switch: only the literal "true"
 // enables it, so an empty, mistyped or capitalised value leaves it off.
 func threadWorkspaceEnabled(value string) bool {
+	return value == "true"
+}
+
+// egressTiersEnabled reads SANDBOX_MANAGER_EGRESS_TIERS strictly: only the literal "true" enables it.
+func egressTiersEnabled(value string) bool {
 	return value == "true"
 }

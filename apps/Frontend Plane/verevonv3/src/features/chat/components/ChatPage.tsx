@@ -179,6 +179,11 @@ export default function ChatPage() {
     hasEarlierTurns,
     loadingEarlierTurns,
     loadEarlier,
+    connectTurn,
+    pendingConnectIntent,
+    resumeConnectIntent,
+    dismissConnectIntent,
+    acceptConnectorSuggestion,
     pendingQuestion,
     questionPending,
     questionError,
@@ -1285,6 +1290,14 @@ export default function ChatPage() {
         threadId={state.threadId}
         temporaryChat={readAloudBlocked()}
         spaceScoped={spaceScoped()}
+        connectorSuggestion={{
+          orgId: session.activeOrg?.id,
+          onUse: (suggestion, connectionId) => void acceptConnectorSuggestion(suggestion, connectionId),
+          connectTurn,
+          pendingConnectIntent,
+          resumeConnectIntent,
+          dismissConnectIntent,
+        }}
       />
     </>
   )

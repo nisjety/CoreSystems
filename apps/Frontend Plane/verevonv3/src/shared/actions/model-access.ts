@@ -355,6 +355,8 @@ export const MODEL_ACCESS: Readonly<Record<ActionId, ModelAccessEntry>> = {
   'chat.wide_research_retry_item': exempt('no_owner_executor', 'external_write'),
   'chat.research_plan_start': exempt('no_owner_executor', 'external_write'),
   'chat.research_plan_cancel': exempt('ui_state_only', 'context_write'),
+  // EP-10 S8: a model does not connect or select the person's accounts; the card is the person's answer.
+  'chat.accept_connector_suggestion': exempt('agent_cannot_self_govern', 'context_write'),
   'chat.set_context_refs': exempt('agent_cannot_self_govern', 'context_write'),
   'chat.pick_context_ref': exempt('no_owner_executor', 'read'),
   'chat.list_deck_templates': exempt('no_owner_executor', 'read'),

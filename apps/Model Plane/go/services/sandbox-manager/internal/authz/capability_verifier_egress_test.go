@@ -110,6 +110,28 @@ func TestVerifyRefusesV2EgressTheRulesForbid(t *testing.T) {
 	}
 }
 
+// D-E2 (EP-9 E3): with SANDBOX_MANAGER_EGRESS_TIERS on, an egress-capable v2
+// claim the decision grants no tier for verifies at off instead of being
+// refused; with it off the refusal stands.
+func TestVerifyGrantsAnUngrantedEgressClaimAtOffOnlyWhenAsked(t *testing.T) {
+	verifier, private := egressTestVerifier(t)
+	claims := validCapabilityClaims()
+	claims.Egress = EgressTierRegistries
+	token, claimsJSON := signedCapabilityToken(t, private, "key-1", claims, v2Decision())
+	if _, err := verifier.Verify(token, claimsJSON, expectedCapabilityVerifyRequest()); err == nil {
+		t.Fatal("expected rejection with grantAtOff off")
+	}
+	expect := expectedCapabilityVerifyRequest()
+	expect.GrantEgressAtOff = true
+	got, err := verifier.Verify(token, claimsJSON, expect)
+	if err != nil {
+		t.Fatalf("grantAtOff refused an ungranted claim: %v", err)
+	}
+	if got.EgressTier != EgressTierOff {
+		t.Fatalf("EgressTier = %q, want off", got.EgressTier)
+	}
+}
+
 func TestVerifyRefusesAnAllowListAlteredAfterSigning(t *testing.T) {
 	verifier, private := egressTestVerifier(t)
 	claims := validCapabilityClaims()

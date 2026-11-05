@@ -13,6 +13,7 @@ pub mod capability_policy;
 pub mod code_interpreter;
 mod compaction_budget;
 pub mod control_http_client;
+pub mod egress_proxy;
 pub mod executor;
 pub mod external_content;
 pub mod grpc;

@@ -169,6 +169,10 @@ func TestCreateInsertsAScratchLease(t *testing.T) {
 	if args[10] != int32(mpv1.SandboxLifecycleState_SCRATCH) {
 		t.Fatalf("state arg = %v, want SCRATCH", args[10])
 	}
+	// A grant that names no egress tier is recorded as off (migration 0008, EP-9 E3).
+	if args[13] != "off" {
+		t.Fatalf("egress_tier_permitted arg = %v, want off for a grant that carried none", args[13])
+	}
 }
 
 // TestCreatePersistsTheAudienceCeiling: the revision a Space decision was

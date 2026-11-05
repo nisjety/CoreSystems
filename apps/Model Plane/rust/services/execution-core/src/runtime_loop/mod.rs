@@ -1416,6 +1416,7 @@ async fn execute_step_inner(
                 Some(lock) => Some(lock.write().await),
                 None => None,
             };
+            let egress = crate::egress_proxy::run_egress().call_egress(org_id, run_id);
             let execution = execute_code_interpreter(
                 tool_input,
                 run_id,
@@ -1426,6 +1427,7 @@ async fn execute_step_inner(
                     .as_deref()
                     .map(crate::skill_mounts::SkillTree::path),
                 lease_id.as_deref(),
+                &egress,
             )
             .await;
             // The step's changes are recorded before the lock is released, so the record holds
@@ -1906,8 +1908,9 @@ async fn execute_code_interpreter(
     ro_inputs: Option<std::sync::Arc<crate::run_inputs::InputSet>>,
     skills: Option<&Path>,
     lease_id: Option<&str>,
+    egress: &crate::egress_proxy::CallEgress,
 ) -> tool_bridge::ToolExecution {
-    match crate::code_interpreter::run_with_skills(
+    match crate::code_interpreter::run_with_egress(
         tool_input,
         run_id,
         step_id,
@@ -1915,6 +1918,7 @@ async fn execute_code_interpreter(
         ro_inputs,
         skills,
         lease_id,
+        egress,
     )
     .await
     {
@@ -1981,6 +1985,8 @@ async fn execute_thread_code_interpreter(
         skills,
         // The thread's own lease: a workspace-rooted spawn is refused without one (WS06-S9).
         Some(lease.lease_id.as_str()),
+        // Thread leases are not tiered until D2-145/147/149 close.
+        &crate::egress_proxy::CallEgress::off(),
     )
     .await;
     let report = match workspace.commit().await {

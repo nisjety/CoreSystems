@@ -2482,6 +2482,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "mp-netbridge"
+version = "0.1.0"
+
+[[package]]
 name = "mp-orchestration"
 version = "0.1.0"
 dependencies = [

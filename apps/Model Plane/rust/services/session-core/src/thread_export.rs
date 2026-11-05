@@ -117,6 +117,13 @@ impl ThreadExportService for ThreadExportGrpc {
         record_metrics("export_thread", started, result.is_ok());
         result
     }
+
+    async fn import_thread(
+        &self,
+        request: Request<pb::ImportThreadRequest>,
+    ) -> Result<Response<pb::ImportThreadResponse>, Status> {
+        crate::thread_import::serve(&self.pool, request).await
+    }
 }
 
 /// Which copy of the thread the caller asked for.

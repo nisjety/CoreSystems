@@ -21,6 +21,7 @@ use mp_contracts::model_plane::v1::{
     memory_service_client::MemoryServiceClient,
     message_tree_service_client::MessageTreeServiceClient,
     thread_export_service_client::ThreadExportServiceClient,
+    thread_share_service_client::ThreadShareServiceClient,
     thread_fork_service_client::ThreadForkServiceClient,
     thread_goal_service_client::ThreadGoalServiceClient,
     thread_reference_service_client::ThreadReferenceServiceClient,
@@ -141,6 +142,8 @@ pub struct AppState {
     pub thread_goal_client: ThreadGoalServiceClient<Channel>,
     /// Session Core's ThreadExportService on the session_client endpoint (EP-12 S10).
     pub thread_export_client: ThreadExportServiceClient<Channel>,
+    /// Session Core's ThreadShareService on the session_client endpoint (EP-12 S14).
+    pub thread_share_client: ThreadShareServiceClient<Channel>,
     /// Session Core's ThreadReference service on the session_client endpoint (EP-3 S7): the
     /// read-only thread reference tools read the threads the person attached through it.
     pub thread_reference_client: ThreadReferenceServiceClient<Channel>,
@@ -506,6 +509,7 @@ impl AppState {
             thread_fork_client: ThreadForkServiceClient::new(session_channel.clone()),
             thread_goal_client: ThreadGoalServiceClient::new(session_channel.clone()),
             thread_export_client: ThreadExportServiceClient::new(session_channel.clone()),
+            thread_share_client: ThreadShareServiceClient::new(session_channel.clone()),
             thread_reference_client: ThreadReferenceServiceClient::new(session_channel.clone()),
             attention_client: AttentionServiceClient::new(session_channel.clone()),
             learning_client: LearningGovernanceServiceClient::new(session_channel.clone()),
@@ -726,6 +730,11 @@ impl AppState {
             "http://localhost:9091",
         )?);
         let thread_export_client = ThreadExportServiceClient::new(Self::lazy_channel(
+            "SESSION_CORE_URL",
+            "SESSION_CORE_ADDR",
+            "http://localhost:9091",
+        )?);
+        let thread_share_client = ThreadShareServiceClient::new(Self::lazy_channel(
             "SESSION_CORE_URL",
             "SESSION_CORE_ADDR",
             "http://localhost:9091",
@@ -977,6 +986,7 @@ impl AppState {
             state.thread_fork_client = thread_fork_client;
             state.thread_goal_client = thread_goal_client;
             state.thread_export_client = thread_export_client;
+            state.thread_share_client = thread_share_client;
             state.thread_reference_client = thread_reference_client;
             state.attention_client = attention_client;
             state.learning_client = learning_client;
@@ -1052,6 +1062,7 @@ impl AppState {
             state.thread_fork_client = thread_fork_client;
             state.thread_goal_client = thread_goal_client;
             state.thread_export_client = thread_export_client;
+            state.thread_share_client = thread_share_client;
             state.thread_reference_client = thread_reference_client;
             state.attention_client = attention_client;
             state.learning_client = learning_client;

@@ -74,6 +74,10 @@ pub struct SpaceCapabilityClaims {
     pub backup: bool,
     pub egress: String,
     pub credential_mode: String,
+    /// The Space egress allow-list Control signed over (EP-9 E2), present only at the `allowlist` tier;
+    /// carried through unchanged so sandbox-manager's digest check sees the list Control bound.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub egress_allowlist: Vec<String>,
 }
 
 /// Why a capability decision was not obtained.
@@ -372,6 +376,7 @@ mod tests {
                 backup: false,
                 egress: "disabled_by_default".to_owned(),
                 credential_mode: "none".to_owned(),
+                egress_allowlist: Vec::new(),
             }
         );
     }

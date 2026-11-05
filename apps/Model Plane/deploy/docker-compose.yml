@@ -470,6 +470,8 @@ services:
       MODEL_GATEWAY_THREAD_GOALS_ENABLED: ${MODEL_GATEWAY_THREAD_GOALS_ENABLED:-false}
       # EP-12 S10: the owner's conversation export route (JSON and Markdown). Only the literal true.
       MODEL_GATEWAY_THREAD_EXPORT: ${MODEL_GATEWAY_THREAD_EXPORT:-false}
+      # EP-12 S14: the owner's share snapshot routes (/v1/threads/:id/snapshots, /v1/snapshots/:id). Needs SESSION_THREAD_SHARES_ENABLED. Only the literal true.
+      MODEL_GATEWAY_THREAD_SHARES: ${MODEL_GATEWAY_THREAD_SHARES:-false}
       # EP-12 S5: the Agent API read and control routes (/v1/agent/*) for API keys with agent:runs. Only the literal true.
       MODEL_GATEWAY_AGENT_API: ${MODEL_GATEWAY_AGENT_API:-false}
       # EP-7 S4: Keep going on the goal bar (pump-sent goal turns). Needs MODEL_GATEWAY_THREAD_GOALS_ENABLED. Only the
@@ -907,6 +909,10 @@ services:
       DEEP_RESEARCH_PLAN_MODEL: ${DEEP_RESEARCH_PLAN_MODEL:-verevon-budget}
       # EP-2 S6: the claim ledger and the gap-driven second pass of deep research. Only the literal true.
       DEEP_RESEARCH_SECOND_PASS: ${DEEP_RESEARCH_SECOND_PASS:-false}
+      # EP-2 S7: org knowledge per sub-query in deep research; knowledge_only research allowed. Only the literal true.
+      DEEP_RESEARCH_KNOWLEDGE_SOURCES: ${DEEP_RESEARCH_KNOWLEDGE_SOURCES:-false}
+      # EP-2 S7: selected connected accounts in deep research (also needs CONNECTOR_ASK_READS_ENABLED). Only the literal true.
+      DEEP_RESEARCH_CONNECTOR_SOURCES: ${DEEP_RESEARCH_CONNECTOR_SOURCES:-false}
       # SEMANTIC_CACHE_URL/SEMANTIC_CACHE_TTL_SECS/SEMANTIC_CACHE_DATAPLANE_ENABLED
       # were removed 2026-09-17 — the code that read them (model-gateway's
       # langcache module) was already reduced to a documentation tombstone on
@@ -930,6 +936,8 @@ services:
       # WS23-S5: Ask-mode connector reads (read_provider_action) for the connections the person selected, with citations
       # and no body text in history. Off by default; only the literal `true`. Reads go to integration-corev2.
       CONNECTOR_ASK_READS_ENABLED: ${CONNECTOR_ASK_READS_ENABLED:-false}
+      # EP-10 S8: the suggest_connector tool and its connector_suggestion card in Ask. Only the literal true.
+      CONNECTOR_SUGGESTIONS_ENABLED: ${CONNECTOR_SUGGESTIONS_ENABLED:-false}
       INTEGRATION_COREV2_URL: ${INTEGRATION_COREV2_URL:-http://integration-api:3026}
       # information-core (Application Plane weather/traffic/news aggregator,
       # wraps Yr/met.no) — backs the plain-chat `get_weather` builtin. Without
@@ -1220,6 +1228,10 @@ services:
       SESSION_CORE_THREAD_GOALS_ENABLED: ${SESSION_CORE_THREAD_GOALS_ENABLED:-false}
       # EP-12 S9: the owner's ExportThread (ThreadExportService). Only the literal true.
       SESSION_THREAD_EXPORT_ENABLED: ${SESSION_THREAD_EXPORT_ENABLED:-false}
+      # EP-12 S14: the ThreadShareService snapshot store. Only the literal true; stays off until the share-model ADR (OD-5) is accepted.
+      SESSION_THREAD_SHARES_ENABLED: ${SESSION_THREAD_SHARES_ENABLED:-false}
+      # EP-12 S15: the owner's ImportThread (ThreadExportService). Only the literal true.
+      SESSION_THREAD_IMPORT_ENABLED: ${SESSION_THREAD_IMPORT_ENABLED:-false}
       # EP-11 S2: the SkillVersionService read of immutable skill versions. Only the literal true;
       # set it together with SKILL_VERSIONS_API on capability-core.
       SKILL_VERSIONS_API: ${SKILL_VERSIONS_API:-false}
@@ -1980,6 +1992,8 @@ services:
       # EP-9 W3: org browser-site allow/block lists on web fetches. off, shadow (logs only) or enforce; an unknown
       # value reads as enforce.
       WEB_DOMAIN_POLICY_MODE: ${WEB_DOMAIN_POLICY_MODE:-off}
+      # EP-9 E3: the code_interpreter egress ceiling (off, registries, allowlist). Unknown reads as off.
+      EXECUTION_SANDBOX_EGRESS: ${EXECUTION_SANDBOX_EGRESS:-off}
       EXECUTION_CORE_APPROVAL_DELIVERY_ORG_IDS: ${EXECUTION_CORE_APPROVAL_DELIVERY_ORG_IDS:-}
       EXECUTION_CORE_APPROVAL_DELIVERY_POLL_SECONDS: ${EXECUTION_CORE_APPROVAL_DELIVERY_POLL_SECONDS:-15}
     depends_on:
@@ -2391,6 +2405,8 @@ services:
       SANDBOX_MANAGER_THREAD_MAX_BYTES: ${SANDBOX_MANAGER_THREAD_MAX_BYTES:-67108864}
       # WS06-S6: refuse a token with no retention claim at all. Exact match, only "on" enables; a token that says zdr:true is refused regardless.
       SANDBOX_MANAGER_REQUIRE_RETENTION_CLAIM: ${SANDBOX_MANAGER_REQUIRE_RETENTION_CLAIM:-off}
+      # EP-9 E3 (D-E2): grant an egress-capable lease at off and record its tier instead of refusing it. Only the literal true.
+      SANDBOX_MANAGER_EGRESS_TIERS: ${SANDBOX_MANAGER_EGRESS_TIERS:-false}
       CONTROL_SPACE_DECISION_KEY_ID: ${CONTROL_SPACE_DECISION_KEY_ID:-}
       CONTROL_SPACE_DECISION_PUBLIC_KEY_BASE64: ${CONTROL_SPACE_DECISION_PUBLIC_KEY_BASE64:-}
     depends_on:
