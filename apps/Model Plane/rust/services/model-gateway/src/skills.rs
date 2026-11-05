@@ -122,6 +122,14 @@ pub struct SkillStore {
     // Whether the first-party Office skills are listed for every org (WS19-S9). Read
     // once, when the store is built, so a running process never changes its answers.
     builtin_office: bool,
+    // Space skills (EP-11 S9), keyed by (org_id, space_id) and never put in `inner`: no
+    // org list, match, get or pick can reach them. Only a turn whose thread session-core
+    // resolved to that Space reads its shelf, through `space_skills_for`.
+    spaces: Arc<DashMap<(String, String), Vec<Skill>>>,
+    // (org_id, caller, thread_id) -> when session-core last answered for that thread and
+    // the Space it resolved ('' for none). The Space comes from session-core's thread row,
+    // never from the request, so this is the only way a turn finds a shelf.
+    thread_spaces: Arc<DashMap<(String, String, String), (std::time::Instant, String)>>,
 }
 
 impl SkillStore {
@@ -180,7 +188,12 @@ impl SkillStore {
     ) {
         let mut org_ids = BTreeSet::new();
         let mut user_ids = BTreeSet::new();
-        for agent in pulled.into_iter().filter(owner_accepted) {
+        // A Space row never joins the org's or a caller's bucket (EP-11 S9): it is cached
+        // on its Space's shelf by `refresh_space`, or not at all.
+        for agent in pulled
+            .into_iter()
+            .filter(|agent| owner_accepted(agent) && !is_space_row(agent))
+        {
             let ids = match crate::ownership::Scope::from_wire(&agent.scope) {
                 crate::ownership::Scope::Org => &mut org_ids,
                 crate::ownership::Scope::User => &mut user_ids,
@@ -212,6 +225,68 @@ impl SkillStore {
             (org_id.to_owned(), caller_user_id.to_owned()),
             std::time::Instant::now(),
         );
+    }
+
+    /// Whether session-core's answer for this caller's thread (EP-11 S9) is recent enough to
+    /// reuse: same TTL as the org pull, so a Space skill edit, or a thread leaving a Space,
+    /// lands within it.
+    #[must_use]
+    pub fn is_thread_space_loaded(&self, org_id: &str, caller_user_id: &str, thread_id: &str) -> bool {
+        self.thread_spaces
+            .get(&(org_id.to_owned(), caller_user_id.to_owned(), thread_id.to_owned()))
+            .is_some_and(|entry| entry.0.elapsed() < skill_cache_ttl())
+    }
+
+    /// Record session-core's answer for one thread (EP-11 S9): the Space it resolved the
+    /// thread to (`space_id`, empty for none) and that Space's skills. The shelf is replaced
+    /// whole, so a deleted Space skill leaves it. Only accepted Space rows are kept; any
+    /// other row in `pulled` is ignored here (the org and the caller's own go through
+    /// `refresh_learned`).
+    pub fn refresh_space(
+        &self,
+        org_id: &str,
+        caller_user_id: &str,
+        thread_id: &str,
+        space_id: &str,
+        pulled: &[AgentSkill],
+    ) {
+        if !space_id.is_empty() {
+            let shelf: Vec<Skill> = pulled
+                .iter()
+                .filter(|agent| owner_accepted(agent) && is_space_row(agent))
+                .cloned()
+                .map(|agent| {
+                    let origin = agent.origin.clone();
+                    let mut skill = agent_skill_to_skill(agent);
+                    skill.source_path = format!("{LEARNED_SOURCE_PREFIX}space:{space_id}:{origin}");
+                    skill
+                })
+                .collect();
+            self.spaces
+                .insert((org_id.to_owned(), space_id.to_owned()), shelf);
+        }
+        self.thread_spaces.insert(
+            (org_id.to_owned(), caller_user_id.to_owned(), thread_id.to_owned()),
+            (std::time::Instant::now(), space_id.to_owned()),
+        );
+    }
+
+    /// The Space skills a turn in this thread may use (EP-11 S9): its Space's shelf when
+    /// session-core resolved the thread to a Space for this caller, else nothing.
+    #[must_use]
+    pub fn space_skills_for(&self, org_id: &str, caller_user_id: &str, thread_id: &str) -> Vec<Skill> {
+        let Some(space_id) = self
+            .thread_spaces
+            .get(&(org_id.to_owned(), caller_user_id.to_owned(), thread_id.to_owned()))
+            .map(|entry| entry.1.clone())
+            .filter(|space_id| !space_id.is_empty())
+        else {
+            return Vec::new();
+        };
+        self.spaces
+            .get(&(org_id.to_owned(), space_id))
+            .map(|shelf| shelf.value().clone())
+            .unwrap_or_default()
     }
 
     fn list(&self, org_id: &str) -> Vec<Skill> {
@@ -258,6 +333,11 @@ fn skill_usable(
     skill: &Skill,
     caller_user_id: &str,
 ) -> bool {
+    // The org's `ext.skills` (EP-11 S9) narrows before ownership is asked. Off, or not
+    // enforced, it permits everything, so this is the check it always was.
+    if !org_ext_skills_permit(org_id, skill) {
+        return false;
+    }
     if skill.source_path.starts_with(LEARNED_SOURCE_PREFIX) {
         ownership.usable(
             org_id,
@@ -448,6 +528,152 @@ pub fn render_pinned_skill_gone(name: &str) -> String {
 #[must_use]
 pub fn owner_accepted(a: &AgentSkill) -> bool {
     a.review_state.is_empty() || a.review_state == "accepted"
+}
+
+/// Whether a session-core row is a Space skill (EP-11 S9). Such a row is cached on its
+/// Space's shelf only, never in the org's or a caller's bucket.
+fn is_space_row(a: &AgentSkill) -> bool {
+    a.scope.eq_ignore_ascii_case("space")
+}
+
+/// Environment switch for Space skills at the gateway (EP-11 S9): the match-cache pull names
+/// the turn's thread so session-core can add that thread's Space skills. Off, the pull is the
+/// request it always was and no Space shelf is read.
+pub const SKILL_SPACE_SCOPE_ENV: &str = "SKILL_SPACE_SCOPE";
+
+/// Whether Space skills are on: only the literal `true`.
+#[must_use]
+pub fn space_scope_from(raw: Option<&str>) -> bool {
+    raw == Some("true")
+}
+
+/// [`space_scope_from`] for this process.
+#[must_use]
+pub fn space_scope_enabled() -> bool {
+    space_scope_from(std::env::var(SKILL_SPACE_SCOPE_ENV).ok().as_deref())
+}
+
+/// Environment switch for the org's `ext.skills` (EP-11 S9). Off, the policy key is not read
+/// and every skill is offered as before.
+pub const SKILL_EXT_POLICY_ENV: &str = "SKILL_EXT_POLICY_ENFORCED";
+
+/// Whether `ext.skills` is enforced: only the literal `true`.
+#[must_use]
+pub fn ext_policy_from(raw: Option<&str>) -> bool {
+    raw == Some("true")
+}
+
+/// [`ext_policy_from`] for this process, read once so it cannot change under a request.
+#[must_use]
+pub fn ext_policy_enforced() -> bool {
+    static ENFORCED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENFORCED.get_or_init(|| ext_policy_from(std::env::var(SKILL_EXT_POLICY_ENV).ok().as_deref()))
+}
+
+/// The org's `ext.skills` setting (org-agent-policy-schema.json): which authored skills may
+/// steer its turns. First-party skills (builtin, disk-loaded, operator-pushed) are not
+/// authored in the org and are never narrowed by it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExtSkills {
+    /// No authored skill at all.
+    None,
+    /// The org's own skills only: a person's private or shared skill and a Space skill are
+    /// skipped.
+    ApprovedOnly,
+    /// Every skill the caller may use, as before the key was enforced.
+    Any,
+}
+
+impl ExtSkills {
+    /// Reads a policy token. Anything but `approved_only` and `any` is `None`, the schema's
+    /// fail-closed value, so an unreadable token can only narrow.
+    #[must_use]
+    pub fn from_token(token: &str) -> Self {
+        match token {
+            "any" => Self::Any,
+            "approved_only" => Self::ApprovedOnly,
+            _ => Self::None,
+        }
+    }
+}
+
+/// The `ext.skills` a turn of this org is held to. `None` when the switch is off, so nothing
+/// changes. On, it is the setting of the policy the turn's admission left in the cache, and
+/// [`ExtSkills::None`] when no policy is held (it could not be read inside its bound, or
+/// `ORG_AGENT_POLICY_MODE` does not read it): an org whose policy cannot be seen gets no
+/// authored skills rather than all of them.
+#[must_use]
+pub fn held_ext_skills(
+    enforced: bool,
+    cache: &crate::org_agent_policy::OrgPolicyCache,
+    org_id: &str,
+) -> Option<ExtSkills> {
+    if !enforced {
+        return None;
+    }
+    Some(
+        cache
+            .policy(org_id)
+            .map_or(ExtSkills::None, |policy| ExtSkills::from_token(&policy.ext_skills)),
+    )
+}
+
+/// Whether `ext` lets this skill reach a turn. The tier is read from the provenance the cache
+/// stamped: `session-core:org:` is an org skill, any other `session-core:` source a person's
+/// or a Space's; everything else is first-party.
+#[must_use]
+pub fn ext_skills_permits(ext: ExtSkills, skill: &Skill) -> bool {
+    if !skill.source_path.starts_with(LEARNED_SOURCE_PREFIX) {
+        return true;
+    }
+    match ext {
+        ExtSkills::Any => true,
+        ExtSkills::ApprovedOnly => skill
+            .source_path
+            .starts_with(&format!("{LEARNED_SOURCE_PREFIX}org:")),
+        ExtSkills::None => false,
+    }
+}
+
+/// [`ext_skills_permits`] for this process's switch and the shared policy cache.
+fn org_ext_skills_permit(org_id: &str, skill: &Skill) -> bool {
+    held_ext_skills(
+        ext_policy_enforced(),
+        crate::org_agent_policy::shared_cache(),
+        org_id,
+    )
+    .is_none_or(|ext| ext_skills_permits(ext, skill))
+}
+
+/// Space skills a turn may use (EP-11 S9), with the org's `ext.skills` applied. A Space skill
+/// carries no ownership record: session-core already decided the caller's thread is in the
+/// Space, which is the whole of its visibility rule.
+#[must_use]
+pub fn usable_space_skills(org_id: &str, shelf: Vec<Skill>) -> Vec<Skill> {
+    shelf
+        .into_iter()
+        .filter(|skill| org_ext_skills_permit(org_id, skill))
+        .collect()
+}
+
+/// Keyword matches among a Space's skills, scored like [`handle_match_skills`] scores the
+/// org's, so the two lists can be merged by score.
+#[must_use]
+pub fn match_space_skills(shelf: &[Skill], query: &str) -> Vec<SkillMatch> {
+    let query_terms: Vec<String> = query
+        .to_lowercase()
+        .split_whitespace()
+        .filter(|t| t.len() >= 3)
+        .map(str::to_string)
+        .collect();
+    shelf
+        .iter()
+        .map(|s| SkillMatch {
+            score: score(&query_terms, s),
+            skill: Some(s.clone()),
+        })
+        .filter(|m| m.score > 0.0 && m.score >= m.skill.as_ref().map_or(0.0, |s| s.min_score))
+        .collect()
 }
 
 /// Derive an [`Ownership`](crate::ownership::Ownership) record from a
@@ -1780,5 +2006,188 @@ mod skill_pin_tests {
         assert_eq!(rendered["status"], "not_available");
         assert_eq!(rendered["name"], "House style");
         assert!(rendered.get("instruction").is_none());
+    }
+}
+
+#[cfg(test)]
+mod ext_skills_tests {
+    use super::*;
+    use crate::org_agent_policy::{OrgPolicy, OrgPolicyCache};
+
+    fn agent(id: &str, scope: &str, owner: &str) -> AgentSkill {
+        AgentSkill {
+            id: id.into(),
+            name: format!("deploy {id}"),
+            content: format!("deploy runbook {id}"),
+            trigger_keywords: vec!["deploy".into()],
+            enabled: true,
+            origin: "user".into(),
+            scope: scope.into(),
+            owner_user_id: owner.into(),
+            review_state: "accepted".into(),
+            ..Default::default()
+        }
+    }
+
+    fn cache_with(org: &str, ext_skills: Option<&str>) -> OrgPolicyCache {
+        let cache = OrgPolicyCache::new();
+        let settings = match ext_skills {
+            Some(mode) => serde_json::json!({ "ext.skills": { "mode": mode } }),
+            None => serde_json::json!({}),
+        };
+        let settings = settings.as_object().cloned().unwrap_or_default();
+        cache.store(org, OrgPolicy::from_settings(1, "sha256:1", &settings), std::time::Instant::now());
+        cache
+    }
+
+    /// The skills alice may use in org `o`, with `ext` applied as the turn applies it.
+    fn usable_under(ext: Option<ExtSkills>) -> Vec<String> {
+        let store = SkillStore::default();
+        let ownership = crate::ownership::OwnershipStore::new();
+        store.refresh_learned(
+            &ownership,
+            "o",
+            "alice",
+            vec![agent("org-1", "org", ""), agent("mine-1", "user", "alice")],
+        );
+        store.upsert(
+            "o",
+            Skill {
+                id: "disk-1".into(),
+                name: "disk".into(),
+                body: "deploy".into(),
+                source_path: "skills/disk.md".into(),
+                ..Default::default()
+            },
+        );
+        let mut ids: Vec<String> = store
+            .list("o")
+            .into_iter()
+            .filter(|s| skill_usable(&ownership, "o", s, "alice"))
+            .filter(|s| ext.is_none_or(|ext| ext_skills_permits(ext, s)))
+            .map(|s| s.id)
+            .collect();
+        ids.sort();
+        ids
+    }
+
+    #[test]
+    fn the_switches_read_only_the_literal_true() {
+        for off in [None, Some(""), Some("TRUE"), Some(" true"), Some("1"), Some("false")] {
+            assert!(!ext_policy_from(off), "{off:?}");
+            assert!(!space_scope_from(off), "{off:?}");
+        }
+        assert!(ext_policy_from(Some("true")));
+        assert!(space_scope_from(Some("true")));
+    }
+
+    #[test]
+    fn ext_skills_switch_off_changes_nothing() {
+        let cache = cache_with("o", Some("none"));
+        assert_eq!(held_ext_skills(false, &cache, "o"), None);
+        assert_eq!(usable_under(None), ["disk-1", "mine-1", "org-1"]);
+    }
+
+    #[test]
+    fn ext_skills_approved_only_skips_user_skills() {
+        let cache = cache_with("o", Some("approved_only"));
+        let ext = held_ext_skills(true, &cache, "o");
+        assert_eq!(ext, Some(ExtSkills::ApprovedOnly));
+        assert_eq!(usable_under(ext), ["disk-1", "org-1"], "a member's private skill is skipped");
+        let space_skill = Skill {
+            id: "space-1".into(),
+            source_path: format!("{LEARNED_SOURCE_PREFIX}space:room-a:user"),
+            ..Default::default()
+        };
+        assert!(!ext_skills_permits(ExtSkills::ApprovedOnly, &space_skill), "a Space skill is skipped");
+        // `any` (the schema default, and a document that omits the key) is today's behaviour.
+        assert_eq!(held_ext_skills(true, &cache_with("o", Some("any")), "o"), Some(ExtSkills::Any));
+        assert_eq!(held_ext_skills(true, &cache_with("o", None), "o"), Some(ExtSkills::Any));
+        assert_eq!(usable_under(Some(ExtSkills::Any)), ["disk-1", "mine-1", "org-1"]);
+    }
+
+    #[test]
+    fn ext_skills_none_keeps_first_party_skills_only() {
+        let ext = held_ext_skills(true, &cache_with("o", Some("none")), "o");
+        assert_eq!(ext, Some(ExtSkills::None));
+        assert_eq!(usable_under(ext), ["disk-1"]);
+        let builtin = Skill {
+            id: "builtin:office/xlsx".into(),
+            source_path: "builtin:office/xlsx".into(),
+            ..Default::default()
+        };
+        assert!(ext_skills_permits(ExtSkills::None, &builtin));
+    }
+
+    #[test]
+    fn ext_skills_policy_unreadable_fails_closed() {
+        // No policy held for the org (unreadable past its bound, or never read): no authored skills.
+        let empty = OrgPolicyCache::new();
+        assert_eq!(held_ext_skills(true, &empty, "o"), Some(ExtSkills::None));
+        // Another org's policy is never borrowed.
+        assert_eq!(held_ext_skills(true, &cache_with("other", Some("any")), "o"), Some(ExtSkills::None));
+        // A token this build cannot read is the schema's fail-closed value.
+        assert_eq!(ExtSkills::from_token("approved"), ExtSkills::None);
+        assert_eq!(ExtSkills::from_token(""), ExtSkills::None);
+        assert_eq!(usable_under(Some(ExtSkills::None)), ["disk-1"]);
+    }
+
+    #[test]
+    fn space_bucket_never_leaks_into_org_bucket() {
+        let store = SkillStore::default();
+        let ownership = crate::ownership::OwnershipStore::new();
+        let pulled = vec![agent("org-1", "org", ""), agent("space-a-1", "space", "")];
+        // One pull for alice's Space thread carries both; each half goes to its own place.
+        store.refresh_learned(&ownership, "o", "alice", pulled.clone());
+        store.refresh_space("o", "alice", "thread-a", "room-a", &pulled);
+        let org_ids: Vec<String> = store.list("o").into_iter().map(|s| s.id).collect();
+        assert_eq!(org_ids, ["org-1"], "a Space skill never enters the org bucket");
+        assert!(ownership.get("o", crate::ownership::KIND_SKILL, "space-a-1").is_none());
+        let matched = handle_match_skills(
+            &store,
+            MatchSkillsRequest {
+                request_id: "t".into(),
+                org_id: "o".into(),
+                query: "deploy runbook".into(),
+                limit: 10,
+                min_score: 0.0,
+            },
+            &ownership,
+            "alice",
+        )
+        .expect("match");
+        assert!(matched
+            .matches
+            .iter()
+            .all(|m| m.skill.as_ref().is_some_and(|s| s.id != "space-a-1")));
+        assert!(
+            resolve_requested_skills(&store, "o", &ownership, "alice", &["space-a-1".to_owned()], 4)
+                .is_empty(),
+            "a Space skill cannot be picked through the org catalogue"
+        );
+
+        // In its own thread the Space shelf is there, stamped with its Space.
+        let shelf = store.space_skills_for("o", "alice", "thread-a");
+        assert_eq!(shelf.len(), 1);
+        assert_eq!(shelf[0].id, "space-a-1");
+        assert_eq!(shelf[0].source_path, "session-core:space:room-a:user");
+        assert!(store.is_thread_space_loaded("o", "alice", "thread-a"));
+        // Another thread, another caller, another org: nothing.
+        store.refresh_space("o", "alice", "personal", "", &[agent("org-1", "org", "")]);
+        assert!(store.space_skills_for("o", "alice", "personal").is_empty());
+        assert!(store.space_skills_for("o", "bob", "thread-a").is_empty());
+        assert!(store.space_skills_for("other", "alice", "thread-a").is_empty());
+        // A second Space's shelf is its own.
+        store.refresh_space("o", "bob", "thread-b", "room-b", &[agent("space-b-1", "space", "")]);
+        let b: Vec<String> = store
+            .space_skills_for("o", "bob", "thread-b")
+            .into_iter()
+            .map(|s| s.id)
+            .collect();
+        assert_eq!(b, ["space-b-1"]);
+        assert_eq!(store.space_skills_for("o", "alice", "thread-a")[0].id, "space-a-1");
+        // A Space skill is matched only through its own shelf.
+        assert_eq!(match_space_skills(&shelf, "deploy runbook").len(), 1);
+        assert!(match_space_skills(&shelf, "unrelated words").is_empty());
     }
 }

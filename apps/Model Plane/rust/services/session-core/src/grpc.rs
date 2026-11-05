@@ -5949,7 +5949,9 @@ pub(crate) async fn append_message_in_tx_as(
     // thread extracts nothing and records no dream run.
     let contained =
         crate::space::memory_scope::thread_is_contained(thread.2.as_deref(), space_kind.as_deref());
-    let candidates = if conversation_only || post_kind == "post" { Vec::new() } else if contained {
+    // EP-12 D2: an API key has no memory, so its threads extract nothing for anyone.
+    let key_owned = crate::auth::is_api_key_owner(&thread.1);
+    let candidates = if conversation_only || post_kind == "post" || key_owned { Vec::new() } else if contained {
         crate::space::memory_scope::record_contained("append_extract");
         // EP-8 S6: with Space memory switched on, what the room states is kept for the room
         // (`scope = 'space'`, stamped with this message's audience), never for its owner; off, the
@@ -7069,6 +7071,19 @@ pub(crate) async fn start_run_inner(
     requested_run_id: Option<String>,
     retention: crate::retention_receipt::RunRetention,
 ) -> Result<Response<pb::StartRunResponse>, Status> {
+    start_run_inner_stamped(pool, req, requested_run_id, retention, None).await
+}
+
+/// [`start_run_inner`] for a run an API key starts: `api_key` names the key in
+/// the run's origin stamp (EP-12 S4). Only `start_run` passes one, from the
+/// verified caller.
+pub(crate) async fn start_run_inner_stamped(
+    pool: &PgPool,
+    req: pb::StartRunRequest,
+    requested_run_id: Option<String>,
+    retention: crate::retention_receipt::RunRetention,
+    api_key: Option<crate::run_origin_stamp::ApiKeyStamp<'_>>,
+) -> Result<Response<pb::StartRunResponse>, Status> {
     use crate::retention_receipt::{self, RunRetention};
     let requested_run_id = requested_run_id.filter(|value| !value.trim().is_empty());
     // A requested run id is the prepared scheduled run's idempotent identity.
@@ -7145,7 +7160,7 @@ pub(crate) async fn start_run_inner(
     .bind(retention.class.as_str())
     .bind(retention.ack_id())
     .bind(retention.connection_id())
-    .bind(crate::run_origin_stamp::origin_at_birth(&req.user_id, inherited_origin))
+    .bind(crate::run_origin_stamp::origin_at_birth(&req.user_id, inherited_origin, api_key))
     .fetch_optional(&mut *tx)
     .await
     .map_err(|e| Status::internal(e.to_string()))?;
@@ -8832,7 +8847,8 @@ impl SessionCore for SessionService {
             // workflow (`runs.thread_id` is NOT NULL REFERENCES threads(id)), so
             // the same allowlisted principals may own a thread. The scope is
             // shared with start_run: the thread exists only to hold the run.
-            let user_id = match caller.user_id() {
+            // An API key owns the threads it creates (EP-12 D2); its owner id is the key.
+            let user_id = match caller.owner_id() {
                 Some(user_id) => user_id.to_owned(),
                 None => authorize_system_run_owner(&caller)?,
             };
@@ -8889,7 +8905,8 @@ impl SessionCore for SessionService {
             // workflow fired by cron has no person — a Temporal activity can only
             // present a service credential, and auth-core mints no user
             // delegation — so an allowlisted service may own the run itself.
-            let owner = match caller.user_id() {
+            // An API key owns its runs like a person, in its own threads only (EP-12 D2).
+            let owner = match caller.owner_id() {
                 Some(user_id) => {
                     authorize_thread_owner(
                         &self.pool,
@@ -8926,7 +8943,8 @@ impl SessionCore for SessionService {
             // waived; a system owner is a service credential, which carries no
             // waiver, so its run is persistent.
             let retention = crate::retention_receipt::RunRetention::from_caller(&caller);
-            start_run_inner(&self.pool, req, None, retention).await
+            let api_key = crate::run_origin_stamp::ApiKeyStamp::of(&caller);
+            start_run_inner_stamped(&self.pool, req, None, retention, api_key).await
         }
         .await;
         record_metrics("start_run", started, result.is_ok());
@@ -10085,10 +10103,21 @@ impl SessionCore for SessionService {
             } else {
                 caller.user_id().unwrap_or_default().to_owned()
             };
+            // EP-11 S9: a Space skill reaches only a turn in its own Space. The Space
+            // is read from the caller's own thread row, never taken from the request,
+            // and only while SKILL_SPACE_SCOPE is on; off, no Space row is listed.
+            let space_id = if skill_space_scope_enabled() {
+                skill_space_of_thread(&self.pool, &caller, &req.org_id, &req.thread_id).await?
+            } else {
+                None
+            };
             // A grantee sees only a skill its owner has accepted: a proposal is
             // private to its owner even if a share was written onto the row.
-            // `scope DESC` puts a user's own skill before an org skill of the
-            // same name.
+            // `scope DESC` puts a user's own skill before a Space or org skill of
+            // the same name. A Space row has no owner, so it is kept out of the
+            // owner branch explicitly: a service caller listing with an empty user
+            // would otherwise match it. `$5` is '' when no Space was resolved, and
+            // no Space row has an empty scope_id (migration 0111).
             let rows: Vec<SkillRow> = sqlx::query_as(
                 "SELECT id, name, description, content, trigger_keywords,
                         trigger_file_patterns, tool_restrictions, enabled, origin,
@@ -10099,8 +10128,10 @@ impl SessionCore for SessionService {
                         version, digest, kind, settings
                  FROM agent_skills
                  WHERE org_id = $1 AND (NOT $2 OR enabled)
-                   AND (scope = 'org' OR owner_user_id = $3
-                        OR (shared_with ? $3 AND review_state = 'accepted'))
+                   AND ((scope <> 'space'
+                         AND (scope = 'org' OR owner_user_id = $3
+                              OR (shared_with ? $3 AND review_state = 'accepted')))
+                        OR (scope = 'space' AND scope_id = $5))
                    AND kind = ANY($4)
                  ORDER BY name, scope DESC",
             )
@@ -10108,6 +10139,7 @@ impl SessionCore for SessionService {
             .bind(req.enabled_only)
             .bind(&caller_user_id)
             .bind(&kinds)
+            .bind(space_id.as_deref().unwrap_or_default())
             .fetch_all(&self.pool)
             .await
             .map_err(|e| {
@@ -10143,7 +10175,10 @@ impl SessionCore for SessionService {
                     settings_json: row.settings.0.to_string(),
                 })
                 .collect();
-            Ok(Response::new(pb::ListAgentSkillsResponse { skills }))
+            Ok(Response::new(pb::ListAgentSkillsResponse {
+                skills,
+                space_id: space_id.unwrap_or_default(),
+            }))
         }
         .await;
         record_metrics("list_agent_skills", started, result.is_ok());
@@ -12472,9 +12507,13 @@ pub async fn serve(
             .await;
     }
 
+    // EP-12 S4: the two services that hold `api_key` methods hand their interceptor the called
+    // path; a key is refused on every service that is not stamped.
+    let session_core = SessionCoreServer::with_interceptor(session.clone(), auth.clone());
+    let run_service = RunServiceServer::with_interceptor(runs, auth.clone());
     tonic::transport::Server::builder()
         .add_service(health_service)
-        .add_service(SessionCoreServer::with_interceptor(session.clone(), auth.clone()))
+        .add_service(crate::auth::RpcPathStamp::new(session_core))
         .add_service(AttentionServiceServer::with_interceptor(session, auth.clone()))
         .add_service(ManagedRunLifecycleServer::with_interceptor(
             managed_lifecycle,
@@ -12576,7 +12615,7 @@ pub async fn serve(
             crate::eventlog_grpc::EventLogService::new(event_log_pool),
             auth.clone(),
         ))
-        .add_service(RunServiceServer::with_interceptor(runs, auth))
+        .add_service(crate::auth::RpcPathStamp::new(run_service))
         .serve(addr)
         .await?;
 
@@ -13109,6 +13148,51 @@ fn agent_skill_kinds(kinds: &[String]) -> Result<Vec<String>, Status> {
         }
     }
     Ok(wanted)
+}
+
+/// The switch that lets `ListAgentSkills` return Space skills (EP-11 S9). Read where it is
+/// used, like the version switch; only the literal `true` turns it on.
+const SKILL_SPACE_SCOPE_ENV: &str = "SKILL_SPACE_SCOPE";
+
+fn skill_space_scope_enabled() -> bool {
+    mp_contracts::loop_fold::switch_from(std::env::var(SKILL_SPACE_SCOPE_ENV).ok().as_deref())
+}
+
+/// The Space whose skills a `ListAgentSkills` caller may be given: the Space of the thread
+/// it names, when that thread is in the caller's org, belongs to the caller and sits in a
+/// Space. The thread is the only input; a Space id never comes from the request, so a caller
+/// cannot ask for another Space's skills by naming it. A service caller has no thread of its
+/// own and gets none, and so does a thread that is unknown or someone else's: those answer
+/// with no Space rather than an error, because skills are advisory and the turn goes on.
+#[allow(clippy::result_large_err)]
+async fn skill_space_of_thread(
+    pool: &PgPool,
+    caller: &VerifiedIdentity,
+    org_id: &str,
+    thread_id: &str,
+) -> Result<Option<String>, Status> {
+    let thread_id = thread_id.trim();
+    let Some(user_id) = caller.user_id().filter(|user| !user.is_empty()) else {
+        return Ok(None);
+    };
+    if thread_id.is_empty() {
+        return Ok(None);
+    }
+    let row: Option<(String,)> = sqlx::query_as(
+        "SELECT space_id FROM threads
+         WHERE id = $1 AND org_id = $2 AND user_id = $3
+           AND space_id IS NOT NULL AND space_id <> ''",
+    )
+    .bind(thread_id)
+    .bind(org_id)
+    .bind(user_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| {
+        warn!(%error, "list_agent_skills: thread Space lookup failed");
+        Status::internal(error.to_string())
+    })?;
+    Ok(row.map(|(space_id,)| space_id))
 }
 
 fn encode_ledger_cursor(at: DateTime<Utc>, id: &str) -> String {
@@ -17787,6 +17871,7 @@ mod tests {
                     enabled_only: true,
                     for_user_id: String::new(),
                     kinds: Vec::new(),
+                    thread_id: String::new(),
                 },
             ))
             .await
@@ -17807,6 +17892,7 @@ mod tests {
                     enabled_only: false,
                     for_user_id: String::new(),
                     kinds: Vec::new(),
+                    thread_id: String::new(),
                 },
             ))
             .await
@@ -17832,6 +17918,7 @@ mod tests {
                     enabled_only: true,
                     for_user_id: String::new(),
                     kinds: Vec::new(),
+                    thread_id: String::new(),
                 },
             ))
             .await
@@ -20631,6 +20718,44 @@ mod tests {
         assert!(handler.contains("agent_skill_kinds(&req.kinds)?"));
     }
 
+    /// EP-11 S9: the list reads its Space from the caller's thread, only behind the switch,
+    /// and keeps Space rows out of the owner branch (a Space row has an empty owner, which
+    /// a service caller's empty user would otherwise match).
+    #[test]
+    fn space_rows_listed_only_for_the_threads_own_space() {
+        let source = include_str!("grpc.rs");
+        let handler = &source[source
+            .find("async fn list_agent_skills(")
+            .expect("the handler")..];
+        let handler = &handler[..handler
+            .find("async fn list_conversation(")
+            .expect("the next handler")];
+        assert!(handler.contains("if skill_space_scope_enabled()"));
+        assert!(handler.contains("skill_space_of_thread(&self.pool, &caller, &req.org_id, &req.thread_id)"));
+        assert!(handler.contains("AND ((scope <> 'space'"));
+        assert!(handler.contains("OR (scope = 'space' AND scope_id = $5))"));
+        assert!(!handler.contains("req.space_id"), "a Space id is never read from the request");
+        let lookup = &source[source
+            .find("async fn skill_space_of_thread(")
+            .expect("the lookup")..];
+        let lookup = &lookup[..lookup.find("fn encode_ledger_cursor(").expect("the next fn")];
+        assert!(lookup.contains("WHERE id = $1 AND org_id = $2 AND user_id = $3"));
+        assert!(lookup.contains("caller.user_id()"));
+        let migration = include_str!("../migrations/0111_agent_skills_space_scope.sql");
+        assert!(migration.contains("CHECK (scope IN ('org', 'user', 'space'))"));
+        assert!(migration.contains("CHECK ((scope = 'space') = (scope_id <> ''))"));
+        assert!(migration.contains("CHECK (scope <> 'space' OR owner_user_id = '')"));
+    }
+
+    #[test]
+    fn skill_space_scope_switch_reads_only_true() {
+        assert!(!mp_contracts::loop_fold::switch_from(None));
+        assert!(!mp_contracts::loop_fold::switch_from(Some("1")));
+        assert!(!mp_contracts::loop_fold::switch_from(Some("yes")));
+        assert!(mp_contracts::loop_fold::switch_from(Some("true")));
+        assert_eq!(super::SKILL_SPACE_SCOPE_ENV, "SKILL_SPACE_SCOPE");
+    }
+
     /// EP-11 S6: migration 0109 replaces the version body with the same field list
     /// as 0108, reading the real `kind` and `settings`. Their column defaults equal
     /// 0108's constants, so no existing digest moves.
@@ -20776,6 +20901,7 @@ mod tests {
                         enabled_only: false,
                         for_user_id: String::new(),
                         kinds,
+                        thread_id: String::new(),
                     },
                 ))
                 .await
@@ -21924,6 +22050,226 @@ mod tests {
     // #[ignore]d so plain `cargo test` (no DB) skips it; run with a DB:
     //   DATABASE_URL=… cargo test --bin session-core -- --ignored list_agent_skills_scope
 
+    // EP-11 S9: Space skills. Each test seeds its own org; they set SKILL_SPACE_SCOPE and
+    // run under the DB harness's --test-threads=1.
+
+    async fn space_skill_pool() -> Option<sqlx::PgPool> {
+        let url = std::env::var("DATABASE_URL").ok()?;
+        let pool = sqlx::PgPool::connect(&url).await.expect("connect pg");
+        sqlx::migrate!("./migrations")
+            .run(&pool)
+            .await
+            .expect("migrate");
+        Some(pool)
+    }
+
+    fn space_skill_service(pool: &sqlx::PgPool) -> super::SessionService {
+        super::SessionService {
+            pool: pool.clone(),
+            retrieval_client: None,
+            graph_client: None,
+            knowledge_client: None,
+            letta_memory: None,
+            audit_publisher: None,
+            auth: None,
+            grant_columns: crate::grpc::ThreadGrantColumns::present(),
+        }
+    }
+
+    async fn seed_space_skill(pool: &sqlx::PgPool, id: &str, org_id: &str, space_id: &str) {
+        sqlx::query(
+            "INSERT INTO agent_skills
+                (id, org_id, name, description, content, trigger_keywords,
+                 trigger_file_patterns, tool_restrictions, enabled, origin,
+                 scope, scope_id, owner_user_id, shared_with, created_at, updated_at)
+             VALUES ($1,$2,$1,'d','c','[]','[]','[]',true,'user','space',$3,'','[]',now(),now())",
+        )
+        .bind(id)
+        .bind(org_id)
+        .bind(space_id)
+        .execute(pool)
+        .await
+        .expect("seed Space skill");
+    }
+
+    /// A thread of `user_id`, inside `space_id` when it is not empty.
+    async fn seed_skill_thread(pool: &sqlx::PgPool, id: &str, org_id: &str, user_id: &str, space_id: &str) {
+        if space_id.is_empty() {
+            sqlx::query("INSERT INTO threads (id, session_key, org_id, user_id) VALUES ($1,$1,$2,$3)")
+                .bind(id)
+                .bind(org_id)
+                .bind(user_id)
+                .execute(pool)
+                .await
+                .expect("seed thread");
+            return;
+        }
+        sqlx::query(
+            "INSERT INTO threads
+             (id, session_key, org_id, user_id, space_id, space_decision_ref,
+              recipient_audience_ref, recipient_audience_revision,
+              recipient_audience_hash, privacy_policy_ref,
+              resource_authorization_ref, authority_revision, origin)
+             VALUES ($1,$1,$2,$3,$4,'decision-'||$1,'audience-'||$1,1,$5,
+                     'privacy-'||$1,'resource-'||$1,1,'space')",
+        )
+        .bind(id)
+        .bind(org_id)
+        .bind(user_id)
+        .bind(space_id)
+        .bind(format!("sha256:{}", "c".repeat(64)))
+        .execute(pool)
+        .await
+        .expect("seed Space thread");
+    }
+
+    async fn list_skills_in_thread(
+        svc: &super::SessionService,
+        identity: VerifiedIdentity,
+        org_id: &str,
+        thread_id: &str,
+    ) -> pb::ListAgentSkillsResponse {
+        let mut request = Request::new(pb::ListAgentSkillsRequest {
+            org_id: org_id.to_owned(),
+            enabled_only: true,
+            for_user_id: String::new(),
+            kinds: Vec::new(),
+            thread_id: thread_id.to_owned(),
+        });
+        request.extensions_mut().insert(identity);
+        svc.list_agent_skills(request)
+            .await
+            .expect("list_agent_skills")
+            .into_inner()
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a Postgres with session-core migrations"]
+    async fn space_skill_needs_scope_id() {
+        let Some(pool) = space_skill_pool().await else {
+            eprintln!("skipping: DATABASE_URL unset");
+            return;
+        };
+        let sfx = std::process::id();
+        let org_id = format!("ssn-org-{sfx}");
+        let insert = |id: String, scope: &'static str, scope_id: &'static str, owner: &'static str| {
+            let pool = pool.clone();
+            let org_id = org_id.clone();
+            async move {
+                sqlx::query(
+                    "INSERT INTO agent_skills
+                        (id, org_id, name, description, content, trigger_keywords,
+                         trigger_file_patterns, tool_restrictions, enabled, origin,
+                         scope, scope_id, owner_user_id, shared_with, created_at, updated_at)
+                     VALUES ($1,$2,$1,'d','c','[]','[]','[]',true,'user',$3,$4,$5,'[]',now(),now())",
+                )
+                .bind(id)
+                .bind(org_id)
+                .bind(scope)
+                .bind(scope_id)
+                .bind(owner)
+                .execute(&pool)
+                .await
+            }
+        };
+        assert!(
+            insert(format!("ssn-nospace-{sfx}"), "space", "", "").await.is_err(),
+            "a Space row must name its Space"
+        );
+        assert!(
+            insert(format!("ssn-orgwith-{sfx}"), "org", "space-a", "").await.is_err(),
+            "an org row must not name a Space"
+        );
+        assert!(
+            insert(format!("ssn-userwith-{sfx}"), "user", "space-a", "u1").await.is_err(),
+            "a user row must not name a Space"
+        );
+        assert!(
+            insert(format!("ssn-owned-{sfx}"), "space", "space-a", "u1").await.is_err(),
+            "a Space row has no owner"
+        );
+        assert!(
+            insert(format!("ssn-ok-{sfx}"), "space", "space-a", "").await.is_ok(),
+            "a Space row naming its Space, without an owner, is accepted"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a Postgres with session-core migrations"]
+    async fn space_skill_not_listed_outside_its_space() {
+        let Some(pool) = space_skill_pool().await else {
+            eprintln!("skipping: DATABASE_URL unset");
+            return;
+        };
+        std::env::set_var("SKILL_SPACE_SCOPE", "true");
+        let sfx = std::process::id();
+        let org_id = format!("sso-org-{sfx}");
+        let user = format!("sso-user-{sfx}");
+        let (space_a, space_b) = (format!("sso-space-a-{sfx}"), format!("sso-space-b-{sfx}"));
+        seed_space_skill(&pool, &format!("sso-skill-a-{sfx}"), &org_id, &space_a).await;
+        seed_space_skill(&pool, &format!("sso-skill-b-{sfx}"), &org_id, &space_b).await;
+        let (thread_a, personal) = (format!("sso-thread-a-{sfx}"), format!("sso-personal-{sfx}"));
+        seed_skill_thread(&pool, &thread_a, &org_id, &user, &space_a).await;
+        seed_skill_thread(&pool, &personal, &org_id, &user, "").await;
+        let svc = space_skill_service(&pool);
+        let as_user = || VerifiedIdentity::user_for_test(&org_id, &user);
+
+        let in_a = list_skills_in_thread(&svc, as_user(), &org_id, &thread_a).await;
+        let names: Vec<&str> = in_a.skills.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(in_a.space_id, space_a, "the Space is the thread's own");
+        assert!(names.contains(&format!("sso-skill-a-{sfx}").as_str()), "{names:?}");
+        assert!(!names.contains(&format!("sso-skill-b-{sfx}").as_str()), "another Space's skill leaked: {names:?}");
+
+        let outside = list_skills_in_thread(&svc, as_user(), &org_id, &personal).await;
+        assert!(outside.space_id.is_empty());
+        assert!(outside.skills.iter().all(|s| s.scope != "space"), "a personal thread lists no Space skill");
+        let no_thread = list_skills_in_thread(&svc, as_user(), &org_id, "").await;
+        assert!(no_thread.skills.iter().all(|s| s.scope != "space"), "no thread, no Space skill");
+        // A service caller with an empty user must not match a Space row's empty owner.
+        let service = VerifiedIdentity::service_for_test_as(&org_id, "service:capability-core", &["session:read"], false);
+        let as_service = list_skills_in_thread(&svc, service, &org_id, &thread_a).await;
+        assert!(as_service.skills.iter().all(|s| s.scope != "space"), "a service caller lists no Space skill");
+
+        std::env::set_var("SKILL_SPACE_SCOPE", "false");
+        let switched_off = list_skills_in_thread(&svc, as_user(), &org_id, &thread_a).await;
+        assert!(switched_off.space_id.is_empty());
+        assert!(switched_off.skills.iter().all(|s| s.scope != "space"), "switch off, no Space skill");
+        std::env::remove_var("SKILL_SPACE_SCOPE");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a Postgres with session-core migrations"]
+    async fn space_skill_not_listed_for_non_member_thread() {
+        let Some(pool) = space_skill_pool().await else {
+            eprintln!("skipping: DATABASE_URL unset");
+            return;
+        };
+        std::env::set_var("SKILL_SPACE_SCOPE", "true");
+        let sfx = std::process::id();
+        let org_id = format!("ssm-org-{sfx}");
+        let (member, outsider) = (format!("ssm-member-{sfx}"), format!("ssm-outsider-{sfx}"));
+        let space = format!("ssm-space-{sfx}");
+        seed_space_skill(&pool, &format!("ssm-skill-{sfx}"), &org_id, &space).await;
+        let thread = format!("ssm-thread-{sfx}");
+        seed_skill_thread(&pool, &thread, &org_id, &member, &space).await;
+        let svc = space_skill_service(&pool);
+
+        // Naming another person's Space thread does not reach that Space.
+        let outsider_view =
+            list_skills_in_thread(&svc, VerifiedIdentity::user_for_test(&org_id, &outsider), &org_id, &thread).await;
+        assert!(outsider_view.space_id.is_empty());
+        assert!(outsider_view.skills.iter().all(|s| s.scope != "space"), "{:?}", outsider_view.skills);
+        // Nor does a caller of another org naming the thread.
+        let other_org = format!("ssm-other-org-{sfx}");
+        let foreign =
+            list_skills_in_thread(&svc, VerifiedIdentity::user_for_test(&other_org, &member), &other_org, &thread).await;
+        assert!(foreign.skills.iter().all(|s| s.scope != "space"));
+        let member_view =
+            list_skills_in_thread(&svc, VerifiedIdentity::user_for_test(&org_id, &member), &org_id, &thread).await;
+        assert_eq!(member_view.space_id, space, "the thread's owner gets its Space");
+        std::env::remove_var("SKILL_SPACE_SCOPE");
+    }
+
     #[tokio::test]
     #[ignore = "requires DATABASE_URL to a Postgres with session-core migrations"]
     async fn list_agent_skills_scope_enforcement_against_real_pg() {
@@ -22030,6 +22376,7 @@ mod tests {
                     enabled_only: false,
                     for_user_id: String::new(),
                     kinds: Vec::new(),
+                    thread_id: String::new(),
                 });
                 request
                     .extensions_mut()
@@ -22095,6 +22442,7 @@ mod tests {
                     enabled_only: false,
                     for_user_id,
                     kinds: Vec::new(),
+                    thread_id: String::new(),
                 });
                 request.extensions_mut().insert(identity);
                 svc.list_agent_skills(request)

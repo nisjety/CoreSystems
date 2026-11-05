@@ -1166,6 +1166,14 @@ message ListAgentSkillsRequest {
   // presets (the gateway's match cache, recovery, the learning review) can
   // never see one. An unknown kind is refused as invalid_argument.
   repeated string kinds = 4;
+  // EP-11 S9. The thread the turn runs in. While session-core's
+  // SKILL_SPACE_SCOPE is on and the caller owns this thread, session-core reads
+  // the thread's own Space (threads.space_id, never a Space the caller names)
+  // and adds that Space's skills to the answer. Empty, unknown, not the
+  // caller's, or not in a Space: no Space skill is returned. Ignored while the
+  // switch is off. (Round B reserved field 5 as `space_id`; it carries the
+  // thread instead, so the Space is always resolved server-side.)
+  string thread_id = 5;
 }
 
 message AgentSkill {
@@ -1218,6 +1226,11 @@ message AgentSkill {
 
 message ListAgentSkillsResponse {
   repeated AgentSkill skills = 1;
+  // EP-11 S9. The Space session-core resolved `thread_id` to, set whenever it
+  // did so and listed that Space's skills (rows with scope "space"; possibly
+  // none). The gateway caches those rows under this Space alone, apart from the
+  // org's and the caller's own. Empty: no Space was resolved.
+  string space_id = 2;
 }
 
 // --- ListConversation (G7 transcript source) ---

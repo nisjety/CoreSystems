@@ -3768,6 +3768,7 @@ pub async fn invoke_stream_sse(
         capability_bearer.as_ref().map(VerifiedCapabilityBearer::as_str),
         &org_id,
         &user_id,
+        &session_run.thread_id,
         &req.content,
         &crate::context_refs::merged_skill_ids(&req.skill_ids, context_refs.as_ref()),
     )
@@ -8229,6 +8230,7 @@ async fn fetch_skill_context(
     capability_bearer: Option<&str>,
     org_id: &str,
     user_id: &str,
+    thread_id: &str,
     query: &str,
     requested: &[String],
 ) -> SkillContext {
@@ -8237,10 +8239,20 @@ async fn fetch_skill_context(
     if org_id.trim().is_empty() {
         return SkillContext::default();
     }
+    // EP-11 S9: with Space skills on, the pull names the turn's thread and session-core adds
+    // the skills of that thread's own Space. Off, the thread is not sent and no shelf is read.
+    let space_thread = if crate::skills::space_scope_enabled() {
+        thread_id.trim()
+    } else {
+        ""
+    };
     // §G7 read path: pull this org's LEARNED skills (session-core agent_skills)
     // into the match cache, re-pulling once the cached copy goes stale so an
     // operator's edit or deletion lands without a gateway restart.
-    if !state.skills.is_loaded(org_id, user_id) {
+    if !state.skills.is_loaded(org_id, user_id)
+        || (!space_thread.is_empty()
+            && !state.skills.is_thread_space_loaded(org_id, user_id, space_thread))
+    {
         if let Ok(request) = authenticated_session_request(
             ListAgentSkillsRequest {
                 org_id: org_id.to_owned(),
@@ -8248,6 +8260,7 @@ async fn fetch_skill_context(
                 for_user_id: String::new(),
                 // EP-11 S6: no kinds = skills only; a template or preset is never matched or injected.
                 kinds: Vec::new(),
+                thread_id: space_thread.to_owned(),
             },
             bearer,
         ) {
@@ -8261,13 +8274,23 @@ async fn fetch_skill_context(
                 // cache must also FORGET skills the operator deleted, or a
                 // removed skill keeps steering answers indefinitely. The pull is
                 // this caller's, so it replaces only this caller's share, and
-                // ownership (SKILL-1) is recorded from the same pull.
-                Ok(resp) => state.skills.refresh_learned(
-                    &state.ownership,
-                    org_id,
-                    user_id,
-                    resp.into_inner().skills,
-                ),
+                // ownership (SKILL-1) is recorded from the same pull. Space rows
+                // go to their Space's shelf alone, never into either bucket.
+                Ok(resp) => {
+                    let listed = resp.into_inner();
+                    if !space_thread.is_empty() {
+                        state.skills.refresh_space(
+                            org_id,
+                            user_id,
+                            space_thread,
+                            &listed.space_id,
+                            &listed.skills,
+                        );
+                    }
+                    state
+                        .skills
+                        .refresh_learned(&state.ownership, org_id, user_id, listed.skills);
+                }
                 Err(error) => {
                     tracing::warn!(%error, %org_id, "list_agent_skills failed; matching disk-loaded skills only");
                 }
@@ -8286,9 +8309,60 @@ async fn fetch_skill_context(
         requested,
         MAX_REQUESTED_SKILLS,
     );
+    // The Space's shelf (EP-11 S9), empty outside a Space thread and while the switch is off.
+    // A picked id the org catalogue did not hold may name one of its skills.
+    let space_skills = if space_thread.is_empty() {
+        Vec::new()
+    } else {
+        crate::skills::usable_space_skills(
+            org_id,
+            state.skills.space_skills_for(org_id, user_id, space_thread),
+        )
+    };
+    let mut requested_skills = requested_skills;
+    for raw in requested {
+        if requested_skills.len() >= MAX_REQUESTED_SKILLS {
+            break;
+        }
+        let id = raw.trim();
+        if requested_skills.iter().any(|s| s.id == id) {
+            continue;
+        }
+        if let Some(skill) = space_skills.iter().find(|s| s.id == id) {
+            requested_skills.push(skill.clone());
+        }
+    }
     let requested_ids: Vec<String> = requested_skills.iter().map(|s| s.id.clone()).collect();
     let mut chosen: Vec<Skill> = requested_skills;
-    if let Ok(matched) = crate::skills::handle_match_skills(
+    if !space_skills.is_empty() {
+        // Org and Space matches compete on one score, so a Space thread gets the same number of
+        // keyword matches as any other, not more.
+        let mut matches = crate::skills::match_space_skills(&space_skills, query);
+        if let Ok(matched) = crate::skills::handle_match_skills(
+            &state.skills,
+            MatchSkillsRequest {
+                request_id: String::new(),
+                org_id: org_id.to_owned(),
+                query: query.to_owned(),
+                limit: MAX_INJECTED_SKILLS,
+                min_score: 0.0,
+            },
+            &state.ownership,
+            user_id,
+        ) {
+            matches.extend(matched.matches);
+        }
+        matches.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        for skill in matches
+            .into_iter()
+            .filter_map(|m| m.skill)
+            .take(usize::try_from(MAX_INJECTED_SKILLS).unwrap_or(0))
+        {
+            if !chosen.iter().any(|c| c.id == skill.id) {
+                chosen.push(skill);
+            }
+        }
+    } else if let Ok(matched) = crate::skills::handle_match_skills(
         &state.skills,
         MatchSkillsRequest {
             request_id: String::new(),
@@ -26374,5 +26448,20 @@ mod authored_kinds_tests {
         assert!(literal.contains("kinds: Vec::new()"), "the match cache must ask for skills only: {literal}");
         assert!(!literal.contains("\"template\""), "the match cache must never name templates: {literal}");
         assert!(!literal.contains("\"preset\""), "the match cache must never name presets: {literal}");
+    }
+
+    /// EP-11 S9: the pull names the turn's thread only while Space skills are on, never a Space
+    /// id, and Space rows are cached on their own shelf before the org refresh sees the list.
+    #[test]
+    fn space_skills_follow_the_thread_behind_the_switch() {
+        let source = include_str!("sse.rs");
+        let start = source.find("async fn fetch_skill_context(").expect("fetch_skill_context is in sse.rs");
+        let body = &source[start..];
+        let body = &body[..body.find("async fn skill_bundle_summaries(").expect("the next fn")];
+        assert!(body.contains("if crate::skills::space_scope_enabled() {"));
+        assert!(body.contains("thread_id: space_thread.to_owned(),"));
+        assert!(!body.contains("space_id: "), "the pull never names a Space");
+        assert!(body.contains("state.skills.refresh_space("));
+        assert!(body.contains("crate::skills::usable_space_skills("));
     }
 }
