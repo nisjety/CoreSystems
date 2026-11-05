@@ -3938,6 +3938,28 @@ Built so far: WS13-S0, WS13-S1, WS13-S2; WS14-S1, WS14-S2 (partial), WS14-S3; WS
 | D3-1213 | W3-23 guard | follow-up | P2 | guard skipped: EP-12-S5 session-core needs (SC auth.rs API_KEY_METHODS StreamRunEvents, RpcPathStamp wrap in grpc.rs, orchestration:read for api_key): these call for design work in another slice, not a shared edit. Until then, GET /v1/agent/runs/:id/events for a key emits run_events_unavailable. | open |
 | D3-1214 | W3-23 guard | follow-up | P2 | guard skipped: Guard test runs listed in lead_todo (go test, cargo test, vitest): skipped because the task forbids tests beyond the golden generation step | open |
 
+
+### Wave-mode batch W3-24 (2026-11-05)
+
+| ID | Slice | Kind | P | Finding | Status |
+|---|---|---|---|---|---|
+| D3-1215 | EP-12-S7 | follow-up | P1 | The start cannot complete live until session-core admits StartManagedRun for an api_key caller (API_KEY_METHODS entry, owner_id in start_managed_run) and stamps origin:api on managed starts; today a key's start is permission_denied and the route answers internal_error. | open |
+| D3-1216 | EP-12-S7 | risk | P1 | No cost-core budget pre-check runs for a key turn (D3-517): the turn is metered after the fact through USAGE_ENVELOPE (transport agent_api, user apikey:<id>) and capped only by 2 live runs per key per replica and the ingress rate limit. | open |
+| D3-1217 | EP-12-S7 | live-proof | P1 | With S2, S4 (plus the StartManagedRun edit), S6 and S7 on: a key POSTs /v1/agent/runs, gets 202, polls GET /v1/agent/runs/:id to completed with metadata.origin=api, reads the answer from /threads/:id/messages; a third concurrent run gets 429; a tools field gets 422; a ZDR key gets 412 with zero new rows. | open |
+| D3-1218 | EP-12-S7 | live-proof | P1 | guard: run rustfmt on agent_api_run.rs, agent_api_routes.rs and auth.rs; lines were hand-wrapped at 100 columns and rustfmt was not run. | open |
+| D3-1219 | EP-12-S7 | live-proof | P1 | guard: cargo test -q -p model-gateway --lib agent_api_run; cargo test -q -p model-gateway --lib agent_api_routes; cargo test -q -p model-gateway --lib auth::tests; cargo test -q -p model-gateway --lib api_key_route_fence_tests; cargo test -q -p model-gateway --lib zdr_posture. | open |
+| D3-1220 | EP-12-S7 | live-proof | P1 | No zdr-posture-matrix row: the ZDR refusal for this route is a feature refusal (`agent_api`) given in admit, so per the rule no row is added. | open |
+| D3-1221 | EP-12-S7 | risk | P2 | model_access::admit asks GetModelAccess with the key's inference bearer, which inference-core refuses for api_key (permission_denied, not a typed refusal); admission therefore reads 'unchecked' with a warn per turn, and the policy is enforced only at Infer, after the run row exists. | open |
+| D3-1222 | EP-12-S7 | risk | P2 | A key's cancel stops the model call only on the replica running the turn; another replica's turn is not reached through the run-control bus and sees the cancel only when complete_direct_inference_run_with_message reports AlreadyTerminal. | open |
+| D3-1223 | EP-12-S7 | follow-up | P3 | 7 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W3-24.json | open |
+| D3-1224 | EP-12-S12 | test-gap | P1 | The four new Vitest files and the chat-client test were written code-first and never run; the guard must run them and the tsc6 typecheck before VITE_THREAD_EXPORT is switched on. | open |
+| D3-1225 | EP-12-S12 | decision | P2 | The export control appears only on the latest assistant answer, where fork appears on every answer, so a thread shows one export entry; the owner should confirm this placement or ask for a thread-level control. | open |
+| D3-1226 | EP-12-S12 | risk | P2 | Until the ChatPage shared-edit lands, the control also shows on Space-scoped threads, where the person then sees the server's space_thread refusal; the server remains the authority. | open |
+| D3-1227 | EP-12-S12 | risk | P2 | exportThread omits the Authorization header that requestJson adds under VITE_ALLOW_DEV_AUTH_BYPASS, so an export in a dev-bypass build can be refused locally; the fix belongs in a shared raw-fetch helper in http.ts, which this slice does not own. | open |
+| D3-1228 | EP-12-S12 | live-proof | P2 | Still owed in the depth phase: the lazy replay inside a message row (Loading fallback, Portal overlay, focus and Escape) at 1280 and 375 px in both themes, with the Norwegian copy checked in the live UI. | open |
+| D3-1229 | EP-12-S12 | risk | P3 | Refusals with codes the menu does not name, such as thread_export_unavailable, show the server's English sentence; a Norwegian mapping for them is a copy follow-up. | open |
+| D3-1230 | EP-12-S12 | cleanup | P3 | Each replay open reads the whole redacted export again (bounded server-side at 2,000 messages and 8 MiB); a per-thread cache is a later choice if long threads feel slow. | open |
+
 ## Cross-wave
 
 | ID | Kind | P | Finding | Status |
