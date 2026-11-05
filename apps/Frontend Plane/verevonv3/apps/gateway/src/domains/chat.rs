@@ -83,6 +83,12 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
                 .put(history::set_thread_goal)
                 .patch(history::update_thread_goal),
         )
+        // The owner's export of one conversation (Wave 3 EP-12 S11): Model Gateway's file, relayed
+        // unchanged. 404 `thread_export_disabled` from Model Gateway while its switch is off.
+        .route(
+            "/api/v1/chat/threads/{thread_id}/export",
+            get(history::export_thread),
+        )
         .route(
             "/api/v1/chat/stream/resume/{request_id}",
             get(streams::resume_stream),

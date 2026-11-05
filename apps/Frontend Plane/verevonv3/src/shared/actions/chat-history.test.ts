@@ -31,4 +31,22 @@ describe('chat history action contract', () => {
       parseChatHistoryAction({ type: 'thread.rewind', threadId: 'thread-1', messageId: 'message-4', confirm: true }).type,
     ).toBe('thread.rewind')
   })
+
+  it('accepts an export of one thread in either format and profile, with the id trimmed', () => {
+    expect(
+      parseChatHistoryAction({ type: 'thread.export', threadId: ' thread-1 ', format: 'markdown', profile: 'redacted' }),
+    ).toEqual({ type: 'thread.export', threadId: 'thread-1', format: 'markdown', profile: 'redacted' })
+    expect(parseChatHistoryAction({ type: 'thread.export', threadId: 'thread-1', format: 'json', profile: 'full' }).type).toBe(
+      'thread.export',
+    )
+  })
+
+  it('refuses an export with a choice missing, an unknown format or profile, or a blank thread', () => {
+    // Neither choice has a default, so a caller that leaves one out is refused.
+    expect(() => parseChatHistoryAction({ type: 'thread.export', threadId: 'thread-1', format: 'json' })).toThrow()
+    expect(() => parseChatHistoryAction({ type: 'thread.export', threadId: 'thread-1', profile: 'full' })).toThrow()
+    expect(() => parseChatHistoryAction({ type: 'thread.export', threadId: 'thread-1', format: 'pdf', profile: 'full' })).toThrow()
+    expect(() => parseChatHistoryAction({ type: 'thread.export', threadId: 'thread-1', format: 'json', profile: 'everything' })).toThrow()
+    expect(() => parseChatHistoryAction({ type: 'thread.export', threadId: '   ', format: 'json', profile: 'full' })).toThrow()
+  })
 })
