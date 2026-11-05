@@ -518,6 +518,8 @@ export function BrowserChrome(props: {
   /** Omnibox search (WS9.A). Defaults to the build flag VITE_BROWSER_OMNIBOX_SEARCH. */
   searchEnabled?: boolean
   onBrowserSelectTab?: (tabId: string) => Promise<void> | void
+  /** Tab context menu (WS9 tab strip): close the named tab. Omit it and Close is not offered. */
+  onBrowserCloseTab?: (tabId: string) => Promise<void> | void
   onBrowserSuggestAction?: (goal: string) => Promise<BrowserActionSuggestionResponse | null>
   onBrowserSocketObservation?: (observation: BrowserObservation, session?: BrowserSession) => void
   /** "Try another source" in the blocked notice: leave the site the observation says blocks automation. */
@@ -562,6 +564,25 @@ export function BrowserChrome(props: {
   const [liveFrameTick, setLiveFrameTick] = createSignal(0)
   const [actionTarget, setActionTarget] = createSignal<BrowserActionTarget | null>(null)
   const [frameAspectMatches, setFrameAspectMatches] = createSignal(false)
+  // Tab context menu (WS9 tab strip, behind VITE_BROWSER_TAB_MENU=true).
+  const [tabMenu, setTabMenu] = createSignal<{ tabId: string } | null>(null)
+  const tabMenuEnabled = () => import.meta.env.VITE_BROWSER_TAB_MENU === 'true'
+  const tabMenuTab = () => {
+    const menu = tabMenu()
+    return menu ? session().tabs.find((tab) => tab.tabId === menu.tabId) ?? null : null
+  }
+  const tabOutsideUrl = (tab: BrowserTab): string | null => {
+    if (!tab.url) return null
+    try {
+      const url = new URL(tab.url)
+      return url.protocol === 'https:' || url.protocol === 'http:'
+        ? url.href
+        : null
+    } catch {
+      return null
+    }
+  }
+  const closeTabMenu = () => setTabMenu(null)
   let addressInputRef: HTMLInputElement | undefined
   let pendingObservedAddress: string | null = null
   let lastWheelDispatchMs = 0
@@ -1334,11 +1355,18 @@ export function BrowserChrome(props: {
                     role="tab"
                     disabled={props.browserBusy}
                     aria-selected={selectedTimelineStep() === null && tab.active ? 'true' : 'false'}
+                    aria-haspopup="menu"
+                    aria-expanded={tabMenu()?.tabId === tab.tabId ? 'true' : 'false'}
                     class={['knowledge-browser-tab', { 'knowledge-browser-tab--active': selectedTimelineStep() === null && tab.active }]}
                     title={`Live · ${liveTabLabel(tab)}`}
                     onClick={() => {
                       setSelectedTimelineStep(null)
                       if (!tab.active) void props.onBrowserSelectTab?.(tab.tabId)
+                    }}
+                    onContextMenu={(event) => {
+                      if (!tabMenuEnabled()) return
+                      event.preventDefault()
+                      setTabMenu({ tabId: tab.tabId })
                     }}
                   >
                     <Show when={tab.openedBy === 'agent'}>
@@ -1405,6 +1433,50 @@ export function BrowserChrome(props: {
                 <Plus class="size-3.5" />
               </button>
             </div>
+          </Show>
+          <Show when={tabMenuEnabled() && tabMenuTab()}>
+            {(tab) => (
+              <div
+                class="knowledge-browser-tab-menu"
+                role="menu"
+                aria-label={`Fanealternativ for ${liveTabLabel(tab())}`}
+                onKeyDown={(event) => { if (event.key === 'Escape') closeTabMenu() }}
+              >
+                <button
+                  type="button"
+                  role="menuitem"
+                  disabled={tab().active || props.browserBusy}
+                  onClick={() => { closeTabMenu(); setSelectedTimelineStep(null); void props.onBrowserSelectTab?.(tab().tabId) }}
+                >
+                  Vis fane
+                </button>
+                <button
+                  type="button"
+                  role="menuitem"
+                  disabled={controlsDisabled()}
+                  onClick={() => { closeTabMenu(); void prepareNewTabNavigation() }}
+                >
+                  Ny fane
+                </button>
+                <Show when={props.onBrowserCloseTab && session().tabs.length > 1}>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    disabled={controlsDisabled()}
+                    onClick={() => { closeTabMenu(); void props.onBrowserCloseTab?.(tab().tabId) }}
+                  >
+                    Lukk fane
+                  </button>
+                </Show>
+                <Show when={tabOutsideUrl(tab())}>
+                  {(url) => (
+                    <a role="menuitem" href={url()} target="_blank" rel="noopener noreferrer" onClick={closeTabMenu}>
+                      Åpne utenfor Verevon
+                    </a>
+                  )}
+                </Show>
+              </div>
+            )}
           </Show>
         </div>
         {props.frameControls}

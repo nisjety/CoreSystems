@@ -79,6 +79,17 @@ export function GlobalAssistant(props: {
   const [revealed, setRevealed] = createSignal(untrack(() => props.forceReveal === true))
   const minimized = () => layout().dockMinimized && !revealed()
   const expanded = () => layout().dockExpanded || revealed()
+  // WS9.G dock positions. Off unless VITE_ASSISTANT_DOCK_POSITION=true; when off
+  // the dock stays at its bottom position and the saved preference is ignored.
+  const dockPositionEnabled = () => import.meta.env.VITE_ASSISTANT_DOCK_POSITION === 'true'
+  const dockPosition = () => (dockPositionEnabled() ? layout().dockPosition : 'bottom')
+  const dockClass = () => `global-assistant global-assistant--dock-${dockPosition()}`
+  const cycleDockPosition = () => {
+    const order = ['bottom', 'right', 'left'] as const
+    const current = layout().dockPosition
+    const next = order[(order.indexOf(current) + 1) % order.length]
+    updateLayout({ dockPosition: next })
+  }
   createEffect(() => props.message, (message) => { if (message.trim() && minimized()) setRevealed(true) })
   const setMinimized = (next: boolean) => { setRevealed(false); updateLayout({ dockMinimized: next }) }
   const setExpanded = (next: boolean) => { setRevealed(false); updateLayout({ dockMinimized: false, dockExpanded: next }) }
@@ -154,7 +165,7 @@ export function GlobalAssistant(props: {
     }
   }
   return (
-    <section class="global-assistant" role="region" aria-label={i18n.tr('Spør Verevon', 'Ask Verevon')}>
+    <section class={dockClass()} role="region" aria-label={i18n.tr('Spør Verevon', 'Ask Verevon')}>
       <div class="global-assistant__header">
         <button type="button" onClick={() => setMinimized(!minimized())} aria-expanded={minimized() ? 'false' : 'true'} aria-label={minimized() ? i18n.tr('Åpne skrivefelt', 'Expand chat bar') : i18n.tr('Minimer skrivefelt', 'Minimize chat bar')}>
           <Show when={minimized()} fallback={<Minus size={16} />}><Plus size={16} /></Show>
@@ -163,6 +174,11 @@ export function GlobalAssistant(props: {
         <strong>{i18n.tr('Spør Verevon', 'Ask Verevon')}</strong>
         <Show when={minimized() && compactStatus()} fallback={<button type="button" class="global-assistant__new" disabled={agentBusy() || pending() || props.state.status === 'sending' || props.state.status === 'streaming' || props.state.status === 'stopping'} onClick={() => { setError(null); props.onNewChat() }}>{i18n.tr('Ny oppgave', 'New task')}</button>}>
           {(status) => <button type="button" class="global-assistant__summary" onClick={() => setMinimized(false)}><span role="status">{status()}</span><ChevronUp size={14} aria-hidden="true" /></button>}
+        </Show>
+        <Show when={dockPositionEnabled() && !minimized()}>
+          <button type="button" class="global-assistant__dockpos" onClick={cycleDockPosition} aria-label={i18n.tr('Bytt posisjon for skrivefeltet', 'Change dock position')}>
+            <Show when={dockPosition() === 'right'} fallback={<Show when={dockPosition() === 'left'} fallback={<span aria-hidden="true">↓</span>}><span aria-hidden="true">←</span></Show>}><span aria-hidden="true">→</span></Show>
+          </button>
         </Show>
         <Show when={!minimized()}>
           <button type="button" onClick={() => setExpanded(!expanded())} aria-expanded={expanded() ? 'true' : 'false'} aria-label={expanded() ? i18n.tr('Gjør skrivefeltet mindre', 'Make composer smaller') : i18n.tr('Utvid skrivefelt', 'Expand composer')}>

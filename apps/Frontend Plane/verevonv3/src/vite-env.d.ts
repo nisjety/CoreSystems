@@ -12,6 +12,10 @@ interface ImportMetaEnv {
 	readonly VITE_BROWSER_TAB_MENTIONS?: string;
 	/** "1" mounts the shared approval card in BrowserChrome and the chat deck (E3.2-b swap). Default off. */
 	readonly VITE_BROWSER_APPROVAL_CARD?: string;
+	/** "true" offers dock position choices (bottom/right/left) for the GlobalAssistant dock. Default off. */
+	readonly VITE_ASSISTANT_DOCK_POSITION?: string;
+	/** "true" shows the browser tab context menu (select/new/close/open-outside). Default off. */
+	readonly VITE_BROWSER_TAB_MENU?: string;
 	/** "1" compiles in the product-scene runtime (src/demo). Never set in production. */
 	readonly VITE_SCENE_MODE?: string;
 	readonly VITE_PLAN_EXECUTE_ENABLED?: string;

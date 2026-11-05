@@ -24,6 +24,7 @@ import { leftWithRunControlsDisabled, runControlsDisabledNotice } from './browse
 import { getAuthSession, getSessionContext } from '@/shared/api/auth-client'
 import {
   closeBrowserSession,
+  closeBrowserTab,
   createBrowserTab,
   createBrowserSession,
   createBrowserProfile,
@@ -1230,6 +1231,25 @@ export function KnowledgeComposer(props: {
     }
   }
 
+  const closePreviewBrowserTab = async (tabId: string) => {
+    cancelTabRefresh()
+    const current = preview()
+    const sessionId = current?.browserSession?.session.id
+    const id = orgId()
+    if (!current || !sessionId || !id || browserBusy() || assistantHandoff()) return
+    setBrowserBusy(true)
+    setFormError(null)
+    try {
+      const nextTabs = await closeBrowserTab(id, sessionId, tabId)
+      setPreview(attachBrowserTabs(current, nextTabs))
+      void refreshBrowserOwnerTimeline(sessionId)
+    } catch (reason) {
+      setFormError(browserErrorMessage(reason, i18n.tr, { no: 'Kunne ikke lukke nettleserfanen.', en: 'Could not close the browser tab.' }))
+    } finally {
+      setBrowserBusy(false)
+    }
+  }
+
   const handleBrowserSocketObservation = (observation: BrowserObservation, session?: BrowserSession) => {
     const current = preview()
     if (!current?.browserSession) return
@@ -2091,6 +2111,7 @@ export function KnowledgeComposer(props: {
             onBrowserNewTab={createPreviewBrowserTab}
             onKeepAlive={keepAliveBrowser}
             onBrowserSelectTab={selectPreviewBrowserTab}
+            onBrowserCloseTab={closePreviewBrowserTab}
             onBrowserSuggestAction={current.browserSession?.session.capabilities.includes('human_browsing') ? undefined : performBrowserSuggestedAction}
             onBrowserSocketObservation={handleBrowserSocketObservation}
             onBrowserTryOtherSource={() => void tryOtherSourceAfterBlock()}
