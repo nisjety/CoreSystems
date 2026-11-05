@@ -702,6 +702,20 @@ pub(crate) async fn create_session(
     if let Some((code, message)) = reject_zdr_persistent_profile(zdr, profile_scope) {
         return (StatusCode::BAD_REQUEST, Json(error(code, message))).into_response();
     }
+    // The assistant browser cannot attach under ZDR (start_ai_run and
+    // capabilities both refuse it). Refuse here, before any grant is issued
+    // or any Quarry session is created, so a ZDR caller never holds an
+    // issuable-but-unusable assistant_task grant.
+    if body.purpose == Some(BrowserSessionPurpose::AssistantTask) && zdr {
+        return (
+            StatusCode::CONFLICT,
+            Json(error(
+                "browser_attach_zdr_unsupported",
+                "The assistant browser is not available under zero data retention.",
+            )),
+        )
+            .into_response();
+    }
     let cookie = cookie_header(&headers);
     let token = quarry_token(&state, &user, &cookie).await;
     let resolved_start_url = if body.purpose == Some(BrowserSessionPurpose::AssistantTask)
@@ -8209,6 +8223,34 @@ pub(crate) mod tests {
             );
             assert!(requests_to(&up.quarry, "POST", "/v1/browser/redirect-hop").await.is_empty());
             assert!(requests_to(&up.quarry, "POST", "/v1/agent/runs").await.is_empty());
+        }
+
+        #[tokio::test]
+        async fn assistant_task_session_is_refused_under_zdr_before_any_grant() {
+            for org_zdr in [false, true] {
+                let up = upstreams().await;
+                if org_zdr {
+                    Mock::given(wm_method("GET"))
+                        .and(wm_path("/api/v1/organizations/org-a"))
+                        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                            "data": { "metadata": { "interactiveRetention": { "zdr": true } } }
+                        })))
+                        .with_priority(1).mount(&up.org).await;
+                }
+                let (status, body) = create_with_body(
+                    state(&up, BrowserGrantMode::Strict),
+                    json!({
+                        "url": "https://example.com/",
+                        "purpose": "assistant_task",
+                        "zdr": !org_zdr,
+                    }),
+                )
+                .await;
+                assert_eq!(status, StatusCode::CONFLICT, "{body}");
+                assert_eq!(body["error"]["code"], "browser_attach_zdr_unsupported");
+                assert!(requests_to(&up.model, "POST", "/v1/browser/grants").await.is_empty());
+                assert!(requests_to(&up.quarry, "POST", "/v1/agent/runs").await.is_empty());
+            }
         }
 
         #[tokio::test]
