@@ -876,6 +876,7 @@ export function AssistantMessage(props: {
                 streaming={props.message.streaming}
                 temporaryChat={props.temporaryChat}
                 onSelectFollowUp={props.onSelectFollowUp}
+                runId={props.message.runId}
               />
             </Show>
           </InlineWidgetSurface>

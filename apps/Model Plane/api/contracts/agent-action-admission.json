@@ -683,6 +683,19 @@
       "zdr_allowed": false
     },
     {
+      "actionId": "chat.mcp_app_tool_call",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "read",
+      "exemptReason": "agent_cannot_self_govern",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:b1e80438cb2d4a2f7bdfc395516071197bc7c5bd02bfb3448762d834d9f05509",
+      "zdr_allowed": false
+    },
+    {
       "actionId": "chat.open_cited_passage",
       "registry": true,
       "access": "none",
@@ -3028,6 +3041,19 @@
       "zdr_allowed": false
     },
     {
+      "actionId": "skills.import",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "context_write",
+      "exemptReason": "agent_cannot_self_govern",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:05c23f584445e8fde24fb5c40adce8f8d63165e5b4617d3ef3f78a83c7d9fa3b",
+      "zdr_allowed": false
+    },
+    {
       "actionId": "skills.publish",
       "registry": true,
       "access": "none",
@@ -3863,6 +3889,19 @@
       "executor": {},
       "hashBasis": "catalog_entry",
       "schemaHash": "sha256:9572d77d466596a3b6641b17d69097483084cf8b50349857e046900022937ef6",
+      "zdr_allowed": false
+    },
+    {
+      "actionId": "thread.export",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "read",
+      "exemptReason": "no_owner_executor",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:cbf29008acba5e792fc12df267d4157b3444d1927633b97390f782492b8531fa",
       "zdr_allowed": false
     },
     {

@@ -761,6 +761,11 @@ pub(crate) mod tests {
                 "posture equality between an api key's ingress and broker bearers, not a decision",
             ),
             (
+                "auth.rs",
+                "verify_delegated_api_key_session_bearer",
+                "posture equality between an api key's ingress and session bearers, not a decision",
+            ),
+            (
                 "grpc_auth.rs",
                 "verify_delegated_bearer",
                 "posture equality across the user bearers of one gRPC request, not a decision",

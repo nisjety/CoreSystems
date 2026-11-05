@@ -299,6 +299,7 @@ func main() {
 	// recPub makes reconcile.Emit a no-op).
 	api.NewSkillsHandler(pool).WithPublisher(recPub).Register(protectedMux)
 	api.NewSkillBundlesHandler(pool, api.SkillBundlesAPIFromLookup(os.Getenv)).Register(protectedMux)
+	api.NewSkillImportHandler(pool, api.SkillImportFromLookup(os.Getenv)).WithPublisher(recPub).Register(protectedMux)
 	api.NewPluginsHandler(pool).WithPublisher(recPub).Register(protectedMux)
 	// Behind ORG_AGENT_POLICY_API (off by default): the handler answers 404 while it is off.
 	api.NewOrgAgentPolicyHandler(pool, api.OrgAgentPolicyAPIFromLookup(os.Getenv)).Register(protectedMux)

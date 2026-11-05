@@ -801,7 +801,7 @@ pub(crate) async fn proxy_model_json_with_inference(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn proxy_model_json_with_delegations(
+pub(crate) async fn proxy_model_json_with_delegations(
     state: &AppState,
     method: Method,
     url: &str,

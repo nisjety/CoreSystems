@@ -68,13 +68,16 @@ type SkillsHandler struct {
 	// bundleRetention is SKILL_BUNDLE_RETENTION (EP-11 S5): on, a publish also makes the draft's
 	// bundle live and a skill delete removes the skill's bundles; off, neither touches a bundle.
 	bundleRetention bool
+	// importEnabled is SKILL_IMPORT_ENABLED (EP-11 S8, with bundles and drafts): on, the listing says so
+	// and the Skills page offers an import; off, every body is as it was.
+	importEnabled bool
 }
 
 // NewSkillsHandler constructs the handler.
 func NewSkillsHandler(pool registryDatabase) *SkillsHandler {
 	return &SkillsHandler{pool: pool, lintMode: skilllint.ModeFromLookup(os.Getenv), versionsAPI: SkillVersionsAPIFromLookup(os.Getenv),
 		authoredKinds: AuthoredKindsFromLookup(os.Getenv), draftPublish: DraftPublishFromLookup(os.Getenv),
-		bundleRetention: skillbundle.RetentionFromLookup(os.Getenv)}
+		bundleRetention: skillbundle.RetentionFromLookup(os.Getenv), importEnabled: SkillImportFromLookup(os.Getenv)}
 }
 
 const draftPublishEnv = "SKILL_DRAFT_PUBLISH"
@@ -532,6 +535,10 @@ func (h *SkillsHandler) listOrCreate(w http.ResponseWriter, r *http.Request) {
 		// EP-11 S5: the Skills page offers draft controls only when the listing says drafts are on.
 		if h.draftPublish {
 			body["drafts_enabled"] = true
+		}
+		// EP-11 S8: the Skills page offers an import only when the listing says it is on.
+		if h.importEnabled {
+			body["import_enabled"] = true
 		}
 		writeJSON(w, body)
 	case http.MethodPost:

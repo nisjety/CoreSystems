@@ -3935,6 +3935,8 @@ Built so far: WS13-S0, WS13-S1, WS13-S2; WS14-S1, WS14-S2 (partial), WS14-S3; WS
 | D3-1210 | EP-12-S11 | risk | P2 | The relay buffers the whole rendering before replying, so one export holds about one copy of the conversation in gateway memory (the upstream text cap is 8 MiB per EP-12 S9). | open |
 | D3-1211 | EP-12-S11 | follow-up | P2 | needed an edit outside the slice's files: apps/Frontend Plane/verevonv3/src/shared/actions/model-access.ts | open |
 | D3-1212 | EP-12-S11 | follow-up | P3 | 2 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W3-23.json | open |
+| D3-1213 | W3-23 guard | follow-up | P2 | guard skipped: EP-12-S5 session-core needs (SC auth.rs API_KEY_METHODS StreamRunEvents, RpcPathStamp wrap in grpc.rs, orchestration:read for api_key): these call for design work in another slice, not a shared edit. Until then, GET /v1/agent/runs/:id/events for a key emits run_events_unavailable. | open |
+| D3-1214 | W3-23 guard | follow-up | P2 | guard skipped: Guard test runs listed in lead_todo (go test, cargo test, vitest): skipped because the task forbids tests beyond the golden generation step | open |
 
 ## Cross-wave
 

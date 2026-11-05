@@ -20,7 +20,7 @@ import { sandboxWidgetDocument } from '@/shared/lib/sandbox-html'
 import { getMcpAppResource, type McpAppResource } from '@/shared/api/chat-client'
 import { widgetThemeCss } from '../lib/inline-widget'
 import { createAnswerFollowupBudget, type TokenBucket } from '../lib/widget-bridge'
-import { createMcpAppBridgeHost, parseMcpToolName, type McpAppHostContext } from '../lib/mcp-app-bridge'
+import { createMcpAppBridgeHost, createMcpAppToolCaller, parseMcpToolName, type McpAppHostContext } from '../lib/mcp-app-bridge'
 import { InlineWidgetSurface, WIDGET_SANDBOX, inlineWidgetsEnabled, widgetBridgeEnabled } from './InlineWidget'
 import type { ChatToolCall } from './chat-types'
 import './inline-widget.css'
@@ -84,6 +84,7 @@ export function McpAppsForAnswer(props: {
   temporaryChat?: boolean
   onSelectFollowUp?: (text: string) => void
   load?: McpAppLoader
+  runId?: string
 }): JSX.Element {
   const surfaceLive = useContext(InlineWidgetSurface) === 'live'
   const load = answerScopedLoader(props.load ?? getMcpAppResource)
@@ -135,6 +136,7 @@ export function McpAppsForAnswer(props: {
                 load={load}
                 messageBudget={messageBudget}
                 onSelectFollowUp={props.onSelectFollowUp}
+                runId={props.runId}
               />
             </McpAppSlot>
           )}
@@ -174,6 +176,7 @@ export function McpAppFrame(props: {
   load?: McpAppLoader
   messageBudget?: TokenBucket
   onSelectFollowUp?: (text: string) => void
+  runId?: string
 }): JSX.Element {
   const i18n = useI18n()
   const [resource, setResource] = createSignal<McpAppResource | null>(null)
@@ -205,6 +208,7 @@ export function McpAppFrame(props: {
           locale={i18n.locale()}
           messageBudget={props.messageBudget ?? createAnswerFollowupBudget()}
           onSelectFollowUp={props.onSelectFollowUp}
+          runId={props.runId}
         />
       )}
     </Show>
@@ -219,6 +223,7 @@ function McpAppDocument(props: {
   locale: string
   messageBudget: TokenBucket
   onSelectFollowUp?: (text: string) => void
+  runId?: string
 }): JSX.Element {
   const i18n = useI18n()
   const label = () => i18n.tr(`App fra ${props.serverId}`, `App from ${props.serverId}`)
@@ -237,6 +242,7 @@ function McpAppDocument(props: {
     hostContext: hostContext(props.locale),
     toolInput: props.call.args,
     toolOutput: props.call.output ?? '',
+    toolCaller: createMcpAppToolCaller({ runId: props.runId, serverId: props.serverId }),
   })
 
   const onMessage = (event: MessageEvent) => {
