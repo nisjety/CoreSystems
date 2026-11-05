@@ -2036,6 +2036,11 @@ async fn run_agent_with_route_parkable(
     // The attached files, held for the whole run and released when this scope ends on any
     // path, a cancelled request included (WS08-S6).
     let _run_inputs = register_run_inputs(&req, deadline)?;
+    // The entry this run's `code_interpreter` calls take their egress tier from (EP-9 E3), held
+    // and released the same way. None with the switch off, so every call runs with no network.
+    let _run_egress = (crate::egress_proxy::switch_tier()
+        != mp_contracts::sandbox_report::NetworkTier::Off)
+        .then(|| crate::egress_proxy::run_egress().register(&req.org_id, &req.run_id));
 
     // A continuation (build plan WS03 S3, S7b): consume the granted approval exactly once,
     // then either restore the paused loop from its fold (the in-place resume) or start the
@@ -4626,6 +4631,23 @@ async fn run_rounds(
                             cause: Some(CauseCode::RiskyEffectUnderAsk),
                             screening_taint: false,
                         });
+                    }
+                    // The run's egress ceiling for this call (EP-9 E3, D-E3), from what the run is
+                    // now: a taint or plan mode that arrived since the last call holds this one at
+                    // off. The calls of one round see the same facts, so they agree.
+                    if call.name == "code_interpreter" {
+                        crate::egress_proxy::run_egress().set_ceiling(
+                            &req.org_id,
+                            &req.run_id,
+                            crate::egress_proxy::run_ceiling(crate::egress_proxy::RunEgressFacts {
+                                zdr,
+                                waived: ctx.route.is_waived(),
+                                plan_mode: req.plan_mode,
+                                tainted: read_in_round || ctx.taint.is_marked(),
+                                read_only_rung: req.autonomy_rung
+                                    == pb::AutonomyRung::ReadOnly as i32,
+                            }),
+                        );
                     }
                     let ledger_entry = if ctx.effect_ledger {
                         let entry = runtime_loop::effect::entry_for_run_call(

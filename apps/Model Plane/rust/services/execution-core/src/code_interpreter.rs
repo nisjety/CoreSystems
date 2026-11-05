@@ -54,6 +54,7 @@ use mp_contracts::attachments::{validate_name, ATTACHMENTS_DIR};
 use mp_contracts::sandbox_report::{Enforcement, NetworkTier, SandboxReport};
 use sha2::{Digest, Sha256};
 
+use crate::egress_proxy::{CallEgress, EgressCounts, EgressProxy};
 use crate::executor;
 use crate::policy::{MpNetworkPolicy, MpSandboxPolicy};
 use crate::run_inputs::InputSet;
@@ -215,6 +216,11 @@ struct CodeResult {
     /// while the switch is off.
     #[serde(skip_serializing_if = "Option::is_none")]
     sandbox: Option<SandboxReport>,
+    /// Distinct hosts the call's egress proxy admitted and refused (EP-9 E3).
+    /// Present only for a call that ran at a tier above off, so every other
+    /// result is unchanged. Counts only: no host name or path is returned.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    egress: Option<EgressCounts>,
 }
 
 /// The `execution` object of a code result: `{sandboxed, limits, limit_hit}`.
@@ -262,6 +268,22 @@ fn enforcement_report(sandboxed: bool, network: &MpNetworkPolicy) -> SandboxRepo
         sandboxed,
         network,
         enforcement,
+    }
+}
+
+/// The report for a run that went out through its own live proxy (EP-9 E3). The
+/// namespace was unshared and the proxy admitted only the tier's hosts, so the
+/// boundary is one the sandbox applied itself: `full`, named by the tier the
+/// call ran at rather than by the policy's host list.
+fn proxied_enforcement_report(sandboxed: bool, tier: NetworkTier) -> SandboxReport {
+    SandboxReport {
+        sandboxed,
+        network: tier,
+        enforcement: if sandboxed {
+            Enforcement::Full
+        } else {
+            Enforcement::Unenforced
+        },
     }
 }
 
@@ -623,6 +645,36 @@ pub async fn run_with_skills(
     skills: Option<&Path>,
     lease_id: Option<&str>,
 ) -> Result<String, String> {
+    run_with_egress(
+        tool_input,
+        run_id,
+        step_id,
+        workspace_root,
+        ro_inputs,
+        skills,
+        lease_id,
+        &CallEgress::off(),
+    )
+    .await
+}
+
+/// [`run_with_skills`] at an egress tier (EP-9 E3). `egress` is built by the
+/// caller with [`CallEgress::resolve`] from the deployment switch, the lease's
+/// recorded tier and the run's ceiling, never from the tool input. At `off`
+/// this is exactly [`run_with_skills`]; above it the call runs behind its own
+/// proxy, and a proxy that cannot start fails the call rather than running it
+/// without one.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_with_egress(
+    tool_input: &str,
+    run_id: &str,
+    step_id: &str,
+    workspace_root: Option<&Path>,
+    ro_inputs: Option<Arc<InputSet>>,
+    skills: Option<&Path>,
+    lease_id: Option<&str>,
+    egress: &CallEgress,
+) -> Result<String, String> {
     let admission = executor::SpawnAdmission {
         space_scoped: workspace_root.is_some(),
         lease_id,
@@ -636,6 +688,7 @@ pub async fn run_with_skills(
         skills,
         executor::code_exec_timeout(),
         &admission,
+        egress,
     )
     .await
 }
@@ -693,11 +746,13 @@ async fn run_staged_with_skills(
         skills,
         timeout,
         &executor::SpawnAdmission::NOT_SPACE,
+        &CallEgress::off(),
     )
     .await
 }
 
-/// [`run_staged_with_skills`] with the Space facts the spawn is admitted on (WS06-S9).
+/// [`run_staged_with_skills`] with the Space facts the spawn is admitted on (WS06-S9)
+/// and the call's egress tier (EP-9 E3).
 #[allow(clippy::too_many_arguments)]
 async fn run_admitted(
     tool_input: &str,
@@ -708,17 +763,18 @@ async fn run_admitted(
     skills: Option<&Path>,
     timeout: Duration,
     admission: &executor::SpawnAdmission<'_>,
+    egress: &CallEgress,
 ) -> Result<String, String> {
     let mut request = parse_request(tool_input)?;
     request.ro_inputs = ro_inputs;
 
     if let Some(root) = workspace_root {
-        return run_in_root(&request, root, timeout, true, skills, admission).await;
+        return run_in_root(&request, root, timeout, true, skills, admission, egress).await;
     }
 
     let workspace = Workspace::create(run_id, step_id)
         .map_err(|error| format!("code_interpreter could not create its workspace: {error}"))?;
-    run_in_root(&request, workspace.path(), timeout, false, skills, admission).await
+    run_in_root(&request, workspace.path(), timeout, false, skills, admission, egress).await
     // `workspace` drops here — and on every `?` above — removing the directory.
 }
 
@@ -732,6 +788,7 @@ async fn run_admitted(
 /// already existed, byte-for-byte unchanged, before THIS call started (not
 /// just this call's own staged inputs) — otherwise every call in a run would
 /// re-report every file any earlier call, or hydrate, ever produced.
+#[allow(clippy::too_many_arguments)]
 async fn run_in_root(
     request: &CodeRequest,
     root: &Path,
@@ -739,6 +796,7 @@ async fn run_in_root(
     persistent: bool,
     skills: Option<&Path>,
     admission: &executor::SpawnAdmission<'_>,
+    egress: &CallEgress,
 ) -> Result<String, String> {
     let pre_call_baseline = if persistent {
         snapshot_file_hashes(root)
@@ -802,22 +860,42 @@ async fn run_in_root(
     // `open("out.xlsx","wb")` work while the rest of the container stays
     // untouchable — and the `attachments/` bind then makes that one directory
     // read-only again.
+    //
+    // EP-9 E3: a call at a tier above off runs behind its own proxy, started
+    // here and stopped when the call returns. Its policy names the tier's hosts
+    // so the admission gate sees an allow-list, but the proxy is what enforces
+    // it; with no proxy the call does not run.
+    let proxy = if egress.is_tiered() {
+        Some(EgressProxy::start(egress).map_err(|error| {
+            format!("code_interpreter could not start its egress proxy: {error}")
+        })?)
+    } else {
+        None
+    };
     let policy = MpSandboxPolicy::WorkspaceWrite {
         writable_roots: vec![root.to_path_buf()],
-        network: MpNetworkPolicy::Disabled,
+        network: if proxy.is_some() {
+            MpNetworkPolicy::AllowDomains(egress.admitted_hosts())
+        } else {
+            MpNetworkPolicy::Disabled
+        },
     };
-    let outcome = executor::execute_sandboxed_in_dir_with_ro_binds(
+    let mut env = child_env(root);
+    env.extend(egress.child_env());
+    let outcome = executor::execute_sandboxed_with_egress(
         &policy,
         request.language.program(),
         &[program_file.to_owned()],
         root,
-        &child_env(root),
+        &env,
         &ro_binds,
         timeout,
         admission,
+        proxy.as_ref(),
     )
     .await
     .map_err(|error| format!("code_interpreter execution failed: {error}"))?;
+    let egress_counts = proxy.map(EgressProxy::finish);
 
     let mut staged: Vec<&str> = Vec::with_capacity(request.files_in.len() + 1);
     staged.push(program_file);
@@ -826,8 +904,13 @@ async fn run_in_root(
     let office = office_verify::verify_outputs(&files).await;
 
     // Attached only while the switch is on, so the result is byte-identical without it.
-    let sandbox = enforcement_report_requested()
-        .then(|| enforcement_report(outcome.sandboxed, &policy.network()));
+    let sandbox = enforcement_report_requested().then(|| {
+        if egress_counts.is_some() {
+            proxied_enforcement_report(outcome.sandboxed, egress.tier)
+        } else {
+            enforcement_report(outcome.sandboxed, &policy.network())
+        }
+    });
 
     serde_json::to_string(&CodeResult {
         stdout: outcome.stdout,
@@ -843,6 +926,7 @@ async fn run_in_root(
             limit_hit: outcome.limit_hit,
         },
         sandbox,
+        egress: egress_counts,
     })
     .map_err(|error| format!("code_interpreter could not encode its result: {error}"))
 }
@@ -1139,6 +1223,7 @@ mod tests {
                 limit_hit: None,
             },
             sandbox: None,
+            egress: None,
         };
         assert_eq!(
             serde_json::to_string(&result).expect("serializes"),
@@ -1164,6 +1249,7 @@ mod tests {
                 limit_hit: None,
             },
             sandbox: Some(enforcement_report(true, &MpNetworkPolicy::Disabled)),
+            egress: None,
         };
         let json = serde_json::to_string(&result).expect("serializes");
         assert!(
@@ -1172,6 +1258,121 @@ mod tests {
             ),
             "json: {json}"
         );
+    }
+
+    /// EP-9 E3: a tiered call's report names its tier as fully enforced, and its
+    /// host counts follow the report. Counts only: no host is named.
+    #[test]
+    fn a_proxied_call_reports_its_tier_and_its_host_counts() {
+        let result = CodeResult {
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: 0,
+            files: Vec::new(),
+            verification: Vec::new(),
+            verification_unchecked: 0,
+            previews: Vec::new(),
+            execution: ExecutionInfo {
+                sandboxed: true,
+                limits: "enforced",
+                limit_hit: None,
+            },
+            sandbox: Some(proxied_enforcement_report(true, NetworkTier::Registries)),
+            egress: Some(EgressCounts {
+                allowed_hosts: 2,
+                denied_hosts: 1,
+            }),
+        };
+        let json = serde_json::to_string(&result).expect("serializes");
+        assert!(
+            json.ends_with(
+                r#""sandbox":{"sandboxed":true,"network":"registries","enforcement":"full"},"egress":{"allowed_hosts":2,"denied_hosts":1}}"#
+            ),
+            "json: {json}"
+        );
+        assert_eq!(
+            proxied_enforcement_report(false, NetworkTier::Registries).enforcement,
+            Enforcement::Unenforced
+        );
+    }
+
+    /// An untiered call never starts a proxy, never gets proxy variables, and so
+    /// runs exactly as before E3: same policy, same environment, same result keys.
+    #[test]
+    fn an_untiered_call_is_unchanged_by_the_egress_seam() {
+        let off = CallEgress::off();
+        assert!(!off.is_tiered());
+        let ws = Path::new("/tmp/verevon-code-x");
+        let mut env = child_env(ws);
+        env.extend(off.child_env());
+        assert_eq!(env, child_env(ws));
+    }
+
+    /// A tiered call whose proxy cannot start never runs: the program is not
+    /// spawned without its boundary. A host without Unix sockets cannot start one.
+    #[cfg(not(unix))]
+    #[tokio::test]
+    async fn a_tiered_call_without_a_proxy_does_not_run() {
+        let egress = CallEgress::resolve(
+            NetworkTier::Registries,
+            NetworkTier::Registries,
+            NetworkTier::All,
+            &[],
+        );
+        let error = run_with_egress(
+            r#"{"code":"print(1)"}"#,
+            "run-egress",
+            "step-0",
+            None,
+            None,
+            None,
+            None,
+            &egress,
+        )
+        .await
+        .expect_err("no proxy, no run");
+        assert!(error.contains("egress proxy"), "{error}");
+    }
+
+    /// The boundary for real (Linux with bubblewrap and the bridge installed, as
+    /// in the CI container and the image): a program at the registries tier
+    /// cannot reach a host off the list, through the proxy or around it, and the
+    /// refusal is counted. Skipped where the sandbox or the bridge is missing.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_python_child_cannot_reach_an_unlisted_host() {
+        if !crate::sandbox::is_supported() || !crate::egress_proxy::bridge_available() {
+            return;
+        }
+        let egress = CallEgress::resolve(
+            NetworkTier::Registries,
+            NetworkTier::Registries,
+            NetworkTier::All,
+            &[],
+        );
+        let code = r#"
+import socket, urllib.request
+try:
+    urllib.request.urlopen("https://example.org/", timeout=10)
+    print("proxied:reached")
+except Exception as error:
+    print("proxied:refused")
+try:
+    socket.create_connection(("93.184.215.14", 443), timeout=5)
+    print("direct:reached")
+except OSError:
+    print("direct:refused")
+"#;
+        let input = serde_json::json!({ "code": code }).to_string();
+        let output = run_with_egress(&input, "run-egress", "step-0", None, None, None, None, &egress)
+            .await
+            .expect("the call runs");
+        let result: serde_json::Value = serde_json::from_str(&output).expect("json");
+        let stdout = result["stdout"].as_str().unwrap_or_default();
+        assert!(stdout.contains("proxied:refused"), "{stdout}");
+        assert!(stdout.contains("direct:refused"), "{stdout}");
+        assert_eq!(result["egress"]["denied_hosts"], 1, "{output}");
+        assert_eq!(result["egress"]["allowed_hosts"], 0, "{output}");
     }
 
     /// Only the exact value `true` enables the report, so a typo or another

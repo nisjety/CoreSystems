@@ -125,6 +125,39 @@ pub struct LaunchOptions<'a> {
     /// command comes back with `limits_applied == false` and the spawn site
     /// refuses it (fail closed).
     pub limits: Option<&'a ResourceLimits>,
+    /// The per-call egress boundary (EP-9 E3). `None` (every existing caller)
+    /// leaves the argv exactly as before. `Some` always unshares the network
+    /// namespace, whatever the policy's network says, and runs the program
+    /// under the bridge so its only way out is this call's proxy socket.
+    pub egress: Option<EgressBridge<'a>>,
+}
+
+/// The sandbox half of a tiered call's egress boundary (EP-9 D-E1): the host
+/// paths the argv needs to give the sandbox exactly one proxy socket.
+#[derive(Debug, Clone, Copy)]
+pub struct EgressBridge<'a> {
+    /// The host directory every call's proxy socket lives under. It is covered
+    /// by an empty tmpfs inside the sandbox, because a path-named Unix socket
+    /// is reachable from any network namespace: without the cover, a program
+    /// could connect to another call's proxy, and so to another Space's list.
+    pub socket_root: &'a Path,
+    /// This call's socket on the host, bound into the sandbox at
+    /// [`EgressBridge::sandbox_socket`].
+    pub socket: &'a Path,
+    /// The bridge binary run inside the sandbox (`mp-netbridge`).
+    pub bridge_program: &'a str,
+}
+
+/// The file name the call's socket takes inside the sandbox.
+pub const SANDBOX_SOCKET_NAME: &str = "egress.sock";
+
+impl EgressBridge<'_> {
+    /// Where the program's bridge finds the proxy inside the sandbox: inside
+    /// the covered root, so it is the one socket there.
+    #[must_use]
+    pub fn sandbox_socket(&self) -> PathBuf {
+        self.socket_root.join(SANDBOX_SOCKET_NAME)
+    }
 }
 
 /// Build the bubblewrap argument vector for `policy`, wrapping `program args`.
@@ -234,8 +267,21 @@ fn assemble_argv(
     // process gets unrestricted egress, silently defeating the allowlist. This
     // pure builder stays env-free by design; the check belongs at the spawn
     // site. Tracked in capability-ownership-matrix §G1.
-    if matches!(network, MpNetworkPolicy::Disabled) {
+    //
+    // EP-9 E3: a call with an egress boundary is the exception that makes
+    // `AllowDomains` enforceable. Its namespace is unshared like `Disabled`, so
+    // it has loopback and no route out, and the one path out is its own proxy
+    // socket, bound in after the socket root is covered (later mounts win).
+    if matches!(network, MpNetworkPolicy::Disabled) || options.egress.is_some() {
         argv.push("--unshare-net".into());
+    }
+    if let Some(egress) = &options.egress {
+        let root = egress.socket_root.to_string_lossy().into_owned();
+        argv.push("--tmpfs".into());
+        argv.push(root);
+        argv.push("--bind".into());
+        argv.push(egress.socket.to_string_lossy().into_owned());
+        argv.push(egress.sandbox_socket().to_string_lossy().into_owned());
     }
 
     // Placed after the binds so the directory it names is already mounted in the
@@ -246,6 +292,13 @@ fn assemble_argv(
     }
 
     argv.push("--".into());
+    // The bridge runs the program as its child, so the program and its
+    // arguments reach it unchanged after the bridge's own separator.
+    if let Some(egress) = &options.egress {
+        argv.push(egress.bridge_program.to_owned());
+        argv.push(egress.sandbox_socket().to_string_lossy().into_owned());
+        argv.push("--".into());
+    }
     argv.push(program.to_owned());
     argv.extend(cmd_args.iter().cloned());
     argv
@@ -413,7 +466,11 @@ pub fn capability_profile() -> SandboxCapabilityProfile {
             PROCESSES_BOUNDED_ONESHOT
         },
         backup: false,
-        egress: "disabled_by_default",
+        egress: mp_contracts::egress_tiers::claim(enforceable_egress_tier(
+            crate::egress_proxy::switch_tier(),
+            local_isolation_available,
+            crate::egress_proxy::bridge_available(),
+        )),
         credential_mode: "credential_free",
         limits: if local_isolation_available
             && LimitsConfig::current().mode == LimitsMode::Enforce
@@ -423,6 +480,26 @@ pub fn capability_profile() -> SandboxCapabilityProfile {
         } else {
             LIMITS_UNLIMITED
         },
+    }
+}
+
+/// The highest egress tier this host can enforce, which is what it claims to
+/// Control (EP-9 E3). The deployment switch is the ceiling, and it only counts
+/// where bubblewrap can unshare the namespace and the bridge binary is in the
+/// image: a claim this host cannot keep would be signed by Control and then
+/// refused, or worse, honoured without a boundary. With the switch off the
+/// claim is the legacy `disabled_by_default`, so the profile and its digest are
+/// unchanged.
+#[must_use]
+pub fn enforceable_egress_tier(
+    switch: mp_contracts::sandbox_report::NetworkTier,
+    local_isolation_available: bool,
+    bridge_available: bool,
+) -> mp_contracts::sandbox_report::NetworkTier {
+    if local_isolation_available && bridge_available {
+        switch
+    } else {
+        mp_contracts::sandbox_report::NetworkTier::Off
     }
 }
 
@@ -557,7 +634,19 @@ mod tests {
         assert_eq!(profile.local_isolation_available, is_supported());
         assert_eq!(profile.persistence, "ephemeral");
         assert!(!profile.backup);
-        assert_eq!(profile.egress, "disabled_by_default");
+        // EP-9 E3: the claim is the switch's tier only where it can be enforced,
+        // and the legacy word otherwise (always, with the switch off).
+        assert_eq!(
+            profile.egress,
+            mp_contracts::egress_tiers::claim(enforceable_egress_tier(
+                crate::egress_proxy::switch_tier(),
+                is_supported(),
+                crate::egress_proxy::bridge_available(),
+            ))
+        );
+        if crate::egress_proxy::switch_tier() == mp_contracts::sandbox_report::NetworkTier::Off {
+            assert_eq!(profile.egress, "disabled_by_default");
+        }
         assert_eq!(profile.credential_mode, "credential_free");
         // `processes` is the one field an operator can change, so this asserts
         // the RELATIONSHIP rather than a constant: it may report the stronger
@@ -895,6 +984,138 @@ mod tests {
         };
         let argv = build_bwrap_argv(&p, "curl", &args(&["x"])).expect("wrapped");
         assert!(!argv.iter().any(|a| a == "--unshare-net"));
+    }
+
+    // -- EP-9 E3 egress boundary ------------------------------------------
+
+    fn bridge<'a>(root: &'a Path, socket: &'a Path) -> EgressBridge<'a> {
+        EgressBridge {
+            socket_root: root,
+            socket,
+            bridge_program: "/usr/local/bin/mp-netbridge",
+        }
+    }
+
+    /// A tiered call keeps no host network, whatever its policy's network says:
+    /// the namespace is unshared and the one way out is the bound socket.
+    #[test]
+    fn an_egress_call_always_unshares_the_network() {
+        let root = PathBuf::from("/tmp/verevon-egress");
+        let socket = PathBuf::from("/tmp/verevon-egress/call-1/egress.sock");
+        for network in [
+            MpNetworkPolicy::Disabled,
+            MpNetworkPolicy::AllowDomains(vec!["pypi.org".to_owned()]),
+            MpNetworkPolicy::AllowAll,
+        ] {
+            let p = MpSandboxPolicy::WorkspaceWrite {
+                writable_roots: vec![PathBuf::from("/work")],
+                network,
+            };
+            let argv = build_bwrap_argv_with(
+                &p,
+                "python3",
+                &args(&["main.py"]),
+                LaunchOptions {
+                    egress: Some(bridge(&root, &socket)),
+                    ..LaunchOptions::default()
+                },
+            )
+            .expect("wrapped");
+            assert_eq!(
+                argv.iter().filter(|a| *a == "--unshare-net").count(),
+                1,
+                "{argv:?}"
+            );
+        }
+    }
+
+    /// Every call's socket root is covered, so a program cannot reach another
+    /// call's proxy through the shared host path; its own socket is bound back in
+    /// after the cover, and the program runs under the bridge.
+    #[test]
+    fn an_egress_call_covers_the_socket_root_and_runs_under_the_bridge() {
+        let root = PathBuf::from("/tmp/verevon-egress");
+        let socket = PathBuf::from("/tmp/verevon-egress/call-1/egress.sock");
+        let p = MpSandboxPolicy::WorkspaceWrite {
+            writable_roots: vec![PathBuf::from("/work")],
+            network: MpNetworkPolicy::AllowDomains(vec!["pypi.org".to_owned()]),
+        };
+        let argv = build_bwrap_argv_with(
+            &p,
+            "python3",
+            &args(&["main.py"]),
+            LaunchOptions {
+                egress: Some(bridge(&root, &socket)),
+                ..LaunchOptions::default()
+            },
+        )
+        .expect("wrapped");
+        let ro_root = argv.iter().position(|a| a == "/").expect("read-only root");
+        let cover = argv
+            .iter()
+            .position(|a| a == "/tmp/verevon-egress")
+            .expect("socket root covered");
+        assert_eq!(argv[cover - 1], "--tmpfs");
+        assert!(cover > ro_root, "the cover must follow the read-only root: {argv:?}");
+        assert!(windowed(
+            &argv,
+            &[
+                "--bind",
+                "/tmp/verevon-egress/call-1/egress.sock",
+                "/tmp/verevon-egress/egress.sock"
+            ]
+        ));
+        let own_socket = argv
+            .iter()
+            .position(|a| a == "/tmp/verevon-egress/call-1/egress.sock")
+            .expect("own socket bound");
+        assert!(own_socket > cover, "the own socket must be bound after the cover");
+        assert!(windowed(
+            &argv,
+            &[
+                "--",
+                "/usr/local/bin/mp-netbridge",
+                "/tmp/verevon-egress/egress.sock",
+                "--",
+                "python3",
+                "main.py"
+            ]
+        ));
+    }
+
+    /// Without a boundary the argv is exactly what it was before E3.
+    #[test]
+    fn no_egress_bridge_leaves_the_argv_unchanged() {
+        let p = MpSandboxPolicy::ReadOnly {
+            network: MpNetworkPolicy::AllowDomains(vec!["pypi.org".to_owned()]),
+        };
+        let argv = build_bwrap_argv(&p, "curl", &args(&["x"])).expect("wrapped");
+        assert!(!argv.iter().any(|a| a == "--unshare-net"));
+        assert!(windowed(&argv, &["--", "curl", "x"]));
+        assert!(!argv.iter().any(|a| a.contains("mp-netbridge")));
+    }
+
+    #[test]
+    fn the_egress_claim_needs_isolation_and_the_bridge() {
+        use mp_contracts::sandbox_report::NetworkTier;
+        for tier in [NetworkTier::Registries, NetworkTier::Allowlist] {
+            assert_eq!(enforceable_egress_tier(tier, true, true), tier);
+            assert_eq!(enforceable_egress_tier(tier, false, true), NetworkTier::Off);
+            assert_eq!(enforceable_egress_tier(tier, true, false), NetworkTier::Off);
+        }
+        assert_eq!(
+            enforceable_egress_tier(NetworkTier::Off, true, true),
+            NetworkTier::Off
+        );
+        assert_eq!(
+            mp_contracts::egress_tiers::claim(enforceable_egress_tier(
+                NetworkTier::Off,
+                true,
+                true
+            )),
+            "disabled_by_default",
+            "switch off keeps the legacy claim, so the profile digest is unchanged"
+        );
     }
 
     #[test]
