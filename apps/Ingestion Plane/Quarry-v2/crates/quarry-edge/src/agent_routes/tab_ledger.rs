@@ -82,6 +82,8 @@ pub struct TabLedger {
     /// W3 E3.2-e2: the per-origin consent of tabs offered to attach mode, by tab id. Kept apart
     /// from `TabMeta` so the holder rules and their callers do not change.
     consents: BTreeMap<String, TabConsent>,
+    /// Attachment-scoped handoffs, retained only until the attachment ends.
+    retained: BTreeMap<String, String>,
 }
 
 impl TabLedger {
@@ -124,6 +126,7 @@ impl TabLedger {
     /// Drop a tab that was closed. Returns what the ledger held for it.
     pub fn forget(&mut self, tab_id: &str) -> Option<TabMeta> {
         self.consents.remove(tab_id);
+        self.retained.remove(tab_id);
         self.tabs.remove(tab_id)
     }
 
@@ -131,6 +134,50 @@ impl TabLedger {
     pub fn retain_live(&mut self, live: &[&str]) {
         self.tabs.retain(|id, _| live.contains(&id.as_str()));
         self.consents.retain(|id, _| live.contains(&id.as_str()));
+        self.retained.retain(|id, _| live.contains(&id.as_str()));
+    }
+
+    /// Mark only the tab belonging to this attachment for the owner to continue using.
+    pub fn mark_for_handoff(&mut self, tab_id: &str, attach_id: &str) -> Result<(), TabError> {
+        let tab = self.tabs.get(tab_id).ok_or(TabError::NotFound)?;
+        if tab.attach_id.as_deref() != Some(attach_id) { return Err(TabError::NotFound); }
+        // Prevent another delegate step after the marking step has finished.
+        self.set_holder(tab_id, BrowserTabHolder::Human, None)?;
+        self.retained.insert(tab_id.to_owned(), attach_id.to_owned());
+        Ok(())
+    }
+
+    pub fn is_marked_for_handoff(&self, tab_id: &str, attach_id: &str) -> bool {
+        self.retained.get(tab_id).is_some_and(|id| id == attach_id)
+            && self.tabs.get(tab_id).is_some_and(|tab| tab.attach_id.as_deref() == Some(attach_id))
+    }
+
+    pub fn clear_handoff(&mut self, tab_id: &str) {
+        self.retained.remove(tab_id);
+    }
+
+    /// Consume the one-use mark, transferring control only to the human owner.
+    pub fn handoff_marked_tab(&mut self, tab_id: &str, attach_id: &str) -> bool {
+        let marked = self.retained.remove(tab_id).as_deref() == Some(attach_id);
+        if !marked || !self.tabs.get(tab_id).is_some_and(|tab| tab.attach_id.as_deref() == Some(attach_id)) {
+            return false;
+        }
+        self.set_holder(tab_id, BrowserTabHolder::Human, None).is_ok()
+    }
+
+    /// Return a borrowed tab intact and clear its one-use attachment and consent.
+    pub fn return_borrowed_tab(&mut self, tab_id: &str, attach_id: &str) {
+        let Some(tab) = self.tabs.get_mut(tab_id) else { return; };
+        if tab.attach_id.as_deref() != Some(attach_id) {
+            return;
+        }
+        tab.attach_id = None;
+        if tab.holder != BrowserTabHolder::Human {
+            tab.holder = BrowserTabHolder::Human;
+            tab.epoch += 1;
+        }
+        self.consents.remove(tab_id);
+        self.retained.remove(tab_id);
     }
 
     pub fn len(&self) -> usize {
@@ -467,6 +514,12 @@ impl AttachBudget {
 
 /// One agent attachment to a live run. Process-local: a restart loses it (documented).
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BorrowedTab {
+    pub origin: url::Origin,
+    pub prior_egress: Option<quarry_browser::BrowserEgressPolicy>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AttachState {
     pub attach_id: String,
     /// The attach grant (a child of the run's grant, kind `attach`).
@@ -475,8 +528,12 @@ pub struct AttachState {
     pub delegate_actor: String,
     /// The one tab the delegate may address (the pin; there is no override).
     pub tab_id: String,
+    /// The owner's original tab, which must be returned on every exit path.
+    pub borrowed: Option<BorrowedTab>,
     /// The hosts the attach grant allows (1 to 8, canonical).
     pub allowed_domains: Vec<String>,
+    /// An independently enforced, tighten-only restriction for this delegate.
+    pub policy_ask: Option<quarry_core::web_policy::RequestAsk>,
     pub budget: AttachBudget,
     /// WS8.H: the delegate's own lane. Its steps never wait for the person's lane, and the
     /// person's steps never wait for it.
@@ -591,7 +648,9 @@ mod tests {
             grant_id: "grant_attach".to_owned(),
             delegate_actor: "svc_execution_core".to_owned(),
             tab_id: tab.to_owned(),
+            borrowed: None,
             allowed_domains: vec!["example.com".to_owned()],
+            policy_ask: None,
             budget,
             lane: LaneRef::new(LaneState::default()),
             phase: BrowserAttachState::Attached,
@@ -888,6 +947,26 @@ mod tests {
         assert_eq!(
             ledger.attach_visible_tab("t1", "att_2", "shop.example.com", None),
             Err(TabConsentError::AlreadyAttached)
+        );
+    }
+
+    #[test]
+    fn a_returned_tab_keeps_its_identity_but_needs_fresh_consent() {
+        let mut ledger = ledger_with("t1", OpenedBy::Human);
+        ledger.approve_consent("t1", "shop.example.com", "grant-1").unwrap();
+        ledger.attach_visible_tab("t1", "att_1", "shop.example.com", Some(0)).unwrap();
+
+        ledger.return_borrowed_tab("t1", "other-attachment");
+        assert_eq!(ledger.get("t1").unwrap().holder, BrowserTabHolder::Agent);
+        ledger.return_borrowed_tab("t1", "att_1");
+        let tab = ledger.get("t1").unwrap();
+        assert_eq!(tab.opened_by, OpenedBy::Human);
+        assert_eq!(tab.holder, BrowserTabHolder::Human);
+        assert_eq!(tab.epoch, 2);
+        assert!(tab.attach_id.is_none());
+        assert_eq!(
+            ledger.attach_visible_tab("t1", "att_2", "shop.example.com", Some(2)),
+            Err(TabConsentError::ConsentRequired)
         );
     }
 

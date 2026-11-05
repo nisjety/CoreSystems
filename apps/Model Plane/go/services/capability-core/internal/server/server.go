@@ -638,6 +638,7 @@ func (s *Server) policyResponse(req *mpv1.EvaluatePolicyRequest, orgID string, c
 				approvalFloor:     floor,
 				policySource:      result.PolicySource,
 				toolDigest:        digest,
+				toolPolicyChecked: result.ToolPolicyChecked,
 			},
 		))
 		if err == nil {

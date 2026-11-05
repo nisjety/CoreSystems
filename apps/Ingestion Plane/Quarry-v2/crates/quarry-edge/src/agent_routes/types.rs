@@ -327,6 +327,8 @@ pub struct BrowserSessionTab {
     pub title: Option<String>,
     pub url: Option<String>,
     pub active: bool,
+    pub tab_epoch: u64,
+    pub holder: BrowserTabHolder,
     /// Who opened the tab, for a tab opened through the tab routes. Absent for a
     /// tab the browser opened itself.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -486,6 +488,19 @@ pub struct LiveFrameData {
     pub zdr: bool,
 }
 
+/// A real pointer position sampled with this frame, scoped to one attachment.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LiveAgentCursorData {
+    pub x: u32,
+    pub y: u32,
+    pub viewport_width: u32,
+    pub viewport_height: u32,
+    pub session_run_id: String,
+    pub tab_id: String,
+    pub attach_id: String,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LiveFrameStreamData {
@@ -493,6 +508,8 @@ pub struct LiveFrameStreamData {
     pub mime_type: String,
     pub data_base64: String,
     pub zdr: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_cursor: Option<LiveAgentCursorData>,
 }
 
 #[derive(Debug, Serialize)]

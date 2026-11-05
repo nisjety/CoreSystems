@@ -9693,6 +9693,16 @@ pub async fn run_events_sse(
         while let Some(result) = grpc_stream.next().await {
             match result {
                 Ok(event) => {
+                    // Never emit a compatibility marker on a stream for a different run,
+                    // even if an upstream event was routed incorrectly.
+                    let compat_observation = match event.event.as_ref() {
+                        Some(orchestration_event::Event::BrowserObservationReceived(p))
+                            if p.action_id == crate::browser_attach_compat::ACTION_ID => Some(p),
+                        _ => None,
+                    };
+                    if compat_observation.is_some_and(|p| p.run_id != run_id) {
+                        continue;
+                    }
                     // Carry the server-assigned event_id onto the SSE `id:` line
                     // so the next reconnect resumes from exactly here.
                     let event_id = event.event_id.clone();
@@ -9707,8 +9717,10 @@ pub async fn run_events_sse(
                     // chat-parity §2/Phase 3: also surface the agentic step in the
                     // unified `step_update` taxonomy (no SSE id — the raw event
                     // above carries the resume cursor).
-                    if let Some(step) = orchestration_event_to_step_update(&event) {
+                    if compat_observation.is_none() {
+                      if let Some(step) = orchestration_event_to_step_update(&event) {
                         let _ = tx.send(Ok(step.to_sse(&run_id))).await;
+                      }
                     }
                 }
                 Err(error) => {
@@ -14408,6 +14420,18 @@ impl AgentRunUsage {
 }
 
 fn orchestration_event_to_sse(event: &OrchestrationEvent) -> Option<Event> {
+    // This owner-writable event is an audit record, not authenticated proof.
+    if matches!(event.event.as_ref(), Some(orchestration_event::Event::BrowserAttachSharedJar(_))) {
+        return None;
+    }
+    if let Some(orchestration_event::Event::BrowserObservationReceived(p)) = event.event.as_ref() {
+        if p.action_id == crate::browser_attach_compat::ACTION_ID {
+            let receipt = crate::browser_attach_compat::verify_configured(&p.status, &p.run_id, &p.plan_id)?;
+            let payload = json!({ "run_id": receipt.run_id, "plan_id": receipt.plan_id,
+                "session_run_id": receipt.session_run_id, "attach_id": receipt.attach_id, "tab_id": receipt.tab_id });
+            return Some(Event::default().event("browser_attach_shared_jar").data(payload.to_string()));
+        }
+    }
     let payload = event_payload_value(event)?;
     let event_name = match event.event.as_ref()? {
         orchestration_event::Event::PlanTransitioned(_) => "plan_transitioned",
@@ -23351,6 +23375,28 @@ mod continue_run_tests {
     }
 
     #[tokio::test]
+    async fn compat_attach_live_requires_matching_key_and_signed_ids() {
+        let key = "test-only-compat-key-32-characters-long";
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+        let receipt = crate::browser_attach_compat::Receipt { run_id: "run-42".into(), plan_id: "plan-1".into(), session_run_id: "qrun-9".into(), attach_id: "att-1".into(), tab_id: "tab-3".into(), issued_at: now };
+        let envelope = crate::browser_attach_compat::sign(key.as_bytes(), &receipt).unwrap();
+        let mut event = OrchestrationEvent { event: Some(orchestration_event::Event::BrowserObservationReceived(orchestration_event::BrowserObservationReceived { run_id: receipt.run_id.clone(), plan_id: receipt.plan_id.clone(), action_id: crate::browser_attach_compat::ACTION_ID.into(), status: envelope, ..Default::default() })), ..Default::default() };
+        std::env::remove_var("BROWSER_ATTACH_COMPAT_HMAC_KEY");
+        assert!(orchestration_event_to_sse(&event).is_none());
+        std::env::set_var("BROWSER_ATTACH_COMPAT_HMAC_KEY", "0".repeat(37));
+        assert!(orchestration_event_to_sse(&event).is_none());
+        std::env::set_var("BROWSER_ATTACH_COMPAT_HMAC_KEY", key);
+        let (name, frame) = frame_of(orchestration_event_to_sse(&event).unwrap()).await;
+        assert_eq!(name, "browser_attach_shared_jar");
+        assert_eq!(frame, json!({"run_id":"run-42","plan_id":"plan-1","session_run_id":"qrun-9","attach_id":"att-1","tab_id":"tab-3"}));
+        if let Some(orchestration_event::Event::BrowserObservationReceived(ref mut p)) = event.event { p.plan_id = "different-plan".into(); }
+        assert!(orchestration_event_to_sse(&event).is_none());
+        let forged = OrchestrationEvent { event: Some(orchestration_event::Event::BrowserAttachSharedJar(orchestration_event::BrowserAttachSharedJar { run_id: "run-42".into(), plan_id: "plan-1".into(), attach_id: "att-1".into(), session_run_id: "qrun-9".into(), tab_id: "tab-3".into() })), ..Default::default() };
+        assert!(orchestration_event_to_sse(&forged).is_none(), "unsigned typed event must not become proof");
+        std::env::remove_var("BROWSER_ATTACH_COMPAT_HMAC_KEY");
+    }
+
+    #[tokio::test]
     async fn orchestration_browser_attach_shared_jar_frame_is_ids_only() {
         let event = OrchestrationEvent {
             event: Some(orchestration_event::Event::BrowserAttachSharedJar(
@@ -23364,14 +23410,7 @@ mod continue_run_tests {
             )),
             ..Default::default()
         };
-        let (name, frame) = frame_of(orchestration_event_to_sse(&event).expect("a frame")).await;
-        assert_eq!(name, "browser_attach_shared_jar");
-        let mut keys: Vec<&str> = frame.as_object().unwrap().keys().map(String::as_str).collect();
-        keys.sort_unstable();
-        assert_eq!(
-            keys,
-            ["attach_id", "plan_id", "run_id", "session_run_id", "tab_id"]
-        );
+        assert!(orchestration_event_to_sse(&event).is_none(), "unsigned owner-writable receipt is not proof");
         assert!(
             orchestration_event_to_step_update(&event).is_none(),
             "an audit event is not a chat step"

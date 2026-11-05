@@ -22,7 +22,7 @@
 // `must_use_candidate`).
 #![allow(clippy::missing_errors_doc, clippy::doc_markdown)]
 
-use std::time::Duration;
+use std::{collections::HashSet, time::Duration};
 
 use serde::{Deserialize, Serialize};
 
@@ -446,8 +446,20 @@ pub struct AttachConstraintsWire {
 pub struct AttachRequest {
     pub grant_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub attach_tab: Option<AttachTabTarget>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub start_url: Option<String>,
     pub constraints: AttachConstraintsWire,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub policy: Option<WireRequestAsk>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct AttachTabTarget {
+    pub tab_id: String,
+    pub expected_epoch: u64,
+    pub expected_origin: String,
 }
 
 /// `POST .../attach` answer (Quarry `AttachData`).
@@ -465,6 +477,11 @@ pub struct AttachData {
     pub holder: String,
     #[serde(default)]
     pub allowed_domains: Vec<String>,
+    /// Explicit acknowledgement from Quarry. Old servers omit it and fail closed.
+    #[serde(default)]
+    pub policy_applied: bool,
+    #[serde(default)]
+    pub attached_existing_tab: bool,
 }
 
 /// How an attachment ends (`DELETE .../attach/{id}?disposition=`).
@@ -745,9 +762,11 @@ pub struct AttachParams<'a> {
     pub run_id: &'a str,
     /// The broker-derived attach grant.
     pub grant_id: &'a str,
+    pub attach_tab: Option<AttachTabTarget>,
     pub start_url: Option<String>,
     pub max_steps: Option<u32>,
     pub max_runtime_s: Option<u64>,
+    pub policy: Option<WireRequestAsk>,
     pub request_id: Option<&'a str>,
 }
 
@@ -1071,6 +1090,28 @@ pub struct WireBrowserSnapshot {
     pub targets: Vec<WireSnapshotTarget>,
     #[serde(default)]
     pub frames: Vec<WireBrowserFrame>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accessibility: Option<WireAccessibilityProjection>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct WireAccessibilityProjection {
+    #[serde(default)]
+    source: String,
+    #[serde(default)]
+    nodes: Vec<WireAccessibilityNode>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+struct WireAccessibilityNode {
+    #[serde(default)]
+    role: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    ignored: bool,
+    #[serde(default)]
+    frame_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -1426,11 +1467,61 @@ pub fn observation_from_wire(
         dom_snapshot_ref,
         snapshot_generation,
         snapshot_targets,
+        rendered_controls: wire
+            .snapshot
+            .as_ref()
+            .map_or_else(Vec::new, rendered_controls),
         error_message,
         challenge: wire.challenge.as_ref().map(challenge_from_wire),
         redaction_rule_version: stamp_rule_version(wire.redaction.as_ref()),
         quality: observation_quality_from_wire(wire),
     }
+}
+
+/// Keep only browser-computed names and text from the top-level page. These
+/// corroborate visible outcomes without treating a URL or raw HTML as proof.
+fn rendered_controls(snapshot: &WireBrowserSnapshot) -> Vec<String> {
+    const MAX_RENDERED_NAMES: usize = 256;
+    const MAX_RENDERED_NAME_CHARS: usize = 200;
+
+    let Some(accessibility) = snapshot
+        .accessibility
+        .as_ref()
+        .filter(|projection| projection.source == "chromium_cdp_ax")
+    else {
+        return Vec::new();
+    };
+    let root_frame = snapshot
+        .frames
+        .iter()
+        .find(|frame| frame.parent_frame_id.is_none())
+        .map(|frame| frame.frame_id.as_str());
+    let mut seen = HashSet::new();
+    accessibility
+        .nodes
+        .iter()
+        .filter(|node| {
+            !node.ignored && node.frame_id.as_deref().is_none_or(|id| Some(id) == root_frame)
+        })
+        .filter(|node| {
+            matches!(
+                node.role.as_deref(),
+                Some("button" | "link" | "checkbox" | "radio" | "switch" | "tab" | "option"
+                    | "heading" | "status" | "alert" | "StaticText")
+            )
+        })
+        .filter_map(|node| {
+            let name = node.name.as_deref()?.trim();
+            if name.is_empty()
+                || name.chars().take(MAX_RENDERED_NAME_CHARS + 1).count() > MAX_RENDERED_NAME_CHARS
+            {
+                return None;
+            }
+            let normalized = name.split_whitespace().collect::<Vec<_>>().join(" ");
+            seen.insert(normalized.clone()).then_some(normalized)
+        })
+        .take(MAX_RENDERED_NAMES)
+        .collect()
 }
 
 /// Read Quarry's signal into the closed vocabularies; a value this build does
@@ -1510,6 +1601,7 @@ pub fn observation_from_challenge_refusal(
         screenshot_ref: String::new(),
         dom_snapshot_ref: String::new(),
         snapshot_generation: None,
+        rendered_controls: Vec::new(),
         snapshot_targets: Vec::new(),
         error_message: format!("the site refuses automation ({challenge})"),
         challenge: Some(challenge),
@@ -1649,6 +1741,7 @@ pub fn observation_from_policy_denial(
         screenshot_ref: String::new(),
         dom_snapshot_ref: String::new(),
         snapshot_generation: None,
+        rendered_controls: Vec::new(),
         snapshot_targets: Vec::new(),
         error_message: denial.fixed_text(),
         challenge: None,
@@ -2279,21 +2372,43 @@ impl QuarryAgentClient {
     /// as the service principal, with the broker-derived attach grant. Quarry
     /// opens one agent tab in the background; the person keeps their tabs.
     pub async fn attach_run(&self, params: AttachParams<'_>) -> Result<AttachData, AgentClientError> {
+        let policy = params.policy.clone().filter(|ask| !ask.is_empty());
+        if policy.is_some() && params.start_url.is_some() {
+            // An old Quarry can ignore unknown policy fields and navigate during
+            // attach before its response exposes the missing acknowledgement.
+            return Err(AgentClientError::Decode("restricted attachments must start on a blank tab".to_owned()));
+        }
         let body = AttachRequest {
             grant_id: params.grant_id.to_owned(),
+            attach_tab: params.attach_tab.clone(),
             start_url: params.start_url.clone(),
             constraints: AttachConstraintsWire {
                 max_steps: params.max_steps,
                 max_runtime_s: params.max_runtime_s,
             },
+            policy: policy.clone(),
         };
-        let endpoint = self.url(&format!("/v1/agent/runs/{}/attach", params.run_id));
+        let route = if params.attach_tab.is_some() { "attach-current-tab" } else { "attach" };
+        let endpoint = self.url(&format!("/v1/agent/runs/{}/{route}", params.run_id));
         let resp = self
             .send_with_auth_retry(params.org_id, params.request_id, || {
                 self.http.post(&endpoint).json(&body)
             })
             .await?;
-        Self::decode(resp).await
+        let data: AttachData = Self::decode(resp).await?;
+        if params.attach_tab.as_ref().is_some_and(|tab|
+            !data.attached_existing_tab || data.tab_id != tab.tab_id)
+        {
+            let _ = self.release_attach(params.org_id, params.run_id, &data.attach_id, AttachDisposition::Abort, params.request_id).await;
+            return Err(AgentClientError::Decode("the current tab was not acknowledged by Quarry".to_owned()));
+        }
+        if policy.is_some() && !data.policy_applied {
+            // An older Quarry may silently ignore unknown fields. The tab was
+            // opened blank and no action was dispatched; abort it and refuse.
+            let _ = self.release_attach(params.org_id, params.run_id, &data.attach_id, AttachDisposition::Abort, params.request_id).await;
+            return Err(AgentClientError::Decode("attachment policy was not acknowledged by Quarry".to_owned()));
+        }
+        Ok(data)
     }
 
     /// WS8.G: end the attachment (`DELETE .../attach/{attach_id}?disposition=`).
@@ -2764,11 +2879,57 @@ mod tests {
         assert_eq!(obs.page_title, "Title");
         assert_eq!(obs.extracted_text, "page text");
         assert_eq!(obs.action_id, "act_9");
+        assert!(obs.rendered_controls.is_empty());
 
         wire.policy_denials = vec!["domain not allowed".into()];
         let blocked = observation_from_wire(&wire, "act_9", "grant_9");
         assert_eq!(blocked.status, ObservationStatus::Blocked);
         assert!(blocked.error_message.contains("domain not allowed"));
+    }
+
+    #[test]
+    fn browser_observation_keeps_rendered_evidence_outside_the_action_index() {
+        let mut snapshot = serde_json::json!({
+            "snapshot_id": "snapshot-results",
+            "generation": 2,
+            "targets": [],
+            "frames": [
+                { "frame_id": "root" },
+                { "frame_id": "embedded", "parent_frame_id": "root" }
+            ],
+            "accessibility": {
+                "source": "chromium_cdp_ax",
+                "nodes": [
+                    { "role": "button", "name": "Vis filter  Oslo", "frame_id": "root" },
+                    { "role": "button", "name": "Vis filter Leilighet" },
+                    { "role": "heading", "name": "42 treff" },
+                    { "role": "StaticText", "name": "42 treff" },
+                    { "role": "button", "name": "Hidden", "ignored": true },
+                    { "role": "button", "name": "Embedded", "frame_id": "embedded" },
+                    { "role": "generic", "name": "Non-semantic" },
+                    { "role": "textbox", "name": "Search", "value": "Do not retain" },
+                    { "role": "button", "name": "x".repeat(201) }
+                ]
+            }
+        });
+        let observation = observation_from_wire(
+            &wire_from(serde_json::json!({ "snapshot": snapshot })),
+            "a",
+            "g",
+        );
+        assert!(observation.snapshot_targets.is_empty());
+        assert_eq!(
+            observation.rendered_controls,
+            ["Vis filter Oslo", "Vis filter Leilighet", "42 treff"]
+        );
+
+        snapshot["accessibility"]["source"] = serde_json::json!("legacy");
+        let observation = observation_from_wire(
+            &wire_from(serde_json::json!({ "snapshot": snapshot })),
+            "a",
+            "g",
+        );
+        assert!(observation.rendered_controls.is_empty());
     }
 
     #[test]
@@ -3943,12 +4104,14 @@ mod tests {
         let client = QuarryAgentClient::new(server.uri(), "svc").unwrap();
         let data = client
             .attach_run(AttachParams {
+                attach_tab: None,
                 org_id: "org_1",
                 run_id: "run_user",
                 grant_id: "grant_attach",
                 start_url: None,
                 max_steps: Some(12),
                 max_runtime_s: Some(300),
+                policy: None,
                 request_id: Some("req-7"),
             })
             .await
@@ -3979,17 +4142,61 @@ mod tests {
         let client = QuarryAgentClient::new(server.uri(), "svc").unwrap();
         let data = client
             .attach_run(AttachParams {
+                attach_tab: None,
                 org_id: "org_1",
                 run_id: "run_user",
                 grant_id: "grant_attach",
                 start_url: Some("https://example.com/".to_owned()),
                 max_steps: None,
                 max_runtime_s: None,
+                policy: None,
                 request_id: None,
             })
             .await
             .expect("the second attempt is answered");
         assert_eq!(data.attach_id, "att_1");
+    }
+
+    #[tokio::test]
+    async fn attached_policy_requires_positive_ack_and_aborts_old_server_attachment() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/agent/runs/run_user/attach"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(attach_ok()))
+            .expect(1).mount(&server).await;
+        Mock::given(method("DELETE"))
+            .and(path("/v1/agent/runs/run_user/attach/att_1"))
+            .and(wiremock::matchers::query_param("disposition", "abort"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"data":{"attach_id":"att_1","state":"aborted"}})))
+            .expect(1).mount(&server).await;
+        let client = QuarryAgentClient::new(server.uri(), "svc").unwrap();
+        let result = client.attach_run(AttachParams {
+            attach_tab: None,
+            org_id: "org_1", run_id: "run_user", grant_id: "grant_attach",
+            start_url: None, max_steps: None, max_runtime_s: None,
+            policy: Some(WireRequestAsk::plan_mode()), request_id: None,
+        }).await;
+        assert!(matches!(result, Err(AgentClientError::Decode(_))));
+    }
+
+    #[tokio::test]
+    async fn attached_policy_is_forwarded_and_accepted_only_with_ack() {
+        let server = MockServer::start().await;
+        let mut response = attach_ok();
+        response["data"]["policy_applied"] = serde_json::json!(true);
+        Mock::given(method("POST"))
+            .and(path("/v1/agent/runs/run_user/attach"))
+            .and(body_json(serde_json::json!({"grant_id":"grant_attach", "constraints":{}, "policy":{"disable":PLAN_MODE_DISABLED_CAPABILITIES}})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(response))
+            .expect(1).mount(&server).await;
+        let client = QuarryAgentClient::new(server.uri(), "svc").unwrap();
+        let data = client.attach_run(AttachParams {
+            attach_tab: None,
+            org_id: "org_1", run_id: "run_user", grant_id: "grant_attach",
+            start_url: None, max_steps: None, max_runtime_s: None,
+            policy: Some(WireRequestAsk::plan_mode()), request_id: None,
+        }).await.unwrap();
+        assert!(data.policy_applied);
     }
 
     #[tokio::test]

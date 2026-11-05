@@ -1,4 +1,5 @@
 import { changeBrowserControl, STALE_CONTROL_COPY } from '@/features/browser/dock/browser-control'
+import { useAssistantBrowser, type NettBrowserOwner } from '@/features/core/assistant-agent/assistant-browser-context'
 import {
   AlertCircle,
   ArrowRight,
@@ -29,8 +30,10 @@ import {
   browserErrorMessage,
   deleteBrowserProfile,
   getBrowserOwnerTimeline,
+  getBrowserSession,
   keepAliveBrowserSession,
   listBrowserProfiles,
+  listBrowserTabs,
   probeBrowserProfile,
   renameBrowserProfile,
   runBrowserAction,
@@ -83,10 +86,12 @@ import {
 } from '@/features/knowledge/components/CrawlApprovalPrompt'
 import { DashboardPlanBadge } from './DashboardPlanBadge'
 import { ProductPicker } from './ProductPicker'
+import { KnowledgeMonitoring } from './KnowledgeMonitoring'
 import { ScrapePreviewPanel } from './KnowledgeScrapePreview'
-import { navigationFailureFromError, type BrowserNavigationFailure } from '@/features/browser/session/browser-navigation-error'
+import { navigationFailureFromError, navigationHttpResponseFailure, type BrowserNavigationFailure } from '@/features/browser/session/browser-navigation-error'
 import type { KeepAliveOutcome } from '@/features/browser/session/session-keepalive'
 import { ApiError } from '@/shared/api/http'
+import { getSession } from '@/shared/session/session-store'
 import { PROFILE_SCOPE_LABELS, type BrowserProfileManagerProps } from './BrowserChrome'
 import { createBrowserLoopController, type BrowserLoopState } from './browser-loop'
 import {
@@ -109,8 +114,9 @@ import {
   type ScrapePreview,
 } from './knowledge-preview'
 import { robotsBlockedText } from './knowledge-robots'
+import { webAddress } from './web-address'
 
-type IngestMode = 'link' | 'crawl' | 'products'
+type IngestMode = 'link' | 'crawl' | 'products' | 'monitor'
 type IngestKind = 'link' | 'crawl' | 'upload'
 
 type IngestJob = {
@@ -154,6 +160,8 @@ type IngestEvent = {
 }
 type BrowserSessionAttempt = {
   error: string | null
+  errorCode?: string | null
+  navigationFailure?: BrowserNavigationFailure
   session: BrowserSessionResponse | null
 }
 type PersistedBrowserPreview = {
@@ -174,8 +182,8 @@ const newProfileChoice = 'new'
 async function loadOrgContext() {
   const [session, ctx] = await Promise.all([getAuthSession(), getSessionContext()])
   return {
-    orgId: ctx.orgs[0]?.id ?? '',
-    userId: session?.user.id ?? '',
+    orgId: ctx.orgId ?? ctx.orgs[0]?.id ?? '',
+    userId: session?.user.id ?? ctx.userId ?? '',
   }
 }
 
@@ -188,6 +196,10 @@ function hasActiveJobId(job: IngestJob): job is ActiveIngestJob {
 }
 
 export function KnowledgeComposer(props: {
+  /** Reuse the existing browser surface in Nett without the extraction controls. */
+  browserOnly?: boolean
+  browserUrl?: string | null
+  browserContextVisible?: boolean
   inlinePlanLabel?: string
   inlineTitle?: string
   onPreviewActiveChange?: (active: boolean) => void
@@ -195,16 +207,20 @@ export function KnowledgeComposer(props: {
 }) {
   const i18n = useI18n()
   let pollTimer: number | undefined
+  let tabRefreshTimers: number[] = []
+  let tabRefreshGeneration = 0
+  let latestAppliedTabRefresh = 0
   let hydratedJobsKey: string | null = null
   let hydratedBrowserPreviewKey: string | null = null
   let keySeq = 0
+  let previewRequestVersion = 0
   const crawlStreams = new Map<string, AbortController>()
   const [ctx] = createResource(loadOrgContext)
   const orgId = createMemo(() => ctx()?.orgId ?? '')
-  const crawlJobsStorageKey = createMemo(() => orgId() ? `${crawlJobsStoragePrefix}.${orgId()}` : null)
-  const browserPreviewStorageKey = createMemo(() => orgId() ? `${browserPreviewStoragePrefix}.${orgId()}` : null)
+  const crawlJobsStorageKey = createMemo(() => !props.browserOnly && orgId() ? `${crawlJobsStoragePrefix}.${orgId()}` : null)
+  const browserPreviewStorageKey = createMemo(() => !props.browserOnly && orgId() ? `${browserPreviewStoragePrefix}.${orgId()}` : null)
   const [url, setUrl] = createSignal('')
-  const [mode, setMode] = createSignal<IngestMode>('link')
+  const [mode, setMode] = createSignal<IngestMode>(props.browserOnly ? 'link' : 'crawl')
   const [agentMode, setAgentMode] = createSignal(false)
   const [crawlMaxPages, setCrawlMaxPages] = createSignal(25)
   // W2-U65-51: crawl scope options and scrape captures. Behind VITE_KNOWLEDGE_SCRAPE_OPTIONS_ENABLED
@@ -281,12 +297,42 @@ export function KnowledgeComposer(props: {
   // preview goes away (Discard, leaving a blocked site, adding to the knowledge base).
   let lastAiRun: { sessionId: string; runId: string } | null = null
   const [preview, setPreview] = createSignal<ScrapePreview | null>(null)
+  const assistantBrowser = useAssistantBrowser()
+  const [nettBrowserOwner, setNettBrowserOwner] = createSignal<NettBrowserOwner | null>(null)
+  const [assistantHandoff, setAssistantHandoff] = createSignal<'waiting' | 'unavailable' | null>(null)
+  const currentOwner = () => {
+    const current = getSession()
+    return { orgId: current.activeOrg?.id, userId: current.user?.id }
+  }
+  const matchesCurrentOwner = (owner: { orgId?: string; userId?: string }) => {
+    const current = currentOwner()
+    return Boolean(owner.orgId && owner.userId && owner.orgId === current.orgId && owner.userId === current.userId)
+  }
+  if (props.browserOnly && assistantBrowser.registerNettBrowser) {
+    onCleanup(assistantBrowser.registerNettBrowser(() => {
+      const owner = nettBrowserOwner()
+      const browser = preview()?.browserSession?.session
+      return props.browserContextVisible && owner && matchesCurrentOwner(owner) && !browserBusy() && !assistantHandoff() &&
+        browser?.id === owner.sessionId && browser.status === 'live' && browser.control?.mode === 'human_takeover'
+        ? owner : null
+    }))
+    createEffect(currentOwner, (current) => {
+      const owner = untrack(nettBrowserOwner)
+      if (owner && (owner.orgId !== current.orgId || owner.userId !== current.userId)) setNettBrowserOwner(null)
+    })
+  }
+  const [pendingSavedPreview, setPendingSavedPreview] = createSignal<PersistedBrowserPreview | null>(null)
   const [discovery, setDiscovery] = createSignal<CrawlDiscovery | null>(null)
   const [discovering, setDiscovering] = createSignal(false)
   const [productExtraction, setProductExtraction] = createSignal<ProductExtraction | null>(null)
   const [productSummary, setProductSummary] = createSignal<string | null>(null)
   const [summarizing, setSummarizing] = createSignal(false)
   const [formError, setFormError] = createSignal<string | null>(null)
+  const [browserOpenRecovery, setBrowserOpenRecovery] = createSignal<{
+    url: string
+    kind: 'permission' | 'driver' | 'handoff'
+  } | null>(null)
+  const [browserOpening, setBrowserOpening] = createSignal(false)
   // A plain-language note that is not a failure: set when the site was left but the AI run
   // could not be stopped (run controls off). Cleared by the next link submit.
   const [leaveNotice, setLeaveNotice] = createSignal<string | null>(null)
@@ -500,12 +546,8 @@ export function KnowledgeComposer(props: {
         removeClientValue(key)
         return
       }
-      setMode('link')
-      setUrl(restored.preview.url)
-      setPreview(restored.preview)
-      setBrowserRationales(restored.browserRationales)
-      const sessionId = restored.preview.browserSession?.session.id
-      if (sessionId) void refreshBrowserOwnerTimeline(sessionId)
+      // Retain the saved extraction without changing Crawl or opening an old session.
+      setPendingSavedPreview(restored)
     },
   )
 
@@ -513,10 +555,8 @@ export function KnowledgeComposer(props: {
     () => ({ key: browserPreviewStorageKey(), current: preview(), rationales: browserRationales() }),
     ({ key, current, rationales }) => {
       if (!key || hydratedBrowserPreviewKey !== key) return
-      if (!current) {
-        removeClientValue(key)
-        return
-      }
+      // Clearing is explicit; initial empty state must never delete a saved preview.
+      if (!current) return
       if (current.browserSession?.session.zdr) {
         removeClientValue(key)
         return
@@ -818,12 +858,18 @@ export function KnowledgeComposer(props: {
   }
 
   const loadLinkPreview = async (target: string) => {
+    const requestVersion = ++previewRequestVersion
+    const ownerAtStart = props.browserOnly ? ctx() : undefined
     // A new link replaces any current preview: stop a running AI loop, close
     // the old browser session, and drop rationales so nothing dangles.
     browserLoop.requestStop()
     aiRunAbort?.abort()
     setAiRunRationale(null)
     closePreviewBrowserSession(preview())
+    if (props.browserOnly) {
+      setPreview(null)
+      setNettBrowserOwner(null)
+    }
     setBrowserRationales([])
     let browserSessionPromise: Promise<BrowserSessionAttempt> | null = null
     // W2-U65-51: a capture is requested only when the user ticked it (flag on).
@@ -831,6 +877,60 @@ export function KnowledgeComposer(props: {
       ? buildCaptureRequest({ pdf: capturePdf(), screenshot: captureScreenshot() })
       : undefined
     try {
+      if (props.browserOnly) {
+        const browserSession = await tryCreateBrowserSession(target)
+        if (requestVersion !== previewRequestVersion) {
+          closeBrowserSessionById(browserSession.session?.session.id)
+          return
+        }
+        if (!browserSession.session) {
+          const refused = browserSession.errorCode === 'browser_grant_denied'
+          const driverFailed = browserSession.errorCode === 'DRIVER_FAILED'
+          if (refused || driverFailed) {
+            const recoveryUrl = webAddress(target)
+            if (recoveryUrl) setBrowserOpenRecovery({ url: recoveryUrl, kind: refused ? 'permission' : 'driver' })
+          }
+          if (refused) {
+            const host = new URL(target).hostname
+            setFormError(i18n.tr(`Nettlesertilgang til ${host} ble ikke innvilget.`, `Browser access to ${host} was not granted.`))
+          } else if (driverFailed) {
+            setFormError(browserSession.navigationFailure?.sentence
+              ?? i18n.tr('Verevons nettleserøkt feilet mens siden ble åpnet.', 'The Verevon browser session failed while opening the page.'))
+          } else {
+            setFormError(browserSession.error ?? i18n.tr('Nettleserøkt kunne ikke startes.', 'Browser session could not be started.'))
+          }
+          return
+        }
+        const initialNavigationError = browserSession.session.navigationError
+        let actualSession = browserSession.session
+        if (actualSession.session.control?.mode !== 'human_takeover') {
+          try {
+            // A freshly opened Nett browser belongs to the person. Keep the
+            // compare-and-set guard and render only the server's actual state.
+            const outcome = await changeBrowserControl(orgId(), actualSession.session.id, 'human_takeover', actualSession.session.control?.epoch ?? null)
+            actualSession = outcome.response
+            if (outcome.stale && actualSession.session.control?.mode !== 'human_takeover') setFormError(i18n.tr(STALE_CONTROL_COPY.no, STALE_CONTROL_COPY.en))
+          } catch (reason) {
+            if (requestVersion === previewRequestVersion) setFormError(browserErrorMessage(reason, i18n.tr, { no: 'Nettleseren ble åpnet, men du fikk ikke kontroll. Prøv «Ta over».', en: 'The browser opened, but control could not be acquired. Try “Take over”.' }))
+          }
+        }
+        if (requestVersion !== previewRequestVersion) {
+          closeBrowserSessionById(actualSession.session.id)
+          return
+        }
+        // Browsing is independent of scraping and does not save page content.
+        const emptyPreview: ScrapePreview = { url: target, title: hostnameOf(target), description: '', markdown: '', blocks: [], charCount: 0, source: 'empty' }
+        setPreview(attachBrowserSession(emptyPreview, actualSession))
+        if (initialNavigationError?.code === 'browser_initial_navigation_failed') {
+          setBrowserNavigationError(navigationHttpResponseFailure(target, initialNavigationError.httpStatus, i18n.tr, initialNavigationError.redirectCount))
+        }
+        const sessionId = actualSession.session.id
+        if (sessionId && ownerAtStart && matchesCurrentOwner(ownerAtStart)) {
+          setNettBrowserOwner({ ...ownerAtStart, sessionId })
+        }
+        if (sessionId) void refreshBrowserOwnerTimeline(sessionId)
+        return
+      }
       browserSessionPromise = tryCreateBrowserSession(target)
       const result = await scrapePreview(orgId(), {
         url: target,
@@ -847,6 +947,10 @@ export function KnowledgeComposer(props: {
         },
       })
       const browserSession = await browserSessionPromise
+      if (requestVersion !== previewRequestVersion) {
+        closeBrowserSessionById(browserSession.session?.session.id)
+        return
+      }
       // The preview route never takes captures, so the ticked ones come from one /scrape call.
       // A capture that fails does not fail the preview; the user sees a notice instead.
       let captureView = toScrapePreview(target, result).captures
@@ -863,6 +967,10 @@ export function KnowledgeComposer(props: {
         ...(captureView ? { captures: captureView } : {}),
         browserSessionError: browserSession.error,
       }
+      if (requestVersion !== previewRequestVersion) {
+        closeBrowserSessionById(browserSession.session?.session.id)
+        return
+      }
       setPreview(nextPreview)
       const sessionId = browserSession.session?.session.id
       if (sessionId) void refreshBrowserOwnerTimeline(sessionId)
@@ -870,7 +978,7 @@ export function KnowledgeComposer(props: {
       void browserSessionPromise?.then((attempt) => {
         closeBrowserSessionById(attempt.session?.session.id)
       })
-      setFormError(browserErrorMessage(reason, i18n.tr, { no: 'Skraping kunne ikke fullføres.', en: 'Scraping could not be completed.' }))
+      if (requestVersion === previewRequestVersion) setFormError(browserErrorMessage(reason, i18n.tr, { no: 'Skraping kunne ikke fullføres.', en: 'Scraping could not be completed.' }))
     }
   }
 
@@ -887,6 +995,7 @@ export function KnowledgeComposer(props: {
     const selectedProfile = zdr ? null : selectedBrowserProfileSummary()
     try {
       const session = await createBrowserSession(id, {
+        ...(props.browserOnly ? { purpose: 'personal_browsing' } : {}),
         ...(zdr ? { zdr: true } : {}),
         ...(selectedProfile ? { profileId: selectedProfile.profile_id, scope: selectedProfile.scope } : {}),
         url: target,
@@ -904,8 +1013,17 @@ export function KnowledgeComposer(props: {
       }
       return { error: null, session }
     } catch (reason) {
+      const apiError = reason instanceof ApiError ? reason : null
+      const driverBlock = apiError?.code === 'DRIVER_FAILED' && apiError.blockReason !== null
+      const details = apiError?.code === 'DRIVER_FAILED' && !driverBlock ? apiError.details : null
+      const httpResponseFailed = details?.http_status !== 407 && (
+        details?.reason === 'navigation_http_response'
+        || (typeof details?.error === 'string' && /\bnet::ERR_HTTP_RESPONSE_CODE_FAILURE\b/.test(details.error))
+      )
       return {
         error: browserErrorMessage(reason, i18n.tr, { no: 'Nettleserøkt kunne ikke startes.', en: 'Browser session could not be started.' }),
+        ...(apiError && !driverBlock ? { errorCode: apiError.code } : {}),
+        ...(httpResponseFailed ? { navigationFailure: navigationHttpResponseFailure(target, details?.http_status, i18n.tr, details?.redirect_count) } : {}),
         session: null,
       }
     } finally {
@@ -970,13 +1088,22 @@ export function KnowledgeComposer(props: {
   }
 
   const clearPreview = () => {
+    cancelTabRefresh()
+    previewRequestVersion += 1
+    if (props.browserOnly) {
+      setNettBrowserOwner(null)
+      setAssistantHandoff(null)
+    }
     const current = preview()
     lastAiRun = null
     browserLoop.requestStop()
     aiRunAbort?.abort()
     setAiRunRationale(null)
     closePreviewBrowserSession(current)
-    clearStoredBrowserPreview()
+    if (current) {
+      clearStoredBrowserPreview()
+      setPendingSavedPreview(null)
+    }
     setBrowserRationales([])
     setPreview(null)
   }
@@ -985,18 +1112,25 @@ export function KnowledgeComposer(props: {
     const current = preview()
     const sessionId = current?.browserSession?.session.id
     const id = orgId()
-    if (!current || !sessionId || !id || browserBusy()) return
+    if (!current || !sessionId || !id || browserBusy() || assistantHandoff()) return
+    const requestVersion = previewRequestVersion
+    const stillCurrent = () => requestVersion === previewRequestVersion && orgId() === id
+      && preview()?.browserSession?.session.id === sessionId
     setBrowserBusy(true)
     setFormError(null)
     try {
       const nextSession = await runBrowserAction(id, sessionId, action, { actor: 'human' })
+      if (!stillCurrent()) return
       setPreview(attachBrowserSession(current, nextSession))
-      setBrowserNavigationError(null)
+      scheduleTabRefresh(sessionId)
+      if (action.type === 'navigate' || action.type === 'back' || action.type === 'forward' || action.type === 'reload') setBrowserNavigationError(null)
       void refreshBrowserOwnerTimeline(sessionId)
     } catch (reason) {
+      if (!stillCurrent()) return
       const failure = navigationFailureFromError(action, reason, i18n.tr)
-      setBrowserNavigationError(failure)
-      if (!failure) {
+      if (failure) {
+        setBrowserNavigationError(failure)
+      } else {
         setFormError(browserErrorMessage(reason, i18n.tr, { no: 'Nettleserhandlingen kunne ikke fullføres.', en: 'The browser action could not be completed.' }))
       }
     } finally {
@@ -1008,7 +1142,7 @@ export function KnowledgeComposer(props: {
     const current = preview()
     const sessionId = current?.browserSession?.session.id
     const id = orgId()
-    if (!current || !sessionId || !id || browserBusy()) return
+    if (!current || !sessionId || !id || browserBusy() || assistantHandoff()) return
     if (mode === 'human_takeover') browserLoop.requestPause()
     setBrowserBusy(true)
     setFormError(null)
@@ -1063,7 +1197,7 @@ export function KnowledgeComposer(props: {
     const current = preview()
     const sessionId = current?.browserSession?.session.id
     const id = orgId()
-    if (!current || !sessionId || !id || browserBusy()) return
+    if (!current || !sessionId || !id || browserBusy() || assistantHandoff()) return
     setBrowserBusy(true)
     setFormError(null)
     try {
@@ -1078,10 +1212,11 @@ export function KnowledgeComposer(props: {
   }
 
   const selectPreviewBrowserTab = async (tabId: string) => {
+    cancelTabRefresh()
     const current = preview()
     const sessionId = current?.browserSession?.session.id
     const id = orgId()
-    if (!current || !sessionId || !id || browserBusy()) return
+    if (!current || !sessionId || !id || browserBusy() || assistantHandoff()) return
     setBrowserBusy(true)
     setFormError(null)
     try {
@@ -1102,6 +1237,110 @@ export function KnowledgeComposer(props: {
       ? attachBrowserSession(current, { observation, session })
       : attachBrowserObservation(current, observation, { controlMode: 'human_takeover' })
     setPreview(next)
+    scheduleTabRefresh(current.browserSession.session.id)
+  }
+
+  // A click can complete before the destination commits. Quarry streams the
+  // immediate observation once, while later frames can already show the new
+  // page. Read the owner's actual tab metadata again after the action settles.
+  const cancelTabRefresh = () => {
+    tabRefreshGeneration += 1
+    for (const timer of tabRefreshTimers) window.clearTimeout(timer)
+    tabRefreshTimers = []
+  }
+  const scheduleTabRefresh = (sessionId: string) => {
+    if (!props.browserOnly || !sessionId || !orgId()) return
+    cancelTabRefresh()
+    const generation = tabRefreshGeneration
+    const ownerOrg = orgId()
+    latestAppliedTabRefresh = 0
+    for (const [index, delay] of [350, 1500, 4000].entries()) {
+      tabRefreshTimers.push(window.setTimeout(() => {
+        void listBrowserTabs(ownerOrg, sessionId).then((response) => {
+          if (generation !== tabRefreshGeneration || orgId() !== ownerOrg || index < latestAppliedTabRefresh) return
+          setPreview((current) => {
+            if (!current || current.browserSession?.session.id !== sessionId) return current
+            latestAppliedTabRefresh = index
+            return attachBrowserTabs(current, response)
+          })
+        }).catch(() => undefined)
+      }, delay))
+    }
+  }
+
+  if (props.browserOnly) {
+    let settledRunId: string | null = null
+    createEffect(
+      () => {
+        const view = assistantBrowser.view()
+        const owner = nettBrowserOwner()
+        return props.browserContextVisible && !browserBusy() && owner && matchesCurrentOwner(owner) && view?.usesExistingTab
+          && view.borrowedTabId && view.sessionId === owner.sessionId && ['completed', 'stopped', 'failed'].includes(view.status)
+          ? view.runId : null
+      },
+      (runId) => {
+        const owner = untrack(nettBrowserOwner)
+        const tabId = untrack(assistantBrowser.view)?.borrowedTabId
+        if (!runId || runId === settledRunId || !owner || !tabId) return
+        const requestVersion = previewRequestVersion
+        const controller = new AbortController()
+        let retryTimer: number | undefined
+        let retry = 0
+        const currentSession = () => untrack(() => {
+          const current = preview()
+          return requestVersion === previewRequestVersion && matchesCurrentOwner(owner)
+            && current?.browserSession?.session.id === owner.sessionId ? current : null
+        })
+        const finish = (response: BrowserSessionResponse | null, returned: boolean, expired = false) => {
+          const current = currentSession()
+          if (controller.signal.aborted || !current) return
+          stopPolling()
+          settledRunId = runId
+          if (response) setPreview(attachBrowserSession(current, response))
+          setAssistantHandoff(returned ? null : 'unavailable')
+          if (returned) return
+          const retryUrl = webAddress(response?.session.url || current.url) ?? webAddress(url())
+          if (retryUrl) setBrowserOpenRecovery({ url: retryUrl, kind: 'handoff' })
+          setFormError(expired
+            ? i18n.tr('Nettleserøkten er avsluttet. Åpne siden på nytt for å fortsette.', 'The browser session has ended. Reopen the page to continue.')
+            : i18n.tr('Nettleseren kunne ikke bekrefte at fanen ble levert tilbake. Åpne siden på nytt.', 'The browser could not confirm that the tab was returned. Reopen the page.'))
+        }
+        const deadline = window.setTimeout(() => finish(null, false), 30_000)
+        const stopPolling = () => {
+          controller.abort()
+          window.clearTimeout(deadline)
+          if (retryTimer !== undefined) window.clearTimeout(retryTimer)
+        }
+        const poll = async () => {
+          if (controller.signal.aborted || !currentSession()) return
+          try {
+            const response = await getBrowserSession(owner.orgId, owner.sessionId, controller.signal)
+            if (response.session.status !== 'live') {
+              finish(response, false, true)
+              return
+            }
+            const holder = response.session.tabs?.find((tab) => tab.tabId === tabId)?.holder
+            if (holder !== 'agent') {
+              finish(response, holder === 'human')
+              return
+            }
+          } catch (reason) {
+            if (reason instanceof ApiError && (reason.code === 'browser_session_expired' || reason.code === 'browser_session_not_found')) {
+              finish(null, false, true)
+              return
+            }
+          }
+          if (!controller.signal.aborted) retryTimer = window.setTimeout(() => void poll(), Math.min(250 * 2 ** retry++, 2_000))
+        }
+        cancelTabRefresh()
+        setAssistantHandoff('waiting')
+        void poll()
+        return () => {
+          stopPolling()
+          setAssistantHandoff((state) => state === 'waiting' ? null : state)
+        }
+      },
+    )
   }
 
   // The model rationale for each AI-driven step, keyed by the step number of
@@ -1435,14 +1674,44 @@ export function KnowledgeComposer(props: {
   })
 
   onCleanup(() => {
+    cancelTabRefresh()
+    previewRequestVersion += 1
+    if (props.browserOnly) closePreviewBrowserSession(preview())
     if (pollTimer !== undefined) window.clearInterval(pollTimer)
     for (const controller of crawlStreams.values()) controller.abort()
+  })
+
+  // Nett provides an explicit URL; wait for the workspace identity before
+  // using the same browser/session path as the existing page preview.
+  const openBrowserUrl = (target: string) => {
+    setFormError(null)
+    setBrowserOpenRecovery(null)
+    setBrowserNavigationError(null)
+    setAssistantHandoff(null)
+    setUrl(target)
+    setBrowserOpening(true)
+    const attempt = loadLinkPreview(target)
+    const version = previewRequestVersion
+    void attempt.finally(() => {
+      if (version === previewRequestVersion) setBrowserOpening(false)
+    })
+  }
+  let lastBrowserUrl = ''
+  createEffect(() => ({ input: props.browserOnly ? props.browserUrl : null, workspaceReady: ready() }), ({ input, workspaceReady }) => {
+    if (!input || !workspaceReady || input === lastBrowserUrl) return
+    const target = normalizeUrl(input)
+    if (!target) {
+      setFormError(i18n.tr('Skriv inn en gyldig nettadresse.', 'Enter a valid web address.'))
+      return
+    }
+    lastBrowserUrl = input
+    untrack(() => openBrowserUrl(target))
   })
 
   return (
     <div class="verevon-panel-in verevon-dashboard-composer-card dashboard-knowledge-composer">
       <form class="dashboard-knowledge-composer__url" onSubmit={submitUrl}>
-        <div
+        <Show when={!props.browserOnly}><div
           class={['dashboard-knowledge-composer__mode-row', { 'dashboard-knowledge-composer__mode-row--inline': Boolean(props.inlinePlanLabel || props.inlineTitle) }]}
         >
           <Show when={props.inlinePlanLabel}>
@@ -1455,14 +1724,6 @@ export function KnowledgeComposer(props: {
           <div class="dashboard-knowledge-composer__modes" role="group" aria-label={i18n.tr('Innhentingsmodus', 'Ingestion mode')}>
             <button
               type="button"
-              class={{ 'dashboard-knowledge-composer__mode--active': mode() === 'link' }}
-              onClick={() => switchMode('link')}
-              aria-pressed={mode() === 'link' ? 'true' : 'false'}
-            >
-              <Link2 class="size-3.5" /> {i18n.tr('Lenke', 'Link')}
-            </button>
-            <button
-              type="button"
               class={{ 'dashboard-knowledge-composer__mode--active': mode() === 'crawl' }}
               onClick={() => switchMode('crawl')}
               aria-pressed={mode() === 'crawl' ? 'true' : 'false'}
@@ -1471,19 +1732,44 @@ export function KnowledgeComposer(props: {
             </button>
             <button
               type="button"
-              class={{ 'dashboard-knowledge-composer__mode--active': mode() === 'products' }}
-              onClick={() => switchMode('products')}
-              aria-pressed={mode() === 'products' ? 'true' : 'false'}
+              class={{ 'dashboard-knowledge-composer__mode--active': mode() === 'link' || mode() === 'products' }}
+              onClick={() => switchMode('link')}
+              aria-pressed={mode() === 'link' || mode() === 'products' ? 'true' : 'false'}
             >
-              <ShoppingBag class="size-3.5" /> {i18n.tr('Produkter', 'Products')}
+              <Link2 class="size-3.5" /> {i18n.tr('Extract', 'Extract')}
+            </button>
+            <button
+              type="button"
+              class={{ 'dashboard-knowledge-composer__mode--active': mode() === 'monitor' }}
+              onClick={() => switchMode('monitor')}
+              aria-pressed={mode() === 'monitor' ? 'true' : 'false'}
+            >
+              <ListChecks class="size-3.5" /> {i18n.tr('Kontroll', 'Monitor')}
             </button>
           </div>
           <Show when={props.inlineTitle}>
             {(title) => <strong class="dashboard-knowledge-composer__inline-title">{title()}</strong>}
           </Show>
-        </div>
+        </div></Show>
 
-        <Show when={props.previewCollapsed || !preview()}>
+        <Show when={!props.browserOnly && mode() !== 'monitor' && (props.previewCollapsed || !preview())}>
+          <Show when={mode() === 'link' && pendingSavedPreview() && (pendingSavedPreview()!.preview.markdown.trim() || pendingSavedPreview()!.preview.blocks.length)}>
+            <button type="button" onClick={() => {
+              const saved = pendingSavedPreview()
+              if (!saved) return
+              setPendingSavedPreview(null)
+              setUrl(saved.preview.url)
+              // The former browser session may have expired; restore content only.
+              setPreview({ ...saved.preview, browserSession: undefined })
+              setBrowserRationales(saved.browserRationales)
+            }}>{i18n.tr('Fortsett forrige uthenting', 'Continue previous extraction')}</button>
+          </Show>
+          <Show when={mode() === 'link' || mode() === 'products'}>
+            <div class="dashboard-knowledge-composer__modes" role="group" aria-label={i18n.tr('Hva vil du hente ut?', 'What would you like to extract?')}>
+              <button type="button" aria-pressed={mode() === 'link' ? 'true' : 'false'} class={{ 'dashboard-knowledge-composer__mode--active': mode() === 'link' }} onClick={() => switchMode('link')}>{i18n.tr('Nettside', 'Web page')}</button>
+              <button type="button" aria-pressed={mode() === 'products' ? 'true' : 'false'} class={{ 'dashboard-knowledge-composer__mode--active': mode() === 'products' }} onClick={() => switchMode('products')}><ShoppingBag class="size-3.5" /> {i18n.tr('Produkter', 'Products')}</button>
+            </div>
+          </Show>
           <div class="verevon-glass-input dashboard-knowledge-composer__input-wrap">
             <Link2 class="size-4 shrink-0 text-[#9A9188]" aria-hidden="true" />
             <input
@@ -1779,12 +2065,15 @@ export function KnowledgeComposer(props: {
         </Show>
       </form>
 
+      <Show when={!props.browserOnly && mode() === 'monitor'}><KnowledgeMonitoring orgId={orgId()} /></Show>
+
       <Show when={props.previewCollapsed ? null : preview()} keyed>
         {(current) => (
           <ScrapePreviewPanel
+            browsing={props.browserOnly}
             adding={adding()}
             browserApprovals={browserApprovals()}
-            browserBusy={browserBusy()}
+            browserBusy={browserBusy() || Boolean(assistantHandoff())}
             browserLoop={browserLoopState()}
             browserLoopRationale={aiRunRationale()}
             browserRationales={browserRationales()}
@@ -1793,7 +2082,7 @@ export function KnowledgeComposer(props: {
             browserNavigationError={browserNavigationError()}
             onBrowserNavigationDismiss={() => setBrowserNavigationError(null)}
             onBrowserNavigationRetry={(url) => void performBrowserAction({ type: 'navigate', url })}
-            onBrowserAutoRun={beginBrowserAiRun}
+            onBrowserAutoRun={current.browserSession?.session.capabilities.includes('human_browsing') ? undefined : beginBrowserAiRun}
             onBrowserControlMode={(mode, expectedEpoch) => void updateBrowserControlMode(mode, expectedEpoch)}
             onBrowserLoopPause={() => browserLoop.requestPause()}
             onBrowserLoopResume={() => browserLoop.requestResume()}
@@ -1802,7 +2091,7 @@ export function KnowledgeComposer(props: {
             onBrowserNewTab={createPreviewBrowserTab}
             onKeepAlive={keepAliveBrowser}
             onBrowserSelectTab={selectPreviewBrowserTab}
-            onBrowserSuggestAction={performBrowserSuggestedAction}
+            onBrowserSuggestAction={current.browserSession?.session.capabilities.includes('human_browsing') ? undefined : performBrowserSuggestedAction}
             onBrowserSocketObservation={handleBrowserSocketObservation}
             onBrowserTryOtherSource={() => void tryOtherSourceAfterBlock()}
             onAdd={(markdown, allSelected) => void addToKnowledge(markdown, allSelected)}
@@ -1852,7 +2141,7 @@ export function KnowledgeComposer(props: {
         )}
       </Show>
 
-      <div class="dashboard-knowledge-composer__actions">
+      <Show when={!props.browserOnly && mode() !== 'monitor'}><div class="dashboard-knowledge-composer__actions">
         <button
           type="button"
           class="dashboard-knowledge-composer__upload"
@@ -1877,19 +2166,41 @@ export function KnowledgeComposer(props: {
           {i18n.tr('Åpne kunnskapsbase', 'Open knowledge base')}
           <ArrowRight class="size-3.5" />
         </a>
-      </div>
+      </div></Show>
 
       <Show when={!ready() && ctx.loading}>
         <p class="dashboard-knowledge-composer__status">{i18n.tr('Kobler til arbeidsområdet ...', 'Connecting to the workspace ...')}</p>
       </Show>
       <Show when={formError()}>
-        {(message) => <p class="dashboard-knowledge-composer__error">{message()}</p>}
+        {(message) => <p class="dashboard-knowledge-composer__error" role={props.browserOnly ? 'alert' : undefined}>{message()}</p>}
       </Show>
+      <Show when={props.browserOnly && browserOpening()}>
+        <p class="dashboard-knowledge-composer__status" role="status">{i18n.tr('Åpner nettleseren ...', 'Opening the browser ...')}</p>
+      </Show>
+      <Show when={assistantHandoff() === 'waiting'}>
+        <p class="dashboard-knowledge-composer__status" role="status">{i18n.tr('Venter på at Verevon leverer tilbake fanen …', 'Waiting for Verevon to return the tab…')}</p>
+      </Show>
+      <Show when={props.browserOnly && browserOpenRecovery()}>{(recovery) => <>
+        <Show when={recovery().kind === 'permission' && import.meta.env.VITE_BROWSER_SITES === 'true'}>
+          <p class="dashboard-knowledge-composer__status">{i18n.tr('Se nettsidevalget for dette domenet. Hvis et nettsidevalg kreves, kan du velge «Lesing og handling» der arbeidsområdet tillater det.', 'Review the site choice for this domain. If a site choice is required, you can select “Reading and acting” when your workspace allows it.')}</p>
+        </Show>
+        <div class="flex flex-wrap items-center gap-x-4 gap-y-2">
+          <Show when={recovery().kind === 'permission' && import.meta.env.VITE_BROWSER_SITES === 'true'}>
+            <a class="dashboard-knowledge-composer__link" href={`/settings/browser-sites?host=${encodeURIComponent(new URL(recovery().url).hostname)}`} target="_blank" rel="noopener noreferrer">{i18n.tr('Se nettsidevalg', 'Review site choice')}</a>
+          </Show>
+          <button class="dashboard-knowledge-composer__link" type="button" disabled={!ready() || browserOpening()} onClick={() => openBrowserUrl(recovery().url)}>
+            {recovery().kind === 'permission' ? i18n.tr('Prøv igjen', 'Try again') : i18n.tr('Start ny nettleserøkt', 'Start a new browser session')}
+          </button>
+          <Show when={recovery().kind !== 'handoff'}>
+            <a class="dashboard-knowledge-composer__link" href={recovery().url} target="_blank" rel="noopener noreferrer">{i18n.tr('Åpne utenfor Verevon', 'Open outside Verevon')}</a>
+          </Show>
+        </div>
+      </>}</Show>
       <Show when={leaveNotice()}>
         {(message) => <p class="dashboard-knowledge-composer__status" role="status">{message()}</p>}
       </Show>
 
-      <Show when={jobs().length > 0}>
+      <Show when={!props.browserOnly && mode() !== 'monitor' && jobs().length > 0}>
         <ul class="dashboard-knowledge-composer__jobs">
           <For each={jobs()}>
             {(job) => <IngestJobRow job={job} />}

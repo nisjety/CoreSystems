@@ -1,10 +1,11 @@
 // @vitest-environment jsdom
 
 import { createRouter, memoryHistory } from '@solidjs/router'
-import { cleanup, fireEvent, render, screen, waitFor } from '@solidjs/testing-library'
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@solidjs/testing-library'
 import { flush } from 'solid-js'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import KnowledgePage from '@/features/knowledge/components/KnowledgePage'
+import { setKnowledgeRequestedView } from '@/features/knowledge/state/knowledge-filter-store'
 
 function makeFetchResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -406,14 +407,15 @@ describe('KnowledgePage', () => {
     expect(screen.getByRole('button', { name: /filtrer kunnskap/i })).toBeTruthy()
   })
 
-  it('switches from overview to graph and chunks using live data', async () => {
+  it('shows the knowledge graph inside AI-kart and switches to excerpts', async () => {
     renderKnowledgePage()
 
     await screen.findByRole('heading', { name: /^mapper$/i })
-    fireEvent.click(screen.getByRole('button', { name: /graf/i }))
+    expect(screen.queryByRole('button', { name: /^graf$/i })).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: /ai-kart/i }))
     flush()
 
-    expect(screen.getByRole('region', { name: /raggraph-relasjonskart/i })).toBeTruthy()
+    expect(screen.getByRole('region', { name: /^kunnskapsgraf$/i })).toBeTruthy()
     // The Graf tab opens on the workspace root — the top level of the tree —
     // rather than auto-selecting an arbitrary extracted entity. Deeper tiers
     // (providers, documents, entities) are reached by expanding a node.
@@ -424,6 +426,21 @@ describe('KnowledgePage', () => {
 
     expect(screen.getByRole('heading', { name: /^kilder$/i })).toBeTruthy()
     expect(screen.getByRole('button', { name: /returns policy/i })).toBeTruthy()
+    expect(screen.queryByRole('button', { name: /rutenettvisning/i })).toBeNull()
+    const trace = screen.getByText('Vis utdrags-ID').closest('details') as HTMLDetailsElement
+    expect(trace.open).toBe(false)
+    fireEvent.click(screen.getByText('Vis utdrags-ID'))
+    expect(trace.open).toBe(true)
+    expect(trace.textContent).toContain('kid-1')
+  })
+
+  it('opens AI-kart for existing graph view requests', async () => {
+    renderKnowledgePage()
+    await screen.findByRole('heading', { name: /^mapper$/i })
+    setKnowledgeRequestedView('graph')
+    flush()
+    await waitFor(() => expect(screen.getByRole('region', { name: /^kunnskapsgraf$/i })).toBeTruthy())
+    expect(screen.getByRole('button', { name: /ai-kart/i }).getAttribute('aria-pressed')).toBe('true')
   })
 
   it('opens a navbar knowledge result on its exact chunk-backed source', async () => {
@@ -493,8 +510,13 @@ describe('KnowledgePage', () => {
     fireEvent.click(screen.getByRole('button', { name: /generate map/i }))
 
     await waitFor(() => expect(screen.getByRole('heading', { name: /proposal awaiting review/i })).toBeTruthy())
-    expect(screen.getByRole('heading', { name: /support triage/i })).toBeTruthy()
-    expect(screen.getByText(/returns policy/i)).toBeTruthy()
+    const graph = screen.getByRole('region', { name: /kunnskapskildegraf/i })
+    const workflowNode = await within(graph).findByRole('button', { name: /forslag · support triage/i })
+    fireEvent.keyDown(workflowNode, { key: 'Enter' })
+    expect(await screen.findByText(/forslag · må gjennomgås/i)).toBeTruthy()
+    expect(screen.getByText(/1 kilder funnet i gjeldende kildeutvalg/i)).toBeTruthy()
+    const workflowCard = screen.getByRole('heading', { name: /^support triage$/i }).closest('article')!
+    expect(within(workflowCard).getByText(/returns policy/i)).toBeTruthy()
     fireEvent.click(screen.getByRole('button', { name: /view evidence/i }))
     flush()
     expect(screen.getByRole('region', { name: /evidence for support triage/i })).toBeTruthy()

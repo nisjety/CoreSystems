@@ -84,6 +84,25 @@ describe('browser session view model', () => {
     expect(next.browserSession?.observation?.url).toBe('https://triodelab.no/')
     expect(model.tabs).toHaveLength(2)
     expect(model.tabs[1]?.active).toBe(true)
+    expect(model.url).toBe('about:blank')
+  })
+
+  it('updates the active tab address when a new observation follows an in-page click', () => {
+    const current = attachBrowserSession(preview(), {
+      session: {
+        capabilities: ['navigate'], id: 'run-1', profile: { scope: 'run_scoped', storage: 'isolated' },
+        renderMode: 'chromium', status: 'live', title: 'Home', url: 'https://example.com/',
+        tabs: [{ active: true, tabId: 'tab-1', title: 'Home', url: 'https://example.com/' }],
+        viewport: { width: 1280, height: 800 },
+      },
+      observation: { run_id: 'run-1', step: 1, title: 'Home', url: 'https://example.com/' },
+    })
+    const next = attachBrowserObservation(current, {
+      run_id: 'run-1', step: 2, title: 'Details', url: 'https://example.com/details',
+    })
+    const model = browserSessionFromPreview(next)
+    expect(model.url).toBe('https://example.com/details')
+    expect(model.tabs[0]?.url).toBe('https://example.com/details')
   })
 
   it('prefers live Quarry browser observations when present', () => {

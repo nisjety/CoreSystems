@@ -17,8 +17,9 @@ import './browser-blocked-notice.css'
  */
 export function BrowserBlockedNotice(props: {
   challenge: BrowserChallenge | null | undefined
-  /** The person already holds the browser: only "Try another source" is left. */
+  /** The person already holds the browser. */
   humanTakeoverActive: boolean
+  openOutsideUrl?: string
   takeoverDisabled: boolean
   tryAnotherSourceDisabled: boolean
   onTakeOver: () => void
@@ -44,6 +45,11 @@ export function BrowserBlockedNotice(props: {
                 <Hand class="size-3" aria-hidden="true" />
                 {i18n.tr('Ta over', 'Take over')}
               </button>
+            </Show>
+            <Show when={props.openOutsideUrl}>
+              {(url) => <a class="knowledge-browser-blocked__button" href={url()} target="_blank" rel="noopener noreferrer">
+                {i18n.tr('Åpne utenfor Verevon', 'Open outside Verevon')}
+              </a>}
             </Show>
             <button
               type="button"

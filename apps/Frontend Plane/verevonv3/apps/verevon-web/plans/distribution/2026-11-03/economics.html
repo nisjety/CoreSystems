@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Verevon — distribution economics</title>
+<style>
+:root{color-scheme:light;--ink:#242722;--muted:#666d65;--line:#d7dcd3;--paper:#f6f7f2;--accent:#456449;--warn:#9b492e}
+*{box-sizing:border-box}body{margin:0;background:var(--paper);color:var(--ink);font:16px/1.5 system-ui,sans-serif}main{max-width:1120px;margin:auto;padding:48px 28px}header{max-width:760px;margin-bottom:32px}.eyebrow{text-transform:uppercase;font-size:12px;letter-spacing:.13em;color:var(--muted)}h1{font-size:clamp(30px,5vw,52px);font-weight:450;letter-spacing:-.045em;line-height:1.1;margin:16px 0}h2{font-size:20px;font-weight:550;margin:0 0 20px}p{color:var(--muted)}.layout{display:grid;grid-template-columns:minmax(270px,1fr) minmax(0,1.5fr);gap:40px}.presets{display:flex;gap:8px;flex-wrap:wrap;margin:20px 0 28px}button{font:inherit;min-height:44px;padding:8px 16px;background:transparent;border:1px solid #aeb8ab;border-radius:6px;cursor:pointer;color:var(--ink)}button[aria-pressed=true]{background:var(--ink);color:white;border-color:var(--ink)}button:focus-visible,input:focus-visible{outline:3px solid #537fd3;outline-offset:3px}label{display:block;font-size:13px;color:var(--muted);margin:0 0 14px}input{display:block;width:100%;margin-top:5px;border:1px solid #bac4b7;border-radius:5px;background:white;padding:9px 11px;color:var(--ink);font:16px system-ui;min-height:44px}.outputs{display:grid;grid-template-columns:1fr 1fr;gap:24px;margin-bottom:32px}.metric{padding:14px 0;border-top:1px solid var(--line)}.metric .label{font-size:13px;color:var(--muted)}.value{font-size:clamp(26px,4vw,38px);font-variant-numeric:tabular-nums;line-height:1.2;margin:6px 0}.note{font-size:12px;color:var(--muted)}.bar{display:flex;height:38px;overflow:hidden;margin:12px 0 16px;background:#e2e5df}.bar span{display:block;min-width:0}.bar .model{background:#abb7c7}.bar .support{background:#cfb09b}.bar .partner{background:#c9c49a}.bar .contribution{background:var(--accent)}.legend{display:flex;flex-wrap:wrap;gap:10px 18px;font-size:12px;color:var(--muted)}.legend b{display:inline-block;width:10px;height:10px;margin-right:5px}.status{margin:22px 0;padding:14px 0;border-top:1px solid var(--line);border-bottom:1px solid var(--line);color:var(--accent)}.status.warn{color:var(--warn)}.detail{font-size:13px;color:var(--muted)}.error{color:var(--warn)}footer{margin-top:38px;padding-top:24px;border-top:1px solid var(--line);font-size:13px;color:var(--muted)}a{color:#365d78}.breakdown{margin:28px 0}small{font-size:12px}table{border-collapse:collapse;width:100%;font-size:13px}th,td{text-align:left;padding:8px 0;border-bottom:1px solid var(--line)}td:last-child{text-align:right;font-variant-numeric:tabular-nums}#error[hidden]{display:none}@media(max-width:760px){main{padding:28px 18px}.layout{grid-template-columns:1fr;gap:28px}.outputs{gap:16px}.value{font-size:30px}}
+</style>
+</head>
+<body>
+<main>
+<header><div class="eyebrow">Verevon / internal planning / 3 November 2026</div><h1>What makes distribution pay?</h1><p>Adjust price, cost and retention before choosing a channel. All presets are hypothetical, in NOK excluding VAT. This calculator works offline and does not submit or save data.</p></header>
+<div class="presets" role="group" aria-label="Hypothetical scenario">
+<button type="button" data-preset="downside" aria-pressed="false">Downside</button><button type="button" data-preset="base" aria-pressed="true">Base</button><button type="button" data-preset="upside" aria-pressed="false">Upside</button>
+</div>
+<div class="layout">
+<section aria-labelledby="input-title"><h2 id="input-title">Per paying organization</h2>
+<form id="inputs">
+<label for="arpa">Net monthly recurring revenue<input id="arpa" name="arpa" type="number" min="0" step="100" value="7500" required></label>
+<label for="model">Monthly model, tools and infrastructure<input id="model" name="model" type="number" min="0" step="50" value="700" required></label>
+<label for="support">Monthly support and operations<input id="support" name="support" type="number" min="0" step="50" value="800" required></label>
+<label for="partner">Monthly recurring partner charge<input id="partner" name="partner" type="number" min="0" step="50" value="0" required></label>
+<label for="cac">Fully loaded acquisition cost<input id="cac" name="cac" type="number" min="0" step="500" value="30000" required></label>
+<label for="onboarding">Successful onboarding delivery cost<input id="onboarding" name="onboarding" type="number" min="0" step="500" value="18000" required></label>
+<label for="fee">Net one-time onboarding fee<input id="fee" name="fee" type="number" min="0" step="500" value="10000" required></label>
+<label for="churn">Assumed monthly logo churn (%)<input id="churn" name="churn" type="number" min="0" max="100" step="0.1" value="1" required></label>
+<label for="horizon">Contribution LTV horizon (months)<input id="horizon" name="horizon" type="number" min="1" max="60" step="1" value="24" required></label>
+</form>
+</section>
+<section aria-labelledby="result-title"><h2 id="result-title">The economics of one customer</h2>
+<p id="error" class="error" role="alert" hidden>Enter valid non-negative amounts, churn from 0–100%, and a whole-number horizon from 1–60 months.</p>
+<div id="results" aria-live="polite" aria-atomic="true">
+<div class="outputs">
+<div class="metric"><div class="label">Recurring contribution / month</div><div class="value" id="gp">6,000</div><div class="note" id="margin">80.0% of revenue</div></div>
+<div class="metric"><div class="label">Adjusted acquisition payback</div><div class="value" id="payback">6.3 mo</div><div class="note">Includes unrecovered setup cost</div></div>
+<div class="metric"><div class="label" id="ltv-label">24-month contribution LTV</div><div class="value" id="ltv">120,593</div><div class="note">Includes net onboarding economics</div></div>
+<div class="metric"><div class="label" id="ratio-label">LTV24 : CAC</div><div class="value" id="ratio">4.02×</div><div class="note">Assumed churn; no expansion</div></div>
+</div>
+<div class="breakdown"><h2>Monthly revenue allocation</h2><div class="bar" role="img" id="cost-bar" aria-label="Monthly revenue allocation"><span class="model" id="bar-model"></span><span class="support" id="bar-support"></span><span class="partner" id="bar-partner"></span><span class="contribution" id="bar-gp"></span></div><div class="legend"><span><b style="background:#abb7c7"></b>Model / infra</span><span><b style="background:#cfb09b"></b>Support</span><span><b style="background:#c9c49a"></b>Partner</span><span><b style="background:#456449"></b>Contribution</span></div><p class="note" id="bar-note"></p></div>
+<div id="status" class="status"></div>
+<table aria-label="Onboarding and acquisition exposure"><tbody><tr><td>Fully loaded CAC</td><td id="cac-value"></td></tr><tr><td>Unrecovered setup cost</td><td id="setup-gap"></td></tr><tr><td>Total acquisition + setup exposure</td><td id="exposure"></td></tr></tbody></table>
+<p class="detail">CAC includes sales time, unsuccessful prospects, pre-sales engineering, failed-pilot net cost and one-time commissions. Successful delivery, pilot fees and credits belong in the onboarding ledger. Count each cost and fee once.</p>
+</div>
+</section>
+</div>
+<footer>Internal targets shown: recurring contribution margin ≥70% and run-rate payback ≤12 months. They are proposed management rules, not market benchmarks. Constant churn, no expansion or discounting; month one is active. Zero churn uses the selected cap. Annual billing and actual cash collection require a separate cohort cash-flow view. <a href="04-unit-economics.md">Definitions and assumptions</a> · <a href="README.md">Distribution plan</a></footer>
+</main>
+<script>
+function calculate(input) {
+  const {arpa, model, support, partner, cac, onboarding, fee, churn, horizon} = input;
+  if (Object.values(input).some(value => !Number.isFinite(value) || value < 0) || churn > 100 || !Number.isInteger(horizon) || horizon < 1 || horizon > 60) return null;
+  const contribution = arpa - model - support - partner;
+  const margin = arpa > 0 ? contribution / arpa : null;
+  const setupGap = Math.max(0, onboarding - fee);
+  const exposure = cac + setupGap;
+  const payback = contribution > 0 ? exposure / contribution : null;
+  const c = churn / 100;
+  const activeMonths = c === 0 ? horizon : (1 - Math.pow(1 - c, horizon)) / c;
+  const ltv = contribution * activeMonths + fee - onboarding;
+  return {contribution, margin, setupGap, exposure, payback, ltv, ratio: cac > 0 ? ltv / cac : null};
+}
+const presets = {
+  downside:{arpa:4500,model:900,support:1200,partner:450,cac:40000,onboarding:30000,fee:5000,churn:3,horizon:24},
+  base:{arpa:7500,model:700,support:800,partner:0,cac:30000,onboarding:18000,fee:10000,churn:1,horizon:24},
+  upside:{arpa:11000,model:900,support:600,partner:1100,cac:20000,onboarding:12000,fee:10000,churn:.5,horizon:24}
+};
+const form = document.getElementById('inputs');
+const fields = Object.keys(presets.base);
+const format = new Intl.NumberFormat('en-GB',{maximumFractionDigits:0});
+const put = (id,value) => { document.getElementById(id).textContent = value; };
+function update() {
+  const input = Object.fromEntries(fields.map(key => [key, form.elements[key].value === '' ? NaN : Number(form.elements[key].value)]));
+  const result = calculate(input);
+  document.getElementById('error').hidden = result !== null;
+  document.getElementById('results').hidden = result === null;
+  if (!result) return;
+  put('gp',format.format(result.contribution));
+  put('margin',result.margin === null ? 'No recurring revenue' : `${(result.margin*100).toFixed(1)}% of revenue`);
+  put('payback',result.payback === null ? 'Not viable' : `${result.payback.toFixed(1)} mo`);
+  put('ltv',format.format(result.ltv));
+  put('ltv-label',`${input.horizon}-month contribution LTV`);
+  put('ratio-label',`LTV${input.horizon} : CAC`);
+  put('ratio',result.ratio === null ? 'Undefined' : `${result.ratio.toFixed(2)}×`);
+  put('cac-value',format.format(input.cac));
+  put('setup-gap',format.format(result.setupGap));
+  put('exposure',format.format(result.exposure));
+  const cost = input.model + input.support + input.partner;
+  const denominator = Math.max(input.arpa,cost,1);
+  for (const [key,value] of [['model',input.model],['support',input.support],['partner',input.partner],['gp',Math.max(0,result.contribution)]]) document.getElementById(`bar-${key}`).style.width = `${100*value/denominator}%`;
+  document.getElementById('cost-bar').setAttribute('aria-label',`Revenue ${input.arpa} NOK; model and infrastructure ${input.model}; support ${input.support}; partner ${input.partner}; contribution ${result.contribution}.`);
+  put('bar-note',cost > input.arpa ? `Recurring costs exceed revenue by ${format.format(cost-input.arpa)} NOK/month. Bar shows total costs.` : 'Bar allocates one month of recurring revenue.');
+  const viable = result.margin !== null && result.margin >= .70 && result.payback !== null && result.payback <= 12;
+  const status = document.getElementById('status');
+  status.classList.toggle('warn',!viable || input.cac === 0);
+  status.textContent = input.cac === 0 ? 'Enter a fully loaded CAC before judging the acquisition channel.' : viable ? 'Meets the proposed margin and payback gates under these assumptions. Retention and value still need evidence.' : 'Outside the proposed margin or payback gate. Revisit price, delivery cost, scope or acquisition effort.';
+}
+form.addEventListener('submit',event=>event.preventDefault());
+form.addEventListener('input',()=>{document.querySelectorAll('[data-preset]').forEach(button=>button.setAttribute('aria-pressed','false'));update();});
+document.querySelectorAll('[data-preset]').forEach(button=>button.addEventListener('click',()=>{for(const [key,value] of Object.entries(presets[button.dataset.preset])) form.elements[key].value=String(value);document.querySelectorAll('[data-preset]').forEach(other=>other.setAttribute('aria-pressed',String(other===button)));update();}));
+update();
+</script>
+</body>
+</html>

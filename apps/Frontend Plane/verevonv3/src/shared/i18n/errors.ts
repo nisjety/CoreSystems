@@ -279,6 +279,10 @@ export const ERROR_COPY: Record<string, ErrorCopy> = {
     no: 'Denne nettleserøkten har ikke tilgang til AI-kjøring. Åpne økten på nytt for å starte en.',
     en: 'This browser session has no access for an AI run. Reopen the session to start one.',
   },
+  browser_attach_unavailable: {
+    no: 'En tilkoblet agentnettleser er ikke tilgjengelig for denne økten.',
+    en: 'An attached agent browser is not available for this session.',
+  },
   browser_grant_not_derivable: {
     no: 'Tilgangen til denne nettleserøkten har utløpt eller er trukket tilbake, så AI-kjøringen kunne ikke starte. Åpne økten på nytt og prøv igjen.',
     en: 'Access for this browser session has expired or been withdrawn, so the AI run could not start. Reopen the session and try again.',

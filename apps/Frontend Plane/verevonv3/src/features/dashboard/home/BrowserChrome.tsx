@@ -59,10 +59,13 @@ import type {
   BrowserTab,
   CreatableBrowserProfileScope,
 } from '@/shared/api/browser-client'
+import { streamBrowserEvents } from '@/shared/api/browser-client'
+import { browserActionTarget, type BrowserActionTarget } from './browser-action-target'
 import type { ApprovalDecision } from '@/shared/api/orchestration-client'
 import { ERROR_COPY } from '@/shared/i18n/errors'
 import { isBrowserLoopRunning, type BrowserLoopState } from './browser-loop'
 import { BrowserBlockedNotice } from './BrowserBlockedNotice'
+import { blockedStateFor } from './browser-blocked'
 import {
   browserApprovalStatusLabel,
   browserRiskLabel,
@@ -102,6 +105,8 @@ import { ConsoleFilterBar, emptyConsoleFilter, filterConsoleEntries, type Consol
 import { EgressReceiptsPanel } from '@/features/browser/evidence/EgressReceiptsPanel'
 import { ProcedurePanel } from '@/features/browser/evidence/ProcedurePanel'
 import { BrowserControlStrip } from '@/features/browser/dock/BrowserControlStrip'
+import { useAssistantBrowser } from '@/features/core/assistant-agent/assistant-browser-context'
+import { assistantBrowserTarget } from '@/features/core/assistant-agent/assistant-browser-agent'
 import { BrowserApprovalDecisionCard } from '@/features/browser/approval/BrowserApprovalDecisionCard'
 import {
   APPROVAL_REDIRECT_ENABLED,
@@ -464,6 +469,11 @@ function BrowserGateDecisionCard(props: {
  * say so at all times.
  */
 export function BrowserChrome(props: {
+  /** Opt in only for an owner-authorized, single-tab session. The event is presentation, not control. */
+  showActionTargets?: boolean
+  /** A person opened this browser directly for browsing. */
+  personalBrowsing?: boolean
+  allowAssistantContinuation?: boolean
   /** Phase 5 HITL gate: pending/decided browser-action approvals for the
    * current durable AI run, oldest first. Surfaced in the AI bubble (the
    * single most recent still-pending one) and listed in full in the evidence
@@ -550,7 +560,10 @@ export function BrowserChrome(props: {
   const [liveFrameSseFailed, setLiveFrameSseFailed] = createSignal(false)
   const [wsActionPending, setWsActionPending] = createSignal(false)
   const [liveFrameTick, setLiveFrameTick] = createSignal(0)
+  const [actionTarget, setActionTarget] = createSignal<BrowserActionTarget | null>(null)
+  const [frameAspectMatches, setFrameAspectMatches] = createSignal(false)
   let addressInputRef: HTMLInputElement | undefined
+  let pendingObservedAddress: string | null = null
   let lastWheelDispatchMs = 0
   let queuedWheelAction: BrowserWheelAction | null = null
   let queuedWheelTimer: number | undefined
@@ -564,7 +577,11 @@ export function BrowserChrome(props: {
   let wsActionTimer: number | undefined
 
   const i18n = useI18n()
+  const assistantBrowser = useAssistantBrowser()
   const session = () => props.session
+  const observedAddress = () => props.browserNavigationError?.reason === 'http_response'
+    ? props.browserNavigationError.url
+    : session().url
   const isLive = () => session().renderMode === 'chromium'
   // Evidence panels (WS9.D) are shown only when the gateway advertises capability 'evidence'.
   const hasEvidence = () => session().capabilities.includes('evidence')
@@ -602,6 +619,15 @@ export function BrowserChrome(props: {
   const pendingApproval = () => pendingBrowserApproval(props.browserApprovals ?? [])
   const decidingBrowserApprovalKeys = () => props.decidingBrowserApprovalKeys ?? []
   const humanTakeoverActive = () => session().controlMode === 'human_takeover'
+  const continuationTab = createMemo(() => {
+    const { sessionId, tabs, zdr } = session()
+    if (!props.allowAssistantContinuation || !assistantBrowser.prepareContinuation ||
+        !sessionId || !isLive() || !humanTakeoverActive() || zdr || blockedStateFor(session().observation?.challenge)) return null
+    const [tab, second] = tabs.filter((item) => item.active)
+    if (!tab?.url || second || tab.holder !== 'human' || tab.tabEpoch === undefined) return null
+    const url = assistantBrowserTarget(tab.url)
+    return url ? { sessionId, tabId: tab.tabId, origin: url.origin, tabEpoch: tab.tabEpoch } : null
+  })
   const liveBrowserTabs = () => session().tabs.length > 0
     ? session().tabs
     : [{
@@ -709,7 +735,9 @@ export function BrowserChrome(props: {
   const closePopover = () => setChrome(closeBrowserChromePopover)
 
   const browserControlUnavailable = () => !isLive() || !session().sessionId
-  const browserControlModeDisabled = () => browserControlUnavailable() || props.browserBusy || !props.onBrowserControlMode
+  const humanOnlyBrowsing = () => session().capabilities.includes('human_browsing')
+  const cannotGiveAgentControl = () => humanOnlyBrowsing() && humanTakeoverActive()
+  const browserControlModeDisabled = () => browserControlUnavailable() || props.browserBusy || !props.onBrowserControlMode || cannotGiveAgentControl()
   const toggleBrowserControlMode = () => {
     if (browserControlModeDisabled()) return
     const nextMode = humanTakeoverActive() ? 'agent_control' : 'human_takeover'
@@ -718,7 +746,7 @@ export function BrowserChrome(props: {
   }
   const runAction = (action: BrowserAction) => {
     if (controlsDisabled()) return
-    if (sendBrowserWsAction(action)) return
+    if (!(action.type === 'navigate' && props.browserNavigationError && props.onBrowserAction) && sendBrowserWsAction(action)) return
     props.onBrowserAction?.(action)
   }
   /**
@@ -982,7 +1010,7 @@ export function BrowserChrome(props: {
     if (intent.kind === 'ask') props.onAskVerevon?.(intent.text)
   }
   const navigateFromAddress = () =>
-    submitOmnibox(resolveOmniboxIntent(addressInput(), { searchEnabled: omniboxSearchEnabled(), fallbackUrl: session().url }))
+    submitOmnibox(resolveOmniboxIntent(addressInput(), { searchEnabled: omniboxSearchEnabled(), fallbackUrl: observedAddress() }))
   // A result click keeps the results open until the navigation settles: a refusal outside the
   // run's domains is explained next to the results (D2-046), any other outcome closes them.
   const [pendingResult, setPendingResult] = createSignal<{ url: string; fromUrl: string } | null>(null)
@@ -1049,12 +1077,14 @@ export function BrowserChrome(props: {
   }
 
   createEffect(
-    () => ({ url: session().url, lastObserved: lastObservedUrl() }),
-    ({ url, lastObserved }) => {
+    () => ({ url: observedAddress(), lastObserved: lastObservedUrl(), failed: props.browserNavigationError?.reason === 'http_response' }),
+    ({ url, lastObserved, failed }) => {
       if (url && lastObserved !== url) {
-        setAddressInput(url)
+        // Live page updates must not overwrite a person's unfinished address.
+        if (document.activeElement === addressInputRef) pendingObservedAddress = url
+        else { pendingObservedAddress = null; setAddressInput(url) }
         setLastObservedUrl(url)
-        recordOmniboxVisit({ url, title: session().title }, { zdr: session().zdr })
+        if (!failed) recordOmniboxVisit({ url, title: session().title }, { zdr: session().zdr })
       }
     },
   )
@@ -1220,6 +1250,42 @@ export function BrowserChrome(props: {
     },
   )
 
+  // Action target display is opt-in until the event carries a tab identity.
+  createEffect(
+    () => props.showActionTargets && isLive() && selectedTimelineStep() === null && session().tabs.length === 1
+      ? session().sessionId ?? null : null,
+    (sessionId) => {
+      setActionTarget(null)
+      if (!sessionId) return
+      const subscribedAt = Date.now()
+      let timeout: number | undefined
+      const clearTarget = () => {
+        if (timeout !== undefined) window.clearTimeout(timeout)
+        timeout = undefined
+        setActionTarget(null)
+      }
+      const stream = streamBrowserEvents(sessionId, {}, {
+        onEvent: (name, event) => {
+          clearTarget()
+          if (name !== 'action.started') return
+          const target = browserActionTarget(event, subscribedAt, Date.now())
+          if (!target) return
+          setActionTarget(target)
+          timeout = window.setTimeout(clearTarget, 2000)
+        },
+        onReplayGap: clearTarget,
+        onError: clearTarget,
+        onDone: clearTarget,
+      })
+      return () => { clearTarget(); stream.close() }
+    },
+  )
+
+  createEffect(
+    () => `${session().url}|${session().tabs.map((tab) => `${tab.tabId}:${tab.url}`).join('|')}`,
+    () => { setActionTarget(null) },
+  )
+
   onCleanup(clearQueuedWheelTimer)
   onCleanup(clearLiveFrameTimer)
   onCleanup(closeLiveFrameSource)
@@ -1239,16 +1305,18 @@ export function BrowserChrome(props: {
 
   return (
     <div
-      class={['knowledge-browser-chrome', { 'knowledge-browser-chrome--compact': Boolean(props.compact) }]}
+      class={['knowledge-browser-chrome', { 'knowledge-browser-chrome--compact': Boolean(props.compact), 'knowledge-browser-chrome--personal': Boolean(props.personalBrowsing) }]}
       onKeyDown={onChromeReloadKey}
     >
       <div class="knowledge-browser-frame__topbar knowledge-browser-frame__topbar--minimal">
         <div class="knowledge-browser-frame__window">
-          <span class="knowledge-browser-traffic" aria-hidden="true">
-            <i />
-            <i />
-            <i />
-          </span>
+          <Show when={!props.personalBrowsing}>
+            <span class="knowledge-browser-traffic" aria-hidden="true">
+              <i />
+              <i />
+              <i />
+            </span>
+          </Show>
           <Show
             when={isLive()}
             fallback={<strong>{session().title || session().host || 'Browser'}</strong>}
@@ -1264,6 +1332,7 @@ export function BrowserChrome(props: {
                   <button
                     type="button"
                     role="tab"
+                    disabled={props.browserBusy}
                     aria-selected={selectedTimelineStep() === null && tab.active ? 'true' : 'false'}
                     class={['knowledge-browser-tab', { 'knowledge-browser-tab--active': selectedTimelineStep() === null && tab.active }]}
                     title={`Live · ${liveTabLabel(tab)}`}
@@ -1278,7 +1347,7 @@ export function BrowserChrome(props: {
                       </span>
                     </Show>
                     <span class="knowledge-browser-tab__dot" data-status={session().status} aria-hidden="true" />
-                    <span class="knowledge-browser-tab__mode">Live</span>
+                    <Show when={!props.personalBrowsing}><span class="knowledge-browser-tab__mode">Live</span></Show>
                     <strong class="knowledge-browser-tab__label">{liveTabLabel(tab)}</strong>
                   </button>
                   <Show when={tab.openedBy === 'agent' && !tab.active}>
@@ -1287,6 +1356,7 @@ export function BrowserChrome(props: {
                       class="knowledge-browser-tab__reveal"
                       aria-label="Vis agentens fane"
                       title="Vis agentens fane"
+                      disabled={props.browserBusy}
                       onClick={() => {
                         setSelectedTimelineStep(null)
                         void props.onBrowserSelectTab?.(tab.tabId)
@@ -1377,7 +1447,7 @@ export function BrowserChrome(props: {
           >
             <RefreshCw class="size-3.5" />
           </button>
-          <Show when={session().capabilities.includes('hard_reload')}>
+          <Show when={!props.personalBrowsing && session().capabilities.includes('hard_reload')}>
             <button
               type="button"
               aria-label="Last nettlesersiden på nytt uten hurtigbuffer"
@@ -1390,7 +1460,12 @@ export function BrowserChrome(props: {
           </Show>
         </div>
 
-        <div class="knowledge-browser-chrome__address">
+        <div class="knowledge-browser-chrome__address" onFocusOut={(event) => {
+          if (event.target === addressInputRef && pendingObservedAddress) {
+            setAddressInput(pendingObservedAddress)
+            pendingObservedAddress = null
+          }
+        }}>
           <button
             type="button"
             class="knowledge-browser-chrome__lock"
@@ -1410,7 +1485,7 @@ export function BrowserChrome(props: {
             label="Nettleseradresse"
             searchEnabled={omniboxSearchEnabled()}
             askEnabled={props.onAskVerevon !== undefined}
-            fallbackUrl={session().url}
+            fallbackUrl={observedAddress()}
             historyKey={currentOmniboxHistoryKey}
             zdr={() => session().zdr}
             onValueChange={setAddressInput}
@@ -1435,14 +1510,14 @@ export function BrowserChrome(props: {
           >
             {SESSION_STATUS_LABELS[session().status]}
           </span>
-          <span class="knowledge-browser-mode-badge" title={`Gjengivelsesmodus: ${session().renderMode}`}>
+          <Show when={!props.personalBrowsing || !isLive()}><span class="knowledge-browser-mode-badge" title={`Gjengivelsesmodus: ${session().renderMode}`}>
             {RENDER_MODE_LABELS[session().renderMode]}
-          </span>
-          <button
+          </span></Show>
+          <Show when={!props.personalBrowsing && !cannotGiveAgentControl()}><button
             type="button"
             class={['knowledge-browser-control-chip', { 'knowledge-browser-control-chip--human': humanTakeoverActive() }]}
             aria-pressed={humanTakeoverActive() ? 'true' : 'false'}
-            aria-label={humanTakeoverActive() ? 'Gi nettleserkontroll tilbake til AI-agenten' : 'Ta over nettleserkontrollen manuelt'}
+            aria-label={humanTakeoverActive() ? props.personalBrowsing && !loopRunning() ? 'Gi nettleserkontroll til AI-agenten' : 'Gi nettleserkontroll tilbake til AI-agenten' : 'Ta over nettleserkontrollen manuelt'}
             title={humanTakeoverActive() ? 'Gi kontroll til AI-agenten' : 'Ta over nettleseren'}
             disabled={browserControlModeDisabled()}
             onClick={toggleBrowserControlMode}
@@ -1453,7 +1528,7 @@ export function BrowserChrome(props: {
             >
               <Hand class="size-3" aria-hidden="true" /> Manuell
             </Show>
-          </button>
+          </button></Show>
           <Show when={evidenceIsEphemeral(session())}>
             <span
               class="knowledge-browser-zdr-chip"
@@ -1475,6 +1550,7 @@ export function BrowserChrome(props: {
           >
             <Camera class="size-3.5" />
           </button>
+          <Show when={!humanOnlyBrowsing() && (!props.personalBrowsing || loopRunning())}>
           <i class="knowledge-browser-chrome__divider" aria-hidden="true" />
           <button
             type="button"
@@ -1592,6 +1668,7 @@ export function BrowserChrome(props: {
               <span class="knowledge-browser-toolbtn__badge">{session().timeline.length}</span>
             </Show>
           </button>
+          </Show>
           <button
             type="button"
             class="knowledge-browser-toolbtn"
@@ -1851,6 +1928,30 @@ export function BrowserChrome(props: {
               aria-label="Flere nettleservalg"
             >
               <div class="knowledge-browser-popover__menu">
+                <Show when={props.personalBrowsing}>
+                  <Show when={session().capabilities.includes('hard_reload')}>
+                    <button type="button" role="menuitem" disabled={controlsDisabled()} onClick={() => { closePopover(); reloadFromChrome(true) }}>
+                      <RefreshCw class="size-3.5" aria-hidden="true" /> Last på nytt uten hurtigbuffer
+                    </button>
+                  </Show>
+                  <button type="button" role="menuitem" disabled={!isLive()} onClick={() => { closePopover(); togglePanel('actions') }}>
+                    <SquareMousePointer class="size-3.5" aria-hidden="true" /> Manuelle handlinger
+                  </button>
+                  <button type="button" role="menuitem" disabled={!isLive()} onClick={() => { closePopover(); togglePanel('devtools') }}>
+                    <PanelRight class="size-3.5" aria-hidden="true" /> Sideverktøy
+                  </button>
+                  <button type="button" role="menuitem" disabled={!isLive()} onClick={() => { closePopover(); togglePanel('evidence') }}>
+                    <History class="size-3.5" aria-hidden="true" /> Tidslinje og evidens
+                  </button>
+                  <Show when={!humanOnlyBrowsing()}>
+                    <button type="button" role="menuitem" disabled={modelActionDisabled()} onClick={() => { closePopover(); void suggestAction() }}>
+                      <Sparkles class="size-3.5" aria-hidden="true" /> Foreslå nettlesersteg
+                    </button>
+                    <button type="button" role="menuitem" disabled={modelLoopDisabled()} onClick={() => { closePopover(); void runModelLoop() }}>
+                      <Play class="size-3.5" aria-hidden="true" /> Start AI-loop
+                    </button>
+                  </Show>
+                </Show>
                 <a
                   href={session().url}
                   target="_blank"
@@ -1986,15 +2087,24 @@ export function BrowserChrome(props: {
           controlMode={session().controlMode}
           controlEpoch={session().controlEpoch ?? null}
           agentWorking={loopRunning()}
+          personalBrowsing={props.personalBrowsing}
           busy={props.browserBusy === true}
-          disabled={browserControlModeDisabled()}
+          disabled={continuationTab() && selectedTimelineStep() === null ? controlsDisabled() : browserControlModeDisabled()}
           zdr={session().zdr}
-          onChangeMode={(mode, expectedEpoch) => props.onBrowserControlMode?.(mode, expectedEpoch)}
+          onContinueHere={continuationTab() && selectedTimelineStep() === null
+            ? () => {
+                const tab = continuationTab()
+                if (tab && !assistantBrowser.taskBusy?.()) assistantBrowser.prepareContinuation?.(tab)
+              }
+            : undefined}
+          continueDisabled={assistantBrowser.taskBusy?.()}
+          onChangeMode={cannotGiveAgentControl() ? undefined : (mode, expectedEpoch) => props.onBrowserControlMode?.(mode, expectedEpoch)}
         />
       </Show>
       <Show when={isLive()}>
         <BrowserBlockedNotice
           challenge={session().observation?.challenge}
+          openOutsideUrl={props.personalBrowsing ? assistantBrowserTarget(observedAddress())?.href : undefined}
           humanTakeoverActive={humanTakeoverActive()}
           takeoverDisabled={browserControlModeDisabled()}
           tryAnotherSourceDisabled={props.browserBusy === true || !props.onBrowserTryOtherSource}
@@ -2115,6 +2225,7 @@ export function BrowserChrome(props: {
               {(src) => (
                 <div
                   class="knowledge-browser-screenshot knowledge-browser-screenshot--interactive"
+                  style={{ position: 'relative' }}
                   aria-label="Interaktiv Chromium-side. Klikk, scroll eller fokuser for tastatur."
                   role="application"
                   tabindex={0}
@@ -2126,9 +2237,27 @@ export function BrowserChrome(props: {
                     src={src}
                     alt={`Gjengitt nettleserside for ${session().title}`}
                     decoding="async"
-                    onLoad={() => handleFrameLoad(src)}
-                    onError={() => handleFrameError(src)}
+                    onLoad={(event) => {
+                      const img = event.currentTarget
+                      const viewport = session().viewport
+                      setFrameAspectMatches(Boolean(img.naturalHeight && viewport.height &&
+                        Math.abs(img.naturalWidth / img.naturalHeight - viewport.width / viewport.height) < 0.01))
+                      handleFrameLoad(src)
+                    }}
+                    onError={() => { setFrameAspectMatches(false); handleFrameError(src) }}
                   />
+                  <Show when={frameAspectMatches() && (src === streamFrameSrc() || src === liveFrameSrc()) && actionTarget()}>
+                    {(target) => (
+                      <svg aria-hidden="true" viewBox={`0 0 ${session().viewport.width} ${session().viewport.height}`}
+                        preserveAspectRatio="xMidYMin meet"
+                        style={{ position: 'absolute', inset: '0', width: '100%', height: '100%', 'pointer-events': 'none' }}>
+                        <rect x={target().x} y={target().y} width={target().width} height={target().height}
+                          fill="rgba(238,122,80,.12)" stroke="#cf613f" stroke-width="3" />
+                        <path d={`M ${target().x} ${target().y} l 4 23 5 -7 8 8 4 -4 -8 -8 8 -4 z`}
+                          fill="#cf613f" stroke="white" stroke-width="2" />
+                      </svg>
+                    )}
+                  </Show>
                 </div>
               )}
             </Show>

@@ -183,18 +183,31 @@ impl PlannerView {
     /// The user message the planner reads: the framed page facts.
     #[must_use]
     pub fn render(&self) -> String {
+        self.render_targets(false)
+    }
+
+    pub(crate) fn render_indexed(&self) -> String {
+        self.render_targets(true)
+    }
+
+    fn render_targets(&self, indexed: bool) -> String {
         let targets = self
             .targets
             .iter()
-            .map(|target| {
-                format!(
-                    "  {} role={} name={} text={} frame_id={}",
-                    target.ref_id,
-                    target.role.as_deref().unwrap_or(""),
-                    target.name.as_deref().unwrap_or(""),
-                    target.text.as_deref().unwrap_or(""),
-                    target.frame_id.as_deref().unwrap_or(""),
-                )
+            .enumerate()
+            .map(|(index, target)| {
+                let role = target.role.as_deref().unwrap_or_default();
+                let name = target.name.as_deref().unwrap_or_default();
+                let text = target.text.as_deref().unwrap_or_default();
+                if indexed {
+                    format!("  {} role={role} name={name} text={text}", index + 1)
+                } else {
+                    let frame = target.frame_id.as_deref().unwrap_or_default();
+                    format!(
+                        "  {} role={role} name={name} text={text} frame_id={frame}",
+                        target.ref_id
+                    )
+                }
             })
             .collect::<Vec<_>>()
             .join("\n");
@@ -229,19 +242,23 @@ impl PlannerView {
         } else {
             String::new()
         };
+        let snapshot = if indexed {
+            String::new()
+        } else {
+            let generation = self
+                .generation
+                .map_or_else(String::new, |value| value.to_string());
+            format!(
+                "  snapshot_id: {}\n  generation: {generation}\n",
+                self.snapshot_id
+            )
+        };
         let body = format!(
-            "Current page:\n  url: {}\n  title: {}\n  extracted_text: {}{}\n  snapshot_id: {}\n  generation: {}\n{}{}  targets:\n{}{}",
+            "Current page:\n  url: {}\n  title: {}\n  extracted_text: {}{}\n{snapshot}{challenge}{signals}  targets:\n{targets}{target_note}",
             self.page_url,
             self.page_title,
             self.page_text,
             text_note,
-            self.snapshot_id,
-            self.generation
-                .map_or_else(String::new, |generation| generation.to_string()),
-            challenge,
-            signals,
-            targets,
-            target_note,
         );
         provenance::render(
             &format!("{BEGIN_DELIMITER}\n{body}\n{END_DELIMITER}"),
@@ -302,7 +319,7 @@ fn view_target(target: &crate::browser_agent::BrowserSnapshotTarget) -> ViewTarg
 /// Roles whose text is a value the user (or a prefill) put there: it is a
 /// credential, an address or a query, never something the planner needs to read
 /// back. The label (`name`) stays, so the planner can still find the field.
-fn is_value_role(role: &str) -> bool {
+pub(crate) fn is_value_role(role: &str) -> bool {
     matches!(
         role.trim().to_ascii_lowercase().as_str(),
         "password"
@@ -435,6 +452,7 @@ mod tests {
             screenshot_ref: String::new(),
             dom_snapshot_ref: "snap-1".to_owned(),
             snapshot_generation: Some(3),
+            rendered_controls: Vec::new(),
             snapshot_targets: vec![BrowserSnapshotTarget {
                 ref_id: "@e1".to_owned(),
                 role: Some("link".to_owned()),

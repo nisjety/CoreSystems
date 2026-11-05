@@ -97,6 +97,11 @@ var approvalParents = map[Kind]struct{}{
 }
 
 const maxAllowedDomains = 32
+
+// AssistantTaskScopeURL is set by the broker on the cloud session it mints
+// for a submitted task. It is stored with the session and inherited by run
+// grants, so the exact host fence survives derivation and process restarts.
+const AssistantTaskScopeURL = "browser://cloud/assistant-task"
 const maxSensitiveScopeValues = 32
 const maxRevokeReasonBytes = 128
 
@@ -415,7 +420,7 @@ func (s *MemoryRepository) CreateScopedSensitiveApproval(_ context.Context, p Ap
 		return nil, err
 	}
 	for _, host := range domains {
-		if !hostWithin(host, parent.AllowedDomains) {
+		if !hostWithinGrant(host, parent) {
 			return nil, ErrDeriveWidensParent
 		}
 	}
@@ -576,14 +581,13 @@ func (s *MemoryRepository) derivedLocked(kind Kind, parentID, orgID, sessionKey 
 // deriveDomains computes a run grant's hosts. An empty request inherits the
 // parent's hosts unless the parent kind requires an explicit list or the
 // parent holds more hosts than one run may inherit. An explicit list must be
-// canonical, at most maxRun hosts, and each host must equal or be a subdomain
-// of a parent host.
-func deriveDomains(parent, requested []string, maxRun int, explicitRequired bool) ([]string, error) {
+// canonical, at most maxRun hosts, and within the parent's host fence.
+func deriveDomains(parent *Grant, requested []string, maxRun int, explicitRequired bool) ([]string, error) {
 	if len(requested) == 0 {
-		if explicitRequired || len(parent) > maxRun {
+		if explicitRequired || len(parent.AllowedDomains) > maxRun {
 			return nil, ErrDeriveNeedsExplicitDomains
 		}
-		return append([]string(nil), parent...), nil
+		return append([]string(nil), parent.AllowedDomains...), nil
 	}
 	domains, err := NormalizeAllowedDomains(requested)
 	if err != nil {
@@ -593,7 +597,7 @@ func deriveDomains(parent, requested []string, maxRun int, explicitRequired bool
 		return nil, ErrInvalidDomainPolicy
 	}
 	for _, host := range domains {
-		if !hostWithin(host, parent) {
+		if !hostWithinGrant(host, parent) {
 			return nil, ErrDeriveWidensParent
 		}
 	}
@@ -610,6 +614,18 @@ func hostWithin(host string, policy []string) bool {
 		}
 	}
 	return false
+}
+
+func hostWithinGrant(host string, parent *Grant) bool {
+	if parent.ScopeURL == AssistantTaskScopeURL {
+		for _, allowed := range parent.AllowedDomains {
+			if allowed == host {
+				return true
+			}
+		}
+		return false
+	}
+	return hostWithin(host, parent.AllowedDomains)
 }
 
 func equalStrings(a, b []string) bool {

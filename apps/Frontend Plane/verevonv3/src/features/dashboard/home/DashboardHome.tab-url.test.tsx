@@ -8,10 +8,9 @@ vi.mock('@/shared/i18n', () => ({ useI18n: () => ({ tr: (_no: string, en: string
 vi.mock('@/features/chat/lib/chat-appearance-preview', () => ({ chatAppearanceActive: () => preview() }))
 vi.mock('@/features/chat/components/ChatPage', () => ({ default: () => null }))
 vi.mock('./DashboardComposer', () => ({ DashboardComposer: (props: { message: string; onMessageChange: (value: string) => void }) => {
-  const [attached, setAttached] = createSignal(false)
   return <>
     <input id="verevon-dashboard-input" aria-label="Draft" value={props.message} onInput={(event) => props.onMessageChange(event.currentTarget.value)} onFocus={(event) => focusedWhileHidden.push(!!event.currentTarget.closest('[hidden]'))} />
-    <button onClick={() => setAttached(true)}>Attach fixture</button><span>{attached() ? 'Attachment retained' : ''}</span>
+
   </>
 } }))
 vi.mock('./DashboardSearchPanel', () => ({ SearchPanel: (props: { onExpandedChange: (value: boolean) => void; onPreviewActiveChange: (value: boolean) => void }) => <>
@@ -24,6 +23,9 @@ vi.mock('./DashboardCards', () => ({ DashboardCardsRail: () => null }))
 vi.mock('./DashboardOverview', () => ({ DashboardOverview: (props: { onPrompt: (card: never) => void }) => <button onClick={() => props.onPrompt({ prompt: 'Skriv et sammendrag', promptEn: 'Write a summary' } as never)}>Prompt card</button> }))
 vi.mock('./DashboardSectionOverview', () => ({ DashboardSectionOverview: (props: { section: string }) => <p>Section {props.section}</p> }))
 import DashboardHome from './DashboardHome'
+import { AssistantNavigationContext } from '@/features/core/assistant-navigation/assistant-navigation-context'
+import { AssistantBrowserContext } from '@/features/core/assistant-agent/assistant-browser-context'
+import type { AssistantAgentView } from '@/features/core/components/GlobalAssistant'
 
 const [preview, setPreview] = createSignal(true)
 const focusedWhileHidden: boolean[] = []
@@ -37,18 +39,47 @@ function setup(path = '/dashboard') {
   const history = memoryHistory(path)
   const TestRouter = createRouter({ history, explicitLinks: true, routes: [{ path: '/*all', component: () => {
     const location = useLocation()
-    return <><DashboardHome /><output data-testid="location">{location.pathname}{location.search}</output></>
+    const [assistantDraft, setAssistantDraft] = createSignal('')
+    return <AssistantNavigationContext value={{ start: () => false, openWithPrompt: setAssistantDraft }}><div><DashboardHome /><input id="verevon-assistant-input" aria-label="Draft" value={assistantDraft()} onInput={(event) => setAssistantDraft(event.currentTarget.value)} onFocus={(event) => focusedWhileHidden.push(!!event.currentTarget.closest('[hidden]'))} /><output data-testid="location">{location.pathname}{location.search}</output></div></AssistantNavigationContext>
   } }] })
   const view = render(() => <TestRouter>{(props) => props.children}</TestRouter>)
   return { history, ...view }
 }
-const tab = (name: 'Chat' | 'Web' | 'Extract') => screen.getByRole('button', { name })
+const tab = (name: 'Chat' | 'Web' | 'Extract') => screen.getByRole('button', { name: name === 'Chat' ? 'Assistant' : name })
 const pressed = () => (['Chat', 'Web', 'Extract'] as const).filter((name) => tab(name).getAttribute('aria-pressed') === 'true')
 const url = () => screen.getByTestId('location').textContent
 const goTo = async (name: 'Chat' | 'Web' | 'Extract', search: string) => {
   fireEvent.click(tab(name)); flush()
   await waitFor(() => expect(url()).toBe(`/dashboard${search}`))
 }
+
+describe('agent browser in Nett', () => {
+  it('switches between the agent view and search, and lets the dock reveal it again', async () => {
+    const [version, setVersion] = createSignal(0)
+    const reportVisible = vi.fn()
+    const [agent, setAgent] = createSignal<AssistantAgentView>({ available: true, kind: 'browser', status: 'running', goal: 'Open a page', error: null, action: null, sessionId: 's1', runId: 'r1', receipt: null })
+    const history = memoryHistory('/dashboard?tab=web')
+    const Router = createRouter({ history, explicitLinks: true, routes: [{ path: '/*all', component: () =>
+      <AssistantBrowserContext value={{ view: agent, stop: () => undefined, setSurfaceVisible: reportVisible, revealVersion: version }}>
+        <DashboardHome />
+      </AssistantBrowserContext> }] })
+    const view = render(() => <Router>{props => props.children}</Router>)
+    await waitFor(() => expect(screen.getByLabelText('Agent browser')).toBeTruthy())
+    expect(reportVisible).toHaveBeenLastCalledWith(true)
+    const browser = screen.getByLabelText('Agent browser')
+    setAgent((current) => ({ ...current, status: 'disconnected' })); flush()
+    expect(screen.getByLabelText('Agent browser')).toBe(browser)
+    expect(reportVisible).toHaveBeenLastCalledWith(true)
+    fireEvent.click(screen.getByRole('button', { name: 'Your web search' })); flush()
+    await waitFor(() => expect(screen.queryByLabelText('Agent browser')).toBeNull())
+    expect(reportVisible).toHaveBeenLastCalledWith(false)
+    setVersion(1); flush()
+    await waitFor(() => expect(screen.getByLabelText('Agent browser')).toBeTruthy())
+    expect(reportVisible).toHaveBeenLastCalledWith(true)
+    view.unmount()
+    expect(reportVisible).toHaveBeenLastCalledWith(false)
+  })
+})
 
 describe('Home tab in the URL', () => {
   it('opens the tab named by ?tab=', () => {
@@ -112,7 +143,7 @@ describe('Home tab in the URL', () => {
     const { history, container } = setup('/dashboard?overview=studio&tab=web')
     expect(screen.getByText('Section studio')).toBeTruthy()
     expect(screen.queryByRole('button', { name: 'Web' })).toBeNull()
-    expect(screen.queryByRole('button', { name: 'Chat' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Assistant' })).toBeNull()
     expect(screen.queryByText('Web tool')).toBeNull()
     expect(container.querySelector('.dashboard-home')?.getAttribute('data-home-tab')).toBe('Chat')
     history.set({ value: '/dashboard?tab=web' }); flush()
@@ -121,14 +152,13 @@ describe('Home tab in the URL', () => {
     expect(screen.queryByText('Section studio')).toBeNull()
   })
 
-  it('keeps the mounted chat composer, its draft and attachment across tab changes', async () => {
+  it('keeps the shared assistant draft across tab changes', async () => {
     const { history } = setup()
     const draft = screen.getByLabelText('Draft')
     fireEvent.input(draft, { target: { value: 'Keep this draft' } })
-    fireEvent.click(screen.getByText('Attach fixture')); flush()
     await goTo('Web', '?tab=web')
     expect(screen.getByLabelText('Draft')).toBe(draft)
-    expect(draft.closest('[hidden]')).not.toBeNull()
+    expect(draft.closest('[hidden]')).toBeNull()
     await goTo('Extract', '?tab=extract')
     history.back(); flush()
     await waitFor(() => expect(pressed()).toEqual(['Web']))
@@ -137,7 +167,6 @@ describe('Home tab in the URL', () => {
     expect(screen.getByLabelText('Draft')).toBe(draft)
     expect(draft.closest('[hidden]')).toBeNull()
     expect((draft as HTMLInputElement).value).toBe('Keep this draft')
-    expect(screen.getByText('Attachment retained')).toBeTruthy()
   })
 
   it('leaves the Chat tab with a prompt card and focuses the composer once it shows again', async () => {

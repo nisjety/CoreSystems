@@ -1507,6 +1507,8 @@ const orchestrationCancelRunInput = z.object({
 const browserRunStartInput = z.object({
   sessionId: z.string().min(1),
   goal: z.string().trim().min(1),
+  // Refuse the run unless it is bound to this owned browser session.
+  requireAttached: z.boolean().optional(),
   allowedDomains: z.array(z.string()).optional(),
   maxSteps: z.number().int().positive().optional(),
   maxRuntimeSeconds: z.number().int().positive().optional(),

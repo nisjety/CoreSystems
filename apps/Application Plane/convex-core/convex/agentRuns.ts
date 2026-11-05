@@ -97,34 +97,38 @@ export const upsertAgentRun = internalMutation({
   },
 });
 
+export async function listForOrgHandler(ctx: any, args: { externalOrgId: string; limit?: number; status?: "started" | "completed" | "failed" | "cancelled" }) {
+    const { externalAuthId } = await requireViewerMembership(ctx, args.externalOrgId);
+    const limit = Math.max(1, Math.min(args.limit ?? 50, 200));
+
+    if (args.status) {
+      const runs = await ctx.db
+        .query("agentRuns")
+        .withIndex("by_org_and_status", (q: any) =>
+          q.eq("externalOrgId", args.externalOrgId).eq("status", args.status!),
+        )
+        .order("desc")
+        .take(limit);
+      return runs.map((run: any) => projectRunForViewer(run, externalAuthId));
+    }
+
+    const runs = await ctx.db
+      .query("agentRuns")
+      .withIndex("by_org_and_started", (q: any) =>
+        q.eq("externalOrgId", args.externalOrgId),
+      )
+      .order("desc")
+      .take(limit);
+    return runs.map((run: any) => projectRunForViewer(run, externalAuthId));
+}
+
 export const listForOrg = query({
   args: {
     externalOrgId: v.string(),
     limit: v.optional(v.number()),
     status: v.optional(statusValidator),
   },
-  handler: async (ctx, args) => {
-    await requireViewerMembership(ctx, args.externalOrgId);
-    const limit = Math.max(1, Math.min(args.limit ?? 50, 200));
-
-    if (args.status) {
-      return await ctx.db
-        .query("agentRuns")
-        .withIndex("by_org_and_status", (q) =>
-          q.eq("externalOrgId", args.externalOrgId).eq("status", args.status!),
-        )
-        .order("desc")
-        .take(limit);
-    }
-
-    return await ctx.db
-      .query("agentRuns")
-      .withIndex("by_org_and_started", (q) =>
-        q.eq("externalOrgId", args.externalOrgId),
-      )
-      .order("desc")
-      .take(limit);
-  },
+  handler: listForOrgHandler,
 });
 
 /**

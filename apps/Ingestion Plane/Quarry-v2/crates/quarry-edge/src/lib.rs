@@ -7,6 +7,7 @@ pub mod api_error;
 pub mod budget;
 pub mod audio_routes;
 pub mod audit_page;
+mod browser_redirect;
 mod audit_seo;
 pub mod auth;
 pub mod cache;

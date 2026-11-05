@@ -74,6 +74,8 @@ export function CoreNavbar(props: {
   homeHref?: string
   navbarData?: NavbarPayload | null
   onNavbarRefresh?: () => void
+  onAssistantToggle?: () => void
+  assistantOpen?: boolean
   onSearchOpenChange?: (open: boolean) => void
   searchOpen?: boolean
   sidebarExpanded?: boolean
@@ -204,6 +206,11 @@ export function CoreNavbar(props: {
   )
 
   const openExclusivePanel = (panel: OpenPanel) => {
+    if (panel === 'assistant' && props.onAssistantToggle) {
+      setOpenPanel(null)
+      props.onAssistantToggle()
+      return
+    }
     setOpenPanel((current) => (current === panel ? null : panel))
   }
 
@@ -330,7 +337,7 @@ export function CoreNavbar(props: {
                 <NavbarActionButton
                   label={i18n.tr('Åpne AI-assistent', 'Open AI assistant')}
                   tooltip={i18n.tr('AI-assistent for gjeldende side', 'AI assistant for current page')}
-                  active={openPanel() === 'assistant'}
+                  active={props.assistantOpen || openPanel() === 'assistant'}
                   onClick={() => openExclusivePanel('assistant')}
                 >
                   <Sparkles class="size-[18px]" strokeWidth={1.85} />
@@ -387,6 +394,7 @@ export function CoreNavbar(props: {
                   when={!offline()}
                   fallback={<span class="core-navbar__offline-badge">{i18n.tr('Lokal demo', 'Local demo')}</span>}
                 >
+                <NavbarActionButton label={i18n.tr('Åpne Verevon-assistent', 'Open Verevon assistant')} tooltip={i18n.tr('Spør Verevon', 'Ask Verevon')} active={props.assistantOpen || openPanel() === 'assistant'} onClick={() => openExclusivePanel('assistant')}><Sparkles size={19} strokeWidth={1.8} /></NavbarActionButton>
                 <button type="button" aria-label={i18n.tr('Åpne profilmeny', 'Open profile menu')} title={i18n.tr('Åpne profilmeny', 'Open profile menu')}
                   onClick={() => openExclusivePanel('profile')} class="core-navbar__profile">
                   <span aria-hidden="true" class="core-navbar__profile-ring" />

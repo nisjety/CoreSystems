@@ -307,7 +307,7 @@ func planDerive(ctx context.Context, p DeriveParams, parent *Grant) (derivePlan,
 // none may be under the parent's deny-list.
 func deriveDomainsFrom(parent *Grant, requested []string, maxRun int, explicitRequired bool) ([]string, error) {
 	if parent.PolicyMode != PolicyModeOpenWeb {
-		return deriveDomains(parent.AllowedDomains, requested, maxRun, explicitRequired)
+		return deriveDomains(parent, requested, maxRun, explicitRequired)
 	}
 	if len(requested) == 0 {
 		return nil, ErrDeriveNeedsExplicitDomains

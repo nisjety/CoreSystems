@@ -2012,6 +2012,20 @@ struct RejectingExecutionCore;
 
 #[tonic::async_trait]
 impl ExecutionCore for RejectingExecutionCore {
+    async fn execute_restricted_browser_step(
+        &self,
+        request: tonic::Request<mp_contracts::model_plane::v1::ExecuteStepRequest>,
+    ) -> Result<tonic::Response<mp_contracts::model_plane::v1::ExecuteStepResponse>, tonic::Status> {
+        Err(tonic::Status::unimplemented("not used by this test"))
+    }
+
+    async fn browser_agent_capabilities(
+        &self,
+        _request: tonic::Request<mp_contracts::model_plane::v1::BrowserAgentCapabilitiesRequest>,
+    ) -> Result<tonic::Response<mp_contracts::model_plane::v1::BrowserAgentCapabilitiesResponse>, tonic::Status> {
+        Ok(tonic::Response::new(mp_contracts::model_plane::v1::BrowserAgentCapabilitiesResponse { attached_policy_protocol: 1 }))
+    }
+
     async fn run_agent(
         &self,
         _: TReq<mpv1::RunAgentRequest>,
@@ -2153,6 +2167,20 @@ struct CapturingExecutionCore {
 
 #[tonic::async_trait]
 impl ExecutionCore for CapturingExecutionCore {
+    async fn execute_restricted_browser_step(
+        &self,
+        request: tonic::Request<mp_contracts::model_plane::v1::ExecuteStepRequest>,
+    ) -> Result<tonic::Response<mp_contracts::model_plane::v1::ExecuteStepResponse>, tonic::Status> {
+        Err(tonic::Status::unimplemented("not used by this test"))
+    }
+
+    async fn browser_agent_capabilities(
+        &self,
+        _request: tonic::Request<mp_contracts::model_plane::v1::BrowserAgentCapabilitiesRequest>,
+    ) -> Result<tonic::Response<mp_contracts::model_plane::v1::BrowserAgentCapabilitiesResponse>, tonic::Status> {
+        Ok(tonic::Response::new(mp_contracts::model_plane::v1::BrowserAgentCapabilitiesResponse { attached_policy_protocol: 1 }))
+    }
+
     async fn run_agent(
         &self,
         request: TReq<mpv1::RunAgentRequest>,
@@ -2247,6 +2275,20 @@ struct RespondingExecutionCore {
 
 #[tonic::async_trait]
 impl ExecutionCore for RespondingExecutionCore {
+    async fn execute_restricted_browser_step(
+        &self,
+        request: tonic::Request<mp_contracts::model_plane::v1::ExecuteStepRequest>,
+    ) -> Result<tonic::Response<mp_contracts::model_plane::v1::ExecuteStepResponse>, tonic::Status> {
+        Err(tonic::Status::unimplemented("not used by this test"))
+    }
+
+    async fn browser_agent_capabilities(
+        &self,
+        _request: tonic::Request<mp_contracts::model_plane::v1::BrowserAgentCapabilitiesRequest>,
+    ) -> Result<tonic::Response<mp_contracts::model_plane::v1::BrowserAgentCapabilitiesResponse>, tonic::Status> {
+        Ok(tonic::Response::new(mp_contracts::model_plane::v1::BrowserAgentCapabilitiesResponse { attached_policy_protocol: 1 }))
+    }
+
     async fn run_agent(
         &self,
         _: TReq<mpv1::RunAgentRequest>,

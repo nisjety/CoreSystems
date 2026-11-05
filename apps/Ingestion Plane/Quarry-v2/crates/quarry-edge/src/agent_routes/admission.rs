@@ -332,6 +332,9 @@ pub(super) struct AdmitInput<'a> {
     pub action: &'a AgentAction,
     /// Refuse (not just log) an agent action while a person holds the browser.
     pub enforce_takeover: bool,
+    /// True only after Quarry has admitted the signed delegate for the
+    /// owner's specific borrowed tab and checked its current holder.
+    pub consented_tab_control: bool,
     /// WS8.H: the last observation of the lane this action runs on (the approval checks read
     /// the dialogs and targets it names). `None` before the lane has observed anything.
     pub last_observation: Option<&'a BrowserObservation>,
@@ -439,12 +442,18 @@ pub(super) async fn admit_action(
     }
 
     // 3. control / takeover
-    let snapshot = match takeover_gate(handle, entry, input.initiator.class, input.enforce_takeover, "action") {
-        Ok(snapshot) => snapshot,
-        Err(error) => {
-            let snapshot = handle.live.snapshot();
-            record_takeover_skip(state, entry, action, &input.initiator, snapshot).await;
-            return Err(error);
+    let snapshot = if input.consented_tab_control {
+        // The person's run stays in human mode. The exact borrowed tab, with
+        // its own holder, is the agent's only authority in that run.
+        handle.live.snapshot()
+    } else {
+        match takeover_gate(handle, entry, input.initiator.class, input.enforce_takeover, "action") {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                let snapshot = handle.live.snapshot();
+                record_takeover_skip(state, entry, action, &input.initiator, snapshot).await;
+                return Err(error);
+            }
         }
     };
 

@@ -15,13 +15,14 @@ use ::chromiumoxide::cdp::browser_protocol::browser::{
     EventDownloadWillBegin, SetDownloadBehaviorBehavior, SetDownloadBehaviorParams,
 };
 use ::chromiumoxide::cdp::browser_protocol::dom::{
-    BackendNodeId, GetNodeForLocationParams, ResolveNodeParams, SetFileInputFilesParams,
+    BackendNodeId, GetBoxModelParams, GetNodeForLocationParams, ResolveNodeParams, SetFileInputFilesParams,
 };
 use ::chromiumoxide::cdp::browser_protocol::emulation::{
     SetDeviceMetricsOverrideParams, SetFocusEmulationEnabledParams, SetTouchEmulationEnabledParams,
 };
 use ::chromiumoxide::cdp::browser_protocol::fetch::{
     ContinueRequestParams, EnableParams as FetchEnableParams, EventRequestPaused, FailRequestParams,
+    FulfillRequestParams, HeaderEntry as FetchHeaderEntry,
 };
 use ::chromiumoxide::cdp::browser_protocol::input::{
     DispatchMouseEventParams, DispatchMouseEventPointerType, DispatchMouseEventType, MouseButton,
@@ -29,7 +30,8 @@ use ::chromiumoxide::cdp::browser_protocol::input::{
 use ::chromiumoxide::cdp::browser_protocol::log::EventEntryAdded;
 use ::chromiumoxide::cdp::browser_protocol::page::{GetLayoutMetricsParams, Viewport as CdpViewport};
 use ::chromiumoxide::cdp::browser_protocol::network::{
-    ErrorReason, EventRequestWillBeSent, EventResponseReceived, ResourceType,
+    ErrorReason, EventRequestWillBeSent, EventResponseReceived, EventResponseReceivedExtraInfo,
+    ResourceType,
 };
 use ::chromiumoxide::cdp::browser_protocol::target::TargetId;
 use ::chromiumoxide::cdp::browser_protocol::target::{
@@ -99,11 +101,29 @@ use crate::tab_control::{
 use crate::{
     BrowserDevtoolsEvent, BrowserDownloadedFile, BrowserDriver, BrowserDriverCapabilities,
     BrowserEgressPolicy, BrowserEgressProxyProvider, BrowserHealth, BrowserNativeProjection,
-    BrowserNativeTarget, BrowserSession, BrowserTab, LiveFrame, LiveFrameFormat, LiveFrameOptions,
+    BrowserNativeTarget, BrowserSession, BrowserTab, LiveAgentCursor, LiveFrame, LiveFrameFormat, LiveFrameOptions,
     ReputationOutcome, SessionInner, SlotHealth, VerifiedTargetAction, VerifiedTargetOperation,
 };
 
 const LIVE_FRAME_CACHE_TTL_MS: u64 = 250;
+const AGENT_CURSOR_TTL: Duration = Duration::from_secs(2);
+
+/// Protected by a per-tab mutex shared with frame capture. The cursor is
+/// process-local and never a durable browser artifact.
+#[derive(Clone)]
+struct AgentCursorEntry {
+    owner: u64,
+    position: LiveAgentCursor,
+    moved_at: Instant,
+}
+
+type AgentCursorSlot = Arc<Mutex<Option<AgentCursorEntry>>>;
+
+fn frame_cursor(entry: Option<&AgentCursorEntry>, owner: u64, tab: &str, now: Instant) -> Option<LiveAgentCursor> {
+    let entry = entry?;
+    (entry.owner == owner && entry.position.tab_id == tab && now.saturating_duration_since(entry.moved_at) < AGENT_CURSOR_TTL)
+        .then(|| entry.position.clone())
+}
 const DEVTOOLS_EVENT_BUFFER_LIMIT: usize = 512;
 const MAX_GOVERNED_DOWNLOAD_BYTES: u64 = 25 * 1024 * 1024;
 /// The driver runs one browser process today (K = 1, ADR-10).
@@ -363,6 +383,7 @@ pub struct ChromiumoxideDriver {
     hooks: Arc<TestHooks>,
     frame_epochs: Arc<AtomicU64>,
     live_frames: Arc<Mutex<LiveFrameCache>>,
+    agent_cursors: Arc<Mutex<HashMap<(String, String), AgentCursorSlot>>>,
     devtools_events: Arc<Mutex<HashMap<String, Vec<BrowserDevtoolsEvent>>>>,
     devtools_sequence: Arc<Mutex<u64>>,
     egress_receipts: Arc<Mutex<HashMap<String, Vec<BrowserEgressReceipt>>>>,
@@ -448,6 +469,7 @@ impl ChromiumoxideDriver {
             hooks: Arc::new(TestHooks::default()),
             frame_epochs: Arc::new(AtomicU64::new(0)),
             live_frames: Arc::new(Mutex::new(LiveFrameCache::default())),
+            agent_cursors: Arc::new(Mutex::new(HashMap::new())),
             devtools_events: Arc::new(Mutex::new(HashMap::new())),
             devtools_sequence: Arc::new(Mutex::new(0)),
             egress_receipts: Arc::new(Mutex::new(HashMap::new())),
@@ -572,6 +594,7 @@ impl ChromiumoxideDriver {
             hooks: self.hooks.clone(),
             frame_epochs: self.frame_epochs.clone(),
             live_frames: self.live_frames.clone(),
+            agent_cursors: self.agent_cursors.clone(),
             devtools_events: self.devtools_events.clone(),
             devtools_sequence: self.devtools_sequence.clone(),
             egress_receipts: self.egress_receipts.clone(),
@@ -1184,12 +1207,20 @@ impl ChromiumoxideDriver {
         self.dialogs.lock().await.remove(&session_key);
         self.dialog_pages.lock().await.remove(&session_key);
         self.live_frames.lock().await.remove(&session_key);
+        self.agent_cursors.lock().await.retain(|key, _| key.0 != session_key);
         self.attach_locks.lock().await.remove(&session_key);
         self.credential_delivered.lock().await.remove(&session_key);
     }
 
     fn session_key(session: &BrowserSession) -> String {
         session.lease.session_affinity_key.clone()
+    }
+
+    async fn agent_cursor_slot(&self, session_key: &str, tab_id: &str) -> AgentCursorSlot {
+        self.agent_cursors.lock().await
+            .entry((session_key.to_owned(), tab_id.to_owned()))
+            .or_insert_with(|| Arc::new(Mutex::new(None)))
+            .clone()
     }
 
     /// Browser navigation (and opening any page, SC4 D1's placeholder tab too)
@@ -1529,6 +1560,7 @@ impl ChromiumoxideDriver {
             self.egress_policies.clone(),
             self.tab_egress_policies.clone(),
             self.navigation_watches.clone(),
+            self.pinned_egress_proxy.clone(),
         )
         .await?;
         if let Some(journal) = profile_journal.as_ref() {
@@ -1777,14 +1809,42 @@ impl ChromiumoxideDriver {
                 let sequence = self.devtools_sequence.clone();
                 let session_key = session_key.clone();
                 let tab_id = tab_id.clone();
+                let navigation_watches = self.navigation_watches.clone();
+                let target_id = page.target_id().clone();
                 tokio::spawn(async move {
                     while let Some(event) = events.next().await {
+                        if event.r#type == ResourceType::Document {
+                            navigation_watches.document_response(
+                                &target_id,
+                                event.request_id.inner(),
+                                event.response.status,
+                            );
+                        }
                         let event = normalize_response_event(&tab_id, &event);
                         push_devtools_event(&event_buffer, &sequence, &session_key, event).await;
                     }
                 });
             }
             Err(err) => tracing::debug!(error_class = crate::deadlines::cdp_class(&err), "response devtools listener unavailable"),
+        }
+
+        // Chromium can report an HTTP failure before emitting ResponseReceived.
+        // ExtraInfo still carries the status. Keep no headers or cookies from it.
+        match page.event_listener::<EventResponseReceivedExtraInfo>().await {
+            Ok(mut events) => {
+                let navigation_watches = self.navigation_watches.clone();
+                let target_id = page.target_id().clone();
+                tokio::spawn(async move {
+                    while let Some(event) = events.next().await {
+                        navigation_watches.document_response(
+                            &target_id,
+                            event.request_id.inner(),
+                            event.status_code,
+                        );
+                    }
+                });
+            }
+            Err(err) => tracing::debug!(error_class = crate::deadlines::cdp_class(&err), "response status listener unavailable"),
         }
 
         match page.event_listener::<EventLifecycleEvent>().await {
@@ -2235,6 +2295,7 @@ async fn install_network_guard(
     policies: Arc<Mutex<HashMap<String, BrowserEgressPolicy>>>,
     tab_policies: Arc<Mutex<HashMap<(String, String), BrowserEgressPolicy>>>,
     navigation_watches: Arc<NavigationWatches>,
+    asset_provider: Option<Arc<dyn BrowserEgressProxyProvider>>,
 ) -> QuarryResult<()> {
     let mut events = page
         .event_listener::<EventRequestPaused>()
@@ -2276,6 +2337,13 @@ async fn install_network_guard(
             // its navigations (a frame's are the frame's, which never end a `goto`).
             let main_frame_document = event.resource_type == ResourceType::Document
                 && event.frame_id.inner() == guarded_page.target_id().inner();
+            if main_frame_document {
+                navigation_watches.document_request(
+                    guarded_page.target_id(),
+                    &PausedDocument::of(&event),
+                    None,
+                );
+            }
             // The meet of the session's policy and the tab's own one (WS8.E, D2-013):
             // a tab can narrow what the session allows, never widen it, and a session
             // with no policy is deny-all. A page can start emitting Fetch events as
@@ -2287,15 +2355,17 @@ async fn install_network_guard(
                 .get(&(session_key.clone(), tab_id.clone()))
                 .cloned();
             let session_policy = policies.lock().await.get(&session_key).cloned();
-            let policy_allows_url =
-                resolve_tab_egress_policy(tab_policy.as_ref(), session_policy.as_ref())
-                    .allows_url(&request_url);
+            let policy = resolve_tab_egress_policy(tab_policy.as_ref(), session_policy.as_ref());
+            let policy_allows_url = policy.allows_url(&request_url);
+            let public_asset = !policy_allows_url
+                && is_public_asset_request(&event.resource_type, &method, event.request.has_post_data)
+                && policy.allows_public_asset(&request_url);
             // E3.8.7 (D2-100): the URL reputation hook, after the grant and before the DNS
             // guard. This listener sees every request the tab makes (a navigation, each
             // redirect hop, a click's navigation, frames and sub-resources), so one check
             // here covers them all. No hook (the default, and `QUARRY_EDGE__REPUTATION_MODE`
             // off) gives `None`, and the decisions below are the ones made before the hook.
-            let reputation = if policy_allows_url {
+            let reputation = if policy_allows_url || public_asset {
                 egress_reputation_outcome(
                     tab_policy.as_ref(),
                     session_policy.as_ref(),
@@ -2312,18 +2382,69 @@ async fn install_network_guard(
                     "chromiumoxide request host is on a reputation list"
                 );
             }
-            let (decision, policy, command_result) = if !policy_allows_url {
-                (
-                    BrowserEgressDecision::Block,
-                    NAVIGATION_REFUSED_BY_GRANT,
-                    best_effort(
-                        Op::GuardResolve,
-                        guarded_page.execute(FailRequestParams::new(request_id, ErrorReason::Aborted)),
-                    )
-                    .await
-                    .map(|_| ()),
-                )
-            } else if reputation.is_some_and(|outcome| outcome.is_block()) {
+            // Fetch outside Chromium's proxy so a CDN asset cannot open a
+            // general-purpose connection outside the tab's host grant.
+            if public_asset && !reputation.is_some_and(|outcome| outcome.is_block()) {
+                if let (Some(provider), Ok(pending)) = (&asset_provider, ASSET_QUEUE.try_acquire()) {
+                    let provider = provider.clone();
+                    let page = guarded_page.clone();
+                    let policies = policies.clone();
+                    let tab_policies = tab_policies.clone();
+                    let receipts = receipts.clone();
+                    let sequence = sequence.clone();
+                    let session_key = session_key.clone();
+                    let tab_id = tab_id.clone();
+                    tokio::spawn(async move {
+                        let _pending = pending;
+                        let result = tokio::time::timeout(std::time::Duration::from_secs(8), async {
+                            let _slot = ASSET_FETCHES.acquire().await.ok()?;
+                            let tab_policy = tab_policies
+                                .lock()
+                                .await
+                                .get(&(session_key.clone(), tab_id.clone()))
+                                .cloned();
+                            let session_policy = policies.lock().await.get(&session_key).cloned();
+                            if !resolve_tab_egress_policy(tab_policy.as_ref(), session_policy.as_ref())
+                                .allows_public_asset(&request_url)
+                            {
+                                return None;
+                            }
+                            let url = url::Url::parse(&request_url).ok()?;
+                            provider.fetch_public_asset(&session_key, &url).await.ok()
+                        })
+                        .await
+                        .ok()
+                        .flatten();
+                        let loaded = if let Some(asset) = result {
+                            let mut response = FulfillRequestParams::new(request_id.clone(), i64::from(asset.status));
+                            response.response_headers = Some(asset.headers.into_iter()
+                                .map(|(name, value)| FetchHeaderEntry::new(name, value))
+                                .collect());
+                            response.body = Some(asset.body_base64.into());
+                            best_effort(Op::GuardResolve, page.execute(response)).await.is_ok()
+                        } else {
+                            false
+                        };
+                        if !loaded {
+                            let _ = best_effort(Op::GuardResolve, page.execute(FailRequestParams::new(request_id, ErrorReason::Aborted))).await;
+                        }
+                        push_egress_receipt(
+                            &receipts, &sequence, &session_key,
+                            BrowserEgressReceipt {
+                                sequence: 0,
+                                tab_id: Some(tab_id),
+                                method,
+                                url: redact_egress_url(&request_url),
+                                decision: if loaded { BrowserEgressDecision::Allow } else { BrowserEgressDecision::Block },
+                                policy: if loaded { "credentialless_public_asset" } else { "public_asset_unavailable" }.to_owned(),
+                                timestamp_ms: now_ms(),
+                            },
+                        ).await;
+                    });
+                    continue;
+                }
+            }
+            let (decision, policy, command_result) = if reputation.is_some_and(|outcome| outcome.is_block()) {
                 (
                     BrowserEgressDecision::Block,
                     NAVIGATION_REFUSED_BY_REPUTATION,
@@ -2334,18 +2455,37 @@ async fn install_network_guard(
                     .await
                     .map(|_| ()),
                 )
+            } else if !policy_allows_url {
+                (
+                    BrowserEgressDecision::Block,
+                    NAVIGATION_REFUSED_BY_GRANT,
+                    best_effort(
+                        Op::GuardResolve,
+                        guarded_page.execute(FailRequestParams::new(request_id, ErrorReason::Aborted)),
+                    )
+                    .await
+                    .map(|_| ()),
+                )
             } else {
                 match navigation_watches.guard_request_target(&request_url).await {
-                    Ok(()) => (
-                        BrowserEgressDecision::Allow,
-                        allowed_receipt_policy(reputation),
-                        best_effort(
-                            Op::GuardResolve,
-                            guarded_page.execute(ContinueRequestParams::new(request_id)),
+                    Ok(()) => {
+                        if main_frame_document {
+                            navigation_watches.allow_document(
+                                guarded_page.target_id(),
+                                event.request_id.inner(),
+                            );
+                        }
+                        (
+                            BrowserEgressDecision::Allow,
+                            allowed_receipt_policy(reputation),
+                            best_effort(
+                                Op::GuardResolve,
+                                guarded_page.execute(ContinueRequestParams::new(request_id)),
+                            )
+                            .await
+                            .map(|_| ()),
                         )
-                        .await
-                        .map(|_| ()),
-                    ),
+                    }
                     Err(error) => {
                         tracing::warn!(
                             code = ?error.code,
@@ -2382,7 +2522,7 @@ async fn install_network_guard(
             )
             .await;
             // SC4 D3: after the receipt, so a `goto` the refusal ends finds it recorded.
-            if main_frame_document {
+            if main_frame_document && refusal.is_some() {
                 navigation_watches.document_request(
                     guarded_page.target_id(),
                     &PausedDocument::of(&event),
@@ -2395,6 +2535,18 @@ async fn install_network_guard(
         }
     });
     Ok(())
+}
+
+static ASSET_QUEUE: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(128);
+static ASSET_FETCHES: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(16);
+
+fn is_public_asset_request(kind: &ResourceType, method: &str, has_body: Option<bool>) -> bool {
+    method == "GET"
+        && !has_body.unwrap_or(false)
+        && matches!(
+            kind,
+            ResourceType::Stylesheet | ResourceType::Image | ResourceType::Font | ResourceType::Script
+        )
 }
 
 /// Register dialog openings as observable state. The listener deliberately
@@ -2629,6 +2781,8 @@ const NAVIGATION_REFUSED_BY_GUARD: &str = "url_or_dns_blocked";
 /// (`domain_grant_blocked`), the reputation hook (this and [`REPUTATION_WARNED`]) or the
 /// URL and DNS guard (`url_or_dns_blocked`, `url_dns_public`).
 const NAVIGATION_REFUSED_BY_REPUTATION: &str = "reputation_blocked";
+const NAVIGATION_HTTP_RESPONSE: &str = "navigation_http_response";
+const CHROMIUM_HTTP_RESPONSE_FAILURE: &str = "net::ERR_HTTP_RESPONSE_CODE_FAILURE";
 /// An allowed request whose host is on a reputation list, with the org in `warn` mode.
 const REPUTATION_WARNED: &str = "reputation_warned";
 /// An allowed request no layer had anything to say about.
@@ -2694,6 +2848,11 @@ struct NavigationWatch {
     requests: HashSet<String>,
     /// Their network ids (one id across a redirect chain).
     networks: HashSet<String>,
+    last_request: Option<String>,
+    last_network: Option<String>,
+    last_document_allowed: bool,
+    http_status: Option<u16>,
+    status_ready: Arc<tokio::sync::Notify>,
     /// Taken by the first refusal.
     refused: Option<tokio::sync::oneshot::Sender<&'static str>>,
 }
@@ -2745,6 +2904,7 @@ impl NavigationWatches {
     /// Watch the navigation of `tab` to `url`, until the returned guard drops.
     fn watch(self: &Arc<Self>, tab: TargetId, url: &str) -> WatchedNavigation {
         let (refused, receiver) = tokio::sync::oneshot::channel();
+        let status_ready = Arc::new(tokio::sync::Notify::new());
         let id = self.sequence.fetch_add(1, Ordering::Relaxed);
         let target = url::Url::parse(url).ok().map(|mut target| {
             target.set_fragment(None);
@@ -2760,6 +2920,11 @@ impl NavigationWatches {
                     target,
                     requests: HashSet::new(),
                     networks: HashSet::new(),
+                    last_request: None,
+                    last_network: None,
+                    last_document_allowed: false,
+                    http_status: None,
+                    status_ready: status_ready.clone(),
                     refused: Some(refused),
                 },
             );
@@ -2768,12 +2933,12 @@ impl NavigationWatches {
             tab,
             id,
             refused: receiver,
+            status_ready,
         }
     }
 
-    /// The guard decided a main-frame document request of `tab` (`event`'s Fetch
-    /// request id, URL, network id and `redirectedRequestId`): `refusal` is the policy
-    /// that refused it, if one did.
+    /// Track the main-frame request before releasing it. The guard calls this again
+    /// on refusal, after recording the policy decision in the egress receipt.
     fn document_request(
         &self,
         tab: &TargetId,
@@ -2791,21 +2956,58 @@ impl NavigationWatches {
         // A hop is in the chain by its `redirectedRequestId` or, failing that, its
         // network id (one across a redirect chain); the chain starts with the `goto`'s
         // own URL, never with whatever main-frame request comes first.
-        let ours = event
-            .redirected_from
-            .is_some_and(|previous| watch.requests.contains(previous))
+        let ours = watch.requests.contains(event.request)
+            || event
+                .redirected_from
+                .is_some_and(|previous| watch.requests.contains(previous))
             || network.is_some_and(|network| watch.networks.contains(network))
             || (watch.requests.is_empty() && watch.starts_with(event.url));
         if !ours {
             return;
         }
-        watch.requests.insert(event.request.to_owned());
+        if watch.requests.insert(event.request.to_owned()) {
+            watch.last_request = Some(event.request.to_owned());
+            watch.last_network = network.map(str::to_owned);
+            watch.last_document_allowed = false;
+            watch.http_status = None;
+        }
         if let Some(network) = network {
             watch.networks.insert(network.to_owned());
         }
         if let Some(policy) = refusal {
+            if watch.last_request.as_deref() == Some(event.request) {
+                watch.last_document_allowed = false;
+            }
             if let Some(refused) = watch.refused.take() {
                 let _ = refused.send(policy);
+            }
+        }
+    }
+
+    fn allow_document(&self, tab: &TargetId, request: &str) {
+        let mut by_tab = self
+            .by_tab
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(watch) = by_tab.get_mut(tab) {
+            if watch.last_request.as_deref() == Some(request) {
+                watch.last_document_allowed = true;
+            }
+        }
+    }
+
+    fn document_response(&self, tab: &TargetId, network: &str, status: i64) {
+        if !(400..=599).contains(&status) {
+            return;
+        }
+        let mut by_tab = self
+            .by_tab
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(watch) = by_tab.get_mut(tab) {
+            if watch.last_document_allowed && watch.last_network.as_deref() == Some(network) {
+                watch.http_status = u16::try_from(status).ok();
+                watch.status_ready.notify_one();
             }
         }
     }
@@ -2832,6 +3034,22 @@ struct WatchedNavigation {
     tab: TargetId,
     id: u64,
     refused: tokio::sync::oneshot::Receiver<&'static str>,
+    status_ready: Arc<tokio::sync::Notify>,
+}
+
+impl WatchedNavigation {
+    fn http_failure_details(&self) -> Option<(Option<u16>, usize)> {
+        let by_tab = self
+            .watches
+            .by_tab
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let watch = by_tab.get(&self.tab)?;
+        if watch.id != self.id || !watch.last_document_allowed {
+            return None;
+        }
+        Some((watch.http_status, watch.requests.len().saturating_sub(1)))
+    }
 }
 
 impl Drop for WatchedNavigation {
@@ -2874,18 +3092,50 @@ async fn goto_watched(
     limit: Duration,
 ) -> QuarryResult<()> {
     let mut watched = watches.watch(page.target_id().clone(), url);
-    tokio::select! {
+    let error = tokio::select! {
         biased;
-        Ok(policy) = &mut watched.refused => Err(navigation_refused(policy)),
+        Ok(policy) = &mut watched.refused => return Err(navigation_refused(policy)),
         navigated = goto_within(page, url, limit) => match navigated {
-            // A refusal that came with the failure is its cause.
-            Err(error) => match watched.refused.try_recv() {
-                Ok(policy) => Err(navigation_refused(policy)),
-                Err(_) => Err(error),
-            },
-            Ok(()) => Ok(()),
+            Err(error) => error,
+            Ok(()) => return Ok(()),
         },
+    };
+    // A refusal that came with the failure is its cause.
+    if let Ok(policy) = watched.refused.try_recv() {
+        return Err(navigation_refused(policy));
     }
+    let chromium_http_error = error.code == ErrorCode::DriverFailed
+        && error
+            .details
+            .as_ref()
+            .and_then(|details| details.get("error"))
+            .and_then(|error| error.as_str())
+            == Some(CHROMIUM_HTTP_RESPONSE_FAILURE);
+    if chromium_http_error {
+        if watched
+            .http_failure_details()
+            .is_some_and(|(status, _)| status.is_none())
+        {
+            // Page.navigate can fail just ahead of the Network response event.
+            let _ = tokio::time::timeout(Duration::from_millis(150), watched.status_ready.notified())
+                .await;
+        }
+        if let Ok(policy) = watched.refused.try_recv() {
+            return Err(navigation_refused(policy));
+        }
+        if let Some((http_status, redirect_count)) = watched.http_failure_details() {
+            let mut details = json!({
+                "error": CHROMIUM_HTTP_RESPONSE_FAILURE,
+                "reason": NAVIGATION_HTTP_RESPONSE,
+                "redirect_count": redirect_count,
+            });
+            if let Some(http_status) = http_status {
+                details["http_status"] = json!(http_status);
+            }
+            return Err(error.with_details(details));
+        }
+    }
+    Err(error)
 }
 
 /// `page.goto(url)` within `limit` (the `Op::Navigate` entry in production). A
@@ -4101,6 +4351,7 @@ async fn capture_live_frame(page: &Page, options: LiveFrameOptions) -> QuarryRes
     Ok(LiveFrame {
         mime_type: options.format.mime_type().to_owned(),
         data_base64: String::from(frame.data.clone()),
+        agent_cursor: None,
     })
 }
 
@@ -4859,10 +5110,18 @@ impl BrowserDriver for ChromiumoxideDriver {
                         .unwrap_or_else(|poisoned| poisoned.into_inner())
                         .insert(page.target_id().clone());
                 }
-                if abandoned
-                    && stop_abandoned_navigation(&page, deadline(Op::NavigateRecovery)).await
-                {
+                let stopped = abandoned
+                    && stop_abandoned_navigation(&page, deadline(Op::NavigateRecovery)).await;
+                let http_failure = error
+                    .details
+                    .as_ref()
+                    .and_then(|details| details.get("reason"))
+                    .and_then(|reason| reason.as_str())
+                    == Some(NAVIGATION_HTTP_RESPONSE);
+                if stopped {
                     self.update_tab_metadata(&session_key, &tab_id, &page).await;
+                }
+                if stopped || http_failure {
                     self.invalidate_live_frame_cache(session, owner).await;
                 }
                 return Err(error);
@@ -4915,6 +5174,32 @@ impl BrowserDriver for ChromiumoxideDriver {
         })
         .await?;
         Ok(Bytes::from(html.into_bytes()))
+    }
+
+    async fn native_target_rect(
+        &self,
+        session: &BrowserSession,
+        target: &BrowserNativeTarget,
+    ) -> Option<quarry_core::contracts::ElementRect> {
+        // Geometry is advisory, bounded, and never affects action execution.
+        // Child-frame coordinates need a verified frame-to-viewport transform;
+        // omit them until that contract is available.
+        tokio::time::timeout(Duration::from_millis(150), async {
+            let page = self.current_page(session).await.ok()?;
+            if let Some(frame_id) = target.frame_id.as_deref() {
+                if root_frame_id(&page).await.ok()?.as_str() != frame_id {
+                    return None;
+                }
+            }
+            let command = GetBoxModelParams::builder()
+                .backend_node_id(BackendNodeId::new(target.backend_node_id))
+                .build();
+            let result = page.execute(command).await.ok()?;
+            quarry_core::contracts::ElementRect::from_content_quad(result.result.model.border.inner())
+        })
+        .await
+        .ok()
+        .flatten()
     }
 
     async fn act_on_verified_target(
@@ -5429,6 +5714,50 @@ impl BrowserDriver for ChromiumoxideDriver {
         Ok(captured.into_masked_screenshot())
     }
 
+    async fn move_agent_pointer(
+        &self,
+        session: &BrowserSession,
+        attach_id: &str,
+        x: u32,
+        y: u32,
+    ) -> QuarryResult<()> {
+        let viewport = session.lease.viewport.ok_or_else(|| QuarryError::unsupported_action("agent_pointer_viewport"))?;
+        if attach_id.is_empty() || attach_id.len() > 256 || x >= viewport.width || y >= viewport.height {
+            return Err(QuarryError::new(ErrorCode::BadRequest, "invalid agent pointer"));
+        }
+        let owner = self.admission(session).ok_or_else(not_open_error)?;
+        let pinned = session.tab_pin().ok_or_else(|| QuarryError::unsupported_action("unpinned_agent_pointer"))?;
+        let (tab_id, page) = self.current_tab_page(session).await?;
+        if tab_id != pinned {
+            return Err(QuarryError::new(ErrorCode::NotFound, "pinned tab is unavailable"));
+        }
+        let key = Self::session_key(session);
+        let slot = self.agent_cursor_slot(&key, &tab_id).await;
+        let mut cursor = slot.lock().await;
+        if self.admission(session) != Some(owner) { return Err(not_open_error()); }
+        actionability::dispatch_pointer_move(&page, f64::from(x), f64::from(y)).await?;
+        if self.admission(session) != Some(owner) { return Err(not_open_error()); }
+        *cursor = Some(AgentCursorEntry {
+            owner,
+            position: LiveAgentCursor { x, y, viewport_width: viewport.width, viewport_height: viewport.height,
+                tab_id, attach_id: attach_id.to_owned() },
+            moved_at: Instant::now(),
+        });
+        self.invalidate_live_frame_cache(session, Some(owner)).await;
+        Ok(())
+    }
+
+    async fn clear_agent_pointer(&self, session: &BrowserSession, attach_id: &str) {
+        let Some(tab_id) = session.tab_pin() else { return };
+        let owner = self.admission(session);
+        let slot = self.agent_cursor_slot(&Self::session_key(session), tab_id).await;
+        let mut cursor = slot.lock().await;
+        if cursor.as_ref().is_some_and(|entry| Some(entry.owner) == owner && entry.position.attach_id == attach_id) {
+            *cursor = None;
+            self.invalidate_live_frame_cache(session, owner).await;
+        }
+    }
+
     async fn live_frame(
         &self,
         session: &BrowserSession,
@@ -5440,6 +5769,10 @@ impl BrowserDriver for ChromiumoxideDriver {
         // this page may only ever be cached for this entry.
         let owner = self.admission(session);
         let (tab_id, page) = self.current_tab_page(session).await?;
+        // A pointer update cannot cross the actual screenshot capture, so the
+        // coordinates belong to this exact image rather than a nearby event.
+        let cursor_slot = self.agent_cursor_slot(&session_key, &tab_id).await;
+        let cursor_guard = cursor_slot.lock().await;
         #[cfg(test)]
         {
             let stall = *self
@@ -5464,13 +5797,17 @@ impl BrowserDriver for ChromiumoxideDriver {
             let current = self.book().admission_id(&session_key);
             let fresh_epoch = || self.frame_epochs.fetch_add(1, Ordering::SeqCst) + 1;
             match frames.begin(&session_key, owner, current, &tab_id, options, fresh_epoch) {
-                FrameLookup::Hit(frame) => return Ok(frame),
+                FrameLookup::Hit(mut frame) => {
+                    frame.agent_cursor = frame_cursor(cursor_guard.as_ref(), current.unwrap_or_default(), &tab_id, Instant::now());
+                    return Ok(frame);
+                }
                 FrameLookup::Capture { owner, epoch } => (owner, epoch),
                 FrameLookup::NotOwner => return Err(not_open_error()),
             }
         };
 
-        let frame = capture_live_frame(&page, options).await?;
+        let mut frame = capture_live_frame(&page, options).await?;
+        frame.agent_cursor = frame_cursor(cursor_guard.as_ref(), owner, &tab_id, Instant::now());
         // Stored only if the page did not change and the entry is the one
         // that started: never into a released session's slot or a newer one.
         self.live_frames.lock().await.store(
@@ -5736,8 +6073,18 @@ impl BrowserDriver for ChromiumoxideDriver {
         tab_id: &str,
         policy: BrowserEgressPolicy,
     ) -> QuarryResult<()> {
+        self.swap_tab_egress_policy(session, tab_id, Some(policy)).await?;
+        Ok(())
+    }
+
+    async fn swap_tab_egress_policy(
+        &self,
+        session: &BrowserSession,
+        tab_id: &str,
+        policy: Option<BrowserEgressPolicy>,
+    ) -> QuarryResult<Option<BrowserEgressPolicy>> {
         let session_key = Self::session_key(session);
-        // Checked and inserted under the pages lock, the lock close_tab takes
+        // Checked and updated under the pages lock, the lock close_tab takes
         // to remove the tab, so a closed tab never keeps a policy (WS8.E).
         let pages = self.pages.lock().await;
         let exists = pages
@@ -5749,12 +6096,14 @@ impl BrowserDriver for ChromiumoxideDriver {
                     .with_details(json!({ "tab_id": tab_id })),
             );
         }
-        self.tab_egress_policies
-            .lock()
-            .await
-            .insert((session_key, tab_id.to_owned()), policy);
+        let mut policies = self.tab_egress_policies.lock().await;
+        let key = (session_key, tab_id.to_owned());
+        let previous = match policy {
+            Some(policy) => policies.insert(key, policy),
+            None => policies.remove(&key),
+        };
         drop(pages);
-        Ok(())
+        Ok(previous)
     }
 
     async fn active_tab_id(&self, session: &BrowserSession) -> QuarryResult<Option<String>> {
@@ -5832,6 +6181,7 @@ impl BrowserDriver for ChromiumoxideDriver {
                 self.hooks.close_tab_resume.notified().await;
             }
         }
+        self.agent_cursors.lock().await.remove(&(session_key.clone(), tab_id.to_owned()));
         self.book().page_closed(&session_key, removed.admission);
         self.forget_abandoned_navigations([&removed.page]);
 
@@ -7523,6 +7873,18 @@ mod tests {
     use crate::PinnedEgressProxyEndpoint;
 
     #[test]
+    fn cursor_frame_is_scoped_to_owner_tab_and_short_lifetime() {
+        let now = Instant::now();
+        let position = LiveAgentCursor { x: 12, y: 30, viewport_width: 100, viewport_height: 80, tab_id: "agent-tab".into(), attach_id: "attach-1".into() };
+        let entry = AgentCursorEntry { owner: 7, position: position.clone(), moved_at: now };
+        assert_eq!(frame_cursor(Some(&entry), 7, "agent-tab", now), Some(position));
+        assert_eq!(frame_cursor(Some(&entry), 8, "agent-tab", now), None);
+        assert_eq!(frame_cursor(Some(&entry), 7, "other-tab", now), None);
+        assert_eq!(frame_cursor(Some(&entry), 7, "agent-tab", now + AGENT_CURSOR_TTL), None);
+        assert_eq!(frame_cursor(None, 7, "agent-tab", now), None);
+    }
+
+    #[test]
     fn sandbox_is_on_by_default_everywhere() {
         assert_eq!(sandbox_policy(false, false), Ok(SandboxMode::Enabled));
         assert_eq!(sandbox_policy(true, false), Ok(SandboxMode::Enabled));
@@ -7877,6 +8239,7 @@ mod tests {
             frame: LiveFrame {
                 mime_type: "image/jpeg".into(),
                 data_base64: data.into(),
+                agent_cursor: None,
             },
         }
     }
@@ -8989,6 +9352,10 @@ mod tests {
         assert_eq!(eval_string(&driver, &session, who_pinned).await, "other");
         let content = driver.content(&handle).await.expect("pinned content");
         assert!(String::from_utf8_lossy(&content).contains("pinned"));
+        let pinned_frame = driver.live_frame(&handle, LiveFrameOptions::default()).await.expect("pinned frame");
+        let active_frame = driver.live_frame(&session, LiveFrameOptions::default()).await.expect("active frame");
+        assert_ne!(pinned_frame.data_base64, active_frame.data_base64, "frame must show the addressed tab");
+        assert_eq!(driver.active_tab_id(&session).await.expect("active after viewing"), Some(other.tab_id.clone()));
         driver.release(session).await.expect("release");
     }
 
@@ -9675,8 +10042,8 @@ mod tests {
     /// `/slow.html` and `/held.png` are accepted and never answered; `/loaded.html` is
     /// a page whose document arrives but whose image never does (so its load never
     /// ends); `/redirect-out.html` is a 302 to `sc4-out.fixture.test`, and
-    /// `/image-out.html` a page (`sc4-image-out`) with an image from that host; any
-    /// other path is a small page carrying `sc4-next-page`. A `CONNECT` (an
+    /// `/image-out.html` a page (`sc4-image-out`) with an image from that host;
+    /// `/missing.html` is an empty 404; other fixture pages carry `sc4-next-page`. A `CONNECT` (an
     /// HTTPS upgrade attempt) is refused, so Chromium stays on plain HTTP.
     async fn fixture_proxy() -> (String, tokio::task::JoinHandle<()>) {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -9716,8 +10083,24 @@ mod tests {
                             .await;
                         return;
                     }
+                    if target.ends_with("/missing.html") {
+                        let _ = socket
+                            .write_all(b"HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
+                            .await;
+                        return;
+                    }
                     let (marker, image) = if target.ends_with("/loaded.html") {
                         ("sc4-loaded", "<img src=\"/held.png\">")
+                    } else if target.ends_with("/public-assets.html") {
+                        (
+                            "sc4-public-assets",
+                            concat!(
+                                "<link rel=\"stylesheet\" href=\"https://asset-cdn.fixture.test/test.css\">",
+                                "<link rel=\"stylesheet\" crossorigin href=\"https://asset-cdn.fixture.test/redirect.css\">",
+                                "<script src=\"https://asset-cdn.fixture.test/test.js\"></script>",
+                                "<img id=\"cdn-image\" src=\"https://asset-cdn.fixture.test/test.svg\">",
+                            ),
+                        )
                     } else if target.ends_with("/image-out.html") {
                         (
                             "sc4-image-out",
@@ -9769,12 +10152,108 @@ mod tests {
             Ok(())
         }
 
+        async fn fetch_public_asset(
+            &self,
+            _session_key: &str,
+            url: &url::Url,
+        ) -> QuarryResult<crate::PublicBrowserAsset> {
+            if url.host_str() == Some("asset-cdn.fixture.test") && url.path() == "/redirect.css" {
+                return Ok(crate::PublicBrowserAsset {
+                    status: 302,
+                    headers: vec![
+                        ("location".into(), "https://asset-cdn.fixture.test/redirected.css".into()),
+                        ("access-control-allow-origin".into(), "*".into()),
+                    ],
+                    body_base64: String::new(),
+                });
+            }
+            let (content_type, body_base64) = match (url.host_str(), url.path()) {
+                (Some("asset-cdn.fixture.test"), "/test.css") => {
+                    ("text/css", "Ym9keSB7IGNvbG9yOiByZ2IoMSwgMiwgMyk7IH0=")
+                }
+                (Some("asset-cdn.fixture.test"), "/redirected.css") => {
+                    ("text/css", "Ym9keSB7IGJhY2tncm91bmQtY29sb3I6IHJnYig0LCA1LCA2KTsgfQ==")
+                }
+                (Some("asset-cdn.fixture.test"), "/test.js") => (
+                    "application/javascript",
+                    "d2luZG93LmFzc2V0U2NyaXB0UmFuID0gdHJ1ZTs=",
+                ),
+                (Some("asset-cdn.fixture.test"), "/test.svg") => (
+                    "image/svg+xml",
+                    "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIyIiBoZWlnaHQ9IjMiPjwvc3ZnPg==",
+                ),
+                _ => return Err(QuarryError::new(ErrorCode::SecurityBlocked, "unexpected fixture asset")),
+            };
+            Ok(crate::PublicBrowserAsset {
+                status: 200,
+                headers: vec![
+                    ("content-type".into(), content_type.into()),
+                    ("access-control-allow-origin".into(), "*".into()),
+                ],
+                body_base64: body_base64.into(),
+            })
+        }
+
         async fn release_session(&self, _session_key: &str) {}
     }
 
     async fn page_html(driver: &ChromiumoxideDriver, session: &BrowserSession) -> String {
         let bytes = driver.content(session).await.expect("content");
         String::from_utf8(bytes.to_vec()).expect("utf-8")
+    }
+
+    #[test]
+    fn credentialless_asset_requests_exclude_documents_and_active_requests() {
+        for kind in [ResourceType::Script, ResourceType::Stylesheet, ResourceType::Image, ResourceType::Font] {
+            assert!(is_public_asset_request(&kind, "GET", None));
+            assert!(!is_public_asset_request(&kind, "POST", None));
+            assert!(!is_public_asset_request(&kind, "GET", Some(true)));
+        }
+        for kind in [ResourceType::Document, ResourceType::Xhr, ResourceType::Fetch] {
+            assert!(!is_public_asset_request(&kind, "GET", None));
+        }
+    }
+
+    #[tokio::test]
+    async fn credentialless_public_cdn_assets_render_without_extending_navigation() {
+        if !live_enabled() {
+            return;
+        }
+        let (endpoint, proxy_task) = fixture_proxy().await;
+        let driver = ChromiumoxideDriver::new()
+            .with_pinned_egress_proxy(Arc::new(FixtureProxyProvider(endpoint)))
+            .with_pool_config(quiet_pool());
+        driver.navigation_watches.fixture_hosts_resolve.store(true, Ordering::SeqCst);
+        let session = live_session_sized(&driver, "sc4-cdn-assets", None, "sc4-before").await;
+        driver
+            .configure_egress_policy(
+                &session,
+                BrowserEgressPolicy::from_allowed_domains(&["sc4.fixture.test".to_owned()])
+                    .with_public_assets(),
+            )
+            .await
+            .expect("grant the site and its credentialless assets");
+        driver.hooks.goto_detour_keeps_guard.store(true, Ordering::SeqCst);
+        let detour = |url: &str| {
+            *driver.hooks.goto_detour.lock().unwrap() =
+                Some((url.to_owned(), Duration::from_secs(10)));
+        };
+        detour("http://sc4.fixture.test/public-assets.html");
+        driver.goto(&session, "about:blank").await.expect("load fixture and assets");
+        let rendered = driver
+            .evaluate(&session, "[window.assetScriptRan, getComputedStyle(document.body).color, getComputedStyle(document.body).backgroundColor, document.querySelector('#cdn-image').naturalWidth]")
+            .await
+            .expect("inspect the rendered assets");
+        assert_eq!(rendered, json!([true, "rgb(1, 2, 3)", "rgb(4, 5, 6)", 2]));
+
+        detour("https://asset-cdn.fixture.test/test.js");
+        let started = Instant::now();
+        let error = driver.goto(&session, "about:blank").await.unwrap_err();
+        assert_refused_at_once("CDN navigation", &error, started.elapsed(), Duration::from_secs(10));
+        assert!(page_html(&driver, &session).await.contains("sc4-public-assets"));
+        driver.release(session).await.expect("release");
+        driver.shutdown().await;
+        proxy_task.abort();
     }
 
     /// SC4 T3 through the driver's own `goto` on a session tab, the live path: the
@@ -10385,6 +10864,80 @@ mod tests {
         );
     }
 
+    #[test]
+    fn navigation_http_status_belongs_to_the_admitted_main_document() {
+        let watches = Arc::new(NavigationWatches::default());
+        let tab = TargetId::new("tab");
+        let mut watched = watches.watch(tab.clone(), "https://example.com/start");
+        let first = paused("r1", "https://example.com/start", Some("n1"), None);
+        let redirect = paused("r2", "https://example.org/next", Some("n1"), Some("r1"));
+
+        watches.document_request(&tab, &first, None);
+        watches.document_response(&tab, "n1", 403);
+        assert_eq!(watched.http_failure_details(), None);
+        watches.allow_document(&tab, "r1");
+        watches.document_response(&tab, "n-stray", 403);
+        watches.document_response(&tab, "n1", 302);
+        assert_eq!(watched.http_failure_details(), Some((None, 0)));
+        watches.document_request(&tab, &redirect, None);
+        assert_eq!(watched.http_failure_details(), None);
+        watches.allow_document(&tab, "r2");
+        watches.document_response(&tab, "n1", 429);
+        assert_eq!(watched.http_failure_details(), Some((Some(429), 1)));
+
+        let refused = paused("r3", "https://example.net/end", None, Some("r2"));
+        watches.document_request(&tab, &refused, None);
+        watches.document_request(&tab, &refused, Some(NAVIGATION_REFUSED_BY_GUARD));
+        assert_eq!(
+            watched.refused.try_recv().ok(),
+            Some(NAVIGATION_REFUSED_BY_GUARD)
+        );
+        assert_eq!(watched.http_failure_details(), None);
+    }
+
+    #[tokio::test]
+    async fn navigation_http_error_keeps_the_live_tab_reusable() {
+        if !live_enabled() {
+            return;
+        }
+        let (endpoint, proxy_task) = fixture_proxy().await;
+        let driver = ChromiumoxideDriver::new()
+            .with_pinned_egress_proxy(Arc::new(FixtureProxyProvider(endpoint)))
+            .with_pool_config(quiet_pool());
+        driver.navigation_watches.fixture_hosts_resolve.store(true, Ordering::SeqCst);
+        let session = live_session_sized(&driver, "sc4-nav-http-failure", None, "before").await;
+        driver
+            .configure_egress_policy(
+                &session,
+                BrowserEgressPolicy::from_allowed_domains(&["sc4.fixture.test".to_owned()]),
+            )
+            .await
+            .expect("allow the fixture domain");
+        driver.hooks.goto_detour_keeps_guard.store(true, Ordering::SeqCst);
+        let detour = |path: &str| {
+            *driver.hooks.goto_detour.lock().unwrap() = Some((
+                format!("http://sc4.fixture.test/{path}"),
+                Duration::from_secs(10),
+            ));
+        };
+        let tab = driver.active_tab_id(&session).await.expect("tab");
+        detour("missing.html");
+        let error = driver.goto(&session, "about:blank").await.expect_err("empty 404");
+        assert_eq!(error.code, ErrorCode::DriverFailed);
+        let details = error.details.expect("HTTP diagnostics");
+        assert_eq!(details["reason"], "navigation_http_response");
+        assert_eq!(details["http_status"], 404);
+        assert_eq!(details["redirect_count"], 0);
+
+        detour("next.html");
+        driver.goto(&session, "about:blank").await.expect("new navigation");
+        assert_eq!(driver.active_tab_id(&session).await.expect("tab"), tab);
+        assert!(page_html(&driver, &session).await.contains("sc4-next-page"));
+        driver.release(session).await.expect("release");
+        driver.shutdown().await;
+        proxy_task.abort();
+    }
+
     /// Whether the tab's Fetch guard recorded a `domain_grant_blocked` receipt for a
     /// request to `host` on `tab_id` after `after` (a subresource's can land just after
     /// the load). The host keeps Chromium's own background requests, which the guard
@@ -10862,6 +11415,34 @@ mod tests {
         assert!(html.contains("<h1>hi</h1>"), "content was: {html}");
 
         driver.release(session).await.expect("release");
+    }
+
+    /// The overlay geometry comes from the same native node the action uses;
+    /// a removed node must not be replaced by another selector match.
+    #[tokio::test]
+    async fn native_target_rect_reports_only_live_native_bounds() {
+        if !live_enabled() {
+            return;
+        }
+        let driver = live_driver();
+        let session = live_session(&driver, "live-target-rect").await;
+        driver.new_tab(&session, None).await.expect("blank tab");
+        let page = driver.current_page(&session).await.expect("current page");
+        page.set_content("<html><body style='margin:0'><button id='target' style='position:absolute;left:100px;top:100px;width:200px;height:50px'>Save</button></body></html>")
+            .await.expect("inject page");
+        let hit = driver.hit_test_point(&session, 150, 120).await.expect("hit test").expect("button");
+        let target = BrowserNativeTarget {
+            ax_node_id: "target".into(),
+            backend_node_id: hit.backend_node_ids[0],
+            frame_id: None, role: None, name: None, value: None, field_kind: None,
+        };
+        let bounds = driver.native_target_rect(&session, &target).await.expect("target bounds");
+        assert!((bounds.x - 100.0).abs() < 1.0 && (bounds.y - 100.0).abs() < 1.0);
+        assert!((bounds.width - 200.0).abs() < 1.0 && (bounds.height - 50.0).abs() < 1.0);
+        page.set_content("<html><body></body></html>").await.expect("replace page");
+        assert!(driver.native_target_rect(&session, &target).await.is_none());
+        driver.release(session).await.expect("release");
+        driver.shutdown().await;
     }
 
     /// E3.3-h: a point over a rendered button gives the node under it, and a point outside the

@@ -710,6 +710,7 @@ mod tests {
             screenshot_ref: String::new(),
             dom_snapshot_ref: String::new(),
             snapshot_generation: None,
+            rendered_controls: Vec::new(),
             snapshot_targets: vec![],
             error_message: String::new(),
             challenge: None,
@@ -942,6 +943,7 @@ mod tests {
                     })
                     .collect(),
                 frames: Vec::new(),
+                accessibility: None,
             }),
             ..WireObservation::default()
         }
@@ -1091,6 +1093,7 @@ mod tests {
         BrowserObservation {
             dom_snapshot_ref: "snap_1".to_owned(),
             snapshot_generation: Some(1),
+            rendered_controls: Vec::new(),
             snapshot_targets: targets,
             ..observation_at("https://butikk.example.no/")
         }

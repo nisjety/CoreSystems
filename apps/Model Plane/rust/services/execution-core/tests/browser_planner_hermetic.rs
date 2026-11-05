@@ -647,6 +647,7 @@ fn golden_observation() -> BrowserObservation {
         screenshot_ref: String::new(),
         dom_snapshot_ref: "snap-3".to_owned(),
         snapshot_generation: Some(3),
+        rendered_controls: Vec::new(),
         snapshot_targets: vec![
             BrowserSnapshotTarget {
                 ref_id: "@e1".to_owned(),
@@ -1399,6 +1400,7 @@ impl execution_core::browser_agent::BrowserEventSink for AttachSink {
 fn attach_config() -> execution_core::browser_agent::PlanConfig {
     execution_core::browser_agent::PlanConfig {
         attach: Some(execution_core::browser_agent::AttachConfig {
+            target_tab: None,
             session_run_id: "run_user".to_owned(),
         }),
         start_url: Some("https://example.com/".to_owned()),

@@ -9,6 +9,7 @@ import (
 	"context"
 	"fmt"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/triodelab/model-plane/services/capability-core/internal/domain"
@@ -103,8 +104,9 @@ type Engine struct {
 	scopes ScopeResolver
 	// toolPolicies is read only when policiesEnforced; with it off a stored policy
 	// is never loaded, so it cannot change a decision.
-	toolPolicies     ToolPolicySource
-	policiesEnforced bool
+	toolPolicies                 ToolPolicySource
+	policiesEnforced             bool
+	browserAgentPoliciesEnforced bool
 	// orgExtensions is read only when orgExtensionsEnforced; with it off the org's policy is never loaded.
 	orgExtensions         OrgExtensionSource
 	orgExtensionsEnforced bool
@@ -127,6 +129,14 @@ func (e *Engine) WithToolPolicies(source ToolPolicySource, enforced bool) *Engin
 	return e
 }
 
+// WithBrowserAgentPolicyEnforced narrows policy rollout to the built-in browser
+// agent without changing other tools of cap.browser.open or any other capability.
+// A missing policy store fails the selected evaluation closed.
+func (e *Engine) WithBrowserAgentPolicyEnforced(enforced bool) *Engine {
+	e.browserAgentPoliciesEnforced = enforced
+	return e
+}
+
 // New constructs an Engine backed by the provided registry.
 func New(reg *registry.Registry) *Engine { return &Engine{reg: reg} }
 
@@ -137,6 +147,8 @@ type Result struct {
 	BudgetContext string
 	// PolicySource is one of the PolicySource constants.
 	PolicySource string
+	// ToolPolicyChecked is signed into proof only after the store was read.
+	ToolPolicyChecked bool
 }
 
 // ToolBinding is the registry's declaration of one tool, resolved by the
@@ -214,6 +226,13 @@ const ToolPolicyEnforcedEnv = "TOOL_POLICY_ENFORCED"
 // layer on by accident.
 func ToolPolicyEnforcedFromLookup(lookup func(string) string) bool {
 	return lookup(ToolPolicyEnforcedEnv) == "true"
+}
+
+const BrowserAgentPolicyEnforcedEnv = "BROWSER_AGENT_POLICY_ENFORCED"
+
+// BrowserAgentPolicyEnforcedFromLookup opts in only on the literal true.
+func BrowserAgentPolicyEnforcedFromLookup(lookup func(string) string) bool {
+	return lookup(BrowserAgentPolicyEnforcedEnv) == "true"
 }
 
 // The decisions and scope kinds of a stored tool policy.
@@ -376,12 +395,23 @@ func (e *Engine) EvaluateTool(ctx context.Context, capEntry *models.Capability, 
 		return denial, err
 	}
 	var policies []ToolPolicy
-	if e.policiesEnforced {
+	// Do not use the capability id alone: browser.console shares this capability
+	// and must retain its existing behavior while this scoped rollout is enabled.
+	browserAgent := binding != nil && binding.ToolName == "browser_agent" && capEntry.ID == "cap.browser.open"
+	if e.browserAgentPoliciesEnforced && browserAgent && strings.TrimSpace(userID) == "" {
+		return nil, fmt.Errorf("browser agent policy requires the run owner")
+	}
+	policyChecked := e.policiesEnforced || (e.browserAgentPoliciesEnforced && browserAgent)
+	if policyChecked {
+		if e.toolPolicies == nil {
+			return nil, fmt.Errorf("load tool policies: store unavailable")
+		}
 		if policies, err = e.toolPolicies.ActiveToolPolicies(ctx, orgID, userID, capEntry.ID); err != nil {
 			return nil, fmt.Errorf("load tool policies: %w", err)
 		}
 	}
 	result := DecideWithPolicies(riskResult(capEntry), capEntry, binding, policies)
+	result.ToolPolicyChecked = policyChecked
 	class := capEntry.SideEffectClass
 	if binding != nil {
 		class = binding.SideEffectClass

@@ -31,6 +31,7 @@ This describes behaviour. It does not change it. A **gap** is a place where ZDR 
 | `parse` | `/v1/parse` | inert: reads the PDF or DOCX bytes the caller uploaded, answers their text and stores nothing: no artifact, cache entry, index row, event, usage record or ingest; the handler takes no AppState | enforced | log-unverified |
 | `map` | `/v1/map` | inert: reads robots and sitemaps and returns links; nothing is stored | enforced | log-unverified |
 | `audit_page` | `/v1/audit/page` | inert: fetches robots and one page and returns bounded evidence; nothing is stored | enforced | log-unverified |
+| `browser_redirect_probe` | `/v1/browser/redirect-hop` | inert: checks one public HTTP response header for a redirect and stores nothing | enforced | log-unverified |
 | `audio` | `/v1/audio` | honored | enforced | log-unverified |
 | `artifacts` | `/v1/artifacts`<br>`/v1/artifacts/{id}` | inert: reads artifacts that already exist; a ZDR run writes none | enforced | log-unverified |
 | `control_records` | `/v1/sources`<br>`/v1/sources/{id}`<br>`/v1/snapshots`<br>`/v1/{kind}/jobs`<br>`/v1/request-queues`<br>`/v1/benchmarks`<br>`/v1/team/credit-usage`<br>`/v1/team/token-usage`<br>`/v1/team/concurrency`<br>`/v1/team/queue-status`<br>`/v1/team/activity`<br>`/v1/runs/{id}/events`<br>`/v1/jobs/{id}/events`<br>`/v1/crawl/{id}/events`<br>`/v1/batch/{id}/events` | inert: reads or proxies Control Plane records; Quarry stores nothing for the caller | enforced | log-unverified |

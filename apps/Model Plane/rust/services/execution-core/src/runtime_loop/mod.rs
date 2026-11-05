@@ -61,6 +61,28 @@ const CODE_INTERPRETER_TOOL: &str = "code_interpreter";
 /// Tool name that drives the live agentic browser loop through Quarry
 /// (`/v1/agent/*`). Async, like `shell` — dispatched off the async path below.
 const BROWSER_AGENT_TOOL: &str = "browser_agent";
+
+/// Apply the signed browser class as an additional ceiling, without changing
+/// the legacy decision for any other tool. The class never loosens that answer.
+fn browser_scoped_permission(
+    enforced: bool,
+    tool_name: &str,
+    tool_input: &str,
+    mode: PermissionMode,
+    legacy: PermissionDecision,
+    signed: &crate::mcp_gateway::SignedToolClass,
+) -> PermissionDecision {
+    if !enforced || tool_name != BROWSER_AGENT_TOOL {
+        return legacy;
+    }
+    let view = permission::ToolClassView::from_registry(tool_name, &signed.class, &signed.floor, "");
+    let declared = permission::evaluate_call_with_class(mode, &view, tool_input);
+    match (legacy, declared) {
+        (PermissionDecision::Deny, _) | (_, PermissionDecision::Deny) => PermissionDecision::Deny,
+        (PermissionDecision::AwaitApproval, _) | (_, PermissionDecision::AwaitApproval) => PermissionDecision::AwaitApproval,
+        _ => PermissionDecision::Allow,
+    }
+}
 /// Thin Model-Plane MCP aliases for an existing Quarry browser run. Unlike
 /// `browser_agent`, these do not plan, acquire, or expose a browser; they
 /// execute one grant-bound observation or opaque snapshot-ref action.
@@ -1178,8 +1200,12 @@ async fn execute_step_inner(
     // Under `TOOL_CLASS_GATE` the run's declared class and approval floor decide
     // instead of the name (`permission::RunGate`); with the gate off this is
     // `evaluate_call` exactly.
-    let permission_decision =
+    let legacy_permission =
         permission::RunGate::for_run(org_id, run_id).evaluate_call(mode, tool_name, tool_input);
+    let permission_decision = browser_scoped_permission(
+        crate::capability_policy::browser_agent_policy_enforced(),
+        tool_name, tool_input, mode, legacy_permission, &signed_class,
+    );
     if matches!(permission_decision, PermissionDecision::Deny) {
         return StepOutcome::permission_denied();
     }
@@ -1290,7 +1316,7 @@ async fn execute_step_inner(
             tool_bridge::execute_browser_agent(
                 tool_input,
                 org_id,
-                zdr,
+                zdr || waived,
                 browser_event_sink,
                 state,
                 inference_bearer,
@@ -6127,4 +6153,18 @@ mod space_overlay_tests {
 
         assert_eq!(recorded, execution);
     }
+
+    #[test]
+    fn browser_scoped_signed_class_only_tightens_that_tool() {
+        let ask = crate::mcp_gateway::SignedToolClass::new("external_write", "ask");
+        let none = crate::mcp_gateway::SignedToolClass::new("read", "none");
+        assert_eq!(browser_scoped_permission(true, BROWSER_AGENT_TOOL, "{}", PermissionMode::Auto, PermissionDecision::Allow, &ask), PermissionDecision::AwaitApproval);
+        assert_eq!(browser_scoped_permission(false, BROWSER_AGENT_TOOL, "{}", PermissionMode::Auto, PermissionDecision::Allow, &ask), PermissionDecision::Allow);
+        assert_eq!(browser_scoped_permission(true, "web_fetch", "{}", PermissionMode::Auto, PermissionDecision::Allow, &ask), PermissionDecision::Allow);
+        assert_eq!(browser_scoped_permission(true, BROWSER_AGENT_TOOL, "{}", PermissionMode::Ask, PermissionDecision::AwaitApproval, &none), PermissionDecision::AwaitApproval);
+        assert_eq!(browser_scoped_permission(true, BROWSER_AGENT_TOOL, "{}", PermissionMode::Deny, PermissionDecision::Deny, &none), PermissionDecision::Deny);
+        let unknown = crate::mcp_gateway::SignedToolClass::new("", "");
+        assert_eq!(browser_scoped_permission(true, BROWSER_AGENT_TOOL, "{}", PermissionMode::Auto, PermissionDecision::Allow, &unknown), PermissionDecision::AwaitApproval);
+    }
+
 }

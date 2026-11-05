@@ -51,6 +51,7 @@ import { recordWebPage, recordWebQuery } from '@/features/dashboard/home/web-his
 import { useI18n, translateApiError } from '@/shared/i18n'
 import { isLocalRetentionAllowed } from '@/features/chat/lib/chat-retention'
 import { readClientJson, removeClientValue, writeClientJson } from '@/shared/session/client-storage'
+import { webAddress } from './web-address'
 
 // The shared query and the saved snapshot's key live in dashboard-search-session
 // (Home resets them from there when the active Nett tab is double-clicked). The
@@ -79,6 +80,8 @@ export function SearchPanel(props: {
   expanded: boolean
   onExpandedChange: (expanded: boolean) => void
   onPreviewActiveChange: (active: boolean) => void
+  /** Open a result in the workspace browser. Explicit new-tab links still open externally. */
+  onOpenBrowser?: (url: string) => void
   previewCollapsed?: boolean
   /**
    * Whether the searches run here and the pages opened from them may be kept in
@@ -227,6 +230,12 @@ export function SearchPanel(props: {
     event.preventDefault()
     const trimmed = activeQuery()
     if (trimmed.length < 3) return
+    const address = webAddress(trimmed)
+    if (address && props.onOpenBrowser) {
+      openPage({ url: address })
+      props.onOpenBrowser(address)
+      return
+    }
     await startSearch(trimmed)
   }
 
@@ -256,7 +265,21 @@ export function SearchPanel(props: {
   }
   const openResult = (result: PreviewResult) => {
     openPage(result)
-    window.open(result.url, '_blank', 'noopener,noreferrer')
+    const address = webAddress(result.url)
+    if (address && props.onOpenBrowser) props.onOpenBrowser(address)
+    else if (!props.onOpenBrowser) window.open(result.url, '_blank', 'noopener,noreferrer')
+  }
+
+  // Normal result-link clicks open in Nett. Modifier clicks and explicit
+  // new-tab controls keep the browser's usual external-link behavior.
+  const openLinkedResult = (event: MouseEvent) => {
+    if (!props.onOpenBrowser || event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return
+    const target = event.target instanceof Element ? event.target.closest('a[target="_blank"]') : null
+    if (!(target instanceof HTMLAnchorElement) || target.classList.contains('dashboard-xresult__external')) return
+    const address = webAddress(target.href)
+    if (!address) return
+    event.preventDefault()
+    props.onOpenBrowser(address)
   }
 
   const runExpandedSearch = async (nextQuery: string, options?: { refreshSidecars?: boolean }) => {
@@ -555,7 +578,7 @@ export function SearchPanel(props: {
       window.clearTimeout(suggestionsTimer)
       suggestionsController?.abort()
 
-      if (trimmed.length < 2) {
+      if (trimmed.length < 2 || (props.onOpenBrowser && (/^https?:/i.test(trimmed) || Boolean(webAddress(trimmed))))) {
         setSuggestions([])
         return
       }
@@ -584,7 +607,8 @@ export function SearchPanel(props: {
     ({ trimmed, expanded, currentFilters }) => {
       window.clearTimeout(previewTimer)
 
-      if (trimmed.length < 3 || expanded) {
+      if (trimmed.length < 3 || expanded || (props.onOpenBrowser && (/^https?:/i.test(trimmed) || Boolean(webAddress(trimmed))))) {
+        if (!expanded) searchController?.abort()
         setPreviewLoading(false)
         setPreviewError(null)
         setPreviewResults([])
@@ -640,7 +664,7 @@ export function SearchPanel(props: {
     <Show
       when={!props.expanded}
       fallback={
-        <div class="verevon-panel-in verevon-search-expanded-shell">
+        <div class="verevon-panel-in verevon-search-expanded-shell" onClick={openLinkedResult}>
           <div class="dashboard-xsearch-header">
             <form onSubmit={submit}>
               <div class="dashboard-xsearch-input-row">
@@ -930,7 +954,7 @@ export function SearchPanel(props: {
                 value={query()}
                 onInput={(event) => updateQuery(event.currentTarget.value)}
                 class="dashboard-search-input"
-                placeholder={i18n.tr('Søk på nettet eller spør…', 'Search on the web or ask…')}
+                placeholder={i18n.tr('Søk på nettet eller skriv inn en nettadresse…', 'Search the web or enter a web address…')}
               />
               <button
                 type="submit"
@@ -977,6 +1001,10 @@ export function SearchPanel(props: {
                             type="button"
                             class="dashboard-search-preview-result"
                             onClick={() => {
+                              if (props.onOpenBrowser && webAddress(result.url)) {
+                                openResult(result)
+                                return
+                              }
                               setActiveResultTab('Info')
                               props.onExpandedChange(true)
                               props.onPreviewActiveChange(false)

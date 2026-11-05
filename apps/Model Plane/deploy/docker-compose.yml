@@ -209,6 +209,8 @@ services:
       - "127.0.0.1:8080:8080"   # HTTP
       - "127.0.0.1:9090:9090"   # gRPC compatibility probe; production overlay removes host ports
     environment:
+      # Optional server-only receipt key; omitted when not present in runtime config.
+      BROWSER_ATTACH_COMPAT_HMAC_KEY:
       RUST_LOG: info
       # This service also joins inter-plane-bus, where the generic `nats`
       # hostname can resolve another plane's broker. Use the plane-unique alias.
@@ -584,6 +586,8 @@ services:
       # browser_attach_unavailable. All layers must be on: broker BROWSER_BROKER_HUMAN_BROWSE_ENABLED,
       # Quarry QUARRY_EDGE__ATTACH and the gateway BROWSER_ATTACH too. Only `on` enables it.
       MODEL_GATEWAY_BROWSER_ATTACH: ${MODEL_GATEWAY_BROWSER_ATTACH:-off}
+      # Enable only after the matching execution and Quarry policy protocol is deployed.
+      MODEL_GATEWAY_BROWSER_ATTACH_POLICY_ENFORCED: ${MODEL_GATEWAY_BROWSER_ATTACH_POLICY_ENFORCED:-off}
       # WS16.S8, OFF by default: advertise the extract_structured chat tool (schema-validated,
       # verbatim-grounded extraction over 1-5 pages). The gRPC ExtractStructured fixes are unflagged.
       MODEL_GATEWAY_EXTRACT_TOOL: ${MODEL_GATEWAY_EXTRACT_TOOL:-0}
@@ -1469,6 +1473,8 @@ services:
       - "127.0.0.1:18083:8083"  # HTTP health — host 18083 avoids collision with the RentNå Expo dev server (host 8083)
       - "127.0.0.1:9093:9093"   # gRPC compatibility probe; production overlay removes host ports
     environment:
+      # Must match model-gateway; never place this value in source control.
+      BROWSER_ATTACH_COMPAT_HMAC_KEY:
       RUST_LOG: info
       # Sandbox spawn bounds (WS06-S7). Per-stream output cap in bytes (the child is killed
       # past it), process-wide concurrent sandbox spawns, and how long a spawn waits for a
@@ -1691,6 +1697,8 @@ services:
       # Do run only with MCP_DO_TOOLS=read (read-class tools; `all` is blocked) AND TOOL_CLASS_GATE=enforce; MCP_DO_TOOL_CAP bounds the offer.
       # Roll execution-core first, then capability-core, then shadow, then enforce.
       TOOL_CLASS_GATE: ${TOOL_CLASS_GATE:-off}
+      # Narrow browser-only signed class and stored-policy enforcement.
+      BROWSER_AGENT_POLICY_ENFORCED: ${BROWSER_AGENT_POLICY_ENFORCED:-false}
       MCP_DO_TOOLS: ${MCP_DO_TOOLS:-off}
       MCP_DO_TOOL_CAP: ${MCP_DO_TOOL_CAP:-40}
       # Per-call capability decisions are signed by capability-core and
@@ -2034,6 +2042,7 @@ services:
       CAPABILITY_CORE_SCHEDULED_NOTIFY_ENABLED: ${CAPABILITY_CORE_SCHEDULED_NOTIFY_ENABLED:-false}
       # WS05-S5: stored per-tool allow/ask/never policies. Only the literal `true` enables them; off, they are stored and ignored.
       TOOL_POLICY_ENFORCED: ${TOOL_POLICY_ENFORCED:-false}
+      BROWSER_AGENT_POLICY_ENFORCED: ${BROWSER_AGENT_POLICY_ENFORCED:-false}
       # Outbound service-token minting for the skill-learning review, which
       # calls session-core (read the transcript, upsert the skill) and
       # inference-core (review it). The two JWKS/ISSUER vars above verify
@@ -2327,6 +2336,11 @@ services:
       AUTH_CORE_URL: ${AUTH_CORE_URL:-http://auth-core:3011}
       BROWSER_BROKER_SERVICE_API_KEY: ${BROWSER_BROKER_SERVICE_API_KEY:-}
       BROWSER_BROKER_QUARRY_READY_URL: ${BROWSER_BROKER_QUARRY_READY_URL:-${QUARRY_EDGE_URL:-http://quarry-edge:8082}/ready}
+      # Browser access consults Control-owned site decisions when explicitly enabled.
+      BROWSER_BROKER_SITE_POLICY: ${BROWSER_BROKER_SITE_POLICY:-off}
+      BROWSER_BROKER_ASSISTANT_TASK_GRANTS_ENABLED: ${BROWSER_BROKER_ASSISTANT_TASK_GRANTS_ENABLED:-0}
+      ORG_CORE_URL: ${ORG_CORE_URL:-http://org-core:8080}
+      BROWSER_BROKER_ORG_CORE_TOKEN: ${BROWSER_BROKER_ORG_CORE_SERVICE_TOKEN:-}
       # API-key grants (INNH-10 MP-2, internal/server/key_grants.go). OFF unless
       # exactly 1, true or on. A key grant lives KEY_GRANT_TTL_SECONDS (clamped
       # 30-900 s, never renewed); one key holds at most MAX_ACTIVE_GRANTS_PER_KEY

@@ -15,6 +15,9 @@ import { createRoot, flush } from 'solid-js'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { ChatStreamHandlers, QueuedInputResult } from '@/shared/api/chat-client'
 import { __resetRetentionForTests } from '@/features/chat/lib/chat-retention'
+import { clearAssistantChatDraft, queueAssistantChatDraft } from '@/features/chat/lib/assistant-chat-draft'
+import { resolveAssistantChatDraft } from '@/shared/actions/assistant-chat-draft'
+import { chatDraftStorageKey, writeChatDraft } from '@/shared/session/home-draft-storage'
 
 const identity = vi.hoisted(() => ({ user: { id: 'user-a' } as { id: string } | null, activeOrg: { id: 'org-a' } as { id: string } | null }))
 vi.mock('@/shared/session/session-store', async (importOriginal) => ({
@@ -98,6 +101,7 @@ function draftTexts(): string[] {
 }
 
 afterEach(() => {
+  clearAssistantChatDraft()
   streams.length = 0
   mockStreamChat.mockClear()
   mockQueueInvocationInput.mockReset()
@@ -108,6 +112,68 @@ afterEach(() => {
   } catch {
     // ignore
   }
+})
+
+describe('the assistant draft handoff', () => {
+  it('prefills Chat after route mount without sending', async () => {
+    const action = resolveAssistantChatDraft('kan du åpne chat og skrive at jeg er best')!
+    expect(queueAssistantChatDraft(action)).toBe(true)
+    await withController(async (controller) => {
+      await tick(8)
+      expect(controller.input()).toBe('jeg er best')
+      expect(mockStreamChat).not.toHaveBeenCalled()
+    })
+  })
+
+  it('appends to an existing draft when Chat is already mounted', async () => {
+    await withController(async (controller) => {
+      await tick(8)
+      controller.setInput('Behold teksten min')
+      expect(queueAssistantChatDraft(resolveAssistantChatDraft('Open Chat and type: A second line.')!)).toBe(true)
+      await tick()
+      expect(controller.input()).toBe('Behold teksten min\n\nA second line.')
+      expect(mockStreamChat).not.toHaveBeenCalled()
+    })
+  })
+
+  it('opens a new Chat draft without losing the previous thread draft', async () => {
+    await withController(async (controller) => {
+      await tick(8)
+      await send(controller, 'Earlier conversation')
+      await tick()
+      const stream = streams[0]!
+      stream.handlers.onConnected?.({ requestId: 'req-1', threadId: 'thread-server-1' })
+      stream.handlers.onDone?.({ requestId: 'req-1', modelUsed: 'verevon-balance', outputTokens: 4, stopReason: 'stop' })
+      stream.resolve()
+      await tick()
+
+      controller.setInput('Old thread draft')
+      flush()
+      writeChatDraft(chatDraftStorageKey('user-a', 'org-a', 'new'), 'Saved new draft')
+      expect(queueAssistantChatDraft(resolveAssistantChatDraft('Open a new Chat and type: New text')!)).toBe(true)
+      await tick()
+
+      expect(controller.state.threadId).toBeNull()
+      expect(controller.input()).toBe('Saved new draft\n\nNew text')
+      expect(draftTexts()).toContain('Old thread draft')
+      expect(mockStreamChat).toHaveBeenCalledOnce()
+    })
+  })
+
+  it('discards a pending draft if the workspace changed before Chat mounted', async () => {
+    expect(queueAssistantChatDraft(resolveAssistantChatDraft('Open Chat and type Private text')!)).toBe(true)
+    const org = identity.activeOrg
+    identity.activeOrg = { id: 'org-b' }
+    try {
+      await withController(async (controller) => {
+        await tick(8)
+        expect(controller.input()).toBe('')
+        expect(mockStreamChat).not.toHaveBeenCalled()
+      })
+    } finally {
+      identity.activeOrg = org
+    }
+  })
 })
 
 describe('the composer draft across a send', () => {

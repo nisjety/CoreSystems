@@ -1,6 +1,7 @@
 
-import { For, Show } from 'solid-js'
+import { createEffect, createSignal, For, Show } from 'solid-js'
 import { DashboardComposer } from '@/features/dashboard/home/DashboardComposer'
+import { useAssistantNavigation } from '@/features/core/assistant-navigation/assistant-navigation-context'
 import { DashboardPlanBadge } from '@/features/dashboard/home/DashboardPlanBadge'
 import { KnowledgeComposer } from '@/features/dashboard/home/KnowledgeComposer'
 import { SearchPanel } from '@/features/dashboard/home/DashboardSearchPanel'
@@ -38,7 +39,7 @@ export function DashboardTabs(props: {
   const tabLabel = (tab: DashboardTab) => {
     if (tab === 'Søk') return i18n.tr('Nett', 'Web')
     if (tab === 'Crawl') return i18n.tr('Hent ut', 'Extract')
-    return i18n.tr('Chat', 'Chat')
+    return i18n.tr('Assistent', 'Assistant')
   }
 
   return (
@@ -80,6 +81,7 @@ export function DashboardTabs(props: {
 
 export function DashboardComposerPanel(props: {
   activeTab: DashboardTab
+  browserContextVisible?: boolean
   persistentChat?: boolean
   compactChat?: boolean
   knowledgeInlinePlanLabel?: string
@@ -90,6 +92,7 @@ export function DashboardComposerPanel(props: {
   onZeroRetentionChange?: (zeroRetention: boolean | undefined) => void
   onSearchExpandedChange: (expanded: boolean) => void
   onSearchPreviewActiveChange: (active: boolean) => void
+  onWebBrowserActiveChange?: (active: boolean) => void
   onMessageChange: (value: string) => void
   previewCollapsed: boolean
   /** Whether searches and opened pages may go in the Nett history: on only while the composer says the next turn is not zero-retention. */
@@ -98,6 +101,18 @@ export function DashboardComposerPanel(props: {
   searchResetKey?: number
   searchExpanded: boolean
 }) {
+  const assistantNavigation = useAssistantNavigation()
+  const i18n = useI18n()
+  const [browserUrl, setBrowserUrl] = createSignal<string | null>(null)
+  const openBrowser = (url: string) => {
+    setBrowserUrl(url)
+    props.onWebBrowserActiveChange?.(true)
+  }
+  const closeBrowser = () => {
+    setBrowserUrl(null)
+    props.onWebBrowserActiveChange?.(false)
+  }
+  createEffect(() => props.searchResetKey, () => closeBrowser(), { defer: true })
   return (
     <div class={props.searchExpanded ? 'verevon-home-composer verevon-home-composer-expanded verevon-panel-in' : 'verevon-home-composer verevon-panel-in'}>
       <Show when={props.activeTab !== 'Chat'}>
@@ -105,13 +120,24 @@ export function DashboardComposerPanel(props: {
           ? (
             // A keyed Show rebuilds its child whenever the key changes.
             <Show when={`search-${props.searchResetKey ?? 0}`} keyed>
+              <div hidden={Boolean(browserUrl())}>
               <SearchPanel
                 expanded={props.searchExpanded}
                 onExpandedChange={props.onSearchExpandedChange}
                 onPreviewActiveChange={props.onSearchPreviewActiveChange}
+                onOpenBrowser={openBrowser}
                 previewCollapsed={props.previewCollapsed}
                 rememberSearches={props.rememberSearches}
               />
+              </div>
+              <Show when={browserUrl()} keyed>
+                {(url) => <section class="home-web-browser" aria-label={i18n.tr('Nettleser', 'Browser')}>
+                  <button type="button" class="home-web-browser__back" onClick={closeBrowser}>
+                    ← {i18n.tr('Tilbake til søk', 'Back to search')}
+                  </button>
+                  <KnowledgeComposer browserOnly browserUrl={url} browserContextVisible={props.browserContextVisible} />
+                </section>}
+              </Show>
             </Show>
           )
           : (
@@ -128,6 +154,7 @@ export function DashboardComposerPanel(props: {
           <DashboardComposer
             compact={props.compactChat}
             message={props.message}
+            onSubmit={assistantNavigation.submit}
             onLaunchStart={props.onLaunchStart}
             onMessageChange={props.onMessageChange}
             onZeroRetentionChange={props.onZeroRetentionChange}

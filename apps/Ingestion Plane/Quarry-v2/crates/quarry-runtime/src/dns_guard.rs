@@ -228,15 +228,19 @@ mod tests {
             })
             .expect("public address can be pinned");
 
-        let name = "rebind.example".parse().expect("valid DNS name");
-        let addresses: Vec<_> = Resolve::resolve(&resolver, name)
-            .await
-            .expect("pinned hostname resolves")
-            .collect();
-        assert_eq!(addresses, vec![vetted]);
+        for host in ["rebind.example", "rebind.example."] {
+            let name = host.parse().expect("valid DNS name");
+            let addresses: Vec<_> = Resolve::resolve(&resolver, name)
+                .await
+                .expect("pinned hostname resolves")
+                .collect();
+            assert_eq!(addresses, vec![vetted]);
+        }
 
-        let missing = "unvetted.example".parse().expect("valid DNS name");
-        assert!(Resolve::resolve(&resolver, missing).await.is_err());
+        for host in ["unvetted.example", "unvetted.example."] {
+            let missing = host.parse().expect("valid DNS name");
+            assert!(Resolve::resolve(&resolver, missing).await.is_err());
+        }
     }
 
     #[test]

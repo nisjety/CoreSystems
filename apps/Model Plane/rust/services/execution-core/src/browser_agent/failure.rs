@@ -10,7 +10,7 @@
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
-use super::{BrowserAction, BrowserObservation};
+use super::{ActionType, BrowserAction, BrowserObservation};
 
 /// How many recent failures the planner is shown.
 pub const FAILURE_RING_CAP: usize = 10;
@@ -210,13 +210,19 @@ impl NoProgressDetector {
 /// or sent anywhere; it only has to tell "same" from "different".
 fn fingerprint(action: &BrowserAction, page: Option<&BrowserObservation>) -> u64 {
     let mut hasher = DefaultHasher::new();
-    action.action_type.as_str().hash(&mut hasher);
-    action.selector.hash(&mut hasher);
-    action.value.hash(&mut hasher);
-    action.url.hash(&mut hasher);
-    if let Some(target) = &action.target {
-        target.ref_id.hash(&mut hasher);
-        target.snapshot_id.hash(&mut hasher);
+    if matches!(action.action_type, ActionType::Observe | ActionType::Extract) {
+        // Both verbs dispatch the same read. Any model-supplied target,
+        // snapshot identity, or text is unused by Quarry.
+        "read_page".hash(&mut hasher);
+    } else {
+        action.action_type.as_str().hash(&mut hasher);
+        action.selector.hash(&mut hasher);
+        action.value.hash(&mut hasher);
+        action.url.hash(&mut hasher);
+        if let Some(target) = &action.target {
+            target.ref_id.hash(&mut hasher);
+            target.snapshot_id.hash(&mut hasher);
+        }
     }
     if let Some(page) = page {
         page.page_url.hash(&mut hasher);
@@ -245,7 +251,7 @@ mod tests {
             assert_eq!(kind.reason(detail), text);
         }
     }
-    use crate::browser_agent::{ActionType, ObservationStatus};
+    use crate::browser_agent::{BrowserTargetRef, ObservationStatus};
 
     fn failure(step: i32) -> ActionFailure {
         ActionFailure {
@@ -283,6 +289,7 @@ mod tests {
             screenshot_ref: String::new(),
             dom_snapshot_ref: String::new(),
             snapshot_generation: None,
+            rendered_controls: Vec::new(),
             snapshot_targets: Vec::new(),
             error_message: String::new(),
             challenge: None,
@@ -356,6 +363,25 @@ mod tests {
         assert!(!detector.observe(&click, Some(&same)));
         assert!(!detector.observe(&click, Some(&same)));
         assert!(detector.observe(&click, Some(&same)));
+    }
+
+    #[test]
+    fn passive_reads_with_new_snapshot_metadata_still_count_as_repeats() {
+        let mut detector = NoProgressDetector::default();
+        let mut observation = page("https://example.com/", "unchanged");
+        for step in 1..=NO_PROGRESS_LIMIT {
+            let verb = if step % 2 == 0 { ActionType::Extract } else { ActionType::Observe };
+            let mut read = action(verb, "");
+            observation.dom_snapshot_ref = format!("snapshot-{step}");
+            read.target = Some(BrowserTargetRef {
+                snapshot_id: observation.dom_snapshot_ref.clone(),
+                generation: step,
+                ref_id: format!("@e{step}"),
+                frame_id: None,
+            });
+            read.value = format!("unused-{step}");
+            assert_eq!(detector.observe(&read, Some(&observation)), step == NO_PROGRESS_LIMIT);
+        }
     }
 
     #[test]

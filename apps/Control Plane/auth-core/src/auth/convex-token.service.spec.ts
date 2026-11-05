@@ -2,7 +2,7 @@ import {
   ConvexTokenService,
   SERVICE_ONLY_PLANE_AUDIENCES,
 } from './convex-token.service';
-import { generateKeyPairSync } from 'crypto';
+import { createPublicKey, generateKeyPairSync, verify } from 'crypto';
 import { mkdtempSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
@@ -324,6 +324,60 @@ describe('ConvexTokenService production key and principal posture', () => {
 
     expect(decode(trusted.token).zdr).toBe(true);
     expect(decode(untrustedAuthority.token).zdr).toBe(false);
+  });
+
+  it('signs an explicit organization posture only for interactive execution tokens with an authoritative posture', () => {
+    process.env.NODE_ENV = 'test';
+    for (const name of keyEnvNames) delete process.env[name];
+    const service = new ConvexTokenService();
+    const identity = { userId: 'user-a', orgId: 'org-a' };
+    const posture = (zdr: boolean) => ({
+      authority: 'interactive-org-retention-policy' as const,
+      zdr,
+    });
+    const decodeAndVerify = (token: string): Record<string, unknown> => {
+      const [header, body, signature] = token.split('.');
+      const jwk = service.getJwks().keys[0];
+      const publicKey = createPublicKey({ key: jwk, format: 'jwk' });
+      expect(verify('RSA-SHA256', Buffer.from(`${header}.${body}`), publicKey, Buffer.from(signature, 'base64url'))).toBe(true);
+      return JSON.parse(Buffer.from(body, 'base64url').toString('utf8')) as Record<string, unknown>;
+    };
+
+    const proof = { orgId: 'org-a', authority: 'fresh-interactive-org-retention-policy' as const, zdr: false as const };
+    expect(decodeAndVerify(service.issuePlaneToken('execution-core', {
+      ...identity, retentionPosture: posture(false), executionRetentionProof: proof,
+    }).token)).toMatchObject({ aud: 'execution-core', org_id: 'org-a', user_id: 'user-a', zdr: false, org_zdr: false });
+
+    const absent = service.issuePlaneToken('execution-core', identity);
+    const noProof = service.issuePlaneToken('execution-core', { ...identity, retentionPosture: posture(false) });
+    const wrongOrg = service.issuePlaneToken('execution-core', { ...identity, retentionPosture: posture(false), executionRetentionProof: { ...proof, orgId: 'org-b' } });
+    const wrongProof = service.issuePlaneToken('execution-core', { ...identity, retentionPosture: posture(false), executionRetentionProof: { ...proof, authority: 'other' } as never });
+    const zdrOrg = service.issuePlaneToken('execution-core', { ...identity, retentionPosture: posture(true), executionRetentionProof: proof });
+    const wrongAuthority = service.issuePlaneToken('execution-core', {
+      ...identity, retentionPosture: { authority: 'service-principal-policy', zdr: false } as never,
+    });
+    const malformed = service.issuePlaneToken('execution-core', {
+      ...identity, retentionPosture: { authority: 'interactive-org-retention-policy', zdr: 'false' } as never,
+    });
+    const otherAudience = service.issuePlaneToken('session-core', {
+      ...identity, retentionPosture: posture(false), executionRetentionProof: proof,
+    });
+    const serviceToken = service.issuePlaneToken('execution-core', {
+      userId: 'service:worker', orgId: 'org-a', principalType: 'service', serviceId: 'worker',
+      retentionPosture: { authority: 'service-principal-policy', zdr: false, source: 'tenant-policy' },
+    });
+    for (const token of [absent, noProof, wrongOrg, wrongProof, zdrOrg, wrongAuthority, malformed, otherAudience, serviceToken]) {
+      expect(decodeAndVerify(token.token)).not.toHaveProperty('org_zdr');
+    }
+
+    // A forged request-shaped waiver cannot become a signed waiver claim or
+    // lower a ZDR organization's authoritative posture.
+    const forgedWaiver = service.issuePlaneToken('execution-core', {
+      ...identity, retentionPosture: posture(true), zdr_waiver: { provider: 'fake' },
+    } as never);
+    expect(decodeAndVerify(forgedWaiver.token)).toMatchObject({ zdr: true });
+    expect(decodeAndVerify(forgedWaiver.token)).not.toHaveProperty('org_zdr');
+    expect(decodeAndVerify(forgedWaiver.token)).not.toHaveProperty('zdr_waiver');
   });
 
   it('caps policy-caller credentials at a five-minute lifetime', () => {

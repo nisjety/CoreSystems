@@ -178,12 +178,13 @@ func main() {
 	// with the other policy APIs below.
 	toolPolicies := api.NewToolPoliciesHandler(pool)
 	toolPolicyEnforced := policy.ToolPolicyEnforcedFromLookup(os.Getenv)
-	slog.Info("tool policies", "enforced", toolPolicyEnforced)
+	browserAgentPolicyEnforced := policy.BrowserAgentPolicyEnforcedFromLookup(os.Getenv)
+	slog.Info("tool policies", "enforced", toolPolicyEnforced, "browser_agent_enforced", browserAgentPolicyEnforced)
 	// WS25-S9: the org's extension allow-list, read from the same agent policy the policy API serves. Inert unless
 	// ORG_EXTENSION_ALLOWLIST is the literal true.
 	orgExtensionsEnforced := policy.OrgExtensionAllowListFromLookup(os.Getenv)
 	pol := policy.New(reg).WithScopeResolver(scopeStore).WithToolPolicies(toolPolicies, toolPolicyEnforced).
-		WithOrgExtensionPolicy(api.NewOrgExtensionReader(pool), orgExtensionsEnforced)
+		WithBrowserAgentPolicyEnforced(browserAgentPolicyEnforced).WithOrgExtensionPolicy(api.NewOrgExtensionReader(pool), orgExtensionsEnforced)
 
 	// Letta's /v1/tools/search searches tool definitions, not memories. When
 	// explicitly configured it is only a discovery ranker; the server

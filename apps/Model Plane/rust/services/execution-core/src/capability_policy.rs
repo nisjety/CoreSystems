@@ -138,6 +138,12 @@ impl ToolClassGate {
     }
 }
 
+/// Strict browser-only rollout; it does not change other tool classes.
+#[must_use]
+pub fn browser_agent_policy_enforced() -> bool {
+    matches!(std::env::var("BROWSER_AGENT_POLICY_ENFORCED").as_deref(), Ok("true"))
+}
+
 #[tonic::async_trait]
 pub trait CapabilityPolicy: Send + Sync {
     async fn evaluate(
@@ -204,6 +210,7 @@ pub struct GrpcCapabilityPolicy {
     decision_verifier: DecisionEvidenceVerifier,
     model_action_view: Option<ServerResolvedModelActionViewClient>,
     gate: ToolClassGate,
+    browser_agent_policy_enforced: bool,
     bindings: Arc<RunBindings>,
 }
 
@@ -232,6 +239,7 @@ impl GrpcCapabilityPolicy {
             decision_verifier: DecisionEvidenceVerifier::from_env()?,
             model_action_view: ServerResolvedModelActionViewClient::from_env()?,
             gate: ToolClassGate::from_env(),
+            browser_agent_policy_enforced: browser_agent_policy_enforced(),
             bindings: Arc::default(),
         })
     }
@@ -245,6 +253,7 @@ impl GrpcCapabilityPolicy {
             decision_verifier: DecisionEvidenceVerifier::disabled_for_test(),
             model_action_view: None,
             gate: ToolClassGate::Off,
+            browser_agent_policy_enforced: false,
             bindings: Arc::default(),
         }
     }
@@ -281,6 +290,7 @@ impl CapabilityPolicy for GrpcCapabilityPolicy {
         org_id: &str,
         user_id: &str,
     ) -> Result<CapabilityEvaluation, Status> {
+        let strict_browser = self.browser_agent_policy_enforced && tool_name == "browser_agent";
         let (binding, response) = self
             .evaluate_response(tool_name, run_id, org_id, user_id)
             .await?;
@@ -292,8 +302,20 @@ impl CapabilityPolicy for GrpcCapabilityPolicy {
             user_id,
             capability_id: &binding.capability_id,
             registry: binding.registry.as_ref(),
-            gate: self.gate,
+            gate: self.effective_gate(tool_name),
         };
+        if strict_browser {
+            // A valid v2 signature alone is insufficient: older capability-core
+            // builds can sign a decision while ignoring stored user/org policies.
+            let checked = self.decision_verifier
+                .verified_claims(&response.decision_evidence, &response, &call)
+                .is_some_and(|claims| claims.tool_policy_checked);
+            if !checked {
+                return Err(Status::permission_denied(
+                    "browser policy requires signed tool-policy enforcement evidence",
+                ));
+            }
+        }
         // An `ask` is checked too, but never refused for failing: it parks the
         // step either way. Only a verified ask may later be satisfied by a
         // broker-validated browser run grant, so it is held to the strict
@@ -311,6 +333,10 @@ impl CapabilityPolicy for GrpcCapabilityPolicy {
                     "capability policy returned invalid decision evidence",
                 ));
             }
+            self.pin_binding(&call, &response)?;
+        } else if strict_browser && evaluation.decision == CapabilityDecision::Ask {
+            // The broker can satisfy the high-risk ask only when its class has
+            // remained pinned under the same verified policy during the run.
             self.pin_binding(&call, &response)?;
         }
         self.refuse_dynamic_unless_enforced(&binding)?;
@@ -542,6 +568,14 @@ struct Binding {
 }
 
 impl GrpcCapabilityPolicy {
+    fn effective_gate(&self, tool_name: &str) -> ToolClassGate {
+        if self.browser_agent_policy_enforced && tool_name == "browser_agent" {
+            ToolClassGate::Enforce
+        } else {
+            self.gate
+        }
+    }
+
     /// Bind `tool_name` and ask capability-core for a decision on it. The binding
     /// comes back so the caller can verify the evidence against what was bound.
     async fn evaluate_response(
@@ -556,6 +590,9 @@ impl GrpcCapabilityPolicy {
                 "run and tenant are required for capability policy",
             ));
         }
+        if self.browser_agent_policy_enforced && tool_name == "browser_agent" && user_id.trim().is_empty() {
+            return Err(Status::permission_denied("browser policy requires the verified run owner"));
+        }
         let binding = self.binding_for(tool_name, run_id, org_id, user_id).await?;
         let bearer = self.tokens.token(org_id).await.map_err(|error| {
             tracing::warn!(%error, "capability service credential unavailable");
@@ -563,7 +600,7 @@ impl GrpcCapabilityPolicy {
         })?;
         // The tool and the user are named only once the gate is on, so with it
         // off the request is byte-for-byte what it was before tool classes.
-        let named = self.gate != ToolClassGate::Off;
+        let named = self.effective_gate(tool_name) != ToolClassGate::Off;
         let mut request = Request::new(EvaluatePolicyRequest {
             capability_id: binding.capability_id.clone(),
             run_id: run_id.to_owned(),
@@ -722,7 +759,7 @@ impl GrpcCapabilityPolicy {
         call: &EvidenceCall<'_>,
         response: &EvaluatePolicyResponse,
     ) -> Result<(), Status> {
-        if self.gate == ToolClassGate::Off || response.side_effect_class.is_empty() {
+        if call.gate == ToolClassGate::Off || response.side_effect_class.is_empty() {
             return Ok(());
         }
         // The run may have been evicted since the binding was resolved. A dynamic
@@ -732,16 +769,21 @@ impl GrpcCapabilityPolicy {
             return Err(pin_lost());
         }
         let class = SideEffectClass::from_wire(&response.side_effect_class);
+        // The narrow browser gate also pins the signed floor: losing or lowering
+        // an approval requirement during the same run is never a new allow.
+        let browser_version = (self.browser_agent_policy_enforced && call.tool_name == "browser_agent")
+            .then(|| format!("{}\0{}", response.capability_version, response.approval_floor));
+        let version = browser_version.as_deref().unwrap_or(&response.capability_version);
         if self.bindings.pin(
             call.org_id,
             call.run_id,
             call.tool_name,
-            &response.capability_version,
+            version,
             class,
         ) {
             return Ok(());
         }
-        if self.gate == ToolClassGate::Enforce {
+        if call.gate == ToolClassGate::Enforce {
             tracing::warn!(tool = %call.tool_name, "tool binding changed during the run");
             return Err(Status::permission_denied(
                 "tool binding changed during the run",
@@ -1241,6 +1283,8 @@ struct DecisionClaims {
     policy_source: String,
     #[serde(default)]
     tool_digest: String,
+    #[serde(default)]
+    tool_policy_checked: bool,
 }
 
 /// What a decision is verified against: the call as this process made it and the
@@ -2686,6 +2730,13 @@ mod tests {
         signed_policy_source: Mutex<Option<String>>,
         /// When set, the evidence carries this claim-set version instead of "2".
         signed_version: Mutex<Option<String>>,
+        signed_for_user: Mutex<Option<String>>,
+        signed_for_org: Mutex<Option<String>>,
+        signed_class: Mutex<Option<String>>,
+        signed_floor: Mutex<Option<String>>,
+        policy_source: Mutex<Option<String>>,
+        tamper_signature: Mutex<bool>,
+        policy_checked: Mutex<bool>,
     }
 
     struct MockCapabilityCore {
@@ -2750,7 +2801,7 @@ mod tests {
                 decision_evidence: String::new(),
                 side_effect_class: class,
                 approval_floor: floor,
-                policy_source: "risk_level".to_owned(),
+                policy_source: self.state.policy_source.lock().unwrap().clone().unwrap_or_else(|| "risk_level".to_owned()),
                 tool_digest: digest,
             };
             let signed_tool = self
@@ -2788,6 +2839,15 @@ mod tests {
                 .expect("signed version lock")
                 .clone()
                 .unwrap_or_else(|| "2".to_owned());
+            let signed_user = self.state.signed_for_user.lock().unwrap().clone()
+                .unwrap_or_else(|| request.user_id.clone());
+            let signed_class = self.state.signed_class.lock().unwrap().clone()
+                .unwrap_or_else(|| response.side_effect_class.clone());
+            let signed_floor = self.state.signed_floor.lock().unwrap().clone()
+                .unwrap_or_else(|| response.approval_floor.clone());
+            let signed_org = self.state.signed_for_org.lock().unwrap().clone()
+                .unwrap_or_else(|| request.org_id.clone());
+            let policy_checked = *self.state.policy_checked.lock().unwrap();
             let now = now_unix();
             response.decision_evidence = sign_json(
                 &self.key,
@@ -2798,21 +2858,25 @@ mod tests {
                     "decision_id": response.decision_id,
                     "capability_id": request.capability_id,
                     "capability_version": response.capability_version,
-                    "org_id": request.org_id,
+                    "org_id": signed_org,
                     "run_id": signed_run,
                     "agent_id": request.agent_id,
                     "scope": request.scope,
                     "decision": signed_decision,
                     "reason": response.reason,
                     "budget_context": response.budget_context,
-                    "user_id": request.user_id,
+                    "user_id": signed_user,
                     "tool_name": signed_tool,
-                    "side_effect_class": response.side_effect_class,
-                    "approval_floor": response.approval_floor,
+                    "side_effect_class": signed_class,
+                    "approval_floor": signed_floor,
                     "policy_source": signed_source,
                     "tool_digest": response.tool_digest,
+                    "tool_policy_checked": policy_checked,
                 }),
             );
+            if *self.state.tamper_signature.lock().unwrap() {
+                response.decision_evidence.push('x');
+            }
             Ok(Response::new(response))
         }
 
@@ -2925,6 +2989,7 @@ mod tests {
             decision_verifier: verifier_for(&key),
             model_action_view: None,
             gate,
+            browser_agent_policy_enforced: false,
             bindings: Arc::default(),
         };
         (policy, state)
@@ -3545,4 +3610,83 @@ mod tests {
             .await
             .expect("a run that was not evicted resolves and pins as usual");
     }
+
+    #[tokio::test]
+    async fn browser_scoped_policy_requires_named_checked_v2_evidence() {
+        let (mut policy, state) = harness(ToolClassGate::Off).await;
+        policy.browser_agent_policy_enforced = true;
+        let mut browser = wire_binding("browser_agent", "external_write", "none");
+        browser.tool_digest.clear(); // Built-in tools have no MCP definition digest.
+        state.bindings.lock().unwrap().push(browser);
+        ask_from(&state);
+        *state.policy_checked.lock().unwrap() = true;
+        let answer = policy.evaluate_tool_call("browser_agent", "run-a", "org-a", "user-a").await.expect("signed scoped ask");
+        assert_eq!(answer.decision, CapabilityDecision::Ask);
+        assert!(answer.ask_evidence_verified);
+        let requests = state.evaluated.lock().unwrap();
+        assert_eq!(requests[0].tool_name, "browser_agent");
+        assert_eq!(requests[0].user_id, "user-a");
+        drop(requests);
+
+        // A newly signed response still may not lower or change the floor this
+        // same run already pinned, even when the capability version is unchanged.
+        state.bindings.lock().unwrap()[0].approval_floor = "ask".to_owned();
+        assert!(policy.evaluate_tool_call("browser_agent", "run-a", "org-a", "user-a").await.is_err(), "floor changed within run");
+        state.bindings.lock().unwrap()[0].approval_floor = "none".to_owned();
+
+        *state.policy_checked.lock().unwrap() = false;
+        assert!(policy.evaluate_tool_call("browser_agent", "run-a", "org-a", "user-a").await.is_err(), "unchecked policy");
+        *state.policy_checked.lock().unwrap() = true;
+        *state.signed_version.lock().unwrap() = Some("1".to_owned());
+        assert!(policy.evaluate_tool_call("browser_agent", "run-a", "org-a", "user-a").await.is_err(), "old evidence");
+        *state.signed_version.lock().unwrap() = None;
+        *state.signed_for_tool.lock().unwrap() = Some("web_fetch".to_owned());
+        assert!(policy.evaluate_tool_call("browser_agent", "run-a", "org-a", "user-a").await.is_err(), "replayed tool");
+        *state.signed_for_tool.lock().unwrap() = None;
+        *state.signed_for_user.lock().unwrap() = Some("other-user".to_owned());
+        assert!(policy.evaluate_tool_call("browser_agent", "run-a", "org-a", "user-a").await.is_err(), "replayed user");
+        *state.signed_for_user.lock().unwrap() = None;
+        *state.signed_for_org.lock().unwrap() = Some("other-org".to_owned());
+        assert!(policy.evaluate_tool_call("browser_agent", "run-a", "org-a", "user-a").await.is_err(), "replayed org");
+        *state.signed_for_org.lock().unwrap() = None;
+        *state.signed_for_run.lock().unwrap() = Some("other-run".to_owned());
+        assert!(policy.evaluate_tool_call("browser_agent", "run-a", "org-a", "user-a").await.is_err(), "replayed run");
+        *state.signed_for_run.lock().unwrap() = None;
+        *state.signed_class.lock().unwrap() = Some("read".to_owned());
+        assert!(policy.evaluate_tool_call("browser_agent", "run-a", "org-a", "user-a").await.is_err(), "tampered class");
+        *state.signed_class.lock().unwrap() = None;
+        *state.signed_floor.lock().unwrap() = Some("ask".to_owned());
+        assert!(policy.evaluate_tool_call("browser_agent", "run-a", "org-a", "user-a").await.is_err(), "tampered floor");
+        *state.signed_floor.lock().unwrap() = None;
+        *state.tamper_signature.lock().unwrap() = true;
+        assert!(policy.evaluate_tool_call("browser_agent", "run-a", "org-a", "user-a").await.is_err(), "tampered signature");
+        *state.tamper_signature.lock().unwrap() = false;
+        *state.signed_policy_source.lock().unwrap() = Some("tool_policy_ask".to_owned());
+        assert!(policy.evaluate_tool_call("browser_agent", "run-a", "org-a", "user-a").await.is_err(), "tampered policy source");
+        *state.signed_policy_source.lock().unwrap() = None;
+        *state.policy_source.lock().unwrap() = Some("tool_policy_ask".to_owned());
+        let stored_ask = policy.evaluate_tool_call("browser_agent", "run-a", "org-a", "user-a").await.expect("signed stored ask");
+        assert_eq!(stored_ask.policy_source, "tool_policy_ask");
+        assert!(stored_ask.ask_evidence_verified);
+        *state.decision.lock().unwrap() = Some("deny".to_owned());
+        *state.policy_source.lock().unwrap() = Some("tool_policy_never".to_owned());
+        let stored_deny = policy.evaluate_tool_call("browser_agent", "run-a", "org-a", "user-a").await.expect("signed stored deny");
+        assert_eq!(stored_deny.decision, CapabilityDecision::Deny);
+        assert_eq!(stored_deny.policy_source, "tool_policy_never");
+        assert!(policy.evaluate_tool_call("browser_agent", "run-a", "org-a", "").await.is_err(), "missing owner");
+        policy.decision_verifier = DecisionEvidenceVerifier::disabled_for_test();
+        assert!(policy.evaluate_tool_call("browser_agent", "run-a", "org-a", "user-a").await.is_err(), "missing verification key");
+    }
+
+    #[tokio::test]
+    async fn browser_scoped_policy_does_not_name_or_change_other_tools() {
+        let (mut policy, state) = harness(ToolClassGate::Off).await;
+        policy.browser_agent_policy_enforced = true;
+        let result = policy.evaluate_tool_call("web_fetch", "run-other", "org-a", "user-a").await.expect("other tool unchanged");
+        assert_eq!(result.decision, CapabilityDecision::Allow);
+        let calls = state.evaluated.lock().unwrap();
+        assert_eq!(calls[0].tool_name, "");
+        assert_eq!(calls[0].user_id, "");
+    }
+
 }

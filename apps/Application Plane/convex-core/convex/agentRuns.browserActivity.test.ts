@@ -16,6 +16,7 @@ import {
   type BrowserActivityUpdate,
   decideBrowserActivityUpdate,
   getByRunIdHandler,
+  listForOrgHandler,
   projectRunForViewer,
   upsertBrowserActivityHandler,
 } from "./agentRuns";
@@ -42,6 +43,7 @@ function fakeCtx(viewerExternalAuthId: string | null, tables: Record<string, Row
           return {
             unique: async () => rows[0] ?? null,
             collect: async () => rows,
+            order: () => ({ take: async (limit: number) => rows.slice(0, limit) }),
           };
         },
       };
@@ -140,6 +142,19 @@ test("a viewer outside the run's org is denied", async () => {
   await upsertBrowserActivityHandler(fakeCtx(null, tables).ctx, update());
   const { ctx } = fakeCtx("outsider", tables);
   await assert.rejects(getByRunIdHandler(ctx, { runId: "run-1" }), /Unauthorized/);
+});
+
+test("both org list paths apply the same owner-only browser projection", async () => {
+  const tables = seed();
+  await upsertBrowserActivityHandler(fakeCtx(null, tables).ctx, update());
+  for (const status of [undefined, "started"] as const) {
+    const ownerRows = await listForOrgHandler(fakeCtx("owner", tables).ctx, { externalOrgId: ORG, status });
+    const colleagueRows = await listForOrgHandler(fakeCtx("colleague", tables).ctx, { externalOrgId: ORG, status });
+    assert.ok(ownerRows[0].browserActivity);
+    assert.equal("browserActivity" in colleagueRows[0], false);
+    await assert.rejects(listForOrgHandler(fakeCtx("outsider", tables).ctx, { externalOrgId: ORG, status }), /Unauthorized/);
+  }
+  assert.ok(tables.agentRuns[0].browserActivity);
 });
 
 test("a run with no externalUserId shows browserActivity to nobody", () => {

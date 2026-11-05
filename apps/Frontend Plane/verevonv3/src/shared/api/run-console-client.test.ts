@@ -243,6 +243,23 @@ describe('streamRunEvents dispatch', () => {
     })
   })
 
+  it('exposes only complete bounded browser attachment IDs', async () => {
+    const onBrowserAttachSharedJar = vi.fn()
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(sseResponse([
+      sseFrame('browser_attach_shared_jar', {
+        run_id: 'run-42', plan_id: 'plan-1', attach_id: 'att-1', session_run_id: 'qrun-9', tab_id: 'tab-3',
+        url: 'https://private.example/',
+      }),
+      sseFrame('browser_attach_shared_jar', { run_id: 'run-42', plan_id: 'plan-1', attach_id: 'att-1', session_run_id: 'qrun-9' }),
+      sseFrame('browser_attach_shared_jar', { run_id: 'run-42', plan_id: 'plan-1', attach_id: 'att-1', session_run_id: 'qrun-9', tab_id: 'x'.repeat(257) }),
+    ])))
+    await streamRunEvents('run-42', { onBrowserAttachSharedJar })
+    expect(onBrowserAttachSharedJar).toHaveBeenCalledTimes(1)
+    expect(onBrowserAttachSharedJar).toHaveBeenCalledWith({
+      runId: 'run-42', planId: 'plan-1', attachId: 'att-1', sessionRunId: 'qrun-9', tabId: 'tab-3',
+    })
+  })
+
   it('dispatches browser_action_dispatched with reason and browser_run_paused/resumed (Phase 2)', async () => {
     const fetchMock = vi.fn().mockResolvedValue(
       sseResponse([

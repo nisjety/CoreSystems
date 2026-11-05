@@ -11,6 +11,14 @@ import "model_plane/v1/inference.proto";
 // Owns: tool planning/selection, permission checkpoints, tool execution,
 //       artifacts, subagents, step transitions, compaction triggers.
 service ExecutionCore {
+  // Authenticated execution-protocol handshake. This says only what this
+  // deployment implements; Quarry must still acknowledge every attachment.
+  rpc BrowserAgentCapabilities(BrowserAgentCapabilitiesRequest) returns (BrowserAgentCapabilitiesResponse);
+
+  // Restricted attached browser runs use a distinct RPC so mixed-version
+  // deployments fail closed: an older execution instance cannot accidentally
+  // accept and drop a restriction it does not understand.
+  rpc ExecuteRestrictedBrowserStep(ExecuteStepRequest) returns (ExecuteStepResponse);
   // Execute a single step within a run.
   rpc ExecuteStep(ExecuteStepRequest) returns (ExecuteStepResponse);
 
@@ -39,6 +47,9 @@ service ExecutionCore {
   // current-run claim/receipt and Control's per-step decision are deployed.
   rpc ExecuteScheduledStep(ExecuteScheduledStepRequest) returns (ExecuteScheduledStepResponse);
 }
+
+message BrowserAgentCapabilitiesRequest { string org_id = 1; }
+message BrowserAgentCapabilitiesResponse { uint32 attached_policy_protocol = 1; }
 
 // ExecuteScheduledStepRequest contains only non-secret, immutable bindings.
 // The Control decision is carried as direct-hop metadata by the eventual
