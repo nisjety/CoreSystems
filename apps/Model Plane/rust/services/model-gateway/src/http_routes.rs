@@ -361,6 +361,8 @@ fn authed_routes_with(agent_api: bool) -> Router<AppState> {
         .merge(crate::thread_goal_routes::router())
         // The owner's export of one thread (Wave 3 EP-12 S10); 404 `thread_export_disabled` while its switch is off.
         .merge(crate::thread_export_routes::router())
+        // The owner's share snapshots (Wave 3 EP-12 S14); 404 `thread_shares_disabled` while its switch is off.
+        .merge(crate::thread_share_routes::router())
         // The person's edit and restore of a thread artifact (Wave 3 EP-3 S4); 404 while editing is off.
         .merge(crate::artifact_edit_routes::router())
         // Read-only replay of Session Core's canonical event log. The route

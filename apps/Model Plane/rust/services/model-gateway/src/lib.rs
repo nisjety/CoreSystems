@@ -127,6 +127,7 @@ pub mod thread_goal;
 pub mod thread_goal_routes;
 pub mod thread_reference_tools;
 pub mod thread_search_routes;
+pub mod thread_share_routes;
 pub mod tool_loop;
 pub mod tool_result_handles;
 pub mod tool_retry;

@@ -75,6 +75,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "model_plane/v1/skill_versions.proto",
         // EP-12 S9: ThreadExportService (session-core's owner-only thread export).
         "model_plane/v1/thread_export.proto",
+        // EP-12 S14: ThreadShareService (session-core's owner-only share snapshots).
+        "model_plane/v1/thread_shares.proto",
     ];
 
     let dp_protos = &[

@@ -41,6 +41,7 @@ use mp_contracts::model_plane::v1::{
     thread_fork_service_server::ThreadForkServiceServer,
     thread_reference_service_server::ThreadReferenceServiceServer,
     thread_goal_service_server::ThreadGoalServiceServer,
+    thread_share_service_server::ThreadShareServiceServer,
 };
 use mp_contracts::run_origin::{RunOrigin, ORIGIN_METADATA_KEY};
 use mp_contracts::retention::{space_zdr_mode, SpaceZdrMode};
@@ -933,6 +934,8 @@ pub(crate) async fn delete_thread_rows(
         "DELETE FROM artifact_revisions WHERE thread_id = $1",
         // EP-7 S1: also ON DELETE CASCADE from threads; named here so the erase list is complete.
         "DELETE FROM thread_goals WHERE thread_id = $1",
+        // EP-12 S14: also ON DELETE CASCADE from threads; named here so the erase list is complete.
+        "DELETE FROM thread_share_snapshots WHERE thread_id = $1",
     ] {
         sqlx::query(query)
             .bind(thread_id)
@@ -12476,6 +12479,7 @@ pub async fn serve(
     let artifact_revision_pool = pool.clone();
     let thread_reference_pool = pool.clone();
     let thread_goal_pool = pool.clone();
+    let thread_share_pool = pool.clone();
     let skill_version_pool = pool.clone();
 
     // Space event stream (WS02-S3): its own small read pool, built before `pool` moves.
@@ -12559,6 +12563,11 @@ pub async fn serve(
         // EP-12 S9: the owner's thread export; answers `unavailable` until its switch is on.
         .add_service(ThreadExportServiceServer::with_interceptor(
             thread_export,
+            auth.clone(),
+        ))
+        // EP-12 S14: the owner's share snapshots; answers `unavailable` until its switch is on.
+        .add_service(ThreadShareServiceServer::with_interceptor(
+            crate::thread_shares::ThreadShareGrpc { pool: thread_share_pool },
             auth.clone(),
         ))
         // EP-3 S7: read-only thread reference reads; only the gateway's switched-off tools call it.
