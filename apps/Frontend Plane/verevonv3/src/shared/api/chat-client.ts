@@ -4177,6 +4177,53 @@ export async function getMcpAppResource(serverId: string, tool: string): Promise
   return { uri, html, needsNetwork: record?.needs_network === true }
 }
 
+/** One call an MCP App asks its host to make on the app's own server (EP-4 S10). */
+export type McpAppToolCallRequest = {
+  /** The run of the turn that drew the app; the gateway checks the viewer owns it. */
+  runId: string
+  /** The app's own server: the frame's, never one the app names. */
+  serverId: string
+  tool: string
+  arguments: Record<string, unknown>
+  /** The nonce the frame minted when it mounted; the gateway bounds calls per frame by it. */
+  frameNonce: string
+}
+
+/** What the app is answered: the tool's output, or the typed code of the refusal. */
+export type McpAppToolCallOutcome =
+  | { ok: true; output: string; truncated: boolean }
+  | { ok: false; code: string }
+
+/**
+ * Ask the gateway to run a read tool on the app's own server as the viewer (`chat.mcp_app_tool_call`). The
+ * gateway decides everything: the run owner, the server's allowlist, the tool's registered class, the frame's
+ * rate limit, and zero retention; a refusal comes back as its typed code (`app_call_requires_chat`,
+ * `rate_limited`, `not_found` while the switch is off or for a run the viewer does not own, ...). Only a
+ * failure that is not a typed answer (the network) rejects.
+ */
+export async function callMcpAppTool(request: McpAppToolCallRequest): Promise<McpAppToolCallOutcome> {
+  let raw: unknown
+  try {
+    raw = await requestJson<unknown>('/api/v1/mcp-apps/tool-call', {
+      method: 'POST',
+      body: JSON.stringify({
+        run_id: request.runId,
+        server_id: request.serverId,
+        tool: request.tool,
+        arguments: request.arguments,
+        frame_nonce: request.frameNonce,
+      }),
+    })
+  } catch (error) {
+    if (error instanceof ApiError) return { ok: false, code: error.code ?? 'tool_call_failed' }
+    throw error
+  }
+  const record = objectValue(raw)
+  const output = record?.output
+  if (typeof output !== 'string') return { ok: false, code: 'tool_call_failed' }
+  return { ok: true, output, truncated: record?.truncated === true }
+}
+
 /**
  * One page of an artifact's stored revisions, newest first, text included.
  * `beforeVersion` pages to older revisions. Rejects with the typed `ApiError`

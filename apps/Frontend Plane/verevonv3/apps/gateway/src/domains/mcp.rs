@@ -41,8 +41,10 @@ use serde_json::Value;
 use crate::{
     config::AppState,
     domains::chat::shared::{
-        data_plane_authorization_value, delegated_auth_unavailable, model_token,
-        proxy_model_json_with_capability, required_capability_token,
+        data_plane_authorization_value, data_plane_token, delegated_auth_unavailable, model_token,
+        proxy_model_json_with_capability, proxy_model_json_with_delegations,
+        required_capability_token, required_execution_token, required_inference_token,
+        required_session_token,
     },
     envelope::error,
     middleware::{has_authorized_org_role, require_session, AuthenticatedUser},
@@ -74,6 +76,9 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
         // The HTML app an MCP tool declares (Wave 3 EP-4 S8). model-gateway checks the viewer,
         // re-discovers the tool and answers 404 while its switch is off.
         .route("/api/v1/mcp-apps/resource", get(get_mcp_app_resource))
+        // A read tool an MCP App calls on its own server (Wave 3 EP-4 S10). model-gateway checks the
+        // run owner, the server and the tool's class, and answers 404 while its switch is off.
+        .route("/api/v1/mcp-apps/tool-call", post(post_mcp_app_tool_call))
         // Per-org/user rate limiting, ordered like `agents_runs.rs`:
         // `require_session` (written last → outer) runs first and inserts
         // `AuthenticatedUser`, so `rate_limit_middleware` (written first → inner)
@@ -487,6 +492,76 @@ async fn get_mcp_app_resource(
     proxy_tool_surface(&state, &user, &headers, Method::GET, &url, None).await
 }
 
+/// The keys an app tool call forwards. Anything else the browser adds (an org
+/// or user id among them) is dropped here; model-gateway reads the org and the
+/// viewer from the minted tokens only.
+const MCP_APP_TOOL_CALL_KEYS: [&str; 5] =
+    ["run_id", "server_id", "tool", "arguments", "frame_nonce"];
+
+/// The body forwarded for an app tool call: the five known keys, as sent.
+fn mcp_app_tool_call_body(body: &Value) -> Value {
+    let mut forwarded = serde_json::Map::new();
+    if let Some(object) = body.as_object() {
+        for key in MCP_APP_TOOL_CALL_KEYS {
+            if let Some(value) = object.get(key) {
+                forwarded.insert(key.to_owned(), value.clone());
+            }
+        }
+    }
+    Value::Object(forwarded)
+}
+
+/// Pass-through of an app tool call (EP-4 S10). model-gateway runs the call
+/// through execution-core's `ExecuteStep` as the viewer, so it needs the
+/// viewer's session, execution, data-plane and inference credentials beside the
+/// capability one; each is minted here from the session, and no scoping header
+/// is added. A credential that cannot be minted is the typed 503; a missing
+/// data-plane one is left to model-gateway, which refuses the call.
+async fn post_mcp_app_tool_call(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Response {
+    let url = format!("{}/v1/mcp-apps/tool-call", state.model_gateway_url);
+    let token = model_token(&state, &user, &headers).await;
+    let capability = match required_capability_token(&state, &user, &headers).await {
+        Ok(token) => token,
+        Err(error) => return delegated_auth_unavailable(error).into_response(),
+    };
+    let session = match required_session_token(&state, &user, &headers).await {
+        Ok(token) => token,
+        Err(error) => return delegated_auth_unavailable(error).into_response(),
+    };
+    let execution = match required_execution_token(&state, &user, &headers).await {
+        Ok(token) => token,
+        Err(error) => return delegated_auth_unavailable(error).into_response(),
+    };
+    let inference = match required_inference_token(&state, &user, &headers).await {
+        Ok(token) => token,
+        Err(error) => return delegated_auth_unavailable(error).into_response(),
+    };
+    let data_plane = data_plane_token(&state, &user, &headers).await;
+    let (status, body) = proxy_model_json_with_delegations(
+        &state,
+        Method::POST,
+        &url,
+        Some(mcp_app_tool_call_body(&body)),
+        token.as_deref(),
+        data_plane.as_deref(),
+        Some(capability.as_str()),
+        Some(inference.as_str()),
+        Some(execution.as_str()),
+        None,
+        Some(session.as_str()),
+        None,
+        None,
+        &user,
+    )
+    .await;
+    (status, body).into_response()
+}
+
 /// Forward one request of the per-tool surface with the caller's model-gateway
 /// and capability-core credentials, exactly as the server routes above do.
 async fn proxy_tool_surface(
@@ -716,6 +791,7 @@ mod tests {
             "/api/v1/tool-policies\"",
             "/api/v1/tool-policies/{capability_id}",
             "/api/v1/mcp-apps/resource",
+            "/api/v1/mcp-apps/tool-call",
             "from_fn_with_state(state, require_session)",
         ] {
             assert!(router.contains(route), "{route}");
@@ -752,6 +828,52 @@ mod tests {
             .expect("the handler");
         assert!(handler.contains("proxy_tool_surface("));
         for forbidden in [".header(", "x-org", "x-user", "x-capability"] {
+            assert!(!handler.contains(forbidden), "{forbidden}");
+        }
+    }
+
+    #[test]
+    fn the_mcp_app_tool_call_forwards_only_the_known_keys() {
+        let body = serde_json::json!({
+            "run_id": "run-1",
+            "server_id": "srv-1",
+            "tool": "echo_read",
+            "arguments": { "q": "x", "org_id": "kept-as-an-argument" },
+            "frame_nonce": "frame-0123456789abcdef",
+            "org_id": "org-2",
+            "user_id": "user-2",
+            "permission_mode": "auto",
+        });
+        assert_eq!(
+            mcp_app_tool_call_body(&body),
+            serde_json::json!({
+                "run_id": "run-1",
+                "server_id": "srv-1",
+                "tool": "echo_read",
+                "arguments": { "q": "x", "org_id": "kept-as-an-argument" },
+                "frame_nonce": "frame-0123456789abcdef",
+            })
+        );
+        // Not an object: nothing is forwarded, and model-gateway answers the typed 400.
+        assert_eq!(
+            mcp_app_tool_call_body(&serde_json::json!([1, 2])),
+            serde_json::json!({})
+        );
+    }
+
+    #[test]
+    fn the_mcp_app_tool_call_sends_no_scoping_header_of_its_own() {
+        // Source-text pin: only the minted credentials go upstream; the handler
+        // sets no header and reads no org or user from the browser.
+        let source = include_str!("mcp.rs");
+        let handler = source
+            .split("async fn post_mcp_app_tool_call")
+            .nth(1)
+            .and_then(|rest| rest.split("\n}").next())
+            .expect("the handler");
+        assert!(handler.contains("proxy_model_json_with_delegations("));
+        assert!(handler.contains("mcp_app_tool_call_body(&body)"));
+        for forbidden in [".header(", "x-org", "x-user", "org_id", "user_id"] {
             assert!(!handler.contains(forbidden), "{forbidden}");
         }
     }

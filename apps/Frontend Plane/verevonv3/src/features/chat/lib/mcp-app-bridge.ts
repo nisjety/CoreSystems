@@ -8,8 +8,10 @@
  * told the call's input and result once, may size itself, may ask to open a safe
  * link the person confirms, and may stage a message the person sends (D3). It
  * gets no storage, no network and no host data. A `tools/call` from the app is
- * refused with `app_call_requires_chat` until app-initiated calls exist (S10);
- * every other request is method-not-found.
+ * refused with `app_call_requires_chat` unless the frame was given a tool caller
+ * (S10, `VITE_MCP_APP_TOOL_CALLS`): then it goes to the gateway, which runs only
+ * a read tool on the app's own server for the run's owner and answers anything
+ * else with the same refusal. Every other request is method-not-found.
  *
  * The extension's method names live in `MCP_APP_METHODS` only (checked against
  * the 2026-01-26 revision), because the extension is young and they may move.
@@ -18,6 +20,7 @@
  * is testable without a frame.
  */
 
+import { callMcpAppTool, type McpAppToolCallOutcome, type McpAppToolCallRequest } from '@/shared/api/chat-client'
 import { isSafeLinkHref } from './safe-href'
 import {
   clampWidgetHeight,
@@ -48,7 +51,7 @@ export const MCP_APP_METHODS = {
   openLink: 'ui/open-link',
   /** App to host request: a user message (staged as a chip the person sends). */
   message: 'ui/message',
-  /** App to host request: call a tool on the app's server (refused until S10). */
+  /** App to host request: call a tool on the app's server (forwarded only with a tool caller, S10). */
   toolsCall: 'tools/call',
   /** App to host request: liveness. */
   ping: 'ping',
@@ -60,8 +63,50 @@ export const JSON_RPC_INVALID_PARAMS = -32602
 /** Implementation-defined server error: the request was valid but the host declined it now. */
 export const JSON_RPC_DECLINED = -32000
 
-/** The refusal an app reads for `tools/call` while app-initiated calls are off (D13). */
+/** The refusal an app reads for a `tools/call` the host will not make (D13). */
 export const APP_CALL_REQUIRES_CHAT = 'app_call_requires_chat'
+
+/**
+ * `VITE_MCP_APP_TOOL_CALLS`, literal `'true'` only. Off: no tool caller is made and
+ * `tools/call` is refused exactly as before S10.
+ */
+export const mcpAppToolCallsEnabled = () => import.meta.env.VITE_MCP_APP_TOOL_CALLS === 'true'
+
+/** Calls one frame sends per minute; the gateway holds the same bound per frame nonce and is the authority. */
+export const APP_TOOL_CALLS_PER_MINUTE = 10
+
+/** Longer than any tool name a server registers; bounds what is forwarded. */
+const MAX_TOOL_NAME_CHARS = 256
+
+/** Gateway refusals an app is told by name; any other failure reads `tool_call_failed`. */
+const DECLINED_CALL_CODES: ReadonlySet<string> = new Set(['rate_limited', 'not_found', 'zdr_feature_not_supported'])
+
+/** One app-initiated call for the frame's own run and server; the frame binds both, the app names only the tool. */
+export type McpAppToolCaller = (tool: string, args: Record<string, unknown>) => Promise<McpAppToolCallOutcome>
+
+/** A per-frame nonce the gateway keys its rate limit on: unguessable, `[A-Za-z0-9-]`. */
+function mintFrameNonce(): string {
+  return globalThis.crypto.randomUUID()
+}
+
+/**
+ * The tool caller for one mounted frame (`chat.mcp_app_tool_call`), or null when
+ * app-initiated calls are off or the answer has no run to call under. The run and
+ * server are the frame's, fixed here, so an app can only ever name a tool.
+ */
+export function createMcpAppToolCaller(options: {
+  runId: string | undefined
+  serverId: string
+  enabled?: boolean
+  call?: (request: McpAppToolCallRequest) => Promise<McpAppToolCallOutcome>
+  frameNonce?: string
+}): McpAppToolCaller | null {
+  const runId = options.runId?.trim()
+  if (!(options.enabled ?? mcpAppToolCallsEnabled()) || !runId) return null
+  const frameNonce = options.frameNonce ?? mintFrameNonce()
+  const call = options.call ?? callMcpAppTool
+  return (tool, args) => call({ runId, serverId: options.serverId, tool, arguments: args, frameNonce })
+}
 
 /** Longer than any request id an app needs; bounds what the host echoes back. */
 const MAX_ID_CHARS = 64
@@ -161,6 +206,19 @@ const failure = (id: JsonRpcId, code: number, message: string): JsonRpcMessage =
 
 const notification = (method: string, params: Record<string, unknown>): JsonRpcMessage => ({ jsonrpc: '2.0', method, params })
 
+/** The JSON-RPC answer to a forwarded `tools/call`. A requires-chat refusal keeps the shape apps already read. */
+export function toolCallReply(id: JsonRpcId, outcome: McpAppToolCallOutcome): JsonRpcMessage {
+  if (outcome.ok) return result(id, toolResultParams(outcome.output))
+  if (outcome.code === APP_CALL_REQUIRES_CHAT) return failure(id, JSON_RPC_METHOD_NOT_FOUND, APP_CALL_REQUIRES_CHAT)
+  return failure(id, JSON_RPC_DECLINED, DECLINED_CALL_CODES.has(outcome.code) ? outcome.code : 'tool_call_failed')
+}
+
+/** Post a late answer to the frame's window, as the frame posts its own answers ('*': an opaque origin has none to name). */
+function postToFrame(target: unknown, message: JsonRpcMessage): void {
+  const post = (target as { postMessage?: unknown } | null)?.postMessage
+  if (typeof post === 'function') post.call(target, message, '*')
+}
+
 /**
  * The text of a `ui/message`: a user-role text block (the extension sends one
  * block; a list of blocks is read for its text blocks). Null when there is no
@@ -206,9 +264,12 @@ export function createMcpAppBridgeHost(options: {
   toolInput: unknown
   /** The settled call's output text. */
   toolOutput: string
+  /** Set only while app-initiated calls are on (`createMcpAppToolCaller`); absent, `tools/call` is refused. */
+  toolCaller?: McpAppToolCaller | null
   now?: () => number
 }): McpAppBridgeHost {
   const sizeBudget = createTokenBucket(SIZE_MESSAGES_PER_SECOND, 1000, options.now)
+  const toolCallBudget = createTokenBucket(APP_TOOL_CALLS_PER_MINUTE, 60_000, options.now)
   const dropped: Partial<Record<McpAppBridgeDrop, number>> = {}
   let initializeAnswered = false
   let callSent = false
@@ -228,8 +289,9 @@ export function createMcpAppBridgeHost(options: {
           result(id, {
             protocolVersion: MCP_APPS_PROTOCOL_VERSION,
             hostInfo: { name: 'Verevon', version: '1' },
-            // Links only: no server tools or resources (S10), no logging, no display modes beyond inline.
-            hostCapabilities: { openLinks: {} },
+            // Links, and server tools only with a tool caller (S10); no resources, no logging, no display modes
+            // beyond inline.
+            hostCapabilities: options.toolCaller ? { openLinks: {}, serverTools: {} } : { openLinks: {} },
             hostContext: {
               theme: options.hostContext.theme,
               locale: options.hostContext.locale,
@@ -255,8 +317,27 @@ export function createMcpAppBridgeHost(options: {
         messageStaged = true
         return answer([result(id)], { kind: 'stage_message', text })
       }
-      case MCP_APP_METHODS.toolsCall:
-        return answer([failure(id, JSON_RPC_METHOD_NOT_FOUND, APP_CALL_REQUIRES_CHAT)])
+      case MCP_APP_METHODS.toolsCall: {
+        const caller = options.toolCaller
+        if (!caller) return answer([failure(id, JSON_RPC_METHOD_NOT_FOUND, APP_CALL_REQUIRES_CHAT)])
+        const name = typeof params.name === 'string' ? params.name.trim() : ''
+        const args = params.arguments === undefined ? {} : params.arguments
+        if (!name || name.length > MAX_TOOL_NAME_CHARS || !isPlainObject(args)) {
+          return answer([failure(id, JSON_RPC_INVALID_PARAMS, 'invalid_tool_call')])
+        }
+        if (!toolCallBudget.take()) return answer([failure(id, JSON_RPC_DECLINED, 'rate_limited')])
+        // The answer arrives later; it goes to the window that asked, and to nothing if the frame was replaced.
+        const target = options.frameWindow()
+        void caller(name, args)
+          .then(
+            (outcome) => toolCallReply(id, outcome),
+            () => failure(id, JSON_RPC_DECLINED, 'tool_call_failed'),
+          )
+          .then((reply) => {
+            if (options.frameWindow() === target) postToFrame(target, reply)
+          })
+        return answer([])
+      }
       default:
         return answer([failure(id, JSON_RPC_METHOD_NOT_FOUND, 'method_not_found')])
     }

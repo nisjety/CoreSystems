@@ -1,13 +1,19 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import {
   APP_CALL_REQUIRES_CHAT,
+  APP_TOOL_CALLS_PER_MINUTE,
+  JSON_RPC_DECLINED,
+  JSON_RPC_INVALID_PARAMS,
   JSON_RPC_METHOD_NOT_FOUND,
   MCP_APP_METHODS,
   MCP_APPS_PROTOCOL_VERSION,
   createMcpAppBridgeHost,
+  createMcpAppToolCaller,
   parseMcpToolName,
+  toolCallReply,
   toolResultParams,
   type JsonRpcMessage,
+  type McpAppToolCaller,
 } from './mcp-app-bridge'
 import { createTokenBucket, MAX_WIDGET_HEIGHT } from './widget-bridge'
 
@@ -163,5 +169,107 @@ describe('mcp-app-bridge', () => {
     for (const name of ['web_search', 'mcp__', 'mcp__srv', 'mcp____tool', 'mcp__srv__']) {
       expect(parseMcpToolName(name)).toBeNull()
     }
+  })
+})
+
+describe('mcp-app-bridge tools/call (EP-4 S10)', () => {
+  /** A frame window that records what the host posts to it. */
+  function frameWithInbox() {
+    const inbox: unknown[] = []
+    return { inbox, window: { postMessage: (message: unknown) => inbox.push(message) } }
+  }
+
+  function hostWith(frameWindow: unknown, toolCaller: McpAppToolCaller | null) {
+    return createMcpAppBridgeHost({
+      frameWindow: () => frameWindow,
+      messageBudget: createTokenBucket(5, 60_000, () => 0),
+      hostContext: { theme: 'light', locale: 'nb' },
+      toolInput: {},
+      toolOutput: '',
+      toolCaller,
+      now: () => 0,
+    })
+  }
+
+  const callRequest = (source: unknown, id: number, params: Record<string, unknown>) => ({
+    source,
+    origin: 'null',
+    data: { jsonrpc: '2.0', id, method: MCP_APP_METHODS.toolsCall, params },
+  })
+
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 0))
+
+  it('makes no caller while the switch is off or without a run', () => {
+    const call = vi.fn()
+    expect(createMcpAppToolCaller({ runId: 'run-1', serverId: 'srv-1', enabled: false, call })).toBeNull()
+    expect(createMcpAppToolCaller({ runId: undefined, serverId: 'srv-1', enabled: true, call })).toBeNull()
+    expect(createMcpAppToolCaller({ runId: '  ', serverId: 'srv-1', enabled: true, call })).toBeNull()
+    expect(call).not.toHaveBeenCalled()
+  })
+
+  it('tools_call_forwards_when_on', async () => {
+    const call = vi.fn().mockResolvedValue({ ok: true, output: '{"content":[{"type":"text","text":"ok"}]}', truncated: false })
+    const caller = createMcpAppToolCaller({ runId: 'run-1', serverId: 'srv-1', enabled: true, call, frameNonce: 'frame-0123456789abcdef' })
+    const frame = frameWithInbox()
+    const bridge = hostWith(frame.window, caller)
+    // The capability is advertised only with a caller.
+    const initialize = { source: frame.window, origin: 'null', data: { jsonrpc: '2.0', id: 1, method: MCP_APP_METHODS.initialize, params: {} } }
+    const [init] = sent(bridge.handle(initialize))
+    expect((init as unknown as { result: { hostCapabilities: Record<string, unknown> } }).result.hostCapabilities).toEqual({ openLinks: {}, serverTools: {} })
+
+    // The app names a tool and its arguments; the run, server and nonce are the frame's.
+    const outcome = bridge.handle(callRequest(frame.window, 2, { name: 'echo_read', arguments: { q: 'x' }, serverId: 'srv-2', runId: 'run-2' }))
+    expect(outcome).toEqual({ ok: true, send: [], action: null })
+    expect(call).toHaveBeenCalledWith({ runId: 'run-1', serverId: 'srv-1', tool: 'echo_read', arguments: { q: 'x' }, frameNonce: 'frame-0123456789abcdef' })
+    await settle()
+    expect(frame.inbox).toEqual([{ jsonrpc: '2.0', id: 2, result: { content: [{ type: 'text', text: 'ok' }] } }])
+  })
+
+  it('refusal_maps_to_jsonrpc_error', () => {
+    expect(toolCallReply(3, { ok: false, code: APP_CALL_REQUIRES_CHAT })).toEqual({
+      jsonrpc: '2.0',
+      id: 3,
+      error: { code: JSON_RPC_METHOD_NOT_FOUND, message: APP_CALL_REQUIRES_CHAT, data: { reason: APP_CALL_REQUIRES_CHAT } },
+    })
+    expect(toolCallReply(4, { ok: false, code: 'rate_limited' })).toMatchObject({ error: { code: JSON_RPC_DECLINED, message: 'rate_limited' } })
+    // A code the host does not know is not passed on.
+    expect(toolCallReply(5, { ok: false, code: 'registry_unavailable' })).toMatchObject({ error: { code: JSON_RPC_DECLINED, message: 'tool_call_failed' } })
+    expect(toolCallReply(6, { ok: true, output: 'plain', truncated: true })).toEqual({
+      jsonrpc: '2.0',
+      id: 6,
+      result: { content: [{ type: 'text', text: 'plain' }] },
+    })
+  })
+
+  it('a failed call is answered, and a malformed one is refused before it is sent', async () => {
+    const call = vi.fn().mockRejectedValue(new Error('network'))
+    const caller = createMcpAppToolCaller({ runId: 'run-1', serverId: 'srv-1', enabled: true, call })
+    const frame = frameWithInbox()
+    const bridge = hostWith(frame.window, caller)
+    for (const params of [{}, { name: '' }, { name: 'x'.repeat(257) }, { name: 'echo_read', arguments: [1] }]) {
+      expect(bridge.handle(callRequest(frame.window, 1, params))).toMatchObject({
+        send: [{ error: { code: JSON_RPC_INVALID_PARAMS, message: 'invalid_tool_call' } }],
+      })
+    }
+    expect(call).not.toHaveBeenCalled()
+    bridge.handle(callRequest(frame.window, 9, { name: 'echo_read' }))
+    await settle()
+    expect(frame.inbox).toEqual([
+      { jsonrpc: '2.0', id: 9, error: { code: JSON_RPC_DECLINED, message: 'tool_call_failed', data: { reason: 'tool_call_failed' } } },
+    ])
+  })
+
+  it('calls are bounded per frame', () => {
+    const call = vi.fn().mockReturnValue(new Promise(() => {}))
+    const caller = createMcpAppToolCaller({ runId: 'run-1', serverId: 'srv-1', enabled: true, call })
+    const frame = frameWithInbox()
+    const bridge = hostWith(frame.window, caller)
+    for (let id = 0; id < APP_TOOL_CALLS_PER_MINUTE; id += 1) {
+      expect(bridge.handle(callRequest(frame.window, id, { name: 'echo_read' }))).toEqual({ ok: true, send: [], action: null })
+    }
+    expect(bridge.handle(callRequest(frame.window, 99, { name: 'echo_read' }))).toMatchObject({
+      send: [{ id: 99, error: { code: JSON_RPC_DECLINED, message: 'rate_limited' } }],
+    })
+    expect(call).toHaveBeenCalledTimes(APP_TOOL_CALLS_PER_MINUTE)
   })
 })

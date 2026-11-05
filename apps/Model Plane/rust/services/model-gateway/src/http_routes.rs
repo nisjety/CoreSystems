@@ -284,6 +284,13 @@ pub fn build_router_with_readiness(
 /// `require_auth`, `authorize_principal_route` and the rate limiter; a test wraps it in the route
 /// policy alone, to prove every route here answers to it (INNH-10 MP-3).
 fn authed_routes() -> Router<AppState> {
+    authed_routes_with(crate::agent_api_routes::enabled())
+}
+
+/// [`authed_routes`] with the Agent API switch passed in (EP-12 S5): its routes are merged only
+/// while it is on, and the route-fence test merges them to prove a key reaches none of them
+/// without the switch and its scope.
+fn authed_routes_with(agent_api: bool) -> Router<AppState> {
     Router::new()
         .route("/v1/invoke", post(invoke))
         // Attachments ride the body as base64, so the 2 MiB default would refuse two
@@ -491,6 +498,9 @@ fn authed_routes() -> Router<AppState> {
         // Wave 3 EP-11 S7: /learn, a person's request to distil one of their threads into a skill
         // proposal. capability-core runs it and answers 404 while LEARN_COMMAND_ENABLED is off.
         .route("/v1/learning/learn", post(learn_from_thread))
+        // Wave 3 EP-12 S5: the Agent API read and control routes, for API keys only; absent
+        // while MODEL_GATEWAY_AGENT_API is off.
+        .merge(crate::agent_api_routes::router(agent_api))
 }
 
 /// `/v1/orchestration/*` read + mutation routes. Merged into the auth-gated router.
@@ -664,6 +674,10 @@ fn proxy_routes() -> Router<AppState> {
             get(list_skills_proxy).post(create_skill_proxy),
         )
         .route(
+            "/v1/skills/import",
+            post(import_skill_proxy).layer(DefaultBodyLimit::max(SKILL_IMPORT_BODY_LIMIT_BYTES)),
+        )
+        .route(
             "/v1/skills/:id",
             get(get_skill_proxy)
                 .patch(patch_skill_proxy)
@@ -700,6 +714,9 @@ fn proxy_routes() -> Router<AppState> {
         // The HTML app an MCP tool declares, read with the viewer's authority and never stored
         // (Wave 3 EP-4 S8); 404 while MCP_APPS_ENABLED is off.
         .route("/v1/mcp-apps/resource", get(get_mcp_app_resource))
+        // A read tool an MCP App calls on its own server, as the run's owner, through execution-core's
+        // ExecuteStep (Wave 3 EP-4 S10); 404 while MCP_APP_TOOL_CALLS is off.
+        .route("/v1/mcp-apps/tool-call", post(post_mcp_app_tool_call))
 }
 
 // ---------------------------------------------------------------------------
@@ -883,6 +900,159 @@ async fn mcp_app_resource(
             "needs_network": resource.needs_network,
         }
     })))
+}
+
+// ---------------------------------------------------------------------------
+// Wave 3 EP-4 S10: `POST /v1/mcp-apps/tool-call` - a read tool an MCP App calls on its own server.
+// ---------------------------------------------------------------------------
+
+/// The viewer's delegated bearers an app call needs, each optional so a missing one is answered by
+/// the handler, after the switch, with the typed envelope.
+struct McpAppCallBearers {
+    capability: Option<Extension<VerifiedCapabilityBearer>>,
+    session: Option<Extension<VerifiedModelBearer>>,
+    execution: Option<Extension<VerifiedExecutionBearer>>,
+    data_plane: Option<Extension<VerifiedBearer>>,
+    inference: Option<Extension<VerifiedInferenceBearer>>,
+}
+
+/// `POST /v1/mcp-apps/tool-call` - see [`mcp_app_tool_call`].
+async fn post_mcp_app_tool_call(
+    state: State<AppState>,
+    claims: Extension<Claims>,
+    capability: Option<Extension<VerifiedCapabilityBearer>>,
+    session: Option<Extension<VerifiedModelBearer>>,
+    execution: Option<Extension<VerifiedExecutionBearer>>,
+    data_plane: Option<Extension<VerifiedBearer>>,
+    inference: Option<Extension<VerifiedInferenceBearer>>,
+    body: Bytes,
+) -> Result<Json<Value>, HttpJsonError> {
+    let bearers = McpAppCallBearers {
+        capability,
+        session,
+        execution,
+        data_plane,
+        inference,
+    };
+    mcp_app_tool_call(
+        state,
+        claims,
+        bearers,
+        body,
+        crate::mcp_app_calls::enabled(),
+    )
+    .await
+}
+
+/// Call `tool` on the app's own `server_id` for the run `run_id`, `{data: {output, truncated}}`
+/// (`crate::mcp_app_calls`). With the switch off the route is a 404 as if it did not exist, decided
+/// before the body is read. A zero-retention or waived bearer is refused before anything else, with
+/// feature `mcp_execution`: the call carries the app's arguments to the MCP server. The org and the
+/// viewer come from the verified claims only; the body names the run, the server, the tool, its
+/// arguments and the frame nonce, and nothing that scopes the call.
+async fn mcp_app_tool_call(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    bearers: McpAppCallBearers,
+    body: Bytes,
+    enabled: bool,
+) -> Result<Json<Value>, HttpJsonError> {
+    if !enabled {
+        return Err(run_trace_error(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "no such route",
+        ));
+    }
+    if claims.zdr || claims.zdr_waiver.is_some() {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(
+                mp_contracts::zdr_refusal::Refusal::feature_not_supported(
+                    crate::mcp_app_calls::ZDR_FEATURE,
+                )
+                .json_body(),
+            ),
+        ));
+    }
+    let parsed: crate::mcp_app_calls::AppCallBody =
+        serde_json::from_slice(&body).map_err(|_| {
+            run_trace_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+                "the body must be a JSON object",
+            )
+        })?;
+    let call = crate::mcp_app_calls::validate(parsed).map_err(mcp_app_call_error)?;
+    let (Some(capability), Some(session), Some(execution), Some(data_plane), Some(inference)) = (
+        non_empty_bearer(
+            bearers
+                .capability
+                .as_ref()
+                .map(|Extension(bearer)| bearer.as_str()),
+        ),
+        non_empty_bearer(
+            bearers
+                .session
+                .as_ref()
+                .map(|Extension(bearer)| bearer.as_str()),
+        ),
+        non_empty_bearer(
+            bearers
+                .execution
+                .as_ref()
+                .map(|Extension(bearer)| bearer.as_str()),
+        ),
+        non_empty_bearer(
+            bearers
+                .data_plane
+                .as_ref()
+                .map(|Extension(bearer)| bearer.as_str()),
+        ),
+        non_empty_bearer(
+            bearers
+                .inference
+                .as_ref()
+                .map(|Extension(bearer)| bearer.as_str()),
+        ),
+    ) else {
+        return Err(run_trace_error(
+            StatusCode::UNAUTHORIZED,
+            "delegated_credential_required",
+            "an app tool call needs the viewer's verified capability, session, execution, data-plane and inference credentials",
+        ));
+    };
+    let output = crate::mcp_app_calls::call_app_tool(
+        &state,
+        &claims.org_id,
+        &claims.user_id,
+        &call,
+        &crate::mcp_app_calls::ViewerBearers {
+            capability,
+            session,
+            execution,
+            data_plane,
+            inference,
+        },
+    )
+    .await
+    .map_err(mcp_app_call_error)?;
+    Ok(Json(json!({
+        "data": {
+            "output": output.output,
+            "truncated": output.truncated,
+        }
+    })))
+}
+
+/// An app call's refusal in the typed envelope; the message is the module's own, never upstream text.
+fn mcp_app_call_error(error: crate::mcp_app_calls::AppCallError) -> HttpJsonError {
+    run_trace_error(error.status(), error.code(), error.message())
+}
+
+/// A bearer the auth layer verified and that is not blank.
+fn non_empty_bearer(bearer: Option<&str>) -> Option<&str> {
+    bearer.filter(|value| !value.trim().is_empty())
 }
 
 /// Request body cap for the two audio routes, `/v1/ai/dictate` and
@@ -8409,6 +8579,17 @@ async fn create_skill_proxy(
     b["org_id"] = json!(c.org_id);
     proxy_to_capability_core(&s, &c, &bearer, "skills", "POST", Some(&b)).await
 }
+/// EP-11 S8: a skill imported from a SKILL.md or a zip, sent as base64 inside JSON; capability-core
+/// answers 404 while SKILL_IMPORT_ENABLED is off. 12 MiB carries the largest bundle in base64.
+const SKILL_IMPORT_BODY_LIMIT_BYTES: usize = 12 * 1024 * 1024;
+async fn import_skill_proxy(
+    State(s): State<AppState>,
+    Extension(c): Extension<Claims>,
+    bearer: VerifiedCapabilityBearer,
+    Json(b): Json<Value>,
+) -> Result<Json<Value>, HttpJsonError> {
+    proxy_to_capability_core(&s, &c, &bearer, "skills/import", "POST", Some(&b)).await
+}
 async fn get_skill_proxy(
     State(s): State<AppState>,
     Extension(c): Extension<Claims>,
@@ -8948,7 +9129,7 @@ fn parse_skill_decision(word: &str) -> Option<mp_contracts::model_plane::v1::Ski
 /// the rest of the orchestration surface; the SPA client normalizes to
 /// camelCase. Timestamps are emitted as RFC3339 strings (null when unset) and
 /// the arbitrary `metadata` Struct is flattened to plain JSON.
-fn run_detail_value(run: &RunDetail) -> Value {
+pub(crate) fn run_detail_value(run: &RunDetail) -> Value {
     run_detail_value_with(run, run_origin_field_enabled())
 }
 
@@ -22161,7 +22342,9 @@ mod api_key_route_fence_tests {
         let mut state = AppState::new();
         // On, so the two key routes reach their handler: it answers 401 for the missing key bearer.
         state.browser_key_grants = Some(true);
-        let router = authed_routes()
+        // With the Agent API routes merged, so the scan proves a key reaches none of them while
+        // the switch is off (EP-12 S5; this test leaves the environment unset).
+        let router = authed_routes_with(true)
             .layer(middleware::from_fn(auth::authorize_principal_route))
             .layer(Extension(key_claims()))
             .with_state(state);
@@ -23215,5 +23398,146 @@ mod mcp_app_resource_route_tests {
             get_json(app(false, false), &format!("/v1/mcp-apps/resource{QUERY}")).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
         assert_eq!(body["error"]["code"], "capability_credential_required");
+    }
+}
+
+#[cfg(test)]
+mod mcp_app_tool_call_route_tests {
+    //! Wave 3 EP-4 S10: the app tool-call route. The switch, the zero-retention refusal, the body
+    //! and the missing credentials are all decided before session-core, capability-core,
+    //! execution-core or an MCP server is asked, so these tests need none of them; the gate itself is
+    //! covered by `mcp_app_calls::tests`.
+    use super::*;
+
+    use axum::{body::Body, http::Request as HttpRequest};
+    use tower::ServiceExt;
+
+    fn claims(zdr: bool) -> Claims {
+        serde_json::from_value(json!({
+            "sub": "user-a", "iss": "auth-core", "exp": 4_102_444_800_i64, "org_id": "org-a",
+            "user_id": "user-a", "principal_type": "user", "zdr": zdr
+        }))
+        .expect("claims")
+    }
+
+    /// The route with its switch on (`/v1/...`) and off (`/off/v1/...`); the env read stays out of
+    /// parallel tests.
+    fn app(zdr: bool, with_bearers: bool) -> Router {
+        fn route(enabled: bool) -> axum::routing::MethodRouter<AppState> {
+            post(
+                move |state: State<AppState>,
+                      claims: Extension<Claims>,
+                      capability: Option<Extension<VerifiedCapabilityBearer>>,
+                      session: Option<Extension<VerifiedModelBearer>>,
+                      execution: Option<Extension<VerifiedExecutionBearer>>,
+                      data_plane: Option<Extension<VerifiedBearer>>,
+                      inference: Option<Extension<VerifiedInferenceBearer>>,
+                      body: Bytes| {
+                    let bearers = McpAppCallBearers {
+                        capability,
+                        session,
+                        execution,
+                        data_plane,
+                        inference,
+                    };
+                    mcp_app_tool_call(state, claims, bearers, body, enabled)
+                },
+            )
+        }
+        let router = Router::new()
+            .route("/v1/mcp-apps/tool-call", route(true))
+            .route("/off/v1/mcp-apps/tool-call", route(false))
+            .with_state(AppState::new())
+            .layer(Extension(claims(zdr)));
+        if with_bearers {
+            router
+                .layer(Extension(VerifiedCapabilityBearer::for_test(
+                    "capability-bearer",
+                )))
+                .layer(Extension(VerifiedModelBearer::for_test("session-bearer")))
+                .layer(Extension(VerifiedExecutionBearer::for_test(
+                    "execution-bearer",
+                )))
+                .layer(Extension(VerifiedBearer::for_test("data-plane-bearer")))
+                .layer(Extension(VerifiedInferenceBearer::for_test(
+                    "inference-bearer",
+                )))
+        } else {
+            router
+        }
+    }
+
+    async fn post_json(router: Router, uri: &str, body: &str) -> (StatusCode, Value) {
+        let response = router
+            .oneshot(
+                HttpRequest::builder()
+                    .method("POST")
+                    .uri(uri)
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(body.to_owned()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+        )
+    }
+
+    const BODY: &str = r#"{"run_id":"run-1","server_id":"srv-1","tool":"echo_read","arguments":{"q":"x"},"frame_nonce":"frame-0123456789abcdef"}"#;
+
+    #[tokio::test]
+    async fn route_404_when_switch_off() {
+        // Off reads as no route at all, for a ZDR caller, a caller with no credential and no body.
+        for (zdr, with_bearers, body) in
+            [(false, true, BODY), (true, true, BODY), (false, false, "")]
+        {
+            let (status, response) =
+                post_json(app(zdr, with_bearers), "/off/v1/mcp-apps/tool-call", body).await;
+            assert_eq!(
+                status,
+                StatusCode::NOT_FOUND,
+                "zdr={zdr} bearers={with_bearers}"
+            );
+            assert_eq!(response["error"]["code"], "not_found");
+        }
+    }
+
+    #[tokio::test]
+    async fn zdr_token_refused() {
+        let (status, body) = post_json(app(true, true), "/v1/mcp-apps/tool-call", BODY).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["error"]["code"], "zdr_feature_not_supported");
+        assert_eq!(body["error"]["feature"], "mcp_execution");
+    }
+
+    #[tokio::test]
+    async fn the_body_must_be_a_valid_call() {
+        for body in [
+            "",
+            "not json",
+            "[]",
+            r#"{"server_id":"srv-1","tool":"echo_read","frame_nonce":"frame-0123456789abcdef"}"#,
+            r#"{"run_id":"run-1","server_id":"srv__x","tool":"t","frame_nonce":"frame-0123456789abcdef"}"#,
+            r#"{"run_id":"run-1","server_id":"srv-1","tool":"t","arguments":[1],"frame_nonce":"frame-0123456789abcdef"}"#,
+            r#"{"run_id":"run-1","server_id":"srv-1","tool":"t","frame_nonce":"short"}"#,
+        ] {
+            let (status, response) =
+                post_json(app(false, true), "/v1/mcp-apps/tool-call", body).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+            assert_eq!(response["error"]["code"], "invalid_request");
+        }
+    }
+
+    #[tokio::test]
+    async fn needs_every_delegated_credential() {
+        let (status, body) = post_json(app(false, false), "/v1/mcp-apps/tool-call", BODY).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body["error"]["code"], "delegated_credential_required");
     }
 }

@@ -3,6 +3,7 @@ import {
   AttachmentsNotSentError,
   approvePlan,
   buildChatWireBody,
+  callMcpAppTool,
   groupChatModels,
   listModels,
   rejectPlan,
@@ -3222,5 +3223,54 @@ describe('EP-4 S9 MCP app resource read', () => {
   it('rejects any other failure with the typed error', async () => {
     vi.stubGlobal('fetch', json({ error: { code: 'upstream_unavailable', message: 'down' } }, 502))
     await expect(getMcpAppResource('srv-1', 'show')).rejects.toBeInstanceOf(ApiError)
+  })
+})
+
+describe('EP-4 S10 MCP app tool call', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  const json = (body: unknown, status = 200) => vi.fn().mockResolvedValue(new Response(
+    JSON.stringify(body),
+    { status, headers: { 'Content-Type': 'application/json' } },
+  ))
+
+  const request = {
+    runId: 'run-1',
+    serverId: 'srv-1',
+    tool: 'echo_read',
+    arguments: { q: 'x' },
+    frameNonce: 'frame-0123456789abcdef',
+  }
+
+  it('posts the call with the frame nonce and nothing that scopes it', async () => {
+    vi.stubGlobal('fetch', json({ data: { output: '{"content":[]}', truncated: true } }))
+    expect(await callMcpAppTool(request)).toEqual({ ok: true, output: '{"content":[]}', truncated: true })
+    const [url, init] = vi.mocked(fetch).mock.calls[0] ?? []
+    expect(String(url)).toContain('/api/v1/mcp-apps/tool-call')
+    expect((init as RequestInit).method).toBe('POST')
+    expect(JSON.parse(String((init as RequestInit).body))).toEqual({
+      run_id: 'run-1',
+      server_id: 'srv-1',
+      tool: 'echo_read',
+      arguments: { q: 'x' },
+      frame_nonce: 'frame-0123456789abcdef',
+    })
+  })
+
+  it('answers a refusal with its typed code', async () => {
+    vi.stubGlobal('fetch', json({ error: { code: 'app_call_requires_chat', message: 'ask in the chat' } }, 403))
+    expect(await callMcpAppTool(request)).toEqual({ ok: false, code: 'app_call_requires_chat' })
+    vi.stubGlobal('fetch', json({ error: { code: 'rate_limited', message: 'slow down' } }, 429))
+    expect(await callMcpAppTool(request)).toEqual({ ok: false, code: 'rate_limited' })
+    // Switched off, the route does not exist.
+    vi.stubGlobal('fetch', json({ error: { code: 'not_found', message: 'no such route' } }, 404))
+    expect(await callMcpAppTool(request)).toEqual({ ok: false, code: 'not_found' })
+  })
+
+  it('a reply without output is a failed call', async () => {
+    vi.stubGlobal('fetch', json({ data: { truncated: false } }))
+    expect(await callMcpAppTool(request)).toEqual({ ok: false, code: 'tool_call_failed' })
   })
 })

@@ -1,5 +1,6 @@
 //! model-gateway library crate — exposes modules for integration tests.
 
+pub mod agent_api_routes;
 pub mod approvals;
 pub mod attachment_policy;
 pub mod artifact_edit_routes;
@@ -55,6 +56,7 @@ pub mod locale_hint;
 pub mod lsp;
 mod mail_task_bridge_auth;
 mod managed_start_key;
+pub mod mcp_app_calls;
 pub mod mcp_apps;
 pub mod mcp_elicitation;
 pub mod mcp_http;
