@@ -107,9 +107,45 @@ message ExportedRun {
   google.protobuf.Timestamp created_at = 7;
 }
 
+// EP-12 S15. Import one `verevon.thread-export.v1` file into a new thread the
+// caller owns. The file is untrusted input: only its user and assistant turn
+// text is kept, and every kept turn is stored as a user-role message that
+// quotes the original text under a fixed header, so imported text reaches a
+// model as quoted data and never as the model's own earlier output. Each
+// stored message carries `metadata.imported{digest, exported_at,
+// source_org_match, original_role}`. Refusals: a zero-retention or waived
+// caller (`zdr_feature_not_supported`, feature `conversation_import`); a
+// service principal (`permission_denied`); a file that is not a v1 export or
+// breaks a cap (`invalid_argument` `thread_import_invalid`, the reason in the
+// `x-mp-error-reason` trailer). Caps: 2 MiB file, 400 turns, 64 KiB per turn.
+// Switch `SESSION_THREAD_IMPORT_ENABLED`, default off; while it is off the RPC
+// answers `unavailable` `thread_import_disabled`.
+message ImportThreadRequest {
+  // The export file's text, exactly as downloaded: a JSON
+  // `verevon.thread-export.v1` document of at most 2 MiB.
+  string export_json = 1;
+  // The new thread's title; empty takes the title the file names. Either is
+  // stored as "Importert: <title>".
+  string title = 2;
+}
+
+// EP-12 S15. The thread an import created.
+message ImportThreadResponse {
+  // The new thread, owned by the caller.
+  string thread_id = 1;
+  // How many turns were stored in the new thread.
+  uint32 imported_messages = 2;
+  // How many things in the file were left out: each turn whose role is not
+  // user or assistant, each turn without text, and each non-empty artifacts,
+  // citations or metadata field of a kept turn.
+  uint32 dropped = 3;
+}
+
 // EP-12 S9. The owner's export of one thread, decided and read in one
 // transaction. See the file comment for every refusal.
 service ThreadExportService {
   // Read one bounded export of a thread the caller owns.
   rpc ExportThread(ExportThreadRequest) returns (ExportThreadResponse);
+  // EP-12 S15. Import an export file into a new thread the caller owns.
+  rpc ImportThread(ImportThreadRequest) returns (ImportThreadResponse);
 }

@@ -13,9 +13,16 @@
 //! `Cache-Control: no-store`, because its body is the owner's conversation. Errors are the typed
 //! envelope `{error:{code,message,details}}` with `details` an object, except a ZDR refusal, which
 //! keeps the catalogue body (with its `feature`) as every ZDR refusal on this gateway does.
+//!
+//! `POST /v1/threads/import` (EP-12 S15, decision D11) takes such a JSON file back as the request
+//! body and asks Session Core's `ImportThread` to make a new thread of it, owned by the caller. The
+//! file is untrusted input; Session Core parses it strictly and stores every turn as quoted text.
+//! The body is held to [`IMPORT_BODY_LIMIT_BYTES`], Session Core's own file cap. The route shares
+//! the export's switch and answers `{data:{thread_id, imported_messages, dropped}}` with 201.
 
 use axum::{
-    extract::{Path, Query, State},
+    body::Bytes,
+    extract::{rejection::BytesRejection, DefaultBodyLimit, Path, Query, State},
     http::{header, StatusCode},
     response::{IntoResponse, Response},
     Extension, Json,
@@ -23,6 +30,7 @@ use axum::{
 use chrono::Utc;
 use mp_contracts::model_plane::v1::{
     ExportProfile, ExportThreadRequest, ExportThreadResponse, ExportedMessage, ExportedRun,
+    ImportThreadRequest,
 };
 use mp_contracts::zdr_refusal::Refusal;
 use serde::{Deserialize, Serialize};
@@ -54,18 +62,38 @@ const NOT_EXPORTABLE: &str = "thread_not_exportable";
 const ERROR_CODE_TRAILER: &str = "x-mp-error-code";
 const ERROR_REASON_TRAILER: &str = "x-mp-error-reason";
 
+/// The ZDR feature key an import refusal names (`zdr-refusals.json`, EP-12 D11).
+const IMPORT_ZDR_FEATURE: &str = "conversation_import";
+
+/// The largest import body: Session Core's file cap (`thread_import.rs`), so a file the gateway
+/// lets through is never refused for its size behind it.
+pub(crate) const IMPORT_BODY_LIMIT_BYTES: usize = 2 * 1024 * 1024;
+
+/// The typed code of a file Session Core refuses, with its reason on [`ERROR_REASON_TRAILER`].
+const IMPORT_INVALID: &str = "thread_import_invalid";
+
+/// Session Core's answer while its import switch is off. The route gives the same 404 as its own
+/// switch does.
+const IMPORT_DISABLED: &str = "thread_import_disabled";
+
 /// Whether the export route is on in this process.
 #[must_use]
 pub fn enabled() -> bool {
     mp_contracts::loop_fold::switch_from(std::env::var(ENABLED_ENV).ok().as_deref())
 }
 
-/// The route, merged into the authed router beside the thread goal.
+/// The routes, merged into the authed router beside the thread goal.
 pub(crate) fn router() -> axum::Router<AppState> {
-    axum::Router::new().route(
-        "/v1/threads/:thread_id/export",
-        axum::routing::get(get_thread_export),
-    )
+    axum::Router::new()
+        .route(
+            "/v1/threads/:thread_id/export",
+            axum::routing::get(get_thread_export),
+        )
+        .route(
+            "/v1/threads/import",
+            axum::routing::post(post_thread_import)
+                .layer(DefaultBodyLimit::max(IMPORT_BODY_LIMIT_BYTES)),
+        )
 }
 
 /// The two renderings of an export. There is no default: a caller always chooses.
@@ -246,6 +274,138 @@ fn export_error(error: &tonic::Status) -> HttpJsonError {
             json!({}),
         ),
         _ => render_failed(),
+    }
+}
+
+/// The query string of an import. The title is optional: without it the file's title is used.
+#[derive(Debug, Deserialize)]
+pub(crate) struct ImportQuery {
+    title: Option<String>,
+}
+
+/// `POST /v1/threads/import`. The switch and the ZDR gate come first, so a refused caller's file
+/// is never read; then the body, which must be the export file's UTF-8 text; then Session Core,
+/// which parses the file and writes the thread.
+pub(crate) async fn post_thread_import(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    bearer: VerifiedSessionBearer,
+    Query(query): Query<ImportQuery>,
+    body: Result<Bytes, BytesRejection>,
+) -> Result<Response, HttpJsonError> {
+    switch_gate()?;
+    import_gate(&claims)?;
+    let export_json = import_body(body)?;
+    let imported = state
+        .thread_export_client
+        .clone()
+        .import_thread(authenticated_session_request(
+            ImportThreadRequest {
+                export_json,
+                title: query.title.unwrap_or_default().trim().to_owned(),
+            },
+            &bearer,
+        )?)
+        .await
+        .map_err(|error| import_error(&error))?
+        .into_inner();
+    Ok((
+        StatusCode::CREATED,
+        [(header::CACHE_CONTROL, "no-store")],
+        Json(json!({
+            "data": {
+                "thread_id": imported.thread_id,
+                "imported_messages": imported.imported_messages,
+                "dropped": imported.dropped,
+            }
+        })),
+    )
+        .into_response())
+}
+
+/// An import writes new durable conversation rows, which a zero-retention caller may never do. A
+/// waived caller is refused as a route mismatch, as on the export. Session Core refuses both again.
+fn import_gate(claims: &Claims) -> Result<(), HttpJsonError> {
+    if crate::zdr_posture::zdr_or_refuse(claims, &crate::zdr_posture::Route::plain(false))? {
+        return Err(crate::zdr_posture::http(&Refusal::feature_not_supported(
+            IMPORT_ZDR_FEATURE,
+        )));
+    }
+    Ok(())
+}
+
+/// The file's text. A body past the limit is named as such; one that is not UTF-8 cannot be an
+/// export file.
+fn import_body(body: Result<Bytes, BytesRejection>) -> Result<String, HttpJsonError> {
+    let bytes = body.map_err(|rejection| {
+        if rejection.status() == StatusCode::PAYLOAD_TOO_LARGE {
+            import_too_large()
+        } else {
+            import_invalid(Some("unreadable"))
+        }
+    })?;
+    String::from_utf8(bytes.to_vec()).map_err(|_| import_invalid(Some("not_utf8")))
+}
+
+fn import_too_large() -> HttpJsonError {
+    envelope(
+        StatusCode::PAYLOAD_TOO_LARGE,
+        IMPORT_INVALID,
+        "the file is larger than an import takes",
+        json!({ "reason": "too_large", "limit_bytes": IMPORT_BODY_LIMIT_BYTES }),
+    )
+}
+
+fn import_invalid(reason: Option<&str>) -> HttpJsonError {
+    envelope(
+        StatusCode::BAD_REQUEST,
+        IMPORT_INVALID,
+        "the file is not a Verevon conversation export this deployment can import",
+        reason.map_or_else(|| json!({}), |reason| json!({ "reason": reason })),
+    )
+}
+
+/// Session Core's refusals as the import answers them. A ZDR refusal keeps its catalogue body; a
+/// refused file names its reason; a service credential reads as forbidden.
+fn import_error(error: &tonic::Status) -> HttpJsonError {
+    if let Some(refusal) = Refusal::from_status(error) {
+        return crate::zdr_posture::http(&refusal);
+    }
+    match error.code() {
+        tonic::Code::Unavailable if error.message() == IMPORT_DISABLED => envelope(
+            StatusCode::NOT_FOUND,
+            IMPORT_DISABLED,
+            "conversation import is not enabled on this deployment",
+            json!({}),
+        ),
+        tonic::Code::InvalidArgument
+            if trailer_text(error, ERROR_CODE_TRAILER) == Some(IMPORT_INVALID) =>
+        {
+            let reason = trailer_text(error, ERROR_REASON_TRAILER);
+            if reason == Some("too_large") {
+                return import_too_large();
+            }
+            import_invalid(reason)
+        }
+        tonic::Code::InvalidArgument => import_invalid(None),
+        tonic::Code::PermissionDenied => envelope(
+            StatusCode::FORBIDDEN,
+            "forbidden",
+            "an import is made by a person for their own conversations",
+            json!({}),
+        ),
+        tonic::Code::Unavailable | tonic::Code::DeadlineExceeded => envelope(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "thread_import_unavailable",
+            "the conversation cannot be imported right now; try again",
+            json!({}),
+        ),
+        _ => envelope(
+            StatusCode::BAD_GATEWAY,
+            "thread_import_failed",
+            "the conversation could not be imported",
+            json!({}),
+        ),
     }
 }
 
@@ -728,6 +888,95 @@ mod tests {
             .expect("a request");
         let response = app.oneshot(request).await.expect("the router answers");
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn api_key_principal_cannot_import() {
+        let app = router()
+            .layer(middleware::from_fn(crate::auth::authorize_principal_route))
+            .layer(Extension(key_claims()))
+            .with_state(AppState::new());
+        let request = Request::builder()
+            .method("POST")
+            .uri("/v1/threads/import")
+            .body(Body::from("{}"))
+            .expect("a request");
+        let response = app.oneshot(request).await.expect("the router answers");
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn zdr_caller_cannot_import() {
+        let (status_code, Json(body)) =
+            import_gate(&claims(true)).expect_err("a ZDR caller is refused");
+        assert_eq!(status_code, StatusCode::PRECONDITION_FAILED);
+        assert_eq!(body["error"]["feature"], IMPORT_ZDR_FEATURE);
+        assert!(import_gate(&claims(false)).is_ok());
+
+        let refusal = Refusal::feature_not_supported(IMPORT_ZDR_FEATURE);
+        let (status_code, Json(body)) =
+            import_error(&refusal.grpc_status(tonic::Code::FailedPrecondition));
+        assert_eq!(status_code, StatusCode::PRECONDITION_FAILED);
+        assert_eq!(body["error"]["code"], code::FEATURE_NOT_SUPPORTED);
+    }
+
+    #[test]
+    fn import_refusal_is_typed_envelope_with_object_details() {
+        let mut status = tonic::Status::invalid_argument(IMPORT_INVALID);
+        status
+            .metadata_mut()
+            .insert(ERROR_CODE_TRAILER, MetadataValue::from_static(IMPORT_INVALID));
+        status
+            .metadata_mut()
+            .insert(ERROR_REASON_TRAILER, MetadataValue::from_static("version"));
+        let (status_code, Json(body)) = import_error(&status);
+        assert_eq!(status_code, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"]["code"], IMPORT_INVALID);
+        assert_eq!(body["error"]["details"], json!({ "reason": "version" }));
+        assert!(body["error"]["message"].is_string());
+
+        let (status_code, Json(body)) =
+            import_error(&tonic::Status::unavailable(IMPORT_DISABLED));
+        assert_eq!(status_code, StatusCode::NOT_FOUND);
+        assert_eq!(body["error"]["code"], IMPORT_DISABLED);
+        assert!(body["error"]["details"].is_object());
+
+        let (status_code, _) = import_error(&tonic::Status::permission_denied("service"));
+        assert_eq!(status_code, StatusCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn import_body_must_be_utf8() {
+        let text = import_body(Ok(Bytes::from_static(b"{\"format\":1}"))).expect("UTF-8 is read");
+        assert_eq!(text, "{\"format\":1}");
+        let (status_code, Json(body)) = import_body(Ok(Bytes::from_static(&[0xff, 0xfe])))
+            .expect_err("bytes that are not UTF-8 are refused");
+        assert_eq!(status_code, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"]["details"]["reason"], "not_utf8");
+    }
+
+    #[tokio::test]
+    async fn import_body_past_the_limit_is_a_typed_413() {
+        let app = axum::Router::new().route(
+            "/import",
+            axum::routing::post(|body: Result<Bytes, BytesRejection>| async move {
+                import_body(body).map(|_| StatusCode::OK)
+            })
+            .layer(DefaultBodyLimit::max(IMPORT_BODY_LIMIT_BYTES)),
+        );
+        let request = Request::builder()
+            .method("POST")
+            .uri("/import")
+            .body(Body::from(vec![b' '; IMPORT_BODY_LIMIT_BYTES + 1]))
+            .expect("a request");
+        let response = app.oneshot(request).await.expect("the router answers");
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("a body");
+        let body: Value = serde_json::from_slice(&body).expect("a typed envelope");
+        assert_eq!(body["error"]["code"], IMPORT_INVALID);
+        assert_eq!(body["error"]["details"]["reason"], "too_large");
     }
 
     #[test]
