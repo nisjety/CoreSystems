@@ -10,6 +10,7 @@ import {
   describeFeedbackFailure,
   getChatThread,
   getChatThreadTranscript,
+  getMcpAppResource,
   getThreadContext,
   getThreadMessages,
   listChatThreads,
@@ -3180,5 +3181,46 @@ describe('EP-4 S2 inline widget feature family', () => {
     vi.stubEnv('VITE_CHAT_INLINE_WIDGETS', 'true')
     expect(buildChatWireBody({ content: 'hi' }).features).toContain('inline_widgets')
     expect(buildChatWireBody({ content: 'hi' }).features).toContain('usage')
+  })
+})
+
+describe('EP-4 S9 MCP app resource read', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  const json = (body: unknown, status = 200) => vi.fn().mockResolvedValue(new Response(
+    JSON.stringify(body),
+    { status, headers: { 'Content-Type': 'application/json' } },
+  ))
+
+  it('reads the app document by server and tool name only', async () => {
+    vi.stubGlobal('fetch', json({ data: { uri: 'ui://charts/pie', html: '<p>app</p>', needs_network: true } }))
+    expect(await getMcpAppResource('srv-1', 'show&org_id=org-2')).toEqual({
+      uri: 'ui://charts/pie',
+      html: '<p>app</p>',
+      needsNetwork: true,
+    })
+    const url = String(vi.mocked(fetch).mock.calls[0]?.[0])
+    expect(url).toContain('/api/v1/mcp-apps/resource?server_id=srv-1&tool=show%26org_id%3Dorg-2')
+  })
+
+  it('reads a 404 (switch off, no app) and a 403 (zero retention) as no app', async () => {
+    vi.stubGlobal('fetch', json({ error: { code: 'not_found', message: 'no such route' } }, 404))
+    expect(await getMcpAppResource('srv-1', 'show')).toBeNull()
+    vi.stubGlobal('fetch', json({ error: { code: 'zdr_feature_not_supported', message: 'no', feature: 'mcp_execution' } }, 403))
+    expect(await getMcpAppResource('srv-1', 'show')).toBeNull()
+  })
+
+  it('a document that is not a ui:// app is no app', async () => {
+    vi.stubGlobal('fetch', json({ data: { uri: 'https://evil.example/app', html: '<p>app</p>' } }))
+    expect(await getMcpAppResource('srv-1', 'show')).toBeNull()
+    vi.stubGlobal('fetch', json({ data: { uri: 'ui://charts/pie', html: '   ' } }))
+    expect(await getMcpAppResource('srv-1', 'show')).toBeNull()
+  })
+
+  it('rejects any other failure with the typed error', async () => {
+    vi.stubGlobal('fetch', json({ error: { code: 'upstream_unavailable', message: 'down' } }, 502))
+    await expect(getMcpAppResource('srv-1', 'show')).rejects.toBeInstanceOf(ApiError)
   })
 })

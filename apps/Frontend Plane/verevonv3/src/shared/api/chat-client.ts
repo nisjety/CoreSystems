@@ -4146,6 +4146,37 @@ export async function listDeckTemplates(): Promise<DeckTemplate[] | null> {
     : []
 }
 
+/** An MCP tool's app document (EP-4 S9), read on demand and never stored. */
+export type McpAppResource = {
+  uri: string
+  html: string
+  /** The app declared network origins; the frame's CSP still allows none (D12). */
+  needsNetwork: boolean
+}
+
+/**
+ * The `ui://` app `tool` on MCP server `serverId` declares, read by the gateway with the viewer's authority
+ * (`chat.open_mcp_app`). `null` when there is no app to draw: the route answers 404 while the gateway's switch
+ * is off and for a tool without an app or a server the viewer may not use, and a zero-retention session is
+ * refused (403). Any other failure rejects with the typed `ApiError`. Not cached here: the caller holds the
+ * document only as long as its frame.
+ */
+export async function getMcpAppResource(serverId: string, tool: string): Promise<McpAppResource | null> {
+  const params = new URLSearchParams({ server_id: serverId, tool })
+  let raw: unknown
+  try {
+    raw = await requestJson<unknown>(`/api/v1/mcp-apps/resource?${params.toString()}`)
+  } catch (error) {
+    if (error instanceof ApiError && (error.status === 404 || error.status === 403)) return null
+    throw error
+  }
+  const record = objectValue(raw)
+  const uri = str(record?.uri)
+  const html = typeof record?.html === 'string' ? record.html : ''
+  if (!uri?.startsWith('ui://') || !html.trim()) return null
+  return { uri, html, needsNetwork: record?.needs_network === true }
+}
+
 /**
  * One page of an artifact's stored revisions, newest first, text included.
  * `beforeVersion` pages to older revisions. Rejects with the typed `ApiError`

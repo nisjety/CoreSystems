@@ -124,6 +124,7 @@ import {
 } from './chat-code-highlight'
 import { ChartFenceBlock } from './ChatChart'
 import { InlineWidget, InlineWidgetAnswer, InlineWidgetSurface, inlineWidgetsEnabled, useInlineWidgetsLive } from './InlineWidget'
+import { McpAppsForAnswer, mcpAppsEnabled } from './McpAppFrame'
 import { ChatTableTools, TableChart, createTableChartState } from './ChatTableTools'
 import { SettledTurnContent } from './SettledTurnFold'
 import { StepStrip, stepStripEnabled } from './StepStrip'
@@ -868,6 +869,15 @@ export function AssistantMessage(props: {
             <InlineWidgetAnswer onSelectFollowUp={props.onSelectFollowUp}>
               <SettledTurnContent fold={props.settledFold} entries={nodeEntries()} renderEntries={renderNodeEntries} />
             </InlineWidgetAnswer>
+            {/* EP-4 S9: the apps of this answer's settled MCP calls, under the same chat-only surface. */}
+            <Show when={mcpAppsEnabled() && (props.message.toolCalls?.length ?? 0) > 0}>
+              <McpAppsForAnswer
+                calls={props.message.toolCalls ?? []}
+                streaming={props.message.streaming}
+                temporaryChat={props.temporaryChat}
+                onSelectFollowUp={props.onSelectFollowUp}
+              />
+            </Show>
           </InlineWidgetSurface>
           <Show when={stepStripEnabled && props.message.streaming}>
             <StepStrip
